@@ -330,7 +330,7 @@ test('publish replies on and resolves an earlier-round thread that its receipt c
   const calls = fixture.gh.calls();
   // The reply cites the record, so the record POST comes first.
   expect(calls.findIndex((args) => args.some((arg) => arg.includes('addPullRequestReviewThreadReply'))))
-    .toBeGreaterThan(calls.findLastIndex((args) => args.some((arg) => arg.endsWith('/issues/' + PUBLISH_PR + '/comments'))));
+    .toBeGreaterThan(calls.map((args) => args.some((arg) => arg.endsWith('/issues/' + PUBLISH_PR + '/comments'))).lastIndexOf(true));
 });
 
 test('a confirmed id that is not an earlier publish thread of this PR is refused and nothing is posted', async () => {

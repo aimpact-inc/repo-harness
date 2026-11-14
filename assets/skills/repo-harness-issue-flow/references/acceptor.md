@@ -210,7 +210,15 @@ posts in this order:
 - the `acceptance claim`;
 - one COMMENT review, with one inline thread for each P0, P1 and P2
   finding and the NIT findings in its body;
-- the `acceptance record`.
+- the `acceptance record`;
+- for each thread id in `confirmed_fixed`, a `review reply` that cites the
+  record, then the resolve of that thread (§6).
+
+Before the first post, it checks each `confirmed_fixed` id. The id must be
+an unresolved review thread on this PR, and its first comment must belong
+to an acceptance review that `review publish` wrote in an earlier round.
+A failed check exits 2 and posts nothing. The result lists the resolved
+ids in `resolved_threads`.
 
 It posts no APPROVE review and no REQUEST_CHANGES review. A gatekeeper
 seat without the `net` tool group has no network, so the session that runs
@@ -272,7 +280,7 @@ The runner turns it into the publish receipt that `review publish` reads,
 from `src/core/review/review-publish.ts`:
 
 ```text
-protocol: 1
+protocol: 2
 kind: repo-harness-review-publish-receipt
 round: <1..5>
 subject_sha: <the PR head>
@@ -283,19 +291,29 @@ model_relation: different-family | same-family | unknown
 summary: <one paragraph>
 findings: [{ id, severity: P0 | P1 | P2, path, line, evidence, fix }
          | { id, severity: P3, message }]
+confirmed_fixed: [<review thread node id>]
 ```
 
 `PASS` carries no P0, P1 or P2 finding. `FAIL` carries at least one. Each
 blocking finding names one path, one line, the evidence and the smallest
 fix. A P3 finding carries no location. `model_relation` comes from the
-closed family table in `acceptance-receipt.ts`. A Claude turn has an
+closed family table in `acceptance-receipt.ts`.
+`confirmed_fixed` lists the node ids of the earlier-round threads whose
+fix this round confirms on its subject SHA. It is `[]` in round 1 and when
+the round confirms no fix. The reviewer reads the PR review threads with
+a read-only GraphQL query, which also gives each node id. `review publish`
+refuses a protocol 1 receipt. A Claude turn has an
 unobserved model, so its value is `unknown`. This does not block the
 merge.
 
 ## 6. Resolve threads
 
-Only the acceptor of a round resolves its threads. It resolves a thread
-after the next round confirms the fix on a new subject SHA.
+A thread that `review publish` opened is resolved only by a later round
+that confirms the fix on a new subject SHA. That round puts the thread id
+in `confirmed_fixed`. Its `review publish` posts the `review reply`
+(`templates.md`) on the thread and then resolves it. No other path resolves
+a thread of a published round, and no joint decision is needed. The merge
+executor still refuses an unresolved thread.
 
 The coordinator resolves a bot thread (§2.3). The coordinator may also
 resolve a thread with a written rejection reason, or
@@ -309,5 +327,6 @@ resolves a thread.
 
 - Do not accept a subject SHA that you wrote.
 - Do not edit, push, merge or publish outside the review path.
-- Do not resolve another round's thread.
+- Do not resolve a thread outside `confirmed_fixed`, and do not list a
+  thread that this round did not confirm as fixed.
 - Do not treat missing, stale or incomplete evidence as `PASS`.
