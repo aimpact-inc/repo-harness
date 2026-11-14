@@ -979,11 +979,15 @@ test('pi-retired-extension warns with a runnable mv -n only for a loaded extensi
   const agentDir = path.join(home, 'pi agent');
   const extensions = path.join(agentDir, 'extensions');
   fs.mkdirSync(extensions, { recursive: true });
-  fs.writeFileSync(path.join(extensions, 'other.ts'), "// runs repo-harness-hook; see --route\nexport default () => {};\n");
+  const bin = 'const HOOK_BIN = process.env.REPO_HARNESS_PI_BIN ?? "repo-harness-hook";';
+  const call = 'const { stdout, stderr } = await execFileAsync(HOOK_BIN, [event, "--route", route], {});';
   const env = { HOME: home, PI_CODING_AGENT_DIR: agentDir };
   const now = new Date('2026-11-14T12:00:00Z');
-  expect(checkRetiredPiExtension(env, now).status).toBe('ok');
-  const content = 'const HOOK_BIN = process.env.REPO_HARNESS_PI_BIN ?? "repo-harness-hook";\nawait execFileAsync(HOOK_BIN, [event, "--route", route], {});\n';
+  for (const comment of [`// ${bin}\n// ${call}\n`, `/**\n * ${bin}\n * ${call}\n */\n`, `/* ${bin} */\n/* ${call} */\n`]) {
+    fs.writeFileSync(path.join(extensions, 'other.ts'), `${comment}export default () => {};\n`);
+    expect(checkRetiredPiExtension(env, now).status, comment).toBe('ok');
+  }
+  const content = `${bin}\n${call}\n`;
   const source = path.join(home, 'legacy.ts');
   fs.writeFileSync(source, content);
   const legacy = path.join(extensions, 'repo-harness.ts');

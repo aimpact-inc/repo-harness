@@ -178,7 +178,10 @@ export function checkPiHost(env: NodeJS.ProcessEnv = process.env): DoctorCheckRe
 }
 
 /** The retired pi extension ran `repo-harness-hook <event> --route <route>` with stdin open, so each call waits for its timeout and fails open. */
-const RETIRED_PI_INVOCATION = ['process.env.REPO_HARNESS_PI_BIN ?? "repo-harness-hook"', 'execFileAsync(HOOK_BIN, [event, "--route", route]'];
+const RETIRED_PI_INVOCATION = [
+  'const HOOK_BIN = process.env.REPO_HARNESS_PI_BIN ?? "repo-harness-hook"',
+  'const { stdout, stderr } = await execFileAsync(HOOK_BIN, [event, "--route", route]',
+];
 
 export function checkRetiredPiExtension(env: NodeJS.ProcessEnv = process.env, now: Date = new Date()): DoctorCheckResult {
   const id = 'pi-retired-extension';
@@ -200,8 +203,9 @@ export function checkRetiredPiExtension(env: NodeJS.ProcessEnv = process.env, no
     .filter(entry => (entry.isFile() || entry.isSymbolicLink()) && /\.(ts|js)$/.test(entry.name))
     .map(entry => path.join(extensions, entry.name))
     .filter((file) => {
-      const text = fs.readFileSync(file, 'utf8');
-      return RETIRED_PI_INVOCATION.every(line => text.includes(line));
+      // Line-anchored: a commented copy of either code line starts with `//` or `*`, so it does not match.
+      const lines = fs.readFileSync(file, 'utf8').split('\n').map(line => line.trim());
+      return RETIRED_PI_INVOCATION.every(code => lines.some(line => line.startsWith(code)));
     });
   if (retired.length === 0) return { id, describe, status: 'ok', detail: `no retired extension in ${extensions}` };
   return { id, describe, status: 'warn', detail: retired.map(file =>
