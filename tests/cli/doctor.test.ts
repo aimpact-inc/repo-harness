@@ -9,6 +9,7 @@ import * as os from 'os';
 import { fileURLToPath } from 'url';
 import { execFileSync, execSync, spawnSync } from 'child_process';
 import {
+  checkRetiredPiExtension,
   checkSkillProjection,
   clearRegisteredChecks,
   compareVersions,
@@ -973,6 +974,26 @@ test('each skill-projection repair command keeps the recorded selection and pass
     expect(JSON.parse(dryRun.stdout).selection, label).toEqual(row.selection);
   });
 }, 60_000);
+
+test('pi-retired-extension warns with a runnable mv only for an extension that uses the old hook argv protocol', () => withTempHome('repo-harness-doctor', home => {
+  const agentDir = path.join(home, 'pi agent');
+  const extensions = path.join(agentDir, 'extensions');
+  fs.mkdirSync(extensions, { recursive: true });
+  fs.writeFileSync(path.join(extensions, 'other.ts'), 'export default () => {};\n');
+  const env = { HOME: home, PI_CODING_AGENT_DIR: agentDir };
+  const now = new Date('2026-11-14T12:00:00Z');
+  expect(checkRetiredPiExtension(env, now).status).toBe('ok');
+  const legacy = path.join(extensions, 'repo-harness.ts');
+  const content = "execFile('repo-harness-hook', [event, '--route', route]);\n";
+  fs.writeFileSync(legacy, content);
+  const check = checkRetiredPiExtension(env, now);
+  expect(check.status).toBe('warn');
+  const command = check.detail.match(/Run: (mv .*)$/)?.[1];
+  expect(command).toBe(`mv '${legacy}' '${path.join(agentDir, 'repo-harness.ts.legacy-20261114')}'`);
+  expect(fs.readFileSync(legacy, 'utf8')).toBe(content);
+  execSync(command!, { shell: '/bin/sh' });
+  expect(checkRetiredPiExtension(env, now).status).toBe('ok');
+}));
 
 describe('legacy workflow-state diagnostic', () => {
   test('reports a legacy copy from a nested cwd without changing its bytes', () => {

@@ -17,6 +17,7 @@ import { MIN_PI_VERSION, PI_UPGRADE_HINT, piVersionSupported, type PiCapability,
 import { piPackagePresent } from '../installer/pi-package';
 import { piExecutable, piExecutableIssue } from '../../effects/pi-executable';
 import { probeInstalledPi } from '../../effects/pi-host-probe';
+import { piAgentDir } from '../../effects/pi-agent-dir';
 
 import * as fs from 'fs';
 import * as os from 'os';
@@ -174,6 +175,31 @@ export function checkPiHost(env: NodeJS.ProcessEnv = process.env): DoctorCheckRe
     checks.push({ id: 'pi-package', describe: 'Pi repo-harness package entry', status: 'fail', detail: String((error as Error).message) });
   }
   return checks;
+}
+
+/** The retired pi extension ran `repo-harness-hook <event> --route <route>` with stdin open, so each call waits for its timeout and fails open. */
+export function checkRetiredPiExtension(env: NodeJS.ProcessEnv = process.env, now: Date = new Date()): DoctorCheckResult {
+  const id = 'pi-retired-extension';
+  const describe = 'Pi extensions keep no retired repo-harness argv extension';
+  let agentDir: string;
+  try { agentDir = piAgentDir(env.HOME ?? env.USERPROFILE ?? os.homedir(), env); }
+  catch (error) { return { id, describe, status: 'warn', detail: (error as Error).message }; }
+  const extensions = path.join(agentDir, 'extensions');
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(extensions, { withFileTypes: true }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { id, describe, status: 'ok', detail: `no extensions directory: ${extensions}` };
+    return { id, describe, status: 'warn', detail: `cannot inspect ${extensions}: ${String(error)}` };
+  }
+  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+  const stamp = now.toISOString().slice(0, 10).replaceAll('-', '');
+  const retired = entries.filter(entry => entry.isFile()).map(entry => path.join(extensions, entry.name)).filter((file) => {
+    const text = fs.readFileSync(file, 'utf8');
+    return text.includes('repo-harness-hook') && text.includes('--route');
+  });
+  if (retired.length === 0) return { id, describe, status: 'ok', detail: `no retired extension in ${extensions}` };
+  return { id, describe, status: 'warn', detail: retired.map(file =>
+    `Retired extension: ${file}. It calls repo-harness-hook with the old --route argv protocol; each call waits for its timeout and fails open. The repo-harness pi package replaces it. Run: mv ${quote(file)} ${quote(path.join(agentDir, `${path.basename(file)}.legacy-${stamp}`))}`).join('\n') };
 }
 
 function checkVersion(): DoctorCheckResult {
@@ -632,7 +658,7 @@ export function runDoctor(ports: DoctorPorts, cwd: string = process.cwd(), targe
   checks.push(checkVersion());
   checks.push(checkSkillProjection(target));
   checks.push(checkCodexCliVersion());
-  if (target === 'both') checks.push(...checkPiHost());
+  if (target === 'both') checks.push(...checkPiHost(), checkRetiredPiExtension());
   checks.push(checkCliUpdate(target));
   for (const target of ALL_TARGETS) {
     if (target.supportsLocation('global')) {
