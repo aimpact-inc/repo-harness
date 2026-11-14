@@ -154,7 +154,7 @@ const publishHome = () => { const home = tmpWorkspace('review-publish-home'); ro
 
 function publishReceipt(overrides: Record<string, unknown> = {}) {
   return {
-    protocol: 1,
+    protocol: 2,
     kind: 'repo-harness-review-publish-receipt',
     round: 1,
     subject_sha: PUBLISH_HEAD,
@@ -167,6 +167,7 @@ function publishReceipt(overrides: Record<string, unknown> = {}) {
       { id: 'F1', severity: 'P1', path: 'src/example.ts', line: 12, evidence: 'The guard drops the last item.', fix: 'Use the inclusive bound.' },
       { id: 'N1', severity: 'P3', message: 'Rename the helper for clarity.' },
     ],
+    confirmed_fixed: [],
     ...overrides,
   };
 }
