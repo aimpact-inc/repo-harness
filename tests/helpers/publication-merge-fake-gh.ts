@@ -63,6 +63,8 @@ export interface PublicationMergeScenario {
   /** Issue comments already on the PR, as the provider lists them. */
   readonly existingComments?: readonly { readonly body: string; readonly html_url: string }[];
   readonly unresolvedThreads?: number;
+  /** Review threads by node id that `node(id:)` returns; the first comment belongs to a review with `reviewBody`. */
+  readonly threadNodes?: Readonly<Record<string, { readonly pr?: number; readonly isResolved?: boolean; readonly reviewBody: string }>>;
   readonly changesRequested?: boolean;
   readonly title?: string;
   readonly body?: string;
@@ -165,6 +167,14 @@ export function fakeGhResponse(args: readonly string[], scenario: PublicationMer
       }
       if (scenario.merge === 'null_errors') return { status: 1, stdout: JSON.stringify({ errors: [null] }), stderr: 'gh: error' };
       return ok({ data: { mergePullRequest: { pullRequest: { number: PR, state: 'MERGED', mergeCommit: { oid: mergeSha } } } } });
+    }
+    if (query.includes('addPullRequestReviewThreadReply')) return ok({ data: { addPullRequestReviewThreadReply: { comment: { url: `https://github.com/${REPOSITORY}/pull/${PR}#discussion_r1` } } } });
+    if (query.includes('resolveReviewThread')) return ok({ data: { resolveReviewThread: { thread: { isResolved: true } } } });
+    if (query.includes('PullRequestReviewThread')) {
+      const thread = scenario.threadNodes?.[graphqlVariable(args, 'id') ?? ''];
+      return ok({ data: { node: thread === undefined ? null : { __typename: 'PullRequestReviewThread', isResolved: thread.isResolved ?? false,
+        pullRequest: { number: thread.pr ?? PR, repository: { nameWithOwner: REPOSITORY } },
+        comments: { nodes: [{ pullRequestReview: { body: thread.reviewBody } }] } } } });
     }
     if (query.includes('closingIssuesReferences')) {
       return ok({ data: { repository: { nameWithOwner: REPOSITORY, pullRequest: {
