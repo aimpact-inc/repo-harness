@@ -1944,7 +1944,7 @@ function detectManagedArchctx() {
     "let linkedBinPath = null;",
     "try { if (linkedRoot) linkedBinPath = runtime.resolvePackageLocalArchctx(resolve(linkedRoot, '..', '..')).binaryPath; } catch { /* An invalid copy is not the managed link. */ }",
     "try { console.log(JSON.stringify({ ok: true, required: runtime.requiredArchctxVersion, resolved: runtime.resolvePackageLocalArchctx(consumerRoot), linkedBinPath })); }",
-    "catch (error) { console.log(JSON.stringify({ ok: false, required: runtime.requiredArchctxVersion, reason: error instanceof Error ? error.message : String(error) })); }",
+    "catch (error) { console.log(JSON.stringify({ ok: false, required: runtime.requiredArchctxVersion, reason: error instanceof Error ? error.message : String(error), linkedBinPath })); }",
   ].join("\n");
   const result = run(bun, [
     "-e", script,
@@ -1958,7 +1958,8 @@ function detectManagedArchctx() {
   if (!answer || typeof answer !== "object") {
     return unusable(`the provider resolution did not run: ${(result.error || result.stderr || result.stdout).trim().slice(0, 300) || `exit ${result.status}`}`);
   }
-  if (!answer.ok) return { ...unusable(answer.reason), required_version: answer.required };
+  // The global link is validated on its own, so a failed local copy does not make it unrelated.
+  if (!answer.ok) return { ...unusable(answer.reason), required_version: answer.required, linked_bin_path: answer.linkedBinPath };
   return {
     status: "present",
     selected: true,
