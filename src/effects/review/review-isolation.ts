@@ -4,7 +4,7 @@ import { isAbsolute, relative, sep, join, dirname, basename } from 'node:path';
 import { piAgentDir } from '../pi-agent-dir';
 import type { PiModelIdentity } from '../pi-host-probe';
 import { shellQuote } from '../../core/shell-quote';
-import type { ReviewIsolationAdmission, ReviewIsolationPaths } from '../../core/review/runner-port';
+import type { NativeAuthHome, ReviewIsolationAdmission, ReviewIsolationPaths } from '../../core/review/runner-port';
 
 
 /**
@@ -66,7 +66,8 @@ const PI_COMPAT: Spec = { object: {
  * carry or select a credential and stay outside the list.
  */
 const PI_PROVIDER_FIELDS: Readonly<Record<string, Spec>> = { name: 'name', api: PI_API, compat: PI_COMPAT };
-const PI_THINKING_LEVELS: Spec = nullable({ enum: ['none', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] });
+const PI_THINKING_LEVEL_NAMES = ['none', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const PI_THINKING_LEVELS: Spec = nullable({ enum: PI_THINKING_LEVEL_NAMES });
 /**
  * The model fields; baseUrl has its own check. headers carries a credential. samplingParams and
  * samplingParamsByThinkingLevel hold schema-unknown values that no closed list covers, so they stay outside the list too.
@@ -244,8 +245,12 @@ function preparePiSettings(directory: string, source: string): Readonly<Record<s
     } catch { throw new Error('review_pi_settings_source_invalid'); }
     finally { bytes.fill(0); }
   }
+  // Only the projected keys are checked; every other native key stays out of the projection unread.
+  if (settings.defaultThinkingLevel !== undefined && schemaFault(settings.defaultThinkingLevel, PI_THINKING_LEVELS, 'defaultThinkingLevel')) {
+    throw new Error(`review_pi_settings_value_invalid: defaultThinkingLevel in ${native} must be absent, null or a pi thinking level (${PI_THINKING_LEVEL_NAMES.join(', ')})`);
+  }
   const projection = Object.fromEntries(['defaultProvider', 'defaultModel', 'defaultThinkingLevel']
-    .filter(key => Object.hasOwn(settings, key)).map(key => [key, settings[key]]));
+    .filter(key => settings[key] !== undefined && settings[key] !== null).map(key => [key, settings[key]]));
   writeOwnedProjection(join(directory, 'settings.json'), JSON.stringify(projection) + '\n', 'review_pi_settings_changed');
   return projection;
 }
@@ -318,13 +323,19 @@ export function prepareCodexHome(output: string, model: string): { home: string 
  * path to every sandbox kind (#2764).
  */
 export function nativeAuthFiles(sourceHome: string, env: Readonly<Record<string, string | undefined>> = process.env): readonly string[] {
-  const home = realpathSync(sourceHome);
-  const piDirectories = [join(home, '.pi', 'agent'), piAgentDir(home, env)];
+  const { HOME: home, PI_CODING_AGENT_DIR: configured } = nativeAuthHome(sourceHome, env);
+  const piDirectories = [join(home, '.pi', 'agent'), configured];
   const files = [...piDirectories.flatMap(directory => ['auth.json', 'models.json'].map(name => join(directory, name))), join(home, '.codex', 'auth.json')];
   return [...new Set(files.flatMap(file => {
     const target = seatbeltPath(file);
     return [target, seatbeltPath(`${file}.lock`), seatbeltPath(`${target}.lock`)];
   }))];
+}
+
+/** The resolved HOME and pi agent directory from which nativeAuthFiles builds the deny list; the review child env carries the same values. */
+export function nativeAuthHome(sourceHome: string, env: Readonly<Record<string, string | undefined>> = process.env): NativeAuthHome {
+  const home = realpathSync(sourceHome);
+  return { HOME: home, PI_CODING_AGENT_DIR: piAgentDir(home, env) };
 }
 
 /** The path that Seatbelt matches for `path`. A dangling link has no resolvable target, so it refuses. */
@@ -421,10 +432,14 @@ const REVIEW_CHILD_VARIABLES = new Set(['PATH', 'HOME', 'USER', 'LOGNAME', 'SHEL
  * the host env and this overlay, so an ambient credential (OPENAI_API_KEY, GH_TOKEN, ...) never
  * reaches the sandboxed child. The host env itself does not change.
  */
-export function reviewChildEnvironment(overlay: Readonly<Record<string, string | null>> = {},
+export function reviewChildEnvironment(paths: ReviewIsolationPaths, overlay: Readonly<Record<string, string | null>> = {},
   inherited: Readonly<Record<string, string | undefined>> = process.env): Readonly<Record<string, string | null>> {
+  // The host env can name another HOME (an app-terminal launch), so the child takes HOME and the
+  // native pi agent directory from the values that built the deny list. The pi overlay keeps its private agent directory.
+  const native = paths.nativeHome;
+  if (!native || !isAbsolute(native.HOME) || !isAbsolute(native.PI_CODING_AGENT_DIR)) throw new Error('OAR_REVIEW_CHILD_HOME_UNSET');
   const removed = Object.keys(inherited).filter(key => !REVIEW_CHILD_VARIABLES.has(key) && !Object.hasOwn(overlay, key));
-  return { ...Object.fromEntries(removed.map(key => [key, null])), ...overlay };
+  return { ...Object.fromEntries(removed.map(key => [key, null])), PI_CODING_AGENT_DIR: native.PI_CODING_AGENT_DIR, ...overlay, HOME: native.HOME };
 }
 
 /** Require the owner-admitted profile and live inherited Seatbelt before SDK Session creation. */

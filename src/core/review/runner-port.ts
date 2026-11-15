@@ -66,7 +66,10 @@ export interface ReviewIsolationPaths {
   readonly modelLoopbackPorts?: readonly number[];
   /** The resolved native pi and codex auth.json files. The policy denies them and their locks to every sandbox kind. */
   readonly nativeAuth: readonly string[];
+  /** The HOME and pi agent directory that built nativeAuth. The review host sets them in the child env and refuses a launch without them. */
+  readonly nativeHome?: NativeAuthHome;
 }
+export type NativeAuthHome = { readonly HOME: string; readonly PI_CODING_AGENT_DIR: string };
 /** The isolation policy as data. The host applies it and refuses a session it cannot isolate. */
 export interface ReviewIsolationAdmission {
   paths: ReviewIsolationPaths;

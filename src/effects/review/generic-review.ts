@@ -14,7 +14,7 @@ import type { ReviewerRunner, TaskClaimReference, TaskCleanupResult, TaskRequest
 import { acquireExclusiveDirectoryLock, ExclusiveLockContentionError, withCallerLock } from '../locking/exclusive-directory-lock';
 import { taskRepository } from '../git/task-repository';
 import { ensureSessionDirectory, nextSessionRound, readSessionArtifact, writeSessionArtifact } from '../terminal/task-session-io';
-import { reviewIsolationPolicy, prepareReviewLauncher, prepareCodexHome, preparePiAgentDirectory, removePiCredentialReferences, nativeAuthFiles, MAGPIE_LOOPBACK_PORTS } from './review-isolation';
+import { reviewIsolationPolicy, prepareReviewLauncher, prepareCodexHome, preparePiAgentDirectory, removePiCredentialReferences, nativeAuthFiles, nativeAuthHome, MAGPIE_LOOPBACK_PORTS } from './review-isolation';
 import { acceptanceContext, acceptanceReviewContextDigest, authorityFingerprint, GENERIC_REVIEW_ROLE,
   projectAcceptance, recordAcceptance, verifyAcceptance, type AcceptancePullRequestSelection,
   type AcceptanceReceipt } from './acceptance-receipt';
@@ -226,8 +226,9 @@ export async function runReviewRound<Session, Endpoint>(options: ReviewOptions<E
     }
     // Isolation admission precedes any SDK/native Session creation.
     const repository = taskRepository(root);
+    const nativeHome = nativeAuthHome(sourceHome);
     const isolationPaths = { subject: root, primary, ownerRecord: dir, journal: dir,
-      gitCommonDir: repository.repository_id, output: outbox, nativeAuth: nativeAuthFiles(sourceHome), modelLoopbackPorts,
+      gitCommonDir: repository.repository_id, output: outbox, nativeAuth: nativeAuthFiles(nativeHome.HOME, nativeHome), nativeHome, modelLoopbackPorts,
       ...(session.actual_harness === 'pi' ? { piAgentDirectory: runtimeHome } : {}) };
     const policy = reviewIsolationPolicy(isolationPaths);
     const profilePath = join(dir, 'isolation.sb');

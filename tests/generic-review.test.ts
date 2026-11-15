@@ -423,7 +423,7 @@ test('Pi isolation fixture projects only the selected loopback provider with the
   const source = join(root, 'home'), output = join(root, 'output'), agent = join(source, '.pi/agent');
   mkdirSync(agent, { recursive: true }); mkdirSync(output);
   for (const name of ['sessions', 'extensions', 'skills']) mkdirSync(join(agent, name));
-  writeFileSync(join(agent, 'settings.json'), JSON.stringify({ defaultProvider: 'fixture', defaultModel: 'fixture-model', defaultThinkingLevel: 'high',
+  writeFileSync(join(agent, 'settings.json'), JSON.stringify({ defaultProvider: 'fixture', defaultModel: 'fixture-model', defaultThinkingLevel: 'high', modelThinkingLevels: { 'fixture-model': { effort: 'high' } },
     packages: ['fixture-package'], extensions: ['fixture-extension'], httpProxy: 'http://fixture.invalid', defaultProjectTrust: 'always' }));
   writeFileSync(join(agent, 'models.json'), PI_MAGPIE_MODELS);
   writeFileSync(join(agent, 'auth.json'), PI_NAMED_AUTH);
@@ -470,6 +470,9 @@ test('Pi isolation fixture projects only the selected loopback provider with the
   }
   expect(prepareWith({})).toThrow('review_pi_model_unnamed');
   expect(prepareWith({ defaultProvider: 'fixture' })).toThrow('review_pi_model_unnamed');
+  for (const level of [{ effort: 'high' }, 'turbo']) {
+    expect(prepareWith({ defaultProvider: 'fixture', defaultModel: 'fixture-model', defaultThinkingLevel: level })).toThrow('review_pi_settings_value_invalid: defaultThinkingLevel');
+  }
   // The host checks the owner's launch file just before the pi session start.
   const control = join(root, `control-${randomUUID()}`); mkdirSync(control);
   const lateDeadline = Date.now() + 1500;
@@ -487,7 +490,7 @@ test('Pi isolation fixture projects only the selected loopback provider with the
 
 test('Pi review source fixture uses custom agent directories and rejects relative overrides', async () => {
   const { mkdirSync } = await import('node:fs');
-  const { preparePiAgentDirectory, removePiCredentialReferences, nativeAuthFiles, reviewIsolationPolicy } = await import('../src/effects/review/review-isolation');
+  const { preparePiAgentDirectory, removePiCredentialReferences, nativeAuthFiles, nativeAuthHome, reviewChildEnvironment, reviewIsolationPolicy } = await import('../src/effects/review/review-isolation');
   const root = tmpWorkspace('pi-custom-source'); roots.push(root);
   const home = join(root, 'home'), native = join(home, '.pi/agent'); mkdirSync(native, { recursive: true });
   writeFileSync(join(native, 'auth.json'), '{"fixture":"default-source"}');
@@ -524,6 +527,16 @@ test('Pi review source fixture uses custom agent directories and rejects relativ
   for (const policy of [reviewIsolationPolicy(paths, 'darwin'), reviewIsolationPolicy({ ...paths, piAgentDirectory: join(realpathSync(paths.output), '.pi-agent') }, 'darwin')]) {
     for (const path of denied) expect(policy).toContain(`(deny file-read* file-write* (literal ${JSON.stringify(path)}))`);
   }
+  // Caller HOME A built the deny list and the host env names HOME B: the child takes A's values, and the deny list covers them.
+  const nativeHome = nativeAuthHome(home, { PI_CODING_AGENT_DIR: sources[0]!.configured });
+  expect(nativeAuthFiles(nativeHome.HOME, nativeHome)).toEqual(nativeAuth);
+  const hostHome = join(root, 'host-home'), codexHome = join(root, 'codex-home');
+  const child = reviewChildEnvironment({ ...paths, nativeHome }, { CODEX_HOME: codexHome },
+    { HOME: hostHome, PI_CODING_AGENT_DIR: join(hostHome, '.pi/agent'), PATH: '/usr/bin', FIXTURE_TOKEN: 'synthetic' });
+  expect(child).toEqual({ FIXTURE_TOKEN: null, PI_CODING_AGENT_DIR: sources[0]!.configured, CODEX_HOME: codexHome, HOME: realpathSync(home) });
+  for (const directory of [join(child.HOME!, '.pi/agent'), realpathSync(child.PI_CODING_AGENT_DIR!)]) expect(nativeAuth).toContain(join(directory, 'auth.json'));
+  expect(reviewChildEnvironment({ ...paths, nativeHome }, { PI_CODING_AGENT_DIR: codexHome }, {}).PI_CODING_AGENT_DIR).toBe(codexHome);
+  expect(() => reviewChildEnvironment(paths)).toThrow('OAR_REVIEW_CHILD_HOME_UNSET');
   unlinkSync(lockTarget);
   expect(() => nativeAuthFiles(home)).toThrow('review_native_auth_unsafe');
   const output = join(root, 'relative-output'); mkdirSync(output);
@@ -562,7 +575,7 @@ test('Pi projection cleanup fixture removes the projection without following dir
 darwinTest('Pi isolation fixture: OAR flags, native extension, actual model and paired denials', async () => {
   const { mkdirSync, chmodSync } = await import('node:fs');
   const { pathToFileURL, fileURLToPath } = await import('node:url');
-  const { preparePiAgentDirectory, reviewIsolationPolicy, prepareReviewLauncher, reviewHostTemporaryDirectory, nativeAuthFiles } = await import('../src/effects/review/review-isolation');
+  const { preparePiAgentDirectory, reviewIsolationPolicy, prepareReviewLauncher, reviewHostTemporaryDirectory, nativeAuthFiles, nativeAuthHome } = await import('../src/effects/review/review-isolation');
   const root = tmpWorkspace('pi-isolation'); roots.push(root);
   const home = join(root, 'home'), source = join(root, 'source'), owner = join(root, 'owner'), output = join(root, 'output');
   for (const path of [home, source, owner, output]) mkdirSync(path);
@@ -577,7 +590,7 @@ darwinTest('Pi isolation fixture: OAR flags, native extension, actual model and 
   const targets = [join(source, 'protected.txt'), credential, join(agent, 'protected.txt'), join(directory, 'models.json'), join(agent, 'models.json'), join(directory, 'settings.json'), join(agent, 'settings.json')];
   for (const target of [targets[0]!, targets[2]!]) writeFileSync(target, 'KEEP');
   const initial = targets.map(path => readFileSync(path, 'utf8'));
-  const paths = { subject: source, primary: source, ownerRecord: owner, journal: owner, gitCommonDir: source, output, piAgentDirectory: directory, nativeAuth: nativeAuthFiles(home) };
+  const paths = { subject: source, primary: source, ownerRecord: owner, journal: owner, gitCommonDir: source, output, piAgentDirectory: directory, nativeAuth: nativeAuthFiles(home), nativeHome: nativeAuthHome(home) };
   const profile = join(owner, 'isolation.sb'); writeFileSync(profile, reviewIsolationPolicy(paths), { mode: 0o600 });
   const node = resolveNode24(), fixture = join(root, 'fixture-pi.cjs'), capture = join(output, 'argv.jsonl');
   const piCli = realpathSync(join(fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent')), '..', 'cli.js'));
@@ -1436,7 +1449,8 @@ darwinTest('OAR native child cannot forge owner control evidence or signal/conne
   const { reviewIsolationPolicy, prepareReviewLauncher } = await import('../src/effects/review/review-isolation');
   const root = tmpWorkspace('oar-native-owner-evidence'); roots.push(root);
   const owner = join(root, 'owner'), output = join(root, 'output'); mkdirSync(owner); mkdirSync(output);
-  const paths = { subject: owner, primary: owner, ownerRecord: owner, journal: owner, gitCommonDir: owner, output, nativeAuth: [] };
+  const paths = { subject: owner, primary: owner, ownerRecord: owner, journal: owner, gitCommonDir: owner, output, nativeAuth: [],
+    nativeHome: { HOME: owner, PI_CODING_AGENT_DIR: join(owner, '.pi/agent') } };
   const policyFile = join(owner, 'profile.sb'); writeFileSync(policyFile, reviewIsolationPolicy(paths), { mode: 0o600 });
   const node = resolveNode24();
   const fixture = join(root, 'fixture-codex.cjs');

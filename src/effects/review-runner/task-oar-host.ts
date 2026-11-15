@@ -277,7 +277,7 @@ export async function openReviewHost(spec: ReviewHostSpec, print: (event: unknow
   // unbound host that exits without disposed.json must stay pending.
   writeSessionArtifact(join(spec.controlDirectory, 'session-opening.json'), { pid: process.pid });
   // The child env is built here from the host env, which an app-terminal launch does not share with the caller.
-  const options = { ...spec.options, env: reviewChildEnvironment(spec.options.env) };
+  const options = { ...spec.options, env: reviewChildEnvironment(spec.isolation.paths, spec.options.env) };
   return new OarReviewHost(await openNativeSession(reviewRuntime(spec.kind, spec.launcher), spec.installation, options, deadline), print);
 }
 
