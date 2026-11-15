@@ -216,9 +216,19 @@ posts in this order:
 
 Before the first post, it checks each `confirmed_fixed` id. The id must be
 an unresolved review thread on this PR, and its first comment must belong
-to an acceptance review that `review publish` wrote in an earlier round.
-A failed check exits 2 and posts nothing. The result lists the resolved
-ids in `resolved_threads`.
+to an acceptance review from an earlier round. That review must have the
+`repo-harness acceptance review` header as its first line, and its author
+must have write access (`OWNER`, `MEMBER` or `COLLABORATOR`). This is the
+rule that the merge gate applies to acceptance records. A bot account or
+an outside account fails it. A write-access account can copy the header,
+but that account can already post a PASS record or resolve a thread, so
+the rule adds no new residual. A failed check exits 2 and posts nothing.
+
+After the record, publish posts the reply and the resolve for each id in
+order. It stops at the first failed or unknown-outcome write, exits 5 and
+does not retry. The message names the record URL, the resolved ids and the
+unresolved ids; inspect the PR before a new publish. On success the result
+lists the resolved ids in `resolved_threads`.
 
 It posts no APPROVE review and no REQUEST_CHANGES review. A gatekeeper
 seat without the `net` tool group has no network, so the session that runs
