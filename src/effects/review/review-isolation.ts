@@ -22,51 +22,74 @@ export interface PiAgentDirectory { readonly directory: string; readonly model: 
 
 const PLAIN_RECORD = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const POSITIVE_NUMBER = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value > 0;
-/** The model fields that pi needs for a magpie model. Each other field (headers, compat, baseUrl, ...) can carry a credential or a second route. */
+const NAME = (value: unknown) => typeof value === 'string' && value !== '';
+const PRIMITIVE_RECORD = (value: unknown) => PLAIN_RECORD(value) && Object.values(value).every(item => ['boolean', 'number', 'string'].includes(typeof item));
+const PI_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const PI_COST_FIELDS = ['input', 'output', 'cacheRead', 'cacheWrite'];
+/** The provider fields that pi needs for the magpie provider; baseUrl, apiKey and models have their own checks. */
+const PI_PROVIDER_FIELDS: Readonly<Record<string, (value: unknown) => boolean>> = { name: NAME, api: NAME, compat: PRIMITIVE_RECORD };
+/** The model fields that pi needs for a magpie model; baseUrl has its own check. Each other field (headers, authHeader, ...) can carry a credential or a second route. */
 const PI_MODEL_FIELDS: Readonly<Record<string, (value: unknown) => boolean>> = {
-  id: value => typeof value === 'string' && value !== '',
-  name: value => typeof value === 'string' && value !== '',
+  id: NAME,
+  name: NAME,
+  api: NAME,
   reasoning: value => typeof value === 'boolean',
   input: value => Array.isArray(value) && value.every(item => item === 'text' || item === 'image'),
   contextWindow: POSITIVE_NUMBER,
   maxTokens: POSITIVE_NUMBER,
+  cost: value => PLAIN_RECORD(value) && Object.entries(value).every(([key, item]) => PI_COST_FIELDS.includes(key) && typeof item === 'number' && Number.isFinite(item) && item >= 0),
+  compat: PRIMITIVE_RECORD,
+  promptCache: PRIMITIVE_RECORD,
+  thinkingLevelMap: value => PLAIN_RECORD(value) && Object.entries(value).every(([key, item]) => PI_THINKING_LEVELS.includes(key) && (typeof item === 'string' || item === null)),
 };
 
+/** Copies the allow-listed fields of `entry` that pass their check; `fixed` fields carry their own check. Any other field refuses by name. */
+function allowListed(entry: Record<string, unknown>, fields: Readonly<Record<string, (value: unknown) => boolean>>, fixed: readonly string[],
+  refuse: (reason: string) => Error, subject: string): Record<string, unknown> {
+  const outside = Object.keys(entry).filter(key => !Object.hasOwn(fields, key) && !fixed.includes(key));
+  if (outside.length > 0) throw refuse(`has the ${subject} fields ${outside.join(', ')} outside the allow-list`);
+  const invalid = Object.keys(fields).filter(key => Object.hasOwn(entry, key) && !fields[key]!(entry[key]));
+  if (invalid.length > 0) throw refuse(`has invalid ${subject} fields ${invalid.join(', ')}`);
+  return Object.fromEntries(Object.keys(fields).filter(key => Object.hasOwn(entry, key)).map(key => [key, entry[key]]));
+}
+
+/** A baseUrl reaches the sandbox only as MAGPIE_BASE_URL; userinfo, a query or a fragment can carry a credential. */
+function assertMagpieUrl(baseUrl: unknown, refuse: (reason: string) => Error, subject: string): void {
+  if (typeof baseUrl !== 'string' || !URL.canParse(baseUrl)) throw refuse(`has no valid ${subject} baseUrl`);
+  const url = new URL(baseUrl);
+  if (url.username !== '' || url.password !== '') throw refuse(`has a ${subject} baseUrl with userinfo`);
+  if (url.search !== '') throw refuse(`has a ${subject} baseUrl with a query`);
+  if (url.hash !== '') throw refuse(`has a ${subject} baseUrl with a fragment`);
+  if (baseUrl !== MAGPIE_BASE_URL) throw refuse(`has the ${subject} baseUrl ${baseUrl}, not ${MAGPIE_BASE_URL}`);
+}
+
 /**
- * The magpie provider entry, built field by field from an allow-list: baseUrl (exactly
- * MAGPIE_BASE_URL), api, apiKey (the placeholder) and models (PI_MODEL_FIELDS). Each other field
- * refuses the session, never drops silently: a field outside the list can carry a real credential
- * into the sandbox.
+ * The magpie provider entry, built field by field from allow-lists: baseUrl (exactly
+ * MAGPIE_BASE_URL), apiKey (the placeholder), PI_PROVIDER_FIELDS, and only the selected model
+ * (PI_MODEL_FIELDS; its baseUrl is absent or MAGPIE_BASE_URL). Each other field refuses the
+ * session, never drops silently: a field outside the lists can carry a real credential into the
+ * sandbox. pi matches a model id without case, so the selection does too; the resolver then
+ * refuses a non-canonical name.
  */
-function piMagpieProvider(bytes: Buffer, provider: string, modelsPath: string): Readonly<Record<string, unknown>> {
+function piMagpieProvider(bytes: Buffer, provider: string, model: string, modelsPath: string): Readonly<Record<string, unknown>> {
   let providers: unknown;
   try { providers = JSON.parse(bytes.toString('utf8'))?.providers; } catch { throw new Error('review_pi_models_invalid'); }
   const refuse = (reason: string) => new Error(`review_pi_provider_not_magpie: the review sandbox holds no real credential, and the ${provider} provider in ${modelsPath} ${reason}; ${MAGPIE_ROUTE}`);
   const entry = PLAIN_RECORD(providers) && Object.hasOwn(providers, provider) ? providers[provider] : undefined;
   if (!PLAIN_RECORD(entry)) throw refuse('does not exist');
-  const unknown = Object.keys(entry).filter(key => !['baseUrl', 'api', 'apiKey', 'models'].includes(key));
-  if (unknown.length > 0) throw refuse(`has the fields ${unknown.join(', ')} outside the allow-list`);
+  const projected = allowListed(entry, PI_PROVIDER_FIELDS, ['baseUrl', 'apiKey', 'models'], refuse, 'provider');
   if (entry.apiKey !== MAGPIE_PLACEHOLDER_KEY) throw refuse('has no placeholder apiKey');
-  const baseUrl = entry.baseUrl;
-  if (typeof baseUrl !== 'string' || !URL.canParse(baseUrl)) throw refuse('has no baseUrl');
-  const url = new URL(baseUrl);
-  if (url.username !== '' || url.password !== '') throw refuse('has a baseUrl with userinfo');
-  if (url.search !== '' || url.hash !== '') throw refuse('has a baseUrl with a query or fragment');
-  if (baseUrl !== MAGPIE_BASE_URL) throw refuse(`has the baseUrl ${baseUrl}, not ${MAGPIE_BASE_URL}`);
-  const projected: Record<string, unknown> = { baseUrl: MAGPIE_BASE_URL, apiKey: MAGPIE_PLACEHOLDER_KEY };
-  if (entry.api !== undefined) {
-    if (typeof entry.api !== 'string' || entry.api === '') throw refuse('has an api that is not a name');
-    projected.api = entry.api;
-  }
+  assertMagpieUrl(entry.baseUrl, refuse, 'provider');
+  Object.assign(projected, { baseUrl: MAGPIE_BASE_URL, apiKey: MAGPIE_PLACEHOLDER_KEY });
   if (entry.models !== undefined) {
     if (!Array.isArray(entry.models)) throw refuse('has models that are not a list');
-    projected.models = entry.models.map((model: unknown, index) => {
-      if (!PLAIN_RECORD(model) || typeof model.id !== 'string') throw refuse(`has model ${index} without an id`);
-      const fields = Object.keys(model).filter(key => !Object.hasOwn(PI_MODEL_FIELDS, key));
-      if (fields.length > 0) throw refuse(`has the model fields ${fields.join(', ')} outside the allow-list`);
-      const invalid = Object.keys(model).filter(key => !PI_MODEL_FIELDS[key]!(model[key]));
-      if (invalid.length > 0) throw refuse(`has invalid model fields ${invalid.join(', ')}`);
-      return Object.fromEntries(Object.keys(PI_MODEL_FIELDS).filter(key => Object.hasOwn(model, key)).map(key => [key, model[key]]));
+    const selected = entry.models.filter((item: unknown, index) => {
+      if (!PLAIN_RECORD(item) || !NAME(item.id)) throw refuse(`has model ${index} without an id`);
+      return (item.id as string).toLowerCase() === model.toLowerCase();
+    }) as Record<string, unknown>[];
+    projected.models = selected.map(item => {
+      if (Object.hasOwn(item, 'baseUrl')) assertMagpieUrl(item.baseUrl, refuse, 'model');
+      return { ...allowListed(item, PI_MODEL_FIELDS, ['baseUrl'], refuse, 'model'), ...(Object.hasOwn(item, 'baseUrl') ? { baseUrl: MAGPIE_BASE_URL } : {}) };
     });
   }
   return projected;
@@ -102,7 +125,7 @@ export function preparePiAgentDirectory(output: string, sourceHome: string,
   if (!existsSync(models)) throw new Error(`review_pi_provider_not_magpie: ${models} does not exist; ${MAGPIE_ROUTE}`);
   const bytes = readNativeConfigBytes(models);
   let entry: ReturnType<typeof piMagpieProvider>;
-  try { entry = piMagpieProvider(bytes, provider, models); } finally { bytes.fill(0); }
+  try { entry = piMagpieProvider(bytes, provider, model, models); } finally { bytes.fill(0); }
   writeOwnedProjection(join(directory, 'models.json'), JSON.stringify({ providers: { [provider]: entry } }) + '\n', 'review_pi_models_changed');
   // pi creates auth.json at its session start, and the profile denies each auth.json write, so the owner writes an empty map.
   writeOwnedProjection(join(directory, 'auth.json'), '{}\n', 'review_pi_auth_changed');
@@ -205,20 +228,31 @@ export function prepareCodexHome(output: string, model: string): { home: string 
 }
 
 /**
- * The native credential files, resolved as Seatbelt matches them: the pi auth.json and models.json
- * in both the default (~/.pi/agent) and the configured (PI_CODING_AGENT_DIR) agent directory, and
- * the codex auth.json. A native pi models.json can hold real keys of other providers. The review
- * profile denies each file, and its lock, to every sandbox kind (#2764).
+ * The native credential files and their locks, resolved as Seatbelt matches them: the pi auth.json
+ * and models.json in both the default (~/.pi/agent) and the configured (PI_CODING_AGENT_DIR) agent
+ * directory, and the codex auth.json. A native pi models.json can hold real keys of other providers.
+ * Each original file and each original lock (`<file>.lock`) resolves on its own, because either can
+ * be a link; the lock beside a linked file's target is also denied. The review profile denies each
+ * path to every sandbox kind (#2764).
  */
 export function nativeAuthFiles(sourceHome: string, env: Readonly<Record<string, string | undefined>> = process.env): readonly string[] {
   const home = realpathSync(sourceHome);
   const piDirectories = [join(home, '.pi', 'agent'), piAgentDir(home, env)];
   const files = [...piDirectories.flatMap(directory => ['auth.json', 'models.json'].map(name => join(directory, name))), join(home, '.codex', 'auth.json')];
-  // A link resolves to its target, so an alias of a credential file is denied where Seatbelt reads it.
-  return [...new Set(files.map(path => {
-    if (existsSync(path)) return realpathSync(path);
-    return existsSync(dirname(path)) ? join(realpathSync(dirname(path)), basename(path)) : path;
+  return [...new Set(files.flatMap(file => {
+    const target = seatbeltPath(file);
+    return [target, seatbeltPath(`${file}.lock`), seatbeltPath(`${target}.lock`)];
   }))];
+}
+
+/** The path that Seatbelt matches for `path`. A dangling link has no resolvable target, so it refuses. */
+function seatbeltPath(path: string): string {
+  let link = false;
+  try { link = lstatSync(path).isSymbolicLink(); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  if (link || existsSync(path)) {
+    try { return realpathSync(path); } catch { throw new Error(`review_native_auth_unsafe: ${path} is a link without a target`); }
+  }
+  return existsSync(dirname(path)) ? join(realpathSync(dirname(path)), basename(path)) : path;
 }
 
 /**
@@ -230,11 +264,11 @@ export function nativeAuthFiles(sourceHome: string, env: Readonly<Record<string,
  */
 export type CleanupReviewIsolationPaths = ReviewIsolationPaths & { readonly cleanup?: { readonly readDenied: readonly string[] } };
 
-/** Each native credential file and its lock, denied to reads and writes. */
+/** Each native credential file and lock (nativeAuthFiles), denied to reads and writes. */
 function nativeAuthPolicy(files: readonly string[]): string {
-  // Seatbelt matches resolved paths, so each rule names a resolved file.
+  // Seatbelt matches resolved paths, so each rule names a resolved path.
   if (files.some(path => !isAbsolute(path) || existsSync(path) && realpathSync(path) !== path)) throw new Error('review_native_auth_unsafe');
-  return files.map(path => `(deny file-read* file-write* (literal ${JSON.stringify(path)}) (literal ${JSON.stringify(`${path}.lock`)}))\n`).join('');
+  return files.map(path => `(deny file-read* file-write* (literal ${JSON.stringify(path)}))\n`).join('');
 }
 
 /** Seatbelt owns enforcement. This emits OS policy, never vendor CLI arguments. */
@@ -295,6 +329,21 @@ export function reviewHostTemporaryDirectory(output: string): string {
   return path;
 }
 
+
+/** The inherited variables that a review child keeps: process basics, locale and terminal. None carries a credential. */
+const REVIEW_CHILD_VARIABLES = new Set(['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TERM', 'COLORTERM', 'LANG', 'LC_ALL', 'LC_CTYPE', 'LC_MESSAGES', 'TZ']);
+
+/**
+ * The review session env overlay for OAR (#2764): the sandbox overlay (CODEX_HOME or the pi agent
+ * directory) plus a removal (null) of each other inherited variable. OAR builds the child env from
+ * the host env and this overlay, so an ambient credential (OPENAI_API_KEY, GH_TOKEN, ...) never
+ * reaches the sandboxed child. The host env itself does not change.
+ */
+export function reviewChildEnvironment(overlay: Readonly<Record<string, string | null>> = {},
+  inherited: Readonly<Record<string, string | undefined>> = process.env): Readonly<Record<string, string | null>> {
+  const removed = Object.keys(inherited).filter(key => !REVIEW_CHILD_VARIABLES.has(key) && !Object.hasOwn(overlay, key));
+  return { ...Object.fromEntries(removed.map(key => [key, null])), ...overlay };
+}
 
 /** Require the owner-admitted profile and live inherited Seatbelt before SDK Session creation. */
 export function assertReviewIsolation(admission: ReviewIsolationAdmission): void {

@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { processIdentity, readSessionArtifact, writeSessionArtifact } from '../terminal/task-session-io';
 import { HOST_DEADLINE_STOP, REVIEW_HOST_LAUNCH_FILE, type HostRoundObservation, type ProcessProof, type ReviewHostLaunch, type ReviewHostSpec, type ReviewIsolationAdmission, type TaskRequest } from '../../core/review/runner-port';
 import { dirname } from 'node:path';
-import { reviewHostTemporaryDirectory, reviewIsolationPolicy, prepareReviewLauncher, assertReviewIsolation } from '../review/review-isolation';
+import { reviewHostTemporaryDirectory, reviewIsolationPolicy, prepareReviewLauncher, assertReviewIsolation, reviewChildEnvironment } from '../review/review-isolation';
 import { promptWithOarObservation, oarActualModel, oarObservationFile, type OarObservationSink } from '../terminal/task-runtime-observation';
 
 /** OAR owns RPC arguments and its explicit extension. Disable all ambient Pi resources. */
@@ -276,7 +276,9 @@ export async function openReviewHost(spec: ReviewHostSpec, print: (event: unknow
   // From here a native reviewer child can exist until disposal. Cleanup of an
   // unbound host that exits without disposed.json must stay pending.
   writeSessionArtifact(join(spec.controlDirectory, 'session-opening.json'), { pid: process.pid });
-  return new OarReviewHost(await openNativeSession(reviewRuntime(spec.kind, spec.launcher), spec.installation, spec.options, deadline), print);
+  // The child env is built here from the host env, which an app-terminal launch does not share with the caller.
+  const options = { ...spec.options, env: reviewChildEnvironment(spec.options.env) };
+  return new OarReviewHost(await openNativeSession(reviewRuntime(spec.kind, spec.launcher), spec.installation, options, deadline), print);
 }
 
 /**
