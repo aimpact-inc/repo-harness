@@ -335,7 +335,7 @@ test('publish replies on and resolves an earlier-round thread that its receipt c
 
 test('a confirmed id that is not an earlier publish thread of this PR is refused and nothing is posted', async () => {
   for (const thread of [{ reviewBody: 'Looks good to me.' }, { pr: PUBLISH_PR + 1, reviewBody: earlierReview(1) }, { reviewBody: earlierReview(2) },
-    { isResolved: true, reviewBody: earlierReview(1) }, { association: 'NONE', reviewBody: earlierReview(1) }]) {
+    { association: 'NONE', reviewBody: earlierReview(1) }]) {
     const fixture = publishFixture(publishScenario({ threadNodes: { PRRT_one: thread } }));
     const result = await runPublish(fixture, confirmReceipt(['PRRT_one']));
     expect(result.status, JSON.stringify(thread)).toBe(2);
@@ -343,6 +343,19 @@ test('a confirmed id that is not an earlier publish thread of this PR is refused
     expect(fixture.gh.inputs().some((entry) => entry.input !== '')).toBe(false);
     expect(threadMutations(fixture)).toEqual([]);
   }
+});
+
+test('an already-resolved confirmed thread is left as is only when it passes the provenance rule', async () => {
+  const fixture = publishFixture(publishScenario({ threadNodes: { PRRT_one: { reviewBody: earlierReview(1) }, PRRT_done: { isResolved: true, reviewBody: earlierReview(1) } } }));
+  const result = await runPublish(fixture, confirmReceipt(['PRRT_done', 'PRRT_one']));
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({ resolved_threads: ['PRRT_one'], already_resolved_threads: ['PRRT_done'] });
+  expect(fixture.gh.calls().filter((args) => args.includes('id=PRRT_done') && args.some((arg) => arg.startsWith('query=mutation')))).toEqual([]);
+  const outside = publishFixture(publishScenario({ threadNodes: { PRRT_done: { isResolved: true, association: 'NONE', reviewBody: earlierReview(1) } } }));
+  const refused = await runPublish(outside, confirmReceipt(['PRRT_done']));
+  expect(JSON.parse(refused.stdout)).toMatchObject({ ok: false, error: 'review_receipt_invalid', posted: [] });
+  expect(outside.gh.inputs().some((entry) => entry.input !== '')).toBe(false);
+  expect(threadMutations(outside)).toEqual([]);
 });
 
 test('a failed or unknown thread write stops publish, names the record and both thread sets, and is not retried', async () => {

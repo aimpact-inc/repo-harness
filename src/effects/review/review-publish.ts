@@ -45,6 +45,8 @@ export interface ReviewPublishResult {
   readonly threads: number;
   /** Node ids of the earlier-round threads that publish replied on and resolved. */
   readonly resolved_threads: readonly string[];
+  /** Confirmed node ids that were already resolved; publish left them unchanged. */
+  readonly already_resolved_threads: readonly string[];
 }
 
 export interface ReviewPublishGhResult {
@@ -309,14 +311,17 @@ function field(value: unknown, key: string): unknown {
 }
 
 /**
- * Each confirmed id must be an open thread of this PR that an earlier round
+ * Each confirmed id must be a thread of this PR that an earlier round
  * of `review publish` opened: its first comment belongs to a review whose
  * first line is the acceptance-review header and whose author has write
  * access. This is the rule `protocolComments` applies to acceptance records:
  * bot and outside accounts fail it, and a write-access account that copies
  * the header could already post a PASS record or resolve the thread itself.
+ * A thread that passes the rule but is already resolved (an overlapping
+ * confirmation from another reviewer) is returned, and publish leaves it as is.
  */
-function checkConfirmedThreads(run: ReviewPublishGhRunner, slug: string, prNumber: number, receipt: ReviewPublishReceipt): void {
+function checkConfirmedThreads(run: ReviewPublishGhRunner, slug: string, prNumber: number, receipt: ReviewPublishReceipt): ReadonlySet<string> {
+  const alreadyResolved = new Set<string>();
   for (const id of receipt.confirmed_fixed) {
     const node = field(field(ghJson(run, ['api', 'graphql', '--hostname', 'github.com', '-f', 'query=' + THREAD_QUERY, '-f', 'id=' + id]), 'data'), 'node');
     const pr = field(node, 'pullRequest');
@@ -327,13 +332,15 @@ function checkConfirmedThreads(run: ReviewPublishGhRunner, slug: string, prNumbe
     const round = typeof body === 'string' ? acceptanceReviewRound(body) : null;
     const reason = field(node, '__typename') !== 'PullRequestReviewThread' ? 'is not a review thread'
       : field(pr, 'number') !== prNumber || field(field(pr, 'repository'), 'nameWithOwner') !== slug ? 'is not on PR ' + slug + '#' + prNumber
-        : field(node, 'isResolved') !== false ? 'is not an unresolved thread'
+        : typeof field(node, 'isResolved') !== 'boolean' ? 'has no resolved state'
           : round === null ? 'was not opened by review publish'
             : typeof association !== 'string' || !WRITE_ACCESS.has(association) ? 'was opened by an account without write access (' + String(association) + ')'
             : round >= receipt.round ? 'is from round ' + round + ', not an earlier round than ' + receipt.round
               : null;
     if (reason !== null) throw new ReviewPublishError('review_receipt_invalid', 'confirmed_fixed thread ' + id + ' ' + reason + '; nothing was posted', 2);
+    if (field(node, 'isResolved') === true) alreadyResolved.add(id);
   }
+  return alreadyResolved;
 }
 
 /**
@@ -391,10 +398,11 @@ export function publishReceipt(input: ReviewPublishInput, receipt: ReviewPublish
   const claimBody = renderAcceptanceClaim(receipt, input.ownerRecord);
   let diffLines: ReviewDiffLines;
   let existingClaim: string | null;
+  let alreadyResolved: ReadonlySet<string>;
   try {
     diffLines = prDiffLines(run, pr.slug, input.prNumber);
     existingClaim = existingClaimUrl(run, pr.slug, input.prNumber, receipt, claimBody);
-    checkConfirmedThreads(run, pr.slug, input.prNumber, receipt);
+    alreadyResolved = checkConfirmedThreads(run, pr.slug, input.prNumber, receipt);
   } catch (error) {
     if (error instanceof ReviewPublishError) throw error;
     throw new ReviewPublishError('review_publish_provider_unavailable', 'nothing was posted: ' + errorMessage(error), 1);
@@ -449,8 +457,9 @@ export function publishReceipt(input: ReviewPublishInput, receipt: ReviewPublish
   }
   posted.push(recordUrl);
   const reply = renderConfirmedReply(receipt, recordUrl);
+  const pending = receipt.confirmed_fixed.filter((id) => !alreadyResolved.has(id));
   const resolved: string[] = [];
-  for (const id of receipt.confirmed_fixed) {
+  for (const id of pending) {
     for (const [stage, args] of [
       ['reply', ['-f', 'query=' + REPLY_MUTATION, '-f', 'id=' + id, '-f', 'body=' + reply]],
       ['resolve', ['-f', 'query=' + RESOLVE_MUTATION, '-f', 'id=' + id]],
@@ -459,7 +468,7 @@ export function publishReceipt(input: ReviewPublishInput, receipt: ReviewPublish
         ghJson(run, ['api', 'graphql', '--hostname', 'github.com', ...args], undefined, { mutation: true });
       } catch (error) {
         const done = 'record ' + recordUrl + '; resolved threads: ' + (resolved.join(', ') || 'none')
-          + '; unresolved threads: ' + receipt.confirmed_fixed.slice(resolved.length).join(', ');
+          + '; unresolved threads: ' + pending.slice(resolved.length).join(', ');
         if (error instanceof GhMutationUnknownError) throw unknownOutcome('the ' + stage + ' outcome on thread ' + id + ' is unknown; ' + done + '; inspection is required before any retry: ' + errorMessage(error), posted, error);
         throw partial('the ' + stage + ' on thread ' + id + ' failed after the record; ' + done + ': ' + errorMessage(error), posted, error);
       }
@@ -476,5 +485,6 @@ export function publishReceipt(input: ReviewPublishInput, receipt: ReviewPublish
     record_url: recordUrl,
     threads,
     resolved_threads: Object.freeze(resolved),
+    already_resolved_threads: Object.freeze(receipt.confirmed_fixed.filter((id) => alreadyResolved.has(id))),
   });
 }

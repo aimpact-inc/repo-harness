@@ -215,7 +215,7 @@ posts in this order:
   record, then the resolve of that thread (§6).
 
 Before the first post, it checks each `confirmed_fixed` id. The id must be
-an unresolved review thread on this PR, and its first comment must belong
+a review thread on this PR, and its first comment must belong
 to an acceptance review from an earlier round. That review must have the
 `repo-harness acceptance review` header as its first line, and its author
 must have write access (`OWNER`, `MEMBER` or `COLLABORATOR`). This is the
@@ -223,6 +223,10 @@ rule that the merge gate applies to acceptance records. A bot account or
 an outside account fails it. A write-access account can copy the header,
 but that account can already post a PASS record or resolve a thread, so
 the rule adds no new residual. A failed check exits 2 and posts nothing.
+A thread that passes the check but is already resolved, for example by an
+overlapping confirmation from another reviewer, gets no reply and no
+resolve; the result lists it in `already_resolved_threads`. Publish never
+reopens a thread.
 
 After the record, publish posts the reply and the resolve for each id in
 order. It stops at the first failed or unknown-outcome write, exits 5 and
