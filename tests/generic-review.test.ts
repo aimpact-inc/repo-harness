@@ -2,7 +2,7 @@ import { readReviewAdmissionSource } from '../src/effects/admission/admission-so
 import { seedReviewAdmissionFixture } from './helpers/review-admission-fixture';
 import { afterAll, afterEach, expect, test } from 'bun:test';
 import { darwinTest } from './helpers/darwin-test';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, readdirSync } from 'fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, readdirSync, symlinkSync } from 'fs';
 import { execFileSync, spawnSync } from 'child_process';
 import { createHash } from 'crypto';
 import { join } from 'path';
@@ -428,8 +428,8 @@ test('Pi isolation fixture projects only the selected loopback provider with the
   writeFileSync(join(agent, 'models.json'), PI_MAGPIE_MODELS);
   writeFileSync(join(agent, 'auth.json'), PI_NAMED_AUTH);
   // pi's own resolver reads the projected models.json; the projection has no auth.json.
-  const { directory, model, loopbackPorts } = preparePiAgentDirectory(output, source, (directory, reference) => resolvePiModel(PI_PACKAGE_CLI, directory, reference));
-  expect(model).toBe('fixture/fixture-model'); expect(loopbackPorts).toEqual([3425]);
+  const { directory, model } = preparePiAgentDirectory(output, source, (directory, reference) => resolvePiModel(PI_PACKAGE_CLI, directory, reference));
+  expect(model).toBe('fixture/fixture-model');
   expect(lstatSync(directory).mode & 0o777).toBe(0o700);
   expect(readdirSync(directory).sort()).toEqual(['auth.json', 'models.json', 'settings.json']);
   expect(readFileSync(join(directory, 'auth.json'), 'utf8')).toBe('{}\n');
@@ -466,7 +466,7 @@ test('Pi isolation fixture projects only the selected loopback provider with the
   };
   // A provider with a real key, an OAuth login or no models.json entry would put a real credential in the sandbox.
   for (const provider of ['other', 'openai-codex']) {
-    expect(prepareWith({ defaultProvider: provider, defaultModel: 'gpt-5.4' })).toThrow(/review_pi_provider_not_loopback: the review sandbox holds no real credential.*route the review through magpie/);
+    expect(prepareWith({ defaultProvider: provider, defaultModel: 'gpt-5.4' })).toThrow(/review_pi_provider_not_magpie: the review sandbox holds no real credential.*route the review through magpie/);
   }
   expect(prepareWith({})).toThrow('review_pi_model_unnamed');
   expect(prepareWith({ defaultProvider: 'fixture' })).toThrow('review_pi_model_unnamed');
@@ -487,10 +487,12 @@ test('Pi isolation fixture projects only the selected loopback provider with the
 
 test('Pi review source fixture uses custom agent directories and rejects relative overrides', async () => {
   const { mkdirSync } = await import('node:fs');
-  const { preparePiAgentDirectory, removePiCredentialReferences } = await import('../src/effects/review/review-isolation');
+  const { preparePiAgentDirectory, removePiCredentialReferences, nativeAuthFiles, reviewIsolationPolicy } = await import('../src/effects/review/review-isolation');
   const root = tmpWorkspace('pi-custom-source'); roots.push(root);
   const home = join(root, 'home'), native = join(home, '.pi/agent'); mkdirSync(native, { recursive: true });
-  for (const name of ['models.json', 'auth.json']) writeFileSync(join(native, name), '{"fixture":"default-source"}');
+  writeFileSync(join(native, 'auth.json'), '{"fixture":"default-source"}');
+  // An alias of the native models.json is denied at its target.
+  const aliased = join(root, 'aliased-models.json'); writeFileSync(aliased, '{"fixture":"default-source"}'); symlinkSync(aliased, join(native, 'models.json'));
   const sources = [
     { configured: join(root, 'custom-agent'), directory: join(root, 'custom-agent') },
     { configured: '~/custom-agent', directory: join(home, 'custom-agent') },
@@ -509,6 +511,15 @@ test('Pi review source fixture uses custom agent directories and rejects relativ
     expect(removePiCredentialReferences(output).status).toBe('removed');
     expect(readdirSync(directory)).toEqual([]);
   }
+  // With PI_CODING_AGENT_DIR set, the default and the configured credential files are denied to both kinds.
+  const subject = join(root, 'subject'); mkdirSync(subject);
+  const nativeAuth = nativeAuthFiles(home, { PI_CODING_AGENT_DIR: sources[0]!.configured });
+  const [realNative, realCustom] = [realpathSync(native), realpathSync(sources[0]!.directory)];
+  const denied = [join(realNative, 'auth.json'), realpathSync(aliased), join(realCustom, 'auth.json'), join(realCustom, 'models.json')];
+  const paths = { subject, primary: subject, ownerRecord: subject, journal: subject, gitCommonDir: subject, output: join(root, 'output-0'), nativeAuth };
+  for (const policy of [reviewIsolationPolicy(paths, 'darwin'), reviewIsolationPolicy({ ...paths, piAgentDirectory: join(realpathSync(paths.output), '.pi-agent') }, 'darwin')]) {
+    for (const path of denied) expect(policy).toContain(`(deny file-read* file-write* (literal ${JSON.stringify(path)}) (literal ${JSON.stringify(`${path}.lock`)}))`);
+  }
   const output = join(root, 'relative-output'); mkdirSync(output);
   expect(() => preparePiAgentDirectory(output, home, piReferenceResolver, { PI_CODING_AGENT_DIR: 'relative-agent' })).toThrow('PI_CODING_AGENT_DIR must be an absolute path or use ~/');
 });
@@ -520,7 +531,7 @@ test('Pi projection cleanup fixture removes the projection without following dir
   const home = join(root, 'home'), source = join(home, '.pi/agent'); mkdirSync(source, { recursive: true });
   writeFileSync(join(source, 'settings.json'), PI_NAMED_SETTINGS);
   const missing = join(root, 'missing'); mkdirSync(missing);
-  expect(() => preparePiAgentDirectory(missing, home, piReferenceResolver)).toThrow(/review_pi_provider_not_loopback: .*models\.json does not exist; route the review through magpie/);
+  expect(() => preparePiAgentDirectory(missing, home, piReferenceResolver)).toThrow(/review_pi_provider_not_magpie: .*models\.json does not exist; route the review through magpie/);
   expect(existsSync(join(missing, '.pi-agent/models.json'))).toBe(false);
   writeFileSync(join(source, 'models.json'), PI_MAGPIE_MODELS); writeFileSync(join(source, 'auth.json'), PI_NAMED_AUTH);
   {
@@ -962,38 +973,35 @@ darwinTest('Pi credential cleanup fixture removes partial references after a fai
   expect(readdirSync(join(host.output, '.pi-agent'))).toEqual([]);
   expectNoStoredPiProbe(host.output);
 });
-test('preparePiAgentDirectory reads the loopback port of the selected provider and refuses a provider it cannot allow', async () => {
+test('preparePiAgentDirectory builds the magpie provider from an allow-list and refuses each other field', async () => {
   const { preparePiAgentDirectory } = await import('../src/effects/review/review-isolation');
-  const { OPERATOR_DEFAULT_PORT: consolePort } = await import('../src/core/review/operator-console-port');
   const prepared = (models: string) => {
-    const root = tmpWorkspace('pi-loopback-ports'); roots.push(root);
+    const root = tmpWorkspace('pi-magpie-provider'); roots.push(root);
     const output = join(root, 'output'), agent = join(root, 'home/.pi/agent');
     mkdirSync(output); mkdirSync(agent, { recursive: true }); writeFileSync(join(agent, 'models.json'), models);
     writeFileSync(join(agent, 'settings.json'), PI_NAMED_SETTINGS);
-    return preparePiAgentDirectory(output, join(root, 'home'), piReferenceResolver);
+    return readFileSync(join(preparePiAgentDirectory(output, join(root, 'home'), piReferenceResolver).directory, 'models.json'), 'utf8');
   };
   const provider = (fixture: unknown) => JSON.stringify({ providers: { fixture } });
-  const baseUrl = (value: unknown) => provider({ baseUrl: value, apiKey: 'magpie' });
-  for (const [url, port] of [['http://127.0.0.1:3425/v1', 3425], ['http://LOCALHOST:8080', 8080], ['http://[::1]:9000/v1', 9000], ['http://localhost/v1', 80], ['https://127.0.0.1/v1', 443]] as const) {
-    expect(prepared(baseUrl(url)).loopbackPorts, url).toEqual([port]);
-  }
-  for (const [models, code] of [
+  const allowed = { ...PI_MAGPIE_PROVIDER, models: [{ id: 'fixture-model', name: 'Fixture', reasoning: true, input: ['text', 'image'], contextWindow: 200000, maxTokens: 32000 }] };
+  expect(JSON.parse(prepared(provider(allowed)))).toEqual({ providers: { fixture: allowed } });
+  for (const [models, reason] of [
     ['{ not json', 'review_pi_models_invalid'],
-    ['// comment\n{"providers":{}}', 'review_pi_models_invalid'],
-    ...['not a url', '127.0.0.1:3425/v1', 'ftp://127.0.0.1:3425', 3425, 'https://api.example.com:4318/v1'].map(url => [baseUrl(url), 'review_pi_provider_not_loopback']),
-    [provider({ baseUrl: 'http://127.0.0.1:3425/v1', apiKey: 'sk-PROBE-LITERAL' }), 'review_pi_provider_not_loopback'],
-    [JSON.stringify({ providers: { other: PI_MAGPIE_PROVIDER } }), 'review_pi_provider_not_loopback'],
-    ...['127.0.0.1', 'localhost', '[::1]'].map(host => [baseUrl(`http://${host}:${consolePort}/v1`), 'review_pi_model_port_is_operator_console']),
-  ] as const) expect(() => prepared(models), models).toThrow(code);
+    [provider({ ...PI_MAGPIE_PROVIDER, headers: { authorization: 'Bearer sk-PROBE-LITERAL' } }), 'fields headers outside the allow-list'],
+    [provider({ ...PI_MAGPIE_PROVIDER, baseUrl: 'http://user:sk-PROBE-LITERAL@127.0.0.1:3425/v1' }), 'baseUrl with userinfo'],
+    [provider({ ...PI_MAGPIE_PROVIDER, baseUrl: 'http://127.0.0.1:3425/v1?key=sk-PROBE-LITERAL' }), 'baseUrl with a query'],
+    [provider({ ...PI_MAGPIE_PROVIDER, baseUrl: 'http://localhost:8080/v1' }), 'not http://127.0.0.1:3425/v1'],
+    [provider({ ...PI_MAGPIE_PROVIDER, models: [{ id: 'fixture-model', headers: { 'x-api-key': 'sk-PROBE-LITERAL' } }] }), 'model fields headers outside the allow-list'],
+  ] as const) expect(() => prepared(models), models).toThrow(reason);
 });
 
-test('a Pi provider on the console port refuses the session before any launch and consumes no round', async () => {
+test('a Pi provider outside magpie refuses the session before any launch and consumes no round', async () => {
   const f = packetRoundFixture();
   const source = join(f.options.endpoint.home, '.pi/agent'); mkdirSync(source, { recursive: true });
   const { OPERATOR_DEFAULT_PORT: consolePort } = await import('../src/core/review/operator-console-port');
   writeFileSync(join(source, 'models.json'), JSON.stringify({ providers: { fixture: { baseUrl: `http://127.0.0.1:${consolePort}/v1`, apiKey: 'magpie' } } }));
   await expect(runReviewRound({ ...f.options, harness: 'pi' }, { ...f.effects, piExecutable: () => '/usr/bin/true', installation: async () => ({ kind: 'available', via: 'bundled' }) }))
-    .rejects.toThrow('review_pi_model_port_is_operator_console');
+    .rejects.toThrow('review_pi_provider_not_magpie');
   writeFileSync(join(source, 'models.json'), PI_MAGPIE_MODELS);
   writeFileSync(join(source, 'settings.json'), '{"defaultProvider":"fixture","defaultModel":"FIXTURE-MODEL"}');
   await expect(runReviewRound({ ...f.options, harness: 'pi' }, { ...f.effects, piExecutable: () => PI_PACKAGE_CLI, installation: async () => ({ kind: 'available', via: 'bundled' }),
@@ -1004,27 +1012,26 @@ test('a Pi provider on the console port refuses the session before any launch an
 }, 60_000);
 
 // The profile comes from runReviewRound, so each case proves the path that its reviewer uses.
-for (const harness of ['codex', 'claude', 'pi'] as const) darwinTest(`zero-model probe through the ${harness} launcher: loopback is denied against live listeners, only the model port connects and both native auth files stay unreadable`, async () => {
+for (const harness of ['codex', 'claude', 'pi'] as const) darwinTest(`zero-model probe through the ${harness} launcher: loopback is denied against live listeners and each native credential file stays unreadable`, async () => {
   const f = packetRoundFixture();
   const listen = (hostname: string, port = 0) => Bun.listen({ hostname, port, socket: { data() {} } });
   const v4 = listen('127.0.0.1'), v6 = listen('::1'), provider = listen('127.0.0.1'), providerV6 = listen('::1', provider.port);
   try {
     const expected = { [`::1 ${v6.port}`]: 'denied', [`127.0.0.1 ${v4.port}`]: 'denied', [`::ffff:127.0.0.1 ${v4.port}`]: 'denied',
-      [`127.0.0.1 ${provider.port}`]: harness === 'pi' ? 'allowed' : 'denied', [`::1 ${providerV6.port}`]: harness === 'pi' ? 'allowed' : 'denied' };
+      [`127.0.0.1 ${provider.port}`]: 'denied', [`::1 ${providerV6.port}`]: 'denied' };
     for (const target of Object.keys(expected)) expect(spawnSync('/usr/bin/nc', ['-z', '-G', '2', ...target.split(' ')]).status, target).toBe(0);
     const vendor = join(f.home, `fake-${harness}`);
-    const home = f.options.endpoint.home, nativeAuth = [join(home, '.pi/agent/auth.json'), join(home, '.codex/auth.json')];
-    mkdirSync(join(home, '.codex')); writeFileSync(nativeAuth[1]!, '{"tokens":{"refresh_token":"sk-PROBE-LITERAL"}}');
+    const home = f.options.endpoint.home, nativeAuth = [join(home, '.pi/agent/auth.json'), join(home, '.pi/agent/models.json'), join(home, '.codex/auth.json')];
+    mkdirSync(join(home, '.codex')); writeFileSync(nativeAuth[2]!, '{"tokens":{"refresh_token":"sk-PROBE-LITERAL"}}');
     writeFileSync(vendor, `#!/bin/sh\n${Object.keys(expected).map(target => `if /usr/bin/nc -z -G 2 ${target} >/dev/null 2>&1; then echo '${target} allowed'; else echo '${target} denied'; fi`).join('\n')}\n${nativeAuth.map(file => `/bin/cat ${file} >/dev/null 2>&1 && echo 'read ${file}'`).join('\n')}\nexit 0\n`);
     chmodSync(vendor, 0o700);
-    if (harness === 'pi') writeFileSync(join(home, '.pi/agent/models.json'), JSON.stringify({ providers: { fixture: { baseUrl: `http://localhost:${provider.port}/v1`, apiKey: 'magpie' } } }));
     await expect(runReviewRound({ ...f.options, harness }, { ...f.effects, piExecutable: () => vendor,
       installation: async (_kind, executable) => harness === 'pi' ? { kind: 'available', via: 'bundled' } : { kind: 'available', via: 'executable', command: executable ?? vendor },
       start: async () => { throw new Error('fixture_start_failure'); } })).rejects.toThrow('fixture_start_failure');
     const { launcher } = readSessionArtifact<{ launcher: string }>(join(f.dir, 'host.json'));
     expect(execFileSync(launcher, [], { encoding: 'utf8', timeout: 20_000 }).trim().split('\n')).toEqual(Object.entries(expected).map(([target, access]) => `${target} ${access}`));
-    // The codex kind reaches models only through magpie.
-    expect(readFileSync(join(f.dir, 'isolation.sb'), 'utf8').includes('(allow network-outbound (remote tcp "localhost:3425"))')).toBe(harness === 'codex');
+    // The codex and pi kinds reach models only through magpie.
+    expect(readFileSync(join(f.dir, 'isolation.sb'), 'utf8').includes('(allow network-outbound (remote tcp "localhost:3425"))')).toBe(harness !== 'claude');
   } finally { for (const listener of [v4, v6, provider, providerV6]) listener.stop(true); }
 }, 90_000);
 

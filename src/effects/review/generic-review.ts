@@ -14,7 +14,7 @@ import type { ReviewerRunner, TaskClaimReference, TaskCleanupResult, TaskRequest
 import { acquireExclusiveDirectoryLock, ExclusiveLockContentionError, withCallerLock } from '../locking/exclusive-directory-lock';
 import { taskRepository } from '../git/task-repository';
 import { ensureSessionDirectory, nextSessionRound, readSessionArtifact, writeSessionArtifact } from '../terminal/task-session-io';
-import { reviewIsolationPolicy, prepareReviewLauncher, prepareCodexHome, preparePiAgentDirectory, removePiCredentialReferences, nativeAuthFiles, CODEX_REVIEW_LOOPBACK_PORTS } from './review-isolation';
+import { reviewIsolationPolicy, prepareReviewLauncher, prepareCodexHome, preparePiAgentDirectory, removePiCredentialReferences, nativeAuthFiles, MAGPIE_LOOPBACK_PORTS } from './review-isolation';
 import { acceptanceContext, acceptanceReviewContextDigest, authorityFingerprint, GENERIC_REVIEW_ROLE,
   projectAcceptance, recordAcceptance, verifyAcceptance, type AcceptancePullRequestSelection,
   type AcceptanceReceipt } from './acceptance-receipt';
@@ -211,18 +211,18 @@ export async function runReviewRound<Session, Endpoint>(options: ReviewOptions<E
     // The one absolute round deadline: the host launch, the host turn and this wait all end at it.
     const deadline = Date.now() + timeout;
     let runtimeHome: string | undefined;
-    let modelLoopbackPorts: readonly number[] = [];
+    // The codex and pi kinds reach models only through magpie; other kinds open no model port.
+    const modelLoopbackPorts = session.actual_harness === 'codex' || session.actual_harness === 'pi' ? MAGPIE_LOOPBACK_PORTS : [];
     let piModel: string | undefined;
     const sourceHome = client.endpointHome(options.endpoint) ?? process.env.HOME ?? userInfo().homedir;
     if (session.actual_harness === 'codex') {
       runtimeHome = prepareCodexHome(outbox, client.sessionOptions('codex', outbox).model!).home;
-      modelLoopbackPorts = CODEX_REVIEW_LOOPBACK_PORTS;
     }
     if (session.actual_harness === 'pi') {
       piOutput = outbox;
       const prepared = preparePiAgentDirectory(outbox, sourceHome,
         (agentDirectory, reference) => client.resolvePiModel(piCommand(), agentDirectory, reference));
-      runtimeHome = prepared.directory; modelLoopbackPorts = prepared.loopbackPorts; piModel = prepared.model;
+      runtimeHome = prepared.directory; piModel = prepared.model;
     }
     // Isolation admission precedes any SDK/native Session creation.
     const repository = taskRepository(root);

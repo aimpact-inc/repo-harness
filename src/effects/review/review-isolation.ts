@@ -1,9 +1,8 @@
 import { lstatSync, realpathSync, mkdirSync, existsSync, readFileSync, openSync, closeSync, constants, fstatSync, writeFileSync, unlinkSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { isAbsolute, relative, sep, join, dirname } from 'node:path';
+import { isAbsolute, relative, sep, join, dirname, basename } from 'node:path';
 import { piAgentDir } from '../pi-agent-dir';
 import type { PiModelIdentity } from '../pi-host-probe';
-import { OPERATOR_DEFAULT_PORT } from '../../core/review/operator-console-port';
 import { shellQuote } from '../../core/shell-quote';
 import type { ReviewIsolationAdmission, ReviewIsolationPaths } from '../../core/review/runner-port';
 
@@ -14,36 +13,63 @@ import type { ReviewIsolationAdmission, ReviewIsolationPaths } from '../../core/
  */
 export const MAGPIE_BASE_URL = 'http://127.0.0.1:3425/v1';
 export const MAGPIE_PLACEHOLDER_KEY = 'magpie';
-/** The model ports that a codex review sandbox opens: magpie alone. */
-export const CODEX_REVIEW_LOOPBACK_PORTS: readonly number[] = [Number(new URL(MAGPIE_BASE_URL).port)];
+/** The model ports that a codex or pi review sandbox opens: magpie alone. */
+export const MAGPIE_LOOPBACK_PORTS: readonly number[] = [Number(new URL(MAGPIE_BASE_URL).port)];
 const MAGPIE_ROUTE = `route the review through magpie (${MAGPIE_BASE_URL}, apiKey ${JSON.stringify(MAGPIE_PLACEHOLDER_KEY)})`;
 
 /** `model` is the canonical `provider/model` from pi's resolver; the review passes it to pi as `--model`. */
-export interface PiAgentDirectory { readonly directory: string; readonly loopbackPorts: readonly number[]; readonly model: string }
+export interface PiAgentDirectory { readonly directory: string; readonly model: string }
 
-const MODEL_URL_DEFAULT_PORTS: Readonly<Record<string, number>> = { 'http:': 80, 'https:': 443 };
-const LOOPBACK_MODEL_HOSTS: readonly string[] = ['127.0.0.1', 'localhost', '[::1]'];
+const PLAIN_RECORD = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+const POSITIVE_NUMBER = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value > 0;
+/** The model fields that pi needs for a magpie model. Each other field (headers, compat, baseUrl, ...) can carry a credential or a second route. */
+const PI_MODEL_FIELDS: Readonly<Record<string, (value: unknown) => boolean>> = {
+  id: value => typeof value === 'string' && value !== '',
+  name: value => typeof value === 'string' && value !== '',
+  reasoning: value => typeof value === 'boolean',
+  input: value => Array.isArray(value) && value.every(item => item === 'text' || item === 'image'),
+  contextWindow: POSITIVE_NUMBER,
+  maxTokens: POSITIVE_NUMBER,
+};
 
 /**
- * The models.json entry of the selected provider, when it is a loopback provider with the
- * placeholder key. Any other provider would put a real credential in the sandbox, so it refuses
- * the session. The review profile allows the returned port and no other; a provider on the
- * console port would reopen the write routes (M82).
+ * The magpie provider entry, built field by field from an allow-list: baseUrl (exactly
+ * MAGPIE_BASE_URL), api, apiKey (the placeholder) and models (PI_MODEL_FIELDS). Each other field
+ * refuses the session, never drops silently: a field outside the list can carry a real credential
+ * into the sandbox.
  */
-function piLoopbackProvider(bytes: Buffer, provider: string, modelsPath: string): { readonly entry: Readonly<Record<string, unknown>>; readonly port: number } {
-  let providers: Record<string, unknown> | null | undefined;
+function piMagpieProvider(bytes: Buffer, provider: string, modelsPath: string): Readonly<Record<string, unknown>> {
+  let providers: unknown;
   try { providers = JSON.parse(bytes.toString('utf8'))?.providers; } catch { throw new Error('review_pi_models_invalid'); }
-  const entry = providers && Object.hasOwn(providers, provider) ? providers[provider] as Record<string, unknown> | null : undefined;
-  const refused = `review_pi_provider_not_loopback: the review sandbox holds no real credential, and ${modelsPath} has no loopback ${provider} provider with the placeholder key; ${MAGPIE_ROUTE}`;
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry) || entry.apiKey !== MAGPIE_PLACEHOLDER_KEY) throw new Error(refused);
+  const refuse = (reason: string) => new Error(`review_pi_provider_not_magpie: the review sandbox holds no real credential, and the ${provider} provider in ${modelsPath} ${reason}; ${MAGPIE_ROUTE}`);
+  const entry = PLAIN_RECORD(providers) && Object.hasOwn(providers, provider) ? providers[provider] : undefined;
+  if (!PLAIN_RECORD(entry)) throw refuse('does not exist');
+  const unknown = Object.keys(entry).filter(key => !['baseUrl', 'api', 'apiKey', 'models'].includes(key));
+  if (unknown.length > 0) throw refuse(`has the fields ${unknown.join(', ')} outside the allow-list`);
+  if (entry.apiKey !== MAGPIE_PLACEHOLDER_KEY) throw refuse('has no placeholder apiKey');
   const baseUrl = entry.baseUrl;
-  if (typeof baseUrl !== 'string' || !URL.canParse(baseUrl)) throw new Error(refused);
-  const url = new URL(baseUrl), defaultPort = MODEL_URL_DEFAULT_PORTS[url.protocol];
-  // "127.0.0.1:3425/v1" parses with the scheme "127.0.0.1:", so the scheme check also refuses a missing scheme.
-  if (defaultPort === undefined || !LOOPBACK_MODEL_HOSTS.includes(url.hostname)) throw new Error(refused);
-  const port = url.port === '' ? defaultPort : Number(url.port);
-  if (port === OPERATOR_DEFAULT_PORT) throw new Error('review_pi_model_port_is_operator_console');
-  return { entry, port };
+  if (typeof baseUrl !== 'string' || !URL.canParse(baseUrl)) throw refuse('has no baseUrl');
+  const url = new URL(baseUrl);
+  if (url.username !== '' || url.password !== '') throw refuse('has a baseUrl with userinfo');
+  if (url.search !== '' || url.hash !== '') throw refuse('has a baseUrl with a query or fragment');
+  if (baseUrl !== MAGPIE_BASE_URL) throw refuse(`has the baseUrl ${baseUrl}, not ${MAGPIE_BASE_URL}`);
+  const projected: Record<string, unknown> = { baseUrl: MAGPIE_BASE_URL, apiKey: MAGPIE_PLACEHOLDER_KEY };
+  if (entry.api !== undefined) {
+    if (typeof entry.api !== 'string' || entry.api === '') throw refuse('has an api that is not a name');
+    projected.api = entry.api;
+  }
+  if (entry.models !== undefined) {
+    if (!Array.isArray(entry.models)) throw refuse('has models that are not a list');
+    projected.models = entry.models.map((model: unknown, index) => {
+      if (!PLAIN_RECORD(model) || typeof model.id !== 'string') throw refuse(`has model ${index} without an id`);
+      const fields = Object.keys(model).filter(key => !Object.hasOwn(PI_MODEL_FIELDS, key));
+      if (fields.length > 0) throw refuse(`has the model fields ${fields.join(', ')} outside the allow-list`);
+      const invalid = Object.keys(model).filter(key => !PI_MODEL_FIELDS[key]!(model[key]));
+      if (invalid.length > 0) throw refuse(`has invalid model fields ${invalid.join(', ')}`);
+      return Object.fromEntries(Object.keys(PI_MODEL_FIELDS).filter(key => Object.hasOwn(model, key)).map(key => [key, model[key]]));
+    });
+  }
+  return projected;
 }
 
 /**
@@ -51,7 +77,7 @@ function piLoopbackProvider(bytes: Buffer, provider: string, modelsPath: string)
  * provider's models.json entry is projected into a private models.json. Without an explicit model
  * pi falls through to the first provider with auth, so the native settings must name the provider
  * and model in the canonical form that pi's own resolver returns. The projected auth.json is an
- * empty map: the provider is a loopback provider with the placeholder key (piLoopbackProvider).
+ * empty map: the provider is the magpie provider with the placeholder key (piMagpieProvider).
  */
 export function preparePiAgentDirectory(output: string, sourceHome: string,
   resolveModel: (agentDirectory: string, reference: string) => PiModelIdentity,
@@ -73,11 +99,11 @@ export function preparePiAgentDirectory(output: string, sourceHome: string,
     throw new Error(`review_pi_model_unnamed: set defaultProvider and defaultModel in ${settingsPath}`);
   }
   const models = join(source, 'models.json');
-  if (!existsSync(models)) throw new Error(`review_pi_provider_not_loopback: ${models} does not exist; ${MAGPIE_ROUTE}`);
+  if (!existsSync(models)) throw new Error(`review_pi_provider_not_magpie: ${models} does not exist; ${MAGPIE_ROUTE}`);
   const bytes = readNativeConfigBytes(models);
-  let selected: ReturnType<typeof piLoopbackProvider>;
-  try { selected = piLoopbackProvider(bytes, provider, models); } finally { bytes.fill(0); }
-  writeOwnedProjection(join(directory, 'models.json'), JSON.stringify({ providers: { [provider]: selected.entry } }) + '\n', 'review_pi_models_changed');
+  let entry: ReturnType<typeof piMagpieProvider>;
+  try { entry = piMagpieProvider(bytes, provider, models); } finally { bytes.fill(0); }
+  writeOwnedProjection(join(directory, 'models.json'), JSON.stringify({ providers: { [provider]: entry } }) + '\n', 'review_pi_models_changed');
   // pi creates auth.json at its session start, and the profile denies each auth.json write, so the owner writes an empty map.
   writeOwnedProjection(join(directory, 'auth.json'), '{}\n', 'review_pi_auth_changed');
   let resolved: PiModelIdentity;
@@ -90,7 +116,7 @@ export function preparePiAgentDirectory(output: string, sourceHome: string,
   if (resolved.provider !== provider || resolved.model !== model) {
     throw new Error(`review_pi_model_not_canonical: pi resolves ${provider}/${model} to ${resolved.provider}/${resolved.model}; set defaultProvider and defaultModel in ${settingsPath} to that form`);
   }
-  return { directory, loopbackPorts: [selected.port], model: `${provider}/${model}` };
+  return { directory, model: `${provider}/${model}` };
 }
 
 /** Writes an owner projection once (0600, never through a link); a later round must find the same content. */
@@ -179,15 +205,20 @@ export function prepareCodexHome(output: string, model: string): { home: string 
 }
 
 /**
- * The native pi and codex auth.json files, resolved as Seatbelt matches them. The review profile
- * denies both, and their locks, to every sandbox kind (#2764).
+ * The native credential files, resolved as Seatbelt matches them: the pi auth.json and models.json
+ * in both the default (~/.pi/agent) and the configured (PI_CODING_AGENT_DIR) agent directory, and
+ * the codex auth.json. A native pi models.json can hold real keys of other providers. The review
+ * profile denies each file, and its lock, to every sandbox kind (#2764).
  */
 export function nativeAuthFiles(sourceHome: string, env: Readonly<Record<string, string | undefined>> = process.env): readonly string[] {
   const home = realpathSync(sourceHome);
-  return [join(piAgentDir(home, env), 'auth.json'), join(home, '.codex', 'auth.json')].map(path => {
+  const piDirectories = [join(home, '.pi', 'agent'), piAgentDir(home, env)];
+  const files = [...piDirectories.flatMap(directory => ['auth.json', 'models.json'].map(name => join(directory, name))), join(home, '.codex', 'auth.json')];
+  // A link resolves to its target, so an alias of a credential file is denied where Seatbelt reads it.
+  return [...new Set(files.map(path => {
     if (existsSync(path)) return realpathSync(path);
-    return existsSync(dirname(path)) ? join(realpathSync(dirname(path)), 'auth.json') : path;
-  });
+    return existsSync(dirname(path)) ? join(realpathSync(dirname(path)), basename(path)) : path;
+  }))];
 }
 
 /**
@@ -199,7 +230,7 @@ export function nativeAuthFiles(sourceHome: string, env: Readonly<Record<string,
  */
 export type CleanupReviewIsolationPaths = ReviewIsolationPaths & { readonly cleanup?: { readonly readDenied: readonly string[] } };
 
-/** Each native auth.json and its lock, denied to reads and writes. */
+/** Each native credential file and its lock, denied to reads and writes. */
 function nativeAuthPolicy(files: readonly string[]): string {
   // Seatbelt matches resolved paths, so each rule names a resolved file.
   if (files.some(path => !isAbsolute(path) || existsSync(path) && realpathSync(path) !== path)) throw new Error('review_native_auth_unsafe');
@@ -243,7 +274,7 @@ export function reviewIsolationPolicy(paths: CleanupReviewIsolationPaths, platfo
   // Output alone is writable; every real CODEX_HOME state grant is retired.
   // Definitions, trust, settings/hooks and credentials stay denied even inside
   // an otherwise writable tree. Nothing in HOME or a native config root opens,
-  // and both native auth.json files are also denied to reads (nativeAuthPolicy).
+  // and each native credential file is also denied to reads (nativeAuthPolicy).
   const forbiddenFiles = '/(CLAUDE\\.md|AGENTS\\.md|settings[^/]*\\.json|\\.claude\\.json|config\\.toml|auth\\.json|\\.?credentials\\.json|secrets\\.json|token\\.json)$';
   const forbiddenDirectories = '/(\\.?hooks|\\.?agents|\\.?skills|\\.?rules|\\.?plugins)(/|$)';
   const exceptions = `(require-not (subpath ${JSON.stringify(output)}))`;
