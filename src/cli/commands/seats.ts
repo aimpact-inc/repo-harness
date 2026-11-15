@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import { dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { CLAUDE_BUILTIN_AGENT_TYPES, SeatPaneNameError, buildSeatLaunch, seatPaneName, seatTabName, type SeatLaunchV1 } from '../../core/board/seat-launch';
-import { LAUNCH_SEAT_IDS, SeatsConfigMigrationRequiredError, decodeSeatsConfig, isWorkerSeat, unavailablePiProvider, type LaunchSeatId, type SeatConfigV1, type SeatsConfigV1 } from '../../core/board/seats-settings';
+import { LAUNCH_SEAT_IDS, SeatsConfigMigrationRequiredError, decodeSeatsConfig, isWorkerSeat, unavailablePiSeat, type LaunchSeatId, type SeatConfigV1, type SeatsConfigV1 } from '../../core/board/seats-settings';
 import { claudeReserved, effectiveGatekeeper, effectiveSeatConfig, seatAccount, seatAccountQuotas, seatState, type SeatRouteV1 } from '../../core/board/seat-routing';
 import { classifyQuotaReading, type QuotaAccount, type QuotaReading } from '../../core/board/quota';
 import { readClaudeQuota, readCodexQuota } from '../../effects/board/quota';
@@ -184,10 +184,8 @@ async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, configur
     throw new SeatsCommandError('owner_exception_invalid', `The ${id} launch has no Claude quota reservation to lift. Launch it without --owner-exception.`);
   }
   const seat = gatekeeper?.id === 'gatekeeper-fallback' ? gatekeeper.seat : effectiveSeatConfig(id, seats, quota)!;
-  const provider = unavailablePiProvider(seat, seats.routing);
-  if (provider !== null) {
-    throw new SeatsCommandError('seat_provider_unavailable', `The owner lists the pi provider ${provider} as unavailable in seats.routing.unavailable_pi_providers. Use the quota routes.`);
-  }
+  const unavailable = unavailablePiSeat(seat, seats.routing);
+  if (unavailable !== null) throw new SeatsCommandError('seat_provider_unavailable', `The ${id} seat cannot launch: ${unavailable}. See the quota routes.`);
   return { seat, modeKnown: account === null || quota[account].mode !== 'unknown' };
 }
 

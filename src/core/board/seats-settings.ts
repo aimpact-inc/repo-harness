@@ -225,10 +225,17 @@ const isRole = (value: unknown): value is string => typeof value === 'string' &&
 const PI_PROVIDER = /^[a-z0-9][a-z0-9._-]{0,63}(?:\/[a-z0-9][a-z0-9._-]{0,63})*$/u;
 const isPiProvider = (value: unknown): value is string => typeof value === 'string' && PI_PROVIDER.test(value);
 
-/** The listed prefix that matches a Pi seat model at a `/` boundary, or null. */
-export function unavailablePiProvider(seat: { readonly runtime: SeatRuntime; readonly model: string | null }, routing: SeatRoutingV1): string | null {
-  if (seat.runtime !== 'pi' || seat.model === null) return null;
-  return routing.unavailable_pi_providers.find(prefix => seat.model!.startsWith(`${prefix}/`)) ?? null;
+/**
+ * Why a Pi seat may start a provider that the owner lists as unavailable, or null (#2769). A listed prefix matches the
+ * seat model at a `/` boundary. While the list is non-empty, a Pi seat without a model is unavailable too: Pi then picks
+ * its own host default provider, and routing does not read Pi settings as a second authority for that provider.
+ */
+export function unavailablePiSeat(seat: { readonly runtime: SeatRuntime; readonly model: string | null }, routing: SeatRoutingV1): string | null {
+  if (seat.runtime !== 'pi' || routing.unavailable_pi_providers.length === 0) return null;
+  const model = seat.model;
+  if (model === null) return 'pi default provider unknown: give the seat an explicit model or empty seats.routing.unavailable_pi_providers';
+  const provider = routing.unavailable_pi_providers.find(prefix => model.startsWith(`${prefix}/`));
+  return provider === undefined ? null : `pi provider ${provider} unavailable`;
 }
 
 function decodeSeat(id: SeatId, value: unknown, code: string): SeatConfigV1 {

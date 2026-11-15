@@ -82,6 +82,23 @@ describe('seat quota routing', () => {
     ]);
   });
 
+  test('a listed provider matches only at a / boundary, and a Pi seat without a model is unavailable while the list is set (#2769)', () => {
+    const pi = (model: string | null): SeatConfigV1 => ({ ...DEFAULT_SEATS_CONFIG['worker-light']!, model });
+    const review = { ...pi(null), tools: DEFAULT_SEATS_CONFIG.reviewer.tools };
+    const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-deep': pi('magpie/cursorx/m'), worker: pi(null),
+      gatekeeper: review, reviewer: review, advisor: { ...pi(null), tools: DEFAULT_SEATS_CONFIG.advisor.tools, fleet: DEFAULT_SEATS_CONFIG.advisor.fleet },
+      routing: { ...DEFAULT_SEATS_CONFIG.routing, unavailable_pi_providers: ['magpie/cursor'] } };
+    const unknown = 'pi default provider unknown: give the seat an explicit model or empty seats.routing.unavailable_pi_providers';
+    const lines = formatSeatRoutes(seats, seatAccountQuotas([claude({ seven_day: week(10, 84) })], seats.routing)).split('\n');
+    expect(lines.filter(line => /^(route simple_|gatekeeper:|reviewer:|advisor:)/u.test(line))).toEqual([
+      'route simple_deep: worker-deep (pi magpie/cursorx/m)',
+      `route simple_fast: none (${unknown})`,
+      `gatekeeper: none (${unknown})`, `reviewer: none (${unknown})`, `advisor: none (${unknown})`,
+    ]);
+    const empty = { ...seats, routing: { ...seats.routing, unavailable_pi_providers: [] } };
+    expect(formatSeatRoutes(empty, seatAccountQuotas([claude({ seven_day: week(10, 84) })], empty.routing))).toContain('reviewer: reviewer (pi default)');
+  });
+
   test.each([50, 51])('Codex %s%% used selects hyper only at or above remaining threshold', used => {
     const account = classifyQuotaReading(decodeCodexRateLimitsResult({ rateLimits: {
       primary: { usedPercent: used, windowDurationMins: 10080, resetsAt: (NOW + 84 * HOUR) / 1000 },

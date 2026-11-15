@@ -398,13 +398,15 @@ describe("rh seats argv", () => {
 
   test("an owner exception on this repository lifts the Claude reservation for one launch and is recorded (#2769)", () => {
     const pi = { ...DEFAULT_SEATS_CONFIG['worker-light']!, model: 'magpie/anthropic/claude-opus-5-5', effort: 'high' };
-    const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-light': pi, routing: { ...DEFAULT_SEATS_CONFIG.routing, unavailable_pi_providers: ['magpie/anthropic'] } };
+    const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-light': pi, 'worker-deep': { ...pi, model: null },
+      routing: { ...DEFAULT_SEATS_CONFIG.routing, unavailable_pi_providers: ['magpie/anthropic'] } };
     withHome(seats, home => withRepository(home, "rh", repo => {
       git(repo, "remote", "add", "origin", "https://github.com/aimpact-inc/repo-harness.git");
       mkdirSync(join(home, ".repo-harness", "quota"), { recursive: true });
-      writeFileSync(join(home, ".repo-harness", "quota", "claude.json"), JSON.stringify({ observed_at: new Date().toISOString(), rate_limits: {
-        seven_day: { used_percentage: 81, resets_at: Math.floor(Date.now() / 1000) + 3600 },
+      const claudeUsed = (used: number) => writeFileSync(join(home, ".repo-harness", "quota", "claude.json"), JSON.stringify({ observed_at: new Date().toISOString(), rate_limits: {
+        seven_day: { used_percentage: used, resets_at: Math.floor(Date.now() / 1000) + 3600 },
       } }));
+      claudeUsed(81);
       const url = "https://github.com/aimpact-inc/repo-harness/issues/2769#issuecomment-6885575441";
       const reviewer = (...args: string[]) => run(registryEnv(home), ["reviewer", "--repository-id", "1", "--pr", "2769", ...args, "--json"], repo);
       const error = (result: ReturnType<typeof run>) => [result.status, result.stdout, JSON.parse(result.stderr).error];
@@ -418,6 +420,15 @@ describe("rh seats argv", () => {
       // The exception lifts only the reservation refusal: a Codex seat has none, and a listed Pi provider stays refused.
       expect(error(run(registryEnv(home), ["worker", "--repository-id", "1", "--issue", "2769", "--owner-exception", url, "--json"], repo))).toEqual([1, "", "owner_exception_invalid"]);
       expect(error(run(registryEnv(home), ["worker-light", "--json"], repo))).toEqual([1, "", "seat_provider_unavailable"]);
+      const unknown = JSON.parse(run(registryEnv(home), ["worker-deep", "--json"], repo).stderr);
+      expect([unknown.error, unknown.message]).toEqual(["seat_provider_unavailable", expect.stringContaining("give the seat an explicit model or empty seats.routing.unavailable_pi_providers")]);
+      expect(error(run(registryEnv(home), ["reviewer", "--pr", "2769", "--owner-exception", url, "--json"], repo))).toEqual([1, "", "repository_id_required"]);
+      expect(error(run(registryEnv(home), ["reviewer", "--repository-id", "1", "--owner-exception", url, "--json"], home))).toEqual([1, "", "owner_exception_invalid"]);
+      git(repo, "remote", "set-url", "origin", "https://gitlab.com/aimpact-inc/repo-harness.git");
+      expect(error(reviewer("--owner-exception", url))).toEqual([1, "", "owner_exception_invalid"]);
+      git(repo, "remote", "set-url", "origin", "https://github.com/aimpact-inc/repo-harness.git");
+      claudeUsed(97);
+      expect(error(reviewer("--owner-exception", url))).toEqual([1, "", "seat_quota_exhausted"]);
     }));
   });
 
