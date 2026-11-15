@@ -408,16 +408,16 @@ export function publishReceipt(input: ReviewPublishInput, receipt: ReviewPublish
     throw new ReviewPublishError('review_publish_provider_unavailable', 'nothing was posted: ' + errorMessage(error), 1);
   }
   const posted: string[] = [];
-  const confirmHead = (stage: string): void => {
+  const confirmHead = (stage: string, progress = ''): void => {
     let current: PullRequestHead;
     try {
       current = prHead(run, input.prNumber);
     } catch (error) {
-      throw partial('the PR head could not be re-read before the ' + stage + '; inspection is required: ' + errorMessage(error), posted, error);
+      throw partial('the PR head could not be re-read before the ' + stage + progress + '; inspection is required: ' + errorMessage(error), posted, error);
     }
     if (current.slug !== pr.slug || current.headSha.toLowerCase() !== receipt.subject_sha) {
       throw partial('the PR head moved from ' + pr.headSha + ' to ' + current.headSha + ' before the ' + stage
-        + '; receipt subject ' + receipt.subject_sha + ' was not published to the ' + stage + '; inspection is required', posted);
+        + '; receipt subject ' + receipt.subject_sha + ' was not published to the ' + stage + progress + '; inspection is required', posted);
     }
   };
   let claimUrl: string;
@@ -460,15 +460,21 @@ export function publishReceipt(input: ReviewPublishInput, receipt: ReviewPublish
   const pending = receipt.confirmed_fixed.filter((id) => !alreadyResolved.has(id));
   const resolved: string[] = [];
   for (const id of pending) {
-    for (const [stage, args] of [
-      ['reply', ['-f', 'query=' + REPLY_MUTATION, '-f', 'id=' + id, '-f', 'body=' + reply]],
-      ['resolve', ['-f', 'query=' + RESOLVE_MUTATION, '-f', 'id=' + id]],
+    // Only the mutation payload confirms a thread write; any other answer may
+    // follow an accepted write, so it is an unknown outcome.
+    for (const [stage, args, confirmed] of [
+      ['reply', ['-f', 'query=' + REPLY_MUTATION, '-f', 'id=' + id, '-f', 'body=' + reply],
+        (data: unknown) => { const url = field(field(field(data, 'addPullRequestReviewThreadReply'), 'comment'), 'url'); return typeof url === 'string' && url !== ''; }],
+      ['resolve', ['-f', 'query=' + RESOLVE_MUTATION, '-f', 'id=' + id],
+        (data: unknown) => field(field(field(data, 'resolveReviewThread'), 'thread'), 'isResolved') === true],
     ] as const) {
+      const done = 'record ' + recordUrl + '; resolved threads: ' + (resolved.join(', ') || 'none')
+        + '; unresolved threads: ' + pending.slice(resolved.length).join(', ');
+      confirmHead(stage + ' on thread ' + id, '; ' + done);
       try {
-        ghJson(run, ['api', 'graphql', '--hostname', 'github.com', ...args], undefined, { mutation: true });
+        const response = ghJson(run, ['api', 'graphql', '--hostname', 'github.com', ...args], undefined, { mutation: true });
+        if (!confirmed(response.data)) throw new GhMutationUnknownError('the ' + stage + ' response does not confirm the write');
       } catch (error) {
-        const done = 'record ' + recordUrl + '; resolved threads: ' + (resolved.join(', ') || 'none')
-          + '; unresolved threads: ' + pending.slice(resolved.length).join(', ');
         if (error instanceof GhMutationUnknownError) throw unknownOutcome('the ' + stage + ' outcome on thread ' + id + ' is unknown; ' + done + '; inspection is required before any retry: ' + errorMessage(error), posted, error);
         throw partial('the ' + stage + ' on thread ' + id + ' failed after the record; ' + done + ': ' + errorMessage(error), posted, error);
       }

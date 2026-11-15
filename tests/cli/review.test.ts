@@ -360,7 +360,8 @@ test('an already-resolved confirmed thread is left as is only when it passes the
 
 test('a failed or unknown thread write stops publish, names the record and both thread sets, and is not retried', async () => {
   const threadNodes = { PRRT_one: { reviewBody: earlierReview(1) }, PRRT_two: { reviewBody: earlierReview(1) }, PRRT_three: { reviewBody: earlierReview(1) } };
-  for (const [stage, outcome, error] of [['reply', 'rejected', 'review_publish_partial'], ['resolve', 'unknown', 'review_publish_unknown']] as const) {
+  for (const [stage, outcome, error] of [['reply', 'rejected', 'review_publish_partial'], ['resolve', 'unknown', 'review_publish_unknown'],
+    ['reply', 'unconfirmed', 'review_publish_unknown'], ['resolve', 'unconfirmed', 'review_publish_unknown']] as const) {
     const fixture = publishFixture(publishScenario({ threadNodes, failThread: { stage, id: 'PRRT_two', outcome } }));
     const result = await runPublish(fixture, confirmReceipt(['PRRT_one', 'PRRT_two', 'PRRT_three']));
     expect(result.status, stage).toBe(5);
@@ -373,6 +374,17 @@ test('a failed or unknown thread write stops publish, names the record and both 
       ? ['addPullRequestReviewThreadReply', 'resolveReviewThread', 'addPullRequestReviewThreadReply']
       : ['addPullRequestReviewThreadReply', 'resolveReviewThread', 'addPullRequestReviewThreadReply', 'resolveReviewThread']);
   }
+});
+
+test('head movement between thread writes stops before the next write with the thread progress', async () => {
+  const fixture = publishFixture(publishScenario({ threadNodes: { PRRT_one: { reviewBody: earlierReview(1) }, PRRT_two: { reviewBody: earlierReview(1) } },
+    headSequence: [PUBLISH_HEAD, PUBLISH_HEAD, PUBLISH_HEAD, PUBLISH_HEAD, PUBLISH_HEAD, 'f'.repeat(40)] }));
+  const result = await runPublish(fixture, confirmReceipt(['PRRT_one', 'PRRT_two']));
+  expect(result.status).toBe(5);
+  const output = JSON.parse(result.stdout);
+  expect(output).toMatchObject({ ok: false, error: 'review_publish_partial' });
+  expect(output.message).toContain('to the reply on thread PRRT_two; record ' + output.posted.at(-1) + '; resolved threads: PRRT_one; unresolved threads: PRRT_two');
+  expect(threadMutations(fixture).map(([name]) => name)).toEqual(['addPullRequestReviewThreadReply', 'resolveReviewThread']);
 });
 
 test('a finding outside the diff goes into the review body, not an inline comment', async () => {

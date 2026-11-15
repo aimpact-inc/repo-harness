@@ -66,7 +66,7 @@ export interface PublicationMergeScenario {
   /** Review threads by node id that `node(id:)` returns; the first comment belongs to a review with `reviewBody`. */
   readonly threadNodes?: Readonly<Record<string, { readonly pr?: number; readonly isResolved?: boolean; readonly reviewBody: string; readonly association?: string }>>;
   /** Make one thread reply or resolve fail: a provider 4xx refusal, or a transport EOF with an unknown outcome. */
-  readonly failThread?: { readonly stage: 'reply' | 'resolve'; readonly id: string; readonly outcome: 'rejected' | 'unknown' };
+  readonly failThread?: { readonly stage: 'reply' | 'resolve'; readonly id: string; readonly outcome: 'rejected' | 'unknown' | 'unconfirmed' };
   readonly changesRequested?: boolean;
   readonly title?: string;
   readonly body?: string;
@@ -173,6 +173,8 @@ export function fakeGhResponse(args: readonly string[], scenario: PublicationMer
     const failThread = scenario.failThread;
     if (failThread !== undefined && graphqlVariable(args, 'id') === failThread.id
       && query.includes(failThread.stage === 'reply' ? 'addPullRequestReviewThreadReply' : 'resolveReviewThread')) {
+      // An exit-0 answer that does not confirm the write: no reply url, or a thread left unresolved.
+      if (failThread.outcome === 'unconfirmed') return ok(failThread.stage === 'reply' ? { data: { addPullRequestReviewThreadReply: null } } : { data: { resolveReviewThread: { thread: { isResolved: false } } } });
       return { status: 1, stdout: '', stderr: failThread.outcome === 'rejected' ? 'gh: thread write refused (HTTP 422)' : 'gh: EOF' };
     }
     if (query.includes('addPullRequestReviewThreadReply')) return ok({ data: { addPullRequestReviewThreadReply: { comment: { url: `https://github.com/${REPOSITORY}/pull/${PR}#discussion_r1` } } } });
