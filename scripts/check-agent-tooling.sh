@@ -1914,7 +1914,11 @@ function bunExecutable() {
  * resolvePackageLocalArchctx() is the only rule: it checks the version, the
  * Node engine contract, bin.archctx and the binary. This probe runs that
  * function under Bun from the repo-harness package root and reports its
- * answer. The runnable command, with the resolved Node path, comes from
+ * answer. It also resolves the copy that findInstalledPackageRoot() selects
+ * in the Bun global install, which `rh update` links as PATH archctx. That
+ * lookup reads only the file system: Bun module resolution from a directory
+ * without node_modules auto-installs the package from the registry. The
+ * runnable command, with the resolved Node path, comes from
  * `rh architecture-projection status --json`. The selection is the
  * one that the shell gate read above: without `selected` the probe loads no
  * provider, `selected` is false, and the CodeGraph and archctx detectors
@@ -1929,17 +1933,25 @@ function detectManagedArchctx() {
   const bun = bunExecutable();
   if (!bun) return unusable("bun is not available, so the managed archctx cannot be resolved");
   const script = [
-    "const [contracts, providers, consumerRoot] = process.argv.slice(1);",
+    "const [contracts, providers, skillProjection, globalRuntime, consumerRoot] = process.argv.slice(1);",
     "const { architecturePort, registerArchitecturePorts } = await import(contracts);",
     "registerArchitecturePorts((await import(providers)).ARCHITECTURE_PROVIDERS);",
     "const runtime = architecturePort('runtime');",
-    "try { console.log(JSON.stringify({ ok: true, required: runtime.requiredArchctxVersion, resolved: runtime.resolvePackageLocalArchctx(consumerRoot) })); }",
+    "const { resolve } = await import('path');",
+    "const { findInstalledPackageRoot } = await import(globalRuntime);",
+    "const globalPackageRoot = (await import(skillProjection)).bunGlobalPackageRoot(process.env);",
+    "const linkedRoot = globalPackageRoot && findInstalledPackageRoot(resolve(globalPackageRoot, '..', '..'), 'archctx');",
+    "let linkedBinPath = null;",
+    "try { if (linkedRoot) linkedBinPath = runtime.resolvePackageLocalArchctx(resolve(linkedRoot, '..', '..')).binaryPath; } catch { /* An invalid copy is not the managed link. */ }",
+    "try { console.log(JSON.stringify({ ok: true, required: runtime.requiredArchctxVersion, resolved: runtime.resolvePackageLocalArchctx(consumerRoot), linkedBinPath })); }",
     "catch (error) { console.log(JSON.stringify({ ok: false, required: runtime.requiredArchctxVersion, reason: error instanceof Error ? error.message : String(error) })); }",
   ].join("\n");
   const result = run(bun, [
     "-e", script,
     path.join(PACKAGE_ROOT, "src", "core", "architecture", "contracts.ts"),
     path.join(PACKAGE_ROOT, "src", "effects", "architecture", "providers.ts"),
+    path.join(PACKAGE_ROOT, "src", "cli", "installer", "skill-projection.ts"),
+    path.join(PACKAGE_ROOT, "src", "cli", "commands", "global-runtime.ts"),
     PACKAGE_ROOT,
   ], { cwd: PACKAGE_ROOT, timeoutMs: 15000 });
   const answer = result.ok ? parseJson(result.stdout.trim()) : null;
@@ -1953,6 +1965,7 @@ function detectManagedArchctx() {
     version: answer.resolved.version,
     required_version: answer.required,
     bin_path: answer.resolved.binaryPath,
+    linked_bin_path: answer.linkedBinPath,
     node_range: answer.resolved.nodeRange,
     reason: null,
     command_source: ARCHCTX_STATUS_COMMAND,
@@ -1978,7 +1991,8 @@ function detectArchctx(managed) {
     packageRoot = parent;
   }
   pathVersion ??= versionOutput && !versionOutput.includes("\n") ? versionOutput : null;
-  const unrelated = !!pathBin && realBin !== resolveRealPath(managed.bin_path || "");
+  // `rh update` links PATH archctx to the Bun global copy at the pin; repo-harness may run a nested copy.
+  const unrelated = !!pathBin && ![managed.bin_path, managed.linked_bin_path].some(bin => bin && realBin === resolveRealPath(bin));
   const warnings = [];
   if (managed.status !== "present") {
     warnings.push(`Managed archctx is not usable: ${managed.reason}. Run rh update.`);

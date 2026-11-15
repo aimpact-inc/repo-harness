@@ -1889,6 +1889,49 @@ describe("check-agent-tooling", () => {
     }
   }, 15000);
 
+  for (const layout of ["hoisted only", "hoisted plus nested"] as const) {
+    test(`treats the PATH link to the Bun global archctx at the pin as managed (${layout})`, () => {
+      const envRoot = setupFakeEnvironment("check-agent-tooling-archctx-hoisted");
+      try {
+        writeArchctxRepo(envRoot.root, "registry");
+        const packaged = JSON.parse(readFileSync(join(ROOT, "node_modules", "archctx", "package.json"), "utf-8"));
+        const writeArchctxCopy = (dir: string) => {
+          mkdirSync(join(dir, "bin"), { recursive: true });
+          writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "archctx", version: packaged.version, engines: packaged.engines, bin: { archctx: "./bin/archctx.mjs" } }));
+          writeExecutable(join(dir, "bin", "archctx.mjs"), `#!/bin/sh\necho ${packaged.version}\n`);
+        };
+        const globalModules = join(envRoot.home, ".bun", "install", "global", "node_modules");
+        writeArchctxCopy(join(globalModules, "archctx"));
+        symlinkSync(join(globalModules, "archctx", "bin", "archctx.mjs"), join(envRoot.fakeBin, "archctx"));
+        // Hoisted only runs the source checkout; hoisted plus nested runs the installed package with its nested copy.
+        let script = SCRIPT;
+        if (layout === "hoisted plus nested") {
+          const packageRoot = join(globalModules, "repo-harness");
+          mkdirSync(join(packageRoot, "scripts"), { recursive: true });
+          copyFileSync(SCRIPT, join(packageRoot, "scripts", "check-agent-tooling.sh"));
+          for (const dir of ["agents", "assets", "src"]) symlinkSync(join(ROOT, dir), join(packageRoot, dir));
+          symlinkSync(join(ROOT, "scripts", "lib"), join(packageRoot, "scripts", "lib"));
+          writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ name: "repo-harness" }));
+          writeArchctxCopy(join(packageRoot, "node_modules", "archctx"));
+          script = join(packageRoot, "scripts", "check-agent-tooling.sh");
+        }
+
+        const res = spawnSync("bash", [script, "--json", "--host", "claude"], {
+          cwd: envRoot.root, encoding: "utf-8", env: { ...process.env, HOME: envRoot.home, BUN_INSTALL: "", PATH: envRoot.fakeBin },
+        });
+
+        expect(res.status).toBe(0);
+        const archctx = JSON.parse(res.stdout).tools.archctx;
+        expect(archctx.managed.status).toBe("present");
+        expect(archctx.path_copy).toMatchObject({ relation: "managed", fix_command: null, fix_note: null });
+        expect(archctx.warnings).toEqual([]);
+        expect(archctx.readiness).toBe("advisory");
+      } finally {
+        rmSync(envRoot.root, { recursive: true, force: true });
+      }
+    }, 15000);
+  }
+
   test("reports a managed archctx with the right version but a missing binary as invalid", () => {
     const envRoot = setupFakeEnvironment("check-agent-tooling-archctx-missing-binary");
     try {
