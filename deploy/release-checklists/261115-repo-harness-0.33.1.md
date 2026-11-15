@@ -41,11 +41,11 @@ On Darwin arm64 with Bun 1.4.4, at source `1b586d8d0` with the release prep chan
 
 ## Acceptance environment
 
-Release upgrade rehearsal run URL: pending.
+Release upgrade rehearsal: [run 43661211783](https://github.com/aimpact-inc/repo-harness/actions/runs/43661211783), success on `ubuntu-latest` at prep head `223d15646`.
 
-- Rehearsal result line: pending.
-- `TARBALL SERVED repo-harness 0.33.1`: pending.
-- `TARBALL SERVED repo-harness-operator-web 0.33.1`: pending.
+- `[rehearsal] OK: 0.33.0 -> 0.33.1`
+- `TARBALL SERVED repo-harness 0.33.1`
+- `TARBALL SERVED repo-harness-operator-web 0.33.1`
 
 ## Publication
 
