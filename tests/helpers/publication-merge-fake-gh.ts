@@ -64,7 +64,9 @@ export interface PublicationMergeScenario {
   readonly existingComments?: readonly { readonly body: string; readonly html_url: string }[];
   readonly unresolvedThreads?: number;
   /** Review threads by node id that `node(id:)` returns; the first comment belongs to a review with `reviewBody`. */
-  readonly threadNodes?: Readonly<Record<string, { readonly pr?: number; readonly isResolved?: boolean; readonly reviewBody: string }>>;
+  readonly threadNodes?: Readonly<Record<string, { readonly pr?: number; readonly isResolved?: boolean; readonly reviewBody: string; readonly association?: string }>>;
+  /** Make one thread reply or resolve fail: a provider 4xx refusal, or a transport EOF with an unknown outcome. */
+  readonly failThread?: { readonly stage: 'reply' | 'resolve'; readonly id: string; readonly outcome: 'rejected' | 'unknown' };
   readonly changesRequested?: boolean;
   readonly title?: string;
   readonly body?: string;
@@ -168,13 +170,18 @@ export function fakeGhResponse(args: readonly string[], scenario: PublicationMer
       if (scenario.merge === 'null_errors') return { status: 1, stdout: JSON.stringify({ errors: [null] }), stderr: 'gh: error' };
       return ok({ data: { mergePullRequest: { pullRequest: { number: PR, state: 'MERGED', mergeCommit: { oid: mergeSha } } } } });
     }
+    const failThread = scenario.failThread;
+    if (failThread !== undefined && graphqlVariable(args, 'id') === failThread.id
+      && query.includes(failThread.stage === 'reply' ? 'addPullRequestReviewThreadReply' : 'resolveReviewThread')) {
+      return { status: 1, stdout: '', stderr: failThread.outcome === 'rejected' ? 'gh: thread write refused (HTTP 422)' : 'gh: EOF' };
+    }
     if (query.includes('addPullRequestReviewThreadReply')) return ok({ data: { addPullRequestReviewThreadReply: { comment: { url: `https://github.com/${REPOSITORY}/pull/${PR}#discussion_r1` } } } });
     if (query.includes('resolveReviewThread')) return ok({ data: { resolveReviewThread: { thread: { isResolved: true } } } });
     if (query.includes('PullRequestReviewThread')) {
       const thread = scenario.threadNodes?.[graphqlVariable(args, 'id') ?? ''];
       return ok({ data: { node: thread === undefined ? null : { __typename: 'PullRequestReviewThread', isResolved: thread.isResolved ?? false,
         pullRequest: { number: thread.pr ?? PR, repository: { nameWithOwner: REPOSITORY } },
-        comments: { nodes: [{ pullRequestReview: { body: thread.reviewBody } }] } } } });
+        comments: { nodes: [{ pullRequestReview: { authorAssociation: thread.association ?? 'MEMBER', body: thread.reviewBody } }] } } } });
     }
     if (query.includes('closingIssuesReferences')) {
       return ok({ data: { repository: { nameWithOwner: REPOSITORY, pullRequest: {

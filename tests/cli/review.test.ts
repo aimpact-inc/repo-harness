@@ -335,13 +335,30 @@ test('publish replies on and resolves an earlier-round thread that its receipt c
 
 test('a confirmed id that is not an earlier publish thread of this PR is refused and nothing is posted', async () => {
   for (const thread of [{ reviewBody: 'Looks good to me.' }, { pr: PUBLISH_PR + 1, reviewBody: earlierReview(1) }, { reviewBody: earlierReview(2) },
-    { isResolved: true, reviewBody: earlierReview(1) }]) {
+    { isResolved: true, reviewBody: earlierReview(1) }, { association: 'NONE', reviewBody: earlierReview(1) }]) {
     const fixture = publishFixture(publishScenario({ threadNodes: { PRRT_one: thread } }));
     const result = await runPublish(fixture, confirmReceipt(['PRRT_one']));
     expect(result.status, JSON.stringify(thread)).toBe(2);
     expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, error: 'review_receipt_invalid', posted: [] });
     expect(fixture.gh.inputs().some((entry) => entry.input !== '')).toBe(false);
     expect(threadMutations(fixture)).toEqual([]);
+  }
+});
+
+test('a failed or unknown thread write stops publish, names the record and both thread sets, and is not retried', async () => {
+  const threadNodes = { PRRT_one: { reviewBody: earlierReview(1) }, PRRT_two: { reviewBody: earlierReview(1) }, PRRT_three: { reviewBody: earlierReview(1) } };
+  for (const [stage, outcome, error] of [['reply', 'rejected', 'review_publish_partial'], ['resolve', 'unknown', 'review_publish_unknown']] as const) {
+    const fixture = publishFixture(publishScenario({ threadNodes, failThread: { stage, id: 'PRRT_two', outcome } }));
+    const result = await runPublish(fixture, confirmReceipt(['PRRT_one', 'PRRT_two', 'PRRT_three']));
+    expect(result.status, stage).toBe(5);
+    const output = JSON.parse(result.stdout);
+    expect(output).toMatchObject({ ok: false, error });
+    const recordUrl = output.posted.at(-1);
+    expect(recordUrl).toContain('/pull/' + PUBLISH_PR + '#issuecomment-');
+    expect(output.message).toContain('record ' + recordUrl + '; resolved threads: PRRT_one; unresolved threads: PRRT_two, PRRT_three');
+    expect(threadMutations(fixture).map(([name]) => name)).toEqual(stage === 'reply'
+      ? ['addPullRequestReviewThreadReply', 'resolveReviewThread', 'addPullRequestReviewThreadReply']
+      : ['addPullRequestReviewThreadReply', 'resolveReviewThread', 'addPullRequestReviewThreadReply', 'resolveReviewThread']);
   }
 });
 
