@@ -12,6 +12,7 @@ import {
   type ReviewPublishReceipt,
 } from '../../core/review/review-publish';
 import { errorMessage } from '../../core/evidence/error-message';
+import { WRITE_ACCESS } from '../../core/board/source';
 
 export type ReviewPublishErrorCode =
   | 'review_receipt_invalid'
@@ -73,7 +74,7 @@ const MAX_PAGES = 30;
 const PR_FIELDS = 'number,headRefOid,url,closingIssuesReferences';
 const HARD_STOP_ROUND = 5;
 const THREAD_QUERY = 'query($id: ID!) { node(id: $id) { __typename ... on PullRequestReviewThread { isResolved '
-  + 'pullRequest { number repository { nameWithOwner } } comments(first: 1) { nodes { pullRequestReview { body } } } } } }';
+  + 'pullRequest { number repository { nameWithOwner } } comments(first: 1) { nodes { pullRequestReview { authorAssociation body } } } } } }';
 const REPLY_MUTATION = 'mutation($id: ID!, $body: String!) { addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $id, body: $body }) { comment { url } } }';
 const RESOLVE_MUTATION = 'mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { isResolved } } }';
 const OWNER_RECORD_PATTERN = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/(pull|issues)\/([0-9]+)#issuecomment-[0-9]+$/;
@@ -309,20 +310,26 @@ function field(value: unknown, key: string): unknown {
 
 /**
  * Each confirmed id must be an open thread of this PR that an earlier round
- * of `review publish` opened: its first comment belongs to a review with the
- * acceptance-review marker. Bot and human threads stay with the coordinator.
+ * of `review publish` opened: its first comment belongs to a review whose
+ * first line is the acceptance-review header and whose author has write
+ * access. This is the rule `protocolComments` applies to acceptance records:
+ * bot and outside accounts fail it, and a write-access account that copies
+ * the header could already post a PASS record or resolve the thread itself.
  */
 function checkConfirmedThreads(run: ReviewPublishGhRunner, slug: string, prNumber: number, receipt: ReviewPublishReceipt): void {
   for (const id of receipt.confirmed_fixed) {
     const node = field(field(ghJson(run, ['api', 'graphql', '--hostname', 'github.com', '-f', 'query=' + THREAD_QUERY, '-f', 'id=' + id]), 'data'), 'node');
     const pr = field(node, 'pullRequest');
     const first = field(field(field(node, 'comments'), 'nodes'), '0');
-    const body = field(field(first, 'pullRequestReview'), 'body');
+    const review = field(first, 'pullRequestReview');
+    const body = field(review, 'body');
+    const association = field(review, 'authorAssociation');
     const round = typeof body === 'string' ? acceptanceReviewRound(body) : null;
     const reason = field(node, '__typename') !== 'PullRequestReviewThread' ? 'is not a review thread'
       : field(pr, 'number') !== prNumber || field(field(pr, 'repository'), 'nameWithOwner') !== slug ? 'is not on PR ' + slug + '#' + prNumber
         : field(node, 'isResolved') !== false ? 'is not an unresolved thread'
           : round === null ? 'was not opened by review publish'
+            : typeof association !== 'string' || !WRITE_ACCESS.has(association) ? 'was opened by an account without write access (' + String(association) + ')'
             : round >= receipt.round ? 'is from round ' + round + ', not an earlier round than ' + receipt.round
               : null;
     if (reason !== null) throw new ReviewPublishError('review_receipt_invalid', 'confirmed_fixed thread ' + id + ' ' + reason + '; nothing was posted', 2);
@@ -451,7 +458,8 @@ export function publishReceipt(input: ReviewPublishInput, receipt: ReviewPublish
       try {
         ghJson(run, ['api', 'graphql', '--hostname', 'github.com', ...args], undefined, { mutation: true });
       } catch (error) {
-        const done = 'resolved threads: ' + (resolved.join(', ') || 'none');
+        const done = 'record ' + recordUrl + '; resolved threads: ' + (resolved.join(', ') || 'none')
+          + '; unresolved threads: ' + receipt.confirmed_fixed.slice(resolved.length).join(', ');
         if (error instanceof GhMutationUnknownError) throw unknownOutcome('the ' + stage + ' outcome on thread ' + id + ' is unknown; ' + done + '; inspection is required before any retry: ' + errorMessage(error), posted, error);
         throw partial('the ' + stage + ' on thread ' + id + ' failed after the record; ' + done + ': ' + errorMessage(error), posted, error);
       }
