@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { processIdentity, readSessionArtifact, writeSessionArtifact } from '../terminal/task-session-io';
 import { HOST_DEADLINE_STOP, REVIEW_HOST_LAUNCH_FILE, type HostRoundObservation, type ProcessProof, type ReviewHostLaunch, type ReviewHostSpec, type ReviewIsolationAdmission, type TaskRequest } from '../../core/review/runner-port';
 import { dirname } from 'node:path';
-import { reviewHostTemporaryDirectory, reviewIsolationPolicy, prepareReviewLauncher, assertReviewIsolation, assertPiCredentialWindow } from '../review/review-isolation';
+import { reviewHostTemporaryDirectory, reviewIsolationPolicy, prepareReviewLauncher, assertReviewIsolation } from '../review/review-isolation';
 import { promptWithOarObservation, oarActualModel, oarObservationFile, type OarObservationSink } from '../terminal/task-runtime-observation';
 
 /** OAR owns RPC arguments and its explicit extension. Disable all ambient Pi resources. */
@@ -235,8 +235,7 @@ export async function serveHostFileRequests(host: OarReviewHost, spec: ReviewHos
 }
 
 /**
- * The owner admitted this launch until its round deadline. A native session that starts later
- * can find the pi token inside pi's refresh margin, so the host checks just before the start.
+ * The owner admitted this launch until its round deadline; the host checks just before the start.
  * `claimed`: the host already wrote host-claim.json, so a repeated round cannot launch again.
  * Returns the admitted round deadline.
  */
@@ -249,7 +248,6 @@ export function assertHostLaunchAdmitted(spec: ReviewHostSpec, claimed: boolean)
     throw new Error(`OAR_HOST_LAUNCH_DEADLINE_PASSED: the round deadline passed before this launch; ${claimed
       ? 'this host holds the claim, so cancel the review and start a new one' : 'repeat the round, then run its launch command'}`);
   }
-  if (launch.pi) assertPiCredentialWindow(launch.pi, launch.deadline);
   return launch.deadline;
 }
 

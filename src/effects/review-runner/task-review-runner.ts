@@ -122,7 +122,7 @@ async function probeReviewInstallation(kind: ReviewRuntimeId, executable?: strin
   return JSON.parse(execFileSync(node, [entry, '--installation', kind, ...(pi ? [pi] : [])], { encoding: 'utf8', timeout: 60_000, maxBuffer: 1024 * 1024,
     env: executable && variable ? { ...process.env, [variable]: executable } : process.env })) as InstallationSnapshot;
 }
-/** Fleet owns review instructions. Pi runs the `provider/model` that review admission read from the native settings. */
+/** Fleet owns review instructions. Codex runs the role's model as its magpie codex/* model; pi runs the `provider/model` that review admission read from the native settings. */
 export function reviewSessionOptions(kind: ReviewRuntimeId, output: string, runtimeHome?: string, piModel?: string): SessionOptions {
   const fleet = parseFrontmatter(readFileSync(fileURLToPath(new URL('../../../agents/fleet/deep-reasoner.md', import.meta.url)), 'utf8'));
   if (!fleet || !validateFrontmatter(fleet, GENERIC_REVIEW_ROLE).ok) throw new Error('review_fleet_invalid');
@@ -131,7 +131,7 @@ export function reviewSessionOptions(kind: ReviewRuntimeId, output: string, runt
   if (kind === 'pi' && !piModel) throw new Error('review_pi_model_required');
   return { cwd: output,
     ...(kind === 'pi' ? { model: piModel!, env: { PI_CODING_AGENT_DIR: runtimeHome!, OAR_PI_AGENT_DIR: runtimeHome! } }
-      : { model: kind === 'codex' ? target.model : fleet.model!, effort: kind === 'codex' ? target.effort : fleet.effort!,
+      : { model: kind === 'codex' ? `codex/${target.model}` : fleet.model!, effort: kind === 'codex' ? target.effort : fleet.effort!,
         ...(kind === 'codex' && runtimeHome ? { env: { CODEX_HOME: runtimeHome } } : {}) }),
     appendSystemPrompt: `${fleet.body}\nReview communication exception: writing the final JSON once to this request's exact result_ref is the only authorized mutation. No temporary file, rename, other edits or permission workarounds. This is communication, not production editing.` };
 }

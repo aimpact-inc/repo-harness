@@ -34,12 +34,12 @@ type TaskReviewEffects = ReviewEffects<TaskPaneBinding, HerdrCoreEndpoint>;
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
-/** The review-local auth.json holds the provider entry by design (#2764); the tests assert its content. */
+/** The review output holds no real credential (#2764). */
 function expectNoStoredPiProbe(directory: string): void {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) expectNoStoredPiProbe(path);
-    else if (entry.isFile() && !path.endsWith('/.pi-agent/auth.json')) expect(readFileSync(path, 'utf8'), path).not.toContain('sk-PROBE-LITERAL');
+    else if (entry.isFile()) expect(readFileSync(path, 'utf8'), path).not.toContain('sk-PROBE-LITERAL');
   }
 }
 
@@ -189,6 +189,9 @@ afterAll(() => packetRepositoryTemplate.dispose());
 
 const PI_NAMED_SETTINGS = '{"defaultProvider":"fixture","defaultModel":"fixture-model"}';
 const PI_NAMED_AUTH = '{"fixture":{"type":"api_key","key":"sk-PROBE-LITERAL"}}';
+/** The selected provider as a magpie loopback provider with the placeholder key; another provider holds a real key. */
+const PI_MAGPIE_PROVIDER = { baseUrl: 'http://127.0.0.1:3425/v1', api: 'openai-completions', apiKey: 'magpie', models: [{ id: 'fixture-model' }] };
+const PI_MAGPIE_MODELS = JSON.stringify({ providers: { fixture: PI_MAGPIE_PROVIDER, other: { baseUrl: 'https://fixture.invalid/v1', apiKey: 'sk-PROBE-LITERAL' } } });
 /** The repo's own pi 1.5.2 package; its resolver runs offline with an empty credential store. */
 const PI_PACKAGE_CLI = join(import.meta.dir, '../node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js');
 /** A resolver double for fixtures that do not test model resolution: the settings reference is canonical. */
@@ -204,6 +207,7 @@ function packetRoundFixture() {
   roots.push(endpointHome);
   mkdirSync(join(endpointHome, '.pi/agent'), { recursive: true });
   writeFileSync(join(endpointHome, '.pi/agent/settings.json'), PI_NAMED_SETTINGS);
+  writeFileSync(join(endpointHome, '.pi/agent/models.json'), PI_MAGPIE_MODELS);
   writeFileSync(join(endpointHome, '.pi/agent/auth.json'), PI_NAMED_AUTH);
   const endpoint = { socket: join(endpointHome, 'hc.sock'), home: endpointHome };
   const reviewerRepo = join(fixture.home, 'reviewer');
@@ -402,7 +406,7 @@ test('OAR SessionOptions reuse fleet and authorize only file communication, with
   const root = tmpWorkspace('generic-review-options'); roots.push(root);
   const claude = reviewSessionOptions('claude', root), codex = reviewSessionOptions('codex', root);
   expect(claude.cwd).toBe(root); expect(codex.cwd).toBe(root);
-  expect(claude.model).toBe('opus'); expect(codex.model).toBe('gpt-6-astra');
+  expect(claude.model).toBe('opus'); expect(codex.model).toBe('codex/gpt-6-astra');
   expect(codex.effort).toBe('high');
   for (const options of [claude, codex]) {
     expect(options.appendSystemPrompt).toContain('RECOMMENDATION:');
@@ -411,107 +415,78 @@ test('OAR SessionOptions reuse fleet and authorize only file communication, with
   }
 });
 
-test('Pi isolation fixture links native models and projects only the provider auth entry, without a refresh token', async () => {
-  const { mkdirSync, chmodSync, symlinkSync, readlinkSync, readdirSync, unlinkSync } = await import('node:fs');
-  const { preparePiAgentDirectory, assertPiCredentialWindow } = await import('../src/effects/review/review-isolation');
+test('Pi isolation fixture projects only the selected loopback provider with the placeholder key and an empty auth.json', async () => {
+  const { mkdirSync, chmodSync, symlinkSync, readdirSync } = await import('node:fs');
+  const { preparePiAgentDirectory } = await import('../src/effects/review/review-isolation');
   const { assertHostLaunchAdmitted } = await import('../src/effects/review-runner/task-oar-host');
   const root = tmpWorkspace('pi-home'); roots.push(root);
   const source = join(root, 'home'), output = join(root, 'output'), agent = join(source, '.pi/agent');
   mkdirSync(agent, { recursive: true }); mkdirSync(output);
   for (const name of ['sessions', 'extensions', 'skills']) mkdirSync(join(agent, name));
-  writeFileSync(join(agent, 'settings.json'), JSON.stringify({ defaultProvider: 'fixture-provider', defaultModel: 'fixture-model', defaultThinkingLevel: 'high',
+  writeFileSync(join(agent, 'settings.json'), JSON.stringify({ defaultProvider: 'fixture', defaultModel: 'fixture-model', defaultThinkingLevel: 'high',
     packages: ['fixture-package'], extensions: ['fixture-extension'], httpProxy: 'http://fixture.invalid', defaultProjectTrust: 'always' }));
-  writeFileSync(join(agent, 'models.json'), '{"providers":{"fixture":{"apiKey":"sk-PROBE-LITERAL"}}}');
-  writeFileSync(join(agent, 'auth.json'), '{"fixture-provider":{"type":"api_key","key":"sk-PROBE-LITERAL"}}');
-  const { directory, model } = preparePiAgentDirectory(output, source, inOneHour(), piReferenceResolver);
-  expect(model).toBe('fixture-provider/fixture-model');
+  writeFileSync(join(agent, 'models.json'), PI_MAGPIE_MODELS);
+  writeFileSync(join(agent, 'auth.json'), PI_NAMED_AUTH);
+  // pi's own resolver reads the projected models.json; the projection has no auth.json.
+  const { directory, model, loopbackPorts } = preparePiAgentDirectory(output, source, (directory, reference) => resolvePiModel(PI_PACKAGE_CLI, directory, reference));
+  expect(model).toBe('fixture/fixture-model'); expect(loopbackPorts).toEqual([3425]);
   expect(lstatSync(directory).mode & 0o777).toBe(0o700);
   expect(readdirSync(directory).sort()).toEqual(['auth.json', 'models.json', 'settings.json']);
-  expect(lstatSync(join(directory, 'models.json')).isSymbolicLink()).toBe(true);
-  expect(readlinkSync(join(directory, 'models.json'))).toBe(join(agent, 'models.json'));
-  expect(lstatSync(join(directory, 'auth.json')).isFile()).toBe(true);
-  expect(lstatSync(join(directory, 'auth.json')).mode & 0o777).toBe(0o600);
-  expect(readFileSync(join(directory, 'auth.json'), 'utf8')).toBe(`${readFileSync(join(agent, 'auth.json'), 'utf8')}\n`);
-  expect(lstatSync(join(directory, 'settings.json')).isSymbolicLink()).toBe(false);
-  expect(lstatSync(join(directory, 'settings.json')).mode & 0o777).toBe(0o600);
-  expect(JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'))).toEqual({ defaultProvider: 'fixture-provider', defaultModel: 'fixture-model', defaultThinkingLevel: 'high' });
+  expect(readFileSync(join(directory, 'auth.json'), 'utf8')).toBe('{}\n');
+  for (const name of ['auth.json', 'models.json', 'settings.json']) {
+    expect(lstatSync(join(directory, name)).isFile()).toBe(true); expect(lstatSync(join(directory, name)).mode & 0o777).toBe(0o600);
+  }
+  expect(JSON.parse(readFileSync(join(directory, 'models.json'), 'utf8'))).toEqual({ providers: { fixture: PI_MAGPIE_PROVIDER } });
+  expect(JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'))).toEqual({ defaultProvider: 'fixture', defaultModel: 'fixture-model', defaultThinkingLevel: 'high' });
   expectNoStoredPiProbe(output);
-  expect(preparePiAgentDirectory(output, source, inOneHour(), piReferenceResolver).directory).toBe(directory);
+  expect(preparePiAgentDirectory(output, source, piReferenceResolver).directory).toBe(directory);
   const projectedSettings = readFileSync(join(directory, 'settings.json'), 'utf8');
   const nativeSettings = JSON.parse(readFileSync(join(agent, 'settings.json'), 'utf8'));
   writeFileSync(join(agent, 'settings.json'), JSON.stringify({ ...nativeSettings, packages: ['other-package'], httpProxy: 'http://other.invalid' }));
-  expect(preparePiAgentDirectory(output, source, inOneHour(), piReferenceResolver).directory).toBe(directory);
+  expect(preparePiAgentDirectory(output, source, piReferenceResolver).directory).toBe(directory);
   expect(readFileSync(join(directory, 'settings.json'), 'utf8')).toBe(projectedSettings);
   writeFileSync(join(directory, 'settings.json'), projectedSettings + ' ');
-  expect(() => preparePiAgentDirectory(output, source, inOneHour(), piReferenceResolver)).toThrow('settings_changed');
+  expect(() => preparePiAgentDirectory(output, source, piReferenceResolver)).toThrow('settings_changed');
   writeFileSync(join(directory, 'settings.json'), projectedSettings);
   writeFileSync(join(agent, 'settings.json'), JSON.stringify({ ...nativeSettings, defaultModel: 'changed-model' }));
-  expect(() => preparePiAgentDirectory(output, source, inOneHour(), piReferenceResolver)).toThrow('settings_changed');
+  expect(() => preparePiAgentDirectory(output, source, piReferenceResolver)).toThrow('settings_changed');
   writeFileSync(join(agent, 'settings.json'), JSON.stringify(nativeSettings));
-  unlinkSync(join(directory, 'models.json'));
-  symlinkSync(join(agent, 'settings.json'), join(directory, 'models.json'));
-  expect(() => preparePiAgentDirectory(output, source, inOneHour(), piReferenceResolver)).toThrow('models_changed');
+  const projectedModels = readFileSync(join(directory, 'models.json'), 'utf8');
+  writeFileSync(join(directory, 'models.json'), projectedModels + ' ');
+  expect(() => preparePiAgentDirectory(output, source, piReferenceResolver)).toThrow('models_changed');
+  writeFileSync(join(directory, 'models.json'), projectedModels);
   chmodSync(directory, 0o755);
-  expect(() => preparePiAgentDirectory(output, source, inOneHour(), piReferenceResolver)).toThrow('directory_unsafe');
+  expect(() => preparePiAgentDirectory(output, source, piReferenceResolver)).toThrow('directory_unsafe');
   const otherOutput = join(root, 'other'); mkdirSync(otherOutput); symlinkSync(agent, join(otherOutput, '.pi-agent'));
-  expect(() => preparePiAgentDirectory(otherOutput, source, inOneHour(), piReferenceResolver)).toThrow('directory_unsafe');
-  const named = { defaultProvider: 'fixture', defaultModel: 'fixture-model' };
-  writeFileSync(join(agent, 'models.json'), JSON.stringify({ providers: { fixture: { baseUrl: 'https://fixture.invalid/v1', api: 'openai-completions',
-    apiKey: 'sk-PROBE-LITERAL', models: [{ id: 'fixture-model' }] } } }));
-  const prepareWith = (auth: Record<string, unknown>, settings: Record<string, unknown> = named, deadline = Date.now() + 60_000) => {
-    writeFileSync(join(agent, 'auth.json'), JSON.stringify(auth));
+  expect(() => preparePiAgentDirectory(otherOutput, source, piReferenceResolver)).toThrow('directory_unsafe');
+  const prepareWith = (settings: Record<string, unknown>) => {
     writeFileSync(join(agent, 'settings.json'), JSON.stringify(settings));
     const windowOutput = join(root, `window-${randomUUID()}`); mkdirSync(windowOutput);
-    return () => preparePiAgentDirectory(windowOutput, source, deadline, (directory, reference) => resolvePiModel(PI_PACKAGE_CLI, directory, reference));
+    return () => preparePiAgentDirectory(windowOutput, source, (directory, reference) => resolvePiModel(PI_PACKAGE_CLI, directory, reference));
   };
-  const oauth = (expires: number) => ({ type: 'oauth', access: '[fixture]', refresh: '[fixture]', expires });
-  const apiKey = { type: 'api_key', key: 'sk-PROBE-LITERAL' }, soon = Date.now() + 1000, deadline = Date.now() + 60_000;
-  expect(prepareWith({ fixture: apiKey })().model).toBe('fixture/fixture-model');
-  // An OAuth entry keeps its access token and loses its refresh token; other providers stay out (#2764).
-  const projected = prepareWith({ fixture: oauth(inOneHour()), other: oauth(inOneHour()) })();
-  expect(JSON.parse(readFileSync(projected.credential.auth, 'utf8'))).toEqual({ fixture: { ...oauth(JSON.parse(readFileSync(join(agent, 'auth.json'), 'utf8')).fixture.expires), refresh: '' } });
-  expect(projected.nativeAuth).toBe(realpathSync(join(agent, 'auth.json')));
-  expect(prepareWith({ fixture: oauth(soon) })).toThrow(/review_access_expires_within_run.*\/login fixture/);
-  // pi refreshes below 5 minutes left, so the token must outlive the round deadline plus 300 s.
-  expect(prepareWith({ fixture: oauth(deadline + 300_000) }, named, deadline)).toThrow('review_access_expires_within_run');
-  expect(prepareWith({ fixture: oauth(deadline + 301_000) }, named, deadline)).not.toThrow();
-  // The run names one provider, so only its entry counts, and the entry must exist.
-  expect(prepareWith({ fixture: apiKey, unused: oauth(soon) })).not.toThrow();
-  expect(prepareWith({ other: oauth(inOneHour()) })).toThrow(/review_pi_auth_missing: .*auth\.json has no fixture entry/);
-  // pi's resolver (built-in catalog, offline) maps a differently cased provider to its canonical id; the settings must name that id.
-  expect(prepareWith({ 'openai-codex': oauth(soon) }, { defaultProvider: 'OPENAI-CODEX', defaultModel: 'gpt-5.4' }))
-    .toThrow('review_pi_model_not_canonical: pi resolves OPENAI-CODEX/gpt-5.4 to openai-codex/gpt-5.4');
-  expect(prepareWith({ 'openai-codex': apiKey }, { defaultProvider: 'openai-codex', defaultModel: 'gpt-5.4' })().model).toBe('openai-codex/gpt-5.4');
-  expect(prepareWith({ fixture: apiKey, other: oauth(soon) }, {})).toThrow('review_pi_model_unnamed');
-  expect(prepareWith({ fixture: apiKey, other: oauth(soon) }, { defaultProvider: 'fixture' })).toThrow('review_pi_model_unnamed');
-  // The host repeats the admission check from the owner's launch file just before the pi session start.
+  // A provider with a real key, an OAuth login or no models.json entry would put a real credential in the sandbox.
+  for (const provider of ['other', 'openai-codex']) {
+    expect(prepareWith({ defaultProvider: provider, defaultModel: 'gpt-5.4' })).toThrow(/review_pi_provider_not_loopback: the review sandbox holds no real credential.*route the review through magpie/);
+  }
+  expect(prepareWith({})).toThrow('review_pi_model_unnamed');
+  expect(prepareWith({ defaultProvider: 'fixture' })).toThrow('review_pi_model_unnamed');
+  // The host checks the owner's launch file just before the pi session start.
   const control = join(root, `control-${randomUUID()}`); mkdirSync(control);
-  const late = prepareWith({ fixture: oauth(inOneHour()) }, named)();
   const lateDeadline = Date.now() + 1500;
-  const hostSpec = { kind: 'pi', controlDirectory: control, options: { model: late.model } } as ReviewHostSpec;
-  const launchAt = (deadline: number) => writeSessionArtifact(join(control, 'launch-deadline.json'), { deadline, pi: { model: late.model, ...late.credential } }, false);
-  launchAt(lateDeadline);
+  const hostSpec = { kind: 'pi', controlDirectory: control, options: { model } } as ReviewHostSpec;
+  writeSessionArtifact(join(control, 'launch-deadline.json'), { deadline: lateDeadline, pi: { model } }, false);
   expect(() => assertHostLaunchAdmitted(hostSpec, false)).not.toThrow();
-  writeSessionArtifact(join(control, 'launch-deadline.json'), { deadline: lateDeadline, pi: { model: 'fixture/other', ...late.credential } }, false);
+  writeSessionArtifact(join(control, 'launch-deadline.json'), { deadline: lateDeadline, pi: { model: 'fixture/other' } }, false);
   expect(() => assertHostLaunchAdmitted(hostSpec, false)).toThrow('OAR_HOST_LAUNCH_DEADLINE_INVALID');
-  // A token that pi would refresh before the deadline refuses the start.
-  launchAt(Date.now() + 3_600_000);
-  expect(() => assertHostLaunchAdmitted(hostSpec, false)).toThrow(/review_access_expires_within_run.*\/login fixture/);
-  // A start delayed to the deadline is refused.
-  launchAt(lateDeadline);
+  writeSessionArtifact(join(control, 'launch-deadline.json'), { deadline: lateDeadline, pi: { model } }, false);
   await Bun.sleep(1600);
   expect(() => assertHostLaunchAdmitted(hostSpec, false)).toThrow(/OAR_HOST_LAUNCH_DEADLINE_PASSED.*repeat the round/);
   // After host-claim.json, a repeated round cannot launch again; the recovery is cancel and restart.
   expect(() => assertHostLaunchAdmitted(hostSpec, true)).toThrow(/OAR_HOST_LAUNCH_DEADLINE_PASSED.*cancel the review and start a new one/);
-  expect(() => assertPiCredentialWindow(late.credential, lateDeadline)).toThrow('review_round_deadline_passed');
-  expect(prepareWith({ fixture: { type: 'session_token' } })).toThrow('review_pi_auth_shape_unknown');
-  // A malformed native OAuth entry refuses the session; nothing links or falls back to the native file.
-  const { access: _access, ...noAccess } = oauth(inOneHour());
-  expect(prepareWith({ fixture: noAccess })).toThrow('review_pi_auth_shape_unknown');
 });
 
 test('Pi review source fixture uses custom agent directories and rejects relative overrides', async () => {
-  const { mkdirSync, readlinkSync } = await import('node:fs');
+  const { mkdirSync } = await import('node:fs');
   const { preparePiAgentDirectory, removePiCredentialReferences } = await import('../src/effects/review/review-isolation');
   const root = tmpWorkspace('pi-custom-source'); roots.push(root);
   const home = join(root, 'home'), native = join(home, '.pi/agent'); mkdirSync(native, { recursive: true });
@@ -524,74 +499,72 @@ test('Pi review source fixture uses custom agent directories and rejects relativ
   for (const [index, source] of sources.entries()) {
     mkdirSync(source.directory, { recursive: true });
     writeFileSync(join(source.directory, 'settings.json'), '{"defaultProvider":"fixture","defaultModel":"fixture-model"}');
-    writeFileSync(join(source.directory, 'models.json'), '{"providers":{"fixture":{"apiKey":"sk-PROBE-LITERAL"}}}');
-    writeFileSync(join(source.directory, 'auth.json'), '{"fixture":{"type":"api_key","key":"sk-PROBE-LITERAL"}}');
+    writeFileSync(join(source.directory, 'models.json'), PI_MAGPIE_MODELS);
+    writeFileSync(join(source.directory, 'auth.json'), PI_NAMED_AUTH);
     const output = join(root, `output-${index}`); mkdirSync(output);
-    const { directory } = preparePiAgentDirectory(output, home, inOneHour(), piReferenceResolver, { PI_CODING_AGENT_DIR: source.configured });
-    expect(readlinkSync(join(directory, 'models.json'))).toBe(join(source.directory, 'models.json'));
-    expect(readFileSync(join(directory, 'auth.json'), 'utf8')).toBe('{"fixture":{"type":"api_key","key":"sk-PROBE-LITERAL"}}\n');
+    const { directory } = preparePiAgentDirectory(output, home, piReferenceResolver, { PI_CODING_AGENT_DIR: source.configured });
+    expect(JSON.parse(readFileSync(join(directory, 'models.json'), 'utf8'))).toEqual({ providers: { fixture: PI_MAGPIE_PROVIDER } });
     expect(JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'))).toEqual({ defaultProvider: 'fixture', defaultModel: 'fixture-model' });
     expectNoStoredPiProbe(output);
     expect(removePiCredentialReferences(output).status).toBe('removed');
     expect(readdirSync(directory)).toEqual([]);
   }
   const output = join(root, 'relative-output'); mkdirSync(output);
-  expect(() => preparePiAgentDirectory(output, home, inOneHour(), piReferenceResolver, { PI_CODING_AGENT_DIR: 'relative-agent' })).toThrow('PI_CODING_AGENT_DIR must be an absolute path or use ~/');
+  expect(() => preparePiAgentDirectory(output, home, piReferenceResolver, { PI_CODING_AGENT_DIR: 'relative-agent' })).toThrow('PI_CODING_AGENT_DIR must be an absolute path or use ~/');
 });
 
-test('Pi credential cleanup fixture removes links without following directory links; a missing auth.json refuses the session', async () => {
+test('Pi projection cleanup fixture removes the projection without following directory links; a missing models.json refuses the session', async () => {
   const { mkdirSync, symlinkSync, unlinkSync } = await import('node:fs');
   const { preparePiAgentDirectory, removePiCredentialReferences } = await import('../src/effects/review/review-isolation');
   const root = tmpWorkspace('pi-cleanup'); roots.push(root);
   const home = join(root, 'home'), source = join(home, '.pi/agent'); mkdirSync(source, { recursive: true });
   writeFileSync(join(source, 'settings.json'), PI_NAMED_SETTINGS);
   const missing = join(root, 'missing'); mkdirSync(missing);
-  expect(() => preparePiAgentDirectory(missing, home, inOneHour(), piReferenceResolver)).toThrow('review_pi_auth_missing');
-  expect(existsSync(join(missing, '.pi-agent/auth.json'))).toBe(false);
-  for (const name of ['models.json', 'auth.json']) writeFileSync(join(source, name), PI_NAMED_AUTH);
+  expect(() => preparePiAgentDirectory(missing, home, piReferenceResolver)).toThrow(/review_pi_provider_not_loopback: .*models\.json does not exist; route the review through magpie/);
+  expect(existsSync(join(missing, '.pi-agent/models.json'))).toBe(false);
+  writeFileSync(join(source, 'models.json'), PI_MAGPIE_MODELS); writeFileSync(join(source, 'auth.json'), PI_NAMED_AUTH);
   {
     const output = join(root, 'linked'); mkdirSync(output);
-    const { directory } = preparePiAgentDirectory(output, home, inOneHour(), piReferenceResolver);
+    const { directory } = preparePiAgentDirectory(output, home, piReferenceResolver);
     expectNoStoredPiProbe(output);
     expect(removePiCredentialReferences(output).status).toBe('removed');
     expect(readdirSync(directory)).toEqual([]);
     expect(removePiCredentialReferences(output).status).toBe('absent');
   }
   const output = join(root, 'refused'); mkdirSync(output);
-  const { directory } = preparePiAgentDirectory(output, home, inOneHour(), piReferenceResolver);
+  const { directory } = preparePiAgentDirectory(output, home, piReferenceResolver);
   unlinkSync(join(directory, 'models.json')); mkdirSync(join(directory, 'models.json'));
   expect(removePiCredentialReferences(output).status).toBe('cleanup_pending');
   expect(readdirSync(directory)).toEqual(['models.json']);
   const escape = join(root, 'escape'); mkdirSync(escape); symlinkSync(source, join(escape, '.pi-agent'));
   expect(removePiCredentialReferences(escape).status).toBe('cleanup_pending');
-  for (const name of ['models.json', 'auth.json']) expect(readFileSync(join(source, name), 'utf8')).toBe(PI_NAMED_AUTH);
+  expect(readFileSync(join(source, 'models.json'), 'utf8')).toBe(PI_MAGPIE_MODELS); expect(readFileSync(join(source, 'auth.json'), 'utf8')).toBe(PI_NAMED_AUTH);
   expect(readFileSync(join(source, 'settings.json'), 'utf8')).toBe(PI_NAMED_SETTINGS);
 });
 
 darwinTest('Pi isolation fixture: OAR flags, native extension, actual model and paired denials', async () => {
   const { mkdirSync, chmodSync } = await import('node:fs');
   const { pathToFileURL, fileURLToPath } = await import('node:url');
-  const { preparePiAgentDirectory, reviewIsolationPolicy, prepareReviewLauncher, reviewHostTemporaryDirectory } = await import('../src/effects/review/review-isolation');
+  const { preparePiAgentDirectory, reviewIsolationPolicy, prepareReviewLauncher, reviewHostTemporaryDirectory, nativeAuthFiles } = await import('../src/effects/review/review-isolation');
   const root = tmpWorkspace('pi-isolation'); roots.push(root);
   const home = join(root, 'home'), source = join(root, 'source'), owner = join(root, 'owner'), output = join(root, 'output');
   for (const path of [home, source, owner, output]) mkdirSync(path);
   const agent = join(home, '.pi/agent'); mkdirSync(agent, { recursive: true });
-  const credential = join(agent, 'auth.json');
-  writeFileSync(credential, JSON.stringify({ openai: { type: 'api_key', key: 'fixture-key-no-provider-call' } }));
-  writeFileSync(join(agent, 'models.json'), '{"providers":{}}');
-  writeFileSync(join(agent, 'settings.json'), '{"defaultProvider":"openai","defaultModel":"gpt-4o"}');
+  const credential = join(agent, 'auth.json'), codexCredential = join(home, '.codex/auth.json');
+  writeFileSync(credential, PI_NAMED_AUTH); mkdirSync(join(home, '.codex')); writeFileSync(codexCredential, '{"tokens":{"refresh_token":"sk-PROBE-LITERAL"}}');
+  writeFileSync(join(agent, 'models.json'), PI_MAGPIE_MODELS);
+  writeFileSync(join(agent, 'settings.json'), PI_NAMED_SETTINGS);
   mkdirSync(join(agent, 'extensions')); writeFileSync(join(agent, 'extensions', 'unexpected.ts'), 'throw new Error("ambient fixture extension loaded");');
-  const { directory, credential: piCredential } = preparePiAgentDirectory(output, home, inOneHour(), piReferenceResolver);
-  writeSessionArtifact(join(owner, 'launch-deadline.json'), { deadline: inOneHour(), pi: { model: 'openai/gpt-4o', ...piCredential } }, false);
-  expect(lstatSync(join(directory, 'models.json')).isSymbolicLink()).toBe(true);
-  const targets = [join(source, 'protected.txt'), credential, join(agent, 'protected.txt'), join(directory, 'auth.json'), join(directory, 'models.json'), join(agent, 'models.json'), join(directory, 'settings.json'), join(agent, 'settings.json')];
+  const { directory } = preparePiAgentDirectory(output, home, piReferenceResolver);
+  writeSessionArtifact(join(owner, 'launch-deadline.json'), { deadline: inOneHour(), pi: { model: 'fixture/fixture-model' } }, false);
+  const targets = [join(source, 'protected.txt'), credential, join(agent, 'protected.txt'), join(directory, 'models.json'), join(agent, 'models.json'), join(directory, 'settings.json'), join(agent, 'settings.json')];
   for (const target of [targets[0]!, targets[2]!]) writeFileSync(target, 'KEEP');
   const initial = targets.map(path => readFileSync(path, 'utf8'));
-  const paths = { subject: source, primary: source, ownerRecord: owner, journal: owner, gitCommonDir: source, output, piAgentDirectory: directory, piNativeAuth: realpathSync(credential) };
+  const paths = { subject: source, primary: source, ownerRecord: owner, journal: owner, gitCommonDir: source, output, piAgentDirectory: directory, nativeAuth: nativeAuthFiles(home) };
   const profile = join(owner, 'isolation.sb'); writeFileSync(profile, reviewIsolationPolicy(paths), { mode: 0o600 });
   const node = resolveNode24(), fixture = join(root, 'fixture-pi.cjs'), capture = join(output, 'argv.jsonl');
   const piCli = realpathSync(join(fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent')), '..', 'cli.js'));
-  const probe = `()=>{const fs=require('node:fs');const denied=${JSON.stringify(targets)}.map(path=>{try{fs.writeFileSync(path,'CHANGED');return false}catch(e){return ['EPERM','EACCES'].includes(e.code)}});let signal=false;try{process.kill(${process.pid},'SIGCONT')}catch(e){signal=e.code==='EPERM'};const native=${JSON.stringify(realpathSync(credential))},local=${JSON.stringify(join(directory, 'auth.json.lock'))},refused=f=>{try{f();return false}catch(e){return ['EPERM','EACCES'].includes(e.code)}};const nativeAuth=[refused(()=>fs.readFileSync(native)),refused(()=>fs.mkdirSync(native+'.lock'))];let localLock;try{fs.mkdirSync(local);fs.rmdirSync(local);localLock=true}catch(e){localLock=e.code==='EEXIST'};return {denied,signal,nativeAuth,localLock};}`;
+  const probe = `()=>{const fs=require('node:fs');const denied=${JSON.stringify(targets)}.map(path=>{try{fs.writeFileSync(path,'CHANGED');return false}catch(e){return ['EPERM','EACCES'].includes(e.code)}});let signal=false;try{process.kill(${process.pid},'SIGCONT')}catch(e){signal=e.code==='EPERM'};const refused=f=>{try{f();return false}catch(e){return ['EPERM','EACCES'].includes(e.code)}};const nativeAuth=${JSON.stringify([realpathSync(credential), realpathSync(codexCredential)])}.flatMap(native=>[refused(()=>fs.readFileSync(native)),refused(()=>fs.mkdirSync(native+'.lock'))]);return {denied,signal,nativeAuth};}`;
   writeFileSync(fixture, `#!${node}\nconst fs=require('node:fs'),cp=require('node:child_process');
 const argv=process.argv.slice(2);
 const check=${probe};
@@ -608,26 +581,26 @@ import {SessionManager} from ${JSON.stringify(import.meta.resolve('@earendil-wor
 const runtime=reviewRuntime('pi',${JSON.stringify(launcher)});
 const session=await runtime.session({kind:'available',via:'bundled'},{cwd:${JSON.stringify(output)},env:{PI_CODING_AGENT_DIR:${JSON.stringify(directory)},OAR_PI_AGENT_DIR:${JSON.stringify(directory)}}});
 const host=new OarReviewHost(session,()=>{});const id=host.sessionId;
-try{assert.ok(id);assert.equal(host.model('pi'),'openai/gpt-4o');const records=readFileSync(${JSON.stringify(capture)},'utf8').trim().split('\\n').map(JSON.parse);const run=records.find(r=>r.argv.includes('--mode'));assert.ok(existsSync(run.env.OAR_PI_RPC_DIRECTORY+'/ready'));}finally{await host.dispose();}
+try{assert.ok(id);assert.equal(host.model('pi'),'fixture/fixture-model');const records=readFileSync(${JSON.stringify(capture)},'utf8').trim().split('\\n').map(JSON.parse);const run=records.find(r=>r.argv.includes('--mode'));assert.ok(existsSync(run.env.OAR_PI_RPC_DIRECTORY+'/ready'));}finally{await host.dispose();}
 const output=${JSON.stringify(output)},agentDir=${JSON.stringify(directory)};
 const captured=readFileSync(${JSON.stringify(capture)},'utf8').trim().split('\\n').map(JSON.parse).find(r=>r.argv.includes('--session-dir'));
 const native=SessionManager.create(output,captured.argv[captured.argv.indexOf('--session-dir')+1]);
 native.appendMessage({role:'user',content:'[fixture transcript; no provider run]',timestamp:Date.now()});
-const spec={mode:'review',kind:'pi',installation:{kind:'available',via:'bundled'},launcher:${JSON.stringify(launcher)},vendorExecutable:${JSON.stringify(fixture)},options:{cwd:output,resume:native.getSessionId(),model:'openai/gpt-4o',env:{PI_CODING_AGENT_DIR:agentDir,OAR_PI_AGENT_DIR:agentDir}},requestDirectory:${JSON.stringify(owner)},output,controlDirectory:${JSON.stringify(owner)},timeoutMs:5000,isolation:${JSON.stringify({ paths, policyFile: profile })}};
-for(let i=0;i<2;i++){const resumed=i===0?await openReviewHost(spec,()=>{}):new OarReviewHost(await runtime.session(spec.installation,spec.options),()=>{});try{assert.equal(resumed.sessionId,native.getSessionId());assert.equal(resumed.model('pi'),'openai/gpt-4o');}finally{await resumed.dispose();}}
-console.log(JSON.stringify({session_id:id,model:'openai/gpt-4o',extension_ready:true,resumed:true}));
+const spec={mode:'review',kind:'pi',installation:{kind:'available',via:'bundled'},launcher:${JSON.stringify(launcher)},vendorExecutable:${JSON.stringify(fixture)},options:{cwd:output,resume:native.getSessionId(),model:'fixture/fixture-model',env:{PI_CODING_AGENT_DIR:agentDir,OAR_PI_AGENT_DIR:agentDir}},requestDirectory:${JSON.stringify(owner)},output,controlDirectory:${JSON.stringify(owner)},timeoutMs:5000,isolation:${JSON.stringify({ paths, policyFile: profile })}};
+for(let i=0;i<2;i++){const resumed=i===0?await openReviewHost(spec,()=>{}):new OarReviewHost(await runtime.session(spec.installation,spec.options),()=>{});try{assert.equal(resumed.sessionId,native.getSessionId());assert.equal(resumed.model('pi'),'fixture/fixture-model');}finally{await resumed.dispose();}}
+console.log(JSON.stringify({session_id:id,model:'fixture/fixture-model',extension_ready:true,resumed:true}));
 `);
   const result = spawnSync(node, [worker], { encoding: 'utf8', timeout: 30000,
     env: { PATH: process.env.PATH, HOME: home, TMPDIR: reviewHostTemporaryDirectory(output) } });
   expect(result.status, result.stderr).toBe(0);
   const observed = JSON.parse(result.stdout);
-  expect(observed.extension_ready).toBe(true); expect(observed.model).toBe('openai/gpt-4o'); expect(observed.session_id).toBeTruthy(); expect(observed.resumed).toBe(true);
+  expect(observed.extension_ready).toBe(true); expect(observed.model).toBe('fixture/fixture-model'); expect(observed.session_id).toBeTruthy(); expect(observed.resumed).toBe(true);
   const captures = readFileSync(capture, 'utf8').trim().split('\n').map(line => JSON.parse(line));
   const run = captures.find(row => row.argv.includes('--mode'));
   for (const flag of ['--no-extensions', '--no-skills', '--no-context-files', '--no-prompt-templates', '--no-mcp', '--no-approve', '--offline']) expect(run.argv).toContain(flag);
   expect(run.argv[run.argv.indexOf('--mode') + 1]).toBe('rpc'); expect(run.argv).toContain('-e');
   expect(run.env.PI_CODING_AGENT_DIR).toBe(directory); expect(run.env.OAR_PI_AGENT_DIR).toBe(directory);
-  for (const row of captures) for (const evidence of [row.own, row.descendant]) { expect(evidence.denied).toEqual(targets.map(() => true)); expect(evidence.signal).toBe(true); expect(evidence.nativeAuth).toEqual([true, true]); expect(evidence.localLock).toBe(true); }
+  for (const row of captures) for (const evidence of [row.own, row.descendant]) { expect(evidence.denied).toEqual(targets.map(() => true)); expect(evidence.signal).toBe(true); expect(evidence.nativeAuth).toEqual([true, true, true, true]); }
   expect(targets.map(path => readFileSync(path, 'utf8'))).toEqual(initial);
 }, 60000);
 
@@ -683,7 +656,7 @@ for (const example of [
   const { verifyAcceptance } = await import('../src/effects/review/acceptance-receipt');
   const f = packetRoundFixture();
   const source = join(f.options.endpoint.home, '.pi/agent'); mkdirSync(source, { recursive: true });
-  const models = '{"providers":{"fixture":{"apiKey":"sk-PROBE-LITERAL"}}}';
+  const models = JSON.stringify({ providers: { 'fixture-provider': PI_MAGPIE_PROVIDER, fixture: { apiKey: 'sk-PROBE-LITERAL' } } });
   const auth = '{"fixture-provider":{"type":"api_key","key":"sk-PROBE-LITERAL"}}';
   const settings = '{"defaultProvider":"fixture-provider","defaultModel":"fixture-actual"}';
   writeFileSync(join(source, 'models.json'), models); writeFileSync(join(source, 'auth.json'), auth);
@@ -729,7 +702,7 @@ for (const example of [
   if (example.verdict === 'PASS') expect((await verifyAcceptance({ root: f.root, authority: f.authority, authorityHome: f.home })).actual_model).toBe(actualModel);
   const host = readSessionArtifact<{ output: string }>(join(f.dir, 'host.json'));
   const directory = join(host.output, '.pi-agent');
-  expect(lstatSync(join(directory, 'models.json')).isSymbolicLink()).toBe(true);
+  expect(JSON.parse(readFileSync(join(directory, 'models.json'), 'utf8'))).toEqual({ providers: { 'fixture-provider': PI_MAGPIE_PROVIDER } });
   expectNoStoredPiProbe(host.output);
   const cancel = example.verdict === 'FAIL';
   if (cancel) {
@@ -836,11 +809,6 @@ async function seamReview(f: ReturnType<typeof packetRoundFixture>, harness: Sea
   const { mkdirSync } = await import('node:fs');
   const { runHostFileRequest } = await import('../src/effects/review-runner/task-oar-host');
   const hostDir = join(f.home, `seam-host-${harness}`); mkdirSync(hostDir);
-  if (harness === 'codex') {
-    mkdirSync(join(f.options.endpoint.home, '.codex'), { recursive: true });
-    const exp = Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 86400 })).toString('base64url');
-    writeFileSync(join(f.options.endpoint.home, '.codex/auth.json'), JSON.stringify({ tokens: { access_token: `fixture.${exp}.fixture` } }), { mode: 0o600 });
-  }
   const host = await scriptedSeamHost(harness, reviewerModel, hostDir);
   let binding: TaskPaneBinding | undefined, request: TaskRequest;
   const effects: TaskReviewEffects = { ...f.effects, assertBinding: () => {}, piExecutable: () => '/usr/bin/true',
@@ -994,7 +962,7 @@ darwinTest('Pi credential cleanup fixture removes partial references after a fai
   expect(readdirSync(join(host.output, '.pi-agent'))).toEqual([]);
   expectNoStoredPiProbe(host.output);
 });
-test('preparePiAgentDirectory reads each loopback port from the provider baseUrl values and refuses a value it cannot allow', async () => {
+test('preparePiAgentDirectory reads the loopback port of the selected provider and refuses a provider it cannot allow', async () => {
   const { preparePiAgentDirectory } = await import('../src/effects/review/review-isolation');
   const { OPERATOR_DEFAULT_PORT: consolePort } = await import('../src/core/review/operator-console-port');
   const prepared = (models: string) => {
@@ -1002,20 +970,19 @@ test('preparePiAgentDirectory reads each loopback port from the provider baseUrl
     const output = join(root, 'output'), agent = join(root, 'home/.pi/agent');
     mkdirSync(output); mkdirSync(agent, { recursive: true }); writeFileSync(join(agent, 'models.json'), models);
     writeFileSync(join(agent, 'settings.json'), PI_NAMED_SETTINGS);
-    writeFileSync(join(agent, 'auth.json'), PI_NAMED_AUTH);
-    return preparePiAgentDirectory(output, join(root, 'home'), inOneHour(), piReferenceResolver);
+    return preparePiAgentDirectory(output, join(root, 'home'), piReferenceResolver);
   };
-  const baseUrl = (value: unknown) => JSON.stringify({ providers: { fixture: { baseUrl: value } } });
-  const urls = ['http://127.0.0.1:3425/v1', 'http://LOCALHOST:8080', 'http://[::1]:9000/v1', 'http://127.0.0.1:3425/v2', 'http://localhost/v1', 'https://127.0.0.1/v1',
-    'https://api.example.com:4318/v1', `http://192.0.2.1:${consolePort}`];
-  expect(prepared(JSON.stringify({ providers: { ...Object.fromEntries(urls.map((url, index) => [`p${index}`, { baseUrl: url }])), keyOnly: { apiKey: 'sk-PROBE-LITERAL' } } })).loopbackPorts).toEqual([3425, 8080, 9000, 80, 443]);
+  const provider = (fixture: unknown) => JSON.stringify({ providers: { fixture } });
+  const baseUrl = (value: unknown) => provider({ baseUrl: value, apiKey: 'magpie' });
+  for (const [url, port] of [['http://127.0.0.1:3425/v1', 3425], ['http://LOCALHOST:8080', 8080], ['http://[::1]:9000/v1', 9000], ['http://localhost/v1', 80], ['https://127.0.0.1/v1', 443]] as const) {
+    expect(prepared(baseUrl(url)).loopbackPorts, url).toEqual([port]);
+  }
   for (const [models, code] of [
     ['{ not json', 'review_pi_models_invalid'],
     ['// comment\n{"providers":{}}', 'review_pi_models_invalid'],
-    [baseUrl('not a url'), 'review_pi_model_base_url_invalid'],
-    [baseUrl('127.0.0.1:3425/v1'), 'review_pi_model_base_url_invalid'],
-    [baseUrl('ftp://127.0.0.1:3425'), 'review_pi_model_base_url_invalid'],
-    [baseUrl(3425), 'review_pi_model_base_url_invalid'],
+    ...['not a url', '127.0.0.1:3425/v1', 'ftp://127.0.0.1:3425', 3425, 'https://api.example.com:4318/v1'].map(url => [baseUrl(url), 'review_pi_provider_not_loopback']),
+    [provider({ baseUrl: 'http://127.0.0.1:3425/v1', apiKey: 'sk-PROBE-LITERAL' }), 'review_pi_provider_not_loopback'],
+    [JSON.stringify({ providers: { other: PI_MAGPIE_PROVIDER } }), 'review_pi_provider_not_loopback'],
     ...['127.0.0.1', 'localhost', '[::1]'].map(host => [baseUrl(`http://${host}:${consolePort}/v1`), 'review_pi_model_port_is_operator_console']),
   ] as const) expect(() => prepared(models), models).toThrow(code);
 });
@@ -1024,12 +991,11 @@ test('a Pi provider on the console port refuses the session before any launch an
   const f = packetRoundFixture();
   const source = join(f.options.endpoint.home, '.pi/agent'); mkdirSync(source, { recursive: true });
   const { OPERATOR_DEFAULT_PORT: consolePort } = await import('../src/core/review/operator-console-port');
-  writeFileSync(join(source, 'models.json'), JSON.stringify({ providers: { fixture: { baseUrl: `http://127.0.0.1:${consolePort}/v1` } } }));
+  writeFileSync(join(source, 'models.json'), JSON.stringify({ providers: { fixture: { baseUrl: `http://127.0.0.1:${consolePort}/v1`, apiKey: 'magpie' } } }));
   await expect(runReviewRound({ ...f.options, harness: 'pi' }, { ...f.effects, piExecutable: () => '/usr/bin/true', installation: async () => ({ kind: 'available', via: 'bundled' }) }))
     .rejects.toThrow('review_pi_model_port_is_operator_console');
-  rmSync(join(source, 'models.json'));
-  writeFileSync(join(source, 'settings.json'), '{"defaultProvider":"OPENAI-CODEX","defaultModel":"gpt-5.4"}');
-  writeFileSync(join(source, 'auth.json'), JSON.stringify({ 'openai-codex': { type: 'oauth', access: '[fixture]', refresh: '[fixture]', expires: Date.now() + 1000 } }));
+  writeFileSync(join(source, 'models.json'), PI_MAGPIE_MODELS);
+  writeFileSync(join(source, 'settings.json'), '{"defaultProvider":"fixture","defaultModel":"FIXTURE-MODEL"}');
   await expect(runReviewRound({ ...f.options, harness: 'pi' }, { ...f.effects, piExecutable: () => PI_PACKAGE_CLI, installation: async () => ({ kind: 'available', via: 'bundled' }),
     resolvePiModel, start: async () => { throw new Error('must not start'); } })).rejects.toThrow('review_pi_model_not_canonical');
   expect(f.calls).toEqual(['admit']);
@@ -1038,32 +1004,27 @@ test('a Pi provider on the console port refuses the session before any launch an
 }, 60_000);
 
 // The profile comes from runReviewRound, so each case proves the path that its reviewer uses.
-for (const harness of ['codex', 'claude', 'pi'] as const) darwinTest(`zero-model probe through the ${harness} launcher: loopback is denied against live listeners and only a Pi provider port connects`, async () => {
+for (const harness of ['codex', 'claude', 'pi'] as const) darwinTest(`zero-model probe through the ${harness} launcher: loopback is denied against live listeners, only the model port connects and both native auth files stay unreadable`, async () => {
   const f = packetRoundFixture();
-  const listen = (hostname: string) => Bun.listen({ hostname, port: 0, socket: { data() {} } });
-  const v4 = listen('127.0.0.1'), v6 = listen('::1'), provider = listen('127.0.0.1'), providerV6 = listen('::1');
+  const listen = (hostname: string, port = 0) => Bun.listen({ hostname, port, socket: { data() {} } });
+  const v4 = listen('127.0.0.1'), v6 = listen('::1'), provider = listen('127.0.0.1'), providerV6 = listen('::1', provider.port);
   try {
     const expected = { [`::1 ${v6.port}`]: 'denied', [`127.0.0.1 ${v4.port}`]: 'denied', [`::ffff:127.0.0.1 ${v4.port}`]: 'denied',
       [`127.0.0.1 ${provider.port}`]: harness === 'pi' ? 'allowed' : 'denied', [`::1 ${providerV6.port}`]: harness === 'pi' ? 'allowed' : 'denied' };
     for (const target of Object.keys(expected)) expect(spawnSync('/usr/bin/nc', ['-z', '-G', '2', ...target.split(' ')]).status, target).toBe(0);
     const vendor = join(f.home, `fake-${harness}`);
-    writeFileSync(vendor, `#!/bin/sh\n${Object.keys(expected).map(target => `if /usr/bin/nc -z -G 2 ${target} >/dev/null 2>&1; then echo '${target} allowed'; else echo '${target} denied'; fi`).join('\n')}\n`);
+    const home = f.options.endpoint.home, nativeAuth = [join(home, '.pi/agent/auth.json'), join(home, '.codex/auth.json')];
+    mkdirSync(join(home, '.codex')); writeFileSync(nativeAuth[1]!, '{"tokens":{"refresh_token":"sk-PROBE-LITERAL"}}');
+    writeFileSync(vendor, `#!/bin/sh\n${Object.keys(expected).map(target => `if /usr/bin/nc -z -G 2 ${target} >/dev/null 2>&1; then echo '${target} allowed'; else echo '${target} denied'; fi`).join('\n')}\n${nativeAuth.map(file => `/bin/cat ${file} >/dev/null 2>&1 && echo 'read ${file}'`).join('\n')}\nexit 0\n`);
     chmodSync(vendor, 0o700);
-    const home = f.options.endpoint.home;
-    if (harness === 'codex') {
-      mkdirSync(join(home, '.codex'));
-      const exp = Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 86400 })).toString('base64url');
-      writeFileSync(join(home, '.codex/auth.json'), JSON.stringify({ tokens: { access_token: `fixture.${exp}.fixture` } }), { mode: 0o600 });
-    }
-    if (harness === 'pi') {
-      mkdirSync(join(home, '.pi/agent'), { recursive: true });
-      writeFileSync(join(home, '.pi/agent/models.json'), JSON.stringify({ providers: { v4: { baseUrl: `http://127.0.0.1:${provider.port}/v1` }, v6: { baseUrl: `http://[::1]:${providerV6.port}/v1` } } }));
-    }
+    if (harness === 'pi') writeFileSync(join(home, '.pi/agent/models.json'), JSON.stringify({ providers: { fixture: { baseUrl: `http://localhost:${provider.port}/v1`, apiKey: 'magpie' } } }));
     await expect(runReviewRound({ ...f.options, harness }, { ...f.effects, piExecutable: () => vendor,
       installation: async (_kind, executable) => harness === 'pi' ? { kind: 'available', via: 'bundled' } : { kind: 'available', via: 'executable', command: executable ?? vendor },
       start: async () => { throw new Error('fixture_start_failure'); } })).rejects.toThrow('fixture_start_failure');
     const { launcher } = readSessionArtifact<{ launcher: string }>(join(f.dir, 'host.json'));
     expect(execFileSync(launcher, [], { encoding: 'utf8', timeout: 20_000 }).trim().split('\n')).toEqual(Object.entries(expected).map(([target, access]) => `${target} ${access}`));
+    // The codex kind reaches models only through magpie.
+    expect(readFileSync(join(f.dir, 'isolation.sb'), 'utf8').includes('(allow network-outbound (remote tcp "localhost:3425"))')).toBe(harness === 'codex');
   } finally { for (const listener of [v4, v6, provider, providerV6]) listener.stop(true); }
 }, 90_000);
 
@@ -1087,7 +1048,7 @@ darwinTest('OAR isolation: Seatbelt denies paired host and descendant writes wit
   const isolatedDenied = [join(isolated,'auth.json'),join(isolated,'config.toml')];
   for (const path of [...allowedNative, ...deniedNative, ...isolatedDenied]) { const { dirname } = await import('node:path'); mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, 'KEEP'); }
   const targets = [...protectedPaths, join(output, 'escape-link'), join(output, '../subject/protected.txt'), ...forbidden, ...deniedNative, ...isolatedDenied];
-  const policy = reviewIsolationPolicy({ subject, primary, ownerRecord: owner, journal, gitCommonDir: git, output });
+  const policy = reviewIsolationPolicy({ subject, primary, ownerRecord: owner, journal, gitCommonDir: git, output, nativeAuth: [] });
   expect(policy).not.toContain(nativeHome);
   const profile = join(root, 'profile.sb'); writeFileSync(profile, policy);
   const worker = join(root, 'worker.cjs');
@@ -1157,7 +1118,7 @@ const connect=()=>new Promise(resolve=>{const socket=net.createConnection(proces
     expect(JSON.parse(control.stdout)).toMatchObject({ local: { connected: true }, lookup: { resolved: true } });
     const profile = join(root, 'profile.sb');
     writeFileSync(profile, reviewIsolationPolicy({ subject, primary: subject, ownerRecord: subject,
-      journal: subject, gitCommonDir: subject, output }));
+      journal: subject, gitCommonDir: subject, output, nativeAuth: [] }));
     const confined = spawnSync('/usr/bin/sandbox-exec', ['-f', profile, node, '-e', script, socketPath], { encoding: 'utf8', timeout: 15000 });
     expect(confined.status, confined.stderr).toBe(0);
     const result = JSON.parse(confined.stdout);
@@ -1175,7 +1136,7 @@ test('OAR isolation: reject authority overlap and symlink output roots before ex
   const root = tmpWorkspace('oar-isolation-admission'); roots.push(root);
   const subject = join(root, 'subject'), primary = join(root, 'primary'), output = join(root, 'output');
   for (const path of [subject, primary, output]) mkdirSync(path);
-  const spec = { subject, primary, ownerRecord: primary, journal: primary, gitCommonDir: primary, output };
+  const spec = { subject, primary, ownerRecord: primary, journal: primary, gitCommonDir: primary, output, nativeAuth: [] };
   expect(() => reviewIsolationPolicy({ ...spec, output: primary })).toThrow('OVERLAPS_AUTHORITY');
   const link = join(root, 'link'); symlinkSync(output, link);
   expect(() => reviewIsolationPolicy({ ...spec, output: link })).toThrow('OUTPUT_UNSAFE');
@@ -1198,7 +1159,7 @@ async function runOarNodeFixture(label: string, body: string, confined = true, d
   const { reviewIsolationPolicy, reviewHostTemporaryDirectory } = await import('../src/effects/review/review-isolation');
   const root = tmpWorkspace(label); roots.push(root);
   const subject = join(root, 'subject'), output = join(root, 'output'); mkdirSync(subject); mkdirSync(output);
-  const paths = { subject, primary: subject, ownerRecord: subject, journal: subject, gitCommonDir: subject, output };
+  const paths = { subject, primary: subject, ownerRecord: subject, journal: subject, gitCommonDir: subject, output, nativeAuth: [] };
   const policyFile = join(root, 'profile.sb'); writeFileSync(policyFile, reviewIsolationPolicy(paths), { mode: 0o600 });
   const temporary = reviewHostTemporaryDirectory(output), worker = join(root, 'fixture.mjs');
   const entry = pathToFileURL(realpathSync(join(import.meta.dir, '../dist/oar-review-host.js'))).href;
@@ -1414,35 +1375,21 @@ darwinTest('OAR installation is probed by the fixed Node host, never the Bun con
   }
 });
 
-test('Codex isolated home: exp-only preflight, exclusive no-follow copy without the refresh token, modes and cleanup', async () => {
-  const { mkdirSync, writeFileSync, symlinkSync, unlinkSync, lstatSync, existsSync } = await import('node:fs');
-  const { prepareCodexHome, removeCopiedAuth } = await import('../src/effects/review/review-isolation');
-  const root = tmpWorkspace('codex-isolated-auth'); roots.push(root);
-  const source = join(root,'source'), output = join(root,'output'); mkdirSync(join(source,'.codex'),{recursive:true});mkdirSync(output);
-  const payload = (exp:number) => Buffer.from(JSON.stringify({exp})).toString('base64url');
-  const fixture = (exp:number) => JSON.stringify({tokens:{access_token:`fixture.${payload(exp)}.fixture`,refresh_token:'fixture-refresh'}});
-  const file = join(source,'.codex','auth.json');
-  writeFileSync(file,fixture(Math.floor(Date.now()/1000)+30),{mode:0o600});
-  expect(() => prepareCodexHome(output,source,60000)).toThrow('expires_within_run');
-  expect(existsSync(join(output,'.codex-home','auth.json'))).toBe(false);
-  writeFileSync(file,fixture(Math.floor(Date.now()/1000)+86400));
-  const prepared = prepareCodexHome(output,source,60000);
-  expect(prepared.auth_copied).toBe(true);expect(prepared.mode).toBe('0600');
-  expect(lstatSync(prepared.home).mode & 0o777).toBe(0o700);expect(lstatSync(join(prepared.home,'auth.json')).mode & 0o777).toBe(0o600);
-  expect(existsSync(join(prepared.home,'config.toml'))).toBe(false);
-  // Codex refuses a copy without the refresh_token key, so the key stays and is empty (#2764).
-  const native = JSON.parse(readFileSync(file,'utf8'));
-  expect(JSON.parse(readFileSync(join(prepared.home,'auth.json'),'utf8'))).toEqual({...native,tokens:{...native.tokens,refresh_token:''}});
-  expect(() => prepareCodexHome(output,source,60000)).toThrow('copy_failed');
-  expect(prepareCodexHome(output,source,60000,true).auth_copied).toBe(true);
-  writeFileSync(join(prepared.home,'auth.json'),readFileSync(file));
-  expect(() => prepareCodexHome(output,source,60000,true)).toThrow('review_auth_copy_unsafe');
-  expect(removeCopiedAuth(output).status).toBe('removed');expect(removeCopiedAuth(output).status).toBe('absent');
-  unlinkSync(file);symlinkSync(join(root,'missing'),file);
-  expect(() => prepareCodexHome(output,source,60000)).toThrow('source_unavailable');unlinkSync(file);mkdirSync(file);
-  expect(() => prepareCodexHome(output,source,60000)).toThrow('source_unsafe');
-  mkdirSync(join(prepared.home,'auth.json'));
-  expect(removeCopiedAuth(output).status).toBe('cleanup_pending');
+test('Codex isolated home sends the explicit codex/* model to magpie and holds no auth.json', async () => {
+  const { mkdirSync, lstatSync, existsSync, readdirSync } = await import('node:fs');
+  const { prepareCodexHome } = await import('../src/effects/review/review-isolation');
+  const root = tmpWorkspace('codex-isolated-home'); roots.push(root);
+  const output = join(root, 'output'); mkdirSync(output);
+  for (const model of ['group/gpt', 'gpt-6-astra']) expect(() => prepareCodexHome(output, model)).toThrow('review_codex_model_not_magpie');
+  const { home } = prepareCodexHome(output, 'codex/gpt-6-astra');
+  expect(lstatSync(home).mode & 0o777).toBe(0o700); expect(lstatSync(join(home, 'config.toml')).mode & 0o777).toBe(0o600);
+  expect(readdirSync(home)).toEqual(['config.toml']);
+  expect(readFileSync(join(home, 'config.toml'), 'utf8')).toBe('model = "codex/gpt-6-astra"\nmodel_provider = "magpie"\n\n[model_providers.magpie]\nname = "magpie"\nbase_url = "http://127.0.0.1:3425/v1"\nexperimental_bearer_token = "magpie"\nwire_api = "responses"\n');
+  expect(prepareCodexHome(output, 'codex/gpt-6-astra').home).toBe(home);
+  expect(() => prepareCodexHome(output, 'codex/gpt-6.1-sol')).toThrow('review_codex_config_changed');
+  writeFileSync(join(home, 'auth.json'), '{}');
+  expect(() => prepareCodexHome(output, 'codex/gpt-6-astra')).toThrow('review_codex_home_unsafe');
+  expect(existsSync(join(home, 'auth.json'))).toBe(true);
 });
 
 darwinTest('OAR native child cannot forge owner control evidence or signal/connect to the trusted host', async () => {
@@ -1452,7 +1399,7 @@ darwinTest('OAR native child cannot forge owner control evidence or signal/conne
   const { reviewIsolationPolicy, prepareReviewLauncher } = await import('../src/effects/review/review-isolation');
   const root = tmpWorkspace('oar-native-owner-evidence'); roots.push(root);
   const owner = join(root, 'owner'), output = join(root, 'output'); mkdirSync(owner); mkdirSync(output);
-  const paths = { subject: owner, primary: owner, ownerRecord: owner, journal: owner, gitCommonDir: owner, output };
+  const paths = { subject: owner, primary: owner, ownerRecord: owner, journal: owner, gitCommonDir: owner, output, nativeAuth: [] };
   const policyFile = join(owner, 'profile.sb'); writeFileSync(policyFile, reviewIsolationPolicy(paths), { mode: 0o600 });
   const node = resolveNode24();
   const fixture = join(root, 'fixture-codex.cjs');

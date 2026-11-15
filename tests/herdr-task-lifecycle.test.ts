@@ -471,7 +471,7 @@ darwinTest('OAR fixed host runs visibly in a private hc terminal and disposes be
   run('git', ['-c','user.name=fixture','-c','user.email=fixture@localhost','commit','--allow-empty','-qm','fixture'], repo, env);
   const closeRequest = join(output, 'close.request'), readyFile = join(output, 'ready.json'), disposedFile = join(output, 'disposed.json');
   const specFile = join(fixture, 'fixture.json'), profile = join(fixture, 'profile.sb');
-  const paths = { subject: repo, primary: repo, ownerRecord: repo, journal: repo, gitCommonDir: join(repo,'.git'), output };
+  const paths = { subject: repo, primary: repo, ownerRecord: repo, journal: repo, gitCommonDir: join(repo,'.git'), output, nativeAuth: [] };
   writeFileSync(profile, reviewIsolationPolicy(paths));
   writeFileSync(specFile, JSON.stringify({ mode: 'scripted', cwd: repo, inputs: ['one','two','three'], closeRequest, readyFile, disposedFile, isolation: { paths, policyFile: profile } }));
   const priorFlag = process.env.REPO_HARNESS_OAR_SCRIPTED_FIXTURE;
@@ -515,7 +515,7 @@ for (const admitted of [false, true]) darwinTest(`operator-terminal OAR host bin
   let taskAuthority = admitted ? { source: seedReviewAdmissionFixture(repo, home).source, claim } : undefined;
   const closeRequest = join(output, 'close.request'), readyFile = join(output, 'ready.json'), disposedFile = join(output, 'disposed.json');
   const specFile = join(fixture, 'fixture.json'), profile = join(fixture, 'profile.sb');
-  const paths = { subject: repo, primary: repo, ownerRecord: repo, journal: repo, gitCommonDir: join(repo,'.git'), output };
+  const paths = { subject: repo, primary: repo, ownerRecord: repo, journal: repo, gitCommonDir: join(repo,'.git'), output, nativeAuth: [] };
   writeFileSync(profile, reviewIsolationPolicy(paths));
   writeFileSync(specFile, JSON.stringify({ mode: 'scripted', cwd: repo, inputs: [], closeRequest, readyFile, disposedFile, isolation: { paths, policyFile: profile } }));
   const command = reviewHostCommand(realpathSync(Bun.which('node')!), realpathSync(join(import.meta.dir,'../dist/oar-review-host.js')), specFile);

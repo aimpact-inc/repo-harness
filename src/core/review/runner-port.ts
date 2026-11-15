@@ -62,10 +62,10 @@ export interface ReviewIsolationPaths {
   readonly gitCommonDir: string;
   readonly output: string;
   readonly piAgentDirectory?: string;
-  /** Loopback ports of the Pi model providers, from models.json. The policy allows only these. */
-  readonly piLoopbackPorts?: readonly number[];
-  /** The resolved native pi auth.json. The policy denies it and its lock to the sandbox. */
-  readonly piNativeAuth?: string;
+  /** Loopback ports of the model endpoint (magpie for codex, the pi provider for pi). The policy allows only these. */
+  readonly modelLoopbackPorts?: readonly number[];
+  /** The resolved native pi and codex auth.json files. The policy denies them and their locks to every sandbox kind. */
+  readonly nativeAuth: readonly string[];
 }
 /** The isolation policy as data. The host applies it and refuses a session it cannot isolate. */
 export interface ReviewIsolationAdmission {
@@ -88,15 +88,14 @@ export interface ReviewHostSpec {
   timeoutMs: number;
 }
 /**
- * The owner writes this file to the control directory before each launch or bind, after its
- * credential check. The host refuses a native session that starts at or after `deadline`, and
- * a pi host repeats the credential-window check for `pi` there.
+ * The owner writes this file to the control directory before each launch or bind. The host
+ * refuses a native session that starts at or after `deadline`.
  */
 export const REVIEW_HOST_LAUNCH_FILE = 'launch-deadline.json';
 export interface ReviewHostLaunch {
   deadline: number;
-  /** The canonical `provider/model` of the admission, the review-local auth.json and the provider of its entry. */
-  pi: { model: string; auth: string; provider: string } | null;
+  /** The canonical `provider/model` of the pi admission. */
+  pi: { model: string } | null;
 }
 /**
  * The observation kind of a turn that the host stopped at its round deadline. The host writes it

@@ -14,7 +14,7 @@ import type { ReviewerRunner, TaskClaimReference, TaskCleanupResult, TaskRequest
 import { acquireExclusiveDirectoryLock, ExclusiveLockContentionError, withCallerLock } from '../locking/exclusive-directory-lock';
 import { taskRepository } from '../git/task-repository';
 import { ensureSessionDirectory, nextSessionRound, readSessionArtifact, writeSessionArtifact } from '../terminal/task-session-io';
-import { reviewIsolationPolicy, prepareReviewLauncher, prepareCodexHome, removeCopiedAuth, preparePiAgentDirectory, removePiCredentialReferences, assertPiCredentialWindow, type PiCredential } from './review-isolation';
+import { reviewIsolationPolicy, prepareReviewLauncher, prepareCodexHome, preparePiAgentDirectory, removePiCredentialReferences, nativeAuthFiles, CODEX_REVIEW_LOOPBACK_PORTS } from './review-isolation';
 import { acceptanceContext, acceptanceReviewContextDigest, authorityFingerprint, GENERIC_REVIEW_ROLE,
   projectAcceptance, recordAcceptance, verifyAcceptance, type AcceptancePullRequestSelection,
   type AcceptanceReceipt } from './acceptance-receipt';
@@ -130,7 +130,6 @@ export async function runReviewRound<Session, Endpoint>(options: ReviewOptions<E
   const endpoint = options.endpoint ?? null, parentPane = options.parentPane ?? null;
   const { root, primary, campaign, key, dir } = reviewLocation(options.repoRoot, options.authority);
   const lock = acquireExclusiveDirectoryLock(primary, relative(primary, join(dir, 'caller.lock')), { waitTimeoutMs: 1, reclaimStaleOwner: true });
-  let authOutput: string | undefined;
   let piOutput: string | undefined;
   try {
     if (existsSync(join(dir, 'closed.json'))) throw new Error('review_session_closed');
@@ -209,31 +208,27 @@ export async function runReviewRound<Session, Endpoint>(options: ReviewOptions<E
       const hostTimeout = readSessionArtifact<ReviewHostSpec>(specPath).timeoutMs;
       if (hostTimeout !== timeout) throw new Error(`review_timeout_changed_for_live_host: the host runs with --timeout-ms ${hostTimeout}; repeat the round with that value, or cancel the review and start a new one`);
     }
-    // The one absolute round deadline: the credential window, the host turn and this wait all end at it.
+    // The one absolute round deadline: the host launch, the host turn and this wait all end at it.
     const deadline = Date.now() + timeout;
     let runtimeHome: string | undefined;
-    let piLoopbackPorts: readonly number[] = [];
+    let modelLoopbackPorts: readonly number[] = [];
     let piModel: string | undefined;
-    let piCredential: PiCredential | undefined;
-    let piNativeAuth: string | undefined;
+    const sourceHome = client.endpointHome(options.endpoint) ?? process.env.HOME ?? userInfo().homedir;
     if (session.actual_harness === 'codex') {
-      authOutput = outbox;
-      const marker = join(dir, 'auth-copy.json');
-      const prepared = prepareCodexHome(outbox, client.endpointHome(options.endpoint) ?? process.env.HOME ?? userInfo().homedir, timeout * REVIEW_MAX_ROUNDS + 120_000, existsSync(marker));
-      runtimeHome = prepared.home;
-      if (!existsSync(marker)) writeSessionArtifact(marker, { auth_copied: true, mode: prepared.mode });
+      runtimeHome = prepareCodexHome(outbox, client.sessionOptions('codex', outbox).model!).home;
+      modelLoopbackPorts = CODEX_REVIEW_LOOPBACK_PORTS;
     }
     if (session.actual_harness === 'pi') {
       piOutput = outbox;
-      const prepared = preparePiAgentDirectory(outbox, client.endpointHome(options.endpoint) ?? process.env.HOME ?? userInfo().homedir, deadline,
+      const prepared = preparePiAgentDirectory(outbox, sourceHome,
         (agentDirectory, reference) => client.resolvePiModel(piCommand(), agentDirectory, reference));
-      runtimeHome = prepared.directory; piLoopbackPorts = prepared.loopbackPorts; piModel = prepared.model; piCredential = prepared.credential; piNativeAuth = prepared.nativeAuth;
+      runtimeHome = prepared.directory; modelLoopbackPorts = prepared.loopbackPorts; piModel = prepared.model;
     }
     // Isolation admission precedes any SDK/native Session creation.
     const repository = taskRepository(root);
     const isolationPaths = { subject: root, primary, ownerRecord: dir, journal: dir,
-      gitCommonDir: repository.repository_id, output: outbox,
-      ...(session.actual_harness === 'pi' ? { piAgentDirectory: runtimeHome, piLoopbackPorts, piNativeAuth } : {}) };
+      gitCommonDir: repository.repository_id, output: outbox, nativeAuth: nativeAuthFiles(sourceHome), modelLoopbackPorts,
+      ...(session.actual_harness === 'pi' ? { piAgentDirectory: runtimeHome } : {}) };
     const policy = reviewIsolationPolicy(isolationPaths);
     const profilePath = join(dir, 'isolation.sb');
     if (!existsSync(profilePath)) writeFileSync(profilePath, policy, { flag: 'wx', mode: 0o600 });
@@ -257,11 +252,8 @@ export async function runReviewRound<Session, Endpoint>(options: ReviewOptions<E
       writeSessionArtifact(specPath, spec);
     }
     const command = client.hostCommand(specPath, false);
-    // pi reads the credential when its session starts. The host repeats this check against the
-    // launch file just before that start, so a late operator launch cannot pass the deadline.
-    if (piCredential) assertPiCredentialWindow(piCredential, deadline);
     // Replaced on each attempt: a launch_required round keeps its number. The reviewer cannot write the control directory.
-    const launch: ReviewHostLaunch = { deadline, pi: piCredential ? { model: piModel!, ...piCredential } : null };
+    const launch: ReviewHostLaunch = { deadline, pi: piModel ? { model: piModel } : null };
     writeSessionArtifact(join(dir, REVIEW_HOST_LAUNCH_FILE), launch, false);
     let binding: Session;
     if (session.endpoint === null) {
@@ -348,7 +340,6 @@ export async function runReviewRound<Session, Endpoint>(options: ReviewOptions<E
     return { status: output.verdict === 'PASS' ? 'accepted' as const : 'rejected' as const, round, output, receipt,
       projection, requested_harness: session.requested_harness, actual_harness: session.actual_harness, fallback_reason: session.fallback_reason };
   } catch (error) {
-    if (authOutput && removeCopiedAuth(authOutput).status === 'cleanup_pending') throw new Error('cleanup_pending: review_auth_copy_delete_failed');
     if (piOutput && removePiCredentialReferences(piOutput).status === 'cleanup_pending') throw new Error('cleanup_pending: review_pi_credential_cleanup_failed');
     throw error;
   } finally { lock.release(); }
@@ -382,17 +373,12 @@ export async function closeReview<Session, Endpoint>(repoRoot: string, authority
     try { writeSessionArtifact(join(dir, 'close.request'), { close: true }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
   }
-  let authOutput: string | undefined;
   let piOutput: string | undefined;
   try {
     return await withCallerLock(primary, dir, async () => {
       if (existsSync(join(dir, 'session.json'))) {
         const owned = readSessionArtifact<ReviewSession<Endpoint>>(join(dir, 'session.json'));
-        if (owned.actual_harness === 'codex' || owned.actual_harness === 'pi') {
-          const output = effects.outputDirectory(owned.reviewer_repo, primary, owned.task, GENERIC_REVIEW_ROLE);
-          if (owned.actual_harness === 'codex') authOutput = output;
-          else piOutput = output;
-        }
+        if (owned.actual_harness === 'pi') piOutput = effects.outputDirectory(owned.reviewer_repo, primary, owned.task, GENERIC_REVIEW_ROLE);
       }
       if (existsSync(join(dir, 'closed.json'))) return readSessionArtifact<{ cleanup: TaskCleanupResult }>(join(dir, 'closed.json')).cleanup;
       const session = readSessionArtifact<ReviewSession<Endpoint>>(join(dir, 'session.json'));
@@ -423,7 +409,6 @@ export async function closeReview<Session, Endpoint>(repoRoot: string, authority
     }
     throw error;
   } finally {
-    if (authOutput && removeCopiedAuth(authOutput).status === 'cleanup_pending') throw new Error('cleanup_pending: review_auth_copy_delete_failed');
     if (piOutput && removePiCredentialReferences(piOutput).status === 'cleanup_pending') throw new Error('cleanup_pending: review_pi_credential_cleanup_failed');
   }
 }

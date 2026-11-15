@@ -1,4 +1,4 @@
-import { lstatSync, realpathSync, mkdirSync, existsSync, readFileSync, openSync, closeSync, constants, fstatSync, writeFileSync, fsyncSync, unlinkSync, symlinkSync, readlinkSync, renameSync } from 'node:fs';
+import { lstatSync, realpathSync, mkdirSync, existsSync, readFileSync, openSync, closeSync, constants, fstatSync, writeFileSync, unlinkSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { isAbsolute, relative, sep, join, dirname } from 'node:path';
 import { piAgentDir } from '../pi-agent-dir';
@@ -8,59 +8,52 @@ import { shellQuote } from '../../core/shell-quote';
 import type { ReviewIsolationAdmission, ReviewIsolationPaths } from '../../core/review/runner-port';
 
 
-/** The review-local auth.json and the canonical provider whose entry pi reads at its session start. */
-export interface PiCredential { readonly auth: string; readonly provider: string }
 /**
- * `model` is the canonical `provider/model` from pi's resolver; the review passes it to pi as `--model`.
- * `nativeAuth` is the resolved native auth.json, which the review profile denies to the sandbox.
+ * The local magpie endpoint (#2764). The review sandbox holds no real credential: each sandboxed
+ * model call goes to magpie on loopback with this placeholder key, and magpie holds the real one.
  */
-export interface PiAgentDirectory {
-  readonly directory: string; readonly loopbackPorts: readonly number[]; readonly model: string;
-  readonly credential: PiCredential; readonly nativeAuth: string;
-}
+export const MAGPIE_BASE_URL = 'http://127.0.0.1:3425/v1';
+export const MAGPIE_PLACEHOLDER_KEY = 'magpie';
+/** The model ports that a codex review sandbox opens: magpie alone. */
+export const CODEX_REVIEW_LOOPBACK_PORTS: readonly number[] = [Number(new URL(MAGPIE_BASE_URL).port)];
+const MAGPIE_ROUTE = `route the review through magpie (${MAGPIE_BASE_URL}, apiKey ${JSON.stringify(MAGPIE_PLACEHOLDER_KEY)})`;
 
-/** pi-ai refreshes an OAuth token that has less than 5 minutes left (auth/resolve.js DEFAULT_OAUTH_MINIMUM_VALIDITY_MS). */
-const PI_OAUTH_REFRESH_MARGIN_MS = 300_000;
+/** `model` is the canonical `provider/model` from pi's resolver; the review passes it to pi as `--model`. */
+export interface PiAgentDirectory { readonly directory: string; readonly loopbackPorts: readonly number[]; readonly model: string }
 
 const MODEL_URL_DEFAULT_PORTS: Readonly<Record<string, number>> = { 'http:': 80, 'https:': 443 };
 const LOOPBACK_MODEL_HOSTS: readonly string[] = ['127.0.0.1', 'localhost', '[::1]'];
 
 /**
- * The loopback ports that models.json names as a provider baseUrl (M82). The
- * review profile allows these ports and no other, so a provider on the console
- * port would reopen the write routes and refuses the session. A remote provider
- * needs no rule.
+ * The models.json entry of the selected provider, when it is a loopback provider with the
+ * placeholder key. Any other provider would put a real credential in the sandbox, so it refuses
+ * the session. The review profile allows the returned port and no other; a provider on the
+ * console port would reopen the write routes (M82).
  */
-function piModelLoopbackPorts(bytes: Buffer): readonly number[] {
-  let providers: Record<string, { readonly baseUrl?: unknown } | null> | null | undefined;
+function piLoopbackProvider(bytes: Buffer, provider: string, modelsPath: string): { readonly entry: Readonly<Record<string, unknown>>; readonly port: number } {
+  let providers: Record<string, unknown> | null | undefined;
   try { providers = JSON.parse(bytes.toString('utf8'))?.providers; } catch { throw new Error('review_pi_models_invalid'); }
-  const ports = new Set<number>();
-  for (const provider of Object.values(providers ?? {})) {
-    const baseUrl = provider?.baseUrl;
-    if (baseUrl === undefined) continue;
-    if (typeof baseUrl !== 'string' || !URL.canParse(baseUrl)) throw new Error('review_pi_model_base_url_invalid');
-    const url = new URL(baseUrl), defaultPort = MODEL_URL_DEFAULT_PORTS[url.protocol];
-    // "127.0.0.1:3425/v1" parses with the scheme "127.0.0.1:", so the scheme check also refuses a missing scheme.
-    if (defaultPort === undefined) throw new Error('review_pi_model_base_url_invalid');
-    if (!LOOPBACK_MODEL_HOSTS.includes(url.hostname)) continue;
-    const port = url.port === '' ? defaultPort : Number(url.port);
-    if (port === OPERATOR_DEFAULT_PORT) throw new Error('review_pi_model_port_is_operator_console');
-    ports.add(port);
-  }
-  return [...ports];
+  const entry = providers && Object.hasOwn(providers, provider) ? providers[provider] as Record<string, unknown> | null : undefined;
+  const refused = `review_pi_provider_not_loopback: the review sandbox holds no real credential, and ${modelsPath} has no loopback ${provider} provider with the placeholder key; ${MAGPIE_ROUTE}`;
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry) || entry.apiKey !== MAGPIE_PLACEHOLDER_KEY) throw new Error(refused);
+  const baseUrl = entry.baseUrl;
+  if (typeof baseUrl !== 'string' || !URL.canParse(baseUrl)) throw new Error(refused);
+  const url = new URL(baseUrl), defaultPort = MODEL_URL_DEFAULT_PORTS[url.protocol];
+  // "127.0.0.1:3425/v1" parses with the scheme "127.0.0.1:", so the scheme check also refuses a missing scheme.
+  if (defaultPort === undefined || !LOOPBACK_MODEL_HOSTS.includes(url.hostname)) throw new Error(refused);
+  const port = url.port === '' ? defaultPort : Number(url.port);
+  if (port === OPERATOR_DEFAULT_PORT) throw new Error('review_pi_model_port_is_operator_console');
+  return { entry, port };
 }
 
 /**
- * Only the native model defaults are projected into private settings, and only the provider's
- * auth entry is projected into a review-local auth.json. Without an explicit model pi falls
- * through to the first provider with auth, so the native settings must name the provider and
- * model in the canonical form that pi's own resolver returns, and the native auth.json must hold
- * an entry for that provider. The projected OAuth entry has an empty refresh token (#2764), so
- * no sandboxed process holds a usable one. pi tries a refresh when the token has less than the
- * refresh margin left, and that refresh fails, so the token must outlive the round deadline
- * plus that margin.
+ * Only the native model defaults are projected into private settings, and only the selected
+ * provider's models.json entry is projected into a private models.json. Without an explicit model
+ * pi falls through to the first provider with auth, so the native settings must name the provider
+ * and model in the canonical form that pi's own resolver returns. The projected auth.json is an
+ * empty map: the provider is a loopback provider with the placeholder key (piLoopbackProvider).
  */
-export function preparePiAgentDirectory(output: string, sourceHome: string, deadline: number,
+export function preparePiAgentDirectory(output: string, sourceHome: string,
   resolveModel: (agentDirectory: string, reference: string) => PiModelIdentity,
   env: Readonly<Record<string, string | undefined>> = process.env): PiAgentDirectory {
   const directory = join(ownedOutput(output), '.pi-agent');
@@ -74,80 +67,42 @@ export function preparePiAgentDirectory(output: string, sourceHome: string, dead
   for (const path of [dirname(source), source]) {
     if (existsSync(path) && (lstatSync(path).isSymbolicLink() || !lstatSync(path).isDirectory())) throw new Error('review_pi_source_unsafe');
   }
-  const models = join(source, 'models.json'), destination = join(directory, 'models.json');
-  let loopbackPorts: readonly number[] = [];
-  if (existsSync(models)) {
-    const bytes = readNativeConfigBytes(models);
-    try { loopbackPorts = piModelLoopbackPorts(bytes); } finally { bytes.fill(0); }
-    if (!existsSync(destination)) symlinkSync(models, destination);
-    if (!lstatSync(destination).isSymbolicLink() || readlinkSync(destination) !== models) throw new Error('review_pi_models_changed');
-  } else if (existsSync(destination)) throw new Error('review_pi_models_changed');
   const settings = preparePiSettings(directory, source), settingsPath = join(source, 'settings.json');
   const provider = settings.defaultProvider, model = settings.defaultModel;
   if (typeof provider !== 'string' || provider === '' || typeof model !== 'string' || model === '') {
     throw new Error(`review_pi_model_unnamed: set defaultProvider and defaultModel in ${settingsPath}`);
   }
+  const models = join(source, 'models.json');
+  if (!existsSync(models)) throw new Error(`review_pi_provider_not_loopback: ${models} does not exist; ${MAGPIE_ROUTE}`);
+  const bytes = readNativeConfigBytes(models);
+  let selected: ReturnType<typeof piLoopbackProvider>;
+  try { selected = piLoopbackProvider(bytes, provider, models); } finally { bytes.fill(0); }
+  writeOwnedProjection(join(directory, 'models.json'), JSON.stringify({ providers: { [provider]: selected.entry } }) + '\n', 'review_pi_models_changed');
+  // pi creates auth.json at its session start, and the profile denies each auth.json write, so the owner writes an empty map.
+  writeOwnedProjection(join(directory, 'auth.json'), '{}\n', 'review_pi_auth_changed');
   let resolved: PiModelIdentity;
   try { resolved = resolveModel(directory, `${provider}/${model}`); } catch (error) {
     const message = (error as Error).message;
     if (!message.startsWith('review_pi_model_unresolved')) throw error;
     // The resolver child has no remote catalog: a model that only the remote catalog lists stays unresolved.
-    throw new Error(`${message}; set defaultProvider and defaultModel in ${settingsPath} to a model that \`pi --list-models\` lists from the built-in catalog or models.json, then repeat the round`);
+    throw new Error(`${message}; set defaultProvider and defaultModel in ${settingsPath} to a model that \`pi --list-models\` lists from models.json, then repeat the round`);
   }
   if (resolved.provider !== provider || resolved.model !== model) {
     throw new Error(`review_pi_model_not_canonical: pi resolves ${provider}/${model} to ${resolved.provider}/${resolved.model}; set defaultProvider and defaultModel in ${settingsPath} to that form`);
   }
-  const native = { auth: join(source, 'auth.json'), provider }, entry = readPiAuthEntry(native, deadline);
-  const projected = Buffer.from(JSON.stringify({ [provider]: entry.type === 'oauth' ? { ...entry, refresh: '' } : entry }) + '\n');
-  const credential: PiCredential = { auth: join(directory, 'auth.json'), provider };
-  try { writePiReviewAuth(directory, projected); } finally { projected.fill(0); }
-  return { directory, loopbackPorts, model: `${provider}/${model}`, credential, nativeAuth: realpathSync(native.auth) };
+  return { directory, loopbackPorts: [selected.port], model: `${provider}/${model}` };
 }
 
-/**
- * Each round writes the projection again, so a /login outside the review renews the next round.
- * The rename replaces the entry atomically and never follows a link at the destination.
- */
-function writePiReviewAuth(directory: string, content: Buffer): void {
-  const destination = join(directory, 'auth.json'), next = `${destination}.next`;
-  if (existsSync(destination)) {
-    const stat = lstatSync(destination);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid?.()) throw new Error('review_pi_auth_changed');
-  }
-  try { unlinkSync(next); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  const fd = openSync(next, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-  try { writeFileSync(fd, content); fsyncSync(fd); } finally { closeSync(fd); }
-  renameSync(next, destination);
-}
-
-/**
- * The one pi credential-window check: at admission on the native entry, before the host launch
- * and in the host just before the pi session starts on the review-local file. The deadline does
- * not move, so a start at or after it could find the token inside pi's refresh margin.
- */
-export function assertPiCredentialWindow(credential: PiCredential, deadline: number): void {
-  readPiAuthEntry(credential, deadline);
-}
-
-/** Reads the provider entry of a pi auth.json and refuses it unless it outlives `deadline` plus pi's refresh margin. */
-function readPiAuthEntry(credential: PiCredential, deadline: number): PiAuthEntry {
-  const { auth, provider } = credential;
-  const renew = piRenew(provider);
-  if (Date.now() >= deadline) throw new Error('review_round_deadline_passed: the round deadline passed before the pi session start; repeat the round');
-  if (!existsSync(auth)) throw new Error(`review_pi_auth_missing: ${auth} does not exist; ${renew}`);
-  const bytes = readNativeConfigBytes(auth);
-  let entry: PiAuthEntry;
-  try { entry = piAuthEntry(bytes, credential); } finally { bytes.fill(0); }
-  assertAccessWindow([entry.type === 'oauth' ? entry.expires : 'none'], deadline + PI_OAUTH_REFRESH_MARGIN_MS, `${renew} to renew the ${provider} token`);
-  return entry;
-}
-
-function piRenew(provider: string): string {
-  return `run pi outside the review and enter /login ${provider}, then repeat the round, or cancel the review and start a new one`;
+/** Writes an owner projection once (0600, never through a link); a later round must find the same content. */
+function writeOwnedProjection(destination: string, content: string, changed: string): void {
+  if (!existsSync(destination)) writeFileSync(destination, content, { flag: 'wx', mode: 0o600 });
+  const stat = lstatSync(destination);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o600
+    || readFileSync(destination, 'utf8') !== content) throw new Error(changed);
 }
 
 function preparePiSettings(directory: string, source: string): Readonly<Record<string, unknown>> {
-  const native = join(source, 'settings.json'), destination = join(directory, 'settings.json');
+  const native = join(source, 'settings.json');
   let settings: Record<string, unknown> = {};
   if (existsSync(native)) {
     const bytes = readNativeConfigBytes(native);
@@ -160,11 +115,7 @@ function preparePiSettings(directory: string, source: string): Readonly<Record<s
   }
   const projection = Object.fromEntries(['defaultProvider', 'defaultModel', 'defaultThinkingLevel']
     .filter(key => Object.hasOwn(settings, key)).map(key => [key, settings[key]]));
-  const content = JSON.stringify(projection) + '\n';
-  if (!existsSync(destination)) writeFileSync(destination, content, { flag: 'wx', mode: 0o600 });
-  const stat = lstatSync(destination);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o600
-    || readFileSync(destination, 'utf8') !== content) throw new Error('review_pi_settings_changed');
+  writeOwnedProjection(join(directory, 'settings.json'), JSON.stringify(projection) + '\n', 'review_pi_settings_changed');
   return projection;
 }
 
@@ -179,7 +130,7 @@ export function removePiCredentialReferences(output: string): { status: 'removed
     }
     if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync(directory) !== directory) return { status: 'cleanup_pending' };
     let removed = false, pending = false;
-    for (const name of ['models.json', 'settings.json', 'auth.json', 'auth.json.next']) {
+    for (const name of ['models.json', 'settings.json', 'auth.json']) {
       try { unlinkSync(join(directory, name)); removed = true; } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') pending = true;
       }
@@ -197,54 +148,6 @@ function ownedOutput(output: string): string {
   if (!isAbsolute(output) || lstatSync(output).isSymbolicLink() || !lstatSync(output).isDirectory()) throw new Error('review_output_unsafe');
   return realpathSync(output);
 }
-/** A credential expiry in epoch milliseconds, or 'none' for a credential that does not expire (an API key). */
-type CredentialExpiry = number | 'none';
-
-/** The one run-window rule: a sandboxed run cannot refresh a credential, so each one must outlive `until` (epoch ms). */
-function assertAccessWindow(expiries: readonly CredentialExpiry[], until: number, renew?: string): void {
-  const now = Date.now();
-  if (!Number.isSafeInteger(until) || until <= now) throw new Error('review_auth_window_invalid');
-  if (expiries.some(expiry => expiry !== 'none' && expiry <= until)) {
-    throw new Error(`review_access_expires_within_run${renew ? `; the token must stay valid for ${Math.ceil((until - now) / 60_000)} minutes; ${renew}` : ''}`);
-  }
-}
-/** Codex auth.json: the access token JWT carries the expiry in seconds. */
-function codexAuth(bytes: Buffer): { readonly auth: { readonly tokens: Record<string, unknown> }; readonly expiry: CredentialExpiry } {
-  let auth: { tokens?: unknown }, exp: unknown;
-  try {
-    auth = JSON.parse(bytes.toString('utf8'));
-    const tokens = auth.tokens as Record<string, unknown> | undefined;
-    if (typeof tokens?.access_token !== 'string') throw new Error();
-    exp = JSON.parse(Buffer.from(tokens.access_token.split('.')[1]!, 'base64url').toString('utf8')).exp;
-  } catch { throw new Error('review_access_exp_unverified'); }
-  if (typeof exp !== 'number' || !Number.isFinite(exp)) throw new Error('review_access_exp_unverified');
-  return { auth: auth as { tokens: Record<string, unknown> }, expiry: exp * 1000 };
-}
-type PiAuthEntry = Readonly<Record<string, unknown>> & (
-  { readonly type: 'api_key' } | { readonly type: 'oauth'; readonly access: string; readonly refresh: string; readonly expires: number });
-
-/**
- * pi auth.json: a provider map of `api_key` entries (no expiry) and `oauth`
- * entries (`access` and `refresh` strings, `expires` in epoch milliseconds), the
- * shape that pi's own loader accepts. The run passes one canonical provider to
- * pi, so only its entry counts, and the entry must exist. Another shape fails closed.
- */
-function piAuthEntry(bytes: Buffer, { auth, provider }: PiCredential): PiAuthEntry {
-  const renew = piRenew(provider);
-  const unknownShape = `review_pi_auth_shape_unknown: ${auth} is not a pi auth map with an api_key or oauth entry for ${JSON.stringify(provider)}; ${renew}`;
-  let entries: unknown;
-  try { entries = JSON.parse(bytes.toString('utf8')); } catch { throw new Error(unknownShape); }
-  if (!entries || typeof entries !== 'object' || Array.isArray(entries)) throw new Error(unknownShape);
-  const map = entries as Record<string, unknown>;
-  if (!Object.hasOwn(map, provider)) throw new Error(`review_pi_auth_missing: ${auth} has no ${provider} entry; ${renew}`);
-  const entry = map[provider] as Record<string, unknown> | null;
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(unknownShape);
-  if (entry.type === 'api_key') return entry as PiAuthEntry;
-  if (entry.type === 'oauth' && typeof entry.access === 'string' && typeof entry.refresh === 'string'
-    && typeof entry.expires === 'number' && Number.isFinite(entry.expires)) return entry as PiAuthEntry;
-  throw new Error(unknownShape);
-}
-
 /** One bounded read of a native credential or configuration file (auth.json, models.json, settings.json); never follows a link. */
 function readNativeConfigBytes(path: string): Buffer {
   let fd: number;
@@ -257,60 +160,34 @@ function readNativeConfigBytes(path: string): Buffer {
   } finally { closeSync(fd); }
 }
 
-/** Owner-only credential preparation. Never called by the sandboxed host. */
-export function prepareCodexHome(output: string, sourceHome: string, runWindowMs: number, reuse = false): { home: string; auth_copied: true; mode: '0600' } {
-  try {
-    const home = join(ownedOutput(output), '.codex-home');
-    try { mkdirSync(home, { mode: 0o700 }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw new Error('review_codex_home_create_failed'); }
-    const dir = lstatSync(home);
-    if (!dir.isDirectory() || dir.isSymbolicLink() || dir.uid !== process.getuid?.() || (dir.mode & 0o777) !== 0o700) throw new Error('review_codex_home_unsafe');
-    const destination = join(home, 'auth.json');
-    if (reuse) {
-      const stat = lstatSync(destination);
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o600) throw new Error('review_auth_copy_unsafe');
-      const bytes = readNativeConfigBytes(destination);
-      let copy: ReturnType<typeof codexAuth>;
-      try { copy = codexAuth(bytes); } finally { bytes.fill(0); }
-      if (copy.auth.tokens.refresh_token !== '') throw new Error('review_auth_copy_unsafe');
-      assertAccessWindow([copy.expiry], Date.now() + runWindowMs);
-      return { home, auth_copied: true, mode: '0600' };
-    }
-    const sourceDirectory = join(realpathSync(sourceHome), '.codex');
-    if (lstatSync(sourceDirectory).isSymbolicLink() || !lstatSync(sourceDirectory).isDirectory()) throw new Error('review_auth_source_unsafe');
-    const source = readNativeConfigBytes(join(sourceDirectory, 'auth.json'));
-    let bytes = source, fd: number | undefined; let created = false;
-    try {
-      const native = codexAuth(source);
-      assertAccessWindow([native.expiry], Date.now() + runWindowMs);
-      // Codex refuses an auth.json without the refresh_token key, so the copy keeps the key empty (#2764).
-      bytes = Buffer.from(JSON.stringify({ ...native.auth, tokens: { ...native.auth.tokens, refresh_token: '' } }));
-      fd = openSync(destination, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); created = true;
-      writeFileSync(fd, bytes); fsyncSync(fd);
-    } catch (error) {
-      if (created) {
-        if (fd !== undefined) { closeSync(fd); fd = undefined; }
-        if (removeCopiedAuth(output).status === 'cleanup_pending') throw new Error('cleanup_pending: review_auth_copy_delete_failed');
-      }
-      if (error instanceof Error && /^review_access_/.test(error.message)) throw error;
-      throw new Error('review_auth_copy_failed');
-    } finally { if (fd !== undefined) closeSync(fd); source.fill(0); bytes.fill(0); }
-    return { home, auth_copied: true, mode: '0600' };
-  } catch (error) {
-    if (error instanceof Error && /^(review_|cleanup_pending:)/.test(error.message)) throw error;
-    throw new Error('review_auth_preflight_failed');
-  }
+/**
+ * The codex review home holds no auth.json (#2764): its config.toml sends each model call to
+ * magpie with the placeholder key. `model` must be a magpie codex model (codex/*); a group/*
+ * model can route to another model family.
+ */
+export function prepareCodexHome(output: string, model: string): { home: string } {
+  if (!/^codex\/[A-Za-z0-9._-]+$/.test(model)) throw new Error(`review_codex_model_not_magpie: ${JSON.stringify(model)} is not a magpie codex/* model`);
+  const home = join(ownedOutput(output), '.codex-home');
+  try { mkdirSync(home, { mode: 0o700 }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw new Error('review_codex_home_create_failed'); }
+  const dir = lstatSync(home);
+  if (!dir.isDirectory() || dir.isSymbolicLink() || dir.uid !== process.getuid?.() || (dir.mode & 0o777) !== 0o700) throw new Error('review_codex_home_unsafe');
+  if (existsSync(join(home, 'auth.json'))) throw new Error('review_codex_home_unsafe');
+  // codex 0.169 accepts only the responses wire API for a custom provider.
+  const config = `model = ${JSON.stringify(model)}\nmodel_provider = "magpie"\n\n[model_providers.magpie]\nname = "magpie"\nbase_url = ${JSON.stringify(MAGPIE_BASE_URL)}\nexperimental_bearer_token = ${JSON.stringify(MAGPIE_PLACEHOLDER_KEY)}\nwire_api = "responses"\n`;
+  writeOwnedProjection(join(home, 'config.toml'), config, 'review_codex_config_changed');
+  return { home };
 }
 
-/** Delete only the isolated copy; never follow a directory link or touch source. */
-export function removeCopiedAuth(output: string): { status: 'removed' | 'absent' | 'cleanup_pending' } {
-  try {
-    const home = join(ownedOutput(output), '.codex-home');
-    let stat;
-    try { stat = lstatSync(home); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { status: 'absent' }; throw error; }
-    if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync(home) !== home) return { status: 'cleanup_pending' };
-    try { unlinkSync(join(home, 'auth.json')); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { status: 'absent' }; throw error; }
-    return { status: 'removed' };
-  } catch { return { status: 'cleanup_pending' }; }
+/**
+ * The native pi and codex auth.json files, resolved as Seatbelt matches them. The review profile
+ * denies both, and their locks, to every sandbox kind (#2764).
+ */
+export function nativeAuthFiles(sourceHome: string, env: Readonly<Record<string, string | undefined>> = process.env): readonly string[] {
+  const home = realpathSync(sourceHome);
+  return [join(piAgentDir(home, env), 'auth.json'), join(home, '.codex', 'auth.json')].map(path => {
+    if (existsSync(path)) return realpathSync(path);
+    return existsSync(dirname(path)) ? join(realpathSync(dirname(path)), 'auth.json') : path;
+  });
 }
 
 /**
@@ -322,18 +199,11 @@ export function removeCopiedAuth(output: string): { status: 'removed' | 'absent'
  */
 export type CleanupReviewIsolationPaths = ReviewIsolationPaths & { readonly cleanup?: { readonly readDenied: readonly string[] } };
 
-/**
- * pi reads and locks the review-local auth.json (preparePiAgentDirectory); its
- * lock directory `<auth.json>.lock` lies in the writable output. The native
- * auth.json holds the refresh token, so the sandbox can neither read it nor
- * create its lock (#2764).
- */
-function piNativeAuthPolicy(directory: string, nativeAuth: string | undefined): string {
-  const local = lstatSync(join(directory, 'auth.json'));
-  if (!local.isFile() || local.isSymbolicLink()) throw new Error('review_pi_auth_changed');
-  // Seatbelt matches resolved paths, so the rule names the resolved native file.
-  if (nativeAuth === undefined || !isAbsolute(nativeAuth) || realpathSync(nativeAuth) !== nativeAuth) throw new Error('review_pi_native_auth_unsafe');
-  return `(deny file-read* file-write* (literal ${JSON.stringify(nativeAuth)}) (literal ${JSON.stringify(`${nativeAuth}.lock`)}))\n`;
+/** Each native auth.json and its lock, denied to reads and writes. */
+function nativeAuthPolicy(files: readonly string[]): string {
+  // Seatbelt matches resolved paths, so each rule names a resolved file.
+  if (files.some(path => !isAbsolute(path) || existsSync(path) && realpathSync(path) !== path)) throw new Error('review_native_auth_unsafe');
+  return files.map(path => `(deny file-read* file-write* (literal ${JSON.stringify(path)}) (literal ${JSON.stringify(`${path}.lock`)}))\n`).join('');
 }
 
 /** Seatbelt owns enforcement. This emits OS policy, never vendor CLI arguments. */
@@ -348,7 +218,7 @@ export function reviewIsolationPolicy(paths: CleanupReviewIsolationPaths, platfo
     const stat = lstatSync(directory);
     if (directory !== join(output, '.pi-agent') || stat.isSymbolicLink() || !stat.isDirectory()
       || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o700) throw new Error('review_pi_agent_directory_unsafe');
-    piPolicy = `(deny file-write* (literal ${JSON.stringify(join(directory, 'models.json'))}))\n${piNativeAuthPolicy(directory, paths.piNativeAuth)}`;
+    piPolicy = `(deny file-write* (literal ${JSON.stringify(join(directory, 'models.json'))}))\n`;
   }
   const readDenied = paths.cleanup?.readDenied ?? [];
   const protectedEntries = [paths.primary, paths.ownerRecord, paths.journal, paths.gitCommonDir, ...readDenied];
@@ -367,19 +237,19 @@ export function reviewIsolationPolicy(paths: CleanupReviewIsolationPaths, platfo
   const networkPolicy = '(deny network-outbound (remote tcp4 "localhost:*"))\n(deny network-outbound (remote tcp6 "*:*"))\n';
   // The last matching rule wins, so each allow follows the deny. A "localhost"
   // baseUrl can resolve to either family, so the allow names tcp, not tcp4.
-  const modelPortPolicy = (paths.piLoopbackPorts ?? []).map(port => `(allow network-outbound (remote tcp "localhost:${port}"))\n`).join('');
+  const modelPortPolicy = (paths.modelLoopbackPorts ?? []).map(port => `(allow network-outbound (remote tcp "localhost:${port}"))\n`).join('');
   const readPolicy = readDenied.map(path => `(deny file-read* (subpath ${JSON.stringify(path)}))\n`).join('');
   if (platform !== 'darwin') throw new Error('OAR_REVIEW_ISOLATION_UNSUPPORTED_PLATFORM');
   // Output alone is writable; every real CODEX_HOME state grant is retired.
   // Definitions, trust, settings/hooks and credentials stay denied even inside
   // an otherwise writable tree. Nothing in HOME or a native config root opens,
-  // and pi's native auth.json is also denied to reads (piNativeAuthPolicy).
+  // and both native auth.json files are also denied to reads (nativeAuthPolicy).
   const forbiddenFiles = '/(CLAUDE\\.md|AGENTS\\.md|settings[^/]*\\.json|\\.claude\\.json|config\\.toml|auth\\.json|\\.?credentials\\.json|secrets\\.json|token\\.json)$';
   const forbiddenDirectories = '/(\\.?hooks|\\.?agents|\\.?skills|\\.?rules|\\.?plugins)(/|$)';
   const exceptions = `(require-not (subpath ${JSON.stringify(output)}))`;
   // macOS resolves DNS through this system socket. Other local services remain denied.
   const unixSockets = '(require-all (remote unix-socket) (require-not (remote unix-socket (path-literal "/private/var/run/mDNSResponder"))))';
-  return `(version 1)\n(allow default)\n(deny file-write* (require-all ${exceptions} (require-not (literal "/dev/null"))))\n(deny file-write* (regex #"${forbiddenFiles}"))\n(deny file-write* (regex #"${forbiddenDirectories}"))\n(deny signal)\n(deny network-outbound ${unixSockets})\n${piPolicy}${networkPolicy}${modelPortPolicy}${readPolicy}`;
+  return `(version 1)\n(allow default)\n(deny file-write* (require-all ${exceptions} (require-not (literal "/dev/null"))))\n(deny file-write* (regex #"${forbiddenFiles}"))\n(deny file-write* (regex #"${forbiddenDirectories}"))\n(deny signal)\n(deny network-outbound ${unixSockets})\n${piPolicy}${nativeAuthPolicy(paths.nativeAuth)}${networkPolicy}${modelPortPolicy}${readPolicy}`;
 
 }
 
