@@ -64,6 +64,8 @@ export interface ReviewIsolationPaths {
   readonly piAgentDirectory?: string;
   /** Loopback ports of the Pi model providers, from models.json. The policy allows only these. */
   readonly piLoopbackPorts?: readonly number[];
+  /** The resolved native pi auth.json. The policy denies it and its lock to the sandbox. */
+  readonly piNativeAuth?: string;
 }
 /** The isolation policy as data. The host applies it and refuses a session it cannot isolate. */
 export interface ReviewIsolationAdmission {
@@ -93,7 +95,7 @@ export interface ReviewHostSpec {
 export const REVIEW_HOST_LAUNCH_FILE = 'launch-deadline.json';
 export interface ReviewHostLaunch {
   deadline: number;
-  /** The canonical `provider/model` of the admission, the native auth.json and the provider of its entry. */
+  /** The canonical `provider/model` of the admission, the review-local auth.json and the provider of its entry. */
   pi: { model: string; auth: string; provider: string } | null;
 }
 /**

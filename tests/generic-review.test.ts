@@ -34,11 +34,12 @@ type TaskReviewEffects = ReviewEffects<TaskPaneBinding, HerdrCoreEndpoint>;
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
+/** The review-local auth.json holds the provider entry by design (#2764); the tests assert its content. */
 function expectNoStoredPiProbe(directory: string): void {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) expectNoStoredPiProbe(path);
-    else if (entry.isFile()) expect(readFileSync(path, 'utf8'), path).not.toContain('sk-PROBE-LITERAL');
+    else if (entry.isFile() && !path.endsWith('/.pi-agent/auth.json')) expect(readFileSync(path, 'utf8'), path).not.toContain('sk-PROBE-LITERAL');
   }
 }
 
@@ -410,7 +411,7 @@ test('OAR SessionOptions reuse fleet and authorize only file communication, with
   }
 });
 
-test('Pi isolation fixture links native configuration without storing credential copies', async () => {
+test('Pi isolation fixture links native models and projects only the provider auth entry, without a refresh token', async () => {
   const { mkdirSync, chmodSync, symlinkSync, readlinkSync, readdirSync, unlinkSync } = await import('node:fs');
   const { preparePiAgentDirectory, assertPiCredentialWindow } = await import('../src/effects/review/review-isolation');
   const { assertHostLaunchAdmitted } = await import('../src/effects/review-runner/task-oar-host');
@@ -428,7 +429,9 @@ test('Pi isolation fixture links native configuration without storing credential
   expect(readdirSync(directory).sort()).toEqual(['auth.json', 'models.json', 'settings.json']);
   expect(lstatSync(join(directory, 'models.json')).isSymbolicLink()).toBe(true);
   expect(readlinkSync(join(directory, 'models.json'))).toBe(join(agent, 'models.json'));
-  expect(readlinkSync(join(directory, 'auth.json'))).toBe(join(agent, 'auth.json'));
+  expect(lstatSync(join(directory, 'auth.json')).isFile()).toBe(true);
+  expect(lstatSync(join(directory, 'auth.json')).mode & 0o777).toBe(0o600);
+  expect(readFileSync(join(directory, 'auth.json'), 'utf8')).toBe(`${readFileSync(join(agent, 'auth.json'), 'utf8')}\n`);
   expect(lstatSync(join(directory, 'settings.json')).isSymbolicLink()).toBe(false);
   expect(lstatSync(join(directory, 'settings.json')).mode & 0o777).toBe(0o600);
   expect(JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'))).toEqual({ defaultProvider: 'fixture-provider', defaultModel: 'fixture-model', defaultThinkingLevel: 'high' });
@@ -464,7 +467,10 @@ test('Pi isolation fixture links native configuration without storing credential
   const oauth = (expires: number) => ({ type: 'oauth', access: '[fixture]', refresh: '[fixture]', expires });
   const apiKey = { type: 'api_key', key: 'sk-PROBE-LITERAL' }, soon = Date.now() + 1000, deadline = Date.now() + 60_000;
   expect(prepareWith({ fixture: apiKey })().model).toBe('fixture/fixture-model');
-  expect(prepareWith({ fixture: oauth(inOneHour()) })).not.toThrow();
+  // An OAuth entry keeps its access token and loses its refresh token; other providers stay out (#2764).
+  const projected = prepareWith({ fixture: oauth(inOneHour()), other: oauth(inOneHour()) })();
+  expect(JSON.parse(readFileSync(projected.credential.auth, 'utf8'))).toEqual({ fixture: { ...oauth(JSON.parse(readFileSync(join(agent, 'auth.json'), 'utf8')).fixture.expires), refresh: '' } });
+  expect(projected.nativeAuth).toBe(realpathSync(join(agent, 'auth.json')));
   expect(prepareWith({ fixture: oauth(soon) })).toThrow(/review_access_expires_within_run.*\/login fixture/);
   // pi refreshes below 5 minutes left, so the token must outlive the round deadline plus 300 s.
   expect(prepareWith({ fixture: oauth(deadline + 300_000) }, named, deadline)).toThrow('review_access_expires_within_run');
@@ -499,6 +505,9 @@ test('Pi isolation fixture links native configuration without storing credential
   expect(() => assertHostLaunchAdmitted(hostSpec, true)).toThrow(/OAR_HOST_LAUNCH_DEADLINE_PASSED.*cancel the review and start a new one/);
   expect(() => assertPiCredentialWindow(late.credential, lateDeadline)).toThrow('review_round_deadline_passed');
   expect(prepareWith({ fixture: { type: 'session_token' } })).toThrow('review_pi_auth_shape_unknown');
+  // A malformed native OAuth entry refuses the session; nothing links or falls back to the native file.
+  const { access: _access, ...noAccess } = oauth(inOneHour());
+  expect(prepareWith({ fixture: noAccess })).toThrow('review_pi_auth_shape_unknown');
 });
 
 test('Pi review source fixture uses custom agent directories and rejects relative overrides', async () => {
@@ -519,7 +528,8 @@ test('Pi review source fixture uses custom agent directories and rejects relativ
     writeFileSync(join(source.directory, 'auth.json'), '{"fixture":{"type":"api_key","key":"sk-PROBE-LITERAL"}}');
     const output = join(root, `output-${index}`); mkdirSync(output);
     const { directory } = preparePiAgentDirectory(output, home, inOneHour(), piReferenceResolver, { PI_CODING_AGENT_DIR: source.configured });
-    for (const name of ['models.json', 'auth.json']) expect(readlinkSync(join(directory, name))).toBe(join(source.directory, name));
+    expect(readlinkSync(join(directory, 'models.json'))).toBe(join(source.directory, 'models.json'));
+    expect(readFileSync(join(directory, 'auth.json'), 'utf8')).toBe('{"fixture":{"type":"api_key","key":"sk-PROBE-LITERAL"}}\n');
     expect(JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'))).toEqual({ defaultProvider: 'fixture', defaultModel: 'fixture-model' });
     expectNoStoredPiProbe(output);
     expect(removePiCredentialReferences(output).status).toBe('removed');
@@ -577,11 +587,11 @@ darwinTest('Pi isolation fixture: OAR flags, native extension, actual model and 
   const targets = [join(source, 'protected.txt'), credential, join(agent, 'protected.txt'), join(directory, 'auth.json'), join(directory, 'models.json'), join(agent, 'models.json'), join(directory, 'settings.json'), join(agent, 'settings.json')];
   for (const target of [targets[0]!, targets[2]!]) writeFileSync(target, 'KEEP');
   const initial = targets.map(path => readFileSync(path, 'utf8'));
-  const paths = { subject: source, primary: source, ownerRecord: owner, journal: owner, gitCommonDir: source, output, piAgentDirectory: directory };
+  const paths = { subject: source, primary: source, ownerRecord: owner, journal: owner, gitCommonDir: source, output, piAgentDirectory: directory, piNativeAuth: realpathSync(credential) };
   const profile = join(owner, 'isolation.sb'); writeFileSync(profile, reviewIsolationPolicy(paths), { mode: 0o600 });
   const node = resolveNode24(), fixture = join(root, 'fixture-pi.cjs'), capture = join(output, 'argv.jsonl');
   const piCli = realpathSync(join(fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent')), '..', 'cli.js'));
-  const probe = `()=>{const fs=require('node:fs');const denied=${JSON.stringify(targets)}.map(path=>{try{fs.writeFileSync(path,'CHANGED');return false}catch(e){return ['EPERM','EACCES'].includes(e.code)}});let signal=false;try{process.kill(${process.pid},'SIGCONT')}catch(e){signal=e.code==='EPERM'};const lock=${JSON.stringify(realpathSync(credential) + '.lock')},refused=f=>{try{f();return false}catch(e){return ['EPERM','EACCES'].includes(e.code)}};fs.mkdirSync(lock);fs.utimesSync(lock,new Date(),new Date());const lockOnly=[refused(()=>fs.writeFileSync(lock+'/inner','CHANGED')),refused(()=>fs.chmodSync(lock,0o777)),refused(()=>fs.mkdirSync(lock+'x'))];fs.rmdirSync(lock);lockOnly.push(refused(()=>fs.writeFileSync(lock,'CHANGED')));return {denied,signal,lockOnly};}`;
+  const probe = `()=>{const fs=require('node:fs');const denied=${JSON.stringify(targets)}.map(path=>{try{fs.writeFileSync(path,'CHANGED');return false}catch(e){return ['EPERM','EACCES'].includes(e.code)}});let signal=false;try{process.kill(${process.pid},'SIGCONT')}catch(e){signal=e.code==='EPERM'};const native=${JSON.stringify(realpathSync(credential))},local=${JSON.stringify(join(directory, 'auth.json.lock'))},refused=f=>{try{f();return false}catch(e){return ['EPERM','EACCES'].includes(e.code)}};const nativeAuth=[refused(()=>fs.readFileSync(native)),refused(()=>fs.mkdirSync(native+'.lock'))];let localLock;try{fs.mkdirSync(local);fs.rmdirSync(local);localLock=true}catch(e){localLock=e.code==='EEXIST'};return {denied,signal,nativeAuth,localLock};}`;
   writeFileSync(fixture, `#!${node}\nconst fs=require('node:fs'),cp=require('node:child_process');
 const argv=process.argv.slice(2);
 const check=${probe};
@@ -617,7 +627,7 @@ console.log(JSON.stringify({session_id:id,model:'openai/gpt-4o',extension_ready:
   for (const flag of ['--no-extensions', '--no-skills', '--no-context-files', '--no-prompt-templates', '--no-mcp', '--no-approve', '--offline']) expect(run.argv).toContain(flag);
   expect(run.argv[run.argv.indexOf('--mode') + 1]).toBe('rpc'); expect(run.argv).toContain('-e');
   expect(run.env.PI_CODING_AGENT_DIR).toBe(directory); expect(run.env.OAR_PI_AGENT_DIR).toBe(directory);
-  for (const row of captures) for (const evidence of [row.own, row.descendant]) { expect(evidence.denied).toEqual(targets.map(() => true)); expect(evidence.signal).toBe(true); expect(evidence.lockOnly).toEqual([true, true, true, true]); }
+  for (const row of captures) for (const evidence of [row.own, row.descendant]) { expect(evidence.denied).toEqual(targets.map(() => true)); expect(evidence.signal).toBe(true); expect(evidence.nativeAuth).toEqual([true, true]); expect(evidence.localLock).toBe(true); }
   expect(targets.map(path => readFileSync(path, 'utf8'))).toEqual(initial);
 }, 60000);
 
@@ -1404,13 +1414,13 @@ darwinTest('OAR installation is probed by the fixed Node host, never the Bun con
   }
 });
 
-test('Codex isolated home: exp-only preflight, exclusive no-follow copy, modes and cleanup', async () => {
+test('Codex isolated home: exp-only preflight, exclusive no-follow copy without the refresh token, modes and cleanup', async () => {
   const { mkdirSync, writeFileSync, symlinkSync, unlinkSync, lstatSync, existsSync } = await import('node:fs');
   const { prepareCodexHome, removeCopiedAuth } = await import('../src/effects/review/review-isolation');
   const root = tmpWorkspace('codex-isolated-auth'); roots.push(root);
   const source = join(root,'source'), output = join(root,'output'); mkdirSync(join(source,'.codex'),{recursive:true});mkdirSync(output);
   const payload = (exp:number) => Buffer.from(JSON.stringify({exp})).toString('base64url');
-  const fixture = (exp:number) => JSON.stringify({tokens:{access_token:`fixture.${payload(exp)}.fixture`}});
+  const fixture = (exp:number) => JSON.stringify({tokens:{access_token:`fixture.${payload(exp)}.fixture`,refresh_token:'fixture-refresh'}});
   const file = join(source,'.codex','auth.json');
   writeFileSync(file,fixture(Math.floor(Date.now()/1000)+30),{mode:0o600});
   expect(() => prepareCodexHome(output,source,60000)).toThrow('expires_within_run');
@@ -1420,8 +1430,13 @@ test('Codex isolated home: exp-only preflight, exclusive no-follow copy, modes a
   expect(prepared.auth_copied).toBe(true);expect(prepared.mode).toBe('0600');
   expect(lstatSync(prepared.home).mode & 0o777).toBe(0o700);expect(lstatSync(join(prepared.home,'auth.json')).mode & 0o777).toBe(0o600);
   expect(existsSync(join(prepared.home,'config.toml'))).toBe(false);
+  // Codex refuses a copy without the refresh_token key, so the key stays and is empty (#2764).
+  const native = JSON.parse(readFileSync(file,'utf8'));
+  expect(JSON.parse(readFileSync(join(prepared.home,'auth.json'),'utf8'))).toEqual({...native,tokens:{...native.tokens,refresh_token:''}});
   expect(() => prepareCodexHome(output,source,60000)).toThrow('copy_failed');
   expect(prepareCodexHome(output,source,60000,true).auth_copied).toBe(true);
+  writeFileSync(join(prepared.home,'auth.json'),readFileSync(file));
+  expect(() => prepareCodexHome(output,source,60000,true)).toThrow('review_auth_copy_unsafe');
   expect(removeCopiedAuth(output).status).toBe('removed');expect(removeCopiedAuth(output).status).toBe('absent');
   unlinkSync(file);symlinkSync(join(root,'missing'),file);
   expect(() => prepareCodexHome(output,source,60000)).toThrow('source_unavailable');unlinkSync(file);mkdirSync(file);

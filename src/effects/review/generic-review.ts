@@ -215,6 +215,7 @@ export async function runReviewRound<Session, Endpoint>(options: ReviewOptions<E
     let piLoopbackPorts: readonly number[] = [];
     let piModel: string | undefined;
     let piCredential: PiCredential | undefined;
+    let piNativeAuth: string | undefined;
     if (session.actual_harness === 'codex') {
       authOutput = outbox;
       const marker = join(dir, 'auth-copy.json');
@@ -226,13 +227,13 @@ export async function runReviewRound<Session, Endpoint>(options: ReviewOptions<E
       piOutput = outbox;
       const prepared = preparePiAgentDirectory(outbox, client.endpointHome(options.endpoint) ?? process.env.HOME ?? userInfo().homedir, deadline,
         (agentDirectory, reference) => client.resolvePiModel(piCommand(), agentDirectory, reference));
-      runtimeHome = prepared.directory; piLoopbackPorts = prepared.loopbackPorts; piModel = prepared.model; piCredential = prepared.credential;
+      runtimeHome = prepared.directory; piLoopbackPorts = prepared.loopbackPorts; piModel = prepared.model; piCredential = prepared.credential; piNativeAuth = prepared.nativeAuth;
     }
     // Isolation admission precedes any SDK/native Session creation.
     const repository = taskRepository(root);
     const isolationPaths = { subject: root, primary, ownerRecord: dir, journal: dir,
       gitCommonDir: repository.repository_id, output: outbox,
-      ...(session.actual_harness === 'pi' ? { piAgentDirectory: runtimeHome, piLoopbackPorts } : {}) };
+      ...(session.actual_harness === 'pi' ? { piAgentDirectory: runtimeHome, piLoopbackPorts, piNativeAuth } : {}) };
     const policy = reviewIsolationPolicy(isolationPaths);
     const profilePath = join(dir, 'isolation.sb');
     if (!existsSync(profilePath)) writeFileSync(profilePath, policy, { flag: 'wx', mode: 0o600 });
