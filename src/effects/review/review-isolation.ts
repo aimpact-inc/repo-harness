@@ -25,16 +25,17 @@ const NAME = (value: unknown) => typeof value === 'string' && value !== '';
 /**
  * A closed projection of pi 1.5.2's models.json schema (ProviderConfigSchema and ModelDefinitionSchema in
  * @earendil-works/pi-coding-agent dist/core/model-config.d.ts). Each object refuses a key outside its list by path.
+ * Values are closed too: booleans, finite numbers and schema enums; a string is free only as an id or a name.
+ * A free string or an open-keyed map (chatTemplateKwargs, chatTemplateArgs, the routing lists) can carry a
+ * credential, so each one stays outside the lists and refuses by path.
  */
-type Spec = 'null' | 'string' | 'name' | 'number' | 'boolean' | { readonly enum: readonly string[] } | { readonly oneOf: readonly Spec[] }
-  | { readonly array: Spec } | { readonly record: Spec } | { readonly object: Readonly<Record<string, Spec>>; readonly required?: readonly string[] };
+type Spec = 'null' | 'name' | 'number' | 'boolean' | { readonly enum: readonly string[] } | { readonly oneOf: readonly Spec[] }
+  | { readonly array: Spec } | { readonly object: Readonly<Record<string, Spec>>; readonly required?: readonly string[] };
 const nullable = (spec: Spec): Spec => ({ oneOf: [spec, 'null'] });
-const strings: Spec = { array: 'string' };
+const PI_API: Spec = { enum: ['anthropic-messages', 'openai-completions', 'openai-responses'] };
 const percentiles: Spec = { oneOf: ['number', { object: { p50: 'number', p75: 'number', p90: 'number', p99: 'number' } }] };
 const price = { input: 'number', output: 'number', cacheRead: 'number', cacheWrite: 'number' } as const;
 const PI_COST: Spec = { object: { ...price, tiers: { array: { object: { ...price, inputTokensAbove: 'number' }, required: [...Object.keys(price), 'inputTokensAbove'] } } }, required: Object.keys(price) };
-const templateArgs: Spec = { record: nullable({ oneOf: ['string', 'number', 'boolean',
-  { object: { $var: { enum: ['thinking.budget', 'thinking.effort', 'thinking.enabled'] }, omitWhenOff: 'boolean' }, required: ['$var'] }] }) };
 const COMPAT_BOOLEANS = ['supportsStore', 'supportsReasoningEffort', 'supportsUsageInStreaming', 'supportsFinishReason', 'requiresToolResultName',
   'requiresAssistantAfterToolResult', 'requiresNonNullAssistantContent', 'requiresToolsWithToolHistory', 'requiresThinkingAsText',
   'requiresReasoningContentOnAssistantMessages', 'zaiToolStream', 'supportsThinkingTokenBudget', 'supportsMidConvoToolAdditions',
@@ -47,20 +48,15 @@ const PI_COMPAT: Spec = { object: {
   ...Object.fromEntries(COMPAT_BOOLEANS.map(key => [key, 'boolean' as const])),
   maxTokensField: { enum: ['max_completion_tokens', 'max_tokens'] },
   thinkingFormat: { enum: ['ant-ling', 'baseten', 'chat-template', 'deepseek', 'openai', 'openrouter', 'qwen', 'qwen-chat-template', 'string-thinking', 'together', 'zai'] },
-  chatTemplateKwargs: templateArgs,
-  chatTemplateArgs: templateArgs,
   openRouterRouting: { object: {
     allow_fallbacks: 'boolean', require_parameters: 'boolean', data_collection: { enum: ['allow', 'deny'] }, zdr: 'boolean', enforce_distillable_text: 'boolean',
-    order: strings, only: strings, ignore: strings, quantizations: strings,
-    sort: { oneOf: ['string', { object: { by: 'string', partition: nullable('string') } }] },
-    max_price: { object: Object.fromEntries(['prompt', 'completion', 'image', 'audio', 'request'].map(key => [key, { oneOf: ['string', 'number'] } as Spec])) },
+    max_price: { object: Object.fromEntries(['prompt', 'completion', 'image', 'audio', 'request'].map(key => [key, 'number' as const])) },
     preferred_min_throughput: percentiles, preferred_max_latency: percentiles,
   } },
-  vercelGatewayRouting: { object: { only: strings, order: strings } },
+  vercelGatewayRouting: { object: {} },
   thinkingTokenBudgetField: { enum: ['thinking_budget', 'thinking_budget_tokens', 'thinking_token_budget'] },
   cacheControlFormat: { enum: ['anthropic'] },
   vllmPriority: 'number',
-  allowedFallbackModels: { array: { object: { provider: 'string', model: 'string', cost: PI_COST }, required: ['provider', 'model', 'cost'] } },
   imageInput: { enum: ['assets', 'images', 'state-image-urls'] },
   sessionAffinityFormat: { enum: ['openai', 'openai-nosession', 'openrouter'] },
   promptCacheKeyMode: { enum: ['auto', 'disabled', 'enabled'] },
@@ -69,7 +65,8 @@ const PI_COMPAT: Spec = { object: {
  * The provider fields; baseUrl, apiKey and models have their own checks. The schema's headers, authHeader and oauth
  * carry or select a credential and stay outside the list.
  */
-const PI_PROVIDER_FIELDS: Readonly<Record<string, Spec>> = { name: 'name', api: 'name', compat: PI_COMPAT };
+const PI_PROVIDER_FIELDS: Readonly<Record<string, Spec>> = { name: 'name', api: PI_API, compat: PI_COMPAT };
+const PI_THINKING_LEVELS: Spec = nullable({ enum: ['none', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] });
 /**
  * The model fields; baseUrl has its own check. headers carries a credential. samplingParams and
  * samplingParamsByThinkingLevel hold schema-unknown values that no closed list covers, so they stay outside the list too.
@@ -77,9 +74,9 @@ const PI_PROVIDER_FIELDS: Readonly<Record<string, Spec>> = { name: 'name', api: 
 const PI_MODEL_FIELDS: Readonly<Record<string, Spec>> = {
   id: 'name',
   name: 'name',
-  api: 'name',
+  api: PI_API,
   reasoning: 'boolean',
-  thinkingLevelMap: { object: Object.fromEntries(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map(key => [key, nullable('string')])) },
+  thinkingLevelMap: { object: Object.fromEntries(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map(key => [key, PI_THINKING_LEVELS])) },
   input: { array: { enum: ['image', 'text'] } },
   inputLimits: { object: { maxRequestBytes: 'number', images: { object: {
     resize: { object: { maxWidth: 'number', maxHeight: 'number', maxBytes: 'number', jpegQuality: 'number' } }, maxPerMessage: 'number', maxPerRequest: 'number',
@@ -95,7 +92,6 @@ const PI_MODEL_FIELDS: Readonly<Record<string, Spec>> = {
 function schemaFault(value: unknown, spec: Spec, path: string): { path: string; outside: boolean } | undefined {
   const here = { path, outside: false };
   if (spec === 'null') return value === null ? undefined : here;
-  if (spec === 'string') return typeof value === 'string' ? undefined : here;
   if (spec === 'name') return NAME(value) ? undefined : here;
   if (spec === 'number') return typeof value === 'number' && Number.isFinite(value) ? undefined : here;
   if (spec === 'boolean') return typeof value === 'boolean' ? undefined : here;
@@ -110,10 +106,6 @@ function schemaFault(value: unknown, spec: Spec, path: string): { path: string; 
     return undefined;
   }
   if (!PLAIN_RECORD(value)) return here;
-  if ('record' in spec) {
-    for (const [key, item] of Object.entries(value)) { const fault = schemaFault(item, spec.record, `${path}.${key}`); if (fault) return fault; }
-    return undefined;
-  }
   for (const [key, item] of Object.entries(value)) {
     if (!Object.hasOwn(spec.object, key)) return { path: `${path}.${key}`, outside: true };
     const fault = schemaFault(item, spec.object[key]!, `${path}.${key}`);

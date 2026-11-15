@@ -993,7 +993,7 @@ test('preparePiAgentDirectory builds the magpie provider from an allow-list and 
     return readFileSync(join(preparePiAgentDirectory(output, join(root, 'home'), piReferenceResolver).directory, 'models.json'), 'utf8');
   };
   const provider = (fixture: unknown) => JSON.stringify({ providers: { fixture } });
-  const allowed = { ...PI_MAGPIE_PROVIDER, models: [{ id: 'fixture-model', name: 'Fixture', reasoning: true, input: ['text', 'image'], contextWindow: 200000, maxTokens: 32000 }] };
+  const allowed = { ...PI_MAGPIE_PROVIDER, models: [{ id: 'fixture-model', name: 'Fixture', reasoning: true, thinkingLevelMap: { off: 'none' }, input: ['text', 'image'], contextWindow: 200000, maxTokens: 32000 }] };
   expect(JSON.parse(prepared(provider(allowed)))).toEqual({ providers: { fixture: allowed } });
   // The real field names; only the selected model reaches the sandbox, so an unselected model with headers is not projected.
   const selected = { api: 'openai-responses', baseUrl: 'http://127.0.0.1:3425/v1', compat: { forceAdaptiveThinking: true, supportsStrictMode: false }, contextWindow: 400000,
@@ -1017,6 +1017,11 @@ test('preparePiAgentDirectory builds the magpie provider from an allow-list and 
     [provider({ ...PI_MAGPIE_PROVIDER, baseUrl: 'not a url' }), 'no valid provider baseUrl'],
     [provider({ ...PI_MAGPIE_PROVIDER, baseUrl: 'http://127.0.0.1:3425/v1#sk-PROBE-LITERAL' }), 'baseUrl with a fragment'],
     [provider({ ...PI_MAGPIE_PROVIDER, models: [{ id: 'fixture-model', baseUrl: 'https://fixture.invalid/v1' }] }), 'model baseUrl https://fixture.invalid/v1, not'],
+    [provider({ ...PI_MAGPIE_PROVIDER, compat: { chatTemplateKwargs: { token: 'sk-PROBE-LITERAL' } } }), 'provider field compat.chatTemplateKwargs outside the allow-list'],
+    [provider({ ...PI_MAGPIE_PROVIDER, models: [{ id: 'fixture-model', compat: { openRouterRouting: { sort: 'sk-PROBE-LITERAL' } } }] }), 'model field models[0].compat.openRouterRouting.sort outside the allow-list'],
+    [provider({ ...PI_MAGPIE_PROVIDER, models: [{ id: 'fixture-model', thinkingLevelMap: { high: 'sk-PROBE-LITERAL' } }] }), 'invalid model field models[0].thinkingLevelMap.high'],
+    [provider({ ...PI_MAGPIE_PROVIDER, models: [{ id: 'fixture-model', cost: { input: '1', output: 1, cacheRead: 0, cacheWrite: 0 } }] }), 'invalid model field models[0].cost.input'],
+    [provider({ ...PI_MAGPIE_PROVIDER, models: [{ id: 'fixture-model', cost: { input: 1, output: 1, cacheRead: 0 } }] }), 'invalid model fields cost'],
   ] as const) expect(() => prepared(models), models).toThrow(reason);
 });
 
