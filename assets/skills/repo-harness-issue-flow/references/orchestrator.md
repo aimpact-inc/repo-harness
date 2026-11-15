@@ -330,6 +330,16 @@ holds a Claude-account seat then uses a configured Pi `worker-light`; a null
 or non-Pi `worker-light` gives a `none` route. An important route without a
 Claude-account seat is read as stored.
 Frontend waits for Claude; it has no non-Claude fallback.
+`rh seats argv <seat> --repository-id <id> --owner-exception <url>` lifts the
+reservation refusal (`seat_quota_reserved`) for one launch. The URL must be an
+owner decision on an issue or PR of the checkout's origin repository. The
+seat label `repo-harness.owner-exception` and the `--json` launch record keep
+the URL. The exception changes no model, tool or permission, and a launch
+that is not reserved refuses it.
+The owner lists Pi model prefixes with no budget, for example
+`magpie/anthropic`, in `routing.unavailable_pi_providers`. Routing skips
+those seats and the route lines name the provider; their launch refuses with
+`seat_provider_unavailable`.
 An exhausted account takes no new dispatch, review seats included, except
 under the stored credit mode `routing.codex_credit_mode` (`off`, `review` or
 `all`; default `off`). While the ChatGPT account is exhausted and reports

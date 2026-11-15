@@ -71,6 +71,17 @@ describe('seat quota routing', () => {
     expect(lines).toContain('route important_fast: none (worker-light not configured)');
   });
 
+  test('routing skips a Pi seat on an owner-listed unavailable provider and names it (#2769)', () => {
+    const pi: SeatConfigV1 = { ...DEFAULT_SEATS_CONFIG['worker-light']!, model: 'magpie/anthropic/claude-opus-5-5', effort: 'high' };
+    const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-important': pi, 'worker-light': pi,
+      routing: { ...DEFAULT_SEATS_CONFIG.routing, unavailable_pi_providers: ['magpie/anthropic'] } };
+    const lines = formatSeatRoutes(seats, seatAccountQuotas([claude({ seven_day: week(95, 84) })], seats.routing)).split('\n');
+    expect(lines.filter(line => line.startsWith('route important_'))).toEqual([
+      'route important_deep: worker-deep (codex gpt-6.1-sol high; chatgpt unknown); skipped worker-important: pi provider magpie/anthropic unavailable',
+      'route important_fast: none (pi provider magpie/anthropic unavailable)',
+    ]);
+  });
+
   test.each([50, 51])('Codex %s%% used selects hyper only at or above remaining threshold', used => {
     const account = classifyQuotaReading(decodeCodexRateLimitsResult({ rateLimits: {
       primary: { usedPercent: used, windowDurationMins: 10080, resetsAt: (NOW + 84 * HOUR) / 1000 },
