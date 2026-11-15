@@ -21,36 +21,126 @@ const MAGPIE_ROUTE = `route the review through magpie (${MAGPIE_BASE_URL}, apiKe
 export interface PiAgentDirectory { readonly directory: string; readonly model: string }
 
 const PLAIN_RECORD = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
-const POSITIVE_NUMBER = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value > 0;
 const NAME = (value: unknown) => typeof value === 'string' && value !== '';
-const PRIMITIVE_RECORD = (value: unknown) => PLAIN_RECORD(value) && Object.values(value).every(item => ['boolean', 'number', 'string'].includes(typeof item));
-const PI_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
-const PI_COST_FIELDS = ['input', 'output', 'cacheRead', 'cacheWrite'];
-/** The provider fields that pi needs for the magpie provider; baseUrl, apiKey and models have their own checks. */
-const PI_PROVIDER_FIELDS: Readonly<Record<string, (value: unknown) => boolean>> = { name: NAME, api: NAME, compat: PRIMITIVE_RECORD };
-/** The model fields that pi needs for a magpie model; baseUrl has its own check. Each other field (headers, authHeader, ...) can carry a credential or a second route. */
-const PI_MODEL_FIELDS: Readonly<Record<string, (value: unknown) => boolean>> = {
-  id: NAME,
-  name: NAME,
-  api: NAME,
-  reasoning: value => typeof value === 'boolean',
-  input: value => Array.isArray(value) && value.every(item => item === 'text' || item === 'image'),
-  contextWindow: POSITIVE_NUMBER,
-  maxTokens: POSITIVE_NUMBER,
-  cost: value => PLAIN_RECORD(value) && Object.entries(value).every(([key, item]) => PI_COST_FIELDS.includes(key) && typeof item === 'number' && Number.isFinite(item) && item >= 0),
-  compat: PRIMITIVE_RECORD,
-  promptCache: PRIMITIVE_RECORD,
-  thinkingLevelMap: value => PLAIN_RECORD(value) && Object.entries(value).every(([key, item]) => PI_THINKING_LEVELS.includes(key) && (typeof item === 'string' || item === null)),
+/**
+ * A closed projection of pi 1.5.2's models.json schema (ProviderConfigSchema and ModelDefinitionSchema in
+ * @earendil-works/pi-coding-agent dist/core/model-config.d.ts). Each object refuses a key outside its list by path.
+ */
+type Spec = 'null' | 'string' | 'name' | 'number' | 'boolean' | { readonly enum: readonly string[] } | { readonly oneOf: readonly Spec[] }
+  | { readonly array: Spec } | { readonly record: Spec } | { readonly object: Readonly<Record<string, Spec>>; readonly required?: readonly string[] };
+const nullable = (spec: Spec): Spec => ({ oneOf: [spec, 'null'] });
+const strings: Spec = { array: 'string' };
+const percentiles: Spec = { oneOf: ['number', { object: { p50: 'number', p75: 'number', p90: 'number', p99: 'number' } }] };
+const price = { input: 'number', output: 'number', cacheRead: 'number', cacheWrite: 'number' } as const;
+const PI_COST: Spec = { object: { ...price, tiers: { array: { object: { ...price, inputTokensAbove: 'number' }, required: [...Object.keys(price), 'inputTokensAbove'] } } }, required: Object.keys(price) };
+const templateArgs: Spec = { record: nullable({ oneOf: ['string', 'number', 'boolean',
+  { object: { $var: { enum: ['thinking.budget', 'thinking.effort', 'thinking.enabled'] }, omitWhenOff: 'boolean' }, required: ['$var'] }] }) };
+const COMPAT_BOOLEANS = ['supportsStore', 'supportsReasoningEffort', 'supportsUsageInStreaming', 'supportsFinishReason', 'requiresToolResultName',
+  'requiresAssistantAfterToolResult', 'requiresNonNullAssistantContent', 'requiresToolsWithToolHistory', 'requiresThinkingAsText',
+  'requiresReasoningContentOnAssistantMessages', 'zaiToolStream', 'supportsThinkingTokenBudget', 'supportsMidConvoToolAdditions',
+  'supportsAdditionalTools', 'supportsToolSearch', 'supportsExplicitPromptCacheMode', 'supportsMaxOutputTokens', 'supportsEagerToolInputStreaming',
+  'supportsCacheControlOnTools', 'supportsTemperature', 'forceAdaptiveThinking', 'allowEmptySignature', 'supportsStrictTools',
+  'supportsMidConvoToolChanges', 'supportsMessageThreads', 'sendImageOptInHeader', 'supportsDeveloperRole', 'supportsMidConvoSystemMessages',
+  'supportsMidConvoEffort', 'supportsLongCacheRetention', 'supportsStrictMode', 'supportsOpenAIGrammarTools', 'sendSessionAffinityHeaders'];
+/** pi 1.5.2 gives the provider compat and the model compat the same type. */
+const PI_COMPAT: Spec = { object: {
+  ...Object.fromEntries(COMPAT_BOOLEANS.map(key => [key, 'boolean' as const])),
+  maxTokensField: { enum: ['max_completion_tokens', 'max_tokens'] },
+  thinkingFormat: { enum: ['ant-ling', 'baseten', 'chat-template', 'deepseek', 'openai', 'openrouter', 'qwen', 'qwen-chat-template', 'string-thinking', 'together', 'zai'] },
+  chatTemplateKwargs: templateArgs,
+  chatTemplateArgs: templateArgs,
+  openRouterRouting: { object: {
+    allow_fallbacks: 'boolean', require_parameters: 'boolean', data_collection: { enum: ['allow', 'deny'] }, zdr: 'boolean', enforce_distillable_text: 'boolean',
+    order: strings, only: strings, ignore: strings, quantizations: strings,
+    sort: { oneOf: ['string', { object: { by: 'string', partition: nullable('string') } }] },
+    max_price: { object: Object.fromEntries(['prompt', 'completion', 'image', 'audio', 'request'].map(key => [key, { oneOf: ['string', 'number'] } as Spec])) },
+    preferred_min_throughput: percentiles, preferred_max_latency: percentiles,
+  } },
+  vercelGatewayRouting: { object: { only: strings, order: strings } },
+  thinkingTokenBudgetField: { enum: ['thinking_budget', 'thinking_budget_tokens', 'thinking_token_budget'] },
+  cacheControlFormat: { enum: ['anthropic'] },
+  vllmPriority: 'number',
+  allowedFallbackModels: { array: { object: { provider: 'string', model: 'string', cost: PI_COST }, required: ['provider', 'model', 'cost'] } },
+  imageInput: { enum: ['assets', 'images', 'state-image-urls'] },
+  sessionAffinityFormat: { enum: ['openai', 'openai-nosession', 'openrouter'] },
+  promptCacheKeyMode: { enum: ['auto', 'disabled', 'enabled'] },
+} };
+/**
+ * The provider fields; baseUrl, apiKey and models have their own checks. The schema's headers, authHeader and oauth
+ * carry or select a credential and stay outside the list.
+ */
+const PI_PROVIDER_FIELDS: Readonly<Record<string, Spec>> = { name: 'name', api: 'name', compat: PI_COMPAT };
+/**
+ * The model fields; baseUrl has its own check. headers carries a credential. samplingParams and
+ * samplingParamsByThinkingLevel hold schema-unknown values that no closed list covers, so they stay outside the list too.
+ */
+const PI_MODEL_FIELDS: Readonly<Record<string, Spec>> = {
+  id: 'name',
+  name: 'name',
+  api: 'name',
+  reasoning: 'boolean',
+  thinkingLevelMap: { object: Object.fromEntries(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map(key => [key, nullable('string')])) },
+  input: { array: { enum: ['image', 'text'] } },
+  inputLimits: { object: { maxRequestBytes: 'number', images: { object: {
+    resize: { object: { maxWidth: 'number', maxHeight: 'number', maxBytes: 'number', jpegQuality: 'number' } }, maxPerMessage: 'number', maxPerRequest: 'number',
+  } } } },
+  cost: PI_COST,
+  promptCache: { object: { short: 'number', long: 'number' } },
+  contextWindow: 'number',
+  maxTokens: 'number',
+  compat: PI_COMPAT,
 };
 
-/** Copies the allow-listed fields of `entry` that pass their check; `fixed` fields carry their own check. Any other field refuses by name. */
-function allowListed(entry: Record<string, unknown>, fields: Readonly<Record<string, (value: unknown) => boolean>>, fixed: readonly string[],
-  refuse: (reason: string) => Error, subject: string): Record<string, unknown> {
+/** The path of the first value that `spec` rejects, with `outside` set when it is an object key outside the schema; undefined when the value passes. */
+function schemaFault(value: unknown, spec: Spec, path: string): { path: string; outside: boolean } | undefined {
+  const here = { path, outside: false };
+  if (spec === 'null') return value === null ? undefined : here;
+  if (spec === 'string') return typeof value === 'string' ? undefined : here;
+  if (spec === 'name') return NAME(value) ? undefined : here;
+  if (spec === 'number') return typeof value === 'number' && Number.isFinite(value) ? undefined : here;
+  if (spec === 'boolean') return typeof value === 'boolean' ? undefined : here;
+  if ('enum' in spec) return spec.enum.includes(value as string) ? undefined : here;
+  if ('oneOf' in spec) {
+    const faults = spec.oneOf.map(option => schemaFault(value, option, path));
+    return faults.some(fault => !fault) ? undefined : faults.find(fault => fault!.path !== path) ?? here;
+  }
+  if ('array' in spec) {
+    if (!Array.isArray(value)) return here;
+    for (const [index, item] of value.entries()) { const fault = schemaFault(item, spec.array, `${path}[${index}]`); if (fault) return fault; }
+    return undefined;
+  }
+  if (!PLAIN_RECORD(value)) return here;
+  if ('record' in spec) {
+    for (const [key, item] of Object.entries(value)) { const fault = schemaFault(item, spec.record, `${path}.${key}`); if (fault) return fault; }
+    return undefined;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (!Object.hasOwn(spec.object, key)) return { path: `${path}.${key}`, outside: true };
+    const fault = schemaFault(item, spec.object[key]!, `${path}.${key}`);
+    if (fault) return fault;
+  }
+  return (spec.required ?? []).some(key => !Object.hasOwn(value, key)) ? here : undefined;
+}
+
+/**
+ * Copies the allow-listed fields of `entry` that pass their schema; `fixed` fields carry their own check. Any other field
+ * refuses by name; a fault inside a field refuses by its path (`path` + field, for example models[0].compat.headers).
+ */
+function allowListed(entry: Record<string, unknown>, fields: Readonly<Record<string, Spec>>, fixed: readonly string[],
+  refuse: (reason: string) => Error, subject: string, path: string): Record<string, unknown> {
   const outside = Object.keys(entry).filter(key => !Object.hasOwn(fields, key) && !fixed.includes(key));
   if (outside.length > 0) throw refuse(`has the ${subject} fields ${outside.join(', ')} outside the allow-list`);
-  const invalid = Object.keys(fields).filter(key => Object.hasOwn(entry, key) && !fields[key]!(entry[key]));
+  const present = Object.keys(fields).filter(key => Object.hasOwn(entry, key));
+  const invalid: string[] = [];
+  for (const key of present) {
+    const fault = schemaFault(entry[key], fields[key]!, `${path}${key}`);
+    if (!fault) continue;
+    if (fault.outside) throw refuse(`has the ${subject} field ${fault.path} outside the allow-list`);
+    if (fault.path !== `${path}${key}`) throw refuse(`has the invalid ${subject} field ${fault.path}`);
+    invalid.push(key);
+  }
   if (invalid.length > 0) throw refuse(`has invalid ${subject} fields ${invalid.join(', ')}`);
-  return Object.fromEntries(Object.keys(fields).filter(key => Object.hasOwn(entry, key)).map(key => [key, entry[key]]));
+  return Object.fromEntries(present.map(key => [key, entry[key]]));
 }
 
 /** A baseUrl reaches the sandbox only as MAGPIE_BASE_URL; userinfo, a query or a fragment can carry a credential. */
@@ -77,19 +167,19 @@ function piMagpieProvider(bytes: Buffer, provider: string, model: string, models
   const refuse = (reason: string) => new Error(`review_pi_provider_not_magpie: the review sandbox holds no real credential, and the ${provider} provider in ${modelsPath} ${reason}; ${MAGPIE_ROUTE}`);
   const entry = PLAIN_RECORD(providers) && Object.hasOwn(providers, provider) ? providers[provider] : undefined;
   if (!PLAIN_RECORD(entry)) throw refuse('does not exist');
-  const projected = allowListed(entry, PI_PROVIDER_FIELDS, ['baseUrl', 'apiKey', 'models'], refuse, 'provider');
+  const projected = allowListed(entry, PI_PROVIDER_FIELDS, ['baseUrl', 'apiKey', 'models'], refuse, 'provider', '');
   if (entry.apiKey !== MAGPIE_PLACEHOLDER_KEY) throw refuse('has no placeholder apiKey');
   assertMagpieUrl(entry.baseUrl, refuse, 'provider');
   Object.assign(projected, { baseUrl: MAGPIE_BASE_URL, apiKey: MAGPIE_PLACEHOLDER_KEY });
   if (entry.models !== undefined) {
     if (!Array.isArray(entry.models)) throw refuse('has models that are not a list');
-    const selected = entry.models.filter((item: unknown, index) => {
+    const selected = entry.models.flatMap((item: unknown, index): [Record<string, unknown>, number][] => {
       if (!PLAIN_RECORD(item) || !NAME(item.id)) throw refuse(`has model ${index} without an id`);
-      return (item.id as string).toLowerCase() === model.toLowerCase();
-    }) as Record<string, unknown>[];
-    projected.models = selected.map(item => {
+      return (item.id as string).toLowerCase() === model.toLowerCase() ? [[item, index]] : [];
+    });
+    projected.models = selected.map(([item, index]) => {
       if (Object.hasOwn(item, 'baseUrl')) assertMagpieUrl(item.baseUrl, refuse, 'model');
-      return { ...allowListed(item, PI_MODEL_FIELDS, ['baseUrl'], refuse, 'model'), ...(Object.hasOwn(item, 'baseUrl') ? { baseUrl: MAGPIE_BASE_URL } : {}) };
+      return { ...allowListed(item, PI_MODEL_FIELDS, ['baseUrl'], refuse, 'model', `models[${index}].`), ...(Object.hasOwn(item, 'baseUrl') ? { baseUrl: MAGPIE_BASE_URL } : {}) };
     });
   }
   return projected;

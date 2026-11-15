@@ -996,10 +996,10 @@ test('preparePiAgentDirectory builds the magpie provider from an allow-list and 
   const allowed = { ...PI_MAGPIE_PROVIDER, models: [{ id: 'fixture-model', name: 'Fixture', reasoning: true, input: ['text', 'image'], contextWindow: 200000, maxTokens: 32000 }] };
   expect(JSON.parse(prepared(provider(allowed)))).toEqual({ providers: { fixture: allowed } });
   // The real field names; only the selected model reaches the sandbox, so an unselected model with headers is not projected.
-  const selected = { api: 'openai-responses', baseUrl: 'http://127.0.0.1:3425/v1', compat: { supportsDeveloperRole: false }, contextWindow: 400000,
+  const selected = { api: 'openai-responses', baseUrl: 'http://127.0.0.1:3425/v1', compat: { forceAdaptiveThinking: true, supportsStrictMode: false }, contextWindow: 400000,
     cost: { cacheRead: 0.1, cacheWrite: 0, input: 1, output: 8 }, id: 'fixture-model', input: ['text', 'image'], maxTokens: 128000, name: 'Fixture',
-    promptCache: { short: true }, reasoning: true, thinkingLevelMap: { high: 'high', low: 'low', max: 'xhigh', medium: 'medium', minimal: 'minimal', off: null, xhigh: 'xhigh' } };
-  const real = { api: 'openai-responses', apiKey: 'magpie', baseUrl: 'http://127.0.0.1:3425/v1', compat: { supportsStore: false }, name: 'Magpie' };
+    promptCache: { long: 3600, short: 300 }, reasoning: true, thinkingLevelMap: { high: 'high', low: 'low', max: 'xhigh', medium: 'medium', minimal: 'minimal', off: null, xhigh: 'xhigh' } };
+  const real = { api: 'openai-responses', apiKey: 'magpie', baseUrl: 'http://127.0.0.1:3425/v1', compat: { sendSessionAffinityHeaders: true }, name: 'Magpie' };
   expect(JSON.parse(prepared(provider({ ...real, models: [selected, { id: 'other-model', headers: { 'x-api-key': 'sk-PROBE-LITERAL' } }] }))))
     .toEqual({ providers: { fixture: { ...real, models: [selected] } } });
   for (const [models, reason] of [
@@ -1012,7 +1012,8 @@ test('preparePiAgentDirectory builds the magpie provider from an allow-list and 
     [provider({ ...PI_MAGPIE_PROVIDER, api: '' }), 'invalid provider fields api'],
     [provider({ ...PI_MAGPIE_PROVIDER, models: { id: 'fixture-model' } }), 'models that are not a list'],
     [provider({ ...PI_MAGPIE_PROVIDER, models: [{ name: 'Fixture' }] }), 'model 0 without an id'],
-    [provider({ ...PI_MAGPIE_PROVIDER, models: [{ id: 'fixture-model', cost: { input: 1, authorization: 2 } }] }), 'invalid model fields cost'],
+    [provider({ ...PI_MAGPIE_PROVIDER, models: [{ id: 'fixture-model', cost: { input: 1, authorization: 2 } }] }), 'model field models[0].cost.authorization outside the allow-list'],
+    [provider({ ...PI_MAGPIE_PROVIDER, models: [{ id: 'fixture-model', compat: { headers: { authorization: 'Bearer sk-PROBE-LITERAL' } } }] }), 'model field models[0].compat.headers outside the allow-list'],
     [provider({ ...PI_MAGPIE_PROVIDER, baseUrl: 'not a url' }), 'no valid provider baseUrl'],
     [provider({ ...PI_MAGPIE_PROVIDER, baseUrl: 'http://127.0.0.1:3425/v1#sk-PROBE-LITERAL' }), 'baseUrl with a fragment'],
     [provider({ ...PI_MAGPIE_PROVIDER, models: [{ id: 'fixture-model', baseUrl: 'https://fixture.invalid/v1' }] }), 'model baseUrl https://fixture.invalid/v1, not'],
