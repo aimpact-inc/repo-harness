@@ -1914,10 +1914,10 @@ function bunExecutable() {
  * resolvePackageLocalArchctx() is the only rule: it checks the version, the
  * Node engine contract, bin.archctx and the binary. This probe runs that
  * function under Bun from the repo-harness package root and reports its
- * answer. It also resolves the copy that findInstalledPackageRoot() selects
- * in the Bun global install, which `rh update` links as PATH archctx. That
- * lookup reads only the file system: Bun module resolution from a directory
- * without node_modules auto-installs the package from the registry. The
+ * answer. It also validates `<Bun global>/node_modules/archctx`, the copy that
+ * `rh update` links as PATH archctx. Only that directory counts: an ancestor
+ * node_modules copy is outside the Bun global install and is not the managed
+ * link. The
  * runnable command, with the resolved Node path, comes from
  * `rh architecture-projection status --json`. The selection is the
  * one that the shell gate read above: without `selected` the probe loads no
@@ -1933,16 +1933,16 @@ function detectManagedArchctx() {
   const bun = bunExecutable();
   if (!bun) return unusable("bun is not available, so the managed archctx cannot be resolved");
   const script = [
-    "const [contracts, providers, skillProjection, globalRuntime, consumerRoot] = process.argv.slice(1);",
+    "const [contracts, providers, skillProjection, consumerRoot] = process.argv.slice(1);",
     "const { architecturePort, registerArchitecturePorts } = await import(contracts);",
     "registerArchitecturePorts((await import(providers)).ARCHITECTURE_PROVIDERS);",
     "const runtime = architecturePort('runtime');",
+    "const { existsSync } = await import('fs');",
     "const { resolve } = await import('path');",
-    "const { findInstalledPackageRoot } = await import(globalRuntime);",
     "const globalPackageRoot = (await import(skillProjection)).bunGlobalPackageRoot(process.env);",
-    "const linkedRoot = globalPackageRoot && findInstalledPackageRoot(resolve(globalPackageRoot, '..', '..'), 'archctx');",
+    "const globalRoot = globalPackageRoot && resolve(globalPackageRoot, '..', '..');",
     "let linkedBinPath = null;",
-    "try { if (linkedRoot) linkedBinPath = runtime.resolvePackageLocalArchctx(resolve(linkedRoot, '..', '..')).binaryPath; } catch { /* An invalid copy is not the managed link. */ }",
+    "try { if (globalRoot && existsSync(resolve(globalRoot, 'node_modules', 'archctx', 'package.json'))) linkedBinPath = runtime.resolvePackageLocalArchctx(globalRoot).binaryPath; } catch { /* An invalid copy is not the managed link. */ }",
     "try { console.log(JSON.stringify({ ok: true, required: runtime.requiredArchctxVersion, resolved: runtime.resolvePackageLocalArchctx(consumerRoot), linkedBinPath })); }",
     "catch (error) { console.log(JSON.stringify({ ok: false, required: runtime.requiredArchctxVersion, reason: error instanceof Error ? error.message : String(error), linkedBinPath })); }",
   ].join("\n");
@@ -1951,7 +1951,6 @@ function detectManagedArchctx() {
     path.join(PACKAGE_ROOT, "src", "core", "architecture", "contracts.ts"),
     path.join(PACKAGE_ROOT, "src", "effects", "architecture", "providers.ts"),
     path.join(PACKAGE_ROOT, "src", "cli", "installer", "skill-projection.ts"),
-    path.join(PACKAGE_ROOT, "src", "cli", "commands", "global-runtime.ts"),
     PACKAGE_ROOT,
   ], { cwd: PACKAGE_ROOT, timeoutMs: 15000 });
   const answer = result.ok ? parseJson(result.stdout.trim()) : null;
