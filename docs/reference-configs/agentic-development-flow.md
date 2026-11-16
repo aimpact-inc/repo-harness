@@ -69,7 +69,7 @@ Manual probe: to see what named test files do on one runner for a branch head, d
 ```
 
 - For a repeat, copy the `Name` and `Mistake pattern` text exactly. Maintenance triage groups entries by `Mistake pattern`. `Seen` is the cumulative event count of the theme, up to and including this entry. Do not edit `Seen` on older entries.
-- A new correction event adds 1 to the last valid cumulative `Seen` value of the theme. A change of format, classification or enforcement adds nothing.
+- A new correction event adds 1 to the last valid cumulative `Seen` value of the theme. A change of format, classification or enforcement adds nothing. One event names at least one new reference in `Triggered by correction` and can name several, so the `Seen` increase of an entry is at most the number of its references that the earlier entries of the theme do not name.
 - A merge of one cumulative series keeps the maximum `Seen` value and every `Triggered by correction` reference of the entries it replaces. Add the consolidating PR to that list; never substitute it for the earlier references. Maintenance triage reads the ledger history and fails an entry whose only reference is a consolidation commit.
 - A merge of different themes is a reclassification. A person checks the events of the themes for overlap and sets `Seen` from that check.
 - A history migration sets the start value of `Seen` from the history evidence, not from the number of references.

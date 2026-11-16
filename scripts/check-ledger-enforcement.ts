@@ -24,8 +24,8 @@ const SEEN = /^([1-9][0-9]*)×$/;
 const PROMOTED = /^(#[1-9][0-9]*|https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/[1-9][0-9]*)$/;
 const RULE_ID = /^[A-Z][A-Za-z0-9]*$/;
 
-/** One parser entry: `line` is the Date line, `lines` the line that set each field. */
-export type LedgerEntry = { readonly line: number; readonly fields: Readonly<Record<string, string>>; readonly lines: Readonly<Record<string, number>> };
+/** One parser entry: `line` is the Date line, `owned` every line that the entry holds. */
+export type LedgerEntry = { readonly line: number; readonly fields: Readonly<Record<string, string>>; readonly owned: readonly number[] };
 export type Finding = { readonly entry: string; readonly field: string; readonly problem: string; readonly fix: string };
 export type LedgerReport = { readonly findings: Finding[]; readonly review: string[]; readonly carried: string[] };
 
@@ -77,16 +77,19 @@ export function evaluateLedger(text: string, head: readonly LedgerEntry[], base:
   const add = (entry: LedgerEntry, name: string, problem: string, fix: string, inBase = false) =>
     findings.push({ entry: label(entry, inBase), field: name, problem, fix });
 
-  // Row 1, parser completeness: each lesson line ("- " at the line start) must be the Date line or
-  // the field line of one entry. A line before the first Date, in a lesson without a Date, or a
-  // repeated field that the parser skips belongs to no entry, so no other row would see it.
-  const held = new Set(head.flatMap((entry) => [entry.line, ...Object.values(entry.lines)]));
+  // Row 1, parser completeness: each non-blank line must be owned by one parsed entry. Before the
+  // first entry, only headings and the `reviewed-through:` watermark may stand alone. A lesson
+  // without a Date, another bullet style, a repeated field that the parser skips, or any other text
+  // belongs to no entry, so no other row would see it.
+  const owned = new Set(head.flatMap((entry) => entry.owned));
+  const first = head[0]?.line ?? Infinity;
   for (const [index, line] of text.split('\n').entries()) {
-    if (!line.startsWith('- ') || held.has(index + 1)) continue;
+    const number = index + 1;
+    if (!line.trim() || owned.has(number) || (number < first && /^(#{1,6} |reviewed-through: )/.test(line))) continue;
     findings.push({
-      entry: `${LEDGER_PATH}:${index + 1}`, field: /^- ([A-Z][A-Za-z ]*):/.exec(line)?.[1] ?? 'line',
+      entry: `${LEDGER_PATH}:${number}`, field: /^[-*+]? ?([A-Z][A-Za-z ]*):/.exec(line)?.[1] ?? 'line',
       problem: `"${line.slice(0, 80)}" belongs to no entry`,
-      fix: 'start each lesson with "- Date: <YYYY-MM-DD>", write each field once in an entry, and write no other "- " line',
+      fix: 'start each lesson with "- Date: <YYYY-MM-DD>" and write each field once as "- <Field>: <value>"',
     });
   }
 
@@ -119,68 +122,79 @@ export function evaluateLedger(text: string, head: readonly LedgerEntry[], base:
     }
   }
 
-  // Row 2 on the candidate tree: one entry per theme and day, and a cumulative Seen.
+  // Row 2 on the candidate tree: one entry per theme and day, and a cumulative Seen. References
+  // bound events from above: one event names at least one new reference, and it can name several
+  // (an issue and its fix PR). So an entry's Seen increase over the earlier entry of its theme is
+  // at least 1 and at most the references that the earlier entries do not name. A first entry's
+  // Seen is at most its own references. An undercount passes: a reference set cannot count events.
   const headKeys = new Map<string, LedgerEntry>();
   for (const entry of head) {
-    const first = headKeys.get(key(entry));
-    if (first && field(entry, 'Mistake pattern') && field(entry, 'Date')) {
-      add(entry, 'Date', `line ${first.line} has an entry of this theme on the same day`, 'merge the two entries into one entry for that day');
+    const earlier = headKeys.get(key(entry));
+    if (earlier && field(entry, 'Mistake pattern') && field(entry, 'Date')) {
+      add(entry, 'Date', `line ${earlier.line} has an entry of this theme on the same day`, 'merge the two entries into one entry for that day');
     } else headKeys.set(key(entry), entry);
   }
   const headThemes = themes(head);
   for (const { entries } of headThemes.values()) {
     for (const [index, entry] of entries.entries()) {
       const before = entries[index - 1];
-      if (before && seen(entry)! <= seen(before)!) {
+      const known = referenceSet(entries.slice(0, index));
+      const fresh = new Set(references(entry).map(normalize).filter((ref) => !known.has(ref))).size;
+      const increase = seen(entry)! - (before ? seen(before)! : 0);
+      if (before && increase < 1) {
         add(entry, 'Seen', `${seen(entry)}× does not exceed ${seen(before)}× of the earlier entry at line ${before.line}`,
           'Seen is cumulative: add the new correction events to the last valid Seen value of the theme');
+      } else if (increase > fresh) {
+        add(entry, 'Seen', `${seen(entry)}× adds ${increase} events, but the entry names ${fresh} references that the earlier entries of the theme do not name`,
+          'each new correction event names at least one new reference in Triggered by correction; lower Seen or name the corrections');
       }
     }
   }
 
+  // A head theme corresponds to the merge-base theme with the same Mistake pattern. A new head theme
+  // corresponds to each merge-base theme that the head no longer has and that shares one of its
+  // Triggered by correction references: a rename or a reclassification keeps the references. A
+  // reference that several kept themes share (a consolidation PR) links no theme.
   const baseThemes = base === null ? new Map<string, Theme>() : themes(base);
+  const partners = (theme: string, state: Theme): Theme[] => {
+    const same = baseThemes.get(theme);
+    if (same) return [same];
+    const refs = referenceSet(state.entries);
+    return [...baseThemes].filter(([name, other]) => !headThemes.has(name) && [...referenceSet(other.entries)].some((ref) => refs.has(ref)))
+      .map(([, other]) => other);
+  };
   if (base !== null) {
-    const baseKeys = new Set(base.map(key));
-    const baseRefs = referenceSet(base);
     for (const [theme, after] of headThemes) {
-      const before = baseThemes.get(theme);
-      // A theme that loses an entry is merged: a merge of one cumulative series keeps the maximum,
-      // does not add the values, and may keep the Date of an entry it replaces.
-      const merged = before?.entries.some((entry) => !headKeys.has(key(entry))) ?? false;
-      if (before) {
-        for (const entry of merged ? [] : before.entries) {
-          const now = headKeys.get(key(entry))!;
-          if (seen(now) !== null && seen(now) !== seen(entry)) {
-            add(now, 'Seen', `changed from ${seen(entry)}× to ${seen(now)}× on an existing entry`, `restore ${seen(entry)}×; do not edit Seen on older entries`);
-          }
-        }
-        if (after.max < before.max) {
-          add(after.latest, 'Seen', `the theme maximum fell from ${before.max}× to ${after.max}×`, `a merge keeps the maximum Seen value; write ${before.max}×`);
-        } else if (merged && after.max > before.max) {
-          add(after.latest, 'Seen', `${after.max}× exceeds the maximum ${before.max}× of the entries that this change merges`,
-            `a merge of one cumulative series keeps the maximum: write ${before.max}×, and record a new correction event in its own entry`);
-        }
+      const sources = partners(theme, after);
+      if (sources.length === 0) continue;
+      const floor = Math.max(...sources.map((source) => source.max));
+      const ceiling = sources.reduce((sum, source) => sum + source.max, 0);
+      const baseRefs = referenceSet(sources.flatMap((source) => source.entries));
+      const fresh = [...referenceSet(after.entries)].filter((ref) => !baseRefs.has(ref));
+      if (after.max < floor) {
+        add(after.latest, 'Seen', `the theme maximum fell from ${floor}× to ${after.max}×`, `the maximum of a theme never falls; write ${floor}×`);
+        continue;
       }
-      if (merged) continue;
-      // Each new entry is one new correction event: its Seen is the earlier entry of the theme plus 1,
-      // and it names a correction that the merge-base ledger does not have. A new theme that takes
-      // no base reference starts at 1×; one that takes base references is a reclassification, and
-      // a person sets its Seen.
-      const reclassified = !before && after.entries.some((entry) => references(entry).some((ref) => baseRefs.has(normalize(ref))));
-      for (const [index, entry] of after.entries.entries()) {
-        if (baseKeys.has(key(entry))) continue;
-        const earlier = after.entries[index - 1];
-        if (earlier) {
-          if (seen(entry) !== seen(earlier)! + 1) {
-            add(entry, 'Seen', `${seen(entry)}× is not ${seen(earlier)! + 1}×, the earlier entry plus one new event`,
-              `a new correction event adds 1 to the last valid Seen value: write ${seen(earlier)! + 1}×`);
-          }
-          const known = referenceSet([...base, ...after.entries.slice(0, index)]);
-          if (!references(entry).some((ref) => !known.has(normalize(ref)))) {
-            add(entry, 'Triggered by correction', 'names no new correction', 'name the commit, PR or issue of the new correction event; a format or enforcement change adds no entry');
-          }
-        } else if (!before && !reclassified && seen(entry) !== 1) {
-          add(entry, 'Seen', `${seen(entry)}× starts a new theme`, 'a new theme starts at 1×');
+      if (after.max > ceiling + fresh.length) {
+        add(after.latest, 'Seen', `${after.max}× exceeds the merge-base maximum ${ceiling}× plus ${fresh.length} new references`,
+          'each new correction event names at least one new reference in Triggered by correction; lower Seen or name the corrections');
+      }
+      const [source] = sources;
+      if (sources.length !== 1) continue;
+      // A consolidation (fewer entries than the corresponding base theme) keeps the base maximum and
+      // adds at most the consolidating reference, so a new event goes to its own PR.
+      if (after.entries.length < source.entries.length) {
+        if (after.max !== source.max || fresh.length > 1) {
+          add(after.latest, 'Seen', `a consolidation of ${source.entries.length} entries into ${after.entries.length} gives ${after.max}× with ${fresh.length} new references`,
+            `a consolidation keeps the maximum ${source.max}× and adds only the consolidating PR to Triggered by correction; record a new correction event in its own PR`);
+        }
+        continue;
+      }
+      // Otherwise an older entry (same Date in the corresponding theme) keeps its Seen.
+      for (const entry of source.entries) {
+        const now = after.entries.find((candidate) => field(candidate, 'Date') === field(entry, 'Date'));
+        if (now && seen(now) !== seen(entry)) {
+          add(now, 'Seen', `changed from ${seen(entry)}× to ${seen(now)}× on an existing entry`, `restore ${seen(entry)}×; do not edit Seen on older entries`);
         }
       }
     }
@@ -195,31 +209,18 @@ export function evaluateLedger(text: string, head: readonly LedgerEntry[], base:
     }
   }
 
-  // Row 4: Seen 3× or more with Enforced by: judgment needs Promoted. A theme state that the base
-  // already has (same maximum, no structural enforcer, no Promoted) is carried: this change did not
-  // make it, and maintenance triage lists it. Any change to that state must promote the rule.
+  // Row 4: Seen 3× or more with Enforced by: judgment needs Promoted. A state that the corresponding
+  // merge-base theme already has (same maximum, no structural enforcer, no Promoted) is carried: this
+  // change did not make it, and maintenance triage lists it. A rename keeps it carried; any other
+  // change to that state must promote the rule.
   for (const [theme, state] of headThemes) {
     if (state.max < 3 || field(state.latest, 'Enforced by') !== 'judgment' || state.promoted) continue;
-    const before = baseThemes.get(theme);
-    if (before && before.max === state.max && judged(before)) {
+    const sources = partners(theme, state);
+    if (sources.length > 0 && sources.every(judged) && sources.some((source) => source.max === state.max)) {
       carried.push(`${label(state.latest)}: Seen ${state.max}× with Enforced by: judgment and no Promoted`);
     } else {
       add(state.latest, 'Promoted', `Seen ${state.max}× with Enforced by: judgment has no Promoted`,
         'promote the prevention rule into root AGENTS.md and root CLAUDE.md in this PR and add "- Promoted: #<PR>", or name the enforcing file in Enforced by');
-    }
-  }
-  // Row 4 from the base side: a judged base theme whose key the head no longer has (a rename or a
-  // delete) is settled only by a Promoted or a structural enforcer on a head entry that takes one
-  // of its references.
-  const headPatterns = new Set(head.map((entry) => field(entry, 'Mistake pattern')));
-  for (const [theme, before] of baseThemes) {
-    if (headPatterns.has(theme) || !judged(before)) continue;
-    const refs = referenceSet(before.entries);
-    const settled = head.some((entry) => references(entry).some((ref) => refs.has(normalize(ref)))
-      && (field(entry, 'Promoted') !== '' || structural(entry)));
-    if (!settled) {
-      add(before.latest, 'Mistake pattern', `the theme at Seen ${before.max}× with Enforced by: judgment and no Promoted is no longer in the ledger`,
-        'keep the Mistake pattern text, or add "- Promoted: #<PR>" or the enforcing file to the entry that takes its references', true);
     }
   }
   return { findings, review, carried };
@@ -247,8 +248,9 @@ function parseLedger(text: string): LedgerEntry[] {
     if (result.status !== 0) throw new Error(`the ledger parser failed: ${result.stderr.trim()}`);
     const entries: unknown = JSON.parse(result.stdout);
     const record = (value: unknown, type: string) => value !== null && typeof value === 'object' && Object.values(value).every((item) => typeof item === type);
-    if (!Array.isArray(entries) || !entries.every((entry) => Number.isInteger(entry?.line) && record(entry.fields, 'string') && record(entry.lines, 'number'))) {
-      throw new Error('the ledger parser output is not a list of {line, fields, lines}');
+    if (!Array.isArray(entries) || !entries.every((entry) => Number.isInteger(entry?.line) && record(entry.fields, 'string')
+      && Array.isArray(entry.owned) && entry.owned.every(Number.isInteger))) {
+      throw new Error('the ledger parser output is not a list of {line, fields, owned}');
     }
     return entries as LedgerEntry[];
   } finally {

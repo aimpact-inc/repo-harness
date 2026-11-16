@@ -55,7 +55,8 @@ function check({ base, head, main, files = {}, ref = 'HEAD' }: Case) {
 
 const valid = ledger(entry());
 const series = ledger(entry({ 'Triggered by correction': '#10' }), entry({ Date: '2026-10-02', 'Triggered by correction': '#11', Seen: '2×' }));
-const judged = ledger(entry({ Seen: '3×' }));
+const judged = ledger(entry({ 'Triggered by correction': '#10, #11, #12', Seen: '3×' }));
+const three = ledger(entry(), entry({ Date: '2026-10-02', 'Triggered by correction': '#11', Seen: '2×' }), entry({ Date: '2026-10-03', 'Triggered by correction': '#12', Seen: '3×', Promoted: '#30' }));
 
 const cases: Case[] = [
   // Row 1: a required field, the Missed by enum and the Seen count.
@@ -66,6 +67,7 @@ const cases: Case[] = [
   // Row 1, parser completeness: every lesson line belongs to an entry.
   { name: 'a lesson before the first Date fails', base: null, head: ledger(entry({ Date: null }), entry()), status: 1, output: ['tasks/lessons.md:5: Name "- Name: Keep evidence" belongs to no entry'] },
   { name: 'a lesson without a Date after an entry fails', base: null, head: ledger(entry(), entry({ Date: null, 'Mistake pattern': 'theme-b' })), status: 1, output: ['tasks/lessons.md:15: Name "- Name: Keep evidence" belongs to no entry', 'tasks/lessons.md:16: Mistake pattern "- Mistake pattern: theme-b" belongs to no entry'] },
+  { name: 'a lesson with another bullet style fails', base: null, head: `${valid}\n* Date: 2026-10-02\n* Name: Keep evidence\n`, status: 1, output: ['tasks/lessons.md:15: Date "* Date: 2026-10-02" belongs to no entry', 'tasks/lessons.md:16: Name "* Name: Keep evidence" belongs to no entry'] },
   { name: 'an unknown field fails', base: null, head: ledger(entry({ Owner: 'maintainer' })), status: 1, output: ['Owner is not a Lessons Retro field'] },
   { name: 'a Promoted that is not a PR reference fails', base: null, head: ledger(entry({ Seen: '3×', Promoted: 'yes' })), status: 1, output: ['Promoted "yes" is not a PR reference'] },
   // Row 2: the cumulative count of a theme.
@@ -73,13 +75,17 @@ const cases: Case[] = [
   { name: 'a repeat that does not raise Seen fails', base: null, head: ledger(entry(), entry({ Date: '2026-10-02', 'Triggered by correction': '#11' })), status: 1, output: ['(2026-10-02): Seen 1× does not exceed 1× of the earlier entry'] },
   { name: 'two entries of a theme on one day fail', base: null, head: ledger(entry(), entry({ 'Triggered by correction': '#11', Seen: '2×' })), status: 1, output: ['Date line 5 has an entry of this theme on the same day'] },
   { name: 'a new entry with one new correction passes', base: valid, head: series, status: 0, output: ['LedgerEnforcement: pass. 2 entries'] },
-  { name: 'a new entry that jumps past one event fails', base: valid, head: ledger(entry(), entry({ Date: '2026-10-02', 'Triggered by correction': '#11', Seen: '99×', Promoted: '#30' })), status: 1, output: ['Seen 99× is not 2×, the earlier entry plus one new event'] },
-  { name: 'a new entry without a new correction fails', base: valid, head: ledger(entry(), entry({ Date: '2026-10-02', Seen: '2×' })), status: 1, output: ['(2026-10-02): Triggered by correction names no new correction'] },
-  { name: 'a new theme that does not start at 1× fails', base: valid, head: ledger(entry(), entry({ 'Mistake pattern': 'theme-b', 'Triggered by correction': '#12', Seen: '2×' })), status: 1, output: ['theme-b (2026-10-01): Seen 2× starts a new theme. Fix: a new theme starts at 1×'] },
+  { name: 'one entry with two new corrections passes', base: valid, head: ledger(entry(), entry({ Date: '2026-10-02', 'Triggered by correction': '#11, #12', Seen: '3×', Promoted: '#30' })), status: 0, output: ['LedgerEnforcement: pass. 2 entries'] },
+  { name: 'a new entry that counts more events than new references fails', base: valid, head: ledger(entry(), entry({ Date: '2026-10-02', 'Triggered by correction': '#11', Seen: '99×', Promoted: '#30' })), status: 1, output: ['(2026-10-02): Seen 99× adds 98 events, but the entry names 1 references that the earlier entries of the theme do not name'] },
+  { name: 'a new entry without a new correction fails', base: valid, head: ledger(entry(), entry({ Date: '2026-10-02', Seen: '2×' })), status: 1, output: ['(2026-10-02): Seen 2× adds 1 events, but the entry names 0 references'] },
+  { name: 'a new theme above its references fails', base: valid, head: ledger(entry(), entry({ 'Mistake pattern': 'theme-b', 'Triggered by correction': '#12', Seen: '2×' })), status: 1, output: ['theme-b (2026-10-01): Seen 2× adds 2 events, but the entry names 1 references'] },
   { name: 'a base commit after the branch cut is not part of this change', base: valid, main: series, head: valid, ref: 'main', status: 0, output: ['LedgerEnforcement: pass. 1 entries, 0 findings'] },
   { name: 'an edited Seen on an older entry fails', base: valid, head: ledger(entry({ Seen: '2×' })), status: 1, output: ['Seen changed from 1× to 2× on an existing entry. Fix: restore 1×'] },
   { name: 'a merge that keeps the maximum and the references passes', base: series, head: ledger(entry({ 'Triggered by correction': '#10, #11, #20', Seen: '2×' })), status: 0, output: ['LedgerEnforcement: pass. 1 entries'] },
-  { name: 'a merge that adds the Seen values fails', base: series, head: ledger(entry({ 'Triggered by correction': '#10, #11, #20', Seen: '3×' })), status: 1, output: ['Seen 3× exceeds the maximum 2× of the entries that this change merges'] },
+  { name: 'a merge that adds the Seen values fails', base: series, head: ledger(entry({ 'Triggered by correction': '#10, #11, #20', Seen: '3×' })), status: 1, output: ['Seen a consolidation of 2 entries into 1 gives 3× with 1 new references. Fix: a consolidation keeps the maximum 2×'] },
+  { name: 'a consolidation that keeps the maximum and adds the consolidating PR passes', base: three, head: ledger(entry({ 'Triggered by correction': '#10, #11, #12, #20', Seen: '3×', Promoted: '#30' })), status: 0, output: ['LedgerEnforcement: pass. 1 entries'] },
+  { name: 'a consolidation with a new correction fails', base: three, head: ledger(entry({ 'Triggered by correction': '#10, #11, #20', Seen: '2×' }), entry({ Date: '2026-10-04', 'Triggered by correction': '#12, #13', Seen: '3×', Promoted: '#30' })), status: 1, output: ['a consolidation of 3 entries into 2 gives 3× with 2 new references'] },
+  { name: 'a consolidation that counts a known correction again fails', base: three, head: ledger(entry({ 'Triggered by correction': '#10, #11, #12, #20', Seen: '2×', Promoted: '#30' }), entry({ Date: '2026-10-04', 'Triggered by correction': '#12', Seen: '3×' })), status: 1, output: ['(2026-10-04): Seen 3× adds 1 events, but the entry names 0 references'] },
   { name: 'a merge that lowers the maximum fails', base: series, head: ledger(entry({ 'Triggered by correction': '#10, #11, #20' })), status: 1, output: ['Seen the theme maximum fell from 2× to 1×'] },
   // Row 3: the Enforced by reference exists. Row 6: an existing reference stops at human review.
   { name: 'a missing Enforced by path fails', base: null, head: ledger(entry({ 'Enforced by': 'tests/guard.test.ts' })), status: 1, output: ['Enforced by tests/guard.test.ts is not a file of the candidate tree'] },
@@ -94,11 +100,11 @@ const cases: Case[] = [
   },
   // Row 4: Seen 3× or more with judgment needs Promoted; a state that the base already has is carried.
   { name: 'Seen 3× with judgment and no Promoted fails', base: null, head: judged, status: 1, output: ['Promoted Seen 3× with Enforced by: judgment has no Promoted. Fix: promote the prevention rule'] },
-  { name: 'Seen 3× with judgment and Promoted passes', base: null, head: ledger(entry({ Seen: '3×', Promoted: '#30' })), status: 0, output: ['LedgerEnforcement: pass'] },
+  { name: 'Seen 3× with judgment and Promoted passes', base: null, head: ledger(entry({ 'Triggered by correction': '#10, #11, #12', Seen: '3×', Promoted: '#30' })), status: 0, output: ['LedgerEnforcement: pass'] },
   { name: 'an unchanged judgment theme from the base is carried', base: judged, head: judged, status: 0, output: ['LedgerEnforcement: pass', 'Carried from the base, not changed here: tasks/lessons.md:5 theme-a (2026-10-01): Seen 3×'] },
-  { name: 'a new event on a carried theme fails', base: judged, head: ledger(entry({ Seen: '3×' }), entry({ Date: '2026-10-02', 'Triggered by correction': '#11', Seen: '4×' })), status: 1, output: ['(2026-10-02): Promoted Seen 4× with Enforced by: judgment has no Promoted'] },
-  { name: 'a renamed judged theme fails', base: judged, head: ledger(entry({ 'Mistake pattern': 'theme-a-renamed' })), status: 1, output: ['base tasks/lessons.md:5 theme-a (2026-10-01): Mistake pattern the theme at Seen 3× with Enforced by: judgment and no Promoted is no longer in the ledger'] },
-  { name: 'a renamed judged theme with Promoted passes', base: judged, head: ledger(entry({ 'Mistake pattern': 'theme-a-renamed', Seen: '3×', Promoted: '#30' })), status: 0, output: ['LedgerEnforcement: pass. 1 entries, 0 findings'] },
+  { name: 'a new event on a carried theme fails', base: judged, head: ledger(entry({ 'Triggered by correction': '#10, #11, #12', Seen: '3×' }), entry({ Date: '2026-10-02', 'Triggered by correction': '#13', Seen: '4×' })), status: 1, output: ['(2026-10-02): Promoted Seen 4× with Enforced by: judgment has no Promoted'] },
+  { name: 'a renamed carried theme stays carried', base: judged, head: ledger(entry({ 'Mistake pattern': 'theme-a-renamed', 'Triggered by correction': '#10, #11, #12', Seen: '3×' })), status: 0, output: ['LedgerEnforcement: pass. 1 entries, 0 findings', 'Carried from the base, not changed here: tasks/lessons.md:5 theme-a-renamed (2026-10-01): Seen 3×'] },
+  { name: 'a renamed theme that resets Seen fails', base: series, head: ledger(entry({ 'Mistake pattern': 'theme-a-renamed', 'Triggered by correction': '#10, #11' })), status: 1, output: ['theme-a-renamed (2026-10-01): Seen the theme maximum fell from 2× to 1×'] },
   // Row 5: a merge keeps every original correction reference.
   { name: 'a merge that keeps only the consolidation reference fails', base: series, head: ledger(entry({ 'Triggered by correction': '#20', Seen: '2×' })), status: 1, output: ['base tasks/lessons.md:5 theme-a (2026-10-01): Triggered by correction #10 is no longer in the ledger', 'base tasks/lessons.md:15 theme-a (2026-10-02): Triggered by correction #11 is no longer in the ledger'] },
   // The ledger file and the base commit.
