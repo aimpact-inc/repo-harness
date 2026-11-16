@@ -166,6 +166,14 @@ export function effectiveGatekeeper(seats: SeatsConfigV1, quota: SeatAccountQuot
     line: `gatekeeper: gatekeeper-fallback (${launchText(fallback)}${accountSuffix('gatekeeper-fallback', fallback, quota)}; gatekeeper: ${cause})` };
 }
 
+/** The route line of a review seat that has no fallback. */
+function reviewSeatLine(id: 'gatekeeper-deep' | 'reviewer', seats: SeatsConfigV1, quota: SeatAccountQuotas): string {
+  const seat = effectiveSeatConfig(id, seats, quota);
+  return reviewSeatBlocked(id, seat, quota, seats.routing)
+    ? `${id}: none (${blockText(id, seat, quota, seats.routing)})`
+    : `${id}: ${id} (${launchText(seat)}${accountSuffix(id, seat, quota)})`;
+}
+
 /** The saving threshold reserves Claude; pace-based tight is only a display state. */
 export function formatSeatRoutes(seats: SeatsConfigV1, quota: SeatAccountQuotas): string {
   const reserved = claudeReserved(quota);
@@ -174,10 +182,7 @@ export function formatSeatRoutes(seats: SeatsConfigV1, quota: SeatAccountQuotas)
     ? `explorer: ${modelText(seats.routing.low_quota_explorer)} (claude ${quota.claude.state === 'exhausted' ? 'exhausted' : quota.claude.mode}; pass model ${seats.routing.low_quota_explorer.model} when you call the explorer)`
     : 'explorer: default');
   lines.push(effectiveGatekeeper(seats, quota).line);
-  const reviewer = effectiveSeatConfig('reviewer', seats, quota);
-  lines.push(reviewSeatBlocked('reviewer', reviewer, quota, seats.routing)
-    ? `reviewer: none (${blockText('reviewer', reviewer, quota, seats.routing)})`
-    : `reviewer: reviewer (${launchText(reviewer)}${accountSuffix('reviewer', reviewer, quota)})`);
+  lines.push(reviewSeatLine('gatekeeper-deep', seats, quota), reviewSeatLine('reviewer', seats, quota));
   const advisor = effectiveSeatConfig('advisor', seats, quota);
   const advisorBlock = unavailablePiSeat(advisor, seats.routing);
   lines.push(advisorBlock === null ? `advisor: advisor (${launchText(advisor)})` : `advisor: none (${advisorBlock})`);

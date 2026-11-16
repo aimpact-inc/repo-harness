@@ -173,6 +173,9 @@ describe('seat quota routing', () => {
     expect(line(null, 97)).toBe('gatekeeper: none (chatgpt exhausted)');
     expect(line(DEFAULT_SEATS_CONFIG.reviewer, 97, 97)).toBe('gatekeeper: none (chatgpt exhausted; gatekeeper-fallback: claude exhausted, reserved for advisor and orchestrator)');
     expect(line(pi, 40)).toBe(line(null, 40));
+    const exhausted = { ...DEFAULT_SEATS_CONFIG };
+    const routes = formatSeatRoutes(exhausted, seatAccountQuotas([codex(97)], exhausted.routing)).split('\n');
+    expect(routes).toContain('gatekeeper-deep: none (chatgpt exhausted)');
   });
 
   test('the credit mode admits the seats it names on an exhausted ChatGPT account with credits at or above the floor', () => {
@@ -421,7 +424,7 @@ describe('rh quota', () => {
     const lines = text.stdout.trim().split('\n');
     expect(lines.slice(0, 2).map(line => line.split(' | ')[0])).toEqual(['claude: exhausted', 'chatgpt: normal']);
     expect(lines.slice(2, 4)).toEqual(['claude mode: saving (5% left < 20%)', 'codex mode: hyper (99% left >= 50%)']);
-    expect(lines.slice(4).map(line => line.split(':')[0])).toEqual(['route important_deep', 'route important_fast', 'route simple_deep', 'route simple_fast', 'route frontend', 'explorer', 'gatekeeper', 'reviewer', 'advisor']);
+    expect(lines.slice(4).map(line => line.split(':')[0])).toEqual(['route important_deep', 'route important_fast', 'route simple_deep', 'route simple_fast', 'route frontend', 'explorer', 'gatekeeper', 'gatekeeper-deep', 'reviewer', 'advisor']);
   });
 
   test('the stored review credit mode routes the gatekeeper on credits and keeps the account line exhausted', () => {

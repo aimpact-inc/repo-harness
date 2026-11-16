@@ -410,7 +410,7 @@ host's PR events or check when the worker reports.
   that meets the Low accept-seat skip gets no Codex, Herdr or OAR accept
   seat (`docs/reference-configs/agentic-development-flow.md`, Review by
   risk). Give each ready PR that needs review its own review seat at once.
-  A High PR keeps two reviewer seats in parallel. Send
+  A High PR keeps two reviewer seats in parallel. A coordinator may add `gatekeeper-deep` (read-only Codex, a different model than `gatekeeper`) as an optional second Codex review row. Send
   each reviewer the review packet of `acceptor.md` §2.1. Each reviewer
   posts an `acceptance claim` before it reads. Who reviews each
   round, and how many claims a round has, follow `acceptor.md` §2.2.

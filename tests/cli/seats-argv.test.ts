@@ -235,7 +235,7 @@ describe("rh seats argv", () => {
 
   test("gatekeeper and reviewer require a PR and launch read-only reviews", () => {
     withHome(undefined, home => withRepository(home, "rh", repo => {
-      for (const [seat, role] of [["gatekeeper", "gk"], ["reviewer", "rv"]]) {
+      for (const [seat, role] of [["gatekeeper", "gk"], ["gatekeeper-deep", "gd"], ["reviewer", "rv"]]) {
         const missing = argv(home, seat!, "--json");
         expect([missing.status, JSON.parse(missing.stderr).error]).toEqual([1, "pane_name_invalid"]);
         const bare = argv(home, seat!, "--pr", "1925", "--json");
@@ -247,7 +247,7 @@ describe("rh seats argv", () => {
         expect(value.brief).toContain("Do not edit files, commit or push. Do not write to GitHub, with one exception: publish your own round with `rh review publish --pr <number> --receipt <path>`. Run no other GitHub write. Report the verdict first");
         expect(value.brief).not.toContain("Do not write to GitHub.");
         expect(value.brief).not.toContain("You are a worker seat");
-        if (seat === "gatekeeper") {
+        if (seat !== "reviewer") {
           expect(agent(value)).toContain("read-only");
           expect(agent(value)).not.toContain('web_search="disabled"');
         } else expect(tools(agent(value))).toEqual(["WebFetch", "WebSearch", "Read", "Glob", "Grep", "Bash", "Monitor", "TaskStop"]);
@@ -257,7 +257,7 @@ describe("rh seats argv", () => {
   });
 
   test("Pi review seats exclude edit and write tools and report the shell path as common_commands", () => {
-    for (const seat of ["gatekeeper", "reviewer"] as const) {
+    for (const seat of ["gatekeeper", "gatekeeper-deep", "reviewer"] as const) {
       withHome({ ...DEFAULT_SEATS_CONFIG, [seat]: { ...DEFAULT_SEATS_CONFIG[seat], runtime: "pi", model: null, effort: null } }, home => {
         const result = argv(home, seat, "--pr", "1928", "--json");
         expect(result.status, result.stderr).toBe(0);
