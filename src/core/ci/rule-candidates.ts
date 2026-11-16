@@ -118,6 +118,12 @@ function freeText(value: unknown, what: string): string {
   return value;
 }
 
+/** The ledger parser accepts continued lesson prose with no short-field length limit. */
+function lessonProse(value: unknown, what: string): string {
+  if (typeof value !== 'string' || CONTROL.test(value)) throw new Error(`rules triage invalid: ${what}`);
+  return value;
+}
+
 function keys(value: unknown, expected: readonly string[], what: string): Record<string, unknown> {
   if (!isRecord(value) || Object.keys(value).sort().join(',') !== [...expected].sort().join(',')) {
     throw new Error(`rules triage invalid: ${what}`);
@@ -143,8 +149,8 @@ function decodeTheme(value: unknown, at: number): TriageThemeV1 {
     key: text(row.key, `themes[${at}].key`),
     theme: text(row.theme, `themes[${at}].theme`),
     name: row.name === null ? null : text(row.name, `themes[${at}].name`),
-    prevention_rule: freeText(row.prevention_rule, `themes[${at}].prevention_rule`),
-    why: freeText(row.why, `themes[${at}].why`),
+    prevention_rule: lessonProse(row.prevention_rule, `themes[${at}].prevention_rule`),
+    why: lessonProse(row.why, `themes[${at}].why`),
     correction_sources: list(row.correction_sources, `themes[${at}].correction_sources`, (source, index) => text(source, `themes[${at}].correction_sources[${index}]`)),
     seen: count(row.seen, `themes[${at}].seen`, 1),
     enforced_by: text(row.enforced_by, `themes[${at}].enforced_by`),
