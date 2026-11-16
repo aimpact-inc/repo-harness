@@ -9,6 +9,7 @@ import { spawnSync } from 'child_process';
 import { runUserUninstall } from '../../src/cli/installer/uninstall';
 import { configurationReceiptPath, writeOwnedConfiguration } from '../../src/cli/installer/configuration-ownership';
 import { buildManagedHooks } from '../../src/cli/installer/managed-entries';
+import { renderGlobalRulesBlock } from '../../src/cli/installer/global-context';
 const CLI = join(import.meta.dir, '../../src/cli/index.ts');
 beforeAll(() => { seedGlobalPackageFixture(); });
 function fixture(run: (home: string, env: NodeJS.ProcessEnv) => void) {
@@ -56,9 +57,18 @@ test('target codex retains Claude and shared brain configuration',()=>fixture((h
  expect(runUserUninstall({target:'codex',env}).exitCode).toBe(0);
  expect(readFileSync(join(home,'.claude/settings.json'),'utf8')).toBe(claude);expect(existsSync(join(home,'.repo-harness/config.json'))).toBe(true);
 }));
-test('old unreceipted TOML and opaque trust state produce explicit unresolved output',()=>fixture((home,env)=>{
+const TRUST_NOTE='Codex keeps its hook trust entries in [hooks.state]; rh does not remove them.';
+test('old unreceipted TOML stays unresolved beside a hook trust note',()=>fixture((home,env)=>{
  put(home,'.codex/config.toml','default_mode_request_user_input = true\n[hooks.state]\nopaque = true\n');
- const result=runUserUninstall({target:'both',env});expect(result.exitCode).toBe(1);expect(result.lines.join('\n')).toContain('no installation provenance');expect(result.lines.join('\n')).toContain('no verified command mapping');
+ const result=runUserUninstall({target:'both',env});expect(result.exitCode).toBe(1);expect(result.lines.join('\n')).toContain('no installation provenance');expect(result.lines).toContain(`[note] ${join(home,'.codex/config.toml')}: ${TRUST_NOTE}`);
+}));
+test('hook trust entries alone are a note: uninstall completes and retires install state',()=>fixture((home,env)=>{
+ put(home,'.codex/config.toml','[hooks.state."hooks.json:pre_tool_use:0:0"]\ntrusted_hash = "sha256:a"\n');
+ profile(home,[]);
+ const result=runUserUninstall({target:'both',env});
+ expect(result.exitCode,result.lines.join('\n')).toBe(0);expect(result.lines.at(-1)).toBe('[uninstall] complete');
+ expect(result.lines.filter((line)=>line.startsWith('[note]'))).toEqual([`[note] ${join(home,'.codex/config.toml')}: ${TRUST_NOTE}`]);
+ expect(existsSync(join(home,'.repo-harness/install-state.json'))).toBe(false);
 }));
 test('CLI dry-run JSON creates no lock, receipt or directories',()=>fixture((home,env)=>{
  const before=tree(home);const result=spawnSync('bun',[CLI,'uninstall','--dry-run','--json'],{env:{...env,BUN_RUNTIME_TRANSPILER_CACHE_PATH:'0'},encoding:'utf8'});
@@ -135,9 +145,17 @@ test.skipIf(process.platform==='win32'||process.getuid?.()===0)('a failed provid
  expect(runUserUninstall({target:'both',env:xdg}).status).toBe('complete');expect(existsSync(path)).toBe(false);
  expect(JSON.parse(readFileSync(join(lockDir,'.skill-lock.json'),'utf8')).skills).toEqual({'user-skill':{}});
 }));
+const RULES_BLOCK=renderGlobalRulesBlock(join(import.meta.dir,'../..'),{preset:'en',instruction:'Use English to report to user.'}).trimEnd();
 test('managed context block cleanup keeps user prose',()=>fixture((home,env)=>{
- put(home,'.codex/AGENTS.md','user-before\n<!-- BEGIN: repo-harness global-working-rules -->\nmanaged\n<!-- END: repo-harness global-working-rules -->\nuser-after\n');
+ put(home,'.codex/AGENTS.md',`user-before\n${RULES_BLOCK}\nuser-after\n`);
  expect(runUserUninstall({target:'codex',env}).status).toBe('complete');expect(readFileSync(join(home,'.codex/AGENTS.md'),'utf8')).toBe('user-before\n\nuser-after\n');
+}));
+test('an edited managed context block keeps the file byte-identical and is unresolved',()=>fixture((home,env)=>{
+ const content=`user-before\n${RULES_BLOCK.replace('## Reporting','- My own rule.\n\n## Reporting')}\n`;
+ put(home,'.claude/CLAUDE.md',content);
+ const result=runUserUninstall({target:'both',env});
+ expect(result.exitCode).toBe(1);expect(readFileSync(join(home,'.claude/CLAUDE.md'),'utf8')).toBe(content);
+ expect(result.lines).toContain(`[unresolved] ${join(home,'.claude/CLAUDE.md')}: managed rules block was edited; preserved. Move your rules outside the markers, then delete the block.`);
 }));
 
 test('old transaction-owned MCP projection composes with hook removal',()=>fixture((home,env)=>{

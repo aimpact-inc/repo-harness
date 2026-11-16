@@ -644,12 +644,19 @@ export function applyGlobalContextRefresh(plan: GlobalContextRefreshPlan, home: 
 export type ManagedBlockRemoval =
   | { readonly status: 'none' }
   | { readonly status: 'unbalanced' }
+  | { readonly status: 'edited' }
   | { readonly status: 'removed'; readonly content: string };
 
-/** Uninstall: removes only the marked block; the rest of the file keeps its bytes. */
-export function removeManagedBlock(content: string): ManagedBlockRemoval {
+/**
+ * Uninstall: removes only the marked block, and only when install would prove
+ * it managed; an edited block holds user text, so the file is left unchanged.
+ * The rest of the file keeps its bytes.
+ */
+export function removeManagedBlock(content: string, sourceRoot: string): ManagedBlockRemoval {
   const layout = markerLayout(content);
   if (layout.kind !== 'balanced') return { status: layout.kind };
+  const existing = content.slice(layout.start, layout.end + GLOBAL_RULES_END.length).replace(/\r\n/g, '\n');
+  if (!managedBlockProved(existing, sourceRoot)) return { status: 'edited' };
   return {
     status: 'removed',
     content: content.slice(0, layout.start) + content.slice(layout.end + GLOBAL_RULES_END.length),

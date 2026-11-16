@@ -5,6 +5,7 @@ import {
   formatGlobalContextWrite,
   inspectGlobalContext,
   mergeManagedBlock,
+  removeManagedBlock,
   renderGlobalRulesBlock,
   SHIPPED_GLOBAL_RULES_H1,
   SHIPPED_GLOBAL_RULES_SECTIONS,
@@ -211,6 +212,8 @@ describe("global working rules distribution", () => {
     const content = `user content\n\n${edited}`;
     expect(mergeManagedBlock(content, zhBlock(), ROOT)).toMatchObject({ status: "kept-edited", content });
     expect(inspectGlobalContext(content, ROOT).state).toBe("managed-stale");
+    expect(removeManagedBlock(content, ROOT)).toEqual({ status: "edited" });
+    expect(removeManagedBlock(`user content\r\n\r\n${zhBlock().replace(/\n/g, "\r\n")}`, ROOT)).toEqual({ status: "removed", content: "user content\r\n\r\n\r\n" });
   });
 
   test("migrates a mixed legacy file and keeps a custom sentence refreshable", () => {
