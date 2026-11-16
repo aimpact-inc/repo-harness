@@ -110,7 +110,7 @@ export type BoardAcceptanceV1 =
   | { readonly status: 'not_accepted' }
   | { readonly status: 'unknown'; readonly reason: 'acceptance_record_unparsed' | 'comments_truncated'; readonly evidence_url: string | null };
 
-export type BoardClaudeReviewV1 = 'not_required' | 'pending' | 'recorded';
+export type BoardSecondReviewV1 = 'not_required' | 'pending' | 'recorded';
 
 /** A review runtime as an acceptance row names it. */
 export type BoardReviewHarness = NonNullable<AcceptanceRowV1['harness']>;
@@ -155,9 +155,9 @@ export interface BoardPullRequestV1 {
   readonly tier: BoardTier | null;
   /**
    * An unknown tier counts as High here (fail closed). `pending`: an open High pull request whose head does not meet the High acceptance rule and has no acceptance row
-   * from a Claude reviewer. `recorded`: such a row exists. `not_required` for any other pull request, and for a High head that meets the rule without a Claude row.
+   * of the configured reviewer's model family (`BoardV1.reviewer_family`). `recorded`: such a row exists. `not_required` for any other pull request, and for a High head that meets the rule without such a row.
    */
-  readonly claude_review: BoardClaudeReviewV1;
+  readonly second_review: BoardSecondReviewV1;
   /**
    * The family of the `Runtime:` that the newest writer claim bound to the head branch names, the same on every linked issue (the parent
    * excluded); null when a linked issue has no such claim, a runtime names no family, or the issues disagree. It selects the Medium review
@@ -293,6 +293,8 @@ export interface BoardV1 {
   readonly plan: BoardPlanV1;
   /** The hold record on the parent: it holds the whole batch, or the issues of its `Issues:` line. */
   readonly merge_hold: BoardMergeHoldV1;
+  /** The model family of the configured `reviewer` seat (seats config); null when its model names no known family. It decides which acceptance rows are the reviewer's. */
+  readonly reviewer_family: string | null;
   readonly items: readonly BoardItemV1[];
   readonly pull_requests: readonly BoardPullRequestV1[];
   readonly path_owners: BoardPathOwnersV1;
@@ -315,6 +317,7 @@ export interface BoardInputV1 {
   readonly observed_at: string;
   readonly parent: BoardParentReadV1;
   readonly acceptance_merge: BoardAcceptanceMergeV1;
+  readonly reviewer_family: string | null;
   readonly pull_requests: readonly BoardPullRequestReadV1[];
   readonly readiness: readonly BoardReadinessV1[];
   /** The required contexts of each base ref of the pull requests, by base ref. */
@@ -573,14 +576,14 @@ function effectiveTier(read: BoardPullRequestReadV1, closes: readonly number[], 
 }
 
 /**
- * The Claude review state of a pull request: a projection of the High rule, not a second rule. `recorded`: a Claude reviewer has a row
- * for the head. `pending`: the High rule is not met for the head and no Claude row exists, so the Claude reviewer seat supplies the
- * missing review (the second review for a Claude writer, the different-family review for any other writer).
+ * The second-review state of a pull request: a projection of the High rule, not a second rule. `recorded`: a row of the configured
+ * reviewer's model family exists for the head. `pending`: the High rule is not met for the head and no such row exists, so the reviewer
+ * seat supplies the missing review. A reviewer with no known family, or a row with no known model, matches no row.
  */
-function claudeReview(read: BoardPullRequestReadV1, tier: BoardTier | null): BoardClaudeReviewV1 {
+function secondReview(read: BoardPullRequestReadV1, tier: BoardTier | null, reviewerFamily: string | null): BoardSecondReviewV1 {
   if (reviewRule(read, tier) !== 'high') return 'not_required';
   const head = protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? []).filter(row => row.subject_sha === read.head_sha);
-  if (head.some(row => row.harness === 'claude')) return 'recorded';
+  if (reviewerFamily !== null && head.some(row => row.model !== null && modelFamily(row.model) === reviewerFamily)) return 'recorded';
   return highRuleMet(read, head) ? 'not_required' : 'pending';
 }
 
@@ -626,7 +629,7 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
     if (required === undefined) throw new Error(`board input has no required contexts for base ${read.base_ref} of PR #${read.number}`);
     const check = requiredCheck(read, required);
     const tier = effectiveTier(read, closes, refs, input.parent, tiers);
-    const claude = claudeReview(read, tier);
+    const second = secondReview(read, tier, input.reviewer_family);
     const readiness = read.state === 'open' ? input.readiness.find(entry => entry.readiness.pr_number === read.number) : undefined;
     if (read.state === 'open' && readiness === undefined) throw new Error(`board input has no merge readiness for open PR #${read.number}`);
     return Object.freeze({
@@ -652,7 +655,7 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
       merge_readiness: readiness?.readiness ?? null,
       merge_readiness_observed_at: readiness?.observed_at ?? null,
       tier,
-      claude_review: claude,
+      second_review: second,
       writer_family: writerFamily(read, closes, refs, input.parent),
       merge_hold: readMergeHold(read.comments, false),
     });
@@ -692,6 +695,7 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
     parent: Object.freeze({ number: parent.number, title: parent.title, url: parent.url, state: parent.state, labels: parent.labels, milestone: parent.milestone }),
     plan: projectPlan(parent),
     merge_hold: readMergeHold(parent.comments, true),
+    reviewer_family: input.reviewer_family,
     items: Object.freeze(items),
     pull_requests: Object.freeze(pullRequests),
     path_owners: input.path_owners,

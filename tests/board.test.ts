@@ -25,7 +25,7 @@ import { ADVISOR_TRANSCRIPT_LINE_WITHHELD, AdvisorSeatError, advisorSeatSendFail
 import { decodeBoardParents, decodeBoardSeats, projectBoardSeats, joinBoardParents, type BoardParentsV1 } from '../src/core/board/parents';
 import { BoardSourceError } from '../src/core/board/source';
 import { planDispatch } from '../src/core/board/dispatch';
-import { DEFAULT_SEATS_CONFIG } from '../src/core/board/seats-settings';
+import { DEFAULT_SEATS_CONFIG, type SeatsConfigV1 } from '../src/core/board/seats-settings';
 import { HC_MIN_VERSION } from '../src/core/terminal/herdr-pin';
 import { BoardParentsError, collectBoardParents } from '../src/effects/board/parents';
 import { deskState, hasDesk, hcStatusClass, isQueued, ISSUE_FLOW_WORKER_LIMIT, liveSeats, seatItem, seatPullRequest, workerLimit } from '../src/core/board/desk';
@@ -76,6 +76,8 @@ interface Replay {
   readonly archctx?: RunArchctxProcess;
   /** Replaces the hc host that replays the recorded terminals. */
   readonly host?: BoardHostPortsV1;
+  /** The seats config that names the reviewer seat; the default config reviews with Claude opus. */
+  readonly seats?: SeatsConfigV1;
   /** The answer to the policy file read of the default branch; the default is a 404. */
   readonly policy?: GhAnswer;
   /** The answer to the protection read of one base branch; the default requires the one context `Required / CI` on every base. */
@@ -131,6 +133,7 @@ function replayInput(options: Replay): BoardCollectInput {
     repo_root: root,
     parent: 1474,
     now: () => options.now ?? REPLAY_NOW,
+    seats: options.seats ?? DEFAULT_SEATS_CONFIG,
     host: options.host ?? boardHostPorts({ env: { PATH: `${join(root, 'bin')}:/bin:/usr/bin`, FIXTURES, HC_VERSION: options.hcVersion ?? HC_MIN_VERSION } }),
     gh_runner: (args) => {
       if (args[0] === 'repo') return answer({ nameWithOwner: 'Ancienttwo/repo-harness' });
@@ -312,12 +315,13 @@ test('Low labels give Low to a fix of at most 50 changed lines, and to docs only
   ]).toEqual(['low', 'medium', 'medium', 'low', 'low', 'medium', 'low', 'low']);
 });
 
-test('High acceptance: PASS rows of the head from two distinct claims, one recorded different-family; claude_review and A10 project the same rule', () => {
+test('High acceptance: PASS rows of the head from two distinct claims, one recorded different-family; second_review and A10 project the same rule', () => {
   const claim = (model: string, branch: string) => comment(`repo-harness issue claim\nStatus: active\nRole: writer\nBranch: ${branch}\nRuntime: pi${model === '' ? '' : `\nModel: ${model}`}`, '2026-11-02T10:00:00Z');
   // The claim and the record are the `review publish` wire format. Claim n is an `acceptance claim` comment whose id comes from its time.
-  const receipt = (harness: 'claude' | 'codex' | 'pi', subject_sha: string, model_relation: ModelRelation = 'different-family', verdict: 'PASS' | 'FAIL' = 'PASS', round = 1): ReviewPublishReceipt => ({
-    protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round, subject_sha, risk_tier: 'high', reviewer: { harness, actual_model: null }, verdict, model_relation, summary: 'Reviewed.', findings: [],
+  const receipt = (harness: 'claude' | 'codex' | 'pi', subject_sha: string, model_relation: ModelRelation = 'different-family', verdict: 'PASS' | 'FAIL' = 'PASS', round = 1, model: string = MODELS[harness]): ReviewPublishReceipt => ({
+    protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round, subject_sha, risk_tier: 'high', reviewer: { harness, actual_model: model }, verdict, model_relation, summary: 'Reviewed.', findings: [],
   });
+  const MODELS = { claude: 'claude-opus-5-5', codex: 'gpt-6.1-terra', pi: 'magpie/codex/gpt-6.1-sol' } as const;
   const claimAt = (n: number) => `2026-11-02T21:0${n}:00Z`;
   const claimUrl = (n: number, path = 'pull/1491') => `https://github.com/Ancienttwo/repo-harness/${path}#issuecomment-${Date.parse(claimAt(n))}`;
   const parent = (data: Json) => {
@@ -340,23 +344,24 @@ test('High acceptance: PASS rows of the head from two distinct claims, one recor
     },
   });
   // One different-family PASS is one review: #1494 (unknown tier, counted as High) and #1499 are not accepted.
-  expect(board.pull_requests.map(pr => [pr.number, pr.tier, pr.claude_review, pr.acceptance.status])).toEqual([
+  expect(board.pull_requests.map(pr => [pr.number, pr.tier, pr.second_review, pr.acceptance.status])).toEqual([
     [1491, 'high', 'pending', 'not_accepted'], [1494, null, 'pending', 'not_accepted'], [1499, 'high', 'recorded', 'not_accepted'],
   ]);
   // A Claude writer claim no longer skips the second review: A10 reads the open, non-draft #1491.
   expect(evaluateBoardAttention(board).findings.filter(finding => finding.rule === 'A10').map(finding => finding.pull_requests)).toEqual([[1491]]);
   // A row: the reviewer, the claim line it cites, its relation (null drops the line), verdict, subject (default the head) and round.
-  type Row = readonly [harness: 'claude' | 'codex' | 'pi', claimLine: string, relation?: ModelRelation | null, verdict?: 'PASS' | 'FAIL', sha?: string, round?: number];
+  type Row = readonly [harness: 'claude' | 'codex' | 'pi', claimLine: string, relation?: ModelRelation | null, verdict?: 'PASS' | 'FAIL', sha?: string, round?: number, model?: string];
   const OLD = 'e'.repeat(40);
-  const head = (rows: readonly Row[], tier = 'tier:high') => replay({
+  const head = (rows: readonly Row[], tier = 'tier:high', seats?: SeatsConfigV1) => replay({
+    seats,
     parent: (data) => { parent(data); const labels = issueNode(data, 1475).labels.nodes; labels[labels.length - 1] = { name: tier }; },
     pulls: (data) => {
       const { pr1491 } = data.repository;
       // Claims 1-3 are round 1 of the head; claims 4 and 6 are round 1 of an earlier head; claim 5 is round 2 and claims 7-8 round 4 of the head.
       const claims: readonly (readonly [number, string, number])[] = [[1, pr1491.headRefOid, 1], [2, pr1491.headRefOid, 1], [3, pr1491.headRefOid, 1], [4, OLD, 1], [5, pr1491.headRefOid, 2], [6, OLD, 1], [7, pr1491.headRefOid, 4], [8, pr1491.headRefOid, 4]];
       pr1491.comments.nodes.push(...claims.map(([n, sha, round]) => comment(renderAcceptanceClaim(receipt('codex', sha, 'different-family', 'PASS', round)), claimAt(n))));
-      pr1491.comments.nodes.push(...rows.map(([harness, claimLine, relation = 'different-family', verdict = 'PASS', sha = pr1491.headRefOid, round = 1], at) => {
-        const body = renderAcceptanceRecord(receipt(harness, sha, relation ?? 'unknown', verdict, round), claimLine);
+      pr1491.comments.nodes.push(...rows.map(([harness, claimLine, relation = 'different-family', verdict = 'PASS', sha = pr1491.headRefOid, round = 1, model], at) => {
+        const body = renderAcceptanceRecord(receipt(harness, sha, relation ?? 'unknown', verdict, round, model), claimLine);
         return comment(relation === null ? body.replace(/^Model relation: .*\n/mu, '') : body, `2026-11-02T22:0${at}:00Z`);
       }));
     },
@@ -387,8 +392,15 @@ test('High acceptance: PASS rows of the head from two distinct claims, one recor
   ];
   const projected = cases.map(([rows]) => head(rows));
   const pr1491 = (projection: BoardV1) => projection.pull_requests.find(pr => pr.number === 1491)!;
-  expect(projected.map(pr1491).map(pr => [pr.acceptance.status, pr.claude_review] as string[])).toEqual(cases.map(([, status, claude]) => [status, claude]));
+  expect(projected.map(pr1491).map(pr => [pr.acceptance.status, pr.second_review] as string[])).toEqual(cases.map(([, status, claude]) => [status, claude]));
   expect(evaluateBoardAttention(projected[1]!).findings.filter(finding => finding.rule === 'A10')).toEqual([]);
+  // A Pi DeepSeek reviewer: its row, not the harness, is the second review; the Pi Codex gatekeeper row alone leaves it pending, and A10 names the reviewer family.
+  const deepseek: SeatsConfigV1 = { ...DEFAULT_SEATS_CONFIG, reviewer: { ...DEFAULT_SEATS_CONFIG.reviewer, runtime: 'pi', model: 'magpie/cursor/deepseek-v41-flash-1017', effort: null } };
+  const reviewed = head([gatekeeper, ['pi', claimUrl(2), 'different-family', 'PASS', undefined, 1, 'magpie/cursor/deepseek-v41-flash-1017']], 'tier:high', deepseek);
+  expect([pr1491(reviewed).acceptance.status, pr1491(reviewed).second_review]).toEqual(['accepted', 'recorded']);
+  const waiting = head([gatekeeper], 'tier:high', deepseek);
+  expect([pr1491(waiting).second_review, waiting.reviewer_family]).toEqual(['pending', 'deepseek']);
+  expect(evaluateBoardAttention(waiting).findings.find(finding => finding.rule === 'A10')?.message).toContain('reviewer seat (family deepseek)');
   // Medium needs one claimed PASS row recorded different-family; a same-family PASS alone, or an unclaimed one, does not accept (#2084).
   expect(([[gatekeeper], [['claude', claimUrl(1), 'same-family']], [['pi', '']]] as const).map(rows => pr1491(head(rows, 'tier:medium')).acceptance.status)).toEqual(['accepted', 'not_accepted', 'not_accepted']);
   // The writer claim bound to the head branch gives the family that the Medium review seat differs from; #1494 links an issue outside the board.
@@ -1696,7 +1708,7 @@ test('watch window: idle sends at once, blocked waits, working sends at window e
   const questions = 'P1 A16: #1475 has a question to the coordinator with no answer for 286 min (https://github.com/Ancienttwo/repo-harness/issues/1475#issuecomment-6585298933); '
     + 'P1 A16: #1479 has a question to the coordinator with no answer for 282 min (https://github.com/Ancienttwo/repo-harness/issues/1479#issuecomment-6585387749); '
     + 'P1 A16: #1479 has a question to the coordinator with no answer for 273 min (https://github.com/Ancienttwo/repo-harness/issues/1479#issuecomment-6585624819); ';
-  const orchestrator = `[rh-attention] #1474 ${questions}P2 A7: the daily full run is failure (https://github.com/Ancienttwo/repo-harness/actions/runs/41358255043) and no CI repair issue is open; P2 A10: #1491 is of unknown tier (counted as High) and has no Claude review of 20e2cbd21; start the Claude reviewer seat`;
+  const orchestrator = `[rh-attention] #1474 ${questions}P2 A7: the daily full run is failure (https://github.com/Ancienttwo/repo-harness/actions/runs/41358255043) and no CI repair issue is open; P2 A10: #1491 is of unknown tier (counted as High) and has no review of 20e2cbd21 from the reviewer seat (family anthropic); start the reviewer seat`;
   expect(hc.calls().filter(args => args[0] !== 'get')).toEqual([
     ['send', '--json', '--', 't3', orchestrator],
     ['send', '--json', '--', 't9', expect.stringMatching(/^\[rh-attention\] #1474 P2 R2: #1494 and #1499 both change .+ with no dependency edge$/u)],
