@@ -26,7 +26,7 @@ reviewed-through: 4305f61cd699547276e2434cbf1f1a4675e4036d
 - Name: One authority per value
 - Mistake pattern: one-authority-per-value
 - Prevention rule: Keep one authority per value and import its existing parser/resolver; never create a second semantic interpretation.
-- Enforced by: scripts/check-state-boundaries.ts
+- Enforced by: judgment
 - Missed by: unknown
 - Why: #483 consolidated this rule from earlier lessons; the pre-consolidation references and count are kept here. The old entries do not name the layer that missed each event, so `Missed by` is unknown.
 - Triggered by correction: d810d9e3, #132, #209, c2e4997d, 9a19af4c, 4527bfa5, d52f9a9b, #483
@@ -106,7 +106,7 @@ reviewed-through: 4305f61cd699547276e2434cbf1f1a4675e4036d
 - Name: Aggregate independent failures
 - Mistake pattern: aggregate-independent-failures
 - Prevention rule: Aggregate independent failures so a red first lane does not conceal later faults; schedule the full suite daily.
-- Enforced by: .github/workflows/ci.yml
+- Enforced by: judgment
 - Missed by: unknown
 - Why: #483 consolidated this rule from earlier lessons; the pre-consolidation references and count are kept here. The old entries do not name the layer that missed each event, so `Missed by` is unknown.
 - Triggered by correction: #319, #321, e467217c, b674ebe4, #483
@@ -116,7 +116,7 @@ reviewed-through: 4305f61cd699547276e2434cbf1f1a4675e4036d
 - Name: Isolate mutable state
 - Mistake pattern: isolate-mutable-state
 - Prevention rule: Isolate mutable process/repository/HOME state and use real synchronization signals instead of sleeps or longer timeouts.
-- Enforced by: tests/preload-home-isolation.ts
+- Enforced by: judgment
 - Missed by: unknown
 - Why: #483 consolidated this rule from earlier lessons; the pre-consolidation references and count are kept here. The old entries do not name the layer that missed each event, so `Missed by` is unknown.
 - Triggered by correction: 6c7aec98, 16aed8af, 7ce86fdd, 01920840, b6dee923, #483
@@ -126,7 +126,7 @@ reviewed-through: 4305f61cd699547276e2434cbf1f1a4675e4036d
 - Name: Change sources with projections
 - Mistake pattern: change-sources-and-projections-together
 - Prevention rule: Change distributed authoring sources and deterministic projections together; validate dry-run against the same operation model as apply.
-- Enforced by: scripts/sync-reference-configs.ts
+- Enforced by: judgment
 - Missed by: unknown
 - Why: #483 consolidated this rule from earlier lessons; the pre-consolidation references and count are kept here. The old entries do not name the layer that missed each event, so `Missed by` is unknown.
 - Triggered by correction: dc4c7656, #173, f081c6a0, cd05083e, 8134a2af, #483
