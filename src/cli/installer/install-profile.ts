@@ -440,19 +440,21 @@ function discoverManagedSurfaces(
   // A catalog facade can lack the prefix (obsidian-memory). Its copy needs
   // the same marker-based receipt as a prefixed facade copy.
   const facadeNames = new Set(catalog.packages.filter((pkg) => pkg.kind === 'facade').map((pkg) => pkg.name));
-  for (const root of selectedSkillHosts(plugins).map((host) => hostSkillRoot(home, host, env))) {
+  const hostRoots = selectedSkillHosts(plugins).map((host) => hostSkillRoot(home, host, env));
+  // The Herdr step writes its marker with the SKILL.md hash, in each selected host
+  // root and in the staged root. A copy that still matches it is rh's, whichever
+  // earlier run wrote it; an edited copy stays the user's.
+  for (const herdr of [...hostRoots, stagedSkillRoot(home)].map((root) => join(root, 'herdr'))) {
+    const owner = ownerForInstallPath(herdr, env);
+    if (!enabled(owner) || !lstatSync(herdr, { throwIfNoEntry: false })?.isDirectory() || !ownedSkillIsIntact(herdr)) continue;
+    const surface = captureOwnedPath(herdr, owner);
+    if (surface) surfaces.push(surface);
+  }
+  for (const root of hostRoots) {
     const canonicalOwner = ownerForInstallPath(join(root, 'repo-harness'), env);
     if (enabled(canonicalOwner)) {
       const canonical = captureDirectoryOrLink(join(root, 'repo-harness'), canonicalOwner);
       if (canonical) surfaces.push(canonical);
-    }
-    // The Herdr step writes its marker with the SKILL.md hash. A copy that still
-    // matches it is rh's, whichever earlier run wrote it; an edited copy stays the user's.
-    const herdr = join(root, 'herdr');
-    const herdrOwner = ownerForInstallPath(herdr, env);
-    if (enabled(herdrOwner) && lstatSync(herdr, { throwIfNoEntry: false })?.isDirectory() && ownedSkillIsIntact(herdr)) {
-      const surface = captureOwnedPath(herdr, herdrOwner);
-      if (surface) surfaces.push(surface);
     }
     if (!existsSync(root)) continue;
     for (const name of readdirSync(root).filter((entry) => entry.startsWith(FACADE_NAME_PREFIX) || facadeNames.has(entry)).sort()) {
@@ -827,7 +829,7 @@ export function installProfileTransactionPaths(env: NodeJS.ProcessEnv = process.
 /**
  * The user Git excludes file that the runtime ignore step writes. It is a
  * restore-only transaction path: the snapshot restores it, and ownership
- * capture never claims it (transactionOwnedSurfaces). Rollback replaces a
+ * capture never claims it, whatever the path (transactionOwnedSurfaces). Rollback replaces a
  * snapshot path whole, and the backup copies what the path names, so the path
  * must be absent or a regular file. Any other entry is refused before the
  * transaction writes anything.
@@ -990,9 +992,11 @@ function transactionOwnedSurfaces(
 ): readonly ManagedInstallSurface[] {
   const home = env.HOME ?? homedir();
   const allowlist = new Set(installProfileHostMutationPaths(env));
+  const excludes = userExcludesFilePath(env);
   return transaction.snapshots.flatMap((snapshot) => {
-    // Ownership capture claims only a path that the ownership allowlist names. Every
-    // other transaction path (the user Git excludes file) is restore-only.
+    // Ownership capture claims only a path that the ownership allowlist names. The
+    // user Git excludes file is restore-only even when the allowlist names its path.
+    if (excludes.ok && snapshot.path === excludes.path) return [];
     if (!allowlist.has(snapshot.path) && !isDiscoveredFacadePath(snapshot.path, home, env)) return [];
     const normalized = snapshot.path.replaceAll('\\', '/');
     if (

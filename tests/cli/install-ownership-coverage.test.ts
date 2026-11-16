@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { spawnSync } from 'child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { configureRequiredHerdrSkill } from '../../src/cli/commands/herdr-skill';
@@ -32,12 +32,17 @@ function withInstallHome(run: (home: string, rh: (...args: string[]) => ReturnTy
 const INSTALL = ['install', '--no-plugins', '--target', 'both', '--no-cli', '--no-codegraph', '--no-external-skills', '--json'];
 
 test('install owns the Herdr skill copies under core, and uninstall removes them with the emptied skill roots', () => {
-  // `earlier copy`: an rh run before this install (a release that recorded no Herdr surface) left marked copies.
+  // `earlier copy`: an rh run before this install (a release that recorded no Herdr surface) left marked copies,
+  // in both host roots and in the staged root that the Herdr step refreshes when it exists.
   for (const earlierCopy of [false, true]) withInstallHome((home, rh, env) => {
-    if (earlierCopy) expect(configureRequiredHerdrSkill('both', env, undefined, false).status).toBe('ok');
+    if (earlierCopy) {
+      expect(configureRequiredHerdrSkill('both', env, undefined, false).status).toBe('ok');
+      cpSync(join(home, '.codex', 'skills', 'herdr'), join(home, '.agents', 'skills', 'herdr'), { recursive: true });
+    }
     const install = rh(...INSTALL);
     expect(install.status, `${install.stdout}\n${install.stderr}`).toBe(0);
-    const herdr = ['.claude', '.codex'].map(host => join(home, host, 'skills', 'herdr'));
+    const herdr = [join('.agents', 'skills'), join('.claude', 'skills'), join('.codex', 'skills')]
+      .filter(root => earlierCopy || !root.startsWith('.agents')).map(root => join(home, root, 'herdr'));
     const ledger = readInstallState(env)!.ownership_manifest;
     expect(ledger.filter(surface => surface.path.endsWith('/herdr')).map(({ owner, path, type }) => ({ owner, path, type })), `earlier copy: ${earlierCopy}`)
       .toEqual(herdr.map(path => ({ owner: 'core', path, type: 'directory-copy' })));
@@ -46,6 +51,7 @@ test('install owns the Herdr skill copies under core, and uninstall removes them
     expect(uninstall.status, `${uninstall.stdout}\n${uninstall.stderr}`).toBe(0);
     expect(JSON.parse(String(uninstall.stdout)).lines.at(-1)).toBe('[uninstall] complete');
     for (const host of ['.claude', '.codex']) expect(existsSync(join(home, host, 'skills')), `${host} earlier copy: ${earlierCopy}`).toBe(false);
+    expect(existsSync(join(home, '.agents', 'skills', 'herdr'))).toBe(false);
   });
 }, 120_000);
 
@@ -74,6 +80,8 @@ test('a custom excludes path is restore-only, and a directory or symlink exclude
     // Each basename matches an ownership rule: an absent path that the ignore step creates must not become a surface.
     { name: 'bin/rh', excludes: home => join(home, 'bin', 'rh'), refused: false },
     { name: 'skills/herdr', excludes: home => join(home, '.config', 'skills', 'herdr'), refused: false },
+    // The ownership allowlist names this Waza rule path, and the excludes file is still restore-only.
+    { name: 'allowlisted rule path', excludes: home => join(home, '.codex', 'rules', 'english.md'), refused: false },
     { name: 'directory', excludes: home => { mkdirSync(join(home, 'rules')); writeFileSync(join(home, 'rules', 'keep'), 'user\n'); return join(home, 'rules'); }, refused: true },
     { name: 'symlink', excludes: home => { writeFileSync(join(home, 'secret'), 'token\n'); symlinkSync(join(home, 'secret'), join(home, 'ignore-link')); return join(home, 'ignore-link'); }, refused: true },
     { name: 'HOME', excludes: home => home, refused: true },
