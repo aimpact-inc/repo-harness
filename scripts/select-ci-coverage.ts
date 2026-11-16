@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { discoverPathReferences, loadPathReferences, savePathReferences, sourceKey } from './ci-path-consumers';
 import { isDocumentationPath, PROJECTION_DIRECTORY, PROJECTION_MANIFEST, projectionOutputs } from '../src/core/ci/documentation-path';
 import { loadTestDurations, planShards } from './select-test-suite';
+import { LEDGER_PATH } from './check-ledger-enforcement';
 
 export type CoverageInput = {
   eventName: string; event: unknown; headSha: string; actualHead: string; diffRaw: string | null;
@@ -47,6 +48,14 @@ export function selectCoverage(input: CoverageInput): CoverageSelection {
     paths.push(path);
   }
   return result(eventName === 'push' ? 'report' : 'affected', 'complete-diff', paths);
+}
+
+/**
+ * LedgerEnforcement runs on each PR diff with code, because a code change can remove a file that an
+ * `Enforced by` line names. Of the documentation-only diffs, only a ledger change selects it.
+ */
+export function ledgerCheckSelected(mode: CoverageSelection['mode'], paths: readonly string[]): boolean {
+  return mode === 'affected' || (mode === 'documentation' && paths.includes(LEDGER_PATH));
 }
 
 /** Imports and exact paths propagate; directory content edges apply to direct changes only. */
@@ -361,6 +370,7 @@ if (import.meta.main) {
     }
     if (referenceCache) savePathReferences(referenceCache, analyzer, [...sources, ...previousSources]);
   }
-  console.log(`mode=${selection.mode}\nreason=${selection.reason}\nhead=${headSha}\nbase=${base ?? headSha}\nnative_oar=${platforms.native_oar}\nnative_oar_reason=${nativeReason}\nhome_isolation=${platforms.home_isolation}`);
-  if (!local) appendFileSync(process.env.GITHUB_OUTPUT!, `mode=${selection.mode}\nsha=${headSha}\nnative_oar=${platforms.native_oar}\nhome_isolation=${platforms.home_isolation}\n`);
+  const ledger = ledgerCheckSelected(selection.mode, selection.paths);
+  console.log(`mode=${selection.mode}\nreason=${selection.reason}\nhead=${headSha}\nbase=${base ?? headSha}\nnative_oar=${platforms.native_oar}\nnative_oar_reason=${nativeReason}\nhome_isolation=${platforms.home_isolation}\nledger=${ledger}`);
+  if (!local) appendFileSync(process.env.GITHUB_OUTPUT!, `mode=${selection.mode}\nsha=${headSha}\nnative_oar=${platforms.native_oar}\nhome_isolation=${platforms.home_isolation}\nledger=${ledger}\n`);
 }
