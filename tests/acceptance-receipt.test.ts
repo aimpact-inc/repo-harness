@@ -12,7 +12,7 @@ import { taskReviewRunner } from '../src/effects/review-runner/task-review-runne
 import { fixtureTemplate, recordFixtureAcceptance, fixtureReviewResult } from './helpers/repo-fixture';
 import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { darwinTest } from './helpers/darwin-test';
-import { existsSync, mkdtempSync, mkdirSync, realpathSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import { spawnSync } from 'child_process';
@@ -627,9 +627,6 @@ function reviewFixture() {
   tempDirs.push(fixture.root, fixture.home);
   admissions.set(fixture.root, { ...admissionFixture, source: { ...admissionFixture.source } });
   const endpointHome = realpathSync(mkdtempSync('/tmp/as-')); tempDirs.push(endpointHome);
-  mkdirSync(join(endpointHome, '.codex'));
-  const payload = Buffer.from(JSON.stringify({ exp: Math.floor(Date.now()/1000)+86400 })).toString('base64url');
-  writeFileSync(join(endpointHome,'.codex','auth.json'),JSON.stringify({tokens:{access_token:`fixture.${payload}.fixture`}}),{mode:0o600});
 
   const reviewerRepo = join(fixture.home, 'reviewer');
   const calls: string[] = [];
@@ -637,6 +634,7 @@ function reviewFixture() {
   let verdict: 'PASS' | 'FAIL' = 'FAIL'; let prior = false;
   const effects: TaskReviewEffects = { ...taskReviewRunner,
     owner: () => 'codex', installation: async (_kind, executable) => ({ kind: 'available', via: 'executable', command: executable ?? '/usr/bin/true' }), model: () => 'fixture-model', assertBinding: () => {}, ready: async () => {}, dispose: async () => { calls.push('dispose'); },
+    assertMagpieReachable: async () => {},
     start: async (repo, spec, _command, _ready, _guard, authority) => {
       calls.push(`start:${spec.harness_kind}:${spec.role}`);
       if (!authority) throw new Error('fixture_task_authority_missing');
@@ -824,38 +822,18 @@ darwinTest('generic review cancel that lands between the final check and the acc
 });
 
 
-const copied = (f: ReturnType<typeof reviewFixture>) => {
+const codexHome = (f: ReturnType<typeof reviewFixture>) => {
   const session = readSessionArtifact<{task:string}>(join(reviewLocation(f.root,f.options.authority).dir,'session.json'));
-  return join(f.reviewerRepo,'.ai/harness/runs/task-agent-outbox',importedTaskDir(f.reviewerRepo,session.task,'deep-reasoner').split('/').pop()!,'.codex-home','auth.json');
+  return join(f.reviewerRepo,'.ai/harness/runs/task-agent-outbox',importedTaskDir(f.reviewerRepo,session.task,'deep-reasoner').split('/').pop()!,'.codex-home');
 };
 
-for (const cancel of [false,true]) darwinTest(`Codex credential copy cleanup follows owner ${cancel ? 'cancel' : 'close'}`, async () => {
-  const f=reviewFixture();f.verdict('PASS');await runReviewRound({...f.options,harness:'codex'},f.effects);
-  expect(existsSync(copied(f))).toBe(true);await closeReview(f.root,f.options.authority,cancel,f.home,f.effects);expect(existsSync(copied(f))).toBe(false);
-});
-
-darwinTest('Codex credential copy cleanup follows start failure', async () => {
-  const start=reviewFixture();
-  await expect(runReviewRound({...start.options,harness:'codex'},{...start.effects,start:async()=>{throw new Error('fixture_start_failure')}})).rejects.toThrow('fixture_start_failure');
-  expect(existsSync(copied(start))).toBe(false);
-});
-
-darwinTest('Codex credential copy cleanup follows a missing Result', async () => {
-  const missing=reviewFixture();
-  await expect(runReviewRound({...missing.options,harness:'codex',timeoutMs:1},{...missing.effects,collect:async()=>null})).rejects.toThrow('review_result_missing');
-  expect(existsSync(copied(missing))).toBe(false);
-});
-
-darwinTest('Codex credential copy cleanup follows round timeout', async () => {
-  const timed=reviewFixture();
-  await expect(runReviewRound({...timed.options,harness:'codex',timeoutMs:1},pendingTurnEffects(timed,async()=>null))).rejects.toThrow('review_round_timeout');
-  expect(existsSync(copied(timed))).toBe(false);
-});
-
-darwinTest('Codex credential copy cleanup reports a refused delete', async () => {
-  const refused=reviewFixture();refused.verdict('PASS');await runReviewRound({...refused.options,harness:'codex'},refused.effects);
-  unlinkSync(copied(refused));mkdirSync(copied(refused));
-  await expect(closeReview(refused.root,refused.options.authority,true,refused.home,refused.effects)).rejects.toThrow('cleanup_pending: review_auth_copy_delete_failed');
+darwinTest('a Codex review starts and closes with no auth.json in its isolated home', async () => {
+  const f=reviewFixture();f.verdict('PASS');
+  let atStart: string[] = [];
+  await runReviewRound({...f.options,harness:'codex'},{...f.effects,start:async(...args)=>{atStart=readdirSync(codexHome(f));return f.effects.start(...args);}});
+  expect(atStart).toEqual(['config.toml']);
+  await closeReview(f.root,f.options.authority,false,f.home,f.effects);
+  expect(readdirSync(codexHome(f))).toEqual(['config.toml']);
 });
 
 // Regression: reviewer-authored completion/model evidence must never mint a Receipt.

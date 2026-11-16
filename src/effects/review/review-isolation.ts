@@ -62,6 +62,9 @@ export function prepareCodexHome(output: string): { home: string } {
     + `wire_api = ${JSON.stringify(MAGPIE_CODEX_WIRE_API)}\nexperimental_bearer_token = ${JSON.stringify(MAGPIE_PLACEHOLDER_KEY)}\n`
     + `http_headers = { ${JSON.stringify(MAGPIE_ACTOR_HEADER)} = ${JSON.stringify(MAGPIE_PLACEHOLDER_KEY)} }\n`;
   writeOwnedFile(join(home, 'config.toml'), config, 'review_codex_config_changed');
+  // An earlier version copied the native auth.json here; the sandbox must not read a left copy.
+  const auth = join(home, 'auth.json');
+  if (existsSync(auth)) throw new Error(`review_codex_auth_present: ${auth} exists; delete it, then repeat the round`);
   return { home };
 }
 
