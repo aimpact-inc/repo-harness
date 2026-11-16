@@ -6,10 +6,10 @@
 - Owner word, relayed locally by the advisor seat and recorded in [#2742 comment 6924525557](https://github.com/aimpact-inc/repo-harness/issues/2742#issuecomment-6924525557) at 2026-11-16T17:55:00Z: "那你等一起，发0.33.2吧，我不想再发一个，下一版就直接跳0.34了". The recorded reading: one release, version 0.33.2; the next release is 0.34.0.
 - The recorded reading cuts the release after #2936 and #2926 (#2916) merge. #2936 merged as `e95dee83b` (#2949). PR #2926 is open; the orchestrator decided that it stays out of this release unless the owner says otherwise.
 - #2898, #2922, #2894 and #2893 stay out of this release; they merge after the `v0.33.2` tag.
-- Source commit before release prep: `3dd1f3d34c8b3da74b119666cfd15726ef1b2867`. The release range is `v0.33.1..3dd1f3d34`, 57 commits, 27 changelog fragments.
+- Source commit before release prep: `ab65af6e20c4f305bfac509a04dc16e6c3aaa5af`. The release range is `v0.33.1..ab65af6e2`, 59 commits, 27 changelog fragments.
 - Breaking removals ship in this patch version because the owner chose 0.33.2: #2863 removes `rh init-hook`, `rh update --check`, `rh update --no-runtime-refresh` and `rh update --check-updates`; #2867 replaces `rh board migrate-dependencies --write` with `--apply`.
 - Release prep correction: the #2798 Fixed entry named `rh update --check`, which #2863 removes in the same release. The entry now names `rh setup check` only.
-- Release prep added one changelog entry, from the merged PR, for each of 14 changes that had no fragment: #2862, #2868, #2870, #2881 (PR #2928), #2823, #2824, #2825, #2826 (Added); #2913, #2923, #2814 (Changed); #2843, #2844, #2917 (Fixed). The orchestrator asked for these entries.
+- Release prep added one changelog entry, from the merged PR, for each of 14 changes that had no fragment: #2862, #2868, #2870, #2881 (PR #2928), #2823, #2824, #2825, #2826 (Added); #2913, #2923, #2814 (Changed); #2843, #2844, #2917 (Fixed). The orchestrator asked for these entries. #2956 (Changed) and #2955 (Fixed) merged after the first prep commit without a fragment; release prep added their entries the same way.
 
 | PR | Commit | Change |
 |---|---|---|
@@ -70,10 +70,12 @@
 | [#2933](https://github.com/aimpact-inc/repo-harness/pull/2933) | `ac5932523` | feat(arch): rh arch verify gives one verdict over the ArchContext checks (#2873) |
 | [#2952](https://github.com/aimpact-inc/repo-harness/pull/2952) | `a88a201e5` | feat(board): High review runs as a relay, the reviewer starts after the gatekeeper PASS (#2910) |
 | [#2957](https://github.com/aimpact-inc/repo-harness/pull/2957) | `3dd1f3d34` | fix(rules): resolve repository root and refuse missing ledger (#2954) |
+| [#2959](https://github.com/aimpact-inc/repo-harness/pull/2959) | `8e6cb4e3f` | fix(seats): accept zai GLM-5.3 for Pi seats (#2956) |
+| [#2958](https://github.com/aimpact-inc/repo-harness/pull/2958) | `ab65af6e2` | fix(review): require an unresolved P0 or P1 for FAIL (#2955) |
 
 ## Verification
 
-On Darwin arm64 with Bun 1.4.4, at source `a88a201e5` with the release prep changes. After the rebase onto `3dd1f3d34` (it changes `src/cli/commands/rules.ts` and `tests/rule-candidates.test.ts` only), `check:type`, the skill version check and the changelog check pass again.
+On Darwin arm64 with Bun 1.4.4, at source `a88a201e5` with the release prep changes. After the rebase onto `3dd1f3d34` (it changes `src/cli/commands/rules.ts` and `tests/rule-candidates.test.ts` only), `check:type`, the skill version check and the changelog check pass again. After the rebase onto `ab65af6e2` (#2959 and #2958, seats range and generic review only), the changelog check, `check:cli-manifest` and `git diff --check` pass.
 
 - `bun install --frozen-lockfile`: pass, 521 packages installed.
 - `bun run check:type`: pass.
