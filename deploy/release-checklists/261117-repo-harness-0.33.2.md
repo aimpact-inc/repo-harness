@@ -78,7 +78,7 @@ On Darwin arm64 with Bun 1.4.4, at source `a88a201e5` with the release prep chan
 - `bun run check:type`: pass.
 - `bun run check:state-boundaries`: pass, 644 TypeScript files checked.
 - `bun scripts/check-skill-version.ts`: pass, repo-harness=0.33.2, template=0.33.2.
-- VERIFY_TESTS
+- `bun run test:files tests/skill-version.test.ts tests/bootstrap-files.test.ts tests/readme-dx.test.ts tests/action-command-skills.test.ts tests/scaffold-parity.test.ts tests/installed-copy-sync.test.ts --timeout 60000 --max-concurrency 1`: pass, 100 tests in 6 files, on the committed prep head.
 - `bun scripts/check-changelog-released-sections.ts --base origin/main`: pass, 121 released sections keep their bytes.
 - `git diff --check`: pass.
 
