@@ -290,7 +290,7 @@ describe('rh arch verify: one status per check', () => {
 });
 
 describe('rh arch verify: one verdict', () => {
-  test('error outranks findings, findings outrank pass, and unavailable never changes the verdict', () => {
+  test('error outranks findings, findings outrank pass, and one unavailable never changes the verdict', () => {
     expect(archVerifyVerdict([check('validate', 'pass'), check('flows', 'pass')])).toBe('pass');
     expect(archVerifyVerdict([check('validate', 'pass'), check('flows', 'unavailable')])).toBe('pass');
     expect(archVerifyVerdict([check('validate', 'pass'), check('flows', 'findings', 1), check('debt', 'unavailable')])).toBe('findings');
@@ -298,6 +298,18 @@ describe('rh arch verify: one verdict', () => {
     expect(archVerifyExitCode('pass')).toBe(0);
     expect(archVerifyExitCode('findings')).toBe(1);
     expect(archVerifyExitCode('error')).toBe(2);
+  });
+
+  // Nothing measured the change, so `pass` would claim a result the run does not have.
+  test('a run where every check is unavailable is error with exit code 2', () => {
+    const allUnavailable = ARCH_VERIFY_CHECK_IDS.map((id) => check(id, 'unavailable'));
+    expect(archVerifyVerdict(allUnavailable)).toBe('error');
+    expect(archVerifyExitCode(archVerifyVerdict(allUnavailable))).toBe(2);
+    // One measured check is enough for the spec's mixed result.
+    expect(archVerifyVerdict([...allUnavailable.slice(1), check('validate', 'pass')])).toBe('pass');
+    expect(archVerifyVerdict([...allUnavailable.slice(1), check('validate', 'findings', 2)])).toBe('findings');
+    // A run with no check at all is also error, not pass.
+    expect(archVerifyVerdict([])).toBe('error');
   });
 
   test('the document has the published shape, and the text is one line per check then the verdict', () => {
@@ -394,4 +406,38 @@ describe('rh arch verify in a repository', () => {
     expect(report.verdict).toBe('error');
     expect(result.exitCode).toBe(2);
   }, 120_000);
+
+  test('every producer envelope failing leaves nothing measured, so the verdict is error with exit 2', () => {
+    // The `unavailable` codes keep their own status; the verdict still cannot claim a pass.
+    const root = validRepository();
+    const run: RunArchctxProcess = () => ({
+      status: 1, signal: null, stderr: '',
+      stdout: JSON.stringify({ schemaVersion: 'archcontext.envelope/v1', ok: false, requestId: 'probe', error: { code: 'AC_CODE_FACTS_UNAVAILABLE', message: 'no index', severity: 'error', retryable: true, action: 'codegraph-init', details: {} } }),
+    });
+    const base = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const result = archVerify(root, base, base, true, { run });
+    if (!result.ok) throw new Error(result.error);
+    const report = JSON.parse(result.document) as { verdict: string; checks: ArchVerifyCheckV1[] };
+    expect(report.checks.every((entry) => entry.status === 'unavailable' && entry.error?.code === 'AC_CODE_FACTS_UNAVAILABLE')).toBe(true);
+    expect(report.verdict).toBe('error');
+    expect(result.exitCode).toBe(2);
+  }, 120_000);
+
+  test('a check that reports a decoded observation gap is error with exit 2, with no failed envelope', () => {
+    // The decoder's own unavailable answers, from a report that arrived ok: the same aggregation.
+    const unmeasuredDebt = redigest({ ...debtReport(0), coverage: 'unknown', coverageReasonCodes: ['anchors:not-evaluated', 'dependencies:not-evaluated', 'flows:not-evaluated', 'ownership:not-evaluated', 'practices:not-evaluated', 'state-machines:not-evaluated'],
+      checks: (debtReport(0).checks as Array<{ check: string }>).map((entry) => ({ check: entry.check, coverage: 'unknown', reasonCodes: ['not-evaluated'] })) });
+    const gaps = [
+      archVerifyCheck('flows', data({ ...flowsReport(0, 0), codeGraph: { availability: 'unavailable', version: '1.6.2' } })),
+      archVerifyCheck('docs', data(anchorsReport(0, 0, 'unavailable'))),
+      archVerifyCheck('debt', data(unmeasuredDebt)),
+      archVerifyCheck('constraints', data(constraintReport('undetermined', 'unknown'))),
+      archVerifyCheck('state-machines', data(machineReport(['holds'], 0, ['unchecked']))),
+    ];
+    expect(gaps.every((entry) => entry.status === 'unavailable')).toBe(true);
+    expect(archVerifyVerdict(gaps)).toBe('error');
+    expect(archVerifyExitCode(archVerifyVerdict(gaps))).toBe(2);
+    // One measured pass among them returns the spec's mixed result.
+    expect(archVerifyVerdict([...gaps, check('validate', 'pass')])).toBe('pass');
+  });
 });

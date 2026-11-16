@@ -237,11 +237,16 @@ export function archVerifyCheck(id: ArchVerifyCheckId, read: ArchVerifyCheckRead
   }
 }
 
-/** `error` outranks `findings`, and an `unavailable` check never changes the verdict. */
+/**
+ * `error` outranks `findings`, and one `unavailable` check never changes the
+ * verdict: a mixed pass/unavailable result stays `pass`, as the issue defines.
+ * A `pass` verdict needs one measured check, so a run in which every check is
+ * unavailable is `error`: nothing observed the change.
+ */
 export function archVerifyVerdict(checks: readonly ArchVerifyCheckV1[]): ArchVerifyVerdict {
   if (checks.some((check) => check.status === 'error')) return 'error';
   if (checks.some((check) => check.status === 'findings')) return 'findings';
-  return 'pass';
+  return checks.some((check) => check.status === 'pass') ? 'pass' : 'error';
 }
 
 export function archVerifyExitCode(verdict: ArchVerifyVerdict): 0 | 1 | 2 {
