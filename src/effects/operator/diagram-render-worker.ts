@@ -7,7 +7,6 @@
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 
 const [directory, browserPath, job] = process.argv.slice(2) as [string, string, string];
 const ICON_NAME = /^[a-z0-9][a-z0-9-]*$/u;
@@ -16,7 +15,8 @@ interface LibraryError { readonly code: string; readonly path?: string; readonly
 type Result = Record<string, unknown>;
 
 const requireFromCapability = createRequire(join(directory, 'package.json'));
-const load = async (name: string): Promise<any> => import(pathToFileURL(requireFromCapability.resolve(name)).href);
+// The modules live in the capability directory, outside this package, so a literal import cannot name them.
+const load = async (name: string): Promise<any> => requireFromCapability(name);
 
 function fontsConfig(libraryDir: string) {
   const stock = join(libraryDir, 'fonts');
