@@ -15,8 +15,13 @@ export interface PiAgentDirectory { readonly directory: string; readonly model: 
  * The sandbox cannot write these names, so a changed file is not the product's file and refuses the session.
  */
 function writeOwnedFile(path: string, content: string, changed: string): void {
-  if (!existsSync(path)) writeFileSync(path, content, { flag: 'wx', mode: 0o600 });
-  const stat = lstatSync(path);
+  let stat;
+  // lstat, not existsSync: a dangling link at the path is a changed file, not an absent one.
+  try { stat = lstatSync(path); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    writeFileSync(path, content, { flag: 'wx', mode: 0o600 });
+    stat = lstatSync(path);
+  }
   if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o600
     || readFileSync(path, 'utf8') !== content) throw new Error(changed);
 }
