@@ -128,16 +128,23 @@ function bare(args: string[]): unknown[] {
   return args.slice(UNSET_SEAT.length);
 }
 /**
- * On darwin a Pi review seat runs under its Seatbelt write profile (#2905): `TMPDIR` and `BUN_TEST_JUNIT_DIR` point into the seat
- * output beside the profile, then `sandbox-exec -f <profile>` starts pi. `piReview` checks that prefix and drops it; elsewhere the argv has none.
+ * On darwin a Pi review seat runs under its Seatbelt write profile (#2905): `TMPDIR`, `REPO_HARNESS_TEST_TEMP_ROOT` and
+ * `BUN_TEST_JUNIT_DIR` point into the seat directory inside /tmp, beside the profile, then `sandbox-exec -f <profile>` starts pi.
+ * `piReview` checks that prefix, removes the seat directory and drops the prefix; elsewhere the argv has none.
  */
 function piReview(args: string[]): unknown[] {
   const rest = bare(args);
   if (process.platform !== "darwin") return rest;
-  const root = dirname(rest[4] as string);
-  expect(rest.slice(0, 4)).toEqual([`TMPDIR=${join(root, "output", "tmp")}`, `BUN_TEST_JUNIT_DIR=${join(root, "output", "junit")}`, "/usr/bin/sandbox-exec", "-f"]);
-  expect(statSync(join(root, "output", "tmp")).isDirectory()).toBe(true);
-  return rest.slice(5);
+  const root = dirname(rest[5] as string);
+  try {
+    expect(root.startsWith(join(realpathSync("/tmp"), "rh-seat-"))).toBe(true);
+    const writable = join(root, "w");
+    expect(rest.slice(0, 5)).toEqual([`TMPDIR=${writable}`, `REPO_HARNESS_TEST_TEMP_ROOT=${writable}`, `BUN_TEST_JUNIT_DIR=${join(writable, "junit")}`, "/usr/bin/sandbox-exec", "-f"]);
+    expect(statSync(writable).isDirectory()).toBe(true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+  return rest.slice(6);
 }
 
 describe("rh seats argv", () => {
@@ -311,8 +318,9 @@ describe("rh seats argv", () => {
         const result = argv(home, seat, ...(seat === "reviewer" ? ["--pr", "1950"] : []), "--json");
         expect(result.status, result.stderr).toBe(0);
         const value = JSON.parse(result.stdout);
-        expect((seat === "reviewer" ? piReview : bare)(value.argv).slice(0, 5)).toEqual(["pi", "--provider", "magpie", "--model", "cursor/deepseek-v41-flash-1017"]);
-        if (seat === "reviewer") expect(piReview(value.argv).slice(5, 12)).toEqual(["--exclude-tools", "edit,write", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-mcp"]);
+        const args = (seat === "reviewer" ? piReview : bare)(value.argv);
+        expect(args.slice(0, 5)).toEqual(["pi", "--provider", "magpie", "--model", "cursor/deepseek-v41-flash-1017"]);
+        if (seat === "reviewer") expect(args.slice(5, 12)).toEqual(["--exclude-tools", "edit,write", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-mcp"]);
       });
     }
   });

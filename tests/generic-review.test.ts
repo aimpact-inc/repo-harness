@@ -1030,13 +1030,14 @@ test('OAR isolation: reject authority overlap and symlink output roots before ex
 
 darwinTest('Pi review seat isolation: shell writes reach the seat output, Pi sessions, the Pi locks and the test queue only; a write through a link stays denied', async () => {
   const { dirname } = await import('node:path');
+  const { symlinkSync } = await import('node:fs');
   const { preparePiReviewSeatIsolation } = await import('../src/effects/board/pi-review-seat-isolation');
   const home = realpathSync(tmpWorkspace('pi-review-seat-home')); roots.push(home);
   mkdirSync(join(home, '.pi', 'agent'), { recursive: true });
   const bun = join(home, '.bun', 'bin', 'bun');
   mkdirSync(dirname(bun), { recursive: true }); writeFileSync(bun, 'original');
   const isolation = preparePiReviewSeatIsolation({ HOME: home, REPO_HARNESS_HOME: join(home, '.repo-harness') });
-  roots.push(dirname(dirname(isolation.temporaryDirectory)));
+  roots.push(dirname(isolation.writableDirectory));
   // A test HOME in TMPDIR writes the configuration names that the OAR profile denies; the seat profile allows them there.
   const script = `const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),home=process.env.HOME,agent=path.join(home,'.pi','agent');
 const probe=write=>{try{write();return 'ok'}catch(error){return error.code}};
@@ -1056,11 +1057,15 @@ console.log(JSON.stringify({
   profile: probe(()=>fs.appendFileSync(process.argv[3],'(allow file-write*)')),
 }));`;
   const run = spawnSync('/usr/bin/sandbox-exec', ['-f', isolation.profile, resolveNode24(), '-e', script, isolation.junitDirectory, bun, isolation.profile],
-    { env: { ...process.env, HOME: home, TMPDIR: isolation.temporaryDirectory }, encoding: 'utf8', timeout: 15000 });
+    { env: { ...process.env, HOME: home, TMPDIR: isolation.writableDirectory }, encoding: 'utf8', timeout: 15000 });
   expect(run.status, run.stderr).toBe(0);
   expect(JSON.parse(run.stdout)).toEqual({ testHome: 'ok', junit: 'ok', session: 'ok', authLock: 'ok', auth: 'EPERM', trustLock: 'ok', trust: 'EPERM', queue: 'ok',
     harnessHome: 'EPERM', bunDirectory: 'EPERM', throughLink: 'EPERM', profile: 'EPERM' });
   expect(readFileSync(bun, 'utf8')).toBe('original');
+  // A sessions link to / would make the whole disk writable, so it refuses the launch.
+  rmSync(join(home, '.pi', 'agent', 'sessions'), { recursive: true });
+  symlinkSync('/', join(home, '.pi', 'agent', 'sessions'));
+  expect(() => preparePiReviewSeatIsolation({ HOME: home, REPO_HARNESS_HOME: join(home, '.repo-harness') })).toThrow('must be a real directory');
 });
 
 async function runOarNodeFixture(label: string, body: string, confined = true, during?: (output: string, pid: number) => Promise<void>) {

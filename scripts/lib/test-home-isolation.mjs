@@ -89,6 +89,21 @@ function assertRegistryOutsideHome(registry, inherited) {
   }
 }
 
+// A sandboxed Pi review seat writes only its own directory inside /tmp (#2905) and names it here.
+const TEST_TEMP_ROOT = "REPO_HARNESS_TEST_TEMP_ROOT";
+
+function allocationRoot(inherited) {
+  const named = inherited[TEST_TEMP_ROOT];
+  if (named === undefined) {
+    const root = resolve("/tmp");
+    mkdirSync(root, { recursive: true });
+    return realpathSync(root);
+  }
+  const root = temporaryPath(named, true);
+  if (root === null) throw new Error("Unsafe test temporary root: " + TEST_TEMP_ROOT + " must name an existing directory inside /tmp without links");
+  return root;
+}
+
 export function createTemporaryTestEnvironment(inherited) {
   const registryName = Object.keys(inherited).find((name) =>
     (process.platform === "win32" ? name.toUpperCase() : name) === "REPO_HARNESS_HOME");
@@ -96,9 +111,7 @@ export function createTemporaryTestEnvironment(inherited) {
   const keptRegistry = registry === undefined ? null : temporaryPath(registry);
   // Validate before allocation, so a refused run leaves no new directories.
   if (keptRegistry !== null) assertRegistryOutsideHome(keptRegistry, inherited);
-  const root = resolve("/tmp");
-  mkdirSync(root, { recursive: true });
-  const canonical = realpathSync(root);
+  const canonical = allocationRoot(inherited);
   const home = mkdtempSync(join(canonical, "rh-test-home-"));
   const temp = mkdtempSync(join(canonical, "rh-test-tmp-"));
   const env = { ...inherited };

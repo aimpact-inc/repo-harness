@@ -356,6 +356,21 @@ describe("test HOME and TMPDIR isolation", () => {
     } finally { f.close(); }
   });
 
+  test("allocates the test HOME and TMPDIR in a named temporary root inside /tmp and refuses a linked one", async () => {
+    const { createTemporaryTestEnvironment } = await import("../scripts/lib/test-home-isolation.mjs");
+    const root = mkdtempSync(join(TMP_ROOT, "seat-root-"));
+    const link = join(TMP_ROOT, `seat-link-${basename(root)}`);
+    try {
+      const { home, temp } = createTemporaryTestEnvironment({ REPO_HARNESS_TEST_TEMP_ROOT: root });
+      expect([dirname(home), dirname(temp)]).toEqual([root, root]);
+      symlinkSync(root, link);
+      expect(() => createTemporaryTestEnvironment({ REPO_HARNESS_TEST_TEMP_ROOT: link })).toThrow("Unsafe test temporary root");
+    } finally {
+      rmSync(link, { force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("refuses a registry home under the caller's real HOME before any test runs", () => {
     const f = fixture();
     try {

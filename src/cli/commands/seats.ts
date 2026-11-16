@@ -16,7 +16,7 @@ import { RepoHarnessRegistryStrictError, canonicalRepoPath, readRepoHarnessRegis
 import { HerdrCoreError, RH_LABEL, hcLabel, hcLabelPairs, type HcLabels } from '../../effects/terminal/herdr-core';
 import { PiFleetRolesError, writePiFleetRoles } from '../../effects/board/pi-fleet-roles';
 import { PiShellError, assertPiShell } from '../../effects/board/pi-shell';
-import { preparePiReviewSeatIsolation } from '../../effects/board/pi-review-seat-isolation';
+import { PiReviewSeatIsolationError, preparePiReviewSeatIsolation } from '../../effects/board/pi-review-seat-isolation';
 import { MANAGED_AGENTS } from '../../effects/terminal/task-role-profiles';
 import { SeatResetError, readSeatSession, readTranscriptUsage, runSeatReset, writeSeatResetRequest, type SeatRelaunch, type SeatResetNotify, type TranscriptUsage } from '../../effects/board/seat-reset';
 import { seatResetAction, seatResetIdentity, seatResetSteps, type SeatResetIdentity } from '../../core/board/seat-reset';
@@ -310,7 +310,7 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
           ownerException: options.ownerException,
         }, process.env, process.cwd());
       } catch (error) {
-        const code = error instanceof SeatsCommandError || error instanceof ClaudeAgentTypesError || error instanceof PiFleetRolesError || error instanceof PiShellError || error instanceof SeatPaneNameError
+        const code = error instanceof SeatsCommandError || error instanceof ClaudeAgentTypesError || error instanceof PiFleetRolesError || error instanceof PiShellError || error instanceof PiReviewSeatIsolationError || error instanceof SeatPaneNameError
           || error instanceof RepoHarnessRegistryStrictError || error instanceof SeatsConfigMigrationRequiredError ? error.code : 'seat_launch_failed';
         process.stderr.write(`${JSON.stringify({ ok: false, error: code, message: (error as Error).message,
           ...(error instanceof SeatsConfigMigrationRequiredError ? { next_action: error.next_action } : {}) })}\n`);

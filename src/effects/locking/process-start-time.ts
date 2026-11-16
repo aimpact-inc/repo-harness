@@ -1,9 +1,6 @@
-import { dlopen, type Pointer } from 'bun:ffi';
-import { spawnSync } from 'child_process';
+import { dlopen, ptr, type Pointer } from 'bun:ffi';
 import { readFileSync } from 'fs';
 import { processExists } from '../process-group-termination';
-
-const PROCESS_TABLE_TIMEOUT_MS = 10_000;
 
 let linuxBootId: string | undefined;
 let ownStartTime: string | undefined;
@@ -38,18 +35,52 @@ function linuxStartTime(pid: number): string | null {
   return `linux:${readLinuxBootId()}:${ticks}`;
 }
 
+// CTL_KERN, KERN_PROC, KERN_PROC_PID; struct kinfo_proc is 648 bytes on arm64 and x86_64.
+const DARWIN_KERN_PROC_PID = [1, 14, 1] as const;
+const DARWIN_KINFO_PROC_SIZE = 648;
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;
+
+type LibSystem = {
+  symbols: { sysctl: (name: Pointer, length: number, old: Pointer, oldLength: Pointer, value: null, valueLength: bigint) => number };
+};
+
+let libSystem: LibSystem | undefined;
+
+function loadLibSystem(pid: number): LibSystem {
+  if (libSystem === undefined) {
+    try {
+      libSystem = dlopen('/usr/lib/libSystem.B.dylib', {
+        sysctl: { args: ['ptr', 'u32', 'ptr', 'ptr', 'ptr', 'u64'], returns: 'i32' },
+      }) as unknown as LibSystem;
+    } catch (error) {
+      throw unreadable(pid, `cannot load libSystem: ${(error as Error).message}`);
+    }
+  }
+  return libSystem;
+}
+
+/** Two digits, as `%H`, `%M` and `%S` print them. */
+const pad = (value: number) => String(value).padStart(2, '0');
+
+/**
+ * The kern.proc entry that `ps` reads, through sysctl instead of the setuid `/bin/ps`: Seatbelt refuses
+ * to exec a setuid binary, so a sandboxed review seat cannot run `ps` (#2905). The value is the text of
+ * `ps -o lstart=` with LC_ALL=C and TZ=UTC after whitespace runs become one space, so owner records
+ * written by the `ps` reader stay valid.
+ */
 function darwinStartTime(pid: number): string | null {
-  // A fixed binary and environment keep PATH and locale out of the value.
-  const result = spawnSync('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], {
-    encoding: 'utf-8',
-    env: { LC_ALL: 'C', TZ: 'UTC' },
-    timeout: PROCESS_TABLE_TIMEOUT_MS,
-  });
-  if (result.error) throw result.error;
-  const text = result.stdout.trim().replace(/\s+/g, ' ');
-  if (result.status === 1 && text === '') return null;
-  if (result.status !== 0 || text === '') throw unreadable(pid, `ps exited with status ${result.status}`);
-  return `darwin:${text}`;
+  const { symbols } = loadLibSystem(pid);
+  const name = new Int32Array([...DARWIN_KERN_PROC_PID, pid]);
+  const entry = new Uint8Array(DARWIN_KINFO_PROC_SIZE);
+  const length = new BigUint64Array([BigInt(DARWIN_KINFO_PROC_SIZE)]);
+  if (symbols.sysctl(ptr(name), name.length, ptr(entry), ptr(length), null, 0n) !== 0) throw unreadable(pid, 'sysctl kern.proc.pid failed');
+  if (length[0] === 0n) return null;
+  if (length[0] !== BigInt(DARWIN_KINFO_PROC_SIZE)) throw unreadable(pid, `kern.proc.pid returned ${length[0]} bytes`);
+  // kp_proc.p_starttime.tv_sec is the first field of struct kinfo_proc.
+  const started = new Date(Number(new DataView(entry.buffer).getBigInt64(0, true)) * 1000);
+  return `darwin:${WEEKDAYS[started.getUTCDay()]} ${MONTHS[started.getUTCMonth()]} ${started.getUTCDate()} `
+    + `${pad(started.getUTCHours())}:${pad(started.getUTCMinutes())}:${pad(started.getUTCSeconds())} ${started.getUTCFullYear()}`;
 }
 
 const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
@@ -119,8 +150,8 @@ function windowsStartTime(pid: number): string | null {
  * different start time:
  * - linux: field 22 of /proc/<pid>/stat (clock ticks after boot), with the boot
  *   ID, because the tick count starts again at each boot.
- * - darwin: `ps -o lstart`, from the kernel's p_starttime. The resolution is one
- *   second. Darwin gives PIDs in sequence, so a reuse in the same second needs
+ * - darwin: the kernel's p_starttime from sysctl kern.proc.pid, in the `ps -o lstart`
+ *   text. The resolution is one second. Darwin gives PIDs in sequence, so a reuse in the same second needs
  *   the full PID range to wrap in that second.
  * - win32: the creation time from kernel32 GetProcessTimes, as a UTC FILETIME
  *   in 100 ns units. The value equals the earlier

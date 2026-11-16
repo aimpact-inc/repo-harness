@@ -36,12 +36,12 @@ export interface SeatLaunchV1 {
 }
 
 /**
- * The Seatbelt write isolation of a Pi review seat on darwin (#2905): the profile file, and the seat-owned
- * directories that `TMPDIR` and `BUN_TEST_JUNIT_DIR` name, so that temp files and test reports stay writable.
+ * The Seatbelt write isolation of a Pi review seat on darwin (#2905): the profile file and the seat-owned
+ * directory that `TMPDIR`, `REPO_HARNESS_TEST_TEMP_ROOT` (the test HOMEs) and `BUN_TEST_JUNIT_DIR` name.
  */
 export interface PiReviewSeatIsolation {
   readonly profile: string;
-  readonly temporaryDirectory: string;
+  readonly writableDirectory: string;
   readonly junitDirectory: string;
 }
 
@@ -272,7 +272,8 @@ function piLaunch(seat: LaunchSeatId, config: SeatConfigV1, roleDirectory: strin
   const slash = config.model?.indexOf('/') ?? -1;
   return {
     argv: [...seatEnv([...(roleDirectory === undefined ? [] : [`${PI_EXTRA_AGENT_DIRS_ENV}=${roleDirectory}`]),
-      ...(sandbox === undefined ? [] : [`TMPDIR=${sandbox.temporaryDirectory}`, `BUN_TEST_JUNIT_DIR=${sandbox.junitDirectory}`])]),
+      ...(sandbox === undefined ? [] : [`TMPDIR=${sandbox.writableDirectory}`, `REPO_HARNESS_TEST_TEMP_ROOT=${sandbox.writableDirectory}`,
+        `BUN_TEST_JUNIT_DIR=${sandbox.junitDirectory}`])]),
       ...(sandbox === undefined ? [] : ['/usr/bin/sandbox-exec', '-f', sandbox.profile]), 'pi', ...(config.model === null ? [] : ['--provider', config.model.slice(0, slash), '--model', config.model.slice(slash + 1)]),
       ...(config.effort === null ? [] : ['--thinking', config.effort]),
       ...(review ? ['--exclude-tools', 'edit,write', '--no-extensions', '--no-skills',

@@ -12,6 +12,7 @@ import {
   readExclusiveDirectoryLockOwner,
 } from '../../src/effects/locking/exclusive-directory-lock';
 import { currentProcessStartTime, readProcessStartTime } from '../../src/effects/locking/process-start-time';
+import { darwinTest } from '../helpers/darwin-test';
 
 const LOCK = 'locks/owner.lock';
 const roots: string[] = [];
@@ -172,6 +173,14 @@ describe('exclusive directory lock owner identity', () => {
     const exited = spawnSync(process.execPath, ['-e', '']);
     expect(exited.status).toBe(0);
     expect(readProcessStartTime(exited.pid)).toBeNull();
+  });
+
+  // Owner records from the earlier `ps` reader must stay equal (#2905); pid 1 is a root process, which `ps` reads through its setuid bit.
+  darwinTest('the darwin start time equals the ps lstart text for an own and a root process', () => {
+    for (const pid of [process.pid, 1]) {
+      const ps = spawnSync('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: { LC_ALL: 'C', TZ: 'UTC' } });
+      expect(readProcessStartTime(pid)).toBe(`darwin:${ps.stdout.trim().replace(/\s+/g, ' ')}`);
+    }
   });
 
   test('a killed child that the parent still holds has no start time', async () => {
