@@ -1962,7 +1962,7 @@ describe('upgrade --registered', () => {
     expect(committed).toContain('deploy/README.md');
     expect(committed.filter((path) => path.startsWith('.ai/harness/backups/'))).toEqual([]);
     expect({ status: status(dirty), files: worktreeSnapshot(dirty), head: git(f, dirty, 'rev-parse', 'HEAD'), branches: git(f, dirty, 'branch', '--list') }).toEqual(before);
-    const worktree = join(f.env.REPO_HARNESS_WORKTREE_ROOT!, 'dirty-wt-harness-refresh');
+    const worktree = join(f.env.REPO_HARNESS_WORKTREE_ROOT!, 'harness-refresh.dirty');
     expect(existsSync(worktree)).toBe(false);
     expect(byPath(result.repos, fresh)).toMatchObject({ status: 'applied', refresh: { outcome: 'up_to_date' } });
     expect(git(f, freshRemote, 'branch', '--list', 'repo-harness/refresh')).toBe('');
@@ -1991,6 +1991,7 @@ describe('upgrade --registered', () => {
     mkdirSync(join(worktree, 'leftover'), { recursive: true });
     const blocked = runRegisteredUpgrade({ apply: true, pr: true, expectedRevision: runRegisteredUpgrade({ env, callerCwd: f.root }).revision!, env, callerCwd: f.root });
     expect(byPath(blocked.repos, dirty)).toMatchObject({ status: 'failed', error: expect.stringContaining(`git worktree add ${worktree} exited with status`) });
+    expect(existsSync(join(worktree, 'leftover'))).toBe(true);
     expect(git(f, dirty, 'branch', '--list', 'repo-harness/refresh')).toBe('');
     expect(git(f, dirtyRemote, 'branch', '--list', 'repo-harness/refresh')).toBe('');
   }), 240_000);
@@ -2013,6 +2014,12 @@ describe('upgrade --registered', () => {
         git(f, repo, 'remote', 'set-url', '--add', '--push', 'origin', 'git@github.com:fixture/two-push-urls.git');
         git(f, repo, 'remote', 'set-url', '--add', '--push', 'origin', 'git@github.com:someone/two-push-urls.git');
       }, expected: { status: 'skipped', reason: 'remote_target_mismatch' } },
+      // Resolved URLs with a token: the detail names only owner/name.
+      { name: 'credentials', setup: (repo) => {
+        git(f, repo, 'remote', 'set-url', '--add', '--push', 'origin', 'https://x-access-token:ghs_SECRET@github.com/someone/credentials.git');
+        git(f, repo, 'remote', 'set-url', '--add', '--push', 'origin', 'https://x-access-token:ghs_SECRET@gitlab.example/x.git');
+      }, expected: { status: 'skipped', reason: 'remote_target_mismatch',
+        detail: 'origin fetches from fixture/credentials and pushes to someone/credentials, a non-github.com URL; every URL must name the same github.com repository' } },
       { name: 'fork-pr', setup: (repo) => openPrs(repo, [{ owner: 'someone', number: 7 }, { owner: 'fixture', number: 1 }]),
         expected: { status: 'applied', refresh: expect.objectContaining({ outcome: 'pushed', pr: 'https://github.com/fixture/fork-pr/pull/1', prAction: 'updated' }) } },
       { name: 'two-prs', setup: (repo) => openPrs(repo, [{ owner: 'fixture', number: 1 }, { owner: 'Fixture', number: 2 }]),
@@ -2036,14 +2043,16 @@ describe('upgrade --registered', () => {
     const result = runRegisteredUpgrade({ apply: true, pr: true, expectedRevision: preview.revision!, env, callerCwd: f.root });
     cases.forEach(({ name, expected }, index) => expect([name, byPath(result.repos, repos[index]!.repo)]).toEqual([name, expect.objectContaining(expected)]));
     const row = (name: string) => repos[cases.findIndex((entry) => entry.name === name)]!;
-    for (const name of ['fetch-rewrite', 'pushurl', 'two-push-urls', 'concurrent-create']) {
+    for (const name of ['fetch-rewrite', 'pushurl', 'two-push-urls', 'credentials', 'concurrent-create']) {
       expect([name, git(f, row(name).remote, 'branch', '--list', 'repo-harness/refresh')]).toEqual([name, '']);
     }
-    expect(readFileSync(env.GH_LOG, 'utf8')).not.toMatch(/fetch-rewrite|mirror|pushurl|push-urls|concurrent-create/);
+    expect(readFileSync(env.GH_LOG, 'utf8')).not.toMatch(/fetch-rewrite|mirror|pushurl|push-urls|credentials|concurrent-create/);
     // The update sets only the title of the origin PR; the fork PR and the operator's body stay.
     expect(readFileSync(`${env.GH_LOG}.edit`, 'utf8').trim().split('\n'))
       .toEqual([expect.stringMatching(/^pr edit https:\/\/github\.com\/fixture\/fork-pr\/pull\/1 --title chore\(harness\): refresh repo-harness files for \S+ --repo github\.com\/fixture\/fork-pr$/)]);
     expect(git(f, row('concurrent-branch').repo, 'log', '-1', '--format=%s', 'repo-harness/refresh')).toBe('concurrent');
+    expect(git(f, row('concurrent-branch').repo, 'worktree', 'list', '--porcelain')).not.toContain('harness-refresh.');
+    expect(JSON.stringify(result) + formatRegisteredUpgradeResult(result)).not.toContain('ghs_SECRET');
     expect(git(f, row('concurrent-create').repo, 'rev-parse', 'repo-harness/refresh')).toBe(git(f, row('concurrent-create').repo, 'rev-parse', 'main'));
   }), 240_000);
 

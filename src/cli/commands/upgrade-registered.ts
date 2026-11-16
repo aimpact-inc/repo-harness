@@ -309,8 +309,10 @@ function originRepository(path: string, env: NodeJS.ProcessEnv): { readonly repo
   const pushed = pushUrls.stdout.split('\n').map((url) => url.trim()).filter((url) => url !== '');
   const repository = githubRemoteRepository(fetchUrl.stdout);
   if (repository === null || pushed.length === 0 || pushed.some((url) => githubRemoteRepository(url) !== repository)) {
-    return skip('remote_target_mismatch',
-      `origin fetches from ${fetchUrl.stdout.trim()} and pushes to ${pushed.join(', ')}; every URL must name the same github.com repository`);
+    // Only the parsed owner/name reaches the detail: a resolved URL can carry a token in its userinfo.
+    const named = (url: string): string => githubRemoteRepository(url) ?? 'a non-github.com URL';
+    return skip('remote_target_mismatch', `origin fetches from ${named(fetchUrl.stdout)} and pushes to `
+      + `${pushed.length === 0 ? 'no URL' : pushed.map(named).join(', ')}; every URL must name the same github.com repository`);
   }
   return { repository };
 }
@@ -482,6 +484,29 @@ function deleteOwnedBranch(path: string, oid: string, env: NodeJS.ProcessEnv): s
   return deleted.error || deleted.status !== 0 ? `${commandFailure(`git update-ref -d refs/heads/${REFRESH_BRANCH} ${oid}`, deleted)}; the branch is left` : null;
 }
 
+/** The branch ref that the registration of `worktree` names: null without a registration, '' for a detached one. */
+function registeredBranch(path: string, worktree: string, env: NodeJS.ProcessEnv): string | null {
+  const listed = git(path, ['worktree', 'list', '--porcelain'], env);
+  if (listed.error || listed.status !== 0) throw new Error(commandFailure('git worktree list', listed));
+  const entry = listed.stdout.split('\n\n').map((block) => block.split('\n')).find((lines) => lines[0] === `worktree ${worktree}`);
+  return entry === undefined ? null : entry.find((line) => line.startsWith('branch '))?.slice('branch '.length) ?? '';
+}
+
+/**
+ * A failed `worktree add` can still leave its registration. The run removes the
+ * worktree only when it registered it on the refresh branch, then deletes its branch.
+ */
+function cleanupFailedAdd(path: string, worktree: string, preRegistered: boolean, oid: string, env: NodeJS.ProcessEnv): string | null {
+  let registration: string | null;
+  try { registration = preRegistered ? null : registeredBranch(path, worktree, env); }
+  catch (error) { return `${message(error)}; the branch is left`; }
+  if (registration === `refs/heads/${REFRESH_BRANCH}`) {
+    const removed = git(path, ['worktree', 'remove', '--force', worktree], env);
+    if (removed.error || removed.status !== 0) return `${commandFailure(`git worktree remove ${worktree}`, removed)}; the branch is left`;
+  }
+  return deleteOwnedBranch(path, oid, env);
+}
+
 /**
  * The `--pr` write sequence. Every write goes to a new worktree on the refresh
  * branch; the primary checkout keeps its files, branch and index. The worktree
@@ -496,9 +521,11 @@ function refreshRepoPr(path: string, env: NodeJS.ProcessEnv, callerCwd: string):
   const foreign = foreignRefreshCommits(path, base, env);
   if (foreign) return skipped(path, skip('refresh_branch_foreign', foreign));
 
-  const worktree = join(managedWorktreeRoot(env), `${basename(path)}-wt-harness-refresh`);
+  // Outside the `<repo>-wt-*` names, so the managed worktree sweep and `contract-worktree start` never select it.
+  const worktree = join(managedWorktreeRoot(env), `harness-refresh.${basename(path)}`);
   const recovery = `check that ${worktree} and the local ${REFRESH_BRANCH} branch hold no work, then remove the path `
     + `(\`git -C ${path} worktree remove --force ${worktree}\` for a registered worktree) and run \`git -C ${path} branch -D ${REFRESH_BRANCH}\``;
+  const preRegistered = registeredBranch(path, worktree, env) !== null;
   // Create-only: the empty old value fails when the branch exists, so a branch of another run or of the operator is never taken over.
   const created = git(path, ['update-ref', `refs/heads/${REFRESH_BRANCH}`, base.baseOid, ''], env);
   if (created.error || created.status !== 0) {
@@ -506,7 +533,8 @@ function refreshRepoPr(path: string, env: NodeJS.ProcessEnv, callerCwd: string):
   }
   const added = git(path, ['worktree', 'add', '--quiet', worktree, REFRESH_BRANCH], env);
   if (added.error || added.status !== 0) {
-    return { path, status: 'failed', error: [commandFailure(`git worktree add ${worktree}`, added), deleteOwnedBranch(path, base.baseOid, env), recovery].filter(Boolean).join('; ') };
+    const cleanup = cleanupFailedAdd(path, worktree, preRegistered, base.baseOid, env);
+    return { path, status: 'failed', error: [commandFailure(`git worktree add ${worktree}`, added), cleanup, recovery].filter(Boolean).join('; ') };
   }
   const owned = { oid: base.baseOid };
   let result: RegisteredRepoResult;
