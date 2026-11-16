@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve, sep } from 'path';
 import { managedBlockMarker, renderManagedBlock } from '../../core/adoption/managed-block';
 import { ignoreBlockProof, removeRuntimeStateIgnoreBlock, runtimeStateIgnoreOperation, userExcludesFilePath } from '../../effects/adoption/gitignore-plan';
 import { resolveGitCommonDirectory } from '../../effects/git/common-directory';
+import { withoutRepositorySelectingGitEnv } from '../../effects/git/runner';
 import { isRepoHarnessAdoptedPath, readRepoHarnessRegistryStrictSnapshot } from '../../effects/repo-registry';
 import { writePrivateConfiguration } from './configuration-ownership';
 import { repoHarnessHome } from '../../effects/repo-harness-home';
@@ -81,6 +82,14 @@ function assertWriteTarget(path: string, env: NodeJS.ProcessEnv): void {
 }
 
 /**
+ * The Git common directory of a registered repository. Inherited repository-selecting variables
+ * (GIT_DIR from a Git hook, for example) would point every repository at one directory, so they are removed.
+ */
+export function repositoryCommonDirectory(repoPath: string, env: NodeJS.ProcessEnv): string {
+  return resolveGitCommonDirectory(repoPath, undefined, undefined, withoutRepositorySelectingGitEnv(env));
+}
+
+/**
  * `<common dir>/info/exclude` of a repository (`git rev-parse --git-common-dir`) with user links followed,
  * so worktrees, gitdir links and linked exclude files of one repository share one owner and one ledger key.
  */
@@ -118,7 +127,7 @@ export function writeRepositoryExcludes(env: NodeJS.ProcessEnv): RepositoryExclu
     if (!existsSync(repo.path)) { unavailable.push(`${repo.path}: missing`); continue; }
     if (!isRepoHarnessAdoptedPath(repo.path)) continue;
     let commonDir: string;
-    try { commonDir = resolveGitCommonDirectory(repo.path, undefined, undefined, env); }
+    try { commonDir = repositoryCommonDirectory(repo.path, env); }
     catch { unavailable.push(`${repo.path}: not a Git repository`); continue; }
     try {
       const path = repositoryExcludeTarget(commonDir, env);

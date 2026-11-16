@@ -414,7 +414,7 @@ describe('runtime ignore rules step', () => {
   const OLD_BLOCK = renderManagedBlock(runtimeStateIgnoreOperation(''));
   const RETIRE = 'retire user-level runtime ignore block';
   /** A registry fixture with an update runner, a repository maker and a user-level excludes file that holds the old block. */
-  function withIgnoreFixture(run: (f: RegisteredReposFixture, update: () => ReturnType<typeof runGlobalRuntimeSetup>, repo: (name: string, adopted?: boolean, ...init: string[]) => string, userExcludes: string) => void): void {
+  function withIgnoreFixture(run: (f: RegisteredReposFixture, update: (extra?: NodeJS.ProcessEnv) => ReturnType<typeof runGlobalRuntimeSetup>, repo: (name: string, adopted?: boolean, ...init: string[]) => string, userExcludes: string) => void): void {
     const f = registeredReposFixture(realpathSync(mkdtempSync(join(tmpdir(), 'runtime-ignore-'))));
     const env = { ...f.env, BUN_INSTALL: join(f.root, 'bun') };
     const userExcludes = join(f.env.XDG_CONFIG_HOME!, 'git', 'ignore');
@@ -428,7 +428,7 @@ describe('runtime ignore rules step', () => {
       return path;
     };
     try {
-      run(f, () => runGlobalRuntimeSetup({ cwd: f.root, env, plugins: [], updateMode: true, installCli: false, syncSkill: false, hostAdapters: false, externalSkills: false, codegraph: false }), repo, userExcludes);
+      run(f, (extra = {}) => runGlobalRuntimeSetup({ cwd: f.root, env: { ...env, ...extra }, plugins: [], updateMode: true, installCli: false, syncSkill: false, hostAdapters: false, externalSkills: false, codegraph: false }), repo, userExcludes);
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   }
   const step = (result: ReturnType<typeof runGlobalRuntimeSetup>, name: string) => result.steps.find(entry => entry.step === name);
@@ -446,7 +446,9 @@ describe('runtime ignore rules step', () => {
     expect(step(update(), RETIRE)).toMatchObject({ status: 'skipped', detail: `${userExcludes}: kept the runtime-state block until every registered repository holds its own proved block` });
     expect(readFileSync(userExcludes, 'utf8')).toBe(`*.log\n\n${OLD_BLOCK}\n`);
     renameSync(`${away}.moved`, away);
-    const run = update();
+    // rh run from a Git hook inherits GIT_DIR; each repository still resolves its own exclude file.
+    const hookEnv = { GIT_DIR: join(adopted, '.git') };
+    const run = update(hookEnv);
     expect(step(run, 'write runtime ignore rules')).toMatchObject({ status: 'ok', detail: expect.stringContaining(`${exclude(away)}: written`) });
     expect(step(run, RETIRE)).toMatchObject({ status: 'ok' });
     expect(readFileSync(userExcludes, 'utf8')).toBe('*.log\n');
@@ -457,7 +459,7 @@ describe('runtime ignore rules step', () => {
     const ledger = join(f.env.HOME!, '.repo-harness', 'repository-excludes.json');
     expect(JSON.parse(readFileSync(ledger, 'utf8')).entries.map((entry: { exclude_path: string }) => entry.exclude_path).sort()).toEqual([exclude(adopted), exclude(away)].sort());
     writeFileSync(exclude(away), readFileSync(exclude(away), 'utf8').replace(`${BEGIN}\n`, `${BEGIN}\nscratch-*/\n`));
-    const removal = runUserUninstall({ target: 'both', env: f.env });
+    const removal = runUserUninstall({ target: 'both', env: { ...f.env, ...hookEnv } });
     expect(readFileSync(exclude(adopted)).equals(userBytes)).toBe(true);
     expect(removal.items).toContainEqual({ path: exclude(away), action: 'unresolved', reason: expect.stringContaining('runtime-state ignore block was edited; preserved') });
     expect(readFileSync(exclude(away), 'utf8')).toContain('scratch-*/');

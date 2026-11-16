@@ -11,8 +11,7 @@ import { piExecutable } from '../../effects/pi-executable';
 import { deepEqual } from './shared';
 import { globalContextPath, removeManagedBlock } from './global-context';
 import { removeRuntimeStateIgnoreBlock } from '../../effects/adoption/gitignore-plan';
-import { resolveGitCommonDirectory } from '../../effects/git/common-directory';
-import { readRepositoryExcludes, repositoryExcludesLedgerPath, repositoryExcludeTarget, serializeRepositoryExcludes, type RepositoryExclude } from './repository-excludes';
+import { readRepositoryExcludes, repositoryCommonDirectory, repositoryExcludesLedgerPath, repositoryExcludeTarget, serializeRepositoryExcludes, type RepositoryExclude } from './repository-excludes';
 import { managedInstallSurfaceIsCurrent, readInstallState, type ManagedInstallSurface } from './install-profile';
 import { installProfileStatePath } from './install-state';
 import { assertConfigurationPath, configurationPaths, configurationReceiptPath, hostConfigurationRoot, readConfigurationFragment, readConfigurationReceipt, replaceConfigurationFragment, writePrivateConfiguration } from './configuration-ownership';
@@ -250,7 +249,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
     const retained = ledger.filter((entry) => {
       try {
         if (!existsSync(entry.repo_path)) throw new Error(`repository ${entry.repo_path} is unavailable; block and ledger entry kept`);
-        const path = repositoryExcludeTarget(resolveGitCommonDirectory(entry.repo_path, undefined, undefined, env), env);
+        const path = repositoryExcludeTarget(repositoryCommonDirectory(entry.repo_path, env), env);
         if (path !== entry.exclude_path) throw new Error(`repository ${entry.repo_path} now resolves its exclude file to ${path}; preserved`);
         repositoryExcludes.add(path);
         // Read as latin1 and written back the same way, so the bytes outside the block stay.
