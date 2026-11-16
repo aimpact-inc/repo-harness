@@ -42,7 +42,8 @@ done
 # `owned` lists the lines that the entry holds: its Date line, its field lines
 # and their continuation lines. A repeated field in one entry keeps its first
 # value, and the parser skips the repeat. An indented or unprefixed line
-# continues the field above it; a blank line ends it. `--entries` prints the
+# continues the field above it; a blank line ends it. A field line with another
+# bullet or an indent ("* Seen:", "  - Seen:") ends it and stays unowned. `--entries` prints the
 # parsed entries of one file for LedgerEnforcement
 # (scripts/check-ledger-enforcement.ts), which fails each line that no entry
 # owns, so the check has no second parser.
@@ -99,7 +100,7 @@ parse_entries() {
       owned = owned "," NR
       next
     }
-    /^- / || /^[[:space:]]*$/ {
+    /^- / || /^[[:space:]]*$/ || /^[[:space:]]*[-*+][[:space:]]+[A-Z][A-Za-z ]*:/ {
       current = ""
       next
     }
