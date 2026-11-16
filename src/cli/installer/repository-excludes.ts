@@ -1,13 +1,13 @@
-import { randomUUID } from 'crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
-import { dirname, join, sep } from 'path';
+import { basename, dirname, join, sep } from 'path';
 import { upsertManagedBlock } from '../../core/adoption/managed-block';
 import { ignoreBlockProof, removeRuntimeStateIgnoreBlock, runtimeStateIgnoreOperation, userExcludesFilePath } from '../../effects/adoption/gitignore-plan';
 import { resolveGitCommonDirectory } from '../../effects/git/common-directory';
 import { isRepoHarnessAdoptedPath, readRepoHarnessRegistryStrictSnapshot } from '../../effects/repo-registry';
 import { writePrivateConfiguration } from './configuration-ownership';
-import { installProfileHostMutationPaths } from './install-profile';
+import { repoHarnessHome } from '../../effects/repo-harness-home';
+import { readInstallState } from './install-profile';
 import { installProfileStatePath } from './install-state';
 
 /** One repository write: the resolved `info/exclude` of a repository's Git common directory. */
@@ -31,41 +31,34 @@ export function serializeRepositoryExcludes(entries: readonly RepositoryExclude[
   return entries.length ? `${JSON.stringify({ version: 1, entries }, null, 2)}\n` : null;
 }
 
-function unsafe(path: string, reason: string): Error {
-  return new Error(`repository_exclude_unsafe: ${path} ${reason}; fix it, or remove the repository from the registry, then run the command again`);
+/** A path with its links followed: the deepest existing ancestor resolved with realpath.native, then the remaining names. */
+function followLinks(path: string): string {
+  try { return realpathSync.native(path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || dirname(path) === path) throw error;
+    return join(followLinks(dirname(path)), basename(path));
+  }
+}
+
+/** rh refuses only a write into its own home or into a path that the install ledger records for another owner. */
+function assertWriteTarget(path: string, env: NodeJS.ProcessEnv): void {
+  const owned = (readInstallState(env)?.ownership_manifest ?? []).map((surface) => surface.path);
+  for (const root of [repoHarnessHome(env), dirname(installProfileStatePath(env)), ...owned]) {
+    const resolved = followLinks(root);
+    if (path === resolved || path.startsWith(resolved + sep)) {
+      throw new Error(`excludes_target_rh_managed: ${path} is in ${root}, which rh manages; fix the link, or remove the repository from the registry, then run the command again`);
+    }
+  }
 }
 
 /**
- * `<common dir>/info/exclude` of a repository (`git rev-parse --git-common-dir`), resolved with realpath.native, so worktrees and
- * gitdir links of one repository share one owner. Refused: a symlinked or non-directory `info`,
- * a symlinked, non-regular or hard-linked (nlink > 1) `exclude`, and a path in a host path that rh manages.
+ * `<common dir>/info/exclude` of a repository (`git rev-parse --git-common-dir`) with user links followed,
+ * so worktrees, gitdir links and linked exclude files of one repository share one owner and one ledger key.
  */
 export function repositoryExcludeTarget(commonDir: string, env: NodeJS.ProcessEnv): string {
-  const info = join(realpathSync.native(commonDir), 'info');
-  const path = join(info, 'exclude');
-  const infoStat = lstatSync(info, { throwIfNoEntry: false });
-  if (infoStat && (infoStat.isSymbolicLink() || !infoStat.isDirectory())) throw unsafe(info, 'is not a real directory');
-  const stat = lstatSync(path, { throwIfNoEntry: false });
-  if (stat && (stat.isSymbolicLink() || !stat.isFile())) throw unsafe(path, 'is not a regular file');
-  if (stat && stat.nlink > 1) throw unsafe(path, `has ${stat.nlink} hard links`);
-  for (const managed of installProfileHostMutationPaths(env)) {
-    let root: string;
-    try { root = realpathSync.native(managed); } catch { continue; }
-    if (path === root || path.startsWith(root + sep)) throw unsafe(path, `is in ${managed}, which rh manages`);
-  }
+  const path = followLinks(join(commonDir, 'info', 'exclude'));
+  assertWriteTarget(path, env);
   return path;
-}
-
-/** Replaces a Git ignore file through a temp file in its directory; the mode stays. An empty result removes the file. */
-export function replaceIgnoreFile(path: string, content: string): void {
-  if (!content.trim()) { unlinkSync(path); return; }
-  const mode = (lstatSync(path, { throwIfNoEntry: false })?.mode ?? 0o644) & 0o777;
-  const temp = join(dirname(path), `.${randomUUID()}.tmp`);
-  try {
-    writeFileSync(temp, content, { flag: 'wx' });
-    chmodSync(temp, mode);
-    renameSync(temp, path);
-  } finally { rmSync(temp, { force: true }); }
 }
 
 export interface RepositoryExcludesResult { readonly status: 'ok' | 'failed'; readonly detail: string; readonly unavailable: readonly string[] }
@@ -106,8 +99,8 @@ export function writeRepositoryExcludes(env: NodeJS.ProcessEnv): RepositoryExclu
       if (update.kept !== undefined) lines.push(`${path}: kept the edited block "${update.kept}"; delete it, then run rh update again to get the current one`);
       else if (!update.changed) lines.push(`${path}: current`);
       else {
-        if (!existsSync(dirname(path))) mkdirSync(dirname(path));
-        replaceIgnoreFile(path, update.content!);
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, update.content!);
         lines.push(`${path}: written`);
       }
     } catch (error) { return failed(error); }
@@ -118,26 +111,27 @@ export function writeRepositoryExcludes(env: NodeJS.ProcessEnv): RepositoryExclu
 
 /**
  * One-shot migration (#2844): earlier releases wrote the runtime-state block to the user-level
- * Git excludes file. Update removes that block only after every registered repository holds its
- * own block. A failed or unavailable repository keeps it; an unsafe target stays untouched.
+ * Git excludes file. Update removes only that block, after every registered repository holds its
+ * own block; a failed or unavailable repository keeps it. User links are followed.
  */
 export function retireUserExcludesBlock(env: NodeJS.ProcessEnv, repositories: RepositoryExcludesResult): { status: 'ok' | 'skipped'; detail: string } {
   const excludes = userExcludesFilePath(env);
   if (!excludes.ok) return { status: 'skipped', detail: `user-level Git excludes file not resolved; nothing removed: ${excludes.error}` };
   const path = excludes.path;
-  const stat = lstatSync(path, { throwIfNoEntry: false });
-  if (!stat) return { status: 'skipped', detail: `${path}: absent` };
-  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink > 1) {
-    return { status: 'skipped', detail: `${path}: not a regular single-link file; left untouched. Remove the runtime-state block from it by hand` };
+  try {
+    if (!existsSync(path)) return { status: 'skipped', detail: `${path}: absent` };
+    const removal = removeRuntimeStateIgnoreBlock(readFileSync(path, 'utf8'));
+    if (removal.status === 'none') return { status: 'skipped', detail: `${path}: no runtime-state block` };
+    if (repositories.status !== 'ok' || repositories.unavailable.length) {
+      return { status: 'skipped', detail: `${path}: kept the runtime-state block until every registered repository holds its own block` };
+    }
+    if (removal.status !== 'removed') {
+      return { status: 'skipped', detail: `${path}: kept the ${removal.status} runtime-state block; move your rules outside the markers, then delete the block` };
+    }
+    assertWriteTarget(followLinks(path), env);
+    writeFileSync(path, removal.content);
+    return { status: 'ok', detail: `${path}: removed the runtime-state block; each adopted repository holds it in .git/info/exclude` };
+  } catch (error) {
+    return { status: 'skipped', detail: `${path}: kept the runtime-state block: ${error instanceof Error ? error.message : String(error)}` };
   }
-  const removal = removeRuntimeStateIgnoreBlock(readFileSync(path, 'utf8'));
-  if (removal.status === 'none') return { status: 'skipped', detail: `${path}: no runtime-state block` };
-  if (repositories.status !== 'ok' || repositories.unavailable.length) {
-    return { status: 'skipped', detail: `${path}: kept the runtime-state block until every registered repository holds its own block` };
-  }
-  if (removal.status !== 'removed') {
-    return { status: 'skipped', detail: `${path}: kept the ${removal.status} runtime-state block; move your rules outside the markers, then delete the block` };
-  }
-  replaceIgnoreFile(path, removal.content);
-  return { status: 'ok', detail: `${path}: removed the runtime-state block; each adopted repository holds it in .git/info/exclude` };
 }
