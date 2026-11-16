@@ -188,38 +188,6 @@ export const CLI_PORTS: {
   },
 };
 
-<<<<<<< HEAD
-export const SUBCOMMANDS = [
-  'init',
-  'init-hook',
-  'install',
-  'uninstall',
-  'status',
-  'doctor',
-  'migrate',
-  'security',
-  'update',
-  'run',
-  'setup',
-  'tools',
-  'herdr',
-  'brain',
-  'capability-context',
-  'docs',
-  'mcp',
-  'state',
-  'publication',
-  'fleet',
-  'arch',
-  'architecture-projection',
-  'architecture-debt',
-  'refactor',
-  'seats',
-] as const;
-export type Subcommand = (typeof SUBCOMMANDS)[number];
-
-=======
->>>>>>> d9d1afc1f (feat(cli): rh commands lists the command tree; check:cli-manifest fails on unknown rh names in skills and root documents (#2862))
 const TARGET_HELP = 'codex|claude|both';
 const LOCATION_HELP = 'global';
 
