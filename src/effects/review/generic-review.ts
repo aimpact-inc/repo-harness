@@ -363,29 +363,35 @@ export async function closeReview<Session, Endpoint>(repoRoot: string, authority
   }
   try {
     return await withCallerLock(primary, dir, async () => {
-      if (existsSync(join(dir, 'closed.json'))) return readSessionArtifact<{ cleanup: TaskCleanupResult }>(join(dir, 'closed.json')).cleanup;
-      const session = readSessionArtifact<ReviewSession<Endpoint>>(join(dir, 'session.json'));
-      if (!cancel) {
-        const receipt = await verifyAcceptance({ root, authorityHome, authority });
-        const completed = acceptedRounds(dir);
-        if (!completed.length) throw new Error('review_no_accepted_round');
-        const last = readSessionArtifact<{ output: ReviewOutput; receipt: AcceptanceReceipt }>(join(dir, `accepted-${completed.at(-1)}.json`));
-        if (last.output.verdict !== 'PASS' || JSON.stringify(last.receipt) !== JSON.stringify(receipt)) throw new Error('review_acceptance_mismatch');
-      }
-      // An ambiguous launch without a disposal acknowledgement remains pending;
-      // never kill a host whose OAR children may still be alive.
-      await effects.dispose(session.reviewer_repo, session.task, session.control_directory, session.endpoint === null);
-      const cleanup = await (cancel ? effects.cancel : effects.close)(session.reviewer_repo, session.task, GENERIC_REVIEW_ROLE);
-      // The round's final close.request read is not atomic with the acceptance
-      // write. A cancel that lands in that window still closes the session,
-      // and the durable receipt is reported here rather than discarded.
-      const accepted = cancel ? acceptedRounds(dir) : [];
-      // After disposal no reviewer child can read the output, and closed.json follows only a complete cleanup.
-      if (session.actual_harness === 'codex' || session.actual_harness === 'pi') {
-        removeLegacyCredentials(effects.outputDirectory(session.reviewer_repo, primary, session.task, GENERIC_REVIEW_ROLE));
-      }
-      if (cleanup.status === 'closed') writeSessionArtifact(join(dir, 'closed.json'), { cancelled: cancel, cleanup, ...(accepted.length ? { accepted_rounds: accepted } : {}) });
-      return accepted.length ? { ...cleanup, accepted_rounds: accepted } : cleanup;
+      // Every close path removes the credential copy and links of an earlier version: the normal close,
+      // the saved closed result and a launch with no binding. The cleanup needs only the saved session.
+      const owned = existsSync(join(dir, 'session.json')) ? readSessionArtifact<ReviewSession<Endpoint>>(join(dir, 'session.json')) : null;
+      const legacyOutput = owned && (owned.actual_harness === 'codex' || owned.actual_harness === 'pi')
+        ? effects.outputDirectory(owned.reviewer_repo, primary, owned.task, GENERIC_REVIEW_ROLE) : null;
+      const removeLegacy = () => { if (legacyOutput) removeLegacyCredentials(legacyOutput); };
+      try {
+        if (existsSync(join(dir, 'closed.json'))) return readSessionArtifact<{ cleanup: TaskCleanupResult }>(join(dir, 'closed.json')).cleanup;
+        const session = readSessionArtifact<ReviewSession<Endpoint>>(join(dir, 'session.json'));
+        if (!cancel) {
+          const receipt = await verifyAcceptance({ root, authorityHome, authority });
+          const completed = acceptedRounds(dir);
+          if (!completed.length) throw new Error('review_no_accepted_round');
+          const last = readSessionArtifact<{ output: ReviewOutput; receipt: AcceptanceReceipt }>(join(dir, `accepted-${completed.at(-1)}.json`));
+          if (last.output.verdict !== 'PASS' || JSON.stringify(last.receipt) !== JSON.stringify(receipt)) throw new Error('review_acceptance_mismatch');
+        }
+        // An ambiguous launch without a disposal acknowledgement remains pending;
+        // never kill a host whose OAR children may still be alive.
+        await effects.dispose(session.reviewer_repo, session.task, session.control_directory, session.endpoint === null);
+        const cleanup = await (cancel ? effects.cancel : effects.close)(session.reviewer_repo, session.task, GENERIC_REVIEW_ROLE);
+        // The round's final close.request read is not atomic with the acceptance
+        // write. A cancel that lands in that window still closes the session,
+        // and the durable receipt is reported here rather than discarded.
+        const accepted = cancel ? acceptedRounds(dir) : [];
+        // closed.json follows only a complete cleanup.
+        removeLegacy();
+        if (cleanup.status === 'closed') writeSessionArtifact(join(dir, 'closed.json'), { cancelled: cancel, cleanup, ...(accepted.length ? { accepted_rounds: accepted } : {}) });
+        return accepted.length ? { ...cleanup, accepted_rounds: accepted } : cleanup;
+      } finally { removeLegacy(); }
     }, undefined, cancel ? REVIEW_CANCEL_LOCK_WAIT_MS : 0);
   } catch (error) {
     if (cancel && error instanceof ExclusiveLockContentionError && error.kind === 'timeout') {

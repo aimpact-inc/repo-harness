@@ -827,20 +827,30 @@ const codexHome = (f: ReturnType<typeof reviewFixture>) => {
   return join(f.reviewerRepo,'.ai/harness/runs/task-agent-outbox',importedTaskDir(f.reviewerRepo,session.task,'deep-reasoner').split('/').pop()!,'.codex-home');
 };
 
-darwinTest('a Codex review starts with no auth.json, and closeout removes the credential copy and links of an earlier version', async () => {
+// The earlier version copied the native codex auth.json and linked the native pi auth.json and models.json.
+// Every close path removes them before it returns; a copy that stays refuses the close.
+for (const path of ['close', 'refused close', 'saved closed result', 'launch with no binding'] as const) darwinTest(`a Codex review starts with no auth.json, and the ${path} path removes the credential copy and links of an earlier version`, async () => {
   const f=reviewFixture();f.verdict('PASS');
   let atStart: string[] = [];
   await runReviewRound({...f.options,harness:'codex'},{...f.effects,start:async(...args)=>{atStart=readdirSync(codexHome(f));return f.effects.start(...args);}});
   expect(atStart).toEqual(['config.toml']);
-  // The earlier version copied the native codex auth.json and linked the native pi auth.json and models.json.
   const native = join(f.home, 'native'), pi = join(codexHome(f), '..', '.pi-agent'), copy = join(codexHome(f), 'auth.json');
+  const closed = join(reviewLocation(f.root,f.options.authority).dir,'closed.json');
   mkdirSync(native); mkdirSync(pi, { mode: 0o700 });
   for (const name of ['auth.json', 'models.json']) { writeFileSync(join(native, name), '{"fixture":"native"}'); symlinkSync(join(native, name), join(pi, name)); }
-  mkdirSync(join(copy, 'inner'), { recursive: true });
-  await expect(closeReview(f.root,f.options.authority,false,f.home,f.effects)).rejects.toThrow('cleanup_pending: review_legacy_credential_cleanup_failed');
-  expect(existsSync(join(reviewLocation(f.root,f.options.authority).dir,'closed.json'))).toBe(false);
-  rmSync(copy, { recursive: true }); writeFileSync(copy, '{"tokens":"fixture"}', { mode: 0o600 });
-  await closeReview(f.root,f.options.authority,false,f.home,f.effects);
+  if (path === 'refused close') mkdirSync(join(copy, 'inner'), { recursive: true });
+  else writeFileSync(copy, '{"tokens":"fixture"}', { mode: 0o600 });
+  // The earlier version wrote closed.json although its copy deletion failed.
+  if (path === 'saved closed result') writeFileSync(closed, JSON.stringify({ cancelled: false, cleanup: { status: 'closed', pids: [] } }));
+  const effects = path === 'launch with no binding' ? { ...f.effects, dispose: async () => { throw new Error('fixture_host_unbound'); } } : f.effects;
+  const closing = closeReview(f.root,f.options.authority,false,f.home,effects);
+  if (path === 'refused close') {
+    await expect(closing).rejects.toThrow('cleanup_pending: review_legacy_credential_cleanup_failed');
+    expect(existsSync(closed)).toBe(false);
+    return;
+  }
+  if (path === 'launch with no binding') { await expect(closing).rejects.toThrow('fixture_host_unbound'); expect(existsSync(closed)).toBe(false); }
+  else expect((await closing).status).toBe('closed');
   expect([readdirSync(codexHome(f)), readdirSync(pi)]).toEqual([['config.toml'], []]);
   for (const name of ['auth.json', 'models.json']) expect(readFileSync(join(native, name), 'utf8')).toBe('{"fixture":"native"}');
 });
