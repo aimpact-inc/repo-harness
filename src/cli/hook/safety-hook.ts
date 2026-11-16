@@ -29,8 +29,13 @@ export interface SafetyScope {
   readonly host: RouteHost;
 }
 
-/** `destroy` acts only on an existing file, so an unknown target denies; `overwrite` creates or replaces, so an unknown target passes. */
-export type TargetKind = 'destroy' | 'overwrite';
+/**
+ * - `destroy` removes or replaces the entry itself (rm, an mv source, sed -i): the leaf link is not followed.
+ * - `change` writes content into an existing file (truncate, shred): the kernel follows the leaf link to its referent.
+ * - `overwrite` creates or replaces content (a redirect, cp, tee): it follows the leaf link too.
+ * `destroy` and `change` act only on an existing file, so an unknown target denies; an unknown `overwrite` target passes.
+ */
+export type TargetKind = 'destroy' | 'change' | 'overwrite';
 
 /** One write target. `path` is absolute, or null when the shell decides it at run time. */
 export interface WriteTarget {
@@ -41,10 +46,11 @@ export interface WriteTarget {
   /** The path is the literal directory of a glob; the write lands below it. */
   readonly glob?: true;
   /**
-   * cp, mv and ln write `<path>/<name>` for each literal source name when `path` is an existing directory; the directory itself
-   * is not written. cp writes through an existing child link (`follow`); mv and ln replace the child entry.
+   * cp, mv and ln write `<path>/<name>` for each source name when `path` is an existing directory; the directory itself is not
+   * written. `names` is null when a source name is not known, and then every existing child can be the target. cp writes
+   * through an existing child link (`follow`); mv and ln replace the child entry.
    */
-  readonly into?: { readonly names: readonly string[]; readonly follow: boolean };
+  readonly into?: { readonly names: readonly string[] | null; readonly follow: boolean };
 }
 
 const inside = (rel: string) => !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`);
@@ -141,13 +147,17 @@ export function ledgerCreated(path: string, env: NodeJS.ProcessEnv): boolean {
   });
 }
 
+/** The most children that an unknown copy source name is checked against. */
+const CHILD_LIMIT = 1000;
+
 class TargetJudge {
   private rootsValue: Root[] | undefined;
   constructor(private readonly scope: SafetyScope, private readonly userStep: string) {}
   private get roots(): Root[] { return this.rootsValue ??= allowedRoots(this.scope); }
 
   denial(target: WriteTarget): Denial | null {
-    if (target.path === null) return target.kind === 'destroy' ? unknownTargetDenial(target, this.roots, this.userStep) : null;
+    const needsTarget = target.kind !== 'overwrite';
+    if (target.path === null) return needsTarget ? unknownTargetDenial(target, this.roots, this.userStep) : null;
     if (/^\/dev\//.test(target.path)) return null;
     if (target.glob) return this.globDenial(target, target.path);
     let path: string;
@@ -155,18 +165,26 @@ class TargetJudge {
       path = target.kind === 'destroy' ? leafPath(target.path) : writeThroughPath(target.path);
     } catch {
       // A path that does not resolve (a link loop, an unreadable directory) cannot be checked.
-      return target.kind === 'destroy' ? unknownTargetDenial(target, this.roots, this.userStep) : null;
+      return needsTarget ? unknownTargetDenial(target, this.roots, this.userStep) : null;
     }
-    if (target.into && statSync(path, { throwIfNoEntry: false })?.isDirectory()) {
-      for (const name of target.into.names) {
-        let child = join(path, name);
-        try { if (target.into.follow) child = writeThroughPath(child); } catch { continue; }
-        const denial = this.existingDenial(target, child);
-        if (denial) return denial;
-      }
-      return null;
-    }
+    if (target.into && statSync(path, { throwIfNoEntry: false })?.isDirectory()) return this.childDenial(target, target.into, path);
     return this.existingDenial(target, path);
+  }
+
+  /** A copy into a directory writes one child per source name; without the names, every existing child is a possible target. */
+  private childDenial(target: WriteTarget, into: NonNullable<WriteTarget['into']>, dir: string): Denial | null {
+    let names = into.names;
+    if (names === null) {
+      try { names = readdirSync(dir); } catch { return unknownTargetDenial(target, this.roots, this.userStep); }
+      if (names.length > CHILD_LIMIT) return unknownTargetDenial(target, this.roots, this.userStep);
+    }
+    for (const name of names) {
+      let child = join(dir, name);
+      try { if (into.follow) child = writeThroughPath(child); } catch { return unknownTargetDenial(target, this.roots, this.userStep); }
+      const denial = this.existingDenial(target, child);
+      if (denial) return denial;
+    }
+    return null;
   }
 
   private existingDenial(target: WriteTarget, path: string): Denial | null {
@@ -176,7 +194,7 @@ class TargetJudge {
     return outsideDenial(target, path, this.roots, this.userStep);
   }
 
-  /** A glob removes entries below its literal directory, so the directory decides. */
+  /** A glob removes or changes entries below its literal directory, so the directory decides. */
   private globDenial(target: WriteTarget, dir: string): Denial | null {
     if (target.kind === 'overwrite') return null;
     let path: string;
@@ -191,7 +209,7 @@ const rootList = (roots: readonly Root[]) => roots.map(root => root.join(sep)).j
 function outsideDenial(target: WriteTarget, path: string, roots: readonly Root[], userStep: string): Denial {
   return {
     guard: 'UserFileGuard',
-    reason: `I2: ${target.via} would ${target.kind === 'destroy' ? 'remove or change' : 'overwrite'} ${path}, an existing file outside `
+    reason: `I2: ${target.via} would ${target.kind === 'overwrite' ? 'overwrite' : 'remove or change'} ${path}, an existing file outside `
       + `the allowed roots (${rootList(roots)}), and rh's install ledger does not record it as rh-created.`,
     fix: `Work on a copy inside an allowed root, or ${userStep}.`,
     askable: true,
@@ -284,13 +302,22 @@ function wordReadsCredential(value: string, pattern: string, dirs: Dirs): boolea
   return patterns.some(item => patternReadsCredential(item, dirs));
 }
 
-/** The file that a word sends: curl-style `@file` and `field=@file` or `field=<file`, or null. */
-function sentFile(word: Word): { value: string; pattern: string } | null {
-  const at = /^@|=[@<]/.exec(word.value);
-  if (!at) return null;
-  const cut = at.index + at[0].length;
-  const patternAt = /^@|=[@<]/.exec(word.pattern);
-  return { value: word.value.slice(cut), pattern: patternAt ? word.pattern.slice(patternAt.index + patternAt[0].length) : escapePattern(word.value.slice(cut)) };
+/**
+ * The files that a word sends, by curl's grammar, after brace expansion: `@file` (-d, --data-binary) and the form value
+ * `name=@file` or `name=<file` (-F). A form file runs to the first `;`, which starts its parameters (`;type=`, `;filename=`), and
+ * may be double-quoted; `@a,b` sends both files. Curl reads the operand as written, without globbing.
+ */
+function sentFiles(word: Word): string[] {
+  return (expandBraces(word.pattern) ?? [word.pattern]).flatMap(pattern => {
+    const value = unescapePattern(pattern);
+    if (value.startsWith('@')) return [value.slice(1)];
+    const form = /=([@<])/.exec(value);
+    if (!form) return [];
+    const rest = value.slice(form.index + 2);
+    const close = rest.indexOf('"', 1);
+    const file = rest.startsWith('"') && close > 0 ? rest.slice(1, close) : rest.split(';')[0]!;
+    return form[1] === '@' ? file.split(',') : [file];
+  });
 }
 
 /** Programs that read no file content to their output: their operands stay local. */
@@ -411,8 +438,8 @@ function credentialFinding(cmd: Command, dirs: Dirs): Denial | null {
   }
   if (NO_CONTENT.has(program)) return null;
   for (const word of args) {
-    const sent = sentFile(word);
-    if (sent && wordReadsCredential(sent.value, sent.pattern, dirs)) return credentialDenial(`${program} sends the credential store ${sent.value}`);
+    const sent = sentFiles(word).find(file => wordReadsCredential(file, escapePattern(file), dirs));
+    if (sent !== undefined) return credentialDenial(`${program} sends the credential store ${sent}`);
   }
   const named = readOperands(program, args).find(operand => wordReadsCredential(operand.value, operand.pattern, dirs));
   return named ? credentialDenial(`${program} reads the credential store ${named.value}`) : null;
@@ -482,23 +509,34 @@ function destinationTargets(program: string, args: readonly Word[], dirs: Dirs):
   const sources = directory ? operands : operands.slice(0, -1);
   const destination = directory ?? operands.at(-1);
   if (!destination || (!directory && operands.length < 2)) return [];
-  const names = sources.flatMap(word => sourceNames(word, dirs));
+  const sourced = sources.map(word => sourceNames(word, dirs));
+  const names = sourced.some(list => list === null) ? null : sourced.flatMap(list => list!);
   const targets = targetsOf('overwrite', program, destination, dirs, { names, follow: program === 'cp' });
   return program === 'mv' ? [...sources.flatMap(word => targetsOf('destroy', 'mv', word, dirs)), ...targets] : targets;
 }
 
-/** The names that a copy or move source gives its destination children; a glob lists its directory, as the shell expands it. */
-function sourceNames(word: Word, dirs: Dirs): string[] {
-  if (word.expand) return [];
-  return (expandBraces(word.pattern) ?? [word.pattern]).flatMap(item => {
-    const pattern = item.replace(/\/+$/, '');
+/**
+ * The names that a copy or move source gives its destination children, as the shell expands the word: `$HOME`, braces and a glob
+ * in the last segment, listed from its directory. Null when a name is not known (another parameter, a glob in a directory segment,
+ * a directory that cannot be listed).
+ */
+function sourceNames(word: Word, dirs: Dirs): string[] | null {
+  if (word.expand) {
+    const found = wordTargets(word, dirs);
+    return found === null || found.some(({ glob }) => glob) ? null : found.map(({ path }) => basename(path));
+  }
+  const names = new Set<string>();
+  for (const item of expandBraces(word.pattern) ?? [word.pattern]) {
+    const pattern = (/^~(?:\/|$)/.test(item) ? escapePattern(homedir()) + item.slice(1) : item).replace(/\/+$/, '');
     const cut = pattern.lastIndexOf('/') + 1;
     const name = pattern.slice(cut);
-    if (globIndex(name) < 0) return [basename(unescapePattern(pattern))];
-    if (globIndex(pattern.slice(0, cut)) >= 0) return [];
-    return (listing(unescapePattern(pattern.slice(0, cut)), dirs) ?? [])
-      .filter(entry => (!entry.startsWith('.') || name.startsWith('.')) && segmentMatches(name, entry));
-  });
+    if (globIndex(name) < 0) { names.add(basename(unescapePattern(pattern))); continue; }
+    if (globIndex(pattern.slice(0, cut)) >= 0) return null;
+    const entries = listing(unescapePattern(pattern.slice(0, cut)), dirs);
+    if (entries === null) return null;
+    for (const entry of entries) if ((!entry.startsWith('.') || name.startsWith('.')) && segmentMatches(name, entry)) names.add(entry);
+  }
+  return [...names];
 }
 
 /** Python and Node one-liners: literal file writes and removals in the script text. */
@@ -542,6 +580,7 @@ function findStarts(args: readonly Word[]): Word[] {
 
 const DOT: Word = { kind: 'word', value: '.', pattern: '.', expand: false, glob: false, quoted: false, assign: false };
 const TRUNCATE_VALUED = new Set(['-s', '--size', '-r', '--reference']);
+const SHRED_VALUED = new Set(['-n', '--iterations', '-s', '--size', '--random-source']);
 const SED_VALUED = new Set(['-e', '--expression', '-f', '--file', '-l', '--line-length']);
 
 /** The write targets of one simple command. */
@@ -562,11 +601,19 @@ function commandTargets(cmd: Command, dirs: Dirs): WriteTarget[] {
   const args = words.slice(at + 1);
   const operands = (valued: ReadonlySet<string> = new Set()) => operandsOf(args, valued).operands;
   switch (program) {
-    case 'rm': case 'unlink': case 'shred':
+    case 'rm': case 'unlink':
       for (const word of operands()) targets.push(...targetsOf('destroy', program, word, dirs));
       break;
+    case 'shred': {
+      const removes = args.some(word => /^-[a-zA-Z]*u/.test(word.value) || /^--remove(?:=|$)/.test(word.value));
+      for (const word of operands(SHRED_VALUED)) {
+        targets.push(...targetsOf('change', program, word, dirs));
+        if (removes) targets.push(...targetsOf('destroy', program, word, dirs));
+      }
+      break;
+    }
     case 'truncate':
-      for (const word of operands(TRUNCATE_VALUED)) targets.push(...targetsOf('destroy', program, word, dirs));
+      for (const word of operands(TRUNCATE_VALUED)) targets.push(...targetsOf('change', program, word, dirs));
       break;
     case 'mv': case 'cp':
       targets.push(...destinationTargets(program, args, dirs));
