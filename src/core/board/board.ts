@@ -114,8 +114,8 @@ export type BoardSecondReviewV1 = 'not_required' | 'pending' | 'recorded';
 
 /**
  * The verdict of `BoardPullRequestV1.gatekeeper_review`, the relay order of the second review (#2910): the reviewer seat starts for this head
- * only after the seat that is not the reviewer reviewed it. `pass`: a PASS row of the head that is not the reviewer's, and no unresolved FAIL
- * row of the head that is not the reviewer's. `fail`: such a FAIL row. `none`: no row of the head that is not the reviewer's. `unknown`: an
+ * only after the seat that is not the reviewer reviewed it. `pass`: a `PASS` row of the head that is not the reviewer's, and no unresolved `FAIL`
+ * row of the head that is not the reviewer's. `fail`: such a `FAIL` row. `none`: no `PASS` row of the head that is not the reviewer's. `unknown`: an
  * older comment outside the read, or a record without a table row, can change either answer.
  */
 export type BoardGatekeeperReviewV1 = 'pass' | 'fail' | 'none' | 'unknown';
@@ -491,7 +491,8 @@ function reviewFail(read: BoardPullRequestReadV1): BoardPullRequestV1['review_fa
 /**
  * The verdict of the rows of the head that are not the reviewer's (`BoardPullRequestV1.gatekeeper_review`). A row is the reviewer's when the
  * family of its model is `reviewerFamily`; every other row of the head, a row with no known model included, counts here, so the relay opens
- * for a head that any other seat reviewed. A row that a disposition resolves does not fail the head.
+ * for a head that any other seat reviewed. Only a `PASS` row opens the relay: a `FAIL` row that a disposition resolves stops failing the head,
+ * but a cleared failure is no review, so it sets no pass either. A `FAIL` row that no disposition resolves fails the head.
  */
 function gatekeeperReview(read: BoardPullRequestReadV1, reviewerFamily: string | null): BoardGatekeeperReviewV1 {
   if (read.comments.truncated) return 'unknown';
@@ -501,8 +502,8 @@ function gatekeeperReview(read: BoardPullRequestReadV1, reviewerFamily: string |
     const rows = parseAcceptanceRecord(record);
     if (rows === null) return 'unknown';
     for (const row of rows.filter(row => row.subject_sha === read.head_sha && (row.model === null || modelFamily(row.model) !== reviewerFamily))) {
-      if (row.verdict === 'FAIL' && !resolvedFail(record, row, dispositions)) return 'fail';
-      verdict = 'pass';
+      if (row.verdict === 'PASS') verdict = 'pass';
+      else if (!resolvedFail(record, row, dispositions)) return 'fail';
     }
   }
   return verdict;

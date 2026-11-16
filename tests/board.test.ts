@@ -1419,7 +1419,7 @@ test('acceptance disposition: a FAIL row is ignored only when every finding of i
   });
   const failAt = '2026-11-02T22:00:00Z';
   const failUrl = `${base}/pull/1499#issuecomment-${Date.parse(failAt)}`;
-  const projected = (dispositions: string[], mangleSecond = false) => {
+  const projected = (dispositions: string[], mangleSecond = false, laterPass = true) => {
     const read = replay({
       owners: (results) => { results.push({ path: boardWriter, matched: false, ambiguous: false, owningCapabilityId: null }); },
       parent: (data) => { issueNode(data, 1476).labels.nodes.push({ name: 'tier:medium' }); },
@@ -1434,8 +1434,10 @@ test('acceptance disposition: a FAIL row is ignored only when every finding of i
         // A bullet marker outside the record shape makes the finding list unreadable.
         pr1499.comments.nodes.push(comment(mangleSecond ? failRecord.replace('- P2 R1-2', '* P2 R1-2') : failRecord, failAt));
         const passClaimAt = '2026-11-02T22:20:00Z';
-        pr1499.comments.nodes.push(comment(renderAcceptanceClaim(receipt(head, 'PASS', 2)), passClaimAt));
-        pr1499.comments.nodes.push(comment(renderAcceptanceRecord(receipt(head, 'PASS', 2), `${base}/pull/1499#issuecomment-${Date.parse(passClaimAt)}`), '2026-11-02T22:30:00Z'));
+        if (laterPass) {
+          pr1499.comments.nodes.push(comment(renderAcceptanceClaim(receipt(head, 'PASS', 2)), passClaimAt));
+          pr1499.comments.nodes.push(comment(renderAcceptanceRecord(receipt(head, 'PASS', 2), `${base}/pull/1499#issuecomment-${Date.parse(passClaimAt)}`), '2026-11-02T22:30:00Z'));
+        }
         dispositions.forEach((body, index) => pr1499.comments.nodes.push(comment(body, `2026-11-02T22:4${index}:00Z`)));
       },
     });
@@ -1459,6 +1461,11 @@ test('acceptance disposition: a FAIL row is ignored only when every finding of i
     evaluateBoardAttention(board).findings.filter(finding => finding.rule === 'A15').map(finding => finding.message.replace(/\(.*\)$/u, ''))];
   expect(a15(projected([disposition('R1-1')]))).toEqual([failAt, ['#1499 has a FAIL record on 23627c4f5 for 89 min and no new head ']]);
   expect(a15(projected([disposition('R1-1, R1-2')]))).toEqual([null, []]);
+  // The relay (#2910) opens on a real `PASS` row only: a disposition clears a failure, it does not supply the review. #1499's records name no
+  // model, so every row of the head counts as a row that is not the reviewer's.
+  const verdict = (board: BoardV1) => board.pull_requests.find(entry => entry.number === 1499)!.gatekeeper_review;
+  expect([verdict(projected([])), verdict(projected([disposition('R1-1, R1-2')]))]).toEqual(['fail', 'pass']);
+  expect([verdict(projected([], false, false)), verdict(projected([disposition('R1-1, R1-2')], false, false))]).toEqual(['fail', 'none']);
 });
 
 test('a rendered record with multiline finding values parses to its finding IDs', () => {
