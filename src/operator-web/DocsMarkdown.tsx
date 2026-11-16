@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useState, type ReactNode } from 'react';
 import Markdown, { type Components, type ExtraProps } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ImageIcon } from '@phosphor-icons/react';
-import { DIAGRAM_MAX_DEPTH, diagramTooDeep, type DocsDiagramFailure } from '../core/operator/docs';
+import { diagramSourceIssues, type DocsDiagramFailure } from '../core/operator/docs';
 import type { OperatorTranslate } from './i18n';
 import { fetchDocsDiagram } from './repository-reads';
 import type { ThemeMode } from './theme';
@@ -59,8 +59,8 @@ export type DiagramCheck =
   | { readonly state: 'browser_missing' }
   | { readonly state: 'pending' }
   | { readonly state: 'failed'; readonly reason: DocsDiagramFailure }
-  /** The stored artifact, drawn as an image; `stale` when it was drawn with another library, font or icon set. */
-  | { readonly state: 'image'; readonly src: string; readonly stale: boolean };
+  /** The stored artifact's bytes, drawn as an image; `stale` when it was drawn with another library, font or icon set. */
+  | { readonly state: 'image'; readonly svg: string; readonly stale: boolean };
 export type DiagramValidator = (document: unknown) => Promise<DiagramCheck>;
 
 /** The page reads the artifact the server stored for the block's content hash; it never starts a render. */
@@ -68,10 +68,15 @@ export const validateDiagramWithCapability: DiagramValidator = async document =>
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(document)));
   const hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
   const diagram = await fetchDocsDiagram(hash, new AbortController().signal);
-  const image = `/api/v1/docs/diagrams/${hash}/image`;
+  // The page holds the bytes it shows, so the export is those bytes even when the stored artifact changes later.
+  const image = async (stale: boolean): Promise<DiagramCheck> => {
+    const response = await fetch(`/api/v1/docs/diagrams/${hash}/image`);
+    // The artifact left between the state read and the image read: the next refresh reads the new state.
+    return response.ok ? { state: 'image', svg: await response.text(), stale } : { state: 'pending' };
+  };
   switch (diagram.state) {
-    case 'rendered': return { state: 'image', src: image, stale: false };
-    case 'stale': return { state: 'image', src: image, stale: true };
+    case 'rendered': return image(false);
+    case 'stale': return image(true);
     case 'invalid': return { state: 'invalid', issues: diagram.issues };
     case 'failed': return { state: 'failed', reason: diagram.reason! };
     default: return { state: diagram.state };
@@ -81,41 +86,6 @@ export const validateDiagramWithCapability: DiagramValidator = async document =>
 const DIAGRAM_REFRESH_MS = 5_000;
 
 export const DIAGRAM_LANGUAGE = 'eraser-diagram';
-
-const REMOTE_ADDRESS = /^\s*(?:[a-z][a-z0-9+.-]*:|\/\/)/iu;
-
-/**
- * Errors the core owns before the capability sees the block: a JSON syntax error, and a
- * remote or scheme-bearing `icon` address (the only resource field; icons load from a local set).
- */
-export function diagramSourceIssues(source: string): { readonly document: unknown; readonly issues: readonly DiagramIssue[] } {
-  let document: unknown;
-  try { document = JSON.parse(source); } catch (error) {
-    return { document: null, issues: [{ element: 'block', field: 'JSON', fix: `Fix the JSON syntax: ${error instanceof Error ? error.message : 'the text does not parse'}.` }] };
-  }
-  if (diagramTooDeep(document)) {
-    return { document, issues: [{ element: 'block', field: 'depth', fix: `Nest the JSON at most ${DIAGRAM_MAX_DEPTH} levels deep.` }] };
-  }
-  const issues: DiagramIssue[] = [];
-  // Iterative: a deeply nested block must not overflow the call stack. A pointer is built only for an issue.
-  interface Step { readonly value: unknown; readonly parent: Step | null; readonly key: string }
-  const pointerOf = (step: Step | null): string => {
-    const keys: string[] = [];
-    for (let at = step; at !== null && at.parent !== null; at = at.parent) keys.push(at.key);
-    return keys.length === 0 ? '/' : `/${keys.reverse().join('/')}`;
-  };
-  const stack: Step[] = [{ value: document, parent: null, key: '' }];
-  for (let step = stack.pop(); step !== undefined; step = stack.pop()) {
-    const { value } = step;
-    if (value === null || typeof value !== 'object') continue;
-    for (const [key, child] of Object.entries(value)) {
-      if (key === 'icon' && typeof child === 'string' && REMOTE_ADDRESS.test(child)) {
-        issues.push({ element: pointerOf(step), field: 'icon', fix: 'Use the name of a local icon; a remote address is not allowed.' });
-      } else stack.push({ value: child, parent: step, key });
-    }
-  }
-  return { document, issues };
-}
 
 export type DocsLink =
   | { readonly kind: 'external'; readonly href: string }
@@ -200,7 +170,9 @@ function DiagramBlock({ source, validate, t }: {
     return (
       <>
         {check.stale && <p className="docs-figure__note" data-diagram="stale">{t('docs.diagram.stale')}</p>}
-        <img key={check.stale ? 'stale' : 'drawn'} src={check.src} alt={t('docs.diagram.alt')} className="docs-figure__image" data-diagram="image" />
+        <img key={check.stale ? 'stale' : 'drawn'} src={svgDataUrl(check.svg)} alt={t('docs.diagram.alt')} className="docs-figure__image" data-diagram="image" />
+        {/* The shown SVG is the export; the browser saves it only when the user follows this link. */}
+        <a href={svgDataUrl(check.svg)} download="diagram.svg" className="docs-figure__note" data-diagram-export>{t('docs.diagram.export')}</a>
       </>
     );
   }
