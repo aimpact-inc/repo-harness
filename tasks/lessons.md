@@ -6,7 +6,7 @@ reviewed-through: 4305f61cd699547276e2434cbf1f1a4675e4036d
 - Name: Verify live state
 - Mistake pattern: verify-live-state-before-relying
 - Prevention rule: Verify the live checkout, declared revision and real entrypoint before relying on an issue, snapshot or agent report.
-- Enforced by: judgment
+- Enforced by: tests/missing-guard.test.ts
 - Missed by: unknown
 - Why: #483 consolidated this rule from earlier lessons; the pre-consolidation references and count are kept here. The old entries do not name the layer that missed each event, so `Missed by` is unknown.
 - Triggered by correction: c27a36e8, 02da1f63, eb48d698, 1d1b702a, a24990b5, 395f61aa, e13bb3fd, 8134a2af, #231-#240, 6c19234e, 12ef448b, #483
