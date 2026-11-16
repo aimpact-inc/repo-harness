@@ -38,10 +38,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 # The one ledger parser. Each entry starts at `- Date:` and becomes
-# {"line": <Date line>, "fields": {"<Field name>": "<value>"}}. An indented or
-# unprefixed line continues the field above it; a blank line ends it.
-# `--entries` prints the parsed entries of one file for LedgerEnforcement
-# (scripts/check-ledger-enforcement.ts), so the check has no second parser.
+# {"line": <Date line>, "fields": {"<Field name>": "<value>"}, "lines": {"<Field name>": <line>}}.
+# `lines` gives the line of each field. A repeated field in one entry keeps its
+# first value and line, and the parser skips the repeat. An indented or unprefixed line continues the field above it; a blank
+# line ends it. `--entries` prints the parsed entries of one file for
+# LedgerEnforcement (scripts/check-ledger-enforcement.ts), which uses `lines`
+# to find the lesson lines that no entry holds, so the check has no second parser.
 parse_entries() {
   awk '
     function esc(value) {
@@ -51,18 +53,21 @@ parse_entries() {
       gsub(/\r/, "", value)
       return value
     }
-    function emit(   name, sep, body) {
+    function emit(   name, sep, body, at) {
       if (start == 0) {
         return
       }
       body = ""
+      at = ""
       sep = ""
       for (name in fields) {
         body = body sep "\"" esc(name) "\":\"" esc(fields[name]) "\""
+        at = at sep "\"" esc(name) "\":" lines[name]
         sep = ","
       }
-      printf "%s{\"line\":%d,\"fields\":{%s}}", (count++ ? "," : ""), start, body
+      printf "%s{\"line\":%d,\"fields\":{%s},\"lines\":{%s}}", (count++ ? "," : ""), start, body, at
       delete fields
+      delete lines
       start = 0
       current = ""
     }
@@ -77,10 +82,15 @@ parse_entries() {
       current = $0
       sub(/^- /, "", current)
       sub(/:.*/, "", current)
+      if (current in fields) {
+        current = ""
+        next
+      }
       value = $0
       sub(/^- [A-Z][A-Za-z ]*:[[:space:]]*/, "", value)
       sub(/[[:space:]]+$/, "", value)
       fields[current] = value
+      lines[current] = NR
       next
     }
     /^- / || /^[[:space:]]*$/ {
