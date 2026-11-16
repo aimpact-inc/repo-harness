@@ -53,6 +53,7 @@ import {
 } from '../../core/skill-surface/plugin-manifest';
 import { hostSkillRoot, providerSkillLock, stagedSkillRoot, syncSkillRoots, type SkillHost } from '../../effects/host-skill-roots';
 import { userExcludesFilePath } from '../../effects/adoption/gitignore-plan';
+import { ownedSkillIsIntact } from '../commands/herdr-skill';
 import { MANAGED_AGENTS } from '../../effects/terminal/task-role-profiles';
 import { hashManagedTree, OWNER_MARKER } from '../../effects/managed-tree';
 import { readWorkflowPolicyDocument } from '../../effects/state/resolve-effective-state';
@@ -445,6 +446,14 @@ function discoverManagedSurfaces(
       const canonical = captureDirectoryOrLink(join(root, 'repo-harness'), canonicalOwner);
       if (canonical) surfaces.push(canonical);
     }
+    // The Herdr step writes its marker with the SKILL.md hash. A copy that still
+    // matches it is rh's, whichever earlier run wrote it; an edited copy stays the user's.
+    const herdr = join(root, 'herdr');
+    const herdrOwner = ownerForInstallPath(herdr, env);
+    if (enabled(herdrOwner) && lstatSync(herdr, { throwIfNoEntry: false })?.isDirectory() && ownedSkillIsIntact(herdr)) {
+      const surface = captureOwnedPath(herdr, herdrOwner);
+      if (surface) surfaces.push(surface);
+    }
     if (!existsSync(root)) continue;
     for (const name of readdirSync(root).filter((entry) => entry.startsWith(FACADE_NAME_PREFIX) || facadeNames.has(entry)).sort()) {
       // A retired facade keeps its receipt under `core` until skill sync removes it; in the Pi root it stays `pi`.
@@ -810,12 +819,27 @@ export function installProfileTransactionPaths(env: NodeJS.ProcessEnv = process.
       if (name.startsWith(FACADE_NAME_PREFIX) || (lstatSync(path).isSymbolicLink() && !existsSync(path))) paths.push(path);
     }
   }
-  // The runtime ignore step writes the user Git excludes file. Rollback restores
-  // its bytes. It stays out of installProfileHostMutationPaths, the ownership
-  // allowlist, so no ownership surface can name it.
-  const excludes = userExcludesFilePath(env);
-  if (excludes.ok) paths.push(excludes.path);
+  const excludes = excludesTransactionPath(env);
+  if (excludes !== null) paths.push(excludes);
   return [...new Set(paths)];
+}
+
+/**
+ * The user Git excludes file that the runtime ignore step writes. It is a
+ * restore-only transaction path: the snapshot restores it, and ownership
+ * capture never claims it (transactionOwnedSurfaces). Rollback replaces a
+ * snapshot path whole, and the backup copies what the path names, so the path
+ * must be absent or a regular file. Any other entry is refused before the
+ * transaction writes anything.
+ */
+function excludesTransactionPath(env: NodeJS.ProcessEnv): string | null {
+  const excludes = userExcludesFilePath(env);
+  if (!excludes.ok) return null;
+  const stat = lstatSync(excludes.path, { throwIfNoEntry: false });
+  if (stat === undefined || stat.isFile()) return excludes.path;
+  const kind = stat.isSymbolicLink() ? 'a symlink' : stat.isDirectory() ? 'a directory' : 'not a regular file';
+  throw new Error(`excludes_file_not_regular: the user Git excludes file ${excludes.path} is ${kind}; `
+    + 'set core.excludesFile to a regular file, then run the command again');
 }
 
 const transactionLocks = new WeakMap<InstallHostTransaction, { context: RuntimeTransactionContext; owned: RuntimeTransactionLock | undefined }>();
@@ -964,7 +988,12 @@ function transactionOwnedSurfaces(
   previous: Pick<InstallState, 'ownership_manifest'> | null,
   env: NodeJS.ProcessEnv,
 ): readonly ManagedInstallSurface[] {
+  const home = env.HOME ?? homedir();
+  const allowlist = new Set(installProfileHostMutationPaths(env));
   return transaction.snapshots.flatMap((snapshot) => {
+    // Ownership capture claims only a path that the ownership allowlist names. Every
+    // other transaction path (the user Git excludes file) is restore-only.
+    if (!allowlist.has(snapshot.path) && !isDiscoveredFacadePath(snapshot.path, home, env)) return [];
     const normalized = snapshot.path.replaceAll('\\', '/');
     if (
       normalized.endsWith('/.codex/config.toml')

@@ -13,7 +13,7 @@ const MARKER = ".repo-harness-owner.json";
 type Step = { step: string; status: "ok" | "failed"; detail: string };
 type BackupCleanup = (path: string) => void;
 
-function ownedSkillIsIntact(directory: string): boolean {
+export function ownedSkillIsIntact(directory: string): boolean {
   try {
     const marker = JSON.parse(readFileSync(join(directory, MARKER), "utf8"));
     return marker.owner === "repo-harness"

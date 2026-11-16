@@ -1068,10 +1068,10 @@ describe('install selection', () => {
       expect(run.status, `${row.name}\n${run.stdout}\n${run.stderr}`).toBe(0);
       expect(readdirSync(piRoot).sort(), row.name).toEqual(row.entries);
       expect(readFileSync(join(piRoot, 'herdr', 'SKILL.md'), 'utf-8'), row.name).toContain(row.pi ? 'new manual' : 'old manual');
-      // The strict reader accepts the state; the pre-existing Herdr copy stays unrecorded.
+      // The strict reader accepts the state. The earlier Herdr copy keeps rh's marker, so a pi selection records it too.
       const recorded = readInstallState(env)!.ownership_manifest.filter(surface => surface.path.startsWith(`${piRoot}/`));
       expect(recorded.map(surface => `${surface.owner}:${basename(surface.path)}`), row.name)
-        .toEqual(row.pi ? row.entries.filter(name => name !== 'herdr').map(name => `pi:${name}`) : []);
+        .toEqual(row.pi ? row.entries.map(name => `pi:${name}`) : []);
     });
   }, 60_000);
 
