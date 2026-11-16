@@ -1,4 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+import { readbackDiagram, readbackExitCode } from '../../effects/operator/diagram-readback';
 import { fileURLToPath } from 'node:url';
 import { version as PACKAGE_VERSION } from '../../../package.json';
 import { OPERATOR_WEB_PACKAGE_NAME } from '../../core/skill-surface/plugin-manifest';
@@ -234,4 +236,14 @@ export async function capture(argv: string[], raw: OperatorCaptureRawOptions): P
 
 export async function cleanupInvestigationJob(sessionId: string, jobId: string, deadlineMs: string, reviewHost: CleanupReviewHost): Promise<void> {
   await runCleanupInvestigationJob(sessionId, jobId, Number(deadlineMs), reviewHost);
+}
+
+/** Prints one JSON result: the PNG path, or the errors that name the element. */
+export async function diagram(file: string): Promise<void> {
+  let text: string;
+  try { text = readFileSync(file === '-' ? 0 : file, 'utf8'); }
+  catch { process.stderr.write(`${JSON.stringify({ ok: false, error: 'input_unreadable' })}\n`); process.exitCode = 2; return; }
+  const result = await readbackDiagram(text, { env: process.env, signal: new AbortController().signal });
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+  process.exitCode = readbackExitCode(result);
 }
