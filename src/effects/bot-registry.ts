@@ -130,7 +130,7 @@ export function readBotRegistry(env: NodeJS.ProcessEnv = process.env): readonly 
     try {
       const stat = lstatSync(path);
       if (!name.endsWith('.json') || !stat.isFile() || stat.size > BOT_RECORD_MAX_BYTES) throw new Error('entry');
-      const bot = validateBotRecord(JSON.parse(readFileSync(path, 'utf8')), path);
+      const bot = validateBotRecord(JSON.parse(readFileSync(path, 'utf8')), name);
       if (`${bot.bot_id}.json` !== name) throw new Error('name');
       return bot;
     } catch (error) {
