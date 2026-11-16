@@ -58,7 +58,8 @@ export function buildBotsCommand(): Command {
     .option('--json', 'Output JSON')
     .action((options: BotsReadOptions) => {
       try {
-        const records = readBotRegistry();
+        // The registry reads in file-name order, where `a-b.json` precedes `a.json`.
+        const records = [...readBotRegistry()].sort((left, right) => (left.bot_id < right.bot_id ? -1 : 1));
         if (options.json) console.log(JSON.stringify({ kind: BOTS_LIST_KIND, protocol: BOTS_LIST_PROTOCOL, bots: records }, null, 2));
         else for (const bot of records) console.log(`${bot.bot_id}  ${bot.name}  ${bot.host}`);
       } catch (error) {

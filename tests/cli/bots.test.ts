@@ -31,11 +31,13 @@ describe('rh bots list and show', () => {
     expect(JSON.parse(empty.stdout)).toEqual({ kind: 'repo-harness.bots', protocol: 1, bots: [] });
     const hermes = registerBot({ bot_id: 'hermes', name: 'Hermes', host: 'Hermes', herdr_agent: 'hermes', now: NOW }, env);
     const dot = registerBot({ bot_id: 'dot', name: 'Dot', host: 'Dot', now: NOW }, env);
+    // `dot-bot.json` sorts before `dot.json`; the id order puts `dot` first.
+    const dotBot = registerBot({ bot_id: 'dot-bot', name: 'Dot Bot', host: 'Dot', now: NOW }, env);
     const listed = rh('list', '--json');
     expect(listed.exitCode).toBe(0);
-    expect(JSON.parse(listed.stdout)).toEqual({ kind: 'repo-harness.bots', protocol: 1, bots: [dot, hermes] });
+    expect(JSON.parse(listed.stdout)).toEqual({ kind: 'repo-harness.bots', protocol: 1, bots: [dot, dotBot, hermes] });
     expect(listed.stdout).not.toContain(root);
-    expect(rh('list').stdout).toBe('dot  Dot  Dot\nhermes  Hermes  Hermes\n');
+    expect(rh('list').stdout).toBe('dot  Dot  Dot\ndot-bot  Dot Bot  Dot\nhermes  Hermes  Hermes\n');
     const shown = rh('show', 'hermes', '--json');
     expect(shown.exitCode).toBe(0);
     expect(JSON.parse(shown.stdout)).toEqual(hermes);
