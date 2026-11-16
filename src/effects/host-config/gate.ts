@@ -156,7 +156,8 @@ function settleTransaction(paths: HostConfigPaths, record: TransactionRecord, at
           removeTarget(paths, entry.path, entry.intended);
         }
       } catch (error) {
-        if (!(error instanceof HostConfigError && error.code === 'host_config_target_changed')) throw error;
+        // A changed target, or a preimage copy that cannot be read, keeps this entry; other entries and records go on.
+        if (!(error instanceof HostConfigError && (error.code === 'host_config_target_changed' || error.code === 'host_config_invalid_state'))) throw error;
         remaining.push(entry);
         continue;
       }
@@ -274,6 +275,8 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
   const skipped: SkippedOverride[] = [];
   const claimedDirs = new Set<string>();
   const plans: FilePlan[] = [];
+  const files = { ...ledger.files };
+  let externalChange = false;
   const work: { change: HostConfigFileChange; plan: FilePlan; entry: TransactionFileEntry; preimage: Buffer | null; mode: number; sha256: string }[] = [];
   for (const [index, change] of changes.entries()) {
     const path = targets[index]!;
@@ -286,7 +289,15 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
     skipped.push(...plan.skipped);
     plans.push(plan);
     // A fragment whose text is already in place is still recorded, but its file is not written.
-    if (plan.result === content) continue;
+    if (plan.result === content) {
+      // No write, but an outside edit since the commit is still recorded, as a written file would record it.
+      const recorded = ledger.files[path];
+      if (recorded && !recorded.external_change && !sameExpected(preimage, expectedFromCommitted(recorded.committed))) {
+        files[path] = { ...recorded, external_change: true };
+        externalChange = true;
+      }
+      continue;
+    }
     const createdDirs = missingDirectories(paths, path).filter((directory) => !claimedDirs.has(directory));
     for (const directory of createdDirs) claimedDirs.add(directory);
     const result = Buffer.from(plan.result, 'utf8');
@@ -308,9 +319,9 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
     });
   }
   if (work.length === 0) {
-    if (!plans.some((plan) => plan.fragments.some(fragmentChanges))) return { txn: null, written: [], skipped };
-    // Only fragment records change: the ledger write is the whole transaction, and settlement has nothing to touch.
-    writeLedger(paths, withLedger(ledger, ledger.files, nextFragments(paths, ledger, plans), txn));
+    if (!externalChange && !plans.some((plan) => plan.fragments.some(fragmentChanges))) return { txn: null, written: [], skipped };
+    // Only ledger records change: the ledger write is the whole transaction, and settlement has nothing to touch.
+    writeLedger(paths, withLedger(ledger, files, nextFragments(paths, ledger, plans), txn));
     return { txn, written: [], skipped };
   }
 
@@ -328,7 +339,6 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
       });
       faults?.at('after-rename', entry.path);
     }
-    const files = { ...ledger.files };
     for (const { change, entry, mode, sha256 } of work) {
       files[entry.path] = nextFileRecord(ledger.files[entry.path], entry.preimage,
         { type: 'file', sha256, mode, txn }, entry.created_dirs, change.baselineUnknown === true);

@@ -79,12 +79,21 @@ function guarded<T>(paths: HostConfigPaths, root: string, target: string, change
     const symlink = assertNoSymlinkInPath(paths.home, relative(paths.home, parent));
     if (symlink) throw invalidPath(symlink);
   }
-  try { return change(); }
+  return mapFsError(target, change);
+}
+
+function mapFsError<T>(target: string, call: () => T): T {
+  try { return call(); }
   catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code && FAIL_CLOSED_CODES.has(code)) throw new HostConfigError('host_config_invalid_path', `${code}: ${target}`, { cause: error });
     throw error;
   }
+}
+
+/** The durability fsync opens its directory with O_NOFOLLOW, so it maps the same codes. */
+function syncDirectory(directory: string): void {
+  mapFsError(directory, () => syncDirectoryDurably(directory));
 }
 
 /** A host target, its temporary file or a directory created for it: under HOME and outside `~/.repo-harness/`. */
@@ -96,8 +105,8 @@ function guardedHost<T>(paths: HostConfigPaths, target: string, change: () => T)
 /** Create a 0700 directory under HOME; refuse a symlink or a non-directory on the way. */
 export function ensurePrivateDirectory(paths: HostConfigPaths, directory: string): void {
   const created = guarded(paths, paths.harness, directory, () => mkdirSync(directory, { recursive: true, mode: 0o700 }));
-  if (!lstatSync(directory).isDirectory()) throw invalidState(`not a directory: ${directory}`);
-  if (created !== undefined) syncDirectoryDurably(dirname(created));
+  if (!lstatSync(directory).isDirectory()) throw invalidPath(`not a directory: ${directory}`);
+  if (created !== undefined) syncDirectory(dirname(created));
 }
 
 /** Windows keeps only the owner write bit; compare modes in the form the platform reports. */
@@ -159,7 +168,7 @@ export function replaceTarget(paths: HostConfigPaths, path: HostPath, txn: strin
     }
     beforeRename();
     guardedHost(paths, path, () => retryWindowsSharingRace(() => renameSync(temporary, path)));
-    syncDirectoryDurably(dirname(path));
+    syncDirectory(dirname(path));
   } finally { removeTemporary(paths, path, txn); }
 }
 
@@ -170,7 +179,7 @@ export function removeTarget(paths: HostConfigPaths, path: HostPath, expected: E
     }
     retryWindowsSharingRace(() => unlinkSync(path));
   });
-  syncDirectoryDurably(dirname(path));
+  syncDirectory(dirname(path));
 }
 
 /** Missing ancestors between HOME and the target's directory, outermost first. */
@@ -186,7 +195,7 @@ export function missingDirectories(paths: HostConfigPaths, path: HostPath): Host
 export function createDirectories(paths: HostConfigPaths, directories: readonly HostPath[]): void {
   for (const directory of directories) {
     guardedHost(paths, directory, () => mkdirSync(directory, { mode: 0o700 }));
-    syncDirectoryDurably(dirname(directory));
+    syncDirectory(dirname(directory));
   }
 }
 
@@ -208,7 +217,7 @@ export function removeCreatedDirectories(paths: HostConfigPaths, directories: re
       }
     });
     if (outcome === 'kept') return ordered.slice(index).reverse();
-    if (outcome === 'removed') syncDirectoryDurably(dirname(directory));
+    if (outcome === 'removed') syncDirectory(dirname(directory));
   }
   return [];
 }
@@ -298,8 +307,11 @@ export function writePreimageCopy(paths: HostConfigPaths, txn: string, name: Pre
   guarded(paths, directory, join(directory, name), () => createFileExclusiveDurably(join(directory, name), bytes));
 }
 
+/** A missing or unreadable copy is an invalid state of this record only; recovery of other records goes on. */
 export function readPreimageCopy(paths: HostConfigPaths, txn: string, name: PreimageCopyName, expected: Sha256): Buffer {
-  const bytes = readFileSync(join(transactionDirectory(paths, txn), name));
+  let bytes: Buffer;
+  try { bytes = readFileSync(join(transactionDirectory(paths, txn), name)); }
+  catch (error) { throw new HostConfigError('host_config_invalid_state', `the preimage copy cannot be read: ${txn}/${name}`, { cause: error }); }
   if (sha256Prefixed(bytes) !== expected) throw invalidState(`the preimage copy does not match its hash: ${txn}/${name}`);
   return bytes;
 }
@@ -308,13 +320,13 @@ export function readPreimageCopy(paths: HostConfigPaths, txn: string, name: Prei
 export function writeTransactionRecord(paths: HostConfigPaths, record: TransactionRecord): void {
   const directory = transactionDirectory(paths, record.txn);
   publishPrivate(paths, directory, join(directory, RECORD), record);
-  syncDirectoryDurably(paths.journal);
+  syncDirectory(paths.journal);
 }
 
 export function removeTransaction(paths: HostConfigPaths, txn: string): void {
   const directory = transactionDirectory(paths, txn);
   guarded(paths, paths.journal, directory, () => rmSync(directory, { recursive: true, force: true }));
-  syncDirectoryDurably(paths.journal);
+  syncDirectory(paths.journal);
 }
 
 export function removePreimageCopy(paths: HostConfigPaths, txn: string, name: PreimageCopyName): void {

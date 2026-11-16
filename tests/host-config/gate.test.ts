@@ -202,6 +202,23 @@ test('a committed transaction always settles: a delegated unchanged path is a no
   writeFileSync(g.a, 'keep=1\nrh=on\nuser=1\n');
   g.gate().delegate([g.a], () => {});
   expect(g.ledger().files[g.a]).toMatchObject({ external_change: true, committed });
+
+  // The same holds for an apply whose text is already in place.
+  const h = fixture();
+  h.gate().apply([h.change(h.a, 'on')]);
+  const before = h.ledger().files[h.a].committed;
+  writeFileSync(h.a, 'keep=1\nrh=on\nuser=1\n');
+  expect(h.gate().apply([h.change(h.a, 'on')]).written).toEqual([]);
+  expect(h.ledger().files[h.a]).toMatchObject({ external_change: true, committed: before });
+});
+
+test('a preimage copy that cannot be read keeps its entry unresolved, and other paths still apply', () => {
+  const f = fixture();
+  killAt(f.home, `gate.apply([{ path: ${JSON.stringify(f.a)}, fragments: [{ owner: 'o1', selector: 'rh', kind: 'add', strategy: keyLine, value: 'on' }] }]);`, 'after-rename', f.a);
+  rmSync(join(f.root, 'journal', f.journal()[0]!, 'preimage-0'));
+  expect(f.gate().recover().unresolved.map((entry) => entry.path)).toEqual([f.a]);
+  expect(readFileSync(f.a, 'utf8')).toBe('keep=1\nrh=on\n');
+  expect(f.gate().apply([f.change(f.b, 'on')]).written).toEqual([f.b]);
 });
 
 test('recovery refuses a recorded path that leaves HOME or meets a symlink, and keeps the record', () => {
