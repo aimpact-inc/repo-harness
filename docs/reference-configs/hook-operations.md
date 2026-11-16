@@ -194,10 +194,15 @@ Safety hook guards:
   `.env*` file other than `.env.example`, `.env.sample` or `.env.template`, a
   keychain dump (`security dump-keychain`, `security find-*-password -w` or
   `-g`), or the whole environment (`env` with no command, `printenv` with no
-  name). Programs that read no file content (`ls`, `stat`, `test`, `chmod`,
-  `rm`, `mv`, `cd`, `echo`, `source`, `ssh-add` and similar), a grep pattern, a
-  `cp` destination, an `--env-file` value and an `ssh -i` identity pass. Secret
-  redaction stays as the second layer.
+  name). The hook judges the file operands that each program reads, after
+  quote removal and brace expansion. A glob counts when it can match a
+  credential name in its directory. A curl `@file`, `field=@file` or
+  `field=<file` value is a send. Programs that read no file content (`ls`,
+  `stat`, `test`, `chmod`, `rm`, `mv`, `cd`, `echo`, `source`, `ssh-add` and
+  similar), a grep pattern (also `-e` and `--regexp`), a `cp` destination, a git
+  path filter (`git status`, `ls-files`, `log` without `-p`), an `--env-file`
+  value and an `ssh -i` identity pass. Secret redaction stays as the second
+  layer.
 - `UserFileGuard` (I2): a call removes or overwrites an existing file outside
   the worktree, the managed worktree root (`/tmp` on POSIX unless
   `REPO_HARNESS_WORKTREE_ROOT` moves it), the system temp directory and the
@@ -208,14 +213,23 @@ Safety hook guards:
   file, or a directory tree above it, as rh-created. A create or an append
   passes everywhere. A removal (`rm`, `unlink`, `shred`, `truncate`, an `mv`
   source, `sed -i`, `find -delete`) whose target is not known before the
-  command runs is refused; an overwrite with an unknown target passes. In a
+  command runs is refused; an overwrite with an unknown target passes. The
+  hook checks every simple command, also after `then`, `do`, `else`, `&&`,
+  `||`, `;`, `|`, a newline and inside a subshell. A `cd` narrows the working
+  directory only when `&&` follows it, `||` does not come before it and its
+  directory exists; after any other `cd` the working directory is not known. A target resolves as the kernel
+  resolves it: each symlink before the `..` after it, and the existing child
+  that a `cp`, `mv` or redirect into a directory writes. In a
   Claude session whose `permission_mode` is not `bypassPermissions` or
   `dontAsk`, the hook returns the host's ask decision and the user answers
   locally. A bypass or `dontAsk` session (the owner's own bypass sessions
   included), a payload without a mode, Codex and the Pi bridge get the deny;
   the bridge renders an ask as a block. The deny names every allowed root and
   the step the user can take: the exact `! <command>` line for a one-line Bash
-  command, or the target path that the user can edit themselves.
+  command, or the target path that the user can edit themselves. The prompt,
+  stderr and the failure record get the reason and fix after secret
+  redaction; a command that holds a secret shows its redacted form, or no
+  command when the redaction leaves a secret.
 - `RecursiveDeleteGuard`: `rm -r`, `find -delete` or `find -exec` with a program
   that is not a reader, or `git clean -x`/`-X` starts at the repository root, an
   ancestor of it, or a start that is not known.
@@ -399,7 +413,7 @@ block to the user-level Git excludes file.
 
 | Point | Hosts | When |
 | --- | --- | --- |
-| `PreToolUse.edit` | `Edit\|Write` | Claude, Codex | `mutation-guard` | Safety hook: block an `Edit`, `Write` or Codex `apply_patch` removal or overwrite of an existing user file outside the worktree and temp roots (I2), or input without a parseable target path. See [Safety hook coverage](#safety-hook-coverage). |
+| `PreToolUse.edit` | Claude, Codex | Existing `[CapabilityOwner]` line; no debt call |
 | `SessionStart.default` | Claude, Codex | Changed owned paths and a new id set, including worker sessions |
 | `Stop.default` | Claude | Same rule; skip when `stop_hook_active` is true |
 | `UserPromptSubmit.inbox` | Codex | Same rule; the installed tuple stays unchanged |

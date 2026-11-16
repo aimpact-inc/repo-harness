@@ -3,7 +3,7 @@
  * reads redirects and heredocs, and splits a command line into simple commands. Substitution bodies come back as their own token
  * streams, after the top-level stream.
  */
-import { lstatSync, readlinkSync } from 'fs';
+import { lstatSync, readlinkSync, statSync } from 'fs';
 import { dirname, isAbsolute, join, parse, resolve, sep } from 'path';
 
 export const escapePattern = (text: string) => text.replace(/[\\*?[\]{},~]/g, '\\$&');
@@ -357,10 +357,14 @@ export interface Command {
 /** A command, or the `(` or `)` of a subshell or group. */
 export type Step = Command | { readonly kind: '(' | ')' };
 
+const CONTROL_WORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{', '}']);
+
 export function commands(tokens: readonly Token[]): Step[] {
   const result: Step[] = [];
   let words: Word[] = [], redirects: Redirect[] = [], before = '', inPipeline: Command[] = [];
   const end = (separator: string) => {
+    // A control word starts a compound command; the simple command that follows it runs like any other.
+    while (words[0] && !words[0].quoted && CONTROL_WORDS.has(words[0].value)) words.shift();
     if (words.length || redirects.length) {
       const command: Command = { kind: 'command', words, redirects, before, after: separator, last: false, size: 0 };
       result.push(command); inPipeline.push(command);
@@ -394,7 +398,7 @@ export function commands(tokens: readonly Token[]): Step[] {
 // The directory each command runs from
 // ---------------------------------------------------------------------------
 
-/** The shell's directory set: absolute directories, or null when a command moved the shell somewhere not known. */
+/** The shell's directory set: one directory that is certain, or null when the reader cannot place the working directory. */
 export type Dirs = readonly string[] | null;
 
 /** Programs after which the shell's directory is not known. */
@@ -403,39 +407,47 @@ const MOVES_SHELL = new Set(['pushd', 'popd', 'source', '.', 'eval', 'builtin', 
 export interface SimpleCommand { readonly command: Command; readonly dirs: Dirs }
 
 /**
- * Each simple command of a command line with the directory set it runs from. `cwd` null, or a substitution body, starts from an
- * unknown directory.
+ * Each simple command of a command line with the directory it runs from. A `cd` moves the directory only for the commands that
+ * run after it succeeds: the rest of its `&&` chain. A command after `;`, a newline, `||` or `&` may run after a failed `cd`, so
+ * its directory is not certain. A substitution body runs from the starting directory when the top-level line never moves it.
  */
 export function simpleCommands(text: string, cwd: string | null): SimpleCommand[] {
   const result: SimpleCommand[] = [];
-  lex(text).forEach((tokens, index) => {
-    let dirs: Dirs = index === 0 && cwd !== null ? [cwd] : null;
+  const streams = lex(text).map(tokens => commands(tokens));
+  const moves = streams[0]!.some(step => step.kind === 'command' && step.words[0] !== undefined
+    && ((!step.words[0].quoted && step.words[0].value === 'cd') || MOVES_SHELL.has(step.words[0].value)));
+  streams.forEach((steps, index) => {
+    let dirs: Dirs = cwd !== null && (index === 0 || !moves) ? [cwd] : null;
+    // Set while a `cd` of the current `&&` chain decided `dirs`.
+    let chainCd = false;
     // A subshell does not move the shell that started it.
-    const outer: Dirs[] = [];
-    for (const step of commands(tokens)) {
+    const outer: Array<{ dirs: Dirs; chainCd: boolean }> = [];
+    for (const step of steps) {
       if (step.kind !== 'command') {
-        if (step.kind === '(') outer.push(dirs); else dirs = outer.length ? outer.pop()! : null;
+        if (step.kind === '(') outer.push({ dirs, chainCd });
+        else ({ dirs, chainCd } = outer.pop() ?? { dirs: null, chainCd: false });
         continue;
       }
+      if (chainCd && step.before !== '&&') { dirs = null; chainCd = false; }
       result.push({ command: step, dirs });
       const program = step.words[0];
-      if (program && !program.quoted && program.value === 'cd') dirs = afterCd(step, dirs);
-      else if (program && MOVES_SHELL.has(program.value)) dirs = null;
+      if (program && !program.quoted && program.value === 'cd') {
+        // A cd before `|` runs in a subshell in bash and zsh, so it never moves the shell.
+        if (step.size > 1 && !step.last) continue;
+        // After `||` the cd may be skipped while its `&&` chain still runs.
+        dirs = step.size === 1 && step.after === '&&' && step.before !== '||' ? cdTarget(step, dirs) : null;
+        chainCd = dirs !== null;
+      } else if (program && MOVES_SHELL.has(program.value)) dirs = null;
     }
   });
   return result;
 }
 
-function afterCd(cmd: Command, dirs: Dirs): Dirs {
+/** The existing directory that a literal `cd DIR` enters, or null. */
+function cdTarget(cmd: Command, dirs: Dirs): Dirs {
   const operands = cmd.words.slice(1);
   const operand = operands[0];
-  const target = operands.length === 1 && !operand!.expand && !operand!.glob && !operand!.value.startsWith('-')
-    && !operand!.value.startsWith('~') && operand!.value ? operand!.value : null;
-  const next: Dirs = target === null ? null : isAbsolute(target) ? [resolve(target)] : dirs && dirs.map(dir => resolve(dir, target));
-  // A cd before `|` runs in a subshell in bash and zsh, so it never moves the shell. A cd before `&` runs in the background, the
-  // last command of a pipeline runs in the shell only in zsh, and a cd after `||`, `;` or a newline may not have run: each of
-  // these adds to the directory set.
-  if (cmd.size > 1 && !cmd.last) return dirs;
-  if (cmd.size === 1 && (cmd.before === '' || cmd.before === '&&') && cmd.after !== '&') return next;
-  return dirs && next && [...new Set([...dirs, ...next])];
+  if (operands.length !== 1 || operand!.expand || operand!.glob || !operand!.value || /^[-~]/.test(operand!.value)) return null;
+  const target = isAbsolute(operand!.value) ? resolve(operand!.value) : dirs && dirs[0] !== undefined ? resolve(dirs[0], operand!.value) : null;
+  return target !== null && statSync(target, { throwIfNoEntry: false })?.isDirectory() ? [target] : null;
 }

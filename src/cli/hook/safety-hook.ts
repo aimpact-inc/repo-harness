@@ -11,14 +11,15 @@
  * The threat model is accidents. A target built at run time, a script or binary that writes, and a hidden alias are accepted
  * residuals; only a removal whose target is not known fails closed.
  */
-import { existsSync, lstatSync, realpathSync, statSync } from 'fs';
+import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'fs';
 import { homedir, tmpdir } from 'os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { managedWorktreeRoot } from '../../effects/git/managed-worktree';
+import { containsSecret, hasUnredactedSecret, replaceSecrets } from '../../core/security/secret-patterns';
 import type { Denial } from './mutation-guard';
 import type { RouteHost } from './route-registry';
 import {
-  escapePattern, expandBraces, globIndex, simpleCommands, unescapePattern, writeThroughPath,
+  escapePattern, expandBraces, globIndex, segmentMatches, simpleCommands, unescapePattern, writeThroughPath,
   type Command, type Dirs, type Word,
 } from './shell-words';
 
@@ -39,8 +40,11 @@ export interface WriteTarget {
   readonly path: string | null;
   /** The path is the literal directory of a glob; the write lands below it. */
   readonly glob?: true;
-  /** cp, mv and ln write `<path>/<name>` for each source name when `path` is an existing directory. */
-  readonly into?: readonly string[];
+  /**
+   * cp, mv and ln write `<path>/<name>` for each literal source name when `path` is an existing directory; the directory itself
+   * is not written. cp writes through an existing child link (`follow`); mv and ln replace the child entry.
+   */
+  readonly into?: { readonly names: readonly string[]; readonly follow: boolean };
 }
 
 const inside = (rel: string) => !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`);
@@ -153,9 +157,11 @@ class TargetJudge {
       // A path that does not resolve (a link loop, an unreadable directory) cannot be checked.
       return target.kind === 'destroy' ? unknownTargetDenial(target, this.roots, this.userStep) : null;
     }
-    if (target.into?.length && statSync(path, { throwIfNoEntry: false })?.isDirectory()) {
-      for (const name of target.into) {
-        const denial = this.existingDenial(target, join(path, name));
+    if (target.into && statSync(path, { throwIfNoEntry: false })?.isDirectory()) {
+      for (const name of target.into.names) {
+        let child = join(path, name);
+        try { if (target.into.follow) child = writeThroughPath(child); } catch { continue; }
+        const denial = this.existingDenial(target, child);
         if (denial) return denial;
       }
       return null;
@@ -212,12 +218,19 @@ export function writeTargetDenial(targets: readonly WriteTarget[], scope: Safety
   return null;
 }
 
-/** The user runs a one-line command themselves with Claude Code's `!` prefix; a longer command runs in their own shell. */
+/**
+ * The user runs a one-line command themselves with Claude Code's `!` prefix; a longer command runs in their own shell. A command
+ * that holds a secret shows only its redacted form, and none at all when the redaction leaves a secret.
+ */
 function bashUserStep(command: string): string {
   const line = command.trim();
-  return !line.includes('\n') && line.length <= 300
-    ? `the user can run it themselves: \`! ${line}\``
-    : 'the user can run the command themselves in their own shell (Claude Code: `! <command>`)';
+  const generic = 'the user can run the command themselves in their own shell (Claude Code: `! <command>`)';
+  if (line.includes('\n') || line.length > 300) return generic;
+  if (!containsSecret(line)) return `the user can run it themselves: \`! ${line}\``;
+  const redacted = replaceSecrets(line);
+  return hasUnredactedSecret(redacted)
+    ? `${generic}; the command holds a secret, so it is not shown`
+    : `the user can run it themselves: \`! ${redacted}\` (secrets redacted; put the real values back)`;
 }
 
 // ---------------------------------------------------------------------------
@@ -227,16 +240,57 @@ function bashUserStep(command: string): string {
 const ENV_FILE = /^\.env(?:$|[.\-_]|rc$)/;
 const ENV_TEMPLATE = /\.(?:example|sample|template)$/i;
 
-/** True when the path names a credential store: an SSH private key or the .ssh directory, auth.json, *credentials*.json or .env*. */
+/** True when a literal path names a credential store: an SSH private key or the .ssh directory, auth.json, *credentials*.json or .env*. */
 export function namesCredentialStore(path: string): boolean {
   const parts = path.replace(/[\\/]+$/, '').split(/[\\/]/);
   const name = parts.at(-1) ?? '';
-  if (parts.at(-2) === '.ssh') {
-    // A glob in .ssh can match a private key.
-    return globIndex(name) >= 0 || (name.startsWith('id_') && !name.endsWith('.pub'));
-  }
+  if (parts.at(-2) === '.ssh') return name.startsWith('id_') && !name.endsWith('.pub');
   return name === '.ssh' || name === 'auth.json' || /credentials.*\.json$/i.test(name)
     || (ENV_FILE.test(name) && !ENV_TEMPLATE.test(name));
+}
+
+/** Names a glob is tried against when its directory cannot be listed. */
+const SAMPLE_NAMES = ['.env', '.env.local', '.envrc', '.ssh', 'auth.json', 'credentials.json', 'id_rsa', 'id_ed25519'];
+
+/** The entries a glob's literal directory holds, or null when the directory cannot be placed or read. */
+function listing(dir: string, dirs: Dirs): string[] | null {
+  const expanded = /^~(?:\/|$)/.test(dir) ? homedir() + dir.slice(1) : dir;
+  const base = isAbsolute(expanded) ? expanded : dirs && dirs[0] !== undefined ? `${dirs[0]}${sep}${expanded}` : null;
+  if (base === null) return null;
+  try { return readdirSync(base || '.'); } catch { return null; }
+}
+
+/**
+ * True when one shell pattern (after brace expansion) reads a credential store. A glob counts when it can match a credential
+ * name in its directory: the existing entries when the directory can be listed, otherwise the sample names. A leading `*` does
+ * not match a dot file, as in the shell.
+ */
+function patternReadsCredential(pattern: string, dirs: Dirs): boolean {
+  const glob = globIndex(pattern);
+  const cut = pattern.lastIndexOf('/') + 1;
+  const name = pattern.slice(cut);
+  const dir = unescapePattern(pattern.slice(0, cut));
+  if (globIndex(name) < 0) return namesCredentialStore(unescapePattern(pattern));
+  // A glob in a directory segment cannot be listed; its last segment is tried against the sample names.
+  const candidates = (cut <= glob ? listing(dir, dirs) : null) ?? SAMPLE_NAMES;
+  return candidates.some(entry => (!entry.startsWith('.') || name.startsWith('.')) && segmentMatches(name, entry)
+    && namesCredentialStore(`${dir}${entry}`));
+}
+
+/** True when a word, as the program consumes it after quote removal and brace expansion, names a credential store. */
+function wordReadsCredential(value: string, pattern: string, dirs: Dirs): boolean {
+  if (!value) return false;
+  const patterns = expandBraces(pattern) ?? [pattern];
+  return patterns.some(item => patternReadsCredential(item, dirs));
+}
+
+/** The file that a word sends: curl-style `@file` and `field=@file` or `field=<file`, or null. */
+function sentFile(word: Word): { value: string; pattern: string } | null {
+  const at = /^@|=[@<]/.exec(word.value);
+  if (!at) return null;
+  const cut = at.index + at[0].length;
+  const patternAt = /^@|=[@<]/.exec(word.pattern);
+  return { value: word.value.slice(cut), pattern: patternAt ? word.pattern.slice(patternAt.index + patternAt[0].length) : escapePattern(word.value.slice(cut)) };
 }
 
 /** Programs that read no file content to their output: their operands stay local. */
@@ -244,6 +298,11 @@ const NO_CONTENT = new Set(['ls', 'stat', 'test', '[', 'file', 'chmod', 'chown',
   'readlink', 'basename', 'dirname', 'source', '.', 'echo', 'printf', 'ssh-add']);
 const SSH = new Set(['ssh', 'scp', 'sftp']);
 const GREP = new Set(['grep', 'egrep', 'fgrep', 'rg', 'ag']);
+/** grep options whose separate value is a count, a type or a path filter, never a file it reads. */
+const GREP_VALUED = new Set(['-A', '-B', '-C', '-m', '-g', '-t', '-T', '--max-count', '--context', '--after-context', '--before-context',
+  '--glob', '--type', '--type-not', '--include', '--exclude', '--exclude-dir']);
+/** git subcommands whose path operands only filter or name paths; they print no file content. */
+const GIT_PATH_FILTERS = new Set(['status', 'ls-files', 'check-ignore', 'rm', 'mv', 'restore', 'checkout', 'switch', 'log', 'shortlog']);
 const WRAPPERS = new Set(['sudo', 'command', 'builtin', 'exec', 'nohup', 'time', 'nice']);
 const SUDO_VALUE = new Set(['-u', '-g', '-C', '-h', '-p', '-U']);
 
@@ -265,14 +324,58 @@ function programAt(words: readonly Word[]): number {
   return -1;
 }
 
-/** The ways one word can name a file: the word, an option value after `=`, or a curl-style `@file`. */
-function fileSpellings(word: Word): string[] {
-  const value = word.value;
-  if (/\s/.test(value)) return [];
-  const spellings = [value];
-  if (value.startsWith('-') && value.includes('=')) spellings.push(value.slice(value.indexOf('=') + 1));
-  for (const spelling of [...spellings]) if (spelling.startsWith('@')) spellings.push(spelling.slice(1));
-  return spellings;
+/**
+ * The file operands that a reading program consumes, by its grammar: an option value after `=` counts, a separate word counts
+ * unless the program's grammar makes it a pattern, a destination, a path filter or a loaded env or identity file.
+ */
+function readOperands(program: string, args: readonly Word[]): Array<{ value: string; pattern: string }> {
+  const skip = new Set<number>();
+  args.forEach((word, n) => {
+    const previous = args[n - 1]?.value ?? '';
+    // An env file loads into a process, and an ssh identity authenticates; neither is printed or sent.
+    if (previous === '--env-file' || word.value.startsWith('--env-file=') || (SSH.has(program) && previous === '-i')) skip.add(n);
+  });
+  if (GREP.has(program)) {
+    let explicit = false;
+    args.forEach((word, n) => {
+      if (GREP_VALUED.has(word.value)) skip.add(n + 1);
+      else if (/^--(?:include|exclude|exclude-dir|glob|type|type-not|max-count|context)=/.test(word.value)) skip.add(n);
+      else if (['-e', '--regexp'].includes(word.value) || /^-[a-zA-Z]+e$/.test(word.value)) { explicit = true; skip.add(n + 1); }
+      else if (/^-[a-zA-Z]*e./.test(word.value) && !word.value.startsWith('--') || word.value.startsWith('--regexp=')) { explicit = true; skip.add(n); }
+      else if (['-f', '--file'].includes(word.value) || word.value.startsWith('--file=')) explicit = true;
+    });
+    if (!explicit) {
+      const pattern = args.findIndex((word, n) => !skip.has(n) && !word.value.startsWith('-'));
+      if (pattern >= 0) skip.add(pattern);
+    }
+  }
+  if (program === 'cp') {
+    const target = args.findIndex(word => /^-[a-zA-Z]*t$|^--target-directory$/.test(word.value));
+    if (target >= 0) skip.add(target + 1);
+    else {
+      const destination = args.map((word, n) => [word, n] as const).filter(([word]) => !word.value.startsWith('-')).at(-1);
+      if (destination) skip.add(destination[1]);
+    }
+  }
+  if (program === 'git') {
+    let at = 0;
+    while (at < args.length && args[at]!.value.startsWith('-')) at += ['-C', '-c'].includes(args[at]!.value) ? 2 : 1;
+    const sub = args[at]?.value ?? '';
+    const patch = args.some(word => word.value === '-p' || word.value === '--patch');
+    if (GIT_PATH_FILTERS.has(sub) && !(sub === 'log' && patch)) return [];
+    for (let n = 0; n <= at && n < args.length; n++) skip.add(n);
+    args.forEach((word, n) => { if (['-m', '--message'].includes(word.value)) skip.add(n + 1); });
+  }
+  const operands: Array<{ value: string; pattern: string }> = [];
+  args.forEach((word, n) => {
+    if (skip.has(n)) return;
+    if (!word.value.startsWith('-')) operands.push({ value: word.value, pattern: word.pattern });
+    else if (word.value.includes('=')) {
+      const at = word.value.indexOf('=') + 1;
+      operands.push({ value: word.value.slice(at), pattern: word.pattern.slice(word.pattern.indexOf('=') + 1) });
+    }
+  });
+  return operands;
 }
 
 function credentialDenial(reason: string): Denial {
@@ -284,10 +387,11 @@ function credentialDenial(reason: string): Denial {
 }
 
 /** The I1 denial for one simple command, or null. */
-function credentialFinding(cmd: Command): Denial | null {
+function credentialFinding(cmd: Command, dirs: Dirs): Denial | null {
   for (const redirect of cmd.redirects) {
-    if (redirect.op.replace(/^\d+/, '') === '<' && redirect.target && fileSpellings(redirect.target).some(namesCredentialStore)) {
-      return credentialDenial(`the command reads the credential store ${redirect.target.value} from a redirect`);
+    const target = redirect.target;
+    if (redirect.op.replace(/^\d+/, '') === '<' && target && wordReadsCredential(target.value, target.pattern, dirs)) {
+      return credentialDenial(`the command reads the credential store ${target.value} from a redirect`);
     }
   }
   const words = cmd.words;
@@ -306,20 +410,11 @@ function credentialFinding(cmd: Command): Denial | null {
     }
   }
   if (NO_CONTENT.has(program)) return null;
-  // An env file loads into a process, and an ssh identity authenticates; neither is printed or sent.
-  const loads = (word: Word, n: number) => args[n - 1]?.value === '--env-file' || word.value.startsWith('--env-file=')
-    || (SSH.has(program) && args[n - 1]?.value === '-i');
-  let operands = args.filter((word, n) => !loads(word, n));
-  if (GREP.has(program) && !args.some(word => /^-[a-zA-Z]*[ef]$|^--(?:regexp|file)(?:=|$)/.test(word.value))) {
-    const pattern = operands.find(word => !word.value.startsWith('-'));
-    operands = operands.filter(word => word !== pattern);
+  for (const word of args) {
+    const sent = sentFile(word);
+    if (sent && wordReadsCredential(sent.value, sent.pattern, dirs)) return credentialDenial(`${program} sends the credential store ${sent.value}`);
   }
-  // A copy destination receives content; only its sources are read.
-  if (program === 'cp' && !args.some(word => /^-[a-zA-Z]*t|^--target-directory/.test(word.value))) {
-    const destination = operands.filter(word => !word.value.startsWith('-')).at(-1);
-    operands = operands.filter(word => word !== destination);
-  }
-  const named = operands.find(word => fileSpellings(word).some(namesCredentialStore));
+  const named = readOperands(program, args).find(operand => wordReadsCredential(operand.value, operand.pattern, dirs));
   return named ? credentialDenial(`${program} reads the credential store ${named.value}`) : null;
 }
 
@@ -350,12 +445,13 @@ function wordTargets(word: Word, dirs: Dirs): Array<{ path: string; glob: boolea
     const glob = globIndex(pattern);
     const literal = unescapePattern(glob < 0 ? pattern : pattern.slice(0, pattern.lastIndexOf('/', glob) + 1)) || '.';
     if (!isAbsolute(literal) && dirs === null) return null;
-    for (const base of isAbsolute(literal) ? [''] : dirs!) result.push({ path: base ? join(base, literal) : literal, glob: glob >= 0 });
+    // The path keeps its `..` parts: the kernel follows each link before the `..` after it.
+    for (const base of isAbsolute(literal) ? [''] : dirs!) result.push({ path: base ? `${base}${sep}${literal}` : literal, glob: glob >= 0 });
   }
   return result;
 }
 
-function targetsOf(kind: TargetKind, via: string, word: Word, dirs: Dirs, into?: readonly string[]): WriteTarget[] {
+function targetsOf(kind: TargetKind, via: string, word: Word, dirs: Dirs, into?: WriteTarget['into']): WriteTarget[] {
   const found = wordTargets(word, dirs);
   if (found === null) return [{ kind, via, spelled: word.value, path: null }];
   return found.map(({ path, glob }) => ({ kind, via, spelled: word.value, path, ...(glob ? { glob: true as const } : {}), ...(into ? { into } : {}) }));
@@ -386,9 +482,23 @@ function destinationTargets(program: string, args: readonly Word[], dirs: Dirs):
   const sources = directory ? operands : operands.slice(0, -1);
   const destination = directory ?? operands.at(-1);
   if (!destination || (!directory && operands.length < 2)) return [];
-  const names = sources.filter(word => !word.expand && !word.glob).map(word => basename(unescapePattern(word.pattern)));
-  const targets = targetsOf('overwrite', program, destination, dirs, names);
+  const names = sources.flatMap(word => sourceNames(word, dirs));
+  const targets = targetsOf('overwrite', program, destination, dirs, { names, follow: program === 'cp' });
   return program === 'mv' ? [...sources.flatMap(word => targetsOf('destroy', 'mv', word, dirs)), ...targets] : targets;
+}
+
+/** The names that a copy or move source gives its destination children; a glob lists its directory, as the shell expands it. */
+function sourceNames(word: Word, dirs: Dirs): string[] {
+  if (word.expand) return [];
+  return (expandBraces(word.pattern) ?? [word.pattern]).flatMap(item => {
+    const pattern = item.replace(/\/+$/, '');
+    const cut = pattern.lastIndexOf('/') + 1;
+    const name = pattern.slice(cut);
+    if (globIndex(name) < 0) return [basename(unescapePattern(pattern))];
+    if (globIndex(pattern.slice(0, cut)) >= 0) return [];
+    return (listing(unescapePattern(pattern.slice(0, cut)), dirs) ?? [])
+      .filter(entry => (!entry.startsWith('.') || name.startsWith('.')) && segmentMatches(name, entry));
+  });
 }
 
 /** Python and Node one-liners: literal file writes and removals in the script text. */
@@ -608,8 +718,8 @@ export function bashSafetyDenial(command: string, cwd: string | null, scope: Saf
       return { guard: 'RecursiveDeleteGuard', reason: `The command runs ${recursion}.`, fix: 'Name the directories to clean below the repository root.' };
     }
   }
-  for (const { command: cmd } of parsed) {
-    const denial = credentialFinding(cmd);
+  for (const { command: cmd, dirs } of parsed) {
+    const denial = credentialFinding(cmd, dirs);
     if (denial) return denial;
   }
   return writeTargetDenial(parsed.flatMap(({ command: cmd, dirs }) => commandTargets(cmd, dirs)), scope, bashUserStep(command));

@@ -7,7 +7,7 @@
  */
 
 import { appendFileSync, mkdirSync } from 'fs';
-import { dirname, join, posix, resolve, win32 } from 'path';
+import { dirname, isAbsolute, join, posix, sep, win32 } from 'path';
 import { canonicalRepoRelativePath } from '../../effects/state/collect-state-inputs';
 import { parseStatusZ, splitNul } from '../../effects/review/diff-fingerprint';
 import {
@@ -19,6 +19,7 @@ import type { HookPermission } from './handler-contract';
 import { payloadString, type HookIdentity, type HookPayload } from './hook-input';
 import { writeTargetDenial, type TargetKind, type WriteTarget } from './safety-hook';
 import { gitExecFileSync } from '../../effects/git/runner';
+import { replaceSecrets } from '../../core/security/secret-patterns';
 
 export interface MutationGuardInput {
   readonly repoRoot: string;
@@ -69,7 +70,8 @@ export function runMutationGuard(opts: MutationGuardInput): MutationGuardResult 
   // Edit and Write name one file that they change or replace.
   const targets: readonly EditTarget[] = command ? extractApplyPatchTargets(command) : (filePath ? [{ kind: 'overwrite', raw: filePath }] : []);
   if (targets.length === 0) return deny(repoRoot, command ? APPLY_PATCH_SCOPE_DENIAL : EDIT_SCOPE_DENIAL, opts.identity.runId);
-  const writes: WriteTarget[] = targets.map(({ kind, raw }) => ({ kind, via: command ? 'apply_patch' : 'the edit', spelled: raw, path: resolve(repoRoot, raw) }));
+  // The path keeps its `..` parts: the kernel follows each link before the `..` after it.
+  const writes: WriteTarget[] = targets.map(({ kind, raw }) => ({ kind, via: command ? 'apply_patch' : 'the edit', spelled: raw, path: isAbsolute(raw) ? raw : `${repoRoot}${sep}${raw}` }));
   const userStep = (path: string) => `the user can edit ${path} themselves`;
   const denial = writeTargetDenial(writes, { repoRoot, env: opts.env, host: opts.identity.host }, userStep);
   if (denial) return runMutationDenial(opts, denial);
@@ -77,7 +79,9 @@ export function runMutationGuard(opts: MutationGuardInput): MutationGuardResult 
 }
 
 /** A caller that owns its own decision reports it through the same denial record and exit code. */
-export function runMutationDenial(opts: MutationGuardInput, denial: Denial): MutationGuardResult {
+export function runMutationDenial(opts: MutationGuardInput, found: Denial): MutationGuardResult {
+  // The reason and fix quote the command, which can hold a token; the prompt, stderr and failure record get the redacted text.
+  const denial: Denial = { ...found, reason: replaceSecrets(found.reason), fix: replaceSecrets(found.fix) };
   const mode = payloadString(opts.payload, 'permission_mode');
   if (denial.askable && opts.identity.host === 'claude' && mode !== '' && !NO_PROMPT_MODES.has(mode)) {
     return { exitCode: 0, stdout: '', stderr: '', permission: { decision: 'ask', reason: `[${denial.guard}] ${denial.reason}` } };
@@ -169,14 +173,23 @@ const PATCH_WS = '[\\t\\n\\v\\f\\r \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\
 const APPLY_PATCH_FILE_LINE = new RegExp(`^${PATCH_WS}*\\*\\*\\* (Add|Update|Delete) File: (.+?)${PATCH_WS}*$`, 's');
 const APPLY_PATCH_MOVE_LINE = new RegExp(`^\\*\\*\\* Move to: (.+?)${PATCH_WS}*$`, 's');
 
-/** Add creates or replaces a file; Update and Delete need an existing file; Move to creates or replaces its destination. */
+/**
+ * Add and Update write file content (through a link); Delete removes the entry. Move to writes its destination and removes the
+ * Update source entry.
+ */
 function extractApplyPatchTargets(command: string): readonly EditTarget[] {
   const targets: EditTarget[] = [];
+  let update: string | null = null;
   for (const line of command.split('\n')) {
     const fileMatch = APPLY_PATCH_FILE_LINE.exec(line);
     const moveMatch = fileMatch ? null : APPLY_PATCH_MOVE_LINE.exec(line);
-    if (fileMatch) targets.push({ kind: fileMatch[1] === 'Add' ? 'overwrite' : 'destroy', raw: fileMatch[2]! });
-    else if (moveMatch) targets.push({ kind: 'overwrite', raw: moveMatch[1]! });
+    if (fileMatch) {
+      targets.push({ kind: fileMatch[1] === 'Delete' ? 'destroy' : 'overwrite', raw: fileMatch[2]! });
+      update = fileMatch[1] === 'Update' ? fileMatch[2]! : null;
+    } else if (moveMatch) {
+      targets.push({ kind: 'overwrite', raw: moveMatch[1]! });
+      if (update !== null) targets.push({ kind: 'destroy', raw: update });
+    }
   }
   return targets;
 }
