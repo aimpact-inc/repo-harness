@@ -27,6 +27,9 @@ function theme(overrides: Partial<TriageThemeV1> = {}): TriageThemeV1 {
     key: 'trace-trigger-to-effect',
     theme: 'trace-trigger-to-effect',
     name: 'Trace trigger to effect',
+    prevention_rule: 'Keep the failure evidence.',
+    why: '',
+    correction_sources: ['c27a36e8'],
     seen: 1,
     enforced_by: 'judgment',
     promoted: null,
@@ -191,6 +194,9 @@ describe('rh rules status on a checkout', () => {
     try {
       const document = JSON.parse(status(repo, '--json').stdout);
       expect(document.themes[0].governance).toBe('judgment_unpromoted');
+      expect(document.themes[0].prevention_rule).toBe('Keep the failure evidence.');
+      expect(document.themes[0].why).toBe('');
+      expect(document.themes[0].correction_sources).toEqual(['c27a36e8']);
       expect(document.themes[0].actions.map((row: { kind: string }) => row.kind)).toEqual(['enforce']);
     } finally { rmSync(repo, { recursive: true, force: true }); }
   });
