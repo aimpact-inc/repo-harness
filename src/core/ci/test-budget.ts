@@ -22,9 +22,10 @@ export const TEST_BUDGET_IMPLEMENTATION_VERSION = 1;
 // The policy key tree is the one list of keys; a key that the tree lacks fails the type check here.
 const CONFIG_KEYS: Readonly<Record<'enabled' | keyof TestBudgetParameters, true>> = WORKFLOW_POLICY_KEYS.rules.TestBudget;
 
-export interface TestBudgetConfig extends TestBudgetParameters {
-  readonly enabled: boolean;
-}
+/** A disabled rule may carry no parameters; an enabled rule carries all of them. */
+export type TestBudgetConfig =
+  | ({ readonly enabled: true } & TestBudgetParameters)
+  | ({ readonly enabled: false } & Partial<TestBudgetParameters>);
 
 export type TestBudgetConfigRead =
   | { readonly status: 'absent' }
@@ -38,21 +39,34 @@ function invalid(message: string): TestBudgetConfigRead {
   return { status: 'invalid', message };
 }
 
-function pathList(value: unknown, key: string): readonly string[] | string {
-  if (!Array.isArray(value) || value.length === 0) return `rules.TestBudget.${key} must be a non-empty array of path prefixes`;
-  for (const entry of value) {
-    if (typeof entry !== 'string' || !PATH_PREFIX.test(entry)) {
-      return `rules.TestBudget.${key} has an invalid path prefix ${JSON.stringify(entry)}`;
+type Checked<Value> = { readonly value: Value } | string;
+
+function pathList(key: string) {
+  return (value: unknown): Checked<readonly string[]> => {
+    if (!Array.isArray(value) || value.length === 0) return `rules.TestBudget.${key} must be a non-empty array of path prefixes`;
+    for (const entry of value) {
+      if (typeof entry !== 'string' || !PATH_PREFIX.test(entry)) {
+        return `rules.TestBudget.${key} has an invalid path prefix ${JSON.stringify(entry)}`;
+      }
     }
-  }
-  if (new Set(value).size !== value.length) return `rules.TestBudget.${key} has a duplicate path prefix`;
-  return value as string[];
+    if (new Set(value).size !== value.length) return `rules.TestBudget.${key} has a duplicate path prefix`;
+    return { value: value as string[] };
+  };
 }
+
+const PARAMETER_CHECKS: { readonly [Key in keyof TestBudgetParameters]: (value: unknown) => Checked<TestBudgetParameters[Key]> } = {
+  ratio_cap: (value) => (typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? { value } : 'rules.TestBudget.ratio_cap must be a positive number'),
+  file_cap: (value) => (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? { value } : 'rules.TestBudget.file_cap must be a non-negative integer'),
+  test_paths: pathList('test_paths'),
+  product_paths: pathList('product_paths'),
+};
 
 /**
  * The rule configuration in a decoded policy. An absent `rules.TestBudget` is
- * "no configuration"; a present one needs `enabled`, and each parameter it
- * omits takes the registry default.
+ * "no configuration". A present one needs `enabled`. Each parameter it states
+ * is checked; an enabled rule needs every parameter.
  */
 export function readTestBudgetConfig(document: DecodedWorkflowPolicy): TestBudgetConfigRead {
   let value: unknown;
@@ -66,23 +80,17 @@ export function readTestBudgetConfig(document: DecodedWorkflowPolicy): TestBudge
   const unknown = Object.keys(value).filter((key) => !Object.hasOwn(CONFIG_KEYS, key)).sort();
   if (unknown.length > 0) return invalid(`rules.TestBudget has unknown fields: ${unknown.join(', ')}`);
   if (typeof value.enabled !== 'boolean') return invalid('rules.TestBudget.enabled must be true or false');
-  const defaults = RULES.TestBudget.parameters;
-  const ratioCap = Object.hasOwn(value, 'ratio_cap') ? value.ratio_cap : defaults.ratio_cap;
-  if (typeof ratioCap !== 'number' || !Number.isFinite(ratioCap) || ratioCap <= 0) {
-    return invalid('rules.TestBudget.ratio_cap must be a positive number');
+  const parameters: { -readonly [Key in keyof TestBudgetParameters]?: TestBudgetParameters[Key] } = {};
+  for (const key of Object.keys(RULES.TestBudget.parameters) as (keyof TestBudgetParameters)[]) {
+    if (!Object.hasOwn(value, key)) continue;
+    const checked = PARAMETER_CHECKS[key](value[key]);
+    if (typeof checked === 'string') return invalid(checked);
+    Object.assign(parameters, { [key]: checked.value });
   }
-  const fileCap = Object.hasOwn(value, 'file_cap') ? value.file_cap : defaults.file_cap;
-  if (typeof fileCap !== 'number' || !Number.isSafeInteger(fileCap) || fileCap < 0) {
-    return invalid('rules.TestBudget.file_cap must be a non-negative integer');
-  }
-  const testPaths = pathList(Object.hasOwn(value, 'test_paths') ? value.test_paths : defaults.test_paths, 'test_paths');
-  if (typeof testPaths === 'string') return invalid(testPaths);
-  const productPaths = pathList(Object.hasOwn(value, 'product_paths') ? value.product_paths : defaults.product_paths, 'product_paths');
-  if (typeof productPaths === 'string') return invalid(productPaths);
-  return {
-    status: 'present',
-    config: { enabled: value.enabled, ratio_cap: ratioCap, file_cap: fileCap, test_paths: testPaths, product_paths: productPaths },
-  };
+  if (!value.enabled) return { status: 'present', config: { enabled: false, ...parameters } };
+  const missing = Object.keys(RULES.TestBudget.parameters).filter((key) => !Object.hasOwn(parameters, key));
+  if (missing.length > 0) return invalid(`rules.TestBudget is enabled without: ${missing.join(', ')}`);
+  return { status: 'present', config: { enabled: true, ...(parameters as TestBudgetParameters) } };
 }
 
 /** The digest of the effective configuration; "no configuration" digests `null`. */

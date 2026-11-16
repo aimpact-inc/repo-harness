@@ -40,7 +40,8 @@ function lines(count: number, word = 'line'): string {
   return Array.from({ length: count }, (_, index) => `${word} ${index}\n`).join('');
 }
 
-const ENABLED = JSON.stringify({ rules: { TestBudget: { enabled: true } } });
+const PARAMETERS = { ratio_cap: 2, file_cap: 1, test_paths: ['tests'], product_paths: ['src'] };
+const ENABLED = JSON.stringify({ rules: { TestBudget: { enabled: true, ...PARAMETERS } } });
 
 /** A repository whose base commit holds `policy` (null: no policy file). */
 function repository(policy: string | null): { repo: string; base: string } {
@@ -129,7 +130,7 @@ describe('TestBudget evaluation', () => {
   });
 
   test('the parameters come from the base commit, not from the PR', () => {
-    const { repo, base } = repository(JSON.stringify({ rules: { TestBudget: { enabled: true, ratio_cap: 20, file_cap: 0 } } }));
+    const { repo, base } = repository(JSON.stringify({ rules: { TestBudget: { ...PARAMETERS, enabled: true, ratio_cap: 20, file_cap: 0 } } }));
     const head = commit(repo, {
       '.ai/harness/policy.json': JSON.stringify({ rules: { TestBudget: { enabled: false } } }),
       'src/app.ts': lines(11),
@@ -152,12 +153,15 @@ describe('TestBudget evaluation', () => {
   });
 
   test('an invalid configuration is an error, not skipped', () => {
-    const { repo, base } = repository(JSON.stringify({ rules: { TestBudget: { enabled: true, test_paths: ['tests/**'] } } }));
-    const result = check(repo, base, commit(repo, { 'src/app.ts': lines(11) }), '');
-    expect(result.state).toBe('error');
-    expect(result.error?.code).toBe('policy_invalid');
-    expect(result.measured).toBeNull();
-    expect(result.bound.policy_digest).toBeNull();
+    const { ratio_cap: _omitted, ...withoutRatioCap } = PARAMETERS;
+    for (const config of [{ ...PARAMETERS, enabled: true, test_paths: ['tests/**'] }, { ...withoutRatioCap, enabled: true }]) {
+      const { repo, base } = repository(JSON.stringify({ rules: { TestBudget: config } }));
+      const result = check(repo, base, commit(repo, { 'src/app.ts': lines(11) }), '');
+      expect(result.state).toBe('error');
+      expect(result.error?.code).toBe('policy_invalid');
+      expect(result.measured).toBeNull();
+      expect(result.bound.policy_digest).toBeNull();
+    }
   });
 
   test('a head without a merge-base with the base is an error', () => {

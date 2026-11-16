@@ -57,7 +57,11 @@
   "internal_pr_authors": [],
   "rules": {
     "TestBudget": {
-      "enabled": true
+      "enabled": true,
+      "ratio_cap": 2,
+      "file_cap": 1,
+      "test_paths": ["tests"],
+      "product_paths": ["src", "scripts"]
     }
   }
 }
