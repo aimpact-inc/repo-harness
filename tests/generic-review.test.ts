@@ -1028,7 +1028,7 @@ test('OAR isolation: reject authority overlap and symlink output roots before ex
   expect(() => reviewIsolationPolicy({ ...spec, cleanup: { readDenied: [subjectLink] } })).toThrow('PROTECTED_PATH_UNSAFE');
 });
 
-darwinTest('Pi review seat isolation: shell writes reach the seat output, Pi sessions, the auth lock and the test queue only; a write through a link stays denied', async () => {
+darwinTest('Pi review seat isolation: shell writes reach the seat output, Pi sessions, the Pi locks and the test queue only; a write through a link stays denied', async () => {
   const { dirname } = await import('node:path');
   const { preparePiReviewSeatIsolation } = await import('../src/effects/board/pi-review-seat-isolation');
   const home = realpathSync(tmpWorkspace('pi-review-seat-home')); roots.push(home);
@@ -1047,6 +1047,8 @@ console.log(JSON.stringify({
   session: probe(()=>{fs.mkdirSync(path.join(agent,'sessions','--cwd--'),{recursive:true});fs.writeFileSync(path.join(agent,'sessions','--cwd--','s.jsonl'),'{}')}),
   authLock: probe(()=>{fs.mkdirSync(path.join(agent,'auth.json.lock'));fs.rmdirSync(path.join(agent,'auth.json.lock'))}),
   auth: probe(()=>fs.writeFileSync(path.join(agent,'auth.json'),'{}')),
+  trustLock: probe(()=>{fs.mkdirSync(path.join(agent,'trust.json.lock'));fs.rmdirSync(path.join(agent,'trust.json.lock'))}),
+  trust: probe(()=>fs.writeFileSync(path.join(agent,'trust.json'),'{}')),
   queue: probe(()=>fs.writeFileSync(path.join(home,'.repo-harness','host-test-queue','ticket.json'),'{}')),
   harnessHome: probe(()=>fs.writeFileSync(path.join(home,'.repo-harness','config.json'),'{}')),
   bunDirectory: probe(()=>fs.writeFileSync(path.join(home,'.bun','bin','probe'),'x')),
@@ -1056,7 +1058,7 @@ console.log(JSON.stringify({
   const run = spawnSync('/usr/bin/sandbox-exec', ['-f', isolation.profile, resolveNode24(), '-e', script, isolation.junitDirectory, bun, isolation.profile],
     { env: { ...process.env, HOME: home, TMPDIR: isolation.temporaryDirectory }, encoding: 'utf8', timeout: 15000 });
   expect(run.status, run.stderr).toBe(0);
-  expect(JSON.parse(run.stdout)).toEqual({ testHome: 'ok', junit: 'ok', session: 'ok', authLock: 'ok', auth: 'EPERM', queue: 'ok',
+  expect(JSON.parse(run.stdout)).toEqual({ testHome: 'ok', junit: 'ok', session: 'ok', authLock: 'ok', auth: 'EPERM', trustLock: 'ok', trust: 'EPERM', queue: 'ok',
     harnessHome: 'EPERM', bunDirectory: 'EPERM', throughLink: 'EPERM', profile: 'EPERM' });
   expect(readFileSync(bun, 'utf8')).toBe('original');
 });
