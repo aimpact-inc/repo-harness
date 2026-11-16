@@ -240,6 +240,8 @@ describe('docs page', () => {
     expect((await show('{"entities":[]}', valid)).state).toBe('valid');
     expect(seen).toEqual([{ entities: [] }]);
     expect((await show('{"entities":[]}')).state).toBe('capability-missing');
+    // A deeply nested block neither overflows the stack nor hides the source.
+    expect((await show(`${'['.repeat(100000)}${']'.repeat(100000)}`, valid)).state).toBe('valid');
   });
 
   test('1-DOCS-F1 shows the server reason for a refused path and none of its content', async () => {

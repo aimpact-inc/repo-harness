@@ -73,16 +73,23 @@ export function diagramSourceIssues(source: string): { readonly document: unknow
     return { document: null, issues: [{ element: 'block', field: 'JSON', fix: `Fix the JSON syntax: ${error instanceof Error ? error.message : 'the text does not parse'}.` }] };
   }
   const issues: DiagramIssue[] = [];
-  const walk = (value: unknown, pointer: string): void => {
-    if (Array.isArray(value)) { value.forEach((item, index) => walk(item, `${pointer}/${index}`)); return; }
-    if (value === null || typeof value !== 'object') return;
+  // Iterative: a deeply nested block must not overflow the call stack. A pointer is built only for an issue.
+  interface Step { readonly value: unknown; readonly parent: Step | null; readonly key: string }
+  const pointerOf = (step: Step | null): string => {
+    const keys: string[] = [];
+    for (let at = step; at !== null && at.parent !== null; at = at.parent) keys.push(at.key);
+    return keys.length === 0 ? '/' : `/${keys.reverse().join('/')}`;
+  };
+  const stack: Step[] = [{ value: document, parent: null, key: '' }];
+  for (let step = stack.pop(); step !== undefined; step = stack.pop()) {
+    const { value } = step;
+    if (value === null || typeof value !== 'object') continue;
     for (const [key, child] of Object.entries(value)) {
       if (key === 'icon' && typeof child === 'string' && REMOTE_ADDRESS.test(child)) {
-        issues.push({ element: pointer === '' ? '/' : pointer, field: 'icon', fix: 'Use the name of a local icon; a remote address is not allowed.' });
-      } else walk(child, `${pointer}/${key}`);
+        issues.push({ element: pointerOf(step), field: 'icon', fix: 'Use the name of a local icon; a remote address is not allowed.' });
+      } else stack.push({ value: child, parent: step, key });
     }
-  };
-  walk(document, '');
+  }
   return { document, issues };
 }
 
