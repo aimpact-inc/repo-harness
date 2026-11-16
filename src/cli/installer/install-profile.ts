@@ -52,6 +52,7 @@ import {
   type SurfaceOwner,
 } from '../../core/skill-surface/plugin-manifest';
 import { hostSkillRoot, providerSkillLock, stagedSkillRoot, syncSkillRoots, type SkillHost } from '../../effects/host-skill-roots';
+import { ownedSkillIsIntact } from './herdr-skill-marker';
 import { MANAGED_AGENTS } from '../../effects/terminal/task-role-profiles';
 import { hashManagedTree, OWNER_MARKER } from '../../effects/managed-tree';
 import { readWorkflowPolicyDocument } from '../../effects/state/resolve-effective-state';
@@ -408,6 +409,8 @@ export function ownerForInstallPath(path: string, env: NodeJS.ProcessEnv = proce
     const catalog = loadSkillSurfaceCatalog();
     const pkg = catalog.packages.find(entry => entry.name === name);
     if (pkg?.kind === 'facade' || pkg?.kind === 'provider-skill') return pkg.owner;
+    // The installer writes the Herdr skill itself (configureRequiredHerdrSkill), outside the selection projection.
+    if (pkg?.name === 'herdr') return pkg.owner;
     if (selectionOwnedSkillNames(catalog).includes(name)) return pkg!.owner;
     const obsidianSelection = requiredExplicitExternalDependencyInstallGroups(catalog, 'obsidian-memory', ['claude', 'codex']);
     if (obsidianSelection.status !== 'selected') {
@@ -436,7 +439,17 @@ function discoverManagedSurfaces(
   // A catalog facade can lack the prefix (obsidian-memory). Its copy needs
   // the same marker-based receipt as a prefixed facade copy.
   const facadeNames = new Set(catalog.packages.filter((pkg) => pkg.kind === 'facade').map((pkg) => pkg.name));
-  for (const root of selectedSkillHosts(plugins).map((host) => hostSkillRoot(home, host, env))) {
+  const hostRoots = selectedSkillHosts(plugins).map((host) => hostSkillRoot(home, host, env));
+  // The Herdr step writes its marker with the SKILL.md hash, in each selected host
+  // root and in the staged root. A copy that still matches it is rh's, whichever
+  // earlier run wrote it; an edited copy stays the user's.
+  for (const herdr of [...hostRoots, stagedSkillRoot(home)].map((root) => join(root, 'herdr'))) {
+    const owner = ownerForInstallPath(herdr, env);
+    if (!enabled(owner) || !lstatSync(herdr, { throwIfNoEntry: false })?.isDirectory() || !ownedSkillIsIntact(herdr)) continue;
+    const surface = captureOwnedPath(herdr, owner);
+    if (surface) surfaces.push(surface);
+  }
+  for (const root of hostRoots) {
     const canonicalOwner = ownerForInstallPath(join(root, 'repo-harness'), env);
     if (enabled(canonicalOwner)) {
       const canonical = captureDirectoryOrLink(join(root, 'repo-harness'), canonicalOwner);

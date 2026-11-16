@@ -1069,12 +1069,58 @@ describe('install selection', () => {
       expect(run.status, `${row.name}\n${run.stdout}\n${run.stderr}`).toBe(0);
       expect(readdirSync(piRoot).sort(), row.name).toEqual(row.entries);
       expect(readFileSync(join(piRoot, 'herdr', 'SKILL.md'), 'utf-8'), row.name).toContain(row.pi ? 'new manual' : 'old manual');
-      // The strict reader accepts the state; the pre-existing Herdr copy stays unrecorded.
+      // The strict reader accepts the state. The earlier Herdr copy keeps rh's marker, so a pi selection records it too.
       const recorded = readInstallState(env)!.ownership_manifest.filter(surface => surface.path.startsWith(`${piRoot}/`));
       expect(recorded.map(surface => `${surface.owner}:${basename(surface.path)}`), row.name)
-        .toEqual(row.pi ? row.entries.filter(name => name !== 'herdr').map(name => `pi:${name}`) : []);
+        .toEqual(row.pi ? row.entries.map(name => `pi:${name}`) : []);
     });
   }, 60_000);
+
+  /** withHome plus a fake `hc` and an `rh` link. The Git excludes file stays in the scratch HOME. */
+  function withCoreHome(run: (env: NodeJS.ProcessEnv, rh: (...args: string[]) => SpawnSyncReturns<string>) => void): void {
+    withHome((base) => {
+      const bin = join(base.HOME!, 'tool-bin');
+      writeFakeHc(bin);
+      writePath(join(base.HOME!, '.bun', 'bin', 'rh'), '#!/bin/sh\n');
+      const env: NodeJS.ProcessEnv = { ...base, XDG_CONFIG_HOME: join(base.HOME!, '.config'), REPO_HARNESS_BUN_EXECUTABLE: join(bin, 'bun') };
+      run(env, (...args) => spawnSync(process.execPath, [CLI, ...args, '--json'], { cwd: env.HOME, env, encoding: 'utf-8' }));
+    });
+  }
+  const CORE_INSTALL = ['install', '--no-plugins', '--target', 'both', '--no-cli', '--no-codegraph', '--no-external-skills'];
+
+  test('install owns the marked Herdr skill copies under core, and uninstall removes them with the emptied skill roots', () => {
+    // `earlier copy`: an rh run before this install (a release that recorded no Herdr surface) left marked copies,
+    // in both host roots and in the staged root that the Herdr step refreshes when it exists.
+    for (const earlierCopy of [false, true]) withCoreHome((env, rh) => {
+      const home = env.HOME!;
+      if (earlierCopy) {
+        expect(configureRequiredHerdrSkill('both', env, undefined, false).status).toBe('ok');
+        cpSync(join(home, '.codex', 'skills', 'herdr'), join(home, '.agents', 'skills', 'herdr'), { recursive: true });
+      }
+      const install = rh(...CORE_INSTALL);
+      expect(install.status, `${install.stdout}\n${install.stderr}`).toBe(0);
+      const herdr = ['.agents', '.claude', '.codex'].filter(root => earlierCopy || root !== '.agents').map(root => join(home, root, 'skills', 'herdr'));
+      expect(readInstallState(env)!.ownership_manifest.filter(surface => surface.path.endsWith('/herdr')).map(({ owner, path, type }) => ({ owner, path, type })), `earlier copy: ${earlierCopy}`)
+        .toEqual(herdr.map(path => ({ owner: 'core', path, type: 'directory-copy' })));
+      const uninstall = rh('uninstall');
+      expect(uninstall.status, `${uninstall.stdout}\n${uninstall.stderr}`).toBe(0);
+      expect(JSON.parse(uninstall.stdout).lines.at(-1)).toBe('[uninstall] complete');
+      for (const root of ['.claude', '.codex']) expect(existsSync(join(home, root, 'skills')), `${root} earlier copy: ${earlierCopy}`).toBe(false);
+      expect(existsSync(join(home, '.agents', 'skills', 'herdr'))).toBe(false);
+    });
+  }, 120_000);
+
+  test('a Herdr copy that holds a user file stays unowned, and uninstall keeps it', () => withCoreHome((env, rh) => {
+    expect(configureRequiredHerdrSkill('both', env, undefined, false).status).toBe('ok');
+    const user = join(env.HOME!, '.claude', 'skills', 'herdr');
+    writeFileSync(join(user, 'notes.md'), '# my notes\n');
+    const install = rh(...CORE_INSTALL);
+    expect(install.status, `${install.stdout}\n${install.stderr}`).toBe(0);
+    expect(readInstallState(env)!.ownership_manifest.map(surface => surface.path)).not.toContain(user);
+    expect(rh('uninstall').status).toBe(0);
+    expect(readdirSync(user).sort()).toEqual(['.repo-harness-owner.json', 'SKILL.md', 'notes.md']);
+    expect(readFileSync(join(user, 'notes.md'), 'utf-8')).toBe('# my notes\n');
+  }), 120_000);
 
   test('a relative XDG_STATE_HOME fails before the install takes its runtime lock', () => withHome((env) => {
     const failed = spawnSync(process.execPath, [CLI, 'install', '--no-plugins', '--json'], { cwd: env.HOME, env: { ...env, XDG_STATE_HOME: 'state' }, encoding: 'utf-8' });
