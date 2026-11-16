@@ -78,6 +78,32 @@ function Field({ label, children }: { readonly label: string; readonly children:
   );
 }
 
+/**
+ * A bounded integer percent field whose draft is local text (#2909). Typing 100 over 95 passes through `1` and `10`,
+ * and clearing the field is a keystroke, so the stored value cannot be the input's only source: the intermediate draft
+ * stays here and is committed at blur or Enter. A committed value outside min-max is refused, and the field shows the
+ * stored value again. The section decoder refuses the same value at the save.
+ */
+function PercentInput({ field, label, value, min, max, disabled, commit }: {
+  readonly field: string; readonly label: string; readonly value: number; readonly min: number; readonly max: number;
+  readonly disabled: boolean; readonly commit: (value: number) => void;
+}) {
+  // Null means the field shows the stored value: it is not being edited.
+  const [draft, setDraft] = useState<string | null>(null);
+  const accept = (text: string) => {
+    setDraft(null);
+    const parsed = Number(text);
+    if (text.trim() !== '' && Number.isInteger(parsed) && parsed >= min && parsed <= max) commit(parsed);
+  };
+  return (
+    <input type="number" min={min} max={max} step={1} value={draft ?? String(value)} disabled={disabled} aria-label={label}
+      className={NUMBER_INPUT} data-threshold={field}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={(event) => accept(event.target.value)}
+      onKeyDown={(event) => { if (event.key === 'Enter') accept(event.currentTarget.value); }} />
+  );
+}
+
 function ToggleRow({ name, mono, badge, detail, why, on, locked, aria, onToggle }: {
   readonly name: string; readonly mono: boolean; readonly badge: ReactNode; readonly detail: string; readonly why: string | null;
   readonly on: boolean; readonly locked: boolean; readonly aria: string; readonly onToggle: (on: boolean) => void;
@@ -331,12 +357,8 @@ function RoutingEditor({ form, settings, quota, locked, t }: {
       </Field>
       {thresholds.map(({ field, account, quota: current }) => (
         <Field key={field} label={t(`seats.threshold.${field}`)}>
-          <input type="number" min={0} max={100} step={1} value={draft.routing[field]} disabled={locked} aria-label={t(`seats.threshold.${field}`)} className={NUMBER_INPUT}
-            data-threshold={field}
-            onChange={(event) => {
-              const value = Number(event.target.value);
-              if (event.target.value !== '' && Number.isInteger(value) && value >= 0 && value <= 100) form.edit(next => setRoutingValue(next, field, value));
-            }} />
+          <PercentInput field={field} label={t(`seats.threshold.${field}`)} value={draft.routing[field]} min={0} max={100} disabled={locked}
+            commit={value => form.edit(next => setRoutingValue(next, field, value))} />
           <span className="font-mono text-xs text-kumo-subtle">%</span>
           <span data-account-mode={account} data-mode={current.mode} className="text-xs text-kumo-subtle">
             {t(`seats.quota.${account}`)} · <b className="font-medium text-kumo-strong">{t(`seats.quota.mode.${current.mode}`)}</b>
@@ -346,15 +368,9 @@ function RoutingEditor({ form, settings, quota, locked, t }: {
       ))}
       {/* The account states above are the ones the server read at the saved line; this field moves the line itself. */}
       <Field label={t('seats.threshold.exhausted_at_or_above_used')}>
-        <input type="number" min={EXHAUSTED_AT_OR_ABOVE_USED_RANGE.min} max={EXHAUSTED_AT_OR_ABOVE_USED_RANGE.max} step={1}
-          value={draft.routing.exhausted_at_or_above_used} disabled={locked} aria-label={t('seats.threshold.exhausted_at_or_above_used')}
-          className={NUMBER_INPUT} data-threshold="exhausted_at_or_above_used"
-          onChange={(event) => {
-            const value = Number(event.target.value);
-            if (event.target.value !== '' && Number.isInteger(value) && value >= EXHAUSTED_AT_OR_ABOVE_USED_RANGE.min && value <= EXHAUSTED_AT_OR_ABOVE_USED_RANGE.max) {
-              form.edit(next => setRoutingValue(next, 'exhausted_at_or_above_used', value));
-            }
-          }} />
+        <PercentInput field="exhausted_at_or_above_used" label={t('seats.threshold.exhausted_at_or_above_used')}
+          value={draft.routing.exhausted_at_or_above_used} min={EXHAUSTED_AT_OR_ABOVE_USED_RANGE.min} max={EXHAUSTED_AT_OR_ABOVE_USED_RANGE.max}
+          disabled={locked} commit={value => form.edit(next => setRoutingValue(next, 'exhausted_at_or_above_used', value))} />
         <span className="font-mono text-xs text-kumo-subtle">%</span>
       </Field>
       <Field label={t('seats.credits.mode')}>
