@@ -60,7 +60,7 @@ describe('rh bots list and show', () => {
     writeFileSync(join(botRegistryPath(env), 'hermes.json'), JSON.stringify({ ...hermes, mcp_client_id: null }));
     const retired = rh('list');
     expect(retired.exitCode).toBe(1);
-    expect(retired.stderr).toContain('remove the key from hermes.json');
+    expect(retired.stderr).toContain('remove the key from "hermes.json"');
     expect(retired.stderr).not.toContain(root);
   }, 60_000);
 });

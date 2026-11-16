@@ -134,17 +134,19 @@ export function readBotRegistry(env: NodeJS.ProcessEnv = process.env): readonly 
   if (files.length > BOT_REGISTRY_MAX_RECORDS) throw new BotRegistryError('bot_registry_invalid', 'bot registry has too many entries');
   const bots = files.map((name) => {
     const path = join(directory, name);
+    // An older rh accepted a credential-shaped bot_id, and the file name repeats it.
+    const label = containsSecret(name) ? '<credential-shaped file name>' : JSON.stringify(name);
     try {
       const stat = lstatSync(path);
       if (!name.endsWith('.json') || !stat.isFile() || stat.size > BOT_RECORD_MAX_BYTES) throw new Error('entry');
-      const bot = validateBotRecord(JSON.parse(readFileSync(path, 'utf8')), name);
+      const bot = validateBotRecord(JSON.parse(readFileSync(path, 'utf8')), label);
       if (`${bot.bot_id}.json` !== name) throw new Error('name');
       return bot;
     } catch (error) {
       if (error instanceof BotRegistryError && error.message.startsWith(`${BOT_RECORD_RETIRED_FIELD}:`)) {
         throw new BotRegistryError('bot_registry_invalid', error.message);
       }
-      throw new BotRegistryError('bot_registry_invalid', `bot registry entry ${JSON.stringify(name)} is invalid`);
+      throw new BotRegistryError('bot_registry_invalid', `bot registry entry ${label} is invalid`);
     }
   });
   assertUniqueIdentities(bots, 'bot_registry_invalid');
