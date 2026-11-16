@@ -148,15 +148,21 @@ or opens a PR.
 `rh upgrade --registered --apply --pr --expected-revision <digest>` does not
 write the primary checkout. A repo that is ready, or skipped only as
 `dirty_worktree` or `not_default_branch`, is refreshed in the temporary
-worktree `<system tmp>/<repo>-wt-harness-refresh` on the branch
-`repo-harness/refresh`. The command fetches `origin/<base_branch>` and makes
-the worktree from it. The base branch must be the one that the policy at
+worktree `<managed worktree root>/<repo>-wt-harness-refresh` on the branch
+`repo-harness/refresh`. `origin` must name a github.com repository; each `gh`
+call gets that repository as `--repo`, and the caller's `GH_REPO` and
+`GH_HOST` do not reach `gh`. The command fetches `origin/<base_branch>` and
+makes the worktree from it. The base branch must be the one that the policy at
 `origin/<base_branch>` names. When the refresh changes tracked files, the
 command makes one commit `chore(harness): refresh repo-harness files for
-<version>`, pushes the branch and opens its PR with `gh`, or updates the open
-PR. When the remote branch already holds the same tree on the same base, it
-pushes nothing. It then removes the worktree and its local branch. It never
-merges. A remote `repo-harness/refresh` with a commit that is not a refresh
+<version>`, pushes the branch and opens its PR with `gh`. When a PR of the
+branch is open, the push updates it, and the command sets only its title. When
+the remote branch already holds the same tree on the same base, it pushes
+nothing. When the base needs no refresh but a refresh PR is still open, the
+command reports that PR and does not close it. It then removes the worktree and
+its local branch. It never merges. A worktree path or a local
+`repo-harness/refresh` branch left from an earlier run fails the repo; the
+error gives the `git worktree remove` and `git branch -D` commands. A remote `repo-harness/refresh` with a commit that is not a refresh
 commit by the current git author skips the repo with `refresh_branch_foreign`;
 the push has a lease on the inspected commit. The other `--pr` skips are
 `no_origin_remote`, `fetch_failed`, `push_failed` and `pr_failed`. The managed

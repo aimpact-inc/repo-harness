@@ -1886,36 +1886,42 @@ describe('upgrade --registered', () => {
   test('--pr refreshes in a temporary worktree, pushes one commit, opens one PR and leaves the checkout alone', () => registeredSandbox((f) => {
     const env = { ...f.env, GIT_AUTHOR_NAME: 'operator', GIT_AUTHOR_EMAIL: 'operator@example.invalid',
       GIT_COMMITTER_NAME: 'operator', GIT_COMMITTER_EMAIL: 'operator@example.invalid',
-      REPO_HARNESS_GH_BIN: join(f.root, 'gh'), GH_LOG: join(f.root, 'gh.log'), GH_PR: join(f.root, 'gh.pr') };
-    // Records each call; `pr list` reports the PR that `pr create` opened for the same worktree. Any other command fails.
+      REPO_HARNESS_GH_BIN: join(f.root, 'gh'), GH_LOG: join(f.root, 'gh.log'), GH_PR: join(f.root, 'gh.pr'),
+      GH_REPO: 'fixture/elsewhere', GH_HOST: 'github.invalid' };
+    // Records each call with its last argument, the --repo value; `pr list` reports the PR that `pr create` opened
+    // in the same repository. A caller GH_REPO or GH_HOST, or any other command, fails.
     writeFileSync(env.REPO_HARNESS_GH_BIN, `#!/bin/sh
-echo "$1 $2" >> "$GH_LOG"
+for repo; do :; done
+echo "$1 $2 $repo" >> "$GH_LOG"
+[ -z "$GH_REPO$GH_HOST" ] || exit 3
+state="$GH_PR-\${repo##*/}"
 case "$1 $2" in
-  "pr list") if [ -f "$GH_PR-\${PWD##*/}" ]; then printf '[{"url":"%s"}]' "$(cat "$GH_PR-\${PWD##*/}")"; else echo '[]'; fi ;;
-  "pr create") echo "https://github.invalid/\${PWD##*/}" | tee "$GH_PR-\${PWD##*/}" ;;
+  "pr list") if [ -f "$state" ]; then printf '[{"url":"%s"}]' "$(cat "$state")"; else echo '[]'; fi ;;
+  "pr create") echo "https://$repo/pull/1" | tee "$state" ;;
   "pr edit") ;;
   *) exit 1 ;;
 esac
 `);
     chmodSync(env.REPO_HARNESS_GH_BIN, 0o755);
-    // The worktree goes to the system tmp directory, so the names stay unique per sandbox.
-    const name = (suffix: string) => `${basename(f.root)}-${suffix}`;
+    // origin names a GitHub repository; insteadOf sends push and fetch to a local bare repository.
     const withOrigin = (repo: string): string => {
       const bare = `${repo}.git`;
+      const url = `https://github.com/fixture/${basename(repo)}.git`;
       git(f, f.root, 'init', '-q', '--bare', '-b', 'main', bare);
-      git(f, repo, 'remote', 'add', 'origin', bare);
+      git(f, repo, 'remote', 'add', 'origin', url);
+      git(f, repo, 'config', `url.${bare}.insteadOf`, url);
       git(f, repo, 'push', '-q', 'origin', 'main');
       return bare;
     };
-    const dirty = staleRepo(f, name('dirty'));
+    const dirty = staleRepo(f, 'dirty');
     const dirtyRemote = withOrigin(dirty);
     git(f, dirty, 'checkout', '-q', '-b', 'topic');
     writeFileSync(join(dirty, 'untracked.txt'), 'operator work\n');
     writeFileSync(join(dirty, 'AGENTS.md'), 'operator edit\n');
-    const fresh = adoptedRepo(f, name('fresh'));
+    const fresh = adoptedRepo(f, 'fresh');
     const freshRemote = withOrigin(fresh);
-    const noOrigin = staleRepo(f, name('no-origin'));
-    const foreign = staleRepo(f, name('foreign'));
+    const noOrigin = staleRepo(f, 'no-origin');
+    const foreign = staleRepo(f, 'foreign');
     const foreignRemote = withOrigin(foreign);
     git(f, foreign, 'checkout', '-q', '-b', 'repo-harness/refresh');
     commitAll(f, foreign, 'chore(harness): refresh repo-harness files for 0.0.0');
@@ -1937,13 +1943,14 @@ esac
     expect(result.error).toBeUndefined();
     const refreshed = byPath(result.repos, dirty);
     expect(refreshed.status, refreshed.error).toBe('applied');
-    expect(refreshed.refresh).toMatchObject({ outcome: 'pushed', branch: 'repo-harness/refresh', pr: `https://github.invalid/${basename(dirty)}-wt-harness-refresh`, prAction: 'created' });
+    expect(refreshed.refresh).toMatchObject({ outcome: 'pushed', branch: 'repo-harness/refresh', pr: 'https://github.com/fixture/dirty/pull/1', prAction: 'created' });
     expect(git(f, dirtyRemote, 'log', '--format=%s', 'main..repo-harness/refresh')).toMatch(/^chore\(harness\): refresh repo-harness files for \S+$/);
     const committed = git(f, dirtyRemote, 'diff', '--name-only', 'main', 'repo-harness/refresh').split('\n');
     expect(committed).toContain('deploy/README.md');
     expect(committed.filter((path) => path.startsWith('.ai/harness/backups/'))).toEqual([]);
     expect({ status: status(dirty), files: worktreeSnapshot(dirty), head: git(f, dirty, 'rev-parse', 'HEAD'), branches: git(f, dirty, 'branch', '--list') }).toEqual(before);
-    expect(existsSync(join(tmpdir(), `${basename(dirty)}-wt-harness-refresh`))).toBe(false);
+    const worktree = join(f.env.REPO_HARNESS_WORKTREE_ROOT!, 'dirty-wt-harness-refresh');
+    expect(existsSync(worktree)).toBe(false);
     expect(byPath(result.repos, fresh)).toMatchObject({ status: 'applied', refresh: { outcome: 'up_to_date' } });
     expect(git(f, freshRemote, 'branch', '--list', 'repo-harness/refresh')).toBe('');
     expect(byPath(result.repos, noOrigin)).toMatchObject({ status: 'skipped', reason: 'no_origin_remote' });
@@ -1957,7 +1964,22 @@ esac
     const second = runRegisteredUpgrade({ apply: true, pr: true, expectedRevision: again.revision!, env, callerCwd: f.root });
     expect(byPath(second.repos, dirty).refresh).toMatchObject({ outcome: 'unchanged', commit: tip, prAction: 'open' });
     expect(git(f, dirtyRemote, 'rev-parse', 'repo-harness/refresh')).toBe(tip);
-    expect(readFileSync(env.GH_LOG, 'utf8').trim().split('\n')).toEqual(['pr list', 'pr create', 'pr list']);
+
+    // main gains the same refresh without the PR: the run reports the open PR and leaves it alone.
+    git(f, dirtyRemote, 'update-ref', 'refs/heads/main', tip);
+    const third = runRegisteredUpgrade({ apply: true, pr: true, expectedRevision: runRegisteredUpgrade({ env, callerCwd: f.root }).revision!, env, callerCwd: f.root });
+    expect(byPath(third.repos, dirty).refresh).toEqual({ outcome: 'up_to_date', stalePr: 'https://github.com/fixture/dirty/pull/1' });
+    expect(readFileSync(env.GH_LOG, 'utf8').trim().split('\n')).toEqual(['pr list', 'pr create', 'pr list', 'pr list']
+      .map((call) => `${call} github.com/fixture/dirty`));
+
+    // An occupied worktree path fails the repo and leaves no local refresh branch behind.
+    git(f, dirtyRemote, 'update-ref', '-d', 'refs/heads/repo-harness/refresh');
+    git(f, dirtyRemote, 'update-ref', 'refs/heads/main', git(f, dirtyRemote, 'rev-parse', 'main~1'));
+    mkdirSync(join(worktree, 'leftover'), { recursive: true });
+    const blocked = runRegisteredUpgrade({ apply: true, pr: true, expectedRevision: runRegisteredUpgrade({ env, callerCwd: f.root }).revision!, env, callerCwd: f.root });
+    expect(byPath(blocked.repos, dirty)).toMatchObject({ status: 'failed', error: expect.stringContaining(`git worktree add ${worktree} exited with status`) });
+    expect(git(f, dirty, 'branch', '--list', 'repo-harness/refresh')).toBe('');
+    expect(git(f, dirtyRemote, 'branch', '--list', 'repo-harness/refresh')).toBe('');
   }), 240_000);
 
   test('preview counts a removable legacy sibling worktree as pending and shows it', () => registeredSandbox((f) => {

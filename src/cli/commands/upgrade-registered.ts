@@ -1,11 +1,12 @@
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import { spawnSync } from 'child_process';
 import { lstatSync } from 'fs';
-import { tmpdir } from 'os';
 import { basename, join } from 'path';
 import { readWorkflowPolicyDocument } from '../../effects/state/resolve-effective-state';
 import { POLICY_ABSENT, isPolicyObject, policyValue } from '../../core/workflow/policy-schema';
 import { formatJson } from '../installer/shared';
+import { githubRemoteRepository } from '../../core/board/source';
+import { managedWorktreeRoot } from '../../effects/git/managed-worktree';
 import { gitSpawnSync, withoutRepositorySelectingGitEnv } from '../../effects/git/runner';
 import { applyAdoptionPlan, FS_TRANSACTION_BACKUP_ROOT, type ApplyAdoptionPlanResult } from '../../effects/fs-transaction';
 import { version as PACKAGE_VERSION } from '../../../package.json';
@@ -61,7 +62,8 @@ export type RegisteredSweep =
 
 /** `--pr` apply: what the refresh in the temporary worktree produced and published. */
 export type RegisteredRefresh =
-  | { readonly outcome: 'up_to_date' }
+  /** `stalePr`: the open PR of a remote refresh branch that the current base no longer needs; it is reported, not closed. */
+  | { readonly outcome: 'up_to_date'; readonly stalePr?: string }
   | {
     /** `unchanged`: the remote refresh branch already holds this tree on this base, so nothing was pushed. */
     readonly outcome: 'pushed' | 'unchanged';
@@ -288,22 +290,32 @@ function commandFailure(label: string, result: CommandResult): string {
   return `${label} ${result.error ? `failed: ${result.error.message}` : `exited with status ${result.status}`}${stderr ? `: ${stderr}` : ''}`;
 }
 
-/** Read-only and local: `git remote get-url` exits 2 when the remote does not exist. */
-function originRemote(path: string, env: NodeJS.ProcessEnv): Classification {
-  const url = git(path, ['remote', 'get-url', 'origin'], env);
-  if (!url.error && url.status === 0) return { ready: true };
-  if (!url.error && url.status === 2) return skip('no_origin_remote', `${path} has no remote named origin`);
-  return skip('git_probe_failed', commandFailure('git remote get-url origin', url));
+/**
+ * The GitHub repository of `origin`, read and local. The configured URL is read
+ * without `insteadOf` expansion, because the PR goes to the repository that the
+ * URL names; git push and fetch resolve the same URL.
+ */
+function originRepository(path: string, env: NodeJS.ProcessEnv): { readonly repository: string } | Skip {
+  const url = git(path, ['config', '--get', 'remote.origin.url'], env);
+  if (!url.error && url.status === 1) return skip('no_origin_remote', `${path} has no remote named origin`);
+  if (url.error || url.status !== 0) return skip('git_probe_failed', commandFailure('git config remote.origin.url', url));
+  const repository = githubRemoteRepository(url.stdout);
+  return repository === null ? skip('no_origin_remote', `origin is not a github.com repository: ${url.stdout.trim()}`) : { repository };
 }
 
 function prRefreshability(path: string, classification: Classification, env: NodeJS.ProcessEnv): Classification {
   if (!classification.ready && !CHECKOUT_ONLY_SKIPS.has(classification.reason)) return classification;
-  return originRemote(path, env);
+  const origin = originRepository(path, env);
+  return 'repository' in origin ? { ready: true } : origin;
 }
 
-function gh(cwd: string, args: readonly string[], env: NodeJS.ProcessEnv): CommandResult {
-  const result = spawnSync(env.REPO_HARNESS_GH_BIN ?? 'gh', [...args], {
-    cwd, env: withoutRepositorySelectingGitEnv(env), encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: PROVIDER_TIMEOUT_MS, killSignal: 'SIGKILL',
+/** Every call names the origin repository; GH_REPO and GH_HOST from the caller cannot select another one. */
+function gh(cwd: string, repository: string, args: readonly string[], env: NodeJS.ProcessEnv): CommandResult {
+  const childEnv = withoutRepositorySelectingGitEnv(env);
+  delete childEnv.GH_REPO;
+  delete childEnv.GH_HOST;
+  const result = spawnSync(env.REPO_HARNESS_GH_BIN ?? 'gh', [...args, '--repo', `github.com/${repository}`], {
+    cwd, env: childEnv, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: PROVIDER_TIMEOUT_MS, killSignal: 'SIGKILL',
   });
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '', ...(result.error ? { error: result.error } : {}) };
 }
@@ -316,6 +328,7 @@ function revParse(cwd: string, rev: string, env: NodeJS.ProcessEnv): string {
 
 /** The fetched base branch, and the fetched remote refresh branch or null when the remote has none. */
 interface RefreshBase {
+  readonly repository: string;
   readonly base: string;
   readonly baseOid: string;
   readonly refreshOid: string | null;
@@ -326,7 +339,7 @@ interface RefreshBase {
  * from the policy at `origin/<base>`; the checkout's policy only names which
  * branch to fetch, and a disagreement fails closed.
  */
-function fetchRefreshBase(path: string, env: NodeJS.ProcessEnv): RefreshBase | Skip {
+function fetchRefreshBase(path: string, repository: string, env: NodeJS.ProcessEnv): RefreshBase | Skip {
   const local = policyDefaultBranch(path, env);
   if ('error' in local) return skip('default_branch_unknown', local.error);
   const listed = git(path, ['ls-remote', '--heads', 'origin', `refs/heads/${REFRESH_BRANCH}`], env);
@@ -342,6 +355,7 @@ function fetchRefreshBase(path: string, env: NodeJS.ProcessEnv): RefreshBase | S
     return skip('default_branch_unknown', `origin/${local.branch} names the base branch ${remote.branch}; the checkout policy names ${local.branch}`);
   }
   return {
+    repository,
     base: local.branch,
     baseOid: revParse(path, `refs/remotes/origin/${local.branch}`, env),
     refreshOid: refreshListed ? revParse(path, `refs/remotes/origin/${REFRESH_BRANCH}`, env) : null,
@@ -363,24 +377,36 @@ function foreignRefreshCommits(path: string, base: RefreshBase, env: NodeJS.Proc
     : `origin/${REFRESH_BRANCH} has ${foreign.length} of ${commits.length} commits that are not refresh commits by ${email}`;
 }
 
-/** Opens the PR of the refresh branch, or updates the open one when this run pushed. */
-function publishRefreshPr(worktree: string, base: string, title: string, pushed: boolean, env: NodeJS.ProcessEnv):
-  { readonly url: string; readonly action: 'created' | 'updated' | 'open' } | { readonly error: string } {
-  const body = `Refresh the repo-harness tracked files for ${title.slice(REFRESH_SUBJECT.length)}.\n\nCreated by \`rh upgrade --registered --apply --pr\`. It never merges.\n`;
-  const listed = gh(worktree, ['pr', 'list', '--head', REFRESH_BRANCH, '--base', base, '--state', 'open', '--json', 'url', '--limit', '1'], env);
+/** The open PR of the refresh branch, or null. */
+function openRefreshPr(worktree: string, base: RefreshBase, env: NodeJS.ProcessEnv): { readonly url: string | null } | { readonly error: string } {
+  const listed = gh(worktree, base.repository, ['pr', 'list', '--head', REFRESH_BRANCH, '--base', base.base, '--state', 'open', '--json', 'url', '--limit', '1'], env);
   if (listed.error || listed.status !== 0) return { error: commandFailure('gh pr list', listed) };
   let open: unknown;
   try { open = JSON.parse(listed.stdout); } catch { return { error: `gh pr list printed no JSON array: ${listed.stdout.trim()}` }; }
   if (!Array.isArray(open)) return { error: `gh pr list printed no JSON array: ${listed.stdout.trim()}` };
   const url = (open[0] as { url?: unknown } | undefined)?.url;
-  if (typeof url === 'string') {
-    if (!pushed) return { url, action: 'open' };
-    const edited = gh(worktree, ['pr', 'edit', url, '--title', title, '--body', body], env);
-    return edited.error || edited.status !== 0 ? { error: commandFailure('gh pr edit', edited) } : { url, action: 'updated' };
+  return { url: typeof url === 'string' ? url : null };
+}
+
+/**
+ * Opens the PR of the refresh branch, or updates the open one when this run
+ * pushed. An update sets only the title, which names the package version; the
+ * body stays as the operator left it.
+ */
+function publishRefreshPr(worktree: string, base: RefreshBase, title: string, pushed: boolean, env: NodeJS.ProcessEnv):
+  { readonly url: string; readonly action: 'created' | 'updated' | 'open' } | { readonly error: string } {
+  const open = openRefreshPr(worktree, base, env);
+  if ('error' in open) return open;
+  if (open.url !== null) {
+    if (!pushed) return { url: open.url, action: 'open' };
+    const edited = gh(worktree, base.repository, ['pr', 'edit', open.url, '--title', title], env);
+    return edited.error || edited.status !== 0 ? { error: commandFailure('gh pr edit', edited) } : { url: open.url, action: 'updated' };
   }
-  const created = gh(worktree, ['pr', 'create', '--base', base, '--head', REFRESH_BRANCH, '--title', title, '--body', body], env);
+  const body = `Refresh the repo-harness tracked files for ${title.slice(REFRESH_SUBJECT.length)}.\n\nCreated by \`rh upgrade --registered --apply --pr\`. It never merges.\n`;
+  const created = gh(worktree, base.repository, ['pr', 'create', '--base', base.base, '--head', REFRESH_BRANCH, '--title', title, '--body', body], env);
   if (created.error || created.status !== 0) return { error: commandFailure('gh pr create', created) };
-  return { url: created.stdout.trim().split('\n').pop() ?? '', action: 'created' };
+  const url = created.stdout.trim().split('\n').pop() ?? '';
+  return url === '' ? { error: 'gh pr create exited with status 0 and printed no PR URL' } : { url, action: 'created' };
 }
 
 /** The init refresh and the project upgrade in the worktree, then the commit, the push and the PR. */
@@ -404,7 +430,12 @@ function refreshInWorktree(path: string, worktree: string, base: RefreshBase, en
   step(['add', '--all', '--', '.', `:(exclude)${FS_TRANSACTION_BACKUP_ROOT}`]);
   const staged = git(worktree, ['diff', '--cached', '--quiet'], env);
   if (staged.error || (staged.status !== 0 && staged.status !== 1)) throw new Error(commandFailure('git diff --cached', staged));
-  if (staged.status === 0) return { path, status: 'applied', init, upgrade, refresh: { outcome: 'up_to_date' } };
+  if (staged.status === 0) {
+    if (base.refreshOid === null) return { path, status: 'applied', init, upgrade, refresh: { outcome: 'up_to_date' } };
+    const open = openRefreshPr(worktree, base, env);
+    if ('error' in open) return skipped(path, skip('pr_failed', open.error));
+    return { path, status: 'applied', init, upgrade, refresh: { outcome: 'up_to_date', ...(open.url === null ? {} : { stalePr: open.url }) } };
+  }
   const title = `${REFRESH_SUBJECT}${PACKAGE_VERSION}`;
   step(['commit', '--quiet', '-m', title]);
   const commit = revParse(worktree, 'HEAD', env);
@@ -418,11 +449,17 @@ function refreshInWorktree(path: string, worktree: string, base: RefreshBase, en
       'origin', `HEAD:refs/heads/${REFRESH_BRANCH}`], env);
     if (pushed.error || pushed.status !== 0) return skipped(path, skip('push_failed', commandFailure('git push origin', pushed)));
   }
-  const pr = publishRefreshPr(worktree, base.base, title, !unchanged, env);
+  const pr = publishRefreshPr(worktree, base, title, !unchanged, env);
   if ('error' in pr) return skipped(path, skip('pr_failed', pr.error));
   return { path, status: 'applied', init, upgrade, refresh: {
     outcome: unchanged ? 'unchanged' : 'pushed', branch: REFRESH_BRANCH, commit: unchanged ? base.refreshOid! : commit, pr: pr.url, prAction: pr.action,
   } };
+}
+
+function localRefreshBranchExists(path: string, env: NodeJS.ProcessEnv): boolean {
+  const shown = git(path, ['show-ref', '--verify', '--quiet', `refs/heads/${REFRESH_BRANCH}`], env);
+  if (shown.error || (shown.status !== 0 && shown.status !== 1)) throw new Error(commandFailure('git show-ref', shown));
+  return shown.status === 0;
 }
 
 /**
@@ -433,14 +470,23 @@ function refreshInWorktree(path: string, worktree: string, base: RefreshBase, en
 function refreshRepoPr(path: string, env: NodeJS.ProcessEnv, callerCwd: string): RegisteredRepoResult {
   const access = prRefreshability(path, classifyRepo(path, env), env);
   if (!access.ready) return skipped(path, access);
-  const base = fetchRefreshBase(path, env);
+  const origin = originRepository(path, env);
+  if (!('repository' in origin)) return skipped(path, origin);
+  const base = fetchRefreshBase(path, origin.repository, env);
   if ('ready' in base) return skipped(path, base);
   const foreign = foreignRefreshCommits(path, base, env);
   if (foreign) return skipped(path, skip('refresh_branch_foreign', foreign));
 
-  const worktree = join(tmpdir(), `${basename(path)}-wt-harness-refresh`);
+  const worktree = join(managedWorktreeRoot(env), `${basename(path)}-wt-harness-refresh`);
+  const recovery = `remove it with \`git -C ${path} worktree remove --force ${worktree}\` and \`git -C ${path} branch -D ${REFRESH_BRANCH}\` after checking it holds no work`;
+  if (localRefreshBranchExists(path, env)) return { path, status: 'failed', error: `a local ${REFRESH_BRANCH} branch is left from an earlier run; ${recovery}` };
   const added = git(path, ['worktree', 'add', '--quiet', '-b', REFRESH_BRANCH, worktree, base.baseOid], env);
-  if (added.error || added.status !== 0) return { path, status: 'failed', error: commandFailure(`git worktree add ${worktree}`, added) };
+  if (added.error || added.status !== 0) {
+    // `worktree add -b` can create the branch and then fail on the path; the branch did not exist before this call.
+    const removed = localRefreshBranchExists(path, env) ? git(path, ['branch', '--quiet', '-D', REFRESH_BRANCH], env) : undefined;
+    const cleanup = removed && (removed.error || removed.status !== 0) ? `; ${commandFailure(`git branch -D ${REFRESH_BRANCH}`, removed)}` : '';
+    return { path, status: 'failed', error: `${commandFailure(`git worktree add ${worktree}`, added)}${cleanup}; ${recovery}` };
+  }
   let result: RegisteredRepoResult;
   try { result = refreshInWorktree(path, worktree, base, env, callerCwd); }
   catch (error) { result = { path, status: 'failed', error: message(error) }; }
@@ -519,7 +565,9 @@ function formatSweep(sweep: RegisteredSweep): string[] {
 }
 
 function formatRefresh(refresh: RegisteredRefresh): string {
-  if (refresh.outcome === 'up_to_date') return '  refresh: up to date';
+  if (refresh.outcome === 'up_to_date') {
+    return refresh.stalePr ? `  refresh: up to date; the open refresh PR is no longer needed: ${refresh.stalePr}` : '  refresh: up to date';
+  }
   const push = refresh.outcome === 'pushed' ? `pushed ${refresh.branch} at ${refresh.commit}` : `${refresh.branch} unchanged at ${refresh.commit}`;
   return `  refresh: ${push}; PR ${refresh.prAction}: ${refresh.pr}`;
 }
