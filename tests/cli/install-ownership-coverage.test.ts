@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { spawnSync } from 'child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { cpSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { configureRequiredHerdrSkill } from '../../src/cli/commands/herdr-skill';
@@ -85,6 +85,11 @@ test('a custom excludes path is restore-only, and a managed, directory or symlin
     { name: 'fleet target', excludes: home => join(home, '.claude', 'agents', 'gatekeeper.md'), refused: managed },
     { name: 'inside the Herdr skill', excludes: home => join(home, '.claude', 'skills', 'herdr', 'ignore'), refused: managed },
     { name: 'facade path', excludes: home => join(home, '.codex', 'skills', 'repo-harness-notes'), refused: managed },
+    // Other spellings of a managed path: identity, not the string, decides.
+    { name: 'parent symlink alias', excludes: home => { mkdirSync(join(home, '.claude', 'agents'), { recursive: true }); symlinkSync(join(home, '.claude', 'agents'), join(home, 'fleet-alias')); return join(home, 'fleet-alias', 'gatekeeper.md'); }, refused: managed },
+    { name: 'case variant', excludes: home => join(home, '.claude', 'agents', 'GATEKEEPER.MD'), refused: process.platform === 'darwin' || process.platform === 'win32' ? managed : null },
+    { name: 'HOME realpath (/private/var on darwin)', excludes: home => join(realpathSync(home), '.claude', 'agents', 'gatekeeper.md'), refused: managed },
+    { name: 'hard link', excludes: home => { mkdirSync(join(home, '.codex')); writeFileSync(join(home, '.codex', 'config.toml'), 'model = "user"\n'); linkSync(join(home, '.codex', 'config.toml'), join(home, 'excludes-link')); return join(home, 'excludes-link'); }, refused: managed },
     { name: 'directory', excludes: home => { mkdirSync(join(home, 'rules')); writeFileSync(join(home, 'rules', 'keep'), 'user\n'); return join(home, 'rules'); }, refused: notRegular },
     { name: 'symlink', excludes: home => { writeFileSync(join(home, 'secret'), 'token\n'); symlinkSync(join(home, 'secret'), join(home, 'ignore-link')); return join(home, 'ignore-link'); }, refused: notRegular },
     { name: 'HOME', excludes: home => home, refused: notRegular },
@@ -92,13 +97,16 @@ test('a custom excludes path is restore-only, and a managed, directory or symlin
   for (const row of rows) withInstallHome((home, rh, env) => {
     const excludes = row.excludes(home);
     expect(spawnSync('git', ['config', '--global', 'core.excludesFile', excludes], { env }).status).toBe(0);
+    // Every entry outside the runtime home (its lock and state) and Bun's own transpiler cache, with its size and mtime.
+    const tree = () => readdirSync(home, { recursive: true }).map(String).filter(path => !/^(?:\.repo-harness|Library|\.cache)(?:\/|$)/.test(path)).sort()
+      .map(path => { const stat = lstatSync(join(home, path)); return `${path}:${stat.size}:${stat.mtimeMs}`; });
+    const before = tree();
     const install = rh(...INSTALL);
     if (row.refused !== null) {
       expect(install.status, row.name).not.toBe(0);
       expect(String(install.stderr), row.name).toContain(`${row.refused}: the user Git excludes file ${excludes} is`);
-      for (const written of ['.claude', '.codex', join('.repo-harness', 'install-state.json')]) expect(existsSync(join(home, written)), `${row.name}: ${written}`).toBe(false);
-      if (row.name === 'directory') expect(readFileSync(join(excludes, 'keep'), 'utf-8')).toBe('user\n');
-      if (row.name === 'symlink') expect(readFileSync(join(home, 'secret'), 'utf-8')).toBe('token\n');
+      expect(tree(), row.name).toEqual(before);
+      expect(existsSync(join(home, '.repo-harness', 'install-state.json')), row.name).toBe(false);
       return;
     }
     expect(install.status, `${row.name}\n${install.stdout}\n${install.stderr}`).toBe(0);

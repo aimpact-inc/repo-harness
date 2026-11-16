@@ -23,7 +23,7 @@ import {
   writeFileSync,
 } from 'fs';
 import { homedir } from 'os';
-import { basename, delimiter, dirname, join, sep } from 'path';
+import { basename, delimiter, dirname, join, resolve } from 'path';
 import {
   MANAGED_TAG,
   canonicalManagedHookProjection,
@@ -829,26 +829,54 @@ export function installProfileTransactionPaths(env: NodeJS.ProcessEnv = process.
 /**
  * The user Git excludes file that the runtime ignore step writes. It is a
  * restore-only transaction path: the snapshot restores it, and no ownership
- * ledger writer may record it. So it must not be a path that rh manages: a
- * path that this install writes (`managed`, which holds the ownership
- * allowlist), a path inside one of them, or a facade path. Rollback replaces
- * a snapshot path whole, and the backup copies what the path names, so it
- * must also be absent or a regular file. Anything else is refused before the
- * transaction writes anything.
+ * ledger writer may record it. So it is refused when it names, by file
+ * identity, a path that this install writes (`managed`, which holds the
+ * ownership allowlist), a path inside one of them, or a facade path.
+ * Identity sees symlinked parents, hard links, the HOME realpath and case
+ * variants on darwin and win32; a link or file created after this check is
+ * not seen. Rollback replaces a snapshot path whole, and the backup copies
+ * what the path names, so the path must also be absent or a regular file.
+ * Each refusal comes before the transaction writes anything.
  */
 function excludesTransactionPath(env: NodeJS.ProcessEnv, managed: readonly string[]): string | null {
   const excludes = userExcludesFilePath(env);
   if (!excludes.ok) return null;
-  if (managed.some((path) => excludes.path === path || excludes.path.startsWith(`${path}${sep}`))
-    || isDiscoveredFacadePath(excludes.path, env.HOME ?? homedir(), env)) {
-    throw new Error(`excludes_file_managed_path: the user Git excludes file ${excludes.path} is a path that rh manages; `
-      + 'set core.excludesFile to a file that rh does not manage, then run the command again');
+  const home = env.HOME ?? homedir();
+  const managedIds = new Set(managed.map(fileIdentity));
+  const hostRootIds = new Set(hostSkillRoots(home, env).map(fileIdentity));
+  for (let path = resolve(excludes.path); dirname(path) !== path; path = dirname(path)) {
+    if (managedIds.has(fileIdentity(path))
+      || (basename(path).startsWith(FACADE_NAME_PREFIX) && hostRootIds.has(fileIdentity(dirname(path))))) {
+      throw new Error(`excludes_file_managed_path: the user Git excludes file ${excludes.path} is a path that rh manages; `
+        + 'set core.excludesFile to a file that rh does not manage, then run the command again');
+    }
   }
   const stat = lstatSync(excludes.path, { throwIfNoEntry: false });
   if (stat === undefined || stat.isFile()) return excludes.path;
   const kind = stat.isSymbolicLink() ? 'a symlink' : stat.isDirectory() ? 'a directory' : 'not a regular file';
   throw new Error(`excludes_file_not_regular: the user Git excludes file ${excludes.path} is ${kind}; `
     + 'set core.excludesFile to a regular file, then run the command again');
+}
+
+/**
+ * The file a path names: the (dev, ino) of the entry, or of its deepest
+ * existing parent followed by the remaining names. The names are case-folded
+ * where the volume is case-insensitive by default (darwin, win32).
+ */
+function fileIdentity(path: string): string {
+  const fold = process.platform === 'darwin' || process.platform === 'win32';
+  const rest: string[] = [];
+  for (let current = resolve(path); ; current = dirname(current)) {
+    let stat;
+    try { stat = statSync(current, { bigint: true }); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error;
+    }
+    if (stat) return [`${stat.dev}:${stat.ino}`, ...rest].join('/');
+    if (dirname(current) === current) throw new Error(`no existing parent for ${path}`);
+    rest.unshift(fold ? basename(current).toLowerCase() : basename(current));
+  }
 }
 
 const transactionLocks = new WeakMap<InstallHostTransaction, { context: RuntimeTransactionContext; owned: RuntimeTransactionLock | undefined }>();
