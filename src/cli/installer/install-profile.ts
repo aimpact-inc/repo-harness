@@ -356,6 +356,24 @@ function captureOwnedPath(path: string, owner: SurfaceOwner): ManagedInstallSurf
 }
 
 /**
+ * A Herdr skill receipt. Its currency is the marker proof (`ownedSkillIsIntact`), never a tree hash:
+ * a later Herdr write keeps the receipt current, and any user entry ends rh's claim on the directory.
+ */
+const HERDR_SKILL_RECEIPT = 'herdr-skill-marker';
+
+function herdrSkillPaths(home: string, env: NodeJS.ProcessEnv): readonly string[] {
+  return [...hostSkillRoots(home, env), stagedSkillRoot(home)].map((root) => join(root, 'herdr'));
+}
+
+function captureHerdrSkill(path: string, owner: SurfaceOwner): ManagedInstallSurface | null {
+  if (!lstatSync(path, { throwIfNoEntry: false })?.isDirectory() || !ownedSkillIsIntact(path)) return null;
+  return {
+    owner, path, type: 'directory-copy', authority: 'repo-harness-install-transaction', removal: 'managed-surfaces-only',
+    content_hash: sha256Prefixed(readFileSync(join(path, 'SKILL.md'))), managed_marker: HERDR_SKILL_RECEIPT, symlink_target: null,
+  };
+}
+
+/**
  * A facade is canonical when the package still ships its source directory,
  * checked through the host's already-synced canonical `repo-harness` skill
  * copy. A name absent from the catalog's facade-kind packages (a fully
@@ -445,8 +463,7 @@ function discoverManagedSurfaces(
   // earlier run wrote it; an edited copy stays the user's.
   for (const herdr of [...hostRoots, stagedSkillRoot(home)].map((root) => join(root, 'herdr'))) {
     const owner = ownerForInstallPath(herdr, env);
-    if (!enabled(owner) || !lstatSync(herdr, { throwIfNoEntry: false })?.isDirectory() || !ownedSkillIsIntact(herdr)) continue;
-    const surface = captureOwnedPath(herdr, owner);
+    const surface = enabled(owner) ? captureHerdrSkill(herdr, owner) : null;
     if (surface) surfaces.push(surface);
   }
   for (const root of hostRoots) {
@@ -505,6 +522,7 @@ function surfaceIsCurrent(surface: ManagedInstallSurface, env: NodeJS.ProcessEnv
         && sha256Prefixed(readFileSync(surface.path)) === surface.content_hash;
     }
     if (!stat.isDirectory() || surface.content_hash === null || surface.managed_marker === null) return false;
+    if (surface.managed_marker === HERDR_SKILL_RECEIPT) return ownedSkillIsIntact(surface.path);
     if (surface.managed_marker === 'transaction-created-directory') {
       return hashManagedTree(surface.path) === surface.content_hash;
     }
@@ -969,7 +987,14 @@ function transactionOwnedSurfaces(
   previous: Pick<InstallState, 'ownership_manifest'> | null,
   env: NodeJS.ProcessEnv,
 ): readonly ManagedInstallSurface[] {
+  const herdr = herdrSkillPaths(env.HOME ?? homedir(), env);
   return transaction.snapshots.flatMap((snapshot) => {
+    // The marker proof alone records a Herdr directory, whatever an earlier receipt held.
+    if (herdr.includes(snapshot.path)) {
+      const owner = ownerForInstallPath(snapshot.path, env);
+      const surface = owner === null ? null : captureHerdrSkill(snapshot.path, owner);
+      return surface ? [surface] : [];
+    }
     const normalized = snapshot.path.replaceAll('\\', '/');
     if (
       normalized.endsWith('/.codex/config.toml')
