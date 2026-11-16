@@ -53,7 +53,7 @@ import {
 } from '../../core/skill-surface/plugin-manifest';
 import { hostSkillRoot, providerSkillLock, stagedSkillRoot, syncSkillRoots, type SkillHost } from '../../effects/host-skill-roots';
 import { userExcludesFilePath } from '../../effects/adoption/gitignore-plan';
-import { ownedSkillIsIntact } from '../commands/herdr-skill';
+import { ownedSkillIsIntact } from './herdr-skill-marker';
 import { MANAGED_AGENTS } from '../../effects/terminal/task-role-profiles';
 import { hashManagedTree, OWNER_MARKER } from '../../effects/managed-tree';
 import { readWorkflowPolicyDocument } from '../../effects/state/resolve-effective-state';
