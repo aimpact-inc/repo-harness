@@ -21,7 +21,6 @@ import {
   ensurePrivateDirectory,
   expectedOf,
   hostConfigPaths,
-  hostPath,
   listTransactionRecords,
   missingDirectories,
   observeFile,
@@ -30,6 +29,7 @@ import {
   putVault,
   readLedger,
   readPreimageCopy,
+  resolveHostPath,
   removeCreatedDirectories,
   removePreimageCopy,
   removeTarget,
@@ -92,8 +92,11 @@ export interface HostConfigGateOptions {
 
 export interface HostConfigGate {
   apply(changes: readonly HostConfigFileChange[]): HostConfigApplyResult;
-  /** Only for out-of-process writers: `run` may write the declared paths, and the gate records them. */
-  delegate(declaredPaths: readonly string[], run: () => void): HostConfigDelegateResult;
+  /**
+   * Only for out-of-process writers: `run` gets the resolved destinations of
+   * the declared paths, may write them, and the gate records them.
+   */
+  delegate(declaredPaths: readonly string[], run: (destinations: readonly HostPath[]) => void): HostConfigDelegateResult;
   recover(): HostConfigRecoveryReport;
 }
 
@@ -136,7 +139,7 @@ function settleTransaction(paths: HostConfigPaths, record: TransactionRecord, at
   // Reverse order: a file that a later entry put in a new directory goes before that directory is removed.
   for (const entry of [...record.files].reverse()) {
     if (entry.intended === 'unchanged') continue;
-    removeTemporary(paths, entry.path, record.txn);
+    removeTemporary(entry.path, record.txn);
     const touched = attempted === null || attempted.has(entry.path);
     const action = touched ? recoveryAction(classifyFile(observeFile(entry.path).observation, entry.preimage, entry.intended), committed) : 'resolved';
     if (action === 'unresolved') { remaining.push(entry); continue; }
@@ -151,9 +154,9 @@ function settleTransaction(paths: HostConfigPaths, record: TransactionRecord, at
       try {
         if (entry.preimage.existed && entry.preimage_copy) {
           const bytes = readPreimageCopy(paths, record.txn, entry.preimage_copy, entry.preimage.sha256);
-          replaceTarget(paths, entry.path, record.txn, bytes, entry.preimage.mode, entry.intended, () => {});
+          replaceTarget(entry.path, record.txn, bytes, entry.preimage.mode, entry.intended, () => {});
         } else {
-          removeTarget(paths, entry.path, entry.intended);
+          removeTarget(entry.path, entry.intended);
         }
       } catch (error) {
         // A changed target, or a preimage copy that cannot be read, keeps this entry; other entries and records go on.
@@ -162,7 +165,7 @@ function settleTransaction(paths: HostConfigPaths, record: TransactionRecord, at
         continue;
       }
     }
-    if (!committed) keptDirs.push(...removeCreatedDirectories(paths, entry.created_dirs));
+    if (!committed) keptDirs.push(...removeCreatedDirectories(entry.created_dirs));
   }
   if (ledgerChanged) writeLedger(paths, withLedger(ledger, files, ledger.fragments));
   if (remaining.length === 0) {
@@ -186,21 +189,22 @@ function recoverAll(paths: HostConfigPaths): UnresolvedHostConfigChange[] {
 }
 
 function prepareStorage(paths: HostConfigPaths): void {
-  for (const directory of [paths.root, paths.vault, paths.journal]) ensurePrivateDirectory(paths, directory);
+  for (const directory of [paths.harness, paths.root, paths.vault, paths.journal]) ensurePrivateDirectory(directory);
 }
 
-/** Validate the targets and refuse a path that an unresolved record still holds. */
+/** Resolve the targets once and refuse a path that an unresolved record still holds. Two aliases of one file are one path. */
 function admitPaths(paths: HostConfigPaths, targets: readonly string[], unresolved: readonly UnresolvedHostConfigChange[]): HostPath[] {
-  if (new Set(targets).size !== targets.length) throw new HostConfigError('host_config_invalid_state', 'a transaction names one path twice');
-  const admitted = targets.map((path) => hostPath(paths, path));
-  const held = unresolved.filter((entry) => targets.includes(entry.path));
+  const admitted = targets.map((path) => resolveHostPath(paths, path));
+  const distinct = new Set<string>(admitted);
+  if (distinct.size !== admitted.length) throw new HostConfigError('host_config_invalid_state', 'a transaction names one path twice');
+  const held = unresolved.filter((entry) => distinct.has(entry.path));
   if (held.length) throw unresolvedError(held);
   return admitted;
 }
 
 /** Write the preimage copies, then fsync the record; no target write happens before this returns. */
 function recordTransaction(paths: HostConfigPaths, record: TransactionRecord, preimages: ReadonlyMap<string, Buffer>): void {
-  ensurePrivateDirectory(paths, transactionDirectory(paths, record.txn));
+  ensurePrivateDirectory(transactionDirectory(paths, record.txn));
   for (const entry of record.files) {
     const bytes = preimages.get(entry.path);
     if (entry.preimage_copy && bytes) writePreimageCopy(paths, record.txn, entry.preimage_copy, bytes);
@@ -332,8 +336,8 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
   const attempted = new Set<string>();
   try {
     for (const { entry, plan, mode } of work) {
-      createDirectories(paths, entry.created_dirs);
-      replaceTarget(paths, entry.path, txn, Buffer.from(plan.result, 'utf8'), mode, entry.preimage, () => {
+      createDirectories(entry.created_dirs);
+      replaceTarget(entry.path, txn, Buffer.from(plan.result, 'utf8'), mode, entry.preimage, () => {
         faults?.at('before-rename', entry.path);
         attempted.add(entry.path);
       });
@@ -353,7 +357,7 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
   return { txn, written: work.map((item) => item.entry.path), skipped };
 }
 
-function delegateWrite(paths: HostConfigPaths, declaredPaths: readonly string[], run: () => void, faults: HostConfigFaults | undefined): HostConfigDelegateResult {
+function delegateWrite(paths: HostConfigPaths, declaredPaths: readonly string[], run: (destinations: readonly HostPath[]) => void, faults: HostConfigFaults | undefined): HostConfigDelegateResult {
   prepareStorage(paths);
   const targets = admitPaths(paths, declaredPaths, recoverAll(paths));
   const txn = newTransactionId();
@@ -370,7 +374,7 @@ function delegateWrite(paths: HostConfigPaths, declaredPaths: readonly string[],
 
   const changed: HostPath[] = [];
   try {
-    run();
+    run(targets);
     // The journal holds every declared path with its observed outcome before the commit, so settlement never guesses.
     const observed = entries.map((entry): TransactionFileEntry => {
       const result = expectedOf(observeFile(entry.path).observation, entry.path);

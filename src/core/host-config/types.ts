@@ -11,6 +11,9 @@ export type HostConfigErrorCode =
   | 'host_config_target_changed'
   | 'host_config_unresolved_external_change'
   | 'host_config_invalid_path'
+  | 'host_config_dangling_link'
+  | 'host_config_link_loop'
+  | 'host_config_hard_link'
   | 'host_config_invalid_state';
 
 export class HostConfigError extends Error {
@@ -24,7 +27,7 @@ export class HostConfigError extends Error {
 export type Sha256 = string;
 
 declare const hostPathBrand: unique symbol;
-/** An absolute path under HOME, outside `~/.repo-harness/`, that passed the store's path check. */
+/** A path resolved once with `realpathSync.native`: under the canonical HOME and outside `~/.repo-harness/`. */
 export type HostPath = string & { readonly [hostPathBrand]: true };
 
 declare const preimageCopyBrand: unique symbol;

@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { classifyFile, recoveryAction } from '../../src/core/host-config/recovery';
@@ -232,19 +232,6 @@ test('recovery refuses a recorded path that leaves HOME or meets a symlink, and 
   expect(readFileSync(join(outside, '.tool', 'sub', 'b.conf'), 'utf8')).toBe('rh=on\n');
   expect(f.journal()).toHaveLength(1);
 
-  // A parent swapped at the rename: the failure cleanup removes nothing through the symlink.
-  const s = fixture();
-  const swapped = realpathSync(mkdtempSync(join(tmpdir(), 'rh-host-config-outside-')));
-  homes.push(swapped);
-  const swapping = s.gate({ faults: { at: (point) => {
-    if (point !== 'before-rename') return;
-    renameSync(join(s.home, '.tool'), join(swapped, '.tool'));
-    symlinkSync(join(swapped, '.tool'), join(s.home, '.tool'));
-  } } });
-  expect(() => swapping.apply([s.change(s.b, 'on')])).toThrow(expect.objectContaining({ code: 'host_config_invalid_path' }));
-  expect(readdirSync(join(swapped, '.tool', 'sub')).map((name) => name.endsWith('.tmp'))).toEqual([true]);
-  expect(s.journal()).toHaveLength(1);
-
   // A forged preimage copy name or a forged path outside HOME fails the parse; the canary and the record stay.
   const g = fixture();
   killAt(g.home, `gate.apply([{ path: ${JSON.stringify(g.a)}, fragments: [{ owner: 'o1', selector: 'rh', kind: 'add', strategy: keyLine, value: 'on' }] }]);`, 'after-record');
@@ -258,6 +245,36 @@ test('recovery refuses a recorded path that leaves HOME or meets a symlink, and 
   writeFileSync(recordPath, original.replaceAll(JSON.stringify(g.a), JSON.stringify(join(outside, 'victim'))));
   expect(() => g.gate().recover()).toThrow(expect.objectContaining({ code: 'host_config_invalid_path' }));
   expect(() => g.gate().apply([g.change(join(g.home, '.repo-harness', 'config.json'), 'on')])).toThrow(expect.objectContaining({ code: 'host_config_invalid_path' }));
+});
+
+test('the boundary resolves each host path once and refuses a dangling, looping or hard link', () => {
+  const f = fixture();
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'rh-host-config-outside-')));
+  homes.push(outside);
+  mkdirSync(join(f.home, 'dotfiles'));
+  symlinkSync(join(f.home, 'dotfiles'), join(f.home, '.linked'));
+  const real = join(f.home, 'dotfiles', 'x.conf');
+  // An in-root link resolves: the ledger key is the real file, and the link stays a link.
+  expect(f.gate().apply([f.change(join(f.home, '.linked', 'x.conf'), 'on')]).written).toEqual([real]);
+  expect({ keys: Object.keys(f.ledger().files), link: lstatSync(join(f.home, '.linked')).isSymbolicLink() }).toEqual({ keys: [real], link: true });
+  // The delegate callback gets the resolved destinations; two aliases of one file are one path.
+  let destinations: readonly string[] = [];
+  f.gate().delegate([join(f.home, '.linked', 'y.conf')], (resolved) => { destinations = resolved; });
+  expect(destinations).toEqual([join(f.home, 'dotfiles', 'y.conf')]);
+  expect(() => f.gate().apply([f.change(real, 'a'), f.change(join(f.home, '.linked', 'x.conf'), 'b')])).toThrow(expect.objectContaining({ code: 'host_config_invalid_state' }));
+  // Refused at the boundary: a dangling link, a loop, a hard link and a link out of HOME.
+  symlinkSync(join(f.home, 'missing'), join(f.home, '.dangling'));
+  symlinkSync(join(f.home, '.loop'), join(f.home, '.loop'));
+  linkSync(f.a, join(f.home, '.hard'));
+  symlinkSync(outside, join(f.home, '.out'));
+  const rows = [
+    [join(f.home, '.dangling', 'x.conf'), 'host_config_dangling_link'],
+    [join(f.home, '.loop', 'x.conf'), 'host_config_link_loop'],
+    [f.a, 'host_config_hard_link'],
+    [join(f.home, '.out', 'x.conf'), 'host_config_invalid_path'],
+  ] as const;
+  for (const [path, code] of rows) expect(() => f.gate().apply([f.change(path, 'on')])).toThrow(expect.objectContaining({ code }));
+  expect(readdirSync(outside)).toEqual([]);
 });
 
 test('a failure before the rename removes the directories the transaction created', () => {

@@ -1,6 +1,6 @@
-import { closeSync, constants, fchmodSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, fchmodSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { sha256Hex, sha256Prefixed } from '../../core/evidence/sha256';
 import { matchesExpected } from '../../core/host-config/recovery';
 import {
@@ -16,24 +16,18 @@ import {
 } from '../../core/host-config/types';
 import { createFileExclusiveDurably, publishFileByRename, retryWindowsSharingRace, syncDirectoryDurably } from '../atomic-append';
 import { globalConfigurationPath } from '../configuration/global-configuration';
-import { assertNoSymlinkInPath } from '../fs-transaction';
 import { isPathInside } from '../path-containment';
 
-/** Storage beside the global configuration file: `~/.repo-harness/config/`. */
+/** Storage beside the global configuration file: `~/.repo-harness/config/`. Every path here is resolved. */
 export interface HostConfigPaths {
+  /** The canonical HOME: the allowed root for every host path. */
   readonly home: string;
-  /** `~/.repo-harness/`: no host target may lie inside it. */
+  /** `~/.repo-harness/`, resolved: no host target may lie inside it. */
   readonly harness: string;
   readonly root: string;
   readonly ledger: string;
   readonly vault: string;
   readonly journal: string;
-}
-
-export function hostConfigPaths(env: NodeJS.ProcessEnv): HostConfigPaths {
-  const harness = dirname(globalConfigurationPath(env));
-  const root = join(harness, 'config');
-  return { home: dirname(harness), harness, root, ledger: join(root, 'ledger.json'), vault: join(root, 'vault'), journal: join(root, 'journal') };
 }
 
 function invalidState(message: string): HostConfigError {
@@ -44,44 +38,9 @@ function invalidPath(message: string): HostConfigError {
   return new HostConfigError('host_config_invalid_path', message);
 }
 
-/**
- * The one boundary for host paths, from a caller or from a journal record: an
- * absolute normalized path under HOME, outside `~/.repo-harness/`, with no
- * symlink on the way.
- */
-export function hostPath(paths: HostConfigPaths, path: unknown): HostPath {
-  if (typeof path !== 'string') throw invalidPath(`not a host configuration path: ${JSON.stringify(path)}`);
-  const rel = relative(paths.home, path);
-  if (!isAbsolute(path) || resolve(path) !== path || !rel || rel.startsWith('..') || isAbsolute(rel) || isPathInside(paths.harness, path)) {
-    throw invalidPath(`not a host configuration path: ${path}`);
-  }
-  const symlink = assertNoSymlinkInPath(paths.home, rel);
-  if (symlink) throw invalidPath(symlink);
-  return path as HostPath;
-}
-
 const FAIL_CLOSED_CODES = new Set(['ENOTDIR', 'EEXIST', 'ELOOP']);
 
-/**
- * The one way this module changes the filesystem. `target` must lie strictly
- * inside `root`, and the parent chain from HOME must hold no symlink right
- * before the call; a parent may have changed since the path was admitted. A
- * failed check throws before anything changes. ENOTDIR, EEXIST and ELOOP
- * become `host_config_invalid_path`, so one odd path fails closed with a
- * structured error.
- */
-function guarded<T>(paths: HostConfigPaths, root: string, target: string, change: () => T): T {
-  if (resolve(target) !== target || target === root || !isPathInside(root, target) || !isPathInside(paths.home, root)) {
-    throw invalidPath(`${target} is not inside ${root}`);
-  }
-  const parent = dirname(target);
-  if (parent !== paths.home) {
-    const symlink = assertNoSymlinkInPath(paths.home, relative(paths.home, parent));
-    if (symlink) throw invalidPath(symlink);
-  }
-  return mapFsError(target, change);
-}
-
+/** ENOTDIR, EEXIST and ELOOP from a filesystem call become `host_config_invalid_path`, so an odd path fails closed. */
 function mapFsError<T>(target: string, call: () => T): T {
   try { return call(); }
   catch (error) {
@@ -96,15 +55,86 @@ function syncDirectory(directory: string): void {
   mapFsError(directory, () => syncDirectoryDurably(directory));
 }
 
-/** A host target, its temporary file or a directory created for it: under HOME and outside `~/.repo-harness/`. */
-function guardedHost<T>(paths: HostConfigPaths, target: string, change: () => T): T {
-  if (isPathInside(paths.harness, target)) throw invalidPath(`not a host configuration path: ${target}`);
-  return guarded(paths, paths.home, target, change);
+/**
+ * Resolve a path once: `realpathSync.native` of the deepest existing
+ * ancestor, plus the missing tail. That tells an absent path from a dangling
+ * link, and a dangling or looping link is refused by name. The result must
+ * lie strictly inside the canonical `root`. Later filesystem calls use the
+ * result as is.
+ */
+function resolveUnder(root: string, path: string): string {
+  if (!isAbsolute(path) || resolve(path) !== path) throw invalidPath(`not an absolute normalized path: ${path}`);
+  const missing: string[] = [];
+  let current = path;
+  for (;;) {
+    try { lstatSync(current); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      // A missing entry, a file or a loop on the way: walk up to the component that exists and resolve that.
+      if (code !== 'ENOENT' && code !== 'ENOTDIR' && code !== 'ELOOP') throw error;
+      if (dirname(current) === current) throw invalidPath(`no existing ancestor: ${path}`);
+      missing.unshift(basename(current));
+      current = dirname(current);
+      continue;
+    }
+    let real: string;
+    try { real = realpathSync.native(current); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') throw new HostConfigError('host_config_dangling_link', `a link on the path has no target: ${current}`, { cause: error });
+      if (code === 'ELOOP') throw new HostConfigError('host_config_link_loop', `a link on the path loops: ${current}`, { cause: error });
+      throw error;
+    }
+    if (missing.length > 0 && !statSync(real).isDirectory()) throw invalidPath(`not a directory: ${current}`);
+    const resolved = missing.length > 0 ? join(real, ...missing) : real;
+    if (resolved === root || !isPathInside(root, resolved)) throw invalidPath(`${path} resolves to ${resolved}, outside ${root}`);
+    return resolved;
+  }
 }
 
-/** Create a 0700 directory under HOME; refuse a symlink or a non-directory on the way. */
-export function ensurePrivateDirectory(paths: HostConfigPaths, directory: string): void {
-  const created = guarded(paths, paths.harness, directory, () => mkdirSync(directory, { recursive: true, mode: 0o700 }));
+export function hostConfigPaths(env: NodeJS.ProcessEnv): HostConfigPaths {
+  const lexicalHarness = dirname(globalConfigurationPath(env));
+  const home = mapFsError(dirname(lexicalHarness), () => realpathSync.native(dirname(lexicalHarness)));
+  const harness = resolveUnder(home, join(home, basename(lexicalHarness)));
+  const root = resolveUnder(harness, join(harness, 'config'));
+  return {
+    home,
+    harness,
+    root,
+    ledger: resolveUnder(root, join(root, 'ledger.json')),
+    vault: resolveUnder(root, join(root, 'vault')),
+    journal: resolveUnder(root, join(root, 'journal')),
+  };
+}
+
+/** A resolved location under the canonical HOME and outside `~/.repo-harness/`. */
+function hostLocation(paths: HostConfigPaths, path: string): string {
+  const resolved = resolveUnder(paths.home, path);
+  if (isPathInside(paths.harness, resolved)) throw invalidPath(`not a host configuration path: ${path}`);
+  return resolved;
+}
+
+/**
+ * The one boundary for a host file that a caller names: resolved once, and an
+ * existing file must have one link, because a rename would split a hard link.
+ */
+export function resolveHostPath(paths: HostConfigPaths, path: unknown): HostPath {
+  if (typeof path !== 'string') throw invalidPath(`not a host configuration path: ${JSON.stringify(path)}`);
+  const resolved = hostLocation(paths, path);
+  const stat = lstatSync(resolved, { throwIfNoEntry: false });
+  if (stat?.isFile() && stat.nlink !== 1) throw new HostConfigError('host_config_hard_link', `the file has ${stat.nlink} links: ${resolved}`);
+  return resolved as HostPath;
+}
+
+/** A path read back from a journal record must already be its own resolution. */
+function recordedHostPath(paths: HostConfigPaths, txn: string, path: unknown): HostPath {
+  if (typeof path !== 'string' || hostLocation(paths, path) !== path) throw invalidPath(`${txn}: the recorded path no longer resolves to itself: ${String(path)}`);
+  return path as HostPath;
+}
+
+/** Create a 0700 storage directory and check that a directory, not a link, is there before anything is published in it. */
+export function ensurePrivateDirectory(directory: string): void {
+  const created = mapFsError(directory, () => mkdirSync(directory, { recursive: true, mode: 0o700 }));
   if (!lstatSync(directory).isDirectory()) throw invalidPath(`not a directory: ${directory}`);
   if (created !== undefined) syncDirectory(dirname(created));
 }
@@ -141,22 +171,21 @@ export function targetTemporary(path: string, txn: string): string {
 }
 
 /** Remove a leftover temporary file of this transaction beside its target. */
-export function removeTemporary(paths: HostConfigPaths, path: HostPath, txn: string): void {
+export function removeTemporary(path: HostPath, txn: string): void {
   const temporary = targetTemporary(path, txn);
-  guardedHost(paths, temporary, () => {
-    const { observation } = observeFile(temporary);
-    if (observation.existed && observation.type === 'file') unlinkSync(temporary);
-  });
+  const { observation } = observeFile(temporary);
+  if (observation.existed && observation.type === 'file') mapFsError(temporary, () => unlinkSync(temporary));
 }
 
 /**
- * Replace the target: temp, fsync, re-read, rename, directory fsync. The
- * re-read must still match `expected`; otherwise nothing is written.
+ * Replace the target: a `wx` temporary file in the resolved directory, fsync,
+ * re-read, rename, directory fsync. The re-read must still match `expected`;
+ * otherwise nothing is written.
  */
-export function replaceTarget(paths: HostConfigPaths, path: HostPath, txn: string, bytes: Buffer, mode: number, expected: ExpectedFile, beforeRename: () => void): void {
+export function replaceTarget(path: HostPath, txn: string, bytes: Buffer, mode: number, expected: ExpectedFile, beforeRename: () => void): void {
   const temporary = targetTemporary(path, txn);
-  removeTemporary(paths, path, txn);
-  const fd = guardedHost(paths, temporary, () => openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600));
+  removeTemporary(path, txn);
+  const fd = mapFsError(temporary, () => openSync(temporary, 'wx', 0o600));
   try {
     try {
       if (writeSync(fd, bytes) !== bytes.byteLength) throw invalidState(`partial write: ${path}`);
@@ -167,18 +196,16 @@ export function replaceTarget(paths: HostConfigPaths, path: HostPath, txn: strin
       throw new HostConfigError('host_config_target_changed', `the target changed before the write: ${path}`);
     }
     beforeRename();
-    guardedHost(paths, path, () => retryWindowsSharingRace(() => renameSync(temporary, path)));
+    mapFsError(path, () => retryWindowsSharingRace(() => renameSync(temporary, path)));
     syncDirectory(dirname(path));
-  } finally { removeTemporary(paths, path, txn); }
+  } finally { removeTemporary(path, txn); }
 }
 
-export function removeTarget(paths: HostConfigPaths, path: HostPath, expected: ExpectedFile): void {
-  guardedHost(paths, path, () => {
-    if (!matchesExpected(observeFile(path).observation, expected)) {
-      throw new HostConfigError('host_config_target_changed', `the target changed before the restore: ${path}`);
-    }
-    retryWindowsSharingRace(() => unlinkSync(path));
-  });
+export function removeTarget(path: HostPath, expected: ExpectedFile): void {
+  if (!matchesExpected(observeFile(path).observation, expected)) {
+    throw new HostConfigError('host_config_target_changed', `the target changed before the restore: ${path}`);
+  }
+  mapFsError(path, () => retryWindowsSharingRace(() => unlinkSync(path)));
   syncDirectory(dirname(path));
 }
 
@@ -192,9 +219,11 @@ export function missingDirectories(paths: HostConfigPaths, path: HostPath): Host
   return missing;
 }
 
-export function createDirectories(paths: HostConfigPaths, directories: readonly HostPath[]): void {
+/** Create each directory and check that a directory, not a link, is there before the file is published. */
+export function createDirectories(directories: readonly HostPath[]): void {
   for (const directory of directories) {
-    guardedHost(paths, directory, () => mkdirSync(directory, { mode: 0o700 }));
+    mapFsError(directory, () => mkdirSync(directory, { mode: 0o700 }));
+    if (!lstatSync(directory).isDirectory()) throw invalidPath(`not a directory: ${directory}`);
     syncDirectory(dirname(directory));
   }
 }
@@ -203,10 +232,10 @@ export function createDirectories(paths: HostConfigPaths, directories: readonly 
  * Remove the directories a transaction created, innermost first; a directory
  * that holds other content stays. Returns the directories that still exist.
  */
-export function removeCreatedDirectories(paths: HostConfigPaths, directories: readonly HostPath[]): HostPath[] {
+export function removeCreatedDirectories(directories: readonly HostPath[]): HostPath[] {
   const ordered = [...directories].reverse();
   for (const [index, directory] of ordered.entries()) {
-    const outcome = guardedHost(paths, directory, () => {
+    const outcome = mapFsError(directory, () => {
       try { rmdirSync(directory); return 'removed'; }
       catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
@@ -222,8 +251,13 @@ export function removeCreatedDirectories(paths: HostConfigPaths, directories: re
   return [];
 }
 
-function publishPrivate(paths: HostConfigPaths, root: string, path: string, value: unknown): void {
-  guarded(paths, root, path, () => publishFileByRename(path, Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8'), `${path}.${randomUUID()}.tmp`));
+/** Publish by a `wx` temporary file in the same resolved storage directory, then rename. */
+function publish(target: string, bytes: Buffer): void {
+  mapFsError(target, () => publishFileByRename(target, bytes, `${target}.${randomUUID()}.tmp`));
+}
+
+function publishPrivate(path: string, value: unknown): void {
+  publish(path, Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8'));
 }
 
 // ---- ledger -------------------------------------------------------------
@@ -271,7 +305,7 @@ export function readLedger(paths: HostConfigPaths): HostConfigLedger {
 
 /** The commit point: one atomic replace of `ledger.json`. */
 export function writeLedger(paths: HostConfigPaths, ledger: HostConfigLedger): void {
-  publishPrivate(paths, paths.root, paths.ledger, ledger);
+  publishPrivate(paths.ledger, ledger);
 }
 
 // ---- vault --------------------------------------------------------------
@@ -284,7 +318,7 @@ export function putVault(paths: HostConfigPaths, bytes: Buffer): Sha256 {
   if (observation.existed) {
     if (stored === null || sha256Hex(stored) !== hex) throw invalidState(`the vault entry does not match its name: ${target}`);
   } else {
-    guarded(paths, paths.vault, target, () => publishFileByRename(target, bytes, `${target}.${randomUUID()}.tmp`));
+    publish(target, bytes);
   }
   return `sha256:${hex}`;
 }
@@ -303,8 +337,8 @@ export function preimageCopyName(index: number): PreimageCopyName {
 }
 
 export function writePreimageCopy(paths: HostConfigPaths, txn: string, name: PreimageCopyName, bytes: Buffer): void {
-  const directory = transactionDirectory(paths, txn);
-  guarded(paths, directory, join(directory, name), () => createFileExclusiveDurably(join(directory, name), bytes));
+  const target = join(transactionDirectory(paths, txn), name);
+  mapFsError(target, () => createFileExclusiveDurably(target, bytes));
 }
 
 /** A missing or unreadable copy is an invalid state of this record only; recovery of other records goes on. */
@@ -318,20 +352,19 @@ export function readPreimageCopy(paths: HostConfigPaths, txn: string, name: Prei
 
 /** fsync the record, its directory and the journal before the first target write. */
 export function writeTransactionRecord(paths: HostConfigPaths, record: TransactionRecord): void {
-  const directory = transactionDirectory(paths, record.txn);
-  publishPrivate(paths, directory, join(directory, RECORD), record);
+  publishPrivate(join(transactionDirectory(paths, record.txn), RECORD), record);
   syncDirectory(paths.journal);
 }
 
 export function removeTransaction(paths: HostConfigPaths, txn: string): void {
   const directory = transactionDirectory(paths, txn);
-  guarded(paths, paths.journal, directory, () => rmSync(directory, { recursive: true, force: true }));
+  mapFsError(directory, () => rmSync(directory, { recursive: true, force: true }));
   syncDirectory(paths.journal);
 }
 
 export function removePreimageCopy(paths: HostConfigPaths, txn: string, name: PreimageCopyName): void {
-  const directory = transactionDirectory(paths, txn);
-  guarded(paths, directory, join(directory, name), () => rmSync(join(directory, name), { force: true }));
+  const target = join(transactionDirectory(paths, txn), name);
+  mapFsError(target, () => rmSync(target, { force: true }));
 }
 
 function validExpected(value: unknown): boolean {
@@ -339,8 +372,9 @@ function validExpected(value: unknown): boolean {
 }
 
 /**
- * Parse a record once into typed values: host paths, created directories
- * above their file, and preimage copy names that the gate writes.
+ * Parse a record once into typed values: host paths that still resolve to
+ * themselves, created directories above their file, and preimage copy names
+ * that the gate writes.
  */
 function parseRecord(paths: HostConfigPaths, txn: string, raw: string): TransactionRecord {
   let value: unknown;
@@ -355,12 +389,12 @@ function parseRecord(paths: HostConfigPaths, txn: string, raw: string): Transact
   if (!valid) throw invalidState(`invalid transaction record: ${txn}`);
   const record = value as unknown as TransactionRecord;
   const files = record.files.map((entry) => {
-    const path = hostPath(paths, entry.path);
+    const path = recordedHostPath(paths, txn, entry.path);
     if (entry.preimage_copy !== null && !PREIMAGE_COPY.test(entry.preimage_copy)) {
       throw invalidPath(`${txn}: not a preimage copy name: ${JSON.stringify(entry.preimage_copy)}`);
     }
     const createdDirs = entry.created_dirs.map((directory) => {
-      const parsed = hostPath(paths, directory);
+      const parsed = recordedHostPath(paths, txn, directory);
       if (!isPathInside(parsed, path) || parsed === path) throw invalidPath(`${txn}: ${parsed} is not a directory above ${path}`);
       return parsed;
     });
