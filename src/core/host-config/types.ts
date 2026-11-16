@@ -27,6 +27,10 @@ declare const hostPathBrand: unique symbol;
 /** An absolute path under HOME, outside `~/.repo-harness/`, that passed the store's path check. */
 export type HostPath = string & { readonly [hostPathBrand]: true };
 
+declare const preimageCopyBrand: unique symbol;
+/** `preimage-<n>`: the only file name the gate writes for a preimage copy inside a transaction directory. */
+export type PreimageCopyName = string & { readonly [preimageCopyBrand]: true };
+
 export type FileBaseline =
   | { readonly state: 'known'; readonly existed: false }
   | { readonly state: 'known'; readonly existed: true; readonly type: 'file'; readonly mode: number; readonly sha256: Sha256 }
@@ -91,7 +95,7 @@ export interface TransactionFileEntry {
   readonly path: HostPath;
   readonly preimage: ExpectedFile;
   /** File name inside the transaction directory; null when the preimage is absent. */
-  readonly preimage_copy: string | null;
+  readonly preimage_copy: PreimageCopyName | null;
   /**
    * A delegated write starts with null, because the gate does not know the
    * result in advance. After the writer runs, the gate records the observed

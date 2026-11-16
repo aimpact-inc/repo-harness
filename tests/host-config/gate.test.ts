@@ -194,6 +194,14 @@ test('a committed transaction always settles: a delegated unchanged path is a no
   expect(f.gate().recover()).toEqual({ unresolved: [] });
   expect(f.journal()).toEqual([]);
   expect(f.ledger().files[f.a].external_change).toBe(true);
+
+  // An outside edit before a delegate that leaves the path unchanged is still an external change; committed stays.
+  const g = fixture();
+  g.gate().apply([g.change(g.a, 'on')]);
+  const committed = g.ledger().files[g.a].committed;
+  writeFileSync(g.a, 'keep=1\nrh=on\nuser=1\n');
+  g.gate().delegate([g.a], () => {});
+  expect(g.ledger().files[g.a]).toMatchObject({ external_change: true, committed });
 });
 
 test('recovery refuses a recorded path that leaves HOME or meets a symlink, and keeps the record', () => {
@@ -207,11 +215,30 @@ test('recovery refuses a recorded path that leaves HOME or meets a symlink, and 
   expect(readFileSync(join(outside, '.tool', 'sub', 'b.conf'), 'utf8')).toBe('rh=on\n');
   expect(f.journal()).toHaveLength(1);
 
-  // A forged record that names a path outside HOME fails the same boundary.
+  // A parent swapped at the rename: the failure cleanup removes nothing through the symlink.
+  const s = fixture();
+  const swapped = realpathSync(mkdtempSync(join(tmpdir(), 'rh-host-config-outside-')));
+  homes.push(swapped);
+  const swapping = s.gate({ faults: { at: (point) => {
+    if (point !== 'before-rename') return;
+    renameSync(join(s.home, '.tool'), join(swapped, '.tool'));
+    symlinkSync(join(swapped, '.tool'), join(s.home, '.tool'));
+  } } });
+  expect(() => swapping.apply([s.change(s.b, 'on')])).toThrow(expect.objectContaining({ code: 'host_config_invalid_path' }));
+  expect(readdirSync(join(swapped, '.tool', 'sub')).map((name) => name.endsWith('.tmp'))).toEqual([true]);
+  expect(s.journal()).toHaveLength(1);
+
+  // A forged preimage copy name or a forged path outside HOME fails the parse; the canary and the record stay.
   const g = fixture();
   killAt(g.home, `gate.apply([{ path: ${JSON.stringify(g.a)}, fragments: [{ owner: 'o1', selector: 'rh', kind: 'add', strategy: keyLine, value: 'on' }] }]);`, 'after-record');
   const recordPath = join(g.root, 'journal', g.journal()[0]!, 'record.json');
-  writeFileSync(recordPath, readFileSync(recordPath, 'utf8').replaceAll(JSON.stringify(g.a), JSON.stringify(join(outside, 'victim'))));
+  const original = readFileSync(recordPath, 'utf8');
+  const canary = join(g.home, '.canary-home');
+  writeFileSync(canary, 'canary\n');
+  writeFileSync(recordPath, original.replace('"preimage-0"', JSON.stringify('../../../../.canary-home')));
+  expect(() => g.gate().recover()).toThrow(expect.objectContaining({ code: 'host_config_invalid_path' }));
+  expect({ canary: readFileSync(canary, 'utf8'), journal: g.journal().length }).toEqual({ canary: 'canary\n', journal: 1 });
+  writeFileSync(recordPath, original.replaceAll(JSON.stringify(g.a), JSON.stringify(join(outside, 'victim'))));
   expect(() => g.gate().recover()).toThrow(expect.objectContaining({ code: 'host_config_invalid_path' }));
   expect(() => g.gate().apply([g.change(join(g.home, '.repo-harness', 'config.json'), 'on')])).toThrow(expect.objectContaining({ code: 'host_config_invalid_path' }));
 });
@@ -222,6 +249,19 @@ test('a failure before the rename removes the directories the transaction create
   expect(() => failing.apply([f.change(f.b, 'on')])).toThrow('temp write failed');
   expect(existsSync(join(f.home, '.tool'))).toBe(false);
   expect(f.journal()).toEqual([]);
+
+  // Two files share a new directory and one stays unresolved: the directory goes once that file is resolved.
+  const c = join(f.home, '.tool', 'sub', 'c.conf');
+  const racing = f.gate({ faults: { at: (point, path) => {
+    if (point !== 'after-rename' || path !== c) return;
+    writeFileSync(c, 'other writer\n');
+    throw new Error('late failure');
+  } } });
+  expect(() => racing.apply([f.change(f.b, 'on'), f.change(c, 'on')])).toThrow(expect.objectContaining({ code: 'host_config_unresolved_external_change' }));
+  expect(readdirSync(join(f.home, '.tool', 'sub'))).toEqual(['c.conf']);
+  rmSync(c);
+  expect(f.gate().recover()).toEqual({ unresolved: [] });
+  expect({ tool: existsSync(join(f.home, '.tool')), journal: f.journal() }).toEqual({ tool: false, journal: [] });
 });
 
 test('a commit records baseline, fragments and the override backup, and leaves no preimage in the journal', () => {

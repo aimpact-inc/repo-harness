@@ -15,6 +15,7 @@ import {
   type TransactionRecord,
 } from '../../core/host-config/types';
 import { globalRuntimeScope, withRuntimeTransactionContext, type RuntimeTransactionContext } from '../locking/runtime-transaction-lock';
+import { isPathInside } from '../path-containment';
 import {
   createDirectories,
   ensurePrivateDirectory,
@@ -25,6 +26,7 @@ import {
   missingDirectories,
   observeFile,
   platformMode,
+  preimageCopyName,
   putVault,
   readLedger,
   readPreimageCopy,
@@ -101,10 +103,6 @@ function newTransactionId(): string {
   return `txn-${Date.now()}-${process.pid}-${randomUUID().slice(0, 8)}`;
 }
 
-function preimageCopyName(index: number): string {
-  return `preimage-${index}`;
-}
-
 function unresolvedError(unresolved: readonly UnresolvedHostConfigChange[], cause?: unknown): HostConfigError {
   const list = unresolved.map((entry) => `${entry.path} (${entry.txn})`).join(', ');
   return new HostConfigError('host_config_unresolved_external_change', `another writer changed a host file; the preimage stays in the journal: ${list}`, { cause });
@@ -125,7 +123,8 @@ function withLedger(ledger: HostConfigLedger, files: Record<string, FileRecord>,
  * whose rename may have run; recovery after a kill passes null and checks all.
  * A file at its preimage in an uncommitted transaction also loses the
  * directories that the transaction created, when they are still empty.
- * Returns the files that stay unresolved; the record keeps only those.
+ * Returns the files that stay unresolved; the record keeps only those, and a
+ * created directory that an unresolved file still holds moves to that entry.
  */
 function settleTransaction(paths: HostConfigPaths, record: TransactionRecord, attempted: ReadonlySet<string> | null): UnresolvedHostConfigChange[] {
   const ledger = readLedger(paths);
@@ -133,6 +132,7 @@ function settleTransaction(paths: HostConfigPaths, record: TransactionRecord, at
   const files = { ...ledger.files };
   let ledgerChanged = false;
   const remaining: TransactionFileEntry[] = [];
+  const keptDirs: HostPath[] = [];
   // Reverse order: a file that a later entry put in a new directory goes before that directory is removed.
   for (const entry of [...record.files].reverse()) {
     if (entry.intended === 'unchanged') continue;
@@ -161,7 +161,7 @@ function settleTransaction(paths: HostConfigPaths, record: TransactionRecord, at
         continue;
       }
     }
-    if (!committed) removeCreatedDirectories(paths, entry.created_dirs);
+    if (!committed) keptDirs.push(...removeCreatedDirectories(paths, entry.created_dirs));
   }
   if (ledgerChanged) writeLedger(paths, withLedger(ledger, files, ledger.fragments));
   if (remaining.length === 0) {
@@ -171,8 +171,13 @@ function settleTransaction(paths: HostConfigPaths, record: TransactionRecord, at
   for (const entry of record.files) {
     if (entry.preimage_copy && !remaining.includes(entry)) removePreimageCopy(paths, record.txn, entry.preimage_copy);
   }
-  writeTransactionRecord(paths, { ...record, stage: 'unresolved', files: remaining });
-  return remaining.map((entry) => ({ code: 'host_config_unresolved_external_change', txn: record.txn, path: entry.path }));
+  // A kept directory above no unresolved file holds other content, so it is no longer the transaction's to remove.
+  const unresolved = record.files.filter((entry) => remaining.includes(entry)).map((entry) => {
+    const carried = keptDirs.filter((directory) => isPathInside(directory, entry.path) && !entry.created_dirs.includes(directory));
+    return carried.length === 0 ? entry : { ...entry, created_dirs: [...entry.created_dirs, ...carried].sort((a, b) => a.length - b.length) };
+  });
+  writeTransactionRecord(paths, { ...record, stage: 'unresolved', files: unresolved });
+  return unresolved.map((entry) => ({ code: 'host_config_unresolved_external_change', txn: record.txn, path: entry.path }));
 }
 
 function recoverAll(paths: HostConfigPaths): UnresolvedHostConfigChange[] {
@@ -367,7 +372,13 @@ function delegateWrite(paths: HostConfigPaths, declaredPaths: readonly string[],
     const ledger = readLedger(paths);
     const files = { ...ledger.files };
     for (const entry of observed) {
-      if (entry.intended === null || entry.intended === 'unchanged') continue;
+      if (entry.intended === null) continue;
+      if (entry.intended === 'unchanged') {
+        // The path keeps its committed result, but an outside edit before the delegate is still recorded.
+        const recorded = ledger.files[entry.path];
+        if (recorded && !sameExpected(entry.preimage, expectedFromCommitted(recorded.committed))) files[entry.path] = { ...recorded, external_change: true };
+        continue;
+      }
       changed.push(entry.path);
       files[entry.path] = nextFileRecord(ledger.files[entry.path], entry.preimage,
         entry.intended.existed ? { type: 'file', sha256: entry.intended.sha256, mode: entry.intended.mode, txn } : { type: 'absent', txn }, [], false);
