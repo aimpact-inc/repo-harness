@@ -181,6 +181,7 @@ describe('retired brainRoot configuration key', () => {
     const rows: Array<readonly [string, string, string]> = [
       ['first member', '{\n    "brainRoot": "/v",\n    "security":   { "mode": "strict" },\n    "custom": [1, 2, 3]\n}\n', '{\n    "security":   { "mode": "strict" },\n    "custom": [1, 2, 3]\n}\n'],
       ['last member', '{\n  "security": { "mode": "strict" },\n  "brainRoot": "/v"\n}\n', '{\n  "security": { "mode": "strict" }\n}\n'],
+      ['nested unique members', '{"brainRoot":"/v","custom":[{"a":1},{"a":2}],"text":"雪 { \\"a\\": 1 }"}\n', '{"custom":[{"a":1},{"a":2}],"text":"雪 { \\"a\\": 1 }"}\n'],
       ['only member', '{\n  "brainRoot": "/v"\n}\n', '{}\n'],
       // A Windows checkout converts LF to CRLF; the renderer keeps its line ending.
       ['CRLF', '{\r\n  "brainRoot": "/v",\r\n  "a": 1\r\n}\r\n', '{\r\n  "a": 1\r\n}\r\n'],
@@ -199,6 +200,25 @@ describe('retired brainRoot configuration key', () => {
         expect(readFileSync(path, 'utf8'), name).toBe(expected);
       } finally { rmSync(home, { recursive: true, force: true }); }
     }
+  });
+
+  test.each([
+    ['duplicate scalar', Buffer.from('{"brainRoot":"/v","custom":1,"custom":2}'), 'duplicate member names'],
+    ['duplicate object', Buffer.from('{"brainRoot":"/v","custom":{"a":1},"custom":{"b":2}}'), 'duplicate member names'],
+    ['duplicate retired key', Buffer.from('{"brainRoot":"/v","brainRoot":"/w"}'), 'duplicate member names'],
+    ['nested duplicate', Buffer.from('{"brainRoot":"/v","custom":{"a":1,"a":2}}'), 'duplicate member names'],
+    ['array-nested escaped duplicate', Buffer.from('{"brainRoot":"/v","custom":[{"a":1,"\\u0061":2}]}'), 'duplicate member names'],
+    ['invalid UTF-8', Buffer.concat([Buffer.from('{"brainRoot":"/v","custom":"'), Buffer.from([0xff]), Buffer.from('"}')]), 'invalid UTF-8'],
+  ])('refuses %s without changing any configuration bytes', (_name, original, reason) => {
+    const home = mkdtempSync(join(tmpdir(), 'repo-harness-brainroot-invalid-'));
+    try {
+      const env = { ...process.env, HOME: home };
+      mkdirSync(join(home, '.repo-harness'), { recursive: true });
+      const path = join(home, '.repo-harness', 'config.json');
+      writeFileSync(path, original);
+      expect(() => removeBrainRootConfiguration(env)).toThrow(reason);
+      expect(readFileSync(path)).toEqual(original);
+    } finally { rmSync(home, { recursive: true, force: true }); }
   });
 
   test('leaves a configuration without the key untouched and fails closed on invalid JSON', () => {
