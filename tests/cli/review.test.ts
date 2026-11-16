@@ -670,6 +670,8 @@ test('collect binds a session by seat, PR and the PR head, across Pi, Claude and
     writeFileSync(join(pi.directory, name), text);
     newer(join(pi.directory, name));
   }
+  // An aborted attempt at the same head (no receipt) is no candidate and causes no ambiguity.
+  writeFileSync(join(pi.directory, 'aborted.jsonl'), line('user', seatPacket('gatekeeper', PUBLISH_HEAD)) + line('assistant', 'I stopped early.'));
   const own = await runCollect(pi);
   expect(own.status, own.stderr).toBe(0);
   expect(JSON.parse(own.stdout)).toMatchObject({ ok: true, head_sha: PUBLISH_HEAD });

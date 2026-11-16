@@ -156,12 +156,17 @@ export function collectReview(input: ReviewCollectInput): ReviewPublishResult {
     throw invalid('the seat session record is missing: no session in ' + piDirectory + ', in ' + claudeDirectory + ' or in a Codex rollout of ' + realCwd + ' holds the review packet of the ' + seat + ' for PR #' + input.prNumber);
   }
   const head = readPrHeadSha(input);
-  const current = bound.filter((session) => parseReviewPacket(session.packet)!.head_sha === head);
-  if (current.length === 0) {
+  const atHead = bound.filter((session) => parseReviewPacket(session.packet)!.head_sha === head);
+  if (atHead.length === 0) {
     throw new ReviewPublishError('review_subject_stale', 'no session of the ' + seat + ' for PR #' + input.prNumber + ' holds a packet for the PR head ' + head + '; nothing was posted', 2);
   }
-  if (current.length > 1) throw invalid(current.length + ' sessions of the ' + seat + ' for PR #' + input.prNumber + ' hold a packet for the PR head ' + head + ': ' + current.map((session) => session.path).join(', '));
-  const receipt = parseReceipt(lastReceiptValue(current[0]!.assistant));
+  // A session that ends with no receipt (an aborted attempt) is no candidate and makes nothing ambiguous.
+  const finished = atHead.flatMap((session) => {
+    try { return [{ session, receipt: parseReceipt(lastReceiptValue(session.assistant)) }]; } catch { return []; }
+  });
+  if (finished.length > 1) throw invalid(finished.length + ' sessions of the ' + seat + ' for PR #' + input.prNumber + ' end with a receipt for the PR head ' + head + ': ' + finished.map(({ session }) => session.path).join(', '));
+  // The one session at the head reports its own error when it holds no valid receipt.
+  const receipt = finished.length === 1 ? finished[0]!.receipt : parseReceipt(lastReceiptValue(atHead[0]!.assistant));
   if (receipt.subject_sha !== head) throw invalid('the receipt names ' + receipt.subject_sha + ', not the packet head ' + head);
   return publishReceipt(input, receipt);
 }
