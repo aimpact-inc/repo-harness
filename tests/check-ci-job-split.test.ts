@@ -863,7 +863,7 @@ describe('single affected verification and daily fallback', () => {
       const result = spawnSync(process.execPath, [join(ROOT, 'scripts/select-ci-coverage.ts')], { cwd: repo, encoding: 'utf8', env: { ...process.env, GITHUB_EVENT_NAME: 'pull_request', GITHUB_EVENT_PATH: event, GITHUB_OUTPUT: output, GITHUB_SHA: head } });
       expect(result.status).toBe(0);
       expect(JSON.parse(readFileSync(join(repo, '.ci-affected-tests.json'), 'utf8'))).toEqual([['tests/feature.test.ts']]);
-      expect(readFileSync(output, 'utf8')).toBe(`mode=affected\nsha=${head}\nnative_oar=false\nhome_isolation=false\n`);
+      expect(readFileSync(output, 'utf8')).toBe(`mode=affected\nsha=${head}\nnative_oar=false\nhome_isolation=false\nledger=true\n`);
     } finally { rmSync(repo, { recursive: true, force: true }); }
   });
 
@@ -932,7 +932,9 @@ describe('single affected verification and daily fallback', () => {
         const result = spawnSync(process.execPath, [join(ROOT, 'scripts/select-ci-coverage.ts')], { cwd: repo, encoding: 'utf8', env: { ...process.env, GITHUB_EVENT_NAME: 'pull_request', GITHUB_EVENT_PATH: event, GITHUB_OUTPUT: output, GITHUB_SHA: head } });
         if (mode === 'error') { expect({ name, failed: result.status !== 0, stderr: result.stderr.includes(message!) }).toEqual({ name, failed: true, stderr: true }); continue; }
         expect({ name, status: result.status }, result.stderr).toEqual({ name, status: 0 });
-        expect({ name, output: readFileSync(output, 'utf8') }).toEqual({ name, output: `mode=${mode}\nsha=${head}\nnative_oar=false\nhome_isolation=false\n` });
+        // Of the documentation-only diffs, only the ledger change ('no reader') selects LedgerEnforcement.
+        const ledger = mode === 'affected' || name === 'no reader';
+        expect({ name, output: readFileSync(output, 'utf8') }).toEqual({ name, output: `mode=${mode}\nsha=${head}\nnative_oar=false\nhome_isolation=false\nledger=${ledger}\n` });
         expect({ name, plan: existsSync(selected) ? JSON.parse(readFileSync(selected, 'utf8')) : null }).toEqual({ name, plan: tests && [tests] });
       }
       // The local affected lane stops after a documentation selection; an affected selection goes on to typecheck.
