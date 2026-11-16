@@ -176,6 +176,10 @@ describe('seat quota routing', () => {
     const exhausted = { ...DEFAULT_SEATS_CONFIG };
     const routes = formatSeatRoutes(exhausted, seatAccountQuotas([codex(97)], exhausted.routing)).split('\n');
     expect(routes).toContain('gatekeeper-deep: none (chatgpt exhausted)');
+    const hyper = seatAccountQuotas([codex(10)], DEFAULT_SEATS_CONFIG.routing);
+    expect(hyper.chatgpt.mode).toBe('hyper');
+    expect(effectiveSeatConfig('gatekeeper-deep', DEFAULT_SEATS_CONFIG, hyper)).toEqual(DEFAULT_SEATS_CONFIG['gatekeeper-deep']);
+    expect(effectiveSeatConfig('gatekeeper', DEFAULT_SEATS_CONFIG, hyper).model).not.toBe(DEFAULT_SEATS_CONFIG['gatekeeper-deep'].model);
   });
 
   test('the credit mode admits the seats it names on an exhausted ChatGPT account with credits at or above the floor', () => {

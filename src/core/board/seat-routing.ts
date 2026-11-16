@@ -65,7 +65,8 @@ export function seatState(id: SeatId, seat: SeatConfigV1, quota: SeatAccountQuot
 export function effectiveSeatConfig<Id extends SeatId>(id: Id, seats: SeatsConfigV1, quota: SeatAccountQuotas): SeatsConfigV1[Id];
 export function effectiveSeatConfig(id: SeatId, seats: SeatsConfigV1, quota: SeatAccountQuotas): SeatConfigV1 | null {
   const seat = seats[id];
-  if (seat === null) return seat;
+  // gatekeeper-deep is the second review row on a fixed other model, so ChatGPT hyper does not remap it.
+  if (seat === null || id === 'gatekeeper-deep') return seat;
   if (seat.runtime === 'codex' && quota.chatgpt.mode === 'hyper') return { ...seat, ...CODEX_HYPER_MODEL };
   if (isPiCodexSeat(seat) && quota.chatgpt.mode === 'hyper') return { ...seat, model: `${PI_CODEX_MODEL_PREFIX}${CODEX_HYPER_MODEL.model}`, effort: CODEX_HYPER_MODEL.effort };
   const control = id === 'orchestrator' ? claudeReserved(quota) : id === 'advisor' && (claudeReserved(quota) || quota.claude.mode !== 'hyper');
