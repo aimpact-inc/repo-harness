@@ -125,15 +125,18 @@ export function createDirectories(directories: readonly string[]): void {
   for (const directory of directories) mkdirSync(directory, { mode: 0o700 });
 }
 
-/** Remove the directories rh created, innermost first; a directory that holds other content stays. */
-export function removeCreatedDirectories(directories: readonly string[]): void {
+/** Remove the directories rh created, innermost first, and return those that still hold other content. */
+export function removeCreatedDirectories(directories: readonly string[]): string[] {
+  const kept: string[] = [];
   for (const directory of [...new Set(directories)].sort((a, b) => b.length - a.length)) {
     try { rmdirSync(directory); }
     catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'ENOTEMPTY' && code !== 'EEXIST' && code !== 'ENOENT') throw error;
+      if (code === 'ENOTEMPTY' || code === 'EEXIST') kept.push(directory);
+      else if (code !== 'ENOENT') throw error;
     }
   }
+  return kept;
 }
 
 // ---- ledger -------------------------------------------------------------
@@ -154,7 +157,7 @@ function validFileRecord(record: unknown): boolean {
   return ['created', 'text_block', 'replaced'].includes(record.kind as string) && validBaseline(record.baseline)
     && (committed.type === 'absent' || (committed.type === 'file' && isSha(committed.sha256)))
     && (isSha(record.backup) || (record.backup === null && record.kind !== 'replaced'))
-    && typeof record.external_change === 'boolean' && Array.isArray(record.created_dirs) && record.created_dirs.every(isText);
+    && typeof record.external_change === 'boolean';
 }
 
 function validFragment(value: unknown): boolean {
@@ -174,7 +177,8 @@ export function readLedger(paths: HostConfigPaths): HostConfigLedger {
   try { value = JSON.parse(bytes.toString('utf8')); } catch { throw invalidState(`the ledger is not valid JSON: ${paths.ledger}`); }
   const valid = isObject(value) && value.protocol === 1
     && isObject(value.files) && Object.entries(value.files).every(([path, record]) => isAbsolute(path) && validFileRecord(record))
-    && Array.isArray(value.fragments) && value.fragments.every(validFragment);
+    && Array.isArray(value.fragments) && value.fragments.every(validFragment)
+    && Array.isArray(value.directories) && value.directories.every((directory) => isText(directory) && isAbsolute(directory));
   if (!valid) throw invalidState(`the ledger has an invalid shape: ${paths.ledger}`);
   return value as unknown as HostConfigLedger;
 }

@@ -56,8 +56,6 @@ export interface FileRecord {
   readonly backup: Sha256 | null;
   /** Sticky: set once the file differed from `committed` when rh wrote it again. */
   readonly external_change: boolean;
-  /** Directories that rh created for this file, outermost first. */
-  readonly created_dirs: readonly string[];
 }
 
 export type FragmentKind = 'add' | 'refresh' | 'override';
@@ -82,7 +80,11 @@ export interface FragmentRecord {
   readonly owner: string;
   readonly selector: string;
   readonly kind: FragmentKind;
-  /** Offset of the inserted text in the committed bytes; null when a write over a user edit lost it. */
+  /**
+   * Offset of the inserted text in the committed bytes; null when a write over
+   * a user edit lost it. A file's records are in the text order of the file,
+   * so records at one offset keep the order of their original text.
+   */
   readonly at: number | null;
   readonly edit: StoredFragmentEdit;
 }
@@ -91,9 +93,11 @@ export interface HostConfigLedger {
   readonly protocol: 1;
   readonly files: Readonly<Record<string, FileRecord>>;
   readonly fragments: readonly FragmentRecord[];
+  /** Directories that rh created and did not remove yet; a revert drops one only when it removes it. */
+  readonly directories: readonly string[];
 }
 
-export const EMPTY_LEDGER: HostConfigLedger = { protocol: 1, files: {}, fragments: [] };
+export const EMPTY_LEDGER: HostConfigLedger = { protocol: 1, files: {}, fragments: [], directories: [] };
 
 /** The observed state of one path. Only regular files are writable targets. */
 export type FileObservation =

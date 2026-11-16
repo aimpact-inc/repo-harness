@@ -22,6 +22,7 @@ export interface FilePlan {
   readonly file: string;
   /** The merged content; equal to the input when every edit is already in place. */
   readonly result: string;
+  /** In the text order of the content: the order in which the merge applies them. */
   readonly fragments: readonly PlannedFragment[];
   readonly skipped: readonly SkippedOverride[];
 }
@@ -72,9 +73,10 @@ function rangesIntersect(a: FragmentEdit, b: FragmentEdit): boolean {
 /**
  * Apply edits that do not intersect, all in the coordinates of `content`. At
  * one offset, insertions come first in request order, then the replacement.
- * `positions[i]` is the offset of edit i's inserted text in the result.
+ * `order` lists the edit indexes in merge order; `positions[i]` is the
+ * offset of edit i's inserted text in the result.
  */
-function mergeEdits(content: string, edits: readonly FragmentEdit[]): { result: string; positions: number[] } {
+function mergeEdits(content: string, edits: readonly FragmentEdit[]): { result: string; order: number[]; positions: number[] } {
   const ordered = edits
     .map((edit, index) => ({ edit, index }))
     .sort((a, b) => a.edit.at - b.edit.at || Number(a.edit.removed !== '') - Number(b.edit.removed !== '') || a.index - b.index);
@@ -86,7 +88,7 @@ function mergeEdits(content: string, edits: readonly FragmentEdit[]): { result: 
     result += edit.inserted;
     cursor = edit.at + edit.removed.length;
   }
-  return { result: result + content.slice(cursor), positions };
+  return { result: result + content.slice(cursor), order: ordered.map(({ index }) => index), positions };
 }
 
 /**
@@ -141,6 +143,6 @@ export function planFile(
     planned.push({ owner: request.owner, selector: request.selector, kind: request.kind, edit, previous });
   }
 
-  const { result, positions } = mergeEdits(content, planned.map((fragment) => fragment.edit));
-  return { file, result, fragments: planned.map((fragment, index) => ({ ...fragment, resultAt: positions[index]! })), skipped };
+  const { result, order, positions } = mergeEdits(content, planned.map((fragment) => fragment.edit));
+  return { file, result, fragments: order.map((index) => ({ ...planned[index]!, resultAt: positions[index]! })), skipped };
 }

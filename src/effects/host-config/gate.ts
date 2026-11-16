@@ -32,6 +32,7 @@ import {
   writeLedger,
   type HostConfigPaths,
 } from './store';
+import { isPathInside } from '../path-containment';
 
 export interface HostConfigFileChange {
   readonly path: string;
@@ -104,7 +105,7 @@ function isCommitted(record: FileRecord, observed: ExpectedFile): boolean {
  * and keep `external_change` once the file differed from `committed`.
  */
 function nextFileRecord(previous: FileRecord | undefined, first: { kind: FileRecordKind; backup: Sha256 | null; baselineUnknown: boolean },
-  preimage: ExpectedFile, written: ExpectedFile, createdDirs: readonly string[]): FileRecord {
+  preimage: ExpectedFile, written: ExpectedFile): FileRecord {
   if (!previous) {
     return {
       kind: first.kind,
@@ -113,7 +114,6 @@ function nextFileRecord(previous: FileRecord | undefined, first: { kind: FileRec
       committed: committedOf(written),
       backup: first.backup,
       external_change: false,
-      created_dirs: createdDirs,
     };
   }
   return {
@@ -121,7 +121,6 @@ function nextFileRecord(previous: FileRecord | undefined, first: { kind: FileRec
     committed: committedOf(written),
     backup: first.backup ?? previous.backup,
     external_change: previous.external_change || !isCommitted(previous, preimage),
-    created_dirs: [...previous.created_dirs, ...createdDirs.filter((directory) => !previous.created_dirs.includes(directory))],
   };
 }
 
@@ -144,7 +143,9 @@ function fragmentChanges(fragment: PlannedFragment): boolean {
  * before rh. Text that rh did not write and now replaces (an override, or a
  * selected refresh over a user's change) goes to the vault first. A record
  * outside the plan keeps a proven offset only when the file still held the
- * committed bytes that the offset refers to.
+ * committed bytes that the offset refers to. The result is in the text order
+ * of the written file: a plan edit goes before a record when the edit ends at
+ * or before the record's offset, as `rebaseOffset` counts it.
  */
 function fileFragments(paths: HostConfigPaths, plan: FilePlan, recorded: readonly FragmentRecord[], offsetsValid: boolean): FragmentRecord[] {
   const planned = plan.fragments.map(({ owner, selector, kind, edit, previous, resultAt }): FragmentRecord => {
@@ -154,11 +155,14 @@ function fileFragments(paths: HostConfigPaths, plan: FilePlan, recorded: readonl
   });
   const replaced = new Set(plan.fragments.map((fragment) => fragment.previous));
   const edits = plan.fragments.map((fragment) => fragment.edit);
-  const others = recorded.filter((entry) => !replaced.has(entry)).map((entry): FragmentRecord => ({
-    ...entry,
-    at: offsetsValid && entry.at !== null ? rebaseOffset(entry.at, entry.edit.inserted.length, edits) : null,
-  }));
-  return [...others, ...planned];
+  const merged: FragmentRecord[] = [];
+  let next = 0;
+  for (const entry of recorded.filter((record) => !replaced.has(record))) {
+    const at = offsetsValid ? entry.at : null;
+    while (at !== null && next < edits.length && edits[next]!.at + edits[next]!.removed.length <= at) merged.push(planned[next++]!);
+    merged.push({ ...entry, at: at === null ? null : rebaseOffset(at, entry.edit.inserted.length, edits) });
+  }
+  return [...merged, ...planned.slice(next)];
 }
 
 /** Each record reaches the ledger before its write, so every write has its record. */
@@ -166,8 +170,8 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
   const targets = admitPaths(paths, changes.map((change) => change.path));
   const ledger = readLedger(paths);
   const files = { ...ledger.files };
-  let fragments = ledger.fragments;
-  const persist = () => writeLedger(paths, { protocol: 1, files, fragments });
+  let { fragments, directories } = ledger;
+  const persist = () => writeLedger(paths, { protocol: 1, files, fragments, directories });
   const skipped: SkippedOverride[] = [];
   const written: HostPath[] = [];
   for (const [index, change] of changes.entries()) {
@@ -185,12 +189,13 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
       continue;
     }
     const previous = files[path];
-    const before = fragments;
+    const before = { fragments, directories };
     const result = Buffer.from(plan.result, 'utf8');
     const createdDirs = unchanged ? [] : missingDirectories(path);
     fragments = [...fragments.filter((entry) => entry.file !== path), ...fileFragments(paths, plan, recorded, !previous || isCommitted(previous, preimage))];
+    directories = [...directories, ...createdDirs];
     files[path] = nextFileRecord(previous, { kind: preimage.existed ? 'text_block' : 'created', backup: null, baselineUnknown: change.baselineUnknown === true },
-      preimage, unchanged ? preimage : { existed: true, sha256: sha256Prefixed(result) }, createdDirs);
+      preimage, unchanged ? preimage : { existed: true, sha256: sha256Prefixed(result) });
     persist();
     if (unchanged) continue;
     try {
@@ -198,7 +203,7 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
       replaceTarget(path, result, preimage);
     } catch (error) {
       removeCreatedDirectories(createdDirs);
-      fragments = before;
+      ({ fragments, directories } = before);
       if (previous) files[path] = previous; else delete files[path];
       persist();
       throw error;
@@ -221,7 +226,7 @@ function delegateWrite(paths: HostConfigPaths, declaredPaths: readonly string[],
     const preimage = expectedOf(observation, path);
     // Bytes that rh did not write go to the vault before the writer may replace them.
     const backup = bytes !== null && (!previous || !isCommitted(previous, preimage)) ? putVault(paths, bytes) : null;
-    const provisional = nextFileRecord(previous, { kind: preimage.existed ? 'replaced' : 'created', backup, baselineUnknown: false }, preimage, preimage, []);
+    const provisional = nextFileRecord(previous, { kind: preimage.existed ? 'replaced' : 'created', backup, baselineUnknown: false }, preimage, preimage);
     return { path, preimage, previous, provisional };
   });
   for (const { path, provisional } of observed) files[path] = provisional;
@@ -248,30 +253,33 @@ function delegateWrite(paths: HostConfigPaths, declaredPaths: readonly string[],
   return { changed };
 }
 
-/** Undo each recorded edit at its recorded offset, last offset first; null when one is not where the ledger says. */
+/**
+ * Undo all recorded edits in one pass over the records in text order, so
+ * edits at one offset get their original text back in its original order.
+ * Null when a record is not where the ledger says.
+ */
 function revertTextBlocks(paths: HostConfigPaths, content: string, records: readonly FragmentRecord[]): string | null {
-  let result = content;
-  for (const entry of [...records].sort((a, b) => (b.at ?? 0) - (a.at ?? 0))) {
+  let result = '', cursor = 0;
+  for (const entry of records) {
     const { at, edit: { inserted } } = entry;
-    if (at === null || result.slice(at, at + inserted.length) !== inserted) return null;
-    const original = 'removed_vault' in entry.edit ? readVault(paths, entry.edit.removed_vault).toString('utf8') : entry.edit.removed;
-    result = result.slice(0, at) + original + result.slice(at + inserted.length);
+    if (at === null || at < cursor || content.slice(at, at + inserted.length) !== inserted) return null;
+    result += content.slice(cursor, at) + ('removed_vault' in entry.edit ? readVault(paths, entry.edit.removed_vault).toString('utf8') : entry.edit.removed);
+    cursor = at + inserted.length;
   }
-  return result;
+  return result + content.slice(cursor);
 }
 
 /**
  * rh reverts a file only while it still hashes to the committed bytes. A
  * created or replaced file also needs no external change: a later rh write
- * may have kept user bytes in it. Directories go after all files, so files
- * that share a created directory release it together.
+ * may have kept user bytes in it. Created directories go after all files; a
+ * directory that still holds content keeps its record for a later revert.
  */
 function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined): HostConfigRevertEntry[] {
   const ledger = readLedger(paths);
   const files = { ...ledger.files };
   let fragments = ledger.fragments;
   const report: HostConfigRevertEntry[] = [];
-  const createdDirs: string[] = [];
   const targets = only ? only.map((path) => resolveHostPath(paths, path)) : (Object.keys(ledger.files) as HostPath[]);
   for (const path of targets) {
     const record = files[path];
@@ -294,15 +302,16 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
       report.push({ path, action: 'kept_edited' });
     } else if (record.kind === 'created') {
       if (current.existed) removeTarget(path, current);
-      createdDirs.push(...record.created_dirs);
       drop('removed');
     } else {
       replaceTarget(path, readVault(paths, record.backup!), current);
       drop('restored');
     }
   }
-  removeCreatedDirectories(createdDirs);
-  writeLedger(paths, { protocol: 1, files, fragments });
+  const attempted = only ? ledger.directories.filter((directory) => targets.some((path) => isPathInside(directory, path))) : ledger.directories;
+  const kept = removeCreatedDirectories(attempted);
+  const directories = ledger.directories.filter((directory) => !attempted.includes(directory) || kept.includes(directory));
+  writeLedger(paths, { protocol: 1, files, fragments, directories });
   return report;
 }
 

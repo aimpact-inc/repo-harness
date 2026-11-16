@@ -23,6 +23,9 @@ const valueOnly: HostConfigStrategy<string> = {
   },
 };
 
+/** Replaces the first occurrence of the selector's own text: value '' deletes it. */
+const ownText: HostConfigStrategy<string> = { locate: () => null, apply: (content, selector, value) => ({ at: content.indexOf(selector), removed: selector, inserted: value }) };
+
 const homes: string[] = [];
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 
@@ -39,7 +42,10 @@ function fixture() {
     ({ path, fragments: [{ owner: 'o1', selector: 'rh', kind: 'add', strategy: keyLine, value, ...extra }] });
   const ledger = () => JSON.parse(readFileSync(join(root, 'ledger.json'), 'utf8'));
   const vault = (reference: unknown) => readFileSync(join(root, 'vault', String(reference).replace('sha256:', '')), 'utf8');
-  return { home, a, b, root, gate, change, ledger, vault };
+  /** Selected overrides in `a`, one per selector. */
+  const select = (strategy: HostConfigStrategy<string>, values: Record<string, string>) => gate().apply([{ path: a, fragments: Object.entries(values)
+    .map(([selector, value]) => ({ owner: 'o1', selector, kind: 'override' as const, strategy, value, selected: true })) }]);
+  return { home, a, b, root, gate, change, ledger, vault, select };
 }
 
 test('every write has a ledger record before a revert, and a revert touches no path without one', () => {
@@ -49,13 +55,13 @@ test('every write has a ledger record before a revert, and a revert touches no p
   writeFileSync(c, 'rh=user\n');
   expect(f.gate().apply([f.change(f.a, 'on'), f.change(f.b, 'on'), f.change(b2, 'on')]).written).toEqual([f.a, f.b, b2]);
   const files = f.ledger().files;
-  expect({ a: files[f.a].kind, b: files[f.b].kind, dirs: files[f.b].created_dirs, b2: files[b2].created_dirs, c: files[c] })
-    .toEqual({ a: 'text_block', b: 'created', dirs: [join(f.home, '.tool'), join(f.home, '.tool', 'sub')], b2: [], c: undefined });
-  // b2 shares the directories that only b's record names: they go after both files.
+  expect({ a: files[f.a].kind, b: files[f.b].kind, dirs: f.ledger().directories, c: files[c] })
+    .toEqual({ a: 'text_block', b: 'created', dirs: [join(f.home, '.tool'), join(f.home, '.tool', 'sub')], c: undefined });
+  // b and b2 share the created directories: they go after both files.
   expect(f.gate().revert().map((entry) => [entry.path, entry.action])).toEqual([[f.a, 'text_removed'], [f.b, 'removed'], [b2, 'removed']]);
   expect({ a: readFileSync(f.a, 'utf8'), mode: statSync(f.a).mode & 0o777, tool: existsSync(join(f.home, '.tool')), c: readFileSync(c, 'utf8') })
     .toEqual({ a: 'keep=1\n', mode: 0o640, tool: false, c: 'rh=user\n' });
-  expect(f.ledger()).toEqual({ protocol: 1, files: {}, fragments: [] });
+  expect(f.ledger()).toEqual({ protocol: 1, files: {}, fragments: [], directories: [] });
 
   // The record is in the ledger before the writer runs, and a failed ledger write stops the file write.
   let seen: unknown;
@@ -137,8 +143,7 @@ test('a created or replaced file that the user edited before a later rh write is
 
 test('a text block is reverted only at its recorded offset in the bytes rh recorded', () => {
   const f = fixture();
-  const set = (values: Record<string, string>) => f.gate().apply([{ path: f.a, fragments: Object.entries(values)
-    .map(([selector, value]) => ({ owner: 'o1', selector, kind: 'override' as const, strategy: valueOnly, value, selected: true })) }]);
+  const set = (values: Record<string, string>) => f.select(valueOnly, values);
   // One value at two selectors and an empty insertion revert where rh put them.
   writeFileSync(f.a, 'a=false\nb=false\nc=x\n');
   set({ a: 'true', b: 'true', c: '' });
@@ -150,6 +155,32 @@ test('a text block is reverted only at its recorded offset in the bytes rh recor
   writeFileSync(f.a, 'a=custom\nb=true\nc=x\n');
   expect(f.gate().revert().map((entry) => entry.action)).toEqual(['kept_edited']);
   expect(readFileSync(f.a, 'utf8')).toBe('a=custom\nb=true\nc=x\n');
+});
+
+test('a revert puts back edits at one offset in their original text order', () => {
+  const runs: Record<string, string>[][] = [
+    [{ a: '', b: '' }], [{ b: '', a: '' }], [{ a: '', b: 'x' }],
+    [{ a: '' }, { b: '' }], [{ b: '' }, { a: '' }], [{ b: 'x' }, { a: '' }],
+  ];
+  for (const calls of runs) {
+    const f = fixture();
+    writeFileSync(f.a, 'ab');
+    for (const values of calls) f.select(ownText, values);
+    expect({ revert: f.gate().revert().map((entry) => entry.action), text: readFileSync(f.a, 'utf8') }).toEqual({ revert: ['text_removed'], text: 'ab' });
+  }
+});
+
+test('a created directory keeps its record until a revert removes it', () => {
+  const f = fixture();
+  const b2 = join(f.home, '.tool', 'sub', 'b2.conf');
+  const created = [join(f.home, '.tool'), join(f.home, '.tool', 'sub')];
+  f.gate().apply([f.change(f.b, 'on'), f.change(b2, 'on')]);
+  writeFileSync(b2, 'rh=on\nmine=1\n');
+  expect(f.gate().revert().map((entry) => entry.action)).toEqual(['removed', 'kept_edited']);
+  expect(f.ledger().directories).toEqual(created);
+  writeFileSync(b2, 'rh=on\n');
+  expect(f.gate().revert([b2]).map((entry) => entry.action)).toEqual(['removed']);
+  expect({ tool: existsSync(created[0]!), directories: f.ledger().directories }).toEqual({ tool: false, directories: [] });
 });
 
 test('a user value at a recorded selector stays unless selected, and its bytes go to the vault before rh writes over them', () => {
