@@ -1,8 +1,8 @@
 /**
  * The host-config ledger. It keeps two levels: a file record per host file
  * that rh wrote, and a fragment record per owned text edit. Owner Plan B
- * (#2841): long-term state keeps hashes, rh's own text edits, and backups of
- * the user bytes that rh replaced. The threat model is accidents (#2841
+ * (#2841): long-term state keeps hashes, rh's own text, and whole-file
+ * backups of the user bytes before rh wrote over them. The threat model is accidents (#2841
  * Decisions): user links are followed.
  */
 
@@ -33,9 +33,9 @@ export type FileBaseline =
   | { readonly state: 'unknown' };
 
 /**
- * What a revert does with the file: `created` removes the file rh created,
- * `text_block` removes rh's text from a user file, `replaced` restores the
- * backup of the user file that a writer replaced.
+ * How rh first wrote the file: `created` (a new file, a revert removes it),
+ * `text_block` (`apply` edited a user file) or `replaced` (a delegated
+ * writer replaced a user file); a revert of the last two restores the backup.
  */
 export type FileRecordKind = 'created' | 'text_block' | 'replaced';
 
@@ -48,11 +48,13 @@ export interface FileRecord {
   readonly baseline: FileBaseline;
   /**
    * The file as rh last wrote it, or as it was when rh last recorded a
-   * fragment in it. Fragment offsets refer to these bytes; a revert acts only
-   * while the file still hashes to them.
+   * fragment in it. A revert acts only while the file still hashes to it.
    */
   readonly committed: FileCommitted;
-  /** Vault reference of the bytes that rh did not write and that a delegated writer then replaced; required for `replaced`. */
+  /**
+   * Vault reference of the whole file before rh last wrote over bytes that rh
+   * did not write; required for `text_block` and `replaced`.
+   */
   readonly backup: Sha256 | null;
   /** Sticky: set once the file differed from `committed` when rh wrote it again. */
   readonly external_change: boolean;
@@ -67,26 +69,13 @@ export interface FragmentEdit {
   readonly inserted: string;
 }
 
-/**
- * A recorded edit: rh's inserted text and the text it replaced. An override
- * keeps the replaced user text in the vault, not a second copy in the ledger.
- */
-export type StoredFragmentEdit =
-  | { readonly removed: string; readonly inserted: string }
-  | { readonly removed_vault: Sha256; readonly inserted: string };
-
 export interface FragmentRecord {
   readonly file: string;
   readonly owner: string;
   readonly selector: string;
   readonly kind: FragmentKind;
-  /**
-   * Offset of the inserted text in the committed bytes; null when a write over
-   * a user edit lost it. A file's records are in the text order of the file,
-   * so records at one offset keep the order of their original text.
-   */
-  readonly at: number | null;
-  readonly edit: StoredFragmentEdit;
+  /** The text rh wrote at the selector: a refresh over other text is a user's change. */
+  readonly inserted: string;
 }
 
 export interface HostConfigLedger {

@@ -156,17 +156,13 @@ function validFileRecord(record: unknown): boolean {
   const committed = record.committed;
   return ['created', 'text_block', 'replaced'].includes(record.kind as string) && validBaseline(record.baseline)
     && (committed.type === 'absent' || (committed.type === 'file' && isSha(committed.sha256)))
-    && (isSha(record.backup) || (record.backup === null && record.kind !== 'replaced'))
+    && (isSha(record.backup) || (record.backup === null && record.kind === 'created'))
     && typeof record.external_change === 'boolean';
 }
 
 function validFragment(value: unknown): boolean {
-  if (!isObject(value) || !isObject(value.edit)) return false;
-  const edit = value.edit;
-  const removed = 'removed_vault' in edit ? isSha(edit.removed_vault) : isText(edit.removed);
-  const at = value.at === null || (Number.isSafeInteger(value.at) && (value.at as number) >= 0);
-  return isText(value.file) && isText(value.owner) && isText(value.selector) && ['add', 'refresh', 'override'].includes(value.kind as string)
-    && at && removed && isText(edit.inserted);
+  return isObject(value) && isText(value.file) && isText(value.owner) && isText(value.selector)
+    && ['add', 'refresh', 'override'].includes(value.kind as string) && isText(value.inserted);
 }
 
 export function readLedger(paths: HostConfigPaths): HostConfigLedger {

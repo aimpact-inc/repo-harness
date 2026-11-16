@@ -14,15 +14,12 @@ export interface PlannedFragment {
   readonly edit: FragmentEdit;
   /** The active record of the same owner and selector, when this edit refreshes it. */
   readonly previous: FragmentRecord | null;
-  /** Offset of the inserted text in the result. */
-  readonly resultAt: number;
 }
 
 export interface FilePlan {
   readonly file: string;
   /** The merged content; equal to the input when every edit is already in place. */
   readonly result: string;
-  /** In the text order of the content: the order in which the merge applies them. */
   readonly fragments: readonly PlannedFragment[];
   readonly skipped: readonly SkippedOverride[];
 }
@@ -73,36 +70,17 @@ function rangesIntersect(a: FragmentEdit, b: FragmentEdit): boolean {
 /**
  * Apply edits that do not intersect, all in the coordinates of `content`. At
  * one offset, insertions come first in request order, then the replacement.
- * `order` lists the edit indexes in merge order; `positions[i]` is the
- * offset of edit i's inserted text in the result.
  */
-function mergeEdits(content: string, edits: readonly FragmentEdit[]): { result: string; order: number[]; positions: number[] } {
+function mergeEdits(content: string, edits: readonly FragmentEdit[]): string {
   const ordered = edits
     .map((edit, index) => ({ edit, index }))
     .sort((a, b) => a.edit.at - b.edit.at || Number(a.edit.removed !== '') - Number(b.edit.removed !== '') || a.index - b.index);
-  const positions: number[] = [];
   let result = '', cursor = 0;
-  for (const { edit, index } of ordered) {
-    result += content.slice(cursor, edit.at);
-    positions[index] = result.length;
-    result += edit.inserted;
+  for (const { edit } of ordered) {
+    result += content.slice(cursor, edit.at) + edit.inserted;
     cursor = edit.at + edit.removed.length;
   }
-  return { result: result + content.slice(cursor), order: ordered.map(({ index }) => index), positions };
-}
-
-/**
- * The offset of a recorded text `[at, at + length)` after `edits` (in the
- * same coordinates) are merged; null when an edit intersects the text.
- */
-export function rebaseOffset(at: number, length: number, edits: readonly FragmentEdit[]): number | null {
-  let shift = 0;
-  for (const edit of edits) {
-    const end = edit.at + edit.removed.length;
-    if (end <= at) shift += edit.inserted.length - edit.removed.length;
-    else if (edit.at < at + length) return null;
-  }
-  return at + shift;
+  return result + content.slice(cursor);
 }
 
 /**
@@ -124,14 +102,14 @@ export function planFile(
   const active = ledgerFragments.filter((record) => record.file === file);
   checkSelectors(file, applied, active);
 
-  const planned: Omit<PlannedFragment, 'resultAt'>[] = [];
+  const planned: PlannedFragment[] = [];
   for (const request of applied) {
     const edit = request.strategy.apply(content, request.selector, request.value);
     // An edit whose text is already in place still claims its fragment, so the ledger records the owner.
     checkEdit(file, content, request, edit);
     const previous = active.find((record) => record.owner === request.owner && record.selector === request.selector) ?? null;
     // The text at a recorded selector is no longer rh's: the user's value stays unless the plan input selects the edit.
-    if (previous && edit.removed !== previous.edit.inserted && request.selected !== true) {
+    if (previous && edit.removed !== previous.inserted && request.selected !== true) {
       skipped.push({ code: 'host_config_user_value_kept', file, owner: request.owner, selector: request.selector });
       continue;
     }
@@ -143,6 +121,5 @@ export function planFile(
     planned.push({ owner: request.owner, selector: request.selector, kind: request.kind, edit, previous });
   }
 
-  const { result, order, positions } = mergeEdits(content, planned.map((fragment) => fragment.edit));
-  return { file, result, fragments: order.map((index) => ({ ...planned[index]!, resultAt: positions[index]! })), skipped };
+  return { file, result: mergeEdits(content, planned.map((fragment) => fragment.edit)), fragments: planned, skipped };
 }

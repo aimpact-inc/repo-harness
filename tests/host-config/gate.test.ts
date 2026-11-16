@@ -23,6 +23,9 @@ const valueOnly: HostConfigStrategy<string> = {
   },
 };
 
+/** The whole `key=...` line is the value: '' deletes the line, and a missing key appends it. */
+const wholeLine: HostConfigStrategy<string> = { locate: () => null, apply: (content, selector, value) => ({ ...keyLineEdit(content, selector, ''), inserted: value }) };
+
 /** Replaces the first occurrence of the selector's own text: value '' deletes it. */
 const ownText: HostConfigStrategy<string> = { locate: () => null, apply: (content, selector, value) => ({ at: content.indexOf(selector), removed: selector, inserted: value }) };
 
@@ -82,14 +85,14 @@ test('rh backs up user bytes before it replaces them, and a revert restores the 
   expect(f.gate().revert([f.a]).map((entry) => entry.action)).toEqual(['restored']);
   expect(readFileSync(f.a, 'utf8')).toBe('keep=1\n');
 
-  // An explicit override keeps the replaced user text in the vault, and a revert puts it back.
+  // An explicit override backs up the whole user file, a refresh keeps that backup, and a revert puts it back.
   const skipped = f.gate().apply([f.change(f.a, 'x', { selector: 'keep', kind: 'override' })]);
   expect(skipped).toEqual({ written: [], skipped: [{ code: 'host_config_override_skipped', file: f.a, owner: 'o1', selector: 'keep' }] });
   f.gate().apply([f.change(f.a, 'x', { selector: 'keep', kind: 'override', selected: true })]);
-  const override = f.ledger().fragments[0];
-  expect(override.edit).toEqual({ removed_vault: expect.stringMatching(/^sha256:/), inserted: 'keep=x\n' });
+  const overrideBackup = f.ledger().files[f.a].backup;
+  expect(f.vault(overrideBackup)).toBe('keep=1\n');
   f.gate().apply([f.change(f.a, 'y', { selector: 'keep', kind: 'refresh', selected: true })]);
-  expect(f.ledger().fragments[0].edit.removed_vault).toBe(override.edit.removed_vault);
+  expect(f.ledger().files[f.a].backup).toBe(overrideBackup);
   expect(f.gate().revert().map((entry) => entry.action)).toEqual(['text_removed']);
   expect(readFileSync(f.a, 'utf8')).toBe('keep=1\n');
   for (const entry of [f.root, join(f.root, 'vault')]) expect(statSync(entry).mode & 0o777).toBe(0o700);
@@ -124,27 +127,28 @@ test('an edit since rh last wrote a file is a sticky external change, also when 
   expect(g.ledger().files[g.a].external_change).toBe(true);
 });
 
-test('a created or replaced file that the user edited before a later rh write is kept by a revert', () => {
-  for (const first of ['created', 'replaced'] as const) {
-    for (const later of ['apply', 'delegate'] as const) {
+test('a file that the user edited before a later rh write is kept by a revert', () => {
+  for (const first of ['created', 'replaced', 'text_block'] as const) {
+    // A whole-file writer may not replace a text_block file (see the user value test).
+    for (const later of first === 'text_block' ? ['apply'] : ['apply', 'delegate']) {
       const f = fixture();
       const path = first === 'created' ? join(f.home, '.new.conf') : f.a;
-      if (first === 'created') f.gate().apply([f.change(path, '1')]);
-      else f.gate().delegate([path], ([target]) => writeFileSync(target!, 'rh=1\n'));
+      if (first === 'replaced') f.gate().delegate([path], ([target]) => writeFileSync(target!, 'rh=1\n'));
+      else f.gate().apply([f.change(path, '1')]);
       writeFileSync(path, 'rh=1\nuser=precious\n');
       if (later === 'apply') f.gate().apply([f.change(path, '2')]);
       else f.gate().delegate([path], ([target]) => writeFileSync(target!, readFileSync(target!, 'utf8').replace('rh=1', 'rh=2')));
       const record = f.ledger().files[path];
-      expect({ kind: record.kind, backup: later === 'delegate' && f.vault(record.backup), revert: f.gate().revert().map((entry) => entry.action), text: readFileSync(path, 'utf8') })
-        .toEqual({ kind: first, backup: later === 'delegate' && 'rh=1\nuser=precious\n', revert: ['kept_edited'], text: 'rh=2\nuser=precious\n' });
+      expect({ kind: record.kind, backup: f.vault(record.backup), revert: f.gate().revert().map((entry) => entry.action), text: readFileSync(path, 'utf8') })
+        .toEqual({ kind: first, backup: 'rh=1\nuser=precious\n', revert: ['kept_edited'], text: 'rh=2\nuser=precious\n' });
     }
   }
 });
 
-test('a text block is reverted only at its recorded offset in the bytes rh recorded', () => {
+test('a file with rh text blocks reverts to its backup only while it holds the bytes rh recorded', () => {
   const f = fixture();
   const set = (values: Record<string, string>) => f.select(valueOnly, values);
-  // One value at two selectors and an empty insertion revert where rh put them.
+  // One value at two selectors and an empty insertion revert exactly.
   writeFileSync(f.a, 'a=false\nb=false\nc=x\n');
   set({ a: 'true', b: 'true', c: '' });
   expect(readFileSync(f.a, 'utf8')).toBe('a=true\nb=true\nc=\n');
@@ -157,16 +161,20 @@ test('a text block is reverted only at its recorded offset in the bytes rh recor
   expect(readFileSync(f.a, 'utf8')).toBe('a=custom\nb=true\nc=x\n');
 });
 
-test('a revert puts back edits at one offset in their original text order', () => {
-  const runs: Record<string, string>[][] = [
-    [{ a: '', b: '' }], [{ b: '', a: '' }], [{ a: '', b: 'x' }],
-    [{ a: '' }, { b: '' }], [{ b: '' }, { a: '' }], [{ b: 'x' }, { a: '' }],
+test('a revert restores the exact bytes from before rh, whatever the order of rh edits at one offset', () => {
+  const users = 'a=USER-A\nb=USER-B\n';
+  const runs: [HostConfigStrategy<string>, string, Record<string, string>[]][] = [
+    [ownText, 'ab', [{ a: '', b: '' }]], [ownText, 'ab', [{ b: '', a: '' }]], [ownText, 'ab', [{ a: '', b: 'x' }]],
+    [ownText, 'ab', [{ a: '' }, { b: '' }]], [ownText, 'ab', [{ b: '' }, { a: '' }]], [ownText, 'ab', [{ b: 'x' }, { a: '' }]],
+    // Deleted lines, then a refresh of the second one or of both in reverse request order.
+    [wholeLine, users, [{ a: '', b: '' }, { b: 'b=RH\n' }]], [wholeLine, users, [{ a: '' }, { b: '' }, { b: 'b=RH\n' }]],
+    [wholeLine, users, [{ a: '', b: '' }, { b: 'b=RH\n', a: 'a=RH\n' }]],
   ];
-  for (const calls of runs) {
+  for (const [strategy, start, calls] of runs) {
     const f = fixture();
-    writeFileSync(f.a, 'ab');
-    for (const values of calls) f.select(ownText, values);
-    expect({ revert: f.gate().revert().map((entry) => entry.action), text: readFileSync(f.a, 'utf8') }).toEqual({ revert: ['text_removed'], text: 'ab' });
+    writeFileSync(f.a, start);
+    for (const values of calls) f.select(strategy, values);
+    expect({ revert: f.gate().revert().map((entry) => entry.action), text: readFileSync(f.a, 'utf8') }).toEqual({ revert: ['text_removed'], text: start });
   }
 });
 
@@ -192,12 +200,12 @@ test('a user value at a recorded selector stays unless selected, and its bytes g
   expect(setting('rh2', { kind: 'refresh' })).toEqual({ written: [], skipped: [{ code: 'host_config_user_value_kept', file: f.a, owner: 'o1', selector: 'setting' }] });
   expect(readFileSync(f.a, 'utf8')).toBe('setting=USER-EDIT\n');
   setting('rh2', { kind: 'refresh', selected: true });
-  expect(f.gate().revert().map((entry) => entry.action)).toEqual(['text_removed']);
-  expect(readFileSync(f.a, 'utf8')).toBe('setting=USER-EDIT\n');
+  expect({ backup: f.vault(f.ledger().files[f.a].backup), revert: f.gate().revert().map((entry) => entry.action), text: readFileSync(f.a, 'utf8') })
+    .toEqual({ backup: 'setting=USER-EDIT\n', revert: ['kept_edited'], text: 'setting=rh2\n' });
   // A whole-file writer may not replace a file that holds rh text blocks.
   f.gate().apply([f.change(f.a, 'on')]);
   expect(() => f.gate().delegate([f.a], ([target]) => writeFileSync(target!, 'external\n'))).toThrow(expect.objectContaining({ code: 'host_config_invalid_state' }));
-  expect(readFileSync(f.a, 'utf8')).toBe('setting=USER-EDIT\nrh=on\n');
+  expect(readFileSync(f.a, 'utf8')).toBe('setting=rh2\nrh=on\n');
 });
 
 test('a revert releases a fragment claim that needed no write, for a named path and for all', () => {
