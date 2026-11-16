@@ -4,6 +4,8 @@
  * The result document is the contract of ADR-0004
  * (`docs/adr/ADR-0004-test-budget-result-contract.md`).
  */
+import type { Nodes, RootContent } from 'mdast';
+import { fromMarkdown } from 'mdast-util-from-markdown';
 import { canonicalize } from '../evidence/canonical-json';
 import { sha256Prefixed } from '../evidence/sha256';
 import {
@@ -172,87 +174,62 @@ export type TestBudgetException =
   | { readonly status: 'malformed'; readonly problem: string }
   | { readonly status: 'parsed'; readonly counts: TestBudgetExceptionCounts; readonly reason: string };
 
-// CommonMark ATX headings: up to three leading spaces, a space or tab after the marks, an optional closing run of #.
-const EXCEPTION_HEADING = /^ {0,3}##[ \t]+test budget exception(?:[ \t]+#+)?[ \t]*$/i;
-const SECTION_END = /^ {0,3}#{1,2}(?:[ \t]|$)/;
-// A setext underline turns the paragraph line above it into a level 1 or 2 heading.
-const SETEXT_UNDERLINE = /^ {0,3}(?:=+|-+)[ \t]*$/;
-// A list item or block quote line cannot take a setext underline; `---` after it is a thematic break.
-const NOT_PARAGRAPH = /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)|^ {0,3}>/;
-const COUNT_LINE = /^ {0,3}(?:[-*+][ \t]+)?(added test lines|added product lines|added test files):[ \t]*(\d+)[ \t]*$/i;
+const EXCEPTION_HEADING = 'test budget exception';
+const COUNT_LINE = /^(added test lines|added product lines|added test files):[ \t]*(\d+)$/i;
 const COUNT_KEYS = {
   'added test lines': 'added_test_lines',
   'added product lines': 'added_product_lines',
   'added test files': 'added_test_files',
 } as const satisfies Record<string, keyof TestBudgetExceptionCounts>;
 
-interface BodyLine {
-  readonly text: string;
-  readonly code: boolean;
+/** The text of inline content; inline HTML (an HTML comment included) adds nothing. */
+function inlineText(node: Nodes): string {
+  if (node.type === 'text' || node.type === 'inlineCode') return node.value;
+  if (node.type === 'break') return '\n';
+  return 'children' in node ? node.children.map(inlineText).join('') : '';
 }
 
-/** The body lines with HTML comments removed and fenced code marked. */
-function bodyLines(body: string): BodyLine[] {
-  const lines: BodyLine[] = [];
-  let fence: { readonly char: string; readonly length: number } | null = null;
-  let comment = false;
-  for (const raw of body.replace(/\r\n?/g, '\n').split('\n')) {
-    if (fence !== null) {
-      const close = /^ {0,3}(`{3,}|~{3,}) *$/.exec(raw);
-      if (close && close[1]![0] === fence.char && close[1]!.length >= fence.length) fence = null;
-      lines.push({ text: raw, code: true });
-      continue;
-    }
-    let text = '';
-    let rest = raw;
-    while (rest !== '') {
-      const marker = comment ? rest.indexOf('-->') : rest.indexOf('<!--');
-      if (marker < 0) {
-        if (!comment) text += rest;
-        break;
-      }
-      if (!comment) text += rest.slice(0, marker);
-      rest = rest.slice(marker + (comment ? 3 : 4));
-      comment = !comment;
-    }
-    const open = /^ {0,3}(`{3,}|~{3,})/.exec(text);
-    if (open) fence = { char: open[1]![0]!, length: open[1]!.length };
-    lines.push({ text, code: open !== null });
+interface SectionLine {
+  readonly text: string;
+  /** A line inside a block quote is reason text and never a count. */
+  readonly quoted: boolean;
+}
+
+/** The text lines of section blocks. Code, HTML blocks and thematic breaks hold no line. */
+function sectionLines(node: Nodes, quoted: boolean, out: SectionLine[]): void {
+  if (node.type === 'paragraph' || node.type === 'heading' || node.type === 'tableCell') {
+    for (const text of inlineText(node).split('\n')) out.push({ text: text.trim(), quoted });
+  } else if (node.type !== 'code' && node.type !== 'html' && 'children' in node) {
+    for (const child of node.children) sectionLines(child, quoted || node.type === 'blockquote', out);
   }
-  return lines;
 }
 
 /**
- * The `## Test budget exception` section of a PR body. A heading inside fenced
- * code, an HTML comment or a block quote is not the section. The section ends at
- * the next level 1 or 2 heading. It needs each count line once; the other text
- * outside fenced code is the reason.
+ * The `## Test budget exception` section of a PR body, read from one CommonMark
+ * parse: a top-level level-2 heading with that text, up to the next level 1 or 2
+ * heading. A heading inside fenced code, an HTML comment, a block quote or a list
+ * is not the section. The section needs each count line once; its other text
+ * lines outside code are the reason.
  */
 export function parseTestBudgetException(body: string): TestBudgetException {
-  const lines = bodyLines(body);
-  const starts = lines.flatMap((line, index) => (!line.code && EXCEPTION_HEADING.test(line.text) ? [index] : []));
+  const blocks = fromMarkdown(body).children;
+  const starts = blocks.flatMap((node, index) => (node.type === 'heading' && node.depth === 2
+    && inlineText(node).replace(/\s+/g, ' ').trim().toLowerCase() === EXCEPTION_HEADING ? [index] : []));
   if (starts.length === 0) return { status: 'absent' };
   if (starts.length > 1) return { status: 'malformed', problem: 'the PR body has more than one Test budget exception section' };
+  const section: RootContent[] = [];
+  for (const node of blocks.slice(starts[0]! + 1)) {
+    if (node.type === 'heading' && node.depth <= 2) break;
+    section.push(node);
+  }
+  const lines: SectionLine[] = [];
+  for (const node of section) sectionLines(node, false, lines);
   const counts: Partial<Record<keyof TestBudgetExceptionCounts, number>> = {};
   const reason: string[] = [];
-  // The previous line, when it is a paragraph line that a setext underline would make a heading.
-  let paragraph: { readonly count: keyof TestBudgetExceptionCounts | null } | null = null;
-  for (const line of lines.slice(starts[0]! + 1)) {
-    if (line.code) {
-      paragraph = null;
-      continue;
-    }
-    if (SECTION_END.test(line.text)) break;
-    if (paragraph !== null && SETEXT_UNDERLINE.test(line.text)) {
-      // The heading line belongs to the next section, not to this one.
-      if (paragraph.count === null) reason.pop(); else delete counts[paragraph.count];
-      break;
-    }
-    const isParagraph = line.text.trim() !== '' && !NOT_PARAGRAPH.test(line.text);
-    const count = COUNT_LINE.exec(line.text);
+  for (const line of lines) {
+    const count = line.quoted ? null : COUNT_LINE.exec(line.text);
     if (count === null) {
-      reason.push(line.text.trimEnd());
-      paragraph = isParagraph ? { count: null } : null;
+      if (line.text !== '') reason.push(line.text);
       continue;
     }
     const key = COUNT_KEYS[count[1]!.toLowerCase() as keyof typeof COUNT_KEYS];
@@ -260,7 +237,6 @@ export function parseTestBudgetException(body: string): TestBudgetException {
     if (counts[key] !== undefined) return { status: 'malformed', problem: `the section states "${count[1]}" more than once` };
     if (!Number.isSafeInteger(value)) return { status: 'malformed', problem: `the section has an invalid number for "${count[1]}"` };
     counts[key] = value;
-    paragraph = isParagraph ? { count: key } : null;
   }
   const missing = Object.entries(COUNT_KEYS).filter(([, key]) => counts[key] === undefined).map(([label]) => label);
   if (missing.length > 0) return { status: 'malformed', problem: `the section has no line for: ${missing.join(', ')}` };
@@ -271,7 +247,7 @@ export function parseTestBudgetException(body: string): TestBudgetException {
       added_product_lines: counts.added_product_lines!,
       added_test_files: counts.added_test_files!,
     },
-    reason: reason.join('\n').trim(),
+    reason: reason.join('\n'),
   };
 }
 

@@ -201,18 +201,23 @@ describe('TestBudget exception', () => {
     });
     const indented = exceptionBody(30, 3, 1).replace('## Test budget exception', '   ##\tTest budget exception');
     expect(check(repo, base, head, indented).state).toBe('pass');
+    const afterBreaks = '## Test budget exception\n\n- Added test lines: 30\n- Added product lines: 3\n- Added test files: 1\n\n'
+      + '***\n---\n\nAn existing test cannot reach this branch.\n';
+    expect(check(repo, base, head, afterBreaks).exception).toMatchObject({ valid: true, reason: 'An existing test cannot reach this branch.' });
   });
 
   test('an empty heading, wrong numbers or an empty reason do not pass', () => {
     const { repo, base } = repository(ENABLED);
     const head = commit(repo, { 'src/app.ts': lines(13), 'tests/new.test.ts': lines(30) });
-    const countsOnly = '## Test budget exception\n\n- Added test lines: 30\n- Added product lines: 3\n- Added test files: 1\n\n';
+    // Plain count lines: after a list, an indented heading would continue the last list item instead.
+    const countsOnly = '## Test budget exception\n\nAdded test lines: 30\nAdded product lines: 3\nAdded test files: 1\n\n';
     const bodies = [
       '## Test budget exception\n\n## Rollback\n',
       exceptionBody(30, 4, 1),
       exceptionBody(30, 3, 1, ''),
       // Each next heading ends the section, so its text is not the reason.
-      ...['  ## Rollback', '##\tRollback', '   # Rollback', 'Rollback\n---'].map((heading) => `${countsOnly}${heading}\n\ngit revert.\n`),
+      ...['  ## Rollback', '##\tRollback', '   # Rollback', 'Rollback\n---', 'Rollback instructions\nfor this change\n---',
+        'Rollback instructions\nfor this change\n==='].map((heading) => `${countsOnly}${heading}\n\ngit revert.\n`),
     ];
     for (const body of bodies) {
       const result = check(repo, base, head, body);
