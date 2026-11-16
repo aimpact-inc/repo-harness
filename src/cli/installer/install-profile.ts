@@ -23,7 +23,7 @@ import {
   writeFileSync,
 } from 'fs';
 import { homedir } from 'os';
-import { basename, delimiter, dirname, join } from 'path';
+import { basename, delimiter, dirname, join, sep } from 'path';
 import {
   MANAGED_TAG,
   canonicalManagedHookProjection,
@@ -821,22 +821,29 @@ export function installProfileTransactionPaths(env: NodeJS.ProcessEnv = process.
       if (name.startsWith(FACADE_NAME_PREFIX) || (lstatSync(path).isSymbolicLink() && !existsSync(path))) paths.push(path);
     }
   }
-  const excludes = excludesTransactionPath(env);
+  const excludes = excludesTransactionPath(env, paths);
   if (excludes !== null) paths.push(excludes);
   return [...new Set(paths)];
 }
 
 /**
  * The user Git excludes file that the runtime ignore step writes. It is a
- * restore-only transaction path: the snapshot restores it, and ownership
- * capture never claims it, whatever the path (transactionOwnedSurfaces). Rollback replaces a
- * snapshot path whole, and the backup copies what the path names, so the path
- * must be absent or a regular file. Any other entry is refused before the
+ * restore-only transaction path: the snapshot restores it, and no ownership
+ * ledger writer may record it. So it must not be a path that rh manages: a
+ * path that this install writes (`managed`, which holds the ownership
+ * allowlist), a path inside one of them, or a facade path. Rollback replaces
+ * a snapshot path whole, and the backup copies what the path names, so it
+ * must also be absent or a regular file. Anything else is refused before the
  * transaction writes anything.
  */
-function excludesTransactionPath(env: NodeJS.ProcessEnv): string | null {
+function excludesTransactionPath(env: NodeJS.ProcessEnv, managed: readonly string[]): string | null {
   const excludes = userExcludesFilePath(env);
   if (!excludes.ok) return null;
+  if (managed.some((path) => excludes.path === path || excludes.path.startsWith(`${path}${sep}`))
+    || isDiscoveredFacadePath(excludes.path, env.HOME ?? homedir(), env)) {
+    throw new Error(`excludes_file_managed_path: the user Git excludes file ${excludes.path} is a path that rh manages; `
+      + 'set core.excludesFile to a file that rh does not manage, then run the command again');
+  }
   const stat = lstatSync(excludes.path, { throwIfNoEntry: false });
   if (stat === undefined || stat.isFile()) return excludes.path;
   const kind = stat.isSymbolicLink() ? 'a symlink' : stat.isDirectory() ? 'a directory' : 'not a regular file';
@@ -992,11 +999,9 @@ function transactionOwnedSurfaces(
 ): readonly ManagedInstallSurface[] {
   const home = env.HOME ?? homedir();
   const allowlist = new Set(installProfileHostMutationPaths(env));
-  const excludes = userExcludesFilePath(env);
   return transaction.snapshots.flatMap((snapshot) => {
-    // Ownership capture claims only a path that the ownership allowlist names. The
-    // user Git excludes file is restore-only even when the allowlist names its path.
-    if (excludes.ok && snapshot.path === excludes.path) return [];
+    // Ownership capture claims only a path that the ownership allowlist names. Every
+    // other transaction path, such as the user Git excludes file, is restore-only.
     if (!allowlist.has(snapshot.path) && !isDiscoveredFacadePath(snapshot.path, home, env)) return [];
     const normalized = snapshot.path.replaceAll('\\', '/');
     if (

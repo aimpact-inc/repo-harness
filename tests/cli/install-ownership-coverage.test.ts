@@ -75,24 +75,27 @@ test('a refused user Herdr skill stays unowned, and the failed install restores 
   });
 }, 120_000);
 
-test('a custom excludes path is restore-only, and a directory or symlink excludes path is refused before any host write', () => {
-  const rows: { name: string; excludes: (home: string) => string; refused: boolean }[] = [
+test('a custom excludes path is restore-only, and a managed, directory or symlink excludes path is refused before any host write', () => {
+  const managed = 'excludes_file_managed_path', notRegular = 'excludes_file_not_regular';
+  const rows: { name: string; excludes: (home: string) => string; refused: string | null }[] = [
     // Each basename matches an ownership rule: an absent path that the ignore step creates must not become a surface.
-    { name: 'bin/rh', excludes: home => join(home, 'bin', 'rh'), refused: false },
-    { name: 'skills/herdr', excludes: home => join(home, '.config', 'skills', 'herdr'), refused: false },
-    // The ownership allowlist names this Waza rule path, and the excludes file is still restore-only.
-    { name: 'allowlisted rule path', excludes: home => join(home, '.codex', 'rules', 'english.md'), refused: false },
-    { name: 'directory', excludes: home => { mkdirSync(join(home, 'rules')); writeFileSync(join(home, 'rules', 'keep'), 'user\n'); return join(home, 'rules'); }, refused: true },
-    { name: 'symlink', excludes: home => { writeFileSync(join(home, 'secret'), 'token\n'); symlinkSync(join(home, 'secret'), join(home, 'ignore-link')); return join(home, 'ignore-link'); }, refused: true },
-    { name: 'HOME', excludes: home => home, refused: true },
+    { name: 'bin/rh', excludes: home => join(home, 'bin', 'rh'), refused: null },
+    { name: 'skills/herdr', excludes: home => join(home, '.config', 'skills', 'herdr'), refused: null },
+    // One row per managed class: an allowlisted path (a fleet target), a path inside a written directory, a facade path.
+    { name: 'fleet target', excludes: home => join(home, '.claude', 'agents', 'gatekeeper.md'), refused: managed },
+    { name: 'inside the Herdr skill', excludes: home => join(home, '.claude', 'skills', 'herdr', 'ignore'), refused: managed },
+    { name: 'facade path', excludes: home => join(home, '.codex', 'skills', 'repo-harness-notes'), refused: managed },
+    { name: 'directory', excludes: home => { mkdirSync(join(home, 'rules')); writeFileSync(join(home, 'rules', 'keep'), 'user\n'); return join(home, 'rules'); }, refused: notRegular },
+    { name: 'symlink', excludes: home => { writeFileSync(join(home, 'secret'), 'token\n'); symlinkSync(join(home, 'secret'), join(home, 'ignore-link')); return join(home, 'ignore-link'); }, refused: notRegular },
+    { name: 'HOME', excludes: home => home, refused: notRegular },
   ];
   for (const row of rows) withInstallHome((home, rh, env) => {
     const excludes = row.excludes(home);
     expect(spawnSync('git', ['config', '--global', 'core.excludesFile', excludes], { env }).status).toBe(0);
     const install = rh(...INSTALL);
-    if (row.refused) {
+    if (row.refused !== null) {
       expect(install.status, row.name).not.toBe(0);
-      expect(String(install.stderr), row.name).toContain(`excludes_file_not_regular: the user Git excludes file ${excludes} is`);
+      expect(String(install.stderr), row.name).toContain(`${row.refused}: the user Git excludes file ${excludes} is`);
       for (const written of ['.claude', '.codex', join('.repo-harness', 'install-state.json')]) expect(existsSync(join(home, written)), `${row.name}: ${written}`).toBe(false);
       if (row.name === 'directory') expect(readFileSync(join(excludes, 'keep'), 'utf-8')).toBe('user\n');
       if (row.name === 'symlink') expect(readFileSync(join(home, 'secret'), 'utf-8')).toBe('token\n');
