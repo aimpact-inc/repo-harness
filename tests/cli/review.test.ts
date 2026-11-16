@@ -1,7 +1,7 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { taskReviewRunner } from '../../src/effects/review-runner/task-review-runner';
@@ -592,7 +592,9 @@ test('the optional PR selection is all-or-none and admission identity alone is n
     .toEqual({ repository: 'example/repo-harness', provider_repository_id: '1001', pr_number: 42, expected_base_sha: 'b'.repeat(40) });
 });
 
-function seatFixture(texts: readonly string[] | null, options: { agentDir?: string; symlinkCwd?: boolean } = {}) {
+const seatPacket = (seat = 'gatekeeper', head = PUBLISH_HEAD) => `Task: review PR #${PUBLISH_PR} at head ${head} (tier high, round 1), as the ${seat} of repo-harness-issue-flow. Review.`;
+
+function seatFixture(texts: readonly string[] | null, options: { agentDir?: string; symlinkCwd?: boolean; seat?: string } = {}) {
   const fixture = publishFixture();
   const home = join(fixture.root, 'home');
   const real = join(fixture.root, 'seat-real');
@@ -604,14 +606,15 @@ function seatFixture(texts: readonly string[] | null, options: { agentDir?: stri
   const directory = join(agentDir, 'sessions', '--' + realCwd.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-') + '--');
   if (texts !== null) {
     mkdirSync(directory, { recursive: true });
-    const lines = texts.map((text) => JSON.stringify({ type: 'message', message: { role: 'assistant', content: [{ type: 'text', text }] } }));
+    const lines = [JSON.stringify({ type: 'message', message: { role: 'user', content: [{ type: 'text', text: seatPacket(options.seat) }] } }),
+      ...texts.map((text) => JSON.stringify({ type: 'message', message: { role: 'assistant', content: [{ type: 'text', text }] } }))];
     writeFileSync(join(directory, 'a.jsonl'), lines.join('\n') + '\n');
   }
   return { ...fixture, home, cwd, directory };
 }
 
-async function runCollect(fixture: ReturnType<typeof seatFixture>, agentDir?: string) {
-  const hc = spyOn(herdrCore, 'hcGet').mockReturnValue({ cwd: fixture.cwd } as never);
+async function runCollect(fixture: ReturnType<typeof seatFixture>, agentDir?: string, seat = 'gatekeeper') {
+  const hc = spyOn(herdrCore, 'hcGet').mockReturnValue({ cwd: fixture.cwd, labels: { 'repo-harness.seat': seat } } as never);
   const previous = process.env.REPO_HARNESS_GH_BIN;
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   process.env.REPO_HARNESS_GH_BIN = fixture.gh.bin;
@@ -652,6 +655,37 @@ test('collect fails closed on a missing record, block, bad JSON, invalid receipt
     expect(JSON.parse(result.stdout).message, label).toContain(message);
     expect(fixture.gh.calls().some((args) => args.includes('POST')), label).toBe(false);
   }
+});
+
+test('collect binds the session to its seat by the packet, not by file age, and reads a Claude session', async () => {
+  const fixture = seatFixture([receiptBlock(publishReceipt())]);
+  const line = (role: string, text: string) => JSON.stringify({ message: { role, content: role === 'user' ? text : [{ type: 'text', text }] } }) + '\n';
+  // A newer session of the other Pi seat in the same worktree, with a receipt for another head.
+  writeFileSync(join(fixture.directory, 'b.jsonl'), line('user', seatPacket('reviewer')) + line('assistant', receiptBlock(publishReceipt({ subject_sha: 'b'.repeat(40) }))));
+  const future = new Date(Date.now() + 60_000);
+  utimesSync(join(fixture.directory, 'b.jsonl'), future, future);
+  const own = await runCollect(fixture);
+  expect(own.status, own.stderr).toBe(0);
+  expect(JSON.parse(own.stdout)).toMatchObject({ ok: true, head_sha: PUBLISH_HEAD });
+
+  // A Claude reviewer: user content is a string and the session lives under CLAUDE_CONFIG_DIR/projects.
+  const claude = seatFixture(null);
+  const configDir = join(claude.root, 'claude-config');
+  const projectDir = join(configDir, 'projects', realpathSync(claude.cwd).replace(/[^A-Za-z0-9]/g, '-'));
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(join(projectDir, 's.jsonl'), line('user', '<system-reminder>x</system-reminder>') + line('user', seatPacket('reviewer')) + line('assistant', receiptBlock(publishReceipt())));
+  process.env.CLAUDE_CONFIG_DIR = configDir;
+  try {
+    const result = await runCollect(claude, undefined, 'reviewer');
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, head_sha: PUBLISH_HEAD });
+  } finally { delete process.env.CLAUDE_CONFIG_DIR; }
+
+  // Two sessions of the same seat both ending with a receipt for their head fail closed.
+  writeFileSync(join(fixture.directory, 'b.jsonl'), line('user', seatPacket()) + line('assistant', receiptBlock(publishReceipt())));
+  const ambiguous = await runCollect(fixture);
+  expect(ambiguous.status).toBe(2);
+  expect(JSON.parse(ambiguous.stdout).message).toContain('2 sessions');
 });
 
 test('collect finds the session directory from the realpath of the seat cwd and the Pi agent dir', async () => {

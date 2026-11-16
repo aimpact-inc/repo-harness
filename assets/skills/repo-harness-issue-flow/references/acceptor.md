@@ -242,15 +242,23 @@ The review brief states that limit. On every seat, Codex and Pi included,
 the one-write limit is a brief rule only. On a Codex seat the sandbox
 limits files only.
 
-A Pi seat without the edit and write tools cannot write a receipt file. It
-ends its reply with a `RECEIPT-JSON` marker and the receipt as one JSON
-object. After the pane status is `done`, the coordinator runs
+A read-only review seat of any runtime (Pi, Claude, Codex) cannot write a
+receipt file. Its packet states the round, `risk_tier`, `subject_sha` and
+the one `reviewer.harness` value of its runtime. The seat ends its reply
+with a `RECEIPT-JSON` marker and the receipt as one JSON object, and does
+not publish. After the pane status is `done`, the coordinator runs
 `rh review collect --seat <terminal> --pr <n> [--owner-record <url>] [--json]`.
-The command reads the newest session record of that seat's worktree under
-`~/.pi/agent/sessions`, takes the last `RECEIPT-JSON` block, validates it
-with the `review publish` validator and publishes it the same way. It
-fails closed when the record, the block, the JSON, the receipt or the PR
-head subject is missing or wrong, and it does not read pane text.
+The command covers Pi sessions (`~/.pi/agent/sessions`) and Claude sessions
+(`~/.claude/projects`, or `CLAUDE_CONFIG_DIR`) of the seat's worktree; it
+reads no Codex session record. It binds a session to the seat by the packet
+that the session received (seat label, PR number and head SHA), never by
+file age, because review seats of one PR share a worktree. When several
+sessions carry the seat's packet, it keeps the one whose last receipt names
+its packet head. It takes the last `RECEIPT-JSON` block, validates it with
+the `review publish` validator and publishes it the same way. It fails
+closed when the record, the block, the JSON, the receipt or the PR head
+subject is missing or wrong, or when two sessions stay ambiguous, and it
+does not read pane text.
 
 `review publish` accepts rounds 1 to 5. Round 5 is the hard stop (§2.2),
 so every review round publishes its claim and record with this command.
