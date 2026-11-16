@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { spawnSync } from "child_process";
@@ -333,17 +333,85 @@ describe("install-agent-fleet", () => {
     }
   }, 30_000);
 
-  test("--force overwrites a drifted target back to generated content", () => {
-    const { root, home } = setupFakeHome("install-agent-fleet-force");
+  test.each([
+    ["claude", "md", "none"], ["codex", "toml", "none"],
+    ["claude", "md", "stale"], ["codex", "toml", "stale"],
+  ] as const)("--force saves %s/%s user bytes and mode (prior ownership: %s) and prints a working restore command", (host, ext, owned) => {
+    const { root, home } = setupFakeHome("install-agent-fleet-user's home");
     try {
       expect(runInstaller(home, FLEET_SOURCE_DIR).status).toBe(0);
-      const target = join(home, ".codex/agents/gatekeeper.toml");
-      writeFileSync(target, "corrupted\n");
+      const file = `gatekeeper.${ext}`;
+      const target = join(home, `.${host}/agents`, file);
+      if (owned === "stale") recordInstallOwnership([target], { ...process.env, HOME: home });
+      const original = Buffer.from([0x75, 0x73, 0x65, 0x72, 0x00, 0xff, 0x0a]);
+      writeFileSync(target, original);
+      chmodSync(target, 0o640);
 
       const forced = runInstaller(home, FLEET_SOURCE_DIR, ["--force"]);
       expect(forced.status).toBe(0);
-      expect(forced.stdout).toContain("[fleet] codex/gatekeeper.toml: installed");
-      expect(readFileSync(target, "utf-8")).toBe(readFileSync(join(GOLDEN_CODEX_DIR, "gatekeeper.toml"), "utf-8"));
+      const line = forced.stdout.split("\n").find(line => line.startsWith(`[fleet] ${host}/${file}:`));
+      const replacement = /: replaced \(backup: (.*); restore: (.*)\)$/.exec(line ?? "");
+      expect(replacement).not.toBeNull();
+      const [, backup, restore] = replacement!;
+      const backupDir = join(home, ".repo-harness/replaced-agents");
+      expect(readdirSync(backupDir)).toEqual([backup.slice(backupDir.length + 1)]);
+      expect(backup).toMatch(new RegExp(`${host}-${file}\\.\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-\\d{3}Z-\\d+\\.bak$`));
+      expect(readFileSync(backup)).toEqual(original);
+      expect(statSync(backup).mode & 0o777).toBe(0o640);
+      expect(statSync(backupDir).mode & 0o777).toBe(0o700);
+      const generated = join(host === "claude" ? FLEET_SOURCE_DIR : GOLDEN_CODEX_DIR, file);
+      expect(readFileSync(target)).toEqual(readFileSync(generated));
+      expect(spawnSync("sh", ["-c", restore], { cwd: root, env: { ...process.env, HOME: home } }).status).toBe(0);
+      expect(readFileSync(target)).toEqual(original);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test.each(["read-only state directory", "unreadable source"])("--force fails closed with a %s", (failure) => {
+    const { root, home } = setupFakeHome("install-agent-fleet-backup-failure");
+    const stateDir = join(home, ".repo-harness");
+    try {
+      expect(runInstaller(home, FLEET_SOURCE_DIR).status).toBe(0);
+      const targets = [join(home, ".claude/agents/explorer.md"), join(home, ".codex/agents/explorer.toml")];
+      for (const target of targets) writeFileSync(target, "user agent\n");
+      mkdirSync(stateDir, { mode: failure === "unreadable source" ? 0o700 : 0o500 });
+      if (failure === "unreadable source") for (const target of targets) chmodSync(target, 0o200);
+      const failed = runInstaller(home, FLEET_SOURCE_DIR, ["--force"]);
+      expect(failed.status).toBe(1);
+      expect(failed.stdout).toContain("[fleet] claude/explorer.md: backup-failed");
+      expect(failed.stdout).toContain("[fleet] codex/explorer.toml: backup-failed");
+      for (const target of targets) {
+        if (failure === "unreadable source") chmodSync(target, 0o600);
+        expect(readFileSync(target, "utf8")).toBe("user agent\n");
+      }
+      expect(existsSync(join(stateDir, "replaced-agents"))).toBe(false);
+    } finally {
+      chmodSync(stateDir, 0o700);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("--force makes no backups for absent, identical or current rh-owned targets", () => {
+    const { root, home } = setupFakeHome("install-agent-fleet-force-no-backup");
+    const backupDir = join(home, ".repo-harness/replaced-agents");
+    try {
+      expect(runInstaller(home, FLEET_SOURCE_DIR, ["--force"]).status).toBe(0);
+      expect(existsSync(backupDir)).toBe(false);
+      expect(runInstaller(home, FLEET_SOURCE_DIR, ["--force"]).stdout).toContain("explorer.md: up-to-date");
+      expect(existsSync(backupDir)).toBe(false);
+      const targets = [join(home, ".claude/agents/explorer.md"), join(home, ".codex/agents/explorer.toml")];
+      recordInstallOwnership(targets, { ...process.env, HOME: home });
+      const next = join(root, "next");
+      cpSync(FLEET_SOURCE_DIR, next, { recursive: true });
+      const source = join(next, "explorer.md");
+      writeFileSync(source, readFileSync(source, "utf8") + "\nUpdated role instruction.\n");
+      const upgraded = runInstaller(home, next, ["--force"]);
+      expect(upgraded.status).toBe(0);
+      expect(upgraded.stdout).toContain("[fleet] claude/explorer.md: installed");
+      expect(upgraded.stdout).toContain("[fleet] codex/explorer.toml: installed");
+      for (const target of targets) expect(readFileSync(target, "utf8")).toContain("Updated role instruction.");
+      expect(existsSync(backupDir)).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
