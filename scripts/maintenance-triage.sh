@@ -170,7 +170,6 @@ consolidation_json="$(consolidation_refs | jq -R . | jq -s 'map(select(length > 
 report_json="$(
   jq -nc --argjson entries "[${entries_json}]" --argjson consolidation "${consolidation_json}" '
     def value($entry; $field): $entry.fields[$field] // "";
-    def keyify: ascii_downcase | gsub("[^a-z0-9]+"; "-") | gsub("^-+|-+$"; "");
     def norm:
       ascii_downcase
       | gsub("^[[:space:]#]+|[[:space:]]+$"; "")
@@ -199,10 +198,9 @@ report_json="$(
     | (if ($field_errors | length) > 0 then null else
         reduce $entries[] as $entry ({};
           . as $acc
-          | (value($entry; "Mistake pattern") | keyify) as $key
+          | value($entry; "Mistake pattern") as $key
           | value($entry; "Promoted") as $promoted
           | .[$key] = (($acc[$key] // {lines: []}) + {
-              theme: value($entry; "Mistake pattern"),
               name: (value($entry; "Name") | if . == "" then null else . end),
               prevention_rule: value($entry; "Prevention rule"),
               why: value($entry; "Why"),
@@ -220,12 +218,12 @@ report_json="$(
     | (if $themes == null then null else
         $themes | to_entries
         | map(select(.value.seen >= 3 and .value.enforced_by == "judgment")
-            | {key, theme: .value.theme, name: .value.name, seen: .value.seen, promoted: (.value.promoted // null)})
+            | {theme: .key, name: .value.name, seen: .value.seen, promoted: (.value.promoted // null)})
       end) as $judgment
 
     | (if $themes == null then null else
         $themes | to_entries | sort_by(.key)
-        | map({key, theme: .value.theme, name: .value.name, seen: .value.seen,
+        | map({key, theme: .key, name: .value.name, seen: .value.seen,
                prevention_rule: .value.prevention_rule, why: .value.why, correction_sources: .value.correction_sources,
                enforced_by: .value.enforced_by, promoted: (.value.promoted // null), lines: .value.lines})
       end) as $theme_list

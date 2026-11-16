@@ -23,6 +23,8 @@ const MISSED_BY = ['self-verify', 'ci', 'independent-review', 'human', 'none', '
 const SEEN = /^([1-9][0-9]*)×$/;
 const PROMOTED = /^(#[1-9][0-9]*|https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/[1-9][0-9]*)$/;
 const RULE_ID = /^[A-Z][A-Za-z0-9]*$/;
+// One spelling per theme key, so no two spellings can claim one theme.
+const THEME_KEY = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 /** One parser entry: `line` is the Date line, `owned` every line that the entry holds. */
 export type LedgerEntry = { readonly line: number; readonly fields: Readonly<Record<string, string>>; readonly owned: readonly number[] };
@@ -46,7 +48,6 @@ const normalize = (ref: string): string => {
 };
 const references = (entry: LedgerEntry): string[] => field(entry, 'Triggered by correction').split(',')
   .map((ref) => ref.trim()).filter(Boolean);
-const referenceSet = (entries: readonly LedgerEntry[]): Set<string> => new Set(entries.flatMap(references).map(normalize));
 /** A structural enforcer is a path or a rule id; `judgment` and an empty value are not. */
 const structural = (entry: LedgerEntry): boolean => !['', 'judgment'].includes(field(entry, 'Enforced by'));
 /** The state that row 4 fails: Seen 3× or more, no structural enforcer, no Promoted. */
@@ -93,7 +94,8 @@ export function evaluateLedger(text: string, head: readonly LedgerEntry[], base:
     });
   }
 
-  // Row 1: required and known fields, the Missed by enum, the Seen count and the Promoted format.
+  // Row 1: required and known fields, the theme key spelling, the Missed by enum, the Seen count and
+  // the Promoted format.
   // Row 3: an Enforced by path or rule id that does not exist. Row 6: one that exists needs human review.
   for (const entry of head) {
     for (const name of REQUIRED_FIELDS) {
@@ -102,6 +104,8 @@ export function evaluateLedger(text: string, head: readonly LedgerEntry[], base:
     for (const name of Object.keys(entry.fields).filter((name) => !FIELDS.includes(name))) {
       add(entry, name, 'is not a Lessons Retro field', `remove it, or use one of ${FIELDS.join(', ')}`);
     }
+    const theme = field(entry, 'Mistake pattern');
+    if (theme && !THEME_KEY.test(theme)) add(entry, 'Mistake pattern', `"${theme}" is not a theme key`, 'write the key in lowercase words joined by "-", and copy it exactly for each entry of the theme');
     const missedBy = field(entry, 'Missed by');
     if (missedBy && !MISSED_BY.includes(missedBy)) add(entry, 'Missed by', `"${missedBy}" is not a valid value`, `write one of ${MISSED_BY.join(', ')}`);
     const count = field(entry, 'Seen');
@@ -122,11 +126,7 @@ export function evaluateLedger(text: string, head: readonly LedgerEntry[], base:
     }
   }
 
-  // Row 2 on the candidate tree: one entry per theme and day, and a cumulative Seen. References
-  // bound events from above: one event names at least one new reference, and it can name several
-  // (an issue and its fix PR). So an entry's Seen increase over the earlier entry of its theme is
-  // at least 1 and at most the references that the earlier entries do not name. A first entry's
-  // Seen is at most its own references. An undercount passes: a reference set cannot count events.
+  // Row 2 on the candidate tree: one entry per theme and day, and a Seen that rises in ledger order.
   const headKeys = new Map<string, LedgerEntry>();
   for (const entry of head) {
     const earlier = headKeys.get(key(entry));
@@ -138,94 +138,45 @@ export function evaluateLedger(text: string, head: readonly LedgerEntry[], base:
   for (const { entries } of headThemes.values()) {
     for (const [index, entry] of entries.entries()) {
       const before = entries[index - 1];
-      const known = referenceSet(entries.slice(0, index));
-      const fresh = new Set(references(entry).map(normalize).filter((ref) => !known.has(ref))).size;
-      const increase = seen(entry)! - (before ? seen(before)! : 0);
-      if (before && increase < 1) {
+      if (before && seen(entry)! <= seen(before)!) {
         add(entry, 'Seen', `${seen(entry)}× does not exceed ${seen(before)}× of the earlier entry at line ${before.line}`,
           'Seen is cumulative: add the new correction events to the last valid Seen value of the theme');
-      } else if (increase > fresh) {
-        add(entry, 'Seen', `${seen(entry)}× adds ${increase} events, but the entry names ${fresh} references that the earlier entries of the theme do not name`,
-          'each new correction event names at least one new reference in Triggered by correction; lower Seen or name the corrections');
       }
     }
   }
 
-  // Theme correspondence is one relation between all merge-base themes and all head themes. A head
-  // theme corresponds to the merge-base theme with the same Mistake pattern, and to each merge-base
-  // theme whose specific reference it names. A reference that more than one merge-base theme names
-  // (a consolidation PR) is not specific and links no themes alone, so two renames that share a
-  // consolidation reference stay separate. A merge-base theme without a specific reference
-  // corresponds to each head theme that names all its references. So a rename, a merge, a split
-  // and an absorption into a kept theme keep their link.
+  // The change: Mistake pattern is the immutable theme key, so a head theme continues only the
+  // merge-base theme with the same key. A Name change is free. A key that leaves the ledger fails,
+  // also when another theme absorbs its entries: the key of a consolidation survives.
   const baseThemes = base === null ? new Map<string, Theme>() : themes(base);
-  const owners = new Map<string, number>();
-  for (const theme of baseThemes.values()) {
-    for (const ref of referenceSet(theme.entries)) owners.set(ref, (owners.get(ref) ?? 0) + 1);
-  }
-  const corresponds = (source: string, before: Theme, theme: string, after: Theme): boolean => {
-    if (source === theme) return true;
-    const refs = [...referenceSet(before.entries)];
-    const named = referenceSet(after.entries);
-    const specific = refs.filter((ref) => owners.get(ref) === 1);
-    return specific.length > 0 ? specific.some((ref) => named.has(ref)) : refs.length > 0 && refs.every((ref) => named.has(ref));
-  };
-  const links = new Map([...headThemes].map(([theme, after]) =>
-    [theme, new Set([...baseThemes].filter(([source, before]) => corresponds(source, before, theme, after)).map(([source]) => source))]));
-  const sourcesOf = (name: string): Theme[] => [...links.get(name)!].map((source) => baseThemes.get(source)!);
-
-  // The maximum of a merge-base theme never falls: one corresponding head theme keeps it. This also
-  // covers row 4 for a deleted or absorbed judgment theme. A split keeps the maximum on one part.
-  const fell = new Set<Theme>();
-  const keeper = new Map<string, Theme>();
-  for (const [name, before] of baseThemes) {
-    const top = [...headThemes].filter(([theme]) => links.get(theme)!.has(name)).map(([, theme]) => theme)
-      .reduce<Theme | undefined>((high, theme) => !high || theme.max > high.max ? theme : high, undefined);
-    if (!top) {
-      add(before.latest, 'Seen', `the theme at ${before.max}× has no corresponding theme in the ledger`,
-        'keep the theme, or keep its Triggered by correction references in the theme that replaces it', true);
-    } else if (top.max >= before.max) {
-      keeper.set(name, top);
-    } else {
-      add(top.latest, 'Seen', `the theme maximum fell from ${before.max}× to ${top.max}×`, `the maximum of a theme never falls; write ${before.max}×`);
-      fell.add(top);
+  for (const [theme, before] of baseThemes) {
+    const after = headThemes.get(theme);
+    if (!after) {
+      add(before.latest, 'Mistake pattern', 'is a theme key that is no longer in the ledger',
+        'keep the key: a rename changes only Name, and a consolidation keeps the key of the theme it continues', true);
+      continue;
+    }
+    if (after.max < before.max) {
+      add(after.latest, 'Seen', `the theme maximum fell from ${before.max}× to ${after.max}×`, `the maximum of a theme never falls; write ${before.max}×`);
+      continue;
+    }
+    // A consolidation (fewer entries) keeps the maximum on its latest entry, so a new event goes to
+    // its own PR. Every other entry with the Date of a merge-base entry keeps the Seen of that entry.
+    const consolidation = after.entries.length < before.entries.length;
+    if (consolidation && after.max !== before.max) {
+      add(after.latest, 'Seen', `a consolidation of ${before.entries.length} entries into ${after.entries.length} gives ${after.max}×`,
+        `a consolidation keeps the maximum ${before.max}×; record a new correction event in its own PR`);
+    }
+    for (const entry of before.entries) {
+      const now = after.entries.find((candidate) => field(candidate, 'Date') === field(entry, 'Date'));
+      if (now && seen(now) !== seen(entry) && !(consolidation && now === after.latest)) {
+        add(now, 'Seen', `changed from ${seen(entry)}× to ${seen(now)}× on an existing entry`, `restore ${seen(entry)}×; do not edit Seen on older entries`);
+      }
     }
   }
-
   if (base !== null) {
-    for (const [theme, after] of headThemes) {
-      const sources = sourcesOf(theme);
-      if (sources.length === 0 || fell.has(after)) continue;
-      const ceiling = sources.reduce((sum, source) => sum + source.max, 0);
-      const baseRefs = referenceSet(sources.flatMap((source) => source.entries));
-      const fresh = [...referenceSet(after.entries)].filter((ref) => !baseRefs.has(ref));
-      if (after.max > ceiling + fresh.length) {
-        add(after.latest, 'Seen', `${after.max}× exceeds the merge-base maximum ${ceiling}× plus ${fresh.length} new references`,
-          'each new correction event names at least one new reference in Triggered by correction; lower Seen or name the corrections');
-      }
-      // The entry checks compare with the theme that this head theme continues: the same name, or
-      // the only corresponding theme. A head theme with several sources and a new name is a merge.
-      const name = baseThemes.has(theme) ? theme : sources.length === 1 ? [...links.get(theme)!][0] : undefined;
-      const source = name === undefined ? undefined : baseThemes.get(name);
-      if (!source) continue;
-      // A consolidation (fewer entries than the corresponding base theme, on the head theme that
-      // keeps its maximum) keeps the base maximum on its latest entry and adds at most the
-      // consolidating reference, so a new event goes to its own PR. A split part without the
-      // maximum is no consolidation. Every other entry with the Date of a base entry keeps its Seen.
-      const consolidation = keeper.get(name!) === after && after.entries.length < source.entries.length;
-      if (consolidation && (after.max !== source.max || fresh.length > 1)) {
-        add(after.latest, 'Seen', `a consolidation of ${source.entries.length} entries into ${after.entries.length} gives ${after.max}× with ${fresh.length} new references`,
-          `a consolidation keeps the maximum ${source.max}× and adds only the consolidating PR to Triggered by correction; record a new correction event in its own PR`);
-      }
-      for (const entry of source.entries) {
-        const now = after.entries.find((candidate) => field(candidate, 'Date') === field(entry, 'Date'));
-        if (now && seen(now) !== seen(entry) && !(consolidation && now === after.latest)) {
-          add(now, 'Seen', `changed from ${seen(entry)}× to ${seen(now)}× on an existing entry`, `restore ${seen(entry)}×; do not edit Seen on older entries`);
-        }
-      }
-    }
     // Row 5: a merge keeps every Triggered by correction reference of the entries it replaces.
-    const kept = referenceSet(head);
+    const kept = new Set(head.flatMap(references).map(normalize));
     for (const entry of base) {
       const lost = references(entry).filter((ref) => !kept.has(normalize(ref)));
       if (lost.length) {
@@ -235,13 +186,14 @@ export function evaluateLedger(text: string, head: readonly LedgerEntry[], base:
     }
   }
 
-  // Row 4: Seen 3× or more with Enforced by: judgment needs Promoted. A state that a corresponding
-  // merge-base theme already has (same maximum, no structural enforcer, no Promoted) is carried: this
-  // change did not make it, and maintenance triage lists it. A rename keeps it carried; any other
-  // change to that state must promote the rule.
+  // Row 4: Seen 3× or more with Enforced by: judgment needs Promoted. The state is carried when the
+  // merge-base theme with the same key already has it at the same maximum: this change did not make
+  // it, and maintenance triage lists it. A new event, a removed Promoted or a change from a path to
+  // judgment makes it again, also through an absorbed entry.
   for (const [theme, state] of headThemes) {
     if (state.max < 3 || field(state.latest, 'Enforced by') !== 'judgment' || state.promoted) continue;
-    if (sourcesOf(theme).some((source) => judged(source) && source.max === state.max)) {
+    const before = baseThemes.get(theme);
+    if (before && judged(before) && before.max === state.max) {
       carried.push(`${label(state.latest)}: Seen ${state.max}× with Enforced by: judgment and no Promoted`);
     } else {
       add(state.latest, 'Promoted', `Seen ${state.max}× with Enforced by: judgment has no Promoted`,
