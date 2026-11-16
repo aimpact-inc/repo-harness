@@ -4,7 +4,7 @@
  * The result document is the contract of ADR-0004
  * (`docs/adr/ADR-0004-test-budget-result-contract.md`).
  */
-import type { Nodes, RootContent } from 'mdast';
+import type { Nodes } from 'mdast';
 import { fromMarkdown } from 'mdast-util-from-markdown';
 import { canonicalize } from '../evidence/canonical-json';
 import { sha256Prefixed } from '../evidence/sha256';
@@ -189,54 +189,56 @@ function inlineText(node: Nodes): string {
   return 'children' in node ? node.children.map(inlineText).join('') : '';
 }
 
-interface SectionLine {
-  readonly text: string;
-  /** A line inside a block quote is reason text and never a count. */
-  readonly quoted: boolean;
-}
+type BodyItem =
+  | { readonly kind: 'heading'; readonly depth: number; readonly text: string; readonly quoted: boolean }
+  | { readonly kind: 'line'; readonly text: string; readonly quoted: boolean };
 
-/** The text lines of section blocks. Code, HTML blocks and thematic breaks hold no line. */
-function sectionLines(node: Nodes, quoted: boolean, out: SectionLine[]): void {
-  if (node.type === 'paragraph' || node.type === 'heading' || node.type === 'tableCell') {
-    for (const text of inlineText(node).split('\n')) out.push({ text: text.trim(), quoted });
+/**
+ * The headings and text lines of the body in document order, at every nesting
+ * depth: a heading inside a list item or a block quote is still a heading.
+ * Code and HTML blocks hold no item. A line inside a block quote is `quoted`.
+ */
+function bodyItems(node: Nodes, quoted: boolean, out: BodyItem[]): void {
+  if (node.type === 'heading') {
+    out.push({ kind: 'heading', depth: node.depth, text: inlineText(node), quoted });
+  } else if (node.type === 'paragraph' || node.type === 'tableCell') {
+    for (const text of inlineText(node).split('\n')) out.push({ kind: 'line', text, quoted });
   } else if (node.type !== 'code' && node.type !== 'html' && 'children' in node) {
-    for (const child of node.children) sectionLines(child, quoted || node.type === 'blockquote', out);
+    for (const child of node.children) bodyItems(child, quoted || node.type === 'blockquote', out);
   }
 }
 
 /**
  * The `## Test budget exception` section of a PR body, read from one CommonMark
- * parse: a top-level level-2 heading with that text, up to the next level 1 or 2
- * heading. A heading inside fenced code, an HTML comment, a block quote or a list
- * is not the section. The section needs each count line once; its other text
- * lines outside code are the reason.
+ * parse: a level-2 heading with that text, up to the next level 1 or 2 heading
+ * in document order, also one nested in a list item or a block quote. A heading
+ * inside fenced code, an HTML comment or a block quote is not the section. The
+ * section needs each count line once; its other text lines are the reason, and
+ * a quoted line is never a count.
  */
 export function parseTestBudgetException(body: string): TestBudgetException {
-  const blocks = fromMarkdown(body).children;
-  const starts = blocks.flatMap((node, index) => (node.type === 'heading' && node.depth === 2
-    && inlineText(node).replace(/\s+/g, ' ').trim().toLowerCase() === EXCEPTION_HEADING ? [index] : []));
+  const items: BodyItem[] = [];
+  bodyItems(fromMarkdown(body), false, items);
+  const starts = items.flatMap((item, index) => (item.kind === 'heading' && item.depth === 2 && !item.quoted
+    && item.text.replace(/\s+/g, ' ').trim().toLowerCase() === EXCEPTION_HEADING ? [index] : []));
   if (starts.length === 0) return { status: 'absent' };
   if (starts.length > 1) return { status: 'malformed', problem: 'the PR body has more than one Test budget exception section' };
-  const section: RootContent[] = [];
-  for (const node of blocks.slice(starts[0]! + 1)) {
-    if (node.type === 'heading' && node.depth <= 2) break;
-    section.push(node);
-  }
-  const lines: SectionLine[] = [];
-  for (const node of section) sectionLines(node, false, lines);
   const counts: Partial<Record<keyof TestBudgetExceptionCounts, number>> = {};
   const reason: string[] = [];
-  for (const line of lines) {
-    const count = line.quoted ? null : COUNT_LINE.exec(line.text);
-    if (count === null) {
-      if (line.text !== '') reason.push(line.text);
-      continue;
+  for (const item of items.slice(starts[0]! + 1)) {
+    if (item.kind === 'heading' && item.depth <= 2) break;
+    for (const line of item.text.split('\n').map((text) => text.trim())) {
+      const count = item.quoted ? null : COUNT_LINE.exec(line);
+      if (count === null) {
+        if (line !== '') reason.push(line);
+        continue;
+      }
+      const key = COUNT_KEYS[count[1]!.toLowerCase() as keyof typeof COUNT_KEYS];
+      const value = Number(count[2]);
+      if (counts[key] !== undefined) return { status: 'malformed', problem: `the section states "${count[1]}" more than once` };
+      if (!Number.isSafeInteger(value)) return { status: 'malformed', problem: `the section has an invalid number for "${count[1]}"` };
+      counts[key] = value;
     }
-    const key = COUNT_KEYS[count[1]!.toLowerCase() as keyof typeof COUNT_KEYS];
-    const value = Number(count[2]);
-    if (counts[key] !== undefined) return { status: 'malformed', problem: `the section states "${count[1]}" more than once` };
-    if (!Number.isSafeInteger(value)) return { status: 'malformed', problem: `the section has an invalid number for "${count[1]}"` };
-    counts[key] = value;
   }
   const missing = Object.entries(COUNT_KEYS).filter(([, key]) => counts[key] === undefined).map(([label]) => label);
   if (missing.length > 0) return { status: 'malformed', problem: `the section has no line for: ${missing.join(', ')}` };

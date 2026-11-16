@@ -209,15 +209,18 @@ describe('TestBudget exception', () => {
   test('an empty heading, wrong numbers or an empty reason do not pass', () => {
     const { repo, base } = repository(ENABLED);
     const head = commit(repo, { 'src/app.ts': lines(13), 'tests/new.test.ts': lines(30) });
-    // Plain count lines: after a list, an indented heading would continue the last list item instead.
-    const countsOnly = '## Test budget exception\n\nAdded test lines: 30\nAdded product lines: 3\nAdded test files: 1\n\n';
+    const bulletCounts = '## Test budget exception\n\n- Added test lines: 30\n- Added product lines: 3\n- Added test files: 1\n\n';
+    const plainCounts = '## Test budget exception\n\nAdded test lines: 30\nAdded product lines: 3\nAdded test files: 1\n\n';
+    const headings = ['  ## Rollback', '##\tRollback', '   # Rollback', '> ## Rollback', 'Rollback\n---', 'Rollback instructions\nfor this change\n---',
+      'Rollback instructions\nfor this change\n==='];
     const bodies = [
       '## Test budget exception\n\n## Rollback\n',
       exceptionBody(30, 4, 1),
       exceptionBody(30, 3, 1, ''),
       // Each next heading ends the section, so its text is not the reason.
-      ...['  ## Rollback', '##\tRollback', '   # Rollback', 'Rollback\n---', 'Rollback instructions\nfor this change\n---',
-        'Rollback instructions\nfor this change\n==='].map((heading) => `${countsOnly}${heading}\n\ngit revert.\n`),
+      ...[bulletCounts, plainCounts].flatMap((counts) => headings.map((heading) => `${counts}${heading}\n\ngit revert.\n`)),
+      // A heading that continues the last list item also ends the section.
+      ...['  ## Rollback', '  # Rollback'].map((heading) => `${bulletCounts}${heading}\n`),
     ];
     for (const body of bodies) {
       const result = check(repo, base, head, body);
@@ -231,7 +234,9 @@ describe('TestBudget exception', () => {
     for (const body of [`\`\`\`markdown\n${section}\`\`\`\n`, `<!--\n${section}-->\n`, section.replace(/^/gm, '> ')]) {
       expect(parseTestBudgetException(body)).toEqual({ status: 'absent' });
     }
-    expect(parseTestBudgetException(`${section}\n${section}`).status).toBe('malformed');
+    for (const body of [`${section}\n${section}`, section.replace('Reason.', '  ## Test budget exception')]) {
+      expect(parseTestBudgetException(body).status).toBe('malformed');
+    }
   });
 
   test('the exception digest changes with the section only', () => {
