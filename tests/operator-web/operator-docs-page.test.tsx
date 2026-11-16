@@ -240,6 +240,10 @@ describe('docs page', () => {
     expect((await show('{"entities":[]}', valid)).state).toBe('valid');
     expect(seen).toEqual([{ entities: [] }]);
     expect((await show('{"entities":[]}')).state).toBe('capability-missing');
+    for (const [check, state] of [
+      [{ state: 'image', src: '/a.svg', stale: false }, 'image'], [{ state: 'image', src: '/a.svg', stale: true }, 'stale'],
+      [{ state: 'pending' }, 'pending'], [{ state: 'browser_missing' }, 'browser-missing'], [{ state: 'failed', reason: 'timeout' }, 'failed'],
+    ] as const) expect((await show('{"entities":[]}', async () => check)).state).toBe(state);
     // A deeply nested block neither overflows the stack nor hides the source.
     expect((await show(`${'['.repeat(100000)}${']'.repeat(100000)}`, valid)).state).toBe('valid');
   });
