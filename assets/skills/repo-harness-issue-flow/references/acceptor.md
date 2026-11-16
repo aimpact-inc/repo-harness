@@ -248,9 +248,9 @@ the one `reviewer.harness` value of its runtime. The seat ends its reply
 with a `RECEIPT-JSON` marker and the receipt as one JSON object, and does
 not publish. After the pane status is `done`, the coordinator runs
 `rh review collect --seat <terminal> --pr <n> [--owner-record <url>] [--json]`.
-The command covers Pi sessions (`~/.pi/agent/sessions`) and Claude sessions
-(`~/.claude/projects`, or `CLAUDE_CONFIG_DIR`) of the seat's worktree; it
-reads no Codex session record. It binds a session to the seat by the packet
+The command reads the session records of the seat's worktree under
+`~/.pi/agent/sessions` (Pi) and `~/.claude/projects`, or `CLAUDE_CONFIG_DIR`
+(Claude Code). It reads no Codex session record. It binds a session to the seat by the packet
 that the session received (seat label, PR number and head SHA), never by
 file age, because review seats of one PR share a worktree. When several
 sessions carry the seat's packet, it keeps the one whose last receipt names
