@@ -213,8 +213,11 @@ Safety hook guards:
   file, or a directory tree above it, as rh-created. A create or an append
   passes everywhere. A removal (`rm`, `unlink`, `shred`, `truncate`, an `mv`
   source, `sed -i`, `find -delete`) whose target is not known before the
-  command runs is refused; an overwrite with an unknown target passes. The
-  hook checks every simple command, also after `then`, `do`, `else`, `&&`,
+  command runs is refused; an overwrite with an unknown target passes. A
+  target with a glob or a parameter is judged by its literal directory before
+  the first such character (a leading `$HOME` or `~` is literal): inside an
+  allowed root it passes, and an existing directory outside them takes the
+  outside rule. The hook checks every simple command, also after `then`, `do`, `else`, `&&`,
   `||`, `;`, `|`, a newline and inside a subshell. A `cd` narrows the working
   directory only when `&&` follows it, `||` does not come before it and its
   directory exists; after any other `cd` the working directory is not known. A target resolves as the kernel

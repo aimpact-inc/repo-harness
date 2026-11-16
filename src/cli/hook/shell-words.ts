@@ -188,7 +188,9 @@ export function lex(text: string): Streams {
   const literal = (ch: string) => { const w = current(); w.value += ch; w.pattern += escapePattern(ch); w.quoted = true; };
   const flush = () => { if (word) frame().tokens.push(word); word = null; };
   const push = (closer: ')' | '`') => {
-    current().expand = true;
+    // The `$` marks where the substitution's run-time text goes in the outer word.
+    const outer = current();
+    outer.expand = true; outer.value += '$'; outer.pattern += '$';
     outerWords.push(word);
     word = null;
     frames.push({ tokens: [], closer, depth: 0, quote: false });

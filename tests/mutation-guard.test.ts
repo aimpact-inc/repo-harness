@@ -114,7 +114,7 @@ describe('safety hook: Bash host route', () => {
     try {
       for (const dir of [cwd, join(root, 'tmp'), join(root, 'managed'), join(home, '.ssh'), join(out, 'sub'), join(out, 'empty')]) mkdirSync(dir, { recursive: true });
       initRepo(cwd);
-      for (const dir of ['src', 'stage/d', 'Project Files']) mkdirSync(join(cwd, dir), { recursive: true });
+      for (const dir of ['src', 'stage/d', 'Project Files', 'build']) mkdirSync(join(cwd, dir), { recursive: true });
       mkdirSync(join(home, 'stage'));
       for (const file of [join(out, 'notes.txt'), join(out, 'app.json'), join(cwd, 'stage/app.json'), join(cwd, 'stage/b.json'), join(cwd, '.env.local'),
         join(cwd, 'Project Files/.env'), join(home, '.ssh/id_ed25519'), join(home, 'stage/app.json'), join(cwd, 'stage/d/notes.txt')]) writeFileSync(file, 'TOKEN=fixture-only\n');
@@ -142,9 +142,11 @@ describe('safety hook: Bash host route', () => {
         'rm linked/../notes.txt', `cp stage/app.json ${cwd}/`,
         // A content write follows the leaf link; a copy source that names `$HOME` or a directory glob still finds the child.
         'truncate -s 0 notes.txt', 'shred notes.txt', 'cp "$HOME/stage/app.json" .', 'cp stage/*/notes.txt .',
+        // A glob or parameter target is judged by its literal directory.
+        'rm "$HOME"/*.txt', ': > "$HOME"/*.txt', `tee ${out}/*.txt`,
       ]);
       expectGuard('RecursiveDeleteGuard', ['if true; then rm -rf .; fi']);
-      expectGuard(null, ['cd src && rm a.txt', 'echo $(rm src/a.txt)', `cp stage/*.json ${out}/empty/`, 'rm notes.txt', 'cp stage/*/notes.txt src/']);
+      expectGuard(null, ['cd src && rm a.txt', 'echo $(rm src/a.txt)', `cp stage/*.json ${out}/empty/`, 'rm notes.txt', 'cp stage/*/notes.txt src/', 'rm -rf build/*']);
       const update = hook('edit', { command: '*** Begin Patch\n*** Update File: app.json\n@@\n-x\n+y\n*** End Patch' });
       expect(update.status).toBe(2);
       expect(update.stderr).toContain('[UserFileGuard]');

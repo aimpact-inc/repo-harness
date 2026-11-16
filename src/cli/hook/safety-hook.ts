@@ -43,7 +43,7 @@ export interface WriteTarget {
   readonly via: string;
   readonly spelled: string;
   readonly path: string | null;
-  /** The path is the literal directory of a glob; the write lands below it. */
+  /** The path is the literal directory before a glob or a parameter; the write lands below it. */
   readonly glob?: true;
   /**
    * cp, mv and ln write `<path>/<name>` for each source name when `path` is an existing directory; the directory itself is not
@@ -194,11 +194,15 @@ class TargetJudge {
     return outsideDenial(target, path, this.roots, this.userStep);
   }
 
-  /** A glob removes or changes entries below its literal directory, so the directory decides. */
+  /**
+   * A glob or a parameter decides its target at run time, below its literal directory, so the directory decides: inside an
+   * allowed root the call passes, and an existing directory outside them takes the outside rule.
+   */
   private globDenial(target: WriteTarget, dir: string): Denial | null {
-    if (target.kind === 'overwrite') return null;
     let path: string;
-    try { path = writeThroughPath(dir); } catch { return unknownTargetDenial(target, this.roots, this.userStep); }
+    try { path = writeThroughPath(dir); } catch {
+      return target.kind === 'overwrite' ? null : unknownTargetDenial(target, this.roots, this.userStep);
+    }
     if (this.roots.some(root => underRoot(root, path, true)) || !existsSync(path) || ledgerCreated(path, this.scope.env)) return null;
     return outsideDenial(target, path, this.roots, this.userStep);
   }
@@ -449,33 +453,36 @@ function credentialFinding(cmd: Command, dirs: Dirs): Denial | null {
 // I2: the write targets of one Bash command
 // ---------------------------------------------------------------------------
 
-/** The absolute paths that a word names from each directory of the set. Null when the shell decides them at run time. */
+/**
+ * The absolute paths that a word names from each directory of the set, after brace expansion. A word that keeps a glob or a
+ * parameter names its literal directory before the first such character (`glob`); a leading `$HOME` and `~` are literal. Null
+ * when the shell decides the directory at run time.
+ */
 function wordTargets(word: Word, dirs: Dirs): Array<{ path: string; glob: boolean }> | null {
-  let patterns: string[];
-  if (word.expand) {
-    // $HOME is the one parameter that the hook resolves.
-    const home = /^\$(?:HOME|\{HOME\})(?=\/|$)/.exec(word.value);
-    const rest = home ? word.value.slice(home[0].length) : '';
-    if (!home || /[$`]/.test(rest)) return null;
-    patterns = [escapePattern(homedir() + rest)];
-  } else {
-    const expanded = expandBraces(word.pattern);
-    if (!expanded) return null;
-    patterns = expanded;
-  }
   const result: Array<{ path: string; glob: boolean }> = [];
-  for (let pattern of patterns) {
-    // Tilde expansion follows brace expansion. `~+` is the working directory; `~-` and `~user` are not known here.
-    if (/^~(?:\/|$)/.test(pattern)) pattern = escapePattern(homedir()) + pattern.slice(1);
+  for (let pattern of expandBraces(word.pattern) ?? [word.pattern]) {
+    const home = /^(?:~|\$HOME|\$\\\{HOME\\\})(?=\/|$)/.exec(pattern);
+    if (home) pattern = escapePattern(homedir()) + pattern.slice(home[0].length);
+    // `~+` is the working directory; `~-` and `~user` are not known here.
     else if (/^~\+(?:\/|$)/.test(pattern)) pattern = `.${pattern.slice(2)}`;
     else if (pattern.startsWith('~')) return null;
-    const glob = globIndex(pattern);
-    const literal = unescapePattern(glob < 0 ? pattern : pattern.slice(0, pattern.lastIndexOf('/', glob) + 1)) || '.';
+    const stop = expansionIndex(pattern, word.expand);
+    if (stop === 0 && pattern[0] === '$') return null;
+    const literal = unescapePattern(stop < 0 ? pattern : pattern.slice(0, pattern.lastIndexOf('/', stop) + 1)) || '.';
     if (!isAbsolute(literal) && dirs === null) return null;
     // The path keeps its `..` parts: the kernel follows each link before the `..` after it.
-    for (const base of isAbsolute(literal) ? [''] : dirs!) result.push({ path: base ? `${base}${sep}${literal}` : literal, glob: glob >= 0 });
+    for (const base of isAbsolute(literal) ? [''] : dirs!) result.push({ path: base ? `${base}${sep}${literal}` : literal, glob: stop >= 0 });
   }
   return result;
+}
+
+/** The first unescaped glob or brace character, or `$` in a word that expands at run time; -1 when the word is literal. */
+function expansionIndex(pattern: string, expand: boolean): number {
+  for (let i = 0; i < pattern.length; i++) {
+    if (pattern[i] === '\\') i++;
+    else if ('*?[{'.includes(pattern[i]!) || (expand && pattern[i] === '$')) return i;
+  }
+  return -1;
 }
 
 function targetsOf(kind: TargetKind, via: string, word: Word, dirs: Dirs, into?: WriteTarget['into']): WriteTarget[] {
@@ -509,34 +516,22 @@ function destinationTargets(program: string, args: readonly Word[], dirs: Dirs):
   const sources = directory ? operands : operands.slice(0, -1);
   const destination = directory ?? operands.at(-1);
   if (!destination || (!directory && operands.length < 2)) return [];
-  const sourced = sources.map(word => sourceNames(word, dirs));
+  const sourced = sources.map(word => sourceNames(word));
   const names = sourced.some(list => list === null) ? null : sourced.flatMap(list => list!);
   const targets = targetsOf('overwrite', program, destination, dirs, { names, follow: program === 'cp' });
   return program === 'mv' ? [...sources.flatMap(word => targetsOf('destroy', 'mv', word, dirs)), ...targets] : targets;
 }
 
-/**
- * The names that a copy or move source gives its destination children, as the shell expands the word: `$HOME`, braces and a glob
- * in the last segment, listed from its directory. Null when a name is not known (another parameter, a glob in a directory segment,
- * a directory that cannot be listed).
- */
-function sourceNames(word: Word, dirs: Dirs): string[] | null {
-  if (word.expand) {
-    const found = wordTargets(word, dirs);
-    return found === null || found.some(({ glob }) => glob) ? null : found.map(({ path }) => basename(path));
-  }
-  const names = new Set<string>();
+/** The names that a copy or move source gives its destination children after brace expansion; null when a glob or a parameter decides one. */
+function sourceNames(word: Word): string[] | null {
+  if (word.expand) return null;
+  const names: string[] = [];
   for (const item of expandBraces(word.pattern) ?? [word.pattern]) {
-    const pattern = (/^~(?:\/|$)/.test(item) ? escapePattern(homedir()) + item.slice(1) : item).replace(/\/+$/, '');
-    const cut = pattern.lastIndexOf('/') + 1;
-    const name = pattern.slice(cut);
-    if (globIndex(name) < 0) { names.add(basename(unescapePattern(pattern))); continue; }
-    if (globIndex(pattern.slice(0, cut)) >= 0) return null;
-    const entries = listing(unescapePattern(pattern.slice(0, cut)), dirs);
-    if (entries === null) return null;
-    for (const entry of entries) if ((!entry.startsWith('.') || name.startsWith('.')) && segmentMatches(name, entry)) names.add(entry);
+    const pattern = item.replace(/\/+$/, '');
+    if (globIndex(pattern) >= 0 || pattern.startsWith('~')) return null;
+    names.push(basename(unescapePattern(pattern)));
   }
-  return [...names];
+  return names;
 }
 
 /** Python and Node one-liners: literal file writes and removals in the script text. */
