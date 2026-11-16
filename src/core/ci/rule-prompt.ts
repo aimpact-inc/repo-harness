@@ -1,9 +1,8 @@
-import { ROUTING_CLASSES, type RoutingClass } from '../board/seats-settings';
 import type { RuleActionKind, RuleStatusV1, RuleThemeV1 } from './rule-candidates';
 
 export const RULES_PROMOTE_KIND = 'repo-harness.rules.promote' as const;
 export const RULES_PARENT_MARKER = '<!-- repo-harness.rules.parent -->';
-export const DEFAULT_PROMPT_ROUTE: RoutingClass = 'important_fast';
+export const DEFAULT_PROMPT_ROUTE = 'important_fast' as const;
 
 export class RulesPromoteError extends Error {
   constructor(readonly code: string, readonly issue: number | null = null) {
@@ -30,33 +29,16 @@ export function promotionCandidate(status: RuleStatusV1, candidateId: string, le
   throw new RulesPromoteError('candidate_not_found');
 }
 
-export function promotionRoute(value: string): RoutingClass {
-  if (!ROUTING_CLASSES.includes(value as RoutingClass)) throw new RulesPromoteError('route_invalid');
-  return value as RoutingClass;
-}
-
-export function candidateMarker(candidateId: string, route: RoutingClass): string {
+export function candidateMarker(candidateId: string, route: string): string {
   return `<!-- repo-harness.rules.candidate:${candidateId} route:${route} -->`;
-}
-
-/** A final newline is allowed. The body itself is never trimmed or rewritten. */
-export function promptMarker(body: string): { candidate_id: string; route: RoutingClass } | null {
-  const lastLine = body.replace(/\r?\n$/u, '').split(/\r?\n/u).at(-1) ?? '';
-  const match = /^<!-- repo-harness\.rules\.candidate:([a-f0-9]{64}) route:([a-z_]+) -->$/u.exec(lastLine);
-  if (!match || !ROUTING_CLASSES.includes(match[2] as RoutingClass)) return null;
-  return { candidate_id: match[1]!, route: match[2] as RoutingClass };
-}
-
-export function validatePromotionPrompt(body: string, candidateId: string, route: RoutingClass): void {
-  const marker = promptMarker(body);
-  if (marker?.candidate_id !== candidateId || marker.route !== route) throw new RulesPromoteError('prompt_marker_missing');
 }
 
 export function promotionTitle(candidate: RulePromotionCandidate): string {
   return `rules: ${candidate.theme.key} — ${candidate.kind === 'enforce' ? 'enforce' : 'promote to the root rules'}`;
 }
 
-export function renderPromotionPrompt(candidate: RulePromotionCandidate, route: RoutingClass): string {
+/** The caller validates the route against the board contract before rendering. */
+export function renderPromotionPrompt(candidate: RulePromotionCandidate, route: string): string {
   const { theme, kind, candidate_id } = candidate;
   return [
     '## Goal',

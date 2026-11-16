@@ -31,9 +31,9 @@ import {
 import { RULES } from '../../core/ci/rules';
 import {
   DEFAULT_PROMPT_ROUTE, RULES_PROMOTE_KIND, RulesPromoteError,
-  promotionCandidate, promotionRoute, renderPromotionPrompt,
+  promotionCandidate, renderPromotionPrompt,
 } from '../../core/ci/rule-prompt';
-import { promoteRules, reconcileRules, type RulesPromoteResult } from '../../effects/rules/promote';
+import { promoteRules, promotionRoute, reconcileRules, type RulesPromoteResult } from '../../effects/rules/promote';
 import type { GithubCommandRunner } from '../../effects/github/issues';
 import { POLICY_PATH, decodeWorkflowPolicy } from '../../core/workflow/policy-schema';
 import { githubRemoteRepository } from '../../core/board/source';

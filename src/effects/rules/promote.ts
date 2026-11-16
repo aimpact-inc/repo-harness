@@ -1,9 +1,8 @@
-import type { RoutingClass } from '../../core/board/seats-settings';
+import { ROUTING_CLASSES, type RoutingClass } from '../../core/board/seats-settings';
 import type { RuleStatusV1 } from '../../core/ci/rule-candidates';
 import {
   RULES_PARENT_BODY, RULES_PARENT_MARKER, RULES_PROMOTE_KIND, RulesPromoteError,
-  promotionCandidate, promotionRoute, promotionTitle, promptMarker,
-  renderPromotionPrompt, validatePromotionPrompt,
+  promotionCandidate, promotionTitle, renderPromotionPrompt,
 } from '../../core/ci/rule-prompt';
 import { isRecord } from '../../core/evidence/is-record';
 import { sha256Hex } from '../../core/evidence/sha256';
@@ -22,6 +21,24 @@ export interface RulesPromoteResult {
     readonly label: 'added' | 'present';
     readonly sub_issue: 'linked' | 'present';
   };
+}
+
+export function promotionRoute(value: string): RoutingClass {
+  if (!ROUTING_CLASSES.includes(value as RoutingClass)) throw new RulesPromoteError('route_invalid');
+  return value as RoutingClass;
+}
+
+/** A final newline is allowed. The body itself is never trimmed or rewritten. */
+function promptMarker(body: string): { candidate_id: string; route: RoutingClass } | null {
+  const lastLine = body.replace(/\r?\n$/u, '').split(/\r?\n/u).at(-1) ?? '';
+  const match = /^<!-- repo-harness\.rules\.candidate:([a-f0-9]{64}) route:([a-z_]+) -->$/u.exec(lastLine);
+  if (!match || !ROUTING_CLASSES.includes(match[2] as RoutingClass)) return null;
+  return { candidate_id: match[1]!, route: match[2] as RoutingClass };
+}
+
+function validatePromotionPrompt(body: string, candidateId: string, route: RoutingClass): void {
+  const marker = promptMarker(body);
+  if (marker?.candidate_id !== candidateId || marker.route !== route) throw new RulesPromoteError('prompt_marker_missing');
 }
 
 interface Issue {
