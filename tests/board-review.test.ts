@@ -178,6 +178,11 @@ test('the gatekeeper starts only when the effective gatekeeper is of another kno
   expect(label(plan([pr(1, { second_review: 'pending' })], page(marker(SHA)), [], GATEKEEPER, 'openai'))).toEqual(['1:review_family_unavailable']);
   expect(label(plan([pr(1, { second_review: 'pending' })], page(marker(SHA)), [], GATEKEEPER, null))).toEqual(['1:review_family_unavailable']);
   expect(label(plan([pr(1, { second_review: 'pending' })], page(), [], GATEKEEPER, 'deepseek'))).toEqual(['1:start']);
+  // A started gatekeeper counts by its recorded row, not by the current route: after a quota switch to a DeepSeek fallback, the reviewer of that family still starts; a recorded row of the reviewer family does not.
+  const fallback = route({ ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'pi', model: 'magpie/cursor/deepseek-v41-flash-1017', effort: null });
+  const pending = pr(1, { second_review: 'pending' });
+  expect(label(plan([pending], page(marker(SHA), record(SHA)), [], fallback, 'deepseek'))).toEqual(['1:start']);
+  expect(label(plan([pending], page(marker(SHA), record(SHA, 'pi (magpie/cursor/deepseek-v41-flash-1017)')), [], GATEKEEPER, 'deepseek'))).toEqual(['1:review_family_unavailable']);
   // A Medium head of another writer family starts the Claude reviewer, which the gatekeeper check does not touch.
   expect(label(plan([pr(1, { tier: 'medium', writer_family: 'openai' })], page(), [], route(DEFAULT_SEATS_CONFIG.gatekeeper, null)))).toEqual(['1:start']);
 });

@@ -58,9 +58,9 @@ function gatekeeperFamilyGap(gatekeeper: SeatRouteV1, writer: string | null, giv
 const gatekeeperFamily = (gatekeeper: SeatRouteV1): string | null => gatekeeper.id === null || gatekeeper.seat.model === null ? null : modelFamily(gatekeeper.seat.model);
 
 /** Why the configured reviewer cannot give this head an independent row, or null when it can. */
-function reviewerFamilyGap(reviewer: string | null, gatekeeper: string | null, tier: 'medium' | 'high'): string | null {
+function reviewerFamilyGap(reviewer: string | null, gatekeepers: readonly (string | null)[], tier: 'medium' | 'high'): string | null {
   if (reviewer === null) return 'the reviewer seat model has no known family';
-  return tier === 'high' && reviewer === gatekeeper ? `the reviewer family ${reviewer} is the gatekeeper family, so the two rows are not independent` : null;
+  return tier === 'high' && gatekeepers.includes(reviewer) ? `the reviewer family ${reviewer} is the gatekeeper family, so the two rows are not independent` : null;
 }
 
 const field = (comment: BoardCommentV1, name: string): string | null => {
@@ -74,6 +74,12 @@ function liveMarkers(page: BoardCommentPageV1, seat: ReviewSeat): BoardCommentV1
     .filter(comment => parseClaimStatus(comment)?.status.startsWith('released') === true)
     .map(claimStatusTarget));
   return protocolComments(page, REVIEW_START_HEADER).filter(comment => field(comment, 'Seat') === seat && !released.has(comment.url));
+}
+
+/** The model families of the acceptance rows that already name this head. */
+function recordedFamilies(page: BoardCommentPageV1, head: string): string[] {
+  return protocolComments(page, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? [])
+    .filter(row => row.subject_sha === head && row.model !== null).flatMap(row => modelFamily(row.model!) ?? []);
 }
 
 /**
@@ -156,7 +162,10 @@ export function planReview(input: ReviewInputV1): readonly ReviewDecisionV1[] {
     const givesDifferentFamily = tier === 'medium' || pr.second_review === 'not_required';
     const gatekeeperGap = seats.some(entry => entry.seat === 'gatekeeper') ? gatekeeperFamilyGap(input.gatekeeper, pr.writer_family, givesDifferentFamily, reviewerRow ? reviewer : null) : null;
     if (gatekeeperGap !== null) return skip('review_family_unavailable', `${gatekeeperGap}; ${input.gatekeeper.line}`);
-    const reviewerGap = seats.some(entry => entry.seat === 'reviewer') ? reviewerFamilyGap(reviewer, gatekeeperFamily(input.gatekeeper), tier) : null;
+    // A gatekeeper that already started for this head is the one that counts: its recorded rows give its family, and only a head with no row yet falls back to the current route.
+    const startedFamilies = seats.some(entry => entry.seat === 'gatekeeper') ? [] : recordedFamilies(page, pr.head_sha);
+    const reviewerGap = seats.some(entry => entry.seat === 'reviewer')
+      ? reviewerFamilyGap(reviewer, startedFamilies.length > 0 ? startedFamilies : [gatekeeperFamily(input.gatekeeper)], tier) : null;
     if (reviewerGap !== null) return skip('review_family_unavailable', reviewerGap);
     return { pr: pr.number, action: 'start', head_ref: pr.head_ref, head_sha: pr.head_sha, tier, round: roundOf(page, pr.head_sha), seats };
   });
