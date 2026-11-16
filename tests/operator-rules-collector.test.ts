@@ -122,7 +122,7 @@ test('real CLI output is served unchanged, including exit 1 ledger errors; GET s
   const correction = run('git', ['rev-parse', 'HEAD'], f.repo).stdout.trim();
   mkdirSync(join(f.repo, 'tasks'));
   const ledger = (seen: string) => `# Lessons\n\n- Date: 2026-10-01\n- Name: Alpha\n- Mistake pattern: alpha\n- Prevention rule: Keep evidence.\n- Enforced by: judgment\n- Triggered by correction: ${correction}\n- Seen: ${seen}\n`;
-  writeFileSync(join(f.repo, 'tasks/lessons.md'), ledger('3'));
+  writeFileSync(join(f.repo, 'tasks/lessons.md'), ledger('3×'));
   commitAll(f.repo, 'ledger');
   let cache: RulesRepositoryCache = { state: 'unavailable', reason: 'rules_pending' };
   const server = await startOperatorServer({ port: 0, env: f.env, read_rules: () => cache });
@@ -135,9 +135,9 @@ test('real CLI output is served unchanged, including exit 1 ledger errors; GET s
       expect(await response.json()).toMatchObject({ error: { code: reason } });
     }
     for (const valid of [true, false]) {
-      writeFileSync(join(f.repo, 'tasks/lessons.md'), ledger(valid ? '3' : 'not-a-count'));
+      writeFileSync(join(f.repo, 'tasks/lessons.md'), ledger(valid ? '3×' : 'not-a-count'));
       const cli = run(process.execPath, [RULES_CLI_ENTRY, 'rules', 'status', '--json', '--target', f.repo], f.repo, f.env);
-      expect(cli.status).toBe(valid ? 0 : 1);
+      expect({ status: cli.status, stderr: cli.stderr }).toEqual({ status: valid ? 0 : 1, stderr: '' });
       const collector = collect({ env: f.env }); await collector.settled();
       cache = collector.read(f.id);
       expect(cache.state).toBe('ready');
