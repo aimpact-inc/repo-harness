@@ -27,7 +27,6 @@ jobs:
       sha: ${{ steps.select.outputs.sha }}
       native_oar: ${{ steps.select.outputs.native_oar }}
       home_isolation: ${{ steps.select.outputs.home_isolation }}
-      ledger: ${{ steps.select.outputs.ledger }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -311,12 +310,12 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: bash scripts/check-ci.sh architecture-advisory --base "$BASE_SHA"
 
-  # Required / CI reads this job. A diff with code selects it, and so does a
-  # documentation-only diff that changes tasks/lessons.md.
+  # Required / CI reads this job. It runs on each PR, because an `Enforced by`
+  # target can be any file of the tree, documentation included.
   ledger-enforcement:
     name: LedgerEnforcement
     needs: selection
-    if: github.event_name == 'pull_request' && needs.selection.outputs.ledger == 'true'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -532,14 +531,13 @@ jobs:
           NATIVE_OAR: ${{ needs.selection.outputs.native_oar }}
           ARCHITECTURE_RESULT: ${{ needs.architecture-advisory.result }}
           LEDGER_RESULT: ${{ needs.ledger-enforcement.result }}
-          LEDGER: ${{ needs.selection.outputs.ledger }}
         run: |
-          # A documentation-only diff selects no build, test or check job; a
-          # ledger change in it still selects LedgerEnforcement.
+          # A documentation-only diff selects no build, test or check job.
+          # LedgerEnforcement runs on each PR.
           [ "$SELECTION_RESULT" = success ] \
             && { [ "$STATE_BOUNDARIES_RESULT" = success ] || { [ "$COVERAGE_MODE" = documentation ] && [ "$STATE_BOUNDARIES_RESULT" = skipped ]; }; } \
             && { { [ "$COVERAGE_MODE" = affected ] && [ "$VERIFY_RESULT" = success ]; } || { [ "$COVERAGE_MODE" = documentation ] && [ "$VERIFY_RESULT" = skipped ]; }; } \
             && { [ "$HOME_ISOLATION_RESULT" = success ] || { [ "$HOME_ISOLATION" = false ] && [ "$HOME_ISOLATION_RESULT" = skipped ]; }; } \
             && { [ "$NATIVE_OAR_RESULT" = success ] || { [ "$NATIVE_OAR" = false ] && [ "$NATIVE_OAR_RESULT" = skipped ]; }; } \
             && { [ "$ARCHITECTURE_RESULT" = success ] || { [ "$COVERAGE_MODE" = documentation ] && [ "$ARCHITECTURE_RESULT" = skipped ]; }; } \
-            && { [ "$LEDGER_RESULT" = success ] || { [ "$LEDGER" = false ] && [ "$LEDGER_RESULT" = skipped ]; }; }
+            && [ "$LEDGER_RESULT" = success ]

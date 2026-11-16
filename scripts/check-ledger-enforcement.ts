@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RULES } from '../src/core/ci/rules';
 
-export const LEDGER_PATH = 'tasks/lessons.md';
+const LEDGER_PATH = 'tasks/lessons.md';
 
 const REQUIRED_FIELDS = ['Date', 'Name', 'Mistake pattern', 'Prevention rule', 'Enforced by', 'Missed by', 'Why', 'Triggered by correction', 'Seen'];
 const FIELDS = [...REQUIRED_FIELDS, 'Promoted'];
@@ -161,11 +161,20 @@ export function evaluateLedger(text: string, head: readonly LedgerEntry[], base:
       continue;
     }
     // A consolidation (fewer entries) keeps the maximum on its latest entry, so a new event goes to
-    // its own PR. Every other entry with the Date of a merge-base entry keeps the Seen of that entry.
+    // its own PR, and it keeps the Promoted and the current Enforced by of the theme. Every other
+    // entry with the Date of a merge-base entry keeps the Seen of that entry.
     const consolidation = after.entries.length < before.entries.length;
-    if (consolidation && after.max !== before.max) {
-      add(after.latest, 'Seen', `a consolidation of ${before.entries.length} entries into ${after.entries.length} gives ${after.max}×`,
-        `a consolidation keeps the maximum ${before.max}×; record a new correction event in its own PR`);
+    if (consolidation) {
+      const merged = `a consolidation of ${before.entries.length} entries into ${after.entries.length}`;
+      if (after.max !== before.max) {
+        add(after.latest, 'Seen', `${merged} gives ${after.max}×`, `a consolidation keeps the maximum ${before.max}×; record a new correction event in its own PR`);
+      }
+      const promoted = before.entries.map((entry) => field(entry, 'Promoted')).find(Boolean);
+      if (promoted && !after.promoted) add(after.latest, 'Promoted', `${merged} drops Promoted ${promoted}`, `keep "- Promoted: ${promoted}"`);
+      const enforcer = field(before.latest, 'Enforced by');
+      if (field(after.latest, 'Enforced by') !== enforcer) {
+        add(after.latest, 'Enforced by', `${merged} changes ${enforcer} to ${field(after.latest, 'Enforced by') || 'nothing'}`, `keep "- Enforced by: ${enforcer}"`);
+      }
     }
     for (const entry of before.entries) {
       const now = after.entries.find((candidate) => field(candidate, 'Date') === field(entry, 'Date'));

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { analyzeAffectedTests, bundleInputPaths, discoverDailyInputs, discoverPlatformInputs, ledgerCheckSelected, nativeTriggers, platformImportClosure, selectAffectedTests, selectCoverage, selectPlatformCoverage } from '../scripts/select-ci-coverage';
+import { analyzeAffectedTests, bundleInputPaths, discoverDailyInputs, discoverPlatformInputs, nativeTriggers, platformImportClosure, selectAffectedTests, selectCoverage, selectPlatformCoverage } from '../scripts/select-ci-coverage';
 import { auditDroppedTests } from '../scripts/ci-edge-audit';
 import { replayNeedsSource } from '../scripts/replay-ci-coverage';
 import { changelogPreamble, checkReleasedSections, fragmentMessage, releasedSections, sectionDrift, unreleasedHeading, withoutUnreleasedSection } from '../scripts/check-changelog-released-sections';
@@ -590,13 +590,9 @@ describe('single affected verification and daily fallback', () => {
     expect(workflow.on.schedule).toEqual([{ cron: '17 19 * * *' }]);
     expect(jobs.required.name).toBe('Required / CI');
     expect(jobs.required.needs).toEqual(['selection', 'state-boundaries', 'verify', 'home-isolation', 'native-oar', 'architecture-advisory', 'ledger-enforcement']);
-    // LedgerEnforcement runs on each PR diff with code and on a documentation-only diff that changes the ledger.
-    expect(jobs['ledger-enforcement'].if).toBe("github.event_name == 'pull_request' && needs.selection.outputs.ledger == 'true'");
+    // LedgerEnforcement runs on each PR, a documentation-only PR included.
+    expect(jobs['ledger-enforcement'].if).toBe("github.event_name == 'pull_request'");
     expect(jobs['ledger-enforcement'].steps.at(-1).run).toBe('bash scripts/check-ci.sh ledger --base "$BASE_SHA"');
-    expect(ledgerCheckSelected('affected', ['src/feature.ts'])).toBe(true);
-    expect(ledgerCheckSelected('documentation', ['docs/guide.md', 'tasks/lessons.md'])).toBe(true);
-    expect(ledgerCheckSelected('documentation', ['docs/guide.md'])).toBe(false);
-    expect(ledgerCheckSelected('daily', [])).toBe(false);
     // State boundaries run on every event except a push to main and a documentation-only diff, and Required / CI requires them.
     expect(jobs['state-boundaries'].needs).toBe('selection');
     expect(jobs['state-boundaries'].if).toBe("github.event_name != 'push' && needs.selection.outputs.mode != 'documentation'");
@@ -680,11 +676,11 @@ describe('single affected verification and daily fallback', () => {
 
   test('real aggregate shell rejects failure, cancellation, omission and invalid coverage', () => {
     const command = workflow.jobs.required.steps[0].run;
-    const run = (selection: string, verification: string, mode: string, home: string, native: string, homeFlag: string, nativeFlag: string, boundaries = 'success', architecture = 'success', ledger = 'success', ledgerFlag = 'true') =>
+    const run = (selection: string, verification: string, mode: string, home: string, native: string, homeFlag: string, nativeFlag: string, boundaries = 'success', architecture = 'success', ledger = 'success') =>
       spawnSync('/bin/bash', ['-c', command], { encoding: 'utf8', env: { ...process.env,
         SELECTION_RESULT: selection, STATE_BOUNDARIES_RESULT: boundaries, COVERAGE_MODE: mode, VERIFY_RESULT: verification,
         HOME_ISOLATION_RESULT: home, NATIVE_OAR_RESULT: native, HOME_ISOLATION: homeFlag, NATIVE_OAR: nativeFlag, ARCHITECTURE_RESULT: architecture,
-        LEDGER_RESULT: ledger, LEDGER: ledgerFlag,
+        LEDGER_RESULT: ledger,
       } }).status;
     for (const selection of ['success', 'failure', 'cancelled', 'skipped']) {
       for (const verification of ['success', 'failure', 'cancelled', 'skipped']) {
@@ -705,13 +701,10 @@ describe('single affected verification and daily fallback', () => {
       expect(run('success', 'success', 'affected', 'success', 'success', 'true', 'true', 'success', architecture) === 0).toBe(architecture === 'success');
       expect(run('success', 'skipped', 'documentation', 'skipped', 'skipped', 'false', 'false', 'success', architecture) === 0).toBe(architecture === 'success' || architecture === 'skipped');
     }
-    // A selected LedgerEnforcement must succeed, also in a documentation-only diff; it may be skipped only when not selected.
+    // LedgerEnforcement must succeed in each mode, a documentation-only diff included.
     for (const ledger of ['success', 'failure', 'cancelled', 'skipped', '']) {
-      for (const ledgerFlag of ['true', 'false', '']) {
-        const pass = ledger === 'success' || (ledgerFlag === 'false' && ledger === 'skipped');
-        expect(run('success', 'success', 'affected', 'success', 'success', 'true', 'true', 'success', 'success', ledger, ledgerFlag) === 0).toBe(pass);
-        expect(run('success', 'skipped', 'documentation', 'skipped', 'skipped', 'false', 'false', 'skipped', 'skipped', ledger, ledgerFlag) === 0).toBe(pass);
-      }
+      expect(run('success', 'success', 'affected', 'success', 'success', 'true', 'true', 'success', 'success', ledger) === 0).toBe(ledger === 'success');
+      expect(run('success', 'skipped', 'documentation', 'skipped', 'skipped', 'false', 'false', 'skipped', 'skipped', ledger) === 0).toBe(ledger === 'success');
     }
     for (const home of ['success', 'failure', 'cancelled', 'skipped', '']) {
       for (const native of ['success', 'failure', 'cancelled', 'skipped', '']) {
@@ -863,7 +856,7 @@ describe('single affected verification and daily fallback', () => {
       const result = spawnSync(process.execPath, [join(ROOT, 'scripts/select-ci-coverage.ts')], { cwd: repo, encoding: 'utf8', env: { ...process.env, GITHUB_EVENT_NAME: 'pull_request', GITHUB_EVENT_PATH: event, GITHUB_OUTPUT: output, GITHUB_SHA: head } });
       expect(result.status).toBe(0);
       expect(JSON.parse(readFileSync(join(repo, '.ci-affected-tests.json'), 'utf8'))).toEqual([['tests/feature.test.ts']]);
-      expect(readFileSync(output, 'utf8')).toBe(`mode=affected\nsha=${head}\nnative_oar=false\nhome_isolation=false\nledger=true\n`);
+      expect(readFileSync(output, 'utf8')).toBe(`mode=affected\nsha=${head}\nnative_oar=false\nhome_isolation=false\n`);
     } finally { rmSync(repo, { recursive: true, force: true }); }
   });
 
@@ -932,9 +925,7 @@ describe('single affected verification and daily fallback', () => {
         const result = spawnSync(process.execPath, [join(ROOT, 'scripts/select-ci-coverage.ts')], { cwd: repo, encoding: 'utf8', env: { ...process.env, GITHUB_EVENT_NAME: 'pull_request', GITHUB_EVENT_PATH: event, GITHUB_OUTPUT: output, GITHUB_SHA: head } });
         if (mode === 'error') { expect({ name, failed: result.status !== 0, stderr: result.stderr.includes(message!) }).toEqual({ name, failed: true, stderr: true }); continue; }
         expect({ name, status: result.status }, result.stderr).toEqual({ name, status: 0 });
-        // Of the documentation-only diffs, only the ledger change ('no reader') selects LedgerEnforcement.
-        const ledger = mode === 'affected' || name === 'no reader';
-        expect({ name, output: readFileSync(output, 'utf8') }).toEqual({ name, output: `mode=${mode}\nsha=${head}\nnative_oar=false\nhome_isolation=false\nledger=${ledger}\n` });
+        expect({ name, output: readFileSync(output, 'utf8') }).toEqual({ name, output: `mode=${mode}\nsha=${head}\nnative_oar=false\nhome_isolation=false\n` });
         expect({ name, plan: existsSync(selected) ? JSON.parse(readFileSync(selected, 'utf8')) : null }).toEqual({ name, plan: tests && [tests] });
       }
       // The local affected lane stops after a documentation selection; an affected selection goes on to typecheck.

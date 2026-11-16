@@ -150,9 +150,7 @@ if [[ "$lane" == affected ]]; then
     if [[ -n "${CI_SHARD:-}" ]]; then shard_total="${CI_SHARD#*/}"; fi
     selection="$(CI_SHARD_TOTAL="$shard_total" bun scripts/select-ci-coverage.ts --base "$base")"
     printf '%s\n' "$selection"
-    if grep -qx 'ledger=true' <<< "$selection"; then
-      run_ledger_enforcement "$base"
-    fi
+    run_ledger_enforcement "$base"
     if grep -qx 'mode=documentation' <<< "$selection"; then
       echo "[ci] Documentation-only diff: no build or test job."
       echo "[ci] OK"

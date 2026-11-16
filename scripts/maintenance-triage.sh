@@ -41,9 +41,10 @@ done
 # {"line": <Date line>, "fields": {"<Field name>": "<value>"}, "owned": [<line>, ...]}.
 # `owned` lists the lines that the entry holds: its Date line, its field lines
 # and their continuation lines. A repeated field in one entry keeps its first
-# value, and the parser skips the repeat. An indented or unprefixed line
-# continues the field above it; a blank line ends it. A field line with another
-# bullet or an indent ("* Seen:", "  - Seen:") ends it and stays unowned. `--entries` prints the
+# value, and the parser skips the repeat. A field line is exactly
+# "- <Field>: <value>". A continuation line is indented plain prose: it starts
+# with no list marker ("-", "*", "+", "1.", "1)"). Every other line ends the
+# field above it and stays unowned. `--entries` prints the
 # parsed entries of one file for LedgerEnforcement
 # (scripts/check-ledger-enforcement.ts), which fails each line that no entry
 # owns, so the check has no second parser.
@@ -85,7 +86,7 @@ parse_entries() {
     start == 0 {
       next
     }
-    /^- [A-Z][A-Za-z ]*:/ {
+    /^- [A-Z][A-Za-z ]*:([[:space:]]|$)/ {
       current = $0
       sub(/^- /, "", current)
       sub(/:.*/, "", current)
@@ -100,15 +101,15 @@ parse_entries() {
       owned = owned "," NR
       next
     }
-    /^- / || /^[[:space:]]*$/ || /^[[:space:]]*[-*+][[:space:]]+[A-Z][A-Za-z ]*:/ {
-      current = ""
-      next
-    }
-    current != "" {
+    current != "" && /^[[:space:]]+[^[:space:]]/ && !/^[[:space:]]*([-*+]|[0-9]+[.)])([[:space:]]|$)/ {
       line = $0
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
       fields[current] = fields[current] " " line
       owned = owned "," NR
+      next
+    }
+    {
+      current = ""
     }
     END {
       emit()
