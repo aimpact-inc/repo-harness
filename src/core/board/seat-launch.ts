@@ -35,6 +35,16 @@ export interface SeatLaunchV1 {
   readonly limits: readonly SeatLimitV1[];
 }
 
+/**
+ * The Seatbelt write isolation of a Pi review seat on darwin (#2905): the profile file, and the seat-owned
+ * directories that `TMPDIR` and `BUN_TEST_JUNIT_DIR` name, so that temp files and test reports stay writable.
+ */
+export interface PiReviewSeatIsolation {
+  readonly profile: string;
+  readonly temporaryDirectory: string;
+  readonly junitDirectory: string;
+}
+
 /** Built-in Claude Code agent types (Claude Code 2.1.316 and 2.1.317 init events and Agent tool), and `fork`. */
 export const CLAUDE_BUILTIN_AGENT_TYPES = ['claude', 'claude-code-guide', 'Explore', 'fork', 'general-purpose', 'Plan', 'statusline-setup', 'web-fetch'] as const;
 
@@ -247,20 +257,23 @@ function codexLaunch(seat: LaunchSeatId, config: SeatConfigV1): Omit<SeatLaunchV
   };
 }
 
-function piLaunch(seat: LaunchSeatId, config: SeatConfigV1, roleDirectory: string | undefined): Omit<SeatLaunchV1, 'protocol' | 'kind' | 'seat' | 'runtime' | 'source'> {
+function piLaunch(seat: LaunchSeatId, config: SeatConfigV1, roleDirectory: string | undefined, isolation: PiReviewSeatIsolation | undefined): Omit<SeatLaunchV1, 'protocol' | 'kind' | 'seat' | 'runtime' | 'source'> {
   const review = isReviewSeat(seat);
-  // Pi's denylist blocks the edit/write tools; shell paths stay open. pi-subagents does not refuse a role outside the fleet.
+  const sandbox = review ? isolation : undefined;
+  // Pi's denylist blocks the edit/write tools; shell writes stay open unless the Seatbelt profile closes them. pi-subagents does not refuse a role outside the fleet.
   const limits: SeatLimitV1[] = [
     ...OFF_GROUPS(config).map(group => ({
       subject: group,
-      level: review && group === 'edit' ? pathLevel(group, 'enforced', true) : 'instructions_only' as const,
+      level: review && group === 'edit' ? pathLevel(group, 'enforced', sandbox === undefined) : 'instructions_only' as const,
     })),
     ...(seatTakesFleet(config) ? [{ subject: 'fleet' as const, level: 'instructions_only' as const }] : []),
   ];
   const text = brief(seat, config, config.fleet, limits, piRoleName);
   const slash = config.model?.indexOf('/') ?? -1;
   return {
-    argv: [...seatEnv(roleDirectory === undefined ? [] : [`${PI_EXTRA_AGENT_DIRS_ENV}=${roleDirectory}`]), 'pi', ...(config.model === null ? [] : ['--provider', config.model.slice(0, slash), '--model', config.model.slice(slash + 1)]),
+    argv: [...seatEnv([...(roleDirectory === undefined ? [] : [`${PI_EXTRA_AGENT_DIRS_ENV}=${roleDirectory}`]),
+      ...(sandbox === undefined ? [] : [`TMPDIR=${sandbox.temporaryDirectory}`, `BUN_TEST_JUNIT_DIR=${sandbox.junitDirectory}`])]),
+      ...(sandbox === undefined ? [] : ['/usr/bin/sandbox-exec', '-f', sandbox.profile]), 'pi', ...(config.model === null ? [] : ['--provider', config.model.slice(0, slash), '--model', config.model.slice(slash + 1)]),
       ...(config.effort === null ? [] : ['--thinking', config.effort]),
       ...(review ? ['--exclude-tools', 'edit,write', '--no-extensions', '--no-skills',
       '--no-prompt-templates', '--no-context-files', '--no-mcp'] : []), '--append-system-prompt', text],
@@ -273,11 +286,12 @@ function piLaunch(seat: LaunchSeatId, config: SeatConfigV1, roleDirectory: strin
  * call. A Claude seat with a fleet refuses each of them that is not in the fleet.
  * `paneName` (`seatPaneName`) becomes the Claude session name `-n`. `repositoryId` is the checked label value.
  * `piRoleDirectory` holds the role files of a Pi seat with a fleet; it goes on that seat's argv only.
+ * `piReviewIsolation` wraps a Pi review seat in its Seatbelt profile; other seats ignore it.
  */
-export function buildSeatLaunch(seat: LaunchSeatId, config: SeatConfigV1, source: SeatLaunchSource, claudeAgentTypes: readonly string[], paneName?: string, repositoryId?: string, piRoleDirectory?: string): SeatLaunchV1 {
+export function buildSeatLaunch(seat: LaunchSeatId, config: SeatConfigV1, source: SeatLaunchSource, claudeAgentTypes: readonly string[], paneName?: string, repositoryId?: string, piRoleDirectory?: string, piReviewIsolation?: PiReviewSeatIsolation): SeatLaunchV1 {
   const launch = config.runtime === 'claude'
     ? claudeLaunch(seat, config, claudeAgentTypes, paneName, repositoryId)
-    : config.runtime === 'codex' ? codexLaunch(seat, config) : piLaunch(seat, config, piRoleDirectory);
+    : config.runtime === 'codex' ? codexLaunch(seat, config) : piLaunch(seat, config, piRoleDirectory, piReviewIsolation);
   return { protocol: 1, kind: 'seat_launch', seat, runtime: config.runtime, source, ...launch };
 }
 

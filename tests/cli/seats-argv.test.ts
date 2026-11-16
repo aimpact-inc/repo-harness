@@ -127,6 +127,18 @@ function bare(args: string[]): unknown[] {
   expect(args.slice(0, UNSET_SEAT.length)).toEqual(UNSET_SEAT);
   return args.slice(UNSET_SEAT.length);
 }
+/**
+ * On darwin a Pi review seat runs under its Seatbelt write profile (#2905): `TMPDIR` and `BUN_TEST_JUNIT_DIR` point into the seat
+ * output beside the profile, then `sandbox-exec -f <profile>` starts pi. `piReview` checks that prefix and drops it; elsewhere the argv has none.
+ */
+function piReview(args: string[]): unknown[] {
+  const rest = bare(args);
+  if (process.platform !== "darwin") return rest;
+  const root = dirname(rest[4] as string);
+  expect(rest.slice(0, 4)).toEqual([`TMPDIR=${join(root, "output", "tmp")}`, `BUN_TEST_JUNIT_DIR=${join(root, "output", "junit")}`, "/usr/bin/sandbox-exec", "-f"]);
+  expect(statSync(join(root, "output", "tmp")).isDirectory()).toBe(true);
+  return rest.slice(5);
+}
 
 describe("rh seats argv", () => {
   test("a Pi seat launch refuses a shell that fails the heredoc probe, passes a good one and reports a shell that cannot start", () => {
@@ -263,15 +275,16 @@ describe("rh seats argv", () => {
     withHome(defaults, home => expect(JSON.parse(argv(home, "gatekeeper-deep", "--pr", "1", "--json").stderr).error).toBe("seat_model_repeats_gatekeeper"));
   });
 
-  test("Pi review seats exclude edit and write tools and report the shell path as common_commands", () => {
+  test("Pi review seats exclude edit and write tools; the shell write path is enforced under Seatbelt on darwin and common_commands elsewhere", () => {
     for (const seat of ["gatekeeper", "gatekeeper-deep", "reviewer"] as const) {
       withHome({ ...DEFAULT_SEATS_CONFIG, [seat]: { ...DEFAULT_SEATS_CONFIG[seat], runtime: "pi", model: null, effort: null } }, home => {
         const result = argv(home, seat, "--pr", "1928", "--json");
         expect(result.status, result.stderr).toBe(0);
         const value = JSON.parse(result.stdout);
-        expect(bare(value.argv).slice(0, 8)).toEqual(["pi", "--exclude-tools", "edit,write",
+        expect(piReview(value.argv).slice(0, 8)).toEqual(["pi", "--exclude-tools", "edit,write",
           "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-mcp"]);
-        expect(value.limits).toContainEqual({ subject: "edit", level: "common_commands" });
+        expect(value.limits).toContainEqual({ subject: "edit", level: process.platform === "darwin" ? "enforced" : "common_commands" });
+        expect(value.brief.includes("The host refuses only common commands for these limits. Keep them yourself. Do not edit files.")).toBe(process.platform !== "darwin");
       });
     }
   });
@@ -284,7 +297,7 @@ describe("rh seats argv", () => {
       expect(bare(gatekeeper().argv).slice(0, 3)).toEqual(["codex", "-m", DEFAULT_SEATS_CONFIG.gatekeeper.model]);
       writeFileSync(join(home, "codex-used"), "97");
       const value = gatekeeper();
-      expect([value.seat, value.runtime, bare(value.argv).slice(0, 5)]).toEqual(["gatekeeper", "pi", ["pi", "--provider", "magpie", "--model", "cursor/deepseek-v41-flash-1017"]]);
+      expect([value.seat, value.runtime, piReview(value.argv).slice(0, 5)]).toEqual(["gatekeeper", "pi", ["pi", "--provider", "magpie", "--model", "cursor/deepseek-v41-flash-1017"]]);
       expect(value.brief).toContain("You are the gatekeeper seat.");
       const refused = argv(home, "gatekeeper-fallback", "--pr", "2253", "--json");
       expect([refused.status, JSON.parse(refused.stderr).error]).toEqual([1, "seat_unknown"]);
@@ -298,8 +311,8 @@ describe("rh seats argv", () => {
         const result = argv(home, seat, ...(seat === "reviewer" ? ["--pr", "1950"] : []), "--json");
         expect(result.status, result.stderr).toBe(0);
         const value = JSON.parse(result.stdout);
-        expect(bare(value.argv).slice(0, 5)).toEqual(["pi", "--provider", "magpie", "--model", "cursor/deepseek-v41-flash-1017"]);
-        if (seat === "reviewer") expect(bare(value.argv).slice(5, 12)).toEqual(["--exclude-tools", "edit,write", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-mcp"]);
+        expect((seat === "reviewer" ? piReview : bare)(value.argv).slice(0, 5)).toEqual(["pi", "--provider", "magpie", "--model", "cursor/deepseek-v41-flash-1017"]);
+        if (seat === "reviewer") expect(piReview(value.argv).slice(5, 12)).toEqual(["--exclude-tools", "edit,write", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-mcp"]);
       });
     }
   });

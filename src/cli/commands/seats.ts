@@ -16,6 +16,7 @@ import { RepoHarnessRegistryStrictError, canonicalRepoPath, readRepoHarnessRegis
 import { HerdrCoreError, RH_LABEL, hcLabel, hcLabelPairs, type HcLabels } from '../../effects/terminal/herdr-core';
 import { PiFleetRolesError, writePiFleetRoles } from '../../effects/board/pi-fleet-roles';
 import { PiShellError, assertPiShell } from '../../effects/board/pi-shell';
+import { preparePiReviewSeatIsolation } from '../../effects/board/pi-review-seat-isolation';
 import { MANAGED_AGENTS } from '../../effects/terminal/task-role-profiles';
 import { SeatResetError, readSeatSession, readTranscriptUsage, runSeatReset, writeSeatResetRequest, type SeatRelaunch, type SeatResetNotify, type TranscriptUsage } from '../../effects/board/seat-reset';
 import { seatResetAction, seatResetIdentity, seatResetSteps, type SeatResetIdentity } from '../../core/board/seat-reset';
@@ -254,7 +255,9 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
     ? [...MANAGED_AGENTS, ...CLAUDE_BUILTIN_AGENT_TYPES, ...claudeHostAgentTypes(env)]
     : [];
   const piRoleDirectory = effective.runtime === 'pi' && effective.fleet.length > 0 ? writePiFleetRoles(effective.fleet, env) : undefined;
-  const launch = buildSeatLaunch(id, effective, config.seats === undefined ? 'defaults' : 'seats', agentTypes, name ?? undefined, labels.repositoryId, piRoleDirectory);
+  // Seatbelt exists on darwin only; elsewhere the brief alone keeps a Pi review seat from shell writes.
+  const piReviewIsolation = effective.runtime === 'pi' && isReviewSeat(id) && process.platform === 'darwin' ? preparePiReviewSeatIsolation(env) : undefined;
+  const launch = buildSeatLaunch(id, effective, config.seats === undefined ? 'defaults' : 'seats', agentTypes, name ?? undefined, labels.repositoryId, piRoleDirectory, piReviewIsolation);
   return { effective, modeKnown, launch: {
     ...launch,
     argv: labelSet === undefined ? launch.argv : selfLabelingArgv(id, labels, launch.argv),

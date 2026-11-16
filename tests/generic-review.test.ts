@@ -1028,6 +1028,39 @@ test('OAR isolation: reject authority overlap and symlink output roots before ex
   expect(() => reviewIsolationPolicy({ ...spec, cleanup: { readDenied: [subjectLink] } })).toThrow('PROTECTED_PATH_UNSAFE');
 });
 
+darwinTest('Pi review seat isolation: shell writes reach the seat output, Pi sessions, the auth lock and the test queue only; a write through a link stays denied', async () => {
+  const { dirname } = await import('node:path');
+  const { preparePiReviewSeatIsolation } = await import('../src/effects/board/pi-review-seat-isolation');
+  const home = realpathSync(tmpWorkspace('pi-review-seat-home')); roots.push(home);
+  mkdirSync(join(home, '.pi', 'agent'), { recursive: true });
+  const bun = join(home, '.bun', 'bin', 'bun');
+  mkdirSync(dirname(bun), { recursive: true }); writeFileSync(bun, 'original');
+  const isolation = preparePiReviewSeatIsolation({ HOME: home, REPO_HARNESS_HOME: join(home, '.repo-harness') });
+  roots.push(dirname(dirname(isolation.temporaryDirectory)));
+  // A test HOME in TMPDIR writes the configuration names that the OAR profile denies; the seat profile allows them there.
+  const script = `const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),home=process.env.HOME,agent=path.join(home,'.pi','agent');
+const probe=write=>{try{write();return 'ok'}catch(error){return error.code}};
+const link=path.join(os.tmpdir(),'bun');
+console.log(JSON.stringify({
+  testHome: probe(()=>{fs.mkdirSync(path.join(os.tmpdir(),'home','.claude'),{recursive:true});fs.writeFileSync(path.join(os.tmpdir(),'home','.claude','settings.json'),'{}')}),
+  junit: probe(()=>fs.mkdirSync(process.argv[1],{recursive:true})),
+  session: probe(()=>{fs.mkdirSync(path.join(agent,'sessions','--cwd--'),{recursive:true});fs.writeFileSync(path.join(agent,'sessions','--cwd--','s.jsonl'),'{}')}),
+  authLock: probe(()=>{fs.mkdirSync(path.join(agent,'auth.json.lock'));fs.rmdirSync(path.join(agent,'auth.json.lock'))}),
+  auth: probe(()=>fs.writeFileSync(path.join(agent,'auth.json'),'{}')),
+  queue: probe(()=>fs.writeFileSync(path.join(home,'.repo-harness','host-test-queue','ticket.json'),'{}')),
+  harnessHome: probe(()=>fs.writeFileSync(path.join(home,'.repo-harness','config.json'),'{}')),
+  bunDirectory: probe(()=>fs.writeFileSync(path.join(home,'.bun','bin','probe'),'x')),
+  throughLink: probe(()=>{fs.symlinkSync(process.argv[2],link);fs.writeFileSync(link,'stub')}),
+  profile: probe(()=>fs.appendFileSync(process.argv[3],'(allow file-write*)')),
+}));`;
+  const run = spawnSync('/usr/bin/sandbox-exec', ['-f', isolation.profile, resolveNode24(), '-e', script, isolation.junitDirectory, bun, isolation.profile],
+    { env: { ...process.env, HOME: home, TMPDIR: isolation.temporaryDirectory }, encoding: 'utf8', timeout: 15000 });
+  expect(run.status, run.stderr).toBe(0);
+  expect(JSON.parse(run.stdout)).toEqual({ testHome: 'ok', junit: 'ok', session: 'ok', authLock: 'ok', auth: 'EPERM', queue: 'ok',
+    harnessHome: 'EPERM', bunDirectory: 'EPERM', throughLink: 'EPERM', profile: 'EPERM' });
+  expect(readFileSync(bun, 'utf8')).toBe('original');
+});
+
 async function runOarNodeFixture(label: string, body: string, confined = true, during?: (output: string, pid: number) => Promise<void>) {
   const { mkdirSync, writeFileSync, realpathSync } = await import('node:fs');
   const { pathToFileURL } = await import('node:url');

@@ -159,11 +159,24 @@ export function reviewIsolationPolicy(paths: CleanupReviewIsolationPaths, platfo
   // an otherwise writable tree. Nothing in HOME or a native config root opens.
   const forbiddenFiles = '/(CLAUDE\\.md|AGENTS\\.md|settings[^/]*\\.json|\\.claude\\.json|config\\.toml|auth\\.json|\\.?credentials\\.json|secrets\\.json|token\\.json)$';
   const forbiddenDirectories = '/(\\.?hooks|\\.?agents|\\.?skills|\\.?rules|\\.?plugins)(/|$)';
-  const exceptions = `(require-not (subpath ${JSON.stringify(output)}))`;
   // macOS resolves DNS through this system socket. Other local services remain denied.
   const unixSockets = '(require-all (remote unix-socket) (require-not (remote unix-socket (path-literal "/private/var/run/mDNSResponder"))))';
-  return `(version 1)\n(allow default)\n(deny file-write* (require-all ${exceptions} (require-not (literal "/dev/null"))))\n(deny file-write* (regex #"${forbiddenFiles}"))\n(deny file-write* (regex #"${forbiddenDirectories}"))\n(deny signal)\n(deny network-outbound ${unixSockets})\n${piPolicy}${networkPolicy}${modelPortPolicy}${readPolicy}`;
+  return `(version 1)\n(allow default)\n${writeOnlyRule({ subpaths: [output], literals: ['/dev/null'] })}(deny file-write* (regex #"${forbiddenFiles}"))\n(deny file-write* (regex #"${forbiddenDirectories}"))\n(deny signal)\n(deny network-outbound ${unixSockets})\n${piPolicy}${networkPolicy}${modelPortPolicy}${readPolicy}`;
+}
 
+/** Resolved paths and path regexes that stay writable. Seatbelt matches the resolved path, so a write through a link to any other path is denied. */
+export interface WritableEntries {
+  readonly subpaths: readonly string[];
+  readonly literals: readonly string[];
+  readonly regexes?: readonly string[];
+}
+
+/** The write rule of every review profile: each write outside the writable entries is denied. */
+export function writeOnlyRule(writable: WritableEntries): string {
+  const exceptions = [...writable.subpaths.map(path => `(require-not (subpath ${JSON.stringify(path)}))`),
+    ...writable.literals.map(path => `(require-not (literal ${JSON.stringify(path)}))`),
+    ...(writable.regexes ?? []).map(pattern => `(require-not (regex #"${pattern}"))`)];
+  return `(deny file-write* (require-all ${exceptions.join(' ')}))\n`;
 }
 
 /** One private output-local TMPDIR; no HOME/config/credential redirection. */
