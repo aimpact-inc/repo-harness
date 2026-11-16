@@ -740,7 +740,9 @@ test('decoders refuse an unknown protocol or kind', () => {
   expect(() => decodeBoard({ protocol: 8, kind: 'repo-harness.board' })).toThrow('unsupported board protocol: 8');
   // A protocol-9 board has no review_records field.
   expect(() => decodeBoard({ protocol: 9, kind: 'repo-harness.board' })).toThrow('unsupported board protocol: 9');
-  expect(() => decodeBoard({ protocol: 10, kind: 'fleet_board_snapshot' })).toThrow('unsupported board kind: fleet_board_snapshot');
+  // A protocol-10 board has claude_review and per-harness review_records, and no reviewer_family.
+  expect(() => decodeBoard({ protocol: 10, kind: 'repo-harness.board' })).toThrow('unsupported board protocol: 10');
+  expect(() => decodeBoard({ protocol: 11, kind: 'fleet_board_snapshot' })).toThrow('unsupported board kind: fleet_board_snapshot');
   const block = (value: Json) => `repo-harness plan\n\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\`\n`;
   const valid = { protocol: 2, kind: 'repo-harness.plan', merge_order: [1475], holds: [], seat_limits: { worker: 3 } } as const;
   expect(decodePlanBlock(block(valid))).toEqual(valid);
@@ -762,10 +764,11 @@ test('decoders refuse a missing or invalid plan revision, merge policy or seat b
   const pull = (patch: Json) => ({ ...recorded, pull_requests: recorded.pull_requests.map((entry: Json, index: number) => index === 0 ? { ...entry, ...patch } : entry) });
   for (const invalid of [plan(undefined), plan(0), plan(1.5), plan('1'), noPolicy, { ...recorded, acceptance_merge: 'maybe' }, board(undefined), board(''),
     item({ claim: undefined }), item({ claim: { status: 'active', url: 'u' } }), item({ open_questions: { status: 'observed' } }), pull({ open_questions: undefined }), pull({ review_fail: { url: 'u' } }),
-    pull({ review_records: undefined }), pull({ review_records: { status: 'observed', claude: 'x', codex: null, pi: null } })]) {
+    pull({ review_records: undefined }), pull({ review_records: { status: 'observed', gatekeeper: 'x', reviewer: null } }), pull({ review_records: { status: 'observed', claude: null, codex: null, pi: null } }),
+    pull({ second_review: undefined }), pull({ second_review: 'maybe' }), { ...recorded, reviewer_family: undefined }, { ...recorded, reviewer_family: '' }]) {
     expect(() => decodeBoard(invalid)).toThrow('invalid board');
   }
-  for (const valid of [plan(null), plan(7), { ...recorded, acceptance_merge: 'unknown' }, board(null), board('main')]) expect(decodeBoard(valid)).toEqual(valid);
+  for (const valid of [plan(null), plan(7), { ...recorded, acceptance_merge: 'unknown' }, { ...recorded, reviewer_family: null }, board(null), board('main')]) expect(decodeBoard(valid)).toEqual(valid);
   for (const invalid of [parents(undefined), parents(''), { ...parents(null), seats: undefined }]) expect(() => decodeBoardSeats(invalid)).toThrow('board seat');
   expect(decodeBoardSeats(parents('main')).seats[0]!.branch).toBe('main');
   // A status message that leaves the server is one redacted line within the limit, and null is no message.
@@ -1434,8 +1437,8 @@ test('acceptance disposition: a FAIL row is ignored only when every finding of i
   const disposition = (findings: string, record = failUrl, subject = replay().pull_requests.find(entry => entry.number === 1499)!.head_sha) =>
     `repo-harness acceptance disposition\nRecord: ${record}\nSubject: ${subject}\nFindings: ${findings}\nDecision: ${base}/issues/2202#issuecomment-1\n`;
   expect(status([])).toBe('not_accepted');
-  // The newest record of each harness, any subject: the two added records are codex rows, newer than the recorded codex one.
-  expect(projected([]).pull_requests.find(entry => entry.number === 1499)!.review_records).toEqual({ status: 'observed', claude: '2026-11-02T20:52:14Z', codex: '2026-11-02T22:30:00Z', pi: null });
+  // The newest record of each seat, any subject: a row that names no model (`unobserved`: the recorded Claude row and the two added records) belongs to no seat.
+  expect(projected([]).pull_requests.find(entry => entry.number === 1499)!.review_records).toEqual({ status: 'observed', reviewer: null, gatekeeper: '2026-11-02T20:56:58Z' });
   expect(status([disposition('R1-1')])).toBe('not_accepted');
   expect(status([disposition('R1-1'), disposition('R1-2')])).toBe('accepted');
   expect(status([disposition('R1-1, R1-2')])).toBe('accepted');
@@ -1546,7 +1549,7 @@ test('rules A12 to A18 fire past their threshold with their message, not at it, 
   expect(skipped(pr({ merge_readiness: null, merge_readiness_observed_at: null }))).toEqual([['A18', 'readiness_missing', '#1494']]);
 });
 
-test('A19 fires for a done review seat whose pull request has no record of its harness after the seat status time', () => {
+test('A19 fires for a done review seat whose pull request has no record of that seat after the seat status time', () => {
   const recorded = replay();
   const now = Date.parse(recorded.observed_at);
   const MIN = 60_000;
@@ -1554,7 +1557,7 @@ test('A19 fires for a done review seat whose pull request has no record of its h
   const iso = (ms: number) => new Date(ms).toISOString();
   const seat = (patch: Json = {}) => ({ address: 't9', name: null, agent: 'codex', state: 'live', status: 'done', status_kind: null, status_msg: null, status_ms: done, turn: 1, branch: null,
     seat_status: 'observed', seat: 'gatekeeper', issue: null, pr: 1494, ...patch }) as BoardTerminalV1;
-  const none = { status: 'observed', claude: null, codex: null, pi: null } as const;
+  const none = { status: 'observed', gatekeeper: null, reviewer: null } as const;
   const board = (terminal: BoardTerminalV1, review_records: BoardPullRequestV1['review_records'] = none): BoardV1 => ({ ...recorded, execution: { status: 'observed', terminals: [terminal] },
     pull_requests: recorded.pull_requests.map(entry => (entry.number === 1494 ? { ...entry, review_records } : entry)) });
   const a19 = (value: BoardV1) => {
@@ -1564,11 +1567,16 @@ test('A19 fires for a done review seat whose pull request has no record of its h
   };
   const fired = [['review seat t9 is done for 11 min and #1494 has no record from it; read the pane and publish', [1494], ['t9']]];
   expect(a19(board(seat()))).toEqual([fired, []]);
-  // A record of the seat's harness after its status time stops the finding; an older one, or a newer one of the other harness, does not.
-  expect(a19(board(seat(), { ...none, codex: iso(done + MIN) }))).toEqual([[], []]);
-  expect(a19(board(seat(), { ...none, codex: iso(done - MIN) }))).toEqual([fired, []]);
-  expect(a19(board(seat(), { ...none, claude: iso(done + MIN) }))).toEqual([fired, []]);
-  expect(a19(board(seat({ seat: 'reviewer', agent: 'claude-code' }), { ...none, claude: iso(done + MIN) }))).toEqual([[], []]);
+  // A record of the seat after its status time stops the finding; an older one, or a newer one of the other seat, does not.
+  expect(a19(board(seat(), { ...none, gatekeeper: iso(done + MIN) }))).toEqual([[], []]);
+  expect(a19(board(seat(), { ...none, gatekeeper: iso(done - MIN) }))).toEqual([fired, []]);
+  expect(a19(board(seat(), { ...none, reviewer: iso(done + MIN) }))).toEqual([fired, []]);
+  expect(a19(board(seat({ seat: 'reviewer', agent: 'claude-code' }), { ...none, reviewer: iso(done + MIN) }))).toEqual([[], []]);
+  // A Pi gatekeeper and a Pi reviewer are the same harness: each publication order leaves the other seat's finding open.
+  const pi = (seatId: string) => seat({ seat: seatId, agent: 'pi' });
+  expect(a19(board(pi('reviewer'), { ...none, gatekeeper: iso(done + MIN) }))[0]).toEqual([[expect.stringContaining('no record from it'), [1494], ['t9']]]);
+  expect(a19(board(pi('gatekeeper'), { ...none, reviewer: iso(done + MIN) }))[0]).toEqual([[expect.stringContaining('no record from it'), [1494], ['t9']]]);
+  expect(a19(board(pi('reviewer'), { ...none, gatekeeper: iso(done - MIN), reviewer: iso(done + MIN) }))).toEqual([[], []]);
   // A working seat, or a seat at the threshold, does not fire.
   expect(a19(board(seat({ status: 'working' })))).toEqual([[], []]);
   expect(a19(board(seat({ status_ms: now - A13_IDLE_MS })))).toEqual([[], []]);
@@ -1576,7 +1584,6 @@ test('A19 fires for a done review seat whose pull request has no record of its h
   expect(a19(board(seat({ pr: null })))).toEqual([[], [['pr_label_missing', 't9']]]);
   expect(a19(board(seat({ pr: 9999 })))).toEqual([[], [['pr_off_board', 't9']]]);
   expect(a19(board(seat({ status_ms: null })))).toEqual([[], [['status_time_missing', 't9']]]);
-  expect(a19(board(seat({ agent: null })))).toEqual([[], [['harness_unknown', 't9']]]);
   expect(a19(board(seat(), { status: 'unknown', reason: 'comments_truncated' }))).toEqual([[], [['comments_truncated', '#1494']]]);
 });
 

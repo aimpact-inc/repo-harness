@@ -40,7 +40,7 @@ import { pathHazardHits, pathHighHits } from './hazards';
  * It is a read model. GitHub and hc stay the authorities; the board keeps
  * their observation time and never writes back.
  */
-export const BOARD_PROTOCOL = 10 as const;
+export const BOARD_PROTOCOL = 11 as const;
 export const BOARD_KIND = 'repo-harness.board' as const;
 
 export type BoardTier = 'low' | 'medium' | 'high';
@@ -112,16 +112,14 @@ export type BoardAcceptanceV1 =
 
 export type BoardSecondReviewV1 = 'not_required' | 'pending' | 'recorded';
 
-/** A review runtime as an acceptance row names it. */
-export type BoardReviewHarness = NonNullable<AcceptanceRowV1['harness']>;
-const REVIEW_HARNESSES: readonly BoardReviewHarness[] = ['claude', 'codex', 'pi'];
-
 /**
- * The comment time of the newest acceptance record with a row of each harness, any subject SHA; null when no record has one.
- * `unknown`: an older comment outside the read, or a record without a table row, can hold a row of any harness.
+ * The comment time of the newest acceptance record with a row of each review seat, any subject SHA; null when no record has one.
+ * A row is the reviewer's when the family of its model is `BoardV1.reviewer_family`; any other known family is the gatekeeper's
+ * (the gatekeeper, gatekeeper-fallback and gatekeeper-deep seats). A row with no known model belongs to no seat.
+ * `unknown`: an older comment outside the read, or a record without a table row, can hold a row of any seat.
  */
 export type BoardReviewRecordsV1 =
-  | { readonly status: 'observed'; readonly claude: string | null; readonly codex: string | null; readonly pi: string | null }
+  | { readonly status: 'observed'; readonly gatekeeper: string | null; readonly reviewer: string | null }
   | { readonly status: 'unknown'; readonly reason: 'comments_truncated' | 'acceptance_record_unparsed' };
 
 /** The model family of a writer, from `modelFamily` on the `Model:` line of its claim. */
@@ -328,6 +326,8 @@ export interface BoardInputV1 {
   readonly tooling: BoardToolingV1;
 }
 
+const SECOND_REVIEWS: ReadonlySet<unknown> = new Set<BoardSecondReviewV1>(['not_required', 'pending', 'recorded']);
+
 const SWITCH_VALUES: ReadonlySet<unknown> = new Set<BoardAcceptanceMergeV1>(['off', 'on', 'unknown']);
 
 /** The `branch` and `status_msg` checks of the board and the parent list decoders: an absent value is a refusal, and null is the explicit none. The error never repeats a refused message. */
@@ -351,7 +351,7 @@ function isIssueClaim(value: unknown): boolean {
 function isReviewRecords(value: unknown): boolean {
   if (!isRecord(value)) return false;
   if (value.status === 'unknown') return value.reason === 'comments_truncated' || value.reason === 'acceptance_record_unparsed';
-  return value.status === 'observed' && REVIEW_HARNESSES.every(harness => value[harness] === null || isTime(value[harness]));
+  return value.status === 'observed' && [value.gatekeeper, value.reviewer].every(time => time === null || isTime(time));
 }
 
 function isOpenQuestions(value: unknown): boolean {
@@ -371,6 +371,7 @@ export function decodeBoard(value: unknown): BoardV1 {
     const { revision } = board.plan;
     if (revision !== null && (!Number.isSafeInteger(revision) || revision < 1)) throw new Error(`invalid board plan revision: ${String(revision)}`);
   }
+  if (board.reviewer_family !== null && (typeof board.reviewer_family !== 'string' || board.reviewer_family === '')) throw new Error(`invalid board reviewer_family: ${String(board.reviewer_family)}`);
   if (board.execution?.status === 'observed') checkSeatTerminals(board.execution.terminals);
   for (const item of board.items ?? []) {
     if (!isIssueClaim(item.claim)) throw new Error(`invalid board claim on #${item.number}`);
@@ -380,6 +381,7 @@ export function decodeBoard(value: unknown): BoardV1 {
     if (!isOpenQuestions(pr.open_questions)) throw new Error(`invalid board open_questions on PR #${pr.number}`);
     const fail: unknown = pr.review_fail;
     if (fail !== null && !(isRecord(fail) && typeof fail.url === 'string' && isTime(fail.recorded_at))) throw new Error(`invalid board review_fail on PR #${pr.number}`);
+    if (!SECOND_REVIEWS.has(pr.second_review)) throw new Error(`invalid board second_review on PR #${pr.number}`);
     if (!isReviewRecords(pr.review_records)) throw new Error(`invalid board review_records on PR #${pr.number}`);
     const observedAt: unknown = pr.merge_readiness_observed_at;
     if (pr.merge_readiness === null ? observedAt !== null : typeof observedAt !== 'string' || Number.isNaN(Date.parse(observedAt))) {
@@ -473,18 +475,21 @@ function reviewFail(read: BoardPullRequestReadV1): BoardPullRequestV1['review_fa
   return newest === null ? null : Object.freeze({ url: newest.url, recorded_at: newest.created_at });
 }
 
-/** The newest acceptance record of each review harness (`BoardPullRequestV1.review_records`). */
-function reviewRecords(read: BoardPullRequestReadV1): BoardReviewRecordsV1 {
+/** The newest acceptance record of each review seat (`BoardPullRequestV1.review_records`). */
+function reviewRecords(read: BoardPullRequestReadV1, reviewerFamily: string | null): BoardReviewRecordsV1 {
   if (read.comments.truncated) return Object.freeze({ status: 'unknown', reason: 'comments_truncated' });
-  const newest = new Map<BoardReviewHarness, string>();
+  const newest = { gatekeeper: '', reviewer: '' };
   for (const record of protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER)) {
     const rows = parseAcceptanceRecord(record);
     if (rows === null) return Object.freeze({ status: 'unknown', reason: 'acceptance_record_unparsed' });
-    for (const harness of new Set(rows.flatMap(row => (row.harness === null ? [] : [row.harness])))) {
-      if (record.created_at > (newest.get(harness) ?? '')) newest.set(harness, record.created_at);
+    for (const row of rows) {
+      const family = row.model === null ? null : modelFamily(row.model);
+      if (family === null) continue;
+      const seat = family === reviewerFamily ? 'reviewer' : 'gatekeeper';
+      if (record.created_at > newest[seat]) newest[seat] = record.created_at;
     }
   }
-  return Object.freeze({ status: 'observed', claude: newest.get('claude') ?? null, codex: newest.get('codex') ?? null, pi: newest.get('pi') ?? null });
+  return Object.freeze({ status: 'observed', gatekeeper: newest.gatekeeper || null, reviewer: newest.reviewer || null });
 }
 
 function acceptance(read: BoardPullRequestReadV1, check: BoardRequiredCheckV1, closedTiers: readonly (BoardTier | null)[], rule: ReviewRule): BoardAcceptanceV1 {
@@ -650,7 +655,7 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
       // An issue outside this board has no observed tier, so it withholds the Low path; so does any non-Low linked issue.
       acceptance: acceptance(read, check, [tier], reviewRule(read, tier)),
       review_fail: reviewFail(read),
-      review_records: reviewRecords(read),
+      review_records: reviewRecords(read, input.reviewer_family),
       open_questions: openQuestions(read.comments),
       merge_readiness: readiness?.readiness ?? null,
       merge_readiness_observed_at: readiness?.observed_at ?? null,
