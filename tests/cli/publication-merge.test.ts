@@ -267,6 +267,15 @@ describe('publication merge binds the TestBudget result to its inputs', () => {
     expect(mutations).toHaveLength(1);
   });
 
+  test('a live tip that moves the merge-base refuses the old result under an unchanged policy', () => {
+    const { result, calls, mutations } = mergeInProcess(budgetScenario({ liveTip: OTHER_COMMIT, policyAt: { [OTHER_COMMIT]: budgetPolicy(2) },
+      testBudget: { document: producedTestBudgetResult(budgetPolicy(2), BODY), mergeBase: 'f'.repeat(40) } }));
+    expect(failureOf(result).blockers?.map((blocker) => blocker.code)).toEqual(['test_budget_stale']);
+    expect(failureOf(result).blockers?.[0]?.detail).toContain('does not match the live diff_start');
+    expect(calls.some((args) => args[1] === `repos/${REPOSITORY}/compare/${OTHER_COMMIT}...${HEAD}`)).toBe(true);
+    expect(mutations).toHaveLength(0);
+  });
+
   test('a threshold change at the live tip refuses a result made with the base policy', () => {
     const { result, mutations } = mergeInProcess(budgetScenario({ liveTip: OTHER_COMMIT, policyAt: { [OTHER_COMMIT]: budgetPolicy(3) } }));
     expect(result.document).toMatchObject({ ok: false, exit_code: 4, error: 'merge_readiness_blocked' });

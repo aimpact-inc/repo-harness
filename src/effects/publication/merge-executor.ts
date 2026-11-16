@@ -597,10 +597,10 @@ function prepareMerge(input: PublicationMergeInput): PreparedMerge {
   assertMergeKeepsPolicy(input, gating, defaultBranch);
   const requiredStatusChecks = assertBaseProtection(input, defaultBranch);
   // Reuse the protection read, and the policy read when the live tip is the base that readiness reads.
-  // TestBudget always compares with the configuration at the live tip.
+  // TestBudget binds the live tip: its configuration and its merge-base with the head.
   const verdict = collectPullRequestMergeReadiness({ ...input,
     ...(gating.ref === input.expected_base_sha ? { policy_file_at_base: gating.file } : {}),
-    required_status_checks_at_base: requiredStatusChecks, test_budget_policy: gating.file });
+    required_status_checks_at_base: requiredStatusChecks, test_budget_base: { ref: gating.ref, file: gating.file } });
   if (!verdict.ready) {
     throw new Refusal('merge_readiness_blocked', `readiness blockers: ${verdict.blockers.map((blocker) => blocker.code).join(', ')}`, verdict.blockers);
   }

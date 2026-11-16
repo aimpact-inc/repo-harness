@@ -110,16 +110,22 @@ export interface PublicationReadinessInput {
   /** Internal effect seam: status checks from the executor's base protection read. */
   readonly required_status_checks_at_base?: unknown;
   /**
-   * Internal effect seam: the executor's policy read at the live tip of the
-   * base branch. The TestBudget result must match the rule configuration
-   * there. Without it, readiness takes the configuration at the PR base.
+   * Internal effect seam: the executor's live tip of the base branch and its
+   * policy read there. The TestBudget result must match the rule configuration
+   * and the merge-base at that one commit. Without it, readiness uses the PR base.
    */
-  readonly test_budget_policy?: PolicyFileAtRef;
+  readonly test_budget_base?: TestBudgetBase;
   /**
    * A read error that an optional request must not swallow; the caller that
    * owns the transport decides.
    */
   readonly fatal_read_error?: (error: unknown) => boolean;
+}
+
+/** The one base commit that a TestBudget comparison binds: its policy file and the merge-base with the head. */
+export interface TestBudgetBase {
+  readonly ref: string;
+  readonly file: PolicyFileAtRef;
 }
 
 export interface ProviderIdentity {
@@ -1055,23 +1061,23 @@ function* testBudgetResult(identity: ProviderIdentity): Generator<ProviderReques
   return document === null ? testBudgetMissing('the Test budget result annotation is not a result document') : Object.freeze({ status: 'read', document });
 }
 
-/** The merge-base of the PR base and head, the `diff_start` meaning of ADR-0004. */
-function mergeBase(identity: ProviderIdentity, input: PublicationReadinessInput): string {
-  const compare = object(gh(input, ['api', `repos/${identity.repo_name_with_owner}/compare/${identity.base_sha}...${identity.head_sha}`,
+/** The merge-base of the base commit and the head, the `diff_start` meaning of ADR-0004. */
+function mergeBase(identity: ProviderIdentity, input: PublicationReadinessInput, base: string): string {
+  const compare = object(gh(input, ['api', `repos/${identity.repo_name_with_owner}/compare/${base}...${identity.head_sha}`,
     '--jq', '{merge_base_sha: .merge_base_commit.sha}']), 'provider compare');
-  if (!validSha(compare.merge_base_sha)) throw new MergeReadinessError('provider_data_incomplete', 'provider merge-base of the PR base and head is invalid');
+  if (!validSha(compare.merge_base_sha)) throw new MergeReadinessError('provider_data_incomplete', 'provider merge-base of the base and the head is invalid');
   return compare.merge_base_sha;
 }
 
 /**
- * The TestBudget facts of one round. The configuration comes from `policyFile`;
- * a file that cannot be decoded is `policy_invalid`, never `off`. The live
- * exception digest comes from the body of this round's identity read.
+ * The TestBudget facts of one round. The configuration and the merge-base both
+ * come from `base`; a file that cannot be decoded is `policy_invalid`, never
+ * `off`. The live exception digest comes from this round's identity read.
  */
-function observeTestBudget(identity: ProviderIdentity, input: PublicationReadinessInput, policyFile: PolicyFileAtRef): TestBudgetFactsV1 {
+function observeTestBudget(identity: ProviderIdentity, input: PublicationReadinessInput, base: TestBudgetBase): TestBudgetFactsV1 {
   let config: TestBudgetConfigRead;
   try {
-    config = readTestBudgetConfig(decodeWorkflowPolicy(policyFile.status === 'present' ? policyFile.text : null));
+    config = readTestBudgetConfig(decodeWorkflowPolicy(base.file.status === 'present' ? base.file.text : null));
   } catch (error) {
     return Object.freeze({ status: 'policy_invalid', message: (error as Error).message });
   }
@@ -1079,7 +1085,7 @@ function observeTestBudget(identity: ProviderIdentity, input: PublicationReadine
   if (config.status === 'absent') return Object.freeze({ status: 'off' });
   const live = Object.freeze({
     head_sha: identity.head_sha,
-    diff_start: mergeBase(identity, input),
+    diff_start: mergeBase(identity, input, base.ref),
     policy_digest: testBudgetPolicyDigest(config),
     implementation_version: TEST_BUDGET_IMPLEMENTATION_VERSION,
     exception_digest: testBudgetExceptionDigest(parseTestBudgetException(identity.body)),
@@ -1312,7 +1318,8 @@ function stableReadinessRound(input: PullRequestReadinessInput): ReadinessRound 
       continue;
     }
     const { facts, policy_file: policyFile } = observeProviderRound(before.identity, input, input);
-    const testBudget = observeTestBudget(before.identity, input, input.test_budget_policy ?? policyFile);
+    const testBudget = observeTestBudget(before.identity, input,
+      input.test_budget_base ?? { ref: before.identity.base_sha, file: policyFile });
     const after = observeProviderReadinessTarget(input);
     const stackAfter = observeStack(after, input);
     if (identityBytes(before.identity) === identityBytes(after.identity) && sameTestBudgetException(testBudget, after.identity)

@@ -41,6 +41,8 @@ export interface TestBudgetFixture {
   readonly document?: unknown;
   readonly checkRuns?: readonly Record<string, unknown>[];
   readonly annotations?: readonly Record<string, unknown>[];
+  /** The live merge-base that the provider compare reports; default the merge-base the document records. */
+  readonly mergeBase?: string;
 }
 
 /** A result made by the producer's own code for a PR that adds 30 test lines, 10 product lines and 1 test file. */
@@ -53,12 +55,14 @@ export function producedTestBudgetResult(policy: string, body: string): unknown 
   ] });
 }
 
-/** The provider answers for the Test budget reads of readiness; null for every other call. */
-export function testBudgetAnswer(args: readonly string[], fixture: TestBudgetFixture, head = HEAD, base = BASE): { readonly status: number; readonly stdout: string } | null {
+/** The provider answers for the Test budget reads of readiness; `compareBase` is the commit readiness binds. Null for every other call. */
+export function testBudgetAnswer(args: readonly string[], fixture: TestBudgetFixture, head = HEAD, base = BASE, compareBase = base): { readonly status: number; readonly stdout: string } | null {
   const found = (value: unknown) => ({ status: 0, stdout: JSON.stringify(value) });
   const root = `repos/${REPOSITORY}`;
   const path = args[1];
-  if (path === `${root}/compare/${base}...${head}` && args.includes('{merge_base_sha: .merge_base_commit.sha}')) return found({ merge_base_sha: TEST_BUDGET_MERGE_BASE });
+  if (path === `${root}/compare/${compareBase}...${head}` && args.includes('{merge_base_sha: .merge_base_commit.sha}')) {
+    return found({ merge_base_sha: fixture.mergeBase ?? TEST_BUDGET_MERGE_BASE });
+  }
   if (path?.startsWith(`${root}/commits/${head}/check-runs?check_name=Test%20budget&`)) {
     const runs = fixture.checkRuns ?? [{ id: TEST_BUDGET_JOB, name: 'Test budget', status: 'completed', completed_at: '2026-11-16T08:00:18Z',
       details_url: `https://github.com/${REPOSITORY}/actions/runs/${TEST_BUDGET_RUN}/job/${TEST_BUDGET_JOB}`, app: { slug: 'github-actions' } }];
@@ -204,7 +208,7 @@ export function fakeGhResponse(args: readonly string[], scenario: PublicationMer
     return { status: checks.some((check) => check.bucket === 'pending') ? 8 : 0, stdout: JSON.stringify(checks) };
   }
   if (command !== 'api') return { status: 2, stdout: '', stderr: `unexpected fake gh args: ${args.join(' ')}` };
-  const testBudget = scenario.testBudget === undefined ? null : testBudgetAnswer(args, scenario.testBudget, headSha, baseSha);
+  const testBudget = scenario.testBudget === undefined ? null : testBudgetAnswer(args, scenario.testBudget, headSha, baseSha, liveTip);
   if (testBudget !== null) return testBudget;
   if (sub === 'graphql') {
     const query = graphqlQuery(args);

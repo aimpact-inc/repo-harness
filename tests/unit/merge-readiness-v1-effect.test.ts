@@ -1294,7 +1294,7 @@ describe('TestBudget result reads', () => {
   });
 
   test('the executor policy at the live tip replaces the base policy', () => {
-    const verdict = collectPullRequestMergeReadiness({ ...input, test_budget_policy: { status: 'present', text: rule({ file_cap: 2 }) },
+    const verdict = collectPullRequestMergeReadiness({ ...input, test_budget_base: { ref: BASE, file: { status: 'present', text: rule({ file_cap: 2 }) } },
       gh_runner: budgetGh(rule(), { document: producedTestBudgetResult(rule(), BODY) }) });
     expect(verdict.blockers.map(blocker => blocker.code)).toEqual(['test_budget_stale']);
   });
