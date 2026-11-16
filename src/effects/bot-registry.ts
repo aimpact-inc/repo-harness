@@ -7,6 +7,7 @@
 import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'fs';
 import { retryWindowsSharingRace } from './atomic-append';
 import { join } from 'path';
+import { containsSecret } from '../core/security/secret-patterns';
 import { withExclusiveDirectoryLock } from './locking/exclusive-directory-lock';
 import { repoHarnessHome } from './repo-harness-home';
 
@@ -77,7 +78,7 @@ export function validateBotRecord(value: unknown, file = 'the Bot record'): BotR
   if (typeof record.registered_at !== 'string' || !TIMESTAMP.test(record.registered_at) || new Date(record.registered_at).toISOString() !== record.registered_at) {
     invalid('registered_at is invalid');
   }
-  return Object.freeze({
+  const bot = Object.freeze({
     protocol: BOT_RECORD_PROTOCOL,
     kind: BOT_RECORD_KIND,
     bot_id: record.bot_id,
@@ -87,6 +88,12 @@ export function validateBotRecord(value: unknown, file = 'the Bot record'): BotR
     herdr_agent: nullable(record.herdr_agent, HERDR_AGENT, 'herdr_agent'),
     registered_at: record.registered_at,
   });
+  // Readers print every field, so a record never holds a credential, whoever wrote the file.
+  for (const field of ['bot_id', 'name', 'host', 'slack_bot_id', 'herdr_agent'] as const) {
+    const value = bot[field];
+    if (value !== null && containsSecret(value)) invalid(`${field} looks like a credential`);
+  }
+  return bot;
 }
 
 export function botRegistryPath(env: NodeJS.ProcessEnv = process.env): string {

@@ -49,6 +49,7 @@ describe('Bot registry', () => {
         { bot_id: 'ok', name: ' padded', host: 'X' },
         { bot_id: 'ok', name: 'X', host: 'X', slack_bot_id: 'https://hooks.slack.example/T0' },
         { bot_id: 'ok', name: 'X', host: 'X', herdr_agent: 'Has Space' },
+        { bot_id: 'ok', name: `ghp_${'A'.repeat(36)}`, host: 'X' },
       ]) expect(code(() => registerBot(input, h.env))).toBe('bot_invalid');
     } finally { h.cleanup(); }
   });
@@ -79,6 +80,8 @@ describe('Bot registry', () => {
       writeFileSync(join(directory, 'impostor.json'), JSON.stringify(hermes));
       expect(code(() => readBotRegistry(h.env))).toBe('bot_registry_invalid');
       writeFileSync(join(directory, 'impostor.json'), '{"protocol":1');
+      expect(code(() => readBotRegistry(h.env))).toBe('bot_registry_invalid');
+      writeFileSync(join(directory, 'impostor.json'), JSON.stringify({ ...hermes, bot_id: 'impostor', name: `ghp_${'A'.repeat(36)}`, herdr_agent: null }));
       expect(code(() => readBotRegistry(h.env))).toBe('bot_registry_invalid');
       rmSync(join(directory, 'impostor.json'));
       expect(readBotRegistry(h.env)).toHaveLength(1);
