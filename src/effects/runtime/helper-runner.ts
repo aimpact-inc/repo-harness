@@ -292,7 +292,8 @@ export function listHelperFiles(env: NodeJS.ProcessEnv = process.env): string[] 
 
 /** The helper ids that `rh run` accepts. */
 export function listHelperIds(env: NodeJS.ProcessEnv = process.env): string[] {
-  return listHelpers(env).map((helper) => helper.id);
+  const contract = readContractHelpers(resolveHelperRuntime(env).contractPath);
+  return contract.fileNames.map(helperId).filter((id) => !contract.internal.has(id));
 }
 
 /** The helper ids that only `rh` subcommands run, through `runInternalHelper`. */
@@ -346,36 +347,43 @@ function resolveFromDir(
   return { id: helperId(fileName), fileName, path: filePath, source, repoRoot };
 }
 
-type ResolvedHelperContext = {
-  resolved: ResolvedHelper | null;
-  /** The contract lists the resolved helper in `helpers.internal`. */
-  internal: boolean;
-  runtime: ProtectedHelperPlatform | null;
-};
+type HelperVisibility = 'public' | 'internal';
+
+type ResolvedHelperContext =
+  | { kind: 'missing' }
+  /** The helper exists, but its `helpers.internal` membership does not match the requested visibility. */
+  | { kind: 'refused'; id: string; internal: boolean }
+  | { kind: 'resolved'; resolved: ResolvedHelper; runtime: ProtectedHelperPlatform | null };
 
 function resolveHelperContext(
   helper: string,
   cwd: string,
   env: NodeJS.ProcessEnv,
   trustedPackage = false,
+  visibility?: HelperVisibility,
 ): ResolvedHelperContext {
   const protectedHelper = trustedPackage || isProtectedHelper(helper);
-  const protectedRuntime = protectedHelper ? resolveProtectedHelperPlatform() : null;
-  const repoRoot = resolveRepoRoot(cwd, env, protectedHelper, protectedRuntime);
   const helperRuntime = resolveHelperRuntime(env, !protectedHelper);
   const contract = readContractHelpers(helperRuntime.contractPath);
   const fileName = resolveHelperFileName(helper, contract.fileNames);
-  if (!fileName) return { resolved: null, internal: false, runtime: protectedRuntime };
+  if (!fileName) return { kind: 'missing' };
+  // The visibility refusal needs only the contract, so it does not depend on the host runtime or the repository.
+  const internal = contract.internal.has(helperId(fileName));
+  if (visibility !== undefined && internal !== (visibility === 'internal')) return { kind: 'refused', id: helperId(fileName), internal };
 
+  const protectedRuntime = protectedHelper ? resolveProtectedHelperPlatform() : null;
+  const repoRoot = resolveRepoRoot(cwd, env, protectedHelper, protectedRuntime);
   return {
+    kind: 'resolved',
     resolved: resolveFromDir(fileName, helperRuntime.helpersRoot, helperRuntime.source, repoRoot),
-    internal: contract.internal.has(helperId(fileName)),
     runtime: protectedRuntime,
   };
 }
 
+/** Resolve a shipped helper file, public or internal. */
 export function resolveHelper(helper: string, cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): ResolvedHelper | null {
-  return resolveHelperContext(helper, cwd, env).resolved;
+  const context = resolveHelperContext(helper, cwd, env);
+  return context.kind === 'resolved' ? context.resolved : null;
 }
 
 /** Run a public helper. An internal helper is refused with reason `internal-helper` and does not run. */
@@ -388,12 +396,12 @@ export function runInternalHelper(opts: Omit<RunHelperOptions, 'trustedPackage'>
   return executeHelper(opts, 'internal');
 }
 
-function executeHelper(opts: RunHelperOptions, visibility: 'public' | 'internal'): RunHelperResult {
+function executeHelper(opts: RunHelperOptions, visibility: HelperVisibility): RunHelperResult {
   const cwd = opts.cwd ?? process.cwd();
   const env = opts.trustedPackage ? (opts.env ?? process.env) : { ...process.env, ...(opts.env ?? {}) };
   let context: ResolvedHelperContext;
   try {
-    context = resolveHelperContext(opts.helper, cwd, env, opts.trustedPackage);
+    context = resolveHelperContext(opts.helper, cwd, env, opts.trustedPackage, visibility);
   } catch (error) {
     return {
       exitCode: 1,
@@ -402,8 +410,7 @@ function executeHelper(opts: RunHelperOptions, visibility: 'public' | 'internal'
       stderr: error instanceof Error ? error.message : String(error),
     };
   }
-  const resolved = context.resolved;
-  if (!resolved) {
+  if (context.kind === 'missing') {
     return {
       exitCode: 2,
       reason: 'missing-helper',
@@ -411,12 +418,13 @@ function executeHelper(opts: RunHelperOptions, visibility: 'public' | 'internal'
       stderr: `rh run: unknown helper "${opts.helper}"`,
     };
   }
-  if (context.internal && visibility === 'public') {
-    return { exitCode: 2, reason: 'internal-helper', helper: opts.helper, resolved, stderr: `rh run: helper "${resolved.id}" is internal` };
+  if (context.kind === 'refused') {
+    // An internal refusal names the canonical id, so `rh run` can map it to its public command.
+    return context.internal
+      ? { exitCode: 2, reason: 'internal-helper', helper: context.id, stderr: `rh run: helper "${context.id}" is internal` }
+      : { exitCode: 2, reason: 'missing-helper', helper: opts.helper, stderr: `unknown internal helper "${opts.helper}"` };
   }
-  if (!context.internal && visibility === 'internal') {
-    return { exitCode: 2, reason: 'missing-helper', helper: opts.helper, stderr: `unknown internal helper "${opts.helper}"` };
-  }
+  const resolved = context.resolved;
 
   const args = [...(opts.args ?? [])];
   const protectedHelper = opts.trustedPackage || isProtectedHelper(opts.helper);

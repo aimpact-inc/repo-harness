@@ -141,7 +141,7 @@ export function buildRunCommand(): Command {
       }
       const result = runHelper({ helper, args });
       if (result.reason === 'internal-helper') {
-        console.error(internalHelperMessage(result.resolved?.id ?? helper));
+        console.error(internalHelperMessage(result.helper));
         process.exit(2);
       }
       if (result.stderr && result.reason !== 'ok') {
