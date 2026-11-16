@@ -52,6 +52,11 @@ import { buildCatchUpCommand } from './commands/catch-up';
 import { buildQuotaCommand } from './commands/quota';
 import { buildRulesCommand } from './commands/rules';
 import { buildArchCommand } from './commands/arch';
+import { buildArchitectureDebtCommand } from './commands/architecture-debt';
+import { buildArchitectureProjectionCommand } from './commands/architecture-projection';
+import { buildModuleCommand } from './commands/module';
+import { buildRefactorCommand } from './commands/refactor';
+import { buildCodegraphCommand } from './commands/tools';
 import { buildRetentionCommand, type RetentionPorts } from './commands/retention';
 import { MCP_AUDIT_LOG_RELATIVE_PATH } from '../core/public-projections/mcp-audit-log';
 import { TASK_INBOX_V2_RELATIVE_PATH } from '../core/fleet/task-inbox-layout';
@@ -1001,7 +1006,10 @@ export function buildProgram(): Command {
   program.addCommand(pluginCommand(buildCatchUpCommand(), 'operator'));
   program.addCommand(buildQuotaCommand());
   program.addCommand(buildRulesCommand(boardHostPorts()));
-  program.addCommand(pluginCommand(buildArchCommand(), 'architecture'));
+  const arch = buildArchCommand();
+  // addCommand, not command(): a child made by command() copies the settings of `rh arch` and would lose its help and strict options.
+  for (const child of [buildArchitectureProjectionCommand(), buildArchitectureDebtCommand(), buildModuleCommand(), buildRefactorCommand(), buildCodegraphCommand()]) arch.addCommand(child);
+  program.addCommand(pluginCommand(arch, 'architecture'));
   program.addCommand(pluginCommand(buildStrategyCommand(), 'strategy-memory'));
   program.addCommand(buildCommandsCommand(() => program));
   program.addCommand(buildRetentionCommand(CLI_PORTS.retention));

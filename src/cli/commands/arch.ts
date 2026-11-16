@@ -1,14 +1,9 @@
 import { Command } from 'commander';
-import { buildArchitectureDebtCommand } from './architecture-debt';
-import { buildArchitectureProjectionCommand } from './architecture-projection';
-import { buildModuleCommand } from './module';
-import { buildRefactorCommand } from './refactor';
-import { buildCodegraphCommand } from './tools';
 
 /**
- * `rh arch <command> [args...]` runs one command of the pinned archctx; the
- * registered repo-harness architecture commands take precedence over that
- * pass-through.
+ * `rh arch <command> [args...]` runs one command of the pinned archctx. A
+ * registered subcommand takes precedence over that pass-through. The CLI root
+ * adds the architecture command groups, so this file imports no other capability.
  */
 export function buildArchCommand(): Command {
   const arch = new Command('arch')
@@ -23,7 +18,5 @@ export function buildArchCommand(): Command {
     .option('--base <ref>', 'The commit or ref the change is measured against')
     .option('--json', 'Output the verdict document instead of one line per check')
     .action(async (options: { base?: string; json?: boolean }) => (await import('./arch-verify')).runArchVerify(options));
-  // addCommand, not command(): a child made by command() copies this command's settings and would lose its help and strict options.
-  for (const child of [buildArchitectureProjectionCommand(), buildArchitectureDebtCommand(), buildModuleCommand(), buildRefactorCommand(), buildCodegraphCommand()]) arch.addCommand(child);
   return arch;
 }
