@@ -1883,36 +1883,49 @@ describe('upgrade --registered', () => {
     expect(readFileSync(target, 'utf8')).toBe('operator notes\n');
   }), 120_000);
 
-  test('--pr refreshes in a temporary worktree, pushes one commit, opens one PR and leaves the checkout alone', () => registeredSandbox((f) => {
+  /**
+   * `--pr` inputs: an operator identity, a caller GH_REPO and GH_HOST that must not reach gh, and a recording gh stub.
+   * origin is `git@github.com:fixture/<repo>.git`; a fake ssh command serves it from the local bare repository `<repo>.git`.
+   */
+  function prFixture(f: RegisteredReposFixture) {
+    const ssh = join(f.root, 'ssh');
+    writeFileSync(ssh, ['#!/bin/sh', 'for cmd; do :; done', 'eval "set -- $cmd"', 'exec git "${1#git-}" "$FIXTURE_REMOTES/${2#fixture/}"', ''].join('\n'));
+    chmodSync(ssh, 0o755);
+    Object.assign(f.env, { GIT_SSH_COMMAND: ssh, FIXTURE_REMOTES: f.root });
     const env = { ...f.env, GIT_AUTHOR_NAME: 'operator', GIT_AUTHOR_EMAIL: 'operator@example.invalid',
       GIT_COMMITTER_NAME: 'operator', GIT_COMMITTER_EMAIL: 'operator@example.invalid',
       REPO_HARNESS_GH_BIN: join(f.root, 'gh'), GH_LOG: join(f.root, 'gh.log'), GH_PR: join(f.root, 'gh.pr'),
       GH_REPO: 'fixture/elsewhere', GH_HOST: 'github.invalid' };
-    // Records each call with its last argument, the --repo value; `pr list` reports the PR that `pr create` opened
-    // in the same repository. A caller GH_REPO or GH_HOST, or any other command, fails.
-    writeFileSync(env.REPO_HARNESS_GH_BIN, `#!/bin/sh
-for repo; do :; done
-echo "$1 $2 $repo" >> "$GH_LOG"
-[ -z "$GH_REPO$GH_HOST" ] || exit 3
-state="$GH_PR-\${repo##*/}"
-case "$1 $2" in
-  "pr list") if [ -f "$state" ]; then printf '[{"url":"%s"}]' "$(cat "$state")"; else echo '[]'; fi ;;
-  "pr create") echo "https://$repo/pull/1" | tee "$state" ;;
-  "pr edit") ;;
-  *) exit 1 ;;
-esac
-`);
+    // Logs each call with its last argument, the --repo value, and each edit in full. `pr list` prints the PRs
+    // stored for that repository; `pr create` stores one. A caller GH_REPO or GH_HOST, or any other command, fails.
+    writeFileSync(env.REPO_HARNESS_GH_BIN, ['#!/bin/sh',
+      'for repo; do :; done',
+      'echo "$1 $2 $repo" >> "$GH_LOG"',
+      '[ "$2" != edit ] || echo "$*" >> "$GH_LOG.edit"',
+      '[ -z "$GH_REPO$GH_HOST" ] || exit 3',
+      'state="$GH_PR-${repo##*/}"',
+      'case "$1 $2" in',
+      '  "pr list") if [ -f "$state" ]; then cat "$state"; else echo "[]"; fi ;;',
+      '  "pr create") printf \'[{"url":"https://%s/pull/1","headRepositoryOwner":{"login":"fixture"},"headRepository":{"name":"%s"}}]\' "$repo" "${repo##*/}" > "$state"; echo "https://$repo/pull/1" ;;',
+      '  "pr edit") ;;',
+      '  *) exit 1 ;;',
+      'esac', ''].join('\n'));
     chmodSync(env.REPO_HARNESS_GH_BIN, 0o755);
-    // origin names a GitHub repository; insteadOf sends push and fetch to a local bare repository.
     const withOrigin = (repo: string): string => {
       const bare = `${repo}.git`;
-      const url = `https://github.com/fixture/${basename(repo)}.git`;
       git(f, f.root, 'init', '-q', '--bare', '-b', 'main', bare);
-      git(f, repo, 'remote', 'add', 'origin', url);
-      git(f, repo, 'config', `url.${bare}.insteadOf`, url);
+      git(f, repo, 'remote', 'add', 'origin', `git@github.com:fixture/${basename(repo)}.git`);
       git(f, repo, 'push', '-q', 'origin', 'main');
       return bare;
     };
+    const openPrs = (repo: string, prs: readonly { readonly owner: string; readonly number: number }[]) => writeFileSync(`${env.GH_PR}-${basename(repo)}`,
+      JSON.stringify(prs.map(({ owner, number }) => ({ url: `https://github.com/${owner}/${basename(repo)}/pull/${number}`,
+        headRepositoryOwner: { login: owner }, headRepository: { name: basename(repo) } }))));
+    return { env, withOrigin, openPrs };
+  }
+
+  test('--pr refreshes in a temporary worktree, pushes one commit, opens one PR and leaves the checkout alone', () => registeredSandbox((f) => {
+    const { env, withOrigin } = prFixture(f);
     const dirty = staleRepo(f, 'dirty');
     const dirtyRemote = withOrigin(dirty);
     git(f, dirty, 'checkout', '-q', '-b', 'topic');
@@ -1980,6 +1993,48 @@ esac
     expect(byPath(blocked.repos, dirty)).toMatchObject({ status: 'failed', error: expect.stringContaining(`git worktree add ${worktree} exited with status`) });
     expect(git(f, dirty, 'branch', '--list', 'repo-harness/refresh')).toBe('');
     expect(git(f, dirtyRemote, 'branch', '--list', 'repo-harness/refresh')).toBe('');
+  }), 240_000);
+
+  test('--pr publishes only to the one repository that git fetches from and pushes to, and deletes only its own branch', () => registeredSandbox((f) => {
+    const { env, withOrigin, openPrs } = prFixture(f);
+    const hooks = join(f.root, 'concurrent-hooks');
+    mkdirSync(hooks);
+    // Fails `worktree add` after another writer has moved the new branch to a commit of its own.
+    writeFileSync(join(hooks, 'post-checkout'), '#!/bin/sh\ngit -c user.name=other -c user.email=other@example.invalid commit -q --allow-empty -m concurrent\nexit 1\n');
+    chmodSync(join(hooks, 'post-checkout'), 0o755);
+    const cases: readonly { readonly name: string; readonly setup: (repo: string) => void; readonly expected: Partial<RegisteredRepoResult> }[] = [
+      { name: 'fetch-rewrite', setup: (repo) => {
+        git(f, repo, 'config', 'url.git@github.com:fixture/mirror.git.insteadOf', 'git@github.com:fixture/fetch-rewrite.git');
+        git(f, repo, 'config', 'url.git@github.com:fixture/fetch-rewrite.git.pushInsteadOf', 'git@github.com:fixture/fetch-rewrite.git');
+      }, expected: { status: 'skipped', reason: 'remote_target_mismatch' } },
+      { name: 'pushurl', setup: (repo) => git(f, repo, 'config', 'remote.origin.pushurl', 'git@github.com:someone/pushurl.git'),
+        expected: { status: 'skipped', reason: 'remote_target_mismatch' } },
+      { name: 'fork-pr', setup: (repo) => openPrs(repo, [{ owner: 'someone', number: 7 }, { owner: 'fixture', number: 1 }]),
+        expected: { status: 'applied', refresh: expect.objectContaining({ outcome: 'pushed', pr: 'https://github.com/fixture/fork-pr/pull/1', prAction: 'updated' }) } },
+      { name: 'two-prs', setup: (repo) => openPrs(repo, [{ owner: 'fixture', number: 1 }, { owner: 'Fixture', number: 2 }]),
+        expected: { status: 'skipped', reason: 'refresh_pr_ambiguous' } },
+      { name: 'concurrent-branch', setup: (repo) => git(f, repo, 'config', 'core.hooksPath', hooks),
+        expected: { status: 'failed', error: expect.stringContaining('the branch is left') } },
+    ];
+    const repos = cases.map(({ name, setup }) => {
+      const repo = staleRepo(f, name);
+      const remote = withOrigin(repo);
+      setup(repo);
+      return { repo, remote };
+    });
+    writeRegistry(f, repos.map(({ repo }) => repo));
+
+    const preview = runRegisteredUpgrade({ env, callerCwd: f.root });
+    expect(byPath(preview.repos, repos[1]!.repo).prRefresh).toMatchObject({ ready: false, reason: 'remote_target_mismatch' });
+    const result = runRegisteredUpgrade({ apply: true, pr: true, expectedRevision: preview.revision!, env, callerCwd: f.root });
+    cases.forEach(({ name, expected }, index) => expect([name, byPath(result.repos, repos[index]!.repo)]).toEqual([name, expect.objectContaining(expected)]));
+    for (const index of [0, 1]) expect(git(f, repos[index]!.remote, 'branch', '--list', 'repo-harness/refresh')).toBe('');
+    expect(readFileSync(env.GH_LOG, 'utf8')).not.toMatch(/fetch-rewrite|mirror|pushurl/);
+    // The update sets only the title of the origin PR; the fork PR and the operator's body stay.
+    expect(readFileSync(`${env.GH_LOG}.edit`, 'utf8').trim().split('\n'))
+      .toEqual([expect.stringMatching(/^pr edit https:\/\/github\.com\/fixture\/fork-pr\/pull\/1 --title chore\(harness\): refresh repo-harness files for \S+ --repo github\.com\/fixture\/fork-pr$/)]);
+    const concurrent = repos[4]!.repo;
+    expect(git(f, concurrent, 'log', '-1', '--format=%s', 'repo-harness/refresh')).toBe('concurrent');
   }), 240_000);
 
   test('preview counts a removable legacy sibling worktree as pending and shows it', () => registeredSandbox((f) => {

@@ -37,7 +37,9 @@ export type RegisteredRepoSkipReason =
   | 'fetch_failed'
   | 'push_failed'
   | 'pr_failed'
-  | 'refresh_branch_foreign';
+  | 'refresh_branch_foreign'
+  | 'remote_target_mismatch'
+  | 'refresh_pr_ambiguous';
 
 export interface RegisteredInitPreview {
   readonly planned: number;
@@ -211,7 +213,8 @@ function skipped(path: string, classification: Skip): RegisteredRepoResult {
 function previewRepo(path: string, env: NodeJS.ProcessEnv, callerCwd: string, plan: RepoPlan): RegisteredRepoResult {
   if ('error' in plan) throw new Error(plan.error);
   const { classification, sweep } = plan;
-  const prRefresh = prRefreshability(path, classification, env);
+  const target = prTarget(path, classification, env);
+  const prRefresh: Classification = 'repository' in target ? { ready: true } : target;
   if (!classification.ready) return { ...skipped(path, classification), prRefresh };
   const planned = planRepoAdoption({ repo: path, mode: 'standard', explicitRepo: true, env });
   const init: RegisteredInitPreview | undefined = planned.plan && {
@@ -291,22 +294,27 @@ function commandFailure(label: string, result: CommandResult): string {
 }
 
 /**
- * The GitHub repository of `origin`, read and local. The configured URL is read
- * without `insteadOf` expansion, because the PR goes to the repository that the
- * URL names; git push and fetch resolve the same URL.
+ * The one github.com repository that origin fetches from and pushes to, as git
+ * resolves them after `insteadOf`, `pushInsteadOf` and `remote.origin.pushurl`.
+ * It is the `--repo` of every gh call. Read-only and local.
  */
 function originRepository(path: string, env: NodeJS.ProcessEnv): { readonly repository: string } | Skip {
-  const url = git(path, ['config', '--get', 'remote.origin.url'], env);
-  if (!url.error && url.status === 1) return skip('no_origin_remote', `${path} has no remote named origin`);
-  if (url.error || url.status !== 0) return skip('git_probe_failed', commandFailure('git config remote.origin.url', url));
-  const repository = githubRemoteRepository(url.stdout);
-  return repository === null ? skip('no_origin_remote', `origin is not a github.com repository: ${url.stdout.trim()}`) : { repository };
+  const fetchUrl = git(path, ['remote', 'get-url', 'origin'], env);
+  if (!fetchUrl.error && fetchUrl.status === 2) return skip('no_origin_remote', `${path} has no remote named origin`);
+  if (fetchUrl.error || fetchUrl.status !== 0) return skip('git_probe_failed', commandFailure('git remote get-url origin', fetchUrl));
+  const pushUrl = git(path, ['remote', 'get-url', '--push', 'origin'], env);
+  if (pushUrl.error || pushUrl.status !== 0) return skip('git_probe_failed', commandFailure('git remote get-url --push origin', pushUrl));
+  const repository = githubRemoteRepository(fetchUrl.stdout);
+  if (repository === null || githubRemoteRepository(pushUrl.stdout) !== repository) {
+    return skip('remote_target_mismatch',
+      `origin fetches from ${fetchUrl.stdout.trim()} and pushes to ${pushUrl.stdout.trim().replace(/\n/g, ', ')}; both must name the same github.com repository`);
+  }
+  return { repository };
 }
 
-function prRefreshability(path: string, classification: Classification, env: NodeJS.ProcessEnv): Classification {
-  if (!classification.ready && !CHECKOUT_ONLY_SKIPS.has(classification.reason)) return classification;
-  const origin = originRepository(path, env);
-  return 'repository' in origin ? { ready: true } : origin;
+/** The repository that `--pr` publishes to, or why `--pr` cannot refresh this repo. */
+function prTarget(path: string, classification: Classification, env: NodeJS.ProcessEnv): { readonly repository: string } | Skip {
+  return classification.ready || CHECKOUT_ONLY_SKIPS.has(classification.reason) ? originRepository(path, env) : classification;
 }
 
 /** Every call names the origin repository; GH_REPO and GH_HOST from the caller cannot select another one. */
@@ -377,15 +385,23 @@ function foreignRefreshCommits(path: string, base: RefreshBase, env: NodeJS.Proc
     : `origin/${REFRESH_BRANCH} has ${foreign.length} of ${commits.length} commits that are not refresh commits by ${email}`;
 }
 
-/** The open PR of the refresh branch, or null. */
-function openRefreshPr(worktree: string, base: RefreshBase, env: NodeJS.ProcessEnv): { readonly url: string | null } | { readonly error: string } {
-  const listed = gh(worktree, base.repository, ['pr', 'list', '--head', REFRESH_BRANCH, '--base', base.base, '--state', 'open', '--json', 'url', '--limit', '1'], env);
-  if (listed.error || listed.status !== 0) return { error: commandFailure('gh pr list', listed) };
+/** One open PR of the refresh branch whose head is the origin repository; a fork PR with the same branch name does not count. */
+function openRefreshPr(worktree: string, base: RefreshBase, env: NodeJS.ProcessEnv): { readonly url: string | null } | Skip {
+  const listed = gh(worktree, base.repository, ['pr', 'list', '--head', REFRESH_BRANCH, '--base', base.base, '--state', 'open',
+    '--json', 'url,headRepositoryOwner,headRepository', '--limit', '100'], env);
+  if (listed.error || listed.status !== 0) return skip('pr_failed', commandFailure('gh pr list', listed));
   let open: unknown;
-  try { open = JSON.parse(listed.stdout); } catch { return { error: `gh pr list printed no JSON array: ${listed.stdout.trim()}` }; }
-  if (!Array.isArray(open)) return { error: `gh pr list printed no JSON array: ${listed.stdout.trim()}` };
-  const url = (open[0] as { url?: unknown } | undefined)?.url;
-  return { url: typeof url === 'string' ? url : null };
+  try { open = JSON.parse(listed.stdout); } catch { open = undefined; }
+  if (!Array.isArray(open)) return skip('pr_failed', `gh pr list printed no JSON array: ${listed.stdout.trim()}`);
+  const own = (open as { url?: unknown; headRepositoryOwner?: { login?: unknown }; headRepository?: { name?: unknown } }[]).filter((pr) =>
+    typeof pr.headRepositoryOwner?.login === 'string' && typeof pr.headRepository?.name === 'string'
+    && `${pr.headRepositoryOwner.login}/${pr.headRepository.name}`.toLowerCase() === base.repository);
+  if (own.length > 1) {
+    return skip('refresh_pr_ambiguous', `${own.length} open PRs from ${base.repository}:${REFRESH_BRANCH} into ${base.base}: ${own.map((pr) => String(pr.url)).join(', ')}`);
+  }
+  const url = own[0]?.url;
+  if (own.length === 1 && typeof url !== 'string') return skip('pr_failed', `gh pr list printed a PR without a url: ${listed.stdout.trim()}`);
+  return { url: own.length === 1 ? url as string : null };
 }
 
 /**
@@ -394,23 +410,23 @@ function openRefreshPr(worktree: string, base: RefreshBase, env: NodeJS.ProcessE
  * body stays as the operator left it.
  */
 function publishRefreshPr(worktree: string, base: RefreshBase, title: string, pushed: boolean, env: NodeJS.ProcessEnv):
-  { readonly url: string; readonly action: 'created' | 'updated' | 'open' } | { readonly error: string } {
+  { readonly url: string; readonly action: 'created' | 'updated' | 'open' } | Skip {
   const open = openRefreshPr(worktree, base, env);
-  if ('error' in open) return open;
+  if (!('url' in open)) return open;
   if (open.url !== null) {
     if (!pushed) return { url: open.url, action: 'open' };
     const edited = gh(worktree, base.repository, ['pr', 'edit', open.url, '--title', title], env);
-    return edited.error || edited.status !== 0 ? { error: commandFailure('gh pr edit', edited) } : { url: open.url, action: 'updated' };
+    return edited.error || edited.status !== 0 ? skip('pr_failed', commandFailure('gh pr edit', edited)) : { url: open.url, action: 'updated' };
   }
   const body = `Refresh the repo-harness tracked files for ${title.slice(REFRESH_SUBJECT.length)}.\n\nCreated by \`rh upgrade --registered --apply --pr\`. It never merges.\n`;
   const created = gh(worktree, base.repository, ['pr', 'create', '--base', base.base, '--head', REFRESH_BRANCH, '--title', title, '--body', body], env);
-  if (created.error || created.status !== 0) return { error: commandFailure('gh pr create', created) };
+  if (created.error || created.status !== 0) return skip('pr_failed', commandFailure('gh pr create', created));
   const url = created.stdout.trim().split('\n').pop() ?? '';
-  return url === '' ? { error: 'gh pr create exited with status 0 and printed no PR URL' } : { url, action: 'created' };
+  return url === '' ? skip('pr_failed', 'gh pr create exited with status 0 and printed no PR URL') : { url, action: 'created' };
 }
 
 /** The init refresh and the project upgrade in the worktree, then the commit, the push and the PR. */
-function refreshInWorktree(path: string, worktree: string, base: RefreshBase, env: NodeJS.ProcessEnv, callerCwd: string): RegisteredRepoResult {
+function refreshInWorktree(path: string, worktree: string, base: RefreshBase, owned: { oid: string }, env: NodeJS.ProcessEnv, callerCwd: string): RegisteredRepoResult {
   const planned = planRepoAdoption({ repo: worktree, mode: 'standard', explicitRepo: true, env });
   if (planned.error) return { path, status: 'failed', error: `init plan failed: ${planned.error.code} - ${planned.error.message}` };
   // The repo is already registered; registration from the worktree path would be refused.
@@ -433,12 +449,13 @@ function refreshInWorktree(path: string, worktree: string, base: RefreshBase, en
   if (staged.status === 0) {
     if (base.refreshOid === null) return { path, status: 'applied', init, upgrade, refresh: { outcome: 'up_to_date' } };
     const open = openRefreshPr(worktree, base, env);
-    if ('error' in open) return skipped(path, skip('pr_failed', open.error));
+    if (!('url' in open)) return skipped(path, open);
     return { path, status: 'applied', init, upgrade, refresh: { outcome: 'up_to_date', ...(open.url === null ? {} : { stalePr: open.url }) } };
   }
   const title = `${REFRESH_SUBJECT}${PACKAGE_VERSION}`;
   step(['commit', '--quiet', '-m', title]);
   const commit = revParse(worktree, 'HEAD', env);
+  owned.oid = commit;
 
   const unchanged = base.refreshOid !== null
     && step(['rev-parse', `${base.refreshOid}^{tree}`]) === step(['rev-parse', 'HEAD^{tree}'])
@@ -450,53 +467,59 @@ function refreshInWorktree(path: string, worktree: string, base: RefreshBase, en
     if (pushed.error || pushed.status !== 0) return skipped(path, skip('push_failed', commandFailure('git push origin', pushed)));
   }
   const pr = publishRefreshPr(worktree, base, title, !unchanged, env);
-  if ('error' in pr) return skipped(path, skip('pr_failed', pr.error));
+  if (!('url' in pr)) return skipped(path, pr);
   return { path, status: 'applied', init, upgrade, refresh: {
     outcome: unchanged ? 'unchanged' : 'pushed', branch: REFRESH_BRANCH, commit: unchanged ? base.refreshOid! : commit, pr: pr.url, prAction: pr.action,
   } };
 }
 
-function localRefreshBranchExists(path: string, env: NodeJS.ProcessEnv): boolean {
-  const shown = git(path, ['show-ref', '--verify', '--quiet', `refs/heads/${REFRESH_BRANCH}`], env);
-  if (shown.error || (shown.status !== 0 && shown.status !== 1)) throw new Error(commandFailure('git show-ref', shown));
-  return shown.status === 0;
+function localRefreshBranch(path: string, env: NodeJS.ProcessEnv): string | null {
+  const shown = git(path, ['rev-parse', '--verify', '--quiet', `refs/heads/${REFRESH_BRANCH}`], env);
+  if (shown.error || (shown.status !== 0 && shown.status !== 1)) throw new Error(commandFailure('git rev-parse', shown));
+  return shown.status === 0 ? shown.stdout.trim() : null;
+}
+
+/** Deletes the local refresh branch only while it still points at the commit that this run created. */
+function deleteOwnedBranch(path: string, oid: string, env: NodeJS.ProcessEnv): string | null {
+  const deleted = git(path, ['update-ref', '-d', `refs/heads/${REFRESH_BRANCH}`, oid], env);
+  return deleted.error || deleted.status !== 0 ? `${commandFailure(`git update-ref -d refs/heads/${REFRESH_BRANCH} ${oid}`, deleted)}; the branch is left` : null;
 }
 
 /**
  * The `--pr` write sequence. Every write goes to a new worktree on the refresh
  * branch; the primary checkout keeps its files, branch and index. The worktree
- * and its local branch are removed on every path. Nothing merges.
+ * is removed on every path; the local branch is removed only while it points at
+ * the commit that this run created. Nothing merges.
  */
 function refreshRepoPr(path: string, env: NodeJS.ProcessEnv, callerCwd: string): RegisteredRepoResult {
-  const access = prRefreshability(path, classifyRepo(path, env), env);
-  if (!access.ready) return skipped(path, access);
-  const origin = originRepository(path, env);
-  if (!('repository' in origin)) return skipped(path, origin);
-  const base = fetchRefreshBase(path, origin.repository, env);
+  const target = prTarget(path, classifyRepo(path, env), env);
+  if (!('repository' in target)) return skipped(path, target);
+  const base = fetchRefreshBase(path, target.repository, env);
   if ('ready' in base) return skipped(path, base);
   const foreign = foreignRefreshCommits(path, base, env);
   if (foreign) return skipped(path, skip('refresh_branch_foreign', foreign));
 
   const worktree = join(managedWorktreeRoot(env), `${basename(path)}-wt-harness-refresh`);
-  const recovery = `remove it with \`git -C ${path} worktree remove --force ${worktree}\` and \`git -C ${path} branch -D ${REFRESH_BRANCH}\` after checking it holds no work`;
-  if (localRefreshBranchExists(path, env)) return { path, status: 'failed', error: `a local ${REFRESH_BRANCH} branch is left from an earlier run; ${recovery}` };
+  const recovery = `check that ${worktree} and the local ${REFRESH_BRANCH} branch hold no work, then remove the path `
+    + `(\`git -C ${path} worktree remove --force ${worktree}\` for a registered worktree) and run \`git -C ${path} branch -D ${REFRESH_BRANCH}\``;
+  if (localRefreshBranch(path, env) !== null) return { path, status: 'failed', error: `a local ${REFRESH_BRANCH} branch exists; ${recovery}` };
   const added = git(path, ['worktree', 'add', '--quiet', '-b', REFRESH_BRANCH, worktree, base.baseOid], env);
   if (added.error || added.status !== 0) {
-    // `worktree add -b` can create the branch and then fail on the path; the branch did not exist before this call.
-    const removed = localRefreshBranchExists(path, env) ? git(path, ['branch', '--quiet', '-D', REFRESH_BRANCH], env) : undefined;
-    const cleanup = removed && (removed.error || removed.status !== 0) ? `; ${commandFailure(`git branch -D ${REFRESH_BRANCH}`, removed)}` : '';
-    return { path, status: 'failed', error: `${commandFailure(`git worktree add ${worktree}`, added)}${cleanup}; ${recovery}` };
+    // `worktree add -b` can create the branch and then fail; another process may also have created it since the check.
+    const cleanup = localRefreshBranch(path, env) === null ? null : deleteOwnedBranch(path, base.baseOid, env);
+    return { path, status: 'failed', error: [commandFailure(`git worktree add ${worktree}`, added), cleanup, recovery].filter(Boolean).join('; ') };
   }
+  const owned = { oid: base.baseOid };
   let result: RegisteredRepoResult;
-  try { result = refreshInWorktree(path, worktree, base, env, callerCwd); }
+  try { result = refreshInWorktree(path, worktree, base, owned, env, callerCwd); }
   catch (error) { result = { path, status: 'failed', error: message(error) }; }
+  const removed = git(path, ['worktree', 'remove', '--force', worktree], env);
   const cleanup = [
-    git(path, ['worktree', 'remove', '--force', worktree], env),
-    git(path, ['branch', '--quiet', '-D', REFRESH_BRANCH], env),
-  ].flatMap((removed, index) => removed.error || removed.status !== 0
-    ? [commandFailure(index === 0 ? `git worktree remove ${worktree}` : `git branch -D ${REFRESH_BRANCH}`, removed)] : []);
+    removed.error || removed.status !== 0 ? commandFailure(`git worktree remove ${worktree}`, removed) : null,
+    removed.error || removed.status !== 0 ? null : deleteOwnedBranch(path, owned.oid, env),
+  ].filter((entry): entry is string => entry !== null);
   return cleanup.length === 0 ? result
-    : { ...result, status: 'failed', error: [result.error, `cleanup failed: ${cleanup.join('; ')}`].filter(Boolean).join('; ') };
+    : { ...result, status: 'failed', error: [result.error, `cleanup failed: ${cleanup.join('; ')}`, recovery].filter(Boolean).join('; ') };
 }
 
 /**
