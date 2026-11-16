@@ -42,7 +42,7 @@ export function seatAccountQuotas(accounts: readonly QuotaAccountReport[], routi
 
 /** `null` is a Codex turn that is no seat, such as the operator cleanup investigation: only `all` covers it. */
 export const creditsCover = (id: SeatId | null, quota: SeatAccountQuotas): boolean =>
-  quota.chatgpt.credits === 'all' || quota.chatgpt.credits === 'review' && id !== null && isReviewSeat(id);
+  quota.chatgpt.credits === 'all' || quota.chatgpt.credits === 'review' && id !== null && isReviewSeat(id) && id !== 'gatekeeper-deep';
 
 export const claudeReserved = (quota: SeatAccountQuotas): boolean => quota.claude.mode === 'saving' || quota.claude.state === 'exhausted';
 
@@ -167,9 +167,20 @@ export function effectiveGatekeeper(seats: SeatsConfigV1, quota: SeatAccountQuot
     line: `gatekeeper: gatekeeper-fallback (${launchText(fallback)}${accountSuffix('gatekeeper-fallback', fallback, quota)}; gatekeeper: ${cause})` };
 }
 
+/**
+ * True when the effective gatekeeper-deep and gatekeeper run the same model, `magpie/codex/` prefix removed: the second
+ * row would then repeat the first. The route line and the launch fail closed on it.
+ */
+export function deepGatekeeperRepeatsGatekeeper(seats: SeatsConfigV1, quota: SeatAccountQuotas): boolean {
+  const bare = (seat: SeatConfigV1 | null): string | null => seat?.model?.replace(PI_CODEX_MODEL_PREFIX, '') ?? null;
+  const deep = bare(effectiveSeatConfig('gatekeeper-deep', seats, quota));
+  return deep !== null && deep === bare(effectiveSeatConfig('gatekeeper', seats, quota));
+}
+
 /** The route line of a review seat that has no fallback. */
 function reviewSeatLine(id: 'gatekeeper-deep' | 'reviewer', seats: SeatsConfigV1, quota: SeatAccountQuotas): string {
   const seat = effectiveSeatConfig(id, seats, quota);
+  if (id === 'gatekeeper-deep' && deepGatekeeperRepeatsGatekeeper(seats, quota)) return 'gatekeeper-deep: none (same model as gatekeeper)';
   return reviewSeatBlocked(id, seat, quota, seats.routing)
     ? `${id}: none (${blockText(id, seat, quota, seats.routing)})`
     : `${id}: ${id} (${launchText(seat)}${accountSuffix(id, seat, quota)})`;

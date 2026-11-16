@@ -180,6 +180,8 @@ describe('seat quota routing', () => {
     expect(hyper.chatgpt.mode).toBe('hyper');
     expect(effectiveSeatConfig('gatekeeper-deep', DEFAULT_SEATS_CONFIG, hyper)).toEqual(DEFAULT_SEATS_CONFIG['gatekeeper-deep']);
     expect(effectiveSeatConfig('gatekeeper', DEFAULT_SEATS_CONFIG, hyper).model).not.toBe(DEFAULT_SEATS_CONFIG['gatekeeper-deep'].model);
+    const same = { ...DEFAULT_SEATS_CONFIG, 'gatekeeper-deep': { ...DEFAULT_SEATS_CONFIG['gatekeeper-deep'], model: 'magpie/codex/gpt-6-astra' } };
+    expect(formatSeatRoutes(same, hyper).split('\n')).toContain('gatekeeper-deep: none (same model as gatekeeper)');
   });
 
   test('the credit mode admits the seats it names on an exhausted ChatGPT account with credits at or above the floor', () => {
@@ -195,6 +197,7 @@ describe('seat quota routing', () => {
     expect(routes(codex(funded), 'off')).toContain('gatekeeper: none (chatgpt exhausted)');
     const review = routes(codex(funded), 'review');
     expect(review).toContain(gatekeeper);
+    expect(review).toContain('gatekeeper-deep: none (chatgpt exhausted)');
     expect(review).toContain('route important_deep: worker-important (claude opus medium; claude unknown)');
     expect(review).toContain('route simple_fast: none (chatgpt exhausted)');
     for (const line of [writer, gatekeeper]) expect(routes(codex(funded), 'all'), line).toContain(line);
