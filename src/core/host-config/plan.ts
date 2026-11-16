@@ -99,7 +99,7 @@ export function planFile(
     skipped.push({ code: 'host_config_override_skipped', file, owner: request.owner, selector: request.selector });
     return false;
   });
-  const active = ledgerFragments.filter((record) => record.file === file && record.state === 'active');
+  const active = ledgerFragments.filter((record) => record.file === file);
   checkSelectors(file, applied, active);
 
   const fragments: PlannedFragment[] = [];

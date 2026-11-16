@@ -1,11 +1,10 @@
 import { afterEach, expect, test } from 'bun:test';
-import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { classifyFile, recoveryAction } from '../../src/core/host-config/recovery';
-import { HostConfigError, type FragmentEdit, type HostConfigStrategy } from '../../src/core/host-config/types';
-import { openHostConfigGate, type HostConfigFileChange, type HostConfigGateOptions } from '../../src/effects/host-config/gate';
+import { join } from 'node:path';
+import type { FragmentEdit, HostConfigStrategy, HostPath } from '../../src/core/host-config/types';
+import { openHostConfigGate, type HostConfigFileChange } from '../../src/effects/host-config/gate';
+import { replaceTarget } from '../../src/effects/host-config/store';
 
 /** A `key=value` line format: the selector is the key. */
 function keyLineEdit(content: string, selector: string, value: string): FragmentEdit {
@@ -26,130 +25,79 @@ function fixture() {
   writeFileSync(a, 'keep=1\n');
   chmodSync(a, 0o640);
   const root = join(home, '.repo-harness', 'config');
-  const gate = (options: Omit<HostConfigGateOptions, 'env'> = {}) => openHostConfigGate({ env: { HOME: home }, ...options });
+  const gate = () => openHostConfigGate({ env: { HOME: home } });
   const change = (path: string, value: string, extra: Partial<HostConfigFileChange['fragments'][number]> = {}): HostConfigFileChange =>
     ({ path, fragments: [{ owner: 'o1', selector: 'rh', kind: 'add', strategy: keyLine, value, ...extra }] });
-  const journal = () => readdirSync(join(root, 'journal'));
   const ledger = () => JSON.parse(readFileSync(join(root, 'ledger.json'), 'utf8'));
-  return { home, a, b, root, gate, change, journal, ledger };
+  return { home, a, b, root, gate, change, ledger };
 }
 
-const gatePath = resolve(import.meta.dir, '../../src/effects/host-config/gate.ts');
-
-/** Run one gate call in a child process that SIGKILLs itself at the fault point. */
-function killAt(home: string, body: string, point: string, path = ''): void {
-  const script = `
-    import { openHostConfigGate } from ${JSON.stringify(gatePath)};
-    ${keyLineEdit.toString()}
-    const keyLine = { locate: () => null, apply: keyLineEdit };
-    const faults = { at(point, path) { if (point === ${JSON.stringify(point)} && (${JSON.stringify(path)} === '' || path === ${JSON.stringify(path)})) process.kill(process.pid, 'SIGKILL'); } };
-    const gate = openHostConfigGate({ env: { HOME: ${JSON.stringify(home)} }, faults });
-    ${body}
-    process.exit(3);
-  `;
-  const child = spawnSync(process.execPath, ['-e', script], { env: { ...process.env, HOME: home }, encoding: 'utf8' });
-  expect({ signal: child.signal, stderr: child.stderr }).toEqual({ signal: 'SIGKILL', stderr: '' });
-}
-
-test('A5: a kill at each fault point recovers by the table', () => {
-  const applyBoth = (f: ReturnType<typeof fixture>) => `gate.apply([
-    { path: ${JSON.stringify(f.a)}, fragments: [{ owner: 'o1', selector: 'rh', kind: 'add', strategy: keyLine, value: 'on' }] },
-    { path: ${JSON.stringify(f.b)}, fragments: [{ owner: 'o1', selector: 'rh', kind: 'add', strategy: keyLine, value: 'on' }] },
-  ]);`;
-  const cases = [
-    { point: 'after-record', path: '', committed: false },
-    // b's new directories and temporary file exist: recovery removes both.
-    { point: 'before-rename', path: 'b', committed: false },
-    { point: 'after-rename', path: 'a', committed: false },
-    { point: 'after-rename', path: 'b', committed: false },
-    { point: 'after-ledger', path: '', committed: true },
-    { point: 'after-cleanup', path: '', committed: true },
-  ];
-  for (const { point, path, committed } of cases) {
-    const f = fixture();
-    killAt(f.home, applyBoth(f), point, path === '' ? '' : f[path as 'a' | 'b']);
-    expect(f.gate().recover()).toEqual({ unresolved: [] });
-    expect(f.journal()).toEqual([]);
-    const label = `${point} ${path}`;
-    if (committed) {
-      expect({ label, a: readFileSync(f.a, 'utf8'), b: readFileSync(f.b, 'utf8') }).toEqual({ label, a: 'keep=1\nrh=on\n', b: 'rh=on\n' });
-      expect(f.ledger().committed_transactions).toHaveLength(1);
-    } else {
-      expect({ label, a: readFileSync(f.a, 'utf8'), mode: statSync(f.a).mode & 0o777, tool: existsSync(join(f.home, '.tool')) })
-        .toEqual({ label, a: 'keep=1\n', mode: 0o640, tool: false });
-      expect(existsSync(join(f.root, 'ledger.json'))).toBe(false);
-    }
-  }
-
-  // Delegated record, killed after the record: the path is still the preimage, so the record goes.
-  const d = fixture();
-  killAt(d.home, `gate.delegate([${JSON.stringify(d.a)}], () => {});`, 'after-record');
-  expect(d.gate().recover()).toEqual({ unresolved: [] });
-  expect(d.journal()).toEqual([]);
-
-  // Delegated record, killed during run: changed content is never guessed to be the writer's.
-  killAt(d.home, `import { writeFileSync } from 'node:fs';
-    gate.delegate([${JSON.stringify(d.a)}], () => { writeFileSync(${JSON.stringify(d.a)}, 'external\\n'); process.kill(process.pid, 'SIGKILL'); });`, 'none');
-  const report = d.gate().recover();
-  expect(report.unresolved.map((entry) => [entry.code, entry.path])).toEqual([['host_config_unresolved_external_change', d.a]]);
-  expect(readFileSync(d.a, 'utf8')).toBe('external\n');
-  const [txn] = d.journal();
-  expect(readFileSync(join(d.root, 'journal', txn!, 'preimage-0'), 'utf8')).toBe('keep=1\n');
-});
-
-test('recovery decision is one pure table', () => {
-  const pre = { existed: true as const, mode: 0o600, sha256: `sha256:${'a'.repeat(64)}` };
-  const intended = { ...pre, sha256: `sha256:${'b'.repeat(64)}` };
-  const observe = (sha256: string) => ({ existed: true as const, type: 'file' as const, mode: 0o600, sha256 });
-  const rows = [
-    [classifyFile(observe(pre.sha256), pre, intended), false, 'resolved'],
-    [classifyFile(observe(intended.sha256), pre, intended), false, 'restore_preimage'],
-    [classifyFile(observe(intended.sha256), pre, intended), true, 'resolved'],
-    [classifyFile(observe(pre.sha256), pre, intended), true, 'mark_external_change'],
-    [classifyFile(observe(`sha256:${'c'.repeat(64)}`), pre, intended), false, 'unresolved'],
-    // A committed transaction never rolls back, so a different file is an external change and the record goes.
-    [classifyFile({ existed: false }, pre, null), true, 'mark_external_change'],
-  ] as const;
-  for (const [state, committed, action] of rows) expect(recoveryAction(state, committed)).toBe(action);
-});
-
-test('A3: a failure after the write restores the state before this transaction, not the baseline', () => {
+test('every write has a ledger record before a revert, and a revert touches no path without one', () => {
   const f = fixture();
-  f.gate().apply([f.change(f.a, '1')]);
-  const failing = f.gate({ faults: { at: (point) => { if (point === 'after-rename') throw new Error('disk full'); } } });
-  expect(() => failing.apply([f.change(f.a, '2')])).toThrow('disk full');
-  expect(readFileSync(f.a, 'utf8')).toBe('keep=1\nrh=1\n');
-  expect(f.journal()).toEqual([]);
-  expect(f.ledger().committed_transactions).toHaveLength(1);
+  const c = join(f.home, '.charlie.conf');
+  writeFileSync(c, 'rh=user\n');
+  expect(f.gate().apply([f.change(f.a, 'on'), f.change(f.b, 'on')]).written).toEqual([f.a, f.b]);
+  const files = f.ledger().files;
+  expect({ a: files[f.a].kind, b: files[f.b].kind, dirs: files[f.b].created_dirs, c: files[c] })
+    .toEqual({ a: 'text_block', b: 'created', dirs: [join(f.home, '.tool'), join(f.home, '.tool', 'sub')], c: undefined });
+  expect(f.gate().revert().map((entry) => [entry.path, entry.action])).toEqual([[f.a, 'text_removed'], [f.b, 'removed']]);
+  expect({ a: readFileSync(f.a, 'utf8'), mode: statSync(f.a).mode & 0o777, tool: existsSync(join(f.home, '.tool')), c: readFileSync(c, 'utf8') })
+    .toEqual({ a: 'keep=1\n', mode: 0o640, tool: false, c: 'rh=user\n' });
+  expect(f.ledger()).toEqual({ protocol: 1, files: {}, fragments: [] });
 });
 
-test('A4/A6: a change by another process after the write blocks the rollback and keeps the preimage', () => {
+test('rh backs up user bytes before it replaces them, and a revert restores the backup', () => {
   const f = fixture();
-  const racing = f.gate({ faults: { at: (point) => {
-    if (point !== 'after-rename') return;
-    writeFileSync(f.a, 'other writer\n');
-    throw new Error('late failure');
-  } } });
-  const error = (() => { try { racing.apply([f.change(f.a, 'on')]); } catch (caught) { return caught; } })();
-  expect(error).toBeInstanceOf(HostConfigError);
-  expect((error as HostConfigError).code).toBe('host_config_unresolved_external_change');
-  expect(readFileSync(f.a, 'utf8')).toBe('other writer\n');
-  const [txn] = f.journal();
-  expect(readFileSync(join(f.root, 'journal', txn!, 'preimage-0'), 'utf8')).toBe('keep=1\n');
-  // A later transaction on the held path fails closed; recovery keeps the preimage.
-  expect(() => f.gate().apply([f.change(f.a, 'again')])).toThrow(/preimage stays/);
-  expect(f.gate().recover().unresolved).toHaveLength(1);
+  // A delegated writer replaces a user file: the old bytes go to the vault first.
+  f.gate().delegate([f.a], ([destination]) => writeFileSync(destination!, 'external\n'));
+  const { kind, backup } = f.ledger().files[f.a];
+  expect({ kind, vault: readFileSync(join(f.root, 'vault', String(backup).replace('sha256:', '')), 'utf8') }).toEqual({ kind: 'replaced', vault: 'keep=1\n' });
+  expect(f.gate().revert([f.a]).map((entry) => entry.action)).toEqual(['restored']);
+  expect(readFileSync(f.a, 'utf8')).toBe('keep=1\n');
+
+  // An explicit override keeps the replaced user text in the vault, and a revert puts it back.
+  const skipped = f.gate().apply([f.change(f.a, 'x', { selector: 'keep', kind: 'override' })]);
+  expect(skipped).toEqual({ written: [], skipped: [{ code: 'host_config_override_skipped', file: f.a, owner: 'o1', selector: 'keep' }] });
+  f.gate().apply([f.change(f.a, 'x', { selector: 'keep', kind: 'override', selected: true })]);
+  const override = f.ledger().fragments[0];
+  expect(override.edit).toEqual({ removed_vault: expect.stringMatching(/^sha256:/), inserted: 'keep=x\n' });
+  f.gate().apply([f.change(f.a, 'y', { selector: 'keep', kind: 'refresh', selected: true })]);
+  expect(f.ledger().fragments[0].edit.removed_vault).toBe(override.edit.removed_vault);
+  expect(f.gate().revert().map((entry) => entry.action)).toEqual(['text_removed']);
+  expect(readFileSync(f.a, 'utf8')).toBe('keep=1\n');
+  for (const entry of [f.root, join(f.root, 'vault')]) expect(statSync(entry).mode & 0o777).toBe(0o700);
 });
 
-test('a target changed before its rename aborts with nothing written for that file', () => {
+test('a revert keeps and reports a file whose rh bytes the user edited', () => {
   const f = fixture();
-  const racing = f.gate({ faults: { at: (point) => { if (point === 'after-record') writeFileSync(f.a, 'user edit\n'); } } });
-  expect(() => racing.apply([f.change(f.a, 'on')])).toThrow(expect.objectContaining({ code: 'host_config_target_changed' }));
-  expect(readFileSync(f.a, 'utf8')).toBe('user edit\n');
-  expect(f.journal()).toEqual([]);
+  f.gate().apply([f.change(f.a, 'on'), f.change(f.b, 'on')]);
+  writeFileSync(f.a, 'keep=1\nrh=user\n');
+  writeFileSync(f.b, 'rh=on\nmine=1\n');
+  expect(f.gate().revert().map((entry) => [entry.path, entry.action])).toEqual([[f.a, 'kept_edited'], [f.b, 'kept_edited']]);
+  expect({ a: readFileSync(f.a, 'utf8'), b: readFileSync(f.b, 'utf8') }).toEqual({ a: 'keep=1\nrh=user\n', b: 'rh=on\nmine=1\n' });
+  expect(Object.keys(f.ledger().files)).toEqual([f.a, f.b]);
+  // The write itself re-reads the target: bytes that rh did not see are never overwritten.
+  expect(() => replaceTarget(f.a as HostPath, Buffer.from('rh\n'), { existed: true, sha256: `sha256:${'0'.repeat(64)}` }))
+    .toThrow(expect.objectContaining({ code: 'host_config_target_changed' }));
+  expect(readFileSync(f.a, 'utf8')).toBe('keep=1\nrh=user\n');
 });
 
-test('A8: two owners on one selector, or a parent and a child selector, write nothing', () => {
+test('an edit since rh last wrote a file is a sticky external change, also when rh writes nothing now', () => {
+  const f = fixture();
+  f.gate().apply([f.change(f.a, 'on')]);
+  const committed = f.ledger().files[f.a].committed;
+  writeFileSync(f.a, 'keep=1\nrh=on\nuser=1\n');
+  expect(f.gate().apply([f.change(f.a, 'on')]).written).toEqual([]);
+  expect(f.ledger().files[f.a]).toMatchObject({ external_change: true, committed });
+
+  const g = fixture();
+  g.gate().apply([g.change(g.a, 'on')]);
+  writeFileSync(g.a, 'keep=1\nrh=on\nuser=1\n');
+  expect(g.gate().delegate([g.a], () => {}).changed).toEqual([]);
+  expect(g.ledger().files[g.a].external_change).toBe(true);
+});
+
+test('A8: another owner on a recorded selector, a parent and a child selector, or one selector twice write nothing', () => {
   const f = fixture();
   const owners = { path: f.a, fragments: [
     { owner: 'o1', selector: 'rh', kind: 'add' as const, strategy: keyLine, value: '1' },
@@ -166,164 +114,36 @@ test('A8: two owners on one selector, or a parent and a child selector, write no
   for (const change of [owners, nested, twice]) {
     expect(() => f.gate().apply([change])).toThrow(expect.objectContaining({ code: 'host_config_fragment_overlap' }));
   }
-  expect(readFileSync(f.a, 'utf8')).toBe('keep=1\n');
-  expect(existsSync(f.b)).toBe(false);
-  expect(f.journal()).toEqual([]);
-  // A recorded fragment counts: another owner cannot take its selector later.
+  expect({ a: readFileSync(f.a, 'utf8'), b: existsSync(f.b) }).toEqual({ a: 'keep=1\n', b: false });
   f.gate().apply([f.change(f.a, '1')]);
   expect(() => f.gate().apply([f.change(f.a, '2', { owner: 'o2' })])).toThrow(expect.objectContaining({ code: 'host_config_fragment_overlap' }));
   // A fragment whose text is already in place is still recorded, without a file write.
-  const noOp = f.gate().apply([f.change(f.a, '1', { selector: 'keep' })]);
-  expect({ txn: typeof noOp.txn, written: noOp.written, a: readFileSync(f.a, 'utf8') }).toEqual({ txn: 'string', written: [], a: 'keep=1\nrh=1\n' });
+  expect(f.gate().apply([f.change(f.a, '1', { selector: 'keep' })]).written).toEqual([]);
   expect(() => f.gate().apply([f.change(f.a, '2', { owner: 'o2', selector: 'keep' })])).toThrow(expect.objectContaining({ code: 'host_config_fragment_overlap' }));
 });
 
-test('a committed transaction always settles: a delegated unchanged path is a no-op, a later edit is an external change', () => {
+test('a target inside ~/.repo-harness is refused, also through a user link', () => {
   const f = fixture();
-  f.gate().apply([f.change(f.a, 'on')]);
-  const x = join(f.home, '.x.conf'), y = join(f.home, '.y.conf');
-  killAt(f.home, `import { writeFileSync } from 'node:fs';
-    gate.delegate([${JSON.stringify(f.a)}, ${JSON.stringify(x)}, ${JSON.stringify(y)}], () => writeFileSync(${JSON.stringify(x)}, 'x\\n'));`, 'after-ledger');
-  expect(f.gate().recover()).toEqual({ unresolved: [] });
-  expect(f.journal()).toEqual([]);
-  const ledger = f.ledger();
-  expect({ a: ledger.files[f.a].external_change, x: ledger.files[x].committed.type, y: ledger.files[y] }).toEqual({ a: false, x: 'file', y: undefined });
-
-  killAt(f.home, `gate.apply([{ path: ${JSON.stringify(f.a)}, fragments: [{ owner: 'o1', selector: 'rh', kind: 'add', strategy: keyLine, value: 'off' }] }]);`, 'after-ledger');
-  writeFileSync(f.a, 'user\n');
-  expect(f.gate().recover()).toEqual({ unresolved: [] });
-  expect(f.journal()).toEqual([]);
-  expect(f.ledger().files[f.a].external_change).toBe(true);
-
-  // An outside edit before a delegate that leaves the path unchanged is still an external change; committed stays.
-  const g = fixture();
-  g.gate().apply([g.change(g.a, 'on')]);
-  const committed = g.ledger().files[g.a].committed;
-  writeFileSync(g.a, 'keep=1\nrh=on\nuser=1\n');
-  g.gate().delegate([g.a], () => {});
-  expect(g.ledger().files[g.a]).toMatchObject({ external_change: true, committed });
-
-  // The same holds for an apply whose text is already in place.
-  const h = fixture();
-  h.gate().apply([h.change(h.a, 'on')]);
-  const before = h.ledger().files[h.a].committed;
-  writeFileSync(h.a, 'keep=1\nrh=on\nuser=1\n');
-  expect(h.gate().apply([h.change(h.a, 'on')]).written).toEqual([]);
-  expect(h.ledger().files[h.a]).toMatchObject({ external_change: true, committed: before });
+  mkdirSync(join(f.home, '.repo-harness'), { recursive: true });
+  symlinkSync(join(f.home, '.repo-harness'), join(f.home, '.into-harness'));
+  for (const path of [join(f.home, '.repo-harness', 'config.json'), join(f.home, '.into-harness', 'x.conf')]) {
+    expect(() => f.gate().apply([f.change(path, 'on')])).toThrow(expect.objectContaining({ code: 'host_config_invalid_path' }));
+  }
 });
 
-test('a preimage copy that cannot be read keeps its entry unresolved, and other paths still apply', () => {
+test('user links are followed: the real file is written and the link stays', () => {
   const f = fixture();
-  killAt(f.home, `gate.apply([{ path: ${JSON.stringify(f.a)}, fragments: [{ owner: 'o1', selector: 'rh', kind: 'add', strategy: keyLine, value: 'on' }] }]);`, 'after-rename', f.a);
-  rmSync(join(f.root, 'journal', f.journal()[0]!, 'preimage-0'));
-  expect(f.gate().recover().unresolved.map((entry) => entry.path)).toEqual([f.a]);
-  expect(readFileSync(f.a, 'utf8')).toBe('keep=1\nrh=on\n');
-  expect(f.gate().apply([f.change(f.b, 'on')]).written).toEqual([f.b]);
-});
-
-test('recovery refuses a recorded path that leaves HOME or meets a symlink, and keeps the record', () => {
-  const f = fixture();
-  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'rh-host-config-outside-')));
-  homes.push(outside);
-  killAt(f.home, `gate.apply([{ path: ${JSON.stringify(f.b)}, fragments: [{ owner: 'o1', selector: 'rh', kind: 'add', strategy: keyLine, value: 'on' }] }]);`, 'after-rename', f.b);
-  renameSync(join(f.home, '.tool'), join(outside, '.tool'));
-  symlinkSync(join(outside, '.tool'), join(f.home, '.tool'));
-  expect(() => f.gate().recover()).toThrow(expect.objectContaining({ code: 'host_config_invalid_path' }));
-  expect(readFileSync(join(outside, '.tool', 'sub', 'b.conf'), 'utf8')).toBe('rh=on\n');
-  expect(f.journal()).toHaveLength(1);
-
-  // A forged preimage copy name or a forged path outside HOME fails the parse; the canary and the record stay.
-  const g = fixture();
-  killAt(g.home, `gate.apply([{ path: ${JSON.stringify(g.a)}, fragments: [{ owner: 'o1', selector: 'rh', kind: 'add', strategy: keyLine, value: 'on' }] }]);`, 'after-record');
-  const recordPath = join(g.root, 'journal', g.journal()[0]!, 'record.json');
-  const original = readFileSync(recordPath, 'utf8');
-  const canary = join(g.home, '.canary-home');
-  writeFileSync(canary, 'canary\n');
-  writeFileSync(recordPath, original.replace('"preimage-0"', JSON.stringify('../../../../.canary-home')));
-  expect(() => g.gate().recover()).toThrow(expect.objectContaining({ code: 'host_config_invalid_path' }));
-  expect({ canary: readFileSync(canary, 'utf8'), journal: g.journal().length }).toEqual({ canary: 'canary\n', journal: 1 });
-  writeFileSync(recordPath, original.replaceAll(JSON.stringify(g.a), JSON.stringify(join(outside, 'victim'))));
-  expect(() => g.gate().recover()).toThrow(expect.objectContaining({ code: 'host_config_invalid_path' }));
-  expect(() => g.gate().apply([g.change(join(g.home, '.repo-harness', 'config.json'), 'on')])).toThrow(expect.objectContaining({ code: 'host_config_invalid_path' }));
-});
-
-test('the boundary resolves each host path once and refuses a dangling, looping or hard link', () => {
-  const f = fixture();
-  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'rh-host-config-outside-')));
-  homes.push(outside);
   mkdirSync(join(f.home, 'dotfiles'));
   symlinkSync(join(f.home, 'dotfiles'), join(f.home, '.linked'));
-  const real = join(f.home, 'dotfiles', 'x.conf');
-  // An in-root link resolves: the ledger key is the real file, and the link stays a link.
-  expect(f.gate().apply([f.change(join(f.home, '.linked', 'x.conf'), 'on')]).written).toEqual([real]);
-  expect({ keys: Object.keys(f.ledger().files), link: lstatSync(join(f.home, '.linked')).isSymbolicLink() }).toEqual({ keys: [real], link: true });
-  // The delegate callback gets the resolved destinations; two aliases of one file are one path.
+  symlinkSync(join(f.home, 'dotfiles', 'later.conf'), join(f.home, '.dangling.conf'));
+  linkSync(f.a, join(f.home, '.hard'));
+  const real = join(f.home, 'dotfiles', 'x.conf'), later = join(f.home, 'dotfiles', 'later.conf');
+  expect(f.gate().apply([f.change(join(f.home, '.linked', 'x.conf'), 'on'), f.change(join(f.home, '.dangling.conf'), 'on'), f.change(f.a, 'on')]).written)
+    .toEqual([real, later, f.a]);
+  expect({ keys: Object.keys(f.ledger().files), linked: lstatSync(join(f.home, '.linked')).isSymbolicLink(), dangling: readFileSync(join(f.home, '.dangling.conf'), 'utf8') })
+    .toEqual({ keys: [real, later, f.a], linked: true, dangling: 'rh=on\n' });
   let destinations: readonly string[] = [];
   f.gate().delegate([join(f.home, '.linked', 'y.conf')], (resolved) => { destinations = resolved; });
   expect(destinations).toEqual([join(f.home, 'dotfiles', 'y.conf')]);
   expect(() => f.gate().apply([f.change(real, 'a'), f.change(join(f.home, '.linked', 'x.conf'), 'b')])).toThrow(expect.objectContaining({ code: 'host_config_invalid_state' }));
-  // Refused at the boundary: a dangling link, a loop, a hard link and a link out of HOME.
-  symlinkSync(join(f.home, 'missing'), join(f.home, '.dangling'));
-  symlinkSync(join(f.home, '.loop'), join(f.home, '.loop'));
-  linkSync(f.a, join(f.home, '.hard'));
-  symlinkSync(outside, join(f.home, '.out'));
-  const rows = [
-    [join(f.home, '.dangling', 'x.conf'), 'host_config_dangling_link'],
-    [join(f.home, '.loop', 'x.conf'), 'host_config_link_loop'],
-    [f.a, 'host_config_hard_link'],
-    [join(f.home, '.out', 'x.conf'), 'host_config_invalid_path'],
-  ] as const;
-  for (const [path, code] of rows) expect(() => f.gate().apply([f.change(path, 'on')])).toThrow(expect.objectContaining({ code }));
-  expect(readdirSync(outside)).toEqual([]);
-});
-
-test('a failure before the rename removes the directories the transaction created', () => {
-  const f = fixture();
-  const failing = f.gate({ faults: { at: (point) => { if (point === 'before-rename') throw new Error('temp write failed'); } } });
-  expect(() => failing.apply([f.change(f.b, 'on')])).toThrow('temp write failed');
-  expect(existsSync(join(f.home, '.tool'))).toBe(false);
-  expect(f.journal()).toEqual([]);
-
-  // Two files share a new directory and one stays unresolved: the directory goes once that file is resolved.
-  const c = join(f.home, '.tool', 'sub', 'c.conf');
-  const racing = f.gate({ faults: { at: (point, path) => {
-    if (point !== 'after-rename' || path !== c) return;
-    writeFileSync(c, 'other writer\n');
-    throw new Error('late failure');
-  } } });
-  expect(() => racing.apply([f.change(f.b, 'on'), f.change(c, 'on')])).toThrow(expect.objectContaining({ code: 'host_config_unresolved_external_change' }));
-  expect(readdirSync(join(f.home, '.tool', 'sub'))).toEqual(['c.conf']);
-  rmSync(c);
-  expect(f.gate().recover()).toEqual({ unresolved: [] });
-  expect({ tool: existsSync(join(f.home, '.tool')), journal: f.journal() }).toEqual({ tool: false, journal: [] });
-});
-
-test('a commit records baseline, fragments and the override backup, and leaves no preimage in the journal', () => {
-  const f = fixture();
-  const skipped = f.gate().apply([f.change(f.a, 'x', { selector: 'keep', kind: 'override' })]);
-  expect(skipped).toEqual({ txn: null, written: [], skipped: [{ code: 'host_config_override_skipped', file: f.a, owner: 'o1', selector: 'keep' }] });
-
-  mkdirSync(join(f.home, '.tool'));
-  const result = f.gate().apply([f.change(f.a, 'x', { selector: 'keep', kind: 'override', selected: true }), f.change(f.b, 'on')]);
-  expect(result.written).toEqual([f.a, f.b]);
-  expect(readFileSync(f.a, 'utf8')).toBe('keep=x\n');
-  expect(statSync(f.a).mode & 0o777).toBe(0o640);
-  expect(f.journal()).toEqual([]);
-  const ledger = f.ledger();
-  expect(ledger.committed_transactions).toEqual([result.txn]);
-  expect(ledger.files[f.a].baseline).toEqual({ state: 'known', existed: true, type: 'file', mode: 0o640, sha256: expect.stringMatching(/^sha256:/) });
-  expect(ledger.files[f.b]).toMatchObject({ baseline: { state: 'known', existed: false }, created_dirs: [join(f.home, '.tool', 'sub')], external_change: false });
-  const override = ledger.fragments.find((record: { file: string }) => record.file === f.a);
-  expect(override.edit).toEqual({ at: 0, removed_vault: expect.stringMatching(/^sha256:/), inserted: 'keep=x\n' });
-  expect(readFileSync(join(f.root, 'vault', override.edit.removed_vault.slice(7)), 'utf8')).toBe('keep=1\n');
-  for (const entry of [f.root, join(f.root, 'vault'), join(f.root, 'journal')]) expect(statSync(entry).mode & 0o777).toBe(0o700);
-  expect(statSync(join(f.root, 'ledger.json')).mode & 0o777).toBe(0o600);
-
-  // A refresh keeps the first removed text; an outside edit becomes a sticky external change.
-  writeFileSync(f.a, 'keep=x\nuser=1\n');
-  f.gate().apply([f.change(f.a, 'y', { selector: 'keep', kind: 'refresh', selected: true })]);
-  const next = f.ledger();
-  expect(next.files[f.a].external_change).toBe(true);
-  expect(next.fragments.find((record: { file: string }) => record.file === f.a).edit.removed_vault).toBe(override.edit.removed_vault);
-  expect(readFileSync(f.a, 'utf8')).toBe('keep=y\nuser=1\n');
 });

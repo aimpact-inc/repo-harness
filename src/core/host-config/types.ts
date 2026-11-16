@@ -1,19 +1,15 @@
 /**
- * The host-config ledger and transaction record. The ledger keeps two levels:
- * a file record per host file and a fragment record per owned text edit.
- * Owner Plan B (#2841): long-term state keeps only hashes, rh's own text edits
- * and the user text that an explicit override replaced; a whole-file preimage
- * exists only inside a transaction record.
+ * The host-config ledger. It keeps two levels: a file record per host file
+ * that rh wrote, and a fragment record per owned text edit. Owner Plan B
+ * (#2841): long-term state keeps hashes, rh's own text edits, and backups of
+ * the user bytes that rh replaced. The threat model is accidents (#2841
+ * Decisions): user links are followed.
  */
 
 export type HostConfigErrorCode =
   | 'host_config_fragment_overlap'
   | 'host_config_target_changed'
-  | 'host_config_unresolved_external_change'
   | 'host_config_invalid_path'
-  | 'host_config_dangling_link'
-  | 'host_config_link_loop'
-  | 'host_config_hard_link'
   | 'host_config_invalid_state';
 
 export class HostConfigError extends Error {
@@ -27,45 +23,55 @@ export class HostConfigError extends Error {
 export type Sha256 = string;
 
 declare const hostPathBrand: unique symbol;
-/** A path resolved once with `realpathSync.native`: under the canonical HOME and outside `~/.repo-harness/`. */
+/** A path with the user's links followed, outside `~/.repo-harness/`. */
 export type HostPath = string & { readonly [hostPathBrand]: true };
-
-declare const preimageCopyBrand: unique symbol;
-/** `preimage-<n>`: the only file name the gate writes for a preimage copy inside a transaction directory. */
-export type PreimageCopyName = string & { readonly [preimageCopyBrand]: true };
 
 export type FileBaseline =
   | { readonly state: 'known'; readonly existed: false }
-  | { readonly state: 'known'; readonly existed: true; readonly type: 'file'; readonly mode: number; readonly sha256: Sha256 }
+  | { readonly state: 'known'; readonly existed: true; readonly sha256: Sha256 }
   /** An earlier rh version wrote the path before the ledger existed. */
   | { readonly state: 'unknown' };
 
+/**
+ * What a revert does with the file: `created` removes the file rh created,
+ * `text_block` removes rh's text from a user file, `replaced` restores the
+ * backup of the user file that a writer replaced.
+ */
+export type FileRecordKind = 'created' | 'text_block' | 'replaced';
+
 export type FileCommitted =
-  | { readonly type: 'file'; readonly sha256: Sha256; readonly mode: number; readonly txn: string }
-  | { readonly type: 'absent'; readonly txn: string };
+  | { readonly type: 'file'; readonly sha256: Sha256 }
+  | { readonly type: 'absent' };
 
 export interface FileRecord {
+  readonly kind: FileRecordKind;
   readonly baseline: FileBaseline;
+  /** The bytes rh last wrote, so a revert can tell a user edit. */
   readonly committed: FileCommitted;
-  /** Sticky: set once content, mode, type or existence differed from `committed`. */
+  /** Vault reference of the user bytes before the first replacement; set only for `replaced`. */
+  readonly backup: Sha256 | null;
+  /** Sticky: set once the file differed from `committed` when rh wrote it again. */
   readonly external_change: boolean;
-  /** Directories that an rh transaction created for this file, outermost first. */
+  /** Directories that rh created for this file, outermost first. */
   readonly created_dirs: readonly string[];
 }
 
 export type FragmentKind = 'add' | 'refresh' | 'override';
 
-/** One text edit. `at` is the offset in the file content that the edit applied to. */
+/** One text edit. `at` is the offset in the content that the edit applies to. */
 export interface FragmentEdit {
   readonly at: number;
   readonly removed: string;
   readonly inserted: string;
 }
 
-/** An override keeps the replaced user text in the vault, not a second copy in the ledger. */
+/**
+ * A recorded edit: rh's inserted text and the text it replaced. An override
+ * keeps the replaced user text in the vault, not a second copy in the ledger.
+ */
 export type StoredFragmentEdit =
-  | FragmentEdit
-  | { readonly at: number; readonly removed_vault: Sha256; readonly inserted: string };
+  | { readonly removed: string; readonly inserted: string }
+  | { readonly removed_vault: Sha256; readonly inserted: string };
 
 export interface FragmentRecord {
   readonly file: string;
@@ -73,50 +79,36 @@ export interface FragmentRecord {
   readonly selector: string;
   readonly kind: FragmentKind;
   readonly edit: StoredFragmentEdit;
-  readonly state: 'active';
 }
 
 export interface HostConfigLedger {
   readonly protocol: 1;
-  readonly committed_transactions: readonly string[];
   readonly files: Readonly<Record<string, FileRecord>>;
   readonly fragments: readonly FragmentRecord[];
 }
 
-export const EMPTY_LEDGER: HostConfigLedger = { protocol: 1, committed_transactions: [], files: {}, fragments: [] };
+export const EMPTY_LEDGER: HostConfigLedger = { protocol: 1, files: {}, fragments: [] };
 
 /** The observed state of one path. Only regular files are writable targets. */
 export type FileObservation =
   | { readonly existed: false }
-  | { readonly existed: true; readonly type: 'file'; readonly mode: number; readonly sha256: Sha256 }
+  | { readonly existed: true; readonly type: 'file'; readonly sha256: Sha256 }
   | { readonly existed: true; readonly type: 'directory' | 'symlink' | 'other' };
 
-/** The expected state of a path: absent, or a regular file with this hash and mode. */
-export type ExpectedFile = { readonly existed: false } | { readonly existed: true; readonly mode: number; readonly sha256: Sha256 };
+/** The expected state of a path: absent, or a regular file with this hash. */
+export type ExpectedFile = { readonly existed: false } | { readonly existed: true; readonly sha256: Sha256 };
 
-export interface TransactionFileEntry {
-  readonly path: HostPath;
-  readonly preimage: ExpectedFile;
-  /** File name inside the transaction directory; null when the preimage is absent. */
-  readonly preimage_copy: PreimageCopyName | null;
-  /**
-   * A delegated write starts with null, because the gate does not know the
-   * result in advance. After the writer runs, the gate records the observed
-   * result, or `unchanged` when the path is still its preimage; settlement
-   * never touches an `unchanged` path.
-   */
-  readonly intended: ExpectedFile | 'unchanged' | null;
-  /** Written before the first mkdir, outermost first. */
-  readonly created_dirs: readonly HostPath[];
+export function matchesExpected(observed: FileObservation, expected: ExpectedFile): boolean {
+  if (!expected.existed) return !observed.existed;
+  return observed.existed && observed.type === 'file' && observed.sha256 === expected.sha256;
 }
 
-export interface TransactionRecord {
-  readonly protocol: 1;
-  readonly txn: string;
-  readonly intended: 'write' | 'delegated';
-  /** Diagnosis only. No decision reads it. */
-  readonly stage: string;
-  readonly files: readonly TransactionFileEntry[];
+export function sameExpected(a: ExpectedFile, b: ExpectedFile): boolean {
+  return a.existed ? b.existed && a.sha256 === b.sha256 : !b.existed;
+}
+
+export function expectedFromCommitted(committed: FileCommitted): ExpectedFile {
+  return committed.type === 'absent' ? { existed: false } : { existed: true, sha256: committed.sha256 };
 }
 
 export interface TextRange {
