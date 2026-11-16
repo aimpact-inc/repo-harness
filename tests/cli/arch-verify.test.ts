@@ -115,8 +115,18 @@ const anchorsReport = (findings: number, unchecked = 0, availability: 'ready' | 
   };
 };
 
-const flowsReport = (proven: number, unproven: number) => ({
-  schemaVersion: 'archcontext.flow-selector-check/v1', ok: unproven === 0,
+/** A capability whose P2 flow proof failed, with the diagnostics archctx reports for it. */
+const unprovable = (diagnostics: string[]) => ({
+  capabilityId: 'capability.test.module', p2Status: 'unprovable' as const,
+  diagnostics: diagnostics.map((code) => ({ code, detail: 'entrypoint.test.read -> sink.test.core' })),
+});
+
+/**
+ * A `flows check` report. `capabilities` is the second authority: archctx sets
+ * `ok: false` for a failing flow proof even when every declared selector is proven.
+ */
+const flowsReport = (proven: number, unproven: number, capabilities: unknown[] = [], ok = unproven === 0) => ({
+  schemaVersion: 'archcontext.flow-selector-check/v1', ok,
   codeGraph: { availability: 'ready', version: '1.6.2' },
   summary: { selectors: proven + unproven, proven, unproven, usedUnproven: 0 },
   selectors: [
@@ -131,7 +141,7 @@ const flowsReport = (proven: number, unproven: number) => ({
       callSites: [], referenceSites: [], rejectedBuiltinCallSites: [], flowSteps: [],
     })),
   ],
-  capabilities: [],
+  capabilities,
 });
 
 const constraintReport = (status: string, coverage: string, violations = 0, unresolved = 0) => ({
@@ -190,6 +200,36 @@ describe('rh arch verify: one status per check', () => {
     expect(archVerifyCheck('flows', data(flowsReport(2, 1)))).toMatchObject({ status: 'findings', count: 1 });
     expect(archVerifyCheck('flows', data({ ...flowsReport(0, 0), codeGraph: { availability: 'unavailable', version: '1.6.2' } })))
       .toMatchObject({ status: 'unavailable', count: 0, error: { code: 'AC_CODE_FACTS_UNAVAILABLE' } });
+  });
+
+  // A flow can fail on a relation, a participant or an outcome while every declared selector is proven,
+  // so `ok: false` and the unprovable capability carry the only signal there is.
+  test('a flow whose capability proof fails is a finding even when every selector is proven', () => {
+    const report = flowsReport(1, 0, [unprovable(['relation-binding-missing'])], false);
+    expect(archVerifyCheck('flows', data(report))).toEqual({ id: 'flows', status: 'findings', count: 1 });
+    // Each diagnostic is one finding, and a capability with no diagnostic still counts once.
+    expect(archVerifyCheck('flows', data(flowsReport(1, 0, [unprovable(['relation-binding-missing', 'outcome-missing'])], false))).count).toBe(2);
+    expect(archVerifyCheck('flows', data(flowsReport(1, 0, [{ capabilityId: 'capability.test.module', p2Status: 'unprovable', diagnostics: [] }], false))).count).toBe(1);
+    // A proven capability and a passing gate stay a pass.
+    expect(archVerifyCheck('flows', data(flowsReport(1, 0, [{ capabilityId: 'capability.test.module', p2Status: 'proven', diagnostics: [] }]))))
+      .toMatchObject({ status: 'pass', count: 0 });
+  });
+
+  test('a failing capability with no selector at all is a finding, not an empty pass', () => {
+    expect(archVerifyCheck('flows', data(flowsReport(0, 0, [unprovable(['selector-declaration-missing'])], false))))
+      .toEqual({ id: 'flows', status: 'findings', count: 1 });
+  });
+
+  test('selector failures and capability diagnostics add up in one count', () => {
+    const report = flowsReport(1, 2, [unprovable(['duplicate-participant', 'outcome-missing'])], false);
+    expect(archVerifyCheck('flows', data(report))).toEqual({ id: 'flows', status: 'findings', count: 4 });
+  });
+
+  test('a producer that marks its own subject not ok never becomes pass', () => {
+    // The gate is authoritative: an unenumerated failure is one finding, never a silent pass.
+    expect(archVerifyCheck('flows', data(flowsReport(0, 0, [], false)))).toEqual({ id: 'flows', status: 'findings', count: 1 });
+    expect(archVerifyCheck('constraints', data(constraintReport('violated', 'complete')))).toMatchObject({ status: 'findings', count: 1 });
+    expect(archVerifyCheck('validate', data({ valid: false, errors: [] }))).toMatchObject({ status: 'findings', count: 1 });
   });
 
   test('state machines count a broken rule, an open finding, a break and a missing anchor; a gap is unavailable', () => {
@@ -313,11 +353,13 @@ describe('rh arch verify in a repository', () => {
 
   test('one failing flow proof makes flows findings, the verdict findings, and the exit code 1', () => {
     // The source declares the selector but never calls its sink, so the P2 proof fails.
+    // archctx@0.15.0 answers for this fixture: 1 unproven selector and 3 capability
+    // diagnostics (`selector-evidence-unmatched`), so the count is 4, not 1.
     const root = validRepository(false);
     indexPackageLocalCodeGraph(root, { policy });
     const result = runArchVerifyCommand(root, { base: 'HEAD', json: false }, { policy });
     if (!result.ok) throw new Error(result.error);
-    expect(result.document).toContain('flows  findings  1');
+    expect(result.document).toContain('flows  findings  4');
     expect(result.document.trimEnd().split('\n').at(-1)).toBe('verdict  findings');
     expect(result.exitCode).toBe(1);
   }, 120_000);

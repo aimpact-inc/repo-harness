@@ -79,6 +79,16 @@ export const ARCH_VERIFY_CONTRACT_CODE = 'RH_ARCH_VERIFY_CONTRACT_INVALID';
 const findings = (count: number): ArchVerifyFindings => (count > 0 ? { status: 'findings', count } : { status: 'pass', count: 0 });
 const unavailable = (code: string, message: string): ArchVerifyFindings => ({ status: 'unavailable', count: 0, error: { code, message } });
 
+/**
+ * One check's verdict from the producer's own gate and the problems this module
+ * counted. A report that marks its own subject as not ok fails closed, also when
+ * it names the reason in a field this module does not enumerate: `ok: false`
+ * with nothing counted is one finding, never `pass`.
+ */
+function producerFindings(ok: boolean, counted: number): ArchVerifyFindings {
+  return findings(counted > 0 ? counted : ok ? 0 : 1);
+}
+
 function decodeContract<T>(schema: unknown, value: unknown, label: string): T {
   const validation = validateJsonSchema(schema as Parameters<typeof validateJsonSchema>[0], value as Json);
   if (!validation.valid) {
@@ -94,16 +104,26 @@ function validateFindings(data: unknown): ArchVerifyFindings {
     throw new Error('archctx validate returned no valid flag and error list');
   }
   // A model marked invalid without a named error is still one finding.
-  return findings(data.valid && data.errors.length === 0 ? 0 : Math.max(data.errors.length, 1));
+  return producerFindings(data.valid, data.errors.length);
 }
 
-/** `flows check --no-sync`: one finding per selector that is not proven. */
+/**
+ * `flows check --no-sync`: one finding per selector that is not proven and per
+ * diagnostic of a capability whose P2 proof is unprovable. The capability list is
+ * a second authority: a flow fails on a missing relation, a duplicate participant
+ * or a missing outcome while every declared selector is proven, and `ok` is false
+ * for exactly that case. A capability without a diagnostic still counts once.
+ */
 function flowsFindings(data: unknown): ArchVerifyFindings {
   const report: ArchitectureFlowSelectorCheckV1 = decodeFlowSelectorCheck(data);
   if (report.codeGraph.availability !== 'ready') {
     return unavailable('AC_CODE_FACTS_UNAVAILABLE', 'the flows check read no CodeGraph code facts, so no flow proof was measured');
   }
-  return findings(report.selectors.filter((selector) => selector.status !== 'proven').length);
+  const unproven = report.selectors.filter((selector) => selector.status !== 'proven').length;
+  const diagnostics = report.capabilities
+    .filter((capability) => capability.p2Status === 'unprovable')
+    .reduce((total, capability) => total + Math.max(capability.diagnostics.length, 1), 0);
+  return producerFindings(report.ok, unproven + diagnostics);
 }
 
 /**
@@ -134,7 +154,11 @@ function stateMachineFindings(data: unknown): ArchVerifyFindings {
   return findings(0);
 }
 
-/** `constraints check`: one finding per violation and per import that resolved to no file. */
+/**
+ * `constraints check`: one finding per violation and per import that resolved to
+ * no file. `violated` with neither is the producer's own gate reporting a problem
+ * this module did not enumerate, so it is one finding.
+ */
 function constraintFindings(data: unknown): ArchVerifyFindings {
   const report: DependencyConstraintEvaluationV1 = decodeConstraintEvaluation(data);
   const count = report.violations.length + report.unresolvedImports.length;
@@ -144,7 +168,7 @@ function constraintFindings(data: unknown): ArchVerifyFindings {
   if (report.status === 'undetermined' || report.coverage !== 'complete') {
     return unavailable('AC_CODE_FACTS_UNAVAILABLE', `the constraint check evaluated no complete import graph (${report.reasonCodes.join(', ') || report.coverage})`);
   }
-  return findings(0);
+  return producerFindings(report.status !== 'violated', 0);
 }
 
 /**
@@ -171,8 +195,10 @@ function docsAnchorsFindings(data: unknown): ArchVerifyFindings {
  */
 function projectionFindings(data: unknown): ArchVerifyFindings {
   const report = decodeContract<ProjectionPrVerificationV1>(projectionPrVerificationSchema, data, 'projection verification report');
-  const unexplained = report.renderEquivalent === false && report.differingPaths.length === 0 ? 1 : 0;
-  return findings(report.differingPaths.length + report.humanEditedPaths.length + unexplained);
+  const counted = report.differingPaths.length + report.humanEditedPaths.length;
+  // A diff the producer could not prove render-equivalent is one finding by itself.
+  const unproven = report.renderEquivalent === false && counted === 0 ? 1 : 0;
+  return producerFindings(report.renderEquivalent !== false, counted + unproven);
 }
 
 /** `debt`: one finding per measured debt item. */
