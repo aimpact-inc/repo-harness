@@ -201,6 +201,8 @@ function DiagramBlock({ source, validate, t }: {
       <>
         {check.stale && <p className="docs-figure__note" data-diagram="stale">{t('docs.diagram.stale')}</p>}
         <img key={check.stale ? 'stale' : 'drawn'} src={check.src} alt={t('docs.diagram.alt')} className="docs-figure__image" data-diagram="image" />
+        {/* The stored SVG is the export; the browser saves it only when the user follows this link. */}
+        <a href={check.src} download="diagram.svg" className="docs-figure__note" data-diagram-export>{t('docs.diagram.export')}</a>
       </>
     );
   }

@@ -259,6 +259,9 @@ describe('docs page', () => {
     await render(async () => ({ state: 'image', src: '/a.svg', stale: false }));
     await settle();
     expect(container.querySelector('img')).not.toBe(staleImage);
+    // The export is a link to the stored artifact: nothing is generated or written before the user follows it.
+    const exportLink = container.querySelector<HTMLAnchorElement>('a[data-diagram-export]')!;
+    expect([exportLink.getAttribute('href'), exportLink.getAttribute('download')]).toEqual(['/a.svg', 'diagram.svg']);
     await act(async () => drawnRoot.unmount());
   });
 
