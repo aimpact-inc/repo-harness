@@ -104,7 +104,7 @@ export interface RunHelperOptions {
 
 export interface RunHelperResult {
   exitCode: number;
-  reason: 'missing-helper' | 'spawn-error' | 'timeout' | 'ok';
+  reason: 'missing-helper' | 'internal-helper' | 'spawn-error' | 'timeout' | 'ok';
   helper: string;
   resolved?: ResolvedHelper;
   stdout?: string;
@@ -144,7 +144,7 @@ function helperContractError(contractPath: string, detail: string): Error {
   return new Error(`invalid helper contract at ${contractPath}: ${detail}`);
 }
 
-function readContractHelpers(contractPath: string): string[] {
+function readContractHelpersObject(contractPath: string): Record<string, unknown> {
   let source: string;
   try {
     source = readFileSync(contractPath, 'utf-8');
@@ -167,7 +167,20 @@ function readContractHelpers(contractPath: string): string[] {
   if (typeof helpers !== 'object' || helpers === null || Array.isArray(helpers)) {
     throw helperContractError(contractPath, 'helpers must be an object');
   }
-  const scripts = (helpers as { scripts?: unknown }).scripts;
+  return helpers as Record<string, unknown>;
+}
+
+type ContractHelpers = {
+  /** Every shipped helper file, public and internal. */
+  fileNames: string[];
+  /** Helper ids that only `rh` subcommands run; `rh run` refuses them. */
+  internal: ReadonlySet<string>;
+  helpers: Record<string, unknown>;
+};
+
+function readContractHelpers(contractPath: string): ContractHelpers {
+  const helpers = readContractHelpersObject(contractPath);
+  const scripts = helpers.scripts;
   if (!Array.isArray(scripts) || scripts.length === 0) {
     throw helperContractError(contractPath, 'helpers.scripts must be a non-empty array');
   }
@@ -199,41 +212,33 @@ function readContractHelpers(contractPath: string): string[] {
     ids.add(id);
   }
 
-  return [...fileNames];
+  return { fileNames: [...fileNames], internal: readInternalHelperIds(contractPath, helpers.internal, ids), helpers };
+}
+
+function readInternalHelperIds(contractPath: string, internal: unknown, ids: ReadonlySet<string>): ReadonlySet<string> {
+  if (internal === undefined) return new Set();
+  if (!Array.isArray(internal)) throw helperContractError(contractPath, 'helpers.internal must be an array');
+  for (const [index, id] of internal.entries()) {
+    if (typeof id !== 'string' || !ids.has(id)) {
+      throw helperContractError(contractPath, `helpers.internal names helper id ${JSON.stringify(id)}, which is not in helpers.scripts`);
+    }
+    if (index > 0 && internal[index - 1] >= id) {
+      throw helperContractError(contractPath, `helpers.internal must be sorted and unique at ${JSON.stringify(id)}`);
+    }
+  }
+  return new Set(internal as string[]);
 }
 
 function readContractHelperDescriptions(
   contractPath: string,
-  fileNames: readonly string[],
+  contract: ContractHelpers,
 ): Record<string, string> {
-  let source: string;
-  try {
-    source = readFileSync(contractPath, 'utf-8');
-  } catch {
-    throw new Error(`helper contract not found: ${contractPath}`);
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(source);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw helperContractError(contractPath, `malformed JSON: ${message}`);
-  }
-
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw helperContractError(contractPath, 'root must be an object');
-  }
-  const helpers = (parsed as { helpers?: unknown }).helpers;
-  if (typeof helpers !== 'object' || helpers === null || Array.isArray(helpers)) {
-    throw helperContractError(contractPath, 'helpers must be an object');
-  }
-  const descriptions = (helpers as { descriptions?: unknown }).descriptions;
+  const descriptions = contract.helpers.descriptions;
   if (typeof descriptions !== 'object' || descriptions === null || Array.isArray(descriptions)) {
     throw helperContractError(contractPath, 'helpers.descriptions must be an object');
   }
 
-  const ids = fileNames.map(helperId);
+  const ids = contract.fileNames.map(helperId);
   const idSet = new Set(ids);
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(descriptions as Record<string, unknown>)) {
@@ -279,23 +284,29 @@ function resolveHelperRuntime(env: NodeJS.ProcessEnv, allowSourceOverride = true
   };
 }
 
+/** Every shipped helper file, public and internal. */
 export function listHelperFiles(env: NodeJS.ProcessEnv = process.env): string[] {
   const runtime = resolveHelperRuntime(env);
-  return readContractHelpers(runtime.contractPath);
+  return readContractHelpers(runtime.contractPath).fileNames;
 }
 
+/** The helper ids that `rh run` accepts. */
 export function listHelperIds(env: NodeJS.ProcessEnv = process.env): string[] {
-  return listHelperFiles(env).map(helperId);
+  return listHelpers(env).map((helper) => helper.id);
 }
 
+/** The helper ids that only `rh` subcommands run, through `runInternalHelper`. */
+export function listInternalHelperIds(env: NodeJS.ProcessEnv = process.env): string[] {
+  const runtime = resolveHelperRuntime(env);
+  return [...readContractHelpers(runtime.contractPath).internal];
+}
+
+/** The public helpers with their contract descriptions. */
 export function listHelpers(env: NodeJS.ProcessEnv = process.env): HelperDescriptor[] {
   const runtime = resolveHelperRuntime(env);
-  const fileNames = readContractHelpers(runtime.contractPath);
-  const descriptions = readContractHelperDescriptions(runtime.contractPath, fileNames);
-  return fileNames.map((fileName) => {
-    const id = helperId(fileName);
-    return { id, description: descriptions[id] };
-  });
+  const contract = readContractHelpers(runtime.contractPath);
+  const descriptions = readContractHelperDescriptions(runtime.contractPath, contract);
+  return contract.fileNames.map(helperId).filter((id) => !contract.internal.has(id)).map((id) => ({ id, description: descriptions[id] }));
 }
 
 function resolveHelperFileName(helper: string, files: readonly string[]): string | null {
@@ -337,6 +348,8 @@ function resolveFromDir(
 
 type ResolvedHelperContext = {
   resolved: ResolvedHelper | null;
+  /** The contract lists the resolved helper in `helpers.internal`. */
+  internal: boolean;
   runtime: ProtectedHelperPlatform | null;
 };
 
@@ -350,11 +363,13 @@ function resolveHelperContext(
   const protectedRuntime = protectedHelper ? resolveProtectedHelperPlatform() : null;
   const repoRoot = resolveRepoRoot(cwd, env, protectedHelper, protectedRuntime);
   const helperRuntime = resolveHelperRuntime(env, !protectedHelper);
-  const fileName = resolveHelperFileName(helper, readContractHelpers(helperRuntime.contractPath));
-  if (!fileName) return { resolved: null, runtime: protectedRuntime };
+  const contract = readContractHelpers(helperRuntime.contractPath);
+  const fileName = resolveHelperFileName(helper, contract.fileNames);
+  if (!fileName) return { resolved: null, internal: false, runtime: protectedRuntime };
 
   return {
     resolved: resolveFromDir(fileName, helperRuntime.helpersRoot, helperRuntime.source, repoRoot),
+    internal: contract.internal.has(helperId(fileName)),
     runtime: protectedRuntime,
   };
 }
@@ -363,7 +378,17 @@ export function resolveHelper(helper: string, cwd = process.cwd(), env: NodeJS.P
   return resolveHelperContext(helper, cwd, env).resolved;
 }
 
+/** Run a public helper. An internal helper is refused with reason `internal-helper` and does not run. */
 export function runHelper(opts: RunHelperOptions): RunHelperResult {
+  return executeHelper(opts, 'public');
+}
+
+/** Run an internal helper for an `rh` subcommand, under the same runtime, timeout and protected-helper rules as `runHelper`. */
+export function runInternalHelper(opts: Omit<RunHelperOptions, 'trustedPackage'>): RunHelperResult {
+  return executeHelper(opts, 'internal');
+}
+
+function executeHelper(opts: RunHelperOptions, visibility: 'public' | 'internal'): RunHelperResult {
   const cwd = opts.cwd ?? process.cwd();
   const env = opts.trustedPackage ? (opts.env ?? process.env) : { ...process.env, ...(opts.env ?? {}) };
   let context: ResolvedHelperContext;
@@ -385,6 +410,12 @@ export function runHelper(opts: RunHelperOptions): RunHelperResult {
       helper: opts.helper,
       stderr: `rh run: unknown helper "${opts.helper}"`,
     };
+  }
+  if (context.internal && visibility === 'public') {
+    return { exitCode: 2, reason: 'internal-helper', helper: opts.helper, resolved, stderr: `rh run: helper "${resolved.id}" is internal` };
+  }
+  if (!context.internal && visibility === 'internal') {
+    return { exitCode: 2, reason: 'missing-helper', helper: opts.helper, stderr: `unknown internal helper "${opts.helper}"` };
   }
 
   const args = [...(opts.args ?? [])];
