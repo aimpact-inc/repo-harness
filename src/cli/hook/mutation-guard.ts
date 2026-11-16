@@ -60,7 +60,7 @@ export function runMutationGuard(opts: MutationGuardInput): MutationGuardResult 
   const targets: readonly EditTarget[] = command ? extractApplyPatchTargets(command) : (filePath ? [{ kind: 'overwrite', raw: filePath }] : []);
   if (targets.length === 0) return deny(repoRoot, command ? APPLY_PATCH_SCOPE_DENIAL : EDIT_SCOPE_DENIAL, opts.identity.runId);
   const writes: WriteTarget[] = targets.map(({ kind, raw }) => ({ kind, via: command ? 'apply_patch' : 'the edit', spelled: raw, path: resolve(repoRoot, raw) }));
-  const denial = writeTargetDenial(writes, { repoRoot, env: opts.env });
+  const denial = writeTargetDenial(writes, { repoRoot, env: opts.env, host: opts.identity.host });
   if (denial) return deny(repoRoot, denial, opts.identity.runId);
   return { exitCode: 0, stdout: capabilityOwnerLines(repoRoot, targets.map(({ raw }) => normalizeFilePath(repoRoot, raw))), stderr: '' };
 }

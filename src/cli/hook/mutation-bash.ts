@@ -8,6 +8,6 @@ export function runBashMutationGuard(opts: MutationGuardInput): MutationGuardRes
   const command = payloadString(opts.payload, 'tool_input.command');
   const cwd = payloadString(opts.payload, 'cwd');
   // Without an absolute host cwd, a relative target is not known.
-  const denial = bashSafetyDenial(command, isAbsolute(cwd) ? cwd : null, { repoRoot: opts.repoRoot, env: opts.env });
+  const denial = bashSafetyDenial(command, isAbsolute(cwd) ? cwd : null, { repoRoot: opts.repoRoot, env: opts.env, host: opts.identity.host });
   return denial ? runMutationDenial(opts, denial) : { exitCode: 0, stdout: '', stderr: '' };
 }

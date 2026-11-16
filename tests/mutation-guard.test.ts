@@ -103,6 +103,36 @@ describe('safety hook: Bash host route', () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   }, 60_000);
 
+  posixOnly('the host agent may change its own memory and plans; the rest of its home directory stays protected', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'bash-safety-agent-output-')));
+    const cwd = join(root, 'repo');
+    const home = join(root, 'home');
+    try {
+      for (const dir of [cwd, join(root, 'tmp'), join(root, 'managed'), join(home, '.claude/projects/p/memory'), join(home, '.claude/plans'), join(home, '.codex/memories')]) {
+        mkdirSync(dir, { recursive: true });
+      }
+      initRepo(cwd);
+      for (const file of ['.claude/projects/p/memory/MEMORY.md', '.claude/plans/plan.md', '.claude/settings.json', '.codex/memories/MEMORY.md']) {
+        writeFileSync(join(home, file), 'x');
+      }
+      // The hook child's temp and managed worktree roots are fixture directories, so HOME is outside every other root.
+      const hook = (route: 'bash' | 'edit', host: 'claude' | 'codex', toolInput: Record<string, string>) => spawnSync(process.execPath,
+        [HOOK_ENTRY, 'PreToolUse', '--route', route], {
+          cwd, encoding: 'utf8',
+          input: JSON.stringify({ tool_name: route === 'bash' ? 'Bash' : 'Write', cwd, tool_input: toolInput }),
+          env: { PATH: process.env.PATH, HOME: home, HOOK_HOST: host, HOOK_REPO_ROOT: cwd, TMPDIR: join(root, 'tmp'), REPO_HARNESS_WORKTREE_ROOT: join(root, 'managed') },
+        });
+      expect(hook('bash', 'claude', { command: 'echo x > ~/.claude/projects/p/memory/MEMORY.md' }).status).toBe(0);
+      expect(hook('bash', 'claude', { command: 'rm ~/.claude/plans/plan.md' }).status).toBe(0);
+      expect(hook('edit', 'codex', { file_path: join(home, '.codex/memories/MEMORY.md') }).status).toBe(0);
+      // Another host's memory and the host's own settings are not its output.
+      expect(hook('edit', 'claude', { file_path: join(home, '.codex/memories/MEMORY.md') }).status).toBe(2);
+      const settings = hook('bash', 'claude', { command: 'echo x > ~/.claude/settings.json' });
+      expect(settings.status).toBe(2);
+      expect(settings.stderr).toContain(`${home}/.claude/projects/*/memory`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }, 60_000);
+
   test('the install ledger records rh-created files and trees; user files and an unreadable ledger record nothing', () => {
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'safety-ledger-')));
     const env: NodeJS.ProcessEnv = { HOME: home };
@@ -157,7 +187,7 @@ describe('safety hook: edit route', () => {
       expect(result.stdout).toBe('');
       const lines = result.stderr.trimEnd().split('\n');
       expect(lines).toHaveLength(2);
-      expect(lines[0]).toMatch(/^\[UserFileGuard\] I2: the edit would overwrite \S*\/etc\/hosts, an existing file outside the worktree/);
+      expect(lines[0]).toMatch(/^\[UserFileGuard\] I2: the edit would overwrite \S*\/etc\/hosts, an existing file outside the allowed roots \(/);
       expect(lines[1]).toBe('  Fix: Work on a copy inside the worktree or a temp directory, or ask the user to run the command in their own shell (Claude Code: `! <command>`).');
       const records = failureRecords(cwd);
       expect(records).toHaveLength(1);

@@ -58,7 +58,7 @@ export function projectUnavailableStateSessionSection(
 export const EDIT_GUARD_SCOPE_SECTION: SessionContextSection = Object.freeze({
   id: 'edit-guard-scope',
   priority: 1,
-  content: '[EditGuardScope] The safety hook checks Edit, Write and apply_patch, and Claude and Pi Bash commands. It refuses a credential read and a removal or overwrite of an existing file outside the worktree and temp directories. Codex Bash and files written by scripts skip it. Use the edit tools to change repository files. Use Bash to run commands.',
+  content: '[EditGuardScope] The safety hook checks Edit, Write and apply_patch, and Claude and Pi Bash commands. It refuses a credential read and a removal or overwrite of an existing file outside the worktree, the temp directories and the agent\'s own memory and plans. Codex Bash and files written by scripts skip it. Use the edit tools to change repository files. Use Bash to run commands.',
   mandatory: true,
   source: 'docs/reference-configs/hook-operations.md',
 });

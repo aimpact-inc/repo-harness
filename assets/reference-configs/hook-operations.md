@@ -200,8 +200,11 @@ Safety hook guards:
   redaction stays as the second layer.
 - `UserFileGuard` (I2): a call removes or overwrites an existing file outside
   the worktree, the managed worktree root (`/tmp` on POSIX unless
-  `REPO_HARNESS_WORKTREE_ROOT` moves it) and the system temp directory, and the
-  install ledger in `~/.repo-harness/install-state.json` does not record the
+  `REPO_HARNESS_WORKTREE_ROOT` moves it), the system temp directory and the
+  host agent's own memory and plan directories (Claude
+  `~/.claude/projects/*/memory` and `~/.claude/plans`, Codex
+  `~/.codex/memories`; the rest of `~/.claude`, `~/.codex` and `~/.pi` stays
+  protected), and the install ledger in `~/.repo-harness/install-state.json` does not record the
   file, or a directory tree above it, as rh-created. A create or an append
   passes everywhere. A removal (`rm`, `unlink`, `shred`, `truncate`, an `mv`
   source, `sed -i`, `find -delete`) whose target is not known before the

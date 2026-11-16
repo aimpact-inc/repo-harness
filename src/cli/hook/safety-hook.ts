@@ -2,9 +2,10 @@
  * The safety hook (#2916): the agent-layer security bar on the PreToolUse bash and edit routes of Claude, Codex and Pi.
  *
  * - I1: refuse a call that prints or sends a credential store. Secret redaction stays as the second layer.
- * - I2: refuse a removal or overwrite of an existing file outside the agent's worktree, the managed worktree root and the system temp
- *   directory, unless rh's install ledger records the file as rh-created. Creates and appends pass everywhere. The user
- *   authorizes anything else locally by running the command in their own shell, which no hook sees.
+ * - I2: refuse a removal or overwrite of an existing file outside the agent's worktree, the managed worktree root, the system temp
+ *   directory and the host agent's own memory and plan directories, unless rh's install ledger records the file as rh-created.
+ *   Creates and appends pass everywhere. The user authorizes anything else locally by running the command in their own shell,
+ *   which no hook sees.
  * - Recursive delete: refuse `rm -r`, `find -delete`/`-exec` and `git clean -x` from the repository root or an ancestor.
  *
  * The threat model is accidents. A target built at run time, a script or binary that writes, and a hidden alias are accepted
@@ -15,6 +16,7 @@ import { homedir, tmpdir } from 'os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { managedWorktreeRoot } from '../../effects/git/managed-worktree';
 import type { Denial } from './mutation-guard';
+import type { RouteHost } from './route-registry';
 import {
   escapePattern, expandBraces, globIndex, simpleCommands, unescapePattern, writeThroughPath,
   type Command, type Dirs, type Word,
@@ -23,6 +25,7 @@ import {
 export interface SafetyScope {
   readonly repoRoot: string;
   readonly env: NodeJS.ProcessEnv;
+  readonly host: RouteHost;
 }
 
 /** `destroy` acts only on an existing file, so an unknown target denies; `overwrite` creates or replaces, so an unknown target passes. */
@@ -41,7 +44,6 @@ export interface WriteTarget {
 }
 
 const inside = (rel: string) => !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`);
-const below = (root: string, path: string) => { const rel = relative(root, path); return rel !== '' && inside(rel); };
 const atOrBelow = (root: string, path: string) => inside(relative(root, path));
 
 // ---------------------------------------------------------------------------
@@ -49,20 +51,53 @@ const atOrBelow = (root: string, path: string) => inside(relative(root, path));
 // ---------------------------------------------------------------------------
 
 /**
- * The worktree, the managed worktree root (`/tmp` on POSIX unless REPO_HARNESS_WORKTREE_ROOT moves it) and the system temp
- * directory, canonical. A root that does not resolve adds nothing.
+ * The host agent's own output below HOME: the files it writes as memory and plans. `*` is one path segment. The rest of
+ * `~/.claude`, `~/.codex` and `~/.pi` (settings, context files, hooks, skills, credentials) stays protected.
  */
-function allowedRoots(scope: SafetyScope): string[] {
-  const roots: string[] = [];
+const AGENT_OUTPUT: Readonly<Record<RouteHost, readonly string[]>> = {
+  claude: ['.claude/projects/*/memory', '.claude/plans'],
+  codex: ['.codex/memories'],
+  pi: [],
+};
+
+/** An allowed root: a canonical directory, with `*` segments for the agent output patterns. */
+type Root = readonly string[];
+
+/**
+ * The worktree, the managed worktree root (`/tmp` on POSIX unless REPO_HARNESS_WORKTREE_ROOT moves it), the system temp
+ * directory and the host's agent output, canonical. A root that does not resolve adds nothing.
+ */
+function allowedRoots(scope: SafetyScope): Root[] {
+  const roots: Root[] = [];
   const candidates: Array<() => string> = [
     () => realpathSync(scope.repoRoot),
     () => managedWorktreeRoot(scope.env),
     () => realpathSync(tmpdir()),
   ];
   for (const candidate of candidates) {
-    try { roots.push(candidate()); } catch { /* no allowance for this root */ }
+    try { roots.push(segments(candidate())); } catch { /* no allowance for this root */ }
+  }
+  let home: string;
+  try { home = realpathSync(scope.env.HOME ?? homedir()); } catch { return roots; }
+  for (const pattern of AGENT_OUTPUT[scope.host]) {
+    // The literal part resolves through its links (a linked ~/.claude), so it compares with canonical targets.
+    const parts = pattern.split('/');
+    const glob = parts.indexOf('*');
+    const literal = join(home, ...(glob < 0 ? parts : parts.slice(0, glob)));
+    let base: string;
+    try { base = writeThroughPath(literal); } catch { continue; }
+    roots.push([...segments(base), ...(glob < 0 ? [] : parts.slice(glob))]);
   }
   return roots;
+}
+
+const segments = (path: string): string[] => resolve(path).split(sep);
+
+/** The path is strictly below the root, or also at it with `orAt`. */
+function underRoot(root: Root, path: string, orAt = false): boolean {
+  const parts = segments(path);
+  if (parts.length < root.length + (orAt ? 0 : 1)) return false;
+  return root.every((part, n) => part === '*' ? parts[n] !== '..' && parts[n] !== '' : parts[n] === part);
 }
 
 /** The path itself, with every directory above it resolved; the leaf link is not followed, as rm and mv do not follow it. */
@@ -103,9 +138,9 @@ export function ledgerCreated(path: string, env: NodeJS.ProcessEnv): boolean {
 }
 
 class TargetJudge {
-  private rootsValue: string[] | undefined;
+  private rootsValue: Root[] | undefined;
   constructor(private readonly scope: SafetyScope) {}
-  private get roots(): string[] { return this.rootsValue ??= allowedRoots(this.scope); }
+  private get roots(): Root[] { return this.rootsValue ??= allowedRoots(this.scope); }
 
   denial(target: WriteTarget): Denial | null {
     if (target.path === null) return target.kind === 'destroy' ? unknownTargetDenial(target) : null;
@@ -129,7 +164,7 @@ class TargetJudge {
   }
 
   private existingDenial(target: WriteTarget, path: string): Denial | null {
-    if (this.roots.some(root => below(root, path))) return null;
+    if (this.roots.some(root => underRoot(root, path))) return null;
     const exists = target.kind === 'destroy' ? lstatSync(path, { throwIfNoEntry: false }) !== undefined : existsSync(path);
     if (!exists || ledgerCreated(path, this.scope.env)) return null;
     return outsideDenial(target, path, this.roots);
@@ -140,16 +175,16 @@ class TargetJudge {
     if (target.kind === 'overwrite') return null;
     let path: string;
     try { path = writeThroughPath(dir); } catch { return unknownTargetDenial(target); }
-    if (this.roots.some(root => atOrBelow(root, path)) || !existsSync(path) || ledgerCreated(path, this.scope.env)) return null;
+    if (this.roots.some(root => underRoot(root, path, true)) || !existsSync(path) || ledgerCreated(path, this.scope.env)) return null;
     return outsideDenial(target, path, this.roots);
   }
 }
 
-function outsideDenial(target: WriteTarget, path: string, roots: readonly string[]): Denial {
+function outsideDenial(target: WriteTarget, path: string, roots: readonly Root[]): Denial {
   return {
     guard: 'UserFileGuard',
     reason: `I2: ${target.via} would ${target.kind === 'destroy' ? 'remove or change' : 'overwrite'} ${path}, an existing file outside `
-      + `the worktree, the managed worktree root and the system temp directory (${roots.join(', ')}), and rh's install ledger does not record it as rh-created.`,
+      + `the allowed roots (${roots.map(root => root.join(sep)).join(', ')}), and rh's install ledger does not record it as rh-created.`,
     fix: 'Work on a copy inside the worktree or a temp directory, or ask the user to run the command in their own shell (Claude Code: `! <command>`).',
   };
 }
