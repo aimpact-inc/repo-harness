@@ -259,6 +259,8 @@ describe("rh seats argv", () => {
   test("gatekeeper-deep refuses to launch on the gatekeeper's model", () => {
     const seats = { ...DEFAULT_SEATS_CONFIG, "gatekeeper-deep": { ...DEFAULT_SEATS_CONFIG["gatekeeper-deep"], model: DEFAULT_SEATS_CONFIG.gatekeeper.model } };
     withHome(seats, home => expect(JSON.parse(argv(home, "gatekeeper-deep", "--pr", "1", "--json").stderr).error).toBe("seat_model_repeats_gatekeeper"));
+    const defaults = { ...seats, gatekeeper: { ...seats.gatekeeper, model: null }, "gatekeeper-deep": { ...seats["gatekeeper-deep"], model: null } };
+    withHome(defaults, home => expect(JSON.parse(argv(home, "gatekeeper-deep", "--pr", "1", "--json").stderr).error).toBe("seat_model_repeats_gatekeeper"));
   });
 
   test("Pi review seats exclude edit and write tools and report the shell path as common_commands", () => {

@@ -167,14 +167,17 @@ export function effectiveGatekeeper(seats: SeatsConfigV1, quota: SeatAccountQuot
     line: `gatekeeper: gatekeeper-fallback (${launchText(fallback)}${accountSuffix('gatekeeper-fallback', fallback, quota)}; gatekeeper: ${cause})` };
 }
 
+/** The model a seat runs: a Pi seat on `magpie/codex/` runs the Codex model, and a null model is the host default of its runtime. */
+const runModel = (seat: SeatConfigV1): string =>
+  `${seat.runtime === 'pi' && !isPiCodexSeat(seat) ? 'pi' : seat.runtime === 'claude' ? 'claude' : 'codex'}:${seat.model?.replace(PI_CODEX_MODEL_PREFIX, '') ?? 'default'}`;
+
 /**
- * True when the effective gatekeeper-deep and gatekeeper run the same model, `magpie/codex/` prefix removed: the second
- * row would then repeat the first. The route line and the launch fail closed on it.
+ * True when the effective gatekeeper-deep runs the same model as the route that `effectiveGatekeeper` selects, which may be
+ * the gatekeeper-fallback: the second row would then repeat the first. The route line and the launch fail closed on it.
  */
 export function deepGatekeeperRepeatsGatekeeper(seats: SeatsConfigV1, quota: SeatAccountQuotas): boolean {
-  const bare = (seat: SeatConfigV1 | null): string | null => seat?.model?.replace(PI_CODEX_MODEL_PREFIX, '') ?? null;
-  const deep = bare(effectiveSeatConfig('gatekeeper-deep', seats, quota));
-  return deep !== null && deep === bare(effectiveSeatConfig('gatekeeper', seats, quota));
+  const route = effectiveGatekeeper(seats, quota);
+  return route.id !== null && runModel(route.seat) === runModel(effectiveSeatConfig('gatekeeper-deep', seats, quota));
 }
 
 /** The route line of a review seat that has no fallback. */

@@ -156,9 +156,12 @@ async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, configur
   readonly seat: SeatConfigV1; readonly modeKnown: boolean;
 }> {
   const readings: QuotaReading[] = [];
+  const done = new Set<QuotaAccount>();
   const read = async (account: QuotaAccount | null) => {
-    if (account === 'claude') readings.push(readClaudeQuota(env));
-    if (account === 'chatgpt') readings.push(await readCodexQuota(env, PACKAGE_VERSION));
+    if (account !== null && !done.has(account)) {
+      done.add(account);
+      readings.push(account === 'claude' ? readClaudeQuota(env) : await readCodexQuota(env, PACKAGE_VERSION));
+    }
     return seatAccountQuotas(readings.map(reading => classifyQuotaReading(reading, Date.now())), seats.routing);
   };
   const own = seatAccount(configured);
@@ -167,6 +170,12 @@ async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, configur
   const fallback = seats['gatekeeper-fallback'];
   if (id === 'gatekeeper' && fallback !== null && own !== null && quota[own].state === 'exhausted' && seatAccount(fallback) !== own) {
     quota = await read(seatAccount(fallback));
+  }
+  // The duplicate-model check compares with the route that the gatekeeper launch selects, so it reads the accounts of that selection.
+  if (id === 'gatekeeper-deep') {
+    const gatekeeperAccount = seatAccount(seats.gatekeeper);
+    quota = await read(gatekeeperAccount);
+    if (gatekeeperAccount !== null && quota[gatekeeperAccount].state === 'exhausted' && fallback !== null) quota = await read(seatAccount(fallback));
   }
   const gatekeeper = id === 'gatekeeper' ? effectiveGatekeeper(seats, quota) : null;
   const launchedId = gatekeeper?.id === 'gatekeeper-fallback' ? 'gatekeeper-fallback' : id;

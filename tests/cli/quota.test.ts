@@ -184,6 +184,24 @@ describe('seat quota routing', () => {
     expect(formatSeatRoutes(same, hyper).split('\n')).toContain('gatekeeper-deep: none (same model as gatekeeper)');
   });
 
+  test('gatekeeper-deep repeats the route that the gatekeeper launch selects, after the default model and the Pi Codex prefix resolve', () => {
+    const codex = classifyQuotaReading(decodeCodexRateLimitsResult({ rateLimits: {
+      primary: { usedPercent: 60, windowDurationMins: 10080, resetsAt: (NOW + 84 * HOUR) / 1000 },
+    } }, new Date(NOW).toISOString()), NOW);
+    const repeats = (patch: Partial<Record<'gatekeeper' | 'gatekeeper-deep' | 'gatekeeper-fallback', SeatConfigV1>>, claudeUsed = 10) => {
+      const seats = { ...DEFAULT_SEATS_CONFIG, ...patch };
+      return formatSeatRoutes(seats, seatAccountQuotas([codex, claude({ seven_day: week(claudeUsed, 84) })], seats.routing))
+        .split('\n').includes('gatekeeper-deep: none (same model as gatekeeper)');
+    };
+    const sol = { ...DEFAULT_SEATS_CONFIG.gatekeeper, model: 'gpt-6.1-sol' };
+    const exhaustedClaude = { gatekeeper: DEFAULT_SEATS_CONFIG.reviewer };
+    expect(repeats({ ...exhaustedClaude, 'gatekeeper-fallback': sol }, 100)).toBe(true);
+    expect(repeats({ ...exhaustedClaude, 'gatekeeper-fallback': { ...sol, model: 'gpt-6.1-terra' } }, 100)).toBe(false);
+    expect(repeats({ gatekeeper: { ...sol, model: null }, 'gatekeeper-deep': { ...sol, model: null } })).toBe(true);
+    expect(repeats({ gatekeeper: { ...sol, model: 'gpt-6.1-terra' }, 'gatekeeper-deep': { ...sol, runtime: 'pi', model: 'magpie/codex/gpt-6.1-terra' } })).toBe(true);
+    expect(repeats({})).toBe(false);
+  });
+
   test('the credit mode admits the seats it names on an exhausted ChatGPT account with credits at or above the floor', () => {
     const codex = (credits: { hasCredits: boolean; unlimited: boolean; balance: string | null } | null, reached: string | null = null, used = 95) => classifyQuotaReading(decodeCodexRateLimitsResult({ rateLimits: {
       primary: { usedPercent: used, windowDurationMins: 10080, resetsAt: (NOW + 84 * HOUR) / 1000 }, credits, rateLimitReachedType: reached,
