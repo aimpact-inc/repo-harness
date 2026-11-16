@@ -368,24 +368,49 @@ describe("install-agent-fleet", () => {
     }
   }, 30_000);
 
-  test.each(["read-only state directory", "unreadable source"])("--force fails closed with a %s", (failure) => {
+  test.each([
+    ["read-only state directory", "both"], ["unreadable sources", "both"],
+    ["mixed replacements", "claude"], ["mixed replacements", "codex"],
+  ])("--force keeps the accepted receipt with %s (failed host: %s)", (failure, failedHost) => {
     const { root, home } = setupFakeHome("install-agent-fleet-backup-failure");
     const stateDir = join(home, ".repo-harness");
     try {
       expect(runInstaller(home, FLEET_SOURCE_DIR).status).toBe(0);
-      const targets = [join(home, ".claude/agents/explorer.md"), join(home, ".codex/agents/explorer.toml")];
-      for (const target of targets) writeFileSync(target, "user agent\n");
-      mkdirSync(stateDir, { mode: failure === "unreadable source" ? 0o700 : 0o500 });
-      if (failure === "unreadable source") for (const target of targets) chmodSync(target, 0o200);
+      const targets = [["claude", "md"], ["codex", "toml"]].map(([host, ext]) => {
+        const file = `explorer.${ext}`;
+        const path = join(home, `.${host}/agents`, file);
+        const generated = readFileSync(path, "utf8");
+        const custom = `${generated}\n# user agent\n`;
+        writeFileSync(path, custom);
+        return { host, file, path, generated, custom, blocked: failedHost === "both" || failedHost === host };
+      });
+      expect(runInstaller(home, FLEET_SOURCE_DIR, ["--accept-user-managed"]).status).toBe(0);
+      const receiptPath = join(stateDir, "agent-fleet-user-managed.json");
+      const receipt = readFileSync(receiptPath);
+      if (failure === "read-only state directory") chmodSync(stateDir, 0o500);
+      else for (const target of targets) if (target.blocked) chmodSync(target.path, 0o200);
+
       const failed = runInstaller(home, FLEET_SOURCE_DIR, ["--force"]);
       expect(failed.status).toBe(1);
-      expect(failed.stdout).toContain("[fleet] claude/explorer.md: backup-failed");
-      expect(failed.stdout).toContain("[fleet] codex/explorer.toml: backup-failed");
       for (const target of targets) {
-        if (failure === "unreadable source") chmodSync(target, 0o600);
-        expect(readFileSync(target, "utf8")).toBe("user agent\n");
+        expect(failed.stdout).toContain(`[fleet] ${target.host}/${target.file}: ${target.blocked ? "backup-failed" : "replaced (backup:"}`);
+        if (target.blocked && failure !== "read-only state directory") chmodSync(target.path, 0o600);
+        expect(readFileSync(target.path, "utf8")).toBe(target.blocked ? target.custom : target.generated);
       }
-      expect(existsSync(join(stateDir, "replaced-agents"))).toBe(false);
+      expect(readFileSync(receiptPath)).toEqual(receipt);
+      const backupDir = join(stateDir, "replaced-agents");
+      if (failedHost === "both") expect(existsSync(backupDir)).toBe(false);
+      else expect(readdirSync(backupDir)).toHaveLength(1);
+
+      chmodSync(stateDir, 0o700);
+      const normal = runInstaller(home, FLEET_SOURCE_DIR);
+      expect(normal.status).toBe(0);
+      for (const target of targets) {
+        expect(normal.stdout).toContain(`[fleet] ${target.host}/${target.file}: ${target.blocked ? "user-managed" : "up-to-date"}`);
+      }
+      expect(readFileSync(receiptPath)).toEqual(receipt);
+      expect(runInstaller(home, FLEET_SOURCE_DIR, ["--force"]).status).toBe(0);
+      expect(existsSync(receiptPath)).toBe(false);
     } finally {
       chmodSync(stateDir, 0o700);
       rmSync(root, { recursive: true, force: true });

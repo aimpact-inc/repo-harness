@@ -387,7 +387,8 @@ for (const target of targets) {
   results.push({ host: target.host, file: target.file, status });
 }
 
-if (force && fs.existsSync(USER_MANAGED_RECEIPT_PATH)) {
+const failed = results.some((entry) => entry.status === "drift" || entry.status === "backup-failed");
+if (force && !failed && fs.existsSync(USER_MANAGED_RECEIPT_PATH)) {
   fs.rmSync(USER_MANAGED_RECEIPT_PATH, { force: true });
 }
 
@@ -395,5 +396,5 @@ for (const entry of results) {
   console.log(`[fleet] ${entry.host}/${entry.file}: ${entry.status}`);
 }
 
-process.exit(results.some((entry) => entry.status === "drift" || entry.status === "backup-failed") ? 1 : 0);
+process.exit(failed ? 1 : 0);
 NODE_EOF
