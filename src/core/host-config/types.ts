@@ -46,9 +46,13 @@ export type FileCommitted =
 export interface FileRecord {
   readonly kind: FileRecordKind;
   readonly baseline: FileBaseline;
-  /** The bytes rh last wrote, so a revert can tell a user edit. */
+  /**
+   * The file as rh last wrote it, or as it was when rh last recorded a
+   * fragment in it. Fragment offsets refer to these bytes; a revert acts only
+   * while the file still hashes to them.
+   */
   readonly committed: FileCommitted;
-  /** Vault reference of the user bytes before the first replacement; set only for `replaced`. */
+  /** Vault reference of the bytes that rh did not write and that a delegated writer then replaced; required for `replaced`. */
   readonly backup: Sha256 | null;
   /** Sticky: set once the file differed from `committed` when rh wrote it again. */
   readonly external_change: boolean;
@@ -78,6 +82,8 @@ export interface FragmentRecord {
   readonly owner: string;
   readonly selector: string;
   readonly kind: FragmentKind;
+  /** Offset of the inserted text in the committed bytes; null when a write over a user edit lost it. */
+  readonly at: number | null;
   readonly edit: StoredFragmentEdit;
 }
 
@@ -131,12 +137,16 @@ export interface FragmentRequest<V = unknown> {
   readonly kind: FragmentKind;
   readonly strategy: HostConfigStrategy<V>;
   readonly value: V;
-  /** An override applies only with an explicit selection in the plan input. */
+  /** An override, or a refresh over a user's change, applies only with this explicit selection. */
   readonly selected?: boolean;
 }
 
+/**
+ * A fragment that the plan input did not select: an override, or a refresh
+ * over a value that the user changed at the recorded selector.
+ */
 export interface SkippedOverride {
-  readonly code: 'host_config_override_skipped';
+  readonly code: 'host_config_override_skipped' | 'host_config_user_value_kept';
   readonly file: string;
   readonly owner: string;
   readonly selector: string;

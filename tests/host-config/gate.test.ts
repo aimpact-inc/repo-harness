@@ -14,6 +14,15 @@ function keyLineEdit(content: string, selector: string, value: string): Fragment
 }
 const keyLine: HostConfigStrategy<string> = { locate: () => null, apply: keyLineEdit };
 
+/** The same format with an edit of the value only: the inserted text does not name its selector. */
+const valueOnly: HostConfigStrategy<string> = {
+  locate: () => null,
+  apply: (content, selector, value) => {
+    const match = new RegExp(`^${selector}=(.*)$`, 'm').exec(content)!;
+    return { at: match.index + selector.length + 1, removed: match[1]!, inserted: value };
+  },
+};
+
 const homes: string[] = [];
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 
@@ -29,21 +38,33 @@ function fixture() {
   const change = (path: string, value: string, extra: Partial<HostConfigFileChange['fragments'][number]> = {}): HostConfigFileChange =>
     ({ path, fragments: [{ owner: 'o1', selector: 'rh', kind: 'add', strategy: keyLine, value, ...extra }] });
   const ledger = () => JSON.parse(readFileSync(join(root, 'ledger.json'), 'utf8'));
-  return { home, a, b, root, gate, change, ledger };
+  const vault = (reference: unknown) => readFileSync(join(root, 'vault', String(reference).replace('sha256:', '')), 'utf8');
+  return { home, a, b, root, gate, change, ledger, vault };
 }
 
 test('every write has a ledger record before a revert, and a revert touches no path without one', () => {
   const f = fixture();
   const c = join(f.home, '.charlie.conf');
+  const b2 = join(f.home, '.tool', 'sub', 'b2.conf');
   writeFileSync(c, 'rh=user\n');
-  expect(f.gate().apply([f.change(f.a, 'on'), f.change(f.b, 'on')]).written).toEqual([f.a, f.b]);
+  expect(f.gate().apply([f.change(f.a, 'on'), f.change(f.b, 'on'), f.change(b2, 'on')]).written).toEqual([f.a, f.b, b2]);
   const files = f.ledger().files;
-  expect({ a: files[f.a].kind, b: files[f.b].kind, dirs: files[f.b].created_dirs, c: files[c] })
-    .toEqual({ a: 'text_block', b: 'created', dirs: [join(f.home, '.tool'), join(f.home, '.tool', 'sub')], c: undefined });
-  expect(f.gate().revert().map((entry) => [entry.path, entry.action])).toEqual([[f.a, 'text_removed'], [f.b, 'removed']]);
+  expect({ a: files[f.a].kind, b: files[f.b].kind, dirs: files[f.b].created_dirs, b2: files[b2].created_dirs, c: files[c] })
+    .toEqual({ a: 'text_block', b: 'created', dirs: [join(f.home, '.tool'), join(f.home, '.tool', 'sub')], b2: [], c: undefined });
+  // b2 shares the directories that only b's record names: they go after both files.
+  expect(f.gate().revert().map((entry) => [entry.path, entry.action])).toEqual([[f.a, 'text_removed'], [f.b, 'removed'], [b2, 'removed']]);
   expect({ a: readFileSync(f.a, 'utf8'), mode: statSync(f.a).mode & 0o777, tool: existsSync(join(f.home, '.tool')), c: readFileSync(c, 'utf8') })
     .toEqual({ a: 'keep=1\n', mode: 0o640, tool: false, c: 'rh=user\n' });
   expect(f.ledger()).toEqual({ protocol: 1, files: {}, fragments: [] });
+
+  // The record is in the ledger before the writer runs, and a failed ledger write stops the file write.
+  let seen: unknown;
+  f.gate().delegate([c], () => { seen = f.ledger().files[c]?.kind; });
+  expect(seen).toBe('replaced');
+  chmodSync(f.root, 0o500);
+  try { expect(() => f.gate().apply([f.change(f.a, 'on')])).toThrow(expect.objectContaining({ code: 'EACCES' })); }
+  finally { chmodSync(f.root, 0o700); }
+  expect(readFileSync(f.a, 'utf8')).toBe('keep=1\n');
 });
 
 test('rh backs up user bytes before it replaces them, and a revert restores the backup', () => {
@@ -51,7 +72,7 @@ test('rh backs up user bytes before it replaces them, and a revert restores the 
   // A delegated writer replaces a user file: the old bytes go to the vault first.
   f.gate().delegate([f.a], ([destination]) => writeFileSync(destination!, 'external\n'));
   const { kind, backup } = f.ledger().files[f.a];
-  expect({ kind, vault: readFileSync(join(f.root, 'vault', String(backup).replace('sha256:', '')), 'utf8') }).toEqual({ kind: 'replaced', vault: 'keep=1\n' });
+  expect({ kind, vault: f.vault(backup) }).toEqual({ kind: 'replaced', vault: 'keep=1\n' });
   expect(f.gate().revert([f.a]).map((entry) => entry.action)).toEqual(['restored']);
   expect(readFileSync(f.a, 'utf8')).toBe('keep=1\n');
 
@@ -91,10 +112,72 @@ test('an edit since rh last wrote a file is a sticky external change, also when 
   expect(f.ledger().files[f.a]).toMatchObject({ external_change: true, committed });
 
   const g = fixture();
-  g.gate().apply([g.change(g.a, 'on')]);
-  writeFileSync(g.a, 'keep=1\nrh=on\nuser=1\n');
+  g.gate().delegate([g.a], ([target]) => writeFileSync(target!, 'rh=on\n'));
+  writeFileSync(g.a, 'rh=on\nuser=1\n');
   expect(g.gate().delegate([g.a], () => {}).changed).toEqual([]);
   expect(g.ledger().files[g.a].external_change).toBe(true);
+});
+
+test('a created or replaced file that the user edited before a later rh write is kept by a revert', () => {
+  for (const first of ['created', 'replaced'] as const) {
+    for (const later of ['apply', 'delegate'] as const) {
+      const f = fixture();
+      const path = first === 'created' ? join(f.home, '.new.conf') : f.a;
+      if (first === 'created') f.gate().apply([f.change(path, '1')]);
+      else f.gate().delegate([path], ([target]) => writeFileSync(target!, 'rh=1\n'));
+      writeFileSync(path, 'rh=1\nuser=precious\n');
+      if (later === 'apply') f.gate().apply([f.change(path, '2')]);
+      else f.gate().delegate([path], ([target]) => writeFileSync(target!, readFileSync(target!, 'utf8').replace('rh=1', 'rh=2')));
+      const record = f.ledger().files[path];
+      expect({ kind: record.kind, backup: later === 'delegate' && f.vault(record.backup), revert: f.gate().revert().map((entry) => entry.action), text: readFileSync(path, 'utf8') })
+        .toEqual({ kind: first, backup: later === 'delegate' && 'rh=1\nuser=precious\n', revert: ['kept_edited'], text: 'rh=2\nuser=precious\n' });
+    }
+  }
+});
+
+test('a text block is reverted only at its recorded offset in the bytes rh recorded', () => {
+  const f = fixture();
+  const set = (values: Record<string, string>) => f.gate().apply([{ path: f.a, fragments: Object.entries(values)
+    .map(([selector, value]) => ({ owner: 'o1', selector, kind: 'override' as const, strategy: valueOnly, value, selected: true })) }]);
+  // One value at two selectors and an empty insertion revert where rh put them.
+  writeFileSync(f.a, 'a=false\nb=false\nc=x\n');
+  set({ a: 'true', b: 'true', c: '' });
+  expect(readFileSync(f.a, 'utf8')).toBe('a=true\nb=true\nc=\n');
+  expect(f.gate().revert().map((entry) => entry.action)).toEqual(['text_removed']);
+  expect(readFileSync(f.a, 'utf8')).toBe('a=false\nb=false\nc=x\n');
+  // The user changed rh's value and put the same text at another selector: the file stays.
+  set({ a: 'true' });
+  writeFileSync(f.a, 'a=custom\nb=true\nc=x\n');
+  expect(f.gate().revert().map((entry) => entry.action)).toEqual(['kept_edited']);
+  expect(readFileSync(f.a, 'utf8')).toBe('a=custom\nb=true\nc=x\n');
+});
+
+test('a user value at a recorded selector stays unless selected, and its bytes go to the vault before rh writes over them', () => {
+  const f = fixture();
+  writeFileSync(f.a, 'setting=original\n');
+  const setting = (value: string, extra: Partial<HostConfigFileChange['fragments'][number]>) => f.gate().apply([f.change(f.a, value, { selector: 'setting', ...extra })]);
+  setting('rh1', { kind: 'override', selected: true });
+  writeFileSync(f.a, 'setting=USER-EDIT\n');
+  expect(setting('rh2', { kind: 'refresh' })).toEqual({ written: [], skipped: [{ code: 'host_config_user_value_kept', file: f.a, owner: 'o1', selector: 'setting' }] });
+  expect(readFileSync(f.a, 'utf8')).toBe('setting=USER-EDIT\n');
+  setting('rh2', { kind: 'refresh', selected: true });
+  expect(f.gate().revert().map((entry) => entry.action)).toEqual(['text_removed']);
+  expect(readFileSync(f.a, 'utf8')).toBe('setting=USER-EDIT\n');
+  // A whole-file writer may not replace a file that holds rh text blocks.
+  f.gate().apply([f.change(f.a, 'on')]);
+  expect(() => f.gate().delegate([f.a], ([target]) => writeFileSync(target!, 'external\n'))).toThrow(expect.objectContaining({ code: 'host_config_invalid_state' }));
+  expect(readFileSync(f.a, 'utf8')).toBe('setting=USER-EDIT\nrh=on\n');
+});
+
+test('a revert releases a fragment claim that needed no write, for a named path and for all', () => {
+  for (const only of [[], undefined]) {
+    const f = fixture();
+    writeFileSync(f.a, 'rh=on\n');
+    expect(f.gate().apply([f.change(f.a, 'on')]).written).toEqual([]);
+    expect(f.gate().revert(only && [f.a])).toEqual([{ path: f.a, action: 'released' }]);
+    expect(f.gate().apply([f.change(f.a, 'on', { owner: 'o2' })]).written).toEqual([]);
+    expect(readFileSync(f.a, 'utf8')).toBe('rh=on\n');
+  }
 });
 
 test('A8: another owner on a recorded selector, a parent and a child selector, or one selector twice write nothing', () => {

@@ -114,22 +114,24 @@ export function removeTarget(path: HostPath, expected: ExpectedFile): void {
   retryWindowsSharingRace(() => unlinkSync(path));
 }
 
-/** Create the missing ancestors of the target, outermost first, and return them. */
-export function createDirectories(path: HostPath): string[] {
+/** The missing ancestors of the target, outermost first. */
+export function missingDirectories(path: HostPath): string[] {
   const missing: string[] = [];
   for (let current = dirname(path); !lstatSync(current, { throwIfNoEntry: false }); current = dirname(current)) missing.unshift(current);
-  for (const directory of missing) mkdirSync(directory, { mode: 0o700 });
   return missing;
+}
+
+export function createDirectories(directories: readonly string[]): void {
+  for (const directory of directories) mkdirSync(directory, { mode: 0o700 });
 }
 
 /** Remove the directories rh created, innermost first; a directory that holds other content stays. */
 export function removeCreatedDirectories(directories: readonly string[]): void {
-  for (const directory of [...directories].reverse()) {
+  for (const directory of [...new Set(directories)].sort((a, b) => b.length - a.length)) {
     try { rmdirSync(directory); }
     catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'ENOTEMPTY' || code === 'EEXIST') return;
-      if (code !== 'ENOENT') throw error;
+      if (code !== 'ENOTEMPTY' && code !== 'EEXIST' && code !== 'ENOENT') throw error;
     }
   }
 }
@@ -151,7 +153,7 @@ function validFileRecord(record: unknown): boolean {
   const committed = record.committed;
   return ['created', 'text_block', 'replaced'].includes(record.kind as string) && validBaseline(record.baseline)
     && (committed.type === 'absent' || (committed.type === 'file' && isSha(committed.sha256)))
-    && (record.kind === 'replaced' ? isSha(record.backup) : record.backup === null)
+    && (isSha(record.backup) || (record.backup === null && record.kind !== 'replaced'))
     && typeof record.external_change === 'boolean' && Array.isArray(record.created_dirs) && record.created_dirs.every(isText);
 }
 
@@ -159,8 +161,9 @@ function validFragment(value: unknown): boolean {
   if (!isObject(value) || !isObject(value.edit)) return false;
   const edit = value.edit;
   const removed = 'removed_vault' in edit ? isSha(edit.removed_vault) : isText(edit.removed);
+  const at = value.at === null || (Number.isSafeInteger(value.at) && (value.at as number) >= 0);
   return isText(value.file) && isText(value.owner) && isText(value.selector) && ['add', 'refresh', 'override'].includes(value.kind as string)
-    && removed && isText(edit.inserted);
+    && at && removed && isText(edit.inserted);
 }
 
 export function readLedger(paths: HostConfigPaths): HostConfigLedger {
