@@ -10,7 +10,6 @@
 // command gives a repository identity that is the same on every host (see
 // `repositoryIdentity` in `src/cli/commands/rules.ts`).
 
-import type { RoutingClass } from '../board/seats-settings';
 import { isRecord } from '../evidence/is-record';
 import { sha256Hex } from '../evidence/sha256';
 
@@ -75,7 +74,8 @@ export interface RuleTaskV1 {
   /** Null identity fields mean discovery failed, not that no task exists. */
   readonly issue: number | null;
   readonly url: string | null;
-  readonly route: RoutingClass | null;
+  /** The effects boundary supplies the route validated by the promotion marker parser. */
+  readonly route: string | null;
   readonly progress: RuleTaskProgress;
   /** A stable code, never provider stderr or an exception message. */
   readonly reason?: string;
