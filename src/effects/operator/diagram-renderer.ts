@@ -7,7 +7,7 @@
 import { fromMarkdown } from 'mdast-util-from-markdown';
 
 import { sha256Hex } from '../../core/evidence/sha256';
-import { OPERATOR_DOCS_DIAGRAM_KIND, type DocsDiagramState, type DocsDiagramV1 } from '../../core/operator/docs';
+import { diagramTooDeep, OPERATOR_DOCS_DIAGRAM_KIND, type DocsDiagramState, type DocsDiagramV1 } from '../../core/operator/docs';
 import { readRepoHarnessRegistryStrictSnapshot } from '../repo-registry';
 import { keepObservation, startObservationLoop } from '../observation-loop';
 import type { DocsRepositoryCache } from './docs-collector';
@@ -22,7 +22,8 @@ export function diagramDocuments(markdown: string): unknown[] {
   const documents: unknown[] = [];
   const visit = (node: { type: string; lang?: string | null; value?: string; children?: unknown[] }): void => {
     if (node.type === 'code' && node.lang === DIAGRAM_LANGUAGE) {
-      try { documents.push(JSON.parse(node.value ?? '')); } catch { /* the page shows the syntax error */ }
+      // A syntax error or a nesting over the bound has no artifact: the page shows that block's own error.
+      try { const document: unknown = JSON.parse(node.value ?? ''); if (!diagramTooDeep(document)) documents.push(document); } catch { /* the page shows the syntax error */ }
     }
     for (const child of node.children ?? []) visit(child as typeof node);
   };
@@ -70,16 +71,21 @@ export function startDiagramRenderer(options: DiagramRendererOptions): DiagramRe
           if (scanned.get(key) === file.sha256) continue;
           let text: string;
           try { text = (await cache.reader.file(file.path)).text; } catch { continue; }
+          // One block that fails to hash, draw or store never stops the others; the file is scanned again next cycle.
+          let complete = true;
           for (const document of diagramDocuments(text)) {
-            const hash = diagramHash(document);
-            if (readStoredDiagram(options.env, hash)?.fingerprint === capability.fingerprint) continue;
-            const result = await render({ capability, document, outputs: { svg: true, png: false }, env: options.env, signal });
-            if (signal.aborted) return { state: 'observed', value: capability };
-            const fingerprint = capability.fingerprint;
-            if (result.ok) storeDiagram(options.env, hash, { status: 'ok', fingerprint }, result.svg);
-            else if (result.kind === 'invalid') storeDiagram(options.env, hash, { status: 'invalid', fingerprint, issues: result.issues }, null);
-            else storeDiagram(options.env, hash, { status: 'failed', fingerprint, reason: result.reason }, null);
+            try {
+              const hash = diagramHash(document);
+              if (readStoredDiagram(options.env, hash)?.fingerprint === capability.fingerprint) continue;
+              const result = await render({ capability, document, outputs: { svg: true, png: false }, env: options.env, signal });
+              if (signal.aborted) return { state: 'observed', value: capability };
+              const fingerprint = capability.fingerprint;
+              if (result.ok) storeDiagram(options.env, hash, { status: 'ok', fingerprint }, result.svg);
+              else if (result.kind === 'invalid') storeDiagram(options.env, hash, { status: 'invalid', fingerprint, issues: result.issues }, null);
+              else storeDiagram(options.env, hash, { status: 'failed', fingerprint, reason: result.reason }, null);
+            } catch { complete = false; }
           }
+          if (!complete) continue;
           scanned.set(key, file.sha256);
         }
       }

@@ -413,7 +413,9 @@ test('the diagram renderer draws a block once per content and fingerprint, and a
   const fence = (json: string) => `# Doc\n\n\`\`\`eraser-diagram\n${json}\n\`\`\`\n`;
   const first = { entities: [{ id: 'a' }] };
   const second = { entities: [{ id: 'b' }] };
-  let text = fence(JSON.stringify(first));
+  // A block nested past the bound sits before the valid one: it gets no artifact and stops nothing.
+  const deep = `\`\`\`eraser-diagram\n${'['.repeat(100_000)}${']'.repeat(100_000)}\n\`\`\`\n`;
+  let text = deep + fence(JSON.stringify(first));
   let sha = 'a'.repeat(64);
   const tree = () => ({ files: [{ path: 'docs/a.md', size: 1, sha256: sha }, { path: 'docs/b.ts', size: 1, sha256: sha }] });
   const read_docs = () => ({ state: 'ready', tree: tree(), reader: { file: async () => ({ text }) } }) as unknown as DocsRepositoryCache;
@@ -438,7 +440,7 @@ test('the diagram renderer draws a block once per content and fingerprint, and a
     // The same blob is not read again; a changed blob with another document draws that document only.
     await Bun.sleep(100);
     expect(drawn).toHaveLength(1);
-    text = fence(JSON.stringify(second)); sha = 'b'.repeat(64);
+    text = deep + fence(JSON.stringify(second)); sha = 'b'.repeat(64);
     for (let attempt = 0; attempt < 100 && drawn.length < 2; attempt += 1) await Bun.sleep(20);
     await renderer.settled();
     expect(drawn).toEqual([first, second]);

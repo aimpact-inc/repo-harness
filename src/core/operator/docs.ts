@@ -192,3 +192,18 @@ export function decodeDocsDiagram(value: unknown): DocsDiagramV1 {
   if (v.state === 'failed' ? !(DOCS_DIAGRAM_FAILURES as readonly unknown[]).includes(v.reason) : v.reason !== null) d.fail('reason');
   return value as DocsDiagramV1;
 }
+
+/** Eraser documents are a few levels deep; a block nested deeper than this is refused before it is hashed, serialized or drawn. */
+export const DIAGRAM_MAX_DEPTH = 64;
+
+/** Iterative, so the check itself cannot overflow the stack on a hostile block. */
+export function diagramTooDeep(document: unknown): boolean {
+  const stack: Array<readonly [unknown, number]> = [[document, 1]];
+  for (let step = stack.pop(); step !== undefined; step = stack.pop()) {
+    const [value, depth] = step;
+    if (value === null || typeof value !== 'object') continue;
+    if (depth > DIAGRAM_MAX_DEPTH) return true;
+    for (const child of Object.values(value)) stack.push([child, depth + 1]);
+  }
+  return false;
+}
