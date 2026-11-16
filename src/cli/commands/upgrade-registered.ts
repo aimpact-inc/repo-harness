@@ -39,7 +39,8 @@ export type RegisteredRepoSkipReason =
   | 'pr_failed'
   | 'refresh_branch_foreign'
   | 'remote_target_mismatch'
-  | 'refresh_pr_ambiguous';
+  | 'refresh_pr_ambiguous'
+  | 'refresh_branch_exists';
 
 export interface RegisteredInitPreview {
   readonly planned: number;
@@ -296,18 +297,20 @@ function commandFailure(label: string, result: CommandResult): string {
 /**
  * The one github.com repository that origin fetches from and pushes to, as git
  * resolves them after `insteadOf`, `pushInsteadOf` and `remote.origin.pushurl`.
+ * A push goes to every push URL, so each one must name the repository.
  * It is the `--repo` of every gh call. Read-only and local.
  */
 function originRepository(path: string, env: NodeJS.ProcessEnv): { readonly repository: string } | Skip {
   const fetchUrl = git(path, ['remote', 'get-url', 'origin'], env);
   if (!fetchUrl.error && fetchUrl.status === 2) return skip('no_origin_remote', `${path} has no remote named origin`);
   if (fetchUrl.error || fetchUrl.status !== 0) return skip('git_probe_failed', commandFailure('git remote get-url origin', fetchUrl));
-  const pushUrl = git(path, ['remote', 'get-url', '--push', 'origin'], env);
-  if (pushUrl.error || pushUrl.status !== 0) return skip('git_probe_failed', commandFailure('git remote get-url --push origin', pushUrl));
+  const pushUrls = git(path, ['remote', 'get-url', '--push', '--all', 'origin'], env);
+  if (pushUrls.error || pushUrls.status !== 0) return skip('git_probe_failed', commandFailure('git remote get-url --push --all origin', pushUrls));
+  const pushed = pushUrls.stdout.split('\n').map((url) => url.trim()).filter((url) => url !== '');
   const repository = githubRemoteRepository(fetchUrl.stdout);
-  if (repository === null || githubRemoteRepository(pushUrl.stdout) !== repository) {
+  if (repository === null || pushed.length === 0 || pushed.some((url) => githubRemoteRepository(url) !== repository)) {
     return skip('remote_target_mismatch',
-      `origin fetches from ${fetchUrl.stdout.trim()} and pushes to ${pushUrl.stdout.trim().replace(/\n/g, ', ')}; both must name the same github.com repository`);
+      `origin fetches from ${fetchUrl.stdout.trim()} and pushes to ${pushed.join(', ')}; every URL must name the same github.com repository`);
   }
   return { repository };
 }
@@ -473,12 +476,6 @@ function refreshInWorktree(path: string, worktree: string, base: RefreshBase, ow
   } };
 }
 
-function localRefreshBranch(path: string, env: NodeJS.ProcessEnv): string | null {
-  const shown = git(path, ['rev-parse', '--verify', '--quiet', `refs/heads/${REFRESH_BRANCH}`], env);
-  if (shown.error || (shown.status !== 0 && shown.status !== 1)) throw new Error(commandFailure('git rev-parse', shown));
-  return shown.status === 0 ? shown.stdout.trim() : null;
-}
-
 /** Deletes the local refresh branch only while it still points at the commit that this run created. */
 function deleteOwnedBranch(path: string, oid: string, env: NodeJS.ProcessEnv): string | null {
   const deleted = git(path, ['update-ref', '-d', `refs/heads/${REFRESH_BRANCH}`, oid], env);
@@ -488,8 +485,8 @@ function deleteOwnedBranch(path: string, oid: string, env: NodeJS.ProcessEnv): s
 /**
  * The `--pr` write sequence. Every write goes to a new worktree on the refresh
  * branch; the primary checkout keeps its files, branch and index. The worktree
- * is removed on every path; the local branch is removed only while it points at
- * the commit that this run created. Nothing merges.
+ * is removed on every path. This run creates the local branch create-only and
+ * removes it only while it points at the commit that this run created. Nothing merges.
  */
 function refreshRepoPr(path: string, env: NodeJS.ProcessEnv, callerCwd: string): RegisteredRepoResult {
   const target = prTarget(path, classifyRepo(path, env), env);
@@ -502,12 +499,14 @@ function refreshRepoPr(path: string, env: NodeJS.ProcessEnv, callerCwd: string):
   const worktree = join(managedWorktreeRoot(env), `${basename(path)}-wt-harness-refresh`);
   const recovery = `check that ${worktree} and the local ${REFRESH_BRANCH} branch hold no work, then remove the path `
     + `(\`git -C ${path} worktree remove --force ${worktree}\` for a registered worktree) and run \`git -C ${path} branch -D ${REFRESH_BRANCH}\``;
-  if (localRefreshBranch(path, env) !== null) return { path, status: 'failed', error: `a local ${REFRESH_BRANCH} branch exists; ${recovery}` };
-  const added = git(path, ['worktree', 'add', '--quiet', '-b', REFRESH_BRANCH, worktree, base.baseOid], env);
+  // Create-only: the empty old value fails when the branch exists, so a branch of another run or of the operator is never taken over.
+  const created = git(path, ['update-ref', `refs/heads/${REFRESH_BRANCH}`, base.baseOid, ''], env);
+  if (created.error || created.status !== 0) {
+    return skipped(path, skip('refresh_branch_exists', `${commandFailure(`git update-ref refs/heads/${REFRESH_BRANCH}`, created)}; another run or the operator owns it; ${recovery}`));
+  }
+  const added = git(path, ['worktree', 'add', '--quiet', worktree, REFRESH_BRANCH], env);
   if (added.error || added.status !== 0) {
-    // `worktree add -b` can create the branch and then fail; another process may also have created it since the check.
-    const cleanup = localRefreshBranch(path, env) === null ? null : deleteOwnedBranch(path, base.baseOid, env);
-    return { path, status: 'failed', error: [commandFailure(`git worktree add ${worktree}`, added), cleanup, recovery].filter(Boolean).join('; ') };
+    return { path, status: 'failed', error: [commandFailure(`git worktree add ${worktree}`, added), deleteOwnedBranch(path, base.baseOid, env), recovery].filter(Boolean).join('; ') };
   }
   const owned = { oid: base.baseOid };
   let result: RegisteredRepoResult;

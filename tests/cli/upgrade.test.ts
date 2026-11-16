@@ -2009,12 +2009,19 @@ describe('upgrade --registered', () => {
       }, expected: { status: 'skipped', reason: 'remote_target_mismatch' } },
       { name: 'pushurl', setup: (repo) => git(f, repo, 'config', 'remote.origin.pushurl', 'git@github.com:someone/pushurl.git'),
         expected: { status: 'skipped', reason: 'remote_target_mismatch' } },
+      { name: 'two-push-urls', setup: (repo) => {
+        git(f, repo, 'remote', 'set-url', '--add', '--push', 'origin', 'git@github.com:fixture/two-push-urls.git');
+        git(f, repo, 'remote', 'set-url', '--add', '--push', 'origin', 'git@github.com:someone/two-push-urls.git');
+      }, expected: { status: 'skipped', reason: 'remote_target_mismatch' } },
       { name: 'fork-pr', setup: (repo) => openPrs(repo, [{ owner: 'someone', number: 7 }, { owner: 'fixture', number: 1 }]),
         expected: { status: 'applied', refresh: expect.objectContaining({ outcome: 'pushed', pr: 'https://github.com/fixture/fork-pr/pull/1', prAction: 'updated' }) } },
       { name: 'two-prs', setup: (repo) => openPrs(repo, [{ owner: 'fixture', number: 1 }, { owner: 'Fixture', number: 2 }]),
         expected: { status: 'skipped', reason: 'refresh_pr_ambiguous' } },
       { name: 'concurrent-branch', setup: (repo) => git(f, repo, 'config', 'core.hooksPath', hooks),
         expected: { status: 'failed', error: expect.stringContaining('the branch is left') } },
+      // Another run created the branch at the same base commit: this run must neither take it over nor delete it.
+      { name: 'concurrent-create', setup: (repo) => git(f, repo, 'branch', 'repo-harness/refresh', 'main'),
+        expected: { status: 'skipped', reason: 'refresh_branch_exists' } },
     ];
     const repos = cases.map(({ name, setup }) => {
       const repo = staleRepo(f, name);
@@ -2025,16 +2032,19 @@ describe('upgrade --registered', () => {
     writeRegistry(f, repos.map(({ repo }) => repo));
 
     const preview = runRegisteredUpgrade({ env, callerCwd: f.root });
-    expect(byPath(preview.repos, repos[1]!.repo).prRefresh).toMatchObject({ ready: false, reason: 'remote_target_mismatch' });
+    expect(byPath(preview.repos, repos[2]!.repo).prRefresh).toMatchObject({ ready: false, reason: 'remote_target_mismatch' });
     const result = runRegisteredUpgrade({ apply: true, pr: true, expectedRevision: preview.revision!, env, callerCwd: f.root });
     cases.forEach(({ name, expected }, index) => expect([name, byPath(result.repos, repos[index]!.repo)]).toEqual([name, expect.objectContaining(expected)]));
-    for (const index of [0, 1]) expect(git(f, repos[index]!.remote, 'branch', '--list', 'repo-harness/refresh')).toBe('');
-    expect(readFileSync(env.GH_LOG, 'utf8')).not.toMatch(/fetch-rewrite|mirror|pushurl/);
+    const row = (name: string) => repos[cases.findIndex((entry) => entry.name === name)]!;
+    for (const name of ['fetch-rewrite', 'pushurl', 'two-push-urls', 'concurrent-create']) {
+      expect([name, git(f, row(name).remote, 'branch', '--list', 'repo-harness/refresh')]).toEqual([name, '']);
+    }
+    expect(readFileSync(env.GH_LOG, 'utf8')).not.toMatch(/fetch-rewrite|mirror|pushurl|push-urls|concurrent-create/);
     // The update sets only the title of the origin PR; the fork PR and the operator's body stay.
     expect(readFileSync(`${env.GH_LOG}.edit`, 'utf8').trim().split('\n'))
       .toEqual([expect.stringMatching(/^pr edit https:\/\/github\.com\/fixture\/fork-pr\/pull\/1 --title chore\(harness\): refresh repo-harness files for \S+ --repo github\.com\/fixture\/fork-pr$/)]);
-    const concurrent = repos[4]!.repo;
-    expect(git(f, concurrent, 'log', '-1', '--format=%s', 'repo-harness/refresh')).toBe('concurrent');
+    expect(git(f, row('concurrent-branch').repo, 'log', '-1', '--format=%s', 'repo-harness/refresh')).toBe('concurrent');
+    expect(git(f, row('concurrent-create').repo, 'rev-parse', 'repo-harness/refresh')).toBe(git(f, row('concurrent-create').repo, 'rev-parse', 'main'));
   }), 240_000);
 
   test('preview counts a removable legacy sibling worktree as pending and shows it', () => registeredSandbox((f) => {
