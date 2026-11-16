@@ -1883,6 +1883,83 @@ describe('upgrade --registered', () => {
     expect(readFileSync(target, 'utf8')).toBe('operator notes\n');
   }), 120_000);
 
+  test('--pr refreshes in a temporary worktree, pushes one commit, opens one PR and leaves the checkout alone', () => registeredSandbox((f) => {
+    const env = { ...f.env, GIT_AUTHOR_NAME: 'operator', GIT_AUTHOR_EMAIL: 'operator@example.invalid',
+      GIT_COMMITTER_NAME: 'operator', GIT_COMMITTER_EMAIL: 'operator@example.invalid',
+      REPO_HARNESS_GH_BIN: join(f.root, 'gh'), GH_LOG: join(f.root, 'gh.log'), GH_PR: join(f.root, 'gh.pr') };
+    // Records each call; `pr list` reports the PR that `pr create` opened for the same worktree. Any other command fails.
+    writeFileSync(env.REPO_HARNESS_GH_BIN, `#!/bin/sh
+echo "$1 $2" >> "$GH_LOG"
+case "$1 $2" in
+  "pr list") if [ -f "$GH_PR-\${PWD##*/}" ]; then printf '[{"url":"%s"}]' "$(cat "$GH_PR-\${PWD##*/}")"; else echo '[]'; fi ;;
+  "pr create") echo "https://github.invalid/\${PWD##*/}" | tee "$GH_PR-\${PWD##*/}" ;;
+  "pr edit") ;;
+  *) exit 1 ;;
+esac
+`);
+    chmodSync(env.REPO_HARNESS_GH_BIN, 0o755);
+    // The worktree goes to the system tmp directory, so the names stay unique per sandbox.
+    const name = (suffix: string) => `${basename(f.root)}-${suffix}`;
+    const withOrigin = (repo: string): string => {
+      const bare = `${repo}.git`;
+      git(f, f.root, 'init', '-q', '--bare', '-b', 'main', bare);
+      git(f, repo, 'remote', 'add', 'origin', bare);
+      git(f, repo, 'push', '-q', 'origin', 'main');
+      return bare;
+    };
+    const dirty = staleRepo(f, name('dirty'));
+    const dirtyRemote = withOrigin(dirty);
+    git(f, dirty, 'checkout', '-q', '-b', 'topic');
+    writeFileSync(join(dirty, 'untracked.txt'), 'operator work\n');
+    writeFileSync(join(dirty, 'AGENTS.md'), 'operator edit\n');
+    const fresh = adoptedRepo(f, name('fresh'));
+    const freshRemote = withOrigin(fresh);
+    const noOrigin = staleRepo(f, name('no-origin'));
+    const foreign = staleRepo(f, name('foreign'));
+    const foreignRemote = withOrigin(foreign);
+    git(f, foreign, 'checkout', '-q', '-b', 'repo-harness/refresh');
+    commitAll(f, foreign, 'chore(harness): refresh repo-harness files for 0.0.0');
+    git(f, foreign, 'push', '-q', 'origin', 'repo-harness/refresh');
+    git(f, foreign, 'checkout', '-q', 'main');
+    git(f, foreign, 'branch', '-q', '-D', 'repo-harness/refresh');
+    const foreignTip = git(f, foreignRemote, 'rev-parse', 'repo-harness/refresh');
+    writeRegistry(f, [dirty, fresh, noOrigin, foreign]);
+    const status = (repo: string) => spawnSync('git', ['status', '--porcelain'], { cwd: repo, env, encoding: 'utf8' }).stdout;
+    const before = { status: status(dirty), files: worktreeSnapshot(dirty), head: git(f, dirty, 'rev-parse', 'HEAD'), branches: git(f, dirty, 'branch', '--list') };
+
+    const preview = runRegisteredUpgrade({ env, callerCwd: f.root });
+    expect(byPath(preview.repos, dirty)).toMatchObject({ status: 'skipped', reason: 'not_default_branch', prRefresh: { ready: true } });
+    expect(byPath(preview.repos, noOrigin)).toMatchObject({ status: 'ready', prRefresh: { ready: false, reason: 'no_origin_remote' } });
+    expect(formatRegisteredUpgradeResult(preview)).toContain(`--apply --pr --expected-revision ${preview.revision}`);
+    expect(cli(f, '--registered', '--pr').status).toBe(2);
+
+    const result = runRegisteredUpgrade({ apply: true, pr: true, expectedRevision: preview.revision!, env, callerCwd: f.root });
+    expect(result.error).toBeUndefined();
+    const refreshed = byPath(result.repos, dirty);
+    expect(refreshed.status, refreshed.error).toBe('applied');
+    expect(refreshed.refresh).toMatchObject({ outcome: 'pushed', branch: 'repo-harness/refresh', pr: `https://github.invalid/${basename(dirty)}-wt-harness-refresh`, prAction: 'created' });
+    expect(git(f, dirtyRemote, 'log', '--format=%s', 'main..repo-harness/refresh')).toMatch(/^chore\(harness\): refresh repo-harness files for \S+$/);
+    const committed = git(f, dirtyRemote, 'diff', '--name-only', 'main', 'repo-harness/refresh').split('\n');
+    expect(committed).toContain('deploy/README.md');
+    expect(committed.filter((path) => path.startsWith('.ai/harness/backups/'))).toEqual([]);
+    expect({ status: status(dirty), files: worktreeSnapshot(dirty), head: git(f, dirty, 'rev-parse', 'HEAD'), branches: git(f, dirty, 'branch', '--list') }).toEqual(before);
+    expect(existsSync(join(tmpdir(), `${basename(dirty)}-wt-harness-refresh`))).toBe(false);
+    expect(byPath(result.repos, fresh)).toMatchObject({ status: 'applied', refresh: { outcome: 'up_to_date' } });
+    expect(git(f, freshRemote, 'branch', '--list', 'repo-harness/refresh')).toBe('');
+    expect(byPath(result.repos, noOrigin)).toMatchObject({ status: 'skipped', reason: 'no_origin_remote' });
+    expect(byPath(result.repos, foreign)).toMatchObject({ status: 'skipped', reason: 'refresh_branch_foreign' });
+    expect(git(f, foreignRemote, 'rev-parse', 'repo-harness/refresh')).toBe(foreignTip);
+    expect(formatRegisteredUpgradeResult(result)).not.toContain('Nothing was committed.');
+
+    // The same package version again: the remote branch already holds the refresh, so nothing is pushed.
+    const tip = git(f, dirtyRemote, 'rev-parse', 'repo-harness/refresh');
+    const again = runRegisteredUpgrade({ env, callerCwd: f.root });
+    const second = runRegisteredUpgrade({ apply: true, pr: true, expectedRevision: again.revision!, env, callerCwd: f.root });
+    expect(byPath(second.repos, dirty).refresh).toMatchObject({ outcome: 'unchanged', commit: tip, prAction: 'open' });
+    expect(git(f, dirtyRemote, 'rev-parse', 'repo-harness/refresh')).toBe(tip);
+    expect(readFileSync(env.GH_LOG, 'utf8').trim().split('\n')).toEqual(['pr list', 'pr create', 'pr list']);
+  }), 240_000);
+
   test('preview counts a removable legacy sibling worktree as pending and shows it', () => registeredSandbox((f) => {
     const repo = adoptedRepo(f, 'legacy');
     const sibling = join(f.root, 'legacy-old');
