@@ -183,12 +183,23 @@ any merge request. It:
 bound input; adding the whole body to the identity would block the merge for any
 edit of other PR text.
 
-After readiness, `prepareMerge()` already rejects a changed head or base. It
-needs no new check for this rule, because the head and the merge-base are bound
-inputs and the exception digest is recomputed from the body read that feeds
-readiness. A body edit between that read and the merge request is not detected.
-The first version accepts this window; it closes only if the merge request can
-bind the body.
+After readiness, `prepareMerge()` re-reads the PR through `readMergeTarget()`,
+which returns the live `target.body`. The readiness verdict carries the
+validated `exception_digest`. `prepareMerge()` parses the exception from
+`target.body`, recomputes the digest and compares it with the validated one.
+On a difference it refuses with `test_budget_stale` and the caller re-runs
+readiness. A change of other body text keeps the digests equal and the merge
+continues. The final check also covers the head and the merge-base, which it
+already compares for head and base.
+
+One window remains: a body edit after that final read and before the provider
+accepts the merge request. The merge request cannot bind the body, so the first
+version accepts this smaller window.
+
+Regression in the public merge path with a provider fixture: the first read has
+exception E, the final read removes or changes E, head and base stay equal, and
+no merge request is sent. A final read that changes only unrelated body text
+still merges.
 
 ### SubjectIdentity
 
@@ -228,6 +239,6 @@ first version.
   result by digest, so a stale pass cannot carry an edited exception.
 - At 10x PR volume the first limit is the annotation read per merge: one extra
   `gh` call per readiness. The check-run API bounds it.
-- The body-edit window between the readiness read and the merge request remains.
+- The body-edit window between the final read and the merge request remains.
 - Rollback: delete the workflow and the consumer check; `git revert` of the
   implementation commits. The ADR changes no behavior.
