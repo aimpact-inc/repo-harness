@@ -3,17 +3,27 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE_EOF'
-Usage: scripts/maintenance-triage.sh [--json]
+Usage: scripts/maintenance-triage.sh [--json | --entries <ledger file>]
 USAGE_EOF
 }
 
 output_mode="text"
+entries_file=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --json)
       output_mode="json"
       shift
+      ;;
+    --entries)
+      if [[ $# -lt 2 ]]; then
+        usage >&2
+        exit 1
+      fi
+      output_mode="entries"
+      entries_file="$2"
+      shift 2
       ;;
     --help|-h)
       usage
@@ -27,26 +37,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-ledger="tasks/lessons.md"
-
-if [[ ! -f "$ledger" ]]; then
-  if [[ "$output_mode" == "json" ]]; then
-    printf '{"judgment":[],"field_errors":[],"evidence_errors":[]}\n'
-  else
-    echo "[Maintenance] No tasks/lessons.md found."
-  fi
-  exit 0
-fi
-
-if ! command -v jq >/dev/null 2>&1; then
-  echo "[Maintenance] jq is required for maintenance triage." >&2
-  exit 1
-fi
-
 # The one ledger parser. Each entry starts at `- Date:` and becomes
 # {"line": <Date line>, "fields": {"<Field name>": "<value>"}}. An indented or
 # unprefixed line continues the field above it; a blank line ends it.
-entries_json="$(
+# `--entries` prints the parsed entries of one file for LedgerEnforcement
+# (scripts/check-ledger-enforcement.ts), so the check has no second parser.
+parse_entries() {
   awk '
     function esc(value) {
       gsub(/\\/, "\\\\", value)
@@ -99,8 +95,35 @@ entries_json="$(
     END {
       emit()
     }
-  ' "$ledger"
-)"
+  ' "$1"
+}
+
+if [[ "$output_mode" == "entries" ]]; then
+  if [[ ! -f "$entries_file" ]]; then
+    echo "[Maintenance] Ledger file not found: $entries_file" >&2
+    exit 1
+  fi
+  printf '[%s]\n' "$(parse_entries "$entries_file")"
+  exit 0
+fi
+
+ledger="tasks/lessons.md"
+
+if [[ ! -f "$ledger" ]]; then
+  if [[ "$output_mode" == "json" ]]; then
+    printf '{"judgment":[],"field_errors":[],"evidence_errors":[]}\n'
+  else
+    echo "[Maintenance] No tasks/lessons.md found."
+  fi
+  exit 0
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "[Maintenance] jq is required for maintenance triage." >&2
+  exit 1
+fi
+
+entries_json="$(parse_entries "$ledger")"
 
 # A consolidation commit replaces several ledger entries with fewer. An entry that
 # keeps only such a commit as its Triggered by correction has lost the failure
