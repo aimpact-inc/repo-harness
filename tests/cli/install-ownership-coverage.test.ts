@@ -20,6 +20,8 @@ function withInstallHome(run: (home: string, rh: (...args: string[]) => ReturnTy
   const env: NodeJS.ProcessEnv = {
     ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun'), XDG_CONFIG_HOME: join(home, '.config'), XDG_STATE_HOME: join(home, '.local', 'state'),
     REPO_HARNESS_HOME: join(home, '.repo-harness'), PATH: `${bin}:/usr/bin:/bin`, REPO_HARNESS_BUN_EXECUTABLE: join(bin, 'bun'),
+    // Bun's transpiler cache would write under HOME (Library/Caches on darwin, $BUN_INSTALL/install/cache on Linux).
+    BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0',
   };
   for (const key of ['GIT_CONFIG_GLOBAL', 'CODEX_SKILLS_ROOT', 'CLAUDE_SKILLS_ROOT', 'PI_CODING_AGENT_DIR', 'REPO_HARNESS_INSTALL_PLUGINS', 'REPO_HARNESS_INCLUDE_PI']) delete env[key];
   seedGlobalPackageFixture(env, { mutable: true });
@@ -97,8 +99,8 @@ test('a custom excludes path is restore-only, and a managed, directory or symlin
   for (const row of rows) withInstallHome((home, rh, env) => {
     const excludes = row.excludes(home);
     expect(spawnSync('git', ['config', '--global', 'core.excludesFile', excludes], { env }).status).toBe(0);
-    // Every entry outside the runtime home (its lock and state) and Bun's own transpiler cache, with its size and mtime.
-    const tree = () => readdirSync(home, { recursive: true }).map(String).filter(path => !/^(?:\.repo-harness|Library|\.cache)(?:\/|$)/.test(path)).sort()
+    // Every entry outside the runtime home (its lock and state), with its size and mtime.
+    const tree = () => readdirSync(home, { recursive: true }).map(String).filter(path => !/^\.repo-harness(?:\/|$)/.test(path)).sort()
       .map(path => { const stat = lstatSync(join(home, path)); return `${path}:${stat.size}:${stat.mtimeMs}`; });
     const before = tree();
     const install = rh(...INSTALL);
