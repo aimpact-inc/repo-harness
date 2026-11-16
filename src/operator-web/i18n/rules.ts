@@ -38,6 +38,7 @@ export const en = {
   'rules.reason.rules_command_failed': 'rh rules status failed in this repository',
   'rules.reason.rules_invalid': 'The rules status failed validation',
   'rules.reason.unreachable': 'The rules route gave no usable answer',
+  'rules.refused.unknown': '{code}: {message}',
 } as const;
 
 export const zh: Readonly<Record<keyof typeof en, string>> = {
@@ -79,4 +80,5 @@ export const zh: Readonly<Record<keyof typeof en, string>> = {
   'rules.reason.rules_command_failed': '在这个仓库运行 rh rules status 失败',
   'rules.reason.rules_invalid': '规则状态没通过校验',
   'rules.reason.unreachable': '规则路由没有给出可用的结果',
+  'rules.refused.unknown': '{code}：{message}',
 };

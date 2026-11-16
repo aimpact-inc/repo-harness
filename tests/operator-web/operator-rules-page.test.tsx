@@ -124,17 +124,19 @@ describe('rules page', () => {
     const original = globalThis.fetch;
     const answers: Response[] = [
       new Response(JSON.stringify({ error: { code: 'rules_pending', message: 'm', next_action: 'n' } }), { status: 503 }),
-      new Response(JSON.stringify({ error: { code: 'new_code', message: 'm', next_action: 'n' } }), { status: 503 }),
+      new Response(JSON.stringify({ error: { code: 'new_code', message: 'A newer refusal.', next_action: 'n' } }), { status: 503 }),
+      new Response('not json', { status: 502 }),
       new Response(JSON.stringify({ protocol: 1 }), { status: 200 }),
     ];
     globalThis.fetch = (async (url: string, init?: RequestInit) => { requests.push({ url, method: init?.method ?? 'GET' }); return answers.shift()!; }) as typeof fetch;
     try {
       const signal = new AbortController().signal;
       expect(await fetchRulesSnapshot('repo-a', signal)).toEqual({ state: 'unavailable', reason: 'rules_pending' });
+      expect(await fetchRulesSnapshot('repo-a', signal)).toEqual({ state: 'refused', code: 'new_code', message: 'A newer refusal.' });
       expect(await fetchRulesSnapshot('repo-a', signal)).toEqual({ state: 'unavailable', reason: 'unreachable' });
       expect(await fetchRulesSnapshot('repo-a', signal)).toEqual({ state: 'unavailable', reason: 'rules_invalid' });
     } finally { globalThis.fetch = original; }
-    expect(requests).toEqual(Array.from({ length: 3 }, () => ({ url: '/api/v1/repositories/repo-a/rules', method: 'GET' })));
+    expect(requests).toEqual(Array.from({ length: 4 }, () => ({ url: '/api/v1/repositories/repo-a/rules', method: 'GET' })));
   });
 
   test('UX-rules-review-F1: field errors show the error rows with line and fix, and no candidate or count', async () => {
@@ -174,7 +176,7 @@ describe('rules page', () => {
     expect(empty.querySelector('a')?.getAttribute('href')).toBe('#rules/ledger');
   });
 
-  test('UX-rules-review-F6: each unavailable reason has its own text and no list or count', async () => {
+  test('UX-rules-review-F6: each unavailable reason has its own text and no list or count; an unknown code shows the server code and message', async () => {
     const texts = new Set<string>();
     for (const reason of [...RULES_UNAVAILABLE_REASONS, 'unreachable'] as const) {
       if (root) { await act(async () => root?.unmount()); root = null; window.happyDOM.abort(); installDom(); }
@@ -185,5 +187,8 @@ describe('rules page', () => {
       expect(document.querySelector('[data-rules-segments], [data-rules-candidate]')).toBeNull();
     }
     expect(texts.size).toBe(RULES_UNAVAILABLE_REASONS.length + 1);
+    await act(async () => root?.unmount()); root = null; window.happyDOM.abort(); installDom();
+    await mount('#rules', { state: 'refused', code: 'new_code', message: 'A newer refusal.' });
+    expect(document.querySelector('[data-rules-unavailable="new_code"]')!.textContent).toBe('new_code: A newer refusal.');
   });
 });

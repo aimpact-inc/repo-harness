@@ -211,11 +211,13 @@ function RulesBody({ snapshot, segment, now, onOpen, t }: {
 /** A waiting reason warns; a broken one fails. */
 const WAITING_REASONS: readonly string[] = ['rules_pending', 'registry_unavailable', 'repository_not_found'];
 
-function RulesRefusal({ read, t }: { readonly read: Extract<RulesRead, { readonly state: 'unavailable' }>; readonly t: OperatorTranslate }) {
+function RulesRefusal({ read, t }: { readonly read: Exclude<RulesRead, { readonly state: 'ok' }>; readonly t: OperatorTranslate }) {
+  const known = read.state === 'unavailable';
   return (
-    <section className="flex min-w-0 flex-col gap-2 rounded-xl border border-kumo-line bg-kumo-base p-4 sm:p-5" data-rules-unavailable={read.reason}>
+    <section className="flex min-w-0 flex-col gap-2 rounded-xl border border-kumo-line bg-kumo-base p-4 sm:p-5" data-rules-unavailable={known ? read.reason : read.code}>
       <p className="flex items-center gap-2 text-sm text-kumo-default">
-        <StatusDot tone={WAITING_REASONS.includes(read.reason) ? 'warn' : 'danger'} />{t(`rules.reason.${read.reason}`)}
+        <StatusDot tone={known && WAITING_REASONS.includes(read.reason) ? 'warn' : 'danger'} />
+        {known ? t(`rules.reason.${read.reason}`) : t('rules.refused.unknown', { code: read.code, message: read.message })}
       </p>
     </section>
   );
@@ -236,7 +238,7 @@ export function RulesPage({ repositoryId, readRules, generation, now, segment, o
       </header>
       {repositoryId === null ? <p role="status" className="text-sm text-kumo-subtle">{t('repository.select')}</p>
         : read === null ? <p role="status" className="flex items-center gap-1.5 text-sm text-kumo-subtle" data-rules-loading><Loader size={12} />{t('rules.loading')}</p>
-        : read.state === 'unavailable' ? <RulesRefusal read={read} t={t} />
+        : read.state !== 'ok' ? <RulesRefusal read={read} t={t} />
         : <RulesBody snapshot={read.snapshot} segment={segment} now={now} onOpen={onOpen} t={t} />}
     </div>
   );
