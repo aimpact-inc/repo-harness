@@ -35,10 +35,12 @@ export function classifyFile(observed: FileObservation, preimage: ExpectedFile, 
 
 /**
  * One pure decision for rollback after a failure and recovery after a kill.
- * `committed` is whether the ledger lists the transaction ID.
+ * `committed` is whether the ledger lists the transaction ID. A committed
+ * transaction never rolls back, so it always settles: a file that differs from
+ * the committed result is an external change, and no preimage stays.
  */
 export function recoveryAction(state: FileState, committed: boolean): RecoveryAction {
-  if (state === 'other') return 'unresolved';
+  if (state === 'other') return committed ? 'mark_external_change' : 'unresolved';
   if (state === 'preimage') return committed ? 'mark_external_change' : 'resolved';
   return committed ? 'resolved' : 'restore_preimage';
 }

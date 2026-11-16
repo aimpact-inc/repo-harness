@@ -18,7 +18,7 @@ export interface PlannedFragment {
 
 export interface FilePlan {
   readonly file: string;
-  /** The merged content; equal to the input when no edit changes text. */
+  /** The merged content; equal to the input when every edit is already in place. */
   readonly result: string;
   readonly fragments: readonly PlannedFragment[];
   readonly skipped: readonly SkippedOverride[];
@@ -105,8 +105,8 @@ export function planFile(
   const fragments: PlannedFragment[] = [];
   for (const request of applied) {
     const edit = request.strategy.apply(content, request.selector, request.value);
+    // An edit whose text is already in place still claims its fragment, so the ledger records the owner.
     checkEdit(file, content, request, edit);
-    if (edit.removed === edit.inserted) continue;
     for (const planned of fragments) {
       if (rangesIntersect(planned.edit, edit)) {
         throw overlap(file, `the edits of ${planned.owner}:${planned.selector} and ${request.owner}:${request.selector} intersect`);

@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { classifyFile, recoveryAction } from '../../src/core/host-config/recovery';
@@ -58,6 +58,8 @@ test('A5: a kill at each fault point recovers by the table', () => {
   ]);`;
   const cases = [
     { point: 'after-record', path: '', committed: false },
+    // b's new directories and temporary file exist: recovery removes both.
+    { point: 'before-rename', path: 'b', committed: false },
     { point: 'after-rename', path: 'a', committed: false },
     { point: 'after-rename', path: 'b', committed: false },
     { point: 'after-ledger', path: '', committed: true },
@@ -105,7 +107,8 @@ test('recovery decision is one pure table', () => {
     [classifyFile(observe(intended.sha256), pre, intended), true, 'resolved'],
     [classifyFile(observe(pre.sha256), pre, intended), true, 'mark_external_change'],
     [classifyFile(observe(`sha256:${'c'.repeat(64)}`), pre, intended), false, 'unresolved'],
-    [classifyFile({ existed: false }, pre, null), true, 'unresolved'],
+    // A committed transaction never rolls back, so a different file is an external change and the record goes.
+    [classifyFile({ existed: false }, pre, null), true, 'mark_external_change'],
   ] as const;
   for (const [state, committed, action] of rows) expect(recoveryAction(state, committed)).toBe(action);
 });
@@ -156,7 +159,11 @@ test('A8: two owners on one selector, or a parent and a child selector, write no
     { owner: 'o1', selector: 'mcp', kind: 'add' as const, strategy: keyLine, value: '1' },
     { owner: 'o1', selector: 'mcp.codegraph', kind: 'add' as const, strategy: keyLine, value: '2' },
   ] };
-  for (const change of [owners, nested]) {
+  const twice = { path: f.a, fragments: [
+    { owner: 'o1', selector: 'rh', kind: 'add' as const, strategy: keyLine, value: '1' },
+    { owner: 'o1', selector: 'rh', kind: 'add' as const, strategy: keyLine, value: '1' },
+  ] };
+  for (const change of [owners, nested, twice]) {
     expect(() => f.gate().apply([change])).toThrow(expect.objectContaining({ code: 'host_config_fragment_overlap' }));
   }
   expect(readFileSync(f.a, 'utf8')).toBe('keep=1\n');
@@ -165,6 +172,56 @@ test('A8: two owners on one selector, or a parent and a child selector, write no
   // A recorded fragment counts: another owner cannot take its selector later.
   f.gate().apply([f.change(f.a, '1')]);
   expect(() => f.gate().apply([f.change(f.a, '2', { owner: 'o2' })])).toThrow(expect.objectContaining({ code: 'host_config_fragment_overlap' }));
+  // A fragment whose text is already in place is still recorded, without a file write.
+  const noOp = f.gate().apply([f.change(f.a, '1', { selector: 'keep' })]);
+  expect({ txn: typeof noOp.txn, written: noOp.written, a: readFileSync(f.a, 'utf8') }).toEqual({ txn: 'string', written: [], a: 'keep=1\nrh=1\n' });
+  expect(() => f.gate().apply([f.change(f.a, '2', { owner: 'o2', selector: 'keep' })])).toThrow(expect.objectContaining({ code: 'host_config_fragment_overlap' }));
+});
+
+test('a committed transaction always settles: a delegated unchanged path is a no-op, a later edit is an external change', () => {
+  const f = fixture();
+  f.gate().apply([f.change(f.a, 'on')]);
+  const x = join(f.home, '.x.conf'), y = join(f.home, '.y.conf');
+  killAt(f.home, `import { writeFileSync } from 'node:fs';
+    gate.delegate([${JSON.stringify(f.a)}, ${JSON.stringify(x)}, ${JSON.stringify(y)}], () => writeFileSync(${JSON.stringify(x)}, 'x\\n'));`, 'after-ledger');
+  expect(f.gate().recover()).toEqual({ unresolved: [] });
+  expect(f.journal()).toEqual([]);
+  const ledger = f.ledger();
+  expect({ a: ledger.files[f.a].external_change, x: ledger.files[x].committed.type, y: ledger.files[y] }).toEqual({ a: false, x: 'file', y: undefined });
+
+  killAt(f.home, `gate.apply([{ path: ${JSON.stringify(f.a)}, fragments: [{ owner: 'o1', selector: 'rh', kind: 'add', strategy: keyLine, value: 'off' }] }]);`, 'after-ledger');
+  writeFileSync(f.a, 'user\n');
+  expect(f.gate().recover()).toEqual({ unresolved: [] });
+  expect(f.journal()).toEqual([]);
+  expect(f.ledger().files[f.a].external_change).toBe(true);
+});
+
+test('recovery refuses a recorded path that leaves HOME or meets a symlink, and keeps the record', () => {
+  const f = fixture();
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'rh-host-config-outside-')));
+  homes.push(outside);
+  killAt(f.home, `gate.apply([{ path: ${JSON.stringify(f.b)}, fragments: [{ owner: 'o1', selector: 'rh', kind: 'add', strategy: keyLine, value: 'on' }] }]);`, 'after-rename', f.b);
+  renameSync(join(f.home, '.tool'), join(outside, '.tool'));
+  symlinkSync(join(outside, '.tool'), join(f.home, '.tool'));
+  expect(() => f.gate().recover()).toThrow(expect.objectContaining({ code: 'host_config_invalid_path' }));
+  expect(readFileSync(join(outside, '.tool', 'sub', 'b.conf'), 'utf8')).toBe('rh=on\n');
+  expect(f.journal()).toHaveLength(1);
+
+  // A forged record that names a path outside HOME fails the same boundary.
+  const g = fixture();
+  killAt(g.home, `gate.apply([{ path: ${JSON.stringify(g.a)}, fragments: [{ owner: 'o1', selector: 'rh', kind: 'add', strategy: keyLine, value: 'on' }] }]);`, 'after-record');
+  const recordPath = join(g.root, 'journal', g.journal()[0]!, 'record.json');
+  writeFileSync(recordPath, readFileSync(recordPath, 'utf8').replaceAll(JSON.stringify(g.a), JSON.stringify(join(outside, 'victim'))));
+  expect(() => g.gate().recover()).toThrow(expect.objectContaining({ code: 'host_config_invalid_path' }));
+  expect(() => g.gate().apply([g.change(join(g.home, '.repo-harness', 'config.json'), 'on')])).toThrow(expect.objectContaining({ code: 'host_config_invalid_path' }));
+});
+
+test('a failure before the rename removes the directories the transaction created', () => {
+  const f = fixture();
+  const failing = f.gate({ faults: { at: (point) => { if (point === 'before-rename') throw new Error('temp write failed'); } } });
+  expect(() => failing.apply([f.change(f.b, 'on')])).toThrow('temp write failed');
+  expect(existsSync(join(f.home, '.tool'))).toBe(false);
+  expect(f.journal()).toEqual([]);
 });
 
 test('a commit records baseline, fragments and the override backup, and leaves no preimage in the journal', () => {

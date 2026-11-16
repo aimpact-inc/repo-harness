@@ -23,6 +23,10 @@ export class HostConfigError extends Error {
 /** `sha256:<hex>` of the exact bytes. */
 export type Sha256 = string;
 
+declare const hostPathBrand: unique symbol;
+/** An absolute path under HOME, outside `~/.repo-harness/`, that passed the store's path check. */
+export type HostPath = string & { readonly [hostPathBrand]: true };
+
 export type FileBaseline =
   | { readonly state: 'known'; readonly existed: false }
   | { readonly state: 'known'; readonly existed: true; readonly type: 'file'; readonly mode: number; readonly sha256: Sha256 }
@@ -84,13 +88,19 @@ export type FileObservation =
 export type ExpectedFile = { readonly existed: false } | { readonly existed: true; readonly mode: number; readonly sha256: Sha256 };
 
 export interface TransactionFileEntry {
-  readonly path: string;
+  readonly path: HostPath;
   readonly preimage: ExpectedFile;
   /** File name inside the transaction directory; null when the preimage is absent. */
   readonly preimage_copy: string | null;
-  /** Null for a delegated write: the gate does not know the result in advance. */
-  readonly intended: ExpectedFile | null;
-  readonly created_dirs: readonly string[];
+  /**
+   * A delegated write starts with null, because the gate does not know the
+   * result in advance. After the writer runs, the gate records the observed
+   * result, or `unchanged` when the path is still its preimage; settlement
+   * never touches an `unchanged` path.
+   */
+  readonly intended: ExpectedFile | 'unchanged' | null;
+  /** Written before the first mkdir, outermost first. */
+  readonly created_dirs: readonly HostPath[];
 }
 
 export interface TransactionRecord {

@@ -9,6 +9,7 @@ import {
   type ExpectedFile,
   type FileObservation,
   type HostConfigLedger,
+  type HostPath,
   type Sha256,
   type TransactionRecord,
 } from '../../core/host-config/types';
@@ -20,6 +21,8 @@ import { isPathInside } from '../path-containment';
 /** Storage beside the global configuration file: `~/.repo-harness/config/`. */
 export interface HostConfigPaths {
   readonly home: string;
+  /** `~/.repo-harness/`: no host target may lie inside it. */
+  readonly harness: string;
   readonly root: string;
   readonly ledger: string;
   readonly vault: string;
@@ -29,27 +32,45 @@ export interface HostConfigPaths {
 export function hostConfigPaths(env: NodeJS.ProcessEnv): HostConfigPaths {
   const harness = dirname(globalConfigurationPath(env));
   const root = join(harness, 'config');
-  return { home: dirname(harness), root, ledger: join(root, 'ledger.json'), vault: join(root, 'vault'), journal: join(root, 'journal') };
+  return { home: dirname(harness), harness, root, ledger: join(root, 'ledger.json'), vault: join(root, 'vault'), journal: join(root, 'journal') };
 }
 
 function invalidState(message: string): HostConfigError {
   return new HostConfigError('host_config_invalid_state', message);
 }
 
-/** A host target is an absolute path under HOME, outside the gate's own storage, with no symlink on the way. */
-export function assertHostPath(paths: HostConfigPaths, path: string): void {
+function invalidPath(message: string): HostConfigError {
+  return new HostConfigError('host_config_invalid_path', message);
+}
+
+/**
+ * The one boundary for host paths, from a caller or from a journal record: an
+ * absolute normalized path under HOME, outside `~/.repo-harness/`, with no
+ * symlink on the way.
+ */
+export function hostPath(paths: HostConfigPaths, path: unknown): HostPath {
+  if (typeof path !== 'string') throw invalidPath(`not a host configuration path: ${JSON.stringify(path)}`);
   const rel = relative(paths.home, path);
-  if (!isAbsolute(path) || resolve(path) !== path || !rel || rel.startsWith('..') || isAbsolute(rel) || isPathInside(paths.root, path)) {
-    throw new HostConfigError('host_config_invalid_path', `not a host configuration path: ${path}`);
+  if (!isAbsolute(path) || resolve(path) !== path || !rel || rel.startsWith('..') || isAbsolute(rel) || isPathInside(paths.harness, path)) {
+    throw invalidPath(`not a host configuration path: ${path}`);
   }
   const symlink = assertNoSymlinkInPath(paths.home, rel);
-  if (symlink) throw new HostConfigError('host_config_invalid_path', symlink);
+  if (symlink) throw invalidPath(symlink);
+  return path as HostPath;
+}
+
+/** Checked again right before each mutation: a parent may have become a symlink after the path was admitted. */
+function assertParentChain(paths: HostConfigPaths, path: HostPath): void {
+  const parent = dirname(path);
+  if (parent === paths.home) return;
+  const symlink = assertNoSymlinkInPath(paths.home, relative(paths.home, parent));
+  if (symlink) throw invalidPath(symlink);
 }
 
 /** Create a 0700 directory under HOME; refuse a symlink or a non-directory on the way. */
 export function ensurePrivateDirectory(paths: HostConfigPaths, directory: string): void {
   const symlink = assertNoSymlinkInPath(paths.home, relative(paths.home, directory));
-  if (symlink) throw new HostConfigError('host_config_invalid_path', symlink);
+  if (symlink) throw invalidPath(symlink);
   const created = mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (!lstatSync(directory).isDirectory()) throw invalidState(`not a directory: ${directory}`);
   if (created !== undefined) syncDirectoryDurably(dirname(created));
@@ -86,18 +107,21 @@ export function targetTemporary(path: string, txn: string): string {
   return `${path}.${txn}.tmp`;
 }
 
-function removeIfFile(path: string): void {
-  const { observation } = observeFile(path);
-  if (observation.existed && observation.type === 'file') unlinkSync(path);
+/** Remove a leftover temporary file of this transaction beside its target. */
+export function removeTemporary(paths: HostConfigPaths, path: HostPath, txn: string): void {
+  assertParentChain(paths, path);
+  const temporary = targetTemporary(path, txn);
+  const { observation } = observeFile(temporary);
+  if (observation.existed && observation.type === 'file') unlinkSync(temporary);
 }
 
 /**
  * Replace the target: temp, fsync, re-read, rename, directory fsync. The
  * re-read must still match `expected`; otherwise nothing is written.
  */
-export function replaceTarget(path: string, txn: string, bytes: Buffer, mode: number, expected: ExpectedFile, beforeRename: () => void): void {
+export function replaceTarget(paths: HostConfigPaths, path: HostPath, txn: string, bytes: Buffer, mode: number, expected: ExpectedFile, beforeRename: () => void): void {
   const temporary = targetTemporary(path, txn);
-  removeIfFile(temporary);
+  removeTemporary(paths, path, txn);
   const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
   try {
     try {
@@ -109,12 +133,14 @@ export function replaceTarget(path: string, txn: string, bytes: Buffer, mode: nu
       throw new HostConfigError('host_config_target_changed', `the target changed before the write: ${path}`);
     }
     beforeRename();
+    assertParentChain(paths, path);
     retryWindowsSharingRace(() => renameSync(temporary, path));
     syncDirectoryDurably(dirname(path));
   } finally { rmSync(temporary, { force: true }); }
 }
 
-export function removeTarget(path: string, expected: ExpectedFile): void {
+export function removeTarget(paths: HostConfigPaths, path: HostPath, expected: ExpectedFile): void {
+  assertParentChain(paths, path);
   if (!matchesExpected(observeFile(path).observation, expected)) {
     throw new HostConfigError('host_config_target_changed', `the target changed before the restore: ${path}`);
   }
@@ -123,30 +149,34 @@ export function removeTarget(path: string, expected: ExpectedFile): void {
 }
 
 /** Missing ancestors between HOME and the target's directory, outermost first. */
-export function missingDirectories(paths: HostConfigPaths, path: string): string[] {
-  const missing: string[] = [];
+export function missingDirectories(paths: HostConfigPaths, path: HostPath): HostPath[] {
+  const missing: HostPath[] = [];
   for (let current = dirname(path); current !== paths.home; current = dirname(current)) {
     if (observeFile(current).observation.existed) break;
-    missing.unshift(current);
+    missing.unshift(current as HostPath);
   }
   return missing;
 }
 
-export function createDirectories(directories: readonly string[]): void {
+export function createDirectories(paths: HostConfigPaths, directories: readonly HostPath[]): void {
   for (const directory of directories) {
+    assertParentChain(paths, directory);
     mkdirSync(directory, { mode: 0o700 });
     syncDirectoryDurably(dirname(directory));
   }
 }
 
 /** Remove the directories a transaction created, innermost first; a directory that holds other content stays. */
-export function removeCreatedDirectories(directories: readonly string[]): void {
+export function removeCreatedDirectories(paths: HostConfigPaths, directories: readonly HostPath[]): void {
   for (const directory of [...directories].reverse()) {
+    assertParentChain(paths, directory);
     try { rmdirSync(directory); }
     catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'ENOTEMPTY' || code === 'EEXIST') return;
-      if (code !== 'ENOENT') throw error;
+      // A kill before mkdir, or an earlier cleanup, already left it absent.
+      if (code === 'ENOENT') continue;
+      throw error;
     }
     syncDirectoryDurably(dirname(directory));
   }
@@ -257,17 +287,29 @@ function validExpected(value: unknown): boolean {
   return isObject(value) && (value.existed === false || (value.existed === true && isMode(value.mode) && isSha(value.sha256)));
 }
 
-function parseRecord(txn: string, raw: string): TransactionRecord {
+/** Parse a record into typed host paths; a created directory must be an ancestor of its file. */
+function parseRecord(paths: HostConfigPaths, txn: string, raw: string): TransactionRecord {
   let value: unknown;
   try { value = JSON.parse(raw); } catch { throw invalidState(`invalid transaction record: ${txn}`); }
-  const valid = isObject(value) && value.protocol === 1 && value.txn === txn && (value.intended === 'write' || value.intended === 'delegated')
-    && isText(value.stage) && Array.isArray(value.files) && value.files.every((entry) => isObject(entry) && isText(entry.path) && isAbsolute(entry.path)
+  const delegated = isObject(value) && value.intended === 'delegated';
+  const valid = isObject(value) && value.protocol === 1 && value.txn === txn && (value.intended === 'write' || delegated)
+    && isText(value.stage) && Array.isArray(value.files) && value.files.every((entry) => isObject(entry)
       && validExpected(entry.preimage) && (entry.preimage_copy === null || isText(entry.preimage_copy))
       && (entry.preimage_copy === null) === ((entry.preimage as { existed: boolean }).existed === false)
-      && (entry.intended === null ? value.intended === 'delegated' : validExpected(entry.intended))
-      && Array.isArray(entry.created_dirs) && entry.created_dirs.every(isText));
+      && (entry.intended === null || entry.intended === 'unchanged' ? delegated : validExpected(entry.intended))
+      && Array.isArray(entry.created_dirs));
   if (!valid) throw invalidState(`invalid transaction record: ${txn}`);
-  return value as unknown as TransactionRecord;
+  const record = value as unknown as TransactionRecord;
+  const files = record.files.map((entry) => {
+    const path = hostPath(paths, entry.path);
+    const createdDirs = entry.created_dirs.map((directory) => {
+      const parsed = hostPath(paths, directory);
+      if (!isPathInside(parsed, path) || parsed === path) throw invalidPath(`${txn}: ${parsed} is not a directory above ${path}`);
+      return parsed;
+    });
+    return { ...entry, path, created_dirs: createdDirs };
+  });
+  return { ...record, files };
 }
 
 /**
@@ -286,7 +328,7 @@ export function listTransactionRecords(paths: HostConfigPaths): TransactionRecor
       removeTransaction(paths, txn);
       continue;
     }
-    records.push(parseRecord(txn, raw));
+    records.push(parseRecord(paths, txn, raw));
   }
   return records;
 }

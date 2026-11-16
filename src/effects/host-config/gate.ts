@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { rmSync } from 'node:fs';
 import { sha256Prefixed } from '../../core/evidence/sha256';
-import { planFile, type FilePlan } from '../../core/host-config/plan';
+import { planFile, type FilePlan, type PlannedFragment } from '../../core/host-config/plan';
 import { classifyFile, expectedFromCommitted, recoveryAction, sameExpected } from '../../core/host-config/recovery';
 import {
   HostConfigError,
@@ -10,17 +9,18 @@ import {
   type FragmentRecord,
   type FragmentRequest,
   type HostConfigLedger,
+  type HostPath,
   type SkippedOverride,
   type TransactionFileEntry,
   type TransactionRecord,
 } from '../../core/host-config/types';
 import { globalRuntimeScope, withRuntimeTransactionContext, type RuntimeTransactionContext } from '../locking/runtime-transaction-lock';
 import {
-  assertHostPath,
   createDirectories,
   ensurePrivateDirectory,
   expectedOf,
   hostConfigPaths,
+  hostPath,
   listTransactionRecords,
   missingDirectories,
   observeFile,
@@ -31,9 +31,9 @@ import {
   removeCreatedDirectories,
   removePreimageCopy,
   removeTarget,
+  removeTemporary,
   removeTransaction,
   replaceTarget,
-  targetTemporary,
   transactionDirectory,
   writeLedger,
   writePreimageCopy,
@@ -41,9 +41,12 @@ import {
   type HostConfigPaths,
 } from './store';
 
-export type HostConfigFaultPoint = 'after-record' | 'after-rename' | 'after-ledger' | 'after-cleanup';
+export type HostConfigFaultPoint = 'after-record' | 'before-rename' | 'after-rename' | 'after-ledger' | 'after-cleanup';
 
-/** Test seam: a hook at each fault point. `path` names the file for `after-rename`. */
+/**
+ * Test seam: a hook at each fault point. `path` names the file for
+ * `before-rename` (its directories and temporary file exist) and `after-rename`.
+ */
 export interface HostConfigFaults {
   at(point: HostConfigFaultPoint, path?: string): void;
 }
@@ -120,6 +123,8 @@ function withLedger(ledger: HostConfigLedger, files: Record<string, FileRecord>,
  * Roll back or recover one transaction with the pure decision of
  * `recoveryAction`. `attempted` limits an in-process rollback to the files
  * whose rename may have run; recovery after a kill passes null and checks all.
+ * A file at its preimage in an uncommitted transaction also loses the
+ * directories that the transaction created, when they are still empty.
  * Returns the files that stay unresolved; the record keeps only those.
  */
 function settleTransaction(paths: HostConfigPaths, record: TransactionRecord, attempted: ReadonlySet<string> | null): UnresolvedHostConfigChange[] {
@@ -130,33 +135,33 @@ function settleTransaction(paths: HostConfigPaths, record: TransactionRecord, at
   const remaining: TransactionFileEntry[] = [];
   // Reverse order: a file that a later entry put in a new directory goes before that directory is removed.
   for (const entry of [...record.files].reverse()) {
-    rmSync(targetTemporary(entry.path, record.txn), { force: true });
-    if (attempted && !attempted.has(entry.path)) continue;
-    const recorded = files[entry.path];
-    const intended: ExpectedFile | null = entry.intended
-      ?? (committed && recorded?.committed.txn === record.txn ? expectedFromCommitted(recorded.committed) : null);
-    const action = recoveryAction(classifyFile(observeFile(entry.path).observation, entry.preimage, intended), committed);
+    if (entry.intended === 'unchanged') continue;
+    removeTemporary(paths, entry.path, record.txn);
+    const touched = attempted === null || attempted.has(entry.path);
+    const action = touched ? recoveryAction(classifyFile(observeFile(entry.path).observation, entry.preimage, entry.intended), committed) : 'resolved';
     if (action === 'unresolved') { remaining.push(entry); continue; }
     if (action === 'mark_external_change') {
+      const recorded = files[entry.path];
       if (!recorded) throw new HostConfigError('host_config_invalid_state', `a committed transaction has no file record: ${entry.path}`);
       files[entry.path] = { ...recorded, external_change: true };
       ledgerChanged = true;
       continue;
     }
-    if (action === 'restore_preimage' && intended) {
+    if (action === 'restore_preimage' && entry.intended) {
       try {
         if (entry.preimage.existed && entry.preimage_copy) {
           const bytes = readPreimageCopy(paths, record.txn, entry.preimage_copy, entry.preimage.sha256);
-          replaceTarget(entry.path, record.txn, bytes, entry.preimage.mode, intended, () => {});
+          replaceTarget(paths, entry.path, record.txn, bytes, entry.preimage.mode, entry.intended, () => {});
         } else {
-          removeTarget(entry.path, intended);
-          removeCreatedDirectories(entry.created_dirs);
+          removeTarget(paths, entry.path, entry.intended);
         }
       } catch (error) {
         if (!(error instanceof HostConfigError && error.code === 'host_config_target_changed')) throw error;
         remaining.push(entry);
+        continue;
       }
     }
+    if (!committed) removeCreatedDirectories(paths, entry.created_dirs);
   }
   if (ledgerChanged) writeLedger(paths, withLedger(ledger, files, ledger.fragments));
   if (remaining.length === 0) {
@@ -179,11 +184,12 @@ function prepareStorage(paths: HostConfigPaths): void {
 }
 
 /** Validate the targets and refuse a path that an unresolved record still holds. */
-function admitPaths(paths: HostConfigPaths, targets: readonly string[], unresolved: readonly UnresolvedHostConfigChange[]): void {
+function admitPaths(paths: HostConfigPaths, targets: readonly string[], unresolved: readonly UnresolvedHostConfigChange[]): HostPath[] {
   if (new Set(targets).size !== targets.length) throw new HostConfigError('host_config_invalid_state', 'a transaction names one path twice');
-  for (const path of targets) assertHostPath(paths, path);
+  const admitted = targets.map((path) => hostPath(paths, path));
   const held = unresolved.filter((entry) => targets.includes(entry.path));
   if (held.length) throw unresolvedError(held);
+  return admitted;
 }
 
 /** Write the preimage copies, then fsync the record; no target write happens before this returns. */
@@ -221,6 +227,12 @@ function nextFileRecord(previous: FileRecord | undefined, preimage: ExpectedFile
   };
 }
 
+/** True when the ledger does not already hold this fragment with this edit. */
+function fragmentChanges(fragment: PlannedFragment): boolean {
+  const { previous, edit } = fragment;
+  return !previous || previous.edit.at !== edit.at || previous.edit.inserted !== edit.inserted;
+}
+
 /** A refresh keeps the first record's kind and removed text, so the ledger always holds the text before rh. */
 function nextFragments(paths: HostConfigPaths, ledger: HostConfigLedger, plans: readonly FilePlan[]): FragmentRecord[] {
   const replaced = new Set<FragmentRecord>();
@@ -251,59 +263,72 @@ function nextFragments(paths: HostConfigPaths, ledger: HostConfigLedger, plans: 
 
 function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileChange[], faults: HostConfigFaults | undefined): HostConfigApplyResult {
   prepareStorage(paths);
-  admitPaths(paths, changes.map((change) => change.path), recoverAll(paths));
+  const targets = admitPaths(paths, changes.map((change) => change.path), recoverAll(paths));
   const ledger = readLedger(paths);
   const txn = newTransactionId();
   const skipped: SkippedOverride[] = [];
   const claimedDirs = new Set<string>();
-  const work: { change: HostConfigFileChange; plan: FilePlan; entry: TransactionFileEntry; preimage: Buffer | null }[] = [];
+  const plans: FilePlan[] = [];
+  const work: { change: HostConfigFileChange; plan: FilePlan; entry: TransactionFileEntry; preimage: Buffer | null; mode: number; sha256: string }[] = [];
   for (const [index, change] of changes.entries()) {
-    const { observation, bytes } = observeFile(change.path);
-    const preimage = expectedOf(observation, change.path);
+    const path = targets[index]!;
+    const { observation, bytes } = observeFile(path);
+    const preimage = expectedOf(observation, path);
     let content: string;
     try { content = bytes === null ? '' : UTF8.decode(bytes); }
-    catch { throw new HostConfigError('host_config_invalid_state', `not UTF-8 text: ${change.path}`); }
-    const plan = planFile(change.path, content, change.fragments, ledger.fragments);
+    catch { throw new HostConfigError('host_config_invalid_state', `not UTF-8 text: ${path}`); }
+    const plan = planFile(path, content, change.fragments, ledger.fragments);
     skipped.push(...plan.skipped);
-    if (plan.fragments.length === 0 || (bytes !== null && plan.result === content)) continue;
-    const createdDirs = missingDirectories(paths, change.path).filter((directory) => !claimedDirs.has(directory));
+    plans.push(plan);
+    // A fragment whose text is already in place is still recorded, but its file is not written.
+    if (plan.result === content) continue;
+    const createdDirs = missingDirectories(paths, path).filter((directory) => !claimedDirs.has(directory));
     for (const directory of createdDirs) claimedDirs.add(directory);
     const result = Buffer.from(plan.result, 'utf8');
     const mode = preimage.existed ? preimage.mode : platformMode(change.createMode ?? 0o600);
+    const sha256 = sha256Prefixed(result);
     work.push({
       change,
       plan,
       preimage: bytes,
+      mode,
+      sha256,
       entry: {
-        path: change.path,
+        path,
         preimage,
         preimage_copy: preimage.existed ? preimageCopyName(index) : null,
-        intended: { existed: true, mode, sha256: sha256Prefixed(result) },
+        intended: { existed: true, mode, sha256 },
         created_dirs: createdDirs,
       },
     });
   }
-  if (work.length === 0) return { txn: null, written: [], skipped };
+  if (work.length === 0) {
+    if (!plans.some((plan) => plan.fragments.some(fragmentChanges))) return { txn: null, written: [], skipped };
+    // Only fragment records change: the ledger write is the whole transaction, and settlement has nothing to touch.
+    writeLedger(paths, withLedger(ledger, ledger.files, nextFragments(paths, ledger, plans), txn));
+    return { txn, written: [], skipped };
+  }
 
   const record: TransactionRecord = { protocol: 1, txn, intended: 'write', stage: 'recorded', files: work.map((item) => item.entry) };
-  recordTransaction(paths, record, new Map(work.flatMap((item) => (item.preimage ? [[item.change.path, item.preimage] as const] : []))));
+  recordTransaction(paths, record, new Map(work.flatMap((item) => (item.preimage ? [[item.entry.path, item.preimage] as const] : []))));
   faults?.at('after-record');
 
   const attempted = new Set<string>();
   try {
-    for (const { entry, plan } of work) {
-      createDirectories(entry.created_dirs);
-      if (!entry.intended?.existed) throw new HostConfigError('host_config_invalid_state', `a write needs an intended file: ${entry.path}`);
-      replaceTarget(entry.path, txn, Buffer.from(plan.result, 'utf8'), entry.intended.mode, entry.preimage, () => attempted.add(entry.path));
+    for (const { entry, plan, mode } of work) {
+      createDirectories(paths, entry.created_dirs);
+      replaceTarget(paths, entry.path, txn, Buffer.from(plan.result, 'utf8'), mode, entry.preimage, () => {
+        faults?.at('before-rename', entry.path);
+        attempted.add(entry.path);
+      });
       faults?.at('after-rename', entry.path);
     }
     const files = { ...ledger.files };
-    for (const { change, entry } of work) {
-      if (!entry.intended?.existed) continue;
+    for (const { change, entry, mode, sha256 } of work) {
       files[entry.path] = nextFileRecord(ledger.files[entry.path], entry.preimage,
-        { type: 'file', sha256: entry.intended.sha256, mode: entry.intended.mode, txn }, entry.created_dirs, change.baselineUnknown === true);
+        { type: 'file', sha256, mode, txn }, entry.created_dirs, change.baselineUnknown === true);
     }
-    writeLedger(paths, withLedger(ledger, files, nextFragments(paths, ledger, work.map((item) => item.plan)), txn));
+    writeLedger(paths, withLedger(ledger, files, nextFragments(paths, ledger, plans), txn));
   } catch (error) {
     settleAfterFailure(paths, record, attempted, error);
   }
@@ -315,30 +340,37 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
 
 function delegateWrite(paths: HostConfigPaths, declaredPaths: readonly string[], run: () => void, faults: HostConfigFaults | undefined): HostConfigDelegateResult {
   prepareStorage(paths);
-  admitPaths(paths, declaredPaths, recoverAll(paths));
+  const targets = admitPaths(paths, declaredPaths, recoverAll(paths));
   const txn = newTransactionId();
   const preimages = new Map<string, Buffer>();
-  const entries = declaredPaths.map((path, index): TransactionFileEntry => {
+  const entries = targets.map((path, index): TransactionFileEntry => {
     const { observation, bytes } = observeFile(path);
     const preimage = expectedOf(observation, path);
     if (bytes !== null) preimages.set(path, bytes);
     return { path, preimage, preimage_copy: preimage.existed ? preimageCopyName(index) : null, intended: null, created_dirs: [] };
   });
-  const record: TransactionRecord = { protocol: 1, txn, intended: 'delegated', stage: 'recorded', files: entries };
+  let record: TransactionRecord = { protocol: 1, txn, intended: 'delegated', stage: 'recorded', files: entries };
   recordTransaction(paths, record, preimages);
   faults?.at('after-record');
 
-  const changed: string[] = [];
+  const changed: HostPath[] = [];
   try {
     run();
+    // The journal holds every declared path with its observed outcome before the commit, so settlement never guesses.
+    const observed = entries.map((entry): TransactionFileEntry => {
+      const result = expectedOf(observeFile(entry.path).observation, entry.path);
+      return { ...entry, intended: sameExpected(result, entry.preimage) ? 'unchanged' : result };
+    });
+    const outcome: TransactionRecord = { ...record, stage: 'observed', files: observed };
+    writeTransactionRecord(paths, outcome);
+    record = outcome;
     const ledger = readLedger(paths);
     const files = { ...ledger.files };
-    for (const entry of entries) {
-      const result = expectedOf(observeFile(entry.path).observation, entry.path);
-      if (sameExpected(result, entry.preimage)) continue;
+    for (const entry of observed) {
+      if (entry.intended === null || entry.intended === 'unchanged') continue;
       changed.push(entry.path);
       files[entry.path] = nextFileRecord(ledger.files[entry.path], entry.preimage,
-        result.existed ? { type: 'file', sha256: result.sha256, mode: result.mode, txn } : { type: 'absent', txn }, [], false);
+        entry.intended.existed ? { type: 'file', sha256: entry.intended.sha256, mode: entry.intended.mode, txn } : { type: 'absent', txn }, [], false);
     }
     writeLedger(paths, withLedger(ledger, files, ledger.fragments, txn));
   } catch (error) {
