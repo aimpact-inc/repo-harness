@@ -272,6 +272,7 @@ describe('publication merge binds the TestBudget result to its inputs', () => {
       testBudget: { document: producedTestBudgetResult(budgetPolicy(2), BODY), mergeBase: 'f'.repeat(40) } }));
     expect(failureOf(result).blockers?.map((blocker) => blocker.code)).toEqual(['test_budget_stale']);
     expect(failureOf(result).blockers?.[0]?.detail).toContain('does not match the live diff_start');
+    // The load-bearing check: it still proves the live-tip merge-base if the fixture ever answers the PR-base compare too.
     expect(calls.some((args) => args[1] === `repos/${REPOSITORY}/compare/${OTHER_COMMIT}...${HEAD}`)).toBe(true);
     expect(mutations).toHaveLength(0);
   });
