@@ -292,12 +292,16 @@ describe('agents page seats section', () => {
     // worker-light is null in busy, so no list offers it.
     expect(all('[data-route="frontend"] ~ button').map(button => button.getAttribute('aria-label'))).toEqual(['Add worker-important']);
     await setNumber('[data-threshold="codex_hyper_at_or_above_remaining"]', '70');
+    // The exhaustion line is a routing setting of its own (#2909).
+    expect(document.querySelector<HTMLInputElement>('[data-threshold="exhausted_at_or_above_used"]')!.value).toBe('95');
+    await setNumber('[data-threshold="exhausted_at_or_above_used"]', '100');
     await click(document.querySelector<HTMLButtonElement>('[aria-label="Codex on credits when exhausted"] button:nth-child(2)')!);
     await setNumber('[data-credit-floor]', '2000');
     await click(seatsSave());
     expect(posts[0]!.seats.routing).toMatchObject({
       important_deep: ['worker-deep', 'worker-important'], simple_fast: ['worker-deep'], frontend: ['worker-important-fast'],
-      claude_saving_below_remaining: 20, codex_hyper_at_or_above_remaining: 70, codex_credit_mode: 'review', codex_credit_floor: 2000,
+      claude_saving_below_remaining: 20, codex_hyper_at_or_above_remaining: 70, exhausted_at_or_above_used: 100,
+      codex_credit_mode: 'review', codex_credit_floor: 2000,
     });
     // worker-light as the only seat of a route: setting it to not configured empties the route, and the decoder refusal keeps Save off.
     await click(pick('worker-light'));

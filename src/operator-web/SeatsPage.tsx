@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { Banner, Button, Empty, Loader, Switch, cn } from '@cloudflare/kumo';
 import { seatAccountQuotas, seatOnCredits } from '../core/board/seat-routing';
+import { EXHAUSTED_AT_OR_ABOVE_USED_RANGE } from '../core/board/quota';
 import { buildSeatLaunch, type SeatLimitLevel } from '../core/board/seat-launch';
 import { CODEX_CREDIT_MODES, SEAT_IDS, SEAT_TOOLS, decodeSeatsSettingsRequest, isReviewSeat, seatTakesFleet, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
 import type { SetupSnapshotV2 } from '../core/setup/types';
@@ -343,6 +344,19 @@ function RoutingEditor({ form, settings, quota, locked, t }: {
           </span>
         </Field>
       ))}
+      {/* The account states above are the ones the server read at the saved line; this field moves the line itself. */}
+      <Field label={t('seats.threshold.exhausted_at_or_above_used')}>
+        <input type="number" min={EXHAUSTED_AT_OR_ABOVE_USED_RANGE.min} max={EXHAUSTED_AT_OR_ABOVE_USED_RANGE.max} step={1}
+          value={draft.routing.exhausted_at_or_above_used} disabled={locked} aria-label={t('seats.threshold.exhausted_at_or_above_used')}
+          className={NUMBER_INPUT} data-threshold="exhausted_at_or_above_used"
+          onChange={(event) => {
+            const value = Number(event.target.value);
+            if (event.target.value !== '' && Number.isInteger(value) && value >= EXHAUSTED_AT_OR_ABOVE_USED_RANGE.min && value <= EXHAUSTED_AT_OR_ABOVE_USED_RANGE.max) {
+              form.edit(next => setRoutingValue(next, 'exhausted_at_or_above_used', value));
+            }
+          }} />
+        <span className="font-mono text-xs text-kumo-subtle">%</span>
+      </Field>
       <Field label={t('seats.credits.mode')}>
         <Segmented label={t('seats.credits.mode')} disabled={locked} value={draft.routing.codex_credit_mode}
           options={CODEX_CREDIT_MODES.map(mode => ({ value: mode, label: t(`seats.credits.${mode}`) }))}
