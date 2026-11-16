@@ -7,6 +7,7 @@ import { configureRequiredHerdrSkill } from '../../src/cli/commands/herdr-skill'
 import { readInstallState } from '../../src/cli/installer/install-profile';
 import { seedGlobalPackageFixture } from '../helpers/install-ownership';
 import { writeFakeHc } from '../helpers/fake-hc';
+import { writeBunWrapper } from '../helpers/repo-fixture';
 
 const CLI = join(import.meta.dir, '../../src/cli/index.ts');
 
@@ -15,7 +16,7 @@ function withInstallHome(run: (home: string, rh: (...args: string[]) => ReturnTy
   const home = mkdtempSync(join(tmpdir(), 'repo-harness-ownership-coverage-'));
   const bin = join(home, 'tool-bin');
   mkdirSync(bin);
-  symlinkSync(process.execPath, join(bin, 'bun'));
+  writeBunWrapper(join(bin, 'bun'));
   writeFakeHc(bin);
   const env: NodeJS.ProcessEnv = {
     ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun'), XDG_CONFIG_HOME: join(home, '.config'), XDG_STATE_HOME: join(home, '.local', 'state'),
