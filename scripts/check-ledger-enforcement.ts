@@ -46,8 +46,9 @@ const normalize = (ref: string): string => {
   const value = ref.toLowerCase().replace(/^[\s#]+|\s+$/g, '');
   return /^[0-9a-f]{8,40}$/.test(value) ? value.slice(0, 8) : value;
 };
-const references = (entry: LedgerEntry): string[] => field(entry, 'Triggered by correction').split(',')
-  .map((ref) => ref.trim()).filter(Boolean);
+const list = (entry: LedgerEntry, name: string): string[] => field(entry, name).split(',').map((ref) => ref.trim()).filter(Boolean);
+const references = (entry: LedgerEntry): string[] => list(entry, 'Triggered by correction');
+const promotions = (entries: readonly LedgerEntry[]): string[] => entries.flatMap((entry) => list(entry, 'Promoted'));
 /** A structural enforcer is a path or a rule id; `judgment` and an empty value are not. */
 const structural = (entry: LedgerEntry): boolean => !['', 'judgment'].includes(field(entry, 'Enforced by'));
 /** The state that row 4 fails: Seen 3× or more, no structural enforcer, no Promoted. */
@@ -111,7 +112,9 @@ export function evaluateLedger(text: string, head: readonly LedgerEntry[], base:
     const count = field(entry, 'Seen');
     if (count && seen(entry) === null) add(entry, 'Seen', `"${count}" is not a positive integer count`, 'write the cumulative event count of the theme as <N>×');
     const promoted = field(entry, 'Promoted');
-    if (promoted && !PROMOTED.test(promoted)) add(entry, 'Promoted', `"${promoted}" is not a PR reference`, 'write "- Promoted: #<PR>" or the pull request URL');
+    if (promoted && !promoted.split(',').every((ref) => PROMOTED.test(ref.trim()))) {
+      add(entry, 'Promoted', `"${promoted}" is not a PR reference or a list of them`, 'write "- Promoted: #<PR>" or the pull request URL, and separate several with ", "');
+    }
     const enforcer = field(entry, 'Enforced by');
     if (!structural(entry)) continue;
     if (resolves(enforcer)) {
@@ -169,8 +172,9 @@ export function evaluateLedger(text: string, head: readonly LedgerEntry[], base:
       if (after.max !== before.max) {
         add(after.latest, 'Seen', `${merged} gives ${after.max}×`, `a consolidation keeps the maximum ${before.max}×; record a new correction event in its own PR`);
       }
-      const promoted = before.entries.map((entry) => field(entry, 'Promoted')).find(Boolean);
-      if (promoted && !after.promoted) add(after.latest, 'Promoted', `${merged} drops Promoted ${promoted}`, `keep "- Promoted: ${promoted}"`);
+      const kept = new Set(promotions(after.entries).map(normalize));
+      const lost = promotions(before.entries).filter((ref) => !kept.has(normalize(ref)));
+      if (lost.length) add(after.latest, 'Promoted', `${merged} drops Promoted ${lost.join(', ')}`, 'keep every Promoted reference of the entries that the consolidation replaces');
       const enforcer = field(before.latest, 'Enforced by');
       if (field(after.latest, 'Enforced by') !== enforcer) {
         add(after.latest, 'Enforced by', `${merged} changes ${enforcer} to ${field(after.latest, 'Enforced by') || 'nothing'}`, `keep "- Enforced by: ${enforcer}"`);

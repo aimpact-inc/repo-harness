@@ -83,7 +83,7 @@ Manual probe: to see what named test files do on one runner for a branch head, d
   4. A test.
   If no level works, write `Enforced by: judgment`.
 - A new check or test must fail on the real commit that had the mistake and pass after the fix. Put both results in the PR.
-- At `Seen: 3×` with `Enforced by: judgment`, promote the prevention rule into root `AGENTS.md` and root `CLAUDE.md` in the same PR. Add `- Promoted: <PR>` to that entry. A rule with a structural enforcer does not go into the root files.
+- At `Seen: 3×` with `Enforced by: judgment`, promote the prevention rule into root `AGENTS.md` and root `CLAUDE.md` in the same PR. Add `- Promoted: <PR>` to that entry. A consolidated entry lists every `Promoted` reference of the entries it replaces, separated by `, `. A rule with a structural enforcer does not go into the root files.
 - When the mistake can no longer occur, delete its text rule from the agent instruction files. Keep its ledger entries.
 - Each retro advances the watermark to the last reviewed commit, also when it finds no lesson. If an earlier retro PR is still open, update that PR. Do not open a second retro PR.
 - Every change to `tasks/lessons.md` goes through a PR and merges only after GO. GO is an explicit go-ahead from the repository owner (Aimpact for repo-harness) for one reviewed head SHA. Task-level publication authorization does not replace it. Merge with `gh pr merge <pr> --squash --match-head-commit <reviewed-sha>`. Lessons are not task logs. Ordinary tasks record a one-time decision in the issue or PR. A correction in a task can add an entry; that entry follows the same PR and GO rule.
