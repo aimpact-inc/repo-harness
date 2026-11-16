@@ -505,20 +505,40 @@ function operandsOf(args: readonly Word[], valued: ReadonlySet<string>): { opera
   return { operands, values };
 }
 
-const MOVE_VALUED = new Set(['-t', '--target-directory', '-S', '--suffix']);
+const MOVE_VALUED = new Set(['-S', '--suffix']);
 
-/** cp, mv and ln: the destination, written into a directory as each source's name. */
+/** The words that the shell passes after brace expansion. */
+const braceWords = (word: Word): Word[] => (expandBraces(word.pattern) ?? [word.pattern])
+  .map(pattern => pattern === word.pattern ? word : { ...word, pattern, value: unescapePattern(pattern) });
+
+/**
+ * A target-directory option (`-t`, `-T`, `--target-directory`, `--no-target-directory`, also inside combined short options)
+ * changes which operand is the destination. Its glued value (`-tDIR`, `--target-directory=DIR`) is an operand.
+ */
+function targetOption(word: Word): Word[] | null {
+  const short = /^-(?!-)[a-zA-Z]*?([tT])(.*)$/.exec(word.value);
+  const long = /^--(?:no-)?target-directory(?:=(.*))?$/.exec(word.value);
+  if (!short && !long) return null;
+  const value = short ? (short[1] === 't' ? short[2]! : '') : long![1] ?? '';
+  return value ? [{ ...word, value, pattern: word.pattern.slice(word.pattern.length - escapePattern(value).length) }] : [];
+}
+
+/**
+ * cp, mv and ln, after brace expansion: the last operand is the destination, written into a directory as each source's name,
+ * and mv removes its sources. When the hook cannot classify the operands (a target-directory option, fewer than two operands),
+ * every operand is a possible write target.
+ */
 function destinationTargets(program: string, args: readonly Word[], dirs: Dirs): WriteTarget[] {
-  const { operands, values } = operandsOf(args, MOVE_VALUED);
-  const glued = args.find(word => /^-t./.test(word.value) || word.value.startsWith('--target-directory='));
-  const directory = values.get('-t') ?? values.get('--target-directory')
-    ?? (glued && { ...glued, value: glued.value.replace(/^-t|^--target-directory=/, ''), pattern: glued.pattern.replace(/^-t|^--target-directory=/, '') });
-  const sources = directory ? operands : operands.slice(0, -1);
-  const destination = directory ?? operands.at(-1);
-  if (!destination || (!directory && operands.length < 2)) return [];
+  const words = args.flatMap(braceWords);
+  const { operands } = operandsOf(words, MOVE_VALUED);
+  const glued = words.map(targetOption);
+  if (glued.some(found => found !== null) || operands.length < 2) {
+    return [...operands, ...glued.flatMap(found => found ?? [])].flatMap(word => targetsOf('overwrite', program, word, dirs));
+  }
+  const sources = operands.slice(0, -1);
   const sourced = sources.map(word => sourceNames(word));
   const names = sourced.some(list => list === null) ? null : sourced.flatMap(list => list!);
-  const targets = targetsOf('overwrite', program, destination, dirs, { names, follow: program === 'cp' });
+  const targets = targetsOf('overwrite', program, operands.at(-1)!, dirs, { names, follow: program === 'cp' });
   return program === 'mv' ? [...sources.flatMap(word => targetsOf('destroy', 'mv', word, dirs)), ...targets] : targets;
 }
 

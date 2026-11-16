@@ -116,7 +116,7 @@ describe('safety hook: Bash host route', () => {
       initRepo(cwd);
       for (const dir of ['src', 'stage/d', 'Project Files', 'build']) mkdirSync(join(cwd, dir), { recursive: true });
       mkdirSync(join(home, 'stage'));
-      for (const file of [join(out, 'notes.txt'), join(out, 'app.json'), join(cwd, 'stage/app.json'), join(cwd, 'stage/b.json'), join(cwd, '.env.local'),
+      for (const file of [join(out, 'notes.txt'), join(out, 'notes.txt.bak'), join(out, 'app.json'), join(cwd, 'stage/app.json'), join(cwd, 'stage/b.json'), join(cwd, '.env.local'),
         join(cwd, 'Project Files/.env'), join(home, '.ssh/id_ed25519'), join(home, 'stage/app.json'), join(cwd, 'stage/d/notes.txt')]) writeFileSync(file, 'TOKEN=fixture-only\n');
       symlinkSync(join(out, 'sub'), join(cwd, 'linked'));
       symlinkSync(join(out, 'app.json'), join(cwd, 'app.json'));
@@ -144,9 +144,12 @@ describe('safety hook: Bash host route', () => {
         'truncate -s 0 notes.txt', 'shred notes.txt', 'cp "$HOME/stage/app.json" .', 'cp stage/*/notes.txt .',
         // A glob or parameter target is judged by its literal directory.
         'rm "$HOME"/*.txt', ': > "$HOME"/*.txt', `tee ${out}/*.txt`,
+        // Operands are brace-expanded first; a target-directory option makes every operand a possible target.
+        `cp ${out}/notes.txt{,.bak}`, `mv ${out}/notes.txt{,.bak}`, `ln -f ${out}/notes.txt{,.bak}`,
+        `cp -rT src ${out}`, `cp -r --no-target-directory src ${out}`,
       ]);
       expectGuard('RecursiveDeleteGuard', ['if true; then rm -rf .; fi']);
-      expectGuard(null, ['cd src && rm a.txt', 'echo $(rm src/a.txt)', `cp stage/*.json ${out}/empty/`, 'rm notes.txt', 'cp stage/*/notes.txt src/', 'rm -rf build/*']);
+      expectGuard(null, ['cd src && rm a.txt', 'echo $(rm src/a.txt)', `cp stage/*.json ${out}/empty/`, 'rm notes.txt', 'cp stage/*/notes.txt src/', 'rm -rf build/*', 'cp -r src build/']);
       const update = hook('edit', { command: '*** Begin Patch\n*** Update File: app.json\n@@\n-x\n+y\n*** End Patch' });
       expect(update.status).toBe(2);
       expect(update.stderr).toContain('[UserFileGuard]');
