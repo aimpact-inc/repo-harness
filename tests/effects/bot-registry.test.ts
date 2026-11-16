@@ -111,4 +111,37 @@ describe('Bot registry', () => {
       expect(readBotRegistry(h.env).map(bot => bot.bot_id)).toEqual(['hermes']);
     } finally { h.cleanup(); }
   }, 30_000);
+
+  test('`rh bots list` and `rh bots show` read the registry and fail closed', () => {
+    const h = home();
+    try {
+      const rh = (...args: string[]) => {
+        const result = Bun.spawnSync(['bun', 'src/cli/index.ts', 'bots', ...args], { cwd: process.cwd(), env: { ...process.env, ...h.env } });
+        return { exitCode: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+      };
+      const empty = rh('list', '--json');
+      expect(empty.exitCode).toBe(0);
+      expect(JSON.parse(empty.stdout)).toEqual({ kind: 'repo-harness.bots', protocol: 1, bots: [] });
+      const hermes = registerBot({ bot_id: 'hermes', name: 'Hermes', host: 'Hermes', herdr_agent: 'hermes', now: NOW }, h.env);
+      const dot = registerBot({ bot_id: 'dot', name: 'Dot', host: 'Dot', now: NOW }, h.env);
+      const listed = rh('list', '--json');
+      expect(listed.exitCode).toBe(0);
+      expect(JSON.parse(listed.stdout)).toEqual({ kind: 'repo-harness.bots', protocol: 1, bots: [dot, hermes] });
+      expect(listed.stdout).not.toContain(h.root);
+      expect(rh('list').stdout).toBe('dot  Dot  Dot\nhermes  Hermes  Hermes\n');
+      const shown = rh('show', 'hermes', '--json');
+      expect(shown.exitCode).toBe(0);
+      expect(JSON.parse(shown.stdout)).toEqual(hermes);
+      const missing = rh('show', 'nosuch');
+      expect(missing.exitCode).toBe(1);
+      expect(missing.stderr).toContain('bot_not_registered: nosuch');
+      const badId = rh('show', '../escape');
+      expect(badId.exitCode).toBe(2);
+      expect(badId.stderr).toContain('bot_id_invalid');
+      writeFileSync(join(botRegistryPath(h.env), 'broken.json'), '{"protocol":1');
+      const corrupt = rh('list');
+      expect(corrupt.exitCode).toBe(1);
+      expect(corrupt.stderr).toContain('bot_registry_invalid: bot registry entry "broken.json" is invalid');
+    } finally { h.cleanup(); }
+  }, 60_000);
 });

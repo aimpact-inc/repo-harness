@@ -35,7 +35,8 @@ export interface BotRecordV1 {
   readonly registered_at: string;
 }
 
-export type BotRegistryErrorCode = 'bot_invalid' | 'bot_exists' | 'bot_conflict' | 'bot_registry_full' | 'bot_registry_invalid';
+export type BotRegistryErrorCode =
+  | 'bot_invalid' | 'bot_id_invalid' | 'bot_not_registered' | 'bot_exists' | 'bot_conflict' | 'bot_registry_full' | 'bot_registry_invalid';
 
 export class BotRegistryError extends Error {
   constructor(readonly code: BotRegistryErrorCode, message: string) {
@@ -141,6 +142,14 @@ export function readBotRegistry(env: NodeJS.ProcessEnv = process.env): readonly 
   });
   assertUniqueIdentities(bots, 'bot_registry_invalid');
   return Object.freeze(bots);
+}
+
+/** One record by id; the whole registry must read cleanly, as for every reader. */
+export function findBot(botId: string, env: NodeJS.ProcessEnv = process.env): BotRecordV1 {
+  if (!BOT_ID.test(botId)) throw new BotRegistryError('bot_id_invalid', 'bot id must match [a-z][a-z0-9-]{0,62}');
+  const bot = readBotRegistry(env).find(entry => entry.bot_id === botId);
+  if (bot === undefined) throw new BotRegistryError('bot_not_registered', botId);
+  return bot;
 }
 
 export interface RegisterBotInput {
