@@ -12,7 +12,7 @@ import { taskReviewRunner } from '../src/effects/review-runner/task-review-runne
 import { fixtureTemplate, recordFixtureAcceptance, fixtureReviewResult } from './helpers/repo-fixture';
 import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { darwinTest } from './helpers/darwin-test';
-import { existsSync, mkdtempSync, mkdirSync, realpathSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import { spawnSync } from 'child_process';
@@ -827,13 +827,22 @@ const codexHome = (f: ReturnType<typeof reviewFixture>) => {
   return join(f.reviewerRepo,'.ai/harness/runs/task-agent-outbox',importedTaskDir(f.reviewerRepo,session.task,'deep-reasoner').split('/').pop()!,'.codex-home');
 };
 
-darwinTest('a Codex review starts and closes with no auth.json in its isolated home', async () => {
+darwinTest('a Codex review starts with no auth.json, and closeout removes the credential copy and links of an earlier version', async () => {
   const f=reviewFixture();f.verdict('PASS');
   let atStart: string[] = [];
   await runReviewRound({...f.options,harness:'codex'},{...f.effects,start:async(...args)=>{atStart=readdirSync(codexHome(f));return f.effects.start(...args);}});
   expect(atStart).toEqual(['config.toml']);
+  // The earlier version copied the native codex auth.json and linked the native pi auth.json and models.json.
+  const native = join(f.home, 'native'), pi = join(codexHome(f), '..', '.pi-agent'), copy = join(codexHome(f), 'auth.json');
+  mkdirSync(native); mkdirSync(pi, { mode: 0o700 });
+  for (const name of ['auth.json', 'models.json']) { writeFileSync(join(native, name), '{"fixture":"native"}'); symlinkSync(join(native, name), join(pi, name)); }
+  mkdirSync(join(copy, 'inner'), { recursive: true });
+  await expect(closeReview(f.root,f.options.authority,false,f.home,f.effects)).rejects.toThrow('cleanup_pending: review_legacy_credential_cleanup_failed');
+  expect(existsSync(join(reviewLocation(f.root,f.options.authority).dir,'closed.json'))).toBe(false);
+  rmSync(copy, { recursive: true }); writeFileSync(copy, '{"tokens":"fixture"}', { mode: 0o600 });
   await closeReview(f.root,f.options.authority,false,f.home,f.effects);
-  expect(readdirSync(codexHome(f))).toEqual(['config.toml']);
+  expect([readdirSync(codexHome(f)), readdirSync(pi)]).toEqual([['config.toml'], []]);
+  for (const name of ['auth.json', 'models.json']) expect(readFileSync(join(native, name), 'utf8')).toBe('{"fixture":"native"}');
 });
 
 // Regression: reviewer-authored completion/model evidence must never mint a Receipt.

@@ -1,4 +1,4 @@
-import { lstatSync, realpathSync, mkdirSync, existsSync, readFileSync, openSync, closeSync, constants, writeFileSync } from 'node:fs';
+import { lstatSync, realpathSync, mkdirSync, existsSync, readFileSync, openSync, closeSync, constants, writeFileSync, unlinkSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { isAbsolute, relative, sep, join } from 'node:path';
 import type { PiModelIdentity } from '../pi-host-probe';
@@ -69,8 +69,36 @@ export function prepareCodexHome(output: string): { home: string } {
   writeOwnedFile(join(home, 'config.toml'), config, 'review_codex_config_changed');
   // An earlier version copied the native auth.json here; the sandbox must not read a left copy.
   const auth = join(home, 'auth.json');
-  if (existsSync(auth)) throw new Error(`review_codex_auth_present: ${auth} exists; delete it, then repeat the round`);
+  if (existsSync(auth)) throw new Error(`review_codex_auth_present: ${auth} exists; cancel the review, which removes it, and start a new one`);
   return { home };
+}
+
+const LEGACY_CLEANUP_PENDING = 'cleanup_pending: review_legacy_credential_cleanup_failed';
+/** The entry at `path`, or null when it is absent. Never follows a link. */
+function legacyEntry(path: string) {
+  try { return lstatSync(path); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw new Error(LEGACY_CLEANUP_PENDING);
+  }
+}
+/**
+ * Review closeout for an output that an earlier version prepared (#2764): it copied the native codex
+ * auth.json into .codex-home and linked the native pi auth.json and models.json into .pi-agent. This
+ * removes those entries without reading or following them; the generated files of this version stay.
+ * An entry that stays, or a directory that is not a real directory, throws cleanup_pending.
+ */
+export function removeLegacyCredentials(output: string): void {
+  if (!isAbsolute(output) || legacyEntry(output) === null) return;
+  let root: string;
+  try { root = ownedOutput(output); } catch { throw new Error(LEGACY_CLEANUP_PENDING); }
+  for (const [directory, name, linksOnly] of [['.codex-home', 'auth.json', false], ['.pi-agent', 'auth.json', true], ['.pi-agent', 'models.json', true]] as const) {
+    const parent = join(root, directory), stat = legacyEntry(parent);
+    if (stat === null) continue;
+    if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync(parent) !== parent) throw new Error(LEGACY_CLEANUP_PENDING);
+    const path = join(parent, name), entry = legacyEntry(path);
+    if (entry === null || (linksOnly && !entry.isSymbolicLink())) continue;
+    try { unlinkSync(path); } catch { throw new Error(LEGACY_CLEANUP_PENDING); }
+  }
 }
 
 export function inside(path: string, directory: string): boolean {

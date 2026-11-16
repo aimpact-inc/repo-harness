@@ -13,7 +13,7 @@ import type { ReviewerRunner, TaskClaimReference, TaskCleanupResult, TaskRequest
 import { acquireExclusiveDirectoryLock, ExclusiveLockContentionError, withCallerLock } from '../locking/exclusive-directory-lock';
 import { taskRepository } from '../git/task-repository';
 import { ensureSessionDirectory, nextSessionRound, readSessionArtifact, writeSessionArtifact } from '../terminal/task-session-io';
-import { reviewIsolationPolicy, prepareReviewLauncher, prepareCodexHome, preparePiAgentDirectory } from './review-isolation';
+import { reviewIsolationPolicy, prepareReviewLauncher, prepareCodexHome, preparePiAgentDirectory, removeLegacyCredentials } from './review-isolation';
 import { assertMagpieReachable } from './magpie-endpoint';
 import { acceptanceContext, acceptanceReviewContextDigest, authorityFingerprint, GENERIC_REVIEW_ROLE,
   projectAcceptance, recordAcceptance, verifyAcceptance, type AcceptancePullRequestSelection,
@@ -380,6 +380,10 @@ export async function closeReview<Session, Endpoint>(repoRoot: string, authority
       // write. A cancel that lands in that window still closes the session,
       // and the durable receipt is reported here rather than discarded.
       const accepted = cancel ? acceptedRounds(dir) : [];
+      // After disposal no reviewer child can read the output, and closed.json follows only a complete cleanup.
+      if (session.actual_harness === 'codex' || session.actual_harness === 'pi') {
+        removeLegacyCredentials(effects.outputDirectory(session.reviewer_repo, primary, session.task, GENERIC_REVIEW_ROLE));
+      }
       if (cleanup.status === 'closed') writeSessionArtifact(join(dir, 'closed.json'), { cancelled: cancel, cleanup, ...(accepted.length ? { accepted_rounds: accepted } : {}) });
       return accepted.length ? { ...cleanup, accepted_rounds: accepted } : cleanup;
     }, undefined, cancel ? REVIEW_CANCEL_LOCK_WAIT_MS : 0);
