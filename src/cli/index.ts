@@ -123,6 +123,7 @@ import {
   enabledPlugins,
 } from './installer/install-state';
 import { runAdoptionPlan } from './commands/adoption-plan';
+import { buildCommandsCommand, recordCommandPlugin } from './commands/commands';
 import { rollbackAdoptionTransaction } from '../effects/fs-transaction';
 import {
   type ExclusiveDirectoryLockHandle,
@@ -157,6 +158,7 @@ else declareArchitectureSelection(recordedSelection);
 
 /** A plugin command stays in help; its handler checks the selection before any probe or write, then loads the plugin code. */
 function pluginCommand(command: Command, id: PluginId, name: string = command.name()): Command {
+  recordCommandPlugin(command, id);
   return command.hook('preAction', () => assertPluginCommandSelected(recordedSelection, id, name));
 }
 
@@ -186,6 +188,7 @@ export const CLI_PORTS: {
   },
 };
 
+<<<<<<< HEAD
 export const SUBCOMMANDS = [
   'init',
   'init-hook',
@@ -215,6 +218,8 @@ export const SUBCOMMANDS = [
 ] as const;
 export type Subcommand = (typeof SUBCOMMANDS)[number];
 
+=======
+>>>>>>> d9d1afc1f (feat(cli): rh commands lists the command tree; check:cli-manifest fails on unknown rh names in skills and root documents (#2862))
 const TARGET_HELP = 'codex|claude|both';
 const LOCATION_HELP = 'global';
 
@@ -1082,6 +1087,7 @@ export function buildProgram(): Command {
   program.addCommand(pluginCommand(buildArchitectureProjectionCommand(), 'architecture'));
   program.addCommand(pluginCommand(buildArchitectureDebtCommand(), 'architecture'));
   program.addCommand(pluginCommand(buildStrategyCommand(), 'strategy-memory'));
+  program.addCommand(buildCommandsCommand(() => program));
   program.addCommand(buildRetentionCommand(CLI_PORTS.retention));
   // The seat reset posts notices through the notify relay only when peer-runtime is selected.
   program.addCommand(buildSeatsCommand(pluginSelected(recordedSelection, 'peer-runtime')

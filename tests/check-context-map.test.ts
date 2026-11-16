@@ -428,3 +428,34 @@ describe("check-context-map", () => {
     });
   }, 30_000);
 });
+
+describe("check-cli-manifest", () => {
+  const manifestScript = join(ROOT, "scripts/check-cli-manifest.ts");
+
+  function run(content: string, file = "README.md") {
+    const repo = mkdtempSync(join(tmpdir(), "cli-manifest-"));
+    try {
+      execFileSync("git", ["init", "-q", repo]);
+      write(repo, file, content);
+      execFileSync("git", ["-C", repo, "add", "."]);
+      return spawnSync("bun", [manifestScript, "--repo", repo], { encoding: "utf8" });
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }
+
+  test("an unregistered command fails with its file and line", () => {
+    const result = run("text\n`rh nosuch`\n");
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('README.md:2: unknown command "rh nosuch"');
+  });
+
+  test("an undeclared option fails, but a passthrough command accepts any option", () => {
+    expect(run("`rh board --nosuch`\n").stdout).toContain('unknown option "--nosuch" for "rh board"');
+    expect(run("`rh run verify-sprint --anything`\n").status).toBe(0);
+  });
+
+  test("files outside the scanned locations are not read", () => {
+    expect(run("`rh nosuch`\n", "docs/note.md").status).toBe(0);
+  });
+});
