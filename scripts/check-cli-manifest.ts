@@ -49,10 +49,14 @@ export function checkSpan(root: Command, span: string): string[] {
   const pathTokens: string[] = [];
   const flags: string[] = [];
   let pathOpen = true;
+  let optionsEnded = false;
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
-    if (token === "--") break;
-    const flag = /^[[(]*(--?[A-Za-z][\w-]*)/.exec(token)?.[1];
+    if (token === "--") {
+      optionsEnded = true;
+      continue;
+    }
+    const flag = optionsEnded ? undefined : /^[[(]*(--?[A-Za-z][\w-]*)/.exec(token)?.[1];
     if (flag !== undefined && token.replace(/^[[(]*/, "").startsWith("-")) {
       flags.push(flag);
       const option = findOption(chain, flag);

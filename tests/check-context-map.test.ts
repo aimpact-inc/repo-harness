@@ -462,6 +462,7 @@ describe("check-cli-manifest", () => {
 
   test("tokens after the -- terminator are not option names", () => {
     expect(run("`rh operator capture --provider pi -- pi --nosuch`\n").status).toBe(0);
+    expect(run("`rh -- nosuch`\n").stdout).toContain('unknown command "rh nosuch"');
   });
 
   test("a short flag and --version on a subcommand are unknown", () => {
