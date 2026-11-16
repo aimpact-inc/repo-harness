@@ -234,13 +234,11 @@ does not retry. The message names the record URL, the resolved ids and the
 unresolved ids; inspect the PR before a new publish. On success the result
 lists the resolved ids in `resolved_threads`.
 
-It posts no APPROVE review and no REQUEST_CHANGES review. A gatekeeper
-seat without the `net` tool group has no network, so the session that runs
-the round publishes its receipt. A reviewer with the `net` tool group
-publishes its own round with this one command and no other GitHub write.
-The review brief states that limit. On every seat, Codex and Pi included,
-the one-write limit is a brief rule only. On a Codex seat the sandbox
-limits files only.
+It posts no APPROVE review and no REQUEST_CHANGES review. A review seat
+writes no file and no GitHub comment: the session that runs the round
+publishes its receipt with `rh review collect` (below). On every seat,
+Codex and Pi included, the read-only limit is a brief rule only. On a Codex
+seat the sandbox limits files only.
 
 A read-only review seat of any runtime (Pi, Claude, Codex) cannot write a
 receipt file. Its packet states the round, `risk_tier`, `subject_sha` and

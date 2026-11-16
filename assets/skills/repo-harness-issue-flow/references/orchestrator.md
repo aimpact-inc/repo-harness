@@ -437,9 +437,8 @@ host's PR events or check when the worker reports.
   Record the result in one acceptance record comment on
   the PR, in the row shape of `templates.md`: round, role, subject,
   verdict and model relation.
-  The review brief lets a reviewer with the `net` tool group publish only
-  its own round with `rh review publish`. It forbids every
-  other GitHub write. Attention rule A19 names a review seat that is done
+  The review brief forbids every GitHub write: the coordinator publishes
+  a review row with `rh review collect`. Attention rule A19 names a review seat that is done
   or idle for more than 10 min while its PR has no record of its harness
   after that time: read its pane and publish its row. The record is
   per harness, not per seat: a `gatekeeper` record from the same harness
