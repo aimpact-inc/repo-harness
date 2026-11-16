@@ -52,6 +52,7 @@ import {
   type SurfaceOwner,
 } from '../../core/skill-surface/plugin-manifest';
 import { hostSkillRoot, providerSkillLock, stagedSkillRoot, syncSkillRoots, type SkillHost } from '../../effects/host-skill-roots';
+import { userExcludesFilePath } from '../../effects/adoption/gitignore-plan';
 import { MANAGED_AGENTS } from '../../effects/terminal/task-role-profiles';
 import { hashManagedTree, OWNER_MARKER } from '../../effects/managed-tree';
 import { readWorkflowPolicyDocument } from '../../effects/state/resolve-effective-state';
@@ -408,6 +409,8 @@ export function ownerForInstallPath(path: string, env: NodeJS.ProcessEnv = proce
     const catalog = loadSkillSurfaceCatalog();
     const pkg = catalog.packages.find(entry => entry.name === name);
     if (pkg?.kind === 'facade' || pkg?.kind === 'provider-skill') return pkg.owner;
+    // The installer writes the Herdr skill itself (configureRequiredHerdrSkill), outside the selection projection.
+    if (pkg?.name === 'herdr') return pkg.owner;
     if (selectionOwnedSkillNames(catalog).includes(name)) return pkg!.owner;
     const obsidianSelection = requiredExplicitExternalDependencyInstallGroups(catalog, 'obsidian-memory', ['claude', 'codex']);
     if (obsidianSelection.status !== 'selected') {
@@ -807,6 +810,11 @@ export function installProfileTransactionPaths(env: NodeJS.ProcessEnv = process.
       if (name.startsWith(FACADE_NAME_PREFIX) || (lstatSync(path).isSymbolicLink() && !existsSync(path))) paths.push(path);
     }
   }
+  // The runtime ignore step writes the user Git excludes file. Rollback restores
+  // its bytes. It stays out of installProfileHostMutationPaths, the ownership
+  // allowlist, so no ownership surface can name it.
+  const excludes = userExcludesFilePath(env);
+  if (excludes.ok) paths.push(excludes.path);
   return [...new Set(paths)];
 }
 
