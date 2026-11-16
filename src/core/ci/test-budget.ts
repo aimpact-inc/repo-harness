@@ -172,9 +172,14 @@ export type TestBudgetException =
   | { readonly status: 'malformed'; readonly problem: string }
   | { readonly status: 'parsed'; readonly counts: TestBudgetExceptionCounts; readonly reason: string };
 
-const EXCEPTION_HEADING = /^## +test budget exception *(?:#+ *)?$/i;
-const SECTION_END = /^#{1,2}(?: |$)/;
-const COUNT_LINE = /^ {0,3}(?:[-*+] +)?(added test lines|added product lines|added test files): *(\d+) *$/i;
+// CommonMark ATX headings: up to three leading spaces, a space or tab after the marks, an optional closing run of #.
+const EXCEPTION_HEADING = /^ {0,3}##[ \t]+test budget exception(?:[ \t]+#+)?[ \t]*$/i;
+const SECTION_END = /^ {0,3}#{1,2}(?:[ \t]|$)/;
+// A setext underline turns the paragraph line above it into a level 1 or 2 heading.
+const SETEXT_UNDERLINE = /^ {0,3}(?:=+|-+)[ \t]*$/;
+// A list item or block quote line cannot take a setext underline; `---` after it is a thematic break.
+const NOT_PARAGRAPH = /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)|^ {0,3}>/;
+const COUNT_LINE = /^ {0,3}(?:[-*+][ \t]+)?(added test lines|added product lines|added test files):[ \t]*(\d+)[ \t]*$/i;
 const COUNT_KEYS = {
   'added test lines': 'added_test_lines',
   'added product lines': 'added_product_lines',
@@ -230,12 +235,24 @@ export function parseTestBudgetException(body: string): TestBudgetException {
   if (starts.length > 1) return { status: 'malformed', problem: 'the PR body has more than one Test budget exception section' };
   const counts: Partial<Record<keyof TestBudgetExceptionCounts, number>> = {};
   const reason: string[] = [];
+  // The previous line, when it is a paragraph line that a setext underline would make a heading.
+  let paragraph: { readonly count: keyof TestBudgetExceptionCounts | null } | null = null;
   for (const line of lines.slice(starts[0]! + 1)) {
-    if (!line.code && SECTION_END.test(line.text)) break;
-    if (line.code) continue;
+    if (line.code) {
+      paragraph = null;
+      continue;
+    }
+    if (SECTION_END.test(line.text)) break;
+    if (paragraph !== null && SETEXT_UNDERLINE.test(line.text)) {
+      // The heading line belongs to the next section, not to this one.
+      if (paragraph.count === null) reason.pop(); else delete counts[paragraph.count];
+      break;
+    }
+    const isParagraph = line.text.trim() !== '' && !NOT_PARAGRAPH.test(line.text);
     const count = COUNT_LINE.exec(line.text);
     if (count === null) {
       reason.push(line.text.trimEnd());
+      paragraph = isParagraph ? { count: null } : null;
       continue;
     }
     const key = COUNT_KEYS[count[1]!.toLowerCase() as keyof typeof COUNT_KEYS];
@@ -243,6 +260,7 @@ export function parseTestBudgetException(body: string): TestBudgetException {
     if (counts[key] !== undefined) return { status: 'malformed', problem: `the section states "${count[1]}" more than once` };
     if (!Number.isSafeInteger(value)) return { status: 'malformed', problem: `the section has an invalid number for "${count[1]}"` };
     counts[key] = value;
+    paragraph = isParagraph ? { count: key } : null;
   }
   const missing = Object.entries(COUNT_KEYS).filter(([, key]) => counts[key] === undefined).map(([label]) => label);
   if (missing.length > 0) return { status: 'malformed', problem: `the section has no line for: ${missing.join(', ')}` };

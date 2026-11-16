@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'child_process';
-import { mkdirSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { runTestBudgetCheck } from '../src/cli/commands/rules';
 import { parseTestBudgetException, testBudgetExceptionDigest } from '../src/core/ci/test-budget';
@@ -55,17 +56,20 @@ function repository(policy: string | null): { repo: string; base: string } {
     'tests/old.test.ts': lines(5),
     'tests/moved.test.ts': lines(5),
     'src/helper.ts': lines(20, 'helper'),
+    'src/tab\tapp.ts': lines(10, 'tabapp'),
+    'docs/tab\tdoc.md': lines(3, 'doc'),
     ...(policy === null ? {} : { '.ai/harness/policy.json': policy }),
   });
   git(repo, 'checkout', '-q', '-b', 'pr');
   return { repo, base };
 }
 
-function check(repo: string, base: string, head: string, body: string) {
-  const bodyFile = join(repo, '..', `${repo.split('/').pop()}-body.md`);
-  workspaces.push(bodyFile);
+function check(cwd: string, base: string, head: string, body: string) {
+  const directory = mkdtempSync(join(tmpdir(), 'test-budget-body-'));
+  workspaces.push(directory);
+  const bodyFile = join(directory, 'body.md');
   writeFileSync(bodyFile, body);
-  return runTestBudgetCheck({ repoRoot: repo, base, head, bodyFile }).result;
+  return runTestBudgetCheck({ cwd, base, head, bodyFile }).result;
 }
 
 function exceptionBody(testLines: number, productLines: number, testFiles: number, reason = 'The parser has no test that reaches the CRLF branch.'): string {
@@ -87,6 +91,8 @@ describe('TestBudget evaluation', () => {
     expect(result.measured).toEqual({ added_test_lines: 30, added_product_lines: 3, added_test_files: 1, ratio: 10, ratio_cap: 2, file_cap: 1 });
     expect(result.over_budget).toBe(true);
     expect(result.exception).toEqual({ present: false, valid: false, counts: null, reason: null });
+    // From a subdirectory the check still reads the policy at the repository root.
+    expect(check(join(repo, 'src'), movedBase, head, '').state).toBe('violation');
   });
 
   test('a PR within the budget passes', () => {
@@ -98,7 +104,7 @@ describe('TestBudget evaluation', () => {
     expect(result.measured?.ratio).toBe(1);
   });
 
-  test('file states: binary, renames, delete-then-recreate and deletes', () => {
+  test('file states: binary, renames, delete-then-recreate, deletes and paths with tabs', () => {
     const { repo, base } = repository(ENABLED);
     commit(repo, { 'tests/old.test.ts': null });
     const head = commit(repo, {
@@ -114,9 +120,13 @@ describe('TestBudget evaluation', () => {
       'tests/helper.test.ts': lines(20, 'helper'),
       'src/app.ts': null,
       'src/main.ts': lines(10),
+      // A tab inside a path name stays part of the path.
+      'tests/tab\tname.test.ts': lines(2, 'tabtest'),
+      'src/tab\tapp.ts': lines(12, 'tabapp'),
+      'docs/tab\tdoc.md': null,
     });
     const result = check(repo, base, head, '');
-    expect(result.measured).toEqual({ added_test_lines: 1, added_product_lines: 0, added_test_files: 2, ratio: null, ratio_cap: 2, file_cap: 1 });
+    expect(result.measured).toEqual({ added_test_lines: 3, added_product_lines: 2, added_test_files: 3, ratio: 1.5, ratio_cap: 2, file_cap: 1 });
     expect(result.state).toBe('violation');
   });
 
@@ -189,15 +199,20 @@ describe('TestBudget exception', () => {
       counts: { added_test_lines: 30, added_product_lines: 3, added_test_files: 1 },
       reason: 'The parser has no test that reaches the CRLF branch.',
     });
+    const indented = exceptionBody(30, 3, 1).replace('## Test budget exception', '   ##\tTest budget exception');
+    expect(check(repo, base, head, indented).state).toBe('pass');
   });
 
   test('an empty heading, wrong numbers or an empty reason do not pass', () => {
     const { repo, base } = repository(ENABLED);
     const head = commit(repo, { 'src/app.ts': lines(13), 'tests/new.test.ts': lines(30) });
+    const countsOnly = '## Test budget exception\n\n- Added test lines: 30\n- Added product lines: 3\n- Added test files: 1\n\n';
     const bodies = [
       '## Test budget exception\n\n## Rollback\n',
       exceptionBody(30, 4, 1),
       exceptionBody(30, 3, 1, ''),
+      // Each next heading ends the section, so its text is not the reason.
+      ...['  ## Rollback', '##\tRollback', '   # Rollback', 'Rollback\n---'].map((heading) => `${countsOnly}${heading}\n\ngit revert.\n`),
     ];
     for (const body of bodies) {
       const result = check(repo, base, head, body);

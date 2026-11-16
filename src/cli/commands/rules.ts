@@ -21,7 +21,8 @@ import { POLICY_PATH, decodeWorkflowPolicy } from '../../core/workflow/policy-sc
 import { gitExecFileSync } from '../../effects/git/runner';
 
 interface TestBudgetCheckInput {
-  readonly repoRoot: string;
+  /** Any directory inside the repository; the check runs at its top level. */
+  readonly cwd: string;
   readonly base: string;
   readonly head: string;
   readonly bodyFile: string;
@@ -54,7 +55,8 @@ function policyTextAt(repoRoot: string, base: string): string | null {
   return git(repoRoot, ['cat-file', 'blob', `${base}:${POLICY_PATH}`], 'policy_unreadable');
 }
 
-const DIFF_ARGS = ['--no-ext-diff', '--no-textconv', '-M'] as const;
+// `--no-relative` keeps paths root-relative under a `diff.relative` setting.
+const DIFF_ARGS = ['--no-ext-diff', '--no-textconv', '--no-relative', '-M'] as const;
 
 /** `git diff --name-status` and `--numstat` with the same rename detection, joined by the new path. */
 function diffEntries(repoRoot: string, start: string, head: string): TestBudgetDiffEntry[] {
@@ -62,9 +64,13 @@ function diffEntries(repoRoot: string, start: string, head: string): TestBudgetD
   const stats = git(repoRoot, ['diff', ...DIFF_ARGS, '--numstat', '-z', start, head, '--'], 'diff_unavailable').split('\0');
   const added = new Map<string, number | null>();
   for (let index = 0; index < stats.length - 1; index += 1) {
-    const [plus, , path] = stats[index]!.split('\t');
-    // A rename prints an empty path, then the old and the new path as their own fields.
-    const target = path === '' ? stats[(index += 2)]! : path!;
+    // `added<TAB>deleted<TAB>path`: a path keeps any tab it holds. A rename prints an
+    // empty path, then the old and the new path as their own fields.
+    const record = stats[index]!;
+    const first = record.indexOf('\t');
+    const plus = record.slice(0, first);
+    const path = record.slice(record.indexOf('\t', first + 1) + 1);
+    const target = path === '' ? stats[(index += 2)]! : path;
     added.set(target, plus === '-' ? null : Number(plus));
   }
   const entries: TestBudgetDiffEntry[] = [];
@@ -94,8 +100,9 @@ export function runTestBudgetCheck(input: TestBudgetCheckInput): { result: TestB
   };
   let exception: TestBudgetException = { status: 'absent' };
   try {
-    bound.head_sha = commit(input.repoRoot, input.head, 'head_unavailable');
-    const base = commit(input.repoRoot, input.base, 'base_unavailable');
+    const repoRoot = git(input.cwd, ['rev-parse', '--show-toplevel'], 'repository_unavailable').trim();
+    bound.head_sha = commit(repoRoot, input.head, 'head_unavailable');
+    const base = commit(repoRoot, input.base, 'base_unavailable');
     let body: string;
     try {
       body = readFileSync(input.bodyFile, 'utf8');
@@ -106,7 +113,7 @@ export function runTestBudgetCheck(input: TestBudgetCheckInput): { result: TestB
     bound.exception_digest = testBudgetExceptionDigest(exception);
     let decoded;
     try {
-      decoded = decodeWorkflowPolicy(policyTextAt(input.repoRoot, base));
+      decoded = decodeWorkflowPolicy(policyTextAt(repoRoot, base));
     } catch (error) {
       if (error instanceof CheckError) throw error;
       throw new CheckError('policy_invalid', (error as Error).message);
@@ -114,15 +121,15 @@ export function runTestBudgetCheck(input: TestBudgetCheckInput): { result: TestB
     const config = readTestBudgetConfig(decoded);
     if (config.status === 'invalid') throw new CheckError('policy_invalid', `${POLICY_PATH} at ${base}: ${config.message}`);
     bound.policy_digest = testBudgetPolicyDigest(config);
-    if (git(input.repoRoot, ['rev-parse', '--is-shallow-repository'], 'diff_unavailable').trim() !== 'false') {
+    if (git(repoRoot, ['rev-parse', '--is-shallow-repository'], 'diff_unavailable').trim() !== 'false') {
       throw new CheckError('diff_unavailable', 'the clone is shallow; the merge-base needs the full history');
     }
-    bound.diff_start = git(input.repoRoot, ['merge-base', base, bound.head_sha], 'merge_base_unavailable').trim();
+    bound.diff_start = git(repoRoot, ['merge-base', base, bound.head_sha], 'merge_base_unavailable').trim();
     const result = evaluateTestBudget({
       head_sha: bound.head_sha,
       diff_start: bound.diff_start,
       config,
-      entries: config.status === 'present' && config.config.enabled ? diffEntries(input.repoRoot, bound.diff_start, bound.head_sha) : [],
+      entries: config.status === 'present' && config.config.enabled ? diffEntries(repoRoot, bound.diff_start, bound.head_sha) : [],
       exception,
     });
     return { result, lines: describeTestBudget(result, exception) };
@@ -156,7 +163,7 @@ export function buildRulesCommand(): Command {
         process.exitCode = 2;
         return;
       }
-      const { result, lines } = runTestBudgetCheck({ repoRoot: process.cwd(), base: options.base, head: options.head, bodyFile: options.bodyFile });
+      const { result, lines } = runTestBudgetCheck({ cwd: process.cwd(), base: options.base, head: options.head, bodyFile: options.bodyFile });
       const document = JSON.stringify(result);
       process.stdout.write(`${document}\n`);
       if (options.githubAnnotation) process.stdout.write(`${githubNoticeCommand(TEST_BUDGET_RESULT_SCHEMA, document)}\n`);
