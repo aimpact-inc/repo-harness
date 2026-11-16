@@ -6,7 +6,7 @@
 - Owner word, relayed locally by the advisor seat and recorded in [#2742 comment 6924525557](https://github.com/aimpact-inc/repo-harness/issues/2742#issuecomment-6924525557) at 2026-11-16T17:55:00Z: "那你等一起，发0.33.2吧，我不想再发一个，下一版就直接跳0.34了". The recorded reading: one release, version 0.33.2; the next release is 0.34.0.
 - The recorded reading cuts the release after #2936 and #2926 (#2916) merge. #2936 merged as `e95dee83b` (#2949). PR #2926 is open at the source commit. When it merges, this prep PR rebases and assembles its fragment into `## [0.33.2]`.
 - #2898, #2922, #2894 and #2893 stay out of this release; they merge after the `v0.33.2` tag.
-- Source commit before release prep: `a88a201e59c17726cd935b3404a3dfff7bbb8977`. The release range is `v0.33.1..a88a201e5`, 56 commits, 27 changelog fragments.
+- Source commit before release prep: `3dd1f3d34c8b3da74b119666cfd15726ef1b2867`. The release range is `v0.33.1..3dd1f3d34`, 57 commits, 27 changelog fragments.
 - Breaking removals ship in this patch version because the owner chose 0.33.2: #2863 removes `rh init-hook`, `rh update --check`, `rh update --no-runtime-refresh` and `rh update --check-updates`; #2867 replaces `rh board migrate-dependencies --write` with `--apply`.
 - Release prep correction: the #2798 Fixed entry named `rh update --check`, which #2863 removes in the same release. The entry now names `rh setup check` only.
 - These changes have no changelog entry: #2862 (`rh commands`), #2868 (`rh bots`), #2870 (`rh arch <command>`), #2913 (Pi review seats load the hook extension), #2923 (dispatch packet Authority line), #2843 (fleet saves user agents), #2844 (installer owns Herdr skill copies), #2917 (seats settings save decoder), #2814 and #2928 (maintenance-triage themes), #2823 to #2826 (operator console diagrams).
@@ -69,10 +69,11 @@
 | [#2949](https://github.com/aimpact-inc/repo-harness/pull/2949) | `e95dee83b` | feat(review): P2 findings do not block a merge; FAIL needs a P0 or P1 |
 | [#2933](https://github.com/aimpact-inc/repo-harness/pull/2933) | `ac5932523` | feat(arch): rh arch verify gives one verdict over the ArchContext checks (#2873) |
 | [#2952](https://github.com/aimpact-inc/repo-harness/pull/2952) | `a88a201e5` | feat(board): High review runs as a relay, the reviewer starts after the gatekeeper PASS (#2910) |
+| [#2957](https://github.com/aimpact-inc/repo-harness/pull/2957) | `3dd1f3d34` | fix(rules): resolve repository root and refuse missing ledger (#2954) |
 
 ## Verification
 
-On Darwin arm64 with Bun 1.4.4, at source `a88a201e5` with the release prep changes:
+On Darwin arm64 with Bun 1.4.4, at source `a88a201e5` with the release prep changes. After the rebase onto `3dd1f3d34` (it changes `src/cli/commands/rules.ts` and `tests/rule-candidates.test.ts` only), `check:type`, the skill version check and the changelog check pass again.
 
 - `bun install --frozen-lockfile`: pass, 521 packages installed.
 - `bun run check:type`: pass.
