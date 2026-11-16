@@ -129,7 +129,7 @@ function bare(args: string[]): unknown[] {
 }
 /**
  * On darwin a Pi review seat runs under its Seatbelt write profile (#2905): `TMPDIR`, `REPO_HARNESS_TEST_TEMP_ROOT` and
- * `BUN_TEST_JUNIT_DIR` point into the seat directory inside /tmp, beside the profile, then `sandbox-exec -f <profile>` starts pi.
+ * `BUN_TEST_JUNIT_DIR` point into the seat directory inside /tmp (in TMPDIR when TMPDIR is there), beside the profile, then `sandbox-exec -f <profile>` starts pi.
  * `piReview` checks that prefix, removes the seat directory and drops the prefix; elsewhere the argv has none.
  */
 function piReview(args: string[]): unknown[] {
@@ -137,7 +137,7 @@ function piReview(args: string[]): unknown[] {
   if (process.platform !== "darwin") return rest;
   const root = dirname(rest[5] as string);
   try {
-    expect(root.startsWith(join(realpathSync("/tmp"), "rh-seat-"))).toBe(true);
+    expect(basename(root).startsWith("rh-seat-") && root.startsWith(realpathSync("/tmp"))).toBe(true);
     const writable = join(root, "w");
     expect(rest.slice(0, 5)).toEqual([`TMPDIR=${writable}`, `REPO_HARNESS_TEST_TEMP_ROOT=${writable}`, `BUN_TEST_JUNIT_DIR=${join(writable, "junit")}`, "/usr/bin/sandbox-exec", "-f"]);
     expect(statSync(writable).isDirectory()).toBe(true);

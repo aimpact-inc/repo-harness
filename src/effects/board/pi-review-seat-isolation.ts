@@ -1,10 +1,10 @@
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PiReviewSeatIsolation } from '../../core/board/seat-launch';
 import { piAgentDir } from '../pi-agent-dir';
 import { repoHarnessHome } from '../repo-harness-home';
-import { writeOnlyRule } from '../review/review-isolation';
+import { inside, writeOnlyRule } from '../review/review-isolation';
 
 export class PiReviewSeatIsolationError extends Error {
   readonly code = 'pi_review_isolation_unsafe';
@@ -27,8 +27,8 @@ function ownedLeaf(parent: string, name: string): string {
  * denies each write outside the entries that the write trace of a review run found: the seat directory
  * (TMPDIR, the JUnit reports and the test HOMEs of `bun run test:files`), the Pi session records that
  * `rh review collect` reads, the locks of the Pi `auth.json` and `trust.json`, the host test queue,
- * `/dev/null` and the terminals. Reads and network stay as they are. The seat directory is a short
- * directory inside /tmp, because the test isolation allocates only there and unix socket paths stay
+ * `/dev/null` and the terminals. Reads and network stay as they are. The seat directory is inside
+ * /tmp, because the test isolation allocates only there, and short, because unix socket paths stay
  * below 104 bytes. The profile sits beside it, where the seat cannot write it.
  */
 export function preparePiReviewSeatIsolation(env: NodeJS.ProcessEnv): PiReviewSeatIsolation {
@@ -40,7 +40,9 @@ export function preparePiReviewSeatIsolation(env: NodeJS.ProcessEnv): PiReviewSe
   // Pi takes the trust store lock on each start, also to read trust.json; trust.json itself stays denied.
   const trustLock = join(realpathSync(agent), 'trust.json.lock');
   const testQueue = ownedLeaf(repoHarnessHome(env), 'host-test-queue');
-  const root = realpathSync(mkdtempSync('/tmp/rh-seat-'));
+  // A TMPDIR inside /tmp (a test run, or a test inside a seat) holds the seat directory; else /tmp does.
+  const temporary = realpathSync(tmpdir()), tmp = realpathSync('/tmp');
+  const root = realpathSync(mkdtempSync(join(inside(temporary, tmp) ? temporary : tmp, 'rh-seat-')));
   const writableDirectory = join(root, 'w');
   mkdirSync(writableDirectory, { mode: 0o700 });
   const profile = join(root, 'write-isolation.sb');
