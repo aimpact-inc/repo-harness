@@ -22,7 +22,7 @@ const NOTICE_TIMEOUT = 'repo-harness: architecture notice: not finished in its t
 const killed = () => ({ status: null, signal: 'SIGKILL' as const, stdout: '', stderr: '' });
 const STATUS = 'rh arch projection status --json';
 const NO_MODEL = 'no ArchContext model (.archcontext/manifest.yaml is missing)';
-const UNIGNORED = '[Architecture] notice unavailable: .ai/harness/state/ is not Git-ignored. Fix: run rh update to write the runtime-state block to the user-level Git excludes file.';
+const UNIGNORED = '[Architecture] notice unavailable: .ai/harness/state/ is not Git-ignored. Fix: run rh init to register this repository, then rh update; update writes the runtime-state block to the repository\'s .git/info/exclude.';
 const UNIGNORED_MESSAGE = 'Architecture: notice unavailable (.ai/harness/state/ is not Git-ignored); run rh update.';
 const ARCHIMAP = 'docs/architecture/archimap.html';
 const ARCHIMAP_MARKER = '.ai/harness/state/agent-notice-archimap';
