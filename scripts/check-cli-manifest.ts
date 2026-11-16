@@ -7,8 +7,8 @@
 import { execFileSync } from "child_process";
 import { readFileSync } from "fs";
 import { resolve } from "path";
-import type { Command } from "commander";
-import { allowsUnknownOptions } from "../src/cli/commands/commands";
+import type { Command, Option } from "commander";
+import { allowsUnknownOptions, effectiveOptions } from "../src/cli/commands/commands";
 import { buildProgram } from "../src/cli/index";
 
 const SCANNED = [
@@ -27,9 +27,19 @@ function findChild(command: Command, name: string): Command | undefined {
   return command.commands.find(child => child.name() === name || child.aliases().includes(name));
 }
 
-function declaresOption(chain: readonly Command[], name: string): boolean {
-  if (name === "help" || name === "version") return true;
-  return chain.some(command => command.options.some(option => option.long === `--${name}`));
+/** The option a flag token names, in the chain or in any command below the last chain command (Commander passes an unmatched option down to the subcommand). */
+function findOption(chain: readonly Command[], flag: string): Option | undefined {
+  const matches = (option: Option) => option.long === flag || option.short === flag;
+  const own = effectiveOptions(chain).find(matches);
+  if (own) return own;
+  const search = (command: Command): Option | undefined =>
+    command.options.find(matches) ?? command.commands.map(search).find(found => found !== undefined);
+  return search(chain[chain.length - 1]);
+}
+
+function isBuiltinFlag(chain: readonly Command[], flag: string): boolean {
+  if (flag === "--help" || flag === "-h") return true;
+  return chain.length === 1 && (flag === "--version" || flag === "-V");
 }
 
 /** Findings for one span (the text after the opening backtick), without file position. */
@@ -37,8 +47,23 @@ export function checkSpan(root: Command, span: string): string[] {
   const tokens = span.trim().split(/\s+/).slice(1);
   const chain: Command[] = [root];
   const pathTokens: string[] = [];
-  for (const token of tokens) {
-    if (token.startsWith("-") || PATH_END.test(token)) break;
+  const flags: string[] = [];
+  let pathOpen = true;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--") break;
+    const flag = /^[[(]*(--?[A-Za-z][\w-]*)/.exec(token)?.[1];
+    if (flag !== undefined && token.replace(/^[[(]*/, "").startsWith("-")) {
+      flags.push(flag);
+      const option = findOption(chain, flag);
+      if (option && (option.required || option.optional) && !token.includes("=") && index + 1 < tokens.length && !tokens[index + 1].startsWith("-")) index += 1;
+      continue;
+    }
+    if (!pathOpen) continue;
+    if (PATH_END.test(token)) {
+      pathOpen = false;
+      continue;
+    }
     const current = chain[chain.length - 1];
     const child = findChild(current, token);
     if (child) {
@@ -46,21 +71,18 @@ export function checkSpan(root: Command, span: string): string[] {
       pathTokens.push(token);
       continue;
     }
-    const hasSubcommands = current.commands.length > 0;
-    if (hasSubcommands && current.registeredArguments.length === 0) {
+    if (current.commands.length > 0 && current.registeredArguments.length === 0) {
       return [`unknown command "rh ${[...pathTokens, token].join(" ")}"`];
     }
-    break;
+    pathOpen = false;
   }
   if (chain.some(allowsUnknownOptions)) return [];
   const path = chain.slice(1).map(command => command.name()).join(" ");
+  const declared = effectiveOptions(chain);
   const findings: string[] = [];
-  const seen = new Set<string>();
-  for (const match of span.matchAll(/(?<![\w-])--([A-Za-z][\w-]*)/g)) {
-    const name = match[1];
-    if (seen.has(name) || declaresOption(chain, name)) continue;
-    seen.add(name);
-    findings.push(`unknown option "--${name}" for "rh${path === "" ? "" : ` ${path}`}"`);
+  for (const flag of new Set(flags)) {
+    if (isBuiltinFlag(chain, flag) || declared.some(option => option.long === flag || option.short === flag)) continue;
+    findings.push(`unknown option "${flag}" for "rh${path === "" ? "" : ` ${path}`}"`);
   }
   return findings;
 }

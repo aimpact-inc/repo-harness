@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { Command } from "commander";
 import { buildProgram } from "../../src/cli/index";
 
-type Manifest = { kind: string; protocol: number; commands: { path: string[]; plugin: string }[] };
+type Manifest = { kind: string; protocol: number; commands: { path: string[]; plugin: string; options: { flags: string }[] }[] };
 
 function leafPaths(command: Command, prefix: string[] = []): string[] {
   return command.commands.flatMap(child => {
@@ -39,5 +39,11 @@ describe("rh commands", () => {
     expect(plugins.get("review publish")).toBe("core");
     expect(plugins.get("mcp serve")).toBe("mcp");
     expect(plugins.get("mcp access set")).toBe("core");
+  });
+
+  test("a leaf lists the options of its ancestors", async () => {
+    const flags = (await manifest()).commands.find(entry => entry.path.join(" ") === "board parents")?.options.map(option => option.flags) ?? [];
+    expect(flags).toContain("--json");
+    expect(flags.some(flag => flag.startsWith("--parent"))).toBe(true);
   });
 });

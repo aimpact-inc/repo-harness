@@ -455,6 +455,20 @@ describe("check-cli-manifest", () => {
     expect(run("`rh run verify-sprint --anything`\n").status).toBe(0);
   });
 
+  test("a parent option before a nested command is valid; a bad nested command after it fails", () => {
+    expect(run("`rh board --parent 2862 attention --watch`\n").status).toBe(0);
+    expect(run("`rh board --parent 2862 attentionz`\n").stdout).toContain('unknown command "rh board attentionz"');
+  });
+
+  test("tokens after the -- terminator are not option names", () => {
+    expect(run("`rh operator capture --provider pi -- pi --nosuch`\n").status).toBe(0);
+  });
+
+  test("a short flag and --version on a subcommand are unknown", () => {
+    expect(run("`rh status -x`\n").stdout).toContain('unknown option "-x" for "rh status"');
+    expect(run("`rh status --version`\n").stdout).toContain('unknown option "--version" for "rh status"');
+  });
+
   test("files outside the scanned locations are not read", () => {
     expect(run("`rh nosuch`\n", "docs/note.md").status).toBe(0);
   });

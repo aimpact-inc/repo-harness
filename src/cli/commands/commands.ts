@@ -1,4 +1,4 @@
-import { Command } from 'commander';
+import { Command, type Option } from 'commander';
 import type { PluginId } from '../../core/skill-surface/plugin-manifest';
 import { CLI_VERSION } from './status';
 
@@ -27,6 +27,21 @@ export interface ManifestCommand {
 /** Commander keeps the unknown-option switch private; this is the only reader. */
 export function allowsUnknownOptions(command: Command): boolean {
   return (command as unknown as { _allowUnknownOption: boolean })._allowUnknownOption;
+}
+
+/** The options that bind for the last command of a chain: its own, then each ancestor's. Commander binds an ancestor option wherever it appears. A nearer declaration of the same flag wins. */
+export function effectiveOptions(chain: readonly Command[]): Option[] {
+  const seen = new Set<string>();
+  const options: Option[] = [];
+  for (let index = chain.length - 1; index >= 0; index -= 1) {
+    for (const option of chain[index].options) {
+      const key = option.long ?? option.short ?? option.flags;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      options.push(option);
+    }
+  }
+  return options;
 }
 
 function pluginOf(chain: readonly Command[]): PluginId | 'core' {
@@ -61,7 +76,7 @@ export function collectCommandManifest(root: Command): ManifestCommand[] {
         plugin: pluginOf(childChain),
         passthrough: allowsUnknownOptions(child),
         arguments: child.registeredArguments.map(argumentLabel),
-        options: child.options.map(option => ({ flags: option.flags, required: option.mandatory, description: option.description })),
+        options: effectiveOptions(childChain).map(option => ({ flags: option.flags, required: option.mandatory, description: option.description })),
         hidden: childHidden,
       });
     }
