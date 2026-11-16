@@ -251,6 +251,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
         assertConfigurationPath(excludes.path, dirname(excludes.path));
         const removal = removeRuntimeStateIgnoreBlock(read(excludes.path));
         if (removal.status === 'unbalanced') unresolved(excludes.path, 'unbalanced runtime-state ignore block; preserved');
+        else if (removal.status === 'edited') unresolved(excludes.path, 'runtime-state ignore block was edited; preserved. Move your rules outside the markers, then delete the block.');
         else if (removal.status === 'removed') change(excludes.path, removal.content.trim() ? removal.content : null, 'runtime-state ignore block');
       } catch (error) { unresolved(excludes.path, String((error as Error).message)); }
     }

@@ -213,6 +213,8 @@ describe("global working rules distribution", () => {
     expect(mergeManagedBlock(content, zhBlock(), ROOT)).toMatchObject({ status: "kept-edited", content });
     expect(inspectGlobalContext(content, ROOT).state).toBe("managed-stale");
     expect(removeManagedBlock(content, ROOT)).toEqual({ status: "edited" });
+    // A released block needs no template: a missing package root still proves it.
+    expect(removeManagedBlock(zhBlock(), join(ROOT, "missing-package-root"))).toEqual({ status: "removed", content: "\n" });
     expect(removeManagedBlock(`user content\r\n\r\n${zhBlock().replace(/\n/g, "\r\n")}`, ROOT)).toEqual({ status: "removed", content: "user content\r\n\r\n\r\n" });
   });
 

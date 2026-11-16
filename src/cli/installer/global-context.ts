@@ -297,8 +297,9 @@ export interface MergedManagedBlock {
 function managedBlockProved(block: string, sourceRoot: string): boolean {
   const lines = block.split('\n');
   const language = isSelfNote(lines[1]) ? decodeReportingLanguage(lines[2]) : null;
-  if (language !== null && block === renderGlobalRulesBlock(sourceRoot, language).trimEnd()) return true;
-  return isReleasedGlobalRulesBlock(block, language?.preset === 'custom' ? language.instruction : null);
+  // The released fingerprints need no template, so a released block is proved even when the template is unreadable.
+  if (isReleasedGlobalRulesBlock(block, language?.preset === 'custom' ? language.instruction : null)) return true;
+  return language !== null && block === renderGlobalRulesBlock(sourceRoot, language).trimEnd();
 }
 
 /**

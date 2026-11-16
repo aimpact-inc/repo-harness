@@ -10,11 +10,13 @@ import { runUserUninstall } from '../../src/cli/installer/uninstall';
 import { configurationReceiptPath, writeOwnedConfiguration } from '../../src/cli/installer/configuration-ownership';
 import { buildManagedHooks } from '../../src/cli/installer/managed-entries';
 import { renderGlobalRulesBlock } from '../../src/cli/installer/global-context';
+import { RUNTIME_STATE_IGNORE_CONTENT } from '../../src/effects/adoption/gitignore-plan';
 const CLI = join(import.meta.dir, '../../src/cli/index.ts');
 beforeAll(() => { seedGlobalPackageFixture(); });
 function fixture(run: (home: string, env: NodeJS.ProcessEnv) => void) {
  const home = mkdtempSync(join(tmpdir(), 'user-uninstall-'));
- const env: NodeJS.ProcessEnv = { ...process.env, HOME: home }; delete env.XDG_STATE_HOME;
+ // Git config and the user excludes file resolve from the temporary HOME only.
+ const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: '1' }; delete env.XDG_STATE_HOME; delete env.XDG_CONFIG_HOME; delete env.GIT_CONFIG_GLOBAL;
  try { run(home, env); } finally { rmSync(home, { recursive: true, force: true }); }
 }
 function put(home: string, path: string, content: string) { const absolute = join(home, path); mkdirSync(join(absolute, '..'), {recursive:true}); writeFileSync(absolute,content); }
@@ -150,12 +152,15 @@ test('managed context block cleanup keeps user prose',()=>fixture((home,env)=>{
  put(home,'.codex/AGENTS.md',`user-before\n${RULES_BLOCK}\nuser-after\n`);
  expect(runUserUninstall({target:'codex',env}).status).toBe('complete');expect(readFileSync(join(home,'.codex/AGENTS.md'),'utf8')).toBe('user-before\n\nuser-after\n');
 }));
-test('an edited managed context block keeps the file byte-identical and is unresolved',()=>fixture((home,env)=>{
- const content=`user-before\n${RULES_BLOCK.replace('## Reporting','- My own rule.\n\n## Reporting')}\n`;
- put(home,'.claude/CLAUDE.md',content);
+const IGNORE_BLOCK=`# BEGIN: repo-harness runtime-state\n${RUNTIME_STATE_IGNORE_CONTENT}\n# END: repo-harness runtime-state`;
+test.each([
+ ['.claude/CLAUDE.md',`user-before\n${RULES_BLOCK.replace('## Reporting','- My own rule.\n\n## Reporting')}\n`,'managed rules block'],
+ ['.config/git/ignore',`*.log\n${IGNORE_BLOCK.replace('\n# END:','\nscratch-*/\n# END:')}\n`,'runtime-state ignore block'],
+])('an edited managed block in %s keeps the file byte-identical and is unresolved',(path,content,name)=>fixture((home,env)=>{
+ put(home,path,content);
  const result=runUserUninstall({target:'both',env});
- expect(result.exitCode).toBe(1);expect(readFileSync(join(home,'.claude/CLAUDE.md'),'utf8')).toBe(content);
- expect(result.lines).toContain(`[unresolved] ${join(home,'.claude/CLAUDE.md')}: managed rules block was edited; preserved. Move your rules outside the markers, then delete the block.`);
+ expect(result.exitCode).toBe(1);expect(readFileSync(join(home,path),'utf8')).toBe(content);
+ expect(result.lines).toContain(`[unresolved] ${join(home,path)}: ${name} was edited; preserved. Move your rules outside the markers, then delete the block.`);
 }));
 
 test('old transaction-owned MCP projection composes with hook removal',()=>fixture((home,env)=>{
