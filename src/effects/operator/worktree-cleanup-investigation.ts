@@ -17,7 +17,7 @@ import {
 } from '../../core/operator/worktree-cleanup-plan';
 import { resolveGitCommonDirectory } from '../git/common-directory';
 import { configuredGitBinary, gitExecFileSync, withoutRepositorySelectingGitEnv } from '../git/runner';
-import { MAGPIE_LOOPBACK_PORTS, nativeAuthFiles, prepareCodexHome, prepareReviewLauncher, reviewIsolationPolicy, type CleanupReviewIsolationPaths } from '../review/review-isolation';
+import { MAGPIE_LOOPBACK_PORTS, nativeAuthFiles, nativeAuthHome, prepareCodexHome, prepareReviewLauncher, reviewIsolationPolicy, type CleanupReviewIsolationPaths } from '../review/review-isolation';
 import { runSetupProcess, type SetupProcessRunner } from '../setup/collector';
 import { readSessionArtifact, writeSessionArtifact, writeSessionBytes } from '../terminal/task-session-io';
 import { readQuotaReport } from '../board/quota';
@@ -196,9 +196,10 @@ export function prepareCleanupInvestigation(env: NodeJS.ProcessEnv, sessionId: s
   const run = privateDirectory(join(privateDirectory(join(prepareOperatorStateDir(env), 'worktree-cleanup-investigation')), jobId));
   const control = privateDirectory(join(run, 'control')), output = privateDirectory(join(run, 'output'));
   const repository = realpathSync(targets[0]!.repository);
+  const nativeHome = nativeAuthHome(env.HOME ?? userInfo().homedir, env);
   const paths: CleanupReviewIsolationPaths = { subject: repository, primary: repository, ownerRecord: cleanupSessionDirectory(env, sessionId), journal: control,
     gitCommonDir: resolveGitCommonDirectory(repository, configuredGitBinary(env), 30_000, withoutRepositorySelectingGitEnv(env)), output,
-    nativeAuth: nativeAuthFiles(env.HOME ?? userInfo().homedir, env), modelLoopbackPorts: MAGPIE_LOOPBACK_PORTS,
+    nativeAuth: nativeAuthFiles(nativeHome.HOME, nativeHome), nativeHome, modelLoopbackPorts: MAGPIE_LOOPBACK_PORTS,
     cleanup: { readDenied: readDeniedRoots(targets, env) } };
   let policy: string;
   try { policy = reviewIsolationPolicy(paths); } catch (error) {

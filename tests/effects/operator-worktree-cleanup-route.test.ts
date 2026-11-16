@@ -20,7 +20,7 @@ import {
   CleanupInvestigationError, prepareCleanupInvestigation, readCleanupInvestigationStatus, runCleanupInvestigation, startCleanupInvestigation,
   worktreeCleanupInvestigationWriteRoute, type CleanupInvestigator,
 } from '../../src/effects/operator/worktree-cleanup-investigation';
-import { prepareReviewLauncher } from '../../src/effects/review/review-isolation';
+import { prepareReviewLauncher, reviewChildEnvironment } from '../../src/effects/review/review-isolation';
 import { CLEANUP_ARCHIVE_BRANCH, createGithubDraftPrPublisher } from '../../src/effects/operator/worktree-cleanup-publish';
 import {
   chooseCleanupSessionPlan, createCleanupSessionPlan, runAuthorizedCleanup, worktreeCleanupExecuteWriteRoute, worktreeCleanupPlanWriteRoute,
@@ -348,6 +348,16 @@ darwinRouteTest('decoded advice becomes a new plan version with nothing authoriz
   expect((await runAuthorizedCleanup(decodeAuthorizedCleanupRequest({ session_id: plan.session_id, ids: [f.id],
     expected_digest: cleanupPlanSelectionDigest(plan, [f.id]), approvals: [] }), f.options())).items[0]).toMatchObject({ outcome: 'skipped', reason: 'not_approved' });
   expect(existsSync(f.tree)).toBe(true);
+});
+
+darwinRouteTest('the cleanup paths give the review child the HOME that built the native deny list', async f => {
+  const home = join(f.parent, 'native-home'); mkdirSync(home);
+  const env = { ...f.env, HOME: home };
+  const first = createCleanupSessionPlan([f.id], f.options());
+  const run = prepareCleanupInvestigation(env, first.session_id, 'd'.repeat(32), [loadCleanupSession(f.env, first.session_id).items[f.id]!.target]);
+  const child = reviewChildEnvironment(run.paths, {}, { HOME: join(f.parent, 'host-home'), PATH: '/usr/bin' });
+  expect(child.HOME).toBe(realpathSync(home));
+  expect(run.paths.nativeAuth).toContain(join(realpathSync(home), '.codex/auth.json'));
 });
 
 darwinRouteTest('zero-model probes through the launcher: the fake codex cannot read or write a target worktree, write the primary checkout or connect to localhost, and writes only its output', async f => {

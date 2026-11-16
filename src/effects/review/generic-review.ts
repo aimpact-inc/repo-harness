@@ -220,7 +220,8 @@ export async function runReviewRound<Session, Endpoint>(options: ReviewOptions<E
     }
     if (session.actual_harness === 'pi') {
       piOutput = outbox;
-      const prepared = preparePiAgentDirectory(outbox, sourceHome,
+      // The review role's magpie model selects the pi model too; the codex kind uses the same one.
+      const prepared = preparePiAgentDirectory(outbox, sourceHome, client.sessionOptions('codex', outbox).model!,
         (agentDirectory, reference) => client.resolvePiModel(piCommand(), agentDirectory, reference));
       runtimeHome = prepared.directory; piModel = prepared.model;
     }

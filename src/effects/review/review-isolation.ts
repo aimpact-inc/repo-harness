@@ -13,6 +13,8 @@ import type { NativeAuthHome, ReviewIsolationAdmission, ReviewIsolationPaths } f
  */
 export const MAGPIE_BASE_URL = 'http://127.0.0.1:3425/v1';
 export const MAGPIE_PLACEHOLDER_KEY = 'magpie';
+/** The pi provider name of magpie in models.json, as in the `magpie/codex/<model>` seat models. */
+export const MAGPIE_PI_PROVIDER = 'magpie';
 /** The model ports that a codex or pi review sandbox opens: magpie alone. */
 export const MAGPIE_LOOPBACK_PORTS: readonly number[] = [Number(new URL(MAGPIE_BASE_URL).port)];
 const MAGPIE_ROUTE = `route the review through magpie (${MAGPIE_BASE_URL}, apiKey ${JSON.stringify(MAGPIE_PLACEHOLDER_KEY)})`;
@@ -179,15 +181,17 @@ function piMagpieProvider(bytes: Buffer, provider: string, model: string, models
 }
 
 /**
- * Only the native model defaults are projected into private settings, and only the selected
- * provider's models.json entry is projected into a private models.json. Without an explicit model
- * pi falls through to the first provider with auth, so the native settings must name the provider
- * and model in the canonical form that pi's own resolver returns. The projected auth.json is an
- * empty map: the provider is the magpie provider with the placeholder key (piMagpieProvider).
+ * The provider and the model come from the product's selection: the magpie provider and `model`, the
+ * review role's magpie model. No native settings string selects them. Only the magpie entry of the native
+ * models.json is projected into a private models.json, and pi's own resolver must return the selection
+ * unchanged. The projected auth.json is an empty map: the provider is the magpie provider with the
+ * placeholder key (piMagpieProvider).
  */
-export function preparePiAgentDirectory(output: string, sourceHome: string,
+export function preparePiAgentDirectory(output: string, sourceHome: string, model: string,
   resolveModel: (agentDirectory: string, reference: string) => PiModelIdentity,
   env: Readonly<Record<string, string | undefined>> = process.env): PiAgentDirectory {
+  if (!NAME(model)) throw new Error('review_pi_model_unselected: the review role selects no magpie model');
+  const provider = MAGPIE_PI_PROVIDER;
   const directory = join(ownedOutput(output), '.pi-agent');
   try { mkdirSync(directory, { mode: 0o700 }); } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
@@ -199,11 +203,7 @@ export function preparePiAgentDirectory(output: string, sourceHome: string,
   for (const path of [dirname(source), source]) {
     if (existsSync(path) && (lstatSync(path).isSymbolicLink() || !lstatSync(path).isDirectory())) throw new Error('review_pi_source_unsafe');
   }
-  const settings = preparePiSettings(directory, source), settingsPath = join(source, 'settings.json');
-  const provider = settings.defaultProvider, model = settings.defaultModel;
-  if (typeof provider !== 'string' || provider === '' || typeof model !== 'string' || model === '') {
-    throw new Error(`review_pi_model_unnamed: set defaultProvider and defaultModel in ${settingsPath}`);
-  }
+  preparePiSettings(directory, source, provider, model);
   const models = join(source, 'models.json');
   if (!existsSync(models)) throw new Error(`review_pi_provider_not_magpie: ${models} does not exist; ${MAGPIE_ROUTE}`);
   const bytes = readNativeConfigBytes(models);
@@ -217,10 +217,10 @@ export function preparePiAgentDirectory(output: string, sourceHome: string,
     const message = (error as Error).message;
     if (!message.startsWith('review_pi_model_unresolved')) throw error;
     // The resolver child has no remote catalog: a model that only the remote catalog lists stays unresolved.
-    throw new Error(`${message}; set defaultProvider and defaultModel in ${settingsPath} to a model that \`pi --list-models\` lists from models.json, then repeat the round`);
+    throw new Error(`${message}; list the model ${model} under the ${provider} provider in ${models}, then repeat the round`);
   }
   if (resolved.provider !== provider || resolved.model !== model) {
-    throw new Error(`review_pi_model_not_canonical: pi resolves ${provider}/${model} to ${resolved.provider}/${resolved.model}; set defaultProvider and defaultModel in ${settingsPath} to that form`);
+    throw new Error(`review_pi_model_not_canonical: pi resolves ${provider}/${model} to ${resolved.provider}/${resolved.model}; give the ${provider} model in ${models} the id ${model}`);
   }
   return { directory, model: `${provider}/${model}` };
 }
@@ -233,26 +233,25 @@ function writeOwnedProjection(destination: string, content: string, changed: str
     || readFileSync(destination, 'utf8') !== content) throw new Error(changed);
 }
 
-function preparePiSettings(directory: string, source: string): Readonly<Record<string, unknown>> {
+/** The projected settings name the selected provider and model; only defaultThinkingLevel comes from the native settings. */
+function preparePiSettings(directory: string, source: string, provider: string, model: string): void {
   const native = join(source, 'settings.json');
-  let settings: Record<string, unknown> = {};
+  let level: unknown;
   if (existsSync(native)) {
     const bytes = readNativeConfigBytes(native);
     try {
       const parsed: unknown = JSON.parse(bytes.toString('utf8'));
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
-      settings = parsed as Record<string, unknown>;
+      if (!PLAIN_RECORD(parsed)) throw new Error();
+      level = parsed.defaultThinkingLevel;
     } catch { throw new Error('review_pi_settings_source_invalid'); }
     finally { bytes.fill(0); }
   }
-  // Only the projected keys are checked; every other native key stays out of the projection unread.
-  if (settings.defaultThinkingLevel !== undefined && schemaFault(settings.defaultThinkingLevel, PI_THINKING_LEVELS, 'defaultThinkingLevel')) {
+  // Only defaultThinkingLevel is checked; every other native key stays out of the projection unread.
+  if (level !== undefined && schemaFault(level, PI_THINKING_LEVELS, 'defaultThinkingLevel')) {
     throw new Error(`review_pi_settings_value_invalid: defaultThinkingLevel in ${native} must be absent, null or a pi thinking level (${PI_THINKING_LEVEL_NAMES.join(', ')})`);
   }
-  const projection = Object.fromEntries(['defaultProvider', 'defaultModel', 'defaultThinkingLevel']
-    .filter(key => settings[key] !== undefined && settings[key] !== null).map(key => [key, settings[key]]));
+  const projection = { defaultProvider: provider, defaultModel: model, ...(level !== undefined && level !== null ? { defaultThinkingLevel: level } : {}) };
   writeOwnedProjection(join(directory, 'settings.json'), JSON.stringify(projection) + '\n', 'review_pi_settings_changed');
-  return projection;
 }
 
 /** Unlink only output-local configuration references. Never follow links. */

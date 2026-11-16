@@ -189,9 +189,9 @@ afterAll(() => packetRepositoryTemplate.dispose());
 
 const PI_NAMED_SETTINGS = '{"defaultProvider":"fixture","defaultModel":"fixture-model"}';
 const PI_NAMED_AUTH = '{"fixture":{"type":"api_key","key":"sk-PROBE-LITERAL"}}';
-/** The selected provider as a magpie loopback provider with the placeholder key; another provider holds a real key. */
+/** The magpie provider as a loopback provider with the placeholder key; another provider holds a real key. */
 const PI_MAGPIE_PROVIDER = { baseUrl: 'http://127.0.0.1:3425/v1', api: 'openai-completions', apiKey: 'magpie', models: [{ id: 'fixture-model' }] };
-const PI_MAGPIE_MODELS = JSON.stringify({ providers: { fixture: PI_MAGPIE_PROVIDER, other: { baseUrl: 'https://fixture.invalid/v1', apiKey: 'sk-PROBE-LITERAL' } } });
+const PI_MAGPIE_MODELS = JSON.stringify({ providers: { magpie: PI_MAGPIE_PROVIDER, other: { baseUrl: 'https://fixture.invalid/v1', apiKey: 'sk-PROBE-LITERAL' } } });
 /** The repo's own pi 1.5.2 package; its resolver runs offline with an empty credential store. */
 const PI_PACKAGE_CLI = join(import.meta.dir, '../node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js');
 /** A resolver double for fixtures that do not test model resolution: the settings reference is canonical. */
@@ -423,55 +423,53 @@ test('Pi isolation fixture projects only the selected loopback provider with the
   const source = join(root, 'home'), output = join(root, 'output'), agent = join(source, '.pi/agent');
   mkdirSync(agent, { recursive: true }); mkdirSync(output);
   for (const name of ['sessions', 'extensions', 'skills']) mkdirSync(join(agent, name));
-  writeFileSync(join(agent, 'settings.json'), JSON.stringify({ defaultProvider: 'fixture', defaultModel: 'fixture-model', defaultThinkingLevel: 'high', modelThinkingLevels: { 'fixture-model': { effort: 'high' } },
+  writeFileSync(join(agent, 'settings.json'), JSON.stringify({ defaultProvider: 'sk-PROBE-LITERAL', defaultModel: 'sk-PROBE-LITERAL', defaultThinkingLevel: 'high', modelThinkingLevels: { 'fixture-model': { effort: 'high' } },
     packages: ['fixture-package'], extensions: ['fixture-extension'], httpProxy: 'http://fixture.invalid', defaultProjectTrust: 'always' }));
   writeFileSync(join(agent, 'models.json'), PI_MAGPIE_MODELS);
   writeFileSync(join(agent, 'auth.json'), PI_NAMED_AUTH);
   // pi's own resolver reads the projected models.json; the projection has no auth.json.
-  const { directory, model } = preparePiAgentDirectory(output, source, (directory, reference) => resolvePiModel(PI_PACKAGE_CLI, directory, reference));
-  expect(model).toBe('fixture/fixture-model');
+  const { directory, model } = preparePiAgentDirectory(output, source, 'fixture-model', (directory, reference) => resolvePiModel(PI_PACKAGE_CLI, directory, reference));
+  expect(model).toBe('magpie/fixture-model');
   expect(lstatSync(directory).mode & 0o777).toBe(0o700);
   expect(readdirSync(directory).sort()).toEqual(['auth.json', 'models.json', 'settings.json']);
   expect(readFileSync(join(directory, 'auth.json'), 'utf8')).toBe('{}\n');
   for (const name of ['auth.json', 'models.json', 'settings.json']) {
     expect(lstatSync(join(directory, name)).isFile()).toBe(true); expect(lstatSync(join(directory, name)).mode & 0o777).toBe(0o600);
   }
-  expect(JSON.parse(readFileSync(join(directory, 'models.json'), 'utf8'))).toEqual({ providers: { fixture: PI_MAGPIE_PROVIDER } });
-  expect(JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'))).toEqual({ defaultProvider: 'fixture', defaultModel: 'fixture-model', defaultThinkingLevel: 'high' });
+  expect(JSON.parse(readFileSync(join(directory, 'models.json'), 'utf8'))).toEqual({ providers: { magpie: PI_MAGPIE_PROVIDER } });
+  expect(JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'))).toEqual({ defaultProvider: 'magpie', defaultModel: 'fixture-model', defaultThinkingLevel: 'high' });
   expectNoStoredPiProbe(output);
-  expect(preparePiAgentDirectory(output, source, piReferenceResolver).directory).toBe(directory);
+  expect(preparePiAgentDirectory(output, source, 'fixture-model', piReferenceResolver).directory).toBe(directory);
   const projectedSettings = readFileSync(join(directory, 'settings.json'), 'utf8');
   const nativeSettings = JSON.parse(readFileSync(join(agent, 'settings.json'), 'utf8'));
   writeFileSync(join(agent, 'settings.json'), JSON.stringify({ ...nativeSettings, packages: ['other-package'], httpProxy: 'http://other.invalid' }));
-  expect(preparePiAgentDirectory(output, source, piReferenceResolver).directory).toBe(directory);
+  expect(preparePiAgentDirectory(output, source, 'fixture-model', piReferenceResolver).directory).toBe(directory);
   expect(readFileSync(join(directory, 'settings.json'), 'utf8')).toBe(projectedSettings);
   writeFileSync(join(directory, 'settings.json'), projectedSettings + ' ');
-  expect(() => preparePiAgentDirectory(output, source, piReferenceResolver)).toThrow('settings_changed');
+  expect(() => preparePiAgentDirectory(output, source, 'fixture-model', piReferenceResolver)).toThrow('settings_changed');
   writeFileSync(join(directory, 'settings.json'), projectedSettings);
-  writeFileSync(join(agent, 'settings.json'), JSON.stringify({ ...nativeSettings, defaultModel: 'changed-model' }));
-  expect(() => preparePiAgentDirectory(output, source, piReferenceResolver)).toThrow('settings_changed');
+  writeFileSync(join(agent, 'settings.json'), JSON.stringify({ ...nativeSettings, defaultThinkingLevel: 'low' }));
+  expect(() => preparePiAgentDirectory(output, source, 'fixture-model', piReferenceResolver)).toThrow('settings_changed');
   writeFileSync(join(agent, 'settings.json'), JSON.stringify(nativeSettings));
   const projectedModels = readFileSync(join(directory, 'models.json'), 'utf8');
   writeFileSync(join(directory, 'models.json'), projectedModels + ' ');
-  expect(() => preparePiAgentDirectory(output, source, piReferenceResolver)).toThrow('models_changed');
+  expect(() => preparePiAgentDirectory(output, source, 'fixture-model', piReferenceResolver)).toThrow('models_changed');
   writeFileSync(join(directory, 'models.json'), projectedModels);
   chmodSync(directory, 0o755);
-  expect(() => preparePiAgentDirectory(output, source, piReferenceResolver)).toThrow('directory_unsafe');
+  expect(() => preparePiAgentDirectory(output, source, 'fixture-model', piReferenceResolver)).toThrow('directory_unsafe');
   const otherOutput = join(root, 'other'); mkdirSync(otherOutput); symlinkSync(agent, join(otherOutput, '.pi-agent'));
-  expect(() => preparePiAgentDirectory(otherOutput, source, piReferenceResolver)).toThrow('directory_unsafe');
-  const prepareWith = (settings: Record<string, unknown>) => {
+  expect(() => preparePiAgentDirectory(otherOutput, source, 'fixture-model', piReferenceResolver)).toThrow('directory_unsafe');
+  const prepareWith = (settings: Record<string, unknown>, selected = 'fixture-model') => {
     writeFileSync(join(agent, 'settings.json'), JSON.stringify(settings));
     const windowOutput = join(root, `window-${randomUUID()}`); mkdirSync(windowOutput);
-    return () => preparePiAgentDirectory(windowOutput, source, (directory, reference) => resolvePiModel(PI_PACKAGE_CLI, directory, reference));
+    return () => preparePiAgentDirectory(windowOutput, source, selected, (directory, reference) => resolvePiModel(PI_PACKAGE_CLI, directory, reference));
   };
-  // A provider with a real key, an OAuth login or no models.json entry would put a real credential in the sandbox.
-  for (const provider of ['other', 'openai-codex']) {
-    expect(prepareWith({ defaultProvider: provider, defaultModel: 'gpt-5.4' })).toThrow(/review_pi_provider_not_magpie: the review sandbox holds no real credential.*route the review through magpie/);
-  }
-  expect(prepareWith({})).toThrow('review_pi_model_unnamed');
-  expect(prepareWith({ defaultProvider: 'fixture' })).toThrow('review_pi_model_unnamed');
+  // The selection names provider and model: a native provider with a real key or an OAuth login is never selected.
+  expect(prepareWith({ defaultProvider: 'other', defaultModel: 'gpt-5.4' })().model).toBe('magpie/fixture-model');
+  expect(prepareWith({}, 'gpt-5.4')).toThrow(/review_pi_model_unresolved.*list the model gpt-5.4 under the magpie provider/);
+  expect(prepareWith({}, '')).toThrow('review_pi_model_unselected');
   for (const level of [{ effort: 'high' }, 'turbo']) {
-    expect(prepareWith({ defaultProvider: 'fixture', defaultModel: 'fixture-model', defaultThinkingLevel: level })).toThrow('review_pi_settings_value_invalid: defaultThinkingLevel');
+    expect(prepareWith({ defaultThinkingLevel: level })).toThrow('review_pi_settings_value_invalid: defaultThinkingLevel');
   }
   // The host checks the owner's launch file just before the pi session start.
   const control = join(root, `control-${randomUUID()}`); mkdirSync(control);
@@ -509,9 +507,9 @@ test('Pi review source fixture uses custom agent directories and rejects relativ
     writeFileSync(join(source.directory, 'models.json'), PI_MAGPIE_MODELS);
     writeFileSync(join(source.directory, 'auth.json'), PI_NAMED_AUTH);
     const output = join(root, `output-${index}`); mkdirSync(output);
-    const { directory } = preparePiAgentDirectory(output, home, piReferenceResolver, { PI_CODING_AGENT_DIR: source.configured });
-    expect(JSON.parse(readFileSync(join(directory, 'models.json'), 'utf8'))).toEqual({ providers: { fixture: PI_MAGPIE_PROVIDER } });
-    expect(JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'))).toEqual({ defaultProvider: 'fixture', defaultModel: 'fixture-model' });
+    const { directory } = preparePiAgentDirectory(output, home, 'fixture-model', piReferenceResolver, { PI_CODING_AGENT_DIR: source.configured });
+    expect(JSON.parse(readFileSync(join(directory, 'models.json'), 'utf8'))).toEqual({ providers: { magpie: PI_MAGPIE_PROVIDER } });
+    expect(JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'))).toEqual({ defaultProvider: 'magpie', defaultModel: 'fixture-model' });
     expectNoStoredPiProbe(output);
     expect(removePiCredentialReferences(output).status).toBe('removed');
     expect(readdirSync(directory)).toEqual([]);
@@ -540,7 +538,7 @@ test('Pi review source fixture uses custom agent directories and rejects relativ
   unlinkSync(lockTarget);
   expect(() => nativeAuthFiles(home)).toThrow('review_native_auth_unsafe');
   const output = join(root, 'relative-output'); mkdirSync(output);
-  expect(() => preparePiAgentDirectory(output, home, piReferenceResolver, { PI_CODING_AGENT_DIR: 'relative-agent' })).toThrow('PI_CODING_AGENT_DIR must be an absolute path or use ~/');
+  expect(() => preparePiAgentDirectory(output, home, 'fixture-model', piReferenceResolver, { PI_CODING_AGENT_DIR: 'relative-agent' })).toThrow('PI_CODING_AGENT_DIR must be an absolute path or use ~/');
 });
 
 test('Pi projection cleanup fixture removes the projection without following directory links; a missing models.json refuses the session', async () => {
@@ -550,19 +548,19 @@ test('Pi projection cleanup fixture removes the projection without following dir
   const home = join(root, 'home'), source = join(home, '.pi/agent'); mkdirSync(source, { recursive: true });
   writeFileSync(join(source, 'settings.json'), PI_NAMED_SETTINGS);
   const missing = join(root, 'missing'); mkdirSync(missing);
-  expect(() => preparePiAgentDirectory(missing, home, piReferenceResolver)).toThrow(/review_pi_provider_not_magpie: .*models\.json does not exist; route the review through magpie/);
+  expect(() => preparePiAgentDirectory(missing, home, 'fixture-model', piReferenceResolver)).toThrow(/review_pi_provider_not_magpie: .*models\.json does not exist; route the review through magpie/);
   expect(existsSync(join(missing, '.pi-agent/models.json'))).toBe(false);
   writeFileSync(join(source, 'models.json'), PI_MAGPIE_MODELS); writeFileSync(join(source, 'auth.json'), PI_NAMED_AUTH);
   {
     const output = join(root, 'linked'); mkdirSync(output);
-    const { directory } = preparePiAgentDirectory(output, home, piReferenceResolver);
+    const { directory } = preparePiAgentDirectory(output, home, 'fixture-model', piReferenceResolver);
     expectNoStoredPiProbe(output);
     expect(removePiCredentialReferences(output).status).toBe('removed');
     expect(readdirSync(directory)).toEqual([]);
     expect(removePiCredentialReferences(output).status).toBe('absent');
   }
   const output = join(root, 'refused'); mkdirSync(output);
-  const { directory } = preparePiAgentDirectory(output, home, piReferenceResolver);
+  const { directory } = preparePiAgentDirectory(output, home, 'fixture-model', piReferenceResolver);
   unlinkSync(join(directory, 'models.json')); mkdirSync(join(directory, 'models.json'));
   expect(removePiCredentialReferences(output).status).toBe('cleanup_pending');
   expect(readdirSync(directory)).toEqual(['models.json']);
@@ -585,8 +583,8 @@ darwinTest('Pi isolation fixture: OAR flags, native extension, actual model and 
   writeFileSync(join(agent, 'models.json'), PI_MAGPIE_MODELS);
   writeFileSync(join(agent, 'settings.json'), PI_NAMED_SETTINGS);
   mkdirSync(join(agent, 'extensions')); writeFileSync(join(agent, 'extensions', 'unexpected.ts'), 'throw new Error("ambient fixture extension loaded");');
-  const { directory } = preparePiAgentDirectory(output, home, piReferenceResolver);
-  writeSessionArtifact(join(owner, 'launch-deadline.json'), { deadline: inOneHour(), pi: { model: 'fixture/fixture-model' } }, false);
+  const { directory } = preparePiAgentDirectory(output, home, 'fixture-model', piReferenceResolver);
+  writeSessionArtifact(join(owner, 'launch-deadline.json'), { deadline: inOneHour(), pi: { model: 'magpie/fixture-model' } }, false);
   const targets = [join(source, 'protected.txt'), credential, join(agent, 'protected.txt'), join(directory, 'models.json'), join(agent, 'models.json'), join(directory, 'settings.json'), join(agent, 'settings.json')];
   for (const target of [targets[0]!, targets[2]!]) writeFileSync(target, 'KEEP');
   const initial = targets.map(path => readFileSync(path, 'utf8'));
@@ -611,15 +609,15 @@ import {SessionManager} from ${JSON.stringify(import.meta.resolve('@earendil-wor
 const runtime=reviewRuntime('pi',${JSON.stringify(launcher)});
 const session=await runtime.session({kind:'available',via:'bundled'},{cwd:${JSON.stringify(output)},env:{PI_CODING_AGENT_DIR:${JSON.stringify(directory)},OAR_PI_AGENT_DIR:${JSON.stringify(directory)}}});
 const host=new OarReviewHost(session,()=>{});const id=host.sessionId;
-try{assert.ok(id);assert.equal(host.model('pi'),'fixture/fixture-model');const records=readFileSync(${JSON.stringify(capture)},'utf8').trim().split('\\n').map(JSON.parse);const run=records.find(r=>r.argv.includes('--mode'));assert.ok(existsSync(run.env.OAR_PI_RPC_DIRECTORY+'/ready'));}finally{await host.dispose();}
+try{assert.ok(id);assert.equal(host.model('pi'),'magpie/fixture-model');const records=readFileSync(${JSON.stringify(capture)},'utf8').trim().split('\\n').map(JSON.parse);const run=records.find(r=>r.argv.includes('--mode'));assert.ok(existsSync(run.env.OAR_PI_RPC_DIRECTORY+'/ready'));}finally{await host.dispose();}
 const output=${JSON.stringify(output)},agentDir=${JSON.stringify(directory)};
 const captured=readFileSync(${JSON.stringify(capture)},'utf8').trim().split('\\n').map(JSON.parse).find(r=>r.argv.includes('--session-dir'));
 const native=SessionManager.create(output,captured.argv[captured.argv.indexOf('--session-dir')+1]);
 native.appendMessage({role:'user',content:'[fixture transcript; no provider run]',timestamp:Date.now()});
-const spec={mode:'review',kind:'pi',installation:{kind:'available',via:'bundled'},launcher:${JSON.stringify(launcher)},vendorExecutable:${JSON.stringify(fixture)},options:{cwd:output,resume:native.getSessionId(),model:'fixture/fixture-model',env:{PI_CODING_AGENT_DIR:agentDir,OAR_PI_AGENT_DIR:agentDir}},requestDirectory:${JSON.stringify(owner)},output,controlDirectory:${JSON.stringify(owner)},timeoutMs:5000,isolation:${JSON.stringify({ paths, policyFile: profile })}};
+const spec={mode:'review',kind:'pi',installation:{kind:'available',via:'bundled'},launcher:${JSON.stringify(launcher)},vendorExecutable:${JSON.stringify(fixture)},options:{cwd:output,resume:native.getSessionId(),model:'magpie/fixture-model',env:{PI_CODING_AGENT_DIR:agentDir,OAR_PI_AGENT_DIR:agentDir}},requestDirectory:${JSON.stringify(owner)},output,controlDirectory:${JSON.stringify(owner)},timeoutMs:5000,isolation:${JSON.stringify({ paths, policyFile: profile })}};
 const lines=()=>readFileSync(${JSON.stringify(capture)},'utf8').trim().split('\\n');let hostRecords=[];
-for(let i=0;i<2;i++){const start=lines().length;const resumed=i===0?await openReviewHost(spec,()=>{}):new OarReviewHost(await runtime.session(spec.installation,spec.options),()=>{});try{assert.equal(resumed.sessionId,native.getSessionId());assert.equal(resumed.model('pi'),'fixture/fixture-model');}finally{await resumed.dispose();}if(i===0)hostRecords=lines().slice(start).map(JSON.parse);}
-console.log(JSON.stringify({session_id:id,model:'fixture/fixture-model',extension_ready:true,resumed:true,hostSecrets:hostRecords.map(r=>r.env.secret)}));
+for(let i=0;i<2;i++){const start=lines().length;const resumed=i===0?await openReviewHost(spec,()=>{}):new OarReviewHost(await runtime.session(spec.installation,spec.options),()=>{});try{assert.equal(resumed.sessionId,native.getSessionId());assert.equal(resumed.model('pi'),'magpie/fixture-model');}finally{await resumed.dispose();}if(i===0)hostRecords=lines().slice(start).map(JSON.parse);}
+console.log(JSON.stringify({session_id:id,model:'magpie/fixture-model',extension_ready:true,resumed:true,hostSecrets:hostRecords.map(r=>r.env.secret)}));
 `);
   const result = spawnSync(node, [worker], { encoding: 'utf8', timeout: 30000,
     env: { PATH: process.env.PATH, HOME: home, TMPDIR: reviewHostTemporaryDirectory(output), REVIEW_FIXTURE_SECRET: 'sk-PROBE-LITERAL' } });
@@ -627,7 +625,7 @@ console.log(JSON.stringify({session_id:id,model:'fixture/fixture-model',extensio
   const observed = JSON.parse(result.stdout);
   // The review host gives its child an allow-listed env: the ambient secret that a direct OAR session inherits is absent.
   expect(observed.hostSecrets.length).toBeGreaterThan(0); expect(observed.hostSecrets.every((secret: unknown) => secret === null)).toBe(true);
-  expect(observed.extension_ready).toBe(true); expect(observed.model).toBe('fixture/fixture-model'); expect(observed.session_id).toBeTruthy(); expect(observed.resumed).toBe(true);
+  expect(observed.extension_ready).toBe(true); expect(observed.model).toBe('magpie/fixture-model'); expect(observed.session_id).toBeTruthy(); expect(observed.resumed).toBe(true);
   const captures = readFileSync(capture, 'utf8').trim().split('\n').map(line => JSON.parse(line));
   const run = captures.find(row => row.argv.includes('--mode'));
   for (const flag of ['--no-extensions', '--no-skills', '--no-context-files', '--no-prompt-templates', '--no-mcp', '--no-approve', '--offline']) expect(run.argv).toContain(flag);
@@ -689,14 +687,16 @@ for (const example of [
   const { verifyAcceptance } = await import('../src/effects/review/acceptance-receipt');
   const f = packetRoundFixture();
   const source = join(f.options.endpoint.home, '.pi/agent'); mkdirSync(source, { recursive: true });
-  const magpie = { ...PI_MAGPIE_PROVIDER, models: [{ id: 'fixture-actual' }] };
-  const models = JSON.stringify({ providers: { 'fixture-provider': magpie, fixture: { apiKey: 'sk-PROBE-LITERAL' } } });
-  const auth = '{"fixture-provider":{"type":"api_key","key":"sk-PROBE-LITERAL"}}';
-  const settings = '{"defaultProvider":"fixture-provider","defaultModel":"fixture-actual"}';
+  // The review role's magpie model selects the pi model; the native settings name another provider.
+  const selected = reviewSessionOptions('codex', source).model!;
+  const magpie = { ...PI_MAGPIE_PROVIDER, models: [{ id: selected }] };
+  const models = JSON.stringify({ providers: { magpie, fixture: { apiKey: 'sk-PROBE-LITERAL' } } });
+  const auth = '{"fixture":{"type":"api_key","key":"sk-PROBE-LITERAL"}}';
+  const settings = '{"defaultProvider":"fixture","defaultModel":"sk-PROBE-LITERAL"}';
   writeFileSync(join(source, 'models.json'), models); writeFileSync(join(source, 'auth.json'), auth);
   writeFileSync(join(source, 'settings.json'), settings);
   let binding: Awaited<ReturnType<typeof startOfflineTaskAgent>>, request: TaskRequest;
-  let actualModel: string | null = 'fixture-provider/fixture-actual', verdict = example.verdict, sent = 0;
+  let actualModel: string | null = `magpie/${selected}`, verdict = example.verdict, sent = 0;
   const effects: TaskReviewEffects = { ...f.effects, assertBinding: () => {}, piExecutable: () => '/usr/bin/true',
     dispose: async () => {}, close: async () => ({ status: 'closed', pids: [] }), cancel: async () => ({ status: 'closed', pids: [] }),
     installation: async () => ({ kind: 'available', via: 'bundled' }),
@@ -736,7 +736,7 @@ for (const example of [
   if (example.verdict === 'PASS') expect((await verifyAcceptance({ root: f.root, authority: f.authority, authorityHome: f.home })).actual_model).toBe(actualModel);
   const host = readSessionArtifact<{ output: string }>(join(f.dir, 'host.json'));
   const directory = join(host.output, '.pi-agent');
-  expect(JSON.parse(readFileSync(join(directory, 'models.json'), 'utf8'))).toEqual({ providers: { 'fixture-provider': magpie } });
+  expect(JSON.parse(readFileSync(join(directory, 'models.json'), 'utf8'))).toEqual({ providers: { magpie } });
   expectNoStoredPiProbe(host.output);
   const cancel = example.verdict === 'FAIL';
   if (cancel) {
@@ -1003,18 +1003,18 @@ test('preparePiAgentDirectory builds the magpie provider from an allow-list and 
     const output = join(root, 'output'), agent = join(root, 'home/.pi/agent');
     mkdirSync(output); mkdirSync(agent, { recursive: true }); writeFileSync(join(agent, 'models.json'), models);
     writeFileSync(join(agent, 'settings.json'), PI_NAMED_SETTINGS);
-    return readFileSync(join(preparePiAgentDirectory(output, join(root, 'home'), piReferenceResolver).directory, 'models.json'), 'utf8');
+    return readFileSync(join(preparePiAgentDirectory(output, join(root, 'home'), 'fixture-model', piReferenceResolver).directory, 'models.json'), 'utf8');
   };
-  const provider = (fixture: unknown) => JSON.stringify({ providers: { fixture } });
+  const provider = (magpie: unknown) => JSON.stringify({ providers: { magpie } });
   const allowed = { ...PI_MAGPIE_PROVIDER, models: [{ id: 'fixture-model', name: 'Fixture', reasoning: true, thinkingLevelMap: { off: 'none' }, input: ['text', 'image'], contextWindow: 200000, maxTokens: 32000 }] };
-  expect(JSON.parse(prepared(provider(allowed)))).toEqual({ providers: { fixture: allowed } });
+  expect(JSON.parse(prepared(provider(allowed)))).toEqual({ providers: { magpie: allowed } });
   // The real field names; only the selected model reaches the sandbox, so an unselected model with headers is not projected.
   const selected = { api: 'openai-responses', baseUrl: 'http://127.0.0.1:3425/v1', compat: { forceAdaptiveThinking: true, supportsStrictMode: false }, contextWindow: 400000,
     cost: { cacheRead: 0.1, cacheWrite: 0, input: 1, output: 8 }, id: 'fixture-model', input: ['text', 'image'], maxTokens: 128000, name: 'Fixture',
     promptCache: { long: 3600, short: 300 }, reasoning: true, thinkingLevelMap: { high: 'high', low: 'low', max: 'xhigh', medium: 'medium', minimal: 'minimal', off: null, xhigh: 'xhigh' } };
   const real = { api: 'openai-responses', apiKey: 'magpie', baseUrl: 'http://127.0.0.1:3425/v1', compat: { sendSessionAffinityHeaders: true }, name: 'Magpie' };
   expect(JSON.parse(prepared(provider({ ...real, models: [selected, { id: 'other-model', headers: { 'x-api-key': 'sk-PROBE-LITERAL' } }] }))))
-    .toEqual({ providers: { fixture: { ...real, models: [selected] } } });
+    .toEqual({ providers: { magpie: { ...real, models: [selected] } } });
   for (const [models, reason] of [
     ['{ not json', 'review_pi_models_invalid'],
     [provider({ ...PI_MAGPIE_PROVIDER, headers: { authorization: 'Bearer sk-PROBE-LITERAL' } }), 'fields headers outside the allow-list'],
@@ -1042,11 +1042,11 @@ test('a Pi provider outside magpie refuses the session before any launch and con
   const f = packetRoundFixture();
   const source = join(f.options.endpoint.home, '.pi/agent'); mkdirSync(source, { recursive: true });
   const { OPERATOR_DEFAULT_PORT: consolePort } = await import('../src/core/review/operator-console-port');
-  writeFileSync(join(source, 'models.json'), JSON.stringify({ providers: { fixture: { baseUrl: `http://127.0.0.1:${consolePort}/v1`, apiKey: 'magpie' } } }));
+  writeFileSync(join(source, 'models.json'), JSON.stringify({ providers: { magpie: { baseUrl: `http://127.0.0.1:${consolePort}/v1`, apiKey: 'magpie' } } }));
   await expect(runReviewRound({ ...f.options, harness: 'pi' }, { ...f.effects, piExecutable: () => '/usr/bin/true', installation: async () => ({ kind: 'available', via: 'bundled' }) }))
     .rejects.toThrow('review_pi_provider_not_magpie');
-  writeFileSync(join(source, 'models.json'), PI_MAGPIE_MODELS);
-  writeFileSync(join(source, 'settings.json'), '{"defaultProvider":"fixture","defaultModel":"FIXTURE-MODEL"}');
+  // pi matches the model id without case and returns the listed form, which differs from the selection.
+  writeFileSync(join(source, 'models.json'), JSON.stringify({ providers: { magpie: { ...PI_MAGPIE_PROVIDER, models: [{ id: reviewSessionOptions('codex', source).model!.toUpperCase() }] } } }));
   await expect(runReviewRound({ ...f.options, harness: 'pi' }, { ...f.effects, piExecutable: () => PI_PACKAGE_CLI, installation: async () => ({ kind: 'available', via: 'bundled' }),
     resolvePiModel, start: async () => { throw new Error('must not start'); } })).rejects.toThrow('review_pi_model_not_canonical');
   expect(f.calls).toEqual(['admit']);
