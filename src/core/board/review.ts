@@ -1,6 +1,7 @@
 import { ACCEPTANCE_RECORD_HEADER, type BoardV1 } from './board';
 import { planRefusal, requiredCheckDetail } from './merge';
 import type { SeatRouteV1 } from './seat-routing';
+import { isReviewSeat, SEAT_IDS, type SeatId } from './seats-settings';
 import { modelFamily } from '../review/model-family';
 import { claimStatusTarget, newestProtocolComment, parseAcceptanceRecord, parseClaimStatus, protocolComments, type BoardCommentPageV1, type BoardCommentV1 } from './source';
 
@@ -78,20 +79,27 @@ function deltaBase(page: BoardCommentPageV1, head: string, seat: ReviewSeat): st
   return newest === null ? null : field(newest, 'Subject');
 }
 
-/** The round of a head: the round of an acceptance row that already names it (a High head has two reviews of one round), else one past the newest round of any row. */
+/**
+ * The round of a head: the round of an acceptance row or claim that already names it (a High head has two reviews of one round),
+ * else one past the newest round of any of them. A claim counts too, so a publish that stopped after its claim keeps its round.
+ */
 function roundOf(page: BoardCommentPageV1, head: string): number {
-  const rows = protocolComments(page, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? []);
-  return rows.find(row => row.subject_sha === head)?.round ?? Math.max(0, ...rows.map(row => row.round)) + 1;
+  const rows = [
+    ...protocolComments(page, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? []).map(row => ({ round: row.round, subject: row.subject_sha })),
+    ...protocolComments(page, 'repo-harness acceptance claim').map(claim => ({ round: Number(field(claim, 'Round')), subject: field(claim, 'Subject') })).filter(row => Number.isSafeInteger(row.round) && row.round > 0),
+  ];
+  return rows.find(row => row.subject === head)?.round ?? Math.max(0, ...rows.map(row => row.round)) + 1;
 }
 
-export interface ReviewPacketBinding { readonly pr: number; readonly head_sha: string; readonly seat: ReviewSeat }
+export interface ReviewPacketBinding { readonly pr: number; readonly head_sha: string; readonly seat: SeatId }
 
 /** The packet's first sentence: the one text that binds a seat session to its PR, head and seat. `parseReviewPacket` reads it back. */
-const PACKET_HEAD = /Task: review PR #([1-9][0-9]*) at head ([0-9a-f]{40}|[0-9a-f]{64}) \(tier (?:medium|high), round [1-9][0-9]*\), as the (gatekeeper|reviewer) of repo-harness-issue-flow\./u;
+const PACKET_HEAD = /Task: review PR #([1-9][0-9]*) at head ([0-9a-f]{40}|[0-9a-f]{64}) \(tier (?:medium|high), round [1-9][0-9]*\), as the ([a-z]+(?:-[a-z]+)*) of repo-harness-issue-flow\./u;
 
 export function parseReviewPacket(text: string): ReviewPacketBinding | null {
   const match = PACKET_HEAD.exec(text);
-  return match === null ? null : { pr: Number(match[1]), head_sha: match[2]!, seat: match[3] as ReviewSeat };
+  const seat = SEAT_IDS.find(id => id === match?.[3]);
+  return match === null || seat === undefined || !isReviewSeat(seat) ? null : { pr: Number(match[1]), head_sha: match[2]!, seat };
 }
 
 /**

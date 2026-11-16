@@ -199,4 +199,8 @@ test('the packet names the round, tier, head, harness and the RECEIPT-JSON hand-
   expect(text).toContain(`round 2, risk_tier "high", subject_sha ${SHA}, reviewer.harness "pi"`);
   expect(text).toContain('End your last reply with the line RECEIPT-JSON');
   expect(parseReviewPacket(text)).toEqual({ pr: 1, head_sha: SHA, seat: 'gatekeeper' });
+  expect(parseReviewPacket(text.replace('as the gatekeeper of', 'as the gatekeeper-deep of'))?.seat).toBe('gatekeeper-deep');
+  expect(parseReviewPacket(text.replace('as the gatekeeper of', 'as the worker of'))).toBeNull();
+  // A claim that a publish left without its record still counts for the round.
+  expect(start(page(comment(`repo-harness acceptance claim\nRound: 2\nSubject: ${OLD}`))).round).toBe(3);
 });

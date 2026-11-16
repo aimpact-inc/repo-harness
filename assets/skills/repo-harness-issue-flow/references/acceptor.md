@@ -246,17 +246,21 @@ the one `reviewer.harness` value of its runtime. The seat ends its reply
 with a `RECEIPT-JSON` marker and the receipt as one JSON object, and does
 not publish. After the pane status is `done`, the coordinator runs
 `rh review collect --seat <terminal> --pr <n> [--owner-record <url>] [--json]`.
-The command reads the session records of the seat's worktree under
-`~/.pi/agent/sessions` (Pi) and `~/.claude/projects`, or `CLAUDE_CONFIG_DIR`
-(Claude Code). It reads no Codex session record. It binds a session to the seat by the packet
-that the session received (seat label, PR number and head SHA), never by
-file age, because review seats of one PR share a worktree. When several
-sessions carry the seat's packet, it keeps the one whose last receipt names
-its packet head. It takes the last `RECEIPT-JSON` block, validates it with
-the `review publish` validator and publishes it the same way. It fails
-closed when the record, the block, the JSON, the receipt or the PR head
-subject is missing or wrong, or when two sessions stay ambiguous, and it
-does not read pane text.
+The command reads the session records of the seat's worktree: Pi under
+`~/.pi/agent/sessions`, Claude Code under `~/.claude/projects` (or
+`CLAUDE_CONFIG_DIR`), and Codex rollout files under `~/.codex/sessions` (or
+`CODEX_HOME`) whose `session_meta` names that worktree. It binds a session
+to the seat by the packet that the session received: the seat label of the
+terminal, the PR number and the PR head now. File age is never evidence,
+because review seats and rounds of one PR share a worktree. A session whose
+packet names an earlier head is not a candidate. The seat label comes from
+`rh seats argv <seat> --repository-id <id> --pr <n>`, which the review launch
+uses; a terminal without it is refused. The command takes the last
+`RECEIPT-JSON` block, requires its `subject_sha` to equal the packet head,
+validates it with the `review publish` validator and publishes it the same
+way. It fails closed when the record, the block, the JSON, the receipt or
+the PR head subject is missing or wrong, or when two sessions hold a packet
+for the head, and it does not read pane text.
 
 `review publish` accepts rounds 1 to 5. Round 5 is the hard stop (§2.2),
 so every review round publishes its claim and record with this command.
