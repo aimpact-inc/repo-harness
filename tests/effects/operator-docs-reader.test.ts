@@ -480,5 +480,9 @@ test('the diagram readback returns the PNG path of one render pass, and an error
   const bad = await readbackDiagram(JSON.stringify({ entities: [{ id: 'bad' }] }), { env, signal, render });
   expect(bad).toMatchObject({ ok: false, status: 'invalid', issues: [{ element: '/entities/0' }] });
   expect(readbackExitCode(bad)).toBe(1);
+  // A remote icon fails before any render, with the element named as on the docs page.
+  const remote = await readbackDiagram(JSON.stringify({ entities: [{ id: 'a', icon: '//example.invalid/a.svg' }] }), { env, signal, render });
+  expect(remote).toMatchObject({ status: 'invalid', issues: [{ element: '/entities/0', field: 'icon' }] });
+  expect(passes).toHaveLength(2);
   expect(await readbackDiagram('{not json', { env, signal, render })).toMatchObject({ status: 'invalid', issues: [{ element: '/' }] });
 });

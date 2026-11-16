@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+import type { RenderPassOptions, RenderPassResult } from '../../effects/operator/diagram-render';
 import { readbackDiagram, readbackExitCode } from '../../effects/operator/diagram-readback';
 import { fileURLToPath } from 'node:url';
 import { version as PACKAGE_VERSION } from '../../../package.json';
@@ -238,12 +239,27 @@ export async function cleanupInvestigationJob(sessionId: string, jobId: string, 
   await runCleanupInvestigationJob(sessionId, jobId, Number(deadlineMs), reviewHost);
 }
 
-/** Prints one JSON result: the PNG path, or the errors that name the element. */
-export async function diagram(file: string): Promise<void> {
+type RenderPassFn = (options: RenderPassOptions) => Promise<RenderPassResult>;
+
+const READBACK_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+
+/**
+ * Prints one JSON result: the PNG path, or the errors that name the element. The render
+ * child is detached, so a termination signal aborts the render and the command waits for
+ * its cleanup (browser group, scratch directory) before it returns.
+ */
+export async function diagram(file: string, deps: { readonly env?: NodeJS.ProcessEnv; readonly render?: RenderPassFn } = {}): Promise<void> {
   let text: string;
   try { text = readFileSync(file === '-' ? 0 : file, 'utf8'); }
   catch { process.stderr.write(`${JSON.stringify({ ok: false, error: 'input_unreadable' })}\n`); process.exitCode = 2; return; }
-  const result = await readbackDiagram(text, { env: process.env, signal: new AbortController().signal });
-  process.stdout.write(`${JSON.stringify(result)}\n`);
-  process.exitCode = readbackExitCode(result);
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  for (const name of READBACK_SIGNALS) process.on(name, abort);
+  try {
+    const result = await readbackDiagram(text, { env: deps.env ?? process.env, signal: controller.signal, render: deps.render });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.exitCode = readbackExitCode(result);
+  } finally {
+    for (const name of READBACK_SIGNALS) process.off(name, abort);
+  }
 }

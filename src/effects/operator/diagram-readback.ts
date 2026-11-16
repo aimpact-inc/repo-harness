@@ -5,7 +5,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { diagramTooDeep, type DocsDiagramFailure, type DocsDiagramIssueV1 } from '../../core/operator/docs';
+import { diagramSourceIssues, type DocsDiagramFailure, type DocsDiagramIssueV1 } from '../../core/operator/docs';
 import { repoHarnessHome } from '../repo-harness-home';
 import { diagramHash } from './diagram-renderer';
 import { probeRenderCapability, renderDiagramPass, type RenderPassOptions, type RenderPassResult } from './diagram-render';
@@ -25,10 +25,10 @@ export async function readbackDiagram(
   text: string,
   options: { readonly env: NodeJS.ProcessEnv; readonly signal: AbortSignal; readonly render?: (options: RenderPassOptions) => Promise<RenderPassResult> },
 ): Promise<DiagramReadback> {
-  const invalid = (fix: string): DiagramReadback => ({ ok: false, status: 'invalid', issues: [{ element: '/', field: 'input', fix }] });
-  let document: unknown;
-  try { document = JSON.parse(text); } catch { return invalid('The diagram block is not valid JSON.'); }
-  if (diagramTooDeep(document)) return invalid('The diagram block is nested too deep.');
+  // The same source validation as the docs page: syntax, depth and remote icon addresses.
+  const source = diagramSourceIssues(text);
+  if (source.issues.length > 0) return { ok: false, status: 'invalid', issues: source.issues };
+  const document = source.document;
   const capability = probeRenderCapability(options.env);
   if (capability.state !== 'ready') return { ok: false, status: 'unavailable', reason: capability.reason, message: capability.reason === 'capability_missing' ? 'render capability not installed' : 'render browser not found' };
   const drawn = await (options.render ?? renderDiagramPass)({ capability, document, outputs: { svg: true, png: true }, env: options.env, signal: options.signal });
