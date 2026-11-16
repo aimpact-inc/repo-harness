@@ -253,7 +253,8 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
         const path = repositoryExcludeTarget(resolveGitCommonDirectory(entry.repo_path, undefined, undefined, env), env);
         if (path !== entry.exclude_path) throw new Error(`repository ${entry.repo_path} now resolves its exclude file to ${path}; preserved`);
         repositoryExcludes.add(path);
-        const removal = removeRuntimeStateIgnoreBlock(read(path));
+        // Read as latin1 and written back the same way, so the bytes outside the block stay.
+        const removal = removeRuntimeStateIgnoreBlock(existsSync(path) ? readFileSync(path, 'latin1') : '');
         if (removal.status === 'unbalanced') unresolved(path, 'unbalanced runtime-state ignore block; preserved');
         else if (removal.status === 'edited') unresolved(path, 'runtime-state ignore block was edited; preserved. Move your rules outside the markers, then delete the block.');
         else if (removal.status === 'removed') change(path, removal.content, 'runtime-state ignore block');
@@ -321,7 +322,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
         if (path === globalConfigurationPath(env)) {
           mutateGlobalConfiguration(env, () => ({ config: content === null ? null : object(content), value: undefined }), { runtimeLock: opts.runtimeLock });
         } else if (content === null) { if (existsSync(path)) unlinkSync(path); }
-        else if (repositoryExcludes.has(path)) writeFileSync(path, content);
+        else if (repositoryExcludes.has(path)) writeFileSync(path, content, 'latin1');
         else writePrivateConfiguration(path, content, surfaceRoot(path));
       }
       for (const path of [...originals.keys()]) {

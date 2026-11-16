@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { runGlobalRuntimeSetup, removeBrainRootConfiguration, updateLeftoverSummary, updateRegisteredUpgradeSummary } from '../../src/cli/commands/global-runtime';
@@ -438,9 +438,12 @@ describe('runtime ignore rules step', () => {
     const adopted = repo('adopted'), other = repo('not-adopted', false), away = repo('away');
     writeRegistry(f, [adopted, other, away]);
     const template = readFileSync(exclude(adopted), 'utf8');
+    // An escaped trailing space, a non-UTF-8 byte and a trailing blank line: bytes that a decode or a trim would change.
+    const userBytes = Buffer.concat([Buffer.from(`${template}name\\ \n`), Buffer.from([0x6e, 0xff, 0x0a, 0x0a])]);
+    writeFileSync(exclude(adopted), userBytes);
     // An unavailable registered repository keeps the user-level block.
     renameSync(away, `${away}.moved`);
-    expect(step(update(), RETIRE)).toMatchObject({ status: 'skipped', detail: `${userExcludes}: kept the runtime-state block until every registered repository holds its own block` });
+    expect(step(update(), RETIRE)).toMatchObject({ status: 'skipped', detail: `${userExcludes}: kept the runtime-state block until every registered repository holds its own proved block` });
     expect(readFileSync(userExcludes, 'utf8')).toBe(`*.log\n\n${OLD_BLOCK}\n`);
     renameSync(`${away}.moved`, away);
     const run = update();
@@ -448,37 +451,42 @@ describe('runtime ignore rules step', () => {
     expect(step(run, RETIRE)).toMatchObject({ status: 'ok' });
     expect(readFileSync(userExcludes, 'utf8')).toBe('*.log\n');
     for (const path of [adopted, away]) expect(git(f, path, 'check-ignore', '.ai/harness/events.jsonl')).toBe('.ai/harness/events.jsonl');
+    expect(readFileSync(exclude(adopted)).subarray(0, userBytes.length).equals(userBytes)).toBe(true);
     // A repository that is not adopted gets no rule.
     expect(readFileSync(exclude(other), 'utf8')).toBe(template);
     const ledger = join(f.env.HOME!, '.repo-harness', 'repository-excludes.json');
     expect(JSON.parse(readFileSync(ledger, 'utf8')).entries.map((entry: { exclude_path: string }) => entry.exclude_path).sort()).toEqual([exclude(adopted), exclude(away)].sort());
     writeFileSync(exclude(away), readFileSync(exclude(away), 'utf8').replace(`${BEGIN}\n`, `${BEGIN}\nscratch-*/\n`));
     const removal = runUserUninstall({ target: 'both', env: f.env });
-    expect(readFileSync(exclude(adopted), 'utf8')).toBe(template);
+    expect(readFileSync(exclude(adopted)).equals(userBytes)).toBe(true);
     expect(removal.items).toContainEqual({ path: exclude(away), action: 'unresolved', reason: expect.stringContaining('runtime-state ignore block was edited; preserved') });
     expect(readFileSync(exclude(away), 'utf8')).toContain('scratch-*/');
     expect(JSON.parse(readFileSync(ledger, 'utf8')).entries.map((entry: { exclude_path: string }) => entry.exclude_path)).toEqual([exclude(away)]);
   }));
 
-  test('update follows a linked exclude file and refuses a target inside the rh home', () => {
-    for (const linked of [true, false]) withIgnoreFixture((f, update, repo, userExcludes) => {
-      const gitDir = join(f.env.HOME!, '.repo-harness', 'gitdir');
-      const path = linked ? repo('repo') : repo('repo', true, '--separate-git-dir', gitDir);
+  test('update follows user links, refuses a target in the rh home, and keeps the user-level block that a repository still needs', () => {
+    const link = (path: string, target: string) => { rmSync(path, { force: true }); symlinkSync(target, path); };
+    const rows: { name: string; setup: (repo: string, f: RegisteredReposFixture, userExcludes: string) => string; init?: (f: RegisteredReposFixture) => string[]; write: 'ok' | 'failed'; retire: 'ok' | 'skipped' }[] = [
+      { name: 'linked file', write: 'ok', retire: 'ok', setup: (repo, f) => { writeFileSync(join(f.root, 'shared'), '# shared\n'); link(exclude(repo), join(f.root, 'shared')); return join(f.root, 'shared'); } },
+      { name: 'dangling relative link', write: 'ok', retire: 'ok', setup: (repo, f) => { link(exclude(repo), '../../../missing-shared'); return join(f.root, 'missing-shared'); } },
+      { name: 'dangling link into the rh home', write: 'failed', retire: 'skipped', setup: (repo, f) => { link(exclude(repo), join(f.env.HOME!, '.repo-harness', 'stray')); return join(f.env.HOME!, '.repo-harness', 'stray'); } },
+      { name: 'Git directory in the rh home', write: 'failed', retire: 'skipped', init: f => ['--separate-git-dir', join(f.env.HOME!, '.repo-harness', 'gitdir')],
+        setup: (_repo, f) => join(f.env.HOME!, '.repo-harness', 'gitdir', 'info', 'exclude') },
+      { name: 'edited repository block', write: 'ok', retire: 'skipped', setup: (repo) => { writeFileSync(exclude(repo), `${BEGIN}\ncustom-only/\n# END: repo-harness runtime-state\n`); return exclude(repo); } },
+      { name: 'repository exclude is the user-level file', write: 'ok', retire: 'skipped', setup: (repo, _f, userExcludes) => { link(exclude(repo), userExcludes); return userExcludes; } },
+    ];
+    for (const row of rows) withIgnoreFixture((f, update, repo, userExcludes) => {
+      const path = repo('repo', true, ...(row.init?.(f) ?? []));
       writeRegistry(f, [path]);
-      const userTarget = join(f.root, 'shared-exclude');
-      if (linked) { writeFileSync(userTarget, '# shared\n'); rmSync(exclude(path)); symlinkSync(userTarget, exclude(path)); }
+      const target = row.setup(path, f, userExcludes);
       const run = update();
-      if (linked) {
-        expect(step(run, 'write runtime ignore rules')).toMatchObject({ status: 'ok', detail: `${userTarget}: written` });
-        expect(readFileSync(userTarget, 'utf8')).toStartWith(`# shared\n\n${BEGIN}\n`);
-        expect(readlinkSync(exclude(path))).toBe(userTarget);
-        expect(step(run, RETIRE)).toMatchObject({ status: 'ok' });
-        return;
-      }
-      expect(step(run, 'write runtime ignore rules')).toMatchObject({ status: 'failed', detail: expect.stringContaining(`excludes_target_rh_managed: ${join(gitDir, 'info', 'exclude')} is in `) });
-      expect(readFileSync(join(gitDir, 'info', 'exclude'), 'utf8')).not.toContain(BEGIN);
-      expect(step(run, RETIRE)).toMatchObject({ status: 'skipped', detail: expect.stringContaining('kept the runtime-state block') });
-      expect(readFileSync(userExcludes, 'utf8')).toBe(`*.log\n\n${OLD_BLOCK}\n`);
+      expect(step(run, 'write runtime ignore rules'), row.name).toMatchObject({ status: row.write });
+      expect(step(run, RETIRE), row.name).toMatchObject({ status: row.retire });
+      expect(readFileSync(userExcludes, 'utf8').includes(OLD_BLOCK), row.name).toBe(row.retire === 'skipped');
+      if (row.write === 'failed') {
+        expect(step(run, 'write runtime ignore rules')!.detail, row.name).toContain(`excludes_target_rh_managed: ${target} is in `);
+        expect(existsSync(target) && readFileSync(target, 'utf8').includes(BEGIN), row.name).toBe(false);
+      } else expect(readFileSync(target, 'utf8'), row.name).toContain(BEGIN);
     });
   });
 });
