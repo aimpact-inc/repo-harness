@@ -79,7 +79,12 @@ export function restoreGlobalConfiguration(path: string, bytes: Buffer | null, r
 export function mutateGlobalConfiguration<T>(
   env: NodeJS.ProcessEnv,
   mutate: (config: Record<string, unknown>) => { readonly config?: Record<string, unknown> | null; readonly value: T },
-  options: { readonly expectedRevision?: string; readonly runtimeLock?: RuntimeTransactionContext } = {},
+  options: {
+    readonly expectedRevision?: string;
+    readonly runtimeLock?: RuntimeTransactionContext;
+    /** Render the next document from the current text, so a caller that removes one member keeps every other byte. Default: `JSON.stringify(config, null, 2)`. */
+    readonly render?: (text: string, next: Record<string, unknown>) => string;
+  } = {},
 ): { readonly path: string; readonly revision: string; readonly changed: boolean; readonly value: T } {
   const scope = globalRuntimeScope(env);
   try {
@@ -96,7 +101,8 @@ export function mutateGlobalConfiguration<T>(
       }
       const next = mutate(document.config);
       if (next.config === undefined) return { path, revision: document.revision, changed: false, value: next.value };
-      const bytes = next.config === null ? null : Buffer.from(`${JSON.stringify(next.config, null, 2)}\n`, 'utf8');
+      const bytes = next.config === null ? null
+        : Buffer.from(options.render ? options.render(readFileSync(path, 'utf8'), next.config) : `${JSON.stringify(next.config, null, 2)}\n`, 'utf8');
       const revision = globalConfigurationRevision(bytes);
       if (revision === document.revision) return { path, revision, changed: false, value: next.value };
       replaceGlobalConfiguration(path, bytes, () => assertRuntimeTransactionContext(context, scope));
