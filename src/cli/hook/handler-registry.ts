@@ -67,6 +67,7 @@ const handlers: Readonly<Record<HookHandlerId, TypedHookHandler>> = Object.freez
       repoRoot: context.repoRoot,
       payload: context.payload,
       identity: context.identity,
+      env: context.env,
     })),
   },
   'bash-mutation-guard': {
@@ -75,6 +76,7 @@ const handlers: Readonly<Record<HookHandlerId, TypedHookHandler>> = Object.freez
       repoRoot: context.repoRoot,
       payload: context.payload,
       identity: context.identity,
+      env: context.env,
     })),
   },
   'return-channel': {

@@ -1,0 +1,568 @@
+/**
+ * The safety hook (#2916): the agent-layer security bar on the PreToolUse bash and edit routes of Claude, Codex and Pi.
+ *
+ * - I1: refuse a call that prints or sends a credential store. Secret redaction stays as the second layer.
+ * - I2: refuse a removal or overwrite of an existing file outside the agent's worktree, the managed worktree root and the system temp
+ *   directory, unless rh's install ledger records the file as rh-created. Creates and appends pass everywhere. The user
+ *   authorizes anything else locally by running the command in their own shell, which no hook sees.
+ * - Recursive delete: refuse `rm -r`, `find -delete`/`-exec` and `git clean -x` from the repository root or an ancestor.
+ *
+ * The threat model is accidents. A target built at run time, a script or binary that writes, and a hidden alias are accepted
+ * residuals; only a removal whose target is not known fails closed.
+ */
+import { existsSync, lstatSync, realpathSync, statSync } from 'fs';
+import { homedir, tmpdir } from 'os';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
+import { managedWorktreeRoot } from '../../effects/git/managed-worktree';
+import type { Denial } from './mutation-guard';
+import {
+  escapePattern, expandBraces, globIndex, simpleCommands, unescapePattern, writeThroughPath,
+  type Command, type Dirs, type Word,
+} from './shell-words';
+
+export interface SafetyScope {
+  readonly repoRoot: string;
+  readonly env: NodeJS.ProcessEnv;
+}
+
+/** `destroy` acts only on an existing file, so an unknown target denies; `overwrite` creates or replaces, so an unknown target passes. */
+export type TargetKind = 'destroy' | 'overwrite';
+
+/** One write target. `path` is absolute, or null when the shell decides it at run time. */
+export interface WriteTarget {
+  readonly kind: TargetKind;
+  readonly via: string;
+  readonly spelled: string;
+  readonly path: string | null;
+  /** The path is the literal directory of a glob; the write lands below it. */
+  readonly glob?: true;
+  /** cp, mv and ln write `<path>/<name>` for each source name when `path` is an existing directory. */
+  readonly into?: readonly string[];
+}
+
+const inside = (rel: string) => !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`);
+const below = (root: string, path: string) => { const rel = relative(root, path); return rel !== '' && inside(rel); };
+const atOrBelow = (root: string, path: string) => inside(relative(root, path));
+
+// ---------------------------------------------------------------------------
+// I2: the decision for one target
+// ---------------------------------------------------------------------------
+
+/**
+ * The worktree, the managed worktree root (`/tmp` on POSIX unless REPO_HARNESS_WORKTREE_ROOT moves it) and the system temp
+ * directory, canonical. A root that does not resolve adds nothing.
+ */
+function allowedRoots(scope: SafetyScope): string[] {
+  const roots: string[] = [];
+  const candidates: Array<() => string> = [
+    () => realpathSync(scope.repoRoot),
+    () => managedWorktreeRoot(scope.env),
+    () => realpathSync(tmpdir()),
+  ];
+  for (const candidate of candidates) {
+    try { roots.push(candidate()); } catch { /* no allowance for this root */ }
+  }
+  return roots;
+}
+
+/** The path itself, with every directory above it resolved; the leaf link is not followed, as rm and mv do not follow it. */
+function leafPath(path: string): string {
+  const name = basename(path);
+  return name === '' || name === '.' || name === '..' ? writeThroughPath(path) : join(writeThroughPath(dirname(path)), name);
+}
+
+/** One surface of rh's install ledger, as the installer records it. */
+export interface LedgerSurface {
+  readonly path: string;
+  readonly type: string;
+  readonly managed_marker: string | null;
+}
+
+/**
+ * The installer owns the ledger reader, and the installer imports the route registry, so the hook process root registers the
+ * reader here. Without a reader the ledger records nothing.
+ */
+let ledgerReader: ((env: NodeJS.ProcessEnv) => readonly LedgerSurface[]) | null = null;
+
+export function registerInstallLedger(reader: (env: NodeJS.ProcessEnv) => readonly LedgerSurface[]): void {
+  ledgerReader = reader;
+}
+
+/** rh created the file when the install ledger records it, or a directory tree above it, as rh-written. An unreadable ledger records nothing. */
+export function ledgerCreated(path: string, env: NodeJS.ProcessEnv): boolean {
+  let surfaces: readonly LedgerSurface[];
+  try { surfaces = ledgerReader?.(env) ?? []; } catch { return false; }
+  return surfaces.some((surface) => {
+    let recorded: string;
+    try { recorded = leafPath(resolve(surface.path)); } catch { return false; }
+    if (surface.type === 'directory-copy') return atOrBelow(recorded, path);
+    if (surface.type === 'symlink') return recorded === path;
+    // Other managed-file markers name an rh block inside a user file.
+    return surface.type === 'managed-file' && surface.managed_marker === 'transaction-created-file' && recorded === path;
+  });
+}
+
+class TargetJudge {
+  private rootsValue: string[] | undefined;
+  constructor(private readonly scope: SafetyScope) {}
+  private get roots(): string[] { return this.rootsValue ??= allowedRoots(this.scope); }
+
+  denial(target: WriteTarget): Denial | null {
+    if (target.path === null) return target.kind === 'destroy' ? unknownTargetDenial(target) : null;
+    if (/^\/dev\//.test(target.path)) return null;
+    if (target.glob) return this.globDenial(target, target.path);
+    let path: string;
+    try {
+      path = target.kind === 'destroy' ? leafPath(target.path) : writeThroughPath(target.path);
+    } catch {
+      // A path that does not resolve (a link loop, an unreadable directory) cannot be checked.
+      return target.kind === 'destroy' ? unknownTargetDenial(target) : null;
+    }
+    if (target.into?.length && statSync(path, { throwIfNoEntry: false })?.isDirectory()) {
+      for (const name of target.into) {
+        const denial = this.existingDenial(target, join(path, name));
+        if (denial) return denial;
+      }
+      return null;
+    }
+    return this.existingDenial(target, path);
+  }
+
+  private existingDenial(target: WriteTarget, path: string): Denial | null {
+    if (this.roots.some(root => below(root, path))) return null;
+    const exists = target.kind === 'destroy' ? lstatSync(path, { throwIfNoEntry: false }) !== undefined : existsSync(path);
+    if (!exists || ledgerCreated(path, this.scope.env)) return null;
+    return outsideDenial(target, path, this.roots);
+  }
+
+  /** A glob removes entries below its literal directory, so the directory decides. */
+  private globDenial(target: WriteTarget, dir: string): Denial | null {
+    if (target.kind === 'overwrite') return null;
+    let path: string;
+    try { path = writeThroughPath(dir); } catch { return unknownTargetDenial(target); }
+    if (this.roots.some(root => atOrBelow(root, path)) || !existsSync(path) || ledgerCreated(path, this.scope.env)) return null;
+    return outsideDenial(target, path, this.roots);
+  }
+}
+
+function outsideDenial(target: WriteTarget, path: string, roots: readonly string[]): Denial {
+  return {
+    guard: 'UserFileGuard',
+    reason: `I2: ${target.via} would ${target.kind === 'destroy' ? 'remove or change' : 'overwrite'} ${path}, an existing file outside `
+      + `the worktree, the managed worktree root and the system temp directory (${roots.join(', ')}), and rh's install ledger does not record it as rh-created.`,
+    fix: 'Work on a copy inside the worktree or a temp directory, or ask the user to run the command in their own shell (Claude Code: `! <command>`).',
+  };
+}
+
+function unknownTargetDenial(target: WriteTarget): Denial {
+  return {
+    guard: 'UserFileGuard',
+    reason: `I2: the target ${target.spelled} of ${target.via} is not known before the command runs, and ${target.via} removes or changes an existing file.`,
+    fix: 'Write the target as a literal path from a known working directory, or ask the user to run the command in their own shell (Claude Code: `! <command>`).',
+  };
+}
+
+/** The first I2 denial among the targets. */
+export function writeTargetDenial(targets: readonly WriteTarget[], scope: SafetyScope): Denial | null {
+  const judge = new TargetJudge(scope);
+  for (const target of targets) {
+    const denial = judge.denial(target);
+    if (denial) return denial;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// I1: credential stores
+// ---------------------------------------------------------------------------
+
+const ENV_FILE = /^\.env(?:$|[.\-_]|rc$)/;
+const ENV_TEMPLATE = /\.(?:example|sample|template)$/i;
+
+/** True when the path names a credential store: an SSH private key or the .ssh directory, auth.json, *credentials*.json or .env*. */
+export function namesCredentialStore(path: string): boolean {
+  const parts = path.replace(/[\\/]+$/, '').split(/[\\/]/);
+  const name = parts.at(-1) ?? '';
+  if (parts.at(-2) === '.ssh') {
+    // A glob in .ssh can match a private key.
+    return globIndex(name) >= 0 || (name.startsWith('id_') && !name.endsWith('.pub'));
+  }
+  return name === '.ssh' || name === 'auth.json' || /credentials.*\.json$/i.test(name)
+    || (ENV_FILE.test(name) && !ENV_TEMPLATE.test(name));
+}
+
+/** Programs that read no file content to their output: their operands stay local. */
+const NO_CONTENT = new Set(['ls', 'stat', 'test', '[', 'file', 'chmod', 'chown', 'touch', 'mkdir', 'rm', 'mv', 'cd', 'du', 'realpath',
+  'readlink', 'basename', 'dirname', 'source', '.', 'echo', 'printf', 'ssh-add']);
+const SSH = new Set(['ssh', 'scp', 'sftp']);
+const GREP = new Set(['grep', 'egrep', 'fgrep', 'rg', 'ag']);
+const WRAPPERS = new Set(['sudo', 'command', 'builtin', 'exec', 'nohup', 'time', 'nice']);
+const SUDO_VALUE = new Set(['-u', '-g', '-C', '-h', '-p', '-U']);
+
+/** The index of the program word after leading assignments and wrappers such as sudo or `env NAME=value`; -1 when none runs. */
+function programAt(words: readonly Word[]): number {
+  let i = 0;
+  while (i < words.length) {
+    const word = words[i]!;
+    if (word.assign) { i++; continue; }
+    if (word.value === 'env' && !word.quoted) {
+      i++;
+      while (i < words.length && (words[i]!.value.startsWith('-') || words[i]!.assign)) i += ['-u', '-C', '-S'].includes(words[i]!.value) ? 2 : 1;
+      continue;
+    }
+    if (!WRAPPERS.has(word.value) || word.quoted) return i;
+    i++;
+    while (i < words.length && words[i]!.value.startsWith('-')) i += word.value === 'sudo' && SUDO_VALUE.has(words[i]!.value) ? 2 : 1;
+  }
+  return -1;
+}
+
+/** The ways one word can name a file: the word, an option value after `=`, or a curl-style `@file`. */
+function fileSpellings(word: Word): string[] {
+  const value = word.value;
+  if (/\s/.test(value)) return [];
+  const spellings = [value];
+  if (value.startsWith('-') && value.includes('=')) spellings.push(value.slice(value.indexOf('=') + 1));
+  for (const spelling of [...spellings]) if (spelling.startsWith('@')) spellings.push(spelling.slice(1));
+  return spellings;
+}
+
+function credentialDenial(reason: string): Denial {
+  return {
+    guard: 'CredentialGuard',
+    reason: `I1: ${reason}; its output can reach the model, a log or a remote.`,
+    fix: 'Do not print or send credential stores. Use the tool that owns the secret without printing it, or ask the user to run the command in their own shell (Claude Code: `! <command>`).',
+  };
+}
+
+/** The I1 denial for one simple command, or null. */
+function credentialFinding(cmd: Command): Denial | null {
+  for (const redirect of cmd.redirects) {
+    if (redirect.op.replace(/^\d+/, '') === '<' && redirect.target && fileSpellings(redirect.target).some(namesCredentialStore)) {
+      return credentialDenial(`the command reads the credential store ${redirect.target.value} from a redirect`);
+    }
+  }
+  const words = cmd.words;
+  const at = programAt(words);
+  if (at < 0) {
+    return words.some(word => word.value === 'env' && !word.quoted) ? credentialDenial('env prints the whole environment') : null;
+  }
+  const program = words[at]!.value;
+  const args = words.slice(at + 1);
+  if (program === 'printenv' && args.every(word => word.value.startsWith('-'))) return credentialDenial('printenv prints the whole environment');
+  if (program === 'security') {
+    const sub = args[0]?.value ?? '';
+    if (sub === 'dump-keychain') return credentialDenial('security dump-keychain prints the keychain');
+    if (/^find-(?:generic|internet)-password$/.test(sub) && args.some(word => /^-[a-zA-Z]*[wg]/.test(word.value))) {
+      return credentialDenial(`security ${sub} -w or -g prints a keychain password`);
+    }
+  }
+  if (NO_CONTENT.has(program)) return null;
+  // An env file loads into a process, and an ssh identity authenticates; neither is printed or sent.
+  const loads = (word: Word, n: number) => args[n - 1]?.value === '--env-file' || word.value.startsWith('--env-file=')
+    || (SSH.has(program) && args[n - 1]?.value === '-i');
+  let operands = args.filter((word, n) => !loads(word, n));
+  if (GREP.has(program) && !args.some(word => /^-[a-zA-Z]*[ef]$|^--(?:regexp|file)(?:=|$)/.test(word.value))) {
+    const pattern = operands.find(word => !word.value.startsWith('-'));
+    operands = operands.filter(word => word !== pattern);
+  }
+  // A copy destination receives content; only its sources are read.
+  if (program === 'cp' && !args.some(word => /^-[a-zA-Z]*t|^--target-directory/.test(word.value))) {
+    const destination = operands.filter(word => !word.value.startsWith('-')).at(-1);
+    operands = operands.filter(word => word !== destination);
+  }
+  const named = operands.find(word => fileSpellings(word).some(namesCredentialStore));
+  return named ? credentialDenial(`${program} reads the credential store ${named.value}`) : null;
+}
+
+// ---------------------------------------------------------------------------
+// I2: the write targets of one Bash command
+// ---------------------------------------------------------------------------
+
+/** The absolute paths that a word names from each directory of the set. Null when the shell decides them at run time. */
+function wordTargets(word: Word, dirs: Dirs): Array<{ path: string; glob: boolean }> | null {
+  let patterns: string[];
+  if (word.expand) {
+    // $HOME is the one parameter that the hook resolves.
+    const home = /^\$(?:HOME|\{HOME\})(?=\/|$)/.exec(word.value);
+    const rest = home ? word.value.slice(home[0].length) : '';
+    if (!home || /[$`]/.test(rest)) return null;
+    patterns = [escapePattern(homedir() + rest)];
+  } else {
+    const expanded = expandBraces(word.pattern);
+    if (!expanded) return null;
+    patterns = expanded;
+  }
+  const result: Array<{ path: string; glob: boolean }> = [];
+  for (let pattern of patterns) {
+    // Tilde expansion follows brace expansion. `~+` is the working directory; `~-` and `~user` are not known here.
+    if (/^~(?:\/|$)/.test(pattern)) pattern = escapePattern(homedir()) + pattern.slice(1);
+    else if (/^~\+(?:\/|$)/.test(pattern)) pattern = `.${pattern.slice(2)}`;
+    else if (pattern.startsWith('~')) return null;
+    const glob = globIndex(pattern);
+    const literal = unescapePattern(glob < 0 ? pattern : pattern.slice(0, pattern.lastIndexOf('/', glob) + 1)) || '.';
+    if (!isAbsolute(literal) && dirs === null) return null;
+    for (const base of isAbsolute(literal) ? [''] : dirs!) result.push({ path: base ? join(base, literal) : literal, glob: glob >= 0 });
+  }
+  return result;
+}
+
+function targetsOf(kind: TargetKind, via: string, word: Word, dirs: Dirs, into?: readonly string[]): WriteTarget[] {
+  const found = wordTargets(word, dirs);
+  if (found === null) return [{ kind, via, spelled: word.value, path: null }];
+  return found.map(({ path, glob }) => ({ kind, via, spelled: word.value, path, ...(glob ? { glob: true as const } : {}), ...(into ? { into } : {}) }));
+}
+
+/** Operands after options; `valued` options take the next word unless glued (`-tDIR`, `--suffix=x`). */
+function operandsOf(args: readonly Word[], valued: ReadonlySet<string>): { operands: Word[]; values: Map<string, Word> } {
+  const operands: Word[] = [];
+  const values = new Map<string, Word>();
+  let only = false;
+  for (let i = 0; i < args.length; i++) {
+    const word = args[i]!;
+    if (only || !word.value.startsWith('-') || word.value === '-') { operands.push(word); continue; }
+    if (word.value === '--') { only = true; continue; }
+    if (valued.has(word.value) && args[i + 1]) values.set(word.value, args[++i]!);
+  }
+  return { operands, values };
+}
+
+const MOVE_VALUED = new Set(['-t', '--target-directory', '-S', '--suffix']);
+
+/** cp, mv and ln: the destination, written into a directory as each source's name. */
+function destinationTargets(program: string, args: readonly Word[], dirs: Dirs): WriteTarget[] {
+  const { operands, values } = operandsOf(args, MOVE_VALUED);
+  const glued = args.find(word => /^-t./.test(word.value) || word.value.startsWith('--target-directory='));
+  const directory = values.get('-t') ?? values.get('--target-directory')
+    ?? (glued && { ...glued, value: glued.value.replace(/^-t|^--target-directory=/, ''), pattern: glued.pattern.replace(/^-t|^--target-directory=/, '') });
+  const sources = directory ? operands : operands.slice(0, -1);
+  const destination = directory ?? operands.at(-1);
+  if (!destination || (!directory && operands.length < 2)) return [];
+  const names = sources.filter(word => !word.expand && !word.glob).map(word => basename(unescapePattern(word.pattern)));
+  const targets = targetsOf('overwrite', program, destination, dirs, names);
+  return program === 'mv' ? [...sources.flatMap(word => targetsOf('destroy', 'mv', word, dirs)), ...targets] : targets;
+}
+
+/** Python and Node one-liners: literal file writes and removals in the script text. */
+function scriptTargets(program: string, source: string, dirs: Dirs): WriteTarget[] {
+  const found: Array<[TargetKind, string]> = [];
+  const add = (kind: TargetKind, pattern: RegExp, group: number) => {
+    for (const match of source.matchAll(pattern)) found.push([kind, match[group]!]);
+  };
+  if (/^python(?:3(?:\.\d+)?)?$/.test(program)) {
+    add('overwrite', /\bopen\(\s*(['"])([^'"\n]+)\1\s*,\s*(?:mode\s*=\s*)?(['"])[^'"\n]*w[^'"\n]*\3/g, 2);
+    add('overwrite', /\bPath\(\s*(['"])([^'"\n]+)\1\s*\)\.(?:write_text|write_bytes)\s*\(/g, 2);
+    add('destroy', /\bPath\(\s*(['"])([^'"\n]+)\1\s*\)\.(?:unlink|rmdir)\s*\(/g, 2);
+    add('destroy', /\bos\.(?:remove|unlink)\(\s*(['"])([^'"\n]+)\1/g, 2);
+  } else {
+    add('overwrite', /\bwriteFile(?:Sync)?\(\s*(['"])([^'"\n]+)\1/g, 2);
+    add('destroy', /\b(?:unlink|rm)(?:Sync)?\(\s*(['"])([^'"\n]+)\1/g, 2);
+  }
+  return found.flatMap(([kind, path]) => {
+    const word: Word = { kind: 'word', value: path, pattern: escapePattern(path), expand: false, glob: false, quoted: true, assign: false };
+    return targetsOf(kind, program, word, dirs);
+  });
+}
+
+const FIND_RUNS = /^-(?:exec|execdir|ok|okdir)$/;
+const FIND_EXEC_READERS = new Set(['cat', 'head', 'tail', 'wc', 'grep', 'rg', 'ls', 'stat', 'file', 'du', 'diff', 'cmp', 'cut', 'tr', 'jq',
+  'echo', 'printf', 'test', 'basename', 'dirname', 'realpath', 'readlink', 'sort']);
+
+/** find writes when it deletes or runs a program that is not a reader. */
+function findWrites(args: readonly Word[]): boolean {
+  return args.some((word, n) => word.value === '-delete' || (FIND_RUNS.test(word.value) && !FIND_EXEC_READERS.has(args[n + 1]?.value ?? '')));
+}
+
+/** The start paths of find, before the first expression word. */
+function findStarts(args: readonly Word[]): Word[] {
+  let i = 0;
+  const starts: Word[] = [];
+  for (; i < args.length && /^-[HLPEXdsx]$|^-O\d$|^-f$/.test(args[i]!.value); i++) if (args[i]!.value === '-f' && args[i + 1]) starts.push(args[++i]!);
+  for (; i < args.length && !/^[-(!)]/.test(args[i]!.value); i++) starts.push(args[i]!);
+  return starts;
+}
+
+const DOT: Word = { kind: 'word', value: '.', pattern: '.', expand: false, glob: false, quoted: false, assign: false };
+const TRUNCATE_VALUED = new Set(['-s', '--size', '-r', '--reference']);
+const SED_VALUED = new Set(['-e', '--expression', '-f', '--file', '-l', '--line-length']);
+
+/** The write targets of one simple command. */
+function commandTargets(cmd: Command, dirs: Dirs): WriteTarget[] {
+  const targets: WriteTarget[] = [];
+  for (const redirect of cmd.redirects) {
+    const op = redirect.op.replace(/^\d+/, '');
+    const target = redirect.target;
+    if (!target || !['>', '>|', '&>', '>&'].includes(op)) continue;
+    // Descriptor duplication or closure, such as 2>&1, has no file.
+    if (op === '>&' && /^(?:\d+|-)$/.test(target.value) && !target.quoted) continue;
+    targets.push(...targetsOf('overwrite', 'a redirect', target, dirs));
+  }
+  const words = cmd.words;
+  const at = programAt(words);
+  if (at < 0 || words[at]!.quoted) return targets;
+  const program = words[at]!.value;
+  const args = words.slice(at + 1);
+  const operands = (valued: ReadonlySet<string> = new Set()) => operandsOf(args, valued).operands;
+  switch (program) {
+    case 'rm': case 'unlink': case 'shred':
+      for (const word of operands()) targets.push(...targetsOf('destroy', program, word, dirs));
+      break;
+    case 'truncate':
+      for (const word of operands(TRUNCATE_VALUED)) targets.push(...targetsOf('destroy', program, word, dirs));
+      break;
+    case 'mv': case 'cp':
+      targets.push(...destinationTargets(program, args, dirs));
+      break;
+    case 'ln':
+      // Without -f, ln refuses an existing destination.
+      if (args.some(word => /^-[a-zA-Z]*f/.test(word.value) || word.value === '--force')) targets.push(...destinationTargets(program, args, dirs));
+      break;
+    case 'tee':
+      if (!args.some(word => /^-[a-zA-Z]*a/.test(word.value) || word.value === '--append')) {
+        for (const word of operands()) targets.push(...targetsOf('overwrite', program, word, dirs));
+      }
+      break;
+    case 'sed': {
+      const inPlace = args.findIndex(word => /^-i/.test(word.value) || /^--in-place(?:=|$)/.test(word.value));
+      if (inPlace < 0) break;
+      // BSD sed takes the backup suffix as the next word: `sed -i '' s/a/b/ file`.
+      const words = args.filter((word, n) => !(n === inPlace + 1 && args[inPlace]!.value === '-i' && word.value === ''));
+      let files = operandsOf(words, SED_VALUED).operands;
+      if (!words.some(word => SED_VALUED.has(word.value) || /^--(?:expression|file)=/.test(word.value))) files = files.slice(1);
+      for (const word of files) targets.push(...targetsOf('destroy', program, word, dirs));
+      break;
+    }
+    case 'dd':
+      for (const word of args.filter(arg => arg.value.startsWith('of='))) {
+        const file = { ...word, value: word.value.slice(3), pattern: word.pattern.slice(3) };
+        targets.push(...targetsOf('overwrite', program, file, dirs));
+      }
+      break;
+    case 'find':
+      if (findWrites(args)) {
+        const starts = findStarts(args);
+        for (const word of starts.length ? starts : [DOT]) targets.push(...targetsOf('destroy', 'find', word, dirs));
+      }
+      break;
+    default:
+      if (/^python(?:3(?:\.\d+)?)?$/.test(program) || program === 'node') {
+        const flag = args.findIndex(word => ['-c', '-e', '--eval'].includes(word.value));
+        const heredoc = cmd.redirects.find(redirect => redirect.body !== undefined)?.body ?? '';
+        targets.push(...scriptTargets(program, flag >= 0 ? args[flag + 1]?.value ?? '' : heredoc, dirs));
+      }
+  }
+  return targets;
+}
+
+// ---------------------------------------------------------------------------
+// Recursive delete
+// ---------------------------------------------------------------------------
+
+const GIT_GLOBAL_FLAGS = new Set(['--no-pager', '-P', '--no-optional-locks', '--literal-pathspecs', '--glob-pathspecs',
+  '--noglob-pathspecs', '--icase-pathspecs']);
+
+/** Global git options before the subcommand, the `-C` directories in order, and the subcommand index; null for another option. */
+function gitInvocation(args: readonly Word[]): { dirs: Word[]; at: number } | null {
+  const dirs: Word[] = [];
+  let i = 1;
+  for (; i < args.length && args[i]!.value.startsWith('-'); i++) {
+    if (args[i]!.value === '-C' && args[i + 1]) dirs.push(args[++i]!);
+    else if (!GIT_GLOBAL_FLAGS.has(args[i]!.value)) return null;
+  }
+  return i < args.length ? { dirs, at: i } : null;
+}
+
+class StartResolver {
+  private realRootValue: string | undefined;
+  constructor(private readonly repoRoot: string) {}
+  private get realRoot(): string { return this.realRootValue ??= realpathSync(this.repoRoot); }
+
+  /** Whether a start path is the repository root or an ancestor of it. */
+  startClass(word: Word, dirs: Dirs): 'root' | 'other' | 'unknown' {
+    if (word.expand) return 'unknown';
+    const expanded = expandBraces(word.pattern);
+    if (!expanded) return 'unknown';
+    let unknown = false;
+    for (let pattern of expanded) {
+      if (/^~\+(?:\/|$)/.test(pattern)) pattern = `.${pattern.slice(2)}`;
+      else if (/^~(?:\/|$)/.test(pattern)) pattern = escapePattern(homedir()) + pattern.slice(1);
+      else if (pattern.startsWith('~')) { unknown = true; continue; }
+      const absolute = pattern.startsWith('/');
+      if (globIndex(pattern) >= 0 || (!absolute && dirs === null)) { unknown = true; continue; }
+      for (const base of absolute ? ['/'] : dirs!) {
+        const path = resolve(base, unescapePattern(pattern));
+        if (inside(relative(path, this.repoRoot))) return 'root';
+        try {
+          if (inside(relative(writeThroughPath(path), this.realRoot))) return 'root';
+        } catch { unknown = true; }
+      }
+    }
+    return unknown ? 'unknown' : 'other';
+  }
+}
+
+/** Whole-repository recursion: rm -r, find -delete or -exec, and git clean -x or -X from the root or an ancestor. */
+function recursionFinding(args: readonly Word[], dirs: Dirs, resolver: StartResolver): string | null {
+  const program = args[0]?.value;
+  if (!program || args[0]!.expand) return null;
+  const starts = (words: readonly Word[], base: Dirs) => words.map(word => resolver.startClass(word, base));
+  if (program === 'rm') {
+    let operandsOnly = false, recursive = false;
+    const operands: Word[] = [];
+    for (const word of args.slice(1)) {
+      if (!operandsOnly && word.value === '--') operandsOnly = true;
+      else if (!operandsOnly && /^-[^-]/.test(word.value)) recursive ||= /[rR]/.test(word.value);
+      else if (!operandsOnly && word.value.startsWith('--')) recursive ||= word.value === '--recursive';
+      else operands.push(word);
+    }
+    return recursive && starts(operands, dirs).includes('root') ? 'rm -r of the repository root or an ancestor' : null;
+  }
+  if (program === 'find') {
+    const rest = args.slice(1);
+    if (!findWrites(rest)) return null;
+    const paths = findStarts(rest);
+    return starts(paths.length ? paths : [DOT], dirs).some(c => c !== 'other')
+      ? 'find -delete or -exec from the repository root, an ancestor or an unknown start' : null;
+  }
+  if (program === 'git') {
+    const git = gitInvocation(args);
+    const clean = git ? args[git.at]!.value === 'clean' : args.some(word => word.value === 'clean');
+    if (!clean) return null;
+    const options = git ? args.slice(git.at + 1) : args;
+    if (!options.some(word => /^-[^-]*[xX]/.test(word.value))) return null;
+    let base: Dirs = git ? dirs : null;
+    for (const dir of git?.dirs ?? []) {
+      base = dir.expand || dir.glob ? null : isAbsolute(dir.value) ? [resolve(dir.value)] : base && base.map(d => resolve(d, dir.value));
+    }
+    const pathspecs: Word[] = [];
+    for (let n = 0; n < options.length; n++) {
+      const value = options[n]!.value;
+      if (value === '-e' || value === '--exclude') n++;
+      else if (!value.startsWith('-')) pathspecs.push(options[n]!);
+    }
+    const classes = pathspecs.some(word => word.value.startsWith(':')) ? ['unknown'] : starts(pathspecs.length ? pathspecs : [DOT], base);
+    return classes.some(c => c !== 'other') ? 'git clean -x or -X from the repository root, an ancestor or an unknown directory' : null;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// The Bash decision
+// ---------------------------------------------------------------------------
+
+/** The first denial for a Bash command line: recursive delete, then I1, then I2. `cwd` null means the directory is not known. */
+export function bashSafetyDenial(command: string, cwd: string | null, scope: SafetyScope): Denial | null {
+  const resolver = new StartResolver(scope.repoRoot);
+  const parsed = simpleCommands(command, cwd);
+  for (const { command: cmd, dirs } of parsed) {
+    const recursion = recursionFinding(cmd.words, dirs, resolver);
+    if (recursion) {
+      return { guard: 'RecursiveDeleteGuard', reason: `The command runs ${recursion}.`, fix: 'Name the directories to clean below the repository root.' };
+    }
+  }
+  for (const { command: cmd } of parsed) {
+    const denial = credentialFinding(cmd);
+    if (denial) return denial;
+  }
+  return writeTargetDenial(parsed.flatMap(({ command: cmd, dirs }) => commandTargets(cmd, dirs)), scope);
+}

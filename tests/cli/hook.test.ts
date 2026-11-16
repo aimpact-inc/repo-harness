@@ -143,7 +143,7 @@ describe('typed hook runtime', () => {
     } finally { clean(root); }
   }, 30_000);
 
-  test('a newer declared minimum leaves every edit guard in force and reports on SessionStart', () => {
+  test.skipIf(process.platform === 'win32')('a newer declared minimum leaves every edit guard in force and reports on SessionStart', () => {
     const root = repo();
     try {
       writeFileSync(join(root, '.ai/harness/workflow-contract.json'), `${JSON.stringify({ minimum_harness_version: '999.0.0' })}\n`);
@@ -152,11 +152,10 @@ describe('typed hook runtime', () => {
         input: `${JSON.stringify({ tool_name: 'Write', tool_input: { file_path: filePath, content: 'x' } })}\n`,
       });
       // The tool route runs; the gate does not turn a deny into an allow.
-      const denied = edit(join(root, '_ops', 'private'));
+      const denied = edit('/etc/hosts');
       expect(denied.status).toBe(2);
-      expect(denied.stderr).toContain('OpsPrivateGuard');
+      expect(denied.stderr).toContain('UserFileGuard');
       expect(denied.stderr).not.toContain('needs repo-harness');
-      expect(existsSync(join(root, '_ops', 'private'))).toBe(false);
       expect(edit(join(root, 'README.md')).status).toBe(0);
 
       const session = spawnSync(process.execPath, [HOOK_ENTRY, 'SessionStart', '--route', 'default'], { cwd: root, env: env(root), input: '', encoding: 'utf8' });
