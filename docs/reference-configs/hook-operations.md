@@ -208,9 +208,14 @@ Safety hook guards:
   file, or a directory tree above it, as rh-created. A create or an append
   passes everywhere. A removal (`rm`, `unlink`, `shred`, `truncate`, an `mv`
   source, `sed -i`, `find -delete`) whose target is not known before the
-  command runs is refused; an overwrite with an unknown target passes. The user
-  authorizes any other case by running the command in their own shell
-  (Claude Code: `! <command>`), which no hook sees.
+  command runs is refused; an overwrite with an unknown target passes. In a
+  Claude session whose `permission_mode` is not `bypassPermissions` or
+  `dontAsk`, the hook returns the host's ask decision and the user answers
+  locally. A bypass or `dontAsk` session (the owner's own bypass sessions
+  included), a payload without a mode, Codex and the Pi bridge get the deny;
+  the bridge renders an ask as a block. The deny names every allowed root and
+  the step the user can take: the exact `! <command>` line for a one-line Bash
+  command, or the target path that the user can edit themselves.
 - `RecursiveDeleteGuard`: `rm -r`, `find -delete` or `find -exec` with a program
   that is not a reader, or `git clean -x`/`-X` starts at the repository root, an
   ancestor of it, or a start that is not known.

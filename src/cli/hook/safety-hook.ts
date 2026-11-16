@@ -139,11 +139,11 @@ export function ledgerCreated(path: string, env: NodeJS.ProcessEnv): boolean {
 
 class TargetJudge {
   private rootsValue: Root[] | undefined;
-  constructor(private readonly scope: SafetyScope) {}
+  constructor(private readonly scope: SafetyScope, private readonly userStep: string) {}
   private get roots(): Root[] { return this.rootsValue ??= allowedRoots(this.scope); }
 
   denial(target: WriteTarget): Denial | null {
-    if (target.path === null) return target.kind === 'destroy' ? unknownTargetDenial(target) : null;
+    if (target.path === null) return target.kind === 'destroy' ? unknownTargetDenial(target, this.roots, this.userStep) : null;
     if (/^\/dev\//.test(target.path)) return null;
     if (target.glob) return this.globDenial(target, target.path);
     let path: string;
@@ -151,7 +151,7 @@ class TargetJudge {
       path = target.kind === 'destroy' ? leafPath(target.path) : writeThroughPath(target.path);
     } catch {
       // A path that does not resolve (a link loop, an unreadable directory) cannot be checked.
-      return target.kind === 'destroy' ? unknownTargetDenial(target) : null;
+      return target.kind === 'destroy' ? unknownTargetDenial(target, this.roots, this.userStep) : null;
     }
     if (target.into?.length && statSync(path, { throwIfNoEntry: false })?.isDirectory()) {
       for (const name of target.into) {
@@ -167,44 +167,57 @@ class TargetJudge {
     if (this.roots.some(root => underRoot(root, path))) return null;
     const exists = target.kind === 'destroy' ? lstatSync(path, { throwIfNoEntry: false }) !== undefined : existsSync(path);
     if (!exists || ledgerCreated(path, this.scope.env)) return null;
-    return outsideDenial(target, path, this.roots);
+    return outsideDenial(target, path, this.roots, this.userStep);
   }
 
   /** A glob removes entries below its literal directory, so the directory decides. */
   private globDenial(target: WriteTarget, dir: string): Denial | null {
     if (target.kind === 'overwrite') return null;
     let path: string;
-    try { path = writeThroughPath(dir); } catch { return unknownTargetDenial(target); }
+    try { path = writeThroughPath(dir); } catch { return unknownTargetDenial(target, this.roots, this.userStep); }
     if (this.roots.some(root => underRoot(root, path, true)) || !existsSync(path) || ledgerCreated(path, this.scope.env)) return null;
-    return outsideDenial(target, path, this.roots);
+    return outsideDenial(target, path, this.roots, this.userStep);
   }
 }
 
-function outsideDenial(target: WriteTarget, path: string, roots: readonly Root[]): Denial {
+const rootList = (roots: readonly Root[]) => roots.map(root => root.join(sep)).join(', ');
+
+function outsideDenial(target: WriteTarget, path: string, roots: readonly Root[], userStep: string): Denial {
   return {
     guard: 'UserFileGuard',
     reason: `I2: ${target.via} would ${target.kind === 'destroy' ? 'remove or change' : 'overwrite'} ${path}, an existing file outside `
-      + `the allowed roots (${roots.map(root => root.join(sep)).join(', ')}), and rh's install ledger does not record it as rh-created.`,
-    fix: 'Work on a copy inside the worktree or a temp directory, or ask the user to run the command in their own shell (Claude Code: `! <command>`).',
+      + `the allowed roots (${rootList(roots)}), and rh's install ledger does not record it as rh-created.`,
+    fix: `Work on a copy inside an allowed root, or ${userStep}.`,
+    askable: true,
   };
 }
 
-function unknownTargetDenial(target: WriteTarget): Denial {
+function unknownTargetDenial(target: WriteTarget, roots: readonly Root[], userStep: string): Denial {
   return {
     guard: 'UserFileGuard',
-    reason: `I2: the target ${target.spelled} of ${target.via} is not known before the command runs, and ${target.via} removes or changes an existing file.`,
-    fix: 'Write the target as a literal path from a known working directory, or ask the user to run the command in their own shell (Claude Code: `! <command>`).',
+    reason: `I2: the target ${target.spelled} of ${target.via} is not known before the command runs, and ${target.via} removes or changes `
+      + `an existing file. Allowed roots: ${rootList(roots)}.`,
+    fix: `Write the target as a literal path inside an allowed root from a known working directory, or ${userStep}.`,
+    askable: true,
   };
 }
 
-/** The first I2 denial among the targets. */
-export function writeTargetDenial(targets: readonly WriteTarget[], scope: SafetyScope): Denial | null {
-  const judge = new TargetJudge(scope);
+/** The first I2 denial among the targets. `userStep` says how the user does the call themselves. */
+export function writeTargetDenial(targets: readonly WriteTarget[], scope: SafetyScope, userStep: string | ((path: string) => string)): Denial | null {
   for (const target of targets) {
-    const denial = judge.denial(target);
+    const step = typeof userStep === 'string' ? userStep : userStep(target.path ?? target.spelled);
+    const denial = new TargetJudge(scope, step).denial(target);
     if (denial) return denial;
   }
   return null;
+}
+
+/** The user runs a one-line command themselves with Claude Code's `!` prefix; a longer command runs in their own shell. */
+function bashUserStep(command: string): string {
+  const line = command.trim();
+  return !line.includes('\n') && line.length <= 300
+    ? `the user can run it themselves: \`! ${line}\``
+    : 'the user can run the command themselves in their own shell (Claude Code: `! <command>`)';
 }
 
 // ---------------------------------------------------------------------------
@@ -599,5 +612,5 @@ export function bashSafetyDenial(command: string, cwd: string | null, scope: Saf
     const denial = credentialFinding(cmd);
     if (denial) return denial;
   }
-  return writeTargetDenial(parsed.flatMap(({ command: cmd, dirs }) => commandTargets(cmd, dirs)), scope);
+  return writeTargetDenial(parsed.flatMap(({ command: cmd, dirs }) => commandTargets(cmd, dirs)), scope, bashUserStep(command));
 }

@@ -69,6 +69,8 @@ describe('hook host output fields', () => {
     const edit = { ...outcome, event: 'PreToolUse' as const, routeId: 'edit' as const, additionalContext: null, systemMessage: undefined };
     expect(JSON.parse(HOST_RENDERERS.pi({ ...edit, exitCode: 2, reason: 'blocked' }).stdout).decision).toBe('block');
     expect(JSON.parse(HOST_RENDERERS.pi({ ...edit, permission: { decision: 'deny', reason: 'x' } }).stdout).decision).toBe('block');
+    // The bridge has no user prompt, so an ask never passes.
+    expect(JSON.parse(HOST_RENDERERS.pi({ ...edit, permission: { decision: 'ask', reason: 'x' } }).stdout).decision).toBe('block');
     expect(JSON.parse(HOST_RENDERERS.pi({ ...edit, permission: { decision: 'allow', reason: 'x' } }).stdout).decision).toBe('allow');
     expect(JSON.parse(HOST_RENDERERS.pi({ ...edit, permission: {
       decision: 'allow', reason: 'x', updatedInput: { file_path: 'changed.txt' },

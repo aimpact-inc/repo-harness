@@ -100,6 +100,8 @@ describe('safety hook: Bash host route', () => {
       }
       // The relative target of a removal resolves against the host cwd.
       expect(invokeBash('rm hosts', '/etc').status).toBe(2);
+      // The deny gives the line that the user can run themselves.
+      expect(invokeBash(`rm ${OUTSIDE}`).stderr).toContain(`the user can run it themselves: \`! rm ${OUTSIDE}\``);
     } finally { rmSync(root, { recursive: true, force: true }); }
   }, 60_000);
 
@@ -188,7 +190,7 @@ describe('safety hook: edit route', () => {
       const lines = result.stderr.trimEnd().split('\n');
       expect(lines).toHaveLength(2);
       expect(lines[0]).toMatch(/^\[UserFileGuard\] I2: the edit would overwrite \S*\/etc\/hosts, an existing file outside the allowed roots \(/);
-      expect(lines[1]).toBe('  Fix: Work on a copy inside the worktree or a temp directory, or ask the user to run the command in their own shell (Claude Code: `! <command>`).');
+      expect(lines[1]).toBe(`  Fix: Work on a copy inside an allowed root, or the user can edit ${OUTSIDE} themselves.`);
       const records = failureRecords(cwd);
       expect(records).toHaveLength(1);
       expect(records[0]).toMatchObject({
@@ -241,6 +243,19 @@ describe('safety hook: edit route', () => {
           expect({ host, toolInput, status: hostEdit(cwd, home, toolInput, host).status }).toEqual({ host, toolInput, status: 0 });
         }
       }
+      // An interactive Claude session asks the user; a bypass session, the owner's included, gets the deny with the user step.
+      const claudeWrite = (permissionMode: string) => spawnSync(process.execPath, [HOOK_ENTRY, 'PreToolUse', '--route', 'edit'], {
+        cwd, encoding: 'utf-8',
+        input: JSON.stringify({ tool_name: 'Write', permission_mode: permissionMode, tool_input: { file_path: OUTSIDE, content: 'x' } }),
+        env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, HOME: home, HOOK_HOST: 'claude', HOOK_REPO_ROOT: cwd },
+      });
+      const asked = claudeWrite('default');
+      expect(asked.status).toBe(0);
+      expect(JSON.parse(asked.stdout).hookSpecificOutput).toMatchObject({ permissionDecision: 'ask' });
+      expect(JSON.parse(asked.stdout).hookSpecificOutput.permissionDecisionReason).toContain('[UserFileGuard] I2:');
+      const bypass = claudeWrite('bypassPermissions');
+      expect(bypass.status).toBe(2);
+      expect(bypass.stderr).toContain(`the user can edit ${OUTSIDE} themselves`);
     } finally { rmSync(root, { recursive: true, force: true }); }
   }, 60_000);
   posixOnly('host edit route checks apply_patch headers that Codex accepts with surrounding whitespace', () => {

@@ -15,6 +15,7 @@ import {
   FAILURE_LOG_FILE,
   type CapabilityPathOwner,
 } from '../../effects/state/resolve-effective-state';
+import type { HookPermission } from './handler-contract';
 import { payloadString, type HookIdentity, type HookPayload } from './hook-input';
 import { writeTargetDenial, type TargetKind, type WriteTarget } from './safety-hook';
 import { gitExecFileSync } from '../../effects/git/runner';
@@ -30,13 +31,22 @@ export interface MutationGuardResult {
   readonly exitCode: number;
   readonly stdout: string;
   readonly stderr: string;
+  readonly permission?: HookPermission;
 }
 
 export interface Denial {
   readonly guard: string;
   readonly reason: string;
   readonly fix: string;
+  /** The user can authorize the call locally (I2), so an interactive Claude session asks instead of denying. */
+  readonly askable?: true;
 }
+
+/**
+ * Claude modes in which a hook ask is not shown to reach the user, so an ask could pass unseen. These sessions, the owner's
+ * bypass sessions included, get the deny. A payload without a mode also gets the deny.
+ */
+const NO_PROMPT_MODES = new Set(['bypassPermissions', 'dontAsk']);
 
 const APPLY_PATCH_SCOPE_DENIAL: Denial = {
   guard: 'ApplyPatchScopeGuard',
@@ -60,13 +70,18 @@ export function runMutationGuard(opts: MutationGuardInput): MutationGuardResult 
   const targets: readonly EditTarget[] = command ? extractApplyPatchTargets(command) : (filePath ? [{ kind: 'overwrite', raw: filePath }] : []);
   if (targets.length === 0) return deny(repoRoot, command ? APPLY_PATCH_SCOPE_DENIAL : EDIT_SCOPE_DENIAL, opts.identity.runId);
   const writes: WriteTarget[] = targets.map(({ kind, raw }) => ({ kind, via: command ? 'apply_patch' : 'the edit', spelled: raw, path: resolve(repoRoot, raw) }));
-  const denial = writeTargetDenial(writes, { repoRoot, env: opts.env, host: opts.identity.host });
-  if (denial) return deny(repoRoot, denial, opts.identity.runId);
+  const userStep = (path: string) => `the user can edit ${path} themselves`;
+  const denial = writeTargetDenial(writes, { repoRoot, env: opts.env, host: opts.identity.host }, userStep);
+  if (denial) return runMutationDenial(opts, denial);
   return { exitCode: 0, stdout: capabilityOwnerLines(repoRoot, targets.map(({ raw }) => normalizeFilePath(repoRoot, raw))), stderr: '' };
 }
 
 /** A caller that owns its own decision reports it through the same denial record and exit code. */
 export function runMutationDenial(opts: MutationGuardInput, denial: Denial): MutationGuardResult {
+  const mode = payloadString(opts.payload, 'permission_mode');
+  if (denial.askable && opts.identity.host === 'claude' && mode !== '' && !NO_PROMPT_MODES.has(mode)) {
+    return { exitCode: 0, stdout: '', stderr: '', permission: { decision: 'ask', reason: `[${denial.guard}] ${denial.reason}` } };
+  }
   return deny(opts.repoRoot, denial, opts.identity.runId);
 }
 
