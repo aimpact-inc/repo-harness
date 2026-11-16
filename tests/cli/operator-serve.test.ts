@@ -1910,7 +1910,7 @@ test('operator diagram aborts an in-flight render on SIGTERM, waits for its clea
     expect(process.listenerCount('SIGTERM')).toBe(before);
   } finally {
     stdout.mockRestore();
-    process.exitCode = previousExit;
+    process.exitCode = previousExit ?? 0;
     rmSync(home, { recursive: true, force: true });
   }
 });
