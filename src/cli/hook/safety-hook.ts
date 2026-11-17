@@ -650,10 +650,15 @@ function expandWord(word: Word, at: number, cwd: string | null, home: string, ta
  * globbed again.
  */
 function restArg(arg: Arg, length: number, home: string): Arg {
-  let at = 0;
-  for (let count = 0; count < length && at < arg.pattern.length; count++) at += arg.pattern[at] === '\\' ? 2 : 1;
-  const rest = itemArg(arg.pattern.slice(at), arg.expand, arg.word, home);
+  const rest = itemArg(patternAfter(arg.pattern, length), arg.expand, arg.word, home);
   return arg.unbounded ? unbounded(rest) : rest;
+}
+
+/** The pattern after its first `length` value characters; an escaped character counts once. */
+function patternAfter(pattern: string, length: number): string {
+  let at = 0;
+  for (let count = 0; count < length && at < pattern.length; count++) at += pattern[at] === '\\' ? 2 : 1;
+  return pattern.slice(at);
 }
 
 /**
@@ -832,11 +837,14 @@ type Valued = { readonly value: string | null };
 /** GNU options that may stand before a start, as `find -xdev build`; the user means them for the starts after them. */
 const FIND_GLOBAL = new Set(['-xdev', '-mount', '-depth', '-noleaf', '-ignore_readdir_race', '-noignore_readdir_race', '-daystart',
   '-follow', '-warn', '-nowarn', '-maxdepth', '-mindepth', '-regextype']);
+/** Expression words that take no operand: actions, tests and operators of GNU and BSD find. */
+const FIND_PLAIN = new Set(['-delete', '-print', '-print0', '-ls', '-prune', '-quit', '-true', '-false', '-empty', '-readable', '-writable',
+  '-executable', '-nouser', '-nogroup', '-not', '-and', '-or', '-a', '-o', '-d', '-x', '-s', '-follow', '-xdev', '-mount', '-depth', '!', '(', ')']);
 /** Expression words whose next word is an operand, never a primary, as the pattern in `-name -follow`. */
 const FIND_VALUED = new Set(['-maxdepth', '-mindepth', '-regextype', '-name', '-iname', '-path', '-ipath', '-wholename', '-iwholename',
   '-lname', '-ilname', '-regex', '-iregex', '-type', '-xtype', '-user', '-group', '-uid', '-gid', '-perm', '-size', '-newer', '-anewer',
   '-cnewer', '-mtime', '-atime', '-ctime', '-mmin', '-amin', '-cmin', '-used', '-links', '-inum', '-samefile', '-fstype', '-context',
-  '-printf', '-fprint', '-fprint0', '-fls']);
+  '-printf', '-fprint', '-fprint0', '-fls', '-flags', '-Bmin', '-Btime', '-Bnewer', '-acl']);
 
 /** One find command line: its start paths, the link mode that applies, and what its expression does. */
 interface FindCommand<T> {
@@ -849,15 +857,19 @@ interface FindCommand<T> {
   readonly writes: boolean;
   /** A writing `-exec` template passes `{}` with a separator after it, so the program walks through a matched link. */
   readonly templateFollows: boolean;
+  /** The first word before the expression that the parser cannot classify; find may read it as an option that names a start. */
+  readonly unknown: T | null;
 }
 
 /**
  * The one find option parser. Leading options run up to `--` or the first other word: BSD getopt clusters of `EHLPXdsx` that may
- * end with `f <path>`, and GNU `-D <opts>` and `-O<n>`. The starts follow, up to the first expression word; a GNU global option
- * before a start is skipped. The expression is read word by word: an operand of a valued primary is never a primary, and an
- * `-exec` template runs to `;`, or to `+` after `{}`. An unknown primary takes no operand, so a later `-follow` still counts.
+ * end with `f`, whose start path is the rest of the word (`-HfPATH`) or the next word, and GNU `-D <opts>` and `-O<n>`. `attached`
+ * builds the start from the rest of a word. The starts follow, up to the first expression word; a GNU global option before a start
+ * is skipped, and a first expression word that is no known primary is `unknown`. The expression is read word by word: an operand of
+ * a valued primary is never a primary, and an `-exec` template runs to `;`, or to `+` after `{}`. An unknown primary later in the
+ * expression takes no operand, so a later `-follow` still counts.
  */
-function parseFind<T extends Valued>(args: readonly T[]): FindCommand<T> {
+function parseFind<T extends Valued>(args: readonly T[], attached: (word: T, length: number) => T): FindCommand<T> {
   const starts: T[] = [];
   let mode = 'P', i = 0;
   for (; i < args.length; i++) {
@@ -865,12 +877,14 @@ function parseFind<T extends Valued>(args: readonly T[]): FindCommand<T> {
     if (value === '--') { i++; break; }
     if (/^-O\d$/.test(value)) continue;
     if (value === '-D') { i++; continue; }
-    const cluster = /^-([EHLPXdsx]*)(f?)$/.exec(value);
+    const cluster = /^-([EHLPXdsx]*)(?:f(.*))?$/s.exec(value);
     if (!cluster || value === '-') break;
     mode = cluster[1]!.replace(/[^HLP]/g, '').at(-1) ?? mode;
-    if (cluster[2] && args[i + 1]) starts.push(args[++i]!);
+    if (cluster[2]) starts.push(attached(args[i]!, value.length - cluster[2].length));
+    else if (cluster[2] === '' && args[i + 1]) starts.push(args[++i]!);
   }
   let follow = false, writes = false, templateFollows = false, expression = false;
+  let unknown: T | null = null;
   for (; i < args.length; i++) {
     const value = args[i]!.value ?? '';
     if (!expression && FIND_GLOBAL.has(value)) {
@@ -879,6 +893,7 @@ function parseFind<T extends Valued>(args: readonly T[]): FindCommand<T> {
       continue;
     }
     if (!expression && !/^[-(!)]/.test(value)) { starts.push(args[i]!); continue; }
+    if (!expression && !(FIND_PLAIN.has(value) || FIND_VALUED.has(value) || FIND_RUNS.test(value) || /^-newer[a-zA-Z]{2}$/.test(value))) unknown = args[i]!;
     expression = true;
     if (value === '-delete') writes = true;
     else if (value === '-follow') follow = true;
@@ -890,7 +905,7 @@ function parseFind<T extends Valued>(args: readonly T[]): FindCommand<T> {
       templateFollows ||= template.slice(1).some(word => /\{\}[\\/]/.test(word ?? ''));
     } else if (FIND_VALUED.has(value) || /^-newer[a-zA-Z]{2}$/.test(value)) i++;
   }
-  return { starts, mode, follow, writes, templateFollows };
+  return { starts, mode, follow, writes, templateFollows, unknown };
 }
 
 /**
@@ -990,11 +1005,12 @@ function commandTargets(cmd: Command, cwd: string | null, home: string): WriteTa
       targets.push(...each('overwrite', args.filter(arg => text(arg).startsWith('of=')).map(arg => restArg(arg, 3, home))));
       break;
     case 'find': {
-      const find = parseFind(args);
+      const find = parseFind(args, (arg, length) => restArg(arg, length, home));
       if (!find.writes) break;
       const follows = findFollowsLinks(find, cwd);
       targets.push(...(find.starts.length ? find.starts : [literalArg('.')]).map(arg => follows(arg)
         ? targetOf('destroy', 'find following links', { ...arg, value: null }, cwd) : targetOf('destroy', 'find', arg, cwd)));
+      if (find.unknown) targets.push(targetOf('destroy', 'find', { ...find.unknown, value: null }, cwd));
       break;
     }
   }
@@ -1067,7 +1083,7 @@ function recursionFinding(args: readonly Word[], dirs: Dirs, resolver: StartReso
   }
   if (program === 'find') {
     const rest = args.slice(1);
-    const find = parseFind(rest);
+    const find = parseFind(rest, (word, length) => ({ ...word, value: word.value.slice(length), pattern: patternAfter(word.pattern, length) }));
     if (!find.writes) return null;
     const paths = find.starts;
     return starts(paths.length ? paths : [DOT], dirs).some(c => c !== 'other')
