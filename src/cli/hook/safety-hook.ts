@@ -494,6 +494,7 @@ function credentialFinding(cmd: Command, dirs: Dirs): Denial | null {
 // ---------------------------------------------------------------------------
 // I2: the write targets of one Bash command
 // ---------------------------------------------------------------------------
+
 /**
  * One word that the program receives after the shell expands a command word. `value` is null when the shell decides it at run
  * time; `prefix` is then the literal directory before the first run-time character, when the word has one. `matched` marks a

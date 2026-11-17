@@ -228,6 +228,8 @@ describe('safety hook: Bash host route', () => {
         const denial = bashSafetyDenial(command, isAbsolute(from) ? from : join(repo, from), { repoRoot: repo, env, host: 'claude' });
         expect({ command, guard: denial?.guard ?? null }).toEqual({ command, guard });
       }
+      // The refusal names the resolved outside path, so the local user can authorize it.
+      expect(bashSafetyDenial('mv a.txt stage/*', repo, { repoRoot: repo, env, host: 'claude' })?.reason).toContain(`would remove or change ${out},`);
     } finally {
       if (savedTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = savedTmp;
       rmSync(root, { recursive: true, force: true });
