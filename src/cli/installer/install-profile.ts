@@ -899,10 +899,11 @@ function settleOrphanedTransactions(transactionRoot: string, env: NodeJS.Process
     const directory = join(transactionRoot, name);
     // A run killed before its rename leaves a staging directory with at most its owner record and no copies.
     const staging = name.startsWith('.staging-');
-    if (!(staging || name.startsWith(TRANSACTION_PREFIX)) || !lstatSync(directory).isDirectory() || lstatExists(join(directory, 'manifest.json'))) continue;
+    // An unlocked transaction (`rh init`) may remove its own directory while the sweep reads it.
+    if (!(staging || name.startsWith(TRANSACTION_PREFIX)) || !lstatSync(directory, { throwIfNoEntry: false })?.isDirectory() || lstatExists(join(directory, 'manifest.json'))) continue;
     const owner = readTransactionOwner(directory);
     if (owner === 'none') {
-      if (!staging) process.stderr.write(`[install] kept the install transaction of an earlier rh version: ${directory}\n`);
+      if (!staging && lstatExists(directory)) process.stderr.write(`[install] kept the install transaction of an earlier rh version: ${directory}\n`);
       continue;
     }
     if (owner === 'invalid' || exclusiveDirectoryLockOwnerLiveness({ lockPath: directory, pid: owner.pid, startTime: owner.startTime, token: '' }) !== 'dead') continue;
