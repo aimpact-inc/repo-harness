@@ -52,7 +52,17 @@
 
 ## Verification
 
-Pending.
+On Darwin arm64 with Bun 1.4.4, at prep head `12d5094bc` on source `0ec0c7c0b`:
+
+- `bun install --frozen-lockfile`: pass, no changes.
+- `bun run check:type`: pass.
+- `bun scripts/check-skill-version.ts`: pass, repo-harness=0.34.0, template=0.34.0.
+- `bun scripts/check-changelog-released-sections.ts --base origin/main`: pass, 122 released sections keep their bytes.
+- `bun run check:cli-manifest`: pass.
+- `git diff --check origin/main...HEAD`: pass.
+- `bun run test:files tests/skill-version.test.ts tests/bootstrap-files.test.ts tests/readme-dx.test.ts tests/scaffold-parity.test.ts tests/installed-copy-sync.test.ts --timeout 60000 --max-concurrency 1`: pass, exit 0, 67 tests in 5 files (13, 17, 5, 2 and 30), 0 fail.
+
+`Required / CI` is pending. The owner release plan runs the release gate after the prep PR merges.
 
 ## Order of the owner steps
 
@@ -65,7 +75,14 @@ Pending.
 
 Joint decision [#2742 comment 6944241312](https://github.com/aimpact-inc/repo-harness/issues/2742#issuecomment-6944241312) runs `bash scripts/check-tarball-install-smoke.sh` with a mkdtemp HOME once, at the frozen release PR head after the version and CHANGELOG commits.
 
-Tarball install smoke: pending.
+Tarball install smoke: `bash scripts/check-tarball-install-smoke.sh` on Darwin arm64, Bun 1.4.4, at prep head `12d5094bc` (the version and CHANGELOG commit), with an outer HOME from `mktemp -d /tmp/rh034-smoke-home.XXXXXX` and the script's own mkdtemp HOME and registry under `/tmp`: pass, exit 0.
+
+- `mcp serve loads 33 MCP modules with all, 0 with selection []; status --json loads 0.`
+- `operator serve loads 80 Operator modules with all and serves; with selection [] it refuses, and status, seats, quota and hook routes load 0; the hook bundle of 134 modules holds 0.`
+- `peer-runtime loads 4 modules when selected; refusals, core commands, hook routes and hook bundle load 0.`
+- `repo-harness-0.34.0.tgz installs, serves the packaged Operator, and packaged CLI bins start.`
+
+The commits after `12d5094bc` change only this record. No step used the real HOME. No step published to npm or created a tag.
 
 ## Publication
 
