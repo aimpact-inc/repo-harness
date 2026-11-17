@@ -283,6 +283,11 @@ describe('safety hook: Bash host route', () => {
         [refuse, 'find -f stage -L -- -name victim.txt -exec rm {} +'], [refuse, 'find -f stage/linked -H -- -name victim.txt -exec rm {} +'],
         [refuse, `find -- ${out} -name victim.txt -delete`, 'stage'], [null, 'find -L -P stage -name victim.txt -exec rm {} +'],
         [null, 'find -L -H stage -name victim.txt -exec rm {} +'],
+        // #3041: one find parser. A writing template with `{}/` walks through a matched link; BSD `-f <path>` before -H; a GNU global
+        // option before a start; an operand of -name is not a primary.
+        [refuse, 'find stage -name linked -exec rm -r {}/ \\;'], [null, 'find stage -name linked -exec rm -r {} \\;'],
+        [refuse, 'find -f stage/linked -H -name victim.txt -delete'], [null, 'find -xdev build -delete'], [refuse, `find -xdev ${out} -delete`],
+        [null, 'find build -name -follow -delete'],
         // An unknown removal refuses; an unknown overwrite refuses only when its literal directory is outside the roots.
         [refuse, 'rm -rf build/$X'], [refuse, `echo x > ${out}/$X`], [null, 'echo x > "$TARGET"'], [null, 'echo x > build/$X'],
         [null, 'rm -rf build/*'], [null, 'rm -rf build/*/'], [null, 'rm stage/*.json'], [null, 'mv stage/*.json build/'], [null, 'cp stage/*.json build/'],
