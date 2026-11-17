@@ -7,7 +7,7 @@ import { ensurePrivateDirectory, hostConfigPaths, putVault, resolveHostPath } fr
 import { openHostConfigGate, rollbackHostConfigTransaction } from '../../effects/host-config/gate';
 import { migrateCodexConfigRecords } from './codex-config-migration';
 import { migrateJsonConfigRecords } from './json-config-migration';
-import { pathRecordHost, pathRecordIsCurrent, pathRecordKey, pathRecordsDigest, readPathRecords, readPathRecordSet, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
+import { pathRecordHost, pathRecordIsCurrent, pathRecordKey, pathRecordsDigest, readPathRecords, readPathRecordSet, registerSupportedPathRecords, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
 import type { FileBaseline, PathCommitted, PathRecord, PathRecordHost, PathRecordKind } from '../../core/host-config/types';
 import { globalContextBackupEligible, globalContextPath } from './global-context';
 import { acquireRuntimeTransactionLock, assertRuntimeTransactionContext, globalRuntimeScope, runtimeTransactionLockRelativePath, runtimeTransactionRoot, type RuntimeTransactionContext, type RuntimeTransactionLock, type RuntimeTransactionScope } from '../../effects/locking/runtime-transaction-lock';
@@ -59,7 +59,7 @@ import {
   type SurfaceOwner,
 } from '../../core/skill-surface/plugin-manifest';
 import { hostSkillRoot, providerSkillLock, stagedSkillRoot, syncSkillRoots, type SkillHost } from '../../effects/host-skill-roots';
-import { ownedSkillIsIntact } from '../../effects/herdr-skill-marker';
+import { ownedSkillIsIntact } from '../../effects/host-config/herdr-skill-marker';
 import { MANAGED_AGENTS } from '../../effects/terminal/task-role-profiles';
 import { hashManagedTree, OWNER_MARKER } from '../../effects/managed-tree';
 import { readWorkflowPolicyDocument } from '../../effects/state/resolve-effective-state';
@@ -140,6 +140,8 @@ export interface InstallStateStatus extends InstallState {
   readonly ownership: readonly OwnershipEntry[];
   /** Record keys outside the root of their host: rh does not act on them, and the next record write drops them. */
   readonly ownership_outside_root: readonly string[];
+  /** Record keys that name no install surface (path, owner or kind): rh does not act on them, and the next record write drops them. */
+  readonly ownership_unsupported: readonly string[];
   /** `core` and each enabled plugin. */
   readonly probes: Readonly<Partial<Record<SurfaceOwner, OwnerProbe>>>;
   readonly drift: {
@@ -622,6 +624,33 @@ export function installProfileHostMutationPaths(env: NodeJS.ProcessEnv = process
     if (globalContextBackupEligible(path)) paths.push(path);
   }
   return [...new Set(paths)];
+}
+
+/**
+ * The install surfaces that a path record may name: the host mutation paths,
+ * and a repo-harness-* facade in a host skill root (also one that later left
+ * the catalog), by key; a `user_managed` record names a fleet file only; the
+ * owner is `core` or a plugin. The protocol 3 reader accepted the same set. A
+ * record outside it never grants a write or a removal.
+ */
+export function supportedPathRecord(env: NodeJS.ProcessEnv): (key: string, record: PathRecord) => boolean {
+  const keyOf = (path: string): string | null => {
+    try { return pathRecordKey(env, path); } catch { return null; }
+  };
+  const keys = (paths: readonly string[]) => new Set(paths.map(keyOf).filter((key): key is string => key !== null));
+  const allowed = keys(installProfileHostMutationPaths(env));
+  const fleet = keys(agentFleetTargetPaths(env));
+  const facadeRoots = new Set([...keys(hostSkillRoots(env.HOME ?? homedir(), env).map((root) => join(root, FACADE_NAME_PREFIX)))].map((key) => dirname(key)));
+  return (key, record) => isSurfaceOwner(record.owner) && (record.kind === 'user_managed'
+    ? fleet.has(key)
+    : allowed.has(key) || (basename(key).startsWith(FACADE_NAME_PREFIX) && facadeRoots.has(dirname(key))));
+}
+
+registerSupportedPathRecords(supportedPathRecord);
+
+function skippedOwnership(env: NodeJS.ProcessEnv): Pick<InstallStateStatus, 'ownership_outside_root' | 'ownership_unsupported'> {
+  const { outside, unsupported } = readPathRecordSet(env);
+  return { ownership_outside_root: outside, ownership_unsupported: unsupported };
 }
 
 /**
@@ -1183,7 +1212,7 @@ export function installStateStatus(
   return {
     ...state,
     ownership,
-    ownership_outside_root: readPathRecordSet(env).outside,
+    ...skippedOwnership(env),
     probes,
     drift: {
       status: missing.length === 0 && surfaceDrift.length === 0 ? 'consistent' : 'drift',
@@ -1390,7 +1419,7 @@ export function applyInstallSelection(
   const additionalPi = options.additionalPiPackages ?? [];
   if (additionalPi.some(source => !validPiPackage(source, env, plugins))) throw new Error('invalid Pi package ownership');
   const plan = planInstallSelection(selection, { run: ran, record: plugins }, current, env);
-  const { records: prior, outside } = readPathRecordSet(env);
+  const { records: prior, outside, unsupported } = readPathRecordSet(env);
   const discovered = discoverManagedSurfaces(ran, env);
   const records = carriedRecords(prior, kept);
   const transactionOwned = transaction ? transactionOwnedSurfaces(transaction, prior, env) : { captures: [], absent: new Set<string>() };
@@ -1409,7 +1438,7 @@ export function applyInstallSelection(
     && JSON.stringify(current.pi_packages) === JSON.stringify(piPackages)
     && pathRecordsDigest(prior) === pathRecordsDigest(committed)
     // A record outside its host root goes with the next write, so it never stays unacted forever.
-    && outside.length === 0;
+    && outside.length === 0 && unsupported.length === 0;
   const state: InstallState = {
     protocol: INSTALL_STATE_PROTOCOL,
     ...recordedVersions,

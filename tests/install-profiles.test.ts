@@ -1,7 +1,7 @@
 import { syncCrossReviewSkills } from '../src/cli/commands/init';
 import { architectureSelectionReport, assertPluginCommandSelected, readRecordedSelection } from '../src/cli/installer/architecture-selection';
 import { configureRequiredHerdrSkill } from '../src/cli/commands/herdr-skill';
-import { ownedSkillIsIntact } from '../src/effects/herdr-skill-marker';
+import { ownedSkillIsIntact } from '../src/effects/host-config/herdr-skill-marker';
 import { describe, expect, test } from 'bun:test';
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { spawnSync, type SpawnSyncReturns } from 'child_process';
@@ -45,6 +45,7 @@ import { hostSkillRoot, providerSkillLock } from '../src/effects/host-skill-root
 import { MANAGED_AGENTS } from '../src/effects/terminal/task-role-profiles';
 import { installStateFixturePath, recordInstallOwnership, recordPluginSelection, seedGlobalPackageFixture, seedPathRecords } from './helpers/install-ownership';
 import { hashManagedTree } from '../src/effects/managed-tree';
+import type { PathRecord } from '../src/core/host-config/types';
 import { buildManagedHooks } from '../src/cli/installer/managed-entries';
 import { runUserUninstall } from '../src/cli/installer/uninstall';
 import { copyUpgradeFixture } from './helpers/upgrade-fixtures';
@@ -559,10 +560,11 @@ describe('install selection', () => {
     applyInstallSelection([], [], env, new Date('2026-01-02T00:00:00Z'));
     expect(ownedPath(env, retired)).toEqual(receipt);
 
-    // A record outside the root of its host is never read as owned; it is reported.
+    // A record outside the root of its host, or on a path that no install surface names, is never read as owned; both are reported.
     const elsewhere = join(env.HOME!, 'elsewhere', 'repo-harness-handoff');
-    seedPathRecords(env, { [pathRecordKey(env, elsewhere)]: receipt });
-    expect(readPathRecordSet(env)).toEqual({ records: {}, outside: [pathRecordKey(env, elsewhere)] });
+    const foreign = join(env.HOME!, '.claude', 'skills', 'foreign-skill');
+    seedPathRecords(env, { [pathRecordKey(env, elsewhere)]: receipt, [pathRecordKey(env, foreign)]: receipt });
+    expect(readPathRecordSet(env)).toEqual({ records: {}, outside: [pathRecordKey(env, elsewhere)], unsupported: [pathRecordKey(env, foreign)] });
   }));
 
   for (const plugins of ['platform', undefined] as const) {
@@ -1314,23 +1316,29 @@ describe('install selection', () => {
     });
   }, 60_000);
 
-  test('a selection switch skips and reports a path record outside its host root, and keeps the file', () => withHome((env) => {
-    const external = join(env.HOME!, 'user-owned.txt');
+  test('a selection switch skips and reports a path record outside its host root or on no install surface, and keeps the user files', () => withHome((env) => {
     const content = 'must survive';
-    writeFileSync(external, content);
+    const external = join(env.HOME!, 'user-owned.txt');
+    const personal = join(env.HOME!, '.codex', 'rules', 'personal.md');
+    const foreign = join(env.HOME!, '.claude', 'skills', 'foreign-skill');
+    for (const path of [external, personal, join(foreign, 'SKILL.md')]) writePath(path, content);
     writePath(installStateFixturePath(env), `${JSON.stringify(seededState(ALL_PLUGINS, 'all'), null, 2)}\n`);
-    seedPathRecords(env, { [pathRecordKey(env, external)]: {
-      owner: 'product', host: 'claude', kind: 'created', baseline: { state: 'unknown' },
-      committed: { type: 'file', sha256: `sha256:${createHash('sha256').update(content).digest('hex')}` },
-    } });
+    const record = (host: 'claude' | 'codex', committed: PathRecord['committed']): PathRecord => ({ owner: 'product', host, kind: 'created', baseline: { state: 'unknown' }, committed });
+    const file = { type: 'file', sha256: `sha256:${createHash('sha256').update(content).digest('hex')}` } as const;
+    seedPathRecords(env, {
+      [pathRecordKey(env, external)]: record('claude', file),
+      [pathRecordKey(env, personal)]: record('codex', file),
+      [pathRecordKey(env, foreign)]: record('claude', { type: 'directory', sha256: hashManagedTree(foreign) }),
+    });
 
-    expect(installStateStatus(readInstallState(env)!, env).ownership_outside_root).toEqual([pathRecordKey(env, external)]);
+    const status = installStateStatus(readInstallState(env)!, env);
+    expect({ outside: status.ownership_outside_root, unsupported: [...status.ownership_unsupported].sort() })
+      .toEqual({ outside: [pathRecordKey(env, external)], unsupported: [pathRecordKey(env, foreign), pathRecordKey(env, personal)].sort() });
     expect(prepareInstallSelectionSwitch([], env)).toEqual([]);
-    expect(readFileSync(external, 'utf-8')).toBe(content);
-    // The next record write drops the record and keeps the file.
+    // The next record write drops the records and keeps the files.
     recordVerifiedAgentFleetOwnership(env);
-    expect(readPathRecordSet(env).outside).toEqual([]);
-    expect(readFileSync(external, 'utf-8')).toBe(content);
+    expect(readPathRecordSet(env)).toEqual({ records: {}, outside: [], unsupported: [] });
+    expect([external, personal, join(foreign, 'SKILL.md')].map((path) => readFileSync(path, 'utf-8'))).toEqual([content, content, content]);
     // The hook selection read uses the read model only; the installer commands own the surface check (#1680).
     expect(readRecordedSelection(env)).toEqual({ status: 'recorded', selection: 'all', plugins: ALL_PLUGINS });
   }));

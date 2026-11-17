@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import type { PathRecord, PathRecordHost } from '../../core/host-config/types';
-import { ownedSkillIsIntact } from '../herdr-skill-marker';
+import { ownedSkillIsIntact } from './herdr-skill-marker';
 import { hostSkillRoot, stagedSkillRoot } from '../host-skill-roots';
 import { hashManagedTree } from '../managed-tree';
 import { isPathInside } from '../path-containment';
@@ -18,26 +18,55 @@ import { hostConfigPaths, hostPathKey, readLedger, resolveHostPath, writeLedger 
 
 export type PathRecords = Readonly<Record<string, PathRecord>>;
 
+/** The check of the install surfaces that a path record may name, for one HOME. */
+export type SupportedPathRecord = (env: NodeJS.ProcessEnv) => (key: string, record: PathRecord) => boolean;
+
 /**
- * The records, each key checked against the root that its host names, with the
- * root's links followed. A removal acts on the key, so a record outside its
- * root could name a user file outside every install root: rh never acts on it,
- * reports it in `outside`, and the next record write drops it. A host root that
- * moved after the install (a linked `~/.claude`) leaves such records; the next
- * install records its paths again under their new keys.
+ * The installer owns the install surface list (install-profile.ts registers it
+ * when it loads). Without a registered check no record is supported, so a
+ * reader acts on nothing.
  */
-export function readPathRecordSet(env: NodeJS.ProcessEnv): { readonly records: PathRecords; readonly outside: readonly string[] } {
+let supportedCheck: SupportedPathRecord | null = null;
+
+export function registerSupportedPathRecords(check: SupportedPathRecord): void {
+  supportedCheck = check;
+}
+
+export interface PathRecordSet {
+  readonly records: PathRecords;
+  /** Keys outside the root of their host, with the root's links followed. */
+  readonly outside: readonly string[];
+  /** Keys inside their root that name no install surface (path, owner or kind). */
+  readonly unsupported: readonly string[];
+}
+
+/**
+ * The records that may grant a write or a removal. A removal acts on the key,
+ * so a record outside its host root or on a path that no install surface names
+ * could name a user file: rh never acts on it, reports it, and the next record
+ * write drops it. A host root that moved after the install (a linked
+ * `~/.claude`) leaves such records; the next install records its paths again
+ * under their new keys.
+ */
+export function partitionPathRecords(env: NodeJS.ProcessEnv, all: PathRecords): PathRecordSet {
   const paths = hostConfigPaths(env);
+  const supported = supportedCheck?.(env) ?? (() => false);
   const records: Record<string, PathRecord> = {};
   const outside: string[] = [];
-  for (const [key, record] of Object.entries(readLedger(paths).paths)) {
+  const unsupported: string[] = [];
+  for (const [key, record] of Object.entries(all)) {
     const root = resolveHostPath(paths, hostRoot(env, record.host));
     const inside = (key !== root && isPathInside(root, key))
       || (record.host === 'claude' && key === hostPathKey(paths, join(env.HOME ?? homedir(), '.claude.json')));
-    if (inside) records[key] = record;
-    else outside.push(key);
+    if (!inside) outside.push(key);
+    else if (!supported(key, record)) unsupported.push(key);
+    else records[key] = record;
   }
-  return { records, outside };
+  return { records, outside, unsupported };
+}
+
+export function readPathRecordSet(env: NodeJS.ProcessEnv): PathRecordSet {
+  return partitionPathRecords(env, readLedger(hostConfigPaths(env)).paths);
 }
 
 export function readPathRecords(env: NodeJS.ProcessEnv): PathRecords {
