@@ -267,8 +267,9 @@ describe('safety hook: Bash host route', () => {
         [null, 'rm -f big/*'], [null, 'rm -f *', 'big'], [null, 'tee big/[0-9]*'], [null, 'echo x > big/[0-9]*'], [refuse, 'tee big/*'],
         [refuse, 'mv big/* build/'], [refuse, 'rm -f linked/big/*'], [null, 'tee {build/{1..1025},build/x.txt}'],
         [refuse, `dd if=source.txt of=${out}/{1..1025}`],
-        // #3048 r1: each possible copy destination that is a directory gets a child per operand name; a collapsed sequence is never globbed.
-        [refuse, 'cp source.txt big/[0-9z]*'], [refuse, 'cp source.txt big/[1z]*'], [refuse, 'cp -t big/zdir source.txt'], [refuse, 'dd if=/dev/null of={1..1025}', 'seq'],
+        // #3048 r1-r2: a copy, link or move destination above an expansion limit keeps the refusal; a collapsed sequence is never globbed.
+        [refuse, 'cp source.txt big/[0-9z]*'], [refuse, 'cp -R source big/*'], [refuse, 'cp -R source big/*/'], [refuse, 'cp -R source big/[0-9z]*'],
+        [refuse, 'dd if=/dev/null of={1..1025}', 'seq'],
         // GNU getopt accepts a long option prefix.
         [refuse, 'mv --target=linked stage/b.json'], [refuse, 'cp --target=linked a.txt'],
         // #3026: a writing find that follows links below its start refuses; plain and read-only find keep today's judge.

@@ -241,8 +241,7 @@ class TargetJudge {
   /**
    * A glob above the match limit in one directory. When the directory resolves inside a root, a match that is not a link is a
    * child entry inside the root, for every kind and through a trailing separator, so only the matches that can be links get the
-   * one decision, and the directory matches too when a copy writes into them. The directory is placed before it is listed;
-   * outside the roots the word stays an unknown target set.
+   * one decision. The directory is placed before it is listed; outside the roots the word stays an unknown target set.
    */
   private childrenDenial(target: WriteTarget, children: NonNullable<WriteTarget['children']>): Denial | null {
     const unknown = () => unknownTargetDenial(target, this.roots, this.userStep);
@@ -252,14 +251,14 @@ class TargetJudge {
       if (!this.roots.some(root => underRoot(root, dir, true))) return unknown();
       entries = readdirSync(dir, { withFileTypes: true });
     } catch { return unknown(); }
-    let judged = 0;
+    let links = 0;
     for (const entry of entries) {
       // An entry without a reported type is neither a file nor a directory here, so it is judged like a link.
-      if (entry.isFile() || (entry.isDirectory() && !target.into) || !nameMatches(children.name, entry.name)) continue;
+      if (entry.isFile() || entry.isDirectory() || !nameMatches(children.name, entry.name)) continue;
       // The resolved directory holds no link, so joining the name keeps the path the kernel walks.
       const path = join(dir, entry.name) + (children.separator ? sep : '');
       if (children.separator && !matchesDirectory(path)) continue;
-      if (++judged > CHILD_LIMIT) return unknown();
+      if (++links > CHILD_LIMIT) return unknown();
       const denial = this.denial({ ...target, path, children: undefined, unbounded: undefined });
       if (denial) return denial;
     }
@@ -759,18 +758,15 @@ function targetOption(arg: Arg, home: string): Arg[] | null {
 /**
  * cp and ln: the last operand is the destination, written into a directory as each source's name. When the hook cannot place the
  * destination (a target-directory option, fewer than two operands, or a last operand from a glob with several matches, whose
- * order depends on the shell's locale, or from a word above an expansion limit), every operand is a possible write target, both
- * as the entry itself (`-T`) and as a directory that receives a child for each operand name.
+ * order depends on the shell's locale), every operand is a possible write target.
  */
 function copyTargets(program: string, args: readonly Arg[], cwd: string | null, home: string): WriteTarget[] {
   const glued = args.map(arg => targetOption(arg, home));
   const operands = operandsOf(args, MOVE_VALUED);
   const last = operands.at(-1);
-  const unplaced = last !== undefined && (last.unbounded === true || last.matched && operands.filter(arg => arg.word === last.word).length > 1);
+  const unplaced = last !== undefined && last.matched && operands.filter(arg => arg.word === last.word).length > 1;
   if (glued.some(found => found !== null) || operands.length < 2 || unplaced) {
-    const all = [...operands, ...glued.flatMap(found => found ?? [])];
-    const into = { names: all.some(arg => arg.value === null) ? null : all.map(arg => basename(arg.value!)), follow: program === 'cp' };
-    return all.flatMap(arg => [targetOf('overwrite', program, arg, cwd), targetOf('overwrite', program, arg, cwd, { into })]);
+    return [...operands, ...glued.flatMap(found => found ?? [])].map(arg => targetOf('overwrite', program, arg, cwd));
   }
   const sources = operands.slice(0, -1);
   const names = sources.some(arg => arg.value === null) ? null : sources.map(arg => basename(arg.value!));
@@ -892,6 +888,12 @@ const SHRED_VALUED = new Set(['-n', '--iterations', '-s', '--size', '--random-so
 const SED_VALUED = new Set(['-e', '--expression', '-f', '--file', '-l', '--line-length']);
 const WRITERS = new Set(['rm', 'unlink', 'shred', 'truncate', 'mv', 'cp', 'ln', 'tee', 'sed', 'dd', 'find']);
 
+/**
+ * A copy, link or move operand can be a destination that receives other files, so a word above an expansion limit keeps the
+ * unknown-target refusal there. Only a word whose matches are themselves the targets is judged by its directory.
+ */
+const destinationRole = (target: WriteTarget): WriteTarget => ({ ...target, children: undefined });
+
 /** The write targets of one simple command, run from `cwd` (null when it is not known); every word is expanded first. */
 function commandTargets(cmd: Command, cwd: string | null, home: string): WriteTarget[] {
   const targets: WriteTarget[] = [];
@@ -930,14 +932,14 @@ function commandTargets(cmd: Command, cwd: string | null, home: string): WriteTa
       targets.push(...each('change', operandsOf(args, TRUNCATE_VALUED)));
       break;
     case 'mv':
-      targets.push(...moveTargets(raw, args, cwd, home));
+      targets.push(...moveTargets(raw, args, cwd, home).map(destinationRole));
       break;
     case 'cp':
-      targets.push(...copyTargets(program, args, cwd, home));
+      targets.push(...copyTargets(program, args, cwd, home).map(destinationRole));
       break;
     case 'ln':
       // Without -f, ln refuses an existing destination.
-      if (args.some(arg => /^-[a-zA-Z]*f/.test(text(arg)) || arg.value === '--force')) targets.push(...copyTargets(program, args, cwd, home));
+      if (args.some(arg => /^-[a-zA-Z]*f/.test(text(arg)) || arg.value === '--force')) targets.push(...copyTargets(program, args, cwd, home).map(destinationRole));
       break;
     case 'tee':
       if (!args.some(arg => /^-[a-zA-Z]*a/.test(text(arg)) || arg.value === '--append')) targets.push(...each('overwrite', operandsOf(args, new Set())));
