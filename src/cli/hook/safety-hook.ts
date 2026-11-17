@@ -182,6 +182,8 @@ const CHILD_LIMIT = 1000;
 
 /** The rest of a copy walk's bound, the resolved directories it has listed, and those on the current walk path. */
 interface CopyWalk { left: number; readonly seen: Set<string>; readonly active: Set<string> }
+/** A directory entry as a listing or a lookup reports it. */
+type ChildEntry = Pick<Dirent, 'name' | 'isFile' | 'isDirectory'>;
 
 class TargetJudge {
   private rootsValue: Root[] | undefined;
@@ -270,12 +272,19 @@ class TargetJudge {
 
   /** A copy into a directory writes one child per source name; without the names, every existing child is a possible target. */
   private childDenial(target: WriteTarget, into: NonNullable<WriteTarget['into']>, dir: string): Denial | null {
-    let entries: Dirent[];
-    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return unknownTargetDenial(target, this.roots, this.userStep); }
-    const names = into.names && new Set(into.names);
-    if (!names && entries.length > CHILD_LIMIT) return unknownTargetDenial(target, this.roots, this.userStep);
-    // A name without an existing entry is a create, so only the existing children that the copy names are judged.
-    return this.entriesDenial(target, into, dir, names ? entries.filter(entry => names.has(entry.name)) : entries, { left: CHILD_LIMIT, seen: new Set(), active: new Set() });
+    const unknown = () => unknownTargetDenial(target, this.roots, this.userStep);
+    const entries: ChildEntry[] = [];
+    try {
+      if (into.names === null) entries.push(...readdirSync(dir, { withFileTypes: true }));
+      // The file system decides which entry a name reaches (a case-insensitive volume maps `report.txt` to `REPORT.txt`), so each
+      // known name is looked up, not matched against a listing. A name without an entry is a create.
+      for (const name of new Set(into.names)) {
+        const stats = lstatSync(join(dir, name), { throwIfNoEntry: false });
+        if (stats) entries.push({ name, isFile: () => stats.isFile(), isDirectory: () => stats.isDirectory() });
+      }
+    } catch { return unknown(); }
+    if (into.names === null && entries.length > CHILD_LIMIT) return unknown();
+    return this.entriesDenial(target, into, dir, entries, { left: CHILD_LIMIT, seen: new Set(), active: new Set() });
   }
 
   /**
@@ -283,7 +292,7 @@ class TargetJudge {
    * directory that the copy does not descend into, is an entry inside the root; only the other entries are judged. Directories
    * listed and links resolved share one bound per target.
    */
-  private entriesDenial(target: WriteTarget, into: NonNullable<WriteTarget['into']>, dir: string, entries: readonly Dirent[], walk: CopyWalk): Denial | null {
+  private entriesDenial(target: WriteTarget, into: NonNullable<WriteTarget['into']>, dir: string, entries: readonly ChildEntry[], walk: CopyWalk): Denial | null {
     const inRoot = this.roots.some(root => underRoot(root, dir, true));
     for (const entry of entries) {
       if (inRoot && (entry.isFile() || (entry.isDirectory() && !into.recursive))) continue;

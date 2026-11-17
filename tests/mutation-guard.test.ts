@@ -199,6 +199,11 @@ describe('safety hook: Bash host route', () => {
       for (const dir of ['repo/big/zdir/stage/d', 'repo/big/ydir/d']) mkdirSync(join(root, dir), { recursive: true });
       symlinkSync(join(out, 'victim.txt'), join(repo, 'big/zdir/stage/d/notes.txt'));
       symlinkSync(join(repo, 'big/ydir'), join(repo, 'big/ydir/d/up'));
+      // On a case-insensitive volume a copy of source.txt into case writes through this link; on a normalization-insensitive
+      // volume the NFC name café.txt reaches this NFD file.
+      mkdirSync(join(repo, 'case'));
+      symlinkSync(join(out, 'victim.txt'), join(repo, 'case/SOURCE.TXT'));
+      writeFileSync(join(out, 'cafe\u0301.txt'), 'x');
       writeFileSync(join(repo, 'seq/of=1'), 'x');
       symlinkSync(join(out, 'victim.txt'), join(repo, 'seq/1025'));
       for (const link of ['linked', 'stage/linked', 'w/stage/linked']) symlinkSync(out, join(repo, link));
@@ -314,6 +319,10 @@ describe('safety hook: Bash host route', () => {
         [refuse, 'cp -R stage big/zdir'], [refuse, 'cp -R stage big/zdir/'], [refuse, 'cp -R stage/ big/zdir/stage'], [refuse, 'cp -rT stage big/zdir/stage'],
         [refuse, 'cp -R stage/. big/zdir/stage'], [null, 'cp -t big/ydir source.txt'], [null, 'cp -R stage big/ydir'],
         [refuse, 'cp -R stage/d big/ydir'],
+        // The file system decides which entry an output name reaches, so each verdict follows the volume.
+        ...([[repo, 'SOURCE.TXT', 'cp source.txt case'], [out, 'VICTIM.TXT', `cp stage/VICTIM.TXT ${out}`], [out, 'caf\u00e9.txt', `cp caf\u00e9.txt ${out}`],
+          [repo, 'big/zdir/stage/D', 'cp -R stage/D big/zdir/stage'], [out, 'VICTIM.TXT', `ln -sf stage/VICTIM.TXT ${out}`]] as const)
+          .map(([dir, alias, command]): [string | null, string] => [existsSync(join(dir, alias)) ? refuse : null, command]),
         // The word after a separate -t or --target-directory is its value, also when it starts with `-`.
         [refuse, `cp -t -archive ${repo}/source.txt`, out], [refuse, `cp --target-directory -archive ${repo}/source.txt`, out],
         [refuse, `cp -R -t -archive ${repo}/stage`, out], [refuse, `ln -sf --target-directory -archive ${repo}/source.txt`, out],
