@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { FragmentEdit, HostConfigStrategy, HostPath } from '../../src/core/host-config/types';
 import { openHostConfigGate, type HostConfigFileChange } from '../../src/effects/host-config/gate';
 import { replaceTarget } from '../../src/effects/host-config/store';
+import { jsonFragment } from '../../src/core/host-config/json-fragment';
 
 /** A `key=value` line format: the selector is the key. */
 function keyLineMatch(content: string, selector: string): RegExpExecArray | null {
@@ -289,4 +290,20 @@ test('a refresh with no recorded fragment is an override, adopt records an old w
   expect({ text: readFileSync(f.a, 'utf8'), recorded: Object.keys(f.ledger().files) }).toEqual({ text: 'keep=1\nrh=old\n', recorded: [f.a] });
   expect(f.gate().revert([f.a]).map((entry) => entry.action)).toEqual(['text_removed']);
   expect(readFileSync(f.a, 'utf8')).toBe('keep=1\n');
+});
+
+test('after a user edit, a revert removes only intact add fragments, also after a refresh, and keeps an override and an edited fragment', () => {
+  const f = fixture();
+  const path = join(f.home, 'conf.json');
+  writeFileSync(path, '{"user":1,"o":"user"}');
+  const json = (selector: string, kind: 'add' | 'refresh' | 'override', value: unknown) => ({ owner: 'o1', selector, kind, strategy: jsonFragment, value, selected: kind === 'override' });
+  f.gate().apply([{ path, fragments: [json('a', 'add', 1), json('b', 'add', 1), json('o', 'override', 'rh')] }]);
+  writeFileSync(path, readFileSync(path, 'utf8').replace('"user":1', '"user":2'));
+  // The refresh after the outside edit moves the backup to a file that holds rh's first text; the fragment kind stays `add`.
+  f.gate().apply([{ path, fragments: [json('a', 'refresh', 2)] }]);
+  expect(f.ledger().fragments.map((entry: { selector: string; kind: string }) => [entry.selector, entry.kind])).toEqual([['b', 'add'], ['o', 'override'], ['a', 'add']]);
+  writeFileSync(path, readFileSync(path, 'utf8').replace('"b":1', '"b":9'));
+  expect(f.gate().revert([path])).toEqual([{ path, action: 'kept_edited', kept: ['b', 'o'] }]);
+  expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ user: 2, o: 'rh', b: 9 });
+  expect(f.ledger().fragments.map((entry: { selector: string }) => entry.selector)).toEqual(['b', 'o']);
 });

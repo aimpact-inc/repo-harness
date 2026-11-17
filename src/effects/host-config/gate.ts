@@ -16,6 +16,7 @@ import {
   type HostPath,
   type Sha256,
   type SkippedOverride,
+  type TextRange,
 } from '../../core/host-config/types';
 import {
   createDirectories,
@@ -313,7 +314,9 @@ function revertFragments(path: string, content: string, records: readonly Fragme
   const removed: FragmentRecord[] = [];
   const kept: string[] = [];
   for (const record of records) {
-    const range = format?.strategy.locate(content, record.selector) ?? null;
+    let range: TextRange | null = null;
+    // A file that the strategy can no longer read keeps every fragment.
+    try { range = format?.strategy.locate(content, record.selector) ?? null; } catch (error) { if (!(error instanceof HostConfigError)) throw error; }
     if (!format || record.kind !== 'add' || record.inserted === '' || !range || content.slice(range.start, range.end) !== record.inserted) {
       kept.push(record.selector);
       continue;
@@ -395,14 +398,16 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
           external_change: record.external_change || !isCommitted(record, current) };
       }
       action = result.kept.length || !removed.size ? 'kept_edited' : 'text_removed';
+    } else if (!removed.size && !(record.kind === 'text_block' && record.backup === null)) {
+      // A changed file with no fragment to take out (a created or replaced file) stays with its record.
+      action = 'kept_edited';
     } else {
       if (!dryRun) {
         if (empty) removeTarget(path, current);
         else if (removed.size) replaceTarget(path, Buffer.from(result.content, 'utf8'), current);
       }
       delete files[path];
-      action = empty ? 'removed' : removed.size ? 'text_removed' : record.kind === 'text_block' && record.backup === null ? 'released' : 'kept_edited';
-      if (action === 'kept_edited') files[path] = record;
+      action = empty ? 'removed' : removed.size ? 'text_removed' : 'released';
     }
     fragments = fragments.filter((entry) => !removed.has(entry));
     report.push(result.kept.length ? { path, action, kept: result.kept } : { path, action });

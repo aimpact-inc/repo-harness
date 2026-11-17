@@ -7,7 +7,7 @@ import { tmpdir } from 'os';
 import { join, relative } from 'path';
 import { spawnSync } from 'child_process';
 import { runUserUninstall } from '../../src/cli/installer/uninstall';
-import { configurationReceiptPath, withConfigurationMutation, writePrivateConfiguration } from '../../src/cli/installer/configuration-ownership';
+import { configurationReceiptPath } from '../../src/cli/installer/configuration-ownership';
 import { requestUserInputFragment } from '../../src/cli/installer/targets/codex';
 import { tomlFragment } from '../../src/core/host-config/toml-fragment';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
@@ -96,16 +96,18 @@ test('malformed receipt prevents all mutation',()=>fixture((home,env)=>{
  put(home,'.codex/hooks.json',JSON.stringify({hooks:buildManagedHooks('codex')}));
  const before=tree(home);expect(runUserUninstall({target:'both',env}).exitCode).toBe(1);expect(tree(home)).toBe(before);
 }));
-test('symlinked host root is never traversed for cleanup',()=>fixture((home,env)=>{
+test('a symlinked host root is followed: the hook file that holds only rh entries goes, and the link stays',()=>fixture((home,env)=>{
  put(home,'outside/hooks.json',JSON.stringify({hooks:buildManagedHooks('codex')}));symlinkSync(join(home,'outside'),join(home,'.codex'));
- const before=readFileSync(join(home,'outside/hooks.json'),'utf8');expect(runUserUninstall({target:'both',env}).exitCode).toBe(1);expect(readFileSync(join(home,'outside/hooks.json'),'utf8')).toBe(before);
+ expect(runUserUninstall({target:'both',env}).exitCode).toBe(0);expect(existsSync(join(home,'outside/hooks.json'))).toBe(false);expect(existsSync(join(home,'outside'))).toBe(true);
 }));
 
 test('restores existing MCP config without deleting sibling registrations or permissions',()=>fixture((home,env)=>{
  const path=join(home,'.claude.json');
- const writeOwnedConfiguration=(target:string,content:string,root:string)=>withConfigurationMutation([target],root,()=>writePrivateConfiguration(target,content,root));
- put(home,'.claude.json',JSON.stringify({mcpServers:{codegraph:{command:'original'},user:{command:'keep'}},allowedTools:['user-tool']}));
- writeOwnedConfiguration(path,JSON.stringify({mcpServers:{codegraph:{command:'new'},user:{command:'keep'}},allowedTools:['user-tool','mcp__codegraph__*']}),home);
+ // An earlier rh version replaced the user's server and added the tool rule, and recorded both in its receipt.
+ put(home,'.claude.json',JSON.stringify({mcpServers:{codegraph:{command:'new'},user:{command:'keep'}},allowedTools:['user-tool','mcp__codegraph__*']}));
+ put(home,'.repo-harness/configuration-restore.json',JSON.stringify({protocol:1,changes:[
+  {path,selector:'mcpServers.codegraph',before:JSON.stringify({command:'original'}),installed:JSON.stringify({command:'new'}),active:true},
+  {path,selector:'allowedTools.codegraph',before:null,installed:JSON.stringify('mcp__codegraph__*'),active:true}]}));
  // An old Codex receipt entry beside a spelling that the Codex migration rejects: a Claude uninstall leaves both alone.
  const codex=join(home,'.codex/config.toml');const codexEntry={path:codex,selector:'default_mode_request_user_input',before:null,installed:'default_mode_request_user_input = true\n',active:true};
  put(home,'.codex/config.toml','"default_mode_request_user_input" = true\n');

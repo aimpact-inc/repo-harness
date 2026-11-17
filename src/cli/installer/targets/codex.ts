@@ -124,9 +124,10 @@ class CodexTarget implements AgentTarget {
     }
     const filePath = globalConfigPath();
     migrateJsonConfigRecords(process.env);
+    // A config.toml that rh cannot edit stops the install before any hook write.
+    const tomlResult = ensureRequestUserInputToml();
     const created = !fs.existsSync(filePath);
     const result = applyManagedHooks(filePath, 'codex');
-    const tomlResult = ensureRequestUserInputToml();
     if (!result.written.length) return { files: [{ path: filePath, action: 'unchanged' }, tomlResult] };
     return {
       files: [{ path: filePath, action: created ? 'created' : 'updated' }, tomlResult],

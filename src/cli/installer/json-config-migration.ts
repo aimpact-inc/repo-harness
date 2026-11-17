@@ -56,7 +56,8 @@ function parseOld(value: unknown, receiptPath: string): unknown {
 /** The receipt's JSON entries per file; every other entry stays for its own reader. */
 function receiptFragments(raw: any, paths: readonly string[], receiptPath: string): { byPath: Map<string, OldFragment[]>; rest: ConfigurationReceipt | null } {
   const byPath = new Map<string, OldFragment[]>();
-  if (raw === null || !Array.isArray(raw?.changes)) return { byPath, rest: null };
+  if (raw === null) return { byPath, rest: null };
+  if (raw?.protocol !== 1 || !Array.isArray(raw.changes)) throw invalid(`invalid configuration receipt: ${receiptPath}`);
   const pending = Array.isArray(raw.pending?.before) ? raw.pending.before.filter((entry: any) => paths.includes(entry?.path)) : [];
   if (pending.length) {
     const named = pending.map((entry: any) => `${String(entry.selector)} in ${String(entry.path)}`).join(', ');

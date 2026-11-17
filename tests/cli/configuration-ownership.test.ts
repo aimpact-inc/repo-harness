@@ -2,19 +2,43 @@ import { test, expect } from 'bun:test';
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync, symlinkSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { configurationReceiptPath, readConfigurationReceipt, recordConfigurationChange, withConfigurationMutation, writePrivateConfiguration } from '../../src/cli/installer/configuration-ownership';
+import { configurationReceiptPath } from '../../src/cli/installer/configuration-ownership';
+import { planCodexConfigMigration } from '../../src/cli/installer/codex-config-migration';
+import { migrateJsonConfigRecords, planJsonConfigMigration } from '../../src/cli/installer/json-config-migration';
+import { buildManagedHooks } from '../../src/cli/installer/managed-entries';
+import { claudeTarget } from '../../src/cli/installer/targets/claude';
+import { runUserUninstall } from '../../src/cli/installer/uninstall';
 import { codexConfigFragment, tomlFragment } from '../../src/core/host-config/toml-fragment';
 import { planFile } from '../../src/core/host-config/plan';
+import { openHostConfigGate } from '../../src/effects/host-config/gate';
+import { seedGlobalPackageFixture } from '../helpers/install-ownership';
 import { acquireRuntimeTransactionLock, globalRuntimeScope, runtimeTransactionRoot, withRuntimeTransactionLock } from '../../src/effects/locking/runtime-transaction-lock';
 
 function fixture(run: (home: string, env: NodeJS.ProcessEnv) => void) {
   const home = mkdtempSync(join(tmpdir(), 'configuration-ownership-'));
   try { run(home, { HOME: home }); } finally { rmSync(home, { recursive: true, force: true }); }
 }
-function writeOwnedConfiguration(path: string, content: string, root: string): void {
-  withConfigurationMutation([path], root, () => writePrivateConfiguration(path, content, root));
+/** A Claude install under a temporary HOME, as `rh install` runs it. */
+function withClaudeHome(run: (home: string, settings: string) => void) {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'json-fragment-')));
+  const previous = { HOME: process.env.HOME, BUN_INSTALL: process.env.BUN_INSTALL };
+  process.env.HOME = home;
+  process.env.BUN_INSTALL = join(home, '.bun');
+  try {
+    seedGlobalPackageFixture();
+    mkdirSync(join(home, '.claude'));
+    run(home, join(home, '.claude/settings.json'));
+  } finally {
+    for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    rmSync(home, { recursive: true, force: true });
+  }
 }
-const claudeJson = (server: string) => `${JSON.stringify({ mcpServers: { codegraph: { command: server } } }, null, 2)}\n`;
+/** Every byte of `before` is still in `after`, in order: the edit only inserted text. */
+function onlyInserted(before: string, after: string): boolean {
+  let at = 0;
+  for (const char of after) if (char === before[at]) at += 1;
+  return at === before.length;
+}
 
 test('issue 698 TOML fragment selects the root key and preserves profile keys', () => {
   const raw = 'default_mode_request_user_input = false\n[profiles.work]\ndefault_mode_request_user_input = false\n';
@@ -40,97 +64,64 @@ test('issue 698 ambiguous top-level TOML keys refuse a fragment mutation', () =>
     expect(() => tomlFragment.apply(raw, 'default_mode_request_user_input', 'default_mode_request_user_input = true\n')).toThrow();
   }
 });
-test('records earliest original and private receipt across repeat installs', () => fixture((home, env) => {
-  const path = join(home, '.claude.json');
-  writeFileSync(path, claudeJson('original'));
-  writeOwnedConfiguration(path, claudeJson('rh'), home);
-  writeOwnedConfiguration(path, readFileSync(path, 'utf8'), home);
-  expect(readConfigurationReceipt(home).changes).toHaveLength(1);
-  expect(readConfigurationReceipt(home).changes[0]!.before).toBe(JSON.stringify({ command: 'original' }));
-  expect(statSync(configurationReceiptPath(home)).mode & 0o777).toBe(0o600);
+test('A1: a Claude install only inserts text into settings.json, and a revert gives back its exact bytes', () => {
+  // A 4-space file, a one-line file, and a file without a final newline that holds a user hook of an event that rh also uses.
+  for (const original of ['{\n    "theme": "dark"\n}\n', '{"theme":"dark"}', '{\n  "hooks": {\n    "UserPromptSubmit": [\n      {"hooks": [{"type": "command", "command": "rtk hook claude"}]}\n    ]\n  }\n}']) withClaudeHome((home, settings) => {
+    writeFileSync(settings, original);
+    claudeTarget.install('global', {});
+    const installed = readFileSync(settings, 'utf8');
+    expect(onlyInserted(original, installed), installed).toBe(true);
+    expect(JSON.parse(installed).hooks.UserPromptSubmit.at(-1).hooks[0].command === 'rtk hook claude').toBe(original.includes('rtk'));
+    expect(openHostConfigGate({ env: process.env }).revert().map((entry) => entry.action)).toEqual(['text_removed']);
+    expect(readFileSync(settings, 'utf8')).toBe(original);
+  });
+});
+
+test('A9: after a user edit, uninstall removes the intact managed entries, keeps the user hook and the edited entry, and reports the edited one', () => withClaudeHome((home, settings) => {
+  writeFileSync(settings, '{\n    "theme": "dark"\n}\n');
+  claudeTarget.install('global', {});
+  const data = JSON.parse(readFileSync(settings, 'utf8'));
+  data.hooks.Stop.push({ hooks: [{ type: 'command', command: 'user-stop-hook' }] });
+  data.hooks.PreToolUse[0].hooks[0].timeout = 99;
+  writeFileSync(settings, `${JSON.stringify(data, null, 4)}\n`);
+  const result = runUserUninstall({ target: 'claude', env: process.env });
+  expect(result.status).toBe('partial');
+  expect(result.lines).toContain(`[unresolved] ${settings}: changed since rh wrote it; preserved: hooks.PreToolUse[edit]`);
+  const after = JSON.parse(readFileSync(settings, 'utf8'));
+  expect({ theme: after.theme, statusLine: after.statusLine, events: Object.keys(after.hooks).sort() }).toEqual({ theme: 'dark', statusLine: undefined, events: ['PreToolUse', 'Stop'] });
+  expect(after.hooks.PreToolUse).toEqual([data.hooks.PreToolUse[0]]);
+  expect(after.hooks.Stop).toEqual([{ hooks: [{ type: 'command', command: 'user-stop-hook' }] }]);
 }));
-test('refuses a configuration receipt with the retired Codex MCP selector', () => fixture((home) => {
+
+test('the JSON migration fails closed on an interrupted receipt entry and on an rh command inside a user hook entry', () => withClaudeHome((home, settings) => {
+  const env = process.env;
+  mkdirSync(join(home, '.repo-harness'));
+  writeFileSync(configurationReceiptPath(home), JSON.stringify({ protocol: 1, changes: [], pending: { id: 'x', before: [{ path: settings, selector: 'allowedTools.codegraph', value: null }] } }));
+  expect(() => planJsonConfigMigration(env)).toThrow(`interrupted configuration change (allowedTools.codegraph in ${settings}). Restore each fragment from its value in the "pending" block of ${configurationReceiptPath(home)}, then remove those entries from the block`);
+  rmSync(configurationReceiptPath(home));
+  const managed = buildManagedHooks('claude', env).Stop![0]!.hooks[0]!;
+  const original = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'user-stop-hook' }, managed] }] } });
+  writeFileSync(settings, original);
+  expect(() => migrateJsonConfigRecords(env)).toThrow('a hook entry in Stop holds a repo-harness command together with other commands. Move that command into its own entry, or delete it, then run rh again');
+  expect(readFileSync(settings, 'utf8')).toBe(original);
+}));
+
+test('refuses a configuration receipt with the retired Codex MCP selector', () => fixture((home, env) => {
   mkdirSync(join(home, '.repo-harness'));
   writeFileSync(configurationReceiptPath(home), JSON.stringify({
     protocol: 1,
     changes: [{ path: join(home, '.codex/config.toml'), selector: 'mcp_servers.repo_harness', before: null, installed: null, active: true }],
   }));
-  expect(() => readConfigurationReceipt(home)).toThrow(`invalid configuration receipt entry: ${configurationReceiptPath(home)}`);
+  expect(() => planCodexConfigMigration(env)).toThrow(`invalid Codex configuration receipt entry: ${configurationReceiptPath(home)}`);
 }));
-test('refuses receipt path symlinks before writing configuration', () => fixture((home, env) => {
+test('refuses a receipt path symlink before the migration writes anything', () => fixture((home, env) => {
   mkdirSync(join(home, '.repo-harness'));
   const victim = join(home, 'victim'); writeFileSync(victim, 'untouched');
   symlinkSync(victim, configurationReceiptPath(home));
-  expect(() => writeOwnedConfiguration(join(home, '.claude.json'), claudeJson('rh'), home)).toThrow();
+  expect(() => migrateJsonConfigRecords(env)).toThrow();
   expect(readFileSync(victim, 'utf8')).toBe('untouched');
-  expect(existsSync(join(home, '.claude.json'))).toBe(false);
+  expect(existsSync(join(home, '.repo-harness/config'))).toBe(false);
 }));
-test('rejects modified original before overwriting it', () => fixture((home, env) => {
-  const path = join(home, '.claude.json');
-  writeOwnedConfiguration(path, claudeJson('rh'), home);
-  writeFileSync(path, claudeJson('user'));
-  expect(() => writeOwnedConfiguration(path, claudeJson('rh'), home)).toThrow('changed since installation');
-  expect(readFileSync(path, 'utf8')).toContain('user');
-}));
-test('records only CodeGraph keys, never sibling secrets', () => fixture((home, env) => {
-  const path = join(home, '.claude.json');
-  recordConfigurationChange(path, JSON.stringify({ secret: 'dont-copy', mcpServers: { user: { command: 'user' } } }), JSON.stringify({ secret: 'dont-copy', mcpServers: { user: { command: 'user' }, codegraph: { command: 'cg' } } }), home);
-  expect(readFileSync(configurationReceiptPath(home), 'utf8')).not.toContain('dont-copy');
-  expect(readConfigurationReceipt(home).changes[0]!.selector).toBe('mcpServers.codegraph');
-}));
-
-test('interrupted external writer retains durable preimage and blocks implicit cleanup', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'configuration-kill-'));
-  const env = { ...process.env, HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0' };
-  try {
-    const path = join(home, '.claude.json');
-    const original = `${JSON.stringify({ model: 'original' }, null, 2)}\n`;
-    writeFileSync(path, original);
-    const modulePath = join(import.meta.dir, '../../src/cli/installer/configuration-ownership.ts');
-    const child = Bun.spawn(['bun', '-e', `import {withConfigurationMutation} from ${JSON.stringify(modulePath)}; import {writeFileSync} from 'fs'; withConfigurationMutation([${JSON.stringify(path)}], process.env.HOME, () => {writeFileSync(${JSON.stringify(path)}, JSON.stringify({ model: 'original', mcpServers: { codegraph: { command: 'cg' } } })); process.kill(process.pid, 'SIGKILL');});`], { env, stdout: 'pipe', stderr: 'pipe' });
-    expect(await child.exited).not.toBe(0);
-    const receipt = readConfigurationReceipt(home);
-    expect(JSON.stringify(receipt.pending)).not.toContain('model');
-    expect(receipt.pending?.before.find(entry => entry.selector === 'mcpServers.codegraph')?.value).toBe(null);
-    const before = readFileSync(path, 'utf8');
-    const { runUserUninstall } = await import('../../src/cli/installer/uninstall');
-    expect(runUserUninstall({ target: 'both', env }).status).toBe('partial');
-    expect(readFileSync(path, 'utf8')).toBe(before);
-    expect(() => writeOwnedConfiguration(path, claudeJson('replacement'), home)).toThrow('interrupted');
-    const receiptBefore = readFileSync(configurationReceiptPath(home), 'utf8');
-    expect(runUserUninstall({target:'both',env,dryRun:true,recoverInterrupted:true}).status).toBe('complete');
-    expect(readFileSync(configurationReceiptPath(home), 'utf8')).toBe(receiptBefore);
-    expect(runUserUninstall({target:'both',env,recoverInterrupted:true}).status).toBe('complete');
-    expect(readFileSync(path,'utf8')).toBe(original);
-    expect(readConfigurationReceipt(home).pending).toBeUndefined();
-  } finally { rmSync(home, { recursive: true, force: true }); }
-});
-
-test('shared host lock serializes concurrent writers and retains both host receipts', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'configuration-lock-'));
-  const env = { ...process.env, HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0' };
-  try {
-    const modulePath = join(import.meta.dir, '../../src/cli/installer/configuration-ownership.ts');
-    const lockPath = join(import.meta.dir, '../../src/effects/locking/runtime-transaction-lock.ts');
-    const signal = join(home, 'locked');
-    const code = (host: string, delay: number) => {
-      const target = JSON.stringify(join(home, host === 'settings' ? '.claude/settings.json' : '.claude.json'));
-      return `import {globalRuntimeScope, withRuntimeTransactionLock} from ${JSON.stringify(lockPath)}; import {withConfigurationMutation, writePrivateConfiguration} from ${JSON.stringify(modulePath)}; import {writeFileSync} from 'fs'; withRuntimeTransactionLock(globalRuntimeScope(process.env),()=>{writeFileSync(${JSON.stringify(signal)},'ready'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,${delay}); withConfigurationMutation([${target}],process.env.HOME,()=>writePrivateConfiguration(${target},'{"mcpServers":{"codegraph":{"command":"cg"}}}',process.env.HOME));});`;
-    };
-    const first = Bun.spawn(['bun', '-e', code('settings', 500)], { env, stdout: 'pipe', stderr: 'pipe' });
-    const deadline = Date.now() + 3000;
-    while (!existsSync(signal) && Date.now() < deadline) await Bun.sleep(5);
-    expect(existsSync(signal)).toBe(true);
-    const second = Bun.spawn(['bun', '-e', code('claude', 0)], { env, stdout: 'pipe', stderr: 'pipe' });
-    expect(await second.exited).toBe(0);
-    expect(await first.exited).toBe(0);
-    const retry = Bun.spawn(['bun', '-e', code('claude', 0)], { env, stdout: 'pipe', stderr: 'pipe' });
-    expect(await retry.exited).toBe(0);
-    expect(readConfigurationReceipt(home).changes).toHaveLength(2);
-    const { runUserUninstall } = await import('../../src/cli/installer/uninstall');
-    expect(runUserUninstall({ target: 'both', env }).status).toBe('complete');
-  } finally { rmSync(home, { recursive: true, force: true }); }
-});
 
 test.skipIf(process.platform === 'win32')('issue 922 the account scope keeps global-runtime.lock', () => fixture((home, env) => {
   const global = globalRuntimeScope(env);
