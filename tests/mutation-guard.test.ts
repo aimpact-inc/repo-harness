@@ -121,6 +121,7 @@ describe('safety hook: Bash host route', () => {
       symlinkSync(join(out, 'sub'), join(cwd, 'linked'));
       symlinkSync(join(out, 'app.json'), join(cwd, 'app.json'));
       symlinkSync(join(out, 'notes.txt'), join(cwd, 'notes.txt'));
+      symlinkSync(cwd, join(out, 'repo-link'));
       // The temp and managed worktree roots are fixture directories, so `outside` is outside every allowed root.
       const hook = (route: 'bash' | 'edit', toolInput: Record<string, string>) => spawnSync(process.execPath,
         [HOOK_ENTRY, 'PreToolUse', '--route', route], {
@@ -150,9 +151,14 @@ describe('safety hook: Bash host route', () => {
         // Brace items keep the shell's left-to-right order, so the outside file is the destination; every mv operand is removed or replaced.
         `cp {stage/app.json,${out}/app.json}`, `ln -f {stage/app.json,${out}/app.json}`,
         `mv -t build ${out}/notes.txt`, `mv --target-directory=build ${out}/notes.txt`, `mv -T ${out}/notes.txt build/notes.txt`,
+        // An allowed root as an mv source, an mv destination link that resolves to a directory outside the roots, and an
+        // outside mv destination link to the worktree, which BSD mv -h replaces.
+        'mv . build', 'mv stage/b.json linked', `mv stage/b.json ${out}/repo-link`,
       ]);
       expectGuard('RecursiveDeleteGuard', ['if true; then rm -rf .; fi']);
-      expectGuard(null, ['cd src && rm a.txt', 'echo $(rm src/a.txt)', `cp stage/*.json ${out}/empty/`, 'rm notes.txt', 'cp stage/*/notes.txt src/', 'rm -rf build/*', 'cp -r src build/', 'mv -t build stage/b.json']);
+      expectGuard(null, ['cd src && rm a.txt', 'echo $(rm src/a.txt)', `cp stage/*.json ${out}/empty/`, 'rm notes.txt', 'cp stage/*/notes.txt src/', 'rm -rf build/*', 'cp -r src build/', 'mv -t build stage/b.json',
+        // mv moves into an allowed root itself or a directory below it.
+        'mv stage/b.json .', 'mv stage/app.json ./build/']);
       const update = hook('edit', { command: '*** Begin Patch\n*** Update File: app.json\n@@\n-x\n+y\n*** End Patch' });
       expect(update.status).toBe(2);
       expect(update.stderr).toContain('[UserFileGuard]');

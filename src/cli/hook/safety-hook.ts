@@ -46,11 +46,17 @@ export interface WriteTarget {
   /** The path is the literal directory before a glob or a parameter; the write lands below it. */
   readonly glob?: true;
   /**
-   * cp, mv and ln write `<path>/<name>` for each source name when `path` is an existing directory; the directory itself is not
+   * cp and ln write `<path>/<name>` for each source name when `path` is an existing directory; the directory itself is not
    * written. `names` is null when a source name is not known, and then every existing child can be the target. cp writes
-   * through an existing child link (`follow`); mv and ln replace the child entry.
+   * through an existing child link (`follow`); ln replaces the child entry.
    */
   readonly into?: { readonly names: readonly string[] | null; readonly follow: boolean };
+  /**
+   * The mv destination. When it resolves to an existing directory, mv moves the sources into that directory and keeps it, so the
+   * directory decides: an allowed root itself or a directory below one passes when the destination entry is in a root too, and a
+   * directory outside the roots is refused.
+   */
+  readonly destination?: true;
 }
 
 const inside = (rel: string) => !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`);
@@ -160,6 +166,15 @@ class TargetJudge {
     if (target.path === null) return needsTarget ? unknownTargetDenial(target, this.roots, this.userStep) : null;
     if (/^\/dev\//.test(target.path)) return null;
     if (target.glob) return this.globDenial(target, target.path);
+    const into = target.destination ? existingDirectory(target.path) : null;
+    if (into) {
+      const inRoot = (path: string) => this.roots.some(root => underRoot(root, path, true));
+      if (!inRoot(into)) return this.existingDenial(target, into);
+      // BSD mv -h renames over a destination link to a directory, so the entry itself must be in a root too.
+      let leaf: string | null = null;
+      try { leaf = leafPath(target.path); } catch { /* the destroy check below decides */ }
+      if (leaf !== null && inRoot(leaf)) return null;
+    }
     let path: string;
     try {
       path = target.kind === 'destroy' ? leafPath(target.path) : writeThroughPath(target.path);
@@ -206,6 +221,14 @@ class TargetJudge {
     if (this.roots.some(root => underRoot(root, path, true)) || !existsSync(path) || ledgerCreated(path, this.scope.env)) return null;
     return outsideDenial(target, path, this.roots, this.userStep);
   }
+}
+
+/** The existing directory that the path resolves to through every link, or null. */
+function existingDirectory(path: string): string | null {
+  try {
+    const dir = writeThroughPath(path);
+    return statSync(dir, { throwIfNoEntry: false })?.isDirectory() ? dir : null;
+  } catch { return null; }
 }
 
 const rootList = (roots: readonly Root[]) => roots.map(root => root.join(sep)).join(', ');
@@ -485,10 +508,10 @@ function expansionIndex(pattern: string, expand: boolean): number {
   return -1;
 }
 
-function targetsOf(kind: TargetKind, via: string, word: Word, dirs: Dirs, into?: WriteTarget['into']): WriteTarget[] {
+function targetsOf(kind: TargetKind, via: string, word: Word, dirs: Dirs, extra: Pick<WriteTarget, 'into' | 'destination'> = {}): WriteTarget[] {
   const found = wordTargets(word, dirs);
   if (found === null) return [{ kind, via, spelled: word.value, path: null }];
-  return found.map(({ path, glob }) => ({ kind, via, spelled: word.value, path, ...(glob ? { glob: true as const } : {}), ...(into ? { into } : {}) }));
+  return found.map(({ path, glob }) => ({ kind, via, spelled: word.value, path, ...(glob ? { glob: true as const } : {}), ...extra }));
 }
 
 /** Operands after options; `valued` options take the next word unless glued (`-tDIR`, `--suffix=x`). */
@@ -527,12 +550,18 @@ function targetOption(word: Word): Word[] | null {
  * cp and ln, after brace expansion: the last operand is the destination, written into a directory as each source's name.
  * When the hook cannot classify the operands (a target-directory option, fewer than two operands), every operand is a possible
  * write target. mv removes or replaces each of its operands, so every operand, a glued target directory too, is a removal target.
+ * Without a target-directory option, the last word of mv is also its destination when it is an operand: BSD mv stops option
+ * parsing at the first operand, and a GNU option value after the operands leaves the real destination a plain removal target.
  */
 function destinationTargets(program: string, args: readonly Word[], dirs: Dirs): WriteTarget[] {
   const words = args.flatMap(braceWords);
   const glued = words.map(targetOption);
   if (program === 'mv') {
-    return [...operandsOf(words, new Set()).operands, ...glued.flatMap(found => found ?? [])].flatMap(word => targetsOf('destroy', 'mv', word, dirs));
+    const { operands } = operandsOf(words, new Set());
+    const last = words.at(-1);
+    const destination = glued.every(found => found === null) && operands.length >= 2 && operands.at(-1) === last ? last : undefined;
+    return [...operands, ...glued.flatMap(found => found ?? [])]
+      .flatMap(word => targetsOf('destroy', 'mv', word, dirs, word === destination ? { destination: true } : {}));
   }
   const { operands } = operandsOf(words, MOVE_VALUED);
   if (glued.some(found => found !== null) || operands.length < 2) {
@@ -541,7 +570,7 @@ function destinationTargets(program: string, args: readonly Word[], dirs: Dirs):
   const sources = operands.slice(0, -1);
   const sourced = sources.map(word => sourceNames(word));
   const names = sourced.some(list => list === null) ? null : sourced.flatMap(list => list!);
-  return targetsOf('overwrite', program, operands.at(-1)!, dirs, { names, follow: program === 'cp' });
+  return targetsOf('overwrite', program, operands.at(-1)!, dirs, { into: { names, follow: program === 'cp' } });
 }
 
 /** The names that a copy or move source gives its destination children after brace expansion; null when a glob or a parameter decides one. */
