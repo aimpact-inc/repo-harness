@@ -1,6 +1,6 @@
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { sha256Prefixed } from "../../core/evidence/sha256";
+import { sha256Prefixed } from "../core/evidence/sha256";
 
 /** The owner marker that the Herdr skill step writes beside SKILL.md. */
 export const HERDR_SKILL_MARKER = ".repo-harness-owner.json";
