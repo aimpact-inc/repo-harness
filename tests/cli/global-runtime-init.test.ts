@@ -119,7 +119,7 @@ test('update keeps one exact configuration backup for both migrations, skips unc
         writeFileSync(path, original);
         if (kind === 'backup-failure') mkdirSync(backup);
         const bun = join(home, 'bun');
-        writeExecutable(bun, '#!/bin/bash\nif [[ "$1" == "--version" ]]; then echo 1.3.14; fi\nexit 0\n');
+        writeExecutable(bun, '#!/bin/bash\nif [[ "$1" == "--version" ]]; then echo 1.4.0; fi\nexit 0\n');
         const result = runGlobalRuntimeSetup({
           sourceRoot: ROOT, cwd: home, plugins: [], updateMode: true, installCli: false,
           syncSkill: false, hostAdapters: false, externalSkills: false, codegraph: false,
@@ -133,7 +133,7 @@ test('update keeps one exact configuration backup for both migrations, skips unc
           expect(lstatSync(backup).isDirectory()).toBe(true);
           continue;
         }
-        expect(result.steps.find(step => step.step === 'migrate seats configuration')?.status).toBe(kind === 'both' ? 'ok' : 'skipped');
+        expect(result.steps.find(step => step.step === 'migrate seats configuration')?.status, result.stdout).toBe(kind === 'both' ? 'ok' : 'skipped');
         expect(result.steps.find(step => step.step === 'remove the retired brainRoot configuration key')?.status).toBe(kind === 'unchanged' ? 'skipped' : 'ok');
         expect(backups).toEqual(kind === 'unchanged' ? [] : [backup.slice(directory.length + 1)]);
         if (kind === 'unchanged') expect(readFileSync(path)).toEqual(original);
