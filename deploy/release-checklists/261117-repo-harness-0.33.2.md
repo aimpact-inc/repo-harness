@@ -103,7 +103,16 @@
 
 ## Verification
 
-VERIFY_BLOCK
+On Darwin arm64 with Bun 1.4.4, at source `2aad37197` with the release prep commits through `621b840ac`:
+
+- `bun install --frozen-lockfile`: pass, no changes.
+- `bun run check:type`: pass, exit 0.
+- `bun run check:state-boundaries`: pass, 652 TypeScript files checked.
+- `bun scripts/check-skill-version.ts`: pass, repo-harness=0.33.2, template=0.33.2.
+- `bun scripts/check-changelog-released-sections.ts --base origin/main`: pass, 121 released sections keep their bytes.
+- `bun run check:cli-manifest`: pass.
+- `bun run test:files tests/skill-version.test.ts tests/bootstrap-files.test.ts tests/readme-dx.test.ts tests/action-command-skills.test.ts tests/scaffold-parity.test.ts tests/installed-copy-sync.test.ts --timeout 60000 --max-concurrency 1`: pass, 100 tests in 6 files.
+- `git diff --check origin/main...HEAD`: pass.
 
 `Required / CI` and the release gate are pending. The owner release plan runs the release gate after the prep PR merges. Skill eval evidence is unavailable. Consumer architecture smoke evidence is pending; the automated case is `tests/hook-runtime.test.ts`, "a registry consumer without code facts or a projection manifest gets one architecture line (#850)".
 
