@@ -3,10 +3,10 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { isRecord } from '../../core/evidence/is-record';
 import type { PathRecord } from '../../core/host-config/types';
-import { hostConfigPaths, migrateLedgerSchema } from '../../effects/host-config/store';
-import { pathRecordHost, pathRecordIsCurrent, pathRecordKey, readPathRecords, writePathRecords } from '../../effects/host-config/path-records';
+import { hostConfigPaths, migrateLedgerSchema, projectedLedgerPaths } from '../../effects/host-config/store';
+import { partitionPathRecords, pathRecordHost, pathRecordIsCurrent, pathRecordKey, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
 import { migrateCodexConfigRecords } from './codex-config-migration';
-import { agentFleetTargetPaths, isLegacyOwnershipSurface, writeState } from './install-profile';
+import { agentFleetTargetPaths, isLegacyOwnershipSurface, writeState, type InstallState } from './install-profile';
 import { enabledPlugins, installProfileStatePath, InstallStateError, invalidOwnership, parseProtocol3InstallState, readRawInstallState, type Protocol3Snapshot } from './install-state';
 import { migrateJsonConfigRecords } from './json-config-migration';
 
@@ -86,16 +86,31 @@ function piSources(env: NodeJS.ProcessEnv, snapshot: Protocol3Snapshot, statePat
 export function migrateInstallState(env: NodeJS.ProcessEnv): void {
   // The ledger gains its `paths` map before any gate or path-record write reads it.
   migrateLedgerSchema(hostConfigPaths(env));
-  const statePath = installProfileStatePath(env);
-  if (parseProtocol3InstallState(readRawInstallState(env), statePath) !== null) {
+  if (installStatePendingMigration(env)) {
     // The section records of the host files leave with the manifest, so their migrations read it first.
     migrateCodexConfigRecords(env);
     migrateJsonConfigRecords(env);
   }
+  const plan = planInstallStateMigration(env);
+  if (plan === null) return;
+  writePathRecords(env, plan.records);
+  if (plan.receipt) rmSync(fleetReceiptPath(env), { force: true });
+  if (plan.state) writeState(plan.state, env);
+}
+
+/** What the move writes: the path records, whether the receipt goes, and the protocol 4 state; null when nothing moves. It writes nothing, so a dry run uses it too. */
+export interface InstallStateMigrationPlan {
+  readonly records: PathRecords;
+  readonly receipt: boolean;
+  readonly state: InstallState | null;
+}
+
+export function planInstallStateMigration(env: NodeJS.ProcessEnv): InstallStateMigrationPlan | null {
+  const statePath = installProfileStatePath(env);
   const legacy = parseProtocol3InstallState(readRawInstallState(env), statePath);
   const receipt = readFleetReceipt(env);
-  if (legacy === null && receipt === null) return;
-  const records: Record<string, PathRecord> = Object.fromEntries(Object.entries(readPathRecords(env))
+  if (legacy === null && receipt === null) return null;
+  const records: Record<string, PathRecord> = Object.fromEntries(Object.entries(partitionPathRecords(env, projectedLedgerPaths(hostConfigPaths(env))).records)
     .filter(([, record]) => legacy === null || record.kind === 'user_managed'));
   const pi: string[] = [];
   if (legacy) {
@@ -113,14 +128,14 @@ export function migrateInstallState(env: NodeJS.ProcessEnv): void {
     if (host === null) throw invalidOwnership(statePath);
     records[pathRecordKey(env, path)] = { owner: 'core', host, kind: 'user_managed', baseline: { state: 'unknown' }, committed: { type: 'file', sha256 } };
   }
-  writePathRecords(env, records);
-  if (receipt) rmSync(fleetReceiptPath(env), { force: true });
-  if (legacy) {
-    const previous = legacy.previous;
-    writeState({
+  const previous = legacy?.previous ?? null;
+  return {
+    records,
+    receipt: receipt !== null,
+    state: legacy && {
       ...legacy.current.fields,
       pi_packages: [...new Set(pi)],
       previous: previous && { ...previous.fields, pi_packages: [...new Set(piSources(env, previous, statePath))] },
-    }, env);
-  }
+    },
+  };
 }

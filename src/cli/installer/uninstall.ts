@@ -11,7 +11,7 @@ import { globalContextPath, inspectUnrecordedGlobalRules, previewGlobalRulesAdop
 import { removeRuntimeStateIgnoreBlock } from '../../effects/adoption/gitignore-plan';
 import { readRepositoryExcludes, repositoryCommonDirectory, repositoryExcludesLedgerPath, repositoryExcludeTarget, serializeRepositoryExcludes, type RepositoryExclude } from './repository-excludes';
 import { readInstallState } from './install-profile';
-import { installStatePendingMigration, migrateInstallState } from './install-state-migration';
+import { installStatePendingMigration, migrateInstallState, planInstallStateMigration } from './install-state-migration';
 import type { PathRecord } from '../../core/host-config/types';
 import { pathRecordIsCurrent, pathRecordsDigest, readPathRecords, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
 import { installProfileStatePath } from './install-state';
@@ -82,8 +82,11 @@ function readUninstallState(opts: UninstallOptions) {
   const files = hostConfigFiles(home, opts.target);
   const codexMigration = files.codex ? planCodexConfigMigration(env) : null;
   const jsonMigration = files.json.length ? planJsonConfigMigration(env, files.json) : null;
-  const state = readInstallState(env);
-  return { state, records: state ? readPathRecords(env) : {}, lock, files, codexMigration, jsonMigration };
+  // A dry run on a protocol 3 state plans with the migration's projection and writes nothing.
+  const projected = opts.dryRun && installStatePendingMigration(env) ? planInstallStateMigration(env) : null;
+  const state = projected?.state ?? readInstallState(env);
+  const records = projected ? projected.records : state ? readPathRecords(env) : {};
+  return { state, records, lock, files, codexMigration, jsonMigration };
 }
 
 const REVERT_ITEMS: Readonly<Record<Exclude<HostConfigRevertEntry['action'], 'released'>, Pick<UninstallItem, 'action' | 'reason'>>> = {

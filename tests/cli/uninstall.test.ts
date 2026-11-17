@@ -1,9 +1,10 @@
 import { createHash } from 'crypto';
 import { versions } from '../../src/cli/installer/install-profile';
 import { beforeAll, test, expect } from 'bun:test';
-import { installStateFixturePath, seedGlobalPackageFixture, seedPathRecords } from '../helpers/install-ownership';
+import { installStateFixturePath, recordLegacyInstallOwnership, seedGlobalPackageFixture, seedPathRecords } from '../helpers/install-ownership';
 import type { PathCommitted } from '../../src/core/host-config/types';
 import { pathRecordHost, pathRecordKey } from '../../src/effects/host-config/path-records';
+import { hashManagedTree } from '../../src/effects/managed-tree';
 import { appendFileSync, chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, relative } from 'path';
@@ -187,6 +188,19 @@ test('a codex uninstall keeps every claude record under a linked ~/.claude, and 
  expect(Object.keys(ledger(home).paths).sort()).toEqual([key(link),key(kept)].sort());
  expect(runUserUninstall({target:'both',env}).status).toBe('complete');
  expect([existsSync(link),readFileSync(kept,'utf8'),ledger(home).paths]).toEqual([false,'mine',{}]);
+}));
+test('an uninstall keeps a personal file and a foreign skill that a path record names outside every install surface',()=>fixture((home,env)=>{
+ const personal=join(home,'.codex/rules/personal.md');const foreign=join(home,'.claude/skills/foreign-skill');
+ put(home,'.codex/rules/personal.md','mine');put(home,'.claude/skills/foreign-skill/SKILL.md','mine');
+ profile(home,[ownedFile(personal,'mine'),{path:foreign,committed:{type:'directory' as const,sha256:hashManagedTree(foreign)}}]);
+ expect(runUserUninstall({target:'both',env}).status).toBe('complete');
+ expect([readFileSync(personal,'utf8'),readFileSync(join(foreign,'SKILL.md'),'utf8')]).toEqual(['mine','mine']);
+}));
+test('a dry run on a protocol 3 install plans the migrated records and writes nothing',()=>fixture((home,env)=>{
+ const rule=join(home,'.codex/rules/anti-patterns.md');put(home,'.codex/rules/anti-patterns.md','owned');
+ recordLegacyInstallOwnership([rule],env);const before=tree(home);
+ expect(runUserUninstall({target:'both',dryRun:true,env}).lines).toContain(`[remove] ${pathRecordKey(env,rule)}: unchanged transaction-owned surface`);
+ expect(tree(home)).toBe(before);
 }));
 test('staging skill removal edits the provider lock under an XDG_STATE_HOME outside HOME, after a failed cleanup',()=>fixture((home,env)=>{
  const state=mkdtempSync(join(tmpdir(),'user-uninstall-state-'));const lockPath=join(state,'skills/.skill-lock.json');

@@ -259,6 +259,16 @@ export function migrateLedgerSchema(paths: HostConfigPaths): void {
   writeLedger(paths, { ...(value as unknown as Omit<HostConfigLedger, 'protocol' | 'paths'>), protocol: HOST_CONFIG_LEDGER_PROTOCOL, paths: {} });
 }
 
+/** The path records as the schema move would leave them: none for a protocol 1 ledger, which a dry run reads without moving it. */
+export function projectedLedgerPaths(paths: HostConfigPaths): HostConfigLedger['paths'] {
+  const { observation, bytes } = observeFile(paths.ledger);
+  if (!observation.existed) return {};
+  if (bytes === null) throw invalidState(`the ledger is not a regular file: ${paths.ledger}`);
+  const value = parseJson(bytes, paths.ledger);
+  if (isObject(value) && value.protocol === 1 && validTextRecords(value) && !('paths' in value)) return {};
+  return parseLedger(bytes, paths.ledger).paths;
+}
+
 export function writeLedger(paths: HostConfigPaths, ledger: HostConfigLedger): void {
   publishFileByRename(paths.ledger, Buffer.from(`${JSON.stringify(ledger, null, 2)}\n`, 'utf8'), `${paths.ledger}.${randomUUID()}.tmp`);
 }
