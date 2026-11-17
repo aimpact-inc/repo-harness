@@ -9,9 +9,11 @@ import {
   type FileCommitted,
   type FileRecord,
   type FileRecordKind,
+  type FragmentEdit,
   type FragmentRecord,
   type FragmentRequest,
   type HostConfigBackupPolicy,
+  EMPTY_LEDGER,
   type HostConfigLedger,
   type HostPath,
   type Sha256,
@@ -23,8 +25,10 @@ import {
   ensurePrivateDirectory,
   expectedOf,
   hostConfigPaths,
+  hostConfigPathsAt,
   missingDirectories,
   observeFile,
+  parseLedger,
   putVault,
   readLedger,
   readVault,
@@ -473,6 +477,71 @@ function adoptFile(paths: HostConfigPaths, target: string, adoption: HostConfigA
   const fragments = adoption.fragments.map((fragment) => ({ file: path, ...fragment }));
   writeLedger(paths, { ...ledger, files: { ...ledger.files, [path]: record }, fragments: [...ledger.fragments, ...fragments] });
   return 'adopted';
+}
+
+/** The entries that a transaction rollback could not prove, as `<path>: <selector>`. */
+export interface HostConfigRollbackResult {
+  readonly unresolved: readonly string[];
+}
+
+const fragmentKey = (record: FragmentRecord): string => `${record.owner}\0${record.selector}`;
+
+/**
+ * The rollback of the gate writes of one install transaction, from the ledger
+ * as it was before the transaction (`snapshot`, null when there was none). It
+ * writes host files only; the transaction restores the ledger file after it.
+ * For each file whose records changed, an intact fragment goes back to its
+ * state before the transaction: to its snapshot text after a refresh, to its
+ * adopted text when the transaction adopted it, out when the transaction
+ * added it, and to its backup text when the transaction overrode a user
+ * value. A file that the transaction created goes only when the file did not
+ * exist before it and still holds exactly what it wrote. Every other entry
+ * stays and is returned.
+ */
+export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer | null): HostConfigRollbackResult {
+  const paths = hostConfigPathsAt(harness);
+  const before = snapshot === null ? EMPTY_LEDGER : parseLedger(snapshot, `${paths.ledger} (transaction snapshot)`);
+  const now = readLedger(paths);
+  const unresolved: string[] = [];
+  for (const path of Object.keys(now.files) as HostPath[]) {
+    const record = now.files[path]!;
+    const previous = before.files[path];
+    const all = now.fragments.filter((entry) => entry.file === path);
+    const earlier = before.fragments.filter((entry) => entry.file === path);
+    const changed = all.filter((entry) => earlier.find((old) => fragmentKey(old) === fragmentKey(entry))?.inserted !== entry.inserted);
+    const dropped = earlier.filter((old) => !all.some((entry) => fragmentKey(entry) === fragmentKey(old)));
+    unresolved.push(...dropped.map((old) => `${path}: ${old.selector}`));
+    if (!changed.length) continue;
+    const { observation, bytes } = observeFile(path);
+    const current = expectedOf(observation, path);
+    const format = fragmentFormat(path);
+    if (!format || bytes === null || !isCommitted(record, current)) {
+      unresolved.push(...changed.map((entry) => `${path}: ${entry.selector}`));
+      continue;
+    }
+    // The bytes before an override in this transaction: the copy that it took of an outside edit, or the first backup.
+    const source = previous && record.external_backup !== previous.external_backup ? record.external_backup : record.backup;
+    const backup = source ? decode(readVault(paths, source), path) : null;
+    let content = decode(bytes, path);
+    for (const entry of [...changed].reverse()) {
+      const range = format.strategy.locate(content, entry.selector);
+      const old = earlier.find((candidate) => fragmentKey(candidate) === fragmentKey(entry));
+      if (!range || content.slice(range.start, range.end) !== entry.inserted || (!old && entry.preimage === undefined && entry.kind !== 'add' && backup === null)) {
+        unresolved.push(`${path}: ${entry.selector}`);
+        continue;
+      }
+      const edit: FragmentEdit = old ? { at: range.start, removed: entry.inserted, inserted: old.inserted }
+        : entry.preimage !== undefined ? { at: range.start, removed: entry.inserted, inserted: entry.preimage }
+          : entry.kind === 'add' ? format.remove(content, entry.selector, all)
+            : format.restore(content, entry.selector, backup!, all);
+      content = content.slice(0, edit.at) + edit.inserted + content.slice(edit.at + edit.removed.length);
+    }
+    const created = !previous && record.kind === 'created' && record.baseline.state === 'known' && record.baseline.existed === false;
+    if (created && format.empty(content)) removeTarget(path, current);
+    else if (content !== decode(bytes, path)) replaceTarget(path, Buffer.from(content, 'utf8'), current);
+  }
+  removeCreatedDirectories(now.directories.filter((directory) => !before.directories.includes(directory)));
+  return { unresolved };
 }
 
 export function openHostConfigGate(options: HostConfigGateOptions = {}): HostConfigGate {

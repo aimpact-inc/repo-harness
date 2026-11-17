@@ -4,7 +4,7 @@ import wazaRules from "../../core/skill-surface/waza-shared-rules.json";
 import { bunGlobalPackageRoot, expectedSkillProjections, skillLinkMatches } from './skill-projection';
 import { configurationReceiptPath } from './configuration-ownership';
 import { ensurePrivateDirectory, hostConfigPaths, putVault, resolveHostPath } from '../../effects/host-config/store';
-import { openHostConfigGate } from '../../effects/host-config/gate';
+import { openHostConfigGate, rollbackHostConfigTransaction } from '../../effects/host-config/gate';
 import { migrateCodexConfigRecords } from './codex-config-migration';
 import { migrateJsonConfigRecords } from './json-config-migration';
 import { globalContextBackupEligible, globalContextPath } from './global-context';
@@ -939,6 +939,14 @@ export function rollbackInstallHostTransaction(
         writeFileSync(join(transaction.backup_root, 'pi-ownership.json'), JSON.stringify({ protocol: 1,
           transaction_id: basename(transaction.backup_root), plugins: unresolved.plugins, ownership_manifest: unresolved.surfaces }), { mode: 0o600 });
       } catch (error) { failures.push(`Pi recovery record: ${String((error as Error).message ?? error)}`); }
+    }
+    // The gate undoes its own writes by the ledger records before the ledger file goes back, so a linked host file needs no copy here.
+    const ledger = transaction.snapshots.find((snapshot) => basename(snapshot.path) === 'ledger.json' && basename(dirname(snapshot.path)) === 'config');
+    if (ledger) {
+      try {
+        const result = rollbackHostConfigTransaction(dirname(dirname(ledger.path)), ledger.existed && ledger.backup_path !== null ? readFileSync(ledger.backup_path) : null);
+        failures.push(...result.unresolved.map((entry) => `${entry}: rh cannot prove this host configuration entry, so it stays as it is`));
+      } catch (error) { failures.push(`host configuration rollback: ${String((error as Error).message ?? error)}`); }
     }
     for (const snapshot of [...transaction.snapshots].reverse()) {
       try {

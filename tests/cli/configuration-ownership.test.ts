@@ -1,15 +1,15 @@
 import { test, expect } from 'bun:test';
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync, symlinkSync, statSync } from 'fs';
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, existsSync, symlinkSync, statSync, lstatSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { configurationReceiptPath } from '../../src/cli/installer/configuration-ownership';
 import { migrateCodexConfigRecords, planCodexConfigMigration } from '../../src/cli/installer/codex-config-migration';
 import { migrateJsonConfigRecords, planJsonConfigMigration } from '../../src/cli/installer/json-config-migration';
 import { buildManagedHooks, canonicalManagedHookProjection, managedStatusLine } from '../../src/cli/installer/managed-entries';
-import { versions, writeState } from '../../src/cli/installer/install-profile';
+import { beginInstallHostTransaction, installProfileHostMutationPaths, rollbackInstallHostTransaction, versions, writeState } from '../../src/cli/installer/install-profile';
 import { MANAGED_TAG } from '../../src/core/adoption/managed-hook-config';
 import { sha256Prefixed } from '../../src/core/evidence/sha256';
-import { removeJsonFragment } from '../../src/core/host-config/json-fragment';
+import { jsonFragment, removeJsonFragment } from '../../src/core/host-config/json-fragment';
 import { claudeTarget } from '../../src/cli/installer/targets/claude';
 import { runUserUninstall } from '../../src/cli/installer/uninstall';
 import { codexConfigFragment, tomlFragment } from '../../src/core/host-config/toml-fragment';
@@ -164,6 +164,37 @@ test('a migrated CodeGraph override keeps its kind and its backup across a refre
     expect(readFileSync(path, 'utf8'), String(external)).toBe(`model = "${external ? 'edited' : 'user'}"\n${userTable}`);
   });
 });
+
+test('a failed install undoes its gate writes through linked host files outside the managed roots, refreshes and created files included, with no copy of ~/.claude.json outside the vault', () => withClaudeHome((home, settings) => {
+  const env = process.env;
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'dotfiles-')));
+  try {
+    const rootTarget = join(outside, 'claude.json');
+    const settingsTarget = join(outside, 'settings.json');
+    const secret = 'sk-rollback-not-a-key';
+    writeFileSync(rootTarget, `{\n  "primaryApiKey": "${secret}",\n  "numStartups": 1\n}\n`);
+    writeFileSync(settingsTarget, '{\n  "theme": "user"\n}\n');
+    symlinkSync(rootTarget, join(home, '.claude.json'));
+    symlinkSync(settingsTarget, settings);
+    // A committed earlier install: its status line is rh's recorded text before the transaction.
+    claudeTarget.install('global', {});
+    const before = [readFileSync(rootTarget, 'utf8'), readFileSync(settingsTarget, 'utf8')];
+    const gate = openHostConfigGate({ env });
+    const hooks = join(home, '.codex/hooks.json');
+    const transaction = beginInstallHostTransaction(installProfileHostMutationPaths(env), env);
+    gate.apply([{ path: join(home, '.claude.json'), backup: 'overrides-only', fragments: [{ owner: 'architecture', selector: 'mcpServers.codegraph', kind: 'add', strategy: jsonFragment, value: { command: 'codegraph' } }] }]);
+    gate.apply([{ path: settings, fragments: [{ owner: 'core', selector: 'statusLine', kind: 'refresh', strategy: jsonFragment, value: { type: 'command', command: 'refreshed' } }] }]);
+    gate.apply([{ path: hooks, fragments: [{ owner: 'core', selector: 'hooks.Stop[default]', kind: 'add', strategy: jsonFragment, value: buildManagedHooks('codex', env).Stop![0] }] }]);
+    expect([readFileSync(rootTarget, 'utf8'), readFileSync(settingsTarget, 'utf8')]).not.toEqual(before);
+    rollbackInstallHostTransaction(transaction);
+    expect([readFileSync(rootTarget, 'utf8'), readFileSync(settingsTarget, 'utf8')]).toEqual(before);
+    expect([lstatSync(join(home, '.claude.json')).isSymbolicLink(), lstatSync(settings).isSymbolicLink(), existsSync(join(home, '.codex'))]).toEqual([true, true, false]);
+    const harness = join(home, '.repo-harness');
+    const copies = readdirSync(harness, { recursive: true }).map(String).map((name) => join(harness, name))
+      .filter((path) => lstatSync(path).isFile() && readFileSync(path, 'utf8').includes(secret));
+    expect(copies).toEqual([]);
+  } finally { rmSync(outside, { recursive: true, force: true }); }
+}));
 
 test('the JSON migration fails closed on an interrupted receipt entry and on an rh command inside a user hook entry', () => withClaudeHome((home, settings) => {
   const env = process.env;
