@@ -180,12 +180,12 @@ describe('safety hook: Bash host route', () => {
     const skill = join(home, '.claude/skills/repo-harness-cross-review');
     const savedTmp = process.env.TMPDIR;
     try {
-      for (const dir of ['repo/build/sub', 'repo/src', 'repo/stage/d', 'repo/w/stage', 'repo/inner', 'outside/sub', 'outside/-archive', 'repo/links', 'tmp', 'managed', 'home/links', 'home/stage']) {
+      for (const dir of ['repo/build/sub', 'repo/src', 'repo/stage/d', 'repo/stage/1', 'repo/w/stage', 'repo/inner', 'outside/sub', 'outside/-archive', 'repo/links', 'tmp', 'managed', 'home/links', 'home/stage']) {
         mkdirSync(join(root, dir), { recursive: true });
       }
       mkdirSync(skill, { recursive: true });
       for (const file of ['repo/source.txt', 'repo/a.txt', 'repo/stage/b.json', 'repo/stage/app.json', 'outside/source.txt', 'outside/a.txt',
-        'outside/victim.txt', 'outside/move.txt', 'outside/notes.txt', 'outside/notes.txt.bak', 'outside/x.txt', 'outside/-f', 'outside/--', 'notes.txt',
+        'outside/victim.txt', 'repo/stage/1/victim.txt', 'outside/move.txt', 'outside/notes.txt', 'outside/notes.txt.bak', 'outside/x.txt', 'outside/-f', 'outside/--', 'notes.txt',
         'home/notes.txt', 'home/stage/x.txt']) writeFileSync(join(root, file), 'x');
       writeFileSync(join(skill, 'SKILL.md'), 'skill');
       for (const link of ['linked', 'stage/linked', 'w/stage/linked']) symlinkSync(out, join(repo, link));
@@ -238,6 +238,11 @@ describe('safety hook: Bash host route', () => {
         [refuse, `cp ${out}/notes.txt{,.bak}`], [refuse, `mv ${out}/notes.txt{,.bak}`], [refuse, `ln -f ${out}/notes.txt{,.bak}`],
         [refuse, `cp -rT src ${out}`], [refuse, `cp -r --no-target-directory src ${out}`], [refuse, 'cp {.,..}/notes.txt'], [refuse, 'ln -f {.,..}/notes.txt'],
         [refuse, 'mv -t build "$SOURCE"'], [refuse, 'mv --target-directory=build "$SOURCE"'], [refuse, 'mv -T "$SOURCE" build/x'],
+        // #3025 r1: an unknown output after `of=` or a glued target directory keeps its literal directory; POSIX classes match as the shell does.
+        [refuse, `dd if=source.txt of=${out}/$X`], [refuse, `dd if=source.txt of=${out}/$(printf notes.txt)`], [refuse, 'dd if=source.txt of=$HOME/notes.txt'],
+        [refuse, 'dd if=source.txt of=${HOME}/notes.txt'], [null, 'dd if=source.txt of=build/$X'], [refuse, 'cp --target-directory="$HOME" source.txt'],
+        [refuse, `cp --target-directory=${out}/$X source.txt`], [refuse, `tee ${out}/$X`], [refuse, 'echo x > ${HOME}/$X'],
+        [null, 'rm -f stage/[[:digit:]]*/victim.txt'], [null, 'truncate -s 0 stage/[[:digit:]]*/victim.txt'], [refuse, 'rm -f stage/[[:alpha:]]*/victim.txt'],
         // GNU getopt accepts a long option prefix.
         [refuse, 'mv --target=linked stage/b.json'], [refuse, 'cp --target=linked a.txt'],
         // An unknown removal refuses; an unknown overwrite refuses only when its literal directory is outside the roots.
@@ -246,10 +251,12 @@ describe('safety hook: Bash host route', () => {
         [null, 'mv stage/b.json .'], [null, 'mv stage/app.json ./build/'], [null, `mv stage/b.json ${out}/repo-link/`], [null, 'mv -t build stage/b.json'],
         [null, 'mv linked build'], [null, 'rm -rf linked'], [null, 'rm -rf stage/linked'],
       ];
-      for (const [guard, command, from = ''] of rows) {
-        const denial = bashSafetyDenial(command, isAbsolute(from) ? from : join(repo, from), { repoRoot: repo, env, host: 'claude' });
-        expect({ command, guard: denial?.guard ?? null }).toEqual({ command, guard });
-      }
+      // Every row runs, so one failure lists each wrong verdict.
+      const wrong = rows.flatMap(([guard, command, from = '']) => {
+        const actual = bashSafetyDenial(command, isAbsolute(from) ? from : join(repo, from), { repoRoot: repo, env, host: 'claude' })?.guard ?? null;
+        return actual === guard ? [] : [{ command: command.replaceAll(root, '$ROOT'), expected: guard, actual }];
+      });
+      expect(wrong).toEqual([]);
       // The refusal names the resolved outside path, so the local user can authorize it.
       expect(bashSafetyDenial('mv a.txt stage/*', repo, { repoRoot: repo, env, host: 'claude' })?.reason).toContain(`would remove or change ${out},`);
     } finally {
