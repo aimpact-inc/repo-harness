@@ -9,7 +9,7 @@ import { isRulesPromptText } from '../../core/operator/rules';
 import { withoutRepositorySelectingGitEnv } from '../git/runner';
 import { readRepoHarnessRegistryStrictSnapshot } from '../repo-registry';
 import type { BoardCliAdmission } from './advisor-seat-route';
-import { RULES_CLI_ENTRY, runRulesProcess, type RulesProcessRunner, type RulesRepositoryCache } from './rules-collector';
+import { RULES_CLI_ENTRY, runRulesProcess, type RulesProcessRunner } from './rules-collector';
 import { prepareOperatorStateDir } from './write-audit';
 import type { OperatorWriteRoute } from './write-channel';
 import { OperatorWriteRefusal, operatorWriteError, type OperatorWriteResponse } from './write-run';
@@ -86,7 +86,6 @@ export interface RulesPromoteRouteOptions {
   readonly env: NodeJS.ProcessEnv;
   /** The env of the write run, so the prompt file lives in the state directory that the run uses. */
   readonly audit_env?: NodeJS.ProcessEnv;
-  readonly read_rules: (repositoryId: string) => RulesRepositoryCache;
   readonly read_herdr: () => 'ready' | 'unavailable';
   /** Production runs the CLI; only tests inject another runner. */
   readonly run_process?: RulesProcessRunner;
@@ -146,22 +145,14 @@ export function rulesPromoteWriteRoute(options: RulesPromoteRouteOptions): Opera
       if (typeof fields.ledger_blob !== 'string' || !BLOB.test(fields.ledger_blob)) throw new Error('ledger_blob');
       if (!isRulesPromptText(fields.prompt)) throw new Error('prompt');
       const route = fields.route as RoutingClass, ledgerBlob = fields.ledger_blob, prompt = fields.prompt;
-      // The theme and action bind the request to the candidate that the console showed.
-      const cache = options.read_rules(repositoryId);
-      const theme = cache.state === 'ready'
-        ? cache.snapshot.status.themes.find(row => row.actions.some(action => action.candidate_id === candidateId)) : undefined;
-      const action = theme?.actions.find(row => row.candidate_id === candidateId);
       return {
         operation: 'rules_promote',
         target: `rules_candidate:${candidateId}`,
-        input: {
-          repository_id: repositoryId, candidate_id: candidateId, theme_key: theme?.key ?? null, action: action?.kind ?? null,
-          ledger_blob: ledgerBlob, route, prompt_sha256: sha256Hex(prompt),
-        },
+        // Only the request body binds: the candidate id and the ledger blob fix the theme and the action, and a
+        // binding read from the rules cache would turn the replay of a recorded result into request_mismatch.
+        input: { repository_id: repositoryId, candidate_id: candidateId, ledger_blob: ledgerBlob, route, prompt_sha256: sha256Hex(prompt) },
         execute: async () => {
           checkHerdr();
-          if (cache.state !== 'ready') throw refusal(503, cache.reason, 'The rules status is not available yet, so the candidate cannot be checked.', REFRESH_NEXT);
-          if (action === undefined) return promoteRefusal('candidate_not_found', null);
           const path = repositoryPath(repositoryId);
           return admitted(async (signal) => {
             let file: string;

@@ -1145,8 +1145,8 @@ export async function startOperatorServer(
     advisorBossCommandWriteRoute({ admit: run => admitBoardCli(run)?.result ?? null, env: boardEnvironment, audit_env: options.env,
       send: options.send_advisor, read: options.read_advisor_transcript }),
     ...[rulesPromoteWriteRoute, rulesReconcileWriteRoute].map(route => route({
-      // The readers are bound after the collectors start, below.
-      admit: run => admitBoardCli(run)?.result ?? null, env: boardEnvironment, audit_env: options.env, read_rules: id => readRules(id), read_herdr: () => readHerdr(),
+      // The runtime status reader is bound after the runtime service starts, below.
+      admit: run => admitBoardCli(run)?.result ?? null, env: boardEnvironment, audit_env: options.env, read_herdr: () => readHerdr(),
     })),
   ].filter(route => !injectedWriteRoutes.some(injected => injected.id === route.id))
     .concat(injectedWriteRoutes);

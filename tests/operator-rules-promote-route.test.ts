@@ -3,7 +3,6 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, wr
 import { join } from 'node:path';
 import { runRulesStatus } from '../src/cli/commands/rules';
 import { promotionCandidate, renderPromotionPrompt } from '../src/core/ci/rule-prompt';
-import type { RulesSnapshotV1 } from '../src/core/operator/rules';
 import { RULES_CLI_ENTRY, runRulesProcess, type RulesProcessRunner } from '../src/effects/operator/rules-collector';
 import { rulesPromoteWriteRoute, rulesReconcileWriteRoute, type RulesPromoteRouteOptions } from '../src/effects/operator/rules-promote-route';
 import { operatorAuditPath, operatorStateDir, readOperatorAuditRecords } from '../src/effects/operator/write-audit';
@@ -71,13 +70,12 @@ function fixture() {
   ] }));
   const env = sandboxEnv({ HOME: home, REPO_HARNESS_HOME: home, PATH: `${bin}:${process.env.PATH}`, FAKE_GH_STATE: stateFile });
   const status = runRulesStatus({ target: repo });
-  const snapshot: RulesSnapshotV1 = { protocol: 1, kind: 'operator_rules', repository_id: id, collected_at: AT, status, prompts: [], routes: null, herdr: 'ready' };
   const calls: (readonly string[])[] = [];
   const runner: RulesProcessRunner = (argv, options) => { calls.push(argv); return runRulesProcess(argv, options); };
   const state = { herdr: 'ready' as 'ready' | 'unavailable' };
   const options: RulesPromoteRouteOptions = {
     admit: work => work(new AbortController().signal), env, audit_env: env, run_process: runner,
-    read_rules: () => ({ state: 'ready', snapshot }), read_herdr: () => state.herdr,
+    read_herdr: () => state.herdr,
   };
   const promoteRoute = rulesPromoteWriteRoute(options), reconcileRoute = rulesReconcileWriteRoute(options);
   const send = (route: typeof promoteRoute, requestId: string, fields: Record<string, unknown>) =>
