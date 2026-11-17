@@ -156,7 +156,7 @@ function validFileRecord(record: unknown): boolean {
   const committed = record.committed;
   return ['created', 'text_block', 'replaced'].includes(record.kind as string) && validBaseline(record.baseline)
     && (committed.type === 'absent' || (committed.type === 'file' && isSha(committed.sha256)))
-    && (isSha(record.backup) || (record.backup === null && record.kind === 'created'))
+    && (isSha(record.backup) || (record.backup === null && record.kind !== 'replaced'))
     && typeof record.external_change === 'boolean';
 }
 

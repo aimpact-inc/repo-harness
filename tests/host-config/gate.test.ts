@@ -7,12 +7,18 @@ import { openHostConfigGate, type HostConfigFileChange } from '../../src/effects
 import { replaceTarget } from '../../src/effects/host-config/store';
 
 /** A `key=value` line format: the selector is the key. */
+function keyLineMatch(content: string, selector: string): RegExpExecArray | null {
+  return new RegExp(`^${selector.replace(/\./g, '\\.')}=.*\\n`, 'm').exec(content);
+}
 function keyLineEdit(content: string, selector: string, value: string): FragmentEdit {
-  const match = new RegExp(`^${selector.replace(/\./g, '\\.')}=.*\\n`, 'm').exec(content);
+  const match = keyLineMatch(content, selector);
   const inserted = `${selector}=${value}\n`;
   return match ? { at: match.index, removed: match[0], inserted } : { at: content.length, removed: '', inserted };
 }
-const keyLine: HostConfigStrategy<string> = { locate: () => null, apply: keyLineEdit };
+const keyLine: HostConfigStrategy<string> = {
+  locate: (content, selector) => { const match = keyLineMatch(content, selector); return match ? { start: match.index, end: match.index + match[0].length } : null; },
+  apply: keyLineEdit,
+};
 
 /** The same format with an edit of the value only: the inserted text does not name its selector. */
 const valueOnly: HostConfigStrategy<string> = {

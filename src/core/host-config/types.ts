@@ -10,7 +10,8 @@ export type HostConfigErrorCode =
   | 'host_config_fragment_overlap'
   | 'host_config_target_changed'
   | 'host_config_invalid_path'
-  | 'host_config_invalid_state';
+  | 'host_config_invalid_state'
+  | 'host_config_unparseable_target';
 
 export class HostConfigError extends Error {
   constructor(readonly code: HostConfigErrorCode, message: string, options?: ErrorOptions) {
@@ -35,9 +36,18 @@ export type FileBaseline =
 /**
  * How rh first wrote the file: `created` (a new file, a revert removes it),
  * `text_block` (`apply` edited a user file) or `replaced` (a delegated
- * writer replaced a user file); a revert of the last two restores the backup.
+ * writer replaced a user file); a revert of the last two restores the backup
+ * when the record has one.
  */
 export type FileRecordKind = 'created' | 'text_block' | 'replaced';
+
+/**
+ * When `apply` puts the whole file into the vault: `whole-file` before any
+ * write over bytes that rh did not write last; `overrides-only` only when a
+ * fragment replaces such bytes, so a file that rh only adds to keeps no copy
+ * and a revert removes rh's fragments instead.
+ */
+export type HostConfigBackupPolicy = 'whole-file' | 'overrides-only';
 
 export type FileCommitted =
   | { readonly type: 'file'; readonly sha256: Sha256 }
@@ -53,7 +63,8 @@ export interface FileRecord {
   readonly committed: FileCommitted;
   /**
    * Vault reference of the whole file before rh last wrote over bytes that rh
-   * did not write; required for `text_block` and `replaced`.
+   * did not write; required for `replaced`, null for `created` and for a
+   * `text_block` that rh only added to under `overrides-only`.
    */
   readonly backup: Sha256 | null;
   /** Sticky: set once the file differed from `committed` when rh wrote it again. */
