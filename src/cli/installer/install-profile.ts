@@ -3,7 +3,7 @@ import { retryWindowsSharingRace } from '../../effects/atomic-append';
 import wazaRules from "../../core/skill-surface/waza-shared-rules.json";
 import { bunGlobalPackageRoot, expectedSkillProjections, skillLinkMatches } from './skill-projection';
 import { configurationReceiptPath } from './configuration-ownership';
-import { hostConfigPaths, readLedger, resolveHostPath } from '../../effects/host-config/store';
+import { ensurePrivateDirectory, hostConfigPaths, putVault, readLedger, resolveHostPath } from '../../effects/host-config/store';
 import { openHostConfigGate } from '../../effects/host-config/gate';
 import { CODEX_CONFIG_FRAGMENTS, tomlFragment } from '../../core/host-config/toml-fragment';
 import { migrateCodexConfigRecords } from './codex-config-migration';
@@ -836,37 +836,79 @@ export function installProfileTransactionPaths(env: NodeJS.ProcessEnv = process.
 const transactionLocks = new WeakMap<InstallHostTransaction, { context: RuntimeTransactionContext; owned: RuntimeTransactionLock | undefined }>();
 
 const TRANSACTION_PREFIX = 'install-';
-/** The process that runs a transaction, in the lock owner's shape: its PID and start time. */
+/** The process that runs a transaction, in the lock owner's shape (PID and start time), and the paths that it snapshots by index. */
 const TRANSACTION_OWNER = 'owner.json';
 
-/** Only a record that proves its owner process ended makes a directory an orphan. */
-function transactionOwnerEnded(directory: string): boolean {
+interface TransactionOwner {
+  readonly pid: number;
+  readonly startTime: string | null;
+  readonly paths: readonly string[];
+}
+
+/** `none`: an earlier rh version wrote no record. `invalid`: the record proves nothing, so the directory stays. */
+function readTransactionOwner(directory: string): TransactionOwner | 'none' | 'invalid' {
   const path = join(directory, TRANSACTION_OWNER);
   const stat = lstatSync(path, { throwIfNoEntry: false });
-  // rh versions before the record wrote none; such a directory has no live owner under the lock.
-  if (!stat) return true;
-  if (!stat.isFile()) return false;
-  let record: { pid?: unknown; start_time?: unknown };
-  try { record = JSON.parse(readFileSync(path, 'utf-8')); } catch { return false; }
-  if (!Number.isSafeInteger(record?.pid) || (record.pid as number) <= 0) return false;
+  if (!stat) return 'none';
+  if (!stat.isFile()) return 'invalid';
+  let record: { pid?: unknown; start_time?: unknown; paths?: unknown };
+  try { record = JSON.parse(readFileSync(path, 'utf-8')); } catch { return 'invalid'; }
+  if (!Number.isSafeInteger(record?.pid) || (record.pid as number) <= 0
+    || !Array.isArray(record.paths) || !record.paths.every((entry) => typeof entry === 'string')) return 'invalid';
   const startTime = typeof record.start_time === 'string' && record.start_time !== '' ? record.start_time : null;
-  return exclusiveDirectoryLockOwnerLiveness({ lockPath: directory, pid: record.pid as number, startTime, token: '' }) === 'dead';
+  return { pid: record.pid as number, startTime, paths: record.paths as string[] };
+}
+
+/**
+ * Settle one copy against its host path. A copy equal to the host bytes goes.
+ * A file copy that differs, or whose host file is gone, can be the only
+ * preimage of that file, so it moves to the private vault. A link or directory
+ * copy that differs stays where it is.
+ */
+function settleTransactionCopy(copy: string, host: string, env: NodeJS.ProcessEnv): void {
+  const copied = lstatSync(copy);
+  const current = lstatSync(host, { throwIfNoEntry: false });
+  if (copied.isFile()) {
+    const bytes = readFileSync(copy);
+    if (!current?.isFile() || !readFileSync(host).equals(bytes)) {
+      const paths = hostConfigPaths(env);
+      ensurePrivateDirectory(paths.vault);
+      const vaulted = join(paths.vault, putVault(paths, bytes).slice('sha256:'.length));
+      process.stderr.write(`[install] ${host} is not as a killed install found it; its earlier bytes are in ${vaulted}\n`);
+    }
+    rmSync(copy);
+    return;
+  }
+  const same = copied.isSymbolicLink()
+    ? current?.isSymbolicLink() === true && readlinkSync(host) === readlinkSync(copy)
+    : copied.isDirectory() && current?.isDirectory() === true && hashManagedTree(host) === hashManagedTree(copy);
+  if (same) rmSync(copy, { recursive: true, force: true });
+  else process.stderr.write(`[install] kept ${copy}: it differs from ${host}\n`);
 }
 
 /**
  * A killed install leaves its directory with copies of host files, credentials
- * included. The lock holder removes each such orphan and restores nothing from
- * it: the directory does not record which host files the killed run changed,
- * so a restore could overwrite later edits. A link is never followed, and a
- * retained upgrade backup (`manifest.json`) stays.
+ * included. The lock holder settles each copy of a directory whose owner ended
+ * and removes the directory once only its record is left. Nothing is restored
+ * to a host path: the directory does not record which host files the killed
+ * run changed. A directory without a record (an earlier rh version) stays, as
+ * does a retained upgrade backup (`manifest.json`); a link is never followed.
  */
-function removeOrphanedTransactions(transactionRoot: string): void {
+function settleOrphanedTransactions(transactionRoot: string, env: NodeJS.ProcessEnv): void {
   for (const name of readdirSync(transactionRoot)) {
     const directory = join(transactionRoot, name);
-    if (!name.startsWith(TRANSACTION_PREFIX) || !lstatSync(directory).isDirectory()) continue;
-    if (lstatExists(join(directory, 'manifest.json')) || !transactionOwnerEnded(directory)) continue;
-    rmSync(directory, { recursive: true, force: true });
-    process.stderr.write(`[install] removed the orphaned install transaction ${directory}\n`);
+    if (!name.startsWith(TRANSACTION_PREFIX) || !lstatSync(directory).isDirectory() || lstatExists(join(directory, 'manifest.json'))) continue;
+    const owner = readTransactionOwner(directory);
+    if (owner === 'none') {
+      process.stderr.write(`[install] kept the install transaction of an earlier rh version: ${directory}\n`);
+      continue;
+    }
+    if (owner === 'invalid' || exclusiveDirectoryLockOwnerLiveness({ lockPath: directory, pid: owner.pid, startTime: owner.startTime, token: '' }) !== 'dead') continue;
+    for (const entry of readdirSync(directory)) {
+      const host = /^\d+$/.test(entry) ? owner.paths[Number(entry)] : undefined;
+      if (host !== undefined) settleTransactionCopy(join(directory, entry), host, env);
+    }
+    if (readdirSync(directory).every((entry) => entry === TRANSACTION_OWNER)) rmSync(directory, { recursive: true, force: true });
   }
 }
 
@@ -876,11 +918,11 @@ function holdsRuntimeLock(scope: RuntimeTransactionScope): boolean {
 }
 
 /** The owner record goes in before the directory gets its `install-` name, so no live directory is ever without one. */
-function createTransactionDirectory(transactionRoot: string): string {
+function createTransactionDirectory(transactionRoot: string, paths: readonly string[]): string {
   const staging = mkdtempSync(join(transactionRoot, '.staging-'));
   const directory = join(transactionRoot, `${TRANSACTION_PREFIX}${randomUUID()}`);
   try {
-    writeFileSync(join(staging, TRANSACTION_OWNER), `${JSON.stringify({ pid: process.pid, start_time: currentProcessStartTime() })}\n`, { mode: 0o600 });
+    writeFileSync(join(staging, TRANSACTION_OWNER), `${JSON.stringify({ pid: process.pid, start_time: currentProcessStartTime(), paths })}\n`, { mode: 0o600 });
     renameSync(staging, directory);
   } catch (error) {
     rmSync(staging, { recursive: true, force: true });
@@ -903,10 +945,11 @@ export function beginInstallHostTransaction(
     if (containsConfig) mutateGlobalConfiguration(env, () => ({ value: undefined }), { runtimeLock: context });
     const transactionRoot = runtimeTransactionRoot(scope);
     mkdirSync(transactionRoot, { recursive: true });
-    if (context && holdsRuntimeLock(scope)) removeOrphanedTransactions(transactionRoot);
-    const backupRoot = createTransactionDirectory(transactionRoot);
+    if (context && holdsRuntimeLock(scope)) settleOrphanedTransactions(transactionRoot, env);
+    const unique = [...new Set(paths)];
+    const backupRoot = createTransactionDirectory(transactionRoot, unique);
     try {
-      const snapshots = [...new Set(paths)].map((path, index): HostSurfaceSnapshot => {
+      const snapshots = unique.map((path, index): HostSurfaceSnapshot => {
         if (!existsSync(path) && !lstatExists(path)) return { path, existed: false, backup_path: null };
         const backupPath = join(backupRoot, String(index));
         cpSync(path, backupPath, { recursive: true, force: false, errorOnExist: true, verbatimSymlinks: true });

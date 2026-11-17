@@ -913,20 +913,24 @@ describe('install selection', () => {
     expect(installStateStatus(refreshed, env).drift.status).toBe('consistent');
   }));
 
-  test('the next locked transaction removes the directory of a killed install and keeps live, retained and linked ones', () => withHome((env) => {
+  test('the next locked transaction settles the copies of a killed install: equal ones go, a changed file moves to the vault, others stay', () => withHome((env) => {
     const home = env.HOME!;
     const transactions = join(home, '.repo-harness', 'transactions');
-    writePath(join(home, '.claude.json'), '{"token":"synthetic"}\n');
+    const claudeJson = join(home, '.claude.json');
+    writePath(claudeJson, '{"token":"synthetic"}\n');
     // A real install transaction in a child process that dies after its copies.
     const killed = spawnSync(process.execPath, ['-e', `const ip = await import(${JSON.stringify(join(ROOT, 'src/cli/installer/install-profile.ts'))}); const env = JSON.parse(process.env.PROBE_ENV); ip.beginInstallHostTransaction(ip.installProfileHostMutationPaths(env), env); process.kill(process.pid, 'SIGKILL');`],
       { env: { ...env, PROBE_ENV: JSON.stringify(env) }, encoding: 'utf-8' });
     expect(killed.signal, killed.stderr).toBe('SIGKILL');
     const [orphan] = readdirSync(transactions).filter((name) => name.startsWith('install-'));
-    expect(readdirSync(join(transactions, orphan!)).length).toBeGreaterThan(1);
+    // The killed run had written over ~/.claude.json: its copy is the only preimage.
+    writeFileSync(claudeJson, '{"token":"changed"}\n');
     const outside = join(home, 'outside');
     writePath(join(outside, 'keep'), 'keep\n');
+    const dead = JSON.stringify({ pid: killed.pid, start_time: null, paths: [outside] });
     const rows = {
-      live: { 'owner.json': JSON.stringify({ pid: process.pid, start_time: currentProcessStartTime() }), '0': 'copy\n' },
+      changed: { 'owner.json': dead, '0/keep': 'before\n' },
+      live: { 'owner.json': JSON.stringify({ pid: process.pid, start_time: currentProcessStartTime(), paths: [claudeJson] }), '0': 'copy\n' },
       unrecorded: { '0': 'copy\n' },
       retained: { 'manifest.json': '{}\n', '0': 'copy\n' },
     };
@@ -934,8 +938,11 @@ describe('install selection', () => {
     symlinkSync(outside, join(transactions, 'install-link'), 'dir');
 
     commitInstallHostTransaction(beginInstallHostTransaction(installProfileHostMutationPaths(env), env));
-    expect(readdirSync(transactions).filter((name) => name.startsWith('install-')).sort()).toEqual(['install-link', 'install-live', 'install-retained']);
-    expect(readFileSync(join(outside, 'keep'), 'utf-8')).toBe('keep\n');
+    expect(readdirSync(transactions).filter((name) => name.startsWith('install-')).sort(), orphan).toEqual(['install-changed', 'install-link', 'install-live', 'install-retained', 'install-unrecorded']);
+    expect(readdirSync(join(transactions, 'install-changed')).sort()).toEqual(['0', 'owner.json']);
+    const vault = join(hostConfigPaths(env).vault, createHash('sha256').update('{"token":"synthetic"}\n').digest('hex'));
+    expect(readFileSync(vault, 'utf-8')).toBe('{"token":"synthetic"}\n');
+    expect([readFileSync(join(outside, 'keep'), 'utf-8'), readFileSync(claudeJson, 'utf-8')]).toEqual(['keep\n', '{"token":"changed"}\n']);
   }));
 
   test('host transaction restores prior bytes and removes later mutations', () => withHome((env) => {
