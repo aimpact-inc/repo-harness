@@ -180,18 +180,23 @@ describe('safety hook: Bash host route', () => {
     const skill = join(home, '.claude/skills/repo-harness-cross-review');
     const savedTmp = process.env.TMPDIR;
     try {
-      for (const dir of ['repo/build/sub', 'repo/src', 'repo/stage/d', 'repo/w/stage', 'repo/inner', 'outside/sub', 'outside/-archive', 'tmp', 'managed', 'home/links']) {
+      for (const dir of ['repo/build/sub', 'repo/src', 'repo/stage/d', 'repo/w/stage', 'repo/inner', 'outside/sub', 'outside/-archive', 'repo/links', 'tmp', 'managed', 'home/links', 'home/stage']) {
         mkdirSync(join(root, dir), { recursive: true });
       }
       mkdirSync(skill, { recursive: true });
       for (const file of ['repo/source.txt', 'repo/a.txt', 'repo/stage/b.json', 'repo/stage/app.json', 'outside/source.txt', 'outside/a.txt',
-        'outside/victim.txt', 'outside/move.txt', 'outside/notes.txt', 'outside/-f', 'outside/--']) writeFileSync(join(root, file), 'x');
+        'outside/victim.txt', 'outside/move.txt', 'outside/notes.txt', 'outside/notes.txt.bak', 'outside/x.txt', 'outside/-f', 'outside/--', 'notes.txt',
+        'home/notes.txt', 'home/stage/x.txt']) writeFileSync(join(root, file), 'x');
       writeFileSync(join(skill, 'SKILL.md'), 'skill');
       for (const link of ['linked', 'stage/linked', 'w/stage/linked']) symlinkSync(out, join(repo, link));
       symlinkSync(join(repo, 'inner'), join(out, 'link'));
       symlinkSync(repo, join(out, 'repo-link'));
       symlinkSync(join(repo, 'build'), join(out, 'build-link'));
       symlinkSync(repo, join(out, 'work\\'));
+      // Worktree links to outside files, and an outside link to a worktree file.
+      symlinkSync(join(out, 'x.txt'), join(repo, 'links/x.txt'));
+      symlinkSync(join(out, 'notes.txt'), join(repo, 'notes.txt'));
+      symlinkSync(join(repo, 'source.txt'), join(out, 'file-link'));
       // An unrecorded user link outside the roots to a ledger-owned directory.
       symlinkSync(skill, join(home, 'links/user-link'));
       const env: NodeJS.ProcessEnv = { HOME: home, REPO_HARNESS_WORKTREE_ROOT: join(root, 'managed') };
@@ -218,6 +223,23 @@ describe('safety hook: Bash host route', () => {
         // #3013 r5: ledger ownership of the resolved directory never excuses the unrecorded link entry.
         [refuse, 'mv -- ~/links/user-link build'], [refuse, 'mv -h source.txt ~/links/user-link'], [refuse, 'mv -t build ~/links/user-link'],
         [refuse, 'mv --strip-trailing-slashes ~/links/user-link/ build'],
+        // #2926 r1-r2: control words, a failed cd, `..` after a link, copy children through a link, content writes through a leaf link.
+        [refuse, `if test -f ${out}/victim.txt; then rm ${out}/victim.txt; fi`], [refuse, `for f in a; do rm ${out}/victim.txt; done`],
+        [refuse, `cd ${out} && cd ${repo}/missing; rm victim.txt`], [refuse, 'rm linked/../notes.txt'], [refuse, `cp ${out}/notes.txt ${repo}/`],
+        ['RecursiveDeleteGuard', 'if true; then rm -rf .; fi'], [refuse, 'truncate -s 0 notes.txt'], [refuse, 'shred notes.txt'],
+        [refuse, 'cp "$HOME/stage/x.txt" links/'], [refuse, 'cp stage/*/*.txt .'], [null, 'rm notes.txt'],
+        // #2926 r3: glob matches that are links to outside files, and HOME with globs and braces.
+        [refuse, 'truncate -s 0 links/*.txt'], [refuse, 'shred links/*.txt'], [refuse, 'tee links/*.txt'], [refuse, 'cp source.txt links/*.txt'],
+        [refuse, `tee ${out}/*.txt`], [null, 'rm links/*.txt'], [refuse, 'rm "$HOME"/*.txt'], [refuse, 'rm $HOME/{notes,other}.txt'],
+        [refuse, 'truncate -s 0 "$HOME"/*.txt'], [refuse, ': > "$HOME"/*.txt'], [refuse, 'cp "$HOME"/stage/*.txt links/'],
+        // mv replaces an outside link entry; `ln -sf` over it passes, the accepted #2926 r4 P3 residual.
+        [refuse, `mv source.txt ${out}/file-link`], [null, `ln -sf source.txt ${out}/file-link`],
+        // #2926 r4-r5: braces before the operand count, in shell order; -T; an unknown mv source with a target directory.
+        [refuse, `cp ${out}/notes.txt{,.bak}`], [refuse, `mv ${out}/notes.txt{,.bak}`], [refuse, `ln -f ${out}/notes.txt{,.bak}`],
+        [refuse, `cp -rT src ${out}`], [refuse, `cp -r --no-target-directory src ${out}`], [refuse, 'cp {.,..}/notes.txt'], [refuse, 'ln -f {.,..}/notes.txt'],
+        [refuse, 'mv -t build "$SOURCE"'], [refuse, 'mv --target-directory=build "$SOURCE"'], [refuse, 'mv -T "$SOURCE" build/x'],
+        // GNU getopt accepts a long option prefix.
+        [refuse, 'mv --target=linked stage/b.json'], [refuse, 'cp --target=linked a.txt'],
         // An unknown removal refuses; an unknown overwrite refuses only when its literal directory is outside the roots.
         [refuse, 'rm -rf build/$X'], [refuse, `echo x > ${out}/$X`], [null, 'echo x > "$TARGET"'], [null, 'echo x > build/$X'],
         [null, 'rm -rf build/*'], [null, 'rm -rf build/*/'], [null, 'rm stage/*.json'], [null, 'mv stage/*.json build/'], [null, 'cp stage/*.json build/'],

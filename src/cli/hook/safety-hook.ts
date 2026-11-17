@@ -274,9 +274,11 @@ function unknownTargetDenial(target: WriteTarget, roots: readonly Root[], userSt
 
 /** The first I2 denial among the targets. `userStep` says how the user does the call themselves. */
 export function writeTargetDenial(targets: readonly WriteTarget[], scope: SafetyScope, userStep: string | ((path: string) => string)): Denial | null {
+  // One glob can give many targets, so a fixed user step shares one judge and one root list.
+  const shared = typeof userStep === 'string' ? new TargetJudge(scope, userStep) : null;
   for (const target of targets) {
-    const step = typeof userStep === 'string' ? userStep : userStep(target.path ?? target.spelled);
-    const denial = new TargetJudge(scope, step).denial(target);
+    const judge = typeof userStep === 'string' ? shared! : new TargetJudge(scope, userStep(target.path ?? target.spelled));
+    const denial = judge.denial(target);
     if (denial) return denial;
   }
   return null;
@@ -620,15 +622,16 @@ function operandsOf(args: readonly Arg[], valued: ReadonlySet<string>): Arg[] {
 const MOVE_VALUED = new Set(['-S', '--suffix']);
 
 /**
- * A target-directory option (`-t`, `-T`, `--target-directory`, `--no-target-directory`, also inside combined short options)
- * changes which operand is the destination. Its glued value (`-tDIR`, `--target-directory=DIR`) is an operand.
+ * A target-directory option (`-t`, `-T`, `--target-directory`, `--no-target-directory`, also inside combined short options, and
+ * any long prefix that GNU getopt accepts, such as `--target`) changes which operand is the destination. Its glued value
+ * (`-tDIR`, `--target-directory=DIR`) is an operand.
  */
 function targetOption(arg: Arg): Arg[] | null {
   if (arg.value === null) return null;
   const short = /^-(?!-)[a-zA-Z]*?([tT])(.*)$/.exec(arg.value);
-  const long = /^--(?:no-)?target-directory(?:=(.*))?$/.exec(arg.value);
-  if (!short && !long) return null;
-  const value = short ? (short[1] === 't' ? short[2]! : '') : long![1] ?? '';
+  const long = /^--(?:no-)?([a-z-]+)(?:=(.*))?$/.exec(arg.value);
+  if (!short && !(long && 'target-directory'.startsWith(long[1]!))) return null;
+  const value = short ? (short[1] === 't' ? short[2]! : '') : long![2] ?? '';
   return value ? [{ ...arg, value, spelled: value }] : [];
 }
 
@@ -724,6 +727,7 @@ const DOT: Word = { kind: 'word', value: '.', pattern: '.', expand: false, glob:
 const TRUNCATE_VALUED = new Set(['-s', '--size', '-r', '--reference']);
 const SHRED_VALUED = new Set(['-n', '--iterations', '-s', '--size', '--random-source']);
 const SED_VALUED = new Set(['-e', '--expression', '-f', '--file', '-l', '--line-length']);
+const WRITERS = new Set(['rm', 'unlink', 'shred', 'truncate', 'mv', 'cp', 'ln', 'tee', 'sed', 'dd', 'find']);
 
 /** The write targets of one simple command, run from `cwd` (null when it is not known); every word is expanded first. */
 function commandTargets(cmd: Command, cwd: string | null, home: string): WriteTarget[] {
@@ -741,6 +745,13 @@ function commandTargets(cmd: Command, cwd: string | null, home: string): WriteTa
   if (at < 0 || words[at]!.quoted) return targets;
   const program = words[at]!.value;
   const raw = words.slice(at + 1);
+  if (/^python(?:3(?:\.\d+)?)?$/.test(program) || program === 'node') {
+    const flag = raw.findIndex(word => ['-c', '-e', '--eval'].includes(word.value));
+    const heredoc = cmd.redirects.find(redirect => redirect.body !== undefined)?.body ?? '';
+    return [...targets, ...scriptTargets(program, flag >= 0 ? raw[flag + 1]?.value ?? '' : heredoc, cwd)];
+  }
+  // Only a writing program lists directories for its glob words.
+  if (!WRITERS.has(program)) return targets;
   const args = expandArgs(raw, cwd, home);
   const each = (kind: TargetKind, list: readonly Arg[]) => list.map(arg => targetOf(kind, program, arg, cwd));
   switch (program) {
@@ -787,12 +798,6 @@ function commandTargets(cmd: Command, cwd: string | null, home: string): WriteTa
         targets.push(...(starts.length ? starts : [literalArg('.')]).map(arg => targetOf('destroy', 'find', arg, cwd)));
       }
       break;
-    default:
-      if (/^python(?:3(?:\.\d+)?)?$/.test(program) || program === 'node') {
-        const flag = raw.findIndex(word => ['-c', '-e', '--eval'].includes(word.value));
-        const heredoc = cmd.redirects.find(redirect => redirect.body !== undefined)?.body ?? '';
-        targets.push(...scriptTargets(program, flag >= 0 ? raw[flag + 1]?.value ?? '' : heredoc, cwd));
-      }
   }
   return targets;
 }
