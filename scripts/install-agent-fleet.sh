@@ -117,6 +117,7 @@ const { pathRecordIsCurrent, pathRecordKey, readPathRecords } = require(
   path.join(SOURCE_DIR, "../../src/effects/host-config/path-records.ts"),
 );
 const { openHostConfigGate } = require(path.join(SOURCE_DIR, "../../src/effects/host-config/gate.ts"));
+const { hostConfigPaths } = require(path.join(SOURCE_DIR, "../../src/effects/host-config/store.ts"));
 const { migrateReplacedAgents } = require(path.join(SOURCE_DIR, "../../src/cli/installer/replaced-agents-migration.ts"));
 const ENV = { ...process.env, HOME };
 // The state check fails closed on a state that this package no longer reads.
@@ -227,6 +228,10 @@ function writeAgent(targetPath, content, replace) {
   gate.writePaths([{ path: targetPath, owner: "core", entry: { type: "file", bytes: Buffer.from(content), ...(mode === undefined ? {} : { mode }) }, replace }]);
 }
 
+function shellQuote(value) {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 function compareAndWrite(targetPath, content, acceptedHash) {
   let existing = null;
   try {
@@ -253,7 +258,9 @@ function compareAndWrite(targetPath, content, acceptedHash) {
     } catch (_error) {
       return "backup-failed";
     }
-    return "replaced (the user file is in the rh vault; a revert of this path puts it back)";
+    const { backup } = readPathRecords(ENV)[pathRecordKey(ENV, targetPath)];
+    const copy = path.join(hostConfigPaths(ENV).vault, backup.slice("sha256:".length));
+    return `replaced (backup: ${copy}; restore: cp ${shellQuote(copy)} ${shellQuote(targetPath)})`;
   }
 
   if (acceptedHash === sha256(existing)) return "user-managed";
