@@ -936,13 +936,23 @@ describe('install selection', () => {
     };
     for (const [name, files] of Object.entries(rows)) for (const [file, text] of Object.entries(files)) writePath(join(transactions, `install-${name}`, file), text);
     symlinkSync(outside, join(transactions, 'install-link'), 'dir');
+    writePath(join(transactions, '.staging-killed', 'owner.json'), dead);
 
     commitInstallHostTransaction(beginInstallHostTransaction(installProfileHostMutationPaths(env), env));
-    expect(readdirSync(transactions).filter((name) => name.startsWith('install-')).sort(), orphan).toEqual(['install-changed', 'install-link', 'install-live', 'install-retained', 'install-unrecorded']);
+    expect(readdirSync(transactions).filter((name) => /^(install-|\.staging-)/.test(name)).sort(), orphan).toEqual(['install-changed', 'install-link', 'install-live', 'install-retained', 'install-unrecorded']);
     expect(readdirSync(join(transactions, 'install-changed')).sort()).toEqual(['0', 'owner.json']);
     const vault = join(hostConfigPaths(env).vault, createHash('sha256').update('{"token":"synthetic"}\n').digest('hex'));
     expect(readFileSync(vault, 'utf-8')).toBe('{"token":"synthetic"}\n');
     expect([readFileSync(join(outside, 'keep'), 'utf-8'), readFileSync(claudeJson, 'utf-8')]).toEqual(['keep\n', '{"token":"changed"}\n']);
+  }));
+
+  test('a rollback keeps a host path whose backup is missing and reports it', () => withHome((env) => {
+    const path = join(env.HOME!, 'surface');
+    writeFileSync(path, 'after\n');
+    const transaction = beginInstallHostTransaction([path], env);
+    rmSync(transaction.snapshots[0]!.backup_path!);
+    expect(() => rollbackInstallHostTransaction(transaction)).toThrow('is missing');
+    expect(readFileSync(path, 'utf-8')).toBe('after\n');
   }));
 
   test('host transaction restores prior bytes and removes later mutations', () => withHome((env) => {

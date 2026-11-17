@@ -897,10 +897,12 @@ function settleTransactionCopy(copy: string, host: string, env: NodeJS.ProcessEn
 function settleOrphanedTransactions(transactionRoot: string, env: NodeJS.ProcessEnv): void {
   for (const name of readdirSync(transactionRoot)) {
     const directory = join(transactionRoot, name);
-    if (!name.startsWith(TRANSACTION_PREFIX) || !lstatSync(directory).isDirectory() || lstatExists(join(directory, 'manifest.json'))) continue;
+    // A run killed before its rename leaves a staging directory with at most its owner record and no copies.
+    const staging = name.startsWith('.staging-');
+    if (!(staging || name.startsWith(TRANSACTION_PREFIX)) || !lstatSync(directory).isDirectory() || lstatExists(join(directory, 'manifest.json'))) continue;
     const owner = readTransactionOwner(directory);
     if (owner === 'none') {
-      process.stderr.write(`[install] kept the install transaction of an earlier rh version: ${directory}\n`);
+      if (!staging) process.stderr.write(`[install] kept the install transaction of an earlier rh version: ${directory}\n`);
       continue;
     }
     if (owner === 'invalid' || exclusiveDirectoryLockOwnerLiveness({ lockPath: directory, pid: owner.pid, startTime: owner.startTime, token: '' }) !== 'dead') continue;
@@ -1023,6 +1025,7 @@ export function rollbackInstallHostTransaction(
         }
         // A path under a regular file cannot exist, so an absent snapshot there is already restored.
         if (!snapshot.existed && lstatSync(dirname(snapshot.path), { throwIfNoEntry: false })?.isFile()) continue;
+        if (snapshot.existed && snapshot.backup_path !== null && !lstatExists(snapshot.backup_path)) throw new Error(`its backup ${snapshot.backup_path} is missing, so the path stays as it is`);
         rmSync(snapshot.path, { recursive: true, force: true });
         if (snapshot.existed && snapshot.backup_path !== null) {
           mkdirSync(dirname(snapshot.path), { recursive: true });
