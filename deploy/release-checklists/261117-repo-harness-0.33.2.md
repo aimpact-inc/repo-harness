@@ -8,11 +8,11 @@
 - Owner word on the version after six breaking fragments reached main, in [#2960 comment 6935965164](https://github.com/aimpact-inc/repo-harness/pull/2960#issuecomment-6935965164) at 2026-11-17T02:20:19Z: "維持 0.33.2". The release ships every commit up to the source commit, with the breaking fragments, under 0.33.2.
 - #2936 merged as `e95dee83b` (#2949). PR #2926 (#2916) is open and stays out of this release by the owner word.
 - #2898, #2922, #2894 and #2893 stay out of this release; they merge after the `v0.33.2` tag.
-- Source commit before release prep: `37b07a0f94fac87da1b724152a7e02ad1153da92`. The release range is `v0.33.1..37b07a0f9`, 83 commits, 36 changelog fragments.
+- Source commit before release prep: `2aad37197c3e8ccd12fe27cf358392328214ae4c`. The release range is `v0.33.1..2aad37197`, 84 commits, 36 changelog fragments.
 - Breaking changes ship in this patch version by the owner word "維持 0.33.2": #2863 removes `rh init-hook` and three `rh update` options; #2867 replaces `--write` with `--apply`; #2864, #2865, #2866 and #2871 move commands under `rh worktrees`, `rh verify`, `rh capability` and `rh arch`; #2937 deletes `rh brain` and `rh migrate`; #2941 renames the `AGENTIC_DEV_*` variables to `REPO_HARNESS_*`. No alias stays. The `### Breaking` section opens with one `Migration:` line per old name, from the retired-helper map in `src/cli/commands/run.ts`, the v0.33.1 command definitions and `rh commands` at the source commit.
 - Release prep correction: the #2798 Fixed entry named `rh update --check`, which #2863 removes in the same release. The entry now names `rh setup check` only. The #2795 entry said to run `rh brain check` and `rh brain sync`; #2937 deletes `rh brain` in this release, so the entry now says that.
 - Release prep added one changelog entry, from the merged PR, for each of 14 changes that had no fragment: #2862, #2868, #2870, #2881 (PR #2928), #2823, #2824, #2825, #2826 (Added); #2913, #2923, #2814 (Changed); #2843, #2844, #2917 (Fixed). The orchestrator asked for these entries. #2956 (Changed) and #2955 (Fixed) merged after the first prep commit without a fragment; release prep added their entries the same way.
-- After `ab65af6e2`, these merged changes have no fragment and no entry: #2885, #2887, #2888, #2963, #2964, #2969, #2970, #2974, #2977, #2988 (rules, operator console and CLI fixes). Release prep did not write entries for them.
+- After `ab65af6e2`, ten user-visible changes merged without a fragment. Release prep added one entry each, from the merged PR: #2885, #2887, #2888 (Added); #2963, #2964, #2969, #2970, #2974, #2977, #2988 (Fixed). The other commits without an entry change only tests, CI, the architecture model or the projection: #2976, #2983, #2986, #2990, #2993, #2994.
 
 | PR | Commit | Change |
 |---|---|---|
@@ -99,19 +99,11 @@
 | [#2991](https://github.com/aimpact-inc/repo-harness/pull/2991) | `6f8016eeb` | fix(operator-web): keep unresolved promotion recovery and stale rules data in the drawer (#2988) |
 | [#2992](https://github.com/aimpact-inc/repo-harness/pull/2992) | `8d430e18a` | fix(architecture): anchor the run-helper flow proof on executeHelper (#2990) |
 | [#2994](https://github.com/aimpact-inc/repo-harness/pull/2994) | `37b07a0f9` | chore(projection): refresh generated architecture outputs for main@8d430e18a2c8 |
+| [#2995](https://github.com/aimpact-inc/repo-harness/pull/2995) | `2aad37197` | fix(architecture): match run-helper labels to execution (#2993) |
 
 ## Verification
 
-On Darwin arm64 with Bun 1.4.4, at source `37b07a0f9` with the release prep commits through `110d2c0fa`:
-
-- `bun install --frozen-lockfile`: pass, no changes.
-- `bun run check:type`: pass, exit 0.
-- `bun run check:state-boundaries`: pass, 652 TypeScript files checked.
-- `bun scripts/check-skill-version.ts`: pass, repo-harness=0.33.2, template=0.33.2.
-- `bun scripts/check-changelog-released-sections.ts --base origin/main`: pass, 121 released sections keep their bytes.
-- `bun run check:cli-manifest`: pass.
-- `bun run test:files tests/skill-version.test.ts tests/bootstrap-files.test.ts tests/readme-dx.test.ts tests/action-command-skills.test.ts tests/scaffold-parity.test.ts tests/installed-copy-sync.test.ts --timeout 60000 --max-concurrency 1`: pass, 100 tests in 6 files.
-- `git diff --check origin/main...HEAD`: pass.
+VERIFY_BLOCK
 
 `Required / CI` and the release gate are pending. The owner release plan runs the release gate after the prep PR merges. Skill eval evidence is unavailable. Consumer architecture smoke evidence is pending; the automated case is `tests/hook-runtime.test.ts`, "a registry consumer without code facts or a projection manifest gets one architecture line (#850)".
 
