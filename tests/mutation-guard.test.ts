@@ -195,9 +195,10 @@ describe('safety hook: Bash host route', () => {
       symlinkSync(out, join(repo, 'big/out-dir'));
       // A regular directory that a copy can write into, through a child link to an outside file.
       symlinkSync(join(out, 'victim.txt'), join(repo, 'big/zdir/source.txt'));
-      // A recursive copy of stage into big/zdir writes through this deeper link; big/ydir holds no link.
-      for (const dir of ['repo/big/zdir/stage/d', 'repo/big/ydir']) mkdirSync(join(root, dir), { recursive: true });
+      // A recursive copy of stage into big/zdir writes through this deeper link; big/ydir holds only a link back to itself.
+      for (const dir of ['repo/big/zdir/stage/d', 'repo/big/ydir/d']) mkdirSync(join(root, dir), { recursive: true });
       symlinkSync(join(out, 'victim.txt'), join(repo, 'big/zdir/stage/d/notes.txt'));
+      symlinkSync(join(repo, 'big/ydir'), join(repo, 'big/ydir/d/up'));
       writeFileSync(join(repo, 'seq/of=1'), 'x');
       symlinkSync(join(out, 'victim.txt'), join(repo, 'seq/1025'));
       for (const link of ['linked', 'stage/linked', 'w/stage/linked']) symlinkSync(out, join(repo, link));
@@ -311,7 +312,11 @@ describe('safety hook: Bash host route', () => {
         // #3055: each output that a copy writes below a possible destination directory (unplaced, -t, recursive) is judged as the kernel resolves it.
         [refuse, 'cp source.txt big/[1z]*'], [refuse, 'cp source.txt big/[yz]dir/'], [refuse, 'cp -t big/zdir source.txt'], [refuse, 'cp -t big/zdir/ source.txt'],
         [refuse, 'cp -R stage big/zdir'], [refuse, 'cp -R stage big/zdir/'], [refuse, 'cp -R stage/ big/zdir/stage'], [refuse, 'cp -rT stage big/zdir/stage'],
-        [refuse, 'cp -R stage/. big/zdir/stage'], [null,'cp -t big/ydir source.txt'], [null, 'cp -R stage big/ydir'],
+        [refuse, 'cp -R stage/. big/zdir/stage'], [null, 'cp -t big/ydir source.txt'], [null, 'cp -R stage big/ydir'],
+        [refuse, 'cp -R stage/d big/ydir'],
+        // The word after a separate -t or --target-directory is its value, also when it starts with `-`.
+        [refuse, `cp -t -archive ${repo}/source.txt`, out], [refuse, `cp --target-directory -archive ${repo}/source.txt`, out],
+        [refuse, `cp -R -t -archive ${repo}/stage`, out], [refuse, `ln -sf --target-directory -archive ${repo}/source.txt`, out],
         // An unknown removal refuses; an unknown overwrite refuses only when its literal directory is outside the roots.
         [refuse, 'rm -rf build/$X'], [refuse, `echo x > ${out}/$X`], [null, 'echo x > "$TARGET"'], [null, 'echo x > build/$X'],
         [null, 'rm -rf build/*'], [null, 'rm -rf build/*/'], [null, 'rm stage/*.json'], [null, 'mv stage/*.json build/'], [null, 'cp stage/*.json build/'],
