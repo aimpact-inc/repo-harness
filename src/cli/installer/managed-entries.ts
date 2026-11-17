@@ -382,14 +382,13 @@ export function applyManagedHooks(filePath: string, host: HookHost, extra: reado
   const gate = openHostConfigGate({ env });
   const routes = routesForHost(host);
   const current = new Set(routes.map(hookSelector));
+  const entries = routes.map((route) => ({ selector: hookSelector(route), value: buildHookEntry(route, host, env) }));
   const retired = gate.recorded(filePath)
     .filter((record) => record.owner === 'core' && record.selector.startsWith('hooks.') && !current.has(record.selector))
     .map((record) => record.selector);
   if (retired.length) gate.revert([filePath], { selectors: retired });
   const content = existsSync(filePath) ? readFileSync(filePath, 'utf8') : '';
-  const fragments = routes.map((route): FragmentRequest => {
-    const selector = hookSelector(route);
-    return { owner: 'core', selector, kind: jsonFragment.locate(content, selector) ? 'refresh' : 'add', strategy: jsonFragment, value: buildHookEntry(route, host, env) };
-  });
+  const fragments = entries.map(({ selector, value }): FragmentRequest =>
+    ({ owner: 'core', selector, kind: jsonFragment.locate(content, selector) ? 'refresh' : 'add', strategy: jsonFragment, value }));
   return gate.apply([{ path: filePath, fragments: [...fragments, ...extra] }]);
 }

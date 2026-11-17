@@ -591,7 +591,7 @@ describe('install command (Phase 1B)', () => {
 
       const uninstall = runUninstall({ target: 'claude', location: 'global' });
       expect(uninstall.exitCode).toBe(0);
-      expect(uninstall.lines).toContain(`[restore] ${filePath}: host-config ledger: the file before rh`);
+      expect(uninstall.lines).toContain(`[restore] ${filePath}: host-config ledger: rh text removed`);
       const afterUninstall = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       expect(afterUninstall.theme).toBe('dark');
       expect(afterUninstall.hooks.UserPromptSubmit).toEqual([

@@ -162,8 +162,8 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
     if (opts.target !== 'both' && opts.target !== host) continue;
     const contextPath = globalContextPath(home, host);
     try {
-      assertConfigurationPath(contextPath, home);
       if (!existsSync(contextPath)) continue;
+      assertConfigurationPath(contextPath, home);
       const removal = removeManagedBlock(read(contextPath), SOURCE_ROOT);
       if (removal.status === 'none') continue;
       if (removal.status === 'unbalanced') throw new Error('unbalanced managed global rules; preserved');

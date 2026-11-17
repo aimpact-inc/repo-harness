@@ -30,6 +30,7 @@ import type {
 import { readJsonOrEmpty } from '../shared';
 import {
   applyManagedHooks,
+  buildHookExecCommand,
   isManagedEntry,
   type HooksByEvent,
 } from '../managed-entries';
@@ -123,6 +124,8 @@ class CodexTarget implements AgentTarget {
       );
     }
     const filePath = globalConfigPath();
+    // An unresolved hook runtime stops the install before the first write.
+    buildHookExecCommand(process.env);
     migrateJsonConfigRecords(process.env);
     // A config.toml that rh cannot edit stops the install before any hook write.
     const tomlResult = ensureRequestUserInputToml();

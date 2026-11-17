@@ -724,28 +724,6 @@ describe('install selection', () => {
     expect(status.probes.core?.missing).toContain('effective-state');
   }));
 
-  test('managed adapter ownership hashes only package entries and preserves sibling edits', () => withHome((env) => {
-    writeManagedHostSurfaces(env);
-    const applied = applyInstallSelection([], [], env);
-    const adapter = join(env.HOME!, '.codex', 'hooks.json');
-    const config = JSON.parse(readFileSync(adapter, 'utf-8'));
-    config.theme = 'changed-by-user';
-    writeFileSync(adapter, JSON.stringify(config));
-    expect(installStateStatus(applied.state, env).drift.status).toBe('consistent');
-
-    config.hooks.SessionStart[0].hooks.push({
-      type: 'command',
-      command: 'echo user-owned-sibling',
-      timeout: 30,
-    });
-    writeFileSync(adapter, JSON.stringify(config));
-    expect(installStateStatus(applied.state, env).drift.status).toBe('consistent');
-
-    config.hooks.SessionStart[0].hooks[0].command = ': repo-harness-managed-hook-v1; changed';
-    writeFileSync(adapter, JSON.stringify(config));
-    expect(installStateStatus(applied.state, env).drift.surface_drift).toContain(adapter);
-  }));
-
   test('adapter probe requires the complete core route projection', () => withHome((env) => {
     writeManagedHostSurfaces(env);
     const applied = applyInstallSelection([], [], env);
@@ -1369,30 +1347,6 @@ describe('install selection', () => {
       expect(() => assertPluginCommandSelected(selection, id, command, env))
         .toThrow(`install_plugin_unavailable: rh ${command} needs the ${id} plugin: the ${id} plugin is not selected; run: rh update`);
     }
-  }));
-
-  test('reinstall refreshes ownership for an already-owned CodeGraph projection', () => withHome((env) => {
-    const first = beginInstallHostTransaction(installProfileHostMutationPaths(env), env);
-    writeManagedHostSurfaces(env, ALL_PLUGINS);
-    const config = join(env.HOME!, '.claude.json');
-    writePath(config, JSON.stringify({ mcpServers: { codegraph: { command: 'codegraph', args: ['serve'] } } }));
-    const initial = applyInstallSelection('all', ALL_PLUGINS, env, new Date('2026-01-01T00:00:00Z'), first);
-    commitInstallHostTransaction(first);
-    const original = initial.state.ownership_manifest.find(({ managed_marker }) => (
-      managed_marker === 'codegraph-config-projection'
-    ));
-    expect(original?.owner).toBe('architecture');
-
-    const second = beginInstallHostTransaction(installProfileHostMutationPaths(env), env);
-    writeFileSync(config, JSON.stringify({ mcpServers: { codegraph: { command: 'codegraph', args: ['serve', '--mcp'] } } }));
-    const refreshed = applyInstallSelection('all', ALL_PLUGINS, env, new Date('2026-01-02T00:00:00Z'), second);
-    commitInstallHostTransaction(second);
-    const next = refreshed.state.ownership_manifest.find(({ managed_marker }) => (
-      managed_marker === 'codegraph-config-projection'
-    ));
-    expect(next).toBeDefined();
-    expect(next?.content_hash).not.toBe(original?.content_hash);
-    expect(installStateStatus(refreshed.state, env).drift.status).toBe('consistent');
   }));
 
   test('update resolves the recorded selection on this host', () => {

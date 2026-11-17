@@ -171,7 +171,7 @@ test('standalone CodeGraph configure for Claude writes its server and tool rule 
     // An earlier rh version wrote the tool rule into top-level allowedTools and recorded it in its receipt.
     const settingsBefore = '{"permissions":{"allow":["Bash(ls)"]}}';
     writeFileSync(settings, '{"permissions":{"allow":["Bash(ls)"]},"allowedTools":["mcp__codegraph__*"]}');
-    mkdirSync(join(fixture.home, '.repo-harness'));
+    mkdirSync(join(fixture.home, '.repo-harness'), { recursive: true });
     writeFileSync(join(fixture.home, '.repo-harness/configuration-restore.json'), JSON.stringify({ protocol: 1, changes: [
       { path: settings, selector: 'allowedTools.codegraph', before: null, installed: JSON.stringify('mcp__codegraph__*'), active: true },
     ] }));
