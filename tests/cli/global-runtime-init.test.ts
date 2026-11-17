@@ -3528,19 +3528,24 @@ describe('Global Working Rules refresh during install and update', () => {
     expect(readFileSync(path, 'utf-8')).toBe(mixedLegacy);
   }));
 
-  test('a failed install transaction restores both rules files from the backup', () => withRulesRuntime(({ home, path }) => {
+  test('a failed install transaction restores both rules files, also a linked target with an adopted block', () => withRulesRuntime(({ home, path }) => {
     const env = { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun') };
     const claudePath = join(home, '.claude', 'CLAUDE.md');
+    const target = join(home, 'dotfiles-CLAUDE.md');
+    const claude = `${userBefore}${releasedUnrecorded}`;
     mkdirSync(join(home, '.claude'), { recursive: true });
     writeFileSync(path, mixedLegacy);
-    writeFileSync(claudePath, 'claude user notes\n');
+    writeFileSync(target, claude);
+    symlinkSync(target, claudePath);
     const transaction = beginInstallHostTransaction(installProfileHostMutationPaths(env), env);
     const applied = applyGlobalContextRefresh(preflightGlobalContextRefresh(ROOT, home, ['codex', 'claude'], 'en'), home);
     expect(applied.status).toBe('ok');
     expect(readFileSync(path, 'utf-8')).not.toBe(mixedLegacy);
+    expect(readFileSync(target, 'utf-8')).not.toBe(claude);
     rollbackInstallHostTransaction(transaction);
     expect(readFileSync(path, 'utf-8')).toBe(mixedLegacy);
-    expect(readFileSync(claudePath, 'utf-8')).toBe('claude user notes\n');
+    expect(readFileSync(target, 'utf-8')).toBe(claude);
+    expect(lstatSync(claudePath).isSymbolicLink()).toBe(true);
   }));
 
   test('a flag migrates the legacy span, keeps every user section, and a second update is a no-op', () => withRulesRuntime(({ home, path, run }) => {

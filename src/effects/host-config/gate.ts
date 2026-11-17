@@ -324,10 +324,10 @@ interface FragmentRevert {
  * that a removal empties goes only when one of them proves that rh created it.
  */
 function revertFragments(path: string, content: string, records: readonly FragmentRecord[], all: readonly FragmentRecord[], backup: string | null): FragmentRevert {
-  const format = fragmentFormat(path);
   const removed: FragmentRecord[] = [];
   const kept: string[] = [];
   for (const record of records) {
+    const format = fragmentFormat(path, record.selector);
     let range: TextRange | null = null;
     // A file that the strategy can no longer read keeps every fragment.
     try { range = format?.strategy.locate(content, record.selector) ?? null; } catch (error) { if (!(error instanceof HostConfigError)) throw error; }
@@ -396,7 +396,7 @@ export function planFileRevert(input: FileRevertInput): FileRevertPlan {
   }
   // A changed file with no fragment to take out (a created or replaced file) stays with its record.
   if (!removed.size && !(kind === 'text_block' && !input.hasBackup)) return { entry: withKept('kept_edited'), write: null, record: 'keep', removed: [] };
-  const empty = kind === 'created' && fragmentFormat(path)?.empty(result.content) === true;
+  const empty = kind === 'created' && all.some((record) => fragmentFormat(path, record.selector)?.empty(result.content) === true);
   const write = empty ? { kind: 'remove' as const } : removed.size ? { kind: 'replace' as const, content } : null;
   return { entry: withKept(empty ? 'removed' : removed.size ? 'text_removed' : 'released'), write, record: 'drop', removed: result.removed };
 }
@@ -514,8 +514,7 @@ export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer 
     if (!changed.length) continue;
     const { observation, bytes } = observeFile(path);
     const current = expectedOf(observation, path);
-    const format = fragmentFormat(path);
-    if (!format || bytes === null || !isCommitted(record, current)) {
+    if (bytes === null || !isCommitted(record, current)) {
       unresolved.push(...changed.map((entry) => `${path}: ${entry.selector}`));
       continue;
     }
@@ -524,9 +523,10 @@ export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer 
     const backup = source ? decode(readVault(paths, source), path) : null;
     let content = decode(bytes, path);
     for (const entry of [...changed].reverse()) {
-      const range = format.strategy.locate(content, entry.selector);
+      const format = fragmentFormat(path, entry.selector);
+      const range = format?.strategy.locate(content, entry.selector) ?? null;
       const old = earlier.find((candidate) => fragmentKey(candidate) === fragmentKey(entry));
-      if (!range || content.slice(range.start, range.end) !== entry.inserted || (!old && entry.preimage === undefined && entry.kind !== 'add' && backup === null)) {
+      if (!format || !range || content.slice(range.start, range.end) !== entry.inserted || (!old && entry.preimage === undefined && entry.kind !== 'add' && backup === null)) {
         unresolved.push(`${path}: ${entry.selector}`);
         continue;
       }
@@ -537,7 +537,7 @@ export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer 
       content = content.slice(0, edit.at) + edit.inserted + content.slice(edit.at + edit.removed.length);
     }
     const created = !previous && record.kind === 'created' && record.baseline.state === 'known' && record.baseline.existed === false;
-    if (created && format.empty(content)) removeTarget(path, current);
+    if (created && all.some((entry) => fragmentFormat(path, entry.selector)?.empty(content) === true)) removeTarget(path, current);
     else if (content !== decode(bytes, path)) replaceTarget(path, Buffer.from(content, 'utf8'), current);
   }
   removeCreatedDirectories(now.directories.filter((directory) => !before.directories.includes(directory)));

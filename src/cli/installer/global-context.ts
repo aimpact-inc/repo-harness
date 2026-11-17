@@ -686,7 +686,8 @@ export function planGlobalRulesAdoption(content: string | null, sourceRoot: stri
   return {
     kind: rest.trim() === '' ? 'created' : 'text_block',
     backup: null,
-    fragments: [{ owner: GLOBAL_RULES_OWNER, selector: GLOBAL_RULES_SELECTOR, kind: 'add', inserted }],
+    // The preimage lets a failed install put back the block that it adopted and then refreshed.
+    fragments: [{ owner: GLOBAL_RULES_OWNER, selector: GLOBAL_RULES_SELECTOR, kind: 'add', inserted, preimage: inserted }],
     externalChange: false,
   };
 }
