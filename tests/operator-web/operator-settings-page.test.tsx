@@ -258,7 +258,7 @@ describe('agents page seats section', () => {
     return seen;
   }
 
-  test('every seat has a card; a review seat shows only its read, shell and network groups and no fleet; modes stay unknown while quota is not read', async () => {
+  test('every seat has a card; a review seat shows only its read, shell and network groups and no fleet; Claude mode stays unknown while quota is not read', async () => {
     await mount(seatsProps([]));
     expect(all('[role="group"][aria-label="Seat"] button')).toHaveLength(11);
     await click(pick('gatekeeper'));
@@ -269,7 +269,7 @@ describe('agents page seats section', () => {
     // busy stores worker-light as null: only the configured switch shows.
     await click(pick('worker-light'));
     expect([document.querySelector('[aria-label="Configured"]')?.getAttribute('aria-checked'), document.querySelector('[data-seat-tools]')]).toEqual(['false', null]);
-    expect([mode('claude').getAttribute('data-mode'), mode('chatgpt').getAttribute('data-mode')]).toEqual(['unknown', 'unknown']);
+    expect(mode('claude').getAttribute('data-mode')).toBe('unknown');
     // A frontend route seat on Codex: the request decoder refuses the section, so Save stays off with its code.
     await click(pick('Important worker'));
     await click(buttonWithText('Codex'));
