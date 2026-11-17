@@ -471,13 +471,15 @@ describe('install command (Phase 1B)', () => {
   test.each([
     // [case, statusLine before install, statusLine the user sets after install, statusLine after uninstall]
     ['none exists', undefined, undefined, undefined],
-    ['an older tagged entry exists', { type: 'command', command: ': repo-harness-managed-hook-v1; exec repo-harness-hook statusline' }, undefined, undefined],
+    // An older tagged entry is not what this rh version writes, so the migration cannot prove it rh's: it stays and is reported.
+    ['an older tagged entry exists', { type: 'command', command: ': repo-harness-managed-hook-v1; exec repo-harness-hook statusline' }, undefined, { type: 'command', command: ': repo-harness-managed-hook-v1; exec repo-harness-hook statusline' }],
     ['a user status line exists', { type: 'command', command: 'my-line' }, undefined, { type: 'command', command: 'my-line' }],
     ['the user edits the installed one', undefined, { type: 'command', command: 'my-line' }, { type: 'command', command: 'my-line' }],
   ] as const)('claude statusLine when %s: install writes the tagged entry only into an empty or tagged slot, uninstall removes only a tagged one', (_name, existing, edit, remaining) => {
     withTempHome('repo-harness-install', (home) => {
       const filePath = path.join(home, '.claude/settings.json');
-      const userLine = existing !== undefined && !existing.command.startsWith(': repo-harness-managed-hook-v1; ');
+      const userLine = existing !== undefined;
+      const unresolved = edit !== undefined || existing?.command.startsWith(': repo-harness-managed-hook-v1; ') === true;
       if (existing) {
         fs.mkdirSync(path.dirname(filePath), { recursive: true });
         fs.writeFileSync(filePath, `${JSON.stringify({ statusLine: existing }, null, 2)}\n`);
@@ -505,15 +507,15 @@ describe('install command (Phase 1B)', () => {
       }
       // An rh status line that the user edited stays, and uninstall reports it (A9).
       const uninstall = runUninstall({ target: 'claude', location: 'global' });
-      expect(uninstall.exitCode, uninstall.lines.join('\n')).toBe(edit ? 1 : 0);
-      if (edit) expect(uninstall.lines).toContain(`[unresolved] ${filePath}: changed since rh wrote it; preserved: statusLine`);
+      expect(uninstall.exitCode, uninstall.lines.join('\n')).toBe(unresolved ? 1 : 0);
+      if (unresolved) expect(uninstall.lines).toContain(`[unresolved] ${filePath}: changed since rh wrote it; preserved: statusLine`);
       const after = fs.existsSync(filePath) ? JSON.parse(fs.readFileSync(filePath, 'utf-8')) : {};
       expect(after.statusLine).toEqual(remaining);
       expect(after.hooks).toBeUndefined();
     });
   });
 
-  test('claude install self-heals legacy Codex-only managed entries back to 6 hooks', () => {
+  test('claude install adds its 6 hooks beside legacy entries of retired routes, which stay and are reported at uninstall', () => {
     withTempHome('repo-harness-install', (home) => {
       const filePath = path.join(home, '.claude/settings.json');
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -537,11 +539,12 @@ describe('install command (Phase 1B)', () => {
       const result = runInstall({ target: 'claude', location: 'global' });
       expect(result.exitCode).toBe(0);
       const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      // This rh version writes no entry for a retired route, so the migration cannot prove these entries rh's.
       const total = Object.values(data.hooks as Record<string, unknown[]>).flat().length;
-      expect(total).toBe(6);
-      expect(data.hooks.UserPromptSubmit.length).toBe(1);
-      expect(data.hooks.SubagentStart).toBeUndefined();
-      expect(data.hooks.SubagentStop).toBeUndefined();
+      expect(total).toBe(9);
+      expect(data.hooks.UserPromptSubmit.length).toBe(2);
+      expect([data.hooks.SubagentStart.length, data.hooks.SubagentStop.length]).toEqual([1, 1]);
+      expect(runUninstall({ target: 'claude', location: 'global' }).lines).toContain(`[unresolved] ${filePath}: changed since rh wrote it; preserved: hooks.UserPromptSubmit[delegation], hooks.SubagentStart[context], hooks.SubagentStop[quality]`);
     });
   });
 

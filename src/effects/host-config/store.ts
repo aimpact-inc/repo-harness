@@ -160,9 +160,15 @@ function validFileRecord(record: unknown): boolean {
     && typeof record.external_change === 'boolean';
 }
 
+/** `created` is a member path that holds the fragment's container: a prefix of its selector. */
+function validCreated(selector: string, created: unknown): boolean {
+  return created === undefined || (isText(created) && /^[^.[\]]+(?:\.[^.[\]]+)*$/.test(created)
+    && (selector.startsWith(`${created}.`) || selector.startsWith(`${created}[`)));
+}
+
 function validFragment(value: unknown): boolean {
   return isObject(value) && isText(value.file) && isText(value.owner) && isText(value.selector)
-    && ['add', 'refresh', 'override'].includes(value.kind as string) && isText(value.inserted);
+    && ['add', 'refresh', 'override'].includes(value.kind as string) && isText(value.inserted) && validCreated(value.selector, value.created);
 }
 
 export function readLedger(paths: HostConfigPaths): HostConfigLedger {

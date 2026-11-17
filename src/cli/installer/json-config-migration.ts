@@ -3,13 +3,14 @@ import { join } from 'path';
 import { isDeepStrictEqual } from 'node:util';
 import { MANAGED_TAG, isRepoHarnessManagedHookCommand } from '../../core/adoption/managed-hook-config';
 import { CLAUDE_ROOT_CONFIG_BACKUP, CODEGRAPH_MCP_SELECTOR, LEGACY_CODEGRAPH_ALLOWED_TOOLS_SELECTOR, claudeFragmentOwner } from '../../core/host-config/claude-config';
-import { createdJsonContainer, jsonDocumentIsEmpty, jsonFragment, jsonFragmentValue, managedHookSelectors, removeJsonFragment } from '../../core/host-config/json-fragment';
+import { jsonFragment, jsonFragmentValue, managedHookSelectors, removeJsonFragment } from '../../core/host-config/json-fragment';
 import { HostConfigError, type FragmentEdit } from '../../core/host-config/types';
 import { openHostConfigGate, planFileRevert, type AdoptedFragment, type HostConfigAdoption, type HostConfigRevertEntry } from '../../effects/host-config/gate';
 import { configurationReceiptPath, hostConfigurationRoot, readRawConfigurationReceipt, saveConfigurationReceipt, type ConfigurationReceipt } from './configuration-ownership';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import { CODEGRAPH_CONFIG_MARKER, readInstallState, writeState, type InstallState, type ManagedInstallSurface } from './install-profile';
-import { canonicalManagedHookProjection } from './managed-entries';
+import { buildHookEntry, managedStatusLine, type HookHost } from './managed-entries';
+import { routesForHost } from '../hook/route-registry';
 
 /**
  * One-shot migration of the JSON host files into the host-config ledger.
@@ -18,10 +19,14 @@ import { canonicalManagedHookProjection } from './managed-entries';
  * in the install-state ownership manifest. Each intact rh fragment becomes a
  * fragment record of one adopted file; the backup is the file with those
  * fragments set back to their text before rh, the state that the old
- * uninstall left. A fragment that the old records do not prove intact (its
- * value or its file hash changed) is still recorded, with no text: it stays
- * and is reported, and rh does not refresh it. Then the old records go, and
- * the receipt file goes with its last entry.
+ * uninstall left. The migration records only what it can prove: a fragment
+ * is rh's only when its whole value equals what rh writes for that record (the
+ * receipt's `installed`, the manifest hash, or this version's builder for a
+ * tagged hook entry or status line). Any other fragment is still recorded,
+ * with no text: it stays and is reported, and rh does not refresh it. No
+ * container and no file is recorded as created; only a later gate write
+ * proves that. Then the old records go, and the receipt file goes with its
+ * last entry.
  */
 export interface JsonConfigMigration {
   readonly files: readonly { readonly path: string; readonly adoption: HostConfigAdoption }[];
@@ -114,30 +119,26 @@ function manifestFragments(state: InstallState | null, path: string, content: st
   return { fragments, changed: !intact };
 }
 
-/** The hash that the old manifest recorded for the managed hook entries of a hook file. */
-function managedAdapterHash(content: string): string | null {
+/** What this rh version writes at a selector of a hook file; undefined when it writes nothing there or cannot build it. */
+function builtValue(host: HookHost, selector: string, env: NodeJS.ProcessEnv): unknown {
   try {
-    const projection = canonicalManagedHookProjection((JSON.parse(content) as { hooks?: unknown }).hooks);
-    if (Object.keys(projection).length === 0) return null;
-    return sha256Prefixed(JSON.stringify(projection));
+    if (selector === 'statusLine') return host === 'claude' ? managedStatusLine(env) : undefined;
+    const match = /^hooks\.([^.[\]]+)\[([^[\]]+)\]$/.exec(selector);
+    const route = match ? routesForHost(host).find((entry) => entry.event === match[1] && entry.routeId === match[2]) : undefined;
+    return route ? buildHookEntry(route, host, env) : undefined;
   } catch {
-    return null;
+    // A hook runtime that does not resolve gives no proof; the fragment stays and is reported.
+    return undefined;
   }
 }
 
-/**
- * Tagged hook entries and a tagged status line: rh added them. The old
- * manifest hashed the managed hook entries of the file as one; when it holds
- * a hash and none matches, no entry is proved intact.
- */
-function taggedFragments(state: InstallState | null, path: string, content: string, hookFile: boolean): { fragments: OldFragment[]; changed: boolean } {
-  if (!hookFile) return { fragments: [], changed: false };
-  const hashes = state?.ownership_manifest.filter((surface) => surface.path === path && surface.managed_marker === MANAGED_TAG).map((surface) => surface.content_hash) ?? [];
-  const intact = !hashes.length || hashes.includes(managedAdapterHash(content));
-  const fragments: OldFragment[] = managedHookSelectors(content).map((selector) => ({ selector, before: undefined, installed: intact ? jsonFragmentValue(content, selector) : undefined }));
+/** Tagged hook entries and a tagged status line, each with the value that rh writes for it. */
+function taggedFragments(host: HookHost | null, content: string, env: NodeJS.ProcessEnv): OldFragment[] {
+  if (!host) return [];
+  const selectors = managedHookSelectors(content);
   const statusLine = jsonFragmentValue(content, 'statusLine') as { command?: unknown } | undefined;
-  if (statusLine && isRepoHarnessManagedHookCommand(statusLine.command)) fragments.push({ selector: 'statusLine', before: undefined, installed: statusLine });
-  return { fragments, changed: !intact };
+  if (statusLine && isRepoHarnessManagedHookCommand(statusLine.command)) selectors.push('statusLine');
+  return selectors.map((selector) => ({ selector, before: undefined, installed: builtValue(host, selector, env) }));
 }
 
 function applyEdit(content: string, edit: FragmentEdit): string {
@@ -145,42 +146,34 @@ function applyEdit(content: string, edit: FragmentEdit): string {
 }
 
 /**
- * The adoption of one file. The backup is the state that the old uninstall
- * left: each intact fragment set back to its old text, and a container that
- * the removal empties removed with it. A container that the backup does not
- * hold is one that rh created, so the record of each added fragment proves it.
+ * The adoption of one file. The backup is the file with each proved fragment
+ * set back to its text before rh; the containers around it stay. An unproved
+ * fragment keeps its current text in the backup and gets a record with no
+ * text, so a revert keeps and reports it.
  */
 function adoption(path: string, content: string, fragments: readonly OldFragment[], changed: boolean, root: string): HostConfigAdoption | null {
   let backup = content;
   let externalChange = changed;
   let override = false;
-  const adopted: { fragment: OldFragment; record: AdoptedFragment }[] = [];
+  const adopted: AdoptedFragment[] = [];
   for (const fragment of fragments) {
     const range = jsonFragment.locate(content, fragment.selector);
     const record = { owner: claudeFragmentOwner(fragment.selector), selector: fragment.selector, kind: fragment.before === undefined ? 'add' as const : 'override' as const };
     if (!range) { externalChange = true; continue; }
     if (fragment.installed === undefined || !isDeepStrictEqual(jsonFragmentValue(content, fragment.selector), fragment.installed)) {
-      // rh wrote this selector, but its text now is not proved rh's: it stays, and the revert reports it.
       externalChange = true;
-      adopted.push({ fragment, record: { ...record, inserted: '' } });
+      adopted.push({ ...record, inserted: '' });
       continue;
     }
-    const container = createdJsonContainer('', fragment.selector);
     backup = fragment.before === undefined
-      ? applyEdit(backup, removeJsonFragment(backup, fragment.selector, container ? [{ selector: fragment.selector, created: container }] : []))
+      ? applyEdit(backup, removeJsonFragment(backup, fragment.selector))
       : applyEdit(backup, jsonFragment.apply(backup, fragment.selector, fragment.before));
     override ||= fragment.before !== undefined;
-    adopted.push({ fragment, record: { ...record, inserted: content.slice(range.start, range.end) } });
+    adopted.push({ ...record, inserted: content.slice(range.start, range.end) });
   }
   if (!adopted.length && !externalChange) return null;
-  const records = adopted.map(({ fragment, record }): AdoptedFragment => {
-    const created = record.inserted !== '' && fragment.before === undefined ? createdJsonContainer(backup, fragment.selector) : null;
-    return created ? { ...record, created } : record;
-  });
-  // The old uninstall removed a file that held nothing else: rh created it.
-  if (jsonDocumentIsEmpty(backup)) return { kind: 'created', backup: null, fragments: records, externalChange };
-  if (path === root && CLAUDE_ROOT_CONFIG_BACKUP === 'overrides-only' && !override) return { kind: 'text_block', backup: null, fragments: records, externalChange };
-  return { kind: 'text_block', backup: Buffer.from(backup, 'utf8'), fragments: records, externalChange };
+  const keepsNoCopy = path === root && CLAUDE_ROOT_CONFIG_BACKUP === 'overrides-only' && !override;
+  return { kind: 'text_block', backup: keepsNoCopy ? null : Buffer.from(backup, 'utf8'), fragments: adopted, externalChange };
 }
 
 /** Plan the migration without writing; null when no old record is left. `only` limits it to some of the files. */
@@ -197,9 +190,9 @@ export function planJsonConfigMigration(env: NodeJS.ProcessEnv, only?: readonly 
     const manifest = manifestFragments(state, path, content);
     const fromReceipt = receipt.byPath.get(path) ?? [];
     // A receipt entry is the older and more exact record of its fragment.
-    const tagged = taggedFragments(state, path, content, paths.hooks.includes(path));
-    const old = [...fromReceipt, ...manifest.fragments.filter((fragment) => !fromReceipt.some((entry) => entry.selector === fragment.selector)), ...tagged.fragments];
-    const adopted = adoption(path, content, old, manifest.changed || tagged.changed, paths.root);
+    const host = path === paths.hooks[0] ? 'codex' : path === paths.hooks[1] ? 'claude' : null;
+    const old = [...fromReceipt, ...manifest.fragments.filter((fragment) => !fromReceipt.some((entry) => entry.selector === fragment.selector)), ...taggedFragments(host, content, env)];
+    const adopted = adoption(path, content, old, manifest.changed, paths.root);
     if (adopted) files.push({ path, adoption: adopted });
   }
   const surfaces = state ? [...state.ownership_manifest, ...(state.previous?.ownership_manifest ?? [])].some(isOldJsonSurface(paths.all)) : false;

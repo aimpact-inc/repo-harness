@@ -275,7 +275,7 @@ function isPrefix(prefix: readonly string[], path: readonly string[]): boolean {
  * yet, so that an insert at the selector creates it; null when the fragment's
  * container is already there. The root object is not one of them.
  */
-export function createdJsonContainer(content: string, selector: string): string | null {
+function createdJsonContainer(content: string, selector: string): string | null {
   const containers = containerPath(selector);
   if (!containers.length) return null;
   const document = root(content);

@@ -5,11 +5,8 @@ import { join } from 'path';
 import { configurationReceiptPath } from '../../src/cli/installer/configuration-ownership';
 import { planCodexConfigMigration } from '../../src/cli/installer/codex-config-migration';
 import { migrateJsonConfigRecords, planJsonConfigMigration } from '../../src/cli/installer/json-config-migration';
-import { buildManagedHooks, canonicalManagedHookProjection } from '../../src/cli/installer/managed-entries';
-import { versions, writeState } from '../../src/cli/installer/install-profile';
-import { MANAGED_TAG } from '../../src/core/adoption/managed-hook-config';
-import { managedHookSelectors } from '../../src/core/host-config/json-fragment';
-import { sha256Prefixed } from '../../src/core/evidence/sha256';
+import { buildManagedHooks, managedStatusLine } from '../../src/cli/installer/managed-entries';
+import { removeJsonFragment } from '../../src/core/host-config/json-fragment';
 import { claudeTarget } from '../../src/cli/installer/targets/claude';
 import { runUserUninstall } from '../../src/cli/installer/uninstall';
 import { codexConfigFragment, tomlFragment } from '../../src/core/host-config/toml-fragment';
@@ -99,38 +96,41 @@ test('A9: after a user edit, uninstall removes the intact managed entries, keeps
   expect(after.hooks.Stop).toEqual([{ hooks: [{ type: 'command', command: 'user-stop-hook' }] }]);
 }));
 
-test('the JSON migration adopts tagged hooks only while the old manifest hash matches; an edited file keeps every hook, reports it and frees it on deletion', () => {
-  const edits: Record<string, (hooks: any) => void> = {
-    intact: () => {},
-    timeout: (hooks) => { hooks.PreToolUse[0].hooks[0].timeout = 99; },
-    matcher: (hooks) => { hooks.PreToolUse[0].matcher = 'Edit'; },
-    command: (hooks) => { hooks.PreToolUse[0].hooks[0].command = hooks.PreToolUse[0].hooks[0].command.replace('HOOK_HOST=claude', 'HOOK_HOST=claude X=1'); },
+test('the JSON migration adopts a tagged hook entry or status line only when it equals what rh writes; any other one stays, is reported and frees on deletion', () => {
+  const edits: Record<string, [string | null, (data: any) => void]> = {
+    intact: [null, () => {}],
+    timeout: ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].hooks[0].timeout = 99; }],
+    matcher: ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].matcher = 'Edit'; }],
+    command: ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].hooks[0].command = data.hooks.PreToolUse[0].hooks[0].command.replace('HOOK_HOST=claude', 'HOOK_HOST=claude X=1'); }],
+    async: ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].hooks[0].async = true; }],
+    metadata: ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].description = 'user note'; }],
+    statusLine: ['statusLine', (data) => { data.statusLine.command += '; user-status-command'; }],
   };
-  for (const [name, edit] of Object.entries(edits)) withClaudeHome((home, settings) => {
+  for (const [name, [kept, edit]] of Object.entries(edits)) withClaudeHome((home, settings) => {
     const env = process.env;
     const hooks = buildManagedHooks('claude', env);
-    writeState({ protocol: 3, ...versions([]), selection: [], transaction_id: 'seeded', applied_at: '2026-11-01T00:00:00.000Z', previous: null, ownership_manifest: [{
-      owner: 'core', path: settings, type: 'managed-file', authority: 'repo-harness-install-transaction', removal: 'managed-surfaces-only',
-      content_hash: sha256Prefixed(JSON.stringify(canonicalManagedHookProjection(hooks))), managed_marker: MANAGED_TAG, symlink_target: null,
-    }] }, env);
-    const data = { theme: 'dark', hooks: structuredClone(hooks) };
-    edit(data.hooks);
+    const data = { theme: 'dark', statusLine: managedStatusLine(env), hooks: structuredClone(hooks) };
+    edit(data);
     const original = `${JSON.stringify(data, null, 2)}\n`;
     writeFileSync(settings, original);
     const result = runUserUninstall({ target: 'claude', env });
-    const selectors = managedHookSelectors(original);
-    if (name === 'intact') {
-      expect([result.status, readFileSync(settings, 'utf8')], name).toEqual(['complete', '{\n  "theme": "dark"\n}\n']);
-      return;
-    }
-    expect(result.status, name).toBe('partial');
-    expect(result.lines, name).toContain(`[unresolved] ${settings}: changed since rh wrote it; preserved: ${selectors.join(', ')}`);
-    expect(readFileSync(settings, 'utf8'), name).toBe(original);
-    expect(() => claudeTarget.install('global', {}), name).toThrow(`${settings}: ${selectors.join(', ')} are not rh's text any more, so rh kept them. Delete those hook entries, then run rh install again; rh writes them anew`);
+    const after = JSON.parse(readFileSync(settings, 'utf8'));
+    // The containers around rh's entries stay: the migration does not prove that rh created them.
+    const emptied = Object.fromEntries(Object.keys(hooks).map((event) => [event, kept?.startsWith(`hooks.${event}[`) ? [data.hooks[event][0]] : []]));
+    expect({ status: result.status, theme: after.theme, statusLine: after.statusLine, hooks: after.hooks }, name)
+      .toEqual({ status: kept ? 'partial' : 'complete', theme: 'dark', statusLine: kept === 'statusLine' ? data.statusLine : undefined, hooks: emptied });
+    if (!kept) return;
+    expect(result.lines, name).toContain(`[unresolved] ${settings}: changed since rh wrote it; preserved: ${kept}`);
+    if (kept === 'statusLine') return;
+    expect(() => claudeTarget.install('global', {}), name).toThrow(`${settings}: ${kept} are not rh's text any more, so rh kept them. Delete those hook entries, then run rh install again; rh writes them anew`);
     if (name !== 'timeout') return;
-    writeFileSync(settings, '{\n  "theme": "dark"\n}\n');
+    // The user deletes the kept entry by a text edit; the bytes around it stay.
+    const content = readFileSync(settings, 'utf8');
+    const deletion = removeJsonFragment(content, 'hooks.PreToolUse[edit]');
+    writeFileSync(settings, content.slice(0, deletion.at) + content.slice(deletion.at + deletion.removed.length));
     claudeTarget.install('global', {});
-    expect(JSON.parse(readFileSync(settings, 'utf8')).hooks, name).toEqual(hooks);
+    const sorted = (byEvent: Record<string, unknown[]>) => Object.fromEntries(Object.entries(byEvent).map(([event, entries]) => [event, entries.map((entry) => JSON.stringify(entry)).sort()]));
+    expect(sorted(JSON.parse(readFileSync(settings, 'utf8')).hooks), name).toEqual(sorted(hooks));
   });
 });
 

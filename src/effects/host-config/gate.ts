@@ -73,7 +73,6 @@ export interface AdoptedFragment {
   readonly selector: string;
   readonly kind: FragmentRecord['kind'];
   readonly inserted: string;
-  readonly created?: string;
 }
 
 /**

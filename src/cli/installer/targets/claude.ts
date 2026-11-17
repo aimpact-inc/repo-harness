@@ -14,7 +14,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { MANAGED_TAG } from '../../../core/adoption/managed-hook-config';
 import { jsonFragment } from '../../../core/host-config/json-fragment';
 import type { FragmentRequest } from '../../../core/host-config/types';
 import { migrateJsonConfigRecords } from '../json-config-migration';
@@ -30,6 +29,7 @@ import {
   applyManagedHooks,
   buildHookExecCommand,
   isManagedEntry,
+  managedStatusLine,
   type HooksByEvent,
 } from '../managed-entries';
 
@@ -60,7 +60,7 @@ function statusLineFragment(content: string): FragmentRequest {
     selector: 'statusLine',
     kind: jsonFragment.locate(content, 'statusLine') ? 'refresh' : 'add',
     strategy: jsonFragment,
-    value: { type: 'command', command: `: ${MANAGED_TAG}; ${buildHookExecCommand()} statusline` },
+    value: managedStatusLine(),
   };
 }
 

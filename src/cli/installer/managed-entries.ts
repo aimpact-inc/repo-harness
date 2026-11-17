@@ -110,6 +110,11 @@ export function isManagedEntry(entry: HookEntry): boolean {
   return entry.hooks.some((hook) => isRepoHarnessManagedHookCommand(hook?.command));
 }
 
+/** The Claude status line that rh writes: the quota capture, tagged as rh's. */
+export function managedStatusLine(env: NodeJS.ProcessEnv = process.env): { type: 'command'; command: string } {
+  return { type: 'command', command: `: ${MANAGED_TAG}; ${buildHookExecCommand(env)} statusline` };
+}
+
 /** Every hook route is core: each install projects every route that the host supports. */
 export function buildManagedHooks(host: HookHost, env: NodeJS.ProcessEnv = process.env): HooksByEvent {
   const out: HooksByEvent = {};
