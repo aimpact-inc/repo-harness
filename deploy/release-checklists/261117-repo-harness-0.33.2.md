@@ -102,7 +102,16 @@
 
 ## Verification
 
-VERIFY_BLOCK
+On Darwin arm64 with Bun 1.4.4, at source `37b07a0f9` with the release prep commits through `110d2c0fa`:
+
+- `bun install --frozen-lockfile`: pass, no changes.
+- `bun run check:type`: pass, exit 0.
+- `bun run check:state-boundaries`: pass, 652 TypeScript files checked.
+- `bun scripts/check-skill-version.ts`: pass, repo-harness=0.33.2, template=0.33.2.
+- `bun scripts/check-changelog-released-sections.ts --base origin/main`: pass, 121 released sections keep their bytes.
+- `bun run check:cli-manifest`: pass.
+- `bun run test:files tests/skill-version.test.ts tests/bootstrap-files.test.ts tests/readme-dx.test.ts tests/action-command-skills.test.ts tests/scaffold-parity.test.ts tests/installed-copy-sync.test.ts --timeout 60000 --max-concurrency 1`: pass, 100 tests in 6 files.
+- `git diff --check origin/main...HEAD`: pass.
 
 `Required / CI` and the release gate are pending. The owner release plan runs the release gate after the prep PR merges. Skill eval evidence is unavailable. Consumer architecture smoke evidence is pending; the automated case is `tests/hook-runtime.test.ts`, "a registry consumer without code facts or a projection manifest gets one architecture line (#850)".
 
@@ -115,7 +124,7 @@ VERIFY_BLOCK
 
 ## Acceptance environment
 
-Release upgrade rehearsal: pending. It is a test deployment and needs a joint decision before it runs. Command: `gh workflow run probe.yml --ref release/0.33.2 -f lane=release-rehearsal -f runner=ubuntu-latest`. Record the run URL and these lines:
+Release upgrade rehearsal: pending. Joint decision [#2960 comment 6935908919](https://github.com/aimpact-inc/repo-harness/pull/2960#issuecomment-6935908919): it runs once at the frozen head, before the merge. Command: `gh workflow run probe.yml --ref release/0.33.2 -f lane=release-rehearsal -f runner=ubuntu-latest`. Record the run URL and these lines:
 
 - `[rehearsal] OK: 0.33.1 -> 0.33.2`
 - `TARBALL SERVED repo-harness 0.33.2`
