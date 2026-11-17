@@ -9,13 +9,10 @@ import { dirname, isAbsolute, join, parse, resolve, sep } from 'path';
 export const escapePattern = (text: string) => text.replace(/[\\*?[\]{},~]/g, '\\$&');
 export const unescapePattern = (pattern: string) => pattern.replace(/\\(.)/gs, '$1');
 
-const ANY = '\\u{0}-\\u{10ffff}';
-const NON_ASCII = '\\u{80}-\\u{10ffff}';
-
 /**
- * The ASCII members of each POSIX class. Bash 3.2 and 5.3 and zsh agree on them in the C and UTF-8 locales; a non-ASCII member
- * depends on the locale. A class is `certain` when no shell setting changes its ASCII members: bash 3.2 with `nocaseglob` folds
- * the name before it tests `upper` or `lower`, and zsh has no `word`.
+ * The ASCII members of each POSIX class. Bash 3.2 and 5.3 and zsh agree on them in the C and UTF-8 locales. A class is `certain`
+ * when no shell setting changes its members: bash 3.2 with `nocaseglob` folds the name before it tests `upper` or `lower`, and zsh
+ * has no `word`.
  */
 const POSIX_CLASSES: Readonly<Record<string, { readonly members: string; readonly certain: boolean }>> = {
   alnum: { members: '0-9A-Za-z', certain: true }, alpha: { members: 'A-Za-z', certain: true },
@@ -30,54 +27,53 @@ const POSIX_CLASSES: Readonly<Record<string, { readonly members: string; readonl
 const regexChar = (ch: string) => ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /** A literal inside a regular expression class: `-`, `^`, `[`, `]` and the backslash are escaped. */
 const classChar = (ch: string) => ch.replace(/[\\\]\[^-]/g, '\\$&');
-/** The literal character at `i` (a backslash escapes the next one) and the index after it. */
-const literalAt = (pattern: string, i: number): [string, number] => pattern[i] === '\\' ? [pattern[i + 1] ?? '', i + 2] : [pattern[i]!, i + 1];
+const ASCII_ONLY = /^[\x00-\x7f]*$/;
 
 /**
- * The regular expression class of the bracket expression that opens at `open`, and its closing index; null when it does not close,
- * so `[` is a literal character. A positive bracket takes every character that may be a member and a negated bracket excludes only
- * the certain members, so both match at least what the shell matches. An equivalence class, a collating symbol and an unknown class
- * name may hold any character and hold none for certain. Each member is a literal, a range of two literals or a class, so no two
- * members join into a range.
+ * The regular expression class of the bracket expression that opens at `open`, and its closing index; null when it does not
+ * close, so `[` is a literal character. The class is exact only for POSIX classes and single ASCII characters: a positive bracket
+ * takes every member and a negated bracket excludes only the certain ones. A range, a collating symbol, an equivalence class, an
+ * unknown class name or a non-ASCII character depends on the shell and the locale, so the bracket is `uncertain`.
  */
-function bracketSource(pattern: string, open: number): { source: string; end: number } | null {
+function bracketSource(pattern: string, open: number): { source: string; end: number } | 'uncertain' | null {
   let i = open + 1;
   const negated = pattern[i] === '!' || pattern[i] === '^';
   if (negated) i++;
-  let maybe = '', certain = '';
+  let members = '', certain = '';
   // A `]` right after `[` or `[!` is a member of the bracket expression, not its end.
   for (const first = i; i < pattern.length;) {
-    if (pattern[i] === ']' && i > first) return { source: negated ? `[^${certain}]` : `[${maybe}]`, end: i };
-    const special = pattern[i] === '[' ? /^\[([:=.])([^]*?)\1\]/.exec(pattern.slice(i)) : null;
-    if (special) {
-      const posix = special[1] === ':' ? POSIX_CLASSES[special[2]!] : undefined;
-      maybe += posix ? posix.members + NON_ASCII : ANY;
-      if (posix?.certain) certain += posix.members;
-      i += special[0].length;
+    if (pattern[i] === ']' && i > first) return { source: negated ? `[^${certain}]` : `[${members}]`, end: i };
+    if (pattern[i] === '[' && /^\[[:=.]/.test(pattern.slice(i))) {
+      const posix = /^\[:([a-z]+):\]/.exec(pattern.slice(i));
+      const known = posix ? POSIX_CLASSES[posix[1]!] : undefined;
+      if (!known) return 'uncertain';
+      members += known.members;
+      if (known.certain) certain += known.members;
+      i += posix![0].length;
       continue;
     }
-    const [low, next] = literalAt(pattern, i);
-    let member = classChar(low);
-    i = next;
-    if (pattern[i] === '-' && i + 1 < pattern.length && pattern[i + 1] !== ']') {
-      const [high, after] = literalAt(pattern, i + 1);
-      member += `-${classChar(high)}`;
-      i = after;
-    }
-    maybe += member; certain += member;
+    const literal = pattern[i] === '\\' ? pattern[i + 1] ?? '' : pattern[i]!;
+    i += pattern[i] === '\\' ? 2 : 1;
+    if (!ASCII_ONLY.test(literal) || (pattern[i] === '-' && i + 1 < pattern.length && pattern[i + 1] !== ']')) return 'uncertain';
+    members += classChar(literal); certain += classChar(literal);
   }
   return null;
 }
 
 /**
  * Shell pattern match of one path segment that errs toward yes, so a check that asks "can this glob reach X" never misses a name
- * that the shell matches. A bracket that does not compile matches every name.
+ * that the shell matches. The exact match runs only where every shell and locale agree: a name of ASCII bytes, and brackets of
+ * POSIX classes and single ASCII characters. Elsewhere every name matches: a non-ASCII name counts bytes in the C locale and
+ * characters in UTF-8; bash 3.2 orders a range by the locale's collation (`[a-z]` holds `é` and `B`); a collating symbol or an
+ * equivalence class depends on the locale; zsh reads an unclosed `[!]` as any character, where bash reads a literal.
  */
 export function segmentMatches(pattern: string, name: string): boolean {
+  if (!ASCII_ONLY.test(name)) return true;
   let source = '';
   for (let i = 0; i < pattern.length; i++) {
     const ch = pattern[i]!;
     const bracket = ch === '[' ? bracketSource(pattern, i) : null;
+    if (bracket === 'uncertain' || (ch === '[' && bracket === null)) return true;
     if (ch === '\\') source += regexChar(pattern[++i] ?? '');
     else if (ch === '*') source += '.*';
     else if (ch === '?') source += '.';

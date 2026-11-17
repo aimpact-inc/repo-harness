@@ -181,7 +181,7 @@ describe('safety hook: Bash host route', () => {
     const skill = join(home, '.claude/skills/repo-harness-cross-review');
     const savedTmp = process.env.TMPDIR;
     try {
-      for (const dir of ['repo/build/sub', 'repo/src', 'repo/stage/d', 'repo/stage/1', 'repo/big', 'repo/w/stage', 'repo/inner', 'outside/sub', 'outside/-archive', 'repo/links', 'repo/tree/cache/version', 'outside/big', 'repo/big/zdir', 'repo/seq', 'tmp', 'managed', 'home/links', 'home/stage']) {
+      for (const dir of ['repo/build/sub', 'repo/src', 'repo/stage/d', 'repo/stage/1', 'repo/big', 'repo/w/stage', 'repo/inner', 'outside/sub', 'outside/-archive', 'repo/links', 'repo/tree/cache/version', 'outside/big', 'repo/big/zdir', 'repo/seq', 'repo/chars', 'tmp', 'managed', 'home/links', 'home/stage']) {
         mkdirSync(join(root, dir), { recursive: true });
       }
       mkdirSync(skill, { recursive: true });
@@ -197,6 +197,7 @@ describe('safety hook: Bash host route', () => {
       // A regular directory that a copy can write into, through a child link to an outside file.
       symlinkSync(join(out, 'victim.txt'), join(repo, 'big/zdir/source.txt'));
       writeFileSync(join(repo, 'seq/of=1'), 'x');
+      for (const name of ['é', '_', '5']) symlinkSync(out, join(repo, 'chars', name));
       symlinkSync(join(out, 'victim.txt'), join(repo, 'seq/1025'));
       for (const link of ['linked', 'stage/linked', 'w/stage/linked']) symlinkSync(out, join(repo, link));
       symlinkSync(join(repo, 'inner'), join(out, 'link'));
@@ -260,6 +261,9 @@ describe('safety hook: Bash host route', () => {
         // #3033: R1-F2, a class matches only its members, so the numbered in-root start passes and the negated class reaches the link.
         [null, 'rm -f stage/[[:digit:]]*/victim.txt'], [null, 'truncate -s 0 stage/[[:digit:]]*/victim.txt'], [refuse, 'rm -f stage/[![:digit:]]*/victim.txt'],
         ['CredentialGuard', 'cat credentials[[:space:]].json'], [null, 'cat credentials[[:alpha:]].json'],
+        // #3051 r1: a non-ASCII name (C-locale bytes, bash 3.2 collation), a range and a collating symbol match every name.
+        [refuse, 'rm -f chars/[![:digit:]]?/victim.txt'], [refuse, 'truncate -s 0 chars/[![:digit:]A-z]/victim.txt'], [refuse, 'rm -f chars/[0-[.9.]]/victim.txt'],
+        [refuse, 'rm -f chars/[a-z]*/victim.txt'], [refuse, 'rm -f chars/[]-x]/victim.txt'], [refuse, 'rm -f chars/[!]-x]/victim.txt'],
         // #3025 r2: expansion never drops an operand; each brace item is its own target, and an unknown item keeps its literal directory.
         [refuse, `tee {build/$X,${out}/victim.txt}`], [refuse, `cp source.txt {build/$X,${out}}`], [refuse, 'tee {build/$X,links/x.txt}'],
         [refuse, `tee {build/$(printf x),${out}/victim.txt}`], [refuse, `tee {build/$'x',${out}/victim.txt}`], [refuse, `tee {~nouser/x,${out}/victim.txt}`],
