@@ -8,11 +8,11 @@
 - Owner word on the version after six breaking fragments reached main, in [#2960 comment 6935965164](https://github.com/aimpact-inc/repo-harness/pull/2960#issuecomment-6935965164) at 2026-11-17T02:20:19Z: "維持 0.33.2". The release ships every commit up to the source commit, with the breaking fragments, under 0.33.2.
 - #2936 merged as `e95dee83b` (#2949). PR #2926 (#2916) is open and stays out of this release by the owner word.
 - #2898, #2922, #2894 and #2893 stay out of this release; they merge after the `v0.33.2` tag.
-- Source commit before release prep: `2aad37197c3e8ccd12fe27cf358392328214ae4c`. The release range is `v0.33.1..2aad37197`, 84 commits, 36 changelog fragments.
+- Source commit before release prep: `e7bb9b1a1786baf17fcf0f412d48fef3a872cf65`. The release range is `v0.33.1..e7bb9b1a1`, 85 commits, 36 changelog fragments. `e7bb9b1a1` is the last base: main merges are frozen until this PR merges, and #2998 is the one exception.
 - Breaking changes ship in this patch version by the owner word "維持 0.33.2": #2863 removes `rh init-hook` and three `rh update` options; #2867 replaces `--write` with `--apply`; #2864, #2865, #2866 and #2871 move commands under `rh worktrees`, `rh verify`, `rh capability` and `rh arch`; #2937 deletes `rh brain` and `rh migrate`; #2941 renames the `AGENTIC_DEV_*` variables to `REPO_HARNESS_*`. No alias stays. The `### Breaking` section opens with one `Migration:` line per old name, from the retired-helper map in `src/cli/commands/run.ts`, the v0.33.1 command definitions and `rh commands` at the source commit.
 - Release prep correction: the #2798 Fixed entry named `rh update --check`, which #2863 removes in the same release. The entry now names `rh setup check` only. The #2795 entry said to run `rh brain check` and `rh brain sync`; #2937 deletes `rh brain` in this release, so the entry now says that.
 - Release prep added one changelog entry, from the merged PR, for each of 14 changes that had no fragment: #2862, #2868, #2870, #2881 (PR #2928), #2823, #2824, #2825, #2826 (Added); #2913, #2923, #2814 (Changed); #2843, #2844, #2917 (Fixed). The orchestrator asked for these entries. #2956 (Changed) and #2955 (Fixed) merged after the first prep commit without a fragment; release prep added their entries the same way.
-- After `ab65af6e2`, ten user-visible changes merged without a fragment. Release prep added one entry each, from the merged PR: #2885, #2887, #2888 (Added); #2963, #2964, #2969, #2970, #2974, #2977, #2988 (Fixed). The other commits without an entry change only tests, CI, the architecture model or the projection: #2976, #2983, #2986, #2990, #2993, #2994.
+- After `ab65af6e2`, ten user-visible changes merged without a fragment. Release prep added one entry each, from the merged PR: #2885, #2887, #2888 (Added); #2963, #2964, #2969, #2970, #2974, #2977, #2988 (Fixed). The other commits without an entry change only tests, CI, the architecture model, the projection or the release smoke: #2976, #2983, #2986, #2990, #2993, #2994, #2998.
 
 | PR | Commit | Change |
 |---|---|---|
@@ -100,10 +100,11 @@
 | [#2992](https://github.com/aimpact-inc/repo-harness/pull/2992) | `8d430e18a` | fix(architecture): anchor the run-helper flow proof on executeHelper (#2990) |
 | [#2994](https://github.com/aimpact-inc/repo-harness/pull/2994) | `37b07a0f9` | chore(projection): refresh generated architecture outputs for main@8d430e18a2c8 |
 | [#2995](https://github.com/aimpact-inc/repo-harness/pull/2995) | `2aad37197` | fix(architecture): match run-helper labels to execution (#2993) |
+| [#2999](https://github.com/aimpact-inc/repo-harness/pull/2999) | `e7bb9b1a1` | fix(release): count only operator setup modules in tarball smoke (#2998) |
 
 ## Verification
 
-On Darwin arm64 with Bun 1.4.4, at source `2aad37197` with the release prep commits through `621b840ac`:
+On Darwin arm64 with Bun 1.4.4, at source `2aad37197` with the release prep commits through `621b840ac`. After the rebase onto `e7bb9b1a1` (#2998 changes one line of `scripts/check-tarball-install-smoke.sh`), `check:type`, the skill version check, the changelog check, `check:cli-manifest` and `git diff --check` pass again:
 
 - `bun install --frozen-lockfile`: pass, no changes.
 - `bun run check:type`: pass, exit 0.
@@ -125,11 +126,28 @@ On Darwin arm64 with Bun 1.4.4, at source `2aad37197` with the release prep comm
 
 ## Acceptance environment
 
-Release upgrade rehearsal: pending. Joint decision [#2960 comment 6935908919](https://github.com/aimpact-inc/repo-harness/pull/2960#issuecomment-6935908919): it runs once at the frozen head, before the merge. Command: `gh workflow run probe.yml --ref release/0.33.2 -f lane=release-rehearsal -f runner=ubuntu-latest`. Record the run URL and these lines:
+Joint decision [#2960 comment 6935908919](https://github.com/aimpact-inc/repo-harness/pull/2960#issuecomment-6935908919) runs the rehearsal once before the merge. The first result is in [#2960 comment 6936188561](https://github.com/aimpact-inc/repo-harness/pull/2960#issuecomment-6936188561).
+
+Release upgrade rehearsal: [run 44003235051](https://github.com/aimpact-inc/repo-harness/actions/runs/44003235051), success on `ubuntu-latest` at prep head `aa1a1c0af`. `scripts/check-release-upgrade-rehearsal.sh` requires `RUNNER_TEMP` and refuses a workstation, so it ran as lane `release-rehearsal` of `probe.yml`. The later commits change the smoke script and this record only.
 
 - `[rehearsal] OK: 0.33.1 -> 0.33.2`
 - `TARBALL SERVED repo-harness 0.33.2`
 - `TARBALL SERVED repo-harness-operator-web 0.33.2`
+
+Tarball install smoke: `bash scripts/check-tarball-install-smoke.sh` on Darwin arm64, Bun 1.4.4, with its own mkdtemp HOME under `/tmp`.
+
+- At `aa1a1c0af`: fail, `operator serve with selection [] returned 1, 0 stdout bytes and 1 Operator modules`. The loaded module was the core file `src/cli/commands/setup-check.ts`, which the smoke regex counted as Operator code after #2863 renamed it. #2998 narrows the regex.
+- At source `e7bb9b1a1` with the release prep commits: pass, exit 0. `mcp serve loads 33 MCP modules with all, 0 with selection []`; `operator serve loads 80 Operator modules with all and serves; with selection [] it refuses`; `peer-runtime loads 4 modules when selected`; `repo-harness-0.33.2.tgz installs, serves the packaged Operator, and packaged CLI bins start`.
+
+Command probe at `aa1a1c0af`: both 0.33.2 tarballs installed into a fresh mkdtemp HOME with an `all` plugin selection.
+
+- `rh --version` prints `0.33.2`.
+- `rh worktrees status`, `rh verify --help`, `rh capability context status`, `rh arch projection status --json` and `rh arch codegraph --help` answer. `rh verify plan validate` reaches its helper (`--repo is required`, exit 2).
+- `rh run contract-worktree`, `rh run verify-sprint` and `rh run capability-resolver` exit 2 with the replacement command.
+- `rh capability-context`, `architecture-projection`, `architecture-debt`, `module`, `refactor`, `tools`, `brain`, `migrate` and `init-hook` exit 1 with `unknown command`.
+- `rh verify --help` prints the helper usage under the name `verify-sprint`.
+
+No step used the real HOME. No step published to npm or created a tag.
 
 ## Publication
 
