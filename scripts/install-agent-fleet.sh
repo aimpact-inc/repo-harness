@@ -225,7 +225,7 @@ function validateUserManagedCodex(agent, content) {
 function writeAgent(targetPath, content, replace) {
   const stat = fs.lstatSync(targetPath, { throwIfNoEntry: false });
   const mode = stat?.isFile() ? stat.mode & 0o777 : undefined;
-  gate.writePaths([{ path: targetPath, owner: "core", entry: { type: "file", bytes: Buffer.from(content), ...(mode === undefined ? {} : { mode }) }, replace }]);
+  gate.writePaths([{ path: targetPath, owner: "core", entry: { type: "file", bytes: Buffer.from(content), ...(mode === undefined ? {} : { mode }) }, replace }], { transaction: process.env.REPO_HARNESS_RUNTIME_TRANSACTION });
 }
 
 function shellQuote(value) {
