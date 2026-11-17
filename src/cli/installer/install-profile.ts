@@ -3,6 +3,7 @@ import { retryWindowsSharingRace } from '../../effects/atomic-append';
 import wazaRules from "../../core/skill-surface/waza-shared-rules.json";
 import { bunGlobalPackageRoot, expectedSkillProjections, skillLinkMatches } from './skill-projection';
 import { configurationReceiptPath } from './configuration-ownership';
+import { hostConfigPaths } from '../../effects/host-config/store';
 import { globalContextBackupEligible, globalContextPath } from './global-context';
 import { acquireRuntimeTransactionLock, assertRuntimeTransactionContext, globalRuntimeScope, runtimeTransactionRoot, type RuntimeTransactionContext, type RuntimeTransactionLock } from '../../effects/locking/runtime-transaction-lock';
 import { randomUUID } from 'crypto';
@@ -765,6 +766,8 @@ export function installProfileHostMutationPaths(env: NodeJS.ProcessEnv = process
     join(home, '.repo-harness', 'config.json'),
     installProfileStatePath(env),
     configurationReceiptPath(home),
+    // A rollback that restores `~/.codex/config.toml` restores its ledger records with it.
+    hostConfigPaths(env).ledger,
     providerSkillLock(home, env).path,
   ];
   for (const root of hostSkillRoots(home, env)) {
