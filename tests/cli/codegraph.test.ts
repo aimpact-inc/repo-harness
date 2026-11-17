@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import { pluginSelectionEnv, recordPluginSelection } from "../helpers/install-ownership";
 import { writeShellExecutableFixture } from "../helpers/repo-fixture";
+import { requestUserInputFragment } from "../../src/cli/installer/targets/codex";
+import { openHostConfigGate } from "../../src/effects/host-config/gate";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const CLI = join(ROOT, "src/cli/index.ts");
@@ -127,14 +129,18 @@ test('standalone CodeGraph configure writes the Codex table through the gate, an
     ].join('\n'));
     mkdirSync(join(fixture.home, '.codex'));
     writeFileSync(join(fixture.home, '.codex/config.toml'), 'model = "user-model"\n');
+    // The `core` fragment is in place before the `architecture` owner writes its table (A7).
+    openHostConfigGate({ env: { HOME: fixture.home } }).apply([{ path: join(fixture.home, '.codex/config.toml'), fragments: [requestUserInputFragment('model = "user-model"\n')!] }]);
     const env = { ...process.env, HOME: fixture.home, PATH: `${fixture.fakeBin}:${process.env.PATH ?? ''}`, REPO_HARNESS_CODEGRAPH_ALLOW_REPO_LOCAL: '0', BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0' };
     const configured = spawnSync('bun', [CLI, 'arch', 'codegraph', 'configure', '--target', 'codex', '--location', 'global', '--json', '--repo', ROOT], { cwd: ROOT, env, encoding: 'utf8' });
     expect(configured.status, configured.stderr).toBe(0);
     expect(JSON.parse(configured.stdout).actions.map((entry: any) => [entry.action, entry.status])).toEqual([['configure-codex', 'changed']]);
     const section = '[mcp_servers.codegraph]\ncommand = "codegraph"\nargs = ["serve", "--mcp", "--path", "."]\n';
-    expect(readFileSync(join(fixture.home, '.codex/config.toml'), 'utf8')).toBe(`model = "user-model"\n${section}`);
+    expect(readFileSync(join(fixture.home, '.codex/config.toml'), 'utf8')).toBe(`default_mode_request_user_input = true\nmodel = "user-model"\n${section}`);
     const ledger = readFileSync(join(fixture.home, '.repo-harness/config/ledger.json'), 'utf8');
-    expect(JSON.parse(ledger).fragments.map((entry: any) => [entry.owner, entry.selector, entry.inserted])).toEqual([['architecture', 'mcp_servers.codegraph', section]]);
+    expect(JSON.parse(ledger).fragments.map((entry: any) => [entry.owner, entry.selector, entry.inserted]))
+      .toEqual([['core', 'default_mode_request_user_input', 'default_mode_request_user_input = true\n'], ['architecture', 'mcp_servers.codegraph', section]]);
+    expect(JSON.parse(ledger).files[realpathSync(join(fixture.home, '.codex/config.toml'))].external_change).toBe(false);
     expect(ledger).not.toContain('user-model');
     const uninstalled = spawnSync('bun', [CLI, 'uninstall', '--target', 'codex', '--json'], { cwd: ROOT, env, encoding: 'utf8' });
     expect(uninstalled.status, uninstalled.stdout + uninstalled.stderr).toBe(0);
