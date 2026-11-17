@@ -62,11 +62,15 @@ export interface FileRecord {
    */
   readonly committed: FileCommitted;
   /**
-   * Vault reference of the whole file before rh last wrote over bytes that rh
-   * did not write; required for `replaced`, null for `created` and for a
-   * `text_block` that rh only added to under `overrides-only`.
+   * Vault reference of the whole file before rh first wrote over bytes that
+   * rh did not write (or the adopted state before rh); required for
+   * `replaced`, null for `created` and for a `text_block` that rh only added
+   * to under `overrides-only`. It is the restore target and never changes
+   * while the record lives.
    */
   readonly backup: Sha256 | null;
+  /** Vault reference of the file as an outside edit left it, from the last rh write over it; for the report, never a restore target. */
+  readonly external_backup?: Sha256;
   /** Sticky: set once the file differed from `committed` when rh wrote it again. */
   readonly external_change: boolean;
 }
@@ -89,6 +93,8 @@ export interface FragmentRecord {
   readonly inserted: string;
   /** The outermost container that rh's insert created on the selector's path; a revert removes an emptied container only on this proof. */
   readonly created?: string;
+  /** For a fragment that the one-shot migration adopted: its text when adopted, kept across refreshes so that a refreshed value stays recoverable. */
+  readonly preimage?: string;
 }
 
 export interface HostConfigLedger {

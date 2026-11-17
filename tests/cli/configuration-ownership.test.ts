@@ -3,9 +3,12 @@ import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, 
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { configurationReceiptPath } from '../../src/cli/installer/configuration-ownership';
-import { planCodexConfigMigration } from '../../src/cli/installer/codex-config-migration';
+import { migrateCodexConfigRecords, planCodexConfigMigration } from '../../src/cli/installer/codex-config-migration';
 import { migrateJsonConfigRecords, planJsonConfigMigration } from '../../src/cli/installer/json-config-migration';
-import { buildManagedHooks, managedStatusLine } from '../../src/cli/installer/managed-entries';
+import { buildManagedHooks, canonicalManagedHookProjection, managedStatusLine } from '../../src/cli/installer/managed-entries';
+import { versions, writeState } from '../../src/cli/installer/install-profile';
+import { MANAGED_TAG } from '../../src/core/adoption/managed-hook-config';
+import { sha256Prefixed } from '../../src/core/evidence/sha256';
 import { removeJsonFragment } from '../../src/core/host-config/json-fragment';
 import { claudeTarget } from '../../src/cli/installer/targets/claude';
 import { runUserUninstall } from '../../src/cli/installer/uninstall';
@@ -96,41 +99,69 @@ test('A9: after a user edit, uninstall removes the intact managed entries, keeps
   expect(after.hooks.Stop).toEqual([{ hooks: [{ type: 'command', command: 'user-stop-hook' }] }]);
 }));
 
-test('the JSON migration adopts a tagged hook entry or status line only when it equals what rh writes; any other one stays, is reported and frees on deletion', () => {
-  const edits: Record<string, [string | null, (data: any) => void]> = {
-    intact: [null, () => {}],
-    timeout: ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].hooks[0].timeout = 99; }],
-    matcher: ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].matcher = 'Edit'; }],
-    command: ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].hooks[0].command = data.hooks.PreToolUse[0].hooks[0].command.replace('HOOK_HOST=claude', 'HOOK_HOST=claude X=1'); }],
-    async: ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].hooks[0].async = true; }],
-    metadata: ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].description = 'user note'; }],
-    statusLine: ['statusLine', (data) => { data.statusLine.command += '; user-status-command'; }],
+test('the JSON migration adopts a tagged entry with the old writer shape, keeps its preimage and reports its refresh; another shape or a hash mismatch stays and refuses', () => {
+  type Row = [kept: string | null, edit: (data: any) => void, hashed?: boolean];
+  const rows: Record<string, Row> = {
+    'within the shape': [null, (data) => { data.hooks.PreToolUse[0].hooks[0].timeout = 99; }],
+    'an extra hook field': ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].hooks[0].async = true; }],
+    'an extra entry field': ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].description = 'user note'; }],
+    'a status line command edit': ['statusLine', (data) => { data.statusLine.command += '; user-status-command'; }],
+    'a manifest hash mismatch': ['hooks.SessionStart[default], hooks.PreToolUse[edit], hooks.PreToolUse[subagent], hooks.PreToolUse[bash], hooks.UserPromptSubmit[inbox], hooks.Stop[default]', (data) => { data.hooks.PreToolUse[0].hooks[0].timeout = 99; }, true],
   };
-  for (const [name, [kept, edit]] of Object.entries(edits)) withClaudeHome((home, settings) => {
+  for (const [name, [kept, edit, hashed]] of Object.entries(rows)) withClaudeHome((home, settings) => {
     const env = process.env;
     const hooks = buildManagedHooks('claude', env);
+    if (hashed) writeState({ protocol: 3, ...versions([]), selection: [], transaction_id: 'seeded', applied_at: '2026-11-01T00:00:00.000Z', previous: null, ownership_manifest: [{
+      owner: 'core', path: settings, type: 'managed-file', authority: 'repo-harness-install-transaction', removal: 'managed-surfaces-only',
+      content_hash: sha256Prefixed(JSON.stringify(canonicalManagedHookProjection(hooks))), managed_marker: MANAGED_TAG, symlink_target: null,
+    }] }, env);
     const data = { theme: 'dark', statusLine: managedStatusLine(env), hooks: structuredClone(hooks) };
     edit(data);
-    const original = `${JSON.stringify(data, null, 2)}\n`;
-    writeFileSync(settings, original);
+    writeFileSync(settings, `${JSON.stringify(data, null, 2)}\n`);
+    if (!kept) {
+      // Adopted: the record keeps the adopted bytes as its preimage, and the install refresh names the changed field.
+      const installed = claudeTarget.install('global', {});
+      const record = openHostConfigGate({ env }).recorded(settings).find((entry) => entry.selector === 'hooks.PreToolUse[edit]')!;
+      expect(record.preimage, name).toBe(JSON.stringify(data.hooks.PreToolUse[0], null, 2).replaceAll('\n', '\n      '));
+      expect(installed.notes, name).toContain(`refreshed the adopted entry hooks.PreToolUse[edit] in ${settings}: timeout 99 -> 30`);
+      expect(JSON.parse(readFileSync(settings, 'utf8')).hooks.PreToolUse[0], name).toEqual(hooks.PreToolUse![0]);
+      return;
+    }
     const result = runUserUninstall({ target: 'claude', env });
-    const after = JSON.parse(readFileSync(settings, 'utf8'));
-    // The containers around rh's entries stay: the migration does not prove that rh created them.
-    const emptied = Object.fromEntries(Object.keys(hooks).map((event) => [event, kept?.startsWith(`hooks.${event}[`) ? [data.hooks[event][0]] : []]));
-    expect({ status: result.status, theme: after.theme, statusLine: after.statusLine, hooks: after.hooks }, name)
-      .toEqual({ status: kept ? 'partial' : 'complete', theme: 'dark', statusLine: kept === 'statusLine' ? data.statusLine : undefined, hooks: emptied });
-    if (!kept) return;
+    expect(result.status, name).toBe('partial');
     expect(result.lines, name).toContain(`[unresolved] ${settings}: changed since rh wrote it; preserved: ${kept}`);
     if (kept === 'statusLine') return;
     expect(() => claudeTarget.install('global', {}), name).toThrow(`${settings}: ${kept} are not rh's text any more, so rh kept them. Delete those hook entries, then run rh install again; rh writes them anew`);
-    if (name !== 'timeout') return;
-    // The user deletes the kept entry by a text edit; the bytes around it stay.
+    if (name !== 'an extra hook field') return;
+    // The user deletes the refused entry by a text edit; rh writes it anew.
     const content = readFileSync(settings, 'utf8');
     const deletion = removeJsonFragment(content, 'hooks.PreToolUse[edit]');
     writeFileSync(settings, content.slice(0, deletion.at) + content.slice(deletion.at + deletion.removed.length));
     claudeTarget.install('global', {});
-    const sorted = (byEvent: Record<string, unknown[]>) => Object.fromEntries(Object.entries(byEvent).map(([event, entries]) => [event, entries.map((entry) => JSON.stringify(entry)).sort()]));
-    expect(sorted(JSON.parse(readFileSync(settings, 'utf8')).hooks), name).toEqual(sorted(hooks));
+    expect(JSON.parse(readFileSync(settings, 'utf8')).hooks.PreToolUse.map((entry: any) => entry.hooks[0].async), name).toEqual([undefined, undefined, undefined]);
+  });
+});
+
+test('a migrated CodeGraph override keeps its kind and its backup across a refresh, so the profile switch restores the user table', () => {
+  for (const external of [false, true]) fixture((home, env) => {
+    const path = join(home, '.codex/config.toml');
+    const userTable = '[mcp_servers.codegraph]\ncommand = "user-codegraph"\n';
+    const rhTable = '[mcp_servers.codegraph]\ncommand = "codegraph"\n';
+    mkdirSync(join(home, '.codex'));
+    writeFileSync(path, `model = "user"\n${rhTable}`);
+    mkdirSync(join(home, '.repo-harness'));
+    writeFileSync(configurationReceiptPath(home), JSON.stringify({ protocol: 1, changes: [{ path, selector: 'mcp_servers.codegraph', before: userTable, installed: rhTable, active: true }] }));
+    migrateCodexConfigRecords(env);
+    const gate = openHostConfigGate({ env });
+    const adopted = JSON.parse(readFileSync(join(home, '.repo-harness/config/ledger.json'), 'utf8')).files[realpathSync(path)].backup;
+    if (external) writeFileSync(path, readFileSync(path, 'utf8').replace('model = "user"', 'model = "edited"'));
+    // A later CodeGraph configure refreshes rh's table with changed text.
+    gate.apply([{ path, fragments: [{ owner: 'architecture', selector: 'mcp_servers.codegraph', kind: 'refresh', strategy: tomlFragment, value: '[mcp_servers.codegraph]\ncommand = "codegraph"\nargs = ["serve"]\n' }] }]);
+    const ledger = JSON.parse(readFileSync(join(home, '.repo-harness/config/ledger.json'), 'utf8'));
+    expect([ledger.fragments[0].kind, ledger.files[realpathSync(path)].backup, ledger.files[realpathSync(path)].external_backup !== undefined], String(external)).toEqual(['override', adopted, external]);
+    // The profile switch that drops architecture reverts the architecture fragments.
+    gate.revert([path], { owner: 'architecture' });
+    expect(readFileSync(path, 'utf8'), String(external)).toBe(`model = "${external ? 'edited' : 'user'}"\n${userTable}`);
   });
 });
 

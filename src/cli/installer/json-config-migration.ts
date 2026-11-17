@@ -9,8 +9,7 @@ import { openHostConfigGate, planFileRevert, type AdoptedFragment, type HostConf
 import { configurationReceiptPath, hostConfigurationRoot, readRawConfigurationReceipt, saveConfigurationReceipt, type ConfigurationReceipt } from './configuration-ownership';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import { CODEGRAPH_CONFIG_MARKER, readInstallState, writeState, type InstallState, type ManagedInstallSurface } from './install-profile';
-import { buildHookEntry, managedStatusLine, type HookHost } from './managed-entries';
-import { routesForHost } from '../hook/route-registry';
+import { canonicalManagedHookProjection } from './managed-entries';
 
 /**
  * One-shot migration of the JSON host files into the host-config ledger.
@@ -19,10 +18,11 @@ import { routesForHost } from '../hook/route-registry';
  * in the install-state ownership manifest. Each intact rh fragment becomes a
  * fragment record of one adopted file; the backup is the file with those
  * fragments set back to their text before rh, the state that the old
- * uninstall left. The migration records only what it can prove: a fragment
- * is rh's only when its whole value equals what rh writes for that record (the
- * receipt's `installed`, the manifest hash, or this version's builder for a
- * tagged hook entry or status line). Any other fragment is still recorded,
+ * uninstall left. The migration records only what it can prove: a receipt
+ * fragment whose value equals its `installed`, a CodeGraph projection whose
+ * manifest hash matches, and a tagged hook entry or status line with exactly
+ * the old writer's shape (and the manifest hash when one exists). Each one
+ * keeps its adopted text as `preimage`. Any other fragment is still recorded,
  * with no text: it stays and is reported, and rh does not refresh it. No
  * container and no file is recorded as created; only a later gate write
  * proves that. Then the old records go, and the receipt file goes with its
@@ -119,26 +119,52 @@ function manifestFragments(state: InstallState | null, path: string, content: st
   return { fragments, changed: !intact };
 }
 
-/** What this rh version writes at a selector of a hook file; undefined when it writes nothing there or cannot build it. */
-function builtValue(host: HookHost, selector: string, env: NodeJS.ProcessEnv): unknown {
-  try {
-    if (selector === 'statusLine') return host === 'claude' ? managedStatusLine(env) : undefined;
-    const match = /^hooks\.([^.[\]]+)\[([^[\]]+)\]$/.exec(selector);
-    const route = match ? routesForHost(host).find((entry) => entry.event === match[1] && entry.routeId === match[2]) : undefined;
-    return route ? buildHookEntry(route, host, env) : undefined;
-  } catch {
-    // A hook runtime that does not resolve gives no proof; the fragment stays and is reported.
-    return undefined;
+const ONLY = (value: object, keys: readonly string[]): boolean => Object.keys(value).every((key) => keys.includes(key));
+const isObjectValue = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+/**
+ * True when a tagged value has exactly the shape that the old writer wrote:
+ * a hook entry with keys within {matcher, hooks} and one hook with keys
+ * within {type, command, timeout}, type `command`; a status line with exactly
+ * {type, command} and the managed statusline command. `managedHookSelectors`
+ * already proved that the hook command is the managed command of its route.
+ */
+function hasOldWriterShape(selector: string, value: unknown): boolean {
+  if (!isObjectValue(value)) return false;
+  if (selector === 'statusLine') {
+    return ONLY(value, ['type', 'command']) && value.type === 'command' && typeof value.command === 'string'
+      && value.command.startsWith(`: ${MANAGED_TAG}; `) && value.command.endsWith(' statusline');
   }
+  const hooks = value.hooks;
+  if (!ONLY(value, ['matcher', 'hooks']) || (value.matcher !== undefined && typeof value.matcher !== 'string') || !Array.isArray(hooks) || hooks.length !== 1) return false;
+  const hook = hooks[0];
+  return isObjectValue(hook) && ONLY(hook, ['type', 'command', 'timeout']) && hook.type === 'command' && typeof hook.command === 'string'
+    && (hook.timeout === undefined || typeof hook.timeout === 'number');
 }
 
-/** Tagged hook entries and a tagged status line, each with the value that rh writes for it. */
-function taggedFragments(host: HookHost | null, content: string, env: NodeJS.ProcessEnv): OldFragment[] {
-  if (!host) return [];
+/** The hash that the old manifest recorded for the managed hook entries of a hook file, as one. */
+function managedAdapterHash(content: string): string | null {
+  const projection = canonicalManagedHookProjection((JSON.parse(content) as { hooks?: unknown }).hooks);
+  return Object.keys(projection).length ? sha256Prefixed(JSON.stringify(projection)) : null;
+}
+
+/**
+ * Tagged hook entries and a tagged status line. One is rh's when it has the
+ * old writer's shape and, while the old manifest holds a hash of the file's
+ * hook entries, that hash matches; any other one is not proved.
+ */
+function taggedFragments(state: InstallState | null, path: string, content: string, hookFile: boolean): OldFragment[] {
+  if (!hookFile) return [];
+  const hashes = state?.ownership_manifest.filter((surface) => surface.path === path && surface.managed_marker === MANAGED_TAG).map((surface) => surface.content_hash) ?? [];
+  const hashMatches = !hashes.length || hashes.includes(managedAdapterHash(content));
   const selectors = managedHookSelectors(content);
   const statusLine = jsonFragmentValue(content, 'statusLine') as { command?: unknown } | undefined;
   if (statusLine && isRepoHarnessManagedHookCommand(statusLine.command)) selectors.push('statusLine');
-  return selectors.map((selector) => ({ selector, before: undefined, installed: builtValue(host, selector, env) }));
+  return selectors.map((selector) => {
+    const value = jsonFragmentValue(content, selector);
+    const proved = hasOldWriterShape(selector, value) && (selector === 'statusLine' || hashMatches);
+    return { selector, before: undefined, installed: proved ? value : undefined };
+  });
 }
 
 function applyEdit(content: string, edit: FragmentEdit): string {
@@ -169,7 +195,8 @@ function adoption(path: string, content: string, fragments: readonly OldFragment
       ? applyEdit(backup, removeJsonFragment(backup, fragment.selector))
       : applyEdit(backup, jsonFragment.apply(backup, fragment.selector, fragment.before));
     override ||= fragment.before !== undefined;
-    adopted.push({ ...record, inserted: content.slice(range.start, range.end) });
+    const text = content.slice(range.start, range.end);
+    adopted.push({ ...record, inserted: text, preimage: text });
   }
   if (!adopted.length && !externalChange) return null;
   const keepsNoCopy = path === root && CLAUDE_ROOT_CONFIG_BACKUP === 'overrides-only' && !override;
@@ -190,8 +217,7 @@ export function planJsonConfigMigration(env: NodeJS.ProcessEnv, only?: readonly 
     const manifest = manifestFragments(state, path, content);
     const fromReceipt = receipt.byPath.get(path) ?? [];
     // A receipt entry is the older and more exact record of its fragment.
-    const host = path === paths.hooks[0] ? 'codex' : path === paths.hooks[1] ? 'claude' : null;
-    const old = [...fromReceipt, ...manifest.fragments.filter((fragment) => !fromReceipt.some((entry) => entry.selector === fragment.selector)), ...taggedFragments(host, content, env)];
+    const old = [...fromReceipt, ...manifest.fragments.filter((fragment) => !fromReceipt.some((entry) => entry.selector === fragment.selector)), ...taggedFragments(state, path, content, paths.hooks.includes(path))];
     const adopted = adoption(path, content, old, manifest.changed, paths.root);
     if (adopted) files.push({ path, adoption: adopted });
   }

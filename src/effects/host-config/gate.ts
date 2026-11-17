@@ -73,6 +73,7 @@ export interface AdoptedFragment {
   readonly selector: string;
   readonly kind: FragmentRecord['kind'];
   readonly inserted: string;
+  readonly preimage?: string;
 }
 
 /**
@@ -165,10 +166,12 @@ function nextFileRecord(previous: FileRecord | undefined, first: { kind: FileRec
       external_change: false,
     };
   }
+  // The first backup stays the restore target; a later copy of an outside edit is kept apart for the report.
+  const externalBackup = first.backup ?? previous.external_backup;
   return {
     ...previous,
     committed: committedOf(written),
-    backup: first.backup ?? previous.backup,
+    ...(externalBackup ? { external_backup: externalBackup } : {}),
     external_change: previous.external_change || !isCommitted(previous, preimage),
   };
 }
@@ -207,7 +210,8 @@ function fileFragments(plan: FilePlan, recorded: readonly FragmentRecord[]): Fra
     ...recorded.filter((entry) => !replaced.has(entry)),
     ...plan.fragments.map(({ owner, selector, kind, previous, text, created }): FragmentRecord => {
       const container = previous?.created ?? created;
-      return { file: plan.file, owner, selector, kind: previous?.kind ?? kind, inserted: text, ...(container ? { created: container } : {}) };
+      return { file: plan.file, owner, selector, kind: previous?.kind ?? kind, inserted: text, ...(container ? { created: container } : {}),
+        ...(previous?.preimage !== undefined ? { preimage: previous.preimage } : {}) };
     }),
   ];
 }
@@ -307,14 +311,15 @@ interface FragmentRevert {
 }
 
 /**
- * The per-fragment rule: a fragment goes only when rh added it (its first
- * kind is `add`) and the text at its selector is still byte-identical to what
- * rh recorded; every other fragment stays. An override is never restored here,
- * because the vault may hold rh's earlier text instead of the user's value.
- * `all` holds every record of the file: a container that a removal empties
- * goes only when one of them proves that rh created it.
+ * The per-fragment rule: a fragment goes only while the text at its selector
+ * is still byte-identical to what rh recorded. An `add` is taken out. An
+ * override (or a selected refresh of text that rh never recorded) is set back
+ * to its text in the backup, which holds the file before rh's first write
+ * over the user's bytes and never changes; with no backup it stays. Every
+ * other fragment stays. `all` holds every record of the file: a container
+ * that a removal empties goes only when one of them proves that rh created it.
  */
-function revertFragments(path: string, content: string, records: readonly FragmentRecord[], all: readonly FragmentRecord[]): FragmentRevert {
+function revertFragments(path: string, content: string, records: readonly FragmentRecord[], all: readonly FragmentRecord[], backup: string | null): FragmentRevert {
   const format = fragmentFormat(path);
   const removed: FragmentRecord[] = [];
   const kept: string[] = [];
@@ -322,11 +327,12 @@ function revertFragments(path: string, content: string, records: readonly Fragme
     let range: TextRange | null = null;
     // A file that the strategy can no longer read keeps every fragment.
     try { range = format?.strategy.locate(content, record.selector) ?? null; } catch (error) { if (!(error instanceof HostConfigError)) throw error; }
-    if (!format || record.kind !== 'add' || record.inserted === '' || !range || content.slice(range.start, range.end) !== record.inserted) {
+    const intact = format !== null && record.inserted !== '' && range !== null && content.slice(range.start, range.end) === record.inserted;
+    if (!format || !intact || (record.kind !== 'add' && backup === null)) {
       kept.push(record.selector);
       continue;
     }
-    const edit = format.remove(content, record.selector, all);
+    const edit = record.kind === 'add' ? format.remove(content, record.selector, all) : format.restore(content, record.selector, backup!, all);
     content = content.slice(0, edit.at) + edit.inserted + content.slice(edit.at + edit.removed.length);
     removed.push(record);
   }
@@ -374,7 +380,7 @@ export function planFileRevert(input: FileRevertInput): FileRevertPlan {
     return { entry: { path, action: kind === 'replaced' ? 'restored' : 'text_removed' }, write: { kind: 'replace', content: backup }, record: 'drop', removed: all };
   }
   if (!input.existed || input.bytes === null) return { entry: { path, action: 'kept_edited', kept: own.map((entry) => entry.selector) }, write: null, record: 'keep', removed: [] };
-  const result = revertFragments(path, decode(input.bytes, path), own, all);
+  const result = revertFragments(path, decode(input.bytes, path), own, all, input.hasBackup ? decode(input.backup(), path) : null);
   const removed = new Set(result.removed);
   const remaining = all.filter((entry) => !removed.has(entry));
   const content = Buffer.from(result.content, 'utf8');

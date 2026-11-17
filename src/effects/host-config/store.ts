@@ -157,6 +157,7 @@ function validFileRecord(record: unknown): boolean {
   return ['created', 'text_block', 'replaced'].includes(record.kind as string) && validBaseline(record.baseline)
     && (committed.type === 'absent' || (committed.type === 'file' && isSha(committed.sha256)))
     && (isSha(record.backup) || (record.backup === null && record.kind !== 'replaced'))
+    && (record.external_backup === undefined || isSha(record.external_backup))
     && typeof record.external_change === 'boolean';
 }
 
@@ -168,7 +169,8 @@ function validCreated(selector: string, created: unknown): boolean {
 
 function validFragment(value: unknown): boolean {
   return isObject(value) && isText(value.file) && isText(value.owner) && isText(value.selector)
-    && ['add', 'refresh', 'override'].includes(value.kind as string) && isText(value.inserted) && validCreated(value.selector, value.created);
+    && ['add', 'refresh', 'override'].includes(value.kind as string) && isText(value.inserted) && validCreated(value.selector, value.created)
+    && (value.preimage === undefined || isText(value.preimage));
 }
 
 export function readLedger(paths: HostConfigPaths): HostConfigLedger {

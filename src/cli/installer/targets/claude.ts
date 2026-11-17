@@ -99,9 +99,9 @@ class ClaudeTarget implements AgentTarget {
     migrateJsonConfigRecords(process.env);
     const created = !fs.existsSync(filePath);
     const result = applyManagedHooks(filePath, 'claude', [statusLineFragment(created ? '' : fs.readFileSync(filePath, 'utf-8'))]);
-    const notes = result.skipped.some((entry) => entry.selector === 'statusLine')
+    const notes = [...result.refreshed, ...(result.skipped.some((entry) => entry.selector === 'statusLine')
       ? [`statusLine exists and is not changed. To capture Claude quota, set its command to: ${CLAUDE_STATUS_LINE_PIPE}`]
-      : [];
+      : [])];
     if (!result.written.length) {
       return { files: [{ path: filePath, action: 'unchanged' }], ...(notes.length ? { notes } : {}) };
     }

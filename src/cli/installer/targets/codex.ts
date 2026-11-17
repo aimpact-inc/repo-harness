@@ -134,7 +134,7 @@ class CodexTarget implements AgentTarget {
     if (!result.written.length) return { files: [{ path: filePath, action: 'unchanged' }, tomlResult] };
     return {
       files: [{ path: filePath, action: created ? 'created' : 'updated' }, tomlResult],
-      notes: [CODEX_HOOK_TRUST_STEP],
+      notes: [...result.refreshed, CODEX_HOOK_TRUST_STEP],
     };
   }
 }
