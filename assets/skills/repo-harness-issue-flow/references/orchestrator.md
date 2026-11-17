@@ -397,12 +397,14 @@ host's PR events or check when the worker reports.
   merges main for this class: that merge makes a new head, a new CI run
   and new delta rows on every open PR. After the main fix lands, only the
   PR that is next to merge gets a CI re-trigger on its unchanged head, so
-  its records stay valid. The other PRs wait until they are next. Trigger
-  it with `gh workflow run` or, once the workflow takes the `reopened`
-  event (#3068), with a close and reopen; a retarget takes the `edited`
-  event. A job that was cancelled or timed out with no failed assertion is
-  infrastructure: it starts no fix round. Rerun the failed job once on the
-  same head. A second identical cancel goes to the owner.
+  its records stay valid. The other PRs wait until they are next. The
+  re-trigger is a close and reopen, and it works once the workflow takes
+  the `reopened` event (#3068). Until #3068 lands, a head with no usable
+  run gets one same-tree amend push (`git diff` is empty) and one
+  confirmation row that records the tree identity. A job that was
+  cancelled or timed out with no failed assertion is infrastructure: it
+  starts no fix round. Rerun the failed job once on the same head. A
+  second identical cancel goes to the owner.
 - **Uncovered path.** A CI selection failure `Affected coverage is unknown
   for: <paths>` is a map bug. The worker fixes the consumer edge
   (`scripts/ci-path-consumers.ts`) or the test import. Never widen to the
