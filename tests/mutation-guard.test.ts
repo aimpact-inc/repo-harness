@@ -333,6 +333,12 @@ describe('safety hook: Bash host route', () => {
         // A content write to {} goes through a matched link, so each link below the starts is judged as the kernel resolves it.
         [refuse, 'find links -name x.txt -exec cp source.txt {} \\;'], [refuse, 'find links -name x.txt -exec tee {} \\;'],
         [refuse, 'find links -name x.txt -exec truncate -s 0 {} \\;'], [null, "find build -name '*.log' -exec truncate -s 0 {} +"],
+        // A link-following start keeps the judgment of its own entry before its links are walked.
+        [refuse, `find -L ${out}/file-link -type f -exec rm {} +`], [refuse, `find -H ${out}/build-link -type f -exec rm {} +`],
+        [refuse, `find ${out}/link -follow -type f -exec rm {} +`],
+        // A value after `of=` or `--target-directory=` that holds {} keeps its literal directory; an interpreter template passes.
+        [refuse, `find stage -name b.json -exec dd if=source.txt of=${out}/{} \\;`], [refuse, `find stage -name b.json -ok cp --target-directory=${out}/{} source.txt \\;`],
+        [null, "find stage -name '*.py' -exec python3 -m py_compile {} \\;"], [refuse, 'find build -name sub -exec rm {}/../../../outside/victim.txt \\;'],
         // An unknown removal refuses; an unknown overwrite refuses only when its literal directory is outside the roots.
         [refuse, 'rm -rf build/$X'], [refuse, `echo x > ${out}/$X`], [null, 'echo x > "$TARGET"'], [null, 'echo x > build/$X'],
         [null, 'rm -rf build/*'], [null, 'rm -rf build/*/'], [null, 'rm stage/*.json'], [null, 'mv stage/*.json build/'], [null, 'cp stage/*.json build/'],

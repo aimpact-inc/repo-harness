@@ -51,10 +51,11 @@ export interface WriteTarget {
   readonly from?: string | null;
   /** For an unknown target: the absolute literal directory before the first run-time character, when the word has one. */
   readonly prefix?: string;
-  /** The word is above an expansion limit, so its targets are not known: it refuses for every kind, except as `children` allows. */
+  /**
+   * The targets are not known and have no bound (a word above an expansion limit, or a find template path that climbs out of its
+   * match with `..`): it refuses for every kind, except as `children` allows.
+   */
   readonly unbounded?: true;
-  /** A find template path from `{}`; the find judges it through its starts. */
-  readonly found?: true;
   /** A find start that find walks through links: every link below it is judged as the kernel resolves it, within the walk bound. */
   readonly followed?: true;
   /**
@@ -208,7 +209,11 @@ class TargetJudge {
       return needsTarget || target.unbounded ? unknownTargetDenial(target, this.roots, this.userStep) : this.prefixDenial(target);
     }
     if (/^\/dev\//.test(target.path)) return null;
-    if (target.followed) return this.outputDenial(target, FOLLOWED_WALK, target.path, { left: CHILD_LIMIT, seen: new Set(), active: new Set() });
+    if (target.followed) {
+      // The start entry is judged as any removal operand is; then each link below it.
+      return this.denial({ ...target, followed: undefined })
+        ?? this.outputDenial(target, FOLLOWED_WALK, target.path, { left: CHILD_LIMIT, seen: new Set(), active: new Set() });
+    }
     let paths: string[];
     try {
       paths = target.kind !== 'destroy' ? [writeThroughPath(target.path)]
@@ -607,8 +612,6 @@ interface Arg {
   readonly matched: boolean;
   /** The word is above the brace limit or a glob above the match limit. */
   readonly unbounded?: true;
-  /** In a find template, the word starts with `{}`: a path below a start, which the find judges with its starts. */
-  readonly found?: true;
 }
 
 /** The text that the grammar reads: the value, or the word as written when the shell decides it at run time. */
@@ -704,7 +707,8 @@ function restArg(arg: Arg, length: number, home: string): Arg {
   let at = 0;
   for (let count = 0; count < length && at < arg.pattern.length; count++) at += arg.pattern[at] === '\\' ? 2 : 1;
   const rest = itemArg(arg.pattern.slice(at), arg.expand, arg.word, home);
-  return arg.unbounded ? unbounded(rest) : rest;
+  // A part of a word that is not known before the command runs is not known either.
+  return arg.unbounded ? unbounded(rest) : arg.value === null ? { ...rest, value: null } : rest;
 }
 
 /**
@@ -758,7 +762,7 @@ function targetOf(kind: TargetKind, via: string, arg: Arg, cwd: string | null, e
   const children = arg.unbounded ? childGlob(arg.pattern, resolveFrom) : null;
   return {
     kind, via, spelled: arg.spelled, path, from: cwd, ...(prefix === null ? {} : { prefix }),
-    ...(arg.unbounded ? { unbounded: true as const } : {}), ...(arg.found ? { found: true as const } : {}), ...(children ? { children } : {}), ...extra,
+    ...(arg.unbounded ? { unbounded: true as const } : {}), ...(children ? { children } : {}), ...extra,
   };
 }
 
@@ -1089,7 +1093,7 @@ function commandTargets(cmd: Command, cwd: string | null, home: string, template
   if (!WRITERS.has(program)) return targets;
   const args = expandArgs(raw, cwd, home, !DESTINATION_ROLE.has(program)).map(arg => {
     const word = raw[arg.word]!.value;
-    return template && word.includes('{}') ? { ...arg, value: null, ...(word.startsWith('{}') ? { found: true as const } : {}) } : arg;
+    return template && word.includes('{}') ? { ...arg, value: null } : arg;
   });
   const each = (kind: TargetKind, list: readonly Arg[]) => list.map(arg => targetOf(kind, program, arg, cwd));
   switch (program) {
@@ -1139,12 +1143,16 @@ function commandTargets(cmd: Command, cwd: string | null, home: string, template
       // Each template is a simple command of its own, judged by the same rules; its `{}` paths are judged through the starts.
       const run = find.templates.flatMap(({ inMatchDirectory, words: [first, ...rest] }) =>
         commandTargets({ ...cmd, words: raw.slice(first!.word, (rest.at(-1) ?? first!).word + 1), redirects: [] }, inMatchDirectory ? null : cwd, home, true));
-      // A content write to a `{}` path follows a matched link to its referent, as a walk that follows links reaches it.
-      const follows = run.some(target => target.found && target.kind !== 'destroy') ? () => true : findFollowsLinks(find, cwd);
+      // A path that starts with `{}` is below a start, so the starts judge it, unless a `..` part climbs out of the match. A content
+      // write to it follows a matched link to its referent, as a walk that follows links reaches it.
+      const fromMatch = (target: WriteTarget) => target.path === null && target.spelled.startsWith('{}');
+      const climbs = (target: WriteTarget) => /(?:^|\/)\.\.(?:\/|$)/.test(target.spelled.slice(2));
+      const found = (target: WriteTarget) => fromMatch(target) && !climbs(target);
+      const follows = run.some(target => found(target) && target.kind !== 'destroy') ? () => true : findFollowsLinks(find, cwd);
       targets.push(...[...find.starts, ...(find.currentDirectory ? [literalArg('.')] : [])].map(arg => follows(arg)
         ? { ...targetOf('destroy', 'find following links', arg, cwd), followed: true as const } : targetOf('destroy', 'find', arg, cwd)));
       if (find.unknown) targets.push(targetOf('destroy', 'find', { ...find.unknown, value: null }, cwd));
-      targets.push(...run.filter(target => !target.found));
+      targets.push(...run.filter(target => !found(target)).map(target => fromMatch(target) ? { ...target, unbounded: true as const } : target));
       break;
     }
   }
