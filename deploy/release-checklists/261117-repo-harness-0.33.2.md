@@ -4,12 +4,15 @@
 
 - Release date: UTC 2026-11-17. Parent [#2742](https://github.com/aimpact-inc/repo-harness/issues/2742); no separate release issue.
 - Owner word, relayed locally by the advisor seat and recorded in [#2742 comment 6924525557](https://github.com/aimpact-inc/repo-harness/issues/2742#issuecomment-6924525557) at 2026-11-16T17:55:00Z: "那你等一起，发0.33.2吧，我不想再发一个，下一版就直接跳0.34了". The recorded reading: one release, version 0.33.2; the next release is 0.34.0.
-- The recorded reading cuts the release after #2936 and #2926 (#2916) merge. #2936 merged as `e95dee83b` (#2949). PR #2926 is open; the orchestrator decided that it stays out of this release unless the owner says otherwise.
+- Owner word for this release without #2926, in [#2960 comment 6935889250](https://github.com/aimpact-inc/repo-harness/pull/2960#issuecomment-6935889250) at 2026-11-17T02:16:21Z: "先發，不含 #2926 (Recommended)".
+- Owner word on the version after six breaking fragments reached main, in [#2960 comment 6935965164](https://github.com/aimpact-inc/repo-harness/pull/2960#issuecomment-6935965164) at 2026-11-17T02:20:19Z: "維持 0.33.2". The release ships every commit up to the source commit, with the breaking fragments, under 0.33.2.
+- #2936 merged as `e95dee83b` (#2949). PR #2926 (#2916) is open and stays out of this release by the owner word.
 - #2898, #2922, #2894 and #2893 stay out of this release; they merge after the `v0.33.2` tag.
-- Source commit before release prep: `ab65af6e20c4f305bfac509a04dc16e6c3aaa5af`. The release range is `v0.33.1..ab65af6e2`, 59 commits, 27 changelog fragments.
-- Breaking removals ship in this patch version because the owner chose 0.33.2: #2863 removes `rh init-hook`, `rh update --check`, `rh update --no-runtime-refresh` and `rh update --check-updates`; #2867 replaces `rh board migrate-dependencies --write` with `--apply`.
-- Release prep correction: the #2798 Fixed entry named `rh update --check`, which #2863 removes in the same release. The entry now names `rh setup check` only.
+- Source commit before release prep: `37b07a0f94fac87da1b724152a7e02ad1153da92`. The release range is `v0.33.1..37b07a0f9`, 83 commits, 36 changelog fragments.
+- Breaking changes ship in this patch version by the owner word "維持 0.33.2": #2863 removes `rh init-hook` and three `rh update` options; #2867 replaces `--write` with `--apply`; #2864, #2865, #2866 and #2871 move commands under `rh worktrees`, `rh verify`, `rh capability` and `rh arch`; #2937 deletes `rh brain` and `rh migrate`; #2941 renames the `AGENTIC_DEV_*` variables to `REPO_HARNESS_*`. No alias stays. The `### Breaking` section opens with one `Migration:` line per old name, from the retired-helper map in `src/cli/commands/run.ts`, the v0.33.1 command definitions and `rh commands` at the source commit.
+- Release prep correction: the #2798 Fixed entry named `rh update --check`, which #2863 removes in the same release. The entry now names `rh setup check` only. The #2795 entry said to run `rh brain check` and `rh brain sync`; #2937 deletes `rh brain` in this release, so the entry now says that.
 - Release prep added one changelog entry, from the merged PR, for each of 14 changes that had no fragment: #2862, #2868, #2870, #2881 (PR #2928), #2823, #2824, #2825, #2826 (Added); #2913, #2923, #2814 (Changed); #2843, #2844, #2917 (Fixed). The orchestrator asked for these entries. #2956 (Changed) and #2955 (Fixed) merged after the first prep commit without a fragment; release prep added their entries the same way.
+- After `ab65af6e2`, these merged changes have no fragment and no entry: #2885, #2887, #2888, #2963, #2964, #2969, #2970, #2974, #2977, #2988 (rules, operator console and CLI fixes). Release prep did not write entries for them.
 
 | PR | Commit | Change |
 |---|---|---|
@@ -72,18 +75,34 @@
 | [#2957](https://github.com/aimpact-inc/repo-harness/pull/2957) | `3dd1f3d34` | fix(rules): resolve repository root and refuse missing ledger (#2954) |
 | [#2959](https://github.com/aimpact-inc/repo-harness/pull/2959) | `8e6cb4e3f` | fix(seats): accept zai GLM-5.3 for Pi seats (#2956) |
 | [#2958](https://github.com/aimpact-inc/repo-harness/pull/2958) | `ab65af6e2` | fix(review): require an unresolved P0 or P1 for FAIL (#2955) |
+| [#2962](https://github.com/aimpact-inc/repo-harness/pull/2962) | `692b61f4d` | feat(operator): serve cached repository rules status (#2885) |
+| [#2953](https://github.com/aimpact-inc/repo-harness/pull/2953) | `3cbadcb99` | refactor(cli): delete the rh brain surface and rh migrate (#2937) |
+| [#2961](https://github.com/aimpact-inc/repo-harness/pull/2961) | `089108182` | feat(rules): file and reconcile promotion tasks (#2887) |
+| [#2965](https://github.com/aimpact-inc/repo-harness/pull/2965) | `612458470` | fix(cli): remove retired command residue and guide adapter cleanup (#2964) |
+| [#2966](https://github.com/aimpact-inc/repo-harness/pull/2966) | `585b53e87` | fix(rules): retain existing promotion parents during reconciliation (#2963) |
+| [#2947](https://github.com/aimpact-inc/repo-harness/pull/2947) | `9944d9377` | cleanup: delete four retired compatibility checks and rename AGENTIC_DEV_* to REPO_HARNESS_* |
+| [#2968](https://github.com/aimpact-inc/repo-harness/pull/2968) | `532784b25` | feat(operator-web): read-only Rules workspace with candidates and ledger (#2886) |
+| [#2967](https://github.com/aimpact-inc/repo-harness/pull/2967) | `c4db28c63` | feat(rules): show promotion task progress in status --tasks (#2888) |
+| [#2971](https://github.com/aimpact-inc/repo-harness/pull/2971) | `337cd2846` | fix(operator-web): state the dirty ledger source (#2970) |
+| [#2972](https://github.com/aimpact-inc/repo-harness/pull/2972) | `edcfc729b` | fix(rules): preserve repository identity in promotion and status (#2969) |
+| [#2973](https://github.com/aimpact-inc/repo-harness/pull/2973) | `15c9aeed0` | feat(worktrees): rh worktrees owns the contract worktree lifecycle (#2864) |
+| [#2975](https://github.com/aimpact-inc/repo-harness/pull/2975) | `94db4a030` | feat(arch): move the architecture commands under rh arch (#2871) |
+| [#2978](https://github.com/aimpact-inc/repo-harness/pull/2978) | `9608a5cd0` | fix(upgrade): report retired worktree helper scripts (#2974) |
+| [#2981](https://github.com/aimpact-inc/repo-harness/pull/2981) | `ff102d23c` | fix(arch): update retired command guidance (#2977) |
+| [#2980](https://github.com/aimpact-inc/repo-harness/pull/2980) | `1882f3c78` | feat(evals-checks): expose verification through rh verify (#2865) |
+| [#2979](https://github.com/aimpact-inc/repo-harness/pull/2979) | `baf2fe2f6` | test(review): budget slow Intel OAR fixtures (#2976) |
+| [#2982](https://github.com/aimpact-inc/repo-harness/pull/2982) | `e5d09c968` | feat(operator): rules_promote and rules_reconcile write routes; the rules snapshot gains tasks, prompts, routes and herdr (#2889) |
+| [#2984](https://github.com/aimpact-inc/repo-harness/pull/2984) | `ae846a391` | feat(cli): group capability commands under rh capability (#2866) |
+| [#2985](https://github.com/aimpact-inc/repo-harness/pull/2985) | `7499bbc30` | fix(ci): budget and split the Intel acceptance-receipt leg (#2983) |
+| [#2987](https://github.com/aimpact-inc/repo-harness/pull/2987) | `8ab7defed` | feat(operator-web): rules candidate drawer, promotion submit and the rules task view (#2890) |
+| [#2989](https://github.com/aimpact-inc/repo-harness/pull/2989) | `6e31f2d21` | docs(architecture): name the current writer supervisor command (#2986) |
+| [#2991](https://github.com/aimpact-inc/repo-harness/pull/2991) | `6f8016eeb` | fix(operator-web): keep unresolved promotion recovery and stale rules data in the drawer (#2988) |
+| [#2992](https://github.com/aimpact-inc/repo-harness/pull/2992) | `8d430e18a` | fix(architecture): anchor the run-helper flow proof on executeHelper (#2990) |
+| [#2994](https://github.com/aimpact-inc/repo-harness/pull/2994) | `37b07a0f9` | chore(projection): refresh generated architecture outputs for main@8d430e18a2c8 |
 
 ## Verification
 
-On Darwin arm64 with Bun 1.4.4, at source `a88a201e5` with the release prep changes. After the rebase onto `3dd1f3d34` (it changes `src/cli/commands/rules.ts` and `tests/rule-candidates.test.ts` only), `check:type`, the skill version check and the changelog check pass again. After the rebase onto `ab65af6e2` (#2959 and #2958, seats range and generic review only), the changelog check, `check:cli-manifest` and `git diff --check` pass.
-
-- `bun install --frozen-lockfile`: pass, 521 packages installed.
-- `bun run check:type`: pass.
-- `bun run check:state-boundaries`: pass, 644 TypeScript files checked.
-- `bun scripts/check-skill-version.ts`: pass, repo-harness=0.33.2, template=0.33.2.
-- `bun run test:files tests/skill-version.test.ts tests/bootstrap-files.test.ts tests/readme-dx.test.ts tests/action-command-skills.test.ts tests/scaffold-parity.test.ts tests/installed-copy-sync.test.ts --timeout 60000 --max-concurrency 1`: pass, 100 tests in 6 files, on the committed prep head.
-- `bun scripts/check-changelog-released-sections.ts --base origin/main`: pass, 121 released sections keep their bytes.
-- `git diff --check`: pass.
+VERIFY_BLOCK
 
 `Required / CI` and the release gate are pending. The owner release plan runs the release gate after the prep PR merges. Skill eval evidence is unavailable. Consumer architecture smoke evidence is pending; the automated case is `tests/hook-runtime.test.ts`, "a registry consumer without code facts or a projection manifest gets one architecture line (#850)".
 
