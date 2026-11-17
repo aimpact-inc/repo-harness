@@ -710,7 +710,8 @@ const fragmentKey = (record: FragmentRecord): string => `${record.owner}\0${reco
  * the transaction directory that holds the path preimages (`transaction`). It
  * writes the host files and then the ledger: the snapshot's records, except
  * the path record of each entry that it cannot undo, which stays so that the
- * entry keeps its owner.
+ * entry keeps its owner. With a null `transaction` it undoes the text writes
+ * only: the caller's own snapshot then restores the whole paths and the ledger.
  * For each file whose records changed, an intact fragment goes back to its
  * state before the transaction: to its snapshot text after a refresh, to its
  * adopted text when the transaction adopted it, out when the transaction
@@ -720,7 +721,7 @@ const fragmentKey = (record: FragmentRecord): string => `${record.owner}\0${reco
  * exist before it and still holds exactly what it wrote. Every other entry
  * stays and is returned.
  */
-export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer | null, transaction: string): HostConfigRollbackResult {
+export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer | null, transaction: string | null): HostConfigRollbackResult {
   const paths = hostConfigPathsAt(harness);
   const before = snapshot === null ? EMPTY_LEDGER : parseLedger(snapshot, `${paths.ledger} (transaction snapshot)`);
   const now = readLedger(paths);
@@ -767,6 +768,10 @@ export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer 
     const created = !previous && record.kind === 'created' && record.baseline.state === 'known' && record.baseline.existed === false;
     if (created && all.some((entry) => fragmentFormat(path, entry.selector)?.empty(content) === true)) removeTarget(path, current);
     else if (content !== decode(bytes, path)) replaceTarget(path, Buffer.from(content, 'utf8'), current);
+  }
+  if (transaction === null) {
+    removeCreatedDirectories(now.directories.filter((directory) => !before.directories.includes(directory)));
+    return { unresolved };
   }
   const pathRecords = rollbackWholePaths(paths, before, now, transaction, unresolved);
   const kept = removeCreatedDirectories(now.directories.filter((directory) => !before.directories.includes(directory)));
