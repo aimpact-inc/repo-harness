@@ -250,8 +250,13 @@ export function runArchctxPassThrough(cwd: string, args: readonly string[], opti
   return result.status ?? 1;
 }
 
-/** Lifecycle readback is separate from the CLI-only capabilities handshake. True means a usable daemon answered. */
-export function verifyArchctxDaemonRuntime(repoRoot: string, options: ArchctxProviderOptions = {}, packageRoot?: string): boolean {
+/** Lifecycle readback is separate from the CLI-only capabilities handshake. */
+export function verifyArchctxDaemonRuntime(repoRoot: string, options: ArchctxProviderOptions = {}, packageRoot?: string): void {
+  hasUsableArchctxDaemon(repoRoot, options, packageRoot);
+}
+
+/** Validate status without starting a daemon. True means a usable daemon answered. */
+function hasUsableArchctxDaemon(repoRoot: string, options: ArchctxProviderOptions = {}, packageRoot?: string): boolean {
   const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
   const client = new ArchctxClient(repoRoot, policy.requiredVersion, options, packageRoot);
   const resolved = client.resolved;
@@ -586,7 +591,7 @@ export function prepareArchitectureTask(repoRoot: string, task: string, options:
   };
   requirePrepareTime();
   // In archctx 0.15.0, status never starts a daemon; prepare can start one if none answers.
-  if (!verifyArchctxDaemonRuntime(repoRoot, { ...options, policy })) {
+  if (!hasUsableArchctxDaemon(repoRoot, { ...options, policy })) {
     throw new ArchctxClientError({ code: 'AC_RUNTIME_UNAVAILABLE', action: 'start-or-reconnect-runtime', message: 'architecture prepare skipped: no usable daemon answered' });
   }
   requirePrepareTime();
