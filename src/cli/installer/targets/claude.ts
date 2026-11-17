@@ -94,6 +94,8 @@ class ClaudeTarget implements AgentTarget {
 
   install(loc: Location, _opts: InstallOptions): WriteResult {
     const filePath = userConfigPath(loc);
+    // An unresolved hook runtime stops the install before the migration writes.
+    buildHookExecCommand(process.env);
     migrateJsonConfigRecords(process.env);
     const created = !fs.existsSync(filePath);
     const result = applyManagedHooks(filePath, 'claude', [statusLineFragment(created ? '' : fs.readFileSync(filePath, 'utf-8'))]);
