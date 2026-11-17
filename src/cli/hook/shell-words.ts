@@ -86,7 +86,7 @@ function braceAlternatives(word: string): string[] | null {
   return null;
 }
 
-/** Brace expansion of one pattern, which the shell runs before tilde and glob expansion; null above the word limit. */
+/** Brace expansion of one pattern in the shell's left-to-right order, before tilde and glob expansion; null above the word limit. */
 export function expandBraces(word: string): string[] | null {
   const done: string[] = [];
   const pending = [word];
@@ -94,7 +94,7 @@ export function expandBraces(word: string): string[] | null {
     while (pending.length) {
       const current = pending.pop()!;
       const items = braceAlternatives(current);
-      if (items) pending.push(...items); else done.push(current);
+      if (items) pending.push(...items.reverse()); else done.push(current);
       if (done.length + pending.length > BRACE_LIMIT) return null;
     }
   } catch (error) {

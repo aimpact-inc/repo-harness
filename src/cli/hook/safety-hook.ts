@@ -524,22 +524,24 @@ function targetOption(word: Word): Word[] | null {
 }
 
 /**
- * cp, mv and ln, after brace expansion: the last operand is the destination, written into a directory as each source's name,
- * and mv removes its sources. When the hook cannot classify the operands (a target-directory option, fewer than two operands),
- * every operand is a possible write target.
+ * cp and ln, after brace expansion: the last operand is the destination, written into a directory as each source's name.
+ * When the hook cannot classify the operands (a target-directory option, fewer than two operands), every operand is a possible
+ * write target. mv removes or replaces each of its operands, so every operand, a glued target directory too, is a removal target.
  */
 function destinationTargets(program: string, args: readonly Word[], dirs: Dirs): WriteTarget[] {
   const words = args.flatMap(braceWords);
-  const { operands } = operandsOf(words, MOVE_VALUED);
   const glued = words.map(targetOption);
+  if (program === 'mv') {
+    return [...operandsOf(words, new Set()).operands, ...glued.flatMap(found => found ?? [])].flatMap(word => targetsOf('destroy', 'mv', word, dirs));
+  }
+  const { operands } = operandsOf(words, MOVE_VALUED);
   if (glued.some(found => found !== null) || operands.length < 2) {
     return [...operands, ...glued.flatMap(found => found ?? [])].flatMap(word => targetsOf('overwrite', program, word, dirs));
   }
   const sources = operands.slice(0, -1);
   const sourced = sources.map(word => sourceNames(word));
   const names = sourced.some(list => list === null) ? null : sourced.flatMap(list => list!);
-  const targets = targetsOf('overwrite', program, operands.at(-1)!, dirs, { names, follow: program === 'cp' });
-  return program === 'mv' ? [...sources.flatMap(word => targetsOf('destroy', 'mv', word, dirs)), ...targets] : targets;
+  return targetsOf('overwrite', program, operands.at(-1)!, dirs, { names, follow: program === 'cp' });
 }
 
 /** The names that a copy or move source gives its destination children after brace expansion; null when a glob or a parameter decides one. */

@@ -211,8 +211,8 @@ Safety hook guards:
   `~/.codex/memories`; the rest of `~/.claude`, `~/.codex` and `~/.pi` stays
   protected), and the install ledger in `~/.repo-harness/install-state.json` does not record the
   file, or a directory tree above it, as rh-created. A create or an append
-  passes everywhere. A removal (`rm`, `unlink`, `shred`, `truncate`, an `mv`
-  source, `sed -i`, `find -delete`) whose target is not known before the
+  passes everywhere. A removal (`rm`, `unlink`, `shred`, `truncate`, each `mv`
+  operand, `sed -i`, `find -delete`) whose target is not known before the
   command runs is refused; an overwrite with an unknown target passes. A
   target with a glob or a parameter is judged by its literal directory before
   the first such character (a leading `$HOME` or `~` is literal): inside an
@@ -222,7 +222,7 @@ Safety hook guards:
   directory only when `&&` follows it, `||` does not come before it and its
   directory exists; after any other `cd` the working directory is not known. A target resolves as the kernel
   resolves it: each symlink before the `..` after it, and the existing child
-  that a `cp`, `mv` or redirect into a directory writes. In a
+  that a `cp` or redirect into a directory writes. In a
   Claude session whose `permission_mode` is not `bypassPermissions` or
   `dontAsk`, the hook returns the host's ask decision and the user answers
   locally. A bypass or `dontAsk` session (the owner's own bypass sessions

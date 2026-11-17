@@ -147,9 +147,12 @@ describe('safety hook: Bash host route', () => {
         // Operands are brace-expanded first; a target-directory option makes every operand a possible target.
         `cp ${out}/notes.txt{,.bak}`, `mv ${out}/notes.txt{,.bak}`, `ln -f ${out}/notes.txt{,.bak}`,
         `cp -rT src ${out}`, `cp -r --no-target-directory src ${out}`,
+        // Brace items keep the shell's left-to-right order, so the outside file is the destination; every mv operand is removed or replaced.
+        `cp {stage/app.json,${out}/app.json}`, `ln -f {stage/app.json,${out}/app.json}`,
+        `mv -t build ${out}/notes.txt`, `mv --target-directory=build ${out}/notes.txt`, `mv -T ${out}/notes.txt build/notes.txt`,
       ]);
       expectGuard('RecursiveDeleteGuard', ['if true; then rm -rf .; fi']);
-      expectGuard(null, ['cd src && rm a.txt', 'echo $(rm src/a.txt)', `cp stage/*.json ${out}/empty/`, 'rm notes.txt', 'cp stage/*/notes.txt src/', 'rm -rf build/*', 'cp -r src build/']);
+      expectGuard(null, ['cd src && rm a.txt', 'echo $(rm src/a.txt)', `cp stage/*.json ${out}/empty/`, 'rm notes.txt', 'cp stage/*/notes.txt src/', 'rm -rf build/*', 'cp -r src build/', 'mv -t build stage/b.json']);
       const update = hook('edit', { command: '*** Begin Patch\n*** Update File: app.json\n@@\n-x\n+y\n*** End Patch' });
       expect(update.status).toBe(2);
       expect(update.stderr).toContain('[UserFileGuard]');
