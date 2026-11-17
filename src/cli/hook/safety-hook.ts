@@ -52,11 +52,11 @@ export interface WriteTarget {
    */
   readonly into?: { readonly names: readonly string[] | null; readonly follow: boolean };
   /**
-   * The mv destination. When it resolves to an existing directory, mv moves the sources into that directory and keeps it, so the
-   * directory decides: an allowed root itself or a directory below one passes when the destination entry is in a root too, and a
-   * directory outside the roots is refused.
+   * An mv word that can be the destination. When it resolves to an existing directory, mv moves the sources into that directory,
+   * so a directory outside the roots is refused. With `intoRoot` (the last word of the plain form), an allowed root itself or a
+   * directory below one passes when the destination entry is in a root too.
    */
-  readonly destination?: true;
+  readonly destination?: { readonly intoRoot: boolean };
 }
 
 const inside = (rel: string) => !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`);
@@ -170,11 +170,13 @@ class TargetJudge {
     if (into) {
       const inRoot = (path: string) => this.roots.some(root => underRoot(root, path, true));
       if (!inRoot(into)) return this.existingDenial(target, into);
-      // BSD mv -h renames over a destination link to a directory, so the entry itself must be in a root too. A trailing slash
-      // makes the kernel follow that link, so the entry is the directory.
-      let leaf: string | null = TRAILING_SEPARATOR.test(target.path) ? into : null;
-      try { leaf ??= leafPath(target.path); } catch { /* the destroy check below decides */ }
-      if (leaf !== null && inRoot(leaf)) return null;
+      if (target.destination!.intoRoot) {
+        // BSD mv -h renames over a destination link to a directory, so the entry itself must be in a root too. A trailing slash
+        // makes the kernel follow that link, so the entry is the directory.
+        let leaf: string | null = TRAILING_SEPARATOR.test(target.path) ? into : null;
+        try { leaf ??= leafPath(target.path); } catch { /* the destroy check below decides */ }
+        if (leaf !== null && inRoot(leaf)) return null;
+      }
     }
     let path: string;
     try {
@@ -553,20 +555,12 @@ function targetOption(word: Word): Word[] | null {
 /**
  * cp and ln, after brace expansion: the last operand is the destination, written into a directory as each source's name.
  * When the hook cannot classify the operands (a target-directory option, fewer than two operands), every operand is a possible
- * write target. mv removes or replaces each of its operands, so every operand, a glued target directory too, is a removal target.
- * BSD mv stops option parsing at the first operand, so each later word, a dash-prefixed one or `--` too, is an mv operand.
- * Without a target-directory option, the last mv operand is also its destination; a GNU option or option value at the end
- * leaves the real destination a plain removal target.
+ * write target.
  */
 function destinationTargets(program: string, args: readonly Word[], dirs: Dirs): WriteTarget[] {
   const words = args.flatMap(braceWords);
+  if (program === 'mv') return moveTargets(words, dirs);
   const glued = words.map(targetOption);
-  if (program === 'mv') {
-    const operands = moveOperands(words);
-    const destination = glued.every(found => found === null) && operands.length >= 2 ? operands.at(-1) : undefined;
-    return [...operands, ...glued.flatMap(found => found ?? [])]
-      .flatMap(word => targetsOf('destroy', 'mv', word, dirs, word === destination ? { destination: true } : {}));
-  }
   const { operands } = operandsOf(words, MOVE_VALUED);
   if (glued.some(found => found !== null) || operands.length < 2) {
     return [...operands, ...glued.flatMap(found => found ?? [])].flatMap(word => targetsOf('overwrite', program, word, dirs));
@@ -575,6 +569,29 @@ function destinationTargets(program: string, args: readonly Word[], dirs: Dirs):
   const sourced = sources.map(word => sourceNames(word));
   const names = sourced.some(list => list === null) ? null : sourced.flatMap(list => list!);
   return targetsOf('overwrite', program, operands.at(-1)!, dirs, { into: { names, follow: program === 'cp' } });
+}
+
+/**
+ * mv removes or replaces each operand. BSD mv stops option parsing at the first operand, so each later word, a dash-prefixed one
+ * or `--` too, is an operand. Only the plain form `mv [short flags] src... dest`, without a dash-prefixed word after the first
+ * operand and without -t, -T or -S, names the same destination for BSD and GNU mv: its last word may move the sources into an
+ * allowed root. In every other form, each operand and each target-directory value, a separate dash-prefixed one too, can be
+ * the destination.
+ */
+function moveTargets(words: readonly Word[], dirs: Dirs): WriteTarget[] {
+  const operands = moveOperands(words);
+  const first = words.findIndex(word => !word.value.startsWith('-'));
+  const plain = first >= 0 && words.length - first >= 2
+    && words.slice(0, first).every(word => /^-[a-zA-Z]+$/.test(word.value) && !/[tTS]/.test(word.value))
+    && words.slice(first).every(word => !word.value.startsWith('-'));
+  if (plain) {
+    return operands.flatMap((word, n) => targetsOf('destroy', 'mv', word, dirs, n === operands.length - 1 ? { destination: { intoRoot: true } } : {}));
+  }
+  const values = words.flatMap((word, n) => {
+    const found = targetOption(word);
+    return found === null ? [] : found.length > 0 ? found : words.slice(n + 1, n + 2);
+  });
+  return [...new Set([...operands, ...values])].flatMap(word => targetsOf('destroy', 'mv', word, dirs, { destination: { intoRoot: false } }));
 }
 
 /** The words from the first mv operand on: leading options and a leading `--` are skipped. */
