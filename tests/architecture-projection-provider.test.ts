@@ -1084,12 +1084,18 @@ describe('package-local ArchContext projection provider', () => {
       `} catch (error) {`,
       `  console.error(String(error));`,
       `  const pid = Number((await import('node:fs')).readFileSync(${JSON.stringify(descendantPidPath)}, 'utf8'));`,
-      // The absence probe is the exit signal; a fixed wait would report a live descendant as gone.
-      `  const deadline = Date.now() + 5_000;`,
-      `  while (processExists(pid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));`,
-      `  const descendantAlive = processExists(pid);`,
+      // The absence probe is the exit signal; a fixed wait would report a live descendant as gone. Both bounds leave
+      // room inside the 4 s outer bound for the fallback kill and the pipe release, so neither can be cut off.
+      `  const waitForAbsence = async (untilMs: number): Promise<boolean> => {`,
+      `    while (processExists(pid) && Date.now() < untilMs) await new Promise((resolve) => setTimeout(resolve, 20));`,
+      `    return !processExists(pid);`,
+      `  };`,
+      `  const descendantAlive = !(await waitForAbsence(started + ${providerBudgetMs} + 500));`,
       // Release the captured pipes even when the process tree kill failed, so the fixture never hangs.
-      `  if (descendantAlive) try { process.kill(pid, 'SIGKILL'); } catch {}`,
+      `  if (descendantAlive) {`,
+      `    try { process.kill(pid, 'SIGKILL'); } catch {}`,
+      `    await waitForAbsence(started + ${providerBudgetMs} + 1_000);`,
+      `  }`,
       `  console.log(String(error));`,
       `  console.log('descendant_alive=' + descendantAlive);`,
       `  console.log('elapsed=' + (Date.now() - started));`,
