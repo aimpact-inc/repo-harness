@@ -581,8 +581,8 @@ export function runTransactionalRuntimeRefresh(
           result = { ...result, lines: [...selectionLines(resolved), ...commandPluginRepairLines(state.selection), ...result.lines] };
         }
         if ((options.target ?? 'both') === 'both') recordPiInstallOwnership(newPiSurfaces(result), transactionEnv, transaction);
+        migrateCodexConfigRecords(transactionEnv);
       }
-      migrateCodexConfigRecords(transactionEnv);
       captureConfigurationRestores(transaction, hostConfigurationRoot(transactionEnv));
       commitInstallHostTransaction(transaction);
       return result;
