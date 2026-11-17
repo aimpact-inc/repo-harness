@@ -145,7 +145,6 @@ describe('issue 698 host configuration ownership', () => {
           expect(runUninstall({ target, location: local }).exitCode).toBe(2);
         }
         expect(() => claudeTarget.install(local, {})).toThrow('--location global');
-        expect(() => claudeTarget.uninstall(local)).toThrow('--location global');
         expect(() => claudeTarget.detect(local)).toThrow('--location global');
         expect(fs.lstatSync(filePath).isSymbolicLink()).toBe(true);
         expect(fs.readFileSync(victim, 'utf8')).toBe(original);

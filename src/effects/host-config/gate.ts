@@ -120,6 +120,8 @@ export interface HostConfigGate {
    * already has a record keeps it (`recorded`), so a migration can run again.
    */
   adopt(path: string, adoption: HostConfigAdoption): 'adopted' | 'recorded';
+  /** The fragment records of one path, its links followed. */
+  recorded(path: string): readonly FragmentRecord[];
 }
 
 const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
@@ -439,5 +441,9 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
     delegate: (declaredPaths, run) => delegateWrite(paths, declaredPaths, run),
     revert: (only, revertOptions) => revertFiles(paths, only, revertOptions ?? {}),
     adopt: (path, adoption) => adoptFile(paths, path, adoption),
+    recorded: (path) => {
+      const resolved = resolveHostPath(paths, path);
+      return readLedger(paths).fragments.filter((entry) => entry.file === resolved);
+    },
   };
 }

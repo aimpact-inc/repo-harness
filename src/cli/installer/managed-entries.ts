@@ -14,17 +14,16 @@
  * hook bundle with the Bun runtime resolved during installation.
  */
 
-import { accessSync, constants, realpathSync, statSync } from 'node:fs';
+import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { isRecord } from '../../core/evidence/is-record';
 import { shellQuote } from '../../core/shell-quote';
 import { bunGlobalPackageRoot } from './skill-projection';
 import { routesForHost, type AdapterHost, type Route } from '../hook/route-registry';
-import {
-  MANAGED_TAG,
-  isRepoHarnessManagedHookCommand,
-  stripRepoHarnessManagedHooks,
-} from '../../core/adoption/managed-hook-config';
+import { MANAGED_TAG, isRepoHarnessManagedHookCommand } from '../../core/adoption/managed-hook-config';
+import { jsonFragment } from '../../core/host-config/json-fragment';
+import type { FragmentRequest } from '../../core/host-config/types';
+import { openHostConfigGate, type HostConfigApplyResult } from '../../effects/host-config/gate';
 
 export { MANAGED_TAG } from '../../core/adoption/managed-hook-config';
 
@@ -367,14 +366,30 @@ export function compareManagedHookProjection(
   return compareManagedHooks(actual, expected);
 }
 
-export function stripManagedEntries(existing: HooksByEvent | undefined): HooksByEvent {
-  return stripRepoHarnessManagedHooks(existing).hooks as HooksByEvent;
+/** The selector of one route's managed entry in a host hook file. */
+export function hookSelector(route: Pick<Route, 'event' | 'routeId'>): string {
+  return `hooks.${route.event}[${route.routeId}]`;
 }
 
-export function mergeHooks(existing: HooksByEvent, managed: HooksByEvent): HooksByEvent {
-  const out: HooksByEvent = { ...existing };
-  for (const [event, managedEntries] of Object.entries(managed)) {
-    out[event] = [...managedEntries, ...(out[event] ?? [])];
-  }
-  return out;
+/**
+ * Writes the managed entry of each route of the host into its hook file
+ * through the host-config gate, before the user's entries of the same event,
+ * and takes out the recorded entry of a route that this version no longer
+ * has. The rest of the file keeps its bytes. `extra` adds other fragments of
+ * the same file to the one apply.
+ */
+export function applyManagedHooks(filePath: string, host: HookHost, extra: readonly FragmentRequest[] = [], env: NodeJS.ProcessEnv = process.env): HostConfigApplyResult {
+  const gate = openHostConfigGate({ env });
+  const routes = routesForHost(host);
+  const current = new Set(routes.map(hookSelector));
+  const retired = gate.recorded(filePath)
+    .filter((record) => record.owner === 'core' && record.selector.startsWith('hooks.') && !current.has(record.selector))
+    .map((record) => record.selector);
+  if (retired.length) gate.revert([filePath], { selectors: retired });
+  const content = existsSync(filePath) ? readFileSync(filePath, 'utf8') : '';
+  const fragments = routes.map((route): FragmentRequest => {
+    const selector = hookSelector(route);
+    return { owner: 'core', selector, kind: jsonFragment.locate(content, selector) ? 'refresh' : 'add', strategy: jsonFragment, value: buildHookEntry(route, host, env) };
+  });
+  return gate.apply([{ path: filePath, fragments: [...fragments, ...extra] }]);
 }

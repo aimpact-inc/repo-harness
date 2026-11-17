@@ -290,6 +290,32 @@ export function jsonFragmentValue(content: string, selector: string): unknown {
   return element === null ? (JSON.parse(`{${text}}`) as Record<string, unknown>)[path.at(-1)!] : JSON.parse(text) as unknown;
 }
 
+/**
+ * The selectors of rh's managed hook entries in a hook file. A managed command
+ * that shares its entry with another command has no selector of its own, so
+ * it fails closed with the step that frees it.
+ */
+export function managedHookSelectors(content: string): string[] {
+  const hooks = root(content) === null ? undefined : (JSON.parse(content) as { hooks?: unknown }).hooks;
+  if (hooks === null || typeof hooks !== 'object' || Array.isArray(hooks)) return [];
+  const selectors: string[] = [];
+  for (const [event, entries] of Object.entries(hooks)) {
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      const { routes, others } = managedRoutes(entry);
+      if (!routes.length) continue;
+      if (routes.length !== 1 || others !== 0) {
+        throw invalid(`a hook entry in ${event} holds a repo-harness command together with other commands. Move that command into its own entry, or delete it, then run rh again`);
+      }
+      const [routeEvent, routeId] = routes[0]!.split(' ');
+      if (routeEvent === event) selectors.push(`hooks.${event}[${routeId}]`);
+    }
+  }
+  // Each selector must locate one entry; a duplicate fails closed here.
+  for (const selector of selectors) find(content, selector);
+  return [...new Set(selectors)];
+}
+
 /** Sets the value at a selector; `undefined` is not a value. */
 export const jsonFragment: HostConfigStrategy<unknown> = {
   locate: (content, selector) => find(content, selector)?.range ?? null,
