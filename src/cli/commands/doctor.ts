@@ -543,9 +543,14 @@ export function checkSkillProjection(target: DoctorTarget = 'both', env: NodeJS.
     }
     let warning = judgments.some(judgment => !judgment.row.ok);
     if (installed) {
-      const drift = installStateStatus(installed, env).drift;
+      const status = installStateStatus(installed, env);
+      const drift = status.drift;
       if (drift.status === 'drift') warning = true;
       details.push(`install ledger: ${JSON.stringify(drift)}${drift.status === 'drift' ? `; inspect: rh install --state; run: ${installSelectionCommand(selection)}` : ''}`);
+      if (status.ownership_outside_root.length) {
+        warning = true;
+        details.push(`install ledger: path records outside their host root, not acted on: ${status.ownership_outside_root.join(', ')}; run: ${installSelectionCommand(selection)} (it records the paths again and drops these records)`);
+      }
     } else {
       warning = true;
       details.push('install ledger: missing; run: rh install');

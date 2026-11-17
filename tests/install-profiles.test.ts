@@ -53,7 +53,7 @@ import { writeBunWrapper } from './helpers/repo-fixture';
 import { HC_MIN_VERSION } from '../src/core/terminal/herdr-pin';
 import { openHostConfigGate } from '../src/effects/host-config/gate';
 import { hostConfigPaths } from '../src/effects/host-config/store';
-import { ownedPath, pathRecordKey, readPathRecords } from '../src/effects/host-config/path-records';
+import { ownedPath, pathRecordKey, readPathRecords, readPathRecordSet } from '../src/effects/host-config/path-records';
 import { tomlFragment } from '../src/core/host-config/toml-fragment';
 import { currentProcessStartTime } from '../src/effects/locking/process-start-time';
 import { jsonFragment } from '../src/core/host-config/json-fragment';
@@ -559,10 +559,10 @@ describe('install selection', () => {
     applyInstallSelection([], [], env, new Date('2026-01-02T00:00:00Z'));
     expect(ownedPath(env, retired)).toEqual(receipt);
 
-    // A record outside the root of its host fails closed.
+    // A record outside the root of its host is never read as owned; it is reported.
     const elsewhere = join(env.HOME!, 'elsewhere', 'repo-harness-handoff');
     seedPathRecords(env, { [pathRecordKey(env, elsewhere)]: receipt });
-    expect(() => readPathRecords(env)).toThrow(`outside its claude root, so rh does not act on it: ${pathRecordKey(env, elsewhere)}`);
+    expect(readPathRecordSet(env)).toEqual({ records: {}, outside: [pathRecordKey(env, elsewhere)] });
   }));
 
   for (const plugins of ['platform', undefined] as const) {
@@ -1314,7 +1314,7 @@ describe('install selection', () => {
     });
   }, 60_000);
 
-  test('a selection switch rejects a path record outside its host root', () => withHome((env) => {
+  test('a selection switch skips and reports a path record outside its host root, and keeps the file', () => withHome((env) => {
     const external = join(env.HOME!, 'user-owned.txt');
     const content = 'must survive';
     writeFileSync(external, content);
@@ -1324,7 +1324,12 @@ describe('install selection', () => {
       committed: { type: 'file', sha256: `sha256:${createHash('sha256').update(content).digest('hex')}` },
     } });
 
-    expect(() => prepareInstallSelectionSwitch([], env)).toThrow(`the ledger records a path outside its claude root, so rh does not act on it: ${pathRecordKey(env, external)}`);
+    expect(installStateStatus(readInstallState(env)!, env).ownership_outside_root).toEqual([pathRecordKey(env, external)]);
+    expect(prepareInstallSelectionSwitch([], env)).toEqual([]);
+    expect(readFileSync(external, 'utf-8')).toBe(content);
+    // The next record write drops the record and keeps the file.
+    recordVerifiedAgentFleetOwnership(env);
+    expect(readPathRecordSet(env).outside).toEqual([]);
     expect(readFileSync(external, 'utf-8')).toBe(content);
     // The hook selection read uses the read model only; the installer commands own the surface check (#1680).
     expect(readRecordedSelection(env)).toEqual({ status: 'recorded', selection: 'all', plugins: ALL_PLUGINS });

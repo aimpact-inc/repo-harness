@@ -2,7 +2,7 @@ import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { sha256Prefixed } from '../../core/evidence/sha256';
-import { HostConfigError, type PathRecord, type PathRecordHost } from '../../core/host-config/types';
+import type { PathRecord, PathRecordHost } from '../../core/host-config/types';
 import { ownedSkillIsIntact } from '../herdr-skill-marker';
 import { hostSkillRoot, stagedSkillRoot } from '../host-skill-roots';
 import { hashManagedTree } from '../managed-tree';
@@ -20,19 +20,28 @@ export type PathRecords = Readonly<Record<string, PathRecord>>;
 
 /**
  * The records, each key checked against the root that its host names, with the
- * root's links followed. A record outside its root fails closed: a removal acts
- * on the key, so such a record could name a user file outside every install root.
+ * root's links followed. A removal acts on the key, so a record outside its
+ * root could name a user file outside every install root: rh never acts on it,
+ * reports it in `outside`, and the next record write drops it. A host root that
+ * moved after the install (a linked `~/.claude`) leaves such records; the next
+ * install records its paths again under their new keys.
  */
-export function readPathRecords(env: NodeJS.ProcessEnv): PathRecords {
+export function readPathRecordSet(env: NodeJS.ProcessEnv): { readonly records: PathRecords; readonly outside: readonly string[] } {
   const paths = hostConfigPaths(env);
-  const records = readLedger(paths).paths;
-  for (const [key, record] of Object.entries(records)) {
+  const records: Record<string, PathRecord> = {};
+  const outside: string[] = [];
+  for (const [key, record] of Object.entries(readLedger(paths).paths)) {
     const root = resolveHostPath(paths, hostRoot(env, record.host));
-    if (key !== root && isPathInside(root, key)) continue;
-    if (record.host === 'claude' && key === hostPathKey(paths, join(env.HOME ?? homedir(), '.claude.json'))) continue;
-    throw new HostConfigError('host_config_invalid_state', `the ledger records a path outside its ${record.host} root, so rh does not act on it: ${key}; inspect: ${paths.ledger}`);
+    const inside = (key !== root && isPathInside(root, key))
+      || (record.host === 'claude' && key === hostPathKey(paths, join(env.HOME ?? homedir(), '.claude.json')));
+    if (inside) records[key] = record;
+    else outside.push(key);
   }
-  return records;
+  return { records, outside };
+}
+
+export function readPathRecords(env: NodeJS.ProcessEnv): PathRecords {
+  return readPathRecordSet(env).records;
 }
 
 /** The record key of a host path: its parent links followed, the leaf kept. */
