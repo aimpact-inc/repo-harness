@@ -106,16 +106,18 @@ test('update keeps one exact configuration backup for both migrations, skips unc
   const timestamp = '2026-11-17T00:00:00.000Z';
   const clock = spyOn(Date.prototype, 'toISOString').mockReturnValue(timestamp);
   try {
-    for (const kind of ['both', 'brain-only', 'unchanged', 'backup-failure'] as const) {
+    for (const kind of ['both', 'threshold-only', 'brain-only', 'unchanged', 'backup-failure'] as const) {
       const home = mkdtempSync(join(tmpdir(), 'update-config-backup-'));
       try {
         const directory = join(home, '.repo-harness');
         mkdirSync(directory);
         const path = join(directory, 'config.json');
         const backup = `${path}.bak-${timestamp.replace(/[:.]/g, '-')}-update`;
+        const routing = kind === 'brain-only' || kind === 'unchanged' ? DEFAULT_SEATS_CONFIG.routing
+          : { ...DEFAULT_SEATS_CONFIG.routing, codex_hyper_at_or_above_remaining: 70 };
         const seats = kind === 'both' || kind === 'backup-failure'
-          ? { ...DEFAULT_SEATS_CONFIG, 'gatekeeper-deep': undefined } : DEFAULT_SEATS_CONFIG;
-        const original = Buffer.from(`${JSON.stringify({ seats, ...(kind === 'unchanged' ? {} : { brainRoot: '/old-vault' }), custom: '雪' }, null, 4)}\r\n`);
+          ? { ...DEFAULT_SEATS_CONFIG, routing, 'gatekeeper-deep': undefined } : { ...DEFAULT_SEATS_CONFIG, routing };
+        const original = Buffer.from(`${JSON.stringify({ seats, ...(kind === 'unchanged' || kind === 'threshold-only' ? {} : { brainRoot: '/old-vault' }), custom: '雪' }, null, 4)}\r\n`);
         writeFileSync(path, original);
         if (kind === 'backup-failure') mkdirSync(backup);
         const bun = join(home, 'bun');
@@ -133,8 +135,8 @@ test('update keeps one exact configuration backup for both migrations, skips unc
           expect(lstatSync(backup).isDirectory()).toBe(true);
           continue;
         }
-        expect(result.steps.find(step => step.step === 'migrate seats configuration')?.status, result.stdout).toBe(kind === 'both' ? 'ok' : 'skipped');
-        expect(result.steps.find(step => step.step === 'remove the retired brainRoot configuration key')?.status).toBe(kind === 'unchanged' ? 'skipped' : 'ok');
+        expect(result.steps.find(step => step.step === 'migrate seats configuration')?.status, result.stdout).toBe(kind === 'both' || kind === 'threshold-only' ? 'ok' : 'skipped');
+        expect(result.steps.find(step => step.step === 'remove the retired brainRoot configuration key')?.status).toBe(kind === 'unchanged' || kind === 'threshold-only' ? 'skipped' : 'ok');
         expect(backups).toEqual(kind === 'unchanged' ? [] : [backup.slice(directory.length + 1)]);
         if (kind === 'unchanged') expect(readFileSync(path)).toEqual(original);
         else {
