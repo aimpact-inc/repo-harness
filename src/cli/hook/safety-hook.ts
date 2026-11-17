@@ -620,9 +620,9 @@ const unbounded = (arg: Arg): Arg => ({ ...arg, value: null, unbounded: true });
  * whose sequence is `*`; when the word is still above the limit, the whole word is one unbounded word. A glob item above the
  * match limit is one unbounded word too.
  */
-function expandWord(word: Word, at: number, cwd: string | null, home: string): Arg[] {
+function expandWord(word: Word, at: number, cwd: string | null, home: string, targetRole = true): Arg[] {
   const exact = expandBraces(word.pattern);
-  const shape = exact === null ? sequenceShape(word.pattern) : null;
+  const shape = exact === null && targetRole ? sequenceShape(word.pattern) : null;
   const patterns = exact ?? (shape === null ? null : expandBraces(shape));
   if (patterns === null) return [unbounded(itemArg(word.pattern, word.expand, at, home))];
   let budget = CHILD_LIMIT;
@@ -693,8 +693,8 @@ function globMatches(pattern: string, cwd: string | null, limit: number): string
 }
 
 /** The arguments after the program word, expanded from one working directory. */
-const expandArgs = (words: readonly Word[], cwd: string | null, home: string): Arg[] =>
-  words.flatMap((word, at) => expandWord(word, at, cwd, home));
+const expandArgs = (words: readonly Word[], cwd: string | null, home: string, targetRole: boolean): Arg[] =>
+  words.flatMap((word, at) => expandWord(word, at, cwd, home, targetRole));
 
 const literalArg = (value: string): Arg => ({ value, pattern: escapePattern(value), expand: false, spelled: value, word: -1, matched: false });
 
@@ -889,9 +889,11 @@ const SED_VALUED = new Set(['-e', '--expression', '-f', '--file', '-l', '--line-
 const WRITERS = new Set(['rm', 'unlink', 'shred', 'truncate', 'mv', 'cp', 'ln', 'tee', 'sed', 'dd', 'find']);
 
 /**
- * A copy, link or move operand can be a destination that receives other files, so a word above an expansion limit keeps the
- * unknown-target refusal there. Only a word whose matches are themselves the targets is judged by its directory.
+ * A copy, link or move operand can be a destination that receives other files, so its words keep main's expansion: no sequence
+ * shaping, and a word above an expansion limit keeps the unknown-target refusal. Only a word whose matches are themselves the
+ * targets is shaped and judged by its directory.
  */
+const DESTINATION_ROLE = new Set(['cp', 'ln', 'mv']);
 const destinationRole = (target: WriteTarget): WriteTarget => ({ ...target, children: undefined });
 
 /** The write targets of one simple command, run from `cwd` (null when it is not known); every word is expanded first. */
@@ -917,7 +919,7 @@ function commandTargets(cmd: Command, cwd: string | null, home: string): WriteTa
   }
   // Only a writing program lists directories for its glob words.
   if (!WRITERS.has(program)) return targets;
-  const args = expandArgs(raw, cwd, home);
+  const args = expandArgs(raw, cwd, home, !DESTINATION_ROLE.has(program));
   const each = (kind: TargetKind, list: readonly Arg[]) => list.map(arg => targetOf(kind, program, arg, cwd));
   switch (program) {
     case 'rm': case 'unlink':

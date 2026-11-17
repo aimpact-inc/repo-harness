@@ -264,12 +264,14 @@ describe('safety hook: Bash host route', () => {
         [refuse, `tee {build/{1..1025},${out}/victim.txt}`], [refuse, `tee {${out}/victim.txt,build/{1..1025}}`],
         [refuse, `cp source.txt {build/{1..1025},${out}}`], [refuse, 'tee {build/{1..1025},links/x.txt}'],
         // #3037: an over-limit glob in one directory inside a root is judged by its link children; a sequence stays in one name.
-        [null, 'rm -f big/*'], [null, 'rm -f *', 'big'], [null, 'tee big/[0-9]*'], [null, 'echo x > big/[0-9]*'], [refuse, 'tee big/*'],
+        [null, 'rm -f big/*'], [null, 'rm -f *', 'big'], [null, 'tee big/[0123456789]*'], [null, 'echo x > big/[0123456789]*'], [refuse, 'tee big/*'],
         [refuse, 'mv big/* build/'], [refuse, 'rm -f linked/big/*'], [null, 'tee {build/{1..1025},build/x.txt}'],
         [refuse, `dd if=source.txt of=${out}/{1..1025}`],
         // #3048 r1-r2: a copy, link or move destination above an expansion limit keeps the refusal; a collapsed sequence is never globbed.
         [refuse, 'cp source.txt big/[0-9z]*'], [refuse, 'cp -R source big/*'], [refuse, 'cp -R source big/*/'], [refuse, 'cp -R source big/[0-9z]*'],
         [refuse, 'dd if=/dev/null of={1..1025}', 'seq'],
+        // #3048 r3: a copy or link word keeps main's expansion, so a sequence never shapes a literal sibling into the destination.
+        [refuse, 'cp -R source {big/{1..1025},big/zdir}'], [refuse, 'cp source.txt {big/{1..1025},big/zdir}'], [refuse, 'ln -sf source.txt {big/{1..1025},big/zdir}'],
         // GNU getopt accepts a long option prefix.
         [refuse, 'mv --target=linked stage/b.json'], [refuse, 'cp --target=linked a.txt'],
         // #3026: a writing find that follows links below its start refuses; plain and read-only find keep today's judge.
