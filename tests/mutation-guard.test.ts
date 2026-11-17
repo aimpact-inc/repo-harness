@@ -256,6 +256,10 @@ describe('safety hook: Bash host route', () => {
         [refuse, `cp source.txt {build/{1..1025},${out}}`], [refuse, 'tee {build/{1..1025},links/x.txt}'],
         // GNU getopt accepts a long option prefix.
         [refuse, 'mv --target=linked stage/b.json'], [refuse, 'cp --target=linked a.txt'],
+        // #3026: a writing find that follows links below its start refuses; plain and read-only find keep today's judge.
+        [refuse, 'find -L stage -name victim.txt -delete'], [refuse, 'find stage -follow -name victim.txt -delete'],
+        [refuse, "find -L stage -name '*.txt' -exec rm {} +"], [refuse, 'find -H stage/linked -delete'], [refuse, "find -L . -name '*.txt' -delete", 'stage'],
+        [null, 'find stage -name victim.txt -delete'], [null, "find -L stage -name '*.txt' -print"], [null, 'find -H stage -delete'],
         // An unknown removal refuses; an unknown overwrite refuses only when its literal directory is outside the roots.
         [refuse, 'rm -rf build/$X'], [refuse, `echo x > ${out}/$X`], [null, 'echo x > "$TARGET"'], [null, 'echo x > build/$X'],
         [null, 'rm -rf build/*'], [null, 'rm -rf build/*/'], [null, 'rm stage/*.json'], [null, 'mv stage/*.json build/'], [null, 'cp stage/*.json build/'],
@@ -270,6 +274,7 @@ describe('safety hook: Bash host route', () => {
       expect(wrong).toEqual([]);
       // The refusal names the resolved outside path, so the local user can authorize it.
       expect(bashSafetyDenial('mv a.txt stage/*', repo, { repoRoot: repo, env, host: 'claude' })?.reason).toContain(`would remove or change ${out},`);
+      expect(bashSafetyDenial('find -L stage -delete', repo, { repoRoot: repo, env, host: 'claude' })?.reason).toContain(`target stage of find following links from ${repo} `);
     } finally {
       if (savedTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = savedTmp;
       rmSync(root, { recursive: true, force: true });

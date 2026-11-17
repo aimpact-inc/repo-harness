@@ -5,7 +5,8 @@
  * - I2: refuse a removal or overwrite of an existing file outside the agent's worktree, the managed worktree root, the system temp
  *   directory and the host agent's own memory and plan directories, unless rh's install ledger records the file as rh-created.
  *   Creates and appends pass everywhere. The user authorizes anything else locally by running the command in their own shell,
- *   which no hook sees.
+ *   which no hook sees. A writing `find` that follows links below a start (`-L`, `-follow`, `-H` on a link start) makes that
+ *   start an unknown target.
  * - Recursive delete: refuse `rm -r`, `find -delete`/`-exec` and `git clean -x` from the repository root or an ancestor.
  *
  * The threat model is accidents. A target built at run time, a script or binary that writes, and a hidden alias are accepted
@@ -761,6 +762,24 @@ function findStarts<T extends Valued>(args: readonly T[]): T[] {
   return starts;
 }
 
+/**
+ * Which starts find follows links from: every start with -L or -follow, a start that is a link with -H. A writing find then
+ * reaches files below a link that its start path does not name, so the start is an unknown target. A start that cannot be
+ * checked counts as a link.
+ */
+function findFollowsLinks(args: readonly Arg[], cwd: string | null): (start: Arg) => boolean {
+  const end = args.findIndex(arg => !/^-(?:[HLPEXdsx]+|O\d)$/.test(text(arg)));
+  const flags = (end < 0 ? args : args.slice(0, end)).map(text).join('');
+  if (flags.includes('L') || args.some(arg => arg.value === '-follow')) return () => true;
+  if (!flags.includes('H')) return () => false;
+  return (start) => {
+    if (start.value === null || (!isAbsolute(start.value) && cwd === null)) return false;
+    try {
+      return lstatSync(resolve(cwd ?? sep, start.value), { throwIfNoEntry: false })?.isSymbolicLink() === true;
+    } catch { return true; }
+  };
+}
+
 const DOT: Word = { kind: 'word', value: '.', pattern: '.', expand: false, glob: false, quoted: false, assign: false };
 const TRUNCATE_VALUED = new Set(['-s', '--size', '-r', '--reference']);
 const SHRED_VALUED = new Set(['-n', '--iterations', '-s', '--size', '--random-source']);
@@ -834,7 +853,9 @@ function commandTargets(cmd: Command, cwd: string | null, home: string): WriteTa
     case 'find':
       if (findWrites(args)) {
         const starts = findStarts(args);
-        targets.push(...(starts.length ? starts : [literalArg('.')]).map(arg => targetOf('destroy', 'find', arg, cwd)));
+        const follows = findFollowsLinks(args, cwd);
+        targets.push(...(starts.length ? starts : [literalArg('.')]).map(arg => follows(arg)
+          ? targetOf('destroy', 'find following links', { ...arg, value: null }, cwd) : targetOf('destroy', 'find', arg, cwd)));
       }
       break;
   }
