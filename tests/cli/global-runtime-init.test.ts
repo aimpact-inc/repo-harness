@@ -3546,6 +3546,47 @@ describe('Global Working Rules refresh during install and update', () => {
     expect(readFileSync(path, 'utf-8')).toBe(mixedLegacy);
     expect(readFileSync(target, 'utf-8')).toBe(claude);
     expect(lstatSync(claudePath).isSymbolicLink()).toBe(true);
+
+    // A linked target with legacy sections only: the rollback puts back the vault copy that the migration took.
+    const legacyTarget = join(home, 'dotfiles-AGENTS.md');
+    rmSync(path);
+    writeFileSync(legacyTarget, mixedLegacy);
+    symlinkSync(legacyTarget, path);
+    const linked = beginInstallHostTransaction(installProfileHostMutationPaths(env), env);
+    expect(applyGlobalContextRefresh(preflightGlobalContextRefresh(ROOT, home, ['codex'], 'en'), home).status).toBe('ok');
+    expect(readFileSync(legacyTarget, 'utf-8')).not.toBe(mixedLegacy);
+    rollbackInstallHostTransaction(linked);
+    expect(readFileSync(legacyTarget, 'utf-8')).toBe(mixedLegacy);
+    expect(lstatSync(path).isSymbolicLink()).toBe(true);
+  }));
+
+  test('a valid block with a released section outside it: the whole file goes to the vault before the migration, and a revert gives it back', () => withRulesRuntime(({ home, path }) => {
+    const block = renderGlobalRulesBlock(ROOT, { preset: 'en', instruction: 'Use English to report to user.' });
+    const original = `${userBefore}${block}\n${released.get('## Progressive Due Diligence')}\n\n${userAfter}`;
+    const claudePath = join(home, '.claude', 'CLAUDE.md');
+    const target = join(home, 'dotfiles-CLAUDE.md');
+    mkdirSync(join(home, '.claude'), { recursive: true });
+    writeFileSync(path, original);
+    writeFileSync(target, original);
+    symlinkSync(target, claudePath);
+    expect(applyGlobalContextRefresh(preflightGlobalContextRefresh(ROOT, home, ['codex', 'claude'], 'en'), home).status).toBe('ok');
+    const ledger = JSON.parse(readFileSync(join(home, '.repo-harness', 'config', 'ledger.json'), 'utf8'));
+    for (const file of [path, target]) {
+      expect(readFileSync(file, 'utf8'), file).not.toBe(original);
+      const backup = String(ledger.files[realpathSync(file)].backup).replace('sha256:', '');
+      expect(readFileSync(join(vaultDir(home), backup), 'utf8'), file).toBe(original);
+    }
+    expect(openHostConfigGate({ env: { HOME: home } }).revert([path, claudePath]).map((entry) => entry.action)).toEqual(['text_removed', 'text_removed']);
+    for (const file of [path, target]) expect(readFileSync(file, 'utf8'), file).toBe(original);
+    expect(lstatSync(claudePath).isSymbolicLink()).toBe(true);
+    if (process.getuid?.() === 0) return;
+    // No vault copy, no migration.
+    const other = `${original}## Later\n`;
+    writeFileSync(path, other);
+    chmodSync(vaultDir(home), 0o500);
+    try { expect(applyGlobalContextRefresh(preflightGlobalContextRefresh(ROOT, home, ['codex'], 'en'), home).status).toBe('failed'); }
+    finally { chmodSync(vaultDir(home), 0o700); }
+    expect(readFileSync(path, 'utf8')).toBe(other);
   }));
 
   test('a flag migrates the legacy span, keeps every user section, and a second update is a no-op', () => withRulesRuntime(({ home, path, run }) => {
