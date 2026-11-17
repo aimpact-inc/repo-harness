@@ -4,7 +4,7 @@ import wazaRules from "../../core/skill-surface/waza-shared-rules.json";
 import { bunGlobalPackageRoot, expectedSkillProjections, skillLinkMatches } from './skill-projection';
 import { configurationReceiptPath } from './configuration-ownership';
 import { ensurePrivateDirectory, hostConfigPaths, putVault, resolveHostPath } from '../../effects/host-config/store';
-import { openHostConfigGate, rollbackHostConfigTransaction, type HostConfigRevertEntry } from '../../effects/host-config/gate';
+import { openHostConfigGate, planPathRevert, rollbackHostConfigTransaction } from '../../effects/host-config/gate';
 import { migrateCodexConfigRecords } from './codex-config-migration';
 import { migrateJsonConfigRecords } from './json-config-migration';
 import { pathRecordHost, pathRecordIsCurrent, pathRecordKey, pathRecordsDigest, readPathRecords, readPathRecordSet, registerSupportedPathRecords, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
@@ -998,18 +998,16 @@ function removeRetiredOwnedSurfaces(
   env: NodeJS.ProcessEnv,
   transaction: string,
 ): readonly string[] {
-  const retired = Object.entries(readPathRecords(env)).filter(([, record]) => !ownerSelected(record, plugins)).map(([key]) => key);
-  const gate = openHostConfigGate({ env });
-  const drifted = (entries: readonly HostConfigRevertEntry[]) => entries.find((entry) => entry.action === 'kept_edited');
-  const planned = drifted(gate.revertPaths(retired, { dryRun: true }));
-  if (planned) throw new Error(`refusing plugin switch because managed surface drifted: ${planned.path}`);
-  const ownedSkills = new Set(selectionOwnedSkillNames(loadSkillSurfaceCatalog()));
   const records = readPathRecords(env);
+  const retired = Object.keys(records).filter((key) => !ownerSelected(records[key]!, plugins));
+  const planned = retired.find((key) => planPathRevert(key, records[key]!) === 'kept_edited');
+  if (planned) throw new Error(`refusing plugin switch because managed surface drifted: ${planned}`);
+  const ownedSkills = new Set(selectionOwnedSkillNames(loadSkillSurfaceCatalog()));
   const removedSkills = new Set(retired.filter((key) => records[key]!.host === 'staged' && ownedSkills.has(basename(key))).map((key) => basename(key)));
   // Only a registration that this install created is in the state.
   const piPackages = plugins.includes('pi') ? [] : current.pi_packages;
   for (const source of piPackages) removePiPackage(source, env);
-  const changed = drifted(gate.revertPaths(retired, { transaction }));
+  const changed = openHostConfigGate({ env }).revertPaths(retired, { transaction }).find((entry) => entry.action === 'kept_edited');
   if (changed) throw new Error(`refusing plugin switch because managed surface drifted: ${changed.path}`);
   removeOwnedSkillLockEntries(env, removedSkills);
   return [...piPackages, ...retired];

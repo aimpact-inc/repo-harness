@@ -107,11 +107,6 @@ export interface HostConfigPathOptions {
   readonly transaction?: string;
 }
 
-export interface HostConfigPathRevertOptions extends HostConfigPathOptions {
-  readonly dryRun?: boolean;
-  /** Revert only the path records of this owner. */
-  readonly owner?: string;
-}
 
 export interface HostConfigRevertEntry {
   readonly path: string;
@@ -179,12 +174,13 @@ export interface HostConfigGate {
    */
   delegate(declared: readonly HostConfigPathDeclaration[], run: (destinations: readonly string[]) => void, options?: HostConfigPathOptions): HostConfigDelegateResult;
   /**
-   * Undo path records, for the named paths or for all: a `created` entry goes
+   * Undo the path records of the named paths, which the caller takes from the
+   * records that may grant a removal (`readPathRecords`): a `created` entry goes
    * while it is current, a `replaced` file gets the user file back while it
    * still holds rh's bytes, and a `user_managed` record is released. A changed
    * entry stays with its record and is reported `kept_edited`.
    */
-  revertPaths(paths?: readonly string[], options?: HostConfigPathRevertOptions): readonly HostConfigRevertEntry[];
+  revertPaths(paths: readonly string[], options?: HostConfigPathOptions): readonly HostConfigRevertEntry[];
   /**
    * The user's word that they keep each file in `kept`: its record becomes
    * `user_managed` with the file's current hash. Every other `user_managed`
@@ -526,37 +522,42 @@ function adoptReplacedPath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, path:
   writeLedger(paths, { ...ledger, paths: { ...ledger.paths, [key]: record } });
 }
 
-/** The undo of one path record; `write` is false in a dry run. */
-function revertWholePath(paths: HostConfigPaths, key: string, record: PathRecord, write: boolean, transaction: string | undefined): HostConfigRevertEntry['action'] {
+/**
+ * The undo that a path record gets now, with no write: a caller that plans
+ * from records that the ledger does not hold yet (a dry-run migration) uses
+ * the same rule as `revertPaths`.
+ */
+export function planPathRevert(key: string, record: PathRecord): HostConfigRevertEntry['action'] {
   if (record.kind === 'user_managed') return 'released';
-  const present = observePathEntry(key) !== null;
-  if (!present) return record.kind === 'created' ? 'released' : 'kept_edited';
+  if (observePathEntry(key) === null) return record.kind === 'created' ? 'released' : 'kept_edited';
   if (!pathRecordIsCurrent(key, record)) return 'kept_edited';
-  if (!write) return record.kind === 'replaced' ? 'restored' : 'removed';
+  return record.kind === 'replaced' ? 'restored' : 'removed';
+}
+
+function revertWholePath(paths: HostConfigPaths, key: string, record: PathRecord, transaction: string | undefined): HostConfigRevertEntry['action'] {
+  const action = planPathRevert(key, record);
+  if (action !== 'restored' && action !== 'removed') return action;
   if (transaction) keepPreimage(transaction, key);
   if (record.kind === 'replaced') {
     const committed = record.committed as Extract<PathCommitted, { type: 'file' }>;
     replaceTarget(key as HostPath, readVault(paths, record.backup!), { existed: true, sha256: committed.sha256 });
-    return 'restored';
-  }
-  removePathEntry(key);
-  return 'removed';
+  } else removePathEntry(key);
+  return action;
 }
 
-function revertWholePaths(paths: HostConfigPaths, only: readonly string[] | undefined, options: HostConfigPathRevertOptions): HostConfigRevertEntry[] {
+function revertWholePaths(paths: HostConfigPaths, only: readonly string[], options: HostConfigPathOptions): HostConfigRevertEntry[] {
   const ledger = readLedger(paths);
   const records = { ...ledger.paths };
-  const keys = only ? only.map((path) => hostPathKey(paths, path)) : Object.keys(ledger.paths);
+  const keys = only.map((path) => hostPathKey(paths, path));
   const report: HostConfigRevertEntry[] = [];
   const dropped: string[] = [];
   for (const key of keys) {
     const record = records[key];
-    if (!record || (options.owner !== undefined && record.owner !== options.owner)) continue;
-    const action = revertWholePath(paths, key, record, options.dryRun !== true, options.transaction);
+    if (!record) continue;
+    const action = revertWholePath(paths, key, record, options.transaction);
     if (action !== 'kept_edited') { delete records[key]; dropped.push(key); }
     report.push({ path: key, action });
   }
-  if (options.dryRun) return report;
   const attempted = ledger.directories.filter((directory) => dropped.some((key) => isPathInside(directory, key)));
   const kept = removeCreatedDirectories(attempted);
   const directories = ledger.directories.filter((directory) => !attempted.includes(directory) || kept.includes(directory));

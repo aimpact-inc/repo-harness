@@ -377,7 +377,7 @@ test('a whole-path write records its entry first; delegate, a transaction rollba
   // A revert undoes each entry that is as rh recorded it; a changed entry stays with its record.
   rmSync(link);
   symlinkSync(user, link);
-  expect(f.gate().revertPaths().map((entry) => [entry.path, entry.action]))
+  expect(f.gate().revertPaths([file, link, tree, user, edited]).map((entry) => [entry.path, entry.action]))
     .toEqual([[file, 'removed'], [link, 'kept_edited'], [tree, 'removed'], [user, 'restored'], [edited, 'kept_edited']]);
   expect({ user: readFileSync(user, 'utf8'), file: existsSync(file), tree: existsSync(tree), paths: Object.keys(f.ledger().paths) })
     .toEqual({ user: 'mine\n', file: false, tree: false, paths: [link, edited] });

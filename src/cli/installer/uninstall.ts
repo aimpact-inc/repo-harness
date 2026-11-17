@@ -18,7 +18,7 @@ import { installProfileStatePath } from './install-state';
 import { assertConfigurationPath, configurationReceiptPath, hostConfigurationRoot, writePrivateConfiguration } from './configuration-ownership';
 import { migrateCodexConfigRecords, planCodexConfigMigration, previewAdoptedRevert } from './codex-config-migration';
 import { migrateJsonConfigRecords, planJsonConfigMigration, previewJsonAdoptedRevert } from './json-config-migration';
-import { openHostConfigGate, type HostConfigAdoption, type HostConfigRevertEntry } from '../../effects/host-config/gate';
+import { openHostConfigGate, planPathRevert, type HostConfigAdoption, type HostConfigRevertEntry } from '../../effects/host-config/gate';
 import { hostConfigPaths, resolveHostPath } from '../../effects/host-config/store';
 
 export interface UninstallOptions { target: 'codex' | 'claude' | 'both'; dryRun?: boolean; env?: NodeJS.ProcessEnv; runtimeLock?: RuntimeTransactionContext }
@@ -226,13 +226,14 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       recordRoots.set(key, realRoot(record.host === 'pi' ? dirname(piSkills) : home));
       // A record may own the final symlink, but never a symlinked parent directory.
       assertConfigurationPath(dirname(key), surfaceRoot(key));
-      const [revert] = gate.revertPaths([key], { dryRun: true });
-      if (revert!.action === 'kept_edited') { unresolved(key, 'owned surface changed since installation; preserved'); continue; }
-      pathReverts.set(key, revert!);
+      // The records of a dry-run migration are not in the ledger yet, so the plan reads them from `records`.
+      const action = planPathRevert(key, record);
+      if (action === 'kept_edited') { unresolved(key, 'owned surface changed since installation; preserved'); continue; }
+      pathReverts.set(key, { path: key, action });
       removedSurfaces.add(key);
-      if (revert!.action === 'released') continue;
+      if (action === 'released') continue;
       remember(key); surfaceRemovals.push(key);
-      items.push(revert!.action === 'restored'
+      items.push(action === 'restored'
         ? { path: key, action: 'restore', reason: 'unchanged transaction-owned file; the user file it replaced comes back from the vault' }
         : { path: key, action: 'remove', reason: 'unchanged transaction-owned surface' });
     } catch (error) { unresolved(key, String((error as Error).message)); }

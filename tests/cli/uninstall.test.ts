@@ -163,7 +163,7 @@ function legacyProfile(home: string, path: string, content: string) {
 test('removes profile-owned rules, restores a file that rh replaced, and retires profile but preserves user files',()=>fixture((home,env)=>{
  const path=join(home,'.codex/rules/anti-patterns.md');put(home,'.codex/rules/anti-patterns.md','owned');put(home,'.codex/rules/user.md','user');
  profile(home,[ownedFile(path,'owned')]);
- const agent=join(home,'.claude/agents/a.md');put(home,'.claude/agents/a.md','mine');
+ const agent=join(home,'.claude/agents/explorer.md');put(home,'.claude/agents/explorer.md','mine');
  openHostConfigGate({env}).writePaths([{path:agent,owner:'core',entry:{type:'file',bytes:Buffer.from('rh')},replace:true}]);
  const result=runUserUninstall({target:'both',env});
  expect(result.status).toBe('complete');expect(existsSync(path)).toBe(false);
