@@ -241,7 +241,8 @@ class TargetJudge {
   /**
    * A glob above the match limit in one directory. When the directory resolves inside a root, a match that is not a link is a
    * child entry inside the root, for every kind and through a trailing separator, so only the matches that can be links get the
-   * one decision. The directory is placed before it is listed; outside the roots the word stays an unknown target set.
+   * one decision, and the directory matches too when a copy writes into them. The directory is placed before it is listed;
+   * outside the roots the word stays an unknown target set.
    */
   private childrenDenial(target: WriteTarget, children: NonNullable<WriteTarget['children']>): Denial | null {
     const unknown = () => unknownTargetDenial(target, this.roots, this.userStep);
@@ -251,14 +252,14 @@ class TargetJudge {
       if (!this.roots.some(root => underRoot(root, dir, true))) return unknown();
       entries = readdirSync(dir, { withFileTypes: true });
     } catch { return unknown(); }
-    let links = 0;
+    let judged = 0;
     for (const entry of entries) {
       // An entry without a reported type is neither a file nor a directory here, so it is judged like a link.
-      if (entry.isFile() || entry.isDirectory() || !nameMatches(children.name, entry.name)) continue;
+      if (entry.isFile() || (entry.isDirectory() && !target.into) || !nameMatches(children.name, entry.name)) continue;
       // The resolved directory holds no link, so joining the name keeps the path the kernel walks.
       const path = join(dir, entry.name) + (children.separator ? sep : '');
       if (children.separator && !matchesDirectory(path)) continue;
-      if (++links > CHILD_LIMIT) return unknown();
+      if (++judged > CHILD_LIMIT) return unknown();
       const denial = this.denial({ ...target, path, children: undefined, unbounded: undefined });
       if (denial) return denial;
     }
@@ -595,21 +596,19 @@ function itemArg(pattern: string, expand: boolean, at: number, home: string): Ar
 }
 
 const NUMERIC_SEQUENCE = /^\{-?\d+\.\.-?\d+(?:\.\.-?\d+)?\}/;
+/** The mark of a collapsed sequence in a shaped word. A shell word never holds a NUL. */
+const SEQUENCE_MARK = '\0';
 
-/**
- * The word with each numeric `{a..b}` sequence as `*`, or null when it has none or holds a bracket. A numeric item holds digits
- * and a sign only, never a separator or a leading dot, so the glob matches every existing file that an item names; an item that
- * names no file is a create or a no-op. The comma items keep their own text.
- */
-function sequenceGlob(pattern: string): string | null {
+/** The word with each numeric `{a..b}` sequence as one mark, or null when it has none or holds a bracket. The comma items keep their text. */
+function sequenceShape(pattern: string): string | null {
   if (patternIndex(pattern, '[') >= 0) return null;
-  let glob = '', found = false;
+  let shape = '', found = false;
   for (let i = 0; i < pattern.length; i++) {
     const sequence = pattern[i] === '{' ? NUMERIC_SEQUENCE.exec(pattern.slice(i)) : null;
-    if (pattern[i] === '\\') { glob += pattern.slice(i, i + 2); i++; }
-    else if (sequence) { glob += '*'; i += sequence[0].length - 1; found = true; } else glob += pattern[i];
+    if (pattern[i] === '\\') { shape += pattern.slice(i, i + 2); i++; }
+    else if (sequence) { shape += SEQUENCE_MARK; i += sequence[0].length - 1; found = true; } else shape += pattern[i];
   }
-  return found ? glob : null;
+  return found ? shape : null;
 }
 
 /** A word or item above an expansion limit: an unknown target set that refuses for every kind. */
@@ -618,25 +617,31 @@ const unbounded = (arg: Arg): Arg => ({ ...arg, value: null, unbounded: true });
 /**
  * The words that one command word gives the program, as the shell expands it without running anything: brace expansion, HOME,
  * then glob expansion from `cwd`. Expansion never drops an operand: each brace item gives its own words, and an item that is not
- * known gives one unknown word. Above the brace limit the numeric sequences become globs; when the word is still above it, its
- * items are not known, so the whole word is one unbounded word. A glob item above the match limit is one unbounded word too.
+ * known gives one unknown word. Above the brace limit each numeric sequence collapses, and an item that holds one is an unbounded word
+ * whose sequence is `*`; when the word is still above the limit, the whole word is one unbounded word. A glob item above the
+ * match limit is one unbounded word too.
  */
 function expandWord(word: Word, at: number, cwd: string | null, home: string): Arg[] {
   const exact = expandBraces(word.pattern);
-  const shape = exact === null ? sequenceGlob(word.pattern) : null;
+  const shape = exact === null ? sequenceShape(word.pattern) : null;
   const patterns = exact ?? (shape === null ? null : expandBraces(shape));
   if (patterns === null) return [unbounded(itemArg(word.pattern, word.expand, at, home))];
   let budget = CHILD_LIMIT;
   return patterns.flatMap(item => {
+    // A numeric item holds digits and a sign only, never a separator or a leading dot, so `*` matches every existing entry that an
+    // item names. The item is not globbed: the shell passes each number as written, also after a prefix such as `of=`.
+    if (item.includes(SEQUENCE_MARK)) {
+      return [{ ...unbounded(itemArg(item.replaceAll(SEQUENCE_MARK, '*'), word.expand, at, home)), spelled: unescapePattern(word.pattern) }];
+    }
     const arg = itemArg(item, word.expand, at, home);
     if (arg.value === null || globIndex(arg.pattern) < 0) return [arg];
     const matches = globMatches(arg.pattern, cwd, budget);
     if (matches === null) return [unbounded(arg)];
     budget -= matches.length;
-    // Without a match the shell passes the word itself. It never passes a sequence glob: a word that a program reads after a
-    // prefix (`of=`, `-t`) never matches, so its items stay unknown.
-    if (!matches.length) return [shape === null ? arg : unbounded(arg)];
-    return matches.map(value => ({ value, pattern: escapePattern(value), expand: false, spelled: value, word: at, matched: true }));
+    // Without a match the shell passes the word itself.
+    return matches.length
+      ? matches.map(value => ({ value, pattern: escapePattern(value), expand: false, spelled: value, word: at, matched: true }))
+      : [arg];
   });
 }
 
@@ -754,7 +759,8 @@ function targetOption(arg: Arg, home: string): Arg[] | null {
 /**
  * cp and ln: the last operand is the destination, written into a directory as each source's name. When the hook cannot place the
  * destination (a target-directory option, fewer than two operands, or a last operand from a glob with several matches, whose
- * order depends on the shell's locale, or from a word above an expansion limit), every operand is a possible write target.
+ * order depends on the shell's locale, or from a word above an expansion limit), every operand is a possible write target, both
+ * as the entry itself (`-T`) and as a directory that receives a child for each operand name.
  */
 function copyTargets(program: string, args: readonly Arg[], cwd: string | null, home: string): WriteTarget[] {
   const glued = args.map(arg => targetOption(arg, home));
@@ -762,7 +768,9 @@ function copyTargets(program: string, args: readonly Arg[], cwd: string | null, 
   const last = operands.at(-1);
   const unplaced = last !== undefined && (last.unbounded === true || last.matched && operands.filter(arg => arg.word === last.word).length > 1);
   if (glued.some(found => found !== null) || operands.length < 2 || unplaced) {
-    return [...operands, ...glued.flatMap(found => found ?? [])].map(arg => targetOf('overwrite', program, arg, cwd));
+    const all = [...operands, ...glued.flatMap(found => found ?? [])];
+    const into = { names: all.some(arg => arg.value === null) ? null : all.map(arg => basename(arg.value!)), follow: program === 'cp' };
+    return all.flatMap(arg => [targetOf('overwrite', program, arg, cwd), targetOf('overwrite', program, arg, cwd, { into })]);
   }
   const sources = operands.slice(0, -1);
   const names = sources.some(arg => arg.value === null) ? null : sources.map(arg => basename(arg.value!));

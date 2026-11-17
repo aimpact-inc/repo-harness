@@ -180,7 +180,7 @@ describe('safety hook: Bash host route', () => {
     const skill = join(home, '.claude/skills/repo-harness-cross-review');
     const savedTmp = process.env.TMPDIR;
     try {
-      for (const dir of ['repo/build/sub', 'repo/src', 'repo/stage/d', 'repo/stage/1', 'repo/big', 'repo/w/stage', 'repo/inner', 'outside/sub', 'outside/-archive', 'repo/links', 'repo/tree/cache/version', 'outside/big', 'tmp', 'managed', 'home/links', 'home/stage']) {
+      for (const dir of ['repo/build/sub', 'repo/src', 'repo/stage/d', 'repo/stage/1', 'repo/big', 'repo/w/stage', 'repo/inner', 'outside/sub', 'outside/-archive', 'repo/links', 'repo/tree/cache/version', 'outside/big', 'repo/big/zdir', 'repo/seq', 'tmp', 'managed', 'home/links', 'home/stage']) {
         mkdirSync(join(root, dir), { recursive: true });
       }
       mkdirSync(skill, { recursive: true });
@@ -193,6 +193,10 @@ describe('safety hook: Bash host route', () => {
       for (let n = 0; n <= 1000; n++) for (const dir of [repo, out]) writeFileSync(join(dir, `big/${n}`), 'x');
       symlinkSync(join(out, 'victim.txt'), join(repo, 'big/out-link'));
       symlinkSync(out, join(repo, 'big/out-dir'));
+      // A regular directory that a copy can write into, through a child link to an outside file.
+      symlinkSync(join(out, 'victim.txt'), join(repo, 'big/zdir/source.txt'));
+      writeFileSync(join(repo, 'seq/of=1'), 'x');
+      symlinkSync(join(out, 'victim.txt'), join(repo, 'seq/1025'));
       for (const link of ['linked', 'stage/linked', 'w/stage/linked']) symlinkSync(out, join(repo, link));
       symlinkSync(join(repo, 'inner'), join(out, 'link'));
       symlinkSync(repo, join(out, 'repo-link'));
@@ -263,6 +267,8 @@ describe('safety hook: Bash host route', () => {
         [null, 'rm -f big/*'], [null, 'rm -f *', 'big'], [null, 'tee big/[0-9]*'], [null, 'echo x > big/[0-9]*'], [refuse, 'tee big/*'],
         [refuse, 'mv big/* build/'], [refuse, 'rm -f linked/big/*'], [null, 'tee {build/{1..1025},build/x.txt}'],
         [refuse, `dd if=source.txt of=${out}/{1..1025}`],
+        // #3048 r1: each possible copy destination that is a directory gets a child per operand name; a collapsed sequence is never globbed.
+        [refuse, 'cp source.txt big/[0-9z]*'], [refuse, 'cp source.txt big/[1z]*'], [refuse, 'cp -t big/zdir source.txt'], [refuse, 'dd if=/dev/null of={1..1025}', 'seq'],
         // GNU getopt accepts a long option prefix.
         [refuse, 'mv --target=linked stage/b.json'], [refuse, 'cp --target=linked a.txt'],
         // #3026: a writing find that follows links below its start refuses; plain and read-only find keep today's judge.
