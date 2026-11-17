@@ -9,29 +9,84 @@ import { dirname, isAbsolute, join, parse, resolve, sep } from 'path';
 export const escapePattern = (text: string) => text.replace(/[\\*?[\]{},~]/g, '\\$&');
 export const unescapePattern = (pattern: string) => pattern.replace(/\\(.)/gs, '$1');
 
+const ANY = '\\u{0}-\\u{10ffff}';
+const NON_ASCII = '\\u{80}-\\u{10ffff}';
+
 /**
- * Shell pattern match of one path segment. A nested bracket, a POSIX class or a bracket that does not compile matches every name, so
- * a check that asks "can this glob reach X" errs toward yes.
+ * The ASCII members of each POSIX class. Bash 3.2 and 5.3 and zsh agree on them in the C and UTF-8 locales; a non-ASCII member
+ * depends on the locale. A class is `certain` when no shell setting changes its ASCII members: bash 3.2 with `nocaseglob` folds
+ * the name before it tests `upper` or `lower`, and zsh has no `word`.
+ */
+const POSIX_CLASSES: Readonly<Record<string, { readonly members: string; readonly certain: boolean }>> = {
+  alnum: { members: '0-9A-Za-z', certain: true }, alpha: { members: 'A-Za-z', certain: true },
+  ascii: { members: '\\x00-\\x7f', certain: true }, blank: { members: '\\t ', certain: true },
+  cntrl: { members: '\\x00-\\x1f\\x7f', certain: true }, digit: { members: '0-9', certain: true },
+  graph: { members: '!-~', certain: true }, lower: { members: 'a-z', certain: false }, print: { members: ' -~', certain: true },
+  punct: { members: '!-\\/:-@\\[-`\\{-~', certain: true }, space: { members: '\\t-\\r ', certain: true },
+  upper: { members: 'A-Z', certain: false }, word: { members: '0-9A-Za-z_', certain: false },
+  xdigit: { members: '0-9A-Fa-f', certain: true },
+};
+
+const regexChar = (ch: string) => ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** A literal inside a regular expression class: `-`, `^`, `[`, `]` and the backslash are escaped. */
+const classChar = (ch: string) => ch.replace(/[\\\]\[^-]/g, '\\$&');
+/** The literal character at `i` (a backslash escapes the next one) and the index after it. */
+const literalAt = (pattern: string, i: number): [string, number] => pattern[i] === '\\' ? [pattern[i + 1] ?? '', i + 2] : [pattern[i]!, i + 1];
+
+/**
+ * The regular expression class of the bracket expression that opens at `open`, and its closing index; null when it does not close,
+ * so `[` is a literal character. A positive bracket takes every character that may be a member and a negated bracket excludes only
+ * the certain members, so both match at least what the shell matches. An equivalence class, a collating symbol and an unknown class
+ * name may hold any character and hold none for certain. Each member is a literal, a range of two literals or a class, so no two
+ * members join into a range.
+ */
+function bracketSource(pattern: string, open: number): { source: string; end: number } | null {
+  let i = open + 1;
+  const negated = pattern[i] === '!' || pattern[i] === '^';
+  if (negated) i++;
+  let maybe = '', certain = '';
+  // A `]` right after `[` or `[!` is a member of the bracket expression, not its end.
+  for (const first = i; i < pattern.length;) {
+    if (pattern[i] === ']' && i > first) return { source: negated ? `[^${certain}]` : `[${maybe}]`, end: i };
+    const special = pattern[i] === '[' ? /^\[([:=.])([^]*?)\1\]/.exec(pattern.slice(i)) : null;
+    if (special) {
+      const posix = special[1] === ':' ? POSIX_CLASSES[special[2]!] : undefined;
+      maybe += posix ? posix.members + NON_ASCII : ANY;
+      if (posix?.certain) certain += posix.members;
+      i += special[0].length;
+      continue;
+    }
+    const [low, next] = literalAt(pattern, i);
+    let member = classChar(low);
+    i = next;
+    if (pattern[i] === '-' && i + 1 < pattern.length && pattern[i + 1] !== ']') {
+      const [high, after] = literalAt(pattern, i + 1);
+      member += `-${classChar(high)}`;
+      i = after;
+    }
+    maybe += member; certain += member;
+  }
+  return null;
+}
+
+/**
+ * Shell pattern match of one path segment that errs toward yes, so a check that asks "can this glob reach X" never misses a name
+ * that the shell matches. A bracket that does not compile matches every name.
  */
 export function segmentMatches(pattern: string, name: string): boolean {
   let source = '';
   for (let i = 0; i < pattern.length; i++) {
     const ch = pattern[i]!;
-    const negated = ch === '[' && (pattern[i + 1] === '!' || pattern[i + 1] === '^');
-    // A `]` right after `[` or `[!` is a member of the bracket expression, not its end.
-    const close = ch === '[' ? pattern.indexOf(']', i + (negated ? 3 : 2)) : -1;
-    if (ch === '\\') source += (pattern[++i] ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const bracket = ch === '[' ? bracketSource(pattern, i) : null;
+    if (ch === '\\') source += regexChar(pattern[++i] ?? '');
     else if (ch === '*') source += '.*';
     else if (ch === '?') source += '.';
-    else if (close > 0 && /\[/.test(pattern.slice(i + 1, close))) return true;
-    else if (close > 0) {
-      source += `[${negated ? '^' : ''}${unescapePattern(pattern.slice(i + (negated ? 2 : 1), close)).replace(/[\\\]]/g, '\\$&')}]`;
-      i = close;
-    } else source += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    else if (bracket) { source += bracket.source; i = bracket.end; }
+    else source += regexChar(ch);
   }
   // A match with or without case counts: the shell glob is case-sensitive, but `nocaseglob` and the filesystem are not.
-  // `u` folds `ſ` to `s` as APFS does.
-  try { return new RegExp(`^${source}$`, 'u').test(name) || new RegExp(`^${source}$`, 'iu').test(name); } catch { return true; }
+  // `u` folds `ſ` to `s` as APFS does; `s` lets `*` and `?` match a newline in a name, as the shell does.
+  try { return new RegExp(`^${source}$`, 'su').test(name) || new RegExp(`^${source}$`, 'isu').test(name); } catch { return true; }
 }
 
 /** Index of the first unescaped glob character of a pattern, or -1. */

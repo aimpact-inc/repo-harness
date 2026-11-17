@@ -6,6 +6,7 @@ import { isAbsolute, join } from 'path';
 import { execFileSync, spawnSync } from 'child_process';
 import { runMutationGuard } from '../src/cli/hook/mutation-guard';
 import { bashSafetyDenial, ledgerCreated, registerInstallLedger } from '../src/cli/hook/safety-hook';
+import { segmentMatches } from '../src/cli/hook/shell-words';
 import { readInstallState } from '../src/cli/installer/install-profile';
 import { getRoute } from '../src/cli/hook/route-registry';
 import { buildHookCommand } from '../src/cli/installer/managed-entries';
@@ -256,6 +257,9 @@ describe('safety hook: Bash host route', () => {
         [refuse, 'dd if=source.txt of=${HOME}/notes.txt'], [null, 'dd if=source.txt of=build/$X'], [refuse, 'cp --target-directory="$HOME" source.txt'],
         [refuse, `cp --target-directory=${out}/$X source.txt`], [refuse, `tee ${out}/$X`], [refuse, 'echo x > ${HOME}/$X'],
         [refuse, 'rm -f stage/[[:alpha:]]*/victim.txt'], [refuse, 'truncate -s 0 stage/[![:graph:]]*/victim.txt'], ['CredentialGuard', 'cat credentials[![:graph:]].json'],
+        // #3033: R1-F2, a class matches only its members, so the numbered in-root start passes and the negated class reaches the link.
+        [null, 'rm -f stage/[[:digit:]]*/victim.txt'], [null, 'truncate -s 0 stage/[[:digit:]]*/victim.txt'], [refuse, 'rm -f stage/[![:digit:]]*/victim.txt'],
+        ['CredentialGuard', 'cat credentials[[:space:]].json'], [null, 'cat credentials[[:alpha:]].json'],
         // #3025 r2: expansion never drops an operand; each brace item is its own target, and an unknown item keeps its literal directory.
         [refuse, `tee {build/$X,${out}/victim.txt}`], [refuse, `cp source.txt {build/$X,${out}}`], [refuse, 'tee {build/$X,links/x.txt}'],
         [refuse, `tee {build/$(printf x),${out}/victim.txt}`], [refuse, `tee {build/$'x',${out}/victim.txt}`], [refuse, `tee {~nouser/x,${out}/victim.txt}`],
@@ -295,6 +299,16 @@ describe('safety hook: Bash host route', () => {
         return actual === guard ? [] : [{ command: command.replaceAll(root, '$ROOT'), expected: guard, actual }];
       });
       expect(wrong).toEqual([]);
+      // #3033: each POSIX class with a member and an ASCII non-member, as bash 3.2, bash 5.3 and zsh match them in the C and UTF-8
+      // locales. A class that a shell setting changes (nocaseglob folds `upper` and `lower`, zsh has no `word`) excludes nothing for certain.
+      const classes: Array<[string, string, string?]> = [['alnum', 'a', '-'], ['alpha', 'Z', '1'], ['ascii', '~'], ['blank', '\t', 'b'],
+        ['cntrl', '\x7f', ' '], ['digit', '7', 'a'], ['graph', '!', ' '], ['lower', 'q', '1'], ['print', ' ', '\x01'], ['punct', '`', 'a'],
+        ['space', '\v', '_'], ['upper', 'Q', '1'], ['word', '_', '-'], ['xdigit', 'f', 'g']];
+      const wrongClass = classes.filter(([name, member, other]) => !segmentMatches(`[[:${name}:]]`, member)
+        || segmentMatches(`[![:${name}:]]`, member) !== ['lower', 'upper', 'word'].includes(name)
+        || (other !== undefined && (segmentMatches(`[[:${name}:]]`, other) || !segmentMatches(`[![:${name}:]]`, other))));
+      expect(wrongClass).toEqual([]);
+      expect(segmentMatches('x?', 'x\n')).toBe(true);
       // The refusal names the resolved outside path, so the local user can authorize it.
       expect(bashSafetyDenial('mv a.txt stage/*', repo, { repoRoot: repo, env, host: 'claude' })?.reason).toContain(`would remove or change ${out},`);
       expect(bashSafetyDenial('find -L stage -delete', repo, { repoRoot: repo, env, host: 'claude' })?.reason).toContain(`target stage of find following links from ${repo} `);
