@@ -168,14 +168,14 @@ describe('safety hook: Bash host route', () => {
         'mv -t linked stage/b.json', 'mv -tlinked stage/b.json', 'mv --target-directory=linked stage/b.json',
         `cd ${out} && mv -t -archive ${cwd}/stage/b.json`, `cd ${out} && mv --target-directory -archive ${cwd}/stage/b.json`,
         // A trailing separator follows the leaf link, so the outside directory is the entry; a glob before it is not bounded.
-        'mv linked/ .', 'mv -f linked// .', "mv 'linked/' .", 'mv stage/*/ .', 'rm -rf linked/',
+        'mv linked/ .', 'mv -f linked// .', "mv 'linked/' .", 'mv stage/*/ .', 'rm -rf linked/', 'rm -rf stage/*/',
       ]);
       expectGuard('RecursiveDeleteGuard', ['if true; then rm -rf .; fi']);
       expectGuard(null, ['cd src && rm a.txt', 'echo $(rm src/a.txt)', `cp stage/*.json ${out}/empty/`, 'rm notes.txt', 'cp stage/*/notes.txt src/', 'rm -rf build/*', 'cp -r src build/', 'mv -t build stage/b.json',
         // mv moves into an allowed root itself or a directory below it; a trailing slash follows the outside link to the worktree.
         'mv stage/b.json .', 'mv stage/app.json ./build/', `mv stage/b.json ${out}/repo-link/`,
-        // Without a trailing separator, mv renames the link entry itself.
-        'mv linked build']);
+        // Without a trailing separator, mv and rm act on the link entry itself.
+        'mv linked build', 'rm -rf linked']);
       // The mv destination refusal names the outside directory that the link resolves to.
       expect(hook('bash', { command: 'mv stage/b.json linked' }).stderr).toContain(`would remove or change ${join(out, 'sub')}, an existing file outside`);
       const update = hook('edit', { command: '*** Begin Patch\n*** Update File: app.json\n@@\n-x\n+y\n*** End Patch' });
