@@ -650,15 +650,10 @@ function expandWord(word: Word, at: number, cwd: string | null, home: string, ta
  * globbed again.
  */
 function restArg(arg: Arg, length: number, home: string): Arg {
-  const rest = itemArg(patternAfter(arg.pattern, length), arg.expand, arg.word, home);
-  return arg.unbounded ? unbounded(rest) : rest;
-}
-
-/** The pattern after its first `length` value characters; an escaped character counts once. */
-function patternAfter(pattern: string, length: number): string {
   let at = 0;
-  for (let count = 0; count < length && at < pattern.length; count++) at += pattern[at] === '\\' ? 2 : 1;
-  return pattern.slice(at);
+  for (let count = 0; count < length && at < arg.pattern.length; count++) at += arg.pattern[at] === '\\' ? 2 : 1;
+  const rest = itemArg(arg.pattern.slice(at), arg.expand, arg.word, home);
+  return arg.unbounded ? unbounded(rest) : rest;
 }
 
 /**
@@ -834,21 +829,49 @@ const FIND_EXEC_READERS = new Set(['cat', 'head', 'tail', 'wc', 'grep', 'rg', 'l
 
 type Valued = { readonly value: string | null };
 
+type Count = number | null;
+const both = (n: number): readonly [Count, Count, Count] => [n, n, n];
+const gnuOnly = (n: number): readonly [Count, Count, Count] => [n, null, null];
+const bsdOnly = (n: number): readonly [Count, Count, Count] => [null, n, n];
+const entries = (names: string, count: readonly [Count, Count, Count]) => names.split(' ').map(name => [name, count] as const);
+
+/**
+ * The operands of each find primary and operator: [GNU findutils manual, macOS find(1) fewest, macOS find(1) most]; null where that
+ * find has no such word. macOS `-depth` stands alone or takes `n`. The `-exec` family takes a template instead.
+ */
+const FIND_PRIMARIES: ReadonlyMap<string, readonly [Count, Count, Count]> = new Map([
+  ...entries('-delete -empty -false -true -ls -print -print0 -prune -quit -nogroup -nouser -not -and -or ! ( ) -follow -xdev -mount -noleaf -d -ignore_readdir_race -noignore_readdir_race', both(0)),
+  ...entries('-amin -anewer -atime -cmin -cnewer -ctime -fstype -gid -group -ilname -iname -inum -ipath -iregex -iwholename -links -lname -maxdepth -mindepth -mmin -mtime -name -newer -path -perm -regex -samefile -size -type -uid -user -wholename', both(1)),
+  ['-depth', [0, 0, 1]],
+  ...entries('-a -o , -daystart -warn -nowarn -executable -readable -writable -help -version', gnuOnly(0)),
+  ...entries('-regextype -files0-from -context -used -xtype -fls -fprint -fprint0 -printf', gnuOnly(1)),
+  ['-fprintf', gnuOnly(2)],
+  ...entries('-acl -sparse -xattr', bsdOnly(0)),
+  ...entries('-Bmin -Bnewer -Btime -flags -mnewer -xattrname', bsdOnly(1)),
+]);
+
 /** GNU options that may stand before a start, as `find -xdev build`; the user means them for the starts after them. */
-const FIND_GLOBAL = new Set(['-xdev', '-mount', '-depth', '-noleaf', '-ignore_readdir_race', '-noignore_readdir_race', '-daystart',
-  '-follow', '-warn', '-nowarn', '-maxdepth', '-mindepth', '-regextype']);
-/** Expression words that take no operand: actions, tests and operators of GNU and BSD find. */
-const FIND_PLAIN = new Set(['-delete', '-print', '-print0', '-ls', '-prune', '-quit', '-true', '-false', '-empty', '-readable', '-writable',
-  '-executable', '-nouser', '-nogroup', '-not', '-and', '-or', '-a', '-o', '-d', '-x', '-s', '-follow', '-xdev', '-mount', '-depth', '!', '(', ')']);
-/** Expression words whose next word is an operand, never a primary, as the pattern in `-name -follow`. */
-const FIND_VALUED = new Set(['-maxdepth', '-mindepth', '-regextype', '-name', '-iname', '-path', '-ipath', '-wholename', '-iwholename',
-  '-lname', '-ilname', '-regex', '-iregex', '-type', '-xtype', '-user', '-group', '-uid', '-gid', '-perm', '-size', '-newer', '-anewer',
-  '-cnewer', '-mtime', '-atime', '-ctime', '-mmin', '-amin', '-cmin', '-used', '-links', '-inum', '-samefile', '-fstype', '-context',
-  '-printf', '-fprint', '-fprint0', '-fls', '-flags', '-Bmin', '-Btime', '-Bnewer', '-acl']);
+const FIND_GLOBAL = new Set(['-xdev', '-mount', '-depth', '-d', '-noleaf', '-ignore_readdir_race', '-noignore_readdir_race', '-daystart',
+  '-follow', '-warn', '-nowarn', '-maxdepth', '-mindepth', '-regextype', '-files0-from', '-help', '-version']);
+
+/** The three readings of the table: GNU, macOS with the fewest operands, macOS with the most. */
+type Reading = 0 | 1 | 2;
+
+/**
+ * The operands that a word takes in one reading, or null when no find knows the word. A word that one find lacks takes the other
+ * find's count: the find that lacks it stops with an error.
+ */
+function findOperands(value: string, reading: Reading): number | null {
+  const counts = FIND_PRIMARIES.get(value) ?? (/^-newer[aBcmt]{2}$/.test(value) ? both(1) : undefined);
+  if (!counts) return null;
+  return counts[reading] ?? counts.find(count => count !== null)!;
+}
 
 /** One find command line: its start paths, the link mode that applies, and what its expression does. */
 interface FindCommand<T> {
   readonly starts: T[];
+  /** A reading names no start, so find starts from the working directory. */
+  readonly currentDirectory: boolean;
   /** The last of -H, -L and -P among the leading options. */
   readonly mode: string;
   /** `-follow` stands as an option or a primary, not as an operand. */
@@ -857,45 +880,57 @@ interface FindCommand<T> {
   readonly writes: boolean;
   /** A writing `-exec` template passes `{}` with a separator after it, so the program walks through a matched link. */
   readonly templateFollows: boolean;
-  /** The first word before the expression that the parser cannot classify; find may read it as an option that names a start. */
+  /** A word that starts with `-` and is no known primary or operator, or `-files0-from`, whose starts come from a file. */
   readonly unknown: T | null;
 }
 
 /**
  * The one find option parser. Leading options run up to `--` or the first other word: BSD getopt clusters of `EHLPXdsx` that may
- * end with `f`, whose start path is the rest of the word (`-HfPATH`) or the next word, and GNU `-D <opts>` and `-O<n>`. `attached`
- * builds the start from the rest of a word. The starts follow, up to the first expression word; a GNU global option before a start
- * is skipped, and a first expression word that is no known primary is `unknown`. The expression is read word by word: an operand of
- * a valued primary is never a primary (`-fprintf FILE FORMAT` has two), and an `-exec` template runs to `;`, or to `+` after `{}`. An unknown primary later in the
- * expression takes no operand, so a later `-follow` still counts.
+ * end with `f`, whose start path is the next word, and GNU `-D <opts>` and `-O<n>`. A path glued to `-f` is never read: that word is
+ * no cluster, so it is an unknown target. The rest is read once for each table reading, and the result joins every reading, so a
+ * write that one reading reaches counts.
  */
-function parseFind<T extends Valued>(args: readonly T[], attached: (word: T, length: number) => T): FindCommand<T> {
-  const starts: T[] = [];
+function parseFind<T extends Valued>(args: readonly T[]): FindCommand<T> {
+  const leading: T[] = [];
   let mode = 'P', i = 0;
   for (; i < args.length; i++) {
     const value = args[i]!.value ?? '';
     if (value === '--') { i++; break; }
     if (/^-O\d$/.test(value)) continue;
     if (value === '-D') { i++; continue; }
-    const cluster = /^-([EHLPXdsx]*)(?:f(.*))?$/s.exec(value);
+    const cluster = /^-([EHLPXdsx]*)(f?)$/.exec(value);
     if (!cluster || value === '-') break;
     mode = cluster[1]!.replace(/[^HLP]/g, '').at(-1) ?? mode;
-    if (cluster[2]) starts.push(attached(args[i]!, value.length - cluster[2].length));
-    else if (cluster[2] === '' && args[i + 1]) starts.push(args[++i]!);
+    if (cluster[2] && args[i + 1]) leading.push(args[++i]!);
   }
+  const readings = ([0, 1, 2] as const).map(reading => readFindExpression(args, i, reading));
+  return {
+    starts: [...new Set([...leading, ...readings.flatMap(found => found.starts)])],
+    currentDirectory: leading.length === 0 && readings.some(found => found.starts.length === 0),
+    mode,
+    follow: readings.some(found => found.follow),
+    writes: readings.some(found => found.writes),
+    templateFollows: readings.some(found => found.templateFollows),
+    unknown: readings.find(found => found.unknown)?.unknown ?? null,
+  };
+}
+
+/**
+ * The starts and the expression from `from` in one reading. The starts run to the first word that starts with `-`, `(`, `!` or
+ * `)`; a GNU global option before a start is skipped with its operands. In the expression an operand is never a primary, and an
+ * `-exec` template runs to `;`, or to `+` after `{}`. A word that no find knows there is an unknown target.
+ */
+function readFindExpression<T extends Valued>(args: readonly T[], from: number, reading: Reading): Omit<FindCommand<T>, 'mode' | 'currentDirectory'> {
+  const starts: T[] = [];
   let follow = false, writes = false, templateFollows = false, expression = false;
   let unknown: T | null = null;
-  for (; i < args.length; i++) {
+  for (let i = from; i < args.length; i++) {
     const value = args[i]!.value ?? '';
-    if (!expression && FIND_GLOBAL.has(value)) {
-      follow ||= value === '-follow';
-      if (FIND_VALUED.has(value)) i++;
-      continue;
-    }
     if (!expression && !/^[-(!)]/.test(value)) { starts.push(args[i]!); continue; }
-    if (!expression && !(FIND_PLAIN.has(value) || FIND_VALUED.has(value) || FIND_RUNS.test(value) || value === '-fprintf'
-      || /^-newer[a-zA-Z]{2}$/.test(value))) unknown = args[i]!;
-    expression = true;
+    const operands = findOperands(value, reading);
+    if (operands === null && !FIND_RUNS.test(value)) { unknown ??= args[i]!; expression = true; continue; }
+    if (!FIND_GLOBAL.has(value)) expression = true;
+    if (value === '-files0-from') unknown ??= args[i]!;
     if (value === '-delete') writes = true;
     else if (value === '-follow') follow = true;
     else if (FIND_RUNS.test(value)) {
@@ -904,10 +939,10 @@ function parseFind<T extends Valued>(args: readonly T[], attached: (word: T, len
       if (FIND_EXEC_READERS.has(template[0] ?? '')) continue;
       writes = true;
       templateFollows ||= template.slice(1).some(word => /\{\}[\\/]/.test(word ?? ''));
-    } else if (value === '-fprintf') i += 2;
-    else if (FIND_VALUED.has(value) || /^-newer[a-zA-Z]{2}$/.test(value)) i++;
+    }
+    i += operands ?? 0;
   }
-  return { starts, mode, follow, writes, templateFollows, unknown };
+  return { starts, follow, writes, templateFollows, unknown };
 }
 
 /**
@@ -1007,10 +1042,10 @@ function commandTargets(cmd: Command, cwd: string | null, home: string): WriteTa
       targets.push(...each('overwrite', args.filter(arg => text(arg).startsWith('of=')).map(arg => restArg(arg, 3, home))));
       break;
     case 'find': {
-      const find = parseFind(args, (arg, length) => restArg(arg, length, home));
+      const find = parseFind(args);
       if (!find.writes) break;
       const follows = findFollowsLinks(find, cwd);
-      targets.push(...(find.starts.length ? find.starts : [literalArg('.')]).map(arg => follows(arg)
+      targets.push(...[...find.starts, ...(find.currentDirectory ? [literalArg('.')] : [])].map(arg => follows(arg)
         ? targetOf('destroy', 'find following links', { ...arg, value: null }, cwd) : targetOf('destroy', 'find', arg, cwd)));
       if (find.unknown) targets.push(targetOf('destroy', 'find', { ...find.unknown, value: null }, cwd));
       break;
@@ -1085,10 +1120,9 @@ function recursionFinding(args: readonly Word[], dirs: Dirs, resolver: StartReso
   }
   if (program === 'find') {
     const rest = args.slice(1);
-    const find = parseFind(rest, (word, length) => ({ ...word, value: word.value.slice(length), pattern: patternAfter(word.pattern, length) }));
+    const find = parseFind(rest);
     if (!find.writes) return null;
-    const paths = find.starts;
-    return starts(paths.length ? paths : [DOT], dirs).some(c => c !== 'other')
+    return starts([...find.starts, ...(find.currentDirectory ? [DOT] : [])], dirs).some(c => c !== 'other')
       ? 'find -delete or -exec from the repository root, an ancestor or an unknown start' : null;
   }
   if (program === 'git') {
