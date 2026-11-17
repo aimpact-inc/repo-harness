@@ -532,39 +532,44 @@ function literalDirectory(pattern: string): string | null {
 }
 
 /**
- * One brace item before glob expansion: a leading `~`, `$HOME` or `${HOME}` is HOME and `~+` is the working directory. A word
- * that still changes at run time (a parameter, a substitution, `$'...'`, `~user`) is unknown.
+ * One brace item before glob expansion: a leading `~`, `$HOME` or `${HOME}` is HOME and `~+` is the working directory. The
+ * item's own text decides whether it is known. In a word that changes at run time, an item with a `$` (a parameter or a
+ * substitution) is unknown, and so is an item with a backslash, because the reader keeps a `$'...'` escape undecoded. An item
+ * with `~user` is unknown too.
  */
 function itemArg(pattern: string, expand: boolean, at: number, home: string): Arg {
   const lead = /^(?:~|\$HOME|\$\\\{HOME\\\})(?=\/|$)/.exec(pattern);
   if (lead) pattern = escapePattern(home) + pattern.slice(lead[0].length);
   else if (/^~\+(?:\/|$)/.test(pattern)) pattern = `.${pattern.slice(2)}`;
-  const known = !pattern.startsWith('~') && !(expand && (lead === null || pattern.includes('$')));
-  return { value: known ? unescapePattern(pattern) : null, pattern, expand, spelled: unescapePattern(pattern), word: at, matched: false };
+  const value = unescapePattern(pattern);
+  const known = !pattern.startsWith('~') && !(expand && (pattern.includes('$') || value.includes('\\')));
+  return { value: known ? value : null, pattern, expand, spelled: value, word: at, matched: false };
 }
+
+/** The same item as an unknown target: it keeps its literal directory for the refusal check. */
+const unknown = (arg: Arg): Arg => ({ ...arg, value: null });
 
 /**
  * The words that one command word gives the program, as the shell expands it without running anything: brace expansion, HOME,
- * then glob expansion from `cwd`. An unknown brace item, a brace expansion above its limit and a glob that cannot be expanded give
- * one unknown word.
+ * then glob expansion from `cwd`. Expansion never drops an operand: each brace item gives its own words, and an item that is not
+ * known, or a glob that cannot be expanded within the match limit, gives one unknown word. Above the brace limit the items are not
+ * known, so the whole word is one unknown word.
  */
 function expandWord(word: Word, at: number, cwd: string | null, home: string): Arg[] {
   const patterns = expandBraces(word.pattern);
-  if (patterns === null) return [{ ...itemArg(word.pattern, word.expand, at, home), value: null }];
-  const args: Arg[] = [];
-  for (const item of patterns) {
+  if (patterns === null) return [unknown(itemArg(word.pattern, word.expand, at, home))];
+  let budget = CHILD_LIMIT;
+  return patterns.flatMap(item => {
     const arg = itemArg(item, word.expand, at, home);
-    if (arg.value === null) return [arg];
-    if (globIndex(arg.pattern) < 0) { args.push(arg); continue; }
-    const matches = globMatches(arg.pattern, cwd);
-    if (matches === null) return [{ ...arg, value: null }];
+    if (arg.value === null || globIndex(arg.pattern) < 0) return [arg];
+    const matches = globMatches(arg.pattern, cwd, budget);
+    if (matches === null) return [unknown(arg)];
+    budget -= matches.length;
     // Without a match the shell passes the word itself.
-    args.push(...(matches.length
+    return matches.length
       ? matches.map(value => ({ value, pattern: escapePattern(value), expand: false, spelled: value, word: at, matched: true }))
-      : [arg]));
-    if (args.length > CHILD_LIMIT) return [{ ...arg, value: null }];
-  }
-  return args;
+      : [arg];
+  });
 }
 
 /**
@@ -582,9 +587,9 @@ function restArg(arg: Arg, length: number, home: string): Arg {
  * The paths that a glob pattern matches from `cwd`, one segment at a time, in the spelling the shell passes (`..` and links
  * stay for the judge). A leading `*`, `?` or `[` does not match a dot name. A trailing separator matches directories only and
  * stays on each match. Null when the pattern cannot be expanded: a relative pattern without a known directory, a listing error
- * other than a missing directory, or more matches than CHILD_LIMIT.
+ * other than a missing directory, or more matches than `limit`.
  */
-function globMatches(pattern: string, cwd: string | null): string[] | null {
+function globMatches(pattern: string, cwd: string | null, limit: number): string[] | null {
   if (!isAbsolute(pattern) && cwd === null) return null;
   const absolute = (path: string) => isAbsolute(path) ? path : `${cwd}${sep}${path || '.'}`;
   const parts = pattern.split('/');
@@ -603,7 +608,7 @@ function globMatches(pattern: string, cwd: string | null): string[] | null {
       for (const name of names.sort()) {
         if ((part.startsWith('.') || !name.startsWith('.')) && segmentMatches(part, name)) next.push(extend(prefix, name));
       }
-      if (next.length > CHILD_LIMIT) return null;
+      if (next.length > limit) return null;
     }
     found = next;
   }

@@ -180,7 +180,7 @@ describe('safety hook: Bash host route', () => {
     const skill = join(home, '.claude/skills/repo-harness-cross-review');
     const savedTmp = process.env.TMPDIR;
     try {
-      for (const dir of ['repo/build/sub', 'repo/src', 'repo/stage/d', 'repo/stage/1', 'repo/w/stage', 'repo/inner', 'outside/sub', 'outside/-archive', 'repo/links', 'tmp', 'managed', 'home/links', 'home/stage']) {
+      for (const dir of ['repo/build/sub', 'repo/src', 'repo/stage/d', 'repo/stage/1', 'repo/big', 'repo/w/stage', 'repo/inner', 'outside/sub', 'outside/-archive', 'repo/links', 'tmp', 'managed', 'home/links', 'home/stage']) {
         mkdirSync(join(root, dir), { recursive: true });
       }
       mkdirSync(skill, { recursive: true });
@@ -188,6 +188,9 @@ describe('safety hook: Bash host route', () => {
         'outside/victim.txt', 'repo/stage/1/victim.txt', 'outside/move.txt', 'outside/notes.txt', 'outside/notes.txt.bak', 'outside/x.txt', 'outside/-f', 'outside/--', 'notes.txt',
         'home/notes.txt', 'home/stage/x.txt']) writeFileSync(join(root, file), 'x');
       writeFileSync(join(skill, 'SKILL.md'), 'skill');
+      writeFileSync(join(repo, 'credentials .json'), 'x');
+      // More entries than the glob match limit (1000).
+      for (let n = 0; n <= 1000; n++) writeFileSync(join(repo, `big/${n}`), 'x');
       for (const link of ['linked', 'stage/linked', 'w/stage/linked']) symlinkSync(out, join(repo, link));
       symlinkSync(join(repo, 'inner'), join(out, 'link'));
       symlinkSync(repo, join(out, 'repo-link'));
@@ -195,6 +198,7 @@ describe('safety hook: Bash host route', () => {
       symlinkSync(repo, join(out, 'work\\'));
       // Worktree links to outside files, and an outside link to a worktree file.
       symlinkSync(join(out, 'x.txt'), join(repo, 'links/x.txt'));
+      symlinkSync(out, join(repo, 'stage/ backup'));
       symlinkSync(join(out, 'notes.txt'), join(repo, 'notes.txt'));
       symlinkSync(join(repo, 'source.txt'), join(out, 'file-link'));
       // An unrecorded user link outside the roots to a ledger-owned directory.
@@ -242,7 +246,11 @@ describe('safety hook: Bash host route', () => {
         [refuse, `dd if=source.txt of=${out}/$X`], [refuse, `dd if=source.txt of=${out}/$(printf notes.txt)`], [refuse, 'dd if=source.txt of=$HOME/notes.txt'],
         [refuse, 'dd if=source.txt of=${HOME}/notes.txt'], [null, 'dd if=source.txt of=build/$X'], [refuse, 'cp --target-directory="$HOME" source.txt'],
         [refuse, `cp --target-directory=${out}/$X source.txt`], [refuse, `tee ${out}/$X`], [refuse, 'echo x > ${HOME}/$X'],
-        [null, 'rm -f stage/[[:digit:]]*/victim.txt'], [null, 'truncate -s 0 stage/[[:digit:]]*/victim.txt'], [refuse, 'rm -f stage/[[:alpha:]]*/victim.txt'],
+        [refuse, 'rm -f stage/[[:alpha:]]*/victim.txt'], [refuse, 'truncate -s 0 stage/[![:graph:]]*/victim.txt'], ['CredentialGuard', 'cat credentials[![:graph:]].json'],
+        // #3025 r2: expansion never drops an operand; each brace item is its own target, and an unknown item keeps its literal directory.
+        [refuse, `tee {build/$X,${out}/victim.txt}`], [refuse, `cp source.txt {build/$X,${out}}`], [refuse, 'tee {build/$X,links/x.txt}'],
+        [refuse, `tee {build/$(printf x),${out}/victim.txt}`], [refuse, `tee {build/$'x',${out}/victim.txt}`], [refuse, `tee {~nouser/x,${out}/victim.txt}`],
+        [refuse, `tee {big/*,${out}/victim.txt}`], [null, 'tee {build/$X,build/new.txt}'],
         // GNU getopt accepts a long option prefix.
         [refuse, 'mv --target=linked stage/b.json'], [refuse, 'cp --target=linked a.txt'],
         // An unknown removal refuses; an unknown overwrite refuses only when its literal directory is outside the roots.

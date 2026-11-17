@@ -9,54 +9,24 @@ import { dirname, isAbsolute, join, parse, resolve, sep } from 'path';
 export const escapePattern = (text: string) => text.replace(/[\\*?[\]{},~]/g, '\\$&');
 export const unescapePattern = (pattern: string) => pattern.replace(/\\(.)/gs, '$1');
 
-/** POSIX character classes inside a bracket expression, as regular expression class members (Unicode, as a UTF-8 locale). */
-const POSIX_CLASSES: Readonly<Record<string, string>> = {
-  alnum: '\\p{L}\\p{Nd}', alpha: '\\p{L}', blank: ' \\t', cntrl: '\\p{Cc}', digit: '0-9', graph: '\\P{Cc}', lower: '\\p{Ll}',
-  print: '\\P{Cc}', punct: '\\p{P}\\p{S}', space: '\\s', upper: '\\p{Lu}', word: '\\p{L}\\p{N}_', xdigit: '0-9A-Fa-f',
-};
-
 /**
- * The regular expression for the bracket expression that opens at `open`, and its closing index. `any` for an equivalence class,
- * a collating symbol or an unknown class name; null when the bracket does not close, so `[` is a literal character.
- */
-function bracketSource(pattern: string, open: number): { source: string; end: number } | 'any' | null {
-  let i = open + 1;
-  const negated = pattern[i] === '!' || pattern[i] === '^';
-  if (negated) i++;
-  let body = '';
-  // A `]` right after `[` or `[!` is a member of the bracket expression, not its end.
-  for (const first = i; i < pattern.length; i++) {
-    const ch = pattern[i]!;
-    if (ch === ']' && i > first) return { source: `[${negated ? '^' : ''}${body}]`, end: i };
-    if (ch === '[' && pattern[i + 1] === ':') {
-      const close = pattern.indexOf(':]', i + 2);
-      const members = close < 0 ? undefined : POSIX_CLASSES[pattern.slice(i + 2, close)];
-      if (members === undefined) return 'any';
-      body += members;
-      i = close + 1;
-    } else if (ch === '[' && (pattern[i + 1] === '=' || pattern[i + 1] === '.')) return 'any';
-    else if (ch === '\\') body += (pattern[++i] ?? '').replace(/[\\\]\[^-]/g, '\\$&');
-    else body += ch === '-' ? ch : ch.replace(/[\\\]\[^]/g, '\\$&');
-  }
-  return null;
-}
-
-/**
- * Shell pattern match of one path segment. An equivalence class, a collating symbol or a bracket that does not compile matches
- * every name, so a check that asks "can this glob reach X" errs toward yes.
+ * Shell pattern match of one path segment. A nested bracket, a POSIX class or a bracket that does not compile matches every name, so
+ * a check that asks "can this glob reach X" errs toward yes.
  */
 export function segmentMatches(pattern: string, name: string): boolean {
   let source = '';
   for (let i = 0; i < pattern.length; i++) {
     const ch = pattern[i]!;
-    const bracket = ch === '[' ? bracketSource(pattern, i) : null;
-    if (bracket === 'any') return true;
+    const negated = ch === '[' && (pattern[i + 1] === '!' || pattern[i + 1] === '^');
+    // A `]` right after `[` or `[!` is a member of the bracket expression, not its end.
+    const close = ch === '[' ? pattern.indexOf(']', i + (negated ? 3 : 2)) : -1;
     if (ch === '\\') source += (pattern[++i] ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     else if (ch === '*') source += '.*';
     else if (ch === '?') source += '.';
-    else if (bracket) {
-      source += bracket.source;
-      i = bracket.end;
+    else if (close > 0 && /\[/.test(pattern.slice(i + 1, close))) return true;
+    else if (close > 0) {
+      source += `[${negated ? '^' : ''}${unescapePattern(pattern.slice(i + (negated ? 2 : 1), close)).replace(/[\\\]]/g, '\\$&')}]`;
+      i = close;
     } else source += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
   // A match with or without case counts: the shell glob is case-sensitive, but `nocaseglob` and the filesystem are not.
