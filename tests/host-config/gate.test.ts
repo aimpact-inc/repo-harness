@@ -344,7 +344,7 @@ test('a revert removes an emptied container only when the record proves rh creat
 test('a whole-path write records its entry first; delegate, a transaction rollback and a revert follow the records', () => {
   const f = fixture();
   const claude = join(f.home, '.claude');
-  const [file, link, tree, user, other] = [join(claude, 'agents', 'a.md'), join(claude, 'commands', 'c.md'), join(claude, 'skills', 's'), join(claude, 'agents', 'u.md'), join(claude, 'agents', 'o.md')];
+  const [file, link, tree, user] = [join(claude, 'agents', 'a.md'), join(claude, 'commands', 'c.md'), join(claude, 'skills', 's'), join(claude, 'agents', 'u.md')];
   const source = (text: string) => { const dir = mkdtempSync(join(f.home, 'src-')); writeFileSync(join(dir, 'SKILL.md'), text); return dir; };
   const bytes = (text: string): PathEntry => ({ type: 'file', bytes: Buffer.from(text) });
   const w = (path: string, entry: PathEntry, replace = false) => ({ path, owner: 'core', entry, replace });
@@ -356,11 +356,6 @@ test('a whole-path write records its entry first; delegate, a transaction rollba
   expect(() => f.gate().writePaths([w(user, bytes('rh\n'))])).toThrow(`rh has no record of it, so rh does not replace it: ${user}`);
   f.gate().writePaths([w(user, bytes('rh\n'), true)]);
   expect({ kind: f.ledger().paths[user].kind, vault: f.vault(f.ledger().paths[user].backup) }).toEqual({ kind: 'replaced', vault: 'mine\n' });
-  // A delegated writer that changes a path rh does not own gets no record for it and fails.
-  writeFileSync(other, 'theirs\n');
-  expect(() => f.gate().delegate([{ path: other, owner: 'core' }], ([target]) => writeFileSync(target!, 'rh\n')))
-    .toThrow(`the delegated writer changed paths that rh does not own, so rh records none of them: ${other}`);
-  expect(f.ledger().paths[other]).toBeUndefined();
 
   // In a transaction rh refreshes the tree in process and the file out of process, and adds two files; the user edits one.
   const snapshot = readFileSync(join(f.root, 'ledger.json'));
@@ -381,4 +376,45 @@ test('a whole-path write records its entry first; delegate, a transaction rollba
     .toEqual([[file, 'removed'], [link, 'kept_edited'], [tree, 'removed'], [user, 'restored'], [edited, 'kept_edited']]);
   expect({ user: readFileSync(user, 'utf8'), file: existsSync(file), tree: existsSync(tree), paths: Object.keys(f.ledger().paths) })
     .toEqual({ user: 'mine\n', file: false, tree: false, paths: [link, edited] });
+});
+
+test('a delegated writer runs only on paths that rh may write; a replaced path stays a file; a rollback undoes a revert of a replaced file', () => {
+  const f = fixture();
+  const agents = join(f.home, '.claude', 'agents');
+  const [unrecorded, edited, kept, foreign, user, blocks] = ['u', 'e', 'k', 'f', 'r', 't'].map((name) => join(agents, `${name}.md`)) as [string, string, string, string, string, string];
+  const file = (text: string): PathEntry => ({ type: 'file', bytes: Buffer.from(text) });
+  f.gate().writePaths([{ path: edited, owner: 'core', entry: file('rh\n') }, { path: foreign, owner: 'o2', entry: file('o2\n') }]);
+  writeFileSync(edited, 'rh\nuser\n');
+  writeFileSync(unrecorded, 'theirs\n');
+  writeFileSync(kept, 'mine\n');
+  f.gate().keepUserPaths('core', [kept], [kept]);
+  const ledger = f.ledger();
+  for (const [path, reason] of [[unrecorded, 'rh has no record of it'], [edited, 'it changed since rh wrote it'], [kept, 'the user keeps it'], [foreign, 'rh records it for o2']] as const) {
+    const before = readFileSync(path, 'utf8');
+    let ran = false;
+    expect(() => f.gate().delegate([{ path, owner: 'core' }], () => { ran = true; })).toThrow(`${reason}, so rh does not replace it: ${path}`);
+    expect({ ran, bytes: readFileSync(path, 'utf8') }).toEqual({ ran: false, bytes: before });
+  }
+  expect(f.ledger()).toEqual(ledger);
+
+  // On the user's word the file goes to the vault before the writer runs, and the path stays a file.
+  writeFileSync(user, 'original\n');
+  expect(f.gate().delegate([{ path: user, owner: 'core', replace: true }], ([target]) => writeFileSync(target!, 'rh\n')).changed).toEqual([user]);
+  expect({ kind: f.ledger().paths[user].kind, vault: f.vault(f.ledger().paths[user].backup) }).toEqual({ kind: 'replaced', vault: 'original\n' });
+  expect(() => f.gate().writePaths([{ path: user, owner: 'core', entry: { type: 'symlink', target: edited } }]))
+    .toThrow(`rh replaced a user file here, so it writes only a file at this path: ${user}`);
+  expect({ bytes: readFileSync(user, 'utf8'), kind: f.ledger().paths[user].kind }).toEqual({ bytes: 'rh\n', kind: 'replaced' });
+
+  // A rollback undoes a revert in its transaction: rh's file and its record come back.
+  const snapshot = readFileSync(join(f.root, 'ledger.json'));
+  const transaction = mkdtempSync(join(f.home, 'tx-'));
+  expect(f.gate().revertPaths([user], { transaction }).map((entry) => entry.action)).toEqual(['restored']);
+  expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, transaction).unresolved).toEqual([]);
+  expect({ bytes: readFileSync(user, 'utf8'), record: f.ledger().paths[user] }).toEqual({ bytes: 'rh\n', record: JSON.parse(snapshot.toString()).paths[user] });
+
+  // A file with rh text blocks is no whole path.
+  writeFileSync(blocks, 'keep=1\n');
+  f.gate().apply([f.change(blocks, 'on')]);
+  expect(() => f.gate().writePaths([{ path: blocks, owner: 'core', entry: file('rh\n') }]))
+    .toThrow(`rh text blocks are recorded in this file, so rh does not write it as a whole path: ${blocks}`);
 });

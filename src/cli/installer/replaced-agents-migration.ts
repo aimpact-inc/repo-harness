@@ -21,8 +21,8 @@ function replacedAgentsDirectory(env: NodeJS.ProcessEnv): string {
 /**
  * One-shot migration (#2850): before path records, `--force` kept each user
  * fleet file that it replaced in `~/.repo-harness/replaced-agents/`. For a
- * target that still holds the fleet's bytes and has no record or a current
- * `created` record, the earliest copy goes to the vault and the record
+ * target with a current `created` record of `core`, or with no record and the
+ * fleet's bytes, the earliest copy goes to the vault and the record
  * becomes `replaced`, so a revert gives the user file back. A `replaced`
  * record is already migrated, so a second run imports nothing. The copies
  * stay where they are. A file in the directory that `--force` did not write
@@ -46,8 +46,10 @@ export function migrateReplacedAgents(env: NodeJS.ProcessEnv, targets: readonly 
     if (!earliest) continue;
     const key = pathRecordKey(env, target.path);
     const record = records[key];
-    if (record && (record.kind !== 'created' || !pathRecordIsCurrent(key, record))) continue;
-    if (!lstatSync(target.path, { throwIfNoEntry: false })?.isFile() || readFileSync(target.path, 'utf8') !== target.content) continue;
+    // A current `created` record proves rh's file, also an older fleet version that this run refreshes next;
+    // an unrecorded file must hold this fleet's bytes.
+    if (record ? record.kind !== 'created' || record.owner !== 'core' || !pathRecordIsCurrent(key, record)
+      : !lstatSync(target.path, { throwIfNoEntry: false })?.isFile() || readFileSync(target.path, 'utf8') !== target.content) continue;
     gate.adoptReplacedPath(target.path, 'core', readFileSync(earliest.path));
     migrated.push({ path: target.path, copy: earliest.path });
   }

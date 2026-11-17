@@ -281,6 +281,7 @@ export function writeLedger(paths: HostConfigPaths, ledger: HostConfigLedger): v
 export function putVault(paths: HostConfigPaths, bytes: Buffer): Sha256 {
   const hex = sha256Hex(bytes);
   const target = join(paths.vault, hex);
+  ensurePrivateDirectory(paths.vault);
   if (!lstatSync(target, { throwIfNoEntry: false })) publishFileByRename(target, bytes, `${target}.${randomUUID()}.tmp`);
   readVault(paths, `sha256:${hex}`);
   return `sha256:${hex}`;

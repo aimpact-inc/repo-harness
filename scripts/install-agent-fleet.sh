@@ -243,6 +243,11 @@ function compareAndWrite(targetPath, content, acceptedHash) {
 
   if (existing === content) return "up-to-date";
 
+  // rh writes a fleet file only as a regular file; a link to a user file (also a dangling one) is follow-up #3102.
+  if (fs.lstatSync(targetPath, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    return `linked (links to ${fs.readlinkSync(targetPath)}; replace the link with a regular file, then run again)`;
+  }
+
   if (existing === null) {
     writeAgent(targetPath, content, false);
     return "installed";
@@ -370,7 +375,7 @@ for (const target of targets) {
   results.push({ host: target.host, file: target.file, status });
 }
 
-const failed = results.some((entry) => entry.status === "drift" || entry.status === "backup-failed");
+const failed = results.some((entry) => entry.status === "drift" || entry.status === "backup-failed" || entry.status.startsWith("linked"));
 // A forced run takes every fleet file back, so the user's claims on them go.
 if (force && !failed) gate.keepUserPaths("core", targets.map((target) => target.path), []);
 

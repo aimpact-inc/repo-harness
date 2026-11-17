@@ -381,6 +381,8 @@ function admitWholePath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, ledger: 
   if (host === null) throw new HostConfigError('host_config_invalid_path', `not inside an install root, so rh records no whole path there: ${path}`);
   const holder = pathRecordOf(ledger, key as HostPath);
   if (holder !== null && holder !== key) throw new HostConfigError('host_config_invalid_state', `the recorded directory ${holder} holds this path, so rh does not write it on its own: ${path}`);
+  // A whole entry would replace rh's text blocks and the user's bytes around them with no record of either.
+  if (ledger.files[key]?.kind === 'text_block') throw new HostConfigError('host_config_invalid_state', `rh text blocks are recorded in this file, so rh does not write it as a whole path: ${path}`);
   return { key, host };
 }
 
@@ -409,6 +411,13 @@ function nextPathRecord(previous: PathRecord | undefined, owner: string, host: P
   return { owner, host, kind: kept ? 'replaced' : 'created', baseline, committed, ...(kept ? { backup: kept } : {}) };
 }
 
+/** `validPathRecord` holds a `replaced` record to a file: the user file that it replaced comes back as a file. */
+function assertReplacedIsFile(record: PathRecord, path: string): void {
+  if (record.kind === 'replaced' && record.committed.type !== 'file') {
+    throw new HostConfigError('host_config_invalid_state', `rh replaced a user file here, so it writes only a file at this path: ${path}`);
+  }
+}
+
 /** Each record reaches the ledger before its entry is published, so every whole-path write has its record. */
 function writeWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, writes: readonly HostConfigPathWrite[], options: HostConfigPathOptions): string[] {
   const ledger = readLedger(paths);
@@ -433,6 +442,7 @@ function writeWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, writes:
       const stage = stagePathEntry(key, write.entry);
       staged = stage.staged;
       const next = nextPathRecord(previous, write.owner, host, observed, stage.committed, backup);
+      assertReplacedIsFile(next, write.path);
       if (sameCommitted(observed, stage.committed) && previous && JSON.stringify(previous) === JSON.stringify(next)) {
         discardStagedEntry(staged);
         continue;
@@ -457,22 +467,32 @@ function writeWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, writes:
 }
 
 /**
- * The out-of-process form of `writeWholePaths`. Records follow the writer: a
- * path that it did not change keeps the record that the ledger then holds, so
- * the writer's own record changes (a `user_managed` claim) stay.
+ * The out-of-process form of `writeWholePaths`. Every destination is checked
+ * before `run`: an existing entry must be rh's, or a file under `replace`,
+ * which goes to the vault first; any other destination stops the call before
+ * the writer runs. Records follow the writer: a path that it did not change
+ * keeps the record that the ledger then holds, so the writer's own record
+ * changes (a `user_managed` claim) stay.
  */
 function delegateWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, declared: readonly HostConfigPathDeclaration[],
   run: (destinations: readonly string[]) => void, options: HostConfigPathOptions): HostConfigDelegateResult {
   const ledger = readLedger(paths);
   const admitted = declared.map((declaration) => ({ declaration, ...admitWholePath(env, paths, ledger, declaration.path) }));
   if (new Set(admitted.map(({ key }) => key)).size !== admitted.length) throw new HostConfigError('host_config_invalid_state', 'a call names one path twice');
-  const before = admitted.map(({ declaration, key, host }) => {
+  const checked = admitted.map(({ declaration, key, host }) => {
     const previous = ledger.paths[key];
     const observed = observePathEntry(key);
     const owned = observed === null || ownsEntry(previous, declaration.owner, key);
-    const backup = !owned && declaration.replace && observed?.type === 'file' ? putVault(paths, readFileSync(key)) : undefined;
-    if (observed !== null && owned && options.transaction) keepPreimage(options.transaction, key);
-    return { declaration, key, host, previous, observed, owned, backup };
+    if (!owned && !(declaration.replace && observed.type === 'file')) {
+      throw observed.type === 'file' || !declaration.replace ? refusal(declaration.path, previous, declaration.owner)
+        : new HostConfigError('host_config_invalid_state', `only a file can be replaced on the user's word: ${declaration.path}`);
+    }
+    return { declaration, key, host, previous, observed, owned };
+  });
+  const before = checked.map((entry) => {
+    const backup = entry.owned ? undefined : putVault(paths, readFileSync(entry.key));
+    if (entry.observed !== null && entry.owned && options.transaction) keepPreimage(options.transaction, entry.key);
+    return { ...entry, backup };
   });
   let failure: unknown = null;
   try { run(admitted.map(({ key }) => key)); } catch (error) { failure = error; }
@@ -480,18 +500,19 @@ function delegateWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, decl
   const after = readLedger(paths);
   const records = { ...after.paths };
   const changed: string[] = [];
-  const unowned: string[] = [];
+  const invalid: string[] = [];
   for (const { declaration, key, host, previous, observed, owned, backup } of before) {
     const now = observePathEntry(key);
     if (sameCommitted(now, observed)) continue;
-    if (!owned && backup === undefined) { unowned.push(declaration.path); continue; }
-    if (now === null) delete records[key];
-    else records[key] = nextPathRecord(owned ? previous : undefined, declaration.owner, host, observed, now, backup);
+    const next = now === null ? null : nextPathRecord(owned ? previous : undefined, declaration.owner, host, observed, now, backup);
+    // A `replaced` path that the writer made a link or a tree keeps no record; the user file stays in the vault.
+    if (next?.kind === 'replaced' && next.committed.type !== 'file') { delete records[key]; invalid.push(declaration.path); continue; }
+    if (next === null) delete records[key]; else records[key] = next;
     changed.push(key);
   }
   writeLedger(paths, { ...after, paths: records });
   if (failure !== null) throw failure;
-  if (unowned.length) throw new HostConfigError('host_config_invalid_state', `the delegated writer changed paths that rh does not own, so rh records none of them: ${unowned.join(', ')}`);
+  if (invalid.length) throw new HostConfigError('host_config_invalid_state', `rh replaced a user file at these paths, but the delegated writer did not leave a file there: ${invalid.join(', ')}`);
   return { changed };
 }
 
@@ -839,7 +860,10 @@ function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, no
     // A claim or release of a file that the user keeps changes no entry.
     if (current?.kind === 'user_managed' || (!current && old?.kind === 'user_managed')) continue;
     if (!current) {
-      if (observePathEntry(key) === null && hasPreimage(transaction, key)) restorePreimage(transaction, key);
+      const entry = observePathEntry(key);
+      // A revert in this transaction took the record out: the entry is gone, or it is the user file that came back from the vault.
+      const reverted = entry === null || (old!.kind === 'replaced' && entry.type === 'file' && entry.sha256 === old!.backup);
+      if (reverted && hasPreimage(transaction, key)) restorePreimage(transaction, key);
       else if (!pathRecordIsCurrent(key, old!)) unresolved.push(key);
       continue;
     }
