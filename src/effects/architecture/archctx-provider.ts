@@ -250,8 +250,8 @@ export function runArchctxPassThrough(cwd: string, args: readonly string[], opti
   return result.status ?? 1;
 }
 
-/** Lifecycle readback is separate from the CLI-only capabilities handshake. */
-export function verifyArchctxDaemonRuntime(repoRoot: string, options: ArchctxProviderOptions = {}, packageRoot?: string): void {
+/** Lifecycle readback is separate from the CLI-only capabilities handshake. True means a usable daemon answered. */
+export function verifyArchctxDaemonRuntime(repoRoot: string, options: ArchctxProviderOptions = {}, packageRoot?: string): boolean {
   const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
   const client = new ArchctxClient(repoRoot, policy.requiredVersion, options, packageRoot);
   const resolved = client.resolved;
@@ -273,6 +273,7 @@ export function verifyArchctxDaemonRuntime(repoRoot: string, options: ArchctxPro
   if (data.running && (data.rpcVersionCompatible !== true || data.productVersionCompatible !== true)) {
     throw new Error('archctx daemon status did not prove runtime compatibility');
   }
+  return data.running === true && data.responding !== false && data.usable !== false;
 }
 
 function daemonStopFailure(stateDir: string | null, error: ArchctxClientError): ArchitectureDaemonStopFailure {
@@ -577,10 +578,18 @@ export function prepareArchitectureTask(repoRoot: string, task: string, options:
   if (capabilitySource(repoRoot) !== 'archcontext' || !capabilityAuthorityReady(repoRoot)) return null;
   const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
   if (policy.provider === 'disabled') return null;
-  // Warm reads measured 1326–1395 ms. Do not start when that work cannot fit.
-  if (remainingTimeout(options, 3_000, 'notice prepare') < 1_500) {
-    throw new ArchctxClientError({ code: 'RH_ARCHCTX_TIMEOUT', action: 'retry', message: 'architecture prepare skipped: less than 1500 ms remains' });
+  // Warm reads measured 1326–1395 ms. Reserve that time after the status probe too.
+  const requirePrepareTime = () => {
+    if (remainingTimeout(options, 3_000, 'notice prepare') < 1_500) {
+      throw new ArchctxClientError({ code: 'RH_ARCHCTX_TIMEOUT', action: 'retry', message: 'architecture prepare skipped: less than 1500 ms remains' });
+    }
+  };
+  requirePrepareTime();
+  // In archctx 0.15.0, status never starts a daemon; prepare can start one if none answers.
+  if (!verifyArchctxDaemonRuntime(repoRoot, { ...options, policy })) {
+    throw new ArchctxClientError({ code: 'AC_RUNTIME_UNAVAILABLE', action: 'start-or-reconnect-runtime', message: 'architecture prepare skipped: no usable daemon answered' });
   }
+  requirePrepareTime();
   const data = new ArchctxClient(repoRoot, policy.requiredVersion, options).data(['prepare', '--task', task, '--json'], 3_000);
   remainingTimeout(options, 3_000, 'notice prepare decode');
   const context = isRecord(data) && isRecord(data.context) ? data.context : null;

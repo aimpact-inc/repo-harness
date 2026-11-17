@@ -139,7 +139,7 @@ describe('typed hook runtime', () => {
           appendFileSync(${JSON.stringify(join(root, 'home/archctx-calls'))}, args[0] + '\\n');
           if (args[0] === 'prepare' && ${slow}) setTimeout(() => {}, 30000);
           else console.log(JSON.stringify({ schemaVersion: 'archcontext.envelope/v1', requestId: args[0], ok: true,
-            data: args[0] === 'checkpoint' ? ${JSON.stringify(report)} : { posture: 'structural', context: {
+            data: args[0] === 'daemon' ? { running: true, rpcVersionCompatible: true, productVersionCompatible: true } : args[0] === 'checkpoint' ? ${JSON.stringify(report)} : { posture: 'structural', context: {
               schemaVersion: 'archcontext.task-context/v1', task: args[2], posture: 'structural', constraints: ['constraint'] } } }));
         `);
         const result = spawnSync(process.execPath, [launcher], { cwd: root, env: { ...noticeEnv(root), ...env(root), HOME: join(root, 'home') },
@@ -159,7 +159,7 @@ describe('typed hook runtime', () => {
           expect(result.stderr).toContain('not finished in its time budget');
         }
       }
-      expect(readFileSync(join(root, 'home/archctx-calls'), 'utf8').trim().split('\n')).toEqual(['checkpoint', 'prepare', 'checkpoint', 'prepare']);
+      expect(readFileSync(join(root, 'home/archctx-calls'), 'utf8').trim().split('\n')).toEqual(['checkpoint', 'daemon', 'prepare', 'checkpoint', 'daemon', 'prepare']);
     } finally { clean(root); }
   }, 30_000);
 
