@@ -116,10 +116,16 @@ function underRoot(root: Root, path: string, orAt = false): boolean {
   return root.every((part, n) => part === '*' ? parts[n] !== '..' && parts[n] !== '' : parts[n] === part);
 }
 
-/** The path itself, with every directory above it resolved; the leaf link is not followed, as rm and mv do not follow it. */
+/** A path separator of this platform at the end; a backslash is a name character on POSIX. */
+const TRAILING_SEPARATOR = sep === '/' ? /\/$/ : /[\\/]$/;
+
+/**
+ * The entry that rm and mv act on, with every directory above it resolved. They do not follow the leaf link, except through a
+ * trailing separator: then the kernel resolves the leaf link, and the directory it names is the entry.
+ */
 function leafPath(path: string): string {
   const name = basename(path);
-  return name === '' || name === '.' || name === '..' ? writeThroughPath(path) : join(writeThroughPath(dirname(path)), name);
+  return name === '' || name === '.' || name === '..' || TRAILING_SEPARATOR.test(path) ? writeThroughPath(path) : join(writeThroughPath(dirname(path)), name);
 }
 
 /** One surface of rh's install ledger, as the installer records it. */
@@ -171,10 +177,9 @@ class TargetJudge {
       const inRoot = (path: string) => this.roots.some(root => underRoot(root, path, true));
       if (!inRoot(into)) return this.existingDenial(target, into);
       if (target.destination!.intoRoot) {
-        // BSD mv -h renames over a destination link to a directory, so the entry itself must be in a root too. A trailing slash
-        // makes the kernel follow that link, so the entry is the directory.
-        let leaf: string | null = TRAILING_SEPARATOR.test(target.path) ? into : null;
-        try { leaf ??= leafPath(target.path); } catch { /* the destroy check below decides */ }
+        // BSD mv -h renames over a destination link to a directory, so the entry itself must be in a root too.
+        let leaf: string | null = null;
+        try { leaf = leafPath(target.path); } catch { /* the destroy check below decides */ }
         if (leaf !== null && inRoot(leaf)) return null;
       }
     }
@@ -225,9 +230,6 @@ class TargetJudge {
     return outsideDenial(target, path, this.roots, this.userStep);
   }
 }
-
-/** A path separator of this platform at the end; a backslash is a name character on POSIX. */
-const TRAILING_SEPARATOR = sep === '/' ? /\/$/ : /[\\/]$/;
 
 /** The existing directory that the path resolves to through every link, or null. */
 function existingDirectory(path: string): string | null {
@@ -516,7 +518,9 @@ function expansionIndex(pattern: string, expand: boolean): number {
 
 function targetsOf(kind: TargetKind, via: string, word: Word, dirs: Dirs, extra: Pick<WriteTarget, 'into' | 'destination'> = {}): WriteTarget[] {
   const found = wordTargets(word, dirs);
-  if (found === null) return [{ kind, via, spelled: word.value, path: null }];
+  // A trailing separator after a glob follows each matched link, so the literal directory does not bound the removal.
+  const unbounded = kind === 'destroy' && found?.some(({ glob }) => glob) && TRAILING_SEPARATOR.test(word.value);
+  if (found === null || unbounded) return [{ kind, via, spelled: word.value, path: null }];
   return found.map(({ path, glob }) => ({ kind, via, spelled: word.value, path, ...(glob ? { glob: true as const } : {}), ...extra }));
 }
 
