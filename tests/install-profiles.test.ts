@@ -55,6 +55,7 @@ import { HC_MIN_VERSION } from '../src/core/terminal/herdr-pin';
 import { openHostConfigGate } from '../src/effects/host-config/gate';
 import { hostConfigPaths } from '../src/effects/host-config/store';
 import { tomlFragment } from '../src/core/host-config/toml-fragment';
+import { currentProcessStartTime } from '../src/effects/locking/process-start-time';
 
 const ROOT = join(import.meta.dir, '..');
 const CLI = join(ROOT, 'src/cli/index.ts');
@@ -910,6 +911,31 @@ describe('install selection', () => {
     expect(after).toBeDefined();
     expect(after).not.toBe(before);
     expect(installStateStatus(refreshed, env).drift.status).toBe('consistent');
+  }));
+
+  test('the next locked transaction removes the directory of a killed install and keeps live, retained and linked ones', () => withHome((env) => {
+    const home = env.HOME!;
+    const transactions = join(home, '.repo-harness', 'transactions');
+    writePath(join(home, '.claude.json'), '{"token":"synthetic"}\n');
+    // A real install transaction in a child process that dies after its copies.
+    const killed = spawnSync(process.execPath, ['-e', `const ip = await import(${JSON.stringify(join(ROOT, 'src/cli/installer/install-profile.ts'))}); const env = JSON.parse(process.env.PROBE_ENV); ip.beginInstallHostTransaction(ip.installProfileHostMutationPaths(env), env); process.kill(process.pid, 'SIGKILL');`],
+      { env: { ...env, PROBE_ENV: JSON.stringify(env) }, encoding: 'utf-8' });
+    expect(killed.signal, killed.stderr).toBe('SIGKILL');
+    const [orphan] = readdirSync(transactions).filter((name) => name.startsWith('install-'));
+    expect(readdirSync(join(transactions, orphan!)).length).toBeGreaterThan(1);
+    const outside = join(home, 'outside');
+    writePath(join(outside, 'keep'), 'keep\n');
+    const rows = {
+      live: { 'owner.json': JSON.stringify({ pid: process.pid, start_time: currentProcessStartTime() }), '0': 'copy\n' },
+      unrecorded: { '0': 'copy\n' },
+      retained: { 'manifest.json': '{}\n', '0': 'copy\n' },
+    };
+    for (const [name, files] of Object.entries(rows)) for (const [file, text] of Object.entries(files)) writePath(join(transactions, `install-${name}`, file), text);
+    symlinkSync(outside, join(transactions, 'install-link'), 'dir');
+
+    commitInstallHostTransaction(beginInstallHostTransaction(installProfileHostMutationPaths(env), env));
+    expect(readdirSync(transactions).filter((name) => name.startsWith('install-')).sort()).toEqual(['install-link', 'install-live', 'install-retained']);
+    expect(readFileSync(join(outside, 'keep'), 'utf-8')).toBe('keep\n');
   }));
 
   test('host transaction restores prior bytes and removes later mutations', () => withHome((env) => {
