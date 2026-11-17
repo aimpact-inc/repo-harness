@@ -343,6 +343,8 @@ describe('safety hook: Bash host route', () => {
         [refuse, `install source.txt ${out}/victim.txt`], [refuse, `install source.txt -S ${out}/victim.txt`], [refuse, `install source.txt -D ${out}/victim.txt`],
         [refuse, `install source.txt -T ${out}/victim.txt`], [refuse, 'install -Q source.txt build/x'], [null, `install -d ${out}/new-dir`],
         [null, 'install -m 644 source.txt big/zdir'],
+        // install replaces the destination entry with a file, so an outside link into the worktree refuses.
+        [refuse, `install stage/b.json ${out}/file-link`],
         // An unknown removal refuses; an unknown overwrite refuses only when its literal directory is outside the roots.
         [refuse, 'rm -rf build/$X'], [refuse, `echo x > ${out}/$X`], [null, 'echo x > "$TARGET"'], [null, 'echo x > build/$X'],
         [null, 'rm -rf build/*'], [null, 'rm -rf build/*/'], [null, 'rm stage/*.json'], [null, 'mv stage/*.json build/'], [null, 'cp stage/*.json build/'],

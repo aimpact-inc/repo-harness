@@ -66,9 +66,10 @@ export interface WriteTarget {
   /**
    * cp and ln write `<path>/<name>` for each source name when `path` is an existing directory; the directory itself is not
    * written. `names` is null when a source name is not known, and then every existing child can be the target. cp writes
-   * through an existing child link (`follow`); ln replaces the child entry. A recursive cp also writes below each child.
+   * through an existing child link (`follow`); ln replaces the child entry. A recursive cp also writes below each child. install
+   * replaces an existing destination entry with a regular file (`replacesWithFile`), so a link there is lost.
    */
-  readonly into?: { readonly names: readonly string[] | null; readonly follow: boolean; readonly recursive: boolean };
+  readonly into?: { readonly names: readonly string[] | null; readonly follow: boolean; readonly recursive: boolean; readonly replacesWithFile?: true };
   /**
    * An mv operand that can be the destination. When it resolves to an existing directory, mv moves the sources into that
    * directory, so a directory outside the roots is refused. With `intoRoot` (the last operand of the plain form), an allowed root
@@ -236,6 +237,13 @@ class TargetJudge {
       }
     }
     if (target.into && statSync(paths[0]!, { throwIfNoEntry: false })?.isDirectory()) return this.childDenial(target, target.into, paths[0]!);
+    if (target.into?.replacesWithFile) {
+      // The destination entry itself is replaced, so an existing entry outside the roots refuses, also a link into a root.
+      let leaf: string;
+      try { leaf = leafPath(target.path); } catch { return unknownTargetDenial(target, this.roots, this.userStep); }
+      const denial = this.existingDenial({ ...target, kind: 'destroy' }, leaf);
+      if (denial) return denial;
+    }
     for (const path of paths) {
       const denial = this.existingDenial(target, path);
       if (denial) return denial;
@@ -897,7 +905,7 @@ function installTargets(args: readonly Arg[], cwd: string | null, home: string):
     });
     if (directories) return [];
     const valued = new Set([...reading.valued].map(letter => `-${letter}`).concat(reading.long.length ? INSTALL_LONG_VALUED : []));
-    return copyTargets('install', args, cwd, home, valued);
+    return copyTargets('install', args, cwd, home, valued).map(target => target.into ? { ...target, into: { ...target.into, replacesWithFile: true as const } } : target);
   })];
 }
 
