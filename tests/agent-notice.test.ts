@@ -2,13 +2,13 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { ERROR_CATALOG } from 'archctx-contracts';
+import { ERROR_CATALOG, digestJson, type Json } from 'archctx-contracts';
 import { collectAgentNotice, renderAgentNotice } from '../src/cli/hook/agent-notice';
 import { ArchctxClient, checkpointArchitectureDebt } from '../src/effects/architecture/archctx-provider';
 import { ARCHCTX_REQUIRED_VERSION } from '../src/core/architecture/projection';
 import type { ArchctxProviderOptions } from '../src/core/architecture/contracts';
 import type { CapabilityOwnership } from '../src/core/capabilities/registry';
-import { resolveCapabilityOwnership } from '../src/effects/state/resolve-effective-state';
+import { resolveCapabilityOwnership, parseIssueBranch } from '../src/effects/state/resolve-effective-state';
 import { agentNoticeFixture, noticeOwnership, noticeEnv, registryNoticeFixture, registryProjectedFixture, unignoreNoticeState, writeNoticeRegistry, NOTICE_CAPABILITY } from './helpers/agent-notice';
 import { fixtureCommit, fixtureGit, fixtureWrite, writeStateMachine, STATE_MACHINE_ID } from './helpers/module-repository';
 
@@ -40,6 +40,111 @@ const touchRegistry = (root: string) => fixtureWrite(root, '.ai/context/capabili
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 describe('AgentNotice', () => {
+  test('SessionStart prepares the canonical issue task after debt within one deadline; turns stay quiet', () => {
+    const root = fixture();
+    fixtureGit(root, ['checkout', '-qb', 'feat/2874-session-task-posture']);
+    const owned = noticeOwnership(root);
+    const report = checkpointArchitectureDebt(root, owned, { env: noticeEnv(root) })!.report;
+    let now = 0;
+    const calls: string[] = [];
+    const options: ArchctxProviderOptions = {
+      env: noticeEnv(root), nowMs: () => now,
+      run: (_binary, args, budget) => {
+        calls.push(args[0]!);
+        expect(budget.timeoutMs).toBe(args[0] === 'checkpoint' ? 3_000 : 1_900);
+        if (args[0] === 'checkpoint') now = 1_100;
+        else expect(args).toEqual(['prepare', '--task', 'Issue #2874: session task posture', '--json']);
+        const data = args[0] === 'checkpoint' ? report : {
+          posture: 'proof-required', context: { schemaVersion: 'archcontext.task-context/v1', task: args[2], posture: 'proof-required', constraints: ['one', 'two'] },
+        };
+        return { status: 0, signal: null, stdout: JSON.stringify({ schemaVersion: 'archcontext.envelope/v1', requestId: args[0], ok: true, data }), stderr: '' };
+      },
+    };
+    const notice = collectAgentNotice(root, () => owned, options, 'session-start');
+    expect(calls).toEqual(['checkpoint', 'prepare']);
+    expect(notice.content).toContain(renderAgentNotice(report)!.content);
+    expect(notice.content).toContain('[Architecture] posture: proof-required; constraints: 2; run: rh arch prepare --task ... --json');
+    expect(Buffer.byteLength(notice.content!)).toBeLessThanOrEqual(800);
+    expect(notice.diagnostics).toBeUndefined();
+    calls.length = 0; now = 0;
+    collectAgentNotice(root, () => owned, options);
+    expect(calls).toEqual(['checkpoint']);
+    for (const branch of ['main', 'feature', 'feat/02874-task', 'feat/2874-', 'feat/2874-task/extra', 'feat/9007199254740992-task', 'HEAD']) {
+      expect(parseIssueBranch(branch)).toBeNull();
+    }
+  });
+
+  test('SessionStart omits prepare failures and preserves debt; short remaining budgets start no prepare', () => {
+    const root = fixture();
+    fixtureGit(root, ['checkout', '-qb', 'feat/2874-task']);
+    const owned = noticeOwnership(root);
+    const report = checkpointArchitectureDebt(root, owned, { env: noticeEnv(root) })!.report;
+    const errors = ['AC_MODEL_ADOPTION_REQUIRED', 'AC_CODE_FACTS_UNAVAILABLE', 'AC_CODE_FACTS_NOT_READY'] as const;
+    for (const mode of ['timeout', 'exit', 'invalid', 'wrong-task', 'late-decode', 'short-budget', ...errors]) {
+      rmSync(join(root, '.ai/harness/state/agent-notice'), { force: true });
+      let now = 0;
+      const calls: string[] = [];
+      const notice = collectAgentNotice(root, () => owned, {
+        env: noticeEnv(root), nowMs: () => now,
+        run: (_binary, args) => {
+          calls.push(args[0]!);
+          if (args[0] === 'checkpoint') {
+            if (mode === 'short-budget') now = 1_501;
+            return { status: 0, signal: null, stdout: JSON.stringify({ schemaVersion: 'archcontext.envelope/v1', requestId: 'checkpoint', ok: true, data: report }), stderr: '' };
+          }
+          if (mode === 'timeout') return timedOut();
+          if (mode === 'exit') return { status: 1, signal: null, stdout: '', stderr: 'private task text' };
+          if (mode === 'invalid') return { status: 0, signal: null, stdout: '{}', stderr: '' };
+          if (mode === 'wrong-task' || mode === 'late-decode') {
+            if (mode === 'late-decode') now = 3_001;
+            return { status: 0, signal: null, stdout: JSON.stringify({ schemaVersion: 'archcontext.envelope/v1', requestId: 'prepare', ok: true,
+              data: { posture: 'normal', context: { schemaVersion: 'archcontext.task-context/v1', task: mode === 'wrong-task' ? 'another task' : args[2], posture: 'normal', constraints: [] } } }), stderr: '' };
+          }
+          const code = mode as typeof errors[number];
+          return { status: 2, signal: null, stdout: JSON.stringify({ schemaVersion: 'archcontext.envelope/v1', requestId: 'prepare', ok: false,
+            error: { ...ERROR_CATALOG[code], message: 'setup needed' } }), stderr: '' };
+        },
+      }, 'session-start');
+      expect(notice.content, mode).toBe(renderAgentNotice(report)!.content);
+      expect(calls, mode).toEqual(mode === 'short-budget' ? ['checkpoint'] : ['checkpoint', 'prepare']);
+      expect(notice.diagnostics!.trim().split('\n'), mode).toHaveLength(1);
+      expect(notice.diagnostics).not.toContain('private task text');
+      expect(Buffer.byteLength(notice.diagnostics!)).toBeLessThanOrEqual(8192);
+    }
+  });
+
+  test('SessionStart gives debt the output budget and skips prepare without an issue branch or ready model', () => {
+    const root = fixture();
+    const owned = noticeOwnership(root);
+    const original = checkpointArchitectureDebt(root, owned, { env: noticeEnv(root) })!.report;
+    const item = original.items[0]!;
+    const { digest: _digest, ...body } = original;
+    const changed = { ...body, items: [{ ...item, details: { ...item.details, modelField: '界'.repeat(205) } }] };
+    const report = { ...changed, digest: digestJson(changed as unknown as Json) };
+    const debt = renderAgentNotice(report)!;
+    expect(Buffer.byteLength(debt.content)).toBeGreaterThan(700);
+    let calls: string[] = [];
+    const options: ArchctxProviderOptions = { env: noticeEnv(root), nowMs: () => 0, run: (_binary, args) => {
+      calls.push(args[0]!);
+      const data = args[0] === 'checkpoint' ? report : { posture: 'normal', context: { schemaVersion: 'archcontext.task-context/v1', task: args[2], posture: 'normal', constraints: [] } };
+      return { status: 0, signal: null, stdout: JSON.stringify({ schemaVersion: 'archcontext.envelope/v1', requestId: args[0], ok: true, data }), stderr: '' };
+    } };
+    expect(collectAgentNotice(root, () => owned, options, 'session-start').content).toBe(debt.content);
+    expect(calls).toEqual(['checkpoint']);
+    fixtureGit(root, ['checkout', '-qb', 'feat/2874-task']);
+    rmSync(join(root, '.ai/harness/state/agent-notice'));
+    calls = [];
+    const full = collectAgentNotice(root, () => owned, options, 'session-start');
+    expect(calls).toEqual(['checkpoint', 'prepare']);
+    expect(full.content).toBe(debt.content);
+    expect(Buffer.byteLength(full.content!)).toBeLessThanOrEqual(800);
+    fixtureWrite(root, '.ai/harness/policy.json', JSON.stringify({ context: { capability_source: 'registry' } }));
+    writeNoticeRegistry(root);
+    calls = [];
+    collectAgentNotice(root, () => owned, options, 'session-start');
+    expect(calls).not.toContain('prepare');
+  });
+
   test.each([false, true])('checkpoint accepts a deleted owned path (committed: %s)', committed => {
     const root = fixture();
     const ownership = noticeOwnership(root);
@@ -111,6 +216,10 @@ describe('AgentNotice', () => {
         // No owned path, so the checkpoint returns before Git; only the archimap read times out.
         return { options: slowMergeBase(root), ownership: () => ({ ...noticeOwnership(root), capabilities: [] }) };
       },
+      'archimap fallback git': root => {
+        adoptArchimap(root);
+        return { options: slowMergeBase(root), ownership: () => null };
+      },
       'archimap and checkpoint git': root => {
         adoptArchimap(root);
         return { options: slowMergeBase(root) };
@@ -131,7 +240,7 @@ describe('AgentNotice', () => {
         };
       },
     };
-    const mergeBaseCalls = { 'checkpoint git': 1, 'archimap git': 1, 'archimap and checkpoint git': 2 } as Record<string, number>;
+    const mergeBaseCalls = { 'checkpoint git': 1, 'archimap git': 1, 'archimap fallback git': 1, 'archimap and checkpoint git': 2 } as Record<string, number>;
     for (const [name, setup] of Object.entries(cases)) {
       const root = fixture();
       const { options, ownership } = setup(root);

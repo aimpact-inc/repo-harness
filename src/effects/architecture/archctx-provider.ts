@@ -572,6 +572,26 @@ export function checkpointArchitectureDebt(repoRoot: string, ownership: Capabili
   return { branch, report };
 }
 
+/** Read task context only when the repository has an adopted model authority. */
+export function prepareArchitectureTask(repoRoot: string, task: string, options: ArchctxProviderOptions): { posture: string; constraints: number } | null {
+  if (capabilitySource(repoRoot) !== 'archcontext' || !capabilityAuthorityReady(repoRoot)) return null;
+  const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
+  if (policy.provider === 'disabled') return null;
+  // Warm reads measured 1326–1395 ms. Do not start when that work cannot fit.
+  if (remainingTimeout(options, 3_000, 'notice prepare') < 1_500) {
+    throw new ArchctxClientError({ code: 'RH_ARCHCTX_TIMEOUT', action: 'retry', message: 'architecture prepare skipped: less than 1500 ms remains' });
+  }
+  const data = new ArchctxClient(repoRoot, policy.requiredVersion, options).data(['prepare', '--task', task, '--json'], 3_000);
+  remainingTimeout(options, 3_000, 'notice prepare decode');
+  const context = isRecord(data) && isRecord(data.context) ? data.context : null;
+  if (!context || context.schemaVersion !== 'archcontext.task-context/v1' || context.task !== task
+    || !['normal', 'structural', 'intervention', 'proof-required'].includes(context.posture as string)
+    || !Array.isArray(context.constraints) || !isRecord(data) || data.posture !== context.posture) {
+    throw new Error('architecture prepare returned invalid task context');
+  }
+  return { posture: context.posture as string, constraints: context.constraints.length };
+}
+
 /** The client already refused an error envelope; this binds the review to the commit and decodes its debt. */
 function decodeCompleteArchitectureDebt(data: unknown, headSha: string): ArchitectureDebtReportV1 {
   const review = isRecord(data) ? data : {};
@@ -639,7 +659,7 @@ function runProjectionCommand(command: 'run' | 'readback', request: ProjectionRe
   }
 }
 
-function remainingTimeout(options: Pick<ArchctxProviderOptions, 'deadlineMs' | 'nowMs'>, maximumMs: number, phase: string): number {
+export function remainingTimeout(options: Pick<ArchctxProviderOptions, 'deadlineMs' | 'nowMs'>, maximumMs: number, phase: string): number {
   if (options.deadlineMs === undefined) return maximumMs;
   const remaining = Math.floor(options.deadlineMs - (options.nowMs ?? Date.now)());
   if (remaining <= 0) throw new ArchctxClientError({ code: 'RH_ARCHCTX_TIMEOUT', action: 'retry', message: `architecture projection timeout before ${phase}` });
