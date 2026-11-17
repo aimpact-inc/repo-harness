@@ -180,9 +180,9 @@ function validBaseline(value: unknown): boolean {
 function validFileRecord(record: unknown): boolean {
   if (!isObject(record) || !isObject(record.committed)) return false;
   const committed = record.committed;
-  return ['created', 'text_block', 'replaced'].includes(record.kind as string) && validBaseline(record.baseline)
+  return ['created', 'text_block'].includes(record.kind as string) && validBaseline(record.baseline)
     && (committed.type === 'absent' || (committed.type === 'file' && isSha(committed.sha256)))
-    && (isSha(record.backup) || (record.backup === null && record.kind !== 'replaced'))
+    && (isSha(record.backup) || record.backup === null)
     && (record.external_backup === undefined || isSha(record.external_backup))
     && typeof record.external_change === 'boolean';
 }
@@ -199,9 +199,11 @@ function validPathCommitted(value: unknown): boolean {
 }
 
 function validPathRecord(record: unknown): boolean {
-  return isObject(record) && isText(record.owner) && record.owner !== '' && PATH_RECORD_HOSTS.includes(record.host as string)
-    && validBaseline(record.baseline) && validPathCommitted(record.committed)
-    && (record.kind === 'created' || (record.kind === 'user_managed' && isObject(record.committed) && record.committed.type === 'file'));
+  if (!isObject(record) || !isText(record.owner) || record.owner === '' || !PATH_RECORD_HOSTS.includes(record.host as string)
+    || !validBaseline(record.baseline) || !validPathCommitted(record.committed)) return false;
+  const file = isObject(record.committed) && record.committed.type === 'file';
+  if (record.kind === 'replaced') return file && isSha(record.backup);
+  return record.backup === undefined && (record.kind === 'created' || (record.kind === 'user_managed' && file));
 }
 
 /** `created` is a member path that holds the fragment's container: a prefix of its selector. */

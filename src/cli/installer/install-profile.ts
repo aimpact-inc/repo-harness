@@ -867,15 +867,19 @@ export function rollbackInstallHostTransaction(
           transaction_id: basename(transaction.backup_root), plugins: unresolved.plugins, pi_packages: unresolved.sources }), { mode: 0o600 });
       } catch (error) { failures.push(`Pi recovery record: ${String((error as Error).message ?? error)}`); }
     }
-    // The gate undoes its own writes by the ledger records before the ledger file goes back, so a linked host file needs no copy here.
+    // The gate undoes its own writes by the ledger records and then writes the ledger itself: the record of an entry
+    // that it cannot undo stays, so the snapshot copy of the ledger goes back only when the gate rollback failed.
     const ledger = transaction.snapshots.find((snapshot) => basename(snapshot.path) === 'ledger.json' && basename(dirname(snapshot.path)) === 'config');
+    let ledgerWritten = false;
     if (ledger) {
       try {
-        const result = rollbackHostConfigTransaction(dirname(dirname(ledger.path)), ledger.existed && ledger.backup_path !== null ? readFileSync(ledger.backup_path) : null);
+        const result = rollbackHostConfigTransaction(dirname(dirname(ledger.path)), ledger.existed && ledger.backup_path !== null ? readFileSync(ledger.backup_path) : null, transaction.backup_root);
+        ledgerWritten = true;
         failures.push(...result.unresolved.map((entry) => `${entry}: rh cannot prove this host configuration entry, so it stays as it is`));
       } catch (error) { failures.push(`host configuration rollback: ${String((error as Error).message ?? error)}`); }
     }
     for (const snapshot of [...transaction.snapshots].reverse()) {
+      if (ledgerWritten && snapshot === ledger) continue;
       try {
         if (isGlobalConfigurationSnapshot(snapshot.path)) {
           const context = transactionLocks.get(transaction)?.context ?? options.runtimeLock;
