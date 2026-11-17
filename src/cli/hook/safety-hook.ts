@@ -170,9 +170,10 @@ class TargetJudge {
     if (into) {
       const inRoot = (path: string) => this.roots.some(root => underRoot(root, path, true));
       if (!inRoot(into)) return this.existingDenial(target, into);
-      // BSD mv -h renames over a destination link to a directory, so the entry itself must be in a root too.
-      let leaf: string | null = null;
-      try { leaf = leafPath(target.path); } catch { /* the destroy check below decides */ }
+      // BSD mv -h renames over a destination link to a directory, so the entry itself must be in a root too. A trailing slash
+      // makes the kernel follow that link, so the entry is the directory.
+      let leaf: string | null = /[\\/]$/.test(target.path) ? into : null;
+      try { leaf ??= leafPath(target.path); } catch { /* the destroy check below decides */ }
       if (leaf !== null && inRoot(leaf)) return null;
     }
     let path: string;
