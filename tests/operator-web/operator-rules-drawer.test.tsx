@@ -49,13 +49,15 @@ const BASE = ruleStatus({
 }, 'github:owner/repo', { head: HEAD, blob: BLOB, dirty: false });
 const [ENFORCE, PROMOTE] = BASE.themes[0]!.actions.map(action => action.candidate_id) as [string, string];
 
-function snapshot({ herdr = 'ready', task = null }: { readonly herdr?: 'ready' | 'unavailable'; readonly task?: RuleTaskV1 | null } = {}) {
+function snapshot({ herdr = 'ready', task = null, evidence = false }: { readonly herdr?: 'ready' | 'unavailable'; readonly task?: RuleTaskV1 | null; readonly evidence?: boolean } = {}) {
   const status = {
     ...BASE,
+    // An evidence-only error keeps the themes (F9); the collector then renders no prompt.
+    ...(evidence ? { ledger: { ...BASE.ledger, valid: false, evidence_errors: [{ theme: 'worktree-cleanup', trigger: 'abc1234' }] } } : {}),
     orchestration: { parent: 2879, plan_comment: true, coordinator_claim: false },
     themes: BASE.themes.map(theme => ({ ...theme, actions: theme.actions.map(action => ({ ...action, task: action.kind === 'enforce' ? task : null })) })),
   };
-  const prompts = BASE.themes[0]!.actions.flatMap(action => ROUTING_CLASSES.map(route => ({ candidate_id: action.candidate_id, route, prompt: renderPromotionPrompt(promotionCandidate(BASE, action.candidate_id), route) })));
+  const prompts = evidence ? [] : BASE.themes[0]!.actions.flatMap(action => ROUTING_CLASSES.map(route => ({ candidate_id: action.candidate_id, route, prompt: renderPromotionPrompt(promotionCandidate(BASE, action.candidate_id), route) })));
   const routes = ROUTING_CLASSES.map(name => (name === 'frontend' ? { class: name, seat: 'worker-important', runtime: 'claude', model: 'opus' } : { class: name, seat: null, runtime: null, model: null }));
   return decodeRulesSnapshot({ protocol: 1, kind: 'operator_rules', repository_id: REPOSITORY_ID, collected_at: new Date(NOW - 60_000).toISOString(), status, prompts, routes, herdr });
 }
@@ -117,6 +119,8 @@ describe('rules candidate drawer', () => {
     expect(bodies).toHaveLength(1);
     expect(bodies[0]).toEqual({ request_id: bodies[0]!.request_id, candidate_id: ENFORCE, route: 'frontend', ledger_blob: BLOB, prompt: `## Goal\nEdited text\n${marker}\n` });
     expect(bodies[0]!.request_id).toMatch(/^[0-9a-f-]{36}$/u);
+    await click('[data-rules-drawer-close]');
+    expect(window.location.hash).toBe(`#rules/candidate/${ENFORCE}`);
 
     await act(async () => answer(filed(2950)));
     expect(one('[data-rules-filed="2950"]')!.textContent).toContain('Filed as #2950. Progress shows after the next collection.');
@@ -131,6 +135,13 @@ describe('rules candidate drawer', () => {
     expect(one('[data-rules-submit-button]')).toBeNull();
     expect(one('[data-rules-copy-prompt]')).not.toBeNull();
     expect(one('[data-rules-herdr-unavailable]')!.textContent).toContain('Herdr is not available on this machine');
+  });
+
+  test('UX-rules-review-F2: with evidence errors only the drawer opens with no prompt and no Submit', async () => {
+    await mount(`#rules/candidate/${ENFORCE}`, snapshot({ evidence: true }));
+    expect(one('[data-rules-banner="evidence"]')).not.toBeNull();
+    expect(one('[data-rules-prompt-none]')).not.toBeNull();
+    expect(one('[data-rules-submit-button]')).toBeNull();
   });
 
   test('UX-rules-review-F4: a 409 candidate_open through the write client shows the existing issue and no second Submit', async () => {
@@ -148,23 +159,38 @@ describe('rules candidate drawer', () => {
     expect(requests).toEqual([`/api/v1/repositories/${REPOSITORY_ID}/rules/promotions`]);
     expect(one('[data-rules-refusal="candidate_open"]')!.textContent).toContain('This candidate already has an open task.');
     expect(one('[data-rules-refusal-issue]')!.textContent).toBe('Issue #2950 exists for this candidate.');
+    expect(one('[data-rules-refusal-issue] a')!.getAttribute('href')).toBe(ISSUE_URL);
     expect(one('[data-rules-submit-button]')).toBeNull();
     expect(one('[data-rules-reconcile]')).not.toBeNull();
   });
 
-  test('UX-rules-review-F3: an unconfirmed submit shows Reconcile and keeps Submit away; Reconcile sends the candidate once', async () => {
-    const reconciles: unknown[] = [];
-    await mount(`#rules/candidate/${ENFORCE}`, snapshot(), {
-      writeRulesPromote: async () => ({ state: 'unreachable' }),
-      writeRulesReconcile: async (_repository, body) => { reconciles.push(body); return filed(2951, { issue: 'found', label: 'present', sub_issue: 'linked' }); },
-    });
-    await click('[data-rules-route="simple_fast"]');
-    await click('[data-rules-submit-button]');
-    expect(one('[data-rules-submit="uncertain"]')).not.toBeNull();
-    expect(one('[data-rules-submit-button]')).toBeNull();
-    await click('[data-rules-reconcile]');
-    expect(reconciles).toEqual([{ request_id: (reconciles[0] as { request_id: string }).request_id, candidate_id: ENFORCE }]);
+  test('UX-rules-review-F3, N1: an unconfirmed submit shows Reconcile and no Submit; Reconcile goes through the write client once', async () => {
+    const posts: { readonly url: string; readonly body: unknown }[] = [];
+    const original = globalThis.fetch;
+    // The 200 body is the closed document of `rh rules promote --json`, as the route answers it.
+    const answer = { kind: 'repo-harness.rules.promote', protocol: 1, candidate_id: ENFORCE, parent: 2879, issue: 2951, url: 'https://github.com/owner/repo/issues/2951', prompt_sha256: 'e'.repeat(64), steps: { issue: 'found', label: 'present', sub_issue: 'linked' } };
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      if (init?.method !== 'POST') return new Promise<Response>(() => {});
+      posts.push({ url, body: JSON.parse(String(init.body)) });
+      if (!url.endsWith('/reconcile')) throw new TypeError('offline');
+      return new Response(JSON.stringify(answer), { status: 200 });
+    }) as typeof fetch;
+    try {
+      await mount(`#rules/candidate/${ENFORCE}`, snapshot());
+      await click('[data-rules-route="simple_fast"]');
+      await click('[data-rules-submit-button]');
+      expect(one('[data-rules-submit="uncertain"]')).not.toBeNull();
+      expect(one('[data-rules-submit-button]')).toBeNull();
+      await click('[data-rules-reconcile]');
+    } finally { globalThis.fetch = original; }
+    const path = `/api/v1/repositories/${REPOSITORY_ID}/rules/promotions`;
+    expect(posts.map(post => post.url)).toEqual([path, `${path}/reconcile`]);
+    const reconcile = posts[1]!.body as { readonly request_id: string; readonly candidate_id: string };
+    expect(reconcile).toEqual({ request_id: reconcile.request_id, candidate_id: ENFORCE });
+    expect(reconcile.request_id).not.toBe((posts[0]!.body as { readonly request_id: string }).request_id);
     expect(one('[data-rules-reconciled]')!.textContent).toBe('Issue #2951: issue found, label present, sub-issue linked');
+    const text = document.body.textContent!;
+    for (const hidden of [reconcile.request_id, 'rules-prompts', answer.prompt_sha256]) expect(text).not.toContain(hidden);
   });
 
   test('UX-rules-review-P4: a merged task keeps the row a candidate with the link to its PR', async () => {

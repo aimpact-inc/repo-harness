@@ -153,7 +153,7 @@ function canReconcileAfter(outcome: Outcome): boolean {
   return !RESUBMIT_CODES.includes(code) && !REFRESH_CODES.includes(code);
 }
 
-function FailureBanner({ failure, t }: { readonly failure: OperatorWriteFailure; readonly t: OperatorTranslate }) {
+function FailureBanner({ failure, repository, t }: { readonly failure: OperatorWriteFailure; readonly repository: string | null; readonly t: OperatorTranslate }) {
   if (failure.state === 'reload_required') return <WriteReloadBanner t={t} />;
   if (uncertain(failure)) {
     return <Banner variant="alert" icon={<WarningIcon />} data-rules-submit="uncertain" title={t('rules.submit.uncertain.title')} description={t('rules.submit.uncertain.body')} />;
@@ -167,7 +167,8 @@ function FailureBanner({ failure, t }: { readonly failure: OperatorWriteFailure;
         <span className="font-mono text-xs">{error.code}</span>
         <span>{known ? t(`rules.submit.refused.code.${error.code}` as OperatorMessageKey) : t('rules.refused.unknown', { code: error.code, message: error.message })}</span>
         {!known && <span>{error.next_action}</span>}
-        {issue !== undefined && <span data-rules-refusal-issue={issue}>{t('rules.submit.refused.issueExists', { issue })}</span>}
+        {issue !== undefined && <span data-rules-refusal-issue={issue}>{repository === null ? t('rules.submit.refused.issueExists', { issue })
+          : <ExternalLink href={`https://github.com/${repository}/issues/${issue}`}>{t('rules.submit.refused.issueExists', { issue })}</ExternalLink>}</span>}
         {issue === undefined && proved && <span>{t('rules.submit.refused.noIssue')}</span>}
       </span>
     } />
@@ -191,9 +192,13 @@ function OrchestrationMissing({ snapshot, t }: { readonly snapshot: RulesSnapsho
   );
 }
 
+/** The `owner/name` of a `github:` status identity; a `local:` identity has none. */
+const githubRepository = (snapshot: RulesSnapshotV1): string | null =>
+  (snapshot.status.repository_id.startsWith('github:') ? snapshot.status.repository_id.slice('github:'.length) : null);
+
 /** `--repository` is the GitHub identity of the status document; `--repository-id` is the numeric id of the seat read. */
 function goCommand(snapshot: RulesSnapshotV1, githubRepositoryId: string | null, task: RuleTaskV1): string | null {
-  const repository = snapshot.status.repository_id.startsWith('github:') ? snapshot.status.repository_id.slice('github:'.length) : null;
+  const repository = githubRepository(snapshot);
   const pr = task.pull_request;
   if (repository === null || githubRepositoryId === null || pr === null) return null;
   return `rh publication merge --repository ${repository} --repository-id ${githubRepositoryId} --pr ${pr.number} --head ${pr.head_sha} --base ${pr.base_sha} --json`;
@@ -281,9 +286,11 @@ function CopyPrompt({ prompt, t }: { readonly prompt: string | null; readonly t:
  * The status the panel shows comes from the snapshot; a write answer only
  * says what the request did.
  */
-function ActionPanel({ snapshot, action, theme, githubRepositoryId, ports, advisor, t }: {
+function ActionPanel({ snapshot, action, theme, githubRepositoryId, ports, advisor, onBusy, t }: {
   readonly snapshot: RulesSnapshotV1; readonly action: RuleCandidateActionV1; readonly theme: RuleThemeV1;
-  readonly githubRepositoryId: string | null; readonly ports: RulesDrawerPorts; readonly advisor: ReactNode; readonly t: OperatorTranslate;
+  readonly githubRepositoryId: string | null; readonly ports: RulesDrawerPorts; readonly advisor: ReactNode;
+  /** The drawer holds close and the action switch while a write runs, so its answer is never dropped. */
+  readonly onBusy: (busy: boolean) => void; readonly t: OperatorTranslate;
 }) {
   const { ledger } = snapshot.status;
   const prompts = snapshot.prompts.filter(row => row.candidate_id === action.candidate_id);
@@ -308,9 +315,11 @@ function ActionPanel({ snapshot, action, theme, githubRepositoryId, ports, advis
     if (inFlight.current) return;
     inFlight.current = true;
     setBusy(kind);
+    onBusy(true);
     void send().then((answer) => {
       inFlight.current = false;
       setBusy(null);
+      onBusy(false);
       if (answer.state === 'ok') setOutcome({ kind: 'filed', promotion: answer.value, via: kind });
       else if (kind === 'reconcile' && answer.state === 'refused' && answer.error.code === 'candidate_not_filed') setOutcome({ kind: 'not_filed' });
       else setOutcome({ kind: 'failed', failure: answer });
@@ -350,7 +359,7 @@ function ActionPanel({ snapshot, action, theme, githubRepositoryId, ports, advis
         {parts !== null && <RouteList snapshot={snapshot} route={route} onRoute={setRoute} t={t} />}
       </>}
       {snapshot.herdr === 'unavailable' && !open && <p className="text-sm text-kumo-default" data-rules-herdr-unavailable>{t('rules.herdr.unavailable.body')}</p>}
-      {outcome.kind === 'failed' && <FailureBanner failure={outcome.failure} t={t} />}
+      {outcome.kind === 'failed' && <FailureBanner failure={outcome.failure} repository={githubRepository(snapshot)} t={t} />}
       {outcome.kind === 'not_filed' && <p className="text-sm text-kumo-default" data-rules-not-filed>{t('rules.reconcile.notFiled')}</p>}
       <footer className="flex flex-wrap items-center gap-2 border-t border-kumo-hairline pt-4">
         {submitShown && <Button variant="primary" onClick={submit} disabled={!submitReady} data-rules-submit-button>
@@ -362,7 +371,7 @@ function ActionPanel({ snapshot, action, theme, githubRepositoryId, ports, advis
         {!open && filed === null && <CopyPrompt prompt={prompt} t={t} />}
         {advisor}
       </footer>
-      {submitShown && route === null && parts !== null && <p className="text-xs text-kumo-subtle">{t('rules.drawer.route.required')}</p>}
+      {!open && filed === null && route === null && parts !== null && <p className="text-xs text-kumo-subtle" data-rules-route-required>{t('rules.drawer.route.required')}</p>}
     </>
   );
 }
@@ -374,11 +383,13 @@ export function RulesCandidateDrawer({ snapshot, candidateId, generation, ports,
   const dialogRef = useRef<HTMLElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const [asking, setAsking] = useState(false);
-  useModalFocus({ dialogRef, closeRef, identity: 'rules-candidate', onClose: () => { if (!asking) onClose(); } });
+  const [writing, setWriting] = useState(false);
+  const close = () => { if (!asking && !writing) onClose(); };
+  useModalFocus({ dialogRef, closeRef, identity: 'rules-candidate', onClose: close });
   const seats = useBoardSeats(ports.readBoardSeats, snapshot.repository_id, generation);
   const theme = snapshot.status.themes.find(row => row.actions.some(entry => entry.candidate_id === candidateId)) ?? null;
   const action = theme?.actions.find(entry => entry.candidate_id === candidateId) ?? null;
-  const repository = snapshot.status.repository_id.startsWith('github:') ? snapshot.status.repository_id.slice('github:'.length) : null;
+  const repository = githubRepository(snapshot);
   const seatDocument = seats?.kind === 'ready' ? seats.seats : null;
   const advisorSeat = seatDocument?.seats.find(seat => seat.seat === 'advisor') ?? null;
   const parent = snapshot.status.orchestration?.parent ?? null;
@@ -391,14 +402,14 @@ export function RulesCandidateDrawer({ snapshot, candidateId, generation, ports,
         {theme !== null && <p className="text-xs text-kumo-subtle">{[theme.name ?? theme.theme, t('rules.seen', { count: theme.seen }), theme.lines.map(line => `L${line}`).join(', ')].join(' · ')}</p>}
       </div>
       {theme !== null && <GovernancePill governance={theme.governance} t={t} />}
-      <button ref={closeRef} type="button" className="rounded-md p-1 text-kumo-subtle hover:bg-kumo-tint hover:text-kumo-default" aria-label={t('rules.drawer.close')} onClick={onClose} data-rules-drawer-close>
+      <button ref={closeRef} type="button" className="rounded-md p-1 text-kumo-subtle hover:bg-kumo-tint hover:text-kumo-default" aria-label={t('rules.drawer.close')} aria-disabled={writing} onClick={close} data-rules-drawer-close>
         <XIcon size={16} aria-hidden="true" />
       </button>
     </header>
   );
   if (theme === null || action === null) {
     return (
-      <DrawerFrame dialogRef={dialogRef} labelledBy="rules-drawer-title" closeLabel={t('rules.drawer.close')} onClose={onClose} header={header}>
+      <DrawerFrame dialogRef={dialogRef} labelledBy="rules-drawer-title" closeLabel={t('rules.drawer.close')} onClose={close} header={header}>
         <p className="pt-4 text-sm text-kumo-default" data-rules-drawer-missing>{t('rules.drawer.notFound')}</p>
       </DrawerFrame>
     );
@@ -412,14 +423,14 @@ export function RulesCandidateDrawer({ snapshot, candidateId, generation, ports,
     </>
   );
   return (
-    <DrawerFrame dialogRef={dialogRef} labelledBy="rules-drawer-title" closeLabel={t('rules.drawer.close')} onClose={onClose} header={header}>
+    <DrawerFrame dialogRef={dialogRef} labelledBy="rules-drawer-title" closeLabel={t('rules.drawer.close')} onClose={close} header={header}>
       <div className="flex flex-col gap-4 pt-4" data-rules-drawer={candidateId}>
         <LessonBlock theme={theme} repository={repository} t={t} />
         <Section id="rules-drawer-action" title={t('rules.drawer.action')}>
           {theme.actions.length === 1 ? <span className="text-sm text-kumo-strong">{t(`rules.action.${action.kind}`)}</span> : (
             <div className="flex gap-1" data-rules-action-switch>
               {theme.actions.map(entry => (
-                <button key={entry.kind} type="button" aria-pressed={entry.candidate_id === candidateId} onClick={() => onSelect(entry.candidate_id)} data-rules-action-pick={entry.kind}
+                <button key={entry.kind} type="button" aria-pressed={entry.candidate_id === candidateId} disabled={writing} onClick={() => onSelect(entry.candidate_id)} data-rules-action-pick={entry.kind}
                   className={cn('rounded-md border px-3 py-1 text-sm', entry.candidate_id === candidateId ? 'border-kumo-brand text-kumo-strong' : 'border-kumo-line text-kumo-subtle hover:text-kumo-default')}>
                   {t(`rules.action.${entry.kind}`)}
                 </button>
@@ -427,7 +438,7 @@ export function RulesCandidateDrawer({ snapshot, candidateId, generation, ports,
             </div>
           )}
         </Section>
-        <ActionPanel key={candidateId} snapshot={snapshot} action={action} theme={theme} githubRepositoryId={seatDocument?.repository_id ?? null} ports={ports} advisor={advisor} t={t} />
+        <ActionPanel key={candidateId} snapshot={snapshot} action={action} theme={theme} githubRepositoryId={seatDocument?.repository_id ?? null} ports={ports} advisor={advisor} onBusy={setWriting} t={t} />
       </div>
       {asking && parent !== null && advisorSeat !== null && (
         <OfficeAdvisorDialog repositoryId={snapshot.repository_id} parent={parent} agent={advisorSeat.agent ?? advisorSeat.address} portrait={null}
