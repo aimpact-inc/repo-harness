@@ -69,7 +69,7 @@ On Darwin arm64 with Bun 1.4.4, at prep head `12d5094bc` on source `0ec0c7c0b`:
 1. Merge the prep PR under rule 2 after `Required / CI` and the recorded verification pass.
 2. On main, run `git fetch origin && bash scripts/release-owner-steps.sh plan 0.34.0`. The plan binds the steps to the release commit.
 3. Run the authorized plan in order. Publish `repo-harness-operator-web` before `repo-harness`. Confirm the npm login, then create the tag and GitHub Release. Resume a partial run by the plan's rules.
-4. After step 7, the orchestrator and the advisor decide the host post-release steps. The owner word does not cover an update of the installed rh on the owner Mac.
+4. After step 7, the orchestrator and the advisor decide the host post-release steps. The owner word does not cover an update of the installed rh on the owner Mac. When the installed rh moves to 0.34.0, run `rh update --version 0.34.0` right after the package install and before a seat relaunch or an `rh quota` read: a seats section saved by 0.33.2 holds `routing.codex_hyper_at_or_above_remaining` (its default was 50), and `rh quota` and `rh seats argv` refuse it with `seats_config_migration_required` until `rh update` removes it (#3004).
 
 ## Acceptance environment
 
