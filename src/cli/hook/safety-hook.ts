@@ -35,7 +35,7 @@ export interface SafetyScope {
  * - `change` writes content into an existing file (truncate, shred): the kernel follows the leaf link to its referent.
  * - `overwrite` creates or replaces content (a redirect, cp, tee): it follows the leaf link too.
  * `destroy` and `change` act only on an existing file, so an unknown target denies; an unknown `overwrite` target passes unless
- * its literal directory is an existing directory outside the roots.
+ * its literal directory is an existing directory outside the roots, or its word is above an expansion limit.
  */
 export type TargetKind = 'destroy' | 'change' | 'overwrite';
 
@@ -49,6 +49,8 @@ export interface WriteTarget {
   readonly from?: string | null;
   /** For an unknown target: the absolute literal directory before the first run-time character, when the word has one. */
   readonly prefix?: string;
+  /** The word is above an expansion limit, so its targets are not known: it refuses for every kind. */
+  readonly unbounded?: true;
   /**
    * cp and ln write `<path>/<name>` for each source name when `path` is an existing directory; the directory itself is not
    * written. `names` is null when a source name is not known, and then every existing child can be the target. cp writes
@@ -175,7 +177,9 @@ class TargetJudge {
    */
   denial(target: WriteTarget): Denial | null {
     const needsTarget = target.kind !== 'overwrite';
-    if (target.path === null) return needsTarget ? unknownTargetDenial(target, this.roots, this.userStep) : this.prefixDenial(target);
+    if (target.path === null) {
+      return needsTarget || target.unbounded ? unknownTargetDenial(target, this.roots, this.userStep) : this.prefixDenial(target);
+    }
     if (/^\/dev\//.test(target.path)) return null;
     let paths: string[];
     try {
@@ -510,6 +514,8 @@ interface Arg {
   readonly spelled: string;
   readonly word: number;
   readonly matched: boolean;
+  /** The word is above the brace limit or a glob above the match limit. */
+  readonly unbounded?: true;
 }
 
 /** The text that the grammar reads: the value, or the word as written when the shell decides it at run time. */
@@ -546,24 +552,24 @@ function itemArg(pattern: string, expand: boolean, at: number, home: string): Ar
   return { value: known ? value : null, pattern, expand, spelled: value, word: at, matched: false };
 }
 
-/** The same item as an unknown target: it keeps its literal directory for the refusal check. */
-const unknown = (arg: Arg): Arg => ({ ...arg, value: null });
+/** A word or item above an expansion limit: an unknown target set that refuses for every kind. */
+const unbounded = (arg: Arg): Arg => ({ ...arg, value: null, unbounded: true });
 
 /**
  * The words that one command word gives the program, as the shell expands it without running anything: brace expansion, HOME,
  * then glob expansion from `cwd`. Expansion never drops an operand: each brace item gives its own words, and an item that is not
- * known, or a glob that cannot be expanded within the match limit, gives one unknown word. Above the brace limit the items are not
- * known, so the whole word is one unknown word.
+ * known gives one unknown word. Above the brace limit the items are not known, so the whole word is one unbounded word; a glob
+ * item above the match limit is one unbounded word too.
  */
 function expandWord(word: Word, at: number, cwd: string | null, home: string): Arg[] {
   const patterns = expandBraces(word.pattern);
-  if (patterns === null) return [unknown(itemArg(word.pattern, word.expand, at, home))];
+  if (patterns === null) return [unbounded(itemArg(word.pattern, word.expand, at, home))];
   let budget = CHILD_LIMIT;
   return patterns.flatMap(item => {
     const arg = itemArg(item, word.expand, at, home);
     if (arg.value === null || globIndex(arg.pattern) < 0) return [arg];
     const matches = globMatches(arg.pattern, cwd, budget);
-    if (matches === null) return [unknown(arg)];
+    if (matches === null) return [unbounded(arg)];
     budget -= matches.length;
     // Without a match the shell passes the word itself.
     return matches.length
@@ -580,7 +586,8 @@ function expandWord(word: Word, at: number, cwd: string | null, home: string): A
 function restArg(arg: Arg, length: number, home: string): Arg {
   let at = 0;
   for (let count = 0; count < length && at < arg.pattern.length; count++) at += arg.pattern[at] === '\\' ? 2 : 1;
-  return itemArg(arg.pattern.slice(at), arg.expand, arg.word, home);
+  const rest = itemArg(arg.pattern.slice(at), arg.expand, arg.word, home);
+  return arg.unbounded ? unbounded(rest) : rest;
 }
 
 /**
@@ -633,7 +640,7 @@ function targetOf(kind: TargetKind, via: string, arg: Arg, cwd: string | null, e
   const path = arg.value === null ? null : resolveFrom(arg.value || '.');
   const dir = arg.value === null ? literalDirectory(arg.pattern) : null;
   const prefix = dir === null ? null : resolveFrom(dir);
-  return { kind, via, spelled: arg.spelled, path, from: cwd, ...(prefix === null ? {} : { prefix }), ...extra };
+  return { kind, via, spelled: arg.spelled, path, from: cwd, ...(prefix === null ? {} : { prefix }), ...(arg.unbounded ? { unbounded: true as const } : {}), ...extra };
 }
 
 const isOption = (arg: Arg) => text(arg).startsWith('-') && text(arg) !== '-';

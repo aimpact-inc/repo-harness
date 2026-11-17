@@ -251,6 +251,9 @@ describe('safety hook: Bash host route', () => {
         [refuse, `tee {build/$X,${out}/victim.txt}`], [refuse, `cp source.txt {build/$X,${out}}`], [refuse, 'tee {build/$X,links/x.txt}'],
         [refuse, `tee {build/$(printf x),${out}/victim.txt}`], [refuse, `tee {build/$'x',${out}/victim.txt}`], [refuse, `tee {~nouser/x,${out}/victim.txt}`],
         [refuse, `tee {big/*,${out}/victim.txt}`], [null, 'tee {build/$X,build/new.txt}'],
+        // #3025 r3: a write operand above an expansion limit refuses as an unknown target set, whatever siblings it has.
+        [refuse, `tee {build/{1..1025},${out}/victim.txt}`], [refuse, `tee {${out}/victim.txt,build/{1..1025}}`],
+        [refuse, `cp source.txt {build/{1..1025},${out}}`], [refuse, 'tee {build/{1..1025},links/x.txt}'],
         // GNU getopt accepts a long option prefix.
         [refuse, 'mv --target=linked stage/b.json'], [refuse, 'cp --target=linked a.txt'],
         // An unknown removal refuses; an unknown overwrite refuses only when its literal directory is outside the roots.
