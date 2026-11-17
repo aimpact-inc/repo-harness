@@ -307,3 +307,27 @@ test('after a user edit, a revert removes only intact add fragments, also after 
   expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ user: 2, o: 'rh', b: 9 });
   expect(f.ledger().fragments.map((entry: { selector: string }) => entry.selector)).toEqual(['b', 'o']);
 });
+
+test('a revert removes an emptied container only when the record proves rh created it, also under an owner filter; an override backup is 0600', () => {
+  const f = fixture();
+  const path = join(f.home, '.claude.json');
+  const allow = { owner: 'o1', selector: 'permissions.allow[rule]', kind: 'add' as const, strategy: jsonFragment, value: 'rule' };
+  for (const [original, filter, left] of [
+    ['{"permissions":{"allow":[]},"theme":"dark"}', undefined, { permissions: { allow: [] }, theme: 'light' }],
+    ['{"permissions":{"allow":[]},"theme":"dark"}', { owner: 'o1' }, { permissions: { allow: [] }, theme: 'light' }],
+    ['{"permissions":{},"theme":"dark"}', { owner: 'o1' }, { permissions: {}, theme: 'light' }],
+    ['{"theme":"dark"}', undefined, { theme: 'light' }],
+    ['{"theme":"dark"}', { owner: 'o1' }, { theme: 'light' }],
+  ] as const) {
+    writeFileSync(path, original);
+    f.gate().apply([{ path, backup: 'overrides-only', fragments: [allow] }]);
+    writeFileSync(path, readFileSync(path, 'utf8').replace('dark', 'light'));
+    expect(f.gate().revert([path], filter).map((entry) => entry.action), original).toEqual(['text_removed']);
+    expect(JSON.parse(readFileSync(path, 'utf8')), original).toEqual(left);
+    if (filter) f.gate().revert([path]);
+  }
+  writeFileSync(path, '{"mcpServers":{"codegraph":{"command":"user"}}}');
+  const backup = f.gate().apply([{ path, backup: 'overrides-only', fragments: [{ owner: 'o1', selector: 'mcpServers.codegraph', kind: 'override', strategy: jsonFragment, value: { command: 'rh' }, selected: true }] }]);
+  expect(backup.written.length).toBe(1);
+  expect(statSync(join(f.root, 'vault', String(f.ledger().files[path].backup).replace('sha256:', ''))).mode & 0o777).toBe(0o600);
+});

@@ -260,17 +260,49 @@ function setFragment(content: string, selector: string, value: unknown): Fragmen
   return insertEdit(content, container, insertIndex(content, container, added), text, compact, unit);
 }
 
+/** The member path of the container that holds the fragment at a selector: the array of an element, the object of a member. */
+function containerPath(selector: string): readonly string[] {
+  const { path, element } = parseSelector(selector);
+  return element === null ? path.slice(0, -1) : path;
+}
+
+function isPrefix(prefix: readonly string[], path: readonly string[]): boolean {
+  return prefix.length <= path.length && prefix.every((key, index) => key === path[index]);
+}
+
+/**
+ * The outermost container on the selector's path that is not in the content
+ * yet, so that an insert at the selector creates it; null when the fragment's
+ * container is already there. The root object is not one of them.
+ */
+export function createdJsonContainer(content: string, selector: string): string | null {
+  const containers = containerPath(selector);
+  if (!containers.length) return null;
+  const document = root(content);
+  const depth = document ? walk(document, containers).depth : 0;
+  return depth < containers.length ? containers.slice(0, depth + 1).join('.') : null;
+}
+
+/** A fragment record that may prove a container: rh's insert at `selector` created `created` and every container below it. */
+export interface CreatedContainerRecord {
+  readonly selector: string;
+  readonly created?: string;
+}
+
 /**
  * Takes the fragment out with its separator. A container that the removal
- * empties goes too, up to the root object, as the old uninstall did.
+ * empties goes too, but only when a record proves that rh's insert created
+ * it; any other container stays, empty.
  */
-export function removeJsonFragment(content: string, selector: string): FragmentEdit {
+export function removeJsonFragment(content: string, selector: string, records: readonly CreatedContainerRecord[] = []): FragmentEdit {
   const located = find(content, selector);
   if (!located) return { at: 0, removed: '', inserted: '' };
   const { container, index, parentPath } = located;
   const all = items(container);
   if (all.length === 1) {
-    if (parentPath.length) return removeJsonFragment(content, parentPath.join('.'));
+    const created = parentPath.length > 0 && records.some((record) => record.created !== undefined
+      && isPrefix(record.created.split('.'), parentPath) && isPrefix(parentPath, containerPath(record.selector)));
+    if (created) return removeJsonFragment(content, parentPath.join('.'), records);
     return { at: container.start + 1, removed: content.slice(container.start + 1, container.end - 1), inserted: '' };
   }
   const [start, end] = index < all.length - 1 ? [all[index]!.start, all[index + 1]!.start] : [all[index - 1]!.end, all[index]!.end];
@@ -319,6 +351,7 @@ export function managedHookSelectors(content: string): string[] {
 /** Sets the value at a selector; `undefined` is not a value. */
 export const jsonFragment: HostConfigStrategy<unknown> = {
   locate: (content, selector) => find(content, selector)?.range ?? null,
+  created: createdJsonContainer,
   apply(content, selector, value) {
     if (value === undefined) throw invalid(`${selector}: no value to write`);
     return setFragment(content, selector, value);

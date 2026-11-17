@@ -7,6 +7,7 @@ import { pluginSelectionEnv, recordPluginSelection } from "../helpers/install-ow
 import { writeShellExecutableFixture } from "../helpers/repo-fixture";
 import { requestUserInputFragment } from "../../src/cli/installer/targets/codex";
 import { openHostConfigGate } from "../../src/effects/host-config/gate";
+import { jsonFragment } from "../../src/core/host-config/json-fragment";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const CLI = join(ROOT, "src/cli/index.ts");
@@ -148,21 +149,22 @@ test('standalone CodeGraph configure writes the Codex table through the gate, an
   } finally { rmSync(fixture.root, { recursive: true, force: true }); }
 }, 15000);
 
-test('standalone CodeGraph configure for Claude writes its server and tool rule through the gate, keeps no copy of ~/.claude.json, and uninstall reverts both', () => {
+test('standalone CodeGraph configure for Claude writes its server and tool rule through the gate, refreshes its own server, keeps no copy of ~/.claude.json, and uninstall reverts both', () => {
   const fixture = setupFakeEnvironment('standalone-codegraph-claude');
+  const fakeCodegraph = (command: string) => writeExecutable(join(fixture.fakeBin, 'codegraph'), [
+    '#!/bin/bash',
+    'set -euo pipefail',
+    'case "${1:-}" in',
+    '  --version) echo "0.9.6" ;;',
+    '  status) echo "CodeGraph Status"; echo "Index is up to date" ;;',
+    // codegraph 1.6.2 prints this object for `install --print-config claude` and writes nothing.
+    `  install) [[ "$*" == "install --print-config claude" ]] || exit 2; printf '%s\\n' "# Add to $HOME/.claude.json" "" '${JSON.stringify({ mcpServers: { codegraph: { type: 'stdio', command, args: ['serve', '--mcp'], alwaysLoad: true } } })}' ;;`,
+    '  *) exit 1 ;;',
+    'esac',
+  ].join('\n'));
   try {
     writeFakeSkillsCli(fixture.fakeBin);
-    writeExecutable(join(fixture.fakeBin, 'codegraph'), [
-      '#!/bin/bash',
-      'set -euo pipefail',
-      'case "${1:-}" in',
-      '  --version) echo "0.9.6" ;;',
-      '  status) echo "CodeGraph Status"; echo "Index is up to date" ;;',
-      // codegraph 1.6.2 prints this object for `install --print-config claude` and writes nothing.
-      '  install) [[ "$*" == "install --print-config claude" ]] || exit 2; printf \'%s\\n\' "# Add to $HOME/.claude.json" "" \'{"mcpServers":{"codegraph":{"type":"stdio","command":"codegraph","args":["serve","--mcp"],"alwaysLoad":true}}}\' ;;',
-      '  *) exit 1 ;;',
-      'esac',
-    ].join('\n'));
+    fakeCodegraph('codegraph');
     const rootConfig = join(fixture.home, '.claude.json');
     const settings = join(fixture.home, '.claude/settings.json');
     const rootBefore = '{\n    "primaryApiKey": "sk-test-not-a-key",\n    "numStartups": 3\n}\n';
@@ -188,6 +190,16 @@ test('standalone CodeGraph configure for Claude writes its server and tool rule 
       expect(readFileSync(join(fixture.home, '.repo-harness/config/vault', name), 'utf8')).not.toContain('sk-test-not-a-key');
     }
     expect(existsSync(join(fixture.home, '.repo-harness/configuration-restore.json'))).toBe(false);
+    // A later codegraph prints another server object: rh refreshes the server that it recorded, and its record follows.
+    fakeCodegraph('/opt/codegraph/bin/codegraph');
+    const refreshed = spawnSync('bun', [CLI, 'arch', 'codegraph', 'configure', '--target', 'claude', '--location', 'global', '--json', '--repo', ROOT], { cwd: ROOT, env, encoding: 'utf8' });
+    expect(refreshed.status, refreshed.stderr).toBe(0);
+    expect(JSON.parse(refreshed.stdout).actions.map((entry: any) => [entry.action, entry.status])).toEqual([['configure-claude', 'changed'], ['claude-tool-permission', 'unchanged']]);
+    const rootAfter = readFileSync(rootConfig, 'utf8');
+    expect(JSON.parse(rootAfter).mcpServers.codegraph).toEqual({ type: 'stdio', command: '/opt/codegraph/bin/codegraph', args: ['serve', '--mcp', '--path', '.'], alwaysLoad: true });
+    const range = jsonFragment.locate(rootAfter, 'mcpServers.codegraph')!;
+    const recorded = JSON.parse(readFileSync(join(fixture.home, '.repo-harness/config/ledger.json'), 'utf8')).fragments.find((entry: any) => entry.file === realpathSync(rootConfig));
+    expect(recorded).toMatchObject({ selector: 'mcpServers.codegraph', kind: 'add', inserted: rootAfter.slice(range.start, range.end) });
     const uninstalled = spawnSync('bun', [CLI, 'uninstall', '--target', 'claude', '--json'], { cwd: ROOT, env, encoding: 'utf8' });
     expect(uninstalled.status, uninstalled.stdout + uninstalled.stderr).toBe(0);
     expect(readFileSync(rootConfig, 'utf8')).toBe(rootBefore);

@@ -85,8 +85,10 @@ export interface FragmentRecord {
   readonly owner: string;
   readonly selector: string;
   readonly kind: FragmentKind;
-  /** The text rh wrote at the selector: a refresh over other text is a user's change. */
+  /** The text rh wrote at the selector: a refresh over other text is a user's change. Empty when rh's text is not known: the fragment stays. */
   readonly inserted: string;
+  /** The outermost container that rh's insert created on the selector's path; a revert removes an emptied container only on this proof. */
+  readonly created?: string;
 }
 
 export interface HostConfigLedger {
@@ -133,6 +135,8 @@ export interface TextRange {
 export interface HostConfigStrategy<V = unknown> {
   locate(content: string, selector: string): TextRange | null;
   apply(content: string, selector: string, value: V): FragmentEdit;
+  /** The outermost container that an insert at the selector would create in the content; null when there is none. */
+  created?(content: string, selector: string): string | null;
 }
 
 export interface FragmentRequest<V = unknown> {

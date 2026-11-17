@@ -118,6 +118,14 @@ test('restores existing MCP config without deleting sibling registrations or per
  expect(JSON.parse(readFileSync(configurationReceiptPath(home),'utf8')).changes).toContainEqual(codexEntry);
  expect(runUserUninstall({target:'claude',env}).status).toBe('complete');
 }));
+test('an old receipt entry whose value the user changed stays and is reported, in the dry run and in the uninstall',()=>fixture((home,env)=>{
+ const path=join(home,'.claude.json');const edited=JSON.stringify({mcpServers:{codegraph:{command:'edited'}}});
+ put(home,'.claude.json',edited);
+ put(home,'.repo-harness/configuration-restore.json',JSON.stringify({protocol:1,changes:[{path,selector:'mcpServers.codegraph',before:null,installed:JSON.stringify({command:'new'}),active:true}]}));
+ const line=`[unresolved] ${path}: changed since rh wrote it; preserved: mcpServers.codegraph`;
+ for(const dryRun of [true,false]){const result=runUserUninstall({target:'claude',env,dryRun});expect(result.status,String(dryRun)).toBe('partial');expect(result.lines,String(dryRun)).toContain(line);}
+ expect(readFileSync(path,'utf8')).toBe(edited);
+}));
 test('restores Codex MCP section while preserving other TOML tables',()=>fixture((home,env)=>{
  const path=join(home,'.codex/config.toml');
  put(home,'.codex/config.toml','model = "user"\n[mcp_servers.other]\ncommand = "keep"\n');

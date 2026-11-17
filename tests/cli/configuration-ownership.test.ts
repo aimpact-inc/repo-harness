@@ -5,7 +5,11 @@ import { join } from 'path';
 import { configurationReceiptPath } from '../../src/cli/installer/configuration-ownership';
 import { planCodexConfigMigration } from '../../src/cli/installer/codex-config-migration';
 import { migrateJsonConfigRecords, planJsonConfigMigration } from '../../src/cli/installer/json-config-migration';
-import { buildManagedHooks } from '../../src/cli/installer/managed-entries';
+import { buildManagedHooks, canonicalManagedHookProjection } from '../../src/cli/installer/managed-entries';
+import { versions, writeState } from '../../src/cli/installer/install-profile';
+import { MANAGED_TAG } from '../../src/core/adoption/managed-hook-config';
+import { managedHookSelectors } from '../../src/core/host-config/json-fragment';
+import { sha256Prefixed } from '../../src/core/evidence/sha256';
 import { claudeTarget } from '../../src/cli/installer/targets/claude';
 import { runUserUninstall } from '../../src/cli/installer/uninstall';
 import { codexConfigFragment, tomlFragment } from '../../src/core/host-config/toml-fragment';
@@ -77,8 +81,9 @@ test('A1: a Claude install only inserts text into settings.json, and a revert gi
   });
 });
 
-test('A9: after a user edit, uninstall removes the intact managed entries, keeps the user hook and the edited entry, and reports the edited one', () => withClaudeHome((home, settings) => {
-  writeFileSync(settings, '{\n    "theme": "dark"\n}\n');
+test('A9: after a user edit, uninstall removes the intact managed entries, keeps the user hook, the edited entry and a hook array of the user, and reports the edited one', () => withClaudeHome((home, settings) => {
+  // The empty SessionStart array was there before rh; the other event arrays and the statusLine are rh's.
+  writeFileSync(settings, '{\n    "theme": "dark",\n    "hooks": {\n        "SessionStart": []\n    }\n}\n');
   claudeTarget.install('global', {});
   const data = JSON.parse(readFileSync(settings, 'utf8'));
   data.hooks.Stop.push({ hooks: [{ type: 'command', command: 'user-stop-hook' }] });
@@ -88,10 +93,46 @@ test('A9: after a user edit, uninstall removes the intact managed entries, keeps
   expect(result.status).toBe('partial');
   expect(result.lines).toContain(`[unresolved] ${settings}: changed since rh wrote it; preserved: hooks.PreToolUse[edit]`);
   const after = JSON.parse(readFileSync(settings, 'utf8'));
-  expect({ theme: after.theme, statusLine: after.statusLine, events: Object.keys(after.hooks).sort() }).toEqual({ theme: 'dark', statusLine: undefined, events: ['PreToolUse', 'Stop'] });
+  expect({ theme: after.theme, statusLine: after.statusLine, events: Object.keys(after.hooks).sort() }).toEqual({ theme: 'dark', statusLine: undefined, events: ['PreToolUse', 'SessionStart', 'Stop'] });
+  expect(after.hooks.SessionStart).toEqual([]);
   expect(after.hooks.PreToolUse).toEqual([data.hooks.PreToolUse[0]]);
   expect(after.hooks.Stop).toEqual([{ hooks: [{ type: 'command', command: 'user-stop-hook' }] }]);
 }));
+
+test('the JSON migration adopts tagged hooks only while the old manifest hash matches; an edited file keeps every hook, reports it and frees it on deletion', () => {
+  const edits: Record<string, (hooks: any) => void> = {
+    intact: () => {},
+    timeout: (hooks) => { hooks.PreToolUse[0].hooks[0].timeout = 99; },
+    matcher: (hooks) => { hooks.PreToolUse[0].matcher = 'Edit'; },
+    command: (hooks) => { hooks.PreToolUse[0].hooks[0].command = hooks.PreToolUse[0].hooks[0].command.replace('HOOK_HOST=claude', 'HOOK_HOST=claude X=1'); },
+  };
+  for (const [name, edit] of Object.entries(edits)) withClaudeHome((home, settings) => {
+    const env = process.env;
+    const hooks = buildManagedHooks('claude', env);
+    writeState({ protocol: 3, ...versions([]), selection: [], transaction_id: 'seeded', applied_at: '2026-11-01T00:00:00.000Z', previous: null, ownership_manifest: [{
+      owner: 'core', path: settings, type: 'managed-file', authority: 'repo-harness-install-transaction', removal: 'managed-surfaces-only',
+      content_hash: sha256Prefixed(JSON.stringify(canonicalManagedHookProjection(hooks))), managed_marker: MANAGED_TAG, symlink_target: null,
+    }] }, env);
+    const data = { theme: 'dark', hooks: structuredClone(hooks) };
+    edit(data.hooks);
+    const original = `${JSON.stringify(data, null, 2)}\n`;
+    writeFileSync(settings, original);
+    const result = runUserUninstall({ target: 'claude', env });
+    const selectors = managedHookSelectors(original);
+    if (name === 'intact') {
+      expect([result.status, readFileSync(settings, 'utf8')], name).toEqual(['complete', '{\n  "theme": "dark"\n}\n']);
+      return;
+    }
+    expect(result.status, name).toBe('partial');
+    expect(result.lines, name).toContain(`[unresolved] ${settings}: changed since rh wrote it; preserved: ${selectors.join(', ')}`);
+    expect(readFileSync(settings, 'utf8'), name).toBe(original);
+    expect(() => claudeTarget.install('global', {}), name).toThrow(`${settings}: ${selectors.join(', ')} are not rh's text any more, so rh kept them. Delete those hook entries, then run rh install again; rh writes them anew`);
+    if (name !== 'timeout') return;
+    writeFileSync(settings, '{\n  "theme": "dark"\n}\n');
+    claudeTarget.install('global', {});
+    expect(JSON.parse(readFileSync(settings, 'utf8')).hooks, name).toEqual(hooks);
+  });
+});
 
 test('the JSON migration fails closed on an interrupted receipt entry and on an rh command inside a user hook entry', () => withClaudeHome((home, settings) => {
   const env = process.env;

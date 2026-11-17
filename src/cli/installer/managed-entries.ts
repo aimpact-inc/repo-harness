@@ -22,7 +22,7 @@ import { bunGlobalPackageRoot } from './skill-projection';
 import { routesForHost, type AdapterHost, type Route } from '../hook/route-registry';
 import { MANAGED_TAG, isRepoHarnessManagedHookCommand } from '../../core/adoption/managed-hook-config';
 import { jsonFragment } from '../../core/host-config/json-fragment';
-import type { FragmentRequest } from '../../core/host-config/types';
+import { HostConfigError, type FragmentRequest } from '../../core/host-config/types';
 import { openHostConfigGate, type HostConfigApplyResult } from '../../effects/host-config/gate';
 
 export { MANAGED_TAG } from '../../core/adoption/managed-hook-config';
@@ -390,5 +390,11 @@ export function applyManagedHooks(filePath: string, host: HookHost, extra: reado
   const content = existsSync(filePath) ? readFileSync(filePath, 'utf8') : '';
   const fragments = entries.map(({ selector, value }): FragmentRequest =>
     ({ owner: 'core', selector, kind: jsonFragment.locate(content, selector) ? 'refresh' : 'add', strategy: jsonFragment, value }));
-  return gate.apply([{ path: filePath, fragments: [...fragments, ...extra] }]);
+  const result = gate.apply([{ path: filePath, fragments: [...fragments, ...extra] }]);
+  // A hook entry that is no longer rh's text stays as it is, and the install cannot complete its routes.
+  const kept = result.skipped.filter((skip) => skip.code === 'host_config_user_value_kept' && current.has(skip.selector)).map((skip) => skip.selector);
+  if (kept.length) {
+    throw new HostConfigError('host_config_invalid_state', `${filePath}: ${kept.join(', ')} are not rh's text any more, so rh kept them. Delete those hook entries, then run rh install again; rh writes them anew`);
+  }
+  return result;
 }

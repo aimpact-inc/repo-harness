@@ -73,6 +73,7 @@ export interface AdoptedFragment {
   readonly selector: string;
   readonly kind: FragmentRecord['kind'];
   readonly inserted: string;
+  readonly created?: string;
 }
 
 /**
@@ -205,7 +206,10 @@ function fileFragments(plan: FilePlan, recorded: readonly FragmentRecord[]): Fra
   const replaced = new Set(plan.fragments.map((fragment) => fragment.previous));
   return [
     ...recorded.filter((entry) => !replaced.has(entry)),
-    ...plan.fragments.map(({ owner, selector, kind, previous, text }) => ({ file: plan.file, owner, selector, kind: previous?.kind ?? kind, inserted: text })),
+    ...plan.fragments.map(({ owner, selector, kind, previous, text, created }): FragmentRecord => {
+      const container = previous?.created ?? created;
+      return { file: plan.file, owner, selector, kind: previous?.kind ?? kind, inserted: text, ...(container ? { created: container } : {}) };
+    }),
   ];
 }
 
@@ -308,8 +312,10 @@ interface FragmentRevert {
  * kind is `add`) and the text at its selector is still byte-identical to what
  * rh recorded; every other fragment stays. An override is never restored here,
  * because the vault may hold rh's earlier text instead of the user's value.
+ * `all` holds every record of the file: a container that a removal empties
+ * goes only when one of them proves that rh created it.
  */
-function revertFragments(path: string, content: string, records: readonly FragmentRecord[]): FragmentRevert {
+function revertFragments(path: string, content: string, records: readonly FragmentRecord[], all: readonly FragmentRecord[]): FragmentRevert {
   const format = fragmentFormat(path);
   const removed: FragmentRecord[] = [];
   const kept: string[] = [];
@@ -321,11 +327,69 @@ function revertFragments(path: string, content: string, records: readonly Fragme
       kept.push(record.selector);
       continue;
     }
-    const edit = format.remove(content, record.selector);
+    const edit = format.remove(content, record.selector, all);
     content = content.slice(0, edit.at) + edit.inserted + content.slice(edit.at + edit.removed.length);
     removed.push(record);
   }
   return { content, removed, kept };
+}
+
+/** What a revert knows about one recorded file. */
+export interface FileRevertInput {
+  readonly path: string;
+  readonly kind: FileRecord['kind'];
+  readonly hasBackup: boolean;
+  readonly externalChange: boolean;
+  /** The file hashes to the record's `committed`. */
+  readonly committed: boolean;
+  readonly existed: boolean;
+  /** The file's bytes; null when it is missing or not a regular file. */
+  readonly bytes: Buffer | null;
+  /** The bytes before rh, for the whole-file restore. */
+  readonly backup: () => Buffer;
+  /** The records that this revert takes out, after its filter. */
+  readonly own: readonly FragmentRecord[];
+  /** Every record of the file. */
+  readonly all: readonly FragmentRecord[];
+  readonly filtered: boolean;
+}
+
+export interface FileRevertPlan {
+  readonly entry: HostConfigRevertEntry;
+  readonly write: { readonly kind: 'remove' } | { readonly kind: 'replace'; readonly content: Buffer } | null;
+  /** `drop`: the file record goes; `update`: it stays and `committed` follows the write; `keep`: it stays as it is. */
+  readonly record: 'drop' | 'update' | 'keep';
+  readonly removed: readonly FragmentRecord[];
+}
+
+/**
+ * The revert of one recorded file, with no read or write: `revert` carries it
+ * out, and a dry run before a migration reports it for records not written yet.
+ */
+export function planFileRevert(input: FileRevertInput): FileRevertPlan {
+  const { path, kind, own, all, filtered } = input;
+  if (!filtered && !input.externalChange && input.committed && (kind === 'created' || input.hasBackup)) {
+    if (kind === 'created') return { entry: { path, action: 'removed' }, write: input.existed ? { kind: 'remove' } : null, record: 'drop', removed: all };
+    const backup = input.backup();
+    if (input.bytes !== null && backup.equals(input.bytes)) return { entry: { path, action: 'released' }, write: null, record: 'drop', removed: all };
+    return { entry: { path, action: kind === 'replaced' ? 'restored' : 'text_removed' }, write: { kind: 'replace', content: backup }, record: 'drop', removed: all };
+  }
+  if (!input.existed || input.bytes === null) return { entry: { path, action: 'kept_edited', kept: own.map((entry) => entry.selector) }, write: null, record: 'keep', removed: [] };
+  const result = revertFragments(path, decode(input.bytes, path), own, all);
+  const removed = new Set(result.removed);
+  const remaining = all.filter((entry) => !removed.has(entry));
+  const content = Buffer.from(result.content, 'utf8');
+  const withKept = (action: HostConfigRevertEntry['action']): HostConfigRevertEntry => result.kept.length ? { path, action, kept: result.kept } : { path, action };
+  if (filtered || result.kept.length || remaining.length) {
+    // The file keeps its record; `committed` follows the write, and an outside edit stays recorded.
+    const action = result.kept.length || !removed.size ? 'kept_edited' : 'text_removed';
+    return { entry: withKept(action), write: removed.size ? { kind: 'replace', content } : null, record: removed.size ? 'update' : 'keep', removed: result.removed };
+  }
+  // A changed file with no fragment to take out (a created or replaced file) stays with its record.
+  if (!removed.size && !(kind === 'text_block' && !input.hasBackup)) return { entry: withKept('kept_edited'), write: null, record: 'keep', removed: [] };
+  const empty = kind === 'created' && fragmentFormat(path)?.empty(result.content) === true;
+  const write = empty ? { kind: 'remove' as const } : removed.size ? { kind: 'replace' as const, content } : null;
+  return { entry: withKept(empty ? 'removed' : removed.size ? 'text_removed' : 'released'), write, record: 'drop', removed: result.removed };
 }
 
 interface RevertFilter {
@@ -360,57 +424,24 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
     if (!record) continue;
     const { observation, bytes } = observeFile(path);
     const current = expectedOf(observation, path);
-    const own = fragments.filter((entry) => entry.file === path && matchesFilter(entry, filter));
+    const all = fragments.filter((entry) => entry.file === path);
+    const own = all.filter((entry) => matchesFilter(entry, filter));
     if (filtered && !own.length) continue;
-    const whole = !filtered && !record.external_change && isCommitted(record, current) && (record.kind === 'created' || record.backup !== null);
-    if (whole) {
-      let action: HostConfigRevertEntry['action'];
-      if (record.kind === 'created') {
-        if (current.existed && !dryRun) removeTarget(path, current);
-        action = 'removed';
-      } else {
-        const backup = readVault(paths, record.backup!);
-        if (bytes !== null && backup.equals(bytes)) action = 'released';
-        else {
-          if (!dryRun) replaceTarget(path, backup, current);
-          action = record.kind === 'replaced' ? 'restored' : 'text_removed';
-        }
-      }
-      delete files[path];
-      fragments = fragments.filter((entry) => entry.file !== path);
-      report.push({ path, action });
-      continue;
+    const plan = planFileRevert({
+      path, kind: record.kind, hasBackup: record.backup !== null, externalChange: record.external_change, committed: isCommitted(record, current),
+      existed: current.existed, bytes, backup: () => readVault(paths, record.backup!), own, all, filtered,
+    });
+    if (!dryRun && plan.write) {
+      if (plan.write.kind === 'remove') removeTarget(path, current);
+      else replaceTarget(path, plan.write.content, current);
     }
-    if (!current.existed || bytes === null) {
-      report.push({ path, action: 'kept_edited', kept: own.map((entry) => entry.selector) });
-      continue;
+    if (plan.record === 'drop') delete files[path];
+    else if (plan.record === 'update' && plan.write?.kind === 'replace') {
+      files[path] = { ...record, committed: { type: 'file', sha256: sha256Prefixed(plan.write.content) }, external_change: record.external_change || !isCommitted(record, current) };
     }
-    const result = revertFragments(path, decode(bytes, path), own);
-    const removed = new Set(result.removed);
-    const remaining = fragments.filter((entry) => entry.file === path && !removed.has(entry));
-    const empty = record.kind === 'created' && fragmentFormat(path)?.empty(result.content) === true;
-    let action: HostConfigRevertEntry['action'];
-    if (filtered || result.kept.length || remaining.length) {
-      // The file keeps its record; `committed` follows the write, and an outside edit stays recorded.
-      if (removed.size && !dryRun) replaceTarget(path, Buffer.from(result.content, 'utf8'), current);
-      if (removed.size) {
-        files[path] = { ...record, committed: { type: 'file', sha256: sha256Prefixed(Buffer.from(result.content, 'utf8')) },
-          external_change: record.external_change || !isCommitted(record, current) };
-      }
-      action = result.kept.length || !removed.size ? 'kept_edited' : 'text_removed';
-    } else if (!removed.size && !(record.kind === 'text_block' && record.backup === null)) {
-      // A changed file with no fragment to take out (a created or replaced file) stays with its record.
-      action = 'kept_edited';
-    } else {
-      if (!dryRun) {
-        if (empty) removeTarget(path, current);
-        else if (removed.size) replaceTarget(path, Buffer.from(result.content, 'utf8'), current);
-      }
-      delete files[path];
-      action = empty ? 'removed' : removed.size ? 'text_removed' : 'released';
-    }
+    const removed = new Set(plan.removed);
     fragments = fragments.filter((entry) => !removed.has(entry));
-    report.push(result.kept.length ? { path, action, kept: result.kept } : { path, action });
+    report.push(plan.entry);
   }
   if (dryRun) return report;
   const attempted = filtered ? [] : only ? ledger.directories.filter((directory) => targets.some((path) => isPathInside(directory, path))) : ledger.directories;

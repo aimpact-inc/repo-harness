@@ -16,6 +16,8 @@ export interface PlannedFragment {
   readonly previous: FragmentRecord | null;
   /** The fragment's text in the result, as the strategy locates it: what the ledger records as `inserted`. */
   readonly text: string;
+  /** The outermost container that this edit created, from the content before it. */
+  readonly created: string | null;
 }
 
 export interface FilePlan {
@@ -85,7 +87,7 @@ export function planFile(
   const active = ledgerFragments.filter((record) => record.file === file);
   checkSelectors(file, applied, active);
 
-  const planned: { request: FragmentRequest; edit: FragmentEdit; previous: FragmentRecord | null }[] = [];
+  const planned: { request: FragmentRequest; edit: FragmentEdit; previous: FragmentRecord | null; created: string | null }[] = [];
   let result = content;
   for (const request of applied) {
     const edit = request.strategy.apply(result, request.selector, request.value);
@@ -102,13 +104,14 @@ export function planFile(
       skipped.push({ code: 'host_config_user_value_kept', file, owner: request.owner, selector: request.selector });
       continue;
     }
+    const created = request.strategy.created?.(result, request.selector) ?? null;
     result = result.slice(0, edit.at) + edit.inserted + result.slice(edit.at + edit.removed.length);
-    planned.push({ request, edit, previous });
+    planned.push({ request, edit, previous, created });
   }
 
-  const fragments = planned.map(({ request, edit, previous }): PlannedFragment => {
+  const fragments = planned.map(({ request, edit, previous, created }): PlannedFragment => {
     const range = request.strategy.locate(result, request.selector);
-    return { owner: request.owner, selector: request.selector, kind: request.kind, edit, previous, text: range ? result.slice(range.start, range.end) : '' };
+    return { owner: request.owner, selector: request.selector, kind: request.kind, edit, previous, text: range ? result.slice(range.start, range.end) : '', created };
   });
   return { file, result, fragments, skipped };
 }

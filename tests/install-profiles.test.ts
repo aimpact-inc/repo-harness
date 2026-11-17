@@ -724,12 +724,22 @@ describe('install selection', () => {
     expect(status.probes.core?.missing).toContain('effective-state');
   }));
 
-  test('adapter probe requires the complete core route projection', () => withHome((env) => {
+  test('adapter probe requires the complete core route projection, and ignores user content beside it', () => withHome((env) => {
     writeManagedHostSurfaces(env);
     const applied = applyInstallSelection([], [], env);
     const adapter = join(env.HOME!, '.codex', 'hooks.json');
-    const config = JSON.parse(readFileSync(adapter, 'utf-8'));
     const original = readFileSync(adapter, 'utf-8');
+    // A user key and a user hook entry of its own beside the managed entries leave the projection complete.
+    const edited = JSON.parse(original);
+    edited.theme = 'changed-by-user';
+    edited.hooks.SessionStart.push({ hooks: [{ type: 'command', command: 'echo user-owned-sibling', timeout: 30 }] });
+    writeFileSync(adapter, JSON.stringify(edited));
+    expect(installStateStatus(applied.state, env).drift.status).toBe('consistent');
+    // A changed managed command is not rh's route any more.
+    edited.hooks.SessionStart[0].hooks[0].command = ': repo-harness-managed-hook-v1; changed';
+    writeFileSync(adapter, JSON.stringify(edited));
+    expect(installStateStatus(applied.state, env).probes.core?.missing).toContain('host-adapters');
+    const config = JSON.parse(original);
     delete config.hooks.PreToolUse;
     writeFileSync(adapter, JSON.stringify(config));
     const status = installStateStatus(applied.state, env);
