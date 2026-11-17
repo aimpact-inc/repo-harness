@@ -2,10 +2,10 @@ import { beforeAll, describe, expect, test } from 'bun:test';
 import { recordInstallOwnership, seedGlobalPackageFixture } from './helpers/install-ownership';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { isAbsolute, join } from 'path';
 import { execFileSync, spawnSync } from 'child_process';
 import { runMutationGuard } from '../src/cli/hook/mutation-guard';
-import { ledgerCreated, registerInstallLedger } from '../src/cli/hook/safety-hook';
+import { bashSafetyDenial, ledgerCreated, registerInstallLedger } from '../src/cli/hook/safety-hook';
 import { readInstallState } from '../src/cli/installer/install-profile';
 import { getRoute } from '../src/cli/hook/route-registry';
 import { buildHookCommand } from '../src/cli/installer/managed-entries';
@@ -117,7 +117,7 @@ describe('safety hook: Bash host route', () => {
       for (const dir of ['src', 'stage/d', 'Project Files', 'build']) mkdirSync(join(cwd, dir), { recursive: true });
       mkdirSync(join(home, 'stage'));
       for (const file of [join(out, 'notes.txt'), join(out, 'notes.txt.bak'), join(out, 'app.json'), join(cwd, 'stage/app.json'), join(cwd, 'stage/b.json'), join(cwd, '.env.local'),
-        join(cwd, 'Project Files/.env'), join(home, '.ssh/id_ed25519'), join(home, 'stage/app.json'), join(cwd, 'stage/d/notes.txt')]) writeFileSync(file, 'TOKEN=fixture-only\n');
+        join(cwd, 'Project Files/.env'), join(home, '.ssh/id_ed25519'), join(home, 'stage/app.json'), join(cwd, 'stage/d/notes.txt'), join(home, 'notes.txt')]) writeFileSync(file, 'TOKEN=fixture-only\n');
       symlinkSync(join(out, 'sub'), join(cwd, 'linked'));
       symlinkSync(join(out, 'app.json'), join(cwd, 'app.json'));
       symlinkSync(join(out, 'notes.txt'), join(cwd, 'notes.txt'));
@@ -172,6 +172,67 @@ describe('safety hook: Bash host route', () => {
       expect(hasUnredactedSecret(readFileSync(join(cwd, '.ai/harness/failures/latest.jsonl'), 'utf8'))).toBe(false);
     } finally { rmSync(root, { recursive: true, force: true }); }
   }, 60_000);
+
+  // The I2 regression corpus (#3019): every command from the findings of #2926 r1-r6 and #3013 r1-r5. A new finding adds a row.
+  posixOnly('I2 corpus: each glob and brace match and each literal operand gets one judge', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'bash-safety-corpus-')));
+    const [repo, out, home] = ['repo', 'outside', 'home'].map(dir => join(root, dir)) as [string, string, string];
+    const skill = join(home, '.claude/skills/repo-harness-cross-review');
+    const savedTmp = process.env.TMPDIR;
+    try {
+      for (const dir of ['repo/build/sub', 'repo/src', 'repo/stage/d', 'repo/w/stage', 'repo/inner', 'outside/sub', 'outside/-archive', 'tmp', 'managed', 'home/links']) {
+        mkdirSync(join(root, dir), { recursive: true });
+      }
+      mkdirSync(skill, { recursive: true });
+      for (const file of ['repo/source.txt', 'repo/a.txt', 'repo/stage/b.json', 'repo/stage/app.json', 'outside/source.txt', 'outside/a.txt',
+        'outside/victim.txt', 'outside/move.txt', 'outside/notes.txt', 'outside/-f', 'outside/--']) writeFileSync(join(root, file), 'x');
+      writeFileSync(join(skill, 'SKILL.md'), 'skill');
+      for (const link of ['linked', 'stage/linked', 'w/stage/linked']) symlinkSync(out, join(repo, link));
+      symlinkSync(join(repo, 'inner'), join(out, 'link'));
+      symlinkSync(repo, join(out, 'repo-link'));
+      symlinkSync(join(repo, 'build'), join(out, 'build-link'));
+      symlinkSync(repo, join(out, 'work\\'));
+      // An unrecorded user link outside the roots to a ledger-owned directory.
+      symlinkSync(skill, join(home, 'links/user-link'));
+      const env: NodeJS.ProcessEnv = { HOME: home, REPO_HARNESS_WORKTREE_ROOT: join(root, 'managed') };
+      recordInstallOwnership([skill], env);
+      registerInstallLedger(ledgerEnv => readInstallState(ledgerEnv)?.ownership_manifest ?? []);
+      process.env.TMPDIR = join(root, 'tmp');
+      const refuse = 'UserFileGuard';
+      const rows: Array<[string | null, string, string?]> = [
+        // #3013 r4 and this issue: glob matches through an in-worktree link to an outside directory.
+        [refuse, `mv --strip-trailing-slashes ${out}/link/ build`], [refuse, 'mv -f source.txt link*'], [refuse, 'rm -rf stage/*/victim.txt'],
+        [refuse, 'mv -f stage/*/victim.txt ..', 'w'], [refuse, 'mv -t link* source.txt'], [refuse, 'mv a.txt stage/*'], [refuse, 'mv -t stage/* a.txt'],
+        [refuse, 'mv a.txt stage/* -f'], [refuse, 'rm -f stage/*/victim.txt'], [refuse, 'mv stage/*/move.txt build'],
+        [refuse, 'cp a.txt stage/*'], [refuse, 'tee stage/*/victim.txt'], [refuse, 'truncate -s 0 stage/*/victim.txt'], [refuse, 'mv stage/b.json {build,linked}'],
+        // #3013 r3: a trailing separator follows the leaf link.
+        [refuse, 'rm -rf stage/linked/'], [refuse, 'rm -rf stage/*/'], [refuse, 'rm -rf linked/'], [refuse, 'mv linked/ .'], [refuse, 'mv -f linked// .'],
+        [refuse, "mv 'linked/' ."], [refuse, 'mv stage/*/ .'], [refuse, 'mv stage/linked/ stage/moved'],
+        // #3013 r0-r2: the plain mv form, BSD late dashes, a literal backslash, GNU destinations and target-directory values.
+        [refuse, 'mv . build'], [refuse, 'mv stage/b.json linked'], [refuse, `mv stage/b.json ${out}/repo-link`], [refuse, `mv -h stage/b.json '${out}/work\\'`],
+        [refuse, `mv ${repo}/stage/b.json -f ${repo}`, out], [refuse, `mv ${repo}/stage/b.json -- ${repo}`, out],
+        [refuse, 'mv stage/b.json linked -f'], [refuse, 'mv stage/b.json linked --'], [refuse, 'mv stage/b.json linked --suffix=.bak'],
+        [refuse, 'mv -t linked stage/b.json'], [refuse, 'mv -tlinked stage/b.json'], [refuse, 'mv --target-directory=linked stage/b.json'],
+        [refuse, `mv -t -archive ${repo}/stage/b.json`, out], [refuse, `mv --target-directory -archive ${repo}/stage/b.json`, out],
+        [refuse, `mv --strip-trailing-slashes ${out}/build-link/ build`], [refuse, 'cd src && mv -f ../stage/*/notes.txt ..'],
+        // #3013 r5: ledger ownership of the resolved directory never excuses the unrecorded link entry.
+        [refuse, 'mv -- ~/links/user-link build'], [refuse, 'mv -h source.txt ~/links/user-link'], [refuse, 'mv -t build ~/links/user-link'],
+        [refuse, 'mv --strip-trailing-slashes ~/links/user-link/ build'],
+        // An unknown removal refuses; an unknown overwrite refuses only when its literal directory is outside the roots.
+        [refuse, 'rm -rf build/$X'], [refuse, `echo x > ${out}/$X`], [null, 'echo x > "$TARGET"'], [null, 'echo x > build/$X'],
+        [null, 'rm -rf build/*'], [null, 'rm -rf build/*/'], [null, 'rm stage/*.json'], [null, 'mv stage/*.json build/'], [null, 'cp stage/*.json build/'],
+        [null, 'mv stage/b.json .'], [null, 'mv stage/app.json ./build/'], [null, `mv stage/b.json ${out}/repo-link/`], [null, 'mv -t build stage/b.json'],
+        [null, 'mv linked build'], [null, 'rm -rf linked'], [null, 'rm -rf stage/linked'],
+      ];
+      for (const [guard, command, from = ''] of rows) {
+        const denial = bashSafetyDenial(command, isAbsolute(from) ? from : join(repo, from), { repoRoot: repo, env, host: 'claude' });
+        expect({ command, guard: denial?.guard ?? null }).toEqual({ command, guard });
+      }
+    } finally {
+      if (savedTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = savedTmp;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
   posixOnly('the host agent may change its own memory and plans; the rest of its home directory stays protected', () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'bash-safety-agent-output-')));
