@@ -80,6 +80,7 @@ export function resolveCompatibleNodeRuntime(
   budget: Pick<ArchctxProviderOptions, 'deadlineMs' | 'nowMs'> = {},
 ): string {
   const version = (candidate: string): string | null => {
+    const callerLimitsProbe = budget.deadlineMs !== undefined && budget.deadlineMs - (budget.nowMs ?? Date.now)() <= 5_000;
     const timeoutMs = remainingTimeout(budget, 5_000, 'Node runtime selection');
     const deadlineMs = budget.deadlineMs === undefined ? undefined : budget.nowMs === undefined
       ? Math.min(budget.deadlineMs, Date.now() + timeoutMs)
@@ -92,7 +93,7 @@ export function resolveCompatibleNodeRuntime(
       redactions: [],
       processGroup: true,
     });
-    if (result.timedOut && budget.deadlineMs !== undefined) {
+    if (result.timedOut && callerLimitsProbe) {
       throw new ArchctxClientError({ code: 'RH_ARCHCTX_TIMEOUT', action: 'retry', message: 'architecture projection timeout before Node runtime selection' });
     }
     return result.ok ? result.stdout.trim().replace(/^v/, '') : null;
