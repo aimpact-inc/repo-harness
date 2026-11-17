@@ -7,7 +7,8 @@ import { jsonDocumentIsEmpty, jsonFragment, jsonFragmentValue, managedHookSelect
 import { HostConfigError, type FragmentEdit } from '../../core/host-config/types';
 import { openHostConfigGate, type AdoptedFragment, type HostConfigAdoption, type HostConfigRevertEntry } from '../../effects/host-config/gate';
 import { configurationReceiptPath, hostConfigurationRoot, readRawConfigurationReceipt, saveConfigurationReceipt, type ConfigurationReceipt } from './configuration-ownership';
-import { CODEGRAPH_CONFIG_MARKER, codegraphProjection, readInstallState, writeState, type InstallState, type ManagedInstallSurface } from './install-profile';
+import { sha256Prefixed } from '../../core/evidence/sha256';
+import { CODEGRAPH_CONFIG_MARKER, readInstallState, writeState, type InstallState, type ManagedInstallSurface } from './install-profile';
 
 /**
  * One-shot migration of the JSON host files into the host-config ledger.
@@ -41,10 +42,10 @@ function invalid(message: string): HostConfigError {
   return new HostConfigError('host_config_invalid_state', message);
 }
 
-function jsonPaths(home: string): { hooks: readonly string[]; root: string; all: readonly string[] } {
+function jsonPaths(home: string, only?: readonly string[]): { hooks: readonly string[]; root: string; all: readonly string[] } {
   const hooks = [join(home, '.codex', 'hooks.json'), join(home, '.claude', 'settings.json')];
   const root = join(home, '.claude.json');
-  return { hooks, root, all: [...hooks, root] };
+  return { hooks, root, all: [...hooks, root].filter((path) => !only || only.includes(path)) };
 }
 
 function parseOld(value: unknown, receiptPath: string): unknown {
@@ -72,6 +73,21 @@ function receiptFragments(raw: any, paths: readonly string[], receiptPath: strin
     byPath.set(entry.path, list);
   }
   return { byPath, rest: { ...raw, changes: raw.changes.filter((entry: any) => !entries.includes(entry)) } };
+}
+
+/** The hash that the old manifest recorded for a file's CodeGraph server and its codegraph `allowedTools` entries. */
+function codegraphProjection(path: string): string | null {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as { mcpServers?: Record<string, unknown>; allowedTools?: unknown[] };
+    const server = parsed.mcpServers?.codegraph;
+    const allowedTools = Array.isArray(parsed.allowedTools)
+      ? parsed.allowedTools.filter((entry) => typeof entry === 'string' && entry.toLowerCase().includes('codegraph'))
+      : [];
+    if (server === undefined && allowedTools.length === 0) return null;
+    return sha256Prefixed(JSON.stringify({ server, allowedTools }));
+  } catch {
+    return null;
+  }
 }
 
 function isOldJsonSurface(paths: readonly string[]) {
@@ -129,10 +145,10 @@ function adoption(path: string, content: string, fragments: readonly OldFragment
   return { kind: 'text_block', backup: Buffer.from(backup, 'utf8'), fragments: adopted, externalChange };
 }
 
-/** Plan the migration without writing; null when no old record is left. */
-export function planJsonConfigMigration(env: NodeJS.ProcessEnv): JsonConfigMigration | null {
+/** Plan the migration without writing; null when no old record is left. `only` limits it to some of the files. */
+export function planJsonConfigMigration(env: NodeJS.ProcessEnv, only?: readonly string[]): JsonConfigMigration | null {
   const home = hostConfigurationRoot(env);
-  const paths = jsonPaths(home);
+  const paths = jsonPaths(home, only);
   const receipt = receiptFragments(readRawConfigurationReceipt(home), paths.all, configurationReceiptPath(home));
   const state = readInstallState(env);
   const gate = openHostConfigGate({ env });
@@ -158,8 +174,8 @@ export function planJsonConfigMigration(env: NodeJS.ProcessEnv): JsonConfigMigra
 }
 
 /** Run the migration once: the ledger records come first, then the old records go. A later run finds none. */
-export function migrateJsonConfigRecords(env: NodeJS.ProcessEnv): void {
-  const migration = planJsonConfigMigration(env);
+export function migrateJsonConfigRecords(env: NodeJS.ProcessEnv, only?: readonly string[]): void {
+  const migration = planJsonConfigMigration(env, only);
   if (!migration) return;
   const gate = openHostConfigGate({ env });
   for (const file of migration.files) gate.adopt(file.path, file.adoption);
