@@ -11,7 +11,7 @@ import { join, relative } from 'path';
 import { spawnSync } from 'child_process';
 import { runUserUninstall } from '../../src/cli/installer/uninstall';
 import { configurationReceiptPath } from '../../src/cli/installer/configuration-ownership';
-import { migrateCodexConfigRecords } from '../../src/cli/installer/codex-config-migration';
+import { migrateCodexConfigRecords, planCodexConfigMigration } from '../../src/cli/installer/codex-config-migration';
 import { requestUserInputFragment } from '../../src/cli/installer/targets/codex';
 import { tomlFragment } from '../../src/core/host-config/toml-fragment';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
@@ -50,7 +50,7 @@ test('restores original config, preserves siblings and archives, dry run is byte
  expect(runUserUninstall({target:'both',env}).status).toBe('complete');
  expect({receipt:existsSync(configurationReceiptPath(home)),files:ledger(home).files}).toEqual({receipt:false,files:{}});
 }));
-test('a legacy receipt table at the end of a file with no final newline goes only with a whole-file revert, which gives back the bytes of the old uninstall', () => {
+test('a pre-separator ledger table goes only with a whole-file revert, which gives back the bytes of the old uninstall', () => {
  // The old receipt recorded the table without the line break before it, so that line break may be the user's.
  const rows=[{before:null,lineBreak:'\n',edited:false},{before:'[mcp_servers.codegraph]\ncommand = "user"',lineBreak:'\n',edited:false},{before:null,lineBreak:'\r\n',edited:false},{before:null,lineBreak:'\n',edited:true}] as const;
  for (const row of rows) fixture((home,env)=>{
@@ -58,6 +58,8 @@ test('a legacy receipt table at the end of a file with no final newline goes onl
   const path=join(home,'.codex/config.toml');const installed='[mcp_servers.codegraph]\ncommand = "codegraph"';
   put(home,'.codex/config.toml',`model = "user"${row.lineBreak}${installed}`);
   put(home,'.repo-harness/configuration-restore.json',JSON.stringify({protocol:1,changes:[{path,selector:'mcp_servers.codegraph',before:row.before,installed,active:true}]}));
+  const adoption=planCodexConfigMigration(env)!.adoption!;
+  openHostConfigGate({env}).adopt(path,{...adoption,fragments:adoption.fragments.map(({owner,selector,kind})=>({owner,selector,kind,inserted:''}))});
   if(row.edited){migrateCodexConfigRecords(env);put(home,'.codex/config.toml',`model = "edited"${row.lineBreak}${installed}`);}
   const result=runUserUninstall({target:'codex',env});
   expect(result.status,`${name} ${result.lines.join('\n')}`).toBe(row.edited?'partial':'complete');
@@ -65,6 +67,24 @@ test('a legacy receipt table at the end of a file with no final newline goes onl
   if(!row.edited) expect(ledger(home).files,name).toEqual({});
  });
 });
+test('uninstall after an unrelated edit removes the legacy EOF table and keeps the user line break', () => {
+ for(const lineBreak of ['\n','\r\n']) for(const source of ['receipt','manifest']) fixture((home,env)=>{
+  const path=join(home,'.codex/config.toml');
+  const installed=`[mcp_servers.codegraph]${lineBreak}command = "codegraph"`;
+  put(home,'.codex/config.toml',`model = "user"${lineBreak}${installed}`);
+  if(source==='receipt') put(home,'.repo-harness/configuration-restore.json',JSON.stringify({protocol:1,changes:[{path,selector:'mcp_servers.codegraph',before:null,installed,active:true}]}));
+  else legacyProfile(home,path,installed.replace(/\r\n/g,'\n'));
+  migrateCodexConfigRecords(env);
+  const user=`# user edit${lineBreak}model = "edited"${lineBreak}`;
+  put(home,'.codex/config.toml',user+installed);
+  expect(readFileSync(path,'utf8')).toBe(user+installed);
+  const result=runUserUninstall({target:'codex',env});
+  expect(result.status,`${JSON.stringify({lineBreak,source})} ${result.lines.join('\n')}`).toBe('complete');
+  expect(readFileSync(path,'utf8'),JSON.stringify({lineBreak,source})).toBe(user);
+  expect(ledger(home).fragments).toEqual([]);
+ });
+});
+
 test('an interrupted change in the receipt fails closed with its recovery step only for the target that owns its file', () => {
  // A pending entry of the other host stays in the receipt, byte for byte, and does not block this target.
  const rows=[{pending:['codex'],target:'both',status:'partial'},{pending:['codex'],target:'claude',status:'complete'},{pending:['claude'],target:'codex',status:'complete'},{pending:['codex','claude'],target:'claude',status:'partial'}] as const;
