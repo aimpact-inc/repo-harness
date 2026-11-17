@@ -12,7 +12,7 @@
  * The threat model is accidents. A target built at run time, a script or binary that writes, and a hidden alias are accepted
  * residuals; only a removal whose target is not known fails closed.
  */
-import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'fs';
+import { existsSync, lstatSync, readdirSync, realpathSync, statSync, type Dirent } from 'fs';
 import { homedir, tmpdir } from 'os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { managedWorktreeRoot } from '../../effects/git/managed-worktree';
@@ -36,7 +36,8 @@ export interface SafetyScope {
  * - `change` writes content into an existing file (truncate, shred): the kernel follows the leaf link to its referent.
  * - `overwrite` creates or replaces content (a redirect, cp, tee): it follows the leaf link too.
  * `destroy` and `change` act only on an existing file, so an unknown target denies; an unknown `overwrite` target passes unless
- * its literal directory is an existing directory outside the roots, or its word is above an expansion limit.
+ * its literal directory is an existing directory outside the roots, or its word is above an expansion limit. A glob above the
+ * match limit whose run-time part is one name in a directory inside a root is judged by that directory's link children.
  */
 export type TargetKind = 'destroy' | 'change' | 'overwrite';
 
@@ -50,8 +51,13 @@ export interface WriteTarget {
   readonly from?: string | null;
   /** For an unknown target: the absolute literal directory before the first run-time character, when the word has one. */
   readonly prefix?: string;
-  /** The word is above an expansion limit, so its targets are not known: it refuses for every kind. */
+  /** The word is above an expansion limit, so its targets are not known: it refuses for every kind, except as `children` allows. */
   readonly unbounded?: true;
+  /**
+   * An unbounded glob whose run-time part is one name in a known directory: its matches are the children of `dir` that `name`
+   * matches, each with a trailing separator when `separator` is set.
+   */
+  readonly children?: { readonly dir: string; readonly name: string; readonly separator: boolean };
   /**
    * cp and ln write `<path>/<name>` for each source name when `path` is an existing directory; the directory itself is not
    * written. `names` is null when a source name is not known, and then every existing child can be the target. cp writes
@@ -68,6 +74,14 @@ export interface WriteTarget {
 
 const inside = (rel: string) => !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`);
 const atOrBelow = (root: string, path: string) => inside(relative(root, path));
+
+/** One glob segment matches a name; a leading `*`, `?` or `[` does not match a dot name, as in the shell. */
+const nameMatches = (part: string, name: string) => (part.startsWith('.') || !name.startsWith('.')) && segmentMatches(part, name);
+
+/** A glob with a trailing separator matches directories only; a path that cannot be checked counts as one. */
+function matchesDirectory(path: string): boolean {
+  try { return statSync(path, { throwIfNoEntry: false })?.isDirectory() === true; } catch { return true; }
+}
 
 // ---------------------------------------------------------------------------
 // I2: the decision for one target
@@ -179,6 +193,7 @@ class TargetJudge {
   denial(target: WriteTarget): Denial | null {
     const needsTarget = target.kind !== 'overwrite';
     if (target.path === null) {
+      if (target.children) return this.childrenDenial(target, target.children);
       return needsTarget || target.unbounded ? unknownTargetDenial(target, this.roots, this.userStep) : this.prefixDenial(target);
     }
     if (/^\/dev\//.test(target.path)) return null;
@@ -221,6 +236,33 @@ class TargetJudge {
     try { dir = writeThroughPath(target.prefix); } catch { return null; }
     if (this.roots.some(root => underRoot(root, dir, true)) || !existsSync(dir) || ledgerCreated(dir, this.scope.env)) return null;
     return outsideDenial(target, dir, this.roots, this.userStep);
+  }
+
+  /**
+   * A glob above the match limit in one directory. When the directory resolves inside a root, a match that is not a link is a
+   * child entry inside the root, for every kind and through a trailing separator, so only the matches that can be links get the
+   * one decision. The directory is placed before it is listed; outside the roots the word stays an unknown target set.
+   */
+  private childrenDenial(target: WriteTarget, children: NonNullable<WriteTarget['children']>): Denial | null {
+    const unknown = () => unknownTargetDenial(target, this.roots, this.userStep);
+    let dir: string, entries: Dirent[];
+    try {
+      dir = writeThroughPath(children.dir);
+      if (!this.roots.some(root => underRoot(root, dir, true))) return unknown();
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch { return unknown(); }
+    let links = 0;
+    for (const entry of entries) {
+      // An entry without a reported type is neither a file nor a directory here, so it is judged like a link.
+      if (entry.isFile() || entry.isDirectory() || !nameMatches(children.name, entry.name)) continue;
+      // The resolved directory holds no link, so joining the name keeps the path the kernel walks.
+      const path = join(dir, entry.name) + (children.separator ? sep : '');
+      if (children.separator && !matchesDirectory(path)) continue;
+      if (++links > CHILD_LIMIT) return unknown();
+      const denial = this.denial({ ...target, path, children: undefined, unbounded: undefined });
+      if (denial) return denial;
+    }
+    return null;
   }
 
   /** A copy into a directory writes one child per source name; without the names, every existing child is a possible target. */
@@ -271,7 +313,7 @@ function unknownTargetDenial(target: WriteTarget, roots: readonly Root[], userSt
   return {
     guard: 'UserFileGuard',
     reason: `I2: the target ${target.spelled} of ${target.via}${target.from ? ` from ${target.from}` : ''} is not known before the command runs, `
-      + `and ${target.via} removes or changes an existing file. Allowed roots: ${rootList(roots)}.`,
+      + `and ${target.via} ${target.kind === 'overwrite' ? 'overwrites' : 'removes or changes'} an existing file. Allowed roots: ${rootList(roots)}.`,
     fix: `Write the target as a literal path inside an allowed root from a known working directory, or ${userStep}.`,
     askable: true,
   };
@@ -344,8 +386,7 @@ function patternReadsCredential(pattern: string, dirs: Dirs): boolean {
   if (globIndex(name) < 0) return namesCredentialStore(unescapePattern(pattern));
   // A glob in a directory segment cannot be listed; its last segment is tried against the sample names.
   const candidates = (cut <= glob ? listing(dir, dirs) : null) ?? SAMPLE_NAMES;
-  return candidates.some(entry => (!entry.startsWith('.') || name.startsWith('.')) && segmentMatches(name, entry)
-    && namesCredentialStore(`${dir}${entry}`));
+  return candidates.some(entry => nameMatches(name, entry) && namesCredentialStore(`${dir}${entry}`));
 }
 
 /** True when a word, as the program consumes it after quote removal and brace expansion, names a credential store. */
@@ -553,17 +594,37 @@ function itemArg(pattern: string, expand: boolean, at: number, home: string): Ar
   return { value: known ? value : null, pattern, expand, spelled: value, word: at, matched: false };
 }
 
+const NUMERIC_SEQUENCE = /^\{-?\d+\.\.-?\d+(?:\.\.-?\d+)?\}/;
+
+/**
+ * The word with each numeric `{a..b}` sequence as `*`, or null when it has none or holds a bracket. A numeric item holds digits
+ * and a sign only, never a separator or a leading dot, so the glob matches every existing file that an item names; an item that
+ * names no file is a create or a no-op. The comma items keep their own text.
+ */
+function sequenceGlob(pattern: string): string | null {
+  if (patternIndex(pattern, '[') >= 0) return null;
+  let glob = '', found = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const sequence = pattern[i] === '{' ? NUMERIC_SEQUENCE.exec(pattern.slice(i)) : null;
+    if (pattern[i] === '\\') { glob += pattern.slice(i, i + 2); i++; }
+    else if (sequence) { glob += '*'; i += sequence[0].length - 1; found = true; } else glob += pattern[i];
+  }
+  return found ? glob : null;
+}
+
 /** A word or item above an expansion limit: an unknown target set that refuses for every kind. */
 const unbounded = (arg: Arg): Arg => ({ ...arg, value: null, unbounded: true });
 
 /**
  * The words that one command word gives the program, as the shell expands it without running anything: brace expansion, HOME,
  * then glob expansion from `cwd`. Expansion never drops an operand: each brace item gives its own words, and an item that is not
- * known gives one unknown word. Above the brace limit the items are not known, so the whole word is one unbounded word; a glob
- * item above the match limit is one unbounded word too.
+ * known gives one unknown word. Above the brace limit the numeric sequences become globs; when the word is still above it, its
+ * items are not known, so the whole word is one unbounded word. A glob item above the match limit is one unbounded word too.
  */
 function expandWord(word: Word, at: number, cwd: string | null, home: string): Arg[] {
-  const patterns = expandBraces(word.pattern);
+  const exact = expandBraces(word.pattern);
+  const shape = exact === null ? sequenceGlob(word.pattern) : null;
+  const patterns = exact ?? (shape === null ? null : expandBraces(shape));
   if (patterns === null) return [unbounded(itemArg(word.pattern, word.expand, at, home))];
   let budget = CHILD_LIMIT;
   return patterns.flatMap(item => {
@@ -572,10 +633,10 @@ function expandWord(word: Word, at: number, cwd: string | null, home: string): A
     const matches = globMatches(arg.pattern, cwd, budget);
     if (matches === null) return [unbounded(arg)];
     budget -= matches.length;
-    // Without a match the shell passes the word itself.
-    return matches.length
-      ? matches.map(value => ({ value, pattern: escapePattern(value), expand: false, spelled: value, word: at, matched: true }))
-      : [arg];
+    // Without a match the shell passes the word itself. It never passes a sequence glob: a word that a program reads after a
+    // prefix (`of=`, `-t`) never matches, so its items stay unknown.
+    if (!matches.length) return [shape === null ? arg : unbounded(arg)];
+    return matches.map(value => ({ value, pattern: escapePattern(value), expand: false, spelled: value, word: at, matched: true }));
   });
 }
 
@@ -614,7 +675,7 @@ function globMatches(pattern: string, cwd: string | null, limit: number): string
         return null;
       }
       for (const name of names.sort()) {
-        if ((part.startsWith('.') || !name.startsWith('.')) && segmentMatches(part, name)) next.push(extend(prefix, name));
+        if (nameMatches(part, name)) next.push(extend(prefix, name));
       }
       if (next.length > limit) return null;
     }
@@ -622,10 +683,8 @@ function globMatches(pattern: string, cwd: string | null, limit: number): string
   }
   const directoriesOnly = parts.length > 1 && parts.at(-1) === '';
   return found.filter(path => {
-    try {
-      return directoriesOnly ? statSync(absolute(path), { throwIfNoEntry: false })?.isDirectory() === true
-        : lstatSync(absolute(path), { throwIfNoEntry: false }) !== undefined;
-    } catch { return true; }
+    if (directoriesOnly) return matchesDirectory(absolute(path));
+    try { return lstatSync(absolute(path), { throwIfNoEntry: false }) !== undefined; } catch { return true; }
   });
 }
 
@@ -641,7 +700,25 @@ function targetOf(kind: TargetKind, via: string, arg: Arg, cwd: string | null, e
   const path = arg.value === null ? null : resolveFrom(arg.value || '.');
   const dir = arg.value === null ? literalDirectory(arg.pattern) : null;
   const prefix = dir === null ? null : resolveFrom(dir);
-  return { kind, via, spelled: arg.spelled, path, from: cwd, ...(prefix === null ? {} : { prefix }), ...(arg.unbounded ? { unbounded: true as const } : {}), ...extra };
+  const children = arg.unbounded ? childGlob(arg.pattern, resolveFrom) : null;
+  return {
+    kind, via, spelled: arg.spelled, path, from: cwd, ...(prefix === null ? {} : { prefix }),
+    ...(arg.unbounded ? { unbounded: true as const } : {}), ...(children ? { children } : {}), ...extra,
+  };
+}
+
+/**
+ * The literal directory and the name pattern of a glob whose glob characters are all in its last segment, which a trailing
+ * separator may follow; null otherwise. A glob character never matches a separator, but a brace left in the pattern can hold one.
+ */
+function childGlob(pattern: string, resolveFrom: (value: string) => string | null): WriteTarget['children'] | null {
+  const separator = pattern.endsWith('/');
+  const body = separator ? pattern.slice(0, -1) : pattern;
+  const cut = body.lastIndexOf('/') + 1;
+  const name = body.slice(cut);
+  if (globIndex(name) < 0 || globIndex(body.slice(0, cut)) >= 0 || patternIndex(body, '{') >= 0) return null;
+  const dir = resolveFrom(unescapePattern(body.slice(0, cut)) || '.');
+  return dir === null ? null : { dir, name, separator };
 }
 
 const isOption = (arg: Arg) => text(arg).startsWith('-') && text(arg) !== '-';
@@ -677,13 +754,13 @@ function targetOption(arg: Arg, home: string): Arg[] | null {
 /**
  * cp and ln: the last operand is the destination, written into a directory as each source's name. When the hook cannot place the
  * destination (a target-directory option, fewer than two operands, or a last operand from a glob with several matches, whose
- * order depends on the shell's locale), every operand is a possible write target.
+ * order depends on the shell's locale, or from a word above an expansion limit), every operand is a possible write target.
  */
 function copyTargets(program: string, args: readonly Arg[], cwd: string | null, home: string): WriteTarget[] {
   const glued = args.map(arg => targetOption(arg, home));
   const operands = operandsOf(args, MOVE_VALUED);
   const last = operands.at(-1);
-  const unplaced = last !== undefined && last.matched && operands.filter(arg => arg.word === last.word).length > 1;
+  const unplaced = last !== undefined && (last.unbounded === true || last.matched && operands.filter(arg => arg.word === last.word).length > 1);
   if (glued.some(found => found !== null) || operands.length < 2 || unplaced) {
     return [...operands, ...glued.flatMap(found => found ?? [])].map(arg => targetOf('overwrite', program, arg, cwd));
   }
