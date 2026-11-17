@@ -119,13 +119,10 @@ function underRoot(root: Root, path: string, orAt = false): boolean {
 /** A path separator of this platform at the end; a backslash is a name character on POSIX. */
 const TRAILING_SEPARATOR = sep === '/' ? /\/$/ : /[\\/]$/;
 
-/**
- * The entry that rm and mv act on, with every directory above it resolved. They do not follow the leaf link, except through a
- * trailing separator: then the kernel resolves the leaf link, and the directory it names is the entry.
- */
+/** The entry that rm and mv act on, with every directory above it resolved and trailing separators removed; the leaf link is not followed. */
 function leafPath(path: string): string {
   const name = basename(path);
-  return name === '' || name === '.' || name === '..' || TRAILING_SEPARATOR.test(path) ? writeThroughPath(path) : join(writeThroughPath(dirname(path)), name);
+  return name === '' || name === '.' || name === '..' ? writeThroughPath(path) : join(writeThroughPath(dirname(path)), name);
 }
 
 /** One surface of rh's install ledger, as the installer records it. */
@@ -177,21 +174,26 @@ class TargetJudge {
       const inRoot = (path: string) => this.roots.some(root => underRoot(root, path, true));
       if (!inRoot(into)) return this.existingDenial(target, into);
       if (target.destination!.intoRoot) {
-        // BSD mv -h renames over a destination link to a directory, so the entry itself must be in a root too.
-        let leaf: string | null = null;
-        try { leaf = leafPath(target.path); } catch { /* the destroy check below decides */ }
+        // BSD mv -h renames over a destination link to a directory, so the entry itself must be in a root too. No option of the
+        // plain form removes a trailing separator, so the kernel follows that link and the directory is the entry.
+        let leaf: string | null = TRAILING_SEPARATOR.test(target.path) ? into : null;
+        try { leaf ??= leafPath(target.path); } catch { /* the destroy check below decides */ }
         if (leaf !== null && inRoot(leaf)) return null;
       }
     }
     let path: string;
+    let through: string | null = null;
     try {
       path = target.kind === 'destroy' ? leafPath(target.path) : writeThroughPath(target.path);
+      // Through a trailing separator the kernel follows the leaf link, and GNU mv --strip-trailing-slashes removes the separator
+      // first, so a removal judges both entries.
+      if (target.kind === 'destroy' && TRAILING_SEPARATOR.test(target.path)) through = writeThroughPath(target.path);
     } catch {
       // A path that does not resolve (a link loop, an unreadable directory) cannot be checked.
       return needsTarget ? unknownTargetDenial(target, this.roots, this.userStep) : null;
     }
     if (target.into && statSync(path, { throwIfNoEntry: false })?.isDirectory()) return this.childDenial(target, target.into, path);
-    return this.existingDenial(target, path);
+    return (through === null ? null : this.existingDenial(target, through)) ?? this.existingDenial(target, path);
   }
 
   /** A copy into a directory writes one child per source name; without the names, every existing child is a possible target. */
@@ -562,8 +564,8 @@ function targetOption(word: Word): Word[] | null {
  * write target.
  */
 function destinationTargets(program: string, args: readonly Word[], dirs: Dirs): WriteTarget[] {
+  if (program === 'mv') return moveTargets(args, dirs);
   const words = args.flatMap(braceWords);
-  if (program === 'mv') return moveTargets(words, dirs);
   const glued = words.map(targetOption);
   const { operands } = operandsOf(words, MOVE_VALUED);
   if (glued.some(found => found !== null) || operands.length < 2) {
@@ -578,14 +580,15 @@ function destinationTargets(program: string, args: readonly Word[], dirs: Dirs):
 /**
  * mv removes or replaces each operand. BSD mv stops option parsing at the first operand, so each later word, a dash-prefixed one
  * or `--` too, is an operand. Only the plain form `mv [short flags] src... dest`, without a dash-prefixed word after the first
- * operand and without -t, -T or -S, names the same destination for BSD and GNU mv: its last word may move the sources into an
- * allowed root. In every other form, each operand and each target-directory value, a separate dash-prefixed one too, can be
- * the destination.
+ * operand, without -t, -T or -S and without a glob or brace character, names the same destination for BSD and GNU mv: its last
+ * word may move the sources into an allowed root. In every other form, each operand and each target-directory value, a
+ * separate dash-prefixed one too, can be the destination.
  */
-function moveTargets(words: readonly Word[], dirs: Dirs): WriteTarget[] {
+function moveTargets(args: readonly Word[], dirs: Dirs): WriteTarget[] {
+  const words = args.flatMap(braceWords);
   const operands = moveOperands(words);
   const first = words.findIndex(word => !word.value.startsWith('-'));
-  const plain = first >= 0 && words.length - first >= 2
+  const plain = first >= 0 && words.length - first >= 2 && args.every(word => expansionIndex(word.pattern, false) < 0)
     && words.slice(0, first).every(word => /^-[a-zA-Z]+$/.test(word.value) && !/[tTS]/.test(word.value))
     && words.slice(first).every(word => !word.value.startsWith('-'));
   if (plain) {

@@ -122,6 +122,7 @@ describe('safety hook: Bash host route', () => {
       symlinkSync(join(out, 'app.json'), join(cwd, 'app.json'));
       symlinkSync(join(out, 'notes.txt'), join(cwd, 'notes.txt'));
       symlinkSync(cwd, join(out, 'repo-link'));
+      symlinkSync(join(cwd, 'build'), join(out, 'build-link'));
       symlinkSync(cwd, join(out, 'work\\'));
       for (const name of ['-f', '--']) writeFileSync(join(out, name), 'x');
       mkdirSync(join(out, '-archive'));
@@ -169,6 +170,8 @@ describe('safety hook: Bash host route', () => {
         `cd ${out} && mv -t -archive ${cwd}/stage/b.json`, `cd ${out} && mv --target-directory -archive ${cwd}/stage/b.json`,
         // A trailing separator follows the leaf link, so the outside directory is the entry; a glob before it is not bounded.
         'mv linked/ .', 'mv -f linked// .', "mv 'linked/' .", 'mv stage/*/ .', 'rm -rf linked/', 'rm -rf stage/*/',
+        // GNU --strip-trailing-slashes moves the outside link entry itself; a glob operand leaves the plain form, so `..` is the root.
+        `mv --strip-trailing-slashes ${out}/build-link/ build`, 'cd src && mv -f ../stage/*/notes.txt ..',
       ]);
       expectGuard('RecursiveDeleteGuard', ['if true; then rm -rf .; fi']);
       expectGuard(null, ['cd src && rm a.txt', 'echo $(rm src/a.txt)', `cp stage/*.json ${out}/empty/`, 'rm notes.txt', 'cp stage/*/notes.txt src/', 'rm -rf build/*', 'cp -r src build/', 'mv -t build stage/b.json',
