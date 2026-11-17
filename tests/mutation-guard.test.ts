@@ -291,6 +291,8 @@ describe('safety hook: Bash host route', () => {
         // #3053 r1: an attached BSD -f start (alone, clustered, after a separate -f) is a start; an unknown option word is an unknown target.
         [refuse, `find -f stage -Hf${out} -- -name victim.txt -delete`], [refuse, `find -f${out} -name victim.txt -delete`],
         [refuse, `find -Hf${out} -name victim.txt -exec rm {} +`], [null, 'find -fbuild -delete'], [refuse, 'find -Q build -delete', 'stage'],
+        // #3053 r1 bot: -fprintf takes two operands, so a later -delete is still read.
+        [refuse, `find ${out} -fprintf -exec echo -delete`],
         // An unknown removal refuses; an unknown overwrite refuses only when its literal directory is outside the roots.
         [refuse, 'rm -rf build/$X'], [refuse, `echo x > ${out}/$X`], [null, 'echo x > "$TARGET"'], [null, 'echo x > build/$X'],
         [null, 'rm -rf build/*'], [null, 'rm -rf build/*/'], [null, 'rm stage/*.json'], [null, 'mv stage/*.json build/'], [null, 'cp stage/*.json build/'],

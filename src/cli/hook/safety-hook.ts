@@ -866,7 +866,7 @@ interface FindCommand<T> {
  * end with `f`, whose start path is the rest of the word (`-HfPATH`) or the next word, and GNU `-D <opts>` and `-O<n>`. `attached`
  * builds the start from the rest of a word. The starts follow, up to the first expression word; a GNU global option before a start
  * is skipped, and a first expression word that is no known primary is `unknown`. The expression is read word by word: an operand of
- * a valued primary is never a primary, and an `-exec` template runs to `;`, or to `+` after `{}`. An unknown primary later in the
+ * a valued primary is never a primary (`-fprintf FILE FORMAT` has two), and an `-exec` template runs to `;`, or to `+` after `{}`. An unknown primary later in the
  * expression takes no operand, so a later `-follow` still counts.
  */
 function parseFind<T extends Valued>(args: readonly T[], attached: (word: T, length: number) => T): FindCommand<T> {
@@ -893,7 +893,8 @@ function parseFind<T extends Valued>(args: readonly T[], attached: (word: T, len
       continue;
     }
     if (!expression && !/^[-(!)]/.test(value)) { starts.push(args[i]!); continue; }
-    if (!expression && !(FIND_PLAIN.has(value) || FIND_VALUED.has(value) || FIND_RUNS.test(value) || /^-newer[a-zA-Z]{2}$/.test(value))) unknown = args[i]!;
+    if (!expression && !(FIND_PLAIN.has(value) || FIND_VALUED.has(value) || FIND_RUNS.test(value) || value === '-fprintf'
+      || /^-newer[a-zA-Z]{2}$/.test(value))) unknown = args[i]!;
     expression = true;
     if (value === '-delete') writes = true;
     else if (value === '-follow') follow = true;
@@ -903,7 +904,8 @@ function parseFind<T extends Valued>(args: readonly T[], attached: (word: T, len
       if (FIND_EXEC_READERS.has(template[0] ?? '')) continue;
       writes = true;
       templateFollows ||= template.slice(1).some(word => /\{\}[\\/]/.test(word ?? ''));
-    } else if (FIND_VALUED.has(value) || /^-newer[a-zA-Z]{2}$/.test(value)) i++;
+    } else if (value === '-fprintf') i += 2;
+    else if (FIND_VALUED.has(value) || /^-newer[a-zA-Z]{2}$/.test(value)) i++;
   }
   return { starts, mode, follow, writes, templateFollows, unknown };
 }
