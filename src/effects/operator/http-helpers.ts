@@ -2,7 +2,29 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { lstatSync, realpathSync } from 'node:fs';
 import { extname, isAbsolute, resolve, sep } from 'node:path';
 import { OPERATOR_DEFAULT_HOST, OPERATOR_DEFAULT_MAX_CONCURRENCY, OPERATOR_DEFAULT_PORT, OPERATOR_DEFAULT_TIMEOUT_MS } from '../../core/review/operator-console-port';
-import { OperatorServerError, OPERATOR_SERVICE_NAME, OPERATOR_STATIC_CONTENT_SECURITY_POLICY, type OperatorErrorResponseV1, type OperatorServerHost } from './server';
+import type { OperatorErrorResponseV1, OperatorServerHost } from './server';
+
+export const OPERATOR_SERVICE_NAME = 'repo-harness-operator' as const;
+
+export class OperatorServerError extends Error {
+  constructor(
+    readonly code: 'invalid_argument' | 'operator_assets_unavailable' | 'operator_server_unavailable',
+    message: string,
+    readonly status_code = 500,
+  ) {
+    super(message);
+    this.name = 'OperatorServerError';
+  }
+}
+
+/**
+ * A Content-Security-Policy governs a document, and the only documents this
+ * server serves are the static ones. JSON responses deliberately carry none:
+ * they are already served `nosniff`, so a browser cannot execute them as a
+ * document, and a policy attached to a non-document would be a header a reader
+ * has to reason about for no boundary it protects.
+ */
+export const OPERATOR_STATIC_CONTENT_SECURITY_POLICY = "default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'none'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'" as const;
 
 export const OPERATOR_DIAGNOSTIC_ACTION = 'Retry. If the error stays, restart `rh operator serve`.';
 

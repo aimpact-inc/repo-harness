@@ -57,8 +57,8 @@ import { readFileSync } from 'node:fs';
 import { reapOrphanedProcessGroups } from '../process-group-registry';
 import { resolve } from 'node:path';
 import { createBoundedTaskReadHandler, OPERATOR_READ_ONLY_GIT_ENVIRONMENT, repositoryWorkerEnvironment } from './supervised-read-process';
-import { architectureStatus, assertCollectionOption, assertLoopbackHost, assertPort, contentType, errorBody, expectedRequestAuthority, fallbackIndex, fileIfSafe, isHtmlNavigation, jsonHeaders, OPERATOR_DIAGNOSTIC_ACTION, sendJson, sendRefusal, staticHeaders } from './http-helpers';
-export { architectureStatus };
+import { architectureStatus, assertCollectionOption, assertLoopbackHost, assertPort, contentType, errorBody, expectedRequestAuthority, fallbackIndex, fileIfSafe, isHtmlNavigation, jsonHeaders, OPERATOR_DIAGNOSTIC_ACTION, OperatorServerError, OPERATOR_SERVICE_NAME, sendJson, sendRefusal, staticHeaders } from './http-helpers';
+export { architectureStatus, OperatorServerError, OPERATOR_SERVICE_NAME, OPERATOR_STATIC_CONTENT_SECURITY_POLICY } from './http-helpers';
 import { createOperatorWriteToken, handleOperatorWrite, operatorWriteTokenCookie, type OperatorWriteRoute } from './write-channel';
 import { AGENTS_CONFIGURATION_FAILURES, OPERATOR_SETTINGS_AGENTS_PATH, OPERATOR_SETTINGS_AGENTS_ROUTE, agentsSettingsWriteRoute, readAgentsSettings } from './agents-settings-route';
 import { OPERATOR_REPORT_LANGUAGE_PATH, OPERATOR_REPORT_LANGUAGE_ROUTE, OPERATOR_DOCUMENTATION_LANGUAGE_ROUTE, requireLanguageSettings, readDocumentationLanguage, reportingLanguageWriteRoute, documentationLanguageWriteRoute, type OperatorLanguageSettingsAdapter } from './language-settings-route';
@@ -69,7 +69,6 @@ import { AgentsConfigurationError } from '../configuration/agents-configuration'
 import type { AgentRuntimesCacheV1 } from '../../core/board/agents-settings';
 
 export const OPERATOR_SERVER_PROTOCOL = 3 as const;
-export const OPERATOR_SERVICE_NAME = 'repo-harness-operator' as const;
 const OPERATOR_REGISTRY_ACTION = 'Run `rh fleet prune` to show the registry error.';
 const OPERATOR_ASSET_ACTION = 'Run `rh update`, restart the server and reload the page.';
 const OPERATOR_ADOPT_ACTION = 'Adopt the repository with `rh init`, then refresh the board.';
@@ -296,26 +295,6 @@ export interface OperatorErrorResponseV1 {
     readonly detail?: DocsRemoteMismatchV1;
   };
 }
-
-export class OperatorServerError extends Error {
-  constructor(
-    readonly code: 'invalid_argument' | 'operator_assets_unavailable' | 'operator_server_unavailable',
-    message: string,
-    readonly status_code = 500,
-  ) {
-    super(message);
-    this.name = 'OperatorServerError';
-  }
-}
-
-/**
- * A Content-Security-Policy governs a document, and the only documents this
- * server serves are the static ones. JSON responses deliberately carry none:
- * they are already served `nosniff`, so a browser cannot execute them as a
- * document, and a policy attached to a non-document would be a header a reader
- * has to reason about for no boundary it protects.
- */
-export const OPERATOR_STATIC_CONTENT_SECURITY_POLICY = "default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'none'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'" as const;
 
 /** The methods a read resource implements; a write route implements POST only. */
 const OPERATOR_ALLOWED_METHODS = 'GET, HEAD' as const;
