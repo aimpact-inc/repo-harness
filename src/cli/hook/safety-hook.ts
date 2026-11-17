@@ -172,7 +172,7 @@ class TargetJudge {
       if (!inRoot(into)) return this.existingDenial(target, into);
       // BSD mv -h renames over a destination link to a directory, so the entry itself must be in a root too. A trailing slash
       // makes the kernel follow that link, so the entry is the directory.
-      let leaf: string | null = /[\\/]$/.test(target.path) ? into : null;
+      let leaf: string | null = TRAILING_SEPARATOR.test(target.path) ? into : null;
       try { leaf ??= leafPath(target.path); } catch { /* the destroy check below decides */ }
       if (leaf !== null && inRoot(leaf)) return null;
     }
@@ -223,6 +223,9 @@ class TargetJudge {
     return outsideDenial(target, path, this.roots, this.userStep);
   }
 }
+
+/** A path separator of this platform at the end; a backslash is a name character on POSIX. */
+const TRAILING_SEPARATOR = sep === '/' ? /\/$/ : /[\\/]$/;
 
 /** The existing directory that the path resolves to through every link, or null. */
 function existingDirectory(path: string): string | null {
@@ -551,16 +554,16 @@ function targetOption(word: Word): Word[] | null {
  * cp and ln, after brace expansion: the last operand is the destination, written into a directory as each source's name.
  * When the hook cannot classify the operands (a target-directory option, fewer than two operands), every operand is a possible
  * write target. mv removes or replaces each of its operands, so every operand, a glued target directory too, is a removal target.
- * Without a target-directory option, the last word of mv is also its destination when it is an operand: BSD mv stops option
- * parsing at the first operand, and a GNU option value after the operands leaves the real destination a plain removal target.
+ * BSD mv stops option parsing at the first operand, so each later word, a dash-prefixed one or `--` too, is an mv operand.
+ * Without a target-directory option, the last mv operand is also its destination; a GNU option or option value at the end
+ * leaves the real destination a plain removal target.
  */
 function destinationTargets(program: string, args: readonly Word[], dirs: Dirs): WriteTarget[] {
   const words = args.flatMap(braceWords);
   const glued = words.map(targetOption);
   if (program === 'mv') {
-    const { operands } = operandsOf(words, new Set());
-    const last = words.at(-1);
-    const destination = glued.every(found => found === null) && operands.length >= 2 && operands.at(-1) === last ? last : undefined;
+    const operands = moveOperands(words);
+    const destination = glued.every(found => found === null) && operands.length >= 2 ? operands.at(-1) : undefined;
     return [...operands, ...glued.flatMap(found => found ?? [])]
       .flatMap(word => targetsOf('destroy', 'mv', word, dirs, word === destination ? { destination: true } : {}));
   }
@@ -572,6 +575,16 @@ function destinationTargets(program: string, args: readonly Word[], dirs: Dirs):
   const sourced = sources.map(word => sourceNames(word));
   const names = sourced.some(list => list === null) ? null : sourced.flatMap(list => list!);
   return targetsOf('overwrite', program, operands.at(-1)!, dirs, { into: { names, follow: program === 'cp' } });
+}
+
+/** The words from the first mv operand on: leading options and a leading `--` are skipped. */
+function moveOperands(words: readonly Word[]): Word[] {
+  for (let i = 0; i < words.length; i++) {
+    const value = words[i]!.value;
+    if (value === '--') return words.slice(i + 1);
+    if (!value.startsWith('-') || value === '-') return words.slice(i);
+  }
+  return [];
 }
 
 /** The names that a copy or move source gives its destination children after brace expansion; null when a glob or a parameter decides one. */

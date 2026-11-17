@@ -122,6 +122,8 @@ describe('safety hook: Bash host route', () => {
       symlinkSync(join(out, 'app.json'), join(cwd, 'app.json'));
       symlinkSync(join(out, 'notes.txt'), join(cwd, 'notes.txt'));
       symlinkSync(cwd, join(out, 'repo-link'));
+      symlinkSync(cwd, join(out, 'work\\'));
+      for (const name of ['-f', '--']) writeFileSync(join(out, name), 'x');
       // The temp and managed worktree roots are fixture directories, so `outside` is outside every allowed root.
       const hook = (route: 'bash' | 'edit', toolInput: Record<string, string>) => spawnSync(process.execPath,
         [HOOK_ENTRY, 'PreToolUse', '--route', route], {
@@ -154,6 +156,10 @@ describe('safety hook: Bash host route', () => {
         // An allowed root as an mv source, an mv destination link that resolves to a directory outside the roots, and an
         // outside mv destination link to the worktree, which BSD mv -h replaces.
         'mv . build', 'mv stage/b.json linked', `mv stage/b.json ${out}/repo-link`,
+        // A backslash is a name character on POSIX, not a trailing separator; BSD mv -h replaces that outside link.
+        `mv -h stage/b.json '${out}/work\\'`,
+        // BSD mv takes each word after the first source as a source: the outside files `-f` and `--` would move into the worktree.
+        `cd ${out} && mv ${cwd}/stage/b.json -f ${cwd}`, `cd ${out} && mv ${cwd}/stage/b.json -- ${cwd}`,
       ]);
       expectGuard('RecursiveDeleteGuard', ['if true; then rm -rf .; fi']);
       expectGuard(null, ['cd src && rm a.txt', 'echo $(rm src/a.txt)', `cp stage/*.json ${out}/empty/`, 'rm notes.txt', 'cp stage/*/notes.txt src/', 'rm -rf build/*', 'cp -r src build/', 'mv -t build stage/b.json',
