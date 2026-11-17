@@ -131,7 +131,7 @@ describe('language settings routes', () => {
     expect(await (await fetch(`${h.server.url}${reportPath}`)).json()).toEqual({ hosts: [
       { host: 'claude', state: 'managed-current', preset: 'en' }, { host: 'codex', state: 'managed-current', preset: 'en' },
     ] });
-    expect(readdirSync(join(h.home, '.repo-harness', 'global-context-backups'))).toHaveLength(2);
+    expect(existsSync(join(h.home, '.repo-harness', 'global-context-backups'))).toBe(false);
     writeFileSync(join(h.home, '.codex', 'AGENTS.md'), '<!-- BEGIN: repo-harness global-working-rules -->');
     const refused = await send(h, reportPath, { preset: 'zh-CN' });
     expect([refused.status, (await refused.json()).error.code]).toEqual([409, 'report_language_refused']);
