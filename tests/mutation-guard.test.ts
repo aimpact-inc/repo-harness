@@ -195,6 +195,9 @@ describe('safety hook: Bash host route', () => {
       symlinkSync(out, join(repo, 'big/out-dir'));
       // A regular directory that a copy can write into, through a child link to an outside file.
       symlinkSync(join(out, 'victim.txt'), join(repo, 'big/zdir/source.txt'));
+      // A recursive copy of stage into big/zdir writes through this deeper link; big/ydir holds no link.
+      for (const dir of ['repo/big/zdir/stage/d', 'repo/big/ydir']) mkdirSync(join(root, dir), { recursive: true });
+      symlinkSync(join(out, 'victim.txt'), join(repo, 'big/zdir/stage/d/notes.txt'));
       writeFileSync(join(repo, 'seq/of=1'), 'x');
       symlinkSync(join(out, 'victim.txt'), join(repo, 'seq/1025'));
       for (const link of ['linked', 'stage/linked', 'w/stage/linked']) symlinkSync(out, join(repo, link));
@@ -305,6 +308,10 @@ describe('safety hook: Bash host route', () => {
         // #3054: the output file of -fprint, -fprint0, -fls and -fprintf is an overwrite target, judged as a redirect target is.
         [refuse, `find build -fprint ${out}/notes.txt`], [refuse, `find build -fprint0 ${out}/notes.txt`], [refuse, `find build -fls ${out}/notes.txt`],
         [refuse, `find build -fprintf ${out}/notes.txt %p`], [null, `find build -fprint ${out}/new-list.txt`],
+        // #3055: each output that a copy writes below a possible destination directory (unplaced, -t, recursive) is judged as the kernel resolves it.
+        [refuse, 'cp source.txt big/[1z]*'], [refuse, 'cp source.txt big/[yz]dir/'], [refuse, 'cp -t big/zdir source.txt'], [refuse, 'cp -t big/zdir/ source.txt'],
+        [refuse, 'cp -R stage big/zdir'], [refuse, 'cp -R stage big/zdir/'], [refuse, 'cp -R stage/ big/zdir/stage'], [refuse, 'cp -rT stage big/zdir/stage'],
+        [refuse, 'cp -R stage/. big/zdir/stage'], [null,'cp -t big/ydir source.txt'], [null, 'cp -R stage big/ydir'],
         // An unknown removal refuses; an unknown overwrite refuses only when its literal directory is outside the roots.
         [refuse, 'rm -rf build/$X'], [refuse, `echo x > ${out}/$X`], [null, 'echo x > "$TARGET"'], [null, 'echo x > build/$X'],
         [null, 'rm -rf build/*'], [null, 'rm -rf build/*/'], [null, 'rm stage/*.json'], [null, 'mv stage/*.json build/'], [null, 'cp stage/*.json build/'],
