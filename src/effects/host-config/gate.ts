@@ -186,6 +186,19 @@ export interface HostConfigGate {
    */
   revertPaths(paths?: readonly string[], options?: HostConfigPathRevertOptions): readonly HostConfigRevertEntry[];
   /**
+   * The user's word that they keep each file in `kept`: its record becomes
+   * `user_managed` with the file's current hash. Every other `user_managed`
+   * record of a path in `scope` goes. `kept` must be inside `scope`.
+   */
+  keepUserPaths(owner: string, scope: readonly string[], kept: readonly string[]): void;
+  /**
+   * One-shot migration: rh's current file at `path` replaced the user file
+   * `backup` before the ledger had path records. The backup goes to the vault
+   * and the record becomes `replaced`. The path must have no record or a
+   * current `created` record of `owner`.
+   */
+  adoptReplacedPath(path: string, owner: string, backup: Buffer): void;
+  /**
    * Undo rh's recorded writes, for the named paths or for all; a path without
    * a record is not touched. With an owner or selector filter, only the
    * matching fragments go, by the per-fragment rule.
@@ -484,6 +497,33 @@ function delegateWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, decl
   if (failure !== null) throw failure;
   if (unowned.length) throw new HostConfigError('host_config_invalid_state', `the delegated writer changed paths that rh does not own, so rh records none of them: ${unowned.join(', ')}`);
   return { changed };
+}
+
+function keepUserPaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, owner: string, scope: readonly string[], kept: readonly string[]): void {
+  const ledger = readLedger(paths);
+  const records = { ...ledger.paths };
+  const inScope = new Map(scope.map((path) => { const admitted = admitWholePath(env, paths, ledger, path); return [admitted.key, admitted.host]; }));
+  for (const key of inScope.keys()) if (records[key]?.kind === 'user_managed') delete records[key];
+  for (const path of kept) {
+    const key = hostPathKey(paths, path);
+    const host = inScope.get(key);
+    if (host === undefined) throw new HostConfigError('host_config_invalid_path', `a kept path must be inside the scope: ${path}`);
+    const committed = observePathEntry(key);
+    if (committed?.type !== 'file') throw new HostConfigError('host_config_invalid_state', `the user keeps only a file: ${path}`);
+    records[key] = { owner, host, kind: 'user_managed', baseline: { state: 'unknown' }, committed };
+  }
+  writeLedger(paths, { ...ledger, paths: records });
+}
+
+function adoptReplacedPath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, path: string, owner: string, backup: Buffer): void {
+  const ledger = readLedger(paths);
+  const { key, host } = admitWholePath(env, paths, ledger, path);
+  const previous = ledger.paths[key];
+  const committed = observePathEntry(key);
+  if (committed?.type !== 'file') throw new HostConfigError('host_config_invalid_state', `only a file can have replaced a user file: ${path}`);
+  if (previous && !(previous.kind === 'created' && ownsEntry(previous, owner, key))) throw refusal(path, previous, owner);
+  const record: PathRecord = { owner, host, kind: 'replaced', baseline: previous?.baseline ?? { state: 'unknown' }, committed, backup: putVault(paths, backup) };
+  writeLedger(paths, { ...ledger, paths: { ...ledger.paths, [key]: record } });
 }
 
 /** The undo of one path record; `write` is false in a dry run. */
@@ -821,6 +861,8 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
     writePaths: (writes, pathOptions) => writeWholePaths(env, paths, writes, pathOptions ?? {}),
     delegate: (declared, run, pathOptions) => delegateWholePaths(env, paths, declared, run, pathOptions ?? {}),
     revertPaths: (only, revertOptions) => revertWholePaths(paths, only, revertOptions ?? {}),
+    keepUserPaths: (owner, scope, kept) => keepUserPaths(env, paths, owner, scope, kept),
+    adoptReplacedPath: (path, owner, backup) => adoptReplacedPath(env, paths, path, owner, backup),
     revert: (only, revertOptions) => revertFiles(paths, only, revertOptions ?? {}),
     adopt: (path, adoption) => adoptFile(paths, path, adoption),
     recorded: (path) => {

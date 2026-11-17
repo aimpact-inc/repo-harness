@@ -427,7 +427,9 @@ function recordCapture(env: NodeJS.ProcessEnv, records: RecordMap, capture: Capt
   const previous = prior[key];
   if (previous?.kind === 'user_managed' || records.get(key)?.kind === 'user_managed') return;
   const baseline: FileBaseline = previous?.baseline ?? (absent.has(capture.path) ? { state: 'known', existed: false } : { state: 'unknown' });
-  records.set(key, { owner: capture.owner, host, kind: 'created', baseline, committed: capture.committed });
+  // A file that replaced a user file keeps its kind and the vault reference of that file.
+  const kind = previous?.kind === 'replaced' ? { kind: 'replaced' as const, backup: previous.backup! } : { kind: 'created' as const };
+  records.set(key, { owner: capture.owner, host, baseline, committed: capture.committed, ...kind });
 }
 
 function ownerSelected(record: PathRecord, plugins: readonly PluginId[]): boolean {
@@ -441,11 +443,12 @@ function selectionRecords(records: RecordMap, plugins: readonly PluginId[]): Rec
 
 /**
  * The current records that a rebuilt set carries: each path still on disk
- * unchanged, each `user_managed` record, and every record of a kept plugin.
+ * unchanged, each `user_managed` record, each `replaced` record (it holds the
+ * vault reference of a user file), and every record of a kept plugin.
  */
 function carriedRecords(prior: PathRecords, kept: readonly PluginId[] = []): RecordMap {
   return new Map(Object.entries(prior).filter(([key, record]) => (
-    record.kind === 'user_managed' || (kept as readonly string[]).includes(record.owner) || pathRecordIsCurrent(key, record)
+    record.kind === 'user_managed' || record.kind === 'replaced' || (kept as readonly string[]).includes(record.owner) || pathRecordIsCurrent(key, record)
   )));
 }
 

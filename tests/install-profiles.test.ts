@@ -1537,7 +1537,8 @@ describe('install selection', () => {
 
     const pristine = join(home, '.codex', 'agents', 'deep-worker.toml');
     applyInstallSelection('all', ALL_PLUGINS, env);
-    expect(ownedPath(env, pristine)).toBeNull();
+    // The fleet records its own writes through the gate.
+    expect(ownedPath(env, pristine)?.kind).toBe('created');
     expect(ownedPath(env, custom)?.kind).toBe('user_managed');
 
     // Update paths record into the existing records without re-applying the selection.
