@@ -121,6 +121,7 @@ const input = readFileSync(0, 'utf8');
 appendFileSync(${JSON.stringify(log)}, operation + '\\n');
 const fail = existsSync(${JSON.stringify(`${state}.fail`)}) ? readFileSync(${JSON.stringify(`${state}.fail`)}, 'utf8') : null;
 if (fail === 'exit') { process.stderr.write(process.argv.join(' ') + '\\n' + input + '\\n' + Buffer.from(input, 'base64').toString('utf8') + '\\n'); process.exit(1); }
+if (fail === 'write' && operation === 'write') process.exit(1);
 if (fail === 'timeout') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60_000);
 if (marker !== 'rh-user-path') process.exit(3);
 const value = existsSync(${JSON.stringify(state)}) ? JSON.parse(readFileSync(${JSON.stringify(state)}, 'utf8')) : { existed: false, kind: 'ExpandString', raw: '' };
