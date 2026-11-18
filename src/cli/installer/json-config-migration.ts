@@ -210,7 +210,8 @@ export function planJsonConfigMigration(env: NodeJS.ProcessEnv, only?: readonly 
   const paths = jsonPaths(home, only);
   const receipt = receiptFragments(readRawConfigurationReceipt(home), paths.all, configurationReceiptPath(home));
   const manifest = readLegacyManifest(env);
-  const gate = openHostConfigGate({ env });
+  // A planner writes nothing, so a dry run before the ledger schema move can use it.
+  const gate = openHostConfigGate({ env, preview: true });
   const files: JsonConfigMigration['files'][number][] = [];
   for (const path of paths.all) {
     if (gate.recorded(path).length) continue;

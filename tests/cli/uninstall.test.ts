@@ -242,7 +242,7 @@ test('removes profile-owned rules, restores a file that rh replaced, and retires
  openHostConfigGate({env}).writePaths([{path:agent,owner:'core',entry:{type:'file',bytes:Buffer.from('rh')},replace:true}]);
  const result=runUserUninstall({target:'both',env});
  expect(result.status).toBe('complete');expect(existsSync(path)).toBe(false);
- expect({action:result.items.find((item)=>item.path===agent)?.action,agent:readFileSync(agent,'utf8'),paths:ledger(home).paths}).toEqual({action:'restore',agent:'mine',paths:{}});
+ expect({action:result.items.find((item)=>item.path===agent)?.action,agent:readFileSync(agent,'utf8'),paths:ledger(home).paths}).toEqual({action:'restored',agent:'mine',paths:{}});
  expect(readFileSync(join(home,'.codex/rules/user.md'),'utf8')).toBe('user');expect(existsSync(join(home,'.repo-harness/install-state.json'))).toBe(false);
 }));
 test('modified profile-owned rule remains retryable with ownership retained',()=>fixture((home,env)=>{
@@ -278,7 +278,7 @@ test('an uninstall keeps a personal file and a foreign skill that a path record 
 test('a dry run on a protocol 3 install plans the migrated records and writes nothing',()=>fixture((home,env)=>{
  const rule=join(home,'.codex/rules/anti-patterns.md');put(home,'.codex/rules/anti-patterns.md','owned');
  recordLegacyInstallOwnership([rule],env);const before=tree(home);
- expect(runUserUninstall({target:'both',dryRun:true,env}).lines).toContain(`[remove] ${pathRecordKey(env,rule)}: unchanged transaction-owned surface`);
+ expect(runUserUninstall({target:'both',dryRun:true,env}).lines).toContain(`[reverted] ${pathRecordKey(env,rule)}: unchanged transaction-owned surface`);
  expect(tree(home)).toBe(before);
 }));
 test('staging skill removal edits the provider lock under an XDG_STATE_HOME outside HOME, after a failed cleanup',()=>fixture((home,env)=>{
