@@ -810,8 +810,9 @@ test.each([
   if (after === 'edit') writeFileSync(join(dir, 'tool'), 'user edit\n');
   expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
   const tools = existsSync(join(f.root, 'ledger.json')) ? f.ledger().tools : {};
+  const stat = record ? lstatSync(join(dir, 'tool'), { bigint: true }) : null;
   expect(tools).toEqual(record ? { 'herdr-core': { installed_by: 'rh-install', removable: true, version: '1.0.0', directories: [join(f.home, '.local'), dir],
-    paths: { [join(dir, 'tool')]: { committed: { type: 'file', sha256: sha256Prefixed(Buffer.from('rh\n')) } } } } } : {});
+    paths: { [join(dir, 'tool')]: { committed: { type: 'file', sha256: sha256Prefixed(Buffer.from('rh\n')) }, identity: `${stat!.dev}:${stat!.ino}:${stat!.birthtimeNs}` } } } } : {});
 });
 
 // Ownership probe P4: a claim released on observation (its target was absent) stays released through a rollback.

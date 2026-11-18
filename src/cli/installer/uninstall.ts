@@ -451,9 +451,11 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
         throw new Error(`configuration changed after preview: ${hostConfigPaths(env).ledger}`);
       }
       if (tools.removal.length) {
-        // A failed removal replaces the planned `removed` item of its entry.
+        // A failed removal replaces the planned `removed` item of its entry; a created directory has no planned item.
         for (const failure of removeTools(env, userPathPort(env, hostConfigPaths(env).harness), tools.removal)) {
-          items[items.findIndex((item) => item.path === failure.path && item.reason.startsWith(`${failure.tool}: `))] = { path: failure.path, action: 'unresolved', reason: `${failure.tool}: ${failure.reason}` };
+          const item: UninstallItem = { path: failure.path, action: 'unresolved', reason: `${failure.tool}: ${failure.reason}` };
+          const index = items.findIndex((planned) => planned.path === failure.path && planned.reason.startsWith(`${failure.tool}: `));
+          if (index === -1) items.push(item); else items[index] = item;
         }
       }
       for (const path of [...originals.keys()]) {

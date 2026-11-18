@@ -11,7 +11,7 @@ import { CLAUDE_ROOT_CONFIG_BACKUP, CODEGRAPH_MCP_SELECTOR } from '../../src/cor
 import type { PathCommitted } from '../../src/core/host-config/types';
 import { pathRecordHost, pathRecordKey } from '../../src/effects/host-config/path-records';
 import { hashManagedTree } from '../../src/effects/managed-tree';
-import { appendFileSync, chmodSync, cpSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync, statSync } from 'fs';
+import { appendFileSync, chmodSync, copyFileSync, cpSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, relative } from 'path';
 import { spawnSync } from 'child_process';
@@ -624,7 +624,7 @@ test.each([
 // `registry write fails` (the entry stays with no claim, so a later run keeps it). `preexisting`: an hc on PATH before install gets no record.
 test.each([
  {platform:'unix',change:'none'},{platform:'windows',change:'none'},{platform:'windows',change:'created value'},{platform:'unix',change:'dry run'},{platform:'unix',change:'bun absent'},
- {platform:'unix',change:'edited'},{platform:'windows',change:'edited'},{platform:'windows',change:'kind'},{platform:'unix',change:'absent'},
+ {platform:'unix',change:'edited'},{platform:'windows',change:'edited'},{platform:'windows',change:'kind'},{platform:'windows',change:'replaced link'},{platform:'windows',change:'stopped'},{platform:'unix',change:'absent'},
  {platform:'unix',change:'preexisting'},{platform:'unix',change:'ledger write fails'},{platform:'unix',change:'unlink fails'},{platform:'windows',change:'registry write fails'},
 ])('rh uninstall --with-tools removes the herdr-core entries and the PATH entry that still hold what rh wrote ($platform, $change)',async({platform,change})=>{
  const root=realpathSync(mkdtempSync(join(tmpdir(),'user-uninstall-with-tools-'))),home=join(root,'home'),windows=platform==='windows';
@@ -667,13 +667,39 @@ test.each([
   if(change==='edited'&&!windows){appendFileSync(join(dir,'herdr-core'),'# user patch\n');writeFileSync(join(dir,'other-tool'),'user\n');}
   if(change==='edited'&&windows)writeFileSync(registry,JSON.stringify({...userPath,raw:`${userPath.raw};${dir.toUpperCase()}`}));
   if(change==='kind')writeFileSync(registry,JSON.stringify({...JSON.parse(installedRegistry!),kind:'String'}));
+  if(change==='stopped'){
+   // GK-3235-2: the ledger as a stop at the registry write leaves it (after the entries went, before the directory removal) holds no
+   // directory claim, so a retry leaves the directory that the user created again, empty.
+   writeFileSync(`${registry}.fail`,`stop:${join(config,'ledger.json')}`);
+   withTools();
+   rmSync(`${registry}.fail`);
+   writeFileSync(join(config,'ledger.json'),readFileSync(`${registry}.at-stop`));
+   mkdirSync(dir,{recursive:true});
+   expect(ledger(home).tools).toEqual({});
+   const retry=withTools();
+   expect([retry.exitCode,toolItems(retry),existsSync(dir)]).toEqual([0,[],true]);
+   return;
+  }
+  if(change==='replaced link'){
+   // GK-3235-1: the user replaces the hc.exe hard link with a copy of the same binary between two runs; the copy is not rh's.
+   rmSync(join(dir,'hc.exe'));copyFileSync(join(dir,'herdr-core.exe'),join(dir,'hc.exe'));
+   const result=withTools();
+   expect([result.exitCode,toolItems(result),readdirSync(dir),Object.keys(ledger(home).tools['herdr-core'].paths)])
+    .toEqual([1,[[join(dir,'herdr-core.exe'),'restored'],[join(dir,'conpty'),'restored'],[join(dir,'hc.exe'),'unresolved'],[label,'reverted']],['hc.exe'],[join(dir,'hc.exe')]]);
+   return;
+  }
   if(change==='edited'||change==='kind'){
    const registryBefore=readFileSync(registry,'utf8');
    const result=withTools();
    const record=ledger(home).tools['herdr-core'];
    if(windows){
-    expect([result.exitCode,toolItems(result),existsSync(dir),readFileSync(registry,'utf8'),Object.keys(record.paths),record.path_entry.entry])
-     .toEqual([1,[...removedAll.slice(0,-1),[label,'unresolved']],false,registryBefore,[],dir]);
+    expect([result.exitCode,toolItems(result),existsSync(dir),readFileSync(registry,'utf8'),Object.keys(record.paths),record.path_entry.entry,record.directories])
+     .toEqual([1,[...removedAll.slice(0,-1),[label,'unresolved']],false,registryBefore,[],dir,[]]);
+    // GK-3235-2: the directory claims went in the one ledger write, so the kept PATH entry brings no later run back to a directory that
+    // the user created again, empty.
+    mkdirSync(dir,{recursive:true});
+    const retry=withTools();
+    expect([retry.exitCode,toolItems(retry),existsSync(dir)]).toEqual([1,[[label,'unresolved']],true]);
    }else{
     expect([result.exitCode,toolItems(result),readdirSync(dir).sort(),Object.keys(record.paths)])
      .toEqual([1,[[join(dir,'herdr-core'),'unresolved'],[join(dir,'hc'),'restored']],['herdr-core','other-tool'],[join(dir,'herdr-core')]]);

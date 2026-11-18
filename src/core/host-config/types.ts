@@ -197,8 +197,14 @@ export interface ToolRecord {
   /** `rh-install`: `rh install` or `rh update`; `rh-bootstrap`: install.sh or install.ps1. */
   readonly installed_by: 'rh-install' | 'rh-bootstrap';
   readonly version: string;
-  /** Keyed by `hostPathKey`. */
-  readonly paths: Readonly<Record<string, { readonly committed: PathCommitted }>>;
+  /**
+   * Keyed by `hostPathKey`. `identity` (`observeEntryIdentity` when the run
+   * wrote the entry) ties the claim to that file-system object: an identical
+   * copy that replaced it, such as a copy in place of the Windows `hc.exe`
+   * hard link, is another object and is not rh's. A record with no identity
+   * (the Bun bootstrap) grants no removal.
+   */
+  readonly paths: Readonly<Record<string, { readonly committed: PathCommitted; readonly identity?: string }>>;
   /** Directories that the run created, for a removal innermost first. */
   readonly directories: readonly string[];
   readonly path_entry?: UserPathEntryRecord;

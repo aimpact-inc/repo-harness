@@ -376,11 +376,13 @@ test.each(HC_STEP_ROWS.map(row => [row.label, row] as const))("herdr-core instal
     const appended = row.userPathCalls?.includes("write") && row.status === "ok";
     const committed = (path: string) => { const stat = lstatSync(path); return stat.isSymbolicLink() ? { type: "symlink", target: readlinkSync(path) }
       : stat.isDirectory() ? { type: "directory", sha256: hashManagedTree(path) } : { type: "file", sha256: sha256Prefixed(readFileSync(path)) }; };
+    // The identity of the object that the step wrote: the Windows hc.exe hard link shares the one of herdr-core.exe.
+    const entry = (path: string) => { const stat = lstatSync(path, { bigint: true }); return { committed: committed(path), identity: `${stat.dev}:${stat.ino}:${stat.birthtimeNs}` }; };
     if (row.recorded === "edited") expect(tool).toEqual(recordedBefore);
-    else if (row.recorded) expect(tool).toEqual({ installed_by: "rh-install", removable: true, version: HC_MIN_VERSION, paths: { [join(fakeBin, "hc")]: { committed: committed(join(fakeBin, "hc")) } }, directories: [] });
+    else if (row.recorded) expect(tool).toEqual({ installed_by: "rh-install", removable: true, version: HC_MIN_VERSION, paths: { [join(fakeBin, "hc")]: entry(join(fakeBin, "hc")) }, directories: [] });
     else if (!row.installed) expect(tool).toBeNull();
     else expect(tool).toEqual({ installed_by: "rh-install", removable: true, version: HC_MIN_VERSION,
-      paths: Object.fromEntries(names.map(name => [join(installDir, name), { committed: committed(join(installDir, name)) }])), directories: [],
+      paths: Object.fromEntries(names.map(name => [join(installDir, name), entry(join(installDir, name))])), directories: [],
       ...(appended ? { path_entry: { entry: installDir, inserted: installDir, kind: "ExpandString", value_existed: false } } : {}) });
     if (appended) expect(JSON.parse(readFileSync(registry, "utf8"))).toEqual({ existed: true, kind: "ExpandString", raw: installDir });
     if (row.userPath !== undefined) expect(JSON.parse(readFileSync(registry, "utf8")).raw).toBe(row.userPath.replace("<dir>", installDir));
