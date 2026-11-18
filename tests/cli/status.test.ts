@@ -6,7 +6,7 @@ import * as os from 'os';
 import { execSync } from 'child_process';
 import { runStatus, formatStatus } from '../../src/cli/commands/status';
 import { runInstall } from '../../src/cli/commands/install';
-import { registerArchitecturePlugin } from '../../src/cli/index';
+import { registerArchitecturePlugin } from '../../src/cli/runtime-transaction';
 import { versions } from '../../src/cli/installer/install-profile';
 import type { PluginId } from '../../src/core/skill-surface/plugin-manifest';
 

@@ -20,6 +20,8 @@ extensions:
 source:
   include:
     - "src/cli/index.ts"
+    - "src/cli/runtime-transaction.ts"
+    - "src/cli/candidate-runtime-reconciliation.ts"
     - "src/cli/commands/mcp.ts"
     - "src/cli/commands/operator.ts"
     - "src/cli/commands/herdr.ts"
@@ -30,7 +32,7 @@ source:
     - "scripts/check-cli-manifest.ts"
   entrypoints:
     - id: entrypoint.global-runtime-reconciliation.cli-root
-      path: "src/cli/index.ts"
+      path: "src/cli/candidate-runtime-reconciliation.ts"
       symbols:
         - name: "runCandidateRuntimeReconciliation"
           sinks:

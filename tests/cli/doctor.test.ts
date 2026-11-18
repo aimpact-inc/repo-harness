@@ -1,4 +1,5 @@
-import { CLI_PORTS, registerArchitecturePlugin } from '../../src/cli/index';
+import { CLI_PORTS } from '../../src/cli/index';
+import { registerArchitecturePlugin } from '../../src/cli/runtime-transaction';
 import { ownerForInstallPath, versions } from '../../src/cli/installer/install-profile';
 import { installSelectionCommand, type PluginId } from '../../src/core/skill-surface/plugin-manifest';
 import { hashManagedTree } from '../../src/effects/managed-tree';
