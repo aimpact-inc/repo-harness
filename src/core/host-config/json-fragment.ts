@@ -327,11 +327,16 @@ export interface HookCommandPosition {
   readonly command: string;
 }
 
+/** The fields that rh wrote in a hook entry: `{ matcher?, hooks }`. */
+const HOOK_ENTRY_FIELDS = new Set(['matcher', 'hooks']);
+
 /**
  * Takes one command out of a hook entry with its separator. The hook entry,
  * the event array and the `hooks` object go too when this removal empties
- * them; a container that was empty before is not touched. The position must
- * hold the command, because each removal moves the positions after it.
+ * them and the hook entry holds no field that rh did not write; a container
+ * that was empty before is not touched. The position must hold the command,
+ * because each removal moves the positions after it. A command object that
+ * sets `command` twice fails closed: `JSON.parse` reads only the last one.
  */
 export function removeJsonHookCommand(content: string, position: HookCommandPosition): FragmentEdit {
   const { event, block, index, command } = position;
@@ -342,13 +347,17 @@ export function removeJsonHookCommand(content: string, position: HookCommandPosi
   const entry = blocks?.value.type === 'array' ? blocks.value.elements[block] : undefined;
   const commands = entry && memberNode(entry, 'hooks');
   const target = commands?.value.type === 'array' ? commands.value.elements[index] : undefined;
-  if (!target || (JSON.parse(content.slice(target.start, target.end)) as { command?: unknown } | null)?.command !== command) throw missing();
+  const held = target && memberNode(target, 'command');
+  if (!held || JSON.parse(content.slice(held.value.start, held.value.end)) !== command) throw missing();
+  const ownedEntry = (entry as Extract<JsonNode, { type: 'object' }>).members.every(({ key }) => HOOK_ENTRY_FIELDS.has(key));
   // Innermost first: the first container that keeps another item takes the removal.
   const levels: [Container, number][] = [
     [commands!.value as Container, index],
-    [blocks!.value as Container, block],
-    [hooks!.value as Container, (hooks!.value as Extract<JsonNode, { type: 'object' }>).members.indexOf(blocks!)],
-    [document!, document!.members.indexOf(hooks!)],
+    ...(ownedEntry ? [
+      [blocks!.value as Container, block],
+      [hooks!.value as Container, (hooks!.value as Extract<JsonNode, { type: 'object' }>).members.indexOf(blocks!)],
+      [document!, document!.members.indexOf(hooks!)],
+    ] as [Container, number][] : []),
   ];
   const [container, at] = levels.find(([candidate]) => items(candidate).length > 1) ?? levels.at(-1)!;
   return removeItem(content, container, at);

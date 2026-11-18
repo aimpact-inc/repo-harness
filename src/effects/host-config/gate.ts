@@ -213,16 +213,18 @@ export interface HostConfigGate {
    * gets the content after the removals before it and must return a pure
    * deletion of text in it. The file before goes to the vault as the record's
    * `external_backup`, and no fragment record is added: a revert never puts
-   * the removed text back. False when the removals change nothing.
+   * the removed text back. The hash of the written file, or null when the
+   * removals change nothing.
    */
-  removeUnrecordedText(path: string, expectedSha256: Sha256, removals: readonly ((content: string) => FragmentEdit)[]): boolean;
+  removeUnrecordedText(path: string, expectedSha256: Sha256, removals: readonly ((content: string) => FragmentEdit)[]): Sha256 | null;
   /** The fragment records of one path, its links followed. */
   recorded(path: string): readonly FragmentRecord[];
 }
 
 const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
-function decode(bytes: Buffer | null, path: string): string {
+/** The one strict UTF-8 reading of a host file: a planner that edits its text reads it the same way. */
+export function decode(bytes: Buffer | null, path: string): string {
   try { return bytes === null ? '' : UTF8.decode(bytes); }
   catch { throw new HostConfigError('host_config_invalid_state', `not UTF-8 text: ${path}`); }
 }
@@ -785,7 +787,7 @@ function adoptFile(paths: HostConfigPaths, target: string, adoption: HostConfigA
  * may still hold the removed text, so it is marked `external_change` and a
  * revert takes out rh's fragments one by one instead of restoring that backup.
  */
-function removeUnrecordedText(paths: HostConfigPaths, target: string, expectedSha256: Sha256, removals: readonly ((content: string) => FragmentEdit)[]): boolean {
+function removeUnrecordedText(paths: HostConfigPaths, target: string, expectedSha256: Sha256, removals: readonly ((content: string) => FragmentEdit)[]): Sha256 | null {
   const [path] = admitPaths(paths, [target]) as [HostPath];
   const ledger = readLedger(paths);
   refuseRecordedPaths(ledger, [path]);
@@ -803,7 +805,7 @@ function removeUnrecordedText(paths: HostConfigPaths, target: string, expectedSh
     }
     result = result.slice(0, edit.at) + result.slice(edit.at + edit.removed.length);
   }
-  if (result === content) return false;
+  if (result === content) return null;
   const written = Buffer.from(result, 'utf8');
   const committed: FileCommitted = { type: 'file', sha256: sha256Prefixed(written) };
   const external_backup = putVault(paths, bytes!);
@@ -817,7 +819,7 @@ function removeUnrecordedText(paths: HostConfigPaths, target: string, expectedSh
     writeLedger(paths, ledger);
     throw error;
   }
-  return true;
+  return committed.sha256;
 }
 
 /** The entries that a transaction rollback could not prove, as `<path>: <selector>`. */

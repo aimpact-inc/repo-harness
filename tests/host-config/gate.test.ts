@@ -370,7 +370,7 @@ test('a removal of unrecorded text checks the hash and each step, keeps the file
   expect({ file: readFileSync(path, 'utf8'), ledger: existsSync(join(f.root, 'ledger.json')) }).toEqual({ file: before, ledger: false });
 
   // No record: the file is released by a revert, with no fragment record.
-  expect(f.gate().removeUnrecordedText(path, sha(before), remove)).toBe(true);
+  expect(f.gate().removeUnrecordedText(path, sha(before), remove)).toBe(sha(after));
   expect(readFileSync(path, 'utf8')).toBe(after);
   expect(f.ledger()).toMatchObject({ fragments: [], files: { [path]: { kind: 'text_block', baseline: { state: 'unknown' }, committed: { type: 'file', sha256: sha(after) }, backup: null, external_backup: sha(before), external_change: false } } });
   expect(f.vault(sha(before))).toBe(before);
@@ -382,7 +382,7 @@ test('a removal of unrecorded text checks the hash and each step, keeps the file
   f.gate().apply([{ path: recorded, fragments: [{ owner: 'o1', selector: 'statusLine', kind: 'add', strategy: jsonFragment, value: 'rh' }] }]);
   const added = readFileSync(recorded, 'utf8');
   expect(f.vault(f.ledger().files[recorded].backup)).toBe(before);
-  expect(f.gate().removeUnrecordedText(recorded, sha(added), remove)).toBe(true);
+  expect(f.gate().removeUnrecordedText(recorded, sha(added), remove)).toBe(sha(added.replace(legacy, '')));
   expect(f.ledger().files[recorded]).toMatchObject({ external_backup: sha(added), external_change: true, committed: { type: 'file', sha256: sha(added.replace(legacy, '')) } });
   expect(f.gate().revert([recorded]).map((entry) => entry.action)).toEqual(['text_removed']);
   expect(readFileSync(recorded, 'utf8')).toBe(after);

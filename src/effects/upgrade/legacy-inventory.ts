@@ -8,6 +8,7 @@ import { hashManagedTree, installedCopyTreeOptions, OWNER_MARKER } from '../mana
 import { isRepoHarnessLegacyTypedHookCommand, isRepoHarnessManagedHookCommand, retiredHookCommands } from '../../core/adoption/managed-hook-config';
 import { removeJsonHookCommand, type HookCommandPosition } from '../../core/host-config/json-fragment';
 import { HostConfigError } from '../../core/host-config/types';
+import { decode as decodeHostFile } from '../host-config/gate';
 import { isRepoHarnessSourceCheckout } from '../source-checkout';
 import { loadWorkflowContractAsset } from '../../core/adoption/workflow-contract-asset';
 import { CLI_NAME, namesRetiredCli, RETIRED_CLI_NAME } from '../../core/skill-surface/cli-name';
@@ -271,20 +272,32 @@ export function removeLegacyHookCommands(content: string, removals: readonly Hoo
 }
 
 /**
- * The legacy hook commands of a hook file's text, which the planner reports
- * and apply removes. Null when the file is not hook settings that the text
- * edits can change; the planner then reports the file and keeps its bytes.
+ * The text of a hook file and its legacy hook commands, which the planner
+ * reports and apply removes. The bytes are read as the gate reads them.
+ * Null when the file is not UTF-8 hook settings that the text edits can
+ * change; the planner then reports the file and keeps its bytes.
  */
-export function hookFileRemovals(content: string, options: HookLocationOptions): HookCommandPosition[] | null {
-  let value: unknown;
-  try { value = JSON.parse(content); } catch { return null; }
-  if (!isRecord(value) || (value.hooks !== undefined && !isRecord(value.hooks))) return null;
-  const removals = legacyHookRemovals(value, options);
-  try { removeLegacyHookCommands(content, removals); } catch (error) {
-    if (error instanceof HostConfigError) return null;
+export function hookFileRemovals(bytes: Buffer, path: string, options: HookLocationOptions): { content: string; removals: HookCommandPosition[] } | null {
+  try {
+    const content = decodeHostFile(bytes, path);
+    const value = JSON.parse(content) as unknown;
+    if (!isRecord(value) || (value.hooks !== undefined && !isRecord(value.hooks))) return null;
+    const removals = legacyHookRemovals(value, options);
+    removeLegacyHookCommands(content, removals);
+    return { content, removals };
+  } catch (error) {
+    if (error instanceof HostConfigError || error instanceof SyntaxError) return null;
     throw error;
   }
-  return removals;
+}
+
+/** The bytes of a hook file, or null when the path is not a regular file that rh can read. */
+function readHookFile(path: string): Buffer | null {
+  if (!stat(path)?.isFile()) return null;
+  try { return readFileSync(path); } catch (error) {
+    if (['EACCES', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')) return null;
+    throw error;
+  }
 }
 
 /** The adoption plan's rewrite of a repository hook file; it drops every empty hook entry and event. */
@@ -690,8 +703,9 @@ export function planLegacyLeftovers(options: LegacyInventoryOptions): { items: L
   const hookRetirement = `${hookAction?.retiredBy ?? ''} ${hookAction?.id ?? 'retired-host-hook-templates'}`.trim();
   const items = new Map<string, LeftoverItem>();
   const projectEnabled = options.scope !== 'global' && !isRepoHarnessSourceCheckout(options.cwd);
-  const add = (item: LeftoverItem): void => {
-    const key = `${item.location}:${item.path}:${item.surface}:${item.hookEvent ?? ''}:${item.hookCommand ?? ''}`;
+  // A hook command's position is part of its key: two equal commands are two removals.
+  const add = (item: LeftoverItem, position = ''): void => {
+    const key = `${item.location}:${item.path}:${item.surface}:${item.hookEvent ?? ''}:${item.hookCommand ?? ''}:${position}`;
     const old = items.get(key);
     if (!old || item.retiredBy === 'current-package-skill' || (old.action === 'report' && item.action !== 'report')) items.set(key, item);
   };
@@ -732,13 +746,16 @@ export function planLegacyLeftovers(options: LegacyInventoryOptions): { items: L
         continue;
       }
       if (!stat(path)) continue;
-      const bytes = readFileSync(path);
-      const removals = hookFileRemovals(bytes.toString('utf8'), hookLocation(location, options));
-      if (removals === null) {
+      const bytes = readHookFile(path);
+      const hookFile = bytes && hookFileRemovals(bytes, path, hookLocation(location, options));
+      if (!hookFile) {
         add({ location, surface: 'hook-entry', path, retiredBy: hookRetirement, ownership: 'unowned', proof: null, action: 'report', reason: 'Invalid hook settings; preserve current bytes.' });
         continue;
       }
-      for (const entry of removals) add({ location, surface: 'hook-entry', path, retiredBy: hookRetirement, ownership: 'owned-clean', proof: 'managed-hook', action: 'strip-entry', expectedContentHash: sha256Prefixed(bytes), hookEvent: entry.event, hookCommand: entry.command });
+      for (const entry of hookFile.removals) {
+        add({ location, surface: 'hook-entry', path, retiredBy: hookRetirement, ownership: 'owned-clean', proof: 'managed-hook', action: 'strip-entry',
+          expectedContentHash: sha256Prefixed(bytes!), hookEvent: entry.event, hookCommand: entry.command }, `${entry.block}:${entry.index}`);
+      }
     }
   }
   if (options.scope !== 'project') {

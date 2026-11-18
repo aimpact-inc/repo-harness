@@ -49,9 +49,9 @@ import {
 import { ownedPath, pathRecordIsCurrent, pathRecordKey, readPathRecords } from '../../effects/host-config/path-records';
 import { stageInstalledSkillCopy } from '../installer/skill-sync';
 import { openHostConfigGate } from '../../effects/host-config/gate';
-import { hostConfigPaths } from '../../effects/host-config/store';
+import { hostConfigPaths, replaceTarget, resolveHostPath } from '../../effects/host-config/store';
 import type { OwnedPathLookup } from '../../effects/upgrade/legacy-inventory';
-import { HostConfigError } from '../../core/host-config/types';
+import { HostConfigError, type Sha256 } from '../../core/host-config/types';
 import {
   installProfileStatePath,
 } from '../installer/install-state';
@@ -295,15 +295,18 @@ function applyLocked(
   const globalPaths = [...new Set(candidates.filter((item) => item.location === 'global').map((item) => item.path))];
   const projectPaths = [...new Set(candidates.filter((item) => item.location === 'project').map((item) => item.path))];
   const gateRefreshPaths = new Set(candidates.filter(item => item.location === 'global' && item.action === 'refresh').map(item => item.path));
+  const globalHookEdits = candidates.some(item => item.location === 'global' && item.surface === 'hook-entry');
   const earlierRecords = options.installOwnership();
   const statePath = installProfileStatePath(env);
-  // The gate writes path records during each refresh.
+  // The gate writes path records during each refresh and a file record for each hook edit.
   const ledgerPath = hostConfigPaths(env).ledger;
   const stateBefore = legacyPathSnapshot(statePath)?.contentHash ?? null;
   let hostBackup: InstallHostTransaction | undefined;
-  let refreshTransaction: InstallHostTransaction | undefined;
+  let gateTransaction: InstallHostTransaction | undefined;
   let projectBackup: ProjectBackup | undefined;
   const mutatedPaths = new Set<string>();
+  // The hash that the gate wrote to each hook file: a rollback restores the file only while it still holds it.
+  const gateEdits = new Map<string, Sha256>();
   const rolledBackPaths: string[] = [];
   const auditPath = join(options.home, '.repo-harness', 'upgrade-cleanup.log.jsonl');
   let error: string | undefined;
@@ -326,7 +329,7 @@ function applyLocked(
     }
     if (!isLegacyPathSafe(options.home, auditPath, false)) throw new Error(`unsafe audit path: ${auditPath}`);
     const hostPaths = globalPaths.filter(path => !gateRefreshPaths.has(path));
-    if (gateRefreshPaths.size) refreshTransaction = beginInstallHostTransaction([statePath, ledgerPath], env, { runtimeLock });
+    if (gateRefreshPaths.size || globalHookEdits) gateTransaction = beginInstallHostTransaction([statePath, ledgerPath], env, { runtimeLock });
     if (hostPaths.length > 0) hostBackup = beginLegacyCleanupBackup(hostPaths, env, runtimeLock);
     projectBackup = backupProject(options.cwd, projectPaths, transactionId);
     if (projectBackup) writeProjectManifest(options.cwd, projectBackup);
@@ -363,13 +366,12 @@ function applyLocked(
       // A global hook file is a gate file: the gate removes the legacy commands and records the file.
       let gateRemovals: readonly HookCommandPosition[] | undefined;
       if (targetItems[0]!.surface === 'hook-entry') {
-        const content = readFileSync(path, 'utf-8');
         const location = targetItems[0]!.location;
-        const removals = hookFileRemovals(content, hookLocation(location, options));
-        if (removals === null) throw new Error(`hook settings can no longer be edited: ${path}`);
-        if (removals.length === 0) continue;
-        if (location === 'global') gateRemovals = removals;
-        else nextContent = removeLegacyHookCommands(content, removals);
+        const hookFile = hookFileRemovals(readFileSync(path), path, hookLocation(location, options));
+        if (hookFile === null) throw new Error(`hook settings can no longer be edited: ${path}`);
+        if (hookFile.removals.length === 0) continue;
+        if (location === 'global') gateRemovals = hookFile.removals;
+        else nextContent = removeLegacyHookCommands(hookFile.content, hookFile.removals);
       }
       // Check the full target snapshot immediately before the destructive write.
       if (!targetItems.every((item) => unchanged(item, options))
@@ -382,16 +384,19 @@ function applyLocked(
       }
       if (directoryRefresh) {
         if (!targetItems[0]!.sourceSurface
-          || !refreshDirectory(targetItems[0]!, options, env, () => { mutatedPaths.add(path); mutatedPaths.add(ledgerPath); }, dependencies, refreshTransaction!.backup_root)) {
+          || !refreshDirectory(targetItems[0]!, options, env, () => { mutatedPaths.add(path); mutatedPaths.add(ledgerPath); }, dependencies, gateTransaction!.backup_root)) {
           keptPaths.push(path);
           for (const item of targetItems) items[items.indexOf(item)] = { ...item, action: 'report', reason: 'Source or target changed during staging.' };
           continue;
         }
       } else if (gateRemovals) {
+        // A refused gate write leaves the file as it is, so only a written file joins the rollback.
+        const written = openHostConfigGate({ env }).removeUnrecordedText(path, targetItems[0]!.expectedContentHash!,
+          gateRemovals.map((position) => (content: string) => removeJsonHookCommand(content, position)));
+        if (written === null) continue;
+        gateEdits.set(path, written);
         mutatedPaths.add(path);
         mutatedPaths.add(ledgerPath);
-        openHostConfigGate({ env }).removeUnrecordedText(path, targetItems[0]!.expectedContentHash!,
-          gateRemovals.map((position) => (content: string) => removeJsonHookCommand(content, position)));
       } else {
         mutatedPaths.add(path);
         if (nextContent === undefined) rmSync(path, { recursive: true });
@@ -414,14 +419,14 @@ function applyLocked(
       refreshInstallStateVersions(env);
     }
     audit();
-    if (refreshTransaction) commitInstallHostTransaction(refreshTransaction);
+    if (gateTransaction) commitInstallHostTransaction(gateTransaction);
   } catch (failure) {
     error = failure instanceof Error ? failure.message : String(failure);
-    if (refreshTransaction) {
+    if (gateTransaction) {
       try {
         // A state changed by another writer stays when this refresh never wrote it.
-        rollbackInstallHostTransaction({ ...refreshTransaction,
-          snapshots: refreshTransaction.snapshots.filter(snapshot => snapshot.path !== statePath || mutatedPaths.has(statePath)) }, { runtimeLock });
+        rollbackInstallHostTransaction({ ...gateTransaction,
+          snapshots: gateTransaction.snapshots.filter(snapshot => snapshot.path !== statePath || mutatedPaths.has(statePath)) }, { runtimeLock });
       } catch (rollbackError) { error += '; ' + String((rollbackError as Error).message ?? rollbackError); }
       try {
         const restored = readPathRecords(env);
@@ -444,7 +449,9 @@ function applyLocked(
             || !snapshot.backup_path || !isLegacyPathSafe(backup.backup_root, snapshot.backup_path)) {
             throw new Error(`unsafe rollback target or backup: ${snapshot.path}`);
           }
-          rollbackLegacyCleanupBackup({ ...backup, snapshots: [snapshot] }, runtimeLock);
+          const written = gateEdits.get(snapshot.path);
+          if (written) replaceTarget(resolveHostPath(hostConfigPaths(env), snapshot.path), readFileSync(snapshot.backup_path), { existed: true, sha256: written });
+          else rollbackLegacyCleanupBackup({ ...backup, snapshots: [snapshot] }, runtimeLock);
           rolledBackPaths.push(snapshot.path);
           const removedIndex = removedPaths.indexOf(snapshot.path);
           if (removedIndex >= 0) removedPaths.splice(removedIndex, 1);

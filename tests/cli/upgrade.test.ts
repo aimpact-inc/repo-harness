@@ -249,9 +249,12 @@ describe('upgrade with real release bytes', () => {
     const project = join(opts.cwd, '.claude/settings.json');
     const legacy = JSON.parse(readFileSync(project, 'utf8')).hooks.Stop[0].hooks[0];
     const user = { type: 'command', command: 'echo project user' };
-    writeFileSync(project, layout('\t', { hooks: { Stop: [{ hooks: [legacy, user] }], Empty: [] } }));
+    // A hook entry with a field that rh never wrote keeps that field; each copy of a command is its own removal.
+    const mine = { matcher: 'm', note: 'mine' };
+    writeFileSync(project, layout('\t', { hooks: { Stop: [{ hooks: [legacy, user] }, { ...mine, hooks: [legacy] }], Empty: [] } }));
+    expect(runUpgrade({ ...opts, scope: 'project' }).items.filter((item) => item.hookCommand === legacy.command)).toHaveLength(2);
     expect(runUpgrade({ ...opts, scope: 'project', apply: true }).exitCode).toBe(0);
-    expect(readFileSync(project, 'utf8')).toBe(layout('\t', { hooks: { Stop: [{ hooks: [user] }], Empty: [] } }));
+    expect(readFileSync(project, 'utf8')).toBe(layout('\t', { hooks: { Stop: [{ hooks: [user] }, { ...mine, hooks: [] }], Empty: [] } }));
   }));
 
   test('the cleanup audit log keeps only the newest records', () => sandbox((opts) => {
@@ -414,6 +417,40 @@ describe('upgrade with real release bytes', () => {
     } finally { if (lockedDir) chmodSync(lockedDir, 0o755); }
     for (const [path, content] of Object.entries(before)) expect(tree(opts.cwd)[path]).toBe(content);
   }));
+
+  test('a global hook rollback restores only the files that the gate wrote, and their ledger records', () => sandbox((opts) => {
+    const names = ['.claude/settings.json', '.codex/hooks.json'].map((name) => join(opts.home, name));
+    const original = '{"hooks":{"Stop":[{"hooks":[{"command":"repo-harness hook Stop --route quality"},{"command":"echo user"}]}]}}';
+    for (const name of names) put(name, original);
+    const config = join(opts.home, '.repo-harness/config');
+    mkdirSync(join(config, 'vault'), { recursive: true });
+    const identity = () => names.map((name) => ({ ino: statSync(name).ino, bytes: readFileSync(name, 'utf8') }));
+    const before = identity();
+    const lastAudit = () => JSON.parse(readFileSync(join(opts.home, '.repo-harness/upgrade-cleanup.log.jsonl'), 'utf8').trim().split('\n').at(-1)!);
+
+    // The gate cannot publish its records, so it writes no hook file and the rollback touches none.
+    try {
+      const refused = runUpgrade({ ...opts, scope: 'global', apply: true }, { beforeRemove() { chmodSync(config, 0o500); } });
+      expect(refused.exitCode).toBe(1);
+    } finally { chmodSync(config, 0o700); }
+    expect(identity()).toEqual(before);
+    expect(lastAudit().attempted_paths).toEqual([]);
+
+    // A failure after the first gate write: that file and its ledger record go back; the second file was never written.
+    const failed = runUpgrade({ ...opts, scope: 'global', apply: true }, { beforeRemove(item) { if (item.path === names[1]) throw new Error('injected'); } });
+    expect(failed.exitCode).toBe(1);
+    expect(lastAudit().rolled_back_paths).toEqual([names[0]]);
+    expect(identity().map(({ bytes }) => bytes)).toEqual([original, original]);
+    expect(identity()[1]).toEqual(before[1]);
+    expect(existsSync(join(config, 'ledger.json'))).toBe(false);
+
+    // A file that changed after the gate wrote it keeps the new bytes.
+    const changed = runUpgrade({ ...opts, scope: 'global', apply: true }, { beforeRemove(item) {
+      if (item.path === names[1]) { writeFileSync(names[0]!, '{"user":"edit"}'); throw new Error('injected'); }
+    } });
+    expect({ exitCode: changed.exitCode, rolledBack: lastAudit().rolled_back_paths, file: readFileSync(names[0]!, 'utf8') }).toEqual({ exitCode: 1, rolledBack: [], file: '{"user":"edit"}' });
+    expect(changed.error).toContain('the target changed');
+  }, false));
 
   const RETIRED_RC_FIXTURE = join(FIXTURES, 'retired-flow-reference-configs');
   const RETIRED_RC_DOCS = [
@@ -617,13 +654,27 @@ describe('upgrade with real release bytes', () => {
     const after = readFileSync(path, 'utf8'); expect(after).toContain(current); expect(after).toContain(user);
     expect(after).not.toContain('repo-harness hook SessionStart');
 
-    // A repeated event key: the text edits cannot place the removal, so the file is reported and keeps its bytes.
-    const repeated = '{"hooks":{"Stop":[],"Stop":[{"hooks":[{"command":"repo-harness hook Stop --route quality"}]}]}}';
-    writeFileSync(path, repeated);
-    const ledger = readFileSync(join(opts.home, '.repo-harness/config/ledger.json'), 'utf8');
-    const reported = runUpgrade({ ...opts, scope: 'global', apply: true });
-    expect(reported.items.filter((item) => item.path === path)).toEqual([expect.objectContaining({ action: 'report', reason: 'Invalid hook settings; preserve current bytes.' })]);
-    expect({ file: readFileSync(path, 'utf8'), ledger: readFileSync(join(opts.home, '.repo-harness/config/ledger.json'), 'utf8') }).toEqual({ file: repeated, ledger });
+    // The text edits cannot place the removal (a repeated event key, a repeated command key that JSON.parse reads
+    // as its last value) or read the file (a Latin-1 byte in a user string): the file is reported and keeps its bytes.
+    const quality = '{"command":"repo-harness hook Stop --route quality"}';
+    const kept = [
+      Buffer.from(`{"hooks":{"Stop":[],"Stop":[{"hooks":[${quality}]}]}}`),
+      Buffer.from('{"hooks":{"Stop":[{"hooks":[{"command":"echo user","command":"repo-harness hook Stop --route quality"}]}]}}'),
+      Buffer.concat([Buffer.from('{"note":"caf'), Buffer.from([0xe9]), Buffer.from(`","hooks":{"Stop":[{"hooks":[${quality}]}]}}`)]),
+    ];
+    const ledgerPath = join(opts.home, '.repo-harness/config/ledger.json');
+    for (const [scope, target] of [['global', path], ['project', join(opts.cwd, '.claude/settings.json')]] as const) {
+      for (const bytes of kept) {
+        put(target, ''); writeFileSync(target, bytes);
+        const ledger = readFileSync(ledgerPath);
+        const reported = runUpgrade({ ...opts, scope, apply: true });
+        expect(reported.items.filter((item) => item.path === target)).toEqual([expect.objectContaining({ action: 'report', reason: 'Invalid hook settings; preserve current bytes.' })]);
+        expect({ file: readFileSync(target).toString('base64'), ledger: readFileSync(ledgerPath).toString('base64') }).toEqual({ file: bytes.toString('base64'), ledger: ledger.toString('base64') });
+      }
+    }
+    // A directory at the hook path is reported; the inventory goes on.
+    rmSync(path); mkdirSync(path);
+    expect(runUpgrade({ ...opts, scope: 'global' }).items.filter((item) => item.path === path)).toEqual([expect.objectContaining({ action: 'report', reason: 'Invalid hook settings; preserve current bytes.' })]);
   }, false));
 
   test('unrecorded historical copies are reported and both clean and edited bytes stay', () => sandbox((opts) => {
