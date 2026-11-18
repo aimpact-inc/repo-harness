@@ -22,21 +22,28 @@ export interface ReviewCollectInput extends ReviewPublishInput {
 /** What `collect` did with the review seat after the record published. It never turns a published record into a failure. */
 export type ReviewSeatCloseV1 =
   | { readonly outcome: 'closed' }
-  /** `not_review_seat`, `other_pr`, `caller_terminal`, `seat_not_done`, or the hc reason of a close that failed. */
+  /** `not_review_seat`, `other_pr`, `caller_terminal`, `seat_not_done`, `launch_unbound`, or the hc reason of a close that failed. */
   | { readonly outcome: 'kept'; readonly reason: string };
 
 export type ReviewCollectResult = ReviewPublishResult & { readonly seat_close: ReviewSeatCloseV1 };
 
 /**
  * Close a done review seat of this pull request once its record is out (#3190), with the kill and remove of the board closeout.
- * Another seat, a seat of another pull request, a seat that still works and the caller's own terminal stay open.
+ * Another seat, a seat of another pull request, a seat that still works and the caller's own terminal stay open. Launches for
+ * different heads can share the worktree and the labels, so the seat closes only when its own launch packet (the task text in the
+ * argv of its agent) names this seat, this pull request and the head of the published receipt.
  */
-function closeReviewSeat(terminal: HcTerminal, seat: string, pr: number): ReviewSeatCloseV1 {
+function closeReviewSeat(terminal: HcTerminal, seat: string, pr: number, head: string): ReviewSeatCloseV1 {
   if (!isReviewSeat(seat as SeatId)) return { outcome: 'kept', reason: 'not_review_seat' };
   if (terminal.labels[RH_LABEL.pr] !== String(pr)) return { outcome: 'kept', reason: 'other_pr' };
   if (terminal.address === process.env.HC_TERMINAL_ID) return { outcome: 'kept', reason: 'caller_terminal' };
   const status = hcStatusClass(terminal.status?.state ?? null);
   if (status !== 'done' && status !== 'idle') return { outcome: 'kept', reason: 'seat_not_done' };
+  const launched = (terminal.foreground?.argv ?? []).some((arg) => {
+    const packet = parseReviewPacket(arg);
+    return packet !== null && packet.pr === pr && packet.seat === seat && packet.head_sha === head;
+  });
+  if (!launched) return { outcome: 'kept', reason: 'launch_unbound' };
   const closed = boardHostPorts().closeTerminal(terminal.address);
   return closed.status === 'closed' ? { outcome: 'closed' } : { outcome: 'kept', reason: closed.reason };
 }
@@ -193,5 +200,5 @@ export function collectReview(input: ReviewCollectInput): ReviewCollectResult {
   const receipt = finished.length === 1 ? finished[0]!.receipt : parseReceipt(lastReceiptValue(atHead[0]!.assistant));
   if (receipt.subject_sha !== head) throw invalid('the receipt names ' + receipt.subject_sha + ', not the packet head ' + head);
   const published = publishReceipt(input, receipt);
-  return { ...published, seat_close: closeReviewSeat(terminal, seat, input.prNumber) };
+  return { ...published, seat_close: closeReviewSeat(terminal, seat, input.prNumber, receipt.subject_sha) };
 }

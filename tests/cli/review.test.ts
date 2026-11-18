@@ -635,8 +635,9 @@ function seatFixture(texts: readonly string[] | null, options: { agentDir?: stri
   return { ...fixture, home, cwd, directory };
 }
 
-async function runCollect(fixture: ReturnType<typeof seatFixture>, agentDir?: string, seat = 'gatekeeper', terminal: { pr?: string; status?: string; closed?: string[] } = {}) {
+async function runCollect(fixture: ReturnType<typeof seatFixture>, agentDir?: string, seat = 'gatekeeper', terminal: { pr?: string; status?: string; argv?: string[]; closed?: string[] } = {}) {
   const hc = spyOn(herdrCore, 'hcGet').mockReturnValue({ address: 't9', cwd: fixture.cwd, status: terminal.status === undefined ? null : { state: terminal.status },
+    foreground: terminal.argv === undefined ? null : { pid: 1, name: 'pi', argv: terminal.argv, cwd: fixture.cwd },
     labels: { 'repo-harness.seat': seat, ...(terminal.pr === undefined ? {} : { 'repo-harness.pr': terminal.pr }) } } as never);
   const ports = spyOn(herdrCore, 'boardHostPorts').mockReturnValue({ closeTerminal: (address: string) => { terminal.closed?.push(address); return { status: 'closed' }; } } as never);
   const previous = process.env.REPO_HARNESS_GH_BIN;
@@ -662,12 +663,17 @@ test('collect publishes the last RECEIPT-JSON block of the seat session', async 
   expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, pr: PUBLISH_PR, head_sha: PUBLISH_HEAD, round: 1, threads: 1, seat_close: { outcome: 'kept', reason: 'other_pr' } });
 });
 
-test('collect closes the done review seat of its pull request after the record publishes, and keeps a seat that still works', async () => {
+test('collect closes only the done review seat whose launch packet names the published head, and keeps a seat that still works', async () => {
   const closed: string[] = [];
-  const done = await runCollect(seatFixture([receiptBlock(publishReceipt())]), undefined, 'gatekeeper', { pr: String(PUBLISH_PR), status: 'done', closed });
+  const current = ['pi', '--model', 'm', seatPacket()];
+  const done = await runCollect(seatFixture([receiptBlock(publishReceipt())]), undefined, 'gatekeeper', { pr: String(PUBLISH_PR), status: 'done', argv: current, closed });
   expect(done.status, done.stderr).toBe(0);
   expect([JSON.parse(done.stdout).seat_close, closed]).toEqual([{ outcome: 'closed' }, ['t9']]);
-  const working = await runCollect(seatFixture([receiptBlock(publishReceipt())]), undefined, 'gatekeeper', { pr: String(PUBLISH_PR), status: 'working', closed });
+  // An earlier-head pane shares the worktree, PR and seat labels: collecting the current head through its address leaves it open.
+  const earlier = await runCollect(seatFixture([receiptBlock(publishReceipt())]), undefined, 'gatekeeper', { pr: String(PUBLISH_PR), status: 'done', argv: ['pi', seatPacket('gatekeeper', 'b'.repeat(40))], closed });
+  expect(earlier.status, earlier.stderr).toBe(0);
+  expect([JSON.parse(earlier.stdout).seat_close, closed]).toEqual([{ outcome: 'kept', reason: 'launch_unbound' }, ['t9']]);
+  const working = await runCollect(seatFixture([receiptBlock(publishReceipt())]), undefined, 'gatekeeper', { pr: String(PUBLISH_PR), status: 'working', argv: current, closed });
   expect([JSON.parse(working.stdout).seat_close, closed]).toEqual([{ outcome: 'kept', reason: 'seat_not_done' }, ['t9']]);
 });
 
