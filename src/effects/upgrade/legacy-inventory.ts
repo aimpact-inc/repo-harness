@@ -6,7 +6,8 @@ import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync } from '
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { hashManagedTree, installedCopyTreeOptions, OWNER_MARKER } from '../managed-tree';
 import { isRepoHarnessLegacyTypedHookCommand, isRepoHarnessManagedHookCommand, retiredHookCommands } from '../../core/adoption/managed-hook-config';
-import { removeJsonHookCommand, type HookCommandPosition } from '../../core/host-config/json-fragment';
+import { hookRenderingKey, removeJsonHookCommand, type HookCommandPosition } from '../../core/host-config/json-fragment';
+import { releasedHookRenderings } from './released-values';
 import { HostConfigError } from '../../core/host-config/types';
 import { decode as decodeHostFile } from '../host-config/gate';
 import { isRepoHarnessSourceCheckout } from '../source-checkout';
@@ -232,41 +233,53 @@ function historicalCommands(actions: readonly RetirementAction[], shimPaths: rea
 
 type HookLocationOptions = { readonly location?: 'project' } | { readonly location: 'global'; readonly home: string; readonly repoHarnessHome?: string };
 
-/** The rule that selects a legacy hook command at a location. */
-function legacyHookCommand(options: HookLocationOptions): (command: string) => boolean {
+/**
+ * The hook commands that rh owns at a location, and the keys of the renderings
+ * that a release wrote. A command that rh owns is removed only when it equals
+ * one of those renderings; any other form of it keeps the whole file.
+ */
+function hookRules(options: HookLocationOptions): { readonly owned: (command: string) => boolean; readonly released: ReadonlySet<string> } {
   const shimPaths = options.location === 'global' ? [
     join(resolve(options.home), '.repo-harness/hook-shim.sh'),
     // The retired installer wrote this configured root verbatim.
     ...(options.repoHarnessHome ? [`${options.repoHarnessHome}/hook-shim.sh`] : []),
   ] : [];
+  const released = releasedHookRenderings(shimPaths);
   const commands = historicalCommands(actionsOf(), shimPaths);
-  // Global ownership needs a full historical command, never a path substring; a project file also drops rh's managed commands.
-  return options.location === 'global'
-    ? (command) => commands.has(command) || isRepoHarnessLegacyTypedHookCommand(command)
-    : (command) => commands.has(command) || isRepoHarnessManagedHookCommand(command);
+  // Global ownership needs a full historical command, never a path substring; a project file also holds rh's managed commands.
+  const owned = options.location === 'global'
+    ? (command: string) => released.commands.has(command) || commands.has(command) || isRepoHarnessLegacyTypedHookCommand(command)
+    : (command: string) => released.commands.has(command) || commands.has(command) || isRepoHarnessManagedHookCommand(command);
+  return { owned, released: released.keys };
 }
+
+const INVALID_HOOK_SETTINGS = 'Invalid hook settings; preserve current bytes.';
+const CUSTOMIZED_HOOK = 'A repo-harness hook differs from every hook that a release wrote; preserve current bytes.';
 
 /**
  * The legacy hook commands of a hook file, in the order that removes them one
  * by one: a removal moves only the positions after it in its event, so each
- * event lists its commands last first.
+ * event lists its commands last first. Null when a command that rh owns is not
+ * a released rendering, matcher and timeout included.
  */
-function legacyHookRemovals(value: unknown, options: HookLocationOptions = {}): HookCommandPosition[] {
-  if (!isRecord(value)) throw new Error('hook settings must be a JSON object');
-  if (value.hooks === undefined) return [];
-  if (!isRecord(value.hooks)) throw new Error('managed hook config must be an object keyed by event');
-  const legacy = legacyHookCommand(options);
+function legacyHookRemovals(value: Record<string, unknown>, options: HookLocationOptions): HookCommandPosition[] | null {
+  if (!isRecord(value.hooks)) return [];
+  const { owned, released } = hookRules(options);
   const removals: HookCommandPosition[] = [];
   for (const [event, blocks] of Object.entries(value.hooks)) {
     if (!Array.isArray(blocks)) continue;
     const found: HookCommandPosition[] = [];
-    blocks.forEach((block, blockIndex) => {
-      if (!isRecord(block) || !Array.isArray(block.hooks)) return;
-      block.hooks.forEach((entry: unknown, index) => {
-        const command = isRecord(entry) ? entry.command : undefined;
-        if (typeof command === 'string' && legacy(command)) found.push({ event, block: blockIndex, index, command });
-      });
-    });
+    for (const [blockIndex, block] of blocks.entries()) {
+      if (!isRecord(block) || !Array.isArray(block.hooks)) continue;
+      const { hooks, ...rest } = block;
+      for (const [index, hook] of (hooks as unknown[]).entries()) {
+        const command = isRecord(hook) ? hook.command : undefined;
+        if (typeof command !== 'string' || !owned(command)) continue;
+        const rendering = hookRenderingKey({ event, block: rest, hook: hook as Record<string, unknown> });
+        if (!released.has(rendering)) return null;
+        found.push({ event, block: blockIndex, index, command, rendering });
+      }
+    }
     removals.push(...found.reverse());
   }
   return removals;
@@ -287,28 +300,32 @@ export function removeLegacyHookCommands(content: string, removals: readonly Hoo
 
 /**
  * The text of a hook file and its legacy hook commands, which the planner
- * reports and apply removes. The bytes are read as the gate reads them.
- * Null when the file is not UTF-8 hook settings that the text edits can
- * change; the planner then reports the file and keeps its bytes.
+ * reports and apply removes. The bytes are read as the gate reads them. A
+ * file that is not UTF-8 hook settings that the text edits can change, or
+ * that holds a customized repo-harness hook, is refused with the report
+ * reason; the planner then reports the file and keeps its bytes.
  */
-export function hookFileRemovals(bytes: Buffer, path: string, options: HookLocationOptions): { content: string; removals: HookCommandPosition[] } | null {
+export function hookFileRemovals(bytes: Buffer, path: string, options: HookLocationOptions): { content: string; removals: HookCommandPosition[] } | { refused: string } {
   try {
     const content = decodeHostFile(bytes, path);
     const value = JSON.parse(content) as unknown;
-    if (!isRecord(value) || (value.hooks !== undefined && !isRecord(value.hooks))) return null;
+    if (!isRecord(value) || (value.hooks !== undefined && !isRecord(value.hooks))) return { refused: INVALID_HOOK_SETTINGS };
     const removals = legacyHookRemovals(value, options);
+    if (!removals) return { refused: CUSTOMIZED_HOOK };
     removeLegacyHookCommands(content, removals);
     return { content, removals };
   } catch (error) {
-    if (error instanceof HostConfigError || error instanceof SyntaxError) return null;
+    if (error instanceof HostConfigError || error instanceof SyntaxError) return { refused: INVALID_HOOK_SETTINGS };
     throw error;
   }
 }
 
 /** The adoption plan's rewrite of a repository hook file; it drops every empty hook entry and event. */
 export function stripLegacyHookEntries(value: unknown, options: HookLocationOptions = {}): { config: Record<string, unknown>; removed: readonly { event: string; command: string }[] } {
+  if (!isRecord(value)) throw new Error('hook settings must be a JSON object');
   const removals = legacyHookRemovals(value, options);
-  const record = value as Record<string, unknown>;
+  if (!removals) throw new Error(CUSTOMIZED_HOOK);
+  const record = value;
   if (record.hooks === undefined) return { config: { ...record }, removed: [] };
   const drop = new Set(removals.map(({ event, block, index }) => JSON.stringify([event, block, index])));
   const hooks: Record<string, unknown> = {};
@@ -760,9 +777,9 @@ export function planLegacyLeftovers(options: LegacyInventoryOptions): { items: L
         if (!inaccessible(error)) throw error;
         bytes = null;
       }
-      const hookFile = bytes && hookFileRemovals(bytes, path, hookLocation(location, options));
-      if (!hookFile) {
-        add({ location, surface: 'hook-entry', path, retiredBy: hookRetirement, ownership: 'unowned', proof: null, action: 'report', reason: 'Invalid hook settings; preserve current bytes.' });
+      const hookFile = bytes ? hookFileRemovals(bytes, path, hookLocation(location, options)) : { refused: INVALID_HOOK_SETTINGS };
+      if ('refused' in hookFile) {
+        add({ location, surface: 'hook-entry', path, retiredBy: hookRetirement, ownership: 'unowned', proof: null, action: 'report', reason: hookFile.refused });
         continue;
       }
       for (const entry of hookFile.removals) {

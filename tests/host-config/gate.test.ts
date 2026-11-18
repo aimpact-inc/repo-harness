@@ -6,7 +6,7 @@ import type { FragmentEdit, HostConfigStrategy, HostPath } from '../../src/core/
 import { openHostConfigGate, rollbackHostConfigTransaction, type HostConfigFileChange } from '../../src/effects/host-config/gate';
 import type { PathEntry } from '../../src/effects/host-config/whole-path';
 import { hostConfigPaths, migrateLedgerSchema, parseLedger, replaceTarget } from '../../src/effects/host-config/store';
-import { jsonFragment, removeJsonHookCommand } from '../../src/core/host-config/json-fragment';
+import { hookRenderingKey, jsonFragment, removeJsonHookCommand } from '../../src/core/host-config/json-fragment';
 import { sha256Prefixed } from '../../src/core/evidence/sha256';
 
 /** A `key=value` line format: the selector is the key. */
@@ -362,7 +362,8 @@ test('a removal of unrecorded text checks the hash and each step, keeps the file
   const legacy = '{"type": "command", "command": "bash legacy.sh"}, ';
   const before = `{\n\t"user": 1,\n\t"hooks": {\n\t\t"Stop": [\n\t\t\t{ "hooks": [ ${legacy}{"type":"command","command":"echo user"} ] }\n\t\t]\n\t}\n}\n`;
   const after = before.replace(legacy, '');
-  const remove = [(content: string) => removeJsonHookCommand(content, { event: 'Stop', block: 0, index: 0, command: 'bash legacy.sh' })];
+  const rendering = hookRenderingKey({ event: 'Stop', block: {}, hook: { type: 'command', command: 'bash legacy.sh' } });
+  const remove = [(content: string) => removeJsonHookCommand(content, { event: 'Stop', block: 0, index: 0, command: 'bash legacy.sh', rendering })];
   const path = join(f.home, 'hooks.json');
   writeFileSync(path, before);
   expect(() => f.gate().removeUnrecordedText(path, sha(`${before} `), remove)).toThrow('the file changed since rh planned its removal');

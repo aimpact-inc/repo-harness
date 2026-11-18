@@ -49,7 +49,7 @@ import {
 import { ownedPath, pathRecordIsCurrent, pathRecordKey, readPathRecords } from '../../effects/host-config/path-records';
 import { stageInstalledSkillCopy } from '../installer/skill-sync';
 import { openHostConfigGate } from '../../effects/host-config/gate';
-import { hostConfigPaths, readLedger, replaceTarget, resolveHostPath } from '../../effects/host-config/store';
+import { hostConfigPaths, replaceTarget, resolveHostPath } from '../../effects/host-config/store';
 import type { OwnedPathLookup } from '../../effects/upgrade/legacy-inventory';
 import { HostConfigError, type Sha256 } from '../../core/host-config/types';
 import {
@@ -127,20 +127,16 @@ export function installOwnershipReader(env: NodeJS.ProcessEnv): () => OwnedPathL
 }
 
 /**
- * Puts back a hook file that the gate cleaned in this run, after the gate
- * transaction rollback restored the ledger. While the ledger still records the
- * cleanup, the file keeps it too, so the record and the file agree. A file that
- * changed after the cleanup keeps its bytes. Both errors name the retained copy
- * of the file before the cleanup.
+ * Puts back a hook file that the gate cleaned in this run. It runs before the
+ * gate transaction rollback restores the ledger, which keeps the cleanup record
+ * of a file that does not hold its backup again. A file that changed after the
+ * cleanup keeps its bytes, and the error names the retained copy.
  */
 function restoreGateHookEdit(env: NodeJS.ProcessEnv, path: string, backupPath: string, written: Sha256): void {
-  const paths = hostConfigPaths(env);
-  const target = resolveHostPath(paths, path);
-  const unresolved = (reason: string) => new Error(`${path}: ${reason}; the file before the cleanup is kept at ${backupPath}`);
-  const committed = readLedger(paths).files[target]?.committed;
-  if (committed?.type === 'file' && committed.sha256 === written) throw unresolved('the ledger still records the cleanup, so the file keeps it');
-  try { replaceTarget(target, readFileSync(backupPath), { existed: true, sha256: written }); }
-  catch (error) { throw unresolved(error instanceof Error ? error.message : String(error)); }
+  try { replaceTarget(resolveHostPath(hostConfigPaths(env), path), readFileSync(backupPath), { existed: true, sha256: written }); }
+  catch (error) {
+    throw new Error(`${path}: ${error instanceof Error ? error.message : String(error)}; the ledger keeps the cleanup record, and the file before the cleanup is kept at ${backupPath}`);
+  }
 }
 
 function removable(item: LeftoverItem): boolean {
@@ -385,7 +381,7 @@ function applyLocked(
       if (targetItems[0]!.surface === 'hook-entry') {
         const location = targetItems[0]!.location;
         const hookFile = hookFileRemovals(readFileSync(path), path, hookLocation(location, options));
-        if (hookFile === null) throw new Error(`hook settings can no longer be edited: ${path}`);
+        if ('refused' in hookFile) throw new Error(`hook settings can no longer be edited: ${path}`);
         if (hookFile.removals.length === 0) continue;
         if (location === 'global') gateRemovals = hookFile.removals;
         else nextContent = removeLegacyHookCommands(hookFile.content, hookFile.removals);
@@ -439,6 +435,32 @@ function applyLocked(
     if (gateTransaction) commitInstallHostTransaction(gateTransaction);
   } catch (failure) {
     error = failure instanceof Error ? failure.message : String(failure);
+    const rollBack = (backup: InstallHostTransaction, snapshot: InstallHostTransaction['snapshots'][number]): void => {
+      const root = projectBackup?.transaction === backup ? options.cwd : options.home;
+      try {
+        if (!isLegacyPathSafe(root, snapshot.path)
+          || !isLegacyPathSafe(root, backup.backup_root, false)
+          || !snapshot.backup_path || !isLegacyPathSafe(backup.backup_root, snapshot.backup_path)) {
+          throw new Error(`unsafe rollback target or backup: ${snapshot.path}`);
+        }
+        const written = gateEdits.get(snapshot.path);
+        if (written) restoreGateHookEdit(env, snapshot.path, snapshot.backup_path, written);
+        else rollbackLegacyCleanupBackup({ ...backup, snapshots: [snapshot] }, runtimeLock);
+        rolledBackPaths.push(snapshot.path);
+        const removedIndex = removedPaths.indexOf(snapshot.path);
+        if (removedIndex >= 0) removedPaths.splice(removedIndex, 1);
+        const refreshedIndex = refreshedPaths.indexOf(snapshot.path);
+        if (refreshedIndex >= 0) refreshedPaths.splice(refreshedIndex, 1);
+        if (projectBackup?.transaction === backup) {
+          const index = projectPaths.indexOf(snapshot.path);
+          projectBackup.operations[index] = { ...projectBackup.operations[index]!, status: 'skipped' };
+        }
+      } catch (rollbackError) {
+        error += `; ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`;
+      }
+    };
+    // Hook files first: the gate transaction rollback then keeps the record of each file that did not go back.
+    for (const snapshot of hostBackup?.snapshots ?? []) if (gateEdits.has(snapshot.path)) rollBack(hostBackup!, snapshot);
     if (gateTransaction) {
       try {
         // A state changed by another writer stays when this refresh never wrote it.
@@ -457,30 +479,8 @@ function applyLocked(
     }
     for (const backup of [projectBackup?.transaction, hostBackup]) {
       if (!backup) continue;
-      const root = projectBackup?.transaction === backup ? options.cwd : options.home;
       for (const snapshot of [...backup.snapshots].reverse()) {
-        if (!mutatedPaths.has(snapshot.path)) continue;
-        try {
-          if (!isLegacyPathSafe(root, snapshot.path)
-            || !isLegacyPathSafe(root, backup.backup_root, false)
-            || !snapshot.backup_path || !isLegacyPathSafe(backup.backup_root, snapshot.backup_path)) {
-            throw new Error(`unsafe rollback target or backup: ${snapshot.path}`);
-          }
-          const written = gateEdits.get(snapshot.path);
-          if (written) restoreGateHookEdit(env, snapshot.path, snapshot.backup_path, written);
-          else rollbackLegacyCleanupBackup({ ...backup, snapshots: [snapshot] }, runtimeLock);
-          rolledBackPaths.push(snapshot.path);
-          const removedIndex = removedPaths.indexOf(snapshot.path);
-          if (removedIndex >= 0) removedPaths.splice(removedIndex, 1);
-          const refreshedIndex = refreshedPaths.indexOf(snapshot.path);
-          if (refreshedIndex >= 0) refreshedPaths.splice(refreshedIndex, 1);
-          if (projectBackup?.transaction === backup) {
-            const index = projectPaths.indexOf(snapshot.path);
-            projectBackup.operations[index] = { ...projectBackup.operations[index]!, status: 'skipped' };
-          }
-        } catch (rollbackError) {
-          error += `; ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`;
-        }
+        if (mutatedPaths.has(snapshot.path) && !gateEdits.has(snapshot.path)) rollBack(backup, snapshot);
       }
     }
     if (projectBackup) {

@@ -22,6 +22,7 @@ import { availableParallelism, tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { canonicalJson, type HookRendering } from '../src/core/host-config/json-fragment';
 
 export const RELEASED_MANAGED_VALUES_PATH = 'assets/released-managed-values.v1.json';
 const SCHEMA = 'repo-harness.released-managed-values.v1';
@@ -68,6 +69,12 @@ export interface ReleasedManagedValues {
      */
     readonly legacySections: Readonly<Record<string, readonly string[]>>;
   };
+  /**
+   * Each hook command that a release wrote in a host hook file: its event, its hook entry without
+   * `hooks`, and the command object. `shimPlaceholder` stands for the hook shim path that the
+   * installer interpolated from HOME or REPO_HARNESS_HOME. Sorted by canonical JSON.
+   */
+  readonly hookRenderings: { readonly shimPlaceholder: string; readonly entries: readonly HookRendering[] };
 }
 
 export function fingerprint(text: string | Buffer): string {
@@ -339,6 +346,74 @@ async function runBashRenderers(tree: TagTree, bashWriters: boolean, scratch: st
 }
 
 // ---------------------------------------------------------------------------
+// Hook renderings: the hook templates, and the installer's build_hooks_json run from a scratch copy
+// ---------------------------------------------------------------------------
+
+/** Placeholder for the hook shim path that `build_hooks_json` interpolated. */
+export const HOOK_SHIM_PLACEHOLDER = '{{shim}}';
+const HOOK_TEMPLATES = ['assets/hooks/settings.template.json', 'assets/hooks/codex.hooks.template.json'];
+const INSTALLER = 'scripts/repo-harness.sh';
+const INSTALLER_DRIVER = String.raw`
+set -u
+unset REPO_HARNESS_HOME
+. scripts/repo-harness.sh help >/dev/null 2>&1
+declare -F build_hooks_json >/dev/null || exit 95
+build_hooks_json > hooks.json || exit 96
+`;
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** The renderings of one `{ <event>: [hook entry] }` object. A shape that no release wrote fails closed. */
+function hookRenderingsOf(tag: string, what: string, events: unknown): HookRendering[] {
+  const fail = (detail: string): never => { throw new Error(`${tag}: ${what}: ${detail}; extend ${RELEASED_MANAGED_VALUES_PATH} extraction`); };
+  if (!isPlainObject(events)) return fail('the hooks are not an object keyed by event');
+  const renderings: HookRendering[] = [];
+  for (const [event, entries] of Object.entries(events)) {
+    if (!Array.isArray(entries)) fail(`${event} is not an array`);
+    for (const entry of entries as unknown[]) {
+      if (!isPlainObject(entry) || !Array.isArray(entry.hooks)) return fail(`a ${event} hook entry has no hooks array`);
+      const { hooks, ...block } = entry;
+      if (Object.keys(block).some((key) => key !== 'matcher') || (block.matcher !== undefined && typeof block.matcher !== 'string')) fail(`a ${event} hook entry has an unknown field`);
+      for (const hook of hooks as unknown[]) {
+        if (!isPlainObject(hook) || typeof hook.command !== 'string') return fail(`a ${event} hook has no command`);
+        renderings.push({ event, block, hook });
+      }
+    }
+  }
+  return renderings;
+}
+
+function templateHookRenderings(tree: TagTree): HookRendering[] {
+  return HOOK_TEMPLATES.filter((path) => tree.has(path)).flatMap((path) => {
+    const template = JSON.parse(tree.read(path)) as { hooks?: unknown };
+    const renderings = hookRenderingsOf(tree.tag, path, template.hooks);
+    if (renderings.some(({ hook }) => (hook.command as string).includes('{{'))) throw new Error(`${tree.tag}: ${path} holds a placeholder; extend ${RELEASED_MANAGED_VALUES_PATH} extraction`);
+    return renderings;
+  });
+}
+
+/** `build_hooks_json` of the tag's installer, run with HOME in the scratch copy; null when the tag has none. */
+async function installerHookRenderings(tree: TagTree, scratch: string): Promise<HookRendering[] | null> {
+  if (!tree.has(INSTALLER) || !tree.read(INSTALLER).includes('\nbuild_hooks_json() {\n')) return null;
+  const dir = join(scratch, `hooks-${tree.tag}`);
+  mkdirSync(join(dir, 'home'), { recursive: true });
+  tree.materialize(dir, [INSTALLER]);
+  const result = await new Promise<{ readonly status: number | null; readonly stderr: string }>((done, fail) => {
+    const child = spawn('bash', ['-c', INSTALLER_DRIVER], { cwd: dir, env: { PATH: process.env.PATH ?? '', HOME: join(dir, 'home') }, stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+    child.on('error', fail);
+    child.on('close', (status) => done({ status, stderr }));
+  });
+  if (result.status !== 0) throw new Error(`${tree.tag}: build_hooks_json driver failed with exit ${result.status}: ${result.stderr.trim()}`);
+  const shim = `${join(dir, 'home')}/.repo-harness/hook-shim.sh`;
+  const rendered = readFileSync(join(dir, 'hooks.json'), 'utf8');
+  rmSync(dir, { recursive: true, force: true });
+  if (!rendered.includes(shim)) throw new Error(`${tree.tag}: build_hooks_json does not render the hook shim path; extend ${RELEASED_MANAGED_VALUES_PATH} extraction`);
+  return hookRenderingsOf(tree.tag, `${INSTALLER} build_hooks_json`, JSON.parse(rendered.replaceAll(shim, HOOK_SHIM_PLACEHOLDER)));
+}
+
+// ---------------------------------------------------------------------------
 // TypeScript renderers, read statically with pinned source shapes
 // ---------------------------------------------------------------------------
 
@@ -571,10 +646,12 @@ export async function buildReleasedManagedValues(repoRoot: string, refs: readonl
   const rulesBlocks = new Set<string>();
   const customRulesBlocks = new Set<string>();
   const legacy = new Map<string, Set<string>>();
+  const hookRenderings = new Map<string, HookRendering>();
   try {
     const trees = releases.map((tag) => new TagTree(repoRoot, tag));
     const bashWriters = trees.map(hasBashWriters);
     const bashRenders = await inPool(trees.map((tree, index) => [tree, bashWriters[index]!] as const), availableParallelism(), ([tree, writers]) => runBashRenderers(tree, writers, scratch));
+    const installerHooks = await inPool(trees, availableParallelism(), (tree) => installerHookRenderings(tree, scratch));
     for (const [index, tree] of trees.entries()) {
       const tag = tree.tag;
       packageScriptValues(tree, bashWriters[index]!, packageScripts);
@@ -615,6 +692,9 @@ export async function buildReleasedManagedValues(repoRoot: string, refs: readonl
       if (tree.has(GLOBAL_RULES_TEMPLATE)) {
         for (const [heading, text] of legacySections(readTemplate(tree.read(GLOBAL_RULES_TEMPLATE)))) addTo(legacy, heading, fingerprint(text));
       }
+      for (const rendering of [...templateHookRenderings(tree), ...(installerHooks[index] ?? [])]) {
+        hookRenderings.set(canonicalJson(rendering), JSON.parse(canonicalJson(rendering)) as HookRendering);
+      }
     }
   } finally {
     rmSync(scratch, { recursive: true, force: true });
@@ -637,6 +717,10 @@ export async function buildReleasedManagedValues(repoRoot: string, refs: readonl
       customInstructionSentinel: CUSTOM_INSTRUCTION_SENTINEL,
       customInstructionBlocks: sorted(customRulesBlocks),
       legacySections: record(legacy),
+    },
+    hookRenderings: {
+      shimPlaceholder: HOOK_SHIM_PLACEHOLDER,
+      entries: [...hookRenderings.keys()].sort().map((key) => hookRenderings.get(key)!),
     },
   };
 }

@@ -9,6 +9,7 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import { sha256Prefixed } from "../../core/evidence/sha256";
+import { hookRenderingKey, type HookRendering } from "../../core/host-config/json-fragment";
 
 const SCHEMA = "repo-harness.released-managed-values.v1";
 const RELEASED_MANAGED_VALUES_FILE = join(import.meta.dir, "../../../assets/released-managed-values.v1.json");
@@ -29,6 +30,7 @@ interface ReleasedManagedValues {
     readonly customInstructionBlocks: Fingerprints;
     readonly legacySections: Readonly<Record<string, Fingerprints>>;
   };
+  readonly hookRenderings: { readonly shimPlaceholder: string; readonly entries: readonly HookRendering[] };
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -53,6 +55,8 @@ export function readReleasedManagedValues(file: string): ReleasedManagedValues {
   const project = object(root.projectGitignoreBlock, "$.projectGitignoreBlock");
   const sections = Array.isArray(project.retiredSections) ? project.retiredSections : fail("$.projectGitignoreBlock.retiredSections", "an array");
   const rules = object(root.globalRulesBlock, "$.globalRulesBlock");
+  const hooks = object(root.hookRenderings, "$.hookRenderings");
+  const entries = Array.isArray(hooks.entries) ? hooks.entries : fail("$.hookRenderings.entries", "an array");
   return {
     packageScripts: lists(root.packageScripts, "$.packageScripts"),
     referenceConfigs: lists(root.referenceConfigs, "$.referenceConfigs", FINGERPRINT),
@@ -74,6 +78,16 @@ export function readReleasedManagedValues(file: string): ReleasedManagedValues {
       customInstructionSentinel: string(rules.customInstructionSentinel, "$.globalRulesBlock.customInstructionSentinel"),
       customInstructionBlocks: strings(rules.customInstructionBlocks, "$.globalRulesBlock.customInstructionBlocks", FINGERPRINT),
       legacySections: lists(rules.legacySections, "$.globalRulesBlock.legacySections", FINGERPRINT),
+    },
+    hookRenderings: {
+      shimPlaceholder: string(hooks.shimPlaceholder, "$.hookRenderings.shimPlaceholder"),
+      entries: entries.map((value, index) => {
+        const path = `$.hookRenderings.entries[${index}]`;
+        const entry = object(value, path);
+        const hook = object(entry.hook, `${path}.hook`);
+        string(hook.command, `${path}.hook.command`);
+        return { event: string(entry.event, `${path}.event`), block: object(entry.block, `${path}.block`), hook };
+      }),
     },
   };
 }
@@ -158,4 +172,19 @@ export function isReleasedGlobalRulesBlock(block: string, customInstruction: str
 /** An unmarked section of a released global rules template, keyed by its heading line, with trailing blank lines dropped. */
 export function isReleasedGlobalRulesSection(heading: string, text: string): boolean {
   return has(own(released().globalRulesBlock.legacySections, heading), sha256Prefixed(text));
+}
+
+/**
+ * The hook commands that a release wrote, as rendering keys (`hookRenderingKey`),
+ * and their command texts. A shim rendering stands once for each of `shimPaths`;
+ * with none (a repository file) it is left out.
+ */
+export function releasedHookRenderings(shimPaths: readonly string[]): { readonly keys: ReadonlySet<string>; readonly commands: ReadonlySet<string> } {
+  const { shimPlaceholder, entries } = released().hookRenderings;
+  const resolved = entries.flatMap((entry) => {
+    const command = entry.hook.command as string;
+    if (!command.includes(shimPlaceholder)) return [entry];
+    return shimPaths.map((shim) => ({ ...entry, hook: { ...entry.hook, command: command.replaceAll(shimPlaceholder, shim) } }));
+  });
+  return { keys: new Set(resolved.map(hookRenderingKey)), commands: new Set(resolved.map((entry) => entry.hook.command as string)) };
 }

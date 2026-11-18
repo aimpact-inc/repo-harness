@@ -19,6 +19,8 @@ describe("released managed values", () => {
     expect(built.releases[0]).toBe("v0.1.2");
     expect(built.packageScripts["check:context-files"]).toContain("bash .ai/harness/scripts/check-context-files.sh");
     expect(built.packageScripts["check:brain-manifest"]).toContain("repo-harness run check-brain-manifest");
+    // The early installer interpolated the hook shim path; the templates wrote the repository hooks.
+    expect(built.hookRenderings.entries).toContainEqual({ event: "Stop", block: {}, hook: { command: "bash {{shim}} finalize-handoff.sh", type: "command" } });
     expect(renderReleasedManagedValues(built)).toBe(readFileSync(join(REPO_ROOT, RELEASED_MANAGED_VALUES_PATH), "utf8"));
   }, 180_000);
 
@@ -43,6 +45,7 @@ describe("released managed values", () => {
         ["{", "invalid JSON"],
         [JSON.stringify({ ...valid, packageScripts: { ...valid.packageScripts, "check:brain": "repo-harness brain check" } }), "$.packageScripts.check:brain must be an array of strings"],
         [JSON.stringify({ ...valid, globalRulesBlock: rulesWithoutSections }), "$.globalRulesBlock.legacySections must be an object"],
+        [JSON.stringify({ ...valid, hookRenderings: { ...valid.hookRenderings, entries: [{ event: "Stop", block: {}, hook: {} }] } }), "$.hookRenderings.entries[0].hook.command must be a string"],
       ];
       for (const [text, error] of rows) {
         rmSync(file, { force: true });

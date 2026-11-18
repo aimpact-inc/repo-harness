@@ -319,31 +319,58 @@ export function removeJsonFragment(content: string, selector: string, records: r
   return removeItem(content, container, index);
 }
 
-/** One command of a hook file: `hooks.<event>[block].hooks[index]`, and the command text that it holds. */
+/** JSON text with the keys of every object sorted: two values are JSON-equal when their canonical texts are equal. */
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * One hook command as a release rendered it: its event, its hook entry
+ * without `hooks` (the matcher), and the command object.
+ */
+export interface HookRendering {
+  readonly event: string;
+  readonly block: Readonly<Record<string, unknown>>;
+  readonly hook: Readonly<Record<string, unknown>>;
+}
+
+/** The canonical text of a hook rendering, which the planner and the removal compare. */
+export function hookRenderingKey(rendering: HookRendering): string {
+  return canonicalJson({ event: rendering.event, block: rendering.block, hook: rendering.hook });
+}
+
+/**
+ * One command of a hook file, `hooks.<event>[block].hooks[index]`, with the
+ * command text and the key of the released rendering that it must equal.
+ */
 export interface HookCommandPosition {
   readonly event: string;
   readonly block: number;
   readonly index: number;
   readonly command: string;
+  readonly rendering: string;
 }
 
-/** The fields that rh wrote in a hook entry, `{ matcher?, hooks }`, and in one of its commands, `{ type, command, timeout? }`. */
-const HOOK_ENTRY_FIELDS = new Set(['matcher', 'hooks']);
-const HOOK_COMMAND_FIELDS = new Set(['type', 'command', 'timeout']);
+function hasRepeatedKey(node: JsonNode): boolean {
+  return node.type === 'object' && new Set(node.members.map(({ key }) => key)).size !== node.members.length;
+}
 
 /**
- * Takes one command out of a hook entry with its separator. The hook entry,
- * the event array and the `hooks` object go too when this removal empties
- * them and the hook entry holds no field that rh did not write; a container
- * that was empty before is not touched. The position must hold the command,
- * because each removal moves the positions after it. A command object that
- * sets `command` twice fails closed, because `JSON.parse` reads only the last
- * one; so does a command object with a field that rh did not write, because
- * the removal takes out the whole object.
+ * Takes one command out of a hook entry with its separator. The command
+ * object and its hook entry without `hooks` must be JSON-equal to the planned
+ * released rendering, and neither may set a key twice (`JSON.parse` reads
+ * only the last value). The hook entry, the event array and the `hooks`
+ * object go too when this removal empties them; a container that was empty
+ * before is not touched. The position must hold the command, because each
+ * removal moves the positions after it.
  */
 export function removeJsonHookCommand(content: string, position: HookCommandPosition): FragmentEdit {
   const { event, block, index, command } = position;
-  const missing = () => invalid(`hooks.${event}[${block}].hooks[${index}] does not hold the planned command; rh writes nothing`);
+  const at = `hooks.${event}[${block}].hooks[${index}]`;
   const document = root(content);
   const hooks = document && memberNode(document, 'hooks');
   const blocks = hooks && memberNode(hooks.value, event);
@@ -351,22 +378,23 @@ export function removeJsonHookCommand(content: string, position: HookCommandPosi
   const commands = entry && memberNode(entry, 'hooks');
   const target = commands?.value.type === 'array' ? commands.value.elements[index] : undefined;
   const held = target && memberNode(target, 'command');
-  if (!held || JSON.parse(content.slice(held.value.start, held.value.end)) !== command) throw missing();
-  if (!(target as Extract<JsonNode, { type: 'object' }>).members.every(({ key }) => HOOK_COMMAND_FIELDS.has(key))) {
-    throw invalid(`hooks.${event}[${block}].hooks[${index}] holds a field that rh did not write beside its command; rh writes nothing`);
+  if (!held || JSON.parse(content.slice(held.value.start, held.value.end)) !== command) {
+    throw invalid(`${at} does not hold the planned command; rh writes nothing`);
   }
-  const ownedEntry = (entry as Extract<JsonNode, { type: 'object' }>).members.every(({ key }) => HOOK_ENTRY_FIELDS.has(key));
+  const { hooks: _hooks, ...rest } = JSON.parse(content.slice(entry!.start, entry!.end)) as Record<string, unknown>;
+  const hook = JSON.parse(content.slice(target!.start, target!.end)) as Record<string, unknown>;
+  if (hasRepeatedKey(entry!) || hasRepeatedKey(target!) || hookRenderingKey({ event, block: rest, hook }) !== position.rendering) {
+    throw invalid(`${at} is not a hook that a released rh wrote; rh writes nothing`);
+  }
   // Innermost first: the first container that keeps another item takes the removal.
   const levels: [Container, number][] = [
     [commands!.value as Container, index],
-    ...(ownedEntry ? [
-      [blocks!.value as Container, block],
-      [hooks!.value as Container, (hooks!.value as Extract<JsonNode, { type: 'object' }>).members.indexOf(blocks!)],
-      [document!, document!.members.indexOf(hooks!)],
-    ] as [Container, number][] : []),
+    [blocks!.value as Container, block],
+    [hooks!.value as Container, (hooks!.value as Extract<JsonNode, { type: 'object' }>).members.indexOf(blocks!)],
+    [document!, document!.members.indexOf(hooks!)],
   ];
-  const [container, at] = levels.find(([candidate]) => items(candidate).length > 1) ?? levels.at(-1)!;
-  return removeItem(content, container, at);
+  const [container, item] = levels.find(([candidate]) => items(candidate).length > 1) ?? levels.at(-1)!;
+  return removeItem(content, container, item);
 }
 
 export function jsonDocumentIsEmpty(content: string): boolean {

@@ -842,14 +842,18 @@ const fragmentKey = (record: FragmentRecord): string => `${record.owner}\0${reco
  * added it, and to its backup text when the transaction overrode a user
  * value. A file of which the transaction took a whole copy goes back to that
  * copy first. A file that the transaction created goes only when the file did not
- * exist before it and still holds exactly what it wrote. Every other entry
- * stays and is returned.
+ * exist before it and still holds exactly what it wrote. A file whose
+ * unrecorded text the transaction removed (a new `external_backup` and no
+ * fragment change) gets its record before the transaction only when the
+ * caller already put the file back to that backup; otherwise the record
+ * stays. Every other entry stays and is returned.
  */
 export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer | null, transaction: string): HostConfigRollbackResult {
   const paths = hostConfigPathsAt(harness);
   const before = snapshot === null ? EMPTY_LEDGER : parseLedger(snapshot, `${paths.ledger} (transaction snapshot)`);
   const now = readLedger(paths);
   const unresolved: string[] = [];
+  const files = { ...before.files };
   for (const path of Object.keys(now.files) as HostPath[]) {
     const record = now.files[path]!;
     const previous = before.files[path];
@@ -858,6 +862,14 @@ export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer 
     const changed = all.filter((entry) => earlier.find((old) => fragmentKey(old) === fragmentKey(entry))?.inserted !== entry.inserted);
     const dropped = earlier.filter((old) => !all.some((entry) => fragmentKey(entry) === fragmentKey(old)));
     unresolved.push(...dropped.map((old) => `${path}: ${old.selector}`));
+    if (!changed.length && !dropped.length && record.external_backup && record.external_backup !== previous?.external_backup) {
+      const current = expectedOf(observeFile(path).observation, path);
+      if (!current.existed || current.sha256 !== record.external_backup) {
+        files[path] = record;
+        unresolved.push(path);
+      }
+      continue;
+    }
     if (!changed.length) continue;
     const { observation, bytes } = observeFile(path);
     const current = expectedOf(observation, path);
@@ -895,7 +907,7 @@ export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer 
   }
   const pathRecords = rollbackWholePaths(paths, before, now, transaction, unresolved);
   const kept = removeCreatedDirectories(now.directories.filter((directory) => !before.directories.includes(directory)));
-  const restored: HostConfigLedger = { ...before, paths: pathRecords, directories: [...before.directories, ...kept] };
+  const restored: HostConfigLedger = { ...before, files, paths: pathRecords, directories: [...before.directories, ...kept] };
   // No ledger before the transaction and no record left: the ledger file goes, as it was.
   if (snapshot === null && JSON.stringify(restored) === JSON.stringify(EMPTY_LEDGER)) rmSync(paths.ledger, { force: true });
   else writeLedger(paths, restored);
