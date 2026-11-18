@@ -32,8 +32,6 @@ export interface UninstallOptions {
   runtimeLock?: RuntimeTransactionContext;
   /** Rules files whose recorded block goes also when the user edited it (`--remove-edited-block`); the whole file goes to the vault first. */
   removeEditedBlocks?: readonly string[];
-  /** `--with-tools`: the removable shared tools go too, each entry only while it holds its recorded bytes (#2853). */
-  withTools?: boolean;
 }
 /**
  * `restored`: the result was checked equal to the state before rh.
@@ -157,59 +155,33 @@ function sameRevert(left: readonly HostConfigRevertEntry[], right: readonly Host
   return key(left) === key(right);
 }
 
-const TOOL_ITEMS: Readonly<Record<HostConfigToolRevertEntry['action'], [UninstallAction, string]>> = {
-  removed: ['restored', 'rh installed it and it held the recorded bytes'],
-  already_absent: ['note', 'already absent; the tool record goes'],
-  kept_edited: ['unresolved', 'changed since rh installed it; preserved with its tool record'],
-  kept_nonempty: ['kept', 'rh created this directory, and it holds other files'],
-};
-
 function toolSummary(tool: string, record: ToolRecord): string {
   const where = Object.keys(record.paths).map((path) => path.split(/[\\/]/u).at(-1)).join(', ');
   return `${tool} ${record.version}${where ? ` (${where})` : ''}${record.path_entry ? ' and its user PATH entry' : ''}`;
 }
 
 /**
- * The tool items. A default uninstall keeps every tool record and prints one
- * `kept` line, so a later `--with-tools` run still finds them; it releases
- * the entries that are gone, so a target that comes back is not rh's.
- * `--with-tools` reverts the removable tools; Bun stays. Both plan as a dry
- * run, and the apply must equal the plan.
+ * The tool items. An uninstall keeps every tool record and prints one `kept`
+ * line (#2853); it releases the entries that are gone, so a target that comes
+ * back is not rh's. The release plans as a dry run, and the apply must equal it.
  */
 interface ToolPlan {
   readonly items: UninstallItem[];
-  readonly removable: ToolId[];
   readonly released: readonly HostConfigToolRevertEntry[];
-  readonly plan: readonly HostConfigToolRevertEntry[];
 }
 
 function planTools(env: NodeJS.ProcessEnv, gate: HostConfigGate, opts: UninstallOptions): ToolPlan {
   const paths = hostConfigPaths(env);
   const tools = Object.entries((opts.dryRun ? readProjectedLedger : readLedger)(paths).tools) as [ToolId, ToolRecord][];
-  const none: ToolPlan = { items: [], removable: [], released: [], plan: [] };
-  if (!tools.length) return none;
-  const port = userPathPort(env, paths.harness);
-  const removable = tools.filter(([, record]) => record.removable).map(([tool]) => tool);
-  if (!opts.withTools) {
-    const released = gate.releaseAbsentTools(port, { dryRun: true });
-    const gone = new Set(released.map((entry) => entry.path));
-    const left = tools.map(([tool, record]) => [tool, { ...record, paths: Object.fromEntries(Object.entries(record.paths).filter(([key]) => !gone.has(key))),
-      ...(record.path_entry && gone.has(userPathLabel(record.path_entry.entry)) ? { path_entry: undefined } : {}) }] as const)
-      .filter(([, record]) => Object.keys(record.paths).length || record.path_entry);
-    const stay = left.filter(([tool]) => removable.includes(tool)).map(([tool]) => tool);
-    const items = released.map(toolItem);
-    if (left.length) items.push({ path: paths.ledger, action: 'kept', reason: `shared tools that rh installed stay: ${left.map(([tool, record]) => toolSummary(tool, record)).join('; ')}${stay.length ? `; remove ${stay.join(', ')} with: rh uninstall --with-tools` : ''}` });
-    return { ...none, items, released };
-  }
-  const kept: UninstallItem[] = tools.filter(([, record]) => !record.removable)
-    .map(([tool, record]) => ({ path: Object.keys(record.paths)[0] ?? paths.ledger, action: 'kept', reason: `rh never removes ${toolSummary(tool, record)}` }));
-  const plan = gate.revertTools(removable, port, { dryRun: true });
-  return { ...none, items: [...kept, ...plan.map(toolItem)], removable, plan };
-}
-
-function toolItem(entry: HostConfigToolRevertEntry): UninstallItem {
-  const [action, reason] = TOOL_ITEMS[entry.action];
-  return { path: entry.path, action, reason: `${entry.tool}: ${entry.path.startsWith('HKCU') && entry.action === 'removed' ? 'rh appended this entry, and it is unchanged' : reason}` };
+  if (!tools.length) return { items: [], released: [] };
+  const released = gate.releaseAbsentTools(userPathPort(env, paths.harness), { dryRun: true });
+  const gone = new Set(released.map((entry) => entry.path));
+  const left = tools.map(([tool, record]) => [tool, { ...record, paths: Object.fromEntries(Object.entries(record.paths).filter(([key]) => !gone.has(key))),
+    ...(record.path_entry && gone.has(userPathLabel(record.path_entry.entry)) ? { path_entry: undefined } : {}) }] as const)
+    .filter(([, record]) => Object.keys(record.paths).length || record.path_entry);
+  const items: UninstallItem[] = released.map((entry) => ({ path: entry.path, action: 'note', reason: `${entry.tool}: already absent; the tool record goes` }));
+  if (left.length) items.push({ path: paths.ledger, action: 'kept', reason: `shared tools that rh installed stay: ${left.map(([tool, record]) => toolSummary(tool, record)).join('; ')}` });
+  return { items, released };
 }
 
 function userPathPort(env: NodeJS.ProcessEnv, cwd: string) {
@@ -417,8 +389,8 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       retireRecords = true;
     }
   }
-  // After the retirement check: a tool that stays does not keep the install state, though it sets the exit code.
-  let tools: ToolPlan = { items: [], removable: [], released: [], plan: [] };
+  // After the retirement check: a tool that stays does not keep the install state; a failed tool read sets the exit code.
+  let tools: ToolPlan = { items: [], released: [] };
   try { tools = planTools(env, gate, opts); } catch (error) { unresolved(hostConfigPaths(env).ledger, String((error as Error).message)); }
   items.push(...tools.items);
   items.push({ path: join(home, '.repo-harness'), action: 'kept', reason: 'archives, runtime history and the MCP config retained; third-party packages/plugins retained' });
@@ -451,10 +423,6 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       if (hostPaths.length && !sameRevert(gate.revert(hostPaths), hostRevert)) throw new Error(`configuration changed after preview: ${hostPaths.join(', ')}`);
       if (tools.released.length && JSON.stringify(gate.releaseAbsentTools(userPathPort(env, hostConfigPaths(env).harness))) !== JSON.stringify(tools.released)) {
         throw new Error(`configuration changed after preview: ${hostConfigPaths(env).ledger}`);
-      }
-      if (tools.removable.length) {
-        const applied = gate.revertTools(tools.removable, userPathPort(env, hostConfigPaths(env).harness));
-        if (JSON.stringify(applied) !== JSON.stringify(tools.plan)) throw new Error(`configuration changed after preview: ${tools.removable.join(', ')}`);
       }
       for (const path of [...originals.keys()]) {
         const parent = dirname(path);

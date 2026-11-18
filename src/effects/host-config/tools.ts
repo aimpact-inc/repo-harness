@@ -8,7 +8,7 @@ import { observePathEntry, sameCommitted } from './whole-path';
 
 /**
  * The shared tools of the host-config ledger (#2853): the Windows user `Path`
- * value behind `gate.addUserPathEntry` and `gate.revertTools`, and the check
+ * value behind `gate.addUserPathEntry` and `gate.releaseAbsentTools`, and the check
  * that an hc on PATH is the one that rh recorded.
  */
 

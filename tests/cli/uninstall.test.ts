@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import { prepareInstallSelectionSwitch, versions } from '../../src/cli/installer/install-profile';
 import { beforeAll, test, expect } from 'bun:test';
 import { installStateFixturePath, recordLegacyInstallOwnership, recordPluginSelection, seedGlobalPackageFixture, seedPathRecords, withTempHome } from '../helpers/install-ownership';
-import { runInstall, runUninstall } from '../../src/cli/commands/install';
+import { runInstall } from '../../src/cli/commands/install';
 import { ensureHerdrCore } from '../../src/cli/commands/global-runtime';
 import { HC_MIN_VERSION } from '../../src/core/terminal/herdr-pin';
 import { startFakeHcRelease, writeFakeUserPathPowershell } from '../helpers/fake-hc';
@@ -539,16 +539,15 @@ async function installHerdrCore(root:string,env:NodeJS.ProcessEnv,windows:boolea
   expect(step.status,step.detail).toBe('ok');
  }finally{server.stop();}
 }
-// Ownership probes (#2853): P2 `edited` (the entry differs: reported, never removed); P1 `absent` (the entry is gone at a read: its
-// record goes, and a later re-created entry stays); P4 `rolled-back` (a release, then a failure and the transaction rollback, then a hand
-// reinstall of identical bytes: the files stay) and `write-fails` (the PATH write fails after the file removals: the removals stay committed,
-// and a hand reinstall of identical bytes stays). P3 (a claim needs the bytes on disk now) is the producer's: the hc update and Bun import cases.
+// Ownership probes (#2853): P2 `edited` (the entry differs: it and its record stay); P1 `absent` (the entry is gone at a read: its record
+// goes, and a later re-created entry is not rh's); P4 `rolled-back` (a release, then the transaction rollback, then a hand reinstall of
+// identical bytes: no claim comes back). P3 (a claim needs the bytes on disk now) is the producer's: the hc update and Bun import cases.
 test.each([
  {platform:'unix',change:'none'},{platform:'windows',change:'none'},
  {platform:'unix',change:'edited'},{platform:'windows',change:'edited'},
  {platform:'unix',change:'absent'},{platform:'windows',change:'absent'},
- {platform:'unix',change:'rolled-back'},{platform:'windows',change:'write-fails'},
-])('a fresh hc install: the default uninstall keeps it with one kept line; --with-tools removes only unchanged entries ($platform, $change)',async({platform,change})=>{
+ {platform:'unix',change:'rolled-back'},
+])('a fresh hc install: the uninstall keeps it with one kept line and releases only the entries that are gone ($platform, $change)',async({platform,change})=>{
  const edited=change==='edited';
  const root=realpathSync(mkdtempSync(join(tmpdir(),'user-uninstall-tools-'))),home=join(root,'home'),windows=platform==='windows';
  const systemRoot=join(root,'Windows'),registry=join(root,'registry.json');
@@ -557,13 +556,16 @@ test.each([
  writeFakeUserPathPowershell(join(systemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe'),registry,join(root,'powershell.log'));
  const userPath={existed:true,kind:'ExpandString',raw:'%USERPROFILE%\\bin'};writeFileSync(registry,JSON.stringify(userPath));
  const dir=windows?join(home,'AppData','Local','Programs','herdr-core'):join(home,'.local','bin');
+ const shared=(result:ReturnType<typeof runUserUninstall>)=>result.items.filter((item)=>item.action==='kept'&&item.reason.startsWith('shared tools'));
+ const keptLine=(summary:string)=>({path:join(home,'.repo-harness/config/ledger.json'),action:'kept' as const,reason:`shared tools that rh installed stay: herdr-core ${HC_MIN_VERSION} (${summary}`});
+ const files=windows?'herdr-core.exe, conpty, hc.exe)':'herdr-core, hc)';
  try{
   await installHerdrCore(root,env,windows);
   const installed=hostTree(home),registryInstalled=readFileSync(registry,'utf8');
   const kept=runUserUninstall({target:'both',env});
-  expect(kept.items.filter((item)=>item.action==='kept'&&item.reason.startsWith('shared tools'))).toEqual([{path:join(home,'.repo-harness/config/ledger.json'),action:'kept',
-   reason:`shared tools that rh installed stay: herdr-core ${HC_MIN_VERSION} (${windows?'herdr-core.exe, conpty, hc.exe) and its user PATH entry':'herdr-core, hc)'}; remove herdr-core with: rh uninstall --with-tools`}]);
+  expect(shared(kept)).toEqual([keptLine(windows?`${files} and its user PATH entry`:files)]);
   expect([kept.exitCode,hostTree(home),readFileSync(registry,'utf8')]).toEqual([0,installed,registryInstalled]);
+  const recorded=ledger(home).tools;
   if(change==='absent'){
    // The entry is gone at the next read, which releases it; then the same bytes or text come back.
    const copies=windows?null:['herdr-core','hc'].map((name)=>[name,lstatSync(join(dir,name)).isSymbolicLink()]as const);const bytes=windows?null:readFileSync(join(dir,'herdr-core'));
@@ -574,56 +576,29 @@ test.each([
    if(windows)writeFileSync(registry,JSON.stringify({...userPath,raw:`${userPath.raw};${dir}`}));
    else{writeFileSync(join(dir,'herdr-core'),bytes!,{mode:0o755});symlinkSync('herdr-core',join(dir,'hc'));expect(copies).toEqual([['herdr-core',false],['hc',true]]);}
   }
-  const save=join(root,'saved');cpSync(dir,save,{recursive:true,verbatimSymlinks:true});
-  const reinstall=()=>{for(const name of readdirSync(save))if(!existsSync(join(dir,name)))cpSync(join(save,name),join(dir,name),{recursive:true,verbatimSymlinks:true});};
   if(change==='rolled-back'){
    // The release is a fact: the rollback of the transaction that made it does not bring the claims back.
+   const save=join(root,'saved');cpSync(dir,save,{recursive:true,verbatimSymlinks:true});
    const snapshot=readFileSync(join(home,'.repo-harness/config/ledger.json'));
    rmSync(join(dir,'hc'));rmSync(join(dir,'herdr-core'));
    openHostConfigGate({env}).releaseAbsentTools(null);
    expect(rollbackHostConfigTransaction(join(home,'.repo-harness'),snapshot,mkdtempSync(join(root,'tx-'))).unresolved).toEqual([]);
-   reinstall();
-  }
-  if(change==='write-fails'){
-   writeFileSync(`${registry}.fail`,'write-exit');
-   const failed=runUserUninstall({target:'both',env,withTools:true});
-   expect([failed.exitCode,existsSync(join(dir,'herdr-core.exe')),failed.lines.some((line)=>line.includes('the user Path write exited with status 1'))]).toEqual([1,false,true]);
-   // The removals reached the ledger before the PATH write failed; only the PATH entry keeps its record.
-   expect(ledger(home).tools['herdr-core'].paths).toEqual({});
-   rmSync(`${registry}.fail`);mkdirSync(dir,{recursive:true});reinstall();
+   for(const name of readdirSync(save))cpSync(join(save,name),join(dir,name),{recursive:true,verbatimSymlinks:true});
   }
   if(edited&&windows)writeFileSync(registry,JSON.stringify({...userPath,raw:`${userPath.raw};${dir.toUpperCase()}`}));
   if(edited&&!windows){appendFileSync(join(dir,'herdr-core'),'# user patch\n');writeFileSync(join(dir,'other-tool'),'user\n');}
-  expect(runUninstall({target:'codex',location:'global',withTools:true,env} as never).exitCode).toBe(2);
   const before=hostTree(home),registryBefore=readFileSync(registry,'utf8');
-  const preview=runUserUninstall({target:'both',env,withTools:true,dryRun:true});
+  const again=runUserUninstall({target:'both',env});
+  // The uninstall changes no tool file and no PATH value; only the ledger can change.
   expect([hostTree(home),readFileSync(registry,'utf8')]).toEqual([before,registryBefore]);
-  const removed=runUserUninstall({target:'both',env,withTools:true});
-  expect({exitCode:preview.exitCode,items:preview.items}).toEqual({exitCode:removed.exitCode,items:removed.items});
-  const tool=(path:string)=>removed.items.find((item)=>item.path===path)?.action;
-  if(change==='write-fails'){
-   expect(removed.exitCode,removed.lines.join('\n')).toBe(0);
-   expect([readdirSync(dir).sort(),JSON.parse(readFileSync(registry,'utf8')),ledger(home).tools]).toEqual([['conpty','hc.exe','herdr-core.exe'],userPath,{}]);
+  if(change==='absent'&&windows){
+   // The files stay recorded; the re-added PATH entry is not rh's.
+   expect([again.exitCode,shared(again)]).toEqual([0,[keptLine(files)]]);
+   expect(Object.keys(ledger(home).tools['herdr-core'])).not.toContain('path_entry');
   }else if(change==='absent'||change==='rolled-back'){
-   expect(removed.exitCode,removed.lines.join('\n')).toBe(0);
-   // The re-created entries are not rh's: on Windows the files go and the re-added PATH entry stays; on Unix every file stays.
-   if(windows)expect([existsSync(dir),JSON.parse(readFileSync(registry,'utf8')).raw]).toEqual([false,`${userPath.raw};${dir}`]);
-   else expect(readdirSync(dir).sort()).toEqual(['hc','herdr-core']);
-   expect(ledger(home).tools).toEqual({});
-  }else if(!edited){
-   expect(removed.exitCode,removed.lines.join('\n')).toBe(0);
-   // Nothing that the hc step created stays: the install dir, the directories above it that it created, and the PATH entry.
-   expect(existsSync(windows?join(home,'AppData'):join(home,'.local'))).toBe(false);
-   expect(JSON.parse(readFileSync(registry,'utf8'))).toEqual(userPath);
-   expect(ledger(home).tools).toEqual({});
-  }else if(windows){
-   expect([removed.exitCode,existsSync(dir),tool(`HKCU\\Environment\\Path: ${dir}`)]).toEqual([1,false,'unresolved']);
-   expect(readFileSync(registry,'utf8')).toBe(registryBefore);
-   expect(Object.keys(ledger(home).tools['herdr-core'])).toContain('path_entry');
+   expect([again.exitCode,shared(again),ledger(home).tools]).toEqual([0,[],{}]);
   }else{
-   // The changed binary and the user's file stay; the unchanged link goes.
-   expect([removed.exitCode,tool(join(dir,'herdr-core')),tool(join(dir,'hc')),tool(dir),readdirSync(dir).sort()]).toEqual([1,'unresolved','restored','kept',['herdr-core','other-tool']]);
-   expect(Object.keys(ledger(home).tools['herdr-core'].paths)).toEqual([join(dir,'herdr-core')]);
+   expect([again.exitCode,shared(again),ledger(home).tools]).toEqual([0,[keptLine(windows?`${files} and its user PATH entry`:files)],recorded]);
   }
  }finally{rmSync(root,{recursive:true,force:true});}
 },30_000);

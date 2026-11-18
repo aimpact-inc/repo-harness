@@ -32,25 +32,3 @@ export function insertUserPathEntry(value: UserPathValue, entry: string): { read
     record: { entry, inserted, kind: value.kind, value_existed: value.existed },
   };
 }
-
-/**
- * The value without rh's entry, in the kind that it has now; null when the
- * entry is not there exactly once with its recorded separator, so it stays.
- * A value that rh created and that holds only its entry goes (`existed: false`).
- */
-export function removeUserPathEntry(value: UserPathValue, record: UserPathEntryRecord): UserPathValue | null {
-  if (!value.existed) return null;
-  const parts = value.raw.split(';');
-  const matches = parts.flatMap((part, index) => (part === record.entry ? [index] : []));
-  if (matches.length !== 1) return null;
-  const index = matches[0]!;
-  const start = parts.slice(0, index).reduce((offset, part) => offset + part.length + 1, 0);
-  const leading = record.inserted.startsWith(';');
-  if (leading && index === 0) return null;
-  // `;<entry>` takes the separator before it; `<entry>` takes the one after it, which a later append added.
-  const from = leading ? start - 1 : start;
-  const to = start + record.entry.length + (!leading && index < parts.length - 1 ? 1 : 0);
-  const raw = value.raw.slice(0, from) + value.raw.slice(to);
-  if (raw === '' && !record.value_existed) return { existed: false, kind: value.kind, raw: '' };
-  return { existed: true, kind: value.kind, raw };
-}

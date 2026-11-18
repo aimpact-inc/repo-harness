@@ -190,8 +190,7 @@ export interface ProfileTextRecord {
 /**
  * A shared tool that an rh run installed. Each path is a whole entry that
  * the run created; an entry that existed before is never in a record.
- * `rh uninstall --with-tools` removes a path only while it equals
- * `committed`, and a created directory only when it is empty.
+ * `rh uninstall` keeps the tools; an entry that is gone loses its record.
  */
 export interface ToolRecord {
   /** `rh-install`: `rh install` or `rh update`; `rh-bootstrap`: install.sh or install.ps1. */

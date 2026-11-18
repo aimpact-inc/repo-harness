@@ -10,7 +10,7 @@ import { hookRenderingKey, jsonFragment, removeJsonHookCommand } from '../../src
 import { sha256Prefixed } from '../../src/core/evidence/sha256';
 import { tomlFragment } from '../../src/core/host-config/toml-fragment';
 import { markedBlock } from '../../src/core/host-config/marked-block';
-import { insertUserPathEntry, listsUserPathEntry, removeUserPathEntry, type UserPathValue } from '../../src/core/host-config/path-entry';
+import { insertUserPathEntry, listsUserPathEntry } from '../../src/core/host-config/path-entry';
 
 /** A `key=value` line format: the selector is the key. */
 function keyLineMatch(content: string, selector: string): RegExpExecArray | null {
@@ -757,24 +757,11 @@ test.each([
   ['an empty value', { existed: true, kind: 'String', raw: '' }, DIR],
   ['one entry', { existed: true, kind: 'ExpandString', raw: '%USERPROFILE%\\bin' }, `%USERPROFILE%\\bin;${DIR}`],
   ['a trailing separator', { existed: true, kind: 'ExpandString', raw: 'a;' }, `a;${DIR}`],
-] as const)('the user PATH entry goes into %s and its removal gives the same value and kind back', (_label, before, after) => {
+] as const)('the user PATH entry goes into %s and keeps the value kind', (_label, before, after) => {
   expect(listsUserPathEntry(before.raw, DIR)).toBe(false);
-  const { next, record } = insertUserPathEntry(before, DIR);
+  const { next } = insertUserPathEntry(before, DIR);
   expect(next).toEqual({ existed: true, kind: before.kind, raw: after });
   expect(listsUserPathEntry(next.raw, `${DIR.toUpperCase()}\\`)).toBe(true);
-  expect(removeUserPathEntry(next, record)).toEqual(before);
-});
-
-test.each([
-  ['a later append stays', `a;${DIR};b`, 'a;b'],
-  ['a duplicate stays', `a;${DIR};${DIR}`, null],
-  ['a case change stays', `a;${DIR.toLowerCase()}`, null],
-  ['an edited entry stays', `a;${DIR}\\sub`, null],
-  ['an entry moved to the front stays', `${DIR};a`, null],
-] as const)('the user PATH entry after a user edit: %s', (_label, raw, left) => {
-  const { record } = insertUserPathEntry({ existed: true, kind: 'ExpandString', raw: 'a' }, DIR);
-  const value: UserPathValue = { existed: true, kind: 'ExpandString', raw };
-  expect(removeUserPathEntry(value, record)).toEqual(left === null ? null : { ...value, raw: left });
 });
 
 // Tool records (#2853). P3: an entry that existed before the writer ran is never claimed, also when the writer rewrites it.
@@ -799,8 +786,7 @@ test.each([
     paths: { [join(dir, 'tool')]: { committed: { type: 'file', sha256: sha256Prefixed(Buffer.from('rh\n')) } } } } } : {});
 });
 
-// Ownership probe P4: a claim released on observation (its target was absent) stays released through a rollback, so a
-// hand reinstall of identical bytes after it is not rh's.
+// Ownership probe P4: a claim released on observation (its target was absent) stays released through a rollback.
 test.each([
   { label: 'the whole tool', gone: ['a', 'b'], left: [] },
   { label: 'one path', gone: ['a'], left: ['b'] },
@@ -816,7 +802,4 @@ test.each([
   f.gate().releaseAbsentTools(null);
   expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
   expect(Object.keys(f.ledger().tools['herdr-core']?.paths ?? {})).toEqual(left.map((name) => join(dir, name)));
-  for (const name of gone) writeFileSync(join(dir, name), `${name}\n`);
-  f.gate().revertTools(['herdr-core'], null);
-  expect(readdirSync(dir).sort()).toEqual([...gone].sort());
 });
