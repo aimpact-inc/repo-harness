@@ -75,6 +75,9 @@ test('global setup preserves an explicit global disabled choice and rejects malf
     expect(() => readGlobalArchitectureConfiguration(f.env)).toThrow();
     expect(readFileSync(f.path, 'utf8')).toBe(invalid);
   }
+  // JSON.parse quotes an identifier-shaped token of the file; the message names the file only (I1, #3164).
+  writeFileSync(f.path, '{"k": sk_FAKE_SECRET_12345}');
+  expect(() => readGlobalArchitectureConfiguration(f.env)).toThrow(new Error(`Invalid global configuration at ${f.path}: the file is not valid JSON`));
 });
 
 test('adoption removes architecture settings and every other policy key outside the schema', () => {

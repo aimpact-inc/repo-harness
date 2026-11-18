@@ -69,7 +69,9 @@ export function restoreGlobalConfiguration(path: string, bytes: Buffer | null, r
   const scope = globalRuntimeScope({ HOME: dirname(dirname(path)) });
   assertRuntimeTransactionContext(runtimeLock, scope);
   if (bytes !== null) {
-    const value: unknown = JSON.parse(bytes.toString('utf8'));
+    let value: unknown;
+    // The JSON parse error can quote text of the file, so it never reaches the message (I1, #3164).
+    try { value = JSON.parse(bytes.toString('utf8')); } catch { throw new GlobalConfigurationError('config_invalid', 'The configuration preimage is not a valid JSON object.'); }
     if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new GlobalConfigurationError('config_invalid', 'The configuration preimage is not a valid JSON object.');
   }
   replaceGlobalConfiguration(path, bytes, () => assertRuntimeTransactionContext(runtimeLock, scope));
@@ -160,7 +162,9 @@ export function readGlobalConfiguration(env: NodeJS.ProcessEnv = process.env): {
     assertUniqueConfigurationMembers(text);
   } catch (error) {
     if (error instanceof GlobalConfigurationError) throw error;
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`Invalid global configuration at ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    // The JSON parse error can quote text of the file, so it never reaches the message (I1, #3164).
+    const detail = error instanceof SyntaxError ? 'the file is not valid JSON' : error instanceof Error ? error.message : String(error);
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`Invalid global configuration at ${path}: ${detail}`);
     value = {};
   }
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Global configuration must be an object: ${path}`);
