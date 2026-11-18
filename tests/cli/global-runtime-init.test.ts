@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, lstatSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, lstatSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { legacySections } from '../../scripts/check-released-managed-values';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
@@ -17,7 +17,7 @@ import { installStateFixturePath, recordInstallOwnership, recordPluginSelection,
 import { writeFakeHc } from '../helpers/fake-hc';
 import wazaRules from '../../src/core/skill-surface/waza-shared-rules.json';
 import { syncWazaSharedRules } from "../../src/cli/installer/waza-rules";
-import { beginInstallHostTransaction, installProfileHostMutationPaths, installProfileTransactionPaths, readInstallState, rollbackInstallHostTransaction, versions } from '../../src/cli/installer/install-profile';
+import { beginInstallHostTransaction, installProfileHostMutationPaths, installProfileTransactionPaths, installStateStatus, readInstallState, rollbackInstallHostTransaction, versions } from '../../src/cli/installer/install-profile';
 import { applyGlobalContextRefresh, GLOBAL_RULES_EDITED, GLOBAL_RULES_END, inspectGlobalContext, preflightGlobalContextRefresh, renderGlobalRulesBlock, setReportingLanguage } from '../../src/cli/installer/global-context';
 import { CandidateRequestProtocolRetiredError, encodeCandidateRequest, parseCandidateRequest, type CandidateReconciliationRequest } from '../../src/cli/commands/candidate-reconciliation';
 import type { PluginId } from '../../src/core/skill-surface/plugin-manifest';
@@ -1766,7 +1766,7 @@ exit 0
     }
   });
 
-  test('full installs bundled cross-review while mutable marketplace skills stay disabled by default', () => {
+  test('full setup keeps an unowned bundled skill and commits the other skills', () => {
     registerArchitecturePlugin();
     const tmp = mkdtempSync(join(tmpdir(), 'repo-harness-global-full-cross-review-'));
     const home = join(tmp, 'home');
@@ -1782,6 +1782,9 @@ exit 0
       setupConsoleFixture(home, source);
       writeExecutable(tmp, join(fakeBin, 'bun'), '#!/bin/bash\nif [[ "${1:-}" == "--version" ]]; then echo 1.4.0; fi\nexit 0\n');
 
+      const portal = join(home, '.claude/skills/repo-harness-herdr-portal');
+      mkdirSync(portal, { recursive: true });
+      writeFileSync(join(portal, 'SKILL.md'), 'user portal\n');
       const result = runGlobalRuntimeSetup({
         sourceRoot: source,
         cwd: repo,
@@ -1796,6 +1799,10 @@ exit 0
 
       expect(result.exitCode).toBe(0);
       expect(result.steps.find((step) => step.step === 'configure Waza skills')?.status).toBe('skipped');
+      expect(result.steps.find(step => step.step === 'cross-review skill repo-harness-herdr-portal')).toMatchObject({
+        status: 'skipped', detail: expect.stringContaining(`rh has no record of it, so rh does not replace it: ${portal}`),
+      });
+      expect(readFileSync(join(portal, 'SKILL.md'), 'utf8')).toBe('user portal\n');
       expect(result.steps.find((step) => step.step === 'cross-review skill repo-harness-cross-review')?.status).toBe('ok');
       expect(existsSync(join(home, '.claude', 'skills', 'repo-harness-cross-review', 'SKILL.md'))).toBe(true);
       expect(existsSync(join(home, '.claude', 'skills', 'merge-gate', 'SKILL.md'))).toBe(false);
@@ -2370,6 +2377,71 @@ exit 0
       rmSync(tmp, { recursive: true, force: true });
     }
   }, 30_000);
+
+  test.each(['moved SKILL.md', 'dangling link'])('a complete update commits sibling skills when the gate keeps the edited sole cross-review skill (%s)', edit => {
+    const tmp = mkdtempSync(join(tmpdir(), 'repo-harness-cli-update-refused-skill-'));
+    const home = join(tmp, 'home');
+    const repo = join(tmp, 'repo');
+    const fakeBin = join(tmp, 'bin');
+    const plugins = ['cross-review', 'peer-runtime'] as const;
+    try {
+      mkdirSync(home, { recursive: true });
+      mkdirSync(repo, { recursive: true });
+      mkdirSync(fakeBin, { recursive: true });
+      writeFakeHc(fakeBin);
+      mkdirSync(join(home, '.repo-harness'), { recursive: true });
+      setupManagedRuntimeReadback(tmp, home, fakeBin);
+      const candidateVersion = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf-8')).version as string;
+      installCandidateRuntimeFixture(home, candidateVersion);
+      // The complete projection requires the launcher that `bun add -g` links.
+      mkdirSync(join(home, '.bun', 'bin'), { recursive: true });
+      writeExecutable(tmp, join(home, '.bun', 'bin', 'rh'), '#!/bin/sh\n');
+      writeFileSync(installStateFixturePath({ HOME: home }), `${JSON.stringify({
+        protocol: 4, selection: plugins, ...versions(plugins), transaction_id: 'before-refusal',
+        applied_at: '2026-07-14T00:00:00.000Z', pi_packages: [], previous: null,
+      })}\n`);
+      writeExecutable(tmp, join(fakeBin, 'bun'), `#!/bin/bash\nif [[ "\${1:-}" == "--version" ]]; then echo 1.4.0; exit 0; fi\nif [[ "\${1:-}" == "pm" && "\${2:-}" == "view" ]]; then printf '%s\\n' '${JSON.stringify(candidateVersion)}'; exit 0; fi\nif [[ "\${1:-}" == *.ts || "\${1:-}" == - ]]; then exec "${process.execPath}" "$@"; fi\nexit 0\n`);
+      const env = {
+        ...sanitizedChildEnv(home),
+        HOME: home,
+        REPO_HARNESS_HOME: join(home, '.repo-harness'),
+        BUN_INSTALL: join(home, '.bun'),
+        PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+        REPO_HARNESS_BUN_EXECUTABLE: join(fakeBin, 'bun'),
+        REPO_HARNESS_CLAUDE_EXECUTABLE: join(fakeBin, 'claude'),
+      };
+      // rh wrote the only cross-review copy; the user then moved its SKILL.md out or replaced it with a dangling link.
+      const crossReview = join(home, '.claude', 'skills', 'repo-harness-cross-review');
+      mkdirSync(dirname(crossReview), { recursive: true });
+      openHostConfigGate({ env }).writePaths([{ path: crossReview, owner: 'cross-review', entry: { type: 'directory', source: join(ROOT, 'assets', 'skills', 'repo-harness-cross-review') } }]);
+      const danglingTarget = join(tmp, 'missing-cross-review');
+      let kept: string[] = [];
+      if (edit === 'dangling link') {
+        rmSync(crossReview, { recursive: true });
+        symlinkSync(danglingTarget, crossReview);
+      } else {
+        renameSync(join(crossReview, 'SKILL.md'), join(tmp, 'SKILL.md'));
+        kept = readdirSync(crossReview).sort();
+      }
+
+      const res = spawnSync(process.execPath, [CLI, 'update', '--target', 'claude', '--no-external-skills', '--no-codegraph', '--json'], { cwd: repo, encoding: 'utf-8', env });
+
+      expect(res.status, `${res.stderr}\n${res.stdout}`).toBe(0);
+      expect((JSON.parse(res.stdout).steps as { step: string }[]).find(step => step.step === 'reconcile installed candidate runtime')).toMatchObject({
+        status: 'ok', detail: expect.stringContaining('scope=complete'),
+        stderr: expect.stringContaining(`it changed since rh wrote it, so rh does not replace it: ${crossReview}`),
+      });
+      if (edit === 'dangling link') expect(readlinkSync(crossReview)).toBe(danglingTarget);
+      else expect(readdirSync(crossReview).sort()).toEqual(kept);
+      expect(existsSync(join(home, '.claude', 'skills', 'repo-harness-herdr-portal', 'SKILL.md'))).toBe(true);
+      const installed = readInstallState(env);
+      expect(installed?.transaction_id).not.toBe('before-refusal');
+      // Status still reports the refused copy until the user moves it out.
+      expect(installStateStatus(installed!, env).drift).toMatchObject({ missing_owners: ['cross-review'], surface_drift: [] });
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   test('update host transaction compensates Obsidian Skill projections when a later step fails', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'repo-harness-cli-update-obsidian-rollback-'));
@@ -3012,6 +3084,7 @@ if [[ -n "$output" ]]; then cat "$source" > "$output"; else cat "$source"; fi
         const result = run(true, evidence === 'unselected host' ? 'codex' : 'both');
         expect(result.status).toBe('failed');
         expect(result.detail).toContain('rh has no record of it');
+        expect(result.detail).toContain('Move the rule to a backup directory. If it is a staging rule, move any existing host copies of the same rule there too.');
         expect(snapshot()).toEqual(before);
         expect(storedBytes(env)).toEqual(state);
         expect(recordsOf(env)).toHaveLength(0);

@@ -100,6 +100,8 @@ export type McpLocalConfigCheck = (env: NodeJS.ProcessEnv) => { readonly status:
 export interface GlobalRuntimeStep {
   /** The Pi package source that this step registered, so the install state records it. */
   owned_pi_package?: string;
+  /** The host path that the gate refused to replace; the selection commit counts the user's copy as present. */
+  refused_path?: string;
   step: string;
   status: "ok" | "skipped" | "failed";
   command?: readonly string[];

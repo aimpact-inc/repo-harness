@@ -9,7 +9,7 @@ import { namingTomlFile } from '../../core/host-config/toml-fragment';
 import { migrateCodexConfigRecords } from './codex-config-migration';
 import { migrateJsonConfigRecords } from './json-config-migration';
 import { pathRecordIsCurrent, pathRecordKey, pathRecordsDigest, readPathRecords, readPathRecordSet, registerSupportedPathRecords, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
-import type { PathCommitted, PathRecord, PathRecordHost, PathRecordKind } from '../../core/host-config/types';
+import { HostConfigError, type PathCommitted, type PathRecord, type PathRecordHost, type PathRecordKind } from '../../core/host-config/types';
 import { globalContextBackupEligible, globalContextPath } from './global-context';
 import { acquireRuntimeTransactionLock, assertRuntimeTransactionContext, globalRuntimeScope, runtimeTransactionLockRelativePath, runtimeTransactionRoot, withRuntimeTransactionLock, type RuntimeTransactionContext, type RuntimeTransactionLock, type RuntimeTransactionScope } from '../../effects/locking/runtime-transaction-lock';
 import { exclusiveDirectoryLockOwnerLiveness, readExclusiveDirectoryLockOwner } from '../../effects/locking/exclusive-directory-lock';
@@ -299,7 +299,7 @@ const STAGED_SKILLS = 'staged-skills.json';
 /** Presence and ownership before the Skills CLI runs. No user bytes are copied. Retired by #2852. */
 export function initializeStagedSkillObservations(transaction: string, env: NodeJS.ProcessEnv): void {
   const metadata = join(transaction, STAGED_SKILLS);
-  if (lstatSync(metadata, { throwIfNoEntry: false })) { readStagedSkillObservations(transaction, env); return; }
+  if (lstatSync(metadata, { throwIfNoEntry: false })) { readStagedSkillObservations(transaction, env, true); return; }
   const prior = readPathRecords(env);
   const { externalSkills } = catalogMutationPathSkillNames(loadSkillSurfaceCatalog());
   const observations = externalSkills.flatMap(name => {
@@ -315,18 +315,31 @@ export function initializeStagedSkillObservations(transaction: string, env: Node
   writeFileSync(metadata, JSON.stringify(observations), { flag: 'wx', mode: 0o600 });
 }
 
-function readStagedSkillObservations(transaction: string, env: NodeJS.ProcessEnv): readonly StagedSkillObservation[] {
+function readStagedSkillObservations(transaction: string, env: NodeJS.ProcessEnv, reportRetired = false): readonly StagedSkillObservation[] {
   const metadata = join(transaction, STAGED_SKILLS);
+  const invalid = 'invalid staged skill observations in runtime transaction';
   let raw: unknown;
   try { raw = JSON.parse(readFileSync(metadata, 'utf8')); }
-  catch { throw new Error('invalid staged skill observations in runtime transaction'); }
-  const { externalSkills } = catalogMutationPathSkillNames(loadSkillSurfaceCatalog());
-  const allowed = new Set(externalSkills.map(name => join(stagedSkillRoot(requireHome(env)), name)));
-  if (!Array.isArray(raw) || raw.some(entry => !isRecord(entry) || typeof entry.path !== 'string' || !allowed.has(entry.path)
-    || !isSurfaceOwner(entry.owner) || entry.owner !== ownerForInstallPath(entry.path, env) || typeof entry.existed !== 'boolean' || typeof entry.owned !== 'boolean')) throw new Error('invalid staged skill observations in runtime transaction');
+  catch { throw new Error(invalid); }
+  const root = stagedSkillRoot(requireHome(env));
+  if (!Array.isArray(raw) || raw.some(entry => !isRecord(entry) || typeof entry.path !== 'string'
+    || join(root, basename(entry.path)) !== entry.path || entry.path === root || !isSurfaceOwner(entry.owner)
+    || typeof entry.existed !== 'boolean' || typeof entry.owned !== 'boolean')) throw new Error(invalid);
   const observations = raw as StagedSkillObservation[];
   if (new Set(observations.map(entry => entry.path)).size !== observations.length) throw new Error('duplicate staged skill observation');
-  return observations;
+
+  const catalog = loadSkillSurfaceCatalog();
+  const { externalSkills } = catalogMutationPathSkillNames(catalog);
+  const retired: string[] = [];
+  const current = observations.filter(entry => {
+    const name = basename(entry.path);
+    if (!catalog.packages.some(pkg => pkg.name === name)) { retired.push(entry.path); return false; }
+    if (!externalSkills.includes(name) || entry.owner !== ownerForInstallPath(entry.path, env, catalog)) throw new Error(invalid);
+    return true;
+  });
+  // The candidate reports at handoff. Later ledger rebuilds can read the same observations.
+  if (reportRetired) for (const path of retired) process.stderr.write(`[install] skipped retired staged skill ${JSON.stringify(path)}\n`);
+  return current;
 }
 
 /** Record only newly staged entries or an entry whose prior record was current. Retired by #2852. */
@@ -562,6 +575,10 @@ export function migrateRuntimeHostConfig(env: NodeJS.ProcessEnv): void {
   requireHome(env);
   migrateCodexConfigRecords(env);
   migrateJsonConfigRecords(env);
+}
+
+export function hostPathReplacementRefused(error: unknown): error is HostConfigError {
+  return error instanceof HostConfigError && error.code === 'host_config_replacement_refused';
 }
 
 /** Standalone writers use the same runtime lock and transaction as install. */
@@ -1009,11 +1026,14 @@ function ownedProbeSkills(catalog: SkillSurfaceCatalog, owner: SurfaceOwner) {
  * Each host root requires the owned skills that list its host. The set is
  * present when one root holds its non-empty required set completely.
  */
-function completeHostSkillSetEvidence(home: string, hosts: readonly SkillHost[], packages: ReturnType<typeof ownedProbeSkills>, env: NodeJS.ProcessEnv): string[] {
+function completeHostSkillSetEvidence(home: string, hosts: readonly SkillHost[], packages: ReturnType<typeof ownedProbeSkills>,
+  env: NodeJS.ProcessEnv, refused: readonly string[]): string[] {
   for (const host of hosts) {
     const root = hostSkillRoot(home, host, env);
-    const paths = packages.filter(pkg => pkg.hosts.includes(host)).map(pkg => join(root, pkg.name, 'SKILL.md'));
-    if (paths.length > 0 && paths.every(existsSync)) return paths;
+    // A skill entry that the gate refused to replace is present evidence: it holds the user's copy, a dangling link included.
+    const paths = packages.filter(pkg => pkg.hosts.includes(host))
+      .map(pkg => join(root, pkg.name)).map(skill => refused.includes(skill) ? skill : join(skill, 'SKILL.md'));
+    if (paths.length > 0 && paths.every(path => refused.includes(path) ? lstatExists(path) : existsSync(path))) return paths;
   }
   return [];
 }
@@ -1036,7 +1056,7 @@ function allOrNone(home: string, hosts: readonly SkillHost[], relativePaths: rea
   return relativePaths.every((relative) => evidence.some((path) => path.endsWith(relative))) ? evidence : [];
 }
 
-function probeCore(env: NodeJS.ProcessEnv, catalog: SkillSurfaceCatalog, hosts: readonly SkillHost[]): OwnerProbe {
+function probeCore(env: NodeJS.ProcessEnv, catalog: SkillSurfaceCatalog, hosts: readonly SkillHost[], refused: readonly string[]): OwnerProbe {
   const home = requireHome(env);
   const adapters = ([
     { path: join(home, '.codex', 'hooks.json'), host: 'codex' },
@@ -1052,7 +1072,7 @@ function probeCore(env: NodeJS.ProcessEnv, catalog: SkillSurfaceCatalog, hosts: 
     'handoff': canonicalEvidence(home, hosts, ['references/handoff.md'], env),
     'host-adapters': adapters,
     'workflow': canonicalEvidence(home, hosts, ['src/core/workflow/profile.ts'], env),
-    'core-skills': completeHostSkillSetEvidence(home, hosts, coreFacades, env),
+    'core-skills': completeHostSkillSetEvidence(home, hosts, coreFacades, env, refused),
     'agent-fleet': fleet,
     'verifier': fleet.some((path) => /\/gatekeeper\.(?:toml|md)$/.test(path))
       ? canonicalEvidence(home, hosts, ['src/effects/review-runner/task-oar-host.ts'], env)
@@ -1068,25 +1088,27 @@ function probePi(env: NodeJS.ProcessEnv): OwnerProbe {
   return probe({ 'pi-package': piPackagePresent(source, env) ? [source] : [] });
 }
 
-function probeOwners(plugins: readonly PluginId[], env: NodeJS.ProcessEnv): Partial<Record<SurfaceOwner, OwnerProbe>> {
+function probeOwners(plugins: readonly PluginId[], env: NodeJS.ProcessEnv, refused: readonly string[]): Partial<Record<SurfaceOwner, OwnerProbe>> {
   const home = requireHome(env);
   const catalog = loadSkillSurfaceCatalog();
   const hosts = selectedSkillHosts(plugins);
-  const probes: Partial<Record<SurfaceOwner, OwnerProbe>> = { core: probeCore(env, catalog, hosts) };
+  const probes: Partial<Record<SurfaceOwner, OwnerProbe>> = { core: probeCore(env, catalog, hosts, refused) };
   for (const id of plugins) {
     if (isCommandPlugin(id)) continue;
     if (id === 'pi') probes.pi = probePi(env);
-    else probes[id] = probe({ skills: completeHostSkillSetEvidence(home, hosts, ownedProbeSkills(catalog, id), env) });
+    else probes[id] = probe({ skills: completeHostSkillSetEvidence(home, hosts, ownedProbeSkills(catalog, id), env, refused) });
   }
   return probes;
 }
 
+/** `refused`: host skill paths that the gate refused to replace in the current run. Only a selection commit passes them. */
 export function installStateStatus(
   state: InstallState,
   env: NodeJS.ProcessEnv = process.env,
   records: PathRecords = readPathRecords(env),
+  refused: readonly string[] = [],
 ): InstallStateStatus {
-  const probes = probeOwners(enabledPlugins(state), env);
+  const probes = probeOwners(enabledPlugins(state), env, refused);
   const missing = (Object.entries(probes) as [SurfaceOwner, OwnerProbe][])
     .filter(([, result]) => result.status === 'missing')
     .map(([owner]) => owner);
@@ -1288,7 +1310,9 @@ function snapshot(state: InstallState): InstallStateSnapshot {
 /**
  * Commit a selection. `plugins` is the recorded set (`record` of the resolver).
  * A `kept` plugin is recorded but did not run: its ledger surfaces stay as
- * they are, and neither its probe nor its surfaces gate this commit.
+ * they are, and neither its probe nor its surfaces gate this commit. A
+ * `refused` skill path holds a user copy that the gate kept: it counts as
+ * present here, and status reports the missing skill until the user moves it.
  */
 export function applyInstallSelection(
   selection: PluginSelection,
@@ -1299,6 +1323,7 @@ export function applyInstallSelection(
   options: {
     readonly additionalPiPackages?: readonly string[];
     readonly kept?: readonly PluginId[];
+    readonly refused?: readonly string[];
   } = {},
 ): { readonly plan: InstallPlan; readonly state: InstallState } {
   if (selection !== 'all' && selection.join(',') !== plugins.join(',')) {
@@ -1333,7 +1358,7 @@ export function applyInstallSelection(
     previous: current === null ? null : snapshot(current),
   };
   const status = installStateStatus({ ...state, plugins: state.plugins.filter(plugin => !kept.includes(plugin.id)) }, env,
-    Object.fromEntries(Object.entries(committed).filter(([, record]) => !(kept as readonly string[]).includes(record.owner))));
+    Object.fromEntries(Object.entries(committed).filter(([, record]) => !(kept as readonly string[]).includes(record.owner))), options.refused);
   if (status.drift.status !== 'consistent') {
     throw new Error(
       `install projection is incomplete: missing=${status.drift.missing_owners.map(owner => `${owner}(${status.probes[owner]?.missing.join('+')})`).join(',') || '(none)'}; surface_drift=${status.drift.surface_drift.join(',') || '(none)'}`,

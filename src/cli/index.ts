@@ -308,6 +308,10 @@ function newPiPackages(result?: GlobalRuntimeResult): string[] {
   return result?.steps.flatMap(step => step.owned_pi_package ? [step.owned_pi_package] : []) ?? [];
 }
 
+function refusedPaths(result: GlobalRuntimeResult): string[] {
+  return result.steps.flatMap(step => step.refused_path ? [step.refused_path] : []);
+}
+
 function compensatePiPackages(sources: Iterable<string>, env: NodeJS.ProcessEnv) {
   const unresolved: string[] = [];
   const failures: unknown[] = [];
@@ -461,7 +465,7 @@ export function runCandidateRuntimeReconciliation(
     let ownershipManifestDigest: string | null = null;
     if (complete) {
       applyInstallSelection(state.selection, resolved.record, env, new Date(), { backup_root: request.transaction_backup_root }, {
-        additionalPiPackages: newPiPackages(runtime), kept: resolved.kept.map(entry => entry.id),
+        additionalPiPackages: newPiPackages(runtime), kept: resolved.kept.map(entry => entry.id), refused: refusedPaths(runtime),
       });
       // Released parents parse this receipt field by name in a handoff and its rollback; its value is now the path-record digest.
       ownershipManifestDigest = pathRecordsDigest(readPathRecords(env));
@@ -585,7 +589,7 @@ export function runTransactionalRuntimeRefresh(
           const { state, resolved } = recordedSelection;
           if (selectionChanged(state, resolved)) {
             applyInstallSelection(state.selection, resolved.record, transactionEnv, new Date(), transaction, {
-              additionalPiPackages: newPiPackages(result), kept: resolved.kept.map(entry => entry.id),
+              additionalPiPackages: newPiPackages(result), kept: resolved.kept.map(entry => entry.id), refused: refusedPaths(result),
             });
           }
           result = { ...result, lines: [...selectionLines(resolved), ...commandPluginRepairLines(state.selection), ...result.lines] };
@@ -682,7 +686,7 @@ async function runGlobalRuntimeBootstrap(
       process.env,
       new Date(),
       transaction,
-      { additionalPiPackages: newPiPackages(result), kept: resolved.kept.map(entry => entry.id) },
+      { additionalPiPackages: newPiPackages(result), kept: resolved.kept.map(entry => entry.id), refused: refusedPaths(result) },
     ).state
   ));
   const result = transaction.result;

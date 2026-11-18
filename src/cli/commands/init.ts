@@ -29,8 +29,8 @@ import {
 import type { PluginId } from "../../core/skill-surface/plugin-manifest";
 import { hostSkillRoot, SKILL_HOSTS, type SkillHost } from "../../effects/host-skill-roots";
 import { pathRecordKey } from "../../effects/host-config/path-records";
-import { openHostConfigGate, type HostConfigPathWrite } from "../../effects/host-config/gate";
-import { assertArchitecturePolicySelection, withHostConfigTransaction } from "../installer/install-profile";
+import { openHostConfigGate } from "../../effects/host-config/gate";
+import { assertArchitecturePolicySelection, hostPathReplacementRefused, withHostConfigTransaction } from "../installer/install-profile";
 import { runProcess as runBoundedProcess } from "../../effects/process-runner";
 import { validateRepoAdoptionTarget } from "../repo-adoption/target";
 import { runAdoptionApply, runAdoptionPlan } from "./adoption-plan";
@@ -97,6 +97,8 @@ export interface InitCommandOptions {
 }
 
 export interface InitStep {
+  /** The host path that the gate refused to replace; the selection commit counts the user's copy as present. */
+  refused_path?: string;
   step: string;
   status: "ok" | "skipped" | "failed";
   command?: string[];
@@ -208,13 +210,13 @@ function syncBundledItemsAtHome(
   transaction?: string,
 ): InitStep[] {
   const steps: InitStep[] = [];
-  const ownerEnv = { ...(env ?? process.env), HOME: home ?? undefined };
+  const ownerEnv: NodeJS.ProcessEnv = { ...(env ?? process.env), HOME: home ?? undefined };
   const globalRoot = bunGlobalPackageRoot(env);
   const useLinks = isBunGlobalPackageSource(sourceRoot, env)
     && (env ?? process.env).REPO_HARNESS_LINK_INSTALLED_COPIES !== '0';
   try {
     withHostConfigTransaction(ownerEnv, transaction, root => {
-      const writes: HostConfigPathWrite[] = [];
+      const gate = openHostConfigGate({ env: ownerEnv });
       for (const { skill, host, step, owner } of skills) {
         if (target !== 'both' && target !== host) continue;
         if (!home) throw new Error('HOME is required to resolve host skill roots');
@@ -225,14 +227,22 @@ function syncBundledItemsAtHome(
           steps.push({ step, status: 'skipped', detail: 'bundled source not found at ' + source });
           continue;
         }
-        writes.push({ path: join(destinationRoot, skill), owner,
-          entry: useLinks ? { type: 'symlink', target: join(globalRoot!, 'assets', 'skills', skill) } : { type: 'directory', source } });
-        steps.push({ step, status: 'ok', detail: 'synced ' + join(destinationRoot, skill) });
-      }
-      const written = openHostConfigGate({ env: ownerEnv }).writePaths(writes, { transaction: root });
-      for (const step of steps) {
-        const path = step.detail?.startsWith('synced ') ? step.detail.slice('synced '.length) : null;
-        if (path && !written.includes(pathRecordKey(ownerEnv, path))) step.detail = 'already present';
+        const path = join(destinationRoot, skill);
+        try {
+          const written = gate.writePaths([{ path, owner,
+            entry: useLinks ? { type: 'symlink', target: join(globalRoot!, 'assets', 'skills', skill) } : { type: 'directory', source }
+          }], { transaction: root });
+          steps.push({ step, status: 'ok', detail: written.includes(pathRecordKey(ownerEnv, path)) ? 'synced ' + path : 'already present' });
+        } catch (error) {
+          if (!hostPathReplacementRefused(error)) throw error;
+          // An ownership refusal leaves this skill untouched and need not abort setup.
+          const status = transaction === undefined ? 'failed' : 'skipped';
+          steps.push(status === 'skipped' ? { step, status, detail: error.message, refused_path: path } : { step, status, detail: error.message });
+          // A candidate sends a receipt on stdout. Its parent displays stderr.
+          if (status === 'skipped' && ownerEnv.REPO_HARNESS_RUNTIME_RECONCILIATION_PARENT === '1') {
+            process.stderr.write(`[runtime] ${status}: ${step} - ${error.message}\n`);
+          }
+        }
       }
     });
   } catch (error) {

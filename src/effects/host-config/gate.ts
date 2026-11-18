@@ -396,7 +396,7 @@ function ownsEntry(record: PathRecord | undefined, owner: string, key: string): 
 function refusal(path: string, record: PathRecord | undefined, owner: string): HostConfigError {
   const reason = !record ? 'rh has no record of it' : record.owner !== owner ? `rh records it for ${record.owner}`
     : record.kind === 'user_managed' ? 'the user keeps it' : 'it changed since rh wrote it';
-  return new HostConfigError('host_config_invalid_state', `${reason}, so rh does not replace it: ${path}`);
+  return new HostConfigError('host_config_replacement_refused', `${reason}, so rh does not replace it: ${path}`);
 }
 
 /** The bytes of a user file that `replace` lets rh write over, in the vault; only a regular file qualifies. */
