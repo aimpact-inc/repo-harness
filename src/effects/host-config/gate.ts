@@ -1,13 +1,15 @@
 import { lstatSync, readFileSync, rmSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import { planFile, type FilePlan, type PlannedFragment } from '../../core/host-config/plan';
-import { fileFormatOf, fragmentFormat } from '../../core/host-config/registry';
+import { fileFormatOf, fragmentFormat, type FragmentFormat } from '../../core/host-config/registry';
+import { isMarkedBlockSelector } from '../../core/host-config/marked-block';
 import {
   HostConfigError,
   expectedFromCommitted,
   sameExpected,
   type ExpectedFile,
+  type FileBaseline,
   type FileCommitted,
   type FileFormat,
   type FileRecord,
@@ -21,6 +23,7 @@ import {
   type HostPath,
   type PathCommitted,
   type PathRecord,
+  type RetiredMaterial,
   type Sha256,
   type SkippedOverride,
   type TextRange,
@@ -38,6 +41,7 @@ import {
   pathRecordOf,
   putVault,
   readLedger,
+  readProjectedLedger,
   readVault,
   removeCreatedDirectories,
   removeTarget,
@@ -121,11 +125,19 @@ export interface HostConfigRevertEntry {
    * `released`: the file already equals its backup (rh's fragments were its
    * text), so only the records go. `already_absent`: the file is missing, so
    * only its records go. `kept_edited`: the file and its records stay because
-   * the file is not as rh recorded it.
+   * the file is not as rh recorded it. `failed`: the reverted bytes would not
+   * equal the known baseline, so nothing is written and every record and
+   * vault copy stays.
    */
-  readonly action: 'removed' | 'restored' | 'text_removed' | 'released' | 'already_absent' | 'kept_edited';
+  readonly action: 'removed' | 'restored' | 'text_removed' | 'released' | 'already_absent' | 'kept_edited' | 'failed';
   /** The selectors of the fragments that stay in a kept file. */
   readonly kept?: readonly string[];
+  /**
+   * `proved`: the result was checked equal to the file before rh. `unknown`:
+   * rh has no record of the file before it, so equality cannot be proved.
+   */
+  readonly baseline?: 'proved' | 'unknown';
+  readonly code?: 'host_config_restore_mismatch';
 }
 
 /** A fragment that an earlier rh version wrote, as its old record names it. */
@@ -161,6 +173,19 @@ export interface HostConfigRevertOptions {
 
 export interface HostConfigGateOptions {
   readonly env?: NodeJS.ProcessEnv;
+  /**
+   * A dry run or a preview: the gate reads the ledger as the schema move would
+   * leave it (`readProjectedLedger`), every revert is a dry run, and every
+   * other write is refused.
+   */
+  readonly preview?: boolean;
+}
+
+/** The result of `removeEditedBlock`: the vault path of the whole-file copy; null in a dry run. */
+export interface HostConfigBlockRemoval {
+  readonly path: string;
+  readonly selector: string;
+  readonly recovery: string | null;
 }
 
 export interface HostConfigGate {
@@ -227,6 +252,12 @@ export interface HostConfigGate {
   removeUnrecordedText(path: string, expectedSha256: Sha256, removals: readonly ((content: string) => FragmentEdit)[]): Sha256 | null;
   /** The fragment records of one path, its links followed. */
   recorded(path: string): readonly FragmentRecord[];
+  /**
+   * The user's word to take out the one recorded marked block of `path`, also
+   * when the user edited it. The whole file goes to the vault as a recovery
+   * copy, recorded before the write; GC never deletes it.
+   */
+  removeEditedBlock(path: string, options?: { readonly dryRun?: boolean }): HostConfigBlockRemoval;
 }
 
 const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
@@ -632,17 +663,22 @@ function revertWholePaths(paths: HostConfigPaths, only: readonly string[], optio
   const report: HostConfigRevertEntry[] = [];
   /** The entries of the dropped records: a created directory goes only with an entry inside it. */
   const dropped: string[] = [];
+  const released: Sha256[] = [];
   for (const key of keys) {
     const record = records[key];
     if (!record) continue;
     const action = revertWholePath(paths, key, record, options.transaction);
-    if (action !== 'kept_edited') { delete records[key]; dropped.push(pathRecordEntry(key, record)); }
+    if (action !== 'kept_edited') {
+      if (record.backup) released.push(record.backup);
+      delete records[key];
+      dropped.push(pathRecordEntry(key, record));
+    }
     report.push({ path: key, action });
   }
   const attempted = ledger.directories.filter((directory) => dropped.some((key) => isPathInside(directory, key)));
   const kept = removeCreatedDirectories(attempted);
   const directories = ledger.directories.filter((directory) => !attempted.includes(directory) || kept.includes(directory));
-  writeLedger(paths, { ...ledger, paths: records, directories });
+  writeLedger(paths, { ...ledger, paths: records, directories, retired: retire(ledger.retired, released) });
   return report;
 }
 
@@ -666,10 +702,14 @@ function revertFragments(fileFormat: FileFormat | undefined, content: string, re
   const kept: string[] = [];
   for (const record of records) {
     const format = fragmentFormat(fileFormat, record.selector);
-    let range: TextRange | null = null;
     // A file that the strategy can no longer read keeps every fragment.
-    try { range = format?.strategy.locate(content, record.selector) ?? null; } catch (error) { if (!(error instanceof HostConfigError)) throw error; }
-    const intact = format !== null && record.inserted !== '' && range !== null && content.slice(range.start, range.end) === record.inserted;
+    const located = format ? locatedText(format, content, record.selector) : undefined;
+    if (format && located !== undefined && isInverse(format, record, located, backup)) {
+      // The text is already what the revert would leave: only the record goes.
+      removed.push(record);
+      continue;
+    }
+    const intact = format !== null && record.inserted !== '' && located === record.inserted;
     if (!format || !intact || (record.kind !== 'add' && backup === null)) {
       kept.push(record.selector);
       continue;
@@ -679,6 +719,29 @@ function revertFragments(fileFormat: FileFormat | undefined, content: string, re
     removed.push(record);
   }
   return { content, removed, kept };
+}
+
+/** The text at the selector, null when it is absent; undefined when the strategy cannot read the content. */
+function locatedText(format: FragmentFormat, content: string, selector: string): string | null | undefined {
+  try {
+    const range = format.strategy.locate(content, selector);
+    return range ? content.slice(range.start, range.end) : null;
+  } catch (error) {
+    if (error instanceof HostConfigError) return undefined;
+    throw error;
+  }
+}
+
+/**
+ * The inverse of a fragment: no text for an `add`, and the selector's text in
+ * the backup for any other kind. With no backup, or a backup that the strategy
+ * cannot read, there is no proof.
+ */
+function isInverse(format: FragmentFormat, record: FragmentRecord, located: string | null, backup: string | null): boolean {
+  if (record.kind === 'add') return located === null;
+  if (backup === null) return false;
+  const before = locatedText(format, backup, record.selector);
+  return before !== undefined && before === located;
 }
 
 /** What a revert knows about one recorded file. */
@@ -703,6 +766,10 @@ export interface FileRevertInput {
   /** Every record of the file. */
   readonly all: readonly FragmentRecord[];
   readonly filtered: boolean;
+  /** The file before rh; absent for a record that a migration has not written yet, which counts as unknown. */
+  readonly baseline?: FileBaseline;
+  /** The vault reference of `backup`. */
+  readonly backupReference?: Sha256 | null;
 }
 
 export interface FileRevertPlan {
@@ -718,6 +785,21 @@ export interface FileRevertPlan {
  * out, and a dry run before a migration reports it for records not written yet.
  */
 export function planFileRevert(input: FileRevertInput): FileRevertPlan {
+  return checkBaseline(input, planRevertWrite(input));
+}
+
+/**
+ * A whole-file restore needs a backup that is the file before rh: an
+ * `overrides-only` file takes its backup at the first override, after rh may
+ * have added to it, so it goes by the per-fragment rule. An unknown baseline
+ * keeps the backup as the restore target (a migration's adopted state).
+ */
+function backupIsBaseline(input: FileRevertInput): boolean {
+  const baseline = input.baseline;
+  return baseline?.state !== 'known' || (baseline.existed && input.backupReference === baseline.sha256);
+}
+
+function planRevertWrite(input: FileRevertInput): FileRevertPlan {
   const { path, kind, own, all, filtered } = input;
   const format = input.format ?? fileFormatOf(path);
   // A dangling link is still there, so the file is not absent: it and its records stay.
@@ -725,28 +807,48 @@ export function planFileRevert(input: FileRevertInput): FileRevertPlan {
   if (!filtered && !input.existed) {
     return { entry: { path, action: 'already_absent' }, write: null, record: 'drop', removed: all };
   }
-  if (!filtered && !input.externalChange && input.committed && (kind === 'created' || input.hasBackup)) {
+  if (!filtered && !input.externalChange && input.committed && (kind === 'created' || (input.hasBackup && backupIsBaseline(input)))) {
     if (kind === 'created') return { entry: { path, action: 'removed' }, write: { kind: 'remove' }, record: 'drop', removed: all };
     const backup = input.backup();
     if (input.bytes !== null && backup.equals(input.bytes)) return { entry: { path, action: 'released' }, write: null, record: 'drop', removed: all };
     return { entry: { path, action: 'text_removed' }, write: { kind: 'replace', content: backup }, record: 'drop', removed: all };
   }
   if (!input.existed || input.bytes === null) return { entry: { path, action: 'kept_edited', kept: own.map((entry) => entry.selector) }, write: null, record: 'keep', removed: [] };
-  const result = revertFragments(format, decode(input.bytes, path), own, all, input.hasBackup ? decode(input.backup(), path) : null);
+  const original = decode(input.bytes, path);
+  const result = revertFragments(format, original, own, all, input.hasBackup ? decode(input.backup(), path) : null);
   const removed = new Set(result.removed);
   const remaining = all.filter((entry) => !removed.has(entry));
+  const changed = result.content !== original;
   const content = Buffer.from(result.content, 'utf8');
   const withKept = (action: HostConfigRevertEntry['action']): HostConfigRevertEntry => result.kept.length ? { path, action, kept: result.kept } : { path, action };
   if (filtered || result.kept.length || remaining.length) {
     // The file keeps its record; `committed` follows the write, and an outside edit stays recorded.
-    const action = result.kept.length || !removed.size ? 'kept_edited' : 'text_removed';
-    return { entry: withKept(action), write: removed.size ? { kind: 'replace', content } : null, record: removed.size ? 'update' : 'keep', removed: result.removed };
+    const action = result.kept.length || !removed.size ? 'kept_edited' : changed ? 'text_removed' : 'released';
+    return { entry: withKept(action), write: changed ? { kind: 'replace', content } : null, record: changed ? 'update' : 'keep', removed: result.removed };
   }
   // A changed file with no fragment to take out (a created file) stays with its record.
   if (!removed.size && !(kind === 'text_block' && !input.hasBackup)) return { entry: withKept('kept_edited'), write: null, record: 'keep', removed: [] };
   const empty = kind === 'created' && all.some((record) => fragmentFormat(format, record.selector)?.empty(result.content) === true);
-  const write = empty ? { kind: 'remove' as const } : removed.size ? { kind: 'replace' as const, content } : null;
-  return { entry: withKept(empty ? 'removed' : removed.size ? 'text_removed' : 'released'), write, record: 'drop', removed: result.removed };
+  const write = empty ? { kind: 'remove' as const } : changed ? { kind: 'replace' as const, content } : null;
+  return { entry: withKept(empty ? 'removed' : changed ? 'text_removed' : 'released'), write, record: 'drop', removed: result.removed };
+}
+
+/**
+ * The check before a write (D1, #2851): when the baseline is known, the file
+ * has no outside change and every fragment goes, the result must be the file
+ * before rh, by hash or by absence. A mismatch writes nothing and keeps every
+ * record. A filtered revert, an outside change or an unknown baseline proves
+ * nothing about the baseline and is not checked.
+ */
+function checkBaseline(input: FileRevertInput, plan: FileRevertPlan): FileRevertPlan {
+  const baseline = input.baseline;
+  if (plan.record !== 'drop' || !input.existed) return plan;
+  if (baseline?.state !== 'known') return { ...plan, entry: { ...plan.entry, baseline: 'unknown' } };
+  if (input.filtered || input.externalChange || !input.committed) return plan;
+  const result = plan.write === null ? input.bytes : plan.write.kind === 'remove' ? null : plan.write.content;
+  const equal = baseline.existed ? result !== null && sha256Prefixed(result) === baseline.sha256 : result === null;
+  if (equal) return { ...plan, entry: { ...plan.entry, baseline: 'proved' } };
+  return { entry: { path: input.path, action: 'failed', code: 'host_config_restore_mismatch' }, write: null, record: 'keep', removed: [] };
 }
 
 /** The requested path itself is there, before its links are followed: lstat of the leaf. */
@@ -788,11 +890,12 @@ function matchesFilter(record: FragmentRecord, filter: RevertFilter): boolean {
  * after all files, only in an unfiltered revert; a directory that still holds
  * content keeps its record for a later revert.
  */
-function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined, options: HostConfigRevertOptions): HostConfigRevertEntry[] {
+function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined, options: HostConfigRevertOptions, read: LedgerReader): HostConfigRevertEntry[] {
   const dryRun = options.dryRun === true;
   const filter: RevertFilter = { owner: options.owner, selectors: options.selectors };
   const filtered = filter.owner !== undefined || filter.selectors !== undefined;
-  const ledger = readLedger(paths);
+  const ledger = read(paths);
+  const released: Sha256[] = [];
   const files = { ...ledger.files };
   let fragments = ledger.fragments;
   const report: HostConfigRevertEntry[] = [];
@@ -809,12 +912,13 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
     const plan = planFileRevert({
       path, format: record.format, kind: record.kind, hasBackup: record.backup !== null, externalChange: record.external_change, committed: isCommitted(record, current),
       existed: current.existed, requestedPresent: only !== undefined && requestedPresent(only[index]!), bytes, backup: () => readVault(paths, record.backup!), own, all, filtered,
+      baseline: record.baseline, backupReference: record.backup,
     });
     if (!dryRun && plan.write) {
       if (plan.write.kind === 'remove') removeTarget(path, current);
       else replaceTarget(path, plan.write.content, current);
     }
-    if (plan.record === 'drop') delete files[path];
+    if (plan.record === 'drop') { released.push(...materialOf(record)); delete files[path]; }
     else if (plan.record === 'update' && plan.write?.kind === 'replace') {
       files[path] = { ...record, committed: { type: 'file', sha256: sha256Prefixed(plan.write.content) }, external_change: record.external_change || !isCommitted(record, current) };
     }
@@ -826,8 +930,21 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
   const attempted = filtered ? [] : only ? ledger.directories.filter((directory) => targets.some((path) => isPathInside(directory, path))) : ledger.directories;
   const kept = removeCreatedDirectories(attempted);
   const directories = ledger.directories.filter((directory) => !attempted.includes(directory) || kept.includes(directory));
-  writeLedger(paths, { ...ledger, files, fragments, directories });
+  writeLedger(paths, { ...ledger, files, fragments, directories, retired: retire(ledger.retired, released) });
   return report;
+}
+
+/** The vault copies that a file record holds. */
+function materialOf(record: FileRecord): Sha256[] {
+  return [record.backup, record.external_backup].filter((reference): reference is Sha256 => typeof reference === 'string');
+}
+
+/** Retire released vault copies now; a copy retired before restarts its 30 days. */
+function retire(retired: readonly RetiredMaterial[], released: readonly Sha256[]): RetiredMaterial[] {
+  if (!released.length) return [...retired];
+  const at = new Date().toISOString();
+  const fresh = [...new Set(released)];
+  return [...retired.filter((entry) => !fresh.includes(entry.sha256)), ...fresh.map((sha256) => ({ sha256, at }))];
 }
 
 function adoptFile(paths: HostConfigPaths, target: string, adoption: HostConfigAdoption): 'adopted' | 'recorded' {
@@ -1023,9 +1140,70 @@ function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, no
   return records;
 }
 
+type LedgerReader = (paths: HostConfigPaths) => HostConfigLedger;
+
+/**
+ * The one recorded marked block of the file goes, with no check of its text.
+ * The recovery copy and its record reach the vault and the ledger before the
+ * write; a failed write puts the other records back and keeps the copy.
+ */
+function removeEditedBlock(paths: HostConfigPaths, target: string, dryRun: boolean, read: LedgerReader): HostConfigBlockRemoval {
+  const path = dryRun ? resolveHostPath(paths, target) : admitPaths(paths, [target])[0]!;
+  const ledger = read(paths);
+  refuseRecordedPaths(ledger, [path]);
+  const record = ledger.files[path];
+  const blocks = ledger.fragments.filter((entry) => entry.file === path && isMarkedBlockSelector(entry.selector));
+  if (!record || blocks.length !== 1) throw new HostConfigError('host_config_invalid_state', `rh records no single marked block in this file: ${path}`);
+  const block = blocks[0]!;
+  const { observation, bytes } = observeFile(path);
+  if (bytes === null) throw new HostConfigError('host_config_invalid_state', `not a regular file: ${path}`);
+  const content = decode(bytes, path);
+  const format = fragmentFormat(record.format ?? fileFormatOf(path), block.selector)!;
+  // An unbalanced block throws here, before any copy or write.
+  if (!format.strategy.locate(content, block.selector)) throw new HostConfigError('host_config_invalid_state', `the recorded block is not in the file: ${path}`);
+  const all = ledger.fragments.filter((entry) => entry.file === path);
+  const edit = format.remove(content, block.selector, all);
+  const result = Buffer.from(content.slice(0, edit.at) + edit.inserted + content.slice(edit.at + edit.removed.length), 'utf8');
+  if (dryRun) return { path, selector: block.selector, recovery: null };
+  const copy = putVault(paths, bytes);
+  const at = new Date().toISOString();
+  const fragments = ledger.fragments.filter((entry) => entry !== block);
+  const files = { ...ledger.files };
+  const remains = fragments.some((entry) => entry.file === path);
+  if (remains) files[path] = { ...record, committed: { type: 'file', sha256: sha256Prefixed(result) } };
+  else delete files[path];
+  const recovery = [...ledger.recovery, { file: path, sha256: copy, at }];
+  writeLedger(paths, { ...ledger, files, fragments, recovery, retired: remains ? [...ledger.retired] : retire(ledger.retired, materialOf(record)) });
+  try { replaceTarget(path, result, expectedOf(observation, path)); }
+  catch (error) {
+    writeLedger(paths, { ...ledger, recovery });
+    throw error;
+  }
+  return { path, selector: block.selector, recovery: join(paths.vault, copy.slice('sha256:'.length)) };
+}
+
+function refusePreview(): never {
+  throw new HostConfigError('host_config_invalid_state', 'a preview gate writes nothing');
+}
+
 export function openHostConfigGate(options: HostConfigGateOptions = {}): HostConfigGate {
   const env = options.env ?? process.env;
   const paths = hostConfigPaths(env);
+  const preview = options.preview === true;
+  const read: LedgerReader = preview ? readProjectedLedger : readLedger;
+  const recorded = (path: string) => {
+    const resolved = resolveHostPath(paths, path);
+    return read(paths).fragments.filter((entry) => entry.file === resolved);
+  };
+  if (preview) {
+    return {
+      apply: refusePreview, writePaths: refusePreview, delegate: refusePreview, revertPaths: refusePreview,
+      keepUserPaths: refusePreview, adoptReplacedPath: refusePreview, adopt: refusePreview, removeUnrecordedText: refusePreview,
+      revert: (only, revertOptions) => revertFiles(paths, only, { ...revertOptions, dryRun: true }, read),
+      removeEditedBlock: (path) => removeEditedBlock(paths, path, true, read),
+      recorded,
+    };
+  }
   return {
     apply: (changes) => applyChanges(paths, changes),
     writePaths: (writes, pathOptions) => writeWholePaths(env, paths, writes, pathOptions ?? {}),
@@ -1033,12 +1211,10 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
     revertPaths: (only, revertOptions) => revertWholePaths(paths, only, revertOptions ?? {}),
     keepUserPaths: (owner, scope, kept) => keepUserPaths(env, paths, owner, scope, kept),
     adoptReplacedPath: (path, owner, backup) => adoptReplacedPath(env, paths, path, owner, backup),
-    revert: (only, revertOptions) => revertFiles(paths, only, revertOptions ?? {}),
+    revert: (only, revertOptions) => revertFiles(paths, only, revertOptions ?? {}, read),
     adopt: (path, adoption) => adoptFile(paths, path, adoption),
     removeUnrecordedText: (path, expectedSha256, removals) => removeUnrecordedText(paths, path, expectedSha256, removals),
-    recorded: (path) => {
-      const resolved = resolveHostPath(paths, path);
-      return readLedger(paths).fragments.filter((entry) => entry.file === resolved);
-    },
+    recorded,
+    removeEditedBlock: (path, removeOptions) => removeEditedBlock(paths, path, removeOptions?.dryRun === true, read),
   };
 }

@@ -41,7 +41,7 @@ const ownText: HostConfigStrategy<string> = { locate: () => null, apply: (conten
 const homes: string[] = [];
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 
-test('an install-owned whole path refuses every gate operation and stays in the ledger; a protocol 1 ledger names rh update', () => {
+test('an install-owned whole path refuses every gate operation and stays in the ledger; a protocol 1 or 2 ledger names rh update', () => {
   const f = fixture();
   const skill = join(f.home, '.claude', 'skills', 'owned');
   const inside = join(skill, 'SKILL.md');
@@ -63,15 +63,22 @@ test('an install-owned whole path refuses every gate operation and stays in the 
   f.gate().apply([f.change(f.b, 'on')]);
   expect(f.ledger().paths).toEqual(paths);
 
-  const { paths: _paths, ...textRecords } = f.ledger();
-  writeFileSync(join(f.root, 'ledger.json'), JSON.stringify({ ...textRecords, protocol: 1 }));
-  expect(() => f.gate().recorded(f.a)).toThrow('the ledger is protocol 1, which has no path records; run: rh update');
-  // The one-shot move keeps every text record and starts `paths` empty; a second run writes nothing.
-  migrateLedgerSchema(hostConfigPaths({ HOME: f.home }));
-  expect(f.ledger()).toEqual({ ...textRecords, protocol: 2, paths: {} });
-  const moved = readFileSync(join(f.root, 'ledger.json'));
-  migrateLedgerSchema(hostConfigPaths({ HOME: f.home }));
-  expect(readFileSync(join(f.root, 'ledger.json'))).toEqual(moved);
+  const { paths: _paths, retired: _retired, recovery: _recovery, ...textRecords } = f.ledger();
+  for (const [old, refusal, moved] of [
+    [{ ...textRecords, protocol: 1 }, 'the ledger is protocol 1, which has no path records; run: rh update', {}],
+    [{ ...textRecords, protocol: 2, paths }, 'the ledger is protocol 2, which has no retirement records; run: rh update', paths],
+  ] as const) {
+    writeFileSync(join(f.root, 'ledger.json'), JSON.stringify(old));
+    expect(() => f.gate().recorded(f.a)).toThrow(refusal);
+    // A preview reads the ledger as the move would leave it, and writes nothing.
+    expect(openHostConfigGate({ env: { HOME: f.home }, preview: true }).recorded(f.a)).toEqual(textRecords.fragments.filter((entry: { file: string }) => entry.file === f.a));
+    // The one-shot move keeps every record and adds the empty new maps; a second run writes nothing.
+    migrateLedgerSchema(hostConfigPaths({ HOME: f.home }));
+    expect(f.ledger()).toEqual({ ...textRecords, protocol: 3, paths: moved, retired: [], recovery: [] });
+    const bytes = readFileSync(join(f.root, 'ledger.json'));
+    migrateLedgerSchema(hostConfigPaths({ HOME: f.home }));
+    expect(readFileSync(join(f.root, 'ledger.json'))).toEqual(bytes);
+  }
 });
 
 test.each([undefined, '\n', '\r\n', '\r', '\n\n', 'user text', null])('ledger checks fragment separator %p', (separator) => {
@@ -116,7 +123,9 @@ test('every write has a ledger record before a revert, and a revert touches no p
   expect(f.gate().revert().map((entry) => [entry.path, entry.action])).toEqual([[f.a, 'text_removed'], [f.b, 'removed'], [b2, 'removed']]);
   expect({ a: readFileSync(f.a, 'utf8'), mode: statSync(f.a).mode & 0o777, tool: existsSync(join(f.home, '.tool')), c: readFileSync(c, 'utf8') })
     .toEqual({ a: 'keep=1\n', mode: 0o640, tool: false, c: 'rh=user\n' });
-  expect(f.ledger()).toEqual({ protocol: 2, files: {}, fragments: [], directories: [], paths: {} });
+  // The revert retires the backup of `a`, which no record references any more.
+  expect(f.ledger()).toEqual({ protocol: 3, files: {}, fragments: [], directories: [], paths: {}, recovery: [],
+    retired: [{ sha256: files[f.a].backup, at: expect.any(String) }] });
 
   // A failed ledger write stops the file write.
   chmodSync(f.root, 0o500);
@@ -245,7 +254,7 @@ test('a revert releases a fragment claim that needed no write, for a named path 
     const f = fixture();
     writeFileSync(f.a, 'rh=on\n');
     expect(f.gate().apply([f.change(f.a, 'on')]).written).toEqual([]);
-    expect(f.gate().revert(only && [f.a])).toEqual([{ path: f.a, action: 'released' }]);
+    expect(f.gate().revert(only && [f.a])).toEqual([{ path: f.a, action: 'released', baseline: 'proved' }]);
     expect(f.gate().apply([f.change(f.a, 'on', { owner: 'o2' })]).written).toEqual([]);
     expect(readFileSync(f.a, 'utf8')).toBe('rh=on\n');
   }
@@ -365,7 +374,7 @@ test('a refresh with no recorded fragment is an override, adopt records an old w
   const adoption = { backup: Buffer.from('keep=1\n'), fragments: [{ owner: 'o1', selector: 'rh', kind: 'add' as const, inserted: 'rh=old\n' }], externalChange: false };
   expect([f.gate().adopt(f.a, adoption), f.gate().adopt(f.a, { ...adoption, backup: null })]).toEqual(['adopted', 'recorded']);
   expect(f.ledger().files[f.a]).toMatchObject({ kind: 'text_block', baseline: { state: 'unknown' }, external_change: false });
-  expect(f.gate().revert([f.a], { dryRun: true })).toEqual([{ path: f.a, action: 'text_removed' }]);
+  expect(f.gate().revert([f.a], { dryRun: true })).toEqual([{ path: f.a, action: 'text_removed', baseline: 'unknown' }]);
   expect({ text: readFileSync(f.a, 'utf8'), recorded: Object.keys(f.ledger().files) }).toEqual({ text: 'keep=1\nrh=old\n', recorded: [f.a] });
   expect(f.gate().revert([f.a]).map((entry) => entry.action)).toEqual(['text_removed']);
   expect(readFileSync(f.a, 'utf8')).toBe('keep=1\n');
