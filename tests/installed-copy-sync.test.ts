@@ -252,31 +252,57 @@ describe("Codex installed copy sync", () => {
     }, 30_000);
   }
 
-  test("records unrecorded facade links that already name the exact package source, then is a no-op", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "repo-harness-same-target-"));
+  /** A selected facade in a fresh package, a scratch HOME, and two empty skill roots. */
+  function sameTargetFixture(prefix: string) {
+    const tmp = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
     const source = join(tmp, "source"), home = join(tmp, "home");
     const roots = [join(tmp, "codex-skills"), join(tmp, "claude-skills")];
     const facade = join(source, "assets/skill-commands/repo-harness-check");
+    seedSkillSurfaceRuntime(source); mkdirSync(home);
+    mkdirSync(facade, { recursive: true }); writeFileSync(join(facade, "SKILL.md"), "# selected facade\n");
+    for (const root of roots) mkdirSync(root);
     const env = { ...process.env, HOME: home, BUN_INSTALL: join(home, ".bun"), REPO_HARNESS_SOURCE_ROOT: source,
       REPO_HARNESS_LINK_INSTALLED_COPIES: "1", REPO_HARNESS_INSTALL_PLUGINS: "", CODEX_SKILLS_ROOT: roots[0], CLAUDE_SKILLS_ROOT: roots[1] };
-    const sync = () => spawnSync("bash", [join(ROOT, "scripts", "sync-codex-installed-copies.sh")], { cwd: ROOT, encoding: "utf-8", env });
+    return { tmp, source, roots, facade, env };
+  }
+
+  for (const relativeRoot of [false, true]) {
+    test(`records unrecorded facade links that already name the exact package source (${relativeRoot ? "relative" : "absolute"} source root), then is a no-op`, () => {
+      const { tmp, source, roots, facade, env: base } = sameTargetFixture("repo-harness-same-target-");
+      // A relative root must not adopt a link that the writer then rewrites relative to the skill root.
+      const env = { ...base, REPO_HARNESS_SOURCE_ROOT: relativeRoot ? "." : source };
+      const sync = () => spawnSync("bash", [join(ROOT, "scripts", "sync-codex-installed-copies.sh")], { cwd: relativeRoot ? source : ROOT, encoding: "utf-8", env });
+      try {
+        for (const root of roots) symlinkSync(facade, join(root, "repo-harness-check"));
+        // The 0.34.0 shape: the claude link is recorded, the codex link with the same target is not.
+        seedSyncOwnership([join(roots[1], "repo-harness-check")], env);
+        const claudeKey = pathRecordKey(env, join(roots[1], "repo-harness-check"));
+        const claudeRecord = readLedger(hostConfigPaths(env)).paths[claudeKey];
+        const first = sync();
+        expect(first.status, first.stderr).toBe(0);
+        const ledger = readFileSync(hostConfigPaths(env).ledger, "utf-8");
+        expect(readLedger(hostConfigPaths(env)).paths[claudeKey]).toEqual(claudeRecord);
+        const codexRecord = readLedger(hostConfigPaths(env)).paths[pathRecordKey(env, join(roots[0], "repo-harness-check"))];
+        expect(codexRecord?.committed).toEqual({ type: "symlink", target: facade });
+        const second = sync();
+        expect(second.status, second.stderr).toBe(0);
+        expect(readFileSync(hostConfigPaths(env).ledger, "utf-8")).toBe(ledger);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    }, 30_000);
+  }
+
+  test("keeps an adopted link unrecorded when the writer refuses another root", () => {
+    const { tmp, source, roots, facade, env } = sameTargetFixture("repo-harness-adopt-refused-");
     try {
-      seedSkillSurfaceRuntime(source); mkdirSync(home);
-      mkdirSync(facade, { recursive: true }); writeFileSync(join(facade, "SKILL.md"), "# selected facade\n");
-      for (const root of roots) { mkdirSync(root); symlinkSync(facade, join(root, "repo-harness-check")); }
-      // The 0.34.0 shape: the claude link is recorded, the codex link with the same target is not.
-      seedSyncOwnership([join(roots[1], "repo-harness-check")], env);
-      const claudeKey = pathRecordKey(env, join(roots[1], "repo-harness-check"));
-      const claudeRecord = readLedger(hostConfigPaths(env)).paths[claudeKey];
-      const first = sync();
-      expect(first.status, first.stderr).toBe(0);
-      const ledger = readFileSync(hostConfigPaths(env).ledger, "utf-8");
-      expect(readLedger(hostConfigPaths(env)).paths[claudeKey]).toEqual(claudeRecord);
-      const codexRecord = readLedger(hostConfigPaths(env)).paths[pathRecordKey(env, join(roots[0], "repo-harness-check"))];
-      expect(codexRecord?.committed).toEqual({ type: "symlink", target: facade });
-      const second = sync();
-      expect(second.status, second.stderr).toBe(0);
-      expect(readFileSync(hostConfigPaths(env).ledger, "utf-8")).toBe(ledger);
+      symlinkSync(facade, join(roots[0], "repo-harness-check"));
+      symlinkSync(join(`${source}-foreign`, "repo-harness-check"), join(roots[1], "repo-harness-check"));
+      const result = spawnSync("bash", [join(ROOT, "scripts", "sync-codex-installed-copies.sh")], { cwd: ROOT, encoding: "utf-8", env });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("path was not declared by the host-config gate");
+      expect(readlinkSync(join(roots[0], "repo-harness-check"))).toBe(facade);
+      expect(readLedger(hostConfigPaths(env)).paths[pathRecordKey(env, join(roots[0], "repo-harness-check"))]).toBeUndefined();
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

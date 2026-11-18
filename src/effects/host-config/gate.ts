@@ -526,7 +526,9 @@ function delegateWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, decl
   const checked = admitted.map(({ declaration, key, host }) => {
     const previous = ledger.paths[key];
     const observed = observePathEntry(key);
-    const adopted = previous === undefined && observed?.type === 'symlink' && declaration.adopt !== undefined && observed.target === declaration.adopt;
+    // Adoption needs the transaction's preimage: a failure must put the link back.
+    const adopted = previous === undefined && options.transaction !== undefined && observed?.type === 'symlink'
+      && declaration.adopt !== undefined && observed.target === declaration.adopt;
     const owned = observed === null || adopted || ownsEntry(previous, declaration.owner, key);
     if (!owned && !(declaration.replace && observed.type === 'file')) {
       throw observed.type === 'file' || !declaration.replace ? refusal(declaration.path, previous, declaration.owner)
@@ -548,6 +550,11 @@ function delegateWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, decl
   const invalid: string[] = [];
   for (const { declaration, key, host, previous, observed, owned, adopted, backup } of before) {
     const now = observePathEntry(key);
+    if (adopted && failure !== null) {
+      // No record names the link, so the transaction rollback does not see it: a failed writer leaves it as rh found it.
+      if (!sameCommitted(now, observed)) restorePreimage(options.transaction!, key);
+      continue;
+    }
     if (sameCommitted(now, observed) && !(adopted && records[key] === undefined)) continue;
     // A failed replacement must keep the vault reference, also when the writer removed the entry.
     if ((backup !== undefined || previous?.kind === 'replaced') && now?.type !== 'file') {
@@ -1008,7 +1015,8 @@ function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, no
     if (current.kind === 'replaced' && current.backup !== old?.backup) {
       const committed = current.committed as Extract<PathCommitted, { type: 'file' }>;
       replaceTarget(at as HostPath, readVault(paths, current.backup!), { existed: true, sha256: committed.sha256 });
-    } else if (!old) removePathEntry(at);
+    } else if (!old && !hasPreimage(transaction, at)) removePathEntry(at);
+    // A link that this transaction adopted has a preimage of itself, so it comes back; a created entry has an absent preimage.
     else if (hasPreimage(transaction, at)) restorePreimage(transaction, at);
     else { records[key] = current; unresolved.push(key); }
   }

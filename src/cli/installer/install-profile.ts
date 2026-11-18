@@ -35,7 +35,7 @@ import {
 } from 'fs';
 import { keepPreimage, observePathEntry } from '../../effects/host-config/whole-path';
 import { requireHome } from '../../effects/repo-harness-home';
-import { basename, delimiter, dirname, join, resolve } from 'path';
+import { basename, delimiter, dirname, join } from 'path';
 import {
   compareManagedHookProjection,
   type HookHost,
@@ -547,6 +547,8 @@ export function installProfileTransactionPaths(env: NodeJS.ProcessEnv = process.
  * The script receives only absent paths, current paths of the selected owner,
  * and unrecorded links that already name the exact source that the script
  * links there. 0.34.0 linked some facades into every root but recorded one.
+ * `sourceRoot` is the exact root string that the writer gets: the targets are
+ * built as the writer builds them (`$SOURCE_ROOT/$source`).
  */
 export function planSkillSync(plugins: readonly PluginId[], env: NodeJS.ProcessEnv = process.env, catalog = loadSkillSurfaceCatalog(), sourceRoot?: string) {
   const { repoHarnessSkills } = catalogMutationPathSkillNames(catalog);
@@ -554,10 +556,11 @@ export function planSkillSync(plugins: readonly PluginId[], env: NodeJS.ProcessE
   const selected = new Set(facadesForSelection(catalog, plugins));
   const linkSources = new Map<string, string>();
   if (sourceRoot !== undefined) {
-    const base = resolve(sourceRoot);
-    linkSources.set('repo-harness', base);
+    linkSources.set('repo-harness', sourceRoot);
     for (const pkg of catalog.packages) {
-      if (pkg.kind === 'facade' && pkg.source !== null && selected.has(pkg.name) && existsSync(join(base, pkg.source, 'SKILL.md'))) linkSources.set(pkg.name, join(base, pkg.source));
+      if (pkg.kind !== 'facade' || pkg.source === null || !selected.has(pkg.name)) continue;
+      const target = `${sourceRoot}/${pkg.source}`;
+      if (existsSync(`${target}/SKILL.md`)) linkSources.set(pkg.name, target);
     }
   }
   const declared = new Map<string, { path: string; owner: SurfaceOwner; adopt?: string }>();
