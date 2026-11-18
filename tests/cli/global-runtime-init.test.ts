@@ -3529,7 +3529,7 @@ describe('Global Working Rules refresh during install and update', () => {
 
     // The migration took out text with no ledger record, so the vault holds the file before it and a revert puts it back.
     writeFileSync(path, expected);
-    expect(openHostConfigGate({ env: { ...process.env, HOME: home } }).revert([path])).toEqual([{ path, action: 'text_removed' }]);
+    expect(openHostConfigGate({ env: { ...process.env, HOME: home } }).revert([path])).toEqual([{ path, action: 'text_removed', baseline: 'proved' }]);
     expect(readFileSync(path, 'utf-8')).toBe(mixedLegacy);
   }), 60_000);
 

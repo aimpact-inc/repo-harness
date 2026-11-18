@@ -613,7 +613,7 @@ describe('install command (Phase 1B)', () => {
 
       const uninstall = runUninstall({ target: 'claude', location: 'global' });
       expect(uninstall.exitCode).toBe(0);
-      expect(uninstall.lines).toContain(`[restore] ${filePath}: host-config ledger: rh text removed`);
+      expect(uninstall.lines).toContain(`[restored] ${filePath}: host-config ledger: rh text removed`);
       const afterUninstall = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       expect(afterUninstall.theme).toBe('dark');
       expect(afterUninstall.hooks.UserPromptSubmit).toEqual([
@@ -661,7 +661,7 @@ describe('install command (Phase 1B)', () => {
 
       const uninstall = runUninstall({ target: 'codex', location: 'global' });
       expect(uninstall.exitCode).toBe(0);
-      expect(uninstall.lines).toContain(`[remove] ${hooksPath}: host-config ledger: rh created this file`);
+      expect(uninstall.lines).toContain(`[restored] ${hooksPath}: host-config ledger: rh created this file`);
 
 
       expect(fs.existsSync(hooksPath)).toBe(false);
@@ -674,11 +674,11 @@ describe('install command (Phase 1B)', () => {
       runInstall({ target: 'both', location: 'global' });
       const first = runUninstall({ target: 'both', location: 'global' });
       expect(first.exitCode).toBe(0);
-      expect(first.lines.some((l) => l.includes('[remove]'))).toBe(true);
+      expect(first.lines.some((l) => l.includes('[restored]'))).toBe(true);
 
       const second = runUninstall({ target: 'both', location: 'global' });
       expect(second.exitCode).toBe(0);
-      expect(second.lines.some((l) => l.includes('[remove]'))).toBe(false);
+      expect(second.lines.some((l) => l.includes('[restored]'))).toBe(false);
     });
   });
 
@@ -713,8 +713,8 @@ describe('install command (Phase 1B)', () => {
         encoding: 'utf-8',
       });
       expect(uninstall.status).toBe(0);
-      expect(uninstall.stdout).toContain(`[remove] ${codexPath}: host-config ledger: rh created this file`);
-      expect(uninstall.stdout).toContain(`[remove] ${claudePath}: host-config ledger: rh created this file`);
+      expect(uninstall.stdout).toContain(`[restored] ${codexPath}: host-config ledger: rh created this file`);
+      expect(uninstall.stdout).toContain(`[restored] ${claudePath}: host-config ledger: rh created this file`);
       expect(fs.existsSync(claudePath)).toBe(false);
       expect(fs.existsSync(codexPath)).toBe(false);
     });
