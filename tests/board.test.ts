@@ -8,7 +8,7 @@ import { WINDOW_WITH_WORKERS_MS, WINDOW_WITHOUT_WORKERS_MS, attentionFindingKey,
 import { attentionLogPath, attentionWatchDoctorCheck, runAttentionWindow, serviceTerminalRepository, startAttentionWatch } from '../src/effects/board/attention-watch';
 import { decodeBoard, type BoardHostPortsV1, type BoardItemV1, type BoardPullRequestV1, type BoardTerminalV1, type BoardV1 } from '../src/core/board/board';
 import { decodePlanBlock, PlanBlockError } from '../src/core/board/plan-block';
-import { decodeReviewHazards, pathHazardHits } from '../src/core/board/hazards';
+import { decodeReviewHazards, pathHazardHits, workflowEditAllowed } from '../src/core/board/hazards';
 import type { PullRequestReadinessV2 } from '../src/core/publication/merge-readiness';
 import { collectPullRequestMergeReadiness } from '../src/effects/publication/merge-readiness';
 import { collectBoard, collectBoardThrough, GH_MAX_BUFFER_BYTES, readGhJson, readParent, readLocalRepositoryId, readLocalRepositoryIdAsync, seatScreenHash, seatTerminalsWithBranches, type BoardCollectInput } from '../src/effects/board/collect';
@@ -84,6 +84,8 @@ interface Replay {
   readonly protection?: (base: string) => GhAnswer;
   /** The REST files of an open pull request: each recorded path, padded to its `changedFiles`; `renamed` gives a path its rename source. */
   readonly renamed?: (path: string) => string | undefined;
+  /** The text of a file at the base or the head commit of its pull request, for the contents read; undefined answers a 404. A stacked head can be another PR's base, so a base commit of any PR reads as `base`. */
+  readonly contents?: (path: string, side: 'base' | 'head') => string | undefined;
   /** The version that the fake hc reports; the recorded core reported 0.1.17. */
   readonly hcVersion?: string;
   readonly now?: Date;
@@ -163,6 +165,12 @@ function replayInput(options: Replay): BoardCollectInput {
           const previous = options.renamed?.(path);
           return { filename: path, status: previous === undefined ? 'modified' : 'renamed', ...(previous === undefined ? {} : { previous_filename: previous }) };
         }));
+      }
+      const contents = args.map(arg => /^repos\/Ancienttwo\/repo-harness\/contents\/(.+)\?ref=([0-9a-f]{40})$/u.exec(arg)).find(match => match !== null);
+      if (contents) {
+        const prs = Object.values(pulls.data.repository) as Json[];
+        const text = options.contents?.(decodeURIComponent(contents[1]!), prs.some(pr => pr?.baseRefOid === contents[2]) ? 'base' : 'head');
+        return text === undefined ? POLICY_ABSENT : answer({ type: 'file', encoding: 'base64', content: Buffer.from(text).toString('base64') });
       }
       throw new Error(`unexpected gh call: ${args.join(' ')}`);
     },
@@ -569,8 +577,9 @@ test('board read: the readiness reads of one board share one answer for the repo
   };
   const count = (calls: readonly string[], prefix: string) => calls.filter(call => call.startsWith(prefix)).length;
   const { board, calls, readiness } = run(() => false);
-  // One page of parent comments (no older page): 7 board reads (2 of them the protection of the two base refs) and 22 readiness reads.
-  expect(calls).toHaveLength(29);
+  // One page of parent comments (no older page): 7 board reads (2 of them the protection of the two base refs), 22 readiness reads and,
+  // for #1494 and #1499, which change `.github/workflows/ci.yml`, one REST files page and the base text (absent, so no head read).
+  expect(calls).toHaveLength(33);
   expect(count(calls, 'api repos/Ancienttwo/repo-harness/branches/main/protection ')).toBe(1);
   expect(count(calls, 'repo view github.com/Ancienttwo/repo-harness --json id,nameWithOwner')).toBe(1);
   expect(count(calls, 'api repos/Ancienttwo/repo-harness --hostname')).toBe(1);
@@ -1380,7 +1389,8 @@ test('one hit for each rule that the recorded state does not trigger', () => {
   expect(partial.unevaluated.filter(entry => entry.rule === 'R3').map(entry => [entry.reason, entry.subject])).toEqual([['files_incomplete', '#1494']]);
   // A malformed hazard list fails at decode.
   const row = { id: 'ci-config', text: 'Changes CI.', path_visible: true, paths: ['.github/**'] };
-  const list = (...hazards: object[]) => ({ hazards_version: 'repo-harness.review-hazards.v1', hazards });
+  const allowed = { hazard: 'ci-config', paths: ['.github/workflows/*.yml'], keys: ['jobs.*.timeout-minutes'] };
+  const list = (...hazards: object[]) => ({ hazards_version: 'repo-harness.review-hazards.v1', hazards, allowed_edits: allowed });
   for (const [value, error] of [
     [{ ...list(row), hazards_version: 'repo-harness.review-hazards.v2' }, 'hazards_version'],
     [list(), 'hazards'],
@@ -1390,12 +1400,24 @@ test('one hit for each rule that the recorded state does not trigger', () => {
     [list({ ...row, paths: ['../x'] }), 'ci-config paths'],
     [list({ ...row, text: 'a | b' }), 'ci-config text'],
     [list(row, row), 'duplicate hazard id ci-config'],
+    // The allowlist only narrows its own path-visible hazard.
+    [{ ...list(row), allowed_edits: { ...allowed, paths: ['src/x.yml'] } }, 'allowed_edits paths'],
+    [{ ...list(row), allowed_edits: { ...allowed, keys: ['jobs..x'] } }, 'allowed_edits keys'],
   ] as const) expect(() => decodeReviewHazards(JSON.parse(JSON.stringify(value)))).toThrow(`review hazards invalid: ${error}`);
   // `**` matches zero or more whole segments, `*` stays inside one segment; the other hazards need a reviewer.
-  expect(pathHazardHits(['.github/workflows/ci.yml', 'docs/.github/x', 'Dockerfile', 'bun.lock', 'install.sh']))
+  expect(pathHazardHits(['.github/workflows/ci.yml', 'docs/.github/x', 'Dockerfile', 'bun.lock', 'install.sh'], []))
     .toEqual([
       { hazard: 'ci-config', path: '.github/workflows/ci.yml' },
     ]);
+  // A cleared workflow path is no hit; the allowlist clears a workflow file only when every changed key is on or under an allowed key.
+  expect(pathHazardHits(['.github/workflows/ci.yml', '.github/actions/a/action.yml'], ['.github/workflows/ci.yml'])).toEqual([{ hazard: 'ci-config', path: '.github/actions/a/action.yml' }]);
+  const workflow = (job: object, on: object = { push: { paths: ['src/**'] } }) => ({ on, jobs: { test: { 'runs-on': 'ubuntu-latest', steps: [{ run: 'bun test' }], ...job } } });
+  expect(workflowEditAllowed('.github/workflows/ci.yml', workflow({}), workflow({ 'timeout-minutes': 5 }, { push: { paths: ['src/**', 'tests/**'] } }))).toBe(true);
+  expect(workflowEditAllowed('.github/workflows/ci.yml', workflow({}), workflow({ steps: [{ run: 'bun test', 'timeout-minutes': 5 }] }))).toBe(true);
+  expect(workflowEditAllowed('.github/workflows/ci.yml', workflow({}), workflow({ permissions: { contents: 'write' } }))).toBe(false);
+  expect(workflowEditAllowed('.github/workflows/ci.yml', workflow({}), workflow({ if: 'false' }))).toBe(false);
+  expect(workflowEditAllowed('.github/workflows/ci.yml', workflow({}), workflow({ steps: [{ run: 'echo' }, { run: 'bun test' }] }))).toBe(false);
+  expect(workflowEditAllowed('.github/actions/a/action.yml', workflow({}), workflow({}))).toBe(false);
 
   // A rule that cannot read its input lists the subject: no status time, no issue label, an issue or a claim PR off the board.
   const [blocked, done] = board.execution.status === 'observed' ? board.execution.terminals : [];
@@ -1417,8 +1439,8 @@ test('R5 and the effective tier read the High list: board record-writing code is
   });
   const claimAt = '2026-11-02T21:01:00Z';
   // #1499 closes tier:medium #1476, changes `files` and has one claimed different-family PASS row of its head.
-  const board = (files: string[], tier: string, incomplete: boolean, policy?: GhAnswer, renamed?: Replay['renamed']) => replay({
-    policy, renamed,
+  const board = (files: string[], tier: string, incomplete: boolean, policy?: GhAnswer, renamed?: Replay['renamed'], contents?: Replay['contents']) => replay({
+    policy, renamed, contents,
     owners: (results) => { results.push(...files.filter(path => !results.some(entry => entry.path === path)).map(path => ({ path, matched: false, ambiguous: false, owningCapabilityId: null }))); },
     parent: (data) => { issueNode(data, 1476).labels.nodes.push({ name: tier }); },
     pulls: (data) => {
@@ -1428,8 +1450,8 @@ test('R5 and the effective tier read the High list: board record-writing code is
       pr1499.comments.nodes.push(comment(renderAcceptanceRecord(receipt(pr1499.headRefOid), `https://github.com/Ancienttwo/repo-harness/pull/1499#issuecomment-${Date.parse(claimAt)}`), '2026-11-02T22:00:00Z'));
     },
   });
-  const view = (files: string[], tier = 'tier:medium', incomplete = false, policy?: GhAnswer, renamed?: Replay['renamed']) => {
-    const read = board(files, tier, incomplete, policy, renamed);
+  const view = (files: string[], tier = 'tier:medium', incomplete = false, policy?: GhAnswer, renamed?: Replay['renamed'], contents?: Replay['contents']) => {
+    const read = board(files, tier, incomplete, policy, renamed, contents);
     const pr = read.pull_requests.find(entry => entry.number === 1499)!;
     const attention = evaluateBoardAttention(read);
     return [pr.tier, pr.acceptance.status,
@@ -1441,6 +1463,12 @@ test('R5 and the effective tier read the High list: board record-writing code is
   expect(view([hook], 'tier:high')).toEqual(['high', 'not_accepted']);
   // A change hazard path sets the High tier too, with its second row, whatever the label; R3 names the label.
   expect(view(['.github/workflows/x.yml'])).toEqual(['high', 'not_accepted']);
+  // A modified workflow whose YAML changes only allowlisted keys has no hazard hit: its labels set the tier and R3 stays quiet. Another key stays High.
+  const job = (extra: string) => (_path: string, side: 'base' | 'head') => `on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n${side === 'head' ? extra : ''}    steps:\n      - run: bun test\n`;
+  expect(view(['.github/workflows/x.yml'], 'tier:medium', false, undefined, undefined, job('    timeout-minutes: 5\n'))).toEqual(['medium', 'accepted']);
+  expect(rules(board(['.github/workflows/x.yml'], 'tier:medium', false, undefined, undefined, job('    timeout-minutes: 5\n')))).not.toContain('R3');
+  expect(view(['.github/workflows/x.yml'], 'tier:low', false, undefined, undefined, job('    timeout-minutes: 5\n'))[0]).toBe('medium');
+  expect(view(['.github/workflows/x.yml'], 'tier:medium', false, undefined, undefined, job('    permissions: write-all\n'))).toEqual(['high', 'not_accepted']);
   // A release path alone is Medium too, and R5 still names the label.
   expect(view(['src/core/release/notes.ts'])).toEqual(['medium', 'accepted', '#1499 changes src/core/release/notes.ts (release), a High signal, but #1476 is tier:medium']);
   // A repository I3 path sets High; a policy that the board cannot read sets High too.

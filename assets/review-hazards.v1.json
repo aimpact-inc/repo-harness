@@ -3,7 +3,7 @@
   "hazards": [
     {
       "id": "ci-config",
-      "text": "Changes a workflow or other CI configuration under `.github/` where it changes secrets or permissions.",
+      "text": "Changes a workflow or other CI configuration under `.github/`.",
       "path_visible": true,
       "paths": [".github/**"]
     },
@@ -17,5 +17,10 @@
       "text": "Reads credentials, such as tokens, keys, `~/.ssh`, `~/.npmrc` or credential environment variables.",
       "path_visible": false
     }
-  ]
+  ],
+  "allowed_edits": {
+    "hazard": "ci-config",
+    "paths": [".github/workflows/*.yml", ".github/workflows/*.yaml"],
+    "keys": ["jobs.*.timeout-minutes", "jobs.*.steps.*.timeout-minutes", "on.*.paths", "on.*.paths-ignore"]
+  }
 }

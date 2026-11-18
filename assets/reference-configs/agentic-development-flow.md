@@ -133,9 +133,11 @@ The board rule R3 reads only the rows with `path_visible: true`: a changed path 
 
 | Hazard | Paths that R3 reads |
 | --- | --- |
-| Changes a workflow or other CI configuration under `.github/` where it changes secrets or permissions. | `.github/**` |
+| Changes a workflow or other CI configuration under `.github/`. | `.github/**` |
 | Changes a release, publish, update or install script, or a package script that runs at install or release. | None (`path_visible: false`) |
 | Reads credentials, such as tokens, keys, `~/.ssh`, `~/.npmrc` or credential environment variables. | None (`path_visible: false`) |
+
+R3 and the tier skip a `ci-config` hit on a modified file that matches `.github/workflows/*.yml` or `.github/workflows/*.yaml` when every YAML key that the diff changes is on or under `jobs.*.timeout-minutes`, `jobs.*.steps.*.timeout-minutes`, `on.*.paths` or `on.*.paths-ignore` (`*` matches one key or list index). The board reads the file at the base and the head commit. A cleared edit is at least Medium. An added, removed or renamed file, another changed key, and a failed read or parse stay High.
 <!-- review-hazards:list:end -->
 
 ### Review by risk
