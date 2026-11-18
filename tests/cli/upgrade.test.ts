@@ -2237,6 +2237,24 @@ describe('upgrade --registered', () => {
     expect(git(f, dirtyRemote, 'branch', '--list', 'repo-harness/refresh')).toBe('');
   }), 240_000);
 
+  test('--pr commits the refresh without the transaction backups when the backup root is gitignored', () => registeredSandbox((f) => {
+    const { env, withOrigin } = prFixture(f);
+    const repo = staleRepo(f, 'ignored-backups');
+    writeFileSync(join(repo, '.gitignore'), `${readFileSync(join(repo, '.gitignore'), 'utf8')}.ai/harness/backups/\n`);
+    commitAll(f, repo, 'ignore backups');
+    const remote = withOrigin(repo);
+    writeRegistry(f, [repo]);
+
+    const preview = runRegisteredUpgrade({ env, callerCwd: f.root });
+    const result = runRegisteredUpgrade({ apply: true, pr: true, expectedRevision: preview.revision!, env, callerCwd: f.root });
+    const refreshed = byPath(result.repos, repo);
+    expect(refreshed.status, refreshed.error).toBe('applied');
+    expect(refreshed.refresh).toMatchObject({ outcome: 'pushed', prAction: 'created' });
+    const committed = git(f, remote, 'diff', '--name-only', 'main', 'repo-harness/refresh').split('\n');
+    expect(committed).toContain('deploy/README.md');
+    expect(committed.filter((path) => path.startsWith('.ai/harness/backups/'))).toEqual([]);
+  }), 120_000);
+
   test('--pr publishes only to the one repository that git fetches from and pushes to, and deletes only its own branch', () => registeredSandbox((f) => {
     const { env, withOrigin, openPrs } = prFixture(f);
     const hooks = join(f.root, 'concurrent-hooks');
