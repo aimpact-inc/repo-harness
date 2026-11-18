@@ -1,9 +1,10 @@
-import { lstatSync, readFileSync, rmSync } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { lstatSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import { planFile, type FilePlan, type PlannedFragment } from '../../core/host-config/plan';
 import { fileFormatOf, fragmentFormat, type FragmentFormat } from '../../core/host-config/registry';
 import { isMarkedBlockSelector } from '../../core/host-config/marked-block';
+import { hostConfigRepositoryKey } from '../git/repository-identity';
 import {
   HostConfigError,
   expectedFromCommitted,
@@ -443,9 +444,12 @@ function fileFragments(plan: FilePlan, recorded: readonly FragmentRecord[]): Fra
   ];
 }
 
+/** The admission of the files of one call: the user scope admits any host path, a repository scope only its own files. */
+type FileAdmission = (paths: HostConfigPaths, targets: readonly string[]) => HostPath[];
+
 /** Each record reaches the ledger before its write, so every write has its record. */
-function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileChange[]): HostConfigApplyResult {
-  const targets = admitPaths(paths, changes.map((change) => change.path));
+function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileChange[], admit: FileAdmission = admitPaths): HostConfigApplyResult {
+  const targets = admit(paths, changes.map((change) => change.path));
   const ledger = readLedger(paths);
   const files = { ...ledger.files };
   let { fragments, directories } = ledger;
@@ -1267,8 +1271,8 @@ function retire(retired: readonly RetiredMaterial[], released: readonly Sha256[]
   return [...retired.filter((entry) => !fresh.includes(entry.sha256)), ...fresh.map((sha256) => ({ sha256, at }))];
 }
 
-function adoptFile(paths: HostConfigPaths, target: string, adoption: HostConfigAdoption): 'adopted' | 'recorded' {
-  const [path] = admitPaths(paths, [target]) as [HostPath];
+function adoptFile(paths: HostConfigPaths, target: string, adoption: HostConfigAdoption, admit: FileAdmission = admitPaths): 'adopted' | 'recorded' {
+  const [path] = admit(paths, [target]) as [HostPath];
   const ledger = readLedger(paths);
   refuseRecordedPaths(ledger, [path]);
   if (ledger.files[path]) return 'recorded';
@@ -1605,5 +1609,64 @@ export function openRepositoryHostConfigGate(env: NodeJS.ProcessEnv, paths: Host
       return writeWholePaths((_ledger, path) => admitRepositoryPath(env, paths, scope, path), paths, writes, { stage: scope.stage });
     },
     revertPaths: (only) => revertWholePaths(paths, only, { stage: scope.stage }),
+  };
+}
+
+/** The file records of one repository ledger (#3080): today only the `.git/info/exclude` of the clone. */
+export interface HostConfigRepositoryFileGate {
+  apply(changes: readonly HostConfigFileChange[]): HostConfigApplyResult;
+  adopt(path: string, adoption: HostConfigAdoption): 'adopted' | 'recorded';
+  /** Revert every file record of the ledger; each target passes the admission again first. A dry run writes nothing. */
+  revert(options?: { readonly dryRun?: boolean }): readonly HostConfigRevertEntry[];
+  recorded(path: string): readonly FragmentRecord[];
+}
+
+/**
+ * The only file that a repository ledger records: `<common dir>/info/exclude`
+ * of the clone whose key names the ledger, so no other repository ledger can
+ * record it. The common dir must be canonical and `info` and `exclude` must be
+ * no links (P6); a file that the user ledger records stays with it (D10).
+ * Write and revert check it the same way, from the file system only. A common
+ * dir that is gone has nothing to write over: its record can only be released.
+ */
+function admitRepositoryExclude(env: NodeJS.ProcessEnv, paths: HostConfigPaths, target: string): HostPath {
+  const refuse = (reason: string): never => {
+    throw new HostConfigError('host_config_invalid_path', `rh does not write this repository exclude file: ${reason}: ${target}`);
+  };
+  const info = dirname(target);
+  const common = dirname(info);
+  if (!isAbsolute(target) || basename(target) !== 'exclude' || basename(info) !== 'info') refuse('it is not <Git common dir>/info/exclude');
+  // The same canonical form that keyed the ledger (`resolveGitCommonDirectory`).
+  if (lstatSync(common, { throwIfNoEntry: false }) && realpathSync(common) !== common) refuse(`${common} is not a canonical path`);
+  if (hostConfigRepositoryKey(common) !== basename(paths.root)) refuse(`the repository ledger ${paths.ledger} is not the ledger of ${common}`);
+  for (const part of [info, target]) if (lstatSync(part, { throwIfNoEntry: false })?.isSymbolicLink()) refuse(`${part} is a link`);
+  const path = resolveHostPath(paths, target);
+  const user = readProjectedLedger(hostConfigPaths(env));
+  if (user.files[path] || pathRecordOf(user, path) !== null) {
+    throw new HostConfigError('host_config_invalid_state', `the user-level ledger records this file, so rh does not record it for the repository: ${target}`);
+  }
+  return path;
+}
+
+/** `paths` is the repository ledger layout. */
+export function openRepositoryFileGate(env: NodeJS.ProcessEnv, paths: HostConfigPaths): HostConfigRepositoryFileGate {
+  const admit: FileAdmission = (_paths, targets) => {
+    const admitted = targets.map((target) => admitRepositoryExclude(env, paths, target));
+    if (new Set(admitted).size !== admitted.length) throw new HostConfigError('host_config_invalid_state', 'a call names one path twice');
+    ensurePrivateDirectory(paths.root);
+    return admitted;
+  };
+  return {
+    apply: (changes) => applyChanges(paths, changes, admit),
+    adopt: (path, adoption) => adoptFile(paths, path, adoption, admit),
+    revert: (options) => {
+      const keys = Object.keys(readLedger(paths).files);
+      for (const key of keys) admitRepositoryExclude(env, paths, key);
+      return keys.length ? revertFiles(paths, keys, { dryRun: options?.dryRun === true }, readLedger) : [];
+    },
+    recorded: (path) => {
+      const resolved = admitRepositoryExclude(env, paths, path);
+      return readLedger(paths).fragments.filter((entry) => entry.file === resolved);
+    },
   };
 }

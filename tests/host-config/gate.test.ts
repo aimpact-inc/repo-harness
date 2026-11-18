@@ -3,8 +3,8 @@ import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, rea
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FragmentEdit, HostConfigStrategy, HostPath } from '../../src/core/host-config/types';
-import { openHostConfigGate, rollbackHostConfigTransaction, type HostConfigFileChange } from '../../src/effects/host-config/gate';
-import { openRepositoryGate, repositoryConfigPaths } from '../../src/effects/host-config/repository';
+import { openHostConfigGate, openRepositoryFileGate, rollbackHostConfigTransaction, type HostConfigFileChange } from '../../src/effects/host-config/gate';
+import { openRepositoryGate, repositoryConfigPaths, repositoryExcludePath } from '../../src/effects/host-config/repository';
 import type { PathEntry } from '../../src/effects/host-config/whole-path';
 import { hostConfigPaths, migrateLedgerSchema, parseLedger, replaceTarget } from '../../src/effects/host-config/store';
 import { hookRenderingKey, jsonFragment, removeJsonHookCommand } from '../../src/core/host-config/json-fragment';
@@ -1012,6 +1012,75 @@ test.each([
   f.gate().apply([f.change(home, 'on')]);
   f.gate().revert([home]);
   expect({ home: readFileSync(home, 'utf8'), worktree: readFileSync(file, 'utf8') }).toEqual({ home: 'home\n', worktree: worktreeBytes });
+});
+
+// The repository exclude file (#3080): one `text_block` record with an `add` runtime-state block in the ledger of its clone, no vault copy.
+// P1 a file that is gone releases its record; P2 an edited block stays; P6 a link below the common dir, or the exclude file of another
+// clone, is refused for the write and for the revert; D10 a file that the user ledger records stays with it.
+test.each([
+  { label: 'written and reverted', change: 'none' },
+  { label: 'P1 absent, then put back by hand', change: 'absent' },
+  { label: 'P2 edited block', change: 'edited' },
+  { label: 'a note after the END line', change: 'annotated' },
+  { label: 'P6 info/ becomes a link after the record', change: 'link-later' },
+  { label: 'P6 a linked info/', change: 'link' },
+  { label: 'P6 the exclude file of another clone', change: 'other' },
+  { label: 'D10 the user ledger records it', change: 'user-recorded' },
+] as const)('repository exclude: $label', ({ change }) => {
+  const f = fixture();
+  const env = { HOME: f.home };
+  const repository = { repositoryId: join(f.home, 'repo', '.git'), worktree: join(f.home, 'repo') };
+  const paths = repositoryConfigPaths(env, repository);
+  const gate = openRepositoryFileGate(env, paths);
+  const exclude = repositoryExcludePath(repository);
+  const info = join(repository.repositoryId, 'info');
+  mkdirSync(info, { recursive: true });
+  writeFileSync(exclude, '# git ls-files --others --exclude-from=.git/info/exclude\n*.tmp\n');
+  const user = readFileSync(exclude, 'utf8');
+  const block = '# BEGIN: repo-harness runtime-state\n.ai/harness/\n# END: repo-harness runtime-state';
+  const target = change === 'other' ? join(f.home, 'other', '.git', 'info', 'exclude') : exclude;
+  if (change === 'other') { mkdirSync(join(target, '..'), { recursive: true }); writeFileSync(target, user); }
+  if (change === 'link') { renameSync(info, join(f.home, 'elsewhere')); symlinkSync(join(f.home, 'elsewhere'), info); }
+  if (change === 'user-recorded') f.gate().apply([f.change(exclude, 'on')]);
+  const write = () => gate.apply([{ path: target, backup: 'overrides-only', fragments: [{ owner: 'core', selector: 'runtime-state', kind: 'add', strategy: markedBlock, value: block }] }]);
+  const refusals = { link: `${info} is a link`, other: `is not the ledger of ${join(f.home, 'other', '.git')}`, 'user-recorded': 'the user-level ledger records this file' } as const;
+  if (change === 'link' || change === 'other' || change === 'user-recorded') {
+    const before = readFileSync(target, 'utf8');
+    expect(write).toThrow(refusals[change]);
+    expect({ ledger: existsSync(paths.ledger), bytes: readFileSync(target, 'utf8') }).toEqual({ ledger: false, bytes: before });
+    return;
+  }
+  expect(write().written).toEqual([exclude]);
+  expect(readFileSync(exclude, 'utf8')).toBe(`${user}\n${block}\n`);
+  const ledger = JSON.parse(readFileSync(paths.ledger, 'utf8'));
+  expect({ record: ledger.files[exclude], fragments: ledger.fragments, vault: existsSync(paths.vault) && readdirSync(paths.vault).length > 0 }).toEqual({
+    record: { kind: 'text_block', baseline: { state: 'known', existed: true, sha256: sha256Prefixed(Buffer.from(user)) }, committed: { type: 'file', sha256: sha256Prefixed(readFileSync(exclude)) }, backup: null, external_change: false },
+    fragments: [expect.objectContaining({ file: exclude, owner: 'core', selector: 'runtime-state', kind: 'add', inserted: block })], vault: false });
+  if (change === 'absent') rmSync(exclude);
+  if (change === 'edited') writeFileSync(exclude, readFileSync(exclude, 'utf8').replace('.ai/harness/\n', '.ai/harness/\nmine/\n'));
+  if (change === 'link-later') { renameSync(info, join(f.home, 'elsewhere')); symlinkSync(join(f.home, 'elsewhere'), info); }
+  if (change === 'annotated') writeFileSync(exclude, `${user}\n${block} (local note)\n`);
+  if (change === 'annotated') {
+    // A marker is a whole line, so the strategy cannot read the block: it stays, with no join of the note to the rule before it.
+    expect(gate.revert().map((entry) => entry.action)).toEqual(['kept_edited']);
+    expect(readFileSync(exclude, 'utf8')).toBe(`${user}\n${block} (local note)\n`);
+    return;
+  }
+  if (change === 'link-later') {
+    expect(() => gate.revert()).toThrow(`${info} is a link`);
+    expect({ bytes: readFileSync(exclude, 'utf8'), record: JSON.parse(readFileSync(paths.ledger, 'utf8')).files[exclude] }).toEqual({ bytes: `${user}\n${block}\n`, record: ledger.files[exclude] });
+    return;
+  }
+  const action = ({ none: 'text_removed', absent: 'already_absent', edited: 'kept_edited' } as const)[change];
+  expect(gate.revert({ dryRun: true }).map((entry) => entry.action)).toEqual([action]);
+  expect(gate.revert().map((entry) => entry.action)).toEqual([action]);
+  if (change === 'none') expect({ bytes: readFileSync(exclude, 'utf8'), files: JSON.parse(readFileSync(paths.ledger, 'utf8')).files }).toEqual({ bytes: user, files: {} });
+  if (change === 'edited') expect(readFileSync(exclude, 'utf8')).toContain('mine/');
+  if (change === 'absent') {
+    writeFileSync(exclude, `${user}\n${block}\n`);
+    expect(gate.revert()).toEqual([]);
+    expect(readFileSync(exclude, 'utf8')).toBe(`${user}\n${block}\n`);
+  }
 });
 
 // Storage that holds user bytes ignores itself (#2854 P7, R2): a guard (`.gitignore` with `*`) goes into each vault and preimage

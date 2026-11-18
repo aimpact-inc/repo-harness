@@ -1,4 +1,4 @@
-import { lstatSync, realpathSync, rmSync } from 'node:fs';
+import { lstatSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { HostConfigError } from '../../core/host-config/types';
@@ -38,10 +38,26 @@ export function resolveHostConfigRepository(directory: string): HostConfigReposi
   return { repositoryId: resolveGitCommonDirectory(worktree, configuredGitBinary(), undefined, env), worktree };
 }
 
-export function repositoryConfigPaths(env: NodeJS.ProcessEnv, repository: HostConfigRepository): HostConfigPaths {
-  const { harness } = hostConfigPaths(env);
-  const root = join(harness, 'config', 'repos', hostConfigRepositoryKey(repository.repositoryId));
+function repositoryLedgerLayout(harness: string, key: string): HostConfigPaths {
+  const root = join(harness, 'config', 'repos', key);
   return { harness, root, ledger: join(root, 'ledger.json'), vault: join(root, 'vault') };
+}
+
+export function repositoryConfigPaths(env: NodeJS.ProcessEnv, repository: HostConfigRepository): HostConfigPaths {
+  return repositoryLedgerLayout(hostConfigPaths(env).harness, hostConfigRepositoryKey(repository.repositoryId));
+}
+
+/** Every repository ledger, also of a repository that left the registry or is gone: uninstall reverts each. */
+export function repositoryLedgers(env: NodeJS.ProcessEnv): HostConfigPaths[] {
+  const { harness } = hostConfigPaths(env);
+  const repos = join(harness, 'config', 'repos');
+  if (!lstatSync(repos, { throwIfNoEntry: false })?.isDirectory()) return [];
+  return readdirSync(repos).sort().map((key) => repositoryLedgerLayout(harness, key)).filter((paths) => lstatSync(paths.ledger, { throwIfNoEntry: false }));
+}
+
+/** The `info/exclude` of the clone: one file for all its worktrees (#3080). */
+export function repositoryExcludePath(repository: HostConfigRepository): string {
+  return join(repository.repositoryId, 'info', 'exclude');
 }
 
 /**

@@ -1,6 +1,6 @@
 import { globalConfigurationPath, mutateGlobalConfiguration } from '../../effects/configuration/global-configuration';
 import { globalRuntimeScope, withRuntimeTransactionContext, type RuntimeTransactionContext } from '../../effects/locking/runtime-transaction-lock';
-import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, rmdirSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, rmdirSync, unlinkSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { createHash } from 'crypto';
@@ -8,8 +8,8 @@ import { hostSkillRoot, providerSkillLock, type ProviderSkillLock } from '../../
 import { ownedPiPackages, piPackagePresent, removePiPackage } from './pi-package';
 import { piExecutable } from '../../effects/pi-executable';
 import { globalContextPath, inspectUnrecordedGlobalRules, previewGlobalRulesAdoptedRevert } from './global-context';
-import { removeRuntimeStateIgnoreBlock } from '../../effects/adoption/gitignore-plan';
-import { readRepositoryExcludes, repositoryCommonDirectory, repositoryExcludesLedgerPath, repositoryExcludeTarget, serializeRepositoryExcludes, type RepositoryExclude } from './repository-excludes';
+import { legacyRepositoryExcludesPath } from './repository-excludes';
+import { repositoryLedgers } from '../../effects/host-config/repository';
 import { readInstallState } from './install-profile';
 import { installStatePendingMigration, migrateInstallState, planInstallStateMigration } from './install-state-migration';
 import type { PathRecord } from '../../core/host-config/types';
@@ -19,7 +19,7 @@ import { assertConfigurationPath, configurationReceiptPath, hostConfigurationRoo
 import { migrateCodexConfigRecords, planCodexConfigMigration, previewAdoptedRevert } from './codex-config-migration';
 import { migrateJsonConfigRecords, planJsonConfigMigration, previewJsonAdoptedRevert } from './json-config-migration';
 import { UNVERIFIED_INSTALLER_RANGES } from '../../effects/host-config/delegated';
-import { openHostConfigGate, planPathRevert, userPathLabel, type HostConfigAdoption, type HostConfigGate, type HostConfigRevertEntry, type HostConfigToolRevertEntry } from '../../effects/host-config/gate';
+import { openHostConfigGate, openRepositoryFileGate, planPathRevert, userPathLabel, type HostConfigAdoption, type HostConfigGate, type HostConfigRepositoryFileGate, type HostConfigRevertEntry, type HostConfigToolRevertEntry } from '../../effects/host-config/gate';
 import { hostConfigPaths, projectedLedgerPaths, readLedger, readProjectedLedger, resolveHostPath } from '../../effects/host-config/store';
 import { planToolRemoval, removeTools, windowsPowershellPath, windowsUserPathPort, type ToolRemovalEntry } from '../../effects/host-config/tools';
 import { HostConfigError, type ToolId, type ToolRecord } from '../../core/host-config/types';
@@ -236,11 +236,11 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   const piRemovals: string[] = [];
   const piSkills = hostSkillRoot(home, 'pi', env);
   let lock: ProviderSkillLock;
-  // A repository exclude file, its links followed, has its own directory as its root.
-  const repositoryExcludes = new Set<string>();
+  // The dry-run revert of each repository ledger's file records; the apply must match it.
+  const repositoryReverts: { gate: HostConfigRepositoryFileGate; preview: readonly HostConfigRevertEntry[]; ledger: string }[] = [];
   // A path record's key has its parent links followed, so it is checked under the root with links followed.
   const recordRoots = new Map<string, string>();
-  const surfaceRoot = (path: string) => recordRoots.get(path) ?? (path === lock.path ? lock.root : repositoryExcludes.has(path) ? dirname(path) : path.startsWith(piSkills + '/') ? dirname(piSkills) : home);
+  const surfaceRoot = (path: string) => recordRoots.get(path) ?? (path === lock.path ? lock.root : path.startsWith(piSkills + '/') ? dirname(piSkills) : home);
   const removedSurfaces = new Set<string>();
   // The gate's dry-run revert of each path record in removedSurfaces; the apply must match it.
   const pathReverts = new Map<string, HostConfigRevertEntry>();
@@ -385,24 +385,20 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
         }
       }
     } catch (error) { unresolved(path, String((error as Error).message)); }
-    const ledgerPath = repositoryExcludesLedgerPath(env);
-    let ledger: RepositoryExclude[] = [];
-    try { ledger = readRepositoryExcludes(env); } catch (error) { items.push(failedRead(error, ledgerPath)); }
-    const retained = ledger.filter((entry) => {
+    // Every repository ledger, also of a repository that left the registry: its exclude block goes by the ledger (#3080).
+    const legacy = legacyRepositoryExcludesPath(env);
+    if (lstatSync(legacy, { throwIfNoEntry: false })) unresolved(legacy, 'the repository exclude blocks of an earlier release are not imported yet; every block stays. Run rh update, then rh uninstall');
+    else for (const ledger of repositoryLedgers(env)) {
+      let files: string[] = [ledger.ledger];
       try {
-        if (!existsSync(entry.repo_path)) throw new Error(`repository ${entry.repo_path} is unavailable; block and ledger entry kept`);
-        const path = repositoryExcludeTarget(repositoryCommonDirectory(entry.repo_path, env), env);
-        if (path !== entry.exclude_path) throw new Error(`repository ${entry.repo_path} now resolves its exclude file to ${path}; preserved`);
-        repositoryExcludes.add(path);
-        // Read as latin1 and written back the same way, so the bytes outside the block stay.
-        const removal = removeRuntimeStateIgnoreBlock(existsSync(path) ? readFileSync(path, 'latin1') : '');
-        if (removal.status === 'unbalanced') unresolved(path, 'unbalanced runtime-state ignore block; preserved');
-        else if (removal.status === 'edited') unresolved(path, 'runtime-state ignore block was edited; preserved. Move your rules outside the markers, then delete the block.');
-        else if (removal.status === 'removed') change(path, removal.content, 'runtime-state ignore block');
-        return removal.status === 'unbalanced' || removal.status === 'edited';
-      } catch (error) { unresolved(entry.exclude_path, String((error as Error).message)); return true; }
-    });
-    if (retained.length !== ledger.length) change(ledgerPath, serializeRepositoryExcludes(retained), 'repository excludes ledger');
+        files = Object.keys(readLedger(ledger).files);
+        if (!files.length) continue;
+        const gate = openRepositoryFileGate(env, ledger);
+        const preview = gate.revert({ dryRun: true });
+        for (const entry of preview) if (entry.action !== 'released') items.push(revertItem(entry));
+        repositoryReverts.push({ gate, preview, ledger: ledger.ledger });
+      } catch (error) { unresolved(files.join(', '), `${String((error as Error).message)}; the block and its record stay`); }
+    }
   }
 
   const statePath = installProfileStatePath(env);
@@ -444,10 +440,10 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
         if (path === globalConfigurationPath(env)) {
           mutateGlobalConfiguration(env, () => ({ config: content === null ? null : object(content), value: undefined }), { runtimeLock: opts.runtimeLock });
         } else if (content === null) { if (existsSync(path)) unlinkSync(path); }
-        else if (repositoryExcludes.has(path)) writeFileSync(path, content, 'latin1');
         else writePrivateConfiguration(path, content, surfaceRoot(path));
       }
       if (hostPaths.length && !sameRevert(gate.revert(hostPaths), hostRevert)) throw new Error(`configuration changed after preview: ${hostPaths.join(', ')}`);
+      for (const { gate: repository, preview, ledger } of repositoryReverts) if (!sameRevert(repository.revert(), preview)) throw new Error(`configuration changed after preview: ${ledger}`);
       if (tools.released.length && JSON.stringify(gate.releaseAbsentTools(userPathPort(env, hostConfigPaths(env).harness))) !== JSON.stringify(tools.released)) {
         throw new Error(`configuration changed after preview: ${hostConfigPaths(env).ledger}`);
       }

@@ -64,6 +64,15 @@ export function fileFormatOf(path: string): FileFormat | undefined {
   return undefined;
 }
 
+/**
+ * The runtime-state block of a repository exclude file (#3080). Emptiness
+ * after a per-fragment revert never removes the file: that revert runs only
+ * after an outside change, so rh cannot prove that the remaining bytes, also
+ * blank lines, are its own. The whole-file revert of an unchanged file that
+ * rh created still removes it.
+ */
+const RUNTIME_STATE_BLOCK: FragmentFormat = { ...MARKED_BLOCK, empty: () => false };
+
 const FILE_FORMATS: Readonly<Record<FileFormat, FragmentFormat>> = { toml: TOML, json: JSON_FORMAT };
 
 /**
@@ -72,6 +81,7 @@ const FILE_FORMATS: Readonly<Record<FileFormat, FragmentFormat>> = { toml: TOML,
  * for a fragment that no strategy owns.
  */
 export function fragmentFormat(format: FileFormat | undefined, selector: string): FragmentFormat | null {
+  if (selector === 'runtime-state') return RUNTIME_STATE_BLOCK;
   if (isMarkedBlockSelector(selector)) return MARKED_BLOCK;
   return format ? FILE_FORMATS[format] : null;
 }

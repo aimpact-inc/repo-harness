@@ -1,27 +1,30 @@
 import { parseJsonText } from '../../core/evidence/file-syntax';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'fs';
-import { homedir } from 'os';
+import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, unlinkSync, writeFileSync } from 'fs';
 import { basename, dirname, join, resolve, sep } from 'path';
-import { managedBlockMarker, renderManagedBlock } from '../../core/adoption/managed-block';
-import { ignoreBlockProof, removeRuntimeStateIgnoreBlock, runtimeStateIgnoreOperation, userExcludesFilePath } from '../../effects/adoption/gitignore-plan';
-import { resolveGitCommonDirectory } from '../../effects/git/common-directory';
-import { withoutRepositorySelectingGitEnv } from '../../effects/git/runner';
+import { renderManagedBlock } from '../../core/adoption/managed-block';
+import { markedBlock, markedBlockLayout, MARKED_BLOCK_FRAGMENTS } from '../../core/host-config/marked-block';
+import { HostConfigError } from '../../core/host-config/types';
+import { removeRuntimeStateIgnoreBlock, runtimeStateIgnoreOperation, userExcludesFilePath } from '../../effects/adoption/gitignore-plan';
+import { decode, openRepositoryFileGate } from '../../effects/host-config/gate';
+import { repositoryConfigPaths, repositoryExcludePath, resolveHostConfigRepository, type HostConfigRepository } from '../../effects/host-config/repository';
 import { isRepoHarnessAdoptedPath, readRepoHarnessRegistryStrictSnapshot } from '../../effects/repo-registry';
-import { writePrivateConfiguration } from './configuration-ownership';
 import { repoHarnessHome } from '../../effects/repo-harness-home';
 import { readPathRecords } from '../../effects/host-config/path-records';
+import { isReleasedUserExcludesBlock } from '../../effects/upgrade/released-values';
 import { installProfileStatePath } from './install-state';
 
-/** One repository write: the resolved `info/exclude` of a repository's Git common directory. */
-export interface RepositoryExclude { readonly repo_id: string; readonly repo_path: string; readonly exclude_path: string }
+const SELECTOR = 'runtime-state';
+const OWNER = MARKED_BLOCK_FRAGMENTS[SELECTOR];
 
-export function repositoryExcludesLedgerPath(env: NodeJS.ProcessEnv): string {
+/** An entry of `repository-excludes.json`, the list of exclude files that releases before #3080 wrote. */
+interface LegacyRepositoryExclude { readonly repo_id: string; readonly repo_path: string; readonly exclude_path: string }
+
+/** While this file exists, the import has not run: uninstall keeps every repository block and asks for `rh update` first. */
+export function legacyRepositoryExcludesPath(env: NodeJS.ProcessEnv): string {
   return join(dirname(installProfileStatePath(env)), 'repository-excludes.json');
 }
 
-export function readRepositoryExcludes(env: NodeJS.ProcessEnv): RepositoryExclude[] {
-  const path = repositoryExcludesLedgerPath(env);
-  if (!lstatSync(path, { throwIfNoEntry: false })) return [];
+function readLegacyLedger(path: string): LegacyRepositoryExclude[] {
   const value = parseJsonText(readFileSync(path, 'utf8'), path) as { version?: unknown; entries?: unknown } | null;
   const valid = (entry: Record<string, unknown>) => Object.keys(entry).sort().join(',') === 'exclude_path,repo_id,repo_path'
     && Object.values(entry).every((field) => typeof field === 'string');
@@ -29,8 +32,47 @@ export function readRepositoryExcludes(env: NodeJS.ProcessEnv): RepositoryExclud
   return value.entries;
 }
 
-export function serializeRepositoryExcludes(entries: readonly RepositoryExclude[]): string | null {
-  return entries.length ? `${JSON.stringify({ version: 1, entries }, null, 2)}\n` : null;
+/** The block that rh writes now, with no final line ending. */
+function runtimeStateBlock(): string {
+  return renderManagedBlock(runtimeStateIgnoreOperation(''));
+}
+
+/**
+ * One-shot import (#3080). A block becomes a ledger record only with both
+ * halves of the evidence: an entry that names exactly the exclude file that
+ * its repository resolves to now, and block text that rh shipped. Every other
+ * block stays unclaimed and is reported, so rh never removes it. Invalid JSON
+ * or a failed ledger write stops the step and keeps the file; a rerun finds
+ * the records that it already wrote. The file goes after the last record.
+ */
+function importLegacyLedger(env: NodeJS.ProcessEnv, lines: string[]): void {
+  const path = legacyRepositoryExcludesPath(env);
+  if (!lstatSync(path, { throwIfNoEntry: false })) return;
+  for (const entry of readLegacyLedger(path)) {
+    const unclaimed = (reason: string) => lines.push(`${entry.exclude_path}: not imported (${reason}); rh does not claim or remove its block`);
+    let repository: HostConfigRepository;
+    try { repository = resolveHostConfigRepository(entry.repo_path); }
+    catch (error) { unclaimed(`the repository ${entry.repo_path} does not resolve: ${error instanceof Error ? error.message : String(error)}`); continue; }
+    const target = repositoryExcludePath(repository);
+    if (target !== entry.exclude_path) { unclaimed(`the repository uses ${target} now`); continue; }
+    const gate = openRepositoryFileGate(env, repositoryConfigPaths(env, repository));
+    try {
+      if (gate.recorded(target).length || !existsSync(target)) continue;
+      const content = decode(readFileSync(target), target);
+      const layout = markedBlockLayout(content, SELECTOR);
+      if (layout.kind === 'none') continue;
+      if (layout.kind === 'unbalanced') { unclaimed('unbalanced runtime-state markers'); continue; }
+      const inserted = content.slice(layout.start, layout.end);
+      const block = inserted.replace(/\r\n/g, '\n');
+      if (block !== runtimeStateBlock() && !isReleasedUserExcludesBlock(block)) { unclaimed('the block was edited'); continue; }
+      gate.adopt(target, { kind: 'text_block', backup: null, externalChange: false, fragments: [{ owner: OWNER, selector: SELECTOR, kind: 'add', inserted, preimage: inserted }] });
+      lines.push(`${target}: imported`);
+    } catch (error) {
+      if (!(error instanceof HostConfigError)) throw error;
+      unclaimed(error.message);
+    }
+  }
+  unlinkSync(path);
 }
 
 /**
@@ -46,31 +88,6 @@ function followLinks(path: string): string {
   }
 }
 
-/**
- * Upserts the runtime-state block in Git ignore text read as latin1, so each user byte is one
- * character and every byte outside the block span is written back unchanged.
- */
-function upsertRuntimeBlock(path: string, existing: string): { content: string; outcome: 'written' | 'current' | 'kept' } {
-  const operation = runtimeStateIgnoreOperation(path);
-  const block = renderManagedBlock(operation);
-  const { begin, end } = managedBlockMarker(operation.marker);
-  const lines = existing.split(/(?<=\n)/);
-  const bare = lines.map((line) => line.replace(/\r?\n$/, ''));
-  const start = bare.indexOf(begin);
-  const stop = bare.indexOf(end);
-  if (start === -1 && stop === -1) {
-    // One blank separator line, which the block removal drops again.
-    const separator = existing === '' ? '' : existing.endsWith('\n') ? '\n' : '\n\n';
-    return { content: `${existing}${separator}${block}\n`, outcome: 'written' };
-  }
-  if (start === -1 || stop < start || bare.indexOf(begin, start + 1) !== -1) throw new Error(`${path}: unbalanced runtime-state ignore block; fix its markers, then run rh update again`);
-  const current = bare.slice(start, stop + 1).join('\n');
-  if (current === block) return { content: existing, outcome: 'current' };
-  if (!ignoreBlockProof(operation)(current)) return { content: existing, outcome: 'kept' };
-  const eol = lines[stop].slice(bare[stop].length);
-  return { content: `${lines.slice(0, start).join('')}${block}${eol}${lines.slice(stop + 1).join('')}`, outcome: 'written' };
-}
-
 /** rh refuses only a write into its own home or into a path that the install ledger records for another owner. */
 function assertWriteTarget(path: string, env: NodeJS.ProcessEnv): void {
   const owned = Object.keys(readPathRecords(env));
@@ -83,32 +100,15 @@ function assertWriteTarget(path: string, env: NodeJS.ProcessEnv): void {
 }
 
 /**
- * The Git common directory of a registered repository. Inherited repository-selecting variables
- * (GIT_DIR from a Git hook, for example) would point every repository at one directory, so they are removed.
- */
-export function repositoryCommonDirectory(repoPath: string, env: NodeJS.ProcessEnv): string {
-  return resolveGitCommonDirectory(repoPath, undefined, undefined, withoutRepositorySelectingGitEnv(env));
-}
-
-/**
- * `<common dir>/info/exclude` of a repository (`git rev-parse --git-common-dir`) with user links followed,
- * so worktrees, gitdir links and linked exclude files of one repository share one owner and one ledger key.
- */
-export function repositoryExcludeTarget(commonDir: string, env: NodeJS.ProcessEnv): string {
-  const path = followLinks(join(commonDir, 'info', 'exclude'));
-  assertWriteTarget(path, env);
-  return path;
-}
-
-/**
  * `incomplete` names each registered repository that does not hold a proved block (missing, not a
- * Git repository, or an edited block); `targets` holds the resolved exclude files that rh wrote or proved.
+ * Git repository, or an edited block); `targets` holds the exclude files that rh wrote or proved.
  */
 export interface RepositoryExcludesResult { readonly status: 'ok' | 'failed'; readonly detail: string; readonly incomplete: readonly string[]; readonly targets: readonly string[] }
 
 /**
- * Writes the runtime-state block into the exclude file of each adopted repository in the registry.
- * The ledger names a target before its first write, so uninstall finds every block that rh wrote.
+ * Writes the runtime-state block into the exclude file of each adopted repository in the registry,
+ * through the repository ledger of its clone: the record reaches the ledger before the write, so
+ * uninstall finds every block that rh wrote. The one-shot import runs first.
  * Every caller holds the global runtime lock, so block updates are serialized.
  */
 export function writeRepositoryExcludes(env: NodeJS.ProcessEnv): RepositoryExcludesResult {
@@ -118,37 +118,37 @@ export function writeRepositoryExcludes(env: NodeJS.ProcessEnv): RepositoryExclu
   const owners = new Map<string, string>();
   const incomplete = () => [...unavailable, ...edited.map((path) => `${path}: edited block`)];
   const failed = (error: unknown) => ({ status: 'failed' as const, detail: [...lines, error instanceof Error ? error.message : String(error)].join('; '), incomplete: incomplete(), targets: [...owners.keys()] });
-  let ledger: RepositoryExclude[];
   let repos;
   try {
-    ledger = readRepositoryExcludes(env);
+    importLegacyLedger(env, lines);
     repos = [...readRepoHarnessRegistryStrictSnapshot({ env }).repos].sort((a, b) => a.id.localeCompare(b.id));
   } catch (error) { return failed(error); }
+  const block = runtimeStateBlock();
   for (const repo of repos) {
     if (!existsSync(repo.path)) { unavailable.push(`${repo.path}: missing`); continue; }
     if (!isRepoHarnessAdoptedPath(repo.path)) continue;
-    let commonDir: string;
-    try { commonDir = repositoryCommonDirectory(repo.path, env); }
-    catch { unavailable.push(`${repo.path}: not a Git repository`); continue; }
+    let repository: HostConfigRepository;
+    try { repository = resolveHostConfigRepository(repo.path); }
+    catch { unavailable.push(`${repo.path}: not a Git worktree root`); continue; }
+    const path = repositoryExcludePath(repository);
+    if (owners.has(path)) { lines.push(`${path}: written for ${owners.get(path)}`); continue; }
+    owners.set(path, repo.path);
     try {
-      const path = repositoryExcludeTarget(commonDir, env);
-      if (owners.has(path)) { lines.push(`${path}: written for ${owners.get(path)}`); continue; }
-      owners.set(path, repo.path);
-      if (!ledger.some((entry) => entry.exclude_path === path)) {
-        ledger = [...ledger, { repo_id: repo.id, repo_path: repo.path, exclude_path: path }];
-        writePrivateConfiguration(repositoryExcludesLedgerPath(env), serializeRepositoryExcludes(ledger)!, env.HOME ?? homedir());
-      }
-      const update = upsertRuntimeBlock(path, existsSync(path) ? readFileSync(path, 'latin1') : '');
-      if (update.outcome === 'kept') {
+      const gate = openRepositoryFileGate(env, repositoryConfigPaths(env, repository));
+      const content = existsSync(path) ? decode(readFileSync(path), path) : null;
+      const kind = content !== null && markedBlockLayout(content, SELECTOR).kind === 'balanced' ? 'refresh' : 'add';
+      // A block that the user deleted after rh recorded it comes back: the insert removes no user byte.
+      const selected = kind === 'add' && gate.recorded(path).length > 0;
+      const result = gate.apply([{ path, backup: 'overrides-only', fragments: [{ owner: OWNER, selector: SELECTOR, kind, strategy: markedBlock, value: block, ...(selected ? { selected } : {}) }] }]);
+      if (result.skipped.length) {
         edited.push(path);
-        lines.push(`${path}: kept the edited block; delete it, then run rh update again to get the current one`);
-      } else if (update.outcome === 'current') lines.push(`${path}: current`);
-      else {
-        mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(path, update.content, 'latin1');
-        lines.push(`${path}: written`);
-      }
-    } catch (error) { return failed(error); }
+        lines.push(`${path}: kept a block that rh cannot prove it wrote; delete it, then run rh update again to get the current one`);
+      } else lines.push(`${path}: ${result.written.length ? 'written' : 'current'}`);
+    } catch (error) {
+      // The file stays as it is: not UTF-8, unbalanced markers, or a target that the admission refuses.
+      if (!(error instanceof HostConfigError)) return failed(error);
+      unavailable.push(`${path}: ${error.message}`);
+    }
   }
   if (unavailable.length) lines.push(`unavailable registered repositories: ${unavailable.join(', ')}`);
   return { status: 'ok', detail: lines.join('; ') || 'no adopted repository is registered', incomplete: incomplete(), targets: [...owners.keys()] };
