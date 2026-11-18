@@ -81,6 +81,7 @@ import {
   InstallStateError,
   invalidOwnership,
   parseRecordedInstallState,
+  readInstallStateJson,
   readRecordedInstallState,
   type RecordedInstallSnapshot,
   type RecordedInstallState,
@@ -419,7 +420,7 @@ export function recordUnresolvedPiOwnership(
 export function newPiPackagesSinceTransaction(transaction: InstallHostTransaction, env: NodeJS.ProcessEnv): readonly string[] {
   const snapshot = transaction.snapshots.find(entry => entry.path === installProfileStatePath(env));
   const before = snapshot?.existed && snapshot.backup_path
-    ? checkedState(parseRecordedInstallState(JSON.parse(readFileSync(snapshot.backup_path, 'utf8')), snapshot.backup_path), snapshot.backup_path, env).pi_packages
+    ? checkedState(parseRecordedInstallState(readInstallStateJson(snapshot.backup_path), snapshot.backup_path), snapshot.backup_path, env).pi_packages
     : [];
   return (readInstallState(env)?.pi_packages ?? []).filter(source => !before.includes(source));
 }
@@ -880,7 +881,10 @@ function removeOwnedSkillLockEntries(env: NodeJS.ProcessEnv, skillNames: Readonl
   if (skillNames.size === 0) return;
   const lockPath = providerSkillLock(requireHome(env), env).path;
   if (!existsSync(lockPath)) return;
-  const parsed = JSON.parse(readFileSync(lockPath, 'utf-8')) as { skills?: Record<string, unknown> };
+  const content = readFileSync(lockPath, 'utf-8');
+  let parsed: { skills?: Record<string, unknown> };
+  // The JSON parse error can quote text of the file, so it never reaches the message (I1, #3164).
+  try { parsed = JSON.parse(content); } catch { throw new Error(`invalid external skill lock: ${lockPath}`); }
   if (!parsed || typeof parsed !== 'object' || !parsed.skills || typeof parsed.skills !== 'object') {
     throw new Error(`invalid external skill lock: ${lockPath}`);
   }

@@ -1363,6 +1363,18 @@ describe('install selection', () => {
     });
   });
 
+  test('a switch that drops a staged skill names a skills lock that is not valid JSON and never quotes it', () => withHome((env) => {
+    const first = beginInstallHostTransaction(installProfileTransactionPaths(env), env);
+    writeManagedHostSurfaces(env, ALL_PLUGINS);
+    writePath(join(env.HOME!, '.agents', 'skills', 'repo-harness-cross-review', 'SKILL.md'), '# owned staging skill\n');
+    applyInstallSelection('all', ALL_PLUGINS, env, new Date('2026-01-01T00:00:00Z'), first);
+    commitInstallHostTransaction(first);
+    // JSON.parse quotes an identifier-shaped token of the file (I1, #3164).
+    writePath(skillLock(env), '{"skills": sk_FAKE_SECRET_12345}');
+    expect(() => prepareInstallSelectionSwitch(ALL_PLUGINS.filter(id => id !== 'cross-review'), env, join(env.HOME!, 'transaction')))
+      .toThrow(new Error(`invalid external skill lock: ${skillLock(env)}`));
+  }));
+
   test('a selection switch skips and reports a path record outside its host root or on no install surface, and keeps the user files', () => withHome((env) => {
     const content = 'must survive';
     const external = join(env.HOME!, 'user-owned.txt');
