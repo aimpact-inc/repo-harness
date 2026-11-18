@@ -13,7 +13,8 @@ import type { ReviewerRunner, TaskClaimReference, TaskCleanupResult, TaskRequest
 import { acquireExclusiveDirectoryLock, ExclusiveLockContentionError, withCallerLock } from '../locking/exclusive-directory-lock';
 import { taskRepository } from '../git/task-repository';
 import { ensureSessionDirectory, nextSessionRound, readSessionArtifact, writeSessionArtifact } from '../terminal/task-session-io';
-import { reviewIsolationPolicy, prepareReviewLauncher, prepareCodexHome, preparePiAgentDirectory, removeLegacyCredentials } from './review-isolation';
+import { CURRENT_REVIEW_MODEL, reviewIsolationPolicy, prepareReviewLauncher, prepareCodexHome, preparePiAgentDirectory, removeLegacyCredentials,
+  type ReviewModelPin } from './review-isolation';
 import { assertMagpieReachable } from './magpie-endpoint';
 import { acceptanceContext, acceptanceReviewContextDigest, authorityFingerprint, GENERIC_REVIEW_ROLE,
   projectAcceptance, recordAcceptance, verifyAcceptance, type AcceptancePullRequestSelection,
@@ -45,6 +46,8 @@ interface ReviewSession<Endpoint> {
   fallback_reason: string | null;
   control_directory: string;
   started_at: number;
+  /** Codex and pi only: the magpie model of round 1. Each round rebuilds the isolated configuration from it. */
+  review_model?: ReviewModelPin;
 }
 interface RoundRecord { subject_sha256: string; context_sha256: string; task_request: TaskRequest }
 export interface ReviewOptions<Endpoint> {
@@ -79,6 +82,17 @@ function completedModel(session: Pick<ReviewSession<unknown>, 'control_directory
 const reviewEffects = { model: completedModel, piExecutable, piReviewLaunchBlocker, resolvePiModel, assertMagpieReachable };
 /** The reviewer runner and optional replacements of the review-owned effects. */
 export type ReviewEffects<Session, Endpoint> = ReviewerRunner<Session, Endpoint, TaskSessionAuthority> & Partial<typeof reviewEffects>;
+
+/** Codex and pi reach their model through magpie, so their session pins the model. */
+const usesMagpie = (harness: Harness) => harness === 'codex' || harness === 'pi';
+/** The pin of a codex or pi session. A session without one was started before pinning and cannot prove its model. */
+function pinnedReviewModel(session: Pick<ReviewSession<unknown>, 'review_model'>): ReviewModelPin {
+  const pin = session.review_model;
+  if (!pin || typeof pin.model !== 'string' || !pin.model || typeof pin.effort !== 'string' || !pin.effort) {
+    throw new Error('review_model_unpinned: the session records no review model; cancel the review and start a new one');
+  }
+  return pin;
+}
 
 export function reviewLocation(repoRoot: string, authority: ReviewAdmissionSource) {
   const repository = taskRepository(authority.repoRoot), root = repository.execution_root;
@@ -178,9 +192,13 @@ export async function runReviewRound<Session, Endpoint>(options: ReviewOptions<E
       options.admitSession();
       session = { protocol: 1, owner_root: root, campaign_sha256: campaign, task_claim: taskClaim, goal_sha256: identity.goal_sha256, task: key, reviewer_repo: reviewerRepo,
         endpoint, parent_pane: parentPane, requested_harness: requested, actual_harness: actual,
-        owner_harness: owner, fallback_reason: reason, control_directory: dir, started_at: Date.now() };
+        owner_harness: owner, fallback_reason: reason, control_directory: dir, started_at: Date.now(),
+        ...(usesMagpie(actual) ? { review_model: CURRENT_REVIEW_MODEL } : {}) };
       writeSessionArtifact(join(dir, 'session.json'), session);
     }
+    // Codex and pi reach a model only through magpie with the placeholder key; no native credential enters the sandbox.
+    const magpie = usesMagpie(session.actual_harness);
+    const reviewModel = magpie ? pinnedReviewModel(session) : undefined;
     // Reconcile only existing positive receipts; never resend an uncertain request.
     client.recoverCompanions(taskAuthority, primary, session.task, GENERIC_REVIEW_ROLE, REVIEW_MAX_ROUNDS);
     const contextDigest = acceptanceReviewContextDigest(context);
@@ -209,11 +227,9 @@ export async function runReviewRound<Session, Endpoint>(options: ReviewOptions<E
     }
     // The one absolute round deadline: the host turn and this wait both end at it.
     const deadline = Date.now() + timeout;
-    // Codex and pi reach a model only through magpie with the placeholder key; no native credential enters the sandbox.
-    const magpie = session.actual_harness === 'codex' || session.actual_harness === 'pi';
-    const runtimeHome = session.actual_harness === 'codex' ? prepareCodexHome(outbox).home
-      : session.actual_harness === 'pi' ? preparePiAgentDirectory(outbox, (agentDirectory, reference) => client.resolvePiModel(piCommand(), agentDirectory, reference)).directory
-      : undefined;
+    const pi = session.actual_harness === 'pi'
+      ? preparePiAgentDirectory(outbox, reviewModel!, (agentDirectory, reference) => client.resolvePiModel(piCommand(), agentDirectory, reference)) : undefined;
+    const runtimeHome = session.actual_harness === 'codex' ? prepareCodexHome(outbox, reviewModel!).home : pi?.directory;
     // Isolation admission precedes any SDK/native Session creation.
     const repository = taskRepository(root);
     const isolationPaths = { subject: root, primary, ownerRecord: dir, journal: dir,
@@ -235,9 +251,14 @@ export async function runReviewRound<Session, Endpoint>(options: ReviewOptions<E
         ? isolatedInstallation.via !== 'bundled' : isolatedInstallation.via !== 'executable' || isolatedInstallation.command !== launcher)) {
         throw new Error('review_isolated_installation_unverified');
       }
+      const sessionOptions = client.sessionOptions(session.actual_harness, outbox, runtimeHome);
+      // The session options carry the current default. A round-1 retry after a default change must not start the host on another model than the pin.
+      if (reviewModel && (sessionOptions.model !== (pi?.model ?? reviewModel.model) || (!pi && sessionOptions.effort !== reviewModel.effort))) {
+        throw new Error('review_model_changed_before_host_start: the default review model changed after the review started; cancel the review and start a new one');
+      }
       const spec: ReviewHostSpec = { mode: 'review', isolation: { paths: isolationPaths, policyFile: profilePath }, kind: session.actual_harness,
         installation: isolatedInstallation, launcher, vendorExecutable: realpathSync(vendorExecutable),
-        options: client.sessionOptions(session.actual_harness, outbox, runtimeHome),
+        options: sessionOptions,
         requestDirectory: client.requestDirectory(primary, session.task, GENERIC_REVIEW_ROLE), output: outbox, controlDirectory: dir, timeoutMs: timeout };
       writeSessionArtifact(specPath, spec);
     }

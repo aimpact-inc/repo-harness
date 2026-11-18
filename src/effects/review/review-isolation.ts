@@ -5,10 +5,19 @@ import type { PiModelIdentity } from '../pi-host-probe';
 import { shellQuote } from '../../core/shell-quote';
 import type { ReviewIsolationAdmission, ReviewIsolationPaths } from '../../core/review/runner-port';
 import { MAGPIE_ACTOR_HEADER, MAGPIE_BASE_URL, MAGPIE_CODEX_WIRE_API, MAGPIE_PI_API, MAGPIE_PLACEHOLDER_KEY, MAGPIE_PORT,
-  MAGPIE_PROVIDER, MAGPIE_REVIEW_EFFORT, MAGPIE_REVIEW_MODEL, MAGPIE_REVIEW_PI_MODEL } from './magpie-endpoint';
+  MAGPIE_PROVIDER, MAGPIE_REVIEW_EFFORT, MAGPIE_REVIEW_MODEL } from './magpie-endpoint';
 
 /** `model` is the `provider/model` reference that the review passes to pi as `--model`. */
 export interface PiAgentDirectory { readonly directory: string; readonly model: string }
+
+/**
+ * The magpie model id and effort of one review. Round 1 pins it in the review session, and each
+ * round builds the isolated configuration from the pin, so a default change between rounds does not
+ * change the bytes that an earlier round wrote.
+ */
+export interface ReviewModelPin { readonly model: string; readonly effort: string }
+/** The pin of a new review: the current magpie defaults of the review role. */
+export const CURRENT_REVIEW_MODEL: ReviewModelPin = { model: MAGPIE_REVIEW_MODEL, effort: MAGPIE_REVIEW_EFFORT };
 
 /**
  * Write one owner file of the isolated configuration, or verify the file of an earlier round.
@@ -39,30 +48,31 @@ function ownedDirectory(output: string, name: string, unsafe: string): string {
 
 /**
  * The pi agent directory of a review: models.json, settings.json and auth.json come from the magpie
- * constants alone. auth.json is the empty map: pi creates the file before it reads the credential
- * store, and the sandbox denies that write, so the owner writes it. pi's own resolver must select the
- * same provider and model from the generated files.
+ * constants and the pinned model alone. auth.json is the empty map: pi creates the file before it
+ * reads the credential store, and the sandbox denies that write, so the owner writes it. pi's own
+ * resolver must select the same provider and model from the generated files.
  */
-export function preparePiAgentDirectory(output: string,
+export function preparePiAgentDirectory(output: string, pin: ReviewModelPin,
   resolveModel: (agentDirectory: string, reference: string) => PiModelIdentity): PiAgentDirectory {
   const directory = ownedDirectory(output, '.pi-agent', 'review_pi_agent_directory_unsafe');
   const models = { providers: { [MAGPIE_PROVIDER]: { baseUrl: MAGPIE_BASE_URL, api: MAGPIE_PI_API, apiKey: MAGPIE_PLACEHOLDER_KEY,
-    models: [{ id: MAGPIE_REVIEW_MODEL, reasoning: true }] } } };
-  const settings = { defaultProvider: MAGPIE_PROVIDER, defaultModel: MAGPIE_REVIEW_MODEL, defaultThinkingLevel: MAGPIE_REVIEW_EFFORT };
+    models: [{ id: pin.model, reasoning: true }] } } };
+  const settings = { defaultProvider: MAGPIE_PROVIDER, defaultModel: pin.model, defaultThinkingLevel: pin.effort };
   writeOwnedFile(join(directory, 'models.json'), JSON.stringify(models) + '\n', 'review_pi_models_changed');
   writeOwnedFile(join(directory, 'settings.json'), JSON.stringify(settings) + '\n', 'review_pi_settings_changed');
   writeOwnedFile(join(directory, 'auth.json'), '{}', 'review_pi_auth_changed');
-  const resolved = resolveModel(directory, MAGPIE_REVIEW_PI_MODEL);
-  if (resolved.provider !== MAGPIE_PROVIDER || resolved.model !== MAGPIE_REVIEW_MODEL) {
-    throw new Error(`review_pi_model_not_canonical: pi resolves ${MAGPIE_REVIEW_PI_MODEL} to ${resolved.provider}/${resolved.model}`);
+  const reference = `${MAGPIE_PROVIDER}/${pin.model}`;
+  const resolved = resolveModel(directory, reference);
+  if (resolved.provider !== MAGPIE_PROVIDER || resolved.model !== pin.model) {
+    throw new Error(`review_pi_model_not_canonical: pi resolves ${reference} to ${resolved.provider}/${resolved.model}`);
   }
-  return { directory, model: MAGPIE_REVIEW_PI_MODEL };
+  return { directory, model: reference };
 }
 
-/** The codex home of a review: config.toml from the magpie constants alone, and no auth.json. */
-export function prepareCodexHome(output: string): { home: string } {
+/** The codex home of a review: config.toml from the magpie constants and the pinned model alone, and no auth.json. */
+export function prepareCodexHome(output: string, pin: ReviewModelPin = CURRENT_REVIEW_MODEL): { home: string } {
   const home = ownedDirectory(output, '.codex-home', 'review_codex_home_unsafe');
-  const config = `model = ${JSON.stringify(MAGPIE_REVIEW_MODEL)}\nmodel_provider = ${JSON.stringify(MAGPIE_PROVIDER)}\n\n`
+  const config = `model = ${JSON.stringify(pin.model)}\nmodel_provider = ${JSON.stringify(MAGPIE_PROVIDER)}\n\n`
     + `[model_providers.${MAGPIE_PROVIDER}]\nname = ${JSON.stringify(MAGPIE_PROVIDER)}\nbase_url = ${JSON.stringify(MAGPIE_BASE_URL)}\n`
     + `wire_api = ${JSON.stringify(MAGPIE_CODEX_WIRE_API)}\nexperimental_bearer_token = ${JSON.stringify(MAGPIE_PLACEHOLDER_KEY)}\n`
     + `http_headers = { ${JSON.stringify(MAGPIE_ACTOR_HEADER)} = ${JSON.stringify(MAGPIE_PLACEHOLDER_KEY)} }\n`;
