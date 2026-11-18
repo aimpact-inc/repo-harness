@@ -1035,6 +1035,8 @@ export interface AgentNotice {
   readonly content?: string;
   readonly systemMessage?: string;
   readonly diagnostics?: string;
+  /** The hook event log reason for a failure that the model does not see: error codes only, never error text. */
+  readonly logReason?: string;
 }
 
 export type AgentNoticePoint = 'session-start' | 'turn';
