@@ -47,12 +47,33 @@ is still as rh wrote it, and the other entries stay and are reported. Sibling ho
 configuration keys, user-edited surfaces and vault contents remain. It does not
 activate a runtime.
 
-Unproven old configuration, malformed configuration, changed owned surfaces and an
-edited managed block (the Global Working Rules block or the runtime-state ignore block)
-are reported as `unresolved`; the file stays unchanged, the command exits nonzero with
-`status: partial` and keeps remaining ownership evidence. Codex hook trust entries in
-`[hooks.state]` give a `note`: rh does not remove them, and they do not block
-completion. A preserved shared/pre-existing
+Each item has one action. `restored`: the result was checked equal to the file
+before rh (sha256, or absence). `reverted`: rh's changes went with no such proof;
+for a file that an earlier rh version wrote, the reason says that equality with the
+file before install cannot be proved. `kept`: rh leaves it. `note`: nothing to do,
+for example a file that the user deleted. Unproven old configuration, malformed
+configuration, changed owned surfaces and an edited managed block (the Global Working
+Rules block or the runtime-state ignore block) are reported as `unresolved`; the file
+stays unchanged, the command exits 1 with `status: partial` and keeps remaining
+ownership evidence. `failed` (`host_config_restore_mismatch`): the reverted bytes
+would not equal the known file before rh, so rh writes nothing, keeps the ledger
+record and its vault copy, and exits 2 with `status: failed`. Codex hook trust
+entries in `[hooks.state]` give a `note`: rh does not remove them, and they do not
+block completion. `--remove-edited-block <path>` (repeatable) removes the Global
+Working Rules block of that rules file also when you edited it: the whole file goes
+to the vault first, and the item prints the copy's path; `rh config gc` never
+deletes that copy.
+
+`rh config status` prints the path, sha256 and state of each file, fragment and path
+that the ledger records, `baseline unknown` for a file that an earlier rh version
+wrote, and old `global-context-backups/*.bak` files as candidates that rh does not
+use. `rh config diff <path>` prints rh's fragments of one file by hash;
+`--show-values` adds only text that the ledger proves rh wrote, and prints any other
+value as `<user value, N bytes, sha256:...>`. `rh config restore <path> [--owner
+<id>]` reverts one file, or one owner's fragments, with the same actions and exit
+codes as uninstall. `rh config gc` deletes the vault copy of each finished revert 30
+days after it, while no record references it. Status and diff create no vault or lock;
+on a ledger of an older protocol they name `rh update`. A preserved shared/pre-existing
 third-party installation is not claimed as repo-harness-owned.
 
 Standalone CodeGraph configuration and global install/update share one host lock.
