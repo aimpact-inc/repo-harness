@@ -1,6 +1,6 @@
 import { globalConfigurationPath, mutateGlobalConfiguration } from '../../effects/configuration/global-configuration';
 import { globalRuntimeScope, withRuntimeTransactionContext, type RuntimeTransactionContext } from '../../effects/locking/runtime-transaction-lock';
-import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, rmdirSync, unlinkSync, writeFileSync } from 'fs';
 import { basename, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { createHash } from 'crypto';
@@ -79,8 +79,9 @@ export function runUserUninstall(opts: UninstallOptions): UninstallResult {
   if (opts.dryRun) return runUserUninstallLocked(opts);
   // Reject invalid authority without creating a lock directory. Read it again
   // under the lock before planning any mutation, since another writer can run here.
-  // A protocol 3 state is read after its migration under the lock.
-  try { if (!installStatePendingMigration(opts.env ?? process.env)) readUninstallState(opts); }
+  // A protocol 3 state is read after its migration under the lock; an older
+  // ledger is read as its schema move under the lock will leave it.
+  try { if (!installStatePendingMigration(opts.env ?? process.env)) readUninstallState({ ...opts, dryRun: true }); }
   catch (error) {
     return uninstallResult([failedRead(error, configurationReceiptPath(hostConfigurationRoot(opts.env)))], false);
   }

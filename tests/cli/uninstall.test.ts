@@ -290,13 +290,14 @@ test('an uninstall keeps a personal file and a foreign skill that a path record 
  expect(runUserUninstall({target:'both',env}).status).toBe('complete');
  expect([readFileSync(personal,'utf8'),readFileSync(join(foreign,'SKILL.md'),'utf8')]).toEqual(['mine','mine']);
 }));
-test('a dry run on a protocol 3 install with an older ledger plans the migrated records, writes nothing and reports what the uninstall does',()=>fixture((home,env)=>{
+// A protocol 4 state comes after the move that gave the ledger its path records, so it has no protocol 1 ledger.
+test.each([[3,1],[3,2],[4,2]])('a protocol %i install state with a protocol %i ledger: the dry run writes nothing and reports what the uninstall does',(stateProtocol,ledgerProtocol)=>fixture((home,env)=>{
  const rule=join(home,'.codex/rules/anti-patterns.md');put(home,'.codex/rules/anti-patterns.md','owned');
  rhWritesInputMode(env,join(home,'.codex/config.toml'));
- recordLegacyInstallOwnership([rule],env);
+ if(stateProtocol===3) recordLegacyInstallOwnership([rule],env); else profile(home,[ownedFile(rule,'owned')]);
  // The ledger as an earlier rh version left it.
- const {paths:_paths,retired:_retired,recovery:_recovery,...text}=ledger(home);
- writeFileSync(join(home,'.repo-harness/config/ledger.json'),JSON.stringify({...text,protocol:1}));
+ const {paths,retired:_retired,recovery:_recovery,...text}=ledger(home);
+ writeFileSync(join(home,'.repo-harness/config/ledger.json'),JSON.stringify(ledgerProtocol===1?{...text,protocol:1}:{...text,protocol:2,paths}));
  const before=tree(home);
  const dryRun=runUserUninstall({target:'both',dryRun:true,env});
  expect(dryRun.lines).toContain(`[reverted] ${pathRecordKey(env,rule)}: unchanged transaction-owned surface`);
@@ -358,7 +359,7 @@ test('rules blocks revert to the original bytes, keep a later user line and an e
 }));
 /** Every entry outside ~/.repo-harness and ~/.bun, with the bytes and mode of each file. */
 function hostSnapshot(home: string) {
- return readdirSync(home,{recursive:true}).map(String).filter((p)=>!/^\.(repo-harness|bun)(\/|$)/.test(p)).sort().map((p)=>{
+ return readdirSync(home,{recursive:true}).map(String).filter((p)=>!/^\.(repo-harness|bun)([\\/]|$)/.test(p)).sort().map((p)=>{
   const stat=lstatSync(join(home,p));return stat.isFile()?[p,stat.mode&0o777,readFileSync(join(home,p),'utf8')]:[p,stat.isDirectory()?'dir':'other'];
  });
 }

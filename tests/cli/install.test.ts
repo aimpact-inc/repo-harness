@@ -678,7 +678,7 @@ describe('install command (Phase 1B)', () => {
 
       const second = runUninstall({ target: 'both', location: 'global' });
       expect(second.exitCode).toBe(0);
-      expect(second.lines.some((l) => l.includes('[restored]'))).toBe(false);
+      expect(second.lines.some((l) => l.includes('[restored]') || l.includes('[reverted]'))).toBe(false);
     });
   });
 
