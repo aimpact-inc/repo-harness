@@ -188,7 +188,7 @@ function changedKeys(base: unknown, head: unknown, at: readonly string[]): strin
 
 /**
  * True when a modified file on the allowlist paths changes only keys on or under an allowlist key: `base` and `head` are its YAML
- * documents at the base and head commits. The caller passes only a file that it read and parsed at both commits; an added, removed or
+ * documents at the merge base and the head commit. The caller passes only a file that it read and parsed at both commits; an added, removed or
  * renamed file is never cleared.
  */
 export function workflowEditAllowed(path: string, base: unknown, head: unknown): boolean {

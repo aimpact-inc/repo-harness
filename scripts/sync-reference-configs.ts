@@ -88,7 +88,7 @@ function hazardTable(list: ReviewHazardsV1): string {
     "| --- | --- |",
     ...list.hazards.map((hazard) => `| ${hazard.text} | ${pathCell(hazard)} |`),
     "",
-    `R3 and the tier skip a \`${list.allowed_edits.hazard}\` hit on a modified file that matches ${quoted(list.allowed_edits.paths)} when every YAML key that the diff changes is on or under ${quoted(list.allowed_edits.keys)} (\`*\` matches one key or list index). The board reads the file at the base and the head commit. A cleared edit is at least Medium. An added, removed or renamed file, another changed key, and a failed read or parse stay High.`,
+    `R3 and the tier skip a \`${list.allowed_edits.hazard}\` hit on a modified file that matches ${quoted(list.allowed_edits.paths)} when every YAML key that the diff changes is on or under ${quoted(list.allowed_edits.keys)} (\`*\` matches one key or list index). The board reads the file at the merge base and the head commit. A cleared edit is at least Medium. An added, removed or renamed file, another changed key, and a failed read or parse stay High.`,
   ].join("\n");
 }
 

@@ -84,8 +84,13 @@ interface Replay {
   readonly protection?: (base: string) => GhAnswer;
   /** The REST files of an open pull request: each recorded path, padded to its `changedFiles`; `renamed` gives a path its rename source. */
   readonly renamed?: (path: string) => string | undefined;
-  /** The text of a file at the base or the head commit of its pull request, for the contents read; undefined answers a 404. A stacked head can be another PR's base, so a base commit of any PR reads as `base`. */
-  readonly contents?: (path: string, side: 'base' | 'head') => string | undefined;
+  /** The merge base that the compare read answers; the default is the base commit (the base tip has not moved). */
+  readonly merge_base?: string;
+  /**
+   * The text of a file at the merge base, the base or the head commit of its pull request, for the contents read; undefined answers a
+   * 404. A stacked head can be another PR's base, so a base commit of any PR reads as `base`.
+   */
+  readonly contents?: (path: string, side: 'merge_base' | 'base' | 'head') => string | undefined;
   /** The version that the fake hc reports; the recorded core reported 0.1.17. */
   readonly hcVersion?: string;
   readonly now?: Date;
@@ -166,10 +171,13 @@ function replayInput(options: Replay): BoardCollectInput {
           return { filename: path, status: previous === undefined ? 'modified' : 'renamed', ...(previous === undefined ? {} : { previous_filename: previous }) };
         }));
       }
+      const compare = args.map(arg => /^repos\/Ancienttwo\/repo-harness\/compare\/([0-9a-f]{40})\.\.\.[0-9a-f]{40}\?per_page=1$/u.exec(arg)).find(match => match !== null);
+      if (compare) return answer({ merge_base_commit: { sha: options.merge_base ?? compare[1] } });
       const contents = args.map(arg => /^repos\/Ancienttwo\/repo-harness\/contents\/(.+)\?ref=([0-9a-f]{40})$/u.exec(arg)).find(match => match !== null);
       if (contents) {
         const prs = Object.values(pulls.data.repository) as Json[];
-        const text = options.contents?.(decodeURIComponent(contents[1]!), prs.some(pr => pr?.baseRefOid === contents[2]) ? 'base' : 'head');
+        const side = contents[2] === options.merge_base ? 'merge_base' : prs.some(pr => pr?.baseRefOid === contents[2]) ? 'base' : 'head';
+        const text = options.contents?.(decodeURIComponent(contents[1]!), side);
         return text === undefined ? POLICY_ABSENT : answer({ type: 'file', encoding: 'base64', content: Buffer.from(text).toString('base64') });
       }
       throw new Error(`unexpected gh call: ${args.join(' ')}`);
@@ -578,8 +586,8 @@ test('board read: the readiness reads of one board share one answer for the repo
   const count = (calls: readonly string[], prefix: string) => calls.filter(call => call.startsWith(prefix)).length;
   const { board, calls, readiness } = run(() => false);
   // One page of parent comments (no older page): 7 board reads (2 of them the protection of the two base refs), 22 readiness reads and,
-  // for #1494 and #1499, which change `.github/workflows/ci.yml`, one REST files page and the base text (absent, so no head read).
-  expect(calls).toHaveLength(33);
+  // for #1494 and #1499, which change `.github/workflows/ci.yml`, one REST files page, the merge base and the old text (absent, so no head read).
+  expect(calls).toHaveLength(35);
   expect(count(calls, 'api repos/Ancienttwo/repo-harness/branches/main/protection ')).toBe(1);
   expect(count(calls, 'repo view github.com/Ancienttwo/repo-harness --json id,nameWithOwner')).toBe(1);
   expect(count(calls, 'api repos/Ancienttwo/repo-harness --hostname')).toBe(1);
@@ -1439,8 +1447,8 @@ test('R5 and the effective tier read the High list: board record-writing code is
   });
   const claimAt = '2026-11-02T21:01:00Z';
   // #1499 closes tier:medium #1476, changes `files` and has one claimed different-family PASS row of its head.
-  const board = (files: string[], tier: string, incomplete: boolean, policy?: GhAnswer, renamed?: Replay['renamed'], contents?: Replay['contents']) => replay({
-    policy, renamed, contents,
+  const board = (files: string[], tier: string, incomplete: boolean, policy?: GhAnswer, renamed?: Replay['renamed'], contents?: Replay['contents'], merge_base?: string) => replay({
+    policy, renamed, contents, merge_base,
     owners: (results) => { results.push(...files.filter(path => !results.some(entry => entry.path === path)).map(path => ({ path, matched: false, ambiguous: false, owningCapabilityId: null }))); },
     parent: (data) => { issueNode(data, 1476).labels.nodes.push({ name: tier }); },
     pulls: (data) => {
@@ -1464,11 +1472,16 @@ test('R5 and the effective tier read the High list: board record-writing code is
   // A change hazard path sets the High tier too, with its second row, whatever the label; R3 names the label.
   expect(view(['.github/workflows/x.yml'])).toEqual(['high', 'not_accepted']);
   // A modified workflow whose YAML changes only allowlisted keys has no hazard hit: its labels set the tier and R3 stays quiet. Another key stays High.
-  const job = (extra: string) => (_path: string, side: 'base' | 'head') => `on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n${side === 'head' ? extra : ''}    steps:\n      - run: bun test\n`;
+  const job = (extra: string) => (_path: string, side: string) => `on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n${side === 'head' ? extra : ''}    steps:\n      - run: bun test\n`;
   expect(view(['.github/workflows/x.yml'], 'tier:medium', false, undefined, undefined, job('    timeout-minutes: 5\n'))).toEqual(['medium', 'accepted']);
   expect(rules(board(['.github/workflows/x.yml'], 'tier:medium', false, undefined, undefined, job('    timeout-minutes: 5\n')))).not.toContain('R3');
   expect(view(['.github/workflows/x.yml'], 'tier:low', false, undefined, undefined, job('    timeout-minutes: 5\n'))[0]).toBe('medium');
   expect(view(['.github/workflows/x.yml'], 'tier:medium', false, undefined, undefined, job('    permissions: write-all\n'))).toEqual(['high', 'not_accepted']);
+  // The old side is the merge base: a run change that the base tip shares with a stale head stays High, and R3 names it.
+  const stale = (_path: string, side: 'merge_base' | 'base' | 'head') => `on: push\njobs:\n  test:\n${side === 'head' ? '    timeout-minutes: 5\n' : ''}    steps:\n      - run: ${side === 'merge_base' ? 'bun test' : 'bun run test:unit'}\n`;
+  const advanced = board(['.github/workflows/x.yml'], 'tier:medium', false, undefined, undefined, stale, 'c'.repeat(40));
+  expect(advanced.pull_requests.find(entry => entry.number === 1499)!.tier).toBe('high');
+  expect(rules(advanced)).toContain('R3');
   // A release path alone is Medium too, and R5 still names the label.
   expect(view(['src/core/release/notes.ts'])).toEqual(['medium', 'accepted', '#1499 changes src/core/release/notes.ts (release), a High signal, but #1476 is tier:medium']);
   // A repository I3 path sets High; a policy that the board cannot read sets High too.

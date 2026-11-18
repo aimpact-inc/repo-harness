@@ -314,16 +314,30 @@ function yamlAt(input: BoardCollectInput, repository: string, path: string, sha:
   }
 }
 
+/** The merge base of a pull request's base and head commits, the old side of its REST file diff; null when the compare read fails. */
+function mergeBase(input: BoardCollectInput, repository: string, read: BoardPullRequestReadV1): string | null {
+  const result = runGh(input, ['api', '--hostname', 'github.com', `repos/${repository}/compare/${read.base_sha}...${read.head_sha}?per_page=1`]);
+  try {
+    const sha: unknown = result.status === 0 ? (JSON.parse(result.stdout) as { merge_base_commit?: { sha?: unknown } }).merge_base_commit?.sha : null;
+    return typeof sha === 'string' && /^[0-9a-f]{40}$/u.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The diff evidence of one open pull request (#3187): the rename sources, read only while I3 globs exist, and the modified workflow
- * files that the edit allowlist clears, from their YAML at the base and the head commit. A failed read clears no file.
+ * files that the edit allowlist clears, from their YAML at the merge base and the head commit. The base tip can hold changes that the
+ * pull request does not make, so it is not the old side. A failed read clears no file.
  */
 function tierEvidence(input: BoardCollectInput, repository: string, read: BoardPullRequestReadV1, i3: readonly string[] | null): BoardPullRequestTierEvidenceV1 {
   const renames = i3 !== null && i3.length > 0;
   if (read.files === null || (!renames && !read.files.some(isAllowedEditPath))) return { rename_sources: [], cleared_paths: [] };
   const files = pullRequestFiles(input, repository, read);
-  const cleared = (files ?? []).filter(file => file.modified && isAllowedEditPath(file.path)).flatMap((file) => {
-    const base = yamlAt(input, repository, file.path, read.base_sha);
+  const candidates = (files ?? []).filter(file => file.modified && isAllowedEditPath(file.path));
+  const old = candidates.length === 0 ? null : mergeBase(input, repository, read);
+  const cleared = old === null ? [] : candidates.flatMap((file) => {
+    const base = yamlAt(input, repository, file.path, old);
     const head = base === null ? null : yamlAt(input, repository, file.path, read.head_sha);
     return base !== null && head !== null && workflowEditAllowed(file.path, base.value, head.value) ? [file.path] : [];
   });
