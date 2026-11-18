@@ -2,6 +2,18 @@
 
 All notable changes to this skill are documented here.
 
+## [0.35.1] - 2026-11-18
+
+### Fixed
+
+- `rh` and `repo-harness-hook` start when `HOME` is not set: `--version`, `--help` and the hook usage run, and a command that needs the recorded plugin selection fails closed with `install_state_home_missing`. The account home is `HOME`, else `USERPROFILE` (a plain Windows shell); the value must be an absolute path. The tarball smoke runs the packed CLI and hook under `env -i`. (#3200)
+- `rh update` from 0.34.0 no longer exits 1 on `~/.codex/skills/repo-harness-{orchestrator,advisor,seat-handoff}` links that 0.34.0 made but did not record. The skill sync adopts an existing link with no record only when its target is exactly the package source of that skill, and records it; another target, a dangling link, a file, a directory or a user-managed record stays refused. (#3201)
+- Rebuild the released managed values list for v0.35.0. (#3199)
+
+### Upgrade
+
+- Run `rh update` once after the package install. It refreshes the managed Global Working Rules block, the hook adapters and the hook code. A 0.34.0 host with unrecorded Codex facade skill links now updates without a manual move of those links.
+
 ## [0.35.0] - 2026-11-18
 
 ### Breaking
