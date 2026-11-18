@@ -40,6 +40,7 @@ export type RecordedInstallSnapshot = Omit<RecordedInstallState, 'previous'>;
 
 export type InstallStateErrorCode =
   | 'install_state_missing'
+  | 'install_state_home_missing'
   | 'install_state_protocol_retired'
   | 'install_state_invalid'
   | 'install_state_invalid_ownership'

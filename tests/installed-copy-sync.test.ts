@@ -89,8 +89,9 @@ test('a child without HOME refuses account writes before starting a transaction'
       "}",
       "console.log(JSON.stringify(failures));",
     ].join('\n');
-    const env: NodeJS.ProcessEnv = { ...process.env, BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0', REPO_HARNESS_BUN_EXECUTABLE: bun, BUN_PROBE_LOG: calls, HOME_TRAP: trap, SOURCE_ROOT: ROOT, BUN_INSTALL: join(temporary, '.bun'), USERPROFILE: trap, REPO_HARNESS_HOME: join(trap, '.repo-harness') };
+    const env: NodeJS.ProcessEnv = { ...process.env, BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0', REPO_HARNESS_BUN_EXECUTABLE: bun, BUN_PROBE_LOG: calls, HOME_TRAP: trap, SOURCE_ROOT: ROOT, BUN_INSTALL: join(temporary, '.bun'), REPO_HARNESS_HOME: join(trap, '.repo-harness') };
     delete env.HOME;
+    delete env.USERPROFILE;
     delete env.BASH_ENV;
     const child = spawnSync(process.execPath, ['-e', code], { env, cwd: temporary, encoding: 'utf8' });
     expect(child.status, child.stderr).toBe(0);
