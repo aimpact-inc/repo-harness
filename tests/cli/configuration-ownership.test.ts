@@ -113,6 +113,9 @@ test('the JSON migration adopts a tagged entry with the old writer shape, keeps 
     'a status line inline segment': ['statusLine', (data) => { data.statusLine.command = data.statusLine.command.replace('; exec ', `; EXAMPLE_TOKEN=${INLINE_TOKEN} exec `); }],
     // No manifest hash, so only an exact match against rh's rendering finds the edit (#3237).
     'a hook command inline segment': ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].hooks[0].command = data.hooks.PreToolUse[0].hooks[0].command.replace('; export ', `; EXAMPLE_TOKEN=${INLINE_TOKEN}; export `); }],
+    // Text inside a quoted path proves only as the path of an existing file with the released name.
+    'a hook Bun path segment': ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].hooks[0].command = data.hooks.PreToolUse[0].hooks[0].command.replace(/ exec '([^']*)'/, ` exec '$1 --token=${INLINE_TOKEN}'`); }],
+    'a status line bundle path segment': ['statusLine', (data) => { data.statusLine.command = data.statusLine.command.replace("/dist/hook-entry.js'", `/${INLINE_TOKEN}/dist/hook-entry.js'`); }],
     'a manifest hash mismatch': ['hooks.SessionStart[default], hooks.PreToolUse[edit], hooks.PreToolUse[subagent], hooks.PreToolUse[bash], hooks.UserPromptSubmit[inbox], hooks.Stop[default]', (data) => { data.hooks.PreToolUse[0].hooks[0].timeout = 99; }, true],
   };
   for (const [name, [kept, edit, hashed]] of Object.entries(rows)) withClaudeHome((home, settings) => {
