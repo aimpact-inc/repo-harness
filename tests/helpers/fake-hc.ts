@@ -103,3 +103,26 @@ export function fakeHc(prefix: string, repoName = 'pinned') {
   fake.setVersion(HC_MIN_VERSION); fake.setSnapshot(1, []);
   return fake;
 }
+
+/**
+ * A fake Windows `powershell.exe` for the user Path scripts of
+ * src/effects/host-config/tools.ts: it decodes the real -EncodedCommand, logs
+ * its first line, and reads or compare-and-sets the value in `state` (JSON
+ * `{ existed, kind, raw }`; no file: no value). A `<state>.denied` file fails every call.
+ */
+export function writeFakeUserPathPowershell(file: string, state: string, log: string): void {
+  mkdirSync(join(file, '..'), { recursive: true });
+  writeFileSync(file, `#!${process.execPath}
+const { appendFileSync, existsSync, readFileSync, writeFileSync, rmSync } = require('node:fs');
+const [marker, operation, payload] = Buffer.from(process.argv.at(-1), 'base64').toString('utf16le').split('\\n')[0].split(' ').slice(1);
+appendFileSync(${JSON.stringify(log)}, operation + '\\n');
+if (existsSync(${JSON.stringify(`${state}.denied`)})) { process.stderr.write('registry access denied\\n'); process.exit(1); }
+if (marker !== 'rh-user-path') process.exit(3);
+const value = existsSync(${JSON.stringify(state)}) ? JSON.parse(readFileSync(${JSON.stringify(state)}, 'utf8')) : { existed: false, kind: 'ExpandString', raw: '' };
+if (operation === 'read') { console.log(Buffer.from(JSON.stringify(value)).toString('base64')); process.exit(0); }
+const { expected, next } = JSON.parse(Buffer.from(payload, 'base64').toString('utf8'));
+if (expected.existed !== value.existed || expected.raw !== value.raw || (value.existed && expected.kind !== value.kind)) { console.log('changed'); process.exit(0); }
+if (next.existed) writeFileSync(${JSON.stringify(state)}, JSON.stringify(next)); else rmSync(${JSON.stringify(state)}, { force: true });
+console.log('written');
+`, { mode: 0o755 });
+}
