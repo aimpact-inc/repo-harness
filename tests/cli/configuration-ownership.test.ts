@@ -135,6 +135,11 @@ test('the JSON migration adopts a tagged entry with the old writer shape, keeps 
     expect(result.lines, name).toContain(`[unresolved] ${settings}: changed since rh wrote it; preserved: ${kept}`);
     if (kept === 'statusLine') return;
     expect(() => claudeTarget.install('global', {}), name).toThrow(`${settings}: ${kept} are not rh's text any more, so rh kept them. Delete those hook entries, then run rh install again; rh writes them anew`);
+    if (name === 'an extra entry field') {
+      // The user's override selection lets rh write its entry over the edited one.
+      claudeTarget.install('global', { overrides: [{ path: realpathSync(settings), selector: 'hooks.PreToolUse[edit]' }] });
+      expect(JSON.parse(readFileSync(settings, 'utf8')).hooks.PreToolUse[0], name).toEqual(hooks.PreToolUse![0]);
+    }
     if (name !== 'an extra hook field') return;
     // The user deletes the refused entry by a text edit; rh writes it anew.
     const content = readFileSync(settings, 'utf8');

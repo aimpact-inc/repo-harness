@@ -385,7 +385,7 @@ describe('Pi package and skill installation', () => {
     recordPiInstallOwnership([f.source], f.env);
     const result = runUserUninstall({ target: 'both', env: { ...f.env, PATH: '' } });
     expect(result.exitCode).toBe(0);
-    expect(result.items).toContainEqual({ path: f.source, action: 'preserve', reason: 'pi not found on PATH; package removal skipped; ownership retained for retry' });
+    expect(result.items).toContainEqual({ path: f.source, action: 'kept', reason: 'pi not found on PATH; package removal skipped; ownership retained for retry' });
     expect(readInstallState(f.env)?.pi_packages).toContain(f.source);
     expect(f.argv().some(args => args[0] === 'remove')).toBe(false);
   }));

@@ -247,7 +247,7 @@ package root and needs the `pi` plugin. Any other shape fails with
 state fails with `install_state_protocol_retired` and names `rh update`.
 
 Host path ownership lives in the host-config ledger
-(`~/.repo-harness/config/ledger.json`, protocol 2), not in the state. Each
+(`~/.repo-harness/config/ledger.json`, protocol 3), not in the state. Each
 path record has an `owner` (`core` or an enabled plugin), a `host` (`claude`,
 `codex`, `pi`, `staged` or `bin`, from the path before links are followed), a
 `kind` (`created`, or `user_managed` for a fleet file that the user keeps), a
@@ -263,7 +263,9 @@ state are never included.
 
 An install, update, uninstall, rollback or global CodeGraph configure moves a
 protocol 3 state once, under the runtime lock and before its transaction: a
-protocol 1 ledger gains an empty `paths` map with every text record kept, the
+protocol 1 or 2 ledger becomes protocol 3 with every record kept (a protocol 1
+ledger gains an empty `paths` map, and both gain empty `retired` and `recovery`
+lists), the
 manifest's section records go to the host-file migrations, every other
 manifest surface becomes a `created` record, each
 `agent-fleet-user-managed.json` entry becomes a `user_managed` record, the

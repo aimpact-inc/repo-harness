@@ -1,6 +1,6 @@
 import { globalConfigurationPath, mutateGlobalConfiguration } from '../../effects/configuration/global-configuration';
 import { globalRuntimeScope, withRuntimeTransactionContext, type RuntimeTransactionContext } from '../../effects/locking/runtime-transaction-lock';
-import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, rmdirSync, unlinkSync, writeFileSync } from 'fs';
 import { basename, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { createHash } from 'crypto';
@@ -13,18 +13,32 @@ import { readRepositoryExcludes, repositoryCommonDirectory, repositoryExcludesLe
 import { readInstallState } from './install-profile';
 import { installStatePendingMigration, migrateInstallState, planInstallStateMigration } from './install-state-migration';
 import type { PathRecord } from '../../core/host-config/types';
-import { pathRecordsDigest, readPathRecords, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
+import { partitionPathRecords, pathRecordRoot, pathRecordsDigest, readPathRecords, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
 import { InstallStateError, installProfileStatePath } from './install-state';
 import { assertConfigurationPath, configurationReceiptPath, hostConfigurationRoot, writePrivateConfiguration } from './configuration-ownership';
 import { migrateCodexConfigRecords, planCodexConfigMigration, previewAdoptedRevert } from './codex-config-migration';
 import { migrateJsonConfigRecords, planJsonConfigMigration, previewJsonAdoptedRevert } from './json-config-migration';
 import { openHostConfigGate, planPathRevert, type HostConfigAdoption, type HostConfigRevertEntry } from '../../effects/host-config/gate';
-import { hostConfigPaths, resolveHostPath } from '../../effects/host-config/store';
+import { hostConfigPaths, projectedLedgerPaths, resolveHostPath } from '../../effects/host-config/store';
 import { FileSyntaxError, parseJsonText, parseTomlText } from '../../core/evidence/file-syntax';
 
-export interface UninstallOptions { target: 'codex' | 'claude' | 'both'; dryRun?: boolean; env?: NodeJS.ProcessEnv; runtimeLock?: RuntimeTransactionContext }
-export interface UninstallItem { path: string; action: 'remove' | 'restore' | 'preserve' | 'unresolved' | 'note'; reason: string }
-export interface UninstallResult { exitCode: number; status: 'complete' | 'partial'; dryRun: boolean; items: UninstallItem[]; lines: string[] }
+export interface UninstallOptions {
+  target: 'codex' | 'claude' | 'both';
+  dryRun?: boolean;
+  env?: NodeJS.ProcessEnv;
+  runtimeLock?: RuntimeTransactionContext;
+  /** Rules files whose recorded block goes also when the user edited it (`--remove-edited-block`); the whole file goes to the vault first. */
+  removeEditedBlocks?: readonly string[];
+}
+/**
+ * `restored`: the result was checked equal to the state before rh.
+ * `reverted`: rh's changes went, with no such proof. `kept`: rh leaves it.
+ * `note`: nothing to do. `unresolved`: preserved because it changed. `failed`:
+ * the check before the write failed; nothing was written.
+ */
+export type UninstallAction = 'restored' | 'reverted' | 'kept' | 'note' | 'unresolved' | 'failed';
+export interface UninstallItem { path: string; action: UninstallAction; reason: string }
+export interface UninstallResult { exitCode: number; status: 'complete' | 'partial' | 'failed'; dryRun: boolean; items: UninstallItem[]; lines: string[] }
 
 /** The running CLI's package root: its rules template proves which global rules block install wrote. */
 const SOURCE_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
@@ -65,8 +79,9 @@ export function runUserUninstall(opts: UninstallOptions): UninstallResult {
   if (opts.dryRun) return runUserUninstallLocked(opts);
   // Reject invalid authority without creating a lock directory. Read it again
   // under the lock before planning any mutation, since another writer can run here.
-  // A protocol 3 state is read after its migration under the lock.
-  try { if (!installStatePendingMigration(opts.env ?? process.env)) readUninstallState(opts); }
+  // A protocol 3 state is read after its migration under the lock; an older
+  // ledger is read as its schema move under the lock will leave it.
+  try { if (!installStatePendingMigration(opts.env ?? process.env)) readUninstallState({ ...opts, dryRun: true }); }
   catch (error) {
     return uninstallResult([failedRead(error, configurationReceiptPath(hostConfigurationRoot(opts.env)))], false);
   }
@@ -96,21 +111,38 @@ function readUninstallState(opts: UninstallOptions) {
   // A dry run on a protocol 3 state plans with the migration's projection and writes nothing.
   const projected = opts.dryRun && installStatePendingMigration(env) ? planInstallStateMigration(env) : null;
   const state = projected?.state ?? readInstallState(env);
-  const records = projected ? projected.records : state ? readPathRecords(env) : {};
+  // A dry run reads the ledger as the schema move would leave it.
+  const records = projected ? projected.records : !state ? {} : opts.dryRun ? partitionPathRecords(env, projectedLedgerPaths(hostConfigPaths(env))).records : readPathRecords(env);
   return { state, records, lock, files, codexMigration, jsonMigration };
 }
 
-const REVERT_ITEMS: Readonly<Record<Exclude<HostConfigRevertEntry['action'], 'released'>, Pick<UninstallItem, 'action' | 'reason'>>> = {
-  removed: { action: 'remove', reason: 'host-config ledger: rh created this file' },
-  restored: { action: 'restore', reason: 'host-config ledger: the file before rh' },
-  text_removed: { action: 'restore', reason: 'host-config ledger: rh text removed' },
-  already_absent: { action: 'note', reason: 'file already absent' },
-  kept_edited: { action: 'unresolved', reason: 'changed since rh wrote it; preserved' },
+const REVERT_REASONS: Readonly<Record<HostConfigRevertEntry['action'], string>> = {
+  removed: 'host-config ledger: rh created this file',
+  restored: 'host-config ledger: the file before rh',
+  text_removed: 'host-config ledger: rh text removed',
+  released: 'host-config ledger: rh text already gone',
+  already_absent: 'file already absent',
+  kept_edited: 'changed since rh wrote it; preserved',
+  failed: 'host_config_restore_mismatch: the reverted file would not equal the file before rh; nothing written, the ledger record and its vault copy kept',
 };
 
-function revertItem(entry: HostConfigRevertEntry): UninstallItem {
-  const item = REVERT_ITEMS[entry.action as keyof typeof REVERT_ITEMS];
-  return { path: entry.path, action: item.action, reason: entry.kept?.length ? `${item.reason}: ${entry.kept.join(', ')}` : item.reason };
+const BASELINE_UNKNOWN = 'baseline unknown: equality with the file before install cannot be proved';
+
+/** The report item of one gate revert entry; `rh config restore` uses the same mapping. */
+export function revertItem(entry: HostConfigRevertEntry): UninstallItem {
+  const action: UninstallAction = entry.action === 'kept_edited' ? 'unresolved' : entry.action === 'already_absent' ? 'note'
+    : entry.action === 'failed' ? 'failed' : entry.baseline === 'proved' ? 'restored' : 'reverted';
+  const reason = [REVERT_REASONS[entry.action], ...(entry.baseline === 'unknown' && action === 'reverted' ? [BASELINE_UNKNOWN] : [])].join('; ');
+  return { path: entry.path, action, reason: entry.kept?.length ? `${reason}: ${entry.kept.join(', ')}` : reason };
+}
+
+/** A `failed` item blocks like an `unresolved` one and takes exit code 2 over 1. */
+function blocking(items: readonly UninstallItem[]): boolean {
+  return items.some((item) => item.action === 'unresolved' || item.action === 'failed');
+}
+
+export function exitCodeOf(items: readonly UninstallItem[]): 0 | 1 | 2 {
+  return items.some((item) => item.action === 'failed') ? 2 : items.some((item) => item.action === 'unresolved') ? 1 : 0;
 }
 
 function sameRevert(left: readonly HostConfigRevertEntry[], right: readonly HostConfigRevertEntry[]): boolean {
@@ -119,9 +151,10 @@ function sameRevert(left: readonly HostConfigRevertEntry[], right: readonly Host
 }
 
 function uninstallResult(items: UninstallItem[], dryRun: boolean): UninstallResult {
-  const partial = items.some((item) => item.action === 'unresolved');
-  return { exitCode: partial ? 1 : 0, status: partial ? 'partial' : 'complete', dryRun, items,
-    lines: [...items.map((item) => `[${item.action}] ${item.path}: ${item.reason}`), `[uninstall] ${partial ? 'partial' : 'complete'}${dryRun ? ' (dry-run)' : ''}`] };
+  const exitCode = exitCodeOf(items);
+  const status = exitCode === 2 ? 'failed' : exitCode === 1 ? 'partial' : 'complete';
+  return { exitCode, status, dryRun, items,
+    lines: [...items.map((item) => `[${item.action}] ${item.path}: ${item.reason}`), `[uninstall] ${status}${dryRun ? ' (dry-run)' : ''}`] };
 }
 
 function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
@@ -145,7 +178,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   const removedPi = new Set<string>();
   const remember = (path: string): void => { if (!originals.has(path)) originals.set(path, fingerprint(path)); };
   const read = (path: string): string => writes.has(path) ? writes.get(path) ?? '' : existsSync(path) ? readFileSync(path, 'utf8') : '';
-  const change = (path: string, value: string | null, reason: string, action: 'remove' | 'restore' = 'remove'): void => {
+  const change = (path: string, value: string | null, reason: string, action: UninstallAction = 'reverted'): void => {
     remember(path); writes.set(path, value); items.push({ path, action, reason });
   };
   const unresolved = (path: string, reason: string): void => { items.push({ path, action: 'unresolved', reason }); };
@@ -162,14 +195,16 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
     ({ state, records, lock, files, codexMigration, jsonMigration } = readUninstallState(opts));
   } catch (error) { items.push(failedRead(error, configurationReceiptPath(home))); return result(); }
 
-  const gate = openHostConfigGate({ env });
+  const gate = openHostConfigGate({ env, preview: opts.dryRun === true });
   const hostPaths = [...(files.codex ? [files.codex] : []), ...files.json];
   // The Global Working Rules files go by the ledger too. Two host paths that name one file are one revert.
   const rulesAdoptions = new Map<string, HostConfigAdoption>();
   const resolvedHostPaths = new Set<string>();
+  const globalContextPaths = new Set<string>();
   for (const host of ['codex', 'claude'] as const) {
     if (opts.target !== 'both' && opts.target !== host) continue;
     const contextPath = globalContextPath(home, host);
+    globalContextPaths.add(contextPath);
     try {
       const resolved = resolveHostPath(hostConfigPaths(env), contextPath);
       if (resolvedHostPaths.has(resolved)) continue;
@@ -184,6 +219,19 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       }
       hostPaths.push(contextPath);
     } catch (error) { unresolved(contextPath, String((error as Error).message)); }
+  }
+  for (const named of opts.removeEditedBlocks ?? []) {
+    try {
+      const target = resolveHostPath(hostConfigPaths(env), named);
+      const rulesPath = [...globalContextPaths].find((path) => hostPaths.includes(path) && resolveHostPath(hostConfigPaths(env), path) === target);
+      if (!rulesPath) throw new Error('not a recorded rules file of this target; nothing removed');
+      const removal = gate.removeEditedBlock(rulesPath);
+      // The dry run cannot plan the revert of the file after the removal, so it leaves the file out.
+      if (opts.dryRun) hostPaths.splice(hostPaths.indexOf(rulesPath), 1);
+      items.push({ path: removal.path, action: 'reverted', reason: removal.recovery === null
+        ? `the ${removal.selector} block goes on your word; the whole file goes to the vault first`
+        : `the ${removal.selector} block went on your word; whole-file copy: ${removal.recovery}` });
+    } catch (error) { unresolved(named, String((error as Error).message)); }
   }
   const previewOf = (path: string): readonly HostConfigRevertEntry[] => {
     const rules = rulesAdoptions.get(path);
@@ -211,17 +259,16 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   for (const source of opts.target === 'both' ? state?.pi_packages ?? [] : []) {
     try {
       if (piExecutable(env) === null) {
-        items.push({ path: source, action: 'preserve', reason: 'pi not found on PATH; package removal skipped; ownership retained for retry' });
+        items.push({ path: source, action: 'kept', reason: 'pi not found on PATH; package removal skipped; ownership retained for retry' });
         continue;
       }
       if (piPackagePresent(source, env)) {
         piRemovals.push(source);
-        items.push({ path: source, action: 'remove', reason: 'transaction-owned Pi package entry through pi remove' });
+        items.push({ path: source, action: 'reverted', reason: 'transaction-owned Pi package entry through pi remove' });
       }
       removedPi.add(source);
     } catch (error) { unresolved(source, (error as Error).message); }
   }
-  const realRoot = (path: string): string => { try { return realpathSync(path); } catch { return path; } };
   for (const [key, record] of Object.entries(records) as [string, PathRecord][]) {
     // The host comes from the path as the install named it, so a linked ~/.claude still is `claude`.
     if (opts.target !== 'both' && record.host !== opts.target) continue;
@@ -231,11 +278,14 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       continue;
     }
     if (record.host === 'bin') {
-      items.push({ path: key, action: 'preserve', reason: 'package-manager installation retained; remove separately after configuration cleanup' });
+      items.push({ path: key, action: 'kept', reason: 'package-manager installation retained; remove separately after configuration cleanup' });
       continue;
     }
     try {
-      recordRoots.set(key, realRoot(record.host === 'pi' ? dirname(piSkills) : home));
+      // The record is checked beneath its own host root, which a link can put outside HOME.
+      const root = pathRecordRoot(env, key, record);
+      if (root === null) throw new Error(`the record is outside the root of its host: ${key}`);
+      recordRoots.set(key, root);
       // A record may own the final symlink, but never a symlinked parent directory.
       assertConfigurationPath(dirname(key), surfaceRoot(key));
       // The records of a dry-run migration are not in the ledger yet, so the plan reads them from `records`.
@@ -246,8 +296,8 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       if (action === 'released') continue;
       remember(key); surfaceRemovals.push(key);
       items.push(action === 'restored'
-        ? { path: key, action: 'restore', reason: 'unchanged transaction-owned file; the user file it replaced comes back from the vault' }
-        : { path: key, action: 'remove', reason: 'unchanged transaction-owned surface' });
+        ? { path: key, action: 'restored', reason: 'unchanged transaction-owned file; the user file it replaced comes back from the vault' }
+        : { path: key, action: record.baseline.state === 'known' && !record.baseline.existed ? 'restored' : 'reverted', reason: 'unchanged transaction-owned surface' });
     } catch (error) { unresolved(key, String((error as Error).message)); }
   }
 
@@ -298,7 +348,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       for (const key of staging) {
         surfaceRemovals.splice(surfaceRemovals.indexOf(key), 1);
         removedSurfaces.delete(key);
-        Object.assign(items.find((item) => item.path === key && item.action === 'remove')!, { action: 'preserve', reason: 'staging skill retained until its lock entry can be removed' });
+        Object.assign(items.find((item) => item.path === key && (item.action === 'reverted' || item.action === 'restored'))!, { action: 'kept', reason: 'staging skill retained until its lock entry can be removed' });
       }
     }
   }
@@ -309,14 +359,14 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   const recordsDigest = pathRecordsDigest(records);
   if (state) {
     const pendingPi = state.pi_packages.filter((source) => !removedPi.has(source));
-    if (opts.target === 'both' && !pendingPi.length && !items.some((item) => item.action === 'unresolved')) {
+    if (opts.target === 'both' && !pendingPi.length && !blocking(items)) {
       change(statePath, null, 'install state retired');
       retireRecords = true;
     } else if (removedPi.size) {
       change(statePath, `${JSON.stringify({ ...state, pi_packages: pendingPi, previous: null }, null, 2)}\n`, 'retain remaining ownership for retry/other host');
     }
   }
-  items.push({ path: join(home, '.repo-harness'), action: 'preserve', reason: 'archives, runtime history and the MCP config retained; third-party packages/plugins retained' });
+  items.push({ path: join(home, '.repo-harness'), action: 'kept', reason: 'archives, runtime history and the MCP config retained; third-party packages/plugins retained' });
 
   if (!opts.dryRun) {
     try {

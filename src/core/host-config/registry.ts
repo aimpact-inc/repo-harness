@@ -37,8 +37,12 @@ const JSON_FORMAT: FragmentFormat = {
   strategy: jsonFragment,
   remove: removeJsonFragment,
   restore: (content, selector, backup, records) => {
-    const value = jsonFragmentValue(backup, selector);
-    return value === undefined ? removeJsonFragment(content, selector, records) : jsonFragment.apply(content, selector, value);
+    const before = jsonFragment.locate(backup, selector);
+    if (!before) return removeJsonFragment(content, selector, records);
+    // In place, the backup's own bytes come back, so a full revert can equal the file before rh.
+    const range = jsonFragment.locate(content, selector);
+    if (range) return { at: range.start, removed: content.slice(range.start, range.end), inserted: backup.slice(before.start, before.end) };
+    return jsonFragment.apply(content, selector, jsonFragmentValue(backup, selector));
   },
   empty: jsonDocumentIsEmpty,
 };

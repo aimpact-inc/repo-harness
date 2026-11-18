@@ -13,11 +13,13 @@ responsibilities:
   - Project the catalog-selected skills to Claude, Codex and Pi roots without a second Pi package skill declaration.
   - Apply and roll back plugin selections and the install state under the runtime host lock.
   - Report host install status and scan local hook and task configurations for injection surfaces without mutation.
+  - Show and revert the host-config ledger records for the user (`rh config status|diff|restore|gc`), and delete retired vault copies.
 source:
   include:
     - src/cli/installer/**
     - src/pi/**
     - src/cli/commands/install.ts
+    - src/cli/commands/config.ts
     - src/cli/commands/status.ts
     - src/cli/commands/security.ts
   exclude:

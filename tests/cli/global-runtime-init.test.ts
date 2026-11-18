@@ -19,7 +19,7 @@ import wazaRules from '../../src/core/skill-surface/waza-shared-rules.json';
 import { syncWazaSharedRules } from "../../src/cli/installer/waza-rules";
 import { beginInstallHostTransaction, installProfileHostMutationPaths, installProfileTransactionPaths, installStateStatus, readInstallState, rollbackInstallHostTransaction, versions } from '../../src/cli/installer/install-profile';
 import { applyGlobalContextRefresh, GLOBAL_RULES_EDITED, GLOBAL_RULES_END, inspectGlobalContext, preflightGlobalContextRefresh, renderGlobalRulesBlock, setReportingLanguage } from '../../src/cli/installer/global-context';
-import { CandidateRequestProtocolRetiredError, encodeCandidateRequest, parseCandidateRequest, type CandidateReconciliationRequest } from '../../src/cli/commands/candidate-reconciliation';
+import { CandidateRequestProtocolRetiredError, assertReceiptSelection, encodeCandidateRequest, parseCandidateReceipt, parseCandidateRequest, type CandidateReconciliationRequest } from '../../src/cli/commands/candidate-reconciliation';
 import type { PluginId } from '../../src/core/skill-surface/plugin-manifest';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
 import { hostConfigPaths } from '../../src/effects/host-config/store';
@@ -2628,6 +2628,38 @@ exit 0
     }
   }, 30_000);
 
+  test('CLI update --dry-run lists the local host-config items of the selection and starts no installer', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'repo-harness-cli-update-dry-run-'));
+    const home = join(tmp, 'home');
+    const fakeBin = join(tmp, 'bin');
+    const bunLog = join(tmp, 'bun.log');
+    try {
+      const env = sanitizedChildEnv(home);
+      seedGlobalPackageFixture(env);
+      const settings = join(home, '.claude', 'settings.json');
+      mkdirSync(dirname(settings), { recursive: true });
+      writeFileSync(settings, '{"statusLine":{"type":"command","command":"user-line"}}\n');
+      mkdirSync(fakeBin, { recursive: true });
+      writeFileSync(join(fakeBin, 'bun'), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${bunLog}"\nexit 0\n`);
+      chmodSync(join(fakeBin, 'bun'), 0o755);
+      const before = readdirSync(home, { recursive: true }).map(String).sort();
+      const res = spawnSync(process.execPath, [CLI, 'update', '--dry-run', '--json', '--target', 'claude', '--override', `${settings}#statusLine`], {
+        cwd: tmp, encoding: 'utf-8',
+        env: { ...env, PATH: `${fakeBin}:${process.env.PATH ?? ''}`, REPO_HARNESS_BUN_EXECUTABLE: join(fakeBin, 'bun'), BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0' },
+      });
+      expect(res.status, res.stderr).toBe(0);
+      const output = JSON.parse(res.stdout);
+      expect(output.candidate_changes).toBe('unavailable');
+      expect(output.host_config.items).toContainEqual({ path: realpathSync(settings), selector: 'statusLine', action: 'override' });
+      expect(existsSync(bunLog)).toBe(false);
+      expect(readdirSync(home, { recursive: true }).map(String).sort()).toEqual(before);
+      // The working directory gets no repository write either.
+      expect(readdirSync(tmp).sort()).toEqual(['bin', 'home']);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('CLI top-level --version still prints the CLI version', () => {
     const res = spawnSync(process.execPath, [CLI, '--version'], {
       cwd: ROOT,
@@ -2668,7 +2700,7 @@ exit 0
     expect(res.stdout).toContain('--configure-codegraph');
     expect(res.stdout).toContain('--no-cli');
     expect(res.stdout).not.toContain('--repo <path>');
-    expect(res.stdout).not.toContain('--dry-run');
+    expect(res.stdout).toContain('--dry-run');
     expect(res.stdout).not.toContain('--interactive');
   }, 30_000);
 
@@ -3529,7 +3561,7 @@ describe('Global Working Rules refresh during install and update', () => {
 
     // The migration took out text with no ledger record, so the vault holds the file before it and a revert puts it back.
     writeFileSync(path, expected);
-    expect(openHostConfigGate({ env: { ...process.env, HOME: home } }).revert([path])).toEqual([{ path, action: 'text_removed' }]);
+    expect(openHostConfigGate({ env: { ...process.env, HOME: home } }).revert([path])).toEqual([{ path, action: 'text_removed', baseline: 'proved' }]);
     expect(readFileSync(path, 'utf-8')).toBe(mixedLegacy);
   }), 60_000);
 
@@ -3571,6 +3603,18 @@ describe('Global Working Rules refresh during install and update', () => {
     expect(parseCandidateRequest(encodeCandidateRequest({ ...request, report_language: 'zh-CN' }), '9.9.9').report_language).toBe('zh-CN');
     expect(parseCandidateRequest(encodeCandidateRequest(request), '9.9.9').report_language).toBeUndefined();
     expect(() => parseCandidateRequest(encodeCandidateRequest({ ...request, report_language: 'custom' as 'en' }), '9.9.9')).toThrow('invalid shape');
+    const overrides = [{ path: '/home/u/.claude/settings.json', selector: 'statusLine' }];
+    expect(parseCandidateRequest(encodeCandidateRequest({ ...request, overrides }), '9.9.9').overrides).toEqual(overrides);
+    // A released candidate ignores the field, so a receipt with no echo of the selection fails the parent's step.
+    const receipt = { protocol: 3, transaction_id: 't', candidate_package_root: '/tmp/c', candidate_version: '0.35.0', candidate_package_digest: 'sha256:00',
+      route_registry_digest: 'sha256:00', selected_target: 'codex', adapter_projection_digests: {}, ownership_manifest_digest: null, reconciliation_scope: 'partial', verified_at: 'now' } as const;
+    expect(() => assertReceiptSelection(overrides, parseCandidateReceipt(JSON.stringify(receipt)))).toThrow('candidate 0.35.0 did not apply the --override selection');
+    expect(() => assertReceiptSelection(overrides, parseCandidateReceipt(JSON.stringify({ ...receipt, overrides })))).not.toThrow();
+    expect(() => assertReceiptSelection(undefined, parseCandidateReceipt(JSON.stringify(receipt)))).not.toThrow();
+    // A selection this version cannot read, and a field it does not know, are refused, not dropped.
+    for (const invalid of [{ overrides: [{ path: 'relative', selector: 'statusLine' }] }, { overrides: [{ path: '/a', selector: '' }] }, { future_field: true }]) {
+      expect(() => parseCandidateRequest(encodeCandidateRequest({ ...request, ...invalid } as unknown as CandidateReconciliationRequest), '9.9.9')).toThrow('invalid shape');
+    }
     // A released parent before request protocol 3 cannot drive this candidate; the candidate names the direct bootstrap.
     for (const protocol of [1, 2]) {
       expect(() => parseCandidateRequest(encodeCandidateRequest({ ...request, protocol, reverse_skill: false } as unknown as CandidateReconciliationRequest), '9.9.9'))

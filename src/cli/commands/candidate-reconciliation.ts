@@ -25,6 +25,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'path';
 
 import type { InstallTargetSpec } from './install';
 import { REPORT_LANGUAGE_FLAG_VALUES, type ReportLanguageFlag } from '../installer/global-context';
+import type { OverrideSelection } from '../../core/host-config/override';
 import {
   buildManagedHooks,
   canonicalManagedHookProjection,
@@ -86,6 +87,8 @@ export interface CandidateReconciliationReceipt {
   readonly ownership_manifest_digest: string | null;
   readonly reconciliation_scope: 'complete' | 'partial';
   readonly verified_at: string;
+  /** The `--override` selection that the candidate applied; absent when the request had none. A released candidate never writes it. */
+  readonly overrides?: OverrideSelection;
 }
 
 export interface CandidateReconciliationRequest {
@@ -102,6 +105,8 @@ export interface CandidateReconciliationRequest {
   readonly obsidian_skills: boolean;
   readonly codegraph: boolean;
   readonly report_language?: ReportLanguageFlag;
+  /** The user's `--override` selection, paths resolved by the parent; the candidate checks it against its own requests. */
+  readonly overrides?: OverrideSelection;
 }
 
 export interface CandidateReceiptExpectation {
@@ -415,6 +420,17 @@ export function assertCandidateReconciliationReceipt(
   }
 }
 
+/**
+ * The parent's check that the candidate applied the selection it sent. A
+ * released candidate ignores an unknown request field, so a selection with no
+ * echo in the receipt was dropped: the step fails and the transaction rolls back.
+ */
+export function assertReceiptSelection(requested: OverrideSelection | undefined, receipt: CandidateReconciliationReceipt): void {
+  if (JSON.stringify(requested ?? []) !== JSON.stringify(receipt.overrides ?? [])) {
+    throw new Error(`candidate ${receipt.candidate_version} did not apply the --override selection; run rh update without --override, then rh install --override`);
+  }
+}
+
 export function parseCandidateReceipt(stdout: string): CandidateReconciliationReceipt {
   let parsed: unknown;
   try {
@@ -443,6 +459,7 @@ export function parseCandidateReceipt(stdout: string): CandidateReconciliationRe
       typeof receipt.ownership_manifest_digest !== 'string'
       || !receipt.ownership_manifest_digest.startsWith('sha256:')
     ))
+    || (receipt.overrides !== undefined && !isOverrideSelection(receipt.overrides))
   ) {
     throw new Error('candidate reconciliation receipt has invalid shape');
   }
@@ -473,6 +490,13 @@ export class CandidateRequestProtocolRetiredError extends Error {
   }
 }
 
+function isOverrideSelection(value: unknown): boolean {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'object' && entry !== null && !Array.isArray(entry)
+    && Object.keys(entry).length === 2
+    && typeof entry.path === 'string' && isAbsolute(entry.path)
+    && typeof entry.selector === 'string' && entry.selector.length > 0);
+}
+
 export function parseCandidateRequest(encoded: string, candidateVersion: string): CandidateReconciliationRequest {
   let parsed: unknown;
   try {
@@ -491,8 +515,8 @@ export function parseCandidateRequest(encoded: string, candidateVersion: string)
   const booleans = [
     'sync_skill', 'host_adapters', 'external_skills', 'obsidian_skills', 'codegraph',
   ];
-  // Fields that earlier request shapes carried; the runtime no longer reads them.
-  const retiredFields = ['profile', 'reverse_skill', 'brain_root'];
+  // A field that this version does not read (a retired one, or one of a newer parent) is refused, not dropped.
+  const known = new Set([...requiredStrings, ...booleans, 'protocol', 'candidate', 'target', 'report_language', 'overrides']);
   if (
     request.protocol !== CANDIDATE_RECONCILIATION_PROTOCOL
     || requiredStrings.some((key) => typeof request[key] !== 'string' || !(request[key] as string).length)
@@ -500,10 +524,11 @@ export function parseCandidateRequest(encoded: string, candidateVersion: string)
     || request.candidate === null
     || Array.isArray(request.candidate)
     || !['codex', 'claude', 'both'].includes(String(request.target))
-    || retiredFields.some((key) => key in request)
+    || Object.keys(request).some((key) => !known.has(key))
     || booleans.some((key) => typeof request[key] !== 'boolean')
     || (request.report_language !== undefined
       && !REPORT_LANGUAGE_FLAG_VALUES.includes(request.report_language as ReportLanguageFlag))
+    || (request.overrides !== undefined && !isOverrideSelection(request.overrides))
   ) {
     throw new Error('candidate reconciliation request has invalid shape');
   }

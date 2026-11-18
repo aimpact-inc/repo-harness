@@ -13,13 +13,13 @@ import { migrateCodexConfigRecords } from './installer/codex-config-migration';
 import { Command, CommanderError } from 'commander';
 import { randomBytes } from 'crypto';
 import { existsSync, lstatSync, realpathSync } from 'fs';
-import { dirname, join } from 'path';
+import { dirname, join, resolve } from 'path';
 import { createInterface } from 'readline/promises';
 import { fileURLToPath } from 'url';
-import { runInstall, runUninstall } from './commands/install';
+import { assertOverridesCarried, formatHostConfigPreview, previewHostConfig, resolveOverrides, runInstall, runUninstall } from './commands/install';
 import { planPiPackage, removePiPackage } from './installer/pi-package';
 import { migrateRuntimeHostConfig, initializeStagedSkillObservations, recordStagedExternalSkillWrites, newPiPackagesSinceTransaction, recordPiInstallOwnership, recordUnresolvedPiOwnership } from './installer/install-profile';
-import { migrateInstallState } from './installer/install-state-migration';
+import { installStatePendingMigration, migrateInstallState, planInstallStateMigration } from './installer/install-state-migration';
 import { requireHome } from "../effects/repo-harness-home";
 import { pathRecordsDigest, readPathRecords } from '../effects/host-config/path-records';
 import { parsePluginList, PLUGIN_IDS, selectionLabel, type PluginId, type PluginSelection } from '../core/skill-surface/plugin-manifest';
@@ -36,6 +36,7 @@ import { buildHerdrCommand } from './commands/herdr';
 import { buildEventsCommand } from './commands/events';
 import { buildCapabilityCommand } from './commands/capability';
 import { buildDocsCommand } from './commands/docs';
+import { buildConfigCommand } from './commands/config';
 import { buildMcpCommand } from './commands/mcp';
 import { buildRunCommand } from './commands/run';
 import { buildVerifyCommand } from './commands/verify';
@@ -203,6 +204,14 @@ interface GlobalRuntimeCommandOptions {
   /** `--plugins a,b` gives a string; `--no-plugins` gives false; neither gives undefined. */
   plugins?: string | false;
   dryRun?: boolean;
+  /** Each `--override <path>#<selector>`, in order. */
+  override?: string[];
+}
+
+const OVERRIDE_HELP = 'Let rh write the fragment at <path>#<selector> over a value that rh did not write (repeatable)';
+
+function collectOption(value: string, previous: string[]): string[] {
+  return [...previous, value];
 }
 
 /** Minimal duck-typed slice of `Command` so tests can fake option-value sourcing without constructing a real commander `Command`. */
@@ -411,6 +420,8 @@ export function runCandidateRuntimeReconciliation(
   // The parent reads and writes no install state after this handoff: this commit owns
   // the whole state, including the Pi package and Pi skill-root receipts.
   const complete = request.sync_skill && request.host_adapters;
+  // This version's own requests must carry the selection before any write.
+  assertOverridesCarried(request.host_adapters ? request.target : null, request.overrides ?? [], env);
   // A released parent holds the lock; its transaction keeps the state, and the ledger keeps the records.
   migrateInParentTransaction(request.transaction_backup_root, env, () => {
     migrateInstallState(env);
@@ -441,6 +452,7 @@ export function runCandidateRuntimeReconciliation(
       obsidianSkills: request.obsidian_skills,
       codegraph: request.codegraph,
       reportLanguage: request.report_language,
+      overrides: request.overrides,
       updateMode: true,
       mcpLocalConfigCheck,
     });
@@ -487,6 +499,7 @@ export function runCandidateRuntimeReconciliation(
       ownership_manifest_digest: ownershipManifestDigest,
       reconciliation_scope: complete ? 'complete' : 'partial',
       verified_at: new Date().toISOString(),
+      ...(request.overrides?.length ? { overrides: request.overrides } : {}),
     };
     assertCandidateReconciliationReceipt(receipt, {
       transaction_id: request.transaction_id,
@@ -628,8 +641,13 @@ async function runGlobalRuntimeBootstrap(
   cmd?: OptionSourceLookup,
 ): Promise<never> {
   const target = assertTarget(rawOpts.target, 'install');
+  const hostAdapters = rawOpts.hooks === false ? null : target;
+  const overrides = resolveOverrides(rawOpts.override ?? [], process.env);
+  assertOverridesCarried(hostAdapters, overrides, process.env);
   if (rawOpts.dryRun !== true) migrateInstallStateLocked(process.env);
-  const current = readInstallState();
+  // A dry run on a protocol 3 state plans with the migration's projection and writes nothing.
+  const projected = rawOpts.dryRun === true && installStatePendingMigration(process.env) ? planInstallStateMigration(process.env) : null;
+  const current = projected?.state ?? readInstallState();
   // `--plugins` selects exactly its ids, `--no-plugins` core only, and neither `all`.
   const selection: PluginSelection = rawOpts.plugins === false ? [] : rawOpts.plugins === undefined ? 'all' : parsePluginList(rawOpts.plugins);
   const resolved = resolveRecordedSelection({ selection, plugins: current?.plugins ?? [] }, target);
@@ -643,7 +661,8 @@ async function runGlobalRuntimeBootstrap(
   if (rawOpts.dryRun === true) {
     const removedDanglingSkillLinks = rawOpts.syncSkill === false ? [] : planSkillSync(plugins).retired
       .filter(path => lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink() && !existsSync(path));
-    if (rawOpts.json === true) console.log(JSON.stringify({ ...plan, removedDanglingSkillLinks }, null, 2));
+    const hostConfig = previewHostConfig(hostAdapters, overrides, process.env);
+    if (rawOpts.json === true) console.log(JSON.stringify({ ...plan, removedDanglingSkillLinks, host_config: hostConfig }, null, 2));
     else {
       console.log(`[plugins] selection=${selectionLabel(selection)}`);
       console.log(`[plugins] requested=${record.join(',') || '(core only)'} current=${plan.current_plugins === null ? 'none' : plan.current_plugins.join(',') || '(core only)'}`);
@@ -652,6 +671,7 @@ async function runGlobalRuntimeBootstrap(
       console.log(`[plugins] remove=${plan.remove.join(',') || '(none)'}`);
       for (const line of selectionLines(resolved)) console.log(line);
       for (const link of removedDanglingSkillLinks) console.log(`[sync-installed] would remove dangling skill symlink: ${link}`);
+      for (const line of formatHostConfigPreview(hostConfig)) console.log(line);
     }
     process.exit(0);
   }
@@ -682,6 +702,7 @@ async function runGlobalRuntimeBootstrap(
     obsidianSkills: rawOpts.withObsidianSkills === true,
     codegraph,
     reportLanguage: rawOpts.reportLanguage === undefined ? undefined : parseReportLanguageFlag(rawOpts.reportLanguage),
+    overrides,
   }, (transaction, result) => (
     applyInstallSelection(
       selection,
@@ -729,6 +750,7 @@ export function buildProgram(): Command {
     .option('--with-obsidian-skills', 'Explicitly install the pinned obsidian-markdown and obsidian-cli companion Skills')
     .option('--no-codegraph', 'Skip CodeGraph CLI/MCP configuration')
     .option('--report-language <language>', `Reporting language for Global Working Rules that record none: ${REPORT_LANGUAGE_FLAG_VALUES.join('|')}`)
+    .option('--override <path#selector>', OVERRIDE_HELP, collectOption, [])
     .option('--json', 'Output JSON instead of human-readable text')
     .action(async (rawOpts: GlobalRuntimeCommandOptions & { location?: string; state?: boolean; rollback?: boolean }, cmd: Command) => {
       const target = assertTarget(rawOpts.target, 'install');
@@ -741,6 +763,9 @@ export function buildProgram(): Command {
       }
       if (rawOpts.dryRun === true && rawOpts.location !== undefined) {
         throw new Error('--dry-run cannot be combined with --location');
+      }
+      if (rawOpts.override?.length && (rawOpts.state === true || rawOpts.rollback === true || rawOpts.location !== undefined)) {
+        throw new Error('--override cannot be combined with --state, --rollback, or --location');
       }
       if (rawOpts.state === true) {
         const state = readInstallState();
@@ -883,6 +908,8 @@ export function buildProgram(): Command {
     .option('--configure-codegraph', 'Refresh CodeGraph CLI/MCP (default during update)')
     .option('--no-codegraph', 'Skip refreshing the global CodeGraph CLI/MCP')
     .option('--report-language <language>', `Reporting language for Global Working Rules that record none: ${REPORT_LANGUAGE_FLAG_VALUES.join('|')}`)
+    .option('--override <path#selector>', OVERRIDE_HELP, collectOption, [])
+    .option('--dry-run', 'Print the local host-config plan; start no package install')
     .option('--json', 'Output JSON instead of human-readable text')
     .action((rawOpts: {
       target: string;
@@ -897,6 +924,8 @@ export function buildProgram(): Command {
       codegraph?: boolean;
       configureCodegraph?: boolean;
       reportLanguage?: string;
+      override: string[];
+      dryRun?: boolean;
       json?: boolean;
     }) => {
       const target = assertTarget(rawOpts.target, 'update');
@@ -907,6 +936,18 @@ export function buildProgram(): Command {
       if (rawOpts.reportLanguage !== undefined && !REPORT_LANGUAGE_FLAG_VALUES.includes(rawOpts.reportLanguage as ReportLanguageFlag)) {
         console.error(`rh update: invalid --report-language (expected: ${REPORT_LANGUAGE_FLAG_VALUES.join(', ')})`);
         process.exit(2);
+      }
+      const hostAdapters = rawOpts.hooks === false ? null : target;
+      const overrides = resolveOverrides(rawOpts.override, process.env);
+      assertOverridesCarried(hostAdapters, overrides, process.env);
+      if (rawOpts.dryRun === true) {
+        const hostConfig = previewHostConfig(hostAdapters, overrides, process.env);
+        if (rawOpts.json === true) console.log(JSON.stringify({ host_config: hostConfig, candidate_changes: 'unavailable' }, null, 2));
+        else {
+          for (const line of formatHostConfigPreview(hostConfig)) console.log(line);
+          console.log('[update] dry run: the current local host changes only; candidate-version changes are unavailable in a dry run');
+        }
+        process.exit(0);
       }
       const installSpec = rawOpts.version
         ? `repo-harness@${rawOpts.version}`
@@ -924,6 +965,7 @@ export function buildProgram(): Command {
         obsidianSkills: rawOpts.withObsidianSkills === true,
         codegraph: rawOpts.codegraph === false ? false : rawOpts.configureCodegraph === true ? true : undefined,
         reportLanguage: rawOpts.reportLanguage as ReportLanguageFlag | undefined,
+        overrides,
       });
       if (result.exitCode === 0) {
         result.lines.push(updateLeftoverSummary(process.cwd(), rawOpts.cli !== false));
@@ -943,11 +985,12 @@ export function buildProgram(): Command {
     .option('--target <target>', `Target host: ${TARGET_HELP}`, 'both')
     .option('--location <location>', `Install location: ${LOCATION_HELP}`, 'global')
     .option('--dry-run', 'Preview cleanup without filesystem writes')
+    .option('--remove-edited-block <path>', 'Also remove the rules block in this file when you edited it; the whole file goes to the vault first (repeatable)', (value: string, previous: string[]) => [...previous, resolve(value)], [] as string[])
     .option('--json', 'Output the cleanup result as JSON')
-    .action((rawOpts: { target: string; location: string; dryRun?: boolean; json?: boolean }) => {
+    .action((rawOpts: { target: string; location: string; dryRun?: boolean; json?: boolean; removeEditedBlock: string[] }) => {
       const target = assertTarget(rawOpts.target, 'uninstall');
       const location = assertLocation(rawOpts.location, 'uninstall');
-      const uninstallAdapters = () => runUninstall({ target, location, dryRun: rawOpts.dryRun });
+      const uninstallAdapters = () => runUninstall({ target, location, dryRun: rawOpts.dryRun, removeEditedBlocks: rawOpts.removeEditedBlock });
       const result = uninstallAdapters();
       if (rawOpts.json) console.log(JSON.stringify(result, null, 2));
       else for (const line of result.lines) console.log(line);
@@ -1004,6 +1047,7 @@ export function buildProgram(): Command {
   program.addCommand(pluginCommand(buildEventsCommand(), 'peer-runtime'));
   program.addCommand(buildCapabilityCommand());
   program.addCommand(buildDocsCommand());
+  program.addCommand(buildConfigCommand());
   const mcp = buildMcpCommand();
   for (const name of ['serve', 'doctor']) {
     const command = mcp.commands.find(candidate => candidate.name() === name);

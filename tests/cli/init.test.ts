@@ -615,7 +615,6 @@ describe("init command", () => {
     ['init', '--brain-mode', ['manifest-only']],
     ['init', '--interactive', []],
     ['update', '--repo', ['.']],
-    ['update', '--dry-run', []],
     ['update', '--interactive', []],
   ] as const)('retired %s %s fails before any repository or host write', (command, flag, values) => {
     const tmp = join(tmpdir(), `retired-cli-option-${command}-${flag.slice(2)}-${Date.now()}`);

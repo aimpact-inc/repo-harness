@@ -1,6 +1,6 @@
 import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { requireHome } from '../repo-harness-home';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import type { PathRecord, PathRecordHost } from '../../core/host-config/types';
 import { ownedSkillIsIntact } from './herdr-skill-marker';
@@ -30,6 +30,30 @@ let supportedCheck: SupportedPathRecord | null = null;
 
 export function registerSupportedPathRecords(check: SupportedPathRecord): void {
   supportedCheck = check;
+  supportedByEnv.clear();
+}
+
+/**
+ * The built check per environment, for `createdPaths` only. A hook process
+ * reads the records once per target and writes nothing, and each build loads
+ * the skill catalog and resolves every install root. The key hashes the whole
+ * environment, because the roots come from several variables. An install
+ * changes links under the roots while it runs, so its readers build the check
+ * each time.
+ */
+const supportedByEnv = new Map<string, (key: string, record: PathRecord) => boolean>();
+const SUPPORTED_CACHE_SIZE = 4;
+
+function cachedSupported(env: NodeJS.ProcessEnv): (key: string, record: PathRecord) => boolean {
+  if (!supportedCheck) return () => false;
+  const key = sha256Prefixed(JSON.stringify(Object.entries(env).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))));
+  let check = supportedByEnv.get(key);
+  if (!check) {
+    check = supportedCheck(env);
+    if (supportedByEnv.size >= SUPPORTED_CACHE_SIZE) supportedByEnv.delete(supportedByEnv.keys().next().value!);
+    supportedByEnv.set(key, check);
+  }
+  return check;
 }
 
 export interface PathRecordSet {
@@ -48,21 +72,28 @@ export interface PathRecordSet {
  * `~/.claude`) leaves such records; the next install records its paths again
  * under their new keys.
  */
-export function partitionPathRecords(env: NodeJS.ProcessEnv, all: PathRecords): PathRecordSet {
-  const paths = hostConfigPaths(env);
-  const supported = supportedCheck?.(env) ?? (() => false);
+export function partitionPathRecords(env: NodeJS.ProcessEnv, all: PathRecords,
+  supported: (key: string, record: PathRecord) => boolean = supportedCheck?.(env) ?? (() => false)): PathRecordSet {
   const records: Record<string, PathRecord> = {};
   const outside: string[] = [];
   const unsupported: string[] = [];
   for (const [key, record] of Object.entries(all)) {
-    const roots = hostRoots(env, record.host).map(root => resolveHostPath(paths, root));
-    const inside = roots.some(root => key !== root && isPathInside(root, key))
-      || (record.host === 'claude' && key === hostPathKey(paths, join(requireHome(env), '.claude.json')));
-    if (!inside) outside.push(key);
+    if (pathRecordRoot(env, key, record) === null) outside.push(key);
     else if (!supported(key, record)) unsupported.push(key);
     else records[key] = record;
   }
   return { records, outside, unsupported };
+}
+
+/**
+ * The root of the record's host that holds the key, with its links followed: a
+ * removal is checked beneath it. `~/.claude.json` has HOME as its root. Null
+ * for a key outside every root of its host.
+ */
+export function pathRecordRoot(env: NodeJS.ProcessEnv, key: string, record: PathRecord): string | null {
+  const paths = hostConfigPaths(env);
+  if (record.host === 'claude' && key === hostPathKey(paths, join(requireHome(env), '.claude.json'))) return dirname(key);
+  return hostRoots(env, record.host).map(root => resolveHostPath(paths, root)).find(root => key !== root && isPathInside(root, key)) ?? null;
 }
 
 export function readPathRecordSet(env: NodeJS.ProcessEnv): PathRecordSet {
@@ -107,7 +138,8 @@ export function ownedPath(env: NodeJS.ProcessEnv, path: string, records: PathRec
 
 /** The `created` records as the hook's ledger surfaces: a file that the user keeps (`user_managed`) is not one that rh created. */
 export function createdPaths(env: NodeJS.ProcessEnv): readonly { readonly path: string; readonly type: PathRecord['committed']['type'] }[] {
-  return Object.entries(readPathRecords(env)).filter(([, record]) => record.kind === 'created').map(([path, record]) => ({ path, type: record.committed.type }));
+  const { records } = partitionPathRecords(env, readLedger(hostConfigPaths(env)).paths, cachedSupported(env));
+  return Object.entries(records).filter(([, record]) => record.kind === 'created').map(([path, record]) => ({ path, type: record.committed.type }));
 }
 
 /** Empty directories and special entries have no entry in the recorded tree hash. */
