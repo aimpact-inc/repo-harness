@@ -20,7 +20,8 @@ import { PiFleetRolesError, writePiFleetRoles } from '../../effects/board/pi-fle
 import { PiShellError, assertPiShell } from '../../effects/board/pi-shell';
 import { MANAGED_AGENTS } from '../../effects/terminal/task-role-profiles';
 import { SeatResetError, readSeatSession, readTranscriptUsage, runSeatReset, writeSeatResetRequest, type SeatRelaunch, type SeatResetNotify, type TranscriptUsage } from '../../effects/board/seat-reset';
-import { seatResetAction, seatResetIdentity, seatResetSteps, type SeatResetIdentity } from '../../core/board/seat-reset';
+import { handoffIdentity, seatResetAction, seatResetIdentity, seatResetSteps, type SeatResetIdentity } from '../../core/board/seat-reset';
+import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
 
 const CLI_ENTRY = fileURLToPath(new URL('../index.ts', import.meta.url));
 
@@ -299,16 +300,16 @@ interface SeatTabInput {
  * person, so a refused tab fails the launch and no headless terminal starts in its place.
  */
 async function seatTabLaunch(seat: string, labels: SeatLabelInput, input: SeatTabInput, env: NodeJS.ProcessEnv = process.env): Promise<{
-  readonly launch: SeatLaunchResult; readonly space: string; readonly placement: Record<string, unknown>;
+  readonly launch: SeatLaunchResult; readonly model: string | null; readonly space: string; readonly placement: Record<string, unknown>;
 }> {
   const space = input.space ?? callerSpace(env);
   if (space === null || space.trim() === '') {
     throw new SeatsCommandError('seat_space_missing', `No Herdr.app space: ${space === null ? 'the calling terminal has no herdr.space label, so no Herdr.app pane shows it' : 'the space is blank'}. Pass --space <id>, or run the launch in a terminal that a Herdr.app pane shows.`);
   }
-  const launch = await seatLaunch(seat, labels, env, input.cwd);
+  const { launch, effective } = await effectiveSeatLaunch(seat, labels, env, input.cwd);
   const args = { ...(launch.tab === null ? {} : { name: launch.tab }), space, folder: input.cwd, argv: launch.argv, task: input.task, focus: input.focus };
   try {
-    return { launch, space, placement: herdrAppDo('tab.new', args, { env }) };
+    return { launch, model: effective.model, space, placement: herdrAppDo('tab.new', args, { env }) };
   } catch (error) {
     if (!(error instanceof HerdrCoreError)) throw error;
     if (HERDR_APP_NOT_SENT.has(error.reason)) {
@@ -413,7 +414,14 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
         writeLaunchError(error);
         return;
       }
-      process.stdout.write(options.json === true ? `${JSON.stringify({ ok: true, ...result }, null, 2)}\n`
+      // Without --repository-id the launch names no repository, so it has no index.
+      if (options.repositoryId !== undefined) {
+        recordLifecycleEvents(() => Number(options.repositoryId), [{ kind: 'seat.lifecycle', phase: 'launch', seat, terminal: result.launch.name,
+          issues: options.issue === undefined ? [] : [Number(options.issue)], pr: options.pr === undefined ? null : Number(options.pr),
+          model: result.model, duration_ms: null, transcript_path: null }], process.env);
+      }
+      const { model: _model, ...shown } = result;
+      process.stdout.write(options.json === true ? `${JSON.stringify({ ok: true, ...shown }, null, 2)}\n`
         : `${JSON.stringify({ ok: true, seat, name: result.launch.name, tab: result.launch.tab, space: result.space, placement: result.placement })}\n`);
     });
   seats
@@ -469,11 +477,19 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
     .argument('<sha256>', 'The handoff sha256 of the RESET-REQUEST')
     .action(async (handoff: string, sha256: string) => {
       try {
+        // The session that the reset ends; its record is replaced when the new session starts.
+        const identity = handoffIdentity(handoff);
+        const ending = identity === null ? null : readSeatSession(identity);
         const result = await runSeatReset(handoff, sha256, {
           ...(loadNotify === undefined ? {} : { notify: await loadNotify() }),
           relaunch: identity => seatResetLaunch(identity),
         });
         process.stdout.write(`${JSON.stringify({ ok: true, ...result })}\n`);
+        if (identity !== null) {
+          recordLifecycleEvents(() => Number(identity.repository), [{ kind: 'seat.lifecycle', phase: 'reset', seat: identity.seat, terminal: result.requester || null,
+            issues: [], pr: null, model: ending?.model ?? null, duration_ms: ending === null ? null : Date.now() - Date.parse(ending.startedAt),
+            transcript_path: ending?.transcriptPath ?? null }], process.env);
+        }
       } catch (error) {
         if (!(error instanceof SeatResetError)) throw error;
         process.stderr.write(`${JSON.stringify({ ok: false, error: error.code, outcome: error.outcome, message: error.message, logErrors: error.logErrors })}\n`);

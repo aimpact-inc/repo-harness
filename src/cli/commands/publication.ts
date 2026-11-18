@@ -4,6 +4,7 @@ import {
   collectPullRequestMergeReadiness,
 } from '../../effects/publication/merge-readiness';
 import { executePublicationMerge } from '../../effects/publication/merge-executor';
+import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
 
 interface PullRequestSelectionOptions {
   readonly repository: string;
@@ -52,6 +53,10 @@ export function buildPublicationCommand(): Command {
     .action((options: PullRequestSelectionOptions) => {
       const result = executePublicationMerge(selection(options));
       process.stdout.write(`${JSON.stringify(result.document)}\n`);
+      if (result.exit_code !== 0) {
+        recordLifecycleEvents(() => Number(options.repositoryId), [{ kind: 'cli.friction', command: 'publication_merge', issue: null, pr: Number(options.pr),
+          error_code: result.document.error, blocker_codes: (result.document.blockers ?? []).map(blocker => blocker.code) }], process.env);
+      }
       process.exitCode = result.exit_code;
     });
   return publication;

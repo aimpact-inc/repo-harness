@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import { readFileSync } from 'fs';
+import { basename } from 'path';
 import { fileURLToPath } from 'url';
 import { AdvisorSeatError, advisorSeatSendFailure, readAdvisorSeat, sendToAdvisorSeat } from '../../core/board/advisor-seat';
 import { AttentionWatchError, attentionLogPath, runAttentionWindow, serviceTerminalRepository, startAttentionWatch } from '../../effects/board/attention-watch';
@@ -22,6 +23,13 @@ import { runBoardMerge, type BoardMergeResultV1 } from '../../effects/board/merg
 import { seatLaunch } from './seats';
 import { runBoardCloseout, stopArchitectureDaemons, stopCodegraphServers } from '../../effects/board/closeout';
 import { worktreeProcesses } from '../../effects/git/worktree-processes';
+import { recordLifecycleEvents, summarizeWorktreeHooks, type CliFrictionEvent, type LifecycleEvent } from '../../effects/board/lifecycle-index';
+import { HOOK_EVENT_TELEMETRY_PATH, HOOK_EVENT_TELEMETRY_PROTOCOL } from '../hook/event-telemetry';
+import { ROUTES } from '../hook/route-registry';
+import type { BoardCloseoutV1 } from '../../effects/board/closeout';
+import type { DispatchResultV1 } from '../../effects/board/dispatch';
+import type { DispatchSkipReason } from '../../core/board/dispatch';
+import type { ReviewSkipReason } from '../../core/board/review';
 
 interface BoardOptions {
   readonly parent?: string;
@@ -124,6 +132,46 @@ function mergeText(result: BoardMergeResultV1, requested: number | null, dryRun:
   return `${lines.join('\n')}\n`;
 }
 
+/** Skip reasons that show a routing, quota or plan problem; the other reasons are ordinary board state. */
+const DISPATCH_FRICTION: ReadonlySet<DispatchSkipReason> = new Set(['kind_label_invalid', 'no_route', 'over_limit']);
+const REVIEW_FRICTION: ReadonlySet<ReviewSkipReason> = new Set(['acceptance_unknown', 'writer_family_unknown', 'review_family_unavailable', 'plan_unavailable']);
+
+/** The closed error code of a refused board command; the message is free text and never leaves the command. */
+function boardErrorCode(error: Error): string {
+  return error instanceof DispatchError ? 'dispatch_refused' : error instanceof BoardSourceError ? 'board_source_invalid' : 'board_collect_failed';
+}
+
+const friction = (command: CliFrictionEvent['command'], fields: Partial<Pick<CliFrictionEvent, 'issue' | 'pr'>> & { readonly error_code: string }): CliFrictionEvent =>
+  ({ kind: 'cli.friction', command, issue: fields.issue ?? null, pr: fields.pr ?? null, error_code: fields.error_code, blocker_codes: [] });
+
+const seatEvent = (phase: 'launch' | 'close', seat: string, fields: { readonly terminal?: string; readonly issue?: number; readonly pr?: number | null }): LifecycleEvent => ({
+  kind: 'seat.lifecycle', phase, seat, terminal: fields.terminal ?? null, issues: fields.issue === undefined ? [] : [fields.issue], pr: fields.pr ?? null,
+  model: null, duration_ms: null, transcript_path: null,
+});
+
+function dispatchEvents(result: DispatchResultV1): LifecycleEvent[] {
+  return [...result.started.map(entry => seatEvent('launch', entry.seat, { issue: entry.issue })),
+    ...result.plan.decisions.flatMap(decision => decision.action === 'skip' && DISPATCH_FRICTION.has(decision.reason)
+      ? [friction('board_dispatch', { issue: decision.issue, error_code: decision.reason })] : [])];
+}
+
+function reviewEvents(result: ReviewResultV1): LifecycleEvent[] {
+  return [...result.started.map(entry => seatEvent('launch', entry.seat, { pr: entry.pr })),
+    ...result.decisions.flatMap(decision => decision.action === 'skip' && REVIEW_FRICTION.has(decision.reason)
+      ? [friction('board_review', { pr: decision.pr, error_code: decision.reason })] : []),
+    ...result.refused.map(entry => friction('board_review', { pr: entry.pr, error_code: 'review_start_refused' }))];
+}
+
+/** A closed seat terminal, and the hook counts of a worktree whose checkout is gone; a kept checkout keeps its log for a later closeout. */
+export function closeoutEvents(result: BoardCloseoutV1): LifecycleEvent[] {
+  const closed = [...result.panes.map(pane => ({ pane, pr: result.pr })), ...result.stale_terminals.map(pane => ({ pane, pr: null }))]
+    .flatMap(({ pane, pr }) => pane.outcome === 'closed' && pane.seat !== null ? [seatEvent('close', pane.seat, { terminal: pane.address, pr })] : []);
+  const hooks = result.hook_summary !== null && result.worktree.checkout_present === false ? [{
+    kind: 'worktree.hook_summary' as const, worktree_id: basename(result.worktree.path), pr: result.pr, branch: result.hook_summary.branch, counts_by_code: result.hook_summary.counts_by_code,
+  }] : [];
+  return [...closed, ...hooks];
+}
+
 /**
  * `--parent` and `--json` belong to `board`. The root program does not use
  * positional options, so Commander binds them to `board` wherever they
@@ -196,8 +244,10 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
           launch: (seat, labels, cwd) => seatLaunch(seat, labels, process.env, cwd),
         });
         process.stdout.write(dispatchText(result.plan, result.started.map(entry => entry.issue)));
+        if (options.dryRun !== true) recordLifecycleEvents(() => readRepositoryId({ repo_root: process.cwd() }), dispatchEvents(result), process.env);
       } catch (error) {
         if (!(error instanceof BoardCollectError || error instanceof BoardSourceError || error instanceof DispatchError)) throw error;
+        recordLifecycleEvents(() => readRepositoryId({ repo_root: process.cwd() }), [friction('board_dispatch', { error_code: boardErrorCode(error) })], process.env);
         process.stderr.write(`${JSON.stringify({ ok: false, error: error.name, message: error.message })}\n`);
         process.exitCode = 1;
       }
@@ -216,8 +266,10 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
           launch: (seat, labels, cwd, gatekeeper) => seatLaunch(seat, labels, process.env, cwd, gatekeeper),
         });
         process.stdout.write(reviewText(result));
+        if (options.dryRun !== true) recordLifecycleEvents(() => readRepositoryId({ repo_root: process.cwd() }), reviewEvents(result), process.env);
       } catch (error) {
         if (!(error instanceof BoardCollectError || error instanceof BoardSourceError)) throw error;
+        recordLifecycleEvents(() => readRepositoryId({ repo_root: process.cwd() }), [friction('board_review', { error_code: boardErrorCode(error) })], process.env);
         process.stderr.write(`${JSON.stringify({ ok: false, error: error.name, message: error.message })}\n`);
         process.exitCode = 1;
       }
@@ -260,8 +312,10 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
         if (!/^[1-9][0-9]*$/u.test(options.pr)) throw new BoardCollectError('--pr must be a pull request number');
         const repo_root = process.cwd();
         const result = await runBoardCloseout({ repo_root, pr: Number(options.pr), host, caller_terminal: process.env.HC_TERMINAL_ID ?? null,
-          stopDaemons: worktree => stopArchitectureDaemons(repo_root, worktree), processes: worktreeProcesses, stopCodegraphServers });
+          stopDaemons: worktree => stopArchitectureDaemons(repo_root, worktree), processes: worktreeProcesses, stopCodegraphServers,
+          summarizeHooks: worktree => summarizeWorktreeHooks(worktree, { path: HOOK_EVENT_TELEMETRY_PATH, protocol: HOOK_EVENT_TELEMETRY_PROTOCOL, routes: ROUTES }) });
         process.stdout.write(`${JSON.stringify(result)}\n`);
+        recordLifecycleEvents(() => readRepositoryId({ repo_root }), closeoutEvents(result), process.env);
         if (result.panes.some(pane => pane.outcome === 'kept') || result.worktree.outcome !== 'removed' || result.daemon_stop_failures.length > 0) process.exitCode = 1;
       } catch (error) {
         if (!(error instanceof BoardCollectError)) throw error;
