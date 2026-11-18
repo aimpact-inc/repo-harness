@@ -9,7 +9,7 @@ import { gitignoreManagedBlockOperation, ignoreBlockProof } from "./gitignore-pl
 import { upsertManagedBlock } from "../../core/adoption/managed-block";
 import { renderWorkflowContractMarker } from "../../core/adoption/workflow-contract-asset";
 import { minimumHarnessVersionOf } from "../../core/adoption/minimum-harness-version";
-import { planLegacyLeftovers, stripLegacyHookEntries } from "../upgrade/legacy-inventory";
+import { hookFileRemovals, hookLocation, planLegacyLeftovers, removeLegacyHookCommands } from "../upgrade/legacy-inventory";
 import { runGit } from "../git/run-git";
 import { pruneUnknownPolicyKeys } from "../../core/workflow/policy-schema";
 import { withoutRepositorySelectingGitEnv } from "../git/runner";
@@ -125,9 +125,10 @@ function writeOperation(
   path: string,
   content: string,
   reason: string,
-  opts: { readonly ifMissing?: boolean; readonly mode?: number; readonly risk?: "low" | "medium" | "high" } = {},
+  opts: { readonly ifMissing?: boolean; readonly mode?: number; readonly risk?: "low" | "medium" | "high"; readonly existing?: string } = {},
 ): WriteFileOperation {
-  const existing = fileContent(repoRoot, path);
+  // A caller that derived `content` from the file passes the text that it read, so apply checks those bytes.
+  const existing = opts.existing ?? fileContent(repoRoot, path);
   return {
     id: makeOperationId("writeFile", path, opts.ifMissing ? "ifMissing" : "replace"),
     kind: "writeFile",
@@ -368,7 +369,9 @@ function addLegacyCleanup(repoRoot: string, operations: AdoptionOperation[]): Ad
       continue;
     }
     if (item.action === "report") {
-      if (item.reason === "Current bytes do not match the declared retired generated asset.") {
+      if (item.surface === "hook-entry") {
+        warnings.push({ code: "hook-settings-not-editable", message: `Preserving ${path}: ${item.reason}`, risk: "medium" });
+      } else if (item.reason === "Current bytes do not match the declared retired generated asset.") {
         warnings.push({ code: "known-generated-fingerprint-mismatch", message: `Preserving ${path}: current bytes do not match the declared retired generated asset`, risk: "medium" });
       }
       continue;
@@ -383,12 +386,16 @@ function addLegacyCleanup(repoRoot: string, operations: AdoptionOperation[]): Ad
       reason: "Untrack removed known-generated workflow asset from the git index", risk: "medium", status: "planned",
     });
   }
+  // Text edits take out only the legacy commands; the bytes outside them stay.
   for (const path of hookPaths) {
-    const current = jsonFile(repoRoot, path);
-    if (!current) continue;
-    const stripped = stripLegacyHookEntries(current, { location: "project" });
-    operations.push(writeOperation(repoRoot, path, jsonContent(stripped.config),
-      "Remove repo-local repo-harness host adapters after the user-level typed adapter cutover", { risk: "medium" }));
+    const target = safePath(repoRoot, path);
+    const hookFile = hookFileRemovals(readFileSync(target), target, hookLocation("project", { home: repoRoot }));
+    if ('refused' in hookFile) {
+      warnings.push({ code: "hook-settings-not-editable", message: `Preserving ${path}: hook settings changed during planning`, risk: "medium" });
+      continue;
+    }
+    operations.push(writeOperation(repoRoot, path, removeLegacyHookCommands(hookFile.content, hookFile.removals),
+      "Remove repo-local repo-harness host adapters after the user-level typed adapter cutover", { risk: "medium", existing: hookFile.content }));
   }
   return warnings;
 }

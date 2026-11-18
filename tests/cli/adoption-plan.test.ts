@@ -526,6 +526,49 @@ describe("canonical adoption plan", () => {
     }
   });
 
+  test("hook cleanup removes only released hooks by text edits and keeps a file that it cannot edit exactly", () => {
+    const repo = tempRepo();
+    try {
+      mkdirSync(join(repo, ".claude"), { recursive: true });
+      mkdirSync(join(repo, ".codex"), { recursive: true });
+      // A released hook without a shim path, read from the manifest that the cleanup reads.
+      const renderings = (JSON.parse(readFileSync(join(ROOT, "assets/released-managed-values.v1.json"), "utf8")) as {
+        hookRenderings: { entries: { event: string; block: Record<string, unknown>; hook: Record<string, unknown> }[] };
+      }).hookRenderings.entries;
+      const { event, block, hook } = renderings.find((entry) => entry.block.matcher === "Edit|Write" && !String(entry.hook.command).includes("{{shim}}"))!;
+      const released = JSON.stringify(hook);
+      const entry = (fields: Record<string, unknown>, hooks: string) => `${JSON.stringify(fields).slice(0, -1)},"hooks":[${hooks}]}`;
+      // The user's own layout and a user command beside the released one.
+      const before = `{\n\t"custom" :  [1,2],\n\t"hooks": {\n\t\t${JSON.stringify(event)}: [\n\t\t\t${entry(block, `${released}, {"type":"command","command":"echo user"}`)}\n\t\t]\n\t}\n}\n`;
+      writeFileSync(join(repo, ".claude/settings.json"), before);
+      // A user field in the hook entry, a repeated command key (JSON.parse reads only the last value) and a Latin-1 byte.
+      const file = (entries: string) => `{"hooks":{${JSON.stringify(event)}:[${entries}]}}\n`;
+      const kept: [Buffer, string][] = [
+        [Buffer.from(file(entry({ ...block, note: "mine" }, released))), "A repo-harness hook differs from every hook that a release wrote; preserve current bytes."],
+        [Buffer.from(file(entry(block, `{"command":"echo user",${released.slice(1)}`))), "Invalid hook settings; preserve current bytes."],
+        [Buffer.concat([Buffer.from('{"note":"caf'), Buffer.from([0xe9]), Buffer.from(`",${file(entry(block, released)).slice(1)}`)]), "Invalid hook settings; preserve current bytes."],
+      ];
+      for (const [bytes, reason] of kept) {
+        writeFileSync(join(repo, ".codex/hooks.json"), bytes);
+        const plan = planAdoption({ repoRoot: repo, mode: "standard", apply: true });
+        expect(plan.operations.filter((operation) => operation.path === ".codex/hooks.json")).toEqual([]);
+        expect(plan.warnings).toContainEqual({ code: "hook-settings-not-editable", message: `Preserving .codex/hooks.json: ${reason}`, risk: "medium" });
+        expect(applyAdoptionPlan(plan).ok).toBe(true);
+        expect(readFileSync(join(repo, ".codex/hooks.json")).toString("base64")).toBe(bytes.toString("base64"));
+      }
+      expect(readFileSync(join(repo, ".claude/settings.json"), "utf8")).toBe(before.replace(`${released}, `, ""));
+
+      // The v0.1.2 Codex context-pressure hook goes; the user's own entry beside it keeps its bytes.
+      const pressure = renderings.find((entry) => String(entry.hook.command).includes("HOOK_HOST=codex") && String(entry.hook.command).endsWith("context-pressure-hook.sh"))!;
+      const sibling = '{"matcher":"Bash","note":"mine","hooks":[]}';
+      writeFileSync(join(repo, ".codex/hooks.json"), `{"hooks":{"${pressure.event}":[{"hooks":[${JSON.stringify(pressure.hook)}]},${sibling}]}}\n`);
+      expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true })).ok).toBe(true);
+      expect(readFileSync(join(repo, ".codex/hooks.json"), "utf8")).toBe(`{"hooks":{"${pressure.event}":[${sibling}]}}\n`);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   for (const mode of ["minimal", "standard"] as const) {
     test(`${mode} adoption keeps lessons without seeding retired task surfaces`, () => {
       const repo = tempRepo();

@@ -320,31 +320,6 @@ export function hookFileRemovals(bytes: Buffer, path: string, options: HookLocat
   }
 }
 
-/** The adoption plan's rewrite of a repository hook file; it drops every empty hook entry and event. */
-export function stripLegacyHookEntries(value: unknown, options: HookLocationOptions = {}): { config: Record<string, unknown>; removed: readonly { event: string; command: string }[] } {
-  if (!isRecord(value)) throw new Error('hook settings must be a JSON object');
-  const removals = legacyHookRemovals(value, options);
-  if (!removals) throw new Error(CUSTOMIZED_HOOK);
-  const record = value;
-  if (record.hooks === undefined) return { config: { ...record }, removed: [] };
-  const drop = new Set(removals.map(({ event, block, index }) => JSON.stringify([event, block, index])));
-  const hooks: Record<string, unknown> = {};
-  for (const [event, blocks] of Object.entries(record.hooks as Record<string, unknown>)) {
-    if (!Array.isArray(blocks)) { hooks[event] = blocks; continue; }
-    const kept: unknown[] = [];
-    blocks.forEach((block, blockIndex) => {
-      if (!isRecord(block) || !Array.isArray(block.hooks)) { kept.push(block); return; }
-      const entries = block.hooks.filter((_entry: unknown, index) => !drop.has(JSON.stringify([event, blockIndex, index])));
-      if (entries.length > 0) kept.push({ ...block, hooks: entries });
-    });
-    if (kept.length > 0) hooks[event] = kept;
-  }
-  const config = { ...record };
-  if (Object.keys(hooks).length > 0) config.hooks = hooks;
-  else delete config.hooks;
-  return { config, removed: removals.map(({ event, command }) => ({ event, command })) };
-}
-
 function readJson(path: string): unknown {
   try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return undefined; }
 }
