@@ -63,6 +63,8 @@ export interface PublicationMergeScenario {
   /** Issue comments already on the PR, as the provider lists them. */
   readonly existingComments?: readonly { readonly body: string; readonly html_url: string }[];
   readonly unresolvedThreads?: number;
+  /** Unresolved review threads that a bot started and no person answered. */
+  readonly unansweredBotThreads?: number;
   /** Review threads by node id that `node(id:)` returns; the first comment belongs to a review with `reviewBody`. */
   readonly threadNodes?: Readonly<Record<string, { readonly pr?: number; readonly isResolved?: boolean; readonly reviewBody: string; readonly association?: string }>>;
   /** Make one thread reply or resolve fail: a provider 4xx refusal, or a transport EOF with an unknown outcome. */
@@ -202,7 +204,11 @@ export function fakeGhResponse(args: readonly string[], scenario: PublicationMer
     return ok({ data: { node: { id: REPOSITORY_NODE, pullRequest: {
       number: PR, headRefOid: headSha, baseRefOid: baseSha, reviewDecision: null,
       latestOpinionatedReviews: { pageInfo: { hasNextPage: false }, nodes: scenario.changesRequested ? [{ state: 'CHANGES_REQUESTED' }] : [] },
-      reviewThreads: { pageInfo: { hasNextPage: false }, nodes: Array.from({ length: scenario.unresolvedThreads ?? 0 }, () => ({ isResolved: false, comments: { nodes: [] } })) },
+      reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [
+        ...Array.from({ length: scenario.unresolvedThreads ?? 0 }, () => ({ isResolved: false, comments: { nodes: [] } })),
+        ...Array.from({ length: scenario.unansweredBotThreads ?? 0 }, () => ({ isResolved: false,
+          comments: { pageInfo: { hasNextPage: false }, nodes: [{ author: { __typename: 'Bot' } }] } })),
+      ] },
     } } } });
   }
   if (sub?.startsWith(`${root}/issues/${PR}/comments?`)) return ok(scenario.existingComments ?? []);

@@ -259,18 +259,40 @@ function parseProviderPullRequestIdentity(prNumber: number, repoValue: unknown, 
   return identity;
 }
 
+function threadComments(thread: Record<string, unknown>): { readonly connection: Record<string, unknown>; readonly nodes: readonly unknown[] } {
+  const connection = object(thread.comments, 'provider review thread comments');
+  if (!Array.isArray(connection.nodes)) throw new MergeReadinessError('provider_data_incomplete', 'provider review thread comments are invalid');
+  return { connection, nodes: connection.nodes };
+}
+
+function commentAuthorType(comment: unknown): string | null {
+  const author = object(comment, 'provider review thread comment').author;
+  if (author === null) return null;
+  const type = object(author, 'provider review thread comment author').__typename;
+  if (typeof type !== 'string') throw new MergeReadinessError('provider_data_incomplete', 'provider review thread comment author type is invalid');
+  return type;
+}
+
 /**
  * Review bots (Codex, Copilot, CodeRabbit and others) post advisory threads, so
- * a thread that a GitHub App account started does not block a merge. A thread
- * with no first comment or a deleted author still blocks.
+ * a thread that a GitHub App account started does not count as unresolved. A
+ * thread with no first comment or a deleted author still does.
  */
-function botStartedThread(thread: Record<string, unknown>): boolean {
-  const comments = object(thread.comments, 'provider review thread comments');
-  if (!Array.isArray(comments.nodes)) throw new MergeReadinessError('provider_data_incomplete', 'provider review thread comments are invalid');
-  const first: unknown = comments.nodes[0];
-  if (first === undefined) return false;
-  const author = object(first, 'provider review thread comment').author;
-  return author !== null && object(author, 'provider review thread comment author').__typename === 'Bot';
+function botStartedThread(comments: readonly unknown[]): boolean {
+  return comments[0] !== undefined && commentAuthorType(comments[0]) === 'Bot';
+}
+
+/**
+ * Life-cycle rule (2) needs a response to each review-bot thread: a later
+ * comment from an author that is not a bot. A deleted author is not proof of a
+ * response. The comment pages matter only when the read nodes hold no response.
+ */
+function botThreadAnswered(comments: ReturnType<typeof threadComments>): boolean {
+  if (comments.nodes.slice(1).some(comment => { const type = commentAuthorType(comment); return type !== null && type !== 'Bot'; })) return true;
+  if (object(comments.connection.pageInfo, 'provider review thread comments pageInfo').hasNextPage !== false) {
+    throw new MergeReadinessError('provider_data_incomplete', 'provider review thread comments were not exhaustively observed');
+  }
+  return false;
 }
 
 function parseProviderReadinessFacts(
@@ -305,10 +327,14 @@ function parseProviderReadinessFacts(
     }
   }
   let unresolved = 0;
+  let unansweredBot = 0;
   for (const entry of threads.nodes as unknown[]) {
     const thread = object(entry, 'provider review thread');
     if (typeof thread.isResolved !== 'boolean') throw new MergeReadinessError('provider_data_incomplete', 'provider review thread isResolved is invalid');
-    if (!thread.isResolved && !botStartedThread(thread)) unresolved++;
+    if (thread.isResolved) continue;
+    const comments = threadComments(thread);
+    if (!botStartedThread(comments.nodes)) unresolved++;
+    else if (!botThreadAnswered(comments)) unansweredBot++;
   }
   let changesRequested = pr.reviewDecision === 'CHANGES_REQUESTED';
   for (const entry of reviews.nodes as unknown[]) {
@@ -325,6 +351,7 @@ function parseProviderReadinessFacts(
     base_sha: identity.base_sha,
     review_decision: changesRequested ? 'CHANGES_REQUESTED' : identity.review_decision,
     unresolved_thread_count: unresolved,
+    unanswered_bot_thread_count: unansweredBot,
     rollback_boundary: rollbackBoundary,
     checks: Object.freeze(checks),
     check_failures: Object.freeze([...checkFailures]),
@@ -336,7 +363,7 @@ function parseProviderReadinessFacts(
 
 function providerReviewArgs(identity: ProviderIdentity): string[] {
   // Latest opinionated reviews preserve a change request across later comment-only reviews.
-  const query = 'query($repoId:ID!,$number:Int!){node(id:$repoId){id ... on Repository{pullRequest(number:$number){number headRefOid baseRefOid reviewDecision latestOpinionatedReviews(first:100){pageInfo{hasNextPage}nodes{state}} reviewThreads(first:100){pageInfo{hasNextPage}nodes{isResolved comments(first:1){nodes{author{__typename}}}}}}}}}';
+  const query = 'query($repoId:ID!,$number:Int!){node(id:$repoId){id ... on Repository{pullRequest(number:$number){number headRefOid baseRefOid reviewDecision latestOpinionatedReviews(first:100){pageInfo{hasNextPage}nodes{state}} reviewThreads(first:100){pageInfo{hasNextPage}nodes{isResolved comments(first:100){pageInfo{hasNextPage}nodes{author{__typename}}}}}}}}}';
   return ['api', 'graphql', '-f', `query=${query}`, '-F', `repoId=${identity.provider_repo_id}`, '-F', `number=${identity.pr_number}`];
 }
 

@@ -105,7 +105,7 @@ function reviewGraph() {
   return { data: { node: { id: receipt.provider_repo_id, pullRequest: {
     number: receipt.pr_number, headRefOid: HEAD, baseRefOid: BASE, reviewDecision: null,
     latestOpinionatedReviews: { pageInfo: { hasNextPage: false }, nodes: [] as { state: string }[] },
-    reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] as { isResolved: boolean; comments: { nodes: { author: { __typename: string } | null }[] } }[] },
+    reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] as { isResolved: boolean; comments: { pageInfo?: { hasNextPage: boolean }; nodes: { author: { __typename: string } | null }[] } }[] },
   } } } };
 }
 
@@ -463,7 +463,7 @@ test('ordinary PR consumer uses trusted CI head/base once and needs no local art
   expect(moved.blockers.map(blocker => blocker.code)).toContain('base_moved_since_verification');
 });
 
-test.each(['changes', 'threads', 'bot-threads', 'deleted-author-threads', 'thread-comments-malformed', 'dismissed', 'approved', 'outdated-unresolved', 'review-truncated', 'threads-truncated', 'malformed', 'graphql-error', 'wrong-head', 'wrong-pr', 'wrong-repo', 'review-churn', 'unavailable'])('the ordinary consumer enforces provider review state: %s', scenario => {
+test.each(['changes', 'threads', 'bot-thread-unanswered', 'bot-thread-answered', 'bot-thread-resolved', 'deleted-author-threads', 'thread-comments-malformed', 'dismissed', 'approved', 'outdated-unresolved', 'review-truncated', 'threads-truncated', 'malformed', 'graphql-error', 'wrong-head', 'wrong-pr', 'wrong-repo', 'review-churn', 'unavailable'])('the ordinary consumer enforces provider review state: %s', scenario => {
   const source = fakeGh();
   const gh_runner: NonNullable<PublicationReadinessInput['gh_runner']> = args => {
     const observed = source(args);
@@ -476,7 +476,10 @@ test.each(['changes', 'threads', 'bot-threads', 'deleted-author-threads', 'threa
     if (scenario === 'dismissed') pr.latestOpinionatedReviews.nodes = [{ state: 'DISMISSED' }];
     if (scenario === 'approved') pr.latestOpinionatedReviews.nodes = [{ state: 'APPROVED' }];
     if (scenario === 'threads' || scenario === 'outdated-unresolved') pr.reviewThreads.nodes = [{ isResolved: false, comments: { nodes: [{ author: { __typename: 'User' } }] } }];
-    if (scenario === 'bot-threads') pr.reviewThreads.nodes = [{ isResolved: false, comments: { nodes: [{ author: { __typename: 'Bot' } }] } }];
+    const bot = { author: { __typename: 'Bot' } };
+    if (scenario === 'bot-thread-unanswered') pr.reviewThreads.nodes = [{ isResolved: false, comments: { pageInfo: { hasNextPage: false }, nodes: [bot, bot] } }];
+    if (scenario === 'bot-thread-answered') pr.reviewThreads.nodes = [{ isResolved: false, comments: { pageInfo: { hasNextPage: false }, nodes: [bot, { author: { __typename: 'User' } }] } }];
+    if (scenario === 'bot-thread-resolved') pr.reviewThreads.nodes = [{ isResolved: true, comments: { pageInfo: { hasNextPage: false }, nodes: [bot] } }];
     if (scenario === 'deleted-author-threads') pr.reviewThreads.nodes = [{ isResolved: false, comments: { nodes: [{ author: null }] } }];
     if (scenario === 'thread-comments-malformed') {
       pr.reviewThreads.nodes = [{ isResolved: false, comments: { nodes: [] } }];
@@ -498,7 +501,8 @@ test.each(['changes', 'threads', 'bot-threads', 'deleted-author-threads', 'threa
     expected_head_sha: HEAD, expected_base_sha: BASE, gh_runner });
   const expected: MergeReadinessBlockerCode[] = scenario === 'changes' ? ['changes_requested']
     : ['threads', 'deleted-author-threads', 'outdated-unresolved'].includes(scenario) ? ['unresolved_threads']
-    : ['bot-threads', 'dismissed', 'approved'].includes(scenario) ? []
+    : scenario === 'bot-thread-unanswered' ? ['unanswered_bot_threads']
+    : ['bot-thread-answered', 'bot-thread-resolved', 'dismissed', 'approved'].includes(scenario) ? []
     : [scenario === 'unavailable' ? 'provider_unavailable' : 'provider_data_incomplete'];
   expect(verdict.blockers.map(blocker => blocker.code)).toEqual(expected);
 });
