@@ -11,6 +11,12 @@ export interface UserPathValue {
   readonly raw: string;
 }
 
+/** Reads and writes the user `Path` value; `write` changes it only while it still equals `expected`, and deletes it for `existed: false`. */
+export interface UserPathPort {
+  read(): UserPathValue;
+  write(expected: UserPathValue, next: UserPathValue): void;
+}
+
 const normalized = (entry: string): string => entry.trim().replace(/\\+$/u, '').toLowerCase();
 
 /** The match of install.ps1: no case, and surrounding space and a trailing backslash ignored. */
