@@ -253,7 +253,11 @@ function compareAndWrite(targetPath, content, acceptedHash) {
   if (existing === content) return "up-to-date";
 
   if (existing === null) {
-    writeAgent(targetPath, content, false);
+    // A link that now names another file than the one whose user bytes rh replaced stops this file only.
+    try { writeAgent(targetPath, content, false); } catch (error) {
+      if (error?.code !== "host_config_replacement_refused") throw error;
+      return `refused (${error.message})`;
+    }
     return "installed";
   }
 
@@ -379,7 +383,7 @@ for (const target of targets) {
   results.push({ host: target.host, file: target.file, status });
 }
 
-const failed = results.some((entry) => entry.status === "drift" || entry.status === "backup-failed");
+const failed = results.some((entry) => entry.status === "drift" || entry.status === "backup-failed" || entry.status.startsWith("refused"));
 // A forced run takes every fleet file back, so the user's claims on them go.
 if (force && !failed) gate.keepUserPaths("core", targets.map((target) => target.path), []);
 

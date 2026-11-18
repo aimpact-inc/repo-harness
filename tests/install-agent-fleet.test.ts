@@ -483,6 +483,17 @@ describe("install-agent-fleet", () => {
       const records = readPathRecords({ HOME: home });
       expect(records[pathRecordKey({ HOME: home }, linked)]).toMatchObject({ kind: "replaced", link_target: existing });
       expect(records[pathRecordKey({ HOME: home }, unborn)]).toMatchObject({ kind: "created", link_target: dangling });
+      // The replaced record stays with the file that it replaced: a link that now names a missing file gets nothing of it.
+      const moved = join(home, "dotfiles/moved.md");
+      rmSync(linked);
+      symlinkSync(moved, linked);
+      const refused = runInstaller(home, FLEET_SOURCE_DIR);
+      expect(refused.status).toBe(1);
+      expect(refused.stdout).toContain(`[fleet] claude/explorer.md: refused (rh replaced the user file ${existing} and keeps it in the vault, but this path now reaches ${moved}`);
+      expect(openHostConfigGate({ env: { HOME: home } }).revertPaths([linked]).map((entry) => entry.action)).toEqual(["kept_edited"]);
+      expect({ moved: existsSync(moved), record: readPathRecords({ HOME: home })[pathRecordKey({ HOME: home }, linked)] }).toMatchObject({ moved: false, record: { kind: "replaced", link_target: existing } });
+      rmSync(linked);
+      symlinkSync(existing, linked);
       expect(openHostConfigGate({ env: { HOME: home } }).revertPaths([linked, unborn]).map((entry) => entry.action)).toEqual(["restored", "removed"]);
       expect({ existing: readFileSync(existing, "utf8"), dangling: existsSync(dangling), links: [linked, unborn].map((path) => lstatSync(path).isSymbolicLink()) })
         .toEqual({ existing: "mine\n", dangling: false, links: [true, true] });

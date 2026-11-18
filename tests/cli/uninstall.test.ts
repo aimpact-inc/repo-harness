@@ -350,13 +350,17 @@ test('uninstall retires a deleted rules file record without restoring the file',
  const {files,fragments}=ledger(home);
  expect({files,fragments}).toEqual({files:{},fragments:[]});
 }));
-test('a deleted config.toml with an active legacy receipt is already absent in the dry run and in the uninstall',()=>fixture((home,env)=>{
+test.each(['deleted','dangling link'] as const)('a %s config.toml with an active legacy receipt plans the same in the dry run and in the uninstall',(shape)=>fixture((home,env)=>{
  const path=join(home,'.codex/config.toml');
  put(home,'.repo-harness/configuration-restore.json',JSON.stringify({protocol:1,changes:[{path,selector:'default_mode_request_user_input',before:null,installed:'default_mode_request_user_input = true\n',active:true}]}));
+ // A dangling link is still there, so its file is not absent: the records stay, in the preview as in the apply.
+ const target=join(home,'dotfiles/config.toml');
+ if(shape==='dangling link'){mkdirSync(join(home,'.codex'),{recursive:true});symlinkSync(target,path);}
  const dryRun=runUserUninstall({target:'codex',env,dryRun:true});
- expect(dryRun.lines).toContain(`[note] ${path}: file already absent`);
+ expect(dryRun.lines).toContain(shape==='deleted'?`[note] ${path}: file already absent`:`[unresolved] ${target}: changed since rh wrote it; preserved: default_mode_request_user_input`);
  const result=runUserUninstall({target:'codex',env});
- expect({status:result.status,items:result.items,exists:existsSync(path)}).toEqual({status:'complete',items:dryRun.items,exists:false});
+ expect({status:result.status,items:result.items}).toEqual({status:dryRun.status,items:dryRun.items});
+ expect({status:result.status,link:lstatSync(path,{throwIfNoEntry:false})?.isSymbolicLink()??false}).toEqual(shape==='deleted'?{status:'complete',link:false}:{status:'partial',link:true});
 }));
 test.each([
  ['.claude/CLAUDE.md',`user-before\n${RULES_BLOCK.replace('## Reporting','- My own rule.\n\n## Reporting')}\n`,'managed rules block'],

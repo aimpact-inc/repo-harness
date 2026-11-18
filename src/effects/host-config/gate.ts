@@ -459,10 +459,17 @@ function writeWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, writes:
     const previous = records[key];
     const linkTarget = linkTargetOf(paths, key, previous, write.entry);
     const entry = linkTarget ?? key;
+    // A record binds to its entry. When the key now reaches another file (a re-pointed link), the record does not
+    // move with it: a replaced user file keeps its record and vault copy and stops the write; any other record starts again.
+    const recorded = previous && pathRecordEntry(key, previous);
+    if (previous?.kind === 'replaced' && recorded !== entry) {
+      throw new HostConfigError('host_config_replacement_refused', `rh replaced the user file ${recorded} and keeps it in the vault, but this path now reaches ${entry}, so rh does not write it. Point it back to ${recorded}, then run the command again: ${write.path}`);
+    }
+    const prior = recorded === entry ? previous : undefined;
     const observed = observePathEntry(entry);
     let backup: Sha256 | undefined;
-    if (observed !== null && !ownsEntry(previous, write.owner, key)) {
-      if (!write.replace) throw refusal(write.path, previous, write.owner);
+    if (observed !== null && !ownsEntry(prior, write.owner, key)) {
+      if (!write.replace) throw refusal(write.path, prior, write.owner);
       backup = vaultUserFile(paths, entry, observed, write.path);
     }
     const createdDirs = missingDirectories(entry as HostPath);
@@ -471,9 +478,9 @@ function writeWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, writes:
     try {
       const stage = stagePathEntry(entry, write.entry);
       staged = stage.staged;
-      const next = nextPathRecord(previous, write.owner, host, observed, stage.committed, backup, linkTarget);
+      const next = nextPathRecord(prior, write.owner, host, observed, stage.committed, backup, linkTarget);
       assertReplacedIsFile(next, write.path);
-      if (sameCommitted(observed, stage.committed) && previous && JSON.stringify(previous) === JSON.stringify(next)) {
+      if (sameCommitted(observed, stage.committed) && prior && JSON.stringify(prior) === JSON.stringify(next)) {
         discardStagedEntry(staged);
         continue;
       }
@@ -670,6 +677,8 @@ export interface FileRevertInput {
   /** The file hashes to the record's `committed`. */
   readonly committed: boolean;
   readonly existed: boolean;
+  /** The requested path is there while the file that it names is missing: a link that dangles. */
+  readonly requestedPresent?: boolean;
   /** The file's bytes; null when it is missing or not a regular file. */
   readonly bytes: Buffer | null;
   /** The bytes before rh, for the whole-file restore. */
@@ -696,6 +705,8 @@ export interface FileRevertPlan {
 export function planFileRevert(input: FileRevertInput): FileRevertPlan {
   const { path, kind, own, all, filtered } = input;
   const format = input.format ?? fileFormatOf(path);
+  // A dangling link is still there, so the file is not absent: it and its records stay.
+  if (!input.existed && input.requestedPresent) return { entry: { path, action: 'kept_edited', kept: own.map((entry) => entry.selector) }, write: null, record: 'keep', removed: [] };
   if (!filtered && !input.existed) {
     return { entry: { path, action: 'already_absent' }, write: null, record: 'drop', removed: all };
   }
@@ -723,6 +734,11 @@ export function planFileRevert(input: FileRevertInput): FileRevertPlan {
   return { entry: withKept(empty ? 'removed' : removed.size ? 'text_removed' : 'released'), write, record: 'drop', removed: result.removed };
 }
 
+/** The requested path itself is there, before its links are followed: lstat of the leaf. */
+function requestedPresent(path: string): boolean {
+  return lstatSync(resolve(path), { throwIfNoEntry: false }) !== undefined;
+}
+
 /**
  * The revert of the file that `adopt` would record now, with no write: a dry
  * run before a migration observes the file as `revert` does after it (links
@@ -734,7 +750,7 @@ export function planAdoptedRevert(env: NodeJS.ProcessEnv, path: string, adoption
   const records = adoption.fragments.map((fragment) => ({ file: resolved, ...fragment }));
   return planFileRevert({
     path: resolved, format: fileFormatOf(path), kind: adoption.kind ?? (adoption.backup === null ? 'created' : 'text_block'), hasBackup: adoption.backup !== null,
-    externalChange: adoption.externalChange, committed: true, existed: expectedOf(observation, resolved).existed, bytes,
+    externalChange: adoption.externalChange, committed: true, existed: expectedOf(observation, resolved).existed, requestedPresent: requestedPresent(path), bytes,
     backup: () => adoption.backup!, own: records, all: records, filtered: false,
   }).entry;
 }
@@ -775,14 +791,9 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
     const all = fragments.filter((entry) => entry.file === path);
     const own = all.filter((entry) => matchesFilter(entry, filter));
     if (filtered && !own.length) continue;
-    // A requested link that names a missing file is still there, so the file is not absent: its records stay.
-    if (!current.existed && only && lstatSync(resolve(only[index]!), { throwIfNoEntry: false })) {
-      report.push({ path, action: 'kept_edited', kept: own.map((entry) => entry.selector) });
-      continue;
-    }
     const plan = planFileRevert({
       path, format: record.format, kind: record.kind, hasBackup: record.backup !== null, externalChange: record.external_change, committed: isCommitted(record, current),
-      existed: current.existed, bytes, backup: () => readVault(paths, record.backup!), own, all, filtered,
+      existed: current.existed, requestedPresent: only !== undefined && requestedPresent(only[index]!), bytes, backup: () => readVault(paths, record.backup!), own, all, filtered,
     });
     if (!dryRun && plan.write) {
       if (plan.write.kind === 'remove') removeTarget(path, current);
