@@ -203,6 +203,8 @@ export interface ToolRecord {
   readonly directories: readonly string[];
   readonly path_entry?: UserPathEntryRecord;
   readonly profile?: ProfileTextRecord;
+  /** Registry keys that the installer wrote, for the report (the Bun `Uninstall\\Bun` key); rh never removes them. */
+  readonly registry_keys?: readonly string[];
   /** False for Bun: no command removes it. */
   readonly removable: boolean;
 }

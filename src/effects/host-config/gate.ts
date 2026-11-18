@@ -273,6 +273,13 @@ export interface HostConfigGate {
    */
   revertTools(tools: readonly ToolId[], port: (() => UserPathPort) | null, options?: { readonly dryRun?: boolean }): readonly HostConfigToolRevertEntry[];
   /**
+   * Release each tool entry that is gone now: a file, link or tree that is
+   * absent, a created directory that is absent, and, with `port`, a user PATH
+   * entry that no entry of the value lists. A target that comes back later is
+   * then not rh's. A dry run (or a preview gate) reports and writes nothing.
+   */
+  releaseAbsentTools(port: (() => UserPathPort) | null, options?: { readonly dryRun?: boolean }): readonly HostConfigToolRevertEntry[];
+  /**
    * Undo the path records of the named paths, which the caller takes from the
    * records that may grant a removal (`readPathRecords`): a `created` entry goes
    * while it is current, a `replaced` file gets the user file back while it
@@ -851,10 +858,12 @@ function revertTools(paths: HostConfigPaths, ids: readonly ToolId[], port: (() =
       if (!port) throw new HostConfigError('host_config_invalid_state', `rh records a user PATH entry for ${tool}, and this system cannot read the user PATH: ${pathEntry.entry}`);
       const user = port();
       const value = user.read();
-      const next = removeUserPathEntry(value, pathEntry);
+      // No entry lists it: the record goes. A listed entry that is not rh's exact text stays with its record.
+      const absent = !listsUserPathEntry(value.raw, pathEntry.entry);
+      const next = absent ? null : removeUserPathEntry(value, pathEntry);
       if (next && !dryRun) user.write(value, next);
-      report.push({ tool, path: userPathLabel(pathEntry.entry), action: next ? 'removed' : 'kept_edited' });
-      if (next) pathEntry = undefined;
+      report.push({ tool, path: userPathLabel(pathEntry.entry), action: absent ? 'already_absent' : next ? 'removed' : 'kept_edited' });
+      if (absent || next) pathEntry = undefined;
     }
     // A directory stays recorded only while an entry inside it stays recorded.
     const directories = present.filter((directory) => !emptied.has(directory) && Object.keys(kept).some((key) => isPathInside(directory, key)));
@@ -864,6 +873,29 @@ function revertTools(paths: HostConfigPaths, ids: readonly ToolId[], port: (() =
   }
   if (!dryRun) writeLedger(paths, { ...ledger, tools });
   return report;
+}
+
+function releaseAbsentTools(paths: HostConfigPaths, port: (() => UserPathPort) | null, dryRun: boolean, read: LedgerReader): HostConfigToolRevertEntry[] {
+  const ledger = read(paths);
+  const tools = { ...ledger.tools };
+  const released: HostConfigToolRevertEntry[] = [];
+  let user: UserPathPort | null = null;
+  for (const [tool, record] of Object.entries(ledger.tools) as [ToolId, ToolRecord][]) {
+    const gone = Object.keys(record.paths).filter((key) => observePathEntry(key) === null);
+    const goneDirectories = record.directories.filter((directory) => !lstatSync(directory, { throwIfNoEntry: false }));
+    user ??= record.path_entry && port ? port() : null;
+    const goneEntry = record.path_entry !== undefined && user !== null && !listsUserPathEntry(user.read().raw, record.path_entry.entry);
+    if (!gone.length && !goneDirectories.length && !goneEntry) continue;
+    released.push(...[...gone, ...goneDirectories].map((path) => ({ tool, path, action: 'already_absent' as const })));
+    if (goneEntry) released.push({ tool, path: userPathLabel(record.path_entry!.entry), action: 'already_absent' });
+    const { path_entry: pathEntry, ...rest } = record;
+    const kept = Object.fromEntries(Object.entries(record.paths).filter(([key]) => !gone.includes(key)));
+    const keptEntry = goneEntry ? undefined : pathEntry;
+    if (!Object.keys(kept).length && !keptEntry) delete tools[tool];
+    else tools[tool] = { ...rest, paths: kept, directories: record.directories.filter((directory) => !goneDirectories.includes(directory)), ...(keptEntry ? { path_entry: keptEntry } : {}) };
+  }
+  if (!dryRun && released.length) writeLedger(paths, { ...ledger, tools });
+  return released;
 }
 
 /**
@@ -1481,6 +1513,7 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
     return {
       apply: refusePreview, writePaths: refusePreview, delegate: refusePreview, revertPaths: refusePreview, addUserPathEntry: refusePreview,
       revertTools: (tools, port) => revertTools(paths, tools, port, true, read),
+      releaseAbsentTools: (port) => releaseAbsentTools(paths, port, true, read),
       keepUserPaths: refusePreview, adoptReplacedPath: refusePreview, adopt: refusePreview, removeUnrecordedText: refusePreview,
       revert: (only, revertOptions) => revertFiles(paths, only, { ...revertOptions, dryRun: true }, read),
       removeEditedBlock: (path) => removeEditedBlock(paths, path, true, read),
@@ -1493,6 +1526,7 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
     delegate: (declared, run, pathOptions) => delegateWrites(env, paths, declared, run, pathOptions ?? {}),
     addUserPathEntry: (tool, entry, port) => addUserPathEntry(paths, tool, entry, port),
     revertTools: (tools, port, revertOptions) => revertTools(paths, tools, port, revertOptions?.dryRun === true, read),
+    releaseAbsentTools: (port, releaseOptions) => releaseAbsentTools(paths, port, releaseOptions?.dryRun === true, read),
     revertPaths: (only, revertOptions) => revertWholePaths(paths, only, revertOptions ?? {}),
     keepUserPaths: (owner, scope, kept) => keepUserPaths(env, paths, owner, scope, kept),
     adoptReplacedPath: (path, owner, backup) => adoptReplacedPath(env, paths, path, owner, backup),

@@ -1,8 +1,9 @@
-import { join } from 'node:path';
-import { HostConfigError, type ToolId } from '../../core/host-config/types';
+import { rmSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
+import { HostConfigError, type HostPath, type ToolId, type ToolRecord } from '../../core/host-config/types';
 import type { UserPathPort, UserPathValue } from '../../core/host-config/path-entry';
 import { runProcess } from '../process-runner';
-import { hostConfigPaths, hostPathKey, readLedger } from './store';
+import { hostConfigPaths, hostPathKey, observeFile, pathRecordOf, readLedger, validToolRecord, writeLedger } from './store';
 import { observePathEntry, sameCommitted } from './whole-path';
 
 /**
@@ -92,4 +93,54 @@ export function windowsUserPathPort(powershell: string, cwd: string, env: NodeJS
       if (outcome !== 'written') throw new HostConfigError('host_config_invalid_state', 'the user Path write gave no result');
     },
   };
+}
+
+/** Written by install.sh and install.ps1 when they installed Bun (JD 6913505420 on #2853); 0600. */
+export function bunBootstrapRecordPath(env: NodeJS.ProcessEnv): string {
+  return join(hostConfigPaths(env).harness, 'bootstrap', 'bun.json');
+}
+
+const BOOTSTRAP_KEYS = new Set(['installed_by', 'version', 'path', 'sha256', 'directories', 'profile', 'path_entry', 'registry_keys']);
+
+function bootstrapRecord(bytes: Buffer, file: string): { readonly path: string; readonly record: ToolRecord } {
+  const malformed = () => new HostConfigError('host_config_invalid_state', `the Bun bootstrap record is malformed, so rh does not import it; it stays: ${file}`);
+  let value: Record<string, unknown>;
+  try { value = JSON.parse(bytes.toString('utf8')); } catch { throw malformed(); }
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some((key) => !BOOTSTRAP_KEYS.has(key))
+    || value.installed_by !== 'rh-bootstrap' || typeof value.path !== 'string' || !isAbsolute(value.path)) throw malformed();
+  const { path, sha256, ...rest } = value;
+  const record = { ...rest, paths: { [path]: { committed: { type: 'file', sha256 } } }, removable: false };
+  if (!validToolRecord(record)) throw malformed();
+  return { path, record: record as unknown as ToolRecord };
+}
+
+/**
+ * The first `rh install` moves the bootstrap's Bun record into the ledger,
+ * once: a ledger record of the same path and hash is not added again, and the
+ * file goes only after the ledger holds the record, so a stop between the two
+ * imports nothing new. A binary that no longer holds the measured bytes gets
+ * no record. A malformed file, or a ledger record of another Bun, stops with
+ * a named error, and the file stays.
+ */
+export function importBunBootstrapRecord(env: NodeJS.ProcessEnv): 'imported' | 'already_recorded' | 'changed' | 'none' {
+  const file = bunBootstrapRecordPath(env);
+  const { bytes } = observeFile(file);
+  if (bytes === null) return 'none';
+  const parsed = bootstrapRecord(bytes, file);
+  const paths = hostConfigPaths(env);
+  const key = hostPathKey(paths, parsed.path);
+  const record: ToolRecord = { ...parsed.record, paths: { [key]: parsed.record.paths[parsed.path]! } };
+  // The claim holds only for the bytes that the bootstrap measured: a Bun that changed since then gets no record, and the claim goes.
+  if (!sameCommitted(observePathEntry(key), record.paths[key]!.committed)) { rmSync(file); return 'changed'; }
+  const ledger = readLedger(paths);
+  const existing = ledger.tools.bun;
+  if (existing && JSON.stringify(existing.paths) !== JSON.stringify(record.paths)) {
+    throw new HostConfigError('host_config_invalid_state', `the ledger records another Bun binary than the bootstrap record; the file stays: ${file}`);
+  }
+  if (!existing) {
+    if (pathRecordOf(ledger, key as HostPath) !== null || ledger.files[key]) throw new HostConfigError('host_config_invalid_state', `another ledger record owns the Bun binary; the file stays: ${file}`);
+    writeLedger(paths, { ...ledger, tools: { ...ledger.tools, bun: record } });
+  }
+  rmSync(file);
+  return existing ? 'already_recorded' : 'imported';
 }

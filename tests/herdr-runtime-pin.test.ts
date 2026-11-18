@@ -273,8 +273,8 @@ interface HcStepRow {
   readonly userPath?: string;
   /** Windows: the user Path scripts that ran through powershell.exe. */
   readonly userPathCalls?: readonly ("read" | "write")[];
-  /** Below the floor: an earlier rh install recorded the hc on PATH, and the update rewrites it. */
-  readonly recorded?: boolean;
+  /** Below the floor: an earlier rh install recorded the hc on PATH, and the update rewrites it; `edited`: the user changed it since. */
+  readonly recorded?: true | "edited";
   readonly status: "ok" | "failed";
   readonly requests: number;
   readonly installed: boolean;
@@ -305,6 +305,8 @@ const HC_STEP_ROWS: readonly HcStepRow[] = [
   { label: "below the floor: hc update --version", before: "0.1.15", platform: "darwin-arm64", served: "pinned", status: "ok", requests: 0, installed: false,
     hcCalls: ["--version", `update --version ${HC_MIN_VERSION}`, "--version"], detail: `hc client 0.1.15 was below the repo-harness floor ${HC_MIN_VERSION}; hc update --version ${HC_MIN_VERSION} updated it to ${HC_MIN_VERSION}` },
   { label: "below the floor: the hc that rh recorded is recorded again after hc update", before: "0.1.15", platform: "darwin-arm64", served: "pinned", recorded: true, status: "ok", requests: 0, installed: false,
+    hcCalls: ["--version", `update --version ${HC_MIN_VERSION}`, "--version"] },
+  { label: "below the floor: an hc that changed since rh recorded it updates, and its record stays as it was (ownership probe P3)", before: "0.1.15", platform: "darwin-arm64", served: "pinned", recorded: "edited", status: "ok", requests: 0, installed: false,
     hcCalls: ["--version", `update --version ${HC_MIN_VERSION}`, "--version"] },
   { label: "below the floor: a failed hc update stops", before: "0.1.15", platform: "darwin-arm64", served: "pinned", updateFails: true, status: "failed", requests: 0, installed: false,
     hcCalls: ["--version", `update --version ${HC_MIN_VERSION}`], detail: `hc client 0.1.15 is below the repo-harness floor ${HC_MIN_VERSION}; hc update --version ${HC_MIN_VERSION} failed: hc: managed install; update it with its package manager` },
@@ -348,7 +350,9 @@ test.each(HC_STEP_ROWS.map(row => [row.label, row] as const))("herdr-core instal
       writeFileSync(join(root, "hc-version"), row.before);
       if (row.recorded) openHostConfigGate({ env }).delegate([{ tool: "herdr-core", version: row.before, directory: fakeBin, entries: ["hc"] }], writeHc);
       else writeHc();
+      if (row.recorded === "edited") appendFileSync(join(fakeBin, "hc"), "# user edit\n");
     }
+    const recordedBefore = row.recorded === "edited" ? JSON.parse(readFileSync(join(home, ".repo-harness", "config", "ledger.json"), "utf8")).tools["herdr-core"] : null;
     const port = await server.port;
     const sha256 = createHash("sha256").update(archive).digest("hex");
     const { step, pathEntry } = ensureHerdrCore({
@@ -371,7 +375,8 @@ test.each(HC_STEP_ROWS.map(row => [row.label, row] as const))("herdr-core instal
     const appended = row.userPathCalls?.includes("write") && row.status === "ok";
     const committed = (path: string) => { const stat = lstatSync(path); return stat.isSymbolicLink() ? { type: "symlink", target: readlinkSync(path) }
       : stat.isDirectory() ? { type: "directory", sha256: hashManagedTree(path) } : { type: "file", sha256: sha256Prefixed(readFileSync(path)) }; };
-    if (row.recorded) expect(tool).toEqual({ installed_by: "rh-install", removable: true, version: HC_MIN_VERSION, paths: { [join(fakeBin, "hc")]: { committed: committed(join(fakeBin, "hc")) } }, directories: [] });
+    if (row.recorded === "edited") expect(tool).toEqual(recordedBefore);
+    else if (row.recorded) expect(tool).toEqual({ installed_by: "rh-install", removable: true, version: HC_MIN_VERSION, paths: { [join(fakeBin, "hc")]: { committed: committed(join(fakeBin, "hc")) } }, directories: [] });
     else if (!row.installed) expect(tool).toBeNull();
     else expect(tool).toEqual({ installed_by: "rh-install", removable: true, version: HC_MIN_VERSION,
       paths: Object.fromEntries(names.map(name => [join(installDir, name), { committed: committed(join(installDir, name)) }])), directories: [],
@@ -397,7 +402,7 @@ test.each(HC_STEP_ROWS.map(row => [row.label, row] as const))("herdr-core instal
   }
 }, 30_000);
 
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';

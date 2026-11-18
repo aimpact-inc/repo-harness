@@ -776,3 +776,25 @@ test.each([
   const value: UserPathValue = { existed: true, kind: 'ExpandString', raw };
   expect(removeUserPathEntry(value, record)).toEqual(left === null ? null : { ...value, raw: left });
 });
+
+// Tool records (#2853). P3: an entry that existed before the writer ran is never claimed, also when the writer rewrites it.
+// The rollback keeps a tool record only while the entry that the transaction created holds the recorded bytes.
+test.each([
+  { label: 'a created entry, rolled back while unchanged', existing: false, after: 'none', record: true },
+  { label: 'a created entry, changed before the rollback', existing: false, after: 'edit', record: false },
+  { label: 'an entry that existed before the writer', existing: true, after: 'none', record: false },
+] as const)('tool record: %s', ({ existing, after, record }) => {
+  const f = fixture();
+  const dir = join(f.home, '.local', 'bin');
+  if (existing) { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'tool'), 'user\n'); }
+  const snapshot = existsSync(join(f.root, 'ledger.json')) ? readFileSync(join(f.root, 'ledger.json')) : null;
+  f.gate().delegate([{ tool: 'herdr-core', version: '1.0.0', directory: dir, entries: ['tool'] }], ([at]) => {
+    mkdirSync(at!, { recursive: true });
+    writeFileSync(join(at!, 'tool'), 'rh\n');
+  });
+  if (after === 'edit') writeFileSync(join(dir, 'tool'), 'user edit\n');
+  expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
+  const tools = existsSync(join(f.root, 'ledger.json')) ? f.ledger().tools : {};
+  expect(tools).toEqual(record ? { 'herdr-core': { installed_by: 'rh-install', removable: true, version: '1.0.0', directories: [join(f.home, '.local'), dir],
+    paths: { [join(dir, 'tool')]: { committed: { type: 'file', sha256: sha256Prefixed(Buffer.from('rh\n')) } } } } } : {});
+});

@@ -12,6 +12,8 @@ import { renderManagedBlock } from '../../src/core/adoption/managed-block';
 import { runtimeStateIgnoreOperation } from '../../src/effects/adoption/gitignore-plan';
 import { installStateFixturePath } from '../helpers/install-ownership';
 import { version as PACKAGE_VERSION } from '../../package.json';
+import { bunBootstrapRecordPath, importBunBootstrapRecord } from '../../src/effects/host-config/tools';
+import { sha256Prefixed } from '../../src/core/evidence/sha256';
 
 describe('operator console setup', () => {
   test('installs a published source outside the global root from the registry', () => {
@@ -493,3 +495,44 @@ describe('runtime ignore rules step', () => {
   });
 });
 
+
+// The bootstrap's Bun record (#2853): imported once, and only for the bytes that the bootstrap measured (ownership probe P3).
+describe('Bun bootstrap record import', () => {
+  test.each([
+    { label: 'imports once; a second file of the same record adds nothing and goes', change: 'none' },
+    { label: 'a binary that changed since the bootstrap gets no record, and the claim goes', change: 'binary' },
+    { label: 'a malformed file stops with a named error and stays', change: 'malformed' },
+  ] as const)('%s', ({ change }) => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'bun-bootstrap-')));
+    const env = { HOME: home };
+    const bun = join(home, '.bun', 'bin', 'bun');
+    try {
+      mkdirSync(dirname(bun), { recursive: true });
+      writeFileSync(bun, 'bun 1.4.4\n');
+      const file = bunBootstrapRecordPath(env);
+      const bootstrap = { installed_by: 'rh-bootstrap', version: '1.4.4', path: bun, sha256: sha256Prefixed(Buffer.from('bun 1.4.4\n')), directories: [join(home, '.bun')],
+        profile: { file: join(home, '.zshrc'), inserted: '\n# bun\nexport BUN_INSTALL="$HOME/.bun"\n' } };
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, change === 'malformed' ? JSON.stringify({ ...bootstrap, sha256: 'not a hash' }) : JSON.stringify(bootstrap), { mode: 0o600 });
+      if (change === 'binary') writeFileSync(bun, 'bun 1.5.0\n');
+      const ledgerFile = join(home, '.repo-harness', 'config', 'ledger.json');
+      if (change === 'malformed') {
+        expect(() => importBunBootstrapRecord(env)).toThrow(`the Bun bootstrap record is malformed, so rh does not import it; it stays: ${file}`);
+        expect([existsSync(file), existsSync(ledgerFile)]).toEqual([true, false]);
+        return;
+      }
+      expect(importBunBootstrapRecord(env)).toBe(change === 'binary' ? 'changed' : 'imported');
+      expect(existsSync(file)).toBe(false);
+      if (change === 'binary') { expect(existsSync(ledgerFile)).toBe(false); return; }
+      const { path: _path, sha256, ...rest } = bootstrap;
+      expect(JSON.parse(readFileSync(ledgerFile, 'utf8')).tools).toEqual({ bun: { ...rest, removable: false, paths: { [bun]: { committed: { type: 'file', sha256 } } } } });
+      // A stop after the ledger write left the file: the next run adds nothing and removes it.
+      const ledger = readFileSync(ledgerFile);
+      writeFileSync(file, JSON.stringify(bootstrap), { mode: 0o600 });
+      expect(importBunBootstrapRecord(env)).toBe('already_recorded');
+      expect([existsSync(file), readFileSync(ledgerFile)]).toEqual([false, ledger]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});

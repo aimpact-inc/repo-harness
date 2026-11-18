@@ -2,7 +2,7 @@ import { requireHome } from "../../effects/repo-harness-home";
 import { parseJsonText } from "../../core/evidence/file-syntax";
 import { syncInstalledSkillCopies } from "../installer/skill-sync";
 import { openHostConfigGate } from "../../effects/host-config/gate";
-import { recordedToolIsCurrent, windowsPowershellPath, windowsUserPathPort } from "../../effects/host-config/tools";
+import { importBunBootstrapRecord, recordedToolIsCurrent, windowsPowershellPath, windowsUserPathPort } from "../../effects/host-config/tools";
 import { hostConfigPaths, readLedger } from "../../effects/host-config/store";
 import { configureRequiredHerdrSkill } from "./herdr-skill";
 import type { RuntimeTransactionContext } from '../../effects/locking/runtime-transaction-lock';
@@ -1522,6 +1522,7 @@ function ensureCodegraphCli(cwd: string, bunExecutable: string, codegraphVersion
 }
 
 export const HERDR_CORE_STEP = "ensure herdr-core (hc)";
+export const BUN_BOOTSTRAP_STEP = "import Bun bootstrap record";
 
 /** Node `<platform>-<arch>` to the pin's release asset name. */
 const HC_ASSET_NAMES: Readonly<Record<string, string>> = {
@@ -1604,6 +1605,9 @@ export function ensureHerdrCore(input: HerdrCoreInstallInput): HerdrCoreInstallR
   const { cwd, env, minVersion } = input;
   const done = (step: Omit<GlobalRuntimeStep, "step">, pathEntry: string | null = null): HerdrCoreInstallResult => ({ step: { step: HERDR_CORE_STEP, ...step }, pathEntry });
   const fail = (detail: string): HerdrCoreInstallResult => done({ status: "failed", detail });
+  // A recorded entry that is gone loses its record now, so an hc that comes back there later is not rh's.
+  try { openHostConfigGate({ env }).releaseAbsentTools(null); }
+  catch (error) { return fail(`the herdr-core tool record could not be read: ${(error as Error).message}`); }
   const hc = findOnPath("hc", env);
   if (hc !== null) {
     const current = hcVersionOf(hc, cwd, env);
@@ -1781,6 +1785,17 @@ function runGlobalRuntimeSetupInTransaction(opts: GlobalRuntimeOptions): GlobalR
       : opts.mcpLocalConfigCheck?.(env) ?? { status: 'skipped' as const, detail: 'no MCP local config check was given' };
     steps.push({ step, ...mcp });
     if (mcp.status === 'failed') return finalizeRuntimeResult(steps);
+  }
+
+  // Before a Bun upgrade can change the binary that the bootstrap measured.
+  try {
+    const imported = importBunBootstrapRecord(env);
+    steps.push({ step: BUN_BOOTSTRAP_STEP, status: imported === 'none' ? 'skipped' : 'ok',
+      detail: { none: 'no Bun bootstrap record', imported: 'recorded the Bun that the bootstrap installed; no command removes it',
+        already_recorded: 'the ledger already records this Bun', changed: 'the Bun binary changed since the bootstrap measured it, so rh records no Bun' }[imported] });
+  } catch (error) {
+    steps.push({ step: BUN_BOOTSTRAP_STEP, status: 'failed', detail: (error as Error).message });
+    return finalizeRuntimeResult(steps);
   }
 
   const bunRuntime = ensureSupportedBunRuntime(cwd, env, bunExecutable);

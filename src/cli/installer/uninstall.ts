@@ -19,7 +19,7 @@ import { assertConfigurationPath, configurationReceiptPath, hostConfigurationRoo
 import { migrateCodexConfigRecords, planCodexConfigMigration, previewAdoptedRevert } from './codex-config-migration';
 import { migrateJsonConfigRecords, planJsonConfigMigration, previewJsonAdoptedRevert } from './json-config-migration';
 import { UNVERIFIED_INSTALLER_RANGES } from '../../effects/host-config/delegated';
-import { openHostConfigGate, planPathRevert, type HostConfigAdoption, type HostConfigGate, type HostConfigRevertEntry, type HostConfigToolRevertEntry } from '../../effects/host-config/gate';
+import { openHostConfigGate, planPathRevert, userPathLabel, type HostConfigAdoption, type HostConfigGate, type HostConfigRevertEntry, type HostConfigToolRevertEntry } from '../../effects/host-config/gate';
 import { hostConfigPaths, projectedLedgerPaths, readLedger, readProjectedLedger, resolveHostPath } from '../../effects/host-config/store';
 import { windowsPowershellPath, windowsUserPathPort } from '../../effects/host-config/tools';
 import { HostConfigError, type ToolId, type ToolRecord } from '../../core/host-config/types';
@@ -171,24 +171,40 @@ function toolSummary(tool: string, record: ToolRecord): string {
 
 /**
  * The tool items. A default uninstall keeps every tool record and prints one
- * `kept` line, so a later `--with-tools` run still finds them. `--with-tools`
- * reverts the removable tools; Bun stays. A dry run plans with the preview
- * gate, and the apply must equal the plan.
+ * `kept` line, so a later `--with-tools` run still finds them; it releases
+ * the entries that are gone, so a target that comes back is not rh's.
+ * `--with-tools` reverts the removable tools; Bun stays. Both plan as a dry
+ * run, and the apply must equal the plan.
  */
-function planTools(env: NodeJS.ProcessEnv, gate: HostConfigGate, opts: UninstallOptions): { items: UninstallItem[]; removable: ToolId[]; plan: readonly HostConfigToolRevertEntry[] } {
+interface ToolPlan {
+  readonly items: UninstallItem[];
+  readonly removable: ToolId[];
+  readonly released: readonly HostConfigToolRevertEntry[];
+  readonly plan: readonly HostConfigToolRevertEntry[];
+}
+
+function planTools(env: NodeJS.ProcessEnv, gate: HostConfigGate, opts: UninstallOptions): ToolPlan {
   const paths = hostConfigPaths(env);
   const tools = Object.entries((opts.dryRun ? readProjectedLedger : readLedger)(paths).tools) as [ToolId, ToolRecord][];
-  if (!tools.length) return { items: [], removable: [], plan: [] };
-  if (!opts.withTools) {
-    const removable = tools.filter(([, record]) => record.removable).map(([tool]) => tool);
-    const reason = `shared tools that rh installed stay: ${tools.map(([tool, record]) => toolSummary(tool, record)).join('; ')}${removable.length ? `; remove ${removable.join(', ')} with: rh uninstall --with-tools` : ''}`;
-    return { items: [{ path: paths.ledger, action: 'kept', reason }], removable: [], plan: [] };
-  }
+  const none: ToolPlan = { items: [], removable: [], released: [], plan: [] };
+  if (!tools.length) return none;
+  const port = userPathPort(env, paths.harness);
   const removable = tools.filter(([, record]) => record.removable).map(([tool]) => tool);
+  if (!opts.withTools) {
+    const released = gate.releaseAbsentTools(port, { dryRun: true });
+    const gone = new Set(released.map((entry) => entry.path));
+    const left = tools.map(([tool, record]) => [tool, { ...record, paths: Object.fromEntries(Object.entries(record.paths).filter(([key]) => !gone.has(key))),
+      ...(record.path_entry && gone.has(userPathLabel(record.path_entry.entry)) ? { path_entry: undefined } : {}) }] as const)
+      .filter(([, record]) => Object.keys(record.paths).length || record.path_entry);
+    const stay = left.filter(([tool]) => removable.includes(tool)).map(([tool]) => tool);
+    const items = released.map(toolItem);
+    if (left.length) items.push({ path: paths.ledger, action: 'kept', reason: `shared tools that rh installed stay: ${left.map(([tool, record]) => toolSummary(tool, record)).join('; ')}${stay.length ? `; remove ${stay.join(', ')} with: rh uninstall --with-tools` : ''}` });
+    return { ...none, items, released };
+  }
   const kept: UninstallItem[] = tools.filter(([, record]) => !record.removable)
     .map(([tool, record]) => ({ path: Object.keys(record.paths)[0] ?? paths.ledger, action: 'kept', reason: `rh never removes ${toolSummary(tool, record)}` }));
-  const plan = gate.revertTools(removable, userPathPort(env, paths.harness), { dryRun: true });
-  return { items: [...kept, ...plan.map(toolItem)], removable, plan };
+  const plan = gate.revertTools(removable, port, { dryRun: true });
+  return { ...none, items: [...kept, ...plan.map(toolItem)], removable, plan };
 }
 
 function toolItem(entry: HostConfigToolRevertEntry): UninstallItem {
@@ -402,7 +418,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
     }
   }
   // After the retirement check: a tool that stays does not keep the install state, though it sets the exit code.
-  let tools: ReturnType<typeof planTools> = { items: [], removable: [], plan: [] };
+  let tools: ToolPlan = { items: [], removable: [], released: [], plan: [] };
   try { tools = planTools(env, gate, opts); } catch (error) { unresolved(hostConfigPaths(env).ledger, String((error as Error).message)); }
   items.push(...tools.items);
   items.push({ path: join(home, '.repo-harness'), action: 'kept', reason: 'archives, runtime history and the MCP config retained; third-party packages/plugins retained' });
@@ -433,6 +449,9 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
         else writePrivateConfiguration(path, content, surfaceRoot(path));
       }
       if (hostPaths.length && !sameRevert(gate.revert(hostPaths), hostRevert)) throw new Error(`configuration changed after preview: ${hostPaths.join(', ')}`);
+      if (tools.released.length && JSON.stringify(gate.releaseAbsentTools(userPathPort(env, hostConfigPaths(env).harness))) !== JSON.stringify(tools.released)) {
+        throw new Error(`configuration changed after preview: ${hostConfigPaths(env).ledger}`);
+      }
       if (tools.removable.length) {
         const applied = gate.revertTools(tools.removable, userPathPort(env, hostConfigPaths(env).harness));
         if (JSON.stringify(applied) !== JSON.stringify(tools.plan)) throw new Error(`configuration changed after preview: ${tools.removable.join(', ')}`);
