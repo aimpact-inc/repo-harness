@@ -142,7 +142,7 @@ function boardErrorCode(error: Error): string {
 }
 
 const friction = (command: CliFrictionEvent['command'], fields: Partial<Pick<CliFrictionEvent, 'issue' | 'pr'>> & { readonly error_code: string }): CliFrictionEvent =>
-  ({ kind: 'cli.friction', command, issue: fields.issue ?? null, pr: fields.pr ?? null, head_sha: null, error_code: fields.error_code, blocker_codes: [] });
+  ({ kind: 'cli.friction', command, issue: fields.issue ?? null, pr: fields.pr ?? null, error_code: fields.error_code, blocker_codes: [] });
 
 const seatEvent = (phase: 'launch' | 'close', seat: string, fields: { readonly terminal?: string; readonly issue?: number; readonly pr?: number | null }): LifecycleEvent => ({
   kind: 'seat.lifecycle', phase, seat, terminal: fields.terminal ?? null, issues: fields.issue === undefined ? [] : [fields.issue], pr: fields.pr ?? null,

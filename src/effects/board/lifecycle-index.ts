@@ -2,7 +2,8 @@
  * The sanitized lifecycle index of one repository (#3204): `<repo-harness home>/lifecycle/<repository id>.jsonl`, an
  * append-only JSONL file outside every task worktree, so seat, friction and hook clues outlive `board closeout`.
  * Telemetry is not an authority: no command reads it back, and a failed append never changes a command result.
- * I1: an event holds closed-enum codes, numeric IDs, SHAs, seat and model IDs, durations and a transcript path only.
+ * I1: an event holds closed-enum codes, numeric IDs, seat and model IDs, durations and a transcript path only. It holds no
+ * operator-typed SHA: a refused command has not confirmed it, and a hex secret has the same shape.
  * The shape gate drops any event with another value, so no stdout, stderr, file content or error prose reaches the file.
  */
 import { mkdirSync } from 'fs';
@@ -36,7 +37,6 @@ export interface CliFrictionEvent {
   readonly command: FrictionCommand;
   readonly issue: number | null;
   readonly pr: number | null;
-  readonly head_sha: string | null;
   readonly error_code: string;
   readonly blocker_codes: readonly string[];
 }
@@ -57,7 +57,6 @@ export type WorktreeHookCounts = Readonly<Record<string, number>>;
 
 const CODE = /^[a-z][a-z0-9_]{0,63}$/u;
 const TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$/u;
-const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const HOOK_CODE = /^[A-Za-z]+\.[a-z]+\.(?:ok|blocked|failed)$/u;
 const TRANSCRIPT_LIMIT = 1024;
 
@@ -77,7 +76,7 @@ function sanitized(event: LifecycleEvent): boolean {
         && token(event.model) && count(event.duration_ms) && transcriptPath(event.transcript_path);
     case 'cli.friction':
       return ['publication_merge', 'board_dispatch', 'board_review'].includes(event.command) && id(event.issue) && id(event.pr)
-        && (event.head_sha === null || SHA.test(event.head_sha)) && CODE.test(event.error_code) && event.blocker_codes.every(code => CODE.test(code));
+        && CODE.test(event.error_code) && event.blocker_codes.every(code => CODE.test(code));
     case 'worktree.hook_summary':
       return TOKEN.test(event.worktree_id) && id(event.pr) && TOKEN.test(event.branch)
         && Object.entries(event.counts_by_code).every(([code, value]) => HOOK_CODE.test(code) && count(value));

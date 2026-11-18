@@ -15,7 +15,7 @@ test('the index keeps only sanitized events in an owner-only file', () => {
   recordLifecycleEvents(() => 77, [
     close,
     // Error prose and a relative transcript path fail the I1 shape gate, so these two events are dropped.
-    { kind: 'cli.friction', command: 'board_review', issue: null, pr: 3210, head_sha: null, error_code: 'gh pr view failed: token ghp_x', blocker_codes: [] },
+    { kind: 'cli.friction', command: 'board_review', issue: null, pr: 3210, error_code: 'gh pr view failed: token ghp_x', blocker_codes: [] },
     { ...close, phase: 'reset', transcript_path: 'session.jsonl' },
   ], env, new Date('2026-11-18T00:00:00.000Z'));
   const path = lifecycleIndexPath(77, env);

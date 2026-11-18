@@ -75,13 +75,13 @@ function failureOf(result: PublicationMergeResult): PublicationMergeFailure {
 }
 
 let cliRun = 0;
-function mergeCli(scenario: PublicationMergeScenario) {
+function mergeCli(scenario: PublicationMergeScenario, head = HEAD) {
   const dir = join(scratch, `cli-${cliRun++}`);
   mkdirSync(dir);
   const gh = installFakeGh(dir, scenario);
   const home = join(dir, 'harness-home');
   const result = spawnSync('bun', [CLI, 'publication', 'merge', '--repository', REPOSITORY, '--repository-id', REPOSITORY_ID,
-    '--pr', String(PR), '--head', HEAD, '--base', BASE, '--json'], {
+    '--pr', String(PR), '--head', head, '--base', BASE, '--json'], {
     cwd: dir, encoding: 'utf-8', env: { ...process.env, REPO_HARNESS_GH_BIN: gh.bin, REPO_HARNESS_HOME: home }, timeout: 120_000,
   });
   const calls = gh.calls();
@@ -313,8 +313,18 @@ describe('publication merge execution', () => {
     // #3204: the refusal appends one sanitized friction event, and the message text stays out of the owner-only index.
     const events = readFileSync(run.index, 'utf8').trim().split('\n').map(line => JSON.parse(line));
     expect(events).toEqual([{ protocol: 'repo-harness.lifecycle-event/v1', at: expect.any(String), repository_id: Number(REPOSITORY_ID), kind: 'cli.friction',
-      command: 'publication_merge', issue: null, pr: PR, head_sha: HEAD, error_code: 'base_protection_insufficient', blocker_codes: [] }]);
+      command: 'publication_merge', issue: null, pr: PR, error_code: 'base_protection_insufficient', blocker_codes: [] }]);
     if (process.platform !== 'win32') expect(statSync(run.index).mode & 0o777).toBe(0o600);
+  }, 120_000);
+
+  test('a refused --head value never reaches the lifecycle index', () => {
+    // A 64-hex value has the shape of a hex secret; the selection validator refuses it before any provider call.
+    const typed = 'b'.repeat(64);
+    const run = mergeCli(passingScenario(), typed);
+    expect(run.document).toMatchObject({ ok: false, exit_code: 4, error: 'invalid_selection' });
+    const index = readFileSync(run.index, 'utf8');
+    expect(JSON.parse(index)).toMatchObject({ kind: 'cli.friction', error_code: 'invalid_selection' });
+    expect(index).not.toContain(typed);
   }, 120_000);
 
   test('a merge request that never completes exits 5 and is not retried', () => {

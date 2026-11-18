@@ -55,7 +55,7 @@ export function buildPublicationCommand(): Command {
       process.stdout.write(`${JSON.stringify(result.document)}\n`);
       if (result.exit_code !== 0) {
         recordLifecycleEvents(() => Number(options.repositoryId), [{ kind: 'cli.friction', command: 'publication_merge', issue: null, pr: Number(options.pr),
-          head_sha: options.head, error_code: result.document.error, blocker_codes: (result.document.blockers ?? []).map(blocker => blocker.code) }], process.env);
+          error_code: result.document.error, blocker_codes: (result.document.blockers ?? []).map(blocker => blocker.code) }], process.env);
       }
       process.exitCode = result.exit_code;
     });
