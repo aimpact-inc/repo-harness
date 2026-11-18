@@ -17,8 +17,8 @@ import { dirname, join, resolve } from 'path';
 import { createInterface } from 'readline/promises';
 import { fileURLToPath } from 'url';
 import { assertOverridesCarried, formatHostConfigPreview, previewHostConfig, resolveOverrides, runInstall, runUninstall } from './commands/install';
-import { planPiPackage, removePiPackage } from './installer/pi-package';
-import { migrateRuntimeHostConfig, initializeStagedSkillObservations, recordStagedExternalSkillWrites, newPiPackagesSinceTransaction, recordPiInstallOwnership, recordUnresolvedPiOwnership } from './installer/install-profile';
+import { planPiPackage } from './installer/pi-package';
+import { migrateRuntimeHostConfig } from './installer/install-profile';
 import { installStatePendingMigration, migrateInstallState, planInstallStateMigration } from './installer/install-state-migration';
 import { requireHome } from "../effects/repo-harness-home";
 import { pathRecordsDigest, readPathRecords } from '../effects/host-config/path-records';
@@ -278,7 +278,6 @@ function runTransactionalSelectionProjection(
   commitState: (transaction: ReturnType<typeof beginInstallHostTransaction>, result: GlobalRuntimeResult) => InstallState,
 ): { result: GlobalRuntimeResult; state: InstallState | null } {
   const plugins = selected.run;
-  const recorded = { selection: selected.selection, plugins: selected.record };
   const transactionEnv = runtimeHostTransactionEnv(options.env);
   // An invalid XDG_STATE_HOME must fail before the lock creates transaction state.
   providerSkillLock(transactionEnv.HOME!, transactionEnv);
@@ -293,12 +292,12 @@ function runTransactionalSelectionProjection(
       if (plugins.includes('architecture')) registerArchitecturePlugin();
       result = runGlobalRuntimeSetup({ ...options, plugins, runtimeLock: lock, transaction: transaction.backup_root });
     } catch (error) {
-      rollbackRuntimeTransaction(transaction, transactionEnv, recorded, error);
+      rollbackRuntimeTransaction(transaction, transactionEnv, error);
       throw error;
     }
     if (result.exitCode !== 0) {
-      rollbackRuntimeTransaction(transaction, transactionEnv, recorded,
-        new Error(`install failed: ${result.stderr || result.lines.join('; ') || `exit ${result.exitCode}`}`), result);
+      rollbackRuntimeTransaction(transaction, transactionEnv,
+        new Error(`install failed: ${result.stderr || result.lines.join('; ') || `exit ${result.exitCode}`}`));
       return { result, state: null };
     }
     try {
@@ -308,28 +307,14 @@ function runTransactionalSelectionProjection(
       commitInstallHostTransaction(transaction);
       return { result, state };
     } catch (error) {
-      rollbackRuntimeTransaction(transaction, transactionEnv, recorded, error, result);
+      rollbackRuntimeTransaction(transaction, transactionEnv, error);
       throw error;
     }
   });
 }
 
-function newPiPackages(result?: GlobalRuntimeResult): string[] {
-  return result?.steps.flatMap(step => step.owned_pi_package ? [step.owned_pi_package] : []) ?? [];
-}
-
 function refusedPaths(result: GlobalRuntimeResult): string[] {
   return result.steps.flatMap(step => step.refused_path ? [step.refused_path] : []);
-}
-
-function compensatePiPackages(sources: Iterable<string>, env: NodeJS.ProcessEnv) {
-  const unresolved: string[] = [];
-  const failures: unknown[] = [];
-  for (const source of sources) {
-    try { removePiPackage(source, env); }
-    catch (error) { unresolved.push(source); failures.push(error); }
-  }
-  return { unresolved, failures };
 }
 
 /** Restore the snapshot bytes only. A failed restore keeps both errors. */
@@ -339,24 +324,10 @@ function restoreTransactionBytes(transaction: ReturnType<typeof beginInstallHost
   }
 }
 
-function rollbackRuntimeTransaction(
-  transaction: ReturnType<typeof beginInstallHostTransaction>, env: NodeJS.ProcessEnv,
-  recorded: { readonly selection: PluginSelection; readonly plugins: readonly PluginId[] }, cause: unknown, result?: GlobalRuntimeResult,
-): void {
+/** The ledger rollback also takes out a Pi package entry that the transaction recorded. */
+function rollbackRuntimeTransaction(transaction: ReturnType<typeof beginInstallHostTransaction>, env: NodeJS.ProcessEnv, cause: unknown): void {
   const failures: unknown[] = [];
-  try { recordStagedExternalSkillWrites(transaction.backup_root, env); } catch (error) { failures.push(error); }
-  const sources = new Set(newPiPackages(result));
-  try {
-    for (const source of newPiPackagesSinceTransaction(transaction, env)) sources.add(source);
-  } catch (error) { failures.push(error); }
-  const compensation = compensatePiPackages(sources, env);
-  const unresolved = compensation.unresolved;
-  failures.push(...compensation.failures);
-  // The filesystem contains the ownership ledger. Restore it even when Pi
-  // cleanup fails, then retain the unresolved external resources in that ledger.
-  try {
-    rollbackInstallHostTransaction(transaction, { unresolvedPi: unresolved.length ? { ...recorded, sources: unresolved, env } : undefined });
-  } catch (error) { failures.push(error); }
+  try { rollbackInstallHostTransaction(transaction); } catch (error) { failures.push(error); }
   if (failures.length) {
     const errors = [cause, ...failures];
     throw new AggregateError(errors, `runtime transaction failed and compensation was incomplete: ${errors.map(error => error instanceof Error ? error.message : String(error)).join('; ')}`);
@@ -427,7 +398,6 @@ export function runCandidateRuntimeReconciliation(
     migrateInstallState(env);
     if (request.host_adapters) migrateRuntimeHostConfig(env);
   });
-  initializeStagedSkillObservations(request.transaction_backup_root, env);
   const state = requireInstallState(env);
   const resolved = resolveRecordedSelection(state, request.target, env, { partial: !complete });
   const plugins = resolved.run;
@@ -473,19 +443,16 @@ export function runCandidateRuntimeReconciliation(
       if (shown) console.error(`[runtime] ${shown.status}: ${shown.step} - ${shown.detail}`);
     }
 
-    recordStagedExternalSkillWrites(request.transaction_backup_root, env);
     const adapterDigests = request.host_adapters
       ? assertInstalledAdapterProjection(request.target, env)
       : {};
     let ownershipManifestDigest: string | null = null;
     if (complete) {
       applyInstallSelection(state.selection, resolved.record, env, new Date(), { backup_root: request.transaction_backup_root }, {
-        additionalPiPackages: newPiPackages(runtime), kept: resolved.kept.map(entry => entry.id), refused: refusedPaths(runtime),
+        kept: resolved.kept.map(entry => entry.id), refused: refusedPaths(runtime),
       });
       // Released parents parse this receipt field by name in a handoff and its rollback; its value is now the path-record digest.
       ownershipManifestDigest = pathRecordsDigest(readPathRecords(env));
-    } else if (request.target === 'both') {
-      recordPiInstallOwnership(newPiPackages(runtime), env);
     }
     const receipt: CandidateReconciliationReceipt = {
       protocol: CANDIDATE_RECONCILIATION_PROTOCOL,
@@ -510,17 +477,10 @@ export function runCandidateRuntimeReconciliation(
     }, env);
     return receipt;
   } catch (error) {
-    const compensation = compensatePiPackages(newPiPackages(runtime), env);
-    try { recordStagedExternalSkillWrites(request.transaction_backup_root, env); }
-    catch (ownershipError) { compensation.failures.push(ownershipError); }
+    // The ledger rollback also takes out a Pi package entry and the staged skills that this run recorded.
     try { rollbackRuntimeHostConfig(request.transaction_backup_root, env); }
-    catch (rollbackError) { compensation.failures.push(rollbackError); }
-    // The parent must still see ownership when candidate cleanup fails, so
-    // its filesystem rollback can preserve the unresolved external effect.
-    try { recordUnresolvedPiOwnership(state.selection, resolved.record, compensation.unresolved, env, request.transaction_id); }
-    catch (ownershipError) { compensation.failures.push(ownershipError); }
-    if (compensation.failures.length) {
-      const errors = [error, ...compensation.failures];
+    catch (rollbackError) {
+      const errors = [error, rollbackError];
       throw new AggregateError(errors, `candidate reconciliation failed: ${errors.map(item => item instanceof Error ? item.message : String(item)).join('; ')}`);
     }
     throw error;
@@ -579,14 +539,11 @@ export function runTransactionalRuntimeRefresh(
       restoreTransactionBytes(transaction, error);
       throw error;
     }
-    const recorded = recordedSelection === null
-      ? { selection: plugins, plugins }
-      : { selection: recordedSelection.state.selection, plugins: recordedSelection.resolved.record };
     let result: GlobalRuntimeResult;
     try {
       result = setup({ ...options, plugins, runtimeLock: lock, transaction: transaction.backup_root, candidateHandoff: candidateHandoffContext(transaction, lock), mcpLocalConfigCheck });
     } catch (error) {
-      rollbackRuntimeTransaction(transaction, transactionEnv, recorded, error);
+      rollbackRuntimeTransaction(transaction, transactionEnv, error);
       throw error;
     }
     // After a candidate handoff the parent reads and writes no install state: the candidate
@@ -595,29 +552,27 @@ export function runTransactionalRuntimeRefresh(
     if (result.exitCode !== 0) {
       const cause = new Error(`runtime refresh failed: ${result.stderr || result.lines.join('; ') || `exit ${result.exitCode}`}`);
       if (byCandidate) restoreTransactionBytes(transaction, cause);
-      else rollbackRuntimeTransaction(transaction, transactionEnv, recorded, cause, result);
+      else rollbackRuntimeTransaction(transaction, transactionEnv, cause);
       return result;
     }
     try {
       if (!byCandidate) {
-        recordStagedExternalSkillWrites(transaction.backup_root, transactionEnv);
         if (recordedSelection !== null) {
           const { state, resolved } = recordedSelection;
           if (selectionChanged(state, resolved)) {
             applyInstallSelection(state.selection, resolved.record, transactionEnv, new Date(), transaction, {
-              additionalPiPackages: newPiPackages(result), kept: resolved.kept.map(entry => entry.id), refused: refusedPaths(result),
+              kept: resolved.kept.map(entry => entry.id), refused: refusedPaths(result),
             });
           }
           result = { ...result, lines: [...selectionLines(resolved), ...commandPluginRepairLines(state.selection), ...result.lines] };
         }
-        if ((options.target ?? 'both') === 'both') recordPiInstallOwnership(newPiPackages(result), transactionEnv);
         migrateCodexConfigRecords(transactionEnv);
       }
       commitInstallHostTransaction(transaction);
       return result;
     } catch (error) {
       if (byCandidate) restoreTransactionBytes(transaction, error);
-      else rollbackRuntimeTransaction(transaction, transactionEnv, recorded, error, result);
+      else rollbackRuntimeTransaction(transaction, transactionEnv, error);
       throw error;
     }
   });
@@ -710,7 +665,7 @@ async function runGlobalRuntimeBootstrap(
       process.env,
       new Date(),
       transaction,
-      { additionalPiPackages: newPiPackages(result), kept: resolved.kept.map(entry => entry.id), refused: refusedPaths(result) },
+      { kept: resolved.kept.map(entry => entry.id), refused: refusedPaths(result) },
     ).state
   ));
   const result = transaction.result;

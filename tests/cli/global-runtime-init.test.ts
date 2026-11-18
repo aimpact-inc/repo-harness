@@ -898,6 +898,8 @@ describe('install command global runtime bootstrap', () => {
       writeFileSync(join(home, '.agents', 'rules', 'durable-context.md'), 'durable\n');
       writeFileSync(join(home, '.agents', 'rules', 'english.md'), 'en\n');
       writeFakeCodegraph(tmp, fakeBin, codegraphLog);
+      // A lock entry with no staged skill and no record, as a killed rh call leaves it (D4b).
+      writeFileSync(join(home, '.agents', '.skill-lock.json'), `${JSON.stringify({ skills: { mermaid: { source: 'BfdCampos/dotfiles' } } }, null, 2)}\n`);
       writeExecutable(tmp, join(fakeBin, 'bun'), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${bunLog}"\nif [[ "\${1:-}" == "--version" ]]; then echo 1.4.0; fi\nexit 0\n`);
       // The install/init provider-driven external-skills bootstrap invokes
       // `bunx skills add ...` directly. The CodeGraph MCP configure step shells
@@ -905,7 +907,21 @@ describe('install command global runtime bootstrap', () => {
       // resolves the `skills` binary from PATH instead of going through bunx, so
       // that one is stubbed separately below.
       writeFakeSkillsCli(tmp, fakeBin);
-      writeExecutable(tmp, join(fakeBin, 'bunx'), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${bunxLog}"\nif [[ "\${1:-}" == "skills" && "\${2:-}" == "add" ]]; then if [[ " $* " == *" tw93/Waza "* ]]; then names='think hunt check health'; else names='mermaid'; fi; if [[ " $* " == *" -a claude-code -s "* ]]; then root="$HOME/.claude/skills"; else root="$HOME/.agents/skills"; fi; for skill in $names; do mkdir -p "$root/$skill"; printf '# %s\\n' "$skill" > "$root/$skill/SKILL.md"; done; fi\nexit 0\n`);
+      // The fake Skills CLI writes the staged skills and its lock entries, and a lock key that no declaration names.
+      writeExecutable(tmp, join(fakeBin, 'bunx'), [`#!${process.execPath}`,
+        "const fs = require('fs'); const path = require('path'); const args = process.argv.slice(2);",
+        `fs.appendFileSync(${JSON.stringify(bunxLog)}, args.join(' ') + '\\n');`,
+        "if (args[0] === 'skills@1.9.0' && args[1] === 'add') {",
+        "  const lock = path.join(process.env.HOME, '.agents', '.skill-lock.json');",
+        "  const data = fs.existsSync(lock) ? JSON.parse(fs.readFileSync(lock, 'utf8')) : { skills: {} };",
+        "  data.version = 3;",
+        "  for (const name of args.slice(args.indexOf('-s') + 1, args.indexOf('-y'))) {",
+        "    fs.mkdirSync(path.join(process.env.HOME, '.agents', 'skills', name), { recursive: true });",
+        "    fs.writeFileSync(path.join(process.env.HOME, '.agents', 'skills', name, 'SKILL.md'), '# ' + name + '\\n');",
+        "    data.skills[name] = { source: args[2] };",
+        "  }",
+        "  fs.writeFileSync(lock, JSON.stringify(data, null, 2) + '\\n');",
+        "}", ''].join('\n'));
 
       const result = runGlobalRuntimeSetup({
         sourceRoot: source,
@@ -930,11 +946,11 @@ describe('install command global runtime bootstrap', () => {
       );
       expect(existsSync(join(home, '.codex', 'hooks.json'))).toBe(true);
       expect(readFileSync(bunxLog, 'utf-8')).toContain(
-        'skills add tw93/Waza -g -a codex -s think hunt check health -y',
+        'skills@1.9.0 add tw93/Waza -g -a codex -s think hunt check health -y',
       );
       expect(readFileSync(join(home, '.codex', 'rules', 'anti-patterns.md'), 'utf-8')).toBe('anti\n');
       expect(readFileSync(bunxLog, 'utf-8')).toContain(
-        'skills add BfdCampos/dotfiles -g -a codex -s mermaid -y',
+        'skills@1.9.0 add BfdCampos/dotfiles -g -a codex -s mermaid -y',
       );
       expect(readFileSync(bunxLog, 'utf-8')).not.toContain(OBSIDIAN_PROVIDER);
       expect(existsSync(join(home, '.codex', 'skills', 'repo-harness-cross-review', 'SKILL.md'))).toBe(true);
@@ -943,6 +959,17 @@ describe('install command global runtime bootstrap', () => {
       // rh stores no vault configuration: the seats migration writes the file, and it carries no brainRoot.
       expect(JSON.parse(readFileSync(join(home, '.repo-harness', 'config.json'), 'utf-8'))).not.toHaveProperty('brainRoot');
       expect(readFileSync(codegraphLog, 'utf-8')).toContain('codegraph install --print-config codex');
+      // CodeGraph's own global installer is not a delegated writer: rh writes its printed config through the gate.
+      expect(readFileSync(codegraphLog, 'utf-8')).not.toContain('--target');
+      // The Skills CLI owns only the staged skills and their lock entries; the lock key outside them is reported.
+      const lock = join(home, '.agents', '.skill-lock.json');
+      const ledger = JSON.parse(readFileSync(join(home, '.repo-harness', 'config', 'ledger.json'), 'utf-8'));
+      const staged = ['think', 'hunt', 'check', 'health', 'mermaid'];
+      expect(staged.map((skill) => ledger.paths[pathRecordKey({ HOME: home }, join(home, '.agents', 'skills', skill))]?.host)).toEqual(staged.map(() => 'staged'));
+      expect(ledger.fragments.filter((fragment: { file: string }) => fragment.file === realpathSync(lock)).map((fragment: { selector: string }) => fragment.selector))
+        .toEqual(['think', 'hunt', 'check', 'health'].map((skill) => `skills.${skill}`));
+      expect(result.steps.find((step) => step.step === 'configure Mermaid skill')?.detail).toContain(`kept unowned lock entry skills.mermaid in ${lock}`);
+      expect(result.steps.find((step) => step.step === 'configure Waza skills')?.detail).toContain(`host_config_unattributed_diff: ${realpathSync(lock)} sha256:`);
       expect(readFileSync(join(home, '.codex', 'config.toml'), 'utf-8')).toContain('[mcp_servers.codegraph]\ncommand = "codegraph"\nargs = ["serve", "--mcp", "--path", "."]\n');
       // Regression guard: the Waza status probe inside check-agent-tooling.sh
       // resolves the `skills` binary from PATH and never re-routes through
@@ -1005,7 +1032,7 @@ exit 0
       });
       expect(installed.exitCode).toBe(0);
       expect(readFileSync(bunxLog, 'utf-8')).toContain(
-        `skills add ${OBSIDIAN_PROVIDER} -g -a codex -s obsidian-markdown obsidian-cli -y`,
+        `skills@1.9.0 add ${OBSIDIAN_PROVIDER} -g -a codex -s obsidian-markdown obsidian-cli -y`,
       );
       for (const skill of ['obsidian-markdown', 'obsidian-cli']) {
         expect(existsSync(join(home, '.agents', 'skills', skill, 'SKILL.md'))).toBe(true);
@@ -1019,12 +1046,11 @@ exit 0
       }
       mkdirSync(join(home, '.repo-harness'), { recursive: true });
       writeFileSync(installStateFixturePath({ HOME: home }), `${JSON.stringify({
-        protocol: 4,
+        protocol: 5,
         selection: ['strategy-memory'],
         ...versions(['strategy-memory']),
         transaction_id: 'obsidian-fixture',
         applied_at: '2026-08-21T00:00:00.000Z',
-        pi_packages: [],
         previous: null,
       }, null, 2)}\n`);
       seedPathRecords({ HOME: home }, { ...readPathRecords({ HOME: home }), ...Object.fromEntries(['obsidian-markdown', 'obsidian-cli'].map((skill) => [
@@ -1090,6 +1116,11 @@ exit 0
       const stagingRules = wazaRules.files.map((rule) => join(home, '.agents', 'rules', rule));
       recordInstallOwnership([], { HOME: home });
       recordInstallOwnership([...stagingRules, ...wazaRules.files.map(rule => join(home, '.codex/rules', rule))], { HOME: home });
+      // The staged skills are rh's: an update refreshes them through the Skills CLI.
+      seedPathRecords({ HOME: home }, { ...readPathRecords({ HOME: home }), ...Object.fromEntries(['think', 'hunt', 'check', 'health', 'mermaid'].map((skill) => [
+        pathRecordKey({ HOME: home }, join(home, '.agents', 'skills', skill)),
+        { owner: 'core', host: 'staged', kind: 'created', baseline: { state: 'unknown' }, committed: { type: 'directory', sha256: singleFileManagedTreeHash(`# stale ${skill}\n`) } },
+      ] as const)) });
       writeFakeCodegraph(tmp, fakeBin, codegraphLog);
       writeExecutable(tmp, join(fakeBin, 'bun'), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${bunLog}"\nif [[ "\${1:-}" == "--version" ]]; then echo 1.4.0; fi\nif [[ "\${3:-}" == archctx@* ]]; then mkdir -p "$HOME/.bun/bin"; ln -sf "$HOME/.bun/install/global/node_modules/archctx/bin/archctx.mjs" "$HOME/.bun/bin/archctx"; fi\nexit 0\n`);
       writeFakeSkillsCli(tmp, fakeBin);
@@ -1190,8 +1221,8 @@ if [[ -n "$output" ]]; then printf '# refreshed rule\\n' > "$output"; else print
       writeExecutable(tmp, join(fakeBin, 'bun'), '#!/bin/bash\nif [[ "${1:-}" == "--version" ]]; then echo 1.4.0; fi\nexit 0\n');
       expect(update({ plugins: FULL_PLUGINS }).steps.find(step => step.step === 'verify managed runtime dependencies')?.detail).toContain('RH_ARCHCTX_BIN_READBACK');
       writeShellExecutableFixture(tmp, join(fakeBin, 'bun'), bunScript);
-      expect(readFileSync(bunxLog, 'utf-8')).toContain('skills add tw93/Waza -g -a codex -s think hunt check health -y');
-      expect(readFileSync(bunxLog, 'utf-8')).toContain('skills add BfdCampos/dotfiles -g -a codex -s mermaid -y');
+      expect(readFileSync(bunxLog, 'utf-8')).toContain('skills@1.9.0 add tw93/Waza -g -a codex -s think hunt check health -y');
+      expect(readFileSync(bunxLog, 'utf-8')).toContain('skills@1.9.0 add BfdCampos/dotfiles -g -a codex -s mermaid -y');
       expect(readFileSync(bunLog, 'utf-8')).toContain(`add -g @colbymchenry/codegraph@${CODEGRAPH_PIN}`);
       expect(result.steps.find((step) => step.step === 'ensure CodeGraph CLI')?.detail).toBe(`updated=${CODEGRAPH_PIN}`);
       expect(readFileSync(join(home, '.codex', 'rules', 'chinese.md'), 'utf-8')).toBe('# refreshed rule\n');
@@ -1451,7 +1482,7 @@ exit 0
     }
   });
 
-  test('rejects a symlinked shared skills root instead of blessing its outside realpath', () => {
+  test.each(['outside directory', 'dangling link'] as const)('rejects a shared skills root that is a link to an %s instead of blessing its realpath', (shape) => {
     const tmp = mkdtempSync(join(tmpdir(), 'repo-harness-obsidian-skill-root-symlink-'));
     const home = join(tmp, 'home');
     const repo = join(tmp, 'repo');
@@ -1461,7 +1492,7 @@ exit 0
       mkdirSync(repo, { recursive: true });
       mkdirSync(join(outside, 'obsidian-markdown'), { recursive: true });
       writeFileSync(join(outside, 'obsidian-markdown', 'SKILL.md'), '# obsidian-markdown\n');
-      symlinkSync(outside, join(home, '.agents', 'skills'), 'dir');
+      symlinkSync(shape === 'dangling link' ? join(tmp, 'missing') : outside, join(home, '.agents', 'skills'), 'dir');
 
       const result = runGlobalRuntimeSetup({
         sourceRoot: ROOT,
@@ -1829,7 +1860,7 @@ exit 0
       // mode, which writes only that agent's root; claude-code alone skips staging.
       writeExecutable(tmp, join(fakeBin, 'bunx'), `#!/bin/bash
 printf '%s\\n' "$*" >> "${bunxLog}"
-if [[ "\${1:-}" == "skills" && "\${2:-}" == "add" ]]; then
+if [[ "\${1:-}" == "skills@1.9.0" && "\${2:-}" == "add" ]]; then
   if [[ " $* " == *" tw93/Waza "* ]]; then
     names='think hunt check health'
     mkdir -p "$HOME/.agents/rules"
@@ -1868,8 +1899,8 @@ exit 0
         status: 'skipped',
         detail: 'cross-review and peer-runtime plugins not selected',
       });
-      expect(readFileSync(bunxLog, 'utf-8')).toContain('skills add tw93/Waza -g -a codex -s think hunt check health -y');
-      expect(readFileSync(bunxLog, 'utf-8')).toContain('skills add BfdCampos/dotfiles -g -a codex -s mermaid -y');
+      expect(readFileSync(bunxLog, 'utf-8')).toContain('skills@1.9.0 add tw93/Waza -g -a codex -s think hunt check health -y');
+      expect(readFileSync(bunxLog, 'utf-8')).toContain('skills@1.9.0 add BfdCampos/dotfiles -g -a codex -s mermaid -y');
       expect(realpathSync(join(home, '.claude', 'skills', 'think'))).toBe(realpathSync(join(home, '.agents', 'skills', 'think')));
       expect(existsSync(join(home, '.claude', 'skills', 'mermaid', 'SKILL.md'))).toBe(true);
       expect(realpathSync(join(home, '.codex', 'skills', 'mermaid'))).toBe(realpathSync(join(home, '.agents', 'skills', 'mermaid')));
@@ -2307,12 +2338,11 @@ exit 0
       setupManagedRuntimeReadback(tmp, home, fakeBin);
       installCandidateRuntimeFixture(home, JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf-8')).version as string);
       writeFileSync(installStateFixturePath({ HOME: home }), `${JSON.stringify({
-        protocol: 4,
+        protocol: 5,
         selection: FULL_PLUGINS,
         ...versions(FULL_PLUGINS),
         transaction_id: 'existing-full-install',
         applied_at: '2026-07-14T00:00:00.000Z',
-        pi_packages: [],
         previous: null,
       })}\n`);
       const candidateVersion = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf-8')).version;
@@ -2397,8 +2427,8 @@ exit 0
       mkdirSync(join(home, '.bun', 'bin'), { recursive: true });
       writeExecutable(tmp, join(home, '.bun', 'bin', 'rh'), '#!/bin/sh\n');
       writeFileSync(installStateFixturePath({ HOME: home }), `${JSON.stringify({
-        protocol: 4, selection: plugins, ...versions(plugins), transaction_id: 'before-refusal',
-        applied_at: '2026-07-14T00:00:00.000Z', pi_packages: [], previous: null,
+        protocol: 5, selection: plugins, ...versions(plugins), transaction_id: 'before-refusal',
+        applied_at: '2026-07-14T00:00:00.000Z', previous: null,
       })}\n`);
       writeExecutable(tmp, join(fakeBin, 'bun'), `#!/bin/bash\nif [[ "\${1:-}" == "--version" ]]; then echo 1.4.0; exit 0; fi\nif [[ "\${1:-}" == "pm" && "\${2:-}" == "view" ]]; then printf '%s\\n' '${JSON.stringify(candidateVersion)}'; exit 0; fi\nif [[ "\${1:-}" == *.ts || "\${1:-}" == - ]]; then exec "${process.execPath}" "$@"; fi\nexit 0\n`);
       const env = {
@@ -2460,8 +2490,11 @@ exit 0
         obsidianSkills: true,
         env: { ...sanitizedChildEnv(home), HOME: home, BUN_INSTALL: join(home, '.bun') },
       }, options => {
-        mkdirSync(staging, { recursive: true });
-        writeFileSync(join(staging, 'SKILL.md'), '# obsidian-markdown\n');
+        // The Skills CLI writes the staging copy as a delegated writer, as the runtime step runs it.
+        openHostConfigGate({ env: { ...sanitizedChildEnv(home), HOME: home } }).delegate([{ path: staging, owner: 'strategy-memory' }], () => {
+          mkdirSync(staging, { recursive: true });
+          writeFileSync(join(staging, 'SKILL.md'), '# obsidian-markdown\n');
+        }, { transaction: options.transaction });
         mkdirSync(join(home, '.codex', 'skills'), { recursive: true });
         openHostConfigGate({ env: { ...sanitizedChildEnv(home), HOME: home } }).writePaths([{ path: projected, owner: 'strategy-memory', entry: { type: 'symlink', target: staging } }], { transaction: options.transaction });
         return {
@@ -2732,7 +2765,7 @@ exit 0
       writeFakeSkillsCli(tmp, fakeBin);
       writeExecutable(tmp, join(fakeBin, 'bunx'), `#!/bin/bash
 printf '%s\\n' "$*" >> "${bunxLog}"
-if [[ "\${1:-}" == "skills" && "\${2:-}" == "add" ]]; then
+if [[ "\${1:-}" == "skills@1.9.0" && "\${2:-}" == "add" ]]; then
   if [[ " $* " == *" tw93/Waza "* ]]; then
     names='think hunt check health'
     mkdir -p "$HOME/.agents/rules"
@@ -2782,7 +2815,7 @@ exit 0
       expect(res.stdout).not.toContain('[plugins] skipped peer-runtime:');
       expect(existsSync(join(home, '.codex', 'skills', 'repo-harness-herdr-portal'))).toBe(false);
       expect(res.stdout).toContain('install repo-harness CLI');
-      expect(readFileSync(bunxLog, 'utf-8')).toContain('skills add tw93/Waza');
+      expect(readFileSync(bunxLog, 'utf-8')).toContain('skills@1.9.0 add tw93/Waza');
       expect(readFileSync(codegraphLog, 'utf-8')).toContain('codegraph install');
       expect(JSON.parse(readFileSync(join(home, '.repo-harness', 'install-state.json'), 'utf-8')).plugins.map(({ id }: { id: string }) => id)).toEqual(codexPlugins);
     } finally {

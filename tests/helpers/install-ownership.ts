@@ -68,7 +68,7 @@ export function withTempHome(prefix: string, fn: (home: string) => void): void {
   }
 }
 
-/** Seed a protocol 4 state and a `created` path record for each path, independently of unrelated owner probes. */
+/** Seed a protocol 5 state and a `created` path record for each path, independently of unrelated owner probes. */
 export function recordInstallOwnership(paths: string[], env: NodeJS.ProcessEnv): void {
   const records = Object.fromEntries(paths.map((path): [string, PathRecord] => {
     const directory = lstatSync(path).isDirectory();
@@ -113,8 +113,8 @@ export function recordLegacyInstallOwnership(paths: string[], env: NodeJS.Proces
 function writeInstallState(env: NodeJS.ProcessEnv, plugins: readonly PluginId[], selection: PluginSelection, transactionId: string): void {
   const statePath = installStateFixturePath(env);
   mkdirSync(dirname(statePath), { recursive: true });
-  writeFileSync(statePath, JSON.stringify({ protocol: 4, ...versions(plugins), selection,
-    transaction_id: transactionId, applied_at: new Date().toISOString(), pi_packages: [], previous: null }));
+  writeFileSync(statePath, JSON.stringify({ protocol: 5, ...versions(plugins), selection,
+    transaction_id: transactionId, applied_at: new Date().toISOString(), previous: null }));
 }
 
 /**

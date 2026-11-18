@@ -1,4 +1,3 @@
-import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
 import { globalConfigurationPath, mutateGlobalConfiguration, restoreGlobalConfiguration } from '../../effects/configuration/global-configuration';
 import { publishFileByRename, retryWindowsSharingRace } from '../../effects/atomic-append';
 import wazaRules from "../../core/skill-surface/waza-shared-rules.json";
@@ -33,7 +32,6 @@ import {
   statSync,
   writeFileSync,
 } from 'fs';
-import { keepPreimage, observePathEntry } from '../../effects/host-config/whole-path';
 import { requireHome } from '../../effects/repo-harness-home';
 import { basename, delimiter, dirname, join } from 'path';
 import {
@@ -69,7 +67,7 @@ import { hashManagedTree } from '../../effects/managed-tree';
 import { readWorkflowPolicyDocument } from '../../effects/state/resolve-effective-state';
 import { POLICY_ABSENT, POLICY_PATH, isPolicyObject, policyValue } from '../../core/workflow/policy-schema';
 import { capabilitySourceModeOf } from '../../effects/architecture/capability-resolver';
-import { piPackagePresent, planPiPackage, removePiPackage, type PiPackageStep } from './pi-package';
+import { ownedPiPackages, piPackagePresent, planPiPackage, removePiPackage, type PiPackageStep } from './pi-package';
 import { piExecutable } from '../../effects/pi-executable';
 import skillSurfaceManifest from '../../../assets/skill-commands/manifest.json';
 import { version as PACKAGE_VERSION } from '../../../package.json';
@@ -80,9 +78,6 @@ import {
   INSTALL_STATE_PROTOCOL,
   installProfileStatePath,
   InstallStateError,
-  invalidOwnership,
-  parseRecordedInstallState,
-  readInstallStateJson,
   readRecordedInstallState,
   type RecordedInstallSnapshot,
   type RecordedInstallState,
@@ -302,71 +297,6 @@ export function fleetReceiptPath(env: NodeJS.ProcessEnv): string {
 /** The path records that a producer edits, by key. */
 type RecordMap = Map<string, PathRecord>;
 
-interface StagedSkillObservation { readonly path: string; readonly owner: SurfaceOwner; readonly existed: boolean; readonly owned: boolean }
-const STAGED_SKILLS = 'staged-skills.json';
-
-/** Presence and ownership before the Skills CLI runs. No user bytes are copied. Retired by #2852. */
-export function initializeStagedSkillObservations(transaction: string, env: NodeJS.ProcessEnv): void {
-  const metadata = join(transaction, STAGED_SKILLS);
-  if (lstatSync(metadata, { throwIfNoEntry: false })) { readStagedSkillObservations(transaction, env, true); return; }
-  const prior = readPathRecords(env);
-  const { externalSkills } = catalogMutationPathSkillNames(loadSkillSurfaceCatalog());
-  const observations = externalSkills.flatMap(name => {
-    const path = join(stagedSkillRoot(requireHome(env)), name);
-    const owner = ownerForInstallPath(path, env);
-    if (owner === null) return [];
-    const key = pathRecordKey(env, path);
-    const record = prior[key];
-    const owned = record?.kind === 'created' && record.owner === owner && pathRecordIsCurrent(key, record);
-    if (owned) keepPreimage(transaction, key);
-    return [{ path, owner, existed: lstatSync(path, { throwIfNoEntry: false }) !== undefined, owned }];
-  });
-  writeFileSync(metadata, JSON.stringify(observations), { flag: 'wx', mode: 0o600 });
-}
-
-function readStagedSkillObservations(transaction: string, env: NodeJS.ProcessEnv, reportRetired = false): readonly StagedSkillObservation[] {
-  const metadata = join(transaction, STAGED_SKILLS);
-  const invalid = 'invalid staged skill observations in runtime transaction';
-  let raw: unknown;
-  try { raw = JSON.parse(readFileSync(metadata, 'utf8')); }
-  catch { throw new Error(invalid); }
-  const root = stagedSkillRoot(requireHome(env));
-  if (!Array.isArray(raw) || raw.some(entry => !isRecord(entry) || typeof entry.path !== 'string'
-    || join(root, basename(entry.path)) !== entry.path || entry.path === root || !isSurfaceOwner(entry.owner)
-    || typeof entry.existed !== 'boolean' || typeof entry.owned !== 'boolean')) throw new Error(invalid);
-  const observations = raw as StagedSkillObservation[];
-  if (new Set(observations.map(entry => entry.path)).size !== observations.length) throw new Error('duplicate staged skill observation');
-
-  const catalog = loadSkillSurfaceCatalog();
-  const { externalSkills } = catalogMutationPathSkillNames(catalog);
-  const retired: string[] = [];
-  const current = observations.filter(entry => {
-    const name = basename(entry.path);
-    if (!catalog.packages.some(pkg => pkg.name === name)) { retired.push(entry.path); return false; }
-    if (!externalSkills.includes(name) || entry.owner !== ownerForInstallPath(entry.path, env, catalog)) throw new Error(invalid);
-    return true;
-  });
-  // The candidate reports at handoff. Later ledger rebuilds can read the same observations.
-  if (reportRetired) for (const path of retired) process.stderr.write(`[install] skipped retired staged skill ${JSON.stringify(path)}\n`);
-  return current;
-}
-
-/** Record only newly staged entries or an entry whose prior record was current. Retired by #2852. */
-export function recordStagedExternalSkillWrites(transaction: string, env: NodeJS.ProcessEnv): void {
-  const observations = readStagedSkillObservations(transaction, env);
-  const records = { ...readPathRecords(env) };
-  for (const entry of observations) {
-    if (entry.existed && !entry.owned) continue;
-    const committed = observePathEntry(entry.path);
-    if (!committed || committed.type === 'file') continue;
-    const key = pathRecordKey(env, entry.path);
-    const previous = records[key];
-    if (previous && (previous.kind !== 'created' || previous.owner !== entry.owner)) continue;
-    records[key] = { owner: entry.owner, host: 'staged', kind: 'created', baseline: previous?.baseline ?? { state: 'known', existed: false }, committed };
-  }
-  writePathRecords(env, records);
-}
-
 function ownerSelected(record: PathRecord, plugins: readonly PluginId[]): boolean {
   return record.kind === 'user_managed' || (isSurfaceOwner(record.owner) && ownerEnabled(record.owner, plugins));
 }
@@ -388,49 +318,8 @@ function carriedRecords(prior: PathRecords, kept: readonly PluginId[] = []): Rec
 }
 
 /** A Pi package source that an install may own: the Bun global package root, with the `pi` plugin enabled. */
-function validPiPackage(source: string, env: NodeJS.ProcessEnv, plugins: readonly PluginId[]): boolean {
+export function validPiPackage(source: string, env: NodeJS.ProcessEnv, plugins: readonly PluginId[]): boolean {
   return plugins.includes('pi') && source === bunGlobalPackageRoot(env);
-}
-
-export function recordPiInstallOwnership(sources: readonly string[], env: NodeJS.ProcessEnv = process.env): void {
-  const current = readInstallState(env);
-  if (current === null) {
-    if (sources.length === 0) return;
-    throw new Error('Pi package ownership requires an install state');
-  }
-  const plugins = enabledPlugins(current);
-  if (sources.some(source => !validPiPackage(source, env, plugins))) throw new Error('invalid Pi package ownership');
-  const piPackages = [...new Set([...current.pi_packages, ...sources])];
-  if (piPackages.length !== current.pi_packages.length) writeState({ ...current, pi_packages: piPackages }, env);
-}
-
-/** Preserve only the external resources that rollback could not remove. */
-export function recordUnresolvedPiOwnership(
-  selection: PluginSelection,
-  plugins: readonly PluginId[],
-  sources: readonly string[],
-  env: NodeJS.ProcessEnv,
-  transactionId: string,
-): void {
-  if (sources.length === 0) return;
-  const current = readInstallState(env);
-  // The state records the attempted selection. Probes still report the
-  // missing filesystem surfaces of an incomplete, rolled-back installation.
-  const state: InstallState = current ?? {
-    protocol: INSTALL_STATE_PROTOCOL, ...versions(plugins), selection,
-    transaction_id: transactionId, applied_at: new Date().toISOString(), pi_packages: [], previous: null,
-  };
-  if (sources.some(source => !validPiPackage(source, env, enabledPlugins(state)))) throw new Error('invalid Pi rollback ownership');
-  writeState({ ...state, pi_packages: [...new Set([...state.pi_packages, ...sources])] }, env);
-}
-
-/** Candidate processes publish Pi packages into the same state as the parent. */
-export function newPiPackagesSinceTransaction(transaction: InstallHostTransaction, env: NodeJS.ProcessEnv): readonly string[] {
-  const snapshot = transaction.snapshots.find(entry => entry.path === installProfileStatePath(env));
-  const before = snapshot?.existed && snapshot.backup_path
-    ? checkedState(parseRecordedInstallState(readInstallStateJson(snapshot.backup_path), snapshot.backup_path), snapshot.backup_path, env).pi_packages
-    : [];
-  return (readInstallState(env)?.pi_packages ?? []).filter(source => !before.includes(source));
 }
 
 /**
@@ -600,7 +489,7 @@ export function planSkillSync(plugins: readonly PluginId[], env: NodeJS.ProcessE
   return { declared: [...declared.values()], retired };
 }
 
-/** Config adoption commits before the runtime snapshot, including a protocol 4 state with an older adapter. */
+/** Config adoption commits before the runtime snapshot, including a protocol 5 state with an older adapter. */
 export function migrateRuntimeHostConfig(env: NodeJS.ProcessEnv): void {
   requireHome(env);
   migrateCodexConfigRecords(env);
@@ -707,7 +596,7 @@ function settleOrphanedTransactions(transactionRoot: string, env: NodeJS.Process
       const host = /^\d+$/.test(entry) ? owner.paths[Number(entry)] : undefined;
       if (host !== undefined && installProfileTransactionPaths(env).includes(host)) settleTransactionCopy(join(directory, entry), host, env);
     }
-    if (readdirSync(directory).every((entry) => entry === TRANSACTION_OWNER || entry === STAGED_SKILLS)) rmSync(directory, { recursive: true, force: true });
+    if (readdirSync(directory).every((entry) => entry === TRANSACTION_OWNER || entry === RETIRED_STAGED_SKILLS)) rmSync(directory, { recursive: true, force: true });
     else process.stderr.write(`[install] kept incomplete transaction for recovery: ${directory}\n`);
   }
 }
@@ -716,6 +605,9 @@ function settleOrphanedTransactions(transactionRoot: string, env: NodeJS.Process
 function holdsRuntimeLock(scope: RuntimeTransactionScope): boolean {
   return readExclusiveDirectoryLockOwner(realpathSync(scope.root), runtimeTransactionLockRelativePath(scope))?.pid === process.pid;
 }
+
+/** The staged-skill observations that an rh before #2852 kept in its transaction: an orphan that holds only them has nothing to recover. */
+const RETIRED_STAGED_SKILLS = 'staged-skills.json';
 
 /** The owner record goes in before the directory gets its `install-` name, so no live directory is ever without one. */
 function createTransactionDirectory(transactionRoot: string, paths: readonly string[]): string {
@@ -739,9 +631,7 @@ export function beginLegacyCleanupBackup(paths: readonly string[], env: NodeJS.P
 export function beginInstallHostTransaction(paths: readonly string[], env: NodeJS.ProcessEnv = process.env, options: { readonly runtimeLock?: RuntimeTransactionContext } = {}): InstallHostTransaction {
   const allowed = new Set(installProfileTransactionPaths(env));
   if (paths.some(path => !allowed.has(path))) throw new Error('runtime transaction contains a host path');
-  const transaction = snapshotPaths(paths, env, options);
-  try { initializeStagedSkillObservations(transaction.backup_root, env); return transaction; }
-  catch (error) { commitInstallHostTransaction(transaction); throw error; }
+  return snapshotPaths(paths, env, options);
 }
 
 function snapshotPaths(
@@ -845,19 +735,11 @@ export function refreshInstallStateVersions(env: NodeJS.ProcessEnv): void {
 
 export function rollbackInstallHostTransaction(
   transaction: InstallHostTransaction,
-  options: { readonly runtimeLock?: RuntimeTransactionContext;
-    readonly unresolvedPi?: { readonly selection: PluginSelection; readonly plugins: readonly PluginId[]; readonly sources: readonly string[]; readonly env: NodeJS.ProcessEnv } } = {},
+  options: { readonly runtimeLock?: RuntimeTransactionContext } = {},
 ): void {
   assertTransactionLock(transaction, options.runtimeLock);
   try {
     const failures: string[] = [];
-    const unresolved = options.unresolvedPi;
-    if (unresolved?.sources.length) {
-      try {
-        writeFileSync(join(transaction.backup_root, 'pi-ownership.json'), JSON.stringify({ protocol: 1,
-          transaction_id: basename(transaction.backup_root), plugins: unresolved.plugins, pi_packages: unresolved.sources }), { mode: 0o600 });
-      } catch (error) { failures.push(`Pi recovery record: ${String((error as Error).message ?? error)}`); }
-    }
     const ledger = transaction.snapshots.find(snapshot => basename(snapshot.path) === 'ledger.json' && basename(dirname(snapshot.path)) === 'config');
     if (ledger) {
       try {
@@ -872,10 +754,6 @@ export function rollbackInstallHostTransaction(
       } catch (error) {
         failures.push(`${snapshot.path}: ${String((error as Error).message ?? error)}`);
       }
-    }
-    if (unresolved?.sources.length) {
-      try { recordUnresolvedPiOwnership(unresolved.selection, unresolved.plugins, unresolved.sources, unresolved.env, basename(transaction.backup_root)); }
-      catch (error) { failures.push(`Pi ownership could not be restored to the ledger; recovery transaction ${transaction.backup_root}: ${String((error as Error).message ?? error)}`); }
     }
     if (failures.length === 0) {
       rmSync(transaction.backup_root, { recursive: true, force: true });
@@ -968,23 +846,14 @@ export function rollbackRuntimeHostConfig(backupRoot: string, env: NodeJS.Proces
   if (owner === 'none') restoreOlderParentFiles(backupRoot, env);
 }
 
+/** The lock entries of the removed staged skills go by the ledger's per-fragment rule: only an entry that rh recorded and that is intact. */
 function removeOwnedSkillLockEntries(env: NodeJS.ProcessEnv, skillNames: ReadonlySet<string>): void {
   if (skillNames.size === 0) return;
   const lockPath = providerSkillLock(requireHome(env), env).path;
-  if (!existsSync(lockPath)) return;
-  const content = readFileSync(lockPath, 'utf-8');
-  let parsed: { skills?: Record<string, unknown> };
-  try { parsed = parseJsonText(content, lockPath) as typeof parsed; } catch (error) {
-    if (!(error instanceof FileSyntaxError)) throw error;
-    throw new Error(`invalid external skill lock: ${lockPath}`);
+  for (const entry of openHostConfigGate({ env }).revert([lockPath], { selectors: [...skillNames].map((name) => `skills.${name}`) })) {
+    if (entry.action !== 'kept_edited') continue;
+    process.stderr.write(`[install] kept_edited ${entry.path}: rh cannot take out the lock entries ${entry.kept?.join(', ') ?? ''} as they are now; their bytes stay\n`);
   }
-  if (!parsed || typeof parsed !== 'object' || !parsed.skills || typeof parsed.skills !== 'object') {
-    throw new Error(`invalid external skill lock: ${lockPath}`);
-  }
-  for (const name of skillNames) delete parsed.skills[name];
-  const temp = `${lockPath}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(temp, `${JSON.stringify(parsed, null, 2)}\n`, { mode: 0o600 });
-  retryWindowsSharingRace(() => renameSync(temp, lockPath));
 }
 
 /**
@@ -994,7 +863,6 @@ function removeOwnedSkillLockEntries(env: NodeJS.ProcessEnv, skillNames: Readonl
  */
 function removeRetiredOwnedSurfaces(
   plugins: readonly PluginId[],
-  current: Pick<InstallState, 'pi_packages'>,
   env: NodeJS.ProcessEnv,
   transaction: string,
 ): readonly string[] {
@@ -1004,8 +872,8 @@ function removeRetiredOwnedSurfaces(
   if (planned) throw new Error(`refusing plugin switch because managed surface drifted: ${planned}`);
   const ownedSkills = new Set(selectionOwnedSkillNames(loadSkillSurfaceCatalog()));
   const removedSkills = new Set(retired.filter((key) => records[key]!.host === 'staged' && ownedSkills.has(basename(key))).map((key) => basename(key)));
-  // Only a registration that this install created is in the state.
-  const piPackages = plugins.includes('pi') ? [] : current.pi_packages;
+  // Only an entry that the ledger records under owner `pi` is rh's to remove.
+  const piPackages = plugins.includes('pi') ? [] : ownedPiPackages(env);
   for (const source of piPackages) removePiPackage(source, env);
   const changed = openHostConfigGate({ env }).revertPaths(retired, { transaction }).find((entry) => entry.action === 'kept_edited');
   if (changed) throw new Error(`refusing plugin switch because managed surface drifted: ${changed.path}`);
@@ -1049,9 +917,8 @@ export function prepareInstallSelectionSwitch(
   // The old records of the host files move to the ledger first, so the architecture revert below finds them.
   migrateCodexConfigRecords(env);
   migrateJsonConfigRecords(env);
-  const current = readInstallState(env);
-  if (!current) return [];
-  const removed = removeRetiredOwnedSurfaces(plugins, current, env, transaction);
+  if (!readInstallState(env)) return [];
+  const removed = removeRetiredOwnedSurfaces(plugins, env, transaction);
   if (!ownerEnabled('architecture', plugins)) removeArchitectureHostFragments(env);
   return removed;
 }
@@ -1089,17 +956,8 @@ export function isLegacyOwnershipSurface(raw: unknown, env: NodeJS.ProcessEnv, p
   return validSurfaceShape(raw, env);
 }
 
-/** The read model's state with each Pi package checked against the plugins of the same snapshot; the installer commands read state only through this. */
-function checkedState(recorded: RecordedInstallState, path: string, env: NodeJS.ProcessEnv): InstallState {
-  for (const snapshot of [recorded, ...(recorded.previous ? [recorded.previous] : [])]) {
-    if (snapshot.pi_packages.some((source) => !validPiPackage(source, env, enabledPlugins(snapshot)))) throw invalidOwnership(path);
-  }
-  return recorded;
-}
-
 export function readInstallState(env: NodeJS.ProcessEnv = process.env): InstallState | null {
-  const recorded = readRecordedInstallState(env);
-  return recorded === null ? null : checkedState(recorded, installProfileStatePath(env), env);
+  return readRecordedInstallState(env);
 }
 
 /** `update` resolves the recorded selection; without a state it has none. */
@@ -1229,7 +1087,7 @@ export function installStateStatus(
   const ownership = Object.entries(records).map(([path, record]): OwnershipEntry => ({
     path, owner: record.owner, host: record.host, kind: record.kind, type: record.committed.type, current: pathRecordIsCurrent(path, record),
   }));
-  const piDrift = piExecutable(env) === null ? [] : state.pi_packages.filter((source) => {
+  const piDrift = piExecutable(env) === null || !enabledPlugins(state).includes('pi') ? [] : ownedPiPackages(env).filter((source) => {
     try { return !piPackagePresent(source, env); } catch { return true; }
   });
   // A file that the user keeps is not rh's to keep current.
@@ -1432,7 +1290,6 @@ export function applyInstallSelection(
   now = new Date(),
   transaction?: Pick<InstallHostTransaction, 'backup_root'>,
   options: {
-    readonly additionalPiPackages?: readonly string[];
     readonly kept?: readonly PluginId[];
     readonly refused?: readonly string[];
   } = {},
@@ -1443,19 +1300,14 @@ export function applyInstallSelection(
   const kept = options.kept ?? [];
   const ran = plugins.filter(id => !kept.includes(id));
   const current = readInstallState(env);
-  const additionalPi = options.additionalPiPackages ?? [];
-  if (additionalPi.some(source => !validPiPackage(source, env, plugins))) throw new Error('invalid Pi package ownership');
   const plan = planInstallSelection(selection, { run: ran, record: plugins }, current, env);
-  if (transaction) recordStagedExternalSkillWrites(transaction.backup_root, env);
   const { records: prior, outside, unsupported } = readPathRecordSet(env);
   const records = carriedRecords(prior, kept);
   const committed = selectionRecords(records, plugins);
-  const piPackages = [...new Set([...(current?.pi_packages ?? []), ...additionalPi])].filter(source => validPiPackage(source, env, plugins));
   const recordedVersions = versions(plugins);
   const unchanged = current !== null
     && JSON.stringify({ core: current.core, plugins: current.plugins }) === JSON.stringify(recordedVersions)
     && JSON.stringify(current.selection) === JSON.stringify(selection)
-    && JSON.stringify(current.pi_packages) === JSON.stringify(piPackages)
     && pathRecordsDigest(prior) === pathRecordsDigest(committed)
     // A record outside its host root goes with the next write, so it never stays unacted forever.
     && outside.length === 0 && unsupported.length === 0;
@@ -1465,7 +1317,6 @@ export function applyInstallSelection(
     selection,
     transaction_id: randomUUID(),
     applied_at: now.toISOString(),
-    pi_packages: piPackages,
     previous: current === null ? null : snapshot(current),
   };
   const status = installStateStatus({ ...state, plugins: state.plugins.filter(plugin => !kept.includes(plugin.id)) }, env,
@@ -1489,7 +1340,6 @@ export function rollbackInstallSelection(
   const current = readInstallState(env);
   if (!current?.previous) throw new Error('no previous install transaction to roll back');
   const plugins = enabledPlugins(current.previous);
-  if (transaction) recordStagedExternalSkillWrites(transaction.backup_root, env);
   const prior = readPathRecords(env);
   const records = carriedRecords(prior);
   const committed = selectionRecords(records, plugins);
@@ -1498,7 +1348,6 @@ export function rollbackInstallSelection(
     ...versions(plugins),
     transaction_id: randomUUID(),
     applied_at: new Date().toISOString(),
-    pi_packages: current.pi_packages.filter(source => validPiPackage(source, env, plugins)),
     previous: null,
   };
   const status = installStateStatus(restored, env, committed);

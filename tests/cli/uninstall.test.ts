@@ -225,10 +225,10 @@ test('restores Codex MCP section while preserving other TOML tables',()=>fixture
  expect(readFileSync(path,'utf8')).toBe('model = "user"\n[mcp_servers.other]\ncommand = "keep"\n');
 }));
 
-/** A protocol 4 state and a `created` core record of each path, as an install leaves them. */
+/** A protocol 5 state and a `created` core record of each path, as an install leaves them. */
 function profile(home: string, entries: readonly { path: string; committed: PathCommitted; kind?: 'user_managed' }[]) {
  const env={HOME:home};
- put(home,relative(home,installStateFixturePath(env)),JSON.stringify({protocol:4,...versions(['architecture']),selection:['architecture'],transaction_id:'fixture',applied_at:new Date().toISOString(),pi_packages:[],previous:null}));
+ put(home,relative(home,installStateFixturePath(env)),JSON.stringify({protocol:5,...versions(['architecture']),selection:['architecture'],transaction_id:'fixture',applied_at:new Date().toISOString(),previous:null}));
  seedPathRecords(env,Object.fromEntries(entries.map(({path,committed,kind})=>[pathRecordKey(env,path),{owner:'core',host:pathRecordHost(env,path)!,kind:kind??'created' as const,baseline:{state:'unknown' as const},committed}])));
 }
 function ownedFile(path: string, content: string) { return {path,committed:{type:'file' as const,sha256:`sha256:${createHash('sha256').update(content).digest('hex')}`}}; }
@@ -294,7 +294,15 @@ test('an uninstall keeps a personal file and a foreign skill that a path record 
 test.each([[3,1],[3,2],[4,2]])('a protocol %i install state with a protocol %i ledger: the dry run writes nothing and reports what the uninstall does',(stateProtocol,ledgerProtocol)=>fixture((home,env)=>{
  const rule=join(home,'.codex/rules/anti-patterns.md');put(home,'.codex/rules/anti-patterns.md','owned');
  rhWritesInputMode(env,join(home,'.codex/config.toml'));
- if(stateProtocol===3) recordLegacyInstallOwnership([rule],env); else profile(home,[ownedFile(rule,'owned')]);
+ const lockPath=join(home,'.agents/.skill-lock.json');
+ if(stateProtocol===3) recordLegacyInstallOwnership([rule],env);
+ else {
+  // A protocol 4 staged skill whose Skills CLI lock stanza matches, as a lock restored from a backup does (GK-3222-3).
+  put(home,'source/SKILL.md','keep');mkdirSync(join(home,'.agents/skills'),{recursive:true});const staged=join(home,'.agents/skills/think');symlinkSync(join(home,'source'),staged);
+  put(home,'.agents/.skill-lock.json',`${JSON.stringify({version:3,skills:{think:{source:'tw93/Waza'},'user-skill':{source:'user/repo'}}},null,2)}\n`);
+  profile(home,[ownedFile(rule,'owned'),ownedLink(staged,join(home,'source'))]);
+  const state=installStateFixturePath(env);writeFileSync(state,JSON.stringify({...JSON.parse(readFileSync(state,'utf8')),protocol:4,pi_packages:[]}));
+ }
  // The ledger as an earlier rh version left it.
  const {paths,retired:_retired,recovery:_recovery,...text}=ledger(home);
  writeFileSync(join(home,'.repo-harness/config/ledger.json'),JSON.stringify(ledgerProtocol===1?{...text,protocol:1}:{...text,protocol:2,paths}));
@@ -305,32 +313,59 @@ test.each([[3,1],[3,2],[4,2]])('a protocol %i install state with a protocol %i l
  const result=runUserUninstall({target:'both',env});
  expect({exitCode:dryRun.exitCode,items:dryRun.items}).toEqual({exitCode:result.exitCode,items:result.items});
  expect(result.exitCode,result.lines.join('\n')).toBe(0);
+ // The protocol 4 state proves no stanza bytes: the move claims no lock stanza, and the uninstall leaves the lock as it was.
+ if(stateProtocol===4) expect([dryRun.items.some((item)=>item.path===lockPath),openHostConfigGate({env}).recorded(lockPath),JSON.parse(readFileSync(lockPath,'utf8')).skills])
+  .toEqual([false,[],{think:{source:'tw93/Waza'},'user-skill':{source:'user/repo'}}]);
 }));
-test('staging skill removal edits the provider lock under an XDG_STATE_HOME outside HOME, after a failed cleanup',()=>fixture((home,env)=>{
+const lockSkills=(lockPath:string)=>JSON.parse(readFileSync(lockPath,'utf8')).skills;
+test.each(['gone','edited'] as const)('ownership probes P1 and P2: a lock stanza that the Skills CLI wrote through the gate and that is %s now is never taken out by uninstall',(shape)=>fixture((home,env)=>{
+ put(home,'source/SKILL.md','keep');mkdirSync(join(home,'.agents/skills'),{recursive:true});const staged=join(home,'.agents/skills/think');symlinkSync(join(home,'source'),staged);
+ profile(home,[ownedLink(staged,join(home,'source'))]);
+ const lockPath=join(home,'.agents/.skill-lock.json');put(home,'.agents/.skill-lock.json',`${JSON.stringify({version:3,skills:{'user-skill':{source:'user/repo'}}},null,2)}\n`);
+ recordLockEntry(lockPath,env);
+ const skills=lockSkills(lockPath);
+ const now=shape==='gone'?{'user-skill':skills['user-skill']}:{...skills,think:{source:'tw93/Waza',pinned:true}};
+ writeFileSync(lockPath,`${JSON.stringify({version:3,skills:now},null,2)}\n`);
+ const first=runUserUninstall({target:'both',env});
+ expect([lockSkills(lockPath),openHostConfigGate({env}).recorded(lockPath).length]).toEqual([now,shape==='gone'?0:1]);
+ if(shape==='edited'){expect(first.exitCode).not.toBe(0);return;}
+ // P1: the stanza that the user registers again after the record went stays through a later uninstall.
+ expect(first.exitCode).toBe(0);
+ const again={...now,think:{source:'tw93/Waza'}};
+ writeFileSync(lockPath,`${JSON.stringify({version:3,skills:again},null,2)}\n`);
+ expect(runUserUninstall({target:'both',env}).exitCode).toBe(0);
+ expect(lockSkills(lockPath)).toEqual(again);
+}));
+/** The Skills CLI as the runtime runs it: a delegated writer that adds `think` to the lock. */
+function recordLockEntry(lockPath:string,env:NodeJS.ProcessEnv){
+ openHostConfigGate({env}).delegate([{path:lockPath,owner:'core',selectors:['skills.think']}],()=>{
+  const data=JSON.parse(readFileSync(lockPath,'utf8'));writeFileSync(lockPath,`${JSON.stringify({...data,skills:{...data.skills,think:{source:'tw93/Waza'}}},null,2)}\n`);
+ });
+}
+test('the provider lock under an XDG_STATE_HOME outside HOME loses only the entry that rh recorded; the HOME lock stays',()=>fixture((home,env)=>{
  const state=mkdtempSync(join(tmpdir(),'user-uninstall-state-'));const lockPath=join(state,'skills/.skill-lock.json');
  try {
   put(home,'source/SKILL.md','keep');mkdirSync(join(home,'.agents/skills'),{recursive:true});const path=join(home,'.agents/skills/think');symlinkSync(join(home,'source'),path);
   profile(home,[ownedLink(path,join(home,'source'))]);
-  put(state,'skills/.skill-lock.json','{"skills":[]}');put(home,'.agents/.skill-lock.json','{"skills":{"think":{}}}');
+  const before=`${JSON.stringify({version:3,skills:{'user-skill':{source:'user/repo'}}},null,2)}\n`;
+  put(state,'skills/.skill-lock.json',before);put(home,'.agents/.skill-lock.json','{"skills":{"think":{}}}');
   const xdg={...env,XDG_STATE_HOME:state};
-  expect(runUserUninstall({target:'both',env:xdg}).status).toBe('partial');
-  expect(existsSync(path)).toBe(true);expect(Object.keys(ledger(home).paths)).toContain(pathRecordKey({HOME:home},path));
-  writeFileSync(lockPath,JSON.stringify({version:3,skills:{think:{source:'tw93/Waza'},'user-skill':{source:'user/repo'}}}));
+  recordLockEntry(lockPath,xdg);
   expect(runUserUninstall({target:'both',env:xdg}).status).toBe('complete');expect(existsSync(path)).toBe(false);
-  expect(JSON.parse(readFileSync(lockPath,'utf8')).skills).toEqual({'user-skill':{source:'user/repo'}});
+  expect(readFileSync(lockPath,'utf8')).toBe(before);
   expect(readFileSync(join(home,'.agents/.skill-lock.json'),'utf8')).toBe('{"skills":{"think":{}}}');
  } finally { rmSync(state,{recursive:true,force:true}); }
 }));
-test.skipIf(process.platform==='win32'||process.getuid?.()===0)('a failed provider lock write keeps the staging skill for a retry',()=>fixture((home,env)=>{
- const lockDir=join(home,'.local/state/skills');const xdg={...env,XDG_STATE_HOME:join(home,'.local/state')};
+test.skipIf(process.platform==='win32'||process.getuid?.()===0)('a failed provider lock write keeps the lock record for a retry',()=>fixture((home,env)=>{
+ const lockDir=join(home,'.local/state/skills');const lockPath=join(lockDir,'.skill-lock.json');const xdg={...env,XDG_STATE_HOME:join(home,'.local/state')};
  put(home,'source/SKILL.md','keep');mkdirSync(join(home,'.agents/skills'),{recursive:true});const path=join(home,'.agents/skills/think');symlinkSync(join(home,'source'),path);
  profile(home,[ownedLink(path,join(home,'source'))]);
- put(home,'.local/state/skills/.skill-lock.json',JSON.stringify({skills:{think:{},'user-skill':{}}}));chmodSync(lockDir,0o500);
- expect(runUserUninstall({target:'both',env:xdg}).status).toBe('partial');
- expect(existsSync(path)).toBe(true);expect(Object.keys(ledger(home).paths)).toContain(pathRecordKey({HOME:home},path));
+ put(home,'.local/state/skills/.skill-lock.json',JSON.stringify({skills:{'user-skill':{}}}));recordLockEntry(lockPath,xdg);chmodSync(lockDir,0o500);
+ expect(runUserUninstall({target:'both',env:xdg}).status).not.toBe('complete');
+ expect(openHostConfigGate({env:xdg}).recorded(lockPath).map((record)=>record.selector)).toEqual(['skills.think']);
  chmodSync(lockDir,0o700);
- expect(runUserUninstall({target:'both',env:xdg}).status).toBe('complete');expect(existsSync(path)).toBe(false);
- expect(JSON.parse(readFileSync(join(lockDir,'.skill-lock.json'),'utf8')).skills).toEqual({'user-skill':{}});
+ expect(runUserUninstall({target:'both',env:xdg}).status).toBe('complete');
+ expect(JSON.parse(readFileSync(lockPath,'utf8')).skills).toEqual({'user-skill':{}});
 }));
 const RULES_BLOCK=renderGlobalRulesBlock(join(import.meta.dir,'../..'),{preset:'en',instruction:'Use English to report to user.'}).trimEnd();
 test('managed context block cleanup keeps user prose',()=>fixture((home,env)=>{

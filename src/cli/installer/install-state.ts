@@ -14,7 +14,7 @@ import { isPluginId, PLUGIN_IDS, type PluginId, type PluginSelection } from '../
  * the host-config ledger's path records, not here.
  */
 
-export const INSTALL_STATE_PROTOCOL = 4 as const;
+export const INSTALL_STATE_PROTOCOL = 5 as const;
 
 export interface InstalledPlugin {
   readonly id: PluginId;
@@ -31,8 +31,6 @@ export interface RecordedInstallState {
   readonly selection: PluginSelection;
   readonly transaction_id: string;
   readonly applied_at: string;
-  /** The Pi package sources that an install registered and may remove; the ledger has no Pi record yet (#2852). */
-  readonly pi_packages: readonly string[];
   readonly previous: RecordedInstallSnapshot | null;
 }
 
@@ -66,7 +64,7 @@ function invalidInstallState(path: string, detail: string): InstallStateError {
   return new InstallStateError('install_state_invalid', path, `install state ${detail}; inspect: rh install --state: ${path}`);
 }
 
-/** The installer throws the same error for a Pi package that fails its source check. */
+/** The one-shot migration throws it for a protocol 3 or 4 Pi package that fails its source check. */
 export function invalidOwnership(path: string): InstallStateError {
   return new InstallStateError('install_state_invalid_ownership', path,
     `install state has an invalid Pi package (not the Bun global package root, or the pi plugin is not enabled); inspect: rh install --state: ${path}`);
@@ -103,15 +101,12 @@ const PROTOCOL_2_BRIDGE = 'bun add -g repo-harness@0.25.4 --no-cache && repo-har
 const CURRENT_PACKAGE_UPDATE = `bun add -g repo-harness@${PACKAGE_VERSION} --no-cache && rh update`;
 
 function parseSnapshot(raw: unknown, path: string, label: string): RecordedInstallSnapshot {
-  const { fields, extra } = parseSnapshotFields(raw, path, label, INSTALL_STATE_PROTOCOL);
-  if (!Array.isArray(extra.pi_packages) || !extra.pi_packages.every((source) => typeof source === 'string')
-    || new Set(extra.pi_packages).size !== extra.pi_packages.length) throw invalidOwnership(path);
-  return { ...fields, pi_packages: extra.pi_packages };
+  return parseSnapshotFields(raw, path, label, INSTALL_STATE_PROTOCOL).fields;
 }
 
-/** The fields that protocols 3 and 4 share; `extra` is the raw object for the fields that differ. */
-function parseSnapshotFields(raw: unknown, path: string, label: string, protocol: 3 | typeof INSTALL_STATE_PROTOCOL):
-  { readonly fields: Omit<RecordedInstallSnapshot, 'pi_packages'>; readonly extra: Record<string, unknown> } {
+/** The fields that protocols 3, 4 and 5 share; `extra` is the raw object for the fields that differ. */
+function parseSnapshotFields(raw: unknown, path: string, label: string, protocol: 3 | 4 | typeof INSTALL_STATE_PROTOCOL):
+  { readonly fields: RecordedInstallSnapshot; readonly extra: Record<string, unknown> } {
   if (!isRecord(raw)) throw invalidInstallState(path, `${label} is not an object`);
   if (raw.protocol === 1) {
     throw new InstallStateError('install_state_protocol_retired', path,
@@ -127,7 +122,12 @@ function parseSnapshotFields(raw: unknown, path: string, label: string, protocol
   if (raw.protocol === 3 && protocol !== 3) {
     throw new InstallStateError('install_state_protocol_retired', path,
       `install state ${path} is protocol 3, which keeps host path ownership in the retired ownership_manifest. Run: rh update `
-      + '(its install step moves the ownership records to the host-config ledger and writes protocol 4)');
+      + `(its install step moves the ownership records to the host-config ledger and writes protocol ${INSTALL_STATE_PROTOCOL})`);
+  }
+  if (raw.protocol === 4 && protocol !== 4) {
+    throw new InstallStateError('install_state_protocol_retired', path,
+      `install state ${path} is protocol 4, which keeps Pi package ownership in the retired pi_packages list. Run: rh update `
+      + `(it moves each Pi package entry that is still in the Pi settings to the host-config ledger and writes protocol ${INSTALL_STATE_PROTOCOL})`);
   }
   if (raw.protocol !== protocol) throw invalidInstallState(path, `${label} has unsupported protocol ${String(raw.protocol)}`);
   if (!isRecord(raw.core) || Object.keys(raw.core).join(',') !== 'version' || typeof raw.core.version !== 'string' || !raw.core.version.trim()) {
@@ -156,7 +156,7 @@ function previousOf(raw: unknown, path: string): Record<string, unknown> | null 
   return previousRaw;
 }
 
-/** The strict protocol 4 reader. Protocols 1, 2 and 3 fail closed with `install_state_protocol_retired`. */
+/** The strict protocol 5 reader. Protocols 1 to 4 fail closed with `install_state_protocol_retired`. */
 export function parseRecordedInstallState(raw: unknown, path: string): RecordedInstallState {
   const current = parseSnapshot(raw, path, 'state');
   const previous = previousOf(raw, path);
@@ -165,8 +165,27 @@ export function parseRecordedInstallState(raw: unknown, path: string): RecordedI
 
 /** A protocol 3 snapshot as the one-shot migration reads it: the shared fields, and its manifest unchecked. */
 export interface Protocol3Snapshot {
-  readonly fields: Omit<RecordedInstallSnapshot, 'pi_packages'>;
+  readonly fields: RecordedInstallSnapshot;
   readonly manifest: readonly unknown[];
+}
+
+/** A protocol 4 snapshot as the one-shot migration reads it: the shared fields, and its Pi package claims. */
+export interface Protocol4Snapshot {
+  readonly fields: RecordedInstallSnapshot;
+  readonly pi_packages: readonly string[];
+}
+
+/** The protocol 4 reader of the one-shot migration (install-state-migration.ts); null for any other protocol. */
+export function parseProtocol4InstallState(raw: unknown, path: string): { readonly current: Protocol4Snapshot; readonly previous: Protocol4Snapshot | null } | null {
+  if (!isRecord(raw) || raw.protocol !== 4) return null;
+  const snapshot = (value: unknown, label: string): Protocol4Snapshot => {
+    const { fields, extra } = parseSnapshotFields(value, path, label, 4);
+    const sources = extra.pi_packages;
+    if (!Array.isArray(sources) || !sources.every((source) => typeof source === 'string') || new Set(sources).size !== sources.length) throw invalidOwnership(path);
+    return { fields, pi_packages: sources };
+  };
+  const previous = previousOf(raw, path);
+  return { current: snapshot(raw, 'state'), previous: previous === null ? null : snapshot(previous, 'previous state') };
 }
 
 /** The protocol 3 reader of the one-shot migration (install-state-migration.ts); null for any other protocol. */
@@ -216,7 +235,7 @@ function legacySurfaces(manifest: readonly unknown[]): LegacyManifestSurface[] {
     : []);
 }
 
-/** The manifest of a protocol 3 state, for the host-file migrations that run before the state migration; null for protocol 4 or no state. */
+/** The manifest of a protocol 3 state, for the host-file migrations that run before the state migration; null for a later protocol or no state. */
 export function readLegacyManifest(env: NodeJS.ProcessEnv = process.env): { readonly current: readonly LegacyManifestSurface[]; readonly previous: readonly LegacyManifestSurface[] } | null {
   const legacy = parseProtocol3InstallState(readRawInstallState(env), installProfileStatePath(env));
   return legacy && { current: legacySurfaces(legacy.current.manifest), previous: legacySurfaces(legacy.previous?.manifest ?? []) };

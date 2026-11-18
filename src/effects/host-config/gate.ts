@@ -64,6 +64,7 @@ import {
   stagePathEntry,
   type PathEntry,
 } from './whole-path';
+import { locatedText, observeDeclaredFragments, settleDelegatedFragments, type HostConfigFragmentDeclaration, type HostConfigUnattributedDiff } from './delegated';
 
 export interface HostConfigFileChange {
   readonly path: string;
@@ -80,8 +81,17 @@ export interface HostConfigApplyResult {
 }
 
 export interface HostConfigDelegateResult {
-  /** The path-record keys whose entry the writer changed. */
+  /** The path-record keys whose entry the writer changed, and the files whose declared fragment records changed. */
   readonly changed: readonly string[];
+  /** The declared files that the writer changed outside their declared fragments. */
+  readonly unattributed: readonly HostConfigUnattributedDiff[];
+}
+
+/** A whole path, or the declared fragments of a shared host file (the `delegated` strategy, #2852). */
+export type HostConfigDelegateDeclaration = HostConfigPathDeclaration | HostConfigFragmentDeclaration;
+
+function isFragmentDeclaration(declaration: HostConfigDelegateDeclaration): declaration is HostConfigFragmentDeclaration {
+  return 'selectors' in declaration;
 }
 
 /** One whole entry for the gate to write at a host path, owned by `owner` (`core` or a plugin id). */
@@ -198,15 +208,20 @@ export interface HostConfigGate {
    */
   writePaths(writes: readonly HostConfigPathWrite[], options?: HostConfigPathOptions): readonly string[];
   /**
-   * Only for out-of-process writers: `run` gets the path-record keys (parent
-   * links followed, leaf kept) and may write them. The gate keeps the files
-   * that `replace` lets the writer replace in the vault before `run`, and
-   * records each entry that the writer changed after it, and each adopted link
-   * also when the writer left it unchanged. A changed path that
-   * rh did not own and that `replace` did not allow is reported and not
-   * recorded.
+   * Only for out-of-process writers: `run` gets one destination per
+   * declaration, in order: the path-record key of a whole path (parent links
+   * followed, leaf kept), and the file of a fragment declaration (links
+   * followed). The gate keeps the files that `replace` lets the writer replace
+   * in the vault before `run`, and records each entry that the writer changed
+   * after it, and each adopted link also when the writer left it unchanged. A
+   * changed path that rh did not own and that `replace` did not allow is
+   * reported and not recorded. A fragment declaration records only the
+   * declared fragments by `settleDelegatedFragments`; a change outside them is
+   * returned in `unattributed` and marks the file `external_change`, so no
+   * revert restores or removes the whole file. A failed `run` still gets its
+   * records, so that a transaction rollback can undo them, and then throws.
    */
-  delegate(declared: readonly HostConfigPathDeclaration[], run: (destinations: readonly string[]) => void, options?: HostConfigPathOptions): HostConfigDelegateResult;
+  delegate(declared: readonly HostConfigDelegateDeclaration[], run: (destinations: readonly string[]) => void, options?: HostConfigPathOptions): HostConfigDelegateResult;
   /**
    * Undo the path records of the named paths, which the caller takes from the
    * records that may grant a removal (`readPathRecords`): a `created` entry goes
@@ -540,20 +555,86 @@ function writeWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, writes:
   return written;
 }
 
+/** A declared host file before the call: its bytes, and the declared selectors' text. */
+interface DelegatedFile {
+  readonly declaration: HostConfigFragmentDeclaration;
+  readonly path: HostPath;
+  readonly format: FileFormat | undefined;
+  readonly preimage: ExpectedFile;
+  readonly content: string | null;
+  readonly observed: ReadonlyMap<string, string | null>;
+}
+
+function observeDelegatedFiles(paths: HostConfigPaths, ledger: HostConfigLedger, declared: readonly HostConfigFragmentDeclaration[]): DelegatedFile[] {
+  const targets = declared.length ? admitPaths(paths, declared.map((declaration) => declaration.path)) : [];
+  refuseRecordedPaths(ledger, targets);
+  return declared.map((declaration, index) => {
+    const path = targets[index]!;
+    const { observation, bytes } = observeFile(path);
+    const preimage = expectedOf(observation, path);
+    const content = preimage.existed ? decode(bytes, path) : null;
+    const format = ledger.files[path]?.format ?? fileFormatOf(declaration.path);
+    return { declaration, path, format, preimage, content, observed: observeDeclaredFragments(path, format, content, declaration.selectors) };
+  });
+}
+
 /**
- * The out-of-process form of `writeWholePaths`. Every destination is checked
- * before `run`: an existing entry must be rh's, an unrecorded link that holds
- * the declaration's `adopt` target, or a file under `replace`, which goes to
- * the vault first; any other destination stops the call before the writer
- * runs. Records follow the writer: a path that it did not change keeps the
- * record that the ledger then holds, so the writer's own record changes (a
- * `user_managed` claim) stay; an adopted link with no record then is recorded.
+ * The records of the declared files after the call. A file whose declared
+ * fragments all go and that holds no other record loses its file record; the
+ * file itself stays. A file with no record before and no fragment now gets
+ * no record: rh claims nothing there.
  */
-function delegateWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, declared: readonly HostConfigPathDeclaration[],
+function settleDelegatedFiles(after: HostConfigLedger, observed: readonly DelegatedFile[]):
+  { files: Record<string, FileRecord>; fragments: readonly FragmentRecord[]; changed: string[]; unattributed: HostConfigUnattributedDiff[]; released: Sha256[] } {
+  const files = { ...after.files };
+  let fragments = after.fragments;
+  const changed: string[] = [];
+  const unattributed: HostConfigUnattributedDiff[] = [];
+  const released: Sha256[] = [];
+  for (const { declaration, path, format, preimage, content, observed: declared } of observed) {
+    const { observation, bytes } = observeFile(path);
+    const now = expectedOf(observation, path);
+    const recorded = fragments.filter((entry) => entry.file === path);
+    let text: string | null = null;
+    try { text = now.existed ? decode(bytes, path) : null; } catch (error) { if (!(error instanceof HostConfigError)) throw error; }
+    const outcome = now.existed && text === null
+      ? { fragments: recorded, unattributed: true }
+      : settleDelegatedFragments({ path, owner: declaration.owner, fileFormat: format, before: content, after: text, observed: declared, recorded });
+    if (outcome.unattributed) unattributed.push({ code: 'host_config_unattributed_diff', path, sha256: now.existed ? now.sha256 : null });
+    const same = outcome.fragments.length === recorded.length && outcome.fragments.every((entry, index) => entry === recorded[index]);
+    if (!same) changed.push(path);
+    fragments = [...fragments.filter((entry) => entry.file !== path), ...outcome.fragments];
+    const previous = files[path];
+    if (!outcome.fragments.length) {
+      if (previous && !same) { released.push(...materialOf(previous)); delete files[path]; }
+      continue;
+    }
+    if (same && sameExpected(preimage, now) && !outcome.unattributed) continue;
+    const next = nextFileRecord(previous, { kind: preimage.existed ? 'text_block' : 'created', backup: null, baselineUnknown: false, format }, preimage, now);
+    files[path] = outcome.unattributed ? { ...next, external_change: true } : next;
+  }
+  return { files, fragments, changed, unattributed, released };
+}
+
+/**
+ * The out-of-process form of `writeWholePaths`, with the declared fragments
+ * of shared host files. Every destination is checked before `run`: an
+ * existing entry must be rh's, an unrecorded link that holds the
+ * declaration's `adopt` target, or a file under `replace`, which goes to the
+ * vault first; a declared file must be one that its strategy reads; any other
+ * destination stops the call before the writer runs. Records follow the
+ * writer: a path that it did not change keeps the record that the ledger then
+ * holds, so the writer's own record changes (a `user_managed` claim) stay; an
+ * adopted link with no record then is recorded. The ledger is written once,
+ * after `run`.
+ */
+function delegateWrites(env: NodeJS.ProcessEnv, paths: HostConfigPaths, declared: readonly HostConfigDelegateDeclaration[],
   run: (destinations: readonly string[]) => void, options: HostConfigPathOptions): HostConfigDelegateResult {
   const ledger = readLedger(paths);
-  const admitted = declared.map((declaration) => ({ declaration, ...admitWholePath(env, paths, ledger, declaration.path) }));
+  const wholes = declared.filter((declaration): declaration is HostConfigPathDeclaration => !isFragmentDeclaration(declaration));
+  const admitted = wholes.map((declaration) => ({ declaration, ...admitWholePath(env, paths, ledger, declaration.path) }));
   if (new Set(admitted.map(({ key }) => key)).size !== admitted.length) throw new HostConfigError('host_config_invalid_state', 'a call names one path twice');
+  const delegatedFiles = observeDelegatedFiles(paths, ledger, declared.filter(isFragmentDeclaration));
   const checked = admitted.map(({ declaration, key, host }) => {
     const previous = ledger.paths[key];
     const observed = observePathEntry(key);
@@ -572,8 +653,10 @@ function delegateWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, decl
     if (entry.owned && options.transaction) keepPreimage(options.transaction, entry.key);
     return { ...entry, backup };
   });
+  const keys = new Map(admitted.map(({ declaration, key }) => [declaration, key]));
+  const files = new Map(delegatedFiles.map((file) => [file.declaration as HostConfigDelegateDeclaration, file.path as string]));
   let failure: unknown = null;
-  try { run(admitted.map(({ key }) => key)); } catch (error) { failure = error; }
+  try { run(declared.map((declaration) => keys.get(declaration as HostConfigPathDeclaration) ?? files.get(declaration)!)); } catch (error) { failure = error; }
 
   const after = readLedger(paths);
   const records = { ...after.paths };
@@ -599,10 +682,11 @@ function delegateWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, decl
     if (next === null) delete records[key]; else records[key] = next;
     changed.push(key);
   }
-  writeLedger(paths, { ...after, paths: records });
+  const settled = settleDelegatedFiles(after, delegatedFiles);
+  writeLedger(paths, { ...after, paths: records, files: settled.files, fragments: settled.fragments, retired: retire(after.retired, settled.released) });
   if (failure !== null) throw failure;
   if (invalid.length) throw new HostConfigError('host_config_invalid_state', `rh replaced a user file at these paths, but the delegated writer did not leave a file there: ${invalid.join(', ')}`);
-  return { changed };
+  return { changed: [...changed, ...settled.changed], unattributed: settled.unattributed };
 }
 
 function keepUserPaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, owner: string, scope: readonly string[], kept: readonly string[]): void {
@@ -723,17 +807,6 @@ function revertFragments(fileFormat: FileFormat | undefined, content: string, re
     removed.push(record);
   }
   return { content, removed, kept, atInverse };
-}
-
-/** The text at the selector, null when it is absent; undefined when the strategy cannot read the content. */
-function locatedText(format: FragmentFormat, content: string, selector: string): string | null | undefined {
-  try {
-    const range = format.strategy.locate(content, selector);
-    return range ? content.slice(range.start, range.end) : null;
-  } catch (error) {
-    if (error instanceof HostConfigError) return undefined;
-    throw error;
-  }
 }
 
 /**
@@ -1214,7 +1287,7 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
   return {
     apply: (changes) => applyChanges(paths, changes),
     writePaths: (writes, pathOptions) => writeWholePaths(env, paths, writes, pathOptions ?? {}),
-    delegate: (declared, run, pathOptions) => delegateWholePaths(env, paths, declared, run, pathOptions ?? {}),
+    delegate: (declared, run, pathOptions) => delegateWrites(env, paths, declared, run, pathOptions ?? {}),
     revertPaths: (only, revertOptions) => revertWholePaths(paths, only, revertOptions ?? {}),
     keepUserPaths: (owner, scope, kept) => keepUserPaths(env, paths, owner, scope, kept),
     adoptReplacedPath: (path, owner, backup) => adoptReplacedPath(env, paths, path, owner, backup),

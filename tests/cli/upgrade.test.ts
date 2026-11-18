@@ -99,8 +99,8 @@ const ownership = (opts: { home: string }) => installOwnershipReader({ ...proces
 /** A protocol 3 state written by an older package: every plugin record carries that older version. */
 function priorState(version: string) {
   const plugins = PLUGIN_IDS.filter((id) => id !== 'pi');
-  return { protocol: 4, core: { version }, plugins: plugins.map((id) => ({ id, version })), selection: 'all',
-    transaction_id: 'prior-install', applied_at: '2026-09-30T00:00:00Z', previous: null, pi_packages: [] };
+  return { protocol: 5, core: { version }, plugins: plugins.map((id) => ({ id, version })), selection: 'all',
+    transaction_id: 'prior-install', applied_at: '2026-09-30T00:00:00Z', previous: null };
 }
 
 /** One `created` path record under `home`, as an install leaves it. */
@@ -832,7 +832,7 @@ describe('upgrade with real release bytes', () => {
     expect(refused.error).toContain('rh update');
     expect(tree(opts.home)).toEqual(before);
     withRuntimeTransactionLock(globalRuntimeScope(env), () => migrateInstallState(env));
-    expect(readInstallState(env)?.protocol).toBe(4);
+    expect(readInstallState(env)?.protocol).toBe(5);
     expect(ownedPath(env, path)?.committed.type).toBe('directory');
     const refreshed = runUpgrade({ ...opts, env, scope: 'global', apply: true });
     expect(refreshed.exitCode, refreshed.error).toBe(0);

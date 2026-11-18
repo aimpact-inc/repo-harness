@@ -8,7 +8,7 @@ import { bunGlobalPackageRoot, isBunGlobalPackageSource } from "../installer/ski
 import { installPiPackage } from '../installer/pi-package';
 import { realPathOrResolved } from '../../effects/path-identity';
 import type { SkillHost } from '../../effects/host-skill-roots';
-import { ownedPath, pathRecordIsCurrent, pathRecordKey, readPathRecords } from '../../effects/host-config/path-records';
+import { pathRecordIsCurrent, pathRecordKey, readPathRecords } from '../../effects/host-config/path-records';
 import { architecturePort, isArchitectureUnavailable } from '../../core/architecture/contracts';
 import { globalConfigurationWriter, mutateGlobalConfiguration } from '../../effects/configuration/global-configuration';
 import { DEFAULT_SEATS_CONFIG, INTRODUCED_ROUTING_DEFAULTS, ROUTING_CLASSES, SeatsConfigMigrationRequiredError, decodeSeatsConfig } from '../../core/board/seats-settings';
@@ -19,7 +19,7 @@ import { renderJsonObjectUpdate } from "../../effects/adoption/standard-plan";
 import { retireUserExcludesBlock, writeRepositoryExcludes } from "../installer/repository-excludes";
 import { sha256Hex } from "../../core/evidence/sha256";
 import { tmpdir, userInfo } from "os";
-import { delimiter, dirname, join, resolve, sep } from "path";
+import { delimiter, dirname, join, relative, resolve, sep } from "path";
 import { fileURLToPath } from "url";
 import { syncWazaSharedRules } from "../installer/waza-rules";
 import { applyGlobalContextRefresh, GLOBAL_RULES_BEGIN, GLOBAL_RULES_END, globalContextPath, preflightGlobalContextRefresh, type GlobalContextRefreshPlan, type ReportLanguageFlag } from "../installer/global-context";
@@ -28,16 +28,15 @@ import { shellQuote } from "../../core/shell-quote";
 import { syncCrossReviewSkills } from "./init";
 import { runInstall, type InstallTargetSpec } from "./install";
 import type { OverrideSelection } from "../../core/host-config/override";
+import { jsonFragment } from "../../core/host-config/json-fragment";
 import { compareVersions, readLatestPackageVersion } from "./doctor";
 import { DEFAULT_PROCESS_MAX_BUFFER_BYTES, redactProcessOutput, runProcess as runBoundedProcess } from "../../effects/process-runner";
 import { gitChildEnv } from "../../effects/git/runner";
 import { leftoverCheckWarning } from "./upgrade";
-import { commitVerifiedSkillTree, skillTreeSha256 } from "../../effects/skill-tree-integrity";
+import { skillTreeSha256 } from "../../effects/skill-tree-integrity";
 import {
-  readInstallState,
   ownerForInstallPath,
   withHostConfigTransaction,
-  recordStagedExternalSkillWrites,
   migrateRuntimeHostConfig,
   requireInstallState,
 } from "../installer/install-profile";
@@ -51,7 +50,8 @@ import {
   requiredExplicitExternalDependencyInstallGroups,
   type SkillSurfaceCatalog,
 } from "../../core/skill-surface/catalog";
-import { hostSkillRoot, stagedSkillRoot } from "../../effects/host-skill-roots";
+import { hostSkillRoot, providerSkillLock, stagedSkillRoot } from "../../effects/host-skill-roots";
+import { MEASURED_INSTALLERS } from "../../effects/host-config/delegated";
 import {
   discoverWindowsProtectedHelperContract,
   resolveProtectedHelperPlatform,
@@ -103,8 +103,6 @@ export interface GlobalRuntimeOptions {
 export type McpLocalConfigCheck = (env: NodeJS.ProcessEnv) => { readonly status: 'ok' | 'skipped' | 'failed'; readonly detail: string };
 
 export interface GlobalRuntimeStep {
-  /** The Pi package source that this step registered, so the install state records it. */
-  owned_pi_package?: string;
   /** The host path that the gate refused to replace; the selection commit counts the user's copy as present. */
   refused_path?: string;
   step: string;
@@ -1081,6 +1079,76 @@ function externalSkillStepName(provider: string): string {
   return `configure external skills ${provider}`;
 }
 
+/** The path with the links of its nearest existing ancestor followed. */
+function canonicalOfNearestAncestor(path: string): string {
+  let ancestor = path;
+  while (!pathEntryExists(ancestor)) {
+    const parent = dirname(ancestor);
+    if (parent === ancestor) return path;
+    ancestor = parent;
+  }
+  return join(realpathSync(ancestor), relative(ancestor, path));
+}
+
+/** The Skills CLI at the version whose write set was measured (#2852); rh pins it, so the table is the version check. */
+const SKILLS_CLI = `skills@${MEASURED_INSTALLERS.skills}`;
+
+function skillsAddArgs(provider: string, skills: readonly string[]): string[] {
+  return [SKILLS_CLI, "add", provider, "-g", "-a", STAGING_PROVIDER_AGENT, "-s", ...skills, "-y"];
+}
+
+/** True when the staged skill is absent, or is rh's current entry of its owner: only then may the Skills CLI write it. */
+function stagedSkillWritable(path: string, env: NodeJS.ProcessEnv): boolean {
+  if (!pathEntryExists(path)) return true;
+  const key = pathRecordKey(env, path);
+  const record = readPathRecords(env)[key];
+  return record !== undefined && record.kind !== 'user_managed' && record.owner === ownerForInstallPath(path, env) && pathRecordIsCurrent(key, record);
+}
+
+/**
+ * `skills add` as a delegated writer: the gate records the staged skill
+ * directories and their lock entries (`skills.<name>`) that the call created
+ * or refreshed, and reports a change outside them. A staged skill that rh does
+ * not own stays out of the call and keeps its bytes.
+ */
+function addStagedSkills(sourceRoot: string, provider: string, requested: readonly string[], env: NodeJS.ProcessEnv | undefined, transaction: string | undefined, stepName: string):
+  { readonly step: GlobalRuntimeStep; readonly notes: readonly string[] } {
+  const environment = env ?? process.env;
+  const home = homeDir(env);
+  const root = stagedSkillRoot(home);
+  const skills = requested.filter((skill) => stagedSkillWritable(join(root, skill), environment));
+  const kept = requested.filter((skill) => !skills.includes(skill)).map((skill) => `kept unowned staged skill ${join(root, skill)}`);
+  if (!skills.length) return { step: { step: stepName, status: "ok" }, notes: kept };
+  const owners = [...new Set(skills.map((skill) => ownerForInstallPath(join(root, skill), environment)))];
+  if (owners.length !== 1 || owners[0] === null) return { step: { step: stepName, status: "failed", detail: `the staged skills ${skills.join(',')} have no single owner` }, notes: [] };
+  const owner = owners[0];
+  const lockPath = providerSkillLock(home, environment).path;
+  let run: GlobalRuntimeStep | null = null as GlobalRuntimeStep | null;
+  try {
+    const gate = openHostConfigGate({ env });
+    const { unattributed } = withHostConfigTransaction(environment, transaction, (txRoot) => gate.delegate([
+      ...skills.map((skill) => ({ path: join(root, skill), owner })),
+      { path: lockPath, owner, selectors: skills.map((skill) => `skills.${skill}`) },
+    ], () => {
+      run = runProcess("bunx", skillsAddArgs(provider, skills), sourceRoot, env);
+      if (run.status === "failed") throw new Error(`${SKILLS_CLI} add ${provider} failed`);
+    }, { transaction: txRoot }));
+    // A lock entry that was there before the call (an rh killed mid-call, or the user) gets no record: report it, claim nothing (D4b).
+    const lock = existsSync(lockPath) ? readFileSync(lockPath, 'utf8') : null;
+    const recorded = new Set(gate.recorded(lockPath).map((record) => record.selector));
+    const unowned = lock === null ? [] : skills.filter((skill) => !recorded.has(`skills.${skill}`) && jsonFragment.locate(lock, `skills.${skill}`))
+      .map((skill) => `kept unowned lock entry skills.${skill} in ${lockPath}`);
+    return { step: run!, notes: [...kept, ...unowned, ...unattributed.map((diff) => `${diff.code}: ${diff.path} ${diff.sha256 ?? 'removed'}`)] };
+  } catch (error) {
+    return { step: run?.status === "failed" ? run : { step: stepName, status: "failed", detail: (error as Error).message }, notes: [] };
+  }
+}
+
+/** The projection result carries the notes of the Skills CLI call before it. */
+function withNotes(step: GlobalRuntimeStep, notes: readonly string[]): GlobalRuntimeStep {
+  return notes.length && step.status === "ok" ? { ...step, detail: [step.detail, ...notes].filter(Boolean).join('; ') } : step;
+}
+
 function installExternalSkillGroup(
   sourceRoot: string,
   target: InstallTargetSpec,
@@ -1096,54 +1164,16 @@ function installExternalSkillGroup(
   const home = homeDir(env);
   const skillsRoot = stagedSkillRoot(home);
   const canonicalSkillsRoot = stagedSkillRoot(realpathSync(home));
-  const committedIntegritySkills = new Set<string>();
-  const replacementBackupRoot = mkdtempSync(join(transaction!, "skill-replace-"));
-  const replacedIntegritySkills = new Set<string>();
-  const restoreReplacedSkills = (): void => {
-    for (const skill of replacedIntegritySkills) {
-      const installed = join(skillsRoot, skill);
-      rmSync(installed, { recursive: true, force: true });
-      cpSync(join(replacementBackupRoot, skill), installed, {
-        recursive: true,
-        force: false,
-        errorOnExist: true,
-        verbatimSymlinks: true,
-      });
-    }
-  };
-  const fail = (result: GlobalRuntimeStep): GlobalRuntimeStep => {
-    for (const skill of committedIntegritySkills) {
-      rmSync(join(skillsRoot, skill), { recursive: true, force: true });
-    }
-    restoreReplacedSkills();
-    rmSync(replacementBackupRoot, { recursive: true, force: true });
-    return result;
-  };
   const preflight = preflightStagedSkillProjection(skills, target, piSelected, env, stepName);
-  if (preflight) return fail(preflight);
+  if (preflight) return preflight;
   const missing = skills.filter((skill) => !existsSync(join(skillsRoot, skill, 'SKILL.md')));
   const selected = refresh ? skills : missing;
   const ordinaryMissing = selected.filter((skill) => integrityBySkill[skill] == null);
+  let notes: readonly string[] = [];
   if (ordinaryMissing.length > 0) {
-    const step = runProcess(
-      "bunx",
-      [
-        "skills",
-        "add",
-        provider,
-        "-g",
-        "-a",
-        STAGING_PROVIDER_AGENT,
-        "-s",
-        ...ordinaryMissing,
-        "-y",
-      ],
-      sourceRoot,
-      env,
-    );
-    if (step.status === 'failed') {
-      return fail(withStepName(step, stepName, `target=${target}; missing=${ordinaryMissing.join(',')}`));
-    }
+    const added = addStagedSkills(sourceRoot, provider, ordinaryMissing, env, transaction, stepName);
+    if (added.step.status === 'failed') return withStepName(added.step, stepName, `target=${target}; missing=${ordinaryMissing.join(',')}`);
+    notes = added.notes;
   }
 
   const integrityMissing = selected.filter((skill) => integrityBySkill[skill] != null);
@@ -1167,24 +1197,9 @@ function installExternalSkillGroup(
       delete isolatedEnv[key];
     }
     try {
-      const step = runProcess(
-        "bunx",
-        [
-          "skills",
-          "add",
-          provider,
-          "-g",
-          "-a",
-          STAGING_PROVIDER_AGENT,
-          "-s",
-          ...integrityMissing,
-          "-y",
-        ],
-        sourceRoot,
-        isolatedEnv,
-      );
+      const step = runProcess("bunx", skillsAddArgs(provider, integrityMissing), sourceRoot, isolatedEnv);
       if (step.status === "failed") {
-        return fail(withStepName(step, stepName, `isolated target=${target}; missing=${integrityMissing.join(',')}`));
+        return withStepName(step, stepName, `isolated target=${target}; missing=${integrityMissing.join(',')}`);
       }
 
       for (const skill of integrityMissing) {
@@ -1194,52 +1209,34 @@ function installExternalSkillGroup(
         try {
           actual = skillTreeSha256(isolatedSkill);
         } catch (error) {
-          return fail({
-            step: stepName,
-            status: "failed",
-            detail: `cannot verify isolated staging integrity for ${skill}: ${(error as Error).message}`,
-          });
+          return { step: stepName, status: "failed", detail: `cannot verify isolated staging integrity for ${skill}: ${(error as Error).message}` };
         }
         if (actual !== expected) {
-          return fail({
-            step: stepName,
-            status: "failed",
-            detail: `isolated staging integrity mismatch for ${skill}: expected=${expected}; actual=${actual}`,
-          });
+          return { step: stepName, status: "failed", detail: `isolated staging integrity mismatch for ${skill}: expected=${expected}; actual=${actual}` };
         }
       }
-
-      for (const skill of integrityMissing) {
-        const installed = join(skillsRoot, skill);
-        if (existsSync(installed)) {
-          const ownerEnv = env ?? process.env;
-          const receipt = readInstallState(ownerEnv) ? ownedPath(ownerEnv, installed) : null;
-          if (receipt === null || !pathRecordIsCurrent(pathRecordKey(ownerEnv, installed), receipt)) {
-            return fail({
-              step: stepName,
-              status: "failed",
-              detail: `refusing to refresh unowned or drifted staging skill ${installed}`,
-            });
-          }
-          cpSync(installed, join(replacementBackupRoot, skill), {
-            recursive: true,
-            force: false,
-            errorOnExist: true,
-            verbatimSymlinks: true,
-          });
-          rmSync(installed, { recursive: true, force: true });
-          replacedIntegritySkills.add(skill);
-        }
-        const committed = commitVerifiedSkillTree(
-          join(stagedSkillRoot(isolatedHome), skill),
-          join(skillsRoot, skill),
-          integrityBySkill[skill]!,
-          { expectedCanonicalParent: canonicalSkillsRoot },
-        );
-        if (committed.status === "failed") {
-          return fail({ step: stepName, status: "failed", detail: committed.detail });
-        }
-        committedIntegritySkills.add(skill);
+      // A linked staging root would put the verified trees outside HOME: the write stops first.
+      let parent: string;
+      try {
+        parent = canonicalOfNearestAncestor(skillsRoot);
+      } catch (error) {
+        return { step: stepName, status: "failed", detail: `staging parent escapes canonical authority: expected=${canonicalSkillsRoot}; ${(error as Error).message}` };
+      }
+      if (parent !== canonicalSkillsRoot) {
+        return { step: stepName, status: "failed", detail: `staging parent escapes canonical authority: expected=${canonicalSkillsRoot}; actual=${parent}` };
+      }
+      // The verified trees reach staging through the gate: an unowned or changed entry stops the write, and the
+      // transaction rollback puts back what the gate replaced.
+      const environment = env ?? process.env;
+      try {
+        withHostConfigTransaction(environment, transaction, (txRoot) => openHostConfigGate({ env }).writePaths(integrityMissing.map((skill) => {
+          const path = join(skillsRoot, skill);
+          const owner = ownerForInstallPath(path, environment);
+          if (owner === null) throw new Error(`no skill owner: ${path}`);
+          return { path, owner, entry: { type: 'directory' as const, source: join(stagedSkillRoot(isolatedHome), skill) } };
+        }), { transaction: txRoot }));
+      } catch (error) {
+        return { step: stepName, status: "failed", detail: (error as Error).message };
       }
     } finally {
       rmSync(isolatedHome, { recursive: true, force: true });
@@ -1258,32 +1255,17 @@ function installExternalSkillGroup(
         || stat.isSymbolicLink()
         || realpathSync(installed) !== join(canonicalRoot, skill)
       ) {
-        return fail({
-          step: stepName,
-          status: "failed",
-          detail: `refusing non-canonical integrity staging root for ${skill}: ${installed}`,
-        });
+        return { step: stepName, status: "failed", detail: `refusing non-canonical integrity staging root for ${skill}: ${installed}` };
       }
       const actual = skillTreeSha256(installed);
       if (actual !== expected) {
-        return fail({
-          step: stepName,
-          status: "failed",
-          detail: `staging integrity mismatch for ${skill}: expected=${expected}; actual=${actual}`,
-        });
+        return { step: stepName, status: "failed", detail: `staging integrity mismatch for ${skill}: expected=${expected}; actual=${actual}` };
       }
     } catch (error) {
-      return fail({
-        step: stepName,
-        status: "failed",
-        detail: `cannot verify staging integrity for ${skill}: ${(error as Error).message}`,
-      });
+      return { step: stepName, status: "failed", detail: `cannot verify staging integrity for ${skill}: ${(error as Error).message}` };
     }
   }
-  const projection = projectStagedSkills(skills, target, piSelected, env, stepName, transaction);
-  if (projection.status === "failed") return fail(projection);
-  rmSync(replacementBackupRoot, { recursive: true, force: true });
-  return projection;
+  return withNotes(projectStagedSkills(skills, target, piSelected, env, stepName, transaction), notes);
 }
 
 function installWazaSkills(sourceRoot: string, target: InstallTargetSpec, piSelected: boolean, env?: NodeJS.ProcessEnv, refresh = false, transaction?: string): GlobalRuntimeStep {
@@ -1292,28 +1274,15 @@ function installWazaSkills(sourceRoot: string, target: InstallTargetSpec, piSele
   const selected = refresh ? wazaSkills : wazaSkills.filter((skill) => !existsSync(join(skillsRoot, skill, 'SKILL.md')));
   const preflight = preflightStagedSkillProjection(wazaSkills, target, piSelected, env, 'configure Waza skills');
   if (preflight) return preflight;
+  let notes: readonly string[] = [];
   if (selected.length > 0) {
-    const step = runProcess(
-      "bunx",
-      [
-        "skills",
-        "add",
-        "tw93/Waza",
-        "-g",
-        "-a",
-        STAGING_PROVIDER_AGENT,
-        "-s",
-        ...selected,
-        "-y",
-      ],
-      sourceRoot,
-      env,
-    );
-    if (step.status === 'failed') {
-      return withStepName(step, "configure Waza skills", `target=${target}; selected=${selected.join(',')}`);
+    const added = addStagedSkills(sourceRoot, "tw93/Waza", selected, env, transaction, "configure Waza skills");
+    if (added.step.status === 'failed') {
+      return withStepName(added.step, "configure Waza skills", `target=${target}; selected=${selected.join(',')}`);
     }
+    notes = added.notes;
   }
-  return projectStagedSkills(wazaSkills, target, piSelected, env, 'configure Waza skills', transaction);
+  return withNotes(projectStagedSkills(wazaSkills, target, piSelected, env, 'configure Waza skills', transaction), notes);
 }
 
 /**
@@ -1385,26 +1354,13 @@ function installMermaidSkill(sourceRoot: string, target: InstallTargetSpec, piSe
   const installed = join(stagedSkillRoot(homeDir(env)), 'mermaid', 'SKILL.md');
   const preflight = preflightStagedSkillProjection(mermaidSkills, target, piSelected, env, 'configure Mermaid skill');
   if (preflight) return preflight;
+  let notes: readonly string[] = [];
   if (refresh || !existsSync(installed)) {
-    const step = runProcess(
-      "bunx",
-      [
-        "skills",
-        "add",
-        "BfdCampos/dotfiles",
-        "-g",
-        "-a",
-        STAGING_PROVIDER_AGENT,
-        "-s",
-        ...mermaidSkills,
-        "-y",
-      ],
-      sourceRoot,
-      env,
-    );
-    if (step.status === 'failed') return withStepName(step, "configure Mermaid skill", `target=${target}`);
+    const added = addStagedSkills(sourceRoot, "BfdCampos/dotfiles", mermaidSkills, env, transaction, "configure Mermaid skill");
+    if (added.step.status === 'failed') return withStepName(added.step, "configure Mermaid skill", `target=${target}`);
+    notes = added.notes;
   }
-  return projectStagedSkills(mermaidSkills, target, piSelected, env, 'configure Mermaid skill', transaction);
+  return withNotes(projectStagedSkills(mermaidSkills, target, piSelected, env, 'configure Mermaid skill', transaction), notes);
 }
 export function configureProtectedHelperPlatform(
   cwd: string,
@@ -1810,14 +1766,7 @@ export function runGlobalRuntimeSetup(opts: GlobalRuntimeOptions = {}): GlobalRu
   if (opts.plugins === undefined) requireInstallState(env);
   try {
     return withHostConfigTransaction(env, undefined, (transaction, runtimeLock) => {
-      let result: GlobalRuntimeResult;
-      try { result = runGlobalRuntimeSetupInTransaction({ ...opts, transaction, runtimeLock }); }
-      catch (error) {
-        try { recordStagedExternalSkillWrites(transaction, env); }
-        catch (ownershipError) { throw new AggregateError([error, ownershipError], 'runtime setup failed before staging ownership could be recorded'); }
-        throw error;
-      }
-      recordStagedExternalSkillWrites(transaction, env);
+      const result = runGlobalRuntimeSetupInTransaction({ ...opts, transaction, runtimeLock });
       if (result.exitCode !== 0) throw new RuntimeSetupFailure(result);
       return result;
     }, opts.hostAdapters === false ? undefined : () => migrateRuntimeHostConfig(env));
@@ -2069,8 +2018,7 @@ function runGlobalRuntimeSetupInTransaction(opts: GlobalRuntimeOptions): GlobalR
   }
   if (steps.every((step) => step.status !== "failed")) steps.push(configureRequiredHerdrSkill(target, env, opts.transaction, piSelected));
   if (steps.every((step) => step.status !== 'failed')) {
-    const pi = installPiPackage(bunGlobalPackageRoot(env)!, plugins.includes('pi') && target === 'both' && opts.hostAdapters !== false, env);
-    steps.push({ ...pi, ...(pi.created ? { owned_pi_package: pi.source } : {}) });
+    steps.push(installPiPackage(bunGlobalPackageRoot(env)!, plugins.includes('pi') && target === 'both' && opts.hostAdapters !== false, env));
   }
   steps.push(...writeRuntimeIgnoreRules(env, updateMode));
   // Last, and only after every other step passed: a failed update keeps the previous command.

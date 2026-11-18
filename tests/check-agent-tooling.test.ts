@@ -569,13 +569,12 @@ describe("check-agent-tooling", () => {
       mkdirSync(join(envRoot.home, ".repo-harness"), { recursive: true });
       const statePath = installStateFixturePath({ HOME: envRoot.home });
       writeFileSync(statePath, JSON.stringify({
-        protocol: 4,
+        protocol: 5,
         ...versions(["strategy-memory"]),
         selection: ["strategy-memory"],
         transaction_id: "obsidian-receipt",
         applied_at: "2026-01-01T00:00:00.000Z",
         previous: null,
-        pi_packages: [],
       }));
       const managed = join(envRoot.home, ".agents", "skills", "obsidian-markdown");
       seedPathRecords({ HOME: envRoot.home }, { [pathRecordKey({ HOME: envRoot.home }, managed)]: {

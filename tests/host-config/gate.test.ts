@@ -663,3 +663,87 @@ test('a rollback reads a ledger snapshot of an older protocol, which a parent to
   // A clean rollback leaves the snapshot's protocol 2 bytes, which the older parent reads.
   expect([readFileSync(f.a, 'utf8'), readFileSync(join(f.root, 'ledger.json'))]).toEqual(['keep=1\n', snapshot]);
 });
+
+test('a delegated installer gets records for the declared fragments that it created only; a change outside them is reported, and no revert touches it', () => {
+  const f = fixture();
+  const path = join(f.home, '.tool', 'settings.json');
+  const entry = '../.bun/install/global/node_modules/pkg';
+  const selector = `packages[${entry}]`;
+  const declared = [{ path, owner: 'pi', selectors: [selector] }];
+  const read = () => JSON.parse(readFileSync(path, 'utf8'));
+  /** A stub installer: it rewrites the whole file, as Pi does. */
+  const install = (extra: Record<string, unknown> = {}) => ([file]: readonly string[]) => {
+    const settings = existsSync(file!) ? JSON.parse(readFileSync(file!, 'utf8')) : {};
+    writeFileSync(file!, `${JSON.stringify({ ...settings, ...extra, packages: [...(settings.packages ?? []), entry] }, null, 2)}\n`);
+  };
+  const remove = ([file]: readonly string[]) => {
+    const settings = JSON.parse(readFileSync(file!, 'utf8'));
+    writeFileSync(file!, `${JSON.stringify({ ...settings, packages: settings.packages.filter((value: string) => value !== entry) }, null, 2)}\n`);
+  };
+
+  // A new file with one declared and one undeclared key: only the declared key is recorded, and a revert takes out only it.
+  mkdirSync(join(path, '..'), { recursive: true });
+  expect(f.gate().delegate(declared, install({ undeclared: true }))).toEqual({ changed: [path], unattributed: [{ code: 'host_config_unattributed_diff', path, sha256: sha256Prefixed(readFileSync(path)) }] });
+  expect(f.ledger().fragments).toEqual([{ file: path, owner: 'pi', selector, kind: 'add', inserted: JSON.stringify(entry), created: 'packages' }]);
+  expect(f.ledger().files[path]).toMatchObject({ kind: 'created', external_change: true });
+  expect(f.gate().revert([path]).map((result) => result.action)).toEqual(['text_removed']);
+  expect(read()).toEqual({ undeclared: true });
+
+  // An existing file that the installer only adds to: the revert gives back its bytes.
+  const before = `${JSON.stringify({ user: 1 }, null, 2)}\n`;
+  writeFileSync(path, before);
+  expect(f.gate().delegate(declared, install()).unattributed).toEqual([]);
+  expect(f.ledger().files[path]).toMatchObject({ kind: 'text_block', backup: null, external_change: false });
+  expect(f.gate().revert([path])).toEqual([{ path, action: 'text_removed', baseline: 'proved' }]);
+  expect(readFileSync(path, 'utf8')).toBe(before);
+
+  // An entry that was there before the call is never claimed.
+  install()([path]);
+  expect(f.gate().delegate(declared, () => {})).toEqual({ changed: [], unattributed: [] });
+  expect(f.ledger().files[path]).toBeUndefined();
+
+  // The tool's remove command: a leftover keeps the record; a removal drops it, and the file stays.
+  writeFileSync(path, before);
+  f.gate().delegate(declared, install());
+  expect(f.gate().delegate(declared, () => {}).changed).toEqual([]);
+  expect(f.gate().recorded(path).map((record) => record.selector)).toEqual([selector]);
+  expect(f.gate().delegate(declared, remove).changed).toEqual([path]);
+  expect([f.gate().recorded(path), f.ledger().files[path], read()]).toEqual([[], undefined, { user: 1, packages: [] }]);
+
+  // A killed installer call: the records come first, so the rollback takes out the declared key and leaves the undeclared one.
+  writeFileSync(path, before);
+  const snapshot = readFileSync(join(f.root, 'ledger.json'));
+  const transaction = mkdtempSync(join(f.home, 'tx-'));
+  const script = `const fs = require('fs'); fs.writeFileSync(process.argv[1], JSON.stringify({ user: 1, undeclared: true, packages: [${JSON.stringify(entry)}] }, null, 2) + '\\n'); process.kill(process.pid, 'SIGKILL');`;
+  expect(() => f.gate().delegate(declared, ([file]) => {
+    const child = Bun.spawnSync([process.execPath, '-e', script, file!]);
+    if (child.signalCode) throw new Error(`installer killed: ${child.signalCode}`);
+  }, { transaction })).toThrow('installer killed: SIGKILL');
+  expect(f.gate().recorded(path).map((record) => record.selector)).toEqual([selector]);
+  expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, transaction).unresolved).toEqual([]);
+  expect(read()).toEqual({ user: 1, undeclared: true });
+
+  // Ownership probe P1: an entry that is gone now loses its record at that read, and a later revert never takes out a re-created entry.
+  f.gate().delegate(declared, install());
+  writeFileSync(path, `${JSON.stringify({ user: 1, undeclared: true, packages: [] }, null, 2)}\n`);
+  expect(f.gate().revert([path]).map((result) => result.action)).toEqual(['released']);
+  install()([path]);
+  expect([f.gate().revert([path]), read()]).toEqual([[], { user: 1, undeclared: true, packages: [entry] }]);
+
+  // Ownership probe P2: a declared fragment whose text differs from the record is reported and stays, with no whole-file action.
+  const lock = join(f.home, '.tool', 'lock.json');
+  writeFileSync(lock, `${JSON.stringify({ skills: { user: {} } }, null, 2)}\n`);
+  f.gate().delegate([{ path: lock, owner: 'core', selectors: ['skills.think'] }], ([file]) => {
+    writeFileSync(file!, `${JSON.stringify({ skills: { user: {}, think: { source: 'a' } } }, null, 2)}\n`);
+  });
+  const edited = `${JSON.stringify({ skills: { user: {}, think: { source: 'b' } } }, null, 2)}\n`;
+  writeFileSync(lock, edited);
+  expect([f.gate().revert([lock]), readFileSync(lock, 'utf8'), f.gate().recorded(lock).map((record) => record.selector)])
+    .toEqual([[{ path: lock, action: 'kept_edited', kept: ['skills.think'] }], edited, ['skills.think']]);
+
+  // A file that its strategy cannot read stops the call before the installer runs.
+  writeFileSync(path, '{ not json');
+  let ran = false;
+  expect(() => f.gate().delegate(declared, () => { ran = true; })).toThrow('the file is not valid JSON');
+  expect(ran).toBe(false);
+});

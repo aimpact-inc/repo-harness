@@ -227,24 +227,26 @@ current template.
 
 ```json
 {
-  "protocol": 4,
+  "protocol": 5,
   "core": { "version": "0.34.0" },
   "plugins": [{ "id": "architecture", "version": "0.34.0" }],
   "selection": "all",
   "transaction_id": "…",
   "applied_at": "…",
-  "pi_packages": [],
   "previous": null
 }
 ```
 
 The reader is strict. `plugins` holds the enabled plugins only, sorted and
 unique. Each plugin version equals the core version. `selection` is required:
-`"all"`, or a sorted list that equals the `plugins` ids. `pi_packages` holds
-the Pi package sources that an install registered; each one is the Bun global
-package root and needs the `pi` plugin. Any other shape fails with
-`install_state_invalid` or `install_state_invalid_ownership`. A protocol 3
-state fails with `install_state_protocol_retired` and names `rh update`.
+`"all"`, or a sorted list that equals the `plugins` ids. Any other shape fails
+with `install_state_invalid`. A protocol 3 or 4 state fails with
+`install_state_protocol_retired` and names `rh update`. Its one-shot move
+writes protocol 5. A protocol 4 `pi_packages` claim (or a protocol 3 Pi
+manifest surface) must name the Bun global package root with the `pi` plugin,
+else the move stops with `install_state_invalid_ownership`. The claim becomes a
+`pi` fragment record of `~/.pi/agent/settings.json` `packages[<entry>]` only
+while that entry is in the file; a claim with no entry gets no record.
 
 Host path ownership lives in the host-config ledger
 (`~/.repo-harness/config/ledger.json`, protocol 3), not in the state. Each
