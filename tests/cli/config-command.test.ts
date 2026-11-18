@@ -118,6 +118,12 @@ test('gc deletes a retired copy 30 days after its revert, and keeps a referenced
     recovery: [{ file: f.path, sha256: kept, at: retired!.at }] }));
   const day = 24 * 60 * 60 * 1000;
   const at = Date.parse(retired!.at);
+  // A kept install transaction can hold a ledger snapshot that still needs a retired copy: GC waits.
+  const transaction = join(f.home, '.repo-harness', 'transactions', 'install-kept');
+  mkdirSync(transaction, { recursive: true });
+  expect(runConfigGc(f.env, { now: new Date(at + 31 * day) })).toMatchObject({ exitCode: 2, lines: [expect.stringContaining(`a kept install transaction can still need retired vault copies: ${transaction}`)] });
+  expect(existsSync(copy(backup))).toBe(true);
+  rmSync(transaction, { recursive: true });
   expect(runConfigGc(f.env, { now: new Date(at + 29 * day) }).json).toEqual({ deleted: [], waiting: 3 });
   expect(runConfigGc(f.env, { now: new Date(at + 31 * day), dryRun: true }).json).toEqual({ deleted: [copy(backup)], waiting: 0 });
   expect(existsSync(copy(backup))).toBe(true);

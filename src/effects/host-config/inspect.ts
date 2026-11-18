@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import { fragmentFormat } from '../../core/host-config/registry';
 import { HostConfigError, type FileRecord, type FragmentRecord, type HostConfigLedger, type Sha256 } from '../../core/host-config/types';
+import { globalRuntimeScope, runtimeTransactionRoot } from '../locking/runtime-transaction-lock';
 import { pathRecordIsCurrent } from './path-records';
 import { hostConfigPaths, observeFile, readLedger, resolveHostPath, writeLedger, type HostConfigPaths } from './store';
 
@@ -183,12 +184,28 @@ export interface GcResult {
 }
 
 /**
+ * A kept install transaction (incomplete, or of an earlier rh version) holds
+ * a ledger snapshot that a rollback restores, and its records can reference a
+ * copy that the current ledger retired. GC waits until no such transaction is
+ * left (owner decision on #2851).
+ */
+function keptTransactions(env: NodeJS.ProcessEnv): string[] {
+  const root = runtimeTransactionRoot(globalRuntimeScope(env));
+  if (!existsSync(root)) return [];
+  return readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && (entry.name.startsWith('install-') || entry.name.startsWith('.staging-')))
+    .map((entry) => join(root, entry.name));
+}
+
+/**
  * Delete the vault copy of each retired entry 30 days after its revert, unless
  * a record references it again. Only retired entries are candidates: an
  * orphan copy, an unknown vault file and a recovery copy stay. The caller
  * holds the runtime lock.
  */
 export function collectRetired(env: NodeJS.ProcessEnv, options: { readonly now?: Date; readonly dryRun?: boolean } = {}): GcResult {
+  const kept = keptTransactions(env);
+  if (kept.length) throw new HostConfigError('host_config_invalid_state', `a kept install transaction can still need retired vault copies: ${kept.join(', ')}; finish or remove it, then run rh config gc again`);
   const paths = hostConfigPaths(env);
   const ledger = readLedger(paths);
   const now = (options.now ?? new Date()).getTime();
