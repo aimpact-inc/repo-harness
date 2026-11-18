@@ -1,3 +1,4 @@
+import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
 import { globalConfigurationPath, mutateGlobalConfiguration, restoreGlobalConfiguration } from '../../effects/configuration/global-configuration';
 import { retryWindowsSharingRace } from '../../effects/atomic-append';
 import wazaRules from "../../core/skill-surface/waza-shared-rules.json";
@@ -883,8 +884,10 @@ function removeOwnedSkillLockEntries(env: NodeJS.ProcessEnv, skillNames: Readonl
   if (!existsSync(lockPath)) return;
   const content = readFileSync(lockPath, 'utf-8');
   let parsed: { skills?: Record<string, unknown> };
-  // The JSON parse error can quote text of the file, so it never reaches the message (I1, #3164).
-  try { parsed = JSON.parse(content); } catch { throw new Error(`invalid external skill lock: ${lockPath}`); }
+  try { parsed = parseJsonText(content, lockPath) as typeof parsed; } catch (error) {
+    if (!(error instanceof FileSyntaxError)) throw error;
+    throw new Error(`invalid external skill lock: ${lockPath}`);
+  }
   if (!parsed || typeof parsed !== 'object' || !parsed.skills || typeof parsed.skills !== 'object') {
     throw new Error(`invalid external skill lock: ${lockPath}`);
   }

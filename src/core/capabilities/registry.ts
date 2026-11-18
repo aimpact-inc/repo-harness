@@ -409,15 +409,13 @@ export function parseCapabilityRegistry(
   let parsed: unknown;
   try {
     parsed = JSON.parse(source);
-  } catch (error) {
+  } catch {
+    // This module is projected as a standalone helper, so it keeps its own
+    // fixed text: the parse error can quote text of the file (I1, #3164).
     return {
       status: "invalid",
       registry: null,
-      diagnostics: [diagnostic(
-        "INVALID_JSON",
-        "$",
-        `invalid JSON: ${(error as Error).message}`,
-      )],
+      diagnostics: [diagnostic("INVALID_JSON", "$", "invalid JSON: the file is not valid JSON")],
     };
   }
   return validateCapabilityRegistryValue(parsed, { repoRoot: options.repoRoot });

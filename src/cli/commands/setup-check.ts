@@ -7,6 +7,7 @@
  * commands and risk notes.
  */
 
+import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
 import { spawnSync } from 'child_process';
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'fs';
 import * as os from 'os';
@@ -772,10 +773,10 @@ function legacyAdapterDetail(filePath: string): { readonly legacy: boolean; read
   if (!existsSync(filePath)) return { legacy: false, text: `not present: ${filePath}` };
   let removed: number;
   try {
-    const data = JSON.parse(readFileSync(filePath, 'utf8')) as { hooks?: unknown };
+    const data = parseJsonText(readFileSync(filePath, 'utf8'), filePath) as { hooks?: unknown };
     removed = stripRepoHarnessManagedHooks(data.hooks).removed.length;
   } catch (error) {
-    return { legacy: true, text: `cannot inspect ${filePath}: ${(error as Error).message}` };
+    return { legacy: true, text: `cannot inspect ${filePath}: ${error instanceof FileSyntaxError ? error.detail : (error as Error).message}` };
   }
   return removed > 0
     ? { legacy: true, text: `legacy adapter config at ${filePath} holds ${removed} repo-harness hook command(s)` }

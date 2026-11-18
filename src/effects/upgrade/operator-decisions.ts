@@ -1,3 +1,4 @@
+import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
 import { readFileSync } from 'fs';
 import { join, relative, sep } from 'path';
 import { isLegacyPathSafe, legacyPathSnapshot, type LeftoverItem, type LegacyPathSnapshot } from './legacy-inventory';
@@ -41,8 +42,9 @@ export function repoRelativeDecisionPath(cwd: string, path: string): string {
 
 export function parseUpgradeDecisions(text: string): UpgradeDecision[] {
   let value: unknown;
-  try { value = JSON.parse(text); } catch (error) {
-    throw decisionFileError(`not valid JSON (${error instanceof Error ? error.message : String(error)})`);
+  try { value = parseJsonText(text, null); } catch (error) {
+    if (!(error instanceof FileSyntaxError)) throw error;
+    throw decisionFileError('not valid JSON');
   }
   if (!exactKeys(value, ['decisions', 'version'])) throw decisionFileError('the top level must have exactly "version" and "decisions"');
   if (value.version !== 1) throw decisionFileError('"version" must be 1');

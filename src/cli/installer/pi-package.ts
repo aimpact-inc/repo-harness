@@ -1,3 +1,4 @@
+import { parseJsonText } from '../../core/evidence/file-syntax';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -65,7 +66,8 @@ export function installPiPackage(source: string, enabled: boolean, env: NodeJS.P
   let attempted = false;
   try {
     if (piPackagePresent(plan.source, env)) return { ...plan, detail: 'Pi user package entry already present; no duplicate added' };
-    const manifest = JSON.parse(readFileSync(join(plan.source, 'package.json'), 'utf8'));
+    const manifestPath = join(plan.source, 'package.json');
+    const manifest = parseJsonText(readFileSync(manifestPath, 'utf8'), manifestPath) as { name?: unknown; pi?: { extensions?: unknown } };
     if (manifest.name !== 'repo-harness' || !Array.isArray(manifest.pi?.extensions) || manifest.pi.extensions.length === 0) {
       throw new Error('installed repo-harness package has no Pi extension declaration');
     }

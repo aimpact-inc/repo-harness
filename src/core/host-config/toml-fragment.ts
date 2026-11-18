@@ -1,3 +1,4 @@
+import { FileSyntaxError, parseTomlText } from '../evidence/file-syntax';
 import { isDeepStrictEqual } from 'node:util';
 import { HostConfigError, type FragmentEdit, type HostConfigStrategy, type TextRange } from './types';
 
@@ -18,23 +19,21 @@ function preserving(selector: string, detail: string): HostConfigError {
   return new HostConfigError('host_config_invalid_state', `${detail} for ${selector}; preserving configuration`);
 }
 
-const UNPARSEABLE_TOML = 'the file is not valid TOML. Fix the TOML in that file, then run the command again';
-
 /**
- * Bun's TOML parse error can quote text of the file, such as an unquoted
- * token, so its message and the error never leave here (I1, #3164). The
- * error stays a SyntaxError: the host-config gate keeps every fragment of a
- * file whose strategy throws a HostConfigError, but an unparseable file must
- * stop the revert.
+ * The fragment text has no path, so a syntax failure is a path-free
+ * FileSyntaxError. It stays a SyntaxError: the host-config gate keeps every
+ * fragment of a file whose strategy throws a HostConfigError, but an
+ * unparseable file must stop the revert.
  */
-export function parseToml(content: string): TomlTable {
-  try { return Bun.TOML.parse(content) as TomlTable; } catch { throw new SyntaxError(UNPARSEABLE_TOML); }
+function parseToml(content: string): TomlTable {
+  return parseTomlText(content, null);
 }
 
-/** The TOML parse error names no file, so the caller that read the file adds its path. */
+/** The TOML parse error names no file, so the caller that read the file adds its path and the remedy. */
 export function namingTomlFile(path: string, error: unknown): unknown {
   if (!(error instanceof SyntaxError)) return error;
-  return new HostConfigError('host_config_unparseable_target', `${path}: ${UNPARSEABLE_TOML}`);
+  const syntax = new FileSyntaxError(path, 'TOML');
+  return new HostConfigError('host_config_unparseable_target', `${syntax.message}. Fix the TOML in that file, then run the command again`, { cause: syntax });
 }
 
 /** The parsed value at the selector, and the parsed file without it. */

@@ -4,6 +4,7 @@
 // a closed diagnostic-code union. This module never touches fs/process;
 // callers own reading manifest.json and (optionally) proving a package's
 // source path exists on disk.
+import { FileSyntaxError, parseJsonText } from "../evidence/file-syntax";
 import { isRecord } from "../evidence/is-record";
 import { HOST_PROGRAM_PLUGINS, isSurfaceOwner, ownerEnabled, SURFACE_OWNERS, type PluginId, type SurfaceOwner } from "./plugin-manifest";
 import { SHA256_PREFIXED_PATTERN } from "../evidence/sha256-pattern";
@@ -626,12 +627,13 @@ export function parseSkillSurfaceCatalog(
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(source);
+    parsed = parseJsonText(source, null);
   } catch (error) {
+    if (!(error instanceof FileSyntaxError)) throw error;
     return {
       status: "invalid",
       catalog: null,
-      diagnostics: [diagnostic("INVALID_JSON", "$", `invalid JSON: ${(error as Error).message}`)],
+      diagnostics: [diagnostic("INVALID_JSON", "$", `invalid JSON: ${error.detail}`)],
     };
   }
   return validateSkillSurfaceCatalogValue(parsed, options);

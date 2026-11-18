@@ -1,3 +1,4 @@
+import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { repoHarnessHome } from '../../effects/repo-harness-home';
@@ -75,10 +76,12 @@ export function parseMcpLocalConfig(value: unknown): McpLocalConfig {
 
 function readMcpLocalConfigFile(path: string): McpLocalConfig | null {
   if (!existsSync(path)) return null;
+  const text = readFileSync(path, 'utf-8');
   try {
-    return parseMcpLocalConfig(JSON.parse(readFileSync(path, 'utf-8')));
+    return parseMcpLocalConfig(parseJsonText(text, path));
   } catch (error) {
-    throw new Error(`invalid MCP local config at ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    // The schema messages are fixed text; a syntax failure names the file only.
+    throw new Error(`invalid MCP local config at ${path}: ${error instanceof FileSyntaxError ? error.detail : error instanceof Error ? error.message : String(error)}`);
   }
 }
 

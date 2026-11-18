@@ -6,6 +6,7 @@
  * proof or when the value equals the current rendering; every other value is
  * kept and reported.
  */
+import { parseJsonText } from "../../core/evidence/file-syntax";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { sha256Prefixed } from "../../core/evidence/sha256";
@@ -45,8 +46,7 @@ export function readReleasedManagedValues(file: string): ReleasedManagedValues {
       ? value as string[] : fail(path, pattern ? "an array of sha256 fingerprints" : "an array of strings");
   const lists = (value: unknown, path: string, pattern?: RegExp): Record<string, readonly string[]> =>
     Object.fromEntries(Object.entries(object(value, path)).map(([key, item]) => [key, strings(item, `${path}.${key}`, pattern)]));
-  let parsed: unknown;
-  try { parsed = JSON.parse(text); } catch (error) { throw new Error(`${file}: invalid JSON: ${(error as Error).message}`); }
+  const parsed = parseJsonText(text, file);
   const root = object(parsed, "$");
   if (root.schema !== SCHEMA) fail("$.schema", JSON.stringify(SCHEMA));
   strings(root.releases, "$.releases");

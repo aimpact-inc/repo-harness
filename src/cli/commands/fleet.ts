@@ -1,3 +1,4 @@
+import { parseJsonText } from '../../core/evidence/file-syntax';
 import { TaskMessageError } from '../../core/messages/task-message-error';
 import { readReviewAdmissionSource } from '../../effects/admission/admission-source';
 import { Command } from 'commander';
@@ -64,7 +65,7 @@ type TaskMessageScope = 'task' | 'claim';
 type TaskMessageAudience = 'owner' | 'orchestrator' | 'user';
 
 function admittedInboxContext(repoRoot: string, taskId: string, contextFile: string) {
-  return parseAdmittedInboxContext(repoRoot, taskId, JSON.parse(readFileSync(contextFile, 'utf8')));
+  return parseAdmittedInboxContext(repoRoot, taskId, parseJsonText(readFileSync(contextFile, 'utf8'), contextFile));
 }
 function parseAdmittedInboxContext(repoRoot: string, taskId: string, value: any) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
@@ -133,7 +134,7 @@ function optionalStringOption(value: string | undefined, name: string): string |
 
 
 function feedbackContext(contextFile: string, publicationId?: string) {
-  const value = JSON.parse(readFileSync(contextFile, 'utf8'));
+  const value = parseJsonText(readFileSync(contextFile, 'utf8'), contextFile) as any;
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || Object.keys(value).sort().join(',') !== 'admission,claim,selection,session') throw new Error('feedback context fields are invalid');
   const context = parseAdmittedInboxContext(process.cwd(), value.session?.task,

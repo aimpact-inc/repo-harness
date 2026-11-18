@@ -4,6 +4,7 @@
  * or repo config.
  */
 
+import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -135,7 +136,7 @@ function resolveRepoRoot(cwd: string): string {
 }
 
 function readJson(filePath: string): unknown {
-  return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  return parseJsonText(fs.readFileSync(filePath, 'utf-8'), filePath);
 }
 
 function pushJsonFailure(findings: SecurityFinding[], filePath: string, err: unknown): void {
@@ -143,7 +144,8 @@ function pushJsonFailure(findings: SecurityFinding[], filePath: string, err: unk
     filePath,
     ruleId: 'invalid-json',
     severity: 'fail',
-    summary: `Could not parse JSON: ${(err as Error).message}`,
+    // The finding names the file; a read error keeps its own message.
+    summary: `Could not parse JSON: ${err instanceof FileSyntaxError ? err.detail : (err as Error).message}`,
     recommendation: 'Inspect the file manually before trusting any configured hooks or tasks.',
   });
 }

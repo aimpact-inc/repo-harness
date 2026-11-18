@@ -1,3 +1,4 @@
+import { parseJsonText } from '../../core/evidence/file-syntax';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs';
 import { retryWindowsSharingRace } from '../../effects/atomic-append';
 import { requireHome } from '../../effects/repo-harness-home';
@@ -49,9 +50,7 @@ export function writePrivateConfiguration(path: string, content: string, root: s
 export function readRawConfigurationReceipt(root: string): unknown {
   const path = configurationReceiptPath(root);
   assertConfigurationPath(path, root);
-  if (!existsSync(path)) return null;
-  // The JSON parse error can quote text of the file, so it never reaches the message (I1, #3164).
-  try { return JSON.parse(readFileSync(path, 'utf8')); } catch { throw new Error(`${path}: the receipt is not valid JSON`); }
+  return existsSync(path) ? parseJsonText(readFileSync(path, 'utf8'), path) : null;
 }
 
 /** The migrations write back what is left of the receipt; the file goes with its last entry. */

@@ -87,8 +87,10 @@ export function decodeWorkflowPolicy(text: string | null): DecodedWorkflowPolicy
   let root: unknown;
   try {
     root = JSON.parse(text);
-  } catch (cause) {
-    throw new Error(`invalid workflow policy JSON: ${POLICY_PATH}`, { cause });
+  } catch {
+    // The parse error can quote text of the file (I1, #3164). The standalone
+    // helper projection inlines this module, so it keeps its own fixed cause.
+    throw new Error(`invalid workflow policy JSON: ${POLICY_PATH}`, { cause: new SyntaxError('the file is not valid JSON') });
   }
   return { present: true, rootIsObject: isPolicyObject(root), [POLICY_ROOT]: root };
 }

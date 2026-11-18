@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// @generated-from src/core/capabilities/registry.ts sha256:9fcf24d1a85bb94b138612001eb51e433c0955544c65da3fc5e46fa2fd88d6dc
+// @generated-from src/core/capabilities/registry.ts sha256:2afbc508fd29f13f6023ed66c65990e1d4b3f0221b823e9bb2504811f2d989bf
 // Standalone typed Bun projection. Regenerate from the capability resolver library; do not edit by hand.
 export const CAPABILITY_REGISTRY_VERSION = 1 as const;
 
@@ -412,15 +412,13 @@ export function parseCapabilityRegistry(
   let parsed: unknown;
   try {
     parsed = JSON.parse(source);
-  } catch (error) {
+  } catch {
+    // This module is projected as a standalone helper, so it keeps its own
+    // fixed text: the parse error can quote text of the file (I1, #3164).
     return {
       status: "invalid",
       registry: null,
-      diagnostics: [diagnostic(
-        "INVALID_JSON",
-        "$",
-        `invalid JSON: ${(error as Error).message}`,
-      )],
+      diagnostics: [diagnostic("INVALID_JSON", "$", "invalid JSON: the file is not valid JSON")],
     };
   }
   return validateCapabilityRegistryValue(parsed, { repoRoot: options.repoRoot });
@@ -1789,8 +1787,10 @@ export function decodeWorkflowPolicy(text: string | null): DecodedWorkflowPolicy
   let root: unknown;
   try {
     root = JSON.parse(text);
-  } catch (cause) {
-    throw new Error(`invalid workflow policy JSON: ${POLICY_PATH}`, { cause });
+  } catch {
+    // The parse error can quote text of the file (I1, #3164). The standalone
+    // helper projection inlines this module, so it keeps its own fixed cause.
+    throw new Error(`invalid workflow policy JSON: ${POLICY_PATH}`, { cause: new SyntaxError('the file is not valid JSON') });
   }
   return { present: true, rootIsObject: isPolicyObject(root), [POLICY_ROOT]: root };
 }

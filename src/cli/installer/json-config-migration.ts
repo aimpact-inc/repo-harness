@@ -1,3 +1,4 @@
+import { parseJsonText } from '../../core/evidence/file-syntax';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { isDeepStrictEqual } from 'node:util';
@@ -141,7 +142,9 @@ function hasOldWriterShape(selector: string, value: unknown): boolean {
 
 /** The hash that the old manifest recorded for the managed hook entries of a hook file, as one. */
 function managedAdapterHash(content: string): string | null {
-  const projection = canonicalManagedHookProjection((JSON.parse(content) as { hooks?: unknown }).hooks);
+  // A blank file has no hook entries, as managedHookSelectors reads it.
+  const hooks = content.trim() === '' ? undefined : (parseJsonText(content, null) as { hooks?: unknown }).hooks;
+  const projection = canonicalManagedHookProjection(hooks);
   return Object.keys(projection).length ? sha256Prefixed(JSON.stringify(projection)) : null;
 }
 

@@ -1,3 +1,4 @@
+import { parseJsonText } from '../../core/evidence/file-syntax';
 import { randomUUID } from 'node:crypto';
 import { retryWindowsSharingRace } from '../atomic-append';
 import { closeSync, constants, fchmodSync, fstatSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -88,7 +89,7 @@ function readDocumentationPolicy(repositoryId: string, env: NodeJS.ProcessEnv | 
   }
   let policy: Record<string, unknown>;
   try {
-    const parsed: unknown = JSON.parse(raw);
+    const parsed = parseJsonText(raw, '.ai/harness/policy.json');
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Policy must be an object.');
     policy = parsed as Record<string, unknown>;
     if (policy.documentation !== undefined && (policy.documentation === null || typeof policy.documentation !== 'object' || Array.isArray(policy.documentation))) {

@@ -1,3 +1,4 @@
+import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
 import { existsSync, readFileSync } from 'fs';
 import { requireHome } from '../../effects/repo-harness-home';
 import { join } from 'path';
@@ -181,10 +182,10 @@ export function parseProtocol3InstallState(raw: unknown, path: string): { readon
 
 /** The raw JSON of a state file, such as a transaction's backup of it. */
 export function readInstallStateJson(path: string): unknown {
-  // The JSON parse error can quote text of the file, so it never reaches the message (I1, #3164).
-  try {
-    return JSON.parse(readFileSync(path, 'utf-8')) as unknown;
-  } catch {
+  let text: string;
+  try { text = readFileSync(path, 'utf-8'); } catch (error) { throw invalidInstallState(path, `cannot be read (${(error as Error).message})`); }
+  try { return parseJsonText(text, path); } catch (error) {
+    if (!(error instanceof FileSyntaxError)) throw error;
     throw invalidInstallState(path, 'is not valid JSON');
   }
 }

@@ -1,3 +1,4 @@
+import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import { closeSync, constants, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, writeSync } from 'node:fs';
 import { requireHome } from '../repo-harness-home';
@@ -69,10 +70,10 @@ export function restoreGlobalConfiguration(path: string, bytes: Buffer | null, r
   const scope = globalRuntimeScope({ HOME: dirname(dirname(path)) });
   assertRuntimeTransactionContext(runtimeLock, scope);
   if (bytes !== null) {
+    const invalid = () => new GlobalConfigurationError('config_invalid', `The configuration preimage of ${path} is not a valid JSON object.`);
     let value: unknown;
-    // The JSON parse error can quote text of the file, so it never reaches the message (I1, #3164).
-    try { value = JSON.parse(bytes.toString('utf8')); } catch { throw new GlobalConfigurationError('config_invalid', 'The configuration preimage is not a valid JSON object.'); }
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new GlobalConfigurationError('config_invalid', 'The configuration preimage is not a valid JSON object.');
+    try { value = parseJsonText(bytes.toString('utf8'), path); } catch (error) { if (error instanceof FileSyntaxError) throw invalid(); throw error; }
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw invalid();
   }
   replaceGlobalConfiguration(path, bytes, () => assertRuntimeTransactionContext(runtimeLock, scope));
 }
@@ -158,12 +159,11 @@ export function readGlobalConfiguration(env: NodeJS.ProcessEnv = process.env): {
     bytes = readFileSync(path);
     try { text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
     catch { throw new GlobalConfigurationError('config_invalid', 'The repo-harness configuration file contains invalid UTF-8. Nothing was changed.'); }
-    value = JSON.parse(text);
+    value = parseJsonText(text, path);
     assertUniqueConfigurationMembers(text);
   } catch (error) {
     if (error instanceof GlobalConfigurationError) throw error;
-    // The JSON parse error can quote text of the file, so it never reaches the message (I1, #3164).
-    const detail = error instanceof SyntaxError ? 'the file is not valid JSON' : error instanceof Error ? error.message : String(error);
+    const detail = error instanceof FileSyntaxError ? error.detail : error instanceof Error ? error.message : String(error);
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`Invalid global configuration at ${path}: ${detail}`);
     value = {};
   }
