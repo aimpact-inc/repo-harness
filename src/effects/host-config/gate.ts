@@ -891,7 +891,8 @@ function adoptReplacedPath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, path:
  */
 export function planPathRevert(key: string, record: PathRecord): HostConfigRevertEntry['action'] {
   if (record.kind === 'user_managed') return 'released';
-  if (observePathEntry(pathRecordEntry(key, record)) === null) return record.kind === 'created' ? 'released' : 'kept_edited';
+  // A missing entry ends the claim at this read: a file that appears later is not the one that rh wrote.
+  if (observePathEntry(pathRecordEntry(key, record)) === null) return 'released';
   if (!pathRecordIsCurrent(key, record)) return 'kept_edited';
   return record.kind === 'replaced' ? 'restored' : 'removed';
 }

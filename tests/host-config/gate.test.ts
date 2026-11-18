@@ -524,6 +524,17 @@ test('a whole-path write records its entry first; delegate, a transaction rollba
     .toEqual([[file, 'removed'], [link, 'kept_edited'], [tree, 'removed'], [user, 'restored'], [edited, 'kept_edited']]);
   expect({ user: readFileSync(user, 'utf8'), file: existsSync(file), tree: existsSync(tree), paths: Object.keys(f.ledger().paths) })
     .toEqual({ user: 'mine\n', file: false, tree: false, paths: [link, edited] });
+
+  // A replaced file that is gone releases its record at that read; its vault copy retires, and a later revert never touches a new file there.
+  writeFileSync(user, 'mine\n');
+  f.gate().writePaths([w(user, bytes('rh\n'), true)]);
+  const backup = f.ledger().paths[user].backup;
+  rmSync(user);
+  expect(f.gate().revertPaths([user])).toEqual([{ path: user, action: 'released' }]);
+  expect({ record: f.ledger().paths[user], retired: f.ledger().retired.map((entry: { sha256: string }) => entry.sha256) }).toEqual({ record: undefined, retired: [backup] });
+  writeFileSync(user, 'rh\n');
+  expect(f.gate().revertPaths([user])).toEqual([]);
+  expect(readFileSync(user, 'utf8')).toBe('rh\n');
 });
 
 test('a delegated writer runs only on paths that rh may write; a replaced path stays a file; a rollback undoes a revert of a replaced file', () => {
