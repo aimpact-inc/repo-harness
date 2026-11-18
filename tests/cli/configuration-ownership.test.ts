@@ -248,7 +248,7 @@ test('pre-separator ledger records keep every byte under the architecture revert
 });
 
 test('a profile switch removes the legacy EOF table and keeps the user separator and restored table bytes', () => {
-  for (const lineBreak of ['\n', '\r\n']) for (const before of [null, `[mcp_servers.codegraph]${lineBreak}command = "user"${lineBreak}`]) fixture((home, env) => {
+  for (const lineBreak of ['\n', '\r\n']) for (const before of [null, `[mcp_servers.codegraph]${lineBreak}command = "user"${lineBreak}`]) for (const refresh of [false, true]) fixture((home, env) => {
     const path = join(home, '.codex/config.toml');
     const installed = `[mcp_servers.codegraph]${lineBreak}command = "codegraph"`;
     const user = `# user config${lineBreak}model = "user"${lineBreak}`;
@@ -258,6 +258,12 @@ test('a profile switch removes the legacy EOF table and keeps the user separator
     writeFileSync(configurationReceiptPath(home), JSON.stringify({ protocol: 1, changes: [{ path, selector: 'mcp_servers.codegraph', before, installed, active: true }] }));
     recordPluginSelection(env);
     expect(readFileSync(path, 'utf8')).toBe(user + installed);
+    if (refresh) {
+      migrateCodexConfigRecords(env);
+      const result = openHostConfigGate({ env }).apply([{ path, fragments: [{ owner: 'architecture', selector: 'mcp_servers.codegraph', kind: 'refresh', strategy: tomlFragment, value: `[mcp_servers.codegraph]${lineBreak}command = "codegraph"${lineBreak}args = ["serve"]` }] }]);
+      expect(result.skipped).toEqual([]);
+      expect(readFileSync(path, 'utf8')).toBe(`${user}${installed}${lineBreak}args = ["serve"]`);
+    }
     prepareInstallSelectionSwitch([], env, join(home, 'transaction'));
     expect(readFileSync(path, 'utf8'), JSON.stringify({ lineBreak, before })).toBe(user + (before ?? ''));
     expect(openHostConfigGate({ env }).recorded(path)).toEqual([]);
