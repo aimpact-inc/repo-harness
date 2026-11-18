@@ -397,13 +397,16 @@ PATH, and `setup check` reports hc missing until the user adds it. On every
 platform, when the directory is not on the PATH of the run, the run puts it
 first on the PATH of its later steps, so the Herdr skill step reads the new hc.
 `rh uninstall` keeps hc and its PATH entry. `rh uninstall --with-tools` (only
-with `--target both`) also removes each herdr-core entry that still holds the
-bytes that rh recorded, the empty directories that rh created, and the PATH
+with `--target both`) also removes each herdr-core file and link that is still
+the object that rh wrote and holds the bytes that rh recorded, the empty
+directories that rh created, and the PATH
 entry while it is still the one recorded text in the recorded value kind; it
 keeps every other entry of the value. A changed entry stays and is reported
 `unresolved`. One ledger write releases every claim before the first removal,
 so an entry that a failed removal leaves (on Windows, a running `hc.exe`) is no
-longer rh's: stop hc and remove it by hand. An hc that existed before the
+longer rh's: stop hc and remove it by hand. rh does not remove the Windows
+`conpty` directory: the run releases its record and reports it `kept`, and
+the user removes it by hand. An hc that existed before the
 install is never recorded and never removed. No command removes Bun.
 
 The step never overwrites an existing install file. A sha256 mismatch, a failed

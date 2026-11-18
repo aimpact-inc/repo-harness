@@ -1,10 +1,11 @@
-import { lstatSync, rmSync } from 'node:fs';
+import { lstatSync, rmSync, unlinkSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { HostConfigError, type HostConfigLedger, type HostPath, type ToolId, type ToolRecord } from '../../core/host-config/types';
 import { listsUserPathEntry, removeUserPathEntry, type UserPathPort, type UserPathValue } from '../../core/host-config/path-entry';
 import { spawnSync } from 'node:child_process';
 import { hostConfigPaths, hostPathKey, observeFile, pathRecordOf, readLedger, removeCreatedDirectories, validToolRecord, writeLedger } from './store';
-import { observePathEntry, removePathEntry, sameCommitted } from './whole-path';
+import { observePathEntry, sameCommitted } from './whole-path';
+import { retryWindowsSharingRace } from '../atomic-append';
 import { observeEntryIdentity, retireThenDestroy, userPathLabel, type RevertStep } from './gate';
 
 /**
@@ -162,13 +163,16 @@ export function importBunBootstrapRecord(env: NodeJS.ProcessEnv): 'imported' | '
  * One entry of `rh uninstall --with-tools`. `removed`: it still holds what rh
  * wrote, so it goes. `already_absent`: it is gone, so its record goes.
  * `kept_edited`: it changed since rh wrote it, so it and its record stay.
+ * `kept_released`: a directory tree (the Windows `conpty`). No proof covers
+ * each file in it, so rh does not remove it; its record goes, and the user
+ * removes it by hand.
  */
 export interface ToolRemovalEntry {
   readonly tool: ToolId;
   /** The entry key, or `userPathLabel(entry)` for the user PATH entry. */
   readonly path: string;
   readonly kind: 'entry' | 'directory' | 'user_path';
-  readonly action: 'removed' | 'already_absent' | 'kept_edited';
+  readonly action: 'removed' | 'already_absent' | 'kept_edited' | 'kept_released';
 }
 
 /** A removal whose claim went but whose write did not land: the entry stays, unclaimed. */
@@ -212,7 +216,8 @@ function planRemoval(ledger: HostConfigLedger, port: () => UserPathPort): Planne
   let user: { readonly port: UserPathPort; value: UserPathValue } | null = null;
   for (const [tool, record] of Object.entries(ledger.tools) as [ToolId, ToolRecord][]) {
     for (const [key, entry] of Object.entries(record.paths)) {
-      const action = observePathEntry(key) === null ? 'already_absent' : isRecordedEntry(key, entry) ? 'removed' : 'kept_edited';
+      const action = observePathEntry(key) === null ? 'already_absent' : entry.committed.type === 'directory' ? 'kept_released'
+        : isRecordedEntry(key, entry) ? 'removed' : 'kept_edited';
       if (!record.removable && action !== 'already_absent') continue;
       planned.entries.push({ tool, path: key, kind: 'entry', action });
       if (action === 'kept_edited') continue;
@@ -220,14 +225,15 @@ function planRemoval(ledger: HostConfigLedger, port: () => UserPathPort): Planne
         const { [key]: _gone, ...paths } = current.paths;
         return { ...current, paths };
       });
-      if (action === 'already_absent') { planned.steps.push({ kind: 'release', commit }); continue; }
+      if (action === 'already_absent' || action === 'kept_released') { planned.steps.push({ kind: 'release', commit }); continue; }
       planned.steps.push({ kind: 'delete', commit, write: () => {
         // The claim is gone already: an entry that changed since the plan, or that cannot go, stays unclaimed.
         if (!isRecordedEntry(key, entry)) {
           planned.failures.push({ tool, path: key, reason: 'changed before the removal; preserved, and rh no longer records it' });
           return;
         }
-        try { removePathEntry(key); }
+        // A file or a link: an unlink never removes a directory tree.
+        try { retryWindowsSharingRace(() => unlinkSync(key)); }
         catch (error) {
           const code = (error as NodeJS.ErrnoException).code ?? 'error';
           planned.failures.push({ tool, path: key, reason: `could not be removed (${code}): it can be in use; rh no longer records it; stop hc, then remove it by hand` });

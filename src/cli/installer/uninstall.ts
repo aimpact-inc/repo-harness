@@ -179,6 +179,7 @@ const TOOL_REMOVAL_ITEMS: Readonly<Record<ToolRemovalEntry['action'], { readonly
   removed: { action: 'restored', reason: 'rh installed it; removed' },
   already_absent: { action: 'note', reason: 'already absent; the tool record goes' },
   kept_edited: { action: 'unresolved', reason: 'changed since rh installed it; preserved' },
+  kept_released: { action: 'kept', reason: 'a directory tree that rh installed; rh does not remove a tree and no longer records it; remove it by hand' },
 };
 
 function planTools(env: NodeJS.ProcessEnv, gate: HostConfigGate, opts: UninstallOptions): ToolPlan {

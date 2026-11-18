@@ -622,6 +622,7 @@ test.each([
 // recorded kind. P2: `edited`, `kind` (kept, with the record). P1: `absent` (a release; a later entry is not rh's). P4 (one ledger write
 // retires every claim before the first unlink or registry write): `ledger write fails` (nothing goes, the claims stay), `unlink fails` and
 // `registry write fails` (the entry stays with no claim, so a later run keeps it). `preexisting`: an hc on PATH before install gets no record.
+// The Windows conpty tree is never removed: its record goes in the same write, and it is reported `kept`.
 test.each([
  {platform:'unix',change:'none'},{platform:'windows',change:'none'},{platform:'windows',change:'created value'},{platform:'unix',change:'dry run'},{platform:'unix',change:'bun absent'},
  {platform:'unix',change:'edited'},{platform:'windows',change:'edited'},{platform:'windows',change:'kind'},{platform:'windows',change:'replaced link'},{platform:'windows',change:'stopped'},{platform:'unix',change:'absent'},
@@ -645,7 +646,7 @@ test.each([
  try{
   await installHerdrCore(root,env,windows);
   const installedRegistry=existsSync(registry)?readFileSync(registry,'utf8'):null;
-  const removedAll=[...entries.map((name)=>[join(dir,name),'restored']),...(windows?[[label,'reverted']]:[])];
+  const removedAll=[...entries.map((name)=>[join(dir,name),name==='conpty'?'kept':'restored']),...(windows?[[label,'reverted']]:[])];
   if(change==='none'||change==='created value'||change==='dry run'||change==='bun absent'){
    // Bun is never removed, but a recorded Bun binary that is gone loses its record in the same run.
    const bun=join(home,'.bun','bin','bun');
@@ -653,7 +654,7 @@ test.each([
    const preview=change==='dry run'?withTools(true):null;
    if(preview){expect([toolItems(preview),existsSync(join(dir,'hc'))]).toEqual([removedAll,true]);}
    const result=withTools();
-   expect([result.exitCode,toolItems(result),hostTree(home),ledger(home).tools]).toEqual([0,removedAll,'',{}]);
+   expect([result.exitCode,toolItems(result),windows?readdirSync(dir):hostTree(home),ledger(home).tools]).toEqual([0,removedAll,windows?['conpty']:'',{}]);
    if(change==='bun absent')expect(result.items.filter((item)=>item.reason.startsWith('bun: ')||item.reason.includes('shared tools'))).toEqual([{path:bun,action:'note',reason:'bun: already absent; the tool record goes'}]);
    // The PATH value keeps its kind and the other entries; a value that rh created is deleted.
    if(windows)expect(existsSync(registry)?JSON.parse(readFileSync(registry,'utf8')):null).toEqual(change==='created value'?null:userPath);
@@ -674,8 +675,9 @@ test.each([
    withTools();
    rmSync(`${registry}.fail`);
    writeFileSync(join(config,'ledger.json'),readFileSync(`${registry}.at-stop`));
-   mkdirSync(dir,{recursive:true});
-   expect(ledger(home).tools).toEqual({});
+   // The user removes the kept conpty tree by hand, as the report says.
+   rmSync(join(dir,'conpty'),{recursive:true});
+   expect([readdirSync(dir),ledger(home).tools]).toEqual([[],{}]);
    const retry=withTools();
    expect([retry.exitCode,toolItems(retry),existsSync(dir)]).toEqual([0,[],true]);
    return;
@@ -684,8 +686,8 @@ test.each([
    // GK-3235-1: the user replaces the hc.exe hard link with a copy of the same binary between two runs; the copy is not rh's.
    rmSync(join(dir,'hc.exe'));copyFileSync(join(dir,'herdr-core.exe'),join(dir,'hc.exe'));
    const result=withTools();
-   expect([result.exitCode,toolItems(result),readdirSync(dir),Object.keys(ledger(home).tools['herdr-core'].paths)])
-    .toEqual([1,[[join(dir,'herdr-core.exe'),'restored'],[join(dir,'conpty'),'restored'],[join(dir,'hc.exe'),'unresolved'],[label,'reverted']],['hc.exe'],[join(dir,'hc.exe')]]);
+   expect([result.exitCode,toolItems(result),readdirSync(dir).sort(),Object.keys(ledger(home).tools['herdr-core'].paths)])
+    .toEqual([1,[[join(dir,'herdr-core.exe'),'restored'],[join(dir,'conpty'),'kept'],[join(dir,'hc.exe'),'unresolved'],[label,'reverted']],['conpty','hc.exe'],[join(dir,'hc.exe')]]);
    return;
   }
   if(change==='edited'||change==='kind'){
@@ -694,10 +696,10 @@ test.each([
    const record=ledger(home).tools['herdr-core'];
    if(windows){
     expect([result.exitCode,toolItems(result),existsSync(dir),readFileSync(registry,'utf8'),Object.keys(record.paths),record.path_entry.entry,record.directories])
-     .toEqual([1,[...removedAll.slice(0,-1),[label,'unresolved']],false,registryBefore,[],dir,[]]);
-    // GK-3235-2: the directory claims went in the one ledger write, so the kept PATH entry brings no later run back to a directory that
-    // the user created again, empty.
-    mkdirSync(dir,{recursive:true});
+     .toEqual([1,[...removedAll.slice(0,-1),[label,'unresolved']],true,registryBefore,[],dir,[]]);
+    // GK-3235-2: the directory claims went in the one ledger write, so the kept PATH entry brings no later run back to the directory,
+    // which is empty after the user removes the kept conpty tree by hand.
+    rmSync(join(dir,'conpty'),{recursive:true});
     const retry=withTools();
     expect([retry.exitCode,toolItems(retry),existsSync(dir)]).toEqual([1,[[label,'unresolved']],true]);
    }else{
@@ -733,7 +735,7 @@ test.each([
    writeFileSync(`${registry}.fail`,'write');
    const failed=withTools();
    rmSync(`${registry}.fail`);
-   expect([failed.exitCode,toolItems(failed),existsSync(dir),readFileSync(registry,'utf8'),ledger(home).tools]).toEqual([1,[...removedAll.slice(0,-1),[label,'unresolved']],false,installedRegistry,{}]);
+   expect([failed.exitCode,toolItems(failed),existsSync(dir),readFileSync(registry,'utf8'),ledger(home).tools]).toEqual([1,[...removedAll.slice(0,-1),[label,'unresolved']],true,installedRegistry,{}]);
    expect(failed.items.filter((item)=>item.action==='unresolved'&&item.path===label).map((item)=>item.reason)).toEqual(['herdr-core: the user Path write exited with status 1; rh no longer records the entry; remove it by hand']);
   }
   // No claim is left: the entries that stay or come back by hand are not rh's.
