@@ -1,7 +1,7 @@
 import { jsonFragment, jsonDocumentIsEmpty, jsonFragmentValue, removeJsonFragment } from './json-fragment';
 import { isMarkedBlockSelector, markedBlock, markedBlockDocumentIsEmpty, removeMarkedBlock } from './marked-block';
 import { tomlFragment } from './toml-fragment';
-import type { FragmentEdit, FragmentRecord, HostConfigStrategy } from './types';
+import type { FileFormat, FragmentEdit, FragmentRecord, HostConfigStrategy } from './types';
 
 /** How the gate finds, and takes out, a recorded fragment in a file of one format. */
 export interface FragmentFormat {
@@ -53,14 +53,21 @@ const MARKED_BLOCK: FragmentFormat = {
   empty: markedBlockDocumentIsEmpty,
 };
 
+/** The format that a file name gives; rh records it at write time from the name that it was asked to write. */
+export function fileFormatOf(path: string): FileFormat | undefined {
+  if (path.endsWith('.toml')) return 'toml';
+  if (path.endsWith('.json')) return 'json';
+  return undefined;
+}
+
+const FILE_FORMATS: Readonly<Record<FileFormat, FragmentFormat>> = { toml: TOML, json: JSON_FORMAT };
+
 /**
  * The format of a fragment: a marked-block selector names its format, because
- * a linked rules file can have any name; else the file name decides. Null for
- * a fragment that no strategy owns.
+ * a linked rules file can have any name; else the file's format decides. Null
+ * for a fragment that no strategy owns.
  */
-export function fragmentFormat(path: string, selector: string): FragmentFormat | null {
+export function fragmentFormat(format: FileFormat | undefined, selector: string): FragmentFormat | null {
   if (isMarkedBlockSelector(selector)) return MARKED_BLOCK;
-  if (path.endsWith('.toml')) return TOML;
-  if (path.endsWith('.json')) return JSON_FORMAT;
-  return null;
+  return format ? FILE_FORMATS[format] : null;
 }

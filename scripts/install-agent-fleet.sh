@@ -227,9 +227,12 @@ function validateUserManagedCodex(agent, content) {
   }
 }
 
-/** One fleet file through the gate; an existing file keeps its mode. `replace` keeps a user file in the vault first. */
+/**
+ * One fleet file through the gate; an existing file keeps its mode. `replace` keeps a user file in the vault first.
+ * A user link stays: the gate writes the file that it names, and creates that file when the link dangles.
+ */
 function writeAgent(targetPath, content, replace) {
-  const stat = fs.lstatSync(targetPath, { throwIfNoEntry: false });
+  const stat = fs.statSync(targetPath, { throwIfNoEntry: false });
   const mode = stat?.isFile() ? stat.mode & 0o777 : undefined;
   gate.writePaths([{ path: targetPath, owner: "core", entry: { type: "file", bytes: Buffer.from(content), ...(mode === undefined ? {} : { mode }) }, replace }], { transaction: process.env.REPO_HARNESS_RUNTIME_TRANSACTION });
 }
@@ -249,13 +252,12 @@ function compareAndWrite(targetPath, content, acceptedHash) {
 
   if (existing === content) return "up-to-date";
 
-  // rh writes a fleet file only as a regular file; a link to a user file (also a dangling one) is follow-up #3102.
-  if (fs.lstatSync(targetPath, { throwIfNoEntry: false })?.isSymbolicLink()) {
-    return `linked (links to ${fs.readlinkSync(targetPath)}; replace the link with a regular file, then run again)`;
-  }
-
   if (existing === null) {
-    writeAgent(targetPath, content, false);
+    // A link that now names another file than the one whose user bytes rh replaced stops this file only.
+    try { writeAgent(targetPath, content, false); } catch (error) {
+      if (error?.code !== "host_config_replacement_refused") throw error;
+      return `refused (${error.message})`;
+    }
     return "installed";
   }
 
@@ -381,7 +383,7 @@ for (const target of targets) {
   results.push({ host: target.host, file: target.file, status });
 }
 
-const failed = results.some((entry) => entry.status === "drift" || entry.status === "backup-failed" || entry.status.startsWith("linked"));
+const failed = results.some((entry) => entry.status === "drift" || entry.status === "backup-failed" || entry.status.startsWith("refused"));
 // A forced run takes every fleet file back, so the user's claims on them go.
 if (force && !failed) gate.keepUserPaths("core", targets.map((target) => target.path), []);
 

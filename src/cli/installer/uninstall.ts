@@ -188,7 +188,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   const previewOf = (path: string): readonly HostConfigRevertEntry[] => {
     const rules = rulesAdoptions.get(path);
     if (rules) return [previewGlobalRulesAdoptedRevert(path, rules)];
-    if (path === files.codex && codexMigration?.adoption) return previewAdoptedRevert(codexMigration);
+    if (path === files.codex && codexMigration?.adoption) return previewAdoptedRevert(env, codexMigration);
     const planned = jsonMigration?.files.find((file) => file.path === path);
     return planned ? previewJsonAdoptedRevert({ ...jsonMigration!, files: [planned] }) : gate.revert([path], { dryRun: true });
   };

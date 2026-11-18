@@ -184,7 +184,8 @@ function validFileRecord(record: unknown): boolean {
     && (committed.type === 'absent' || (committed.type === 'file' && isSha(committed.sha256)))
     && (isSha(record.backup) || record.backup === null)
     && (record.external_backup === undefined || isSha(record.external_backup))
-    && typeof record.external_change === 'boolean';
+    && typeof record.external_change === 'boolean'
+    && (record.format === undefined || record.format === 'toml' || record.format === 'json');
 }
 
 const PATH_RECORD_HOSTS: readonly string[] = ['claude', 'codex', 'pi', 'staged', 'bin'];
@@ -202,6 +203,8 @@ function validPathRecord(record: unknown): boolean {
   if (!isObject(record) || !isText(record.owner) || record.owner === '' || !PATH_RECORD_HOSTS.includes(record.host as string)
     || !validBaseline(record.baseline) || !validPathCommitted(record.committed)) return false;
   const file = isObject(record.committed) && record.committed.type === 'file';
+  // A user link at the key: rh acts on the file that it names, which only a created or replaced file record does.
+  if (record.link_target !== undefined && !(isText(record.link_target) && isAbsolute(record.link_target) && file && record.kind !== 'user_managed')) return false;
   if (record.kind === 'replaced') return file && isSha(record.backup);
   return record.backup === undefined && (record.kind === 'created' || (record.kind === 'user_managed' && file));
 }

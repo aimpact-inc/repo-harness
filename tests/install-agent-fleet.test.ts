@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { spawnSync } from "child_process";
@@ -463,21 +463,40 @@ describe("install-agent-fleet", () => {
     }
   }, 30_000);
 
-  test("--force writes no linked agent file, whether its target exists or not, and names the link target", () => {
+  test("--force writes a linked agent file through its link: the target goes to the vault, a dangling link gets its target, and the revert keeps both links", () => {
     const { root, home } = setupFakeHome("install-agent-fleet-linked");
     try {
       const [existing, dangling] = [join(home, "dotfiles/explorer.md"), join(home, "dotfiles/gatekeeper.md")];
+      const [linked, unborn] = [join(home, ".claude/agents/explorer.md"), join(home, ".claude/agents/gatekeeper.md")];
       mkdirSync(join(home, "dotfiles"), { recursive: true });
       mkdirSync(join(home, ".claude/agents"), { recursive: true });
       writeFileSync(existing, "mine\n");
-      symlinkSync(existing, join(home, ".claude/agents/explorer.md"));
-      symlinkSync(dangling, join(home, ".claude/agents/gatekeeper.md"));
+      symlinkSync(existing, linked);
+      symlinkSync(dangling, unborn);
       const forced = runInstaller(home, FLEET_SOURCE_DIR, ["--force"]);
-      expect(forced.status).toBe(1);
+      expect(forced.status, forced.stdout + forced.stderr).toBe(0);
+      expect(forced.stdout).toContain("[fleet] claude/explorer.md: replaced (backup:");
+      expect(forced.stdout).toContain("[fleet] claude/gatekeeper.md: installed");
       for (const [file, target] of [["explorer.md", existing], ["gatekeeper.md", dangling]]) {
-        expect(forced.stdout).toContain(`[fleet] claude/${file}: linked (links to ${target}; replace the link with a regular file, then run again)`);
+        expect(readFileSync(target, "utf8")).toBe(readFileSync(join(FLEET_SOURCE_DIR, file), "utf8"));
       }
-      expect({ existing: readFileSync(existing, "utf8"), dangling: existsSync(dangling) }).toEqual({ existing: "mine\n", dangling: false });
+      const records = readPathRecords({ HOME: home });
+      expect(records[pathRecordKey({ HOME: home }, linked)]).toMatchObject({ kind: "replaced", link_target: existing });
+      expect(records[pathRecordKey({ HOME: home }, unborn)]).toMatchObject({ kind: "created", link_target: dangling });
+      // The replaced record stays with the file that it replaced: a link that now names a missing file gets nothing of it.
+      const moved = join(home, "dotfiles/moved.md");
+      rmSync(linked);
+      symlinkSync(moved, linked);
+      const refused = runInstaller(home, FLEET_SOURCE_DIR);
+      expect(refused.status).toBe(1);
+      expect(refused.stdout).toContain(`[fleet] claude/explorer.md: refused (rh replaced the user file ${existing} and keeps it in the vault, but this path now reaches ${moved}`);
+      expect(openHostConfigGate({ env: { HOME: home } }).revertPaths([linked]).map((entry) => entry.action)).toEqual(["kept_edited"]);
+      expect({ moved: existsSync(moved), record: readPathRecords({ HOME: home })[pathRecordKey({ HOME: home }, linked)] }).toMatchObject({ moved: false, record: { kind: "replaced", link_target: existing } });
+      rmSync(linked);
+      symlinkSync(existing, linked);
+      expect(openHostConfigGate({ env: { HOME: home } }).revertPaths([linked, unborn]).map((entry) => entry.action)).toEqual(["restored", "removed"]);
+      expect({ existing: readFileSync(existing, "utf8"), dangling: existsSync(dangling), links: [linked, unborn].map((path) => lstatSync(path).isSymbolicLink()) })
+        .toEqual({ existing: "mine\n", dangling: false, links: [true, true] });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
+import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { requireHome } from '../repo-harness-home';
 import { join } from 'node:path';
 import { sha256Prefixed } from '../../core/evidence/sha256';
@@ -125,12 +125,25 @@ function treeEntriesAreCovered(path: string): boolean {
   return covered;
 }
 
-/** The entry at the key still is what rh recorded: a removal acts only then. */
+/** The entry that a path record acts on: the file that its user link names, or the key itself. */
+export function pathRecordEntry(key: string, record: PathRecord): string {
+  return record.link_target ?? key;
+}
+
+/**
+ * The entry at the key still is what rh recorded: a removal acts only then.
+ * For a linked record the key must still be a link that names `link_target`,
+ * and that file must hold `committed`.
+ */
 export function pathRecordIsCurrent(key: string, record: PathRecord): boolean {
   const stat = lstatSync(key, { throwIfNoEntry: false });
   if (!stat) return false;
   const committed = record.committed;
   try {
+    if (record.link_target !== undefined) {
+      if (!stat.isSymbolicLink() || realpathSync.native(key) !== record.link_target || committed.type !== 'file') return false;
+      return lstatSync(record.link_target).isFile() && sha256Prefixed(readFileSync(record.link_target)) === committed.sha256;
+    }
     if (committed.type === 'symlink') return stat.isSymbolicLink() && readlinkSync(key) === committed.target;
     if (committed.type === 'file') return stat.isFile() && sha256Prefixed(readFileSync(key)) === committed.sha256;
     if (!stat.isDirectory()) return false;
