@@ -441,7 +441,7 @@ function claimStatus(issue: BoardSubIssueReadV1): BoardClaimStatusV1 {
   return issue.comments.truncated ? { status_kind: 'unknown' } : { status_kind: 'none' };
 }
 
-function bodyLinks(repository: string, body: string): { readonly closes: number[]; readonly refs: number[] } {
+export function bodyLinks(repository: string, body: string): { readonly closes: number[]; readonly refs: number[] } {
   const prefix = `${repository.toLowerCase()}#`;
   const closes = parseClosingReferences(repository, body).references
     .filter(reference => reference.startsWith(prefix))

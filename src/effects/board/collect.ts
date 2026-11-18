@@ -567,7 +567,7 @@ function boardReadinessTransport(input: GhInput, repository: string): GhRunner {
 }
 
 /** The pull request read in groups of `PULL_REQUEST_GROUP`, one query each; the decoder gets the aliases of all groups as one answer. */
-function readPullRequests(input: GhInput, owner: string, name: string, numbers: readonly number[]): BoardPullRequestReadV1[] {
+export function readPullRequests(input: GhInput, owner: string, name: string, numbers: readonly number[]): BoardPullRequestReadV1[] {
   if (numbers.length === 0) return [];
   const repository: Record<string, unknown> = {};
   for (let at = 0; at < numbers.length; at += PULL_REQUEST_GROUP) {

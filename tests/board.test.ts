@@ -2732,3 +2732,113 @@ describe('board required check: the contexts come from the base protection (#226
     expect(decision).toMatchObject({ eligible: false, reason: 'required_check', detail: 'required contexts unavailable: the protection of main requires no status check context list' });
   });
 });
+
+describe('board retro (#3205): the read-only projection of the lifecycle index and GitHub', () => {
+  const REPOSITORY_ID = 1186405141;
+  // Every gh read of the retro; the fake refuses any other call, so a write would fail the command.
+  const RETRO_GH = `#!${process.execPath}
+const { appendFileSync, readFileSync } = require('fs');
+const dir = process.env.RETRO_GH;
+const args = process.argv.slice(2);
+appendFileSync(dir + '/calls.jsonl', JSON.stringify(args) + '\\n');
+const out = name => process.stdout.write(readFileSync(dir + '/' + name, 'utf8'));
+if (args[0] === 'repo' && args[1] === 'view') out('repo.json');
+else if (args[0] === 'pr' && args[1] === 'list') out('prs.json');
+else if (args[0] === 'issue' && args[1] === 'list') out('issues.json');
+else if (args.includes('repos/{owner}/{repo}')) console.log('{"id":${REPOSITORY_ID}}');
+else if (args.some(arg => arg.includes('/actions/runs?branch=feat%2F1479-notify-relay&event=pull_request'))) out('runs.json');
+else if (args[1] === 'graphql' && args.some(arg => arg.includes('subIssues'))) out('parent.json');
+else if (args[1] === 'graphql') out('pulls.json');
+else process.exit(2);
+`;
+  const run_ = (id: number, conclusion: string | null, created: string, updated: string) =>
+    ({ id, name: 'Required / CI', status: 'completed', conclusion, created_at: created, run_started_at: created, updated_at: updated, html_url: `https://github.com/x/y/actions/runs/${id}` });
+  const at = (time: string) => ({ protocol: 'repo-harness.lifecycle-event/v1', at: time, repository_id: REPOSITORY_ID });
+  const seat = { kind: 'seat.lifecycle', seat: 'worker', terminal: 't9', issues: [1479], pr: null, model: null, duration_ms: null, transcript_path: null };
+  const EVENTS = [
+    { ...at('2026-11-02T19:00:00.000Z'), ...seat, phase: 'launch' },
+    { ...at('2026-11-02T21:30:00.000Z'), ...seat, phase: 'reset', model: 'opus', duration_ms: 3_600_000, transcript_path: '/tmp/retro/session.jsonl' },
+    { ...at('2026-11-02T21:20:00.000Z'), kind: 'cli.friction', command: 'board_review', issue: null, pr: 1494, error_code: 'acceptance_unknown', blocker_codes: [] },
+    { ...at('2026-11-02T22:10:00.000Z'), kind: 'worktree.hook_summary', worktree_id: 'wt-1479', pr: 1494, branch: 'feat/1479-notify-relay', counts_by_code: { 'PreToolUse.guard.blocked': 2, 'PreToolUse.guard.ok': 5 } },
+    // Another parent's issue: outside the --parent scope.
+    { ...at('2026-11-02T21:00:00.000Z'), kind: 'cli.friction', command: 'board_dispatch', issue: 9999, pr: null, error_code: 'no_route', blocker_codes: [] },
+  ];
+
+  /** A repository whose PR #1494 merged at 22:00 with three Actions runs before the merge and one after it. */
+  function retro(args: readonly string[], index: readonly unknown[] | null) {
+    const root = tmpWorkspace('board-retro'); roots.push(root);
+    const home = join(root, 'rh-home');
+    const gh = join(root, 'gh'); mkdirSync(gh);
+    writeFileSync(join(gh, 'gh'), RETRO_GH); chmodSync(join(gh, 'gh'), 0o755);
+    const parent = JSON.parse(fixture('parent-1474.graphql.json'));
+    issueNode(parent.data, 1479).state = 'CLOSED';
+    const pulls = JSON.parse(fixture('pull-requests-1474.graphql.json'));
+    Object.assign(pulls.data.repository.pr1494, { state: 'MERGED', isDraft: false, mergedAt: '2026-11-02T22:00:00Z' });
+    pulls.data.repository.pr1494.comments.nodes.unshift(comment('repo-harness review start\nSeat: gatekeeper', '2026-11-02T21:10:00Z'));
+    const files: Record<string, unknown> = {
+      'repo.json': { nameWithOwner: 'Ancienttwo/repo-harness' }, 'parent.json': parent, 'pulls.json': pulls,
+      'prs.json': [{ number: 1494 }], 'issues.json': [{ number: 1479 }, { number: 1480 }],
+      // Run 14 was cancelled by a newer push: it counts as a run, not as a failure.
+      'runs.json': { total_count: 4, workflow_runs: [run_(11, 'failure', '2026-11-02T20:00:00Z', '2026-11-02T20:10:00Z'), run_(14, 'cancelled', '2026-11-02T20:15:00Z', '2026-11-02T20:20:00Z'),
+        run_(12, 'success', '2026-11-02T20:30:00Z', '2026-11-02T20:45:00Z'), run_(13, 'success', '2026-11-02T22:30:00Z', '2026-11-02T22:40:00Z')] },
+    };
+    for (const [name, value] of Object.entries(files)) writeFileSync(join(gh, name), JSON.stringify(value));
+    if (index !== null) {
+      mkdirSync(join(home, 'lifecycle'), { recursive: true });
+      writeFileSync(join(home, `lifecycle/${REPOSITORY_ID}.jsonl`), index.map(line => (typeof line === 'string' ? line : JSON.stringify(line))).join('\n') + '\n');
+    }
+    const result = run(process.execPath, [join(import.meta.dir, '../src/cli/index.ts'), 'board', 'retro', ...args], root,
+      { HOME: root, REPO_HARNESS_HOME: home, REPO_HARNESS_GH_BIN: join(gh, 'gh'), RETRO_GH: gh });
+    const calls = readFileSync(join(gh, 'calls.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as string[]);
+    return { result, calls };
+  }
+
+  test('--parent joins the merged pull requests, their runs and comments with the index events of the parent', () => {
+    const { result, calls } = retro(['--parent', '1474', '--json'], EVENTS);
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+    const document = JSON.parse(result.stdout);
+    expect(document).toMatchObject({
+      protocol: 'repo-harness.board-retro/v1', repository_id: REPOSITORY_ID, scope: { parent: 1474 },
+      closed_issues: 1, merged_prs: 1, consolidation_ratio: 1, ci_runs_per_pr: 3, review_rounds_per_pr: 2, comments_truncated: [],
+      spawned_issues_per_pr: { status: 'unavailable', reason: 'no_spawn_link' },
+      p1_fixed: { status: 'unavailable', reason: 'record_findings_have_no_severity' },
+      p1_downgraded_by_jd: { status: 'unavailable', reason: 'disposition_counts_records_not_findings' },
+      top_failing_checks: [{ name: 'Required / CI', failures: 1, run_ids: [11] }],
+      top_friction_codes: [{ code: 'PreToolUse.guard.blocked', count: 2 }, { code: 'acceptance_unknown', count: 1 }],
+    });
+    // write: launch 19:00 to first run 20:00; ci: 5, 10 and 15 min; review_wait: run end 20:45 to start 21:10;
+    // review_run: start 21:10:00 to the records at 21:10:40 and 21:11:11; merge_wait: record 21:11:11 to the merge at 22:00.
+    expect(document.phase_median_ms).toEqual({ write: { median_ms: 3_600_000, n: 1 }, ci: { median_ms: 600_000, n: 3 }, review_wait: { median_ms: 1_500_000, n: 1 },
+      review_run: { median_ms: 40_000, n: 2 }, merge_wait: { median_ms: 2_929_000, n: 1 } });
+    const clues = { pr: 1494, seat: null, error_codes: ['PreToolUse.guard.blocked', 'acceptance_unknown'], comment_ids: ['6588547691', '6588557915'], run_ids: [11], transcript_paths: ['/tmp/retro/session.jsonl'] };
+    expect(document.outliers).toEqual([
+      { metric: 'wall_clock_ms', value: 10_800_000, ...clues }, { metric: 'ci_runs', value: 3, ...clues }, { metric: 'friction_count', value: 3, ...clues },
+      { metric: 'seat_duration_ms', value: 3_600_000, pr: null, seat: 'worker', error_codes: [], comment_ids: [], run_ids: [], transcript_paths: ['/tmp/retro/session.jsonl'] },
+    ]);
+    expect(result.stdout).not.toContain('https://');
+    expect(calls.every(args => args[0] === 'api' || (args[0] === 'repo' && args[1] === 'view'))).toBe(true);
+  });
+
+  test('--since reads the merged pull requests and closed issues of the window and the index events since its start', () => {
+    const { result, calls } = retro(['--since', '14d', '--json'], EVENTS);
+    expect(result.status).toBe(0);
+    const document = JSON.parse(result.stdout);
+    expect(document.scope.since).toMatch(/^\d{4}-\d{2}-\d{2}T/u);
+    expect(calls.find(args => args[0] === 'pr')).toEqual(['pr', 'list', '--state', 'merged', '--search', `merged:>=${document.scope.since}`, '--json', 'number', '--limit', '501']);
+    // The recorded events of 2026-11-02 are older than any window that ends now.
+    expect([document.closed_issues, document.merged_prs, document.consolidation_ratio, document.top_friction_codes, document.phase_median_ms.write]).toEqual([2, 1, 2, [], { median_ms: null, n: 0 }]);
+  });
+
+  test('a missing index, or a line that the I1 gate refuses, ends the retro with no document', () => {
+    const missing = retro(['--parent', '1474', '--json'], null).result;
+    expect([missing.status, missing.stdout]).toEqual([1, '']);
+    expect(JSON.parse(missing.stderr)).toMatchObject({ ok: false, error: 'BoardCollectError', message: expect.stringContaining('cannot be read') });
+    const leaked = { ...EVENTS[2], error_code: 'gh failed: token ghp_abc' };
+    for (const line of [leaked, 'not json', { ...EVENTS[0], repository_id: 7 }]) {
+      const refused = retro(['--parent', '1474', '--json'], [EVENTS[0], line]).result;
+      expect([refused.status, refused.stdout]).toEqual([1, '']);
+      expect(JSON.parse(refused.stderr).message).toContain(`line 2 is not a lifecycle event of repository ${REPOSITORY_ID}`);
+    }
+  });
+});
