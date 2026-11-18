@@ -447,8 +447,10 @@ function refreshInWorktree(path: string, worktree: string, base: RefreshBase, ow
     if (result.error || result.status !== 0) throw new Error(commandFailure(`git ${args[0]}`, result));
     return result.stdout.trim();
   };
-  // The init and upgrade backups are local rollback records, not refreshed files.
-  step(['add', '--all', '--', '.', `:(exclude)${FS_TRANSACTION_BACKUP_ROOT}`]);
+  // The init and upgrade backups are local rollback records, not refreshed files. They are unstaged after the add:
+  // an exclude pathspec that names an ignored path makes `git add` exit 1, and adopted repos ignore the backup root.
+  step(['add', '--all', '--', '.']);
+  step(['reset', '--quiet', '--', FS_TRANSACTION_BACKUP_ROOT]);
   const staged = git(worktree, ['diff', '--cached', '--quiet'], env);
   if (staged.error || (staged.status !== 0 && staged.status !== 1)) throw new Error(commandFailure('git diff --cached', staged));
   if (staged.status === 0) {
