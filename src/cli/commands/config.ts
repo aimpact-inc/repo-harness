@@ -1,12 +1,9 @@
 import { Command } from 'commander';
 import { resolve } from 'node:path';
 import { globalRuntimeScope, withRuntimeTransactionLock } from '../../effects/locking/runtime-transaction-lock';
-import { openHostConfigGate, planPathRevert } from '../../effects/host-config/gate';
-import { openRepositoryGate, repositoryConfigPaths, resolveHostConfigRepository } from '../../effects/host-config/repository';
-import { HostConfigError } from '../../core/host-config/types';
-import { isPathInside } from '../../effects/path-containment';
+import { openHostConfigGate } from '../../effects/host-config/gate';
 import { collectRetired, configDiff, configStatus, type ConfigStatus, type FragmentDiff, type GcResult } from '../../effects/host-config/inspect';
-import { hostConfigPaths, hostPathKey, observeFile, readLedger, readProjectedLedger, resolveHostPath } from '../../effects/host-config/store';
+import { hostConfigPaths, readLedger, readProjectedLedger, resolveHostPath } from '../../effects/host-config/store';
 import { migrateInstallState } from '../installer/install-state-migration';
 import { exitCodeOf, revertItem, type UninstallItem } from '../installer/uninstall';
 
@@ -69,11 +66,9 @@ export function runConfigDiff(env: NodeJS.ProcessEnv, path: string, options: { r
  * The report and exit code follow `rh uninstall`. A dry run reads the ledger
  * as the schema move would leave it and takes no lock.
  */
-export function runConfigRestore(env: NodeJS.ProcessEnv, path: string | undefined, options: { readonly owner?: string; readonly dryRun?: boolean; readonly repo?: string } = {}): ConfigCommandResult {
+export function runConfigRestore(env: NodeJS.ProcessEnv, path: string, options: { readonly owner?: string; readonly dryRun?: boolean } = {}): ConfigCommandResult {
   try {
     const revert = (): UninstallItem[] => {
-      if (options.repo !== undefined) return revertRepository(env, options.repo, path, options);
-      if (path === undefined) throw new HostConfigError('host_config_invalid_path', 'name a file, or a repository with --repo');
       const paths = hostConfigPaths(env);
       const target = resolveHostPath(paths, path);
       const gate = openHostConfigGate({ env, preview: options.dryRun === true });
@@ -86,29 +81,6 @@ export function runConfigRestore(env: NodeJS.ProcessEnv, path: string | undefine
     const exitCode = exitCodeOf(items);
     return { exitCode, lines: [...items.map((item) => `[${item.action}] ${item.path}: ${item.reason}`), `[restore] ${exitCode === 2 ? 'failed' : exitCode === 1 ? 'partial' : 'complete'}${options.dryRun ? ' (dry-run)' : ''}`], json: { exitCode, dryRun: options.dryRun === true, items } };
   } catch (error) { return failure(error); }
-}
-
-/**
- * `--repo`: the records of one repository ledger inside the worktree of
- * `repo` (D5, D6), or the one record at `path`. No ledger, or no record there,
- * stops the restore with `host_config_repository_unrecorded`; the user ledger
- * is never read.
- */
-function revertRepository(env: NodeJS.ProcessEnv, repo: string, path: string | undefined, options: { readonly owner?: string; readonly dryRun?: boolean }): UninstallItem[] {
-  const repository = resolveHostConfigRepository(repo);
-  const paths = repositoryConfigPaths(env, repository);
-  const unrecorded = (where: string) => new HostConfigError('host_config_repository_unrecorded', `rh records no repository file ${where}`);
-  if (!observeFile(paths.ledger).observation.existed) throw unrecorded(`for ${repository.worktree}`);
-  const records = readLedger(paths).paths;
-  let keys = Object.keys(records).filter((key) => isPathInside(repository.worktree, key) && (options.owner === undefined || records[key]!.owner === options.owner));
-  if (path !== undefined) {
-    const key = hostPathKey(paths, path);
-    if (!keys.includes(key)) throw unrecorded(`at ${path}`);
-    keys = [key];
-  }
-  if (!keys.length) throw unrecorded(`in ${repository.worktree}`);
-  const entries = options.dryRun ? keys.map((key) => ({ path: key, action: planPathRevert(key, records[key]!) })) : openRepositoryGate(env, repository).revertPaths(keys);
-  return entries.map(revertItem);
 }
 
 export function runConfigGc(env: NodeJS.ProcessEnv, options: { readonly dryRun?: boolean; readonly now?: Date } = {}): ConfigCommandResult {
@@ -137,13 +109,11 @@ export function buildConfigCommand(): Command {
     .option('--show-values', 'Also print text that the ledger proves rh wrote; any other value prints as its size and hash')
     .option('--json', 'Output JSON')
     .action((path: string, opts: { json?: boolean; showValues?: boolean }) => emit(runConfigDiff(process.env, resolve(path), { showValues: opts.showValues }), opts.json));
-  config.command('restore [path]').description("Revert rh's changes in one file, or in one repository with --repo")
-    .option('--repo <dir>', "Revert rh's recorded files in the worktree of this repository")
+  config.command('restore <path>').description("Revert rh's changes in one file")
     .option('--owner <id>', 'Revert only the fragments of this owner')
     .option('--dry-run', 'Report the revert and write nothing')
     .option('--json', 'Output JSON')
-    .action((path: string | undefined, opts: { json?: boolean; owner?: string; dryRun?: boolean; repo?: string }) =>
-      emit(runConfigRestore(process.env, path === undefined ? undefined : resolve(path), { owner: opts.owner, dryRun: opts.dryRun, repo: opts.repo === undefined ? undefined : resolve(opts.repo) }), opts.json));
+    .action((path: string, opts: { json?: boolean; owner?: string; dryRun?: boolean }) => emit(runConfigRestore(process.env, resolve(path), { owner: opts.owner, dryRun: opts.dryRun }), opts.json));
   config.command('gc').description('Delete vault copies of reverts that finished 30 days ago and that no record references')
     .option('--dry-run', 'List the copies and delete nothing')
     .option('--json', 'Output JSON')

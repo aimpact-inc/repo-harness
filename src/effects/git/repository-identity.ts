@@ -19,7 +19,6 @@
  * | task-agent session key | sha256(JSON[repository id, task, role]) | `taskSessionKey` |
  * | task-workspace key | sha256(JSON[repository id, worktree id]) | `taskWorkspaceKey` |
  * | gates directory | sha256(worktree id), 64 hex | `gatesDirectoryName` |
- * | host-config repository ledger directory | sha256(repository id), 64 hex | `hostConfigRepositoryKey` |
  * | registry repo id | `repo_` + sha256(canonical registered root), 16 hex | `repoHarnessRepoIdFor` in `repo-registry.ts` |
  *
  * Gates are worktree-scoped on purpose: an acceptance receipt binds the source
@@ -69,9 +68,4 @@ export function taskWorkspaceKey(repositoryId: string, worktreeId: string): stri
 
 export function gatesDirectoryName(worktreeId: string): string {
   return sha256Hex(worktreeId);
-}
-
-/** One ledger per clone: every linked worktree of the clone shares it (#2854 D5). */
-export function hostConfigRepositoryKey(repositoryId: string): string {
-  return sha256Hex(repositoryId);
 }

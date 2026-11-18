@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, cpSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "fs";
 import { spawnSync } from "child_process";
 import { createHash } from "crypto";
 import { tmpdir } from "os";
@@ -10,10 +10,7 @@ import { GITIGNORE_MANAGED_BLOCK_CONTENT } from "../../src/effects/adoption/giti
 import { isRepoHarnessSourceCheckout } from "../../src/effects/source-checkout";
 import { applyAdoptionPlan, rollbackAdoptionTransaction } from "../../src/effects/fs-transaction";
 import type { AdoptionOperation, AdoptionPlan } from "../../src/core/adoption/operations";
-import { planRepoAdoption, renderApplyReport, runAdoptionApply, runAdoptionPlan } from "../../src/cli/commands/adoption-plan";
-import { runConfigRestore } from "../../src/cli/commands/config";
-import { shellQuote } from "../../src/core/shell-quote";
-import { planRepositoryHookStrips } from "../../src/effects/upgrade/repository-hooks";
+import { planRepoAdoption, renderApplyReport, runAdoptionApply } from "../../src/cli/commands/adoption-plan";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const FS_TRANSACTION = join(ROOT, "src/effects/fs-transaction.ts");
@@ -377,9 +374,8 @@ describe("canonical adoption plan", () => {
     }
   });
 
-  test("init retires exact legacy runtime and strips managed adapters through the repository gate; rh config restore --repo puts the hook files back", () => {
+  test("one transaction retires exact legacy runtime and managed adapters, preserves mismatches, and rolls back", () => {
     const repo = tempRepo();
-    const home = tempDir();
     try {
       cpSync(join(HRD09_LEGACY_FIXTURE, ".ai"), join(repo, ".ai"), { recursive: true });
       cpSync(join(HRD09_LEGACY_FIXTURE, "scripts"), join(repo, "scripts"), { recursive: true });
@@ -429,16 +425,9 @@ describe("canonical adoption plan", () => {
       expect(scheduledRetirements).not.toContain(modifiedPath);
       expect(plan.warnings.some((warning) => warning.code === "known-generated-fingerprint-mismatch" && warning.message.includes(modifiedPath))).toBe(true);
 
-      // The init path: the transaction, then the repository gate strips the hook files.
-      const hookFiles = [".codex/hooks.json", ".claude/settings.json"];
-      chmodSync(join(repo, ".codex/hooks.json"), 0o640);
-      const before = hookFiles.map((path) => ({ bytes: readFileSync(join(repo, path)), mode: statSync(join(repo, path)).mode & 0o777 }));
-      const env = { HOME: home };
-      expect(runAdoptionPlan({ repo, mode: "standard", explicitRepo: true, env }).output).toContain(`[init-plan] hook cleanup: .claude/settings.json (undo: rh config restore --repo ${shellQuote(repo)})`);
-      const init = runAdoptionApply({ repo, mode: "standard", explicitRepo: true, env }).report;
-      expect(init.ok, JSON.stringify(init.errors)).toBe(true);
-      expect(init.hookCleanup?.paths).toEqual([".claude/settings.json", ".codex/hooks.json"]);
-      expect(renderApplyReport(init)).toContain(`[init] hook cleanup: .codex/hooks.json (undo: rh config restore --repo ${shellQuote(repo)})`);
+      const apply = applyAdoptionPlan(plan);
+      expect(apply.ok).toBe(true);
+      expect(apply.transactionManifestPath).toBeDefined();
       for (const path of retirement.paths) {
         expect(existsSync(join(repo, path))).toBe(path === modifiedPath);
       }
@@ -450,29 +439,14 @@ describe("canonical adoption plan", () => {
       const claudeAfter = readFileSync(join(repo, ".claude/settings.json"), "utf8");
       expect(claudeAfter).not.toContain("run-hook.sh");
       expect(claudeAfter).toContain("permissions");
-      // No copy of the hook files before the strip is in the working tree; the repository ledger keeps them outside it.
-      const backups = join(repo, ".ai/harness/backups");
-      const copies = existsSync(backups) ? readdirSync(backups, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile()).map((entry) => readFileSync(join(entry.parentPath, entry.name))) : [];
-      for (const { bytes } of before) expect(copies.some((copy) => copy.equals(bytes))).toBe(false);
-      expect(readdirSync(join(home, ".repo-harness/config/repos"))).toHaveLength(1);
 
-      expect(runConfigRestore(env, join(repo, ".ai/hooks/prompt-guard.sh"), { repo }).lines).toEqual([`[config] rh records no repository file at ${join(repo, ".ai/hooks/prompt-guard.sh")}`]);
-      const restore = runConfigRestore(env, undefined, { repo });
-      expect(restore.exitCode, restore.lines.join("\n")).toBe(0);
-      hookFiles.forEach((path, index) => expect({ bytes: readFileSync(join(repo, path)), mode: statSync(join(repo, path)).mode & 0o777 }).toEqual(before[index]!));
-      // Without a record in this worktree, a restore stops with a named error and writes nothing.
-      expect(runConfigRestore(env, undefined, { repo }).lines).toEqual([`[config] rh records no repository file in ${realpathSync(repo)}`]);
-      const other = tempRepo();
-      try {
-        expect(runConfigRestore(env, undefined, { repo: other })).toMatchObject({ exitCode: 2, json: { error: `rh records no repository file for ${realpathSync(other)}` } });
-      } finally { cleanup(other); }
-
-      // The transaction rollback still brings back the retired runtime.
-      expect(rollbackAdoptionTransaction({ repoRoot: repo, transaction: init.apply!.transactionManifestPath! }).ok).toBe(true);
+      const rollback = rollbackAdoptionTransaction({ repoRoot: repo, transaction: apply.transactionManifestPath! });
+      expect(rollback.ok).toBe(true);
       for (const path of retirement.paths) expect(existsSync(join(repo, path))).toBe(true);
+      expect(JSON.parse(readFileSync(join(repo, ".codex/hooks.json"), "utf8"))).toEqual(codexBefore);
+      expect(JSON.parse(readFileSync(join(repo, ".claude/settings.json"), "utf8"))).toEqual(claudeBefore);
     } finally {
       cleanup(repo);
-      cleanup(home);
     }
   }, 30_000);
 
@@ -552,7 +526,7 @@ describe("canonical adoption plan", () => {
     }
   });
 
-  test("the hook cleanup plan removes only released hooks by text edits and keeps a file that it cannot edit exactly", () => {
+  test("hook cleanup removes only released hooks by text edits and keeps a file that it cannot edit exactly", () => {
     const repo = tempRepo();
     try {
       mkdirSync(join(repo, ".claude"), { recursive: true });
@@ -581,14 +555,15 @@ describe("canonical adoption plan", () => {
         expect(plan.warnings).toContainEqual({ code: "hook-settings-not-editable", message: `Preserving .codex/hooks.json: ${reason}`, risk: "medium" });
         expect(applyAdoptionPlan(plan).ok).toBe(true);
         expect(readFileSync(join(repo, ".codex/hooks.json")).toString("base64")).toBe(bytes.toString("base64"));
-        expect(planRepositoryHookStrips(repo).map((strip) => [strip.path, strip.next.toString("utf8")])).toEqual([[".claude/settings.json", before.replace(`${released}, `, "")]]);
       }
+      expect(readFileSync(join(repo, ".claude/settings.json"), "utf8")).toBe(before.replace(`${released}, `, ""));
 
       // The v0.1.2 Codex context-pressure hook goes; the user's own entry beside it keeps its bytes.
       const pressure = renderings.find((entry) => String(entry.hook.command).includes("HOOK_HOST=codex") && String(entry.hook.command).endsWith("context-pressure-hook.sh"))!;
       const sibling = '{"matcher":"Bash","note":"mine","hooks":[]}';
       writeFileSync(join(repo, ".codex/hooks.json"), `{"hooks":{"${pressure.event}":[{"hooks":[${JSON.stringify(pressure.hook)}]},${sibling}]}}\n`);
-      expect(planRepositoryHookStrips(repo).find((strip) => strip.path === ".codex/hooks.json")?.next.toString("utf8")).toBe(`{"hooks":{"${pressure.event}":[${sibling}]}}\n`);
+      expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true })).ok).toBe(true);
+      expect(readFileSync(join(repo, ".codex/hooks.json"), "utf8")).toBe(`{"hooks":{"${pressure.event}":[${sibling}]}}\n`);
     } finally {
       cleanup(repo);
     }

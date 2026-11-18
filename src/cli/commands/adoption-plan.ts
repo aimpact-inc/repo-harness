@@ -6,7 +6,6 @@ import { planAdoption } from "../../effects/adoption/plan";
 import { ReviewBaseUnresolvedError } from "../../effects/adoption/standard-plan";
 import { renderAdoptionPlanJson, renderAdoptionPlanObject, renderAdoptionPlanText } from "../../core/adoption/render";
 import { applyAdoptionPlan, type ApplyAdoptionPlanResult } from "../../effects/fs-transaction";
-import { planRepositoryHookStrips, stripRepositoryHookFiles } from "../../effects/upgrade/repository-hooks";
 import { registerRepoHarnessRepo, type RepoHarnessRegisterResult } from "../../effects/repo-registry";
 import { validateRepoAdoptionTarget } from "../repo-adoption/target";
 
@@ -32,18 +31,7 @@ export interface AdoptionApplyReport {
   readonly plan: Record<string, unknown>;
   readonly apply?: ApplyAdoptionPlanResult;
   readonly registration?: RepoHarnessRegisterResult;
-  /** The hook files that the gate stripped after the transaction; the transaction rollback does not cover them. */
-  readonly hookCleanup?: HookCleanup;
   readonly errors?: readonly { readonly code: string; readonly message: string }[];
-}
-
-export interface HookCleanup {
-  readonly paths: readonly string[];
-  readonly restore: string;
-}
-
-function hookCleanup(repoRoot: string, paths: readonly string[]): HookCleanup {
-  return { paths, restore: `rh config restore --repo ${shellQuote(repoRoot)}` };
 }
 
 export interface RunAdoptionApplyResult extends RunAdoptionPlanResult {
@@ -108,12 +96,10 @@ export function runAdoptionPlan(opts: RunAdoptionPlanOptions): RunAdoptionPlanRe
   const created = createPlan(opts);
   if (created.error) return created.error;
   const plan = created.plan!;
-  const strips = planRepositoryHookStrips(created.repoRoot).map((strip) => strip.path);
-  if (opts.json === true) {
-    return { exitCode: 0, output: strips.length ? `${JSON.stringify({ ...renderAdoptionPlanObject(plan), hookCleanup: hookCleanup(created.repoRoot, strips) }, null, 2)}\n` : renderAdoptionPlanJson(plan) };
-  }
-  const restore = hookCleanup(created.repoRoot, strips).restore;
-  return { exitCode: 0, output: `${renderAdoptionPlanText(plan)}${strips.map((path) => `[init-plan] hook cleanup: ${path} (undo: ${restore})\n`).join("")}` };
+  return {
+    exitCode: 0,
+    output: opts.json === true ? renderAdoptionPlanJson(plan) : renderAdoptionPlanText(plan),
+  };
 }
 
 export function renderApplyReport(report: AdoptionApplyReport, json = false): string {
@@ -157,7 +143,6 @@ export function renderApplyReport(report: AdoptionApplyReport, json = false): st
       }
     }
   }
-  for (const path of report.hookCleanup?.paths ?? []) lines.push(`[init] hook cleanup: ${path} (undo: ${report.hookCleanup!.restore})`);
   if (report.registration) {
     lines.push(`[init] registry: ${report.registration.registered ? "registered" : "skipped"}${report.registration.reason ? ` - ${report.registration.reason}` : ""}`);
   }
@@ -193,17 +178,8 @@ export function runAdoptionApply(opts: RunAdoptionPlanOptions): RunAdoptionApply
     return { exitCode: 2, output: renderApplyReport(report, opts.json === true), report };
   }
   const apply = applyAdoptionPlan({ ...plan, apply: true });
-  let cleanup: HookCleanup | undefined;
-  const errors: { code: string; message: string }[] = [];
-  if (apply.ok) {
-    try { cleanup = hookCleanup(created.repoRoot, stripRepositoryHookFiles(created.repoRoot, { env: opts.env ?? process.env, record: "ledger" })); }
-    catch (error) {
-      // A file stripped before the failure keeps its record; the restore command puts it back.
-      errors.push({ code: "hook_cleanup_failed", message: `${error instanceof Error ? error.message : String(error)}; undo a stripped file with: ${hookCleanup(created.repoRoot, []).restore}` });
-    }
-  }
   const registration = apply.ok ? registerRepoHarnessRepo(created.repoRoot, "init", { env: opts.env }) : undefined;
-  const ok = apply.ok && !errors.length && (registration === undefined || registration.registered || registration.reason === "already registered");
+  const ok = apply.ok && (registration === undefined || registration.registered || registration.reason === "already registered");
   const report: AdoptionApplyReport = {
     protocol: 1,
     command: "init",
@@ -213,8 +189,6 @@ export function runAdoptionApply(opts: RunAdoptionPlanOptions): RunAdoptionApply
     plan: renderAdoptionPlanObject(plan),
     apply,
     registration,
-    ...(cleanup?.paths.length ? { hookCleanup: cleanup } : {}),
-    ...(errors.length ? { errors } : {}),
   };
   return { exitCode: ok ? 0 : 1, output: renderApplyReport(report, opts.json === true), report };
 }

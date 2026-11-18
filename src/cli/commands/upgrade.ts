@@ -12,6 +12,7 @@ import {
   hookFileRemovals,
   hookLocation,
   planLegacyLeftovers,
+  removeLegacyHookCommands,
   type LeftoverItem,
 } from '../../effects/upgrade/legacy-inventory';
 import {
@@ -48,7 +49,6 @@ import {
 import { ownedPath, pathRecordIsCurrent, pathRecordKey, readPathRecords } from '../../effects/host-config/path-records';
 import { stageInstalledSkillCopy } from '../installer/skill-sync';
 import { openHostConfigGate } from '../../effects/host-config/gate';
-import { stripRepositoryHookFiles, type HookStripRecord } from '../../effects/upgrade/repository-hooks';
 import { hostConfigPaths, replaceTarget, resolveHostPath } from '../../effects/host-config/store';
 import type { OwnedPathLookup } from '../../effects/upgrade/legacy-inventory';
 import { HostConfigError, type Sha256 } from '../../core/host-config/types';
@@ -77,8 +77,6 @@ export interface UpgradeOptions {
   readonly includeStateArtifacts?: boolean;
   /** False skips the legacy sibling worktree check and removal. Default true. */
   readonly legacyWorktreeCleanup?: boolean;
-  /** Where a stripped repository hook file is recorded (#2854 D7). Default `ledger`. */
-  readonly repositoryHookRecord?: HookStripRecord;
   readonly env?: NodeJS.ProcessEnv;
 }
 
@@ -293,7 +291,6 @@ function applyLocked(
   lockedProjectPaths: ReadonlySet<string>,
   runtimeLock: RuntimeTransactionContext,
   decisions: readonly UpgradeDecision[],
-  repositoryHookRecord: HookStripRecord,
 ): UpgradeResult {
   const planned = planUpgrade(options, decisions);
   const operatorKept = planned.operatorKept;
@@ -309,9 +306,7 @@ function applyLocked(
   if (candidates.length === 0) return { items, apply: true, exitCode: 0, removedPaths, refreshedPaths, keptPaths, operatorKept };
   const transactionId = randomUUID();
   const globalPaths = [...new Set(candidates.filter((item) => item.location === 'global').map((item) => item.path))];
-  // A repository hook file goes through the repository gate after the other targets, so no copy of it lands in the working tree.
-  const repositoryHooks = [...new Set(candidates.filter((item) => item.location === 'project' && item.surface === 'hook-entry').map((item) => item.path))];
-  const projectPaths = [...new Set(candidates.filter((item) => item.location === 'project' && item.surface !== 'hook-entry').map((item) => item.path))];
+  const projectPaths = [...new Set(candidates.filter((item) => item.location === 'project').map((item) => item.path))];
   const gateRefreshPaths = new Set(candidates.filter(item => item.location === 'global' && item.action === 'refresh').map(item => item.path));
   const globalHookEdits = candidates.some(item => item.location === 'global' && item.surface === 'hook-entry');
   const earlierRecords = options.installOwnership();
@@ -384,10 +379,12 @@ function applyLocked(
       // A global hook file is a gate file: the gate removes the legacy commands and records the file.
       let gateRemovals: readonly HookCommandPosition[] | undefined;
       if (targetItems[0]!.surface === 'hook-entry') {
-        const hookFile = hookFileRemovals(readFileSync(path), path, hookLocation('global', options));
+        const location = targetItems[0]!.location;
+        const hookFile = hookFileRemovals(readFileSync(path), path, hookLocation(location, options));
         if ('refused' in hookFile) throw new Error(`hook settings can no longer be edited: ${path}`);
         if (hookFile.removals.length === 0) continue;
-        gateRemovals = hookFile.removals;
+        if (location === 'global') gateRemovals = hookFile.removals;
+        else nextContent = removeLegacyHookCommands(hookFile.content, hookFile.removals);
       }
       // Check the full target snapshot immediately before the destructive write.
       if (!targetItems.every((item) => unchanged(item, options))
@@ -427,14 +424,6 @@ function applyLocked(
           ...(nextContent === undefined ? {} : { kind: 'writeFile', contentHash: legacyPathSnapshot(path)?.contentHash }),
         };
         writeProjectManifest(options.cwd, projectBackup);
-      }
-    }
-    if (repositoryHooks.length) {
-      const stripped = new Set(stripRepositoryHookFiles(options.cwd, { env, record: repositoryHookRecord, runtimeLock }).map((path) => join(options.cwd, path)));
-      for (const path of repositoryHooks) {
-        if (stripped.has(path)) { removedPaths.push(path); continue; }
-        keptPaths.push(path);
-        for (const item of candidates.filter((candidate) => candidate.path === path)) items[items.indexOf(item)] = { ...item, action: 'report', reason: 'Target changed before mutation.' };
       }
     }
     if ([...gateRefreshPaths].some(path => refreshedPaths.includes(path))) {
@@ -550,7 +539,7 @@ export function runUpgrade(opts: UpgradeOptions = {}, dependencies: UpgradeDepen
     return finish(withRuntimeTransactionLock(globalRuntimeScope(env), (lock) => {
       const underHostLock = planUpgrade(options, decisions).items;
       const paths = [...new Set(underHostLock.filter((item) => item.location === 'project' && removable(item)).map((item) => item.path))].sort();
-      return withProjectLocks(paths, () => applyLocked(options, env, dependencies, () => lock.assertOwned(), new Set(paths), lock, decisions, opts.repositoryHookRecord ?? 'ledger'));
+      return withProjectLocks(paths, () => applyLocked(options, env, dependencies, () => lock.assertOwned(), new Set(paths), lock, decisions));
     }));
   } catch (error) {
     return { items: [], apply, exitCode: 1, removedPaths: [], refreshedPaths: [], keptPaths: [], operatorKept: [], error: error instanceof Error ? error.message : String(error) };

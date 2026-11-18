@@ -439,7 +439,7 @@ function refreshInWorktree(path: string, worktree: string, base: RefreshBase, ow
   // The transaction records stay in the worktree, which is removed, so no rollback command is reported.
   const init = initApplyResult(applied.ok, planned.plan.summary.plannedTotal, { ...applied, transactionManifestPath: undefined }, []);
   if (!init.ok) return { path, status: 'failed', init, error: `init refresh failed: ${init.errors?.join('; ') || 'not ok'}` };
-  const upgrade = runUpgrade({ cwd: worktree, callerCwd, scope: 'project', apply: true, env, legacyWorktreeCleanup: false, repositoryHookRecord: 'commit' });
+  const upgrade = runUpgrade({ cwd: worktree, callerCwd, scope: 'project', apply: true, env, legacyWorktreeCleanup: false });
   if (upgrade.error) return { path, status: 'failed', init, upgrade, error: `project upgrade failed: ${upgrade.error}` };
 
   const step = (args: readonly string[]): string => {
