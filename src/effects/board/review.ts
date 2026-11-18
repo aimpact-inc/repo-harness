@@ -6,7 +6,7 @@ import type { BoardCommentPageV1 } from '../../core/board/source';
 import type { SeatConfigV1, SeatId } from '../../core/board/seats-settings';
 import type { SeatRouteV1 } from '../../core/board/seat-routing';
 import { gitSpawnSync, withoutRepositorySelectingGitEnv } from '../git/runner';
-import { HerdrCoreError, herdrAppDo } from '../terminal/herdr-core';
+import { HERDR_APP_NOT_SENT, HerdrCoreError, herdrAppDo } from '../terminal/herdr-core';
 import { acquireExclusiveDirectoryLock, ExclusiveLockContentionError } from '../locking/exclusive-directory-lock';
 import { repoHarnessHome } from '../repo-harness-home';
 import { effectiveGatekeeper, seatAccountQuotas } from '../../core/board/seat-routing';
@@ -75,9 +75,6 @@ function markerBody(decision: StartDecision, start: ReviewSeatStartV1): string {
   return [REVIEW_START_HEADER, `Subject: ${decision.head_sha}`, `Seat: ${start.seat}`, `PR: #${decision.pr}`, `Reading: ${reading}`].join('\n');
 }
 
-/** Failures that stop `tab.new` before it sends a request. Any other failure may follow a created tab. */
-const NOT_SENT: ReadonlySet<string> = new Set(['missing', 'nested', 'invalid_labels', 'invalid_address']);
-
 /**
  * Start each required seat of each `start` decision: refuse unless the writer's worktree is at the head, then post the seat's head
  * marker and open its tab. A launch that failed before any request releases that seat's marker only, so a retry starts that seat
@@ -103,7 +100,7 @@ export async function executeReview(decisions: readonly ReviewDecisionV1[], cont
       try {
         ports.openTab({ ...(launch.tab === null ? {} : { name: launch.tab }), space: context.space, folder: worktree.path, argv: launch.argv, task: reviewPacket(decision, start, launch.runtime) });
       } catch (error) {
-        if (!(error instanceof HerdrCoreError) || NOT_SENT.has(error.reason)) {
+        if (!(error instanceof HerdrCoreError) || HERDR_APP_NOT_SENT.has(error.reason)) {
           ports.comment(decision.pr, `${REVIEW_START_STATUS_HEADER}\nClaim: ${markerUrl}\nStatus: released`);
           throw error;
         }

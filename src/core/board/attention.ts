@@ -45,7 +45,7 @@ const WORKER_SEATS = new Set<string>(WORKER_SEAT_IDS);
 const REVIEW_SEATS = new Set<string>(SEAT_IDS.filter(isReviewSeat));
 const RED_CONCLUSIONS = new Set(['failure', 'timed_out', 'startup_failure']);
 
-export type BoardRuleId = 'A1' | 'A3' | 'A4' | 'A5' | 'A6' | 'A7' | 'A8' | 'A9' | 'A10' | 'A11' | 'A12' | 'A13' | 'A14' | 'A15' | 'A16' | 'A17' | 'A18' | 'A19' | 'A20' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R6' | 'R7';
+export type BoardRuleId = 'A1' | 'A3' | 'A4' | 'A5' | 'A6' | 'A7' | 'A8' | 'A9' | 'A10' | 'A11' | 'A12' | 'A13' | 'A14' | 'A15' | 'A16' | 'A17' | 'A18' | 'A19' | 'A20' | 'A21' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R6' | 'R7';
 export type BoardAttentionRoute = 'orchestrator' | 'advisor';
 /** P0: a seat cannot continue. P1: a worker or an issue waits for the coordinator, or a High change has a lower tier. P2: a pull request or the plan waits. P3: housekeeping. */
 export type BoardPriority = 'P0' | 'P1' | 'P2' | 'P3';
@@ -59,7 +59,7 @@ export const BOARD_PRIORITY_ORDER: readonly BoardPriority[] = Object.freeze(['P0
  */
 export const BOARD_RULE_PRIORITY: Readonly<Record<BoardRuleId, BoardPriority>> = Object.freeze({
   A1: 'P2', A3: 'P0', A4: 'P1', A5: 'P1', A6: 'P1', A7: 'P2', A8: 'P3', A9: 'P3', A10: 'P2', A11: 'P2',
-  A12: 'P1', A13: 'P1', A14: 'P2', A15: 'P2', A16: 'P1', A17: 'P1', A18: 'P2', A19: 'P1', A20: 'P2',
+  A12: 'P1', A13: 'P1', A14: 'P2', A15: 'P2', A16: 'P1', A17: 'P1', A18: 'P2', A19: 'P1', A20: 'P2', A21: 'P1',
   R1: 'P2', R2: 'P2', R3: 'P1', R4: 'P2', R5: 'P1', R6: 'P1', R7: 'P2',
 });
 
@@ -288,6 +288,21 @@ function a9(context: Context): void {
     if (pr?.state !== 'merged') continue;
     find(context, 'A9', { issues: terminal.issue === null ? [] : [terminal.issue], pull_requests: [pr.number], terminals: [terminal.address] },
       `${terminal.seat} ${terminal.address} of merged #${pr.number} is still open; run rh board closeout --pr ${pr.number}`);
+  }
+}
+
+/**
+ * A21: a live seat has no Herdr.app pane (#3166), so the person cannot see its progress. `hc run --bg` starts such a seat;
+ * `rh board dispatch`, `rh board review` and `rh seats launch` open a tab. The host read leaves out the watcher terminals.
+ */
+function a21(context: Context): void {
+  const execution = context.board.execution;
+  if (execution.status === 'unavailable') return skip(context, 'A21', execution.reason);
+  for (const terminal of liveSeats(execution.terminals)) {
+    if (terminal.where !== null) continue;
+    const subject = terminal.pr !== null ? ` of #${terminal.pr}` : terminal.issue !== null ? ` of #${terminal.issue}` : '';
+    find(context, 'A21', { issues: terminal.issue === null ? [] : [terminal.issue], pull_requests: terminal.pr === null ? [] : [terminal.pr], terminals: [terminal.address] },
+      `${terminal.seat} ${terminal.address}${subject} has no Herdr.app pane: give it one with herdr-app do terminal.keep '{"terminal":"${terminal.address}"}'`);
   }
 }
 
@@ -622,7 +637,7 @@ export function renderAttentionText(attention: BoardAttentionV1): string {
 
 export function evaluateBoardAttention(board: BoardV1): BoardAttentionV1 {
   const context: Context = { board, now: Date.parse(board.observed_at), findings: [], unevaluated: [] };
-  for (const rule of [a1, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, r1, r2, r3, r4, r5, r6, r7]) rule(context);
+  for (const rule of [a1, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, r1, r2, r3, r4, r5, r6, r7]) rule(context);
   return Object.freeze({
     protocol: BOARD_ATTENTION_PROTOCOL,
     kind: BOARD_ATTENTION_KIND,

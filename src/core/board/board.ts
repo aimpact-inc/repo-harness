@@ -149,6 +149,8 @@ export type BoardTerminalV1 = {
   readonly status_msg: string | null;
   readonly status_ms: number | null;
   readonly turn: number;
+  /** The Herdr.app `space / tab` that shows the terminal; null when no pane shows it, so the person cannot see the seat (#3166). */
+  readonly where: string | null;
   /** The current branch of the terminal's working directory; null for a detached HEAD, a missing directory or a failed read. */
   readonly branch: string | null;
 } & (
@@ -171,6 +173,8 @@ export interface BoardSeatTerminalReadV1 {
   readonly turn: number;
   /** The working directory that hc reports, when it reports one. */
   readonly cwd: string | null;
+  /** The Herdr.app `where` label; null when no Herdr.app pane shows the terminal. */
+  readonly where: string | null;
   readonly labels: { readonly seat?: string; readonly issue?: string; readonly pr?: string; readonly parent?: string };
 }
 
@@ -304,11 +308,12 @@ const GATEKEEPER_REVIEWS: ReadonlySet<unknown> = new Set<BoardGatekeeperReviewV1
 
 const SWITCH_VALUES: ReadonlySet<unknown> = new Set<BoardAcceptanceMergeV1>(['off', 'on', 'unknown']);
 
-/** The `branch` and `status_msg` checks of the board and the parent list decoders: an absent value is a refusal, and null is the explicit none. The error never repeats a refused message. */
+/** The `branch`, `where` and `status_msg` checks of the board and the parent list decoders: an absent value is a refusal, and null is the explicit none. The error never repeats a refused message. */
 export function checkSeatTerminals(terminals: unknown): void {
   if (!Array.isArray(terminals)) throw new Error('board seat terminals are not a list');
-  for (const { address, branch, status_msg } of terminals as readonly BoardTerminalV1[]) {
+  for (const { address, branch, where, status_msg } of terminals as readonly BoardTerminalV1[]) {
     if (branch !== null && (typeof branch !== 'string' || branch === '')) throw new Error(`invalid board seat branch on ${address}: ${String(branch)}`);
+    if (where !== null && (typeof where !== 'string' || where === '')) throw new Error(`invalid board seat where on ${address}: ${String(where)}`);
     if (!isSeatStatusMessage(status_msg)) throw new Error(`invalid board seat status message on ${address}`);
   }
 }

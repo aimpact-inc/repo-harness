@@ -464,6 +464,10 @@ test('replay: the recorded #1474 reads project to a board, and its findings come
     ['A16', 'orchestrator', [], []],
     ['A16', 'orchestrator', [], []],
     ['A16', 'orchestrator', [], []],
+    // The recorded seats carry no Herdr.app `where` label, so no pane shows them.
+    ['A21', 'orchestrator', [1499], ['t1']],
+    ['A21', 'orchestrator', [1491], ['t2']],
+    ['A21', 'orchestrator', [], ['t3']],
     ['R2', 'advisor', [1494, 1499], []],
   ]);
   // t4 has no seat label: the board does not guess its seat. The plan comment has no block, so R1 and R4 wait.
@@ -921,7 +925,7 @@ test('each attention finding names its priority, and a delivery sorts the entrie
   // The priority has one source, and the record names every rule of the protocol.
   expect(BOARD_RULE_PRIORITY).toEqual({
     A1: 'P2', A3: 'P0', A4: 'P1', A5: 'P1', A6: 'P1', A7: 'P2', A8: 'P3', A9: 'P3', A10: 'P2', A11: 'P2',
-    A12: 'P1', A13: 'P1', A14: 'P2', A15: 'P2', A16: 'P1', A17: 'P1', A18: 'P2', A19: 'P1', A20: 'P2',
+    A12: 'P1', A13: 'P1', A14: 'P2', A15: 'P2', A16: 'P1', A17: 'P1', A18: 'P2', A19: 'P1', A20: 'P2', A21: 'P1',
     R1: 'P2', R2: 'P2', R3: 'P1', R4: 'P2', R5: 'P1', R6: 'P1', R7: 'P2',
   });
   expect(attention.findings.map(finding => [finding.rule, finding.priority])).toContainEqual(['A3', 'P0']);
@@ -1628,6 +1632,19 @@ test('A20 fires for a required check that is pending or missing past the thresho
   expect(a20(board({ required_check: { status: 'success', completed_at: at(MIN), contexts }, head_committed_at: at(A20_STUCK_MS + MIN) }))).toEqual([[], []]);
   expect(a20(board({ required_check: { status: 'unavailable', reason: 'protection_unreadable' }, head_committed_at: at(A20_STUCK_MS + MIN) })))
     .toEqual([[], [['protection_unreadable', '#1494']]]);
+});
+
+test('A21 fires for a live seat that no Herdr.app pane shows: the host read maps the where label, and a bound seat does not fire', () => {
+  const labels = { 'repo-harness.repository': '1186405141', 'repo-harness.seat': 'worker', 'repo-harness.parent': '1474' };
+  const hc = watchHc({ FAKE_LS: ['t1', 't2'].map(address => ({ address, state: 'live' })), FAKE_TERMINALS: {
+    t1: { labels: { ...labels, 'repo-harness.issue': '1476', 'herdr.space': 'sp1', where: 'repo-harness / #1474' } },
+    t2: { labels: { ...labels, 'repo-harness.issue': '1477' } },
+  } });
+  const read = boardHostPorts(hc.options).seatTerminals('1186405141');
+  expect(read.status === 'observed' && read.terminals.map(terminal => [terminal.address, terminal.where])).toEqual([['t1', 'repo-harness / #1474'], ['t2', null]]);
+  const attention = evaluateBoardAttention(replay({ host: boardHostPorts(hc.options) }));
+  expect(attention.findings.filter(finding => finding.rule === 'A21').map(finding => [finding.message, finding.issues, finding.terminals, finding.priority, finding.route]))
+    .toEqual([[`worker t2 of #1477 has no Herdr.app pane: give it one with herdr-app do terminal.keep '{"terminal":"t2"}'`, [1477], ['t2'], 'P1', 'orchestrator']]);
 });
 
 test('R2 counts every shared file, the changelog fragments included', () => {
@@ -2351,7 +2368,7 @@ test('board closeout: proofs come first; a bound, clean, pushed seat closes and 
   git(unpushed, 'commit', '-q', '--allow-empty', '-m', 'local only');
   writeFileSync(join(edited, 'note.txt'), 'draft');
   const terminal = (address: string, cwd: string | null, labels: Record<string, string>, state: 'live' | 'finished' = 'live', seat: string | null = 'worker') => ({ address, name: null, agent: 'claude-code', state, status: 'done',
-    status_kind: null, status_msg: null, status_ms: null, turn: 1, cwd, labels: { ...(seat === null ? {} : { seat }), ...labels } });
+    status_kind: null, status_msg: null, status_ms: null, turn: 1, cwd, where: 'repo-harness / #1474', labels: { ...(seat === null ? {} : { seat }), ...labels } });
   const terminals = [terminal('t1', clean, { issue: '11' }), terminal('t2', clean, { seat: 'gatekeeper', pr: '21' }), terminal('t3', join(root, 'gone-caller'), { seat: 'orchestrator' }, 'finished'),
     terminal('t4', kept, { issue: '12' }), terminal('t5', unpushed, { seat: 'reviewer', pr: '22' }), terminal('t6', kept, { issue: '12', pr: '99' }),
     terminal('t7', edited, { seat: 'gatekeeper', pr: '22' }), terminal('t8', main, { seat: 'reviewer', pr: '23' }), terminal('t9', main, { seat: 'reviewer', pr: '24' }),

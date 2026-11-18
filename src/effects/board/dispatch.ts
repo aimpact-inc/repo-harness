@@ -3,7 +3,7 @@ import type { BoardHostPortsV1 } from '../../core/board/board';
 import { effectiveSeatConfig, seatAccountQuotas } from '../../core/board/seat-routing';
 import { withSeatLine } from '../../core/board/seat-line';
 import type { SeatConfigV1, SeatId } from '../../core/board/seats-settings';
-import { HerdrCoreError, herdrAppDo } from '../terminal/herdr-core';
+import { HERDR_APP_NOT_SENT, HerdrCoreError, herdrAppDo } from '../terminal/herdr-core';
 import { runInternalHelper } from '../runtime/helper-runner';
 import { readQuotaReport } from './quota';
 import { readSeatsConfiguration } from './seats-configuration';
@@ -79,9 +79,6 @@ function packet(decision: DispatchedV1, worktree: string, claimUrl: string): str
   return `Task: issue #${decision.issue} (${decision.title}). Worktree: ${worktree}. Claim: ${claimUrl}. Read the issue body and every comment first: gh issue view ${decision.issue} --comments. Work as the writer of repo-harness-issue-flow and report to the orchestrator when done. Authority: ${WORKER_AUTHORITY}`;
 }
 
-/** Failures that stop `tab.new` before it sends a request. Any other failure (a timeout, an unreadable answer) may follow a created tab. */
-const NOT_SENT: ReadonlySet<string> = new Set(['missing', 'nested', 'invalid_labels', 'invalid_address']);
-
 function releaseClaim(ports: DispatchPorts, issue: number, claimUrl: string): void {
   ports.comment(issue, `repo-harness issue claim status\nClaim: ${claimUrl}\nStatus: released`);
 }
@@ -108,7 +105,7 @@ export async function executeDispatch(plan: DispatchPlanV1, context: { readonly 
         ...(launch.tab === null ? {} : { name: launch.tab }), space: context.space, folder: worktree.path, argv: launch.argv, task: packet(decision, worktree.path, claimUrl),
       });
     } catch (error) {
-      if (error instanceof HerdrCoreError && NOT_SENT.has(error.reason)) {
+      if (error instanceof HerdrCoreError && HERDR_APP_NOT_SENT.has(error.reason)) {
         releaseClaim(ports, decision.issue, claimUrl);
         throw error;
       }
