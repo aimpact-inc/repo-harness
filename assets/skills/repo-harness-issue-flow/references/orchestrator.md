@@ -291,6 +291,21 @@ module is in the title so that a list view shows the write scopes.
   does not grant publication, deletion or credential authority.
   For the Herdr pane topology, follow
   [Herdr Dispatch](https://github.com/aimpact-inc/repo-harness/blob/main/docs/reference-configs/herdr-notify.md#herdr-dispatch).
+- Open every worker and reviewer seat in a Herdr.app tab, so the owner
+  can see its progress: `rh board dispatch`, `rh board review`, or
+  `rh seats launch <seat> --cwd <worktree> --task <packet>` with the label
+  flags of `rh seats argv` for a standalone issue, a fix round or a stacked
+  writer. `rh seats launch` takes the space from `--space` or from the
+  `herdr.space` label of your own terminal, and fails closed when Herdr.app
+  opens no tab. Never start a seat with `hc run --bg`: that terminal has no
+  pane. Attention rule A21 names each live seat that no pane shows; give it
+  a pane with `herdr-app do terminal.keep`, or close and relaunch it.
+- Remote topology: Herdr.app runs on one machine, and `herdr-app` on any
+  other machine has no window. When the coordinated space is on another
+  machine's window (`--space <machine>/sp...`), run the dispatch and launch
+  commands from the machine that runs Herdr.app, so the worker tabs appear
+  in that space. A coordinator that runs on a machine without the window
+  cannot open a seat tab; it does not fall back to a headless terminal.
 
 ### 7.1 Quota check
 
@@ -298,8 +313,8 @@ Before each dispatch wave, run `rh quota`. It prints the account
 states, one mode line per account and one route line per task class. For
 example: `claude mode: saving (5% left < 20%)` and
 `codex mode: normal (68% left)`. Launch each task on the seat its
-route line names with `rh seats argv <seat>`; state the boundary
-in the task. A `none` route waits, or it changes through the seats
+route line names with `rh seats launch <seat>` (it uses the
+argv of `rh seats argv <seat>`); state the boundary in the task. A `none` route waits, or it changes through the seats
 configuration: the owner sets the seat order and each fallback there, and
 the route line then names the first eligible seat. When the gatekeeper
 account is exhausted and a `gatekeeper-fallback` seat is configured, the

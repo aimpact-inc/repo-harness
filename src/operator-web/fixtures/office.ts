@@ -43,11 +43,11 @@ function pullRequest(number: number, head_ref: string, required_check: BoardPull
 }
 
 function worker(now: number, address: string, agent: string, status: string, issue: number | null, pr: number | null, branch: string | null): Extract<BoardTerminalV1, { readonly seat_status: 'observed' }> {
-  return { address, name: null, agent, state: 'live', status, status_kind: null, status_msg: null, status_ms:now, turn: 1, branch, seat_status: 'observed', seat: 'worker', issue, pr };
+  return { address, name: null, agent, state: 'live', status, status_kind: null, status_msg: null, status_ms:now, turn: 1, where: 'repo-harness / #1474', branch, seat_status: 'observed', seat: 'worker', issue, pr };
 }
 
 function lead(address: string, agent: string, seat: string): BoardParentsSeatV1 {
-  return { address, name: null, agent, state: 'live', status: 'idle', status_kind: null, status_msg: null, status_ms:null, turn: 1, branch: null, seat_status: 'observed', seat, issue: null, pr: null, parent: null };
+  return { address, name: null, agent, state: 'live', status: 'idle', status_kind: null, status_msg: null, status_ms:null, turn: 1, where: 'repo-harness / #1474', branch: null, seat_status: 'observed', seat, issue: null, pr: null, parent: null };
 }
 
 const accepted = (at: string): BoardPullRequestV1['acceptance'] => ({ status: 'accepted', via: 'record', accepted_at: at, evidence_url: `${url('pull', OFFICE_PARENT)}#issuecomment-2` });
@@ -183,7 +183,7 @@ const IDLE_ROOMS: Readonly<Record<string, string>> = {
 function sampleParents(room: SampleRoom, repository: string, now: number) {
   const observed_at = new Date(now).toISOString();
   const seat = (address: string, agent: string | null, status: string, role: string, parent: string | null): BoardParentsSeatV1 =>
-    ({ address, name: null, agent, state: 'live', status, status_kind: null, status_msg: null, status_ms:null, turn: 1, branch: null, seat_status: 'observed', seat: role, issue: null, pr: null, parent });
+    ({ address, name: null, agent, state: 'live', status, status_kind: null, status_msg: null, status_ms:null, turn: 1, where: 'repo-harness / #1474', branch: null, seat_status: 'observed', seat: role, issue: null, pr: null, parent });
   return documents({
     protocol: BOARD_PARENTS_PROTOCOL, kind: 'repo-harness.board-parents', observed_at, repository,
     parents: [{ number: room.parent, title: room.name, url: `https://github.com/${repository}/issues/${room.parent}`, updated_at: observed_at, sub_issues: { total: 6, completed: 2 } }],

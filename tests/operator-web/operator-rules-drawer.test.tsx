@@ -64,7 +64,7 @@ function snapshot({ herdr = 'ready', task = null, evidence = false }: { readonly
 
 const SEATS: BoardSeatsV1 = {
   protocol: 1, kind: 'repo-harness.board-seats', observed_at: new Date(NOW).toISOString(), repository_id: '987654',
-  seats: [{ address: 'w1:t1', name: 'advisor', agent: 'claude', state: 'live', status: 'idle', status_kind: null, status_msg: null, status_ms: null, turn: 0, branch: null, seat_status: 'observed', seat: 'advisor', issue: null, pr: null, parent: null }],
+  seats: [{ address: 'w1:t1', name: 'advisor', agent: 'claude', state: 'live', status: 'idle', status_kind: null, status_msg: null, status_ms: null, turn: 0, where: 'repo-harness / #1474', branch: null, seat_status: 'observed', seat: 'advisor', issue: null, pr: null, parent: null }],
 };
 
 async function mount(hash: string, rules: ReturnType<typeof snapshot>, extra: Partial<OperatorAppProps> = {}): Promise<void> {

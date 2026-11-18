@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { existsSync } from 'node:fs';
-import { dirname, join } from 'path';
+import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { CLAUDE_BUILTIN_AGENT_TYPES, SeatPaneNameError, buildSeatLaunch, seatPaneName, seatTabName, type SeatLaunchV1 } from '../../core/board/seat-launch';
 import { LAUNCH_SEAT_IDS, SeatsConfigMigrationRequiredError, decodeSeatsConfig, isReviewSeat, isWorkerSeat, unavailablePiSeat, type LaunchSeatId, type SeatConfigV1, type SeatsConfigV1 } from '../../core/board/seats-settings';
@@ -14,7 +14,7 @@ import { gitExecFileSync } from '../../effects/git/runner';
 import { githubRemoteRepository } from '../../core/board/source';
 import { ClaudeAgentTypesError, claudeHostAgentTypes } from '../../effects/board/claude-agent-types';
 import { RepoHarnessRegistryStrictError, canonicalRepoPath, readRepoHarnessRegistryStrictSnapshot, repoCheckoutProbeEnv, setRepoHarnessPanePrefix } from '../../effects/repo-registry';
-import { HerdrCoreError, RH_LABEL, hcLabel, hcLabelPairs, type HcLabels } from '../../effects/terminal/herdr-core';
+import { HERDR_APP_LABEL, HERDR_APP_NOT_SENT, HerdrCoreError, RH_LABEL, hcGet, hcLabel, hcLabelPairs, herdrAppDo, type HcLabels } from '../../effects/terminal/herdr-core';
 import { bunGlobalPackageRoot } from '../installer/skill-projection';
 import { PiFleetRolesError, writePiFleetRoles } from '../../effects/board/pi-fleet-roles';
 import { PiShellError, assertPiShell } from '../../effects/board/pi-shell';
@@ -25,7 +25,7 @@ import { seatResetAction, seatResetIdentity, seatResetSteps, type SeatResetIdent
 const CLI_ENTRY = fileURLToPath(new URL('../index.ts', import.meta.url));
 
 class SeatsCommandError extends Error {
-  constructor(readonly code: 'seat_unknown' | 'seat_not_configured' | 'seat_quota_exhausted' | 'seat_quota_reserved' | 'seat_provider_unavailable' | 'seat_model_repeats_gatekeeper' | 'owner_exception_invalid' | 'config_invalid' | 'label_value_invalid' | 'repository_id_required' | 'terminal_unknown' | 'seat_identity_missing' | 'seat_session_unknown' | 'seat_context_unknown' | 'pi_extension_missing', message: string) {
+  constructor(readonly code: 'seat_unknown' | 'seat_not_configured' | 'seat_quota_exhausted' | 'seat_quota_reserved' | 'seat_provider_unavailable' | 'seat_model_repeats_gatekeeper' | 'owner_exception_invalid' | 'config_invalid' | 'label_value_invalid' | 'repository_id_required' | 'terminal_unknown' | 'seat_identity_missing' | 'seat_session_unknown' | 'seat_context_unknown' | 'pi_extension_missing' | 'seat_space_missing' | 'seat_tab_failed' | 'seat_tab_unknown', message: string) {
     super(message);
   }
 }
@@ -279,6 +279,75 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   } };
 }
 
+/** The space of the calling terminal: Herdr.app writes it as a label on each terminal that a pane shows. */
+function callerSpace(env: NodeJS.ProcessEnv): string {
+  const terminal = env.HC_TERMINAL_ID;
+  const missing = (why: string) => new SeatsCommandError('seat_space_missing', `No Herdr.app space: ${why}. Pass --space <id>, or run the launch in a terminal that a Herdr.app pane shows.`);
+  if (!terminal) throw missing('HC_TERMINAL_ID is not set');
+  let space: string | undefined;
+  try { space = hcGet(terminal, { env }).labels[HERDR_APP_LABEL.space]; } catch (error) {
+    if (error instanceof HerdrCoreError) throw missing(`hc cannot read terminal ${terminal} (${error.message})`);
+    throw error;
+  }
+  if (space === undefined) throw missing(`terminal ${terminal} has no ${HERDR_APP_LABEL.space} label, so no Herdr.app pane shows it`);
+  return space;
+}
+
+interface SeatTabInput {
+  readonly cwd: string;
+  readonly task: string;
+  readonly space?: string;
+  readonly focus: boolean;
+}
+
+/**
+ * `seats launch` (#3166): open the `seats argv` launch in a Herdr.app tab. A seat that no pane shows is invisible to the
+ * person, so a refused tab fails the launch and no headless terminal starts in its place.
+ */
+async function seatTabLaunch(seat: string, labels: SeatLabelInput, input: SeatTabInput, env: NodeJS.ProcessEnv = process.env): Promise<{
+  readonly launch: SeatLaunchResult; readonly space: string; readonly placement: Record<string, unknown>;
+}> {
+  const space = input.space ?? callerSpace(env);
+  const launch = await seatLaunch(seat, labels, env, input.cwd);
+  const args = { ...(launch.tab === null ? {} : { name: launch.tab }), space, folder: input.cwd, argv: launch.argv, task: input.task, focus: input.focus };
+  try {
+    return { launch, space, placement: herdrAppDo('tab.new', args, { env }) };
+  } catch (error) {
+    if (!(error instanceof HerdrCoreError)) throw error;
+    if (HERDR_APP_NOT_SENT.has(error.reason)) {
+      throw new SeatsCommandError('seat_tab_failed', `Herdr.app opened no tab in space ${space}: ${error.message}. No seat started. Run the launch on the machine that shows the Herdr.app window.`);
+    }
+    throw new SeatsCommandError('seat_tab_unknown', `Herdr.app did not confirm the tab in space ${space}: ${error.message}. The tab may exist: check hc ls before a retry. No headless seat was started.`);
+  }
+}
+
+/** The `ok: false` line of `seats argv` and `seats launch`. */
+function writeLaunchError(error: unknown): void {
+  const code = error instanceof SeatsCommandError || error instanceof ClaudeAgentTypesError || error instanceof PiFleetRolesError || error instanceof PiShellError || error instanceof SeatPaneNameError
+    || error instanceof RepoHarnessRegistryStrictError || error instanceof SeatsConfigMigrationRequiredError ? error.code : 'seat_launch_failed';
+  process.stderr.write(`${JSON.stringify({ ok: false, error: code, message: (error as Error).message,
+    ...(error instanceof SeatsConfigMigrationRequiredError ? { next_action: error.next_action } : {}) })}\n`);
+  process.exitCode = 1;
+}
+
+/** The label and pane name options that `seats argv` and `seats launch` share. */
+function withSeatLabelOptions(command: Command): Command {
+  return command
+    .argument('<seat>', LAUNCH_SEAT_IDS.join('|'))
+    .option('--repository-id <id>', 'GitHub numeric repository id; the argv then labels its own terminal before the agent starts')
+    .option('--issue <n>', 'Issue number for the seat labels')
+    .option('--pr <n>', 'PR number for the seat labels')
+    .option('--parent <n>', 'Parent issue number for the seat labels and the tab name')
+    .option('--release <digits>', 'Release item of a worker pane name, for example 0252 for rh-w-rel0252')
+    .option('--qualifier <word>', 'Slice word of a worker pane name when one issue has two live worker panes')
+    .option('--owner-exception <url>', 'Owner decision URL on an issue or PR of this repository: lifts the Claude quota reservation for this one launch; needs --repository-id');
+}
+
+const labelInput = (options: SeatLabelInput): SeatLabelInput => ({
+  repositoryId: options.repositoryId, issue: options.issue, pr: options.pr, parent: options.parent, release: options.release, qualifier: options.qualifier,
+  ownerException: options.ownerException,
+});
+
 /**
  * `seats handoff`: an on-demand reset. It records a reset request for the current session, as the Stop hook does at
  * the threshold, so the peer's `seats reset` accepts the handoff, and returns the steps that the hook prints.
@@ -304,31 +373,16 @@ export function seatHandoff(env: NodeJS.ProcessEnv = process.env, now = new Date
 /** `loadNotify` comes from the composition root, only when peer-runtime is selected. */
 export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): Command {
   const seats = new Command('seats').description('Seat launch commands for Herdr panes');
-  seats
+  withSeatLabelOptions(seats
     .command('argv')
-    .description('Print the argv that starts a seat, from the seats section of ~/.repo-harness/config.json')
-    .argument('<seat>', LAUNCH_SEAT_IDS.join('|'))
-    .option('--repository-id <id>', 'GitHub numeric repository id; the argv then labels its own terminal before the agent starts')
-    .option('--issue <n>', 'Issue number for the seat labels')
-    .option('--pr <n>', 'PR number for the seat labels')
-    .option('--parent <n>', 'Parent issue number for the seat labels and the tab name')
-    .option('--release <digits>', 'Release item of a worker pane name, for example 0252 for rh-w-rel0252')
-    .option('--qualifier <word>', 'Slice word of a worker pane name when one issue has two live worker panes')
-    .option('--owner-exception <url>', 'Owner decision URL on an issue or PR of this repository: lifts the Claude quota reservation for this one launch; needs --repository-id')
+    .description('Print the argv that starts a seat, from the seats section of ~/.repo-harness/config.json'))
     .option('--json', 'Print the argv, the seat brief, the source, the limits, the labels, the pane name and the tab name as JSON')
     .action(async (seat: string, options: SeatLabelInput & { json?: boolean }) => {
       let launch: Awaited<ReturnType<typeof seatLaunch>>;
       try {
-        launch = await seatLaunch(seat, {
-          repositoryId: options.repositoryId, issue: options.issue, pr: options.pr, parent: options.parent, release: options.release, qualifier: options.qualifier,
-          ownerException: options.ownerException,
-        }, process.env, process.cwd());
+        launch = await seatLaunch(seat, labelInput(options), process.env, process.cwd());
       } catch (error) {
-        const code = error instanceof SeatsCommandError || error instanceof ClaudeAgentTypesError || error instanceof PiFleetRolesError || error instanceof PiShellError || error instanceof SeatPaneNameError
-          || error instanceof RepoHarnessRegistryStrictError || error instanceof SeatsConfigMigrationRequiredError ? error.code : 'seat_launch_failed';
-        process.stderr.write(`${JSON.stringify({ ok: false, error: code, message: (error as Error).message,
-          ...(error instanceof SeatsConfigMigrationRequiredError ? { next_action: error.next_action } : {}) })}\n`);
-        process.exitCode = 1;
+        writeLaunchError(error);
         return;
       }
       if (options.json === true) {
@@ -345,6 +399,25 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
       if (launch.labels.length > 0) process.stderr.write(`labels: ${launch.labels.join(' ')}\n`);
       if (launch.name !== null) process.stderr.write(`name: ${launch.name}\ntab: ${launch.tab}\n`);
       if (launch.ownerException !== null) process.stderr.write(`owner exception: ${launch.ownerException}\n`);
+    });
+  withSeatLabelOptions(seats
+    .command('launch')
+    .description('Open a seat in a Herdr.app tab with the argv of seats argv; fails closed when Herdr.app opens no tab'))
+    .requiredOption('--cwd <path>', 'Working directory of the seat, usually its worktree')
+    .requiredOption('--task <text>', 'First message of the seat')
+    .option('--space <id>', 'Herdr space that receives the tab; default: the herdr.space label of the calling terminal')
+    .option('--focus', 'Show the new tab at once')
+    .option('--json', 'Print the launch, the space and the Herdr.app placement as JSON')
+    .action(async (seat: string, options: SeatLabelInput & { cwd: string; task: string; space?: string; focus?: boolean; json?: boolean }) => {
+      let result: Awaited<ReturnType<typeof seatTabLaunch>>;
+      try {
+        result = await seatTabLaunch(seat, labelInput(options), { cwd: resolve(options.cwd), task: options.task, space: options.space, focus: options.focus === true }, process.env);
+      } catch (error) {
+        writeLaunchError(error);
+        return;
+      }
+      process.stdout.write(options.json === true ? `${JSON.stringify({ ok: true, ...result }, null, 2)}\n`
+        : `${JSON.stringify({ ok: true, seat, name: result.launch.name, tab: result.launch.tab, space: result.space, placement: result.placement })}\n`);
     });
   seats
     .command('label')

@@ -102,6 +102,8 @@ export const RH_LABEL = {
   /** A resident repo-harness program that is not a seat (#1509). */
   service: 'repo-harness.service',
 } as const;
+/** The keys that Herdr.app writes on a terminal that it shows in a pane: its space and the `space / tab` text. hc projects `where` as a top-level field only in `ls`. */
+export const HERDR_APP_LABEL = { space: 'herdr.space', where: 'where' } as const;
 /** `repo-harness.role` values. A surface that needs a new role adds it here. */
 export const RH_ROLE = { notifyRelay: 'notify-relay', taskSession: 'task-session' } as const;
 /** Terminals that carry this pair send blocked and done notices through the relay. */
@@ -504,6 +506,9 @@ export function herdrAppCommand(command: HerdrAppPlacement, args: Readonly<Recor
   return ['herdr-app', 'do', command, JSON.stringify(args)];
 }
 
+/** Failures that stop a `herdr-app do` placement before it sends a request. Any other failure (a timeout, an unreadable answer) may follow a created tab. */
+export const HERDR_APP_NOT_SENT: ReadonlySet<HerdrCoreErrorReason> = new Set<HerdrCoreErrorReason>(['missing', 'nested', 'invalid_labels', 'invalid_address']);
+
 /** `herdr-app do <command> <json>`: place a tab or pane in the person's window. Returns the created IDs. */
 export function herdrAppDo(command: HerdrAppPlacement, args: Readonly<Record<string, unknown>>, options: HerdrCoreOptions = {}): Record<string, unknown> {
   const [program, ...rest] = herdrAppCommand(command, args);
@@ -515,7 +520,7 @@ export function boardSeatTerminals(terminals: readonly (HcTerminal & { readonly 
   return terminals.filter(terminal => terminal.labels[RH_LABEL.service] === undefined).map(terminal => ({
     address: terminal.address, name: terminal.name, agent: terminal.agent, state: terminal.state, status: terminal.status?.state ?? null,
     status_kind: terminal.status?.kind ?? null, status_msg: terminal.status?.msg ?? null, status_ms: terminal.status_ms ?? null,
-    turn: terminal.turn, cwd: terminal.cwd ?? null,
+    turn: terminal.turn, cwd: terminal.cwd ?? null, where: terminal.labels[HERDR_APP_LABEL.where] ?? null,
     labels: { seat: terminal.labels[RH_LABEL.seat], issue: terminal.labels[RH_LABEL.issue], pr: terminal.labels[RH_LABEL.pr], parent: terminal.labels[RH_LABEL.parent] },
   }));
 }
