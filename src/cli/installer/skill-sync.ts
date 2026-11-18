@@ -1,5 +1,5 @@
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { hashManagedTree, installedCopyTreeOptions, managedTreeEntries, OWNER_MARKER } from '../../effects/managed-tree';
 import { parseSkillSurfaceCatalog } from '../../core/skill-surface/catalog';
 import { parsePluginList, PLUGIN_IDS } from '../../core/skill-surface/plugin-manifest';
@@ -27,12 +27,14 @@ export function stageInstalledSkillCopy(source: string, surface: 'canonical-skil
 export function syncInstalledSkillCopies(sourceRoot: string, env: NodeJS.ProcessEnv, transaction?: string,
   script = join(sourceRoot, 'scripts', 'sync-codex-installed-copies.sh')) {
   requireHome(env);
+  // The planner and the shell writer build link targets from this one root string; an adopted link must be the link that the writer writes.
+  const packageRoot = resolve(sourceRoot);
   const selection = env.REPO_HARNESS_INSTALL_PLUGINS;
   const plugins = selection === undefined ? PLUGIN_IDS : selection === '' ? [] : parsePluginList(selection);
-  const manifest = join(sourceRoot, 'assets/skill-commands/manifest.json');
+  const manifest = join(packageRoot, 'assets/skill-commands/manifest.json');
   const catalog = parseSkillSurfaceCatalog(readFileSync(manifest, 'utf8'), { declared: true });
   if (catalog.status !== 'valid') throw new Error('invalid skill-surface catalog: ' + manifest);
-  const { declared, retired } = planSkillSync(plugins, env, catalog.catalog);
+  const { declared, retired } = planSkillSync(plugins, env, catalog.catalog, packageRoot);
   return withHostConfigTransaction(env, transaction, root => {
     let result: ReturnType<typeof runProcess> | undefined;
     openHostConfigGate({ env }).delegate(declared, () => {
@@ -42,8 +44,8 @@ export function syncInstalledSkillCopies(sourceRoot: string, env: NodeJS.Process
       const retiredFile = join(plan, 'retired-paths');
       atomicWriteFileSync(declaredFile, declared.map(entry => entry.path).join('\n') + '\n', { mode: 0o600 });
       atomicWriteFileSync(retiredFile, retired.join('\n') + '\n', { mode: 0o600 });
-      result = runProcess(env.REPO_HARNESS_SYNC_SHELL ?? 'bash', [script], { cwd: sourceRoot, env: { ...env,
-        BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0', REPO_HARNESS_SOURCE_ROOT: sourceRoot, REPO_HARNESS_SYNC_DECLARED_PATHS_FILE: declaredFile,
+      result = runProcess(env.REPO_HARNESS_SYNC_SHELL ?? 'bash', [script], { cwd: packageRoot, env: { ...env,
+        BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0', REPO_HARNESS_SOURCE_ROOT: packageRoot, REPO_HARNESS_SYNC_DECLARED_PATHS_FILE: declaredFile,
         REPO_HARNESS_SYNC_RETIRED_PATHS_FILE: retiredFile } });
       if (!result.ok) throw new Error(result.stderr || result.error || 'skill sync failed');
     }, { transaction: root });
