@@ -173,9 +173,10 @@ A bot finding that arrives after the merge is triaged once: `decline`, or,
 for a P0 or P1, `adopt` as a new issue under the batch parent. The merged PR is not
 reopened.
 
-The merge executor still refuses a PR with an unresolved thread
-(`unresolved_threads`). The change is who resolves a bot thread, not the
-gate.
+The merge executor refuses a PR with a review-bot thread that is not
+resolved and has no reply from an author that is not a bot
+(`unanswered_bot_threads`). A reply is enough; the thread does not have to
+be resolved.
 
 ## 3. Findings
 
