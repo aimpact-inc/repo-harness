@@ -227,6 +227,7 @@ Agent: <kind>, session <id>     # required
 Runtime: <claude|codex|pi>      # required on a writer claim
 Model: <model id>               # on a dispatched writer claim when the seat config names a model
 Branch: <type>/<issue>-<slug>   # required
+Issues: #<a>, #<b>, #<c>        # on a bundle claim: every issue of the bundle, this issue included
 Scope: <what this claim covers> # required
 Not in scope: <what it leaves>  # required
 Coordinator: <parent claim URL> # required on a dispatched writer claim
@@ -253,8 +254,11 @@ Every template below ends with the line `Seat: <seat id> <hc address>` when a se
 
 `issue claim` is seat-only. The coordinator posts it, including the
 claim of each agent it dispatches. A bundle claim
-(`rh board claim --issues <a>,<b>,<c>`) puts one claim with the same
-`Agent:` and `Branch:` on each issue of the bundle. Such a claim names the agent in
+(`rh board dispatch --issues <a>,<b>,<c>`) puts one claim with the same
+`Agent:`, `Branch:` and `Issues:` line on each issue of the bundle. The board
+reads `Issues:` as one writer for the whole bundle (attention rules A4, A12
+and A13, and the merge order); a line that does not parse or omits its own
+issue makes the claim unknown. Such a claim names the agent in
 `Agent:` and the coordinator's own claim in `Coordinator:`. Any other
 agent's claim is a request, not a claim role. A claim is valid only from an
 account whose `author_association` is `OWNER`, `MEMBER` or
@@ -500,7 +504,7 @@ equal.
 ```text
 Role: worker (read references/worker.md of repo-harness-issue-flow)
 Goal: <one sentence>
-Closes: #<a>, #<b>, #<c>
+Closes: #<a>, #<b>, #<c>        # the PR body has one "Closes #<n>" line for each; "Closes #a, #b" closes only #a
 Slot: <PR slot or "whole bundle">
 Files: <exact file boundary>
 Decisions: <design choices already made>
