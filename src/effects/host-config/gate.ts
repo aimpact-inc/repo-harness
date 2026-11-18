@@ -36,7 +36,7 @@ import {
   hostConfigPathsAt,
   missingDirectories,
   observeFile,
-  parseLedger,
+  parseSnapshotLedger,
   hostPathKey,
   pathRecordOf,
   putVault,
@@ -1038,7 +1038,7 @@ const fragmentKey = (record: FragmentRecord): string => `${record.owner}\0${reco
  */
 export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer | null, transaction: string): HostConfigRollbackResult {
   const paths = hostConfigPathsAt(harness);
-  const before = snapshot === null ? EMPTY_LEDGER : parseLedger(snapshot, `${paths.ledger} (transaction snapshot)`);
+  const before = snapshot === null ? EMPTY_LEDGER : parseSnapshotLedger(snapshot, `${paths.ledger} (transaction snapshot)`);
   const now = readLedger(paths);
   const unresolved: string[] = [];
   const files = { ...before.files };

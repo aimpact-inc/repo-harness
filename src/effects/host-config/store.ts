@@ -295,7 +295,16 @@ export function readProjectedLedger(paths: HostConfigPaths): HostConfigLedger {
   const { observation, bytes } = observeFile(paths.ledger);
   if (!observation.existed) return EMPTY_LEDGER;
   if (bytes === null) throw invalidState(`the ledger is not a regular file: ${paths.ledger}`);
-  return movedLedger(parseJson(bytes, paths.ledger)) ?? parseLedger(bytes, paths.ledger);
+  return parseSnapshotLedger(bytes, paths.ledger);
+}
+
+/**
+ * A transaction's ledger snapshot: the parent took it before a candidate of
+ * a newer package moved the ledger, so it can be an older protocol. It reads
+ * as the move leaves it.
+ */
+export function parseSnapshotLedger(bytes: Buffer, label: string): HostConfigLedger {
+  return movedLedger(parseJson(bytes, label)) ?? parseLedger(bytes, label);
 }
 
 /** The path records of `readProjectedLedger`. */

@@ -621,3 +621,13 @@ test('a fragment already at its inverse loses its record with no write: a remove
   expect(f.gate().revert([path])).toEqual([{ path, action: 'released' }]);
   expect([readFileSync(path, 'utf8'), statSync(path).mtimeMs, f.ledger().files, f.ledger().fragments]).toEqual(['{\n  "x": "user",\n  "later": true\n}\n', edited, {}, []]);
 });
+
+test('a rollback reads a ledger snapshot of an older protocol, which a parent took before a newer candidate moved the ledger', () => {
+  const f = fixture();
+  f.gate().apply([f.change(f.b, 'on')]);
+  const { retired: _retired, recovery: _recovery, ...older } = f.ledger();
+  const snapshot = Buffer.from(JSON.stringify({ ...older, protocol: 2 }));
+  f.gate().apply([f.change(f.a, 'on')]);
+  expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
+  expect([readFileSync(f.a, 'utf8'), f.ledger()]).toEqual(['keep=1\n', { ...older, protocol: 3, retired: [], recovery: [] }]);
+});
