@@ -82,23 +82,37 @@ function stat(path: string): ReturnType<typeof lstatSync> | null {
   }
 }
 
-/** Check the authority and all descendants without resolving a symlink. */
+/**
+ * Check the authority and all descendants without resolving a symlink. An
+ * entry that rh cannot inspect (EACCES, EPERM, ELOOP) is not safe, so the
+ * caller reports or skips that path and the inventory goes on.
+ */
 export function isLegacyPathSafe(root: string, path: string, allowLeafSymlink = true): boolean {
   const authority = resolve(root);
   const target = resolve(path);
   const rel = relative(authority, target);
   if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return false;
-  const rootStat = stat(authority);
-  if (rootStat?.isSymbolicLink() || (rootStat && !rootStat.isDirectory())) return false;
-  let current = authority;
-  const parts = rel.split(sep);
-  for (let index = 0; index < parts.length; index++) {
-    current = join(current, parts[index]!);
-    const entry = stat(current);
-    if (entry?.isSymbolicLink() && !(allowLeafSymlink && index === parts.length - 1)) return false;
-    if (entry && index < parts.length - 1 && !entry.isDirectory()) return false;
+  try {
+    const rootStat = stat(authority);
+    if (rootStat?.isSymbolicLink() || (rootStat && !rootStat.isDirectory())) return false;
+    let current = authority;
+    const parts = rel.split(sep);
+    for (let index = 0; index < parts.length; index++) {
+      current = join(current, parts[index]!);
+      const entry = stat(current);
+      if (entry?.isSymbolicLink() && !(allowLeafSymlink && index === parts.length - 1)) return false;
+      if (entry && index < parts.length - 1 && !entry.isDirectory()) return false;
+    }
+  } catch (error) {
+    if (inaccessible(error)) return false;
+    throw error;
   }
   return true;
+}
+
+/** An error that keeps rh from inspecting or reading one path: the inventory reports that path and goes on. */
+function inaccessible(error: unknown): boolean {
+  return ['EACCES', 'EPERM', 'ELOOP'].includes((error as NodeJS.ErrnoException).code ?? '');
 }
 
 export interface LegacyPathSnapshot {
@@ -291,15 +305,6 @@ export function hookFileRemovals(bytes: Buffer, path: string, options: HookLocat
   }
 }
 
-/** The bytes of a hook file, or null when the path is not a regular file that rh can read. */
-function readHookFile(path: string): Buffer | null {
-  if (!stat(path)?.isFile()) return null;
-  try { return readFileSync(path); } catch (error) {
-    if (['EACCES', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')) return null;
-    throw error;
-  }
-}
-
 /** The adoption plan's rewrite of a repository hook file; it drops every empty hook entry and event. */
 export function stripLegacyHookEntries(value: unknown, options: HookLocationOptions = {}): { config: Record<string, unknown>; removed: readonly { event: string; command: string }[] } {
   const removals = legacyHookRemovals(value, options);
@@ -381,7 +386,7 @@ function refreshItem(
 ): LeftoverItem | null {
   const root = location === 'project' ? options.cwd : options.home;
   const base = { location, surface, path, retiredBy: surface === 'skill' ? 'current-package-skill' : action.id ?? 'stale-project-copy' };
-  if (!isLegacyPathSafe(root, path)) return { ...base, ownership: 'unowned', proof: null, action: 'report', reason: 'Copy path has a protected symlink or non-directory ancestor.' };
+  if (!isLegacyPathSafe(root, path)) return { ...base, ownership: 'unowned', proof: null, action: 'report', reason: 'Copy path has a protected symlink, a non-directory ancestor or an entry that rh cannot inspect.' };
   const snapshot = legacyPathSnapshot(path);
   if (!snapshot) return null;
   const expectedSourceHash = hashUpgradeSource(sourcePath, options.packageRoot, sourceSurface);
@@ -720,7 +725,7 @@ export function planLegacyLeftovers(options: LegacyInventoryOptions): { items: L
       const path = resolve(root, contractPath);
       const base = { location, path, retiredBy: `${action.retiredBy ?? ''} ${action.id ?? 'retired-asset'}`.trim() };
       if (!isLegacyPathSafe(root, path)) {
-        add({ ...base, surface: action.surface ?? 'file', ownership: 'unowned', proof: null, action: 'report', reason: 'Path has a protected symlink or non-directory ancestor.' });
+        add({ ...base, surface: action.surface ?? 'file', ownership: 'unowned', proof: null, action: 'report', reason: 'Path has a protected symlink, a non-directory ancestor or an entry that rh cannot inspect.' });
         continue;
       }
       const snapshot = legacyPathSnapshot(path);
@@ -741,12 +746,20 @@ export function planLegacyLeftovers(options: LegacyInventoryOptions): { items: L
     const root = resolve(location === 'project' ? options.cwd : options.home);
     for (const name of ['.claude/settings.json', '.codex/hooks.json']) {
       const path = join(root, name);
-      if (!isLegacyPathSafe(root, path, false)) {
-        if (stat(dirname(path))) add({ location, surface: 'hook-entry', path, retiredBy: hookRetirement, ownership: 'unowned', proof: null, action: 'report', reason: 'Hook path has a protected symlink ancestor.' });
-        continue;
+      // Null when the path is not a regular file that rh can inspect and read.
+      let bytes: Buffer | null;
+      try {
+        if (!isLegacyPathSafe(root, path, false)) {
+          if (stat(dirname(path))) add({ location, surface: 'hook-entry', path, retiredBy: hookRetirement, ownership: 'unowned', proof: null, action: 'report', reason: 'Hook path has a protected symlink ancestor or an entry that rh cannot inspect.' });
+          continue;
+        }
+        const entry = stat(path);
+        if (!entry) continue;
+        bytes = entry.isFile() ? readFileSync(path) : null;
+      } catch (error) {
+        if (!inaccessible(error)) throw error;
+        bytes = null;
       }
-      if (!stat(path)) continue;
-      const bytes = readHookFile(path);
       const hookFile = bytes && hookFileRemovals(bytes, path, hookLocation(location, options));
       if (!hookFile) {
         add({ location, surface: 'hook-entry', path, retiredBy: hookRetirement, ownership: 'unowned', proof: null, action: 'report', reason: 'Invalid hook settings; preserve current bytes.' });

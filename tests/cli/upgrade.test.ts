@@ -449,7 +449,24 @@ describe('upgrade with real release bytes', () => {
       if (item.path === names[1]) { writeFileSync(names[0]!, '{"user":"edit"}'); throw new Error('injected'); }
     } });
     expect({ exitCode: changed.exitCode, rolledBack: lastAudit().rolled_back_paths, file: readFileSync(names[0]!, 'utf8') }).toEqual({ exitCode: 1, rolledBack: [], file: '{"user":"edit"}' });
-    expect(changed.error).toContain('the target changed');
+    expect(changed.error).toContain(`${names[0]}: the target changed before the write: ${names[0]}; the file before the cleanup is kept at`);
+
+    // The ledger rollback fails and keeps the record of the cleanup, so the file keeps the cleanup too.
+    writeFileSync(names[0]!, original);
+    let cleaned = '';
+    try {
+      const unresolved = runUpgrade({ ...opts, scope: 'global', apply: true }, { beforeRemove(item) {
+        if (item.path !== names[1]) return;
+        cleaned = readFileSync(names[0]!, 'utf8');
+        chmodSync(config, 0o500);
+        throw new Error('injected');
+      } });
+      expect(unresolved.error).toContain(`${names[0]}: the ledger still records the cleanup, so the file keeps it`);
+    } finally { chmodSync(config, 0o700); }
+    expect(cleaned).not.toBe(original);
+    expect(readFileSync(names[0]!, 'utf8')).toBe(cleaned);
+    expect(JSON.parse(readFileSync(join(config, 'ledger.json'), 'utf8')).files[names[0]!].committed.sha256)
+      .toBe(`sha256:${new Bun.CryptoHasher('sha256').update(cleaned).digest('hex')}`);
   }, false));
 
   const RETIRED_RC_FIXTURE = join(FIXTURES, 'retired-flow-reference-configs');
@@ -655,11 +672,13 @@ describe('upgrade with real release bytes', () => {
     expect(after).not.toContain('repo-harness hook SessionStart');
 
     // The text edits cannot place the removal (a repeated event key, a repeated command key that JSON.parse reads
-    // as its last value) or read the file (a Latin-1 byte in a user string): the file is reported and keeps its bytes.
+    // as its last value), cannot remove the whole command (a user field beside a legacy command) or cannot read the
+    // file (a Latin-1 byte in a user string): the file is reported and keeps its bytes.
     const quality = '{"command":"repo-harness hook Stop --route quality"}';
     const kept = [
       Buffer.from(`{"hooks":{"Stop":[],"Stop":[{"hooks":[${quality}]}]}}`),
       Buffer.from('{"hooks":{"Stop":[{"hooks":[{"command":"echo user","command":"repo-harness hook Stop --route quality"}]}]}}'),
+      Buffer.from('{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"repo-harness hook Stop --route quality","statusMessage":"mine"}]}]}}'),
       Buffer.concat([Buffer.from('{"note":"caf'), Buffer.from([0xe9]), Buffer.from(`","hooks":{"Stop":[{"hooks":[${quality}]}]}}`)]),
     ];
     const ledgerPath = join(opts.home, '.repo-harness/config/ledger.json');
@@ -672,9 +691,13 @@ describe('upgrade with real release bytes', () => {
         expect({ file: readFileSync(target).toString('base64'), ledger: readFileSync(ledgerPath).toString('base64') }).toEqual({ file: bytes.toString('base64'), ledger: ledger.toString('base64') });
       }
     }
-    // A directory at the hook path is reported; the inventory goes on.
+    // A directory at the hook path, and a hook path below a directory that rh cannot search, are reported; the inventory goes on.
     rmSync(path); mkdirSync(path);
-    expect(runUpgrade({ ...opts, scope: 'global' }).items.filter((item) => item.path === path)).toEqual([expect.objectContaining({ action: 'report', reason: 'Invalid hook settings; preserve current bytes.' })]);
+    const reportedPath = (reason: string) => expect(planLegacyLeftovers({ ...opts, scope: 'global', installOwnership: () => () => null }).items
+      .filter((item) => item.path === path)).toEqual([expect.objectContaining({ action: 'report', reason })]);
+    reportedPath('Invalid hook settings; preserve current bytes.');
+    chmodSync(dirname(path), 0o000);
+    try { reportedPath('Hook path has a protected symlink ancestor or an entry that rh cannot inspect.'); } finally { chmodSync(dirname(path), 0o755); }
   }, false));
 
   test('unrecorded historical copies are reported and both clean and edited bytes stay', () => sandbox((opts) => {

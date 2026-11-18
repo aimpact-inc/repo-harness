@@ -327,8 +327,9 @@ export interface HookCommandPosition {
   readonly command: string;
 }
 
-/** The fields that rh wrote in a hook entry: `{ matcher?, hooks }`. */
+/** The fields that rh wrote in a hook entry, `{ matcher?, hooks }`, and in one of its commands, `{ type, command, timeout? }`. */
 const HOOK_ENTRY_FIELDS = new Set(['matcher', 'hooks']);
+const HOOK_COMMAND_FIELDS = new Set(['type', 'command', 'timeout']);
 
 /**
  * Takes one command out of a hook entry with its separator. The hook entry,
@@ -336,7 +337,9 @@ const HOOK_ENTRY_FIELDS = new Set(['matcher', 'hooks']);
  * them and the hook entry holds no field that rh did not write; a container
  * that was empty before is not touched. The position must hold the command,
  * because each removal moves the positions after it. A command object that
- * sets `command` twice fails closed: `JSON.parse` reads only the last one.
+ * sets `command` twice fails closed, because `JSON.parse` reads only the last
+ * one; so does a command object with a field that rh did not write, because
+ * the removal takes out the whole object.
  */
 export function removeJsonHookCommand(content: string, position: HookCommandPosition): FragmentEdit {
   const { event, block, index, command } = position;
@@ -349,6 +352,9 @@ export function removeJsonHookCommand(content: string, position: HookCommandPosi
   const target = commands?.value.type === 'array' ? commands.value.elements[index] : undefined;
   const held = target && memberNode(target, 'command');
   if (!held || JSON.parse(content.slice(held.value.start, held.value.end)) !== command) throw missing();
+  if (!(target as Extract<JsonNode, { type: 'object' }>).members.every(({ key }) => HOOK_COMMAND_FIELDS.has(key))) {
+    throw invalid(`hooks.${event}[${block}].hooks[${index}] holds a field that rh did not write beside its command; rh writes nothing`);
+  }
   const ownedEntry = (entry as Extract<JsonNode, { type: 'object' }>).members.every(({ key }) => HOOK_ENTRY_FIELDS.has(key));
   // Innermost first: the first container that keeps another item takes the removal.
   const levels: [Container, number][] = [

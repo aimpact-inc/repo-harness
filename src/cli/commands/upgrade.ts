@@ -49,7 +49,7 @@ import {
 import { ownedPath, pathRecordIsCurrent, pathRecordKey, readPathRecords } from '../../effects/host-config/path-records';
 import { stageInstalledSkillCopy } from '../installer/skill-sync';
 import { openHostConfigGate } from '../../effects/host-config/gate';
-import { hostConfigPaths, replaceTarget, resolveHostPath } from '../../effects/host-config/store';
+import { hostConfigPaths, readLedger, replaceTarget, resolveHostPath } from '../../effects/host-config/store';
 import type { OwnedPathLookup } from '../../effects/upgrade/legacy-inventory';
 import { HostConfigError, type Sha256 } from '../../core/host-config/types';
 import {
@@ -124,6 +124,23 @@ export function installOwnershipReader(env: NodeJS.ProcessEnv): () => OwnedPathL
       }
     };
   };
+}
+
+/**
+ * Puts back a hook file that the gate cleaned in this run, after the gate
+ * transaction rollback restored the ledger. While the ledger still records the
+ * cleanup, the file keeps it too, so the record and the file agree. A file that
+ * changed after the cleanup keeps its bytes. Both errors name the retained copy
+ * of the file before the cleanup.
+ */
+function restoreGateHookEdit(env: NodeJS.ProcessEnv, path: string, backupPath: string, written: Sha256): void {
+  const paths = hostConfigPaths(env);
+  const target = resolveHostPath(paths, path);
+  const unresolved = (reason: string) => new Error(`${path}: ${reason}; the file before the cleanup is kept at ${backupPath}`);
+  const committed = readLedger(paths).files[target]?.committed;
+  if (committed?.type === 'file' && committed.sha256 === written) throw unresolved('the ledger still records the cleanup, so the file keeps it');
+  try { replaceTarget(target, readFileSync(backupPath), { existed: true, sha256: written }); }
+  catch (error) { throw unresolved(error instanceof Error ? error.message : String(error)); }
 }
 
 function removable(item: LeftoverItem): boolean {
@@ -450,7 +467,7 @@ function applyLocked(
             throw new Error(`unsafe rollback target or backup: ${snapshot.path}`);
           }
           const written = gateEdits.get(snapshot.path);
-          if (written) replaceTarget(resolveHostPath(hostConfigPaths(env), snapshot.path), readFileSync(snapshot.backup_path), { existed: true, sha256: written });
+          if (written) restoreGateHookEdit(env, snapshot.path, snapshot.backup_path, written);
           else rollbackLegacyCleanupBackup({ ...backup, snapshots: [snapshot] }, runtimeLock);
           rolledBackPaths.push(snapshot.path);
           const removedIndex = removedPaths.indexOf(snapshot.path);
