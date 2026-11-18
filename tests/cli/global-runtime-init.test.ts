@@ -1478,7 +1478,7 @@ exit 0
     }
   });
 
-  test('rejects a symlinked shared skills root instead of blessing its outside realpath', () => {
+  test.each(['outside directory', 'dangling link'] as const)('rejects a shared skills root that is a link to an %s instead of blessing its realpath', (shape) => {
     const tmp = mkdtempSync(join(tmpdir(), 'repo-harness-obsidian-skill-root-symlink-'));
     const home = join(tmp, 'home');
     const repo = join(tmp, 'repo');
@@ -1488,7 +1488,7 @@ exit 0
       mkdirSync(repo, { recursive: true });
       mkdirSync(join(outside, 'obsidian-markdown'), { recursive: true });
       writeFileSync(join(outside, 'obsidian-markdown', 'SKILL.md'), '# obsidian-markdown\n');
-      symlinkSync(outside, join(home, '.agents', 'skills'), 'dir');
+      symlinkSync(shape === 'dangling link' ? join(tmp, 'missing') : outside, join(home, '.agents', 'skills'), 'dir');
 
       const result = runGlobalRuntimeSetup({
         sourceRoot: ROOT,

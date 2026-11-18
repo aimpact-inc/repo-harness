@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { basename } from 'node:path';
 import { jsonFragment } from '../../core/host-config/json-fragment';
-import { openHostConfigGate, type AdoptedFragment } from '../../effects/host-config/gate';
+import { openHostConfigGate, type AdoptedFragment, type HostConfigAdoption } from '../../effects/host-config/gate';
 import { providerSkillLock } from '../../effects/host-skill-roots';
 import { requireHome } from '../../effects/repo-harness-home';
 import { isRecord } from '../../core/evidence/is-record';
@@ -121,10 +121,15 @@ function stagedSkillLockEntries(env: NodeJS.ProcessEnv, records: PathRecords): A
   });
 }
 
+/** The ledger adoption of the planned lock entries: the move writes it, and an uninstall dry run previews its revert. */
+export function skillLockAdoption(fragments: readonly AdoptedFragment[]): HostConfigAdoption {
+  return { kind: 'text_block', backup: null, fragments, externalChange: false };
+}
+
 /** A lock that rh already records keeps its records: the move claims nothing more there. */
 function adoptSkillLockEntries(env: NodeJS.ProcessEnv, fragments: readonly AdoptedFragment[]): void {
   if (!fragments.length) return;
-  openHostConfigGate({ env }).adopt(providerSkillLock(requireHome(env), env).path, { kind: 'text_block', backup: null, fragments, externalChange: false });
+  openHostConfigGate({ env }).adopt(providerSkillLock(requireHome(env), env).path, skillLockAdoption(fragments));
 }
 
 /** What the move writes: the path records, the Pi package entries to record, whether the receipt goes, and the protocol 5 state; null when nothing moves. It writes nothing, so a dry run uses it too. */

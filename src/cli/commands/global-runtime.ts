@@ -1208,7 +1208,12 @@ function installExternalSkillGroup(
         }
       }
       // A linked staging root would put the verified trees outside HOME: the write stops first.
-      const parent = canonicalOfNearestAncestor(skillsRoot);
+      let parent: string;
+      try {
+        parent = canonicalOfNearestAncestor(skillsRoot);
+      } catch (error) {
+        return { step: stepName, status: "failed", detail: `staging parent escapes canonical authority: expected=${canonicalSkillsRoot}; ${(error as Error).message}` };
+      }
       if (parent !== canonicalSkillsRoot) {
         return { step: stepName, status: "failed", detail: `staging parent escapes canonical authority: expected=${canonicalSkillsRoot}; actual=${parent}` };
       }

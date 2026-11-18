@@ -294,7 +294,15 @@ test('an uninstall keeps a personal file and a foreign skill that a path record 
 test.each([[3,1],[3,2],[4,2]])('a protocol %i install state with a protocol %i ledger: the dry run writes nothing and reports what the uninstall does',(stateProtocol,ledgerProtocol)=>fixture((home,env)=>{
  const rule=join(home,'.codex/rules/anti-patterns.md');put(home,'.codex/rules/anti-patterns.md','owned');
  rhWritesInputMode(env,join(home,'.codex/config.toml'));
- if(stateProtocol===3) recordLegacyInstallOwnership([rule],env); else profile(home,[ownedFile(rule,'owned')]);
+ const lockPath=join(home,'.agents/.skill-lock.json');
+ if(stateProtocol===3) recordLegacyInstallOwnership([rule],env);
+ else {
+  // A protocol 4 staged skill: older releases took its Skills CLI lock entry out by the staged record.
+  put(home,'source/SKILL.md','keep');mkdirSync(join(home,'.agents/skills'),{recursive:true});const staged=join(home,'.agents/skills/think');symlinkSync(join(home,'source'),staged);
+  put(home,'.agents/.skill-lock.json',`${JSON.stringify({version:3,skills:{think:{source:'tw93/Waza'},'user-skill':{source:'user/repo'}}},null,2)}\n`);
+  profile(home,[ownedFile(rule,'owned'),ownedLink(staged,join(home,'source'))]);
+  const state=installStateFixturePath(env);writeFileSync(state,JSON.stringify({...JSON.parse(readFileSync(state,'utf8')),protocol:4,pi_packages:[]}));
+ }
  // The ledger as an earlier rh version left it.
  const {paths,retired:_retired,recovery:_recovery,...text}=ledger(home);
  writeFileSync(join(home,'.repo-harness/config/ledger.json'),JSON.stringify(ledgerProtocol===1?{...text,protocol:1}:{...text,protocol:2,paths}));
@@ -305,6 +313,10 @@ test.each([[3,1],[3,2],[4,2]])('a protocol %i install state with a protocol %i l
  const result=runUserUninstall({target:'both',env});
  expect({exitCode:dryRun.exitCode,items:dryRun.items}).toEqual({exitCode:result.exitCode,items:result.items});
  expect(result.exitCode,result.lines.join('\n')).toBe(0);
+ if(stateProtocol===4){
+  expect(dryRun.items.some((item)=>item.path===lockPath&&item.action==='reverted')).toBe(true);
+  expect(JSON.parse(readFileSync(lockPath,'utf8')).skills).toEqual({'user-skill':{source:'user/repo'}});
+ }
 }));
 /** The Skills CLI as the runtime runs it: a delegated writer that adds `think` to the lock. */
 function recordLockEntry(lockPath:string,env:NodeJS.ProcessEnv){

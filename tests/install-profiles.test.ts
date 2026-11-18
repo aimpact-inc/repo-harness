@@ -4,7 +4,7 @@ import { architectureSelectionReport, assertPluginCommandSelected, readRecordedS
 import { configureRequiredHerdrSkill } from '../src/cli/commands/herdr-skill';
 import { ownedSkillIsIntact } from '../src/effects/host-config/herdr-skill-marker';
 import { describe, expect, spyOn, test } from 'bun:test';
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { spawnSync, type SpawnSyncReturns } from 'child_process';
 import { createHash } from 'crypto';
 import { tmpdir } from 'os';
@@ -1370,8 +1370,9 @@ describe('install selection', () => {
     const stderr = spyOn(process.stderr, 'write').mockImplementation((line) => { written.push(String(line)); return true; });
     try { prepareInstallSelectionSwitch(ALL_PLUGINS.filter(id => id !== 'cross-review'), env, join(env.HOME!, 'transaction')); }
     finally { stderr.mockRestore(); }
-    const lines = written.filter((line) => line.startsWith(`[install] kept_edited ${realpathSync(skillLock(env))}`));
-    expect([lines.length, written.some((line) => line.includes('sk_FAKE')), readFileSync(skillLock(env), 'utf-8')]).toEqual([1, false, '{"skills": sk_FAKE_SECRET_12345}']);
+    // The record stays, so a later switch or uninstall can still take the entry out.
+    expect([written.some((line) => line.includes('sk_FAKE')), readFileSync(skillLock(env), 'utf-8'), openHostConfigGate({ env }).recorded(skillLock(env)).map((record) => record.selector)])
+      .toEqual([false, '{"skills": sk_FAKE_SECRET_12345}', ['skills.repo-harness-cross-review']]);
   }));
 
   test('a selection switch skips and reports a path record outside its host root or on no install surface, and keeps the user files', () => withHome((env) => {
