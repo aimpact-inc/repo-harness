@@ -591,3 +591,33 @@ test.each(['absent', 'symlink', 'directory'] as const)('delegate keeps the repla
     if (result === 'directory') expect(readFileSync(join(path, 'keep.txt'), 'utf8')).toBe('keep\n');
   }
 });
+
+test('an overrides-only file with an add before the override reverts by fragment to the bytes before rh', () => {
+  const f = fixture();
+  const path = join(f.home, '.claude.json');
+  const before = '{\n  "user": 1,\n  "mcpServers": {"x": {"command": "user"}}\n}\n';
+  writeFileSync(path, before);
+  const apply = (selector: string, kind: 'add' | 'override', value: unknown) =>
+    f.gate().apply([{ path, backup: 'overrides-only', fragments: [{ owner: 'o1', selector, kind, strategy: jsonFragment, value, selected: true }] }]);
+  apply('mcpServers.codegraph', 'add', { command: 'codegraph' });
+  apply('mcpServers.x', 'override', { command: 'rh' });
+  // The backup came at the override, so it still holds rh's add: it is not the restore target.
+  expect(f.ledger().files[path].backup).not.toBe(f.ledger().files[path].baseline.sha256);
+  expect(f.gate().revert([path])).toEqual([{ path, action: 'text_removed', baseline: 'proved' }]);
+  expect(readFileSync(path, 'utf8')).toBe(before);
+});
+
+test('a fragment already at its inverse loses its record with no write: a removed add, and an override set back to the backup', () => {
+  const f = fixture();
+  const path = join(f.home, '.claude.json');
+  writeFileSync(path, '{\n  "x": "user"\n}\n');
+  f.gate().apply([{ path, fragments: [
+    { owner: 'o1', selector: 'added', kind: 'add', strategy: jsonFragment, value: 'rh' },
+    { owner: 'o1', selector: 'x', kind: 'override', strategy: jsonFragment, value: 'rh', selected: true },
+  ] }]);
+  writeFileSync(path, '{\n  "x": "user",\n  "later": true\n}\n');
+  const edited = statSync(path).mtimeMs;
+  // The file changed after rh wrote it, so no baseline proof is claimed.
+  expect(f.gate().revert([path])).toEqual([{ path, action: 'released' }]);
+  expect([readFileSync(path, 'utf8'), statSync(path).mtimeMs, f.ledger().files, f.ledger().fragments]).toEqual(['{\n  "x": "user",\n  "later": true\n}\n', edited, {}, []]);
+});
