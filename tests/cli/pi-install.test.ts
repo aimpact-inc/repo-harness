@@ -234,6 +234,26 @@ describe('Pi package and skill installation', () => {
       migrateInstallState(f.env);
       const moved = JSON.parse(readFileSync(path, 'utf8'));
       expect([moved.protocol, 'pi_packages' in moved, ownedPiPackages(f.env)]).toEqual([5, false, present ? [f.source] : []]);
+      // Ownership probe P3: the moved claim is adopted text, a record only while the entry of this source is on disk.
+      expect(openHostConfigGate({ env: f.env }).recorded(join(f.env.PI_CODING_AGENT_DIR!, 'settings.json')).map((record) => record.preimage === record.inserted)).toEqual(present ? [true] : []);
+    });
+    // Pi switched off: only the previous snapshot holds the claim, and the user registers the package by hand later.
+    for (const protocol of [3, 4] as const) fixture(f => {
+      recordInstallOwnership([], f.env);
+      const path = installStateFixturePath(f.env);
+      const base = JSON.parse(readFileSync(path, 'utf8'));
+      const { previous: _none, ...fields } = base;
+      const piFields = { ...fields, ...versions(PI_FULL_PLUGINS), selection: PI_FULL_PLUGINS, protocol };
+      const claim = { owner: 'pi', authority: 'repo-harness-install-transaction', removal: 'managed-surfaces-only', path: f.source,
+        type: 'pi-package', content_hash: null, managed_marker: 'pi-package-source', symlink_target: null };
+      writeFileSync(path, JSON.stringify(protocol === 3
+        ? { ...base, protocol, ownership_manifest: [], previous: { ...piFields, ownership_manifest: [claim] } }
+        : { ...base, protocol, pi_packages: [], previous: { ...piFields, pi_packages: [f.source] } }));
+      f.setPackages(['npm:other-package', relative(f.env.PI_CODING_AGENT_DIR, f.source)]);
+      migrateInstallState(f.env);
+      expect(ownedPiPackages(f.env)).toEqual([]);
+      expect(runUserUninstall({ target: 'both', env: f.env }).exitCode).toBe(0);
+      expect([f.packages(), f.argv().filter(args => args[0] === 'remove')]).toEqual([['npm:other-package', relative(f.env.PI_CODING_AGENT_DIR, f.source)], []]);
     });
   });
 
@@ -333,6 +353,18 @@ describe('Pi package and skill installation', () => {
     expect(f.argv().filter(args => args[0] === 'remove')).toEqual([['remove', f.source]]);
     expect(f.packages()).toEqual(['npm:other-package']);
     expect(readInstallState(f.env)).toBeNull();
+  }));
+
+  test('an entry removed outside rh releases its record at uninstall with no pi remove; a later hand registration stays', () => fixture(f => {
+    recordPiSelection(f.env);
+    expect(installPiPackage(f.source, true, f.env).created).toBe(true);
+    f.setPackages(['npm:other-package']);
+    expect(runUserUninstall({ target: 'both', env: f.env }).exitCode).toBe(0);
+    expect(ownedPiPackages(f.env)).toEqual([]);
+    const entry = relative(f.env.PI_CODING_AGENT_DIR, f.source);
+    f.setPackages(['npm:other-package', entry]);
+    expect(runUserUninstall({ target: 'both', env: f.env }).exitCode).toBe(0);
+    expect([f.packages(), f.argv().filter(args => args[0] === 'remove')]).toEqual([['npm:other-package', entry], []]);
   }));
 
   test('doctor reports a missing package directory without a raw filesystem error', () => fixture(f => {

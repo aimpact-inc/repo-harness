@@ -271,10 +271,11 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
         items.push({ path: source, action: 'kept', reason: 'pi not found on PATH; package removal skipped; ownership retained for retry' });
         continue;
       }
-      if (piPackagePresent(source, env)) {
-        piRemovals.push(source);
-        items.push({ path: source, action: 'reverted', reason: 'recorded Pi package entry through pi remove; the entry is read back' });
-      }
+      // An entry that is gone from the Pi settings releases its record with no pi remove, so a later hand registration is never rh's.
+      items.push({ path: source, action: 'reverted', reason: piPackagePresent(source, env)
+        ? 'recorded Pi package entry through pi remove; the entry is read back'
+        : 'recorded Pi package entry is already absent; its record is released with no pi remove' });
+      piRemovals.push(source);
       removedPi.add(source);
     } catch (error) { unresolved(source, (error as Error).message); }
   }

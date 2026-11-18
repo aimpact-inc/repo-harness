@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { basename } from 'node:path';
-import { jsonFragment } from '../../core/host-config/json-fragment';
+import { jsonFragment, jsonFragmentValue } from '../../core/host-config/json-fragment';
 import { openHostConfigGate, type AdoptedFragment, type HostConfigAdoption } from '../../effects/host-config/gate';
 import { providerSkillLock } from '../../effects/host-skill-roots';
 import { requireHome } from '../../effects/repo-harness-home';
@@ -9,7 +9,7 @@ import type { PathRecord } from '../../core/host-config/types';
 import { hostConfigPaths, migrateLedgerSchema, projectedLedgerPaths } from '../../effects/host-config/store';
 import { partitionPathRecords, pathRecordHost, pathRecordIsCurrent, pathRecordKey, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
 import { migrateCodexConfigRecords } from './codex-config-migration';
-import { agentFleetTargetPaths, fleetReceiptPath, isLegacyOwnershipSurface, validPiPackage, writeState, type InstallState } from './install-profile';
+import { agentFleetTargetPaths, fleetReceiptPath, isLegacyOwnershipSurface, loadSkillSurfaceCatalog, ownerForInstallPath, validPiPackage, writeState, type InstallState } from './install-profile';
 import { enabledPlugins, installProfileStatePath, InstallStateError, invalidOwnership, parseProtocol3InstallState, parseProtocol4InstallState, readRawInstallState, type Protocol3Snapshot, type RecordedInstallSnapshot } from './install-state';
 import { adoptPiPackage, piPackageEntryPresent } from './pi-package';
 import { migrateJsonConfigRecords } from './json-config-migration';
@@ -73,10 +73,6 @@ function checkedManifest(env: NodeJS.ProcessEnv, snapshot: Protocol3Snapshot, st
   return snapshot.manifest as Record<string, unknown>[];
 }
 
-function piSources(env: NodeJS.ProcessEnv, snapshot: Protocol3Snapshot, statePath: string): string[] {
-  return checkedManifest(env, snapshot, statePath).filter((surface) => surface.type === 'pi-package').map((surface) => surface.path as string);
-}
-
 /** A Pi claim of an older state must name the Bun global package root with the pi plugin of the same snapshot enabled; any other claim stops the move. */
 function checkedPiSources(env: NodeJS.ProcessEnv, snapshot: RecordedInstallSnapshot, sources: readonly string[], statePath: string): readonly string[] {
   if (sources.some((source) => !validPiPackage(source, env, enabledPlugins(snapshot)))) throw invalidOwnership(statePath);
@@ -108,16 +104,29 @@ export function migrateInstallState(env: NodeJS.ProcessEnv): void {
   if (plan.state) writeState(plan.state, env);
 }
 
-/** The lock entry of each current staged skill record, by the Skills CLI lock path; an unreadable lock stops the move. */
+/**
+ * The lock entry of each current staged skill record, by the Skills CLI lock
+ * path; an unreadable lock stops the move. A name alone proves nothing: the
+ * entry must name the catalog provider of that skill as its `source`, and the
+ * record owner must be the catalog owner. The entry is adopted text
+ * (`preimage`): rh cannot prove it wrote those bytes.
+ */
 function stagedSkillLockEntries(env: NodeJS.ProcessEnv, records: PathRecords): AdoptedFragment[] {
   const lock = providerSkillLock(requireHome(env), env).path;
   if (!existsSync(lock)) return [];
   const content = readFileSync(lock, 'utf8');
+  const catalog = loadSkillSurfaceCatalog();
   return Object.entries(records).flatMap(([key, record]) => {
     if (record.host !== 'staged' || record.kind !== 'created' || !pathRecordIsCurrent(key, record)) return [];
-    const selector = `skills.${basename(key)}`;
+    const name = basename(key);
+    const provider = catalog.packages.find((entry) => entry.name === name)?.provider ?? null;
+    if (provider === null || ownerForInstallPath(key, env, catalog) !== record.owner) return [];
+    const selector = `skills.${name}`;
     const range = jsonFragment.locate(content, selector);
-    return range ? [{ owner: record.owner, selector, kind: 'add' as const, inserted: content.slice(range.start, range.end) }] : [];
+    const value = range ? jsonFragmentValue(content, selector) : null;
+    if (!range || !isRecord(value) || value.source !== provider) return [];
+    const inserted = content.slice(range.start, range.end);
+    return [{ owner: record.owner, selector, kind: 'add' as const, inserted, preimage: inserted }];
   });
 }
 
@@ -168,10 +177,11 @@ export function planInstallStateMigration(env: NodeJS.ProcessEnv): InstallStateM
     if (host === null) throw invalidOwnership(statePath);
     records[pathRecordKey(env, path)] = { owner: 'core', host, kind: 'user_managed', baseline: { state: 'unknown' }, committed: { type: 'file', sha256 } };
   }
-  if (legacy?.previous) pi.push(...piSources(env, legacy.previous, statePath));
-  for (const snapshot of protocol4 ? [protocol4.current, ...(protocol4.previous ? [protocol4.previous] : [])] : []) {
-    pi.push(...checkedPiSources(env, snapshot.fields, snapshot.pi_packages, statePath));
-  }
+  // Only the current snapshot claims an active entry: a previous snapshot is the state before a switch, and Pi may have been switched off since.
+  // The previous snapshot is still checked, so an invalid one stops the move.
+  if (legacy?.previous) checkedManifest(env, legacy.previous, statePath);
+  if (protocol4?.previous) checkedPiSources(env, protocol4.previous.fields, protocol4.previous.pi_packages, statePath);
+  if (protocol4) pi.push(...checkedPiSources(env, protocol4.current.fields, protocol4.current.pi_packages, statePath));
   const older = legacy ?? protocol4;
   return {
     records,

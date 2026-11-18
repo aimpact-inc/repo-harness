@@ -101,7 +101,8 @@ export function piPackageEntryPresent(source: string, env: NodeJS.ProcessEnv = p
 /**
  * The one-shot migration of a `pi_packages` claim of an older install state
  * (#2852): the entry that is in the Pi settings now becomes a `pi` record with
- * an unknown baseline. A settings file that rh already records must already
+ * an unknown baseline, as adopted text (`preimage`): Pi wrote the bytes, and rh
+ * cannot prove which version. A settings file that rh already records must already
  * hold that record; anything else stops the move.
  */
 export function adoptPiPackage(source: string, env: NodeJS.ProcessEnv = process.env): void {
@@ -110,7 +111,7 @@ export function adoptPiPackage(source: string, env: NodeJS.ProcessEnv = process.
   if (inserted === null) return;
   const gate = openHostConfigGate({ env });
   if (gate.recorded(path).some((record) => record.owner === owner && record.selector === selector)) return;
-  const adopted = gate.adopt(path, { kind: 'text_block', backup: null, fragments: [{ owner, selector: selector!, kind: 'add', inserted }], externalChange: false });
+  const adopted = gate.adopt(path, { kind: 'text_block', backup: null, fragments: [{ owner, selector: selector!, kind: 'add', inserted, preimage: inserted }], externalChange: false });
   if (adopted === 'recorded') throw new HostConfigError('host_config_invalid_state', `rh records this Pi settings file without the Pi package entry that the install state claims, so rh does not move the claim: ${path}`);
 }
 

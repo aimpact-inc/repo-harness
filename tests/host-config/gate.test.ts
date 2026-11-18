@@ -723,6 +723,24 @@ test('a delegated installer gets records for the declared fragments that it crea
   expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, transaction).unresolved).toEqual([]);
   expect(read()).toEqual({ user: 1, undeclared: true });
 
+  // Ownership probe P1: an entry that is gone now loses its record at that read, and a later revert never takes out a re-created entry.
+  f.gate().delegate(declared, install());
+  writeFileSync(path, `${JSON.stringify({ user: 1, undeclared: true, packages: [] }, null, 2)}\n`);
+  expect(f.gate().revert([path]).map((result) => result.action)).toEqual(['released']);
+  install()([path]);
+  expect([f.gate().revert([path]), read()]).toEqual([[], { user: 1, undeclared: true, packages: [entry] }]);
+
+  // Ownership probe P2: a declared fragment whose text differs from the record is reported and stays, with no whole-file action.
+  const lock = join(f.home, '.tool', 'lock.json');
+  writeFileSync(lock, `${JSON.stringify({ skills: { user: {} } }, null, 2)}\n`);
+  f.gate().delegate([{ path: lock, owner: 'core', selectors: ['skills.think'] }], ([file]) => {
+    writeFileSync(file!, `${JSON.stringify({ skills: { user: {}, think: { source: 'a' } } }, null, 2)}\n`);
+  });
+  const edited = `${JSON.stringify({ skills: { user: {}, think: { source: 'b' } } }, null, 2)}\n`;
+  writeFileSync(lock, edited);
+  expect([f.gate().revert([lock]), readFileSync(lock, 'utf8'), f.gate().recorded(lock).map((record) => record.selector)])
+    .toEqual([[{ path: lock, action: 'kept_edited', kept: ['skills.think'] }], edited, ['skills.think']]);
+
   // A file that its strategy cannot read stops the call before the installer runs.
   writeFileSync(path, '{ not json');
   let ran = false;
