@@ -1,8 +1,9 @@
 import { HostConfigError, type FragmentEdit, type HostConfigStrategy, type TextRange } from './types';
 
-/** The marked blocks that rh writes in Markdown host files, each with its one owner (#2841). */
+/** The marked blocks that rh writes, each with its one owner (#2841): the rules block in Markdown host files, and the runtime-state block in a repository's Git `info/exclude` (#3080). */
 export const MARKED_BLOCK_FRAGMENTS = {
   'global-working-rules': 'core',
+  'runtime-state': 'core',
 } as const;
 export type MarkedBlockSelector = keyof typeof MARKED_BLOCK_FRAGMENTS;
 
@@ -11,6 +12,8 @@ export function isMarkedBlockSelector(selector: string): selector is MarkedBlock
 }
 
 export function markedBlockMarkers(selector: string): { readonly begin: string; readonly end: string } {
+  // Git ignore text has `#` comments only.
+  if (selector === 'runtime-state') return { begin: `# BEGIN: repo-harness ${selector}`, end: `# END: repo-harness ${selector}` };
   return { begin: `<!-- BEGIN: repo-harness ${selector} -->`, end: `<!-- END: repo-harness ${selector} -->` };
 }
 
@@ -86,5 +89,5 @@ export function markedBlockDocumentIsEmpty(content: string): boolean {
   return content.trim() === '';
 }
 
-/** A marked block in a Markdown host file. The fragment is the text from BEGIN to the end of END. */
+/** A marked block in a host file. The fragment is the text from BEGIN to the end of END. */
 export const markedBlock: HostConfigStrategy<string> = { locate, apply };

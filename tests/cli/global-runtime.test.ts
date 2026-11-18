@@ -14,6 +14,8 @@ import { installStateFixturePath } from '../helpers/install-ownership';
 import { version as PACKAGE_VERSION } from '../../package.json';
 import { bunBootstrapRecordPath, importBunBootstrapRecord } from '../../src/effects/host-config/tools';
 import { sha256Prefixed } from '../../src/core/evidence/sha256';
+import { openRepositoryFileGate } from '../../src/effects/host-config/gate';
+import { repositoryConfigPaths, resolveHostConfigRepository } from '../../src/effects/host-config/repository';
 
 describe('operator console setup', () => {
   test('installs a published source outside the global root from the registry', () => {
@@ -436,12 +438,12 @@ describe('runtime ignore rules step', () => {
   const step = (result: ReturnType<typeof runGlobalRuntimeSetup>, name: string) => result.steps.find(entry => entry.step === name);
   const exclude = (repo: string) => join(repo, '.git', 'info', 'exclude');
 
-  test('update writes the block into each adopted repository and then retires the user-level block; uninstall removes the repository blocks', () => withIgnoreFixture((f, update, repo, userExcludes) => {
-    const adopted = repo('adopted'), other = repo('not-adopted', false), away = repo('away');
-    writeRegistry(f, [adopted, other, away]);
+  test('update writes the block into each adopted repository through the ledger of its clone and then retires the user-level block; uninstall reverts each repository ledger', () => withIgnoreFixture((f, update, repo, userExcludes) => {
+    const adopted = repo('adopted'), other = repo('not-adopted', false), away = repo('away'), gone = repo('gone'), moved = repo('moved');
+    writeRegistry(f, [adopted, other, away, gone, moved]);
     const template = readFileSync(exclude(adopted), 'utf8');
-    // An escaped trailing space, a non-UTF-8 byte and a trailing blank line: bytes that a decode or a trim would change.
-    const userBytes = Buffer.concat([Buffer.from(`${template}name\\ \n`), Buffer.from([0x6e, 0xff, 0x0a, 0x0a])]);
+    // An escaped trailing space and a trailing blank line: bytes that a trim would change. The block goes before the final line endings.
+    const userBytes = `${template}name\\ \n\n`;
     writeFileSync(exclude(adopted), userBytes);
     // An unavailable registered repository keeps the user-level block.
     renameSync(away, `${away}.moved`);
@@ -450,51 +452,91 @@ describe('runtime ignore rules step', () => {
     renameSync(`${away}.moved`, away);
     // rh run from a Git hook inherits GIT_DIR; each repository still resolves its own exclude file.
     const hookEnv = { GIT_DIR: join(adopted, '.git') };
-    const run = update(hookEnv);
+    const inherited = process.env.GIT_DIR;
+    process.env.GIT_DIR = hookEnv.GIT_DIR;
+    let run: ReturnType<typeof update>;
+    try { run = update(hookEnv); } finally { if (inherited === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = inherited; }
     expect(step(run, 'write runtime ignore rules')).toMatchObject({ status: 'ok', detail: expect.stringContaining(`${exclude(away)}: written`) });
     expect(step(run, RETIRE)).toMatchObject({ status: 'ok' });
     expect(readFileSync(userExcludes, 'utf8')).toBe('*.log\n');
     for (const path of [adopted, away]) expect(git(f, path, 'check-ignore', '.ai/harness/events.jsonl')).toBe('.ai/harness/events.jsonl');
-    expect(readFileSync(exclude(adopted)).subarray(0, userBytes.length).equals(userBytes)).toBe(true);
+    expect(readFileSync(exclude(adopted), 'utf8')).toBe(`${template}name\\ \n\n${OLD_BLOCK}\n\n`);
     // A repository that is not adopted gets no rule.
     expect(readFileSync(exclude(other), 'utf8')).toBe(template);
-    const ledger = join(f.env.HOME!, '.repo-harness', 'repository-excludes.json');
-    expect(JSON.parse(readFileSync(ledger, 'utf8')).entries.map((entry: { exclude_path: string }) => entry.exclude_path).sort()).toEqual([exclude(adopted), exclude(away)].sort());
+    for (const path of [adopted, away]) expect(openRepositoryFileGate(f.env, repositoryConfigPaths(f.env, resolveHostConfigRepository(path))).recorded(exclude(path))).toHaveLength(1);
+    expect(existsSync(join(f.env.HOME!, '.repo-harness', 'repository-excludes.json'))).toBe(false);
+    // P2: an edit inside a block keeps it, a line outside a block stays. P1: a deleted file releases its record. P6: a linked info/ keeps its block.
     writeFileSync(exclude(away), readFileSync(exclude(away), 'utf8').replace(`${BEGIN}\n`, `${BEGIN}\nscratch-*/\n`));
+    writeFileSync(exclude(adopted), `${readFileSync(exclude(adopted), 'utf8')}later/\n`);
+    rmSync(exclude(gone));
+    const info = join(moved, '.git', 'info');
+    renameSync(info, join(f.root, 'moved-info'));
+    symlinkSync(join(f.root, 'moved-info'), info);
+    // Uninstall goes by the repository ledgers, so a repository that left the registry still loses its block.
+    writeRegistry(f, []);
     const removal = runUserUninstall({ target: 'both', env: { ...f.env, ...hookEnv } });
-    expect(readFileSync(exclude(adopted)).equals(userBytes)).toBe(true);
-    expect(removal.items).toContainEqual({ path: exclude(away), action: 'unresolved', reason: expect.stringContaining('runtime-state ignore block was edited; preserved') });
+    expect(readFileSync(exclude(adopted), 'utf8')).toBe(`${userBytes}later/\n`);
+    expect(removal.items).toContainEqual({ path: exclude(away), action: 'unresolved', reason: expect.stringContaining('changed since rh wrote it; preserved') });
     expect(readFileSync(exclude(away), 'utf8')).toContain('scratch-*/');
-    expect(JSON.parse(readFileSync(ledger, 'utf8')).entries.map((entry: { exclude_path: string }) => entry.exclude_path)).toEqual([exclude(away)]);
+    expect(removal.items).toContainEqual({ path: exclude(moved), action: 'unresolved', reason: expect.stringContaining(`${info} is a link`) });
+    expect(readFileSync(exclude(moved), 'utf8')).toContain(OLD_BLOCK);
+    // The identical block put back by hand after the release is the user's.
+    writeFileSync(exclude(gone), `${template}\n${OLD_BLOCK}\n`);
+    runUserUninstall({ target: 'both', env: f.env });
+    expect(readFileSync(exclude(gone), 'utf8')).toBe(`${template}\n${OLD_BLOCK}\n`);
   }));
 
-  test('update follows user links, refuses a target in the rh home, and keeps the user-level block that a repository still needs', () => {
+  test('update imports the blocks that an earlier release listed: only a listed block with shipped text becomes a record', () => withIgnoreFixture((f, update, repo) => {
+    const listed = repo('listed'), edited = repo('edited'), unlisted = repo('unlisted');
+    writeRegistry(f, [listed, edited, unlisted]);
+    const template = readFileSync(exclude(listed), 'utf8');
+    const editedBlock = OLD_BLOCK.replace(`${BEGIN}\n`, `${BEGIN}\nmine/\n`);
+    for (const [path, block] of [[listed, OLD_BLOCK], [edited, editedBlock], [unlisted, OLD_BLOCK]] as const) writeFileSync(exclude(path), `${template}\n${block}\n`);
+    const list = join(f.env.HOME!, '.repo-harness', 'repository-excludes.json');
+    // An invalid list stops the step and stays.
+    writeFileSync(list, '{"version":1,"entries":[{}]}\n');
+    expect(step(update(), 'write runtime ignore rules')).toMatchObject({ status: 'failed', detail: expect.stringContaining('repository_excludes_ledger_invalid') });
+    expect(existsSync(list)).toBe(true);
+    writeFileSync(list, JSON.stringify({ version: 1, entries: [listed, edited].map((path) => ({ repo_id: 'id', repo_path: path, exclude_path: exclude(path) })) }));
+    const detail = step(update(), 'write runtime ignore rules')!.detail;
+    expect(detail).toContain(`${exclude(listed)}: imported`);
+    expect(detail).toContain(`${exclude(edited)}: not imported (the block was edited)`);
+    expect(detail).toContain(`${exclude(unlisted)}: kept a block that rh cannot prove it wrote`);
+    expect(existsSync(list)).toBe(false);
+    // A recorded block that the user deleted comes back at the next update, as before the ledger.
+    writeFileSync(exclude(listed), template);
+    expect(step(update(), 'write runtime ignore rules')!.detail).toContain(`${exclude(listed)}: written`);
+    runUserUninstall({ target: 'both', env: f.env });
+    expect([listed, edited, unlisted].map((path) => readFileSync(exclude(path), 'utf8'))).toEqual([template, `${template}\n${editedBlock}\n`, `${template}\n${OLD_BLOCK}\n`]);
+  }));
+
+  test('update refuses a link below the common dir, a target in the rh home, a non-UTF-8 file and an unproved block, and keeps the user-level block', () => {
     const link = (path: string, target: string) => { rmSync(path, { force: true }); symlinkSync(target, path); };
-    const rows: { name: string; setup: (repo: string, f: RegisteredReposFixture, userExcludes: string) => string; init?: (f: RegisteredReposFixture) => string[]; write: 'ok' | 'failed'; retire: 'ok' | 'skipped' }[] = [
-      { name: 'linked file', write: 'ok', retire: 'ok', setup: (repo, f) => { writeFileSync(join(f.root, 'shared'), '# shared\n'); link(exclude(repo), join(f.root, 'shared')); return join(f.root, 'shared'); } },
-      { name: 'dangling relative link', write: 'ok', retire: 'ok', setup: (repo, f) => { link(exclude(repo), '../../../missing-shared'); return join(f.root, 'missing-shared'); } },
-      { name: 'dangling link into the rh home', write: 'failed', retire: 'skipped', setup: (repo, f) => { link(exclude(repo), join(f.env.HOME!, '.repo-harness', 'stray')); return join(f.env.HOME!, '.repo-harness', 'stray'); } },
-      { name: 'Git directory in the rh home', write: 'failed', retire: 'skipped', init: f => ['--separate-git-dir', join(f.env.HOME!, '.repo-harness', 'gitdir')],
+    const rows: { name: string; setup: (repo: string, f: RegisteredReposFixture, userExcludes: string) => string; init?: (f: RegisteredReposFixture) => string[]; reason: (repo: string) => string }[] = [
+      { name: 'linked file', reason: (repo) => `${exclude(repo)} is a link`, setup: (repo, f) => { writeFileSync(join(f.root, 'shared'), '# shared\n'); link(exclude(repo), join(f.root, 'shared')); return join(f.root, 'shared'); } },
+      { name: 'dangling relative link', reason: (repo) => `${exclude(repo)} is a link`, setup: (repo, f) => { link(exclude(repo), '../../../missing-shared'); return join(f.root, 'missing-shared'); } },
+      { name: 'dangling link into the rh home', reason: (repo) => `${exclude(repo)} is a link`, setup: (repo, f) => { link(exclude(repo), join(f.env.HOME!, '.repo-harness', 'stray')); return join(f.env.HOME!, '.repo-harness', 'stray'); } },
+      { name: 'linked info directory', reason: (repo) => `${join(repo, '.git', 'info')} is a link`,
+        setup: (repo, f) => { renameSync(join(repo, '.git', 'info'), join(f.root, 'info')); symlinkSync(join(f.root, 'info'), join(repo, '.git', 'info')); return join(f.root, 'info', 'exclude'); } },
+      { name: 'Git directory in the rh home', reason: () => 'rh does not write host configuration inside', init: f => ['--separate-git-dir', join(f.env.HOME!, '.repo-harness', 'gitdir')],
         setup: (_repo, f) => join(f.env.HOME!, '.repo-harness', 'gitdir', 'info', 'exclude') },
-      { name: 'edited repository block', write: 'ok', retire: 'skipped', setup: (repo) => { writeFileSync(exclude(repo), `${BEGIN}\ncustom-only/\n# END: repo-harness runtime-state\n`); return exclude(repo); } },
-      { name: 'repository exclude is the user-level file', write: 'ok', retire: 'skipped', setup: (repo, _f, userExcludes) => { link(exclude(repo), userExcludes); return userExcludes; } },
+      { name: 'edited repository block', reason: () => 'kept a block that rh cannot prove it wrote', setup: (repo) => { writeFileSync(exclude(repo), `${BEGIN}\ncustom-only/\n# END: repo-harness runtime-state\n`); return exclude(repo); } },
+      { name: 'non-UTF-8 file', reason: () => 'not UTF-8 text', setup: (repo) => { writeFileSync(exclude(repo), Buffer.from([0x6e, 0xff, 0x0a])); return exclude(repo); } },
+      { name: 'repository exclude is the user-level file', reason: (repo) => `${exclude(repo)} is a link`, setup: (repo, _f, userExcludes) => { link(exclude(repo), userExcludes); return userExcludes; } },
     ];
     for (const row of rows) withIgnoreFixture((f, update, repo, userExcludes) => {
       const path = repo('repo', true, ...(row.init?.(f) ?? []));
       writeRegistry(f, [path]);
       const target = row.setup(path, f, userExcludes);
+      const before = existsSync(target) ? readFileSync(target) : null;
       const run = update();
-      expect(step(run, 'write runtime ignore rules'), row.name).toMatchObject({ status: row.write });
-      expect(step(run, RETIRE), row.name).toMatchObject({ status: row.retire });
-      expect(readFileSync(userExcludes, 'utf8').includes(OLD_BLOCK), row.name).toBe(row.retire === 'skipped');
-      if (row.write === 'failed') {
-        expect(step(run, 'write runtime ignore rules')!.detail, row.name).toContain(`excludes_target_rh_managed: ${target} is in `);
-        expect(existsSync(target) && readFileSync(target, 'utf8').includes(BEGIN), row.name).toBe(false);
-      } else expect(readFileSync(target, 'utf8'), row.name).toContain(BEGIN);
+      expect(step(run, 'write runtime ignore rules'), row.name).toMatchObject({ status: 'ok', detail: expect.stringContaining(row.reason(path)) });
+      expect(step(run, RETIRE), row.name).toMatchObject({ status: 'skipped' });
+      expect(readFileSync(userExcludes, 'utf8').includes(OLD_BLOCK), row.name).toBe(true);
+      expect(existsSync(target) ? readFileSync(target) : null, row.name).toEqual(before);
     });
   });
 });
-
 
 // The bootstrap's Bun record (#2853): imported once, and only for the bytes that the bootstrap measured (ownership probe P3).
 describe('Bun bootstrap record import', () => {
