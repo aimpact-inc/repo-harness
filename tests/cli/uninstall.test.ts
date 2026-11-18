@@ -18,8 +18,6 @@ import { migrateCodexConfigRecords, planCodexConfigMigration } from '../../src/c
 import { requestUserInputFragment } from '../../src/cli/installer/targets/codex';
 import { tomlFragment } from '../../src/core/host-config/toml-fragment';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
-import { configDiff, userValue } from '../../src/effects/host-config/inspect';
-import { migrateInstallState } from '../../src/cli/installer/install-state-migration';
 import { buildManagedHooks } from '../../src/cli/installer/managed-entries';
 import { applyGlobalContextRefresh, preflightGlobalContextRefresh, renderGlobalRulesBlock } from '../../src/cli/installer/global-context';
 const CLI = join(import.meta.dir, '../../src/cli/index.ts');
@@ -299,7 +297,7 @@ test.each([[3,1],[3,2],[4,2]])('a protocol %i install state with a protocol %i l
  const lockPath=join(home,'.agents/.skill-lock.json');
  if(stateProtocol===3) recordLegacyInstallOwnership([rule],env);
  else {
-  // A protocol 4 staged skill: older releases took its Skills CLI lock entry out by the staged record.
+  // A protocol 4 staged skill whose Skills CLI lock stanza matches, as a lock restored from a backup does (GK-3222-3).
   put(home,'source/SKILL.md','keep');mkdirSync(join(home,'.agents/skills'),{recursive:true});const staged=join(home,'.agents/skills/think');symlinkSync(join(home,'source'),staged);
   put(home,'.agents/.skill-lock.json',`${JSON.stringify({version:3,skills:{think:{source:'tw93/Waza'},'user-skill':{source:'user/repo'}}},null,2)}\n`);
   profile(home,[ownedFile(rule,'owned'),ownedLink(staged,join(home,'source'))]);
@@ -315,37 +313,18 @@ test.each([[3,1],[3,2],[4,2]])('a protocol %i install state with a protocol %i l
  const result=runUserUninstall({target:'both',env});
  expect({exitCode:dryRun.exitCode,items:dryRun.items}).toEqual({exitCode:result.exitCode,items:result.items});
  expect(result.exitCode,result.lines.join('\n')).toBe(0);
- if(stateProtocol===4){
-  expect(dryRun.items.some((item)=>item.path===lockPath&&item.action==='reverted')).toBe(true);
-  expect(JSON.parse(readFileSync(lockPath,'utf8')).skills).toEqual({'user-skill':{source:'user/repo'}});
- }
+ // The protocol 4 state proves no stanza bytes: the move claims no lock stanza, and the uninstall leaves the lock as it was.
+ if(stateProtocol===4) expect([dryRun.items.some((item)=>item.path===lockPath),openHostConfigGate({env}).recorded(lockPath),JSON.parse(readFileSync(lockPath,'utf8')).skills])
+  .toEqual([false,[],{think:{source:'tw93/Waza'},'user-skill':{source:'user/repo'}}]);
 }));
-/** A protocol 4 state with the staged Waza skills `think` and `hunt`; the lock names `think` from Waza and `hunt` from another provider. */
-function protocol4StagedSkills(home:string,env:NodeJS.ProcessEnv){
- put(home,'source/SKILL.md','keep');mkdirSync(join(home,'.agents/skills'),{recursive:true});
- const staged=['think','hunt'].map((name)=>{const path=join(home,'.agents/skills',name);symlinkSync(join(home,'source'),path);return ownedLink(path,join(home,'source'));});
- put(home,'.agents/.skill-lock.json',`${JSON.stringify({version:3,skills:{think:{source:'tw93/Waza'},hunt:{source:'other/repo'},'user-skill':{source:'user/repo'}}},null,2)}\n`);
- profile(home,staged);
- const state=installStateFixturePath(env);writeFileSync(state,JSON.stringify({...JSON.parse(readFileSync(state,'utf8')),protocol:4,pi_packages:[]}));
- return join(home,'.agents/.skill-lock.json');
-}
 const lockSkills=(lockPath:string)=>JSON.parse(readFileSync(lockPath,'utf8')).skills;
-test('ownership probe P3: the protocol 4 move records a lock stanza only when its source is the provider of the staged skill, as adopted text',()=>fixture((home,env)=>{
- const lockPath=protocol4StagedSkills(home,env);
- migrateInstallState(env);
- const records=openHostConfigGate({env}).recorded(lockPath);
- expect(records.map((record)=>[record.selector,record.preimage===record.inserted])).toEqual([['skills.think',true]]);
- // Adopted text is not proved rh's: the diff shows it as a user value.
- const think=configDiff(env,lockPath,{showValues:true}).fragments.find((entry)=>entry.selector==='skills.think')!;
- expect(think.value).toBe(userValue(records[0]!.inserted));
- expect(runUserUninstall({target:'both',env}).exitCode).toBe(0);
- expect(lockSkills(lockPath)).toEqual({hunt:{source:'other/repo'},'user-skill':{source:'user/repo'}});
-}));
-test.each(['gone','edited'] as const)('ownership probes P1 and P2: a recorded lock stanza that is %s now is never taken out by uninstall',(shape)=>fixture((home,env)=>{
- const lockPath=protocol4StagedSkills(home,env);
- migrateInstallState(env);
+test.each(['gone','edited'] as const)('ownership probes P1 and P2: a lock stanza that the Skills CLI wrote through the gate and that is %s now is never taken out by uninstall',(shape)=>fixture((home,env)=>{
+ put(home,'source/SKILL.md','keep');mkdirSync(join(home,'.agents/skills'),{recursive:true});const staged=join(home,'.agents/skills/think');symlinkSync(join(home,'source'),staged);
+ profile(home,[ownedLink(staged,join(home,'source'))]);
+ const lockPath=join(home,'.agents/.skill-lock.json');put(home,'.agents/.skill-lock.json',`${JSON.stringify({version:3,skills:{'user-skill':{source:'user/repo'}}},null,2)}\n`);
+ recordLockEntry(lockPath,env);
  const skills=lockSkills(lockPath);
- const now=shape==='gone'?{hunt:skills.hunt,'user-skill':skills['user-skill']}:{...skills,think:{source:'tw93/Waza',pinned:true}};
+ const now=shape==='gone'?{'user-skill':skills['user-skill']}:{...skills,think:{source:'tw93/Waza',pinned:true}};
  writeFileSync(lockPath,`${JSON.stringify({version:3,skills:now},null,2)}\n`);
  const first=runUserUninstall({target:'both',env});
  expect([lockSkills(lockPath),openHostConfigGate({env}).recorded(lockPath).length]).toEqual([now,shape==='gone'?0:1]);

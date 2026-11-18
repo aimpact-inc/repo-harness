@@ -11,7 +11,7 @@ import { globalContextPath, inspectUnrecordedGlobalRules, previewGlobalRulesAdop
 import { removeRuntimeStateIgnoreBlock } from '../../effects/adoption/gitignore-plan';
 import { readRepositoryExcludes, repositoryCommonDirectory, repositoryExcludesLedgerPath, repositoryExcludeTarget, serializeRepositoryExcludes, type RepositoryExclude } from './repository-excludes';
 import { readInstallState } from './install-profile';
-import { installStatePendingMigration, migrateInstallState, planInstallStateMigration, skillLockAdoption } from './install-state-migration';
+import { installStatePendingMigration, migrateInstallState, planInstallStateMigration } from './install-state-migration';
 import type { PathRecord } from '../../core/host-config/types';
 import { partitionPathRecords, pathRecordRoot, pathRecordsDigest, readPathRecords, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
 import { InstallStateError, installProfileStatePath } from './install-state';
@@ -116,9 +116,7 @@ function readUninstallState(opts: UninstallOptions) {
   const records = projected ? projected.records : !state ? {} : opts.dryRun ? partitionPathRecords(env, projectedLedgerPaths(hostConfigPaths(env))).records : readPathRecords(env);
   // The Pi package entries that the ledger records under owner `pi`, or that the migration would record.
   const piPackages = opts.target !== 'both' ? [] : projected ? projected.piPackages : ownedPiPackages(env, openHostConfigGate({ env, preview: opts.dryRun === true }));
-  // The lock entries that the migration would record, as a dry run previews their revert.
-  const lockAdoption = opts.target === 'both' && projected?.lockEntries.length ? skillLockAdoption(projected.lockEntries) : null;
-  return { state, records, piPackages, lock, lockAdoption, files, codexMigration, jsonMigration };
+  return { state, records, piPackages, lock, files, codexMigration, jsonMigration };
 }
 
 const REVERT_REASONS: Readonly<Record<HostConfigRevertEntry['action'], string>> = {
@@ -190,7 +188,6 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   let state: ReturnType<typeof readInstallState> = null;
   let records: PathRecords = {};
   let piPackages: readonly string[] = [];
-  let lockAdoption: HostConfigAdoption | null = null;
   let files: ReturnType<typeof hostConfigFiles>;
   let codexMigration: ReturnType<typeof planCodexConfigMigration>;
   let jsonMigration: ReturnType<typeof planJsonConfigMigration>;
@@ -199,12 +196,12 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
     const targets = hostConfigFiles(home, opts.target);
     if (!opts.dryRun && targets.codex) migrateCodexConfigRecords(env);
     if (!opts.dryRun && targets.json.length) migrateJsonConfigRecords(env, targets.json);
-    ({ state, records, piPackages, lock, lockAdoption, files, codexMigration, jsonMigration } = readUninstallState(opts));
+    ({ state, records, piPackages, lock, files, codexMigration, jsonMigration } = readUninstallState(opts));
   } catch (error) { items.push(failedRead(error, configurationReceiptPath(home))); return result(); }
 
   const gate = openHostConfigGate({ env, preview: opts.dryRun === true });
   // The Skills CLI lock is a staging file: its recorded entries go with a full uninstall only.
-  const hostPaths = [...(files.codex ? [files.codex] : []), ...files.json, ...(lockAdoption || (opts.target === 'both' && gate.recorded(lock.path).length) ? [lock.path] : [])];
+  const hostPaths = [...(files.codex ? [files.codex] : []), ...files.json, ...(opts.target === 'both' && gate.recorded(lock.path).length ? [lock.path] : [])];
   // The Global Working Rules files go by the ledger too. Two host paths that name one file are one revert.
   const rulesAdoptions = new Map<string, HostConfigAdoption>();
   const resolvedHostPaths = new Set<string>();
@@ -245,7 +242,6 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
     const rules = rulesAdoptions.get(path);
     if (rules) return [previewGlobalRulesAdoptedRevert(path, rules)];
     if (path === files.codex && codexMigration?.adoption) return previewAdoptedRevert(env, codexMigration);
-    if (path === lock.path && lockAdoption) return previewJsonAdoptedRevert({ files: [{ path, adoption: lockAdoption }], receipt: null });
     const planned = jsonMigration?.files.find((file) => file.path === path);
     return planned ? previewJsonAdoptedRevert({ ...jsonMigration!, files: [planned] }) : gate.revert([path], { dryRun: true });
   };

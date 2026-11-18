@@ -1,15 +1,10 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs';
-import { basename } from 'node:path';
-import { jsonFragment, jsonFragmentValue } from '../../core/host-config/json-fragment';
-import { openHostConfigGate, type AdoptedFragment, type HostConfigAdoption } from '../../effects/host-config/gate';
-import { providerSkillLock } from '../../effects/host-skill-roots';
-import { requireHome } from '../../effects/repo-harness-home';
 import { isRecord } from '../../core/evidence/is-record';
 import type { PathRecord } from '../../core/host-config/types';
 import { hostConfigPaths, migrateLedgerSchema, projectedLedgerPaths } from '../../effects/host-config/store';
 import { partitionPathRecords, pathRecordHost, pathRecordIsCurrent, pathRecordKey, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
 import { migrateCodexConfigRecords } from './codex-config-migration';
-import { agentFleetTargetPaths, fleetReceiptPath, isLegacyOwnershipSurface, loadSkillSurfaceCatalog, ownerForInstallPath, validPiPackage, writeState, type InstallState } from './install-profile';
+import { agentFleetTargetPaths, fleetReceiptPath, isLegacyOwnershipSurface, validPiPackage, writeState, type InstallState } from './install-profile';
 import { enabledPlugins, installProfileStatePath, InstallStateError, invalidOwnership, parseProtocol3InstallState, parseProtocol4InstallState, readRawInstallState, type Protocol3Snapshot, type RecordedInstallSnapshot } from './install-state';
 import { adoptPiPackage, piPackageEntryPresent } from './pi-package';
 import { migrateJsonConfigRecords } from './json-config-migration';
@@ -99,46 +94,8 @@ export function migrateInstallState(env: NodeJS.ProcessEnv): void {
   if (plan === null) return;
   writePathRecords(env, plan.records);
   for (const source of plan.piPackages) adoptPiPackage(source, env);
-  adoptSkillLockEntries(env, plan.lockEntries);
   if (plan.receipt) rmSync(fleetReceiptPath(env), { force: true });
   if (plan.state) writeState(plan.state, env);
-}
-
-/**
- * The lock entry of each current staged skill record, by the Skills CLI lock
- * path; an unreadable lock stops the move. A name alone proves nothing: the
- * entry must name the catalog provider of that skill as its `source`, and the
- * record owner must be the catalog owner. The entry is adopted text
- * (`preimage`): rh cannot prove it wrote those bytes.
- */
-function stagedSkillLockEntries(env: NodeJS.ProcessEnv, records: PathRecords): AdoptedFragment[] {
-  const lock = providerSkillLock(requireHome(env), env).path;
-  if (!existsSync(lock)) return [];
-  const content = readFileSync(lock, 'utf8');
-  const catalog = loadSkillSurfaceCatalog();
-  return Object.entries(records).flatMap(([key, record]) => {
-    if (record.host !== 'staged' || record.kind !== 'created' || !pathRecordIsCurrent(key, record)) return [];
-    const name = basename(key);
-    const provider = catalog.packages.find((entry) => entry.name === name)?.provider ?? null;
-    if (provider === null || ownerForInstallPath(key, env, catalog) !== record.owner) return [];
-    const selector = `skills.${name}`;
-    const range = jsonFragment.locate(content, selector);
-    const value = range ? jsonFragmentValue(content, selector) : null;
-    if (!range || !isRecord(value) || value.source !== provider) return [];
-    const inserted = content.slice(range.start, range.end);
-    return [{ owner: record.owner, selector, kind: 'add' as const, inserted, preimage: inserted }];
-  });
-}
-
-/** The ledger adoption of the planned lock entries: the move writes it, and an uninstall dry run previews its revert. */
-export function skillLockAdoption(fragments: readonly AdoptedFragment[]): HostConfigAdoption {
-  return { kind: 'text_block', backup: null, fragments, externalChange: false };
-}
-
-/** A lock that rh already records keeps its records: the move claims nothing more there. */
-function adoptSkillLockEntries(env: NodeJS.ProcessEnv, fragments: readonly AdoptedFragment[]): void {
-  if (!fragments.length) return;
-  openHostConfigGate({ env }).adopt(providerSkillLock(requireHome(env), env).path, skillLockAdoption(fragments));
 }
 
 /** What the move writes: the path records, the Pi package entries to record, whether the receipt goes, and the protocol 5 state; null when nothing moves. It writes nothing, so a dry run uses it too. */
@@ -146,8 +103,6 @@ export interface InstallStateMigrationPlan {
   readonly records: PathRecords;
   /** The claimed Pi package sources whose entry is in the Pi settings now: only these get a record. */
   readonly piPackages: readonly string[];
-  /** The Skills CLI lock entries of the current staged skill records: the lock removal of an older release followed those records. */
-  readonly lockEntries: readonly AdoptedFragment[];
   readonly receipt: boolean;
   readonly state: InstallState | null;
 }
@@ -186,7 +141,6 @@ export function planInstallStateMigration(env: NodeJS.ProcessEnv): InstallStateM
   return {
     records,
     piPackages: [...new Set(pi)].filter((source) => piPackageEntryPresent(source, env)),
-    lockEntries: older ? stagedSkillLockEntries(env, records) : [],
     receipt: receipt !== null,
     state: older && { ...older.current.fields, previous: older.previous?.fields ?? null },
   };
