@@ -16,6 +16,7 @@
     "include": [
       "src/cli/mcp/server.ts",
       "src/cli/mcp/tools.ts",
+      "src/cli/mcp/repo-discovery.ts",
       "src/cli/mcp/state-tools.ts",
       "src/cli/mcp/fleet-tools.ts",
       "src/cli/mcp/instructions.ts",
