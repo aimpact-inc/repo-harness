@@ -19,7 +19,7 @@ import wazaRules from '../../src/core/skill-surface/waza-shared-rules.json';
 import { syncWazaSharedRules } from "../../src/cli/installer/waza-rules";
 import { beginInstallHostTransaction, installProfileHostMutationPaths, installProfileTransactionPaths, installStateStatus, readInstallState, rollbackInstallHostTransaction, versions } from '../../src/cli/installer/install-profile';
 import { applyGlobalContextRefresh, GLOBAL_RULES_EDITED, GLOBAL_RULES_END, inspectGlobalContext, preflightGlobalContextRefresh, renderGlobalRulesBlock, setReportingLanguage } from '../../src/cli/installer/global-context';
-import { CandidateRequestProtocolRetiredError, encodeCandidateRequest, parseCandidateRequest, type CandidateReconciliationRequest } from '../../src/cli/commands/candidate-reconciliation';
+import { CandidateRequestProtocolRetiredError, assertReceiptSelection, encodeCandidateRequest, parseCandidateReceipt, parseCandidateRequest, type CandidateReconciliationRequest } from '../../src/cli/commands/candidate-reconciliation';
 import type { PluginId } from '../../src/core/skill-surface/plugin-manifest';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
 import { hostConfigPaths } from '../../src/effects/host-config/store';
@@ -3603,6 +3603,12 @@ describe('Global Working Rules refresh during install and update', () => {
     expect(() => parseCandidateRequest(encodeCandidateRequest({ ...request, report_language: 'custom' as 'en' }), '9.9.9')).toThrow('invalid shape');
     const overrides = [{ path: '/home/u/.claude/settings.json', selector: 'statusLine' }];
     expect(parseCandidateRequest(encodeCandidateRequest({ ...request, overrides }), '9.9.9').overrides).toEqual(overrides);
+    // A released candidate ignores the field, so a receipt with no echo of the selection fails the parent's step.
+    const receipt = { protocol: 3, transaction_id: 't', candidate_package_root: '/tmp/c', candidate_version: '0.35.0', candidate_package_digest: 'sha256:00',
+      route_registry_digest: 'sha256:00', selected_target: 'codex', adapter_projection_digests: {}, ownership_manifest_digest: null, reconciliation_scope: 'partial', verified_at: 'now' } as const;
+    expect(() => assertReceiptSelection(overrides, parseCandidateReceipt(JSON.stringify(receipt)))).toThrow('candidate 0.35.0 did not apply the --override selection');
+    expect(() => assertReceiptSelection(overrides, parseCandidateReceipt(JSON.stringify({ ...receipt, overrides })))).not.toThrow();
+    expect(() => assertReceiptSelection(undefined, parseCandidateReceipt(JSON.stringify(receipt)))).not.toThrow();
     // A selection this version cannot read, and a field it does not know, are refused, not dropped.
     for (const invalid of [{ overrides: [{ path: 'relative', selector: 'statusLine' }] }, { overrides: [{ path: '/a', selector: '' }] }, { future_field: true }]) {
       expect(() => parseCandidateRequest(encodeCandidateRequest({ ...request, ...invalid } as unknown as CandidateReconciliationRequest), '9.9.9')).toThrow('invalid shape');

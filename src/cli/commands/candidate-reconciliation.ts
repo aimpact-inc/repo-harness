@@ -87,6 +87,8 @@ export interface CandidateReconciliationReceipt {
   readonly ownership_manifest_digest: string | null;
   readonly reconciliation_scope: 'complete' | 'partial';
   readonly verified_at: string;
+  /** The `--override` selection that the candidate applied; absent when the request had none. A released candidate never writes it. */
+  readonly overrides?: OverrideSelection;
 }
 
 export interface CandidateReconciliationRequest {
@@ -418,6 +420,17 @@ export function assertCandidateReconciliationReceipt(
   }
 }
 
+/**
+ * The parent's check that the candidate applied the selection it sent. A
+ * released candidate ignores an unknown request field, so a selection with no
+ * echo in the receipt was dropped: the step fails and the transaction rolls back.
+ */
+export function assertReceiptSelection(requested: OverrideSelection | undefined, receipt: CandidateReconciliationReceipt): void {
+  if (JSON.stringify(requested ?? []) !== JSON.stringify(receipt.overrides ?? [])) {
+    throw new Error(`candidate ${receipt.candidate_version} did not apply the --override selection; run rh update without --override, then rh install --override`);
+  }
+}
+
 export function parseCandidateReceipt(stdout: string): CandidateReconciliationReceipt {
   let parsed: unknown;
   try {
@@ -446,6 +459,7 @@ export function parseCandidateReceipt(stdout: string): CandidateReconciliationRe
       typeof receipt.ownership_manifest_digest !== 'string'
       || !receipt.ownership_manifest_digest.startsWith('sha256:')
     ))
+    || (receipt.overrides !== undefined && !isOverrideSelection(receipt.overrides))
   ) {
     throw new Error('candidate reconciliation receipt has invalid shape');
   }

@@ -18,6 +18,7 @@ import {
   encodeCandidateRequest,
   installedAdapterProjectionDigest,
   managedProjectionDigest,
+  parseCandidateReceipt,
   publishCandidateReconciliationCapability,
   routeRegistryDigest,
   type CandidatePackageIdentity,
@@ -464,6 +465,7 @@ describe('candidate-bound global runtime reconciliation', () => {
       expect(existsSync(join(home, '.repo-harness', 'config', 'ledger.json'))).toBe(false);
       const carried = run('statusLine');
       expect(carried.status, String(carried.stderr)).toBe(0);
+      expect(parseCandidateReceipt(String(carried.stdout)).overrides).toEqual([{ path: realpathSync(settings), selector: 'statusLine' }]);
       expect(JSON.parse(readFileSync(settings, 'utf-8')).statusLine.command).toEndWith(' statusline');
     } finally {
       rmSync(root, { recursive: true, force: true });

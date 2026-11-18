@@ -59,6 +59,7 @@ import {
 } from "../../effects/runtime/protected-helper-platform";
 import {
   CANDIDATE_RECONCILIATION_PROTOCOL,
+  assertReceiptSelection,
   candidatePackageIdentity,
   encodeCandidateRequest,
   parseCandidateReceipt,
@@ -868,6 +869,7 @@ function reconcileWithInstalledCandidate(
     if (completeRequired && receipt.ownership_manifest_digest === null) {
       throw new Error('candidate receipt omitted the ownership ledger digest');
     }
+    assertReceiptSelection(request.overrides, receipt);
     return {
       step: CANDIDATE_RECONCILE_STEP,
       status: 'ok',

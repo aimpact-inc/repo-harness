@@ -499,6 +499,7 @@ export function runCandidateRuntimeReconciliation(
       ownership_manifest_digest: ownershipManifestDigest,
       reconciliation_scope: complete ? 'complete' : 'partial',
       verified_at: new Date().toISOString(),
+      ...(request.overrides?.length ? { overrides: request.overrides } : {}),
     };
     assertCandidateReconciliationReceipt(receipt, {
       transaction_id: request.transaction_id,
