@@ -138,20 +138,10 @@ archimap, a source scan or memory.
 The child has no dependency section. Its parent, blockers, milestone and
 tier are GitHub fields (Plan data, above).
 
-## Follow-up issue (P2 findings of a review)
-
-A review that returns `PASS` with P2 findings makes one follow-up issue
-for the whole PR, under the same parent (`acceptor.md` §2.2). It is a child
-issue in the shape above, with the P2 findings as its `Do` lines and the
-tier of the module it touches. Write the title as
-`<module>: <outcome> (P2 follow-up of #<PR>)`. Name every P2 finding ID and
-its review thread URL, so the coordinator can resolve each thread with the
-`deferred #<follow-up issue>` reply.
-
 ## PR body
 
 ````markdown
-Closes #<issue>            <!-- or: Refs #<issue> for a non-final PR of the issue -->
+Closes #<issue>            <!-- one line for each bundle issue; Refs #<issue> for a non-final PR of the issue -->
 
 ## Goal
 <one sentence, from the issue>
@@ -262,7 +252,9 @@ comment and does not dispatch until the corrected claim is on the board.
 Every template below ends with the line `Seat: <seat id> <hc address>` when a seat posts it by hand. The line is a reader trace; no decoder reads it. The `review start` marker keeps its own `Seat:` field and takes no second line.
 
 `issue claim` is seat-only. The coordinator posts it, including the
-claim of each agent it dispatches. Such a claim names the agent in
+claim of each agent it dispatches. A bundle claim
+(`rh board claim --issues <a>,<b>,<c>`) puts one claim with the same
+`Agent:` and `Branch:` on each issue of the bundle. Such a claim names the agent in
 `Agent:` and the coordinator's own claim in `Coordinator:`. Any other
 agent's claim is a request, not a claim role. A claim is valid only from an
 account whose `author_association` is `OWNER`, `MEMBER` or
@@ -416,14 +408,14 @@ failing. A later PASS record never clears a FAIL row by itself.
 ```text
 repo-harness review reply
 Agent: <kind>, session <id>
-Disposition: fixed <sha> | disputed | rejected | deferred #<follow-up issue>
+Disposition: fixed <sha> | disputed | rejected | noted
              | confirmed fixed in round <n> on <sha>
 Why: <reason; for fixed, the test that fails on the base; for confirmed, the acceptance record URL>
 ```
 
 The head owner replies `fixed` or `disputed` and leaves the thread open.
-Only the coordinator replies `rejected`, or `deferred` for a P2
-(`acceptor.md` §2.2), then resolves the thread (`board.md` rule 5).
+Only the coordinator replies `rejected`, or `noted` for a P2 that stays
+in the review record (`acceptor.md` §2.2), then resolves the thread (`board.md` rule 5).
 `rh review publish` writes the `confirmed` reply. It posts it on each
 thread in the receipt's `confirmed_fixed` list and then resolves that
 thread (`acceptor.md` §6). Nobody writes this disposition by hand.
@@ -498,19 +490,27 @@ error code in the executor JSON.
 
 ## Dispatch packet
 
-Send through the host channel. Never restate the issue. `rh board dispatch`
-sends this text. The `Authority:` line is `WORKER_AUTHORITY` in
+Send through the host channel. The issues stay the requirement authority:
+the packet names them and adds the bundle decisions, so the worker asks no
+design question. `rh board dispatch` sends this text. The `Authority:` line is `WORKER_AUTHORITY` in
 `src/effects/board/dispatch.ts`, which is the single source: change the
 constant first, then this quote. `tests/board-dispatch.test.ts` keeps them
 equal.
 
 ```text
 Role: worker (read references/worker.md of repo-harness-issue-flow)
-Issue: <URL>
-Slot: <PR slot or "whole issue">
+Goal: <one sentence>
+Closes: #<a>, #<b>, #<c>
+Slot: <PR slot or "whole bundle">
+Files: <exact file boundary>
+Decisions: <design choices already made>
+Non-goals: <what the PR does not add>
+Test: <exact fast test command>
+Rounds: at most 2 review rounds (acceptor.md §2.2)
+Stop: <another owner's path, a contract outside the boundary, user data, credentials, a release>
 Worktree: /tmp/<repo>-wt-<issue>-<slug> on <type>/<issue>-<slug> from origin/main
 Model: <model>
-Report: status comments on the issue; nudge <coordinator channel> only on PASS, a boundary question or a fix-loop stop
+Report: DONE <PR> <head> or BLOCKED <one question> to <coordinator channel>
 Authority: implement, push the PR branch as soon as checks pass, open the PR, run your own fix rounds. No merge, no deletion outside the issue, no credentials.
 ```
 

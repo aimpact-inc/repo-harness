@@ -15,7 +15,7 @@ seat is a process (`SKILL.md`, Seats, sub-agents and claim roles).
 | Claim role | Object | Holds it | Can write | Released by |
 |---|---|---|---|---|
 | Coordinator | Parent issue | Orchestrator | Parent body (child table), plan, plan data (sub-issues, blocked-by, milestone, `tier:` labels), dispatch, scope changes | Closing comment, or handoff |
-| Writer | Child issue, or one PR slot of it | Worker | Its branch, its PR body, status comments | PR merged, or released or handed-off status |
+| Writer | One bundle of child issues, or one PR slot of an issue | Worker | Its branch, its PR body, status comments | PR merged, or released or handed-off status |
 | Head owner | One PR | The writer of that PR | Pushes to the PR branch. Only this role pushes | Merge, or a handoff that names the next head owner |
 | Acceptor | One review in one round of one PR (`acceptor.md` §2.2 sets the reviews of a round) | A read-only reviewer; the gatekeeper is the default (`acceptor.md`) | Its review threads and the acceptance record row, through the review-round runner | The acceptance record row for its review |
 | Integrator | Main branch publication | Orchestrator | Merge with `rh publication merge` only (`orchestrator.md` §9) | Merge done, or handoff |
@@ -145,7 +145,9 @@ after each claim or status change.
 - **PR slots.** One issue can name several PRs in advance (PR-1a, PR-1b),
   each with its own scope. Each slot is claimed separately: the
   coordinator posts one `issue claim` per slot, with `Slot: PR-1b`.
-  Without named slots, one issue is one writer.
+  Without named slots, one bundle (one or more issues of one module and
+  write scope) is one writer, under one bundle claim
+  (`rh board claim --issues <a>,<b>,<c>`).
 - **PR dependencies** are base branches. A PR that needs another PR's
   unmerged code sets its base to that PR's branch. A PR to issue link is
   `Closes #<issue>` or `Refs #<issue>` in the PR body.
@@ -247,8 +249,8 @@ Board rules:
    (`acceptor.md` §3). The head owner replies with the fix SHA and does
    not resolve the thread. Only the acceptor of that round resolves it
    after the next round confirms the fix. The coordinator may resolve a
-   thread with a written rejection reason, or with the follow-up issue
-   link of a P2 (`acceptor.md` §2.2). See `acceptor.md`.
+   thread with a written rejection reason, or with the `noted` reply of
+   a P2 (`acceptor.md` §2.2). See `acceptor.md`.
 6. **Nudge with a link.** To wake an agent, send it the comment URL
    through the host channel (a Herdr prompt, a session message). The
    comment is the instruction. A message that differs from the board loses.

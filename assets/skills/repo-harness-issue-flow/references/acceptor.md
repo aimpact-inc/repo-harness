@@ -28,8 +28,9 @@ return the result schema can accept.
   Medium unless it also hits the High list.
 - For the Medium tier, the one review comes from a model family different
   from the writer's.
-- For the High tier, at least one of the two reviews of a head comes from
-  a model family different from the writer's (§2.2).
+- The High tier is a diff that touches I1, I2 or a repository-configured
+  I3 path. At least one of its two reviews of a head comes from a model
+  family different from the writer's, and the two run in parallel (§2.2).
 - The other High review can use a fresh context of the writer's family.
   Record `model_relation: same-family` in its receipt.
 - When the author model or the reviewer model is unknown, record
@@ -59,91 +60,72 @@ The table rules govern how the row combines with the review.
 
 ### 2.2 Rounds
 
-1. **Round 1** is the full tier review. Round 1 of a High PR has two
-   reviews of one subject SHA, and both take the same round number: the
-   gatekeeper and a second reviewer. At least one of the two is from a
-   model family different from the writer's (§1). They run as a relay
-   (#2910): the gatekeeper reads first, and the second reviewer starts
-   only after the gatekeeper recorded `PASS` for that head. The reviewer
-   is then blind to the findings of that gatekeeper round, and it reads
-   the delta from the last head that the reviewer itself reviewed. Each
-   review has its own `acceptance claim` and its own record row. `review publish` keys a
-   claim by round, subject and `Agent:` line, so two reviewers with an
-   identical `Agent:` line on one round share one claim and count once.
-   The board accepts a High head, or a head of unknown tier, only when it
-   has `PASS` rows that cite two distinct `acceptance claim` comments of
-   the PR, each with the row's `Subject` and `Round`, at least one of them with `Model relation: different-family`,
-   and no `FAIL` row. A Medium head needs one `PASS` row that cites an
-   `acceptance claim` comment of the PR the same way and records
-   `Model relation: different-family`, and no `FAIL` row. A `same-family`
-   or `unknown` row does not count for Medium.
+A review has at most two rounds. Each round grades only the lines that the
+PR changes.
+
+1. **Round 1** is the full tier review of one subject SHA. A Medium head
+   has one reviewer. A High head has two: the gatekeeper and a second
+   reviewer, at least one of them from a model family different from the
+   writer's (§1). The two start in parallel on the same SHA and take the
+   same round number. Each review has its own `acceptance claim` and its
+   own record row. `review publish` keys a claim by round, subject and
+   `Agent:` line, so two reviewers with an identical `Agent:` line on one
+   round share one claim and count once. The board accepts a High head, or
+   a head of unknown tier, only when it has `PASS` rows that cite two
+   distinct `acceptance claim` comments of the PR, each with the row's
+   `Subject` and `Round`, at least one of them with `Model relation:
+   different-family`, and no `FAIL` row. A Medium head needs one `PASS`
+   row that cites an `acceptance claim` comment of the PR the same way and
+   records `Model relation: different-family`, and no `FAIL` row. A
+   `same-family` or `unknown` row does not count for Medium.
 
    The review brief requires each reviewer, in its first round, to group
    findings by bug family. For each family, list every sibling case and
    every missing test branch in one finding.
 
-   **New head.** The rows of a record count for their subject SHA only;
-   the board reads the rows of the head. A PR whose base is behind main
-   merges with no sync (`orchestrator.md` §9), so do not merge main into
-   a PR that has no conflict. A merge of main is for a conflict with main
-   only: a stale base takes a CI re-trigger on the unchanged head
-   (`orchestrator.md` §8, CI red), and a clean stacked producer takes a
-   retarget (`board.md`, Producer merges). A head made only by a clean
-   merge of main, with no change to the PR's own files, needs no review
-   row: cite the empty range-diff of the PR's own commits. A head that
-   resolves a conflict is a new head. It needs its own CI run and a delta
-   check: a review of the delta from the reviewed head that writes one
-   record row for the new head. A Medium head needs one delta check row
-   under the Medium rule above. A High head needs the round-1 rule: two
-   delta check rows from distinct claims, at least one different-family.
-   A reviewer `FAIL` sends the fix back to the gatekeeper first: the fix
-   is a new head, it starts the gatekeeper, and the reviewer runs again
-   only after the gatekeeper `PASS` of that head.
-2. **Round 2.** The reviewer or reviewers that raised a blocking finding
-   read the fix delta (the hunks that changed after round 1) and the
-   sibling cases of each of its findings. On a High or unknown-tier PR,
-   the fix head needs the round-1 rule too: a reviewer of round 1 that
-   raised no blocking finding takes a delta check of the fix head and
-   records its own row. Together the
-   rows of the fix head come from two distinct claims, at least one
-   different-family.
-3. **Round 3** runs with no owner question when the round-2 findings are in
-   the fix delta. It has the scope of round 2.
-4. **After round 3.** A fix loop continues after round 3 without the owner
-   while each round has fewer blocking findings (P0-P1) than the round
-   before and the scope does not grow. A grown scope is a joint decision.
-   When the count does not drop but no open blocking finding touches I1 or I2, the loop continues by joint decision under one rule.
-   A new P0 finding, or a new P1 finding on I1 or I2, goes to the owner as a notice. The loop continues
-   without an owner word when the fix closes the finding. It stops at the
-   owner only when the fix for that finding would accept a residual, relax a
-   control or grow the scope. Each merge outside rule 2, each release, each change that reads, moves or exposes a
-   credential and each deletion that git cannot restore stay with
-   the owner. Any other new P1 finding does not stop the loop. Round 5 is
-   the hard stop. A blocking
-   finding after round 5, or a fix for a new P0 or an I1/I2 P1 that would accept a
-   residual, relax a control or grow the scope, becomes a parked owner gate
-   (`docs/reference-configs/agentic-development-flow.md`, Park a gate).
-   Other work continues.
+   **New head.** The rows of a record count for their subject SHA only,
+   except the round-1 `PASS` row that rule 2 carries to the fix head. A PR
+   whose base is behind main merges with no sync (`orchestrator.md` §9),
+   so do not merge main into a PR that has no conflict. A merge of main is
+   for a conflict with main only: a stale base takes a CI re-trigger on
+   the unchanged head (`orchestrator.md` §8, CI red), and a clean stacked
+   producer takes a retarget (`board.md`, Producer merges). A head made
+   only by a clean merge of main, with no change to the PR's own files,
+   needs no review row: cite the empty range-diff of the PR's own commits.
+   A head that resolves a conflict is a new head. It needs its own CI run
+   and a delta check: a review of the delta from the reviewed head that
+   writes one record row for the new head. A Medium head needs one delta
+   check row under the Medium rule above. A High head needs two delta
+   check rows from distinct claims, at least one different-family, started
+   in parallel.
+2. **Round 2** checks only the round-1 fix delta (the hunks that changed
+   after round 1) and the sibling cases of each blocking finding. Only a
+   reviewer that raised a blocking finding runs it. A round-1 `PASS` row
+   does not run again when the fix stays inside the files of the failing
+   reviewer's findings: that row counts for the fix head. A fix outside
+   those files takes a delta check from the passing reviewer too.
+3. **Merge or stop.** The orchestrator merges on round 2 when only P2 or
+   P3 findings remain. There is no round 3: a blocking finding after round
+   2 ends the loop. The orchestrator then narrows the PR to the part that
+   passed, or closes it and dispatches the bundle again with a new packet.
+   A joint decision is needed only to grow the scope of the open PR, to
+   skip a required review row or to accept an I1/I2/I3 residual. A new P0
+   finding, or a new P1 finding on I1 or I2, goes to the owner as a notice.
 
-A P2 does not block a merge. It is a real defect that is small, so it is a
-follow-up, not a fix round: the round records `PASS` with it, and the
-coordinator files one follow-up issue for the PR's P2 findings under the
-same parent (rule 1 of `orchestrator.md` §2, deferred scope). The
-coordinator then resolves each P2 thread with a `deferred` reply that links
-that issue (§6). A finding that touches I1 or I2 is not a P2: the reviewer
-rates it at least P1 (§3).
+A P2 or a P3 finding does not block a merge and opens no issue. It stays
+in the review record: the round records `PASS` with it, and the
+coordinator resolves each P2 thread with a `noted` reply (§6). Only a P0
+or P1 defect, or an item that the owner names, opens a GitHub issue. A
+finding that touches I1 or I2 is not a P2: the reviewer rates it at least
+P1 (§3).
 
-The worker fixes each finding by the class rule (`worker.md` §7).
-If a new P1 appears in the fix delta in two rounds in a row, stop
-patching. The orchestrator and the advisor then make a joint decision to
-rescope the PR or revert it to the last clean rule. A new P0 or a new P1
-on I1 or I2 still goes to the owner
-as a notice.
+The worker fixes each finding by the class rule (`worker.md` §7), so that
+round 2 closes the whole family.
 
 Return `PASS` or `FAIL`. A `FAIL` has at least one P0 or P1 finding. A P2
-and a P3 do not block a merge: a `PASS` record carries them as follow-ups.
-Rule 4 decides whether a `FAIL` after round 3 takes another round or
-becomes an owner gate. A merge always needs a `PASS` record.
+and a P3 do not block a merge: a `PASS` record carries them in the review
+record. Rule 3 decides what follows a `FAIL` in round 2. A merge always
+needs a `PASS` record.
 
 ### 2.3 Review bot reference
 
@@ -178,15 +160,14 @@ the summary. A summary with findings gets one decision per finding.
 The coordinator writes the replies, so each role keeps one GitHub write
 path. The acceptor stays read-only. The reply uses the `review reply`
 shape (`templates.md`): `rejected` for a decline or an outdated finding,
-`fixed <sha>` for an adopted one after its fix round, and `deferred
-#<follow-up issue>` for a P2. An adopted P3 gets `fixed <sha>`
-when it is fixed and `deferred #<follow-up issue>` otherwise, each with the
-reason in `Why`. A thread that the coordinator answers with `rejected` or
-`deferred` is resolved with its reply. An adopted thread with a fix is resolved when the
+`fixed <sha>` for an adopted one after its fix round, and `noted` for a
+P2. An adopted P3 gets `fixed <sha>` when it is fixed and `noted`
+otherwise, each with the reason in `Why`. A thread that the coordinator
+answers with `rejected` or `noted` is resolved with its reply. An adopted thread with a fix is resolved when the
 fix round that addresses it is pushed.
 
-A bot finding that arrives after the merge is triaged once: `decline`, or
-`adopt` as a new issue under the batch parent. The merged PR is not
+A bot finding that arrives after the merge is triaged once: `decline`, or,
+for a P0 or P1, `adopt` as a new issue under the batch parent. The merged PR is not
 reopened.
 
 The merge executor still refuses a PR with an unresolved thread
@@ -199,7 +180,7 @@ gate.
 |---|---|---|
 | P0 | Data loss, a security defect or an unusable result | Inline thread on the changed line; blocks the merge |
 | P1 | Wrong behavior or broken boundary | Inline thread on the changed line; blocks the merge |
-| P2 | Real defect, small | Inline thread on the changed line; a follow-up issue, not a fix round |
+| P2 | Real defect, small | Inline thread on the changed line; stays in the review record, with no fix round and no issue |
 | NIT (P3) | Improvement | Review body only. No thread and no merge block |
 
 Only P0 and P1 block a merge (`src/core/review/finding-severity.ts`). A
@@ -208,12 +189,14 @@ unauthorized deletion or overwrite of a user file) is rated at least P1, so
 it blocks. That rating is your duty: code reads a severity, not a subject.
 
 Judge a product PR on its own behavior and on I1 (no credential leak) and
-I2 (no deletion or overwrite of a user file without authorization). An
-adversarial finding (attacker, race, alias, shell trick) is a P3 note unless
-it can happen by accident.
+I2 (no deletion or overwrite of a user file without authorization). P0 and
+P1 are for failures that ordinary use or an accident can cause. An
+adversarial-only finding (attacker, race, alias, shell trick), a
+client-side cache timing window and a duplicate JSON key are P3 notes.
 
-A finding gives the file, the line, the evidence and the smallest fix. A
-defect in code that the PR does not change is a note, not a finding.
+A finding gives the file, the line, the evidence and the smallest fix.
+Grade only the lines that the PR changes. A defect that main already has
+is a non-blocking note, never a `FAIL`.
 
 ## 4. Publish
 
@@ -277,8 +260,7 @@ way. It fails closed when the record, the block, the JSON, the receipt or
 the PR head subject is missing or wrong, or when two sessions hold a packet
 for the head, and it does not read pane text.
 
-`review publish` accepts rounds 1 to 5. Round 5 is the hard stop (§2.2),
-so every review round publishes its claim and record with this command.
+Every review round publishes its claim and record with this command.
 Do not post a claim or a record by hand, and do not write the verdict in
 free prose: the board counts a High row only when it cites a published
 claim, and the PR does not count as accepted.
@@ -295,8 +277,8 @@ Act on the exit code:
 The merge executor refuses a PR with an unresolved review thread.
 A bot thread is a reference input (§2.3): the coordinator answers and
 resolves it, and the bot never adds or removes a gate by itself.
-A P2 thread passes this check only after the coordinator files the
-follow-up issue and resolves the thread with the `deferred` reply (§6).
+A P2 thread passes this check only after the coordinator resolves it
+with the `noted` reply (§6).
 
 ## 5. Result schema
 
@@ -333,8 +315,8 @@ findings: [{ id, severity: P0 | P1 | P2, path, line, evidence, fix }
 confirmed_fixed: [<review thread node id>]
 ```
 
-`PASS` carries no P0 or P1 finding; it may carry P2 and P3 findings as
-follow-ups. `FAIL` carries at least one P0 or P1. Each
+`PASS` carries no P0 or P1 finding; it may carry P2 and P3 findings,
+which stay in the review record. `FAIL` carries at least one P0 or P1. Each
 blocking finding names one path, one line, the evidence and the smallest
 fix. A P3 finding carries no location. `model_relation` comes from the
 closed family table in `acceptance-receipt.ts`.
@@ -357,7 +339,7 @@ executor still refuses an unresolved thread.
 
 The coordinator resolves a bot thread (§2.3). The coordinator may also
 resolve a thread with a written rejection reason, or
-with the follow-up issue link of a P2 (§2.2). Both are a
+with the `noted` reply of a P2 (§2.2). Both are a
 `review reply` (`templates.md`).
 
 The head owner replies with the fix SHA and does not resolve. No worker

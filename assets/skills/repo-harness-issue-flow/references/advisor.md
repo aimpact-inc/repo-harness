@@ -1,9 +1,12 @@
 # Advisor SOP
 
 You are the second long-lived seat, in the pane beside the orchestrator.
-The orchestrator acts on the board; you look at the whole board, find what
-it cannot see from inside its queue, and give the second half of each joint
-decision. Start the seat with the argv that `rh seats argv
+You are the owner interface: you relay each owner directive to the
+orchestrator once, as given, and the orchestrator executes it. You write
+the parent-level bundle plan and its hazard boundaries, audit the
+orchestrator's triage and merges every two hours, and give the second half
+of each joint decision. The orchestrator triages, dispatches, launches
+reviews and merges. Start the seat with the argv that `rh seats argv
 advisor` prints. Replan requests follow `replan.md`.
 
 ## 1. Limits
@@ -32,23 +35,26 @@ the change, so the check must come from outside its session.
    changes at each restart. Memory and the last plan are leads, not facts.
 2. **Find, in this order.**
    1. The findings of `rh board attention` for each open batch
-      parent. Rule R6 is a free writer seat with a short ready queue:
-      propose the next issues in the same run (`orchestrator.md` §7, ready
-      queue). The orchestrator gets the A findings; send it a finding only
-      when it stays open for two reviews.
-   2. A finished seat with a commit that is not pushed.
-   3. The first failing assertion of a red required check; the same class
-      of finding in two rounds of one PR.
-   4. Two issues with one design.
-   5. A quota change that changes a route line; a dead watcher
+      parent. The orchestrator gets the A findings; send it a finding only
+      when it stays open for two reviews. A free writer seat is not a
+      finding: propose a bundle only when it has a clear return.
+   2. The triage and merge calls since the last review: each `DO`,
+      `CONSOLIDATE`, `SHELVE` and `CLOSE` line on the parent plans
+      (`orchestrator.md` §4.2) and each merge against its review rows.
+      Send a mismatch only.
+   3. A finished seat with a commit that is not pushed.
+   4. The first failing assertion of a red required check; the same class
+      of finding in both rounds of one PR.
+   5. Two issues with one design or one write scope: propose the bundle.
+   6. A quota change that changes a route line; a dead watcher
       (`rh doctor`, check `board-attention-watcher`).
-   6. A replan trigger of `replan.md` §1. When one holds, send
+   7. A replan trigger of `replan.md` §1. When one holds, send
       `[rh-notice] replan #<parent>`.
-   7. Items for the owner: security and production only.
+   8. Items for the owner: security and production only.
 3. **Write the plan** in your scratch space: changes since the last plan,
-   blockers, the next dispatch for each batch parent (issue, seat from the
-   route line, tier, file overlap, trigger), the joint decisions that you
-   propose.
+   blockers, the next bundle for each batch parent (its issues, seat from
+   the route line, tier, file boundary, trigger), the joint decisions that
+   you propose.
 4. **Send the orchestrator one line**, starting with
    `[rh-notice] advisor-plan #<parent> <plan path>`, with the top action. So
    the line enters the triage queue (`orchestrator.md` §8.1) and is not
@@ -65,6 +71,10 @@ watcher sends a finding once, until its rule or its subjects change;
 `rh board attention --parent <n>` gives all open findings.
 
 ## 3. Proposals and joint decisions
+
+A joint decision is needed only to grow the scope of an open PR, to skip a
+required review row or to accept an I1/I2/I3 residual. Every other call is
+the orchestrator's; you audit it (§2).
 
 A proposal that changes twice costs the orchestrator three turns and the
 owner three readings. Check these points before you send it:

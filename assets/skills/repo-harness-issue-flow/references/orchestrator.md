@@ -16,7 +16,7 @@ worker is yours, and it names the worker. Every later instruction to a
 worker is a comment on its issue or PR.
 
 Contents: §1 Preflight · §2 Split · §3 Write the boundaries · §4 Parent
-issue (§4.1 Release set, §4.2 Intake) · §5 Gap review · §6 Publish ·
+issue (§4.1 Release set, §4.2 Intake triage) · §5 Gap review · §6 Publish ·
 §7 Dispatch (§7.1 Quota check) · §8 Follow up (§8.1 Triage queue) ·
 §9 Merge and integrate (§9.3 Board merge) · §10 Close out.
 
@@ -73,10 +73,10 @@ Make one child issue for each pair of module and observable outcome.
 - **Order.** Contract and types → core logic → effects and adapters →
   CLI or server → UI → docs and map. Deletion of the old path goes with
   the change that replaces it, never as "cleanup later".
-- **Deferred scope.** Fold a review follow-up in the same function and
-  tier into the open PR. A follow-up in another module or tier, or one
-  that must land before another open PR, gets its own issue even when
-  small.
+- **Bundles.** Fine child issues stay requirement units. At dispatch,
+  group the open issues of one module and write scope into one bundle:
+  one worker, one worktree, one PR, one CI run, one review. A P2 or P3
+  review finding stays in the review record and gets no issue.
 
 ## 3. Write the boundaries
 
@@ -175,8 +175,8 @@ content before the work, not after the merges.
   cannot hold the release.
 - **Critical path.** Name the longest serial chain of the set. Dispatch its
   head first and give it the scarce seats: the release date is its end.
-- **Record.** The advisor proposes the set (`advisor.md` §4). After the
-  joint decision, post one `decision` comment on each batch parent with the
+- **Record.** The advisor proposes the set (`advisor.md` §4). When you
+  accept it, post one `decision` comment on each batch parent with the
   train table: train, result, order, state. Update it when a train changes.
 - **Release run.** Propose the release when every issue of the set is closed
   and the daily full run is green. A fix that users need before that is the
@@ -185,17 +185,25 @@ content before the work, not after the merges.
   so a merged change does not change the host before a release, and an
   unreleased build is not installed as the host CLI.
 
-### 4.2 Intake
+### 4.2 Intake triage
 
-Each new issue costs a dispatch, a review and a merge slot, and it moves
-the end of the batch. Before you file one during a batch:
+Each new issue costs a dispatch slot and moves the end of the batch. Sort
+each open or new issue once, and log the call in one line on the parent
+plan:
 
-1. Search the open issues and PRs for the same design. Fold a duplicate:
-   keep the older issue, copy the missing text into it, and close the newer
-   one with a link.
-2. Check that the issue is needed: it blocks an issue of the release set,
-   it records a defect that a user meets, or the owner asked for it. Other
-   findings wait in the advisor's proposal for the next set.
+| Call | When | Action |
+|---|---|---|
+| `DO` | It blocks the release set, records a P0 or P1 defect, or the owner named it | Put it in a bundle of its module |
+| `CONSOLIDATE` | An older issue or an open bundle has the same design or write scope | Copy the missing text into the older issue or the bundle packet, then close it with a link |
+| `SHELVE` | An owner roadmap item, or an item that a vendor or upstream blocks | Label `status:deferred` and keep it open, off the dispatch board. It closes only on the owner's word |
+| `CLOSE` | An agent-spawned P2 or P3 issue | Close it as not planned |
+
+Before you file a new issue during a batch:
+
+1. Search the open issues and PRs for the same design and consolidate a
+   duplicate into the older issue.
+2. File it only for a P0 or P1 defect, a blocker of the release set or an
+   owner-named item. A P2 or P3 review finding stays in the review record.
 3. Give it its parent, its `tier:` and `route:` labels, its blocked-by links
    and its milestone at once. An issue without a parent is in no plan and no
    seat takes it.
@@ -238,14 +246,18 @@ module is in the title so that a list view shows the write scopes.
 
 ## 7. Dispatch
 
-- The issue is the brief. The dispatch packet holds only the issue URL,
-  the role (`worker`), the worktree path and branch name, the model, the
-  report channel and the `Authority:` line. Do not restate the requirement
-  in chat. A second copy becomes a second authority.
-- Post the claim, then the packet. Post one `issue claim` on the child
-  issue for the worker with the required fields in `templates.md` § issue
-  claim. The claim is the worker's identity on the board, and the worker
-  never posts one. Dispatch only after the claim is on the issue.
+- One bundle goes to one worker as one decision-complete packet
+  (`templates.md`, dispatch packet): the goal, the `Closes` list, the exact
+  file boundary, the design choices already made, the non-goals, the exact
+  fast test command, the round cap and the stop conditions. The issues
+  stay the requirement authority; the packet names them and adds the
+  bundle decisions, so the worker asks no design question. The worker
+  replies `DONE <PR> <head>` or `BLOCKED <one question>`.
+- Post the claim, then the packet. Post one bundle claim with
+  `rh board claim --issues <a>,<b>,<c>`, with the required fields in
+  `templates.md` § issue claim. The claim is the worker's identity on the
+  board, and the worker never posts one. Dispatch only after the claim is
+  on each issue of the bundle.
 - Dispatch in parallel only when the write scopes are disjoint and each
   dependency is merged, or its contract is stable and the issue allows
   early start.
@@ -262,17 +274,14 @@ module is in the title so that a list view shows the write scopes.
   prefer the deepest available model for architecture and contract issues,
   and the execution model for bounded single-module issues. With one model
   available, it takes both. The preference never becomes a requirement.
-- Keep a ready queue. While a writer seat is free, the plan holds at least
-  two ready issues that wait for no owner answer. When every open item
-  waits for the owner or for a held PR, ask the advisor for the next issues
-  in the same turn and dispatch them by joint decision. Seats that idle
-  through a night because every item waited for one answer are the most
-  expensive failure of this flow.
+- A seat may idle. When no bundle with a clear return is ready, leave the
+  writer seats idle: an idle seat spends no quota and no memory. Do not
+  file or propose work to fill a seat.
 - Match the model to the issue. Give a weaker or over-defensive model the
   issues with the tightest boundaries and the clearest acceptance checks.
   Keep contract-design issues for a strong model.
 - Review rounds converge by the round rules in `acceptor.md` §2.2.
-  Include this rule in the worker brief: before asking for round N >= 2,
+  Include this rule in the worker brief: before asking for round 2,
   check the fix delta against the open findings for sibling cases, missing
   test branches and changelog fragment text against behavior. A Claude writer runs
   one read-only sub-agent for this check. A Pi writer has no sub-agents and
@@ -327,7 +336,7 @@ route line names the fallback seat, and `rh seats launch gatekeeper
 Never start a seat with an argv that `rh seats argv` did not print, and
 never outside a Herdr.app tab.
 `rh board dispatch --parent <n> --space <id>` applies this step to every ready issue of the plan: it reads the `route:<class>` label of each issue (and `touches:credentials`), starts the worktree, posts the claim and opens the worker tab. `--dry-run` prints the decisions only. An issue without one `route:<class>` label is reported and not dispatched.
-`rh board review --parent <n> --space <id>` starts the gatekeeper seat for each ready, green High pull request that has no gatekeeper start marker for its head. The two High seats run as a relay (#2910): one run starts one seat of a head, and the reviewer starts only after the gatekeeper of that head recorded `PASS`. The board carries that verdict per pull request as `gatekeeper_review` (`pass`, `fail`, `none`, `unknown`). When it is `pass` and the board shows `second_review: pending` (an open High or unknown-tier head that does not meet the High acceptance rule and has no row of the configured reviewer's model family), the run starts the reviewer seat on any runtime; a row belongs to a seat by the family of its model, and the family of the `reviewer` seat of the seats config is the one reviewer family; each seat has its own marker, so a seat that was not sent retries alone. A reviewer `FAIL` sends the fix back to the gatekeeper first: the fix is a new head, its `gatekeeper_review` is not `pass`, and the run starts the gatekeeper only. The reviewer then reads the delta from its own last head, not from the gatekeeper's. A Medium head gets one seat of the other family than the board's `writer_family` (the `modelFamily` of the `Model:` line of the writer claim of the head branch): the gatekeeper for a writer of the reviewer family, the reviewer for any other known family. An unknown writer family (no such claim, no `Model:` line, an unmatched model, or linked issues that disagree) starts no seat and is skipped as `writer_family_unknown`; the orchestrator then starts by hand one reviewer seat of a model family known to differ from the writer's, and that review records its own `Model relation:`. `--pr <n>` reviews that pull request only. A pull request that links a plan-held issue is skipped as `plan_hold`. A head whose gatekeeper is about to start is skipped as `review_family_unavailable` when the effective gatekeeper (the seat of the `gatekeeper:` route line) cannot launch, has a model with no known family, is of the writer's family where it gives the different-family row, or is of the reviewer family where the head takes a reviewer row; the detail names the gap and the route line. The reviewer seat is skipped the same way when its model has no known family, or on a High head when its family is the gatekeeper's, because the two rows are then not independent. `--dry-run` prints the decisions only. A High head is not accepted until it has `PASS` rows from two distinct claims, one of them different-family to the writer; a Medium head needs one claimed `PASS` row recorded different-family (`acceptor.md` §2.2).
+`rh board review --parent <n> --space <id>` starts the gatekeeper seat for each ready, green High pull request that has no gatekeeper start marker for its head. The two High seats start in parallel on the same head: one run starts the gatekeeper and the reviewer seat of the configured reviewer's model family (a row belongs to a seat by the family of its model, and the family of the `reviewer` seat of the seats config is the one reviewer family). Each seat has its own marker, so a seat that was not sent retries alone. In round 2 the run starts only the seat that raised a blocking finding (`acceptor.md` §2.2). A Medium head gets one seat of the other family than the board's `writer_family` (the `modelFamily` of the `Model:` line of the writer claim of the head branch): the gatekeeper for a writer of the reviewer family, the reviewer for any other known family. An unknown writer family (no such claim, no `Model:` line, an unmatched model, or linked issues that disagree) starts no seat and is skipped as `writer_family_unknown`; the orchestrator then starts by hand one reviewer seat of a model family known to differ from the writer's, and that review records its own `Model relation:`. `--pr <n>` reviews that pull request only. A pull request that links a plan-held issue is skipped as `plan_hold`. A head whose gatekeeper is about to start is skipped as `review_family_unavailable` when the effective gatekeeper (the seat of the `gatekeeper:` route line) cannot launch, has a model with no known family, is of the writer's family where it gives the different-family row, or is of the reviewer family where the head takes a reviewer row; the detail names the gap and the route line. The reviewer seat is skipped the same way when its model has no known family, or on a High head when its family is the gatekeeper's, because the two rows are then not independent. `--dry-run` prints the decisions only. A High head is not accepted until it has `PASS` rows from two distinct claims, one of them different-family to the writer; a Medium head needs one claimed `PASS` row recorded different-family (`acceptor.md` §2.2).
 Apply the explorer line through the Claude Agent tool's `model` parameter when you call the explorer.
 
 Claude saving mode applies when weekly remaining quota is below
@@ -396,8 +405,8 @@ host's PR events or check when the worker reports.
 - **Worker PR.** A worker pushes its branch and opens its PR as soon as its
   checks pass. Do not send a push or PR go. You keep dispatch, joint
   decisions, the merge, and the review start with `rh board
-  review`. A worker reports to you only on PASS, a boundary question or a
-  fix-loop stop.
+  review`. A worker reports to you only `DONE <PR> <head>` or
+  `BLOCKED <one question>`.
 - **Draft PR.** A writer keeps its PR draft until its verification
   evidence exists. Do not follow CI on a draft push by push. Act on the
   worker's `ready for review` notice (§8.1).
@@ -437,10 +446,9 @@ host's PR events or check when the worker reports.
   that meets the Low accept-seat skip gets no Codex, Herdr or OAR accept
   seat (`docs/reference-configs/agentic-development-flow.md`, Review by
   risk). Give each ready PR that needs review its own review seat at once.
-  A High PR takes its two reviews as a relay (#2910): the gatekeeper
-  seat starts first, and the reviewer seat starts after the gatekeeper
-  recorded `PASS` for that head. A reviewer `FAIL` returns the fix to
-  the gatekeeper before the reviewer runs again.
+  A Medium PR takes one reviewer. A High PR takes its two reviews in
+  parallel on the same head; in round 2 only the reviewer that raised a
+  blocking finding runs again.
   A coordinator may add `gatekeeper-deep` as an optional second Codex
   review row: a read-only Codex seat on a different model than
   `gatekeeper`. Start it with `rh seats launch gatekeeper-deep --repository-id <id> --pr <n> --cwd <worktree> --task <packet>`.
@@ -453,9 +461,9 @@ host's PR events or check when the worker reports.
   Ship the whole verdict bundle of a round before the worker pushes: the
   worker fixes and pushes once per round, not once per finding.
   Findings take the severities of `acceptor.md` §3. A P2 and a P3 do not
-  block the PR: the `PASS` record carries them, and you file one follow-up
-  issue for the PR's P2 findings under the same parent and resolve their
-  threads with the `deferred` reply (`acceptor.md` §2.2, `templates.md`).
+  block the PR and open no issue: the `PASS` record carries them, and you
+  resolve their threads with the `noted` reply (`acceptor.md` §2.2,
+  `templates.md`).
   Send the findings to the worker that
   wrote the PR only when the worker cannot read them: the worker reads the
   acceptance records and review threads on its PR and runs its own fix
@@ -464,8 +472,8 @@ host's PR events or check when the worker reports.
   (`worker.md` §7). For the design change, post a `scope change` with one
   mechanism rule that covers the class, and require the fix to show the rule
   on each case that the reviews found (one table-driven test or a replay of
-  those inputs). The next round reviews the rule. A loop that fixes one
-  instance for each round reaches the hard stop with the class still open.
+  those inputs). Round 2 reviews the rule. A fix of one instance leaves
+  the class open after the last round.
   Record the result in one acceptance record comment on
   the PR, in the row shape of `templates.md`: round, role, subject,
   verdict and model relation.
@@ -521,7 +529,7 @@ the board. It holds no state of its own, so it cannot drift from the board.
   `rh board attention --parent <n>` gives all open findings.
   Rule A20 names an open PR whose required check is `pending` or `missing`
   more than 60 min after its head commit: read the run, and when it holds
-  no job, cancel it and start it again by JD.
+  no job, cancel it and start it again.
   Start the watcher of a batch parent with
   `rh board attention start --parent <n>`. When the watcher
   exits, hc types a note `t<id> exited (exit <n>)` into your terminal:
@@ -620,14 +628,14 @@ A PR is eligible when all of these are true:
 - It is open and not draft.
 - Its required checks are SUCCESS on its own head.
 - Its tier review passed on a subject SHA. A review that returns `PASS`
-  with a P2 needs no fix round: the P2 is a follow-up issue. A Low PR needs no review, but
+  with a P2 needs no fix round: the P2 stays in the review record. A Low PR needs no review, but
   its PR body must hold the author verification evidence
   (`docs/reference-configs/agentic-development-flow.md`, Review by risk).
 - Its head equals the reviewed subject. Rows of an earlier head do not
   count for a later head.
 - It has no unresolved review thread that a person started. A review bot
   thread is advisory input and does not block. You resolve a P2 thread with
-  its follow-up issue link first (`acceptor.md` §6).
+  the `noted` reply first (`acceptor.md` §6).
 - Its closing references are correct.
 
 ```bash
@@ -651,8 +659,8 @@ so a retarget after the push leaves the head with no run.
 
 ### 9.3 Board merge
 
-A GitHub comment is a log; a local decision and CI act. After a joint decision or
-an owner authorization for the batch, you start the merge from your seat:
+A GitHub comment is a log; a local decision and CI act. For an
+owner-approved batch, you start the merge from your seat:
 
 ```bash
 rh board merge --parent <n> [--pr <p>] [--dry-run]
@@ -669,8 +677,9 @@ are true:
   (the parent excluded) is an item of the parent.
 - No hold record is in force on the parent, on the PR's issues or on the PR.
 - The plan does not hold its issues, its issues are in `merge_order`, and
-  every issue before each of them in `merge_order` is closed. A PR that
-  closes two plan items is never eligible, in any plan order: split the PR.
+  every issue before each of them in `merge_order` is closed or is an
+  issue of the PR's bundle claim. A bundle PR closes every plan item that
+  its bundle claim names.
 - An acceptance record has a PASS row for the head, at every tier. The
   provisional `tier_low` status is not enough: post the Low record after
   you check the verification evidence.
@@ -687,7 +696,7 @@ review-bot comment (`acceptor.md` §2.3): the command does not read bot
 comments.
 
 A hold record narrows only. When a stop is decided locally (an owner
-instruction that reaches your seat, or a joint decision on a "stop" or "no"
+instruction that reaches your seat, or your call on a "stop" or "no"
 comment), post the `merge hold` with `rh board post hold` in the same turn,
 before any other action. A hold on the parent holds the whole batch, or only
 the issues of its `Issues:` line. A hold on an issue or a PR holds that
@@ -701,10 +710,10 @@ thread.
 
 ## 10. Close out
 
-1. All children are closed or explicitly deferred to a linked issue.
+1. All children are closed or shelved (`status:deferred`).
 2. When module boundaries, APIs or flows changed, the architecture model
    and `docs/architecture/archimap.html` are current (`repo-harness-archimap`).
-3. Post a closing comment on the parent: merged PRs, deferred issues,
+3. Post a closing comment on the parent: merged PRs, shelved issues,
    remaining risk. Then close it, when the owner's instruction covers
    closing.
 4. Close each finished worker pane after its PR merges, with

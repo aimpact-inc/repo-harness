@@ -27,7 +27,7 @@ This is the root routing contract for Claude Code and Codex. Load this before ta
 - Run the repository type check and the affected tests once after the implementation is stable.
 - Prefer a focused failing regression before a bug fix. For other work, select tests by observable risk and owning runtime boundary, including error and recovery paths.
 - Use `bun run test:files <affected tests> --timeout 60000 --max-concurrency 1`; extend existing coverage before creating a new test file.
-- Test budget per PR: added test lines divided by added product lines must not exceed 2:1, and the PR adds at most one test file.
+- Report added test lines, added product lines and added test files in the PR as data; the report blocks no merge.
 - Never modify or delete a test assertion to make a test pass; justify every necessary test change item by item in the PR.
 - Report failed, timed-out, incomplete or omitted coverage explicitly; do not manufacture receipts.
 
