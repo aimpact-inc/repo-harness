@@ -1030,10 +1030,10 @@ function completeHostSkillSetEvidence(home: string, hosts: readonly SkillHost[],
   env: NodeJS.ProcessEnv, refused: readonly string[]): string[] {
   for (const host of hosts) {
     const root = hostSkillRoot(home, host, env);
-    // A skill directory that the gate refused to replace is present evidence: it holds the user's copy.
+    // A skill entry that the gate refused to replace is present evidence: it holds the user's copy, a dangling link included.
     const paths = packages.filter(pkg => pkg.hosts.includes(host))
       .map(pkg => join(root, pkg.name)).map(skill => refused.includes(skill) ? skill : join(skill, 'SKILL.md'));
-    if (paths.length > 0 && paths.every(existsSync)) return paths;
+    if (paths.length > 0 && paths.every(path => refused.includes(path) ? lstatExists(path) : existsSync(path))) return paths;
   }
   return [];
 }

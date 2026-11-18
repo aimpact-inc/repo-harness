@@ -2378,7 +2378,7 @@ exit 0
     }
   }, 30_000);
 
-  test('a complete update commits sibling skills when the gate keeps the edited sole cross-review skill', () => {
+  test.each(['moved SKILL.md', 'dangling link'])('a complete update commits sibling skills when the gate keeps the edited sole cross-review skill (%s)', edit => {
     const tmp = mkdtempSync(join(tmpdir(), 'repo-harness-cli-update-refused-skill-'));
     const home = join(tmp, 'home');
     const repo = join(tmp, 'repo');
@@ -2393,6 +2393,9 @@ exit 0
       setupManagedRuntimeReadback(tmp, home, fakeBin);
       const candidateVersion = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf-8')).version as string;
       installCandidateRuntimeFixture(home, candidateVersion);
+      // The complete projection requires the launcher that `bun add -g` links.
+      mkdirSync(join(home, '.bun', 'bin'), { recursive: true });
+      writeExecutable(tmp, join(home, '.bun', 'bin', 'rh'), '#!/bin/sh\n');
       writeFileSync(installStateFixturePath({ HOME: home }), `${JSON.stringify({
         protocol: 4, selection: plugins, ...versions(plugins), transaction_id: 'before-refusal',
         applied_at: '2026-07-14T00:00:00.000Z', pi_packages: [], previous: null,
@@ -2407,12 +2410,19 @@ exit 0
         REPO_HARNESS_BUN_EXECUTABLE: join(fakeBin, 'bun'),
         REPO_HARNESS_CLAUDE_EXECUTABLE: join(fakeBin, 'claude'),
       };
-      // rh wrote the only cross-review copy; the user then moved its SKILL.md out.
+      // rh wrote the only cross-review copy; the user then moved its SKILL.md out or replaced it with a dangling link.
       const crossReview = join(home, '.claude', 'skills', 'repo-harness-cross-review');
       mkdirSync(dirname(crossReview), { recursive: true });
       openHostConfigGate({ env }).writePaths([{ path: crossReview, owner: 'cross-review', entry: { type: 'directory', source: join(ROOT, 'assets', 'skills', 'repo-harness-cross-review') } }]);
-      renameSync(join(crossReview, 'SKILL.md'), join(tmp, 'SKILL.md'));
-      const kept = readdirSync(crossReview).sort();
+      const danglingTarget = join(tmp, 'missing-cross-review');
+      let kept: string[] = [];
+      if (edit === 'dangling link') {
+        rmSync(crossReview, { recursive: true });
+        symlinkSync(danglingTarget, crossReview);
+      } else {
+        renameSync(join(crossReview, 'SKILL.md'), join(tmp, 'SKILL.md'));
+        kept = readdirSync(crossReview).sort();
+      }
 
       const res = spawnSync(process.execPath, [CLI, 'update', '--target', 'claude', '--no-external-skills', '--no-codegraph', '--json'], { cwd: repo, encoding: 'utf-8', env });
 
@@ -2421,7 +2431,8 @@ exit 0
         status: 'ok', detail: expect.stringContaining('scope=complete'),
         stderr: expect.stringContaining(`it changed since rh wrote it, so rh does not replace it: ${crossReview}`),
       });
-      expect(readdirSync(crossReview).sort()).toEqual(kept);
+      if (edit === 'dangling link') expect(readlinkSync(crossReview)).toBe(danglingTarget);
+      else expect(readdirSync(crossReview).sort()).toEqual(kept);
       expect(existsSync(join(home, '.claude', 'skills', 'repo-harness-herdr-portal', 'SKILL.md'))).toBe(true);
       const installed = readInstallState(env);
       expect(installed?.transaction_id).not.toBe('before-refusal');
