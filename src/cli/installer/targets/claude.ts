@@ -58,14 +58,14 @@ export const CLAUDE_STATUS_LINE_PIPE = `input=$(cat); printf '%s' "$input" | rep
  * rh adds the status line only when none exists, and refreshes only the one
  * it recorded; a status line that rh did not write is the user's (R4).
  */
-function statusLineFragment(content: string, selected: (selector: string) => boolean): FragmentRequest {
+function statusLineFragment(content: string, isSelected: (selector: string) => boolean): FragmentRequest {
   return {
     owner: 'core',
     selector: 'statusLine',
     kind: jsonFragment.locate(content, 'statusLine') ? 'refresh' : 'add',
     strategy: jsonFragment,
     value: managedStatusLine(),
-    selected: selected('statusLine'),
+    selected: isSelected('statusLine'),
   };
 }
 
@@ -104,8 +104,8 @@ class ClaudeTarget implements AgentTarget {
   hostConfigChanges(loc: Location, opts: InstallOptions): HostConfigFileChange[] {
     const filePath = userConfigPath(loc);
     const content = readSettings(filePath);
-    const selected = overridesOf(opts.overrides ?? NO_OVERRIDES, filePath, process.env);
-    return [{ path: filePath, fragments: [...managedHookRequests('claude', content, selected), statusLineFragment(content, selected)] }];
+    const isSelected = overridesOf(opts.overrides ?? NO_OVERRIDES, filePath, process.env);
+    return [{ path: filePath, fragments: [...managedHookRequests('claude', content, isSelected), statusLineFragment(content, isSelected)] }];
   }
 
   install(loc: Location, opts: InstallOptions): WriteResult {

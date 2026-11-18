@@ -425,11 +425,11 @@ export function overridesOf(selection: OverrideSelection, filePath: string, env:
   return (selector) => selected(selection, path, selector);
 }
 
-/** The managed entry request of each route of the host, for the file content; `selected` is the override lookup of the file. */
-export function managedHookRequests(host: HookHost, content: string, selected: (selector: string) => boolean, env: NodeJS.ProcessEnv = process.env): FragmentRequest[] {
+/** The managed entry request of each route of the host, for the file content; `isSelected` is the override lookup of the file. */
+export function managedHookRequests(host: HookHost, content: string, isSelected: (selector: string) => boolean, env: NodeJS.ProcessEnv = process.env): FragmentRequest[] {
   return routesForHost(host).map((route): FragmentRequest => {
     const selector = hookSelector(route);
-    return { owner: 'core', selector, kind: jsonFragment.locate(content, selector) ? 'refresh' : 'add', strategy: jsonFragment, value: buildHookEntry(route, host, env), selected: selected(selector) };
+    return { owner: 'core', selector, kind: jsonFragment.locate(content, selector) ? 'refresh' : 'add', strategy: jsonFragment, value: buildHookEntry(route, host, env), selected: isSelected(selector) };
   });
 }
 
