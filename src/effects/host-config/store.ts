@@ -83,9 +83,10 @@ export function hostPathKey(paths: HostConfigPaths, path: string): string {
   return key;
 }
 
-/** The path record that owns a gate target: the same entry, or a recorded directory above it. */
+/** The path record or tool path that owns a gate target: the same entry, or a recorded directory above it. */
 export function pathRecordOf(ledger: HostConfigLedger, target: HostPath): string | null {
-  for (const [key, record] of Object.entries(ledger.paths)) {
+  const owned = [...Object.entries(ledger.paths), ...Object.values(ledger.tools).flatMap((tool) => Object.entries(tool!.paths))];
+  for (const [key, record] of owned) {
     if (key === target || (record.committed.type === 'directory' && isPathInside(key, target))) return key;
   }
   return null;
@@ -244,20 +245,52 @@ function validPathRecords(value: Record<string, unknown>): boolean {
   return isObject(value.paths) && Object.entries(value.paths).every(([path, record]) => isAbsolute(path) && validPathRecord(record));
 }
 
+const TOOL_IDS: readonly string[] = ['herdr-core', 'bun'];
+
+function validUserPathEntry(value: unknown): boolean {
+  if (!isObject(value) || !isText(value.entry) || value.entry === '' || value.entry.includes(';') || !isText(value.inserted)) return false;
+  return (value.inserted === value.entry || value.inserted === `;${value.entry}`)
+    && (value.kind === 'String' || value.kind === 'ExpandString') && typeof value.value_existed === 'boolean';
+}
+
+function validToolRecord(record: unknown): boolean {
+  if (!isObject(record) || !isObject(record.paths) || !Array.isArray(record.directories)) return false;
+  return (record.installed_by === 'rh-install' || record.installed_by === 'rh-bootstrap') && isText(record.version) && record.version !== ''
+    && Object.entries(record.paths).every(([path, entry]) => isAbsolute(path) && isObject(entry) && Object.keys(entry).join() === 'committed' && validPathCommitted(entry.committed))
+    && record.directories.every((directory) => isText(directory) && isAbsolute(directory))
+    && (record.path_entry === undefined || validUserPathEntry(record.path_entry))
+    && (record.profile === undefined || (isObject(record.profile) && isText(record.profile.file) && isAbsolute(record.profile.file) && isText(record.profile.inserted) && record.profile.inserted !== ''))
+    && typeof record.removable === 'boolean';
+}
+
+/** Each host path has one owner record: a tool path is in no other tool, file record or path record. */
+function validTools(value: Record<string, unknown>): boolean {
+  if (!isObject(value.tools) || !Object.entries(value.tools).every(([id, record]) => TOOL_IDS.includes(id) && validToolRecord(record))) return false;
+  const keys = Object.values(value.tools as HostConfigLedger['tools']).flatMap((tool) => Object.keys(tool!.paths));
+  const taken = new Set([...Object.keys(value.files as object), ...Object.keys(value.paths as object)]);
+  return new Set(keys).size === keys.length && keys.every((key) => !taken.has(key));
+}
+
 const validRetired = (value: unknown): boolean => isObject(value) && isSha(value.sha256) && isText(value.at) && !Number.isNaN(Date.parse(value.at));
 const validRecovery = (value: unknown): boolean => validRetired(value) && isObject(value) && isText(value.file) && isAbsolute(value.file);
+const validRetirement = (value: Record<string, unknown>): boolean => Array.isArray(value.retired) && value.retired.every(validRetired) && Array.isArray(value.recovery) && value.recovery.every(validRecovery);
 
 /** A valid ledger of an older protocol as the schema move leaves it; null for any other value. */
 function movedLedger(value: unknown): HostConfigLedger | null {
-  if (!isObject(value) || !validTextRecords(value) || 'retired' in value || 'recovery' in value) return null;
+  if (!isObject(value) || !validTextRecords(value) || 'tools' in value) return null;
   const { files, fragments, directories } = value as unknown as HostConfigLedger;
-  const moved = { protocol: HOST_CONFIG_LEDGER_PROTOCOL as typeof HOST_CONFIG_LEDGER_PROTOCOL, files, fragments, directories, retired: [], recovery: [] };
-  if (value.protocol === 1 && !('paths' in value)) return { ...moved, paths: {} };
-  if (value.protocol === 2 && validPathRecords(value)) return { ...moved, paths: value.paths as HostConfigLedger['paths'] };
+  const moved = { protocol: HOST_CONFIG_LEDGER_PROTOCOL as typeof HOST_CONFIG_LEDGER_PROTOCOL, files, fragments, directories, tools: {} };
+  const empty = !('retired' in value) && !('recovery' in value);
+  if (value.protocol === 1 && empty && !('paths' in value)) return { ...moved, paths: {}, retired: [], recovery: [] };
+  if (value.protocol === 2 && empty && validPathRecords(value)) return { ...moved, paths: value.paths as HostConfigLedger['paths'], retired: [], recovery: [] };
+  if (value.protocol === 3 && validPathRecords(value) && validRetirement(value)) {
+    const { paths, retired, recovery } = value as unknown as HostConfigLedger;
+    return { ...moved, paths, retired, recovery };
+  }
   return null;
 }
 
-const RETIRED_PROTOCOLS: Readonly<Record<number, string>> = { 1: 'which has no path records', 2: 'which has no retirement records' };
+const RETIRED_PROTOCOLS: Readonly<Record<number, string>> = { 1: 'which has no path records', 2: 'which has no retirement records', 3: 'which has no tool records' };
 
 /** The ledger in `bytes`, also a copy of it; `label` names the file in an error. An older protocol names the update step. */
 export function parseLedger(bytes: Buffer, label: string): HostConfigLedger {
@@ -265,16 +298,16 @@ export function parseLedger(bytes: Buffer, label: string): HostConfigLedger {
   const retired = isObject(value) && typeof value.protocol === 'number' ? RETIRED_PROTOCOLS[value.protocol] : undefined;
   if (retired) throw invalidState(`the ledger is protocol ${String((value as Record<string, unknown>).protocol)}, ${retired}; run: rh update (${label})`);
   const valid = isObject(value) && value.protocol === HOST_CONFIG_LEDGER_PROTOCOL && validTextRecords(value) && validPathRecords(value)
-    && Array.isArray(value.retired) && value.retired.every(validRetired) && Array.isArray(value.recovery) && value.recovery.every(validRecovery);
+    && validRetirement(value) && validTools(value);
   if (!valid) throw invalidState(`the ledger has an invalid shape: ${label}`);
   return value as unknown as HostConfigLedger;
 }
 
 /**
- * The one-shot move of an older ledger to protocol 3: every record stays as it
- * is; a protocol 1 ledger gets an empty `paths`, and both get empty `retired`
- * and `recovery`. A mutating entry runs it under the runtime lock; a later run
- * finds protocol 3.
+ * The one-shot move of an older ledger to protocol 4: every record stays as it
+ * is; a protocol 1 ledger gets an empty `paths`, protocols 1 and 2 get empty
+ * `retired` and `recovery`, and every older ledger gets empty `tools`. A
+ * mutating entry runs it under the runtime lock; a later run finds protocol 4.
  */
 export function migrateLedgerSchema(paths: HostConfigPaths): void {
   const { observation, bytes } = observeFile(paths.ledger);

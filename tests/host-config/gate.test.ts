@@ -65,10 +65,12 @@ test('an install-owned whole path refuses every gate operation and stays in the 
   f.gate().apply([f.change(f.b, 'on')]);
   expect(f.ledger().paths).toEqual(paths);
 
-  const { paths: _paths, retired: _retired, recovery: _recovery, ...textRecords } = f.ledger();
-  for (const [old, refusal, moved] of [
-    [{ ...textRecords, protocol: 1 }, 'the ledger is protocol 1, which has no path records; run: rh update', {}],
-    [{ ...textRecords, protocol: 2, paths }, 'the ledger is protocol 2, which has no retirement records; run: rh update', paths],
+  const { paths: _paths, retired: _retired, recovery: _recovery, tools: _tools, ...textRecords } = f.ledger();
+  const retirement = { retired: [{ sha256: `sha256:${'a'.repeat(64)}`, at: '2026-11-01T00:00:00.000Z' }], recovery: [] };
+  for (const [old, refusal, moved, kept] of [
+    [{ ...textRecords, protocol: 1 }, 'the ledger is protocol 1, which has no path records; run: rh update', {}, { retired: [], recovery: [] }],
+    [{ ...textRecords, protocol: 2, paths }, 'the ledger is protocol 2, which has no retirement records; run: rh update', paths, { retired: [], recovery: [] }],
+    [{ ...textRecords, protocol: 3, paths, ...retirement }, 'the ledger is protocol 3, which has no tool records; run: rh update', paths, retirement],
   ] as const) {
     writeFileSync(join(f.root, 'ledger.json'), JSON.stringify(old));
     expect(() => f.gate().recorded(f.a)).toThrow(refusal);
@@ -76,7 +78,7 @@ test('an install-owned whole path refuses every gate operation and stays in the 
     expect(openHostConfigGate({ env: { HOME: f.home }, preview: true }).recorded(f.a)).toEqual(textRecords.fragments.filter((entry: { file: string }) => entry.file === f.a));
     // The one-shot move keeps every record and adds the empty new maps; a second run writes nothing.
     migrateLedgerSchema(hostConfigPaths({ HOME: f.home }));
-    expect(f.ledger()).toEqual({ ...textRecords, protocol: 3, paths: moved, retired: [], recovery: [] });
+    expect(f.ledger()).toEqual({ ...textRecords, protocol: 4, paths: moved, ...kept, tools: {} });
     const bytes = readFileSync(join(f.root, 'ledger.json'));
     migrateLedgerSchema(hostConfigPaths({ HOME: f.home }));
     expect(readFileSync(join(f.root, 'ledger.json'))).toEqual(bytes);
@@ -126,7 +128,7 @@ test('every write has a ledger record before a revert, and a revert touches no p
   expect({ a: readFileSync(f.a, 'utf8'), mode: statSync(f.a).mode & 0o777, tool: existsSync(join(f.home, '.tool')), c: readFileSync(c, 'utf8') })
     .toEqual({ a: 'keep=1\n', mode: 0o640, tool: false, c: 'rh=user\n' });
   // The revert retires the backup of `a`, which no record references any more.
-  expect(f.ledger()).toEqual({ protocol: 3, files: {}, fragments: [], directories: [], paths: {}, recovery: [],
+  expect(f.ledger()).toEqual({ protocol: 4, files: {}, fragments: [], directories: [], paths: {}, recovery: [], tools: {},
     retired: [{ sha256: files[f.a].backup, at: expect.any(String) }] });
 
   // A failed ledger write stops the file write.
@@ -656,7 +658,7 @@ test('a fragment already at its inverse loses its record with no write: a remove
 test('a rollback reads a ledger snapshot of an older protocol, which a parent took before a newer candidate moved the ledger', () => {
   const f = fixture();
   f.gate().apply([f.change(f.b, 'on')]);
-  const { retired: _retired, recovery: _recovery, ...older } = f.ledger();
+  const { retired: _retired, recovery: _recovery, tools: _tools, ...older } = f.ledger();
   const snapshot = Buffer.from(JSON.stringify({ ...older, protocol: 2 }));
   f.gate().apply([f.change(f.a, 'on')]);
   expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);

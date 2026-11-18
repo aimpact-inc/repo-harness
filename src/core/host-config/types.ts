@@ -161,11 +161,58 @@ export interface RecoveryCopy {
   readonly at: string;
 }
 
+/** The shared tools that rh installs outside the host roots: they serve both hosts. */
+export type ToolId = 'herdr-core' | 'bun';
+
+/**
+ * The entry that rh appended to the Windows user `Path` value
+ * (`HKCU\Environment`). A revert takes out `inserted` only while exactly one
+ * entry equals `entry`, and deletes the value only when rh created it.
+ */
+export interface UserPathEntryRecord {
+  /** The directory as rh wrote it. */
+  readonly entry: string;
+  /** The exact text that rh appended: `;<entry>`, or `<entry>` after an empty value or a trailing `;`. */
+  readonly inserted: string;
+  readonly kind: UserPathValueKind;
+  /** False: the `Path` value did not exist before rh created it. */
+  readonly value_existed: boolean;
+}
+
+export type UserPathValueKind = 'String' | 'ExpandString';
+
+/** A line block that an installer appended to a shell profile; rh never removes it. */
+export interface ProfileTextRecord {
+  readonly file: string;
+  readonly inserted: string;
+}
+
+/**
+ * A shared tool that an rh run installed. Each path is a whole entry that
+ * the run created; an entry that existed before is never in a record.
+ * `rh uninstall --with-tools` removes a path only while it equals
+ * `committed`, and a created directory only when it is empty.
+ */
+export interface ToolRecord {
+  /** `rh-install`: `rh install` or `rh update`; `rh-bootstrap`: install.sh or install.ps1. */
+  readonly installed_by: 'rh-install' | 'rh-bootstrap';
+  readonly version: string;
+  /** Keyed by `hostPathKey`. */
+  readonly paths: Readonly<Record<string, { readonly committed: PathCommitted }>>;
+  /** Directories that the run created, for a removal innermost first. */
+  readonly directories: readonly string[];
+  readonly path_entry?: UserPathEntryRecord;
+  readonly profile?: ProfileTextRecord;
+  /** False for Bun: no command removes it. */
+  readonly removable: boolean;
+}
+
 /**
  * Protocol 2 added `paths` (#2896); protocol 3 adds `retired` and `recovery`
- * (#2851). `migrateLedgerSchema` moves an older ledger once at a mutating entry.
+ * (#2851); protocol 4 adds `tools` (#2853). `migrateLedgerSchema` moves an
+ * older ledger once at a mutating entry.
  */
-export const HOST_CONFIG_LEDGER_PROTOCOL = 3;
+export const HOST_CONFIG_LEDGER_PROTOCOL = 4;
 
 export interface HostConfigLedger {
   readonly protocol: typeof HOST_CONFIG_LEDGER_PROTOCOL;
@@ -177,9 +224,11 @@ export interface HostConfigLedger {
   readonly paths: Readonly<Record<string, PathRecord>>;
   readonly retired: readonly RetiredMaterial[];
   readonly recovery: readonly RecoveryCopy[];
+  /** No key of a tool path is also a key of `files` or `paths`; the gate refuses a write to it. */
+  readonly tools: Readonly<Partial<Record<ToolId, ToolRecord>>>;
 }
 
-export const EMPTY_LEDGER: HostConfigLedger = { protocol: HOST_CONFIG_LEDGER_PROTOCOL, files: {}, fragments: [], directories: [], paths: {}, retired: [], recovery: [] };
+export const EMPTY_LEDGER: HostConfigLedger = { protocol: HOST_CONFIG_LEDGER_PROTOCOL, files: {}, fragments: [], directories: [], paths: {}, retired: [], recovery: [], tools: {} };
 
 /** The observed state of one path. Only regular files are writable targets. */
 export type FileObservation =

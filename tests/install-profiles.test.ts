@@ -1540,7 +1540,7 @@ describe('install selection', () => {
       [pathRecordKey(env, skill)]: created(skill, 'cross-review', { type: 'directory', sha256: hashManagedTree(skill) }),
     });
     const { paths: _paths, ...migrated } = JSON.parse(readFileSync(ledgerPath, 'utf-8'));
-    expect(migrated).toEqual({ ...textRecords, protocol: 3, retired: [], recovery: [] });
+    expect(migrated).toEqual({ ...textRecords, protocol: 4, retired: [], recovery: [], tools: {} });
     const state = JSON.parse(readFileSync(installStateFixturePath(env), 'utf-8'));
     // The manifest claims the Pi package, but its entry is not in the Pi settings: no record.
     expect([state.protocol, 'pi_packages' in state, 'ownership_manifest' in state, ownedPiPackages(env)]).toEqual([5, false, false, []]);
