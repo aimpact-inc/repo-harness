@@ -212,7 +212,7 @@ function noticeTimeout(error: unknown): boolean {
  * blockers already carry the cause once per session. A missing or mismatched archctx package stays visible: the
  * operator repairs it with the blocker's `rh update` fix, which is the only package signal the blocker keeps.
  */
-function transientOwnershipFailure(error: unknown): boolean {
+function transientOwnershipFailure(error: unknown): error is CapabilityOwnershipError {
   return error instanceof CapabilityOwnershipError
     && error.blocker.key === 'capability_ownership:unavailable'
     && error.blocker.fix !== 'rh update';
@@ -482,6 +482,9 @@ export function collectAgentNotice(repoRoot: string, ownership: (options: Archct
   return {
     ...(chosen.length > 0 ? { content: chosen.map(block => block.content).join('\n'), systemMessage: chosen.map(block => block.systemMessage).join('\n') } : {}),
     ...(diagnostics === '' ? {} : { diagnostics }),
+    // A timeout is load and keeps its fixed line only. The log gets the code, never the text: archctx output can carry private paths.
+    ...(status.kind === 'quiet' && transientOwnershipFailure(status.error) && !noticeTimeout(status.error)
+      ? { logReason: `architecture-notice-quiet:${singleLine(status.error.blocker.code)}` } : {}),
   };
 }
 
