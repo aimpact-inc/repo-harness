@@ -12,6 +12,7 @@ export type HostConfigErrorCode =
   | 'host_config_invalid_path'
   | 'host_config_invalid_state'
   | 'host_config_replacement_refused'
+  | 'host_config_restore_mismatch'
   | 'host_config_unparseable_target';
 
 export class HostConfigError extends Error {
@@ -146,8 +147,25 @@ export interface PathRecord {
   readonly link_target?: string;
 }
 
-/** Protocol 2 adds `paths` (#2896); `migrateLedgerSchema` moves a protocol 1 ledger once at a mutating entry. */
-export const HOST_CONFIG_LEDGER_PROTOCOL = 2;
+/** Vault material that a finished revert released; `rh config gc` deletes it 30 days after `at` while no record references it. */
+export interface RetiredMaterial {
+  readonly sha256: Sha256;
+  /** ISO 8601 time of the revert. */
+  readonly at: string;
+}
+
+/** The whole file before `rh uninstall --remove-edited-block` took out a block that the user edited: it holds user bytes, so GC keeps it. */
+export interface RecoveryCopy {
+  readonly file: string;
+  readonly sha256: Sha256;
+  readonly at: string;
+}
+
+/**
+ * Protocol 2 added `paths` (#2896); protocol 3 adds `retired` and `recovery`
+ * (#2851). `migrateLedgerSchema` moves an older ledger once at a mutating entry.
+ */
+export const HOST_CONFIG_LEDGER_PROTOCOL = 3;
 
 export interface HostConfigLedger {
   readonly protocol: typeof HOST_CONFIG_LEDGER_PROTOCOL;
@@ -157,9 +175,11 @@ export interface HostConfigLedger {
   readonly directories: readonly string[];
   /** Keyed by the path with its parent links followed and the leaf kept (`hostPathKey`). The gate refuses a path that has one. */
   readonly paths: Readonly<Record<string, PathRecord>>;
+  readonly retired: readonly RetiredMaterial[];
+  readonly recovery: readonly RecoveryCopy[];
 }
 
-export const EMPTY_LEDGER: HostConfigLedger = { protocol: HOST_CONFIG_LEDGER_PROTOCOL, files: {}, fragments: [], directories: [], paths: {} };
+export const EMPTY_LEDGER: HostConfigLedger = { protocol: HOST_CONFIG_LEDGER_PROTOCOL, files: {}, fragments: [], directories: [], paths: {}, retired: [], recovery: [] };
 
 /** The observed state of one path. Only regular files are writable targets. */
 export type FileObservation =

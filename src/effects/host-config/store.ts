@@ -233,46 +233,74 @@ function parseJson(bytes: Buffer, label: string): unknown {
   try { return JSON.parse(bytes.toString('utf8')); } catch { throw invalidState(`the ledger is not valid JSON: ${label}`); }
 }
 
-/** The text records that protocols 1 and 2 share. */
+/** The text records that every protocol has. */
 function validTextRecords(value: Record<string, unknown>): boolean {
   return isObject(value.files) && Object.entries(value.files).every(([path, record]) => isAbsolute(path) && validFileRecord(record))
     && Array.isArray(value.fragments) && value.fragments.every(validFragment)
     && Array.isArray(value.directories) && value.directories.every((directory) => isText(directory) && isAbsolute(directory));
 }
 
-/** The ledger in `bytes`, also a copy of it; `label` names the file in an error. A protocol 1 ledger names the update step. */
+function validPathRecords(value: Record<string, unknown>): boolean {
+  return isObject(value.paths) && Object.entries(value.paths).every(([path, record]) => isAbsolute(path) && validPathRecord(record));
+}
+
+const validRetired = (value: unknown): boolean => isObject(value) && isSha(value.sha256) && isText(value.at) && !Number.isNaN(Date.parse(value.at));
+const validRecovery = (value: unknown): boolean => validRetired(value) && isObject(value) && isText(value.file) && isAbsolute(value.file);
+
+/** A valid ledger of an older protocol as the schema move leaves it; null for any other value. */
+function movedLedger(value: unknown): HostConfigLedger | null {
+  if (!isObject(value) || !validTextRecords(value) || 'retired' in value || 'recovery' in value) return null;
+  const { files, fragments, directories } = value as unknown as HostConfigLedger;
+  const moved = { protocol: HOST_CONFIG_LEDGER_PROTOCOL as typeof HOST_CONFIG_LEDGER_PROTOCOL, files, fragments, directories, retired: [], recovery: [] };
+  if (value.protocol === 1 && !('paths' in value)) return { ...moved, paths: {} };
+  if (value.protocol === 2 && validPathRecords(value)) return { ...moved, paths: value.paths as HostConfigLedger['paths'] };
+  return null;
+}
+
+const RETIRED_PROTOCOLS: Readonly<Record<number, string>> = { 1: 'which has no path records', 2: 'which has no retirement records' };
+
+/** The ledger in `bytes`, also a copy of it; `label` names the file in an error. An older protocol names the update step. */
 export function parseLedger(bytes: Buffer, label: string): HostConfigLedger {
   const value = parseJson(bytes, label);
-  if (isObject(value) && value.protocol === 1) throw invalidState(`the ledger is protocol 1, which has no path records; run: rh update (${label})`);
-  const valid = isObject(value) && value.protocol === HOST_CONFIG_LEDGER_PROTOCOL && validTextRecords(value)
-    && isObject(value.paths) && Object.entries(value.paths).every(([path, record]) => isAbsolute(path) && validPathRecord(record));
+  const retired = isObject(value) && typeof value.protocol === 'number' ? RETIRED_PROTOCOLS[value.protocol] : undefined;
+  if (retired) throw invalidState(`the ledger is protocol ${String((value as Record<string, unknown>).protocol)}, ${retired}; run: rh update (${label})`);
+  const valid = isObject(value) && value.protocol === HOST_CONFIG_LEDGER_PROTOCOL && validTextRecords(value) && validPathRecords(value)
+    && Array.isArray(value.retired) && value.retired.every(validRetired) && Array.isArray(value.recovery) && value.recovery.every(validRecovery);
   if (!valid) throw invalidState(`the ledger has an invalid shape: ${label}`);
   return value as unknown as HostConfigLedger;
 }
 
 /**
- * The one-shot move of a protocol 1 ledger (written by #3022 and later, before
- * #2896) to protocol 2: every text record stays as it is, and `paths` starts
- * empty. A mutating entry runs it under the runtime lock; a later run finds protocol 2.
+ * The one-shot move of an older ledger to protocol 3: every record stays as it
+ * is; a protocol 1 ledger gets an empty `paths`, and both get empty `retired`
+ * and `recovery`. A mutating entry runs it under the runtime lock; a later run
+ * finds protocol 3.
  */
 export function migrateLedgerSchema(paths: HostConfigPaths): void {
   const { observation, bytes } = observeFile(paths.ledger);
   if (!observation.existed) return;
   if (bytes === null) throw invalidState(`the ledger is not a regular file: ${paths.ledger}`);
   const value = parseJson(bytes, paths.ledger);
-  if (!isObject(value) || value.protocol !== 1) return;
-  if (!validTextRecords(value) || 'paths' in value) throw invalidState(`the protocol 1 ledger has an invalid shape: ${paths.ledger}`);
-  writeLedger(paths, { ...(value as unknown as Omit<HostConfigLedger, 'protocol' | 'paths'>), protocol: HOST_CONFIG_LEDGER_PROTOCOL, paths: {} });
+  if (!isObject(value) || typeof value.protocol !== 'number' || !RETIRED_PROTOCOLS[value.protocol]) return;
+  const moved = movedLedger(value);
+  if (!moved) throw invalidState(`the protocol ${String(value.protocol)} ledger has an invalid shape: ${paths.ledger}`);
+  writeLedger(paths, moved);
 }
 
-/** The path records as the schema move would leave them: none for a protocol 1 ledger, which a dry run reads without moving it. */
-export function projectedLedgerPaths(paths: HostConfigPaths): HostConfigLedger['paths'] {
+/**
+ * The ledger as the schema move would leave it, read without moving it. Only a
+ * dry run or a preview reads it; every other reader takes `readLedger`.
+ */
+export function readProjectedLedger(paths: HostConfigPaths): HostConfigLedger {
   const { observation, bytes } = observeFile(paths.ledger);
-  if (!observation.existed) return {};
+  if (!observation.existed) return EMPTY_LEDGER;
   if (bytes === null) throw invalidState(`the ledger is not a regular file: ${paths.ledger}`);
-  const value = parseJson(bytes, paths.ledger);
-  if (isObject(value) && value.protocol === 1 && validTextRecords(value) && !('paths' in value)) return {};
-  return parseLedger(bytes, paths.ledger).paths;
+  return movedLedger(parseJson(bytes, paths.ledger)) ?? parseLedger(bytes, paths.ledger);
+}
+
+/** The path records of `readProjectedLedger`. */
+export function projectedLedgerPaths(paths: HostConfigPaths): HostConfigLedger['paths'] {
+  return readProjectedLedger(paths).paths;
 }
 
 export function writeLedger(paths: HostConfigPaths, ledger: HostConfigLedger): void {
