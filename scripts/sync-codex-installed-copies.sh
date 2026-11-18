@@ -4,11 +4,11 @@ set -euo pipefail
 export BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
 
 RUNTIME_ROOT="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
-if [[ -z "${REPO_HARNESS_SYNC_DECLARED_PATHS+x}" ]]; then
+if [[ -z "${REPO_HARNESS_SYNC_DECLARED_PATHS_FILE+x}" ]]; then
   export REPO_HARNESS_SYNC_SHELL="$BASH"
   exec bun "$RUNTIME_ROOT/scripts/skill-surface-select.ts" sync-installed-copies "$@"
 fi
-[[ -n "${REPO_HARNESS_SYNC_RETIRED_PATHS+x}" ]] || { echo "[sync-installed] gate retirement plan is required" >&2; exit 1; }
+[[ -f "$REPO_HARNESS_SYNC_DECLARED_PATHS_FILE" && -f "${REPO_HARNESS_SYNC_RETIRED_PATHS_FILE:-}" ]] || { echo "[sync-installed] gate path plan files are required" >&2; exit 1; }
 
 SOURCE_ROOT="${REPO_HARNESS_SOURCE_ROOT:-}"
 if [[ -z "$SOURCE_ROOT" ]]; then
@@ -154,13 +154,13 @@ path_in_list() {
   local wanted="$1" declared
   while IFS= read -r declared; do
     [[ "$declared" == "$wanted" ]] && return 0
-  done <<< "$2"
+  done
   return 1
 }
 
 assert_managed_dest() {
   local dest="$1"
-  path_in_list "$dest" "$REPO_HARNESS_SYNC_DECLARED_PATHS" \
+  path_in_list "$dest" < "$REPO_HARNESS_SYNC_DECLARED_PATHS_FILE" \
     || refuse_unowned_dest "$dest" "path was not declared by the host-config gate"
 }
 
@@ -225,7 +225,7 @@ facade_source_for() {
 
 facade_selected() {
   local wanted="$1"
-  path_in_list "$wanted" "$SELECTED_FACADES"
+  path_in_list "$wanted" <<< "$SELECTED_FACADES"
 }
 
 provider_skill_for_root() {
@@ -239,13 +239,13 @@ provider_skill_for_root() {
   elif [[ -n "$PI_SKILLS_ROOT" && "$root" == "$PI_SKILLS_ROOT" ]]; then
     host="pi"
   fi
-  [[ -n "$host" ]] && path_in_list "$host $wanted" "$PROVIDER_PLACEMENTS"
+  [[ -n "$host" ]] && path_in_list "$host $wanted" <<< "$PROVIDER_PLACEMENTS"
 }
 
 # An integration skill is linked by its own
 # explicit setup command. Facade preflight and retirement never own it.
 integration_skill() {
-  [[ -n "$INTEGRATION_NAMES" ]] && path_in_list "$1" "$INTEGRATION_NAMES"
+  [[ -n "$INTEGRATION_NAMES" ]] && path_in_list "$1" <<< "$INTEGRATION_NAMES"
 }
 
 preflight_skill_root() {
@@ -277,7 +277,7 @@ remove_retired_owned_facades() {
     if [[ -z "$source" || ! -d "$source" ]]; then
       echo "[sync-installed] retiring $dest: canonical facade source no longer exists in the package"
     fi
-    if path_in_list "$dest" "$REPO_HARNESS_SYNC_RETIRED_PATHS"; then
+    if path_in_list "$dest" < "$REPO_HARNESS_SYNC_RETIRED_PATHS_FILE"; then
       remove_managed_dest "$dest"
     else
       echo "[sync-installed] preserving retired facade $dest. Run: rh upgrade" >&2

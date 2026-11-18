@@ -91,12 +91,18 @@ test('a child without HOME refuses account writes before starting a transaction'
     ].join('\n');
     const env: NodeJS.ProcessEnv = { ...process.env, BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0', REPO_HARNESS_BUN_EXECUTABLE: bun, BUN_PROBE_LOG: calls, HOME_TRAP: trap, SOURCE_ROOT: ROOT, BUN_INSTALL: join(temporary, '.bun'), USERPROFILE: trap, REPO_HARNESS_HOME: join(trap, '.repo-harness') };
     delete env.HOME;
+    delete env.BASH_ENV;
     const child = spawnSync(process.execPath, ['-e', code], { env, cwd: temporary, encoding: 'utf8' });
     expect(child.status, child.stderr).toBe(0);
     const refusals = JSON.parse(child.stdout);
+    const fleet = spawnSync('bash', [join(ROOT, 'scripts/install-agent-fleet.sh')], {
+      env: { ...env, REPO_HARNESS_BUN_BIN: bun }, cwd: temporary, encoding: 'utf8',
+    });
+    expect(fleet.status, fleet.stderr).toBe(1);
+    refusals.push(fleet.stderr.trim());
     expect(refusals.slice(0, 5)).toEqual(Array(5).fill('HOME is required and must be an absolute path'));
-    expect(refusals).toHaveLength(8);
-    expect(refusals.slice(6)).toEqual(Array(2).fill('HOME is required and must be an absolute path'));
+    expect(refusals).toHaveLength(9);
+    expect(refusals.slice(6)).toEqual(Array(3).fill('HOME is required and must be an absolute path'));
     expect(refusals[5]).toContain('HOME is required and must be an absolute path');
     expect(readdirSync(trap)).toEqual([]);
     expect(existsSync(env.BUN_INSTALL!)).toBe(false);

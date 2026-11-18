@@ -1,6 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
+if [[ -z "${HOME:-}" ]]; then
+  echo "HOME is required and must be an absolute path" >&2
+  exit 1
+fi
+export BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
+
 MIN_BUN_VERSION="1.4.0"
 
 bun_version_is_supported() {
@@ -70,7 +76,6 @@ export REPO_HARNESS_AGENT_FLEET_SOURCE_DIR="$AGENT_FLEET_SOURCE_DIR"
 
 exec "$RUNTIME_BIN" - "$@" <<'NODE_EOF'
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 
@@ -106,10 +111,11 @@ if (force && acceptUserManaged) {
   process.exit(1);
 }
 
-const HOME = process.env.HOME ?? os.homedir();
+const SOURCE_DIR = process.env.REPO_HARNESS_AGENT_FLEET_SOURCE_DIR;
+const { requireHome } = require(path.join(SOURCE_DIR, "../../src/effects/repo-harness-home.ts"));
+const HOME = requireHome(process.env);
 const CLAUDE_TARGET_DIR = path.join(HOME, ".claude", "agents");
 const CODEX_TARGET_DIR = path.join(HOME, ".codex", "agents");
-const SOURCE_DIR = process.env.REPO_HARNESS_AGENT_FLEET_SOURCE_DIR;
 const { readInstallState } = require(
   path.join(SOURCE_DIR, "../../src/cli/installer/install-profile.ts"),
 );

@@ -7,6 +7,7 @@ import { requireHome } from '../../effects/repo-harness-home';
 import { openHostConfigGate } from '../../effects/host-config/gate';
 import { runProcess } from '../../effects/process-runner';
 import { planSkillSync, withHostConfigTransaction } from './install-profile';
+import { atomicWriteFileSync } from './shared';
 
 /** Build a new copy in rh's transaction directory. Host publication stays at the gate. */
 export function stageInstalledSkillCopy(source: string, surface: 'canonical-skill' | 'command-facade', transaction: string,
@@ -36,9 +37,14 @@ export function syncInstalledSkillCopies(sourceRoot: string, env: NodeJS.Process
     let result: ReturnType<typeof runProcess> | undefined;
     openHostConfigGate({ env }).delegate(declared, () => {
       if (declared.some(({ path }) => /[\r\n]/.test(path))) throw new Error('skill path contains a newline');
+      const plan = mkdtempSync(join(root, 'skill-sync-'));
+      const declaredFile = join(plan, 'declared-paths');
+      const retiredFile = join(plan, 'retired-paths');
+      atomicWriteFileSync(declaredFile, declared.map(entry => entry.path).join('\n') + '\n', { mode: 0o600 });
+      atomicWriteFileSync(retiredFile, retired.join('\n') + '\n', { mode: 0o600 });
       result = runProcess(env.REPO_HARNESS_SYNC_SHELL ?? 'bash', [script], { cwd: sourceRoot, env: { ...env,
-        BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0', REPO_HARNESS_SOURCE_ROOT: sourceRoot, REPO_HARNESS_SYNC_DECLARED_PATHS: declared.map(entry => entry.path).join('\n'),
-        REPO_HARNESS_SYNC_RETIRED_PATHS: retired.join('\n') } });
+        BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0', REPO_HARNESS_SOURCE_ROOT: sourceRoot, REPO_HARNESS_SYNC_DECLARED_PATHS_FILE: declaredFile,
+        REPO_HARNESS_SYNC_RETIRED_PATHS_FILE: retiredFile } });
       if (!result.ok) throw new Error(result.stderr || result.error || 'skill sync failed');
     }, { transaction: root });
     return result!;
