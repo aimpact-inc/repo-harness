@@ -1,10 +1,9 @@
 import { afterAll, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
-import { tmpdir } from 'os';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { runTestBudgetCheck } from '../src/cli/commands/rules';
-import { parseTestBudgetException, renderTestBudgetSummary, testBudgetExceptionDigest } from '../src/core/ci/test-budget';
+import { renderTestBudgetSummary } from '../src/core/ci/test-budget';
 import { tmpWorkspace } from './helpers/repo-fixture';
 
 const ROOT = join(import.meta.dir, '..');
@@ -64,41 +63,34 @@ function repository(policy: string | null): { repo: string; base: string } {
   return { repo, base };
 }
 
-function check(cwd: string, base: string, head: string, body: string) {
-  const directory = mkdtempSync(join(tmpdir(), 'test-budget-body-'));
-  workspaces.push(directory);
-  const bodyFile = join(directory, 'body.md');
-  writeFileSync(bodyFile, body);
-  return runTestBudgetCheck({ cwd, base, head, bodyFile }).result;
-}
-
-function exceptionBody(testLines: number, productLines: number, testFiles: number, reason = 'The parser has no test that reaches the CRLF branch.'): string {
-  return `## Goal\n\nText.\n\n## Test budget exception\r\n\r\n- Added test lines: ${testLines}\r\n- Added product lines: ${productLines}\r\n`
-    + `- Added test files: ${testFiles}\r\n\r\n${reason}\r\n\r\n## Rollback\n\ngit revert.\n`;
+function check(cwd: string, base: string, head: string) {
+  return runTestBudgetCheck({ cwd, base, head }).result;
 }
 
 describe('TestBudget evaluation', () => {
-  test('a PR over the budget is a violation; the measure starts at the merge-base', () => {
+  test('a PR over the budget passes and reports it; the measure starts at the merge-base', () => {
     const { repo, base } = repository(ENABLED);
     const head = commit(repo, { 'src/app.ts': lines(13), 'tests/new.test.ts': lines(30) });
     // A base commit after the fork point does not enter the diff.
     git(repo, 'checkout', '-q', 'main');
     const movedBase = commit(repo, { 'src/other.ts': lines(100) });
-    const result = check(repo, movedBase, head, '## Goal\n\nNo exception.\n');
-    expect(result.state).toBe('violation');
+    const result = check(repo, movedBase, head);
+    expect(result.state).toBe('pass');
     expect(result.bound.diff_start).toBe(base);
     expect(result.bound.head_sha).toBe(head);
+    // The 0.34.0 merge readiness compares this field with the PR body; a body without an exception section gives null.
+    expect(result.bound.exception_digest).toBeNull();
     expect(result.measured).toEqual({ added_test_lines: 30, added_product_lines: 3, added_test_files: 1, ratio: 10, ratio_cap: 2, file_cap: 1 });
     expect(result.over_budget).toBe(true);
-    expect(result.exception).toEqual({ present: false, valid: false, counts: null, reason: null });
+    expect(renderTestBudgetSummary(result)).toStartWith('### TestBudget: over budget (report only)');
     // From a subdirectory the check still reads the policy at the repository root.
-    expect(check(join(repo, 'src'), movedBase, head, '').state).toBe('violation');
+    expect(check(join(repo, 'src'), movedBase, head).over_budget).toBe(true);
   });
 
   test('a PR within the budget passes', () => {
     const { repo, base } = repository(ENABLED);
     const head = commit(repo, { 'src/app.ts': lines(20), 'tests/old.test.ts': lines(15) });
-    const result = check(repo, base, head, '');
+    const result = check(repo, base, head);
     expect(result.state).toBe('pass');
     expect(result.over_budget).toBe(false);
     expect(result.measured?.ratio).toBe(1);
@@ -125,18 +117,18 @@ describe('TestBudget evaluation', () => {
       'src/tab\tapp.ts': lines(12, 'tabapp'),
       'docs/tab\tdoc.md': null,
     });
-    const result = check(repo, base, head, '');
+    const result = check(repo, base, head);
     expect(result.measured).toEqual({ added_test_lines: 3, added_product_lines: 2, added_test_files: 3, ratio: 1.5, ratio_cap: 2, file_cap: 1 });
-    expect(result.state).toBe('violation');
+    expect(result.over_budget).toBe(true);
   });
 
   test('test lines without a product line are over the budget', () => {
     const { repo, base } = repository(ENABLED);
     const head = commit(repo, { 'tests/old.test.ts': lines(6), 'docs/guide.md': lines(50) });
-    const result = check(repo, base, head, '');
+    const result = check(repo, base, head);
     expect(result.measured?.added_product_lines).toBe(0);
     expect(result.measured?.ratio).toBeNull();
-    expect(result.state).toBe('violation');
+    expect(result.over_budget).toBe(true);
   });
 
   test('the parameters come from the base commit, not from the PR', () => {
@@ -146,16 +138,16 @@ describe('TestBudget evaluation', () => {
       'src/app.ts': lines(11),
       'tests/new.test.ts': lines(5),
     });
-    const result = check(repo, base, head, '');
-    expect(result.state).toBe('violation');
+    const result = check(repo, base, head);
+    expect(result.over_budget).toBe(true);
     expect(result.measured).toMatchObject({ ratio_cap: 20, file_cap: 0, added_test_files: 1 });
   });
 
   test('no configuration and an explicit off are skipped with different policy digests', () => {
     const absent = repository(null);
     const off = repository(JSON.stringify({ rules: { TestBudget: { enabled: false } } }));
-    const absentResult = check(absent.repo, absent.base, commit(absent.repo, { 'tests/new.test.ts': lines(50) }), '');
-    const offResult = check(off.repo, off.base, commit(off.repo, { 'tests/new.test.ts': lines(50) }), '');
+    const absentResult = check(absent.repo, absent.base, commit(absent.repo, { 'tests/new.test.ts': lines(50) }));
+    const offResult = check(off.repo, off.base, commit(off.repo, { 'tests/new.test.ts': lines(50) }));
     expect(absentResult.state).toBe('skipped');
     expect(offResult.state).toBe('skipped');
     expect(absentResult.measured).toBeNull();
@@ -168,7 +160,7 @@ describe('TestBudget evaluation', () => {
     const { ratio_cap: _omitted, ...withoutRatioCap } = PARAMETERS;
     for (const config of [{ ...PARAMETERS, enabled: true, test_paths: ['tests/**'] }, { ...withoutRatioCap, enabled: true }]) {
       const { repo, base } = repository(JSON.stringify({ rules: { TestBudget: config } }));
-      const result = check(repo, base, commit(repo, { 'src/app.ts': lines(11) }), '');
+      const result = check(repo, base, commit(repo, { 'src/app.ts': lines(11) }));
       expect(result.state).toBe('error');
       expect(result.error?.code).toBe('policy_invalid');
       expect(result.measured).toBeNull();
@@ -181,101 +173,28 @@ describe('TestBudget evaluation', () => {
     const { repo, base } = repository(ENABLED);
     git(repo, 'checkout', '-q', '--orphan', 'unrelated');
     const head = commit(repo, { 'src/app.ts': lines(3) });
-    const result = check(repo, base, head, '');
+    const result = check(repo, base, head);
     expect(result.state).toBe('error');
     expect(result.error?.code).toBe('merge_base_unavailable');
     expect(result.bound.diff_start).toBeNull();
   });
 });
 
-describe('TestBudget exception', () => {
-  test('a valid exception passes and keeps the measured numbers', () => {
-    const { repo, base } = repository(ENABLED);
-    const head = commit(repo, { 'src/app.ts': lines(13), 'tests/new.test.ts': lines(30) });
-    const result = check(repo, base, head, exceptionBody(30, 3, 1));
-    expect(result.state).toBe('pass');
-    expect(result.over_budget).toBe(true);
-    expect(result.measured).toMatchObject({ added_test_lines: 30, added_product_lines: 3, added_test_files: 1 });
-    expect(result.exception).toEqual({
-      present: true,
-      valid: true,
-      counts: { added_test_lines: 30, added_product_lines: 3, added_test_files: 1 },
-      reason: 'The parser has no test that reaches the CRLF branch.',
-    });
-    // The summary keeps the measured numbers and never reads as within budget.
-    const summary = renderTestBudgetSummary(result);
-    expect(summary).toStartWith('### TestBudget: pass with exception (over budget, exception valid)');
-    expect(summary).toContain('| Measured | 30 | 3 | 1 |');
-    expect(summary).not.toContain('within budget');
-    expect(summary).not.toContain('CRLF branch');
-    const indented = exceptionBody(30, 3, 1).replace('## Test budget exception', '   ##\tTest budget exception');
-    expect(check(repo, base, head, indented).state).toBe('pass');
-    const afterBreaks = '## Test budget exception\n\n- Added test lines: 30\n- Added product lines: 3\n- Added test files: 1\n\n'
-      + '***\n---\n\nAn existing test cannot reach this branch.\n';
-    expect(check(repo, base, head, afterBreaks).exception).toMatchObject({ valid: true, reason: 'An existing test cannot reach this branch.' });
-  });
-
-  test('an empty heading, wrong numbers or an empty reason do not pass', () => {
-    const { repo, base } = repository(ENABLED);
-    const head = commit(repo, { 'src/app.ts': lines(13), 'tests/new.test.ts': lines(30) });
-    const bulletCounts = '## Test budget exception\n\n- Added test lines: 30\n- Added product lines: 3\n- Added test files: 1\n\n';
-    const plainCounts = '## Test budget exception\n\nAdded test lines: 30\nAdded product lines: 3\nAdded test files: 1\n\n';
-    const headings = ['  ## Rollback', '##\tRollback', '   # Rollback', '> ## Rollback', 'Rollback\n---', 'Rollback instructions\nfor this change\n---',
-      'Rollback instructions\nfor this change\n==='];
-    const bodies = [
-      '## Test budget exception\n\n## Rollback\n',
-      exceptionBody(30, 4, 1),
-      exceptionBody(30, 3, 1, ''),
-      // Each next heading ends the section, so its text is not the reason.
-      ...[bulletCounts, plainCounts].flatMap((counts) => headings.map((heading) => `${counts}${heading}\n\ngit revert.\n`)),
-      // A heading that continues the last list item also ends the section.
-      ...['  ## Rollback', '  # Rollback'].map((heading) => `${bulletCounts}${heading}\n`),
-    ];
-    for (const body of bodies) {
-      const result = check(repo, base, head, body);
-      expect(result.state).toBe('violation');
-      expect(result.exception).toMatchObject({ present: true, valid: false });
-    }
-  });
-
-  test('a heading in fenced code, an HTML comment or a block quote is not the section', () => {
-    const section = '## Test budget exception\n\n- Added test lines: 30\n- Added product lines: 3\n- Added test files: 1\n\nReason.\n';
-    for (const body of [`\`\`\`markdown\n${section}\`\`\`\n`, `<!--\n${section}-->\n`, section.replace(/^/gm, '> ')]) {
-      expect(parseTestBudgetException(body)).toEqual({ status: 'absent' });
-    }
-    for (const body of [`${section}\n${section}`, section.replace('Reason.', '  ## Test budget exception')]) {
-      expect(parseTestBudgetException(body).status).toBe('malformed');
-    }
-  });
-
-  test('the exception digest changes with the section only', () => {
-    const digest = (body: string) => testBudgetExceptionDigest(parseTestBudgetException(body));
-    expect(digest(exceptionBody(30, 3, 1))).toBe(digest(exceptionBody(30, 3, 1).replace('Text.', 'Other text.')));
-    expect(digest(exceptionBody(30, 3, 1))).not.toBe(digest(exceptionBody(30, 3, 1, 'Another reason.')));
-    expect(digest('## Goal\n')).toBeNull();
-  });
-});
-
-test('the CLI prints the document as a one-line notice, appends the summary and exits 1 on a violation', () => {
+test('the CLI prints the document as a one-line notice, appends the summary and exits 0 over the budget', () => {
   const { repo, base } = repository(ENABLED);
   const head = commit(repo, { 'src/app.ts': lines(13), 'tests/new.test.ts': lines(30) });
-  const bodyFile = join(repo, '..', `${repo.split('/').pop()}-cli-body.md`);
-  workspaces.push(bodyFile);
-  writeFileSync(bodyFile, exceptionBody(30, 3, 2, '100% of the cases\nneed a fixture.'));
-  const summaryFile = `${bodyFile}.summary.md`;
+  const summaryFile = join(repo, '..', `${repo.split('/').pop()}-summary.md`);
   workspaces.push(summaryFile);
   writeFileSync(summaryFile, '');
   const run = spawnSync('bun', [join(ROOT, 'src/cli/index.ts'), 'rules', 'check', 'TestBudget', '--base', base, '--head', head,
-    '--body-file', bodyFile, '--github-annotation', '--github-summary', summaryFile], { cwd: repo, encoding: 'utf8' });
-  expect(run.status).toBe(1);
+    '--github-annotation', '--github-summary', summaryFile], { cwd: repo, encoding: 'utf8' });
+  expect(run.status).toBe(0);
   const [document, notice] = run.stdout.trimEnd().split('\n');
-  expect(JSON.parse(document!).state).toBe('violation');
+  expect(JSON.parse(document!)).toMatchObject({ state: 'pass', over_budget: true });
   expect(notice!.startsWith('::notice title=repo-harness/test-budget-result/v1::')).toBe(true);
   const message = notice!.slice(notice!.indexOf('::', 2) + 2);
   expect(message.replace(/%0A/g, '\n').replace(/%0D/g, '\r').replace(/%25/g, '%')).toBe(document!);
-  expect(run.stderr).not.toContain('need a fixture');
   const summary = readFileSync(summaryFile, 'utf8');
-  expect(summary).toStartWith('### TestBudget: violation (over budget, exception invalid)');
-  expect(summary).toContain('| Exception states | 30 | 3 | 2 |');
-  expect(summary).not.toContain('need a fixture');
+  expect(summary).toStartWith('### TestBudget: over budget (report only)');
+  expect(summary).toContain('| Measured | 30 | 3 | 1 |');
 });

@@ -82,6 +82,8 @@ interface Replay {
   readonly policy?: GhAnswer;
   /** The answer to the protection read of one base branch; the default requires the one context `Required / CI` on every base. */
   readonly protection?: (base: string) => GhAnswer;
+  /** The REST files of an open pull request: each recorded path, padded to its `changedFiles`; `renamed` gives a path its rename source. */
+  readonly renamed?: (path: string) => string | undefined;
   /** The version that the fake hc reports; the recorded core reported 0.1.17. */
   readonly hcVersion?: string;
   readonly now?: Date;
@@ -152,6 +154,16 @@ function replayInput(options: Replay): BoardCollectInput {
         return options.protection?.(base) ?? answer({ required_status_checks: { contexts: ['Required / CI'] } });
       }
       if (args.includes('repos/{owner}/{repo}')) return answer({ id: 1_000_001 });
+      const filesPage = args.map(arg => /^repos\/Ancienttwo\/repo-harness\/pulls\/(\d+)\/files\?per_page=100&page=(\d+)$/u.exec(arg)).find(match => match !== null);
+      if (filesPage) {
+        const pr = pulls.data.repository[`pr${filesPage[1]}`];
+        const paths = [...pr.files.nodes.map((node: Json) => node.path as string)];
+        while (paths.length < pr.changedFiles) paths.push(`filler/${paths.length}.ts`);
+        return answer(paths.slice((Number(filesPage[2]) - 1) * 100, Number(filesPage[2]) * 100).map((path) => {
+          const previous = options.renamed?.(path);
+          return { filename: path, status: previous === undefined ? 'modified' : 'renamed', ...(previous === undefined ? {} : { previous_filename: previous }) };
+        }));
+      }
       throw new Error(`unexpected gh call: ${args.join(' ')}`);
     },
     // #1491 is the only PR that the recorded data shows as accepted; the readiness projection has its own suite.
@@ -398,6 +410,9 @@ test('High acceptance: PASS rows of the head from two distinct claims, one recor
     [[gatekeeper, ['codex', claimUrl(2)], ['codex', claimUrl(3), 'same-family', 'FAIL']], 'not_accepted', 'pending'],
     // Rows of an earlier head do not count for the head.
     [[['pi', claimUrl(4), 'different-family', 'PASS', OLD], ['codex', claimUrl(6), 'different-family', 'PASS', OLD]], 'not_accepted', 'pending'],
+    // A fix round (#3187): the gatekeeper PASS of the earlier head carries past the newer reviewer FAIL, so only the reviewer reviews the fix head.
+    [[['pi', claimUrl(4), 'different-family', 'PASS', OLD], ['claude', claimUrl(6), 'same-family', 'FAIL', OLD]], 'not_accepted', 'pending'],
+    [[['pi', claimUrl(4), 'different-family', 'PASS', OLD], ['claude', claimUrl(6), 'same-family', 'FAIL', OLD], ['claude', claimUrl(5), 'same-family', 'PASS', undefined, 2]], 'accepted', 'recorded'],
   ];
   const projected = cases.map(([rows]) => head(rows));
   const pr1491 = (projection: BoardV1) => projection.pull_requests.find(pr => pr.number === 1491)!;
@@ -423,7 +438,10 @@ test('High acceptance: PASS rows of the head from two distinct claims, one recor
     family((data) => { const node = issueNode(data, 1475).comments.nodes.find((entry: Json) => entry.body.includes('Model: claude')); node.body = node.body.replace(/Model: .*/u, 'Model: magpie/deepseek-v4'); }),
     family(second('gpt-5.5'), refs1479),
     family(second('claude-opus-5-5'), refs1479),
-  ]).toEqual([null, 'deepseek', null, 'anthropic']);
+    // A bundled issue without its own claim of the branch is ignored; with no claim of the branch at all there is no family.
+    family(() => {}, refs1479),
+    family((data) => { const nodes = issueNode(data, 1475).comments.nodes; nodes.splice(0, nodes.length, ...nodes.filter((entry: Json) => !entry.body.startsWith('repo-harness issue claim'))); }),
+  ]).toEqual([null, 'deepseek', null, 'anthropic', 'anthropic', null]);
 });
 
 test('replay: the recorded #1474 reads project to a board, and its findings come from the recorded state', () => {
@@ -1377,14 +1395,15 @@ test('one hit for each rule that the recorded state does not trigger', () => {
   expect(merged.findings.filter(finding => finding.rule === 'A9').map(finding => [finding.terminals, finding.pull_requests])).toEqual([[['t2'], [1494]]]);
 });
 
-test('R5 and the effective tier read the High list: board record-writing code is Medium on one PASS row; a deletion-path change is High and needs two', () => {
+test('R5 and the effective tier read the High list: board record-writing code is Medium on one PASS row; an I1/I2, I3 or change hazard path is High and needs two', () => {
   const [hook, boardWriter] = ['src/cli/installer/uninstall.ts', 'src/effects/board/review.ts'];
   const receipt = (subject_sha: string): ReviewPublishReceipt => ({
     protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 1, subject_sha, risk_tier: 'medium', reviewer: { harness: 'codex', actual_model: null }, verdict: 'PASS', model_relation: 'different-family', summary: 'Reviewed.', findings: [],
   });
   const claimAt = '2026-11-02T21:01:00Z';
   // #1499 closes tier:medium #1476, changes `files` and has one claimed different-family PASS row of its head.
-  const board = (files: string[], tier: string, incomplete: boolean) => replay({
+  const board = (files: string[], tier: string, incomplete: boolean, policy?: GhAnswer, renamed?: Replay['renamed']) => replay({
+    policy, renamed,
     owners: (results) => { results.push(...files.filter(path => !results.some(entry => entry.path === path)).map(path => ({ path, matched: false, ambiguous: false, owningCapabilityId: null }))); },
     parent: (data) => { issueNode(data, 1476).labels.nodes.push({ name: tier }); },
     pulls: (data) => {
@@ -1394,8 +1413,8 @@ test('R5 and the effective tier read the High list: board record-writing code is
       pr1499.comments.nodes.push(comment(renderAcceptanceRecord(receipt(pr1499.headRefOid), `https://github.com/Ancienttwo/repo-harness/pull/1499#issuecomment-${Date.parse(claimAt)}`), '2026-11-02T22:00:00Z'));
     },
   });
-  const view = (files: string[], tier = 'tier:medium', incomplete = false) => {
-    const read = board(files, tier, incomplete);
+  const view = (files: string[], tier = 'tier:medium', incomplete = false, policy?: GhAnswer, renamed?: Replay['renamed']) => {
+    const read = board(files, tier, incomplete, policy, renamed);
     const pr = read.pull_requests.find(entry => entry.number === 1499)!;
     const attention = evaluateBoardAttention(read);
     return [pr.tier, pr.acceptance.status,
@@ -1405,8 +1424,16 @@ test('R5 and the effective tier read the High list: board record-writing code is
   expect(view([boardWriter])).toEqual(['medium', 'accepted']);
   expect(view([boardWriter, hook])).toEqual(['high', 'not_accepted', `#1499 changes ${hook} (deletion), a High signal, but #1476 is tier:medium`]);
   expect(view([hook], 'tier:high')).toEqual(['high', 'not_accepted']);
-  // A change hazard path sets the High tier too; R3 names the label.
-  expect(view(['.github/workflows/ci.yml'])).toEqual(['high', 'not_accepted']);
+  // A change hazard path sets the High tier too, with its second row, whatever the label; R3 names the label.
+  expect(view(['.github/workflows/x.yml'])).toEqual(['high', 'not_accepted']);
+  // A release path alone is Medium too, and R5 still names the label.
+  expect(view(['src/core/release/notes.ts'])).toEqual(['medium', 'accepted', '#1499 changes src/core/release/notes.ts (release), a High signal, but #1476 is tier:medium']);
+  // A repository I3 path sets High; a policy that the board cannot read sets High too.
+  const i3 = { status: 0, stdout: JSON.stringify({ type: 'file', path: '.ai/harness/policy.json', encoding: 'base64', content: Buffer.from('{"review":{"i3_paths":["src/effects/board/**"]}}').toString('base64') }) };
+  expect(view([boardWriter], 'tier:medium', false, i3)).toEqual(['high', 'not_accepted']);
+  // A rename out of an I3 glob is High by its source path.
+  expect(view(['src/core/moved.ts'], 'tier:medium', false, i3, path => (path === 'src/core/moved.ts' ? boardWriter : undefined))).toEqual(['high', 'not_accepted']);
+  expect(view([boardWriter], 'tier:medium', false, { status: 1, stdout: 'HTTP 502' })).toEqual(['high', 'not_accepted']);
   // An incomplete file list can hide a High path: High, and R5 lists it as unevaluated.
   expect(view([boardWriter], 'tier:medium', true)).toEqual(['high', 'not_accepted', 'files_incomplete: #1499']);
 });

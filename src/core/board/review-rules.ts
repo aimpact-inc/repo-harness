@@ -1,7 +1,7 @@
 import { PROJECTION_WRITER_DEFAULT_BRANCH } from 'archctx-contracts';
 import { documentationOnly } from '../ci/documentation-path';
 import { modelFamily } from '../review/model-family';
-import { pathHazardHits, pathHighHits } from './hazards';
+import { pathHighHits, pathSecondReviewHits } from './hazards';
 import {
   ACCEPTANCE_DISPOSITION_HEADER,
   BoardSourceError,
@@ -147,7 +147,8 @@ export function reviewFail(read: BoardPullRequestReadV1): { readonly url: string
  * The verdict of the rows of the head that are not the reviewer's (`BoardPullRequestV1.gatekeeper_review`). A row is the reviewer's when the
  * family of its model is `reviewerFamily`; every other row of the head, a row with no known model included, counts here, so the relay opens
  * for a head that any other seat reviewed. Only a `PASS` row opens the relay: a `FAIL` row that a disposition resolves stops failing the head,
- * but a cleared failure is no review, so it sets no pass either. A `FAIL` row that no disposition resolves fails the head.
+ * but a cleared failure is no review, so it sets no pass either. A `FAIL` row that no disposition resolves fails the head. With no row of
+ * the head, a carried PASS of another seat (`carriedPasses`) opens the relay, so a fix round starts only the seat that failed.
  */
 export function gatekeeperReview(read: BoardPullRequestReadV1, reviewerFamily: string | null): BoardGatekeeperReviewV1 {
   if (read.comments.truncated) return 'unknown';
@@ -161,7 +162,31 @@ export function gatekeeperReview(read: BoardPullRequestReadV1, reviewerFamily: s
       else if (!resolvedFail(record, row, dispositions)) return 'fail';
     }
   }
-  return verdict;
+  return verdict === 'none' && carriedPasses(read).some(row => modelFamily(row.model!) !== reviewerFamily) ? 'pass' : verdict;
+}
+
+/**
+ * The round-1 PASS rows that count for the head under the High rule (#3187): in a fix round only the seat that returned FAIL reviews
+ * again. Only claimed rows (`claimedRows`) take part, so publication order and unclaimed rows change nothing. The carry needs one
+ * round-1 subject with a claimed PASS of one model family and a claimed FAIL of another family and claim. The PASS carries only to the
+ * fix head: the one subject of the failing family's claimed round-2 rows, or the head while that family has no round-2 row. It never reaches a later head, and
+ * a family with a row of the head carries nothing. Whether the fix stays inside the findings is the orchestrator's scope call.
+ */
+function carriedPasses(read: BoardPullRequestReadV1): AcceptanceRowV1[] {
+  const rows = claimedRows(read, protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? []));
+  const family = (row: AcceptanceRowV1): string | null => (row.model === null ? null : modelFamily(row.model));
+  const round1 = rows.filter(row => row.round === 1);
+  const answered = (pass: AcceptanceRowV1): boolean => pass.verdict === 'PASS' && family(pass) !== null
+    && round1.some(fail => fail.subject_sha === pass.subject_sha && fail.verdict === 'FAIL' && family(fail) !== family(pass) && fail.claim !== pass.claim);
+  const subjects = [...new Set(round1.filter(answered).map(row => row.subject_sha))];
+  if (subjects.length !== 1) return [];
+  const failing = new Set(round1.filter(row => row.subject_sha === subjects[0] && row.verdict === 'FAIL').map(family));
+  const fixes = [...new Set(rows.filter(row => row.round === 2 && failing.has(family(row))).map(row => row.subject_sha))];
+  const fix = fixes.length === 0 ? read.head_sha : fixes.length === 1 ? fixes[0] : null;
+  if (fix !== read.head_sha || fix === subjects[0]) return [];
+  const onHead = new Set(protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? [])
+    .filter(row => row.subject_sha === read.head_sha).map(family));
+  return round1.filter(row => row.subject_sha === subjects[0] && answered(row) && !onHead.has(family(row)));
 }
 
 /** The newest acceptance record of each review seat (`BoardPullRequestV1.review_records`). */
@@ -199,7 +224,7 @@ export function acceptance(read: BoardPullRequestReadV1, check: BoardRequiredChe
   if (!failed && passes.length > 0) {
     // An older comment outside the read can hold a FAIL on the head.
     if (read.comments.truncated) return { status: 'unknown', reason: 'comments_truncated', evidence_url: null };
-    if (rule === 'none' || (rule === 'medium' ? mediumRuleMet(read, head) : highRuleMet(read, head))) {
+    if (rule === 'none' || (rule === 'medium' ? mediumRuleMet(read, head) : highRuleMet(read, [...head, ...carriedPasses(read)]))) {
       const newest = passes.reduce((latest, record) => (record.created_at >= latest.created_at ? record : latest));
       return { status: 'accepted', via: 'record', accepted_at: newest.created_at, evidence_url: newest.url };
     }
@@ -252,47 +277,76 @@ function sizeExempt(read: BoardPullRequestReadV1, files: readonly string[]): boo
   return read.head_ref === PROJECTION_WRITER_DEFAULT_BRANCH || documentationOnly(files) || files.every(path => path.startsWith('tests/'));
 }
 
+/** The diff evidence of one open pull request that the tier reads beyond its path list. */
+export interface BoardPullRequestTierEvidenceV1 {
+  /** The source path of each renamed file; null when the PR files read failed. Read only while I3 globs exist. */
+  readonly rename_sources: readonly string[] | null;
+}
+
+/** The review evidence of a board read: the I3 globs of the default-branch policy and the diff evidence of each open pull request. */
+export interface BoardReviewEvidenceV1 {
+  /** `review.i3_paths`; null when the policy read or the value failed. */
+  readonly i3_paths: readonly string[] | null;
+  readonly pull_requests: ReadonlyMap<number, BoardPullRequestTierEvidenceV1>;
+}
+
+/** A closed pull request takes no review, so the board reads no diff evidence for it and its path list alone sets its tier. */
+const NO_DIFF_EVIDENCE: BoardPullRequestTierEvidenceV1 = { rename_sources: [] };
+
 /**
- * The one effective tier of a pull request, for the Low acceptance path and the review planner alike. A changed path on the High
- * list or the change hazard list sets High whatever the labels say (`agentic-development-flow.md`, Review by risk); R3 and R5 name
- * the labels to fix. An incomplete file list can hide such a path, so it sets High too. Otherwise null unless every linked issue
- * (the parent excluded) is on the board with a tier label. Low labels on a fix of more than 50 changed lines, or of unknown size, give Medium.
+ * The one effective tier of a pull request, for the Low acceptance path and the review planner alike; High takes the second review
+ * row (#3190 section 2.3). High, whatever the labels say: a changed path, or the source of a renamed path, on the I1/I2 High-list
+ * signals, on a path-visible change hazard (`.github/**`) or on a repository I3 glob. Incomplete evidence can hide such a hit, so it
+ * sets High too: an incomplete file list, an I3 list that the board could not read, or no rename sources while I3 globs exist. Any
+ * other High-list hit sets at least Medium; R3 and R5 name the labels to fix. Otherwise null
+ * unless every linked issue (the parent excluded) is on the board with a tier label. Low labels on a fix of more than 50 changed lines,
+ * or of unknown size, give Medium.
  */
-export function effectiveTier(read: BoardPullRequestReadV1, closes: readonly number[], refs: readonly number[], parent: BoardParentReadV1, tiers: ReadonlyMap<number, BoardTier | null>): BoardTier | null {
+export function effectiveTier(read: BoardPullRequestReadV1, closes: readonly number[], refs: readonly number[], parent: BoardParentReadV1, tiers: ReadonlyMap<number, BoardTier | null>, evidence: BoardReviewEvidenceV1): BoardTier | null {
   const files = read.files;
-  if (files === null || pathHighHits(files).length > 0 || pathHazardHits(files).length > 0) return 'high';
+  const diff = read.state === 'open' ? evidence.pull_requests.get(read.number) : NO_DIFF_EVIDENCE;
+  const i3 = evidence.i3_paths;
+  if (files === null || i3 === null || diff === undefined) return 'high';
+  if (i3.length > 0 && diff.rename_sources === null) return 'high';
+  if (pathSecondReviewHits([...files, ...(diff.rename_sources ?? [])], i3).length > 0) return 'high';
   const linked = [...new Set([...closes, ...refs])].filter(number => number !== parent.parent.number);
   const known = linked.map(number => tiers.get(number) ?? null);
   if (linked.length === 0 || known.includes(null)) return null;
   if (known.includes('high')) return 'high';
-  if (known.includes('medium')) return 'medium';
+  if (known.includes('medium') || pathHighHits(files).length > 0) return 'medium';
   return sizeExempt(read, files) || (read.changed_lines !== null && read.changed_lines <= LOW_FIX_MAX_LINES) ? 'low' : 'medium';
 }
 
 /**
  * The second-review state of a pull request: a projection of the High rule, not a second rule. `recorded`: a row of the configured
- * reviewer's model family exists for the head. `pending`: the High rule is not met for the head and no such row exists, so the reviewer
+ * reviewer's model family exists for the head, or carries to it (`carriedPasses`). `pending`: the High rule is not met for the head and no such row exists, so the reviewer
  * seat supplies the missing review. A reviewer with no known family, or a row with no known model, matches no row.
  */
 export function secondReview(read: BoardPullRequestReadV1, tier: BoardTier | null, reviewerFamily: string | null): BoardSecondReviewV1 {
   if (reviewRule(read, tier) !== 'high') return 'not_required';
-  const head = protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? []).filter(row => row.subject_sha === read.head_sha);
+  const head = [...protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? [])
+    .filter(row => row.subject_sha === read.head_sha), ...carriedPasses(read)];
   if (reviewerFamily !== null && head.some(row => row.model !== null && modelFamily(row.model) === reviewerFamily)) return 'recorded';
   return highRuleMet(read, head) ? 'not_required' : 'pending';
 }
 
-/** The writer family of a pull request (`BoardPullRequestV1.writer_family`). */
+/**
+ * The writer family of a pull request (`BoardPullRequestV1.writer_family`): the one model family of the newest writer claims of the head
+ * branch on its linked issues. A bundle links issues without their own claim, so an unclaimed linked issue is ignored. Null when no linked
+ * issue has such a claim, when a claim names no known family, when two claims disagree, or when a linked issue is off the board.
+ */
 export function writerFamily(read: BoardPullRequestReadV1, closes: readonly number[], refs: readonly number[], parent: BoardParentReadV1): BoardWriterFamily | null {
   const issues = new Map(parent.sub_issues.map(issue => [issue.number, issue]));
   const linked = [...new Set([...closes, ...refs])].filter(number => number !== parent.parent.number);
-  const families = new Set(linked.map((number) => {
+  const families = new Set<string | null>();
+  for (const number of linked) {
     const issue = issues.get(number);
     if (issue === undefined) return null;
     const claims = protocolComments(issue.comments, CLAIM_HEADER).filter(claim => field(claim.body, 'Role') === 'writer' && field(claim.body, 'Branch') === read.head_ref);
-    const newest = claims.length === 0 ? null : newestProtocolComment({ ...issue.comments, comments: claims }, CLAIM_HEADER);
-    const model = newest === null ? null : field(newest.body, 'Model');
-    return model === null ? null : modelFamily(model);
-  }));
+    if (claims.length === 0) continue;
+    const model = field(newestProtocolComment({ ...issue.comments, comments: claims }, CLAIM_HEADER)!.body, 'Model');
+    families.add(model === null ? null : modelFamily(model));
+  }
   const [family] = families;
   return families.size === 1 && family !== undefined ? family : null;
 }

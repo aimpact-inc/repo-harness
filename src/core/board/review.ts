@@ -21,9 +21,9 @@ import { claimStatusTarget, newestProtocolComment, parseAcceptanceRecord, parseC
  * or a High head that takes no reviewer row), and is not of the reviewer family where the head takes a reviewer row. The reviewer
  * starts only with a known family that differs from the gatekeeper's on a High head: equal families leave the two rows not independent.
  *
- * The two High seats run as a relay (#2910): a High head starts the gatekeeper only, and the reviewer starts for that head when the
- * gatekeeper of the head is `pass` (`BoardPullRequestV1.gatekeeper_review`) and the reviewer has no marker of its own. A reviewer
- * finding sends the fix back to the gatekeeper first, because the fix is a new head that no seat reviewed. The reviewer's delta base
+ * The two High seats of a head that no seat reviewed start in parallel on the same head (#3190 section 2.3). The reviewer alone starts
+ * when the gatekeeper of the head is `pass` (`BoardPullRequestV1.gatekeeper_review`), and the gatekeeper alone after a gatekeeper FAIL.
+ * In a fix round only the seat that returned FAIL starts: the PASS of the other seat carries to the fix head (#3187). The reviewer's delta base
  * stays the newest earlier head that the reviewer itself reviewed, else the whole diff, so the reviewer never reads only the tail.
  */
 export const REVIEW_START_HEADER = 'repo-harness review start';
@@ -156,15 +156,16 @@ export function planReview(input: ReviewInputV1): readonly ReviewDecisionV1[] {
     if (page === undefined) return skip('started', 'the comments of the pull request were not read');
     if (page.truncated) return skip('started', 'older comments were not read, so a start marker cannot be ruled out');
     const reviewer = board.reviewer_family;
-    // The relay (#2910): the reviewer of a High head starts after the other seat of that head passed.
+    // A High head that no seat reviewed starts both seats in parallel (#3190 section 2.3); after a gatekeeper PASS, also a carried one,
+    // only the reviewer starts, and after a gatekeeper FAIL only the gatekeeper.
     const relayOpen = pr.gatekeeper_review === 'pass';
     const required: readonly ReviewSeat[] = tier === 'medium' ? [reviewer !== null && pr.writer_family === reviewer ? 'gatekeeper' : 'reviewer']
-      : pr.second_review === 'pending' ? [relayOpen ? 'reviewer' : 'gatekeeper'] : ['gatekeeper'];
+      : pr.second_review !== 'pending' ? ['gatekeeper'] : relayOpen ? ['reviewer'] : pr.gatekeeper_review === 'none' ? ['gatekeeper', 'reviewer'] : ['gatekeeper'];
     const seats = required.filter(seat => !liveMarkers(page, seat).some(marker => field(marker, 'Subject') === pr.head_sha))
       .map((seat): ReviewSeatStartV1 => ({ seat, delta_from: deltaBase(page, pr.head_sha, seat, reviewer) }));
     if (seats.length === 0) {
-      // A High head whose gatekeeper already started waits for that seat's verdict; the reviewer starts after a PASS (#2910).
-      if (tier === 'high' && pr.second_review === 'pending' && !relayOpen) {
+      // A High head whose gatekeeper failed, or whose verdict is unknown, waits for the gatekeeper; the reviewer starts after a PASS.
+      if (tier === 'high' && pr.second_review === 'pending' && !relayOpen && pr.gatekeeper_review !== 'none') {
         return skip('started', `the gatekeeper started for ${pr.head_sha} and recorded ${pr.gatekeeper_review}; the reviewer starts after a PASS`);
       }
       return skip('started', `a start marker of every required seat covers ${pr.head_sha}`);

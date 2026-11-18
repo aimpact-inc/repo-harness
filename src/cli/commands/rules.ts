@@ -7,15 +7,12 @@ import {
   describeTestBudget,
   evaluateTestBudget,
   githubNoticeCommand,
-  parseTestBudgetException,
   readTestBudgetConfig,
   renderTestBudgetSummary,
   testBudgetError,
-  testBudgetExceptionDigest,
   testBudgetPolicyDigest,
   type TestBudgetBound,
   type TestBudgetDiffEntry,
-  type TestBudgetException,
   type TestBudgetResult,
 } from '../../core/ci/test-budget';
 import {
@@ -49,7 +46,6 @@ interface TestBudgetCheckInput {
   readonly cwd: string;
   readonly base: string;
   readonly head: string;
-  readonly bodyFile: string;
 }
 
 class CheckError extends Error {
@@ -122,19 +118,10 @@ export function runTestBudgetCheck(input: TestBudgetCheckInput): { result: TestB
     head_sha: null, diff_start: null, policy_digest: null,
     implementation_version: TEST_BUDGET_IMPLEMENTATION_VERSION, exception_digest: null,
   };
-  let exception: TestBudgetException = { status: 'absent' };
   try {
     const repoRoot = git(input.cwd, ['rev-parse', '--show-toplevel'], 'repository_unavailable').trim();
     bound.head_sha = commit(repoRoot, input.head, 'head_unavailable');
     const base = commit(repoRoot, input.base, 'base_unavailable');
-    let body: string;
-    try {
-      body = readFileSync(input.bodyFile, 'utf8');
-    } catch (error) {
-      throw new CheckError('body_unreadable', `cannot read the PR body file: ${(error as Error).message}`);
-    }
-    exception = parseTestBudgetException(body);
-    bound.exception_digest = testBudgetExceptionDigest(exception);
     let decoded;
     try {
       decoded = decodeWorkflowPolicy(policyTextAt(repoRoot, base));
@@ -154,13 +141,12 @@ export function runTestBudgetCheck(input: TestBudgetCheckInput): { result: TestB
       diff_start: bound.diff_start,
       config,
       entries: config.status === 'present' && config.config.enabled ? diffEntries(repoRoot, bound.diff_start, bound.head_sha) : [],
-      exception,
     });
-    return { result, lines: describeTestBudget(result, exception) };
+    return { result, lines: describeTestBudget(result) };
   } catch (error) {
     if (!(error instanceof CheckError)) throw error;
     const result = testBudgetError(bound, error.code, error.message);
-    return { result, lines: describeTestBudget(result, exception) };
+    return { result, lines: describeTestBudget(result) };
   }
 }
 
@@ -283,7 +269,6 @@ export function runRulesStatus(input: { target: string }): RuleStatusV1 {
 interface RulesCheckOptions {
   base: string;
   head: string;
-  bodyFile: string;
   githubAnnotation?: boolean;
   githubSummary?: string;
 }
@@ -338,11 +323,10 @@ export function buildRulesCommand(host: BoardHostPortsV1): Command {
   const rules = new Command('rules').description('Run a repository rule check');
   rules
     .command('check')
-    .description('Check one rule and print its result document; exit 1 on a violation, 2 on an error')
+    .description('Check one rule and print its result document; a rule result never fails the command')
     .argument('<rule>', `rule id (${RULES.TestBudget.id})`)
     .requiredOption('--base <rev>', 'base commit: the policy source and one side of the merge-base')
     .requiredOption('--head <rev>', 'PR head commit')
-    .requiredOption('--body-file <path>', 'file with the PR body text')
     .option('--github-annotation', `also print the result as a GitHub Actions notice titled ${TEST_BUDGET_RESULT_SCHEMA}`)
     .option('--github-summary <path>', 'also append the human summary as Markdown to this file ($GITHUB_STEP_SUMMARY in a job)')
     .action((rule: string, options: RulesCheckOptions) => {
@@ -351,13 +335,12 @@ export function buildRulesCommand(host: BoardHostPortsV1): Command {
         process.exitCode = 2;
         return;
       }
-      const { result, lines } = runTestBudgetCheck({ cwd: process.cwd(), base: options.base, head: options.head, bodyFile: options.bodyFile });
+      const { result, lines } = runTestBudgetCheck({ cwd: process.cwd(), base: options.base, head: options.head });
       const document = JSON.stringify(result);
       process.stdout.write(`${document}\n`);
       if (options.githubAnnotation) process.stdout.write(`${githubNoticeCommand(TEST_BUDGET_RESULT_SCHEMA, document)}\n`);
       if (options.githubSummary) appendFileSync(options.githubSummary, renderTestBudgetSummary(result));
       process.stderr.write(`${lines.join('\n')}\n`);
-      process.exitCode = result.state === 'violation' ? 1 : result.state === 'error' ? 2 : 0;
     });
   rules
     .command('status')

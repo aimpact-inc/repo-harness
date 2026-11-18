@@ -9,12 +9,18 @@
 import hazardsJson from '../../../assets/review-hazards.v1.json';
 import highListJson from '../../../assets/review-high-list.v1.json';
 import { decodeReaders } from '../evidence/decode-readers';
+import { POLICY_ABSENT, policyValue, type DecodedWorkflowPolicy } from '../workflow/policy-schema';
 
 export const REVIEW_HAZARDS_VERSION = 'repo-harness.review-hazards.v1';
 export const REVIEW_HIGH_LIST_VERSION = 'repo-harness.review-high-list.v1';
 const ENTRY_ID = /^[a-z0-9][a-z0-9-]{0,63}$/u;
 /** One path segment: `**`, or literal characters with at most one `*`. */
 const GLOB_SEGMENT = /^(?:\*\*|[A-Za-z0-9._-]*\*?[A-Za-z0-9._-]*)$/u;
+
+function isGlob(value: unknown): value is string {
+  const segments = typeof value === 'string' ? value.split('/') : [];
+  return segments.length > 0 && segments.every(s => s !== '' && s !== '.' && s !== '..' && GLOB_SEGMENT.test(s));
+}
 
 export type ReviewPathEntry =
   | { readonly id: string; readonly text: string; readonly path_visible: true; readonly paths: readonly string[] }
@@ -46,10 +52,7 @@ function decodePathList(value: unknown, shape: PathListShape): ReviewPathEntry[]
   // Text lands in a markdown table cell: one line, no pipe.
   const cell = (v: unknown, what: string): string =>
     (typeof v === 'string' && v.length > 0 && v.length <= 280 && v.trim() === v && !/[\x00-\x1f\x7f|]/u.test(v) ? v : fail(what));
-  const glob = (v: unknown, what: string): string => {
-    const segments = typeof v === 'string' ? v.split('/') : [];
-    return segments.length > 0 && segments.every(s => s !== '' && s !== '.' && s !== '..' && GLOB_SEGMENT.test(s)) ? v as string : fail(what);
-  };
+  const glob = (v: unknown, what: string): string => (isGlob(v) ? v : fail(what));
 
   const root = obj(value, [shape.version_key, shape.list_key], 'list');
   if (root[shape.version_key] !== shape.version) fail(shape.version_key);
@@ -84,6 +87,17 @@ export function decodeReviewHighList(value: unknown): ReviewHighListV1 {
 /** The packaged lists. A decode failure is a build error; the board and reference-config tests stop it. */
 export const REVIEW_HAZARDS: ReviewHazardsV1 = decodeReviewHazards(hazardsJson);
 export const REVIEW_HIGH_LIST: ReviewHighListV1 = decodeReviewHighList(highListJson);
+
+/**
+ * The High-list signals of invariant I1 (credentials) and I2 (deletion). A hit on
+ * one of them, on a path-visible change hazard or on a repository I3 path takes the
+ * second review row; another High-list signal alone takes one row (#3190 section 2.3).
+ */
+const INVARIANT_SIGNALS: readonly ReviewPathEntry[] = ['secrets', 'deletion'].map((id) => {
+  const signal = REVIEW_HIGH_LIST.signals.find(entry => entry.id === id);
+  if (signal === undefined || !signal.path_visible) throw new Error(`review high list invalid: invariant signal ${id} is missing or not path-visible`);
+  return signal;
+});
 
 /** `**` matches zero or more whole segments; `*` matches inside one segment. */
 function globPattern(glob: string): RegExp {
@@ -122,4 +136,36 @@ export interface PathHighHitV1 {
 /** Hits of repository-relative paths on the path-visible High signals; a reviewer applies the whole list. */
 export function pathHighHits(paths: readonly string[]): PathHighHitV1[] {
   return pathHits(REVIEW_HIGH_LIST.signals, paths).map(hit => ({ signal: hit.id, path: hit.path }));
+}
+
+export type ReviewI3PathsRead =
+  | { readonly status: 'present'; readonly paths: readonly string[] }
+  | { readonly status: 'invalid'; readonly message: string };
+
+/**
+ * `review.i3_paths` of a decoded policy: the repository's I3 paths (for example
+ * server-side auth, RLS, entitlement or release SQL), as globs of the hazard
+ * grammar. An absent key is no I3 path.
+ */
+export function readReviewI3Paths(document: DecodedWorkflowPolicy): ReviewI3PathsRead {
+  let value: unknown;
+  try {
+    value = policyValue(document, 'review.i3_paths');
+  } catch (error) {
+    return { status: 'invalid', message: (error as Error).message };
+  }
+  if (value === POLICY_ABSENT) return { status: 'present', paths: [] };
+  if (!Array.isArray(value) || !value.every(isGlob)) return { status: 'invalid', message: 'review.i3_paths must be an array of path globs' };
+  if (new Set(value).size !== value.length) return { status: 'invalid', message: 'review.i3_paths has a duplicate glob' };
+  return { status: 'present', paths: value };
+}
+
+/**
+ * Hits of repository-relative paths that take a second review row: the I1/I2 High-list signals, the path-visible change hazards
+ * (`.github/**`) and the I3 globs (id `i3`).
+ */
+export function pathSecondReviewHits(paths: readonly string[], i3Paths: readonly string[]): PathHighHitV1[] {
+  const entries: ReviewPathEntry[] = [...INVARIANT_SIGNALS, ...REVIEW_HAZARDS.hazards];
+  if (i3Paths.length > 0) entries.push({ id: 'i3', text: 'Repository I3 path.', path_visible: true, paths: i3Paths });
+  return pathHits(entries, paths).map(hit => ({ signal: hit.id, path: hit.path }));
 }
