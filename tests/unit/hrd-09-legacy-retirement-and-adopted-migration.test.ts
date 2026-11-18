@@ -14,6 +14,7 @@ import { tmpdir } from 'os';
 import { delimiter, join } from 'path';
 import { planAdoption } from '../../src/effects/adoption/plan';
 import { applyAdoptionPlan } from '../../src/effects/fs-transaction';
+import { stripRepositoryHookFiles } from '../../src/effects/upgrade/repository-hooks';
 import { HOOK_EVENT_TELEMETRY_PROTOCOL } from '../../src/cli/hook/event-telemetry';
 import { ROUTES, type HookEvent, type RouteId } from '../../src/cli/hook/route-registry';
 import { runHook } from '../../src/cli/hook/runtime';
@@ -97,6 +98,8 @@ describe('HRD-09 terminal runtime migration', () => {
       const applied = applyAdoptionPlan(planned);
       expect(applied.ok).toBe(true);
       expect(applied.transactionManifestPath).toBeDefined();
+      // Init strips the repository hook files after the transaction, through the repository gate.
+      expect(stripRepositoryHookFiles(repo, { env: { HOME: home }, record: 'ledger' })).toEqual(['.claude/settings.json', '.codex/hooks.json']);
       expect(planAdoption({ repoRoot: repo, mode: 'standard' }).summary.plannedTotal).toBe(0);
       // Adoption lands as a commit in practice. Committing it here keeps the
       // Stop route's git-derived architecture changed set at the realistic

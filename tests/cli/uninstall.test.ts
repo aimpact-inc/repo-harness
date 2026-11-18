@@ -21,6 +21,7 @@ import { migrateCodexConfigRecords, planCodexConfigMigration } from '../../src/c
 import { requestUserInputFragment } from '../../src/cli/installer/targets/codex';
 import { tomlFragment } from '../../src/core/host-config/toml-fragment';
 import { openHostConfigGate, rollbackHostConfigTransaction } from '../../src/effects/host-config/gate';
+import { openRepositoryGate, repositoryConfigPaths } from '../../src/effects/host-config/repository';
 import { buildManagedHooks } from '../../src/cli/installer/managed-entries';
 import { applyGlobalContextRefresh, preflightGlobalContextRefresh, renderGlobalRulesBlock } from '../../src/cli/installer/global-context';
 const CLI = join(import.meta.dir, '../../src/cli/index.ts');
@@ -245,10 +246,19 @@ test('removes profile-owned rules, restores a file that rh replaced, and retires
  const path=join(home,'.codex/rules/anti-patterns.md');put(home,'.codex/rules/anti-patterns.md','owned');put(home,'.codex/rules/user.md','user');
  profile(home,[ownedFile(path,'owned')]);
  const agent=join(home,'.claude/agents/explorer.md');put(home,'.claude/agents/explorer.md','mine');
- openHostConfigGate({env}).writePaths([{path:agent,owner:'core',entry:{type:'file',bytes:Buffer.from('rh')},replace:true}]);
+ // P1: a replaced file that the user deleted loses its record at the uninstall read, and the uninstall writes nothing there.
+ const deleted=join(home,'.claude/agents/deleted.md');put(home,'.claude/agents/deleted.md','theirs');
+ openHostConfigGate({env}).writePaths([agent,deleted].map((file)=>({path:file,owner:'core',entry:{type:'file' as const,bytes:Buffer.from('rh')},replace:true})));
+ rmSync(deleted);
+ // A repository record (#2854) is not the uninstall's: only rh config restore --repo reverts it (D8).
+ const worktree=join(home,'repo'),repoFile=join(worktree,'.claude/settings.json');put(home,'repo/.claude/settings.json','user\n');
+ const repository={repositoryId:join(worktree,'.git'),worktree};
+ openRepositoryGate(env,repository).writePaths([{path:repoFile,owner:'core',replace:true,entry:{type:'file',bytes:Buffer.from('stripped\n')}}]);
+ const repoLedger=readFileSync(repositoryConfigPaths(env,repository).ledger);
  const result=runUserUninstall({target:'both',env});
  expect(result.status).toBe('complete');expect(existsSync(path)).toBe(false);
  expect({action:result.items.find((item)=>item.path===agent)?.action,agent:readFileSync(agent,'utf8'),paths:ledger(home).paths}).toEqual({action:'restored',agent:'mine',paths:{}});
+ expect([existsSync(deleted),readFileSync(repoFile,'utf8'),readFileSync(repositoryConfigPaths(env,repository).ledger).equals(repoLedger)]).toEqual([false,'stripped\n',true]);
  // The vault copy of the replaced file is retired for a later rh config gc.
  expect(ledger(home).retired.map((entry: {sha256: string})=>entry.sha256)).toContain(`sha256:${createHash('sha256').update('mine').digest('hex')}`);
  expect(readFileSync(join(home,'.codex/rules/user.md'),'utf8')).toBe('user');expect(existsSync(join(home,'.repo-harness/install-state.json'))).toBe(false);
