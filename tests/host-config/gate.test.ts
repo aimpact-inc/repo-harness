@@ -11,7 +11,7 @@ import { hookRenderingKey, jsonFragment, removeJsonHookCommand } from '../../src
 import { sha256Prefixed } from '../../src/core/evidence/sha256';
 import { tomlFragment } from '../../src/core/host-config/toml-fragment';
 import { markedBlock } from '../../src/core/host-config/marked-block';
-import { insertUserPathEntry, listsUserPathEntry } from '../../src/core/host-config/path-entry';
+import { insertUserPathEntry, listsUserPathEntry, removeUserPathEntry } from '../../src/core/host-config/path-entry';
 
 /** A `key=value` line format: the selector is the key. */
 function keyLineMatch(content: string, selector: string): RegExpExecArray | null {
@@ -776,6 +776,22 @@ test.each([
   expect(listsUserPathEntry(next.raw, `${DIR.toUpperCase()}\\`)).toBe(true);
 });
 
+// The removal takes out the text that rh appended and keeps every other byte; a value that rh created goes. It keeps a value whose
+// kind changed or that does not list the recorded text exactly once.
+test.each([
+  ['an absent value', { existed: false, kind: 'ExpandString', raw: '' }, (raw: string) => raw, { existed: false, kind: 'ExpandString', raw: '' }],
+  ['an empty value', { existed: true, kind: 'String', raw: '' }, (raw: string) => raw, { existed: true, kind: 'String', raw: '' }],
+  ['a trailing separator, then a user entry', { existed: true, kind: 'ExpandString', raw: 'a;' }, (raw: string) => `${raw};b`, { existed: true, kind: 'ExpandString', raw: 'a;b' }],
+  ['one entry, then a user entry', { existed: true, kind: 'ExpandString', raw: 'a' }, (raw: string) => `${raw};b`, { existed: true, kind: 'ExpandString', raw: 'a;b' }],
+  ['one entry, with the earlier entries gone', { existed: true, kind: 'ExpandString', raw: 'a' }, (raw: string) => raw.slice(2), { existed: true, kind: 'ExpandString', raw: '' }],
+  ['an entry in upper case', { existed: true, kind: 'ExpandString', raw: 'a' }, (raw: string) => raw.toUpperCase(), null],
+  ['the entry listed twice', { existed: true, kind: 'ExpandString', raw: 'a' }, (raw: string) => `${raw};${DIR}`, null],
+] as const)('the user PATH entry comes out of %s', (_label, before, edit, after) => {
+  const { next, record } = insertUserPathEntry(before, DIR);
+  expect(removeUserPathEntry({ ...next, raw: edit(next.raw) }, record)).toEqual(after);
+  expect(removeUserPathEntry({ ...next, kind: next.kind === 'String' ? 'ExpandString' : 'String' }, record)).toBeNull();
+});
+
 // Tool records (#2853). P3: an entry that existed before the writer ran is never claimed, also when the writer rewrites it.
 // The rollback keeps a tool record only while the entry that the transaction created holds the recorded bytes.
 test.each([
@@ -794,8 +810,9 @@ test.each([
   if (after === 'edit') writeFileSync(join(dir, 'tool'), 'user edit\n');
   expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
   const tools = existsSync(join(f.root, 'ledger.json')) ? f.ledger().tools : {};
+  const stat = record ? lstatSync(join(dir, 'tool'), { bigint: true }) : null;
   expect(tools).toEqual(record ? { 'herdr-core': { installed_by: 'rh-install', removable: true, version: '1.0.0', directories: [join(f.home, '.local'), dir],
-    paths: { [join(dir, 'tool')]: { committed: { type: 'file', sha256: sha256Prefixed(Buffer.from('rh\n')) } } } } } : {});
+    paths: { [join(dir, 'tool')]: { committed: { type: 'file', sha256: sha256Prefixed(Buffer.from('rh\n')) }, identity: `${stat!.dev}:${stat!.ino}:${stat!.birthtimeNs}` } } } } : {});
 });
 
 // Ownership probe P4: a claim released on observation (its target was absent) stays released through a rollback.

@@ -11,7 +11,7 @@ import { CLAUDE_ROOT_CONFIG_BACKUP, CODEGRAPH_MCP_SELECTOR } from '../../src/cor
 import type { PathCommitted } from '../../src/core/host-config/types';
 import { pathRecordHost, pathRecordKey } from '../../src/effects/host-config/path-records';
 import { hashManagedTree } from '../../src/effects/managed-tree';
-import { appendFileSync, chmodSync, cpSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync, statSync } from 'fs';
+import { appendFileSync, chmodSync, copyFileSync, cpSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, relative } from 'path';
 import { spawnSync } from 'child_process';
@@ -155,6 +155,10 @@ test('hook trust entries alone are a note: uninstall completes and retires insta
 test('CLI dry-run JSON creates no lock, receipt or directories',()=>fixture((home,env)=>{
  const before=tree(home);const result=spawnSync('bun',[CLI,'uninstall','--dry-run','--json'],{env:{...env,BUN_RUNTIME_TRANSPILER_CACHE_PATH:'0'},encoding:'utf8'});
  expect(result.status).toBe(0);expect(JSON.parse(result.stdout).dryRun).toBe(true);expect(tree(home)).toBe(before);
+}));
+test('CLI --with-tools with one target is refused before any read or write',()=>fixture((home,env)=>{
+ const before=tree(home);const result=spawnSync('bun',[CLI,'uninstall','--target','codex','--with-tools'],{env:{...env,BUN_RUNTIME_TRANSPILER_CACHE_PATH:'0'},encoding:'utf8'});
+ expect([result.status,result.stderr.trim(),tree(home)]).toEqual([2,'rh uninstall: --with-tools needs --target both; the shared tools serve both hosts',before]);
 }));
 // JSON.parse quotes an identifier only up to a dash, so the JSON rows use an identifier-shaped fake token.
 const BROKEN_TOML='k = sk-FAKE-SECRET-12345\n',BROKEN_JSON='{"k": sk_FAKE_SECRET_12345}';
@@ -612,5 +616,131 @@ test.each([
   }else{
    expect([again.exitCode,shared(again),ledger(home).tools]).toEqual([0,[keptLine(windows?`${files} and its user PATH entry`:files)],recorded]);
   }
+ }finally{rmSync(root,{recursive:true,force:true});}
+},30_000);
+// --with-tools (#2853): an entry goes only while it holds what rh wrote; the PATH entry only while it is the one recorded text in the
+// recorded kind. P2: `edited`, `kind` (kept, with the record). P1: `absent` (a release; a later entry is not rh's). P4 (one ledger write
+// retires every claim before the first unlink or registry write): `ledger write fails` (nothing goes, the claims stay), `unlink fails` and
+// `registry write fails` (the entry stays with no claim, so a later run keeps it). `preexisting`: an hc on PATH before install gets no record.
+// The Windows conpty tree is never removed: its record goes in the same write, and it is reported `kept`.
+test.each([
+ {platform:'unix',change:'none'},{platform:'windows',change:'none'},{platform:'windows',change:'created value'},{platform:'unix',change:'dry run'},{platform:'unix',change:'bun absent'},
+ {platform:'unix',change:'edited'},{platform:'windows',change:'edited'},{platform:'windows',change:'kind'},{platform:'windows',change:'replaced link'},{platform:'windows',change:'stopped'},{platform:'unix',change:'absent'},
+ {platform:'unix',change:'preexisting'},{platform:'unix',change:'ledger write fails'},{platform:'unix',change:'unlink fails'},{platform:'windows',change:'registry write fails'},
+])('rh uninstall --with-tools removes the herdr-core entries and the PATH entry that still hold what rh wrote ($platform, $change)',async({platform,change})=>{
+ const root=realpathSync(mkdtempSync(join(tmpdir(),'user-uninstall-with-tools-'))),home=join(root,'home'),windows=platform==='windows';
+ const systemRoot=join(root,'Windows'),registry=join(root,'registry.json'),userBin=join(root,'user-bin');
+ mkdirSync(home);mkdirSync(join(systemRoot,'System32'),{recursive:true});
+ const env:NodeJS.ProcessEnv={...process.env,HOME:home,GIT_CONFIG_NOSYSTEM:'1',PATH:'/usr/bin:/bin',SystemRoot:systemRoot,LOCALAPPDATA:join(home,'AppData','Local')};delete env.XDG_STATE_HOME;delete env.XDG_CONFIG_HOME;
+ writeFakeUserPathPowershell(join(systemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe'),registry,join(root,'powershell.log'));
+ const userPath={existed:true,kind:'ExpandString',raw:'%USERPROFILE%\\bin;C:\\Tools'};
+ if(change!=='created value')writeFileSync(registry,JSON.stringify(userPath));
+ if(change==='preexisting'){mkdirSync(userBin);writeFileSync(join(userBin,'hc'),`#!/bin/sh\necho "hc ${HC_MIN_VERSION}"\n`,{mode:0o755});env.PATH=`${userBin}:${env.PATH}`;}
+ const dir=windows?join(home,'AppData','Local','Programs','herdr-core'):join(home,'.local','bin');
+ const config=join(home,'.repo-harness','config');
+ const withTools=(dryRun=false)=>runUserUninstall({target:'both',env,withTools:true,dryRun});
+ const toolItems=(result:ReturnType<typeof runUserUninstall>)=>result.items.filter((item)=>item.reason.startsWith('herdr-core: ')).map((item)=>[item.path,item.action]);
+ const locked=(path:string,run:()=>ReturnType<typeof runUserUninstall>)=>{chmodSync(path,0o500);try{return run();}finally{chmodSync(path,0o700);}};
+ const label=`HKCU\\Environment\\Path: ${dir}`;
+ const entries=windows?['herdr-core.exe','conpty','hc.exe']:['herdr-core','hc'];
+ try{
+  await installHerdrCore(root,env,windows);
+  const installedRegistry=existsSync(registry)?readFileSync(registry,'utf8'):null;
+  const removedAll=[...entries.map((name)=>[join(dir,name),name==='conpty'?'kept':'restored']),...(windows?[[label,'reverted']]:[])];
+  if(change==='none'||change==='created value'||change==='dry run'||change==='bun absent'){
+   // Bun is never removed, but a recorded Bun binary that is gone loses its record in the same run.
+   const bun=join(home,'.bun','bin','bun');
+   if(change==='bun absent'){const file=join(config,'ledger.json'),state=JSON.parse(readFileSync(file,'utf8'));state.tools.bun={installed_by:'rh-bootstrap',version:'1.3.0',paths:{[bun]:{committed:{type:'file',sha256:`sha256:${'0'.repeat(64)}`}}},directories:[],removable:false};writeFileSync(file,JSON.stringify(state));}
+   const preview=change==='dry run'?withTools(true):null;
+   if(preview){expect([toolItems(preview),existsSync(join(dir,'hc'))]).toEqual([removedAll,true]);}
+   const result=withTools();
+   expect([result.exitCode,toolItems(result),windows?readdirSync(dir):hostTree(home),ledger(home).tools]).toEqual([0,removedAll,windows?['conpty']:'',{}]);
+   if(change==='bun absent')expect(result.items.filter((item)=>item.reason.startsWith('bun: ')||item.reason.includes('shared tools'))).toEqual([{path:bun,action:'note',reason:'bun: already absent; the tool record goes'}]);
+   // The PATH value keeps its kind and the other entries; a value that rh created is deleted.
+   if(windows)expect(existsSync(registry)?JSON.parse(readFileSync(registry,'utf8')):null).toEqual(change==='created value'?null:userPath);
+   return;
+  }
+  if(change==='preexisting'){
+   const result=withTools();
+   expect([result.exitCode,toolItems(result),readFileSync(join(userBin,'hc'),'utf8'),existsSync(dir)]).toEqual([0,[],`#!/bin/sh\necho "hc ${HC_MIN_VERSION}"\n`,false]);
+   return;
+  }
+  if(change==='edited'&&!windows){appendFileSync(join(dir,'herdr-core'),'# user patch\n');writeFileSync(join(dir,'other-tool'),'user\n');}
+  if(change==='edited'&&windows)writeFileSync(registry,JSON.stringify({...userPath,raw:`${userPath.raw};${dir.toUpperCase()}`}));
+  if(change==='kind')writeFileSync(registry,JSON.stringify({...JSON.parse(installedRegistry!),kind:'String'}));
+  if(change==='stopped'){
+   // GK-3235-2: the ledger as a stop at the registry write leaves it (after the entries went, before the directory removal) holds no
+   // directory claim, so a retry leaves the directory that the user created again, empty.
+   writeFileSync(`${registry}.fail`,`stop:${join(config,'ledger.json')}`);
+   withTools();
+   rmSync(`${registry}.fail`);
+   writeFileSync(join(config,'ledger.json'),readFileSync(`${registry}.at-stop`));
+   // The user removes the kept conpty tree by hand, as the report says.
+   rmSync(join(dir,'conpty'),{recursive:true});
+   expect([readdirSync(dir),ledger(home).tools]).toEqual([[],{}]);
+   const retry=withTools();
+   expect([retry.exitCode,toolItems(retry),existsSync(dir)]).toEqual([0,[],true]);
+   return;
+  }
+  if(change==='replaced link'){
+   // GK-3235-1: the user replaces the hc.exe hard link with a copy of the same binary between two runs; the copy is not rh's.
+   rmSync(join(dir,'hc.exe'));copyFileSync(join(dir,'herdr-core.exe'),join(dir,'hc.exe'));
+   const result=withTools();
+   expect([result.exitCode,toolItems(result),readdirSync(dir).sort(),Object.keys(ledger(home).tools['herdr-core'].paths)])
+    .toEqual([1,[[join(dir,'herdr-core.exe'),'restored'],[join(dir,'conpty'),'kept'],[join(dir,'hc.exe'),'unresolved'],[label,'reverted']],['conpty','hc.exe'],[join(dir,'hc.exe')]]);
+   return;
+  }
+  if(change==='edited'||change==='kind'){
+   const registryBefore=readFileSync(registry,'utf8');
+   const result=withTools();
+   const record=ledger(home).tools['herdr-core'];
+   if(windows){
+    expect([result.exitCode,toolItems(result),existsSync(dir),readFileSync(registry,'utf8'),Object.keys(record.paths),record.path_entry.entry,record.directories])
+     .toEqual([1,[...removedAll.slice(0,-1),[label,'unresolved']],true,registryBefore,[],dir,[]]);
+    // GK-3235-2: the directory claims went in the one ledger write, so the kept PATH entry brings no later run back to the directory,
+    // which is empty after the user removes the kept conpty tree by hand.
+    rmSync(join(dir,'conpty'),{recursive:true});
+    const retry=withTools();
+    expect([retry.exitCode,toolItems(retry),existsSync(dir)]).toEqual([1,[[label,'unresolved']],true]);
+   }else{
+    expect([result.exitCode,toolItems(result),readdirSync(dir).sort(),Object.keys(record.paths)])
+     .toEqual([1,[[join(dir,'herdr-core'),'unresolved'],[join(dir,'hc'),'restored']],['herdr-core','other-tool'],[join(dir,'herdr-core')]]);
+   }
+   return;
+  }
+  if(change==='absent'){
+   const bytes=readFileSync(join(dir,'herdr-core'));
+   rmSync(join(dir,'hc'));rmSync(join(dir,'herdr-core'));
+   const released=withTools();
+   expect([released.exitCode,toolItems(released),ledger(home).tools]).toEqual([0,[[join(dir,'herdr-core'),'note'],[join(dir,'hc'),'note']],{}]);
+   // The empty directories that rh created went with the release.
+   mkdirSync(dir,{recursive:true});writeFileSync(join(dir,'herdr-core'),bytes,{mode:0o755});symlinkSync('herdr-core',join(dir,'hc'));
+  }
+  if(change==='ledger write fails'){
+   const failed=locked(config,withTools);
+   expect([failed.exitCode,readdirSync(dir).sort(),Object.keys(ledger(home).tools['herdr-core'].paths).sort()]).toEqual([1,['hc','herdr-core'],[join(dir,'hc'),join(dir,'herdr-core')]]);
+   expect(failed.items.some((item)=>item.action==='unresolved'&&item.reason.startsWith('uninstall incomplete'))).toBe(true);
+   // The claims stayed, so a later run removes the entries.
+   const result=withTools();
+   expect([result.exitCode,toolItems(result),hostTree(home)]).toEqual([0,removedAll,'']);
+   return;
+  }
+  if(change==='unlink fails'){
+   const failed=locked(dir,withTools);
+   // Each entry has one item, and it says that the entry stays.
+   expect([failed.exitCode,toolItems(failed),readdirSync(dir).sort(),ledger(home).tools]).toEqual([1,[[join(dir,'herdr-core'),'unresolved'],[join(dir,'hc'),'unresolved']],['hc','herdr-core'],{}]);
+   expect(failed.items.filter((item)=>item.reason.includes('could not be removed (EACCES)')).map((item)=>item.path)).toEqual([join(dir,'herdr-core'),join(dir,'hc')]);
+  }
+  if(change==='registry write fails'){
+   writeFileSync(`${registry}.fail`,'write');
+   const failed=withTools();
+   rmSync(`${registry}.fail`);
+   expect([failed.exitCode,toolItems(failed),existsSync(dir),readFileSync(registry,'utf8'),ledger(home).tools]).toEqual([1,[...removedAll.slice(0,-1),[label,'unresolved']],true,installedRegistry,{}]);
+   expect(failed.items.filter((item)=>item.action==='unresolved'&&item.path===label).map((item)=>item.reason)).toEqual(['herdr-core: the user Path write exited with status 1; rh no longer records the entry; remove it by hand']);
+  }
+  // No claim is left: the entries that stay or come back by hand are not rh's.
+  const before=hostTree(home),registryBefore=existsSync(registry)?readFileSync(registry,'utf8'):null;
+  const again=withTools();
+  expect([again.exitCode,toolItems(again),hostTree(home),existsSync(registry)?readFileSync(registry,'utf8'):null]).toEqual([0,[],before,registryBefore]);
  }finally{rmSync(root,{recursive:true,force:true});}
 },30_000);

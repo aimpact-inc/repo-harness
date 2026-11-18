@@ -784,6 +784,15 @@ function observeTools(paths: HostConfigPaths, ledger: HostConfigLedger, declared
 }
 
 /**
+ * The device, file id and birth time of the entry itself (its links not
+ * followed): two names of one hard link share it, and a copy has its own.
+ */
+export function observeEntryIdentity(path: string): string | null {
+  const stat = lstatSync(path, { bigint: true, throwIfNoEntry: false });
+  return stat ? `${stat.dev}:${stat.ino}:${stat.birthtimeNs}` : null;
+}
+
+/**
  * The tool records after the writer: an entry that it created is recorded, a
  * recorded entry that held its recorded bytes before follows it, and every
  * other entry keeps the record that it had. A record with nothing left goes.
@@ -792,14 +801,14 @@ function settleTools(current: HostConfigLedger['tools'], observed: readonly Obse
   const tools = { ...current };
   for (const { declaration, missing, before } of observed) {
     const previous = tools[declaration.tool];
-    const recorded: Record<string, { committed: PathCommitted }> = { ...previous?.paths };
+    const recorded: Record<string, { committed: PathCommitted; identity?: string }> = { ...previous?.paths };
     let wrote = false;
     for (const [key, prior] of before) {
       const now = observePathEntry(key);
       const owned = prior === null || (recorded[key] !== undefined && sameCommitted(prior, recorded[key].committed));
       if (!owned || sameCommitted(prior, now)) continue;
       wrote = true;
-      if (now === null) delete recorded[key]; else recorded[key] = { committed: now };
+      if (now === null) delete recorded[key]; else recorded[key] = { committed: now, identity: observeEntryIdentity(key)! };
     }
     const directories = [...(previous?.directories ?? []), ...missing.filter((directory) => lstatSync(directory, { throwIfNoEntry: false })?.isDirectory())];
     if (!Object.keys(recorded).length && !previous?.path_entry) { delete tools[declaration.tool]; continue; }
@@ -915,7 +924,7 @@ export function planPathRevert(key: string, record: PathRecord): HostConfigRever
 }
 
 /** One write of a revert and the ledger change that it makes. */
-interface RevertStep {
+export interface RevertStep {
   /**
    * `delete`: the write takes an entry or rh's added text away, so its claim
    * leaves the ledger before it. `restore`: the write gives the user's bytes
@@ -938,7 +947,7 @@ interface RevertStep {
  * restore reaches the ledger also when a later write fails. The caller writes
  * the returned ledger with its closing state.
  */
-function retireThenDestroy(paths: HostConfigPaths, ledger: HostConfigLedger, steps: readonly RevertStep[]): HostConfigLedger {
+export function retireThenDestroy(paths: HostConfigPaths, ledger: HostConfigLedger, steps: readonly RevertStep[]): HostConfigLedger {
   const early = steps.filter((step) => step.kind !== 'restore');
   let state = early.reduce((current, step) => step.commit(current), ledger);
   if (early.length) writeLedger(paths, state);

@@ -1,10 +1,12 @@
-import { rmSync } from 'node:fs';
+import { lstatSync, rmSync, unlinkSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { HostConfigError, type HostPath, type ToolId, type ToolRecord } from '../../core/host-config/types';
-import type { UserPathPort, UserPathValue } from '../../core/host-config/path-entry';
+import { HostConfigError, type HostConfigLedger, type HostPath, type ToolId, type ToolRecord } from '../../core/host-config/types';
+import { listsUserPathEntry, removeUserPathEntry, type UserPathPort, type UserPathValue } from '../../core/host-config/path-entry';
 import { spawnSync } from 'node:child_process';
-import { hostConfigPaths, hostPathKey, observeFile, pathRecordOf, readLedger, validToolRecord, writeLedger } from './store';
+import { hostConfigPaths, hostPathKey, observeFile, pathRecordOf, readLedger, removeCreatedDirectories, validToolRecord, writeLedger } from './store';
 import { observePathEntry, sameCommitted } from './whole-path';
+import { retryWindowsSharingRace } from '../atomic-append';
+import { observeEntryIdentity, retireThenDestroy, userPathLabel, type RevertStep } from './gate';
 
 /**
  * The shared tools of the host-config ledger (#2853): the Windows user `Path`
@@ -155,4 +157,158 @@ export function importBunBootstrapRecord(env: NodeJS.ProcessEnv): 'imported' | '
   }
   rmSync(file);
   return existing ? 'already_recorded' : 'imported';
+}
+
+/**
+ * One entry of `rh uninstall --with-tools`. `removed`: it still holds what rh
+ * wrote, so it goes. `already_absent`: it is gone, so its record goes.
+ * `kept_edited`: it changed since rh wrote it, so it and its record stay.
+ * `kept_released`: a directory tree (the Windows `conpty`). No proof covers
+ * each file in it, so rh does not remove it; its record goes, and the user
+ * removes it by hand.
+ */
+export interface ToolRemovalEntry {
+  readonly tool: ToolId;
+  /** The entry key, or `userPathLabel(entry)` for the user PATH entry. */
+  readonly path: string;
+  readonly kind: 'entry' | 'directory' | 'user_path';
+  readonly action: 'removed' | 'already_absent' | 'kept_edited' | 'kept_released';
+}
+
+/** A removal whose claim went but whose write did not land: the entry stays, unclaimed. */
+export interface ToolRemovalFailure {
+  readonly tool: ToolId;
+  readonly path: string;
+  readonly reason: string;
+}
+
+interface PlannedRemoval {
+  readonly entries: ToolRemovalEntry[];
+  readonly steps: RevertStep[];
+  readonly failures: ToolRemovalFailure[];
+}
+
+/** The ledger with one tool record changed; a record with no path and no PATH entry left goes, as in `releaseAbsentTools`. */
+function withTool(ledger: HostConfigLedger, tool: ToolId, change: (record: ToolRecord) => ToolRecord): HostConfigLedger {
+  const current = ledger.tools[tool];
+  if (!current) return ledger;
+  const { [tool]: _old, ...tools } = ledger.tools;
+  const record = change(current);
+  return { ...ledger, tools: Object.keys(record.paths).length || record.path_entry ? { ...tools, [tool]: record } : tools };
+}
+
+/** The entry is still the object that rh wrote (identity) and holds the bytes that rh wrote (content). */
+function isRecordedEntry(key: string, entry: ToolRecord['paths'][string]): boolean {
+  return entry.identity !== undefined && sameCommitted(observePathEntry(key), entry.committed) && observeEntryIdentity(key) === entry.identity;
+}
+
+/**
+ * The plan of every tool record. A removable tool loses each entry that holds
+ * what rh wrote; a tool that is not removable (Bun) loses nothing. Each record
+ * releases the entries that are gone, as `releaseAbsentTools` does. The user
+ * PATH value is read once; each entry removal writes from the value that the
+ * one before it left, so the compare and set of each write holds.
+ */
+function planRemoval(ledger: HostConfigLedger, port: () => UserPathPort): PlannedRemoval {
+  const planned: PlannedRemoval = { entries: [], steps: [], failures: [] };
+  /** The directories whose claims go in the first ledger write: the absent ones, and those of a removable tool, which go after the entries when empty. */
+  const directories: { readonly tool: ToolId; readonly directory: string; readonly present: boolean }[] = [];
+  let user: { readonly port: UserPathPort; value: UserPathValue } | null = null;
+  for (const [tool, record] of Object.entries(ledger.tools) as [ToolId, ToolRecord][]) {
+    for (const [key, entry] of Object.entries(record.paths)) {
+      const action = observePathEntry(key) === null ? 'already_absent' : entry.committed.type === 'directory' ? 'kept_released'
+        : isRecordedEntry(key, entry) ? 'removed' : 'kept_edited';
+      if (!record.removable && action !== 'already_absent') continue;
+      planned.entries.push({ tool, path: key, kind: 'entry', action });
+      if (action === 'kept_edited') continue;
+      const commit = (state: HostConfigLedger) => withTool(state, tool, (current) => {
+        const { [key]: _gone, ...paths } = current.paths;
+        return { ...current, paths };
+      });
+      if (action === 'already_absent' || action === 'kept_released') { planned.steps.push({ kind: 'release', commit }); continue; }
+      planned.steps.push({ kind: 'delete', commit, write: () => {
+        // The claim is gone already: an entry that changed since the plan, or that cannot go, stays unclaimed.
+        if (!isRecordedEntry(key, entry)) {
+          planned.failures.push({ tool, path: key, reason: 'changed before the removal; preserved, and rh no longer records it' });
+          return;
+        }
+        // A file or a link: an unlink never removes a directory tree.
+        try { retryWindowsSharingRace(() => unlinkSync(key)); }
+        catch (error) {
+          const code = (error as NodeJS.ErrnoException).code ?? 'error';
+          planned.failures.push({ tool, path: key, reason: `could not be removed (${code}): it can be in use; rh no longer records it; stop hc, then remove it by hand` });
+        }
+      } });
+    }
+    for (const directory of record.directories) {
+      const present = lstatSync(directory, { throwIfNoEntry: false }) !== undefined;
+      if (!present) planned.entries.push({ tool, path: directory, kind: 'directory', action: 'already_absent' });
+      if (!present || record.removable) directories.push({ tool, directory, present });
+    }
+    const pathEntry = record.path_entry;
+    if (!pathEntry) continue;
+    const label = userPathLabel(pathEntry.entry);
+    const commit = (state: HostConfigLedger) => withTool(state, tool, ({ path_entry: _gone, ...current }) => current);
+    if (user === null) { const opened = port(); user = { port: opened, value: opened.read() }; }
+    if (!listsUserPathEntry(user.value.raw, pathEntry.entry)) {
+      planned.entries.push({ tool, path: label, kind: 'user_path', action: 'already_absent' });
+      planned.steps.push({ kind: 'release', commit });
+      continue;
+    }
+    if (!record.removable) continue;
+    const next = removeUserPathEntry(user.value, pathEntry);
+    if (next === null) { planned.entries.push({ tool, path: label, kind: 'user_path', action: 'kept_edited' }); continue; }
+    const expected = user.value;
+    const opened = user.port;
+    user.value = next;
+    planned.entries.push({ tool, path: label, kind: 'user_path', action: 'removed' });
+    planned.steps.push({ kind: 'delete', commit, write: () => {
+      try { opened.write(expected, next); }
+      catch (error) {
+        planned.failures.push({ tool, path: label, reason: `${(error as Error).message}; rh no longer records the entry; remove it by hand` });
+      }
+    } });
+  }
+  if (directories.length) {
+    const present = directories.filter((entry) => entry.present);
+    planned.steps.push({
+      kind: present.length ? 'delete' : 'release',
+      commit: (state) => directories.reduce((current, { tool, directory }) =>
+        withTool(current, tool, (record) => ({ ...record, directories: record.directories.filter((entry) => entry !== directory) })), state),
+      // Innermost first, after every entry: only an empty directory goes, and one that holds content stays, unclaimed.
+      write: () => {
+        for (const { tool, directory } of [...present].sort((left, right) => right.directory.length - left.directory.length)) {
+          try { removeCreatedDirectories([directory]); }
+          catch (error) {
+            planned.failures.push({ tool, path: directory, reason: `the empty directory could not be removed (${(error as NodeJS.ErrnoException).code ?? 'error'}); rh no longer records it` });
+          }
+        }
+      },
+    });
+  }
+  return planned;
+}
+
+/** The entries that `removeTools` would take now, with no write. */
+export function planToolRemoval(ledger: HostConfigLedger, port: () => UserPathPort): readonly ToolRemovalEntry[] {
+  return planRemoval(ledger, port).entries;
+}
+
+/**
+ * `rh uninstall --with-tools`: the plan must equal `expected`, the dry run of
+ * the same run. One ledger write retires every claim of the run, the
+ * directory claims and the empty tool records included, before the first
+ * unlink, registry write or directory removal (P4, `retireThenDestroy`). It is
+ * the only write: a failure or a stop leaves an entry with no claim, never a
+ * claim without its entry.
+ */
+export function removeTools(env: NodeJS.ProcessEnv, port: () => UserPathPort, expected: readonly ToolRemovalEntry[]): readonly ToolRemovalFailure[] {
+  const paths = hostConfigPaths(env);
+  const ledger = readLedger(paths);
+  const planned = planRemoval(ledger, port);
+  if (JSON.stringify(planned.entries) !== JSON.stringify(expected)) {
+    throw new HostConfigError('host_config_target_changed', 'the shared tools changed after the preview; nothing removed');
+  }
+  retireThenDestroy(paths, ledger, planned.steps);
+  return planned.failures;
 }

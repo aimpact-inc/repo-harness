@@ -36,6 +36,7 @@ export interface UninstallCommandOptions {
   location: Location;
   dryRun?: boolean;
   removeEditedBlocks?: readonly string[];
+  withTools?: boolean;
 }
 
 export interface InstallCommandResult {

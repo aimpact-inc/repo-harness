@@ -32,3 +32,24 @@ export function insertUserPathEntry(value: UserPathValue, entry: string): { read
     record: { entry, inserted, kind: value.kind, value_existed: value.existed },
   };
 }
+
+/**
+ * The value without the entry that rh appended, or null when the value no
+ * longer holds it as rh wrote it: the kind changed, or not exactly one entry
+ * equals the recorded text byte for byte. The `;` that rh wrote goes with the
+ * entry, and every other byte stays. A value that rh created and that is now
+ * empty is deleted.
+ */
+export function removeUserPathEntry(value: UserPathValue, record: UserPathEntryRecord): UserPathValue | null {
+  if (!value.existed || value.kind !== record.kind) return null;
+  const parts = value.raw.split(';');
+  const matches = parts.flatMap((part, index) => (part === record.entry ? [index] : []));
+  if (matches.length !== 1) return null;
+  const index = matches[0]!;
+  let start = parts.slice(0, index).reduce((offset, part) => offset + part.length + 1, 0);
+  let end = start + record.entry.length;
+  if (record.inserted.startsWith(';') && index > 0) start -= 1;
+  else if (end < value.raw.length) end += 1;
+  const raw = value.raw.slice(0, start) + value.raw.slice(end);
+  return { existed: raw !== '' || record.value_existed, kind: value.kind, raw };
+}

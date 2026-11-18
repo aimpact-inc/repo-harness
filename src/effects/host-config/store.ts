@@ -256,7 +256,8 @@ function validUserPathEntry(value: unknown): boolean {
 export function validToolRecord(record: unknown): boolean {
   if (!isObject(record) || !isObject(record.paths) || !Array.isArray(record.directories)) return false;
   return (record.installed_by === 'rh-install' || record.installed_by === 'rh-bootstrap') && isText(record.version) && record.version !== ''
-    && Object.entries(record.paths).every(([path, entry]) => isAbsolute(path) && isObject(entry) && Object.keys(entry).join() === 'committed' && validPathCommitted(entry.committed))
+    && Object.entries(record.paths).every(([path, entry]) => isAbsolute(path) && isObject(entry) && validPathCommitted(entry.committed)
+      && Object.keys(entry).every((key) => key === 'committed' || (key === 'identity' && isText(entry.identity) && /^\d+:\d+:\d+$/u.test(entry.identity))))
     && record.directories.every((directory) => isText(directory) && isAbsolute(directory))
     && (record.path_entry === undefined || validUserPathEntry(record.path_entry))
     && (record.profile === undefined || (isObject(record.profile) && isText(record.profile.file) && isAbsolute(record.profile.file) && isText(record.profile.inserted) && record.profile.inserted !== ''))
