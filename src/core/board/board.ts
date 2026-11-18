@@ -35,6 +35,7 @@ import {
   type BoardGatekeeperReviewV1,
   type BoardRequiredCheckV1,
   type BoardRequiredContextsV1,
+  type BoardReviewEvidenceV1,
   type BoardReviewRecordsV1,
   type BoardSecondReviewV1,
   type BoardTier,
@@ -292,8 +293,8 @@ export interface BoardInputV1 {
   readonly parent: BoardParentReadV1;
   readonly acceptance_merge: BoardAcceptanceMergeV1;
   readonly reviewer_family: string | null;
-  /** `review.i3_paths` of the policy on the default branch; null when the read or the value failed, which makes every pull request High. */
-  readonly i3_paths: readonly string[] | null;
+  /** The I3 globs of the default-branch policy and the diff evidence of each open pull request; missing evidence makes a pull request High. */
+  readonly review_evidence: BoardReviewEvidenceV1;
   readonly pull_requests: readonly BoardPullRequestReadV1[];
   readonly readiness: readonly BoardReadinessV1[];
   /** The required contexts of each base ref of the pull requests, by base ref. */
@@ -421,7 +422,7 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
     const required = input.required_contexts.get(read.base_ref);
     if (required === undefined) throw new Error(`board input has no required contexts for base ${read.base_ref} of PR #${read.number}`);
     const check = requiredCheck(read, required);
-    const tier = effectiveTier(read, closes, refs, input.parent, tiers, input.i3_paths);
+    const tier = effectiveTier(read, closes, refs, input.parent, tiers, input.review_evidence);
     const second = secondReview(read, tier, input.reviewer_family);
     const readiness = read.state === 'open' ? input.readiness.find(entry => entry.readiness.pr_number === read.number) : undefined;
     if (read.state === 'open' && readiness === undefined) throw new Error(`board input has no merge readiness for open PR #${read.number}`);

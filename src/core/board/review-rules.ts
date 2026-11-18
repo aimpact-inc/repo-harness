@@ -1,7 +1,7 @@
 import { PROJECTION_WRITER_DEFAULT_BRANCH } from 'archctx-contracts';
 import { documentationOnly } from '../ci/documentation-path';
 import { modelFamily } from '../review/model-family';
-import { pathHazardHits, pathHighHits, pathSecondReviewHits } from './hazards';
+import { pathHazardHits, pathHighHits, pathSecondReviewHits, type WorkflowHazardHitV1 } from './hazards';
 import {
   ACCEPTANCE_DISPOSITION_HEADER,
   BoardSourceError,
@@ -166,19 +166,27 @@ export function gatekeeperReview(read: BoardPullRequestReadV1, reviewerFamily: s
 }
 
 /**
- * The PASS rows of earlier heads that count for the head under the High rule (#3187): in a fix round only the seat that returned
- * FAIL reviews again. The newest row of a model family carries when it is a PASS of an earlier head, the family has no row of the
- * head, and a FAIL row of another family is newer than it, so the fix answers that FAIL. A row with no known model never carries.
- * Whether the fix stays inside the failing findings is the orchestrator's scope call, not a board rule.
+ * The round-1 PASS rows that count for the head under the High rule (#3187): in a fix round only the seat that returned FAIL reviews
+ * again. Only claimed rows (`claimedRows`) take part, so publication order and unclaimed rows change nothing. The carry needs one
+ * round-1 subject with a claimed PASS of one model family and a claimed FAIL of another family and claim. The PASS carries only to the
+ * fix head: the one subject of the failing family's claimed round-2 rows, or the head while that family has no round-2 row. It never reaches a later head, and
+ * a family with a row of the head carries nothing. Whether the fix stays inside the findings is the orchestrator's scope call.
  */
 function carriedPasses(read: BoardPullRequestReadV1): AcceptanceRowV1[] {
-  const rows = protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER).flatMap(record => (parseAcceptanceRecord(record) ?? [])
-    .map(row => ({ row, at: record.created_at, family: row.model === null ? null : modelFamily(row.model) })));
-  const onHead = new Set(rows.filter(entry => entry.row.subject_sha === read.head_sha).map(entry => entry.family));
-  const newest = new Map<string, (typeof rows)[number]>();
-  for (const entry of rows) if (entry.family !== null && (newest.get(entry.family)?.at ?? '') <= entry.at) newest.set(entry.family, entry);
-  return [...newest.values()].filter(entry => entry.row.verdict === 'PASS' && entry.row.subject_sha !== read.head_sha && !onHead.has(entry.family)
-    && rows.some(other => other.row.verdict === 'FAIL' && other.family !== entry.family && other.at > entry.at)).map(entry => entry.row);
+  const rows = claimedRows(read, protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? []));
+  const family = (row: AcceptanceRowV1): string | null => (row.model === null ? null : modelFamily(row.model));
+  const round1 = rows.filter(row => row.round === 1);
+  const answered = (pass: AcceptanceRowV1): boolean => pass.verdict === 'PASS' && family(pass) !== null
+    && round1.some(fail => fail.subject_sha === pass.subject_sha && fail.verdict === 'FAIL' && family(fail) !== family(pass) && fail.claim !== pass.claim);
+  const subjects = [...new Set(round1.filter(answered).map(row => row.subject_sha))];
+  if (subjects.length !== 1) return [];
+  const failing = new Set(round1.filter(row => row.subject_sha === subjects[0] && row.verdict === 'FAIL').map(family));
+  const fixes = [...new Set(rows.filter(row => row.round === 2 && failing.has(family(row))).map(row => row.subject_sha))];
+  const fix = fixes.length === 0 ? read.head_sha : fixes.length === 1 ? fixes[0] : null;
+  if (fix !== read.head_sha || fix === subjects[0]) return [];
+  const onHead = new Set(protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? [])
+    .filter(row => row.subject_sha === read.head_sha).map(family));
+  return round1.filter(row => row.subject_sha === subjects[0] && answered(row) && !onHead.has(family(row)));
 }
 
 /** The newest acceptance record of each review seat (`BoardPullRequestV1.review_records`). */
@@ -269,16 +277,40 @@ function sizeExempt(read: BoardPullRequestReadV1, files: readonly string[]): boo
   return read.head_ref === PROJECTION_WRITER_DEFAULT_BRANCH || documentationOnly(files) || files.every(path => path.startsWith('tests/'));
 }
 
+/** The diff evidence of one open pull request that the tier reads beyond its path list. */
+export interface BoardPullRequestTierEvidenceV1 {
+  /** The source path of each renamed file; null when the PR files read failed. */
+  readonly rename_sources: readonly string[] | null;
+  /** The workflow hazard hits of the diff (`workflowHazardHits`); null when a needed read failed or a patch was incomplete. */
+  readonly workflow_hazards: readonly WorkflowHazardHitV1[] | null;
+}
+
+/** The review evidence of a board read: the I3 globs of the default-branch policy and the diff evidence of each open pull request. */
+export interface BoardReviewEvidenceV1 {
+  /** `review.i3_paths`; null when the policy read or the value failed. */
+  readonly i3_paths: readonly string[] | null;
+  readonly pull_requests: ReadonlyMap<number, BoardPullRequestTierEvidenceV1>;
+}
+
+/** A closed pull request takes no review, so the board reads no diff evidence for it and its path list alone sets its tier. */
+const NO_DIFF_EVIDENCE: BoardPullRequestTierEvidenceV1 = { rename_sources: [], workflow_hazards: [] };
+
 /**
  * The one effective tier of a pull request, for the Low acceptance path and the review planner alike; High takes the second review
- * row (#3190 section 2.3). A changed path on the I1/I2 High-list signals or on a repository I3 path sets High whatever the labels say;
- * an incomplete file list, or an I3 list that the board could not read (`i3Paths` null), can hide such a path, so it sets High too.
- * Any other High-list or change hazard hit sets at least Medium; R3 and R5 name the labels to fix. Otherwise null unless every linked
- * issue (the parent excluded) is on the board with a tier label. Low labels on a fix of more than 50 changed lines, or of unknown size, give Medium.
+ * row (#3190 section 2.3). High, whatever the labels say: a changed path, or the source of a renamed path, on the I1/I2 High-list
+ * signals or on a repository I3 glob; a workflow hazard hit of the diff (`workflowHazardHits`). Incomplete evidence can hide such a
+ * hit, so it sets High too: an incomplete file list, an I3 list that the board could not read, a failed diff read, or no rename sources
+ * while I3 globs exist. Any other High-list or change hazard hit sets at least Medium; R3 and R5 name the labels to fix. Otherwise null
+ * unless every linked issue (the parent excluded) is on the board with a tier label. Low labels on a fix of more than 50 changed lines,
+ * or of unknown size, give Medium.
  */
-export function effectiveTier(read: BoardPullRequestReadV1, closes: readonly number[], refs: readonly number[], parent: BoardParentReadV1, tiers: ReadonlyMap<number, BoardTier | null>, i3Paths: readonly string[] | null): BoardTier | null {
+export function effectiveTier(read: BoardPullRequestReadV1, closes: readonly number[], refs: readonly number[], parent: BoardParentReadV1, tiers: ReadonlyMap<number, BoardTier | null>, evidence: BoardReviewEvidenceV1): BoardTier | null {
   const files = read.files;
-  if (files === null || i3Paths === null || pathSecondReviewHits(files, i3Paths).length > 0) return 'high';
+  const diff = read.state === 'open' ? evidence.pull_requests.get(read.number) : NO_DIFF_EVIDENCE;
+  const i3 = evidence.i3_paths;
+  if (files === null || i3 === null || diff === undefined || diff.workflow_hazards === null || diff.workflow_hazards.length > 0) return 'high';
+  if (i3.length > 0 && diff.rename_sources === null) return 'high';
+  if (pathSecondReviewHits([...files, ...(diff.rename_sources ?? [])], i3).length > 0) return 'high';
   const linked = [...new Set([...closes, ...refs])].filter(number => number !== parent.parent.number);
   const known = linked.map(number => tiers.get(number) ?? null);
   if (linked.length === 0 || known.includes(null)) return null;

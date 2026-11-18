@@ -6,9 +6,11 @@ import { parseReviewPacket, planReview, reviewPacket, type ReviewDecisionV1, typ
 import { executeReview, withReviewLock, type ReviewPorts } from '../src/effects/board/review';
 import { HerdrCoreError } from '../src/effects/terminal/herdr-core';
 import type { BoardPullRequestV1, BoardV1 } from '../src/core/board/board';
-import type { BoardCommentPageV1, BoardCommentV1 } from '../src/core/board/source';
+import type { BoardCommentPageV1, BoardCommentV1, BoardPullRequestReadV1 } from '../src/core/board/source';
 import type { SeatRouteV1 } from '../src/core/board/seat-routing';
 import { DEFAULT_SEATS_CONFIG, type SeatConfigV1 } from '../src/core/board/seats-settings';
+import { acceptance, gatekeeperReview, secondReview } from '../src/core/board/review-rules';
+import { renderAcceptanceClaim, renderAcceptanceRecord, type ReviewPublishReceipt } from '../src/core/review/review-publish';
 
 const SHA = 'a'.repeat(40);
 const OLD = 'b'.repeat(40);
@@ -234,4 +236,36 @@ test('the packet names the round, tier, head, harness and the RECEIPT-JSON hand-
   expect(parseReviewPacket(text.replace('as the gatekeeper of', 'as the worker of'))).toBeNull();
   // A claim that a publish left without its record still counts for the round.
   expect(start(page(comment(`repo-harness acceptance claim\nRound: 2\nSubject: ${OLD}`))).round).toBe(3);
+});
+
+test('a round-1 PASS carries only to the fix head of the claimed FAIL, in either publication order; never to a later head or from an unclaimed row (#3187)', () => {
+  const FIX = 'c'.repeat(40);
+  const LATER = 'd'.repeat(40);
+  const models = { pi: 'magpie/codex/gpt-6.1-sol', claude: 'claude-opus-5-5' } as const;
+  type Row = readonly [harness: 'pi' | 'claude', subject: string, round: number, verdict: 'PASS' | 'FAIL', claimed?: boolean];
+  const read = (head: string, rows: readonly Row[]) => {
+    const comments = rows.flatMap(([harness, subject, round, verdict, claimed = true], at) => {
+      const receipt: ReviewPublishReceipt = { protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round, subject_sha: subject, risk_tier: 'high',
+        reviewer: { harness, actual_model: models[harness] }, verdict, model_relation: 'different-family', summary: 'Reviewed.', findings: [] };
+      const claimUrl = `https://github.com/example/repo/pull/1#issuecomment-${100 + at}`;
+      const made = (body: string, url: string, minute: number): BoardCommentV1 => ({ url, created_at: `2026-11-18T10:${String(minute).padStart(2, '0')}:00Z`, author_association: 'OWNER', body });
+      return [...(claimed ? [made(renderAcceptanceClaim(receipt), claimUrl, at * 2)] : []), made(renderAcceptanceRecord(receipt, claimUrl), `https://github.com/example/repo/pull/1#issuecomment-${200 + at}`, at * 2 + 1)];
+    });
+    return { state: 'open', head_sha: head, comments: page(...comments) } as unknown as BoardPullRequestReadV1;
+  };
+  const view = (head: string, rows: readonly Row[]) => {
+    const pr = read(head, rows);
+    return [gatekeeperReview(pr, 'anthropic'), secondReview(pr, 'high', 'anthropic'), acceptance(pr, { status: 'pending', contexts: [] }, ['high'], 'high').status];
+  };
+  const passThenFail: Row[] = [['pi', OLD, 1, 'PASS'], ['claude', OLD, 1, 'FAIL']];
+  const failThenPass: Row[] = [['claude', OLD, 1, 'FAIL'], ['pi', OLD, 1, 'PASS']];
+  // Both orders carry the gatekeeper PASS to the fix head, so only the failed reviewer starts there.
+  expect(view(FIX, passThenFail)).toEqual(['pass', 'pending', 'not_accepted']);
+  expect(view(FIX, failThenPass)).toEqual(['pass', 'pending', 'not_accepted']);
+  // The reviewer's round-2 PASS of the fix head meets the High rule with the carried row.
+  expect(view(FIX, [...failThenPass, ['claude', FIX, 2, 'PASS']])).toEqual(['pass', 'recorded', 'accepted']);
+  // A later head after round 2 gets no carry: both seats review it.
+  expect(view(LATER, [...passThenFail, ['claude', FIX, 2, 'PASS']])).toEqual(['none', 'pending', 'not_accepted']);
+  // Unclaimed rows carry nothing.
+  expect(view(FIX, passThenFail.map(([harness, subject, round, verdict]) => [harness, subject, round, verdict, false] as const))).toEqual(['none', 'pending', 'not_accepted']);
 });

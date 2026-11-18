@@ -5,7 +5,8 @@ import {
   type BoardPathOwnerV1, type BoardPathOwnersV1, type BoardRequiredContextsV1, type BoardSeatTerminalInputV1, type BoardSeatTerminalReadV1, type BoardToolingV1, type BoardV1,
 } from '../../core/board/board';
 import { ADVISOR_SEAT } from '../../core/board/advisor-seat';
-import { readReviewI3Paths } from '../../core/board/hazards';
+import { isWorkflowPath, readReviewI3Paths, workflowHazardHits, type WorkflowHazardHitV1 } from '../../core/board/hazards';
+import type { BoardPullRequestTierEvidenceV1 } from '../../core/board/review-rules';
 import {
   BOARD_PAGE, BOARD_PARENT_COMMENT_PAGES, BOARD_SUB_ISSUE_PAGES, BoardSourceError, decodeParentRead, decodePullRequestsRead, parentCommentsPreviousCursor, parentReadNextCursor, type BoardParentReadV1, type BoardPullRequestReadV1,
 } from '../../core/board/source';
@@ -267,6 +268,72 @@ function i3Paths(file: PolicyFileAtRef | null): readonly string[] | null {
   }
 }
 
+const PULL_REQUEST_FILE_PAGE = 100;
+/** The REST pull request files list stops at 3000 files. */
+const PULL_REQUEST_FILE_LIMIT = 3000;
+
+interface PullRequestDiffFile {
+  readonly path: string;
+  readonly removed: boolean;
+  readonly previous_path: string | null;
+  readonly patch: string | null;
+}
+
+/** The REST files of a pull request, paged by its changed-file count; null when a page fails or the pages do not hold that count. */
+function pullRequestDiffFiles(input: BoardCollectInput, repository: string, read: BoardPullRequestReadV1): PullRequestDiffFile[] | null {
+  const count = read.readiness_inputs.changed_files;
+  if (count > PULL_REQUEST_FILE_LIMIT) return null;
+  const files: PullRequestDiffFile[] = [];
+  for (let page = 1; page <= Math.ceil(count / PULL_REQUEST_FILE_PAGE); page++) {
+    const result = runGh(input, ['api', '--hostname', 'github.com', `repos/${repository}/pulls/${read.number}/files?per_page=${PULL_REQUEST_FILE_PAGE}&page=${page}`]);
+    let entries: unknown;
+    try {
+      entries = result.status === 0 ? JSON.parse(result.stdout) : null;
+    } catch {
+      return null;
+    }
+    if (!Array.isArray(entries)) return null;
+    for (const entry of entries as { filename?: unknown; status?: unknown; previous_filename?: unknown; patch?: unknown }[]) {
+      if (typeof entry?.filename !== 'string' || typeof entry.status !== 'string') return null;
+      files.push({ path: entry.filename, removed: entry.status === 'removed', previous_path: typeof entry.previous_filename === 'string' ? entry.previous_filename : null,
+        patch: typeof entry.patch === 'string' ? entry.patch : null });
+    }
+  }
+  return files.length === count ? files : null;
+}
+
+/** The text of a file at a commit; null when the read fails or GitHub returns no inline content. */
+function fileTextAt(input: BoardCollectInput, repository: string, path: string, sha: string): string | null {
+  const result = runGh(input, ['api', '--hostname', 'github.com', `repos/${repository}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${sha}`]);
+  let body: { type?: unknown; encoding?: unknown; content?: unknown } | null;
+  try {
+    body = result.status === 0 ? JSON.parse(result.stdout) : null;
+  } catch {
+    return null;
+  }
+  return body?.type === 'file' && body.encoding === 'base64' && typeof body.content === 'string' ? Buffer.from(body.content, 'base64').toString('utf-8') : null;
+}
+
+/**
+ * The diff evidence of one open pull request (#3187). It reads the PR files only when the path list has a workflow file or I3 globs
+ * exist, and the head text of each changed workflow file. A failed read gives null, which the tier reads as High.
+ */
+function tierEvidence(input: BoardCollectInput, repository: string, read: BoardPullRequestReadV1, i3: readonly string[] | null, required: BoardRequiredContextsV1): BoardPullRequestTierEvidenceV1 {
+  const workflows = (read.files ?? []).some(isWorkflowPath);
+  if (read.files === null || (!workflows && (i3 === null || i3.length === 0))) return { rename_sources: [], workflow_hazards: [] };
+  const files = pullRequestDiffFiles(input, repository, read);
+  if (files === null) return { rename_sources: null, workflow_hazards: workflows ? null : [] };
+  const renameSources = files.flatMap(file => (file.previous_path === null ? [] : [file.previous_path]));
+  const contexts = required.status === 'observed' ? required.contexts : null;
+  const hits: WorkflowHazardHitV1[] = [];
+  for (const file of files.filter(entry => isWorkflowPath(entry.path) || (entry.previous_path !== null && isWorkflowPath(entry.previous_path)))) {
+    const found = workflowHazardHits(file.path, file.patch, file.removed ? null : fileTextAt(input, repository, file.path, read.head_sha), file.removed, contexts);
+    if (found === null) return { rename_sources: renameSources, workflow_hazards: null };
+    hits.push(...found);
+  }
+  return { rename_sources: renameSources, workflow_hazards: hits };
+}
+
 function tooling(input: BoardCollectInput): BoardToolingV1 {
   const herdrApp = { status: 'not_pinned' } as const;
   const version = input.host.hcVersion();
@@ -500,15 +567,19 @@ export function collectBoardThrough(input: BoardCollectInput, sources: KeyedSour
     }));
   });
   const policy = defaultBranchPolicy(input, repository, parent.repository.default_branch);
+  const required = new Map([...new Set(linked.map(read => read.base_ref))].map(base => [base, requiredContexts(input, repository, base)] as const));
+  const i3 = i3Paths(policy);
+  const evidence = new Map(linked.filter(read => read.state === 'open')
+    .map(read => [read.number, tierEvidence(input, repository, read, i3, required.get(read.base_ref)!)] as const));
   return projectBoard({
     observed_at: observedAt,
     parent,
     acceptance_merge: acceptanceMerge(policy),
     reviewer_family: reviewerFamily(input),
-    i3_paths: i3Paths(policy),
+    review_evidence: { i3_paths: i3, pull_requests: evidence },
     pull_requests: reads,
     readiness,
-    required_contexts: new Map([...new Set(linked.map(read => read.base_ref))].map(base => [base, requiredContexts(input, repository, base)] as const)),
+    required_contexts: required,
     path_owners: pathOwners(input, linked),
     execution: execution(input, parent.repository.database_id, new Set(parent.sub_issues.map(issue => String(issue.number))),
       new Set(linked.map(read => String(read.number)))),

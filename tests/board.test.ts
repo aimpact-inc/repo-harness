@@ -9,7 +9,6 @@ import { attentionLogPath, attentionWatchDoctorCheck, runAttentionWindow, servic
 import { decodeBoard, type BoardHostPortsV1, type BoardItemV1, type BoardPullRequestV1, type BoardTerminalV1, type BoardV1 } from '../src/core/board/board';
 import { decodePlanBlock, PlanBlockError } from '../src/core/board/plan-block';
 import { decodeReviewHazards, pathHazardHits } from '../src/core/board/hazards';
-import { gatekeeperReview } from '../src/core/board/review-rules';
 import type { PullRequestReadinessV2 } from '../src/core/publication/merge-readiness';
 import { collectPullRequestMergeReadiness } from '../src/effects/publication/merge-readiness';
 import { collectBoard, collectBoardThrough, GH_MAX_BUFFER_BYTES, readGhJson, readParent, readLocalRepositoryId, readLocalRepositoryIdAsync, seatTerminalsWithBranches, type BoardCollectInput } from '../src/effects/board/collect';
@@ -83,12 +82,21 @@ interface Replay {
   readonly policy?: GhAnswer;
   /** The answer to the protection read of one base branch; the default requires the one context `Required / CI` on every base. */
   readonly protection?: (base: string) => GhAnswer;
+  /**
+   * The REST files of an open pull request: each recorded path, padded to its `changedFiles`. `diff` gives a file its patch, rename
+   * source and head text; the default gives a workflow file a `timeout-minutes` edit outside a required job.
+   */
+  readonly diff?: (path: string) => { readonly patch?: string; readonly previous?: string; readonly head?: string } | undefined;
   /** The version that the fake hc reports; the recorded core reported 0.1.17. */
   readonly hcVersion?: string;
   readonly now?: Date;
   /** The open pull requests whose readiness is ready; the default is #1491. */
   readonly ready?: readonly number[];
 }
+
+/** A workflow head with a required job, and a `timeout-minutes` edit in another job of it. */
+const DEFAULT_WORKFLOW_TEXT = 'name: CI\non: pull_request\njobs:\n  build:\n    timeout-minutes: 15\n    runs-on: ubuntu-latest\n  required:\n    name: Required / CI\n    runs-on: ubuntu-latest\n';
+const DEFAULT_WORKFLOW_PATCH = '@@ -5,1 +5,1 @@\n-    timeout-minutes: 10\n+    timeout-minutes: 15';
 
 function issueNode(data: Json, number: number): Json {
   return data.repository.issue.subIssues.nodes.find((node: Json) => node.number === number);
@@ -153,6 +161,21 @@ function replayInput(options: Replay): BoardCollectInput {
         return options.protection?.(base) ?? answer({ required_status_checks: { contexts: ['Required / CI'] } });
       }
       if (args.includes('repos/{owner}/{repo}')) return answer({ id: 1_000_001 });
+      const filesPage = args.map(arg => /^repos\/Ancienttwo\/repo-harness\/pulls\/(\d+)\/files\?per_page=100&page=(\d+)$/u.exec(arg)).find(match => match !== null);
+      if (filesPage) {
+        const pr = pulls.data.repository[`pr${filesPage[1]}`];
+        const paths = [...pr.files.nodes.map((node: Json) => node.path as string)];
+        while (paths.length < pr.changedFiles) paths.push(`filler/${paths.length}.ts`);
+        return answer(paths.slice((Number(filesPage[2]) - 1) * 100, Number(filesPage[2]) * 100).map((path) => {
+          const diff = { ...(path.startsWith('.github/workflows/') ? { patch: DEFAULT_WORKFLOW_PATCH } : {}), ...options.diff?.(path) };
+          return { filename: path, status: diff.previous === undefined ? 'modified' : 'renamed', ...(diff.previous === undefined ? {} : { previous_filename: diff.previous }), ...(diff.patch === undefined ? {} : { patch: diff.patch }) };
+        }));
+      }
+      const contents = args.map(arg => /^repos\/Ancienttwo\/repo-harness\/contents\/(.+)\?ref=[0-9a-f]{40}$/u.exec(arg)).find(match => match !== null);
+      if (contents) {
+        const path = contents[1]!.split('/').map(decodeURIComponent).join('/');
+        return answer({ type: 'file', path, encoding: 'base64', content: Buffer.from(options.diff?.(path)?.head ?? DEFAULT_WORKFLOW_TEXT).toString('base64') });
+      }
       throw new Error(`unexpected gh call: ${args.join(' ')}`);
     },
     // #1491 is the only PR that the recorded data shows as accepted; the readiness projection has its own suite.
@@ -406,11 +429,6 @@ test('High acceptance: PASS rows of the head from two distinct claims, one recor
   const projected = cases.map(([rows]) => head(rows));
   const pr1491 = (projection: BoardV1) => projection.pull_requests.find(pr => pr.number === 1491)!;
   expect(projected.map(pr1491).map(pr => [pr.acceptance.status, pr.second_review] as string[])).toEqual(cases.map(([, status, claude]) => [status, claude]));
-  // The carried gatekeeper PASS opens the relay for the reviewer; without the newer FAIL nothing carries and the gatekeeper reviews the new head.
-  const relayRead = (verdicts: readonly ('PASS' | 'FAIL')[]) => ({ head_sha: 'f'.repeat(40), comments: { truncated: false, comments: verdicts.map((verdict, at) => ({
-    url: claimUrl(at + 4), created_at: `2026-11-02T22:0${at}:00Z`, author_association: 'OWNER',
-    body: renderAcceptanceRecord(receipt(at === 0 ? 'pi' : 'claude', OLD, 'different-family', verdict), claimUrl(at + 4)) })) } }) as unknown as Parameters<typeof gatekeeperReview>[0];
-  expect([gatekeeperReview(relayRead(['PASS', 'FAIL']), 'anthropic'), gatekeeperReview(relayRead(['PASS', 'PASS']), 'anthropic')]).toEqual(['pass', 'none']);
   expect(evaluateBoardAttention(projected[1]!).findings.filter(finding => finding.rule === 'A10')).toEqual([]);
   // A Pi DeepSeek reviewer: its row, not the harness, is the second review; the Pi Codex gatekeeper row alone leaves it pending, and A10 names the reviewer family.
   const deepseek: SeatsConfigV1 = { ...DEFAULT_SEATS_CONFIG, reviewer: { ...DEFAULT_SEATS_CONFIG.reviewer, runtime: 'pi', model: 'magpie/cursor/deepseek-v41-flash-1017', effort: null } };
@@ -562,8 +580,9 @@ test('board read: the readiness reads of one board share one answer for the repo
   };
   const count = (calls: readonly string[], prefix: string) => calls.filter(call => call.startsWith(prefix)).length;
   const { board, calls, readiness } = run(() => false);
-  // One page of parent comments (no older page): 7 board reads (2 of them the protection of the two base refs) and 22 readiness reads.
-  expect(calls).toHaveLength(29);
+  // One page of parent comments (no older page): 7 board reads (2 of them the protection of the two base refs), 4 diff reads (a files
+  // page and a workflow head text for each of #1494 and #1499, which change `.github/workflows/ci.yml`) and 22 readiness reads.
+  expect(calls).toHaveLength(33);
   expect(count(calls, 'api repos/Ancienttwo/repo-harness/branches/main/protection ')).toBe(1);
   expect(count(calls, 'repo view github.com/Ancienttwo/repo-harness --json id,nameWithOwner')).toBe(1);
   expect(count(calls, 'api repos/Ancienttwo/repo-harness --hostname')).toBe(1);
@@ -1385,8 +1404,8 @@ test('R5 and the effective tier read the High list: board record-writing code is
   });
   const claimAt = '2026-11-02T21:01:00Z';
   // #1499 closes tier:medium #1476, changes `files` and has one claimed different-family PASS row of its head.
-  const board = (files: string[], tier: string, incomplete: boolean, policy?: GhAnswer) => replay({
-    policy,
+  const board = (files: string[], tier: string, incomplete: boolean, policy?: GhAnswer, diff?: Replay['diff']) => replay({
+    policy, diff,
     owners: (results) => { results.push(...files.filter(path => !results.some(entry => entry.path === path)).map(path => ({ path, matched: false, ambiguous: false, owningCapabilityId: null }))); },
     parent: (data) => { issueNode(data, 1476).labels.nodes.push({ name: tier }); },
     pulls: (data) => {
@@ -1396,8 +1415,8 @@ test('R5 and the effective tier read the High list: board record-writing code is
       pr1499.comments.nodes.push(comment(renderAcceptanceRecord(receipt(pr1499.headRefOid), `https://github.com/Ancienttwo/repo-harness/pull/1499#issuecomment-${Date.parse(claimAt)}`), '2026-11-02T22:00:00Z'));
     },
   });
-  const view = (files: string[], tier = 'tier:medium', incomplete = false, policy?: GhAnswer) => {
-    const read = board(files, tier, incomplete, policy);
+  const view = (files: string[], tier = 'tier:medium', incomplete = false, policy?: GhAnswer, diff?: Replay['diff']) => {
+    const read = board(files, tier, incomplete, policy, diff);
     const pr = read.pull_requests.find(entry => entry.number === 1499)!;
     const attention = evaluateBoardAttention(read);
     return [pr.tier, pr.acceptance.status,
@@ -1407,12 +1426,18 @@ test('R5 and the effective tier read the High list: board record-writing code is
   expect(view([boardWriter])).toEqual(['medium', 'accepted']);
   expect(view([boardWriter, hook])).toEqual(['high', 'not_accepted', `#1499 changes ${hook} (deletion), a High signal, but #1476 is tier:medium`]);
   expect(view([hook], 'tier:high')).toEqual(['high', 'not_accepted']);
-  // A workflow edit is Medium on one PASS row (#3187); a release path alone is Medium too, and R5 still names the label.
+  // A workflow timeout edit is Medium on one PASS row (#3187); a changed `permissions:` line keeps the workflow hazard High.
   expect(view(['.github/workflows/ci.yml'])).toEqual(['medium', 'accepted']);
+  expect(view(['.github/workflows/ci.yml'], 'tier:medium', false, undefined, () => ({ patch: '@@ -1,1 +1,2 @@\n name: CI\n+permissions:' }))).toEqual(['high', 'not_accepted']);
+  // So does a changed line inside the job that the required context `Required / CI` names.
+  expect(view(['.github/workflows/ci.yml'], 'tier:medium', false, undefined, () => ({ patch: '@@ -9,1 +9,1 @@\n-    runs-on: ubuntu-22.04\n+    runs-on: ubuntu-latest' }))).toEqual(['high', 'not_accepted']);
+  // A release path alone is Medium too, and R5 still names the label.
   expect(view(['src/core/release/notes.ts'])).toEqual(['medium', 'accepted', '#1499 changes src/core/release/notes.ts (release), a High signal, but #1476 is tier:medium']);
   // A repository I3 path sets High; a policy that the board cannot read sets High too.
   const i3 = { status: 0, stdout: JSON.stringify({ type: 'file', path: '.ai/harness/policy.json', encoding: 'base64', content: Buffer.from('{"review":{"i3_paths":["src/effects/board/**"]}}').toString('base64') }) };
   expect(view([boardWriter], 'tier:medium', false, i3)).toEqual(['high', 'not_accepted']);
+  // A rename out of an I3 glob is High by its source path.
+  expect(view(['src/core/moved.ts'], 'tier:medium', false, i3, path => (path === 'src/core/moved.ts' ? { previous: boardWriter } : undefined))).toEqual(['high', 'not_accepted']);
   expect(view([boardWriter], 'tier:medium', false, { status: 1, stdout: 'HTTP 502' })).toEqual(['high', 'not_accepted']);
   // An incomplete file list can hide a High path: High, and R5 lists it as unevaluated.
   expect(view([boardWriter], 'tier:medium', true)).toEqual(['high', 'not_accepted', 'files_incomplete: #1499']);
