@@ -798,3 +798,25 @@ test.each([
   expect(tools).toEqual(record ? { 'herdr-core': { installed_by: 'rh-install', removable: true, version: '1.0.0', directories: [join(f.home, '.local'), dir],
     paths: { [join(dir, 'tool')]: { committed: { type: 'file', sha256: sha256Prefixed(Buffer.from('rh\n')) } } } } } : {});
 });
+
+// Ownership probe P4: a claim released on observation (its target was absent) stays released through a rollback, so a
+// hand reinstall of identical bytes after it is not rh's.
+test.each([
+  { label: 'the whole tool', gone: ['a', 'b'], left: [] },
+  { label: 'one path', gone: ['a'], left: ['b'] },
+] as const)('tool record: a release of %s survives a rollback', ({ gone, left }) => {
+  const f = fixture();
+  const dir = join(f.home, '.local', 'bin');
+  mkdirSync(dir, { recursive: true });
+  f.gate().delegate([{ tool: 'herdr-core', version: '1.0.0', directory: dir, entries: ['a', 'b'] }], ([at]) => {
+    for (const name of ['a', 'b']) writeFileSync(join(at!, name), `${name}\n`);
+  });
+  const snapshot = readFileSync(join(f.root, 'ledger.json'));
+  for (const name of gone) rmSync(join(dir, name));
+  f.gate().releaseAbsentTools(null);
+  expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
+  expect(Object.keys(f.ledger().tools['herdr-core']?.paths ?? {})).toEqual(left.map((name) => join(dir, name)));
+  for (const name of gone) writeFileSync(join(dir, name), `${name}\n`);
+  f.gate().revertTools(['herdr-core'], null);
+  expect(readdirSync(dir).sort()).toEqual([...gone].sort());
+});

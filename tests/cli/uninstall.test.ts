@@ -11,7 +11,7 @@ import { CLAUDE_ROOT_CONFIG_BACKUP, CODEGRAPH_MCP_SELECTOR } from '../../src/cor
 import type { PathCommitted } from '../../src/core/host-config/types';
 import { pathRecordHost, pathRecordKey } from '../../src/effects/host-config/path-records';
 import { hashManagedTree } from '../../src/effects/managed-tree';
-import { appendFileSync, chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync, statSync } from 'fs';
+import { appendFileSync, chmodSync, cpSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, relative } from 'path';
 import { spawnSync } from 'child_process';
@@ -20,7 +20,7 @@ import { configurationReceiptPath } from '../../src/cli/installer/configuration-
 import { migrateCodexConfigRecords, planCodexConfigMigration } from '../../src/cli/installer/codex-config-migration';
 import { requestUserInputFragment } from '../../src/cli/installer/targets/codex';
 import { tomlFragment } from '../../src/core/host-config/toml-fragment';
-import { openHostConfigGate } from '../../src/effects/host-config/gate';
+import { openHostConfigGate, rollbackHostConfigTransaction } from '../../src/effects/host-config/gate';
 import { buildManagedHooks } from '../../src/cli/installer/managed-entries';
 import { applyGlobalContextRefresh, preflightGlobalContextRefresh, renderGlobalRulesBlock } from '../../src/cli/installer/global-context';
 const CLI = join(import.meta.dir, '../../src/cli/index.ts');
@@ -540,11 +540,14 @@ async function installHerdrCore(root:string,env:NodeJS.ProcessEnv,windows:boolea
  }finally{server.stop();}
 }
 // Ownership probes (#2853): P2 `edited` (the entry differs: reported, never removed); P1 `absent` (the entry is gone at a read: its
-// record goes, and a later re-created entry stays). P3 (a claim needs the bytes on disk now) is the producer's: the hc update and Bun import cases.
+// record goes, and a later re-created entry stays); P4 `rolled-back` (a release, then a failure and the transaction rollback, then a hand
+// reinstall of identical bytes: the files stay) and `write-fails` (the PATH write fails after the file removals: the removals stay committed,
+// and a hand reinstall of identical bytes stays). P3 (a claim needs the bytes on disk now) is the producer's: the hc update and Bun import cases.
 test.each([
  {platform:'unix',change:'none'},{platform:'windows',change:'none'},
  {platform:'unix',change:'edited'},{platform:'windows',change:'edited'},
  {platform:'unix',change:'absent'},{platform:'windows',change:'absent'},
+ {platform:'unix',change:'rolled-back'},{platform:'windows',change:'write-fails'},
 ])('a fresh hc install: the default uninstall keeps it with one kept line; --with-tools removes only unchanged entries ($platform, $change)',async({platform,change})=>{
  const edited=change==='edited';
  const root=realpathSync(mkdtempSync(join(tmpdir(),'user-uninstall-tools-'))),home=join(root,'home'),windows=platform==='windows';
@@ -571,6 +574,24 @@ test.each([
    if(windows)writeFileSync(registry,JSON.stringify({...userPath,raw:`${userPath.raw};${dir}`}));
    else{writeFileSync(join(dir,'herdr-core'),bytes!,{mode:0o755});symlinkSync('herdr-core',join(dir,'hc'));expect(copies).toEqual([['herdr-core',false],['hc',true]]);}
   }
+  const save=join(root,'saved');cpSync(dir,save,{recursive:true,verbatimSymlinks:true});
+  const reinstall=()=>{for(const name of readdirSync(save))if(!existsSync(join(dir,name)))cpSync(join(save,name),join(dir,name),{recursive:true,verbatimSymlinks:true});};
+  if(change==='rolled-back'){
+   // The release is a fact: the rollback of the transaction that made it does not bring the claims back.
+   const snapshot=readFileSync(join(home,'.repo-harness/config/ledger.json'));
+   rmSync(join(dir,'hc'));rmSync(join(dir,'herdr-core'));
+   openHostConfigGate({env}).releaseAbsentTools(null);
+   expect(rollbackHostConfigTransaction(join(home,'.repo-harness'),snapshot,mkdtempSync(join(root,'tx-'))).unresolved).toEqual([]);
+   reinstall();
+  }
+  if(change==='write-fails'){
+   writeFileSync(`${registry}.fail`,'write-exit');
+   const failed=runUserUninstall({target:'both',env,withTools:true});
+   expect([failed.exitCode,existsSync(join(dir,'herdr-core.exe')),failed.lines.some((line)=>line.includes('the user Path write exited with status 1'))]).toEqual([1,false,true]);
+   // The removals reached the ledger before the PATH write failed; only the PATH entry keeps its record.
+   expect(ledger(home).tools['herdr-core'].paths).toEqual({});
+   rmSync(`${registry}.fail`);mkdirSync(dir,{recursive:true});reinstall();
+  }
   if(edited&&windows)writeFileSync(registry,JSON.stringify({...userPath,raw:`${userPath.raw};${dir.toUpperCase()}`}));
   if(edited&&!windows){appendFileSync(join(dir,'herdr-core'),'# user patch\n');writeFileSync(join(dir,'other-tool'),'user\n');}
   expect(runUninstall({target:'codex',location:'global',withTools:true,env} as never).exitCode).toBe(2);
@@ -580,7 +601,10 @@ test.each([
   const removed=runUserUninstall({target:'both',env,withTools:true});
   expect({exitCode:preview.exitCode,items:preview.items}).toEqual({exitCode:removed.exitCode,items:removed.items});
   const tool=(path:string)=>removed.items.find((item)=>item.path===path)?.action;
-  if(change==='absent'){
+  if(change==='write-fails'){
+   expect(removed.exitCode,removed.lines.join('\n')).toBe(0);
+   expect([readdirSync(dir).sort(),JSON.parse(readFileSync(registry,'utf8')),ledger(home).tools]).toEqual([['conpty','hc.exe','herdr-core.exe'],userPath,{}]);
+  }else if(change==='absent'||change==='rolled-back'){
    expect(removed.exitCode,removed.lines.join('\n')).toBe(0);
    // The re-created entries are not rh's: on Windows the files go and the re-added PATH entry stays; on Unix every file stays.
    if(windows)expect([existsSync(dir),JSON.parse(readFileSync(registry,'utf8')).raw]).toEqual([false,`${userPath.raw};${dir}`]);

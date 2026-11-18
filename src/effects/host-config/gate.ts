@@ -839,21 +839,29 @@ function revertTools(paths: HostConfigPaths, ids: readonly ToolId[], port: (() =
     const record = tools[tool];
     if (!record) continue;
     if (!record.removable) throw new HostConfigError('host_config_invalid_state', `rh never removes ${tool}`);
-    const kept: Record<string, { committed: PathCommitted }> = {};
+    // Each finished step reaches the ledger before the next one can fail, so no record outlives the entry that it names.
+    let state: ToolRecord = record;
+    const commit = (next: ToolRecord | null) => {
+      if (next) { state = next; tools[tool] = next; } else delete tools[tool];
+      if (!dryRun) writeLedger(paths, { ...ledger, tools });
+    };
     const removed = new Set<string>();
     for (const [key, { committed }] of Object.entries(record.paths)) {
       const now = observePathEntry(key);
       const action = now === null ? 'already_absent' : sameCommitted(now, committed) ? 'removed' : 'kept_edited';
-      if (action === 'kept_edited') kept[key] = { committed };
-      else removed.add(key);
-      if (action === 'removed' && !dryRun) removePathEntry(key);
       report.push({ tool, path: key, action });
+      if (action === 'kept_edited') continue;
+      if (action === 'removed' && !dryRun) removePathEntry(key);
+      removed.add(key);
+      commit({ ...state, paths: Object.fromEntries(Object.entries(state.paths).filter(([entry]) => entry !== key)) });
     }
     const emptied = emptiedDirectories(record.directories, removed);
     const present = record.directories.filter((directory) => lstatSync(directory, { throwIfNoEntry: false }));
     for (const directory of [...present].sort((a, b) => b.length - a.length)) report.push({ tool, path: directory, action: emptied.has(directory) ? 'removed' : 'kept_nonempty' });
     if (!dryRun) removeCreatedDirectories([...emptied]);
-    let pathEntry = record.path_entry;
+    // A directory stays recorded only while an entry inside it stays recorded.
+    commit({ ...state, directories: present.filter((directory) => !emptied.has(directory) && Object.keys(state.paths).some((key) => isPathInside(directory, key))) });
+    const pathEntry = record.path_entry;
     if (pathEntry) {
       if (!port) throw new HostConfigError('host_config_invalid_state', `rh records a user PATH entry for ${tool}, and this system cannot read the user PATH: ${pathEntry.entry}`);
       const user = port();
@@ -863,15 +871,10 @@ function revertTools(paths: HostConfigPaths, ids: readonly ToolId[], port: (() =
       const next = absent ? null : removeUserPathEntry(value, pathEntry);
       if (next && !dryRun) user.write(value, next);
       report.push({ tool, path: userPathLabel(pathEntry.entry), action: absent ? 'already_absent' : next ? 'removed' : 'kept_edited' });
-      if (absent || next) pathEntry = undefined;
+      if (absent || next) { const { path_entry: _removed, ...rest } = state; commit(rest); }
     }
-    // A directory stays recorded only while an entry inside it stays recorded.
-    const directories = present.filter((directory) => !emptied.has(directory) && Object.keys(kept).some((key) => isPathInside(directory, key)));
-    const { path_entry: _removed, ...rest } = record;
-    if (!Object.keys(kept).length && !pathEntry) delete tools[tool];
-    else tools[tool] = { ...rest, paths: kept, directories, ...(pathEntry ? { path_entry: pathEntry } : {}) };
+    if (!Object.keys(state.paths).length && !state.path_entry) commit(null);
   }
-  if (!dryRun) writeLedger(paths, { ...ledger, tools });
   return report;
 }
 
@@ -899,26 +902,27 @@ function releaseAbsentTools(paths: HostConfigPaths, port: (() => UserPathPort) |
 }
 
 /**
- * The tool records after a rollback. The rollback does not undo a tool
- * install, so an entry that the transaction recorded stays recorded while it
- * holds its recorded bytes; otherwise the record before the transaction
- * stays. The user PATH entry stays recorded: the rollback does not undo it.
+ * The tool records after a rollback. A rollback does not undo a tool install,
+ * and a record that a run released on observation (its target was absent) is
+ * a fact, not an effect of the transaction: it never comes back. So a tool or
+ * entry that the ledger no longer holds stays released, and an entry that it
+ * holds stays only while the target holds those recorded bytes, or the bytes
+ * recorded before the transaction. The user PATH entry stays as the ledger
+ * holds it: the rollback does not undo the registry.
  */
 function rollbackTools(before: HostConfigLedger['tools'], now: HostConfigLedger['tools']): HostConfigLedger['tools'] {
-  const tools = { ...before };
+  const tools: Partial<Record<ToolId, ToolRecord>> = {};
   for (const [tool, record] of Object.entries(now) as [ToolId, ToolRecord][]) {
     const earlier = before[tool];
-    if (JSON.stringify(earlier) === JSON.stringify(record)) continue;
+    if (JSON.stringify(earlier) === JSON.stringify(record)) { tools[tool] = record; continue; }
     const recorded: Record<string, { committed: PathCommitted }> = {};
-    for (const key of new Set([...Object.keys(earlier?.paths ?? {}), ...Object.keys(record.paths)])) {
-      const entry = record.paths[key];
-      if (entry && sameCommitted(observePathEntry(key), entry.committed)) recorded[key] = entry;
-      else if (earlier?.paths[key]) recorded[key] = earlier.paths[key];
+    for (const [key, entry] of Object.entries(record.paths)) {
+      const observed = observePathEntry(key);
+      if (sameCommitted(observed, entry.committed)) recorded[key] = entry;
+      else if (earlier?.paths[key] && sameCommitted(observed, earlier.paths[key].committed)) recorded[key] = earlier.paths[key];
     }
-    const pathEntry = record.path_entry ?? earlier?.path_entry;
-    if (!Object.keys(recorded).length && !pathEntry) { delete tools[tool]; continue; }
-    const directories = [...new Set([...(earlier?.directories ?? []), ...record.directories.filter((directory) => lstatSync(directory, { throwIfNoEntry: false }))])];
-    tools[tool] = { ...record, paths: recorded, directories, ...(pathEntry ? { path_entry: pathEntry } : {}) };
+    if (!Object.keys(recorded).length && !record.path_entry) continue;
+    tools[tool] = { ...record, paths: recorded, directories: record.directories.filter((directory) => lstatSync(directory, { throwIfNoEntry: false })) };
   }
   return tools;
 }
