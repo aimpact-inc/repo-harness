@@ -136,7 +136,7 @@ export function revertItem(entry: HostConfigRevertEntry): UninstallItem {
 }
 
 /** A `failed` item blocks like an `unresolved` one and takes exit code 2 over 1. */
-export function blocking(items: readonly UninstallItem[]): boolean {
+function blocking(items: readonly UninstallItem[]): boolean {
   return items.some((item) => item.action === 'unresolved' || item.action === 'failed');
 }
 

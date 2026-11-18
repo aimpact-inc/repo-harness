@@ -246,6 +246,8 @@ test('removes profile-owned rules, restores a file that rh replaced, and retires
  const result=runUserUninstall({target:'both',env});
  expect(result.status).toBe('complete');expect(existsSync(path)).toBe(false);
  expect({action:result.items.find((item)=>item.path===agent)?.action,agent:readFileSync(agent,'utf8'),paths:ledger(home).paths}).toEqual({action:'restored',agent:'mine',paths:{}});
+ // The vault copy of the replaced file is retired for a later rh config gc.
+ expect(ledger(home).retired.map((entry: {sha256: string})=>entry.sha256)).toContain(`sha256:${createHash('sha256').update('mine').digest('hex')}`);
  expect(readFileSync(join(home,'.codex/rules/user.md'),'utf8')).toBe('user');expect(existsSync(join(home,'.repo-harness/install-state.json'))).toBe(false);
 }));
 test('modified profile-owned rule remains retryable with ownership retained',()=>fixture((home,env)=>{
