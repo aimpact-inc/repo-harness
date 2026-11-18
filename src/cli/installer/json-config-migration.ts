@@ -11,7 +11,7 @@ import { configurationReceiptPath, hostConfigurationRoot, readRawConfigurationRe
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import { CODEGRAPH_CONFIG_MARKER } from './install-profile';
 import { readLegacyManifest, type LegacyManifestSurface } from './install-state';
-import { canonicalManagedHookProjection, managedStatusLine } from './managed-entries';
+import { canonicalManagedHookProjection, type HookHost } from './managed-entries';
 
 /**
  * One-shot migration of the JSON host files into the host-config ledger.
@@ -23,8 +23,9 @@ import { canonicalManagedHookProjection, managedStatusLine } from './managed-ent
  * uninstall left. The migration records only what it can prove: a receipt
  * fragment whose value equals its `installed`, a CodeGraph projection whose
  * manifest hash matches, a tagged hook entry with exactly the old writer's
- * shape (and the manifest hash when one exists), and a status line whose text
- * is exactly a rendering that a release wrote. Each one
+ * shape and a command that a release wrote (and the manifest hash when one
+ * exists), and a status line whose text is exactly a rendering that a release
+ * wrote. Each one
  * keeps its adopted text as `preimage`. Any other fragment is still recorded,
  * with no text: it stays and is reported, and rh does not refresh it. No
  * container and no file is recorded as created; only a later gate write
@@ -52,10 +53,10 @@ function invalid(message: string): HostConfigError {
   return new HostConfigError('host_config_invalid_state', message);
 }
 
-function jsonPaths(home: string, only?: readonly string[]): { hooks: readonly string[]; root: string; all: readonly string[] } {
-  const hooks = [join(home, '.codex', 'hooks.json'), join(home, '.claude', 'settings.json')];
+function jsonPaths(home: string, only?: readonly string[]): { hooks: ReadonlyMap<string, HookHost>; root: string; all: readonly string[] } {
+  const hooks = new Map<string, HookHost>([[join(home, '.codex', 'hooks.json'), 'codex'], [join(home, '.claude', 'settings.json'), 'claude']]);
   const root = join(home, '.claude.json');
-  return { hooks, root, all: [...hooks, root].filter((path) => !only || only.includes(path)) };
+  return { hooks, root, all: [...hooks.keys(), root].filter((path) => !only || only.includes(path)) };
 }
 
 function parseOld(value: unknown, receiptPath: string): unknown {
@@ -121,23 +122,60 @@ function manifestFragments(manifest: LegacyManifest, path: string, content: stri
 const ONLY = (value: object, keys: readonly string[]): boolean => Object.keys(value).every((key) => keys.includes(key));
 const isObjectValue = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const ABSOLUTE_QUOTED = String.raw`'(?:/|[A-Za-z]:[\\/])(?:[^'\n]|'\\'')*`;
+/**
+ * `exec <Bun> <bundle>` as v0.26.6 and later wrote it, the machine's paths
+ * as placeholders: each one absolute and quoted exactly as `shellQuote`
+ * quotes it, the bundle ending in `dist/hook-entry.js`. Text outside the
+ * quotes fails the match; text inside them changes a path, so the command
+ * stops running.
+ */
+const MACHINE_EXEC = String.raw`exec ${ABSOLUTE_QUOTED}' ${ABSOLUTE_QUOTED}[\\/]dist[\\/]hook-entry\.js'`;
+const TAGGED = `: ${MANAGED_TAG}; `;
+
+/** True when the command is one that a release wrote with this tail: `exec repo-harness-hook` before v0.26.6, `MACHINE_EXEC` since. */
+function isReleasedExec(command: string, head: string, tail: string): boolean {
+  return command === `${head}exec repo-harness-hook${tail}` || new RegExp(`^${escapeRegExp(head)}${MACHINE_EXEC}${escapeRegExp(tail)}$`).test(command);
+}
+
+/**
+ * True when the command is a tagged command that a release wrote for one
+ * route of a host: v0.10.0 to v0.22.x fell back to `repo-harness hook`;
+ * v0.23.0 and later checked the opt-in marker first.
+ */
+function isReleasedHookCommand(command: string, host: HookHost, event: string, routeId: string): boolean {
+  const tail = ` ${event} --route ${routeId}`;
+  return command === `${TAGGED}repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; export HOOK_REPO_ROOT="$repo"; if command -v repo-harness-hook >/dev/null 2>&1; then HOOK_HOST=${host} exec repo-harness-hook${tail}; fi; command -v repo-harness >/dev/null 2>&1 || exit 0; HOOK_HOST=${host} exec repo-harness hook${tail}`
+    || isReleasedExec(command, `${TAGGED}repo=$(git rev-parse --show-toplevel 2>/dev/null) && [ -f "$repo/.ai/harness/workflow-contract.json" ] || exit 0; export HOOK_REPO_ROOT="$repo"; HOOK_HOST=${host} `, tail);
+}
+
 /**
  * True when a tagged hook entry has exactly the shape that the old writer
- * wrote: keys within {matcher, hooks} and one hook with keys within {type,
- * command, timeout}, type `command`. `managedHookSelectors` already proved
- * that the hook command is the managed command of its route.
+ * wrote, keys within {matcher, hooks} and one hook with keys within {type,
+ * command, timeout}, type `command`, and its command is one that a release
+ * wrote for the selector's route on this host. `managedHookSelectors` already
+ * proved that an untagged command is a legacy typed or retired command, each
+ * an exact text. A user's segment anywhere in a tagged command fails the
+ * proof (I1, #3237).
  */
-function hasOldWriterShape(value: unknown): boolean {
+function isReleasedHookEntry(selector: string, value: unknown, host: HookHost): boolean {
   if (!isObjectValue(value)) return false;
   const hooks = value.hooks;
   if (!ONLY(value, ['matcher', 'hooks']) || (value.matcher !== undefined && typeof value.matcher !== 'string') || !Array.isArray(hooks) || hooks.length !== 1) return false;
   const hook = hooks[0];
-  return isObjectValue(hook) && ONLY(hook, ['type', 'command', 'timeout']) && hook.type === 'command' && typeof hook.command === 'string'
-    && (hook.timeout === undefined || typeof hook.timeout === 'number');
+  if (!isObjectValue(hook) || !ONLY(hook, ['type', 'command', 'timeout']) || hook.type !== 'command' || typeof hook.command !== 'string'
+    || (hook.timeout !== undefined && typeof hook.timeout !== 'number')) return false;
+  if (!hook.command.startsWith(TAGGED)) return true;
+  const [, event, routeId] = /^hooks\.([^.[\]]+)\[([^[\]]+)\]$/.exec(selector) ?? [];
+  return event !== undefined && isReleasedHookCommand(hook.command, host, event, routeId!);
 }
 
-/** v0.26.2 to v0.26.5 wrote this status line command; v0.26.6 and later write `managedStatusLine`, with the machine's absolute Bun and bundle paths. */
-const FIRST_STATUS_LINE_COMMAND = `: ${MANAGED_TAG}; exec repo-harness-hook statusline`;
+/** True when the status line is one that a release wrote: v0.26.2 and later, with the same `exec` as the hook commands. */
+function isReleasedStatusLine(value: unknown): boolean {
+  return isObjectValue(value) && ONLY(value, ['type', 'command']) && value.type === 'command' && typeof value.command === 'string'
+    && isReleasedExec(value.command, TAGGED, ' statusline');
+}
 
 /** The JSON text without the whitespace between its tokens. */
 function compactJson(text: string): string {
@@ -158,18 +196,14 @@ function compactJson(text: string): string {
 }
 
 /**
- * True when the status line member text is exactly one that a release wrote
- * on this machine. The proof reads the stored text itself, not its parsed
- * value: a repeated key parses to its last value and would hide the first.
- * A user's edit anywhere in the command fails the proof (I1, #3232).
+ * True when the fragment text is its parsed value written out, whitespace
+ * aside. The proofs read the parsed value, and the ledger stores the text:
+ * a repeated key parses to its last value and would hide the first (I1).
+ * A member (`statusLine`) carries its key; an array element does not.
  */
-function isReleasedStatusLine(member: string, env: NodeJS.ProcessEnv): boolean {
-  const commands = [FIRST_STATUS_LINE_COMMAND];
-  // Without a resolvable Bun runtime or global bundle this machine has no current rendering, so only the first one can prove.
-  try { commands.push(managedStatusLine(env).command); } catch { /* no current rendering */ }
-  const compact = compactJson(member);
-  return commands.some((command) => [{ type: 'command', command }, { command, type: 'command' }]
-    .some((value) => compact === `"statusLine":${JSON.stringify(value)}`));
+function textIsValue(text: string, selector: string, value: unknown): boolean {
+  const written = JSON.stringify(value);
+  return compactJson(text) === (selector.includes('[') ? written : `${JSON.stringify(selector.split('.').at(-1))}:${written}`);
 }
 
 /** The hash that the old manifest recorded for the managed hook entries of a hook file, as one. */
@@ -181,13 +215,13 @@ function managedAdapterHash(content: string): string | null {
 }
 
 /**
- * Tagged hook entries and a tagged status line. A hook entry is rh's when it
- * has the old writer's shape and, while the old manifest holds a hash of the
- * file's hook entries, that hash matches. The status line is rh's when its
- * text is a released rendering. Any other one is not proved.
+ * Tagged hook entries and a tagged status line. Each one is rh's when its
+ * text is its value written out and that value is a released rendering; a
+ * hook entry also needs, while the old manifest holds a hash of the file's
+ * hook entries, that hash to match. Any other one is not proved.
  */
-function taggedFragments(manifest: LegacyManifest, path: string, content: string, hookFile: boolean, env: NodeJS.ProcessEnv): OldFragment[] {
-  if (!hookFile) return [];
+function taggedFragments(manifest: LegacyManifest, path: string, content: string, host: HookHost | undefined): OldFragment[] {
+  if (!host) return [];
   const hashes = manifest?.current.filter((surface) => surface.path === path && surface.managed_marker === MANAGED_TAG).map((surface) => surface.content_hash) ?? [];
   // managedHookSelectors validates the file first: its error never quotes the file's text (I1, #3164).
   const selectors = managedHookSelectors(content);
@@ -197,9 +231,9 @@ function taggedFragments(manifest: LegacyManifest, path: string, content: string
   return selectors.map((selector) => {
     const value = jsonFragmentValue(content, selector);
     const range = jsonFragment.locate(content, selector);
-    const proved = selector === 'statusLine'
-      ? range !== null && isReleasedStatusLine(content.slice(range.start, range.end), env)
-      : hasOldWriterShape(value) && hashMatches;
+    const proved = range !== null && textIsValue(content.slice(range.start, range.end), selector, value) && (selector === 'statusLine'
+      ? isReleasedStatusLine(value)
+      : isReleasedHookEntry(selector, value, host) && hashMatches);
     return { selector, before: undefined, installed: proved ? value : undefined };
   });
 }
@@ -255,7 +289,7 @@ export function planJsonConfigMigration(env: NodeJS.ProcessEnv, only?: readonly 
     const projection = manifestFragments(manifest, path, content);
     const fromReceipt = receipt.byPath.get(path) ?? [];
     // A receipt entry is the older and more exact record of its fragment.
-    const old = [...fromReceipt, ...projection.fragments.filter((fragment) => !fromReceipt.some((entry) => entry.selector === fragment.selector)), ...taggedFragments(manifest, path, content, paths.hooks.includes(path), env)];
+    const old = [...fromReceipt, ...projection.fragments.filter((fragment) => !fromReceipt.some((entry) => entry.selector === fragment.selector)), ...taggedFragments(manifest, path, content, paths.hooks.get(path))];
     const adopted = adoption(path, content, old, projection.changed, paths.root);
     if (adopted) files.push({ path, adoption: adopted });
   }
