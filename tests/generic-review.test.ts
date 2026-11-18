@@ -642,8 +642,65 @@ test.each(['codex', 'pi'] as const)('a %s review keeps its round-1 model after t
   await expect(runReviewRound(options, effects)).rejects.toThrow(harness === 'codex' ? 'review_codex_config_changed' : 'review_pi_models_changed');
   writeFileSync(sessionPath, JSON.stringify({ ...session, review_model: undefined }));
   await expect(runReviewRound(options, effects)).rejects.toThrow('review_model_unpinned');
+  // The refusal names the exact cancel command of this admission and the fresh campaign that a restart needs.
+  const unpinned = await runReviewRound(options, effects).catch((error: Error) => error.message);
+  expect(unpinned).toContain(`Run rh review cancel --repository-id '${f.options.authority.repository_id}' --issue-id '${f.options.authority.issue_id}' --campaign-id '${f.options.authority.campaign_id}'`);
+  expect(unpinned).toContain('a restart needs a new campaign and grant: run rh review admit --request <file>');
   // A new review pins the current default.
   expect(session.review_model).toEqual({ model: 'codex/gpt-6.2-astra', effort: 'high' });
+}, 60_000);
+
+test.each(['codex', 'pi'] as const)('a %s review dispatches round 2 on its pin and refuses a configuration that leaves it', async harness => {
+  const f = packetRoundFixture();
+  const pinnedModel = 'codex/gpt-6-astra';
+  // Round 1 of this session ran under an earlier default, so its pin, its host spec and its generated
+  // configuration name the earlier model. The launch is a double: no provider runs.
+  const effects: TaskReviewEffects = { ...f.effects, piExecutable: () => '/usr/bin/true',
+    installation: async (kind, executable) => kind === 'pi' ? { kind: 'available', via: 'bundled' }
+      : { kind: 'available', via: 'executable', command: executable ?? '/usr/bin/true' } };
+  const options = { ...f.options, harness };
+  await expect(runReviewRound(options, effects)).rejects.toThrow(process.platform === 'darwin' ? 'fixture_start_failure' : 'OAR_REVIEW_ISOLATION_UNSUPPORTED_PLATFORM');
+  const sessionPath = join(f.dir, 'session.json');
+  const session = readSessionArtifact<Record<string, unknown>>(sessionPath);
+  expect(session.review_model).toEqual({ ...CURRENT_REVIEW_MODEL });
+  writeFileSync(sessionPath, JSON.stringify({ ...session, review_model: { ...CURRENT_REVIEW_MODEL, model: pinnedModel } }));
+  const output = taskReviewRunner.outputDirectory(realpathSync(f.options.reviewerRepo), f.primary, f.key, 'deep-reasoner');
+  const configFiles = harness === 'codex' ? [join(output, '.codex-home/config.toml')]
+    : ['models.json', 'settings.json'].map(name => join(output, '.pi-agent', name));
+  const pinnedConfig = new Map<string, string>();
+  for (const file of configFiles) {
+    const content = readFileSync(file, 'utf8').replaceAll(CURRENT_REVIEW_MODEL.model, pinnedModel);
+    writeFileSync(file, content); pinnedConfig.set(file, content);
+  }
+  // The completed round 1 of that earlier context stays in the round budget.
+  writeSessionArtifact(join(f.dir, 'request-1.json'), { subject_sha256: 'sha256:' + 'b'.repeat(64), context_sha256: 'sha256:' + 'd'.repeat(64) });
+  writeSessionArtifact(join(f.dir, 'accepted-1.json'), { output: { findings: [] } });
+  // The pin stays fixed. A configuration at the current default and one at a third model both refuse the round.
+  for (const model of [CURRENT_REVIEW_MODEL.model, 'codex/gpt-6.1-astra']) {
+    for (const file of configFiles) writeFileSync(file, pinnedConfig.get(file)!.replaceAll(pinnedModel, model));
+    await expect(runReviewRound(options, effects)).rejects.toThrow(harness === 'codex' ? 'review_codex_config_changed' : 'review_pi_models_changed');
+  }
+  for (const file of configFiles) writeFileSync(file, pinnedConfig.get(file)!);
+  if (process.platform === 'darwin') {
+    // The host spec of the earlier default stays with the session, so round 2 launches and delivers on the pin.
+    const specPath = join(f.dir, 'host.json');
+    const spec = readSessionArtifact<ReviewHostSpec>(specPath);
+    const pinnedOptions = { ...spec.options, model: spec.options.model!.replace(CURRENT_REVIEW_MODEL.model, pinnedModel) };
+    writeSessionArtifact(specPath, { ...spec, options: pinnedOptions }, false);
+    // A refused round writes no request, so the seeded round 1 still stands. This dispatch is last because a
+    // delivered request stays open for its round.
+    const delivered: string[] = [];
+    await expect(runReviewRound(options, { ...effects,
+      start: async () => ({ runtime: 'herdr-core' } as unknown as TaskPaneBinding), assertBinding: () => {}, bindNative: () => {},
+      send: async (_repo, _task, _role, contextRef) => { delivered.push(contextRef); throw new Error('fixture_round_two_dispatched'); } }))
+      .rejects.toThrow('fixture_round_two_dispatched');
+    expect(delivered.map(reference => reference.split('/').pop())).toEqual(['packet-2.txt']);
+    expect(existsSync(join(f.dir, 'request-2.json'))).toBe(true);
+    expect(existsSync(join(f.dir, 'accepted-2.json'))).toBe(false);
+    expect(readSessionArtifact<ReviewHostSpec>(specPath).options.model).toBe(pinnedOptions.model);
+  }
+  // Every round above kept the earlier pin; none wrote the current default back into the session.
+  expect(readSessionArtifact<Record<string, unknown>>(sessionPath).review_model).toEqual({ ...CURRENT_REVIEW_MODEL, model: pinnedModel });
 }, 60_000);
 
 test('same content with a new approved context consumes the next campaign round', async () => {
