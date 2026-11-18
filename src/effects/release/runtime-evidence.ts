@@ -3,6 +3,7 @@ import { existsSync, readFileSync, realpathSync, statSync } from 'fs';
 import { basename, dirname, isAbsolute, relative, resolve } from 'path';
 import { spawnSync } from 'child_process';
 
+import { parseJsonText } from '../../core/evidence/file-syntax';
 import type { RuntimeEvidenceObservation } from '../../core/release/runtime-evidence';
 import { runProcess } from '../process-runner';
 
@@ -22,12 +23,7 @@ function sha512Integrity(path: string): string {
 }
 
 function parseRegistryReadback(path: string): RegistryTarballReadback {
-  let value: unknown;
-  try {
-    value = JSON.parse(readFileSync(path, 'utf-8'));
-  } catch (error) {
-    throw new Error(`registry readback is invalid JSON: ${(error as Error).message}`);
-  }
+  const value = parseJsonText(readFileSync(path, 'utf-8'), path);
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('registry readback must be an object');
   const record = value as Record<string, unknown>;
   if (typeof record.version !== 'string' || typeof record['dist.integrity'] !== 'string'

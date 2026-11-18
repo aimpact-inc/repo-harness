@@ -91,6 +91,21 @@ describe('issue 698 host configuration ownership', () => {
     });
   }
 
+  test('issue 3079 names an invalid config.toml with the remedy and never quotes its text', () => {
+    withTempHome('repo-harness-install', (home) => {
+      const filePath = path.join(home, '.codex/config.toml');
+      const raw = 'k = sk-FAKE-SECRET-12345\n';
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, raw);
+      const result = runInstall({ target: 'codex', location: 'global' });
+      expect(result.exitCode).toBe(1);
+      expect(result.lines).toContain(`[codex] error: ${filePath}: the file is not valid TOML. Fix the TOML in that file, then run the command again`);
+      expect(result.lines.join('\n')).not.toContain('sk-FAKE');
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(raw);
+      expect(fs.existsSync(path.join(home, '.codex/hooks.json'))).toBe(false);
+    });
+  });
+
   for (const host of ['codex', 'claude'] as const) {
     for (const shape of ['file', 'directory', 'dangling'] as const) {
       test(`${host} install follows a user's ${shape} symlink, and uninstall restores the linked file`, () => {

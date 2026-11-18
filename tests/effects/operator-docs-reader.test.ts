@@ -463,7 +463,7 @@ test('the diagram readback returns the PNG path of one render pass, and an error
       ? { ok: false, kind: 'invalid', issues: [{ element: '/entities/0', field: 'E_UNKNOWN_TAG', fix: 'Use a known tag.' }] }
       : { ok: true, svg: '<svg/>', png: Buffer.from('png-bytes') };
   };
-  const unavailable = await readbackDiagram('{}', { env, signal, render });
+  const unavailable = await readbackDiagram('{}', { label: 'block.json', env, signal, render });
   expect(unavailable).toMatchObject({ ok: false, status: 'unavailable', reason: 'capability_missing', message: 'render capability not installed' });
   expect(readbackExitCode(unavailable)).toBe(2);
   const library = join(home, 'operator/render-capability/node_modules/@eraserlabs/diagrams');
@@ -471,18 +471,21 @@ test('the diagram readback returns the PNG path of one render pass, and an error
   writeFileSync(join(library, 'package.json'), JSON.stringify({ version: RENDER_LIBRARY_VERSION }));
   writeFileSync(join(home, 'browser'), '');
   const good = { entities: [{ id: 'a' }] };
-  const ok = await readbackDiagram(JSON.stringify(good), { env, signal, render });
+  const ok = await readbackDiagram(JSON.stringify(good), { label: 'block.json', env, signal, render });
   expect(ok).toMatchObject({ ok: true, hash: diagramHash(good) });
   expect(readbackExitCode(ok)).toBe(0);
   expect(readFileSync((ok as { png: string }).png).toString()).toBe('png-bytes');
   // One pass gives the SVG of the docs page and the PNG together.
   expect(passes).toEqual([{ svg: true, png: true }]);
-  const bad = await readbackDiagram(JSON.stringify({ entities: [{ id: 'bad' }] }), { env, signal, render });
+  const bad = await readbackDiagram(JSON.stringify({ entities: [{ id: 'bad' }] }), { label: 'block.json', env, signal, render });
   expect(bad).toMatchObject({ ok: false, status: 'invalid', issues: [{ element: '/entities/0' }] });
   expect(readbackExitCode(bad)).toBe(1);
   // A remote icon fails before any render, with the element named as on the docs page.
-  const remote = await readbackDiagram(JSON.stringify({ entities: [{ id: 'a', icon: '//example.invalid/a.svg' }] }), { env, signal, render });
+  const remote = await readbackDiagram(JSON.stringify({ entities: [{ id: 'a', icon: '//example.invalid/a.svg' }] }), { label: 'block.json', env, signal, render });
   expect(remote).toMatchObject({ status: 'invalid', issues: [{ element: '/entities/0', field: 'icon' }] });
   expect(passes).toHaveLength(2);
-  expect(await readbackDiagram('{not json', { env, signal, render })).toMatchObject({ status: 'invalid', issues: [{ element: 'block', field: 'JSON' }] });
+  // A syntax error names the input and never quotes its text (I1).
+  const broken = JSON.stringify(await readbackDiagram('{"entities": sk_FAKE_DIAGRAM_12345}', { label: 'block.json', env, signal, render }));
+  expect(JSON.parse(broken)).toMatchObject({ status: 'invalid', issues: [{ element: 'block', field: 'JSON', fix: 'Fix the JSON syntax: block.json: the file is not valid JSON.' }] });
+  expect(broken).not.toContain('sk_FAKE');
 });

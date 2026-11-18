@@ -1,6 +1,6 @@
 import { migrateCodexConfigRecords } from '../codex-config-migration';
 import { migrateJsonConfigRecords } from '../json-config-migration';
-import { CODEX_CONFIG_FRAGMENTS, codexConfigValue, tomlFragment } from '../../../core/host-config/toml-fragment';
+import { CODEX_CONFIG_FRAGMENTS, codexConfigValue, namingTomlFile, tomlFragment } from '../../../core/host-config/toml-fragment';
 import type { FragmentRequest } from '../../../core/host-config/types';
 import { openHostConfigGate } from '../../../effects/host-config/gate';
 /**
@@ -78,7 +78,8 @@ function ensureRequestUserInputToml(): WriteResult['files'][number] {
   migrateCodexConfigRecords(process.env);
   const created = !fs.existsSync(filePath);
   const current = created ? '' : fs.readFileSync(filePath, 'utf-8');
-  const request = requestUserInputFragment(current);
+  let request: FragmentRequest<string> | null;
+  try { request = requestUserInputFragment(current); } catch (error) { throw namingTomlFile(filePath, error); }
   if (!request) return { path: filePath, action: 'unchanged' };
   const result = openHostConfigGate({ env: process.env }).apply([{ path: filePath, fragments: [request] }]);
   if (result.skipped.length) return { path: filePath, action: 'kept', detail: keptLine(codexConfigValue(current, REQUEST_USER_INPUT)) };

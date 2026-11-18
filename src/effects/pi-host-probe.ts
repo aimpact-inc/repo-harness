@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseJsonText } from '../core/evidence/file-syntax';
 import { piVersionSupported, type PiCapability, type PiHostUnavailableCode } from '../pi/compat';
 
 export interface InstalledPi { version: string; state: PiCapability['state']; code?: PiHostUnavailableCode }
@@ -11,7 +12,7 @@ function piPackageRoot(executable: string): string {
   let root = dirname(realpathSync(executable));
   while (true) {
     const manifest = join(root, 'package.json');
-    if (existsSync(manifest) && JSON.parse(readFileSync(manifest, 'utf8')).name === '@earendil-works/pi-coding-agent') return root;
+    if (existsSync(manifest) && (parseJsonText(readFileSync(manifest, 'utf8'), manifest) as { name?: unknown }).name === '@earendil-works/pi-coding-agent') return root;
     const parent = dirname(root);
     if (parent === root) throw new Error('Pi package root unavailable');
     root = parent;

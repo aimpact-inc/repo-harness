@@ -51,7 +51,7 @@ export function resolvePackageLocalArchctx(consumerRoot?: string, requiredVersio
     ? resolvePackageManifest(consumerRoot === undefined ? import.meta.url : join(resolve(consumerRoot), 'package.json'), 'archctx', `package-local archctx@${requiredVersion} is missing from the dependency tree of ${origin}`)
     : join(packageRoot, 'package.json');
   const resolvedRoot = dirname(manifestPath);
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { name?: unknown; version?: unknown; bin?: unknown; engines?: unknown };
+  const manifest = parseJsonText(readFileSync(manifestPath, 'utf8'), manifestPath) as { name?: unknown; version?: unknown; bin?: unknown; engines?: unknown };
   if (manifest.name !== 'archctx' || manifest.version !== requiredVersion) throw new ArchctxClientError({ code: 'RH_ARCHCTX_PACKAGE_MISMATCH', action: 'update-repo-harness', message: `package-local archctx mismatch: expected archctx@${requiredVersion}, got ${String(manifest.name)}@${String(manifest.version)} (resolved from ${origin})` });
   const engines = isRecord(manifest.engines) ? manifest.engines : null;
   if (engines?.node !== ARCHCONTEXT_NODE_RANGE) throw new Error(`package-local archctx@${requiredVersion} Node runtime contract mismatch: expected ${ARCHCONTEXT_NODE_RANGE}, got ${String(engines?.node)}`);
@@ -663,10 +663,12 @@ export function indexPackageLocalCodeGraph(checkoutRoot: string, options: Archct
 
 function resolvePackageLocalCodeGraph(archctx: ResolvedArchctxPackage): string {
   const name = '@colbymchenry/codegraph';
-  const declared = (JSON.parse(readFileSync(join(archctx.packageRoot, 'package.json'), 'utf8')) as { dependencies?: Record<string, unknown> }).dependencies?.[name];
+  const archctxManifest = join(archctx.packageRoot, 'package.json');
+  const declared = (parseJsonText(readFileSync(archctxManifest, 'utf8'), archctxManifest) as { dependencies?: Record<string, unknown> }).dependencies?.[name];
   if (typeof declared !== 'string') throw new Error(`package-local archctx@${archctx.version} does not declare ${name}`);
   const packageRoot = dirname(resolvePackageManifest(join(archctx.packageRoot, 'package.json'), name, `package-local ${name}@${declared} is missing from the archctx dependency tree rooted at ${archctx.packageRoot}`));
-  const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')) as { name?: unknown; version?: unknown; bin?: unknown };
+  const manifestPath = join(packageRoot, 'package.json');
+  const manifest = parseJsonText(readFileSync(manifestPath, 'utf8'), manifestPath) as { name?: unknown; version?: unknown; bin?: unknown };
   if (manifest.name !== name || manifest.version !== declared) throw new ArchctxClientError({ code: 'RH_ARCHCTX_PACKAGE_MISMATCH', action: 'update-repo-harness', message: `package-local CodeGraph mismatch: archctx declares ${name}@${declared}, got ${String(manifest.name)}@${String(manifest.version)}` });
   const bin = isRecord(manifest.bin) && typeof manifest.bin.codegraph === 'string' ? manifest.bin.codegraph : null;
   if (!bin) throw new Error(`package-local ${name}@${declared} does not declare bin.codegraph`);

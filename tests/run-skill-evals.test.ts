@@ -241,6 +241,9 @@ describe("run-skill-evals helpers", () => {
       expect(() => loadBenchmarkConfig(path)).toThrow("must be a boolean");
       writeFileSync(path, JSON.stringify({ profiles: { without_skill: { skillMount: "auto" } } }), "utf-8");
       expect(() => loadBenchmarkConfig(path)).toThrow("Unexpected without_skill skillMount");
+      // A config that does not parse is named by its path; its text never reaches the error (I1).
+      writeFileSync(path, '{"profiles": sk_FAKE_BENCHMARK_12345}', "utf-8");
+      expect(() => loadBenchmarkConfig(path)).toThrow(new Error(`${path}: the file is not valid JSON`));
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

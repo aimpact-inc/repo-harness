@@ -1,4 +1,5 @@
 import { canonicalize } from "./canonical-json";
+import { parseJsonText } from "./file-syntax";
 import { isRecord } from "./is-record";
 import { sha256Prefixed } from "./sha256";
 import type { JsonValue } from "./types";
@@ -223,9 +224,9 @@ export function parseVerificationPlanFromContractText(contractText: string): Ver
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(matches[0]![1]!);
-  } catch (error) {
-    fail(`Verification Plan block is invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+    parsed = parseJsonText(matches[0]![1]!, null);
+  } catch {
+    fail("Verification Plan block is invalid JSON");
   }
   return validateVerificationPlan(parsed);
 }

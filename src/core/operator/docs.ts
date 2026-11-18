@@ -5,6 +5,7 @@
 // it renders.
 
 import { GITHUB_REPOSITORY } from '../board/github-repository';
+import { parseJsonText } from '../evidence/file-syntax';
 
 export const OPERATOR_DOCS_TREE_KIND = 'operator_docs_tree' as const;
 export const OPERATOR_DOCS_FILE_KIND = 'operator_docs_file' as const;
@@ -213,11 +214,12 @@ const REMOTE_ADDRESS = /^\s*(?:[a-z][a-z0-9+.-]*:|\/\/)/iu;
 /**
  * Errors the core owns before the capability sees the block: a JSON syntax error, and a
  * remote or scheme-bearing `icon` address (the only resource field; icons load from a local set).
+ * `label` names the input (a file or stdin); a block inside a page has none.
  */
-export function diagramSourceIssues(source: string): { readonly document: unknown; readonly issues: readonly DocsDiagramIssueV1[] } {
+export function diagramSourceIssues(source: string, label: string | null): { readonly document: unknown; readonly issues: readonly DocsDiagramIssueV1[] } {
   let document: unknown;
-  try { document = JSON.parse(source); } catch (error) {
-    return { document: null, issues: [{ element: 'block', field: 'JSON', fix: `Fix the JSON syntax: ${error instanceof Error ? error.message : 'the text does not parse'}.` }] };
+  try { document = parseJsonText(source, label); } catch (error) {
+    return { document: null, issues: [{ element: 'block', field: 'JSON', fix: `Fix the JSON syntax: ${(error as Error).message}.` }] };
   }
   if (diagramTooDeep(document)) {
     return { document, issues: [{ element: 'block', field: 'depth', fix: `Nest the JSON at most ${DIAGRAM_MAX_DEPTH} levels deep.` }] };

@@ -439,8 +439,9 @@ export function parseProjectedModulePages(source: string): ProjectedModulePages 
   let manifest: unknown;
   try {
     manifest = JSON.parse(source);
-  } catch (error) {
-    return invalidManifest(`is not valid JSON: ${(error as Error).message}`);
+  } catch {
+    // Fixed text, as in parseCapabilityRegistry: the parse error can quote text of the file (I1).
+    return invalidManifest("is not valid JSON");
   }
   const targets = isRecord(manifest) ? manifest.targets : undefined;
   if (!isRecord(targets)) return invalidManifest("has no targets object");

@@ -257,7 +257,7 @@ export async function diagram(file: string, deps: { readonly env?: NodeJS.Proces
   const abort = () => controller.abort();
   for (const name of READBACK_SIGNALS) process.on(name, abort);
   try {
-    const result = await readbackDiagram(text, { env: deps.env ?? process.env, signal: controller.signal, render: deps.render });
+    const result = await readbackDiagram(text, { label: file === '-' ? 'stdin' : file, env: deps.env ?? process.env, signal: controller.signal, render: deps.render });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     process.exitCode = readbackExitCode(result);
   } finally {

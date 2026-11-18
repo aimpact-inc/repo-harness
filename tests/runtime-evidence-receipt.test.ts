@@ -130,5 +130,11 @@ describe('release runtime evidence', () => {
     expect(retired.status).toBe(2);
     expect(retired.stderr).toContain('--output is not a verify option');
     expect(existsSync(join(value.root, '.ai'))).toBe(false);
+    // A registry readback that does not parse is named by its path; its text never reaches stderr (I1).
+    writeFileSync(value.registry, '{"version": sk_FAKE_REGISTRY_12345}');
+    const broken = verify();
+    expect(broken.status).not.toBe(0);
+    expect(broken.stderr).toContain(`${value.registry}: the file is not valid JSON`);
+    expect(`${broken.stdout}${broken.stderr}`).not.toContain('sk_FAKE');
   });
 });

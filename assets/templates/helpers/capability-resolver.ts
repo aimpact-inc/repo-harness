@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// @generated-from src/core/capabilities/registry.ts sha256:2afbc508fd29f13f6023ed66c65990e1d4b3f0221b823e9bb2504811f2d989bf
+// @generated-from src/core/capabilities/registry.ts sha256:752268abdb299b72d69da8345238a62952bb98de0d5e697834acb54c8c533a40
 // Standalone typed Bun projection. Regenerate from the capability resolver library; do not edit by hand.
 export const CAPABILITY_REGISTRY_VERSION = 1 as const;
 
@@ -442,8 +442,9 @@ export function parseProjectedModulePages(source: string): ProjectedModulePages 
   let manifest: unknown;
   try {
     manifest = JSON.parse(source);
-  } catch (error) {
-    return invalidManifest(`is not valid JSON: ${(error as Error).message}`);
+  } catch {
+    // Fixed text, as in parseCapabilityRegistry: the parse error can quote text of the file (I1).
+    return invalidManifest("is not valid JSON");
   }
   const targets = isRecord(manifest) ? manifest.targets : undefined;
   if (!isRecord(targets)) return invalidManifest("has no targets object");

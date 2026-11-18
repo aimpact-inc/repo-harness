@@ -1,6 +1,7 @@
 import { CLI_NAME } from '../../core/skill-surface/cli-name';
 import { createHash, randomUUID } from 'crypto';
 import { sha256Prefixed } from '../../core/evidence/sha256';
+import { parseJsonText } from '../../core/evidence/file-syntax';
 import { isPathInside } from '../../effects/path-containment';
 import {
   closeSync,
@@ -300,7 +301,7 @@ function packageTreeDigest(root: string): string {
 function readPackageIdentity(root: string): CandidatePackageIdentity {
   const packagePath = join(root, 'package.json');
   const raw = readFileSync(packagePath);
-  const manifest = JSON.parse(raw.toString('utf-8')) as { name?: unknown; version?: unknown };
+  const manifest = parseJsonText(raw.toString('utf-8'), packagePath) as { name?: unknown; version?: unknown };
   if (manifest.name !== 'repo-harness' || typeof manifest.version !== 'string' || manifest.version.length === 0) {
     throw new Error(`candidate package identity is invalid: ${packagePath}`);
   }
