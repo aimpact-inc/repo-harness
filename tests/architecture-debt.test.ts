@@ -1,13 +1,15 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { digestJson, errorEnvelope, type ArchitectureDebtItemV1, type ArchitectureDebtReportV1, type Json } from 'archctx-contracts';
 import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError, decodeArchitectureDebtReport } from '../src/core/architecture/projection';
 import type { ArchctxProcessResult, ArchitectureProjectionPolicy, RunArchctxProcess } from '../src/core/architecture/contracts';
 import { completeArchitectureDebt, checkpointArchitectureDebt } from '../src/effects/architecture/archctx-provider';
+import { currentProcessStartTime } from '../src/effects/locking/process-start-time';
 import { architectureDebtReport, architectureDebtSummary } from '../src/cli/commands/architecture-debt-report';
+import { version as packageVersion } from '../package.json';
 
 /**
  * Recorded from archctx@0.8.0 `complete --head-sha <sha> --json` in a disposable
@@ -306,6 +308,40 @@ describe('architecture-debt command', () => {
     const listed = worktrees(f.repoRoot);
     expect(listed).toContain(stale);
     expect(listed).not.toContain(provider.baseCheckout()!);
+  });
+
+  test('a second run on the same base reads the cached base report and builds no checkout', () => {
+    const f = fixture();
+    const base = withItems([flowItem, goneItem]);
+    const first = fakeProvider(f, { head: recordedDebt, base });
+    const measured = architectureDebtReport(f.repoRoot, 'HEAD~1', { consumerRoot: f.consumerRoot, policy, run: first.run });
+    const cacheDirectory = join(f.repoRoot, '.git', 'repo-harness', 'cache', 'arch-debt');
+    expect(readdirSync(cacheDirectory).filter((name) => name.endsWith('.json'))).toEqual([`${f.baseSha}-none-${packageVersion}.json`]);
+    const second = fakeProvider(f, { head: recordedDebt, base: failed(errorEnvelope('complete', 'AC_UNCLASSIFIED_FAILURE', 'base must not run')) });
+    expect(architectureDebtReport(f.repoRoot, f.baseSha, { consumerRoot: f.consumerRoot, policy, run: second.run })).toEqual({ ...measured, base: { ...measured.base!, ref: f.baseSha } });
+    expect(second.calls.map(({ tool, args, cwd }) => [tool, args[0], cwd])).toEqual([['archctx', 'doctor', f.repoRoot], ['archctx', 'complete', f.repoRoot]]);
+    expect(worktrees(f.repoRoot)).toEqual([f.repoRoot]);
+  });
+
+  test('a base run reaps base checkouts whose owner process is gone and keeps live and user ones', () => {
+    const f = fixture();
+    const stale = join(dirname(f.repoRoot), 'stale-worktree');
+    git(f.repoRoot, ['worktree', 'add', '--detach', stale, 'HEAD']);
+    rmSync(stale, { recursive: true, force: true });
+    const orphan = (startTime: string): string => {
+      const parent = mkdtempSync(join(tmpdir(), 'repo-harness-debt-base-'));
+      roots.push(parent);
+      writeFileSync(join(parent, 'owner.json'), JSON.stringify({ pid: process.pid, start_time: startTime }));
+      git(f.repoRoot, ['worktree', 'add', '--detach', join(parent, 'checkout'), f.baseSha]);
+      return realpathSync(join(parent, 'checkout'));
+    };
+    const dead = orphan('a start time of an exited process');
+    const live = orphan(currentProcessStartTime());
+    const provider = fakeProvider(f, { head: recordedDebt, base: recordedDebt });
+    architectureDebtReport(f.repoRoot, 'HEAD~1', { consumerRoot: f.consumerRoot, policy, run: provider.run });
+    expect(existsSync(dirname(dead))).toBe(false);
+    expect(worktrees(f.repoRoot).map((path) => existsSync(path) ? realpathSync(path) : path).sort()).toEqual([f.repoRoot, stale, live].sort());
+    git(f.repoRoot, ['worktree', 'remove', '--force', live]);
   });
 
   test('an unresolvable base fails before archctx runs', () => {
