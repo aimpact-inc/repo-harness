@@ -111,6 +111,8 @@ test('the JSON migration adopts a tagged entry with the old writer shape, keeps 
     'a status line command edit': ['statusLine', (data) => { data.statusLine.command += '; user-status-command'; }],
     // The tag and the suffix stay, so only an exact match against rh's rendering finds the edit (#3232).
     'a status line inline segment': ['statusLine', (data) => { data.statusLine.command = data.statusLine.command.replace('; exec ', `; EXAMPLE_TOKEN=${INLINE_TOKEN} exec `); }],
+    // No manifest hash, so only an exact match against rh's rendering finds the edit (#3237).
+    'a hook command inline segment': ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].hooks[0].command = data.hooks.PreToolUse[0].hooks[0].command.replace('; export ', `; EXAMPLE_TOKEN=${INLINE_TOKEN}; export `); }],
     'a manifest hash mismatch': ['hooks.SessionStart[default], hooks.PreToolUse[edit], hooks.PreToolUse[subagent], hooks.PreToolUse[bash], hooks.UserPromptSubmit[inbox], hooks.Stop[default]', (data) => { data.hooks.PreToolUse[0].hooks[0].timeout = 99; }, true],
   };
   for (const [name, [kept, edit, hashed]] of Object.entries(rows)) withClaudeHome((home, settings) => {
@@ -136,13 +138,14 @@ test('the JSON migration adopts a tagged entry with the old writer shape, keeps 
       expect(JSON.parse(readFileSync(settings, 'utf8')).hooks.PreToolUse[0], name).toEqual(hooks.PreToolUse![0]);
       return;
     }
-    if (kept === 'statusLine') {
-      // An unproved status line gets a record with no text: ledger.json holds no copy of the edited command.
-      migrateJsonConfigRecords(env);
-      const record = openHostConfigGate({ env }).recorded(settings).find((entry) => entry.selector === 'statusLine')!;
-      expect({ inserted: record.inserted, preimage: record.preimage }, name).toEqual({ inserted: '', preimage: undefined });
-      expect(readFileSync(join(home, '.repo-harness/config/ledger.json'), 'utf8').includes(INLINE_TOKEN), name).toBe(false);
+    // An unproved fragment gets a record with no text: ledger.json holds no copy of the edited value.
+    migrateJsonConfigRecords(env);
+    const records = openHostConfigGate({ env }).recorded(settings);
+    for (const selector of kept.split(', ')) {
+      const record = records.find((entry) => entry.selector === selector)!;
+      expect({ selector, inserted: record.inserted, preimage: record.preimage }, name).toEqual({ selector, inserted: '', preimage: undefined });
     }
+    expect(readFileSync(join(home, '.repo-harness/config/ledger.json'), 'utf8').includes(INLINE_TOKEN), name).toBe(false);
     const result = runUserUninstall({ target: 'claude', env });
     expect(result.status, name).toBe('partial');
     expect(result.lines, name).toContain(`[unresolved] ${settings}: changed since rh wrote it; preserved: ${kept}`);
