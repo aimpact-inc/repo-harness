@@ -234,7 +234,7 @@ sequenceDiagram
 | 候选包接管 update 后半段 | 新目录格式和新 schema 由新代码解析，避免旧模块误读（PR #628 的事故）。代价是多一个进程和一次 token 交接。 |
 | daemon 失败降级为 `skipped` | 包升级不会因为共享 daemon 的维护问题回退，避免 hoisted 依赖停在新版本而 CLI 回到旧版本。代价是 update 成功时 daemon 可能还没就绪，要等下一次严格检查发现。 |
 | CLI 根集中在 `index.ts` | 所有命令在一个 commander 程序里注册（`buildProgram`，`src/cli/index.ts:500`），帮助和选项校验一致。代价是 `index.ts` 引用约 26 个 capability 的命令模块，成为单一 SCC 的原因之一（见 §3.3 和 Backlog）。 |
-| update 事务放在 CLI 根 | `runTransactionalSelectionProjection` 和 `runTransactionalRuntimeRefresh` 在 `index.ts` 里开启 host 事务并捕获配置还原点。代价是 CLI 根同时承担路由和事务，文件有 1087 行。 |
+| update 事务归 CLI 根组件 | `runTransactionalSelectionProjection` 和 `runTransactionalRuntimeRefresh` 在 `src/cli/runtime-transaction.ts` 里开启 host 事务并捕获配置还原点，候选侧在 `src/cli/candidate-runtime-reconciliation.ts`。两个文件按需加载 architecture 和 MCP 插件，所以留在 composition tier，不放进 core tier 的 `src/cli/installer/**`。`index.ts` 只注册命令（#3209）。 |
 | 发布门禁用 shell 脚本 | 门禁逻辑一个脚本两种模式（`--prepublish` 与完整模式），不分叉。代价是 CodeGraph 看不到 shell 调用，`release-packaging → cli-root` 关系只能凭文本证据声明（`check-tarball-install-smoke.sh:131-132`）。 |
 
 ### 3.3 组件拆分（2026-10-11）
@@ -257,7 +257,7 @@ sequenceDiagram
 
 | 关系 | 证据 |
 | --- | --- |
-| cli-root → primary | `runCandidateRuntimeReconciliation` 调用 `runGlobalRuntimeSetup`（`src/cli/index.ts:308`）；注册 update 与 upgrade |
+| cli-root → primary | `runCandidateRuntimeReconciliation` 调用 `runGlobalRuntimeSetup`（`src/cli/candidate-runtime-reconciliation.ts:67`）；注册 update 与 upgrade |
 | cli-root → archctx-closure | `buildProgram` 调用 `buildArchitectureProjectionCommand`（`src/cli/index.ts:862`） |
 | primary → archctx-closure | `runGlobalRuntimeSetup` 调用 `ensureGlobalArchitectureProjection`（`global-runtime.ts:1502`）；`inspectManagedDaemonRuntime` 调用 `verifyArchctxDaemonRuntime`（`:534`） |
 | release-packaging → cli-root | tarball 冒烟安装后运行 `repo-harness` 和 `repo-harness-hook`（`check-tarball-install-smoke.sh:123-124`；shell，无 CodeGraph 边） |
