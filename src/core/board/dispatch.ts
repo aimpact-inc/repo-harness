@@ -110,7 +110,7 @@ export function planDispatch(input: DispatchInputV1): DispatchPlanV1 {
     if (hold !== undefined) return skip('held', hold);
     const open = issue.blocked_by.filter(blocker => blocker.state === 'open').map(blocker => `#${blocker.number}`);
     if (open.length > 0) return skip('blocked', `blocked by ${open.join(', ')}`);
-    const claim = claimHolder(issueClaim(issue.comments)) ?? (liveIssues.has(String(number)) ? 'a live worker seat carries the issue label' : null);
+    const claim = claimHolder(issueClaim(issue.comments, number)) ?? (liveIssues.has(String(number)) ? 'a live worker seat carries the issue label' : null);
     if (claim !== null) return skip('claimed', claim);
     const kind = routeClass(issue.labels);
     if ('error' in kind) return skip('kind_label_invalid', kind.error);

@@ -122,7 +122,7 @@ export function collectRulesTasks(status: RuleStatusV1, unlimited: TaskReadInput
     orchestration.plan_comment = board.plan.status === 'observed';
     // The board omits parent claims and worker names; reuse its source decoder and claim parser.
     const source = readParent(boardInput).parent;
-    const coordinator = issueClaim(source.parent.comments);
+    const coordinator = issueClaim(source.parent.comments, null);
     orchestration.coordinator_claim = coordinator.status === 'active' && coordinator.role === 'coordinator';
     return attach(status, orchestration, id => {
       const match = selected!.get(id);

@@ -61,7 +61,7 @@ export type {
  * It is a read model. GitHub and hc stay the authorities; the board keeps
  * their observation time and never writes back.
  */
-export const BOARD_PROTOCOL = 12 as const;
+export const BOARD_PROTOCOL = 13 as const;
 export const BOARD_KIND = 'repo-harness.board' as const;
 
 const PLAN_HEADER = PLAN_COMMENT_HEADER;
@@ -327,7 +327,9 @@ const isTime = (value: unknown): boolean => typeof value === 'string' && !Number
 function isIssueClaim(value: unknown): boolean {
   if (!isRecord(value)) return false;
   if (value.status === 'none' || value.status === 'unknown') return true;
-  return value.status === 'active' && typeof value.url === 'string' && isTime(value.created_at) && (value.role === null || typeof value.role === 'string');
+  return value.status === 'active' && typeof value.url === 'string' && isTime(value.created_at) && (value.role === null || typeof value.role === 'string')
+    && (value.branch === null || typeof value.branch === 'string')
+    && (value.bundle === null || (Array.isArray(value.bundle) && value.bundle.length > 1 && value.bundle.every(number => Number.isSafeInteger(number) && number > 0)));
 }
 
 function isReviewRecords(value: unknown): boolean {
@@ -469,7 +471,7 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
     tier: tiers.get(issue.number) ?? null,
     milestone: issue.milestone,
     blocked_by: issue.blocked_by,
-    claim: issueClaim(issue.comments),
+    claim: issueClaim(issue.comments, issue.number),
     claim_status: claimStatus(issue),
     open_questions: openQuestions(issue.comments),
     pull_requests: Object.freeze(pullRequests.filter(pr => pr.closes.includes(issue.number) || pr.refs.includes(issue.number)).map(pr => pr.number)),

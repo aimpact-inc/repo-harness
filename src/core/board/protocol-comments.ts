@@ -57,17 +57,43 @@ export function closedClaimUrls(page: BoardCommentPageV1): Set<string | null> {
 }
 
 export type IssueClaimV1 =
-  | { readonly status: 'active'; readonly url: string; readonly created_at: string; readonly role: string | null }
+  /**
+   * `bundle`: the issues of an `Issues:` line, the claim's own issue among them, when one writer and one pull request hold several
+   * issues (`rh board dispatch --issues`); null for a claim of one issue. `branch`: the `Branch:` line, null when the claim has none.
+   */
+  | { readonly status: 'active'; readonly url: string; readonly created_at: string; readonly role: string | null; readonly bundle: readonly number[] | null; readonly branch: string | null }
   | { readonly status: 'none' }
-  /** Older comments exist that the read did not return, and the newest ones hold no claim. */
+  /** Older comments exist that the read did not return, and the newest ones hold no claim; or the newest claim has an `Issues:` line that does not parse or does not name its own issue. */
   | { readonly status: 'unknown' };
 
-/** The one decision of an active claim, for dispatch and for the board: the newest `issue claim` that no `done` or `released` status closes. */
-export function issueClaim(page: BoardCommentPageV1): IssueClaimV1 {
+/** The `Issues:` line of a bundle claim: `#a, #b, #c`, two or more distinct issues. */
+const BUNDLE_LINE = /^#[1-9][0-9]*(?:, #[1-9][0-9]*)+$/u;
+
+/** The `Issues:` line of a bundle claim; `rh board dispatch --issues` writes it and `bundleOf` reads it. */
+export function renderBundleLine(issues: readonly number[]): string {
+  return `Issues: ${issues.map(number => `#${number}`).join(', ')}`;
+}
+
+/** The issues of a claim's `Issues:` line; null when the claim has no such line, `invalid` when the line does not parse or omits the claim's own issue. */
+function bundleOf(body: string, issue: number | null): readonly number[] | null | 'invalid' {
+  const line = field(body, 'Issues');
+  if (line === null) return null;
+  if (!BUNDLE_LINE.test(line)) return 'invalid';
+  const issues = line.split(', ').map(entry => Number(entry.slice(1)));
+  return new Set(issues).size === issues.length && (issue === null || issues.includes(issue)) ? Object.freeze(issues) : 'invalid';
+}
+
+/**
+ * The one decision of an active claim, for dispatch and for the board: the newest `issue claim` that no `done` or `released` status closes.
+ * A claim whose `Issues:` line does not parse or omits `issue` is `unknown`: no reader can tell which issues it holds. `issue` is null for a parent thread.
+ */
+export function issueClaim(page: BoardCommentPageV1, issue: number | null): IssueClaimV1 {
   const claim = newestProtocolComment(page, CLAIM_HEADER);
   if (claim === null) return page.truncated ? { status: 'unknown' } : { status: 'none' };
   if (closedClaimUrls(page).has(claim.url)) return { status: 'none' };
-  return { status: 'active', url: claim.url, created_at: claim.created_at, role: field(claim.body, 'Role') };
+  const bundle = bundleOf(claim.body, issue);
+  if (bundle === 'invalid') return { status: 'unknown' };
+  return { status: 'active', url: claim.url, created_at: claim.created_at, role: field(claim.body, 'Role'), bundle, branch: field(claim.body, 'Branch') };
 }
 
 /** The fields of one `boundary question` comment. `rh board post question` renders them. */

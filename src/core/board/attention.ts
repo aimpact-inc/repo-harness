@@ -194,6 +194,22 @@ function a3(context: Context): void {
   }
 }
 
+/**
+ * The items of one writer: the item itself, and for a bundle claim (`rh board dispatch --issues`) each board item that its `Issues:` line
+ * names. One pull request and one claim status on any of them serve the whole bundle, so A4, A12 and A13 read the bundle.
+ */
+function bundleItems(board: BoardV1, item: BoardItemV1): BoardItemV1[] {
+  const bundle = item.claim.status === 'active' ? item.claim.bundle : null;
+  return bundle === null ? [item] : board.items.filter(entry => bundle.includes(entry.number));
+}
+
+/** The newest observed claim status of the bundle items; `unknown` when a read of one of them is truncated. */
+function bundleClaimStatus(items: readonly BoardItemV1[]): { readonly status_kind: 'unknown' } | { readonly status_kind: 'none' } | { readonly status_kind: 'observed'; readonly created_at: string } {
+  if (items.some(entry => entry.claim_status.status_kind === 'unknown')) return { status_kind: 'unknown' };
+  const times = items.flatMap(entry => (entry.claim_status.status_kind === 'observed' ? [entry.claim_status.created_at] : [])).sort();
+  return times.length === 0 ? { status_kind: 'none' } : { status_kind: 'observed', created_at: times.at(-1)! };
+}
+
 function a4(context: Context): void {
   for (const terminal of workerTerminals(context, 'A4')) {
     const word = hcStatusClass(terminal.status);
@@ -207,12 +223,15 @@ function a4(context: Context): void {
       skip(context, 'A4', 'issue_off_board', terminal.address);
       continue;
     }
-    const prs = context.board.pull_requests.filter(pr => pr.state === 'open' && (terminal.pr === null ? item.pull_requests.includes(pr.number) : pr.number === terminal.pr));
+    const members = bundleItems(context.board, item);
+    const prs = context.board.pull_requests.filter(pr => pr.state === 'open'
+      && (terminal.pr === null ? members.some(member => member.pull_requests.includes(pr.number)) : pr.number === terminal.pr));
     if (prs.length === 0) continue;
     const lastCommit = prs.map(pr => pr.head_committed_at).sort().at(-1)!;
-    if (item.claim_status.status_kind === 'unknown') {
+    const status = bundleClaimStatus(members);
+    if (status.status_kind === 'unknown') {
       skip(context, 'A4', 'comments_truncated', `#${item.number}`);
-    } else if (item.claim_status.status_kind === 'none' || item.claim_status.created_at < lastCommit) {
+    } else if (status.status_kind === 'none' || status.created_at < lastCommit) {
       find(context, 'A4', { issues: [item.number], pull_requests: prs.map(pr => pr.number), terminals: [terminal.address] },
         `worker ${terminal.address} is ${terminal.status} and #${item.number} has no claim status after its last commit (${lastCommit})`);
     }
@@ -321,17 +340,19 @@ function a11(context: Context): void {
   }
 }
 
-/** A12: a writer holds an open item with no pull request and no claim status after the claim. */
+/** A12: a writer holds an open item, and no item of its bundle has a pull request or a claim status after the claim. */
 function a12(context: Context): void {
   for (const item of context.board.items.filter(entry => entry.state === 'open')) {
-    const { claim, claim_status: status } = item;
+    const { claim } = item;
     if (claim.status === 'unknown') {
       skip(context, 'A12', 'comments_truncated', `#${item.number}`);
       continue;
     }
-    if (claim.status !== 'active' || claim.role !== 'writer' || item.pull_requests.length > 0) continue;
+    if (claim.status !== 'active' || claim.role !== 'writer') continue;
+    const members = bundleItems(context.board, item);
+    if (members.some(member => member.pull_requests.length > 0)) continue;
     // The claim is in the read, so a later status is too: an unknown status holds none after the claim.
-    if (status.status_kind === 'observed' && status.created_at > claim.created_at) continue;
+    if (members.some(member => member.claim_status.status_kind === 'observed' && member.claim_status.created_at > claim.created_at)) continue;
     const waited = context.now - Date.parse(claim.created_at);
     if (waited > A12_NO_PR_MS) {
       find(context, 'A12', { issues: [item.number] }, `#${item.number} has a writer claim for ${minutes(waited)} min, no PR and no claim status (${claim.url})`);
@@ -339,7 +360,7 @@ function a12(context: Context): void {
   }
 }
 
-/** A13: a worker seat is done or idle and its item has no open or merged pull request; A4 reads the seat once a pull request is open. */
+/** A13: a worker seat is done or idle and no item of its bundle has an open or merged pull request; A4 reads the seat once a pull request is open. */
 function a13(context: Context): void {
   for (const terminal of workerTerminals(context, 'A13')) {
     const word = hcStatusClass(terminal.status);
@@ -353,7 +374,8 @@ function a13(context: Context): void {
       skip(context, 'A13', 'issue_off_board', terminal.address);
       continue;
     }
-    if (context.board.pull_requests.some(pr => item.pull_requests.includes(pr.number) && pr.state !== 'closed')) continue;
+    const members = bundleItems(context.board, item);
+    if (context.board.pull_requests.some(pr => members.some(member => member.pull_requests.includes(pr.number)) && pr.state !== 'closed')) continue;
     if (terminal.status_ms === null) {
       skip(context, 'A13', 'status_time_missing', terminal.address);
     } else if (context.now - terminal.status_ms > A13_IDLE_MS) {

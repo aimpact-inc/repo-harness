@@ -773,7 +773,9 @@ test('decoders refuse an unknown protocol or kind', () => {
   // A protocol-10 board has claude_review and per-harness review_records, and no reviewer_family; a protocol-11 board has no gatekeeper_review.
   expect(() => decodeBoard({ protocol: 10, kind: 'repo-harness.board' })).toThrow('unsupported board protocol: 10');
   expect(() => decodeBoard({ protocol: 11, kind: 'repo-harness.board' })).toThrow('unsupported board protocol: 11');
-  expect(() => decodeBoard({ protocol: 12, kind: 'fleet_board_snapshot' })).toThrow('unsupported board kind: fleet_board_snapshot');
+  // A protocol-12 board has no claim bundle or branch and no seat liveness.
+  expect(() => decodeBoard({ protocol: 12, kind: 'repo-harness.board' })).toThrow('unsupported board protocol: 12');
+  expect(() => decodeBoard({ protocol: 13, kind: 'fleet_board_snapshot' })).toThrow('unsupported board kind: fleet_board_snapshot');
   const block = (value: Json) => `repo-harness plan\n\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\`\n`;
   const valid = { protocol: 2, kind: 'repo-harness.plan', merge_order: [1475], holds: [], seat_limits: { worker: 3 } } as const;
   expect(decodePlanBlock(block(valid))).toEqual(valid);
@@ -794,7 +796,8 @@ test('decoders refuse a missing or invalid plan revision, merge policy or seat b
   const item = (patch: Json) => ({ ...recorded, items: recorded.items.map((entry: Json, index: number) => index === 0 ? { ...entry, ...patch } : entry) });
   const pull = (patch: Json) => ({ ...recorded, pull_requests: recorded.pull_requests.map((entry: Json, index: number) => index === 0 ? { ...entry, ...patch } : entry) });
   for (const invalid of [plan(undefined), plan(0), plan(1.5), plan('1'), noPolicy, { ...recorded, acceptance_merge: 'maybe' }, board(undefined), board(''),
-    item({ claim: undefined }), item({ claim: { status: 'active', url: 'u' } }), item({ open_questions: { status: 'observed' } }), pull({ open_questions: undefined }), pull({ review_fail: { url: 'u' } }),
+    item({ claim: undefined }), item({ claim: { status: 'active', url: 'u' } }), ...[{ bundle: [1475], branch: null }, { bundle: null, branch: 7 }]
+      .map(patch => item({ claim: { status: 'active', url: 'u', created_at: '2026-11-02T18:34:59Z', role: null, ...patch } })), item({ open_questions: { status: 'observed' } }), pull({ open_questions: undefined }), pull({ review_fail: { url: 'u' } }),
     pull({ review_records: undefined }), pull({ review_records: { status: 'observed', gatekeeper: 'x', reviewer: null } }), pull({ review_records: { status: 'observed', claude: null, codex: null, pi: null } }),
     pull({ second_review: undefined }), pull({ second_review: 'maybe' }), pull({ gatekeeper_review: undefined }), pull({ gatekeeper_review: 'maybe' }), { ...recorded, reviewer_family: undefined }, { ...recorded, reviewer_family: '' }]) {
     expect(() => decodeBoard(invalid)).toThrow('invalid board');
@@ -1082,6 +1085,17 @@ test('board merge: no plan, a draft, plan holds, plan order for every linked ite
   const decision = (edit: Parameters<typeof mergeReplay>[0]) => boardMergeDecisions(replay(mergeReplay(edit))).find(entry => entry.pr === 1491);
   expect(decision({ order: [1475, 1479], pulls: (data) => { data.repository.pr1491.body += '\nCloses #1479\n'; } }))
     .toMatchObject({ reason: 'merge_order', detail: 'earlier plan item #1475 is closed only by this PR; split the PR' });
+  // A bundle PR: each item it closes has a claim that names its head branch and the same issue set, so the order does not split it.
+  const bundleClaims = (branch: string) => (data: Json) => {
+    for (const number of [1475, 1479]) {
+      issueNode(data, number).comments.nodes.push({ url: `https://github.com/Ancienttwo/repo-harness/issues/${number}#issuecomment-9${number}`, createdAt: '2026-11-02T23:00:00Z', authorAssociation: 'OWNER',
+        body: `repo-harness issue claim\nStatus: active\nRole: writer\nBranch: ${branch}\nIssues: #1475, #1479` });
+    }
+  };
+  const closesBoth = (data: Json) => { data.repository.pr1491.body += '\nCloses #1479\n'; };
+  expect(decision({ order: [1475, 1479], parent: bundleClaims('feat/1475-hc-transport'), pulls: closesBoth })).toMatchObject({ reason: 'not_accepted' });
+  expect(decision({ order: [1475, 1479], parent: bundleClaims('feat/other'), pulls: closesBoth }))
+    .toMatchObject({ reason: 'merge_order', detail: 'earlier plan item #1475 is closed only by this PR; split the PR' });
   expect(decision({ pulls: (data) => { data.repository.pr1491.body += '\nRefs #1460\n'; } })).toMatchObject({ reason: 'item_off_board' });
   // A parent with two children or fewer needs no plan: it merges in blocked-by order.
   const planless = (blocker: string | null) => (data: Json) => {
@@ -1093,6 +1107,7 @@ test('board merge: no plan, a draft, plan holds, plan order for every linked ite
   expect([planless(null), planless('CLOSED'), planless('OPEN')].map(parent => mergeReason({ parent }))).toEqual(['eligible', 'eligible', 'merge_order']);
   expect(decision({ parent: planless('OPEN'), pulls: (data) => { data.repository.pr1491.body += '\nCloses #1479\n'; } }))
     .toMatchObject({ reason: 'merge_order', detail: 'blocker #1479 is closed only by this PR; split the PR' });
+  expect(decision({ parent: (data) => { planless('OPEN')(data); bundleClaims('feat/1475-hc-transport')(data); }, pulls: closesBoth })).toMatchObject({ reason: 'not_accepted' });
   // The Low PR is accepted on the provisional tier_low path, which an unattended merge does not take.
   expect(replay(mergeReplay({ ...lowGreen, order: [1479, 1475] })).pull_requests.find(pr => pr.number === 1494)!.acceptance).toMatchObject({ status: 'accepted', via: 'tier_low' });
 });
@@ -1559,7 +1574,7 @@ test('rules A12 to A18 fire past their threshold with their message, not at it, 
   expect(messages(base)).toEqual([]);
 
   const cases: readonly [string, (age: number) => BoardV1, number, string][] = [
-    ['A12', age => item({ claim: { status: 'active', url, created_at: at(age), role: 'writer' } }), A12_NO_PR_MS, `#1477 has a writer claim for 121 min, no PR and no claim status (${url})`],
+    ['A12', age => item({ claim: { status: 'active', url, created_at: at(age), role: 'writer', bundle: null, branch: null } }), A12_NO_PR_MS, `#1477 has a writer claim for 121 min, no PR and no claim status (${url})`],
     ['A13', age => ({ ...base, execution: { status: 'observed', terminals: [terminal(now - age)] } }), A13_IDLE_MS, 'worker t1 is idle for 11 min and #1477 has no PR'],
     ['A14', age => pr({ required_check: { status: 'failure', completed_at: at(age), contexts: [] } }), A14_RED_MS, `#1494 has a failed required check on ${sha} for 31 min`],
     ['A15', age => pr({ review_fail: { url, recorded_at: at(age) } }), A15_FAIL_MS, `#1494 has a FAIL record on ${sha} for 61 min and no new head (${url})`],
@@ -1592,6 +1607,17 @@ test('rules A12 to A18 fire past their threshold with their message, not at it, 
   expect([messages(truncated), skipped(truncated)]).toEqual([[], [['A12', 'comments_truncated', '#1477'], ['A16', 'comments_truncated', '#1477']]]);
   expect(skipped({ ...base, execution: { status: 'observed', terminals: [terminal(null)] } })).toEqual([['A13', 'status_time_missing', 't1']]);
   expect(skipped(pr({ merge_readiness: null, merge_readiness_observed_at: null }))).toEqual([['A18', 'readiness_missing', '#1494']]);
+
+  // A bundle claim of #1477 and #1479: #1494 closes #1479, so A12 and A13 stay silent on #1477, and A4 reads the claim status of either issue.
+  const idle = { ...base, execution: { status: 'observed', terminals: [terminal(now - A13_IDLE_MS - MIN)] } } as const;
+  const bundled = (board: BoardV1) => item({ claim: { status: 'active', url, created_at: at(A12_NO_PR_MS + MIN), role: 'writer', bundle: [1477, 1479], branch: null } }, board);
+  const statusOn1479 = (board: BoardV1, created_at: string): BoardV1 => ({ ...board, items: board.items.map(entry => (entry.number === 1479
+    ? { ...entry, claim_status: { status_kind: 'observed', url, created_at, status: 'done', pr: 1494, head_sha: null } } : entry)) });
+  const a4 = (board: BoardV1) => evaluateBoardAttention(board).findings.filter(finding => finding.rule === 'A4').map(finding => [finding.issues, finding.pull_requests]);
+  const headAt = base.pull_requests.find(entry => entry.number === 1494)!.head_committed_at;
+  expect(messages(bundled(idle))).toEqual([]);
+  expect(a4(statusOn1479(bundled(idle), '2000-01-01T00:00:00Z'))).toEqual([[[1477], [1494]]]);
+  expect(a4(statusOn1479(bundled(idle), new Date(Date.parse(headAt) + MIN).toISOString()))).toEqual([]);
 });
 
 test('A19 fires for a done review seat whose pull request has no record of that seat after the seat status time', () => {
