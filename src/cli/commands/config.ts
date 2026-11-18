@@ -4,6 +4,7 @@ import { globalRuntimeScope, withRuntimeTransactionLock } from '../../effects/lo
 import { openHostConfigGate } from '../../effects/host-config/gate';
 import { collectRetired, configDiff, configStatus, type ConfigStatus, type FragmentDiff, type GcResult } from '../../effects/host-config/inspect';
 import { hostConfigPaths, readLedger, readProjectedLedger, resolveHostPath } from '../../effects/host-config/store';
+import { errorTextWithoutValues } from '../../core/host-config/types';
 import { migrateInstallState } from '../installer/install-state-migration';
 import { exitCodeOf, revertItem, type UninstallItem } from '../installer/uninstall';
 
@@ -19,8 +20,8 @@ export interface ConfigCommandResult {
 }
 
 function failure(error: unknown): ConfigCommandResult {
-  const message = `[config] ${(error as Error).message}`;
-  return { exitCode: 2, lines: [message], json: { error: (error as Error).message } };
+  const text = errorTextWithoutValues(error);
+  return { exitCode: 2, lines: [`[config] ${text}`], json: { error: text } };
 }
 
 function statusLines(status: ConfigStatus): string[] {
