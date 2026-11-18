@@ -629,5 +629,6 @@ test('a rollback reads a ledger snapshot of an older protocol, which a parent to
   const snapshot = Buffer.from(JSON.stringify({ ...older, protocol: 2 }));
   f.gate().apply([f.change(f.a, 'on')]);
   expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
-  expect([readFileSync(f.a, 'utf8'), f.ledger()]).toEqual(['keep=1\n', { ...older, protocol: 3, retired: [], recovery: [] }]);
+  // A clean rollback leaves the snapshot's protocol 2 bytes, which the older parent reads.
+  expect([readFileSync(f.a, 'utf8'), readFileSync(join(f.root, 'ledger.json'))]).toEqual(['keep=1\n', snapshot]);
 });

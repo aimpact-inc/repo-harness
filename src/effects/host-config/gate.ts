@@ -48,6 +48,7 @@ import {
   replaceTarget,
   resolveHostPath,
   writeLedger,
+  writeLedgerBytes,
   type HostConfigPaths,
 } from './store';
 import { isPathInside } from '../path-containment';
@@ -1099,6 +1100,8 @@ export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer 
   const restored: HostConfigLedger = { ...before, files, paths: pathRecords, directories: [...before.directories, ...kept] };
   // No ledger before the transaction and no record left: the ledger file goes, as it was.
   if (snapshot === null && JSON.stringify(restored) === JSON.stringify(EMPTY_LEDGER)) rmSync(paths.ledger, { force: true });
+  // A clean rollback puts the snapshot back as it was: a parent of an older protocol reads its ledger again.
+  else if (snapshot !== null && JSON.stringify(restored) === JSON.stringify(before)) writeLedgerBytes(paths, snapshot);
   else writeLedger(paths, restored);
   return { unresolved };
 }

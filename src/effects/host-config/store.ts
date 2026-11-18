@@ -313,7 +313,12 @@ export function projectedLedgerPaths(paths: HostConfigPaths): HostConfigLedger['
 }
 
 export function writeLedger(paths: HostConfigPaths, ledger: HostConfigLedger): void {
-  publishFileByRename(paths.ledger, Buffer.from(`${JSON.stringify(ledger, null, 2)}\n`, 'utf8'), `${paths.ledger}.${randomUUID()}.tmp`);
+  writeLedgerBytes(paths, Buffer.from(`${JSON.stringify(ledger, null, 2)}\n`, 'utf8'));
+}
+
+/** Put back a transaction's ledger snapshot byte for byte, in the protocol that its writer reads. */
+export function writeLedgerBytes(paths: HostConfigPaths, bytes: Buffer): void {
+  publishFileByRename(paths.ledger, bytes, `${paths.ledger}.${randomUUID()}.tmp`);
 }
 
 // ---- vault --------------------------------------------------------------
