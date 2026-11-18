@@ -13,7 +13,7 @@ import { migrateCodexConfigRecords } from './installer/codex-config-migration';
 import { Command, CommanderError } from 'commander';
 import { randomBytes } from 'crypto';
 import { existsSync, lstatSync, realpathSync } from 'fs';
-import { dirname, join } from 'path';
+import { dirname, join, resolve } from 'path';
 import { createInterface } from 'readline/promises';
 import { fileURLToPath } from 'url';
 import { runInstall, runUninstall } from './commands/install';
@@ -36,6 +36,7 @@ import { buildHerdrCommand } from './commands/herdr';
 import { buildEventsCommand } from './commands/events';
 import { buildCapabilityCommand } from './commands/capability';
 import { buildDocsCommand } from './commands/docs';
+import { buildConfigCommand } from './commands/config';
 import { buildMcpCommand } from './commands/mcp';
 import { buildRunCommand } from './commands/run';
 import { buildVerifyCommand } from './commands/verify';
@@ -943,11 +944,12 @@ export function buildProgram(): Command {
     .option('--target <target>', `Target host: ${TARGET_HELP}`, 'both')
     .option('--location <location>', `Install location: ${LOCATION_HELP}`, 'global')
     .option('--dry-run', 'Preview cleanup without filesystem writes')
+    .option('--remove-edited-block <path>', 'Also remove the rules block in this file when you edited it; the whole file goes to the vault first (repeatable)', (value: string, previous: string[]) => [...previous, resolve(value)], [] as string[])
     .option('--json', 'Output the cleanup result as JSON')
-    .action((rawOpts: { target: string; location: string; dryRun?: boolean; json?: boolean }) => {
+    .action((rawOpts: { target: string; location: string; dryRun?: boolean; json?: boolean; removeEditedBlock: string[] }) => {
       const target = assertTarget(rawOpts.target, 'uninstall');
       const location = assertLocation(rawOpts.location, 'uninstall');
-      const uninstallAdapters = () => runUninstall({ target, location, dryRun: rawOpts.dryRun });
+      const uninstallAdapters = () => runUninstall({ target, location, dryRun: rawOpts.dryRun, removeEditedBlocks: rawOpts.removeEditedBlock });
       const result = uninstallAdapters();
       if (rawOpts.json) console.log(JSON.stringify(result, null, 2));
       else for (const line of result.lines) console.log(line);
@@ -1004,6 +1006,7 @@ export function buildProgram(): Command {
   program.addCommand(pluginCommand(buildEventsCommand(), 'peer-runtime'));
   program.addCommand(buildCapabilityCommand());
   program.addCommand(buildDocsCommand());
+  program.addCommand(buildConfigCommand());
   const mcp = buildMcpCommand();
   for (const name of ['serve', 'doctor']) {
     const command = mcp.commands.find(candidate => candidate.name() === name);
