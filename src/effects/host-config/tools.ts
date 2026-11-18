@@ -182,7 +182,7 @@ interface PlannedRemoval {
   readonly entries: ToolRemovalEntry[];
   readonly steps: RevertStep[];
   readonly failures: ToolRemovalFailure[];
-  /** The removable tools: their created directories go when empty, and a record with nothing left goes. */
+  /** Every recorded tool: a record with nothing left goes. The created directories of a removable tool go when empty. */
   readonly tools: ToolId[];
 }
 
@@ -198,7 +198,9 @@ function withoutPathEntry(ledger: HostConfigLedger, tool: ToolId): HostConfigLed
 }
 
 /**
- * The plan of every removable tool record (Bun is not removable). The user
+ * The plan of every tool record. A removable tool loses each entry that holds
+ * what rh wrote; a tool that is not removable (Bun) loses nothing. Each record
+ * releases the entries that are gone, as `releaseAbsentTools` does. The user
  * PATH value is read once; each entry removal writes from the value that the
  * one before it left, so the compare and set of each write holds.
  */
@@ -206,11 +208,11 @@ function planRemoval(ledger: HostConfigLedger, port: () => UserPathPort): Planne
   const planned: PlannedRemoval = { entries: [], steps: [], failures: [], tools: [] };
   let user: { readonly port: UserPathPort; value: UserPathValue } | null = null;
   for (const [tool, record] of Object.entries(ledger.tools) as [ToolId, ToolRecord][]) {
-    if (!record.removable) continue;
     planned.tools.push(tool);
     for (const [key, { committed }] of Object.entries(record.paths)) {
       const now = observePathEntry(key);
       const action = now === null ? 'already_absent' : sameCommitted(now, committed) ? 'removed' : 'kept_edited';
+      if (!record.removable && action !== 'already_absent') continue;
       planned.entries.push({ tool, path: key, kind: 'entry', action });
       if (action === 'kept_edited') continue;
       const commit = (state: HostConfigLedger) => withoutPath(state, tool, key);
@@ -241,6 +243,7 @@ function planRemoval(ledger: HostConfigLedger, port: () => UserPathPort): Planne
       planned.steps.push({ kind: 'release', commit });
       continue;
     }
+    if (!record.removable) continue;
     const next = removeUserPathEntry(user.value, pathEntry);
     if (next === null) { planned.entries.push({ tool, path: label, kind: 'user_path', action: 'kept_edited' }); continue; }
     const expected = user.value;
@@ -281,7 +284,8 @@ export function removeTools(env: NodeJS.ProcessEnv, port: () => UserPathPort, ex
   const tools = { ...state.tools };
   for (const tool of planned.tools) {
     const record = tools[tool]!;
-    const kept = removeCreatedDirectories(record.directories);
+    const present = record.directories.filter((directory) => lstatSync(directory, { throwIfNoEntry: false }));
+    const kept = ledger.tools[tool]!.removable ? removeCreatedDirectories(present) : present;
     if (!Object.keys(record.paths).length && !record.path_entry) delete tools[tool];
     else tools[tool] = { ...record, directories: record.directories.filter((directory) => kept.includes(directory)) };
   }

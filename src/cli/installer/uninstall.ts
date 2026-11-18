@@ -194,7 +194,9 @@ function planTools(env: NodeJS.ProcessEnv, gate: HostConfigGate, opts: Uninstall
       const action = entry.action === 'removed' && entry.kind === 'user_path' ? 'reverted' : item.action;
       return { path: entry.path, action, reason: `${entry.tool}: ${item.reason}` };
     });
-    const left = tools.filter(([, record]) => !record.removable);
+    const gone = new Set(removal.filter((entry) => entry.action === 'already_absent').map((entry) => entry.path));
+    const left = tools.filter(([, record]) => !record.removable && (Object.keys(record.paths).some((key) => !gone.has(key))
+      || (record.path_entry !== undefined && !gone.has(userPathLabel(record.path_entry.entry)))));
     if (left.length) items.push({ path: paths.ledger, action: 'kept', reason: `shared tools that rh installed stay: ${left.map(([tool, record]) => toolSummary(tool, record)).join('; ')}` });
     return { items, released: [], removal };
   }
@@ -449,7 +451,10 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
         throw new Error(`configuration changed after preview: ${hostConfigPaths(env).ledger}`);
       }
       if (tools.removal.length) {
-        for (const failure of removeTools(env, userPathPort(env, hostConfigPaths(env).harness), tools.removal)) unresolved(failure.path, `${failure.tool}: ${failure.reason}`);
+        // A failed removal replaces the planned `removed` item of its entry.
+        for (const failure of removeTools(env, userPathPort(env, hostConfigPaths(env).harness), tools.removal)) {
+          items[items.findIndex((item) => item.path === failure.path && item.reason.startsWith(`${failure.tool}: `))] = { path: failure.path, action: 'unresolved', reason: `${failure.tool}: ${failure.reason}` };
+        }
       }
       for (const path of [...originals.keys()]) {
         const parent = dirname(path);

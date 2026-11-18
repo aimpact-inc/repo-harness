@@ -623,7 +623,7 @@ test.each([
 // retires every claim before the first unlink or registry write): `ledger write fails` (nothing goes, the claims stay), `unlink fails` and
 // `registry write fails` (the entry stays with no claim, so a later run keeps it). `preexisting`: an hc on PATH before install gets no record.
 test.each([
- {platform:'unix',change:'none'},{platform:'windows',change:'none'},{platform:'windows',change:'created value'},{platform:'unix',change:'dry run'},
+ {platform:'unix',change:'none'},{platform:'windows',change:'none'},{platform:'windows',change:'created value'},{platform:'unix',change:'dry run'},{platform:'unix',change:'bun absent'},
  {platform:'unix',change:'edited'},{platform:'windows',change:'edited'},{platform:'windows',change:'kind'},{platform:'unix',change:'absent'},
  {platform:'unix',change:'preexisting'},{platform:'unix',change:'ledger write fails'},{platform:'unix',change:'unlink fails'},{platform:'windows',change:'registry write fails'},
 ])('rh uninstall --with-tools removes the herdr-core entries and the PATH entry that still hold what rh wrote ($platform, $change)',async({platform,change})=>{
@@ -646,11 +646,15 @@ test.each([
   await installHerdrCore(root,env,windows);
   const installedRegistry=existsSync(registry)?readFileSync(registry,'utf8'):null;
   const removedAll=[...entries.map((name)=>[join(dir,name),'restored']),...(windows?[[label,'reverted']]:[])];
-  if(change==='none'||change==='created value'||change==='dry run'){
+  if(change==='none'||change==='created value'||change==='dry run'||change==='bun absent'){
+   // Bun is never removed, but a recorded Bun binary that is gone loses its record in the same run.
+   const bun=join(home,'.bun','bin','bun');
+   if(change==='bun absent'){const file=join(config,'ledger.json'),state=JSON.parse(readFileSync(file,'utf8'));state.tools.bun={installed_by:'rh-bootstrap',version:'1.3.0',paths:{[bun]:{committed:{type:'file',sha256:`sha256:${'0'.repeat(64)}`}}},directories:[],removable:false};writeFileSync(file,JSON.stringify(state));}
    const preview=change==='dry run'?withTools(true):null;
    if(preview){expect([toolItems(preview),existsSync(join(dir,'hc'))]).toEqual([removedAll,true]);}
    const result=withTools();
    expect([result.exitCode,toolItems(result),hostTree(home),ledger(home).tools]).toEqual([0,removedAll,'',{}]);
+   if(change==='bun absent')expect(result.items.filter((item)=>item.reason.startsWith('bun: ')||item.reason.includes('shared tools'))).toEqual([{path:bun,action:'note',reason:'bun: already absent; the tool record goes'}]);
    // The PATH value keeps its kind and the other entries; a value that rh created is deleted.
    if(windows)expect(existsSync(registry)?JSON.parse(readFileSync(registry,'utf8')):null).toEqual(change==='created value'?null:userPath);
    return;
@@ -695,14 +699,15 @@ test.each([
   }
   if(change==='unlink fails'){
    const failed=locked(dir,withTools);
-   expect([failed.exitCode,readdirSync(dir).sort(),ledger(home).tools]).toEqual([1,['hc','herdr-core'],{}]);
-   expect(failed.items.filter((item)=>item.action==='unresolved'&&item.reason.includes('could not be removed (EACCES)')).map((item)=>item.path)).toEqual([join(dir,'herdr-core'),join(dir,'hc')]);
+   // Each entry has one item, and it says that the entry stays.
+   expect([failed.exitCode,toolItems(failed),readdirSync(dir).sort(),ledger(home).tools]).toEqual([1,[[join(dir,'herdr-core'),'unresolved'],[join(dir,'hc'),'unresolved']],['hc','herdr-core'],{}]);
+   expect(failed.items.filter((item)=>item.reason.includes('could not be removed (EACCES)')).map((item)=>item.path)).toEqual([join(dir,'herdr-core'),join(dir,'hc')]);
   }
   if(change==='registry write fails'){
    writeFileSync(`${registry}.fail`,'write');
    const failed=withTools();
    rmSync(`${registry}.fail`);
-   expect([failed.exitCode,existsSync(dir),readFileSync(registry,'utf8'),ledger(home).tools]).toEqual([1,false,installedRegistry,{}]);
+   expect([failed.exitCode,toolItems(failed),existsSync(dir),readFileSync(registry,'utf8'),ledger(home).tools]).toEqual([1,[...removedAll.slice(0,-1),[label,'unresolved']],false,installedRegistry,{}]);
    expect(failed.items.filter((item)=>item.action==='unresolved'&&item.path===label).map((item)=>item.reason)).toEqual(['herdr-core: the user Path write exited with status 1; rh no longer records the entry; remove it by hand']);
   }
   // No claim is left: the entries that stay or come back by hand are not rh's.
