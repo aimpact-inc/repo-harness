@@ -817,7 +817,10 @@ test.each([
 
 // Revert order (P4, #2854): a claim whose write deletes an entry leaves the ledger before the write; a restore keeps its claim and vault
 // copy until it lands; a rollback never brings back a claim released on observation. A locked directory forces the failure.
-test.each(['created path', 'replaced restore fails', 'replaced ledger write fails', 'created file', 'rollback'] as const)('revert order: %s', (label) => {
+// An `add` taken out of a user file with no backup is a removal too (#3227); a restore of backup bytes still writes first.
+test.each(['created path', 'replaced restore fails', 'replaced ledger write fails', 'created file', 'rollback',
+  'added text ledger write fails', 'added text write fails', 'added text rollback', 'backed-up added text ledger write fails', 'backed-up added text write fails',
+  'override restore ledger write fails'] as const)('revert order: %s', (label) => {
   const f = fixture();
   const agents = join(f.home, '.claude', 'agents');
   const [file, user] = [join(agents, 'a.md'), join(agents, 'u.md')];
@@ -838,6 +841,69 @@ test.each(['created path', 'replaced restore fails', 'replaced ledger write fail
     expect(f.ledger().files[f.b]).toBeUndefined();
     expect(f.gate().revert([f.b])).toEqual([]);
     expect(readFileSync(f.b, 'utf8')).toBe('rh=on\n');
+  } else if (label.startsWith('added text')) {
+    // The global-working-rules block that rh added to the user's file, with no backup.
+    const text = join(agents, 'rules.md');
+    writeFileSync(text, 'mine\n');
+    f.gate().apply([{ path: text, backup: 'overrides-only', fragments: [{ owner: 'o1', selector: 'global-working-rules', kind: 'add', strategy: markedBlock, value: RULES }] }]);
+    const added = readFileSync(text, 'utf8');
+    expect({ kind: f.ledger().files[text].kind, backup: f.ledger().files[text].backup, block: added.includes(RULES) }).toEqual({ kind: 'text_block', backup: null, block: true });
+    if (label === 'added text ledger write fails') {
+      // The retire fails first, so the block and its claim both stay; a rerun takes the block out.
+      locked(f.root, () => expect(() => f.gate().revert([text])).toThrow());
+      expect({ bytes: readFileSync(text, 'utf8'), fragments: f.ledger().fragments.length }).toEqual({ bytes: added, fragments: 1 });
+      expect(f.gate().revert([text])).toEqual([{ path: text, action: 'text_removed', baseline: 'proved' }]);
+      expect(readFileSync(text, 'utf8')).toBe('mine\n');
+    } else if (label === 'added text write fails') {
+      // The claim went before the write, as after a kill there: the identical block is no longer rh's, and a later revert keeps it.
+      locked(agents, () => expect(() => f.gate().revert([text])).toThrow());
+      expect({ record: f.ledger().files[text], fragments: f.ledger().fragments }).toEqual({ record: undefined, fragments: [] });
+      expect(f.gate().revert([text])).toEqual([]);
+      expect(readFileSync(text, 'utf8')).toBe(added);
+    } else {
+      // A claim released on observation (the file is gone) stays released through a rollback; a released backup stays retired, so gc can delete it.
+      f.gate().apply([f.change(f.a, 'on')]);
+      const backup = f.ledger().files[f.a].backup;
+      const snapshot = readFileSync(join(f.root, 'ledger.json'));
+      rmSync(text);
+      rmSync(f.a);
+      expect(f.gate().revert([text, f.a]).map((entry) => entry.action)).toEqual(['already_absent', 'already_absent']);
+      expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
+      expect({ files: f.ledger().files, fragments: f.ledger().fragments, retired: f.ledger().retired.map((entry: { sha256: string }) => entry.sha256) })
+        .toEqual({ files: {}, fragments: [], retired: [backup] });
+      writeFileSync(text, added);
+      expect(f.gate().revert([text])).toEqual([]);
+      expect(readFileSync(text, 'utf8')).toBe(added);
+    }
+  } else if (label.startsWith('backed-up added text')) {
+    // Only `add` fragments in a file with a backup: the whole-file write of the backup takes out rh's bytes only, so it is a removal too.
+    const text = join(agents, 'k.conf');
+    writeFileSync(text, 'keep=1\n');
+    f.gate().apply([f.change(text, 'on')]);
+    const record = f.ledger().files[text];
+    expect({ kind: record.kind, backup: f.vault(record.backup) }).toEqual({ kind: 'text_block', backup: 'keep=1\n' });
+    if (label === 'backed-up added text ledger write fails') {
+      // The retire fails first: no write lands while the claim stays, so no later run can take out a line that the user put back.
+      locked(f.root, () => expect(() => f.gate().revert([text])).toThrow());
+      expect({ bytes: readFileSync(text, 'utf8'), record: f.ledger().files[text] }).toEqual({ bytes: 'keep=1\nrh=on\n', record });
+      expect(f.gate().revert([text]).map((entry) => entry.action)).toEqual(['text_removed']);
+      expect(readFileSync(text, 'utf8')).toBe('keep=1\n');
+    } else {
+      // The claim went before the write, as after a kill there: the identical line is the user's now, and a later revert keeps it.
+      locked(agents, () => expect(() => f.gate().revert([text])).toThrow());
+      expect(f.ledger().files[text]).toBeUndefined();
+      expect(f.gate().revert([text])).toEqual([]);
+      expect(readFileSync(text, 'utf8')).toBe('keep=1\nrh=on\n');
+    }
+  } else if (label === 'override restore ledger write fails') {
+    // A whole-file restore of user bytes that an override replaced writes first; the stale record then no longer matches, so a rerun writes nothing.
+    f.select(keyLine, { keep: '2' });
+    const record = f.ledger().files[f.a];
+    expect(readFileSync(f.a, 'utf8')).toBe('keep=2\n');
+    locked(f.root, () => expect(() => f.gate().revert([f.a])).toThrow());
+    expect({ bytes: readFileSync(f.a, 'utf8'), record: f.ledger().files[f.a] }).toEqual({ bytes: 'keep=1\n', record });
+    f.gate().revert([f.a]);
+    expect(readFileSync(f.a, 'utf8')).toBe('keep=1\n');
   } else if (label === 'rollback') {
     f.gate().writePaths([{ path: file, owner: 'core', entry: entry('rh\n') }, { path: user, owner: 'core', entry: entry('rh\n'), replace: true }]);
     const snapshot = readFileSync(join(f.root, 'ledger.json'));

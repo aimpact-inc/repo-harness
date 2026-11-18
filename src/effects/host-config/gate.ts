@@ -900,9 +900,10 @@ export function planPathRevert(key: string, record: PathRecord): HostConfigRever
 /** One write of a revert and the ledger change that it makes. */
 interface RevertStep {
   /**
-   * `delete`: the write takes an entry away, so its claim leaves the ledger
-   * before it. `restore`: the write gives the user's bytes back, so its claim
-   * stays until it lands. `release`: no write; the claim goes at once.
+   * `delete`: the write takes an entry or rh's added text away, so its claim
+   * leaves the ledger before it. `restore`: the write gives the user's bytes
+   * back, so its claim stays until it lands. `release`: no write; the claim
+   * goes at once.
    */
   readonly kind: 'delete' | 'restore' | 'release';
   readonly write?: () => void;
@@ -911,7 +912,8 @@ interface RevertStep {
 
 /**
  * The order of every revert (P4, #2854). One durable ledger write takes out
- * each claim whose write deletes an entry, and each release, before the first
+ * each claim whose write deletes an entry or only takes out rh's added text
+ * (#3227), and each release, before the first
  * write: a failure or a kill then leaves an entry with no claim, never a claim
  * without its entry, so a later run cannot delete an entry that the user put
  * back. The deletions run next. A restore keeps its claim and vault copy
@@ -976,6 +978,8 @@ interface FragmentRevert {
   readonly kept: readonly string[];
   /** Records that went with no edit, since their text was already at the inverse: the user changed the file there. */
   readonly atInverse: number;
+  /** An edit set text back from the backup; with none, the revert only took out rh's added text. */
+  readonly restored: boolean;
 }
 
 /**
@@ -991,6 +995,7 @@ function revertFragments(fileFormat: FileFormat | undefined, content: string, re
   const removed: FragmentRecord[] = [];
   const kept: string[] = [];
   let atInverse = 0;
+  let restored = false;
   for (const record of records) {
     const format = fragmentFormat(fileFormat, record.selector);
     // A file that the strategy can no longer read keeps every fragment.
@@ -1009,8 +1014,9 @@ function revertFragments(fileFormat: FileFormat | undefined, content: string, re
     const edit = record.kind === 'add' ? format.remove(content, record.selector, all) : format.restore(content, record.selector, backup!, all);
     content = content.slice(0, edit.at) + edit.inserted + content.slice(edit.at + edit.removed.length);
     removed.push(record);
+    restored ||= record.kind !== 'add';
   }
-  return { content, removed, kept, atInverse };
+  return { content, removed, kept, atInverse, restored };
 }
 
 /**
@@ -1055,7 +1061,8 @@ export interface FileRevertInput {
 
 export interface FileRevertPlan {
   readonly entry: HostConfigRevertEntry;
-  readonly write: { readonly kind: 'remove' } | { readonly kind: 'replace'; readonly content: Buffer } | null;
+  /** `restores`: the write puts user bytes back; false when it only takes out rh's added text, which makes it a removal. */
+  readonly write: { readonly kind: 'remove' } | { readonly kind: 'replace'; readonly content: Buffer; readonly restores: boolean } | null;
   /** `drop`: the file record goes; `update`: it stays and `committed` follows the write; `keep`: it stays as it is. */
   readonly record: 'drop' | 'update' | 'keep';
   readonly removed: readonly FragmentRecord[];
@@ -1092,7 +1099,8 @@ function planRevertWrite(input: FileRevertInput): FileRevertPlan {
     if (kind === 'created') return { entry: { path, action: 'removed' }, write: { kind: 'remove' }, record: 'drop', removed: all };
     const backup = input.backup();
     if (input.bytes !== null && backup.equals(input.bytes)) return { entry: { path, action: 'released' }, write: null, record: 'drop', removed: all };
-    return { entry: { path, action: 'text_removed' }, write: { kind: 'replace', content: backup }, record: 'drop', removed: all };
+    // The file is exactly what rh last wrote over its backup: with only `add` fragments, the backup is the file without rh's bytes.
+    return { entry: { path, action: 'text_removed' }, write: { kind: 'replace', content: backup, restores: all.some((record) => record.kind !== 'add') }, record: 'drop', removed: all };
   }
   if (!input.existed || input.bytes === null) return { entry: { path, action: 'kept_edited', kept: own.map((entry) => entry.selector) }, write: null, record: 'keep', removed: [] };
   const original = decode(input.bytes, path);
@@ -1105,13 +1113,13 @@ function planRevertWrite(input: FileRevertInput): FileRevertPlan {
   if (filtered || result.kept.length || remaining.length) {
     // The file keeps its record; `committed` follows the write, and an outside edit stays recorded.
     const action = result.kept.length || !removed.size ? 'kept_edited' : changed ? 'text_removed' : 'released';
-    return { entry: withKept(action), write: changed ? { kind: 'replace', content } : null, record: changed ? 'update' : 'keep', removed: result.removed };
+    return { entry: withKept(action), write: changed ? { kind: 'replace', content, restores: result.restored } : null, record: changed ? 'update' : 'keep', removed: result.removed };
   }
   // A changed file with no fragment to take out (a created file) stays with its record.
   if (!removed.size && !(kind === 'text_block' && !input.hasBackup)) return { entry: withKept('kept_edited'), write: null, record: 'keep', removed: [] };
   // An empty created file goes only when this revert took out all of rh's text: a fragment that the user already took out proves the file is the user's now.
   const empty = kind === 'created' && result.atInverse === 0 && all.some((record) => fragmentFormat(format, record.selector)?.empty(result.content) === true);
-  const write = empty ? { kind: 'remove' as const } : changed ? { kind: 'replace' as const, content } : null;
+  const write = empty ? { kind: 'remove' as const } : changed ? { kind: 'replace' as const, content, restores: result.restored } : null;
   return { entry: withKept(empty ? 'removed' : changed ? 'text_removed' : 'released'), write, record: 'drop', removed: result.removed };
 }
 
@@ -1210,7 +1218,7 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
     };
     steps.push(write === null ? { kind: 'release', commit }
       : write.kind === 'remove' ? { kind: 'delete', commit, write: () => removeTarget(path, current) }
-        : { kind: 'restore', commit, write: () => replaceTarget(path, write.content, current) });
+        : { kind: write.restores ? 'restore' : 'delete', commit, write: () => replaceTarget(path, write.content, current) });
   }
   if (dryRun) return report;
   const state = retireThenDestroy(paths, ledger, steps);
@@ -1320,14 +1328,19 @@ const fragmentKey = (record: FragmentRecord): string => `${record.owner}\0${reco
  * unrecorded text the transaction removed (a new `external_backup` and no
  * fragment change) gets its record before the transaction only when the
  * caller already put the file back to that backup; otherwise the record
- * stays. Every other entry stays and is returned.
+ * stays. A file record that the transaction dropped stays dropped with its
+ * fragments and the retirement of its vault copies (P4, #3227): this rollback
+ * does not undo a file revert, so a claim from the snapshot would have no text
+ * on disk. Every other entry stays and is returned.
  */
 export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer | null, transaction: string): HostConfigRollbackResult {
   const paths = hostConfigPathsAt(harness);
   const before = snapshot === null ? EMPTY_LEDGER : parseSnapshotLedger(snapshot, `${paths.ledger} (transaction snapshot)`);
   const now = readLedger(paths);
   const unresolved: string[] = [];
-  const files = { ...before.files };
+  const releasedFiles = new Set(Object.keys(before.files).filter((path) => !now.files[path]));
+  const files = Object.fromEntries(Object.entries(before.files).filter(([path]) => !releasedFiles.has(path)));
+  const releasedMaterial = new Set([...releasedFiles].flatMap((path) => materialOf(before.files[path]!)));
   for (const path of Object.keys(now.files) as HostPath[]) {
     const record = now.files[path]!;
     const previous = before.files[path];
@@ -1382,7 +1395,8 @@ export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer 
   }
   const pathRecords = rollbackWholePaths(paths, before, now, transaction, unresolved);
   const kept = removeCreatedDirectories(now.directories.filter((directory) => !before.directories.includes(directory)));
-  const restored: HostConfigLedger = { ...before, files, paths: pathRecords, directories: [...before.directories, ...kept], tools: rollbackTools(before.tools, now.tools) };
+  const restored: HostConfigLedger = { ...before, files, fragments: before.fragments.filter((entry) => !releasedFiles.has(entry.file)),
+    retired: [...before.retired.filter((entry) => !releasedMaterial.has(entry.sha256)), ...now.retired.filter((entry) => releasedMaterial.has(entry.sha256))], paths: pathRecords, directories: [...before.directories, ...kept], tools: rollbackTools(before.tools, now.tools) };
   // No ledger before the transaction and no record left: the ledger file goes, as it was.
   if (snapshot === null && JSON.stringify(restored) === JSON.stringify(EMPTY_LEDGER)) rmSync(paths.ledger, { force: true });
   // A clean rollback puts the snapshot back as it was: a parent of an older protocol reads its ledger again.
