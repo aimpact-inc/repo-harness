@@ -5,7 +5,7 @@ import { basename, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { createHash } from 'crypto';
 import { stagedSkillRoot, hostSkillRoot, providerSkillLock, type ProviderSkillLock } from '../../effects/host-skill-roots';
-import { piPackagePresent, removePiPackage } from './pi-package';
+import { ownedPiPackages, piPackagePresent, removePiPackage } from './pi-package';
 import { piExecutable } from '../../effects/pi-executable';
 import { globalContextPath, inspectUnrecordedGlobalRules, previewGlobalRulesAdoptedRevert } from './global-context';
 import { removeRuntimeStateIgnoreBlock } from '../../effects/adoption/gitignore-plan';
@@ -113,7 +113,9 @@ function readUninstallState(opts: UninstallOptions) {
   const state = projected?.state ?? readInstallState(env);
   // A dry run reads the ledger as the schema move would leave it.
   const records = projected ? projected.records : !state ? {} : opts.dryRun ? partitionPathRecords(env, projectedLedgerPaths(hostConfigPaths(env))).records : readPathRecords(env);
-  return { state, records, lock, files, codexMigration, jsonMigration };
+  // The Pi package entries that the ledger records under owner `pi`, or that the migration would record.
+  const piPackages = opts.target !== 'both' ? [] : projected ? projected.piPackages : ownedPiPackages(env, openHostConfigGate({ env, preview: opts.dryRun === true }));
+  return { state, records, piPackages, lock, files, codexMigration, jsonMigration };
 }
 
 const REVERT_REASONS: Readonly<Record<HostConfigRevertEntry['action'], string>> = {
@@ -184,6 +186,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   const unresolved = (path: string, reason: string): void => { items.push({ path, action: 'unresolved', reason }); };
   let state: ReturnType<typeof readInstallState> = null;
   let records: PathRecords = {};
+  let piPackages: readonly string[] = [];
   let files: ReturnType<typeof hostConfigFiles>;
   let codexMigration: ReturnType<typeof planCodexConfigMigration>;
   let jsonMigration: ReturnType<typeof planJsonConfigMigration>;
@@ -192,7 +195,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
     const targets = hostConfigFiles(home, opts.target);
     if (!opts.dryRun && targets.codex) migrateCodexConfigRecords(env);
     if (!opts.dryRun && targets.json.length) migrateJsonConfigRecords(env, targets.json);
-    ({ state, records, lock, files, codexMigration, jsonMigration } = readUninstallState(opts));
+    ({ state, records, piPackages, lock, files, codexMigration, jsonMigration } = readUninstallState(opts));
   } catch (error) { items.push(failedRead(error, configurationReceiptPath(home))); return result(); }
 
   const gate = openHostConfigGate({ env, preview: opts.dryRun === true });
@@ -256,7 +259,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
     } catch (error) { unresolved(files.codex, String((error as Error).message)); }
   }
 
-  for (const source of opts.target === 'both' ? state?.pi_packages ?? [] : []) {
+  for (const source of piPackages) {
     try {
       if (piExecutable(env) === null) {
         items.push({ path: source, action: 'kept', reason: 'pi not found on PATH; package removal skipped; ownership retained for retry' });
@@ -264,7 +267,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       }
       if (piPackagePresent(source, env)) {
         piRemovals.push(source);
-        items.push({ path: source, action: 'reverted', reason: 'transaction-owned Pi package entry through pi remove' });
+        items.push({ path: source, action: 'reverted', reason: 'recorded Pi package entry through pi remove; the entry is read back' });
       }
       removedPi.add(source);
     } catch (error) { unresolved(source, (error as Error).message); }
@@ -358,12 +361,10 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   let retireRecords = false;
   const recordsDigest = pathRecordsDigest(records);
   if (state) {
-    const pendingPi = state.pi_packages.filter((source) => !removedPi.has(source));
+    const pendingPi = piPackages.filter((source) => !removedPi.has(source));
     if (opts.target === 'both' && !pendingPi.length && !blocking(items)) {
       change(statePath, null, 'install state retired');
       retireRecords = true;
-    } else if (removedPi.size) {
-      change(statePath, `${JSON.stringify({ ...state, pi_packages: pendingPi, previous: null }, null, 2)}\n`, 'retain remaining ownership for retry/other host');
     }
   }
   items.push({ path: join(home, '.repo-harness'), action: 'kept', reason: 'archives, runtime history and the MCP config retained; third-party packages/plugins retained' });

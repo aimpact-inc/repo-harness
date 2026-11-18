@@ -18,12 +18,11 @@ function writeInstallStateFixture(plugins: readonly PluginId[]): void {
   const statePath = installStateFixturePath(process.env);
   fs.mkdirSync(path.dirname(statePath), { recursive: true });
   fs.writeFileSync(statePath, JSON.stringify({
-    protocol: 4,
+    protocol: 5,
     ...versions(plugins),
     selection: plugins === FULL_PLUGINS ? 'all' : plugins,
     transaction_id: `test-${plugins.join('-') || 'core'}`,
     applied_at: '2026-01-01T00:00:00.000Z',
-    pi_packages: [],
     previous: null,
   }));
 }
@@ -373,13 +372,12 @@ describe('status command (Phase 1C)', () => {
       fs.mkdirSync(path.dirname(statePath), { recursive: true });
       const { core } = versions([]);
       fs.writeFileSync(statePath, JSON.stringify({
-        protocol: 4,
+        protocol: 5,
         core,
         plugins: [{ id: 'not-a-real-plugin', version: core.version }],
         selection: 'all',
         transaction_id: 'test-txn',
         applied_at: '2026-01-01T00:00:00.000Z',
-        pi_packages: [],
         previous: null,
       }));
 
@@ -448,12 +446,11 @@ describe('status command (Phase 1C)', () => {
       const statePath = installStateFixturePath(process.env);
       fs.mkdirSync(path.dirname(statePath), { recursive: true });
       fs.writeFileSync(statePath, JSON.stringify({
-        protocol: 4,
+        protocol: 5,
         core: versions([]).core,
         selection: 'all',
         transaction_id: 'test-txn',
         applied_at: '2026-01-01T00:00:00.000Z',
-        pi_packages: [],
         previous: null,
       }));
 
@@ -471,13 +468,12 @@ describe('status command (Phase 1C)', () => {
       const statePath = installStateFixturePath(process.env);
       fs.mkdirSync(path.dirname(statePath), { recursive: true });
       fs.writeFileSync(statePath, JSON.stringify({
-        protocol: 4,
+        protocol: 5,
         core: versions([]).core,
         plugins: 'architecture,product',
         selection: 'all',
         transaction_id: 'test-txn',
         applied_at: '2026-01-01T00:00:00.000Z',
-        pi_packages: [],
         previous: null,
       }));
 

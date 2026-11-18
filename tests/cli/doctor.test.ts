@@ -25,7 +25,7 @@ import type { PathCommitted } from '../../src/core/host-config/types';
 import { pathRecordHost, pathRecordKey } from '../../src/effects/host-config/path-records';
 import { hostConfigPaths } from '../../src/effects/host-config/store';
 
-/** A protocol 4 state and one `created` path record per entry, as an install leaves them. */
+/** A protocol 5 state and one `created` path record per entry, as an install leaves them. */
 function seedRecordedInstall(env: NodeJS.ProcessEnv, plugins: readonly PluginId[], selection: 'all' | readonly PluginId[],
   records: readonly { readonly path: string; readonly owner: string; readonly committed: PathCommitted }[]): void {
   recordPluginSelection(env, plugins, selection === 'all' ? 'all' : [...selection]);
@@ -659,8 +659,8 @@ describe('doctor command (Phase 1C)', () => {
       fs.rmSync(logFile);
       const statePath = installStateFixturePath(env);
       fs.mkdirSync(path.dirname(statePath), { recursive: true });
-      fs.writeFileSync(statePath, JSON.stringify({ protocol: 4, ...versions(['product']), selection: ['product'], transaction_id: 'doctor',
-        applied_at: '2026-11-01T00:00:00.000Z', pi_packages: [], previous: null }));
+      fs.writeFileSync(statePath, JSON.stringify({ protocol: 5, ...versions(['product']), selection: ['product'], transaction_id: 'doctor',
+        applied_at: '2026-11-01T00:00:00.000Z', previous: null }));
       const unselected = JSON.parse(doctor().stdout).checks
         .filter((entry: { id: string }) => ['codegraph', 'codegraph-readiness', 'codex-codegraph-mcp', 'claude-codegraph-mcp', 'codegraph-index'].includes(entry.id))
         .map(({ id, status, detail }: { id: string; status: string; detail: string }) => ({ id, status, detail }));

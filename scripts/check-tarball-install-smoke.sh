@@ -515,8 +515,8 @@ const statePath = join(home, '.repo-harness', 'install-state.json');
 const ledgerPath = join(home, '.repo-harness', 'config', 'ledger.json');
 const agent = join(realpathSync(home), '.claude', 'agents', 'explorer.md');
 mkdirSync(dirname(ledgerPath), { recursive: true });
-writeFileSync(statePath, JSON.stringify({ protocol: 4, core: { version }, plugins: PLUGIN_IDS.map((id) => ({ id, version })), selection: 'all',
-  transaction_id: 'tarball-smoke', applied_at: new Date().toISOString(), pi_packages: [], previous: null }));
+writeFileSync(statePath, JSON.stringify({ protocol: 5, core: { version }, plugins: PLUGIN_IDS.map((id) => ({ id, version })), selection: 'all',
+  transaction_id: 'tarball-smoke', applied_at: new Date().toISOString(), previous: null }));
 writeFileSync(ledgerPath, JSON.stringify({ protocol: 3, files: {}, fragments: [], directories: [], retired: [], recovery: [], paths: { [agent]: {
   owner: 'core', host: 'claude', kind: 'created', baseline: { state: 'unknown' }, committed: { type: 'file', sha256: `sha256:${'0'.repeat(64)}` } } } }));
 JS_EOF

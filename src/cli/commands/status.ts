@@ -21,6 +21,8 @@ import {
 import { readJsonOrEmpty } from '../installer/shared';
 import type { Location } from '../installer/types';
 import { readInstallState } from '../installer/install-profile';
+import { ownedPiPackages, unmeasuredPiVersionLine } from '../installer/pi-package';
+import { piExecutable } from '../../effects/pi-executable';
 import {
   enabledPlugins,
   InstallStateError,
@@ -58,7 +60,9 @@ export interface StatusReport {
   };
   routes: { total: number; byEvent: Record<string, number> };
   installState:
-    | { recorded: true; core_version: string; plugins: readonly PluginId[]; selection: PluginSelection }
+    | { recorded: true; core_version: string; plugins: readonly PluginId[]; selection: PluginSelection;
+        /** The Pi version line when rh records a Pi package entry and the user's pi is not the measured version. */
+        pi_version_notice?: string }
     | { recorded: false }
     // install-state.json exists but the strict protocol 3 reader rejected it.
     // The code says which next step applies: protocol 1 and protocol 2 need
@@ -154,7 +158,9 @@ export function readInstallStateForStatus(): StatusReport['installState'] {
   try {
     const state = readInstallState();
     if (!state) return { recorded: false };
-    return { recorded: true, core_version: state.core.version, plugins: enabledPlugins(state), selection: state.selection };
+    const plugins = enabledPlugins(state);
+    const notice = plugins.includes('pi') && piExecutable() !== null && ownedPiPackages().length ? unmeasuredPiVersionLine() : null;
+    return { recorded: true, core_version: state.core.version, plugins, selection: state.selection, ...(notice ? { pi_version_notice: notice } : {}) };
   } catch (error) {
     if (!(error instanceof InstallStateError)) throw error;
     return { recorded: 'invalid', code: error.code, error: error.message, path: installProfileStatePath() };
@@ -249,6 +255,7 @@ export function formatStatus(report: StatusReport, asJson = false): string {
     lines.push(`  core: ${report.installState.core_version}`);
     lines.push(`  selection: ${selectionLabel(report.installState.selection)}`);
     lines.push(`  plugins: ${report.installState.plugins.join(', ') || '(none)'}`);
+    if (report.installState.pi_version_notice) lines.push(`  ${report.installState.pi_version_notice}`);
   } else if (report.installState.recorded === 'invalid') {
     lines.push(`  (${report.installState.code}): ${report.installState.error}`);
   } else {

@@ -225,10 +225,10 @@ test('restores Codex MCP section while preserving other TOML tables',()=>fixture
  expect(readFileSync(path,'utf8')).toBe('model = "user"\n[mcp_servers.other]\ncommand = "keep"\n');
 }));
 
-/** A protocol 4 state and a `created` core record of each path, as an install leaves them. */
+/** A protocol 5 state and a `created` core record of each path, as an install leaves them. */
 function profile(home: string, entries: readonly { path: string; committed: PathCommitted; kind?: 'user_managed' }[]) {
  const env={HOME:home};
- put(home,relative(home,installStateFixturePath(env)),JSON.stringify({protocol:4,...versions(['architecture']),selection:['architecture'],transaction_id:'fixture',applied_at:new Date().toISOString(),pi_packages:[],previous:null}));
+ put(home,relative(home,installStateFixturePath(env)),JSON.stringify({protocol:5,...versions(['architecture']),selection:['architecture'],transaction_id:'fixture',applied_at:new Date().toISOString(),previous:null}));
  seedPathRecords(env,Object.fromEntries(entries.map(({path,committed,kind})=>[pathRecordKey(env,path),{owner:'core',host:pathRecordHost(env,path)!,kind:kind??'created' as const,baseline:{state:'unknown' as const},committed}])));
 }
 function ownedFile(path: string, content: string) { return {path,committed:{type:'file' as const,sha256:`sha256:${createHash('sha256').update(content).digest('hex')}`}}; }

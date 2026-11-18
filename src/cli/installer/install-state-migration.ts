@@ -4,20 +4,25 @@ import type { PathRecord } from '../../core/host-config/types';
 import { hostConfigPaths, migrateLedgerSchema, projectedLedgerPaths } from '../../effects/host-config/store';
 import { partitionPathRecords, pathRecordHost, pathRecordIsCurrent, pathRecordKey, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
 import { migrateCodexConfigRecords } from './codex-config-migration';
-import { agentFleetTargetPaths, fleetReceiptPath, isLegacyOwnershipSurface, writeState, type InstallState } from './install-profile';
-import { enabledPlugins, installProfileStatePath, InstallStateError, invalidOwnership, parseProtocol3InstallState, readRawInstallState, type Protocol3Snapshot } from './install-state';
+import { agentFleetTargetPaths, fleetReceiptPath, isLegacyOwnershipSurface, validPiPackage, writeState, type InstallState } from './install-profile';
+import { enabledPlugins, installProfileStatePath, InstallStateError, invalidOwnership, parseProtocol3InstallState, parseProtocol4InstallState, readRawInstallState, type Protocol3Snapshot, type RecordedInstallSnapshot } from './install-state';
+import { adoptPiPackage, piPackageEntryPresent } from './pi-package';
 import { migrateJsonConfigRecords } from './json-config-migration';
 
 /**
- * The one-shot move of host path ownership from the protocol 3
- * `ownership_manifest` and `agent-fleet-user-managed.json` to the host-config
- * ledger's path records. It runs at the lock-holding entry points before any
- * other state read; every other reader fails closed on protocol 3.
+ * The one-shot move of ownership to the host-config ledger, as one chained
+ * step to protocol 5: the protocol 3 `ownership_manifest` and
+ * `agent-fleet-user-managed.json` become path records, and the Pi package
+ * claims of protocol 3 or 4 become `pi` fragment records of the Pi settings
+ * entry (#2852). It runs at the lock-holding entry points before any other
+ * state read; every other reader fails closed on protocols 3 and 4.
  */
 
-/** True when the state still is protocol 3, so the next entry point migrates it. */
+/** True when the state still is protocol 3 or 4, so the next entry point migrates it. */
 export function installStatePendingMigration(env: NodeJS.ProcessEnv): boolean {
-  return parseProtocol3InstallState(readRawInstallState(env), installProfileStatePath(env)) !== null;
+  const raw = readRawInstallState(env);
+  const path = installProfileStatePath(env);
+  return parseProtocol3InstallState(raw, path) !== null || parseProtocol4InstallState(raw, path) !== null;
 }
 
 /** The fleet files that the user keeps, by path; null without a receipt. A malformed receipt stops: rh must not overwrite those files. */
@@ -67,6 +72,12 @@ function piSources(env: NodeJS.ProcessEnv, snapshot: Protocol3Snapshot, statePat
   return checkedManifest(env, snapshot, statePath).filter((surface) => surface.type === 'pi-package').map((surface) => surface.path as string);
 }
 
+/** A Pi claim of an older state must name the Bun global package root with the pi plugin of the same snapshot enabled; any other claim stops the move. */
+function checkedPiSources(env: NodeJS.ProcessEnv, snapshot: RecordedInstallSnapshot, sources: readonly string[], statePath: string): readonly string[] {
+  if (sources.some((source) => !validPiPackage(source, env, enabledPlugins(snapshot)))) throw invalidOwnership(statePath);
+  return sources;
+}
+
 /**
  * Run the move once. While the state is protocol 3 its manifest is the only
  * authority for `created` records, so they are replaced, not merged: a released
@@ -78,7 +89,7 @@ function piSources(env: NodeJS.ProcessEnv, snapshot: Protocol3Snapshot, statePat
 export function migrateInstallState(env: NodeJS.ProcessEnv): void {
   // The ledger gains its `paths` map before any gate or path-record write reads it.
   migrateLedgerSchema(hostConfigPaths(env));
-  if (installStatePendingMigration(env)) {
+  if (parseProtocol3InstallState(readRawInstallState(env), installProfileStatePath(env)) !== null) {
     // The section records of the host files leave with the manifest, so their migrations read it first.
     migrateCodexConfigRecords(env);
     migrateJsonConfigRecords(env);
@@ -86,22 +97,27 @@ export function migrateInstallState(env: NodeJS.ProcessEnv): void {
   const plan = planInstallStateMigration(env);
   if (plan === null) return;
   writePathRecords(env, plan.records);
+  for (const source of plan.piPackages) adoptPiPackage(source, env);
   if (plan.receipt) rmSync(fleetReceiptPath(env), { force: true });
   if (plan.state) writeState(plan.state, env);
 }
 
-/** What the move writes: the path records, whether the receipt goes, and the protocol 4 state; null when nothing moves. It writes nothing, so a dry run uses it too. */
+/** What the move writes: the path records, the Pi package entries to record, whether the receipt goes, and the protocol 5 state; null when nothing moves. It writes nothing, so a dry run uses it too. */
 export interface InstallStateMigrationPlan {
   readonly records: PathRecords;
+  /** The claimed Pi package sources whose entry is in the Pi settings now: only these get a record. */
+  readonly piPackages: readonly string[];
   readonly receipt: boolean;
   readonly state: InstallState | null;
 }
 
 export function planInstallStateMigration(env: NodeJS.ProcessEnv): InstallStateMigrationPlan | null {
   const statePath = installProfileStatePath(env);
-  const legacy = parseProtocol3InstallState(readRawInstallState(env), statePath);
+  const raw = readRawInstallState(env);
+  const legacy = parseProtocol3InstallState(raw, statePath);
+  const protocol4 = parseProtocol4InstallState(raw, statePath);
   const receipt = readFleetReceipt(env);
-  if (legacy === null && receipt === null) return null;
+  if (legacy === null && protocol4 === null && receipt === null) return null;
   const records: Record<string, PathRecord> = Object.fromEntries(Object.entries(partitionPathRecords(env, projectedLedgerPaths(hostConfigPaths(env))).records)
     .filter(([, record]) => legacy === null || record.kind === 'user_managed'));
   const pi: string[] = [];
@@ -120,14 +136,15 @@ export function planInstallStateMigration(env: NodeJS.ProcessEnv): InstallStateM
     if (host === null) throw invalidOwnership(statePath);
     records[pathRecordKey(env, path)] = { owner: 'core', host, kind: 'user_managed', baseline: { state: 'unknown' }, committed: { type: 'file', sha256 } };
   }
-  const previous = legacy?.previous ?? null;
+  if (legacy?.previous) pi.push(...piSources(env, legacy.previous, statePath));
+  for (const snapshot of protocol4 ? [protocol4.current, ...(protocol4.previous ? [protocol4.previous] : [])] : []) {
+    pi.push(...checkedPiSources(env, snapshot.fields, snapshot.pi_packages, statePath));
+  }
+  const older = legacy ?? protocol4;
   return {
     records,
+    piPackages: [...new Set(pi)].filter((source) => piPackageEntryPresent(source, env)),
     receipt: receipt !== null,
-    state: legacy && {
-      ...legacy.current.fields,
-      pi_packages: [...new Set(pi)],
-      previous: previous && { ...previous.fields, pi_packages: [...new Set(piSources(env, previous, statePath))] },
-    },
+    state: older && { ...older.current.fields, previous: older.previous?.fields ?? null },
   };
 }

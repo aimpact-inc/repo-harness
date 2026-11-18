@@ -8,6 +8,24 @@ import { HostConfigError, type FileFormat, type FragmentRecord } from '../../cor
  * the gate reads the files and writes the ledger.
  */
 
+/**
+ * The installers whose write sets were measured, at the measured versions
+ * (discovery 6914365319 on #2852, macOS arm64). rh pins the Skills CLI to its
+ * version; the user's Pi binary is not pinned, so another Pi version gets a
+ * report line and the same before/after proof.
+ */
+export const MEASURED_INSTALLERS = { pi: '1.5.2', skills: '1.9.0' } as const;
+
+/** What the measurement did not cover: rh claims nothing there and names these ranges in its reports. */
+export const UNVERIFIED_INSTALLER_RANGES: readonly string[] = [
+  'Windows and Linux',
+  'installer versions other than the measured ones',
+  'the Skills CLI lock path without XDG_STATE_HOME',
+  'CLAUDE_CONFIG_DIR and CODEX_HOME overrides',
+  'catalog providers other than Waza and Mermaid',
+  'files that an installer reads',
+];
+
 /** A host file that an out-of-process installer may edit at the declared selectors, for `owner`. */
 export interface HostConfigFragmentDeclaration {
   readonly path: string;
@@ -80,6 +98,7 @@ export interface DelegatedFragmentOutcome {
  * - absent before, present after: an `add` record of the exact text, with the container that the insert created;
  * - recorded for the owner and intact before, present after: the record follows the new text (a refresh);
  * - recorded for the owner and intact before, absent after: the record goes (the tool's remove command);
+ * - recorded for the owner and absent before and after: the record goes;
  * - present before with no intact record of the owner: never claimed, the record stays as it is.
  * Then the declared fragments come out of both texts by the same strategy; a
  * remainder that differs is an unattributed change. A file that did not exist
@@ -97,7 +116,10 @@ export function settleDelegatedFragments(input: DelegatedFragmentInput): Delegat
     if (now === undefined) { unreadable = true; continue; }
     const record = recorded.find((entry) => entry.selector === selector);
     if (record) {
-      if (record.owner !== owner || record.inserted === '' || prior !== record.inserted || now === record.inserted) continue;
+      if (record.owner !== owner) continue;
+      // A record of a fragment that is in the file neither before nor after proves nothing: it goes.
+      if (prior === null && now === null) { replaced.set(record, null); continue; }
+      if (record.inserted === '' || prior !== record.inserted || now === record.inserted) continue;
       replaced.set(record, now === null ? null : { ...record, inserted: now });
     } else if (prior === null && now !== null) {
       const created = format.strategy.created?.(before ?? '', selector) ?? null;

@@ -1019,12 +1019,11 @@ exit 0
       }
       mkdirSync(join(home, '.repo-harness'), { recursive: true });
       writeFileSync(installStateFixturePath({ HOME: home }), `${JSON.stringify({
-        protocol: 4,
+        protocol: 5,
         selection: ['strategy-memory'],
         ...versions(['strategy-memory']),
         transaction_id: 'obsidian-fixture',
         applied_at: '2026-08-21T00:00:00.000Z',
-        pi_packages: [],
         previous: null,
       }, null, 2)}\n`);
       seedPathRecords({ HOME: home }, { ...readPathRecords({ HOME: home }), ...Object.fromEntries(['obsidian-markdown', 'obsidian-cli'].map((skill) => [
@@ -2307,12 +2306,11 @@ exit 0
       setupManagedRuntimeReadback(tmp, home, fakeBin);
       installCandidateRuntimeFixture(home, JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf-8')).version as string);
       writeFileSync(installStateFixturePath({ HOME: home }), `${JSON.stringify({
-        protocol: 4,
+        protocol: 5,
         selection: FULL_PLUGINS,
         ...versions(FULL_PLUGINS),
         transaction_id: 'existing-full-install',
         applied_at: '2026-07-14T00:00:00.000Z',
-        pi_packages: [],
         previous: null,
       })}\n`);
       const candidateVersion = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf-8')).version;
@@ -2397,8 +2395,8 @@ exit 0
       mkdirSync(join(home, '.bun', 'bin'), { recursive: true });
       writeExecutable(tmp, join(home, '.bun', 'bin', 'rh'), '#!/bin/sh\n');
       writeFileSync(installStateFixturePath({ HOME: home }), `${JSON.stringify({
-        protocol: 4, selection: plugins, ...versions(plugins), transaction_id: 'before-refusal',
-        applied_at: '2026-07-14T00:00:00.000Z', pi_packages: [], previous: null,
+        protocol: 5, selection: plugins, ...versions(plugins), transaction_id: 'before-refusal',
+        applied_at: '2026-07-14T00:00:00.000Z', previous: null,
       })}\n`);
       writeExecutable(tmp, join(fakeBin, 'bun'), `#!/bin/bash\nif [[ "\${1:-}" == "--version" ]]; then echo 1.4.0; exit 0; fi\nif [[ "\${1:-}" == "pm" && "\${2:-}" == "view" ]]; then printf '%s\\n' '${JSON.stringify(candidateVersion)}'; exit 0; fi\nif [[ "\${1:-}" == *.ts || "\${1:-}" == - ]]; then exec "${process.execPath}" "$@"; fi\nexit 0\n`);
       const env = {

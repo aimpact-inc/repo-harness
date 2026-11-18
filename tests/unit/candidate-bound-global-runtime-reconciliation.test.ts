@@ -133,12 +133,11 @@ function requireLegacyRenderer(packageRoot: string): void {
 function writeCoreOnlyInstallState(home: string): void {
   mkdirSync(join(home, '.repo-harness'), { recursive: true });
   writeFileSync(installStateFixturePath({ HOME: home }), `${JSON.stringify({
-    protocol: 4,
+    protocol: 5,
     selection: [],
     ...versions([]),
     transaction_id: 'fixture-install',
     applied_at: '2026-09-04T00:00:00.000Z',
-    pi_packages: [],
     previous: null,
   }, null, 2)}\n`);
 }
@@ -965,12 +964,11 @@ describe('candidate-bound global runtime reconciliation', () => {
       seedGlobalPackageFixture({ HOME: home, BUN_INSTALL: join(home, '.bun') });
       mkdirSync(join(home, '.repo-harness'), { recursive: true });
       writeFileSync(installStateFixturePath({ HOME: home }), `${JSON.stringify({
-        protocol: 4,
+        protocol: 5,
         selection: [],
         ...versions([]),
         transaction_id: 'predecessor-install',
         applied_at: '2026-09-04T00:00:00.000Z',
-        pi_packages: [],
         previous: null,
       }, null, 2)}\n`);
       const predecessor = structuredClone(buildManagedHooks('codex'));

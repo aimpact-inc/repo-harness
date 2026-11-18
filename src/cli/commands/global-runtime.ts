@@ -103,8 +103,6 @@ export interface GlobalRuntimeOptions {
 export type McpLocalConfigCheck = (env: NodeJS.ProcessEnv) => { readonly status: 'ok' | 'skipped' | 'failed'; readonly detail: string };
 
 export interface GlobalRuntimeStep {
-  /** The Pi package source that this step registered, so the install state records it. */
-  owned_pi_package?: string;
   /** The host path that the gate refused to replace; the selection commit counts the user's copy as present. */
   refused_path?: string;
   step: string;
@@ -2069,8 +2067,7 @@ function runGlobalRuntimeSetupInTransaction(opts: GlobalRuntimeOptions): GlobalR
   }
   if (steps.every((step) => step.status !== "failed")) steps.push(configureRequiredHerdrSkill(target, env, opts.transaction, piSelected));
   if (steps.every((step) => step.status !== 'failed')) {
-    const pi = installPiPackage(bunGlobalPackageRoot(env)!, plugins.includes('pi') && target === 'both' && opts.hostAdapters !== false, env);
-    steps.push({ ...pi, ...(pi.created ? { owned_pi_package: pi.source } : {}) });
+    steps.push(installPiPackage(bunGlobalPackageRoot(env)!, plugins.includes('pi') && target === 'both' && opts.hostAdapters !== false, env));
   }
   steps.push(...writeRuntimeIgnoreRules(env, updateMode));
   // Last, and only after every other step passed: a failed update keeps the previous command.
