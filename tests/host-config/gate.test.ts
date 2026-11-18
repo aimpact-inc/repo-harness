@@ -869,3 +869,57 @@ test.each([
   f.gate().revert([home]);
   expect({ home: readFileSync(home, 'utf8'), worktree: readFileSync(file, 'utf8') }).toEqual({ home: 'home\n', worktree: worktreeBytes });
 });
+
+// Revert order (P4, #2854): a claim whose write deletes an entry leaves the ledger before the write; a restore keeps its claim and vault
+// copy until it lands; a rollback never brings back a claim released on observation. A locked directory forces the failure.
+test.each(['created path', 'replaced restore fails', 'replaced ledger write fails', 'created file', 'rollback'] as const)('revert order: %s', (label) => {
+  const f = fixture();
+  const agents = join(f.home, '.claude', 'agents');
+  const [file, user] = [join(agents, 'a.md'), join(agents, 'u.md')];
+  const entry = (text: string): PathEntry => ({ type: 'file', bytes: Buffer.from(text) });
+  const locked = (dir: string, run: () => void) => { chmodSync(dir, 0o500); try { run(); } finally { chmodSync(dir, 0o700); } };
+  mkdirSync(agents, { recursive: true });
+  writeFileSync(user, 'mine\n');
+  if (label === 'created path') {
+    f.gate().writePaths([{ path: file, owner: 'core', entry: entry('rh\n') }]);
+    locked(agents, () => expect(() => f.gate().revertPaths([file])).toThrow());
+    // The claim went before the unlink: the entry stays with no claim, and a later revert keeps it.
+    expect(f.ledger().paths[file]).toBeUndefined();
+    expect(f.gate().revertPaths([file])).toEqual([]);
+    expect(readFileSync(file, 'utf8')).toBe('rh\n');
+  } else if (label === 'created file') {
+    f.gate().apply([f.change(f.b, 'on')]);
+    locked(join(f.home, '.tool', 'sub'), () => expect(() => f.gate().revert([f.b])).toThrow());
+    expect(f.ledger().files[f.b]).toBeUndefined();
+    expect(f.gate().revert([f.b])).toEqual([]);
+    expect(readFileSync(f.b, 'utf8')).toBe('rh=on\n');
+  } else if (label === 'rollback') {
+    f.gate().writePaths([{ path: file, owner: 'core', entry: entry('rh\n') }, { path: user, owner: 'core', entry: entry('rh\n'), replace: true }]);
+    const snapshot = readFileSync(join(f.root, 'ledger.json'));
+    rmSync(file);
+    rmSync(user);
+    const transaction = mkdtempSync(join(f.home, 'tx-'));
+    expect(f.gate().revertPaths([file, user], { transaction }).map((reverted) => reverted.action)).toEqual(['released', 'released']);
+    expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, transaction).unresolved).toEqual([]);
+    expect(f.ledger().paths).toEqual({});
+    // A hand reinstall of the same bytes is the user's: a later revert leaves it.
+    writeFileSync(file, 'rh\n');
+    writeFileSync(user, 'rh\n');
+    expect(f.gate().revertPaths([file, user])).toEqual([]);
+    expect([readFileSync(file, 'utf8'), readFileSync(user, 'utf8')]).toEqual(['rh\n', 'rh\n']);
+  } else {
+    f.gate().writePaths([{ path: user, owner: 'core', entry: entry('rh\n'), replace: true }]);
+    const record = f.ledger().paths[user];
+    if (label === 'replaced restore fails') {
+      locked(agents, () => expect(() => f.gate().revertPaths([user])).toThrow());
+      expect({ bytes: readFileSync(user, 'utf8'), record: f.ledger().paths[user], vault: f.vault(record.backup) }).toEqual({ bytes: 'rh\n', record, vault: 'mine\n' });
+      expect(f.gate().revertPaths([user])).toEqual([{ path: user, action: 'restored' }]);
+    } else {
+      locked(f.root, () => expect(() => f.gate().revertPaths([user])).toThrow());
+      // The user's bytes are back; the stale claim no longer matches them, so a rerun only reports.
+      expect({ bytes: readFileSync(user, 'utf8'), record: f.ledger().paths[user] }).toEqual({ bytes: 'mine\n', record });
+      expect(f.gate().revertPaths([user])).toEqual([{ path: user, action: 'kept_edited' }]);
+    }
+    expect(readFileSync(user, 'utf8')).toBe('mine\n');
+  }
+});

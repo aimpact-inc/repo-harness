@@ -908,41 +908,76 @@ export function planPathRevert(key: string, record: PathRecord): HostConfigRever
   return record.kind === 'replaced' ? 'restored' : 'removed';
 }
 
-function revertWholePath(paths: HostConfigPaths, key: string, record: PathRecord, transaction: string | undefined): HostConfigRevertEntry['action'] {
-  const action = planPathRevert(key, record);
-  if (action !== 'restored' && action !== 'removed') return action;
-  const entry = pathRecordEntry(key, record);
-  if (transaction) keepPreimage(transaction, entry);
-  if (record.kind === 'replaced') {
-    const committed = record.committed as Extract<PathCommitted, { type: 'file' }>;
-    replaceTarget(entry as HostPath, readVault(paths, record.backup!), { existed: true, sha256: committed.sha256 });
-  } else removePathEntry(entry);
-  return action;
+/** One write of a revert and the ledger change that it makes. */
+interface RevertStep {
+  /**
+   * `delete`: the write takes an entry away, so its claim leaves the ledger
+   * before it. `restore`: the write gives the user's bytes back, so its claim
+   * stays until it lands. `release`: no write; the claim goes at once.
+   */
+  readonly kind: 'delete' | 'restore' | 'release';
+  readonly write?: () => void;
+  readonly commit: (ledger: HostConfigLedger) => HostConfigLedger;
+}
+
+/**
+ * The order of every revert (P4, #2854). One durable ledger write takes out
+ * each claim whose write deletes an entry, and each release, before the first
+ * write: a failure or a kill then leaves an entry with no claim, never a claim
+ * without its entry, so a later run cannot delete an entry that the user put
+ * back. The deletions run next. A restore keeps its claim and vault copy
+ * until its write lands, so a failed restore can run again; each landed
+ * restore reaches the ledger also when a later write fails. The caller writes
+ * the returned ledger with its closing state.
+ */
+function retireThenDestroy(paths: HostConfigPaths, ledger: HostConfigLedger, steps: readonly RevertStep[]): HostConfigLedger {
+  const early = steps.filter((step) => step.kind !== 'restore');
+  let state = early.reduce((current, step) => step.commit(current), ledger);
+  if (early.length) writeLedger(paths, state);
+  for (const step of early) step.write?.();
+  try {
+    for (const step of steps.filter((entry) => entry.kind === 'restore')) {
+      step.write!();
+      state = step.commit(state);
+    }
+  } catch (error) {
+    writeLedger(paths, state);
+    throw error;
+  }
+  return state;
 }
 
 function revertWholePaths(paths: HostConfigPaths, only: readonly string[], options: HostConfigPathOptions): HostConfigRevertEntry[] {
   const ledger = readLedger(paths);
-  const records = { ...ledger.paths };
-  const keys = only.map((path) => hostPathKey(paths, path));
   const report: HostConfigRevertEntry[] = [];
   /** The entries of the dropped records: a created directory goes only with an entry inside it. */
   const dropped: string[] = [];
-  const released: Sha256[] = [];
-  for (const key of keys) {
-    const record = records[key];
+  const steps: RevertStep[] = [];
+  for (const key of new Set(only.map((path) => hostPathKey(paths, path)))) {
+    const record = ledger.paths[key];
     if (!record) continue;
-    const action = revertWholePath(paths, key, record, options.transaction);
-    if (action !== 'kept_edited') {
-      if (record.backup) released.push(record.backup);
-      delete records[key];
-      dropped.push(pathRecordEntry(key, record));
-    }
+    const action = planPathRevert(key, record);
     report.push({ path: key, action });
+    if (action === 'kept_edited') continue;
+    const entry = pathRecordEntry(key, record);
+    dropped.push(entry);
+    const commit = (state: HostConfigLedger): HostConfigLedger => {
+      const { [key]: _gone, ...records } = state.paths;
+      return { ...state, paths: records, retired: retire(state.retired, record.backup ? [record.backup] : []) };
+    };
+    if (action === 'released') { steps.push({ kind: 'release', commit }); continue; }
+    steps.push({ kind: action === 'removed' ? 'delete' : 'restore', commit, write: () => {
+      if (options.transaction) keepPreimage(options.transaction, entry);
+      if (record.kind === 'replaced') {
+        const committed = record.committed as Extract<PathCommitted, { type: 'file' }>;
+        replaceTarget(entry as HostPath, readVault(paths, record.backup!), { existed: true, sha256: committed.sha256 });
+      } else removePathEntry(entry);
+    } });
   }
+  const state = retireThenDestroy(paths, ledger, steps);
   const attempted = ledger.directories.filter((directory) => dropped.some((key) => isPathInside(directory, key)));
   const kept = removeCreatedDirectories(attempted);
-  const directories = ledger.directories.filter((directory) => !attempted.includes(directory) || kept.includes(directory));
-  writeLedger(paths, { ...ledger, paths: records, directories, retired: retire(ledger.retired, released) });
+  writeLedger(paths, { ...state, directories: state.directories.filter((directory) => !attempted.includes(directory) || kept.includes(directory)) });
   return report;
 }
 
@@ -1153,18 +1188,18 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
   const filter: RevertFilter = { owner: options.owner, selectors: options.selectors };
   const filtered = filter.owner !== undefined || filter.selectors !== undefined;
   const ledger = read(paths);
-  const released: Sha256[] = [];
-  const files = { ...ledger.files };
-  let fragments = ledger.fragments;
   const report: HostConfigRevertEntry[] = [];
+  const steps: RevertStep[] = [];
   const targets = only ? only.map((path) => resolveHostPath(paths, path)) : (Object.keys(ledger.files) as HostPath[]);
   refuseRecordedPaths(ledger, targets);
+  const seen = new Set<string>();
   for (const [index, path] of targets.entries()) {
-    const record = files[path];
-    if (!record) continue;
+    const record = ledger.files[path];
+    if (!record || seen.has(path)) continue;
+    seen.add(path);
     const { observation, bytes } = observeFile(path);
     const current = expectedOf(observation, path);
-    const all = fragments.filter((entry) => entry.file === path);
+    const all = ledger.fragments.filter((entry) => entry.file === path);
     const own = all.filter((entry) => matchesFilter(entry, filter));
     if (filtered && !own.length) continue;
     const plan = planFileRevert({
@@ -1172,23 +1207,27 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
       existed: current.existed, requestedPresent: only !== undefined && requestedPresent(only[index]!), bytes, backup: () => readVault(paths, record.backup!), own, all, filtered,
       baseline: record.baseline, backupReference: record.backup,
     });
-    if (!dryRun && plan.write) {
-      if (plan.write.kind === 'remove') removeTarget(path, current);
-      else replaceTarget(path, plan.write.content, current);
-    }
-    if (plan.record === 'drop') { released.push(...materialOf(record)); delete files[path]; }
-    else if (plan.record === 'update' && plan.write?.kind === 'replace') {
-      files[path] = { ...record, committed: { type: 'file', sha256: sha256Prefixed(plan.write.content) }, external_change: record.external_change || !isCommitted(record, current) };
-    }
-    const removed = new Set(plan.removed);
-    fragments = fragments.filter((entry) => !removed.has(entry));
     report.push(plan.entry);
+    const removed = new Set(plan.removed);
+    const write = plan.write;
+    const commit = (state: HostConfigLedger): HostConfigLedger => {
+      const files = { ...state.files };
+      if (plan.record === 'drop') delete files[path];
+      else if (plan.record === 'update' && write?.kind === 'replace') {
+        files[path] = { ...record, committed: { type: 'file', sha256: sha256Prefixed(write.content) }, external_change: record.external_change || !isCommitted(record, current) };
+      }
+      return { ...state, files, fragments: state.fragments.filter((entry) => !removed.has(entry)),
+        retired: plan.record === 'drop' ? retire(state.retired, materialOf(record)) : state.retired };
+    };
+    steps.push(write === null ? { kind: 'release', commit }
+      : write.kind === 'remove' ? { kind: 'delete', commit, write: () => removeTarget(path, current) }
+        : { kind: 'restore', commit, write: () => replaceTarget(path, write.content, current) });
   }
   if (dryRun) return report;
+  const state = retireThenDestroy(paths, ledger, steps);
   const attempted = filtered ? [] : only ? ledger.directories.filter((directory) => targets.some((path) => isPathInside(directory, path))) : ledger.directories;
   const kept = removeCreatedDirectories(attempted);
-  const directories = ledger.directories.filter((directory) => !attempted.includes(directory) || kept.includes(directory));
-  writeLedger(paths, { ...ledger, files, fragments, directories, retired: retire(ledger.retired, released) });
+  writeLedger(paths, { ...state, directories: state.directories.filter((directory) => !attempted.includes(directory) || kept.includes(directory)) });
   return report;
 }
 
@@ -1385,6 +1424,8 @@ function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, no
       // A revert in this transaction took the record out: the entry is gone, or it is the user file that came back from the vault.
       const reverted = entry === null || (old!.kind === 'replaced' && entry.type === 'file' && entry.sha256 === old!.backup);
       if (reverted && hasPreimage(transaction, at)) restorePreimage(transaction, at);
+      // A claim released on observation is a fact, not an effect of this transaction: it stays released (P4).
+      else if (entry === null) delete records[key];
       else if (!pathRecordIsCurrent(key, old!)) unresolved.push(key);
       continue;
     }
