@@ -665,6 +665,11 @@ describe("canonical adoption plan", () => {
       const backup = manifest.operations.find((operation) => operation.path === ".ai/harness/workflow-contract.json")?.backupPath;
       expect(backup).toBeDefined();
       expect(readFileSync(join(repo, backup!), "utf8")).toBe(legacy);
+      // The backup root ignores itself before its first copy, with no exclude block and no user-level Git ignore (#3228).
+      const isolatedGit = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+      expect(spawnSync("git", ["add", "-A"], { cwd: repo, env: isolatedGit }).status).toBe(0);
+      expect(spawnSync("git", ["status", "--porcelain"], { cwd: repo, env: isolatedGit, encoding: "utf8" }).stdout).not.toContain(".ai/harness/backups");
+      expect([statSync(join(repo, ".ai/harness/backups")).mode & 0o777, statSync(join(repo, ".ai/harness/backups/.gitignore")).mode & 0o777]).toEqual([0o700, 0o600]);
       const report = { protocol: 1, command: "init", repoRoot: repo, mode: "minimal", ok: true, plan: {} } as const;
       const restore = `cp '${join(repo, backup!)}' '${target}'`;
       expect(renderApplyReport({ ...report, apply }))
