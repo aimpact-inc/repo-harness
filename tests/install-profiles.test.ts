@@ -1566,6 +1566,19 @@ describe('install selection', () => {
       .toEqual([true, true, undefined, ...parentBytes]);
   }), 60_000);
 
+  test('under an rh 0.34.0 parent a migration that stops at a malformed fleet receipt puts the ledger back and leaves the receipt link as it is', () => withProtocol3Release(({ env }) => {
+    const ledger = hostConfigPaths(env).ledger;
+    const parentLedger = readFileSync(ledger);
+    const receipt = join(env.HOME!, '.repo-harness', 'agent-fleet-user-managed.json');
+    const target = join(env.HOME!, 'fleet-receipt.json');
+    writeFileSync(target, '{');
+    rmSync(receipt);
+    symlinkSync(target, receipt);
+    const backupRoot = mkdtempSync(join(env.HOME!, 'install-'));
+    expect(() => migrateInParentTransaction(backupRoot, env, () => { migrateInstallState(env); migrateRuntimeHostConfig(env); })).toThrow('the agent fleet receipt is malformed');
+    expect([readFileSync(ledger), lstatSync(receipt).isSymbolicLink(), readlinkSync(receipt), readFileSync(target, 'utf-8')]).toEqual([parentLedger, true, target, '{']);
+  }), 60_000);
+
   test('a protocol 3 state restored over the ledger migrates again: its manifest replaces the created records, and user-managed records stay', () => withProtocol3Release(({ env, skill, fleet, kept, manifest, update }) => {
     update();
     const migrated = readPathRecords(env);

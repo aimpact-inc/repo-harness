@@ -899,10 +899,17 @@ function readOlderParentCopy(backupRoot: string, name: string): Buffer | null {
   throw new Error(`runtime transaction of an earlier rh version has no ${name} copy; run rh update`);
 }
 
-/** Every copy is read before the first write, so a missing copy changes no file. */
+/**
+ * Every copy is read before the first write, so a missing copy changes no
+ * file. A file that still holds its copy's bytes is one that the run did not
+ * change (a migration can stop before it), so its entry, link and mode stay.
+ */
 function restoreOlderParentFiles(backupRoot: string, env: NodeJS.ProcessEnv): void {
   const files = Object.entries(olderParentFiles(env)).map(([name, path]) => ({ path, bytes: readOlderParentCopy(backupRoot, `${name}-before-migration`) }));
   for (const { path, bytes } of files) {
+    // The copy followed a link, so the comparison does too.
+    const current = lstatExists(path) ? readFileSync(path) : null;
+    if (bytes === null ? current === null : current?.equals(bytes) === true) continue;
     if (bytes === null) rmSync(path, { force: true });
     else publishFileByRename(path, bytes, `${path}.${randomUUID()}.tmp`);
   }
