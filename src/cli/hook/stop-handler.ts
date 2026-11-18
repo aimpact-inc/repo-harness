@@ -27,6 +27,8 @@ export interface StopHandlerResult {
   readonly stdout: string;
   readonly stderr: string;
   readonly systemMessage?: string;
+  /** The hook event log reason; the runtime records it in `hook-events.jsonl`. */
+  readonly reason?: string;
 }
 
 /**
@@ -77,13 +79,10 @@ function seatReset(payload: HookPayload, env: NodeJS.ProcessEnv, now: Date): { r
   }
 }
 
-/** The architecture and protected path notices fail independently. */
+/** The architecture and protected path notices fail independently. A quiet architecture failure is logged, not shown. */
 function claudeNotices(repoRoot: string, env: NodeJS.ProcessEnv, extra: readonly StopNotice[]): StopHandlerResult {
-  const notices: StopNotice[] = [
-    collectArchitectureNotice(repoRoot, options => resolveCapabilityOwnership(repoRoot, undefined, options), { env }),
-    collectProtectedPathNotice(repoRoot, env),
-    ...extra,
-  ];
+  const architecture = collectArchitectureNotice(repoRoot, options => resolveCapabilityOwnership(repoRoot, undefined, options), { env });
+  const notices: StopNotice[] = [architecture, collectProtectedPathNotice(repoRoot, env), ...extra];
   const joined = (field: 'content' | 'systemMessage') => notices.map(notice => notice[field]).filter(Boolean).join('\n');
   const systemMessage = joined('systemMessage');
   return {
@@ -91,6 +90,7 @@ function claudeNotices(repoRoot: string, env: NodeJS.ProcessEnv, extra: readonly
     stdout: joined('content'),
     stderr: notices.map(notice => notice.diagnostics ?? '').join(''),
     ...(systemMessage ? { systemMessage } : {}),
+    ...(architecture.logReason ? { reason: architecture.logReason } : {}),
   };
 }
 

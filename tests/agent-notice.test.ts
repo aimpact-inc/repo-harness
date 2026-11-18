@@ -8,7 +8,7 @@ import { ArchctxClient, checkpointArchitectureDebt, resolveCompatibleNodeRuntime
 import { ARCHCTX_REQUIRED_VERSION } from '../src/core/architecture/projection';
 import type { ArchctxProviderOptions } from '../src/core/architecture/contracts';
 import type { CapabilityOwnership } from '../src/core/capabilities/registry';
-import { resolveCapabilityOwnership, parseIssueBranch } from '../src/effects/state/resolve-effective-state';
+import { CapabilityOwnershipError, resolveCapabilityOwnership, parseIssueBranch } from '../src/effects/state/resolve-effective-state';
 import { agentNoticeFixture, noticeOwnership, noticeEnv, registryNoticeFixture, registryProjectedFixture, unignoreNoticeState, writeNoticeRegistry, NOTICE_CAPABILITY } from './helpers/agent-notice';
 import { fixtureCommit, fixtureGit, fixtureWrite, writeStateMachine, STATE_MACHINE_ID } from './helpers/module-repository';
 
@@ -343,7 +343,7 @@ describe('AgentNotice', () => {
     }
   });
 
-  test('#2491: a timeout at each Git call under the host hook timeout, in archctx or in the resolve gives one fixed diagnostic; a resolve failure keeps its block', () => {
+  test('#2491: a timeout at each Git call under the host hook timeout, in archctx or in the resolve gives one fixed diagnostic; a resolve failure gives only its diagnostic', () => {
     const ownership = (root: string) => (options: ArchctxProviderOptions) => resolveCapabilityOwnership(root, undefined, options);
     // The ownership reads take the Git binary from the process environment, so the fake must be set there too.
     // It logs each call and hangs at call `hang`; the fixed clock keeps the notice deadline from running out first.
@@ -378,10 +378,28 @@ describe('AgentNotice', () => {
     expect(collectAgentNotice(resolveRoot, ownership(resolveRoot), { env: noticeEnv(resolveRoot), run: timedOut })).toEqual({ diagnostics: `${NOTICE_TIMEOUT}\n` });
     const failedRoot = fixture();
     const resolveFailed = collectAgentNotice(failedRoot, ownership(failedRoot), { env: noticeEnv(failedRoot), run: killed });
-    expect(resolveFailed.content).toStartWith('[Architecture] notice unavailable (error): capability_ownership:unavailable ARCHCONTEXT_RESOLVE_FAILED: ');
-    expect(resolveFailed.systemMessage).toBe('Architecture: notice unavailable (error); run rh arch debt --json.');
+    expect(resolveFailed.content).toBeUndefined();
+    expect(resolveFailed.systemMessage).toBeUndefined();
     expect(resolveFailed.diagnostics).toStartWith('repo-harness: architecture notice unavailable: capability_ownership:unavailable ARCHCONTEXT_RESOLVE_FAILED: ');
   }, 240_000);
+
+  test('#3190: a transient resolve failure never reaches the model across a recovery; a package failure stays visible', () => {
+    const root = fixture();
+    const env = noticeEnv(root);
+    const ownership = (options: ArchctxProviderOptions) => resolveCapabilityOwnership(root, undefined, options);
+    const corrupt = () => ({ status: 0, signal: null, stdout: '{"owners":', stderr: '' });
+    const quiet = (result: ReturnType<typeof collectAgentNotice>) => {
+      expect(result.content).toBeUndefined();
+      expect(result.systemMessage).toBeUndefined();
+      expect(result.diagnostics!.trim().split('\n')).toEqual([expect.stringContaining('ARCHCONTEXT_RESOLVE_FAILED: RH_ARCHCTX_RESOLVE_CORRUPT_JSON: archctx resolve returned corrupt JSON')]);
+    };
+    quiet(collectAgentNotice(root, ownership, { env, run: corrupt }));
+    expect(existsSync(join(root, '.ai/harness/state/agent-notice-status'))).toBe(false);
+    expect(collectAgentNotice(root, ownership, { env }).content).toStartWith('[ArchitectureDebt]');
+    quiet(collectAgentNotice(root, ownership, { env, run: corrupt }));
+    const missing = new CapabilityOwnershipError({ key: 'capability_ownership:unavailable', code: 'ARCHCONTEXT_RESOLVE_FAILED', message: 'archctx package missing', fix: 'rh update' });
+    expect(collectAgentNotice(root, () => { throw missing; }, { env }).content).toContain('notice unavailable (error): capability_ownership:unavailable ARCHCONTEXT_RESOLVE_FAILED: archctx package missing; fix: rh update');
+  });
 
   test('real citation debt is bounded, uses producer ids and dedupes across delivery points', () => {
     const root = fixture();

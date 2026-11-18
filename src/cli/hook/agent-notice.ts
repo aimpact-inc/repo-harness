@@ -47,8 +47,11 @@ type Status =
   | { readonly kind: 'disabled' }
   | { readonly kind: 'inactive'; readonly cause: string }
   | { readonly kind: 'failure'; readonly error: unknown }
-  /** A notice-path timeout: load, not a state change. Only diagnostics get it, and the next hook measures again. */
-  | { readonly kind: 'timeout'; readonly error: unknown };
+  /**
+   * A notice-path timeout or a transient ownership lookup failure: not a state change. Only diagnostics get it,
+   * no marker changes, and the next hook measures again.
+   */
+  | { readonly kind: 'quiet'; readonly error: unknown };
 
 interface Observation {
   readonly status: Status;
@@ -203,8 +206,20 @@ function noticeTimeout(error: unknown): boolean {
     || (error instanceof Error && (error as NodeJS.ErrnoException).code === 'ETIMEDOUT');
 }
 
+/**
+ * Ownership that archctx did not compute (corrupt resolve output, a process or runtime failure) is a tool fault, not
+ * a model or setup fault. A model-facing line would wake an idle Stop loop at each flap, and the SessionStart state
+ * blockers already carry the cause once per session. A missing or mismatched archctx package stays visible: the
+ * operator repairs it with the blocker's `rh update` fix, which is the only package signal the blocker keeps.
+ */
+function transientOwnershipFailure(error: unknown): error is CapabilityOwnershipError {
+  return error instanceof CapabilityOwnershipError
+    && error.blocker.key === 'capability_ownership:unavailable'
+    && error.blocker.fix !== 'rh update';
+}
+
 function statusOf(error: unknown): Status {
-  if (noticeTimeout(error)) return { kind: 'timeout', error };
+  if (noticeTimeout(error) || transientOwnershipFailure(error)) return { kind: 'quiet', error };
   if (!(error instanceof ArchctxClientError) || !INACTIVE_CODES.has(error.code)) return { kind: 'failure', error };
   return { kind: 'inactive', cause: singleLine(error.action ? `${error.code}, action ${error.action}` : error.code) };
 }
@@ -337,8 +352,8 @@ function undelivered(repoRoot: string, path: string, entries: readonly { key: st
 /** One line per readiness change. A failure never touches the debt marker. */
 function statusNotice(repoRoot: string, options: ArchctxProviderOptions, status: Status): NoticeBlock | null {
   switch (status.kind) {
-    // A Claude Stop block for a timeout would start one more turn with nothing to do.
-    case 'disabled': case 'timeout': return null;
+    // A Claude Stop block for a timeout or a transient tool fault would start one more turn with nothing to do.
+    case 'disabled': case 'quiet': return null;
     case 'active':
       // The active key ends the previous state, so a cause that returns prints again.
       if (existsSync(join(repoRoot, STATUS_MARKER))) claim(repoRoot, STATUS_MARKER, digest(['active']), options);
@@ -354,9 +369,9 @@ function statusNotice(repoRoot: string, options: ArchctxProviderOptions, status:
 /** Ownership and citation debt share one marker. Their key changes when a debt item or an unowned path changes. */
 function debtNotice(repoRoot: string, options: ArchctxProviderOptions, observation: Observation): NoticeBlock[] {
   const { unowned, debt } = observation;
-  // A failed or timed-out checkpoint has no measured set. Claiming the unowned paths alone would
+  // A failed, timed-out or transient lookup has no measured set. Claiming the unowned paths alone would
   // make every recovery print them again.
-  if (observation.status.kind === 'failure' || observation.status.kind === 'timeout' || (!unowned && !debt)) return [];
+  if (observation.status.kind === 'failure' || observation.status.kind === 'quiet' || (!unowned && !debt)) return [];
   const key = [debt?.branch ?? currentBranch(repoRoot, options), debt?.ids ?? [], unowned?.paths ?? []];
   return undelivered(repoRoot, MARKER, [
     ...(unowned ? [{ key: digest([...key, 'unowned']), block: unowned.block }] : []),
@@ -431,7 +446,7 @@ export function collectAgentNotice(repoRoot: string, ownership: (options: Archct
   const blocks: NoticeBlock[] = [];
   const problems = noticeProblems();
   const { status } = observation;
-  if (status.kind === 'failure' || status.kind === 'timeout') problems.add(status.error);
+  if (status.kind === 'failure' || status.kind === 'quiet') problems.add(status.error);
   if (observation.unmeasured !== undefined) problems.add(observation.unmeasured);
   try {
     const block = statusNotice(repoRoot, options, status);
@@ -442,7 +457,7 @@ export function collectAgentNotice(repoRoot: string, ownership: (options: Archct
   // A failure that the status or unowned filter already reported (the shared
   // diff, or the same unavailable review subject) is not repeated.
   const { archimapError } = observation;
-  const reported = status.kind === 'failure' ? status.error : observation.unmeasured;
+  const reported = status.kind === 'failure' || status.kind === 'quiet' ? status.error : observation.unmeasured;
   if (archimapError !== undefined && (reported === undefined || errorText(archimapError) !== errorText(reported))) problems.add(archimapError);
   try { blocks.push(...archimapNotice(repoRoot, options, observation)); }
   catch (error) { problems.add(error); }
@@ -467,6 +482,9 @@ export function collectAgentNotice(repoRoot: string, ownership: (options: Archct
   return {
     ...(chosen.length > 0 ? { content: chosen.map(block => block.content).join('\n'), systemMessage: chosen.map(block => block.systemMessage).join('\n') } : {}),
     ...(diagnostics === '' ? {} : { diagnostics }),
+    // A timeout is load and keeps its fixed line only. The log gets the code, never the text: archctx output can carry private paths.
+    ...(status.kind === 'quiet' && transientOwnershipFailure(status.error) && !noticeTimeout(status.error)
+      ? { logReason: `architecture-notice-quiet:${singleLine(status.error.blocker.code)}` } : {}),
   };
 }
 

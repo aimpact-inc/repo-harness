@@ -103,7 +103,7 @@ const handlers: Readonly<Record<HookHandlerId, TypedHookHandler>> = Object.freez
       if (context.identity.host !== 'codex' && context.identity.host !== 'pi') return { exitCode: 0 };
       const notice = collectArchitectureNotice(context.repoRoot,
         options => resolveCapabilityOwnership(context.repoRoot, undefined, options), { env: context.env });
-      return { exitCode: 0, ...(notice.content ? { additionalContext: notice.content } : {}), ...(notice.diagnostics ? { diagnostics: notice.diagnostics } : {}) };
+      return { exitCode: 0, ...(notice.content ? { additionalContext: notice.content } : {}), ...(notice.diagnostics ? { diagnostics: notice.diagnostics } : {}), ...(notice.logReason ? { reason: notice.logReason } : {}) };
     },
   },
   stop: {

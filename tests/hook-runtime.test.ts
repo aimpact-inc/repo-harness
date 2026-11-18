@@ -13,7 +13,7 @@ import {
 } from 'fs';
 import { fixtureWrite } from './helpers/module-repository';
 import { recordPluginSelection } from './helpers/install-ownership';
-import { registryNoticeFixture, registryProjectedFixture, repeatUndeliveredNotice, streamNoticeAttempt, unignoreNoticeState } from './helpers/agent-notice';
+import { agentNoticeFixture, registryNoticeFixture, registryProjectedFixture, repeatUndeliveredNotice, streamNoticeAttempt, unignoreNoticeState } from './helpers/agent-notice';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { resolveCompatibleNodeRuntime } from '../src/effects/architecture/archctx-provider';
@@ -505,6 +505,19 @@ process.exit(child.status ?? 1);
         expect(context(session.stdout, 'SessionStart')).not.toContain('[ArchitectureDebt]');
       }
       expect(host(root, 'claude', 'Stop', 'default', { stop_hook_active: false }).stdout).toBe('');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }, 60_000);
+
+  test('#3190: a corrupt archctx resolve on Claude Stop reaches only stderr and the hook event log', () => {
+    const root = agentNoticeFixture();
+    try {
+      // archctx runs under REPO_HARNESS_NODE_BIN; this wrapper corrupts only the resolve output.
+      const node = join(root, 'home/corrupt-resolve-node');
+      writeFileSync(node, `#!/bin/sh\nfor a in "$@"; do [ "$a" = resolve ] && { printf '{"owners":'; exit 0; }; done\nexec '${resolveCompatibleNodeRuntime(process.env)}' "$@"\n`, { mode: 0o755 });
+      const stop = host(root, 'claude', 'Stop', 'default', { stop_hook_active: false }, { REPO_HARNESS_NODE_BIN: node });
+      expect([stop.status, stop.stdout]).toEqual([0, '']);
+      expect(stop.stderr.trim().split('\n')).toEqual([expect.stringContaining('ARCHCONTEXT_RESOLVE_FAILED: RH_ARCHCTX_RESOLVE_CORRUPT_JSON')]);
+      expect(telemetry(root).at(-1)).toMatchObject({ event: 'Stop', exit_code: 0, reason: 'architecture-notice-quiet:ARCHCONTEXT_RESOLVE_FAILED' });
     } finally { rmSync(root, { recursive: true, force: true }); }
   }, 60_000);
 
