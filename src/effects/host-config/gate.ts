@@ -1099,7 +1099,8 @@ function planRevertWrite(input: FileRevertInput): FileRevertPlan {
     if (kind === 'created') return { entry: { path, action: 'removed' }, write: { kind: 'remove' }, record: 'drop', removed: all };
     const backup = input.backup();
     if (input.bytes !== null && backup.equals(input.bytes)) return { entry: { path, action: 'released' }, write: null, record: 'drop', removed: all };
-    return { entry: { path, action: 'text_removed' }, write: { kind: 'replace', content: backup, restores: true }, record: 'drop', removed: all };
+    // The file is exactly what rh last wrote over its backup: with only `add` fragments, the backup is the file without rh's bytes.
+    return { entry: { path, action: 'text_removed' }, write: { kind: 'replace', content: backup, restores: all.some((record) => record.kind !== 'add') }, record: 'drop', removed: all };
   }
   if (!input.existed || input.bytes === null) return { entry: { path, action: 'kept_edited', kept: own.map((entry) => entry.selector) }, write: null, record: 'keep', removed: [] };
   const original = decode(input.bytes, path);

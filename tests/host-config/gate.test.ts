@@ -819,7 +819,8 @@ test.each([
 // copy until it lands; a rollback never brings back a claim released on observation. A locked directory forces the failure.
 // An `add` taken out of a user file with no backup is a removal too (#3227); a restore of backup bytes still writes first.
 test.each(['created path', 'replaced restore fails', 'replaced ledger write fails', 'created file', 'rollback',
-  'added text ledger write fails', 'added text write fails', 'added text rollback', 'text restore ledger write fails'] as const)('revert order: %s', (label) => {
+  'added text ledger write fails', 'added text write fails', 'added text rollback', 'backed-up added text ledger write fails', 'backed-up added text write fails',
+  'override restore ledger write fails'] as const)('revert order: %s', (label) => {
   const f = fixture();
   const agents = join(f.home, '.claude', 'agents');
   const [file, user] = [join(agents, 'a.md'), join(agents, 'u.md')];
@@ -874,10 +875,31 @@ test.each(['created path', 'replaced restore fails', 'replaced ledger write fail
       expect(f.gate().revert([text])).toEqual([]);
       expect(readFileSync(text, 'utf8')).toBe(added);
     }
-  } else if (label === 'text restore ledger write fails') {
-    // A whole-file restore of the backup writes first; the stale record then no longer matches, so a rerun writes nothing.
-    f.gate().apply([f.change(f.a, 'on')]);
+  } else if (label.startsWith('backed-up added text')) {
+    // Only `add` fragments in a file with a backup: the whole-file write of the backup takes out rh's bytes only, so it is a removal too.
+    const text = join(agents, 'k.conf');
+    writeFileSync(text, 'keep=1\n');
+    f.gate().apply([f.change(text, 'on')]);
+    const record = f.ledger().files[text];
+    expect({ kind: record.kind, backup: f.vault(record.backup) }).toEqual({ kind: 'text_block', backup: 'keep=1\n' });
+    if (label === 'backed-up added text ledger write fails') {
+      // The retire fails first: no write lands while the claim stays, so no later run can take out a line that the user put back.
+      locked(f.root, () => expect(() => f.gate().revert([text])).toThrow());
+      expect({ bytes: readFileSync(text, 'utf8'), record: f.ledger().files[text] }).toEqual({ bytes: 'keep=1\nrh=on\n', record });
+      expect(f.gate().revert([text]).map((entry) => entry.action)).toEqual(['text_removed']);
+      expect(readFileSync(text, 'utf8')).toBe('keep=1\n');
+    } else {
+      // The claim went before the write, as after a kill there: the identical line is the user's now, and a later revert keeps it.
+      locked(agents, () => expect(() => f.gate().revert([text])).toThrow());
+      expect(f.ledger().files[text]).toBeUndefined();
+      expect(f.gate().revert([text])).toEqual([]);
+      expect(readFileSync(text, 'utf8')).toBe('keep=1\nrh=on\n');
+    }
+  } else if (label === 'override restore ledger write fails') {
+    // A whole-file restore of user bytes that an override replaced writes first; the stale record then no longer matches, so a rerun writes nothing.
+    f.select(keyLine, { keep: '2' });
     const record = f.ledger().files[f.a];
+    expect(readFileSync(f.a, 'utf8')).toBe('keep=2\n');
     locked(f.root, () => expect(() => f.gate().revert([f.a])).toThrow());
     expect({ bytes: readFileSync(f.a, 'utf8'), record: f.ledger().files[f.a] }).toEqual({ bytes: 'keep=1\n', record });
     f.gate().revert([f.a]);
