@@ -31,6 +31,7 @@
 import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync, type Stats } from 'fs';
 import { dirname, join } from 'path';
 import { FS_TRANSACTION_BACKUP_ROOT } from './fs-transaction';
+import { SELF_IGNORE_NAME } from './self-ignoring-directory';
 import { ensureRepoRelativePath, resolveInsideRepo } from './path-safety';
 import { gitExecFileSync, gitSpawnSync } from './git/runner';
 import { readWorkflowPolicyDocument } from './state/resolve-effective-state';
@@ -210,11 +211,13 @@ function occupied(path: string): boolean {
 
 /**
  * Newest time of any file in the entry, without following links. An empty
- * directory counts by its own mtime.
+ * directory counts by its own mtime. The storage guard (`.gitignore`) is not
+ * content: it is written when the directory is made, so a directory that holds
+ * only its guard also counts by its own mtime.
  */
 function newestTimeMs(absolute: string, entry: Stats): number {
   if (!entry.isDirectory()) return entry.mtimeMs;
-  const names = readdirSync(absolute);
+  const names = readdirSync(absolute).filter((name) => name !== SELF_IGNORE_NAME);
   if (names.length === 0) return entry.mtimeMs;
   let newest = 0;
   for (const name of names) {

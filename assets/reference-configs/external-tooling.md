@@ -75,8 +75,11 @@ codes as uninstall. `rh init` and `rh upgrade` strip retired rh hooks from a
 repository's `.claude/settings.json` and `.codex/hooks.json` through a repository
 ledger in `~/.repo-harness/config/repos/<key>/`, one per clone; it keeps the whole
 file before the strip, and no copy goes into the working tree. `rh config restore
-[<path>] --repo <dir>` puts back the recorded files of that worktree while each still
-holds the bytes that rh wrote; with no record it stops with
+[<path>] --repo <dir>`, with `<dir>` the worktree root that holds `.git`, puts back
+the recorded files of that worktree while each still holds the bytes that rh wrote. A
+file below a link or below a nested checkout stays, with its reason. Copies of user
+files wait in self-ignoring directories (a `.gitignore` with `*`), never beside the
+target. With no record it stops with
 `host_config_repository_unrecorded`. `rh uninstall` does not revert a repository
 record. `rh config gc` deletes the vault copy of each finished revert in the user
 ledger 30 days after it, while no record references it. Status and diff create no vault or lock;

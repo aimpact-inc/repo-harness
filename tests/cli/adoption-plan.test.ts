@@ -34,6 +34,15 @@ function cleanup(path: string): void {
   rmSync(path, { recursive: true, force: true });
 }
 
+/** `git add -A`, then the index under the backup root; Git reads no user or system config, so a host ignore rule cannot hide a copy. */
+function stagedBackupPaths(repo: string): string[] {
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  expect(spawnSync("git", ["add", "-A"], { cwd: repo, env }).status).toBe(0);
+  const listed = spawnSync("git", ["ls-files", "--cached", "--", ".ai/harness/backups"], { cwd: repo, env, encoding: "utf8" });
+  expect(listed.status).toBe(0);
+  return listed.stdout.split("\n").filter(Boolean);
+}
+
 function planWith(repo: string, operations: readonly AdoptionOperation[]): AdoptionPlan {
   return { ...planAdoption({ repoRoot: repo, mode: "minimal" }), apply: true, operations };
 }
@@ -470,6 +479,9 @@ describe("canonical adoption plan", () => {
       // The transaction rollback still brings back the retired runtime.
       expect(rollbackAdoptionTransaction({ repoRoot: repo, transaction: init.apply!.transactionManifestPath! }).ok).toBe(true);
       for (const path of retirement.paths) expect(existsSync(join(repo, path))).toBe(true);
+      // `rh init rollback` keeps each file that it replaces in the guarded `<transaction>/rollback/`, never loose in the backup root (#2854 R1).
+      expect(readdirSync(join(repo, ".ai/harness/backups/fs-transaction"), { withFileTypes: true }).every((entry) => entry.isDirectory())).toBe(true);
+      expect(stagedBackupPaths(repo)).toEqual([]);
     } finally {
       cleanup(repo);
       cleanup(home);
@@ -691,9 +703,7 @@ describe("canonical adoption plan", () => {
       expect(backup).toBeDefined();
       expect(readFileSync(join(repo, backup!), "utf8")).toBe(legacy);
       // The backup root ignores itself before its first copy, with no exclude block and no user-level Git ignore (#3228).
-      const isolatedGit = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
-      expect(spawnSync("git", ["add", "-A"], { cwd: repo, env: isolatedGit }).status).toBe(0);
-      expect(spawnSync("git", ["status", "--porcelain"], { cwd: repo, env: isolatedGit, encoding: "utf8" }).stdout).not.toContain(".ai/harness/backups");
+      expect(stagedBackupPaths(repo)).toEqual([]);
       expect([statSync(join(repo, ".ai/harness/backups")).mode & 0o777, statSync(join(repo, ".ai/harness/backups/.gitignore")).mode & 0o777]).toEqual([0o700, 0o600]);
       const report = { protocol: 1, command: "init", repoRoot: repo, mode: "minimal", ok: true, plan: {} } as const;
       const restore = `cp '${join(repo, backup!)}' '${target}'`;
@@ -779,6 +789,10 @@ describe("canonical adoption plan", () => {
       expect(readFileSync(join(repo, "existing.txt")).equals(original)).toBe(true);
       expect(existsSync(join(repo, "created-dir"))).toBe(false);
       expect(existsSync(join(repo, "blocker"))).toBe(false);
+      // The rollback kept the replaced file in the guarded `<transaction>/rollback/` (#2854 R1).
+      const rollbackDir = join(repo, dirname(apply.transactionManifestPath!), "rollback");
+      expect(readdirSync(rollbackDir).map((name) => name === ".gitignore" ? name : readFileSync(join(rollbackDir, name), "utf8")).sort()).toEqual([".gitignore", "replaced\n"]);
+      expect(stagedBackupPaths(repo)).toEqual([]);
       const manifest = JSON.parse(readFileSync(join(repo, apply.transactionManifestPath!), "utf-8"));
       expect(manifest.operations.map((operation: { status: string }) => operation.status))
         .toEqual(["applied", "applied", "applied", "failed", "planned"]);

@@ -143,7 +143,8 @@ test('the delegated sync changes no HOME file outside its plan and runtime state
     }
     expect(readlinkSync(userLink)).toBe(target);
     expect(readFileSync(join(home, '.claude/notes.txt'), 'utf8')).toBe('user\n');
-    expect(readdirSync(join(home, '.repo-harness/transactions'))).toEqual([]);
+    // No transaction is left; the root keeps only its storage guard (#2854).
+    expect(readdirSync(join(home, '.repo-harness/transactions'))).toEqual(['.gitignore']);
   } finally { rmSync(temporary, { recursive: true, force: true }); }
 });
 

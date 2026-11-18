@@ -6,6 +6,7 @@ import { runConfigDiff, runConfigGc, runConfigRestore, runConfigStatus } from '.
 import { runUserUninstall } from '../../src/cli/installer/uninstall';
 import { jsonFragment } from '../../src/core/host-config/json-fragment';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
+import { openRepositoryGate, resolveHostConfigRepository } from '../../src/effects/host-config/repository';
 
 /** A fake credential: no real token is ever read or written. */
 const FAKE_TOKEN = 'sk-FAKE-2851-not-a-real-token';
@@ -128,7 +129,7 @@ test('gc deletes a retired copy 30 days after its revert, and keeps a referenced
   expect(runConfigGc(f.env, { now: new Date(at + 31 * day), dryRun: true }).json).toEqual({ deleted: [copy(backup)], changed: [], waiting: 0 });
   expect(existsSync(copy(backup))).toBe(true);
   expect(runConfigGc(f.env, { now: new Date(at + 31 * day) }).json).toEqual({ deleted: [copy(backup)], changed: [], waiting: 0 });
-  expect(readdirSync(vault).sort()).toEqual([live, kept, `sha256:${'c'.repeat(64)}`].map((reference) => reference.slice('sha256:'.length)).sort());
+  expect(readdirSync(vault).sort()).toEqual(['.gitignore', ...[live, kept, `sha256:${'c'.repeat(64)}`].map((reference) => reference.slice('sha256:'.length)).sort()]);
   expect(f.ledger().retired).toEqual([]);
 });
 
@@ -153,4 +154,24 @@ test('gc keeps a retired copy whose entry is no longer the retired bytes, in the
   expect(runConfigGc(f.env, { now })).toMatchObject({ exitCode: 1, json: expected });
   expect([readFileSync(copy(edited), 'utf8'), lstatSync(copy(linked)).isSymbolicLink()]).toEqual(['my recovery edits', true]);
   expect(f.ledger().retired.map((entry: { sha256: string }) => entry.sha256)).toEqual([edited, linked]);
+});
+
+// restore --repo (#2854): the dry run and the apply share one plan, so a record below a nested checkout is kept with the same
+// reason and exit code in both; the apply writes nothing there and leaves no staging copy. Without the nested checkout it restores.
+test('restore --repo keeps a record that the target rule refuses, in the dry run as in the apply', () => {
+  const f = fixture();
+  const repo = join(f.home, 'repo');
+  const file = join(repo, '.claude', 'settings.json');
+  mkdirSync(join(repo, '.claude'), { recursive: true });
+  expect(Bun.spawnSync(['git', 'init', '-q', repo]).exitCode).toBe(0);
+  writeFileSync(file, 'user\n');
+  const repository = resolveHostConfigRepository(repo);
+  openRepositoryGate(f.env, repository).writePaths([{ path: file, owner: 'core', replace: true, entry: { type: 'file', bytes: Buffer.from('stripped\n') } }]);
+  writeFileSync(join(repo, '.claude', '.git'), 'gitdir: /elsewhere\n');
+  const kept = `[kept] ${file}: ${join(repo, '.claude')} holds .git, so another checkout owns it`;
+  const [preview, apply] = [runConfigRestore(f.env, undefined, { repo, dryRun: true }), runConfigRestore(f.env, undefined, { repo })];
+  expect([preview.exitCode, preview.lines[0], apply.exitCode, apply.lines[0], readFileSync(file, 'utf8')]).toEqual([preview.exitCode, kept, preview.exitCode, kept, 'stripped\n']);
+  rmSync(join(repo, '.claude', '.git'));
+  const restore = runConfigRestore(f.env, undefined, { repo });
+  expect([restore.exitCode, readFileSync(file, 'utf8'), readdirSync(join(repo, '.claude')), readdirSync(join(repo, '.ai/harness/backups/staging'))]).toEqual([0, 'user\n', ['settings.json'], []]);
 });

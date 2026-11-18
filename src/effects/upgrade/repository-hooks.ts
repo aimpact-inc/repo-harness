@@ -1,8 +1,8 @@
-import { lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import type { HostPath, Sha256 } from '../../core/host-config/types';
-import { openRepositoryGate, resolveHostConfigRepository } from '../host-config/repository';
+import { resolveHostConfigRepository, openRepositoryGate, withRepositoryStaging } from '../host-config/repository';
 import { replaceTarget } from '../host-config/store';
 import { globalRuntimeScope, withRuntimeTransactionContext, type RuntimeTransactionContext } from '../locking/runtime-transaction-lock';
 import { hookFileRemovals, hookLocation, planLegacyLeftovers, removeLegacyHookCommands } from './legacy-inventory';
@@ -61,10 +61,11 @@ export function stripRepositoryHookFiles(worktree: string, options: HookStripOpt
   const strips = planRepositoryHookStrips(worktree);
   if (!strips.length) return [];
   const repository = resolveHostConfigRepository(worktree);
-  if (realpathSync.native(worktree) !== repository.worktree) throw new Error(`rh strips repository hook files only at the worktree root ${repository.worktree}: ${worktree}`);
   const target = (strip: PlannedHookStrip) => join(repository.worktree, strip.path);
   if (options.record === 'commit') {
-    for (const strip of strips) replaceTarget(target(strip) as HostPath, strip.next, { existed: true, sha256: strip.expected });
+    withRepositoryStaging(repository.worktree, (stage) => {
+      for (const strip of strips) replaceTarget(target(strip) as HostPath, strip.next, { existed: true, sha256: strip.expected }, stage(target(strip)));
+    });
     return strips.map((strip) => strip.path);
   }
   return withRuntimeTransactionContext(globalRuntimeScope(options.env), options.runtimeLock, () => {
@@ -72,6 +73,6 @@ export function stripRepositoryHookFiles(worktree: string, options: HookStripOpt
       path: target(strip), owner: 'core', replace: true, expected: strip.expected,
       entry: { type: 'file' as const, bytes: strip.next, mode: lstatSync(target(strip)).mode & 0o777 },
     })));
-    return written.map((key) => relative(repository.worktree, key).split(sep).join('/'));
+    return written.map((key: string) => relative(repository.worktree, key).split(sep).join('/'));
   });
 }

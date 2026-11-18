@@ -414,7 +414,8 @@ describe("install-agent-fleet", () => {
       const kept = Object.fromEntries(Object.entries(receipt).filter(([key]) => targets.some((target) => target.blocked && pathRecordKey({ HOME: home }, target.path) === key)));
       expect(userManagedRecords(home)).toEqual(kept);
       const vault = join(stateDir, "config", "vault");
-      expect(existsSync(vault) ? readdirSync(vault) : []).toHaveLength(failedHost === "both" ? 0 : 1);
+      // The vault's storage guard (#2854) is not a copy.
+      expect(existsSync(vault) ? readdirSync(vault).filter((name) => name !== ".gitignore") : []).toHaveLength(failedHost === "both" ? 0 : 1);
 
       chmodSync(configDir, 0o700);
       const normal = runInstaller(home, FLEET_SOURCE_DIR);

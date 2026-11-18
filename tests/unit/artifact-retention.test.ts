@@ -129,7 +129,10 @@ describe('artifact retention selection', () => {
   test('fs-transaction backups past the window leave for the archive root and recent ones stay', () => {
     const root = fixture('.ai/harness/backups/\n.ai/harness/archive/\n');
     const backups = '.ai/harness/backups/fs-transaction';
+    // A newer storage guard is not content: the `removed/` that a rollback emptied counts by its own mtime (#2854 R3).
+    seed(root, `${backups}/1700000000000-42-1/removed/.gitignore`, 1);
     seed(root, `${backups}/1700000000000-42-1/manifest.json`, 45);
+    utimesSync(join(root, backups, '1700000000000-42-1/removed'), (NOW - 45 * DAY_MS) / 1000, (NOW - 45 * DAY_MS) / 1000);
     seed(root, `${backups}/AGENTS.md.1700000000000-42-1.bak`, 45);
     seed(root, `${backups}/1790000000000-43-1/manifest.json`, 2);
 

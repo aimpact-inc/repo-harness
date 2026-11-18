@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import { resolve } from 'node:path';
 import { globalRuntimeScope, withRuntimeTransactionLock } from '../../effects/locking/runtime-transaction-lock';
 import { openHostConfigGate, planPathRevert } from '../../effects/host-config/gate';
-import { openRepositoryGate, repositoryConfigPaths, resolveHostConfigRepository } from '../../effects/host-config/repository';
+import { repositoryConfigPaths, repositoryRestorePlan, resolveHostConfigRepository, revertRepositoryPaths } from '../../effects/host-config/repository';
 import { HostConfigError } from '../../core/host-config/types';
 import { isPathInside } from '../../effects/path-containment';
 import { collectRetired, configDiff, configStatus, type ConfigStatus, type FragmentDiff, type GcResult } from '../../effects/host-config/inspect';
@@ -71,8 +71,8 @@ export function runConfigDiff(env: NodeJS.ProcessEnv, path: string, options: { r
  */
 export function runConfigRestore(env: NodeJS.ProcessEnv, path: string | undefined, options: { readonly owner?: string; readonly dryRun?: boolean; readonly repo?: string } = {}): ConfigCommandResult {
   try {
+    if (options.repo !== undefined) return finishRestore(restoreRepository(env, options.repo, path, options), options.dryRun === true);
     const revert = (): UninstallItem[] => {
-      if (options.repo !== undefined) return revertRepository(env, options.repo, path, options);
       if (path === undefined) throw new HostConfigError('host_config_invalid_path', 'name a file, or a repository with --repo');
       const paths = hostConfigPaths(env);
       const target = resolveHostPath(paths, path);
@@ -82,33 +82,31 @@ export function runConfigRestore(env: NodeJS.ProcessEnv, path: string | undefine
       if (!entries.length) return [{ path: target, action: 'note', reason: options.owner === undefined ? 'rh has no record of this file' : `rh records no fragment of ${options.owner} in this file` }];
       return [...entries.map(revertItem), ...others.map((entry): UninstallItem => ({ path: target, action: 'kept', reason: `${entry.selector}: owned by ${entry.owner}` }))];
     };
-    const items = options.dryRun ? revert() : withRuntimeTransactionLock(globalRuntimeScope(env), () => { migrateInstallState(env); return revert(); });
-    const exitCode = exitCodeOf(items);
-    return { exitCode, lines: [...items.map((item) => `[${item.action}] ${item.path}: ${item.reason}`), `[restore] ${exitCode === 2 ? 'failed' : exitCode === 1 ? 'partial' : 'complete'}${options.dryRun ? ' (dry-run)' : ''}`], json: { exitCode, dryRun: options.dryRun === true, items } };
+    return finishRestore(options.dryRun ? revert() : withRuntimeTransactionLock(globalRuntimeScope(env), () => { migrateInstallState(env); return revert(); }), options.dryRun === true);
   } catch (error) { return failure(error); }
 }
 
+function finishRestore(items: readonly UninstallItem[], dryRun: boolean): ConfigCommandResult {
+  const exitCode = exitCodeOf(items);
+  return { exitCode, lines: [...items.map((item) => `[${item.action}] ${item.path}: ${item.reason}`), `[restore] ${exitCode === 2 ? 'failed' : exitCode === 1 ? 'partial' : 'complete'}${dryRun ? ' (dry-run)' : ''}`], json: { exitCode, dryRun, items } };
+}
+
 /**
- * `--repo`: the records of one repository ledger inside the worktree of
- * `repo` (D5, D6), or the one record at `path`. No ledger, or no record there,
- * stops the restore with `host_config_repository_unrecorded`; the user ledger
- * is never read.
+ * `--repo`: the records of one repository ledger under the selected worktree
+ * root (D5, D6), or the one record at `path`. The dry run and the apply share
+ * one read-only plan; the apply plans again under the runtime lock and runs no
+ * user-level migration, since it never reads the user ledger. A record that
+ * the target rule or the staging check refuses stays, with its reason.
  */
-function revertRepository(env: NodeJS.ProcessEnv, repo: string, path: string | undefined, options: { readonly owner?: string; readonly dryRun?: boolean }): UninstallItem[] {
+function restoreRepository(env: NodeJS.ProcessEnv, repo: string, path: string | undefined, options: { readonly owner?: string; readonly dryRun?: boolean }): UninstallItem[] {
   const repository = resolveHostConfigRepository(repo);
-  const paths = repositoryConfigPaths(env, repository);
-  const unrecorded = (where: string) => new HostConfigError('host_config_repository_unrecorded', `rh records no repository file ${where}`);
-  if (!observeFile(paths.ledger).observation.existed) throw unrecorded(`for ${repository.worktree}`);
-  const records = readLedger(paths).paths;
-  let keys = Object.keys(records).filter((key) => isPathInside(repository.worktree, key) && (options.owner === undefined || records[key]!.owner === options.owner));
-  if (path !== undefined) {
-    const key = hostPathKey(paths, path);
-    if (!keys.includes(key)) throw unrecorded(`at ${path}`);
-    keys = [key];
-  }
-  if (!keys.length) throw unrecorded(`in ${repository.worktree}`);
-  const entries = options.dryRun ? keys.map((key) => ({ path: key, action: planPathRevert(key, records[key]!) })) : openRepositoryGate(env, repository).revertPaths(keys);
-  return entries.map(revertItem);
+  const only = path === undefined ? undefined : hostPathKey(repositoryConfigPaths(env, repository), path);
+  const run = (): UninstallItem[] => {
+    const plan = repositoryRestorePlan(env, repository, { only, owner: options.owner });
+    const entries = options.dryRun ? plan.entries : revertRepositoryPaths(env, repository, plan);
+    return [...entries.map(revertItem), ...plan.refused.map((entry): UninstallItem => ({ path: entry.path, action: 'kept', reason: entry.reason }))];
+  };
+  return options.dryRun ? run() : withRuntimeTransactionLock(globalRuntimeScope(env), run);
 }
 
 export function runConfigGc(env: NodeJS.ProcessEnv, options: { readonly dryRun?: boolean; readonly now?: Date } = {}): ConfigCommandResult {

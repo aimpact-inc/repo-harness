@@ -3,7 +3,8 @@ import { publishFileByRename, retryWindowsSharingRace } from '../../effects/atom
 import wazaRules from "../../core/skill-surface/waza-shared-rules.json";
 import { bunGlobalPackageRoot, expectedSkillProjections } from './skill-projection';
 import { configurationReceiptPath } from './configuration-ownership';
-import { ensurePrivateDirectory, hostConfigPaths, putVault, resolveHostPath } from '../../effects/host-config/store';
+import { hostConfigPaths, putVault, resolveHostPath } from '../../effects/host-config/store';
+import { ensureSelfIgnoringDirectory, SELF_IGNORE_NAME } from '../../effects/self-ignoring-directory';
 import { openHostConfigGate, planPathRevert, rollbackHostConfigTransaction } from '../../effects/host-config/gate';
 import { namingTomlFile } from '../../core/host-config/toml-fragment';
 import { migrateCodexConfigRecords } from './codex-config-migration';
@@ -559,7 +560,6 @@ function settleTransactionCopy(copy: string, host: string, env: NodeJS.ProcessEn
     const bytes = readFileSync(copy);
     if (!current?.isFile() || !readFileSync(host).equals(bytes)) {
       const paths = hostConfigPaths(env);
-      ensurePrivateDirectory(paths.vault);
       const vaulted = join(paths.vault, putVault(paths, bytes).slice('sha256:'.length));
       process.stderr.write(`[install] ${host} is not as a killed install found it; its earlier bytes are in ${vaulted}\n`);
     }
@@ -596,7 +596,7 @@ function settleOrphanedTransactions(transactionRoot: string, env: NodeJS.Process
       const host = /^\d+$/.test(entry) ? owner.paths[Number(entry)] : undefined;
       if (host !== undefined && installProfileTransactionPaths(env).includes(host)) settleTransactionCopy(join(directory, entry), host, env);
     }
-    if (readdirSync(directory).every((entry) => entry === TRANSACTION_OWNER || entry === RETIRED_STAGED_SKILLS)) rmSync(directory, { recursive: true, force: true });
+    if (readdirSync(directory).every((entry) => entry === TRANSACTION_OWNER || entry === RETIRED_STAGED_SKILLS || entry === SELF_IGNORE_NAME)) rmSync(directory, { recursive: true, force: true });
     else process.stderr.write(`[install] kept incomplete transaction for recovery: ${directory}\n`);
   }
 }
@@ -614,6 +614,8 @@ function createTransactionDirectory(transactionRoot: string, paths: readonly str
   const staging = mkdtempSync(join(transactionRoot, '.staging-'));
   const directory = join(transactionRoot, `${TRANSACTION_PREFIX}${randomUUID()}`);
   try {
+    // The guard goes in first: the directory holds copies of host files (#2854 P7).
+    ensureSelfIgnoringDirectory(staging);
     writeFileSync(join(staging, TRANSACTION_OWNER), `${JSON.stringify({ pid: process.pid, start_time: currentProcessStartTime(), paths })}\n`, { mode: 0o600 });
     renameSync(staging, directory);
   } catch (error) {
@@ -648,6 +650,7 @@ function snapshotPaths(
     if (containsConfig) mutateGlobalConfiguration(env, () => ({ value: undefined }), { runtimeLock: context });
     const transactionRoot = runtimeTransactionRoot(scope);
     mkdirSync(transactionRoot, { recursive: true });
+    ensureSelfIgnoringDirectory(transactionRoot);
     if (context && holdsRuntimeLock(scope)) settleOrphanedTransactions(transactionRoot, env);
     const unique = [...new Set(paths)];
     const backupRoot = createTransactionDirectory(transactionRoot, unique);

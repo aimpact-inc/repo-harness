@@ -926,7 +926,7 @@ describe('upgrade with real release bytes', () => {
     expect(current?.core.version).toBe(JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version);
     const snapshots = JSON.parse(readFileSync(join(result.backupPath!, 'manifest.json'), 'utf8')).snapshots as Array<{ path: string }>;
     expect(snapshots.some(snapshot => [path, statePath, join(opts.home, '.repo-harness/config/ledger.json')].includes(snapshot.path))).toBe(false);
-    expect(readdirSync(join(opts.home, '.repo-harness/transactions'))).toEqual([basename(result.backupPath!)]);
+    expect(readdirSync(join(opts.home, '.repo-harness/transactions')).sort()).toEqual(['.gitignore', basename(result.backupPath!)]);
     expect(runUpgrade({ ...opts, scope: 'global' }).items.some((item) => item.path === path)).toBe(false);
   }, false));
 

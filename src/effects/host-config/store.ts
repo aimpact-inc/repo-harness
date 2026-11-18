@@ -14,6 +14,7 @@ import {
   type Sha256,
 } from '../../core/host-config/types';
 import { publishFileByRename, retryWindowsSharingRace } from '../atomic-append';
+import { ensureSelfIgnoringDirectory } from '../self-ignoring-directory';
 import { globalConfigurationPath } from '../configuration/global-configuration';
 import { isPathInside } from '../path-containment';
 
@@ -117,8 +118,7 @@ export function expectedOf(observation: FileObservation, path: string): Expected
  * target must still match `expected` right before the rename, so rh never
  * overwrites a change that it did not see. An existing file keeps its mode.
  */
-export function replaceTarget(path: HostPath, bytes: Buffer, expected: ExpectedFile): void {
-  const temporary = `${path}.${randomUUID()}.tmp`;
+export function replaceTarget(path: HostPath, bytes: Buffer, expected: ExpectedFile, temporary = `${path}.${randomUUID()}.tmp`): void {
   const mode = lstatSync(path, { throwIfNoEntry: false })?.mode ?? 0o600;
   const fd = openSync(temporary, 'wx', 0o600);
   try {
@@ -361,7 +361,8 @@ export function writeLedgerBytes(paths: HostConfigPaths, bytes: Buffer): void {
 export function putVault(paths: HostConfigPaths, bytes: Buffer): Sha256 {
   const hex = sha256Hex(bytes);
   const target = join(paths.vault, hex);
-  ensurePrivateDirectory(paths.vault);
+  ensurePrivateDirectory(paths.root);
+  ensureSelfIgnoringDirectory(paths.vault);
   if (!lstatSync(target, { throwIfNoEntry: false })) publishFileByRename(target, bytes, `${target}.${randomUUID()}.tmp`);
   readVault(paths, `sha256:${hex}`);
   return `sha256:${hex}`;

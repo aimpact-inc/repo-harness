@@ -159,6 +159,12 @@ export interface HostConfigPathOptions {
    * can put it back; the transaction deletes the directory at commit.
    */
   readonly transaction?: string;
+  /**
+   * Where a write puts its bytes before the rename onto `target`; by default
+   * a name beside the target. The repository scope stages in a guarded rh
+   * directory instead, so a kill leaves no copy that Git can stage (#2854).
+   */
+  readonly stage?: (target: string) => string;
 }
 
 
@@ -584,7 +590,7 @@ function writeWholePaths(admit: WholePathAdmit, paths: HostConfigPaths, writes: 
     createDirectories(createdDirs);
     let staged: string | null = null;
     try {
-      const stage = stagePathEntry(entry, write.entry);
+      const stage = stagePathEntry(entry, write.entry, options.stage?.(entry));
       staged = stage.staged;
       const next = nextPathRecord(prior, write.owner, host, observed, stage.committed, backup, linkTarget);
       assertReplacedIsFile(next, write.path);
@@ -972,7 +978,7 @@ function revertWholePaths(paths: HostConfigPaths, only: readonly string[], optio
       if (options.transaction) keepPreimage(options.transaction, entry);
       if (record.kind === 'replaced') {
         const committed = record.committed as Extract<PathCommitted, { type: 'file' }>;
-        replaceTarget(entry as HostPath, readVault(paths, record.backup!), { existed: true, sha256: committed.sha256 });
+        replaceTarget(entry as HostPath, readVault(paths, record.backup!), { existed: true, sha256: committed.sha256 }, options.stage?.(entry));
       } else removePathEntry(entry);
     } });
   }
@@ -1547,38 +1553,48 @@ export interface HostConfigRepositoryGate {
   revertPaths(paths: readonly string[]): readonly HostConfigRevertEntry[];
 }
 
+/** What the repository scope adds to a whole-path write: the worktree, its target rule and its staging. */
+export interface HostConfigRepositoryScope {
+  /** The worktree root, links followed. */
+  readonly worktree: string;
+  /** Why rh may not write the target, or null; from the file system only. */
+  readonly refusal: (target: string) => string | null;
+  /** Where the bytes for one target wait before the rename; it checks the target again and throws when no safe place exists. */
+  readonly stage: (target: string) => string;
+}
+
 /** The host directory of a repository file, from its first path segment in the worktree. */
 const REPOSITORY_HOSTS: Readonly<Record<string, PathRecord['host']>> = { '.claude': 'claude', '.codex': 'codex' };
 
 /**
- * A repository file is admitted only inside the worktree, links followed, and
- * under `.claude/` or `.codex/`. A file that the user ledger records stays with
- * that ledger: one file never has two owners (D10). The user ledger is read
- * as the schema move would leave it, since this gate never moves it.
+ * A repository file is admitted only under `.claude/` or `.codex/` of the
+ * worktree, and only when the scope's target rule passes. A file that the user
+ * ledger records stays with that ledger: one file never has two owners (D10).
+ * The user ledger is read as the schema move would leave it, since this gate
+ * never moves it.
  */
-function admitRepositoryPath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, worktree: string, path: string): { key: string; host: PathRecord['host'] } {
+function admitRepositoryPath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, scope: HostConfigRepositoryScope, path: string): { key: string; host: PathRecord['host'] } {
+  const refused = scope.refusal(path);
+  if (refused !== null) throw new HostConfigError('host_config_invalid_path', `rh does not write this repository file: ${refused}: ${path}`);
   const key = hostPathKey(paths, path);
-  const entry = resolveHostPath(paths, path);
-  const host = REPOSITORY_HOSTS[relative(worktree, key).split(sep)[0]!];
-  if (!isPathInside(worktree, key) || !isPathInside(worktree, entry) || host === undefined) {
-    throw new HostConfigError('host_config_invalid_path', `rh records a repository file only under .claude/ or .codex/ of the worktree ${worktree}: ${path}`);
+  const host = REPOSITORY_HOSTS[relative(scope.worktree, key).split(sep)[0]!];
+  if (!isPathInside(scope.worktree, key) || host === undefined) {
+    throw new HostConfigError('host_config_invalid_path', `rh records a repository file only under .claude/ or .codex/ of the worktree ${scope.worktree}: ${path}`);
   }
   const user = readProjectedLedger(hostConfigPaths(env));
-  for (const target of new Set([key, entry])) {
-    if (user.files[target] || pathRecordOf(user, target as HostPath) !== null) {
-      throw new HostConfigError('host_config_invalid_state', `the user-level ledger records this file, so rh does not record it for the repository: ${path}`);
-    }
+  if (user.files[key] || pathRecordOf(user, key as HostPath) !== null) {
+    throw new HostConfigError('host_config_invalid_state', `the user-level ledger records this file, so rh does not record it for the repository: ${path}`);
   }
   return { key, host };
 }
 
-/** `paths` is the repository ledger layout; `worktree` is the worktree root, links followed. */
-export function openRepositoryHostConfigGate(env: NodeJS.ProcessEnv, paths: HostConfigPaths, worktree: string): HostConfigRepositoryGate {
+/** `paths` is the repository ledger layout. */
+export function openRepositoryHostConfigGate(env: NodeJS.ProcessEnv, paths: HostConfigPaths, scope: HostConfigRepositoryScope): HostConfigRepositoryGate {
   return {
     writePaths: (writes) => {
       ensurePrivateDirectory(paths.root);
-      return writeWholePaths((_ledger, path) => admitRepositoryPath(env, paths, worktree, path), paths, writes, {});
+      return writeWholePaths((_ledger, path) => admitRepositoryPath(env, paths, scope, path), paths, writes, { stage: scope.stage });
     },
-    revertPaths: (only) => revertWholePaths(paths, only, {}),
+    revertPaths: (only) => revertWholePaths(paths, only, { stage: scope.stage }),
   };
 }
