@@ -23,7 +23,9 @@ import { routesForHost, type AdapterHost, type Route } from '../hook/route-regis
 import { MANAGED_TAG, isRepoHarnessManagedHookCommand } from '../../core/adoption/managed-hook-config';
 import { jsonFragment, jsonFragmentValue } from '../../core/host-config/json-fragment';
 import { HostConfigError, type FragmentRecord, type FragmentRequest } from '../../core/host-config/types';
+import { NO_OVERRIDES, selected, type OverrideSelection } from '../../core/host-config/override';
 import { openHostConfigGate, type HostConfigApplyResult } from '../../effects/host-config/gate';
+import { hostConfigPaths, resolveHostPath } from '../../effects/host-config/store';
 
 export { MANAGED_TAG } from '../../core/adoption/managed-hook-config';
 
@@ -416,19 +418,31 @@ export interface ManagedHooksResult extends HostConfigApplyResult {
   readonly refreshed: readonly string[];
 }
 
-export function applyManagedHooks(filePath: string, host: HookHost, extra: readonly FragmentRequest[] = [], env: NodeJS.ProcessEnv = process.env): ManagedHooksResult {
+/** The override lookup of one host file: the selection names a fragment by the file's path with its links followed. */
+export function overridesOf(selection: OverrideSelection, filePath: string, env: NodeJS.ProcessEnv): (selector: string) => boolean {
+  if (!selection.length) return () => false;
+  const path = resolveHostPath(hostConfigPaths(env), filePath);
+  return (selector) => selected(selection, path, selector);
+}
+
+/** The managed entry request of each route of the host, for the file content; `selected` is the override lookup of the file. */
+export function managedHookRequests(host: HookHost, content: string, selected: (selector: string) => boolean, env: NodeJS.ProcessEnv = process.env): FragmentRequest[] {
+  return routesForHost(host).map((route): FragmentRequest => {
+    const selector = hookSelector(route);
+    return { owner: 'core', selector, kind: jsonFragment.locate(content, selector) ? 'refresh' : 'add', strategy: jsonFragment, value: buildHookEntry(route, host, env), selected: selected(selector) };
+  });
+}
+
+export function applyManagedHooks(filePath: string, host: HookHost, extra: readonly FragmentRequest[] = [], env: NodeJS.ProcessEnv = process.env,
+  overrides: OverrideSelection = NO_OVERRIDES): ManagedHooksResult {
   const gate = openHostConfigGate({ env });
-  const routes = routesForHost(host);
-  const current = new Set(routes.map(hookSelector));
-  const entries = routes.map((route) => ({ selector: hookSelector(route), value: buildHookEntry(route, host, env) }));
+  const current = new Set(routesForHost(host).map(hookSelector));
   const retired = gate.recorded(filePath)
     .filter((record) => record.owner === 'core' && record.selector.startsWith('hooks.') && !current.has(record.selector))
     .map((record) => record.selector);
   if (retired.length) gate.revert([filePath], { selectors: retired });
   const content = existsSync(filePath) ? readFileSync(filePath, 'utf8') : '';
-  const fragments = entries.map(({ selector, value }): FragmentRequest =>
-    ({ owner: 'core', selector, kind: jsonFragment.locate(content, selector) ? 'refresh' : 'add', strategy: jsonFragment, value }));
-  const requests = [...fragments, ...extra];
+  const requests = [...managedHookRequests(host, content, overridesOf(overrides, filePath, env), env), ...extra];
   const report = adoptedRefreshes(filePath, content, requests, gate.recorded(filePath));
   const result = gate.apply([{ path: filePath, fragments: requests }]);
   const skipped = new Set(result.skipped.map((skip) => skip.selector));

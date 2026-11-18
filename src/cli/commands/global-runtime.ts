@@ -27,6 +27,7 @@ import { CLI_NAME, namesRetiredCli, RETIRED_CLI_NAME } from "../../core/skill-su
 import { shellQuote } from "../../core/shell-quote";
 import { syncCrossReviewSkills } from "./init";
 import { runInstall, type InstallTargetSpec } from "./install";
+import type { OverrideSelection } from "../../core/host-config/override";
 import { compareVersions, readLatestPackageVersion } from "./doctor";
 import { DEFAULT_PROCESS_MAX_BUFFER_BYTES, redactProcessOutput, runProcess as runBoundedProcess } from "../../effects/process-runner";
 import { gitChildEnv } from "../../effects/git/runner";
@@ -90,6 +91,8 @@ export interface GlobalRuntimeOptions {
   updateMode?: boolean;
   /** Render inputs for a Global Working Rules block that records none. A recorded header wins. */
   reportLanguage?: ReportLanguageFlag;
+  /** The user's `--override` selection, checked by the caller before any write. */
+  overrides?: OverrideSelection;
   /** Internal-only capability proving that the caller owns the outer transaction. */
   candidateHandoff?: CandidateHandoffContext;
   mcpLocalConfigCheck?: McpLocalConfigCheck;
@@ -766,8 +769,8 @@ function syncRuntimeSkill(sourceRoot: string, plugins: readonly PluginId[], targ
   } catch (error) { return { step: 'sync repo-harness skill runtime', status: 'failed', detail: (error as Error).message }; }
 }
 
-function installHostAdapters(target: InstallTargetSpec, env?: NodeJS.ProcessEnv): GlobalRuntimeStep {
-  const installed = withProcessEnv(env, () => runInstall({ target, location: "global" }));
+function installHostAdapters(target: InstallTargetSpec, env: NodeJS.ProcessEnv | undefined, overrides: OverrideSelection | undefined): GlobalRuntimeStep {
+  const installed = withProcessEnv(env, () => runInstall({ target, location: "global", overrides }));
   return {
     step: "install host adapters",
     status: installed.exitCode === 0 ? "ok" : "failed",
@@ -834,6 +837,7 @@ function reconcileWithInstalledCandidate(
     obsidian_skills: opts.obsidianSkills === true,
     codegraph: opts.codegraph ?? true,
     report_language: opts.reportLanguage,
+    ...(opts.overrides?.length ? { overrides: opts.overrides } : {}),
   };
   const child = runProcess(
     bunExecutable,
@@ -1950,7 +1954,7 @@ function runGlobalRuntimeSetupInTransaction(opts: GlobalRuntimeOptions): GlobalR
   if (opts.syncSkill !== false) steps.push(syncRuntimeSkill(sourceRoot, plugins, target, env, opts.transaction));
   else steps.push({ step: "sync repo-harness skill runtime", status: "skipped", detail: "disabled" });
 
-  if (opts.hostAdapters !== false) steps.push(installHostAdapters(target, env));
+  if (opts.hostAdapters !== false) steps.push(installHostAdapters(target, env, opts.overrides));
   else steps.push({ step: "install host adapters", status: "skipped", detail: "disabled" });
 
   steps.push(installAgentFleet(sourceRoot, bunExecutable, env, opts.transaction));

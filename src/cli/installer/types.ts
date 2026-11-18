@@ -11,6 +11,9 @@
  * settings.json), not MCP server registration.
  */
 
+import type { OverrideSelection } from '../../core/host-config/override';
+import type { HostConfigFileChange } from '../../effects/host-config/gate';
+
 export type Location = 'global';
 
 /**
@@ -49,12 +52,10 @@ export interface WriteResult {
   notes?: string[];
 }
 
-/**
- * Reserved for Phase 1B/1C install/migrate flags (dry-run, force, etc.).
- * Phase 1A keeps the parameter shape but ships no flags so call sites
- * don't have to change later.
- */
-export type InstallOptions = Record<string, never>;
+export interface InstallOptions {
+  /** The user's `--override` selection; a target without `hostConfigChanges` takes none. */
+  readonly overrides?: OverrideSelection;
+}
 
 export interface AgentTarget {
   readonly id: TargetId;
@@ -65,4 +66,10 @@ export interface AgentTarget {
   supportsLocation(loc: Location): boolean;
   detect(loc: Location): DetectionResult;
   install(loc: Location, opts: InstallOptions): WriteResult;
+  /**
+   * The host-config changes that `install` applies, built from the current
+   * files without a write: the dry run plans them and the override check
+   * reads their selectors. A target without it takes no override selection.
+   */
+  hostConfigChanges?(loc: Location, opts: InstallOptions): readonly HostConfigFileChange[];
 }

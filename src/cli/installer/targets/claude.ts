@@ -15,7 +15,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { requireHome } from '../../../effects/repo-harness-home';
 import { jsonFragment } from '../../../core/host-config/json-fragment';
+import { NO_OVERRIDES } from '../../../core/host-config/override';
 import type { FragmentRequest } from '../../../core/host-config/types';
+import type { HostConfigFileChange } from '../../../effects/host-config/gate';
 import { migrateJsonConfigRecords } from '../json-config-migration';
 import type {
   AgentTarget,
@@ -29,7 +31,9 @@ import {
   applyManagedHooks,
   buildHookExecCommand,
   isManagedEntry,
+  managedHookRequests,
   managedStatusLine,
+  overridesOf,
   type HooksByEvent,
 } from '../managed-entries';
 
@@ -54,14 +58,19 @@ export const CLAUDE_STATUS_LINE_PIPE = `input=$(cat); printf '%s' "$input" | rep
  * rh adds the status line only when none exists, and refreshes only the one
  * it recorded; a status line that rh did not write is the user's (R4).
  */
-function statusLineFragment(content: string): FragmentRequest {
+function statusLineFragment(content: string, selected: (selector: string) => boolean): FragmentRequest {
   return {
     owner: 'core',
     selector: 'statusLine',
     kind: jsonFragment.locate(content, 'statusLine') ? 'refresh' : 'add',
     strategy: jsonFragment,
     value: managedStatusLine(),
+    selected: selected('statusLine'),
   };
+}
+
+function readSettings(filePath: string): string {
+  return fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf-8') : '';
 }
 
 class ClaudeTarget implements AgentTarget {
@@ -92,13 +101,22 @@ class ClaudeTarget implements AgentTarget {
     return { installed, alreadyConfigured, configPath: filePath };
   }
 
-  install(loc: Location, _opts: InstallOptions): WriteResult {
+  hostConfigChanges(loc: Location, opts: InstallOptions): HostConfigFileChange[] {
     const filePath = userConfigPath(loc);
+    const content = readSettings(filePath);
+    const selected = overridesOf(opts.overrides ?? NO_OVERRIDES, filePath, process.env);
+    return [{ path: filePath, fragments: [...managedHookRequests('claude', content, selected), statusLineFragment(content, selected)] }];
+  }
+
+  install(loc: Location, opts: InstallOptions): WriteResult {
+    const filePath = userConfigPath(loc);
+    const overrides = opts.overrides ?? NO_OVERRIDES;
     // An unresolved hook runtime stops the install before the migration writes.
     buildHookExecCommand(process.env);
     migrateJsonConfigRecords(process.env);
     const created = !fs.existsSync(filePath);
-    const result = applyManagedHooks(filePath, 'claude', [statusLineFragment(created ? '' : fs.readFileSync(filePath, 'utf-8'))]);
+    const statusLine = statusLineFragment(readSettings(filePath), overridesOf(overrides, filePath, process.env));
+    const result = applyManagedHooks(filePath, 'claude', [statusLine], process.env, overrides);
     const notes = [...result.refreshed, ...(result.skipped.some((entry) => entry.selector === 'statusLine')
       ? [`statusLine exists and is not changed. To capture Claude quota, set its command to: ${CLAUDE_STATUS_LINE_PIPE}`]
       : [])];
