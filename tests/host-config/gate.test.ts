@@ -1021,6 +1021,7 @@ test.each([
   { label: 'written and reverted', change: 'none' },
   { label: 'P1 absent, then put back by hand', change: 'absent' },
   { label: 'P2 edited block', change: 'edited' },
+  { label: 'a note after the END line', change: 'annotated' },
   { label: 'P6 info/ becomes a link after the record', change: 'link-later' },
   { label: 'P6 a linked info/', change: 'link' },
   { label: 'P6 the exclude file of another clone', change: 'other' },
@@ -1058,6 +1059,13 @@ test.each([
   if (change === 'absent') rmSync(exclude);
   if (change === 'edited') writeFileSync(exclude, readFileSync(exclude, 'utf8').replace('.ai/harness/\n', '.ai/harness/\nmine/\n'));
   if (change === 'link-later') { renameSync(info, join(f.home, 'elsewhere')); symlinkSync(join(f.home, 'elsewhere'), info); }
+  if (change === 'annotated') writeFileSync(exclude, `${user}\n${block} (local note)\n`);
+  if (change === 'annotated') {
+    // A marker is a whole line, so the strategy cannot read the block: it stays, with no join of the note to the rule before it.
+    expect(gate.revert().map((entry) => entry.action)).toEqual(['kept_edited']);
+    expect(readFileSync(exclude, 'utf8')).toBe(`${user}\n${block} (local note)\n`);
+    return;
+  }
   if (change === 'link-later') {
     expect(() => gate.revert()).toThrow(`${info} is a link`);
     expect({ bytes: readFileSync(exclude, 'utf8'), record: JSON.parse(readFileSync(paths.ledger, 'utf8')).files[exclude] }).toEqual({ bytes: `${user}\n${block}\n`, record: ledger.files[exclude] });

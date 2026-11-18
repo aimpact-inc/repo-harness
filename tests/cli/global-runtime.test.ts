@@ -439,8 +439,9 @@ describe('runtime ignore rules step', () => {
   const exclude = (repo: string) => join(repo, '.git', 'info', 'exclude');
 
   test('update writes the block into each adopted repository through the ledger of its clone and then retires the user-level block; uninstall reverts each repository ledger', () => withIgnoreFixture((f, update, repo, userExcludes) => {
-    const adopted = repo('adopted'), other = repo('not-adopted', false), away = repo('away'), gone = repo('gone'), moved = repo('moved');
-    writeRegistry(f, [adopted, other, away, gone, moved]);
+    const adopted = repo('adopted'), other = repo('not-adopted', false), away = repo('away'), gone = repo('gone'), moved = repo('moved'), fresh = repo('fresh');
+    writeRegistry(f, [adopted, other, away, gone, moved, fresh]);
+    rmSync(exclude(fresh));
     const template = readFileSync(exclude(adopted), 'utf8');
     // An escaped trailing space and a trailing blank line: bytes that a trim would change. The block goes before the final line endings.
     const userBytes = `${template}name\\ \n\n`;
@@ -450,6 +451,8 @@ describe('runtime ignore rules step', () => {
     expect(step(update(), RETIRE)).toMatchObject({ status: 'skipped', detail: `${userExcludes}: kept the runtime-state block until every registered repository holds its own proved block` });
     expect(readFileSync(userExcludes, 'utf8')).toBe(`*.log\n\n${OLD_BLOCK}\n`);
     renameSync(`${away}.moved`, away);
+    // rh created this file; the user replaces it with blank lines, and the next update puts the block back in.
+    writeFileSync(exclude(fresh), '\n\n');
     // rh run from a Git hook inherits GIT_DIR; each repository still resolves its own exclude file.
     const hookEnv = { GIT_DIR: join(adopted, '.git') };
     const inherited = process.env.GIT_DIR;
@@ -480,6 +483,8 @@ describe('runtime ignore rules step', () => {
     expect(readFileSync(exclude(away), 'utf8')).toContain('scratch-*/');
     expect(removal.items).toContainEqual({ path: exclude(moved), action: 'unresolved', reason: expect.stringContaining(`${info} is a link`) });
     expect(readFileSync(exclude(moved), 'utf8')).toContain(OLD_BLOCK);
+    // The outside change leaves whole-file ownership unproved: the file and its blank lines stay.
+    expect(readFileSync(exclude(fresh), 'utf8')).toBe('\n\n');
     // The identical block put back by hand after the release is the user's.
     writeFileSync(exclude(gone), `${template}\n${OLD_BLOCK}\n`);
     runUserUninstall({ target: 'both', env: f.env });
@@ -487,27 +492,32 @@ describe('runtime ignore rules step', () => {
   }));
 
   test('update imports the blocks that an earlier release listed: only a listed block with shipped text becomes a record', () => withIgnoreFixture((f, update, repo) => {
-    const listed = repo('listed'), edited = repo('edited'), unlisted = repo('unlisted');
-    writeRegistry(f, [listed, edited, unlisted]);
+    const listed = repo('listed'), edited = repo('edited'), unlisted = repo('unlisted'), annotated = repo('annotated');
+    writeRegistry(f, [listed, edited, unlisted, annotated]);
     const template = readFileSync(exclude(listed), 'utf8');
     const editedBlock = OLD_BLOCK.replace(`${BEGIN}\n`, `${BEGIN}\nmine/\n`);
     for (const [path, block] of [[listed, OLD_BLOCK], [edited, editedBlock], [unlisted, OLD_BLOCK]] as const) writeFileSync(exclude(path), `${template}\n${block}\n`);
+    // A marker must be a whole line: a note after the END line belongs to the user, so the block is unbalanced and stays.
+    const annotatedBytes = `${template}*.log\n\n${OLD_BLOCK} (local note)\nscratch/\n`;
+    writeFileSync(exclude(annotated), annotatedBytes);
     const list = join(f.env.HOME!, '.repo-harness', 'repository-excludes.json');
     // An invalid list stops the step and stays.
     writeFileSync(list, '{"version":1,"entries":[{}]}\n');
     expect(step(update(), 'write runtime ignore rules')).toMatchObject({ status: 'failed', detail: expect.stringContaining('repository_excludes_ledger_invalid') });
     expect(existsSync(list)).toBe(true);
-    writeFileSync(list, JSON.stringify({ version: 1, entries: [listed, edited].map((path) => ({ repo_id: 'id', repo_path: path, exclude_path: exclude(path) })) }));
+    writeFileSync(list, JSON.stringify({ version: 1, entries: [listed, edited, annotated].map((path) => ({ repo_id: 'id', repo_path: path, exclude_path: exclude(path) })) }));
     const detail = step(update(), 'write runtime ignore rules')!.detail;
     expect(detail).toContain(`${exclude(listed)}: imported`);
     expect(detail).toContain(`${exclude(edited)}: not imported (the block was edited)`);
     expect(detail).toContain(`${exclude(unlisted)}: kept a block that rh cannot prove it wrote`);
+    expect(detail).toContain(`${exclude(annotated)}: not imported (unbalanced runtime-state markers)`);
+    expect(detail).toContain(`${exclude(annotated)}: unbalanced repo-harness runtime-state markers; preserving the file`);
     expect(existsSync(list)).toBe(false);
     // A recorded block that the user deleted comes back at the next update, as before the ledger.
     writeFileSync(exclude(listed), template);
     expect(step(update(), 'write runtime ignore rules')!.detail).toContain(`${exclude(listed)}: written`);
     runUserUninstall({ target: 'both', env: f.env });
-    expect([listed, edited, unlisted].map((path) => readFileSync(exclude(path), 'utf8'))).toEqual([template, `${template}\n${editedBlock}\n`, `${template}\n${OLD_BLOCK}\n`]);
+    expect([listed, edited, unlisted, annotated].map((path) => readFileSync(exclude(path), 'utf8'))).toEqual([template, `${template}\n${editedBlock}\n`, `${template}\n${OLD_BLOCK}\n`, annotatedBytes]);
   }));
 
   test('update refuses a link below the common dir, a target in the rh home, a non-UTF-8 file and an unproved block, and keeps the user-level block', () => {

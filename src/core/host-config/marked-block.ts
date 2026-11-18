@@ -23,21 +23,31 @@ export type MarkedBlockLayout =
   /** `end` is the offset after the END marker. */
   | { readonly kind: 'balanced'; readonly start: number; readonly end: number };
 
-function countOccurrences(haystack: string, needle: string): number {
-  let count = 0;
-  for (let index = haystack.indexOf(needle); index !== -1; index = haystack.indexOf(needle, index + needle.length)) count += 1;
-  return count;
+function occurrences(haystack: string, needle: string): number[] {
+  const found: number[] = [];
+  for (let index = haystack.indexOf(needle); index !== -1; index = haystack.indexOf(needle, index + needle.length)) found.push(index);
+  return found;
+}
+
+/**
+ * Git ignore text is read by line, so each runtime-state marker must be a
+ * whole line: text before or after a marker on its line is the user's, and a
+ * removal of the block would join it to another rule (#3080).
+ */
+function isWholeLine(content: string, at: number, length: number): boolean {
+  const after = content.slice(at + length, at + length + 2);
+  return (at === 0 || content[at - 1] === '\n') && (after === '' || after.startsWith('\n') || after === '\r\n');
 }
 
 /** One BEGIN and one END marker, in that order, make a block; any other marker set is unbalanced. */
 export function markedBlockLayout(content: string, selector: string): MarkedBlockLayout {
   const { begin, end } = markedBlockMarkers(selector);
-  const beginCount = countOccurrences(content, begin);
-  const endCount = countOccurrences(content, end);
-  if (beginCount === 0 && endCount === 0) return { kind: 'none' };
-  const start = content.indexOf(begin);
-  const stop = content.indexOf(end);
-  if (beginCount !== 1 || endCount !== 1 || stop < start) return { kind: 'unbalanced' };
+  const begins = occurrences(content, begin);
+  const ends = occurrences(content, end);
+  if (begins.length === 0 && ends.length === 0) return { kind: 'none' };
+  const [start, stop] = [begins[0] ?? -1, ends[0] ?? -1];
+  if (begins.length !== 1 || ends.length !== 1 || stop < start) return { kind: 'unbalanced' };
+  if (selector === 'runtime-state' && !(isWholeLine(content, start, begin.length) && isWholeLine(content, stop, end.length))) return { kind: 'unbalanced' };
   return { kind: 'balanced', start, end: stop + end.length };
 }
 
