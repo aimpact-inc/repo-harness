@@ -10,6 +10,7 @@ import { hookRenderingKey, jsonFragment, removeJsonHookCommand } from '../../src
 import { sha256Prefixed } from '../../src/core/evidence/sha256';
 import { tomlFragment } from '../../src/core/host-config/toml-fragment';
 import { markedBlock } from '../../src/core/host-config/marked-block';
+import { insertUserPathEntry, listsUserPathEntry, removeUserPathEntry, type UserPathValue } from '../../src/core/host-config/path-entry';
 
 /** A `key=value` line format: the selector is the key. */
 function keyLineMatch(content: string, selector: string): RegExpExecArray | null {
@@ -748,4 +749,30 @@ test('a delegated installer gets records for the declared fragments that it crea
   let ran = false;
   expect(() => f.gate().delegate(declared, () => { ran = true; })).toThrow('the file is not valid JSON');
   expect(ran).toBe(false);
+});
+
+const DIR = 'C:\\Users\\u\\AppData\\Local\\Programs\\herdr-core';
+test.each([
+  ['an absent value', { existed: false, kind: 'ExpandString', raw: '' }, DIR],
+  ['an empty value', { existed: true, kind: 'String', raw: '' }, DIR],
+  ['one entry', { existed: true, kind: 'ExpandString', raw: '%USERPROFILE%\\bin' }, `%USERPROFILE%\\bin;${DIR}`],
+  ['a trailing separator', { existed: true, kind: 'ExpandString', raw: 'a;' }, `a;${DIR}`],
+] as const)('the user PATH entry goes into %s and its removal gives the same value and kind back', (_label, before, after) => {
+  expect(listsUserPathEntry(before.raw, DIR)).toBe(false);
+  const { next, record } = insertUserPathEntry(before, DIR);
+  expect(next).toEqual({ existed: true, kind: before.kind, raw: after });
+  expect(listsUserPathEntry(next.raw, `${DIR.toUpperCase()}\\`)).toBe(true);
+  expect(removeUserPathEntry(next, record)).toEqual(before);
+});
+
+test.each([
+  ['a later append stays', `a;${DIR};b`, 'a;b'],
+  ['a duplicate stays', `a;${DIR};${DIR}`, null],
+  ['a case change stays', `a;${DIR.toLowerCase()}`, null],
+  ['an edited entry stays', `a;${DIR}\\sub`, null],
+  ['an entry moved to the front stays', `${DIR};a`, null],
+] as const)('the user PATH entry after a user edit: %s', (_label, raw, left) => {
+  const { record } = insertUserPathEntry({ existed: true, kind: 'ExpandString', raw: 'a' }, DIR);
+  const value: UserPathValue = { existed: true, kind: 'ExpandString', raw };
+  expect(removeUserPathEntry(value, record)).toEqual(left === null ? null : { ...value, raw: left });
 });
