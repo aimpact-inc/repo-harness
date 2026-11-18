@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runConfigDiff, runConfigGc, runConfigRestore, runConfigStatus } from '../../src/cli/commands/config';
@@ -130,4 +130,27 @@ test('gc deletes a retired copy 30 days after its revert, and keeps a referenced
   expect(runConfigGc(f.env, { now: new Date(at + 31 * day) }).json).toEqual({ deleted: [copy(backup)], waiting: 0 });
   expect(readdirSync(vault).sort()).toEqual([live, kept, `sha256:${'c'.repeat(64)}`].map((reference) => reference.slice('sha256:'.length)).sort());
   expect(f.ledger().retired).toEqual([]);
+});
+
+test('gc keeps a retired copy whose entry is no longer the retired bytes, in the dry run as in the apply, and keeps its retirement record', () => {
+  const f = fixture();
+  writeFileSync(f.path, '{\n  "user": 1\n}\n');
+  f.add('architecture', 'mcpServers.codegraph', { command: 'codegraph' });
+  expect(runConfigRestore(f.env, f.path).exitCode).toBe(0);
+  const vault = join(f.root, 'vault');
+  const copy = (reference: string) => join(vault, reference.slice('sha256:'.length));
+  const [retired] = f.ledger().retired as { sha256: string; at: string }[];
+  // A copy that the user saved edits into, and one that an editor replaced with a link.
+  const edited = `sha256:${'d'.repeat(64)}`;
+  const linked = `sha256:${'e'.repeat(64)}`;
+  writeFileSync(copy(edited), 'my recovery edits');
+  symlinkSync(copy(retired!.sha256), copy(linked));
+  const ledger = f.ledger();
+  writeFileSync(f.ledgerPath, JSON.stringify({ ...ledger, retired: [...ledger.retired, { sha256: edited, at: retired!.at }, { sha256: linked, at: retired!.at }] }));
+  const now = new Date(Date.parse(retired!.at) + 31 * 24 * 60 * 60 * 1000);
+  const expected = { deleted: [copy(retired!.sha256)], changed: [copy(edited), copy(linked)], waiting: 0 };
+  expect(runConfigGc(f.env, { now, dryRun: true })).toMatchObject({ exitCode: 1, json: expected });
+  expect(runConfigGc(f.env, { now })).toMatchObject({ exitCode: 1, json: expected });
+  expect([readFileSync(copy(edited), 'utf8'), lstatSync(copy(linked)).isSymbolicLink()]).toEqual(['my recovery edits', true]);
+  expect(f.ledger().retired.map((entry: { sha256: string }) => entry.sha256)).toEqual([edited, linked]);
 });

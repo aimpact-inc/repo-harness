@@ -8,6 +8,8 @@ import type { PathEntry } from '../../src/effects/host-config/whole-path';
 import { hostConfigPaths, migrateLedgerSchema, parseLedger, replaceTarget } from '../../src/effects/host-config/store';
 import { hookRenderingKey, jsonFragment, removeJsonHookCommand } from '../../src/core/host-config/json-fragment';
 import { sha256Prefixed } from '../../src/core/evidence/sha256';
+import { tomlFragment } from '../../src/core/host-config/toml-fragment';
+import { markedBlock } from '../../src/core/host-config/marked-block';
 
 /** A `key=value` line format: the selector is the key. */
 function keyLineMatch(content: string, selector: string): RegExpExecArray | null {
@@ -306,6 +308,35 @@ test('user links are followed: the real file is written and the link stays', () 
   expect({ keys: Object.keys(f.ledger().files), linked: lstatSync(join(f.home, '.linked')).isSymbolicLink(), dangling: readFileSync(join(f.home, '.dangling.conf'), 'utf8') })
     .toEqual({ keys: [real, later, f.a], linked: true, dangling: 'rh=on\n' });
   expect(() => f.gate().apply([f.change(real, 'a'), f.change(join(f.home, '.linked', 'x.conf'), 'b')])).toThrow(expect.objectContaining({ code: 'host_config_invalid_state' }));
+});
+
+const RULES = '<!-- BEGIN: repo-harness global-working-rules -->\nrules\n<!-- END: repo-harness global-working-rules -->';
+test.each([
+  ['an empty JSON document', 'c.json', [{ selector: 'mcpServers.codegraph', strategy: jsonFragment, value: { command: 'cg' } }], '{}\n'],
+  ['a blank TOML file', 'c.toml', [{ selector: 'mcp_servers.codegraph', strategy: tomlFragment, value: '[mcp_servers.codegraph]\ncommand = "cg"\n' }], '\n'],
+  ['a blank Markdown file', 'c.md', [{ selector: 'global-working-rules', strategy: markedBlock, value: RULES }], '\n'],
+] as const)('a file that rh created and the user reset to %s loses only its records; the revert does not unlink it', (_name, name, fragments, reset) => {
+  const f = fixture();
+  const path = join(f.home, name);
+  f.gate().apply([{ path, fragments: fragments.map((fragment) => ({ owner: 'o1', kind: 'add' as const, ...fragment })) }]);
+  expect(f.ledger().files[path].kind).toBe('created');
+  writeFileSync(path, reset);
+  expect(f.gate().revert([path], { dryRun: true })).toEqual([{ path, action: 'released' }]);
+  expect(f.gate().revert([path])).toEqual([{ path, action: 'released' }]);
+  expect({ bytes: readFileSync(path, 'utf8'), recorded: Object.keys(f.ledger().files) }).toEqual({ bytes: reset, recorded: [] });
+});
+
+test('a created file with one fragment the user took out and one intact: the revert takes out the intact text and keeps the file', () => {
+  const f = fixture();
+  const path = join(f.home, 'c.toml');
+  const root = 'default_mode_request_user_input = true\n';
+  f.gate().apply([{ path, fragments: [
+    { owner: 'o1', selector: 'default_mode_request_user_input', kind: 'add', strategy: tomlFragment, value: root },
+    { owner: 'o1', selector: 'mcp_servers.codegraph', kind: 'add', strategy: tomlFragment, value: '[mcp_servers.codegraph]\ncommand = "cg"\n' },
+  ] }]);
+  writeFileSync(path, readFileSync(path, 'utf8').replace(root, ''));
+  expect(f.gate().revert([path])).toEqual([{ path, action: 'text_removed' }]);
+  expect({ exists: existsSync(path), bytes: readFileSync(path, 'utf8').trim(), recorded: Object.keys(f.ledger().files) }).toEqual({ exists: true, bytes: '', recorded: [] });
 });
 
 test('a linked config whose target has no extension reverts by the format recorded at write time; a dangling link keeps its records', () => {
