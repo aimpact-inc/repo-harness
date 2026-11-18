@@ -163,8 +163,10 @@ map ─▶ split ─▶ gap review ─▶ publish ─▶ dispatch ─▶ worker 
   provisional; confirm the evidence before the merge (`references/acceptor.md` §1). The rolling projection PR
   (`archctx/projection`) merges on green CI; its merge is its acceptance.
 - Review rounds. A review grades only the lines that the PR changes and
-  has at most two rounds. Round 2 checks only the round-1 fix delta, and a
-  round-1 `PASS` row does not run again. The orchestrator merges on round
+  has at most two rounds. Round 2 checks only the round-1 fix delta. A
+  round-1 `PASS` row carries forward while the fix stays inside the
+  failing reviewer's files; otherwise its reviewer checks only that
+  delta. The orchestrator merges on round
   2 when only P2 or P3 findings remain. A blocking finding after round 2
   ends the loop: the orchestrator narrows the PR, or closes it and
   dispatches the bundle again. P2 and P3 findings stay in the review
@@ -181,8 +183,9 @@ map ─▶ split ─▶ gap review ─▶ publish ─▶ dispatch ─▶ worker 
   batch issue is an orchestrator call, logged in one line on the parent
   plan.
 - Intake triage. The orchestrator sorts each open or new issue as `DO`
-  (dispatch it in a bundle), `CONSOLIDATE` (fold it into an older issue or
-  an open bundle) or `SHELVE` (label `status:deferred`, keep it open, off
+  (dispatch it in a bundle), `CONSOLIDATE` (close a duplicate into the older
+  issue, or add a distinct issue of the same write scope to an open
+  bundle) or `SHELVE` (label `status:deferred`, keep it open, off
   the dispatch board). Shelve owner roadmap items and items that a vendor
   or upstream blocks; they close only on the owner's word. Close an
   agent-spawned P2 or P3 issue as not planned. During a batch, file a new

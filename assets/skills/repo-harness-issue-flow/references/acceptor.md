@@ -70,8 +70,10 @@ PR changes.
    same round number. Each review has its own `acceptance claim` and its
    own record row. `review publish` keys a claim by round, subject and
    `Agent:` line, so two reviewers with an identical `Agent:` line on one
-   round share one claim and count once. The board accepts a High head, or
-   a head of unknown tier, only when it has `PASS` rows that cite two
+   round share one claim and count once. This is the one row rule for
+   every head. The board accepts a High head, or a head of unknown tier,
+   only when it has `PASS` rows (its own, or carried to it by rule 2) that
+   cite two
    distinct `acceptance claim` comments of the PR, each with the row's
    `Subject` and `Round`, at least one of them with `Model relation:
    different-family`, and no `FAIL` row. A Medium head needs one `PASS`
@@ -103,7 +105,8 @@ PR changes.
    reviewer that raised a blocking finding runs it. A round-1 `PASS` row
    does not run again when the fix stays inside the files of the failing
    reviewer's findings: that row counts for the fix head. A fix outside
-   those files takes a delta check from the passing reviewer too.
+   those files takes a delta check from the passing reviewer, on that
+   delta only.
 3. **Merge or stop.** The orchestrator merges on round 2 when only P2 or
    P3 findings remain. There is no round 3: a blocking finding after round
    2 ends the loop. The orchestrator then narrows the PR to the part that
@@ -144,7 +147,7 @@ The decision is one of:
 
 | Decision | Meaning | Effect |
 |---|---|---|
-| `adopt` | The finding is real. | It is a finding of the review loop (§2.2) with its severity. A blocking one adopted after the last round goes to the author as a fix round, and a gatekeeper seat reviews the new head before the merge; the earlier `PASS` does not cover it. |
+| `adopt` | The finding is real. | It is a finding of the review loop (§2.2) with its severity. A blocking one adopted before round 2 ends goes into the round-2 fix. After round 2 there is no round 3: a non-blocking one is recorded as a P3 note, and a blocking one ends the loop by rule 3 of §2.2. |
 | `decline` | The finding is wrong, out of scope or not worth a fix. | One-line reason. It is not a finding of the loop. |
 | `outdated` | The finding is on an older head, and the current head no longer contains the code. | No triage again. It is not a finding of the loop. |
 

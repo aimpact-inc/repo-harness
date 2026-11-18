@@ -194,7 +194,7 @@ plan:
 | Call | When | Action |
 |---|---|---|
 | `DO` | It blocks the release set, records a P0 or P1 defect, or the owner named it | Put it in a bundle of its module |
-| `CONSOLIDATE` | An older issue or an open bundle has the same design or write scope | Copy the missing text into the older issue or the bundle packet, then close it with a link |
+| `CONSOLIDATE` | An older issue has the same requirement (a duplicate), or an open bundle has the same write scope | A duplicate: copy the missing text into the older issue, then close the newer one with a link. A distinct requirement in a bundle's write scope stays open: add it to the bundle claim and to the PR's `Closes` list |
 | `SHELVE` | An owner roadmap item, or an item that a vendor or upstream blocks | Label `status:deferred` and keep it open, off the dispatch board. It closes only on the owner's word |
 | `CLOSE` | An agent-spawned P2 or P3 issue | Close it as not planned |
 
@@ -336,7 +336,7 @@ route line names the fallback seat, and `rh seats launch gatekeeper
 Never start a seat with an argv that `rh seats argv` did not print, and
 never outside a Herdr.app tab.
 `rh board dispatch --parent <n> --space <id>` applies this step to every ready issue of the plan: it reads the `route:<class>` label of each issue (and `touches:credentials`), starts the worktree, posts the claim and opens the worker tab. `--dry-run` prints the decisions only. An issue without one `route:<class>` label is reported and not dispatched.
-`rh board review --parent <n> --space <id>` starts the gatekeeper seat for each ready, green High pull request that has no gatekeeper start marker for its head. The two High seats start in parallel on the same head: one run starts the gatekeeper and the reviewer seat of the configured reviewer's model family (a row belongs to a seat by the family of its model, and the family of the `reviewer` seat of the seats config is the one reviewer family). Each seat has its own marker, so a seat that was not sent retries alone. In round 2 the run starts only the seat that raised a blocking finding (`acceptor.md` §2.2). A Medium head gets one seat of the other family than the board's `writer_family` (the `modelFamily` of the `Model:` line of the writer claim of the head branch): the gatekeeper for a writer of the reviewer family, the reviewer for any other known family. An unknown writer family (no such claim, no `Model:` line, an unmatched model, or linked issues that disagree) starts no seat and is skipped as `writer_family_unknown`; the orchestrator then starts by hand one reviewer seat of a model family known to differ from the writer's, and that review records its own `Model relation:`. `--pr <n>` reviews that pull request only. A pull request that links a plan-held issue is skipped as `plan_hold`. A head whose gatekeeper is about to start is skipped as `review_family_unavailable` when the effective gatekeeper (the seat of the `gatekeeper:` route line) cannot launch, has a model with no known family, is of the writer's family where it gives the different-family row, or is of the reviewer family where the head takes a reviewer row; the detail names the gap and the route line. The reviewer seat is skipped the same way when its model has no known family, or on a High head when its family is the gatekeeper's, because the two rows are then not independent. `--dry-run` prints the decisions only. A High head is not accepted until it has `PASS` rows from two distinct claims, one of them different-family to the writer; a Medium head needs one claimed `PASS` row recorded different-family (`acceptor.md` §2.2).
+`rh board review --parent <n> --space <id>` starts the gatekeeper seat for each ready, green High pull request that has no gatekeeper start marker for its head. The two High seats start in parallel on the same head: one run starts the gatekeeper and the reviewer seat of the configured reviewer's model family (a row belongs to a seat by the family of its model, and the family of the `reviewer` seat of the seats config is the one reviewer family). Each seat has its own marker, so a seat that was not sent retries alone. In round 2 the run starts the seat that raised a blocking finding, and the passing seat only for a delta check when the fix leaves the failing reviewer's files (`acceptor.md` §2.2). A Medium head gets one seat of the other family than the board's `writer_family` (the `modelFamily` of the `Model:` line of the writer claim of the head branch): the gatekeeper for a writer of the reviewer family, the reviewer for any other known family. An unknown writer family (no such claim, no `Model:` line, an unmatched model, or linked issues that disagree) starts no seat and is skipped as `writer_family_unknown`; the orchestrator then starts by hand one reviewer seat of a model family known to differ from the writer's, and that review records its own `Model relation:`. `--pr <n>` reviews that pull request only. A pull request that links a plan-held issue is skipped as `plan_hold`. A head whose gatekeeper is about to start is skipped as `review_family_unavailable` when the effective gatekeeper (the seat of the `gatekeeper:` route line) cannot launch, has a model with no known family, is of the writer's family where it gives the different-family row, or is of the reviewer family where the head takes a reviewer row; the detail names the gap and the route line. The reviewer seat is skipped the same way when its model has no known family, or on a High head when its family is the gatekeeper's, because the two rows are then not independent. `--dry-run` prints the decisions only. The rows that a head, a fix head included, needs and counts are the row rule of `acceptor.md` §2.2.
 Apply the explorer line through the Claude Agent tool's `model` parameter when you call the explorer.
 
 Claude saving mode applies when weekly remaining quota is below
@@ -447,8 +447,10 @@ host's PR events or check when the worker reports.
   seat (`docs/reference-configs/agentic-development-flow.md`, Review by
   risk). Give each ready PR that needs review its own review seat at once.
   A Medium PR takes one reviewer. A High PR takes its two reviews in
-  parallel on the same head; in round 2 only the reviewer that raised a
-  blocking finding runs again.
+  parallel on the same head. In round 2 the reviewer that raised a
+  blocking finding runs again; the passing reviewer runs a delta check
+  only when the fix leaves the failing reviewer's files (`acceptor.md`
+  §2.2).
   A coordinator may add `gatekeeper-deep` as an optional second Codex
   review row: a read-only Codex seat on a different model than
   `gatekeeper`. Start it with `rh seats launch gatekeeper-deep --repository-id <id> --pr <n> --cwd <worktree> --task <packet>`.
@@ -683,9 +685,9 @@ are true:
 - An acceptance record has a PASS row for the head, at every tier. The
   provisional `tier_low` status is not enough: post the Low record after
   you check the verification evidence.
-  A High PR needs two PASS rows for the head that cite distinct
-  `acceptance claim` comments, one of them `different-family`
-  (`acceptor.md` §2.2).
+  A High PR needs the rows of the High rule in `acceptor.md` §2.2. On a
+  fix head, a round-1 `PASS` row that rule 2 of §2.2 carries forward
+  counts.
 - `Required / CI` passed on the head, and the readiness verdict is ready.
 
 The executor keeps all its own gates. Exit codes follow the §9 table; exit 4
