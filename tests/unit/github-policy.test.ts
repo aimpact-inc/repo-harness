@@ -32,9 +32,8 @@ describe('GitHub external_sources policy', () => {
             expect((error as ExternalSourcePolicyError).code).toBe('external_source_policy_invalid');
             expect((error as Error).message).toContain(row.github);
             if (row.text === '{') {
-              let syntaxMessage = '';
-              try { JSON.parse(row.text); } catch (syntax) { syntaxMessage = (syntax as Error).message; }
-              expect((error as Error).message).toBe(`.ai/harness/policy.json cannot be read: ${syntaxMessage}`);
+              // The parser message can quote text of the file, so the error names the file only (I1, #3164).
+              expect((error as Error).message).toBe('.ai/harness/policy.json cannot be read: the file is not valid JSON');
             }
           }
         } else expect(readExternalSourcesPolicy(repo)).toEqual({ version: 1, mode: 'off' });
