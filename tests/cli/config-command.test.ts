@@ -78,7 +78,7 @@ test('a fake token in a user value reaches no default output; --show-values prin
   for (const output of outputs) expect(`${output.lines.join('\n')}\n${JSON.stringify('json' in output ? output.json : output)}`).not.toContain(FAKE_TOKEN);
   expect(runConfigDiff(f.env, f.path).lines.join('\n')).not.toContain('rh-other');
 
-  // A malformed config.toml that the one-shot migration of restore and gc parses: Bun quotes the unquoted value, rh does not print it.
+  // A malformed config.toml that the one-shot migration of restore and gc parses: Bun quotes the unquoted value; rh prints the file and the fixed text only.
   const toml = join(f.home, '.codex', 'config.toml');
   mkdirSync(join(f.home, '.codex'), { recursive: true });
   writeFileSync(toml, `token = ${FAKE_TOKEN}\n`);
@@ -88,7 +88,7 @@ test('a fake token in a user value reaches no default output; --show-values prin
     applied_at: new Date().toISOString(), ownership_manifest: [entry], previous: null }));
   for (const output of [runConfigRestore(f.env, f.path), runConfigGc(f.env)]) {
     expect(output.exitCode).toBe(2);
-    expect(output.lines.join('\n')).toContain(`${toml}: <parser text withheld>`);
+    expect(output.lines.join('\n')).toContain(`${toml}: the file is not valid TOML`);
     expect(`${output.lines.join('\n')}\n${JSON.stringify(output.json)}`).not.toContain(FAKE_TOKEN);
   }
 });

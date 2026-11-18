@@ -1,3 +1,5 @@
+import { FileSyntaxError } from '../evidence/file-syntax';
+
 /**
  * The host-config ledger. It keeps two levels: a file record per host file
  * that rh wrote, and a fragment record per owned text edit. Owner Plan B
@@ -26,13 +28,14 @@ export class HostConfigError extends Error {
  * The text of an error for user output. A parser's error (`SyntaxError`, from
  * `JSON.parse` or `Bun.TOML.parse`) can quote a value of the file, also a
  * credential; its text never reaches the output. A wrapper that quotes it
- * keeps its own words, with the parser text cut out.
+ * keeps its own words, with the parser text cut out. A FileSyntaxError has a
+ * fixed text that names the file only (#3164), so it stays.
  */
 export function errorTextWithoutValues(error: unknown): string {
   const chain: unknown[] = [];
   for (let current = error; current instanceof Error && chain.length < 8; current = current.cause) chain.push(current);
   const outer = error instanceof Error ? error.message : String(error);
-  const parsers = chain.filter((entry): entry is SyntaxError => entry instanceof SyntaxError);
+  const parsers = chain.filter((entry): entry is SyntaxError => entry instanceof SyntaxError && !(entry instanceof FileSyntaxError));
   if (!parsers.length) return outer;
   const code = error instanceof HostConfigError ? error.code : 'parse_error';
   let text = outer;

@@ -317,7 +317,7 @@ test('a linked config whose target has no extension reverts by the format record
   const statusLine = { owner: 'o1', selector: 'statusLine', kind: 'add' as const, strategy: jsonFragment, value: 'rh' };
   f.gate().apply([{ path: config, backup: 'overrides-only', fragments: [statusLine] }]);
   expect(f.ledger().files[target].format).toBe('json');
-  expect(f.gate().revert([config])).toEqual([{ path: target, action: 'text_removed' }]);
+  expect(f.gate().revert([config])).toEqual([{ path: target, action: 'text_removed', baseline: 'proved' }]);
   expect({ bytes: readFileSync(target, 'utf8'), link: lstatSync(config).isSymbolicLink() }).toEqual({ bytes: '{\n  "theme": "dark"\n}\n', link: true });
 
   // The link stays when its target goes, so the file is not absent: the records stay for a later revert.
@@ -441,7 +441,7 @@ test('a removal of unrecorded text checks the hash and each step, keeps the file
   expect(readFileSync(path, 'utf8')).toBe(after);
   expect(f.ledger()).toMatchObject({ fragments: [], files: { [path]: { kind: 'text_block', baseline: { state: 'unknown' }, committed: { type: 'file', sha256: sha(after) }, backup: null, external_backup: sha(before), external_change: false } } });
   expect(f.vault(sha(before))).toBe(before);
-  expect(f.gate().revert([path], { dryRun: true })).toEqual([{ path, action: 'released' }]);
+  expect(f.gate().revert([path], { dryRun: true })).toEqual([{ path, action: 'released', baseline: 'unknown' }]);
 
   // A recorded file whose backup still holds the legacy command: a revert takes out rh's fragment only.
   const recorded = join(f.home, 'settings.json');
