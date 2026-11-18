@@ -34,7 +34,7 @@ import {
   type LegacyWorktreeCandidate,
   type LegacyWorktreeOutcome,
 } from '../../effects/upgrade/legacy-worktree-cleanup';
-import { FS_TRANSACTION_BACKUP_ROOT, withTargetLock, type FsTransactionManifest, type FsTransactionManifestOperation } from '../../effects/fs-transaction';
+import { ensureSelfIgnoringRoot, FS_BACKUP_ROOT, FS_TRANSACTION_BACKUP_ROOT, withTargetLock, type FsTransactionManifest, type FsTransactionManifestOperation } from '../../effects/fs-transaction';
 import {
   beginLegacyCleanupBackup,
   beginInstallHostTransaction,
@@ -247,6 +247,7 @@ function backupProject(cwd: string, paths: readonly string[], id: string): Proje
   if (paths.length === 0) return undefined;
   const backupRoot = join(cwd, FS_TRANSACTION_BACKUP_ROOT, `upgrade-${id}`);
   if (!isLegacyPathSafe(cwd, backupRoot, false)) throw new Error(`unsafe project backup path: ${backupRoot}`);
+  ensureSelfIgnoringRoot(join(cwd, FS_BACKUP_ROOT));
   mkdirSync(backupRoot, { recursive: true, mode: 0o700 });
   const snapshots = paths.map((path, index) => {
     if (!isLegacyPathSafe(cwd, path, false) || legacyPathSnapshot(path)?.kind !== 'file') {

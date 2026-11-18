@@ -15,7 +15,7 @@ import {
 } from "fs";
 import { errorMessage } from "../core/evidence/error-message";
 import { sha256Prefixed } from "../core/evidence/sha256";
-import { basename, dirname, relative, resolve, sep } from "path";
+import { basename, dirname, join, relative, resolve, sep } from "path";
 import type {
   AdoptionOperation,
   AdoptionOperationStatus,
@@ -33,7 +33,9 @@ import { ignoreBlockProof } from "./adoption/gitignore-plan";
 import { withExclusiveDirectoryLock } from "./locking/exclusive-directory-lock";
 import { runGit } from './git/run-git';
 
-export const FS_TRANSACTION_BACKUP_ROOT = ".ai/harness/backups/fs-transaction";
+export const FS_BACKUP_ROOT = ".ai/harness/backups";
+export const FS_TRANSACTION_BACKUP_ROOT = `${FS_BACKUP_ROOT}/fs-transaction`;
+const SELF_IGNORE = "*\n";
 const LOCK_SUFFIX = ".repo-harness.lock";
 let atomicWriteSequence = 0;
 let transactionSequence = 0;
@@ -218,6 +220,47 @@ function checkExpectedFileState(repoRoot: string, operation: AdoptionOperation):
   return null;
 }
 
+/**
+ * A root that holds copies of user files ignores itself before the first copy: Git reads its `.gitignore` with `*`
+ * wherever the root's real directory is, with no Git lookup. In a checkout this closes the window before
+ * `rh update` writes the runtime-state exclude block (#3228).
+ */
+export function ensureSelfIgnoringRoot(root: string): void {
+  mkdirSync(dirname(root), { recursive: true });
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const ignore = join(realpathSync.native(root), ".gitignore");
+  const stat = lstatSync(ignore, { throwIfNoEntry: false });
+  if (stat) {
+    if (stat.isFile() && readFileSync(ignore, "utf8") === SELF_IGNORE) return;
+    throw new Error(`backup root has a .gitignore that rh did not write; move it, then run again: ${ignore}`);
+  }
+  const temp = `${ignore}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileDurably(temp, SELF_IGNORE, 0o600);
+    renameSync(temp, ignore);
+    fsyncDirectory(dirname(ignore));
+  } finally {
+    rmSync(temp, { force: true });
+  }
+}
+
+function ensureBackupRootIgnored(repoRoot: string): void {
+  const symlinkError = assertNoSymlinkInPath(repoRoot, `${FS_BACKUP_ROOT}/.gitignore`);
+  if (symlinkError) throw new Error(symlinkError);
+  const root = resolveInsideRepo(repoRoot, FS_BACKUP_ROOT);
+  if (!root.ok || !root.path) throw new Error(root.error ?? "invalid backup root");
+  ensureSelfIgnoringRoot(root.path);
+}
+
+function backupRootError(repoRoot: string): string | null {
+  try {
+    ensureBackupRootIgnored(repoRoot);
+    return null;
+  } catch (error) {
+    return errorMessage(error);
+  }
+}
+
 function backupPathFor(path: string, backupRoot = FS_TRANSACTION_BACKUP_ROOT): string {
   atomicWriteSequence += 1;
   return `${backupRoot}/${sanitizeBackupStem(path)}.${Date.now()}-${process.pid}-${atomicWriteSequence}.bak`;
@@ -277,6 +320,7 @@ function writeFileUnderTargetLock(
 
     let backupPath: string | undefined;
     if (existingMode !== undefined) {
+      ensureBackupRootIgnored(repoRoot);
       backupPath = backupPathFor(path, backupRoot);
       const backup = resolveInsideRepo(repoRoot, backupPath);
       if (!backup.ok || !backup.path) throw new Error(backup.error ?? "invalid backup path");
@@ -648,7 +692,8 @@ export function applyAdoptionPlan(plan: AdoptionPlan, dryRun = false): ApplyAdop
   const preflight = plan.operations.map((operation) => ({ operation, error: preflightOperation(plan.repoRoot, operation) }));
   const preflightFailures = preflight.filter((entry) => entry.error);
   const transactionDir = dryRun ? undefined : transactionDirFor();
-  const manifestPreflightError = transactionDir ? preflightTransactionManifest(plan.repoRoot, transactionDir) : null;
+  // The backup root ignores itself before the manifest or any copy lands in it.
+  const manifestPreflightError = transactionDir ? preflightTransactionManifest(plan.repoRoot, transactionDir) ?? backupRootError(plan.repoRoot) : null;
   if (preflightFailures.length > 0 || manifestPreflightError) {
     const results: ApplyOperationResult[] = preflight.map(({ operation, error }) =>
       error

@@ -383,6 +383,10 @@ describe('upgrade with real release bytes', () => {
     const originals = new Map(planLegacyLeftovers({ ...opts, scope: 'all', installOwnership: ownership(opts) }).items.filter((item) => item.action !== 'report').map((item) => [item.path, lstatSync(item.path).isDirectory() ? tree(item.path) : readFileSync(item.path).toString('base64')]));
     const result = runUpgrade({ ...opts, apply: true });
     expect(result.exitCode).toBe(0); expect(result.backupPath).toBeDefined(); expect(result.projectBackupPath).toBeDefined();
+    // The project backup root ignores itself, with no exclude block and no user-level Git ignore (#3228).
+    const isolatedGit = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+    expect(spawnSync('git', ['add', '-A'], { cwd: opts.cwd, env: isolatedGit }).status).toBe(0);
+    expect(spawnSync('git', ['status', '--porcelain'], { cwd: opts.cwd, env: isolatedGit, encoding: 'utf8' }).stdout).not.toContain('.ai/harness/backups');
     const manifestPath = join(result.backupPath!, 'manifest.json');
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
     for (const snapshot of manifest.snapshots) {
