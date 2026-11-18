@@ -31,20 +31,6 @@ import {
   type PolicyFileAtRef,
 } from '../../core/publication/acceptance-merge-policy';
 import type { GeneratedArtifactsFactsV1 } from '../../core/publication/generated-artifacts';
-import {
-  TEST_BUDGET_CHECK_NAME,
-  TEST_BUDGET_IMPLEMENTATION_VERSION,
-  TEST_BUDGET_RESULT_SCHEMA,
-  TEST_BUDGET_WORKFLOW_PATH,
-  decodeTestBudgetResult,
-  parseTestBudgetException,
-  readTestBudgetConfig,
-  testBudgetExceptionDigest,
-  testBudgetPolicyDigest,
-  type TestBudgetConfigRead,
-} from '../../core/ci/test-budget';
-import type { TestBudgetFactsV1, TestBudgetResultObservationV1 } from '../../core/publication/merge-readiness';
-import { decodeWorkflowPolicy } from '../../core/workflow/policy-schema';
 import { observeGeneratedArtifacts } from './generated-artifacts';
 export type MergeReadinessErrorCode =
   | 'provider_unavailable'
@@ -110,22 +96,10 @@ export interface PublicationReadinessInput {
   /** Internal effect seam: status checks from the executor's base protection read. */
   readonly required_status_checks_at_base?: unknown;
   /**
-   * Internal effect seam: the executor's live tip of the base branch and its
-   * policy read there. The TestBudget result must match the rule configuration
-   * and the merge-base at that one commit. Without it, readiness uses the PR base.
-   */
-  readonly test_budget_base?: TestBudgetBase;
-  /**
    * A read error that an optional request must not swallow; the caller that
    * owns the transport decides.
    */
   readonly fatal_read_error?: (error: unknown) => boolean;
-}
-
-/** The one base commit that a TestBudget comparison binds: its policy file and the merge-base with the head. */
-export interface TestBudgetBase {
-  readonly ref: string;
-  readonly file: PolicyFileAtRef;
 }
 
 export interface ProviderIdentity {
@@ -852,7 +826,7 @@ function reusedPolicyFile(input: PublicationReadinessInput, ref: string): Policy
 
 type PublicationPolicyBlocks = ReturnType<typeof publicationPolicyBlocksAtRef>;
 
-/** One policy read per readiness round answers both declared blocks and the TestBudget configuration at the base. */
+/** One policy read per readiness round answers the declared blocks at the base. */
 function publicationPolicyFile(input: PublicationReadinessInput, ref: string): PolicyFileAtRef {
   const reused = reusedPolicyFile(input, ref);
   if (reused !== null) return reused;
@@ -970,13 +944,7 @@ function* rollbackBoundary(identity: ProviderIdentity): Generator<string, Provid
   return Object.freeze({ status: 'ready', pr_number: prNumber, before_sha: before, after_sha: identity.base_sha });
 }
 
-interface ProviderRound {
-  readonly facts: ProviderMergeReadinessFactsV1;
-  /** The policy file at the PR base that the round read. */
-  readonly policy_file: PolicyFileAtRef;
-}
-
-function observeProviderRound(identity: ProviderIdentity, receipt: Pick<PullRequestSelectionV2, 'pr_number'>, input: PublicationReadinessInput): ProviderRound {
+export function observeProviderReadinessFacts(identity: ProviderIdentity, receipt: Pick<PullRequestSelectionV2, 'pr_number'>, input: PublicationReadinessInput): ProviderMergeReadinessFactsV1 {
   const checks = protectedChecks(identity, receipt.pr_number, input);
   const checkFailures = driveRequestsSync(requiredCheckFailures(identity, checks), input);
   const policyFile = publicationPolicyFile(input, identity.base_sha);
@@ -986,116 +954,7 @@ function observeProviderRound(identity: ProviderIdentity, receipt: Pick<PullRequ
   const boundary = rollbackBoundary(identity);
   let request = boundary.next();
   while (!request.done) request = boundary.next(gh(input, ['api', request.value], request.value.includes('/contents/') ? [0, 1] : [0]));
-  return {
-    facts: parseProviderReadinessFacts(identity, checks, request.value, gh(input, providerReviewArgs(identity)), checkFailures, coverage, generated),
-    policy_file: policyFile,
-  };
-}
-
-export function observeProviderReadinessFacts(identity: ProviderIdentity, receipt: Pick<PullRequestSelectionV2, 'pr_number'>, input: PublicationReadinessInput): ProviderMergeReadinessFactsV1 {
-  return observeProviderRound(identity, receipt, input).facts;
-}
-
-function testBudgetMissing(detail: string): TestBudgetResultObservationV1 {
-  return Object.freeze({ status: 'missing', detail });
-}
-
-interface TestBudgetCheckRun {
-  readonly id: number;
-  readonly completed: boolean;
-  readonly completed_at: string | null;
-  readonly details_url: string;
-}
-
-/** One check run of the head named like the producer job; only a GitHub Actions run counts. */
-function testBudgetCheckRun(value: unknown): TestBudgetCheckRun | null {
-  const run = object(value, 'Test budget check run');
-  if (run.name !== TEST_BUDGET_CHECK_NAME || object(run.app, 'Test budget check run app').slug !== 'github-actions') return null;
-  if (!Number.isSafeInteger(run.id) || Number(run.id) < 1 || typeof run.status !== 'string' || typeof run.details_url !== 'string'
-    || (run.status === 'completed' && (typeof run.completed_at !== 'string' || Number.isNaN(Date.parse(run.completed_at))))) {
-    throw new MergeReadinessError('provider_data_incomplete', 'Test budget check run is incomplete');
-  }
-  return Object.freeze({ id: Number(run.id), completed: run.status === 'completed',
-    completed_at: run.status === 'completed' ? run.completed_at as string : null, details_url: run.details_url });
-}
-
-/**
- * Read protocol for the stored TestBudget result (ADR-0004): the newest
- * completed Test budget check run of the head, its Actions run bound to this
- * PR, head and base, and its one result annotation. Each read is strict; only
- * an answer without a usable result is `missing`.
- */
-function* testBudgetResult(identity: ProviderIdentity): Generator<ProviderRequest, TestBudgetResultObservationV1, unknown> {
-  const root = `repos/${identity.repo_name_with_owner}`;
-  const listed = object(yield {
-    args: ['api', `${root}/commits/${identity.head_sha}/check-runs?check_name=${encodeURIComponent(TEST_BUDGET_CHECK_NAME)}&filter=all&per_page=100`],
-  }, 'Test budget check runs');
-  if (!Array.isArray(listed.check_runs) || listed.total_count !== listed.check_runs.length || listed.check_runs.length >= 100) {
-    throw new MergeReadinessError('provider_data_incomplete', 'Test budget check runs were not exhaustively observed');
-  }
-  const runs = listed.check_runs.map(testBudgetCheckRun).filter((run): run is TestBudgetCheckRun => run !== null);
-  if (runs.length === 0) return testBudgetMissing('this head has no Test budget check run');
-  // A running check replaces the result; an older completed run does not stand in for it.
-  if (runs.some((run) => !run.completed)) return Object.freeze({ status: 'pending' });
-  const newest = Math.max(...runs.map((run) => Date.parse(run.completed_at!)));
-  const latest = runs.filter((run) => Date.parse(run.completed_at!) === newest);
-  if (latest.length !== 1) return testBudgetMissing('two Test budget check runs of this head completed at the same time');
-  const checkRun = latest[0]!;
-  const link = checkLink(identity, checkRun.details_url);
-  if (link.job_id !== checkRun.id) throw new MergeReadinessError('provider_data_incomplete', 'Test budget check run does not link its own Actions job');
-  const run = requiredCheckRunFacts(identity, yield { args: ['api', link.run_api_path] }, 'Test budget run');
-  if (run.path !== TEST_BUDGET_WORKFLOW_PATH) {
-    throw new MergeReadinessError('provider_data_incomplete', `Test budget check run comes from ${run.path}, not ${TEST_BUDGET_WORKFLOW_PATH}`);
-  }
-  const annotations = yield { args: ['api', `${root}/check-runs/${checkRun.id}/annotations?per_page=100`] };
-  if (!Array.isArray(annotations) || annotations.length >= 100) {
-    throw new MergeReadinessError('provider_data_incomplete', 'Test budget annotations were not exhaustively observed');
-  }
-  const results = annotations.map((entry) => object(entry, 'Test budget annotation'))
-    .filter((annotation) => annotation.title === TEST_BUDGET_RESULT_SCHEMA && annotation.annotation_level === 'notice');
-  if (results.length !== 1) {
-    return testBudgetMissing(`the newest Test budget run has ${results.length === 0 ? 'no' : 'more than one'} result annotation`);
-  }
-  const message = results[0]!.message;
-  const document = typeof message === 'string' ? decodeTestBudgetResult(message) : null;
-  return document === null ? testBudgetMissing('the Test budget result annotation is not a result document') : Object.freeze({ status: 'read', document });
-}
-
-/** The merge-base of the base commit and the head, the `diff_start` meaning of ADR-0004. */
-function mergeBase(identity: ProviderIdentity, input: PublicationReadinessInput, base: string): string {
-  const compare = object(gh(input, ['api', `repos/${identity.repo_name_with_owner}/compare/${base}...${identity.head_sha}`,
-    '--jq', '{merge_base_sha: .merge_base_commit.sha}']), 'provider compare');
-  if (!validSha(compare.merge_base_sha)) throw new MergeReadinessError('provider_data_incomplete', 'provider merge-base of the base and the head is invalid');
-  return compare.merge_base_sha;
-}
-
-/**
- * The TestBudget facts of one round. The configuration and the merge-base both
- * come from `base`; a file that cannot be decoded is `policy_invalid`, never
- * `off`. The live exception digest comes from this round's identity read.
- */
-function observeTestBudget(identity: ProviderIdentity, input: PublicationReadinessInput, base: TestBudgetBase): TestBudgetFactsV1 {
-  let config: TestBudgetConfigRead;
-  try {
-    config = readTestBudgetConfig(decodeWorkflowPolicy(base.file.status === 'present' ? base.file.text : null));
-  } catch (error) {
-    return Object.freeze({ status: 'policy_invalid', message: (error as Error).message });
-  }
-  if (config.status === 'invalid') return Object.freeze({ status: 'policy_invalid', message: config.message });
-  if (config.status === 'absent') return Object.freeze({ status: 'off' });
-  const live = Object.freeze({
-    head_sha: identity.head_sha,
-    diff_start: mergeBase(identity, input, base.ref),
-    policy_digest: testBudgetPolicyDigest(config),
-    implementation_version: TEST_BUDGET_IMPLEMENTATION_VERSION,
-    exception_digest: testBudgetExceptionDigest(parseTestBudgetException(identity.body)),
-  });
-  return Object.freeze({ status: 'active', live, result: driveRequestsSync(testBudgetResult(identity), input) });
-}
-
-/** `identityBytes` leaves the body out; an active rule also fences the exception parsed from it. */
-function sameTestBudgetException(facts: TestBudgetFactsV1, after: ProviderIdentity): boolean {
-  return facts.status !== 'active' || facts.live.exception_digest === testBudgetExceptionDigest(parseTestBudgetException(after.body));
+  return parseProviderReadinessFacts(identity, checks, request.value, gh(input, providerReviewArgs(identity)), checkFailures, coverage, generated);
 }
 
 export interface PullRequestReadinessInput extends PublicationReadinessInput {
@@ -1272,7 +1131,7 @@ function readinessProjection(input: PullRequestReadinessInput, round: ReadinessR
     ...projectPullRequestMergeReadiness({ expected_head_sha: input.expected_head_sha, expected_base_sha: input.expected_base_sha,
       integration_mode: round?.facts?.state === 'MERGED' ? 'ancestor' : 'unmerged', observation,
       ...(observationDetail === undefined ? {} : { observation_detail: observationDetail }), provider: round?.facts ?? null,
-      stack: round?.stack ?? unobservedStackDetail(), test_budget: round?.test_budget ?? null }) });
+      stack: round?.stack ?? unobservedStackDetail() }) });
 }
 
 /** One observation loop for exact merged-PR evidence. The stack is fenced with the identity. */
@@ -1297,8 +1156,6 @@ function stablePullRequestRound<T>(input: PullRequestReadinessInput, observeExtr
 interface ReadinessRound {
   readonly facts: ProviderMergeReadinessFactsV1 | null;
   readonly stack: MergeReadinessStackDetailV1;
-  /** Null for a stack member, whose own-base facts are not read. */
-  readonly test_budget: TestBudgetFactsV1 | null;
 }
 
 /**
@@ -1314,16 +1171,14 @@ function stableReadinessRound(input: PullRequestReadinessInput): ReadinessRound 
       const after = observeProviderReadinessTarget(input);
       const stackAfter = observeStack(after, input);
       if (identityBytes(before.identity) === identityBytes(after.identity)
-        && JSON.stringify(stack) === JSON.stringify(stackAfter)) return { facts: null, stack: stackAfter, test_budget: null };
+        && JSON.stringify(stack) === JSON.stringify(stackAfter)) return { facts: null, stack: stackAfter };
       continue;
     }
-    const { facts, policy_file: policyFile } = observeProviderRound(before.identity, input, input);
-    const testBudget = observeTestBudget(before.identity, input,
-      input.test_budget_base ?? { ref: before.identity.base_sha, file: policyFile });
+    const facts = observeProviderReadinessFacts(before.identity, input, input);
     const after = observeProviderReadinessTarget(input);
     const stackAfter = observeStack(after, input);
-    if (identityBytes(before.identity) === identityBytes(after.identity) && sameTestBudgetException(testBudget, after.identity)
-      && JSON.stringify(stack) === JSON.stringify(stackAfter)) return { facts, stack: stackAfter, test_budget: testBudget };
+    if (identityBytes(before.identity) === identityBytes(after.identity)
+      && JSON.stringify(stack) === JSON.stringify(stackAfter)) return { facts, stack: stackAfter };
   }
   return null;
 }
@@ -1378,7 +1233,7 @@ export function collectPullRequestIntegration(input: PullRequestIntegrationInput
   if (!round) throw new MergeReadinessError('provider_data_incomplete', 'integration selection changed during read');
   const verdict = projectPullRequestMergeReadiness({ expected_head_sha: input.expected_head_sha,
     expected_base_sha: input.expected_base_sha, integration_mode: 'ancestor', observation: 'stable', provider: round.facts,
-    stack: round.stack, test_budget: null });
+    stack: round.stack });
   // These blockers describe merge lifecycle, not CI/review acceptance of an already merged PR.
   const blockers = verdict.blockers.filter(blocker => !['already_integrated', 'pr_not_open', 'not_mergeable', 'mergeability_pending'].includes(blocker.code));
   if (blockers.length) throw new MergeReadinessError('provider_data_incomplete', `integrated PR evidence refused: ${blockers.map(blocker => blocker.code).join(', ')}`);

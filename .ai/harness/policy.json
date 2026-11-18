@@ -48,6 +48,9 @@
     }
   },
   "internal_pr_authors": [],
+  "review": {
+    "i3_paths": []
+  },
   "rules": {
     "TestBudget": {
       "enabled": true,

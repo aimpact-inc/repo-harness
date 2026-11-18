@@ -9,6 +9,7 @@ import { attentionLogPath, attentionWatchDoctorCheck, runAttentionWindow, servic
 import { decodeBoard, type BoardHostPortsV1, type BoardItemV1, type BoardPullRequestV1, type BoardTerminalV1, type BoardV1 } from '../src/core/board/board';
 import { decodePlanBlock, PlanBlockError } from '../src/core/board/plan-block';
 import { decodeReviewHazards, pathHazardHits } from '../src/core/board/hazards';
+import { gatekeeperReview } from '../src/core/board/review-rules';
 import type { PullRequestReadinessV2 } from '../src/core/publication/merge-readiness';
 import { collectPullRequestMergeReadiness } from '../src/effects/publication/merge-readiness';
 import { collectBoard, collectBoardThrough, GH_MAX_BUFFER_BYTES, readGhJson, readParent, readLocalRepositoryId, readLocalRepositoryIdAsync, seatTerminalsWithBranches, type BoardCollectInput } from '../src/effects/board/collect';
@@ -398,10 +399,18 @@ test('High acceptance: PASS rows of the head from two distinct claims, one recor
     [[gatekeeper, ['codex', claimUrl(2)], ['codex', claimUrl(3), 'same-family', 'FAIL']], 'not_accepted', 'pending'],
     // Rows of an earlier head do not count for the head.
     [[['pi', claimUrl(4), 'different-family', 'PASS', OLD], ['codex', claimUrl(6), 'different-family', 'PASS', OLD]], 'not_accepted', 'pending'],
+    // A fix round (#3187): the gatekeeper PASS of the earlier head carries past the newer reviewer FAIL, so only the reviewer reviews the fix head.
+    [[['pi', claimUrl(4), 'different-family', 'PASS', OLD], ['claude', claimUrl(6), 'same-family', 'FAIL', OLD]], 'not_accepted', 'pending'],
+    [[['pi', claimUrl(4), 'different-family', 'PASS', OLD], ['claude', claimUrl(6), 'same-family', 'FAIL', OLD], ['claude', claimUrl(5), 'same-family', 'PASS', undefined, 2]], 'accepted', 'recorded'],
   ];
   const projected = cases.map(([rows]) => head(rows));
   const pr1491 = (projection: BoardV1) => projection.pull_requests.find(pr => pr.number === 1491)!;
   expect(projected.map(pr1491).map(pr => [pr.acceptance.status, pr.second_review] as string[])).toEqual(cases.map(([, status, claude]) => [status, claude]));
+  // The carried gatekeeper PASS opens the relay for the reviewer; without the newer FAIL nothing carries and the gatekeeper reviews the new head.
+  const relayRead = (verdicts: readonly ('PASS' | 'FAIL')[]) => ({ head_sha: 'f'.repeat(40), comments: { truncated: false, comments: verdicts.map((verdict, at) => ({
+    url: claimUrl(at + 4), created_at: `2026-11-02T22:0${at}:00Z`, author_association: 'OWNER',
+    body: renderAcceptanceRecord(receipt(at === 0 ? 'pi' : 'claude', OLD, 'different-family', verdict), claimUrl(at + 4)) })) } }) as unknown as Parameters<typeof gatekeeperReview>[0];
+  expect([gatekeeperReview(relayRead(['PASS', 'FAIL']), 'anthropic'), gatekeeperReview(relayRead(['PASS', 'PASS']), 'anthropic')]).toEqual(['pass', 'none']);
   expect(evaluateBoardAttention(projected[1]!).findings.filter(finding => finding.rule === 'A10')).toEqual([]);
   // A Pi DeepSeek reviewer: its row, not the harness, is the second review; the Pi Codex gatekeeper row alone leaves it pending, and A10 names the reviewer family.
   const deepseek: SeatsConfigV1 = { ...DEFAULT_SEATS_CONFIG, reviewer: { ...DEFAULT_SEATS_CONFIG.reviewer, runtime: 'pi', model: 'magpie/cursor/deepseek-v41-flash-1017', effort: null } };
@@ -471,7 +480,7 @@ test('replay: the recorded #1474 reads project to a board, and its findings come
     ['R2', 'advisor', [1494, 1499], []],
   ]);
   // t4 has no seat label: the board does not guess its seat. The plan comment has no block, so R1 and R4 wait.
-  // #1494 and #1499 change `.github/` and their items carry no tier label, so R3 waits.
+  // #1494 and #1499 change `.github/`, but no change hazard is path-visible, so R3 has no entry.
   // No open pull request changes a path on the High list, so R5 has no entry.
   expect(attention.unevaluated.map(entry => [entry.rule, entry.reason, entry.subject])).toEqual([
     ['A3', 'seat_label_missing', 't4'],
@@ -479,8 +488,6 @@ test('replay: the recorded #1474 reads project to a board, and its findings come
     ['A13', 'seat_label_missing', 't4'],
     ['A19', 'seat_label_missing', 't4'],
     ['R1', 'plan_unavailable', 'https://github.com/Ancienttwo/repo-harness/issues/1474#issuecomment-6588782468'],
-    ['R3', 'tier_label_missing', '#1494 #1479'],
-    ['R3', 'tier_label_missing', '#1499 #1476'],
     ['R4', 'plan_unavailable', null],
     ['R6', 'plan_unavailable', null],
     ['R7', 'plan_unavailable', null],
@@ -1332,19 +1339,13 @@ test('one hit for each rule that the recorded state does not trigger', () => {
     },
   });
   const hits = rules(board);
-  for (const rule of ['A4', 'A5', 'A6', 'A8', 'R1', 'R3', 'R4', 'R5'] as const) expect(hits).toContain(rule);
+  for (const rule of ['A4', 'A5', 'A6', 'A8', 'R1', 'R4', 'R5'] as const) expect(hits).toContain(rule);
   const findings = evaluateBoardAttention(board).findings;
   expect(findings.find(finding => finding.rule === 'A8')?.message).toBe(`hc client 0.1.15 is below the repo-harness floor ${HC_MIN_VERSION}; run hc update --version ${HC_MIN_VERSION}`);
   expect(findings.filter(finding => finding.rule === 'A6').map(finding => finding.issues)).toEqual([[1477, 1490], [1478, 1480]]);
   expect(findings.find(finding => finding.rule === 'R1')?.issues).toEqual([1477, 1478, 1479, 1480, 1481, 1482, 1483]);
-  // R3: #1494 changes `.github/` for tier:medium #1479. #1499 (tier:low #1476) changes no hazard path. A tier:high item is no hit.
-  expect(findings.filter(finding => finding.rule === 'R3').map(finding => [finding.pull_requests, finding.issues])).toEqual([[[1494], [1479]]]);
-  const high = { ...board, items: board.items.map(item => (item.number === 1479 ? { ...item, tier: 'high' as const } : item)) };
-  expect(rules(high)).not.toContain('R3');
-  // A pull request without a complete file list is unevaluated, never a miss.
-  const partial = evaluateBoardAttention({ ...board, pull_requests: board.pull_requests.map(pr => (pr.number === 1494 ? { ...pr, files: null } : pr)) });
-  expect(partial.findings.map(finding => finding.rule)).not.toContain('R3');
-  expect(partial.unevaluated.filter(entry => entry.rule === 'R3').map(entry => [entry.reason, entry.subject])).toEqual([['files_incomplete', '#1494']]);
+  // R3: #1494 changes `.github/` for tier:medium #1479, but the workflow hazard is not path-visible (#3187): a reviewer applies it.
+  expect(findings.filter(finding => finding.rule === 'R3')).toEqual([]);
   // A malformed hazard list fails at decode.
   const row = { id: 'ci-config', text: 'Changes CI.', path_visible: true, paths: ['.github/**'] };
   const list = (...hazards: object[]) => ({ hazards_version: 'repo-harness.review-hazards.v1', hazards });
@@ -1358,11 +1359,8 @@ test('one hit for each rule that the recorded state does not trigger', () => {
     [list({ ...row, text: 'a | b' }), 'ci-config text'],
     [list(row, row), 'duplicate hazard id ci-config'],
   ] as const) expect(() => decodeReviewHazards(JSON.parse(JSON.stringify(value)))).toThrow(`review hazards invalid: ${error}`);
-  // `**` matches zero or more whole segments, `*` stays inside one segment; the other hazards need a reviewer.
-  expect(pathHazardHits(['.github/workflows/ci.yml', 'docs/.github/x', 'Dockerfile', 'bun.lock', 'install.sh']))
-    .toEqual([
-      { hazard: 'ci-config', path: '.github/workflows/ci.yml' },
-    ]);
+  // No packaged hazard is path-visible; every hazard needs a reviewer.
+  expect(pathHazardHits(['.github/workflows/ci.yml', 'docs/.github/x', 'Dockerfile', 'bun.lock', 'install.sh'])).toEqual([]);
 
   // A rule that cannot read its input lists the subject: no status time, no issue label, an issue or a claim PR off the board.
   const [blocked, done] = board.execution.status === 'observed' ? board.execution.terminals : [];
@@ -1377,14 +1375,15 @@ test('one hit for each rule that the recorded state does not trigger', () => {
   expect(merged.findings.filter(finding => finding.rule === 'A9').map(finding => [finding.terminals, finding.pull_requests])).toEqual([[['t2'], [1494]]]);
 });
 
-test('R5 and the effective tier read the High list: board record-writing code is Medium on one PASS row; a deletion-path change is High and needs two', () => {
+test('R5 and the effective tier read the High list: board record-writing code is Medium on one PASS row; an I1/I2 or I3 path is High and needs two', () => {
   const [hook, boardWriter] = ['src/cli/installer/uninstall.ts', 'src/effects/board/review.ts'];
   const receipt = (subject_sha: string): ReviewPublishReceipt => ({
     protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 1, subject_sha, risk_tier: 'medium', reviewer: { harness: 'codex', actual_model: null }, verdict: 'PASS', model_relation: 'different-family', summary: 'Reviewed.', findings: [],
   });
   const claimAt = '2026-11-02T21:01:00Z';
   // #1499 closes tier:medium #1476, changes `files` and has one claimed different-family PASS row of its head.
-  const board = (files: string[], tier: string, incomplete: boolean) => replay({
+  const board = (files: string[], tier: string, incomplete: boolean, policy?: GhAnswer) => replay({
+    policy,
     owners: (results) => { results.push(...files.filter(path => !results.some(entry => entry.path === path)).map(path => ({ path, matched: false, ambiguous: false, owningCapabilityId: null }))); },
     parent: (data) => { issueNode(data, 1476).labels.nodes.push({ name: tier }); },
     pulls: (data) => {
@@ -1394,8 +1393,8 @@ test('R5 and the effective tier read the High list: board record-writing code is
       pr1499.comments.nodes.push(comment(renderAcceptanceRecord(receipt(pr1499.headRefOid), `https://github.com/Ancienttwo/repo-harness/pull/1499#issuecomment-${Date.parse(claimAt)}`), '2026-11-02T22:00:00Z'));
     },
   });
-  const view = (files: string[], tier = 'tier:medium', incomplete = false) => {
-    const read = board(files, tier, incomplete);
+  const view = (files: string[], tier = 'tier:medium', incomplete = false, policy?: GhAnswer) => {
+    const read = board(files, tier, incomplete, policy);
     const pr = read.pull_requests.find(entry => entry.number === 1499)!;
     const attention = evaluateBoardAttention(read);
     return [pr.tier, pr.acceptance.status,
@@ -1405,8 +1404,13 @@ test('R5 and the effective tier read the High list: board record-writing code is
   expect(view([boardWriter])).toEqual(['medium', 'accepted']);
   expect(view([boardWriter, hook])).toEqual(['high', 'not_accepted', `#1499 changes ${hook} (deletion), a High signal, but #1476 is tier:medium`]);
   expect(view([hook], 'tier:high')).toEqual(['high', 'not_accepted']);
-  // A change hazard path sets the High tier too; R3 names the label.
-  expect(view(['.github/workflows/ci.yml'])).toEqual(['high', 'not_accepted']);
+  // A workflow edit is Medium on one PASS row (#3187); a release path alone is Medium too, and R5 still names the label.
+  expect(view(['.github/workflows/ci.yml'])).toEqual(['medium', 'accepted']);
+  expect(view(['src/core/release/notes.ts'])).toEqual(['medium', 'accepted', '#1499 changes src/core/release/notes.ts (release), a High signal, but #1476 is tier:medium']);
+  // A repository I3 path sets High; a policy that the board cannot read sets High too.
+  const i3 = { status: 0, stdout: JSON.stringify({ type: 'file', path: '.ai/harness/policy.json', encoding: 'base64', content: Buffer.from('{"review":{"i3_paths":["src/effects/board/**"]}}').toString('base64') }) };
+  expect(view([boardWriter], 'tier:medium', false, i3)).toEqual(['high', 'not_accepted']);
+  expect(view([boardWriter], 'tier:medium', false, { status: 1, stdout: 'HTTP 502' })).toEqual(['high', 'not_accepted']);
   // An incomplete file list can hide a High path: High, and R5 lists it as unevaluated.
   expect(view([boardWriter], 'tier:medium', true)).toEqual(['high', 'not_accepted', 'files_incomplete: #1499']);
 });

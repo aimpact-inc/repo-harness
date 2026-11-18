@@ -5,6 +5,7 @@ import {
   type BoardPathOwnerV1, type BoardPathOwnersV1, type BoardRequiredContextsV1, type BoardSeatTerminalInputV1, type BoardSeatTerminalReadV1, type BoardToolingV1, type BoardV1,
 } from '../../core/board/board';
 import { ADVISOR_SEAT } from '../../core/board/advisor-seat';
+import { readReviewI3Paths } from '../../core/board/hazards';
 import {
   BOARD_PAGE, BOARD_PARENT_COMMENT_PAGES, BOARD_SUB_ISSUE_PAGES, BoardSourceError, decodeParentRead, decodePullRequestsRead, parentCommentsPreviousCursor, parentReadNextCursor, type BoardParentReadV1, type BoardPullRequestReadV1,
 } from '../../core/board/source';
@@ -16,6 +17,7 @@ import { GitExecError, gitExecFile, gitSpawnSync, withoutRepositorySelectingGitE
 import { collectPullRequestMergeReadiness } from '../publication/merge-readiness';
 import type { SeatsConfigV1 } from '../../core/board/seats-settings';
 import { modelFamily } from '../../core/review/model-family';
+import { decodeWorkflowPolicy } from '../../core/workflow/policy-schema';
 import { readSeatsConfiguration } from './seats-configuration';
 import { createKeyedSources, readinessKey, type GhRunner, type KeyedSources } from './keyed-sources';
 
@@ -232,23 +234,37 @@ function requiredContexts(input: BoardCollectInput, repository: string, base: st
 }
 
 /**
- * `publication.acceptance_merge` on the default branch, decoded only by the
- * publication policy parser. GitHub answers an absent file with exit 1 and a
- * JSON body of status 404; every other failure leaves the value unknown.
+ * The policy file on the default branch. GitHub answers an absent file with
+ * exit 1 and a JSON body of status 404; every other failure is null.
  */
-function acceptanceMerge(input: BoardCollectInput, repository: string, branch: string): BoardAcceptanceMergeV1 {
+function defaultBranchPolicy(input: BoardCollectInput, repository: string, branch: string): PolicyFileAtRef | null {
   const result = runGh(input, ['api', '--hostname', 'github.com', `repos/${repository}/contents/${PUBLICATION_POLICY_PATH}?ref=${encodeURIComponent(branch)}`]);
   let body: unknown;
   try {
     body = JSON.parse(result.stdout);
   } catch {
-    return 'unknown';
+    return null;
   }
   const absent = result.status === 1 && (body as { status?: unknown } | null)?.status === '404';
-  const file: PolicyFileAtRef | null = absent ? { status: 'missing' } : result.status === 0 ? policyFileFromContents(body) : null;
+  return absent ? { status: 'missing' } : result.status === 0 ? policyFileFromContents(body) : null;
+}
+
+/** `publication.acceptance_merge`, decoded only by the publication policy parser; an unread file leaves it unknown. */
+function acceptanceMerge(file: PolicyFileAtRef | null): BoardAcceptanceMergeV1 {
   if (file === null) return 'unknown';
   const policy = parsePublicationPolicy(file);
   return policy.ok ? policy.acceptance_merge : 'unknown';
+}
+
+/** `review.i3_paths`; null for an unread file or an invalid value. */
+function i3Paths(file: PolicyFileAtRef | null): readonly string[] | null {
+  if (file === null) return null;
+  try {
+    const read = readReviewI3Paths(decodeWorkflowPolicy(file.status === 'present' ? file.text : null));
+    return read.status === 'present' ? read.paths : null;
+  } catch {
+    return null;
+  }
 }
 
 function tooling(input: BoardCollectInput): BoardToolingV1 {
@@ -483,11 +499,13 @@ export function collectBoardThrough(input: BoardCollectInput, sources: KeyedSour
       fatal_read_error: error => error instanceof GhOutputLimitError,
     }));
   });
+  const policy = defaultBranchPolicy(input, repository, parent.repository.default_branch);
   return projectBoard({
     observed_at: observedAt,
     parent,
-    acceptance_merge: acceptanceMerge(input, repository, parent.repository.default_branch),
+    acceptance_merge: acceptanceMerge(policy),
     reviewer_family: reviewerFamily(input),
+    i3_paths: i3Paths(policy),
     pull_requests: reads,
     readiness,
     required_contexts: new Map([...new Set(linked.map(read => read.base_ref))].map(base => [base, requiredContexts(input, repository, base)] as const)),

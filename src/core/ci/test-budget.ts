@@ -1,11 +1,10 @@
 /**
  * The `TestBudget` rule: the test lines and test files that a PR adds, measured
  * from the merge-base to the head, against the parameters of the base policy.
+ * The rule is telemetry: it reports on the PR and never blocks a merge (#3181).
  * The result document is the contract of ADR-0004
  * (`docs/adr/ADR-0004-test-budget-result-contract.md`).
  */
-import type { Nodes } from 'mdast';
-import { fromMarkdown } from 'mdast-util-from-markdown';
 import { canonicalize } from '../evidence/canonical-json';
 import { sha256Prefixed } from '../evidence/sha256';
 import {
@@ -18,11 +17,12 @@ import {
 import { RULES, type TestBudgetParameters } from './rules';
 
 export const TEST_BUDGET_RESULT_SCHEMA = 'repo-harness/test-budget-result/v1';
-/** Bump when a change to this file can change a result for the same inputs. */
+/**
+ * Bump when a change to this file can change a result for the same inputs. The
+ * telemetry change of #3181 keeps 1: the 0.34.0 readiness reads any other value
+ * as a stale result and blocks the merge.
+ */
 export const TEST_BUDGET_IMPLEMENTATION_VERSION = 1;
-/** The producer: the job name (its check run name) and the workflow file that `.github/workflows/test-budget.yml` declares. */
-export const TEST_BUDGET_CHECK_NAME = 'Test budget';
-export const TEST_BUDGET_WORKFLOW_PATH = '.github/workflows/test-budget.yml';
 
 // The policy key tree is the one list of keys; a key that the tree lacks fails the type check here.
 const CONFIG_KEYS: Readonly<Record<'enabled' | keyof TestBudgetParameters, true>> = WORKFLOW_POLICY_KEYS.rules.TestBudget;
@@ -166,130 +166,32 @@ function overTestBudget(measured: TestBudgetMeasured): boolean {
   return linesOver || measured.added_test_files > measured.file_cap;
 }
 
-export interface TestBudgetExceptionCounts {
-  readonly added_test_lines: number;
-  readonly added_product_lines: number;
-  readonly added_test_files: number;
-}
-
-export type TestBudgetException =
-  | { readonly status: 'absent' }
-  | { readonly status: 'malformed'; readonly problem: string }
-  | { readonly status: 'parsed'; readonly counts: TestBudgetExceptionCounts; readonly reason: string };
-
-const EXCEPTION_HEADING = 'test budget exception';
-const COUNT_LINE = /^(added test lines|added product lines|added test files):[ \t]*(\d+)$/i;
-const COUNT_KEYS = {
-  'added test lines': 'added_test_lines',
-  'added product lines': 'added_product_lines',
-  'added test files': 'added_test_files',
-} as const satisfies Record<string, keyof TestBudgetExceptionCounts>;
-
-/** The text of inline content; inline HTML (an HTML comment included) adds nothing. */
-function inlineText(node: Nodes): string {
-  if (node.type === 'text' || node.type === 'inlineCode') return node.value;
-  if (node.type === 'break') return '\n';
-  return 'children' in node ? node.children.map(inlineText).join('') : '';
-}
-
-type BodyItem =
-  | { readonly kind: 'heading'; readonly depth: number; readonly text: string; readonly quoted: boolean }
-  | { readonly kind: 'line'; readonly text: string; readonly quoted: boolean };
-
-/**
- * The headings and text lines of the body in document order, at every nesting
- * depth: a heading inside a list item or a block quote is still a heading.
- * Code and HTML blocks hold no item. A line inside a block quote is `quoted`.
- */
-function bodyItems(node: Nodes, quoted: boolean, out: BodyItem[]): void {
-  if (node.type === 'heading') {
-    out.push({ kind: 'heading', depth: node.depth, text: inlineText(node), quoted });
-  } else if (node.type === 'paragraph' || node.type === 'tableCell') {
-    for (const text of inlineText(node).split('\n')) out.push({ kind: 'line', text, quoted });
-  } else if (node.type !== 'code' && node.type !== 'html' && 'children' in node) {
-    for (const child of node.children) bodyItems(child, quoted || node.type === 'blockquote', out);
-  }
-}
-
-/**
- * The `## Test budget exception` section of a PR body, read from one CommonMark
- * parse: a level-2 heading with that text, up to the next level 1 or 2 heading
- * in document order, also one nested in a list item or a block quote. A heading
- * inside fenced code, an HTML comment or a block quote is not the section. The
- * section needs each count line once; its other text lines are the reason, and
- * a quoted line is never a count.
- */
-export function parseTestBudgetException(body: string): TestBudgetException {
-  const items: BodyItem[] = [];
-  bodyItems(fromMarkdown(body), false, items);
-  const starts = items.flatMap((item, index) => (item.kind === 'heading' && item.depth === 2 && !item.quoted
-    && item.text.replace(/\s+/g, ' ').trim().toLowerCase() === EXCEPTION_HEADING ? [index] : []));
-  if (starts.length === 0) return { status: 'absent' };
-  if (starts.length > 1) return { status: 'malformed', problem: 'the PR body has more than one Test budget exception section' };
-  const counts: Partial<Record<keyof TestBudgetExceptionCounts, number>> = {};
-  const reason: string[] = [];
-  for (const item of items.slice(starts[0]! + 1)) {
-    if (item.kind === 'heading' && item.depth <= 2) break;
-    for (const line of item.text.split('\n').map((text) => text.trim())) {
-      const count = item.quoted ? null : COUNT_LINE.exec(line);
-      if (count === null) {
-        if (line !== '') reason.push(line);
-        continue;
-      }
-      const key = COUNT_KEYS[count[1]!.toLowerCase() as keyof typeof COUNT_KEYS];
-      const value = Number(count[2]);
-      if (counts[key] !== undefined) return { status: 'malformed', problem: `the section states "${count[1]}" more than once` };
-      if (!Number.isSafeInteger(value)) return { status: 'malformed', problem: `the section has an invalid number for "${count[1]}"` };
-      counts[key] = value;
-    }
-  }
-  const missing = Object.entries(COUNT_KEYS).filter(([, key]) => counts[key] === undefined).map(([label]) => label);
-  if (missing.length > 0) return { status: 'malformed', problem: `the section has no line for: ${missing.join(', ')}` };
-  return {
-    status: 'parsed',
-    counts: {
-      added_test_lines: counts.added_test_lines!,
-      added_product_lines: counts.added_product_lines!,
-      added_test_files: counts.added_test_files!,
-    },
-    reason: reason.join('\n'),
-  };
-}
-
-/** The digest of the parsed counts and reason; null when the body has no parsed section. */
-export function testBudgetExceptionDigest(exception: TestBudgetException): string | null {
-  if (exception.status !== 'parsed') return null;
-  return sha256Prefixed(canonicalize({ counts: exception.counts, reason: exception.reason }));
-}
-
 export interface TestBudgetBound {
   readonly head_sha: string;
   readonly diff_start: string;
   readonly policy_digest: string;
   readonly implementation_version: number;
-  readonly exception_digest: string | null;
-}
-
-export interface TestBudgetExceptionResult {
-  readonly present: boolean;
-  readonly valid: boolean;
-  readonly counts: TestBudgetExceptionCounts | null;
-  readonly reason: string | null;
+  /**
+   * Always null. The merge readiness of repo-harness 0.34.0 compares this field
+   * with the exception section of the live PR body, so the v1 document keeps it
+   * until no released readiness reads it.
+   */
+  readonly exception_digest: null;
 }
 
 /**
- * `measured`, `over_budget` and `exception` are null for `skipped` (nothing is
- * measured) and for `error`. An `error` result keeps null for each bound input
- * that the rule could not compute.
+ * The rule reports and never fails a check: over budget is `pass` with
+ * `over_budget: true`. `measured` and `over_budget` are null for `skipped`
+ * (nothing is measured) and for `error`. An `error` result keeps null for each
+ * bound input that the rule could not compute.
  */
 export type TestBudgetResult =
   | {
     readonly schema: typeof TEST_BUDGET_RESULT_SCHEMA;
-    readonly state: 'pass' | 'violation';
+    readonly state: 'pass';
     readonly bound: TestBudgetBound;
     readonly measured: TestBudgetMeasured;
     readonly over_budget: boolean;
-    readonly exception: TestBudgetExceptionResult;
     readonly error: null;
   }
   | {
@@ -298,7 +200,6 @@ export type TestBudgetResult =
     readonly bound: TestBudgetBound;
     readonly measured: null;
     readonly over_budget: null;
-    readonly exception: null;
     readonly error: null;
   }
   | {
@@ -307,114 +208,28 @@ export type TestBudgetResult =
     readonly bound: { readonly [Key in keyof TestBudgetBound]: TestBudgetBound[Key] | null };
     readonly measured: null;
     readonly over_budget: null;
-    readonly exception: null;
     readonly error: { readonly code: string; readonly message: string };
   };
 
-function exceptionMatches(exception: TestBudgetException, measured: TestBudgetMeasured): boolean {
-  return exception.status === 'parsed'
-    && exception.reason !== ''
-    && exception.counts.added_test_lines === measured.added_test_lines
-    && exception.counts.added_product_lines === measured.added_product_lines
-    && exception.counts.added_test_files === measured.added_test_files;
-}
-
-/**
- * Over budget with a valid exception is `pass`; the measured numbers stay as
- * measured. A disabled rule is `skipped` and measures nothing.
- */
+/** A disabled rule is `skipped` and measures nothing. */
 export function evaluateTestBudget(input: {
   readonly head_sha: string;
   readonly diff_start: string;
   readonly config: Exclude<TestBudgetConfigRead, { status: 'invalid' }>;
   readonly entries: readonly TestBudgetDiffEntry[];
-  readonly exception: TestBudgetException;
 }): TestBudgetResult {
   const bound: TestBudgetBound = {
     head_sha: input.head_sha,
     diff_start: input.diff_start,
     policy_digest: testBudgetPolicyDigest(input.config),
     implementation_version: TEST_BUDGET_IMPLEMENTATION_VERSION,
-    exception_digest: testBudgetExceptionDigest(input.exception),
+    exception_digest: null,
   };
   if (input.config.status === 'absent' || !input.config.config.enabled) {
-    return { schema: TEST_BUDGET_RESULT_SCHEMA, state: 'skipped', bound, measured: null, over_budget: null, exception: null, error: null };
+    return { schema: TEST_BUDGET_RESULT_SCHEMA, state: 'skipped', bound, measured: null, over_budget: null, error: null };
   }
   const measured = measureTestBudget(input.entries, input.config.config);
-  const overBudget = overTestBudget(measured);
-  const valid = exceptionMatches(input.exception, measured);
-  const parsed = input.exception.status === 'parsed' ? input.exception : null;
-  return {
-    schema: TEST_BUDGET_RESULT_SCHEMA,
-    state: overBudget && !valid ? 'violation' : 'pass',
-    bound,
-    measured,
-    over_budget: overBudget,
-    exception: {
-      present: input.exception.status !== 'absent',
-      valid,
-      counts: parsed?.counts ?? null,
-      reason: parsed?.reason ?? null,
-    },
-    error: null,
-  };
-}
-
-/**
- * A stored result as a consumer reads it back from its store (the check
- * annotation). `bound` keeps the stored values unchecked: the consumer compares
- * each with its live value, so a malformed field reads as changed.
- */
-export interface TestBudgetResultReadback {
-  readonly state: TestBudgetResult['state'];
-  readonly bound: { readonly [Key in keyof TestBudgetBound]: unknown };
-  /** The stored numbers of `pass` and `violation`; null when absent or malformed. */
-  readonly measured: TestBudgetMeasured | null;
-  /** The stored code of `error`; null when absent or not a code. */
-  readonly error_code: string | null;
-}
-
-function readbackObject(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
-}
-
-const isCount = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
-const isCap = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0;
-
-function readbackMeasured(value: unknown): TestBudgetMeasured | null {
-  const measured = readbackObject(value);
-  if (measured === null || !isCount(measured.added_test_lines) || !isCount(measured.added_product_lines)
-    || !isCount(measured.added_test_files) || !isCap(measured.ratio_cap) || !isCount(measured.file_cap)
-    || (measured.ratio !== null && !isCap(measured.ratio))) return null;
-  return {
-    added_test_lines: measured.added_test_lines, added_product_lines: measured.added_product_lines,
-    added_test_files: measured.added_test_files, ratio: measured.ratio as number | null,
-    ratio_cap: measured.ratio_cap, file_cap: measured.file_cap,
-  };
-}
-
-/** Null when the text is not a v1 result document with a known state; the consumer then has no result. */
-export function decodeTestBudgetResult(text: string): TestBudgetResultReadback | null {
-  let document: Record<string, unknown> | null;
-  try {
-    document = readbackObject(JSON.parse(text));
-  } catch {
-    return null;
-  }
-  const bound = readbackObject(document?.bound);
-  const state = document?.state;
-  if (document === null || bound === null || document.schema !== TEST_BUDGET_RESULT_SCHEMA
-    || (state !== 'pass' && state !== 'violation' && state !== 'skipped' && state !== 'error')) return null;
-  const code = readbackObject(document.error)?.code;
-  return {
-    state,
-    bound: {
-      head_sha: bound.head_sha, diff_start: bound.diff_start, policy_digest: bound.policy_digest,
-      implementation_version: bound.implementation_version, exception_digest: bound.exception_digest,
-    },
-    measured: readbackMeasured(document.measured),
-    error_code: typeof code === 'string' && /^[a-z][a-z_]{0,63}$/u.test(code) ? code : null,
-  };
+  return { schema: TEST_BUDGET_RESULT_SCHEMA, state: 'pass', bound, measured, over_budget: overTestBudget(measured), error: null };
 }
 
 export function testBudgetError(
@@ -422,7 +237,7 @@ export function testBudgetError(
   code: string,
   message: string,
 ): TestBudgetResult {
-  return { schema: TEST_BUDGET_RESULT_SCHEMA, state: 'error', bound, measured: null, over_budget: null, exception: null, error: { code, message } };
+  return { schema: TEST_BUDGET_RESULT_SCHEMA, state: 'error', bound, measured: null, over_budget: null, error: { code, message } };
 }
 
 const NO_CONFIGURATION_DIGEST = testBudgetPolicyDigest({ status: 'absent' });
@@ -441,57 +256,35 @@ function fenced(text: string): string {
   return `${fence}text\n${text}\n${fence}`;
 }
 
-/**
- * The job summary (Markdown) of one result document. It is a projection of the
- * document only and never repeats PR body text: the exception reason is not
- * shown. Over budget with a valid exception keeps the measured numbers and says
- * so; it never reads as "within budget".
- */
+/** The job summary (Markdown) of one result document; a projection of the document only. */
 export function renderTestBudgetSummary(result: TestBudgetResult): string {
   if (result.state === 'error') {
     const title = result.error.code === 'policy_invalid' ? 'invalid configuration' : `error ${result.error.code}`;
     return `### TestBudget: not checked (${title})\n\nNothing is measured.\n\n${fenced(result.error.message)}\n`;
   }
   if (result.state === 'skipped') return `### TestBudget: skipped (${skippedCause(result)})\n\nNothing is measured.\n`;
-  const { measured, exception } = result;
-  const title = result.state === 'violation'
-    ? `violation (over budget, exception ${exception.present ? 'invalid' : 'missing'})`
-    : result.over_budget ? 'pass with exception (over budget, exception valid)' : 'pass (within budget)';
-  const rows = [
+  const { measured } = result;
+  const ratio = measured.ratio === null ? 'none (no added product line)' : String(measured.ratio);
+  return [
+    `### TestBudget: ${result.over_budget ? 'over budget (report only)' : 'within budget'}`,
+    '',
     '| | Added test lines | Added product lines | Added test files |',
     '| --- | --- | --- | --- |',
     `| Measured | ${measured.added_test_lines} | ${measured.added_product_lines} | ${measured.added_test_files} |`,
-  ];
-  if (exception.counts !== null) {
-    const stated = exception.counts;
-    rows.push(`| Exception states | ${stated.added_test_lines} | ${stated.added_product_lines} | ${stated.added_test_files} |`);
-  }
-  const ratio = measured.ratio === null ? 'none (no added product line)' : String(measured.ratio);
-  return [
-    `### TestBudget: ${title}`,
-    '',
-    ...rows,
     '',
     `Ratio ${ratio}, cap ${measured.ratio_cap}. Test files cap ${measured.file_cap}. Head \`${result.bound.head_sha}\`, diff start \`${result.bound.diff_start}\`.`,
     '',
   ].join('\n');
 }
 
-/** Human lines for the job log. They never repeat PR body text. */
-export function describeTestBudget(result: TestBudgetResult, exception: TestBudgetException): string[] {
+/** Human lines for the job log. */
+export function describeTestBudget(result: TestBudgetResult): string[] {
   if (result.state === 'error') return [`TestBudget error (${result.error.code}): ${result.error.message}`];
   if (result.state === 'skipped') return [`TestBudget skipped: ${skippedCause(result)}.`];
   const { measured } = result;
-  const lines = [`TestBudget ${result.state}: ${measured.added_test_lines} added test lines, ${measured.added_product_lines} added product lines, `
-    + `${measured.added_test_files} added test files (ratio cap ${measured.ratio_cap}, file cap ${measured.file_cap}).`];
-  if (result.state === 'pass') return result.over_budget ? [...lines, 'Over budget; the exception is valid.'] : lines;
-  if (exception.status === 'absent') lines.push('The PR body has no Test budget exception section.');
-  if (exception.status === 'malformed') lines.push(`The exception is invalid: ${exception.problem}.`);
-  if (exception.status === 'parsed' && exception.reason === '') lines.push('The exception is invalid: the reason is empty.');
-  if (exception.status === 'parsed' && exception.reason !== '' && !result.exception.valid) {
-    lines.push('The exception is invalid: its numbers differ from the measured numbers.');
-  }
-  return [...lines, RULES.TestBudget.repair];
+  return [`TestBudget ${result.over_budget ? 'over budget (report only)' : 'within budget'}: ${measured.added_test_lines} added test lines, `
+    + `${measured.added_product_lines} added product lines, ${measured.added_test_files} added test files `
+    + `(ratio cap ${measured.ratio_cap}, file cap ${measured.file_cap}).`];
 }
 
 /** A GitHub Actions workflow command for one `notice` annotation; the escapes keep it one command line. */

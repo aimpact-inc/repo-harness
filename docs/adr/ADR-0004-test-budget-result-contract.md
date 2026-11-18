@@ -10,6 +10,15 @@ appliesTo:
 
 # ADR-0004: Test budget result contract
 
+## Amendment (2026-11-18, #3181)
+
+The rule is telemetry. The producer reports the measured numbers on the PR and
+never fails. Merge readiness and the merge executor read no result, so the
+consumer sections below and the `Test budget exception` section are retired.
+The v1 document keeps `bound.exception_digest` as null and
+`implementation_version` as 1, because the 0.34.0 readiness still compares both
+before it merges.
+
 ## Context
 
 The `TestBudget` rule limits the test lines and the test files that a PR adds.

@@ -108,10 +108,10 @@ describe("change hazard list", () => {
   test("assets/review-hazards.v1.json owns the hazard table: a hand edit or a list change is drift", () => {
     const doc = readFileSync(join(SOURCE_DIR, FLOW_DOC), "utf-8");
     expect(renderHazardRegion(doc, REVIEW_HAZARDS)).toBe(doc);
-    const edited = doc.replace("| `.github/**` |", "| None (`path_visible: false`) |");
+    const edited = doc.replace("| Reads credentials,", "| Reads secrets,");
     expect(edited).not.toBe(doc);
     expect(renderHazardRegion(edited, REVIEW_HAZARDS)).not.toBe(edited);
-    const changed = { ...REVIEW_HAZARDS, hazards: REVIEW_HAZARDS.hazards.map((hazard) => ({ id: hazard.id, text: hazard.text, path_visible: false as const })) };
+    const changed = { ...REVIEW_HAZARDS, hazards: REVIEW_HAZARDS.hazards.map((hazard) => ({ id: hazard.id, text: hazard.text, path_visible: true as const, paths: [".github/**"] })) };
     expect(renderHazardRegion(doc, changed)).not.toBe(doc);
     expect(() => renderHazardRegion(doc.replace("<!-- review-hazards:list:end -->", ""), REVIEW_HAZARDS)).toThrow("exactly one");
     // assets/review-high-list.v1.json owns the High list table the same way.

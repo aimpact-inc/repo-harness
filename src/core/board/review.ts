@@ -22,8 +22,8 @@ import { claimStatusTarget, newestProtocolComment, parseAcceptanceRecord, parseC
  * starts only with a known family that differs from the gatekeeper's on a High head: equal families leave the two rows not independent.
  *
  * The two High seats run as a relay (#2910): a High head starts the gatekeeper only, and the reviewer starts for that head when the
- * gatekeeper of the head is `pass` (`BoardPullRequestV1.gatekeeper_review`) and the reviewer has no marker of its own. A reviewer
- * finding sends the fix back to the gatekeeper first, because the fix is a new head that no seat reviewed. The reviewer's delta base
+ * gatekeeper of the head is `pass` (`BoardPullRequestV1.gatekeeper_review`) and the reviewer has no marker of its own. In a fix round
+ * only the seat that returned FAIL starts: the PASS of the other seat carries to the fix head (#3187). The reviewer's delta base
  * stays the newest earlier head that the reviewer itself reviewed, else the whole diff, so the reviewer never reads only the tail.
  */
 export const REVIEW_START_HEADER = 'repo-harness review start';
