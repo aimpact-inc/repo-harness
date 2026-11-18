@@ -300,18 +300,23 @@ export function secondReview(read: BoardPullRequestReadV1, tier: BoardTier | nul
   return highRuleMet(read, head) ? 'not_required' : 'pending';
 }
 
-/** The writer family of a pull request (`BoardPullRequestV1.writer_family`). */
+/**
+ * The writer family of a pull request (`BoardPullRequestV1.writer_family`): the one model family of the newest writer claims of the head
+ * branch on its linked issues. A bundle links issues without their own claim, so an unclaimed linked issue is ignored. Null when no linked
+ * issue has such a claim, when a claim names no known family, when two claims disagree, or when a linked issue is off the board.
+ */
 export function writerFamily(read: BoardPullRequestReadV1, closes: readonly number[], refs: readonly number[], parent: BoardParentReadV1): BoardWriterFamily | null {
   const issues = new Map(parent.sub_issues.map(issue => [issue.number, issue]));
   const linked = [...new Set([...closes, ...refs])].filter(number => number !== parent.parent.number);
-  const families = new Set(linked.map((number) => {
+  const families = new Set<string | null>();
+  for (const number of linked) {
     const issue = issues.get(number);
     if (issue === undefined) return null;
     const claims = protocolComments(issue.comments, CLAIM_HEADER).filter(claim => field(claim.body, 'Role') === 'writer' && field(claim.body, 'Branch') === read.head_ref);
-    const newest = claims.length === 0 ? null : newestProtocolComment({ ...issue.comments, comments: claims }, CLAIM_HEADER);
-    const model = newest === null ? null : field(newest.body, 'Model');
-    return model === null ? null : modelFamily(model);
-  }));
+    if (claims.length === 0) continue;
+    const model = field(newestProtocolComment({ ...issue.comments, comments: claims }, CLAIM_HEADER)!.body, 'Model');
+    families.add(model === null ? null : modelFamily(model));
+  }
   const [family] = families;
   return families.size === 1 && family !== undefined ? family : null;
 }

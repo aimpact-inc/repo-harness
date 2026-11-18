@@ -40,11 +40,11 @@ test('a ready, green pull request starts; every other state is skipped with its 
 
 const seatsOf = (decision: ReviewDecisionV1 | undefined) => decision?.action === 'start' ? decision.seats.map(entry => entry.seat) : [];
 
-test('an unknown tier is reviewed as High; the relay starts the gatekeeper first and the reviewer after its PASS', () => {
+test('an unknown tier is reviewed as High; a head that no seat reviewed starts both seats, and the reviewer alone after a gatekeeper PASS', () => {
   const [start] = plan([pr(1, { tier: null, second_review: 'pending' })]);
   expect(start).toMatchObject({ action: 'start', tier: 'high' });
-  expect(seatsOf(start)).toEqual(['gatekeeper']);
-  // The gatekeeper PASS of the head opens the relay: that run starts the reviewer only.
+  expect(seatsOf(start)).toEqual(['gatekeeper', 'reviewer']);
+  // A gatekeeper PASS of the head, also a carried one: that run starts the reviewer only.
   expect(seatsOf(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })])[0])).toEqual(['reviewer']);
   // A gatekeeper FAIL of the head starts no reviewer: the fix goes back to the gatekeeper.
   expect(seatsOf(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'fail' })])[0])).toEqual(['gatekeeper']);
@@ -78,11 +78,12 @@ test('an unavailable plan names why the plan block does not decode', () => {
     .toMatchObject({ action: 'skip', reason: 'plan_unavailable', detail: `the plan is unavailable: ${reason}` });
 });
 
-test('a marker covers one seat: a started gatekeeper holds the reviewer until its PASS, and a marker without a seat covers none', () => {
+test('a marker covers one seat: a started gatekeeper leaves the reviewer of a fresh head free, and a marker without a seat covers none', () => {
   const pending = pr(1, { second_review: 'pending' });
-  // No gatekeeper row yet: the started gatekeeper is the only seat of the head, and the reviewer waits for its verdict.
-  expect(label(plan([pending], page(marker(SHA))))).toEqual(['1:started']);
-  expect(plan([pending], page(marker(SHA)))[0]).toMatchObject({ detail: `the gatekeeper started for ${SHA} and recorded none; the reviewer starts after a PASS` });
+  // No gatekeeper row yet: the reviewer still starts beside the started gatekeeper.
+  expect(seatsOf(plan([pending], page(marker(SHA)))[0])).toEqual(['reviewer']);
+  // A gatekeeper FAIL of the head holds the reviewer until a PASS.
+  expect(plan([{ ...pending, gatekeeper_review: 'fail' }], page(marker(SHA)))[0]).toMatchObject({ reason: 'started', detail: `the gatekeeper started for ${SHA} and recorded fail; the reviewer starts after a PASS` });
   expect(seatsOf(plan([{ ...pending, gatekeeper_review: 'pass' }], page(marker(SHA)))[0])).toEqual(['reviewer']);
   expect(label(plan([{ ...pending, gatekeeper_review: 'pass' }], page(marker(SHA), marker(SHA, 'https://example.test/m2', 'reviewer'))))).toEqual(['1:started']);
   expect(seatsOf(plan([pr(1)], page(comment(`repo-harness review start\nSubject: ${SHA}`)))[0])).toEqual(['gatekeeper']);
@@ -100,8 +101,7 @@ test('a released marker frees its head', () => {
 });
 
 test('the delta base of a seat is an earlier head that its own family reviewed; otherwise the seat reviews the whole diff', () => {
-  // The relay gives one seat of the head per run, so each seat's base is read from its own run: the gatekeeper before the PASS, the
-  // reviewer after it. Both read the same earlier markers and rows, and each base comes from the seat's own family (#2910).
+  // Each seat's base is read from the same earlier markers and rows, and each base comes from the seat's own family.
   const base = (seat: ReviewSeat, comments: BoardCommentPageV1, reviewer = 'anthropic') => {
     const started = plan([pr(1, { second_review: 'pending', gatekeeper_review: seat === 'reviewer' ? 'pass' : 'none' })], comments, [], GATEKEEPER, reviewer)[0];
     const entry = started.action === 'start' ? started.seats.find(candidate => candidate.seat === seat) : undefined;
@@ -138,12 +138,9 @@ test('each required seat opens its tab with its launch argv in the writer worktr
   const seats: string[] = [];
   const routes: SeatRouteV1[] = [];
   const p = ports({ launch: async (seat, _labels, _cwd, gatekeeper) => { seats.push(seat); routes.push(gatekeeper); return { argv: [seat], tab: seat, runtime: seat === 'reviewer' ? 'claude' : 'codex' }; } });
-  // The relay (#2910): one run starts the gatekeeper of the head, and the run after its PASS starts the reviewer.
+  // A High head that no seat reviewed starts both seats in one run (#3190 section 2.3).
   const pending = pr(1, { second_review: 'pending' });
-  expect(await executeReview(plan([pending]), context, p)).toMatchObject({ started: [{ pr: 1, seat: 'gatekeeper' }] });
-  const passed = page(marker(SHA), record(SHA, 'pi (gpt-6.1-sol)', 'PASS'));
-  const after = await executeReview(plan([{ ...pending, gatekeeper_review: 'pass' }], passed), context, p);
-  expect(after).toMatchObject({ started: [{ pr: 1, seat: 'reviewer' }] });
+  expect(await executeReview(plan([pending]), context, p)).toMatchObject({ started: [{ pr: 1, seat: 'gatekeeper' }, { pr: 1, seat: 'reviewer' }] });
   expect(seats).toEqual(['gatekeeper', 'reviewer']);
   expect(routes[0]).toBe(GATEKEEPER);
   expect(p.comments[0]).toContain(`Subject: ${SHA}\nSeat: gatekeeper`);

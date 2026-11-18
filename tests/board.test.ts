@@ -432,7 +432,10 @@ test('High acceptance: PASS rows of the head from two distinct claims, one recor
     family((data) => { const node = issueNode(data, 1475).comments.nodes.find((entry: Json) => entry.body.includes('Model: claude')); node.body = node.body.replace(/Model: .*/u, 'Model: magpie/deepseek-v4'); }),
     family(second('gpt-5.5'), refs1479),
     family(second('claude-opus-5-5'), refs1479),
-  ]).toEqual([null, 'deepseek', null, 'anthropic']);
+    // A bundled issue without its own claim of the branch is ignored; with no claim of the branch at all there is no family.
+    family(() => {}, refs1479),
+    family((data) => { const nodes = issueNode(data, 1475).comments.nodes; nodes.splice(0, nodes.length, ...nodes.filter((entry: Json) => !entry.body.startsWith('repo-harness issue claim'))); }),
+  ]).toEqual([null, 'deepseek', null, 'anthropic', 'anthropic', null]);
 });
 
 test('replay: the recorded #1474 reads project to a board, and its findings come from the recorded state', () => {
