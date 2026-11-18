@@ -5,6 +5,7 @@ import { sha256Hex, sha256Prefixed } from '../../core/evidence/sha256';
 import { HostConfigError, type PathCommitted } from '../../core/host-config/types';
 import { retryWindowsSharingRace } from '../atomic-append';
 import { hashManagedTree } from '../managed-tree';
+import { ensureSelfIgnoringDirectory } from '../self-ignoring-directory';
 
 /** The whole entry that a path write puts at a path: a file, a link, or a copy of a directory tree. */
 export type PathEntry =
@@ -26,9 +27,8 @@ export function sameCommitted(left: PathCommitted | null, right: PathCommitted |
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-/** Write the entry beside the path; the caller records it and then publishes it. */
-export function stagePathEntry(path: string, entry: PathEntry): { readonly staged: string; readonly committed: PathCommitted } {
-  const staged = `${path}.${randomUUID()}.rh-stage`;
+/** Write the entry beside the path, or at `staged`; the caller records it and then publishes it. */
+export function stagePathEntry(path: string, entry: PathEntry, staged = `${path}.${randomUUID()}.rh-stage`): { readonly staged: string; readonly committed: PathCommitted } {
   try {
     if (entry.type === 'file') {
       writeFileSync(staged, entry.bytes, { flag: 'wx', mode: 0o600 });
@@ -83,8 +83,9 @@ export function preimagePath(transaction: string, key: string): string {
 export function keepPreimage(transaction: string, key: string): void {
   const target = preimagePath(transaction, key);
   if (lstatSync(target, { throwIfNoEntry: false }) || lstatSync(target + '.absent', { throwIfNoEntry: false })) return;
+  mkdirSync(transaction, { recursive: true, mode: 0o700 });
+  ensureSelfIgnoringDirectory(dirname(target));
   if (!lstatSync(key, { throwIfNoEntry: false })) {
-    mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
     writeFileSync(target + '.absent', '', { flag: 'wx', mode: 0o600 });
     return;
   }

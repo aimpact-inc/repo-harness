@@ -10,7 +10,7 @@ import { gitignoreManagedBlockOperation, ignoreBlockProof } from "./gitignore-pl
 import { upsertManagedBlock } from "../../core/adoption/managed-block";
 import { renderWorkflowContractMarker } from "../../core/adoption/workflow-contract-asset";
 import { minimumHarnessVersionOf } from "../../core/adoption/minimum-harness-version";
-import { hookFileRemovals, hookLocation, planLegacyLeftovers, removeLegacyHookCommands } from "../upgrade/legacy-inventory";
+import { planLegacyLeftovers } from "../upgrade/legacy-inventory";
 import { runGit } from "../git/run-git";
 import { pruneUnknownPolicyKeys } from "../../core/workflow/policy-schema";
 import { withoutRepositorySelectingGitEnv } from "../git/runner";
@@ -362,13 +362,10 @@ Use \`rh docs show ${docId}\` for the full generic runtime guide.
 function addLegacyCleanup(repoRoot: string, operations: AdoptionOperation[]): AdoptionWarning[] {
   const plan = planLegacyLeftovers({ scope: "project", cwd: repoRoot, home: repoRoot, packageRoot: join(ASSET_ROOT, ".."), installOwnership: () => () => null });
   const warnings: AdoptionWarning[] = [];
-  const hookPaths = new Set<string>();
   for (const item of plan.items) {
     const path = relative(resolve(repoRoot), item.path).split(sep).join("/");
-    if (item.action === "strip-entry") {
-      hookPaths.add(path);
-      continue;
-    }
+    // The repository hook strip is a host-config gate write after the transaction (#2854): its file copy stays out of the working tree.
+    if (item.action === "strip-entry") continue;
     if (item.action === "report") {
       if (item.surface === "hook-entry") {
         warnings.push({ code: "hook-settings-not-editable", message: `Preserving ${path}: ${item.reason}`, risk: "medium" });
@@ -386,17 +383,6 @@ function addLegacyCleanup(repoRoot: string, operations: AdoptionOperation[]): Ad
       id: makeOperationId("gitUntrack", path), kind: "gitUntrack", path,
       reason: "Untrack removed known-generated workflow asset from the git index", risk: "medium", status: "planned",
     });
-  }
-  // Text edits take out only the legacy commands; the bytes outside them stay.
-  for (const path of hookPaths) {
-    const target = safePath(repoRoot, path);
-    const hookFile = hookFileRemovals(readFileSync(target), target, hookLocation("project", { home: repoRoot }));
-    if ('refused' in hookFile) {
-      warnings.push({ code: "hook-settings-not-editable", message: `Preserving ${path}: hook settings changed during planning`, risk: "medium" });
-      continue;
-    }
-    operations.push(writeOperation(repoRoot, path, removeLegacyHookCommands(hookFile.content, hookFile.removals),
-      "Remove repo-local repo-harness host adapters after the user-level typed adapter cutover", { risk: "medium", existing: hookFile.content }));
   }
   return warnings;
 }

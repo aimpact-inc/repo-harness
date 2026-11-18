@@ -1,5 +1,5 @@
 import { lstatSync, readFileSync, rmSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import { planFile, type FilePlan, type PlannedFragment } from '../../core/host-config/plan';
 import { fileFormatOf, fragmentFormat, type FragmentFormat } from '../../core/host-config/registry';
@@ -135,6 +135,8 @@ export interface HostConfigPathWrite {
    * gate keeps that file in the vault first and records `replaced`.
    */
   readonly replace?: boolean;
+  /** The file that the caller planned from: the gate writes and keeps a vault copy only while the entry still holds these bytes. */
+  readonly expected?: Sha256;
 }
 
 /** A host path that an out-of-process writer may write, owned by `owner`. */
@@ -157,6 +159,12 @@ export interface HostConfigPathOptions {
    * can put it back; the transaction deletes the directory at commit.
    */
   readonly transaction?: string;
+  /**
+   * Where a write puts its bytes before the rename onto `target`; by default
+   * a name beside the target. The repository scope stages in a guarded rh
+   * directory instead, so a kill leaves no copy that Git can stage (#2854).
+   */
+  readonly stage?: (target: string) => string;
 }
 
 
@@ -515,7 +523,10 @@ function refusal(path: string, record: PathRecord | undefined, owner: string): H
 /** The bytes of a user file that `replace` lets rh write over, in the vault; only a regular file qualifies. */
 function vaultUserFile(paths: HostConfigPaths, entry: string, observed: PathCommitted, path: string): Sha256 {
   if (observed.type !== 'file') throw new HostConfigError('host_config_invalid_state', `only a file can be replaced on the user's word: ${path}`);
-  return putVault(paths, readFileSync(entry));
+  const kept = putVault(paths, readFileSync(entry));
+  // The copy must be the file that the record names as replaced, not a later edit.
+  if (kept !== observed.sha256) throw new HostConfigError('host_config_target_changed', `the file changed while rh kept its copy, so rh writes nothing to it: ${path}`);
+  return kept;
 }
 
 /**
@@ -543,13 +554,16 @@ function assertReplacedIsFile(record: PathRecord, path: string): void {
   }
 }
 
+/** The record key and host of a whole path that a scope admits; it throws for any other path. */
+type WholePathAdmit = (ledger: HostConfigLedger, path: string) => { key: string; host: PathRecord['host'] };
+
 /** Each record reaches the ledger before its entry is published, so every whole-path write has its record. */
-function writeWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, writes: readonly HostConfigPathWrite[], options: HostConfigPathOptions): string[] {
+function writeWholePaths(admit: WholePathAdmit, paths: HostConfigPaths, writes: readonly HostConfigPathWrite[], options: HostConfigPathOptions): string[] {
   const ledger = readLedger(paths);
   const records = { ...ledger.paths };
   let directories = ledger.directories;
   const persist = () => writeLedger(paths, { ...ledger, paths: records, directories });
-  const admitted = writes.map((write) => ({ write, ...admitWholePath(env, paths, ledger, write.path) }));
+  const admitted = writes.map((write) => ({ write, ...admit(ledger, write.path) }));
   if (new Set(admitted.map(({ key }) => key)).size !== admitted.length) throw new HostConfigError('host_config_invalid_state', 'a call names one path twice');
   const written: string[] = [];
   for (const { write, key, host } of admitted) {
@@ -564,6 +578,9 @@ function writeWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, writes:
     }
     const prior = recorded === entry ? previous : undefined;
     const observed = observePathEntry(entry);
+    if (write.expected !== undefined && !(observed?.type === 'file' && observed.sha256 === write.expected)) {
+      throw new HostConfigError('host_config_target_changed', `the file changed since rh planned its write, so rh writes nothing to it: ${write.path}`);
+    }
     let backup: Sha256 | undefined;
     if (observed !== null && !ownsEntry(prior, write.owner, key)) {
       if (!write.replace) throw refusal(write.path, prior, write.owner);
@@ -573,7 +590,7 @@ function writeWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, writes:
     createDirectories(createdDirs);
     let staged: string | null = null;
     try {
-      const stage = stagePathEntry(entry, write.entry);
+      const stage = stagePathEntry(entry, write.entry, options.stage?.(entry));
       staged = stage.staged;
       const next = nextPathRecord(prior, write.owner, host, observed, stage.committed, backup, linkTarget);
       assertReplacedIsFile(next, write.path);
@@ -961,7 +978,7 @@ function revertWholePaths(paths: HostConfigPaths, only: readonly string[], optio
       if (options.transaction) keepPreimage(options.transaction, entry);
       if (record.kind === 'replaced') {
         const committed = record.committed as Extract<PathCommitted, { type: 'file' }>;
-        replaceTarget(entry as HostPath, readVault(paths, record.backup!), { existed: true, sha256: committed.sha256 });
+        replaceTarget(entry as HostPath, readVault(paths, record.backup!), { existed: true, sha256: committed.sha256 }, options.stage?.(entry));
       } else removePathEntry(entry);
     } });
   }
@@ -1511,7 +1528,7 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
   }
   return {
     apply: (changes) => applyChanges(paths, changes),
-    writePaths: (writes, pathOptions) => writeWholePaths(env, paths, writes, pathOptions ?? {}),
+    writePaths: (writes, pathOptions) => writeWholePaths((ledger, path) => admitWholePath(env, paths, ledger, path), paths, writes, pathOptions ?? {}),
     delegate: (declared, run, pathOptions) => delegateWrites(env, paths, declared, run, pathOptions ?? {}),
     addUserPathEntry: (tool, entry, port) => addUserPathEntry(paths, tool, entry, port),
     releaseAbsentTools: (port, releaseOptions) => releaseAbsentTools(paths, port, releaseOptions?.dryRun === true, read),
@@ -1523,5 +1540,61 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
     removeUnrecordedText: (path, expectedSha256, removals) => removeUnrecordedText(paths, path, expectedSha256, removals),
     recorded,
     removeEditedBlock: (path, removeOptions) => removeEditedBlock(paths, path, removeOptions?.dryRun === true, read),
+  };
+}
+
+// ---- repository scope (#2854) ---------------------------------------------
+
+/** The gate of one repository ledger: whole files that rh writes inside a worktree, outside the user ledger. */
+export interface HostConfigRepositoryGate {
+  /** As `HostConfigGate.writePaths`, for files inside the worktree only. */
+  writePaths(writes: readonly HostConfigPathWrite[]): readonly string[];
+  /** As `HostConfigGate.revertPaths`, over the records of this repository ledger. */
+  revertPaths(paths: readonly string[]): readonly HostConfigRevertEntry[];
+}
+
+/** What the repository scope adds to a whole-path write: the worktree, its target rule and its staging. */
+export interface HostConfigRepositoryScope {
+  /** The worktree root, links followed. */
+  readonly worktree: string;
+  /** Why rh may not write the target, or null; from the file system only. */
+  readonly refusal: (target: string) => string | null;
+  /** Where the bytes for one target wait before the rename; it checks the target again and throws when no safe place exists. */
+  readonly stage: (target: string) => string;
+}
+
+/** The host directory of a repository file, from its first path segment in the worktree. */
+const REPOSITORY_HOSTS: Readonly<Record<string, PathRecord['host']>> = { '.claude': 'claude', '.codex': 'codex' };
+
+/**
+ * A repository file is admitted only under `.claude/` or `.codex/` of the
+ * worktree, and only when the scope's target rule passes. A file that the user
+ * ledger records stays with that ledger: one file never has two owners (D10).
+ * The user ledger is read as the schema move would leave it, since this gate
+ * never moves it.
+ */
+function admitRepositoryPath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, scope: HostConfigRepositoryScope, path: string): { key: string; host: PathRecord['host'] } {
+  const refused = scope.refusal(path);
+  if (refused !== null) throw new HostConfigError('host_config_invalid_path', `rh does not write this repository file: ${refused}: ${path}`);
+  const key = hostPathKey(paths, path);
+  const host = REPOSITORY_HOSTS[relative(scope.worktree, key).split(sep)[0]!];
+  if (!isPathInside(scope.worktree, key) || host === undefined) {
+    throw new HostConfigError('host_config_invalid_path', `rh records a repository file only under .claude/ or .codex/ of the worktree ${scope.worktree}: ${path}`);
+  }
+  const user = readProjectedLedger(hostConfigPaths(env));
+  if (user.files[key] || pathRecordOf(user, key as HostPath) !== null) {
+    throw new HostConfigError('host_config_invalid_state', `the user-level ledger records this file, so rh does not record it for the repository: ${path}`);
+  }
+  return { key, host };
+}
+
+/** `paths` is the repository ledger layout. */
+export function openRepositoryHostConfigGate(env: NodeJS.ProcessEnv, paths: HostConfigPaths, scope: HostConfigRepositoryScope): HostConfigRepositoryGate {
+  return {
+    writePaths: (writes) => {
+      ensurePrivateDirectory(paths.root);
+      return writeWholePaths((_ledger, path) => admitRepositoryPath(env, paths, scope, path), paths, writes, { stage: scope.stage });
+    },
+    revertPaths: (only) => revertWholePaths(paths, only, { stage: scope.stage }),
   };
 }

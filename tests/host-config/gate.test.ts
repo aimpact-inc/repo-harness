@@ -1,9 +1,10 @@
 import { afterEach, expect, test } from 'bun:test';
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FragmentEdit, HostConfigStrategy, HostPath } from '../../src/core/host-config/types';
 import { openHostConfigGate, rollbackHostConfigTransaction, type HostConfigFileChange } from '../../src/effects/host-config/gate';
+import { openRepositoryGate, repositoryConfigPaths } from '../../src/effects/host-config/repository';
 import type { PathEntry } from '../../src/effects/host-config/whole-path';
 import { hostConfigPaths, migrateLedgerSchema, parseLedger, replaceTarget } from '../../src/effects/host-config/store';
 import { hookRenderingKey, jsonFragment, removeJsonHookCommand } from '../../src/core/host-config/json-fragment';
@@ -933,4 +934,104 @@ test.each(['created path', 'replaced restore fails', 'replaced ledger write fail
     }
     expect(readFileSync(user, 'utf8')).toBe('mine\n');
   }
+});
+
+// Repository records (#2854): `replaced` path records in the ledger of one clone, outside the working tree. P1 `absent`, P2 `edited`,
+// P3 `planned bytes changed` (a record needs the planned bytes on disk now). The same relative path under HOME is another file.
+test.each([
+  { label: 'restored', change: 'none' },
+  { label: 'P1 absent', change: 'absent' },
+  { label: 'P2 edited', change: 'edited' },
+  { label: 'P3 planned bytes changed', change: 'planned' },
+  { label: 'D10 the user ledger records it', change: 'user-recorded' },
+  { label: 'outside .claude/ and .codex/', change: 'outside' },
+  { label: 'P6 a link on the way', change: 'link' },
+  { label: 'P6 a nested checkout on the way', change: 'nested' },
+] as const)('repository record: $label', ({ change }) => {
+  const f = fixture();
+  const env = { HOME: f.home };
+  const worktree = join(f.home, 'repo');
+  const repository = { repositoryId: join(worktree, '.git'), worktree };
+  const paths = repositoryConfigPaths(env, repository);
+  const gate = openRepositoryGate(env, repository);
+  const name = change === 'outside' ? 'notes/settings.json' : '.claude/settings.json';
+  const [file, home] = [join(worktree, name), join(f.home, name)];
+  for (const [path, text] of [[file, 'user\n'], [home, 'home\n']] as const) { mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, text); chmodSync(path, 0o640); }
+  if (change === 'link') { renameSync(join(worktree, '.claude'), join(worktree, 'elsewhere')); symlinkSync(join(worktree, 'elsewhere'), join(worktree, '.claude')); }
+  if (change === 'nested') writeFileSync(join(worktree, '.claude', '.git'), 'gitdir: /elsewhere\n');
+  if (change === 'user-recorded') f.gate().apply([f.change(file, 'on')]);
+  const userLedger = existsSync(join(f.root, 'ledger.json')) ? readFileSync(join(f.root, 'ledger.json')) : null;
+  const expected = sha256Prefixed(readFileSync(file));
+  if (change === 'planned') writeFileSync(file, 'user edit\n');
+  const write = () => gate.writePaths([{ path: file, owner: 'core', replace: true, expected, entry: { type: 'file', bytes: Buffer.from('stripped\n'), mode: 0o640 } }]);
+  const refusals = { planned: 'the file changed since rh planned its write', 'user-recorded': 'the user-level ledger records this file', outside: 'rh records a repository file only under .claude/ or .codex/',
+    link: `${join(worktree, '.claude')} is a link`, nested: `${join(worktree, '.claude')} holds .git` } as const;
+  if (change === 'planned' || change === 'user-recorded' || change === 'outside' || change === 'link' || change === 'nested') {
+    expect(write).toThrow(refusals[change]);
+    expect({ ledger: existsSync(paths.ledger), vault: existsSync(paths.vault) && readdirSync(paths.vault).length > 0 }).toEqual({ ledger: false, vault: false });
+    return;
+  }
+  expect(write()).toEqual([file]);
+  const record = JSON.parse(readFileSync(paths.ledger, 'utf8')).paths[file];
+  expect(record).toMatchObject({ owner: 'core', host: 'claude', kind: 'replaced', baseline: { state: 'known', existed: true, sha256: expected } });
+  expect([paths.root, join(paths.ledger), join(paths.vault, record.backup.slice('sha256:'.length))].map((path) => statSync(path).mode & 0o777)).toEqual([0o700, 0o600, 0o600]);
+  expect(paths.root).toBe(join(f.home, '.repo-harness', 'config', 'repos', sha256Prefixed(Buffer.from(repository.repositoryId)).slice('sha256:'.length)));
+  if (change === 'absent') rmSync(file);
+  if (change === 'edited') writeFileSync(file, 'stripped\nuser\n');
+  const action = ({ none: 'restored', absent: 'released', edited: 'kept_edited' } as const)[change];
+  expect(gate.revertPaths([file])).toEqual([{ path: file, action }]);
+  // Both writes staged in a guarded directory that went with the call: nothing beside the target, no staging left.
+  if (change === 'none') expect({ bytes: readFileSync(file, 'utf8'), mode: statSync(file).mode & 0o777, beside: readdirSync(join(worktree, '.claude')), staging: readdirSync(join(worktree, '.ai/harness/backups/staging')) })
+    .toEqual({ bytes: 'user\n', mode: 0o640, beside: ['settings.json'], staging: [] });
+  if (change === 'edited') expect({ bytes: readFileSync(file, 'utf8'), record: JSON.parse(readFileSync(paths.ledger, 'utf8')).paths[file] }).toEqual({ bytes: 'stripped\nuser\n', record });
+  if (change === 'absent') {
+    writeFileSync(file, 'stripped\n');
+    expect(gate.revertPaths([file])).toEqual([]);
+    expect(readFileSync(file, 'utf8')).toBe('stripped\n');
+  }
+  // Neither ledger reaches the other's file: HOME keeps its bytes and the user ledger is unchanged, and a user revert there leaves the worktree alone.
+  expect({ home: readFileSync(home, 'utf8'), user: existsSync(join(f.root, 'ledger.json')) ? readFileSync(join(f.root, 'ledger.json')) : null }).toEqual({ home: 'home\n', user: userLedger });
+  const worktreeBytes = readFileSync(file, 'utf8');
+  f.gate().apply([f.change(home, 'on')]);
+  f.gate().revert([home]);
+  expect({ home: readFileSync(home, 'utf8'), worktree: readFileSync(file, 'utf8') }).toEqual({ home: 'home\n', worktree: worktreeBytes });
+});
+
+// Storage that holds user bytes ignores itself (#2854 P7, R2): a guard (`.gitignore` with `*`) goes into each vault and preimage
+// directory before the first copy, and only into a directory that rh owns. A linked directory without the guard, or a foreign
+// `.gitignore`, stops the write with nothing written there. Git reads no user or system config, so a host rule cannot hide a copy.
+test.each(['git-managed HOME', 'bare repository with --work-tree=HOME', 'linked vault', 'foreign .gitignore'] as const)('storage guard: %s', (label) => {
+  const f = fixture();
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const bare = `${f.home}.git`;
+  homes.push(bare);
+  const gitArgs = label === 'bare repository with --work-tree=HOME' ? ['--git-dir', bare, '--work-tree', f.home] : ['-C', f.home];
+  const git = (...args: string[]) => Bun.spawnSync(['git', ...gitArgs, ...args], { env });
+  const [vault, dotfiles] = [join(f.root, 'vault'), join(f.home, 'dotfiles')];
+  const [agents, user, own] = [join(f.home, '.claude', 'agents'), join(f.home, '.claude', 'agents', 'u.md'), join(f.home, '.claude', 'agents', 'rh.md')];
+  mkdirSync(agents, { recursive: true });
+  writeFileSync(user, 'sentinel-user-bytes\n');
+  mkdirSync(f.root, { recursive: true });
+  if (label === 'linked vault') { mkdirSync(dotfiles); symlinkSync(dotfiles, vault); }
+  if (label === 'foreign .gitignore') { mkdirSync(vault); writeFileSync(join(vault, '.gitignore'), 'node_modules/\n'); }
+  const write = () => f.gate().writePaths([{ path: user, owner: 'core', replace: true, entry: { type: 'file', bytes: Buffer.from('rh\n') } }]);
+  if (label === 'linked vault' || label === 'foreign .gitignore') {
+    expect(write).toThrow(label === 'foreign .gitignore' ? 'is not the rh guard' : 'which rh does not own');
+    const real = label === 'foreign .gitignore' ? vault : dotfiles;
+    expect({ user: readFileSync(user, 'utf8'), storage: readdirSync(real).map((name) => [name, readFileSync(join(real, name), 'utf8')]) })
+      .toEqual({ user: 'sentinel-user-bytes\n', storage: label === 'foreign .gitignore' ? [['.gitignore', 'node_modules/\n']] : [] });
+    return;
+  }
+  expect(write()).toEqual([user]);
+  expect((label === 'git-managed HOME' ? git('init', '-q') : Bun.spawnSync(['git', 'init', '-q', '--bare', bare], { env })).exitCode).toBe(0);
+  // A transaction preimage of a path that rh owns: its copy goes into the guarded `host-config-paths/`.
+  const transaction = join(f.home, '.repo-harness', 'transactions', 'install-x');
+  mkdirSync(transaction, { recursive: true });
+  f.gate().writePaths([{ path: own, owner: 'core', entry: { type: 'file', bytes: Buffer.from('sentinel-rh-first\n') } }]);
+  f.gate().writePaths([{ path: own, owner: 'core', entry: { type: 'file', bytes: Buffer.from('rh second\n') } }], { transaction });
+  expect(readdirSync(join(transaction, 'host-config-paths')).length).toBe(2);
+  expect(git('add', '-A').exitCode).toBe(0);
+  const staged = new TextDecoder().decode(git('ls-files', '--cached').stdout).split('\n').filter(Boolean);
+  expect(staged.filter((path) => path.startsWith('.repo-harness/config/vault/') || path.startsWith('.repo-harness/transactions/'))).toEqual([]);
+  expect(staged).toContain('.claude/agents/rh.md');
 });

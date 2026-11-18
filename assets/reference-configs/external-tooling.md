@@ -71,8 +71,18 @@ use. `rh config diff <path>` prints rh's fragments of one file by hash;
 `--show-values` adds only text that the ledger proves rh wrote, and prints any other
 value as `<user value, N bytes, sha256:...>`. `rh config restore <path> [--owner
 <id>]` reverts one file, or one owner's fragments, with the same actions and exit
-codes as uninstall. `rh config gc` deletes the vault copy of each finished revert 30
-days after it, while no record references it. Status and diff create no vault or lock;
+codes as uninstall. `rh init` and `rh upgrade` strip retired rh hooks from a
+repository's `.claude/settings.json` and `.codex/hooks.json` through a repository
+ledger in `~/.repo-harness/config/repos/<key>/`, one per clone; it keeps the whole
+file before the strip, and no copy goes into the working tree. `rh config restore
+[<path>] --repo <dir>`, with `<dir>` the worktree root that holds `.git`, puts back
+the recorded files of that worktree while each still holds the bytes that rh wrote. A
+file below a link or below a nested checkout stays, with its reason. Copies of user
+files wait in self-ignoring directories (a `.gitignore` with `*`), never beside the
+target. With no record it stops with
+`host_config_repository_unrecorded`. `rh uninstall` does not revert a repository
+record. `rh config gc` deletes the vault copy of each finished revert in the user
+ledger 30 days after it, while no record references it. Status and diff create no vault or lock;
 on a ledger of an older protocol they name `rh update`. A preserved shared/pre-existing
 third-party installation is not claimed as repo-harness-owned.
 

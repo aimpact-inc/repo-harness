@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, cpSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "fs";
 import { spawnSync } from "child_process";
 import { createHash } from "crypto";
 import { tmpdir } from "os";
@@ -10,7 +10,10 @@ import { GITIGNORE_MANAGED_BLOCK_CONTENT } from "../../src/effects/adoption/giti
 import { isRepoHarnessSourceCheckout } from "../../src/effects/source-checkout";
 import { applyAdoptionPlan, rollbackAdoptionTransaction } from "../../src/effects/fs-transaction";
 import type { AdoptionOperation, AdoptionPlan } from "../../src/core/adoption/operations";
-import { planRepoAdoption, renderApplyReport, runAdoptionApply } from "../../src/cli/commands/adoption-plan";
+import { planRepoAdoption, renderApplyReport, runAdoptionApply, runAdoptionPlan } from "../../src/cli/commands/adoption-plan";
+import { runConfigRestore } from "../../src/cli/commands/config";
+import { shellQuote } from "../../src/core/shell-quote";
+import { planRepositoryHookStrips } from "../../src/effects/upgrade/repository-hooks";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const FS_TRANSACTION = join(ROOT, "src/effects/fs-transaction.ts");
@@ -29,6 +32,15 @@ function tempRepo(): string {
 
 function cleanup(path: string): void {
   rmSync(path, { recursive: true, force: true });
+}
+
+/** `git add -A`, then the index under the backup root; Git reads no user or system config, so a host ignore rule cannot hide a copy. */
+function stagedBackupPaths(repo: string): string[] {
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  expect(spawnSync("git", ["add", "-A"], { cwd: repo, env }).status).toBe(0);
+  const listed = spawnSync("git", ["ls-files", "--cached", "--", ".ai/harness/backups"], { cwd: repo, env, encoding: "utf8" });
+  expect(listed.status).toBe(0);
+  return listed.stdout.split("\n").filter(Boolean);
 }
 
 function planWith(repo: string, operations: readonly AdoptionOperation[]): AdoptionPlan {
@@ -374,8 +386,9 @@ describe("canonical adoption plan", () => {
     }
   });
 
-  test("one transaction retires exact legacy runtime and managed adapters, preserves mismatches, and rolls back", () => {
+  test("init retires exact legacy runtime and strips managed adapters through the repository gate; rh config restore --repo puts the hook files back", () => {
     const repo = tempRepo();
+    const home = tempDir();
     try {
       cpSync(join(HRD09_LEGACY_FIXTURE, ".ai"), join(repo, ".ai"), { recursive: true });
       cpSync(join(HRD09_LEGACY_FIXTURE, "scripts"), join(repo, "scripts"), { recursive: true });
@@ -425,9 +438,16 @@ describe("canonical adoption plan", () => {
       expect(scheduledRetirements).not.toContain(modifiedPath);
       expect(plan.warnings.some((warning) => warning.code === "known-generated-fingerprint-mismatch" && warning.message.includes(modifiedPath))).toBe(true);
 
-      const apply = applyAdoptionPlan(plan);
-      expect(apply.ok).toBe(true);
-      expect(apply.transactionManifestPath).toBeDefined();
+      // The init path: the transaction, then the repository gate strips the hook files.
+      const hookFiles = [".codex/hooks.json", ".claude/settings.json"];
+      chmodSync(join(repo, ".codex/hooks.json"), 0o640);
+      const before = hookFiles.map((path) => ({ bytes: readFileSync(join(repo, path)), mode: statSync(join(repo, path)).mode & 0o777 }));
+      const env = { HOME: home };
+      expect(runAdoptionPlan({ repo, mode: "standard", explicitRepo: true, env }).output).toContain(`[init-plan] hook cleanup: .claude/settings.json (undo: rh config restore --repo ${shellQuote(repo)})`);
+      const init = runAdoptionApply({ repo, mode: "standard", explicitRepo: true, env }).report;
+      expect(init.ok, JSON.stringify(init.errors)).toBe(true);
+      expect(init.hookCleanup?.paths).toEqual([".claude/settings.json", ".codex/hooks.json"]);
+      expect(renderApplyReport(init)).toContain(`[init] hook cleanup: .codex/hooks.json (undo: rh config restore --repo ${shellQuote(repo)})`);
       for (const path of retirement.paths) {
         expect(existsSync(join(repo, path))).toBe(path === modifiedPath);
       }
@@ -439,14 +459,32 @@ describe("canonical adoption plan", () => {
       const claudeAfter = readFileSync(join(repo, ".claude/settings.json"), "utf8");
       expect(claudeAfter).not.toContain("run-hook.sh");
       expect(claudeAfter).toContain("permissions");
+      // No copy of the hook files before the strip is in the working tree; the repository ledger keeps them outside it.
+      const backups = join(repo, ".ai/harness/backups");
+      const copies = existsSync(backups) ? readdirSync(backups, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile()).map((entry) => readFileSync(join(entry.parentPath, entry.name))) : [];
+      for (const { bytes } of before) expect(copies.some((copy) => copy.equals(bytes))).toBe(false);
+      expect(readdirSync(join(home, ".repo-harness/config/repos"))).toHaveLength(1);
 
-      const rollback = rollbackAdoptionTransaction({ repoRoot: repo, transaction: apply.transactionManifestPath! });
-      expect(rollback.ok).toBe(true);
+      expect(runConfigRestore(env, join(repo, ".ai/hooks/prompt-guard.sh"), { repo }).lines).toEqual([`[config] rh records no repository file at ${join(repo, ".ai/hooks/prompt-guard.sh")}`]);
+      const restore = runConfigRestore(env, undefined, { repo });
+      expect(restore.exitCode, restore.lines.join("\n")).toBe(0);
+      hookFiles.forEach((path, index) => expect({ bytes: readFileSync(join(repo, path)), mode: statSync(join(repo, path)).mode & 0o777 }).toEqual(before[index]!));
+      // Without a record in this worktree, a restore stops with a named error and writes nothing.
+      expect(runConfigRestore(env, undefined, { repo }).lines).toEqual([`[config] rh records no repository file in ${realpathSync(repo)}`]);
+      const other = tempRepo();
+      try {
+        expect(runConfigRestore(env, undefined, { repo: other })).toMatchObject({ exitCode: 2, json: { error: `rh records no repository file for ${realpathSync(other)}` } });
+      } finally { cleanup(other); }
+
+      // The transaction rollback still brings back the retired runtime.
+      expect(rollbackAdoptionTransaction({ repoRoot: repo, transaction: init.apply!.transactionManifestPath! }).ok).toBe(true);
       for (const path of retirement.paths) expect(existsSync(join(repo, path))).toBe(true);
-      expect(JSON.parse(readFileSync(join(repo, ".codex/hooks.json"), "utf8"))).toEqual(codexBefore);
-      expect(JSON.parse(readFileSync(join(repo, ".claude/settings.json"), "utf8"))).toEqual(claudeBefore);
+      // `rh init rollback` keeps each file that it replaces in the guarded `<transaction>/rollback/`, never loose in the backup root (#2854 R1).
+      expect(readdirSync(join(repo, ".ai/harness/backups/fs-transaction"), { withFileTypes: true }).every((entry) => entry.isDirectory())).toBe(true);
+      expect(stagedBackupPaths(repo)).toEqual([]);
     } finally {
       cleanup(repo);
+      cleanup(home);
     }
   }, 30_000);
 
@@ -526,7 +564,7 @@ describe("canonical adoption plan", () => {
     }
   });
 
-  test("hook cleanup removes only released hooks by text edits and keeps a file that it cannot edit exactly", () => {
+  test("the hook cleanup plan removes only released hooks by text edits and keeps a file that it cannot edit exactly", () => {
     const repo = tempRepo();
     try {
       mkdirSync(join(repo, ".claude"), { recursive: true });
@@ -555,15 +593,14 @@ describe("canonical adoption plan", () => {
         expect(plan.warnings).toContainEqual({ code: "hook-settings-not-editable", message: `Preserving .codex/hooks.json: ${reason}`, risk: "medium" });
         expect(applyAdoptionPlan(plan).ok).toBe(true);
         expect(readFileSync(join(repo, ".codex/hooks.json")).toString("base64")).toBe(bytes.toString("base64"));
+        expect(planRepositoryHookStrips(repo).map((strip) => [strip.path, strip.next.toString("utf8")])).toEqual([[".claude/settings.json", before.replace(`${released}, `, "")]]);
       }
-      expect(readFileSync(join(repo, ".claude/settings.json"), "utf8")).toBe(before.replace(`${released}, `, ""));
 
       // The v0.1.2 Codex context-pressure hook goes; the user's own entry beside it keeps its bytes.
       const pressure = renderings.find((entry) => String(entry.hook.command).includes("HOOK_HOST=codex") && String(entry.hook.command).endsWith("context-pressure-hook.sh"))!;
       const sibling = '{"matcher":"Bash","note":"mine","hooks":[]}';
       writeFileSync(join(repo, ".codex/hooks.json"), `{"hooks":{"${pressure.event}":[{"hooks":[${JSON.stringify(pressure.hook)}]},${sibling}]}}\n`);
-      expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true })).ok).toBe(true);
-      expect(readFileSync(join(repo, ".codex/hooks.json"), "utf8")).toBe(`{"hooks":{"${pressure.event}":[${sibling}]}}\n`);
+      expect(planRepositoryHookStrips(repo).find((strip) => strip.path === ".codex/hooks.json")?.next.toString("utf8")).toBe(`{"hooks":{"${pressure.event}":[${sibling}]}}\n`);
     } finally {
       cleanup(repo);
     }
@@ -666,9 +703,7 @@ describe("canonical adoption plan", () => {
       expect(backup).toBeDefined();
       expect(readFileSync(join(repo, backup!), "utf8")).toBe(legacy);
       // The backup root ignores itself before its first copy, with no exclude block and no user-level Git ignore (#3228).
-      const isolatedGit = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
-      expect(spawnSync("git", ["add", "-A"], { cwd: repo, env: isolatedGit }).status).toBe(0);
-      expect(spawnSync("git", ["status", "--porcelain"], { cwd: repo, env: isolatedGit, encoding: "utf8" }).stdout).not.toContain(".ai/harness/backups");
+      expect(stagedBackupPaths(repo)).toEqual([]);
       expect([statSync(join(repo, ".ai/harness/backups")).mode & 0o777, statSync(join(repo, ".ai/harness/backups/.gitignore")).mode & 0o777]).toEqual([0o700, 0o600]);
       const report = { protocol: 1, command: "init", repoRoot: repo, mode: "minimal", ok: true, plan: {} } as const;
       const restore = `cp '${join(repo, backup!)}' '${target}'`;
@@ -754,6 +789,10 @@ describe("canonical adoption plan", () => {
       expect(readFileSync(join(repo, "existing.txt")).equals(original)).toBe(true);
       expect(existsSync(join(repo, "created-dir"))).toBe(false);
       expect(existsSync(join(repo, "blocker"))).toBe(false);
+      // The rollback kept the replaced file in the guarded `<transaction>/rollback/` (#2854 R1).
+      const rollbackDir = join(repo, dirname(apply.transactionManifestPath!), "rollback");
+      expect(readdirSync(rollbackDir).map((name) => name === ".gitignore" ? name : readFileSync(join(rollbackDir, name), "utf8")).sort()).toEqual([".gitignore", "replaced\n"]);
+      expect(stagedBackupPaths(repo)).toEqual([]);
       const manifest = JSON.parse(readFileSync(join(repo, apply.transactionManifestPath!), "utf-8"));
       expect(manifest.operations.map((operation: { status: string }) => operation.status))
         .toEqual(["applied", "applied", "applied", "failed", "planned"]);

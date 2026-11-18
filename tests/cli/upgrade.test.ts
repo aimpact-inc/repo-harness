@@ -4,6 +4,7 @@ import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readF
 import { tmpdir } from 'os';
 import { basename, dirname, join, relative } from 'path';
 import { formatUpgradeResult, installOwnershipReader, runUpgrade, runUpgradeDecide, UPGRADE_AUDIT_MAX_RECORDS } from '../../src/cli/commands/upgrade';
+import { runConfigRestore } from '../../src/cli/commands/config';
 import { runAdoptionApply } from '../../src/cli/commands/adoption-plan';
 import { LEGACY_WORKTREE_PROVIDER_DEFERRED, runLegacyWorktreeCleanup } from '../../src/effects/upgrade/legacy-worktree-cleanup';
 import { localMergeMode, planManagedWorktreeSweep, sweepManagedWorktrees, type WorktreeSweepPlan } from '../../src/effects/state/coordination-worktree-topology';
@@ -250,15 +251,25 @@ describe('upgrade with real release bytes', () => {
     }
     expect(ledger.fragments).toEqual([]);
 
-    // A repository hook file gets the same text edits, outside the gate.
+    // A repository hook file gets the same text edits through the repository gate: its ledger keeps the file before, outside the worktree.
     const project = join(opts.cwd, '.claude/settings.json');
     const legacy = JSON.parse(readFileSync(project, 'utf8')).hooks.Stop[0].hooks[0];
     const user = { type: 'command', command: 'echo project user' };
     // Each copy of a released command is its own removal.
-    writeFileSync(project, layout('\t', { hooks: { Stop: [{ hooks: [legacy, user] }, { hooks: [legacy] }], Empty: [] } }));
+    const projectBefore = layout('\t', { hooks: { Stop: [{ hooks: [legacy, user] }, { hooks: [legacy] }], Empty: [] } });
+    writeFileSync(project, projectBefore);
     expect(runUpgrade({ ...opts, scope: 'project' }).items.filter((item) => item.hookCommand === legacy.command)).toHaveLength(2);
-    expect(runUpgrade({ ...opts, scope: 'project', apply: true }).exitCode).toBe(0);
+    const applied = runUpgrade({ ...opts, scope: 'project', apply: true });
+    expect(applied.exitCode).toBe(0);
+    expect(applied.removedPaths).toContain(project);
     expect(readFileSync(project, 'utf8')).toBe(layout('\t', { hooks: { Stop: [{ hooks: [user] }], Empty: [] } }));
+    const backups = join(opts.cwd, '.ai/harness/backups');
+    const copies = existsSync(backups) ? readdirSync(backups, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile()).map((entry) => readFileSync(join(entry.parentPath, entry.name), 'utf8')) : [];
+    expect(copies).not.toContain(projectBefore);
+    const repos = join(opts.home, '.repo-harness/config/repos');
+    expect(JSON.parse(readFileSync(join(repos, readdirSync(repos)[0]!, 'ledger.json'), 'utf8')).paths[project]).toMatchObject({ kind: 'replaced', host: 'claude', baseline: { sha256: sha(projectBefore) } });
+    expect(runConfigRestore({ HOME: opts.home }, project, { repo: opts.cwd }).exitCode).toBe(0);
+    expect(readFileSync(project, 'utf8')).toBe(projectBefore);
   }));
 
   test('the cleanup audit log keeps only the newest records', () => sandbox((opts) => {
@@ -379,7 +390,7 @@ describe('upgrade with real release bytes', () => {
     expect(tree(opts.home)).toEqual(beforeHome); expect(tree(opts.cwd)).toEqual(beforeRepo);
   }));
 
-  test('backups restore exact pre-apply target bytes and project rollback uses the adoption manifest', () => sandbox((opts) => {
+  test('backups restore exact pre-apply target bytes, project rollback uses the adoption manifest, and repository hook files come back by restore --repo', () => sandbox((opts) => {
     const originals = new Map(planLegacyLeftovers({ ...opts, scope: 'all', installOwnership: ownership(opts) }).items.filter((item) => item.action !== 'report').map((item) => [item.path, lstatSync(item.path).isDirectory() ? tree(item.path) : readFileSync(item.path).toString('base64')]));
     const result = runUpgrade({ ...opts, apply: true });
     expect(result.exitCode).toBe(0); expect(result.backupPath).toBeDefined(); expect(result.projectBackupPath).toBeDefined();
@@ -396,6 +407,7 @@ describe('upgrade with real release bytes', () => {
     }
     const rollback = rollbackAdoptionTransaction({ repoRoot: opts.cwd, transaction: relative(opts.cwd, result.projectBackupPath!) });
     expect(rollback.ok).toBe(true);
+    expect(runConfigRestore({ HOME: opts.home }, undefined, { repo: opts.cwd }).exitCode).toBe(0);
     for (const [path, bytes] of originals) expect(typeof bytes === 'string' ? readFileSync(path).toString('base64') : tree(path)).toEqual(bytes);
   }));
 
@@ -914,7 +926,7 @@ describe('upgrade with real release bytes', () => {
     expect(current?.core.version).toBe(JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version);
     const snapshots = JSON.parse(readFileSync(join(result.backupPath!, 'manifest.json'), 'utf8')).snapshots as Array<{ path: string }>;
     expect(snapshots.some(snapshot => [path, statePath, join(opts.home, '.repo-harness/config/ledger.json')].includes(snapshot.path))).toBe(false);
-    expect(readdirSync(join(opts.home, '.repo-harness/transactions'))).toEqual([basename(result.backupPath!)]);
+    expect(readdirSync(join(opts.home, '.repo-harness/transactions')).sort()).toEqual(['.gitignore', basename(result.backupPath!)]);
     expect(runUpgrade({ ...opts, scope: 'global' }).items.some((item) => item.path === path)).toBe(false);
   }, false));
 
@@ -2172,6 +2184,10 @@ describe('upgrade --registered', () => {
   test('--pr refreshes in a temporary worktree, pushes one commit, opens one PR and leaves the checkout alone', () => registeredSandbox((f) => {
     const { env, withOrigin } = prFixture(f);
     const dirty = staleRepo(f, 'dirty');
+    // A legacy repo-local hook beside a user hook: the refresh commit strips it, and the commit is its only record (#2854 D7).
+    const legacyHook = 'repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT="$repo" bash "$repo/.ai/hooks/run-hook.sh" prompt-guard.sh';
+    put(join(dirty, '.claude/settings.json'), `${JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: legacyHook }] }] }, permissions: { allow: ['Bash(git status:*)'] } }, null, 2)}\n`);
+    commitAll(f, dirty, 'legacy hook');
     const dirtyRemote = withOrigin(dirty);
     git(f, dirty, 'checkout', '-q', '-b', 'topic');
     writeFileSync(join(dirty, 'untracked.txt'), 'operator work\n');
@@ -2206,6 +2222,8 @@ describe('upgrade --registered', () => {
     const committed = git(f, dirtyRemote, 'diff', '--name-only', 'main', 'repo-harness/refresh').split('\n');
     expect(committed).toContain('deploy/README.md');
     expect(committed.filter((path) => path.startsWith('.ai/harness/backups/'))).toEqual([]);
+    const refreshedHooks = git(f, dirtyRemote, 'show', 'repo-harness/refresh:.claude/settings.json');
+    expect([refreshedHooks.includes('run-hook.sh'), refreshedHooks.includes('permissions'), existsSync(join(f.env.HOME!, '.repo-harness/config/repos'))]).toEqual([false, true, false]);
     expect({ status: status(dirty), files: worktreeSnapshot(dirty), head: git(f, dirty, 'rev-parse', 'HEAD'), branches: git(f, dirty, 'branch', '--list') }).toEqual(before);
     const worktree = join(f.env.REPO_HARNESS_WORKTREE_ROOT!, 'harness-refresh.dirty');
     expect(existsSync(worktree)).toBe(false);
