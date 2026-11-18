@@ -301,11 +301,14 @@ module is in the title so that a list view shows the write scopes.
   pane. Attention rule A21 names each live seat that no pane shows; give it
   a pane with `herdr-app do terminal.keep`, or close and relaunch it.
 - Remote topology: Herdr.app runs on one machine, and `herdr-app` on any
-  other machine has no window. When the coordinated space is on another
-  machine's window (`--space <machine>/sp...`), run the dispatch and launch
-  commands from the machine that runs Herdr.app, so the worker tabs appear
-  in that space. A coordinator that runs on a machine without the window
-  cannot open a seat tab; it does not fall back to a headless terminal.
+  other machine has no window. A coordinator on a machine without the
+  window cannot open a seat tab and does not fall back to a headless
+  terminal. Run the dispatch and launch commands on the machine that runs
+  Herdr.app. The launch builds the seat argv and reads the worktree on that
+  machine, so keep the worktrees and the rh install there too. A
+  `--space <machine>/sp...` space starts its terminals on the other
+  machine; use it only when that machine has the same worktree path and
+  the same rh and bun paths.
 
 ### 7.1 Quota check
 

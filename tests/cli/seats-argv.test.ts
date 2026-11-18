@@ -869,6 +869,9 @@ describe("rh seats argv", () => {
         // Herdr.app refuses the tab: the launch fails closed and never falls back to hc run.
         const refused = seats({ FAKE_HERDR_FAIL: "1" }, ["launch", ...launchArgs, "--space", "mini-cf/sp2"]);
         expect([refused.status, refused.error, refused.calls.map(line => line.split(" ").slice(0, 3).join(" "))]).toEqual([1, "seat_tab_unknown", ["herdr-app do tab.new"]]);
+        // No herdr-app on PATH: no request was sent, so the tab surely does not exist.
+        const absent = seats({ PATH: `${join(home, ".quota-bin")}${delimiter}${dirname(process.execPath)}${delimiter}/bin${delimiter}/usr/bin` }, ["launch", ...launchArgs, "--space", "sp1"]);
+        expect([absent.status, absent.error, absent.calls]).toEqual([1, "seat_tab_failed", []]);
       });
     });
   });
