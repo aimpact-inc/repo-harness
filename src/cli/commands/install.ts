@@ -121,7 +121,11 @@ export interface HostConfigPreview {
   readonly items: readonly HostConfigPreviewItem[];
   /** A target whose items are not listed, and why. */
   readonly unplanned: readonly { readonly target: TargetId; readonly reason: string }[];
+  /** Host-config writers of the run whose items no dry run lists yet, so the list is not taken as complete. */
+  readonly notListed: readonly string[];
 }
+
+const NOT_LISTED = ['Global Working Rules files', 'CodeGraph configuration'] as const;
 
 /** The gate's rule for user bytes: an edit that removes nothing adds, one that removes rh's recorded text refreshes, any other overrides. */
 function plannedAction(fragment: PlannedFragment): 'add' | 'refresh' | 'override' {
@@ -167,13 +171,14 @@ export function previewHostConfig(spec: InstallTargetSpec | null, overrides: Ove
       unplanned.push({ target: target.id, reason: (error as Error).message });
     }
   }
-  return { items, unplanned };
+  return { items, unplanned, notListed: NOT_LISTED };
 }
 
 export function formatHostConfigPreview(preview: HostConfigPreview): string[] {
   return [
     ...preview.items.map((item) => `[host-config] ${item.action}: ${formatOverride(item)}`),
     ...preview.unplanned.map((entry) => `[host-config] not planned for ${entry.target}: ${entry.reason}`),
+    ...preview.notListed.map((writer) => `[host-config] not planned: ${writer}; its writer lists no items yet`),
   ];
 }
 

@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { globalRuntimeScope, withRuntimeTransactionLock } from '../../effects/locking/runtime-transaction-lock';
 import { openHostConfigGate } from '../../effects/host-config/gate';
 import { collectRetired, configDiff, configStatus, type ConfigStatus, type FragmentDiff, type GcResult } from '../../effects/host-config/inspect';
-import { hostConfigPaths, readProjectedLedger, resolveHostPath } from '../../effects/host-config/store';
+import { hostConfigPaths, readLedger, readProjectedLedger, resolveHostPath } from '../../effects/host-config/store';
 import { migrateInstallState } from '../installer/install-state-migration';
 import { exitCodeOf, revertItem, type UninstallItem } from '../installer/uninstall';
 
@@ -72,7 +72,7 @@ export function runConfigRestore(env: NodeJS.ProcessEnv, path: string, options: 
       const paths = hostConfigPaths(env);
       const target = resolveHostPath(paths, path);
       const gate = openHostConfigGate({ env, preview: options.dryRun === true });
-      const others = options.owner === undefined ? [] : readProjectedLedger(paths).fragments.filter((entry) => entry.file === target && entry.owner !== options.owner);
+      const others = options.owner === undefined ? [] : (options.dryRun ? readProjectedLedger : readLedger)(paths).fragments.filter((entry) => entry.file === target && entry.owner !== options.owner);
       const entries = gate.revert([path], options.owner === undefined ? {} : { owner: options.owner });
       if (!entries.length) return [{ path: target, action: 'note', reason: options.owner === undefined ? 'rh has no record of this file' : `rh records no fragment of ${options.owner} in this file` }];
       return [...entries.map(revertItem), ...others.map((entry): UninstallItem => ({ path: target, action: 'kept', reason: `${entry.selector}: owned by ${entry.owner}` }))];

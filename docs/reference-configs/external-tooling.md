@@ -83,6 +83,17 @@ archives and runtime history remain. Repository unadoption and package removal a
 separate operations; this command does not enumerate other repositories or remove
 third-party packages. Remove the CLI package only after configuration cleanup.
 
+`rh install` and `rh update` take `--override <path>#<selector>` (repeatable):
+rh writes its value at that fragment also over a value that it did not write,
+and the gate keeps the file before the write in the vault. rh checks every
+entry before any write and refuses one that no writer of the run can take; today
+the Claude `settings.json` writers take a selection. A candidate package that
+does not echo the selection in its receipt fails the update step.
+`rh install --dry-run` and `rh update --dry-run` list each planned host-config
+item as `add`, `refresh`, `override` or a skip code, with paths and selectors
+only, and name the writers that they do not list yet. `rh update --dry-run`
+starts no package install.
+
 `rh update` is a reconciliation command, not a best-effort package
 install. It verifies the installed package's exact `archctx` and
 `archctx-contracts` dependencies, package-local CodeGraph, compatible ArchContext
