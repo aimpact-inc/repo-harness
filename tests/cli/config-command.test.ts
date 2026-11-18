@@ -6,8 +6,6 @@ import { runConfigDiff, runConfigGc, runConfigRestore, runConfigStatus } from '.
 import { runUserUninstall } from '../../src/cli/installer/uninstall';
 import { jsonFragment } from '../../src/core/host-config/json-fragment';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
-import { openRepositoryGate, repositoryConfigPaths, resolveHostConfigRepository } from '../../src/effects/host-config/repository';
-import { spawnSync } from 'node:child_process';
 
 /** A fake credential: no real token is ever read or written. */
 const FAKE_TOKEN = 'sk-FAKE-2851-not-a-real-token';
@@ -155,43 +153,4 @@ test('gc keeps a retired copy whose entry is no longer the retired bytes, in the
   expect(runConfigGc(f.env, { now })).toMatchObject({ exitCode: 1, json: expected });
   expect([readFileSync(copy(edited), 'utf8'), lstatSync(copy(linked)).isSymbolicLink()]).toEqual(['my recovery edits', true]);
   expect(f.ledger().retired.map((entry: { sha256: string }) => entry.sha256)).toEqual([edited, linked]);
-});
-
-// P6 (#2854): restore --repo binds to the resolved root of the selected worktree; one checked record set serves the dry run and the restore.
-test.each(['a linked checkout nested under the worktree', 'a settings directory linked to a sibling worktree'] as const)('restore --repo acts only on the records of the selected worktree: %s', (label) => {
-  const f = fixture();
-  const main = join(f.home, 'src', 'main');
-  mkdirSync(main, { recursive: true });
-  const git = (cwd: string, ...args: string[]) => expect(spawnSync('git', ['-c', 'user.name=f', '-c', 'user.email=f@example.invalid', '-c', 'commit.gpgsign=false', ...args], { cwd, env: f.env }).status).toBe(0);
-  git(main, 'init', '-q');
-  git(main, 'commit', '-q', '--allow-empty', '-m', 'base');
-  const nested = label.startsWith('a linked checkout');
-  const other = nested ? join(main, 'nested') : join(f.home, 'src', 'sibling');
-  git(main, 'worktree', 'add', '-q', other);
-  const record = (worktree: string): string => {
-    const file = join(worktree, '.claude', 'settings.json');
-    mkdirSync(join(worktree, '.claude'), { recursive: true });
-    writeFileSync(file, `user ${worktree}\n`);
-    openRepositoryGate(f.env, resolveHostConfigRepository(worktree)).writePaths([{ path: file, owner: 'core', replace: true, entry: { type: 'file', bytes: Buffer.from('stripped\n') } }]);
-    return file;
-  };
-  const [mine, theirs] = [record(main), record(other)];
-  const ledgerPath = repositoryConfigPaths(f.env, resolveHostConfigRepository(main)).ledger;
-  const theirRecord = JSON.parse(readFileSync(ledgerPath, 'utf8')).paths[theirs];
-  if (!nested) {
-    rmSync(join(main, '.claude'), { recursive: true });
-    symlinkSync(join(other, '.claude'), join(main, '.claude'));
-  }
-  const items = (result: { json: unknown }) => (result.json as { items: { path: string; action: string; reason: string }[] }).items;
-  const preview = runConfigRestore(f.env, undefined, { repo: main, dryRun: true });
-  const restore = runConfigRestore(f.env, undefined, { repo: main });
-  expect(items(preview).map(({ path, action }) => [path, action])).toEqual(items(restore).map(({ path, action }) => [path, action]));
-  if (nested) {
-    expect({ exitCode: restore.exitCode, paths: items(restore).map((item) => item.path), mine: readFileSync(mine, 'utf8') }).toEqual({ exitCode: 0, paths: [mine], mine: `user ${main}\n` });
-  } else {
-    expect({ exitCode: restore.exitCode, items: items(restore) }).toEqual({ exitCode: 1,
-      items: [{ path: mine, action: 'unresolved', reason: `a directory on its path now leads to ${join(other, '.claude')}; rh does not restore it for this worktree` }] });
-  }
-  // The other checkout keeps its file and its record.
-  expect({ bytes: readFileSync(theirs, 'utf8'), record: JSON.parse(readFileSync(ledgerPath, 'utf8')).paths[theirs] }).toEqual({ bytes: 'stripped\n', record: theirRecord });
 });

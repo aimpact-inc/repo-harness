@@ -2,8 +2,9 @@ import { Command } from 'commander';
 import { resolve } from 'node:path';
 import { globalRuntimeScope, withRuntimeTransactionLock } from '../../effects/locking/runtime-transaction-lock';
 import { openHostConfigGate, planPathRevert } from '../../effects/host-config/gate';
-import { openRepositoryGate, repositoryConfigPaths, repositoryRestoreSet, resolveHostConfigRepository } from '../../effects/host-config/repository';
-import { HostConfigError, type PathRecord } from '../../core/host-config/types';
+import { openRepositoryGate, repositoryConfigPaths, resolveHostConfigRepository } from '../../effects/host-config/repository';
+import { HostConfigError } from '../../core/host-config/types';
+import { isPathInside } from '../../effects/path-containment';
 import { collectRetired, configDiff, configStatus, type ConfigStatus, type FragmentDiff, type GcResult } from '../../effects/host-config/inspect';
 import { hostConfigPaths, hostPathKey, observeFile, readLedger, readProjectedLedger, resolveHostPath } from '../../effects/host-config/store';
 import { migrateInstallState } from '../installer/install-state-migration';
@@ -98,21 +99,16 @@ function revertRepository(env: NodeJS.ProcessEnv, repo: string, path: string | u
   const paths = repositoryConfigPaths(env, repository);
   const unrecorded = (where: string) => new HostConfigError('host_config_repository_unrecorded', `rh records no repository file ${where}`);
   if (!observeFile(paths.ledger).observation.existed) throw unrecorded(`for ${repository.worktree}`);
-  // One checked set, bound to this worktree root, serves the dry run and the restore (P6).
-  const { records, refused } = repositoryRestoreSet(paths, repository, readLedger(paths));
-  const owned = (record: PathRecord) => options.owner === undefined || record.owner === options.owner;
-  let keys = Object.keys(records).filter((key) => owned(records[key]!));
-  let kept = refused.filter((entry) => owned(entry.record));
+  const records = readLedger(paths).paths;
+  let keys = Object.keys(records).filter((key) => isPathInside(repository.worktree, key) && (options.owner === undefined || records[key]!.owner === options.owner));
   if (path !== undefined) {
-    // The path as named, or as its parent links lead now: a redirected path matches only its own record.
-    const named = new Set([resolve(path), hostPathKey(paths, path)]);
-    keys = keys.filter((key) => named.has(key));
-    kept = kept.filter((entry) => named.has(entry.path));
-    if (!keys.length && !kept.length) throw unrecorded(`at ${path}`);
+    const key = hostPathKey(paths, path);
+    if (!keys.includes(key)) throw unrecorded(`at ${path}`);
+    keys = [key];
   }
-  if (!keys.length && !kept.length) throw unrecorded(`in ${repository.worktree}`);
-  const entries = options.dryRun ? keys.map((key) => ({ path: key, action: planPathRevert(key, records[key]!) })) : keys.length ? openRepositoryGate(env, repository).revertPaths(keys) : [];
-  return [...entries.map(revertItem), ...kept.map(({ path: key, reason }): UninstallItem => ({ path: key, action: 'unresolved', reason: `${reason}; rh does not restore it for this worktree` }))];
+  if (!keys.length) throw unrecorded(`in ${repository.worktree}`);
+  const entries = options.dryRun ? keys.map((key) => ({ path: key, action: planPathRevert(key, records[key]!) })) : openRepositoryGate(env, repository).revertPaths(keys);
+  return entries.map(revertItem);
 }
 
 export function runConfigGc(env: NodeJS.ProcessEnv, options: { readonly dryRun?: boolean; readonly now?: Date } = {}): ConfigCommandResult {

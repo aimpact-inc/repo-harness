@@ -252,7 +252,7 @@ test('removes profile-owned rules, restores a file that rh replaced, and retires
  rmSync(deleted);
  // A repository record (#2854) is not the uninstall's: only rh config restore --repo reverts it (D8).
  const worktree=join(home,'repo'),repoFile=join(worktree,'.claude/settings.json');put(home,'repo/.claude/settings.json','user\n');
- const repository={repositoryId:join(worktree,'.git'),worktree,nested:[]};
+ const repository={repositoryId:join(worktree,'.git'),worktree};
  openRepositoryGate(env,repository).writePaths([{path:repoFile,owner:'core',replace:true,entry:{type:'file',bytes:Buffer.from('stripped\n')}}]);
  const repoLedger=readFileSync(repositoryConfigPaths(env,repository).ledger);
  const result=runUserUninstall({target:'both',env});
