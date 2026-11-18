@@ -40,6 +40,9 @@ describe("install script contracts", () => {
     expect(script).toContain(`$MinimumBunVersion = [Version]"${MIN_BUN_VERSION}"`);
     expect(script).toContain('$BunVersion -lt $MinimumBunVersion');
     expect(script).toContain("& bun add -g $PackageSpec");
+    // The Bun installer runs at the version whose writes win-ci measured (#2853); macOS CI cannot run install.ps1.
+    expect(script).toContain('$BunBootstrapVersion = "1.4.4"');
+    expect(script).toContain("-Version $BunBootstrapVersion");
     expect(script).toContain("rh --version");
     expect(script).not.toMatch(/\bnpm\b/i);
     expect(script).not.toMatch(/\bnpx\b/i);
