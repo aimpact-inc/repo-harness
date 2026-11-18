@@ -104,11 +104,12 @@ interface Selector {
   readonly element: string | null;
 }
 
+/** The element comes off first: a string element can hold dots (a relative Pi package path). */
 function parseSelector(selector: string): Selector {
-  const segments = selector.split('.');
-  const last = /^([^[\]]+)(?:\[([^[\]]+)\])?$/.exec(segments.at(-1) ?? '');
-  if (!last || segments.slice(0, -1).some((segment) => !/^[^[\]]+$/.test(segment))) throw invalid(`not a JSON fragment selector: ${selector}`);
-  return { path: [...segments.slice(0, -1), last[1]!], element: last[2] ?? null };
+  const parts = /^([^[\]]+)(?:\[([^[\]]+)\])?$/.exec(selector);
+  const segments = parts ? parts[1]!.split('.') : [];
+  if (!parts || segments.some((segment) => segment === '')) throw invalid(`not a JSON fragment selector: ${selector}`);
+  return { path: segments, element: parts[2] ?? null };
 }
 
 const ROUTE_COMMAND = / (\S+) --route (\S+)$/;
