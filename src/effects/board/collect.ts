@@ -2,9 +2,11 @@ import { execFile, spawnSync, type ExecFileException } from 'child_process';
 import { architecturePort, isArchitectureUnavailable, type ArchctxProviderOptions } from '../../core/architecture/contracts';
 import {
   linkedPullRequests, projectBoard, seatTerminal, type BoardAcceptanceMergeV1, type BoardDailyRunInputV1, type BoardExecutionV1, type BoardHostPortsV1,
-  type BoardPathOwnerV1, type BoardPathOwnersV1, type BoardRequiredContextsV1, type BoardSeatTerminalInputV1, type BoardSeatTerminalReadV1, type BoardToolingV1, type BoardV1,
+  type BoardPathOwnerV1, type BoardPathOwnersV1, type BoardRequiredContextsV1, type BoardSeatLivenessV1, type BoardSeatTerminalInputV1, type BoardSeatTerminalReadV1, type BoardToolingV1, type BoardV1,
 } from '../../core/board/board';
 import { ADVISOR_SEAT } from '../../core/board/advisor-seat';
+import { sha256Hex } from '../../core/evidence/sha256';
+import { STALLED_WORKING_MS } from '../../core/board/attention';
 import { readReviewI3Paths } from '../../core/board/hazards';
 import type { BoardPullRequestTierEvidenceV1 } from '../../core/board/review-rules';
 import {
@@ -320,7 +322,7 @@ function seatBranch(cwd: string | null): string | null {
 
 /** Each terminal with the current branch of its directory, read with git in that directory. The directory stays here. */
 export function seatTerminalsWithBranches(terminals: readonly BoardSeatTerminalReadV1[]): readonly BoardSeatTerminalInputV1[] {
-  return terminals.map(({ cwd, ...terminal }) => ({ ...terminal, branch: seatBranch(cwd) }));
+  return terminals.map(({ cwd, agent_pid: _agentPid, ...terminal }) => ({ ...terminal, branch: seatBranch(cwd) }));
 }
 
 /**
@@ -333,9 +335,9 @@ export function seatTerminalsWithBranches(terminals: readonly BoardSeatTerminalR
  * terminal means the seat labels are not written, which the board does not
  * read as "no stuck seats".
  */
-function execution(input: BoardCollectInput, repositoryId: number, items: ReadonlySet<string>, pullRequests: ReadonlySet<string>): BoardExecutionV1 {
+function execution(input: BoardCollectInput, repositoryId: number, items: ReadonlySet<string>, pullRequests: ReadonlySet<string>, observedAt: string): { readonly execution: BoardExecutionV1; readonly seat_liveness: BoardSeatLivenessV1 } {
   const read = input.host.seatTerminals(String(repositoryId));
-  if (read.status === 'unavailable') return read;
+  if (read.status === 'unavailable') return { execution: read, seat_liveness: read };
   const parent = String(input.parent);
   const ofBoard = ({ seat, issue, pr, parent: label }: BoardSeatTerminalReadV1['labels']): boolean => {
     if (seat !== undefined && REPOSITORY_SEATS.has(seat)) return true;
@@ -343,8 +345,47 @@ function execution(input: BoardCollectInput, repositoryId: number, items: Readon
     return (issue !== undefined && items.has(issue)) || (pr !== undefined && pullRequests.has(pr));
   };
   const terminals = read.terminals.filter(({ labels }) => ofBoard(labels));
-  if (terminals.length === 0) return { status: 'unavailable', reason: 'no_seat_terminals' };
-  return { status: 'observed', terminals: Object.freeze(seatTerminalsWithBranches(terminals).map(seatTerminal)) };
+  if (terminals.length === 0) {
+    const none = { status: 'unavailable', reason: 'no_seat_terminals' } as const;
+    return { execution: none, seat_liveness: none };
+  }
+  return {
+    execution: { status: 'observed', terminals: Object.freeze(seatTerminalsWithBranches(terminals).map(seatTerminal)) },
+    seat_liveness: seatLiveness(input.host, terminals, Date.parse(observedAt)),
+  };
+}
+
+/** The screen lines that a liveness probe reads. */
+const SEAT_SCREEN_LINES = 40;
+const SPINNER_FRAMES = /[\u2800-\u28FF]/gu;
+/** Elapsed-time counters such as `12s`, `1m 05s`, `2h`, `340ms` and `03:12`; they move while a stream hangs. Token counters such as `↓ 2.1k` stay. */
+const ELAPSED_COUNTERS = /\b\d+(?:\.\d+)?\s?(?:ms|s|m|h)\b|\b\d{1,2}:\d{2}(?::\d{2})?\b/gu;
+
+/** The hash of a seat screen without its Braille spinner frames and elapsed-time counters, which change while the agent makes no progress. */
+export function seatScreenHash(text: string): string {
+  return sha256Hex(text.replace(SPINNER_FRAMES, '').replace(ELAPSED_COUNTERS, ''));
+}
+
+/**
+ * The liveness probes of the live seats that report `working` for longer than `STALLED_WORKING_MS` (#3182): one process table read
+ * for all of them, and one screen read each. A seat under the bound costs no read.
+ */
+function seatLiveness(host: BoardCollectInput['host'], terminals: readonly BoardSeatTerminalReadV1[], now: number): BoardSeatLivenessV1 {
+  const candidates = terminals.filter(terminal => terminal.state === 'live' && terminal.status === 'working' && terminal.labels.seat !== undefined
+    && terminal.status_ms !== null && now - terminal.status_ms > STALLED_WORKING_MS);
+  if (candidates.length === 0) return { status: 'observed', probes: [] };
+  const table = host.childProcessCounts();
+  if (table.status === 'unavailable') return table;
+  return {
+    status: 'observed',
+    probes: Object.freeze(candidates.flatMap((terminal) => {
+      if (terminal.agent_pid === null) return [];
+      const screen = host.seatRead(terminal.address, SEAT_SCREEN_LINES);
+      const usable = screen.status === 'observed' && screen.text.trim() !== '';
+      return [Object.freeze({ address: terminal.address, status_ms: terminal.status_ms!, turn: terminal.turn, children: table.counts.get(terminal.agent_pid) ?? 0,
+        screen_hash: usable ? seatScreenHash(screen.text) : null })];
+    })),
+  };
 }
 
 /**
@@ -538,6 +579,8 @@ export function collectBoardThrough(input: BoardCollectInput, sources: KeyedSour
   const i3 = i3Paths(policy);
   const evidence = new Map(linked.filter(read => read.state === 'open')
     .map(read => [read.number, tierEvidence(input, repository, read, i3)] as const));
+  const seats = execution(input, parent.repository.database_id, new Set(parent.sub_issues.map(issue => String(issue.number))),
+    new Set(linked.map(read => String(read.number))), observedAt);
   return projectBoard({
     observed_at: observedAt,
     parent,
@@ -548,8 +591,7 @@ export function collectBoardThrough(input: BoardCollectInput, sources: KeyedSour
     readiness,
     required_contexts: new Map([...new Set(linked.map(read => read.base_ref))].map(base => [base, requiredContexts(input, repository, base)] as const)),
     path_owners: pathOwners(input, linked),
-    execution: execution(input, parent.repository.database_id, new Set(parent.sub_issues.map(issue => String(issue.number))),
-      new Set(linked.map(read => String(read.number)))),
+    ...seats,
     daily_run: dailyRun(input, repository, parent.repository.default_branch),
     tooling: tooling(input),
   });

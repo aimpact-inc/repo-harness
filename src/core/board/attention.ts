@@ -34,18 +34,18 @@ export const A15_FAIL_MS = 60 * MINUTE;
 export const A16_QUESTION_MS = 15 * MINUTE;
 /** A17: a blocked claim status is this old. */
 export const A17_BLOCKED_MS = 15 * MINUTE;
+/** A22: a seat reports `working` this long; the board collector probes only such seats. */
+export const STALLED_WORKING_MS = 5 * MINUTE;
 /** R1: this many open items are not in the latest plan. */
 export const R1_UNPLANNED_ITEMS = 3;
 /** R4: an accepted pull request in the merge order waits this long unmerged. */
 export const R4_STALLED_MS = 4 * 60 * MINUTE;
-/** R6: a free worker seat and fewer ready issues than this. The weekly threshold review changes it. */
-export const R6_READY_MIN = 2;
 const WORKER_SEATS = new Set<string>(WORKER_SEAT_IDS);
 /** The review seat ids of the seats config; the gatekeeper-fallback seat launches under the gatekeeper label (#2253). */
 const REVIEW_SEATS = new Set<string>(SEAT_IDS.filter(isReviewSeat));
 const RED_CONCLUSIONS = new Set(['failure', 'timed_out', 'startup_failure']);
 
-export type BoardRuleId = 'A1' | 'A3' | 'A4' | 'A5' | 'A6' | 'A7' | 'A8' | 'A9' | 'A10' | 'A11' | 'A12' | 'A13' | 'A14' | 'A15' | 'A16' | 'A17' | 'A18' | 'A19' | 'A20' | 'A21' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R6' | 'R7';
+export type BoardRuleId = 'A1' | 'A3' | 'A4' | 'A5' | 'A6' | 'A7' | 'A8' | 'A9' | 'A10' | 'A11' | 'A12' | 'A13' | 'A14' | 'A15' | 'A16' | 'A17' | 'A18' | 'A19' | 'A20' | 'A21' | 'A22' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R7';
 export type BoardAttentionRoute = 'orchestrator' | 'advisor';
 /** P0: a seat cannot continue. P1: a worker or an issue waits for the coordinator, or a High change has a lower tier. P2: a pull request or the plan waits. P3: housekeeping. */
 export type BoardPriority = 'P0' | 'P1' | 'P2' | 'P3';
@@ -59,8 +59,8 @@ export const BOARD_PRIORITY_ORDER: readonly BoardPriority[] = Object.freeze(['P0
  */
 export const BOARD_RULE_PRIORITY: Readonly<Record<BoardRuleId, BoardPriority>> = Object.freeze({
   A1: 'P2', A3: 'P0', A4: 'P1', A5: 'P1', A6: 'P1', A7: 'P2', A8: 'P3', A9: 'P3', A10: 'P2', A11: 'P2',
-  A12: 'P1', A13: 'P1', A14: 'P2', A15: 'P2', A16: 'P1', A17: 'P1', A18: 'P2', A19: 'P1', A20: 'P2', A21: 'P1',
-  R1: 'P2', R2: 'P2', R3: 'P1', R4: 'P2', R5: 'P1', R6: 'P1', R7: 'P2',
+  A12: 'P1', A13: 'P1', A14: 'P2', A15: 'P2', A16: 'P1', A17: 'P1', A18: 'P2', A19: 'P1', A20: 'P2', A21: 'P1', A22: 'P1',
+  R1: 'P2', R2: 'P2', R3: 'P1', R4: 'P2', R5: 'P1', R7: 'P2',
 });
 
 export interface BoardFindingV1 {
@@ -92,6 +92,8 @@ export interface BoardAttentionV1 {
 
 interface Context {
   readonly board: BoardV1;
+  /** The board read before this one, which A22 compares with; null for a single read. */
+  readonly previous: BoardV1 | null;
   readonly now: number;
   readonly findings: BoardFindingV1[];
   readonly unevaluated: BoardUnevaluatedV1[];
@@ -196,6 +198,22 @@ function a3(context: Context): void {
   }
 }
 
+/**
+ * The items of one writer: the item itself, and for a bundle claim (`rh board dispatch --issues`) each board item that its `Issues:` line
+ * names. One pull request and one claim status on any of them serve the whole bundle, so A4, A12 and A13 read the bundle.
+ */
+function bundleItems(board: BoardV1, item: BoardItemV1): BoardItemV1[] {
+  const bundle = item.claim.status === 'active' ? item.claim.bundle : null;
+  return bundle === null ? [item] : board.items.filter(entry => bundle.includes(entry.number));
+}
+
+/** The newest observed claim status of the bundle items; `unknown` when a read of one of them is truncated. */
+function bundleClaimStatus(items: readonly BoardItemV1[]): { readonly status_kind: 'unknown' } | { readonly status_kind: 'none' } | { readonly status_kind: 'observed'; readonly created_at: string } {
+  if (items.some(entry => entry.claim_status.status_kind === 'unknown')) return { status_kind: 'unknown' };
+  const times = items.flatMap(entry => (entry.claim_status.status_kind === 'observed' ? [entry.claim_status.created_at] : [])).sort();
+  return times.length === 0 ? { status_kind: 'none' } : { status_kind: 'observed', created_at: times.at(-1)! };
+}
+
 function a4(context: Context): void {
   for (const terminal of workerTerminals(context, 'A4')) {
     const word = hcStatusClass(terminal.status);
@@ -209,12 +227,15 @@ function a4(context: Context): void {
       skip(context, 'A4', 'issue_off_board', terminal.address);
       continue;
     }
-    const prs = context.board.pull_requests.filter(pr => pr.state === 'open' && (terminal.pr === null ? item.pull_requests.includes(pr.number) : pr.number === terminal.pr));
+    const members = bundleItems(context.board, item);
+    const prs = context.board.pull_requests.filter(pr => pr.state === 'open'
+      && (terminal.pr === null ? members.some(member => member.pull_requests.includes(pr.number)) : pr.number === terminal.pr));
     if (prs.length === 0) continue;
     const lastCommit = prs.map(pr => pr.head_committed_at).sort().at(-1)!;
-    if (item.claim_status.status_kind === 'unknown') {
+    const status = bundleClaimStatus(members);
+    if (status.status_kind === 'unknown') {
       skip(context, 'A4', 'comments_truncated', `#${item.number}`);
-    } else if (item.claim_status.status_kind === 'none' || item.claim_status.created_at < lastCommit) {
+    } else if (status.status_kind === 'none' || status.created_at < lastCommit) {
       find(context, 'A4', { issues: [item.number], pull_requests: prs.map(pr => pr.number), terminals: [terminal.address] },
         `worker ${terminal.address} is ${terminal.status} and #${item.number} has no claim status after its last commit (${lastCommit})`);
     }
@@ -306,6 +327,35 @@ function a21(context: Context): void {
   }
 }
 
+/**
+ * A22: a seat is stalled (#3182). It reports `working` for longer than `STALLED_WORKING_MS`, its program has no child process, and its
+ * screen hash without spinner frames and elapsed-time counters is the same as in the read before, in the same turn and status. The
+ * finding asks the orchestrator to look; nothing kills the seat.
+ */
+function a22(context: Context): void {
+  const liveness = context.board.seat_liveness;
+  if (liveness.status === 'unavailable') return skip(context, 'A22', liveness.reason);
+  const execution = context.board.execution;
+  const before = context.previous?.seat_liveness;
+  for (const probe of liveness.probes) {
+    if (context.now - probe.status_ms <= STALLED_WORKING_MS || probe.children > 0) continue;
+    if (probe.screen_hash === null) {
+      skip(context, 'A22', 'screen_unavailable', probe.address);
+      continue;
+    }
+    if (before?.status !== 'observed') {
+      skip(context, 'A22', 'previous_read_missing', probe.address);
+      continue;
+    }
+    const prior = before.probes.find(entry => entry.address === probe.address && entry.status_ms === probe.status_ms && entry.turn === probe.turn);
+    if (prior === undefined || prior.children > 0 || prior.screen_hash !== probe.screen_hash) continue;
+    const terminal = execution.status === 'observed' ? execution.terminals.find(entry => entry.address === probe.address) : undefined;
+    const seat = terminal?.seat_status === 'observed' ? terminal : null;
+    find(context, 'A22', { issues: seat?.issue == null ? [] : [seat.issue], pull_requests: seat?.pr == null ? [] : [seat.pr], terminals: [probe.address] },
+      `${seat?.seat ?? 'seat'} ${probe.address} is working for ${minutes(context.now - probe.status_ms)} min with no child process and an unchanged screen since the read before; read the pane, it may be a stalled stream`);
+  }
+}
+
 /** A10: an open High pull request whose head does not meet the High acceptance rule has no reviewer row for its head (`second_review: pending`) and its gatekeeper passed it. No merge gate holds it, so the board does. Before the gatekeeper PASS the head waits for a start, not for attention (#2910). */
 function a10(context: Context): void {
   for (const pr of openPullRequests(context.board).filter(entry => !entry.is_draft && entry.second_review === 'pending' && entry.gatekeeper_review === 'pass')) {
@@ -323,17 +373,19 @@ function a11(context: Context): void {
   }
 }
 
-/** A12: a writer holds an open item with no pull request and no claim status after the claim. */
+/** A12: a writer holds an open item, and no item of its bundle has a pull request or a claim status after the claim. */
 function a12(context: Context): void {
   for (const item of context.board.items.filter(entry => entry.state === 'open')) {
-    const { claim, claim_status: status } = item;
+    const { claim } = item;
     if (claim.status === 'unknown') {
       skip(context, 'A12', 'comments_truncated', `#${item.number}`);
       continue;
     }
-    if (claim.status !== 'active' || claim.role !== 'writer' || item.pull_requests.length > 0) continue;
+    if (claim.status !== 'active' || claim.role !== 'writer') continue;
+    const members = bundleItems(context.board, item);
+    if (members.some(member => member.pull_requests.length > 0)) continue;
     // The claim is in the read, so a later status is too: an unknown status holds none after the claim.
-    if (status.status_kind === 'observed' && status.created_at > claim.created_at) continue;
+    if (members.some(member => member.claim_status.status_kind === 'observed' && member.claim_status.created_at > claim.created_at)) continue;
     const waited = context.now - Date.parse(claim.created_at);
     if (waited > A12_NO_PR_MS) {
       find(context, 'A12', { issues: [item.number] }, `#${item.number} has a writer claim for ${minutes(waited)} min, no PR and no claim status (${claim.url})`);
@@ -341,7 +393,7 @@ function a12(context: Context): void {
   }
 }
 
-/** A13: a worker seat is done or idle and its item has no open or merged pull request; A4 reads the seat once a pull request is open. */
+/** A13: a worker seat is done or idle and no item of its bundle has an open or merged pull request; A4 reads the seat once a pull request is open. */
 function a13(context: Context): void {
   for (const terminal of workerTerminals(context, 'A13')) {
     const word = hcStatusClass(terminal.status);
@@ -355,7 +407,8 @@ function a13(context: Context): void {
       skip(context, 'A13', 'issue_off_board', terminal.address);
       continue;
     }
-    if (context.board.pull_requests.some(pr => item.pull_requests.includes(pr.number) && pr.state !== 'closed')) continue;
+    const members = bundleItems(context.board, item);
+    if (context.board.pull_requests.some(pr => members.some(member => member.pull_requests.includes(pr.number)) && pr.state !== 'closed')) continue;
     if (terminal.status_ms === null) {
       skip(context, 'A13', 'status_time_missing', terminal.address);
     } else if (context.now - terminal.status_ms > A13_IDLE_MS) {
@@ -577,32 +630,6 @@ function r4(context: Context): void {
   }
 }
 
-/**
- * R6: a worker seat is free and the plan has fewer ready issues than `R6_READY_MIN`. Quota and route labels are not read: an issue that
- * no seat can take still counts as ready, and `board dispatch --dry-run` gives that reason.
- */
-function r6(context: Context): void {
-  const { plan, items } = context.board;
-  if (plan.status !== 'observed') return skip(context, 'R6', planSkipReason(plan.status));
-  if (context.board.execution.status === 'unavailable') return skip(context, 'R6', context.board.execution.reason);
-  const terminals = workerTerminals(context, 'R6');
-  // A live terminal with an unknown seat may be a worker, so the free count is unknown (workerTerminals listed the reason).
-  if (context.board.execution.terminals.some(terminal => terminal.state === 'live' && terminal.seat_status === 'unavailable')) return;
-  const open = new Map(items.filter(item => item.state === 'open').map(item => [item.number, item] as const));
-  const queued = plan.block.merge_order.flatMap(number => (open.has(number) ? [open.get(number)!] : []));
-  const truncated = queued.filter(item => item.claim.status === 'unknown');
-  for (const item of truncated) skip(context, 'R6', 'comments_truncated', `#${item.number}`);
-  if (truncated.length > 0 || open.size === 0) return;
-  const holds = new Set(plan.block.holds.map(hold => hold.issue));
-  const seated = new Set(terminals.map(terminal => terminal.issue));
-  const ready = queued.filter(item => !holds.has(item.number) && item.blocked_by.every(blocker => blocker.state === 'closed')
-    && item.claim.status === 'none' && !seated.has(item.number));
-  const free = plan.block.seat_limits.worker - terminals.length;
-  if (free >= 1 && ready.length < R6_READY_MIN) {
-    find(context, 'R6', { issues: ready.map(item => item.number) }, `${free} worker seats are free and the plan has ${ready.length} ready issues; propose the next issues`);
-  }
-}
-
 /** R7: an accepted pull request waits behind an earlier open entry of the merge order that is held, which blocks each ready pull request behind it. */
 function r7(context: Context): void {
   const { board } = context;
@@ -635,9 +662,10 @@ export function renderAttentionText(attention: BoardAttentionV1): string {
   return `${lines.join('\n')}\n`;
 }
 
-export function evaluateBoardAttention(board: BoardV1): BoardAttentionV1 {
-  const context: Context = { board, now: Date.parse(board.observed_at), findings: [], unevaluated: [] };
-  for (const rule of [a1, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, r1, r2, r3, r4, r5, r6, r7]) rule(context);
+/** `previous`: the board read before this one; A22 needs it, and a single read lists each candidate seat of A22 as unevaluated. */
+export function evaluateBoardAttention(board: BoardV1, previous: BoardV1 | null = null): BoardAttentionV1 {
+  const context: Context = { board, previous, now: Date.parse(board.observed_at), findings: [], unevaluated: [] };
+  for (const rule of [a1, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, r1, r2, r3, r4, r5, r7]) rule(context);
   return Object.freeze({
     protocol: BOARD_ATTENTION_PROTOCOL,
     kind: BOARD_ATTENTION_KIND,

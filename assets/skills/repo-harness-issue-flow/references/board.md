@@ -147,7 +147,7 @@ after each claim or status change.
   coordinator posts one `issue claim` per slot, with `Slot: PR-1b`.
   Without named slots, one bundle (one or more issues of one module and
   write scope) is one writer, under one bundle claim
-  (`rh board claim --issues <a>,<b>,<c>`).
+  (`rh board dispatch --issues <a>,<b>,<c>`).
 - **PR dependencies** are base branches. A PR that needs another PR's
   unmerged code sets its base to that PR's branch. A PR to issue link is
   `Closes #<issue>` or `Refs #<issue>` in the PR body.

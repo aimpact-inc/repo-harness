@@ -15,7 +15,7 @@ const URL = `https://github.com/${REPOSITORY}`;
 const CLAIM = `${URL}/issues/1475#issuecomment-1`;
 const TIME = '2026-11-02T18:34:59Z';
 const recorded = decodeBoard(JSON.parse(readFileSync(join(import.meta.dir, '../src/operator-web/fixtures/board-1474.json'), 'utf8')));
-const ACTIVE = { status: 'active', role: 'writer', created_at: TIME, url: CLAIM } as const;
+const ACTIVE = { status: 'active', role: 'writer', created_at: TIME, url: CLAIM, bundle: null, branch: null } as const;
 const accepted = { status: 'accepted', via: 'record', accepted_at: TIME, evidence_url: `${URL}/pull/1491#issuecomment-2` } as const;
 const success = { status: 'success', completed_at: TIME, contexts: [{ name: 'Required / CI', status: 'success' }] } as const;
 const host: BoardHostPortsV1 = {
@@ -23,7 +23,8 @@ const host: BoardHostPortsV1 = {
   hcVersion: () => ({ status: 'observed', version: '0.1.30' }),
   closeoutTerminals: () => { throw new Error('unexpected closeout'); },
   advisorSend: () => { throw new Error('unexpected send'); },
-  advisorRead: () => { throw new Error('unexpected advisor read'); },
+  seatRead: () => { throw new Error('unexpected seat read'); },
+  childProcessCounts: () => { throw new Error('unexpected process read'); },
   closeTerminal: () => { throw new Error('unexpected close'); },
 };
 

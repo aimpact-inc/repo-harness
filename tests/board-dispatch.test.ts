@@ -113,6 +113,17 @@ test('zero or several route labels, and an unknown route class, skip the issue',
   expect(reasons(plan).filter((_, index) => index !== 1).slice(0, 3)).toEqual(['1:kind_label_invalid', '3:kind_label_invalid', '4:kind_label_invalid']);
 });
 
+test('a bundle keeps its order, takes one seat and one route, and does not block on a blocker inside it', () => {
+  const plan = planDispatch({
+    seats: DEFAULT_SEATS_CONFIG, quota: NORMAL, terminals: [], bundle: [3, 4, 1],
+    parent: read([issue(1, { labels: ['route:simple_fast'] }), issue(3, { blocked_by: [{ number: 4, state: 'open' }] }), issue(4)], 1),
+  });
+  expect(reasons(plan)).toEqual(['3:dispatch', '4:dispatch', '1:dispatch']);
+  expect(new Set(plan.decisions.map(decision => decision.action === 'dispatch' && decision.seat))).toEqual(new Set(['worker-important']));
+  const outside = planDispatch({ seats: DEFAULT_SEATS_CONFIG, quota: NORMAL, terminals: [], bundle: [1, 10], parent: read([issue(1), issue(10)]) });
+  expect(reasons(outside)).toEqual(['1:dispatch', '10:not_planned']);
+});
+
 function ports(overrides: Partial<DispatchPorts> = {}) {
   const calls: string[] = [];
   const base: DispatchPorts = {
@@ -217,4 +228,23 @@ test('a seat comment gets the Seat line only when the seat env and the hc addres
   expect(withSeatLine('body', { REPO_HARNESS_SEAT: 'advisor', HC_TERMINAL_ID: 't5' })).toBe('body\nSeat: advisor t5');
   expect(withSeatLine('body', { REPO_HARNESS_SEAT: 'advisor' })).toBe('body');
   expect(withSeatLine('body', { HC_TERMINAL_ID: 't5' })).toBe('body');
+});
+
+test('a bundle starts one worktree and one tab with a bundle claim on each issue, only as a whole, and releases every claim when the tab fails before the request', async () => {
+  const bundlePlan = (bundle: number[]) => planDispatch({ seats: DEFAULT_SEATS_CONFIG, quota: NORMAL, terminals: [], bundle, parent: read([issue(1), issue(2), issue(3)]) });
+  const bodies: string[] = [];
+  const tasks: string[] = [];
+  const run = ports({ comment: (issueNumber, body) => { bodies.push(body); run.calls.push(`comment ${issueNumber}`); return `https://example.test/claim-${issueNumber}`; },
+    openTab: args => { tasks.push(String(args.task)); run.calls.push(`tab ${String(args.folder)}`); } });
+  const started = await executeDispatch(bundlePlan([1, 3]), context, run.base);
+  expect(run.calls).toEqual(['worktree 1', 'comment 1', 'comment 3', 'tab /tmp/wt-1']);
+  expect(started.map(entry => [entry.issue, entry.worktree])).toEqual([[1, '/tmp/wt-1'], [3, '/tmp/wt-1']]);
+  expect(bodies.map(body => body.split('\n').filter(line => /^(Issues|Branch): /u.test(line)))).toEqual([['Branch: feat/1', 'Issues: #1, #3'], ['Branch: feat/1', 'Issues: #1, #3']]);
+  expect(tasks[0]).toContain('Closes #1 / Closes #3');
+  const held = ports();
+  await expect(executeDispatch(bundlePlan([1, 2]), context, held.base)).rejects.toThrow(/starts only as a whole; #2 held/);
+  expect(held.calls).toEqual([]);
+  const lost = ports({ openTab: () => { throw new HerdrCoreError('herdr-app', 'missing'); } });
+  await expect(executeDispatch(bundlePlan([1, 3]), context, lost.base)).rejects.toBeInstanceOf(HerdrCoreError);
+  expect(lost.calls.slice(-2)).toEqual(['comment 1: repo-harness issue claim status Status: released', 'comment 3: repo-harness issue claim status Status: released']);
 });

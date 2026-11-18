@@ -61,7 +61,7 @@ export type {
  * It is a read model. GitHub and hc stay the authorities; the board keeps
  * their observation time and never writes back.
  */
-export const BOARD_PROTOCOL = 12 as const;
+export const BOARD_PROTOCOL = 13 as const;
 export const BOARD_KIND = 'repo-harness.board' as const;
 
 const PLAN_HEADER = PLAN_COMMENT_HEADER;
@@ -176,11 +176,32 @@ export interface BoardSeatTerminalReadV1 {
   readonly cwd: string | null;
   /** The Herdr.app `where` label; null when no Herdr.app pane shows the terminal. */
   readonly where: string | null;
+  /** The agent's pid: hc's foreground process, else the terminal program (a seat argv can wrap the agent in a login shell); null when hc reports neither. Only the liveness probe reads it. */
+  readonly agent_pid: number | null;
   readonly labels: { readonly seat?: string; readonly issue?: string; readonly pr?: string; readonly parent?: string };
 }
 
-/** A read terminal with its branch in place of its directory: the board carries no machine-local path (ADR-0002). */
-export type BoardSeatTerminalInputV1 = Omit<BoardSeatTerminalReadV1, 'cwd'> & { readonly branch: string | null };
+/** A read terminal with its branch in place of its directory and no pid: the board carries no machine-local path or process id (ADR-0002). */
+export type BoardSeatTerminalInputV1 = Omit<BoardSeatTerminalReadV1, 'cwd' | 'agent_pid'> & { readonly branch: string | null };
+
+/**
+ * One liveness probe of a seat that reports `working` for longer than the stalled bound: the number of child processes of its program
+ * and the hash of its screen (`seatScreenHash`); `screen_hash` is null when the screen read failed or came back empty. hc marks the
+ * read of a working terminal incomplete, so the probe does not require a complete read: both reads hash the same screen tail.
+ * `status_ms` and `turn` bind the probe to one working status, so A22 compares two probes of the same turn only.
+ */
+export interface BoardSeatProbeV1 {
+  readonly address: string;
+  readonly status_ms: number;
+  readonly turn: number;
+  readonly children: number;
+  readonly screen_hash: string | null;
+}
+
+export type BoardSeatLivenessV1 =
+  | { readonly status: 'observed'; readonly probes: readonly BoardSeatProbeV1[] }
+  | { readonly status: 'unavailable'; readonly reason: string };
+
 
 const POSITIVE = /^[1-9][0-9]*$/u;
 
@@ -220,9 +241,13 @@ export interface BoardHostPortsV1 {
   readonly advisorSend: (address: string, text: string) =>
     | { readonly status: 'sent'; readonly started: boolean | null; readonly turn: number }
     | { readonly status: 'unavailable'; readonly reason: string };
-  /** `hc read --lines <lines>` of the advisor terminal that the caller resolved from `seatTerminals` (#1756). */
-  readonly advisorRead: (address: string, lines: number) =>
+  /** `hc read --lines <lines>` of a seat terminal that the caller resolved from `seatTerminals`: the advisor transcript (#1756) and the liveness probe. */
+  readonly seatRead: (address: string, lines: number) =>
     | { readonly status: 'observed'; readonly text: string; readonly complete: boolean; readonly why: string | null }
+    | { readonly status: 'unavailable'; readonly reason: string };
+  /** The number of child processes of each process with children, from one process table read; unavailable where no `ps` runs. */
+  readonly childProcessCounts: () =>
+    | { readonly status: 'observed'; readonly counts: ReadonlyMap<number, number> }
     | { readonly status: 'unavailable'; readonly reason: string };
   /** `hc kill`, then `hc rm`, of a seat terminal that the post-merge closeout resolved from `closeoutTerminals` (#2005). */
   readonly closeTerminal: (address: string) =>
@@ -274,6 +299,8 @@ export interface BoardV1 {
   readonly pull_requests: readonly BoardPullRequestV1[];
   readonly path_owners: BoardPathOwnersV1;
   readonly execution: BoardExecutionV1;
+  /** Probes of the seats that work past the stalled bound; A22 compares them with the probes of the board read before. */
+  readonly seat_liveness: BoardSeatLivenessV1;
   readonly daily_run: BoardDailyRunV1;
   readonly tooling: BoardToolingV1;
 }
@@ -301,6 +328,7 @@ export interface BoardInputV1 {
   readonly required_contexts: ReadonlyMap<string, BoardRequiredContextsV1>;
   readonly path_owners: BoardPathOwnersV1;
   readonly execution: BoardExecutionV1;
+  readonly seat_liveness: BoardSeatLivenessV1;
   readonly daily_run: BoardDailyRunInputV1;
   readonly tooling: BoardToolingV1;
 }
@@ -327,7 +355,9 @@ const isTime = (value: unknown): boolean => typeof value === 'string' && !Number
 function isIssueClaim(value: unknown): boolean {
   if (!isRecord(value)) return false;
   if (value.status === 'none' || value.status === 'unknown') return true;
-  return value.status === 'active' && typeof value.url === 'string' && isTime(value.created_at) && (value.role === null || typeof value.role === 'string');
+  return value.status === 'active' && typeof value.url === 'string' && isTime(value.created_at) && (value.role === null || typeof value.role === 'string')
+    && (value.branch === null || typeof value.branch === 'string')
+    && (value.bundle === null || (Array.isArray(value.bundle) && value.bundle.length > 1 && value.bundle.every(number => Number.isSafeInteger(number) && number > 0)));
 }
 
 function isReviewRecords(value: unknown): boolean {
@@ -343,6 +373,14 @@ function isOpenQuestions(value: unknown): boolean {
     && value.questions.every((question: unknown) => isRecord(question) && typeof question.url === 'string' && isTime(question.created_at));
 }
 
+function isSeatLiveness(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value.status === 'unavailable') return typeof value.reason === 'string';
+  return value.status === 'observed' && Array.isArray(value.probes) && value.probes.every((probe: unknown) => isRecord(probe) && typeof probe.address === 'string'
+    && Number.isSafeInteger(probe.status_ms) && Number.isSafeInteger(probe.turn) && Number.isSafeInteger(probe.children) && (probe.children as number) >= 0
+    && (probe.screen_hash === null || (typeof probe.screen_hash === 'string' && /^[0-9a-f]{64}$/u.test(probe.screen_hash))));
+}
+
 /** Refuse a board of another protocol or kind, or a board without a valid new value, at a process boundary (Surface contract, docs/adr/ADR-0002). */
 export function decodeBoard(value: unknown): BoardV1 {
   const board = value as Partial<BoardV1> | null;
@@ -355,6 +393,7 @@ export function decodeBoard(value: unknown): BoardV1 {
   }
   if (board.reviewer_family !== null && (typeof board.reviewer_family !== 'string' || board.reviewer_family === '')) throw new Error(`invalid board reviewer_family: ${String(board.reviewer_family)}`);
   if (board.execution?.status === 'observed') checkSeatTerminals(board.execution.terminals);
+  if (!isSeatLiveness(board.seat_liveness)) throw new Error('invalid board seat_liveness');
   for (const item of board.items ?? []) {
     if (!isIssueClaim(item.claim)) throw new Error(`invalid board claim on #${item.number}`);
     if (!isOpenQuestions(item.open_questions)) throw new Error(`invalid board open_questions on #${item.number}`);
@@ -469,7 +508,7 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
     tier: tiers.get(issue.number) ?? null,
     milestone: issue.milestone,
     blocked_by: issue.blocked_by,
-    claim: issueClaim(issue.comments),
+    claim: issueClaim(issue.comments, issue.number),
     claim_status: claimStatus(issue),
     open_questions: openQuestions(issue.comments),
     pull_requests: Object.freeze(pullRequests.filter(pr => pr.closes.includes(issue.number) || pr.refs.includes(issue.number)).map(pr => pr.number)),
@@ -495,6 +534,7 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
     pull_requests: Object.freeze(pullRequests),
     path_owners: input.path_owners,
     execution: input.execution,
+    seat_liveness: input.seat_liveness,
     daily_run: daily,
     tooling: input.tooling,
   });

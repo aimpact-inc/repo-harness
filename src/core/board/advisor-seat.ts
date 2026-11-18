@@ -421,7 +421,7 @@ export function sendToAdvisorSeat(scope: AdvisorSeatScope, text: string): Adviso
 /** Resolve the one advisor terminal and read its last lines; every line is redacted before it is returned. */
 export function readAdvisorSeat(scope: AdvisorSeatScope): AdvisorSeatTranscriptV1 {
   const seat = advisorSeat(scope);
-  const read = scope.host.advisorRead(seat.address, ADVISOR_TRANSCRIPT_LINES);
+  const read = scope.host.seatRead(seat.address, ADVISOR_TRANSCRIPT_LINES);
   if (read.status === 'unavailable') throw new AdvisorSeatError('advisor_read_failed', `hc did not read ${seat.address}: ${read.reason}`);
   return {
     protocol: 1, kind: ADVISOR_SEAT_TRANSCRIPT_KIND, github_repository_id: scope.github_repository_id, parent: scope.parent,

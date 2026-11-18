@@ -5,7 +5,7 @@ import { AdvisorSeatError, advisorSeatSendFailure, readAdvisorSeat, sendToAdviso
 import { AttentionWatchError, attentionLogPath, runAttentionWindow, serviceTerminalRepository, startAttentionWatch } from '../../effects/board/attention-watch';
 import { evaluateBoardAttention, renderAttentionText } from '../../core/board/attention';
 import type { AttentionHostPortsV1, AttentionSentV1 } from '../../core/board/attention-delivery';
-import type { BoardHostPortsV1 } from '../../core/board/board';
+import type { BoardHostPortsV1, BoardV1 } from '../../core/board/board';
 import { BoardSourceError } from '../../core/board/source';
 import { BoardCollectError, collectBoard, collectBoardThrough, readRepositoryId } from '../../effects/board/collect';
 import { createKeyedSources } from '../../effects/board/keyed-sources';
@@ -51,6 +51,15 @@ interface PostOptions extends BoardOptions {
 function parentNumber(options: BoardOptions): number {
   if (options.parent === undefined || !/^[1-9][0-9]*$/u.test(options.parent)) throw new BoardCollectError('--parent <issue number> is required');
   return Number(options.parent);
+}
+
+/** `--issues a,b,c`: two or more distinct issue numbers. */
+function bundleIssues(value: string): readonly number[] {
+  const entries = value.split(',');
+  if (entries.length < 2 || entries.some(entry => !/^[1-9][0-9]*$/u.test(entry)) || new Set(entries).size !== entries.length) {
+    throw new BoardCollectError('--issues takes two or more distinct issue numbers separated by commas, such as 12,13');
+  }
+  return entries.map(Number);
 }
 
 /** The one JSON object of `--fields-file`; a path that does not read, or that holds no JSON object, is refused input. */
@@ -178,11 +187,12 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
     .description('Start a seat for each ready sub-issue of the plan (takes --parent): worktree, claim comment and worker tab, on the seat that the quota route names')
     .requiredOption('--space <id>', 'Herdr space that receives the worker tabs')
     .option('--dry-run', 'Print the decision for each plan issue and start nothing')
-    .action(async (options: { space: string; dryRun?: boolean }, command: Command) => {
+    .option('--issues <a,b,c>', 'Start one seat, one worktree and one pull request for these plan issues; each claim names the bundle, and nothing starts unless every issue is ready')
+    .action(async (options: { space: string; dryRun?: boolean; issues?: string }, command: Command) => {
       try {
         const parent = parentNumber(command.optsWithGlobals<BoardOptions>());
         const result = await runDispatch({
-          repo_root: process.cwd(), parent, space: options.space, host, dry_run: options.dryRun === true,
+          repo_root: process.cwd(), parent, space: options.space, host, dry_run: options.dryRun === true, bundle: options.issues === undefined ? null : bundleIssues(options.issues),
           launch: (seat, labels, cwd) => seatLaunch(seat, labels, process.env, cwd),
         });
         process.stdout.write(dispatchText(result.plan, result.started.map(entry => entry.issue)));
@@ -348,7 +358,13 @@ async function watchAttention(options: AttentionOptions, host: BoardHostPortsV1,
     };
     // The sent slots live in this process only: a new watcher sends each open finding once.
     let sent: AttentionSentV1 = new Map();
-    for (;;) sent = await runAttentionWindow({ ...input, sent });
+    // A22 compares each board read with the one before; a window whose read failed keeps the older board.
+    let previous: BoardV1 | null = null;
+    for (;;) {
+      let read: BoardV1 | null = null;
+      sent = await runAttentionWindow({ ...input, collect: () => (read = input.collect()), previous, sent });
+      previous = read ?? previous;
+    }
   } catch (error) {
     if (!(error instanceof BoardCollectError || error instanceof BoardSourceError || error instanceof AttentionWatchError)) throw error;
     process.stderr.write(`${JSON.stringify({ ok: false, error: error.name, message: error.message })}\n`);

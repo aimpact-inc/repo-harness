@@ -253,11 +253,13 @@ module is in the title so that a list view shows the write scopes.
   stay the requirement authority; the packet names them and adds the
   bundle decisions, so the worker asks no design question. The worker
   replies `DONE <PR> <head>` or `BLOCKED <one question>`.
-- Post the claim, then the packet. Post one bundle claim with
-  `rh board claim --issues <a>,<b>,<c>`, with the required fields in
-  `templates.md` § issue claim. The claim is the worker's identity on the
-  board, and the worker never posts one. Dispatch only after the claim is
-  on each issue of the bundle.
+- Post the claim, then the packet. `rh board dispatch --parent <n>
+  --space <id> --issues <a>,<b>,<c>` starts one seat, one worktree and one
+  tab for the bundle and posts the bundle claim on each issue, with the
+  required fields in `templates.md` § issue claim and the `Issues:` line.
+  It starts only when every issue is ready, and starts nothing otherwise.
+  The claim is the worker's identity on the board, and the worker never
+  posts one. Dispatch only after the claim is on each issue of the bundle.
 - Dispatch in parallel only when the write scopes are disjoint and each
   dependency is merged, or its contract is stable and the issue allows
   early start.
@@ -309,6 +311,12 @@ module is in the title so that a list view shows the write scopes.
   opens no tab. Never start a seat with `hc run --bg`: that terminal has no
   pane. Attention rule A21 names each live seat that no pane shows; give it
   a pane with `herdr-app do terminal.keep`, or close and relaunch it.
+- Attention rule A22 names a stalled seat: it reports `working` for more
+  than 300 s, its agent has no child process, and its screen without
+  spinner frames and elapsed-time counters did not change between two
+  watcher reads. Read the pane; when the stream hangs, close the seat and
+  dispatch the work again. Nothing closes the seat for you. A seat with
+  resident child processes (a Claude seat's MCP servers) does not show it.
 - Remote topology: Herdr.app runs on one machine, and `herdr-app` on any
   other machine has no window. A coordinator on a machine without the
   window cannot open a seat tab and does not fall back to a headless
@@ -680,8 +688,9 @@ are true:
 - No hold record is in force on the parent, on the PR's issues or on the PR.
 - The plan does not hold its issues, its issues are in `merge_order`, and
   every issue before each of them in `merge_order` is closed or is an
-  issue of the PR's bundle claim. A bundle PR closes every plan item that
-  its bundle claim names.
+  issue of the PR's bundle claim: a claim on the PR's head branch whose
+  `Issues:` line names exactly the items that the PR closes. A bundle PR
+  closes every plan item that its bundle claim names.
 - An acceptance record has a PASS row for the head, at every tier. The
   provisional `tier_low` status is not enough: post the Low record after
   you check the verification evidence.

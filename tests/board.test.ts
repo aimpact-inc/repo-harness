@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { initGitRepo, run, tmpWorkspace } from './helpers/repo-fixture';
-import { A12_NO_PR_MS, A13_IDLE_MS, A14_RED_MS, A15_FAIL_MS, A16_QUESTION_MS, A17_BLOCKED_MS, A20_STUCK_MS, BOARD_PRIORITY_ORDER, BOARD_RULE_PRIORITY, evaluateBoardAttention, renderAttentionText, type BoardPriority, type BoardRuleId } from '../src/core/board/attention';
+import { A12_NO_PR_MS, A13_IDLE_MS, A14_RED_MS, A15_FAIL_MS, A16_QUESTION_MS, A17_BLOCKED_MS, A20_STUCK_MS, STALLED_WORKING_MS, BOARD_PRIORITY_ORDER, BOARD_RULE_PRIORITY, evaluateBoardAttention, renderAttentionText, type BoardPriority, type BoardRuleId } from '../src/core/board/attention';
 import { WINDOW_WITH_WORKERS_MS, WINDOW_WITHOUT_WORKERS_MS, attentionFindingKey, planAttentionDeliveries, type AttentionSentV1 } from '../src/core/board/attention-delivery';
 import { attentionLogPath, attentionWatchDoctorCheck, runAttentionWindow, serviceTerminalRepository, startAttentionWatch } from '../src/effects/board/attention-watch';
 import { decodeBoard, type BoardHostPortsV1, type BoardItemV1, type BoardPullRequestV1, type BoardTerminalV1, type BoardV1 } from '../src/core/board/board';
@@ -11,7 +11,7 @@ import { decodePlanBlock, PlanBlockError } from '../src/core/board/plan-block';
 import { decodeReviewHazards, pathHazardHits } from '../src/core/board/hazards';
 import type { PullRequestReadinessV2 } from '../src/core/publication/merge-readiness';
 import { collectPullRequestMergeReadiness } from '../src/effects/publication/merge-readiness';
-import { collectBoard, collectBoardThrough, GH_MAX_BUFFER_BYTES, readGhJson, readParent, readLocalRepositoryId, readLocalRepositoryIdAsync, seatTerminalsWithBranches, type BoardCollectInput } from '../src/effects/board/collect';
+import { collectBoard, collectBoardThrough, GH_MAX_BUFFER_BYTES, readGhJson, readParent, readLocalRepositoryId, readLocalRepositoryIdAsync, seatScreenHash, seatTerminalsWithBranches, type BoardCollectInput } from '../src/effects/board/collect';
 import { createKeyedSources, KEYED_SOURCE_MAX_AGE_MS } from '../src/effects/board/keyed-sources';
 import { runBoardMerge } from '../src/effects/board/merge';
 import { boardMergeDecisions } from '../src/core/board/merge';
@@ -500,7 +500,6 @@ test('replay: the recorded #1474 reads project to a board, and its findings come
     ['R3', 'tier_label_missing', '#1494 #1479'],
     ['R3', 'tier_label_missing', '#1499 #1476'],
     ['R4', 'plan_unavailable', null],
-    ['R6', 'plan_unavailable', null],
     ['R7', 'plan_unavailable', null],
   ]);
 });
@@ -774,7 +773,9 @@ test('decoders refuse an unknown protocol or kind', () => {
   // A protocol-10 board has claude_review and per-harness review_records, and no reviewer_family; a protocol-11 board has no gatekeeper_review.
   expect(() => decodeBoard({ protocol: 10, kind: 'repo-harness.board' })).toThrow('unsupported board protocol: 10');
   expect(() => decodeBoard({ protocol: 11, kind: 'repo-harness.board' })).toThrow('unsupported board protocol: 11');
-  expect(() => decodeBoard({ protocol: 12, kind: 'fleet_board_snapshot' })).toThrow('unsupported board kind: fleet_board_snapshot');
+  // A protocol-12 board has no claim bundle or branch and no seat liveness.
+  expect(() => decodeBoard({ protocol: 12, kind: 'repo-harness.board' })).toThrow('unsupported board protocol: 12');
+  expect(() => decodeBoard({ protocol: 13, kind: 'fleet_board_snapshot' })).toThrow('unsupported board kind: fleet_board_snapshot');
   const block = (value: Json) => `repo-harness plan\n\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\`\n`;
   const valid = { protocol: 2, kind: 'repo-harness.plan', merge_order: [1475], holds: [], seat_limits: { worker: 3 } } as const;
   expect(decodePlanBlock(block(valid))).toEqual(valid);
@@ -795,9 +796,11 @@ test('decoders refuse a missing or invalid plan revision, merge policy or seat b
   const item = (patch: Json) => ({ ...recorded, items: recorded.items.map((entry: Json, index: number) => index === 0 ? { ...entry, ...patch } : entry) });
   const pull = (patch: Json) => ({ ...recorded, pull_requests: recorded.pull_requests.map((entry: Json, index: number) => index === 0 ? { ...entry, ...patch } : entry) });
   for (const invalid of [plan(undefined), plan(0), plan(1.5), plan('1'), noPolicy, { ...recorded, acceptance_merge: 'maybe' }, board(undefined), board(''),
-    item({ claim: undefined }), item({ claim: { status: 'active', url: 'u' } }), item({ open_questions: { status: 'observed' } }), pull({ open_questions: undefined }), pull({ review_fail: { url: 'u' } }),
+    item({ claim: undefined }), item({ claim: { status: 'active', url: 'u' } }), ...[{ bundle: [1475], branch: null }, { bundle: null, branch: 7 }]
+      .map(patch => item({ claim: { status: 'active', url: 'u', created_at: '2026-11-02T18:34:59Z', role: null, ...patch } })), item({ open_questions: { status: 'observed' } }), pull({ open_questions: undefined }), pull({ review_fail: { url: 'u' } }),
     pull({ review_records: undefined }), pull({ review_records: { status: 'observed', gatekeeper: 'x', reviewer: null } }), pull({ review_records: { status: 'observed', claude: null, codex: null, pi: null } }),
-    pull({ second_review: undefined }), pull({ second_review: 'maybe' }), pull({ gatekeeper_review: undefined }), pull({ gatekeeper_review: 'maybe' }), { ...recorded, reviewer_family: undefined }, { ...recorded, reviewer_family: '' }]) {
+    pull({ second_review: undefined }), pull({ second_review: 'maybe' }), pull({ gatekeeper_review: undefined }), pull({ gatekeeper_review: 'maybe' }), { ...recorded, reviewer_family: undefined }, { ...recorded, reviewer_family: '' },
+    { ...recorded, seat_liveness: undefined }, { ...recorded, seat_liveness: { status: 'observed', probes: [{ address: 't1', status_ms: 1, turn: 1, children: -1, screen_hash: null }] } }]) {
     expect(() => decodeBoard(invalid)).toThrow('invalid board');
   }
   for (const valid of [plan(null), plan(7), { ...recorded, acceptance_merge: 'unknown' }, { ...recorded, reviewer_family: null }, board(null), board('main')]) expect(decodeBoard(valid)).toEqual(valid);
@@ -943,8 +946,8 @@ test('each attention finding names its priority, and a delivery sorts the entrie
   // The priority has one source, and the record names every rule of the protocol.
   expect(BOARD_RULE_PRIORITY).toEqual({
     A1: 'P2', A3: 'P0', A4: 'P1', A5: 'P1', A6: 'P1', A7: 'P2', A8: 'P3', A9: 'P3', A10: 'P2', A11: 'P2',
-    A12: 'P1', A13: 'P1', A14: 'P2', A15: 'P2', A16: 'P1', A17: 'P1', A18: 'P2', A19: 'P1', A20: 'P2', A21: 'P1',
-    R1: 'P2', R2: 'P2', R3: 'P1', R4: 'P2', R5: 'P1', R6: 'P1', R7: 'P2',
+    A12: 'P1', A13: 'P1', A14: 'P2', A15: 'P2', A16: 'P1', A17: 'P1', A18: 'P2', A19: 'P1', A20: 'P2', A21: 'P1', A22: 'P1',
+    R1: 'P2', R2: 'P2', R3: 'P1', R4: 'P2', R5: 'P1', R7: 'P2',
   });
   expect(attention.findings.map(finding => [finding.rule, finding.priority])).toContainEqual(['A3', 'P0']);
   expect(attention.findings.map(finding => [finding.rule, finding.priority])).toContainEqual(['A11', 'P2']);
@@ -1083,6 +1086,17 @@ test('board merge: no plan, a draft, plan holds, plan order for every linked ite
   const decision = (edit: Parameters<typeof mergeReplay>[0]) => boardMergeDecisions(replay(mergeReplay(edit))).find(entry => entry.pr === 1491);
   expect(decision({ order: [1475, 1479], pulls: (data) => { data.repository.pr1491.body += '\nCloses #1479\n'; } }))
     .toMatchObject({ reason: 'merge_order', detail: 'earlier plan item #1475 is closed only by this PR; split the PR' });
+  // A bundle PR: each item it closes has a claim that names its head branch and the same issue set, so the order does not split it.
+  const bundleClaims = (branch: string) => (data: Json) => {
+    for (const number of [1475, 1479]) {
+      issueNode(data, number).comments.nodes.push({ url: `https://github.com/Ancienttwo/repo-harness/issues/${number}#issuecomment-9${number}`, createdAt: '2026-11-02T23:00:00Z', authorAssociation: 'OWNER',
+        body: `repo-harness issue claim\nStatus: active\nRole: writer\nBranch: ${branch}\nIssues: #1475, #1479` });
+    }
+  };
+  const closesBoth = (data: Json) => { data.repository.pr1491.body += '\nCloses #1479\n'; };
+  expect(decision({ order: [1475, 1479], parent: bundleClaims('feat/1475-hc-transport'), pulls: closesBoth })).toMatchObject({ reason: 'not_accepted' });
+  expect(decision({ order: [1475, 1479], parent: bundleClaims('feat/other'), pulls: closesBoth }))
+    .toMatchObject({ reason: 'merge_order', detail: 'earlier plan item #1475 is closed only by this PR; split the PR' });
   expect(decision({ pulls: (data) => { data.repository.pr1491.body += '\nRefs #1460\n'; } })).toMatchObject({ reason: 'item_off_board' });
   // A parent with two children or fewer needs no plan: it merges in blocked-by order.
   const planless = (blocker: string | null) => (data: Json) => {
@@ -1094,6 +1108,7 @@ test('board merge: no plan, a draft, plan holds, plan order for every linked ite
   expect([planless(null), planless('CLOSED'), planless('OPEN')].map(parent => mergeReason({ parent }))).toEqual(['eligible', 'eligible', 'merge_order']);
   expect(decision({ parent: planless('OPEN'), pulls: (data) => { data.repository.pr1491.body += '\nCloses #1479\n'; } }))
     .toMatchObject({ reason: 'merge_order', detail: 'blocker #1479 is closed only by this PR; split the PR' });
+  expect(decision({ parent: (data) => { planless('OPEN')(data); bundleClaims('feat/1475-hc-transport')(data); }, pulls: closesBoth })).toMatchObject({ reason: 'not_accepted' });
   // The Low PR is accepted on the provisional tier_low path, which an unattended merge does not take.
   expect(replay(mergeReplay({ ...lowGreen, order: [1479, 1475] })).pull_requests.find(pr => pr.number === 1494)!.acceptance).toMatchObject({ status: 'accepted', via: 'tier_low' });
 });
@@ -1560,7 +1575,7 @@ test('rules A12 to A18 fire past their threshold with their message, not at it, 
   expect(messages(base)).toEqual([]);
 
   const cases: readonly [string, (age: number) => BoardV1, number, string][] = [
-    ['A12', age => item({ claim: { status: 'active', url, created_at: at(age), role: 'writer' } }), A12_NO_PR_MS, `#1477 has a writer claim for 121 min, no PR and no claim status (${url})`],
+    ['A12', age => item({ claim: { status: 'active', url, created_at: at(age), role: 'writer', bundle: null, branch: null } }), A12_NO_PR_MS, `#1477 has a writer claim for 121 min, no PR and no claim status (${url})`],
     ['A13', age => ({ ...base, execution: { status: 'observed', terminals: [terminal(now - age)] } }), A13_IDLE_MS, 'worker t1 is idle for 11 min and #1477 has no PR'],
     ['A14', age => pr({ required_check: { status: 'failure', completed_at: at(age), contexts: [] } }), A14_RED_MS, `#1494 has a failed required check on ${sha} for 31 min`],
     ['A15', age => pr({ review_fail: { url, recorded_at: at(age) } }), A15_FAIL_MS, `#1494 has a FAIL record on ${sha} for 61 min and no new head (${url})`],
@@ -1593,6 +1608,50 @@ test('rules A12 to A18 fire past their threshold with their message, not at it, 
   expect([messages(truncated), skipped(truncated)]).toEqual([[], [['A12', 'comments_truncated', '#1477'], ['A16', 'comments_truncated', '#1477']]]);
   expect(skipped({ ...base, execution: { status: 'observed', terminals: [terminal(null)] } })).toEqual([['A13', 'status_time_missing', 't1']]);
   expect(skipped(pr({ merge_readiness: null, merge_readiness_observed_at: null }))).toEqual([['A18', 'readiness_missing', '#1494']]);
+
+  // A bundle claim of #1477 and #1479: #1494 closes #1479, so A12 and A13 stay silent on #1477, and A4 reads the claim status of either issue.
+  const idle = { ...base, execution: { status: 'observed', terminals: [terminal(now - A13_IDLE_MS - MIN)] } } as const;
+  const bundled = (board: BoardV1) => item({ claim: { status: 'active', url, created_at: at(A12_NO_PR_MS + MIN), role: 'writer', bundle: [1477, 1479], branch: null } }, board);
+  const statusOn1479 = (board: BoardV1, created_at: string): BoardV1 => ({ ...board, items: board.items.map(entry => (entry.number === 1479
+    ? { ...entry, claim_status: { status_kind: 'observed', url, created_at, status: 'done', pr: 1494, head_sha: null } } : entry)) });
+  const a4 = (board: BoardV1) => evaluateBoardAttention(board).findings.filter(finding => finding.rule === 'A4').map(finding => [finding.issues, finding.pull_requests]);
+  const headAt = base.pull_requests.find(entry => entry.number === 1494)!.head_committed_at;
+  expect(messages(bundled(idle))).toEqual([]);
+  expect(a4(statusOn1479(bundled(idle), '2000-01-01T00:00:00Z'))).toEqual([[[1477], [1494]]]);
+  expect(a4(statusOn1479(bundled(idle), new Date(Date.parse(headAt) + MIN).toISOString()))).toEqual([]);
+});
+
+test('A22 flags a seat that works past the bound with no child process and the same screen as the read before; the collector probes only such seats', () => {
+  const recorded = replay();
+  const since = Date.parse(recorded.observed_at) - STALLED_WORKING_MS - 60_000;
+  const seat = { address: 't7', name: null, agent: 'pi', state: 'live', status: 'working', status_kind: null, status_msg: null, status_ms: since, turn: 3, where: 'repo-harness / 1',
+    branch: null, seat_status: 'observed', seat: 'worker', issue: 1477, pr: null } as BoardTerminalV1;
+  const screen = (text: string) => seatScreenHash(text);
+  const probe = (patch: Json = {}) => ({ address: 't7', status_ms: since, turn: 3, children: 0, screen_hash: screen('\u280b Working (5m 12s \u00b7 \u2193 2.1k tokens)'), ...patch });
+  const board = (probes: Json[]): BoardV1 => ({ ...recorded, execution: { status: 'observed', terminals: [seat] }, seat_liveness: { status: 'observed', probes: probes as never } });
+  const a22 = (current: BoardV1, previous: BoardV1 | null) => {
+    const attention = evaluateBoardAttention(current, previous);
+    return [attention.findings.filter(finding => finding.rule === 'A22').map(finding => [finding.route, finding.issues, finding.message]),
+      attention.unevaluated.filter(entry => entry.rule === 'A22').map(entry => [entry.reason, entry.subject])];
+  };
+  // Another spinner frame and elapsed time is the same screen; another token count is progress.
+  const later = probe({ screen_hash: screen('\u2819 Working (6m 40s \u00b7 \u2193 2.1k tokens)') });
+  expect(a22(board([probe()]), board([later]))).toEqual([[['orchestrator', [1477], 'worker t7 is working for 6 min with no child process and an unchanged screen since the read before; read the pane, it may be a stalled stream']], []]);
+  expect(a22(board([probe()]), board([probe({ screen_hash: screen('\u2819 Working (6m 40s \u00b7 \u2193 2.3k tokens)') })]))).toEqual([[], []]);
+  expect(a22(board([probe({ children: 1 })]), board([probe()]))).toEqual([[], []]);
+  expect(a22(board([probe()]), board([probe({ turn: 2 })]))).toEqual([[], []]);
+  expect(a22(board([probe()]), null)).toEqual([[], [['previous_read_missing', 't7']]]);
+  expect(a22(board([probe({ screen_hash: null })]), board([probe()]))).toEqual([[], [['screen_unavailable', 't7']]]);
+
+  // The collector reads the process table once and the screen of each seat past the bound only.
+  const read = (address: string, status_ms: number, pid: number) => ({ address, name: null, agent: 'pi', state: 'live', status: 'working', status_kind: null, status_msg: null,
+    status_ms, turn: 3, cwd: null, where: 'repo-harness / 1', agent_pid: pid, labels: { seat: 'worker', issue: '1477' } }) as const;
+  const screens: string[] = [];
+  const host: BoardHostPortsV1 = { ...boardHostPorts({ env: { PATH: '/nonexistent' } }),
+    seatTerminals: () => ({ status: 'observed', terminals: [read('t7', since, 4242), read('t8', Date.parse(recorded.observed_at) - 60_000, 4343)] }),
+    childProcessCounts: () => ({ status: 'observed', counts: new Map([[4343, 2]]) }),
+    seatRead: (address) => { screens.push(address); return { status: 'observed', text: '\u280b Working (5m 12s)', complete: false, why: 'working' }; } };
+  expect([replay({ host }).seat_liveness, screens]).toEqual([{ status: 'observed', probes: [{ address: 't7', status_ms: since, turn: 3, children: 0, screen_hash: screen('\u2819 Working (9m 1s)') }] }, ['t7']]);
 });
 
 test('A19 fires for a done review seat whose pull request has no record of that seat after the seat status time', () => {
@@ -2395,7 +2454,7 @@ test('board closeout: proofs come first; a bound, clean, pushed seat closes and 
   git(unpushed, 'commit', '-q', '--allow-empty', '-m', 'local only');
   writeFileSync(join(edited, 'note.txt'), 'draft');
   const terminal = (address: string, cwd: string | null, labels: Record<string, string>, state: 'live' | 'finished' = 'live', seat: string | null = 'worker') => ({ address, name: null, agent: 'claude-code', state, status: 'done',
-    status_kind: null, status_msg: null, status_ms: null, turn: 1, cwd, where: 'repo-harness / #1474', labels: { ...(seat === null ? {} : { seat }), ...labels } });
+    status_kind: null, status_msg: null, status_ms: null, turn: 1, cwd, where: 'repo-harness / #1474', agent_pid: null, labels: { ...(seat === null ? {} : { seat }), ...labels } });
   const terminals = [terminal('t1', clean, { issue: '11' }), terminal('t2', clean, { seat: 'gatekeeper', pr: '21' }), terminal('t3', join(root, 'gone-caller'), { seat: 'orchestrator' }, 'finished'),
     terminal('t4', kept, { issue: '12' }), terminal('t5', unpushed, { seat: 'reviewer', pr: '22' }), terminal('t6', kept, { issue: '12', pr: '99' }),
     terminal('t7', edited, { seat: 'gatekeeper', pr: '22' }), terminal('t8', main, { seat: 'reviewer', pr: '23' }), terminal('t9', main, { seat: 'reviewer', pr: '24' }),
@@ -2555,31 +2614,12 @@ test('watch window --review: the message to a blocked orchestrator waits for it 
   expect(sent.map(record => [record.terminal, record.outcome])).toEqual([['t3', 'sent']]);
 });
 
-describe('rules R6 and R7', () => {
+describe('rule R7', () => {
   const recorded = replay();
   const at = recorded.observed_at;
   const plan = (order: number[], holds: number[] = [], worker = 3) => ({ status: 'observed', comment_url: 'https://github.com/plan', created_at: at, revision: 1,
     block: { protocol: 2, kind: 'repo-harness.plan', merge_order: order, holds: holds.map(issue => ({ issue, reason: 'held' })), seat_limits: { worker } } }) as const;
-  const worker = (address: string, issue: number) => ({ address, name: null, agent: null, state: 'live', status: 'working', status_kind: null, status_msg: null, status_ms: null, turn: 1,
-    branch: null, seat_status: 'observed', seat: 'worker', issue, pr: null }) as BoardTerminalV1;
-  const r6 = (board: BoardV1) => evaluateBoardAttention(board).findings.filter(finding => finding.rule === 'R6').map(finding => finding.message);
   const skipped = (board: BoardV1, id: BoardRuleId) => evaluateBoardAttention(board).unevaluated.filter(entry => entry.rule === id).map(entry => [entry.reason, entry.subject]);
-  // #1475 and #1476 carry the two live workers; #1477 and #1478 have no claim and no blocker.
-  const queue = (order: number[]): BoardV1 => ({ ...recorded, plan: plan(order), execution: { status: 'observed', terminals: [worker('t1', 1475), worker('t2', 1476)] } });
-
-  test('R6 fires on a free seat with fewer than two ready issues, and reads only an observed plan and claims', () => {
-    expect(r6(queue([1475, 1477]))).toEqual(['1 worker seats are free and the plan has 1 ready issues; propose the next issues']);
-    expect(r6(queue([1477, 1478]))).toEqual([]);
-    expect(r6({ ...queue([1477]), items: recorded.items.map(item => ({ ...item, state: 'closed' as const })) })).toEqual([]);
-    expect(r6({ ...queue([1477]), plan: { status: 'absent', truncated: false } })).toEqual([]);
-    expect(skipped({ ...queue([1477]), plan: { status: 'absent', truncated: false } }, 'R6')).toEqual([['plan_absent', null]]);
-    const cut = { ...queue([1477]), items: recorded.items.map(item => (item.number === 1477 ? { ...item, claim: { status: 'unknown', reason: 'comments_truncated' } as const } : item)) };
-    expect([r6(cut), skipped(cut, 'R6')]).toEqual([[], [['comments_truncated', '#1477']]]);
-    const down = { ...queue([1477]), execution: { status: 'unavailable', reason: 'no_seat_terminals' } } as const;
-    expect([r6(down), skipped(down, 'R6')]).toEqual([[], [['no_seat_terminals', null]]]);
-    const unknownSeat = { ...queue([1477]), plan: plan([1477], [], 3), execution: { status: 'observed', terminals: [{ ...worker('t1', 1475), seat_status: 'unavailable', reason: 'seat_label_missing' }] } } as unknown as BoardV1;
-    expect([r6(unknownSeat), skipped(unknownSeat, 'R6')]).toEqual([[], [['seat_label_missing', 't1']]]);
-  });
 
   test('R7 fires on an accepted pull request behind a held entry, not behind an open entry that is not held', () => {
     const accepted = { status: 'accepted', via: 'record', accepted_at: at, evidence_url: 'https://github.com/acceptance' } as const;

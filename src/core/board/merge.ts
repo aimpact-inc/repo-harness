@@ -1,4 +1,4 @@
-import type { BoardPullRequestV1, BoardRequiredCheckV1, BoardV1 } from './board';
+import type { BoardItemV1, BoardPullRequestV1, BoardRequiredCheckV1, BoardV1 } from './board';
 import { protocolComments, type BoardCommentPageV1 } from './source';
 
 /**
@@ -125,6 +125,20 @@ export function planRefusal(board: BoardV1, pr: BoardPullRequestV1): { readonly 
   return hold === undefined ? null : { reason: 'plan_hold', detail: `the plan holds #${hold.issue}: ${hold.reason}` };
 }
 
+/**
+ * The items that this pull request closes as one bundle (`rh board dispatch --issues`): each item it closes whose active claim names the
+ * pull request's head branch and lists exactly the board items that the pull request closes. The merge order and the blocked-by order
+ * do not split such items; every other item keeps both checks.
+ */
+function bundledItems(pr: BoardPullRequestV1, onBoard: ReadonlyMap<number, BoardItemV1>): ReadonlySet<number> {
+  const closed = pr.closes.filter(number => onBoard.has(number));
+  return new Set(closed.filter((number) => {
+    const claim = onBoard.get(number)!.claim;
+    return claim.status === 'active' && claim.branch === pr.head_ref && claim.bundle !== null
+      && claim.bundle.length === closed.length && closed.every(entry => claim.bundle!.includes(entry));
+  }));
+}
+
 function refusal(board: BoardV1, pr: BoardPullRequestV1): { readonly reason: BoardMergeRefusalV1; readonly detail: string } | null {
   if (board.acceptance_merge !== 'on') return { reason: 'acceptance_merge_off', detail: `publication.acceptance_merge is ${board.acceptance_merge} on ${board.default_branch}` };
   if (board.plan.status !== 'observed') {
@@ -158,13 +172,15 @@ function refusal(board: BoardV1, pr: BoardPullRequestV1): { readonly reason: Boa
     if (unordered.length > 0) return { reason: 'not_in_merge_order', detail: `${unordered.map(number => `#${number}`).join(' ')} not in the plan merge_order` };
     const last = Math.max(...items.map(number => plan.merge_order.indexOf(number)));
     // Every entry before each linked item must be closed. An earlier issue outside the board has no observed state, so it blocks like an open one.
-    const earlier = plan.merge_order.slice(0, last).filter(number => onBoard.get(number)?.state !== 'closed');
+    const bundle = bundledItems(pr, onBoard);
+    const earlier = plan.merge_order.slice(0, last).filter(number => onBoard.get(number)?.state !== 'closed' && !bundle.has(number));
     const own = earlier.find(number => pr.closes.includes(number));
     if (own !== undefined) return { reason: 'merge_order', detail: `earlier plan item #${own} is closed only by this PR; split the PR` };
     if (earlier.length > 0) return { reason: 'merge_order', detail: `earlier in merge_order and not closed: ${earlier.map(number => `#${number}`).join(' ')}` };
   } else {
     // A parent without a plan merges in blocked-by order: every blocker of each linked item must be closed.
-    const open = [...new Set(items.flatMap(number => onBoard.get(number)!.blocked_by.filter(blocker => blocker.state === 'open').map(blocker => blocker.number)))]
+    const bundle = bundledItems(pr, onBoard);
+    const open = [...new Set(items.flatMap(number => onBoard.get(number)!.blocked_by.filter(blocker => blocker.state === 'open' && !bundle.has(blocker.number)).map(blocker => blocker.number)))]
       .sort((left, right) => left - right);
     const own = open.find(number => pr.closes.includes(number));
     if (own !== undefined) return { reason: 'merge_order', detail: `blocker #${own} is closed only by this PR; split the PR` };

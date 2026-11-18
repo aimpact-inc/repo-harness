@@ -82,6 +82,8 @@ export interface AttentionWindowInput {
   /** The `sent` slots that the window before returned; empty for the first window. */
   readonly sent?: AttentionSentV1;
   readonly collect: () => BoardV1;
+  /** The board that the window before read; A22 compares with it. */
+  readonly previous?: BoardV1 | null;
   readonly host: AttentionHostPortsV1;
   readonly now?: () => Date;
   readonly sleep?: (ms: number) => Promise<void>;
@@ -140,7 +142,7 @@ export async function runAttentionWindow(input: AttentionWindowInput): Promise<A
     await sleep(started.getTime() + WINDOW_WITH_WORKERS_MS - now().getTime());
     return prior;
   }
-  const attention = evaluateBoardAttention(board);
+  const attention = evaluateBoardAttention(board, input.previous ?? null);
   const open = new Set(attention.findings.map(attentionFindingKey));
   // A slot that keeps no open key leaves the map: a watcher that runs for days keeps no empty slot for each terminal.
   const next = new Map<string, Set<string>>();
