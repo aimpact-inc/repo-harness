@@ -147,7 +147,7 @@ The decision is one of:
 
 | Decision | Meaning | Effect |
 |---|---|---|
-| `adopt` | The finding is real. | It is a finding of the review loop (§2.2) with its severity. A blocking one adopted before round 2 ends goes into the round-2 fix. After round 2 there is no round 3: a non-blocking one is recorded as a P3 note, and a blocking one ends the loop by rule 3 of §2.2. |
+| `adopt` | The finding is real. | It is a finding of the review loop (§2.2) with its severity. Include adopted blockers in the round-2 fix before the round starts. Once round 2 starts, record an adopted blocker as a blocking finding for that round and apply §2.2's stop rule. After round 2 there is no round 3: a non-blocking one is recorded as a P3 note, and a blocking one ends the loop by rule 3 of §2.2. |
 | `decline` | The finding is wrong, out of scope or not worth a fix. | One-line reason. It is not a finding of the loop. |
 | `outdated` | The finding is on an older head, and the current head no longer contains the code. | No triage again. It is not a finding of the loop. |
 
