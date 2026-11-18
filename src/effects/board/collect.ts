@@ -321,7 +321,7 @@ function seatBranch(cwd: string | null): string | null {
 
 /** Each terminal with the current branch of its directory, read with git in that directory. The directory stays here. */
 export function seatTerminalsWithBranches(terminals: readonly BoardSeatTerminalReadV1[]): readonly BoardSeatTerminalInputV1[] {
-  return terminals.map(({ cwd, pid: _pid, ...terminal }) => ({ ...terminal, branch: seatBranch(cwd) }));
+  return terminals.map(({ cwd, agent_pid: _agentPid, ...terminal }) => ({ ...terminal, branch: seatBranch(cwd) }));
 }
 
 /**
@@ -367,10 +367,10 @@ function seatLiveness(host: BoardCollectInput['host'], terminals: readonly Board
   return {
     status: 'observed',
     probes: Object.freeze(candidates.flatMap((terminal) => {
-      if (terminal.pid === null) return [];
+      if (terminal.agent_pid === null) return [];
       const screen = host.seatRead(terminal.address, SEAT_SCREEN_LINES);
-      const usable = screen.status === 'observed' && screen.complete && screen.text.trim() !== '';
-      return [Object.freeze({ address: terminal.address, status_ms: terminal.status_ms!, turn: terminal.turn, children: table.counts.get(terminal.pid) ?? 0,
+      const usable = screen.status === 'observed' && screen.text.trim() !== '';
+      return [Object.freeze({ address: terminal.address, status_ms: terminal.status_ms!, turn: terminal.turn, children: table.counts.get(terminal.agent_pid) ?? 0,
         screen_hash: usable ? seatScreenHash(screen.text) : null })];
     })),
   };

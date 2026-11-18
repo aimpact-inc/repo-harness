@@ -1645,12 +1645,12 @@ test('A22 flags a seat that works past the bound with no child process and the s
 
   // The collector reads the process table once and the screen of each seat past the bound only.
   const read = (address: string, status_ms: number, pid: number) => ({ address, name: null, agent: 'pi', state: 'live', status: 'working', status_kind: null, status_msg: null,
-    status_ms, turn: 3, cwd: null, where: 'repo-harness / 1', pid, labels: { seat: 'worker', issue: '1477' } }) as const;
+    status_ms, turn: 3, cwd: null, where: 'repo-harness / 1', agent_pid: pid, labels: { seat: 'worker', issue: '1477' } }) as const;
   const screens: string[] = [];
   const host: BoardHostPortsV1 = { ...boardHostPorts({ env: { PATH: '/nonexistent' } }),
     seatTerminals: () => ({ status: 'observed', terminals: [read('t7', since, 4242), read('t8', Date.parse(recorded.observed_at) - 60_000, 4343)] }),
     childProcessCounts: () => ({ status: 'observed', counts: new Map([[4343, 2]]) }),
-    seatRead: (address) => { screens.push(address); return { status: 'observed', text: '\u280b Working (5m 12s)', complete: true, why: null }; } };
+    seatRead: (address) => { screens.push(address); return { status: 'observed', text: '\u280b Working (5m 12s)', complete: false, why: 'working' }; } };
   expect([replay({ host }).seat_liveness, screens]).toEqual([{ status: 'observed', probes: [{ address: 't7', status_ms: since, turn: 3, children: 0, screen_hash: screen('\u2819 Working (9m 1s)') }] }, ['t7']]);
 });
 
@@ -2454,7 +2454,7 @@ test('board closeout: proofs come first; a bound, clean, pushed seat closes and 
   git(unpushed, 'commit', '-q', '--allow-empty', '-m', 'local only');
   writeFileSync(join(edited, 'note.txt'), 'draft');
   const terminal = (address: string, cwd: string | null, labels: Record<string, string>, state: 'live' | 'finished' = 'live', seat: string | null = 'worker') => ({ address, name: null, agent: 'claude-code', state, status: 'done',
-    status_kind: null, status_msg: null, status_ms: null, turn: 1, cwd, where: 'repo-harness / #1474', pid: null, labels: { ...(seat === null ? {} : { seat }), ...labels } });
+    status_kind: null, status_msg: null, status_ms: null, turn: 1, cwd, where: 'repo-harness / #1474', agent_pid: null, labels: { ...(seat === null ? {} : { seat }), ...labels } });
   const terminals = [terminal('t1', clean, { issue: '11' }), terminal('t2', clean, { seat: 'gatekeeper', pr: '21' }), terminal('t3', join(root, 'gone-caller'), { seat: 'orchestrator' }, 'finished'),
     terminal('t4', kept, { issue: '12' }), terminal('t5', unpushed, { seat: 'reviewer', pr: '22' }), terminal('t6', kept, { issue: '12', pr: '99' }),
     terminal('t7', edited, { seat: 'gatekeeper', pr: '22' }), terminal('t8', main, { seat: 'reviewer', pr: '23' }), terminal('t9', main, { seat: 'reviewer', pr: '24' }),

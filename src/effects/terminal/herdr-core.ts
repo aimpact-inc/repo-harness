@@ -531,7 +531,8 @@ export function boardSeatTerminals(terminals: readonly (HcTerminal & { readonly 
   return terminals.filter(terminal => terminal.labels[RH_LABEL.service] === undefined).map(terminal => ({
     address: terminal.address, name: terminal.name, agent: terminal.agent, state: terminal.state, status: terminal.status?.state ?? null,
     status_kind: terminal.status?.kind ?? null, status_msg: terminal.status?.msg ?? null, status_ms: terminal.status_ms ?? null,
-    turn: terminal.turn, cwd: terminal.cwd ?? null, where: terminal.labels[HERDR_APP_LABEL.where] ?? null, pid: terminal.pid,
+    turn: terminal.turn, cwd: terminal.cwd ?? null, where: terminal.labels[HERDR_APP_LABEL.where] ?? null,
+    agent_pid: terminal.foreground?.pid ?? terminal.pid,
     labels: { seat: terminal.labels[RH_LABEL.seat], issue: terminal.labels[RH_LABEL.issue], pr: terminal.labels[RH_LABEL.pr], parent: terminal.labels[RH_LABEL.parent] },
   }));
 }

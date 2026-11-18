@@ -177,17 +177,18 @@ export interface BoardSeatTerminalReadV1 {
   readonly cwd: string | null;
   /** The Herdr.app `where` label; null when no Herdr.app pane shows the terminal. */
   readonly where: string | null;
-  /** The program's pid; null when hc reports none. Only the liveness probe reads it. */
-  readonly pid: number | null;
+  /** The agent's pid: hc's foreground process, else the terminal program (a seat argv can wrap the agent in a login shell); null when hc reports neither. Only the liveness probe reads it. */
+  readonly agent_pid: number | null;
   readonly labels: { readonly seat?: string; readonly issue?: string; readonly pr?: string; readonly parent?: string };
 }
 
 /** A read terminal with its branch in place of its directory and no pid: the board carries no machine-local path or process id (ADR-0002). */
-export type BoardSeatTerminalInputV1 = Omit<BoardSeatTerminalReadV1, 'cwd' | 'pid'> & { readonly branch: string | null };
+export type BoardSeatTerminalInputV1 = Omit<BoardSeatTerminalReadV1, 'cwd' | 'agent_pid'> & { readonly branch: string | null };
 
 /**
  * One liveness probe of a seat that reports `working` for longer than the stalled bound: the number of child processes of its program
- * and the hash of its screen (`seatScreenHash`); `screen_hash` is null when the screen read failed, came back empty or incomplete.
+ * and the hash of its screen (`seatScreenHash`); `screen_hash` is null when the screen read failed or came back empty. hc marks the
+ * read of a working terminal incomplete, so the probe does not require a complete read: both reads hash the same screen tail.
  * `status_ms` and `turn` bind the probe to one working status, so A22 compares two probes of the same turn only.
  */
 export interface BoardSeatProbeV1 {
