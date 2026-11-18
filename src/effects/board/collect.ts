@@ -1,10 +1,11 @@
 import { execFile, spawnSync, type ExecFileException } from 'child_process';
 import { architecturePort, isArchitectureUnavailable, type ArchctxProviderOptions } from '../../core/architecture/contracts';
 import {
-  SEAT_SCREEN_LINES, linkedPullRequests, projectBoard, seatScreenHash, seatTerminal, type BoardAcceptanceMergeV1, type BoardDailyRunInputV1, type BoardExecutionV1, type BoardHostPortsV1,
+  linkedPullRequests, projectBoard, seatTerminal, type BoardAcceptanceMergeV1, type BoardDailyRunInputV1, type BoardExecutionV1, type BoardHostPortsV1,
   type BoardPathOwnerV1, type BoardPathOwnersV1, type BoardRequiredContextsV1, type BoardSeatLivenessV1, type BoardSeatTerminalInputV1, type BoardSeatTerminalReadV1, type BoardToolingV1, type BoardV1,
 } from '../../core/board/board';
 import { ADVISOR_SEAT } from '../../core/board/advisor-seat';
+import { sha256Hex } from '../../core/evidence/sha256';
 import { STALLED_WORKING_MS } from '../../core/board/attention';
 import { readReviewI3Paths } from '../../core/board/hazards';
 import type { BoardPullRequestTierEvidenceV1 } from '../../core/board/review-rules';
@@ -352,6 +353,17 @@ function execution(input: BoardCollectInput, repositoryId: number, items: Readon
     execution: { status: 'observed', terminals: Object.freeze(seatTerminalsWithBranches(terminals).map(seatTerminal)) },
     seat_liveness: seatLiveness(input.host, terminals, Date.parse(observedAt)),
   };
+}
+
+/** The screen lines that a liveness probe reads. */
+const SEAT_SCREEN_LINES = 40;
+const SPINNER_FRAMES = /[\u2800-\u28FF]/gu;
+/** Elapsed-time counters such as `12s`, `1m 05s`, `2h`, `340ms` and `03:12`; they move while a stream hangs. Token counters such as `↓ 2.1k` stay. */
+const ELAPSED_COUNTERS = /\b\d+(?:\.\d+)?\s?(?:ms|s|m|h)\b|\b\d{1,2}:\d{2}(?::\d{2})?\b/gu;
+
+/** The hash of a seat screen without its Braille spinner frames and elapsed-time counters, which change while the agent makes no progress. */
+export function seatScreenHash(text: string): string {
+  return sha256Hex(text.replace(SPINNER_FRAMES, '').replace(ELAPSED_COUNTERS, ''));
 }
 
 /**

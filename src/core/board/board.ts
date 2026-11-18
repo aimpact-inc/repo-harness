@@ -20,7 +20,6 @@ import {
   type OpenQuestionsV1,
 } from './source';
 import { isCiRepairIssueBody } from '../ci/test-report';
-import { sha256Hex } from '../evidence/sha256';
 import {
   acceptance,
   effectiveTier,
@@ -203,16 +202,6 @@ export type BoardSeatLivenessV1 =
   | { readonly status: 'observed'; readonly probes: readonly BoardSeatProbeV1[] }
   | { readonly status: 'unavailable'; readonly reason: string };
 
-/** The screen lines that a liveness probe reads. */
-export const SEAT_SCREEN_LINES = 40;
-const SPINNER_FRAMES = /[\u2800-\u28FF]/gu;
-/** Elapsed-time counters such as `12s`, `1m 05s`, `2h`, `340ms` and `03:12`; they move while a stream hangs. Token counters such as `↓ 2.1k` stay. */
-const ELAPSED_COUNTERS = /\b\d+(?:\.\d+)?\s?(?:ms|s|m|h)\b|\b\d{1,2}:\d{2}(?::\d{2})?\b/gu;
-
-/** The hash of a seat screen without its Braille spinner frames and elapsed-time counters, which change while the agent makes no progress. */
-export function seatScreenHash(text: string): string {
-  return sha256Hex(text.replace(SPINNER_FRAMES, '').replace(ELAPSED_COUNTERS, ''));
-}
 
 const POSITIVE = /^[1-9][0-9]*$/u;
 
