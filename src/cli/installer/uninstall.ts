@@ -14,14 +14,13 @@ import { readInstallState } from './install-profile';
 import { installStatePendingMigration, migrateInstallState, planInstallStateMigration } from './install-state-migration';
 import type { PathRecord } from '../../core/host-config/types';
 import { pathRecordsDigest, readPathRecords, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
-import { installProfileStatePath } from './install-state';
+import { InstallStateError, installProfileStatePath } from './install-state';
 import { assertConfigurationPath, configurationReceiptPath, hostConfigurationRoot, writePrivateConfiguration } from './configuration-ownership';
 import { migrateCodexConfigRecords, planCodexConfigMigration, previewAdoptedRevert } from './codex-config-migration';
 import { migrateJsonConfigRecords, planJsonConfigMigration, previewJsonAdoptedRevert } from './json-config-migration';
 import { openHostConfigGate, planPathRevert, type HostConfigAdoption, type HostConfigRevertEntry } from '../../effects/host-config/gate';
 import { hostConfigPaths, resolveHostPath } from '../../effects/host-config/store';
 import { FileSyntaxError, parseJsonText, parseTomlText } from '../../core/evidence/file-syntax';
-import { InstallStateError } from './install-state';
 
 export interface UninstallOptions { target: 'codex' | 'claude' | 'both'; dryRun?: boolean; env?: NodeJS.ProcessEnv; runtimeLock?: RuntimeTransactionContext }
 export interface UninstallItem { path: string; action: 'remove' | 'restore' | 'preserve' | 'unresolved' | 'note'; reason: string }
