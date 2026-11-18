@@ -106,6 +106,7 @@ import {
   commandPluginRepairLines,
   notAddedPluginLine,
   rollbackRuntimeHostConfig,
+  migrateInParentTransaction,
   planInstallSelection,
   prepareInstallSelectionSwitch,
   readInstallState,
@@ -411,8 +412,10 @@ export function runCandidateRuntimeReconciliation(
   // the whole state, including the Pi package and Pi skill-root receipts.
   const complete = request.sync_skill && request.host_adapters;
   // A released parent holds the lock; its transaction keeps the state, and the ledger keeps the records.
-  migrateInstallState(env);
-  if (request.host_adapters) migrateRuntimeHostConfig(env);
+  migrateInParentTransaction(request.transaction_backup_root, env, () => {
+    migrateInstallState(env);
+    if (request.host_adapters) migrateRuntimeHostConfig(env);
+  });
   initializeStagedSkillObservations(request.transaction_backup_root, env);
   const state = requireInstallState(env);
   const resolved = resolveRecordedSelection(state, request.target, env, { partial: !complete });
