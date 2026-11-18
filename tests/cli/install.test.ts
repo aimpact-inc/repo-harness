@@ -1,16 +1,18 @@
 import { describe, expect, test } from 'bun:test';
-import { installStateFixturePath, withTempHome } from '../helpers/install-ownership';
+import { installStateFixturePath, recordLegacyInstallOwnership, withTempHome } from '../helpers/install-ownership';
 import * as fs from 'fs';
 import * as path from 'path';
 import { spawnSync } from 'child_process';
-import { runInstall, runUninstall } from '../../src/cli/commands/install';
+import { previewHostConfig, resolveOverrides, runInstall, runUninstall } from '../../src/cli/commands/install';
+import { NO_OVERRIDES } from '../../src/core/host-config/override';
+import { routesForHost } from '../../src/cli/hook/route-registry';
 import { CLAUDE_STATUS_LINE_PIPE, claudeTarget } from '../../src/cli/installer/targets/claude';
 import type { Location } from '../../src/cli/installer/types';
 import { requestUserInputFragment } from '../../src/cli/installer/targets/codex';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
 import { hostConfigPaths } from '../../src/effects/host-config/store';
 import { isRepoHarnessManagedHookCommand } from '../../src/core/adoption/managed-hook-config';
-import { buildManagedHooks, compareManagedHookProjection } from '../../src/cli/installer/managed-entries';
+import { buildManagedHooks, compareManagedHookProjection, hookSelector, managedStatusLine } from '../../src/cli/installer/managed-entries';
 
 const ROOT = path.join(import.meta.dir, '..', '..');
 const CLI = path.join(ROOT, 'src/cli/index.ts');
@@ -56,6 +58,39 @@ describe('issue 698 host configuration ownership', () => {
       expect(fs.readFileSync(filePath, 'utf8')).toBe(original.replace('false   # I prefer no prompts', 'true'));
       expect(gate.revert([filePath]).map((entry) => entry.action)).toEqual(['text_removed']);
       expect(fs.readFileSync(filePath, 'utf8')).toBe(original);
+    });
+  });
+
+  test('only an override selection replaces a user value; the dry run lists the items that the apply then writes, and writes nothing', () => {
+    withTempHome('repo-harness-install', (home) => {
+      const settings = path.join(home, '.claude/settings.json');
+      const original = '{"statusLine":{"type":"command","command":"user-line"}}\n';
+      fs.mkdirSync(path.dirname(settings), { recursive: true });
+      fs.writeFileSync(settings, original);
+      const file = fs.realpathSync(settings);
+      const ledgerPath = hostConfigPaths(process.env).ledger;
+      const recorded = () => fs.existsSync(ledgerPath) ? JSON.parse(fs.readFileSync(ledgerPath, 'utf8')).fragments.map((entry: { selector: string }) => entry.selector) as string[] : [];
+      const preview = (overrides: typeof NO_OVERRIDES) => {
+        const ledgerBefore = fs.existsSync(ledgerPath) ? fs.readFileSync(ledgerPath) : null;
+        const settingsBefore = fs.readFileSync(settings);
+        const items = previewHostConfig('claude', overrides, process.env).items;
+        expect(fs.existsSync(ledgerPath) ? fs.readFileSync(ledgerPath) : null).toEqual(ledgerBefore);
+        expect(fs.readFileSync(settings)).toEqual(settingsBefore);
+        return items;
+      };
+
+      const unselected = preview(NO_OVERRIDES);
+      expect(unselected.filter((item) => item.action.startsWith('host_config_'))).toEqual([{ path: file, selector: 'statusLine', action: 'host_config_override_skipped' }]);
+      expect(runInstall({ target: 'claude', location: 'global' }).exitCode).toBe(0);
+      expect(JSON.parse(fs.readFileSync(settings, 'utf8')).statusLine.command).toBe('user-line');
+      expect(recorded().sort()).toEqual(unselected.filter((item) => item.action === 'add').map((item) => item.selector).sort());
+
+      const overrides = resolveOverrides([`${settings}#statusLine`], process.env);
+      expect(preview(overrides)).toEqual([{ path: file, selector: 'statusLine', action: 'override' }]);
+      const before = recorded();
+      expect(runInstall({ target: 'claude', location: 'global', overrides }).exitCode).toBe(0);
+      expect(JSON.parse(fs.readFileSync(settings, 'utf8')).statusLine).toEqual(managedStatusLine());
+      expect(recorded().filter((selector) => !before.includes(selector))).toEqual(['statusLine']);
     });
   });
 
@@ -265,6 +300,50 @@ describe('install command (Phase 1B)', () => {
         expect(fs.readdirSync(path.join(home, '.codex'))).toEqual(['skills']);
         expect(fs.readdirSync(path.join(home, '.claude'))).toEqual(['skills']);
       }
+    });
+  }, 30_000);
+
+  test('install refuses an override that no request of the run carries before any write', () => {
+    withTempHome('repo-harness-install', (home) => {
+      const settings = path.join(home, '.claude/settings.json');
+      fs.mkdirSync(path.dirname(settings), { recursive: true });
+      fs.writeFileSync(settings, '{"statusLine":{"type":"command","command":"user-line"}}\n');
+      const before = fs.readdirSync(home, { recursive: true }).map(String).sort();
+      const codexHook = `${path.join(home, '.codex/hooks.json')}#${hookSelector(routesForHost('codex')[0]!)}`;
+      for (const args of [
+        ['--override', `${settings}#nope`],
+        // The Codex writers take no selection yet.
+        ['--override', codexHook],
+        ['--no-hooks', '--override', `${settings}#statusLine`],
+        ['--override', settings],
+        ['--state', '--override', `${settings}#statusLine`],
+      ]) {
+        const result = spawnSync(process.execPath, [CLI, 'install', ...args], { cwd: ROOT, env: { ...process.env, HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0' }, encoding: 'utf-8' });
+        expect(result.status, args.join(' ')).not.toBe(0);
+        expect(result.stderr, args.join(' ')).toContain('--override');
+        expect(fs.readdirSync(home, { recursive: true }).map(String).sort()).toEqual(before);
+      }
+    });
+  }, 60_000);
+
+  test('install --dry-run on a protocol 3 state lists the host-config items of every override and writes nothing', () => {
+    withTempHome('repo-harness-install', (home) => {
+      const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0' };
+      recordLegacyInstallOwnership([], env);
+      const settings = path.join(home, '.claude/settings.json');
+      fs.mkdirSync(path.dirname(settings), { recursive: true });
+      fs.writeFileSync(settings, '{"statusLine":{"type":"command","command":"user-line"}}\n');
+      const hook = hookSelector(routesForHost('claude')[0]!);
+      const before = fs.readdirSync(home, { recursive: true }).map(String).sort();
+      const state = fs.readFileSync(installStateFixturePath(env));
+      const result = spawnSync(process.execPath, [CLI, 'install', '--dry-run', '--json', '--target', 'claude',
+        '--override', `${settings}#statusLine`, '--override', `${settings}#${hook}`], { cwd: ROOT, env, encoding: 'utf-8' });
+      expect(result.status, result.stderr).toBe(0);
+      const items = JSON.parse(result.stdout).host_config.items;
+      expect(items).toContainEqual({ path: fs.realpathSync(settings), selector: 'statusLine', action: 'override' });
+      expect(items).toContainEqual({ path: fs.realpathSync(settings), selector: hook, action: 'add' });
+      expect(fs.readdirSync(home, { recursive: true }).map(String).sort()).toEqual(before);
+      expect(fs.readFileSync(installStateFixturePath(env))).toEqual(state);
     });
   }, 30_000);
 

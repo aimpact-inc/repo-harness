@@ -433,6 +433,43 @@ describe('candidate-bound global runtime reconciliation', () => {
     }
   });
 
+  test('the candidate refuses a selection that its own requests do not carry before any write, and applies a carried one', () => {
+    const root = mkdtempSync(join(tmpdir(), 'repo-harness-candidate-override-'));
+    const home = join(root, 'home');
+    const cwd = join(root, 'repo');
+    const candidate = fixtureCandidate(root);
+    const env = { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun') };
+    try {
+      mkdirSync(cwd, { recursive: true });
+      writeCoreOnlyInstallState(home);
+      const settings = join(home, '.claude', 'settings.json');
+      const original = '{"statusLine":{"type":"command","command":"user-line"}}\n';
+      mkdirSync(join(home, '.claude'), { recursive: true });
+      writeFileSync(settings, original);
+      const run = (selector: string) => {
+        const transaction = beginInstallHostTransaction([], env);
+        const result = runCandidateChild({
+          protocol: 3, parent_token: 'd'.repeat(64), candidate, cwd, target: 'claude', sync_skill: false, host_adapters: true,
+          external_skills: false, obsidian_skills: false, codegraph: false,
+          transaction_id: sha256Prefixed(transaction.backup_root), transaction_backup_root: transaction.backup_root,
+          overrides: [{ path: realpathSync(settings), selector }],
+        }, env);
+        rollbackInstallHostTransaction(transaction);
+        return result;
+      };
+      const refused = run('nope');
+      expect(refused.status).toBe(1);
+      expect(String(refused.stderr)).toContain('--override');
+      expect(readFileSync(settings, 'utf-8')).toBe(original);
+      expect(existsSync(join(home, '.repo-harness', 'config', 'ledger.json'))).toBe(false);
+      const carried = run('statusLine');
+      expect(carried.status, String(carried.stderr)).toBe(0);
+      expect(JSON.parse(readFileSync(settings, 'utf-8')).statusLine.command).toEndWith(' statusline');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('#973: a 0.24.1 parent lock record without start_time authorizes the candidate; a pid or token mismatch does not', () => {
     const root = mkdtempSync(join(tmpdir(), 'repo-harness-candidate-legacy-lock-'));
     const home = join(root, 'home');
