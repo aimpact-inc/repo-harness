@@ -2,13 +2,16 @@ import { createHash } from 'crypto';
 import { prepareInstallSelectionSwitch, versions } from '../../src/cli/installer/install-profile';
 import { beforeAll, test, expect } from 'bun:test';
 import { installStateFixturePath, recordLegacyInstallOwnership, recordPluginSelection, seedGlobalPackageFixture, seedPathRecords, withTempHome } from '../helpers/install-ownership';
-import { runInstall } from '../../src/cli/commands/install';
+import { runInstall, runUninstall } from '../../src/cli/commands/install';
+import { ensureHerdrCore } from '../../src/cli/commands/global-runtime';
+import { HC_MIN_VERSION } from '../../src/core/terminal/herdr-pin';
+import { startFakeHcRelease, writeFakeUserPathPowershell } from '../helpers/fake-hc';
 import { jsonFragment } from '../../src/core/host-config/json-fragment';
 import { CLAUDE_ROOT_CONFIG_BACKUP, CODEGRAPH_MCP_SELECTOR } from '../../src/core/host-config/claude-config';
 import type { PathCommitted } from '../../src/core/host-config/types';
 import { pathRecordHost, pathRecordKey } from '../../src/effects/host-config/path-records';
 import { hashManagedTree } from '../../src/effects/managed-tree';
-import { appendFileSync, chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync, statSync } from 'fs';
+import { appendFileSync, chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, relative } from 'path';
 import { spawnSync } from 'child_process';
@@ -304,7 +307,7 @@ test.each([[3,1],[3,2],[4,2]])('a protocol %i install state with a protocol %i l
   const state=installStateFixturePath(env);writeFileSync(state,JSON.stringify({...JSON.parse(readFileSync(state,'utf8')),protocol:4,pi_packages:[]}));
  }
  // The ledger as an earlier rh version left it.
- const {paths,retired:_retired,recovery:_recovery,...text}=ledger(home);
+ const {paths,retired:_retired,recovery:_recovery,tools:_tools,...text}=ledger(home);
  writeFileSync(join(home,'.repo-harness/config/ledger.json'),JSON.stringify(ledgerProtocol===1?{...text,protocol:1}:{...text,protocol:2,paths}));
  const before=tree(home);
  const dryRun=runUserUninstall({target:'both',dryRun:true,env});
@@ -520,3 +523,63 @@ test('an old manifest record of the Codex CodeGraph table migrates to the ledger
   expect(readFileSync(path,'utf8')).toBe('model = "user"\n');expect(existsSync(join(home,'.repo-harness/install-state.json'))).toBe(false);
  });
 });
+
+/** The entries outside ~/.repo-harness/, where an uninstall keeps its own state. */
+function hostTree(home:string){return readdirSync(home,{recursive:true}).map(String).filter((path)=>!path.startsWith('.repo-harness')).sort().map((path)=>{const stat=lstatSync(join(home,path));return stat.isFile()?`${path}:${createHash('sha256').update(readFileSync(join(home,path))).digest('hex')}`:path;}).join('\n');}
+/** The hc step of a fresh install from a fake pinned release: the real producer of the herdr-core tool record. */
+async function installHerdrCore(root:string,env:NodeJS.ProcessEnv,windows:boolean){
+ const pkg=join(root,'pkg'),release=join(root,'release');mkdirSync(pkg);mkdirSync(release);
+ writeFileSync(join(pkg,windows?'herdr-core.exe':'herdr-core'),`#!/bin/sh\necho "hc ${HC_MIN_VERSION}"\n`,{mode:0o755});
+ if(windows){mkdirSync(join(pkg,'conpty'));writeFileSync(join(pkg,'conpty','conpty.dll'),'dll\n');writeFileSync(join(env.SystemRoot!,'System32','tar.exe'),'#!/bin/sh\nexec tar "$@"\n',{mode:0o755});}
+ expect(spawnSync('tar',['-czf',join(release,'asset'),'-C',pkg,'.']).status).toBe(0);
+ const server=startFakeHcRelease(root,release);
+ try{
+  const asset={url:`http://127.0.0.1:${await server.port}/asset`,sha256:createHash('sha256').update(readFileSync(join(release,'asset'))).digest('hex')};
+  const {step}=ensureHerdrCore({cwd:root,env,command:'install',platform:windows?'win32-x64':'darwin-arm64',minVersion:HC_MIN_VERSION,assets:{'macos-aarch64':asset,'windows-x86_64':asset}});
+  expect(step.status,step.detail).toBe('ok');
+ }finally{server.stop();}
+}
+test.each([
+ {platform:'unix',edited:false},{platform:'windows',edited:false},
+ {platform:'unix',edited:true},{platform:'windows',edited:true},
+])('a fresh hc install: the default uninstall keeps it with one kept line; --with-tools removes only unchanged entries ($platform, edited $edited)',async({platform,edited})=>{
+ const root=realpathSync(mkdtempSync(join(tmpdir(),'user-uninstall-tools-'))),home=join(root,'home'),windows=platform==='windows';
+ const systemRoot=join(root,'Windows'),registry=join(root,'registry.json');
+ mkdirSync(home);mkdirSync(join(systemRoot,'System32'),{recursive:true});
+ const env:NodeJS.ProcessEnv={...process.env,HOME:home,GIT_CONFIG_NOSYSTEM:'1',PATH:'/usr/bin:/bin',SystemRoot:systemRoot,LOCALAPPDATA:join(home,'AppData','Local')};delete env.XDG_STATE_HOME;delete env.XDG_CONFIG_HOME;
+ writeFakeUserPathPowershell(join(systemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe'),registry,join(root,'powershell.log'));
+ const userPath={existed:true,kind:'ExpandString',raw:'%USERPROFILE%\\bin'};writeFileSync(registry,JSON.stringify(userPath));
+ const dir=windows?join(home,'AppData','Local','Programs','herdr-core'):join(home,'.local','bin');
+ try{
+  await installHerdrCore(root,env,windows);
+  const installed=hostTree(home),registryInstalled=readFileSync(registry,'utf8');
+  const kept=runUserUninstall({target:'both',env});
+  expect(kept.items.filter((item)=>item.action==='kept'&&item.reason.startsWith('shared tools'))).toEqual([{path:join(home,'.repo-harness/config/ledger.json'),action:'kept',
+   reason:`shared tools that rh installed stay: herdr-core ${HC_MIN_VERSION} (${windows?'herdr-core.exe, conpty, hc.exe) and its user PATH entry':'herdr-core, hc)'}; remove herdr-core with: rh uninstall --with-tools`}]);
+  expect([kept.exitCode,hostTree(home),readFileSync(registry,'utf8')]).toEqual([0,installed,registryInstalled]);
+  if(edited&&windows)writeFileSync(registry,JSON.stringify({...userPath,raw:`${userPath.raw};${dir.toUpperCase()}`}));
+  if(edited&&!windows){appendFileSync(join(dir,'herdr-core'),'# user patch\n');writeFileSync(join(dir,'other-tool'),'user\n');}
+  expect(runUninstall({target:'codex',location:'global',withTools:true,env} as never).exitCode).toBe(2);
+  const before=hostTree(home),registryBefore=readFileSync(registry,'utf8');
+  const preview=runUserUninstall({target:'both',env,withTools:true,dryRun:true});
+  expect([hostTree(home),readFileSync(registry,'utf8')]).toEqual([before,registryBefore]);
+  const removed=runUserUninstall({target:'both',env,withTools:true});
+  expect({exitCode:preview.exitCode,items:preview.items}).toEqual({exitCode:removed.exitCode,items:removed.items});
+  const tool=(path:string)=>removed.items.find((item)=>item.path===path)?.action;
+  if(!edited){
+   expect(removed.exitCode,removed.lines.join('\n')).toBe(0);
+   // Nothing that the hc step created stays: the install dir, the directories above it that it created, and the PATH entry.
+   expect(existsSync(windows?join(home,'AppData'):join(home,'.local'))).toBe(false);
+   expect(JSON.parse(readFileSync(registry,'utf8'))).toEqual(userPath);
+   expect(ledger(home).tools).toEqual({});
+  }else if(windows){
+   expect([removed.exitCode,existsSync(dir),tool(`HKCU\\Environment\\Path: ${dir}`)]).toEqual([1,false,'unresolved']);
+   expect(readFileSync(registry,'utf8')).toBe(registryBefore);
+   expect(Object.keys(ledger(home).tools['herdr-core'])).toContain('path_entry');
+  }else{
+   // The changed binary and the user's file stay; the unchanged link goes.
+   expect([removed.exitCode,tool(join(dir,'herdr-core')),tool(join(dir,'hc')),tool(dir),readdirSync(dir).sort()]).toEqual([1,'unresolved','restored','kept',['herdr-core','other-tool']]);
+   expect(Object.keys(ledger(home).tools['herdr-core'].paths)).toEqual([join(dir,'herdr-core')]);
+  }
+ }finally{rmSync(root,{recursive:true,force:true});}
+},30_000);

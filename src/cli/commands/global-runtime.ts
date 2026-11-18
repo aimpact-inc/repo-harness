@@ -2,7 +2,7 @@ import { requireHome } from "../../effects/repo-harness-home";
 import { parseJsonText } from "../../core/evidence/file-syntax";
 import { syncInstalledSkillCopies } from "../installer/skill-sync";
 import { openHostConfigGate } from "../../effects/host-config/gate";
-import { recordedToolIsCurrent, windowsUserPathPort } from "../../effects/host-config/tools";
+import { recordedToolIsCurrent, windowsPowershellPath, windowsUserPathPort } from "../../effects/host-config/tools";
 import { hostConfigPaths, readLedger } from "../../effects/host-config/store";
 import { configureRequiredHerdrSkill } from "./herdr-skill";
 import type { RuntimeTransactionContext } from '../../effects/locking/runtime-transaction-lock';
@@ -1580,7 +1580,7 @@ function hcInstallLayout(assetName: string, env: NodeJS.ProcessEnv): HcInstallLa
   if (!env.SystemRoot) return { failure: "SystemRoot is not set; it names the Windows tar.exe that opens the herdr-core zip" };
   const tar = join(env.SystemRoot, "System32", "tar.exe");
   if (!existsSync(tar)) return { failure: `${tar} is missing; it opens the herdr-core zip (Windows 10 1803 or newer)` };
-  const powershell = join(env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const powershell = windowsPowershellPath(env)!;
   if (!existsSync(powershell)) return { failure: `${powershell} is missing; it adds the herdr-core directory to the user PATH` };
   return { dir: join(env.LOCALAPPDATA, "Programs", "herdr-core"), binary: "herdr-core.exe", members: ["herdr-core.exe", "conpty"], link: "hc.exe", linkKind: "hardlink", tar, powershell };
 }

@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { HostConfigError, type ToolId } from '../../core/host-config/types';
 import type { UserPathPort, UserPathValue } from '../../core/host-config/path-entry';
 import { runProcess } from '../process-runner';
@@ -16,6 +17,11 @@ export function recordedToolIsCurrent(env: NodeJS.ProcessEnv, tool: ToolId, path
   const record = readLedger(paths).tools[tool];
   if (!record || !(hostPathKey(paths, path) in record.paths)) return false;
   return Object.entries(record.paths).every(([key, { committed }]) => sameCommitted(observePathEntry(key), committed));
+}
+
+/** The Windows PowerShell that reads and writes the user `Path` value; null without `SystemRoot`. */
+export function windowsPowershellPath(env: NodeJS.ProcessEnv): string | null {
+  return env.SystemRoot ? join(env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : null;
 }
 
 /** The first line names the operation, so a test double can read the command that it gets. */

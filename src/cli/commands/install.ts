@@ -36,6 +36,7 @@ export interface UninstallCommandOptions {
   location: Location;
   dryRun?: boolean;
   removeEditedBlocks?: readonly string[];
+  withTools?: boolean;
 }
 
 export interface InstallCommandResult {
@@ -185,6 +186,9 @@ export function formatHostConfigPreview(preview: HostConfigPreview): string[] {
 export function runUninstall(opts: UninstallCommandOptions): InstallCommandResult {
   if (opts.location !== 'global') {
     return { exitCode: 2, lines: [`rh uninstall: invalid --location "${opts.location}" (expected: global)`] };
+  }
+  if (opts.withTools && opts.target !== 'both') {
+    return { exitCode: 2, lines: [`rh uninstall: --with-tools needs --target both: herdr-core and its PATH entry serve both hosts`] };
   }
   return runUserUninstall(opts);
 }
