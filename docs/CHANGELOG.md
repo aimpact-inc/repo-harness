@@ -2,6 +2,72 @@
 
 All notable changes to this skill are documented here.
 
+## [0.35.0] - 2026-11-18
+
+### Breaking
+
+- Migration path: each old name below stops working in this release and has no alias. Use the replacement that its line names.
+- Migration: install state protocol 3 with `ownership_manifest`, and the fleet receipt `~/.repo-harness/agent-fleet-user-managed.json` → ledger path records (install state protocol 4, ledger protocol 2); `rh status` and the other readers fail with `install_state_protocol_retired` until `rh update` migrates the state once. (#2896)
+- Migration: `rh uninstall --recover-interrupted` → removed with no replacement; `rh update` migrates the configuration receipt `~/.repo-harness/configuration-restore.json` into ledger records once, and a receipt with a `pending` entry or a malformed receipt fails closed with `host_config_invalid_state` and a recovery step. (#2848)
+- Migration: `rh rules check TestBudget --body-file <path>` → `rh rules check TestBudget` without the flag; the rule reads no PR body, reports `over_budget` as data, and a rule result never fails the command. (#3181)
+- Migration: the `Test budget exception` section of a PR body → removed with no replacement; merge readiness no longer reads a `Test budget` result, and the `test_budget_stale`, `test_budget_missing`, `test_budget_pending`, `test_budget_violation`, `test_budget_error` and `test_budget_policy_invalid` blockers are gone. (#3181)
+- Migration: board attention rule R6 → removed with no replacement; an idle seat with no ready bundle is not a finding. (#3182)
+
+### Added
+
+- `rh seats launch <seat> --cwd <path> --task <text>` opens the seat in a Herdr.app tab with the `rh seats argv` argv. The space comes from `--space` or from the `herdr.space` label of the calling terminal; without one, or when Herdr.app refuses the tab, the launch fails closed and starts no terminal.
+- Attention rule A21 (P1, orchestrator) names a live seat terminal that no Herdr.app pane shows, so a seat started with `hc run --bg` is no longer invisible. The board seat terminals carry the Herdr.app `where` label as `where` (null when unbound).
+- `rh board dispatch --issues a,b,c` starts one seat, one worktree and one pull request for a module bundle. Each claim carries an `Issues:` line; attention rules A4, A12 and A13 read the whole bundle, and `rh board merge` accepts a pull request that closes every issue of its bundle claim, on its head branch, without a split.
+- Attention rule A22 tells the orchestrator about a stalled seat: it reports `working` for more than 300 s, its program has no child process, and its screen without spinner frames and elapsed-time counters is the same as in the board read before. The board shows the probes as `seat_liveness`; nothing kills the seat. The board protocol is 13.
+- `rh review collect` closes the done review seat of its pull request after the record publishes and reports the result as `seat_close`.
+- A seat has an `advisor_model` setting (default null). A Claude seat with a value launches with `--advisor <model>`; Codex and Pi seats reject a value, and the Seats page shows the control for Claude seats only. A Claude seat in saving mode launches with `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`, which also turns off an `advisorModel` from the user's Claude Code settings. (#2930, #3091)
+- The policy key `review.i3_paths` names the I3 paths of a repository as path globs. (#3181, #3187)
+
+### Changed
+
+- rh changes `~/.codex/config.toml` through the host-config gate with the `toml-fragment` strategy, and a revert restores the original bytes. An explicit user value of `default_mode_request_user_input` stays, and install names it. The Codex CodeGraph table comes from `codegraph install --print-config codex`; the `rh arch codegraph configure --json` action is `configure-codex` (before: `codex-project-path`). An indented table header and a table at the end of the file without a final newline round-trip. A profile switch that cannot remove a fragment (invalid TOML or JSON, an unsupported spelling, a user edit) prints `[install] kept_edited <path>: …`, keeps the bytes and continues. (#2847, #3038, #3046, #3109, #3079)
+- rh changes `~/.claude/settings.json`, `~/.codex/hooks.json` and `~/.claude.json` by text edits through the gate, and a revert restores the original bytes. A mixed hook entry (an rh route command beside a user command, or a retired rh command beside a user command) fails with `host_config_invalid_state`, keeps the file bytes and names the entry to move out. The Claude CodeGraph server goes to `mcpServers.codegraph` from `codegraph install --print-config claude`, and its tool rule goes to `permissions.allow`; a configure no longer writes the codegraph `UserPromptSubmit` hook or `~/.claude/CLAUDE.md`. (#2848, #3058)
+- The Global Working Rules block in `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` changes through the gate with the `marked-block` strategy. A refresh keeps the bytes and line endings around the block, so uninstall restores the original file. Links are followed. Uninstall prints `[note] <path>: file already absent` and retires the records of a recorded file that is gone. rh no longer writes `~/.repo-harness/global-context-backups/`. (#2849, #3082)
+- Whole host paths (files, links and skill trees) change through the gate with `created`, `replaced` and `user_managed` path records. Uninstall and the plugin switch revert them. A write at a user link writes the link target and keeps the link. `scripts/install-agent-fleet.sh --force` saves the replaced user file in the 0600 vault and prints a `cp` restore command; it imports `~/.repo-harness/replaced-agents/` once, and a stray file there stops the fleet before any change. `rh install --state` prints an `ownership` list of the path records. (#2850, #2896, #3102, #3065, #3161)
+- Herdr, the Waza shared rules, bundled skills, staged skill links and installed command copies write through the gate. A rollback keeps a later user edit. A user copy of a Waza, Herdr or bundled skill that the gate refuses is a skipped row with `host_config_replacement_refused`, `refused_path` and a move-out step, and the other writes commit. (#3076, #3132)
+- `rh upgrade` removes a legacy hook command from `~/.claude/settings.json`, `~/.codex/hooks.json` and repository hook files by a text edit only when it is exactly a hook that a released rh wrote; all other bytes stay. A customized hook, the bare `HOOK_HOST=<host> repo-harness hook <Event> --route <id>` form and other unmatched commands are reported, and the file keeps its bytes. (#3044)
+- `rh rules check TestBudget` reports the budget as data. The second, cross-model review row runs only for an I1, I2 or I3 path, a `.github/**` path, an incomplete file list or a `tier:high` label. A round-1 `PASS` row carries to the fix head, and a High head with no seat starts the gatekeeper and the reviewer in parallel. (#3181, #3187)
+- `worker-deep` and `gatekeeper-deep` default to `gpt-6.2-sol`, and the Sol and Astra fleet roles move to their 6.2 models. Codex and Pi seats accept both 6.2 models; `gpt-6.1-sol` and `gpt-6-astra` stay selectable. The Pi seat range accepts `magpie/agy-cli/gemini-4-carbon`. (#3147, #3086)
+- Round 1 of a Codex or Pi review pins `review_model` in the review session, and each later round checks the isolated configuration against the pin. An open Codex or Pi review without a pin fails with `review_model_unpinned`, which names the `rh review cancel` command and the restart steps. (#3155, #3171)
+- `rh seats argv` only prints the argv. `rh seats launch` failures are `seat_space_missing`, `seat_tab_failed` and `seat_tab_unknown`. (#3166)
+
+### Fixed
+
+- The safety hook judges each output path of a `find` and of a copy: one `find` parser for GNU and BSD (an unknown word is an unknown target, and a writing `find` with one refuses), the `-fprint`, `-fprint0`, `-fls` and `-fprintf` output files, each `-exec`, `-execdir`, `-ok` and `-okdir` template as a simple command, each output that `cp` or `ln` writes below a destination directory (recursive for `-r`, `-R` and `-a`, through links, refused above 1000 children), and `install` destinations under the GNU and BSD option readings. A writing `find` below a link-following start walks the links instead of a refusal. An over-limit glob in an in-root directory is judged by its children, so `rm -f big/*` passes. (#3037, #3041, #3054, #3055, #3057, #3073)
+- A transient ownership lookup failure (`capability_ownership:unavailable`) no longer sends `[Architecture] notice unavailable` to the model at each Stop and turn. The hook writes one stderr line and one `hook-events.jsonl` entry. (#3190)
+- The lock holder settles the copies that a killed install left under `~/.repo-harness/transactions/install-*`: a copy with the same bytes as its host file goes, and a different copy moves to the 0600 vault. Nothing is restored to a host path. A rollback with a missing backup keeps the host path and reports a failure. (#3043)
+- An update from an rh 0.34.0 parent whose candidate fails keeps the converted ledger entries and puts the ledger and `agent-fleet-user-managed.json` back byte for byte. (#3167)
+- A parse error of a user or rh-written JSON or TOML file names only the path (`<path>: the file is not valid JSON` or `TOML`) and the fix, without the parser text. The acceptance receipt reader still prints the parser text. (#3164, #3183, #3175)
+- `rh arch debt --base <ref>` caches the base report under `<git-common-dir>/repo-harness/cache/arch-debt/`, and a killed run leaves no `repo-harness-debt-base-*` checkout. An invalid cache record fails with `RH_ARCHITECTURE_DEBT_CACHE_INVALID`. (#3186)
+- A corrupt `archctx resolve` JSON raises `RH_ARCHCTX_RESOLVE_CORRUPT_JSON` and keeps its exit code, the stdout size, the first and last 128 bytes of stdout, the last 128 bytes of stderr and the parse error. (#3075)
+- Rebuild the released managed values list for v0.34.0. (#3061)
+
+### Removed
+
+- Attention rule R6 (free worker seats and a short ready queue) is gone: an idle seat with no ready bundle is not a finding.
+- Merge readiness no longer reads the `TestBudget` result, and the PR-body `Test budget exception` parser is deleted. (#3181)
+- `rh uninstall --recover-interrupted` is deleted. (#2848)
+
+### Documentation
+
+- The managed Global Working Rules block and the issue-flow skill describe diff-only review with one reviewer by default, a second cross-model row only for I1, I2 or I3 paths, at most two review rounds, P2 and P3 findings kept in the review record without an issue, module bundles, and a Test budget report without a cap. (#3190, #3181)
+- The issue-flow skill asks for one CI run per change: a clean stacked PR merges without a merge of main, and a worker pushes once per review round. (#3067)
+- The Herdr Dispatch guide starts seats with `rh seats launch`, `rh board dispatch` or `rh board review`. (#3172)
+
+### Upgrade
+
+- Run `rh update` once after the package install. It migrates the install state to protocol 4 and the ledger to protocol 2, imports the configuration receipt, and refreshes the Global Working Rules block, the hook adapters and the skills through the gate. Until it runs, `rh status` fails with `install_state_protocol_retired`.
+- When `rh install` or `rh update` stops with `host_config_invalid_state` for a hook entry, move the named rh command out of the user hook entry, then run the command again. `rh upgrade` removes legacy rh hook commands that are exactly a released form.
+
+### Rollback
+
+- A downgrade below 0.35.0 after `rh update` fails closed: an older rh cannot read the protocol 2 ledger or a `replaced` path record. Run `rh uninstall` with 0.35.0 first.
+
 ## [0.34.0] - 2026-11-17
 
 ### Breaking
