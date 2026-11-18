@@ -21,7 +21,9 @@ export function repositoryExcludesLedgerPath(env: NodeJS.ProcessEnv): string {
 export function readRepositoryExcludes(env: NodeJS.ProcessEnv): RepositoryExclude[] {
   const path = repositoryExcludesLedgerPath(env);
   if (!lstatSync(path, { throwIfNoEntry: false })) return [];
-  const value = JSON.parse(readFileSync(path, 'utf8'));
+  let value;
+  // The JSON parse error can quote text of the file, so it never reaches the message (I1, #3164).
+  try { value = JSON.parse(readFileSync(path, 'utf8')); } catch { throw new Error(`repository_excludes_ledger_invalid: ${path}`); }
   const valid = (entry: Record<string, unknown>) => Object.keys(entry).sort().join(',') === 'exclude_path,repo_id,repo_path'
     && Object.values(entry).every((field) => typeof field === 'string');
   if (value?.version !== 1 || !Array.isArray(value.entries) || !value.entries.every(valid)) throw new Error(`repository_excludes_ledger_invalid: ${path}`);

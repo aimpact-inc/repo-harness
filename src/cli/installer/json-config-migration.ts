@@ -153,8 +153,9 @@ function managedAdapterHash(content: string): string | null {
 function taggedFragments(manifest: LegacyManifest, path: string, content: string, hookFile: boolean): OldFragment[] {
   if (!hookFile) return [];
   const hashes = manifest?.current.filter((surface) => surface.path === path && surface.managed_marker === MANAGED_TAG).map((surface) => surface.content_hash) ?? [];
-  const hashMatches = !hashes.length || hashes.includes(managedAdapterHash(content));
+  // managedHookSelectors validates the file first: its error never quotes the file's text (I1, #3164).
   const selectors = managedHookSelectors(content);
+  const hashMatches = !hashes.length || hashes.includes(managedAdapterHash(content));
   const statusLine = jsonFragmentValue(content, 'statusLine') as { command?: unknown } | undefined;
   if (statusLine && isRepoHarnessManagedHookCommand(statusLine.command)) selectors.push('statusLine');
   return selectors.map((selector) => {

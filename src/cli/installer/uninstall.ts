@@ -20,6 +20,7 @@ import { migrateCodexConfigRecords, planCodexConfigMigration, previewAdoptedReve
 import { migrateJsonConfigRecords, planJsonConfigMigration, previewJsonAdoptedRevert } from './json-config-migration';
 import { openHostConfigGate, planPathRevert, type HostConfigAdoption, type HostConfigRevertEntry } from '../../effects/host-config/gate';
 import { hostConfigPaths, resolveHostPath } from '../../effects/host-config/store';
+import { parseToml } from '../../core/host-config/toml-fragment';
 
 export interface UninstallOptions { target: 'codex' | 'claude' | 'both'; dryRun?: boolean; env?: NodeJS.ProcessEnv; runtimeLock?: RuntimeTransactionContext }
 export interface UninstallItem { path: string; action: 'remove' | 'restore' | 'preserve' | 'unresolved' | 'note'; reason: string }
@@ -44,9 +45,11 @@ function fingerprint(path: string): string | null {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 function object(raw: string): Record<string, any> {
-  const parsed = JSON.parse(raw);
+  let parsed: unknown;
+  // The JSON parse error can quote text of the file (I1, #3164); the uninstall item names the file.
+  try { parsed = JSON.parse(raw); } catch { throw new Error('the file is not valid JSON'); }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('expected JSON object');
-  return parsed;
+  return parsed as Record<string, any>;
 }
 
 /** Plan completely before writing; dry-run neither takes a filesystem lock nor creates receipts. */
@@ -191,7 +194,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   }
   if (files.codex && existsSync(files.codex)) {
     try {
-      const parsed = Bun.TOML.parse(readFileSync(files.codex, 'utf8')) as Record<string, any>;
+      const parsed = parseToml(readFileSync(files.codex, 'utf8')) as Record<string, any>;
       // Codex writes these after the user trusts the hooks; they never block completion.
       if (parsed.hooks?.state && Object.keys(parsed.hooks.state).length) items.push({ path: files.codex, action: 'note', reason: 'Codex keeps its hook trust entries in [hooks.state]; rh does not remove them.' });
     } catch (error) { unresolved(files.codex, String((error as Error).message)); }

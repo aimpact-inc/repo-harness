@@ -183,10 +183,11 @@ export function parseProtocol3InstallState(raw: unknown, path: string): { readon
 export function readRawInstallState(env: NodeJS.ProcessEnv = process.env): unknown {
   const path = installProfileStatePath(env);
   if (!existsSync(path)) return undefined;
+  // The JSON parse error can quote text of the file, so it never reaches the message (I1, #3164).
   try {
     return JSON.parse(readFileSync(path, 'utf-8')) as unknown;
-  } catch (error) {
-    throw invalidInstallState(path, `is not valid JSON (${(error as Error).message})`);
+  } catch {
+    throw invalidInstallState(path, 'is not valid JSON');
   }
 }
 

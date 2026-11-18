@@ -49,7 +49,9 @@ export function writePrivateConfiguration(path: string, content: string, root: s
 export function readRawConfigurationReceipt(root: string): unknown {
   const path = configurationReceiptPath(root);
   assertConfigurationPath(path, root);
-  return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null;
+  if (!existsSync(path)) return null;
+  // The JSON parse error can quote text of the file, so it never reaches the message (I1, #3164).
+  try { return JSON.parse(readFileSync(path, 'utf8')); } catch { throw new Error(`${path}: the receipt is not valid JSON`); }
 }
 
 /** The migrations write back what is left of the receipt; the file goes with its last entry. */
