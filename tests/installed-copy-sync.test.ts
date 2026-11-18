@@ -252,6 +252,36 @@ describe("Codex installed copy sync", () => {
     }, 30_000);
   }
 
+  test("records unrecorded facade links that already name the exact package source, then is a no-op", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "repo-harness-same-target-"));
+    const source = join(tmp, "source"), home = join(tmp, "home");
+    const roots = [join(tmp, "codex-skills"), join(tmp, "claude-skills")];
+    const facade = join(source, "assets/skill-commands/repo-harness-check");
+    const env = { ...process.env, HOME: home, BUN_INSTALL: join(home, ".bun"), REPO_HARNESS_SOURCE_ROOT: source,
+      REPO_HARNESS_LINK_INSTALLED_COPIES: "1", REPO_HARNESS_INSTALL_PLUGINS: "", CODEX_SKILLS_ROOT: roots[0], CLAUDE_SKILLS_ROOT: roots[1] };
+    const sync = () => spawnSync("bash", [join(ROOT, "scripts", "sync-codex-installed-copies.sh")], { cwd: ROOT, encoding: "utf-8", env });
+    try {
+      seedSkillSurfaceRuntime(source); mkdirSync(home);
+      mkdirSync(facade, { recursive: true }); writeFileSync(join(facade, "SKILL.md"), "# selected facade\n");
+      for (const root of roots) { mkdirSync(root); symlinkSync(facade, join(root, "repo-harness-check")); }
+      // The 0.34.0 shape: the claude link is recorded, the codex link with the same target is not.
+      seedSyncOwnership([join(roots[1], "repo-harness-check")], env);
+      const claudeKey = pathRecordKey(env, join(roots[1], "repo-harness-check"));
+      const claudeRecord = readLedger(hostConfigPaths(env)).paths[claudeKey];
+      const first = sync();
+      expect(first.status, first.stderr).toBe(0);
+      const ledger = readFileSync(hostConfigPaths(env).ledger, "utf-8");
+      expect(readLedger(hostConfigPaths(env)).paths[claudeKey]).toEqual(claudeRecord);
+      const codexRecord = readLedger(hostConfigPaths(env)).paths[pathRecordKey(env, join(roots[0], "repo-harness-check"))];
+      expect(codexRecord?.committed).toEqual({ type: "symlink", target: facade });
+      const second = sync();
+      expect(second.status, second.stderr).toBe(0);
+      expect(readFileSync(hostConfigPaths(env).ledger, "utf-8")).toBe(ledger);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test("does not delete an unrecorded dangling link through a package ancestor that points outside", () => {
     const temporary = mkdtempSync(join(tmpdir(), 'rh-dangling-escape-'));
     try {

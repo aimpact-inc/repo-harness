@@ -32,7 +32,7 @@ export function syncInstalledSkillCopies(sourceRoot: string, env: NodeJS.Process
   const manifest = join(sourceRoot, 'assets/skill-commands/manifest.json');
   const catalog = parseSkillSurfaceCatalog(readFileSync(manifest, 'utf8'), { declared: true });
   if (catalog.status !== 'valid') throw new Error('invalid skill-surface catalog: ' + manifest);
-  const { declared, retired } = planSkillSync(plugins, env, catalog.catalog);
+  const { declared, retired } = planSkillSync(plugins, env, catalog.catalog, sourceRoot);
   return withHostConfigTransaction(env, transaction, root => {
     let result: ReturnType<typeof runProcess> | undefined;
     openHostConfigGate({ env }).delegate(declared, () => {

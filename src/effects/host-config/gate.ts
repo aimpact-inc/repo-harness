@@ -98,6 +98,11 @@ export interface HostConfigPathDeclaration {
   readonly owner: string;
   /** As in `HostConfigPathWrite`: the writer may replace a file that rh does not own. */
   readonly replace?: boolean;
+  /**
+   * The exact link target that makes an unrecorded link rh's: the gate adopts
+   * the path only while no record names it and the link still holds this target.
+   */
+  readonly adopt?: string;
 }
 
 export interface HostConfigPathOptions {
@@ -171,7 +176,8 @@ export interface HostConfigGate {
    * Only for out-of-process writers: `run` gets the path-record keys (parent
    * links followed, leaf kept) and may write them. The gate keeps the files
    * that `replace` lets the writer replace in the vault before `run`, and
-   * records each entry that the writer changed after it. A changed path that
+   * records each entry that the writer changed after it, and each adopted link
+   * also when the writer left it unchanged. A changed path that
    * rh did not own and that `replace` did not allow is reported and not
    * recorded.
    */
@@ -505,11 +511,12 @@ function writeWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, writes:
 
 /**
  * The out-of-process form of `writeWholePaths`. Every destination is checked
- * before `run`: an existing entry must be rh's, or a file under `replace`,
- * which goes to the vault first; any other destination stops the call before
- * the writer runs. Records follow the writer: a path that it did not change
- * keeps the record that the ledger then holds, so the writer's own record
- * changes (a `user_managed` claim) stay.
+ * before `run`: an existing entry must be rh's, an unrecorded link that holds
+ * the declaration's `adopt` target, or a file under `replace`, which goes to
+ * the vault first; any other destination stops the call before the writer
+ * runs. Records follow the writer: a path that it did not change keeps the
+ * record that the ledger then holds, so the writer's own record changes (a
+ * `user_managed` claim) stay; an adopted link with no record then is recorded.
  */
 function delegateWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, declared: readonly HostConfigPathDeclaration[],
   run: (destinations: readonly string[]) => void, options: HostConfigPathOptions): HostConfigDelegateResult {
@@ -519,12 +526,13 @@ function delegateWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, decl
   const checked = admitted.map(({ declaration, key, host }) => {
     const previous = ledger.paths[key];
     const observed = observePathEntry(key);
-    const owned = observed === null || ownsEntry(previous, declaration.owner, key);
+    const adopted = previous === undefined && observed?.type === 'symlink' && declaration.adopt !== undefined && observed.target === declaration.adopt;
+    const owned = observed === null || adopted || ownsEntry(previous, declaration.owner, key);
     if (!owned && !(declaration.replace && observed.type === 'file')) {
       throw observed.type === 'file' || !declaration.replace ? refusal(declaration.path, previous, declaration.owner)
         : new HostConfigError('host_config_invalid_state', `only a file can be replaced on the user's word: ${declaration.path}`);
     }
-    return { declaration, key, host, previous, observed, owned };
+    return { declaration, key, host, previous, observed, owned, adopted };
   });
   const before = checked.map((entry) => {
     const backup = entry.owned ? undefined : putVault(paths, readFileSync(entry.key));
@@ -538,9 +546,9 @@ function delegateWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, decl
   const records = { ...after.paths };
   const changed: string[] = [];
   const invalid: string[] = [];
-  for (const { declaration, key, host, previous, observed, owned, backup } of before) {
+  for (const { declaration, key, host, previous, observed, owned, adopted, backup } of before) {
     const now = observePathEntry(key);
-    if (sameCommitted(now, observed)) continue;
+    if (sameCommitted(now, observed) && !(adopted && records[key] === undefined)) continue;
     // A failed replacement must keep the vault reference, also when the writer removed the entry.
     if ((backup !== undefined || previous?.kind === 'replaced') && now?.type !== 'file') {
       records[key] = backup !== undefined

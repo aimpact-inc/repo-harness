@@ -35,7 +35,7 @@ import {
 } from 'fs';
 import { keepPreimage, observePathEntry } from '../../effects/host-config/whole-path';
 import { requireHome } from '../../effects/repo-harness-home';
-import { basename, delimiter, dirname, join } from 'path';
+import { basename, delimiter, dirname, join, resolve } from 'path';
 import {
   compareManagedHookProjection,
   type HookHost,
@@ -543,11 +543,24 @@ export function installProfileTransactionPaths(env: NodeJS.ProcessEnv = process.
   ];
 }
 
-/** The script receives only absent paths and current paths of the selected owner. */
-export function planSkillSync(plugins: readonly PluginId[], env: NodeJS.ProcessEnv = process.env, catalog = loadSkillSurfaceCatalog()) {
+/**
+ * The script receives only absent paths, current paths of the selected owner,
+ * and unrecorded links that already name the exact source that the script
+ * links there. 0.34.0 linked some facades into every root but recorded one.
+ */
+export function planSkillSync(plugins: readonly PluginId[], env: NodeJS.ProcessEnv = process.env, catalog = loadSkillSurfaceCatalog(), sourceRoot?: string) {
   const { repoHarnessSkills } = catalogMutationPathSkillNames(catalog);
   const prior = readPathRecords(env);
-  const declared = new Map<string, { path: string; owner: SurfaceOwner }>();
+  const selected = new Set(facadesForSelection(catalog, plugins));
+  const linkSources = new Map<string, string>();
+  if (sourceRoot !== undefined) {
+    const base = resolve(sourceRoot);
+    linkSources.set('repo-harness', base);
+    for (const pkg of catalog.packages) {
+      if (pkg.kind === 'facade' && pkg.source !== null && selected.has(pkg.name) && existsSync(join(base, pkg.source, 'SKILL.md'))) linkSources.set(pkg.name, join(base, pkg.source));
+    }
+  }
+  const declared = new Map<string, { path: string; owner: SurfaceOwner; adopt?: string }>();
   for (const root of effectiveSkillRoots(plugins, env)) {
     const names = new Set(repoHarnessSkills);
     if (statSync(root, { throwIfNoEntry: false })?.isDirectory()) {
@@ -562,12 +575,17 @@ export function planSkillSync(plugins: readonly PluginId[], env: NodeJS.ProcessE
       const record = prior[key];
       const owner = ownerForInstallPath(path, env, catalog) ?? (record && isSurfaceOwner(record.owner) ? record.owner : null);
       if (owner === null || (!ownerEnabled(owner, plugins) && !record)) continue;
-      if (lstatSync(path, { throwIfNoEntry: false }) && (!record || record.kind === 'user_managed'
+      const entry = lstatSync(path, { throwIfNoEntry: false });
+      const adopt = linkSources.get(name);
+      if (entry && !record && adopt !== undefined && entry.isSymbolicLink() && readlinkSync(path) === adopt) {
+        declared.set(key, { path, owner, adopt });
+        continue;
+      }
+      if (entry && (!record || record.kind === 'user_managed'
         || record.owner !== owner || !pathRecordIsCurrent(key, record))) continue;
       declared.set(key, { path, owner });
     }
   }
-  const selected = new Set(facadesForSelection(catalog, plugins));
   const providers = hostSkillPlacements(catalog);
   const integrations = new Set(catalog.packages.filter(pkg => pkg.kind === 'integration').map(pkg => pkg.name));
   const roots = syncSkillRoots(env, requireHome(env), plugins);
