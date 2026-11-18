@@ -370,11 +370,16 @@ export function buildProgram(): Command {
     .option('--location <location>', `Install location: ${LOCATION_HELP}`, 'global')
     .option('--dry-run', 'Preview cleanup without filesystem writes')
     .option('--remove-edited-block <path>', 'Also remove the rules block in this file when you edited it; the whole file goes to the vault first (repeatable)', (value: string, previous: string[]) => [...previous, resolve(value)], [] as string[])
+    .option('--with-tools', 'Also remove herdr-core, its hc link and the user PATH entry that rh installed, where they still hold what rh wrote')
     .option('--json', 'Output the cleanup result as JSON')
-    .action((rawOpts: { target: string; location: string; dryRun?: boolean; json?: boolean; removeEditedBlock: string[] }) => {
+    .action((rawOpts: { target: string; location: string; dryRun?: boolean; json?: boolean; removeEditedBlock: string[]; withTools?: boolean }) => {
       const target = assertTarget(rawOpts.target, 'uninstall');
       const location = assertLocation(rawOpts.location, 'uninstall');
-      const uninstallAdapters = () => runUninstall({ target, location, dryRun: rawOpts.dryRun, removeEditedBlocks: rawOpts.removeEditedBlock });
+      if (rawOpts.withTools && target !== 'both') {
+        console.error('rh uninstall: --with-tools needs --target both; the shared tools serve both hosts');
+        process.exit(2);
+      }
+      const uninstallAdapters = () => runUninstall({ target, location, dryRun: rawOpts.dryRun, removeEditedBlocks: rawOpts.removeEditedBlock, withTools: rawOpts.withTools });
       const result = uninstallAdapters();
       if (rawOpts.json) console.log(JSON.stringify(result, null, 2));
       else for (const line of result.lines) console.log(line);

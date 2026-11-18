@@ -915,7 +915,7 @@ export function planPathRevert(key: string, record: PathRecord): HostConfigRever
 }
 
 /** One write of a revert and the ledger change that it makes. */
-interface RevertStep {
+export interface RevertStep {
   /**
    * `delete`: the write takes an entry or rh's added text away, so its claim
    * leaves the ledger before it. `restore`: the write gives the user's bytes
@@ -938,7 +938,7 @@ interface RevertStep {
  * restore reaches the ledger also when a later write fails. The caller writes
  * the returned ledger with its closing state.
  */
-function retireThenDestroy(paths: HostConfigPaths, ledger: HostConfigLedger, steps: readonly RevertStep[]): HostConfigLedger {
+export function retireThenDestroy(paths: HostConfigPaths, ledger: HostConfigLedger, steps: readonly RevertStep[]): HostConfigLedger {
   const early = steps.filter((step) => step.kind !== 'restore');
   let state = early.reduce((current, step) => step.commit(current), ledger);
   if (early.length) writeLedger(paths, state);
