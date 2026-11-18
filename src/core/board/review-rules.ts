@@ -1,7 +1,7 @@
 import { PROJECTION_WRITER_DEFAULT_BRANCH } from 'archctx-contracts';
 import { documentationOnly } from '../ci/documentation-path';
 import { modelFamily } from '../review/model-family';
-import { pathHazardHits, pathHighHits, pathSecondReviewHits, type WorkflowHazardHitV1 } from './hazards';
+import { pathHighHits, pathSecondReviewHits } from './hazards';
 import {
   ACCEPTANCE_DISPOSITION_HEADER,
   BoardSourceError,
@@ -279,10 +279,8 @@ function sizeExempt(read: BoardPullRequestReadV1, files: readonly string[]): boo
 
 /** The diff evidence of one open pull request that the tier reads beyond its path list. */
 export interface BoardPullRequestTierEvidenceV1 {
-  /** The source path of each renamed file; null when the PR files read failed. */
+  /** The source path of each renamed file; null when the PR files read failed. Read only while I3 globs exist. */
   readonly rename_sources: readonly string[] | null;
-  /** The workflow hazard hits of the diff (`workflowHazardHits`); null when a needed read failed or a patch was incomplete. */
-  readonly workflow_hazards: readonly WorkflowHazardHitV1[] | null;
 }
 
 /** The review evidence of a board read: the I3 globs of the default-branch policy and the diff evidence of each open pull request. */
@@ -293,14 +291,14 @@ export interface BoardReviewEvidenceV1 {
 }
 
 /** A closed pull request takes no review, so the board reads no diff evidence for it and its path list alone sets its tier. */
-const NO_DIFF_EVIDENCE: BoardPullRequestTierEvidenceV1 = { rename_sources: [], workflow_hazards: [] };
+const NO_DIFF_EVIDENCE: BoardPullRequestTierEvidenceV1 = { rename_sources: [] };
 
 /**
  * The one effective tier of a pull request, for the Low acceptance path and the review planner alike; High takes the second review
  * row (#3190 section 2.3). High, whatever the labels say: a changed path, or the source of a renamed path, on the I1/I2 High-list
- * signals or on a repository I3 glob; a workflow hazard hit of the diff (`workflowHazardHits`). Incomplete evidence can hide such a
- * hit, so it sets High too: an incomplete file list, an I3 list that the board could not read, a failed diff read, or no rename sources
- * while I3 globs exist. Any other High-list or change hazard hit sets at least Medium; R3 and R5 name the labels to fix. Otherwise null
+ * signals, on a path-visible change hazard (`.github/**`) or on a repository I3 glob. Incomplete evidence can hide such a hit, so it
+ * sets High too: an incomplete file list, an I3 list that the board could not read, or no rename sources while I3 globs exist. Any
+ * other High-list hit sets at least Medium; R3 and R5 name the labels to fix. Otherwise null
  * unless every linked issue (the parent excluded) is on the board with a tier label. Low labels on a fix of more than 50 changed lines,
  * or of unknown size, give Medium.
  */
@@ -308,14 +306,14 @@ export function effectiveTier(read: BoardPullRequestReadV1, closes: readonly num
   const files = read.files;
   const diff = read.state === 'open' ? evidence.pull_requests.get(read.number) : NO_DIFF_EVIDENCE;
   const i3 = evidence.i3_paths;
-  if (files === null || i3 === null || diff === undefined || diff.workflow_hazards === null || diff.workflow_hazards.length > 0) return 'high';
+  if (files === null || i3 === null || diff === undefined) return 'high';
   if (i3.length > 0 && diff.rename_sources === null) return 'high';
   if (pathSecondReviewHits([...files, ...(diff.rename_sources ?? [])], i3).length > 0) return 'high';
   const linked = [...new Set([...closes, ...refs])].filter(number => number !== parent.parent.number);
   const known = linked.map(number => tiers.get(number) ?? null);
   if (linked.length === 0 || known.includes(null)) return null;
   if (known.includes('high')) return 'high';
-  if (known.includes('medium') || pathHighHits(files).length > 0 || pathHazardHits(files).length > 0) return 'medium';
+  if (known.includes('medium') || pathHighHits(files).length > 0) return 'medium';
   return sizeExempt(read, files) || (read.changed_lines !== null && read.changed_lines <= LOW_FIX_MAX_LINES) ? 'low' : 'medium';
 }
 

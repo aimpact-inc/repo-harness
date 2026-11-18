@@ -3,8 +3,9 @@
   "hazards": [
     {
       "id": "ci-config",
-      "text": "Changes a workflow under `.github/` where it touches `secrets.`, `permissions:`, `pull_request_target`, `environment:`, an unpinned third-party `uses:` or release publishing.",
-      "path_visible": false
+      "text": "Changes a workflow or other CI configuration under `.github/` where it changes secrets or permissions.",
+      "path_visible": true,
+      "paths": [".github/**"]
     },
     {
       "id": "release-install-script",

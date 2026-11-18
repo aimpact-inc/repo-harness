@@ -133,7 +133,7 @@ The board rule R3 reads only the rows with `path_visible: true`: a changed path 
 
 | Hazard | Paths that R3 reads |
 | --- | --- |
-| Changes a workflow under `.github/` where it touches `secrets.`, `permissions:`, `pull_request_target`, `environment:`, an unpinned third-party `uses:` or release publishing. | None (`path_visible: false`) |
+| Changes a workflow or other CI configuration under `.github/` where it changes secrets or permissions. | `.github/**` |
 | Changes a release, publish, update or install script, or a package script that runs at install or release. | None (`path_visible: false`) |
 | Reads credentials, such as tokens, keys, `~/.ssh`, `~/.npmrc` or credential environment variables. | None (`path_visible: false`) |
 <!-- review-hazards:list:end -->

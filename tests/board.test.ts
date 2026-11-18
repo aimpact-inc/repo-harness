@@ -82,21 +82,14 @@ interface Replay {
   readonly policy?: GhAnswer;
   /** The answer to the protection read of one base branch; the default requires the one context `Required / CI` on every base. */
   readonly protection?: (base: string) => GhAnswer;
-  /**
-   * The REST files of an open pull request: each recorded path, padded to its `changedFiles`. `diff` gives a file its patch, rename
-   * source and head text; the default gives a workflow file a `timeout-minutes` edit outside a required job.
-   */
-  readonly diff?: (path: string) => { readonly patch?: string; readonly previous?: string; readonly head?: string } | undefined;
+  /** The REST files of an open pull request: each recorded path, padded to its `changedFiles`; `renamed` gives a path its rename source. */
+  readonly renamed?: (path: string) => string | undefined;
   /** The version that the fake hc reports; the recorded core reported 0.1.17. */
   readonly hcVersion?: string;
   readonly now?: Date;
   /** The open pull requests whose readiness is ready; the default is #1491. */
   readonly ready?: readonly number[];
 }
-
-/** A workflow head with a required job, and a `timeout-minutes` edit in another job of it. */
-const DEFAULT_WORKFLOW_TEXT = 'name: CI\non: pull_request\njobs:\n  build:\n    timeout-minutes: 15\n    runs-on: ubuntu-latest\n  required:\n    name: Required / CI\n    runs-on: ubuntu-latest\n';
-const DEFAULT_WORKFLOW_PATCH = '@@ -5,1 +5,1 @@\n-    timeout-minutes: 10\n+    timeout-minutes: 15';
 
 function issueNode(data: Json, number: number): Json {
   return data.repository.issue.subIssues.nodes.find((node: Json) => node.number === number);
@@ -167,14 +160,9 @@ function replayInput(options: Replay): BoardCollectInput {
         const paths = [...pr.files.nodes.map((node: Json) => node.path as string)];
         while (paths.length < pr.changedFiles) paths.push(`filler/${paths.length}.ts`);
         return answer(paths.slice((Number(filesPage[2]) - 1) * 100, Number(filesPage[2]) * 100).map((path) => {
-          const diff = { ...(path.startsWith('.github/workflows/') ? { patch: DEFAULT_WORKFLOW_PATCH } : {}), ...options.diff?.(path) };
-          return { filename: path, status: diff.previous === undefined ? 'modified' : 'renamed', ...(diff.previous === undefined ? {} : { previous_filename: diff.previous }), ...(diff.patch === undefined ? {} : { patch: diff.patch }) };
+          const previous = options.renamed?.(path);
+          return { filename: path, status: previous === undefined ? 'modified' : 'renamed', ...(previous === undefined ? {} : { previous_filename: previous }) };
         }));
-      }
-      const contents = args.map(arg => /^repos\/Ancienttwo\/repo-harness\/contents\/(.+)\?ref=[0-9a-f]{40}$/u.exec(arg)).find(match => match !== null);
-      if (contents) {
-        const path = contents[1]!.split('/').map(decodeURIComponent).join('/');
-        return answer({ type: 'file', path, encoding: 'base64', content: Buffer.from(options.diff?.(path)?.head ?? DEFAULT_WORKFLOW_TEXT).toString('base64') });
       }
       throw new Error(`unexpected gh call: ${args.join(' ')}`);
     },
@@ -501,7 +489,7 @@ test('replay: the recorded #1474 reads project to a board, and its findings come
     ['R2', 'advisor', [1494, 1499], []],
   ]);
   // t4 has no seat label: the board does not guess its seat. The plan comment has no block, so R1 and R4 wait.
-  // #1494 and #1499 change `.github/`, but no change hazard is path-visible, so R3 has no entry.
+  // #1494 and #1499 change `.github/` and their items carry no tier label, so R3 waits.
   // No open pull request changes a path on the High list, so R5 has no entry.
   expect(attention.unevaluated.map(entry => [entry.rule, entry.reason, entry.subject])).toEqual([
     ['A3', 'seat_label_missing', 't4'],
@@ -509,6 +497,8 @@ test('replay: the recorded #1474 reads project to a board, and its findings come
     ['A13', 'seat_label_missing', 't4'],
     ['A19', 'seat_label_missing', 't4'],
     ['R1', 'plan_unavailable', 'https://github.com/Ancienttwo/repo-harness/issues/1474#issuecomment-6588782468'],
+    ['R3', 'tier_label_missing', '#1494 #1479'],
+    ['R3', 'tier_label_missing', '#1499 #1476'],
     ['R4', 'plan_unavailable', null],
     ['R6', 'plan_unavailable', null],
     ['R7', 'plan_unavailable', null],
@@ -580,9 +570,8 @@ test('board read: the readiness reads of one board share one answer for the repo
   };
   const count = (calls: readonly string[], prefix: string) => calls.filter(call => call.startsWith(prefix)).length;
   const { board, calls, readiness } = run(() => false);
-  // One page of parent comments (no older page): 7 board reads (2 of them the protection of the two base refs), 4 diff reads (a files
-  // page and a workflow head text for each of #1494 and #1499, which change `.github/workflows/ci.yml`) and 22 readiness reads.
-  expect(calls).toHaveLength(33);
+  // One page of parent comments (no older page): 7 board reads (2 of them the protection of the two base refs) and 22 readiness reads.
+  expect(calls).toHaveLength(29);
   expect(count(calls, 'api repos/Ancienttwo/repo-harness/branches/main/protection ')).toBe(1);
   expect(count(calls, 'repo view github.com/Ancienttwo/repo-harness --json id,nameWithOwner')).toBe(1);
   expect(count(calls, 'api repos/Ancienttwo/repo-harness --hostname')).toBe(1);
@@ -1361,13 +1350,19 @@ test('one hit for each rule that the recorded state does not trigger', () => {
     },
   });
   const hits = rules(board);
-  for (const rule of ['A4', 'A5', 'A6', 'A8', 'R1', 'R4', 'R5'] as const) expect(hits).toContain(rule);
+  for (const rule of ['A4', 'A5', 'A6', 'A8', 'R1', 'R3', 'R4', 'R5'] as const) expect(hits).toContain(rule);
   const findings = evaluateBoardAttention(board).findings;
   expect(findings.find(finding => finding.rule === 'A8')?.message).toBe(`hc client 0.1.15 is below the repo-harness floor ${HC_MIN_VERSION}; run hc update --version ${HC_MIN_VERSION}`);
   expect(findings.filter(finding => finding.rule === 'A6').map(finding => finding.issues)).toEqual([[1477, 1490], [1478, 1480]]);
   expect(findings.find(finding => finding.rule === 'R1')?.issues).toEqual([1477, 1478, 1479, 1480, 1481, 1482, 1483]);
-  // R3: #1494 changes `.github/` for tier:medium #1479, but the workflow hazard is not path-visible (#3187): a reviewer applies it.
-  expect(findings.filter(finding => finding.rule === 'R3')).toEqual([]);
+  // R3: #1494 changes `.github/` for tier:medium #1479. #1499 (tier:low #1476) changes no hazard path. A tier:high item is no hit.
+  expect(findings.filter(finding => finding.rule === 'R3').map(finding => [finding.pull_requests, finding.issues])).toEqual([[[1494], [1479]]]);
+  const high = { ...board, items: board.items.map(item => (item.number === 1479 ? { ...item, tier: 'high' as const } : item)) };
+  expect(rules(high)).not.toContain('R3');
+  // A pull request without a complete file list is unevaluated, never a miss.
+  const partial = evaluateBoardAttention({ ...board, pull_requests: board.pull_requests.map(pr => (pr.number === 1494 ? { ...pr, files: null } : pr)) });
+  expect(partial.findings.map(finding => finding.rule)).not.toContain('R3');
+  expect(partial.unevaluated.filter(entry => entry.rule === 'R3').map(entry => [entry.reason, entry.subject])).toEqual([['files_incomplete', '#1494']]);
   // A malformed hazard list fails at decode.
   const row = { id: 'ci-config', text: 'Changes CI.', path_visible: true, paths: ['.github/**'] };
   const list = (...hazards: object[]) => ({ hazards_version: 'repo-harness.review-hazards.v1', hazards });
@@ -1381,8 +1376,11 @@ test('one hit for each rule that the recorded state does not trigger', () => {
     [list({ ...row, text: 'a | b' }), 'ci-config text'],
     [list(row, row), 'duplicate hazard id ci-config'],
   ] as const) expect(() => decodeReviewHazards(JSON.parse(JSON.stringify(value)))).toThrow(`review hazards invalid: ${error}`);
-  // No packaged hazard is path-visible; every hazard needs a reviewer.
-  expect(pathHazardHits(['.github/workflows/ci.yml', 'docs/.github/x', 'Dockerfile', 'bun.lock', 'install.sh'])).toEqual([]);
+  // `**` matches zero or more whole segments, `*` stays inside one segment; the other hazards need a reviewer.
+  expect(pathHazardHits(['.github/workflows/ci.yml', 'docs/.github/x', 'Dockerfile', 'bun.lock', 'install.sh']))
+    .toEqual([
+      { hazard: 'ci-config', path: '.github/workflows/ci.yml' },
+    ]);
 
   // A rule that cannot read its input lists the subject: no status time, no issue label, an issue or a claim PR off the board.
   const [blocked, done] = board.execution.status === 'observed' ? board.execution.terminals : [];
@@ -1397,15 +1395,15 @@ test('one hit for each rule that the recorded state does not trigger', () => {
   expect(merged.findings.filter(finding => finding.rule === 'A9').map(finding => [finding.terminals, finding.pull_requests])).toEqual([[['t2'], [1494]]]);
 });
 
-test('R5 and the effective tier read the High list: board record-writing code is Medium on one PASS row; an I1/I2 or I3 path is High and needs two', () => {
+test('R5 and the effective tier read the High list: board record-writing code is Medium on one PASS row; an I1/I2, I3 or change hazard path is High and needs two', () => {
   const [hook, boardWriter] = ['src/cli/installer/uninstall.ts', 'src/effects/board/review.ts'];
   const receipt = (subject_sha: string): ReviewPublishReceipt => ({
     protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 1, subject_sha, risk_tier: 'medium', reviewer: { harness: 'codex', actual_model: null }, verdict: 'PASS', model_relation: 'different-family', summary: 'Reviewed.', findings: [],
   });
   const claimAt = '2026-11-02T21:01:00Z';
   // #1499 closes tier:medium #1476, changes `files` and has one claimed different-family PASS row of its head.
-  const board = (files: string[], tier: string, incomplete: boolean, policy?: GhAnswer, diff?: Replay['diff']) => replay({
-    policy, diff,
+  const board = (files: string[], tier: string, incomplete: boolean, policy?: GhAnswer, renamed?: Replay['renamed']) => replay({
+    policy, renamed,
     owners: (results) => { results.push(...files.filter(path => !results.some(entry => entry.path === path)).map(path => ({ path, matched: false, ambiguous: false, owningCapabilityId: null }))); },
     parent: (data) => { issueNode(data, 1476).labels.nodes.push({ name: tier }); },
     pulls: (data) => {
@@ -1415,8 +1413,8 @@ test('R5 and the effective tier read the High list: board record-writing code is
       pr1499.comments.nodes.push(comment(renderAcceptanceRecord(receipt(pr1499.headRefOid), `https://github.com/Ancienttwo/repo-harness/pull/1499#issuecomment-${Date.parse(claimAt)}`), '2026-11-02T22:00:00Z'));
     },
   });
-  const view = (files: string[], tier = 'tier:medium', incomplete = false, policy?: GhAnswer, diff?: Replay['diff']) => {
-    const read = board(files, tier, incomplete, policy, diff);
+  const view = (files: string[], tier = 'tier:medium', incomplete = false, policy?: GhAnswer, renamed?: Replay['renamed']) => {
+    const read = board(files, tier, incomplete, policy, renamed);
     const pr = read.pull_requests.find(entry => entry.number === 1499)!;
     const attention = evaluateBoardAttention(read);
     return [pr.tier, pr.acceptance.status,
@@ -1426,18 +1424,15 @@ test('R5 and the effective tier read the High list: board record-writing code is
   expect(view([boardWriter])).toEqual(['medium', 'accepted']);
   expect(view([boardWriter, hook])).toEqual(['high', 'not_accepted', `#1499 changes ${hook} (deletion), a High signal, but #1476 is tier:medium`]);
   expect(view([hook], 'tier:high')).toEqual(['high', 'not_accepted']);
-  // A workflow timeout edit is Medium on one PASS row (#3187); a changed `permissions:` line keeps the workflow hazard High.
-  expect(view(['.github/workflows/ci.yml'])).toEqual(['medium', 'accepted']);
-  expect(view(['.github/workflows/ci.yml'], 'tier:medium', false, undefined, () => ({ patch: '@@ -1,1 +1,2 @@\n name: CI\n+permissions:' }))).toEqual(['high', 'not_accepted']);
-  // So does a changed line inside the job that the required context `Required / CI` names.
-  expect(view(['.github/workflows/ci.yml'], 'tier:medium', false, undefined, () => ({ patch: '@@ -9,1 +9,1 @@\n-    runs-on: ubuntu-22.04\n+    runs-on: ubuntu-latest' }))).toEqual(['high', 'not_accepted']);
+  // A change hazard path sets the High tier too, with its second row, whatever the label; R3 names the label.
+  expect(view(['.github/workflows/x.yml'])).toEqual(['high', 'not_accepted']);
   // A release path alone is Medium too, and R5 still names the label.
   expect(view(['src/core/release/notes.ts'])).toEqual(['medium', 'accepted', '#1499 changes src/core/release/notes.ts (release), a High signal, but #1476 is tier:medium']);
   // A repository I3 path sets High; a policy that the board cannot read sets High too.
   const i3 = { status: 0, stdout: JSON.stringify({ type: 'file', path: '.ai/harness/policy.json', encoding: 'base64', content: Buffer.from('{"review":{"i3_paths":["src/effects/board/**"]}}').toString('base64') }) };
   expect(view([boardWriter], 'tier:medium', false, i3)).toEqual(['high', 'not_accepted']);
   // A rename out of an I3 glob is High by its source path.
-  expect(view(['src/core/moved.ts'], 'tier:medium', false, i3, path => (path === 'src/core/moved.ts' ? { previous: boardWriter } : undefined))).toEqual(['high', 'not_accepted']);
+  expect(view(['src/core/moved.ts'], 'tier:medium', false, i3, path => (path === 'src/core/moved.ts' ? boardWriter : undefined))).toEqual(['high', 'not_accepted']);
   expect(view([boardWriter], 'tier:medium', false, { status: 1, stdout: 'HTTP 502' })).toEqual(['high', 'not_accepted']);
   // An incomplete file list can hide a High path: High, and R5 lists it as unevaluated.
   expect(view([boardWriter], 'tier:medium', true)).toEqual(['high', 'not_accepted', 'files_incomplete: #1499']);

@@ -90,8 +90,8 @@ export const REVIEW_HIGH_LIST: ReviewHighListV1 = decodeReviewHighList(highListJ
 
 /**
  * The High-list signals of invariant I1 (credentials) and I2 (deletion). A hit on
- * one of them, or on a repository I3 path, takes the second review row; another
- * High-list signal alone takes one row (#3190 section 2.3).
+ * one of them, on a path-visible change hazard or on a repository I3 path takes the
+ * second review row; another High-list signal alone takes one row (#3190 section 2.3).
  */
 const INVARIANT_SIGNALS: readonly ReviewPathEntry[] = ['secrets', 'deletion'].map((id) => {
   const signal = REVIEW_HIGH_LIST.signals.find(entry => entry.id === id);
@@ -160,81 +160,12 @@ export function readReviewI3Paths(document: DecodedWorkflowPolicy): ReviewI3Path
   return { status: 'present', paths: value };
 }
 
-/** Hits of repository-relative paths on the I1/I2 High-list signals and on the I3 globs (id `i3`): the paths that take a second review row. */
+/**
+ * Hits of repository-relative paths that take a second review row: the I1/I2 High-list signals, the path-visible change hazards
+ * (`.github/**`) and the I3 globs (id `i3`).
+ */
 export function pathSecondReviewHits(paths: readonly string[], i3Paths: readonly string[]): PathHighHitV1[] {
-  const entries: ReviewPathEntry[] = [...INVARIANT_SIGNALS];
+  const entries: ReviewPathEntry[] = [...INVARIANT_SIGNALS, ...REVIEW_HAZARDS.hazards];
   if (i3Paths.length > 0) entries.push({ id: 'i3', text: 'Repository I3 path.', path_visible: true, paths: i3Paths });
   return pathHits(entries, paths).map(hit => ({ signal: hit.id, path: hit.path }));
-}
-
-export type WorkflowHazardReason = 'permissions' | 'secrets' | 'pull_request_target' | 'required_job';
-
-export interface WorkflowHazardHitV1 {
-  readonly path: string;
-  readonly reason: WorkflowHazardReason;
-}
-
-/** A workflow file: the paths whose diff lines the board classifies (`workflowHazardHits`). */
-export function isWorkflowPath(path: string): boolean {
-  return path.startsWith('.github/workflows/');
-}
-
-const LINE_HAZARDS: readonly (readonly [WorkflowHazardReason, RegExp])[] = [
-  ['permissions', /\bpermissions\s*:/u],
-  ['secrets', /\bsecrets\b/u],
-  ['pull_request_target', /\bpull_request_target\b/u],
-];
-
-const indentOf = (line: string): number => line.length - line.trimStart().length;
-const unquote = (value: string): string => value.trim().replace(/^(['"])(.*)\1$/u, '$2');
-
-/** The 1-based head line ranges of the jobs whose `name:` or key is a required status context. */
-function requiredJobRanges(lines: readonly string[], required: readonly string[]): (readonly [number, number])[] {
-  const jobs = lines.findIndex(line => /^jobs\s*:\s*(?:#.*)?$/u.test(line));
-  if (jobs < 0) return [];
-  const body = lines.slice(jobs + 1).findIndex(line => line.trim() !== '' && !line.trimStart().startsWith('#'));
-  if (body < 0) return [];
-  const jobIndent = indentOf(lines[jobs + 1 + body]!);
-  const ranges: (readonly [number, number])[] = [];
-  for (let start = jobs + 1; start < lines.length; start++) {
-    const line = lines[start]!;
-    if (line.trim() === '' || line.trimStart().startsWith('#') || indentOf(line) !== jobIndent) continue;
-    let end = start;
-    while (end + 1 < lines.length && (lines[end + 1]!.trim() === '' || indentOf(lines[end + 1]!) > jobIndent)) end++;
-    const key = unquote(line.trim().replace(/:\s*(?:#.*)?$/u, ''));
-    const names = lines.slice(start + 1, end + 1).filter(entry => indentOf(entry) > jobIndent && /^\s*name\s*:/u.test(entry))
-      .map(entry => unquote(entry.replace(/^\s*name\s*:/u, '').replace(/\s+#.*$/u, '')));
-    if (required.includes(key) || names.some(name => required.includes(name))) ranges.push([start + 1, end + 1]);
-  }
-  return ranges;
-}
-
-/**
- * The hazard hits of one workflow file of a pull request diff (#3187): a changed line that touches `permissions:`, `secrets` or
- * `pull_request_target`, or a changed line inside a job that a required status context names. `patch` is the unified diff of the file
- * from the PR files read, `head` the file text at the head (null for a removed file) and `required` the required contexts of the base.
- * Null when the evidence is incomplete: no patch, an unparsable hunk, no required context list, or no head text for a kept file.
- */
-export function workflowHazardHits(path: string, patch: string | null, head: string | null, removed: boolean, required: readonly string[] | null): WorkflowHazardHitV1[] | null {
-  if (patch === null || required === null || (head === null && !removed)) return null;
-  const ranges = head === null ? [] : requiredJobRanges(head.split(/\r?\n/u), required);
-  const inJob = (line: number): boolean => ranges.some(([start, end]) => line >= start && line <= end);
-  const reasons = new Set<WorkflowHazardReason>();
-  let next: number | null = null;
-  for (const line of patch.split(/\r?\n/u)) {
-    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/u.exec(line);
-    if (hunk !== null) { next = Number(hunk[1]); continue; }
-    if (next === null) return null;
-    const mark = line[0];
-    if (mark === '+' || mark === '-') {
-      const body = line.slice(1);
-      for (const [reason, pattern] of LINE_HAZARDS) if (pattern.test(body)) reasons.add(reason);
-      // An added line is head line `next`; a removed line sits between head lines `next - 1` and `next`.
-      const inside = mark === '+' ? inJob(next) : inJob(next - 1) || inJob(next);
-      const namesRequired = /^\s*name\s*:/u.test(body) && required.includes(unquote(body.replace(/^\s*name\s*:/u, '').replace(/\s+#.*$/u, '')));
-      if (inside || namesRequired) reasons.add('required_job');
-    }
-    if (mark !== '-' && mark !== '\\') next += 1;
-  }
-  return [...reasons].sort().map(reason => ({ path, reason }));
 }
