@@ -2653,6 +2653,8 @@ exit 0
       expect(output.host_config.items).toContainEqual({ path: realpathSync(settings), selector: 'statusLine', action: 'override' });
       expect(existsSync(bunLog)).toBe(false);
       expect(readdirSync(home, { recursive: true }).map(String).sort()).toEqual(before);
+      // The working directory gets no repository write either.
+      expect(readdirSync(tmp).sort()).toEqual(['bin', 'home']);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
