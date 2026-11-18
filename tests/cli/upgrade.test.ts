@@ -90,6 +90,11 @@ exit "$status"
   return dir;
 }
 const projectHook = '.ai/hooks/prompt-guard.sh';
+/** A released hook without a shim path, matcher Edit|Write and timeout 30, read from the manifest that the cleanup reads. */
+const RELEASED_HOOK = (JSON.parse(readFileSync(join(ROOT, 'assets/released-managed-values.v1.json'), 'utf8')) as {
+  hookRenderings: { entries: { event: string; block: Record<string, unknown>; hook: Record<string, unknown> }[] };
+}).hookRenderings.entries.find(({ block, hook }) => block.matcher === 'Edit|Write' && hook.timeout === 30 && !String(hook.command).includes('{{shim}}'))!;
+const CUSTOMIZED_HOOK = 'A repo-harness hook differs from every hook that a release wrote; preserve current bytes.';
 const ownership = (opts: { home: string }) => installOwnershipReader({ ...process.env, HOME: opts.home });
 /** A protocol 3 state written by an older package: every plugin record carries that older version. */
 function priorState(version: string) {
@@ -210,26 +215,50 @@ describe('upgrade with real release bytes', () => {
       `bash "${shim}"`,
       'repo-harness hook Stop --route user',
     ];
+    // The user's own layout: a tab or four-space indent, and a member with its own spacing.
+    const layout = (indent: string, value: Record<string, unknown>) => `{\n${indent}"custom" :  [1,2],${JSON.stringify(value, null, indent).slice(1)}`;
+    const indents: Record<string, string> = { '.claude/settings.json': '\t', '.codex/hooks.json': '    ' };
+    const before: Record<string, string> = {};
     for (const name of ['.claude/settings.json', '.codex/hooks.json']) {
       const path = join(opts.home, name);
       const settings = JSON.parse(readFileSync(path, 'utf8'));
       const userHooks = userCommands.map((command) => ({ type: 'command', command }));
-      settings.hooks.Stop = [{ matcher: 'user', hooks: [...userHooks, { type: 'command', command: shim }] }];
-      writeFileSync(path, JSON.stringify(settings));
+      settings.hooks.Stop = [{ matcher: 'user', hooks: userHooks }, { hooks: [{ type: 'command', command: `bash ${shim} stop-orchestrator.sh`, timeout: 30 }] }];
+      before[name] = layout(indents[name]!, settings);
+      writeFileSync(path, before[name]);
     }
     const plan = planLegacyLeftovers({ ...opts, scope: 'global', installOwnership: ownership(opts) });
     expect(plan.items.filter((item) => userCommands.includes(item.hookCommand!))).toEqual([]);
-    expect(plan.items.filter((item) => item.hookCommand === shim)).toHaveLength(2);
+    expect(plan.items.filter((item) => item.hookCommand === `bash ${shim} stop-orchestrator.sh`)).toHaveLength(2);
     expect(plan.items.some((item) => item.hookEvent === 'SessionStart')).toBe(true);
     const result = runUpgrade({ ...opts, scope: 'global', apply: true });
     expect(result.exitCode).toBe(0);
+    const sha = (text: string) => `sha256:${new Bun.CryptoHasher('sha256').update(text).digest('hex')}`;
+    const ledger = JSON.parse(readFileSync(join(opts.home, '.repo-harness/config/ledger.json'), 'utf8'));
     for (const name of ['.claude/settings.json', '.codex/hooks.json']) {
-      const settings = JSON.parse(readFileSync(join(opts.home, name), 'utf8'));
+      const after = readFileSync(join(opts.home, name), 'utf8');
+      const settings = JSON.parse(after);
       expect(settings.hooks.Stop).toEqual([{
         matcher: 'user', hooks: userCommands.map((command) => ({ type: 'command', command })),
       }]);
       expect(settings.hooks.SessionStart).toBeUndefined();
+      // Text edits: only the legacy commands and the containers that they emptied go.
+      const { custom: _custom, ...rest } = settings;
+      expect(after).toBe(layout(indents[name]!, rest));
+      expect(ledger.files[join(opts.home, name)]).toEqual({ kind: 'text_block', baseline: { state: 'unknown' }, committed: { type: 'file', sha256: sha(after) },
+        backup: null, external_backup: sha(before[name]!), external_change: false });
     }
+    expect(ledger.fragments).toEqual([]);
+
+    // A repository hook file gets the same text edits, outside the gate.
+    const project = join(opts.cwd, '.claude/settings.json');
+    const legacy = JSON.parse(readFileSync(project, 'utf8')).hooks.Stop[0].hooks[0];
+    const user = { type: 'command', command: 'echo project user' };
+    // Each copy of a released command is its own removal.
+    writeFileSync(project, layout('\t', { hooks: { Stop: [{ hooks: [legacy, user] }, { hooks: [legacy] }], Empty: [] } }));
+    expect(runUpgrade({ ...opts, scope: 'project' }).items.filter((item) => item.hookCommand === legacy.command)).toHaveLength(2);
+    expect(runUpgrade({ ...opts, scope: 'project', apply: true }).exitCode).toBe(0);
+    expect(readFileSync(project, 'utf8')).toBe(layout('\t', { hooks: { Stop: [{ hooks: [user] }], Empty: [] } }));
   }));
 
   test('the cleanup audit log keeps only the newest records', () => sandbox((opts) => {
@@ -317,7 +346,7 @@ describe('upgrade with real release bytes', () => {
     }
   }));
 
-  test('global cleanup removes only full legacy typed command forms', () => sandbox((opts) => {
+  test('global cleanup reports legacy typed commands that no release wrote and keeps their file', () => sandbox((opts) => {
     const legacy = [
       'HOOK_HOST=codex repo-harness hook PreToolUse --route edit',
       'HOOK_HOST=claude repo-harness hook SessionStart --route default',
@@ -329,18 +358,17 @@ describe('upgrade with real release bytes', () => {
       'HOOK_HOST=other repo-harness hook Stop --route quality',
       'HOOK_HOST=codex repo-harness hook Unknown --route default',
     ].map((command) => ({ type: 'command', command }));
-    for (const name of ['.claude/settings.json', '.codex/hooks.json']) {
-      put(join(opts.home, name), JSON.stringify({ hooks: { Stop: [{ matcher: 'mixed', hooks: [
-        ...legacy.map((command) => ({ type: 'command', command })), ...user,
-      ] }] } }));
-    }
+    const [claude, codex] = ['.claude/settings.json', '.codex/hooks.json'].map((name) => join(opts.home, name));
+    // No release tag rendered the bare typed form, so a file that holds it is reported; look-alike user commands are not rh's.
+    const typed = JSON.stringify({ hooks: { Stop: [{ hooks: [...legacy.map((command) => ({ type: 'command', command })), ...user] }] } });
+    const userOnly = JSON.stringify({ hooks: { Stop: [{ matcher: 'mixed', hooks: user }] } });
+    put(claude!, typed);
+    put(codex!, userOnly);
     const plan = runUpgrade({ ...opts, scope: 'global' });
-    expect(plan.items.filter((item) => legacy.includes(item.hookCommand!))).toHaveLength(6);
-    expect(plan.items.filter((item) => user.some((hook) => hook.command === item.hookCommand))).toEqual([]);
+    expect(plan.items.filter((item) => item.path === claude)).toEqual([expect.objectContaining({ action: 'report', reason: CUSTOMIZED_HOOK })]);
+    expect(plan.items.filter((item) => item.path === codex)).toEqual([]);
     expect(runUpgrade({ ...opts, scope: 'global', apply: true }).exitCode).toBe(0);
-    for (const name of ['.claude/settings.json', '.codex/hooks.json']) {
-      expect(JSON.parse(readFileSync(join(opts.home, name), 'utf8')).hooks.Stop).toEqual([{ matcher: 'mixed', hooks: user }]);
-    }
+    expect([readFileSync(claude!, 'utf8'), readFileSync(codex!, 'utf8')]).toEqual([typed, userOnly]);
   }, false));
 
   test('a second apply removes nothing and changes no bytes', () => sandbox((opts) => {
@@ -392,6 +420,60 @@ describe('upgrade with real release bytes', () => {
     } finally { if (lockedDir) chmodSync(lockedDir, 0o755); }
     for (const [path, content] of Object.entries(before)) expect(tree(opts.cwd)[path]).toBe(content);
   }));
+
+  test('a global hook rollback restores only the files that the gate wrote, and their ledger records', () => sandbox((opts) => {
+    const names = ['.claude/settings.json', '.codex/hooks.json'].map((name) => join(opts.home, name));
+    const original = JSON.stringify({ hooks: { [RELEASED_HOOK.event]: [{ ...RELEASED_HOOK.block, hooks: [RELEASED_HOOK.hook, { command: 'echo user' }] }] } });
+    for (const name of names) put(name, original);
+    const config = join(opts.home, '.repo-harness/config');
+    mkdirSync(join(config, 'vault'), { recursive: true });
+    const identity = () => names.map((name) => ({ ino: statSync(name).ino, bytes: readFileSync(name, 'utf8') }));
+    const before = identity();
+    const lastAudit = () => JSON.parse(readFileSync(join(opts.home, '.repo-harness/upgrade-cleanup.log.jsonl'), 'utf8').trim().split('\n').at(-1)!);
+
+    // The gate cannot publish its records, so it writes no hook file and the rollback touches none.
+    try {
+      const refused = runUpgrade({ ...opts, scope: 'global', apply: true }, { beforeRemove() { chmodSync(config, 0o500); } });
+      expect(refused.exitCode).toBe(1);
+    } finally { chmodSync(config, 0o700); }
+    expect(identity()).toEqual(before);
+    expect(lastAudit().attempted_paths).toEqual([]);
+
+    // A failure after the first gate write: that file and its ledger record go back; the second file was never written.
+    const failed = runUpgrade({ ...opts, scope: 'global', apply: true }, { beforeRemove(item) { if (item.path === names[1]) throw new Error('injected'); } });
+    expect(failed.exitCode).toBe(1);
+    expect(lastAudit().rolled_back_paths).toEqual([names[0]]);
+    expect(identity().map(({ bytes }) => bytes)).toEqual([original, original]);
+    expect(identity()[1]).toEqual(before[1]);
+    expect(existsSync(join(config, 'ledger.json'))).toBe(false);
+
+    // A file that changed after the gate wrote it keeps the new bytes, and the ledger keeps its cleanup record.
+    const sha = (text: string) => `sha256:${new Bun.CryptoHasher('sha256').update(text).digest('hex')}`;
+    const recorded = () => JSON.parse(readFileSync(join(config, 'ledger.json'), 'utf8')).files[names[0]!]?.committed.sha256;
+    let cleaned = '';
+    const changed = runUpgrade({ ...opts, scope: 'global', apply: true }, { beforeRemove(item) {
+      if (item.path !== names[1]) return;
+      cleaned = readFileSync(names[0]!, 'utf8');
+      writeFileSync(names[0]!, '{"user":"edit"}');
+      throw new Error('injected');
+    } });
+    expect({ exitCode: changed.exitCode, rolledBack: lastAudit().rolled_back_paths, file: readFileSync(names[0]!, 'utf8'), record: recorded() })
+      .toEqual({ exitCode: 1, rolledBack: [], file: '{"user":"edit"}', record: sha(cleaned) });
+    expect(changed.error).toContain(`${names[0]}: the target changed before the write: ${names[0]}; the ledger keeps the cleanup record, and the file before the cleanup is kept at`);
+
+    // The file goes back first; when the ledger rollback then fails, the error says so and the record stays ahead of the file.
+    rmSync(join(config, 'ledger.json'));
+    writeFileSync(names[0]!, original);
+    try {
+      const unresolved = runUpgrade({ ...opts, scope: 'global', apply: true }, { beforeRemove(item) {
+        if (item.path !== names[1]) return;
+        chmodSync(config, 0o500);
+        throw new Error('injected');
+      } });
+      expect(unresolved.error).toContain('host configuration rollback');
+    } finally { chmodSync(config, 0o700); }
+    expect({ file: readFileSync(names[0]!, 'utf8'), record: recorded() }).toEqual({ file: original, record: sha(cleaned) });
+  }, false));
 
   const RETIRED_RC_FIXTURE = join(FIXTURES, 'retired-flow-reference-configs');
   const RETIRED_RC_DOCS = [
@@ -585,15 +667,53 @@ describe('upgrade with real release bytes', () => {
     expect(tree(external)).toEqual(before);
   }, false));
 
-  test('current global typed adapters stay while a legacy adapter is removed', () => sandbox((opts) => {
+  test('current global typed adapters stay while a released legacy hook is removed', () => sandbox((opts) => {
     const path = join(opts.home, '.codex/hooks.json');
     const current = ': repo-harness-managed-hook-v1; repo-harness-hook SessionStart --route context';
     const user = 'echo repo-harness';
-    put(path, JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ command: current }, { command: 'repo-harness hook SessionStart --route context' }, { command: user }] }] } }));
+    const { event, block, hook } = RELEASED_HOOK;
+    put(path, JSON.stringify({ hooks: { [event]: [{ ...block, hooks: [{ command: current }, hook, { command: user }] }] } }));
     const result = runUpgrade({ ...opts, scope: 'global', apply: true });
     expect(result.exitCode).toBe(0);
-    const after = readFileSync(path, 'utf8'); expect(after).toContain(current); expect(after).toContain(user);
-    expect(after).not.toContain('repo-harness hook SessionStart');
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ hooks: { [event]: [{ ...block, hooks: [{ command: current }, { command: user }] }] } });
+
+    // Only an exact released hook goes. A customized matcher, timeout, command field or hook entry field keeps the file;
+    // so does a file that the text edits cannot place (a repeated event, command or timeout key, which JSON.parse reads
+    // as its last value) or read (a Latin-1 byte in a user string). Each file keeps its bytes and the ledger stays.
+    const entry = (fields: Record<string, unknown>, hooks: string) => `${JSON.stringify(fields).slice(0, -1)}${Object.keys(fields).length ? ',' : ''}"hooks":[${hooks}]}`;
+    const released = JSON.stringify(hook);
+    const file = (entries: string) => `{"hooks":{${JSON.stringify(event)}:[${entries}]}}`;
+    const kept: [Buffer, string][] = [
+      [Buffer.from(file(entry({ ...block, matcher: 'Edit|NotebookEdit' }, released))), CUSTOMIZED_HOOK],
+      [Buffer.from(file(entry(block, JSON.stringify({ ...hook, timeout: 120 })))), CUSTOMIZED_HOOK],
+      [Buffer.from(file(entry(block, JSON.stringify({ ...hook, statusMessage: 'mine' })))), CUSTOMIZED_HOOK],
+      [Buffer.from(file(entry({ ...block, note: 'mine' }, released))), CUSTOMIZED_HOOK],
+      [Buffer.from(`{"hooks":{${JSON.stringify(event)}:[],${file(entry(block, released)).slice(10)}`), 'Invalid hook settings; preserve current bytes.'],
+      [Buffer.from(file(entry(block, `{"command":"echo user",${released.slice(1)}`))), 'Invalid hook settings; preserve current bytes.'],
+      [Buffer.from(file(entry(block, `{"timeout":120,${released.slice(1)}`))), 'Invalid hook settings; preserve current bytes.'],
+      [Buffer.concat([Buffer.from('{"note":"caf'), Buffer.from([0xe9]), Buffer.from(`",${file(entry(block, released)).slice(1)}`)]), 'Invalid hook settings; preserve current bytes.'],
+    ];
+    const ledgerPath = join(opts.home, '.repo-harness/config/ledger.json');
+    for (const [scope, target] of [['global', path], ['project', join(opts.cwd, '.claude/settings.json')]] as const) {
+      for (const [bytes, reason] of kept) {
+        put(target, ''); writeFileSync(target, bytes);
+        const ledger = readFileSync(ledgerPath);
+        const reported = runUpgrade({ ...opts, scope, apply: true });
+        expect(reported.items.filter((item) => item.path === target)).toEqual([expect.objectContaining({ action: 'report', reason })]);
+        expect({ file: readFileSync(target).toString('base64'), ledger: readFileSync(ledgerPath).toString('base64') }).toEqual({ file: bytes.toString('base64'), ledger: ledger.toString('base64') });
+      }
+      // The exact released hook goes, with the containers that it empties.
+      writeFileSync(target, file(entry(block, released)));
+      expect(runUpgrade({ ...opts, scope, apply: true }).exitCode).toBe(0);
+      expect(readFileSync(target, 'utf8')).toBe('{}');
+    }
+    // A directory at the hook path, and a hook path below a directory that rh cannot search, are reported; the inventory goes on.
+    rmSync(path); mkdirSync(path);
+    const reportedPath = (reason: string) => expect(planLegacyLeftovers({ ...opts, scope: 'global', installOwnership: () => () => null }).items
+      .filter((item) => item.path === path)).toEqual([expect.objectContaining({ action: 'report', reason })]);
+    reportedPath('Invalid hook settings; preserve current bytes.');
+    chmodSync(dirname(path), 0o000);
+    try { reportedPath('Hook path has a protected symlink ancestor or an entry that rh cannot inspect.'); } finally { chmodSync(dirname(path), 0o755); }
   }, false));
 
   test('unrecorded historical copies are reported and both clean and edited bytes stay', () => sandbox((opts) => {

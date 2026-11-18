@@ -2333,5 +2333,668 @@
         "sha256:b2a452142e34f036c6323777bd6ec1c3e879d1f7ee3d3ea4d80e4253cde01532"
       ]
     }
+  },
+  "hookRenderings": {
+    "shimPlaceholder": "{{shim}}",
+    "entries": [
+      {
+        "block": {
+          "matcher": "Bash"
+        },
+        "event": "PostToolUse",
+        "hook": {
+          "command": "bash {{shim}} post-bash.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Bash"
+        },
+        "event": "PostToolUse",
+        "hook": {
+          "command": "bash {{shim}} post-bash.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Bash"
+        },
+        "event": "PostToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" post-bash.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Bash"
+        },
+        "event": "PostToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" post-bash.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Bash"
+        },
+        "event": "PostToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" post-bash.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Bash"
+        },
+        "event": "PostToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" post-bash.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PostToolUse",
+        "hook": {
+          "command": "bash {{shim}} autoresearch-advisory.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PostToolUse",
+        "hook": {
+          "command": "bash {{shim}} minimal-change-observer.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PostToolUse",
+        "hook": {
+          "command": "bash {{shim}} post-edit-guard.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PostToolUse",
+        "hook": {
+          "command": "bash {{shim}} post-edit-guard.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PostToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" minimal-change-observer.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PostToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" post-edit-guard.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PostToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" post-edit-guard.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PostToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" minimal-change-observer.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PostToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" post-edit-guard.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PostToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" post-edit-guard.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PreToolUse",
+        "hook": {
+          "command": "bash {{shim}} pre-edit-guard.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PreToolUse",
+        "hook": {
+          "command": "bash {{shim}} pre-edit-guard.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PreToolUse",
+        "hook": {
+          "command": "bash {{shim}} worktree-guard.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PreToolUse",
+        "hook": {
+          "command": "bash {{shim}} worktree-guard.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PreToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" pre-edit-guard.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PreToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" pre-edit-guard.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PreToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" worktree-guard.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PreToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" worktree-guard.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PreToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" pre-edit-guard.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PreToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" pre-edit-guard.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PreToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" worktree-guard.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Edit|Write"
+        },
+        "event": "PreToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" worktree-guard.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Task|Agent|SendUserMessage"
+        },
+        "event": "PreToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" subagent-return-channel-guard.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {
+          "matcher": "Task|Agent|SendUserMessage"
+        },
+        "event": "PreToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" subagent-return-channel-guard.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "PostToolUse",
+        "hook": {
+          "command": "bash {{shim}} context-pressure-hook.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "PostToolUse",
+        "hook": {
+          "command": "bash {{shim}} post-tool-observer.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "PostToolUse",
+        "hook": {
+          "command": "bash {{shim}} trace-event.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "PostToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" context-pressure-hook.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "PostToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" post-tool-observer.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "PostToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" trace-event.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "PostToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" context-pressure-hook.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "PostToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" post-tool-observer.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "PostToolUse",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" trace-event.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "SessionStart",
+        "hook": {
+          "command": "bash {{shim}} minimal-change-context.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "SessionStart",
+        "hook": {
+          "command": "bash {{shim}} security-sentinel.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "SessionStart",
+        "hook": {
+          "command": "bash {{shim}} session-start-context.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "SessionStart",
+        "hook": {
+          "command": "bash {{shim}} session-start-context.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "SessionStart",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" minimal-change-context.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "SessionStart",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" security-sentinel.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "SessionStart",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" session-start-context.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "SessionStart",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" session-start-context.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "SessionStart",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" minimal-change-context.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "SessionStart",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" security-sentinel.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "SessionStart",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" session-start-context.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "SessionStart",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" session-start-context.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "Stop",
+        "hook": {
+          "command": "bash {{shim}} finalize-handoff.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "Stop",
+        "hook": {
+          "command": "bash {{shim}} stop-orchestrator.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "Stop",
+        "hook": {
+          "command": "bash {{shim}} stop-orchestrator.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "Stop",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" finalize-handoff.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "Stop",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" stop-orchestrator.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "Stop",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" stop-orchestrator.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "Stop",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" finalize-handoff.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "Stop",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" stop-orchestrator.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "Stop",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" stop-orchestrator.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "SubagentStart",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" subagent-start-context.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "SubagentStop",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" subagent-stop-quality.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "UserPromptSubmit",
+        "hook": {
+          "command": "bash {{shim}} autoresearch-advisory.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "UserPromptSubmit",
+        "hook": {
+          "command": "bash {{shim}} prompt-guard.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "UserPromptSubmit",
+        "hook": {
+          "command": "bash {{shim}} prompt-guard.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "UserPromptSubmit",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" codex-delegation-advisor.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "UserPromptSubmit",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" prompt-guard.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "UserPromptSubmit",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_HOST=codex HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" prompt-guard.sh",
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "UserPromptSubmit",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" prompt-guard.sh",
+          "timeout": 30,
+          "type": "command"
+        }
+      },
+      {
+        "block": {},
+        "event": "UserPromptSubmit",
+        "hook": {
+          "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT=\"$repo\" bash \"$repo/.ai/hooks/run-hook.sh\" prompt-guard.sh",
+          "type": "command"
+        }
+      }
+    ]
   }
 }

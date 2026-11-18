@@ -207,13 +207,24 @@ export interface HostConfigGate {
    * already has a record keeps it (`recorded`), so a migration can run again.
    */
   adopt(path: string, adoption: HostConfigAdoption): 'adopted' | 'recorded';
+  /**
+   * Take out text that no fragment record names (a hook entry that an earlier
+   * rh version wrote) from a file that hashes to `expectedSha256`. Each removal
+   * gets the content after the removals before it and must return a pure
+   * deletion of text in it. The file before goes to the vault as the record's
+   * `external_backup`, and no fragment record is added: a revert never puts
+   * the removed text back. The hash of the written file, or null when the
+   * removals change nothing.
+   */
+  removeUnrecordedText(path: string, expectedSha256: Sha256, removals: readonly ((content: string) => FragmentEdit)[]): Sha256 | null;
   /** The fragment records of one path, its links followed. */
   recorded(path: string): readonly FragmentRecord[];
 }
 
 const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
-function decode(bytes: Buffer | null, path: string): string {
+/** The one strict UTF-8 reading of a host file: a planner that edits its text reads it the same way. */
+export function decode(bytes: Buffer | null, path: string): string {
   try { return bytes === null ? '' : UTF8.decode(bytes); }
   catch { throw new HostConfigError('host_config_invalid_state', `not UTF-8 text: ${path}`); }
 }
@@ -770,6 +781,47 @@ function adoptFile(paths: HostConfigPaths, target: string, adoption: HostConfigA
   return 'adopted';
 }
 
+/**
+ * A file with no record gets `text_block` with an unknown baseline and no
+ * backup, so a revert releases it. A recorded file keeps its backup, which
+ * may still hold the removed text, so it is marked `external_change` and a
+ * revert takes out rh's fragments one by one instead of restoring that backup.
+ */
+function removeUnrecordedText(paths: HostConfigPaths, target: string, expectedSha256: Sha256, removals: readonly ((content: string) => FragmentEdit)[]): Sha256 | null {
+  const [path] = admitPaths(paths, [target]) as [HostPath];
+  const ledger = readLedger(paths);
+  refuseRecordedPaths(ledger, [path]);
+  const { observation, bytes } = observeFile(path);
+  const preimage = expectedOf(observation, path);
+  if (!preimage.existed || preimage.sha256 !== expectedSha256) {
+    throw new HostConfigError('host_config_invalid_state', `the file changed since rh planned its removal, so rh writes nothing to it: ${path}`);
+  }
+  const content = decode(bytes, path);
+  let result = content;
+  for (const removal of removals) {
+    const edit = removal(result);
+    if (edit.inserted !== '' || result.slice(edit.at, edit.at + edit.removed.length) !== edit.removed) {
+      throw new HostConfigError('host_config_invalid_state', `a removal must only take out text that is in the file, so rh writes nothing to it: ${path}`);
+    }
+    result = result.slice(0, edit.at) + result.slice(edit.at + edit.removed.length);
+  }
+  if (result === content) return null;
+  const written = Buffer.from(result, 'utf8');
+  const committed: FileCommitted = { type: 'file', sha256: sha256Prefixed(written) };
+  const external_backup = putVault(paths, bytes!);
+  const previous = ledger.files[path];
+  const record: FileRecord = previous ? { ...previous, committed, external_backup, external_change: true }
+    : { kind: 'text_block', baseline: { state: 'unknown' }, committed, backup: null, external_backup, external_change: false };
+  writeLedger(paths, { ...ledger, files: { ...ledger.files, [path]: record } });
+  try {
+    replaceTarget(path, written, preimage);
+  } catch (error) {
+    writeLedger(paths, ledger);
+    throw error;
+  }
+  return committed.sha256;
+}
+
 /** The entries that a transaction rollback could not prove, as `<path>: <selector>`. */
 export interface HostConfigRollbackResult {
   readonly unresolved: readonly string[];
@@ -790,14 +842,18 @@ const fragmentKey = (record: FragmentRecord): string => `${record.owner}\0${reco
  * added it, and to its backup text when the transaction overrode a user
  * value. A file of which the transaction took a whole copy goes back to that
  * copy first. A file that the transaction created goes only when the file did not
- * exist before it and still holds exactly what it wrote. Every other entry
- * stays and is returned.
+ * exist before it and still holds exactly what it wrote. A file whose
+ * unrecorded text the transaction removed (a new `external_backup` and no
+ * fragment change) gets its record before the transaction only when the
+ * caller already put the file back to that backup; otherwise the record
+ * stays. Every other entry stays and is returned.
  */
 export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer | null, transaction: string): HostConfigRollbackResult {
   const paths = hostConfigPathsAt(harness);
   const before = snapshot === null ? EMPTY_LEDGER : parseLedger(snapshot, `${paths.ledger} (transaction snapshot)`);
   const now = readLedger(paths);
   const unresolved: string[] = [];
+  const files = { ...before.files };
   for (const path of Object.keys(now.files) as HostPath[]) {
     const record = now.files[path]!;
     const previous = before.files[path];
@@ -806,6 +862,14 @@ export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer 
     const changed = all.filter((entry) => earlier.find((old) => fragmentKey(old) === fragmentKey(entry))?.inserted !== entry.inserted);
     const dropped = earlier.filter((old) => !all.some((entry) => fragmentKey(entry) === fragmentKey(old)));
     unresolved.push(...dropped.map((old) => `${path}: ${old.selector}`));
+    if (!changed.length && !dropped.length && record.external_backup && record.external_backup !== previous?.external_backup) {
+      const current = expectedOf(observeFile(path).observation, path);
+      if (!current.existed || current.sha256 !== record.external_backup) {
+        files[path] = record;
+        unresolved.push(path);
+      }
+      continue;
+    }
     if (!changed.length) continue;
     const { observation, bytes } = observeFile(path);
     const current = expectedOf(observation, path);
@@ -843,7 +907,7 @@ export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer 
   }
   const pathRecords = rollbackWholePaths(paths, before, now, transaction, unresolved);
   const kept = removeCreatedDirectories(now.directories.filter((directory) => !before.directories.includes(directory)));
-  const restored: HostConfigLedger = { ...before, paths: pathRecords, directories: [...before.directories, ...kept] };
+  const restored: HostConfigLedger = { ...before, files, paths: pathRecords, directories: [...before.directories, ...kept] };
   // No ledger before the transaction and no record left: the ledger file goes, as it was.
   if (snapshot === null && JSON.stringify(restored) === JSON.stringify(EMPTY_LEDGER)) rmSync(paths.ledger, { force: true });
   else writeLedger(paths, restored);
@@ -896,6 +960,7 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
     adoptReplacedPath: (path, owner, backup) => adoptReplacedPath(env, paths, path, owner, backup),
     revert: (only, revertOptions) => revertFiles(paths, only, revertOptions ?? {}),
     adopt: (path, adoption) => adoptFile(paths, path, adoption),
+    removeUnrecordedText: (path, expectedSha256, removals) => removeUnrecordedText(paths, path, expectedSha256, removals),
     recorded: (path) => {
       const resolved = resolveHostPath(paths, path);
       return readLedger(paths).fragments.filter((entry) => entry.file === resolved);

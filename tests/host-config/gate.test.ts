@@ -6,7 +6,8 @@ import type { FragmentEdit, HostConfigStrategy, HostPath } from '../../src/core/
 import { openHostConfigGate, rollbackHostConfigTransaction, type HostConfigFileChange } from '../../src/effects/host-config/gate';
 import type { PathEntry } from '../../src/effects/host-config/whole-path';
 import { hostConfigPaths, migrateLedgerSchema, parseLedger, replaceTarget } from '../../src/effects/host-config/store';
-import { jsonFragment } from '../../src/core/host-config/json-fragment';
+import { hookRenderingKey, jsonFragment, removeJsonHookCommand } from '../../src/core/host-config/json-fragment';
+import { sha256Prefixed } from '../../src/core/evidence/sha256';
 
 /** A `key=value` line format: the selector is the key. */
 function keyLineMatch(content: string, selector: string): RegExpExecArray | null {
@@ -53,6 +54,7 @@ test('an install-owned whole path refuses every gate operation and stays in the 
     () => f.gate().apply([f.change(inside, 'on')]),
     () => f.gate().adopt(inside, { backup: null, fragments: [], externalChange: false }),
     () => f.gate().revert([inside]),
+    () => f.gate().removeUnrecordedText(inside, sha256Prefixed(readFileSync(inside)), []),
   ];
   for (const operation of operations) expect(operation).toThrow(`an install owns this whole path (${skill})`);
   expect(() => f.gate().writePaths([{ path: inside, owner: 'core', entry: { type: 'file', bytes: Buffer.from('x') } }])).toThrow(`the recorded directory ${skill} holds this path`);
@@ -118,8 +120,11 @@ test('every write has a ledger record before a revert, and a revert touches no p
 
   // A failed ledger write stops the file write.
   chmodSync(f.root, 0o500);
-  try { expect(() => f.gate().apply([f.change(f.a, 'on')])).toThrow(expect.objectContaining({ code: 'EACCES' })); }
-  finally { chmodSync(f.root, 0o700); }
+  try {
+    expect(() => f.gate().apply([f.change(f.a, 'on')])).toThrow(expect.objectContaining({ code: 'EACCES' }));
+    const removal = (content: string) => ({ at: 0, removed: content.slice(0, 7), inserted: '' });
+    expect(() => f.gate().removeUnrecordedText(f.a, sha256Prefixed(readFileSync(f.a)), [removal])).toThrow(expect.objectContaining({ code: 'EACCES' }));
+  } finally { chmodSync(f.root, 0o700); }
   expect(readFileSync(f.a, 'utf8')).toBe('keep=1\n');
 });
 
@@ -349,6 +354,39 @@ test('a revert removes an emptied container only when the record proves rh creat
   const backup = f.gate().apply([{ path, backup: 'overrides-only', fragments: [{ owner: 'o1', selector: 'mcpServers.codegraph', kind: 'override', strategy: jsonFragment, value: { command: 'rh' }, selected: true }] }]);
   expect(backup.written.length).toBe(1);
   expect(statSync(join(f.root, 'vault', String(f.ledger().files[path].backup).replace('sha256:', ''))).mode & 0o777).toBe(0o600);
+});
+
+test('a removal of unrecorded text checks the hash and each step, keeps the file before in the vault, and a revert never puts the text back', () => {
+  const f = fixture();
+  const sha = (text: string) => sha256Prefixed(Buffer.from(text));
+  const legacy = '{"type": "command", "command": "bash legacy.sh"}, ';
+  const before = `{\n\t"user": 1,\n\t"hooks": {\n\t\t"Stop": [\n\t\t\t{ "hooks": [ ${legacy}{"type":"command","command":"echo user"} ] }\n\t\t]\n\t}\n}\n`;
+  const after = before.replace(legacy, '');
+  const rendering = hookRenderingKey({ event: 'Stop', block: {}, hook: { type: 'command', command: 'bash legacy.sh' } });
+  const remove = [(content: string) => removeJsonHookCommand(content, { event: 'Stop', block: 0, index: 0, command: 'bash legacy.sh', rendering })];
+  const path = join(f.home, 'hooks.json');
+  writeFileSync(path, before);
+  expect(() => f.gate().removeUnrecordedText(path, sha(`${before} `), remove)).toThrow('the file changed since rh planned its removal');
+  expect(() => f.gate().removeUnrecordedText(path, sha(before), [() => ({ at: 0, removed: '{', inserted: '[' })])).toThrow('a removal must only take out text that is in the file');
+  expect({ file: readFileSync(path, 'utf8'), ledger: existsSync(join(f.root, 'ledger.json')) }).toEqual({ file: before, ledger: false });
+
+  // No record: the file is released by a revert, with no fragment record.
+  expect(f.gate().removeUnrecordedText(path, sha(before), remove)).toBe(sha(after));
+  expect(readFileSync(path, 'utf8')).toBe(after);
+  expect(f.ledger()).toMatchObject({ fragments: [], files: { [path]: { kind: 'text_block', baseline: { state: 'unknown' }, committed: { type: 'file', sha256: sha(after) }, backup: null, external_backup: sha(before), external_change: false } } });
+  expect(f.vault(sha(before))).toBe(before);
+  expect(f.gate().revert([path], { dryRun: true })).toEqual([{ path, action: 'released' }]);
+
+  // A recorded file whose backup still holds the legacy command: a revert takes out rh's fragment only.
+  const recorded = join(f.home, 'settings.json');
+  writeFileSync(recorded, before);
+  f.gate().apply([{ path: recorded, fragments: [{ owner: 'o1', selector: 'statusLine', kind: 'add', strategy: jsonFragment, value: 'rh' }] }]);
+  const added = readFileSync(recorded, 'utf8');
+  expect(f.vault(f.ledger().files[recorded].backup)).toBe(before);
+  expect(f.gate().removeUnrecordedText(recorded, sha(added), remove)).toBe(sha(added.replace(legacy, '')));
+  expect(f.ledger().files[recorded]).toMatchObject({ external_backup: sha(added), external_change: true, committed: { type: 'file', sha256: sha(added.replace(legacy, '')) } });
+  expect(f.gate().revert([recorded]).map((entry) => entry.action)).toEqual(['text_removed']);
+  expect(readFileSync(recorded, 'utf8')).toBe(after);
 });
 
 test('a whole-path write records its entry first; delegate, a transaction rollback and a revert follow the records', () => {
