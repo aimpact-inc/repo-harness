@@ -26,7 +26,10 @@ import {
   type RetiredMaterial,
   type Sha256,
   type SkippedOverride,
+  type ToolId,
+  type ToolRecord,
 } from '../../core/host-config/types';
+import { insertUserPathEntry, listsUserPathEntry, type UserPathPort } from '../../core/host-config/path-entry';
 import {
   createDirectories,
   ensurePrivateDirectory,
@@ -87,12 +90,40 @@ export interface HostConfigDelegateResult {
   readonly unattributed: readonly HostConfigUnattributedDiff[];
 }
 
-/** A whole path, or the declared fragments of a shared host file (the `delegated` strategy, #2852). */
-export type HostConfigDelegateDeclaration = HostConfigPathDeclaration | HostConfigFragmentDeclaration;
+/** A whole path, the declared fragments of a shared host file (the `delegated` strategy, #2852), or a shared tool (#2853). */
+export type HostConfigDelegateDeclaration = HostConfigPathDeclaration | HostConfigFragmentDeclaration | HostConfigToolDeclaration;
 
 function isFragmentDeclaration(declaration: HostConfigDelegateDeclaration): declaration is HostConfigFragmentDeclaration {
   return 'selectors' in declaration;
 }
+
+function isToolDeclaration(declaration: HostConfigDelegateDeclaration): declaration is HostConfigToolDeclaration {
+  return 'tool' in declaration;
+}
+
+/**
+ * The entries of a shared tool in its install directory, outside the host
+ * roots (#2853). The writer gets the directory, links followed. An entry that
+ * the writer creates gets a tool record; a recorded entry that still held its
+ * recorded bytes follows the writer; an entry that existed with no record is
+ * never claimed.
+ */
+export interface HostConfigToolDeclaration {
+  readonly tool: ToolId;
+  readonly version: string;
+  readonly directory: string;
+  readonly entries: readonly string[];
+}
+
+/** A tool entry that is gone now, so its record goes (`releaseAbsentTools`). */
+export interface HostConfigToolRevertEntry {
+  readonly tool: ToolId;
+  readonly path: string;
+  readonly action: 'already_absent';
+}
+
+/** The label of the user PATH entry in a tool release. */
+export const userPathLabel = (entry: string): string => `HKCU\\Environment\\Path: ${entry}`;
 
 /** One whole entry for the gate to write at a host path, owned by `owner` (`core` or a plugin id). */
 export interface HostConfigPathWrite {
@@ -222,6 +253,19 @@ export interface HostConfigGate {
    * records, so that a transaction rollback can undo them, and then throws.
    */
   delegate(declared: readonly HostConfigDelegateDeclaration[], run: (destinations: readonly string[]) => void, options?: HostConfigPathOptions): HostConfigDelegateResult;
+  /**
+   * Append `entry` to the user `Path` value for a tool that has a record,
+   * unless an entry already lists it. The tool record gets the exact text
+   * before the write; a failed write takes it out again.
+   */
+  addUserPathEntry(tool: ToolId, entry: string, port: UserPathPort): 'listed' | 'added';
+  /**
+   * Release each tool entry that is gone now: a file, link or tree that is
+   * absent, a created directory that is absent, and, with `port`, a user PATH
+   * entry that no entry of the value lists. A target that comes back later is
+   * then not rh's. A dry run (or a preview gate) reports and writes nothing.
+   */
+  releaseAbsentTools(port: (() => UserPathPort) | null, options?: { readonly dryRun?: boolean }): readonly HostConfigToolRevertEntry[];
   /**
    * Undo the path records of the named paths, which the caller takes from the
    * records that may grant a removal (`readPathRecords`): a `created` entry goes
@@ -450,6 +494,7 @@ function admitWholePath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, ledger: 
   const host = pathRecordHost(env, path);
   if (host === null) throw new HostConfigError('host_config_invalid_path', `not inside an install root, so rh records no whole path there: ${path}`);
   const holder = pathRecordOf(ledger, key as HostPath);
+  if (holder !== null && toolOf(ledger, holder) !== null) throw new HostConfigError('host_config_invalid_state', `rh records this path for the tool ${toolOf(ledger, holder)}, so it does not write it as an install path: ${path}`);
   if (holder !== null && holder !== key) throw new HostConfigError('host_config_invalid_state', `the recorded directory ${holder} holds this path, so rh does not write it on its own: ${path}`);
   // A whole entry would replace rh's text blocks and the user's bytes around them with no record of either.
   if (ledger.files[key]?.kind === 'text_block') throw new HostConfigError('host_config_invalid_state', `rh text blocks are recorded in this file, so rh does not write it as a whole path: ${path}`);
@@ -631,10 +676,11 @@ function settleDelegatedFiles(after: HostConfigLedger, observed: readonly Delega
 function delegateWrites(env: NodeJS.ProcessEnv, paths: HostConfigPaths, declared: readonly HostConfigDelegateDeclaration[],
   run: (destinations: readonly string[]) => void, options: HostConfigPathOptions): HostConfigDelegateResult {
   const ledger = readLedger(paths);
-  const wholes = declared.filter((declaration): declaration is HostConfigPathDeclaration => !isFragmentDeclaration(declaration));
+  const wholes = declared.filter((declaration): declaration is HostConfigPathDeclaration => !isFragmentDeclaration(declaration) && !isToolDeclaration(declaration));
   const admitted = wholes.map((declaration) => ({ declaration, ...admitWholePath(env, paths, ledger, declaration.path) }));
   if (new Set(admitted.map(({ key }) => key)).size !== admitted.length) throw new HostConfigError('host_config_invalid_state', 'a call names one path twice');
   const delegatedFiles = observeDelegatedFiles(paths, ledger, declared.filter(isFragmentDeclaration));
+  const tools = observeTools(paths, ledger, declared.filter(isToolDeclaration));
   const checked = admitted.map(({ declaration, key, host }) => {
     const previous = ledger.paths[key];
     const observed = observePathEntry(key);
@@ -654,7 +700,10 @@ function delegateWrites(env: NodeJS.ProcessEnv, paths: HostConfigPaths, declared
     return { ...entry, backup };
   });
   const keys = new Map(admitted.map(({ declaration, key }) => [declaration, key]));
-  const files = new Map(delegatedFiles.map((file) => [file.declaration as HostConfigDelegateDeclaration, file.path as string]));
+  const files = new Map<HostConfigDelegateDeclaration, string>([
+    ...delegatedFiles.map((file) => [file.declaration, file.path] as const),
+    ...tools.map((tool) => [tool.declaration, tool.directory] as const),
+  ]);
   let failure: unknown = null;
   try { run(declared.map((declaration) => keys.get(declaration as HostConfigPathDeclaration) ?? files.get(declaration)!)); } catch (error) { failure = error; }
 
@@ -683,10 +732,129 @@ function delegateWrites(env: NodeJS.ProcessEnv, paths: HostConfigPaths, declared
     changed.push(key);
   }
   const settled = settleDelegatedFiles(after, delegatedFiles);
-  writeLedger(paths, { ...after, paths: records, files: settled.files, fragments: settled.fragments, retired: retire(after.retired, settled.released) });
+  writeLedger(paths, { ...after, paths: records, files: settled.files, fragments: settled.fragments, retired: retire(after.retired, settled.released), tools: settleTools(after.tools, tools) });
   if (failure !== null) throw failure;
   if (invalid.length) throw new HostConfigError('host_config_invalid_state', `rh replaced a user file at these paths, but the delegated writer did not leave a file there: ${invalid.join(', ')}`);
   return { changed: [...changed, ...settled.changed], unattributed: settled.unattributed };
+}
+
+// ---- shared tools (#2853) -------------------------------------------------
+
+/** The tool whose record holds the key. */
+function toolOf(ledger: HostConfigLedger, key: string): ToolId | null {
+  return (Object.entries(ledger.tools) as [ToolId, ToolRecord][]).find(([, record]) => key in record.paths)?.[0] ?? null;
+}
+
+interface ObservedTool {
+  readonly declaration: HostConfigToolDeclaration;
+  readonly directory: string;
+  /** The directories that are missing before the writer runs, outermost first. */
+  readonly missing: readonly string[];
+  readonly before: ReadonlyMap<string, PathCommitted | null>;
+}
+
+function observeTools(paths: HostConfigPaths, ledger: HostConfigLedger, declared: readonly HostConfigToolDeclaration[]): ObservedTool[] {
+  if (new Set(declared.map((declaration) => declaration.tool)).size !== declared.length) throw new HostConfigError('host_config_invalid_state', 'a call names one tool twice');
+  return declared.map((declaration) => {
+    const directory = resolveHostPath(paths, declaration.directory);
+    const keys = declaration.entries.map((name) => join(directory, name));
+    for (const key of keys) {
+      const holder = pathRecordOf(ledger, key as HostPath) ?? (ledger.files[key] ? key : null);
+      if (holder !== null && toolOf(ledger, holder) !== declaration.tool) throw new HostConfigError('host_config_invalid_state', `another ledger record owns this path, so rh does not install ${declaration.tool} there: ${key}`);
+    }
+    return { declaration, directory, missing: missingDirectories(join(directory, '_') as HostPath), before: new Map(keys.map((key) => [key, observePathEntry(key)])) };
+  });
+}
+
+/**
+ * The tool records after the writer: an entry that it created is recorded, a
+ * recorded entry that held its recorded bytes before follows it, and every
+ * other entry keeps the record that it had. A record with nothing left goes.
+ */
+function settleTools(current: HostConfigLedger['tools'], observed: readonly ObservedTool[]): HostConfigLedger['tools'] {
+  const tools = { ...current };
+  for (const { declaration, missing, before } of observed) {
+    const previous = tools[declaration.tool];
+    const recorded: Record<string, { committed: PathCommitted }> = { ...previous?.paths };
+    let wrote = false;
+    for (const [key, prior] of before) {
+      const now = observePathEntry(key);
+      const owned = prior === null || (recorded[key] !== undefined && sameCommitted(prior, recorded[key].committed));
+      if (!owned || sameCommitted(prior, now)) continue;
+      wrote = true;
+      if (now === null) delete recorded[key]; else recorded[key] = { committed: now };
+    }
+    const directories = [...(previous?.directories ?? []), ...missing.filter((directory) => lstatSync(directory, { throwIfNoEntry: false })?.isDirectory())];
+    if (!Object.keys(recorded).length && !previous?.path_entry) { delete tools[declaration.tool]; continue; }
+    tools[declaration.tool] = {
+      installed_by: 'rh-install', removable: true, ...previous,
+      version: wrote || !previous ? declaration.version : previous.version,
+      paths: recorded, directories: [...new Set(directories)],
+    };
+  }
+  return tools;
+}
+
+function addUserPathEntry(paths: HostConfigPaths, tool: ToolId, entry: string, port: UserPathPort): 'listed' | 'added' {
+  const ledger = readLedger(paths);
+  const record = ledger.tools[tool];
+  if (!record) throw new HostConfigError('host_config_invalid_state', `rh has no record of ${tool}, so it adds no PATH entry for it`);
+  const value = port.read();
+  if (listsUserPathEntry(value.raw, entry)) return 'listed';
+  const { next, record: pathEntry } = insertUserPathEntry(value, entry);
+  writeLedger(paths, { ...ledger, tools: { ...ledger.tools, [tool]: { ...record, path_entry: pathEntry } } });
+  try { port.write(value, next); }
+  catch (error) { writeLedger(paths, ledger); throw error; }
+  return 'added';
+}
+
+function releaseAbsentTools(paths: HostConfigPaths, port: (() => UserPathPort) | null, dryRun: boolean, read: LedgerReader): HostConfigToolRevertEntry[] {
+  const ledger = read(paths);
+  const tools = { ...ledger.tools };
+  const released: HostConfigToolRevertEntry[] = [];
+  let user: UserPathPort | null = null;
+  for (const [tool, record] of Object.entries(ledger.tools) as [ToolId, ToolRecord][]) {
+    const gone = Object.keys(record.paths).filter((key) => observePathEntry(key) === null);
+    const goneDirectories = record.directories.filter((directory) => !lstatSync(directory, { throwIfNoEntry: false }));
+    user ??= record.path_entry && port ? port() : null;
+    const goneEntry = record.path_entry !== undefined && user !== null && !listsUserPathEntry(user.read().raw, record.path_entry.entry);
+    if (!gone.length && !goneDirectories.length && !goneEntry) continue;
+    released.push(...[...gone, ...goneDirectories].map((path) => ({ tool, path, action: 'already_absent' as const })));
+    if (goneEntry) released.push({ tool, path: userPathLabel(record.path_entry!.entry), action: 'already_absent' });
+    const { path_entry: pathEntry, ...rest } = record;
+    const kept = Object.fromEntries(Object.entries(record.paths).filter(([key]) => !gone.includes(key)));
+    const keptEntry = goneEntry ? undefined : pathEntry;
+    if (!Object.keys(kept).length && !keptEntry) delete tools[tool];
+    else tools[tool] = { ...rest, paths: kept, directories: record.directories.filter((directory) => !goneDirectories.includes(directory)), ...(keptEntry ? { path_entry: keptEntry } : {}) };
+  }
+  if (!dryRun && released.length) writeLedger(paths, { ...ledger, tools });
+  return released;
+}
+
+/**
+ * The tool records after a rollback. A rollback does not undo a tool install,
+ * and a record that a run released on observation (its target was absent) is
+ * a fact, not an effect of the transaction: it never comes back. So a tool or
+ * entry that the ledger no longer holds stays released, and an entry that it
+ * holds stays only while the target holds those recorded bytes, or the bytes
+ * recorded before the transaction. The user PATH entry stays as the ledger
+ * holds it: the rollback does not undo the registry.
+ */
+function rollbackTools(before: HostConfigLedger['tools'], now: HostConfigLedger['tools']): HostConfigLedger['tools'] {
+  const tools: Partial<Record<ToolId, ToolRecord>> = {};
+  for (const [tool, record] of Object.entries(now) as [ToolId, ToolRecord][]) {
+    const earlier = before[tool];
+    if (JSON.stringify(earlier) === JSON.stringify(record)) { tools[tool] = record; continue; }
+    const recorded: Record<string, { committed: PathCommitted }> = {};
+    for (const [key, entry] of Object.entries(record.paths)) {
+      const observed = observePathEntry(key);
+      if (sameCommitted(observed, entry.committed)) recorded[key] = entry;
+      else if (earlier?.paths[key] && sameCommitted(observed, earlier.paths[key].committed)) recorded[key] = earlier.paths[key];
+    }
+    if (!Object.keys(recorded).length && !record.path_entry) continue;
+    tools[tool] = { ...record, paths: recorded, directories: record.directories.filter((directory) => lstatSync(directory, { throwIfNoEntry: false })) };
+  }
+  return tools;
 }
 
 function keepUserPaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, owner: string, scope: readonly string[], kept: readonly string[]): void {
@@ -1174,7 +1342,7 @@ export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer 
   }
   const pathRecords = rollbackWholePaths(paths, before, now, transaction, unresolved);
   const kept = removeCreatedDirectories(now.directories.filter((directory) => !before.directories.includes(directory)));
-  const restored: HostConfigLedger = { ...before, files, paths: pathRecords, directories: [...before.directories, ...kept] };
+  const restored: HostConfigLedger = { ...before, files, paths: pathRecords, directories: [...before.directories, ...kept], tools: rollbackTools(before.tools, now.tools) };
   // No ledger before the transaction and no record left: the ledger file goes, as it was.
   if (snapshot === null && JSON.stringify(restored) === JSON.stringify(EMPTY_LEDGER)) rmSync(paths.ledger, { force: true });
   // A clean rollback puts the snapshot back as it was: a parent of an older protocol reads its ledger again.
@@ -1277,7 +1445,8 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
   };
   if (preview) {
     return {
-      apply: refusePreview, writePaths: refusePreview, delegate: refusePreview, revertPaths: refusePreview,
+      apply: refusePreview, writePaths: refusePreview, delegate: refusePreview, revertPaths: refusePreview, addUserPathEntry: refusePreview,
+      releaseAbsentTools: (port) => releaseAbsentTools(paths, port, true, read),
       keepUserPaths: refusePreview, adoptReplacedPath: refusePreview, adopt: refusePreview, removeUnrecordedText: refusePreview,
       revert: (only, revertOptions) => revertFiles(paths, only, { ...revertOptions, dryRun: true }, read),
       removeEditedBlock: (path) => removeEditedBlock(paths, path, true, read),
@@ -1288,6 +1457,8 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
     apply: (changes) => applyChanges(paths, changes),
     writePaths: (writes, pathOptions) => writeWholePaths(env, paths, writes, pathOptions ?? {}),
     delegate: (declared, run, pathOptions) => delegateWrites(env, paths, declared, run, pathOptions ?? {}),
+    addUserPathEntry: (tool, entry, port) => addUserPathEntry(paths, tool, entry, port),
+    releaseAbsentTools: (port, releaseOptions) => releaseAbsentTools(paths, port, releaseOptions?.dryRun === true, read),
     revertPaths: (only, revertOptions) => revertWholePaths(paths, only, revertOptions ?? {}),
     keepUserPaths: (owner, scope, kept) => keepUserPaths(env, paths, owner, scope, kept),
     adoptReplacedPath: (path, owner, backup) => adoptReplacedPath(env, paths, path, owner, backup),

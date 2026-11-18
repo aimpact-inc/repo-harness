@@ -10,6 +10,7 @@ import { hookRenderingKey, jsonFragment, removeJsonHookCommand } from '../../src
 import { sha256Prefixed } from '../../src/core/evidence/sha256';
 import { tomlFragment } from '../../src/core/host-config/toml-fragment';
 import { markedBlock } from '../../src/core/host-config/marked-block';
+import { insertUserPathEntry, listsUserPathEntry } from '../../src/core/host-config/path-entry';
 
 /** A `key=value` line format: the selector is the key. */
 function keyLineMatch(content: string, selector: string): RegExpExecArray | null {
@@ -65,10 +66,12 @@ test('an install-owned whole path refuses every gate operation and stays in the 
   f.gate().apply([f.change(f.b, 'on')]);
   expect(f.ledger().paths).toEqual(paths);
 
-  const { paths: _paths, retired: _retired, recovery: _recovery, ...textRecords } = f.ledger();
-  for (const [old, refusal, moved] of [
-    [{ ...textRecords, protocol: 1 }, 'the ledger is protocol 1, which has no path records; run: rh update', {}],
-    [{ ...textRecords, protocol: 2, paths }, 'the ledger is protocol 2, which has no retirement records; run: rh update', paths],
+  const { paths: _paths, retired: _retired, recovery: _recovery, tools: _tools, ...textRecords } = f.ledger();
+  const retirement = { retired: [{ sha256: `sha256:${'a'.repeat(64)}`, at: '2026-11-01T00:00:00.000Z' }], recovery: [] };
+  for (const [old, refusal, moved, kept] of [
+    [{ ...textRecords, protocol: 1 }, 'the ledger is protocol 1, which has no path records; run: rh update', {}, { retired: [], recovery: [] }],
+    [{ ...textRecords, protocol: 2, paths }, 'the ledger is protocol 2, which has no retirement records; run: rh update', paths, { retired: [], recovery: [] }],
+    [{ ...textRecords, protocol: 3, paths, ...retirement }, 'the ledger is protocol 3, which has no tool records; run: rh update', paths, retirement],
   ] as const) {
     writeFileSync(join(f.root, 'ledger.json'), JSON.stringify(old));
     expect(() => f.gate().recorded(f.a)).toThrow(refusal);
@@ -76,7 +79,7 @@ test('an install-owned whole path refuses every gate operation and stays in the 
     expect(openHostConfigGate({ env: { HOME: f.home }, preview: true }).recorded(f.a)).toEqual(textRecords.fragments.filter((entry: { file: string }) => entry.file === f.a));
     // The one-shot move keeps every record and adds the empty new maps; a second run writes nothing.
     migrateLedgerSchema(hostConfigPaths({ HOME: f.home }));
-    expect(f.ledger()).toEqual({ ...textRecords, protocol: 3, paths: moved, retired: [], recovery: [] });
+    expect(f.ledger()).toEqual({ ...textRecords, protocol: 4, paths: moved, ...kept, tools: {} });
     const bytes = readFileSync(join(f.root, 'ledger.json'));
     migrateLedgerSchema(hostConfigPaths({ HOME: f.home }));
     expect(readFileSync(join(f.root, 'ledger.json'))).toEqual(bytes);
@@ -126,7 +129,7 @@ test('every write has a ledger record before a revert, and a revert touches no p
   expect({ a: readFileSync(f.a, 'utf8'), mode: statSync(f.a).mode & 0o777, tool: existsSync(join(f.home, '.tool')), c: readFileSync(c, 'utf8') })
     .toEqual({ a: 'keep=1\n', mode: 0o640, tool: false, c: 'rh=user\n' });
   // The revert retires the backup of `a`, which no record references any more.
-  expect(f.ledger()).toEqual({ protocol: 3, files: {}, fragments: [], directories: [], paths: {}, recovery: [],
+  expect(f.ledger()).toEqual({ protocol: 4, files: {}, fragments: [], directories: [], paths: {}, recovery: [], tools: {},
     retired: [{ sha256: files[f.a].backup, at: expect.any(String) }] });
 
   // A failed ledger write stops the file write.
@@ -656,7 +659,7 @@ test('a fragment already at its inverse loses its record with no write: a remove
 test('a rollback reads a ledger snapshot of an older protocol, which a parent took before a newer candidate moved the ledger', () => {
   const f = fixture();
   f.gate().apply([f.change(f.b, 'on')]);
-  const { retired: _retired, recovery: _recovery, ...older } = f.ledger();
+  const { retired: _retired, recovery: _recovery, tools: _tools, ...older } = f.ledger();
   const snapshot = Buffer.from(JSON.stringify({ ...older, protocol: 2 }));
   f.gate().apply([f.change(f.a, 'on')]);
   expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
@@ -746,4 +749,57 @@ test('a delegated installer gets records for the declared fragments that it crea
   let ran = false;
   expect(() => f.gate().delegate(declared, () => { ran = true; })).toThrow('the file is not valid JSON');
   expect(ran).toBe(false);
+});
+
+const DIR = 'C:\\Users\\u\\AppData\\Local\\Programs\\herdr-core';
+test.each([
+  ['an absent value', { existed: false, kind: 'ExpandString', raw: '' }, DIR],
+  ['an empty value', { existed: true, kind: 'String', raw: '' }, DIR],
+  ['one entry', { existed: true, kind: 'ExpandString', raw: '%USERPROFILE%\\bin' }, `%USERPROFILE%\\bin;${DIR}`],
+  ['a trailing separator', { existed: true, kind: 'ExpandString', raw: 'a;' }, `a;${DIR}`],
+] as const)('the user PATH entry goes into %s and keeps the value kind', (_label, before, after) => {
+  expect(listsUserPathEntry(before.raw, DIR)).toBe(false);
+  const { next } = insertUserPathEntry(before, DIR);
+  expect(next).toEqual({ existed: true, kind: before.kind, raw: after });
+  expect(listsUserPathEntry(next.raw, `${DIR.toUpperCase()}\\`)).toBe(true);
+});
+
+// Tool records (#2853). P3: an entry that existed before the writer ran is never claimed, also when the writer rewrites it.
+// The rollback keeps a tool record only while the entry that the transaction created holds the recorded bytes.
+test.each([
+  { label: 'a created entry, rolled back while unchanged', existing: false, after: 'none', record: true },
+  { label: 'a created entry, changed before the rollback', existing: false, after: 'edit', record: false },
+  { label: 'an entry that existed before the writer', existing: true, after: 'none', record: false },
+] as const)('tool record: %s', ({ existing, after, record }) => {
+  const f = fixture();
+  const dir = join(f.home, '.local', 'bin');
+  if (existing) { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'tool'), 'user\n'); }
+  const snapshot = existsSync(join(f.root, 'ledger.json')) ? readFileSync(join(f.root, 'ledger.json')) : null;
+  f.gate().delegate([{ tool: 'herdr-core', version: '1.0.0', directory: dir, entries: ['tool'] }], ([at]) => {
+    mkdirSync(at!, { recursive: true });
+    writeFileSync(join(at!, 'tool'), 'rh\n');
+  });
+  if (after === 'edit') writeFileSync(join(dir, 'tool'), 'user edit\n');
+  expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
+  const tools = existsSync(join(f.root, 'ledger.json')) ? f.ledger().tools : {};
+  expect(tools).toEqual(record ? { 'herdr-core': { installed_by: 'rh-install', removable: true, version: '1.0.0', directories: [join(f.home, '.local'), dir],
+    paths: { [join(dir, 'tool')]: { committed: { type: 'file', sha256: sha256Prefixed(Buffer.from('rh\n')) } } } } } : {});
+});
+
+// Ownership probe P4: a claim released on observation (its target was absent) stays released through a rollback.
+test.each([
+  { label: 'the whole tool', gone: ['a', 'b'], left: [] },
+  { label: 'one path', gone: ['a'], left: ['b'] },
+] as const)('tool record: a release of %s survives a rollback', ({ gone, left }) => {
+  const f = fixture();
+  const dir = join(f.home, '.local', 'bin');
+  mkdirSync(dir, { recursive: true });
+  f.gate().delegate([{ tool: 'herdr-core', version: '1.0.0', directory: dir, entries: ['a', 'b'] }], ([at]) => {
+    for (const name of ['a', 'b']) writeFileSync(join(at!, name), `${name}\n`);
+  });
+  const snapshot = readFileSync(join(f.root, 'ledger.json'));
+  for (const name of gone) rmSync(join(dir, name));
+  f.gate().releaseAbsentTools(null);
+  expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
+  expect(Object.keys(f.ledger().tools['herdr-core']?.paths ?? {})).toEqual(left.map((name) => join(dir, name)));
 });

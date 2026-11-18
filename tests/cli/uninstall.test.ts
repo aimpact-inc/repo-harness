@@ -3,12 +3,15 @@ import { prepareInstallSelectionSwitch, versions } from '../../src/cli/installer
 import { beforeAll, test, expect } from 'bun:test';
 import { installStateFixturePath, recordLegacyInstallOwnership, recordPluginSelection, seedGlobalPackageFixture, seedPathRecords, withTempHome } from '../helpers/install-ownership';
 import { runInstall } from '../../src/cli/commands/install';
+import { ensureHerdrCore } from '../../src/cli/commands/global-runtime';
+import { HC_MIN_VERSION } from '../../src/core/terminal/herdr-pin';
+import { startFakeHcRelease, writeFakeUserPathPowershell } from '../helpers/fake-hc';
 import { jsonFragment } from '../../src/core/host-config/json-fragment';
 import { CLAUDE_ROOT_CONFIG_BACKUP, CODEGRAPH_MCP_SELECTOR } from '../../src/core/host-config/claude-config';
 import type { PathCommitted } from '../../src/core/host-config/types';
 import { pathRecordHost, pathRecordKey } from '../../src/effects/host-config/path-records';
 import { hashManagedTree } from '../../src/effects/managed-tree';
-import { appendFileSync, chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync, statSync } from 'fs';
+import { appendFileSync, chmodSync, cpSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, relative } from 'path';
 import { spawnSync } from 'child_process';
@@ -17,7 +20,7 @@ import { configurationReceiptPath } from '../../src/cli/installer/configuration-
 import { migrateCodexConfigRecords, planCodexConfigMigration } from '../../src/cli/installer/codex-config-migration';
 import { requestUserInputFragment } from '../../src/cli/installer/targets/codex';
 import { tomlFragment } from '../../src/core/host-config/toml-fragment';
-import { openHostConfigGate } from '../../src/effects/host-config/gate';
+import { openHostConfigGate, rollbackHostConfigTransaction } from '../../src/effects/host-config/gate';
 import { buildManagedHooks } from '../../src/cli/installer/managed-entries';
 import { applyGlobalContextRefresh, preflightGlobalContextRefresh, renderGlobalRulesBlock } from '../../src/cli/installer/global-context';
 const CLI = join(import.meta.dir, '../../src/cli/index.ts');
@@ -304,7 +307,7 @@ test.each([[3,1],[3,2],[4,2]])('a protocol %i install state with a protocol %i l
   const state=installStateFixturePath(env);writeFileSync(state,JSON.stringify({...JSON.parse(readFileSync(state,'utf8')),protocol:4,pi_packages:[]}));
  }
  // The ledger as an earlier rh version left it.
- const {paths,retired:_retired,recovery:_recovery,...text}=ledger(home);
+ const {paths,retired:_retired,recovery:_recovery,tools:_tools,...text}=ledger(home);
  writeFileSync(join(home,'.repo-harness/config/ledger.json'),JSON.stringify(ledgerProtocol===1?{...text,protocol:1}:{...text,protocol:2,paths}));
  const before=tree(home);
  const dryRun=runUserUninstall({target:'both',dryRun:true,env});
@@ -520,3 +523,82 @@ test('an old manifest record of the Codex CodeGraph table migrates to the ledger
   expect(readFileSync(path,'utf8')).toBe('model = "user"\n');expect(existsSync(join(home,'.repo-harness/install-state.json'))).toBe(false);
  });
 });
+
+/** The entries outside ~/.repo-harness/, where an uninstall keeps its own state. */
+function hostTree(home:string){return readdirSync(home,{recursive:true}).map(String).filter((path)=>!path.startsWith('.repo-harness')).sort().map((path)=>{const stat=lstatSync(join(home,path));return stat.isFile()?`${path}:${createHash('sha256').update(readFileSync(join(home,path))).digest('hex')}`:path;}).join('\n');}
+/** The hc step of a fresh install from a fake pinned release: the real producer of the herdr-core tool record. */
+async function installHerdrCore(root:string,env:NodeJS.ProcessEnv,windows:boolean){
+ const pkg=join(root,'pkg'),release=join(root,'release');mkdirSync(pkg);mkdirSync(release);
+ writeFileSync(join(pkg,windows?'herdr-core.exe':'herdr-core'),`#!/bin/sh\necho "hc ${HC_MIN_VERSION}"\n`,{mode:0o755});
+ if(windows){mkdirSync(join(pkg,'conpty'));writeFileSync(join(pkg,'conpty','conpty.dll'),'dll\n');writeFileSync(join(env.SystemRoot!,'System32','tar.exe'),'#!/bin/sh\nexec tar "$@"\n',{mode:0o755});}
+ expect(spawnSync('tar',['-czf',join(release,'asset'),'-C',pkg,'.']).status).toBe(0);
+ const server=startFakeHcRelease(root,release);
+ try{
+  const asset={url:`http://127.0.0.1:${await server.port}/asset`,sha256:createHash('sha256').update(readFileSync(join(release,'asset'))).digest('hex')};
+  const {step}=ensureHerdrCore({cwd:root,env,command:'install',platform:windows?'win32-x64':'darwin-arm64',minVersion:HC_MIN_VERSION,assets:{'macos-aarch64':asset,'windows-x86_64':asset}});
+  expect(step.status,step.detail).toBe('ok');
+ }finally{server.stop();}
+}
+// Ownership probes (#2853): P2 `edited` (the entry differs: it and its record stay); P1 `absent` (the entry is gone at a read: its record
+// goes, and a later re-created entry is not rh's); P4 `rolled-back` (a release, then the transaction rollback, then a hand reinstall of
+// identical bytes: no claim comes back). P3 (a claim needs the bytes on disk now) is the producer's: the hc update and Bun import cases.
+test.each([
+ {platform:'unix',change:'none'},{platform:'windows',change:'none'},
+ {platform:'unix',change:'edited'},{platform:'windows',change:'edited'},
+ {platform:'unix',change:'absent'},{platform:'windows',change:'absent'},
+ {platform:'unix',change:'rolled-back'},
+])('a fresh hc install: the uninstall keeps it with one kept line and releases only the entries that are gone ($platform, $change)',async({platform,change})=>{
+ const edited=change==='edited';
+ const root=realpathSync(mkdtempSync(join(tmpdir(),'user-uninstall-tools-'))),home=join(root,'home'),windows=platform==='windows';
+ const systemRoot=join(root,'Windows'),registry=join(root,'registry.json');
+ mkdirSync(home);mkdirSync(join(systemRoot,'System32'),{recursive:true});
+ const env:NodeJS.ProcessEnv={...process.env,HOME:home,GIT_CONFIG_NOSYSTEM:'1',PATH:'/usr/bin:/bin',SystemRoot:systemRoot,LOCALAPPDATA:join(home,'AppData','Local')};delete env.XDG_STATE_HOME;delete env.XDG_CONFIG_HOME;
+ writeFakeUserPathPowershell(join(systemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe'),registry,join(root,'powershell.log'));
+ const userPath={existed:true,kind:'ExpandString',raw:'%USERPROFILE%\\bin'};writeFileSync(registry,JSON.stringify(userPath));
+ const dir=windows?join(home,'AppData','Local','Programs','herdr-core'):join(home,'.local','bin');
+ const shared=(result:ReturnType<typeof runUserUninstall>)=>result.items.filter((item)=>item.action==='kept'&&item.reason.startsWith('shared tools'));
+ const keptLine=(summary:string)=>({path:join(home,'.repo-harness/config/ledger.json'),action:'kept' as const,reason:`shared tools that rh installed stay: herdr-core ${HC_MIN_VERSION} (${summary}`});
+ const files=windows?'herdr-core.exe, conpty, hc.exe)':'herdr-core, hc)';
+ try{
+  await installHerdrCore(root,env,windows);
+  const installed=hostTree(home),registryInstalled=readFileSync(registry,'utf8');
+  const kept=runUserUninstall({target:'both',env});
+  expect(shared(kept)).toEqual([keptLine(windows?`${files} and its user PATH entry`:files)]);
+  expect([kept.exitCode,hostTree(home),readFileSync(registry,'utf8')]).toEqual([0,installed,registryInstalled]);
+  const recorded=ledger(home).tools;
+  if(change==='absent'){
+   // The entry is gone at the next read, which releases it; then the same bytes or text come back.
+   const copies=windows?null:['herdr-core','hc'].map((name)=>[name,lstatSync(join(dir,name)).isSymbolicLink()]as const);const bytes=windows?null:readFileSync(join(dir,'herdr-core'));
+   if(windows)writeFileSync(registry,JSON.stringify(userPath));else{rmSync(join(dir,'hc'));rmSync(join(dir,'herdr-core'));}
+   const released=runUserUninstall({target:'both',env});
+   const gone=windows?[`HKCU\\Environment\\Path: ${dir}`]:[join(dir,'herdr-core'),join(dir,'hc')];
+   expect(released.items.filter((item)=>item.action==='note'&&item.reason.includes('already absent')).map((item)=>item.path).sort()).toEqual(gone.sort());
+   if(windows)writeFileSync(registry,JSON.stringify({...userPath,raw:`${userPath.raw};${dir}`}));
+   else{writeFileSync(join(dir,'herdr-core'),bytes!,{mode:0o755});symlinkSync('herdr-core',join(dir,'hc'));expect(copies).toEqual([['herdr-core',false],['hc',true]]);}
+  }
+  if(change==='rolled-back'){
+   // The release is a fact: the rollback of the transaction that made it does not bring the claims back.
+   const save=join(root,'saved');cpSync(dir,save,{recursive:true,verbatimSymlinks:true});
+   const snapshot=readFileSync(join(home,'.repo-harness/config/ledger.json'));
+   rmSync(join(dir,'hc'));rmSync(join(dir,'herdr-core'));
+   openHostConfigGate({env}).releaseAbsentTools(null);
+   expect(rollbackHostConfigTransaction(join(home,'.repo-harness'),snapshot,mkdtempSync(join(root,'tx-'))).unresolved).toEqual([]);
+   for(const name of readdirSync(save))cpSync(join(save,name),join(dir,name),{recursive:true,verbatimSymlinks:true});
+  }
+  if(edited&&windows)writeFileSync(registry,JSON.stringify({...userPath,raw:`${userPath.raw};${dir.toUpperCase()}`}));
+  if(edited&&!windows){appendFileSync(join(dir,'herdr-core'),'# user patch\n');writeFileSync(join(dir,'other-tool'),'user\n');}
+  const before=hostTree(home),registryBefore=readFileSync(registry,'utf8');
+  const again=runUserUninstall({target:'both',env});
+  // The uninstall changes no tool file and no PATH value; only the ledger can change.
+  expect([hostTree(home),readFileSync(registry,'utf8')]).toEqual([before,registryBefore]);
+  if(change==='absent'&&windows){
+   // The files stay recorded; the re-added PATH entry is not rh's.
+   expect([again.exitCode,shared(again)]).toEqual([0,[keptLine(files)]]);
+   expect(Object.keys(ledger(home).tools['herdr-core'])).not.toContain('path_entry');
+  }else if(change==='absent'||change==='rolled-back'){
+   expect([again.exitCode,shared(again),ledger(home).tools]).toEqual([0,[],{}]);
+  }else{
+   expect([again.exitCode,shared(again),ledger(home).tools]).toEqual([0,[keptLine(windows?`${files} and its user PATH entry`:files)],recorded]);
+  }
+ }finally{rmSync(root,{recursive:true,force:true});}
+},30_000);

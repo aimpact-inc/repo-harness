@@ -103,3 +103,31 @@ export function fakeHc(prefix: string, repoName = 'pinned') {
   fake.setVersion(HC_MIN_VERSION); fake.setSnapshot(1, []);
   return fake;
 }
+
+/**
+ * A fake Windows `powershell.exe` for the user Path scripts of
+ * src/effects/host-config/tools.ts: it decodes the real -EncodedCommand, logs
+ * its first line, and reads or compare-and-sets the value in `state` (JSON
+ * `{ existed, kind, raw }`; no file: no value) from the stdin payload. A
+ * `<state>.fail` file holding `exit` echoes
+ * its argv and stdin to stderr and exits 1; holding `timeout`, it hangs.
+ */
+export function writeFakeUserPathPowershell(file: string, state: string, log: string): void {
+  mkdirSync(join(file, '..'), { recursive: true });
+  writeFileSync(file, `#!${process.execPath}
+const { appendFileSync, existsSync, readFileSync, writeFileSync, rmSync } = require('node:fs');
+const [marker, operation] = Buffer.from(process.argv.at(-1), 'base64').toString('utf16le').split('\\n')[0].split(' ').slice(1);
+const input = readFileSync(0, 'utf8');
+appendFileSync(${JSON.stringify(log)}, operation + '\\n');
+const fail = existsSync(${JSON.stringify(`${state}.fail`)}) ? readFileSync(${JSON.stringify(`${state}.fail`)}, 'utf8') : null;
+if (fail === 'exit') { process.stderr.write(process.argv.join(' ') + '\\n' + input + '\\n' + Buffer.from(input, 'base64').toString('utf8') + '\\n'); process.exit(1); }
+if (fail === 'timeout') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60_000);
+if (marker !== 'rh-user-path') process.exit(3);
+const value = existsSync(${JSON.stringify(state)}) ? JSON.parse(readFileSync(${JSON.stringify(state)}, 'utf8')) : { existed: false, kind: 'ExpandString', raw: '' };
+if (operation === 'read') { console.log(Buffer.from(JSON.stringify(value)).toString('base64')); process.exit(0); }
+const { expected, next } = JSON.parse(Buffer.from(input.trim(), 'base64').toString('utf8'));
+if (expected.existed !== value.existed || expected.raw !== value.raw || (value.existed && expected.kind !== value.kind)) { console.log('changed'); process.exit(0); }
+if (next.existed) writeFileSync(${JSON.stringify(state)}, JSON.stringify(next)); else rmSync(${JSON.stringify(state)}, { force: true });
+console.log('written');
+`, { mode: 0o755 });
+}

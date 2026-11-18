@@ -7,9 +7,11 @@ import { ownedPath } from "../src/effects/host-config/path-records";
 import { openHostConfigGate } from "../src/effects/host-config/gate";
 import { configureRequiredHerdrSkill } from "../src/cli/commands/herdr-skill";
 import { ensureHerdrCore } from "../src/cli/commands/global-runtime";
-import { startFakeHcRelease } from "./helpers/fake-hc";
+import { startFakeHcRelease, writeFakeUserPathPowershell } from "./helpers/fake-hc";
 import { HC_MIN_VERSION } from "../src/core/terminal/herdr-pin";
 import { sha256Prefixed } from "../src/core/evidence/sha256";
+import { hashManagedTree } from "../src/effects/managed-tree";
+import { windowsUserPathPort } from "../src/effects/host-config/tools";
 
 /**
  * The package file `src/core/terminal/herdr-core-pin.json` is the single herdr
@@ -266,10 +268,14 @@ interface HcStepRow {
   readonly updateFails?: boolean;
   readonly updateLeavesVersion?: boolean;
   readonly installDirOnPath?: boolean;
-  /** Windows: the fake powershell.exe fails its user PATH write. */
+  /** Windows: the fake powershell.exe fails its user PATH read. */
   readonly userPathFails?: boolean;
-  /** Windows: user PATH writes through powershell.exe. */
-  readonly userPathCalls?: number;
+  /** Windows: the user Path value before the step; absent: no value. */
+  readonly userPath?: string;
+  /** Windows: the user Path scripts that ran through powershell.exe. */
+  readonly userPathCalls?: readonly ("read" | "write")[];
+  /** Below the floor: an earlier rh install recorded the hc on PATH, and the update rewrites it; `edited`: the user changed it since. */
+  readonly recorded?: true | "edited";
   readonly status: "ok" | "failed";
   readonly requests: number;
   readonly installed: boolean;
@@ -289,14 +295,20 @@ const HC_STEP_ROWS: readonly HcStepRow[] = [
   { label: "missing: a dangling hc link is not overwritten", before: null, platform: "darwin-arm64", served: "pinned", existing: "hc", status: "failed", requests: 0, installed: false, hcCalls: [],
     detail: dir => `refusing to overwrite it; add ${dir} to PATH, then rerun rh update` },
   { label: "missing on Windows: installs herdr-core.exe, conpty and the hc.exe hard link, and adds the dir to the user PATH", before: null, platform: "win32-x64", served: "pinned", status: "ok", requests: 1, installed: true, hcCalls: [],
-    userPathCalls: 1, detail: "to the user PATH: new terminals have hc; this run uses it for its later steps" },
-  { label: "missing on Windows: a failed user PATH write fails the step", before: null, platform: "win32-x64", served: "pinned", userPathFails: true, status: "failed", requests: 1, installed: true, hcCalls: [],
-    userPathCalls: 1, detail: "to the user PATH failed: registry access denied" },
-  { label: "missing on Windows: a zip without conpty installs nothing", before: null, platform: "win32-x64", served: "no-conpty", status: "failed", requests: 1, installed: false, hcCalls: [], userPathCalls: 0, detail: "holds no complete hc (missing conpty, conpty/conpty.dll)" },
+    userPathCalls: ["read", "write"], detail: "to the user PATH: new terminals have hc; this run uses it for its later steps" },
+  { label: "missing on Windows: a user PATH that lists the dir gets no entry and no record of one", before: null, platform: "win32-x64", served: "pinned", status: "ok", requests: 1, installed: true, hcCalls: [],
+    userPath: "%USERPROFILE%\\bin;<dir>\\", userPathCalls: ["read"], detail: "is already on the user PATH" },
+  { label: "missing on Windows: a failed user PATH read fails the step", before: null, platform: "win32-x64", served: "pinned", userPathFails: true, status: "failed", requests: 1, installed: true, hcCalls: [],
+    userPathCalls: ["read"], detail: "to the user PATH failed: the user Path read exited with status 1" },
+  { label: "missing on Windows: a zip without conpty installs nothing", before: null, platform: "win32-x64", served: "no-conpty", status: "failed", requests: 1, installed: false, hcCalls: [], detail: "holds no complete hc (missing conpty, conpty/conpty.dll)" },
   { label: "missing: no pin target for the platform", before: null, platform: "win32-arm64", served: "pinned", status: "failed", requests: 0, installed: false, hcCalls: [],
     detail: `no herdr-core release asset for win32-arm64; install hc >=${HC_MIN_VERSION} manually (Herdr.app or a herdr-core release), then run rh update` },
   { label: "below the floor: hc update --version", before: "0.1.15", platform: "darwin-arm64", served: "pinned", status: "ok", requests: 0, installed: false,
     hcCalls: ["--version", `update --version ${HC_MIN_VERSION}`, "--version"], detail: `hc client 0.1.15 was below the repo-harness floor ${HC_MIN_VERSION}; hc update --version ${HC_MIN_VERSION} updated it to ${HC_MIN_VERSION}` },
+  { label: "below the floor: the hc that rh recorded is recorded again after hc update", before: "0.1.15", platform: "darwin-arm64", served: "pinned", recorded: true, status: "ok", requests: 0, installed: false,
+    hcCalls: ["--version", `update --version ${HC_MIN_VERSION}`, "--version"] },
+  { label: "below the floor: an hc that changed since rh recorded it updates, and its record stays as it was (ownership probe P3)", before: "0.1.15", platform: "darwin-arm64", served: "pinned", recorded: "edited", status: "ok", requests: 0, installed: false,
+    hcCalls: ["--version", `update --version ${HC_MIN_VERSION}`, "--version"] },
   { label: "below the floor: a failed hc update stops", before: "0.1.15", platform: "darwin-arm64", served: "pinned", updateFails: true, status: "failed", requests: 0, installed: false,
     hcCalls: ["--version", `update --version ${HC_MIN_VERSION}`], detail: `hc client 0.1.15 is below the repo-harness floor ${HC_MIN_VERSION}; hc update --version ${HC_MIN_VERSION} failed: hc: managed install; update it with its package manager` },
   { label: "below the floor: hc update leaves the client below the floor", before: "0.1.15", platform: "darwin-arm64", served: "pinned", updateLeavesVersion: true, status: "failed", requests: 0, installed: false,
@@ -319,10 +331,10 @@ test.each(HC_STEP_ROWS.map(row => [row.label, row] as const))("herdr-core instal
     writeFileSync(join(pkg, binary), `#!/bin/sh\necho "hc ${row.served === "wrong-version" ? "0.0.1" : HC_MIN_VERSION}"\n`, { mode: 0o755 });
     if (windows && row.served !== "no-conpty") { mkdirSync(join(pkg, "conpty")); writeFileSync(join(pkg, "conpty", "conpty.dll"), "dll\n"); }
     writeFileSync(join(systemRoot, "System32", "tar.exe"), '#!/bin/sh\nexec tar "$@"\n', { mode: 0o755 });
-    // A fake powershell.exe: it logs the encoded command and prints what the registry script prints.
-    mkdirSync(join(systemRoot, "System32", "WindowsPowerShell", "v1.0"), { recursive: true });
-    writeFileSync(join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), `#!/bin/sh\nprintf '%s\\n' "$4" >> "${root}/powershell.log"\n`
-      + (row.userPathFails ? "echo 'registry access denied' >&2; exit 1\n" : "echo added\n"), { mode: 0o755 });
+    const registry = join(root, "registry.json");
+    writeFakeUserPathPowershell(join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), registry, join(root, "powershell.log"));
+    if (row.userPathFails) writeFileSync(`${registry}.fail`, "exit");
+    if (row.userPath !== undefined) writeFileSync(registry, JSON.stringify({ existed: true, kind: "ExpandString", raw: row.userPath.replace("<dir>", installDir) }));
     expect(spawnSync("tar", ["-czf", join(root, "asset"), "-C", pkg, "."]).status).toBe(0);
     const archive = readFileSync(join(root, "asset"));
     const assetFile = windows ? "herdr-core-windows-x86_64.zip" : "herdr-core-macos-aarch64.tar.gz";
@@ -330,19 +342,24 @@ test.each(HC_STEP_ROWS.map(row => [row.label, row] as const))("herdr-core instal
     // Neither entry is an hc on PATH: a user file named herdr-core, and a link to a removed binary.
     if (row.existing === "herdr-core") writeFileSync(join(installDir, "herdr-core"), "user file\n");
     if (row.existing === "hc") symlinkSync("removed-herdr-core", join(installDir, "hc"));
-    // A fake hc: it logs each call; `update --version X` sets its version to X.
+    // A fake hc: it logs each call; `update --version X` sets its version to X and rewrites the binary.
+    const env = { HOME: home, LOCALAPPDATA: localAppData, SystemRoot: systemRoot, PATH: `${row.installDirOnPath ? `${installDir}:` : ""}${fakeBin}:/usr/bin:/bin` };
+    const writeHc = () => writeFileSync(join(fakeBin, "hc"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${root}/hc-argv.log"\n`
+      + `if [ "$1" = update ]; then ${row.updateFails ? `echo 'hc: managed install; update it with its package manager' >&2; exit 1` : row.updateLeavesVersion ? 'exit 0' : `printf '%s' "$3" > "${root}/hc-version"; echo '# updated' >> "$0"; exit 0`}; fi\n`
+      + `printf 'hc %s\\n' "$(cat "${root}/hc-version")"\n`, { mode: 0o755 });
     if (row.before !== null) {
       writeFileSync(join(root, "hc-version"), row.before);
-      writeFileSync(join(fakeBin, "hc"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${root}/hc-argv.log"\n`
-        + `if [ "$1" = update ]; then ${row.updateFails ? `echo 'hc: managed install; update it with its package manager' >&2; exit 1` : row.updateLeavesVersion ? 'exit 0' : `printf '%s' "$3" > "${root}/hc-version"; exit 0`}; fi\n`
-        + `printf 'hc %s\\n' "$(cat "${root}/hc-version")"\n`, { mode: 0o755 });
+      if (row.recorded) openHostConfigGate({ env }).delegate([{ tool: "herdr-core", version: row.before, directory: fakeBin, entries: ["hc"] }], writeHc);
+      else writeHc();
+      if (row.recorded === "edited") appendFileSync(join(fakeBin, "hc"), "# user edit\n");
     }
+    const recordedBefore = row.recorded === "edited" ? JSON.parse(readFileSync(join(home, ".repo-harness", "config", "ledger.json"), "utf8")).tools["herdr-core"] : null;
     const port = await server.port;
     const sha256 = createHash("sha256").update(archive).digest("hex");
     const { step, pathEntry } = ensureHerdrCore({
       cwd: root, command: "update", platform: row.platform, minVersion: HC_MIN_VERSION,
       assets: Object.fromEntries(["macos-aarch64", "windows-x86_64"].map(name => [name, { url: `http://127.0.0.1:${port}/${assetFile}`, sha256 }])),
-      env: { HOME: home, LOCALAPPDATA: localAppData, SystemRoot: systemRoot, PATH: `${row.installDirOnPath ? `${installDir}:` : ""}${fakeBin}:/usr/bin:/bin` },
+      env,
     });
     expect(step.status, step.detail).toBe(row.status);
     if (row.detail !== undefined) expect(step.detail).toContain(typeof row.detail === "string" ? row.detail : row.detail(installDir));
@@ -351,12 +368,22 @@ test.each(HC_STEP_ROWS.map(row => [row.label, row] as const))("herdr-core instal
     expect(server.requests()).toHaveLength(row.requests);
     expect(existsSync(join(root, "hc-argv.log")) ? readFileSync(join(root, "hc-argv.log"), "utf8").split("\n").filter(Boolean) : []).toEqual([...row.hcCalls]);
     const userPathCommands = existsSync(join(root, "powershell.log")) ? readFileSync(join(root, "powershell.log"), "utf8").split("\n").filter(Boolean) : [];
-    expect(userPathCommands).toHaveLength(row.userPathCalls ?? 0);
-    for (const command of userPathCommands) {
-      const script = Buffer.from(command, "base64").toString("utf16le");
-      expect(script).toContain(`$dir = '${installDir}'`);
-      expect(script).toContain("DoNotExpandEnvironmentNames");
-    }
+    expect(userPathCommands).toEqual([...(row.userPathCalls ?? [])]);
+    // The tool record holds each entry that the step created, and the PATH entry that it appended, as the files and the registry are now.
+    const ledgerFile = join(home, ".repo-harness", "config", "ledger.json");
+    const tool = existsSync(ledgerFile) ? JSON.parse(readFileSync(ledgerFile, "utf8")).tools["herdr-core"] ?? null : null;
+    const names = windows ? ["herdr-core.exe", "conpty", "hc.exe"] : ["herdr-core", "hc"];
+    const appended = row.userPathCalls?.includes("write") && row.status === "ok";
+    const committed = (path: string) => { const stat = lstatSync(path); return stat.isSymbolicLink() ? { type: "symlink", target: readlinkSync(path) }
+      : stat.isDirectory() ? { type: "directory", sha256: hashManagedTree(path) } : { type: "file", sha256: sha256Prefixed(readFileSync(path)) }; };
+    if (row.recorded === "edited") expect(tool).toEqual(recordedBefore);
+    else if (row.recorded) expect(tool).toEqual({ installed_by: "rh-install", removable: true, version: HC_MIN_VERSION, paths: { [join(fakeBin, "hc")]: { committed: committed(join(fakeBin, "hc")) } }, directories: [] });
+    else if (!row.installed) expect(tool).toBeNull();
+    else expect(tool).toEqual({ installed_by: "rh-install", removable: true, version: HC_MIN_VERSION,
+      paths: Object.fromEntries(names.map(name => [join(installDir, name), { committed: committed(join(installDir, name)) }])), directories: [],
+      ...(appended ? { path_entry: { entry: installDir, inserted: installDir, kind: "ExpandString", value_existed: false } } : {}) });
+    if (appended) expect(JSON.parse(readFileSync(registry, "utf8"))).toEqual({ existed: true, kind: "ExpandString", raw: installDir });
+    if (row.userPath !== undefined) expect(JSON.parse(readFileSync(registry, "utf8")).raw).toBe(row.userPath.replace("<dir>", installDir));
     if (row.existing === "herdr-core") expect(readFileSync(join(installDir, "herdr-core"), "utf8")).toBe("user file\n");
     if (row.existing === "hc") expect(readlinkSync(join(installDir, "hc"))).toBe("removed-herdr-core");
     if (!row.installed) {
@@ -376,7 +403,33 @@ test.each(HC_STEP_ROWS.map(row => [row.label, row] as const))("herdr-core instal
   }
 }, 30_000);
 
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+
+// Ownership probe P5: no user PATH value reaches output. The values go by stdin; a failed or timed-out script gives a fixed
+// operation name and its exit status, never its argv or stderr, which the fake fills with its whole input.
+test.each(["exit", "timeout"] as const)("the user PATH port reports a %s with no PATH text", (mode) => {
+  const root = mkdtempSync(join(tmpdir(), "repo-harness-user-path-"));
+  try {
+    const registry = join(root, "registry.json"), log = join(root, "powershell.log"), powershell = join(root, "powershell.exe");
+    const sentinel = "C:\\rh-sentinel-7f3a\\bin";
+    writeFakeUserPathPowershell(powershell, registry, log);
+    writeFileSync(registry, JSON.stringify({ existed: true, kind: "ExpandString", raw: sentinel }));
+    const value = windowsUserPathPort(powershell, root, { PATH: "/usr/bin:/bin" }).read();
+    const port = windowsUserPathPort(powershell, root, { PATH: "/usr/bin:/bin" }, 3_000);
+    expect(value.raw).toBe(sentinel);
+    writeFileSync(`${registry}.fail`, mode);
+    const messages = [() => port.read(), () => port.write(value, { ...value, raw: `${sentinel};C:\\next` })].map((call) => {
+      try { call(); } catch (error) { return (error as Error).message; }
+      throw new Error("the port did not fail");
+    });
+    expect(messages).toEqual(mode === "exit" ? ["the user Path read exited with status 1", "the user Path write exited with status 1"]
+      : ["the user Path read timed out after 3000 ms", "the user Path write timed out after 3000 ms"]);
+    const forms = [sentinel, Buffer.from(sentinel, "utf8").toString("base64"), Buffer.from(sentinel, "utf16le").toString("base64")];
+    for (const message of messages) for (const form of forms) expect(message).not.toContain(form);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 30_000);

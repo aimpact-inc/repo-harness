@@ -19,8 +19,10 @@ import { assertConfigurationPath, configurationReceiptPath, hostConfigurationRoo
 import { migrateCodexConfigRecords, planCodexConfigMigration, previewAdoptedRevert } from './codex-config-migration';
 import { migrateJsonConfigRecords, planJsonConfigMigration, previewJsonAdoptedRevert } from './json-config-migration';
 import { UNVERIFIED_INSTALLER_RANGES } from '../../effects/host-config/delegated';
-import { openHostConfigGate, planPathRevert, type HostConfigAdoption, type HostConfigRevertEntry } from '../../effects/host-config/gate';
-import { hostConfigPaths, projectedLedgerPaths, resolveHostPath } from '../../effects/host-config/store';
+import { openHostConfigGate, planPathRevert, userPathLabel, type HostConfigAdoption, type HostConfigGate, type HostConfigRevertEntry, type HostConfigToolRevertEntry } from '../../effects/host-config/gate';
+import { hostConfigPaths, projectedLedgerPaths, readLedger, readProjectedLedger, resolveHostPath } from '../../effects/host-config/store';
+import { windowsPowershellPath, windowsUserPathPort } from '../../effects/host-config/tools';
+import { HostConfigError, type ToolId, type ToolRecord } from '../../core/host-config/types';
 import { FileSyntaxError, parseJsonText, parseTomlText } from '../../core/evidence/file-syntax';
 
 export interface UninstallOptions {
@@ -151,6 +153,43 @@ export function exitCodeOf(items: readonly UninstallItem[]): 0 | 1 | 2 {
 function sameRevert(left: readonly HostConfigRevertEntry[], right: readonly HostConfigRevertEntry[]): boolean {
   const key = (entries: readonly HostConfigRevertEntry[]) => entries.map((entry) => `${entry.action}:${entry.kept?.join(',') ?? ''}`).join();
   return key(left) === key(right);
+}
+
+function toolSummary(tool: string, record: ToolRecord): string {
+  const where = Object.keys(record.paths).map((path) => path.split(/[\\/]/u).at(-1)).join(', ');
+  return `${tool} ${record.version}${where ? ` (${where})` : ''}${record.path_entry ? ' and its user PATH entry' : ''}`;
+}
+
+/**
+ * The tool items. An uninstall keeps every tool record and prints one `kept`
+ * line (#2853); it releases the entries that are gone, so a target that comes
+ * back is not rh's. The release plans as a dry run, and the apply must equal it.
+ */
+interface ToolPlan {
+  readonly items: UninstallItem[];
+  readonly released: readonly HostConfigToolRevertEntry[];
+}
+
+function planTools(env: NodeJS.ProcessEnv, gate: HostConfigGate, opts: UninstallOptions): ToolPlan {
+  const paths = hostConfigPaths(env);
+  const tools = Object.entries((opts.dryRun ? readProjectedLedger : readLedger)(paths).tools) as [ToolId, ToolRecord][];
+  if (!tools.length) return { items: [], released: [] };
+  const released = gate.releaseAbsentTools(userPathPort(env, paths.harness), { dryRun: true });
+  const gone = new Set(released.map((entry) => entry.path));
+  const left = tools.map(([tool, record]) => [tool, { ...record, paths: Object.fromEntries(Object.entries(record.paths).filter(([key]) => !gone.has(key))),
+    ...(record.path_entry && gone.has(userPathLabel(record.path_entry.entry)) ? { path_entry: undefined } : {}) }] as const)
+    .filter(([, record]) => Object.keys(record.paths).length || record.path_entry);
+  const items: UninstallItem[] = released.map((entry) => ({ path: entry.path, action: 'note', reason: `${entry.tool}: already absent; the tool record goes` }));
+  if (left.length) items.push({ path: paths.ledger, action: 'kept', reason: `shared tools that rh installed stay: ${left.map(([tool, record]) => toolSummary(tool, record)).join('; ')}` });
+  return { items, released };
+}
+
+function userPathPort(env: NodeJS.ProcessEnv, cwd: string) {
+  return () => {
+    const powershell = windowsPowershellPath(env);
+    if (powershell === null) throw new HostConfigError('host_config_invalid_state', 'SystemRoot is not set, so rh cannot read the user PATH');
+    return windowsUserPathPort(powershell, cwd, env);
+  };
 }
 
 function uninstallResult(items: UninstallItem[], dryRun: boolean): UninstallResult {
@@ -350,6 +389,10 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       retireRecords = true;
     }
   }
+  // After the retirement check: a tool that stays does not keep the install state; a failed tool read sets the exit code.
+  let tools: ToolPlan = { items: [], released: [] };
+  try { tools = planTools(env, gate, opts); } catch (error) { unresolved(hostConfigPaths(env).ledger, String((error as Error).message)); }
+  items.push(...tools.items);
   items.push({ path: join(home, '.repo-harness'), action: 'kept', reason: 'archives, runtime history and the MCP config retained; third-party packages/plugins retained' });
   // The records of another tool's installer cover only what its measurement proved (#2852).
   if (piPackages.length || hostPaths.includes(lock.path)) {
@@ -378,6 +421,9 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
         else writePrivateConfiguration(path, content, surfaceRoot(path));
       }
       if (hostPaths.length && !sameRevert(gate.revert(hostPaths), hostRevert)) throw new Error(`configuration changed after preview: ${hostPaths.join(', ')}`);
+      if (tools.released.length && JSON.stringify(gate.releaseAbsentTools(userPathPort(env, hostConfigPaths(env).harness))) !== JSON.stringify(tools.released)) {
+        throw new Error(`configuration changed after preview: ${hostConfigPaths(env).ledger}`);
+      }
       for (const path of [...originals.keys()]) {
         const parent = dirname(path);
         // Never remove a host root or history tree; only now-empty managed leaf containers.

@@ -2,6 +2,8 @@ import { requireHome } from "../../effects/repo-harness-home";
 import { parseJsonText } from "../../core/evidence/file-syntax";
 import { syncInstalledSkillCopies } from "../installer/skill-sync";
 import { openHostConfigGate } from "../../effects/host-config/gate";
+import { importBunBootstrapRecord, recordedToolIsCurrent, windowsPowershellPath, windowsUserPathPort } from "../../effects/host-config/tools";
+import { hostConfigPaths, readLedger } from "../../effects/host-config/store";
 import { configureRequiredHerdrSkill } from "./herdr-skill";
 import type { RuntimeTransactionContext } from '../../effects/locking/runtime-transaction-lock';
 import { bunGlobalPackageRoot, isBunGlobalPackageSource } from "../installer/skill-projection";
@@ -19,7 +21,7 @@ import { renderJsonObjectUpdate } from "../../effects/adoption/standard-plan";
 import { retireUserExcludesBlock, writeRepositoryExcludes } from "../installer/repository-excludes";
 import { sha256Hex } from "../../core/evidence/sha256";
 import { tmpdir, userInfo } from "os";
-import { delimiter, dirname, join, relative, resolve, sep } from "path";
+import { basename, delimiter, dirname, join, relative, resolve, sep } from "path";
 import { fileURLToPath } from "url";
 import { syncWazaSharedRules } from "../installer/waza-rules";
 import { applyGlobalContextRefresh, GLOBAL_RULES_BEGIN, GLOBAL_RULES_END, globalContextPath, preflightGlobalContextRefresh, type GlobalContextRefreshPlan, type ReportLanguageFlag } from "../installer/global-context";
@@ -1520,6 +1522,7 @@ function ensureCodegraphCli(cwd: string, bunExecutable: string, codegraphVersion
 }
 
 export const HERDR_CORE_STEP = "ensure herdr-core (hc)";
+export const BUN_BOOTSTRAP_STEP = "import Bun bootstrap record";
 
 /** Node `<platform>-<arch>` to the pin's release asset name. */
 const HC_ASSET_NAMES: Readonly<Record<string, string>> = {
@@ -1578,40 +1581,9 @@ function hcInstallLayout(assetName: string, env: NodeJS.ProcessEnv): HcInstallLa
   if (!env.SystemRoot) return { failure: "SystemRoot is not set; it names the Windows tar.exe that opens the herdr-core zip" };
   const tar = join(env.SystemRoot, "System32", "tar.exe");
   if (!existsSync(tar)) return { failure: `${tar} is missing; it opens the herdr-core zip (Windows 10 1803 or newer)` };
-  const powershell = join(env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const powershell = windowsPowershellPath(env)!;
   if (!existsSync(powershell)) return { failure: `${powershell} is missing; it adds the herdr-core directory to the user PATH` };
   return { dir: join(env.LOCALAPPDATA, "Programs", "herdr-core"), binary: "herdr-core.exe", members: ["herdr-core.exe", "conpty"], link: "hc.exe", linkKind: "hardlink", tar, powershell };
-}
-
-/**
- * The user PATH step of install.ps1: read the raw `HKCU\Environment` `Path`
- * (unexpanded), keep its value kind, append `dir` only when no entry matches
- * (no case, trailing backslash ignored), then set and clear a user variable so
- * running programs reread the environment. Not `setx`: it cuts the value at
- * 1024 characters. Prints `listed` or `added`.
- */
-function addToWindowsUserPath(powershell: string, dir: string, cwd: string, env: NodeJS.ProcessEnv): { outcome: "listed" | "added" } | { failure: string } {
-  const script = [
-    "$ErrorActionPreference = 'Stop'",
-    `$dir = '${dir.replaceAll("'", "''")}'`,
-    "$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)",
-    "try {",
-    "  $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)",
-    "  if ($raw -split ';' | Where-Object { $_.Trim().TrimEnd('\\') -ieq $dir.TrimEnd('\\') }) { 'listed' } else {",
-    "    $kind = if ($key.GetValueNames() -contains 'Path') { $key.GetValueKind('Path') } else { [Microsoft.Win32.RegistryValueKind]::ExpandString }",
-    "    $key.SetValue('Path', $(if ($raw) { \"$($raw.TrimEnd(';'));$dir\" } else { $dir }), $kind)",
-    "    [Environment]::SetEnvironmentVariable('HC_INSTALLING', '1', 'User')",
-    "    [Environment]::SetEnvironmentVariable('HC_INSTALLING', $null, 'User')",
-    "    'added'",
-    "  }",
-    "} finally { $key.Close() }",
-  ].join("\n");
-  // UTF-16LE base64: Windows PowerShell 5.1 splits the quotes of a -Command argument.
-  const encoded = Buffer.from(script, "utf16le").toString("base64");
-  const result = runBoundedProcess(powershell, ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], { cwd, env, timeoutMs: 30_000 });
-  const outcome = result.stdout.trim();
-  if (result.ok && (outcome === "listed" || outcome === "added")) return { outcome };
-  return { failure: `adding ${dir} to the user PATH failed: ${processFailure(result)}` };
 }
 
 export interface HerdrCoreInstallResult {
@@ -1623,14 +1595,19 @@ export interface HerdrCoreInstallResult {
 /**
  * Bring hc on PATH to the package floor. Missing: download the pinned asset,
  * check its sha256 and the downloaded hc, then install it in the official
- * layout. Below the floor: `hc update --version <floor>`. At or above: no
- * change. hc is a user tool after install: no ledger entry, and an existing
- * hc install file is never overwritten.
+ * layout; the ledger records each entry that the install created as a tool
+ * record (#2853), and an existing hc install file is never overwritten. Below
+ * the floor: `hc update --version <floor>`; the record follows the update only
+ * for the hc that rh recorded and that still holds its recorded bytes. At or
+ * above: no change.
  */
 export function ensureHerdrCore(input: HerdrCoreInstallInput): HerdrCoreInstallResult {
   const { cwd, env, minVersion } = input;
   const done = (step: Omit<GlobalRuntimeStep, "step">, pathEntry: string | null = null): HerdrCoreInstallResult => ({ step: { step: HERDR_CORE_STEP, ...step }, pathEntry });
   const fail = (detail: string): HerdrCoreInstallResult => done({ status: "failed", detail });
+  // A recorded entry that is gone loses its record now, so an hc that comes back there later is not rh's.
+  try { openHostConfigGate({ env }).releaseAbsentTools(null); }
+  catch (error) { return fail(`the herdr-core tool record could not be read: ${(error as Error).message}`); }
   const hc = findOnPath("hc", env);
   if (hc !== null) {
     const current = hcVersionOf(hc, cwd, env);
@@ -1638,7 +1615,16 @@ export function ensureHerdrCore(input: HerdrCoreInstallInput): HerdrCoreInstallR
     if (compareHcVersions(current.version, minVersion) >= 0) {
       return done({ status: "ok", detail: `hc ${current.version} at ${hc} is at or above ${minVersion}; no change` });
     }
-    const update = runBoundedProcess(hc, ["update", "--version", minVersion], { cwd, env, timeoutMs: 300_000 });
+    const ran: { update?: ReturnType<typeof runBoundedProcess> } = {};
+    const runUpdate = () => { ran.update = runBoundedProcess(hc, ["update", "--version", minVersion], { cwd, env, timeoutMs: 300_000 }); };
+    try {
+      if (!recordedToolIsCurrent(env, "herdr-core", hc)) runUpdate();
+      else {
+        const keys = Object.keys(readLedger(hostConfigPaths(env)).tools["herdr-core"]!.paths);
+        openHostConfigGate({ env }).delegate([{ tool: "herdr-core", version: minVersion, directory: dirname(keys[0]!), entries: keys.map(key => basename(key)) }], runUpdate);
+      }
+    } catch (error) { return fail(`hc update --version ${minVersion} could not be recorded: ${(error as Error).message}`); }
+    const update = ran.update!;
     if (!update.ok) return fail(`hc client ${current.version} is below the repo-harness floor ${minVersion}; hc update --version ${minVersion} failed: ${processFailure(update)}`);
     const updated = hcVersionOf(hc, cwd, env);
     if ("failure" in updated) return fail(updated.failure);
@@ -1676,19 +1662,24 @@ export function ensureHerdrCore(input: HerdrCoreInstallInput): HerdrCoreInstallR
     if ("failure" in downloaded) return fail(`the downloaded hc does not run on this machine: ${downloaded.failure}`);
     if (downloaded.version !== minVersion) return fail(`the downloaded hc reports ${downloaded.version}, expected ${minVersion}; nothing installed`);
 
-    mkdirSync(layout.dir, { recursive: true });
-    const binary = join(layout.dir, layout.binary);
-    const link = join(layout.dir, layout.link);
-    for (const name of layout.members) cpSync(join(extract, name), join(layout.dir, name), { recursive: true, force: false, errorOnExist: true });
-    chmodSync(binary, 0o755);
-    if (layout.linkKind === "symlink") symlinkSync(layout.binary, link);
-    else linkSync(binary, link);
+    const gate = openHostConfigGate({ env });
+    try {
+      gate.delegate([{ tool: "herdr-core", version: downloaded.version, directory: layout.dir, entries: [...layout.members, layout.link] }], ([dir]) => {
+        mkdirSync(dir!, { recursive: true });
+        const binary = join(dir!, layout.binary);
+        for (const name of layout.members) cpSync(join(extract, name), join(dir!, name), { recursive: true, force: false, errorOnExist: true });
+        chmodSync(binary, 0o755);
+        if (layout.linkKind === "symlink") symlinkSync(layout.binary, join(dir!, layout.link));
+        else linkSync(binary, join(dir!, layout.link));
+      });
+    } catch (error) { return fail(`installing hc into ${layout.dir} failed: ${(error as Error).message}`); }
     const installed = `installed hc ${downloaded.version} (sha256 verified) into ${layout.dir}: ${[...layout.members, layout.link].join(", ")}`;
     let pathNote: string | null = null;
     if (layout.powershell !== null) {
-      const userPath = addToWindowsUserPath(layout.powershell, layout.dir, cwd, env);
-      if ("failure" in userPath) return fail(`${installed}; ${userPath.failure}`);
-      pathNote = userPath.outcome === "added" ? `added ${layout.dir} to the user PATH: new terminals have hc` : `${layout.dir} is already on the user PATH`;
+      let outcome: "listed" | "added";
+      try { outcome = gate.addUserPathEntry("herdr-core", layout.dir, windowsUserPathPort(layout.powershell, cwd, env)); }
+      catch (error) { return fail(`${installed}; adding ${layout.dir} to the user PATH failed: ${(error as Error).message}`); }
+      pathNote = outcome === "added" ? `added ${layout.dir} to the user PATH: new terminals have hc` : `${layout.dir} is already on the user PATH`;
     }
     // Windows paths compare without case, as install.ps1 does.
     const samePath = (left: string) => process.platform === "win32" ? resolve(left).toLowerCase() === resolve(layout.dir).toLowerCase() : resolve(left) === resolve(layout.dir);
@@ -1799,6 +1790,17 @@ function runGlobalRuntimeSetupInTransaction(opts: GlobalRuntimeOptions): GlobalR
   const bunRuntime = ensureSupportedBunRuntime(cwd, env, bunExecutable);
   steps.push(bunRuntime);
   if (bunRuntime.status === "failed") {
+    return finalizeRuntimeResult(steps);
+  }
+
+  // A bootstrap Bun is at the measured version, so the runtime step above never upgrades it before the import.
+  try {
+    const imported = importBunBootstrapRecord(env);
+    steps.push({ step: BUN_BOOTSTRAP_STEP, status: imported === 'none' ? 'skipped' : 'ok',
+      detail: { none: 'no Bun bootstrap record', imported: 'recorded the Bun that the bootstrap installed; no command removes it',
+        already_recorded: 'the ledger already records this Bun', changed: 'the Bun binary changed since the bootstrap measured it, so rh records no Bun' }[imported] });
+  } catch (error) {
+    steps.push({ step: BUN_BOOTSTRAP_STEP, status: 'failed', detail: (error as Error).message });
     return finalizeRuntimeResult(steps);
   }
 
