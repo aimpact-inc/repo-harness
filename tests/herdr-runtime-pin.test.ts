@@ -11,6 +11,7 @@ import { startFakeHcRelease, writeFakeUserPathPowershell } from "./helpers/fake-
 import { HC_MIN_VERSION } from "../src/core/terminal/herdr-pin";
 import { sha256Prefixed } from "../src/core/evidence/sha256";
 import { hashManagedTree } from "../src/effects/managed-tree";
+import { windowsUserPathPort } from "../src/effects/host-config/tools";
 
 /**
  * The package file `src/core/terminal/herdr-core-pin.json` is the single herdr
@@ -298,7 +299,7 @@ const HC_STEP_ROWS: readonly HcStepRow[] = [
   { label: "missing on Windows: a user PATH that lists the dir gets no entry and no record of one", before: null, platform: "win32-x64", served: "pinned", status: "ok", requests: 1, installed: true, hcCalls: [],
     userPath: "%USERPROFILE%\\bin;<dir>\\", userPathCalls: ["read"], detail: "is already on the user PATH" },
   { label: "missing on Windows: a failed user PATH read fails the step", before: null, platform: "win32-x64", served: "pinned", userPathFails: true, status: "failed", requests: 1, installed: true, hcCalls: [],
-    userPathCalls: ["read"], detail: "to the user PATH failed: the user Path step failed: registry access denied" },
+    userPathCalls: ["read"], detail: "to the user PATH failed: the user Path read exited with status 1" },
   { label: "missing on Windows: a zip without conpty installs nothing", before: null, platform: "win32-x64", served: "no-conpty", status: "failed", requests: 1, installed: false, hcCalls: [], detail: "holds no complete hc (missing conpty, conpty/conpty.dll)" },
   { label: "missing: no pin target for the platform", before: null, platform: "win32-arm64", served: "pinned", status: "failed", requests: 0, installed: false, hcCalls: [],
     detail: `no herdr-core release asset for win32-arm64; install hc >=${HC_MIN_VERSION} manually (Herdr.app or a herdr-core release), then run rh update` },
@@ -332,7 +333,7 @@ test.each(HC_STEP_ROWS.map(row => [row.label, row] as const))("herdr-core instal
     writeFileSync(join(systemRoot, "System32", "tar.exe"), '#!/bin/sh\nexec tar "$@"\n', { mode: 0o755 });
     const registry = join(root, "registry.json");
     writeFakeUserPathPowershell(join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), registry, join(root, "powershell.log"));
-    if (row.userPathFails) writeFileSync(`${registry}.denied`, "");
+    if (row.userPathFails) writeFileSync(`${registry}.fail`, "exit");
     if (row.userPath !== undefined) writeFileSync(registry, JSON.stringify({ existed: true, kind: "ExpandString", raw: row.userPath.replace("<dir>", installDir) }));
     expect(spawnSync("tar", ["-czf", join(root, "asset"), "-C", pkg, "."]).status).toBe(0);
     const archive = readFileSync(join(root, "asset"));
@@ -406,3 +407,29 @@ import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSyn
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+
+// Ownership probe P5: no user PATH value reaches output. The values go by stdin; a failed or timed-out script gives a fixed
+// operation name and its exit status, never its argv or stderr, which the fake fills with its whole input.
+test.each(["exit", "timeout"] as const)("the user PATH port reports a %s with no PATH text", (mode) => {
+  const root = mkdtempSync(join(tmpdir(), "repo-harness-user-path-"));
+  try {
+    const registry = join(root, "registry.json"), log = join(root, "powershell.log"), powershell = join(root, "powershell.exe");
+    const sentinel = "C:\\rh-sentinel-7f3a\\bin";
+    writeFakeUserPathPowershell(powershell, registry, log);
+    writeFileSync(registry, JSON.stringify({ existed: true, kind: "ExpandString", raw: sentinel }));
+    const value = windowsUserPathPort(powershell, root, { PATH: "/usr/bin:/bin" }).read();
+    const port = windowsUserPathPort(powershell, root, { PATH: "/usr/bin:/bin" }, 3_000);
+    expect(value.raw).toBe(sentinel);
+    writeFileSync(`${registry}.fail`, mode);
+    const messages = [() => port.read(), () => port.write(value, { ...value, raw: `${sentinel};C:\\next` })].map((call) => {
+      try { call(); } catch (error) { return (error as Error).message; }
+      throw new Error("the port did not fail");
+    });
+    expect(messages).toEqual(mode === "exit" ? ["the user Path read exited with status 1", "the user Path write exited with status 1"]
+      : ["the user Path read timed out after 3000 ms", "the user Path write timed out after 3000 ms"]);
+    const forms = [sentinel, Buffer.from(sentinel, "utf8").toString("base64"), Buffer.from(sentinel, "utf16le").toString("base64")];
+    for (const message of messages) for (const form of forms) expect(message).not.toContain(form);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 30_000);

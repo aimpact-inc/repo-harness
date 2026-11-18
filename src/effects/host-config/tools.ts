@@ -2,7 +2,7 @@ import { rmSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { HostConfigError, type HostPath, type ToolId, type ToolRecord } from '../../core/host-config/types';
 import type { UserPathPort, UserPathValue } from '../../core/host-config/path-entry';
-import { runProcess } from '../process-runner';
+import { spawnSync } from 'node:child_process';
 import { hostConfigPaths, hostPathKey, observeFile, pathRecordOf, readLedger, validToolRecord, writeLedger } from './store';
 import { observePathEntry, sameCommitted } from './whole-path';
 
@@ -42,14 +42,13 @@ const READ_SCRIPT = [
  * Compare and set: the value changes only while it is still the one read, in
  * the kind of `next`. Then a user variable is set and cleared, so running
  * programs reread the environment. Not `setx`: it cuts the value at 1024
- * characters.
+ * characters. The two values come on stdin, never in the command line, which
+ * a timeout report can show.
  */
-function writeScript(expected: UserPathValue, next: UserPathValue): string {
-  const payload = Buffer.from(JSON.stringify({ expected, next }), 'utf8').toString('base64');
-  return [
-    `# rh-user-path write ${payload}`,
+const WRITE_SCRIPT = [
+    '# rh-user-path write',
     "$ErrorActionPreference = 'Stop'",
-    `$p = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${payload}')) | ConvertFrom-Json`,
+    '$p = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd().Trim())) | ConvertFrom-Json',
     "$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)",
     'try {',
     "  $existed = $key.GetValueNames() -contains 'Path'",
@@ -63,7 +62,6 @@ function writeScript(expected: UserPathValue, next: UserPathValue): string {
     '  }',
     '} finally { $key.Close() }',
   ].join('\n');
-}
 
 function decodeValue(stdout: string): UserPathValue {
   let value: unknown;
@@ -76,19 +74,28 @@ function decodeValue(stdout: string): UserPathValue {
   return { existed: record.existed, kind: record.kind, raw: record.raw };
 }
 
-/** The user `Path` value through Windows PowerShell. No output names the value: it can hold user paths. */
-export function windowsUserPathPort(powershell: string, cwd: string, env: NodeJS.ProcessEnv): UserPathPort {
-  const run = (script: string): string => {
+/**
+ * The user `Path` value through Windows PowerShell. No output carries the
+ * value: a failure names the operation and its exit status only, and the
+ * child's diagnostics, which can echo its input, are dropped.
+ */
+export function windowsUserPathPort(powershell: string, cwd: string, env: NodeJS.ProcessEnv, timeoutMs = 30_000): UserPathPort {
+  const run = (operation: 'read' | 'write', script: string, input: string): string => {
     // UTF-16LE base64: Windows PowerShell 5.1 splits the quotes of a -Command argument.
     const encoded = Buffer.from(script, 'utf16le').toString('base64');
-    const result = runProcess(powershell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { cwd, env, timeoutMs: 30_000 });
-    if (!result.ok) throw new HostConfigError('host_config_invalid_state', `the user Path step failed: ${(result.stderr || result.error || '').trim() || `exit ${result.status}`}`);
+    const result = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+      { cwd, env, input, encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 1024 * 1024 });
+    if (result.error || result.status !== 0) {
+      const code = (result.error as NodeJS.ErrnoException | undefined)?.code;
+      const how = code === 'ETIMEDOUT' ? `timed out after ${timeoutMs} ms` : result.error ? 'could not run' : `exited with status ${result.status ?? result.signal}`;
+      throw new HostConfigError('host_config_invalid_state', `the user Path ${operation} ${how}`);
+    }
     return result.stdout;
   };
   return {
-    read: () => decodeValue(run(READ_SCRIPT)),
+    read: () => decodeValue(run('read', READ_SCRIPT, '')),
     write: (expected, next) => {
-      const outcome = run(writeScript(expected, next)).trim();
+      const outcome = run('write', WRITE_SCRIPT, Buffer.from(JSON.stringify({ expected, next }), 'utf8').toString('base64')).trim();
       if (outcome === 'changed') throw new HostConfigError('host_config_target_changed', 'the user Path value changed before the write; nothing written');
       if (outcome !== 'written') throw new HostConfigError('host_config_invalid_state', 'the user Path write gave no result');
     },
