@@ -299,6 +299,63 @@ test('user links are followed: the real file is written and the link stays', () 
   expect(() => f.gate().apply([f.change(real, 'a'), f.change(join(f.home, '.linked', 'x.conf'), 'b')])).toThrow(expect.objectContaining({ code: 'host_config_invalid_state' }));
 });
 
+test('a linked config whose target has no extension reverts by the format recorded at write time; a dangling link keeps its records', () => {
+  const f = fixture();
+  const [config, target] = [join(f.home, '.claude.json'), join(f.home, 'dotfiles', 'claude-config')];
+  mkdirSync(join(f.home, 'dotfiles'));
+  writeFileSync(target, '{\n  "theme": "dark"\n}\n');
+  symlinkSync(target, config);
+  const statusLine = { owner: 'o1', selector: 'statusLine', kind: 'add' as const, strategy: jsonFragment, value: 'rh' };
+  f.gate().apply([{ path: config, backup: 'overrides-only', fragments: [statusLine] }]);
+  expect(f.ledger().files[target].format).toBe('json');
+  expect(f.gate().revert([config])).toEqual([{ path: target, action: 'text_removed' }]);
+  expect({ bytes: readFileSync(target, 'utf8'), link: lstatSync(config).isSymbolicLink() }).toEqual({ bytes: '{\n  "theme": "dark"\n}\n', link: true });
+
+  // The link stays when its target goes, so the file is not absent: the records stay for a later revert.
+  f.gate().apply([{ path: config, backup: 'overrides-only', fragments: [statusLine] }]);
+  rmSync(target);
+  expect(f.gate().revert([config])).toEqual([{ path: target, action: 'kept_edited', kept: ['statusLine'] }]);
+  expect(f.gate().recorded(config).map((entry) => entry.selector)).toEqual(['statusLine']);
+});
+
+test('a file written at a user link goes to the file that the link names; the link stays through write, rollback and revert', () => {
+  const f = fixture();
+  const agents = join(f.home, '.claude', 'agents');
+  mkdirSync(agents, { recursive: true });
+  mkdirSync(join(f.home, 'dotfiles'));
+  const [linked, dangling, repointed] = [join(agents, 'l.md'), join(agents, 'd.md'), join(agents, 'r.md')];
+  const [target, created, other] = [join(f.home, 'dotfiles', 'l.md'), join(f.home, 'dotfiles', 'new', 'd.md'), join(f.home, 'dotfiles', 'r.md')];
+  writeFileSync(target, 'mine\n');
+  writeFileSync(other, 'rh\n');
+  symlinkSync(target, linked);
+  symlinkSync(created, dangling);
+  symlinkSync(join(f.home, 'dotfiles', 'first.md'), repointed);
+  const write = (path: string, replace = false) => ({ path, owner: 'core', entry: { type: 'file', bytes: Buffer.from('rh\n') } as PathEntry, replace });
+  const state = () => ({ target: readFileSync(target, 'utf8'), created: existsSync(created) ? readFileSync(created, 'utf8') : null,
+    links: [linked, dangling].map((path) => lstatSync(path).isSymbolicLink()) });
+  expect(() => f.gate().writePaths([write(linked)])).toThrow(`rh has no record of it, so rh does not replace it: ${linked}`);
+
+  // A rollback puts the user file back from the vault and takes out the file and directory that rh created.
+  const transaction = mkdtempSync(join(f.home, 'tx-'));
+  expect(f.gate().writePaths([write(linked, true), write(dangling)], { transaction })).toEqual([linked, dangling]);
+  expect(state()).toEqual({ target: 'rh\n', created: 'rh\n', links: [true, true] });
+  expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), null, transaction).unresolved).toEqual([]);
+  expect({ ...state(), directory: existsSync(join(f.home, 'dotfiles', 'new')) }).toEqual({ target: 'mine\n', created: null, links: [true, true], directory: false });
+
+  // The record keys the link and names the file; a revert gives the user file back and removes only the created file.
+  f.gate().writePaths([write(linked, true), write(dangling), write(repointed)]);
+  const sha = sha256Prefixed(Buffer.from('rh\n'));
+  expect(f.ledger().paths[linked]).toMatchObject({ kind: 'replaced', link_target: target, committed: { type: 'file', sha256: sha } });
+  expect({ vault: f.vault(f.ledger().paths[linked].backup), dangling: f.ledger().paths[dangling] })
+    .toMatchObject({ vault: 'mine\n', dangling: { kind: 'created', link_target: created, baseline: { state: 'known', existed: false } } });
+  // A link that now names another file with the same bytes is not rh's entry.
+  rmSync(repointed);
+  symlinkSync(other, repointed);
+  expect(f.gate().revertPaths([linked, dangling, repointed]).map((entry) => [entry.path, entry.action]))
+    .toEqual([[linked, 'restored'], [dangling, 'removed'], [repointed, 'kept_edited']]);
+  expect(state()).toEqual({ target: 'mine\n', created: null, links: [true, true] });
+});
+
 test('a refresh with no recorded fragment is an override, adopt records an old write once, and a dry-run revert writes nothing', () => {
   const f = fixture();
   expect(f.gate().apply([f.change(f.a, 'x', { selector: 'keep', kind: 'refresh' })]).skipped.map((entry) => entry.code)).toEqual(['host_config_override_skipped']);

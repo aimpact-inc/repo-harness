@@ -350,6 +350,14 @@ test('uninstall retires a deleted rules file record without restoring the file',
  const {files,fragments}=ledger(home);
  expect({files,fragments}).toEqual({files:{},fragments:[]});
 }));
+test('a deleted config.toml with an active legacy receipt is already absent in the dry run and in the uninstall',()=>fixture((home,env)=>{
+ const path=join(home,'.codex/config.toml');
+ put(home,'.repo-harness/configuration-restore.json',JSON.stringify({protocol:1,changes:[{path,selector:'default_mode_request_user_input',before:null,installed:'default_mode_request_user_input = true\n',active:true}]}));
+ const dryRun=runUserUninstall({target:'codex',env,dryRun:true});
+ expect(dryRun.lines).toContain(`[note] ${path}: file already absent`);
+ const result=runUserUninstall({target:'codex',env});
+ expect({status:result.status,items:result.items,exists:existsSync(path)}).toEqual({status:'complete',items:dryRun.items,exists:false});
+}));
 test.each([
  ['.claude/CLAUDE.md',`user-before\n${RULES_BLOCK.replace('## Reporting','- My own rule.\n\n## Reporting')}\n`,'managed rules block'],
 ])('an edited managed block in %s keeps the file byte-identical and is unresolved',(path,content,name)=>fixture((home,env)=>{

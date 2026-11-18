@@ -3,7 +3,7 @@ import { syncCrossReviewSkills } from '../src/cli/commands/init';
 import { architectureSelectionReport, assertPluginCommandSelected, readRecordedSelection } from '../src/cli/installer/architecture-selection';
 import { configureRequiredHerdrSkill } from '../src/cli/commands/herdr-skill';
 import { ownedSkillIsIntact } from '../src/effects/host-config/herdr-skill-marker';
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { spawnSync, type SpawnSyncReturns } from 'child_process';
 import { createHash } from 'crypto';
@@ -1352,17 +1352,34 @@ describe('install selection', () => {
     });
   }, 60_000);
 
-  test('a switch that drops architecture names config.toml and its remedy when the file is not valid TOML, and never quotes the file', () => {
+  test('a switch that drops architecture keeps a fragment in a file that does not parse, names the file without quoting it, and goes on with the other files', () => {
+    const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
     // The fake token is the text that Bun's parser quotes in its message (I1, #3164).
-    for (const broken of ['model = [\n', 'k = sk-FAKE-SECRET-12345\n']) withHome((env) => {
+    for (const [broken, text] of [['toml', 'model = [\n'], ['toml', 'k = sk-FAKE-SECRET-12345\n'], ['json', '{"k": sk-FAKE-SECRET-12345\n']] as const) withHome((env) => {
       const config = join(env.HOME!, '.codex', 'config.toml');
+      const [claudeJson, settings] = [join(env.HOME!, '.claude.json'), join(env.HOME!, '.claude', 'settings.json')];
       writePath(installStateFixturePath(env), `${JSON.stringify(seededState(ALL_PLUGINS, 'all'), null, 2)}\n`);
       writePath(config, 'model = "user"\n');
-      openHostConfigGate({ env }).apply([{ path: config, fragments: [{ owner: 'architecture', selector: 'mcp_servers.codegraph', kind: 'add', strategy: tomlFragment, value: '[mcp_servers.codegraph]\ncommand = "cg"\n' }] }]);
-      writePath(config, broken);
-      expect(() => prepareInstallSelectionSwitch(ALL_PLUGINS.filter(id => id !== 'architecture'), env, join(env.HOME!, 'transaction')))
-        .toThrow(new RegExp(`^${config.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}: the file is not valid TOML\\. Fix the TOML in that file, then run the command again$`));
-      expect(readFileSync(config, 'utf-8')).toBe(broken);
+      for (const path of [claudeJson, settings]) writePath(path, '{\n  "user": true\n}\n');
+      const gate = openHostConfigGate({ env });
+      gate.apply([{ path: config, fragments: [{ owner: 'architecture', selector: 'mcp_servers.codegraph', kind: 'add', strategy: tomlFragment, value: '[mcp_servers.codegraph]\ncommand = "cg"\n' }] }]);
+      for (const path of [claudeJson, settings]) gate.apply([{ path, backup: 'overrides-only', fragments: [{ owner: 'architecture', selector: 'mcpServers.codegraph', kind: 'add', strategy: jsonFragment, value: { command: 'cg' } }] }]);
+      const kept = broken === 'toml' ? config : claudeJson;
+      writePath(kept, text);
+      const written: string[] = [];
+      const stderr = spyOn(process.stderr, 'write').mockImplementation((line) => { written.push(String(line)); return true; });
+      try { prepareInstallSelectionSwitch(ALL_PLUGINS.filter(id => id !== 'architecture'), env, join(env.HOME!, 'transaction')); }
+      finally { stderr.mockRestore(); }
+      const lines = written.filter((line) => line.startsWith('[install] kept_edited'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatch(new RegExp(broken === 'toml'
+        ? `^\\[install\\] kept_edited ${escape(config)}: the file is not valid TOML\\. Fix the TOML in that file, then run the command again\\n$`
+        : `^\\[install\\] kept_edited ${escape(claudeJson)}: rh cannot take out the architecture fragments mcpServers\\.codegraph as they are now`));
+      expect(lines[0]).not.toContain('sk-FAKE');
+      expect(readFileSync(kept, 'utf-8')).toBe(text);
+      for (const path of [config, claudeJson, settings].filter((path) => path !== kept)) {
+        expect(readFileSync(path, 'utf-8'), path).toBe(path === config ? 'model = "user"\n' : '{\n  "user": true\n}\n');
+      }
     });
   });
 

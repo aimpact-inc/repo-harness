@@ -1,13 +1,15 @@
-import { readFileSync, rmSync } from 'node:fs';
+import { lstatSync, readFileSync, rmSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import { planFile, type FilePlan, type PlannedFragment } from '../../core/host-config/plan';
-import { fragmentFormat } from '../../core/host-config/registry';
+import { fileFormatOf, fragmentFormat } from '../../core/host-config/registry';
 import {
   HostConfigError,
   expectedFromCommitted,
   sameExpected,
   type ExpectedFile,
   type FileCommitted,
+  type FileFormat,
   type FileRecord,
   type FileRecordKind,
   type FragmentEdit,
@@ -45,7 +47,7 @@ import {
   type HostConfigPaths,
 } from './store';
 import { isPathInside } from '../path-containment';
-import { pathRecordHost, pathRecordIsCurrent } from './path-records';
+import { pathRecordEntry, pathRecordHost, pathRecordIsCurrent } from './path-records';
 import {
   discardStagedEntry,
   hasPreimage,
@@ -261,8 +263,9 @@ function isCommitted(record: FileRecord, observed: ExpectedFile): boolean {
  * `committed`, set a new backup when they replace bytes that rh did not write,
  * and keep `external_change` once the file differed from `committed`.
  */
-function nextFileRecord(previous: FileRecord | undefined, first: { kind: FileRecordKind; backup: Sha256 | null; baselineUnknown: boolean },
+function nextFileRecord(previous: FileRecord | undefined, first: { kind: FileRecordKind; backup: Sha256 | null; baselineUnknown: boolean; format: FileFormat | undefined },
   preimage: ExpectedFile, written: ExpectedFile): FileRecord {
+  const format = previous?.format ?? first.format;
   if (!previous) {
     return {
       kind: first.kind,
@@ -271,6 +274,7 @@ function nextFileRecord(previous: FileRecord | undefined, first: { kind: FileRec
       committed: committedOf(written),
       backup: first.backup,
       external_change: false,
+      ...(format ? { format } : {}),
     };
   }
   // The first backup stays the restore target; a later copy of an outside edit is kept apart for the report. A file
@@ -283,6 +287,7 @@ function nextFileRecord(previous: FileRecord | undefined, first: { kind: FileRec
     committed: committedOf(written),
     ...(externalBackup ? { external_backup: externalBackup } : {}),
     external_change: previous.external_change || !isCommitted(previous, preimage),
+    ...(format ? { format } : {}),
   };
 }
 
@@ -366,7 +371,7 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
     const backup = change.backup === 'overrides-only' && !removesUserBytes ? null : backupUserBytes(paths, previous, preimage, bytes, removesUserBytes);
     fragments = [...fragments.filter((entry) => entry.file !== path), ...fileFragments(plan, recorded)];
     directories = [...directories, ...createdDirs];
-    files[path] = nextFileRecord(previous, { kind: preimage.existed ? 'text_block' : 'created', backup, baselineUnknown: change.baselineUnknown === true },
+    files[path] = nextFileRecord(previous, { kind: preimage.existed ? 'text_block' : 'created', backup, baselineUnknown: change.baselineUnknown === true, format: fileFormatOf(change.path) },
       preimage, unchanged ? preimage : { existed: true, sha256: sha256Prefixed(result) });
     persist();
     if (unchanged) continue;
@@ -411,17 +416,27 @@ function refusal(path: string, record: PathRecord | undefined, owner: string): H
 }
 
 /** The bytes of a user file that `replace` lets rh write over, in the vault; only a regular file qualifies. */
-function vaultUserFile(paths: HostConfigPaths, key: string, observed: PathCommitted, path: string): Sha256 {
+function vaultUserFile(paths: HostConfigPaths, entry: string, observed: PathCommitted, path: string): Sha256 {
   if (observed.type !== 'file') throw new HostConfigError('host_config_invalid_state', `only a file can be replaced on the user's word: ${path}`);
-  return putVault(paths, readFileSync(key));
+  return putVault(paths, readFileSync(entry));
+}
+
+/**
+ * The file that a user link at the key names, when rh writes a file there: rh
+ * follows the link, writes that file and keeps the link. A link that rh
+ * recorded as its own entry is replaced as a link.
+ */
+function linkTargetOf(paths: HostConfigPaths, key: string, previous: PathRecord | undefined, entry: PathEntry): string | undefined {
+  if (entry.type !== 'file' || previous?.committed.type === 'symlink' || !lstatSync(key, { throwIfNoEntry: false })?.isSymbolicLink()) return undefined;
+  return resolveHostPath(paths, key);
 }
 
 function nextPathRecord(previous: PathRecord | undefined, owner: string, host: PathRecord['host'], observed: PathCommitted | null,
-  committed: PathCommitted, backup: Sha256 | undefined): PathRecord {
+  committed: PathCommitted, backup: Sha256 | undefined, linkTarget?: string): PathRecord {
   const baseline = previous?.baseline ?? (observed === null ? { state: 'known' as const, existed: false as const }
     : observed.type === 'file' ? { state: 'known' as const, existed: true as const, sha256: observed.sha256 } : { state: 'unknown' as const });
   const kept = backup ?? (previous?.kind === 'replaced' ? previous.backup : undefined);
-  return { owner, host, kind: kept ? 'replaced' : 'created', baseline, committed, ...(kept ? { backup: kept } : {}) };
+  return { owner, host, kind: kept ? 'replaced' : 'created', baseline, committed, ...(kept ? { backup: kept } : {}), ...(linkTarget ? { link_target: linkTarget } : {}) };
 }
 
 /** `validPathRecord` holds a `replaced` record to a file: the user file that it replaced comes back as a file. */
@@ -442,29 +457,31 @@ function writeWholePaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, writes:
   const written: string[] = [];
   for (const { write, key, host } of admitted) {
     const previous = records[key];
-    const observed = observePathEntry(key);
+    const linkTarget = linkTargetOf(paths, key, previous, write.entry);
+    const entry = linkTarget ?? key;
+    const observed = observePathEntry(entry);
     let backup: Sha256 | undefined;
     if (observed !== null && !ownsEntry(previous, write.owner, key)) {
       if (!write.replace) throw refusal(write.path, previous, write.owner);
-      backup = vaultUserFile(paths, key, observed, write.path);
+      backup = vaultUserFile(paths, entry, observed, write.path);
     }
-    const createdDirs = missingDirectories(key as HostPath);
+    const createdDirs = missingDirectories(entry as HostPath);
     createDirectories(createdDirs);
     let staged: string | null = null;
     try {
-      const stage = stagePathEntry(key, write.entry);
+      const stage = stagePathEntry(entry, write.entry);
       staged = stage.staged;
-      const next = nextPathRecord(previous, write.owner, host, observed, stage.committed, backup);
+      const next = nextPathRecord(previous, write.owner, host, observed, stage.committed, backup, linkTarget);
       assertReplacedIsFile(next, write.path);
       if (sameCommitted(observed, stage.committed) && previous && JSON.stringify(previous) === JSON.stringify(next)) {
         discardStagedEntry(staged);
         continue;
       }
-      if (backup === undefined && options.transaction) keepPreimage(options.transaction, key);
+      if (backup === undefined && options.transaction) keepPreimage(options.transaction, entry);
       records[key] = next;
       directories = [...directories, ...createdDirs];
       persist();
-      publishPathEntry(staged, key);
+      publishPathEntry(staged, entry);
       staged = null;
       written.push(key);
     } catch (error) {
@@ -569,7 +586,7 @@ function adoptReplacedPath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, path:
  */
 export function planPathRevert(key: string, record: PathRecord): HostConfigRevertEntry['action'] {
   if (record.kind === 'user_managed') return 'released';
-  if (observePathEntry(key) === null) return record.kind === 'created' ? 'released' : 'kept_edited';
+  if (observePathEntry(pathRecordEntry(key, record)) === null) return record.kind === 'created' ? 'released' : 'kept_edited';
   if (!pathRecordIsCurrent(key, record)) return 'kept_edited';
   return record.kind === 'replaced' ? 'restored' : 'removed';
 }
@@ -577,11 +594,12 @@ export function planPathRevert(key: string, record: PathRecord): HostConfigRever
 function revertWholePath(paths: HostConfigPaths, key: string, record: PathRecord, transaction: string | undefined): HostConfigRevertEntry['action'] {
   const action = planPathRevert(key, record);
   if (action !== 'restored' && action !== 'removed') return action;
-  if (transaction) keepPreimage(transaction, key);
+  const entry = pathRecordEntry(key, record);
+  if (transaction) keepPreimage(transaction, entry);
   if (record.kind === 'replaced') {
     const committed = record.committed as Extract<PathCommitted, { type: 'file' }>;
-    replaceTarget(key as HostPath, readVault(paths, record.backup!), { existed: true, sha256: committed.sha256 });
-  } else removePathEntry(key);
+    replaceTarget(entry as HostPath, readVault(paths, record.backup!), { existed: true, sha256: committed.sha256 });
+  } else removePathEntry(entry);
   return action;
 }
 
@@ -590,12 +608,13 @@ function revertWholePaths(paths: HostConfigPaths, only: readonly string[], optio
   const records = { ...ledger.paths };
   const keys = only.map((path) => hostPathKey(paths, path));
   const report: HostConfigRevertEntry[] = [];
+  /** The entries of the dropped records: a created directory goes only with an entry inside it. */
   const dropped: string[] = [];
   for (const key of keys) {
     const record = records[key];
     if (!record) continue;
     const action = revertWholePath(paths, key, record, options.transaction);
-    if (action !== 'kept_edited') { delete records[key]; dropped.push(key); }
+    if (action !== 'kept_edited') { delete records[key]; dropped.push(pathRecordEntry(key, record)); }
     report.push({ path: key, action });
   }
   const attempted = ledger.directories.filter((directory) => dropped.some((key) => isPathInside(directory, key)));
@@ -620,11 +639,11 @@ interface FragmentRevert {
  * other fragment stays. `all` holds every record of the file: a container
  * that a removal empties goes only when one of them proves that rh created it.
  */
-function revertFragments(path: string, content: string, records: readonly FragmentRecord[], all: readonly FragmentRecord[], backup: string | null): FragmentRevert {
+function revertFragments(fileFormat: FileFormat | undefined, content: string, records: readonly FragmentRecord[], all: readonly FragmentRecord[], backup: string | null): FragmentRevert {
   const removed: FragmentRecord[] = [];
   const kept: string[] = [];
   for (const record of records) {
-    const format = fragmentFormat(path, record.selector);
+    const format = fragmentFormat(fileFormat, record.selector);
     let range: TextRange | null = null;
     // A file that the strategy can no longer read keeps every fragment.
     try { range = format?.strategy.locate(content, record.selector) ?? null; } catch (error) { if (!(error instanceof HostConfigError)) throw error; }
@@ -643,6 +662,8 @@ function revertFragments(path: string, content: string, records: readonly Fragme
 /** What a revert knows about one recorded file. */
 export interface FileRevertInput {
   readonly path: string;
+  /** The file record's format; absent on an older record, where the path's name gives it. */
+  readonly format?: FileFormat;
   readonly kind: FileRecord['kind'];
   readonly hasBackup: boolean;
   readonly externalChange: boolean;
@@ -674,6 +695,7 @@ export interface FileRevertPlan {
  */
 export function planFileRevert(input: FileRevertInput): FileRevertPlan {
   const { path, kind, own, all, filtered } = input;
+  const format = input.format ?? fileFormatOf(path);
   if (!filtered && !input.existed) {
     return { entry: { path, action: 'already_absent' }, write: null, record: 'drop', removed: all };
   }
@@ -684,7 +706,7 @@ export function planFileRevert(input: FileRevertInput): FileRevertPlan {
     return { entry: { path, action: 'text_removed' }, write: { kind: 'replace', content: backup }, record: 'drop', removed: all };
   }
   if (!input.existed || input.bytes === null) return { entry: { path, action: 'kept_edited', kept: own.map((entry) => entry.selector) }, write: null, record: 'keep', removed: [] };
-  const result = revertFragments(path, decode(input.bytes, path), own, all, input.hasBackup ? decode(input.backup(), path) : null);
+  const result = revertFragments(format, decode(input.bytes, path), own, all, input.hasBackup ? decode(input.backup(), path) : null);
   const removed = new Set(result.removed);
   const remaining = all.filter((entry) => !removed.has(entry));
   const content = Buffer.from(result.content, 'utf8');
@@ -696,9 +718,25 @@ export function planFileRevert(input: FileRevertInput): FileRevertPlan {
   }
   // A changed file with no fragment to take out (a created file) stays with its record.
   if (!removed.size && !(kind === 'text_block' && !input.hasBackup)) return { entry: withKept('kept_edited'), write: null, record: 'keep', removed: [] };
-  const empty = kind === 'created' && all.some((record) => fragmentFormat(path, record.selector)?.empty(result.content) === true);
+  const empty = kind === 'created' && all.some((record) => fragmentFormat(format, record.selector)?.empty(result.content) === true);
   const write = empty ? { kind: 'remove' as const } : removed.size ? { kind: 'replace' as const, content } : null;
   return { entry: withKept(empty ? 'removed' : removed.size ? 'text_removed' : 'released'), write, record: 'drop', removed: result.removed };
+}
+
+/**
+ * The revert of the file that `adopt` would record now, with no write: a dry
+ * run before a migration observes the file as `revert` does after it (links
+ * followed, then lstat) and plans by the same rule, also for an absent file.
+ */
+export function planAdoptedRevert(env: NodeJS.ProcessEnv, path: string, adoption: HostConfigAdoption): HostConfigRevertEntry {
+  const resolved = resolveHostPath(hostConfigPaths(env), path);
+  const { observation, bytes } = observeFile(resolved);
+  const records = adoption.fragments.map((fragment) => ({ file: resolved, ...fragment }));
+  return planFileRevert({
+    path: resolved, format: fileFormatOf(path), kind: adoption.kind ?? (adoption.backup === null ? 'created' : 'text_block'), hasBackup: adoption.backup !== null,
+    externalChange: adoption.externalChange, committed: true, existed: expectedOf(observation, resolved).existed, bytes,
+    backup: () => adoption.backup!, own: records, all: records, filtered: false,
+  }).entry;
 }
 
 interface RevertFilter {
@@ -729,7 +767,7 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
   const report: HostConfigRevertEntry[] = [];
   const targets = only ? only.map((path) => resolveHostPath(paths, path)) : (Object.keys(ledger.files) as HostPath[]);
   refuseRecordedPaths(ledger, targets);
-  for (const path of targets) {
+  for (const [index, path] of targets.entries()) {
     const record = files[path];
     if (!record) continue;
     const { observation, bytes } = observeFile(path);
@@ -737,8 +775,13 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
     const all = fragments.filter((entry) => entry.file === path);
     const own = all.filter((entry) => matchesFilter(entry, filter));
     if (filtered && !own.length) continue;
+    // A requested link that names a missing file is still there, so the file is not absent: its records stay.
+    if (!current.existed && only && lstatSync(resolve(only[index]!), { throwIfNoEntry: false })) {
+      report.push({ path, action: 'kept_edited', kept: own.map((entry) => entry.selector) });
+      continue;
+    }
     const plan = planFileRevert({
-      path, kind: record.kind, hasBackup: record.backup !== null, externalChange: record.external_change, committed: isCommitted(record, current),
+      path, format: record.format, kind: record.kind, hasBackup: record.backup !== null, externalChange: record.external_change, committed: isCommitted(record, current),
       existed: current.existed, bytes, backup: () => readVault(paths, record.backup!), own, all, filtered,
     });
     if (!dryRun && plan.write) {
@@ -769,12 +812,14 @@ function adoptFile(paths: HostConfigPaths, target: string, adoption: HostConfigA
   const current = expectedOf(observeFile(path).observation, path);
   const kind = adoption.kind ?? (adoption.backup === null ? 'created' : 'text_block');
   if (kind === 'created' && adoption.backup !== null) throw new HostConfigError('host_config_invalid_state', `a created file has no backup: ${path}`);
+  const format = fileFormatOf(target);
   const record: FileRecord = {
     kind,
     baseline: { state: 'unknown' },
     committed: committedOf(current),
     backup: adoption.backup === null ? null : putVault(paths, adoption.backup),
     external_change: adoption.externalChange,
+    ...(format ? { format } : {}),
   };
   const fragments = adoption.fragments.map((fragment) => ({ file: path, ...fragment }));
   writeLedger(paths, { ...ledger, files: { ...ledger.files, [path]: record }, fragments: [...ledger.fragments, ...fragments] });
@@ -886,8 +931,9 @@ export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer 
     const copy = !previous || record.backup !== previous.backup ? record.backup
       : record.external_backup !== previous.external_backup ? record.external_backup ?? null : null;
     let content = decode(copy ? readVault(paths, copy) : bytes, path);
+    const fileFormat = record.format ?? fileFormatOf(path);
     for (const entry of [...changed].reverse()) {
-      const format = fragmentFormat(path, entry.selector);
+      const format = fragmentFormat(fileFormat, entry.selector);
       const range = format?.strategy.locate(content, entry.selector) ?? null;
       const old = earlier.find((candidate) => fragmentKey(candidate) === fragmentKey(entry));
       if (copy && (!range || content.slice(range.start, range.end) !== entry.inserted)) continue;
@@ -902,7 +948,7 @@ export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer 
       content = content.slice(0, edit.at) + edit.inserted + content.slice(edit.at + edit.removed.length);
     }
     const created = !previous && record.kind === 'created' && record.baseline.state === 'known' && record.baseline.existed === false;
-    if (created && all.some((entry) => fragmentFormat(path, entry.selector)?.empty(content) === true)) removeTarget(path, current);
+    if (created && all.some((entry) => fragmentFormat(fileFormat, entry.selector)?.empty(content) === true)) removeTarget(path, current);
     else if (content !== decode(bytes, path)) replaceTarget(path, Buffer.from(content, 'utf8'), current);
   }
   const pathRecords = rollbackWholePaths(paths, before, now, transaction, unresolved);
@@ -926,23 +972,25 @@ function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, no
   for (const key of new Set([...Object.keys(before.paths), ...Object.keys(now.paths)])) {
     const old = before.paths[key];
     const current = now.paths[key];
-    if (JSON.stringify(old) === JSON.stringify(current) && !hasPreimage(transaction, key)) continue;
+    // A linked record acts on the file that its link names, also for the transaction's preimage.
+    const at = pathRecordEntry(key, (current ?? old)!);
+    if (JSON.stringify(old) === JSON.stringify(current) && !hasPreimage(transaction, at)) continue;
     // A claim or release of a file that the user keeps changes no entry.
     if (current?.kind === 'user_managed' || (!current && old?.kind === 'user_managed')) continue;
     if (!current) {
-      const entry = observePathEntry(key);
+      const entry = observePathEntry(at);
       // A revert in this transaction took the record out: the entry is gone, or it is the user file that came back from the vault.
       const reverted = entry === null || (old!.kind === 'replaced' && entry.type === 'file' && entry.sha256 === old!.backup);
-      if (reverted && hasPreimage(transaction, key)) restorePreimage(transaction, key);
+      if (reverted && hasPreimage(transaction, at)) restorePreimage(transaction, at);
       else if (!pathRecordIsCurrent(key, old!)) unresolved.push(key);
       continue;
     }
     if (!pathRecordIsCurrent(key, current)) { records[key] = current; unresolved.push(key); continue; }
     if (current.kind === 'replaced' && current.backup !== old?.backup) {
       const committed = current.committed as Extract<PathCommitted, { type: 'file' }>;
-      replaceTarget(key as HostPath, readVault(paths, current.backup!), { existed: true, sha256: committed.sha256 });
-    } else if (!old) removePathEntry(key);
-    else if (hasPreimage(transaction, key)) restorePreimage(transaction, key);
+      replaceTarget(at as HostPath, readVault(paths, current.backup!), { existed: true, sha256: committed.sha256 });
+    } else if (!old) removePathEntry(at);
+    else if (hasPreimage(transaction, at)) restorePreimage(transaction, at);
     else { records[key] = current; unresolved.push(key); }
   }
   return records;

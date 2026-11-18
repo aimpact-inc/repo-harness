@@ -997,13 +997,27 @@ function removeRetiredOwnedSurfaces(
  * and server, and its tool rule) go with the plugin, through the gate's
  * per-fragment rule: a fragment that the user changed stays, and an override
  * is never restored here, so only a whole-file revert gives a user's value back.
+ * One rule for a fragment that the switch cannot take out (edited, an
+ * unsupported spelling, or a file that does not parse): its bytes stay, the
+ * switch names the file, and it goes on with the other files. Each file is
+ * its own revert, so a failure in one leaves the records of the others right.
  */
 function removeArchitectureHostFragments(env: NodeJS.ProcessEnv): void {
   const home = requireHome(env);
-  const codexConfig = join(home, '.codex', 'config.toml');
-  const files = [codexConfig, join(home, '.claude.json'), join(home, '.claude', 'settings.json')];
-  // Of these files only config.toml goes through Bun's TOML parser.
-  try { openHostConfigGate({ env }).revert(files, { owner: 'architecture' }); } catch (error) { throw namingTomlFile(codexConfig, error); }
+  const gate = openHostConfigGate({ env });
+  for (const path of [join(home, '.codex', 'config.toml'), join(home, '.claude.json'), join(home, '.claude', 'settings.json')]) {
+    let entries;
+    try { entries = gate.revert([path], { owner: 'architecture' }); } catch (error) {
+      // Only config.toml goes through Bun's TOML parser; the gate keeps a JSON file that does not parse with its fragments.
+      if (!(error instanceof SyntaxError)) throw error;
+      process.stderr.write(`[install] kept_edited ${(namingTomlFile(path, error) as Error).message}\n`);
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.action !== 'kept_edited') continue;
+      process.stderr.write(`[install] kept_edited ${entry.path}: rh cannot take out the architecture fragments ${entry.kept?.join(', ') ?? ''} as they are now; their bytes stay. Remove them by hand if you do not want them\n`);
+    }
+  }
 }
 
 export function prepareInstallSelectionSwitch(

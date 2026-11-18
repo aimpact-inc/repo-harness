@@ -72,7 +72,16 @@ export interface FileRecord {
   readonly external_backup?: Sha256;
   /** Sticky: set once the file differed from `committed` when rh wrote it again. */
   readonly external_change: boolean;
+  /**
+   * The format of the file's fragments, from the name of the path that rh was
+   * asked to write: a linked config can have a target with no extension.
+   * Absent on older records and on a file that no name gives a format.
+   */
+  readonly format?: FileFormat;
 }
+
+/** The fragment formats that a file name decides; a marked-block selector names its own format. */
+export type FileFormat = 'toml' | 'json';
 
 export type FragmentKind = 'add' | 'refresh' | 'override';
 
@@ -129,6 +138,12 @@ export interface PathRecord {
   readonly committed: PathCommitted;
   /** Vault reference of the user file that a `replaced` record replaced; only `replaced` has it. */
   readonly backup?: Sha256;
+  /**
+   * The file that a user link at the key names, links followed. A `created`
+   * or `replaced` file record with it acts on this file and keeps the link;
+   * `committed` is the hash of this file. Absent: the key is the entry.
+   */
+  readonly link_target?: string;
 }
 
 /** Protocol 2 adds `paths` (#2896); `migrateLedgerSchema` moves a protocol 1 ledger once at a mutating entry. */

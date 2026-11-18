@@ -3,7 +3,7 @@ import { join } from 'path';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import { CODEX_CONFIG_FRAGMENTS, codexConfigFragment, isCodexConfigSelector, namingTomlFile, tomlFragment, type CodexConfigSelector } from '../../core/host-config/toml-fragment';
 import { HostConfigError, type FragmentRecord } from '../../core/host-config/types';
-import { openHostConfigGate, type HostConfigAdoption, type HostConfigRevertEntry } from '../../effects/host-config/gate';
+import { openHostConfigGate, planAdoptedRevert, type HostConfigAdoption, type HostConfigRevertEntry } from '../../effects/host-config/gate';
 import { configurationReceiptPath, hostConfigurationRoot, readRawConfigurationReceipt, saveConfigurationReceipt, type ConfigurationReceipt } from './configuration-ownership';
 import { CODEGRAPH_CONFIG_MARKER } from './install-profile';
 import { readLegacyManifest, type LegacyManifestSurface } from './install-state';
@@ -154,12 +154,7 @@ export function migrateCodexConfigRecords(env: NodeJS.ProcessEnv): void {
   if (migration.receipt) saveConfigurationReceipt(migration.receipt, home);
 }
 
-/** What a revert of the adopted file would report, for a dry run before the migration. */
-export function previewAdoptedRevert(migration: CodexConfigMigration): HostConfigRevertEntry[] {
-  const { path, adoption: adopted } = migration;
-  if (!adopted) return [];
-  if (adopted.externalChange) return [{ path, action: 'kept_edited' }];
-  if (adopted.backup === null) return [{ path, action: 'removed' }];
-  const current = existsSync(path) ? readFileSync(path) : null;
-  return [{ path, action: current !== null && adopted.backup.equals(current) ? 'released' : 'text_removed' }];
+/** What a revert of the adopted file would report, for a dry run before the migration: the gate's plan of the record that `adopt` writes. */
+export function previewAdoptedRevert(env: NodeJS.ProcessEnv, migration: CodexConfigMigration): HostConfigRevertEntry[] {
+  return migration.adoption ? [planAdoptedRevert(env, migration.path, migration.adoption)] : [];
 }
