@@ -306,31 +306,36 @@ test.each([[3,1],[3,2],[4,2]])('a protocol %i install state with a protocol %i l
  expect({exitCode:dryRun.exitCode,items:dryRun.items}).toEqual({exitCode:result.exitCode,items:result.items});
  expect(result.exitCode,result.lines.join('\n')).toBe(0);
 }));
-test('staging skill removal edits the provider lock under an XDG_STATE_HOME outside HOME, after a failed cleanup',()=>fixture((home,env)=>{
+/** The Skills CLI as the runtime runs it: a delegated writer that adds `think` to the lock. */
+function recordLockEntry(lockPath:string,env:NodeJS.ProcessEnv){
+ openHostConfigGate({env}).delegate([{path:lockPath,owner:'core',selectors:['skills.think']}],()=>{
+  const data=JSON.parse(readFileSync(lockPath,'utf8'));writeFileSync(lockPath,`${JSON.stringify({...data,skills:{...data.skills,think:{source:'tw93/Waza'}}},null,2)}\n`);
+ });
+}
+test('the provider lock under an XDG_STATE_HOME outside HOME loses only the entry that rh recorded; the HOME lock stays',()=>fixture((home,env)=>{
  const state=mkdtempSync(join(tmpdir(),'user-uninstall-state-'));const lockPath=join(state,'skills/.skill-lock.json');
  try {
   put(home,'source/SKILL.md','keep');mkdirSync(join(home,'.agents/skills'),{recursive:true});const path=join(home,'.agents/skills/think');symlinkSync(join(home,'source'),path);
   profile(home,[ownedLink(path,join(home,'source'))]);
-  put(state,'skills/.skill-lock.json','{"skills":[]}');put(home,'.agents/.skill-lock.json','{"skills":{"think":{}}}');
+  const before=`${JSON.stringify({version:3,skills:{'user-skill':{source:'user/repo'}}},null,2)}\n`;
+  put(state,'skills/.skill-lock.json',before);put(home,'.agents/.skill-lock.json','{"skills":{"think":{}}}');
   const xdg={...env,XDG_STATE_HOME:state};
-  expect(runUserUninstall({target:'both',env:xdg}).status).toBe('partial');
-  expect(existsSync(path)).toBe(true);expect(Object.keys(ledger(home).paths)).toContain(pathRecordKey({HOME:home},path));
-  writeFileSync(lockPath,JSON.stringify({version:3,skills:{think:{source:'tw93/Waza'},'user-skill':{source:'user/repo'}}}));
+  recordLockEntry(lockPath,xdg);
   expect(runUserUninstall({target:'both',env:xdg}).status).toBe('complete');expect(existsSync(path)).toBe(false);
-  expect(JSON.parse(readFileSync(lockPath,'utf8')).skills).toEqual({'user-skill':{source:'user/repo'}});
+  expect(readFileSync(lockPath,'utf8')).toBe(before);
   expect(readFileSync(join(home,'.agents/.skill-lock.json'),'utf8')).toBe('{"skills":{"think":{}}}');
  } finally { rmSync(state,{recursive:true,force:true}); }
 }));
-test.skipIf(process.platform==='win32'||process.getuid?.()===0)('a failed provider lock write keeps the staging skill for a retry',()=>fixture((home,env)=>{
- const lockDir=join(home,'.local/state/skills');const xdg={...env,XDG_STATE_HOME:join(home,'.local/state')};
+test.skipIf(process.platform==='win32'||process.getuid?.()===0)('a failed provider lock write keeps the lock record for a retry',()=>fixture((home,env)=>{
+ const lockDir=join(home,'.local/state/skills');const lockPath=join(lockDir,'.skill-lock.json');const xdg={...env,XDG_STATE_HOME:join(home,'.local/state')};
  put(home,'source/SKILL.md','keep');mkdirSync(join(home,'.agents/skills'),{recursive:true});const path=join(home,'.agents/skills/think');symlinkSync(join(home,'source'),path);
  profile(home,[ownedLink(path,join(home,'source'))]);
- put(home,'.local/state/skills/.skill-lock.json',JSON.stringify({skills:{think:{},'user-skill':{}}}));chmodSync(lockDir,0o500);
- expect(runUserUninstall({target:'both',env:xdg}).status).toBe('partial');
- expect(existsSync(path)).toBe(true);expect(Object.keys(ledger(home).paths)).toContain(pathRecordKey({HOME:home},path));
+ put(home,'.local/state/skills/.skill-lock.json',JSON.stringify({skills:{'user-skill':{}}}));recordLockEntry(lockPath,xdg);chmodSync(lockDir,0o500);
+ expect(runUserUninstall({target:'both',env:xdg}).status).not.toBe('complete');
+ expect(openHostConfigGate({env:xdg}).recorded(lockPath).map((record)=>record.selector)).toEqual(['skills.think']);
  chmodSync(lockDir,0o700);
- expect(runUserUninstall({target:'both',env:xdg}).status).toBe('complete');expect(existsSync(path)).toBe(false);
- expect(JSON.parse(readFileSync(join(lockDir,'.skill-lock.json'),'utf8')).skills).toEqual({'user-skill':{}});
+ expect(runUserUninstall({target:'both',env:xdg}).status).toBe('complete');
+ expect(JSON.parse(readFileSync(lockPath,'utf8')).skills).toEqual({'user-skill':{}});
 }));
 const RULES_BLOCK=renderGlobalRulesBlock(join(import.meta.dir,'../..'),{preset:'en',instruction:'Use English to report to user.'}).trimEnd();
 test('managed context block cleanup keeps user prose',()=>fixture((home,env)=>{

@@ -1,10 +1,10 @@
 import { globalConfigurationPath, mutateGlobalConfiguration } from '../../effects/configuration/global-configuration';
 import { globalRuntimeScope, withRuntimeTransactionContext, type RuntimeTransactionContext } from '../../effects/locking/runtime-transaction-lock';
 import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, rmdirSync, unlinkSync, writeFileSync } from 'fs';
-import { basename, dirname, join } from 'path';
+import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { createHash } from 'crypto';
-import { stagedSkillRoot, hostSkillRoot, providerSkillLock, type ProviderSkillLock } from '../../effects/host-skill-roots';
+import { hostSkillRoot, providerSkillLock, type ProviderSkillLock } from '../../effects/host-skill-roots';
 import { ownedPiPackages, piPackagePresent, removePiPackage } from './pi-package';
 import { piExecutable } from '../../effects/pi-executable';
 import { globalContextPath, inspectUnrecordedGlobalRules, previewGlobalRulesAdoptedRevert } from './global-context';
@@ -18,6 +18,7 @@ import { InstallStateError, installProfileStatePath } from './install-state';
 import { assertConfigurationPath, configurationReceiptPath, hostConfigurationRoot, writePrivateConfiguration } from './configuration-ownership';
 import { migrateCodexConfigRecords, planCodexConfigMigration, previewAdoptedRevert } from './codex-config-migration';
 import { migrateJsonConfigRecords, planJsonConfigMigration, previewJsonAdoptedRevert } from './json-config-migration';
+import { UNVERIFIED_INSTALLER_RANGES } from '../../effects/host-config/delegated';
 import { openHostConfigGate, planPathRevert, type HostConfigAdoption, type HostConfigRevertEntry } from '../../effects/host-config/gate';
 import { hostConfigPaths, projectedLedgerPaths, resolveHostPath } from '../../effects/host-config/store';
 import { FileSyntaxError, parseJsonText, parseTomlText } from '../../core/evidence/file-syntax';
@@ -199,7 +200,8 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   } catch (error) { items.push(failedRead(error, configurationReceiptPath(home))); return result(); }
 
   const gate = openHostConfigGate({ env, preview: opts.dryRun === true });
-  const hostPaths = [...(files.codex ? [files.codex] : []), ...files.json];
+  // The Skills CLI lock is a staging file: its recorded entries go with a full uninstall only.
+  const hostPaths = [...(files.codex ? [files.codex] : []), ...files.json, ...(opts.target === 'both' && gate.recorded(lock.path).length ? [lock.path] : [])];
   // The Global Working Rules files go by the ledger too. Two host paths that name one file are one revert.
   const rulesAdoptions = new Map<string, HostConfigAdoption>();
   const resolvedHostPaths = new Set<string>();
@@ -336,26 +338,6 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
     if (retained.length !== ledger.length) change(ledgerPath, serializeRepositoryExcludes(retained), 'repository excludes ledger');
   }
 
-  // Only remove lock entries for staging skills actually removed in this operation.
-  const staging = surfaceRemovals.filter((key) => records[key]!.host === 'staged' && basename(dirname(key)) === basename(stagedSkillRoot(home)));
-  if (staging.length && existsSync(lock.path)) {
-    try {
-      assertConfigurationPath(lock.path, lock.root);
-      const data = object(read(lock.path));
-      if (!data.skills || typeof data.skills !== 'object' || Array.isArray(data.skills)) throw new Error('invalid skills lock; preserved');
-      for (const key of staging) delete data.skills[basename(key)];
-      change(lock.path, `${JSON.stringify(data, null, 2)}\n`, 'removed staging skill registrations');
-    } catch (error) {
-      unresolved(lock.path, String((error as Error).message));
-      // A retry selects lock entries from staging ownership, so keep both.
-      for (const key of staging) {
-        surfaceRemovals.splice(surfaceRemovals.indexOf(key), 1);
-        removedSurfaces.delete(key);
-        Object.assign(items.find((item) => item.path === key && (item.action === 'reverted' || item.action === 'restored'))!, { action: 'kept', reason: 'staging skill retained until its lock entry can be removed' });
-      }
-    }
-  }
-
   const statePath = installProfileStatePath(env);
   // A retired state drops every path record that the gate revert leaves (the preserved `bin` entries); a partial run keeps them for a retry or the other host.
   let retireRecords = false;
@@ -368,6 +350,10 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
     }
   }
   items.push({ path: join(home, '.repo-harness'), action: 'kept', reason: 'archives, runtime history and the MCP config retained; third-party packages/plugins retained' });
+  // The records of another tool's installer cover only what its measurement proved (#2852).
+  if (piPackages.length || hostPaths.includes(lock.path)) {
+    items.push({ path: hostConfigPaths(env).ledger, action: 'note', reason: `installer writes outside the declared sets are not verified, and rh claims nothing there: ${UNVERIFIED_INSTALLER_RANGES.join('; ')}` });
+  }
 
   if (!opts.dryRun) {
     try {
@@ -375,10 +361,6 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
         assertConfigurationPath(dirname(path), surfaceRoot(path));
         if (fingerprint(path) !== expected) throw new Error(`configuration changed after preview: ${path}`);
       }
-      // A retry selects lock entries from staging ownership, so the lock
-      // cleanup lands before the staging removal and the ledger write.
-      const lockCleanup = writes.get(lock.path);
-      if (typeof lockCleanup === 'string') { writePrivateConfiguration(lock.path, lockCleanup, lock.root); writes.delete(lock.path); }
       // A failed Pi readback stops before the ownership ledger is written.
       for (const source of piRemovals) removePiPackage(source, env);
       const surfaces = [...removedSurfaces];

@@ -350,6 +350,8 @@ describe('Pi package and skill installation', () => {
     const result = runUserUninstall({ target: 'both', env: { ...f.env, PI_FIXTURE_KEEP_ENTRY: '1' } });
     expect(result.exitCode).toBe(1);
     expect(result.items.some(item => item.action === 'unresolved' && item.reason.includes('PI_PACKAGE_REMOVE_NOT_RECORDED'))).toBe(true);
+    // The report names the ranges that the installer measurement did not cover.
+    expect(result.items.some(item => item.action === 'note' && item.reason.includes('the Skills CLI lock path without XDG_STATE_HOME'))).toBe(true);
     expect(ownedPiPackages(f.env)).toEqual([f.source]);
     expect(piPackagePresent(f.source, f.env)).toBe(true);
     expect(f.argv().filter(args => args[0] === 'remove')).toEqual([['remove', f.source]]);

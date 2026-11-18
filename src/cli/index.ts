@@ -18,7 +18,7 @@ import { createInterface } from 'readline/promises';
 import { fileURLToPath } from 'url';
 import { assertOverridesCarried, formatHostConfigPreview, previewHostConfig, resolveOverrides, runInstall, runUninstall } from './commands/install';
 import { planPiPackage } from './installer/pi-package';
-import { migrateRuntimeHostConfig, initializeStagedSkillObservations, recordStagedExternalSkillWrites } from './installer/install-profile';
+import { migrateRuntimeHostConfig } from './installer/install-profile';
 import { installStatePendingMigration, migrateInstallState, planInstallStateMigration } from './installer/install-state-migration';
 import { requireHome } from "../effects/repo-harness-home";
 import { pathRecordsDigest, readPathRecords } from '../effects/host-config/path-records';
@@ -278,7 +278,6 @@ function runTransactionalSelectionProjection(
   commitState: (transaction: ReturnType<typeof beginInstallHostTransaction>, result: GlobalRuntimeResult) => InstallState,
 ): { result: GlobalRuntimeResult; state: InstallState | null } {
   const plugins = selected.run;
-  const recorded = { selection: selected.selection, plugins: selected.record };
   const transactionEnv = runtimeHostTransactionEnv(options.env);
   // An invalid XDG_STATE_HOME must fail before the lock creates transaction state.
   providerSkillLock(transactionEnv.HOME!, transactionEnv);
@@ -328,7 +327,6 @@ function restoreTransactionBytes(transaction: ReturnType<typeof beginInstallHost
 /** The ledger rollback also takes out a Pi package entry that the transaction recorded. */
 function rollbackRuntimeTransaction(transaction: ReturnType<typeof beginInstallHostTransaction>, env: NodeJS.ProcessEnv, cause: unknown): void {
   const failures: unknown[] = [];
-  try { recordStagedExternalSkillWrites(transaction.backup_root, env); } catch (error) { failures.push(error); }
   try { rollbackInstallHostTransaction(transaction); } catch (error) { failures.push(error); }
   if (failures.length) {
     const errors = [cause, ...failures];
@@ -400,7 +398,6 @@ export function runCandidateRuntimeReconciliation(
     migrateInstallState(env);
     if (request.host_adapters) migrateRuntimeHostConfig(env);
   });
-  initializeStagedSkillObservations(request.transaction_backup_root, env);
   const state = requireInstallState(env);
   const resolved = resolveRecordedSelection(state, request.target, env, { partial: !complete });
   const plugins = resolved.run;
@@ -446,7 +443,6 @@ export function runCandidateRuntimeReconciliation(
       if (shown) console.error(`[runtime] ${shown.status}: ${shown.step} - ${shown.detail}`);
     }
 
-    recordStagedExternalSkillWrites(request.transaction_backup_root, env);
     const adapterDigests = request.host_adapters
       ? assertInstalledAdapterProjection(request.target, env)
       : {};
@@ -481,14 +477,10 @@ export function runCandidateRuntimeReconciliation(
     }, env);
     return receipt;
   } catch (error) {
-    const compensation = { failures: [] as unknown[] };
-    try { recordStagedExternalSkillWrites(request.transaction_backup_root, env); }
-    catch (ownershipError) { compensation.failures.push(ownershipError); }
-    // The ledger rollback also takes out a Pi package entry that this run recorded.
+    // The ledger rollback also takes out a Pi package entry and the staged skills that this run recorded.
     try { rollbackRuntimeHostConfig(request.transaction_backup_root, env); }
-    catch (rollbackError) { compensation.failures.push(rollbackError); }
-    if (compensation.failures.length) {
-      const errors = [error, ...compensation.failures];
+    catch (rollbackError) {
+      const errors = [error, rollbackError];
       throw new AggregateError(errors, `candidate reconciliation failed: ${errors.map(item => item instanceof Error ? item.message : String(item)).join('; ')}`);
     }
     throw error;
@@ -547,9 +539,6 @@ export function runTransactionalRuntimeRefresh(
       restoreTransactionBytes(transaction, error);
       throw error;
     }
-    const recorded = recordedSelection === null
-      ? { selection: plugins, plugins }
-      : { selection: recordedSelection.state.selection, plugins: recordedSelection.resolved.record };
     let result: GlobalRuntimeResult;
     try {
       result = setup({ ...options, plugins, runtimeLock: lock, transaction: transaction.backup_root, candidateHandoff: candidateHandoffContext(transaction, lock), mcpLocalConfigCheck });
@@ -568,7 +557,6 @@ export function runTransactionalRuntimeRefresh(
     }
     try {
       if (!byCandidate) {
-        recordStagedExternalSkillWrites(transaction.backup_root, transactionEnv);
         if (recordedSelection !== null) {
           const { state, resolved } = recordedSelection;
           if (selectionChanged(state, resolved)) {

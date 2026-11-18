@@ -1,4 +1,3 @@
-import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
 import { globalConfigurationPath, mutateGlobalConfiguration, restoreGlobalConfiguration } from '../../effects/configuration/global-configuration';
 import { publishFileByRename, retryWindowsSharingRace } from '../../effects/atomic-append';
 import wazaRules from "../../core/skill-surface/waza-shared-rules.json";
@@ -33,7 +32,6 @@ import {
   statSync,
   writeFileSync,
 } from 'fs';
-import { keepPreimage, observePathEntry } from '../../effects/host-config/whole-path';
 import { requireHome } from '../../effects/repo-harness-home';
 import { basename, delimiter, dirname, join } from 'path';
 import {
@@ -80,9 +78,6 @@ import {
   INSTALL_STATE_PROTOCOL,
   installProfileStatePath,
   InstallStateError,
-  invalidOwnership,
-  parseRecordedInstallState,
-  readInstallStateJson,
   readRecordedInstallState,
   type RecordedInstallSnapshot,
   type RecordedInstallState,
@@ -301,71 +296,6 @@ export function fleetReceiptPath(env: NodeJS.ProcessEnv): string {
 
 /** The path records that a producer edits, by key. */
 type RecordMap = Map<string, PathRecord>;
-
-interface StagedSkillObservation { readonly path: string; readonly owner: SurfaceOwner; readonly existed: boolean; readonly owned: boolean }
-const STAGED_SKILLS = 'staged-skills.json';
-
-/** Presence and ownership before the Skills CLI runs. No user bytes are copied. Retired by #2852. */
-export function initializeStagedSkillObservations(transaction: string, env: NodeJS.ProcessEnv): void {
-  const metadata = join(transaction, STAGED_SKILLS);
-  if (lstatSync(metadata, { throwIfNoEntry: false })) { readStagedSkillObservations(transaction, env, true); return; }
-  const prior = readPathRecords(env);
-  const { externalSkills } = catalogMutationPathSkillNames(loadSkillSurfaceCatalog());
-  const observations = externalSkills.flatMap(name => {
-    const path = join(stagedSkillRoot(requireHome(env)), name);
-    const owner = ownerForInstallPath(path, env);
-    if (owner === null) return [];
-    const key = pathRecordKey(env, path);
-    const record = prior[key];
-    const owned = record?.kind === 'created' && record.owner === owner && pathRecordIsCurrent(key, record);
-    if (owned) keepPreimage(transaction, key);
-    return [{ path, owner, existed: lstatSync(path, { throwIfNoEntry: false }) !== undefined, owned }];
-  });
-  writeFileSync(metadata, JSON.stringify(observations), { flag: 'wx', mode: 0o600 });
-}
-
-function readStagedSkillObservations(transaction: string, env: NodeJS.ProcessEnv, reportRetired = false): readonly StagedSkillObservation[] {
-  const metadata = join(transaction, STAGED_SKILLS);
-  const invalid = 'invalid staged skill observations in runtime transaction';
-  let raw: unknown;
-  try { raw = JSON.parse(readFileSync(metadata, 'utf8')); }
-  catch { throw new Error(invalid); }
-  const root = stagedSkillRoot(requireHome(env));
-  if (!Array.isArray(raw) || raw.some(entry => !isRecord(entry) || typeof entry.path !== 'string'
-    || join(root, basename(entry.path)) !== entry.path || entry.path === root || !isSurfaceOwner(entry.owner)
-    || typeof entry.existed !== 'boolean' || typeof entry.owned !== 'boolean')) throw new Error(invalid);
-  const observations = raw as StagedSkillObservation[];
-  if (new Set(observations.map(entry => entry.path)).size !== observations.length) throw new Error('duplicate staged skill observation');
-
-  const catalog = loadSkillSurfaceCatalog();
-  const { externalSkills } = catalogMutationPathSkillNames(catalog);
-  const retired: string[] = [];
-  const current = observations.filter(entry => {
-    const name = basename(entry.path);
-    if (!catalog.packages.some(pkg => pkg.name === name)) { retired.push(entry.path); return false; }
-    if (!externalSkills.includes(name) || entry.owner !== ownerForInstallPath(entry.path, env, catalog)) throw new Error(invalid);
-    return true;
-  });
-  // The candidate reports at handoff. Later ledger rebuilds can read the same observations.
-  if (reportRetired) for (const path of retired) process.stderr.write(`[install] skipped retired staged skill ${JSON.stringify(path)}\n`);
-  return current;
-}
-
-/** Record only newly staged entries or an entry whose prior record was current. Retired by #2852. */
-export function recordStagedExternalSkillWrites(transaction: string, env: NodeJS.ProcessEnv): void {
-  const observations = readStagedSkillObservations(transaction, env);
-  const records = { ...readPathRecords(env) };
-  for (const entry of observations) {
-    if (entry.existed && !entry.owned) continue;
-    const committed = observePathEntry(entry.path);
-    if (!committed || committed.type === 'file') continue;
-    const key = pathRecordKey(env, entry.path);
-    const previous = records[key];
-    if (previous && (previous.kind !== 'created' || previous.owner !== entry.owner)) continue;
-    records[key] = { owner: entry.owner, host: 'staged', kind: 'created', baseline: previous?.baseline ?? { state: 'known', existed: false }, committed };
-  }
-  writePathRecords(env, records);
-}
 
 function ownerSelected(record: PathRecord, plugins: readonly PluginId[]): boolean {
   return record.kind === 'user_managed' || (isSurfaceOwner(record.owner) && ownerEnabled(record.owner, plugins));
@@ -666,7 +596,7 @@ function settleOrphanedTransactions(transactionRoot: string, env: NodeJS.Process
       const host = /^\d+$/.test(entry) ? owner.paths[Number(entry)] : undefined;
       if (host !== undefined && installProfileTransactionPaths(env).includes(host)) settleTransactionCopy(join(directory, entry), host, env);
     }
-    if (readdirSync(directory).every((entry) => entry === TRANSACTION_OWNER || entry === STAGED_SKILLS)) rmSync(directory, { recursive: true, force: true });
+    if (readdirSync(directory).every((entry) => entry === TRANSACTION_OWNER || entry === RETIRED_STAGED_SKILLS)) rmSync(directory, { recursive: true, force: true });
     else process.stderr.write(`[install] kept incomplete transaction for recovery: ${directory}\n`);
   }
 }
@@ -675,6 +605,9 @@ function settleOrphanedTransactions(transactionRoot: string, env: NodeJS.Process
 function holdsRuntimeLock(scope: RuntimeTransactionScope): boolean {
   return readExclusiveDirectoryLockOwner(realpathSync(scope.root), runtimeTransactionLockRelativePath(scope))?.pid === process.pid;
 }
+
+/** The staged-skill observations that an rh before #2852 kept in its transaction: an orphan that holds only them has nothing to recover. */
+const RETIRED_STAGED_SKILLS = 'staged-skills.json';
 
 /** The owner record goes in before the directory gets its `install-` name, so no live directory is ever without one. */
 function createTransactionDirectory(transactionRoot: string, paths: readonly string[]): string {
@@ -698,9 +631,7 @@ export function beginLegacyCleanupBackup(paths: readonly string[], env: NodeJS.P
 export function beginInstallHostTransaction(paths: readonly string[], env: NodeJS.ProcessEnv = process.env, options: { readonly runtimeLock?: RuntimeTransactionContext } = {}): InstallHostTransaction {
   const allowed = new Set(installProfileTransactionPaths(env));
   if (paths.some(path => !allowed.has(path))) throw new Error('runtime transaction contains a host path');
-  const transaction = snapshotPaths(paths, env, options);
-  try { initializeStagedSkillObservations(transaction.backup_root, env); return transaction; }
-  catch (error) { commitInstallHostTransaction(transaction); throw error; }
+  return snapshotPaths(paths, env, options);
 }
 
 function snapshotPaths(
@@ -915,23 +846,14 @@ export function rollbackRuntimeHostConfig(backupRoot: string, env: NodeJS.Proces
   if (owner === 'none') restoreOlderParentFiles(backupRoot, env);
 }
 
+/** The lock entries of the removed staged skills go by the ledger's per-fragment rule: only an entry that rh recorded and that is intact. */
 function removeOwnedSkillLockEntries(env: NodeJS.ProcessEnv, skillNames: ReadonlySet<string>): void {
   if (skillNames.size === 0) return;
   const lockPath = providerSkillLock(requireHome(env), env).path;
-  if (!existsSync(lockPath)) return;
-  const content = readFileSync(lockPath, 'utf-8');
-  let parsed: { skills?: Record<string, unknown> };
-  try { parsed = parseJsonText(content, lockPath) as typeof parsed; } catch (error) {
-    if (!(error instanceof FileSyntaxError)) throw error;
-    throw new Error(`invalid external skill lock: ${lockPath}`);
+  for (const entry of openHostConfigGate({ env }).revert([lockPath], { selectors: [...skillNames].map((name) => `skills.${name}`) })) {
+    if (entry.action !== 'kept_edited') continue;
+    process.stderr.write(`[install] kept_edited ${entry.path}: rh cannot take out the lock entries ${entry.kept?.join(', ') ?? ''} as they are now; their bytes stay\n`);
   }
-  if (!parsed || typeof parsed !== 'object' || !parsed.skills || typeof parsed.skills !== 'object') {
-    throw new Error(`invalid external skill lock: ${lockPath}`);
-  }
-  for (const name of skillNames) delete parsed.skills[name];
-  const temp = `${lockPath}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(temp, `${JSON.stringify(parsed, null, 2)}\n`, { mode: 0o600 });
-  retryWindowsSharingRace(() => renameSync(temp, lockPath));
 }
 
 /**
@@ -1379,7 +1301,6 @@ export function applyInstallSelection(
   const ran = plugins.filter(id => !kept.includes(id));
   const current = readInstallState(env);
   const plan = planInstallSelection(selection, { run: ran, record: plugins }, current, env);
-  if (transaction) recordStagedExternalSkillWrites(transaction.backup_root, env);
   const { records: prior, outside, unsupported } = readPathRecordSet(env);
   const records = carriedRecords(prior, kept);
   const committed = selectionRecords(records, plugins);
@@ -1419,7 +1340,6 @@ export function rollbackInstallSelection(
   const current = readInstallState(env);
   if (!current?.previous) throw new Error('no previous install transaction to roll back');
   const plugins = enabledPlugins(current.previous);
-  if (transaction) recordStagedExternalSkillWrites(transaction.backup_root, env);
   const prior = readPathRecords(env);
   const records = carriedRecords(prior);
   const committed = selectionRecords(records, plugins);

@@ -4,7 +4,7 @@ import { architectureSelectionReport, assertPluginCommandSelected, readRecordedS
 import { configureRequiredHerdrSkill } from '../src/cli/commands/herdr-skill';
 import { ownedSkillIsIntact } from '../src/effects/host-config/herdr-skill-marker';
 import { describe, expect, spyOn, test } from 'bun:test';
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { spawnSync, type SpawnSyncReturns } from 'child_process';
 import { createHash } from 'crypto';
 import { tmpdir } from 'os';
@@ -22,7 +22,6 @@ import {
   loadSkillSurfaceCatalog,
   migrateInParentTransaction,
   migrateRuntimeHostConfig,
-  recordStagedExternalSkillWrites,
   planInstallSelection,
   prepareInstallSelectionSwitch,
   readInstallState,
@@ -130,6 +129,15 @@ function withPi(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     writePath(join(bunGlobalPackageRoot(env)!, 'package.json'), JSON.stringify({ name: 'repo-harness', version: '0.0.0', pi: { extensions: ['./extension.ts'] } }));
   }
   return { ...env, PATH: `${bin}:${env.PATH}` };
+}
+
+/** The Skills CLI as the runtime runs it: a delegated writer of the staged skill and, when named, of its lock entry. */
+function stageSkill(env: NodeJS.ProcessEnv, path: string, owner: string, text: string, transaction?: string, lock?: { readonly path: string; readonly content: string }): void {
+  const name = path.split('/').at(-1)!;
+  openHostConfigGate({ env }).delegate([{ path, owner }, ...(lock ? [{ path: lock.path, owner, selectors: [`skills.${name}`] }] : [])], () => {
+    writePath(join(path, 'SKILL.md'), text);
+    if (lock) writePath(lock.path, lock.content);
+  }, { transaction });
 }
 
 function skillLock(env: NodeJS.ProcessEnv): string {
@@ -319,39 +327,6 @@ describe('install selection', () => {
     }
   }));
 
-  test('candidate reconciliation reports a retired staged skill and records only current skills', () => withHome(env => {
-    const transaction = mkdtempSync(join(env.HOME!, 'candidate-'));
-    const retired = join(env.HOME!, '.agents/skills/retired-provider-skill');
-    const current = join(env.HOME!, '.agents/skills/repo-harness-cross-review');
-    for (const path of [retired, current]) writePath(join(path, 'SKILL.md'), '# staged\n');
-    writePath(join(transaction, 'staged-skills.json'), JSON.stringify([retired, current].map(path => ({
-      path, owner: 'cross-review', existed: false, owned: false,
-    }))));
-    const result = spawnSync(process.execPath, ['-e', [
-      "const profile = require('./src/cli/installer/install-profile.ts');",
-      'profile.initializeStagedSkillObservations(process.argv[1], process.env);',
-      'profile.recordStagedExternalSkillWrites(process.argv[1], process.env);',
-    ].join('\n'), transaction], { cwd: ROOT, env, encoding: 'utf8' });
-    expect(result.status, result.stderr).toBe(0);
-    expect(result.stderr.trim().split('\n')).toEqual([`[install] skipped retired staged skill ${JSON.stringify(retired)}`]);
-    const ledgerKeys = Object.keys(JSON.parse(readFileSync(hostConfigPaths(env).ledger, 'utf8')).paths);
-    expect(ledgerKeys).toContain(pathRecordKey(env, current));
-    expect(ledgerKeys).not.toContain(pathRecordKey(env, retired));
-    expect(readFileSync(join(retired, 'SKILL.md'), 'utf8')).toBe('# staged\n');
-    expect(ownedPath(env, current)).toMatchObject({ owner: 'cross-review', host: 'staged', kind: 'created' });
-  }));
-
-  test.each(['outside staging', 'wrong owner', 'duplicate path'])('staged skill observations still reject %s', kind => withHome(env => {
-    const transaction = mkdtempSync(join(env.HOME!, 'candidate-'));
-    const entry = {
-      path: join(env.HOME!, kind === 'outside staging' ? '.codex' : '.agents', 'skills/repo-harness-cross-review'),
-      owner: kind === 'wrong owner' ? 'core' : 'cross-review', existed: false, owned: false,
-    };
-    writePath(join(transaction, 'staged-skills.json'), JSON.stringify(kind === 'duplicate path' ? [entry, entry] : [entry]));
-    expect(() => recordStagedExternalSkillWrites(transaction, env)).toThrow(kind === 'duplicate path'
-      ? 'duplicate staged skill observation' : 'invalid staged skill observations in runtime transaction');
-  }));
-
   test('refresh retains a markerless owned directory record under its owner and writes the records in key order', () => withHome((env) => {
     const path = join(env.HOME!, '.codex/skills/repo-harness-cross-review');
     const fleet = join(env.HOME!, '.codex/agents/explorer.toml');
@@ -475,7 +450,7 @@ describe('install selection', () => {
       const rule = join(env.HOME!, '.agents', 'rules', 'english.md');
       const staged = join(env.HOME!, '.agents', 'skills', 'think');
       openHostConfigGate({ env }).writePaths([{ path: rule, owner: 'core', entry: { type: 'file', bytes: Buffer.from('# rule\n') } }], { transaction: forward.backup_root });
-      writePath(join(staged, 'SKILL.md'), '# think\n');
+      stageSkill(env, staged, 'core', '# think\n', forward.backup_root);
       const productSource = join(source, FACADE_SOURCES.get('repo-harness-product')!);
       writePath(join(productSource, 'SKILL.md'), '# managed\n');
       openHostConfigGate({ env }).writePaths([{ path: join(env.HOME!, '.codex/skills/repo-harness-product'), owner: 'product', entry: { type: 'directory', source: productSource } }], { transaction: forward.backup_root });
@@ -883,7 +858,7 @@ describe('install selection', () => {
     const receiptPaths: string[] = [];
     for (const skill of ['obsidian-markdown', 'obsidian-cli']) {
       const staging = join(env.HOME!, '.agents', 'skills', skill);
-      writePath(join(staging, 'SKILL.md'), `# ${skill}\n`);
+      stageSkill(env, staging, 'strategy-memory', `# ${skill}\n`, transaction.backup_root);
       receiptPaths.push(staging);
       for (const host of ['.codex', '.claude']) {
         const projected = join(env.HOME!, host, 'skills', skill);
@@ -919,7 +894,7 @@ describe('install selection', () => {
     const projected = join(env.HOME!, '.codex', 'skills', 'obsidian-cli');
 
     const first = beginInstallHostTransaction(installProfileTransactionPaths(env), env);
-    writePath(join(staging, 'SKILL.md'), '# old\n');
+    stageSkill(env, staging, 'strategy-memory', '# old\n', first.backup_root);
     mkdirSync(join(projected, '..'), { recursive: true });
     symlinkSync(staging, projected, 'dir');
     applyInstallSelection(['strategy-memory'], ['strategy-memory'], env, new Date('2026-08-21T00:00:00.000Z'), first);
@@ -928,7 +903,7 @@ describe('install selection', () => {
     expect(before).toBeDefined();
 
     const second = beginInstallHostTransaction(installProfileTransactionPaths(env), env);
-    writeFileSync(join(staging, 'SKILL.md'), '# refreshed\n');
+    stageSkill(env, staging, 'strategy-memory', '# refreshed\n', second.backup_root);
     const refreshed = applyInstallSelection(['strategy-memory'], ['strategy-memory'], env, new Date('2026-08-21T00:01:00.000Z'), second).state;
     commitInstallHostTransaction(second);
     const after = ownedPath(env, staging)?.committed;
@@ -1296,11 +1271,10 @@ describe('install selection', () => {
       writeManagedHostSurfaces(env, ALL_PLUGINS);
       if (!userSections) writeConfigs();
       const lock = skillLock(env);
-      writePath(join(env.HOME!, '.agents', 'skills', 'repo-harness-cross-review', 'SKILL.md'), '# owned staging skill\n');
-      writePath(lock, `${JSON.stringify({ version: 3, skills: {
+      stageSkill(env, join(env.HOME!, '.agents', 'skills', 'repo-harness-cross-review'), 'cross-review', '# owned staging skill\n', first.backup_root, { path: lock, content: `${JSON.stringify({ version: 3, skills: {
         'repo-harness-cross-review': { source: 'repo-harness' },
         'user-skill': { source: 'user/repo' },
-      } }, null, 2)}\n`);
+      } }, null, 2)}\n` });
       if (legacyManifest) {
         // An earlier version recorded its Codex table as a section record of a protocol 3 manifest; the entry migration moves it to the gate.
         writePath(installStateFixturePath(env), JSON.stringify({ protocol: 3, ...versions(ALL_PLUGINS), selection: 'all', transaction_id: 'legacy', applied_at: '2026-01-01T00:00:00Z', previous: null, ownership_manifest: [{
@@ -1383,16 +1357,21 @@ describe('install selection', () => {
     });
   });
 
-  test('a switch that drops a staged skill names a skills lock that is not valid JSON and never quotes it', () => withHome((env) => {
+  test('a switch that drops a staged skill names a skills lock that is not valid JSON, keeps it and never quotes it', () => withHome((env) => {
     const first = beginInstallHostTransaction(installProfileTransactionPaths(env), env);
     writeManagedHostSurfaces(env, ALL_PLUGINS);
-    writePath(join(env.HOME!, '.agents', 'skills', 'repo-harness-cross-review', 'SKILL.md'), '# owned staging skill\n');
+    stageSkill(env, join(env.HOME!, '.agents', 'skills', 'repo-harness-cross-review'), 'cross-review', '# owned staging skill\n', first.backup_root,
+      { path: skillLock(env), content: `${JSON.stringify({ skills: { 'repo-harness-cross-review': {} } }, null, 2)}\n` });
     applyInstallSelection('all', ALL_PLUGINS, env, new Date('2026-01-01T00:00:00Z'), first);
     commitInstallHostTransaction(first);
     // JSON.parse quotes an identifier-shaped token of the file (I1, #3164).
     writePath(skillLock(env), '{"skills": sk_FAKE_SECRET_12345}');
-    expect(() => prepareInstallSelectionSwitch(ALL_PLUGINS.filter(id => id !== 'cross-review'), env, join(env.HOME!, 'transaction')))
-      .toThrow(new Error(`invalid external skill lock: ${skillLock(env)}`));
+    const written: string[] = [];
+    const stderr = spyOn(process.stderr, 'write').mockImplementation((line) => { written.push(String(line)); return true; });
+    try { prepareInstallSelectionSwitch(ALL_PLUGINS.filter(id => id !== 'cross-review'), env, join(env.HOME!, 'transaction')); }
+    finally { stderr.mockRestore(); }
+    const lines = written.filter((line) => line.startsWith(`[install] kept_edited ${realpathSync(skillLock(env))}`));
+    expect([lines.length, written.some((line) => line.includes('sk_FAKE')), readFileSync(skillLock(env), 'utf-8')]).toEqual([1, false, '{"skills": sk_FAKE_SECRET_12345}']);
   }));
 
   test('a selection switch skips and reports a path record outside its host root or on no install surface, and keeps the user files', () => withHome((env) => {
