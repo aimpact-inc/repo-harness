@@ -180,14 +180,16 @@ afterAll(() => {
  * interpreting a private body avoids paying that cost for every generated stub.
  * These fixtures use /bin/sh or /bin/bash and do not inspect their script path.
  */
-export function writeShellExecutableFixture(filePath: string, content: string): void {
+export function writeShellExecutableFixture(temporaryRoot: string, filePath: string, content: string): void {
+  bunStubPath(temporaryRoot, filePath);
+  const bodyPath = bunStubPath(temporaryRoot, `${filePath}.fixture-body`);
   const shebang = content.split("\n", 1)[0];
   if (shebang !== "#!/bin/sh" && shebang !== "#!/bin/bash") {
     throw new Error(`unsupported shell fixture interpreter: ${shebang}`);
   }
   if (!shellFixtureRoot) {
     const root = tmpWorkspace("shell-fixture-launcher");
-    const launcher = join(root, "launcher");
+    const launcher = bunStubPath(root, join(root, "launcher"));
     writeFileSync(launcher, [
       "#!/bin/sh",
       'if [ "${1:-}" = "__fixture-ready" ]; then exit 0; fi',
@@ -207,7 +209,7 @@ export function writeShellExecutableFixture(filePath: string, content: string): 
     }
     shellFixtureRoot = root;
   }
-  writeFileSync(`${filePath}.fixture-body`, content, { mode: 0o600 });
+  writeFileSync(bodyPath, content, { mode: 0o600 });
   rmSync(filePath, { force: true });
   // A hard link retains the command path even when a runtime canonicalizes it.
   linkSync(join(shellFixtureRoot, "launcher"), filePath);
@@ -223,10 +225,11 @@ export function bunStubPath(temporaryRoot: string, path: string): string {
     const suffix = relative(base, candidate);
     return suffix !== '' && suffix !== '..' && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix);
   };
-  let ancestor = target;
+  let ancestor = dirname(target);
   while (!lstatSync(ancestor, { throwIfNoEntry: false })) ancestor = dirname(ancestor);
-  const canonicalTarget = resolve(realpathSync(ancestor), relative(ancestor, target));
-  if (!inside(resolve(temporaryRoot), target) || !inside(root, canonicalTarget)) {
+  const canonicalPath = resolve(realpathSync(ancestor), relative(ancestor, target));
+  const canonicalTarget = lstatSync(target, { throwIfNoEntry: false }) ? realpathSync(target) : canonicalPath;
+  if (!inside(root, canonicalPath) || !inside(root, canonicalTarget)) {
     throw new Error(`Bun stub must stay under its test temporary root: ${path}`);
   }
   return path;
@@ -236,7 +239,8 @@ export function bunStubPath(temporaryRoot: string, path: string): string {
  * Write `<path>` as a wrapper that execs the running Bun. A symlink to
  * `process.execPath` would let a later write to `<path>` replace the real binary.
  */
-export function writeBunWrapper(path: string): void {
+export function writeBunWrapper(temporaryRoot: string, path: string): void {
+  bunStubPath(temporaryRoot, path);
   writeFileSync(path, `#!/bin/sh\nexec '${process.execPath.replace(/'/g, `'\\''`)}' "$@"\n`);
   chmodSync(path, 0o755);
 }

@@ -5,7 +5,7 @@ import { join } from 'path';
 import { spawnSync } from 'child_process';
 import { createHash, randomUUID } from 'crypto';
 
-import { bunStubPath, copyPackageRuntimeFixture } from '../helpers/repo-fixture';
+import { copyPackageRuntimeFixture, writeShellExecutableFixture } from '../helpers/repo-fixture';
 import { startFakeHcRelease, writeFakeHc } from '../helpers/fake-hc';
 import { HC_MIN_VERSION } from '../../src/core/terminal/herdr-pin';
 import { installStateFixturePath, recordPluginSelection, seedGlobalPackageFixture } from '../helpers/install-ownership';
@@ -105,7 +105,7 @@ function writeCandidateSwitchingBun(
   const candidateVersion = JSON.parse(readFileSync(join(candidateRoot, 'package.json'), 'utf-8')).version;
   // Bun replaces package files in place; the predecessor then sees assets it cannot parse.
   const replaceAsset = replacedPredecessorAsset ? `printf '{}' > "${replacedPredecessorAsset}"; ` : '';
-  writeExecutable(bunStubPath(temporaryRoot, path), [
+  writeShellExecutableFixture(temporaryRoot, path, [
     '#!/bin/bash',
     `printf '%s\\n' "$*" >> "${logPath}"`,
     'if [[ "${1:-}" == "--version" ]]; then echo 1.4.0; exit 0; fi',
@@ -671,8 +671,8 @@ describe('candidate-bound global runtime reconciliation', () => {
         const oldState = readFileSync(statePath, 'utf-8');
         writeCandidateSwitchingBun(root, join(bin, 'bun'), bunLog, globalPackage, candidateRoot);
         // Model the package manager's manifest and bin writes as well as its package link.
-        const bunSource = readFileSync(join(bin, 'bun'), 'utf-8');
-        writeExecutable(bunStubPath(root, join(bin, 'bun')), bunSource.replace(
+        const bunSource = readFileSync(join(bin, 'bun.fixture-body'), 'utf-8');
+        writeShellExecutableFixture(root, join(bin, 'bun'), bunSource.replace(
           'if [[ "$1" == "add" && "$2" == "-g" ]]; then ',
           `if [[ "$1" == "add" && "$2" == "-g" ]]; then printf '%s' '{"dependencies":{"repo-harness":"^0.22.1"}}' > "${globalManifest}"; printf '#!/bin/sh\\necho 0.22.1\\n' > "${cliBin}"; `,
         ));
@@ -940,7 +940,7 @@ describe('candidate-bound global runtime reconciliation', () => {
       stop.hooks[0]!.timeout = 30;
       mkdirSync(join(home, '.codex'), { recursive: true });
       writeFileSync(join(home, '.codex', 'hooks.json'), `${JSON.stringify({ hooks: predecessor }, null, 2)}\n`);
-      writeExecutable(bunStubPath(root, join(bin, 'bun')), [
+      writeShellExecutableFixture(root, join(bin, 'bun'), [
         '#!/bin/bash',
         'if [[ "${1:-}" == "--version" ]]; then echo 1.4.0; exit 0; fi',
         `if [[ "\${1:-}" == "pm" && "\${2:-}" == "view" ]]; then printf '%s\\n' '${JSON.stringify(JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf-8')).version)}'; exit 0; fi`,
