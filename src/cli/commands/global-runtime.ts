@@ -1787,7 +1787,13 @@ function runGlobalRuntimeSetupInTransaction(opts: GlobalRuntimeOptions): GlobalR
     if (mcp.status === 'failed') return finalizeRuntimeResult(steps);
   }
 
-  // Before a Bun upgrade can change the binary that the bootstrap measured.
+  const bunRuntime = ensureSupportedBunRuntime(cwd, env, bunExecutable);
+  steps.push(bunRuntime);
+  if (bunRuntime.status === "failed") {
+    return finalizeRuntimeResult(steps);
+  }
+
+  // A bootstrap Bun is at the measured version, so the runtime step above never upgrades it before the import.
   try {
     const imported = importBunBootstrapRecord(env);
     steps.push({ step: BUN_BOOTSTRAP_STEP, status: imported === 'none' ? 'skipped' : 'ok',
@@ -1795,12 +1801,6 @@ function runGlobalRuntimeSetupInTransaction(opts: GlobalRuntimeOptions): GlobalR
         already_recorded: 'the ledger already records this Bun', changed: 'the Bun binary changed since the bootstrap measured it, so rh records no Bun' }[imported] });
   } catch (error) {
     steps.push({ step: BUN_BOOTSTRAP_STEP, status: 'failed', detail: (error as Error).message });
-    return finalizeRuntimeResult(steps);
-  }
-
-  const bunRuntime = ensureSupportedBunRuntime(cwd, env, bunExecutable);
-  steps.push(bunRuntime);
-  if (bunRuntime.status === "failed") {
     return finalizeRuntimeResult(steps);
   }
 

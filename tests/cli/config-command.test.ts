@@ -46,7 +46,7 @@ test('status lists hashes and states with no value, names an unknown baseline an
   expect([existsSync(join(f.root, 'vault')), existsSync(join(f.home, '.repo-harness', 'transactions'))]).toEqual([false, false]);
 
   // A ledger of an older protocol names the update step; a read-only call does not move it.
-  const { paths: _paths, retired: _retired, recovery: _recovery, ...text } = f.ledger();
+  const { paths: _paths, retired: _retired, recovery: _recovery, tools: _tools, ...text } = f.ledger();
   writeFileSync(f.ledgerPath, JSON.stringify({ ...text, protocol: 1 }));
   const old = readFileSync(f.ledgerPath);
   expect(runConfigStatus(f.env)).toMatchObject({ exitCode: 2, lines: [expect.stringContaining('which has no path records; run: rh update')] });
