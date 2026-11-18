@@ -274,6 +274,22 @@ if [[ "$VERSION" != "$PACKAGE_VERSION" ]]; then
   exit 1
 fi
 
+# The published-package readback runs with PATH only, and a plain Windows
+# shell has no HOME: both entries must start without an account home.
+ENV_ONLY_PATH="$(dirname "$(command -v bun)"):/usr/bin:/bin"
+ENV_ONLY_VERSION="$(env -i PATH="$ENV_ONLY_PATH" "$CLI" --version)"
+if [[ "$ENV_ONLY_VERSION" != "$PACKAGE_VERSION" ]]; then
+  echo "[tarball-smoke] ERROR: rh --version without HOME returned $ENV_ONLY_VERSION, expected $PACKAGE_VERSION" >&2
+  exit 1
+fi
+HOOK_ENV_ONLY_STATUS=0
+env -i PATH="$ENV_ONLY_PATH" "$HOOK" </dev/null >/dev/null 2>"$TMP_DIR/hook-env-only.err" || HOOK_ENV_ONLY_STATUS=$?
+if [[ "$HOOK_ENV_ONLY_STATUS" -ne 2 ]] || ! grep -q '^repo-harness-hook: usage:' "$TMP_DIR/hook-env-only.err"; then
+  echo "[tarball-smoke] ERROR: repo-harness-hook without HOME did not reach its usage check (exit $HOOK_ENV_ONLY_STATUS)" >&2
+  cat "$TMP_DIR/hook-env-only.err" >&2
+  exit 1
+fi
+
 if ! "$CLI" operator serve --help >/dev/null; then
   echo "[tarball-smoke] ERROR: packaged operator command is unavailable" >&2
   exit 1

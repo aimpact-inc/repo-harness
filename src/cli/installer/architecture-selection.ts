@@ -1,5 +1,6 @@
 import { declareArchitectureAbsent, registerArchitecturePorts, type ArchitecturePorts } from '../../core/architecture/contracts';
 import { installSelectionCommand, PLUGIN_IDS, UPDATE_COMMAND, type PluginId, type PluginSelection } from '../../core/skill-surface/plugin-manifest';
+import { requireHome } from '../../effects/repo-harness-home';
 import { enabledPlugins, installProfileStatePath, InstallStateError, readRecordedInstallState } from './install-state';
 
 /**
@@ -18,6 +19,12 @@ export type RecordedSelection =
  * commands (install, update, doctor, status), not in a hook or command root.
  */
 export function readRecordedSelection(env: NodeJS.ProcessEnv = process.env): RecordedSelection {
+  // A root without an account home still starts (`--version`, `--help`); a command that needs the selection fails closed with this error.
+  try {
+    requireHome(env);
+  } catch (error) {
+    return { status: 'unreadable', error: new InstallStateError('install_state_home_missing', '', (error as Error).message) };
+  }
   try {
     const state = readRecordedInstallState(env);
     return state === null ? { status: 'none' } : { status: 'recorded', selection: state.selection, plugins: enabledPlugins(state) };

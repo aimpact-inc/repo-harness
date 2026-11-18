@@ -298,6 +298,7 @@ global package.
 | Code | Cause | Next step |
 |---|---|---|
 | `install_state_missing` | `update` found no install state. | `rh install` |
+| `install_state_home_missing` | Neither `HOME` nor `USERPROFILE` is an absolute path, so a command that needs the install selection cannot read it. `--version` and `--help` still run. | Set `HOME` (or `USERPROFILE` on Windows) to an absolute path. |
 | `install_state_protocol_retired` | The state is protocol 1 or 2. | The bridge releases (see below). |
 | `install_state_invalid` | Malformed state, unknown plugin id, wrong version, or invalid `selection`. | `rh install --state` |
 | `install_state_invalid_ownership` | A ledger entry has an unknown path, a malformed shape, or an owner that is not enabled. | `rh install --state` |

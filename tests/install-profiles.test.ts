@@ -1434,6 +1434,17 @@ describe('install selection', () => {
     }
   }));
 
+  test('the selection read without HOME is unreadable and fails each guard closed; USERPROFILE stands in for an absent HOME', () => withHome((env) => {
+    recordPluginSelection(env, ['product'], 'all');
+    const { HOME: home, ...rest } = env;
+    // The test preload sets USERPROFILE to the temp HOME, so "neither" clears it explicitly.
+    const neither = { ...rest, USERPROFILE: undefined };
+    const selection = readRecordedSelection(neither);
+    expect(selection).toMatchObject({ status: 'unreadable', error: { code: 'install_state_home_missing', message: 'HOME is required and must be an absolute path' } });
+    expect(() => assertPluginCommandSelected(selection, 'mcp', 'mcp serve', neither)).toThrow('HOME is required and must be an absolute path');
+    expect(readRecordedSelection({ ...rest, USERPROFILE: home })).toEqual({ status: 'recorded', selection: 'all', plugins: ['product'] });
+  }));
+
   test('update resolves the recorded selection on this host', () => {
     interface Row {
       readonly name: string;

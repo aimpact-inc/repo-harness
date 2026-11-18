@@ -11,7 +11,7 @@ import { pathRecordHost, pathRecordKey, writePathRecords } from '../../src/effec
 import { hashManagedTree } from '../../src/effects/managed-tree';
 
 /**
- * Install state resolves to `homedir()` without HOME; a fixture write must never reach the real one.
+ * Install state resolves from HOME, or USERPROFILE when HOME is absent; a fixture write must never reach the real home.
  * Bun's `homedir()` and `userInfo().homedir` both follow $HOME, so neither names the real home from a process
  * that already runs under a temp HOME. The guard accepts only a HOME strictly inside the temp directory, which
  * need not exist yet: callers let the fixture create it. The temp root may be a symlink (macOS /var), so both forms count.
