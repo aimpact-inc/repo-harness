@@ -1,3 +1,4 @@
+import { parseJsonText } from '../../core/evidence/file-syntax';
 import { approveDelegatedReviewAdmission } from '../../effects/admission/control-admission';
 import { readReviewAdmissionSource } from '../../effects/admission/admission-source';
 import { revokeActiveReviewAdmission } from '../../effects/admission/admission-store';
@@ -12,7 +13,7 @@ import { collectReview } from '../../effects/review/review-collect';
 
 /** Both control operations accept only a closed JSON object from the trusted Bot. */
 function readControlRequest(file: string, fields: readonly string[]): Record<string, any> {
-  const request = JSON.parse(readFileSync(file, 'utf8'));
+  const request = parseJsonText(readFileSync(file, 'utf8'), file) as Record<string, any>;
   if (!request || typeof request !== 'object' || Array.isArray(request)
     || JSON.stringify(Object.keys(request).sort()) !== JSON.stringify([...fields].sort())) {
     throw new Error('review_control_request_invalid');
@@ -124,7 +125,7 @@ export function buildReviewCommand<Session, Endpoint>(loadRunner: () => Promise<
         });
         let result;
         if (operation === 'round') {
-          const addressing = opts.herdrEndpoint ? JSON.parse(readFileSync(opts.herdrEndpoint, 'utf8')) : {};
+          const addressing = (opts.herdrEndpoint ? parseJsonText(readFileSync(opts.herdrEndpoint, 'utf8'), opts.herdrEndpoint) : {}) as { endpoint?: any; parent_pane?: any };
           if (opts.harness && !isReviewRuntimeId(opts.harness)) throw new Error('review_harness_unsupported');
           const pullRequest = pullRequestSelectionFromOptions(opts);
           result = await runReviewRound({ repoRoot: opts.repo, authority, taskClaim: { reference: opts.claimRef, revision: opts.claimRevision }, verification: opts.verification,

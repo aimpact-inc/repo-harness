@@ -270,14 +270,17 @@ test('a profile switch removes the legacy EOF table and keeps the user separator
   });
 });
 
-test('the Codex migration names config.toml and its remedy when the file is not valid TOML', () => fixture((home, env) => {
-  const path = join(home, '.codex/config.toml');
-  mkdirSync(join(home, '.codex'));
-  writeFileSync(path, 'model = [\n');
-  mkdirSync(join(home, '.repo-harness'));
-  writeFileSync(configurationReceiptPath(home), JSON.stringify({ protocol: 1, changes: [{ path, selector: 'mcp_servers.codegraph', before: null, installed: '[mcp_servers.codegraph]\ncommand = "cg"\n', active: true }] }));
-  expect(() => planCodexConfigMigration(env)).toThrow(new RegExp(`^${path.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}: TOML Parse error: .+\\. Fix the TOML in that file, then run the command again$`));
-}));
+test('the Codex migration names config.toml and its remedy when the file is not valid TOML, and never quotes the file', () => {
+  // The fake token is the text that Bun's parser quotes in its message (I1, #3164).
+  for (const broken of ['model = [\n', 'k = sk-FAKE-SECRET-12345\n']) fixture((home, env) => {
+    const path = join(home, '.codex/config.toml');
+    mkdirSync(join(home, '.codex'));
+    writeFileSync(path, broken);
+    mkdirSync(join(home, '.repo-harness'));
+    writeFileSync(configurationReceiptPath(home), JSON.stringify({ protocol: 1, changes: [{ path, selector: 'mcp_servers.codegraph', before: null, installed: '[mcp_servers.codegraph]\ncommand = "cg"\n', active: true }] }));
+    expect(() => planCodexConfigMigration(env)).toThrow(new RegExp(`^${path.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}: the file is not valid TOML\\. Fix the TOML in that file, then run the command again$`));
+  });
+});
 test('refuses a receipt path symlink before the migration writes anything', () => fixture((home, env) => {
   mkdirSync(join(home, '.repo-harness'));
   const victim = join(home, 'victim'); writeFileSync(victim, 'untouched');

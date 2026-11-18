@@ -204,6 +204,12 @@ describe('setup check command', () => {
       expect(report.agent_actions.find((entry) => entry.id === 'legacy.project-adapters.review')?.targets).toEqual([claude, codex]);
       expect(report.agent_actions.find((entry) => entry.id === 'legacy.project-adapters.review')?.command).toBe('rh init');
       expect(readFileSync(claude, 'utf8')).toBe('{ broken');
+      // JSON.parse quotes an identifier-shaped token of the file; neither renderer prints it (I1, #3164).
+      writeFileSync(claude, '{"env": sk_FAKE_SECRET_12345}');
+      const secret = run();
+      expect(secret.checks.find((entry) => entry.id === 'legacy.project-claude-settings')?.detail).toBe(`cannot inspect ${claude}: the file is not valid JSON`);
+      for (const asJson of [false, true]) expect(formatInitHook(secret, asJson)).not.toContain('sk_FAKE');
+      writeFileSync(claude, '{ broken');
 
       // Issue 1650: outside a repository (cwd = $HOME) the same files are the user-level adapters.
       rmSync(join(repo, '.git'), { recursive: true, force: true });

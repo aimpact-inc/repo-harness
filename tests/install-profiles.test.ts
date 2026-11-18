@@ -1349,15 +1349,30 @@ describe('install selection', () => {
     });
   }, 60_000);
 
-  test('a switch that drops architecture names config.toml and its remedy when the file is not valid TOML', () => withHome((env) => {
-    const config = join(env.HOME!, '.codex', 'config.toml');
-    writePath(installStateFixturePath(env), `${JSON.stringify(seededState(ALL_PLUGINS, 'all'), null, 2)}\n`);
-    writePath(config, 'model = "user"\n');
-    openHostConfigGate({ env }).apply([{ path: config, fragments: [{ owner: 'architecture', selector: 'mcp_servers.codegraph', kind: 'add', strategy: tomlFragment, value: '[mcp_servers.codegraph]\ncommand = "cg"\n' }] }]);
-    writePath(config, 'model = [\n');
-    expect(() => prepareInstallSelectionSwitch(ALL_PLUGINS.filter(id => id !== 'architecture'), env, join(env.HOME!, 'transaction')))
-      .toThrow(new RegExp(`^${config.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}: TOML Parse error: .+\\. Fix the TOML in that file, then run the command again$`));
-    expect(readFileSync(config, 'utf-8')).toBe('model = [\n');
+  test('a switch that drops architecture names config.toml and its remedy when the file is not valid TOML, and never quotes the file', () => {
+    // The fake token is the text that Bun's parser quotes in its message (I1, #3164).
+    for (const broken of ['model = [\n', 'k = sk-FAKE-SECRET-12345\n']) withHome((env) => {
+      const config = join(env.HOME!, '.codex', 'config.toml');
+      writePath(installStateFixturePath(env), `${JSON.stringify(seededState(ALL_PLUGINS, 'all'), null, 2)}\n`);
+      writePath(config, 'model = "user"\n');
+      openHostConfigGate({ env }).apply([{ path: config, fragments: [{ owner: 'architecture', selector: 'mcp_servers.codegraph', kind: 'add', strategy: tomlFragment, value: '[mcp_servers.codegraph]\ncommand = "cg"\n' }] }]);
+      writePath(config, broken);
+      expect(() => prepareInstallSelectionSwitch(ALL_PLUGINS.filter(id => id !== 'architecture'), env, join(env.HOME!, 'transaction')))
+        .toThrow(new RegExp(`^${config.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}: the file is not valid TOML\\. Fix the TOML in that file, then run the command again$`));
+      expect(readFileSync(config, 'utf-8')).toBe(broken);
+    });
+  });
+
+  test('a switch that drops a staged skill names a skills lock that is not valid JSON and never quotes it', () => withHome((env) => {
+    const first = beginInstallHostTransaction(installProfileTransactionPaths(env), env);
+    writeManagedHostSurfaces(env, ALL_PLUGINS);
+    writePath(join(env.HOME!, '.agents', 'skills', 'repo-harness-cross-review', 'SKILL.md'), '# owned staging skill\n');
+    applyInstallSelection('all', ALL_PLUGINS, env, new Date('2026-01-01T00:00:00Z'), first);
+    commitInstallHostTransaction(first);
+    // JSON.parse quotes an identifier-shaped token of the file (I1, #3164).
+    writePath(skillLock(env), '{"skills": sk_FAKE_SECRET_12345}');
+    expect(() => prepareInstallSelectionSwitch(ALL_PLUGINS.filter(id => id !== 'cross-review'), env, join(env.HOME!, 'transaction')))
+      .toThrow(new Error(`invalid external skill lock: ${skillLock(env)}`));
   }));
 
   test('a selection switch skips and reports a path record outside its host root or on no install surface, and keeps the user files', () => withHome((env) => {

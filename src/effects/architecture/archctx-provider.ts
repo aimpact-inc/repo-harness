@@ -1,3 +1,4 @@
+import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
 import { loadArchitectureProjectionPolicy, readGlobalArchitectureConfiguration } from './projection-config';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -358,10 +359,12 @@ const COMMITTED_PROJECTION_MANIFEST = 'docs/architecture/.projection-manifest.js
 function assertCommittedProjectionManifestCompatible(repoRoot: string, capabilities: ArchctxCapabilitiesV1): void {
   const path = join(repoRoot, COMMITTED_PROJECTION_MANIFEST);
   if (!existsSync(path)) return;
+  const text = readFileSync(path, 'utf8');
   let manifest: unknown;
-  try { manifest = JSON.parse(readFileSync(path, 'utf8')); }
+  try { manifest = parseJsonText(text, COMMITTED_PROJECTION_MANIFEST); }
   catch (error) {
-    throw new ArchctxClientError({ code: 'RH_ARCHCTX_PROJECTION_MANIFEST_INVALID', action: 'inspect-projection-manifest', message: `${COMMITTED_PROJECTION_MANIFEST} is not valid JSON: ${error instanceof Error ? error.message : String(error)}` });
+    if (!(error instanceof FileSyntaxError)) throw error;
+    throw new ArchctxClientError({ code: 'RH_ARCHCTX_PROJECTION_MANIFEST_INVALID', action: 'inspect-projection-manifest', message: error.message });
   }
   if (!isRecord(manifest)) throw new ArchctxClientError({ code: 'RH_ARCHCTX_PROJECTION_MANIFEST_INVALID', action: 'inspect-projection-manifest', message: `${COMMITTED_PROJECTION_MANIFEST} is not a JSON object` });
   const issues = architectureDocsProjectionCompatibilityIssues(manifest, {

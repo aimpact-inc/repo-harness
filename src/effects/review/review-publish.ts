@@ -1,3 +1,4 @@
+import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
 import { lstatSync, readFileSync } from 'fs';
 import {
   renderConfirmedReply,
@@ -74,9 +75,10 @@ function readReceipt(path: string): ReviewPublishReceipt {
   }
   let value: unknown;
   try {
-    value = JSON.parse(bytes.toString('utf8'));
+    value = parseJsonText(bytes.toString('utf8'), null);
   } catch (error) {
-    throw new ReviewPublishError('review_receipt_invalid', 'review receipt is not valid JSON: ' + errorMessage(error), 2);
+    if (!(error instanceof FileSyntaxError)) throw error;
+    throw new ReviewPublishError('review_receipt_invalid', 'review receipt is not valid JSON', 2);
   }
   return parseReceipt(value);
 }

@@ -131,9 +131,8 @@ describe("capability resolver", () => {
         expect(projected.stdout).toBe(canonical.stdout);
         expect(projected.stderr).toBe(canonical.stderr);
         if (text === '{') {
-          let syntaxMessage = '';
-          try { JSON.parse(text); } catch (error) { syntaxMessage = (error as Error).message; }
-          expect(projected.stderr).toContain(`malformed harness policy: .ai/harness/policy.json: ${syntaxMessage}`);
+          // The parser message can quote text of the file, so the output names the file only (I1, #3164).
+          expect(projected.stderr).toContain('malformed harness policy: .ai/harness/policy.json: the file is not valid JSON');
         }
       }
 

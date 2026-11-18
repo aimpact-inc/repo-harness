@@ -6,6 +6,7 @@
  * proof or when the value equals the current rendering; every other value is
  * kept and reported.
  */
+import { FileSyntaxError, parseJsonText } from "../../core/evidence/file-syntax";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { sha256Prefixed } from "../../core/evidence/sha256";
@@ -46,7 +47,10 @@ export function readReleasedManagedValues(file: string): ReleasedManagedValues {
   const lists = (value: unknown, path: string, pattern?: RegExp): Record<string, readonly string[]> =>
     Object.fromEntries(Object.entries(object(value, path)).map(([key, item]) => [key, strings(item, `${path}.${key}`, pattern)]));
   let parsed: unknown;
-  try { parsed = JSON.parse(text); } catch (error) { throw new Error(`${file}: invalid JSON: ${(error as Error).message}`); }
+  try { parsed = parseJsonText(text, file); } catch (error) {
+    if (error instanceof FileSyntaxError) throw new Error(`${file}: invalid JSON: ${error.detail}`);
+    throw error;
+  }
   const root = object(parsed, "$");
   if (root.schema !== SCHEMA) fail("$.schema", JSON.stringify(SCHEMA));
   strings(root.releases, "$.releases");

@@ -1,3 +1,4 @@
+import { parseJsonText } from '../../core/evidence/file-syntax';
 import { readFileSync, lstatSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { runtimeId, unavailableRuntimeOverlay, NATIVE_RUNTIME_SOURCE_LIMIT, type RuntimeOverlay } from '../../core/operator/runtime-status';
@@ -49,7 +50,7 @@ export function decodeRuntimeConfig(value: unknown): RuntimeConfig {
 /** Starts only from explicit configuration, before HTTP admission. No GET source work. */
 export async function startRuntimeService(path: string, env: NodeJS.ProcessEnv = process.env) {
   if (!isAbsolute(path)) throw new Error('runtime_config_path');
-  const config = decodeRuntimeConfig(JSON.parse(readBounded(path).toString()));
+  const config = decodeRuntimeConfig(parseJsonText(readBounded(path).toString(), path));
   if (config.kind === 'native') {
     const observer = createNativeRuntimeStatusObserver(config.sources.map(source => ({ source_id: source.source_id, provider: source.provider,
       snapshot: () => readNativeRuntimeSnapshot(source) })));

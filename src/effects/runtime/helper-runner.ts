@@ -1,3 +1,4 @@
+import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
 import { existsSync, lstatSync, readFileSync } from 'fs';
 import { dirname, extname, isAbsolute, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
@@ -154,10 +155,10 @@ function readContractHelpersObject(contractPath: string): Record<string, unknown
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(source);
+    parsed = parseJsonText(source, null);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw helperContractError(contractPath, `malformed JSON: ${message}`);
+    if (!(error instanceof FileSyntaxError)) throw error;
+    throw helperContractError(contractPath, `malformed JSON: ${error.detail}`);
   }
 
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {

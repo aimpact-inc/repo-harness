@@ -14,12 +14,13 @@ import { readInstallState } from './install-profile';
 import { installStatePendingMigration, migrateInstallState, planInstallStateMigration } from './install-state-migration';
 import type { PathRecord } from '../../core/host-config/types';
 import { pathRecordsDigest, readPathRecords, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
-import { installProfileStatePath } from './install-state';
+import { InstallStateError, installProfileStatePath } from './install-state';
 import { assertConfigurationPath, configurationReceiptPath, hostConfigurationRoot, writePrivateConfiguration } from './configuration-ownership';
 import { migrateCodexConfigRecords, planCodexConfigMigration, previewAdoptedRevert } from './codex-config-migration';
 import { migrateJsonConfigRecords, planJsonConfigMigration, previewJsonAdoptedRevert } from './json-config-migration';
 import { openHostConfigGate, planPathRevert, type HostConfigAdoption, type HostConfigRevertEntry } from '../../effects/host-config/gate';
 import { hostConfigPaths, resolveHostPath } from '../../effects/host-config/store';
+import { FileSyntaxError, parseJsonText, parseTomlText } from '../../core/evidence/file-syntax';
 
 export interface UninstallOptions { target: 'codex' | 'claude' | 'both'; dryRun?: boolean; env?: NodeJS.ProcessEnv; runtimeLock?: RuntimeTransactionContext }
 export interface UninstallItem { path: string; action: 'remove' | 'restore' | 'preserve' | 'unresolved' | 'note'; reason: string }
@@ -43,10 +44,20 @@ function fingerprint(path: string): string | null {
   if (!stat.isFile()) throw new Error(`unsupported installed surface: ${path}`);
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
+/** The uninstall item names the file, so a syntax failure gives the path-free text. */
 function object(raw: string): Record<string, any> {
-  const parsed = JSON.parse(raw);
+  const parsed = parseJsonText(raw, null);
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('expected JSON object');
-  return parsed;
+  return parsed as Record<string, any>;
+}
+
+/** The item of a failed read before planning: the file that failed, and a reason that does not repeat its path. */
+function failedRead(error: unknown, fallback: string): UninstallItem {
+  const cause = error instanceof Error ? error.cause : undefined;
+  const syntax = error instanceof FileSyntaxError ? error : cause instanceof FileSyntaxError ? cause : null;
+  if (syntax?.path) return { path: syntax.path, action: 'unresolved', reason: syntax.detail };
+  if (error instanceof InstallStateError) return { path: error.path, action: 'unresolved', reason: error.message };
+  return { path: fallback, action: 'unresolved', reason: String((error as Error).message) };
 }
 
 /** Plan completely before writing; dry-run neither takes a filesystem lock nor creates receipts. */
@@ -57,7 +68,7 @@ export function runUserUninstall(opts: UninstallOptions): UninstallResult {
   // A protocol 3 state is read after its migration under the lock.
   try { if (!installStatePendingMigration(opts.env ?? process.env)) readUninstallState(opts); }
   catch (error) {
-    return uninstallResult([{ path: configurationReceiptPath(hostConfigurationRoot(opts.env)), action: 'unresolved', reason: String((error as Error).message) }], false);
+    return uninstallResult([failedRead(error, configurationReceiptPath(hostConfigurationRoot(opts.env)))], false);
   }
   return withRuntimeTransactionContext(globalRuntimeScope(opts.env), opts.runtimeLock, (runtimeLock) => runUserUninstallLocked({ ...opts, runtimeLock }));
 }
@@ -149,7 +160,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
     if (!opts.dryRun && targets.codex) migrateCodexConfigRecords(env);
     if (!opts.dryRun && targets.json.length) migrateJsonConfigRecords(env, targets.json);
     ({ state, records, lock, files, codexMigration, jsonMigration } = readUninstallState(opts));
-  } catch (error) { unresolved(configurationReceiptPath(home), String((error as Error).message)); return result(); }
+  } catch (error) { items.push(failedRead(error, configurationReceiptPath(home))); return result(); }
 
   const gate = openHostConfigGate({ env });
   const hostPaths = [...(files.codex ? [files.codex] : []), ...files.json];
@@ -191,7 +202,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   }
   if (files.codex && existsSync(files.codex)) {
     try {
-      const parsed = Bun.TOML.parse(readFileSync(files.codex, 'utf8')) as Record<string, any>;
+      const parsed = parseTomlText(readFileSync(files.codex, 'utf8'), null) as Record<string, any>;
       // Codex writes these after the user trusts the hooks; they never block completion.
       if (parsed.hooks?.state && Object.keys(parsed.hooks.state).length) items.push({ path: files.codex, action: 'note', reason: 'Codex keeps its hook trust entries in [hooks.state]; rh does not remove them.' });
     } catch (error) { unresolved(files.codex, String((error as Error).message)); }
@@ -254,7 +265,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
     } catch (error) { unresolved(path, String((error as Error).message)); }
     const ledgerPath = repositoryExcludesLedgerPath(env);
     let ledger: RepositoryExclude[] = [];
-    try { ledger = readRepositoryExcludes(env); } catch (error) { unresolved(ledgerPath, String((error as Error).message)); }
+    try { ledger = readRepositoryExcludes(env); } catch (error) { items.push(failedRead(error, ledgerPath)); }
     const retained = ledger.filter((entry) => {
       try {
         if (!existsSync(entry.repo_path)) throw new Error(`repository ${entry.repo_path} is unavailable; block and ledger entry kept`);

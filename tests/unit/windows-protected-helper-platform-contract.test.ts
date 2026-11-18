@@ -204,6 +204,12 @@ describe('Windows protected-helper platform contract', () => {
       fileAccess: staleAccess,
       nativeSystemToolsDirectory: CONTRACT.system_tools_dir,
     })).toThrow('protocol must be 1');
+    // JSON.parse quotes an identifier-shaped token of the file; the error names the file only (I1, #3164).
+    expect(() => resolveProtectedHelperPlatform({
+      platform: 'win32', accountHome: 'C:\\Users\\Ada', configPath,
+      fileAccess: { ...staleAccess, readFile: () => '{"protectedHelperRuntime": sk_FAKE_SECRET_12345}' },
+      nativeSystemToolsDirectory: CONTRACT.system_tools_dir,
+    })).toThrow(new Error(`${configPath}: the file is not valid JSON`));
 
     expect(() => resolveProtectedHelperPlatform({
       platform: 'win32',

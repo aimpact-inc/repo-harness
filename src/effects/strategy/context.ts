@@ -1,3 +1,4 @@
+import { parseJsonText } from '../../core/evidence/file-syntax';
 import { fileURLToPath } from 'node:url';
 import { ObservationViolation, type ReadonlyObservationIO } from '../readonly-observation';
 import { resolveEffectiveStateReadOnly } from '../state/resolve-effective-state';
@@ -251,7 +252,7 @@ function collectContext(reader: StrategyReader, opts: StrategyCollectionOptions,
   if (load.length > 8 || new Set(load).size !== load.length || topics.length > 16 || topics.some(t => !t || t.length > 500)) throw new Error('Invalid retrieval selection');
   const documentPath = opts.documentPath ?? STRATEGY_DOCUMENT;
   const raw = reader.read(documentPath);
-  const doc = parseStrategyDocument(JSON.parse(raw));
+  const doc = parseStrategyDocument(parseJsonText(raw, documentPath));
   const revision = reader.head();
   const eligible = activeMemory(doc, nowMs, revision, topics);
   reader.restrictStateMemoryBodies(doc.memory.flatMap(m => m.body ? [m.body.path] : []),
@@ -317,7 +318,7 @@ export function validateStrategyRequest(repo: string, path: string, opts: Strate
   assertReadProfile(opts);
   const reader = requestReader(repo, opts.limits, effects.clock);
   const raw = reader.read(path);
-  const proposal: unknown = JSON.parse(raw);
+  const proposal = parseJsonText(raw, path);
   const packet = collectContext(reader, opts, effects, { path, raw });
   return validateProposal(proposal, packet);
 }

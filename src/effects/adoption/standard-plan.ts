@@ -1,3 +1,4 @@
+import { FileSyntaxError, parseJsonText } from "../../core/evidence/file-syntax";
 import { sha256Prefixed } from "../../core/evidence/sha256";
 import { existsSync, lstatSync, readdirSync, readFileSync } from "fs";
 import { basename, join, relative, resolve, sep } from "path";
@@ -173,11 +174,11 @@ function jsonFile(repoRoot: string, path: string): JsonObject | undefined {
   const raw = fileContent(repoRoot, path);
   if (raw === undefined) return undefined;
   try {
-    const value = JSON.parse(raw) as unknown;
+    const value = parseJsonText(raw, path);
     if (!value || Array.isArray(value) || typeof value !== "object") throw new Error("not an object");
     return value as JsonObject;
   } catch (error) {
-    throw new Error(`invalid JSON in ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`invalid JSON in ${path}: ${error instanceof FileSyntaxError ? error.detail : error instanceof Error ? error.message : String(error)}`);
   }
 }
 

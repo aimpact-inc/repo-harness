@@ -272,6 +272,20 @@ describe('security scan command', () => {
     });
   });
 
+  test('CLI text and --json name an unparseable host config and VS Code tasks file without its text (I1, #3164)', () => {
+    withTempHomeAndRepo(({ home, repo }) => {
+      // JSON.parse quotes an identifier-shaped token of the file.
+      const broken = '{"hooks": sk_FAKE_SECRET_12345}';
+      const files = [path.join(home, '.codex', 'hooks.json'), path.join(repo, '.vscode', 'tasks.json')];
+      for (const file of files) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, broken); }
+      for (const args of [['--json'], []]) {
+        const result = spawnSync(process.execPath, [CLI, 'security', 'scan', ...args], { cwd: repo, encoding: 'utf-8', env: { ...process.env, HOME: home, BUN_INSTALL: path.join(home, '.bun') } });
+        expect(result.stdout + result.stderr).not.toContain('sk_FAKE');
+        if (args.length) expect(JSON.parse(result.stdout).findings.filter((finding: { ruleId: string }) => finding.ruleId === 'invalid-json').map((finding: { filePath: string }) => finding.filePath).sort()).toEqual([...files].sort());
+      }
+    });
+  });
+
   test('CLI emits JSON and --strict fails on high findings', () => {
     withTempHomeAndRepo(({ home, repo }) => {
       fs.mkdirSync(path.join(repo, '.vscode'), { recursive: true });

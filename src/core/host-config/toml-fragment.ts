@@ -1,3 +1,4 @@
+import { FileSyntaxError, parseTomlText } from '../evidence/file-syntax';
 import { isDeepStrictEqual } from 'node:util';
 import { HostConfigError, type FragmentEdit, type HostConfigStrategy, type TextRange } from './types';
 
@@ -18,19 +19,26 @@ function preserving(selector: string, detail: string): HostConfigError {
   return new HostConfigError('host_config_invalid_state', `${detail} for ${selector}; preserving configuration`);
 }
 
-function parse(content: string): TomlTable {
-  return Bun.TOML.parse(content) as TomlTable;
+/**
+ * The fragment text has no path, so a syntax failure is a path-free
+ * FileSyntaxError. It stays a SyntaxError: the host-config gate keeps every
+ * fragment of a file whose strategy throws a HostConfigError, but an
+ * unparseable file must stop the revert.
+ */
+function parseToml(content: string): TomlTable {
+  return parseTomlText(content, null);
 }
 
-/** Bun's TOML parse error names no file, so the caller that read the file adds its path and the remedy. */
+/** The TOML parse error names no file, so the caller that read the file adds its path and the remedy. */
 export function namingTomlFile(path: string, error: unknown): unknown {
   if (!(error instanceof SyntaxError)) return error;
-  return new HostConfigError('host_config_unparseable_target', `${path}: ${error.message}. Fix the TOML in that file, then run the command again`, { cause: error });
+  const syntax = new FileSyntaxError(path, 'TOML');
+  return new HostConfigError('host_config_unparseable_target', `${syntax.message}. Fix the TOML in that file, then run the command again`, { cause: syntax });
 }
 
 /** The parsed value at the selector, and the parsed file without it. */
 function split(content: string, selector: CodexConfigSelector): { value: unknown; rest: TomlTable } {
-  const rest = parse(content);
+  const rest = parseToml(content);
   if (selector === 'default_mode_request_user_input') {
     const value = rest[selector];
     delete rest[selector];
@@ -74,7 +82,7 @@ function span(content: string, selector: CodexConfigSelector): TextRange | null 
   const end = start + matches[0]![0].length;
   if (!rootKey && end === content.length && !content.endsWith('\n') && content[start - 1] === '\n') start -= content[start - 2] === '\r' ? 2 : 1;
   const range = { start, end };
-  if (!isDeepStrictEqual(parse(content.slice(0, range.start) + content.slice(range.end)), rest)) throw preserving(selector, 'ambiguous TOML fragment');
+  if (!isDeepStrictEqual(parseToml(content.slice(0, range.start) + content.slice(range.end)), rest)) throw preserving(selector, 'ambiguous TOML fragment');
   return range;
 }
 
@@ -117,7 +125,7 @@ export const tomlFragment: HostConfigStrategy<string> = {
       : name === 'default_mode_request_user_input' ? { at: 0, removed: '', inserted: value }
         : { at: content.length, removed: '', inserted: content === '' || content.endsWith('\n') ? value : atFileEnd('\n', value) };
     const next = content.slice(0, edit.at) + edit.inserted + content.slice(edit.at + edit.removed.length);
-    try { parse(next); } catch (error) { throw new HostConfigError('host_config_invalid_state', `the ${selector} edit does not give valid TOML; preserving configuration`, { cause: error }); }
+    try { parseToml(next); } catch (error) { throw new HostConfigError('host_config_invalid_state', `the ${selector} edit does not give valid TOML; preserving configuration`, { cause: error }); }
     return edit;
   },
 };

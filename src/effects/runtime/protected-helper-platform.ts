@@ -1,3 +1,4 @@
+import { parseJsonText } from '../../core/evidence/file-syntax';
 import {
   existsSync,
   lstatSync,
@@ -300,12 +301,7 @@ function readWindowsContract(
   if (source.isSymbolicLink() || !source.isFile()) {
     throw new Error(`Windows protected-helper config must be a non-symlink regular file: ${configPath}`);
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(access.readFile(access.realpath(configPath)));
-  } catch (error) {
-    throw new Error(`Windows protected-helper config is invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
-  }
+  const parsed = parseJsonText(access.readFile(access.realpath(configPath)), configPath);
   if (!isRecord(parsed)) throw new Error('Windows protected-helper config root must be an object');
   if (!(WINDOWS_PROTECTED_HELPER_CONFIG_KEY in parsed)) {
     throw new Error(`Windows protected-helper platform contract is missing from ${configPath}; run rh install or rh update`);

@@ -1,3 +1,4 @@
+import { parseJsonText } from '../../core/evidence/file-syntax';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs';
 import { retryWindowsSharingRace } from '../../effects/atomic-append';
 import { requireHome } from '../../effects/repo-harness-home';
@@ -49,7 +50,7 @@ export function writePrivateConfiguration(path: string, content: string, root: s
 export function readRawConfigurationReceipt(root: string): unknown {
   const path = configurationReceiptPath(root);
   assertConfigurationPath(path, root);
-  return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null;
+  return existsSync(path) ? parseJsonText(readFileSync(path, 'utf8'), path) : null;
 }
 
 /** The migrations write back what is left of the receipt; the file goes with its last entry. */

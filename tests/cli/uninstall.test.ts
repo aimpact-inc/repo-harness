@@ -149,6 +149,27 @@ test('CLI dry-run JSON creates no lock, receipt or directories',()=>fixture((hom
  const before=tree(home);const result=spawnSync('bun',[CLI,'uninstall','--dry-run','--json'],{env:{...env,BUN_RUNTIME_TRANSPILER_CACHE_PATH:'0'},encoding:'utf8'});
  expect(result.status).toBe(0);expect(JSON.parse(result.stdout).dryRun).toBe(true);expect(tree(home)).toBe(before);
 }));
+// JSON.parse quotes an identifier only up to a dash, so the JSON rows use an identifier-shaped fake token.
+const BROKEN_TOML='k = sk-FAKE-SECRET-12345\n',BROKEN_JSON='{"k": sk_FAKE_SECRET_12345}';
+test.each<[string,(home:string,env:NodeJS.ProcessEnv)=>void]>([
+ ['config.toml with a ledger record',(home,env)=>{rhWritesInputMode(env,join(home,'.codex/config.toml'));put(home,'.codex/config.toml',BROKEN_TOML);}],
+ ['config.toml with a receipt entry',(home)=>{put(home,'.codex/config.toml',BROKEN_TOML);put(home,'.repo-harness/configuration-restore.json',JSON.stringify({protocol:1,changes:[{path:join(home,'.codex/config.toml'),selector:'mcp_servers.codegraph',before:null,installed:'[mcp_servers.codegraph]\ncommand = "cg"\n',active:true}]}));}],
+ ['install state',(home)=>put(home,'.repo-harness/install-state.json',BROKEN_JSON)],
+ ['receipt',(home)=>put(home,'.repo-harness/configuration-restore.json',BROKEN_JSON)],
+ ['rh config',(home)=>put(home,'.repo-harness/config.json',BROKEN_JSON)],
+ ['repository excludes ledger',(home)=>put(home,'.repo-harness/repository-excludes.json',BROKEN_JSON)],
+])('no parser message of a broken %s reaches rh uninstall output, text or --json (I1, #3164)',(name,seed)=>fixture((home,env)=>{
+ seed(home,env);
+ const bunInstall=mkdtempSync(join(tmpdir(),'user-uninstall-bun-'));
+ try{
+  for(const args of [['uninstall','--json'],['uninstall']]){
+   const result=spawnSync('bun',[CLI,...args],{env:{...env,BUN_INSTALL:bunInstall,BUN_RUNTIME_TRANSPILER_CACHE_PATH:'0'},encoding:'utf8'});
+   expect(result.status,`${name}: ${args.join(' ')}`).toBe(1);
+   expect(result.stdout+result.stderr,`${name}: ${args.join(' ')}`).not.toMatch(/sk[-_]FAKE/);
+   if(args.includes('--json')) expect(JSON.parse(result.stdout).items.some((item:{action:string})=>item.action==='unresolved'),name).toBe(true);
+  }
+ }finally{rmSync(bunInstall,{recursive:true,force:true});}
+}),60_000);
 test('malformed receipt prevents all mutation',()=>fixture((home,env)=>{
  put(home,'.repo-harness/configuration-restore.json','{"protocol":999}');
  put(home,'.codex/hooks.json',JSON.stringify({hooks:buildManagedHooks('codex')}));

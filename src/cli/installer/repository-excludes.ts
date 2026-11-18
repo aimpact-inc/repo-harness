@@ -1,3 +1,4 @@
+import { parseJsonText } from '../../core/evidence/file-syntax';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { basename, dirname, join, resolve, sep } from 'path';
@@ -21,7 +22,7 @@ export function repositoryExcludesLedgerPath(env: NodeJS.ProcessEnv): string {
 export function readRepositoryExcludes(env: NodeJS.ProcessEnv): RepositoryExclude[] {
   const path = repositoryExcludesLedgerPath(env);
   if (!lstatSync(path, { throwIfNoEntry: false })) return [];
-  const value = JSON.parse(readFileSync(path, 'utf8'));
+  const value = parseJsonText(readFileSync(path, 'utf8'), path) as { version?: unknown; entries?: unknown } | null;
   const valid = (entry: Record<string, unknown>) => Object.keys(entry).sort().join(',') === 'exclude_path,repo_id,repo_path'
     && Object.values(entry).every((field) => typeof field === 'string');
   if (value?.version !== 1 || !Array.isArray(value.entries) || !value.entries.every(valid)) throw new Error(`repository_excludes_ledger_invalid: ${path}`);

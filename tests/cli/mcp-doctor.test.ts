@@ -68,6 +68,22 @@ describe('mcp doctor and local config', () => {
     });
   });
 
+  test('rh mcp doctor names an unparseable local config without its text, in text and --json (I1, #3164)', () => {
+    withTmpRepo((repoRoot, userHome) => {
+      // JSON.parse quotes an identifier-shaped token of the file, here a retired auth setting.
+      writeFileSync(join(userHome, 'mcp.local.json'), '{"auth": {"token": sk_FAKE_SECRET_12345}}\n');
+      const env = pluginSelectionEnv(['mcp']);
+      try {
+        for (const args of [['--json'], []]) {
+          const result = spawnSync(process.execPath, [CLI, 'mcp', 'doctor', '--repo', repoRoot, ...args], { encoding: 'utf-8', input: '', env: { ...env, BUN_INSTALL: join(env.HOME!, '.bun'), REPO_HARNESS_HOME: userHome, BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0' } });
+          expect(result.status, args.join(' ')).toBe(2);
+          expect(result.stdout + result.stderr, args.join(' ')).not.toContain('sk_FAKE');
+          expect(result.stderr, args.join(' ')).toContain(`invalid MCP local config at ${join(userHome, 'mcp.local.json')}: the file is not valid JSON`);
+        }
+      } finally { rmSync(env.HOME!, { recursive: true, force: true }); }
+    });
+  });
+
   test('fails closed on a local config that keeps a retired ChatGPT, OAuth or orchestrator key', () => {
     withTmpRepo((repoRoot, userHome) => {
       writeUserConfig(userHome, {

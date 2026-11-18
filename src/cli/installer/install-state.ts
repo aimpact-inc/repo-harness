@@ -1,3 +1,4 @@
+import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
 import { existsSync, readFileSync } from 'fs';
 import { requireHome } from '../../effects/repo-harness-home';
 import { join } from 'path';
@@ -179,15 +180,20 @@ export function parseProtocol3InstallState(raw: unknown, path: string): { readon
   return { current: snapshot(raw, 'state'), previous: previous === null ? null : snapshot(previous, 'previous state') };
 }
 
+/** The raw JSON of a state file, such as a transaction's backup of it. */
+export function readInstallStateJson(path: string): unknown {
+  let text: string;
+  try { text = readFileSync(path, 'utf-8'); } catch (error) { throw invalidInstallState(path, `cannot be read (${(error as Error).message})`); }
+  try { return parseJsonText(text, path); } catch (error) {
+    if (!(error instanceof FileSyntaxError)) throw error;
+    throw invalidInstallState(path, 'is not valid JSON');
+  }
+}
+
 /** The raw JSON of the state file, or undefined when it is absent. */
 export function readRawInstallState(env: NodeJS.ProcessEnv = process.env): unknown {
   const path = installProfileStatePath(env);
-  if (!existsSync(path)) return undefined;
-  try {
-    return JSON.parse(readFileSync(path, 'utf-8')) as unknown;
-  } catch (error) {
-    throw invalidInstallState(path, `is not valid JSON (${(error as Error).message})`);
-  }
+  return existsSync(path) ? readInstallStateJson(path) : undefined;
 }
 
 /** The recorded state at the HOME of `env`, or null when the file is absent. */
