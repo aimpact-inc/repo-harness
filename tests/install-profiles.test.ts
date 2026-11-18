@@ -20,6 +20,7 @@ import {
   installProfileTransactionPaths,
   installStateStatus,
   loadSkillSurfaceCatalog,
+  recordStagedExternalSkillWrites,
   planInstallSelection,
   prepareInstallSelectionSwitch,
   readInstallState,
@@ -27,6 +28,7 @@ import {
   rollbackInstallHostTransaction,
   rollbackInstallSelection,
   versions,
+  withHostConfigTransaction,
   type InstallState,
 } from '../src/cli/installer/install-profile';
 import {
@@ -290,40 +292,58 @@ describe('install selection', () => {
     expect(hashManagedTree(source)).not.toBe(marker.content_hash);
   }));
 
-  test('stage-owned-copy refuses an existing destination without changing it', () => {
-    const home = mkdtempSync('/tmp/repo-harness-stage-existing-');
-    try {
-      const source = join(home, 'source');
-      const dest = join(home, 'destination');
-      writePath(join(source, 'SKILL.md'), 'source bytes\n');
-      writePath(join(dest, 'SKILL.md'), 'user bytes\n');
-      const result = spawnSync('bash', [join(ROOT, 'scripts/sync-codex-installed-copies.sh'),
-        '--stage-owned-copy', source, dest, 'canonical-skill'], {
-        env: { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun'), REPO_HARNESS_SOURCE_ROOT: ROOT }, encoding: 'utf8',
-      });
-      expect(result.status, result.stderr).toBe(2);
-      expect(readFileSync(join(dest, 'SKILL.md'), 'utf8')).toBe('user bytes\n');
-      expect(existsSync(join(dest, '.repo-harness-owner.json'))).toBe(false);
-    } finally { rmSync(home, { recursive: true, force: true }); }
-  });
-
-  test('stage-owned-copy refuses a dangling symlink destination without changing it', () => {
-    const home = mkdtempSync('/tmp/repo-harness-stage-symlink-');
-    try {
-      const source = join(home, 'source');
-      const dest = join(home, 'destination');
-      const target = join(home, 'missing-target');
-      writePath(join(source, 'SKILL.md'), 'source bytes\n');
-      symlinkSync(target, dest);
-      const result = spawnSync('bash', [join(ROOT, 'scripts/sync-codex-installed-copies.sh'),
-        '--stage-owned-copy', source, dest, 'canonical-skill'], {
-        env: { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun'), REPO_HARNESS_SOURCE_ROOT: ROOT }, encoding: 'utf8',
-      });
-      expect(result.status, result.stderr).toBe(2);
+  test.each(['existing directory', 'dangling symlink'])('private staged copy cannot replace an unowned %s', kind => withHome(env => {
+    const source = join(env.HOME!, 'source');
+    const dest = join(env.HOME!, '.codex/skills/repo-harness');
+    const target = join(env.HOME!, 'missing-target');
+    writePath(join(source, 'SKILL.md'), 'source bytes\n');
+    mkdirSync(dirname(dest), { recursive: true });
+    if (kind === 'dangling symlink') symlinkSync(target, dest);
+    else writePath(join(dest, 'SKILL.md'), 'user bytes\n');
+    const contract = JSON.parse(readFileSync(join(ROOT, 'assets/workflow-contract.v1.json'), 'utf8'));
+    expect(() => withHostConfigTransaction(env, undefined, transaction => {
+      const staged = stageInstalledSkillCopy(source, 'canonical-skill', transaction, contract);
+      openHostConfigGate({ env }).writePaths([{ path: dest, owner: 'core', entry: { type: 'directory', source: staged } }], { transaction });
+    })).toThrow(`rh has no record of it, so rh does not replace it: ${dest}`);
+    if (kind === 'dangling symlink') {
       expect(readlinkSync(dest)).toBe(target);
       expect(existsSync(target)).toBe(false);
-    } finally { rmSync(home, { recursive: true, force: true }); }
-  });
+    } else {
+      expect(readFileSync(join(dest, 'SKILL.md'), 'utf8')).toBe('user bytes\n');
+      expect(existsSync(join(dest, '.repo-harness-owner.json'))).toBe(false);
+    }
+  }));
+
+  test('candidate reconciliation reports a retired staged skill and records only current skills', () => withHome(env => {
+    const transaction = mkdtempSync(join(env.HOME!, 'candidate-'));
+    const retired = join(env.HOME!, '.agents/skills/retired-provider-skill');
+    const current = join(env.HOME!, '.agents/skills/repo-harness-cross-review');
+    for (const path of [retired, current]) writePath(join(path, 'SKILL.md'), '# staged\n');
+    writePath(join(transaction, 'staged-skills.json'), JSON.stringify([retired, current].map(path => ({
+      path, owner: 'cross-review', existed: false, owned: false,
+    }))));
+    const result = spawnSync(process.execPath, ['-e', [
+      "const profile = require('./src/cli/installer/install-profile.ts');",
+      'profile.initializeStagedSkillObservations(process.argv[1], process.env);',
+      'profile.recordStagedExternalSkillWrites(process.argv[1], process.env);',
+    ].join('\n'), transaction], { cwd: ROOT, env, encoding: 'utf8' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr.trim().split('\n')).toEqual([`[install] skipped retired staged skill ${JSON.stringify(retired)}`]);
+    expect(ownedPath(env, retired)).toBeNull();
+    expect(readFileSync(join(retired, 'SKILL.md'), 'utf8')).toBe('# staged\n');
+    expect(ownedPath(env, current)).toMatchObject({ owner: 'cross-review', host: 'staged', kind: 'created' });
+  }));
+
+  test.each(['outside staging', 'wrong owner', 'duplicate path'])('staged skill observations still reject %s', kind => withHome(env => {
+    const transaction = mkdtempSync(join(env.HOME!, 'candidate-'));
+    const entry = {
+      path: join(env.HOME!, kind === 'outside staging' ? '.codex' : '.agents', 'skills/repo-harness-cross-review'),
+      owner: kind === 'wrong owner' ? 'core' : 'cross-review', existed: false, owned: false,
+    };
+    writePath(join(transaction, 'staged-skills.json'), JSON.stringify(kind === 'duplicate path' ? [entry, entry] : [entry]));
+    expect(() => recordStagedExternalSkillWrites(transaction, env)).toThrow(kind === 'duplicate path'
+      ? 'duplicate staged skill observation' : 'invalid staged skill observations in runtime transaction');
+  }));
 
   test('refresh retains a markerless owned directory record under its owner and writes the records in key order', () => withHome((env) => {
     const path = join(env.HOME!, '.codex/skills/repo-harness-cross-review');
@@ -1073,7 +1093,9 @@ describe('install selection', () => {
     writeFileSync(english, '# local edit\n');
     const refused = installWithFreshRules(env);
     expect(refused.status).not.toBe(0);
-    expect(refused.rules).toMatchObject({ status: 'failed', detail: `it changed since rh wrote it, so rh does not replace it: ${english}` });
+    expect(refused.rules.status).toBe('failed');
+    expect(refused.rules.detail).toContain(`it changed since rh wrote it, so rh does not replace it: ${english}`);
+    expect(refused.rules.detail).toContain('Move the rule to a backup directory.');
     expect(readFileSync(english, 'utf-8')).toBe('# local edit\n');
     expect(readFileSync(statePath)).toEqual(stateBefore);
   }), 60_000);

@@ -9,7 +9,7 @@ import { namingTomlFile } from '../../core/host-config/toml-fragment';
 import { migrateCodexConfigRecords } from './codex-config-migration';
 import { migrateJsonConfigRecords } from './json-config-migration';
 import { pathRecordIsCurrent, pathRecordKey, pathRecordsDigest, readPathRecords, readPathRecordSet, registerSupportedPathRecords, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
-import type { PathCommitted, PathRecord, PathRecordHost, PathRecordKind } from '../../core/host-config/types';
+import { HostConfigError, type PathCommitted, type PathRecord, type PathRecordHost, type PathRecordKind } from '../../core/host-config/types';
 import { globalContextBackupEligible, globalContextPath } from './global-context';
 import { acquireRuntimeTransactionLock, assertRuntimeTransactionContext, globalRuntimeScope, runtimeTransactionLockRelativePath, runtimeTransactionRoot, withRuntimeTransactionLock, type RuntimeTransactionContext, type RuntimeTransactionLock, type RuntimeTransactionScope } from '../../effects/locking/runtime-transaction-lock';
 import { exclusiveDirectoryLockOwnerLiveness, readExclusiveDirectoryLockOwner } from '../../effects/locking/exclusive-directory-lock';
@@ -299,7 +299,7 @@ const STAGED_SKILLS = 'staged-skills.json';
 /** Presence and ownership before the Skills CLI runs. No user bytes are copied. Retired by #2852. */
 export function initializeStagedSkillObservations(transaction: string, env: NodeJS.ProcessEnv): void {
   const metadata = join(transaction, STAGED_SKILLS);
-  if (lstatSync(metadata, { throwIfNoEntry: false })) { readStagedSkillObservations(transaction, env); return; }
+  if (lstatSync(metadata, { throwIfNoEntry: false })) { readStagedSkillObservations(transaction, env, true); return; }
   const prior = readPathRecords(env);
   const { externalSkills } = catalogMutationPathSkillNames(loadSkillSurfaceCatalog());
   const observations = externalSkills.flatMap(name => {
@@ -315,18 +315,31 @@ export function initializeStagedSkillObservations(transaction: string, env: Node
   writeFileSync(metadata, JSON.stringify(observations), { flag: 'wx', mode: 0o600 });
 }
 
-function readStagedSkillObservations(transaction: string, env: NodeJS.ProcessEnv): readonly StagedSkillObservation[] {
+function readStagedSkillObservations(transaction: string, env: NodeJS.ProcessEnv, reportRetired = false): readonly StagedSkillObservation[] {
   const metadata = join(transaction, STAGED_SKILLS);
+  const invalid = 'invalid staged skill observations in runtime transaction';
   let raw: unknown;
   try { raw = JSON.parse(readFileSync(metadata, 'utf8')); }
-  catch { throw new Error('invalid staged skill observations in runtime transaction'); }
-  const { externalSkills } = catalogMutationPathSkillNames(loadSkillSurfaceCatalog());
-  const allowed = new Set(externalSkills.map(name => join(stagedSkillRoot(requireHome(env)), name)));
-  if (!Array.isArray(raw) || raw.some(entry => !isRecord(entry) || typeof entry.path !== 'string' || !allowed.has(entry.path)
-    || !isSurfaceOwner(entry.owner) || entry.owner !== ownerForInstallPath(entry.path, env) || typeof entry.existed !== 'boolean' || typeof entry.owned !== 'boolean')) throw new Error('invalid staged skill observations in runtime transaction');
+  catch { throw new Error(invalid); }
+  const root = stagedSkillRoot(requireHome(env));
+  if (!Array.isArray(raw) || raw.some(entry => !isRecord(entry) || typeof entry.path !== 'string'
+    || join(root, basename(entry.path)) !== entry.path || entry.path === root || !isSurfaceOwner(entry.owner)
+    || typeof entry.existed !== 'boolean' || typeof entry.owned !== 'boolean')) throw new Error(invalid);
   const observations = raw as StagedSkillObservation[];
   if (new Set(observations.map(entry => entry.path)).size !== observations.length) throw new Error('duplicate staged skill observation');
-  return observations;
+
+  const catalog = loadSkillSurfaceCatalog();
+  const { externalSkills } = catalogMutationPathSkillNames(catalog);
+  const retired: string[] = [];
+  const current = observations.filter(entry => {
+    const name = basename(entry.path);
+    if (!catalog.packages.some(pkg => pkg.name === name)) { retired.push(entry.path); return false; }
+    if (!externalSkills.includes(name) || entry.owner !== ownerForInstallPath(entry.path, env, catalog)) throw new Error(invalid);
+    return true;
+  });
+  // The candidate reports at handoff. Later ledger rebuilds can read the same observations.
+  if (reportRetired) for (const path of retired) process.stderr.write(`[install] skipped retired staged skill ${JSON.stringify(path)}\n`);
+  return current;
 }
 
 /** Record only newly staged entries or an entry whose prior record was current. Retired by #2852. */
@@ -562,6 +575,12 @@ export function migrateRuntimeHostConfig(env: NodeJS.ProcessEnv): void {
   requireHome(env);
   migrateCodexConfigRecords(env);
   migrateJsonConfigRecords(env);
+}
+
+/** The gate reports replacement refusals under its general invalid-state code. */
+export function hostPathReplacementRefused(error: unknown): error is HostConfigError {
+  return error instanceof HostConfigError && error.code === 'host_config_invalid_state'
+    && error.message.includes(', so rh does not replace it: ');
 }
 
 /** Standalone writers use the same runtime lock and transaction as install. */

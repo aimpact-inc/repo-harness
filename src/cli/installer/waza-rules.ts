@@ -3,7 +3,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import wazaRules from '../../core/skill-surface/waza-shared-rules.json';
 import { runProcess } from '../../effects/process-runner';
-import { withHostConfigTransaction } from './install-profile';
+import { hostPathReplacementRefused, withHostConfigTransaction } from './install-profile';
 import { openHostConfigGate } from '../../effects/host-config/gate';
 import { requireHome } from '../../effects/repo-harness-home';
 
@@ -76,6 +76,9 @@ export function syncWazaSharedRules(
     withHostConfigTransaction(env, transaction, root => openHostConfigGate({ env }).writePaths(writes, { transaction: root }));
     return { status: 'ok', detail: `${refresh ? 'refreshed staging; ' : ''}synced ${hosts.length * wazaRules.files.length} files` };
   } catch (error) {
-    return { status: 'failed', detail: (error as Error).message };
+    const detail = (error as Error).message;
+    if (!hostPathReplacementRefused(error)) return { status: 'failed', detail };
+    return { status: 'failed', detail: `${detail}. Move the rule to a backup directory. `
+      + 'If it is a staging rule, move any existing host copies of the same rule there too. Then run `rh update` again.' };
   }
 }

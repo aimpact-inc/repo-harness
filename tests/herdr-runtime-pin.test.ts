@@ -191,7 +191,10 @@ test("required Herdr skill records its writes and keeps unrecorded or edited cop
     const classic = join(home, '.claude/skills/herdr');
     mkdirSync(classic, { recursive: true });
     writeFileSync(join(classic, 'SKILL.md'), 'classic user copy\n');
-    expect(configureRequiredHerdrSkill('both', env).status).toBe('failed');
+    const unowned = configureRequiredHerdrSkill('both', env);
+    expect(unowned.status).toBe('failed');
+    expect(unowned.detail).toContain(`rh has no record of it, so rh does not replace it: ${classic}`);
+    expect(unowned.detail).toContain('move it out of its skill directory. Then run `rh update` again.');
     expect(readFileSync(join(classic, 'SKILL.md'), 'utf8')).toBe('classic user copy\n');
     expect(existsSync(join(home, '.codex/skills/herdr'))).toBe(false);
     rmSync(classic, { recursive: true });
@@ -217,7 +220,10 @@ test("required Herdr skill records its writes and keeps unrecorded or edited cop
     writeFileSync(marker, '{}');
     writeFileSync(join(shared, 'SKILL.md'), 'user change\n');
     writeFileSync(source, next + 'New rule.\n');
-    expect(configureRequiredHerdrSkill('both', env).status).toBe('failed');
+    const edited = configureRequiredHerdrSkill('both', env);
+    expect(edited.status).toBe('failed');
+    expect(edited.detail).toContain(`it changed since rh wrote it, so rh does not replace it: ${shared}`);
+    expect(edited.detail).toContain('move it out of its skill directory. Then run `rh update` again.');
     expect(readFileSync(join(shared, 'SKILL.md'), 'utf8')).toBe('user change\n');
     expect(readFileSync(join(codex, 'SKILL.md'), 'utf8')).toBe(renderHerdrSkill(next));
     writeFileSync(hc, '#!/bin/sh\nkill -TERM $$\n');

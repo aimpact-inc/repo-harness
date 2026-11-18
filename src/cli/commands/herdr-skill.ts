@@ -6,7 +6,7 @@ import { requireHome } from "../../effects/repo-harness-home";
 import { join } from "node:path";
 import { hostSkillRoot, stagedSkillRoot, SKILL_HOSTS, type SkillHost } from "../../effects/host-skill-roots";
 import { openHostConfigGate } from "../../effects/host-config/gate";
-import { withHostConfigTransaction } from "../installer/install-profile";
+import { hostPathReplacementRefused, withHostConfigTransaction } from "../installer/install-profile";
 import type { InstallTargetSpec } from "./install";
 import { HERDR_SKILL_MARKER as MARKER } from "../../effects/host-config/herdr-skill-marker";
 
@@ -44,6 +44,9 @@ export function configureRequiredHerdrSkill(
     });
     return { step: STEP, status: 'ok', detail: 'installed for ' + hosts.join(', ') + '; ' + sha256Prefixed(content) };
   } catch (error) {
-    return { step: STEP, status: 'failed', detail: error instanceof Error ? error.message : String(error) };
+    const detail = error instanceof Error ? error.message : String(error);
+    return { step: STEP, status: 'failed', detail: hostPathReplacementRefused(error)
+      ? `${detail}. To keep the skill, move it out of its skill directory. Then run \`rh update\` again.`
+      : detail };
   }
 }

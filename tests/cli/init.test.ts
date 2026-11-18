@@ -991,8 +991,14 @@ describe("bundled host runtimes", () => {
         expect(readFileSync(join(dest, "new-reference.md"), "utf8")).toBe("new reference");
         writeFileSync(join(dest, "new-reference.md"), "user edit");
       }
+      const portal = "repo-harness-herdr-portal";
+      writeFileSync(join(source, "assets/skills", portal, "SKILL.md"), "Updated portal\n");
       const blocked = syncCrossReviewSkills(source, "both", env);
-      expect(blocked.filter(step => step.status === "failed")).toHaveLength(1);
+      expect(blocked.filter(step => step.status === "failed")).toEqual([".claude", ".codex"].map(host => ({
+        step: "cross-review skill repo-harness-cross-review", status: "failed",
+        detail: expect.stringContaining(`it changed since rh wrote it, so rh does not replace it: ${join(home, host, "skills/repo-harness-cross-review")}`),
+      })));
+      expect(readFileSync(join(home, ".claude/skills", portal, "SKILL.md"), "utf8")).toBe("Updated portal\n");
       for (const host of [".claude", ".codex"]) {
         expect(readFileSync(join(home, host, "skills/repo-harness-cross-review/new-reference.md"), "utf8")).toBe("user edit");
       }

@@ -1766,7 +1766,7 @@ exit 0
     }
   });
 
-  test('full installs bundled cross-review while mutable marketplace skills stay disabled by default', () => {
+  test('full setup keeps an unowned bundled skill and commits the other skills', () => {
     registerArchitecturePlugin();
     const tmp = mkdtempSync(join(tmpdir(), 'repo-harness-global-full-cross-review-'));
     const home = join(tmp, 'home');
@@ -1782,6 +1782,9 @@ exit 0
       setupConsoleFixture(home, source);
       writeExecutable(tmp, join(fakeBin, 'bun'), '#!/bin/bash\nif [[ "${1:-}" == "--version" ]]; then echo 1.4.0; fi\nexit 0\n');
 
+      const portal = join(home, '.claude/skills/repo-harness-herdr-portal');
+      mkdirSync(portal, { recursive: true });
+      writeFileSync(join(portal, 'SKILL.md'), 'user portal\n');
       const result = runGlobalRuntimeSetup({
         sourceRoot: source,
         cwd: repo,
@@ -1796,6 +1799,10 @@ exit 0
 
       expect(result.exitCode).toBe(0);
       expect(result.steps.find((step) => step.step === 'configure Waza skills')?.status).toBe('skipped');
+      expect(result.steps.find(step => step.step === 'cross-review skill repo-harness-herdr-portal')).toMatchObject({
+        status: 'skipped', detail: expect.stringContaining(`rh has no record of it, so rh does not replace it: ${portal}`),
+      });
+      expect(readFileSync(join(portal, 'SKILL.md'), 'utf8')).toBe('user portal\n');
       expect(result.steps.find((step) => step.step === 'cross-review skill repo-harness-cross-review')?.status).toBe('ok');
       expect(existsSync(join(home, '.claude', 'skills', 'repo-harness-cross-review', 'SKILL.md'))).toBe(true);
       expect(existsSync(join(home, '.claude', 'skills', 'merge-gate', 'SKILL.md'))).toBe(false);
@@ -3012,6 +3019,7 @@ if [[ -n "$output" ]]; then cat "$source" > "$output"; else cat "$source"; fi
         const result = run(true, evidence === 'unselected host' ? 'codex' : 'both');
         expect(result.status).toBe('failed');
         expect(result.detail).toContain('rh has no record of it');
+        expect(result.detail).toContain('Move the rule to a backup directory. If it is a staging rule, move any existing host copies of the same rule there too.');
         expect(snapshot()).toEqual(before);
         expect(storedBytes(env)).toEqual(state);
         expect(recordsOf(env)).toHaveLength(0);
