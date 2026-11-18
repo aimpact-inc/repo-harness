@@ -33,6 +33,7 @@ export type MergeReadinessBlockerCode =
   | 'checks_pending'
   | 'changes_requested'
   | 'unresolved_threads'
+  | 'unanswered_bot_threads'
   | 'not_mergeable'
   | 'mergeability_pending'
   | 'already_integrated'
@@ -137,6 +138,8 @@ export interface ProviderMergeReadinessFactsV1 {
   readonly base_sha: string;
   readonly review_decision: string | null;
   readonly unresolved_thread_count: number | null;
+  /** Unresolved review-bot threads with no later comment from an author that is not a bot. */
+  readonly unanswered_bot_thread_count: number;
   readonly rollback_boundary: MergeReadinessRollbackBoundary | null;
   /** All required checks; the effect verifies base-protected context presence before projection. */
   readonly checks: readonly {
@@ -218,6 +221,7 @@ const ATTENTION: Readonly<Record<MergeReadinessBlockerCode, MergeReadinessAttent
   checks_pending: 'external',
   changes_requested: 'agent',
   unresolved_threads: 'agent',
+  unanswered_bot_threads: 'agent',
   not_mergeable: 'agent',
   mergeability_pending: 'external',
   already_integrated: 'agent',
@@ -420,6 +424,10 @@ export function projectPullRequestMergeReadiness(input: PullRequestMergeReadines
       push(blockers, 'provider_data_incomplete', 'provider unresolved_thread_count is invalid');
     }
     else if (provider.unresolved_thread_count! > 0) push(blockers, 'unresolved_threads');
+    if (!Number.isSafeInteger(provider.unanswered_bot_thread_count) || provider.unanswered_bot_thread_count < 0) {
+      push(blockers, 'provider_data_incomplete', 'provider unanswered_bot_thread_count is invalid');
+    }
+    else if (provider.unanswered_bot_thread_count > 0) push(blockers, 'unanswered_bot_threads');
     if (provider.checks.length === 0) push(blockers, 'provider_data_incomplete', 'provider reported no required checks');
     if (provider.checks.some(check => check.bucket === 'pending')) push(blockers, 'checks_pending');
     if (provider.checks.some(check => check.bucket !== 'pass' && check.bucket !== 'pending')) push(blockers, 'checks_failed');

@@ -185,6 +185,7 @@ describe('publication merge refusals send no mergePullRequest', () => {
 
   test.each([
     ['unresolved_threads', { unresolvedThreads: 1 }],
+    ['unanswered_bot_threads', { unansweredBotThreads: 1 }],
     ['checks_pending', { checks: 'pending' }],
     ['changes_requested', { changesRequested: true }],
   ] as const)('readiness blocker %s is passed through unchanged', (code, overrides) => {

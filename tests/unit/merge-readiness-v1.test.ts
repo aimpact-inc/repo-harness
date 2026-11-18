@@ -31,6 +31,7 @@ function readyInput(): PullRequestMergeReadinessInput {
       base_sha: BASE,
       review_decision: null,
       unresolved_thread_count: 0,
+      unanswered_bot_thread_count: 0,
       rollback_boundary: { status: 'not_active' },
       checks: [{ name: 'Required / CI', bucket: 'pass' }],
       check_failures: [],
