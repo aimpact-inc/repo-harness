@@ -12,7 +12,7 @@ import { buildManagedHooks } from '../../src/cli/installer/managed-entries';
 import { hostSkillRoot } from '../../src/effects/host-skill-roots';
 import { checkPiHost } from '../../src/cli/commands/doctor';
 import { dependencies } from '../../package.json';
-import { runTransactionalRuntimeRefresh } from '../../src/cli/index';
+import { runTransactionalRuntimeRefresh } from '../../src/cli/runtime-transaction';
 import { installStateFixturePath, recordInstallOwnership, seedGlobalPackageFixture } from '../helpers/install-ownership';
 import { runUserUninstall } from '../../src/cli/installer/uninstall';
 import { migrateInstallState } from '../../src/cli/installer/install-state-migration';

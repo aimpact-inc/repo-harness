@@ -39,7 +39,7 @@ import {
   InstallStateError,
 } from '../src/cli/installer/install-state';
 import { isCommandPlugin, ownerEnabled, PLUGIN_IDS, type PluginId, type PluginSelection, type SurfaceOwner } from '../src/core/skill-surface/plugin-manifest';
-import { runTransactionalRuntimeRefresh } from '../src/cli/index';
+import { runTransactionalRuntimeRefresh } from '../src/cli/runtime-transaction';
 import { CANDIDATE_RECONCILE_STEP, type GlobalRuntimeOptions, type GlobalRuntimeResult } from '../src/cli/commands/global-runtime';
 import { CandidateRequestProtocolRetiredError, parseCandidateRequest } from '../src/cli/commands/candidate-reconciliation';
 import { installPiPackage, ownedPiPackages } from '../src/cli/installer/pi-package';

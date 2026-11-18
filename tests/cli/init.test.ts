@@ -26,7 +26,7 @@ import {
 import { globalRuntimeScope, withRuntimeTransactionLock } from "../../src/effects/locking/runtime-transaction-lock";
 import { beginInstallHostTransaction, rollbackInstallHostTransaction } from "../../src/cli/installer/install-profile";
 import { listHelperFiles } from "../../src/effects/runtime/helper-runner";
-import { registerArchitecturePlugin } from '../../src/cli/index';
+import { registerArchitecturePlugin } from '../../src/cli/runtime-transaction';
 import type { InitCommandOptions } from "../../src/cli/commands/init";
 import { writeFakeHc } from '../helpers/fake-hc';
 
