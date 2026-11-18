@@ -19,7 +19,7 @@ import { ALL_TARGETS, getTarget, listTargetIds } from '../installer/targets/regi
 import { planJsonConfigMigration } from '../installer/json-config-migration';
 import { planFile, type PlannedFragment } from '../../core/host-config/plan';
 import { NO_OVERRIDES, formatOverride, parseOverride, unmatchedOverrides, type OverrideSelection } from '../../core/host-config/override';
-import { errorTextWithoutValues, type FragmentRecord, type SkippedOverride } from '../../core/host-config/types';
+import type { FragmentRecord, SkippedOverride } from '../../core/host-config/types';
 import { openHostConfigGate, type HostConfigFileChange, type HostConfigGate } from '../../effects/host-config/gate';
 import { hostConfigPaths, resolveHostPath } from '../../effects/host-config/store';
 
@@ -168,7 +168,7 @@ export function previewHostConfig(spec: InstallTargetSpec | null, overrides: Ove
       if (built === null) unplanned.push({ target: target.id, reason: 'its host-config writer lists no items yet' });
       else items.push(...built.flatMap((change) => previewFile(gate, env, change)));
     } catch (error) {
-      unplanned.push({ target: target.id, reason: errorTextWithoutValues(error) });
+      unplanned.push({ target: target.id, reason: (error as Error).message });
     }
   }
   return { items, unplanned, notListed: NOT_LISTED };

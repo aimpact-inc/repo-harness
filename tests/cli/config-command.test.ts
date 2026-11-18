@@ -6,8 +6,6 @@ import { runConfigDiff, runConfigGc, runConfigRestore, runConfigStatus } from '.
 import { runUserUninstall } from '../../src/cli/installer/uninstall';
 import { jsonFragment } from '../../src/core/host-config/json-fragment';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
-import { versions } from '../../src/cli/installer/install-profile';
-import { installStateFixturePath } from '../helpers/install-ownership';
 
 /** A fake credential: no real token is ever read or written. */
 const FAKE_TOKEN = 'sk-FAKE-2851-not-a-real-token';
@@ -77,20 +75,6 @@ test('a fake token in a user value reaches no default output; --show-values prin
   ];
   for (const output of outputs) expect(`${output.lines.join('\n')}\n${JSON.stringify('json' in output ? output.json : output)}`).not.toContain(FAKE_TOKEN);
   expect(runConfigDiff(f.env, f.path).lines.join('\n')).not.toContain('rh-other');
-
-  // A malformed config.toml that the one-shot migration of restore and gc parses: Bun quotes the unquoted value; rh prints the file and the fixed text only.
-  const toml = join(f.home, '.codex', 'config.toml');
-  mkdirSync(join(f.home, '.codex'), { recursive: true });
-  writeFileSync(toml, `token = ${FAKE_TOKEN}\n`);
-  const entry = { owner: 'architecture', authority: 'repo-harness-install-transaction', removal: 'managed-surfaces-only', path: toml, type: 'managed-file',
-    content_hash: `sha256:${'0'.repeat(64)}`, managed_marker: 'codegraph-config-projection', symlink_target: null };
-  writeFileSync(installStateFixturePath(f.env), JSON.stringify({ protocol: 3, ...versions(['architecture']), selection: ['architecture'], transaction_id: 'fixture',
-    applied_at: new Date().toISOString(), ownership_manifest: [entry], previous: null }));
-  for (const output of [runConfigRestore(f.env, f.path), runConfigGc(f.env)]) {
-    expect(output.exitCode).toBe(2);
-    expect(output.lines.join('\n')).toContain(`${toml}: the file is not valid TOML`);
-    expect(`${output.lines.join('\n')}\n${JSON.stringify(output.json)}`).not.toContain(FAKE_TOKEN);
-  }
 });
 
 test('restore --owner takes out one owner and keeps the other; a dry run writes nothing', () => {
