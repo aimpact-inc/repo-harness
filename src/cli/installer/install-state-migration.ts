@@ -1,12 +1,10 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs';
-import { requireHome } from '../../effects/repo-harness-home';
-import { join } from 'node:path';
 import { isRecord } from '../../core/evidence/is-record';
 import type { PathRecord } from '../../core/host-config/types';
 import { hostConfigPaths, migrateLedgerSchema, projectedLedgerPaths } from '../../effects/host-config/store';
 import { partitionPathRecords, pathRecordHost, pathRecordIsCurrent, pathRecordKey, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
 import { migrateCodexConfigRecords } from './codex-config-migration';
-import { agentFleetTargetPaths, isLegacyOwnershipSurface, writeState, type InstallState } from './install-profile';
+import { agentFleetTargetPaths, fleetReceiptPath, isLegacyOwnershipSurface, writeState, type InstallState } from './install-profile';
 import { enabledPlugins, installProfileStatePath, InstallStateError, invalidOwnership, parseProtocol3InstallState, readRawInstallState, type Protocol3Snapshot } from './install-state';
 import { migrateJsonConfigRecords } from './json-config-migration';
 
@@ -16,12 +14,6 @@ import { migrateJsonConfigRecords } from './json-config-migration';
  * ledger's path records. It runs at the lock-holding entry points before any
  * other state read; every other reader fails closed on protocol 3.
  */
-
-const FLEET_RECEIPT = 'agent-fleet-user-managed.json';
-
-function fleetReceiptPath(env: NodeJS.ProcessEnv): string {
-  return join(requireHome(env), '.repo-harness', FLEET_RECEIPT);
-}
 
 /** True when the state still is protocol 3, so the next entry point migrates it. */
 export function installStatePendingMigration(env: NodeJS.ProcessEnv): boolean {

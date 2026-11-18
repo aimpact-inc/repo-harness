@@ -20,6 +20,8 @@ import {
   installProfileTransactionPaths,
   installStateStatus,
   loadSkillSurfaceCatalog,
+  migrateInParentTransaction,
+  migrateRuntimeHostConfig,
   recordStagedExternalSkillWrites,
   planInstallSelection,
   prepareInstallSelectionSwitch,
@@ -27,6 +29,7 @@ import {
   resolveRecordedSelection,
   rollbackInstallHostTransaction,
   rollbackInstallSelection,
+  rollbackRuntimeHostConfig,
   versions,
   withHostConfigTransaction,
   type InstallState,
@@ -1539,6 +1542,41 @@ describe('install selection', () => {
     const bytes = [ledgerPath, installStateFixturePath(env)].map(path => readFileSync(path));
     update();
     expect([ledgerPath, installStateFixturePath(env)].map(path => readFileSync(path))).toEqual(bytes);
+  }), 60_000);
+
+  test('under an rh 0.34.0 parent a failed candidate keeps the entries that its migration converted and puts back the files that the parent does not restore', () => withProtocol3Release(({ env, skill, fleet }) => {
+    const unrestored = [hostConfigPaths(env).ledger, join(env.HOME!, '.repo-harness', 'agent-fleet-user-managed.json')];
+    const parentBytes = unrestored.map(path => readFileSync(path));
+    const state = readFileSync(installStateFixturePath(env));
+    const migrate = () => { migrateInstallState(env); migrateRuntimeHostConfig(env); };
+    // A 0.34.0 parent's transaction directory holds no owner record, and it snapshots neither file.
+    const stopped = mkdtempSync(join(env.HOME!, 'install-'));
+    expect(() => migrateInParentTransaction(stopped, env, () => { migrate(); throw new Error('migration stopped'); })).toThrow('migration stopped');
+    expect(unrestored.map(path => readFileSync(path))).toEqual(parentBytes);
+    // The parent's rollback restores the state, which it snapshots; the next candidate migrates again.
+    writeFileSync(installStateFixturePath(env), state);
+
+    const failed = mkdtempSync(join(env.HOME!, 'install-'));
+    migrateInParentTransaction(failed, env, migrate);
+    expect([readPathRecords(env)[pathRecordKey(env, skill)]?.kind, existsSync(unrestored[1]!)]).toEqual(['created', false]);
+    const added = join(env.HOME!, '.codex', 'skills', 'repo-harness-candidate');
+    openHostConfigGate({ env }).writePaths([{ path: added, owner: 'core', entry: { type: 'symlink', target: skill } }], { transaction: failed });
+    rollbackRuntimeHostConfig(failed, env);
+    expect([existsSync(skill), existsSync(fleet), lstatSync(added, { throwIfNoEntry: false }), ...unrestored.map(path => readFileSync(path))])
+      .toEqual([true, true, undefined, ...parentBytes]);
+  }), 60_000);
+
+  test('under an rh 0.34.0 parent a migration that stops at a malformed fleet receipt puts the ledger back and leaves the receipt link as it is', () => withProtocol3Release(({ env }) => {
+    const ledger = hostConfigPaths(env).ledger;
+    const parentLedger = readFileSync(ledger);
+    const receipt = join(env.HOME!, '.repo-harness', 'agent-fleet-user-managed.json');
+    const target = join(env.HOME!, 'fleet-receipt.json');
+    writeFileSync(target, '{');
+    rmSync(receipt);
+    symlinkSync(target, receipt);
+    const backupRoot = mkdtempSync(join(env.HOME!, 'install-'));
+    expect(() => migrateInParentTransaction(backupRoot, env, () => { migrateInstallState(env); migrateRuntimeHostConfig(env); })).toThrow('the agent fleet receipt is malformed');
+    expect([readFileSync(ledger), lstatSync(receipt).isSymbolicLink(), readlinkSync(receipt), readFileSync(target, 'utf-8')]).toEqual([parentLedger, true, target, '{']);
   }), 60_000);
 
   test('a protocol 3 state restored over the ledger migrates again: its manifest replaces the created records, and user-managed records stay', () => withProtocol3Release(({ env, skill, fleet, kept, manifest, update }) => {

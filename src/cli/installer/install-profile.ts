@@ -1,6 +1,6 @@
 import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
 import { globalConfigurationPath, mutateGlobalConfiguration, restoreGlobalConfiguration } from '../../effects/configuration/global-configuration';
-import { retryWindowsSharingRace } from '../../effects/atomic-append';
+import { publishFileByRename, retryWindowsSharingRace } from '../../effects/atomic-append';
 import wazaRules from "../../core/skill-surface/waza-shared-rules.json";
 import { bunGlobalPackageRoot, expectedSkillProjections } from './skill-projection';
 import { configurationReceiptPath } from './configuration-ownership';
@@ -290,6 +290,13 @@ export function agentFleetTargetPaths(env: NodeJS.ProcessEnv = process.env): rea
     join(home, '.codex', 'agents', `${agent}.toml`),
     join(home, '.claude', 'agents', `${agent}.md`),
   ]);
+}
+
+const FLEET_RECEIPT = 'agent-fleet-user-managed.json';
+
+/** The fleet receipt of a release before #2896, which the one-shot migration moves into the ledger. */
+export function fleetReceiptPath(env: NodeJS.ProcessEnv): string {
+  return join(requireHome(env), '.repo-harness', FLEET_RECEIPT);
 }
 
 /** The path records that a producer edits, by key. */
@@ -866,16 +873,78 @@ export function commitInstallHostTransaction(transaction: InstallHostTransaction
   transactionLocks.delete(transaction);
 }
 
+/**
+ * A parent of rh 0.34.0 writes no owner record and does not snapshot the
+ * ledger, and it reads only the protocol 1 ledger that it left. Under such a
+ * parent the candidate keeps the ledger before its migrations, which the
+ * parent can read, and after them, which its rollback starts from: a rollback
+ * to the earlier one would take out the records that the migration converted
+ * from current entries, and remove those entries. The migration also moves
+ * the fleet receipt into the ledger, and that parent does not snapshot the
+ * receipt either, so it goes back with the earlier ledger.
+ */
+function olderParentFiles(env: NodeJS.ProcessEnv): { readonly ledger: string; readonly 'fleet-receipt': string } {
+  return { ledger: hostConfigPaths(env).ledger, 'fleet-receipt': fleetReceiptPath(env) };
+}
+
+function keepOlderParentCopy(backupRoot: string, name: string, path: string): void {
+  if (lstatExists(path)) writeFileSync(join(backupRoot, `${name}.json`), readFileSync(path), { mode: 0o600, flag: 'wx' });
+  else writeFileSync(join(backupRoot, `${name}.absent`), '', { mode: 0o600, flag: 'wx' });
+}
+
+function readOlderParentCopy(backupRoot: string, name: string): Buffer | null {
+  const copy = join(backupRoot, `${name}.json`);
+  if (lstatExists(copy)) return readFileSync(copy);
+  if (lstatExists(join(backupRoot, `${name}.absent`))) return null;
+  throw new Error(`runtime transaction of an earlier rh version has no ${name} copy; run rh update`);
+}
+
+/**
+ * Every copy is read before the first write, so a missing copy changes no
+ * file. A file that still holds its copy's bytes is one that the run did not
+ * change (a migration can stop before it), so its entry, link and mode stay.
+ */
+function restoreOlderParentFiles(backupRoot: string, env: NodeJS.ProcessEnv): void {
+  const files = Object.entries(olderParentFiles(env)).map(([name, path]) => ({ path, bytes: readOlderParentCopy(backupRoot, `${name}-before-migration`) }));
+  for (const { path, bytes } of files) {
+    // The copy followed a link, so the comparison does too.
+    const current = lstatExists(path) ? readFileSync(path) : null;
+    if (bytes === null ? current === null : current?.equals(bytes) === true) continue;
+    if (bytes === null) rmSync(path, { force: true });
+    else publishFileByRename(path, bytes, `${path}.${randomUUID()}.tmp`);
+  }
+}
+
+/** The candidate's one-shot migrations in its parent's transaction. Under an rh 0.34.0 parent a failed migration puts the parent's files back. */
+export function migrateInParentTransaction(backupRoot: string, env: NodeJS.ProcessEnv, migrate: () => void): void {
+  if (readTransactionOwner(backupRoot) !== 'none') {
+    migrate();
+    return;
+  }
+  for (const [name, path] of Object.entries(olderParentFiles(env))) keepOlderParentCopy(backupRoot, `${name}-before-migration`, path);
+  try { migrate(); } catch (error) {
+    try { restoreOlderParentFiles(backupRoot, env); } catch (restore) { throw new AggregateError([error, restore], 'restore after a failed migration failed'); }
+    throw error;
+  }
+  keepOlderParentCopy(backupRoot, 'ledger-after-migration', hostConfigPaths(env).ledger);
+}
+
 /** Undo candidate host writes with the parent transaction's ledger snapshot. */
 export function rollbackRuntimeHostConfig(backupRoot: string, env: NodeJS.ProcessEnv): void {
   const owner = readTransactionOwner(backupRoot);
-  if (owner === 'none' || owner === 'invalid') throw new Error('runtime transaction has no valid owner; run rh update');
+  if (owner === 'invalid') throw new Error('runtime transaction has no valid owner; run rh update');
   const ledger = hostConfigPaths(env).ledger;
-  const index = owner.paths.indexOf(ledger);
-  if (index < 0) throw new Error('runtime transaction has no ledger snapshot; run rh update');
-  const backup = join(backupRoot, String(index));
-  const result = rollbackHostConfigTransaction(dirname(dirname(ledger)), lstatExists(backup) ? readFileSync(backup) : null, backupRoot);
+  let snapshot: Buffer | null;
+  if (owner === 'none') snapshot = readOlderParentCopy(backupRoot, 'ledger-after-migration');
+  else {
+    const index = owner.paths.indexOf(ledger);
+    if (index < 0) throw new Error('runtime transaction has no ledger snapshot; run rh update');
+    const backup = join(backupRoot, String(index));
+    snapshot = lstatExists(backup) ? readFileSync(backup) : null;
+  }
+  const result = rollbackHostConfigTransaction(dirname(dirname(ledger)), snapshot, backupRoot);
   if (result.unresolved.length) throw new Error('host configuration rollback unresolved: ' + result.unresolved.join(', ') + '; run rh update');
+  if (owner === 'none') restoreOlderParentFiles(backupRoot, env);
 }
 
 function removeOwnedSkillLockEntries(env: NodeJS.ProcessEnv, skillNames: ReadonlySet<string>): void {
