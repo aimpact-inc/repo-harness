@@ -1,6 +1,8 @@
 import { closeSync, openSync, readdirSync, readFileSync, readSync, realpathSync } from 'fs';
 import { join, resolve } from 'path';
-import { hcGet, RH_LABEL } from '../terminal/herdr-core';
+import { boardHostPorts, hcGet, RH_LABEL, type HcTerminal } from '../terminal/herdr-core';
+import { hcStatusClass } from '../../core/board/desk';
+import { isReviewSeat, type SeatId } from '../../core/board/seats-settings';
 import { piAgentDir } from '../pi-agent-dir';
 import { osAccountHome } from '../runtime/os-account-home';
 import { parseReviewPacket } from '../../core/board/review';
@@ -15,6 +17,28 @@ const RECEIPT_KIND = 'repo-harness-review-publish-receipt';
 export interface ReviewCollectInput extends ReviewPublishInput {
   /** The review seat's `hc` terminal address (Pi, Claude or Codex). */
   readonly seat: string;
+}
+
+/** What `collect` did with the review seat after the record published. It never turns a published record into a failure. */
+export type ReviewSeatCloseV1 =
+  | { readonly outcome: 'closed' }
+  /** `not_review_seat`, `other_pr`, `caller_terminal`, `seat_not_done`, or the hc reason of a close that failed. */
+  | { readonly outcome: 'kept'; readonly reason: string };
+
+export type ReviewCollectResult = ReviewPublishResult & { readonly seat_close: ReviewSeatCloseV1 };
+
+/**
+ * Close a done review seat of this pull request once its record is out (#3190), with the kill and remove of the board closeout.
+ * Another seat, a seat of another pull request, a seat that still works and the caller's own terminal stay open.
+ */
+function closeReviewSeat(terminal: HcTerminal, seat: string, pr: number): ReviewSeatCloseV1 {
+  if (!isReviewSeat(seat as SeatId)) return { outcome: 'kept', reason: 'not_review_seat' };
+  if (terminal.labels[RH_LABEL.pr] !== String(pr)) return { outcome: 'kept', reason: 'other_pr' };
+  if (terminal.address === process.env.HC_TERMINAL_ID) return { outcome: 'kept', reason: 'caller_terminal' };
+  const status = hcStatusClass(terminal.status?.state ?? null);
+  if (status !== 'done' && status !== 'idle') return { outcome: 'kept', reason: 'seat_not_done' };
+  const closed = boardHostPorts().closeTerminal(terminal.address);
+  return closed.status === 'closed' ? { outcome: 'closed' } : { outcome: 'kept', reason: closed.reason };
 }
 
 const invalid = (message: string) => new ReviewPublishError('review_receipt_invalid', message, 2);
@@ -136,7 +160,7 @@ function lastReceiptValue(texts: readonly string[]): unknown {
  * worktree, so one directory holds every seat and every round, and file age says nothing about either. Sessions of an earlier head
  * are not candidates; two sessions for the head, or a receipt for another head than its packet's, fail closed.
  */
-export function collectReview(input: ReviewCollectInput): ReviewPublishResult {
+export function collectReview(input: ReviewCollectInput): ReviewCollectResult {
   const terminal = hcGet(input.seat);
   const cwd = terminal.cwd;
   if (cwd == null) throw invalid('terminal ' + input.seat + ' reports no working directory');
@@ -168,5 +192,6 @@ export function collectReview(input: ReviewCollectInput): ReviewPublishResult {
   // The one session at the head reports its own error when it holds no valid receipt.
   const receipt = finished.length === 1 ? finished[0]!.receipt : parseReceipt(lastReceiptValue(atHead[0]!.assistant));
   if (receipt.subject_sha !== head) throw invalid('the receipt names ' + receipt.subject_sha + ', not the packet head ' + head);
-  return publishReceipt(input, receipt);
+  const published = publishReceipt(input, receipt);
+  return { ...published, seat_close: closeReviewSeat(terminal, seat, input.prNumber) };
 }
