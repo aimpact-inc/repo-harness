@@ -85,11 +85,18 @@ export type ReviewEffects<Session, Endpoint> = ReviewerRunner<Session, Endpoint,
 
 /** Codex and pi reach their model through magpie, so their session pins the model. */
 const usesMagpie = (harness: Harness) => harness === 'codex' || harness === 'pi';
+/** The exact cancel command of this admission: the selection the round was admitted under and this checkout. */
+function reviewCancelCommand(source: ReviewAdmissionSource): string {
+  const selection: [string, string][] = [['--repository-id', source.repository_id], ['--issue-id', source.issue_id],
+    ['--campaign-id', source.campaign_id], ['--grant-sha256', source.expectedGrantSha256],
+    ['--policy-sha256', source.expectedPolicySha256], ['--actor', source.expectedActor], ['--repo', source.repoRoot]];
+  return ['rh review cancel', ...selection.flatMap(([flag, value]) => [flag, shellQuote(value)])].join(' ');
+}
 /** The pin of a codex or pi session. A session without one was started before pinning and cannot prove its model. */
-function pinnedReviewModel(session: Pick<ReviewSession<unknown>, 'review_model'>): ReviewModelPin {
+function pinnedReviewModel(session: Pick<ReviewSession<unknown>, 'review_model'>, source: ReviewAdmissionSource): ReviewModelPin {
   const pin = session.review_model;
   if (!pin || typeof pin.model !== 'string' || !pin.model || typeof pin.effort !== 'string' || !pin.effort) {
-    throw new Error('review_model_unpinned: the session records no review model; cancel the review and start a new one');
+    throw new Error(`review_model_unpinned: the session records no review model. Run ${reviewCancelCommand(source)} to cancel it. A cancelled review stays closed for its campaign, so a restart needs a new campaign and grant: run rh review admit --request <file>, then rh review round with the new --campaign-id and --grant-sha256`);
   }
   return pin;
 }
@@ -198,7 +205,7 @@ export async function runReviewRound<Session, Endpoint>(options: ReviewOptions<E
     }
     // Codex and pi reach a model only through magpie with the placeholder key; no native credential enters the sandbox.
     const magpie = usesMagpie(session.actual_harness);
-    const reviewModel = magpie ? pinnedReviewModel(session) : undefined;
+    const reviewModel = magpie ? pinnedReviewModel(session, options.authority) : undefined;
     // Reconcile only existing positive receipts; never resend an uncertain request.
     client.recoverCompanions(taskAuthority, primary, session.task, GENERIC_REVIEW_ROLE, REVIEW_MAX_ROUNDS);
     const contextDigest = acceptanceReviewContextDigest(context);
