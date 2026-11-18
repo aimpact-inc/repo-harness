@@ -100,6 +100,8 @@ test('A9: after a user edit, uninstall removes the intact managed entries, keeps
   expect(after.hooks.Stop).toEqual([{ hooks: [{ type: 'command', command: 'user-stop-hook' }] }]);
 }));
 
+const INLINE_TOKEN = 'synthetic-inline-segment-not-a-key';
+
 test('the JSON migration adopts a tagged entry with the old writer shape, keeps its preimage and reports its refresh; another shape or a hash mismatch stays and refuses', () => {
   type Row = [kept: string | null, edit: (data: any) => void, hashed?: boolean];
   const rows: Record<string, Row> = {
@@ -107,6 +109,8 @@ test('the JSON migration adopts a tagged entry with the old writer shape, keeps 
     'an extra hook field': ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].hooks[0].async = true; }],
     'an extra entry field': ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].description = 'user note'; }],
     'a status line command edit': ['statusLine', (data) => { data.statusLine.command += '; user-status-command'; }],
+    // The tag and the suffix stay, so only an exact match against rh's rendering finds the edit (#3232).
+    'a status line inline segment': ['statusLine', (data) => { data.statusLine.command = data.statusLine.command.replace('; exec ', `; EXAMPLE_TOKEN=${INLINE_TOKEN} exec `); }],
     'a manifest hash mismatch': ['hooks.SessionStart[default], hooks.PreToolUse[edit], hooks.PreToolUse[subagent], hooks.PreToolUse[bash], hooks.UserPromptSubmit[inbox], hooks.Stop[default]', (data) => { data.hooks.PreToolUse[0].hooks[0].timeout = 99; }, true],
   };
   for (const [name, [kept, edit, hashed]] of Object.entries(rows)) withClaudeHome((home, settings) => {
@@ -123,12 +127,21 @@ test('the JSON migration adopts a tagged entry with the old writer shape, keeps 
     writeFileSync(settings, `${JSON.stringify(data, null, 2)}\n`);
     if (!kept) {
       // Adopted: the record keeps the adopted bytes as its preimage, and the install refresh names the changed field.
+      migrateJsonConfigRecords(env);
+      expect(openHostConfigGate({ env }).recorded(settings).find((entry) => entry.selector === 'statusLine')!.preimage, name).toBe(`"statusLine": ${JSON.stringify(data.statusLine, null, 2).replaceAll('\n', '\n  ')}`);
       const installed = claudeTarget.install('global', {});
       const record = openHostConfigGate({ env }).recorded(settings).find((entry) => entry.selector === 'hooks.PreToolUse[edit]')!;
       expect(record.preimage, name).toBe(JSON.stringify(data.hooks.PreToolUse[0], null, 2).replaceAll('\n', '\n      '));
       expect(installed.notes, name).toContain(`refreshed the adopted entry hooks.PreToolUse[edit] in ${settings}: timeout 99 -> 30`);
       expect(JSON.parse(readFileSync(settings, 'utf8')).hooks.PreToolUse[0], name).toEqual(hooks.PreToolUse![0]);
       return;
+    }
+    if (kept === 'statusLine') {
+      // An unproved status line gets a record with no text: ledger.json holds no copy of the edited command.
+      migrateJsonConfigRecords(env);
+      const record = openHostConfigGate({ env }).recorded(settings).find((entry) => entry.selector === 'statusLine')!;
+      expect({ inserted: record.inserted, preimage: record.preimage }, name).toEqual({ inserted: '', preimage: undefined });
+      expect(readFileSync(join(home, '.repo-harness/config/ledger.json'), 'utf8').includes(INLINE_TOKEN), name).toBe(false);
     }
     const result = runUserUninstall({ target: 'claude', env });
     expect(result.status, name).toBe('partial');
