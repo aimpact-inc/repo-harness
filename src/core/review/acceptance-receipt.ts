@@ -2,6 +2,7 @@ import type { ReviewAdmission, ReviewAuthorityContext } from './authority-contex
 import type { RequiredCheckFailureEvidenceV1 } from '../evidence/required-check-evidence';
 import type { RequiredCheckCoverageEvidenceV1 } from '../publication/required-check-coverage';
 import { canonicalize } from '../evidence/canonical-json';
+import { parseJsonText } from '../evidence/file-syntax';
 import { isRecord } from '../evidence/is-record';
 import { SHA256_PREFIXED_PATTERN } from '../evidence/sha256-pattern';
 import { sha256Prefixed } from '../evidence/sha256';
@@ -195,9 +196,9 @@ export function parseAcceptancePolicy(contractText: string): AcceptancePolicy {
   if (!section) fail('contract Acceptance Policy JSON block is missing');
   let value: unknown;
   try {
-    value = JSON.parse(section[1]);
-  } catch (error) {
-    fail(`contract Acceptance Policy is invalid JSON: ${(error as Error).message}`);
+    value = parseJsonText(section[1], null);
+  } catch {
+    fail('contract Acceptance Policy is invalid JSON');
   }
   if (!isRecord(value) || (value.protocol !== 1 && value.protocol !== 2)) fail('acceptance policy protocol must be 1 or 2');
   if (value.user_waiver !== 'allowed' && value.user_waiver !== 'forbidden') {

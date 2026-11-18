@@ -18,6 +18,7 @@ import { fileURLToPath } from "url";
 import type { EvalExecutionReport } from "../src/effects/evidence/verification-execution";
 
 import { captureEvalCatalogSource, readEvalCatalogPlan, type EvalCatalogSource } from "../src/effects/evidence/eval-catalog";
+import { parseJsonText } from "../src/core/evidence/file-syntax";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -215,7 +216,7 @@ const ARTIFACT_FILES = [
 ] as const;
 
 function readJsonFile<T>(path: string): T {
-  return JSON.parse(readFileSync(path, "utf-8")) as T;
+  return parseJsonText(readFileSync(path, "utf-8"), path) as T;
 }
 
 function ensureDir(path: string): void {

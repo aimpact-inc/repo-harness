@@ -4,6 +4,7 @@
  * read from disk and performs the quarantine write; everything here is a
  * deterministic function of its inputs so replay is provably reproducible.
  */
+import { parseJsonText } from "./file-syntax";
 import { isRecord } from "./is-record";
 import type { EvidenceEventRecord, EvidenceLogRecord, GenesisRecord, SubjectIdentity, TrustClass } from "./types";
 import { SHA256_PREFIXED_PATTERN } from './sha256-pattern';
@@ -81,9 +82,9 @@ export function parseLogLine(line: string): ParsedLogLine {
   }
   let value: unknown;
   try {
-    value = JSON.parse(line);
-  } catch (error) {
-    return { ok: false, error: `invalid JSON: ${error instanceof Error ? error.message : String(error)}` };
+    value = parseJsonText(line, null);
+  } catch {
+    return { ok: false, error: "invalid JSON" };
   }
   if (isValidGenesis(value)) return { ok: true, record: value };
   if (isValidEvidenceEvent(value)) return { ok: true, record: value };

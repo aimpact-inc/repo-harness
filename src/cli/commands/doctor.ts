@@ -21,6 +21,7 @@ import { probeInstalledPi } from '../../effects/pi-host-probe';
 import { piAgentDir } from '../../effects/pi-agent-dir';
 
 import * as fs from 'fs';
+import { parseJsonText } from '../../core/evidence/file-syntax';
 import * as os from 'os';
 import * as path from 'path';
 import { spawnSync } from 'child_process';
@@ -508,7 +509,7 @@ export function checkSkillProjection(target: DoctorTarget = 'both', env: NodeJS.
     const pathRecords = installed ? readPathRecords(env) : {};
     const sourceRoot = skillProjectionSourceRoot(env);
     const contractPath = path.join(sourceRoot, 'assets', 'workflow-contract.v1.json');
-    const contract = JSON.parse(fs.readFileSync(contractPath, 'utf8'));
+    const contract = parseJsonText(fs.readFileSync(contractPath, 'utf8'), contractPath) as Record<string, unknown>;
     for (const field of ['installedCopyExcludes', 'installedCopyIncludes']) {
       if (sourceRoot !== PACKAGE_ROOT && contract[field] === undefined) {
         return { id, describe, status: 'warn', detail: `global package contract at ${contractPath} lacks ${field}; run: rh update; then run: rh upgrade` };

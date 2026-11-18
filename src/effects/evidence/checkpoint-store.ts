@@ -54,6 +54,7 @@ import { readAcceptedEvents } from "./event-log";
 import { resolveBlobsDir, resolveLogPath } from "./paths";
 import type { EvidenceEventRecord } from "../../core/evidence/types";
 import { isRecord } from "../../core/evidence/is-record";
+import { parseJsonText } from "../../core/evidence/file-syntax";
 import { readCheckpointSnapshot } from "./checkpoint-snapshot";
 import { acquireExclusiveDirectoryLock } from "../locking/exclusive-directory-lock";
 import { sha256Hex } from "../../core/evidence/sha256";
@@ -288,12 +289,12 @@ function validateStagedCheckpoint(
 ): ValidationResult {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(machineJsonText);
+    parsed = parseJsonText(machineJsonText, null);
   } catch (error) {
     return {
       ok: false,
       reason: "machine-json-unparseable",
-      detail: error instanceof Error ? error.message : String(error),
+      detail: (error as Error).message,
     };
   }
   if (!isSchemaCompleteCheckpoint(parsed)) {
@@ -463,12 +464,13 @@ export function readDecisionPayload(repoRoot: string, event: EvidenceEventRecord
   if (!digest || !/^[0-9a-f]{64}$/.test(digest) || event.content_type !== "application/json") {
     throw new Error(`invalid decision blob reference: ${event.event_id}`);
   }
-  const bytes = readFileSync(join(resolveBlobsDir(repoRoot), digest));
+  const path = join(resolveBlobsDir(repoRoot), digest);
+  const bytes = readFileSync(path);
   if (sha256Hex(bytes) !== digest
     || event.payload_hash !== `sha256:${digest}` || event.blob_bytes !== bytes.length) {
     throw new Error(`decision blob integrity check failed: ${event.event_id}`);
   }
-  return JSON.parse(bytes.toString("utf8"));
+  return parseJsonText(bytes.toString("utf8"), path);
 }
 
 /** Publish the accepted set through the validated checkpoint transaction. */
@@ -525,12 +527,9 @@ export function resolveLastPublishedCheckpoint(repoRoot: string): ResolveLastPub
     markerText => {
       let marker: unknown;
       try {
-        marker = JSON.parse(markerText);
-      } catch (error) {
-        throw new CheckpointResolutionError(
-          "marker-malformed",
-          `checkpoint marker at ${CHECKPOINT_MARKER_RELATIVE} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        marker = parseJsonText(markerText, CHECKPOINT_MARKER_RELATIVE);
+      } catch {
+        throw new CheckpointResolutionError("marker-malformed", `checkpoint marker at ${CHECKPOINT_MARKER_RELATIVE} is not valid JSON`);
       }
       if (
         !isRecord(marker) ||

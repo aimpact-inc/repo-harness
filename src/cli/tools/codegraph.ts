@@ -1,7 +1,7 @@
 import { migrateCodexConfigRecords } from '../installer/codex-config-migration';
 import { migrateInstallState } from '../installer/install-state-migration';
 import { migrateJsonConfigRecords } from '../installer/json-config-migration';
-import { CODEX_CONFIG_FRAGMENTS, codexConfigFragment, codexConfigValue, tomlFragment } from '../../core/host-config/toml-fragment';
+import { CODEX_CONFIG_FRAGMENTS, codexConfigFragment, codexConfigValue, namingTomlFile, tomlFragment } from '../../core/host-config/toml-fragment';
 import { CLAUDE_ROOT_CONFIG_BACKUP, CODEGRAPH_MCP_SELECTOR, CODEGRAPH_PERMISSION_RULE, CODEGRAPH_PERMISSION_SELECTOR, LEGACY_CODEGRAPH_ALLOWED_TOOLS_SELECTOR } from '../../core/host-config/claude-config';
 import { jsonFragment } from '../../core/host-config/json-fragment';
 import { openHostConfigGate } from '../../effects/host-config/gate';
@@ -320,7 +320,9 @@ function configureCodexMcp(actions: CodegraphAction[], binPath: string, repoRoot
   try {
     const section = scopedCodexSection(printed.stdout);
     const content = existsSync(path) ? readFileSync(path, "utf8") : "";
-    const kind = codexConfigFragment(content, CODEX_MCP_SELECTOR) === null ? "add" : "refresh";
+    let existing: string | null;
+    try { existing = codexConfigFragment(content, CODEX_MCP_SELECTOR); } catch (error) { throw namingTomlFile(path, error); }
+    const kind = existing === null ? "add" : "refresh";
     const result = openHostConfigGate({ env: { ...process.env, ...env } }).apply([{
       path,
       fragments: [{ owner: CODEX_CONFIG_FRAGMENTS[CODEX_MCP_SELECTOR], selector: CODEX_MCP_SELECTOR, kind, strategy: tomlFragment, value: section }],

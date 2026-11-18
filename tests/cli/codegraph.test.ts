@@ -148,6 +148,14 @@ test('standalone CodeGraph configure writes the Codex table through the gate, an
     const uninstalled = spawnSync('bun', [CLI, 'uninstall', '--target', 'codex', '--json'], { cwd: ROOT, env, encoding: 'utf8' });
     expect(uninstalled.status, uninstalled.stdout + uninstalled.stderr).toBe(0);
     expect(readFileSync(join(fixture.home, '.codex/config.toml'), 'utf8')).toBe('model = "user-model"\n');
+    // A config.toml that does not parse is named with the remedy; its text never reaches the output, and its bytes stay (I1).
+    const broken = 'k = sk-FAKE-SECRET-12345\n';
+    writeFileSync(join(fixture.home, '.codex/config.toml'), broken);
+    const refused = spawnSync('bun', [CLI, 'arch', 'codegraph', 'configure', '--target', 'codex', '--location', 'global', '--json', '--repo', ROOT], { cwd: ROOT, env, encoding: 'utf8' });
+    expect(JSON.parse(refused.stdout).actions).toMatchObject([{ action: 'configure-codex', status: 'failed',
+      stderr: `${join(fixture.home, '.codex/config.toml')}: the file is not valid TOML. Fix the TOML in that file, then run the command again` }]);
+    expect(`${refused.stdout}${refused.stderr}`).not.toContain('sk-FAKE');
+    expect(readFileSync(join(fixture.home, '.codex/config.toml'), 'utf8')).toBe(broken);
   } finally { rmSync(fixture.root, { recursive: true, force: true }); }
 }, 15000);
 

@@ -3,6 +3,7 @@ import { realpathSync } from 'node:fs';
 import { isAbsolute, relative } from 'node:path';
 import { observationReadFileSync as readFileSync } from '../readonly-observation';
 import { canonicalize } from '../../core/evidence/canonical-json';
+import { parseJsonText } from '../../core/evidence/file-syntax';
 import type { JsonValue } from '../../core/evidence/types';
 import { validateVerificationPlan, type VerificationPlan } from '../../core/evidence/verification-plan';
 
@@ -20,8 +21,8 @@ function object(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`invalid eval catalog ${label}`);
   return value as Record<string, unknown>;
 }
-function entryFromBytes(bytes: Buffer, id: string): Record<string, unknown> {
-  const manifest = object(JSON.parse(bytes.toString('utf8')), 'manifest');
+function entryFromBytes(bytes: Buffer, path: string, id: string): Record<string, unknown> {
+  const manifest = object(parseJsonText(bytes.toString('utf8'), path), 'manifest');
   if (manifest.skill_name !== 'repo-harness' || !Array.isArray(manifest.evals)) throw new Error('invalid eval catalog manifest');
   const entries = manifest.evals.map(value => object(value, 'entry'));
   const selected = entries.filter(entry => String(entry.id) === id);
@@ -38,7 +39,7 @@ export function captureEvalCatalogSource<T extends { readonly id: number }>(path
   const catalog_path = realpathSync(path);
   const bytes = readFileSync(catalog_path);
   const eval_id = String(selected.id);
-  const entry = entryFromBytes(bytes, eval_id);
+  const entry = entryFromBytes(bytes, catalog_path, eval_id);
   const eval_sha256 = entryDigest(entry);
   if (eval_sha256 !== entryDigest(selected)) throw new Error('eval catalog changed during selection');
   return Object.freeze({ catalog_path, catalog_sha256: sha256Prefixed(bytes), eval_id, eval_sha256 });
@@ -92,7 +93,7 @@ export function readEvalCatalogPlan(repoRoot: string, source: EvalCatalogSource)
   if (path !== source.catalog_path) throw new Error('eval catalog location changed');
   const bytes = readFileSync(path);
   if (sha256Prefixed(bytes) !== source.catalog_sha256) throw new Error('eval catalog changed');
-  const entry = entryFromBytes(bytes, source.eval_id);
+  const entry = entryFromBytes(bytes, path, source.eval_id);
   if (entryDigest(entry) !== source.eval_sha256) throw new Error('eval catalog entry changed');
   return planForEntry(entry);
 }

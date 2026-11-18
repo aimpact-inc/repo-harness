@@ -1,4 +1,5 @@
 import { requireHome } from "../../effects/repo-harness-home";
+import { parseJsonText } from "../../core/evidence/file-syntax";
 import { syncInstalledSkillCopies } from "../installer/skill-sync";
 import { openHostConfigGate } from "../../effects/host-config/gate";
 import { configureRequiredHerdrSkill } from "./herdr-skill";
@@ -422,7 +423,8 @@ interface ManagedRuntimeReadback {
 }
 
 export function readPackageManifest(packageRoot: string): PackageManifest {
-  return JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf-8")) as PackageManifest;
+  const path = join(packageRoot, "package.json");
+  return parseJsonText(readFileSync(path, "utf-8"), path) as PackageManifest;
 }
 
 export function recordValue(value: unknown): Record<string, unknown> {

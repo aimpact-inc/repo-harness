@@ -23,10 +23,10 @@ export const readbackDirectory = (env: NodeJS.ProcessEnv): string => join(repoHa
 
 export async function readbackDiagram(
   text: string,
-  options: { readonly env: NodeJS.ProcessEnv; readonly signal: AbortSignal; readonly render?: (options: RenderPassOptions) => Promise<RenderPassResult> },
+  options: { readonly label: string; readonly env: NodeJS.ProcessEnv; readonly signal: AbortSignal; readonly render?: (options: RenderPassOptions) => Promise<RenderPassResult> },
 ): Promise<DiagramReadback> {
   // The same source validation as the docs page: syntax, depth and remote icon addresses.
-  const source = diagramSourceIssues(text);
+  const source = diagramSourceIssues(text, options.label);
   if (source.issues.length > 0) return { ok: false, status: 'invalid', issues: source.issues };
   const document = source.document;
   const capability = probeRenderCapability(options.env);

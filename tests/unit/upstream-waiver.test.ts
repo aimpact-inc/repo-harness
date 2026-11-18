@@ -87,6 +87,12 @@ test('grant-waiver CLI requires the separate upstream request and consumes its e
     process.chdir(f.root);
     await expect(runAcceptanceReceiptCli(args, { authorityHome: f.home, admissionSource: () => f.seeded.source })).rejects.toThrow('--authorization is required');
     expect(existsSync(f.path)).toBe(false);
+    // A request that does not parse is named by its path, and its text never reaches the error (I1).
+    const broken = join(f.root, 'broken-request.json');
+    writeFileSync(broken, '{"protocol": sk_FAKE_WAIVER_12345}');
+    const refused = await runAcceptanceReceiptCli([...args, '--authorization', broken], { authorityHome: f.home, admissionSource: () => f.seeded.source }).catch((error: Error) => error);
+    expect((refused as Error).message).toBe(`${broken}: the file is not valid JSON`);
+    expect(existsSync(f.path)).toBe(false);
     expect(await runAcceptanceReceiptCli([...args, '--authorization', request], {
       authorityHome: f.home, admissionSource: () => f.seeded.source,
     })).toBe(0);

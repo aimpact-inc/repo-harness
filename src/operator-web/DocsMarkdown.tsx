@@ -152,7 +152,7 @@ function DiagramBlock({ source, validate, t }: {
   useEffect(() => {
     let live = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const own = diagramSourceIssues(source);
+    const own = diagramSourceIssues(source, null);
     const done = (check: DiagramCheck) => {
       if (!live) return;
       setChecked({ source, check });

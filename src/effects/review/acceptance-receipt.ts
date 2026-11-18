@@ -53,6 +53,7 @@ import {
   type UserWaiverGrant,
 } from '../../core/review/acceptance-receipt';
 import { isRecord } from '../../core/evidence/is-record';
+import { parseJsonText } from '../../core/evidence/file-syntax';
 import { SHA256_PREFIXED_PATTERN } from '../../core/evidence/sha256-pattern';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import {
@@ -126,7 +127,7 @@ function verifyReviewResult(root: string, authorityHome: string, receipt: Accept
   assertReviewFields(receipt); if (receipt.disposition === 'user_waiver') return;
   const path = reviewResultPath(root, authorityHome);
   const stat = lstatSync(path); if (!stat.isFile() || stat.isSymbolicLink()) fail('generic-review result authority is unsafe');
-  const review = validateDomainReview(JSON.parse(readFileSync(path,'utf8')));
+  const review = validateDomainReview(parseJsonText(readFileSync(path,'utf8'), path));
   for (const field of ['request_id','context_sha256','actual_harness','actual_role','actual_model'] as const) {
     if (receipt[field] !== review[field]) fail(`AcceptanceReceipt generic-review ${field} mismatch`);
   }
@@ -221,10 +222,10 @@ export function inspectAcceptanceEvidence(args: {
   return { fingerprint: sha256Prefixed(stableJson({ execution: { ...report, target, results }, change_assessment: assessmentBasis, benchmark })), benchmark };
 }
 
-function normalizedVerificationEvidence(content: string, subject: ReviewSubject, root: string,
+function normalizedVerificationEvidence(verification: { path: string; content: string }, subject: ReviewSubject, root: string,
   authority: ReviewAdmissionSource): AcceptanceEvidence {
   let report: unknown;
-  try { report = JSON.parse(content); } catch (error) { fail('verification evidence is invalid JSON: ' + (error as Error).message); }
+  try { report = parseJsonText(verification.content, verification.path); } catch (error) { fail('verification evidence is invalid JSON: ' + (error as Error).message); }
   const execution = requireFromHelper(join(PACKAGE_ROOT, 'src/effects/evidence/verification-execution.ts')) as typeof import('../evidence/verification-execution');
   const current = execution.evaluateAdmittedVerification({ repoRoot: root, authority });
   if (!current.passed) fail('verification evidence is stale: current passing evaluation is unavailable');
@@ -380,8 +381,8 @@ export async function acceptanceContext(args: {
   const root = realpathSync(args.root), active = currentAdmission(root, args.authority), admission = active.admission;
   const verification = verificationReportFile(root, args.verification);
   const subject = currentSubject(root, args.targetRef, args.targetRevision);
-  const evidence = normalizedVerificationEvidence(verification.content, subject, root, args.authority);
-  const report = JSON.parse(verification.content);
+  const evidence = normalizedVerificationEvidence(verification, subject, root, args.authority);
+  const report = parseJsonText(verification.content, verification.path) as { target: { plan_hash: string; snapshot_hash: string } };
   const authorityContext = bindReviewAdmission(admission, {
     subject: { status: 'ok', scope: subject.scope, target_ref: subject.target_ref, target_rev: subject.target_rev,
       head_rev: subject.head_rev, review_subject_sha256: subject.review_subject_sha256 },
@@ -666,7 +667,8 @@ export function inspectAcceptanceCurrentBinding(args: {
   const base = diff.resolvePolicyReviewBase(root);
   if (!base.ok || base.targetRef !== receipt.target_ref) fail('AcceptanceReceipt target ref is stale against workflow policy');
   if (args.evidence.fingerprint !== receipt.verification_evidence_sha256 || args.evidence.benchmark !== receipt.benchmark_evidence_sha256) fail('AcceptanceReceipt verification evidence is stale');
-  const report = JSON.parse(verificationReportFile(root, receipt.verification_file).content);
+  const verification = verificationReportFile(root, receipt.verification_file);
+  const report = parseJsonText(verification.content, verification.path) as { target: { plan_hash: string; snapshot_hash: string } };
   const context = bindReviewAdmission(active.admission, {
     subject: { status: 'ok', scope: subject.scope, target_ref: subject.target_ref, target_rev: subject.target_rev, head_rev: subject.head_rev, review_subject_sha256: subject.review_subject_sha256 },
     verification: { plan_sha256: report.target.plan_hash, source_sha256: report.target.snapshot_hash, // The validated snapshot SHA256 binds the Git tree OID; the OID itself may be SHA1.
@@ -821,7 +823,7 @@ export async function runAcceptanceReceiptCli(argv: string[], opts: Options = {}
       authority,
       actor: option(argv, '--actor')!,
       summary: option(argv, '--summary')!,
-      authorization: JSON.parse(readFileSync(resolve(root, option(argv, '--authorization')!), 'utf8')),
+      authorization: parseJsonText(readFileSync(resolve(root, option(argv, '--authorization')!), 'utf8'), option(argv, '--authorization')!),
       now: opts.now,
     });
     console.log(JSON.stringify(grant));
@@ -861,7 +863,7 @@ export async function runAcceptanceReceiptCli(argv: string[], opts: Options = {}
     const reviewResultFile = option(argv, '--review-result')!;
     if (!lstatSync(reviewResultFile).isFile() || lstatSync(reviewResultFile).isSymbolicLink()) fail('--review-result must be a regular file');
     const receipt = await recordAcceptance({
-      reviewResult: validateDomainReview(JSON.parse(readFileSync(reviewResultFile,'utf8'))),
+      reviewResult: validateDomainReview(parseJsonText(readFileSync(reviewResultFile,'utf8'), reviewResultFile)),
       root,
       authorityHome,
       authority,
