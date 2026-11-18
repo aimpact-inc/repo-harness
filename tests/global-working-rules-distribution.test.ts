@@ -223,7 +223,8 @@ describe("global working rules distribution", () => {
     expect(inspectGlobalContext(content, ROOT).state).toBe("managed-stale");
     expect(planGlobalRulesAdoption(content, ROOT)).toBeNull();
     // A released block needs no template: a missing package root still proves it.
-    expect(planGlobalRulesAdoption(zhBlock(), join(ROOT, "missing-package-root"))).toMatchObject({ kind: "created", backup: null });
+    const released = readFileSync(join(ROOT, "tests/fixtures/global-rules/released-v0.23.1-en.md"), "utf-8");
+    expect(planGlobalRulesAdoption(released, join(ROOT, "missing-package-root"))).toMatchObject({ kind: "created", backup: null });
     const crlf = `user content\r\n\r\n${zhBlock().replace(/\n/g, "\r\n")}`;
     const removal = removeMarkedBlock(crlf, "global-working-rules");
     expect(crlf.slice(0, removal.at) + crlf.slice(removal.at + removal.removed.length)).toBe("user content\r\n");
