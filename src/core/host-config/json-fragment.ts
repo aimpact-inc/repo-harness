@@ -294,6 +294,14 @@ export interface CreatedContainerRecord {
   readonly created?: string;
 }
 
+/** Takes one item out of a container with its separator; the sole item leaves the container empty. */
+function removeItem(content: string, container: Container, index: number): FragmentEdit {
+  const all = items(container);
+  if (all.length === 1) return { at: container.start + 1, removed: content.slice(container.start + 1, container.end - 1), inserted: '' };
+  const [start, end] = index < all.length - 1 ? [all[index]!.start, all[index + 1]!.start] : [all[index - 1]!.end, all[index]!.end];
+  return { at: start, removed: content.slice(start, end), inserted: '' };
+}
+
 /**
  * Takes the fragment out with its separator. A container that the removal
  * empties goes too, but only when a record proves that rh's insert created
@@ -303,15 +311,47 @@ export function removeJsonFragment(content: string, selector: string, records: r
   const located = find(content, selector);
   if (!located) return { at: 0, removed: '', inserted: '' };
   const { container, index, parentPath } = located;
-  const all = items(container);
-  if (all.length === 1) {
+  if (items(container).length === 1) {
     const created = parentPath.length > 0 && records.some((record) => record.created !== undefined
       && isPrefix(record.created.split('.'), parentPath) && isPrefix(parentPath, containerPath(record.selector)));
     if (created) return removeJsonFragment(content, parentPath.join('.'), records);
-    return { at: container.start + 1, removed: content.slice(container.start + 1, container.end - 1), inserted: '' };
   }
-  const [start, end] = index < all.length - 1 ? [all[index]!.start, all[index + 1]!.start] : [all[index - 1]!.end, all[index]!.end];
-  return { at: start, removed: content.slice(start, end), inserted: '' };
+  return removeItem(content, container, index);
+}
+
+/** One command of a hook file: `hooks.<event>[block].hooks[index]`, and the command text that it holds. */
+export interface HookCommandPosition {
+  readonly event: string;
+  readonly block: number;
+  readonly index: number;
+  readonly command: string;
+}
+
+/**
+ * Takes one command out of a hook entry with its separator. The hook entry,
+ * the event array and the `hooks` object go too when this removal empties
+ * them; a container that was empty before is not touched. The position must
+ * hold the command, because each removal moves the positions after it.
+ */
+export function removeJsonHookCommand(content: string, position: HookCommandPosition): FragmentEdit {
+  const { event, block, index, command } = position;
+  const missing = () => invalid(`hooks.${event}[${block}].hooks[${index}] does not hold the planned command; rh writes nothing`);
+  const document = root(content);
+  const hooks = document && memberNode(document, 'hooks');
+  const blocks = hooks && memberNode(hooks.value, event);
+  const entry = blocks?.value.type === 'array' ? blocks.value.elements[block] : undefined;
+  const commands = entry && memberNode(entry, 'hooks');
+  const target = commands?.value.type === 'array' ? commands.value.elements[index] : undefined;
+  if (!target || (JSON.parse(content.slice(target.start, target.end)) as { command?: unknown } | null)?.command !== command) throw missing();
+  // Innermost first: the first container that keeps another item takes the removal.
+  const levels: [Container, number][] = [
+    [commands!.value as Container, index],
+    [blocks!.value as Container, block],
+    [hooks!.value as Container, (hooks!.value as Extract<JsonNode, { type: 'object' }>).members.indexOf(blocks!)],
+    [document!, document!.members.indexOf(hooks!)],
+  ];
+  const [container, at] = levels.find(([candidate]) => items(candidate).length > 1) ?? levels.at(-1)!;
+  return removeItem(content, container, at);
 }
 
 export function jsonDocumentIsEmpty(content: string): boolean {

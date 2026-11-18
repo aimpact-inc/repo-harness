@@ -207,6 +207,15 @@ export interface HostConfigGate {
    * already has a record keeps it (`recorded`), so a migration can run again.
    */
   adopt(path: string, adoption: HostConfigAdoption): 'adopted' | 'recorded';
+  /**
+   * Take out text that no fragment record names (a hook entry that an earlier
+   * rh version wrote) from a file that hashes to `expectedSha256`. Each removal
+   * gets the content after the removals before it and must return a pure
+   * deletion of text in it. The file before goes to the vault as the record's
+   * `external_backup`, and no fragment record is added: a revert never puts
+   * the removed text back. False when the removals change nothing.
+   */
+  removeUnrecordedText(path: string, expectedSha256: Sha256, removals: readonly ((content: string) => FragmentEdit)[]): boolean;
   /** The fragment records of one path, its links followed. */
   recorded(path: string): readonly FragmentRecord[];
 }
@@ -770,6 +779,47 @@ function adoptFile(paths: HostConfigPaths, target: string, adoption: HostConfigA
   return 'adopted';
 }
 
+/**
+ * A file with no record gets `text_block` with an unknown baseline and no
+ * backup, so a revert releases it. A recorded file keeps its backup, which
+ * may still hold the removed text, so it is marked `external_change` and a
+ * revert takes out rh's fragments one by one instead of restoring that backup.
+ */
+function removeUnrecordedText(paths: HostConfigPaths, target: string, expectedSha256: Sha256, removals: readonly ((content: string) => FragmentEdit)[]): boolean {
+  const [path] = admitPaths(paths, [target]) as [HostPath];
+  const ledger = readLedger(paths);
+  refuseRecordedPaths(ledger, [path]);
+  const { observation, bytes } = observeFile(path);
+  const preimage = expectedOf(observation, path);
+  if (!preimage.existed || preimage.sha256 !== expectedSha256) {
+    throw new HostConfigError('host_config_invalid_state', `the file changed since rh planned its removal, so rh writes nothing to it: ${path}`);
+  }
+  const content = decode(bytes, path);
+  let result = content;
+  for (const removal of removals) {
+    const edit = removal(result);
+    if (edit.inserted !== '' || result.slice(edit.at, edit.at + edit.removed.length) !== edit.removed) {
+      throw new HostConfigError('host_config_invalid_state', `a removal must only take out text that is in the file, so rh writes nothing to it: ${path}`);
+    }
+    result = result.slice(0, edit.at) + result.slice(edit.at + edit.removed.length);
+  }
+  if (result === content) return false;
+  const written = Buffer.from(result, 'utf8');
+  const committed: FileCommitted = { type: 'file', sha256: sha256Prefixed(written) };
+  const external_backup = putVault(paths, bytes!);
+  const previous = ledger.files[path];
+  const record: FileRecord = previous ? { ...previous, committed, external_backup, external_change: true }
+    : { kind: 'text_block', baseline: { state: 'unknown' }, committed, backup: null, external_backup, external_change: false };
+  writeLedger(paths, { ...ledger, files: { ...ledger.files, [path]: record } });
+  try {
+    replaceTarget(path, written, preimage);
+  } catch (error) {
+    writeLedger(paths, ledger);
+    throw error;
+  }
+  return true;
+}
+
 /** The entries that a transaction rollback could not prove, as `<path>: <selector>`. */
 export interface HostConfigRollbackResult {
   readonly unresolved: readonly string[];
@@ -896,6 +946,7 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
     adoptReplacedPath: (path, owner, backup) => adoptReplacedPath(env, paths, path, owner, backup),
     revert: (only, revertOptions) => revertFiles(paths, only, revertOptions ?? {}),
     adopt: (path, adoption) => adoptFile(paths, path, adoption),
+    removeUnrecordedText: (path, expectedSha256, removals) => removeUnrecordedText(paths, path, expectedSha256, removals),
     recorded: (path) => {
       const resolved = resolveHostPath(paths, path);
       return readLedger(paths).fragments.filter((entry) => entry.file === resolved);

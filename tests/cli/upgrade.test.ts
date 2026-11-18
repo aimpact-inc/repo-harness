@@ -210,12 +210,17 @@ describe('upgrade with real release bytes', () => {
       `bash "${shim}"`,
       'repo-harness hook Stop --route user',
     ];
+    // The user's own layout: a tab or four-space indent, and a member with its own spacing.
+    const layout = (indent: string, value: Record<string, unknown>) => `{\n${indent}"custom" :  [1,2],${JSON.stringify(value, null, indent).slice(1)}`;
+    const indents: Record<string, string> = { '.claude/settings.json': '\t', '.codex/hooks.json': '    ' };
+    const before: Record<string, string> = {};
     for (const name of ['.claude/settings.json', '.codex/hooks.json']) {
       const path = join(opts.home, name);
       const settings = JSON.parse(readFileSync(path, 'utf8'));
       const userHooks = userCommands.map((command) => ({ type: 'command', command }));
       settings.hooks.Stop = [{ matcher: 'user', hooks: [...userHooks, { type: 'command', command: shim }] }];
-      writeFileSync(path, JSON.stringify(settings));
+      before[name] = layout(indents[name]!, settings);
+      writeFileSync(path, before[name]);
     }
     const plan = planLegacyLeftovers({ ...opts, scope: 'global', installOwnership: ownership(opts) });
     expect(plan.items.filter((item) => userCommands.includes(item.hookCommand!))).toEqual([]);
@@ -223,13 +228,30 @@ describe('upgrade with real release bytes', () => {
     expect(plan.items.some((item) => item.hookEvent === 'SessionStart')).toBe(true);
     const result = runUpgrade({ ...opts, scope: 'global', apply: true });
     expect(result.exitCode).toBe(0);
+    const sha = (text: string) => `sha256:${new Bun.CryptoHasher('sha256').update(text).digest('hex')}`;
+    const ledger = JSON.parse(readFileSync(join(opts.home, '.repo-harness/config/ledger.json'), 'utf8'));
     for (const name of ['.claude/settings.json', '.codex/hooks.json']) {
-      const settings = JSON.parse(readFileSync(join(opts.home, name), 'utf8'));
+      const after = readFileSync(join(opts.home, name), 'utf8');
+      const settings = JSON.parse(after);
       expect(settings.hooks.Stop).toEqual([{
         matcher: 'user', hooks: userCommands.map((command) => ({ type: 'command', command })),
       }]);
       expect(settings.hooks.SessionStart).toBeUndefined();
+      // Text edits: only the legacy commands and the containers that they emptied go.
+      const { custom: _custom, ...rest } = settings;
+      expect(after).toBe(layout(indents[name]!, rest));
+      expect(ledger.files[join(opts.home, name)]).toEqual({ kind: 'text_block', baseline: { state: 'unknown' }, committed: { type: 'file', sha256: sha(after) },
+        backup: null, external_backup: sha(before[name]!), external_change: false });
     }
+    expect(ledger.fragments).toEqual([]);
+
+    // A repository hook file gets the same text edits, outside the gate.
+    const project = join(opts.cwd, '.claude/settings.json');
+    const legacy = JSON.parse(readFileSync(project, 'utf8')).hooks.Stop[0].hooks[0];
+    const user = { type: 'command', command: 'echo project user' };
+    writeFileSync(project, layout('\t', { hooks: { Stop: [{ hooks: [legacy, user] }], Empty: [] } }));
+    expect(runUpgrade({ ...opts, scope: 'project', apply: true }).exitCode).toBe(0);
+    expect(readFileSync(project, 'utf8')).toBe(layout('\t', { hooks: { Stop: [{ hooks: [user] }], Empty: [] } }));
   }));
 
   test('the cleanup audit log keeps only the newest records', () => sandbox((opts) => {
@@ -594,6 +616,14 @@ describe('upgrade with real release bytes', () => {
     expect(result.exitCode).toBe(0);
     const after = readFileSync(path, 'utf8'); expect(after).toContain(current); expect(after).toContain(user);
     expect(after).not.toContain('repo-harness hook SessionStart');
+
+    // A repeated event key: the text edits cannot place the removal, so the file is reported and keeps its bytes.
+    const repeated = '{"hooks":{"Stop":[],"Stop":[{"hooks":[{"command":"repo-harness hook Stop --route quality"}]}]}}';
+    writeFileSync(path, repeated);
+    const ledger = readFileSync(join(opts.home, '.repo-harness/config/ledger.json'), 'utf8');
+    const reported = runUpgrade({ ...opts, scope: 'global', apply: true });
+    expect(reported.items.filter((item) => item.path === path)).toEqual([expect.objectContaining({ action: 'report', reason: 'Invalid hook settings; preserve current bytes.' })]);
+    expect({ file: readFileSync(path, 'utf8'), ledger: readFileSync(join(opts.home, '.repo-harness/config/ledger.json'), 'utf8') }).toEqual({ file: repeated, ledger });
   }, false));
 
   test('unrecorded historical copies are reported and both clean and edited bytes stay', () => sandbox((opts) => {

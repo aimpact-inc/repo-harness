@@ -9,8 +9,10 @@ import {
   isLegacyPathSafe,
   hashUpgradeSource,
   legacyPathSnapshot,
+  hookFileRemovals,
+  hookLocation,
   planLegacyLeftovers,
-  stripLegacyHookEntries,
+  removeLegacyHookCommands,
   type LeftoverItem,
 } from '../../effects/upgrade/legacy-inventory';
 import {
@@ -55,6 +57,7 @@ import {
 } from '../installer/install-state';
 import { globalRuntimeScope, withRuntimeTransactionLock, type RuntimeTransactionContext } from '../../effects/locking/runtime-transaction-lock';
 import { atomicWriteFileSync, formatJson } from '../installer/shared';
+import { removeJsonHookCommand, type HookCommandPosition } from '../../core/host-config/json-fragment';
 import { redactProcessOutput } from '../../effects/process-runner';
 import { gitExecFileSync } from '../../effects/git/runner';
 import { formatRegisteredUpgradeResult, runRegisteredUpgrade } from './upgrade-registered';
@@ -357,12 +360,16 @@ function applyLocked(
         directoryRefresh = lstatSync(targetItems[0]!.sourcePath!).isDirectory();
         if (!directoryRefresh) nextContent = readFileSync(targetItems[0]!.sourcePath!, 'utf-8');
       }
+      // A global hook file is a gate file: the gate removes the legacy commands and records the file.
+      let gateRemovals: readonly HookCommandPosition[] | undefined;
       if (targetItems[0]!.surface === 'hook-entry') {
-        const config = JSON.parse(readFileSync(path, 'utf-8')) as unknown;
+        const content = readFileSync(path, 'utf-8');
         const location = targetItems[0]!.location;
-        const stripped = stripLegacyHookEntries(config, location === 'global' ? { location, home: options.home, repoHarnessHome: options.repoHarnessHome } : { location });
-        if (stripped.removed.length === 0) continue;
-        nextContent = formatJson(stripped.config);
+        const removals = hookFileRemovals(content, hookLocation(location, options));
+        if (removals === null) throw new Error(`hook settings can no longer be edited: ${path}`);
+        if (removals.length === 0) continue;
+        if (location === 'global') gateRemovals = removals;
+        else nextContent = removeLegacyHookCommands(content, removals);
       }
       // Check the full target snapshot immediately before the destructive write.
       if (!targetItems.every((item) => unchanged(item, options))
@@ -380,6 +387,11 @@ function applyLocked(
           for (const item of targetItems) items[items.indexOf(item)] = { ...item, action: 'report', reason: 'Source or target changed during staging.' };
           continue;
         }
+      } else if (gateRemovals) {
+        mutatedPaths.add(path);
+        mutatedPaths.add(ledgerPath);
+        openHostConfigGate({ env }).removeUnrecordedText(path, targetItems[0]!.expectedContentHash!,
+          gateRemovals.map((position) => (content: string) => removeJsonHookCommand(content, position)));
       } else {
         mutatedPaths.add(path);
         if (nextContent === undefined) rmSync(path, { recursive: true });
