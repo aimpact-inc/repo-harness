@@ -109,8 +109,12 @@ export interface FragmentRecord {
   readonly preimage?: string;
 }
 
-/** The host root that a path record lives under, from the path before links are followed: an uninstall selects by it. */
-export type PathRecordHost = 'claude' | 'codex' | 'pi' | 'staged' | 'bin';
+/**
+ * The host root that a path record lives under, from the path before links are
+ * followed: an uninstall selects by it. `repository`: a file that `rh init`
+ * writes in a worktree outside `.claude/` and `.codex/` (#2903).
+ */
+export type PathRecordHost = 'claude' | 'codex' | 'pi' | 'staged' | 'bin' | 'repository';
 
 /**
  * `created`: an install wrote the whole path and an uninstall removes it while

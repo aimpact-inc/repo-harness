@@ -128,6 +128,8 @@ function hostRoots(env: NodeJS.ProcessEnv, host: PathRecordHost): readonly strin
   if (host === 'pi') return [hostSkillRoot(home, 'pi', env)];
   if (host === 'staged') return [join(stagedSkillRoot(home), '..')];
   if (host === 'bin') return [env.BUN_INSTALL ?? join(home, '.bun')];
+  // A repository record lives in a worktree, never under a host root of the user.
+  if (host === 'repository') return [];
   const sync = syncSkillRoots(env, home, ['pi'])[host];
   return [...new Set([join(home, '.' + host), ...(sync ? [sync] : [])])];
 }

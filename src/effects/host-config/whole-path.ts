@@ -98,11 +98,10 @@ export function hasPreimage(transaction: string, key: string): boolean {
   return lstatSync(path, { throwIfNoEntry: false }) !== undefined || lstatSync(path + '.absent', { throwIfNoEntry: false }) !== undefined;
 }
 
-/** Put the transaction's entry back at the path, in place of what is there. */
-export function restorePreimage(transaction: string, key: string): void {
+/** Put the transaction's entry back at the path, in place of what is there; the copy waits at `staged` before the rename. */
+export function restorePreimage(transaction: string, key: string, staged = `${key}.${randomUUID()}.rh-stage`): void {
   const source = preimagePath(transaction, key);
   if (lstatSync(source + '.absent', { throwIfNoEntry: false })) { removePathEntry(key); return; }
-  const staged = `${key}.${randomUUID()}.rh-stage`;
   cpSync(source, staged, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
   if (lstatSync(key, { throwIfNoEntry: false })) publishPathEntry(staged, key);
   else retryWindowsSharingRace(() => renameSync(staged, key));

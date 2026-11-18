@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import { planFile, type FilePlan, type PlannedFragment } from '../../core/host-config/plan';
@@ -36,7 +36,6 @@ import {
   ensurePrivateDirectory,
   expectedOf,
   hostConfigPaths,
-  hostConfigPathsAt,
   missingDirectories,
   observeFile,
   parseSnapshotLedger,
@@ -1342,9 +1341,10 @@ export interface HostConfigRollbackResult {
 const fragmentKey = (record: FragmentRecord): string => `${record.owner}\0${record.selector}`;
 
 /**
- * The rollback of the gate writes of one install transaction, from the ledger
- * as it was before the transaction (`snapshot`, null when there was none), and
- * the transaction directory that holds the path preimages (`transaction`). It
+ * The rollback of the gate writes of one transaction on the ledger at `paths`,
+ * from the ledger as it was before the transaction (`snapshot`, null when there
+ * was none), and the transaction directory that holds the path preimages
+ * (`transaction`). A path entry goes back through `options.stage` (#2903). It
  * writes the host files and then the ledger: the snapshot's records, except
  * the path record of each entry that it cannot undo, which stays so that the
  * entry keeps its owner.
@@ -1363,8 +1363,7 @@ const fragmentKey = (record: FragmentRecord): string => `${record.owner}\0${reco
  * does not undo a file revert, so a claim from the snapshot would have no text
  * on disk. Every other entry stays and is returned.
  */
-export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer | null, transaction: string): HostConfigRollbackResult {
-  const paths = hostConfigPathsAt(harness);
+export function rollbackHostConfigTransaction(paths: HostConfigPaths, snapshot: Buffer | null, transaction: string, options: Pick<HostConfigPathOptions, 'stage'> = {}): HostConfigRollbackResult {
   const before = snapshot === null ? EMPTY_LEDGER : parseSnapshotLedger(snapshot, `${paths.ledger} (transaction snapshot)`);
   const now = readLedger(paths);
   const unresolved: string[] = [];
@@ -1423,7 +1422,7 @@ export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer 
     if (created && all.some((entry) => fragmentFormat(fileFormat, entry.selector)?.empty(content) === true)) removeTarget(path, current);
     else if (content !== decode(bytes, path)) replaceTarget(path, Buffer.from(content, 'utf8'), current);
   }
-  const pathRecords = rollbackWholePaths(paths, before, now, transaction, unresolved);
+  const pathRecords = rollbackWholePaths(paths, before, now, transaction, unresolved, options.stage);
   const kept = removeCreatedDirectories(now.directories.filter((directory) => !before.directories.includes(directory)));
   const restored: HostConfigLedger = { ...before, files, fragments: before.fragments.filter((entry) => !releasedFiles.has(entry.file)),
     retired: [...before.retired.filter((entry) => !releasedMaterial.has(entry.sha256)), ...now.retired.filter((entry) => releasedMaterial.has(entry.sha256))], paths: pathRecords, directories: [...before.directories, ...kept], tools: rollbackTools(before.tools, now.tools) };
@@ -1442,7 +1441,7 @@ export function rollbackHostConfigTransaction(harness: string, snapshot: Buffer 
  * preimage when it refreshed or removed rh's entry. An entry that is no longer
  * what the transaction recorded stays with that record, and is returned.
  */
-function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, now: HostConfigLedger, transaction: string, unresolved: string[]): Record<string, PathRecord> {
+function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, now: HostConfigLedger, transaction: string, unresolved: string[], stage?: (target: string) => string): Record<string, PathRecord> {
   const records: Record<string, PathRecord> = { ...before.paths };
   for (const key of new Set([...Object.keys(before.paths), ...Object.keys(now.paths)])) {
     const old = before.paths[key];
@@ -1456,7 +1455,7 @@ function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, no
       const entry = observePathEntry(at);
       // A revert in this transaction took the record out: the entry is gone, or it is the user file that came back from the vault.
       const reverted = entry === null || (old!.kind === 'replaced' && entry.type === 'file' && entry.sha256 === old!.backup);
-      if (reverted && hasPreimage(transaction, at)) restorePreimage(transaction, at);
+      if (reverted && hasPreimage(transaction, at)) restorePreimage(transaction, at, stage?.(at));
       // A claim released on observation is a fact, not an effect of this transaction: it stays released (P4).
       else if (entry === null) delete records[key];
       else if (!pathRecordIsCurrent(key, old!)) unresolved.push(key);
@@ -1465,10 +1464,10 @@ function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, no
     if (!pathRecordIsCurrent(key, current)) { records[key] = current; unresolved.push(key); continue; }
     if (current.kind === 'replaced' && current.backup !== old?.backup) {
       const committed = current.committed as Extract<PathCommitted, { type: 'file' }>;
-      replaceTarget(at as HostPath, readVault(paths, current.backup!), { existed: true, sha256: committed.sha256 });
+      replaceTarget(at as HostPath, readVault(paths, current.backup!), { existed: true, sha256: committed.sha256 }, stage?.(at));
     } else if (!old && !hasPreimage(transaction, at)) removePathEntry(at);
     // A link that this transaction adopted has a preimage of itself, so it comes back; a created entry has an absent preimage.
-    else if (hasPreimage(transaction, at)) restorePreimage(transaction, at);
+    else if (hasPreimage(transaction, at)) restorePreimage(transaction, at, stage?.(at));
     else { records[key] = current; unresolved.push(key); }
   }
   return records;
@@ -1562,6 +1561,12 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
 export interface HostConfigRepositoryGate {
   /** As `HostConfigGate.writePaths`, for files inside the worktree only. */
   writePaths(writes: readonly HostConfigPathWrite[]): readonly string[];
+  /**
+   * Create each missing directory and its missing ancestors; the ledger lists
+   * them before the `mkdir`, so a revert or rollback removes them when empty.
+   * Returns the directories that it created.
+   */
+  createDirectories(directories: readonly string[]): readonly string[];
   /** As `HostConfigGate.revertPaths`, over the records of this repository ledger. */
   revertPaths(paths: readonly string[]): readonly HostConfigRevertEntry[];
 }
@@ -1574,26 +1579,32 @@ export interface HostConfigRepositoryScope {
   readonly refusal: (target: string) => string | null;
   /** Where the bytes for one target wait before the rename; it checks the target again and throws when no safe place exists. */
   readonly stage: (target: string) => string;
+  /** As `HostConfigPathOptions.transaction`: the run that keeps a preimage of each rh entry that it replaces. */
+  readonly transaction?: string;
 }
 
-/** The host directory of a repository file, from its first path segment in the worktree. */
+/** The host of a repository file, from its first path segment in the worktree; any other file is `repository` (#2903). */
 const REPOSITORY_HOSTS: Readonly<Record<string, PathRecord['host']>> = { '.claude': 'claude', '.codex': 'codex' };
 
+/** Git's own directory, rh's state and rh's in-checkout storage: never a repository record. */
+const REPOSITORY_UNRECORDED = ['.git', '.repo-harness', '.ai/harness/backups'];
+
 /**
- * A repository file is admitted only under `.claude/` or `.codex/` of the
- * worktree, and only when the scope's target rule passes. A file that the user
- * ledger records stays with that ledger: one file never has two owners (D10).
- * The user ledger is read as the schema move would leave it, since this gate
- * never moves it.
+ * A repository file is admitted anywhere in the worktree except
+ * `REPOSITORY_UNRECORDED`, and only when the scope's target rule passes. A file
+ * that the user ledger records stays with that ledger: one file never has two
+ * owners (D10). The user ledger is read as the schema move would leave it,
+ * since this gate never moves it.
  */
 function admitRepositoryPath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, scope: HostConfigRepositoryScope, path: string): { key: string; host: PathRecord['host'] } {
   const refused = scope.refusal(path);
   if (refused !== null) throw new HostConfigError('host_config_invalid_path', `rh does not write this repository file: ${refused}: ${path}`);
   const key = hostPathKey(paths, path);
-  const host = REPOSITORY_HOSTS[relative(scope.worktree, key).split(sep)[0]!];
-  if (!isPathInside(scope.worktree, key) || host === undefined) {
-    throw new HostConfigError('host_config_invalid_path', `rh records a repository file only under .claude/ or .codex/ of the worktree ${scope.worktree}: ${path}`);
+  const rel = relative(scope.worktree, key).split(sep).join('/');
+  if (!isPathInside(scope.worktree, key) || REPOSITORY_UNRECORDED.some((root) => rel === root || rel.startsWith(`${root}/`))) {
+    throw new HostConfigError('host_config_invalid_path', `rh records no repository file in ${REPOSITORY_UNRECORDED.join(', ')} or outside the worktree ${scope.worktree}: ${path}`);
   }
+  const host = REPOSITORY_HOSTS[rel.split('/')[0]!] ?? 'repository';
   const user = readProjectedLedger(hostConfigPaths(env));
   if (user.files[key] || pathRecordOf(user, key as HostPath) !== null) {
     throw new HostConfigError('host_config_invalid_state', `the user-level ledger records this file, so rh does not record it for the repository: ${path}`);
@@ -1601,12 +1612,34 @@ function admitRepositoryPath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, sco
   return { key, host };
 }
 
+/** Repository directories keep the default mode: the worktree is shared with Git and the user's tools. */
+function createRepositoryDirectories(paths: HostConfigPaths, keys: readonly string[]): string[] {
+  const created: string[] = [];
+  for (const key of keys) {
+    const missing = missingDirectories(join(key, '_') as HostPath);
+    if (!missing.length) continue;
+    const ledger = readLedger(paths);
+    writeLedger(paths, { ...ledger, directories: [...ledger.directories, ...missing] });
+    try { for (const directory of missing) { mkdirSync(directory); created.push(directory); } }
+    catch (error) {
+      removeCreatedDirectories(missing);
+      writeLedger(paths, ledger);
+      throw error;
+    }
+  }
+  return created;
+}
+
 /** `paths` is the repository ledger layout. */
 export function openRepositoryHostConfigGate(env: NodeJS.ProcessEnv, paths: HostConfigPaths, scope: HostConfigRepositoryScope): HostConfigRepositoryGate {
   return {
     writePaths: (writes) => {
       ensurePrivateDirectory(paths.root);
-      return writeWholePaths((_ledger, path) => admitRepositoryPath(env, paths, scope, path), paths, writes, { stage: scope.stage });
+      return writeWholePaths((_ledger, path) => admitRepositoryPath(env, paths, scope, path), paths, writes, { stage: scope.stage, transaction: scope.transaction });
+    },
+    createDirectories: (directories) => {
+      ensurePrivateDirectory(paths.root);
+      return createRepositoryDirectories(paths, directories.map((directory) => admitRepositoryPath(env, paths, scope, directory).key));
     },
     revertPaths: (only) => revertWholePaths(paths, only, { stage: scope.stage }),
   };

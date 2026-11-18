@@ -3,7 +3,7 @@ import { publishFileByRename, retryWindowsSharingRace } from '../../effects/atom
 import wazaRules from "../../core/skill-surface/waza-shared-rules.json";
 import { bunGlobalPackageRoot, expectedSkillProjections } from './skill-projection';
 import { configurationReceiptPath } from './configuration-ownership';
-import { hostConfigPaths, putVault, resolveHostPath } from '../../effects/host-config/store';
+import { hostConfigPaths, hostConfigPathsAt, putVault, resolveHostPath } from '../../effects/host-config/store';
 import { ensureSelfIgnoringDirectory, isSelfIgnoreGuard, SELF_IGNORE_NAME } from '../../effects/self-ignoring-directory';
 import { openHostConfigGate, planPathRevert, rollbackHostConfigTransaction } from '../../effects/host-config/gate';
 import { namingTomlFile } from '../../core/host-config/toml-fragment';
@@ -746,7 +746,7 @@ export function rollbackInstallHostTransaction(
     const ledger = transaction.snapshots.find(snapshot => basename(snapshot.path) === 'ledger.json' && basename(dirname(snapshot.path)) === 'config');
     if (ledger) {
       try {
-        const result = rollbackHostConfigTransaction(dirname(dirname(ledger.path)), ledger.existed && ledger.backup_path !== null ? readFileSync(ledger.backup_path) : null, transaction.backup_root);
+        const result = rollbackHostConfigTransaction(hostConfigPathsAt(dirname(dirname(ledger.path))), ledger.existed && ledger.backup_path !== null ? readFileSync(ledger.backup_path) : null, transaction.backup_root);
         failures.push(...result.unresolved.map(entry => entry + ': rh cannot prove this host configuration entry; run rh update'));
       } catch (error) { failures.push('host configuration rollback: ' + String((error as Error).message ?? error) + '; run rh update'); }
     }
@@ -844,7 +844,7 @@ export function rollbackRuntimeHostConfig(backupRoot: string, env: NodeJS.Proces
     const backup = join(backupRoot, String(index));
     snapshot = lstatExists(backup) ? readFileSync(backup) : null;
   }
-  const result = rollbackHostConfigTransaction(dirname(dirname(ledger)), snapshot, backupRoot);
+  const result = rollbackHostConfigTransaction(hostConfigPathsAt(dirname(dirname(ledger))), snapshot, backupRoot);
   if (result.unresolved.length) throw new Error('host configuration rollback unresolved: ' + result.unresolved.join(', ') + '; run rh update');
   if (owner === 'none') restoreOlderParentFiles(backupRoot, env);
 }

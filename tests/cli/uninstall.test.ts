@@ -21,6 +21,7 @@ import { migrateCodexConfigRecords, planCodexConfigMigration } from '../../src/c
 import { requestUserInputFragment } from '../../src/cli/installer/targets/codex';
 import { tomlFragment } from '../../src/core/host-config/toml-fragment';
 import { openHostConfigGate, rollbackHostConfigTransaction } from '../../src/effects/host-config/gate';
+import { hostConfigPathsAt } from '../../src/effects/host-config/store';
 import { openRepositoryGate, repositoryConfigPaths } from '../../src/effects/host-config/repository';
 import { buildManagedHooks } from '../../src/cli/installer/managed-entries';
 import { applyGlobalContextRefresh, preflightGlobalContextRefresh, renderGlobalRulesBlock } from '../../src/cli/installer/global-context';
@@ -598,7 +599,7 @@ test.each([
    const snapshot=readFileSync(join(home,'.repo-harness/config/ledger.json'));
    rmSync(join(dir,'hc'));rmSync(join(dir,'herdr-core'));
    openHostConfigGate({env}).releaseAbsentTools(null);
-   expect(rollbackHostConfigTransaction(join(home,'.repo-harness'),snapshot,mkdtempSync(join(root,'tx-'))).unresolved).toEqual([]);
+   expect(rollbackHostConfigTransaction(hostConfigPathsAt(join(home,'.repo-harness')),snapshot,mkdtempSync(join(root,'tx-'))).unresolved).toEqual([]);
    for(const name of readdirSync(save))cpSync(join(save,name),join(dir,name),{recursive:true,verbatimSymlinks:true});
   }
   if(edited&&windows)writeFileSync(registry,JSON.stringify({...userPath,raw:`${userPath.raw};${dir.toUpperCase()}`}));

@@ -7,7 +7,8 @@ import { hostConfigRepositoryKey } from '../git/repository-identity';
 import { ensureCheckoutBackupDirectory, FS_BACKUP_ROOT } from '../fs-transaction';
 import { isPathInside } from '../path-containment';
 import { selfIgnoringRefusal } from '../self-ignoring-directory';
-import { openRepositoryHostConfigGate, planPathRevert, type HostConfigRepositoryGate, type HostConfigRevertEntry } from './gate';
+import { openRepositoryHostConfigGate, planPathRevert, rollbackHostConfigTransaction, type HostConfigRepositoryGate, type HostConfigRevertEntry, type HostConfigRollbackResult } from './gate';
+import { pathRecordEntry } from './path-records';
 import { hostConfigPaths, observeFile, readLedger, type HostConfigPaths } from './store';
 
 /**
@@ -117,14 +118,38 @@ export function withRepositoryStaging<T>(worktree: string, run: (stage: (target:
   finally { if (made) rmSync(join(worktree, staging), { recursive: true, force: true }); }
 }
 
-/** The repository gate; each call stages in its own guarded directory. */
-export function openRepositoryGate(env: NodeJS.ProcessEnv, repository: HostConfigRepository): HostConfigRepositoryGate {
+/**
+ * The repository gate; each call stages in its own guarded directory.
+ * `transaction` keeps a preimage of each rh entry that a write replaces.
+ */
+export function openRepositoryGate(env: NodeJS.ProcessEnv, repository: HostConfigRepository, options: { readonly transaction?: string } = {}): HostConfigRepositoryGate {
   const { worktree } = repository;
   const call = <T>(run: (gate: HostConfigRepositoryGate) => T): T => withRepositoryStaging(worktree, (stage) => run(openRepositoryHostConfigGate(env,
-    repositoryConfigPaths(env, repository), { worktree, refusal: (target) => repositoryTargetRefusal(worktree, target), stage })));
+    repositoryConfigPaths(env, repository), { worktree, refusal: (target) => repositoryTargetRefusal(worktree, target), stage, transaction: options.transaction })));
   return {
     writePaths: (writes) => call((gate) => gate.writePaths(writes)),
+    createDirectories: (directories) => call((gate) => gate.createDirectories(directories)),
     revertPaths: (paths) => call((gate) => gate.revertPaths(paths)),
+  };
+}
+
+/** The gate writes of one run and their rollback to the ledger as it was before the run. */
+export interface RepositoryWriteRun {
+  readonly gate: HostConfigRepositoryGate;
+  rollback(): HostConfigRollbackResult;
+}
+
+/**
+ * One run of repository writes (#2903). The caller holds the runtime lock.
+ * `transaction` is the run's guarded directory for preimages; the rollback
+ * puts each entry back through repository staging, never beside the target.
+ */
+export function openRepositoryWriteRun(env: NodeJS.ProcessEnv, repository: HostConfigRepository, transaction: string): RepositoryWriteRun {
+  const paths = repositoryConfigPaths(env, repository);
+  const snapshot = observeFile(paths.ledger).bytes;
+  return {
+    gate: openRepositoryGate(env, repository, { transaction }),
+    rollback: () => withRepositoryStaging(repository.worktree, (stage) => rollbackHostConfigTransaction(paths, snapshot, transaction, { stage })),
   };
 }
 
@@ -133,6 +158,8 @@ export interface RepositoryRestorePlan {
   readonly entries: readonly HostConfigRevertEntry[];
   /** Records that rh does not touch, with the reason. */
   readonly refused: readonly { readonly path: string; readonly reason: string }[];
+  /** The directories that rh created and removes when they are empty after the revert: each holds an entry that goes. */
+  readonly directories: readonly string[];
 }
 
 /**
@@ -145,7 +172,8 @@ export function repositoryRestorePlan(env: NodeJS.ProcessEnv, repository: HostCo
   const paths = repositoryConfigPaths(env, repository);
   const unrecorded = (where: string) => new HostConfigError('host_config_repository_unrecorded', `rh records no repository file ${where}`);
   if (!observeFile(paths.ledger).observation.existed) throw unrecorded(`for ${repository.worktree}`);
-  const records = readLedger(paths).paths;
+  const ledger = readLedger(paths);
+  const records = ledger.paths;
   let keys = Object.keys(records).filter((key) => isPathInside(repository.worktree, key) && (options.owner === undefined || records[key]!.owner === options.owner));
   if (options.only !== undefined) {
     if (!keys.includes(options.only)) throw unrecorded(`at ${options.only}`);
@@ -160,7 +188,10 @@ export function repositoryRestorePlan(env: NodeJS.ProcessEnv, repository: HostCo
     if (reason !== null) refused.push({ path: key, reason });
     else entries.push({ path: key, action });
   }
-  return { entries, refused };
+  // The revert's own rule: a created directory goes only with an entry inside it.
+  const dropped = entries.filter((entry) => entry.action !== 'kept_edited').map((entry) => pathRecordEntry(entry.path, records[entry.path]!));
+  const directories = ledger.directories.filter((directory) => dropped.some((entry) => isPathInside(directory, entry)));
+  return { entries, refused, directories };
 }
 
 /** Revert the planned entries; the gate checks each target again before its write. */

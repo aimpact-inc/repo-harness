@@ -6,7 +6,7 @@ import type { FragmentEdit, HostConfigStrategy, HostPath } from '../../src/core/
 import { openHostConfigGate, openRepositoryFileGate, rollbackHostConfigTransaction, type HostConfigFileChange } from '../../src/effects/host-config/gate';
 import { openRepositoryGate, repositoryConfigPaths, repositoryExcludePath } from '../../src/effects/host-config/repository';
 import type { PathEntry } from '../../src/effects/host-config/whole-path';
-import { hostConfigPaths, migrateLedgerSchema, parseLedger, replaceTarget } from '../../src/effects/host-config/store';
+import { hostConfigPaths, hostConfigPathsAt, migrateLedgerSchema, parseLedger, replaceTarget } from '../../src/effects/host-config/store';
 import { hookRenderingKey, jsonFragment, removeJsonHookCommand } from '../../src/core/host-config/json-fragment';
 import { sha256Prefixed } from '../../src/core/evidence/sha256';
 import { tomlFragment } from '../../src/core/host-config/toml-fragment';
@@ -383,7 +383,7 @@ test('a file written at a user link goes to the file that the link names; the li
   const transaction = mkdtempSync(join(f.home, 'tx-'));
   expect(f.gate().writePaths([write(linked, true), write(dangling)], { transaction })).toEqual([linked, dangling]);
   expect(state()).toEqual({ target: 'rh\n', created: 'rh\n', links: [true, true] });
-  expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), null, transaction).unresolved).toEqual([]);
+  expect(rollbackHostConfigTransaction(hostConfigPathsAt(join(f.home, '.repo-harness')), null, transaction).unresolved).toEqual([]);
   expect({ ...state(), directory: existsSync(join(f.home, 'dotfiles', 'new')) }).toEqual({ target: 'mine\n', created: null, links: [true, true], directory: false });
 
   // The record keys the link and names the file; a revert gives the user file back and removes only the created file.
@@ -513,7 +513,7 @@ test('a whole-path write records its entry first; delegate, a transaction rollba
   f.gate().writePaths([w(tree, { type: 'directory', source: source('v2\n') }), w(added, bytes('new\n')), w(edited, bytes('new\n'))], { transaction });
   expect(f.gate().delegate([{ path: file, owner: 'core' }], ([target]) => writeFileSync(target!, 'rh2\n'), { transaction }).changed).toEqual([file]);
   writeFileSync(edited, 'new\nuser\n');
-  expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, transaction).unresolved).toEqual([edited]);
+  expect(rollbackHostConfigTransaction(hostConfigPathsAt(join(f.home, '.repo-harness')), snapshot, transaction).unresolved).toEqual([edited]);
   expect({ tree: readFileSync(join(tree, 'SKILL.md'), 'utf8'), file: readFileSync(file, 'utf8'), added: existsSync(added), edited: readFileSync(edited, 'utf8') })
     .toEqual({ tree: 'v1\n', file: 'rh\n', added: false, edited: 'new\nuser\n' });
   expect(Object.keys(f.ledger().paths)).toEqual([file, link, tree, user, edited]);
@@ -569,7 +569,7 @@ test('a delegated writer runs only on paths that rh may write; a replaced path s
   const snapshot = readFileSync(join(f.root, 'ledger.json'));
   const transaction = mkdtempSync(join(f.home, 'tx-'));
   expect(f.gate().revertPaths([user], { transaction }).map((entry) => entry.action)).toEqual(['restored']);
-  expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, transaction).unresolved).toEqual([]);
+  expect(rollbackHostConfigTransaction(hostConfigPathsAt(join(f.home, '.repo-harness')), snapshot, transaction).unresolved).toEqual([]);
   expect({ bytes: readFileSync(user, 'utf8'), record: f.ledger().paths[user] }).toEqual({ bytes: 'rh\n', record: JSON.parse(snapshot.toString()).paths[user] });
 
   // A file with rh text blocks is no whole path.
@@ -608,7 +608,7 @@ test('rollback restores pre-run absence and keeps a path edited after the write'
     if (delegated) f.gate().delegate([{ path, owner: 'core' }], ([key]) => writeFileSync(key!, 'rh\n'), { transaction });
     else f.gate().writePaths([write], { transaction });
     if (edited) writeFileSync(path, 'user edit\n');
-    expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, transaction).unresolved).toEqual(edited ? [path] : []);
+    expect(rollbackHostConfigTransaction(hostConfigPathsAt(join(f.home, '.repo-harness')), snapshot, transaction).unresolved).toEqual(edited ? [path] : []);
     expect(existsSync(path)).toBe(edited);
     if (edited) expect(readFileSync(path, 'utf8')).toBe('user edit\n');
     expect(f.ledger().paths[path]).toBeDefined();
@@ -674,7 +674,7 @@ test('a rollback reads a ledger snapshot of an older protocol, which a parent to
   const { retired: _retired, recovery: _recovery, tools: _tools, ...older } = f.ledger();
   const snapshot = Buffer.from(JSON.stringify({ ...older, protocol: 2 }));
   f.gate().apply([f.change(f.a, 'on')]);
-  expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
+  expect(rollbackHostConfigTransaction(hostConfigPathsAt(join(f.home, '.repo-harness')), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
   // A clean rollback leaves the snapshot's protocol 2 bytes, which the older parent reads.
   expect([readFileSync(f.a, 'utf8'), readFileSync(join(f.root, 'ledger.json'))]).toEqual(['keep=1\n', snapshot]);
 });
@@ -735,7 +735,7 @@ test('a delegated installer gets records for the declared fragments that it crea
     if (child.signalCode) throw new Error(`installer killed: ${child.signalCode}`);
   }, { transaction })).toThrow('installer killed: SIGKILL');
   expect(f.gate().recorded(path).map((record) => record.selector)).toEqual([selector]);
-  expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, transaction).unresolved).toEqual([]);
+  expect(rollbackHostConfigTransaction(hostConfigPathsAt(join(f.home, '.repo-harness')), snapshot, transaction).unresolved).toEqual([]);
   expect(read()).toEqual({ user: 1, undeclared: true });
 
   // Ownership probe P1: an entry that is gone now loses its record at that read, and a later revert never takes out a re-created entry.
@@ -808,7 +808,7 @@ test.each([
     writeFileSync(join(at!, 'tool'), 'rh\n');
   });
   if (after === 'edit') writeFileSync(join(dir, 'tool'), 'user edit\n');
-  expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
+  expect(rollbackHostConfigTransaction(hostConfigPathsAt(join(f.home, '.repo-harness')), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
   const tools = existsSync(join(f.root, 'ledger.json')) ? f.ledger().tools : {};
   const stat = record ? lstatSync(join(dir, 'tool'), { bigint: true }) : null;
   expect(tools).toEqual(record ? { 'herdr-core': { installed_by: 'rh-install', removable: true, version: '1.0.0', directories: [join(f.home, '.local'), dir],
@@ -829,7 +829,7 @@ test.each([
   const snapshot = readFileSync(join(f.root, 'ledger.json'));
   for (const name of gone) rmSync(join(dir, name));
   f.gate().releaseAbsentTools(null);
-  expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
+  expect(rollbackHostConfigTransaction(hostConfigPathsAt(join(f.home, '.repo-harness')), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
   expect(Object.keys(f.ledger().tools['herdr-core']?.paths ?? {})).toEqual(left.map((name) => join(dir, name)));
 });
 
@@ -886,7 +886,7 @@ test.each(['created path', 'replaced restore fails', 'replaced ledger write fail
       rmSync(text);
       rmSync(f.a);
       expect(f.gate().revert([text, f.a]).map((entry) => entry.action)).toEqual(['already_absent', 'already_absent']);
-      expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
+      expect(rollbackHostConfigTransaction(hostConfigPathsAt(join(f.home, '.repo-harness')), snapshot, mkdtempSync(join(f.home, 'tx-'))).unresolved).toEqual([]);
       expect({ files: f.ledger().files, fragments: f.ledger().fragments, retired: f.ledger().retired.map((entry: { sha256: string }) => entry.sha256) })
         .toEqual({ files: {}, fragments: [], retired: [backup] });
       writeFileSync(text, added);
@@ -929,7 +929,7 @@ test.each(['created path', 'replaced restore fails', 'replaced ledger write fail
     rmSync(user);
     const transaction = mkdtempSync(join(f.home, 'tx-'));
     expect(f.gate().revertPaths([file, user], { transaction }).map((reverted) => reverted.action)).toEqual(['released', 'released']);
-    expect(rollbackHostConfigTransaction(join(f.home, '.repo-harness'), snapshot, transaction).unresolved).toEqual([]);
+    expect(rollbackHostConfigTransaction(hostConfigPathsAt(join(f.home, '.repo-harness')), snapshot, transaction).unresolved).toEqual([]);
     expect(f.ledger().paths).toEqual({});
     // A hand reinstall of the same bytes is the user's: a later revert leaves it.
     writeFileSync(file, 'rh\n');
