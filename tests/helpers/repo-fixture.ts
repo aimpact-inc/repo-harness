@@ -1,8 +1,8 @@
 import { afterAll, expect } from "bun:test";
 import { spawnSync } from "child_process";
-import { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, linkSync, writeFileSync } from "fs";
+import { appendFileSync, chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, linkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { dirname, join } from "path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "path";
 
 const homes = new Map<string, string>();
 function fixtureHome(cwd: string): string {
@@ -214,6 +214,23 @@ export function writeShellExecutableFixture(filePath: string, content: string): 
 }
 
 export { fixtureReviewResult, recordFixtureAcceptance } from './acceptance-fixture';
+
+/** Refuse bun fixture writes outside this fixture's root, including symlink escapes. */
+export function bunStubPath(temporaryRoot: string, path: string): string {
+  const root = realpathSync(temporaryRoot);
+  const target = resolve(path);
+  const inside = (base: string, candidate: string): boolean => {
+    const suffix = relative(base, candidate);
+    return suffix !== '' && suffix !== '..' && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix);
+  };
+  let ancestor = target;
+  while (!lstatSync(ancestor, { throwIfNoEntry: false })) ancestor = dirname(ancestor);
+  const canonicalTarget = resolve(realpathSync(ancestor), relative(ancestor, target));
+  if (!inside(resolve(temporaryRoot), target) || !inside(root, canonicalTarget)) {
+    throw new Error(`Bun stub must stay under its test temporary root: ${path}`);
+  }
+  return path;
+}
 
 /**
  * Write `<path>` as a wrapper that execs the running Bun. A symlink to
