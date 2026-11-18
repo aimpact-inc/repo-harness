@@ -3,7 +3,8 @@ import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, rea
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FragmentEdit, HostConfigStrategy, HostPath } from '../../src/core/host-config/types';
-import { openHostConfigGate, rollbackHostConfigTransaction, type HostConfigFileChange } from '../../src/effects/host-config/gate';
+import { openHostConfigGate, openRepositoryHostConfigGate, rollbackHostConfigTransaction, type HostConfigFileChange } from '../../src/effects/host-config/gate';
+import { repositoryConfigPaths } from '../../src/effects/host-config/repository';
 import type { PathEntry } from '../../src/effects/host-config/whole-path';
 import { hostConfigPaths, migrateLedgerSchema, parseLedger, replaceTarget } from '../../src/effects/host-config/store';
 import { hookRenderingKey, jsonFragment, removeJsonHookCommand } from '../../src/core/host-config/json-fragment';
@@ -933,4 +934,58 @@ test.each(['created path', 'replaced restore fails', 'replaced ledger write fail
     }
     expect(readFileSync(user, 'utf8')).toBe('mine\n');
   }
+});
+
+// Repository records (#2854): `replaced` path records in the ledger of one clone, outside the working tree. P1 `absent`, P2 `edited`,
+// P3 `planned bytes changed` (a record needs the planned bytes on disk now). The same relative path under HOME is another file.
+test.each([
+  { label: 'restored', change: 'none' },
+  { label: 'P1 absent', change: 'absent' },
+  { label: 'P2 edited', change: 'edited' },
+  { label: 'P3 planned bytes changed', change: 'planned' },
+  { label: 'D10 the user ledger records it', change: 'user-recorded' },
+  { label: 'outside .claude/ and .codex/', change: 'outside' },
+] as const)('repository record: $label', ({ change }) => {
+  const f = fixture();
+  const env = { HOME: f.home };
+  const worktree = join(f.home, 'repo');
+  const repository = { repositoryId: join(worktree, '.git'), worktree };
+  const paths = repositoryConfigPaths(env, repository);
+  const gate = openRepositoryHostConfigGate(env, paths, worktree);
+  const name = change === 'outside' ? 'notes/settings.json' : '.claude/settings.json';
+  const [file, home] = [join(worktree, name), join(f.home, name)];
+  for (const [path, text] of [[file, 'user\n'], [home, 'home\n']] as const) { mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, text); chmodSync(path, 0o640); }
+  if (change === 'user-recorded') f.gate().apply([f.change(file, 'on')]);
+  const userLedger = existsSync(join(f.root, 'ledger.json')) ? readFileSync(join(f.root, 'ledger.json')) : null;
+  const expected = sha256Prefixed(readFileSync(file));
+  if (change === 'planned') writeFileSync(file, 'user edit\n');
+  const write = () => gate.writePaths([{ path: file, owner: 'core', replace: true, expected, entry: { type: 'file', bytes: Buffer.from('stripped\n'), mode: 0o640 } }]);
+  const refusals = { planned: 'the file changed since rh planned its write', 'user-recorded': 'the user-level ledger records this file', outside: 'rh records a repository file only under .claude/ or .codex/' } as const;
+  if (change === 'planned' || change === 'user-recorded' || change === 'outside') {
+    expect(write).toThrow(refusals[change]);
+    expect({ ledger: existsSync(paths.ledger), vault: existsSync(paths.vault) && readdirSync(paths.vault).length > 0 }).toEqual({ ledger: false, vault: false });
+    return;
+  }
+  expect(write()).toEqual([file]);
+  const record = JSON.parse(readFileSync(paths.ledger, 'utf8')).paths[file];
+  expect(record).toMatchObject({ owner: 'core', host: 'claude', kind: 'replaced', baseline: { state: 'known', existed: true, sha256: expected } });
+  expect([paths.root, join(paths.ledger), join(paths.vault, record.backup.slice('sha256:'.length))].map((path) => statSync(path).mode & 0o777)).toEqual([0o700, 0o600, 0o600]);
+  expect(paths.root).toBe(join(f.home, '.repo-harness', 'config', 'repos', sha256Prefixed(Buffer.from(repository.repositoryId)).slice('sha256:'.length)));
+  if (change === 'absent') rmSync(file);
+  if (change === 'edited') writeFileSync(file, 'stripped\nuser\n');
+  const action = ({ none: 'restored', absent: 'released', edited: 'kept_edited' } as const)[change];
+  expect(gate.revertPaths([file])).toEqual([{ path: file, action }]);
+  if (change === 'none') expect({ bytes: readFileSync(file, 'utf8'), mode: statSync(file).mode & 0o777 }).toEqual({ bytes: 'user\n', mode: 0o640 });
+  if (change === 'edited') expect({ bytes: readFileSync(file, 'utf8'), record: JSON.parse(readFileSync(paths.ledger, 'utf8')).paths[file] }).toEqual({ bytes: 'stripped\nuser\n', record });
+  if (change === 'absent') {
+    writeFileSync(file, 'stripped\n');
+    expect(gate.revertPaths([file])).toEqual([]);
+    expect(readFileSync(file, 'utf8')).toBe('stripped\n');
+  }
+  // Neither ledger reaches the other's file: HOME keeps its bytes and the user ledger is unchanged, and a user revert there leaves the worktree alone.
+  expect({ home: readFileSync(home, 'utf8'), user: existsSync(join(f.root, 'ledger.json')) ? readFileSync(join(f.root, 'ledger.json')) : null }).toEqual({ home: 'home\n', user: userLedger });
+  const worktreeBytes = readFileSync(file, 'utf8');
+  f.gate().apply([f.change(home, 'on')]);
+  f.gate().revert([home]);
+  expect({ home: readFileSync(home, 'utf8'), worktree: readFileSync(file, 'utf8') }).toEqual({ home: 'home\n', worktree: worktreeBytes });
 });
