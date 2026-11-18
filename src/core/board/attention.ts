@@ -589,13 +589,13 @@ function r2(context: Context): void {
  * refs whose tier label is below High. One hit sets High (`agentic-development-flow.md`, Review by risk). A pull request without a
  * complete file list, or an item without a tier label, is unevaluated, never a miss.
  */
-function belowHighOnHits(context: Context, rule: 'R3' | 'R5', hitsOf: (files: readonly string[]) => readonly { readonly path: string; readonly id: string }[], what: string): void {
+function belowHighOnHits(context: Context, rule: 'R3' | 'R5', hitsOf: (files: readonly string[], pr: BoardPullRequestV1) => readonly { readonly path: string; readonly id: string }[], what: string): void {
   for (const pr of openPullRequests(context.board)) {
     if (pr.files === null) {
       skip(context, rule, 'files_incomplete', `#${pr.number}`);
       continue;
     }
-    const hits = hitsOf(pr.files);
+    const hits = hitsOf(pr.files, pr);
     if (hits.length === 0) continue;
     const items = itemsOf(context.board, pr).map(number => context.board.items.find(item => item.number === number)!);
     for (const item of items.filter(entry => entry.tier === null)) skip(context, rule, 'tier_label_missing', `#${pr.number} #${item.number}`);
@@ -607,9 +607,9 @@ function belowHighOnHits(context: Context, rule: 'R3' | 'R5', hitsOf: (files: re
   }
 }
 
-/** R3: an open pull request changes a path on the change hazard list. */
+/** R3: an open pull request changes a path on the change hazard list that the workflow edit allowlist did not clear. */
 function r3(context: Context): void {
-  belowHighOnHits(context, 'R3', files => pathHazardHits(files).map(hit => ({ path: hit.path, id: hit.hazard })), 'a High hazard');
+  belowHighOnHits(context, 'R3', (files, pr) => pathHazardHits(files, pr.cleared_hazard_paths).map(hit => ({ path: hit.path, id: hit.hazard })), 'a High hazard');
 }
 
 /** R5: an open pull request changes a path on the High list (permissions, hooks, secrets, deletion, release, merge and push). */

@@ -22,6 +22,7 @@ import {
 import { isCiRepairIssueBody } from '../ci/test-report';
 import {
   acceptance,
+  clearedHazardPaths,
   effectiveTier,
   gatekeeperReview,
   requiredCheck,
@@ -110,6 +111,8 @@ export interface BoardPullRequestV1 {
   readonly closes: readonly number[];
   readonly refs: readonly number[];
   readonly files: readonly string[] | null;
+  /** The changed `.github/workflows/` files that the workflow edit allowlist cleared (#3187): no change hazard hit for the tier or R3. */
+  readonly cleared_hazard_paths: readonly string[];
   readonly required_check: BoardRequiredCheckV1;
   readonly acceptance: BoardAcceptanceV1;
   /** The newest acceptance record with a FAIL row for the head that no disposition resolves; `recorded_at` is the record's comment time. */
@@ -402,6 +405,8 @@ export function decodeBoard(value: unknown): BoardV1 {
     if (!isOpenQuestions(pr.open_questions)) throw new Error(`invalid board open_questions on PR #${pr.number}`);
     const fail: unknown = pr.review_fail;
     if (fail !== null && !(isRecord(fail) && typeof fail.url === 'string' && isTime(fail.recorded_at))) throw new Error(`invalid board review_fail on PR #${pr.number}`);
+    const cleared: unknown = pr.cleared_hazard_paths;
+    if (!Array.isArray(cleared) || !cleared.every(path => typeof path === 'string')) throw new Error(`invalid board cleared_hazard_paths on PR #${pr.number}`);
     if (!SECOND_REVIEWS.has(pr.second_review)) throw new Error(`invalid board second_review on PR #${pr.number}`);
     if (!GATEKEEPER_REVIEWS.has(pr.gatekeeper_review)) throw new Error(`invalid board gatekeeper_review on PR #${pr.number}`);
     if (!isReviewRecords(pr.review_records)) throw new Error(`invalid board review_records on PR #${pr.number}`);
@@ -479,6 +484,7 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
       closes: Object.freeze(closes),
       refs: Object.freeze(refs),
       files: read.files,
+      cleared_hazard_paths: Object.freeze([...clearedHazardPaths(read, input.review_evidence)]),
       required_check: check,
       // An issue outside this board has no observed tier, so it withholds the Low path; so does any non-Low linked issue.
       acceptance: acceptance(read, check, [tier], reviewRule(read, tier)),

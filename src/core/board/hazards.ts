@@ -4,7 +4,8 @@
 // both lists in agentic-development-flow.md; the board rule R3 reads the
 // path-visible hazards and R5 the path-visible High signals. The package ships
 // both files, so downstream boards read the same lists. Exact keys; an entry
-// that a path cannot show has no paths.
+// that a path cannot show has no paths. The hazard list also holds the one
+// workflow edit allowlist (#3187): a hit that the board proves on it does not count.
 
 import hazardsJson from '../../../assets/review-hazards.v1.json';
 import highListJson from '../../../assets/review-high-list.v1.json';
@@ -28,9 +29,20 @@ export type ReviewPathEntry =
 
 export type ReviewHazard = ReviewPathEntry;
 
+/**
+ * The edits of one path-visible hazard that do not count as a hit: a modified file on `paths` whose diff changes only YAML keys on or
+ * under `keys`. A key glob is dot-separated; `*` matches one key or one list index.
+ */
+export interface ReviewAllowedEditsV1 {
+  readonly hazard: string;
+  readonly paths: readonly string[];
+  readonly keys: readonly string[];
+}
+
 export interface ReviewHazardsV1 {
   readonly hazards_version: typeof REVIEW_HAZARDS_VERSION;
   readonly hazards: readonly ReviewHazard[];
+  readonly allowed_edits: ReviewAllowedEditsV1;
 }
 
 export interface ReviewHighListV1 {
@@ -44,9 +56,10 @@ interface PathListShape {
   readonly version: string;
   readonly list_key: string;
   readonly entry: string;
+  readonly extra_keys: readonly string[];
 }
 
-function decodePathList(value: unknown, shape: PathListShape): ReviewPathEntry[] {
+function decodePathList(value: unknown, shape: PathListShape): { readonly root: Record<string, unknown>; readonly entries: ReviewPathEntry[] } {
   const fail = (what: string): never => { throw new Error(`${shape.label} invalid: ${what}`); };
   const { obj } = decodeReaders(fail);
   // Text lands in a markdown table cell: one line, no pipe.
@@ -54,12 +67,12 @@ function decodePathList(value: unknown, shape: PathListShape): ReviewPathEntry[]
     (typeof v === 'string' && v.length > 0 && v.length <= 280 && v.trim() === v && !/[\x00-\x1f\x7f|]/u.test(v) ? v : fail(what));
   const glob = (v: unknown, what: string): string => (isGlob(v) ? v : fail(what));
 
-  const root = obj(value, [shape.version_key, shape.list_key], 'list');
+  const root = obj(value, [shape.version_key, shape.list_key, ...shape.extra_keys], 'list');
   if (root[shape.version_key] !== shape.version) fail(shape.version_key);
   const raws = root[shape.list_key];
   if (!Array.isArray(raws) || raws.length === 0) fail(shape.list_key);
   const ids = new Set<string>();
-  return (raws as unknown[]).map((raw): ReviewPathEntry => {
+  const entries = (raws as unknown[]).map((raw): ReviewPathEntry => {
     const visible = (raw as { path_visible?: unknown } | null)?.path_visible === true;
     const h = obj(raw, visible ? ['id', 'text', 'path_visible', 'paths'] : ['id', 'text', 'path_visible'], shape.entry);
     const id = typeof h.id === 'string' && ENTRY_ID.test(h.id) ? h.id : fail(`${shape.entry} id`);
@@ -72,15 +85,29 @@ function decodePathList(value: unknown, shape: PathListShape): ReviewPathEntry[]
     if (new Set(paths).size !== paths.length) fail(`${id} paths`);
     return { id, text, path_visible: true, paths };
   });
+  return { root, entries };
 }
 
+const KEY_GLOB = /^(?:\*|[A-Za-z0-9_-]+)(?:\.(?:\*|[A-Za-z0-9_-]+))*$/u;
+
 export function decodeReviewHazards(value: unknown): ReviewHazardsV1 {
-  const hazards = decodePathList(value, { label: 'review hazards', version_key: 'hazards_version', version: REVIEW_HAZARDS_VERSION, list_key: 'hazards', entry: 'hazard' });
-  return { hazards_version: REVIEW_HAZARDS_VERSION, hazards };
+  const fail = (what: string): never => { throw new Error(`review hazards invalid: ${what}`); };
+  const { obj } = decodeReaders(fail);
+  const { root, entries: hazards } = decodePathList(value, { label: 'review hazards', version_key: 'hazards_version', version: REVIEW_HAZARDS_VERSION, list_key: 'hazards', entry: 'hazard', extra_keys: ['allowed_edits'] });
+  const raw = obj(root.allowed_edits, ['hazard', 'paths', 'keys'], 'allowed_edits');
+  const owner = hazards.find(hazard => hazard.id === raw.hazard);
+  const ownerPaths = owner !== undefined && owner.path_visible ? owner.paths : fail('allowed_edits hazard');
+  const list = (v: unknown, valid: (item: unknown) => boolean, what: string): string[] =>
+    (Array.isArray(v) && v.length > 0 && v.every(valid) && new Set(v).size === v.length ? v as string[] : fail(what));
+  // An allowed path lies under the hazard's own paths, so the allowlist can only narrow that hazard.
+  const under = (path: unknown): boolean => isGlob(path) && ownerPaths.some(glob => globPattern(glob).test(path));
+  const paths = list(raw.paths, under, 'allowed_edits paths');
+  const keys = list(raw.keys, key => typeof key === 'string' && KEY_GLOB.test(key), 'allowed_edits keys');
+  return { hazards_version: REVIEW_HAZARDS_VERSION, hazards, allowed_edits: { hazard: raw.hazard as string, paths, keys } };
 }
 
 export function decodeReviewHighList(value: unknown): ReviewHighListV1 {
-  const signals = decodePathList(value, { label: 'review high list', version_key: 'high_list_version', version: REVIEW_HIGH_LIST_VERSION, list_key: 'signals', entry: 'signal' });
+  const { entries: signals } = decodePathList(value, { label: 'review high list', version_key: 'high_list_version', version: REVIEW_HIGH_LIST_VERSION, list_key: 'signals', entry: 'signal', extra_keys: [] });
   return { high_list_version: REVIEW_HIGH_LIST_VERSION, signals };
 }
 
@@ -123,9 +150,50 @@ export interface PathHazardHitV1 {
   readonly path: string;
 }
 
-/** Hits of repository-relative paths on the path-visible hazards; the other hazards need a reviewer. */
-export function pathHazardHits(paths: readonly string[]): PathHazardHitV1[] {
-  return pathHits(REVIEW_HAZARDS.hazards, paths).map(hit => ({ hazard: hit.id, path: hit.path }));
+/** A hit of the allowlist's hazard on a path that the board proved on the allowlist (`workflowEditAllowed`) does not count. */
+function uncleared(hits: readonly { readonly id: string; readonly path: string }[], cleared: readonly string[]): { readonly id: string; readonly path: string }[] {
+  return hits.filter(hit => hit.id !== REVIEW_HAZARDS.allowed_edits.hazard || !cleared.includes(hit.path));
+}
+
+/**
+ * Hits of repository-relative paths on the path-visible hazards; the other hazards need a reviewer. `cleared`: the paths whose diff
+ * the board proved on the workflow edit allowlist.
+ */
+export function pathHazardHits(paths: readonly string[], cleared: readonly string[]): PathHazardHitV1[] {
+  return uncleared(pathHits(REVIEW_HAZARDS.hazards, paths), cleared).map(hit => ({ hazard: hit.id, path: hit.path }));
+}
+
+const ALLOWED_PATHS = REVIEW_HAZARDS.allowed_edits.paths.map(globPattern);
+const ALLOWED_KEYS = REVIEW_HAZARDS.allowed_edits.keys.map(key => key.split('.'));
+
+/** A path whose modification the workflow edit allowlist can clear; the board reads the diff of such a path only. */
+export function isAllowedEditPath(path: string): boolean {
+  return ALLOWED_PATHS.some(pattern => pattern.test(path));
+}
+
+/** The key paths where two parsed YAML values differ: a map key on one side only, a list index past the shorter list, or another value. */
+function changedKeys(base: unknown, head: unknown, at: readonly string[]): string[][] {
+  // Only a plain mapping recurses; any other object compares by identity, so it reads as changed.
+  const map = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype;
+  if (Array.isArray(base) && Array.isArray(head)) {
+    return Array.from({ length: Math.max(base.length, head.length) }, (_, index) =>
+      (index < base.length && index < head.length ? changedKeys(base[index], head[index], [...at, String(index)]) : [[...at, String(index)]])).flat();
+  }
+  if (map(base) && map(head)) {
+    return [...new Set([...Object.keys(base), ...Object.keys(head)])].flatMap(key =>
+      (Object.hasOwn(base, key) && Object.hasOwn(head, key) ? changedKeys(base[key], head[key], [...at, key]) : [[...at, key]]));
+  }
+  return Object.is(base, head) ? [] : [[...at]];
+}
+
+/**
+ * True when a modified file on the allowlist paths changes only keys on or under an allowlist key: `base` and `head` are its YAML
+ * documents at the merge base and the head commit. The caller passes only a file that it read and parsed at both commits; an added, removed or
+ * renamed file is never cleared.
+ */
+export function workflowEditAllowed(path: string, base: unknown, head: unknown): boolean {
+  return isAllowedEditPath(path) && changedKeys(base, head, []).every(key =>
+    ALLOWED_KEYS.some(glob => glob.length <= key.length && glob.every((segment, index) => segment === '*' || segment === key[index])));
 }
 
 export interface PathHighHitV1 {
@@ -162,10 +230,10 @@ export function readReviewI3Paths(document: DecodedWorkflowPolicy): ReviewI3Path
 
 /**
  * Hits of repository-relative paths that take a second review row: the I1/I2 High-list signals, the path-visible change hazards
- * (`.github/**`) and the I3 globs (id `i3`).
+ * (`.github/**`, except the `cleared` paths) and the I3 globs (id `i3`).
  */
-export function pathSecondReviewHits(paths: readonly string[], i3Paths: readonly string[]): PathHighHitV1[] {
+export function pathSecondReviewHits(paths: readonly string[], i3Paths: readonly string[], cleared: readonly string[]): PathHighHitV1[] {
   const entries: ReviewPathEntry[] = [...INVARIANT_SIGNALS, ...REVIEW_HAZARDS.hazards];
   if (i3Paths.length > 0) entries.push({ id: 'i3', text: 'Repository I3 path.', path_visible: true, paths: i3Paths });
-  return pathHits(entries, paths).map(hit => ({ signal: hit.id, path: hit.path }));
+  return uncleared(pathHits(entries, paths), cleared).map(hit => ({ signal: hit.id, path: hit.path }));
 }

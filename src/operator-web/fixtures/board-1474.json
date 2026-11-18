@@ -334,6 +334,7 @@
         "src/effects/terminal/herdr-core.ts",
         "tests/effects/herdr-core-transport.test.ts"
       ],
+      "cleared_hazard_paths": [],
       "required_check": {
         "status": "success",
         "completed_at": "2026-11-02T21:10:01Z",
@@ -456,6 +457,7 @@
         "tests/unit/helper-projection-drift.test.ts",
         "tests/unit/pane-status.test.ts"
       ],
+      "cleared_hazard_paths": [],
       "required_check": {
         "status": "missing",
         "contexts": [
@@ -558,6 +560,7 @@
         "tests/herdr-runtime-pin.test.ts",
         "tests/herdr-task-lifecycle.test.ts"
       ],
+      "cleared_hazard_paths": [],
       "required_check": {
         "status": "missing",
         "contexts": [

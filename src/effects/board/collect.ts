@@ -7,7 +7,7 @@ import {
 import { ADVISOR_SEAT } from '../../core/board/advisor-seat';
 import { sha256Hex } from '../../core/evidence/sha256';
 import { STALLED_WORKING_MS } from '../../core/board/attention';
-import { readReviewI3Paths } from '../../core/board/hazards';
+import { isAllowedEditPath, readReviewI3Paths, workflowEditAllowed } from '../../core/board/hazards';
 import type { BoardPullRequestTierEvidenceV1 } from '../../core/board/review-rules';
 import {
   BOARD_PAGE, BOARD_PARENT_COMMENT_PAGES, BOARD_SUB_ISSUE_PAGES, BoardSourceError, decodeParentRead, decodePullRequestsRead, parentCommentsPreviousCursor, parentReadNextCursor, type BoardParentReadV1, type BoardPullRequestReadV1,
@@ -274,12 +274,17 @@ const PULL_REQUEST_FILE_PAGE = 100;
 /** The REST pull request files list stops at 3000 files. */
 const PULL_REQUEST_FILE_LIMIT = 3000;
 
-/** The source path of each renamed file of a pull request, from its REST files paged by its changed-file count; null when a read fails or the pages do not hold that count. */
-function renameSources(input: BoardCollectInput, repository: string, read: BoardPullRequestReadV1): string[] | null {
+interface PullRequestFile {
+  readonly path: string;
+  readonly modified: boolean;
+  readonly previous_path: string | null;
+}
+
+/** The REST files of a pull request, paged by its changed-file count; null when a read fails or the pages do not hold that count. */
+function pullRequestFiles(input: BoardCollectInput, repository: string, read: BoardPullRequestReadV1): PullRequestFile[] | null {
   const count = read.readiness_inputs.changed_files;
   if (count > PULL_REQUEST_FILE_LIMIT) return null;
-  const sources: string[] = [];
-  let seen = 0;
+  const files: PullRequestFile[] = [];
   for (let page = 1; page <= Math.ceil(count / PULL_REQUEST_FILE_PAGE); page++) {
     const result = runGh(input, ['api', '--hostname', 'github.com', `repos/${repository}/pulls/${read.number}/files?per_page=${PULL_REQUEST_FILE_PAGE}&page=${page}`]);
     let entries: unknown;
@@ -289,19 +294,55 @@ function renameSources(input: BoardCollectInput, repository: string, read: Board
       return null;
     }
     if (!Array.isArray(entries)) return null;
-    for (const entry of entries as { filename?: unknown; previous_filename?: unknown }[]) {
+    for (const entry of entries as { filename?: unknown; status?: unknown; previous_filename?: unknown }[]) {
       if (typeof entry?.filename !== 'string') return null;
-      seen += 1;
-      if (typeof entry.previous_filename === 'string') sources.push(entry.previous_filename);
+      files.push({ path: entry.filename, modified: entry.status === 'modified', previous_path: typeof entry.previous_filename === 'string' ? entry.previous_filename : null });
     }
   }
-  return seen === count ? sources : null;
+  return files.length === count ? files : null;
 }
 
-/** The diff evidence of one open pull request: the rename sources, read only while I3 globs exist (#3187). */
+/** The parsed YAML of a file at a commit; null when the read fails, GitHub returns no inline content, or the text does not parse. */
+function yamlAt(input: BoardCollectInput, repository: string, path: string, sha: string): { readonly value: unknown } | null {
+  const result = runGh(input, ['api', '--hostname', 'github.com', `repos/${repository}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${sha}`]);
+  try {
+    const body = result.status === 0 ? JSON.parse(result.stdout) as { type?: unknown; encoding?: unknown; content?: unknown } : null;
+    if (body?.type !== 'file' || body.encoding !== 'base64' || typeof body.content !== 'string') return null;
+    return { value: Bun.YAML.parse(Buffer.from(body.content, 'base64').toString('utf-8')) };
+  } catch {
+    return null;
+  }
+}
+
+/** The merge base of a pull request's base and head commits, the old side of its REST file diff; null when the compare read fails. */
+function mergeBase(input: BoardCollectInput, repository: string, read: BoardPullRequestReadV1): string | null {
+  const result = runGh(input, ['api', '--hostname', 'github.com', `repos/${repository}/compare/${read.base_sha}...${read.head_sha}?per_page=1`]);
+  try {
+    const sha: unknown = result.status === 0 ? (JSON.parse(result.stdout) as { merge_base_commit?: { sha?: unknown } }).merge_base_commit?.sha : null;
+    return typeof sha === 'string' && /^[0-9a-f]{40}$/u.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The diff evidence of one open pull request (#3187): the rename sources, read only while I3 globs exist, and the modified workflow
+ * files that the edit allowlist clears, from their YAML at the merge base and the head commit. The base tip can hold changes that the
+ * pull request does not make, so it is not the old side. A failed read clears no file.
+ */
 function tierEvidence(input: BoardCollectInput, repository: string, read: BoardPullRequestReadV1, i3: readonly string[] | null): BoardPullRequestTierEvidenceV1 {
-  if (read.files === null || i3 === null || i3.length === 0) return { rename_sources: [] };
-  return { rename_sources: renameSources(input, repository, read) };
+  const renames = i3 !== null && i3.length > 0;
+  if (read.files === null || (!renames && !read.files.some(isAllowedEditPath))) return { rename_sources: [], cleared_paths: [] };
+  const files = pullRequestFiles(input, repository, read);
+  const candidates = (files ?? []).filter(file => file.modified && isAllowedEditPath(file.path));
+  const old = candidates.length === 0 ? null : mergeBase(input, repository, read);
+  const cleared = old === null ? [] : candidates.flatMap((file) => {
+    const base = yamlAt(input, repository, file.path, old);
+    const head = base === null ? null : yamlAt(input, repository, file.path, read.head_sha);
+    return base !== null && head !== null && workflowEditAllowed(file.path, base.value, head.value) ? [file.path] : [];
+  });
+  const sources = files === null ? null : files.flatMap(file => (file.previous_path === null ? [] : [file.previous_path]));
+  return { rename_sources: renames ? sources : [], cleared_paths: cleared };
 }
 
 function tooling(input: BoardCollectInput): BoardToolingV1 {

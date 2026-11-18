@@ -281,6 +281,11 @@ function sizeExempt(read: BoardPullRequestReadV1, files: readonly string[]): boo
 export interface BoardPullRequestTierEvidenceV1 {
   /** The source path of each renamed file; null when the PR files read failed. Read only while I3 globs exist. */
   readonly rename_sources: readonly string[] | null;
+  /**
+   * The modified workflow files whose diff the board read at both commits and proved on the workflow edit allowlist
+   * (`workflowEditAllowed`). A failed or incomplete read proves no file, so its `.github/**` hit stays.
+   */
+  readonly cleared_paths: readonly string[];
 }
 
 /** The review evidence of a board read: the I3 globs of the default-branch policy and the diff evidence of each open pull request. */
@@ -291,14 +296,20 @@ export interface BoardReviewEvidenceV1 {
 }
 
 /** A closed pull request takes no review, so the board reads no diff evidence for it and its path list alone sets its tier. */
-const NO_DIFF_EVIDENCE: BoardPullRequestTierEvidenceV1 = { rename_sources: [] };
+const NO_DIFF_EVIDENCE: BoardPullRequestTierEvidenceV1 = { rename_sources: [], cleared_paths: [] };
+
+/** The paths of a pull request that the workflow edit allowlist cleared; the tier and R3 read the same list. */
+export function clearedHazardPaths(read: BoardPullRequestReadV1, evidence: BoardReviewEvidenceV1): readonly string[] {
+  return (read.state === 'open' ? evidence.pull_requests.get(read.number) : NO_DIFF_EVIDENCE)?.cleared_paths ?? [];
+}
 
 /**
  * The one effective tier of a pull request, for the Low acceptance path and the review planner alike; High takes the second review
  * row (#3190 section 2.3). High, whatever the labels say: a changed path, or the source of a renamed path, on the I1/I2 High-list
- * signals, on a path-visible change hazard (`.github/**`) or on a repository I3 glob. Incomplete evidence can hide such a hit, so it
+ * signals, on a path-visible change hazard (`.github/**`, except a file that the workflow edit allowlist cleared) or on a repository
+ * I3 glob. Incomplete evidence can hide such a hit, so it
  * sets High too: an incomplete file list, an I3 list that the board could not read, or no rename sources while I3 globs exist. Any
- * other High-list hit sets at least Medium; R3 and R5 name the labels to fix. Otherwise null
+ * other High-list hit, or a cleared workflow edit, sets at least Medium; R3 and R5 name the labels to fix. Otherwise null
  * unless every linked issue (the parent excluded) is on the board with a tier label. Low labels on a fix of more than 50 changed lines,
  * or of unknown size, give Medium.
  */
@@ -308,12 +319,12 @@ export function effectiveTier(read: BoardPullRequestReadV1, closes: readonly num
   const i3 = evidence.i3_paths;
   if (files === null || i3 === null || diff === undefined) return 'high';
   if (i3.length > 0 && diff.rename_sources === null) return 'high';
-  if (pathSecondReviewHits([...files, ...(diff.rename_sources ?? [])], i3).length > 0) return 'high';
+  if (pathSecondReviewHits([...files, ...(diff.rename_sources ?? [])], i3, diff.cleared_paths).length > 0) return 'high';
   const linked = [...new Set([...closes, ...refs])].filter(number => number !== parent.parent.number);
   const known = linked.map(number => tiers.get(number) ?? null);
   if (linked.length === 0 || known.includes(null)) return null;
   if (known.includes('high')) return 'high';
-  if (known.includes('medium') || pathHighHits(files).length > 0) return 'medium';
+  if (known.includes('medium') || pathHighHits(files).length > 0 || diff.cleared_paths.length > 0) return 'medium';
   return sizeExempt(read, files) || (read.changed_lines !== null && read.changed_lines <= LOW_FIX_MAX_LINES) ? 'low' : 'medium';
 }
 

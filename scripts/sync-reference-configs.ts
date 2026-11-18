@@ -75,6 +75,11 @@ function pathCell(entry: ReviewPathEntry): string {
   return entry.path_visible ? entry.paths.map((path) => `\`${path}\``).join(", ") : "None (`path_visible: false`)";
 }
 
+function quoted(values: readonly string[]): string {
+  const codes = values.map((value) => `\`${value}\``);
+  return codes.length === 1 ? codes[0]! : `${codes.slice(0, -1).join(", ")} or ${codes.at(-1)}`;
+}
+
 function hazardTable(list: ReviewHazardsV1): string {
   return [
     "The board rule R3 reads only the rows with `path_visible: true`: a changed path that matches one of their patterns is a hit. Reviewers apply every row.",
@@ -82,6 +87,8 @@ function hazardTable(list: ReviewHazardsV1): string {
     "| Hazard | Paths that R3 reads |",
     "| --- | --- |",
     ...list.hazards.map((hazard) => `| ${hazard.text} | ${pathCell(hazard)} |`),
+    "",
+    `R3 and the tier skip a \`${list.allowed_edits.hazard}\` hit on a modified file that matches ${quoted(list.allowed_edits.paths)} when every YAML key that the diff changes is on or under ${quoted(list.allowed_edits.keys)} (\`*\` matches one key or list index). The board reads the file at the merge base and the head commit. A cleared edit is at least Medium. An added, removed or renamed file, another changed key, and a failed read or parse stay High.`,
   ].join("\n");
 }
 
