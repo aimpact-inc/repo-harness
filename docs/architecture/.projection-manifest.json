@@ -5,7 +5,7 @@
   "layoutVersion": "archcontext.docs-layout/v1",
   "generatedFrom": {"codeGraphPackage":"@colbymchenry/codegraph","codeGraphVersion":"1.6.2"},
   "semanticBaseline": {
-    "modelDigest": "sha256:d278226fd2a22f433ac9ecda0d244d8f80ef3b1233395a5e6fce998b053cf119",
+    "modelDigest": "sha256:55d07f6ce6209a629f1819270e3fd363970d0067e0090c5972e4060a3c70c9e7",
     "capabilities": [
       {
         "capabilityId": "capability.organization.board",
@@ -328,7 +328,7 @@
           "component.hook-adapters.session-lifecycle",
           "component.hook-adapters.session-lifecycle-effects"
         ],
-        "semanticFingerprint": "sha256:0f2c9aa6558acd24e610fd1ca4c4817cd8289c036324ab09790292a5005af82a",
+        "semanticFingerprint": "sha256:ae5d38956095f4fa8fbb33be5b9f4984bd787d27a7100d3154dba5fbf94bde20",
         "flowProofFingerprint": "sha256:e507615812a16190c07439062185cea1005eaea3d76a311f36ce4a1d5a2c2b7e",
         "proofStatus": {
           "p1": "proven",
@@ -340,10 +340,10 @@
           "interfaces": "sha256:6482c8858910fa7578e9ea2f627fbad41bc3c33d7457e4aeb5b33493252416b7",
           "lifecycle": "sha256:eb244b13e3b8a271dbfd571b7697a148f061adfbb7846de3edb2187617d1d720",
           "names": "sha256:75c264cbd11cdf95e0fec765b3dafa335214ec2b8937d3a58f852d3229e28243",
-          "ownership": "sha256:14ef1a3911d310db736a82b8ef60874d2285fc083d30389ff112b36c653ae6d6",
+          "ownership": "sha256:f3d67af95effc693ae94e8b0ab5f915bd452c0130d0905681d5d17bc8f6d0814",
           "placement": "sha256:749dcb9986687da6611b86c34e9c1e3f02989bc3c7600ccebdf5cac3cb81619c",
           "relations": "sha256:e1211194ee30eb44f447d062a40549a4d349ad7b692f6e0c6fee6f8c18b5f4ef",
-          "responsibilities": "sha256:c2a577b33162ab43c405b588afec21c6483f416f5f100271fc8d7fdb08bc3521",
+          "responsibilities": "sha256:59ce1e771d9ac259683dbe7e13a745c67b40c1a387e6de519e38f59ef01a191a",
           "riskBoundaries": "sha256:74d7e78878e775e049f27c622240f825d2e010ab96a98f026d9bf6e1714baccf"
         },
         "selectorEvidenceDigest": "sha256:679ab5fa35d2615a0f580505a905d70c692de5f845ccef230d0b0c47137f9ce7"
@@ -780,7 +780,7 @@
     "projection_target.entity.capability-runtime-harness-global-runtime-reconciliation":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.global-runtime-reconciliation","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/global-runtime-reconciliation.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:b415f827cfef5c797b793e79562a214ca3471d551b17f8b699f15a9920ed69aa"},
     "projection_target.entity.capability-runtime-harness-hook-adapters":
-      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.hook-adapters","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/hook-adapters.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:5d251cfa58870aa583cfabf06e316cf92cc94146fabcf6d1efed13dbd1f4ebd9"},
+      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.hook-adapters","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/hook-adapters.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:ad322298d36b8e4ad127387b44adf95eee921a12c6aa5ff21fae7413db8e7c9d"},
     "projection_target.entity.capability-runtime-harness-mcp-sidecar":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.mcp-sidecar","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/mcp-sidecar.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:632a8c4632aacc085a23cf9ff38c30e5bb1b35313691d69bd9aded9b17ef8bd7"},
     "projection_target.entity.capability-runtime-harness-operator":
