@@ -367,6 +367,20 @@ function writeReadyOfficialCodexPluginCli(temporaryRoot: string, fakeBin: string
   ].join('\n'));
 }
 
+/**
+ * List every entry under `root`, but stop at a symbolic link instead of walking its target.
+ * The global package fixture at `.bun/install/global/node_modules/repo-harness` links into the
+ * checkout, so walking it would list files that parallel test processes write there, such as
+ * junit XML under `.ai/harness/runs/junit/`. The link itself stays in the listing.
+ */
+function listTreeWithoutSymlinkDescent(root: string, prefix = ''): string[] {
+  return readdirSync(prefix ? join(root, prefix) : root, { withFileTypes: true }).flatMap((entry) => {
+    const relative = prefix ? join(prefix, entry.name) : entry.name;
+    if (entry.isSymbolicLink() || !entry.isDirectory()) return [relative];
+    return [relative, ...listTreeWithoutSymlinkDescent(root, relative)];
+  });
+}
+
 function sanitizedChildEnv(home: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun') };
   // Machine shells (zshenv) can export an explicit node runtime authority that
@@ -2676,7 +2690,9 @@ exit 0
       mkdirSync(fakeBin, { recursive: true });
       writeFileSync(join(fakeBin, 'bun'), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${bunLog}"\nexit 0\n`);
       chmodSync(join(fakeBin, 'bun'), 0o755);
-      const before = readdirSync(home, { recursive: true }).map(String).sort();
+      const before = listTreeWithoutSymlinkDescent(home).sort();
+      // The fixture link stays listed, so a missing global package cannot pass as an unchanged home.
+      expect(before).toContain(join('.bun', 'install', 'global', 'node_modules', 'repo-harness'));
       const res = spawnSync(process.execPath, [CLI, 'update', '--dry-run', '--json', '--target', 'claude', '--override', `${settings}#statusLine`], {
         cwd: tmp, encoding: 'utf-8',
         env: { ...env, PATH: `${fakeBin}:${process.env.PATH ?? ''}`, REPO_HARNESS_BUN_EXECUTABLE: join(fakeBin, 'bun'), BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0' },
@@ -2686,7 +2702,7 @@ exit 0
       expect(output.candidate_changes).toBe('unavailable');
       expect(output.host_config.items).toContainEqual({ path: realpathSync(settings), selector: 'statusLine', action: 'override' });
       expect(existsSync(bunLog)).toBe(false);
-      expect(readdirSync(home, { recursive: true }).map(String).sort()).toEqual(before);
+      expect(listTreeWithoutSymlinkDescent(home).sort()).toEqual(before);
       // The working directory gets no repository write either.
       expect(readdirSync(tmp).sort()).toEqual(['bin', 'home']);
     } finally {
