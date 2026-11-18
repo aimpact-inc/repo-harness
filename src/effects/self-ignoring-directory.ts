@@ -6,10 +6,14 @@ import { join } from 'node:path';
 export const SELF_IGNORE_NAME = '.gitignore';
 const SELF_IGNORE_CONTENT = '*\n';
 
-function isGuard(path: string): boolean | null {
+/**
+ * The one test for an rh guard, for the writer and for every reader that
+ * skips it: a regular file (by `lstat`) with exactly the guard bytes. Any other
+ * entry named `.gitignore` is the user's.
+ */
+export function isSelfIgnoreGuard(path: string): boolean {
   const stat = lstatSync(path, { throwIfNoEntry: false });
-  if (!stat) return null;
-  return stat.isFile() && readFileSync(path, 'utf8') === SELF_IGNORE_CONTENT;
+  return stat !== undefined && stat.isFile() && readFileSync(path, 'utf8') === SELF_IGNORE_CONTENT;
 }
 
 /**
@@ -27,9 +31,8 @@ export function selfIgnoringRefusal(directory: string): string | null {
   const real = linked ? realpathSync.native(directory) : directory;
   if (!lstatSync(real).isDirectory()) return `rh storage path is not a directory: ${directory}`;
   const guard = join(real, SELF_IGNORE_NAME);
-  const present = isGuard(guard);
-  if (present === true) return null;
-  if (present === false) return `${guard} is not the rh guard ("*"); rh writes no copy into ${directory}. Move that file, then run again`;
+  if (isSelfIgnoreGuard(guard)) return null;
+  if (lstatSync(guard, { throwIfNoEntry: false })) return `${guard} is not the rh guard ("*"); rh writes no copy into ${directory}. Move that file, then run again`;
   if (linked) return `${directory} links to ${real}, which rh does not own; rh writes no copy there. Create ${guard} with the single line "*", or remove the link, then run again`;
   return null;
 }
@@ -47,7 +50,7 @@ export function ensureSelfIgnoringDirectory(directory: string): void {
   const refused = selfIgnoringRefusal(directory);
   if (refused !== null) throw new Error(refused);
   const guard = join(directory, SELF_IGNORE_NAME);
-  if (isGuard(guard) === true) return;
+  if (isSelfIgnoreGuard(guard)) return;
   const temporary = join(directory, `${SELF_IGNORE_NAME}.${randomUUID()}.tmp`);
   const fd = openSync(temporary, 'wx', 0o600);
   try {
@@ -58,7 +61,7 @@ export function ensureSelfIgnoringDirectory(directory: string): void {
     try { linkSync(temporary, guard); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      if (isGuard(guard) !== true) throw new Error(selfIgnoringRefusal(directory) ?? `${guard} appeared while rh wrote its guard`);
+      if (!isSelfIgnoreGuard(guard)) throw new Error(selfIgnoringRefusal(directory) ?? `${guard} appeared while rh wrote its guard`);
     }
   } finally { rmSync(temporary, { force: true }); }
 }

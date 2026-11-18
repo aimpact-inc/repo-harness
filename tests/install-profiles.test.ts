@@ -926,8 +926,14 @@ describe('install selection', () => {
     const legacy = join(transactions, 'install-legacy');
     writePath(join(legacy, 'owner.json'), JSON.stringify({ pid: killed.pid, start_time: null, paths: [host] }));
     writeFileSync(join(legacy, '0'), 'retained earlier copy\n');
+    // The same dead owner with a user-edited `.gitignore`: only the exact rh guard goes with a settled orphan (#2854).
+    const edited = join(transactions, 'install-edited');
+    writePath(join(edited, 'owner.json'), readFileSync(join(transactions, orphan!, 'owner.json'), 'utf8'));
+    writeFileSync(join(edited, '.gitignore'), '*\nmine/\n');
+    expect(readFileSync(join(transactions, orphan!, '.gitignore'), 'utf8')).toBe('*\n');
     commitInstallHostTransaction(beginInstallHostTransaction(installProfileTransactionPaths(env), env));
     expect(existsSync(join(transactions, orphan!))).toBe(false);
+    expect(readFileSync(join(edited, '.gitignore'), 'utf8')).toBe('*\nmine/\n');
     expect(readFileSync(host, 'utf8')).toBe('user after\n');
     expect(readFileSync(join(legacy, '0'), 'utf8')).toBe('retained earlier copy\n');
     expect(existsSync(hostConfigPaths(env).vault)).toBe(false);

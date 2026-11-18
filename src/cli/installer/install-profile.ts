@@ -4,7 +4,7 @@ import wazaRules from "../../core/skill-surface/waza-shared-rules.json";
 import { bunGlobalPackageRoot, expectedSkillProjections } from './skill-projection';
 import { configurationReceiptPath } from './configuration-ownership';
 import { hostConfigPaths, putVault, resolveHostPath } from '../../effects/host-config/store';
-import { ensureSelfIgnoringDirectory, SELF_IGNORE_NAME } from '../../effects/self-ignoring-directory';
+import { ensureSelfIgnoringDirectory, isSelfIgnoreGuard, SELF_IGNORE_NAME } from '../../effects/self-ignoring-directory';
 import { openHostConfigGate, planPathRevert, rollbackHostConfigTransaction } from '../../effects/host-config/gate';
 import { namingTomlFile } from '../../core/host-config/toml-fragment';
 import { migrateCodexConfigRecords } from './codex-config-migration';
@@ -596,7 +596,7 @@ function settleOrphanedTransactions(transactionRoot: string, env: NodeJS.Process
       const host = /^\d+$/.test(entry) ? owner.paths[Number(entry)] : undefined;
       if (host !== undefined && installProfileTransactionPaths(env).includes(host)) settleTransactionCopy(join(directory, entry), host, env);
     }
-    if (readdirSync(directory).every((entry) => entry === TRANSACTION_OWNER || entry === RETIRED_STAGED_SKILLS || entry === SELF_IGNORE_NAME)) rmSync(directory, { recursive: true, force: true });
+    if (readdirSync(directory).every((entry) => entry === TRANSACTION_OWNER || entry === RETIRED_STAGED_SKILLS || (entry === SELF_IGNORE_NAME && isSelfIgnoreGuard(join(directory, entry))))) rmSync(directory, { recursive: true, force: true });
     else process.stderr.write(`[install] kept incomplete transaction for recovery: ${directory}\n`);
   }
 }

@@ -129,10 +129,17 @@ describe('artifact retention selection', () => {
   test('fs-transaction backups past the window leave for the archive root and recent ones stay', () => {
     const root = fixture('.ai/harness/backups/\n.ai/harness/archive/\n');
     const backups = '.ai/harness/backups/fs-transaction';
-    // A newer storage guard is not content: the `removed/` that a rollback emptied counts by its own mtime (#2854 R3).
-    seed(root, `${backups}/1700000000000-42-1/removed/.gitignore`, 1);
-    seed(root, `${backups}/1700000000000-42-1/manifest.json`, 45);
-    utimesSync(join(root, backups, '1700000000000-42-1/removed'), (NOW - 45 * DAY_MS) / 1000, (NOW - 45 * DAY_MS) / 1000);
+    // A newer rh guard is not content: the `removed/` that a rollback emptied counts by its own mtime (#2854 R3).
+    // A user-edited `.gitignore` there is content and keeps its transaction recent.
+    const days = (n: number) => (NOW - n * DAY_MS) / 1000;
+    for (const [transaction, bytes] of [['1700000000000-42-1', '*\n'], ['1700000000000-42-2', 'node_modules/\n']] as const) {
+      seed(root, `${backups}/${transaction}/manifest.json`, 45);
+      mkdirSync(join(root, backups, transaction, 'removed'));
+      writeFileSync(join(root, backups, transaction, 'removed/.gitignore'), bytes);
+      utimesSync(join(root, backups, transaction, 'removed/.gitignore'), days(1), days(1));
+      utimesSync(join(root, backups, transaction, 'removed'), days(45), days(45));
+      utimesSync(join(root, backups, transaction), days(45), days(45));
+    }
     seed(root, `${backups}/AGENTS.md.1700000000000-42-1.bak`, 45);
     seed(root, `${backups}/1790000000000-43-1/manifest.json`, 2);
 
@@ -142,9 +149,9 @@ describe('artifact retention selection', () => {
       ['transaction-backups', `${backups}/1700000000000-42-1`],
       ['transaction-backups', `${backups}/AGENTS.md.1700000000000-42-1.bak`],
     ]);
-    expect(report.skipped.map((entry) => [entry.path, entry.reason])).toEqual([[`${backups}/1790000000000-43-1`, 'recent']]);
+    expect(report.skipped.map((entry) => [entry.path, entry.reason, entry.ageDays])).toEqual([[`${backups}/1700000000000-42-2`, 'recent', 1], [`${backups}/1790000000000-43-1`, 'recent', 2]]);
     expect(existsSync(join(root, DEFAULT_ARCHIVE_ROOT, backups, '1700000000000-42-1/manifest.json'))).toBe(true);
-    expect(readdirSync(join(root, backups))).toEqual(['1790000000000-43-1']);
+    expect(readdirSync(join(root, backups)).sort()).toEqual(['1700000000000-42-2', '1790000000000-43-1']);
   });
 
   test('archived entries past the archive window are deleted and the rest of the archive stays', () => {
