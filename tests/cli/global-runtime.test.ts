@@ -502,6 +502,7 @@ describe('Bun bootstrap record import', () => {
     { label: 'imports once; a second file of the same record adds nothing and goes', change: 'none' },
     { label: 'a binary that changed since the bootstrap gets no record, and the claim goes', change: 'binary' },
     { label: 'a malformed file stops with a named error and stays', change: 'malformed' },
+    { label: 'a recorded Bun that is gone does not block a bootstrap into another BUN_INSTALL', change: 'relocated' },
   ] as const)('%s', ({ change }) => {
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'bun-bootstrap-')));
     const env = { HOME: home };
@@ -531,6 +532,15 @@ describe('Bun bootstrap record import', () => {
       writeFileSync(file, JSON.stringify(bootstrap), { mode: 0o600 });
       expect(importBunBootstrapRecord(env)).toBe('already_recorded');
       expect([existsSync(file), readFileSync(ledgerFile)]).toEqual([false, ledger]);
+      if (change !== 'relocated') return;
+      // The old binary goes; the user bootstraps Bun again into another BUN_INSTALL.
+      rmSync(join(home, '.bun'), { recursive: true });
+      const moved = join(home, '.bun2', 'bin', 'bun');
+      mkdirSync(dirname(moved), { recursive: true });
+      writeFileSync(moved, 'bun 1.4.4\n');
+      writeFileSync(file, JSON.stringify({ ...bootstrap, path: moved, directories: [join(home, '.bun2')] }), { mode: 0o600 });
+      expect(importBunBootstrapRecord(env)).toBe('imported');
+      expect(JSON.parse(readFileSync(ledgerFile, 'utf8')).tools.bun).toEqual({ ...rest, directories: [join(home, '.bun2')], removable: false, paths: { [moved]: { committed: { type: 'file', sha256 } } } });
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

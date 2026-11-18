@@ -126,8 +126,9 @@ function bootstrapRecord(bytes: Buffer, file: string): { readonly path: string; 
  * once: a ledger record of the same path and hash is not added again, and the
  * file goes only after the ledger holds the record, so a stop between the two
  * imports nothing new. A binary that no longer holds the measured bytes gets
- * no record. A malformed file, or a ledger record of another Bun, stops with
- * a named error, and the file stays.
+ * no record. A recorded Bun whose binary is gone is replaced. A malformed
+ * file, or a ledger record of another Bun that is still there, stops with a
+ * named error, and the file stays.
  */
 export function importBunBootstrapRecord(env: NodeJS.ProcessEnv): 'imported' | 'already_recorded' | 'changed' | 'none' {
   const file = bunBootstrapRecordPath(env);
@@ -140,7 +141,11 @@ export function importBunBootstrapRecord(env: NodeJS.ProcessEnv): 'imported' | '
   // The claim holds only for the bytes that the bootstrap measured: a Bun that changed since then gets no record, and the claim goes.
   if (!sameCommitted(observePathEntry(key), record.paths[key]!.committed)) { rmSync(file); return 'changed'; }
   const ledger = readLedger(paths);
-  const existing = ledger.tools.bun;
+  let existing = ledger.tools.bun;
+  // A recorded Bun binary that is gone loses its claim before the conflict test, so a bootstrap into another
+  // BUN_INSTALL imports. The old record's PATH entry, profile text and registry key never granted an action: they
+  // stay on disk, unclaimed, and do not keep the old binary claim alive.
+  if (existing && Object.keys(existing.paths).every((path) => observePathEntry(path) === null)) existing = undefined;
   if (existing && JSON.stringify(existing.paths) !== JSON.stringify(record.paths)) {
     throw new HostConfigError('host_config_invalid_state', `the ledger records another Bun binary than the bootstrap record; the file stays: ${file}`);
   }
