@@ -22,7 +22,6 @@ import { currentProcessStartTime, readProcessStartTime } from '../../effects/loc
 const BASE_CHECKOUT_PREFIX = 'repo-harness-debt-base-';
 const BASE_CHECKOUT_OWNER = 'owner.json';
 const INTERRUPT_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
-const MAX_LOCK_WAIT_MS = 2_147_483_647;
 
 export interface ArchitectureDebtOutputV1 {
   kind: 'repo-harness-architecture-debt';
@@ -100,15 +99,20 @@ function cachedBaseDebt(repoRoot: string, sha: string, options: ArchctxProviderO
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
   // A holder runs CodeGraph init, archctx doctor and archctx complete, each bounded by the policy timeout, then the daemon stop.
-  const waitTimeoutMs = Math.min(4 * policy.timeoutMs, MAX_LOCK_WAIT_MS);
+  const waitTimeoutMs = 4 * policy.timeoutMs;
   try {
     return withExclusiveDirectoryLock(realpathSync(directory), `${name}.lock`, () => {
       const cached = readCachedBaseDebt(file, sha);
       if (cached) return cached;
       const report = measure();
       const temporary = `${file}.${randomUUID()}`;
-      writeFileSync(temporary, `${JSON.stringify({ sha, report })}\n`, { flag: 'wx', mode: 0o600 });
-      retryWindowsSharingRace(() => renameSync(temporary, file));
+      try {
+        writeFileSync(temporary, `${JSON.stringify({ sha, report })}\n`, { flag: 'wx', mode: 0o600 });
+        retryWindowsSharingRace(() => renameSync(temporary, file));
+      } catch (error) {
+        rmSync(temporary, { force: true });
+        throw error;
+      }
       return report;
     }, { reclaimStaleOwner: true, waitTimeoutMs });
   } catch (error) {
@@ -238,13 +242,16 @@ function closeBaseCheckout(repoRoot: string, parent: string, checkout: string, o
       for (const failure of report.failures) issues.push(`archctx daemon stop ${failure.stateDir ?? '(listing)'}: ${failure.code} ${failure.action}: ${failure.message}`);
     } catch (error) { issues.push(`archctx daemon stop: ${error instanceof Error ? error.message : String(error)}`); }
     const removed = gitSpawnSync(['-C', repoRoot, 'worktree', 'remove', '--force', checkout], { encoding: 'utf8' });
-    if (removed.status !== 0) issues.push(`git worktree remove: ${removed.stderr.trim()}`);
+    // A concurrent reaper may have removed the same orphan first.
+    if (removed.status !== 0 && existsSync(checkout)) issues.push(`git worktree remove: ${removed.stderr.trim()}`);
   }
+  // The owner record stays while the checkout stays, so a later run can still reap it.
+  if (existsSync(checkout)) return issues;
   try {
     rmSync(join(parent, BASE_CHECKOUT_OWNER), { force: true });
     rmdirSync(parent);
   }
-  catch (error) { issues.push(`remove ${parent}: ${error instanceof Error ? error.message : String(error)}`); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') issues.push(`remove ${parent}: ${error instanceof Error ? error.message : String(error)}`); }
   return issues;
 }
 
