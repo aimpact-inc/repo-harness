@@ -3,10 +3,10 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { initGitRepo, run, tmpWorkspace } from './helpers/repo-fixture';
-import { A12_NO_PR_MS, A13_IDLE_MS, A14_RED_MS, A15_FAIL_MS, A16_QUESTION_MS, A17_BLOCKED_MS, A20_STUCK_MS, BOARD_PRIORITY_ORDER, BOARD_RULE_PRIORITY, evaluateBoardAttention, renderAttentionText, type BoardPriority, type BoardRuleId } from '../src/core/board/attention';
+import { A12_NO_PR_MS, A13_IDLE_MS, A14_RED_MS, A15_FAIL_MS, A16_QUESTION_MS, A17_BLOCKED_MS, A20_STUCK_MS, STALLED_WORKING_MS, BOARD_PRIORITY_ORDER, BOARD_RULE_PRIORITY, evaluateBoardAttention, renderAttentionText, type BoardPriority, type BoardRuleId } from '../src/core/board/attention';
 import { WINDOW_WITH_WORKERS_MS, WINDOW_WITHOUT_WORKERS_MS, attentionFindingKey, planAttentionDeliveries, type AttentionSentV1 } from '../src/core/board/attention-delivery';
 import { attentionLogPath, attentionWatchDoctorCheck, runAttentionWindow, serviceTerminalRepository, startAttentionWatch } from '../src/effects/board/attention-watch';
-import { decodeBoard, type BoardHostPortsV1, type BoardItemV1, type BoardPullRequestV1, type BoardTerminalV1, type BoardV1 } from '../src/core/board/board';
+import { decodeBoard, seatScreenHash, type BoardHostPortsV1, type BoardItemV1, type BoardPullRequestV1, type BoardTerminalV1, type BoardV1 } from '../src/core/board/board';
 import { decodePlanBlock, PlanBlockError } from '../src/core/board/plan-block';
 import { decodeReviewHazards, pathHazardHits } from '../src/core/board/hazards';
 import type { PullRequestReadinessV2 } from '../src/core/publication/merge-readiness';
@@ -799,7 +799,8 @@ test('decoders refuse a missing or invalid plan revision, merge policy or seat b
     item({ claim: undefined }), item({ claim: { status: 'active', url: 'u' } }), ...[{ bundle: [1475], branch: null }, { bundle: null, branch: 7 }]
       .map(patch => item({ claim: { status: 'active', url: 'u', created_at: '2026-11-02T18:34:59Z', role: null, ...patch } })), item({ open_questions: { status: 'observed' } }), pull({ open_questions: undefined }), pull({ review_fail: { url: 'u' } }),
     pull({ review_records: undefined }), pull({ review_records: { status: 'observed', gatekeeper: 'x', reviewer: null } }), pull({ review_records: { status: 'observed', claude: null, codex: null, pi: null } }),
-    pull({ second_review: undefined }), pull({ second_review: 'maybe' }), pull({ gatekeeper_review: undefined }), pull({ gatekeeper_review: 'maybe' }), { ...recorded, reviewer_family: undefined }, { ...recorded, reviewer_family: '' }]) {
+    pull({ second_review: undefined }), pull({ second_review: 'maybe' }), pull({ gatekeeper_review: undefined }), pull({ gatekeeper_review: 'maybe' }), { ...recorded, reviewer_family: undefined }, { ...recorded, reviewer_family: '' },
+    { ...recorded, seat_liveness: undefined }, { ...recorded, seat_liveness: { status: 'observed', probes: [{ address: 't1', status_ms: 1, turn: 1, children: -1, screen_hash: null }] } }]) {
     expect(() => decodeBoard(invalid)).toThrow('invalid board');
   }
   for (const valid of [plan(null), plan(7), { ...recorded, acceptance_merge: 'unknown' }, { ...recorded, reviewer_family: null }, board(null), board('main')]) expect(decodeBoard(valid)).toEqual(valid);
@@ -945,7 +946,7 @@ test('each attention finding names its priority, and a delivery sorts the entrie
   // The priority has one source, and the record names every rule of the protocol.
   expect(BOARD_RULE_PRIORITY).toEqual({
     A1: 'P2', A3: 'P0', A4: 'P1', A5: 'P1', A6: 'P1', A7: 'P2', A8: 'P3', A9: 'P3', A10: 'P2', A11: 'P2',
-    A12: 'P1', A13: 'P1', A14: 'P2', A15: 'P2', A16: 'P1', A17: 'P1', A18: 'P2', A19: 'P1', A20: 'P2', A21: 'P1',
+    A12: 'P1', A13: 'P1', A14: 'P2', A15: 'P2', A16: 'P1', A17: 'P1', A18: 'P2', A19: 'P1', A20: 'P2', A21: 'P1', A22: 'P1',
     R1: 'P2', R2: 'P2', R3: 'P1', R4: 'P2', R5: 'P1', R7: 'P2',
   });
   expect(attention.findings.map(finding => [finding.rule, finding.priority])).toContainEqual(['A3', 'P0']);
@@ -1618,6 +1619,39 @@ test('rules A12 to A18 fire past their threshold with their message, not at it, 
   expect(messages(bundled(idle))).toEqual([]);
   expect(a4(statusOn1479(bundled(idle), '2000-01-01T00:00:00Z'))).toEqual([[[1477], [1494]]]);
   expect(a4(statusOn1479(bundled(idle), new Date(Date.parse(headAt) + MIN).toISOString()))).toEqual([]);
+});
+
+test('A22 flags a seat that works past the bound with no child process and the same screen as the read before; the collector probes only such seats', () => {
+  const recorded = replay();
+  const since = Date.parse(recorded.observed_at) - STALLED_WORKING_MS - 60_000;
+  const seat = { address: 't7', name: null, agent: 'pi', state: 'live', status: 'working', status_kind: null, status_msg: null, status_ms: since, turn: 3, where: 'repo-harness / 1',
+    branch: null, seat_status: 'observed', seat: 'worker', issue: 1477, pr: null } as BoardTerminalV1;
+  const screen = (text: string) => seatScreenHash(text);
+  const probe = (patch: Json = {}) => ({ address: 't7', status_ms: since, turn: 3, children: 0, screen_hash: screen('\u280b Working (5m 12s \u00b7 \u2193 2.1k tokens)'), ...patch });
+  const board = (probes: Json[]): BoardV1 => ({ ...recorded, execution: { status: 'observed', terminals: [seat] }, seat_liveness: { status: 'observed', probes: probes as never } });
+  const a22 = (current: BoardV1, previous: BoardV1 | null) => {
+    const attention = evaluateBoardAttention(current, previous);
+    return [attention.findings.filter(finding => finding.rule === 'A22').map(finding => [finding.route, finding.issues, finding.message]),
+      attention.unevaluated.filter(entry => entry.rule === 'A22').map(entry => [entry.reason, entry.subject])];
+  };
+  // Another spinner frame and elapsed time is the same screen; another token count is progress.
+  const later = probe({ screen_hash: screen('\u2819 Working (6m 40s \u00b7 \u2193 2.1k tokens)') });
+  expect(a22(board([probe()]), board([later]))).toEqual([[['orchestrator', [1477], 'worker t7 is working for 6 min with no child process and an unchanged screen since the read before; read the pane, it may be a stalled stream']], []]);
+  expect(a22(board([probe()]), board([probe({ screen_hash: screen('\u2819 Working (6m 40s \u00b7 \u2193 2.3k tokens)') })]))).toEqual([[], []]);
+  expect(a22(board([probe({ children: 1 })]), board([probe()]))).toEqual([[], []]);
+  expect(a22(board([probe()]), board([probe({ turn: 2 })]))).toEqual([[], []]);
+  expect(a22(board([probe()]), null)).toEqual([[], [['previous_read_missing', 't7']]]);
+  expect(a22(board([probe({ screen_hash: null })]), board([probe()]))).toEqual([[], [['screen_unavailable', 't7']]]);
+
+  // The collector reads the process table once and the screen of each seat past the bound only.
+  const read = (address: string, status_ms: number, pid: number) => ({ address, name: null, agent: 'pi', state: 'live', status: 'working', status_kind: null, status_msg: null,
+    status_ms, turn: 3, cwd: null, where: 'repo-harness / 1', pid, labels: { seat: 'worker', issue: '1477' } }) as const;
+  const screens: string[] = [];
+  const host: BoardHostPortsV1 = { ...boardHostPorts({ env: { PATH: '/nonexistent' } }),
+    seatTerminals: () => ({ status: 'observed', terminals: [read('t7', since, 4242), read('t8', Date.parse(recorded.observed_at) - 60_000, 4343)] }),
+    childProcessCounts: () => ({ status: 'observed', counts: new Map([[4343, 2]]) }),
+    seatRead: (address) => { screens.push(address); return { status: 'observed', text: '\u280b Working (5m 12s)', complete: true, why: null }; } };
+  expect([replay({ host }).seat_liveness, screens]).toEqual([{ status: 'observed', probes: [{ address: 't7', status_ms: since, turn: 3, children: 0, screen_hash: screen('\u2819 Working (9m 1s)') }] }, ['t7']]);
 });
 
 test('A19 fires for a done review seat whose pull request has no record of that seat after the seat status time', () => {
@@ -2420,7 +2454,7 @@ test('board closeout: proofs come first; a bound, clean, pushed seat closes and 
   git(unpushed, 'commit', '-q', '--allow-empty', '-m', 'local only');
   writeFileSync(join(edited, 'note.txt'), 'draft');
   const terminal = (address: string, cwd: string | null, labels: Record<string, string>, state: 'live' | 'finished' = 'live', seat: string | null = 'worker') => ({ address, name: null, agent: 'claude-code', state, status: 'done',
-    status_kind: null, status_msg: null, status_ms: null, turn: 1, cwd, where: 'repo-harness / #1474', labels: { ...(seat === null ? {} : { seat }), ...labels } });
+    status_kind: null, status_msg: null, status_ms: null, turn: 1, cwd, where: 'repo-harness / #1474', pid: null, labels: { ...(seat === null ? {} : { seat }), ...labels } });
   const terminals = [terminal('t1', clean, { issue: '11' }), terminal('t2', clean, { seat: 'gatekeeper', pr: '21' }), terminal('t3', join(root, 'gone-caller'), { seat: 'orchestrator' }, 'finished'),
     terminal('t4', kept, { issue: '12' }), terminal('t5', unpushed, { seat: 'reviewer', pr: '22' }), terminal('t6', kept, { issue: '12', pr: '99' }),
     terminal('t7', edited, { seat: 'gatekeeper', pr: '22' }), terminal('t8', main, { seat: 'reviewer', pr: '23' }), terminal('t9', main, { seat: 'reviewer', pr: '24' }),

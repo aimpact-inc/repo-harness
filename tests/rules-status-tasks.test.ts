@@ -23,7 +23,8 @@ const host: BoardHostPortsV1 = {
   hcVersion: () => ({ status: 'observed', version: '0.1.30' }),
   closeoutTerminals: () => { throw new Error('unexpected closeout'); },
   advisorSend: () => { throw new Error('unexpected send'); },
-  advisorRead: () => { throw new Error('unexpected advisor read'); },
+  seatRead: () => { throw new Error('unexpected seat read'); },
+  childProcessCounts: () => { throw new Error('unexpected process read'); },
   closeTerminal: () => { throw new Error('unexpected close'); },
 };
 

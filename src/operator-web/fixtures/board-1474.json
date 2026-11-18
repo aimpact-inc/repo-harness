@@ -1112,6 +1112,10 @@
       }
     ]
   },
+  "seat_liveness": {
+    "status": "observed",
+    "probes": []
+  },
   "daily_run": {
     "status": "observed",
     "run_url": "https://github.com/Ancienttwo/repo-harness/actions/runs/41358255043",

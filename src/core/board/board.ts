@@ -20,6 +20,7 @@ import {
   type OpenQuestionsV1,
 } from './source';
 import { isCiRepairIssueBody } from '../ci/test-report';
+import { sha256Hex } from '../evidence/sha256';
 import {
   acceptance,
   effectiveTier,
@@ -176,11 +177,41 @@ export interface BoardSeatTerminalReadV1 {
   readonly cwd: string | null;
   /** The Herdr.app `where` label; null when no Herdr.app pane shows the terminal. */
   readonly where: string | null;
+  /** The program's pid; null when hc reports none. Only the liveness probe reads it. */
+  readonly pid: number | null;
   readonly labels: { readonly seat?: string; readonly issue?: string; readonly pr?: string; readonly parent?: string };
 }
 
-/** A read terminal with its branch in place of its directory: the board carries no machine-local path (ADR-0002). */
-export type BoardSeatTerminalInputV1 = Omit<BoardSeatTerminalReadV1, 'cwd'> & { readonly branch: string | null };
+/** A read terminal with its branch in place of its directory and no pid: the board carries no machine-local path or process id (ADR-0002). */
+export type BoardSeatTerminalInputV1 = Omit<BoardSeatTerminalReadV1, 'cwd' | 'pid'> & { readonly branch: string | null };
+
+/**
+ * One liveness probe of a seat that reports `working` for longer than the stalled bound: the number of child processes of its program
+ * and the hash of its screen (`seatScreenHash`); `screen_hash` is null when the screen read failed, came back empty or incomplete.
+ * `status_ms` and `turn` bind the probe to one working status, so A22 compares two probes of the same turn only.
+ */
+export interface BoardSeatProbeV1 {
+  readonly address: string;
+  readonly status_ms: number;
+  readonly turn: number;
+  readonly children: number;
+  readonly screen_hash: string | null;
+}
+
+export type BoardSeatLivenessV1 =
+  | { readonly status: 'observed'; readonly probes: readonly BoardSeatProbeV1[] }
+  | { readonly status: 'unavailable'; readonly reason: string };
+
+/** The screen lines that a liveness probe reads. */
+export const SEAT_SCREEN_LINES = 40;
+const SPINNER_FRAMES = /[\u2800-\u28FF]/gu;
+/** Elapsed-time counters such as `12s`, `1m 05s`, `2h`, `340ms` and `03:12`; they move while a stream hangs. Token counters such as `↓ 2.1k` stay. */
+const ELAPSED_COUNTERS = /\b\d+(?:\.\d+)?\s?(?:ms|s|m|h)\b|\b\d{1,2}:\d{2}(?::\d{2})?\b/gu;
+
+/** The hash of a seat screen without its Braille spinner frames and elapsed-time counters, which change while the agent makes no progress. */
+export function seatScreenHash(text: string): string {
+  return sha256Hex(text.replace(SPINNER_FRAMES, '').replace(ELAPSED_COUNTERS, ''));
+}
 
 const POSITIVE = /^[1-9][0-9]*$/u;
 
@@ -220,9 +251,13 @@ export interface BoardHostPortsV1 {
   readonly advisorSend: (address: string, text: string) =>
     | { readonly status: 'sent'; readonly started: boolean | null; readonly turn: number }
     | { readonly status: 'unavailable'; readonly reason: string };
-  /** `hc read --lines <lines>` of the advisor terminal that the caller resolved from `seatTerminals` (#1756). */
-  readonly advisorRead: (address: string, lines: number) =>
+  /** `hc read --lines <lines>` of a seat terminal that the caller resolved from `seatTerminals`: the advisor transcript (#1756) and the liveness probe. */
+  readonly seatRead: (address: string, lines: number) =>
     | { readonly status: 'observed'; readonly text: string; readonly complete: boolean; readonly why: string | null }
+    | { readonly status: 'unavailable'; readonly reason: string };
+  /** The number of child processes of each process with children, from one process table read; unavailable where no `ps` runs. */
+  readonly childProcessCounts: () =>
+    | { readonly status: 'observed'; readonly counts: ReadonlyMap<number, number> }
     | { readonly status: 'unavailable'; readonly reason: string };
   /** `hc kill`, then `hc rm`, of a seat terminal that the post-merge closeout resolved from `closeoutTerminals` (#2005). */
   readonly closeTerminal: (address: string) =>
@@ -274,6 +309,8 @@ export interface BoardV1 {
   readonly pull_requests: readonly BoardPullRequestV1[];
   readonly path_owners: BoardPathOwnersV1;
   readonly execution: BoardExecutionV1;
+  /** Probes of the seats that work past the stalled bound; A22 compares them with the probes of the board read before. */
+  readonly seat_liveness: BoardSeatLivenessV1;
   readonly daily_run: BoardDailyRunV1;
   readonly tooling: BoardToolingV1;
 }
@@ -301,6 +338,7 @@ export interface BoardInputV1 {
   readonly required_contexts: ReadonlyMap<string, BoardRequiredContextsV1>;
   readonly path_owners: BoardPathOwnersV1;
   readonly execution: BoardExecutionV1;
+  readonly seat_liveness: BoardSeatLivenessV1;
   readonly daily_run: BoardDailyRunInputV1;
   readonly tooling: BoardToolingV1;
 }
@@ -345,6 +383,14 @@ function isOpenQuestions(value: unknown): boolean {
     && value.questions.every((question: unknown) => isRecord(question) && typeof question.url === 'string' && isTime(question.created_at));
 }
 
+function isSeatLiveness(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value.status === 'unavailable') return typeof value.reason === 'string';
+  return value.status === 'observed' && Array.isArray(value.probes) && value.probes.every((probe: unknown) => isRecord(probe) && typeof probe.address === 'string'
+    && Number.isSafeInteger(probe.status_ms) && Number.isSafeInteger(probe.turn) && Number.isSafeInteger(probe.children) && (probe.children as number) >= 0
+    && (probe.screen_hash === null || (typeof probe.screen_hash === 'string' && /^[0-9a-f]{64}$/u.test(probe.screen_hash))));
+}
+
 /** Refuse a board of another protocol or kind, or a board without a valid new value, at a process boundary (Surface contract, docs/adr/ADR-0002). */
 export function decodeBoard(value: unknown): BoardV1 {
   const board = value as Partial<BoardV1> | null;
@@ -357,6 +403,7 @@ export function decodeBoard(value: unknown): BoardV1 {
   }
   if (board.reviewer_family !== null && (typeof board.reviewer_family !== 'string' || board.reviewer_family === '')) throw new Error(`invalid board reviewer_family: ${String(board.reviewer_family)}`);
   if (board.execution?.status === 'observed') checkSeatTerminals(board.execution.terminals);
+  if (!isSeatLiveness(board.seat_liveness)) throw new Error('invalid board seat_liveness');
   for (const item of board.items ?? []) {
     if (!isIssueClaim(item.claim)) throw new Error(`invalid board claim on #${item.number}`);
     if (!isOpenQuestions(item.open_questions)) throw new Error(`invalid board open_questions on #${item.number}`);
@@ -497,6 +544,7 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
     pull_requests: Object.freeze(pullRequests),
     path_owners: input.path_owners,
     execution: input.execution,
+    seat_liveness: input.seat_liveness,
     daily_run: daily,
     tooling: input.tooling,
   });

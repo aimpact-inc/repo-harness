@@ -34,6 +34,8 @@ export const A15_FAIL_MS = 60 * MINUTE;
 export const A16_QUESTION_MS = 15 * MINUTE;
 /** A17: a blocked claim status is this old. */
 export const A17_BLOCKED_MS = 15 * MINUTE;
+/** A22: a seat reports `working` this long; the board collector probes only such seats. */
+export const STALLED_WORKING_MS = 5 * MINUTE;
 /** R1: this many open items are not in the latest plan. */
 export const R1_UNPLANNED_ITEMS = 3;
 /** R4: an accepted pull request in the merge order waits this long unmerged. */
@@ -43,7 +45,7 @@ const WORKER_SEATS = new Set<string>(WORKER_SEAT_IDS);
 const REVIEW_SEATS = new Set<string>(SEAT_IDS.filter(isReviewSeat));
 const RED_CONCLUSIONS = new Set(['failure', 'timed_out', 'startup_failure']);
 
-export type BoardRuleId = 'A1' | 'A3' | 'A4' | 'A5' | 'A6' | 'A7' | 'A8' | 'A9' | 'A10' | 'A11' | 'A12' | 'A13' | 'A14' | 'A15' | 'A16' | 'A17' | 'A18' | 'A19' | 'A20' | 'A21' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R7';
+export type BoardRuleId = 'A1' | 'A3' | 'A4' | 'A5' | 'A6' | 'A7' | 'A8' | 'A9' | 'A10' | 'A11' | 'A12' | 'A13' | 'A14' | 'A15' | 'A16' | 'A17' | 'A18' | 'A19' | 'A20' | 'A21' | 'A22' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R7';
 export type BoardAttentionRoute = 'orchestrator' | 'advisor';
 /** P0: a seat cannot continue. P1: a worker or an issue waits for the coordinator, or a High change has a lower tier. P2: a pull request or the plan waits. P3: housekeeping. */
 export type BoardPriority = 'P0' | 'P1' | 'P2' | 'P3';
@@ -57,7 +59,7 @@ export const BOARD_PRIORITY_ORDER: readonly BoardPriority[] = Object.freeze(['P0
  */
 export const BOARD_RULE_PRIORITY: Readonly<Record<BoardRuleId, BoardPriority>> = Object.freeze({
   A1: 'P2', A3: 'P0', A4: 'P1', A5: 'P1', A6: 'P1', A7: 'P2', A8: 'P3', A9: 'P3', A10: 'P2', A11: 'P2',
-  A12: 'P1', A13: 'P1', A14: 'P2', A15: 'P2', A16: 'P1', A17: 'P1', A18: 'P2', A19: 'P1', A20: 'P2', A21: 'P1',
+  A12: 'P1', A13: 'P1', A14: 'P2', A15: 'P2', A16: 'P1', A17: 'P1', A18: 'P2', A19: 'P1', A20: 'P2', A21: 'P1', A22: 'P1',
   R1: 'P2', R2: 'P2', R3: 'P1', R4: 'P2', R5: 'P1', R7: 'P2',
 });
 
@@ -90,6 +92,8 @@ export interface BoardAttentionV1 {
 
 interface Context {
   readonly board: BoardV1;
+  /** The board read before this one, which A22 compares with; null for a single read. */
+  readonly previous: BoardV1 | null;
   readonly now: number;
   readonly findings: BoardFindingV1[];
   readonly unevaluated: BoardUnevaluatedV1[];
@@ -320,6 +324,35 @@ function a21(context: Context): void {
     const subject = terminal.pr !== null ? ` of #${terminal.pr}` : terminal.issue !== null ? ` of #${terminal.issue}` : '';
     find(context, 'A21', { issues: terminal.issue === null ? [] : [terminal.issue], pull_requests: terminal.pr === null ? [] : [terminal.pr], terminals: [terminal.address] },
       `${terminal.seat} ${terminal.address}${subject} has no Herdr.app pane: give it one with herdr-app do terminal.keep '{"terminal":"${terminal.address}"}'`);
+  }
+}
+
+/**
+ * A22: a seat is stalled (#3182). It reports `working` for longer than `STALLED_WORKING_MS`, its program has no child process, and its
+ * screen hash without spinner frames and elapsed-time counters is the same as in the read before, in the same turn and status. The
+ * finding asks the orchestrator to look; nothing kills the seat.
+ */
+function a22(context: Context): void {
+  const liveness = context.board.seat_liveness;
+  if (liveness.status === 'unavailable') return skip(context, 'A22', liveness.reason);
+  const execution = context.board.execution;
+  const before = context.previous?.seat_liveness;
+  for (const probe of liveness.probes) {
+    if (context.now - probe.status_ms <= STALLED_WORKING_MS || probe.children > 0) continue;
+    if (probe.screen_hash === null) {
+      skip(context, 'A22', 'screen_unavailable', probe.address);
+      continue;
+    }
+    if (before?.status !== 'observed') {
+      skip(context, 'A22', 'previous_read_missing', probe.address);
+      continue;
+    }
+    const prior = before.probes.find(entry => entry.address === probe.address && entry.status_ms === probe.status_ms && entry.turn === probe.turn);
+    if (prior === undefined || prior.children > 0 || prior.screen_hash !== probe.screen_hash) continue;
+    const terminal = execution.status === 'observed' ? execution.terminals.find(entry => entry.address === probe.address) : undefined;
+    const seat = terminal?.seat_status === 'observed' ? terminal : null;
+    find(context, 'A22', { issues: seat?.issue == null ? [] : [seat.issue], pull_requests: seat?.pr == null ? [] : [seat.pr], terminals: [probe.address] },
+      `${seat?.seat ?? 'seat'} ${probe.address} is working for ${minutes(context.now - probe.status_ms)} min with no child process and an unchanged screen since the read before; read the pane, it may be a stalled stream`);
   }
 }
 
@@ -629,9 +662,10 @@ export function renderAttentionText(attention: BoardAttentionV1): string {
   return `${lines.join('\n')}\n`;
 }
 
-export function evaluateBoardAttention(board: BoardV1): BoardAttentionV1 {
-  const context: Context = { board, now: Date.parse(board.observed_at), findings: [], unevaluated: [] };
-  for (const rule of [a1, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, r1, r2, r3, r4, r5, r7]) rule(context);
+/** `previous`: the board read before this one; A22 needs it, and a single read lists each candidate seat of A22 as unevaluated. */
+export function evaluateBoardAttention(board: BoardV1, previous: BoardV1 | null = null): BoardAttentionV1 {
+  const context: Context = { board, previous, now: Date.parse(board.observed_at), findings: [], unevaluated: [] };
+  for (const rule of [a1, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, r1, r2, r3, r4, r5, r7]) rule(context);
   return Object.freeze({
     protocol: BOARD_ATTENTION_PROTOCOL,
     kind: BOARD_ATTENTION_KIND,

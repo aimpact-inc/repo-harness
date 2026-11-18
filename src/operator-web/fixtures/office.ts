@@ -86,7 +86,7 @@ export function officeBoard(now: number): BoardV1 {
       pullRequest(1311, 'feat/1311-seat-labels', done, accepted(ago(2)), ago(10)),
     ],
     path_owners: { status: 'observed', owners: [] },
-    execution: { status: 'observed', terminals },
+    execution: { status: 'observed', terminals }, seat_liveness: { status: 'observed', probes: [] },
     daily_run: { status: 'observed', run_url: url('actions/runs', 1), conclusion: 'success', created_at: ago(12), open_repair_issues: [] },
     tooling: { hc: { status: 'observed', version: '0.1.20', min_version: '0.1.20' }, herdr_app: { status: 'not_pinned' } },
   });
@@ -171,6 +171,7 @@ function sampleBoard(room: SampleRoom, repository: string, now: number): BoardV1
     ],
     path_owners: { status: 'observed', owners: [] },
     execution: { status: 'observed', terminals: room.workers.map(([agent, status], index) => ({ ...worker(now, `t${10 + index}`, agent ?? 'unknown', status, 100 + index, null, null), agent })) },
+    seat_liveness: { status: 'observed', probes: [] },
     daily_run: { status: 'observed', run_url: link('actions/runs', 1), conclusion: 'success', created_at: at, open_repair_issues: [] },
     tooling: { hc: { status: 'observed', version: '0.1.20', min_version: '0.1.20' }, herdr_app: { status: 'not_pinned' } },
   });

@@ -531,7 +531,7 @@ export function boardSeatTerminals(terminals: readonly (HcTerminal & { readonly 
   return terminals.filter(terminal => terminal.labels[RH_LABEL.service] === undefined).map(terminal => ({
     address: terminal.address, name: terminal.name, agent: terminal.agent, state: terminal.state, status: terminal.status?.state ?? null,
     status_kind: terminal.status?.kind ?? null, status_msg: terminal.status?.msg ?? null, status_ms: terminal.status_ms ?? null,
-    turn: terminal.turn, cwd: terminal.cwd ?? null, where: terminal.labels[HERDR_APP_LABEL.where] ?? null,
+    turn: terminal.turn, cwd: terminal.cwd ?? null, where: terminal.labels[HERDR_APP_LABEL.where] ?? null, pid: terminal.pid,
     labels: { seat: terminal.labels[RH_LABEL.seat], issue: terminal.labels[RH_LABEL.issue], pr: terminal.labels[RH_LABEL.pr], parent: terminal.labels[RH_LABEL.parent] },
   }));
 }
@@ -573,12 +573,22 @@ export function boardHostPorts(options: HerdrCoreOptions = {}): BoardHostPortsV1
         return unavailable(error);
       }
     },
-    advisorRead: (address, lines) => {
+    seatRead: (address, lines) => {
       try {
         return { status: 'observed', ...hcRead(address, lines, options) };
       } catch (error) {
         return unavailable(error);
       }
+    },
+    childProcessCounts: () => {
+      const ps = spawnSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8', env: { ...(options.env ?? process.env), LC_ALL: 'C' }, timeout: timeoutOf(options), maxBuffer: MAX_OUTPUT_BYTES });
+      if (ps.error !== undefined || ps.status !== 0) return { status: 'unavailable', reason: 'ps_unavailable' };
+      const counts = new Map<number, number>();
+      for (const line of ps.stdout.split('\n')) {
+        const match = /^\s*(\d+)\s+(\d+)\s*$/u.exec(line);
+        if (match !== null) counts.set(Number(match[2]), (counts.get(Number(match[2])) ?? 0) + 1);
+      }
+      return { status: 'observed', counts };
     },
     closeTerminal: (address) => {
       try {

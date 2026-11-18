@@ -5,7 +5,7 @@ import { AdvisorSeatError, advisorSeatSendFailure, readAdvisorSeat, sendToAdviso
 import { AttentionWatchError, attentionLogPath, runAttentionWindow, serviceTerminalRepository, startAttentionWatch } from '../../effects/board/attention-watch';
 import { evaluateBoardAttention, renderAttentionText } from '../../core/board/attention';
 import type { AttentionHostPortsV1, AttentionSentV1 } from '../../core/board/attention-delivery';
-import type { BoardHostPortsV1 } from '../../core/board/board';
+import type { BoardHostPortsV1, BoardV1 } from '../../core/board/board';
 import { BoardSourceError } from '../../core/board/source';
 import { BoardCollectError, collectBoard, collectBoardThrough, readRepositoryId } from '../../effects/board/collect';
 import { createKeyedSources } from '../../effects/board/keyed-sources';
@@ -358,7 +358,13 @@ async function watchAttention(options: AttentionOptions, host: BoardHostPortsV1,
     };
     // The sent slots live in this process only: a new watcher sends each open finding once.
     let sent: AttentionSentV1 = new Map();
-    for (;;) sent = await runAttentionWindow({ ...input, sent });
+    // A22 compares each board read with the one before; a window whose read failed keeps the older board.
+    let previous: BoardV1 | null = null;
+    for (;;) {
+      let read: BoardV1 | null = null;
+      sent = await runAttentionWindow({ ...input, collect: () => (read = input.collect()), previous, sent });
+      previous = read ?? previous;
+    }
   } catch (error) {
     if (!(error instanceof BoardCollectError || error instanceof BoardSourceError || error instanceof AttentionWatchError)) throw error;
     process.stderr.write(`${JSON.stringify({ ok: false, error: error.name, message: error.message })}\n`);
