@@ -88,8 +88,10 @@ export function runConfigGc(env: NodeJS.ProcessEnv, options: { readonly dryRun?:
     const run = (): GcResult => collectRetired(env, options);
     const result = options.dryRun ? run() : withRuntimeTransactionLock(globalRuntimeScope(env), () => { migrateInstallState(env); return run(); });
     const verb = options.dryRun ? 'would delete' : 'deleted';
-    return { exitCode: 0, json: result,
-      lines: [...result.deleted.map((path) => `[gc] ${verb} ${path}`), `[gc] ${result.deleted.length} ${verb}; ${result.waiting} retired copies younger than 30 days kept${options.dryRun ? ' (dry-run)' : ''}`] };
+    return { exitCode: result.changed.length ? 1 : 0, json: result,
+      lines: [...result.deleted.map((path) => `[gc] ${verb} ${path}`),
+        ...result.changed.map((path) => `[unresolved] ${path}: no longer the retired copy (edited or replaced); kept with its retirement record`),
+        `[gc] ${result.deleted.length} ${verb}; ${result.waiting} retired copies younger than 30 days kept${options.dryRun ? ' (dry-run)' : ''}`] };
   } catch (error) { return failure(error); }
 }
 

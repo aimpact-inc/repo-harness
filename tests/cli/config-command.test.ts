@@ -124,10 +124,10 @@ test('gc deletes a retired copy 30 days after its revert, and keeps a referenced
   expect(runConfigGc(f.env, { now: new Date(at + 31 * day) })).toMatchObject({ exitCode: 2, lines: [expect.stringContaining(`a kept install transaction can still need retired vault copies: ${transaction}`)] });
   expect(existsSync(copy(backup))).toBe(true);
   rmSync(transaction, { recursive: true });
-  expect(runConfigGc(f.env, { now: new Date(at + 29 * day) }).json).toEqual({ deleted: [], waiting: 3 });
-  expect(runConfigGc(f.env, { now: new Date(at + 31 * day), dryRun: true }).json).toEqual({ deleted: [copy(backup)], waiting: 0 });
+  expect(runConfigGc(f.env, { now: new Date(at + 29 * day) }).json).toEqual({ deleted: [], changed: [], waiting: 3 });
+  expect(runConfigGc(f.env, { now: new Date(at + 31 * day), dryRun: true }).json).toEqual({ deleted: [copy(backup)], changed: [], waiting: 0 });
   expect(existsSync(copy(backup))).toBe(true);
-  expect(runConfigGc(f.env, { now: new Date(at + 31 * day) }).json).toEqual({ deleted: [copy(backup)], waiting: 0 });
+  expect(runConfigGc(f.env, { now: new Date(at + 31 * day) }).json).toEqual({ deleted: [copy(backup)], changed: [], waiting: 0 });
   expect(readdirSync(vault).sort()).toEqual([live, kept, `sha256:${'c'.repeat(64)}`].map((reference) => reference.slice('sha256:'.length)).sort());
   expect(f.ledger().retired).toEqual([]);
 });

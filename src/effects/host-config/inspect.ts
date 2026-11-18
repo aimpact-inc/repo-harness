@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import { fileFormatOf, fragmentFormat } from '../../core/host-config/registry';
@@ -180,6 +180,8 @@ function liveReferences(ledger: HostConfigLedger): Set<Sha256> {
 export interface GcResult {
   /** Vault paths deleted (or, in a dry run, to delete). */
   readonly deleted: readonly string[];
+  /** Vault paths of due copies whose entry is no longer the retired bytes: kept, with their retirement records. */
+  readonly changed: readonly string[];
   /** Retired entries younger than 30 days. */
   readonly waiting: number;
 }
@@ -199,10 +201,22 @@ function keptTransactions(env: NodeJS.ProcessEnv): string[] {
 }
 
 /**
+ * The vault entry of a retired copy: `intact` when it is a regular file with
+ * the retired hash. A user can save edits into a copy that gc listed, or an
+ * editor can replace it; such an entry is `changed` and gc keeps it.
+ */
+function retiredEntry(path: string, sha256: Sha256): 'intact' | 'changed' | 'missing' {
+  const stat = lstatSync(path, { throwIfNoEntry: false });
+  if (!stat) return 'missing';
+  return stat.isFile() && sha256Prefixed(readFileSync(path)) === sha256 ? 'intact' : 'changed';
+}
+
+/**
  * Delete the vault copy of each retired entry 30 days after its revert, unless
- * a record references it again. Only retired entries are candidates: an
- * orphan copy, an unknown vault file and a recovery copy stay. The caller
- * holds the runtime lock.
+ * a record references it again or the entry is no longer the retired bytes.
+ * Only retired entries are candidates: an orphan copy, an unknown vault file
+ * and a recovery copy stay. The dry run and the apply check each entry the
+ * same way. The caller holds the runtime lock.
  */
 export function collectRetired(env: NodeJS.ProcessEnv, options: { readonly now?: Date; readonly dryRun?: boolean } = {}): GcResult {
   const kept = keptTransactions(env);
@@ -212,10 +226,14 @@ export function collectRetired(env: NodeJS.ProcessEnv, options: { readonly now?:
   const now = (options.now ?? new Date()).getTime();
   const live = liveReferences(ledger);
   const due = ledger.retired.filter((entry) => now - Date.parse(entry.at) >= RETENTION_MS);
-  const deleted = due.filter((entry) => !live.has(entry.sha256)).map((entry) => vaultPath(paths, entry.sha256));
-  if (options.dryRun || !due.length) return { deleted, waiting: ledger.retired.length - due.length };
+  const states = new Map(due.filter((entry) => !live.has(entry.sha256)).map((entry) => [entry, retiredEntry(vaultPath(paths, entry.sha256), entry.sha256)]));
+  const of = (state: 'intact' | 'changed') => [...states].filter(([, current]) => current === state).map(([entry]) => entry);
+  const result = { deleted: of('intact').map((entry) => vaultPath(paths, entry.sha256)), changed: of('changed').map((entry) => vaultPath(paths, entry.sha256)), waiting: ledger.retired.length - due.length };
+  const changed = new Set(of('changed'));
+  const dropped = due.filter((entry) => !changed.has(entry));
+  if (options.dryRun || !dropped.length) return result;
   // The ledger drops the entries first: a stop before the deletion leaves an orphan copy, never a record of a missing one.
-  writeLedger(paths, { ...ledger, retired: ledger.retired.filter((entry) => !due.includes(entry)) });
-  for (const path of deleted) rmSync(path, { force: true });
-  return { deleted, waiting: ledger.retired.length - due.length };
+  writeLedger(paths, { ...ledger, retired: ledger.retired.filter((entry) => !dropped.includes(entry)) });
+  for (const path of result.deleted) rmSync(path, { force: true });
+  return result;
 }

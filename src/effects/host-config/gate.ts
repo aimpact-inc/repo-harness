@@ -686,6 +686,8 @@ interface FragmentRevert {
   readonly content: string;
   readonly removed: readonly FragmentRecord[];
   readonly kept: readonly string[];
+  /** Records that went with no edit, since their text was already at the inverse: the user changed the file there. */
+  readonly atInverse: number;
 }
 
 /**
@@ -700,6 +702,7 @@ interface FragmentRevert {
 function revertFragments(fileFormat: FileFormat | undefined, content: string, records: readonly FragmentRecord[], all: readonly FragmentRecord[], backup: string | null): FragmentRevert {
   const removed: FragmentRecord[] = [];
   const kept: string[] = [];
+  let atInverse = 0;
   for (const record of records) {
     const format = fragmentFormat(fileFormat, record.selector);
     // A file that the strategy can no longer read keeps every fragment.
@@ -707,6 +710,7 @@ function revertFragments(fileFormat: FileFormat | undefined, content: string, re
     if (format && located !== undefined && isInverse(format, record, located, backup)) {
       // The text is already what the revert would leave: only the record goes.
       removed.push(record);
+      atInverse += 1;
       continue;
     }
     const intact = format !== null && record.inserted !== '' && located === record.inserted;
@@ -718,7 +722,7 @@ function revertFragments(fileFormat: FileFormat | undefined, content: string, re
     content = content.slice(0, edit.at) + edit.inserted + content.slice(edit.at + edit.removed.length);
     removed.push(record);
   }
-  return { content, removed, kept };
+  return { content, removed, kept, atInverse };
 }
 
 /** The text at the selector, null when it is absent; undefined when the strategy cannot read the content. */
@@ -828,7 +832,8 @@ function planRevertWrite(input: FileRevertInput): FileRevertPlan {
   }
   // A changed file with no fragment to take out (a created file) stays with its record.
   if (!removed.size && !(kind === 'text_block' && !input.hasBackup)) return { entry: withKept('kept_edited'), write: null, record: 'keep', removed: [] };
-  const empty = kind === 'created' && all.some((record) => fragmentFormat(format, record.selector)?.empty(result.content) === true);
+  // An empty created file goes only when this revert took out all of rh's text: a fragment that the user already took out proves the file is the user's now.
+  const empty = kind === 'created' && result.atInverse === 0 && all.some((record) => fragmentFormat(format, record.selector)?.empty(result.content) === true);
   const write = empty ? { kind: 'remove' as const } : changed ? { kind: 'replace' as const, content } : null;
   return { entry: withKept(empty ? 'removed' : changed ? 'text_removed' : 'released'), write, record: 'drop', removed: result.removed };
 }
