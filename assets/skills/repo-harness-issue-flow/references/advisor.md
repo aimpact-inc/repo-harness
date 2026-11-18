@@ -122,3 +122,25 @@ shipped, when a batch parent closes, and when the owner asks.
    scarce account must serve first.
 5. Give the table: train, result, order, tier and route, state. Give an
    estimate only with its basis, and mark it as an estimate.
+
+## 5. Retro
+
+Run a retro when a batch parent closes and after a release ships. Run it
+before the release set of §4, so the set can name the levers.
+
+1. Run `rh board retro --parent <n> --json` for the closed parent, or
+   `rh board retro --since <window> --json` for the release window (such as
+   `14d`). The command is read-only. It fails when the lifecycle index is
+   missing or holds a line that is not a sanitized event; report that
+   failure, do not estimate the numbers.
+2. Give each entry of `outliers` to one read-only `explorer` sub-agent: its
+   `transcript_path` values, its `run_ids` (job logs through `gh run view
+   <id> --log-failed`) and its `comment_ids`. Ask for the mechanism of the
+   delay or the failure, with evidence.
+3. Write a retrospective of 30 lines or fewer in your scratch space. Name
+   the top one to three bottlenecks. For each: the mechanism, the wasted
+   minutes or rounds from the retro numbers, and the exact lever (a seats
+   setting, a rule of the issue-flow skill, or a code path). Metrics with
+   `status: unavailable` are gaps, not zero.
+4. Tell the owner the retrospective path and the top bottleneck (§2 step
+   5). The owner reviews it before anyone files a workflow change.

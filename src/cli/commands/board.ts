@@ -8,7 +8,7 @@ import { evaluateBoardAttention, renderAttentionText } from '../../core/board/at
 import type { AttentionHostPortsV1, AttentionSentV1 } from '../../core/board/attention-delivery';
 import type { BoardHostPortsV1, BoardV1 } from '../../core/board/board';
 import { BoardSourceError } from '../../core/board/source';
-import { BoardCollectError, collectBoard, collectBoardThrough, readRepositoryId } from '../../effects/board/collect';
+import { BoardCollectError, collectBoard, collectBoardThrough, readGhJson, readParent, readPullRequests, readRepositoryId } from '../../effects/board/collect';
 import { createKeyedSources } from '../../effects/board/keyed-sources';
 import { renderDependencyMigrationPlan } from '../../core/board/dependency-migration';
 import { DependencyMigrationError, runDependencyMigration, type DependencyMigrationResultV1 } from '../../effects/board/dependency-migration';
@@ -23,7 +23,10 @@ import { runBoardMerge, type BoardMergeResultV1 } from '../../effects/board/merg
 import { seatLaunch } from './seats';
 import { runBoardCloseout, stopArchitectureDaemons, stopCodegraphServers } from '../../effects/board/closeout';
 import { worktreeProcesses } from '../../effects/git/worktree-processes';
-import { recordLifecycleEvents, summarizeWorktreeHooks, type CliFrictionEvent, type LifecycleEvent } from '../../effects/board/lifecycle-index';
+import { LIFECYCLE_EVENT_PROTOCOL, lifecycleIndexPath, recordLifecycleEvents, sanitized, summarizeWorktreeHooks, type CliFrictionEvent, type LifecycleEvent } from '../../effects/board/lifecycle-index';
+import { bodyLinks, linkedPullRequests } from '../../core/board/board';
+import { projectBoardRetro, type RetroEventV1, type RetroPullRequestInputV1, type RetroRunV1 } from '../../core/board/retro';
+import type { BoardPullRequestReadV1 } from '../../core/board/source';
 import { HOOK_EVENT_TELEMETRY_PATH, HOOK_EVENT_TELEMETRY_PROTOCOL } from '../hook/event-telemetry';
 import { ROUTES } from '../hook/route-registry';
 import type { BoardCloseoutV1 } from '../../effects/board/closeout';
@@ -172,6 +175,111 @@ export function closeoutEvents(result: BoardCloseoutV1): LifecycleEvent[] {
   return [...closed, ...hooks];
 }
 
+type IndexedEvent = LifecycleEvent & { readonly at: string };
+
+/** One record of the lifecycle index of `repositoryId` that the writer's own I1 shape gate accepts. */
+function indexedEvent(record: unknown, repositoryId: number): record is IndexedEvent {
+  if (typeof record !== 'object' || record === null) return false;
+  const { protocol, repository_id: repository, at } = record as Record<string, unknown>;
+  if (protocol !== LIFECYCLE_EVENT_PROTOCOL || repository !== repositoryId || typeof at !== 'string' || Number.isNaN(Date.parse(at))) return false;
+  // A record with a missing list throws inside the gate; it is refused like any other shape.
+  try { return sanitized(record as LifecycleEvent); } catch { return false; }
+}
+
+/** The events of the lifecycle index. The file is user-writable input: a missing file or any line that the gate refuses ends the retro. */
+function readLifecycleIndex(repositoryId: number, env: NodeJS.ProcessEnv): IndexedEvent[] {
+  const path = lifecycleIndexPath(repositoryId, env);
+  let text: string;
+  try { text = readFileSync(path, 'utf8'); } catch { throw new BoardCollectError(`the lifecycle index ${path} cannot be read; run rh board commands that record events first`); }
+  return text.split('\n').flatMap((line, at) => {
+    if (line === '') return [];
+    let record: unknown = null;
+    try { record = JSON.parse(line); } catch { /* refused below */ }
+    if (!indexedEvent(record, repositoryId)) throw new BoardCollectError(`the lifecycle index ${path} line ${at + 1} is not a lifecycle event of repository ${repositoryId}`);
+    return [record];
+  });
+}
+
+/** The most Actions runs of one pull request branch that one read returns; a branch with more refuses the retro. */
+const RETRO_RUN_PAGE = 100;
+/** The most merged pull requests or closed issues of one `--since` window. */
+const RETRO_LIST_LIMIT = 500;
+const CHECK_NAME = /^[A-Za-z0-9][A-Za-z0-9 ._:/()-]{0,127}$/u;
+const isTime = (value: unknown): value is string => typeof value === 'string' && !Number.isNaN(Date.parse(value));
+
+/** The Actions runs of a merged pull request: the `pull_request` runs of its head branch up to its merge. */
+function readRetroRuns(repo_root: string, repository: string, read: BoardPullRequestReadV1): RetroRunV1[] {
+  const body = readGhJson({ repo_root }, ['api', '--hostname', 'github.com',
+    `repos/${repository}/actions/runs?branch=${encodeURIComponent(read.head_ref)}&event=pull_request&per_page=${RETRO_RUN_PAGE}`]) as { total_count?: unknown; workflow_runs?: unknown } | null;
+  const runs = body?.workflow_runs;
+  if (!Array.isArray(runs) || typeof body?.total_count !== 'number') throw new BoardCollectError(`the Actions runs of PR #${read.number} are not a run list`);
+  if (body.total_count > runs.length) throw new BoardCollectError(`PR #${read.number} has more than ${RETRO_RUN_PAGE} Actions runs`);
+  return runs.map((value: Record<string, unknown>) => {
+    const { id, name, status, conclusion, created_at, run_started_at, updated_at } = value ?? {};
+    if (!Number.isSafeInteger(id) || typeof status !== 'string' || (conclusion !== null && typeof conclusion !== 'string') || !isTime(created_at) || !isTime(run_started_at) || !isTime(updated_at)) {
+      throw new BoardCollectError(`an Actions run of PR #${read.number} has an invalid field`);
+    }
+    return { id: id as number, name: typeof name === 'string' && CHECK_NAME.test(name) ? name : null, conclusion, created_at, started_at: run_started_at, updated_at, completed: status === 'completed' };
+  }).filter(run => read.merged_at === null || Date.parse(run.created_at) <= Date.parse(read.merged_at));
+}
+
+/** The numbers of a `gh pr list` or `gh issue list` answer; a full page refuses the window, because a count would be short. */
+function listedNumbers(repo_root: string, kind: 'pr' | 'issue', search: string): number[] {
+  const list = readGhJson({ repo_root }, [kind, 'list', '--state', kind === 'pr' ? 'merged' : 'closed', '--search', search, '--json', 'number', '--limit', String(RETRO_LIST_LIMIT + 1)]);
+  if (!Array.isArray(list) || !list.every(entry => Number.isSafeInteger(entry?.number))) throw new BoardCollectError(`gh ${kind} list did not return numbers`);
+  if (list.length > RETRO_LIST_LIMIT) throw new BoardCollectError(`the window holds more than ${RETRO_LIST_LIMIT} ${kind === 'pr' ? 'merged pull requests' : 'closed issues'}; pass a shorter --since`);
+  return list.map(entry => entry.number as number);
+}
+
+const DURATION_MS = { h: 3_600_000, d: 86_400_000 } as const;
+
+/** `--since <n>h|<n>d`: the start of the window. */
+function sinceStart(value: string, now: Date): string {
+  const match = /^([1-9][0-9]{0,4})([hd])$/u.exec(value);
+  if (match === null) throw new BoardCollectError('--since takes a duration such as 48h or 14d');
+  // GitHub search dates take whole seconds.
+  return new Date(now.getTime() - Number(match[1]) * DURATION_MS[match[2] as 'h' | 'd']).toISOString().replace(/\.\d{3}Z$/u, 'Z');
+}
+
+/** `rh board retro`: one read of GitHub and the lifecycle index, no write. Exactly one of `--parent` and `--since` selects the scope. */
+function collectRetro(options: BoardOptions & { readonly since?: string }, env: NodeJS.ProcessEnv): ReturnType<typeof projectBoardRetro> {
+  if ((options.parent === undefined) === (options.since === undefined)) throw new BoardCollectError('board retro takes exactly one of --parent <issue number> and --since <duration>');
+  const repo_root = process.cwd();
+  const now = new Date();
+  const repositoryId = readRepositoryId({ repo_root });
+  const events = readLifecycleIndex(repositoryId, env);
+  const pullRequests = (repository: string, reads: readonly BoardPullRequestReadV1[], scope: (issue: number) => boolean): RetroPullRequestInputV1[] =>
+    reads.filter(read => read.state === 'merged').map((read) => {
+      const { closes, refs } = bodyLinks(repository, read.body);
+      return { read, issues: [...new Set([...closes, ...refs])].filter(scope), runs: readRetroRuns(repo_root, repository, read) };
+    });
+  if (options.since === undefined) {
+    const { parent } = readParent({ repo_root, parent: parentNumber(options) });
+    const [owner, name] = parent.repository.name_with_owner.split('/') as [string, string];
+    const candidates = [...new Set(parent.sub_issues.flatMap(issue => issue.pull_request_candidates))].sort((left, right) => left - right);
+    const linked = linkedPullRequests(parent, readPullRequests({ repo_root }, owner, name, candidates));
+    const issues = new Set(parent.sub_issues.map(issue => issue.number));
+    const prs = new Set(linked.map(read => read.number));
+    const related = (event: IndexedEvent): boolean => event.kind === 'seat.lifecycle' ? (event.pr !== null && prs.has(event.pr)) || event.issues.some(issue => issues.has(issue))
+      : event.kind === 'cli.friction' ? (event.pr !== null && prs.has(event.pr)) || (event.issue !== null && issues.has(event.issue)) : prs.has(event.pr);
+    return projectBoardRetro({
+      observed_at: now.toISOString(), repository_id: repositoryId, scope: { parent: parent.parent.number },
+      closed_issues: parent.sub_issues.filter(issue => issue.state === 'closed').length,
+      pull_requests: pullRequests(parent.repository.name_with_owner, linked, issue => issues.has(issue)), events: events.filter(related) satisfies RetroEventV1[],
+    });
+  }
+  const since = sinceStart(options.since, now);
+  const repository = (readGhJson({ repo_root }, ['repo', 'view', '--json', 'nameWithOwner']) as { nameWithOwner?: unknown } | null)?.nameWithOwner;
+  if (typeof repository !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)) throw new BoardCollectError('the local GitHub repository is unknown');
+  const [owner, name] = repository.split('/') as [string, string];
+  const merged = listedNumbers(repo_root, 'pr', `merged:>=${since}`);
+  return projectBoardRetro({
+    observed_at: now.toISOString(), repository_id: repositoryId, scope: { since },
+    closed_issues: listedNumbers(repo_root, 'issue', `closed:>=${since}`).length,
+    pull_requests: pullRequests(repository, readPullRequests({ repo_root }, owner, name, merged), () => true), events: events.filter(event => Date.parse(event.at) >= Date.parse(since)),
+  });
+}
+
 /**
  * `--parent` and `--json` belong to `board`. The root program does not use
  * positional options, so Commander binds them to `board` wherever they
@@ -304,6 +412,13 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
         process.exitCode = 1;
       }
     });
+  board.command('retro')
+    .description('Read-only retro of one parent (--parent) or of a window (--since 48h|14d): merged pull requests, their Actions runs and the lifecycle index; prints JSON')
+    .option('--since <duration>', 'The window that ends now, in hours or days, such as 48h or 14d')
+    .action((_options: { since?: string }, command: Command) => guarded((options: BoardOptions & { since?: string }) => {
+      if (options.json !== true) throw new BoardCollectError('board retro prints JSON only; pass --json');
+      process.stdout.write(`${JSON.stringify(collectRetro(options, process.env))}\n`);
+    })(command.optsWithGlobals()));
   board.command('closeout')
     .description('After a merge, in the primary checkout: close each seat terminal of the pull request whose checkout is clean and pushed, then remove its merged worktree; prints JSON, exit 1 when anything is kept')
     .requiredOption('--pr <number>', 'The merged pull request')

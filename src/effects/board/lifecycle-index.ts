@@ -1,7 +1,7 @@
 /**
  * The sanitized lifecycle index of one repository (#3204): `<repo-harness home>/lifecycle/<repository id>.jsonl`, an
  * append-only JSONL file outside every task worktree, so seat, friction and hook clues outlive `board closeout`.
- * Telemetry is not an authority: no command reads it back, and a failed append never changes a command result.
+ * Telemetry is not an authority: only the read-only `rh board retro` reads it back (#3205), and a failed append never changes a command result.
  * I1: an event holds closed-enum codes, numeric IDs, seat and model IDs, durations and a transcript path only. It holds no
  * operator-typed SHA: a refused command has not confirmed it, and a hex secret has the same shape.
  * The shape gate drops any event with another value, so no stdout, stderr, file content or error prose reaches the file.
@@ -68,8 +68,8 @@ function transcriptPath(value: string | null): boolean {
   return value === null || (value.length <= TRANSCRIPT_LIMIT && isAbsolute(value) && value.endsWith('.jsonl') && !/[\u0000-\u001f\u007f]/u.test(value));
 }
 
-/** The I1 shape gate: true only when every value is one of the allowed kinds. */
-function sanitized(event: LifecycleEvent): boolean {
+/** The I1 shape gate: true only when every value is one of the allowed kinds. The writer and the retro reader share it. */
+export function sanitized(event: LifecycleEvent): boolean {
   switch (event.kind) {
     case 'seat.lifecycle':
       return ['launch', 'reset', 'close'].includes(event.phase) && TOKEN.test(event.seat) && token(event.terminal) && event.issues.every(id) && id(event.pr)
