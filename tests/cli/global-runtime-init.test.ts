@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, lstatSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, lstatSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { legacySections } from '../../scripts/check-released-managed-values';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
@@ -17,7 +17,7 @@ import { installStateFixturePath, recordInstallOwnership, recordPluginSelection,
 import { writeFakeHc } from '../helpers/fake-hc';
 import wazaRules from '../../src/core/skill-surface/waza-shared-rules.json';
 import { syncWazaSharedRules } from "../../src/cli/installer/waza-rules";
-import { beginInstallHostTransaction, installProfileHostMutationPaths, installProfileTransactionPaths, readInstallState, rollbackInstallHostTransaction, versions } from '../../src/cli/installer/install-profile';
+import { beginInstallHostTransaction, installProfileHostMutationPaths, installProfileTransactionPaths, installStateStatus, readInstallState, rollbackInstallHostTransaction, versions } from '../../src/cli/installer/install-profile';
 import { applyGlobalContextRefresh, GLOBAL_RULES_EDITED, GLOBAL_RULES_END, inspectGlobalContext, preflightGlobalContextRefresh, renderGlobalRulesBlock, setReportingLanguage } from '../../src/cli/installer/global-context';
 import { CandidateRequestProtocolRetiredError, encodeCandidateRequest, parseCandidateRequest, type CandidateReconciliationRequest } from '../../src/cli/commands/candidate-reconciliation';
 import type { PluginId } from '../../src/core/skill-surface/plugin-manifest';
@@ -2377,6 +2377,60 @@ exit 0
       rmSync(tmp, { recursive: true, force: true });
     }
   }, 30_000);
+
+  test('a complete update commits sibling skills when the gate keeps the edited sole cross-review skill', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'repo-harness-cli-update-refused-skill-'));
+    const home = join(tmp, 'home');
+    const repo = join(tmp, 'repo');
+    const fakeBin = join(tmp, 'bin');
+    const plugins = ['cross-review', 'peer-runtime'] as const;
+    try {
+      mkdirSync(home, { recursive: true });
+      mkdirSync(repo, { recursive: true });
+      mkdirSync(fakeBin, { recursive: true });
+      writeFakeHc(fakeBin);
+      mkdirSync(join(home, '.repo-harness'), { recursive: true });
+      setupManagedRuntimeReadback(tmp, home, fakeBin);
+      const candidateVersion = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf-8')).version as string;
+      installCandidateRuntimeFixture(home, candidateVersion);
+      writeFileSync(installStateFixturePath({ HOME: home }), `${JSON.stringify({
+        protocol: 4, selection: plugins, ...versions(plugins), transaction_id: 'before-refusal',
+        applied_at: '2026-07-14T00:00:00.000Z', pi_packages: [], previous: null,
+      })}\n`);
+      writeExecutable(tmp, join(fakeBin, 'bun'), `#!/bin/bash\nif [[ "\${1:-}" == "--version" ]]; then echo 1.4.0; exit 0; fi\nif [[ "\${1:-}" == "pm" && "\${2:-}" == "view" ]]; then printf '%s\\n' '${JSON.stringify(candidateVersion)}'; exit 0; fi\nif [[ "\${1:-}" == *.ts || "\${1:-}" == - ]]; then exec "${process.execPath}" "$@"; fi\nexit 0\n`);
+      const env = {
+        ...sanitizedChildEnv(home),
+        HOME: home,
+        REPO_HARNESS_HOME: join(home, '.repo-harness'),
+        BUN_INSTALL: join(home, '.bun'),
+        PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+        REPO_HARNESS_BUN_EXECUTABLE: join(fakeBin, 'bun'),
+        REPO_HARNESS_CLAUDE_EXECUTABLE: join(fakeBin, 'claude'),
+      };
+      // rh wrote the only cross-review copy; the user then moved its SKILL.md out.
+      const crossReview = join(home, '.claude', 'skills', 'repo-harness-cross-review');
+      mkdirSync(dirname(crossReview), { recursive: true });
+      openHostConfigGate({ env }).writePaths([{ path: crossReview, owner: 'cross-review', entry: { type: 'directory', source: join(ROOT, 'assets', 'skills', 'repo-harness-cross-review') } }]);
+      renameSync(join(crossReview, 'SKILL.md'), join(tmp, 'SKILL.md'));
+      const kept = readdirSync(crossReview).sort();
+
+      const res = spawnSync(process.execPath, [CLI, 'update', '--target', 'claude', '--no-external-skills', '--no-codegraph', '--json'], { cwd: repo, encoding: 'utf-8', env });
+
+      expect(res.status, `${res.stderr}\n${res.stdout}`).toBe(0);
+      expect((JSON.parse(res.stdout).steps as { step: string }[]).find(step => step.step === 'reconcile installed candidate runtime')).toMatchObject({
+        status: 'ok', detail: expect.stringContaining('scope=complete'),
+        stderr: expect.stringContaining(`it changed since rh wrote it, so rh does not replace it: ${crossReview}`),
+      });
+      expect(readdirSync(crossReview).sort()).toEqual(kept);
+      expect(existsSync(join(home, '.claude', 'skills', 'repo-harness-herdr-portal', 'SKILL.md'))).toBe(true);
+      const installed = readInstallState(env);
+      expect(installed?.transaction_id).not.toBe('before-refusal');
+      // Status still reports the refused copy until the user moves it out.
+      expect(installStateStatus(installed!, env).drift).toMatchObject({ missing_owners: ['cross-review'], surface_drift: [] });
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   test('update host transaction compensates Obsidian Skill projections when a later step fails', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'repo-harness-cli-update-obsidian-rollback-'));

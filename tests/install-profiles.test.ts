@@ -329,7 +329,9 @@ describe('install selection', () => {
     ].join('\n'), transaction], { cwd: ROOT, env, encoding: 'utf8' });
     expect(result.status, result.stderr).toBe(0);
     expect(result.stderr.trim().split('\n')).toEqual([`[install] skipped retired staged skill ${JSON.stringify(retired)}`]);
-    expect(ownedPath(env, retired)).toBeNull();
+    const ledgerKeys = Object.keys(JSON.parse(readFileSync(hostConfigPaths(env).ledger, 'utf8')).paths);
+    expect(ledgerKeys).toContain(pathRecordKey(env, current));
+    expect(ledgerKeys).not.toContain(pathRecordKey(env, retired));
     expect(readFileSync(join(retired, 'SKILL.md'), 'utf8')).toBe('# staged\n');
     expect(ownedPath(env, current)).toMatchObject({ owner: 'cross-review', host: 'staged', kind: 'created' });
   }));

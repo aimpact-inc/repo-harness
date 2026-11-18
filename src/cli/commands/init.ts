@@ -97,6 +97,8 @@ export interface InitCommandOptions {
 }
 
 export interface InitStep {
+  /** The host path that the gate refused to replace; the selection commit counts the user's copy as present. */
+  refused_path?: string;
   step: string;
   status: "ok" | "skipped" | "failed";
   command?: string[];
@@ -235,7 +237,7 @@ function syncBundledItemsAtHome(
           if (!hostPathReplacementRefused(error)) throw error;
           // An ownership refusal leaves this skill untouched and need not abort setup.
           const status = transaction === undefined ? 'failed' : 'skipped';
-          steps.push({ step, status, detail: error.message });
+          steps.push(status === 'skipped' ? { step, status, detail: error.message, refused_path: path } : { step, status, detail: error.message });
           // A candidate sends a receipt on stdout. Its parent displays stderr.
           if (status === 'skipped' && ownerEnv.REPO_HARNESS_RUNTIME_RECONCILIATION_PARENT === '1') {
             process.stderr.write(`[runtime] ${status}: ${step} - ${error.message}\n`);

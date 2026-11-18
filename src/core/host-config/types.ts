@@ -11,6 +11,7 @@ export type HostConfigErrorCode =
   | 'host_config_target_changed'
   | 'host_config_invalid_path'
   | 'host_config_invalid_state'
+  | 'host_config_replacement_refused'
   | 'host_config_unparseable_target';
 
 export class HostConfigError extends Error {
