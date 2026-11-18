@@ -53,6 +53,15 @@ function parentNumber(options: BoardOptions): number {
   return Number(options.parent);
 }
 
+/** `--issues a,b,c`: two or more distinct issue numbers. */
+function bundleIssues(value: string): readonly number[] {
+  const entries = value.split(',');
+  if (entries.length < 2 || entries.some(entry => !/^[1-9][0-9]*$/u.test(entry)) || new Set(entries).size !== entries.length) {
+    throw new BoardCollectError('--issues takes two or more distinct issue numbers separated by commas, such as 12,13');
+  }
+  return entries.map(Number);
+}
+
 /** The one JSON object of `--fields-file`; a path that does not read, or that holds no JSON object, is refused input. */
 function readFieldsFile(path: string): Record<string, unknown> {
   let text: string;
@@ -178,11 +187,12 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
     .description('Start a seat for each ready sub-issue of the plan (takes --parent): worktree, claim comment and worker tab, on the seat that the quota route names')
     .requiredOption('--space <id>', 'Herdr space that receives the worker tabs')
     .option('--dry-run', 'Print the decision for each plan issue and start nothing')
-    .action(async (options: { space: string; dryRun?: boolean }, command: Command) => {
+    .option('--issues <a,b,c>', 'Start one seat, one worktree and one pull request for these plan issues; each claim names the bundle, and nothing starts unless every issue is ready')
+    .action(async (options: { space: string; dryRun?: boolean; issues?: string }, command: Command) => {
       try {
         const parent = parentNumber(command.optsWithGlobals<BoardOptions>());
         const result = await runDispatch({
-          repo_root: process.cwd(), parent, space: options.space, host, dry_run: options.dryRun === true,
+          repo_root: process.cwd(), parent, space: options.space, host, dry_run: options.dryRun === true, bundle: options.issues === undefined ? null : bundleIssues(options.issues),
           launch: (seat, labels, cwd) => seatLaunch(seat, labels, process.env, cwd),
         });
         process.stdout.write(dispatchText(result.plan, result.started.map(entry => entry.issue)));

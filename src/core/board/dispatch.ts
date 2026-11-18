@@ -22,7 +22,7 @@ export class DispatchError extends Error {
   }
 }
 
-export type DispatchSkipReason = 'not_sub_issue' | 'closed' | 'held' | 'blocked' | 'claimed' | 'kind_label_invalid' | 'no_route' | 'over_limit';
+export type DispatchSkipReason = 'not_sub_issue' | 'not_planned' | 'closed' | 'held' | 'blocked' | 'claimed' | 'kind_label_invalid' | 'no_route' | 'over_limit';
 
 export type DispatchDecisionV1 =
   | { readonly issue: number; readonly action: 'dispatch'; readonly title: string; readonly route_class: RoutingClass; readonly credentials: boolean; readonly seat: SeatId; readonly route_line: string }
@@ -39,10 +39,14 @@ export interface DispatchInputV1 {
   readonly terminals: readonly DispatchTerminalV1[];
   readonly seats: SeatsConfigV1;
   readonly quota: SeatAccountQuotas;
+  /** `--issues`: two or more distinct issues that one seat, one worktree and one pull request take; absent dispatches the plan one issue per seat. */
+  readonly bundle?: readonly number[];
 }
 
 export interface DispatchPlanV1 {
   readonly plan: PlanBlockV2;
+  /** The bundle of the input. Its decisions follow its order, and each `dispatch` decision of it names the seat of its first issue. */
+  readonly bundle: readonly number[] | null;
   /** Live worker seats that carry this parent's label before this dispatch. */
   readonly live_workers: number;
   readonly coordinator: string | null;
@@ -85,6 +89,7 @@ function routeClass(labels: readonly string[]): { readonly kind: RoutingClass } 
 
 export function planDispatch(input: DispatchInputV1): DispatchPlanV1 {
   const { parent, seats, quota } = input;
+  const bundle = input.bundle ?? null;
   const plan = planOf(parent);
   const comments = parent.parent.comments;
   const closed = closedClaimUrls(comments);
@@ -101,25 +106,36 @@ export function planDispatch(input: DispatchInputV1): DispatchPlanV1 {
   const held = new Map(plan.holds.map(hold => [hold.issue, hold.reason]));
   const issues = new Map(parent.sub_issues.map(issue => [issue.number, issue]));
   let running = liveWorkers.length;
-  const decisions = plan.merge_order.map((number): DispatchDecisionV1 => {
+  const members = new Set(bundle ?? []);
+  // A bundle takes one seat and one route: the first issue's route class, kept off Pi when any issue touches credentials.
+  const bundleCredentials = (bundle ?? []).some(number => issues.get(number)?.labels.includes(CREDENTIALS_LABEL) === true);
+  let bundleRoute: { readonly seat: SeatId; readonly line: string } | null = null;
+  const decisions = (bundle ?? plan.merge_order).map((number): DispatchDecisionV1 => {
     const skip = (reason: DispatchSkipReason, detail: string): DispatchDecisionV1 => ({ issue: number, action: 'skip', reason, detail });
     const issue = issues.get(number);
     if (issue === undefined) return skip('not_sub_issue', `#${number} is not a sub-issue of #${parent.parent.number}`);
+    if (!plan.merge_order.includes(number)) return skip('not_planned', `#${number} is not in the plan merge_order`);
     if (issue.state === 'closed') return skip('closed', 'the issue is closed');
     const hold = held.get(number);
     if (hold !== undefined) return skip('held', hold);
-    const open = issue.blocked_by.filter(blocker => blocker.state === 'open').map(blocker => `#${blocker.number}`);
+    // A blocker inside the bundle lands in the same pull request, so it does not block.
+    const open = issue.blocked_by.filter(blocker => blocker.state === 'open' && !members.has(blocker.number)).map(blocker => `#${blocker.number}`);
     if (open.length > 0) return skip('blocked', `blocked by ${open.join(', ')}`);
     const claim = claimHolder(issueClaim(issue.comments, number)) ?? (liveIssues.has(String(number)) ? 'a live worker seat carries the issue label' : null);
     if (claim !== null) return skip('claimed', claim);
     const kind = routeClass(issue.labels);
     if ('error' in kind) return skip('kind_label_invalid', kind.error);
-    const credentials = issue.labels.includes(CREDENTIALS_LABEL);
-    const route = selectSeatRoute(kind.kind, seats, quota, credentials ? seat => seat.runtime !== 'pi' : undefined);
-    if (route.id === null) return skip('no_route', route.line);
-    if (running >= plan.seat_limits.worker) return skip('over_limit', `${running} of ${plan.seat_limits.worker} worker seats run`);
-    running += 1;
-    return { issue: number, action: 'dispatch', title: issue.title, route_class: kind.kind, credentials, seat: route.id, route_line: route.line };
+    const credentials = bundle === null ? issue.labels.includes(CREDENTIALS_LABEL) : bundleCredentials;
+    let route = bundleRoute;
+    if (route === null) {
+      const selected = selectSeatRoute(kind.kind, seats, quota, credentials ? seat => seat.runtime !== 'pi' : undefined);
+      if (selected.id === null) return skip('no_route', selected.line);
+      if (running >= plan.seat_limits.worker) return skip('over_limit', `${running} of ${plan.seat_limits.worker} worker seats run`);
+      running += 1;
+      route = { seat: selected.id, line: selected.line };
+      if (bundle !== null) bundleRoute = route;
+    }
+    return { issue: number, action: 'dispatch', title: issue.title, route_class: kind.kind, credentials, seat: route.seat, route_line: route.line };
   });
-  return Object.freeze({ plan, live_workers: liveWorkers.length, coordinator: coordinator?.url ?? null, parent_comments_truncated: comments.truncated, decisions: Object.freeze(decisions) });
+  return Object.freeze({ plan, bundle, live_workers: liveWorkers.length, coordinator: coordinator?.url ?? null, parent_comments_truncated: comments.truncated, decisions: Object.freeze(decisions) });
 }

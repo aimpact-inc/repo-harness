@@ -2,6 +2,7 @@ import { DispatchError, planDispatch, type DispatchDecisionV1, type DispatchPlan
 import type { BoardHostPortsV1 } from '../../core/board/board';
 import { effectiveSeatConfig, seatAccountQuotas } from '../../core/board/seat-routing';
 import { withSeatLine } from '../../core/board/seat-line';
+import { renderBundleLine } from '../../core/board/source';
 import type { SeatConfigV1, SeatId } from '../../core/board/seats-settings';
 import { HERDR_APP_NOT_SENT, HerdrCoreError, herdrAppDo } from '../terminal/herdr-core';
 import { runInternalHelper } from '../runtime/helper-runner';
@@ -24,6 +25,8 @@ export interface DispatchInput {
   readonly launch: DispatchLaunch;
   /** Plan only: no worktree, no claim, no seat. */
   readonly dry_run: boolean;
+  /** `--issues`: the issues that one seat and one pull request take; null dispatches the plan. */
+  readonly bundle: readonly number[] | null;
 }
 
 /** The writes of one dispatch. Each is a process boundary, so tests replace them. */
@@ -53,7 +56,11 @@ function startWorktree(input: DispatchInput, issue: number): { readonly path: st
   return { path: start.worktree_path, branch: start.branch };
 }
 
-function claimBody(decision: DispatchedV1, branch: string, tab: string | null, runtime: SeatConfigV1['runtime'], model: string | null, coordinator: string): string {
+const issueList = (unit: readonly DispatchedV1[]): string => unit.map(decision => `#${decision.issue}`).join(', ');
+
+/** The claim of one issue of a unit. A bundle claim carries the `Issues:` line that the board reads (`issueClaim`). */
+function claimBody(decision: DispatchedV1, unit: readonly DispatchedV1[], branch: string, tab: string | null, runtime: SeatConfigV1['runtime'], model: string | null, coordinator: string): string {
+  const bundle = unit.length > 1;
   return [
     'repo-harness issue claim',
     'Status: active',
@@ -62,7 +69,8 @@ function claimBody(decision: DispatchedV1, branch: string, tab: string | null, r
     `Runtime: ${runtime}`,
     ...(model === null ? [] : [`Model: ${model}`]),
     `Branch: ${branch}`,
-    `Scope: issue #${decision.issue} as its body states it`,
+    ...(bundle ? [renderBundleLine(unit.map(entry => entry.issue))] : []),
+    bundle ? `Scope: issues ${issueList(unit)} as their bodies state them` : `Scope: issue #${decision.issue} as its body states it`,
     'Not in scope: anything the issue body does not name',
     `Coordinator: ${coordinator}`,
     `Dispatch reading: ${decision.route_line}`,
@@ -75,12 +83,31 @@ function claimBody(decision: DispatchedV1, branch: string, tab: string | null, r
  */
 export const WORKER_AUTHORITY = 'implement, push the PR branch as soon as checks pass, open the PR, run your own fix rounds. No merge, no deletion outside the issue, no credentials.';
 
-function packet(decision: DispatchedV1, worktree: string, claimUrl: string): string {
-  return `Task: issue #${decision.issue} (${decision.title}). Worktree: ${worktree}. Claim: ${claimUrl}. Read the issue body and every comment first: gh issue view ${decision.issue} --comments. Work as the writer of repo-harness-issue-flow and report to the orchestrator when done. Authority: ${WORKER_AUTHORITY}`;
+function packet(unit: readonly DispatchedV1[], worktree: string, claimUrls: readonly string[]): string {
+  const authority = `Work as the writer of repo-harness-issue-flow and report to the orchestrator when done. Authority: ${WORKER_AUTHORITY}`;
+  if (unit.length === 1) {
+    const [decision] = unit;
+    return `Task: issue #${decision!.issue} (${decision!.title}). Worktree: ${worktree}. Claim: ${claimUrls[0]}. Read the issue body and every comment first: gh issue view ${decision!.issue} --comments. ${authority}`;
+  }
+  // `Closes #a, #b` closes only #a (parseClosingReferences), so the packet asks for one closing line per issue.
+  return `Task: one pull request for the bundle ${unit.map(decision => `#${decision.issue} (${decision.title})`).join(', ')}. Worktree: ${worktree}. Claims: ${claimUrls.join(' ')}. `
+    + `Read each issue body and every comment first: ${unit.map(decision => `gh issue view ${decision.issue} --comments`).join('; ')}. `
+    + `The pull request body has one line for each issue: ${unit.map(decision => `Closes #${decision.issue}`).join(' / ')}. ${authority}`;
 }
 
-function releaseClaim(ports: DispatchPorts, issue: number, claimUrl: string): void {
-  ports.comment(issue, `repo-harness issue claim status\nClaim: ${claimUrl}\nStatus: released`);
+function releaseClaims(ports: DispatchPorts, claims: readonly { readonly issue: number; readonly url: string }[]): void {
+  for (const claim of claims) ports.comment(claim.issue, `repo-harness issue claim status\nClaim: ${claim.url}\nStatus: released`);
+}
+
+/** The seats to start: one for each dispatch decision, or one for the whole bundle, which starts only when every issue of it dispatches. */
+function units(plan: DispatchPlanV1): DispatchedV1[][] {
+  const dispatched = plan.decisions.filter((decision): decision is DispatchedV1 => decision.action === 'dispatch');
+  if (plan.bundle === null) return dispatched.map(decision => [decision]);
+  const skipped = plan.decisions.filter(decision => decision.action === 'skip');
+  if (skipped.length > 0) {
+    throw new DispatchError(`the bundle ${plan.bundle.map(number => `#${number}`).join(', ')} starts only as a whole; ${skipped.map(decision => `#${decision.issue} ${decision.reason}: ${decision.detail}`).join('; ')}; nothing was started`);
+  }
+  return [dispatched];
 }
 
 /**
@@ -92,26 +119,33 @@ export async function executeDispatch(plan: DispatchPlanV1, context: { readonly 
   const started: Array<DispatchResultV1['started'][number]> = [];
   if (plan.decisions.some(decision => decision.action === 'dispatch') && plan.coordinator === null) throw new DispatchError(`#${context.parent} has no active coordinator claim${plan.parent_comments_truncated ? ' in the comments that were read; older parent comments were not read' : ''}; nothing was started`);
   if (context.dry_run) return started;
-  for (const decision of plan.decisions) {
-    if (decision.action !== 'dispatch') continue;
-    const worktree = ports.startWorktree(decision.issue);
-    const labels = { repositoryId: context.repositoryId, issue: String(decision.issue), parent: String(context.parent) };
-    const launch = await ports.launch(decision.seat, labels, worktree.path);
+  for (const unit of units(plan)) {
+    const lead = unit[0]!;
+    const worktree = ports.startWorktree(lead.issue);
+    const labels = { repositoryId: context.repositoryId, issue: String(lead.issue), parent: String(context.parent) };
+    const launch = await ports.launch(lead.seat, labels, worktree.path);
     // The launch reads the seats configuration again, so the runtime that will run is checked here, not the planned one.
-    if (decision.credentials && launch.runtime === 'pi') throw new DispatchError(`#${decision.issue} touches credentials and its launch resolved to a Pi seat; nothing was started`);
-    const claimUrl = ports.comment(decision.issue, claimBody(decision, worktree.branch, launch.tab, launch.runtime, context.model(decision.seat), plan.coordinator!));
+    if (lead.credentials && launch.runtime === 'pi') throw new DispatchError(`${issueList(unit)} touches credentials and its launch resolved to a Pi seat; nothing was started`);
+    const claims: { readonly issue: number; readonly url: string }[] = [];
+    try {
+      for (const decision of unit) claims.push({ issue: decision.issue, url: ports.comment(decision.issue, claimBody(decision, unit, worktree.branch, launch.tab, launch.runtime, context.model(lead.seat), plan.coordinator!)) });
+    } catch (error) {
+      // No tab opened yet, so the claims of a bundle that posted only in part hold no seat.
+      releaseClaims(ports, claims);
+      throw error;
+    }
     try {
       ports.openTab({
-        ...(launch.tab === null ? {} : { name: launch.tab }), space: context.space, folder: worktree.path, argv: launch.argv, task: packet(decision, worktree.path, claimUrl),
+        ...(launch.tab === null ? {} : { name: launch.tab }), space: context.space, folder: worktree.path, argv: launch.argv, task: packet(unit, worktree.path, claims.map(claim => claim.url)),
       });
     } catch (error) {
       if (error instanceof HerdrCoreError && HERDR_APP_NOT_SENT.has(error.reason)) {
-        releaseClaim(ports, decision.issue, claimUrl);
+        releaseClaims(ports, claims);
         throw error;
       }
-      throw new DispatchError(`launch_unknown for #${decision.issue}: ${(error as Error).message}. The claim ${claimUrl} stays; check hc ls for the tab before a retry`);
+      throw new DispatchError(`launch_unknown for ${issueList(unit)}: ${(error as Error).message}. The claims ${claims.map(claim => claim.url).join(' ')} stay; check hc ls for the tab before a retry`);
     }
-    started.push({ issue: decision.issue, seat: decision.seat, worktree: worktree.path, claim_url: claimUrl });
+    started.push(...unit.map((decision, index) => ({ issue: decision.issue, seat: decision.seat, worktree: worktree.path, claim_url: claims[index]!.url })));
   }
   return started;
 }
@@ -124,7 +158,7 @@ export async function runDispatch(input: DispatchInput): Promise<DispatchResultV
   if (terminals.status === 'unavailable') throw new BoardCollectError(`hc could not list the seat terminals: ${terminals.reason}`);
   const { seats } = readSeatsConfiguration(process.env);
   const quota = seatAccountQuotas((await readQuotaReport(process.env, seats.routing.exhausted_at_or_above_used)).accounts, seats.routing);
-  const plan = planDispatch({ parent, terminals: terminals.terminals, seats, quota });
+  const plan = planDispatch({ parent, terminals: terminals.terminals, seats, quota, ...(input.bundle === null ? {} : { bundle: input.bundle }) });
   const started = await executeDispatch(plan, { repositoryId, parent: input.parent, space: input.space, dry_run: input.dry_run,
     // The same projection that `seatLaunch` uses for the argv, so the claim names the model that runs.
     model: seat => effectiveSeatConfig(seat, seats, quota)?.model ?? null,
