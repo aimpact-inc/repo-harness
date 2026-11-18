@@ -1,5 +1,5 @@
 # workflow-engine/contract-assets 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-contract-assets" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:f341930a68cf9631bc9f3eadd2b4b2e499975b1a9429e7ebfaeda5d494b47a18" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-contract-assets" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:25d61a153e21ff71bd186e2a7810b01fb96816b2d6fce79b660214437a1ef052" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.workflow-engine.contract-assets`(kind `capability`)
 > **Matched Prefixes**:`agents/fleet/**`、`.codex/agents/**`、`scripts/install-agent-fleet.sh`、`assets/workflow-contract.v1.json`、`assets/released-managed-values.v1.json`、`scripts/check-released-managed-values.ts`、`.ai/context/**`、`.archcontext/model/nodes/**`、`scripts/capability-resolver.ts`、`scripts/capability-config.ts`、`scripts/contract-worktree.sh`、`scripts/merge-gate.ts`、`scripts/ship-worktrees.sh`、`assets/templates/**`、`assets/reference-configs/**`、`docs/reference-configs/**`、`assets/AGENTS.md`、`assets/CLAUDE.md`、`.archcontext/**`、`docs/adr/**`、`src/core/capabilities/**`、`assets/project-structures/**`、`assets/plan-map.json`、`assets/versions.json`、`.claude/templates/**`、`scripts/workflow-contract.ts`、`scripts/check-context-map.ts`、`scripts/check-context-files.sh`、`scripts/select-agent-context-blocks.sh`、`scripts/sync-reference-configs.ts`、`scripts/contract-worktree-runtime.ts`、`scripts/worktree-merge-lib.sh`、`scripts/cutover-closure.ts`、`scripts/new-spec.sh`、`scripts/summarize-failures.sh`、`scripts/maintenance-triage.sh`、`scripts/heartbeat-triage.sh`、`scripts/check-deploy-sql-order.sh`、`scripts/factor-lab-new.sh`、`scripts/factor-lab-promote.sh`、`scripts/factor-lab-reject.sh`、`scripts/factor-lab-check.sh`
@@ -79,6 +79,8 @@ flowchart LR
 出向關係:
 
 - `depends-on` → `capability.organization.board` — Render the change hazard table in agentic-development-flow.md from the board hazard list reader.
+- `depends-on` → `capability.runtime-harness.evidence-ledger` — Decode shared tool catalog records.
+- `depends-on` → `capability.runtime-harness.global-runtime-reconciliation` — Resolve protected helper runtimes and host skill roots for contract assets.
 - `depends-on` → `capability.organization.publication` — Read publication merge readiness from the merge helper.
 - `calls` → `component.contract-assets.planning-helpers` — Run a contract-listed helper through rh run
 - `calls` → `component.contract-assets.primary` — Project the workflow contract
@@ -86,7 +88,9 @@ flowchart LR
 
 入向關係:
 
+- `depends-on` ← `capability.verification.acceptance-review` — Read task role profiles for review endpoints.
 - `depends-on` ← `capability.public-surface.action-commands` — Read the workflow contract during skill version checks.
+- `depends-on` ← `capability.public-surface.adoption` — Read the workflow contract asset for adoption.
 - `reads` ← `component.architecture.model-reader` — Plugin → core: decode the capability registry from the native context and resolve changed paths to capability owners
 - `depends-on` ← `capability.verification.codegraph-readiness` — Type the CodeGraph init step with the core init port type and the CodeGraph doctor provider with the core architecture contract
 - `calls` ← `component.evals-checks.primary` — Consume trusted PR checks for a base ref through the merge gate without rerunning commands

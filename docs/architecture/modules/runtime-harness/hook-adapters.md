@@ -1,5 +1,5 @@
 # runtime-harness/hook-adapters 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-hook-adapters" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:0a1d01cb92dea959d207f0b58ad14c3a27f15fb4782d89607a9d426a0cfa0379" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-hook-adapters" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:5d251cfa58870aa583cfabf06e316cf92cc94146fabcf6d1efed13dbd1f4ebd9" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.hook-adapters`(kind `capability`)
 > **Matched Prefixes**:`src/cli/hook/**`、`src/cli/installer/**`、`src/pi/**`、`src/effects/managed-tree.ts`、`src/cli/hook-entry.ts`、`src/effects/loop/**`、`src/effects/segmented-log.ts`、`src/effects/run-summary-retention.ts`、`src/cli/commands/install.ts`、`src/cli/commands/status.ts`、`src/cli/commands/security.ts`
@@ -29,6 +29,7 @@ flowchart LR
   p1_component_hook_adapters_session_lifecycle_e389d412["Session Lifecycle Handlers"]:::component
   p1_component_hook_adapters_session_lifecycle_effects_b7b67dd9["Session Lifecycle Handlers (effects)"]:::component
   p1_capability_runtime_harness_evidence_ledger_2fe63ef5 -->|"Collect loop state inputs for recovery evidence."| p1_capability_runtime_harness_hook_adapters_75a11743
+  p1_capability_runtime_harness_global_runtime_reconciliation_401730e8 -->|"Hash runtime candidates and reconciliation evidence."| p1_capability_runtime_harness_evidence_ledger_2fe63ef5
   p1_component_hook_adapters_edit_guards_019fd22c -->|"Implement the typed handler contract and read hook input through the shared parsers"| p1_component_hook_adapters_primary_1659ffb9
   p1_component_hook_adapters_hook_root_4ed4a0fc -->|"Run the hook route runtime for one host event"| p1_component_hook_adapters_primary_1659ffb9
   p1_component_hook_adapters_host_installer_cd378e80 -->|"Read the shared host skill roots for install projections and report architecture projection readiness in status"| p1_capability_runtime_harness_global_runtime_reconciliation_401730e8
@@ -47,8 +48,8 @@ flowchart LR
   classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-- Proof: `proven` (`sha256:200caf416ff4b37103194050d6d556e148e73d319d71cfb3f3f9877ed9983b25`).
-- Semantic nodes: `14`; declared relations: `13`.
+- Proof: `proven` (`sha256:a3986ea604c6b12bf88e8d218595c8d916df1ddd8e882ff79fc699f636578bca`).
+- Semantic nodes: `14`; declared relations: `14`.
 
 ### 1.2 模組職責表
 
@@ -79,18 +80,21 @@ flowchart LR
 
 - `deployed-on` → `process.hook` — Hook adapters run in the per-event hook process.
 - `depends-on` → `capability.verification.acceptance-review` — Read the diff fingerprint for mutation guards.
+- `depends-on` → `capability.organization.board` — Read seat reset state in lifecycle hook handlers.
 - `calls` → `component.hook-adapters.primary` — Dispatch a host hook route to its typed handler
 
 入向關係:
 
 - `calls` ← `capability.verification.acceptance-review` — Admit at most one persistent semantic review session per work package through the circuit breaker
 - `depends-on` ← `capability.public-surface.adoption` — Use installer setup during repository migration.
+- `depends-on` ← `capability.organization.board` — Project the selected skill surface for seat launch.
 - `calls` ← `external.claude-code` — Claude Code runs the installed repo-harness hook command for each hook event.
 - `depends-on` ← `capability.verification.codegraph-readiness` — Use host locks and configuration ownership for CodeGraph setup.
 - `calls` ← `external.codex` — Codex runs the installed repo-harness hook command for each hook event.
 - `calls` ← `component.contract-assets.template-projection` — Read the install state and project skills during init
 - `reads` ← `component.evals-checks.evals-and-benchmarks` — Read hook event telemetry records to measure hook cost in profile benchmarks
 - `depends-on` ← `capability.runtime-harness.evidence-ledger` — Collect loop state inputs for recovery evidence.
+- `depends-on` ← `capability.runtime-mcp.general-repo-access` — Write repository access events through the shared segmented log.
 - `calls` ← `component.global-runtime-reconciliation.archctx-closure` — Write the private global configuration through the installer ownership writer
 - `calls` ← `component.global-runtime-reconciliation.cli-diagnostics` — Read the install state, skill projections, host targets, the Pi host probe, hook routes and status for the doctor and setup check reports
 - `calls` ← `component.global-runtime-reconciliation.cli-root` — Register the install and status and security and hook commands and run host transactions for the plugin selection
@@ -98,6 +102,7 @@ flowchart LR
 - `calls` ← `component.mcp-sidecar.repo-policy-registry` — Append the MCP audit log through the shared segmented log writer
 - `reads` ← `component.operator.activity-feeds` — Read the hook route registry for the Hooks and Agents pages
 - `calls` ← `external.pi` — Pi loads the native extension, which sends mapped session, prompt and tool events to the same-package Bun hook process.
+- `depends-on` ← `capability.runtime-harness.task-agent-host` — Resolve the Pi executable for task review sessions.
 
 組件出向關係:
 
@@ -149,8 +154,8 @@ flowchart LR
 | --- | --- | --- | --- |
 | `component.hook-adapters.edit-guards` | Edit Guard Handlers | `2–5` 個文件 / `500–1000` 行 | 未宣告 |
 | `component.hook-adapters.hook-root` | Hook Composition Root | `1–2` 個文件 / `50–100` 行 | 未宣告 |
-| `component.hook-adapters.host-config` | Host Config Write Gate | `5–10` 個文件 / `500–1000` 行 | 未宣告 |
-| `component.hook-adapters.host-config-effects` | Host Config Write Gate (effects) | `2–5` 個文件 / `500–1000` 行 | 未宣告 |
+| `component.hook-adapters.host-config` | Host Config Write Gate | `5–10` 個文件 / `1000–2000` 行 | 未宣告 |
+| `component.hook-adapters.host-config-effects` | Host Config Write Gate (effects) | `5–10` 個文件 / `1000–2000` 行 | 未宣告 |
 | `component.hook-adapters.host-installer` | Host Adapter Installer | `20–50` 個文件 / `5000–10000` 行 | `entrypoint.hook-adapters.managed-entries`、`entrypoint.hook-adapters.pi-extension`、`entrypoint.hook-adapters.skill-projection` |
 | `component.hook-adapters.host-installer-effects` | Host Adapter Installer (effects) | `5–10` 個文件 / `200–500` 行 | 未宣告 |
 | `component.hook-adapters.primary` | Hook Route Runtime | `5–10` 個文件 / `1000–2000` 行 | `entrypoint.hook-adapters.handler-bindings` |
@@ -160,7 +165,7 @@ flowchart LR
 
 ## 2. P2:端到端數據流
 
-> **Proof**: `proven` (`sha256:200caf416ff4b37103194050d6d556e148e73d319d71cfb3f3f9877ed9983b25`); selectors `7/7`.
+> **Proof**: `proven` (`sha256:a3986ea604c6b12bf88e8d218595c8d916df1ddd8e882ff79fc699f636578bca`); selectors `7/7`.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%

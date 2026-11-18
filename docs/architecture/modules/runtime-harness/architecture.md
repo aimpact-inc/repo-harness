@@ -1,6 +1,6 @@
 # runtime-harness/architecture 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-architecture" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:5ee4b75e79ffb961151f19ff70cc6c3bb36e655569dd368b11406c6ab00fea24" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-architecture" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:cf88a393f57c0ecfb5de72e1c3da49d093c9dce1f7c8bb08dd0bb27eed243ef7" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.architecture`(kind `capability`)
 > **Matched Prefixes**:`src/effects/architecture/**`、`src/core/architecture/projection.ts`、`src/core/architecture/module-view.ts`、`src/core/review/module-review-prompt.ts`、`src/cli/commands/module.ts`、`src/cli/hook/agent-notice.ts`、`scripts/axr5-archctx-clean-room.ts`、`scripts/check-state-boundaries.ts`、`scripts/project-test-capabilities.ts`、`scripts/sync-helper-sources.ts`、`assets/skills/repo-harness-archimap/**`、`assets/skill-commands/repo-harness-architecture/**`、`docs/verification/**`
@@ -68,10 +68,14 @@ flowchart LR
 出向關係:
 
 - `calls` → `component.architecture.helper-projection` — Project the standalone capability resolver helper
+- `depends-on` → `capability.public-surface.adoption` — Resolve the source checkout for the projection writer.
+- `depends-on` → `capability.verification.evals-checks` — Read CI coverage selection and test reports for capability projection.
+- `depends-on` → `capability.workflow-engine.inspection-migration` — Use the shared clean-room runtime for the architecture probe.
 
 入向關係:
 
-- 無。
+- `depends-on` ← `capability.verification.evals-checks` — Verify architecture commands, providers and notices.
+- `depends-on` ← `capability.runtime-harness.refactor-program` — Use the shared ArchContext provider and projection contracts for refactor checks.
 
 組件出向關係:
 

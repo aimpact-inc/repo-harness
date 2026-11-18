@@ -1,5 +1,5 @@
 # verification/evals-checks 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-verification-evals-checks" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:44390b27cafad0769252ff8d9a5d4e92178ee0d01989b4be2db71512b3f62347" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-verification-evals-checks" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:cf29f7f319d686bf3b449d334daf4ca5bad0abae810a6c9bfd41b0954faceec9" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.verification.evals-checks`(kind `capability`)
 > **Matched Prefixes**:`tests/**`、`evals/**`、`scripts/run-skill-evals.ts`、`scripts/run-harness-profile-benchmark.ts`、`scripts/validate-harness-profile-benchmark.ts`、`scripts/verify-sprint.sh`、`scripts/check-agent-tooling.sh`、`bunfig.toml`、`.github/**`、`scripts/verification-plan.ts`、`scripts/check-ci.sh`、`scripts/host-test-queue.ts`、`scripts/check-protected-paths.ts`、`scripts/select-ci-coverage.ts`、`scripts/replay-ci-coverage.ts`、`scripts/report-ci.ts`、`scripts/check-archimap-links.ts`、`scripts/check-ledger-enforcement.ts`、`scripts/select-test-suite.ts`、`scripts/ci-documentation-consumers.ts`、`scripts/harness-trace-grade.sh`、`src/cli/commands/rules.ts`、`src/cli/commands/verify.ts`
@@ -63,6 +63,7 @@ flowchart LR
 - `depends-on` → `capability.verification.acceptance-review` — Test Acceptance Review behavior through its source modules.
 - `depends-on` → `capability.public-surface.action-commands` — Test Action Commands behavior through its source modules.
 - `depends-on` → `capability.public-surface.adoption` — Test Adoption behavior through its source modules.
+- `depends-on` → `capability.runtime-harness.architecture` — Verify architecture commands, providers and notices.
 - `depends-on` → `capability.organization.board` — Test Board behavior through its source modules
 - `depends-on` → `capability.verification.codegraph-readiness` — Test CodeGraph Readiness behavior through its source modules.
 - `depends-on` → `capability.runtime-harness.global-runtime-reconciliation` — Test Global Runtime Reconciliation behavior through its source modules.
@@ -80,6 +81,7 @@ flowchart LR
 入向關係:
 
 - `depends-on` ← `capability.public-surface.action-commands` — Run the skill evaluation engine for routing checks.
+- `depends-on` ← `capability.runtime-harness.architecture` — Read CI coverage selection and test reports for capability projection.
 - `depends-on` ← `capability.organization.board` — Match open CI repair issues by the marker that the CI report writes
 - `depends-on` ← `capability.verification.codegraph-readiness` — Use shared repository fixtures for CodeGraph resolver tests.
 - `depends-on` ← `capability.runtime-harness.global-runtime-reconciliation` — Use shared test fixtures for global runtime checks.
@@ -116,7 +118,7 @@ flowchart LR
 
 | 組件 | 名稱 | 規模量級 | 宣告入口 |
 | --- | --- | --- | --- |
-| `component.evals-checks.ci-report-core` | CI Report Core | `5–10` 個文件 / `1000–2000` 行 | 未宣告 |
+| `component.evals-checks.ci-report-core` | CI Report Core | `5–10` 個文件 / `500–1000` 行 | 未宣告 |
 | `component.evals-checks.ci-selection` | CI Selection And Report | `10–20` 個文件 / `2000–5000` 行 | 未宣告 |
 | `component.evals-checks.evals-and-benchmarks` | Evals And Benchmarks | `2–5` 個文件 / `2000–5000` 行 | 未宣告 |
 | `component.evals-checks.evals-and-benchmarks-tests` | Evals And Benchmarks (tests) | `50–100` 個文件 / `10k–20k` 行 | 未宣告 |

@@ -1,9 +1,9 @@
 # organization/publication 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-organization-publication" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:1d7f574fa34ff39cc81e6ac503b57af5e841b89ea13baf618145104748078659" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-organization-publication" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:f32b651d8d64d12f5c85f3d8ab74b2404fa2c9df837d633b2d2dd45b9794eee9" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.organization.publication`(kind `capability`)
-> **Matched Prefixes**:`src/core/publication/**`、`src/effects/publication/**`、`src/cli/commands/publication.ts`
+> **Matched Prefixes**:`src/core/publication/**`、`src/effects/publication/**`、`src/cli/commands/publication.ts`、`scripts/release-owner-steps.sh`
 > **Local Contracts**:`AGENTS.md`、`CLAUDE.md`
 > **事實優先級**:倉庫當前狀態 > 本文檔機器區 > 本文檔人工區。機器區(引言、§1、§2)由 ArchContext 從架構模型與源碼度量投影生成,手改會在下次投影被覆蓋。本文檔不記錄出處;本次投影所驗證的 commit 見 `docs/architecture/.projection-manifest.json`。
 
@@ -44,7 +44,7 @@ flowchart LR
 ### 1.3 規模信號
 
 - 規模量級:`10–20` 個文件 / `5000–10000` 行
-- 匹配前綴:`src/core/publication/**`、`src/effects/publication/**`、`src/cli/commands/publication.ts`
+- 匹配前綴:`src/core/publication/**`、`src/effects/publication/**`、`src/cli/commands/publication.ts`、`scripts/release-owner-steps.sh`
 - 推導:掃描 `source.include` 減 `source.exclude`,跳過 `.git/` 與 `node_modules/`,再按 1–2–5 階梯分桶。精確計數不入本文檔:量級足以回答「這個能力有多大」,而逐行計數會讓覆蓋範圍內任何一次源碼改動都改寫本文檔。
 
 ### 1.4 依賴邊界
@@ -55,11 +55,14 @@ flowchart LR
 - `calls` → `external.github` — Read pull request readiness, post provider feedback and find or create Draft PRs through gh. Set the GitHub App hook config over the REST API with an App JWT.
 - `depends-on` → `capability.verification.acceptance-review` — Run the bounded gh command transport that the Draft PR operation uses.
 - `depends-on` → `capability.verification.evals-checks` — Read the TestBudget configuration, exception digest and stored result document through the rule's own parser at merge readiness.
+- `depends-on` → `capability.runtime-harness.evidence-ledger` — Decode and hash publication feedback and readiness evidence.
 - `depends-on` → `capability.workflow-engine.execution-primitives` — Resolve the Git common directory for the feedback store, validate the shared task message claim in feedback records, and run Git through the shared runner in the new remote ref push operation
+- `depends-on` → `capability.workflow-engine.workflow-state` — Read workflow policy and no-progress state for publication readiness.
 - `calls` → `component.publication.primary` — Derive fenced PR readiness, collect provider integration evidence and share the digest helpers without task ownership mutation
 
 入向關係:
 
+- `depends-on` ← `capability.verification.acceptance-review` — Read merge policy and required check coverage for acceptance receipts.
 - `depends-on` ← `capability.organization.board` — Parse closing references and reuse the single-PR merge readiness projection
 - `depends-on` ← `capability.workflow-engine.contract-assets` — Read publication merge readiness from the merge helper.
 - `depends-on` ← `capability.verification.evals-checks` — Test PR Publication behavior through its source modules.

@@ -1,6 +1,6 @@
 # runtime-harness/task-agent-host 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-task-agent-host" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:67eea0cb1facd8e369f21c2af0762df52b4f0fbece3baac00f58f4fc528dcac1" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-task-agent-host" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:871ee534669af15e452902062b3df449651b9412a53041b1a1a383808c2f590c" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.task-agent-host`(kind `capability`)
 > **Matched Prefixes**:`src/effects/terminal/task-session.ts`、`src/effects/terminal/task-runtime-observation.ts`、`assets/herdr/**`、`src/effects/terminal/native-task-session.ts`、`src/effects/review-runner/**`
@@ -67,6 +67,7 @@ flowchart LR
 - `calls` → `capability.runtime-harness.evidence-ledger` — Hash request context and result bytes with the evidence canonical JSON
 - `depends-on` → `external.herdr-app` — Own the one herdr-app do argv for tab.new, pane.split, pane.close and terminal.keep. The console prints the terminal.keep command for the person to run.
 - `calls` → `external.herdr-core` — Run labeled task-agent, review-host and notify relay terminals with hc run, and get and list them. Kill and remove notify relay terminals. Follow hc events in the notify relay.
+- `depends-on` → `capability.runtime-harness.hook-adapters` — Resolve the Pi executable for task review sessions.
 - `depends-on` → `capability.workflow-engine.workflow-state` — Read admitted sessions and task session lists through the shared core selector and session types
 - `calls` → `component.task-agent-host.primary` — Start send and collect persistent Herdr task agents
 - `calls` → `component.task-agent-host.review-runner` — Run the reviewer session, its OAR review host and its pre-prompt inbox companion for acceptance review

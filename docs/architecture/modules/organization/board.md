@@ -1,6 +1,6 @@
 # organization/board 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-organization-board" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:d884d5a835237780208f17c5e39f344102545206e0aa931587c4b33b2d768117" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-organization-board" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:b3ea34555a3db450174b59f77f51d04db82f1a2fad882180a8a955452ce78e3e" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.organization.board`(kind `capability`)
 > **Matched Prefixes**:`src/core/board/**`、`src/effects/board/**`、`src/cli/commands/board.ts`、`src/cli/commands/quota.ts`、`src/cli/commands/seats.ts`
@@ -45,7 +45,7 @@ flowchart LR
 
 ### 1.3 規模信號
 
-- 規模量級:`20–50` 個文件 / `5000–10000` 行
+- 規模量級:`20–50` 個文件 / `10k–20k` 行
 - 匹配前綴:`src/core/board/**`、`src/effects/board/**`、`src/cli/commands/board.ts`、`src/cli/commands/quota.ts`、`src/cli/commands/seats.ts`
 - 推導:掃描 `source.include` 減 `source.exclude`,跳過 `.git/` 與 `node_modules/`,再按 1–2–5 階梯分桶。精確計數不入本文檔:量級足以回答「這個能力有多大」,而逐行計數會讓覆蓋範圍內任何一次源碼改動都改寫本文檔。
 
@@ -54,18 +54,24 @@ flowchart LR
 出向關係:
 
 - `calls` → `component.board.cli` — Expose board, attention, seats and quota commands, and validate and post typed protocol comments through board post
+- `depends-on` → `capability.verification.acceptance-review` — Resolve review model families for board review selection.
 - `depends-on` → `capability.verification.evals-checks` — Match open CI repair issues by the marker that the CI report writes
+- `depends-on` → `capability.runtime-harness.evidence-ledger` — Use shared evidence decoders and hashes for board records.
 - `depends-on` → `capability.workflow-engine.execution-primitives` — Build the seat launch from the pane prefix, the hc terminal labels, the repository registry and the Git common directory. Read the Git runner, the hc pin, the repo-harness home and the secret token rules for the board.
 - `depends-on` → `component.contract-assets.fleet-role-profiles` — Read the fleet role profiles for the seat ranges, the seat sub-agents and the seats section check.
 - `depends-on` → `capability.runtime-harness.global-runtime-reconciliation` — Read and change the seats section through the shared global configuration transaction, and read the package version for the codex app-server client.
+- `depends-on` → `capability.runtime-harness.hook-adapters` — Project the selected skill surface for seat launch.
 - `depends-on` → `capability.organization.publication` — Parse closing references and reuse the single-PR merge readiness projection
+- `depends-on` → `capability.workflow-engine.workflow-state` — Read coordination worktree topology during closeout.
 
 入向關係:
 
+- `depends-on` ← `capability.verification.acceptance-review` — Read seat settings and board review sources for review collection and publication.
 - `depends-on` ← `capability.workflow-engine.contract-assets` — Render the change hazard table in agentic-development-flow.md from the board hazard list reader.
 - `depends-on` ← `capability.verification.evals-checks` — Test Board behavior through its source modules
 - `depends-on` ← `component.execution-primitives.hc-client` — Implement the board host port (seat terminals by parent label and the hc version) and the attention host port (start watcher terminals with hc run, read watcher terminals, and send to and wait on seat terminals)
 - `calls` ← `component.global-runtime-reconciliation.cli-root` — Register the board, seats and quota commands
+- `depends-on` ← `capability.runtime-harness.hook-adapters` — Read seat reset state in lifecycle hook handlers.
 - `depends-on` ← `capability.runtime-harness.operator` — Serve and show the board of one parent issue: decode the board and parent documents that the board observer worker reads, and evaluate the attention rules in the browser. Read the seat, quota and agent settings contracts, read quota through the core readers, and save seats through the core writer.
 
 組件出向關係:

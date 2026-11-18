@@ -1,5 +1,5 @@
 # verification/codegraph-readiness 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-verification-codegraph-readiness" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:ec079d9a182a34acf5ba538704b4e145fe7a85747f14ab8552822e28208aaf56" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-verification-codegraph-readiness" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:7c3d62aec0462d5c5009f01711a7d00facf5a7332c989f00c4ec6bf4bfba58bd" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.verification.codegraph-readiness`(kind `capability`)
 > **Matched Prefixes**:`src/cli/tools/codegraph.ts`、`src/cli/tools/codegraph-reader.ts`、`src/cli/commands/tools.ts`
@@ -52,6 +52,7 @@ flowchart LR
 - `calls` → `external.codegraph` — Run codegraph to check index readiness and read code facts.
 - `depends-on` → `capability.workflow-engine.contract-assets` — Type the CodeGraph init step with the core init port type and the CodeGraph doctor provider with the core architecture contract
 - `depends-on` → `capability.verification.evals-checks` — Use shared repository fixtures for CodeGraph resolver tests.
+- `depends-on` → `capability.runtime-harness.evidence-ledger` — Hash CodeGraph reader evidence.
 - `depends-on` → `capability.workflow-engine.execution-primitives` — Run bounded CodeGraph processes.
 - `depends-on` → `capability.runtime-harness.global-runtime-reconciliation` — Type the CodeGraph doctor checks and global runtime MCP step with the core doctor and global runtime port types
 - `depends-on` → `capability.runtime-harness.hook-adapters` — Use host locks and configuration ownership for CodeGraph setup.

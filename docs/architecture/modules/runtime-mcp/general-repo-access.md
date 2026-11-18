@@ -1,5 +1,5 @@
 # runtime-mcp/general-repo-access 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-mcp-general-repo-access" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:82249479932a74c8892e186f390c6bf49c8ab26503c4df87e36b079e213edb0c" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-mcp-general-repo-access" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:b58bd16afff8a1eeac1a3fea86d9fddab4471de4e0c71db9e01226b7b23cb8cd" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-mcp.general-repo-access`(kind `capability`)
 > **Matched Prefixes**:`src/cli/mcp/general-repo-access.ts`、`src/cli/mcp/general-repo-access/**`、`assets/mcp/**`
@@ -47,6 +47,9 @@ flowchart LR
 
 出向關係:
 
+- `depends-on` → `capability.verification.acceptance-review` — Use acceptance receipt and change assessment contracts in MCP tests.
+- `depends-on` → `capability.runtime-harness.evidence-ledger` — Decode and hash repository access authority and tool records.
+- `depends-on` → `capability.runtime-harness.hook-adapters` — Write repository access events through the shared segmented log.
 - `calls` → `component.general-repo-access.primary` — Read a repository file
 
 入向關係:

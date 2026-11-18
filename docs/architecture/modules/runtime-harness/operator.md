@@ -1,6 +1,6 @@
 # runtime-harness/operator 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-operator" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:941f181fbd410b5dfddb7a6601b17c6954cb923d05294b9e9f7a792b8877d22e" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-operator" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:d70b7fb7bfa9740d4510efcdae08bed9fdb4b230c875c54c5b22475219ab7afd" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.operator`(kind `capability`)
 > **Matched Prefixes**:`docs/kanban-runtime-status.md`、`src/effects/operator/**`、`src/operator-web/**`、`packages/operator-web/**`、`src/effects/setup/**`、`src/effects/dev-activity/**`、`vite.operator.config.ts`
@@ -81,6 +81,7 @@ flowchart LR
 - `deployed-on` → `process.operator-server` — The operator board runs in the operator server process.
 - `reads` → `external.github` — Collect pull request and CI activity, the newest daily CI run with its JUnit and test projection artifacts, the open CI repair issues, and the CLI inventory repository lookups through gh in background collectors.
 - `depends-on` → `capability.public-surface.action-commands` — Read the skill catalog for the setup snapshot.
+- `depends-on` → `capability.public-surface.adoption` — Build the adoption plan for language settings.
 - `depends-on` → `capability.organization.board` — Serve and show the board of one parent issue: decode the board and parent documents that the board observer worker reads, and evaluate the attention rules in the browser. Read the seat, quota and agent settings contracts, read quota through the core readers, and save seats through the core writer.
 - `depends-on` → `component.evals-checks.ci-report-core` — Read the test result types, the test projection parser and the run command for the tests board and its snapshot decoder.
 - `depends-on` → `capability.runtime-harness.evidence-ledger` — Plugin → core: canonicalize digests and use the JSON value types for worktree cleanup and the operator write audit

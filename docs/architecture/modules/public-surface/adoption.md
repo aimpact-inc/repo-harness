@@ -1,5 +1,5 @@
 # public-surface/adoption 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-public-surface-adoption" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:8ef58d7b04ca9a2d1a67cc12f483708ce3c3ac1e561d3258534f943ab88b5308" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-public-surface-adoption" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:fc6b2256a5c3ba70051ca78900520bc979986f04ab3c9229e16572cb3385bc2c" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.public-surface.adoption`(kind `capability`)
 > **Matched Prefixes**:`src/core/adoption/**`
@@ -49,6 +49,8 @@ flowchart LR
 
 出向關係:
 
+- `depends-on` → `capability.workflow-engine.contract-assets` — Read the workflow contract asset for adoption.
+- `depends-on` → `capability.runtime-harness.evidence-ledger` — Hash adoption plans and report file transaction errors.
 - `depends-on` → `capability.workflow-engine.execution-primitives` — Run bounded processes for adoption and file transactions.
 - `depends-on` → `capability.runtime-harness.global-runtime-reconciliation` — Use the legacy inventory during adoption planning.
 - `depends-on` → `capability.runtime-harness.hook-adapters` — Use installer setup during repository migration.
@@ -58,6 +60,7 @@ flowchart LR
 
 入向關係:
 
+- `depends-on` ← `capability.runtime-harness.architecture` — Resolve the source checkout for the projection writer.
 - `calls` ← `component.contract-assets.template-projection` — Plan and apply the transactional adoption for repository init
 - `depends-on` ← `capability.verification.evals-checks` — Test Adoption behavior through its source modules.
 - `calls` ← `capability.runtime-harness.evidence-ledger` — Resolve blob and log paths inside the repository with the shared path-safety helper
@@ -66,6 +69,7 @@ flowchart LR
 - `calls` ← `component.global-runtime-reconciliation.primary` — Classify retired surfaces with the adoption fingerprints and back up removals in an FsTransaction manifest under the target lock
 - `calls` ← `component.hook-adapters.host-installer` — Share the managed hook command fingerprints with the adoption migration
 - `calls` ← `component.hook-adapters.session-lifecycle` — Check the one-release run summary cleanup paths with the shared path safety rules
+- `depends-on` ← `capability.runtime-harness.operator` — Build the adoption plan for language settings.
 
 組件出向關係:
 

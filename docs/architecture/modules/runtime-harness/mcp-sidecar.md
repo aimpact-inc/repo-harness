@@ -1,5 +1,5 @@
 # runtime-harness/mcp-sidecar 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-mcp-sidecar" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:56eabc1f7d76a09d5ab11b76a60811a59000b0137deb9aae518a22ee46819003" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-mcp-sidecar" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:632a8c4632aacc085a23cf9ff38c30e5bb1b35313691d69bd9aded9b17ef8bd7" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.mcp-sidecar`(kind `capability`)
 > **Matched Prefixes**:`src/cli/mcp/**`
@@ -62,6 +62,7 @@ flowchart LR
 
 - `deployed-on` → `process.mcp-server` — The MCP sidecar runs in the MCP server process.
 - `depends-on` → `capability.verification.codegraph-readiness` — Build the CodeGraph reader for the served tools and type the reader tool context
+- `depends-on` → `capability.runtime-harness.evidence-ledger` — Hash MCP audit and guarded write evidence.
 - `calls` → `component.mcp-sidecar.primary` — Dispatch an MCP tool call
 
 入向關係:

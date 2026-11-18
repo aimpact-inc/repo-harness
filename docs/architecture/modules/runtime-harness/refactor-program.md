@@ -1,5 +1,5 @@
 # Refactor Program
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-refactor-program" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:199eb6ed1531519de779176e539739096840ba79deda784a2972601c27e5e25d" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-refactor-program" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:3174c5f17b28c8ec7adc5e5ff594366430556a105c99717280ee2756fb2e9438" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.refactor-program`(kind `capability`)
 > **Matched Prefixes**:`src/effects/refactor/**`
@@ -50,6 +50,7 @@ flowchart LR
 出向關係:
 
 - `calls` → `component.refactor-program.archctx-provider` — Scan for structural observations and record user decisions through the pinned package-local ArchContext CLI
+- `depends-on` → `capability.runtime-harness.architecture` — Use the shared ArchContext provider and projection contracts for refactor checks.
 - `depends-on` → `capability.workflow-engine.contract-assets` — Type the archctx provider options with the core architecture contract
 - `calls` → `component.execution-primitives.repository-registry` — Resolve the canonical repository path through the repo registry
 
