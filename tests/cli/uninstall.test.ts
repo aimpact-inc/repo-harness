@@ -1,11 +1,14 @@
 import { createHash } from 'crypto';
 import { prepareInstallSelectionSwitch, versions } from '../../src/cli/installer/install-profile';
 import { beforeAll, test, expect } from 'bun:test';
-import { installStateFixturePath, recordLegacyInstallOwnership, recordPluginSelection, seedGlobalPackageFixture, seedPathRecords } from '../helpers/install-ownership';
+import { installStateFixturePath, recordLegacyInstallOwnership, recordPluginSelection, seedGlobalPackageFixture, seedPathRecords, withTempHome } from '../helpers/install-ownership';
+import { runInstall } from '../../src/cli/commands/install';
+import { jsonFragment } from '../../src/core/host-config/json-fragment';
+import { CLAUDE_ROOT_CONFIG_BACKUP, CODEGRAPH_MCP_SELECTOR } from '../../src/core/host-config/claude-config';
 import type { PathCommitted } from '../../src/core/host-config/types';
 import { pathRecordHost, pathRecordKey } from '../../src/effects/host-config/path-records';
 import { hashManagedTree } from '../../src/effects/managed-tree';
-import { appendFileSync, chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync } from 'fs';
+import { appendFileSync, chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, relative } from 'path';
 import { spawnSync } from 'child_process';
@@ -268,6 +271,16 @@ test('a codex uninstall keeps every claude record under a linked ~/.claude, and 
  expect(runUserUninstall({target:'both',env}).status).toBe('complete');
  expect([existsSync(link),readFileSync(kept,'utf8'),ledger(home).paths]).toEqual([false,'mine',{}]);
 }));
+test('a recorded skill under a ~/.claude linked outside HOME is checked beneath that root and goes',()=>fixture((home,env)=>{
+ const outside=mkdtempSync(join(tmpdir(),'claude-dotfiles-'));
+ try {
+  mkdirSync(join(outside,'skills'),{recursive:true});symlinkSync(outside,join(home,'.claude'));
+  put(home,'source/SKILL.md','keep');const link=join(home,'.claude/skills/check');symlinkSync(join(home,'source'),link);
+  profile(home,[ownedLink(link,join(home,'source'))]);
+  const result=runUserUninstall({target:'both',env});
+  expect(result.status,result.lines.join('\n')).toBe('complete');expect([existsSync(link),ledger(home).paths]).toEqual([false,{}]);
+ } finally { rmSync(outside,{recursive:true,force:true}); }
+}));
 test('an uninstall keeps a personal file and a foreign skill that a path record names outside every install surface',()=>fixture((home,env)=>{
  const personal=join(home,'.codex/rules/personal.md');const foreign=join(home,'.claude/skills/foreign-skill');
  put(home,'.codex/rules/personal.md','mine');put(home,'.claude/skills/foreign-skill/SKILL.md','mine');
@@ -275,11 +288,20 @@ test('an uninstall keeps a personal file and a foreign skill that a path record 
  expect(runUserUninstall({target:'both',env}).status).toBe('complete');
  expect([readFileSync(personal,'utf8'),readFileSync(join(foreign,'SKILL.md'),'utf8')]).toEqual(['mine','mine']);
 }));
-test('a dry run on a protocol 3 install plans the migrated records and writes nothing',()=>fixture((home,env)=>{
+test('a dry run on a protocol 3 install with an older ledger plans the migrated records, writes nothing and reports what the uninstall does',()=>fixture((home,env)=>{
  const rule=join(home,'.codex/rules/anti-patterns.md');put(home,'.codex/rules/anti-patterns.md','owned');
- recordLegacyInstallOwnership([rule],env);const before=tree(home);
- expect(runUserUninstall({target:'both',dryRun:true,env}).lines).toContain(`[reverted] ${pathRecordKey(env,rule)}: unchanged transaction-owned surface`);
+ rhWritesInputMode(env,join(home,'.codex/config.toml'));
+ recordLegacyInstallOwnership([rule],env);
+ // The ledger as an earlier rh version left it.
+ const {paths:_paths,retired:_retired,recovery:_recovery,...text}=ledger(home);
+ writeFileSync(join(home,'.repo-harness/config/ledger.json'),JSON.stringify({...text,protocol:1}));
+ const before=tree(home);
+ const dryRun=runUserUninstall({target:'both',dryRun:true,env});
+ expect(dryRun.lines).toContain(`[reverted] ${pathRecordKey(env,rule)}: unchanged transaction-owned surface`);
  expect(tree(home)).toBe(before);
+ const result=runUserUninstall({target:'both',env});
+ expect({exitCode:dryRun.exitCode,items:dryRun.items}).toEqual({exitCode:result.exitCode,items:result.items});
+ expect(result.exitCode,result.lines.join('\n')).toBe(0);
 }));
 test('staging skill removal edits the provider lock under an XDG_STATE_HOME outside HOME, after a failed cleanup',()=>fixture((home,env)=>{
  const state=mkdtempSync(join(tmpdir(),'user-uninstall-state-'));const lockPath=join(state,'skills/.skill-lock.json');
@@ -332,6 +354,27 @@ test('rules blocks revert to the original bytes, keep a later user line and an e
  expect(runUserUninstall({target:'both',env}).status).toBe('complete');
  expect(readFileSync(codex,'utf8')).toBe('codex notes\nlater\n');expect(lstatSync(claude).isSymbolicLink()).toBe(true);
 }));
+/** Every entry outside ~/.repo-harness and ~/.bun, with the bytes and mode of each file. */
+function hostSnapshot(home: string) {
+ return readdirSync(home,{recursive:true}).map(String).filter((p)=>!/^\.(repo-harness|bun)(\/|$)/.test(p)).sort().map((p)=>{
+  const stat=lstatSync(join(home,p));return stat.isFile()?[p,stat.mode&0o777,readFileSync(join(home,p),'utf8')]:[p,stat.isDirectory()?'dir':'other'];
+ });
+}
+test('install then uninstall leaves the six host text files byte-identical with their modes, and nothing new outside ~/.repo-harness',()=>withTempHome('host-config-roundtrip',(home)=>{
+ const env={...process.env};const root=join(import.meta.dir,'../..');
+ const seeds:Record<string,[string,number]>={'.codex/config.toml':['model = "user"\n',0o644],'.codex/hooks.json':['{\n  "hooks": {}\n}\n',0o644],
+  '.claude/settings.json':['{\n  "theme": "dark"\n}\n',0o640],'.claude.json':['{\n  "user": 1\n}',0o644],'.claude/CLAUDE.md':['claude notes\n',0o644],'.codex/AGENTS.md':['codex notes',0o600]};
+ for(const [path,[content,mode]] of Object.entries(seeds)){put(home,path,content);chmodSync(join(home,path),mode);}
+ const before=hostSnapshot(home);
+ expect(runInstall({target:'both',location:'global'}).exitCode).toBe(0);
+ openHostConfigGate({env}).apply([{path:join(home,'.claude.json'),backup:CLAUDE_ROOT_CONFIG_BACKUP,fragments:[{owner:'architecture',selector:CODEGRAPH_MCP_SELECTOR,kind:'add',strategy:jsonFragment,value:{command:'codegraph'}}]}]);
+ expect(applyGlobalContextRefresh(preflightGlobalContextRefresh(root,home,['codex','claude'],'en'),home).status).toBe('ok');
+ for(const path of Object.keys(seeds)) expect(readFileSync(join(home,path),'utf8'),path).not.toBe(seeds[path]![0]);
+ const result=runUserUninstall({target:'both',env});
+ expect(result.exitCode,result.lines.join('\n')).toBe(0);
+ expect(Object.keys(seeds).map((path)=>result.items.find((item)=>item.path===join(home,path))?.action)).toEqual(Object.keys(seeds).map(()=>'restored'));
+ expect(hostSnapshot(home)).toEqual(before);
+}));
 test('uninstall retires a deleted rules file record without restoring the file',()=>fixture((home,env)=>{
  const path=join(home,'.claude/CLAUDE.md');
  put(home,'.claude/CLAUDE.md','user notes');
@@ -361,6 +404,43 @@ test.each(['deleted','dangling link'] as const)('a %s config.toml with an active
  const result=runUserUninstall({target:'codex',env});
  expect({status:result.status,items:result.items}).toEqual({status:dryRun.status,items:dryRun.items});
  expect({status:result.status,link:lstatSync(path,{throwIfNoEntry:false})?.isSymbolicLink()??false}).toEqual(shape==='deleted'?{status:'complete',link:false}:{status:'partial',link:true});
+}));
+test('a revert whose result would not equal the known baseline writes nothing, exits 2 and keeps the install state, the record and its vault copy',()=>fixture((home,env)=>{
+ const path=join(home,'.codex/config.toml');put(home,'.codex/config.toml','model = "user"\n');
+ rhWritesInputMode(env,path);
+ profile(home,[]);
+ const written=readFileSync(path,'utf8');const recorded=ledger(home);
+ // A ledger whose baseline does not match the reverted bytes, as a wrong strategy result would give.
+ const wrong={...recorded,files:{[path]:{...recorded.files[path],baseline:{state:'known',existed:true,sha256:`sha256:${'1'.repeat(64)}`}}}};
+ writeFileSync(join(home,'.repo-harness/config/ledger.json'),JSON.stringify(wrong));
+ put(home,'.codex/rules/anti-patterns.md','edited');seedPathRecords({HOME:home},{[pathRecordKey(env,join(home,'.codex/rules/anti-patterns.md'))]:{owner:'core',host:'codex',kind:'created',baseline:{state:'unknown'},committed:ownedFile('','owned').committed}});
+ const result=runUserUninstall({target:'both',env});
+ expect({exitCode:result.exitCode,status:result.status}).toEqual({exitCode:2,status:'failed'});
+ expect(result.lines).toContain(`[failed] ${path}: host_config_restore_mismatch: the reverted file would not equal the file before rh; nothing written, the ledger record and its vault copy kept`);
+ expect(result.items.some((item)=>item.action==='unresolved')).toBe(true);
+ expect([readFileSync(path,'utf8'),ledger(home).files[path],existsSync(join(home,'.repo-harness/install-state.json'))]).toEqual([written,wrong.files[path],true]);
+ expect(readdirSync(join(home,'.repo-harness/config/vault'))).toContain(String(wrong.files[path].backup).slice('sha256:'.length));
+}));
+test('--remove-edited-block takes out an edited rules block after a whole-file copy; the dry run copies nothing, and an unbalanced block is kept',()=>fixture((home,env)=>{
+ const path=join(home,'.claude/CLAUDE.md');put(home,'.claude/CLAUDE.md','claude notes');
+ expect(applyGlobalContextRefresh(preflightGlobalContextRefresh(join(import.meta.dir,'../..'),home,['claude'],'en'),home).status).toBe('ok');
+ writeFileSync(path,readFileSync(path,'utf8').replace('## Reporting','- My own rule.\n\n## Reporting')+'\nlater\n');
+ const edited=readFileSync(path,'utf8');const vault=join(home,'.repo-harness/config/vault');const copies=()=>existsSync(vault)?readdirSync(vault).sort():[];const before=copies();
+ const dryRun=runUserUninstall({target:'claude',env,dryRun:true,removeEditedBlocks:[path]});
+ expect([dryRun.exitCode,readFileSync(path,'utf8'),copies()]).toEqual([0,edited,before]);
+ const result=runUserUninstall({target:'claude',env,removeEditedBlocks:[path]});
+ expect(result.exitCode,result.lines.join('\n')).toBe(0);
+ expect(readFileSync(path,'utf8')).toBe('claude notes\nlater\n');
+ const copy=ledger(home).recovery[0].sha256.slice('sha256:'.length);
+ expect(result.lines).toContain(`[reverted] ${path}: the global-working-rules block went on your word; whole-file copy: ${join(vault,copy)}`);
+ expect(readFileSync(join(vault,copy),'utf8')).toBe(edited);
+ expect(ledger(home).files).toEqual({});
+ // An unbalanced block: no copy and no write.
+ expect(applyGlobalContextRefresh(preflightGlobalContextRefresh(join(import.meta.dir,'../..'),home,['claude'],'en'),home).status).toBe('ok');
+ appendFileSync(path,'\n<!-- END: repo-harness global-working-rules -->\n');
+ const unbalanced=readFileSync(path,'utf8');const kept=copies();
+ const refused=runUserUninstall({target:'claude',env,removeEditedBlocks:[path]});
+ expect([refused.exitCode,readFileSync(path,'utf8'),copies()]).toEqual([1,unbalanced,kept]);
 }));
 test.each([
  ['.claude/CLAUDE.md',`user-before\n${RULES_BLOCK.replace('## Reporting','- My own rule.\n\n## Reporting')}\n`,'managed rules block'],
@@ -397,6 +477,8 @@ test('an old manifest record of the Codex CodeGraph table migrates to the ledger
   put(home,'.codex/config.toml',`model = "user"\n${table}`);
   legacyProfile(home,path,table.trim());
   const result=runUserUninstall({target:'both',env});expect(result.status,result.lines.join('\n')).toBe('complete');
+  // An adopted record has no baseline, so the report says that equality with the file before install cannot be proved.
+  expect(result.items.find((item)=>item.path===path)).toEqual({path,action:'reverted',reason:'host-config ledger: rh text removed; baseline unknown: equality with the file before install cannot be proved'});
   expect(readFileSync(path,'utf8')).toBe('model = "user"\n');expect(existsSync(join(home,'.repo-harness/install-state.json'))).toBe(false);
  });
 });

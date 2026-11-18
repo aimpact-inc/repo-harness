@@ -22,7 +22,14 @@ import { openHostConfigGate, planPathRevert, type HostConfigAdoption, type HostC
 import { hostConfigPaths, projectedLedgerPaths, resolveHostPath } from '../../effects/host-config/store';
 import { FileSyntaxError, parseJsonText, parseTomlText } from '../../core/evidence/file-syntax';
 
-export interface UninstallOptions { target: 'codex' | 'claude' | 'both'; dryRun?: boolean; env?: NodeJS.ProcessEnv; runtimeLock?: RuntimeTransactionContext }
+export interface UninstallOptions {
+  target: 'codex' | 'claude' | 'both';
+  dryRun?: boolean;
+  env?: NodeJS.ProcessEnv;
+  runtimeLock?: RuntimeTransactionContext;
+  /** Rules files whose recorded block goes also when the user edited it (`--remove-edited-block`); the whole file goes to the vault first. */
+  removeEditedBlocks?: readonly string[];
+}
 /**
  * `restored`: the result was checked equal to the state before rh.
  * `reverted`: rh's changes went, with no such proof. `kept`: rh leaves it.
@@ -192,9 +199,11 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   // The Global Working Rules files go by the ledger too. Two host paths that name one file are one revert.
   const rulesAdoptions = new Map<string, HostConfigAdoption>();
   const resolvedHostPaths = new Set<string>();
+  const globalContextPaths = new Set<string>();
   for (const host of ['codex', 'claude'] as const) {
     if (opts.target !== 'both' && opts.target !== host) continue;
     const contextPath = globalContextPath(home, host);
+    globalContextPaths.add(contextPath);
     try {
       const resolved = resolveHostPath(hostConfigPaths(env), contextPath);
       if (resolvedHostPaths.has(resolved)) continue;
@@ -209,6 +218,19 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       }
       hostPaths.push(contextPath);
     } catch (error) { unresolved(contextPath, String((error as Error).message)); }
+  }
+  for (const named of opts.removeEditedBlocks ?? []) {
+    try {
+      const target = resolveHostPath(hostConfigPaths(env), named);
+      const rulesPath = [...globalContextPaths].find((path) => hostPaths.includes(path) && resolveHostPath(hostConfigPaths(env), path) === target);
+      if (!rulesPath) throw new Error('not a recorded rules file of this target; nothing removed');
+      const removal = gate.removeEditedBlock(rulesPath);
+      // The dry run cannot plan the revert of the file after the removal, so it leaves the file out.
+      if (opts.dryRun) hostPaths.splice(hostPaths.indexOf(rulesPath), 1);
+      items.push({ path: removal.path, action: 'reverted', reason: removal.recovery === null
+        ? `the ${removal.selector} block goes on your word; the whole file goes to the vault first`
+        : `the ${removal.selector} block went on your word; whole-file copy: ${removal.recovery}` });
+    } catch (error) { unresolved(named, String((error as Error).message)); }
   }
   const previewOf = (path: string): readonly HostConfigRevertEntry[] => {
     const rules = rulesAdoptions.get(path);

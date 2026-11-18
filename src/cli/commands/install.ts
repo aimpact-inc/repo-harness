@@ -27,6 +27,7 @@ export interface UninstallCommandOptions {
   target: InstallTargetSpec;
   location: Location;
   dryRun?: boolean;
+  removeEditedBlocks?: readonly string[];
 }
 
 export interface InstallCommandResult {
