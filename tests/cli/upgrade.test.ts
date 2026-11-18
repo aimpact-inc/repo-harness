@@ -272,6 +272,23 @@ describe('upgrade with real release bytes', () => {
     expect(readFileSync(project, 'utf8')).toBe(projectBefore);
   }));
 
+  // P7 (#2854): HOME is a Git checkout, so the repository ledger would lie in a worktree. The project upgrade refuses before any
+  // storage or strip, and no copy of the settings file with its env value lands in the checkout; restore --repo writes nothing either.
+  test('a project upgrade in a Git-managed HOME refuses the repository ledger before any write', () => sandbox((opts) => {
+    expect(spawnSync('git', ['init', '-q', opts.home]).status).toBe(0);
+    const sentinel = 'sk-FAKE-2854-sentinel';
+    const legacy = 'repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; HOOK_REPO_ROOT="$repo" bash "$repo/.ai/hooks/run-hook.sh" prompt-guard.sh';
+    const settings = join(opts.home, '.claude/settings.json');
+    const before = `${JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: legacy }] }] }, env: { TOKEN: sentinel } }, null, 2)}\n`;
+    put(settings, before);
+    const holders = () => readdirSync(opts.home, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile() && !join(entry.parentPath, entry.name).includes(`${join(opts.home, '.git')}/`))
+      .filter((entry) => readFileSync(join(entry.parentPath, entry.name), 'utf8').includes(sentinel)).map((entry) => join(entry.parentPath, entry.name));
+    const result = runUpgrade({ ...opts, cwd: opts.home, scope: 'project', apply: true });
+    expect(result.error).toContain(`would lie in the Git worktree ${opts.home}`);
+    expect(runConfigRestore({ HOME: opts.home }, undefined, { repo: opts.home })).toMatchObject({ exitCode: 2 });
+    expect({ settings: readFileSync(settings, 'utf8'), holders: holders(), repos: existsSync(join(opts.home, '.repo-harness/config/repos')) }).toEqual({ settings: before, holders: [settings], repos: false });
+  }, false));
+
   test('the cleanup audit log keeps only the newest records', () => sandbox((opts) => {
     const auditPath = join(opts.home, '.repo-harness/upgrade-cleanup.log.jsonl');
     const prior = Array.from({ length: UPGRADE_AUDIT_MAX_RECORDS }, (_, index) => JSON.stringify({ transaction_id: `prior-${index}` }));
