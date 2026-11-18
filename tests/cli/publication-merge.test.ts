@@ -1,5 +1,5 @@
 import { spawnSync } from 'child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
@@ -79,12 +79,14 @@ function mergeCli(scenario: PublicationMergeScenario) {
   const dir = join(scratch, `cli-${cliRun++}`);
   mkdirSync(dir);
   const gh = installFakeGh(dir, scenario);
+  const home = join(dir, 'harness-home');
   const result = spawnSync('bun', [CLI, 'publication', 'merge', '--repository', REPOSITORY, '--repository-id', REPOSITORY_ID,
     '--pr', String(PR), '--head', HEAD, '--base', BASE, '--json'], {
-    cwd: dir, encoding: 'utf-8', env: { ...process.env, REPO_HARNESS_GH_BIN: gh.bin }, timeout: 120_000,
+    cwd: dir, encoding: 'utf-8', env: { ...process.env, REPO_HARNESS_GH_BIN: gh.bin, REPO_HARNESS_HOME: home }, timeout: 120_000,
   });
   const calls = gh.calls();
-  return { status: result.status, document: JSON.parse(result.stdout) as Record<string, any>, calls, mutations: calls.filter(isMergeMutation) };
+  const index = join(home, 'lifecycle', `${REPOSITORY_ID}.jsonl`);
+  return { status: result.status, document: JSON.parse(result.stdout) as Record<string, any>, calls, mutations: calls.filter(isMergeMutation), index };
 }
 
 const policy = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
@@ -284,6 +286,8 @@ describe('publication merge execution', () => {
     });
     expect(run.mutations).toHaveLength(1);
     expect(graphqlVariable(run.mutations[0]!, 'expectedHeadOid')).toBe(HEAD);
+    // A merge is no friction, so the lifecycle index stays absent.
+    expect(existsSync(run.index)).toBe(false);
   }, 120_000);
 
   test('the CLI returns the merge document after a stale first readback', () => {
@@ -306,6 +310,11 @@ describe('publication merge execution', () => {
     expect(run.status).toBe(4);
     expect(run.document).toMatchObject({ ok: false, exit_code: 4, error: 'base_protection_insufficient' });
     expect(run.mutations).toHaveLength(0);
+    // #3204: the refusal appends one sanitized friction event, and the message text stays out of the owner-only index.
+    const events = readFileSync(run.index, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    expect(events).toEqual([{ protocol: 'repo-harness.lifecycle-event/v1', at: expect.any(String), repository_id: Number(REPOSITORY_ID), kind: 'cli.friction',
+      command: 'publication_merge', issue: null, pr: PR, head_sha: HEAD, error_code: 'base_protection_insufficient', blocker_codes: [] }]);
+    if (process.platform !== 'win32') expect(statSync(run.index).mode & 0o777).toBe(0o600);
   }, 120_000);
 
   test('a merge request that never completes exits 5 and is not retried', () => {

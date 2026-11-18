@@ -2483,6 +2483,7 @@ test('board closeout: proofs come first; a bound, clean, pushed seat closes and 
   const closeout = (pr: number) => runBoardCloseout({
     repo_root: main, pr, caller_terminal: 't3', processes: () => holders.map(cwd => ({ pid: 4242, cwd })), stopCodegraphServers: (path) => stops[path] ?? { stopped: [], failures: [] },
     stopDaemons: (path) => { if (path === partial) throw new Error('daemon stop failed'); return []; },
+    summarizeHooks: () => null,
     host: { closeoutTerminals: () => ({ status: 'observed', terminals: terminals.filter(row => !closed.includes(row.address)) }), closeTerminal: (address) => {
       if (rmFails.has(address)) return { status: 'unavailable', reason: 'hc_failed' };
       closed.push(address); return { status: 'closed' };

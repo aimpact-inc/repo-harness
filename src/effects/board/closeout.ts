@@ -8,6 +8,7 @@ import type { WorktreeProcess } from '../git/worktree-processes';
 import { assertNoOwner, checkoutPath, entries, protectsCwd, removeExactWorktree } from '../state/coordination-worktree-topology';
 import { cleanupTaskWorktree } from '../terminal/runtime-closeout';
 import { BoardCollectError, readGhJson, readRepositoryId, type GhInput } from './collect';
+import type { WorktreeHookCounts } from './lifecycle-index';
 
 /**
  * The post-merge closeout of one pull request (#2005). Every merge and worktree proof comes first; a missing one stops
@@ -44,6 +45,8 @@ export interface BoardCloseoutV1 {
   readonly daemon_stop_failures: readonly string[];
   /** PIDs of the CodeGraph MCP servers bound to the worktree that closeout stopped; the seat that started them is gone. */
   readonly stopped_codegraph_servers: readonly number[];
+  /** The hook event counts of the PR head worktree, read before the removal step; null when its log is missing or unreadable. */
+  readonly hook_summary: { readonly branch: string; readonly counts_by_code: WorktreeHookCounts } | null;
 }
 
 export interface CodegraphStop { readonly stopped: readonly number[]; readonly failures: readonly string[] }
@@ -59,6 +62,8 @@ export interface BoardCloseoutInput extends GhInput {
   readonly stopCodegraphServers: (worktree: string, processes: readonly WorktreeProcess[]) => CodegraphStop;
   /** `HC_TERMINAL_ID` of the caller: closeout never ends its own terminal. */
   readonly caller_terminal: string | null;
+  /** The hook event counts of a worktree (`summarizeWorktreeHooks`): it writes no log record, holds the log's rotation lock at most 1 s and never throws. */
+  readonly summarizeHooks: (worktree: string) => WorktreeHookCounts | null;
 }
 
 interface MergedPullRequest {
@@ -288,7 +293,10 @@ export async function runBoardCloseout(input: BoardCloseoutInput): Promise<Board
   const pr = readMergedPullRequest(input);
   const proof = proveCloseout(input, pr);
   const { panes, stale_terminals } = closePanes(input, pr, proof);
-  return { kind: BOARD_CLOSEOUT_KIND, pr: pr.number, merge_commit: pr.merge_commit, panes, stale_terminals, ...await removeWorktree(input, pr, proof, panes) };
+  // The hook log lives in the worktree, so it is read before the removal.
+  const counts = input.summarizeHooks(proof.path);
+  const hook_summary = counts === null ? null : { branch: pr.head_ref, counts_by_code: counts };
+  return { kind: BOARD_CLOSEOUT_KIND, pr: pr.number, merge_commit: pr.merge_commit, panes, stale_terminals, hook_summary, ...await removeWorktree(input, pr, proof, panes) };
 }
 
 /** The paths that process `pid` holds open; null when the platform probe cannot prove them. */
