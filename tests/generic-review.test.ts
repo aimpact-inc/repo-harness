@@ -356,23 +356,23 @@ test('Pi agent directory holds only the magpie constants and an empty auth map; 
   const root = tmpWorkspace('pi-home'); roots.push(root);
   const output = join(root, 'output'); mkdirSync(output);
   // pi's own offline resolver selects the review role's magpie model from the generated files.
-  const { directory, model } = isolation.preparePiAgentDirectory(output, (agentDirectory, reference) => resolvePiModel(PI_PACKAGE_CLI, agentDirectory, reference));
+  const { directory, model } = isolation.preparePiAgentDirectory(output, isolation.CURRENT_REVIEW_MODEL, (agentDirectory, reference) => resolvePiModel(PI_PACKAGE_CLI, agentDirectory, reference));
   expect(model).toBe('magpie/codex/gpt-6.2-astra');
   expect(lstatSync(directory).mode & 0o777).toBe(0o700);
   expectGeneratedPiDirectory(directory);
-  expect(isolation.preparePiAgentDirectory(output, piReferenceResolver).directory).toBe(directory);
-  expect(() => isolation.preparePiAgentDirectory(output, () => ({ provider: 'magpie', model: 'codex/other' })))
+  expect(isolation.preparePiAgentDirectory(output, isolation.CURRENT_REVIEW_MODEL, piReferenceResolver).directory).toBe(directory);
+  expect(() => isolation.preparePiAgentDirectory(output, isolation.CURRENT_REVIEW_MODEL, () => ({ provider: 'magpie', model: 'codex/other' })))
     .toThrow('review_pi_model_not_canonical: pi resolves magpie/codex/gpt-6.2-astra to magpie/codex/other');
   const settings = readFileSync(join(directory, 'settings.json'), 'utf8');
   writeFileSync(join(directory, 'settings.json'), settings + ' ');
-  expect(() => isolation.preparePiAgentDirectory(output, piReferenceResolver)).toThrow('review_pi_settings_changed');
+  expect(() => isolation.preparePiAgentDirectory(output, isolation.CURRENT_REVIEW_MODEL, piReferenceResolver)).toThrow('review_pi_settings_changed');
   writeFileSync(join(directory, 'settings.json'), settings);
   unlinkSync(join(directory, 'auth.json')); symlinkSync(join(root, 'elsewhere.json'), join(directory, 'auth.json'));
-  expect(() => isolation.preparePiAgentDirectory(output, piReferenceResolver)).toThrow('review_pi_auth_changed');
+  expect(() => isolation.preparePiAgentDirectory(output, isolation.CURRENT_REVIEW_MODEL, piReferenceResolver)).toThrow('review_pi_auth_changed');
   chmodSync(directory, 0o755);
-  expect(() => isolation.preparePiAgentDirectory(output, piReferenceResolver)).toThrow('directory_unsafe');
+  expect(() => isolation.preparePiAgentDirectory(output, isolation.CURRENT_REVIEW_MODEL, piReferenceResolver)).toThrow('directory_unsafe');
   const otherOutput = join(root, 'other'); mkdirSync(otherOutput); symlinkSync(directory, join(otherOutput, '.pi-agent'));
-  expect(() => isolation.preparePiAgentDirectory(otherOutput, piReferenceResolver)).toThrow('directory_unsafe');
+  expect(() => isolation.preparePiAgentDirectory(otherOutput, isolation.CURRENT_REVIEW_MODEL, piReferenceResolver)).toThrow('directory_unsafe');
   // The host refuses a native session that starts at or after the owner's round deadline.
   const control = join(root, `control-${randomUUID()}`); mkdirSync(control);
   const hostSpec = { kind: 'pi', controlDirectory: control } as ReviewHostSpec;
@@ -392,7 +392,7 @@ test('Pi agent directory holds only the magpie constants and an empty auth map; 
 darwinTest('Pi isolation fixture: OAR flags, native extension, actual model and paired denials', async () => {
   const { mkdirSync, chmodSync } = await import('node:fs');
   const { pathToFileURL, fileURLToPath } = await import('node:url');
-  const { preparePiAgentDirectory, reviewIsolationPolicy, prepareReviewLauncher, reviewHostTemporaryDirectory } = await import('../src/effects/review/review-isolation');
+  const { CURRENT_REVIEW_MODEL, preparePiAgentDirectory, reviewIsolationPolicy, prepareReviewLauncher, reviewHostTemporaryDirectory } = await import('../src/effects/review/review-isolation');
   const root = tmpWorkspace('pi-isolation'); roots.push(root);
   const home = join(root, 'home'), source = join(root, 'source'), owner = join(root, 'owner'), output = join(root, 'output');
   for (const path of [home, source, owner, output]) mkdirSync(path);
@@ -403,7 +403,7 @@ darwinTest('Pi isolation fixture: OAR flags, native extension, actual model and 
   writeFileSync(join(agent, 'models.json'), '{"providers":{}}');
   writeFileSync(join(agent, 'settings.json'), '{"defaultProvider":"openai","defaultModel":"gpt-4o"}');
   mkdirSync(join(agent, 'extensions')); writeFileSync(join(agent, 'extensions', 'unexpected.ts'), 'throw new Error("ambient fixture extension loaded");');
-  const { directory, model } = preparePiAgentDirectory(output, piReferenceResolver);
+  const { directory, model } = preparePiAgentDirectory(output, CURRENT_REVIEW_MODEL, piReferenceResolver);
   writeSessionArtifact(join(owner, 'launch-deadline.json'), { deadline: inOneHour() }, false);
   expectGeneratedPiDirectory(directory);
   const targets = [join(source, 'protected.txt'), credential, join(agent, 'protected.txt'), join(directory, 'auth.json'), join(directory, 'models.json'), join(agent, 'models.json'), join(directory, 'settings.json'), join(agent, 'settings.json')];
@@ -614,6 +614,36 @@ test('Codex isolated home holds only the magpie config.toml and no auth.json', a
   chmodSync(home, 0o755);
   expect(() => prepareCodexHome(output)).toThrow('review_codex_home_unsafe');
 });
+
+test.each(['codex', 'pi'] as const)('a %s review keeps its round-1 model after the default model changes', async harness => {
+  const f = packetRoundFixture();
+  const effects = { ...f.effects, piExecutable: () => '/usr/bin/true' };
+  const options = { ...f.options, harness };
+  const launchError = process.platform !== 'darwin' ? 'OAR_REVIEW_ISOLATION_UNSUPPORTED_PLATFORM'
+    : harness === 'codex' ? 'fixture_start_failure' : 'review_provider_executable_required';
+  await expect(runReviewRound(options, effects)).rejects.toThrow(launchError);
+  const sessionPath = join(f.dir, 'session.json');
+  const session = readSessionArtifact<Record<string, unknown>>(sessionPath);
+  // The review started on an earlier default; an upgrade moved the default before round 2.
+  writeFileSync(sessionPath, JSON.stringify({ ...session, review_model: { model: 'codex/gpt-6-astra', effort: 'high' } }));
+  const output = taskReviewRunner.outputDirectory(realpathSync(f.options.reviewerRepo), f.primary, f.key, 'deep-reasoner');
+  const pinned = (path: string) => writeFileSync(path, readFileSync(path, 'utf8').replaceAll('gpt-6.2-astra', 'gpt-6-astra'));
+  if (harness === 'codex') pinned(join(output, '.codex-home/config.toml'));
+  else for (const name of ['models.json', 'settings.json']) pinned(join(output, '.pi-agent', name));
+  await expect(runReviewRound(options, effects)).rejects.toThrow(launchError);
+  if (harness === 'codex' && process.platform === 'darwin') {
+    // A round-1 retry before the host spec exists does not start the host on the new default.
+    rmSync(join(f.dir, 'host.json'));
+    await expect(runReviewRound(options, effects)).rejects.toThrow('review_model_changed_before_host_start');
+  }
+  // A configuration that does not match the pin stays refused, and a session without a pin cannot prove its model.
+  writeFileSync(sessionPath, JSON.stringify({ ...session, review_model: { model: 'codex/gpt-6.1-astra', effort: 'high' } }));
+  await expect(runReviewRound(options, effects)).rejects.toThrow(harness === 'codex' ? 'review_codex_config_changed' : 'review_pi_models_changed');
+  writeFileSync(sessionPath, JSON.stringify({ ...session, review_model: undefined }));
+  await expect(runReviewRound(options, effects)).rejects.toThrow('review_model_unpinned');
+  // A new review pins the current default.
+  expect(session.review_model).toEqual({ model: 'codex/gpt-6.2-astra', effort: 'high' });
+}, 60_000);
 
 test('same content with a new approved context consumes the next campaign round', async () => {
   const f = packetRoundFixture();
