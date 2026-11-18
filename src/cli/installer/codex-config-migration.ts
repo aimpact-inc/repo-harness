@@ -121,8 +121,9 @@ function adoption(content: string, fragments: readonly OldFragment[], manifestCh
     } else externalChange = true;
     adopted.push({ owner: CODEX_CONFIG_FRAGMENTS[fragment.selector], selector: fragment.selector, kind: fragment.before === null ? 'add' : 'override', inserted, ...(separator !== undefined ? { separator } : {}) });
   }
-  // The old uninstall removed a file that was blank after its restore: rh created it.
-  return { backup: backup.trim() ? Buffer.from(backup, 'utf8') : null, fragments: adopted, externalChange };
+  // A whitespace-only backup still holds user bytes when the separator is unproven.
+  const keepBackup = backup.trim() !== '' || adopted.some((fragment) => fragment.separator !== undefined);
+  return { backup: keepBackup ? Buffer.from(backup, 'utf8') : null, fragments: adopted, externalChange };
 }
 
 /** Plan the migration without writing; null when no old record names the file. */

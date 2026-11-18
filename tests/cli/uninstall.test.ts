@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
-import { versions } from '../../src/cli/installer/install-profile';
+import { prepareInstallSelectionSwitch, versions } from '../../src/cli/installer/install-profile';
 import { beforeAll, test, expect } from 'bun:test';
-import { installStateFixturePath, recordLegacyInstallOwnership, seedGlobalPackageFixture, seedPathRecords } from '../helpers/install-ownership';
+import { installStateFixturePath, recordLegacyInstallOwnership, recordPluginSelection, seedGlobalPackageFixture, seedPathRecords } from '../helpers/install-ownership';
 import type { PathCommitted } from '../../src/core/host-config/types';
 import { pathRecordHost, pathRecordKey } from '../../src/effects/host-config/path-records';
 import { hashManagedTree } from '../../src/effects/managed-tree';
@@ -67,20 +67,30 @@ test('a pre-separator ledger table goes only with a whole-file revert, which giv
   if(!row.edited) expect(ledger(home).files,name).toEqual({});
  });
 });
-test('uninstall after an unrelated edit removes the legacy EOF table and keeps the user line break', () => {
- for(const lineBreak of ['\n','\r\n']) for(const source of ['receipt','manifest']) fixture((home,env)=>{
+test('legacy EOF table removal keeps user bytes after an edit, refresh, or profile switch then uninstall', () => {
+ for(const lineBreak of ['\n','\r\n']) for(const source of ['receipt','manifest']) for(const action of ['unrelated edit','blank-line edit','refresh','profile switch']) fixture((home,env)=>{
   const path=join(home,'.codex/config.toml');
   const installed=`[mcp_servers.codegraph]${lineBreak}command = "codegraph"`;
-  put(home,'.codex/config.toml',`model = "user"${lineBreak}${installed}`);
+  put(home,'.codex/config.toml',`${action==='unrelated edit'?'model = "user"':''}${lineBreak}${installed}`);
   if(source==='receipt') put(home,'.repo-harness/configuration-restore.json',JSON.stringify({protocol:1,changes:[{path,selector:'mcp_servers.codegraph',before:null,installed,active:true}]}));
   else legacyProfile(home,path,installed.replace(/\r\n/g,'\n'));
   migrateCodexConfigRecords(env);
-  const user=`# user edit${lineBreak}model = "edited"${lineBreak}`;
+  const user=action==='unrelated edit'?`# user edit${lineBreak}model = "edited"${lineBreak}`:lineBreak.repeat(action==='blank-line edit'?2:1);
   put(home,'.codex/config.toml',user+installed);
   expect(readFileSync(path,'utf8')).toBe(user+installed);
+  if(action==='refresh'){
+   const result=openHostConfigGate({env}).apply([{path,fragments:[{owner:'architecture',selector:'mcp_servers.codegraph',kind:'refresh',strategy:tomlFragment,value:`${installed}${lineBreak}args = ["serve"]`}]}]);
+   expect(result.skipped).toEqual([]);
+   expect(readFileSync(path,'utf8')).toBe(`${user}${installed}${lineBreak}args = ["serve"]`);
+  }
+  if(action==='profile switch'){
+   recordPluginSelection(env);
+   prepareInstallSelectionSwitch([],env,join(home,'transaction'));
+   expect(readFileSync(path,'utf8')).toBe(user);
+  }
   const result=runUserUninstall({target:'codex',env});
-  expect(result.status,`${JSON.stringify({lineBreak,source})} ${result.lines.join('\n')}`).toBe('complete');
-  expect(readFileSync(path,'utf8'),JSON.stringify({lineBreak,source})).toBe(user);
+  expect(result.status,`${JSON.stringify({lineBreak,source,action})} ${result.lines.join('\n')}`).toBe('complete');
+  expect(readFileSync(path,'utf8'),JSON.stringify({lineBreak,source,action})).toBe(user);
   expect(ledger(home).fragments).toEqual([]);
  });
 });
