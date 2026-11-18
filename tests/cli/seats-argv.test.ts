@@ -838,7 +838,7 @@ describe("rh seats argv", () => {
         const bin = join(home, "bin"), log = join(home, "calls.log");
         mkdirSync(bin);
         writeFileSync(join(bin, "hc"), `#!/bin/sh\nprintf 'hc %s\\n' "$*" >> "${log}"\n`
-          + `printf '{"address":"t5","state":"live","turn":0,"labels":{"repo-harness.seat":"orchestrator"%s}}' "\${FAKE_SPACE:+,\\"herdr.space\\":\\"$FAKE_SPACE\\"}"\n`);
+          + `printf '{"address":"t5","state":"live","turn":0,"labels":{%s}}' "\${FAKE_SPACE+\\"herdr.space\\":\\"$FAKE_SPACE\\"}"\n`);
         writeFileSync(join(bin, "herdr-app"), `#!/bin/sh\nprintf 'herdr-app %s\\n' "$*" >> "${log}"\n`
           + `if [ -n "$FAKE_HERDR_FAIL" ]; then printf '%s' '{"error":"no window"}'; exit 1; fi\nprintf '%s' '{"tab":"tb1","terminal":"t9"}'\n`);
         for (const name of ["hc", "herdr-app"]) chmodSync(join(bin, name), 0o755);
@@ -853,16 +853,17 @@ describe("rh seats argv", () => {
         const argvLaunch = JSON.parse(seats({}, ["argv", ...labels, "--json"]).stdout);
         const launchArgs = [...labels, "--cwd", worktree, "--task", "Task: issue #1473"];
 
-        // The space comes from the herdr.space label of the calling terminal; the tab gets the seats argv argv and its tab name.
+        // The space comes from the herdr.space label of the calling terminal, which may carry no repo-harness label (an
+        // ordinary Herdr.app shell); the tab gets the seats argv argv and its tab name.
         const opened = seats({ HC_TERMINAL_ID: "t5", FAKE_SPACE: "sp1" }, ["launch", ...launchArgs]);
         expect([opened.status, JSON.parse(opened.stdout).placement, opened.calls[0]]).toEqual([0, { tab: "tb1", terminal: "t9" }, "hc get --json -- t5"]);
         expect(opened.calls.slice(1).map(line => line.split(" ").slice(0, 3).join(" "))).toEqual(["herdr-app do tab.new"]);
         expect(JSON.parse(opened.calls[1]!.slice("herdr-app do tab.new ".length))).toEqual({
           name: "#1000", space: "sp1", folder: worktree, argv: argvLaunch.argv, task: "Task: issue #1473", focus: false });
 
-        // No --space and a caller without a herdr.space label: no tab and no headless terminal.
-        for (const env of [{}, { HC_TERMINAL_ID: "t5" }] as Record<string, string>[]) {
-          const missing = seats(env, ["launch", ...launchArgs]);
+        // No --space and a caller without a herdr.space label, a blank caller label, or a blank --space: no tab and no headless terminal.
+        for (const [env, space] of [[{}, []], [{ HC_TERMINAL_ID: "t5" }, []], [{ HC_TERMINAL_ID: "t5", FAKE_SPACE: " " }, []], [{}, ["--space", " "]]] as [Record<string, string>, string[]][]) {
+          const missing = seats(env, ["launch", ...launchArgs, ...space]);
           expect([missing.status, missing.error, missing.calls.filter(line => !line.startsWith("hc get "))]).toEqual([1, "seat_space_missing", []]);
         }
 

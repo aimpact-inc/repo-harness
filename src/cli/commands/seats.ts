@@ -14,7 +14,7 @@ import { gitExecFileSync } from '../../effects/git/runner';
 import { githubRemoteRepository } from '../../core/board/source';
 import { ClaudeAgentTypesError, claudeHostAgentTypes } from '../../effects/board/claude-agent-types';
 import { RepoHarnessRegistryStrictError, canonicalRepoPath, readRepoHarnessRegistryStrictSnapshot, repoCheckoutProbeEnv, setRepoHarnessPanePrefix } from '../../effects/repo-registry';
-import { HERDR_APP_LABEL, HERDR_APP_NOT_SENT, HerdrCoreError, RH_LABEL, hcGet, hcLabel, hcLabelPairs, herdrAppDo, type HcLabels } from '../../effects/terminal/herdr-core';
+import { HERDR_APP_NOT_SENT, HerdrCoreError, RH_LABEL, hcCallerSpace, hcLabel, hcLabelPairs, herdrAppDo, type HcLabels } from '../../effects/terminal/herdr-core';
 import { bunGlobalPackageRoot } from '../installer/skill-projection';
 import { PiFleetRolesError, writePiFleetRoles } from '../../effects/board/pi-fleet-roles';
 import { PiShellError, assertPiShell } from '../../effects/board/pi-shell';
@@ -280,17 +280,11 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
 }
 
 /** The space of the calling terminal: Herdr.app writes it as a label on each terminal that a pane shows. */
-function callerSpace(env: NodeJS.ProcessEnv): string {
-  const terminal = env.HC_TERMINAL_ID;
-  const missing = (why: string) => new SeatsCommandError('seat_space_missing', `No Herdr.app space: ${why}. Pass --space <id>, or run the launch in a terminal that a Herdr.app pane shows.`);
-  if (!terminal) throw missing('HC_TERMINAL_ID is not set');
-  let space: string | undefined;
-  try { space = hcGet(terminal, { env }).labels[HERDR_APP_LABEL.space]; } catch (error) {
-    if (error instanceof HerdrCoreError) throw missing(`hc cannot read terminal ${terminal} (${error.message})`);
+function callerSpace(env: NodeJS.ProcessEnv): string | null {
+  try { return hcCallerSpace({ env }); } catch (error) {
+    if (error instanceof HerdrCoreError) throw new SeatsCommandError('seat_space_missing', `No Herdr.app space: hc cannot read the calling terminal (${error.message}). Pass --space <id>, or run the launch in a terminal that a Herdr.app pane shows.`);
     throw error;
   }
-  if (space === undefined) throw missing(`terminal ${terminal} has no ${HERDR_APP_LABEL.space} label, so no Herdr.app pane shows it`);
-  return space;
 }
 
 interface SeatTabInput {
@@ -308,6 +302,9 @@ async function seatTabLaunch(seat: string, labels: SeatLabelInput, input: SeatTa
   readonly launch: SeatLaunchResult; readonly space: string; readonly placement: Record<string, unknown>;
 }> {
   const space = input.space ?? callerSpace(env);
+  if (space === null || space.trim() === '') {
+    throw new SeatsCommandError('seat_space_missing', `No Herdr.app space: ${space === null ? 'the calling terminal has no herdr.space label, so no Herdr.app pane shows it' : 'the space is blank'}. Pass --space <id>, or run the launch in a terminal that a Herdr.app pane shows.`);
+  }
   const launch = await seatLaunch(seat, labels, env, input.cwd);
   const args = { ...(launch.tab === null ? {} : { name: launch.tab }), space, folder: input.cwd, argv: launch.argv, task: input.task, focus: input.focus };
   try {

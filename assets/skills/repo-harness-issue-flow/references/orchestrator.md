@@ -316,14 +316,16 @@ Before each dispatch wave, run `rh quota`. It prints the account
 states, one mode line per account and one route line per task class. For
 example: `claude mode: saving (5% left < 20%)` and
 `codex mode: normal (68% left)`. Launch each task on the seat its
-route line names with `rh seats launch <seat>` (it uses the
-argv of `rh seats argv <seat>`); state the boundary in the task. A `none` route waits, or it changes through the seats
+route line names with `rh seats launch <seat> --repository-id <id>
+--issue <n> --cwd <worktree> --task <packet>` (it opens the argv of
+`rh seats argv` in a Herdr.app tab); state the boundary in the task. A `none` route waits, or it changes through the seats
 configuration: the owner sets the seat order and each fallback there, and
 the route line then names the first eligible seat. When the gatekeeper
 account is exhausted and a `gatekeeper-fallback` seat is configured, the
-route line names the fallback seat, and `rh seats argv gatekeeper
---repository-id <id> --pr <n>` launches it. Never start a seat with an argv that
-`rh seats argv` did not print.
+route line names the fallback seat, and `rh seats launch gatekeeper
+--repository-id <id> --pr <n> --cwd <worktree> --task <packet>` opens it.
+Never start a seat with an argv that `rh seats argv` did not print, and
+never outside a Herdr.app tab.
 `rh board dispatch --parent <n> --space <id>` applies this step to every ready issue of the plan: it reads the `route:<class>` label of each issue (and `touches:credentials`), starts the worktree, posts the claim and opens the worker tab. `--dry-run` prints the decisions only. An issue without one `route:<class>` label is reported and not dispatched.
 `rh board review --parent <n> --space <id>` starts the gatekeeper seat for each ready, green High pull request that has no gatekeeper start marker for its head. The two High seats run as a relay (#2910): one run starts one seat of a head, and the reviewer starts only after the gatekeeper of that head recorded `PASS`. The board carries that verdict per pull request as `gatekeeper_review` (`pass`, `fail`, `none`, `unknown`). When it is `pass` and the board shows `second_review: pending` (an open High or unknown-tier head that does not meet the High acceptance rule and has no row of the configured reviewer's model family), the run starts the reviewer seat on any runtime; a row belongs to a seat by the family of its model, and the family of the `reviewer` seat of the seats config is the one reviewer family; each seat has its own marker, so a seat that was not sent retries alone. A reviewer `FAIL` sends the fix back to the gatekeeper first: the fix is a new head, its `gatekeeper_review` is not `pass`, and the run starts the gatekeeper only. The reviewer then reads the delta from its own last head, not from the gatekeeper's. A Medium head gets one seat of the other family than the board's `writer_family` (the `modelFamily` of the `Model:` line of the writer claim of the head branch): the gatekeeper for a writer of the reviewer family, the reviewer for any other known family. An unknown writer family (no such claim, no `Model:` line, an unmatched model, or linked issues that disagree) starts no seat and is skipped as `writer_family_unknown`; the orchestrator then starts by hand one reviewer seat of a model family known to differ from the writer's, and that review records its own `Model relation:`. `--pr <n>` reviews that pull request only. A pull request that links a plan-held issue is skipped as `plan_hold`. A head whose gatekeeper is about to start is skipped as `review_family_unavailable` when the effective gatekeeper (the seat of the `gatekeeper:` route line) cannot launch, has a model with no known family, is of the writer's family where it gives the different-family row, or is of the reviewer family where the head takes a reviewer row; the detail names the gap and the route line. The reviewer seat is skipped the same way when its model has no known family, or on a High head when its family is the gatekeeper's, because the two rows are then not independent. `--dry-run` prints the decisions only. A High head is not accepted until it has `PASS` rows from two distinct claims, one of them different-family to the writer; a Medium head needs one claimed `PASS` row recorded different-family (`acceptor.md` §2.2).
 Apply the explorer line through the Claude Agent tool's `model` parameter when you call the explorer.
@@ -348,7 +350,7 @@ holds a Claude-account seat then uses a configured Pi `worker-light`; a null
 or non-Pi `worker-light` gives a `none` route. An important route without a
 Claude-account seat is read as stored.
 Frontend waits for Claude; it has no non-Claude fallback.
-`rh seats argv <seat> --repository-id <id> --owner-exception <url>` lifts the
+`rh seats launch <seat> --repository-id <id> --owner-exception <url> --cwd <worktree> --task <packet>` lifts the
 reservation refusal (`seat_quota_reserved`) for one launch. The URL must be an
 owner decision on an issue or PR of the checkout's origin repository. The
 seat label `repo-harness.owner-exception` and the `--json` launch record keep
@@ -441,7 +443,7 @@ host's PR events or check when the worker reports.
   the gatekeeper before the reviewer runs again.
   A coordinator may add `gatekeeper-deep` as an optional second Codex
   review row: a read-only Codex seat on a different model than
-  `gatekeeper`. Start it with `rh seats argv gatekeeper-deep --repository-id <id> --pr <n>`.
+  `gatekeeper`. Start it with `rh seats launch gatekeeper-deep --repository-id <id> --pr <n> --cwd <worktree> --task <packet>`.
   Both Codex rows write the Agent line `codex (<model>)`. When the host
   observes no model, both write `codex (unobserved)`, share one claim and
   count once toward the High two-claim rule.

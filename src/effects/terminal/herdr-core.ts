@@ -308,6 +308,17 @@ export function hcGet(terminalAddress: string, options: HerdrCoreOptions = {}): 
 }
 
 /**
+ * The `herdr.space` label of the calling terminal (`HC_TERMINAL_ID`), or null when it has none (#3166). The caller can be
+ * an ordinary Herdr.app shell with no repo-harness label, so this read skips the ownership check of `hcGet`; it reads
+ * only the caller's own terminal and returns only that label.
+ */
+export function hcCallerSpace(options: HerdrCoreOptions = {}): string | null {
+  const caller = (options.env ?? process.env).HC_TERMINAL_ID;
+  if (!caller) throw new HerdrCoreError('hc', 'invalid_address', undefined, undefined, 'HC_TERMINAL_ID is not set');
+  return terminal(hc('get', ['--', address(caller)], options)).labels[HERDR_APP_LABEL.space] ?? null;
+}
+
+/**
  * `hc run --bg`: start argv in a new terminal that carries `labels`. By default the caller's terminal is its
  * parent and the child ends with it; `noParent` starts it without a parent, so it outlives the caller. `parent` names
  * another parent terminal; with `outliveParent` the child keeps running when that parent's program ends.
