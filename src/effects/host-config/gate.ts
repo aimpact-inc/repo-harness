@@ -26,7 +26,6 @@ import {
   type RetiredMaterial,
   type Sha256,
   type SkippedOverride,
-  type TextRange,
 } from '../../core/host-config/types';
 import {
   createDirectories,

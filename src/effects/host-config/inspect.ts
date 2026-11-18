@@ -1,8 +1,8 @@
 import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { sha256Prefixed } from '../../core/evidence/sha256';
-import { fragmentFormat } from '../../core/host-config/registry';
-import { HostConfigError, type FileRecord, type FragmentRecord, type HostConfigLedger, type Sha256 } from '../../core/host-config/types';
+import { fileFormatOf, fragmentFormat } from '../../core/host-config/registry';
+import { HostConfigError, type FileFormat, type FileRecord, type FragmentRecord, type HostConfigLedger, type Sha256 } from '../../core/host-config/types';
 import { globalRuntimeScope, runtimeTransactionRoot } from '../locking/runtime-transaction-lock';
 import { pathRecordIsCurrent } from './path-records';
 import { hostConfigPaths, observeFile, readLedger, resolveHostPath, writeLedger, type HostConfigPaths } from './store';
@@ -66,8 +66,8 @@ function decoded(bytes: Buffer | null): string | null {
 }
 
 /** The text at the selector: null when absent, undefined when the file cannot be read by its strategy. */
-function located(path: string, content: string | null, selector: string): string | null | undefined {
-  const format = fragmentFormat(path, selector);
+function located(fileFormat: FileFormat | undefined, content: string | null, selector: string): string | null | undefined {
+  const format = fragmentFormat(fileFormat, selector);
   if (content === null || format === null) return undefined;
   try {
     const range = format.strategy.locate(content, selector);
@@ -106,7 +106,7 @@ export function configStatus(env: NodeJS.ProcessEnv): ConfigStatus {
     return {
       path, current, baseline: baselineOf(record), committed: committedMatches(record, current), externalChange: record.external_change,
       fragments: ledger.fragments.filter((entry) => entry.file === path)
-        .map((entry) => ({ owner: entry.owner, selector: entry.selector, kind: entry.kind, state: fragmentState(located(path, content, entry.selector), entry) })),
+        .map((entry) => ({ owner: entry.owner, selector: entry.selector, kind: entry.kind, state: fragmentState(located(record.format ?? fileFormatOf(path), content, entry.selector), entry) })),
     };
   });
   const backups = join(paths.harness, 'global-context-backups');
@@ -149,11 +149,12 @@ export function configDiff(env: NodeJS.ProcessEnv, target: string, options: { re
   const paths = hostConfigPaths(env);
   const path = resolveHostPath(paths, target);
   const ledger = readLedger(paths);
-  if (!ledger.files[path]) throw new HostConfigError('host_config_invalid_state', `rh has no record of this file: ${path}`);
+  const record = ledger.files[path];
+  if (!record) throw new HostConfigError('host_config_invalid_state', `rh has no record of this file: ${path}`);
   const content = decoded(currentOf(path).bytes);
   const hash = (text: string) => sha256Prefixed(Buffer.from(text, 'utf8'));
   const fragments = ledger.fragments.filter((entry) => entry.file === path).map((entry): FragmentDiff => {
-    const text = located(path, content, entry.selector);
+    const text = located(record.format ?? fileFormatOf(path), content, entry.selector);
     const diff = { owner: entry.owner, selector: entry.selector, kind: entry.kind, state: fragmentState(text, entry),
       rh: entry.inserted === '' ? null : hash(entry.inserted), current: typeof text === 'string' ? hash(text) : null };
     if (!options.showValues) return diff;
