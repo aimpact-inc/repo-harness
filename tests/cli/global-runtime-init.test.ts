@@ -898,6 +898,8 @@ describe('install command global runtime bootstrap', () => {
       writeFileSync(join(home, '.agents', 'rules', 'durable-context.md'), 'durable\n');
       writeFileSync(join(home, '.agents', 'rules', 'english.md'), 'en\n');
       writeFakeCodegraph(tmp, fakeBin, codegraphLog);
+      // A lock entry with no staged skill and no record, as a killed rh call leaves it (D4b).
+      writeFileSync(join(home, '.agents', '.skill-lock.json'), `${JSON.stringify({ skills: { mermaid: { source: 'BfdCampos/dotfiles' } } }, null, 2)}\n`);
       writeExecutable(tmp, join(fakeBin, 'bun'), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${bunLog}"\nif [[ "\${1:-}" == "--version" ]]; then echo 1.4.0; fi\nexit 0\n`);
       // The install/init provider-driven external-skills bootstrap invokes
       // `bunx skills add ...` directly. The CodeGraph MCP configure step shells
@@ -911,7 +913,8 @@ describe('install command global runtime bootstrap', () => {
         `fs.appendFileSync(${JSON.stringify(bunxLog)}, args.join(' ') + '\\n');`,
         "if (args[0] === 'skills@1.9.0' && args[1] === 'add') {",
         "  const lock = path.join(process.env.HOME, '.agents', '.skill-lock.json');",
-        "  const data = fs.existsSync(lock) ? JSON.parse(fs.readFileSync(lock, 'utf8')) : { version: 3, skills: {} };",
+        "  const data = fs.existsSync(lock) ? JSON.parse(fs.readFileSync(lock, 'utf8')) : { skills: {} };",
+        "  data.version = 3;",
         "  for (const name of args.slice(args.indexOf('-s') + 1, args.indexOf('-y'))) {",
         "    fs.mkdirSync(path.join(process.env.HOME, '.agents', 'skills', name), { recursive: true });",
         "    fs.writeFileSync(path.join(process.env.HOME, '.agents', 'skills', name, 'SKILL.md'), '# ' + name + '\\n');",
@@ -964,7 +967,8 @@ describe('install command global runtime bootstrap', () => {
       const staged = ['think', 'hunt', 'check', 'health', 'mermaid'];
       expect(staged.map((skill) => ledger.paths[pathRecordKey({ HOME: home }, join(home, '.agents', 'skills', skill))]?.host)).toEqual(staged.map(() => 'staged'));
       expect(ledger.fragments.filter((fragment: { file: string }) => fragment.file === realpathSync(lock)).map((fragment: { selector: string }) => fragment.selector))
-        .toEqual(staged.map((skill) => `skills.${skill}`));
+        .toEqual(['think', 'hunt', 'check', 'health'].map((skill) => `skills.${skill}`));
+      expect(result.steps.find((step) => step.step === 'configure Mermaid skill')?.detail).toContain(`kept unowned lock entry skills.mermaid in ${lock}`);
       expect(result.steps.find((step) => step.step === 'configure Waza skills')?.detail).toContain(`host_config_unattributed_diff: ${realpathSync(lock)} sha256:`);
       expect(readFileSync(join(home, '.codex', 'config.toml'), 'utf-8')).toContain('[mcp_servers.codegraph]\ncommand = "codegraph"\nargs = ["serve", "--mcp", "--path", "."]\n');
       // Regression guard: the Waza status probe inside check-agent-tooling.sh

@@ -28,6 +28,7 @@ import { shellQuote } from "../../core/shell-quote";
 import { syncCrossReviewSkills } from "./init";
 import { runInstall, type InstallTargetSpec } from "./install";
 import type { OverrideSelection } from "../../core/host-config/override";
+import { jsonFragment } from "../../core/host-config/json-fragment";
 import { compareVersions, readLatestPackageVersion } from "./doctor";
 import { DEFAULT_PROCESS_MAX_BUFFER_BYTES, redactProcessOutput, runProcess as runBoundedProcess } from "../../effects/process-runner";
 import { gitChildEnv } from "../../effects/git/runner";
@@ -1121,16 +1122,23 @@ function addStagedSkills(sourceRoot: string, provider: string, requested: readon
   const owners = [...new Set(skills.map((skill) => ownerForInstallPath(join(root, skill), environment)))];
   if (owners.length !== 1 || owners[0] === null) return { step: { step: stepName, status: "failed", detail: `the staged skills ${skills.join(',')} have no single owner` }, notes: [] };
   const owner = owners[0];
+  const lockPath = providerSkillLock(home, environment).path;
   let run: GlobalRuntimeStep | null = null as GlobalRuntimeStep | null;
   try {
-    const { unattributed } = withHostConfigTransaction(environment, transaction, (txRoot) => openHostConfigGate({ env }).delegate([
+    const gate = openHostConfigGate({ env });
+    const { unattributed } = withHostConfigTransaction(environment, transaction, (txRoot) => gate.delegate([
       ...skills.map((skill) => ({ path: join(root, skill), owner })),
-      { path: providerSkillLock(home, environment).path, owner, selectors: skills.map((skill) => `skills.${skill}`) },
+      { path: lockPath, owner, selectors: skills.map((skill) => `skills.${skill}`) },
     ], () => {
       run = runProcess("bunx", skillsAddArgs(provider, skills), sourceRoot, env);
       if (run.status === "failed") throw new Error(`${SKILLS_CLI} add ${provider} failed`);
     }, { transaction: txRoot }));
-    return { step: run!, notes: [...kept, ...unattributed.map((diff) => `${diff.code}: ${diff.path} ${diff.sha256 ?? 'removed'}`)] };
+    // A lock entry that was there before the call (an rh killed mid-call, or the user) gets no record: report it, claim nothing (D4b).
+    const lock = existsSync(lockPath) ? readFileSync(lockPath, 'utf8') : null;
+    const recorded = new Set(gate.recorded(lockPath).map((record) => record.selector));
+    const unowned = lock === null ? [] : skills.filter((skill) => !recorded.has(`skills.${skill}`) && jsonFragment.locate(lock, `skills.${skill}`))
+      .map((skill) => `kept unowned lock entry skills.${skill} in ${lockPath}`);
+    return { step: run!, notes: [...kept, ...unowned, ...unattributed.map((diff) => `${diff.code}: ${diff.path} ${diff.sha256 ?? 'removed'}`)] };
   } catch (error) {
     return { step: run?.status === "failed" ? run : { step: stepName, status: "failed", detail: (error as Error).message }, notes: [] };
   }
