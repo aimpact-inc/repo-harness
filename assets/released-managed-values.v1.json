@@ -99,7 +99,8 @@
     "v0.33.0",
     "v0.33.1",
     "v0.33.2",
-    "v0.34.0"
+    "v0.34.0",
+    "v0.35.0"
   ],
   "packageScripts": {
     "check:architecture-sync": [
@@ -2315,6 +2316,7 @@
         "sha256:542332264af0204a934af7c5c4001738f21c14e2206b5f893478984885fc29a0",
         "sha256:7edc472a487ed8c2aa12193336bfcc6394c44b2fe4bdf8bac0754779713fbe4e",
         "sha256:7f2c692a1a6be999c9e6bf1e55dd7868174bbc23893cb25b65e04e16e658be8d",
+        "sha256:83a5ab81faf34de117284042b375d67c08a6a9816d7cf94bbcbbfc7af990ec28",
         "sha256:9c788d8ab025ff2bdd7f6f915e4c99b39a09670bf5cf02ab9d7a86466ae5ebb0"
       ],
       "## Sub-agent Delegation": [
@@ -2330,7 +2332,8 @@
         "sha256:6f1c27796bb280cde59f09645b0c7aa0842d9962a6503497647d2a28d6582dfa"
       ],
       "## Test Budget": [
-        "sha256:b2a452142e34f036c6323777bd6ec1c3e879d1f7ee3d3ea4d80e4253cde01532"
+        "sha256:b2a452142e34f036c6323777bd6ec1c3e879d1f7ee3d3ea4d80e4253cde01532",
+        "sha256:f95b20ea8d6ccbf4e548482dc8cc625e766f77438a9ef0c765281e248c51338b"
       ]
     }
   },
