@@ -1,6 +1,6 @@
 # workflow-engine/workflow-state 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-workflow-state" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:58023ee68d99907241c2e763e7583e2470d756d2ad4a3122e9b46366b75abed1" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-workflow-state" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:754947a6d435d82ce40f2c6e5e7bb4faa74f9583909666fc1aefcaba1d7deff6" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.workflow-engine.workflow-state`(kind `capability`)
 > **Matched Prefixes**:`src/core/state/**`、`src/effects/state/**`、`src/core/workflow/**`、`interfaces/**`、`src/core/worktree-location.mjs`、`src/core/worktree-location.d.mts`、`src/cli/commands/state.ts`
@@ -68,6 +68,7 @@ flowchart LR
 
 - `calls` → `component.workflow-state.coordination-plane` — Observe task session admission and retain explicit historical task parsing and exact worktree safety
 - `depends-on` → `capability.verification.acceptance-review` — Read the diff fingerprint for Effective State.
+- `depends-on` → `capability.runtime-harness.evidence-ledger` — Hash workflow state inputs and projections.
 - `depends-on` → `capability.runtime-harness.global-runtime-reconciliation` — Resolve the helper platform for coordination worktrees.
 - `calls` → `component.workflow-state.primary` — Resolve Effective State under the state lock
 
@@ -75,6 +76,7 @@ flowchart LR
 
 - `reads` ← `component.acceptance-review.primary` — Observe Git and files read-only and resolve the workflow profile for the review subject
 - `depends-on` ← `capability.public-surface.adoption` — Resolve worktree locations during adoption planning.
+- `depends-on` ← `capability.organization.board` — Read coordination worktree topology during closeout.
 - `calls` ← `component.contract-assets.contract-worktree-lifecycle` — Create and remove task worktrees and sweep merged managed worktrees at start under the worktree topology lock
 - `depends-on` ← `capability.verification.evals-checks` — Test Workflow State behavior through its source modules.
 - `depends-on` ← `capability.runtime-harness.evidence-ledger` — Read state artifacts and read-only observations for evidence.
@@ -87,6 +89,7 @@ flowchart LR
 - `reads` ← `component.mcp-sidecar.primary` — Resolve effective state read-only for the state MCP tools
 - `depends-on` ← `component.operator.console-collectors` — Reuse inspectWorktree and the sweep merge predicates for the read-only worktree inventory.
 - `depends-on` ← `capability.runtime-harness.operator` — Read state types and artifacts for Operator projections.
+- `depends-on` ← `capability.organization.publication` — Read workflow policy and no-progress state for publication readiness.
 - `reads` ← `component.strategy-reflection.primary` — Resolve effective state read-only for strategy context
 - `depends-on` ← `capability.runtime-harness.task-agent-host` — Read admitted sessions and task session lists through the shared core selector and session types
 - `reads` ← `component.task-fleet.primary` — Read provider issue and admitted session board observations without Sprint or lease authority
@@ -124,7 +127,7 @@ flowchart LR
 | `component.workflow-state.coordination-plane-core` | Task Session Admission and Historical Worktree Safety (core) | `2–5` 個文件 / `20–50` 行 | 未宣告 |
 | `component.workflow-state.primary` | Effective State Resolver | `5–10` 個文件 / `500–1000` 行 | 未宣告 |
 | `component.workflow-state.primary-cli` | Effective State Resolver (cli) | `1–2` 個文件 / `200–500` 行 | 未宣告 |
-| `component.workflow-state.primary-effects` | Effective State Resolver (effects) | `2–5` 個文件 / `1000–2000` 行 | 未宣告 |
+| `component.workflow-state.primary-effects` | Effective State Resolver (effects) | `5–10` 個文件 / `1000–2000` 行 | 未宣告 |
 | `component.workflow-state.primary-scripts` | Effective State Resolver (scripts) | 未宣告 `source.include` | 未宣告 |
 
 ## 2. P2:端到端數據流

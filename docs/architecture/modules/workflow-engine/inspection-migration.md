@@ -1,5 +1,5 @@
 # workflow-engine/inspection-migration 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-inspection-migration" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:f3ba20cbf3c1ea790008335fc5469f52ebcb9900f61f5159f03025a58217c0d0" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-inspection-migration" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:4743dc77da1a60484b6e0398bbc54a4d76eceff65dde7a261c45b2f3f3468e3d" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.workflow-engine.inspection-migration`(kind `capability`)
 > **Matched Prefixes**:`references/migration-guide.md`、`references/tech-stacks.md`、`scripts/inspect-project-state.ts`、`scripts/create-project-dirs.sh`、`scripts/init-project.sh`、`scripts/lib/**`、`scripts/AGENTS.md`、`scripts/CLAUDE.md`
@@ -52,6 +52,7 @@ flowchart LR
 
 入向關係:
 
+- `depends-on` ← `capability.runtime-harness.architecture` — Use the shared clean-room runtime for the architecture probe.
 - `calls` ← `component.evals-checks.ci-selection` — Run test files through the shared runner in scripts/lib/ci-run-tests.sh
 
 組件出向關係:

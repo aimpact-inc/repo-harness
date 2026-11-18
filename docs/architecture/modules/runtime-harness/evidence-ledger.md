@@ -1,6 +1,6 @@
 # runtime-harness/evidence-ledger 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-evidence-ledger" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:4a490f39b01a3988ee8b813bd8a23245825a14e1999e6f78d1915a79ab6b1457" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-evidence-ledger" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:20e50b16a1f22219776a205b2b84b91be71dc82a056966596d6241b708427b74" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.evidence-ledger`(kind `capability`)
 > **Matched Prefixes**:`src/core/evidence/**`、`src/effects/evidence/**`
@@ -53,6 +53,7 @@ flowchart LR
 出向關係:
 
 - `calls` → `capability.public-surface.adoption` — Resolve blob and log paths inside the repository with the shared path-safety helper
+- `depends-on` → `capability.verification.acceptance-review` — Read acceptance receipts and admission sources for attested evidence imports.
 - `depends-on` → `capability.runtime-harness.hook-adapters` — Collect loop state inputs for recovery evidence.
 - `depends-on` → `capability.workflow-engine.workflow-state` — Read state artifacts and read-only observations for evidence.
 - `calls` → `component.evidence-ledger.primary` — Append fold and checkpoint evidence events through one writer path
@@ -60,15 +61,26 @@ flowchart LR
 入向關係:
 
 - `calls` ← `component.acceptance-review.primary` — Canonicalize review records and load verification execution results
+- `depends-on` ← `capability.public-surface.action-commands` — Validate skill surface catalog records and digests.
+- `depends-on` ← `capability.public-surface.adoption` — Hash adoption plans and report file transaction errors.
 - `depends-on` ← `component.architecture.model-reader` — Plugin → core: canonicalize the dirty worktree digest and the stale citations of a review prompt
 - `depends-on` ← `component.architecture.module-view` — Plugin → core: canonicalize module review prompt digests
+- `depends-on` ← `capability.organization.board` — Use shared evidence decoders and hashes for board records.
+- `depends-on` ← `capability.verification.codegraph-readiness` — Hash CodeGraph reader evidence.
+- `depends-on` ← `capability.workflow-engine.contract-assets` — Decode shared tool catalog records.
 - `calls` ← `component.evals-checks.primary` — Validate and execute verification plans through the evidence verification modules
 - `depends-on` ← `component.execution-primitives.task-message-claim` — Canonicalize task message claim digests with the shared canonical JSON
+- `depends-on` ← `capability.runtime-mcp.general-repo-access` — Decode and hash repository access authority and tool records.
+- `depends-on` ← `capability.runtime-harness.global-runtime-reconciliation` — Hash runtime candidates and reconciliation evidence.
 - `calls` ← `component.hook-adapters.session-lifecycle` — Publish the evidence checkpoint and render handoff and resume from it
+- `depends-on` ← `capability.runtime-harness.mcp-sidecar` — Hash MCP audit and guarded write evidence.
 - `depends-on` ← `capability.runtime-harness.operator` — Plugin → core: canonicalize digests and use the JSON value types for worktree cleanup and the operator write audit
+- `depends-on` ← `capability.organization.publication` — Decode and hash publication feedback and readiness evidence.
 - `calls` ← `component.refactor-program.archctx-provider` — Canonicalize refactor provider records
+- `depends-on` ← `capability.public-surface.strategy-reflection` — Hash strategy context evidence.
 - `calls` ← `capability.runtime-harness.task-agent-host` — Hash request context and result bytes with the evidence canonical JSON
 - `calls` ← `capability.organization.task-fleet` — Reuse canonical JSON and durable atomic append for task message records
+- `depends-on` ← `capability.workflow-engine.workflow-state` — Hash workflow state inputs and projections.
 
 組件出向關係:
 

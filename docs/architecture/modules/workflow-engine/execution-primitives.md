@@ -1,6 +1,6 @@
 # workflow-engine/execution-primitives 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-execution-primitives" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:cc7d57615b9cd4ef580ac6b348eaee7a58e69ff777b89b96e53c62fc5fee1b15" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-execution-primitives" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:8efa766b62c761a399581984199cccbb16d6131957f3d83292949f75f6ebc550" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.workflow-engine.execution-primitives`(kind `capability`)
 > **Matched Prefixes**:`src/effects/process-runner.ts`、`src/effects/process-supervisor.ts`、`src/effects/process-group-launcher.ts`、`src/effects/process-group-termination.ts`、`src/effects/process-group-registry.ts`、`src/effects/expensive-run-lock.ts`、`src/effects/readonly-observation.ts`、`src/core/shell-quote.ts`、`src/effects/path-containment.ts`、`src/effects/atomic-append.ts`、`src/effects/locking/**`、`src/effects/git/**`
@@ -96,6 +96,7 @@ flowchart LR
 - `depends-on` ← `capability.runtime-harness.operator` — Read Git topology for task diffs and development activity. Read the task session records, the native session record and the process proof for task execution state. Use the hc client for hc server status, hc ls, hc events, the terminal labels, the herdr-app command and its error type. Read the notify install record, the notify config and the relay delivery record through the notify read contract, and use its relay channel names and record types in the notify status and the Bots page.
 - `depends-on` ← `capability.organization.publication` — Resolve the Git common directory for the feedback store, validate the shared task message claim in feedback records, and run Git through the shared runner in the new remote ref push operation
 - `calls` ← `component.publication.primary` — Read the worktree topology and the Git common directory
+- `depends-on` ← `capability.public-surface.strategy-reflection` — Read strategy context through shared Git and runtime observations.
 - `calls` ← `component.task-agent-host.primary` — Resolve the task repository and record task worktrees through the Git primitives. Hold task session locks, read and write immutable session artifacts, run hc through the hc client, read the notify secret key names, read the notify config, the delivery record and the notify file paths through the notify read contract, and build the next delivery record with its channel names, record types and empty record
 - `calls` ← `component.task-agent-host.review-runner` — Read and write immutable session artifacts, including the accepted-input proof, and read the host process identity
 - `calls` ← `component.task-fleet.provider-feedback` — Hold the shared task lock while feedback events and delivery receipts are recorded

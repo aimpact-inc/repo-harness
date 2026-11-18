@@ -1,5 +1,5 @@
 # public-surface/action-commands 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-public-surface-action-commands" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:79622bcfde529a0558fed45033ff8113295ffdaedeb98b801a9d48f6b7739a1b" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-public-surface-action-commands" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:4eecf511c729936e3c54350845aebca32665e4c24b0077bde2bf38e1aca72681" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.public-surface.action-commands`(kind `capability`)
 > **Matched Prefixes**:`assets/skill-commands/**`、`assets/skills/**`、`assets/skill-version.json`、`.claude/.skill-version`、`src/core/skill-surface/**`、`scripts/skill-surface-select.ts`、`scripts/run-skill-routing-eval.ts`、`scripts/check-skill-version.ts`
@@ -58,6 +58,8 @@ flowchart LR
 
 - `depends-on` → `capability.workflow-engine.contract-assets` — Read the workflow contract during skill version checks.
 - `depends-on` → `capability.verification.evals-checks` — Run the skill evaluation engine for routing checks.
+- `depends-on` → `capability.runtime-harness.evidence-ledger` — Validate skill surface catalog records and digests.
+- `depends-on` → `capability.runtime-harness.global-runtime-reconciliation` — Resolve host skill roots for skill surface selection.
 - `calls` → `component.action-commands.primary` — Install action command skills
 - `calls` → `component.action-commands.skill-surface-catalog` — Select the facade and host placement projection for a plugin selection
 

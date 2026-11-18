@@ -1,6 +1,6 @@
 # verification/acceptance-review 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-verification-acceptance-review" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:8c04adfcae2ce322f8b98dceeec627e7ee2aee1f6f59a61da72f5d792b047a98" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-verification-acceptance-review" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:722326c5f46b1b7fe12e61aae8afe92e5ce5035adddad1846671029f8d57e716" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.verification.acceptance-review`(kind `capability`)
 > **Matched Prefixes**:`src/core/review/**`、`src/effects/review/**`、`src/cli/commands/review.ts`、`scripts/acceptance-receipt.ts`、`scripts/change-assessment.ts`、`src/effects/admission/admission-store.ts`、`src/effects/admission/admission-source.ts`、`src/effects/admission/issue-goal.ts`、`src/effects/admission/control-admission.ts`、`src/effects/github/issues.ts`、`src/effects/github/policy.ts`
@@ -32,6 +32,7 @@ flowchart LR
   p1_component_acceptance_review_primary_b86fb286 -->|"Drive the persistent reviewer session through the runner port that task-agent-host implements#59; the CLI root injects a loader and guards the four runtime operations with peer-runtime#44; so core review admission and publication load no task-agent-host module"| p1_capability_runtime_harness_task_agent_host_d81dadb6
   p1_capability_runtime_harness_hook_adapters_75a11743 -->|"Read the diff fingerprint for mutation guards."| p1_capability_verification_acceptance_review_f80a24d6
   p1_capability_runtime_harness_task_agent_host_d81dadb6 -->|"Plugin → core: bind task sessions to the active review admission and its source#44; resolve the policy review base of the diff fingerprint#44; implement the reviewer runner port#44; and apply the review isolation policy in the OAR review host"| p1_capability_verification_acceptance_review_f80a24d6
+  p1_capability_runtime_harness_task_agent_host_d81dadb6 -->|"Resolve the Pi executable for task review sessions."| p1_capability_runtime_harness_hook_adapters_75a11743
   p1_capability_runtime_harness_task_agent_host_d81dadb6 -->|"Start send and collect persistent Herdr task agents"| p1_component_task_agent_host_primary_d8453f09
   p1_component_task_agent_host_primary_d8453f09 -->|"Resolve the task repository and record task worktrees through the Git primitives. Hold task session locks#44; read and write immutable session artifacts#44; run hc through the hc client#44; read the notify secret key names#44; read the notify config#44; the delivery record and the notify file paths through the notify read contract#44; and build the next delivery record with its channel names#44; record types and empty record"| p1_capability_workflow_engine_execution_primitives_b3033934
   p1_capability_runtime_harness_task_agent_host_d81dadb6 -->|"Run the reviewer session#44; its OAR review host and its pre-prompt inbox companion for acceptance review"| p1_component_task_agent_host_review_runner_c2379e1e
@@ -44,8 +45,8 @@ flowchart LR
   classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-- Proof: `proven` (`sha256:5297380e711a3009ba2ec58579dc70d1d74a6561af8bacae4b065381c2a2f732`).
-- Semantic nodes: `11`; declared relations: `12`.
+- Proof: `proven` (`sha256:7a7ef7785c1d8ff2666761dd97ab9e7ea156aff387e42a55c50a15550369fa73`).
+- Semantic nodes: `11`; declared relations: `13`.
 
 ### 1.2 模組職責表
 
@@ -75,16 +76,22 @@ flowchart LR
 - `deployed-on` → `process.oar-review-host` — Acceptance review runs review sessions in the OAR review host.
 - `reads` → `external.github` — Read the GitHub repository identity and the admitted issue goal through gh under the manual external_sources policy
 - `calls` → `capability.runtime-harness.hook-adapters` — Admit at most one persistent semantic review session per work package through the circuit breaker
+- `depends-on` → `capability.organization.board` — Read seat settings and board review sources for review collection and publication.
+- `depends-on` → `capability.workflow-engine.contract-assets` — Read task role profiles for review endpoints.
+- `depends-on` → `capability.organization.publication` — Read merge policy and required check coverage for acceptance receipts.
 - `calls` → `component.acceptance-review.primary` — Run one generic acceptance review round for an admitted review campaign
 
 入向關係:
 
 - `depends-on` ← `component.architecture.module-view` — Plugin → core: apply the shared review finding rules in module review prompts
+- `depends-on` ← `capability.organization.board` — Resolve review model families for board review selection.
 - `calls` ← `component.contract-assets.contract-worktree-lifecycle` — Locate the acceptance receipt and the protected Git runtime
 - `calls` ← `component.contract-assets.planning-helpers` — Read the acceptance policy for planning helpers
 - `depends-on` ← `capability.verification.evals-checks` — Test Acceptance Review behavior through its source modules.
+- `depends-on` ← `capability.runtime-harness.evidence-ledger` — Read acceptance receipts and admission sources for attested evidence imports.
 - `calls` ← `component.execution-primitives.runtime-closeout` — Validate the task claim reference of a session binding, and type requests, results and cleanup results with the runner port types
 - `reads` ← `component.execution-primitives.task-session-record` — Type the task session record fields with the review runner port types: process proof, task agent spec and task session admission
+- `depends-on` ← `capability.runtime-mcp.general-repo-access` — Use acceptance receipt and change assessment contracts in MCP tests.
 - `calls` ← `component.global-runtime-reconciliation.cli-root` — Register the review command
 - `depends-on` ← `capability.runtime-harness.hook-adapters` — Read the diff fingerprint for mutation guards.
 - `reads` ← `component.mcp-sidecar.primary` — Read the check records and the change assessment record
@@ -120,7 +127,7 @@ flowchart LR
 
 ## 2. P2:端到端數據流
 
-> **Proof**: `proven` (`sha256:5297380e711a3009ba2ec58579dc70d1d74a6561af8bacae4b065381c2a2f732`); selectors `16/16`.
+> **Proof**: `proven` (`sha256:7a7ef7785c1d8ff2666761dd97ab9e7ea156aff387e42a55c50a15550369fa73`); selectors `16/16`.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%

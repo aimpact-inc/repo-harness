@@ -1,6 +1,6 @@
 # public-surface/strategy-reflection 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-public-surface-strategy-reflection" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:6ea08390fc26d1cd55c14f1411959fa715904a5a4e3962e4ea58b44552e28eb3" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-public-surface-strategy-reflection" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:2dfb67ea7a6b58a840d0f6a49756864317c9219324d301317036e104b1e4f33e" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.public-surface.strategy-reflection`(kind `capability`)
 > **Matched Prefixes**:`src/core/strategy/**`、`src/effects/strategy/**`、`src/cli/commands/strategy.ts`、`src/cli/commands/strategy-actions.ts`、`docs/strategy/**`
@@ -50,6 +50,9 @@ flowchart LR
 
 出向關係:
 
+- `depends-on` → `capability.runtime-harness.evidence-ledger` — Hash strategy context evidence.
+- `depends-on` → `capability.workflow-engine.execution-primitives` — Read strategy context through shared Git and runtime observations.
+- `depends-on` → `capability.runtime-harness.global-runtime-reconciliation` — Resolve host skill roots for strategy skills.
 - `calls` → `component.strategy-reflection.primary` — Collect strategy context and validate a proposal
 
 入向關係:
