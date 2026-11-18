@@ -620,23 +620,23 @@ describe("repo-harness action command skills", () => {
     expect(acceptor).toContain("repo-harness-review-publish-receipt");
     expect(acceptor).toContain("review_publish_unknown");
     expect(acceptor).toContain("model_relation");
-    // M32: reviewers read CI and the recorded evidence. #2936: a FAIL needs a P0 or P1; a P2 is a follow-up; a merge needs a PASS.
+    // M32: reviewers read CI and the recorded evidence. #2936: a FAIL needs a P0 or P1; a merge needs a PASS. #3190: two rounds; a P2 stays in the review record.
     const flat = (text: string) => text.replace(/\s+/g, " ");
     expect(flat(acceptor)).toContain("Never rerun a passing typecheck or test.");
-    expect(flat(acceptor)).toContain("Round 3** runs with no owner question");
-    expect(flat(acceptor)).toContain("A `FAIL` has at least one P0 or P1 finding. A P2 and a P3 do not block a merge: a `PASS` record carries them as follow-ups. Rule 4 decides whether a `FAIL` after round 3 takes another round or becomes an owner gate. A merge always needs a `PASS` record.");
+    expect(flat(acceptor)).toContain("There is no round 3: a blocking finding after round 2 ends the loop.");
+    expect(flat(acceptor)).toContain("A `FAIL` has at least one P0 or P1 finding. A P2 and a P3 do not block a merge: a `PASS` record carries them in the review record. Rule 3 decides what follows a `FAIL` in round 2. A merge always needs a `PASS` record.");
     expect(flat(acceptor)).not.toContain("defers a P2 family");
     expect(worker).toContain("**Fix the class.**");
 
-    // #2936: every rule that resolves threads or needs zero open threads names the P2 follow-up.
+    // #2936, #3190: every rule that resolves threads or needs zero open threads names the P2 `noted` reply.
     const p2ThreadSites: Array<[string, string]> = [
-      ["references/acceptor.md", "coordinator then resolves each P2 thread with a `deferred` reply that links"],
-      ["references/acceptor.md", "A P2 thread passes this check only after the coordinator files the"],
-      ["references/acceptor.md", "with the follow-up issue link of a P2 (§2.2). Both are a"],
-      ["references/board.md", "link of a P2 (`acceptor.md` §2.2)"],
-      ["references/templates.md", "| deferred #<follow-up issue>"],
-      ["references/orchestrator.md", "You resolve a P2 thread with its follow-up issue link first (`acceptor.md` §6)"],
-      ["references/orchestrator.md", "with a P2 needs no fix round: the P2 is a follow-up issue"],
+      ["references/acceptor.md", "coordinator resolves each P2 thread with a `noted` reply (§6)"],
+      ["references/acceptor.md", "A P2 thread passes this check only after the coordinator resolves it with the `noted` reply (§6)."],
+      ["references/acceptor.md", "with the `noted` reply of a P2 (§2.2). Both are a"],
+      ["references/board.md", "with the `noted` reply of a P2 (`acceptor.md` §2.2)"],
+      ["references/templates.md", "| rejected | noted"],
+      ["references/orchestrator.md", "You resolve a P2 thread with the `noted` reply first (`acceptor.md` §6)"],
+      ["references/orchestrator.md", "with a P2 needs no fix round: the P2 stays in the review record"],
     ];
     for (const [path, text] of p2ThreadSites) {
       expect(flat(readFileSync(join(SKILLS_ROOT, "repo-harness-issue-flow", path), "utf-8"))).toContain(text);

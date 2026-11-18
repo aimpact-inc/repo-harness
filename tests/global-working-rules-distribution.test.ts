@@ -66,15 +66,14 @@ describe("global working rules distribution", () => {
     expect(rendered).toContain("docs/reference-configs/herdr-notify.md#herdr-dispatch");
   });
 
-  test("the managed block ships the test-volume budget and its exception path", () => {
+  test("the managed block ships the test-volume report with no cap", () => {
     const rendered = renderedManagedBlock("en", "Use English to report to user.");
     expect(SHIPPED_GLOBAL_RULES_SECTIONS).toContain("Test Budget");
     expect(rendered).toContain("## Test Budget");
-    expect(rendered).toContain("added test lines divided by added product lines must not exceed 2:1");
-    expect(rendered).toContain("the PR adds at most one test file");
+    expect(rendered).toContain("Report the test volume in the PR as data");
     expect(rendered).toContain("git diff --numstat <base>...HEAD -- tests");
     expect(rendered).toContain("git diff --numstat <base>...HEAD -- src scripts");
-    expect(rendered).toContain("Test budget exception");
+    expect(rendered).toContain("The report has no cap and blocks no merge.");
     expect(rendered).toContain("Remove a redundant test only when the PR names the retained test");
     expect(rendered).toContain("Never modify or delete assertions just to make a test pass");
   });
@@ -224,7 +223,8 @@ describe("global working rules distribution", () => {
     expect(inspectGlobalContext(content, ROOT).state).toBe("managed-stale");
     expect(planGlobalRulesAdoption(content, ROOT)).toBeNull();
     // A released block needs no template: a missing package root still proves it.
-    expect(planGlobalRulesAdoption(zhBlock(), join(ROOT, "missing-package-root"))).toMatchObject({ kind: "created", backup: null });
+    const released = readFileSync(join(ROOT, "tests/fixtures/global-rules/released-v0.23.1-en.md"), "utf-8");
+    expect(planGlobalRulesAdoption(released, join(ROOT, "missing-package-root"))).toMatchObject({ kind: "created", backup: null });
     const crlf = `user content\r\n\r\n${zhBlock().replace(/\n/g, "\r\n")}`;
     const removal = removeMarkedBlock(crlf, "global-working-rules");
     expect(crlf.slice(0, removal.at) + crlf.slice(removal.at + removal.removed.length)).toBe("user content\r\n");

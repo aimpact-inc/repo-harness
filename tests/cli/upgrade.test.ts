@@ -542,11 +542,23 @@ describe('upgrade with real release bytes', () => {
       expect(afterRollback[path], path).toBe(before[path]);
     }
 
-    const previousTemplate = rootTemplate.replace(
+    // The 0.34 root context capped the test volume; an unchanged copy refreshes.
+    const v034Template = rootTemplate.replace(
+      '- Report added test lines, added product lines and added test files in the PR as data; the report blocks no merge.',
+      '- Test budget per PR: added test lines divided by added product lines must not exceed 2:1, and the PR adds at most one test file.',
+    );
+    const cleanRoot = join(opts.cwd, 'CLAUDE.md');
+    put(cleanRoot, v034Template);
+    expect(legacyPathSnapshot(cleanRoot)?.contentHash).toBe('sha256:3d6741b137951bd51e3957edd93be78b59d0a1c8063acb2d72b97045ca17955e');
+    const v034Refreshed = runUpgrade({ ...opts, scope: 'project', apply: true });
+    expect(v034Refreshed.exitCode, v034Refreshed.error).toBe(0);
+    expect(v034Refreshed.refreshedPaths).toContain(cleanRoot);
+    expect(readFileSync(cleanRoot, 'utf8')).toBe(rootTemplate);
+
+    const previousTemplate = v034Template.replace(
       "- Write output text in a plain technical style: short sentences, one idea per sentence, active voice. For `en`, follow ASD-STE100 Simplified Technical English. For `zh-CN`, write plain Chinese (简明中文) with the same rules and keep technical terms in English. For `follow-user`, use the user's language with the same rules.",
       '- Write output text in ASD-STE100 Simplified Technical English: short sentences, one idea per sentence, active voice.',
     ).replace('`rh worktrees start', '`repo-harness run contract-worktree start');
-    const cleanRoot = join(opts.cwd, 'CLAUDE.md');
     const editedRoot = join(opts.cwd, 'AGENTS.md');
     put(cleanRoot, previousTemplate);
     expect(legacyPathSnapshot(cleanRoot)?.contentHash).toBe('sha256:58b9816cad7ffe1ba2380b15b3c5c41ab0ab862696763c618037bc904f93c026');
@@ -559,7 +571,7 @@ describe('upgrade with real release bytes', () => {
     expect(readFileSync(editedRoot, 'utf8')).toBe(`${previousTemplate}user edit\n`);
 
     // The 0.33 root context named the helper id that is now internal.
-    const helperTemplate = rootTemplate.replace('`rh worktrees start', '`rh run contract-worktree start');
+    const helperTemplate = v034Template.replace('`rh worktrees start', '`rh run contract-worktree start');
     put(cleanRoot, helperTemplate);
     expect(legacyPathSnapshot(cleanRoot)?.contentHash).toBe('sha256:5ec6c523a550df4dc3e36d1bbfa8470fa3dd48e494a1b8c5de52b9bd6276f5a1');
     const helperRefreshed = runUpgrade({ ...opts, scope: 'project', apply: true });

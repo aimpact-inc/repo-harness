@@ -35,11 +35,11 @@ writer, head owner, integrator or acceptor.
 
 | Agent | Suggested model | Claim roles it holds | Never does |
 |---|---|---|---|
-| Orchestrator | Any host's long-lived top-level session with network access, started from `rh seats argv orchestrator` | Coordinator of the parent issue; integrator | Implements a child issue in its own sub-tree; calls a writer sub-agent (`fast-worker`, `deep-worker`, `root-cause-prover`) or runs the Codex cross-review as a sub-agent |
-| Advisor | A long-lived session beside the orchestrator, started from `rh seats argv advisor` | None. It researches, reviews the board on a schedule and gives its half of a joint decision (`references/advisor.md`) | Writes to GitHub, commits, sends a message to a worker, decides alone |
+| Orchestrator | Any host's long-lived top-level session with network access, started from `rh seats argv orchestrator` | Coordinator of the parent issue; integrator. It triages intake (`DO` / `CONSOLIDATE` / `SHELVE`), dispatches bundles, launches reviews and merges | Implements a child issue in its own sub-tree; calls a writer sub-agent (`fast-worker`, `deep-worker`, `root-cause-prover`) or runs the Codex cross-review as a sub-agent |
+| Advisor | A long-lived session beside the orchestrator, started from `rh seats argv advisor` | None. It is the owner interface, writes the parent bundle plan, audits triage and merges every 2 h and gives its half of a joint decision (`references/advisor.md`) | Writes to GitHub, commits, sends a message to a worker, decides alone |
 | Gap reviewer | A different model family from the orchestrator, when one is available | None. Comments on the drafts | Rewrites the split or decides scope |
 | Worker | Any capable coding model | Writer of one issue or PR slot, dispatched by the coordinator; head owner of its PR | Posts its own claim, widens scope, merges, pushes to another owner's branch |
-| Acceptor | A seat holds the acceptor role. The default reviewer is the gatekeeper in its own Herdr seat; the acceptor does not call it as a sub-agent. The orchestrator does not review a PR itself; a gatekeeper seat reviews each PR that the orchestrator dispatches. The Codex cross-review and every other review run in another seat. For the High tier, two reviews of each head, at least one from a model family different from the writer's; the other can be a fresh same-family context (`references/acceptor.md` §2.2) | Acceptor of one review in one round | Reviews its own code, pushes code |
+| Acceptor | A seat holds the acceptor role. The default reviewer is the gatekeeper in its own Herdr seat; the acceptor does not call it as a sub-agent. The orchestrator does not review a PR itself; a gatekeeper seat reviews each PR that the orchestrator dispatches. The Codex cross-review and every other review run in another seat. One reviewer by default. For the High tier (I1, I2 or a repository-configured I3 path), two reviews of each head in parallel, at least one from a model family different from the writer's; the other can be a fresh same-family context (`references/acceptor.md` §2.2) | Acceptor of one review in one round | Reviews its own code, pushes code |
 
 The suggested models are advice, not a requirement. Any capable host may
 hold any claim role. The High tier records its `model_relation` in the
@@ -109,8 +109,9 @@ Every comment that a seat writes ends with one line `Seat: <seat id> <hc address
 - GitHub events pushed to the orchestrator (install, verify, errors): read
   `references/events.md`.
 
-A worker reads `references/worker.md`, `references/board.md` and the issue.
-Keep the issue self-contained so that this is enough.
+A worker reads `references/worker.md`, `references/board.md`, its packet
+and the issues that the packet names. Keep the packet decision-complete so
+that this is enough.
 
 ## Lifecycle
 
@@ -130,8 +131,10 @@ map ─▶ split ─▶ gap review ─▶ publish ─▶ dispatch ─▶ worker 
   read every comment, and take a posted patch first. Do not post a
   "seen again" comment; the reporter appends evidence through `report-ci`
   only.
-- One child issue has one write scope. It has one PR, or PR slots that the
-  issue names in advance. Parallel workers never share a file.
+- Fine child issues are requirement units. One module bundle (the open
+  issues of one module and write scope) has one worker, one PR, one CI run
+  and one review; the PR closes each issue of the bundle. Parallel workers
+  never share a file.
 - One head owner per PR. Any other agent asks on the board, or takes the
   head-owner role through a handoff comment before it pushes.
 - The worker follows the issue boundary. A needed change outside it is a
@@ -159,46 +162,49 @@ map ─▶ split ─▶ gap review ─▶ publish ─▶ dispatch ─▶ worker 
   evidence, with no acceptance record. The board `tier_low` status is
   provisional; confirm the evidence before the merge (`references/acceptor.md` §1). The rolling projection PR
   (`archctx/projection`) merges on green CI; its merge is its acceptance.
-- Fix rounds. A fix loop continues after round 3 without the owner while
-  each round has fewer blocking findings (P0-P1) than the round before and
-  the scope does not grow. A grown scope is a joint decision. When the count does not drop but no open blocking finding touches I1 or I2, the loop continues by joint decision under one rule. A new P0
-  finding, or a new P1 finding on I1 or I2, goes to the owner as a notice. The loop continues
-  without an owner word when the fix closes the finding. It stops at the
-  owner only when the fix for that finding would accept a residual, relax a
-  control or grow the scope. Each merge outside rule 2, each release, each change that reads, moves or exposes a
-  credential and each deletion that git cannot restore stay with
-  the owner. Any other new P1 finding does not stop the loop. Round 5 is
-  the hard stop. A P2 does not block a merge: the `PASS` record carries it,
-  and the coordinator files one follow-up issue for the PR's P2 findings
-  under the same parent. Details:
-  `references/acceptor.md` §2.2. For issue-flow review loops,
-  this rule replaces the three-round cap of the managed global working
-  rules.
+- Review rounds. A review grades only the lines that the PR changes and
+  has at most two rounds. Round 2 checks only the round-1 fix delta. A
+  round-1 `PASS` row carries forward while the fix stays inside the
+  failing reviewer's files; otherwise its reviewer checks only that
+  delta. The orchestrator merges on round
+  2 when only P2 or P3 findings remain. A blocking finding after round 2
+  ends the loop: the orchestrator narrows the PR, or closes it and
+  dispatches the bundle again. P2 and P3 findings stay in the review
+  record; only a P0 or P1 defect or an owner-named item opens an issue. A
+  new P0 finding, or a new P1 finding on I1 or I2, goes to the owner as a
+  notice. Details: `references/acceptor.md` §2.2. For issue-flow review
+  loops, this rule replaces the three-round cap of the managed global
+  working rules.
 - Dispatch. After the owner approves a batch parent and its plan comment,
-  the orchestrator dispatches the plan's issues in plan order with no other
-  owner step. A new issue or a changed order goes to the owner or to a joint
-  decision. A new issue that only closes an I1/I2 gap (no accepted residual,
-  no relaxed control, no grown scope) joins a batch by joint decision, with a
-  notice to the owner.
-- Intake. Open issues are cleared before new ones are filed. During a batch,
-  file a new issue only when it blocks an issue of the release set, records
-  a defect that a user meets, or the owner asks for it. Search the open
-  issues first and fold a duplicate into the older issue
-  (`references/orchestrator.md` §4.2).
+  the orchestrator dispatches the plan's bundles in plan order with no other
+  owner step. Each bundle goes to one worker as one decision-complete
+  packet (`references/templates.md`, dispatch packet). The worker replies
+  `DONE <PR> <head>` or `BLOCKED <one question>`. A changed order or a new
+  batch issue is an orchestrator call, logged in one line on the parent
+  plan.
+- Intake triage. The orchestrator sorts each open or new issue as `DO`
+  (dispatch it in a bundle), `CONSOLIDATE` (close a duplicate into the older
+  issue, or add a distinct issue of the same write scope to an open
+  bundle) or `SHELVE` (label `status:deferred`, keep it open, off
+  the dispatch board). Shelve owner roadmap items and items that a vendor
+  or upstream blocks; they close only on the owner's word. Close an
+  agent-spawned P2 or P3 issue as not planned. During a batch, file a new
+  issue only for a P0 or P1 defect, a blocker of the release set or an
+  owner-named item (`references/orchestrator.md` §4.2).
 - Release set. A release ships a planned set of issue trains, ordered by
   their dependencies. The release run starts when every train of the set is
   merged. Do not propose a release for a few merged issues or to put one
   change on the host (`references/orchestrator.md` §4.1).
 - Joint decision. The flow aims at full automation outside I1/I2 and
-  deployment. The seats decide and act on every other item, by rule or by
-  joint decision. An owner message applies to the item it names and stops
-  or reorders no other work. The orchestrator and the advisor make a
-  decision that otherwise goes to the owner when both agree, unless it
-  touches security. A new issue that only closes an I1/I2 gap (no accepted
-  residual, no relaxed control, no grown scope) joins a batch by joint
-  decision, with a notice to the owner. Before the action, the orchestrator posts it on the
-  owning issue or PR as `Joint decision (orchestrator + advisor)` with the
-  reason. A joint decision never replaces the High-tier cross-model review,
+  deployment. The seats decide and act on every other item by rule. An
+  owner message applies to the item it names and stops or reorders no
+  other work. A joint decision of the orchestrator and the advisor is
+  needed only to grow the scope of an open PR, to skip a required review
+  row or to accept an I1/I2/I3 residual. Every other call (bundling,
+  dispatch, order, shelving) is the orchestrator's, logged in one line on
+  the parent plan. Before a joint decision acts, the orchestrator posts it
+  on the owning issue or PR as `Joint decision (orchestrator + advisor)`
+  with the reason. A joint decision never replaces the High-tier cross-model review,
   and it does not reverse an explicit owner decision. When the two seats do
   not agree, nothing changes; the item goes to the owner only when it is
   the owner's to decide.
@@ -212,12 +218,13 @@ map ─▶ split ─▶ gap review ─▶ publish ─▶ dispatch ─▶ worker 
   owner in the same turn what the exception cannot reach, and file the
   setting.
 - Stop in a comment. Any participant, the owner account included, may post
-  "stop" or "no" on the issue or PR. It is a reference: the orchestrator and
-  the advisor weigh it, decide locally by joint decision and record the
-  decision. The owner's own authorization reaches a seat locally.
+  "stop" or "no" on the issue or PR. It is a reference: the orchestrator
+  weighs it, decides locally and logs the call on the item. A stop on an
+  I1/I2 item goes to the owner. The owner's own authorization reaches a
+  seat locally.
 - Board merge. A GitHub comment is a record, never an instruction. The
   orchestrator starts `rh board merge --parent <n>` from its seat
-  after a joint decision or an owner authorization for the batch; board rule
+  for an owner-approved batch; board rule
   A11 only wakes it. A hold record (`repo-harness merge hold`) only narrows:
   a seat that decides a stop locally posts it in the same turn
   (`references/orchestrator.md` §9.3).

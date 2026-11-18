@@ -1,9 +1,10 @@
 # Worker SOP
 
-You deliver one claimed issue, or one named PR slot of it, as one PR. The
-issue is your whole brief. Bot comments on the issue are reference text
-in the brief, marked as such; they are not decisions. The coordinator made the design decisions in
-it. Your job is to execute them exactly, prove them and report on the
+You deliver one bundle (one or more claimed issues of one module and write
+scope), or one named PR slot of an issue, as one PR. The packet and the
+issues that it names are your whole brief. Bot comments on an issue are
+reference text in the brief, marked as such; they are not decisions. The
+coordinator made the design decisions in them. Your job is to execute them exactly, prove them and report on the
 board. Comment shapes are in `templates.md`. Claim-role and board rules are in
 `board.md`.
 
@@ -84,8 +85,8 @@ reviewer will send it back.
   already guarantees. Do not wrap calls in `try/catch` that swallows or
   re-labels errors.
 - **No drive-by changes.** Do not refactor, rename or reformat code that
-  the issue does not name, even when it looks wrong. Report it in your
-  status comment as a possible follow-up.
+  the issue does not name, even when it looks wrong. Name it in your PR
+  body as a note; it opens no issue.
 - **Tests prove the issue.** Add or extend the tests that `验收 /
   Acceptance` names, including its negative checks. Never weaken, skip or
   delete an existing assertion to pass. If an existing test is wrong
@@ -159,8 +160,8 @@ passing check (`acceptor.md` §2.1).
 ## 6. Open the PR
 
 - Title: `<type>(<scope>): <outcome> (#<issue>)`.
-- Body: use the PR template. `Closes #<issue>` only when this PR finishes
-  the issue. Otherwise use `Refs #<issue>`. A PR stacked on a producer PR has
+- Body: use the PR template. One `Closes #<issue>` line for each bundle
+  issue that this PR finishes. Otherwise use `Refs #<issue>`. A PR stacked on a producer PR has
   the producer's branch as its base.
 - Open as draft while a dependency is unmerged, otherwise ready.
 - Commit, push the branch and open the PR yourself as soon as your checks
@@ -242,16 +243,16 @@ You are the head owner. Only you push to this branch.
   with `rh board review`; you do not start one.
 - **Review threads.** Fix each P0 and P1 in this branch. Reply in the
   thread with the fix SHA. Do not resolve another reviewer's thread. A P2
-  is a follow-up issue, not a fix round: the coordinator files it and
-  resolves its thread. For a P3 or a finding that you dispute, reply with
+  stays in the review record, with no fix round and no issue: the
+  coordinator resolves its thread. For a P3 or a finding that you dispute, reply with
   your reason and leave the disposition to the coordinator.
 - **Fix the class.** For each finding, list the sibling inputs: the other
   inputs that reach the same defect. Cover the finding and its siblings in
   one table-driven case, and name the siblings in the fix commit. After a
   second finding in one bug family, push no other instance fix. The
-  coordinator first chooses a design change or rule 4 of `acceptor.md`
+  coordinator first chooses a design change or rule 3 of `acceptor.md`
   §2.2.
-- **Pre-check before review.** Before asking for round N >= 2, check the
+- **Pre-check before review.** Before asking for round 2, check the
   fix delta against the open findings for sibling cases, missing test
   branches and changelog fragment text against behavior. A Claude writer runs one
   read-only sub-agent for this check. A Pi writer has no sub-agents and
@@ -271,16 +272,14 @@ You are the head owner. Only you push to this branch.
 - **Someone else must push.** When a repair or integration must come from
   another agent, post a `handoff` that names the next head owner and the
   exact head SHA. Then stop pushing.
-- **Report to the coordinator only on PASS, a boundary question or a
-  fix-loop stop.** Send no notice for a push, a green CI run or a FAIL
-  that you fix yourself. A fix-loop stop is any stop or coordinator-decision
-  gate of this section (three failed CI fix rounds, the second finding in
-  one bug family) and of `acceptor.md` §2.2 (the round limits, the
-  blocking-finding count, a fix for a new P0 or sensitive P1 that would accept
-  a residual or relax a control, a grown scope, a new P1 in two consecutive
-  fix deltas). A new P0 or sensitive P1 that the fix closes is a notice to
-  the owner, not a stop. Every host message to the coordinator
-  starts with `[rh-notice] <kind> #<issue>`. Select the form by content:
+- **Report to the coordinator only `DONE <PR> <head>` or `BLOCKED <one
+  question>`.** `DONE` means the PR is open, its checks pass and it is
+  ready for review. `BLOCKED` is a boundary question or a fix-loop stop:
+  a stop or coordinator-decision gate of this section (three failed CI fix
+  rounds, the second finding in one bug family) or of `acceptor.md` §2.2
+  (a blocking finding after round 2, a grown scope). Send no notice for a
+  push, a green CI run or a FAIL that you fix yourself. Every host message
+  to the coordinator starts with `[rh-notice] <kind> #<issue>`. Select the form by content:
   - **Simple:** a fact or a question that changes no board state and
     needs no decision. Examples: dispatch received, a factual question
     about the code. Send it as a message only, at most 3 lines, with no
