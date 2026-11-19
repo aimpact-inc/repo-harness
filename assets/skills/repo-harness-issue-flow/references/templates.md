@@ -27,6 +27,8 @@ a comment.
 | Child of a parent | Sub-issue of the parent | `gh api graphql` mutation `addSubIssue(input: {issueId: <parent node id>, subIssueId: <child node id>})` |
 | Issue dependency | Blocked-by link on the blocked issue | `gh api graphql` mutation `addBlockedBy(input: {issueId: <blocked node id>, blockingIssueId: <blocker node id>})` |
 | Release window | Milestone | `gh issue edit <n> --milestone <title>` |
+| Issue module | One `module:<id>` label with the architecture module ID | `gh issue edit <n> --add-label module:<id>` |
+| Defect pattern | At most one `pattern:<key>` label with the theme key from `tasks/lessons.md` | `gh issue edit <n> --add-label pattern:<key>` |
 | Plan tier | One label `tier:low`, `tier:medium` or `tier:high` | `gh issue edit <n> --add-label tier:<tier>` |
 | PR stack | The PR base branch | `gh pr create --base <producer branch>`, later `gh pr edit <p> --base main` |
 | PR to issue | `Closes #<issue>` or `Refs #<issue>` in the PR body | the PR body template |
@@ -89,7 +91,6 @@ Source: <PRD or design link at pinned SHA>, requirement and scenario IDs <IDs>.
 - <each failure case with its exact error code or message>
 
 ## Module and files
-- Module: <module id from the architecture map>
 - Change: <main files>
 - Tests to extend: <test files>
 

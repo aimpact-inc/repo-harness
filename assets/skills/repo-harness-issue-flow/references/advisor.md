@@ -45,7 +45,9 @@ the change, so the check must come from outside its session.
    3. A finished seat with a commit that is not pushed.
    4. The first failing assertion of a red required check; the same class
       of finding in both rounds of one PR.
-   5. Two issues with one design or one write scope: propose the bundle.
+   5. Run `rh board cluster --parent <n> --json` for each open batch
+      parent. Check the module bundles against the write scope. Propose
+      a bundle when at least two issues share one design or write scope.
    6. A quota change that changes a route line; a dead watcher
       (`rh doctor`, check `board-attention-watcher`).
    7. A replan trigger of `replan.md` §1. When one holds, send
@@ -115,7 +117,8 @@ shipped, when a batch parent closes, and when the owner asks.
    parent, then the open issues that no parent holds.
 2. Group them into trains by the blocked-by chains. Add an edge where two
    issues write one file. Two issues with one design are one issue: propose
-   the fold.
+   the fold. Run `rh board cluster --open --json` and check its module
+   bundles and pattern groups against the shape table below.
 3. Put a train in the set when nothing outside the repository and no owner
    hold blocks it. List the other trains with their blocker. Do not propose
    a release while a train that changes a migration or a ledger path has an
@@ -126,6 +129,12 @@ shipped, when a batch parent closes, and when the owner asks.
    scarce account must serve first.
 5. Give the table: train, result, order, tier and route, state. Give an
    estimate only with its basis, and mark it as an estimate.
+
+| Shape | Use when | Plan |
+|---|---|---|
+| Same-module bundle | The issues share a design or write scope in one module, and the tier and route permit a bundle | Give one plan unit to one worker with one PR |
+| Mechanical batch or rule train | One established rule needs the same fix in several modules | Use a mechanical batch for independent fixes. Use a train when blocked-by links set the order |
+| Rule-first train | The issues share a pattern and need a new or changed rule | Put the rule issue first. Use blocked-by links to order the applications after it |
 
 ## 5. Retro
 
