@@ -15,6 +15,7 @@ import { globalRuntimeScope, withRuntimeTransactionLock } from '../../src/effect
 import { readInstallState, withHostConfigTransaction } from '../../src/cli/installer/install-profile';
 import { stageInstalledSkillCopy } from '../../src/cli/installer/skill-sync';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
+import { observeEntryIdentity } from '../../src/effects/host-config/whole-path';
 import { PLUGIN_IDS } from '../../src/core/skill-surface/plugin-manifest';
 import { hashManagedTree } from '../../src/effects/managed-tree';
 import { applyGlobalContextRefresh, preflightGlobalContextRefresh } from '../../src/cli/installer/global-context';
@@ -943,7 +944,7 @@ describe('upgrade with real release bytes', () => {
     const result = runUpgrade({ ...opts, scope: 'global', apply: true });
     expect(result.exitCode, result.error).toBe(0); expect(result.refreshedPaths).toContain(path);
     expect(readlinkSync(path)).toBe(currentSource);
-    expect(ownedPath({ HOME: opts.home }, path)).toEqual({ ...receipt, committed: { type: 'symlink', target: currentSource } });
+    expect(ownedPath({ HOME: opts.home }, path)).toEqual({ ...receipt, committed: { type: 'symlink', target: currentSource }, identity: observeEntryIdentity(path)! });
     const before = tree(opts.home);
     expect(runUpgrade({ ...opts, scope: 'global', apply: true }).refreshedPaths).toEqual([]);
     expect(tree(opts.home)).toEqual(before);

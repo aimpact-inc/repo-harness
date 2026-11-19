@@ -8,7 +8,7 @@ import { sha256Prefixed } from '../../src/core/evidence/sha256';
 import type { PathRecord } from '../../src/core/host-config/types';
 import type { PluginId, PluginSelection } from '../../src/core/skill-surface/plugin-manifest';
 import { pathRecordHost, pathRecordKey, writePathRecords } from '../../src/effects/host-config/path-records';
-import { observeEntryIdentity } from '../../src/effects/host-config/whole-path';
+import { observeEntryIdentity, pathRecordEntry } from '../../src/effects/host-config/whole-path';
 import { hashManagedTree } from '../../src/effects/managed-tree';
 
 /**
@@ -78,17 +78,23 @@ export function recordInstallOwnership(paths: string[], env: NodeJS.ProcessEnv):
     return [pathRecordKey(env, path), {
       owner: directory ? 'cross-review' : 'core', host, kind: 'created', baseline: { state: 'unknown' },
       committed: directory ? { type: 'directory', sha256: hashManagedTree(path) } : { type: 'file', sha256: sha256Prefixed(readFileSync(path)) },
-      identity: observeEntryIdentity(path)!,
     }];
   }));
   writeInstallState(env, ['architecture', 'cross-review', 'mcp', 'operator', 'peer-runtime', 'platform', 'product', 'strategy-memory'], 'all', 'owned-upgrade-fixture');
   seedPathRecords(env, records);
 }
 
-/** Replace the ledger's path records; the ledger write creates the ledger when it is absent. */
+/**
+ * Replace the ledger's path records as a gate write leaves them: a `created` or `replaced` record with no identity gets the
+ * identity of its entry (#3266). The ledger write creates the ledger when it is absent.
+ */
 export function seedPathRecords(env: NodeJS.ProcessEnv, records: Readonly<Record<string, PathRecord>>): void {
   installStateFixturePath(env);
-  writePathRecords(env, records);
+  writePathRecords(env, Object.fromEntries(Object.entries(records).map(([key, record]) => {
+    const identity = record.identity === undefined && record.kind !== 'user_managed' && !('proof' in record.committed)
+      ? observeEntryIdentity(pathRecordEntry(key, record)) : null;
+    return [key, identity === null ? record : { ...record, identity }];
+  })));
 }
 
 /**

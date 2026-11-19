@@ -7,7 +7,7 @@ import { planSkillSync } from "../src/cli/installer/install-profile";
 import { stageInstalledSkillCopy } from "../src/cli/installer/skill-sync";
 import { pathRecordHost, pathRecordKey, writePathRecords } from "../src/effects/host-config/path-records";
 import { hostConfigPaths, readLedger } from "../src/effects/host-config/store";
-import { observePathEntry } from "../src/effects/host-config/whole-path";
+import { observeEntryIdentity, observePathEntry } from "../src/effects/host-config/whole-path";
 import { PLUGIN_IDS } from "../src/core/skill-surface/plugin-manifest";
 import { writeBunWrapper } from "./helpers/repo-fixture";
 
@@ -50,7 +50,7 @@ function seedSkillSurfaceRuntime(source: string): void {
 function seedSyncOwnership(paths: readonly string[], env: NodeJS.ProcessEnv, owner = 'core'): void {
   const records = { ...readLedger(hostConfigPaths(env)).paths };
   for (const path of paths) records[pathRecordKey(env, path)] = { owner, host: pathRecordHost(env, path)!, kind: 'created',
-    baseline: { state: 'known', existed: false }, committed: observePathEntry(path)! };
+    baseline: { state: 'known', existed: false }, committed: observePathEntry(path)!, identity: observeEntryIdentity(path)! };
   writePathRecords(env, records);
 }
 
@@ -283,12 +283,16 @@ describe("Codex installed copy sync", () => {
         const first = sync();
         expect(first.status, first.stderr).toBe(0);
         const ledger = readFileSync(hostConfigPaths(env).ledger, "utf-8");
-        expect(readLedger(hostConfigPaths(env)).paths[claudeKey]).toEqual(claudeRecord);
+        // The writer removes and re-creates each link, so the record follows the new link's identity and keeps every other field.
+        expect(readLedger(hostConfigPaths(env)).paths[claudeKey]).toEqual({ ...claudeRecord, identity: observeEntryIdentity(join(roots[1], "repo-harness-check"))! });
         const codexRecord = readLedger(hostConfigPaths(env)).paths[pathRecordKey(env, join(roots[0], "repo-harness-check"))];
         expect(codexRecord?.committed).toEqual({ type: "symlink", target: facade });
         const second = sync();
         expect(second.status, second.stderr).toBe(0);
-        expect(readFileSync(hostConfigPaths(env).ledger, "utf-8")).toBe(ledger);
+        // A second run changes no record apart from the identities of the links that the writer re-created.
+        const withoutIdentity = (text: string) => Object.fromEntries(Object.entries(JSON.parse(text).paths as Record<string, Record<string, unknown>>)
+          .map(([key, { identity: _identity, ...record }]) => [key, record]));
+        expect(withoutIdentity(readFileSync(hostConfigPaths(env).ledger, "utf-8"))).toEqual(withoutIdentity(ledger));
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }
