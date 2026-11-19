@@ -3,12 +3,12 @@ import { Banner, Button, Empty, Loader, Switch, cn } from '@cloudflare/kumo';
 import { effectiveSeatConfig, seatAccountQuotas, seatOnCredits } from '../core/board/seat-routing';
 import { EXHAUSTED_AT_OR_ABOVE_USED_RANGE } from '../core/board/quota';
 import { buildSeatLaunch, type SeatLimitLevel } from '../core/board/seat-launch';
-import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, decodeSeatsSettingsRequest, isReviewSeat, isSeatScaffoldSubAgent, piSubAgentModel, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
+import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, decodeSeatsSettingsRequest, isOptionalSeat, isPlannerSeat, isReviewSeat, isSeatScaffoldSubAgent, piSubAgentModel, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
 import type { SetupSnapshotV2 } from '../core/setup/types';
 import type { OperatorTranslate } from './i18n';
 import type { QuotaSection } from './quota';
 import {
-  GATEKEEPER_FALLBACK_STARTER, seatChanges, setExplorer, setOptionalSeat, setPiSubAgentModel, setRoute, setSeatAdvisorModel, setSeatEffort, setSeatModel, setSeatRole, setSeatRuntime, setRoutingValue, setSeatTool, type SeatsSettingsForm,
+  GATEKEEPER_FALLBACK_STARTER, plannerStarter, seatChanges, setExplorer, setOptionalSeat, setPiSubAgentModel, setRoute, setSeatAdvisorModel, setSeatEffort, setSeatModel, setSeatRole, setSeatRuntime, setRoutingValue, setSeatTool, type SeatsSettingsForm,
 } from './seats';
 import { EnableSwitch, formLocked, runtimeRowOf, SaveResult } from './SettingsPage';
 import type { AgentsSettingsForm } from './settings';
@@ -32,6 +32,7 @@ export const ARGV: Readonly<Record<FormSeatId, string>> = {
 function launchOf(seat: SeatId): string {
   if (seat === 'orchestrator') return `herdr-app do tab.new --name "$(${ARGV.orchestrator} --json | jq -r .tab)" --space <id> --folder <repo> --argv "$(${ARGV.orchestrator})"`;
   if (seat === 'advisor') return `herdr-app do pane.split --direction right --pane <orchestrator-pane> --argv "$(${ARGV.advisor})"`;
+  if (isPlannerSeat(seat)) return 'rh seats argv planner --repository-id <repository-id> --issue <n>';
   // The fallback launches as the effective gatekeeper, so its card shows the gatekeeper command.
   const argv = isReviewSeat(seat)
     ? `rh seats argv ${seat === 'gatekeeper-fallback' ? 'gatekeeper' : seat} --repository-id <repository-id> --pr <n>`
@@ -172,14 +173,14 @@ function SeatHeader({ seat, runtime, t }: { readonly seat: SeatId; readonly runt
 
 /** The Claude families: the closed range of `advisor_model`, and the Claude choices of the low-quota explorer. */
 const CLAUDE_FAMILIES = Object.keys(MODEL_FAMILY_LABELS);
-const isOptionalSeat = (seat: SeatId): seat is OptionalSeatId => seat === 'worker-light' || seat === 'gatekeeper-fallback';
 
-/** The switch of a seat that may be null: on restores the recommended worker-light, or the gatekeeper-fallback starter. */
+/** The switch of a seat that may be null. Turning it on uses the starter configuration. */
 function OptionalSeatSwitch({ seat, form, settings, locked, t }: {
   readonly seat: OptionalSeatId; readonly form: SeatsSettingsForm; readonly settings: SeatsSettingsV1; readonly locked: boolean; readonly t: OperatorTranslate;
 }) {
   const on = form.draft![seat] !== null;
-  const recommended = seat === 'worker-light' ? settings.defaults['worker-light'] : GATEKEEPER_FALLBACK_STARTER;
+  const recommended = seat === 'worker-light' ? settings.defaults['worker-light']
+    : seat === 'planner' ? plannerStarter(settings.ranges) : GATEKEEPER_FALLBACK_STARTER;
   return (
     <Field label={t('seats.field.configured')}>
       <Switch checked={on} disabled={locked || (!on && recommended === null)} aria-label={t('seats.field.configured')}
@@ -211,6 +212,7 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
   const range = ranges.seats[seat];
   const recommended = seat !== 'worker' && defaults[seat]?.runtime === draft.runtime ? defaults[seat] : null;
   const review = isReviewSeat(seat);
+  const planner = isPlannerSeat(seat);
   const check = (on: boolean) => (on ? ' ✓' : '');
   const suggested = range.models.filter(entry => entry.runtime === draft.runtime).map(entry => entry.model);
   const models = [
@@ -252,7 +254,8 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
           onPick={value => form.edit(current => setSeatModel(current, seat, value))} />
         <ModelInput label={t('seats.model.custom')} disabled={locked} commit={value => form.edit(current => setSeatModel(current, seat, value))} />
         <span className="text-xs text-kumo-brand">
-          {seat === 'worker' ? t('seats.rec.worker') : recommended?.model ? t('seats.rec.model', { model: recommended.model }) + check(draft.model === recommended.model) : ''}
+          {planner ? t('seats.rec.planner') : seat === 'worker' ? t('seats.rec.worker')
+            : recommended?.model ? t('seats.rec.model', { model: recommended.model }) + check(draft.model === recommended.model) : ''}
         </span>
       </Field>
 
@@ -282,8 +285,8 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
         <li className="flex flex-wrap items-center gap-3 bg-kumo-recessed px-4 py-2.5 sm:px-5">
           <span className="flex-1 text-sm font-medium text-kumo-strong">{t('seats.tools.title')}</span>
         </li>
-        {/* A review seat shows only its range: the section refuses any other group there. */}
-        {SEAT_TOOLS.filter(tool => !review || range.tools.includes(tool)).map((tool) => {
+        {/* The section limits the tool range for review seats and the planner. */}
+        {SEAT_TOOLS.filter(tool => !(review || planner) || range.tools.includes(tool)).map((tool) => {
           const on = draft.tools.includes(tool);
           const ruled = !range.tools.includes(tool);
           // Codex always runs commands, so its Shell can be turned on but not off.

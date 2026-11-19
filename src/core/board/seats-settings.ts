@@ -11,14 +11,15 @@ export type WorkerSeatId = typeof WORKER_SEAT_IDS[number];
 export const FRONTEND_SEAT_IDS = ['worker-important', 'worker-important-fast'] as const;
 export const ROUTING_CLASSES = ['important_deep', 'important_fast', 'simple_deep', 'simple_fast', 'frontend'] as const;
 export type RoutingClass = typeof ROUTING_CLASSES[number];
-export const SEAT_IDS = ['orchestrator', 'advisor', ...WORKER_SEAT_IDS, 'gatekeeper', 'gatekeeper-deep', 'gatekeeper-fallback', 'reviewer'] as const;
+export const SEAT_IDS = ['orchestrator', 'advisor', 'planner', ...WORKER_SEAT_IDS, 'gatekeeper', 'gatekeeper-deep', 'gatekeeper-fallback', 'reviewer'] as const;
 export type SeatId = typeof SEAT_IDS[number];
 /** The gatekeeper-fallback seat launches only as the effective gatekeeper (#2253), under the gatekeeper label and brief. */
 export type LaunchSeatId = Exclude<SeatId, 'gatekeeper-fallback'>;
 export const LAUNCH_SEAT_IDS = SEAT_IDS.filter((id): id is LaunchSeatId => id !== 'gatekeeper-fallback');
 /** The seats that may be null in the section. */
-export type OptionalSeatId = 'worker-light' | 'gatekeeper-fallback';
-const isOptionalSeat = (id: SeatId): id is OptionalSeatId => id === 'worker-light' || id === 'gatekeeper-fallback';
+export type OptionalSeatId = 'worker-light' | 'gatekeeper-fallback' | 'planner';
+export const isPlannerSeat = (id: SeatId): boolean => id === 'planner';
+export const isOptionalSeat = (id: SeatId): id is OptionalSeatId => id === 'worker-light' || id === 'gatekeeper-fallback' || isPlannerSeat(id);
 export const isReviewSeat = (id: SeatId): boolean => id === 'gatekeeper' || id === 'gatekeeper-deep' || id === 'gatekeeper-fallback' || id === 'reviewer';
 export const isWorkerSeat = (seat: SeatId): seat is WorkerSeatId => WORKER_SEAT_IDS.includes(seat as WorkerSeatId);
 
@@ -122,6 +123,7 @@ export const RETIRED_SEAT_FLEET_ROLES = Object.freeze(['deep-worker', 'fast-work
 const isRetiredFleetRole = (id: SeatId, role: unknown): boolean =>
   RETIRED_SEAT_FLEET_ROLES.some(retired => retired === role) || (role === 'harness-evaluator' && isWorkerSeat(id));
 const REVIEW_TOOLS: readonly SeatTool[] = Object.freeze(['net', 'read', 'shell'] as const);
+export const PLANNER_TOOLS: readonly SeatTool[] = Object.freeze(['net', 'read', 'shell'] as const);
 
 /**
  * The section an absent `seats` key reads as: the canvas defaults, with the
@@ -131,6 +133,7 @@ const REVIEW_TOOLS: readonly SeatTool[] = Object.freeze(['net', 'read', 'shell']
 export const DEFAULT_SEATS_CONFIG: SeatsConfigV1 = Object.freeze({
   orchestrator: Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: Object.freeze(['gh', 'mcp', 'net', 'read', 'shell', 'tasks'] as const), fleet: Object.freeze([]) }),
   advisor: Object.freeze({ runtime: 'claude', model: 'fable', advisor_model: null, effort: 'high', tools: Object.freeze(['mcp', 'net', 'read', 'shell'] as const), fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
+  planner: null,
   worker: Object.freeze({ runtime: 'codex', model: 'gpt-6.1-terra', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
   'worker-deep': Object.freeze({ runtime: 'codex', model: 'gpt-6.2-sol', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
   'worker-important': Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'medium', tools: WORKER_TOOLS, fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
@@ -316,6 +319,7 @@ function decodeSeat(id: SeatId, value: unknown, code: string, fromSettingsReques
   if (!tools.includes('read')) at('tools');
   const fleet = field('fleet', () => ascending(record.fleet, isRole, code));
   if (isReviewSeat(id) && tools.some(tool => !REVIEW_TOOLS.includes(tool))) at('tools');
+  if (isPlannerSeat(id) && tools.some(tool => !PLANNER_TOOLS.includes(tool))) at('tools');
   const model = record.model === null ? null
     : seatModelShapeValid(record.runtime as SeatRuntime, record.model) ? record.model : at('model');
   // Let the Settings save return its typed fleet refusal when the request contains a retired role.

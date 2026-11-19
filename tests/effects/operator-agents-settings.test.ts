@@ -710,7 +710,14 @@ describe('seat settings contract without transport', () => {
     for (const id of ['gatekeeper', 'gatekeeper-deep', 'gatekeeper-fallback', 'reviewer'] as const) expect(settings.ranges.seats[id]).toEqual({ tools: ['net', 'read', 'shell'], fleet: [],
       models: [{ runtime: 'codex', model: 'gpt-6.2-sol' }, { runtime: 'codex', model: 'gpt-6.2-astra' }, { runtime: 'pi', model: 'zai/glm-5.3-flash' }] });
     expect(settings.defaults['gatekeeper-fallback']).toBeNull();
-    for (const id of SEAT_IDS.filter(id => id !== 'gatekeeper-fallback')) expect(settings.defaults[id]?.tools).toEqual(expect.arrayContaining(['net']));
+    expect(settings.defaults.planner).toBeNull();
+    expect(settings.ranges.seats.planner).toEqual({ tools: ['net', 'read', 'shell'], fleet: ['deep-reasoner', 'explorer'], models: [
+      { runtime: 'pi', model: 'magpie/agy-cli/gemini-4-carbon' }, { runtime: 'pi', model: 'magpie/agy-cli/gemini-4-neon' },
+      { runtime: 'codex', model: 'gpt-6.2-astra' }, { runtime: 'claude', model: 'opus' },
+    ] });
+    for (const id of SEAT_IDS.filter(id => id !== 'gatekeeper-fallback' && id !== 'planner')) {
+      expect(settings.defaults[id]?.tools).toEqual(expect.arrayContaining(['net']));
+    }
   });
 
   test('the write route stores the full section and round-trips routing with Pi disabled', async () => {
@@ -990,6 +997,20 @@ describe('seat settings routes', () => {
     const saved = await post(harness, { expected_revision: revision, seats: { ...section, advisor: { ...section.advisor, effort: 'high' } } }, 'seats');
     expect(saved.status).toBe(200);
     expect((await seats(harness)).config.worker.tools).toEqual(editNet as typeof section.worker.tools);
+  });
+
+  test('the planner settings save accepts a read-only fleet and the decoder rejects other tool groups', async () => {
+    const harness = await startHarness({ agents: PANE_AGENTS });
+    const { revision, ...section } = (await seats(harness)).config;
+    const planner = { ...section.reviewer, runtime: 'pi' as const, model: 'magpie/agy-cli/gemini-4-carbon', fleet: ['explorer'] };
+    for (const tool of ['edit', 'gh', 'mcp', 'schedule', 'tasks']) {
+      expect(() => decodeSeatsConfig({ ...section, planner: { ...planner, tools: [tool, 'read'].sort() } }))
+        .toThrow('seats_config_invalid: seats.planner.tools');
+    }
+    const saved = await post(harness, { expected_revision: revision, seats: { ...section, planner } }, 'seats');
+    expect(saved.status).toBe(200);
+    expect((await saved.json()).changed_keys).toEqual(['seats.planner']);
+    expect((await seats(harness)).config.planner).toEqual(planner);
   });
 
   test('every seat refuses retired roles with 422 and the orchestrator can save the two scaffold roles', async () => {

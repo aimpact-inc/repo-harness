@@ -153,6 +153,27 @@ test('update removes stored routing mode and hyper values once, keeps a null wor
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
+test('update adds the disabled planner and preserves the stored seats and runtimes', () => {
+  const home = mkdtempSync(join(tmpdir(), 'planner-migration-'));
+  try {
+    const directory = join(home, '.repo-harness');
+    mkdirSync(directory);
+    const path = join(directory, 'config.json');
+    const env = { HOME: home };
+    const { planner: _planner, ...stored } = DEFAULT_SEATS_CONFIG;
+    const seats = { ...stored, advisor: { ...stored.advisor, model: 'sonnet' }, pi_sub_agent_models: { explorer: 'custom/model' } };
+    const agents = { enabled: ['claude'], uses: { docs: [], review: [] }, default_docs: null };
+    expect(decodeSeatsConfig(undefined).planner).toBeNull();
+    expect(() => decodeSeatsConfig(seats)).toThrow(SeatsConfigMigrationRequiredError);
+    writeFileSync(path, JSON.stringify({ seats, agents }));
+    expect(migrateSeatsConfiguration(env)).toBe(true);
+    const migrated = readFileSync(path, 'utf8');
+    expect(JSON.parse(migrated)).toEqual({ seats: { ...seats, planner: null }, agents });
+    expect(migrateSeatsConfiguration(env)).toBe(false);
+    expect(readFileSync(path, 'utf8')).toBe(migrated);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
 test('update removes the Codex hyper threshold once, preserves other settings, and refuses malformed sections without writing', () => {
   const home = mkdtempSync(join(tmpdir(), 'codex-hyper-migration-'));
   try {

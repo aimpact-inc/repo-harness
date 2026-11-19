@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { decodeAgentsConfig } from '../../core/board/agents-settings';
 import { isRecord } from '../../core/evidence/is-record';
 import {
+  PLANNER_TOOLS,
   SEAT_IDS,
   SEAT_RUNTIMES,
   SEAT_SCAFFOLD_SUB_AGENTS,
@@ -66,6 +67,7 @@ const without = (...excluded: SeatTool[]): readonly SeatTool[] => SEAT_TOOLS.fil
 const SEAT_ACCESS: { readonly [seat in SeatId]: Omit<SeatRangeV1, 'models'> } = {
   orchestrator: { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: without('edit') },
   advisor: { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: without('gh') },
+  planner: { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: PLANNER_TOOLS },
   worker: { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: SEAT_TOOLS },
   'worker-deep': { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: SEAT_TOOLS },
   'worker-important': { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: SEAT_TOOLS },
