@@ -55,7 +55,7 @@ const CONTROL_MODELS = {
   agy: { model: `${AGY_MODEL_PREFIX}gemini-4-neon` },
 } as const;
 
-export function seatAccount(seat: SeatConfigV1): QuotaAccount | null {
+export function seatAccount(seat: Pick<SeatConfigV1, 'runtime' | 'model'>): QuotaAccount | null {
   if (seat.runtime === 'claude') return 'claude';
   if (seat.runtime === 'codex' || isPiCodexSeat(seat)) return 'chatgpt';
   if (seat.runtime === 'pi' && seat.model?.startsWith(AGY_MODEL_PREFIX)) {

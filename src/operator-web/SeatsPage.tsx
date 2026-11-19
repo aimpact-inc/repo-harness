@@ -456,6 +456,38 @@ export function SeatsSection({ form, agents, setup, quota, t }: {
   );
 }
 
+function SeatModelPool({ cache, seat, t }: {
+  readonly cache: SeatsSettingsV1['model_pool']; readonly seat: SeatId; readonly t: OperatorTranslate;
+}) {
+  const row = cache?.report.seats.find(entry => entry.seat === seat);
+  return (
+    <section aria-labelledby="seats-pool-heading" className="rounded-xl border border-kumo-line bg-kumo-base px-4 py-3 sm:px-5" data-seat-pool={cache?.status ?? 'unavailable'}>
+      <h2 id="seats-pool-heading" className="text-base font-semibold text-kumo-strong">{t('seats.pool.title')}</h2>
+      <p className="mt-1 text-xs text-kumo-subtle">{t('seats.pool.refresh', { command: 'rh seats pool' })}</p>
+      {cache !== undefined && row !== undefined && <>
+        <p className={cn('mt-2 text-xs', cache.status === 'stale' ? 'text-kumo-warning' : 'text-kumo-subtle')}>
+          {t(`seats.pool.${cache.status}`, { time: cache.report.collected_at })}
+        </p>
+        <p className="mt-2 text-sm text-kumo-subtle"><code className="break-all">{row.configured.field}</code> · {t(`seats.pool.reason.${row.configured.reason}`)}</p>
+        {row.pool.length === 0 && <p className="mt-2 text-sm text-kumo-strong">{t('seats.pool.empty')}</p>}
+        <ul className="mt-2 divide-y divide-kumo-hairline">
+          {[...row.pool, ...row.excluded].map(entry => (
+            <li key={entry.runtime + '/' + entry.model} className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 py-2 text-sm">
+              <span className="min-w-0 break-all font-mono text-kumo-strong">{entry.runtime} {entry.model}</span>
+              <span className="text-xs text-kumo-subtle">
+                {t(`seats.pool.reason.${entry.status}`)}{entry.account === null ? '' : ` · ${entry.account}`}
+                {entry.status === 'not_installed' && <> · {t('seats.pool.install', { runtime: t(`seats.runtime.${entry.runtime}`) })}</>}
+                {entry.status === 'signed_out' && <> · {t('seats.pool.login', { command: entry.runtime === 'claude' ? 'claude auth login' : 'codex login' })}</>}
+              </span>
+            </li>
+          ))}
+        </ul>
+        <p className="mt-1 text-xs text-kumo-subtle">{t('seats.pool.quota', { command: 'rh quota' })}</p>
+      </>}
+    </section>
+  );
+}
+
 function SeatsBody({ form, agents, setup, quota, t }: {
   readonly form: SeatsSettingsForm; readonly agents: AgentsSettingsForm; readonly setup: SetupSnapshotV2 | null; readonly quota: QuotaSection; readonly t: OperatorTranslate;
 }) {
@@ -505,6 +537,7 @@ function SeatsBody({ form, agents, setup, quota, t }: {
       {draft !== null && <>
         <Segmented label={t('seats.pick')} disabled={false} value={seat} options={SEAT_IDS.map(id => ({ value: id, label: t(`seats.${id}.short`) }))} onPick={setSeat} />
         <SeatCard seat={seat} form={form} agents={agents} settings={settings} setup={setup} quota={quota} locked={locked} t={t} />
+        <SeatModelPool seat={seat} cache={settings.model_pool} t={t} />
         <section aria-labelledby="seats-pi-models-heading" className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
           <h2 id="seats-pi-models-heading" className="border-b border-kumo-hairline px-4 py-3 text-base font-semibold text-kumo-strong sm:px-5">{t('seats.piModels.title')}</h2>
           {SEAT_SCAFFOLD_SUB_AGENTS.map(role => (
