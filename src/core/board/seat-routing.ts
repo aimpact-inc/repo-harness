@@ -1,6 +1,6 @@
-import { weeklyRemainingPercent, type QuotaAccount, type QuotaAccountReport, type QuotaState } from './quota';
+import { AGY_QUOTA_ACCOUNTS, weeklyRemainingPercent, type QuotaAccount, type QuotaAccountReport, type QuotaState } from './quota';
 import { SHIPPED_MODEL_IDS } from './recommended-models';
-import { PI_CODEX_MODEL_PREFIX, ROUTING_CLASSES, isPiCodexSeat, isReviewSeat, unavailablePiSeat, type CodexCreditMode, type RoutingClass, type SeatConfigV1, type SeatId, type SeatRoutingV1, type SeatsConfigV1 } from './seats-settings';
+import { PI_CODEX_MODEL_PREFIX, ROUTING_CLASSES, SEAT_IDS, isPiCodexSeat, isReviewSeat, unavailablePiSeat, type CodexCreditMode, type RoutingClass, type SeatConfigV1, type SeatId, type SeatRoutingV1, type SeatsConfigV1 } from './seats-settings';
 
 /** The Claude control-seat model outside its config entry: the orchestrator while Claude is reserved, the advisor outside Claude hyper. */
 export const CLAUDE_CONTROL_MODEL = Object.freeze({ model: 'opus', effort: 'high' });
@@ -9,6 +9,8 @@ export interface SeatAccountQuotas {
   readonly claude: AccountQuota & { readonly mode: 'hyper' | 'normal' | 'saving' | 'unknown' };
   /** `credits`: the owner's credit mode where it acts now (#2630); `off` unless the account is exhausted and has credits at or above the floor. */
   readonly chatgpt: AccountQuota & { readonly mode: 'normal' | 'unknown'; readonly credits: CodexCreditMode };
+  readonly agy_gemini: AccountQuota;
+  readonly agy_other: AccountQuota;
 }
 
 /**
@@ -37,6 +39,8 @@ export function seatAccountQuotas(accounts: readonly QuotaAccountReport[], routi
       : claude.remaining >= routing.claude_hyper_at_or_above_remaining ? 'hyper' : 'normal' },
     chatgpt: { ...chatgpt, credits: codexCreditMode(accounts.find(account => account.account === 'chatgpt'), routing),
       mode: chatgpt.remaining === null ? 'unknown' : 'normal' },
+    agy_gemini: quota('agy_gemini'),
+    agy_other: quota('agy_other'),
   };
 }
 
@@ -46,8 +50,26 @@ export const creditsCover = (id: SeatId | null, quota: SeatAccountQuotas): boole
 
 export const claudeReserved = (quota: SeatAccountQuotas): boolean => quota.claude.mode === 'saving' || quota.claude.state === 'exhausted';
 
+const AGY_MODEL_PREFIX = 'magpie/agy-cli/';
+
 export function seatAccount(seat: SeatConfigV1): QuotaAccount | null {
-  return seat.runtime === 'claude' ? 'claude' : seat.runtime === 'codex' || isPiCodexSeat(seat) ? 'chatgpt' : null;
+  if (seat.runtime === 'claude') return 'claude';
+  if (seat.runtime === 'codex' || isPiCodexSeat(seat)) return 'chatgpt';
+  if (seat.runtime === 'pi' && seat.model?.startsWith(AGY_MODEL_PREFIX)) {
+    return seat.model.startsWith(`${AGY_MODEL_PREFIX}gemini-`) ? 'agy_gemini' : 'agy_other';
+  }
+  return null;
+}
+
+function isAgyAccount(account: QuotaAccount | null): boolean {
+  return account === 'agy_gemini' || account === 'agy_other';
+}
+
+export function hasAgySeat(seats: SeatsConfigV1): boolean {
+  return SEAT_IDS.some(id => {
+    const seat = seats[id];
+    return seat !== null && isAgyAccount(seatAccount(seat));
+  });
 }
 
 export const seatOnCredits = (id: SeatId, seat: SeatConfigV1, quota: SeatAccountQuotas): boolean => seatAccount(seat) === 'chatgpt' && creditsCover(id, quota);
@@ -95,12 +117,16 @@ function blockText(id: SeatId, seat: SeatConfigV1, quota: SeatAccountQuotas, rou
 
 export function formatSeatModes(seats: SeatsConfigV1, quota: SeatAccountQuotas): string {
   const { claude_saving_below_remaining: saving, claude_hyper_at_or_above_remaining: hyper } = seats.routing;
-  const line = (id: QuotaAccount, label: string, bounds = ''): string => {
-    const account = quota[id];
-    return `${label} mode: ${account.mode} (${account.remaining === null ? 'weekly quota unavailable' : `${account.remaining}% left${bounds ? ` ${bounds}` : ''}`})`;
-  };
-  const claude = { saving: `< ${saving}%`, hyper: `>= ${hyper}%`, normal: `>= ${saving}% and < ${hyper}%`, unknown: '' }[quota.claude.mode];
-  return [line('claude', 'claude', claude), line('chatgpt', 'codex')].join('\n');
+  const weekly = (account: AccountQuota): string => account.remaining === null ? 'weekly quota unavailable' : `${account.remaining}% left`;
+  const bounds = { saving: ` < ${saving}%`, hyper: ` >= ${hyper}%`, normal: ` >= ${saving}% and < ${hyper}%`, unknown: '' }[quota.claude.mode];
+  const lines = [
+    `claude mode: ${quota.claude.mode} (${weekly(quota.claude)}${bounds})`,
+    `codex mode: ${quota.chatgpt.mode} (${weekly(quota.chatgpt)})`,
+  ];
+  if (hasAgySeat(seats)) {
+    for (const account of AGY_QUOTA_ACCOUNTS) lines.push(`${account} weekly: ${weekly(quota[account])}`);
+  }
+  return lines.join('\n');
 }
 
 export type SeatRouteV1 =
@@ -133,7 +159,8 @@ export function selectSeatRoute(task: RoutingClass, seats: SeatsConfigV1, quota:
     return { id: null, line: `route ${task}: none (${reasons}${task === 'frontend' ? '; frontend waits for claude' : ''})` };
   }
   const selectedState = seatState(selected.id, selected.seat, quota);
-  const warning = selectedState === 'unknown' || selectedState === 'tight' ? `; ${accountText(selected.id, selected.seat, quota)}` : '';
+  const showAccount = isAgyAccount(seatAccount(selected.seat)) || selectedState === 'unknown' || selectedState === 'tight';
+  const warning = showAccount ? accountSuffix(selected.id, selected.seat, quota) : '';
   const skipped = candidates.slice(0, candidates.indexOf(selected)).map(({ id, seat }) => `; skipped ${id}: ${blockText(id, seat, quota, seats.routing)}`).join('');
   return { id: selected.id, seat: selected.seat, line: `route ${task}: ${selected.id} (${launchText(selected.id, selected.seat)}${warning})${skipped}` };
 }
@@ -204,7 +231,10 @@ export function formatSeatRoutes(seats: SeatsConfigV1, quota: SeatAccountQuotas)
   lines.push(effectiveGatekeeper(seats, quota).line);
   lines.push(reviewSeatLine('gatekeeper-deep', seats, quota), reviewSeatLine('reviewer', seats, quota));
   const advisor = effectiveSeatConfig('advisor', seats, quota);
-  const advisorBlock = unavailablePiSeat(advisor, seats.routing);
-  lines.push(advisorBlock === null ? `advisor: advisor (${launchText('advisor', advisor)})` : `advisor: none (${advisorBlock})`);
+  const agyAdvisor = isAgyAccount(seatAccount(advisor));
+  const advisorQuota = agyAdvisor ? accountSuffix('advisor', advisor, quota) : '';
+  const advisorBlock = unavailablePiSeat(advisor, seats.routing)
+    ?? (agyAdvisor && seatState('advisor', advisor, quota) === 'exhausted' ? accountText('advisor', advisor, quota) : null);
+  lines.push(advisorBlock === null ? `advisor: advisor (${launchText('advisor', advisor)}${advisorQuota})` : `advisor: none (${advisorBlock})`);
   return lines.join('\n');
 }

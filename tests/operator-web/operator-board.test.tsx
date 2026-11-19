@@ -343,7 +343,7 @@ describe('board page', () => {
       const chatgpt = busyRead.settings.accounts.find(account => account.account === 'chatgpt')!;
       const easy = { ...busyRead, settings: { ...busyRead.settings, accounts: [chatgpt, { ...chatgpt, account: 'claude' as const, state: 'surplus' as const }] } };
       const answers = [
-        [busyRead, [['claude', 'tight']], null],
+        [busyRead, [['claude', 'tight'], ['agy_other', 'exhausted']], null],
         [await readFixture('degraded'), [['claude', 'unknown'], ['chatgpt', 'exhausted']], null],
         [await readFixture('empty'), [], 'unreachable'],
         [easy, [], null],
@@ -388,7 +388,7 @@ describe('board page', () => {
       boardAt();
       await mount(<OperatorApp {...props(busy(), { readQuota: async () => answers[reads++]! })} />);
       await settle();
-      expect([reads, findings(), failure()]).toEqual([1, [['claude', 'tight']], null]);
+      expect([reads, findings(), failure()]).toEqual([1, [['claude', 'tight'], ['agy_other', 'exhausted']], null]);
       await act(async () => button('Refresh').click());
       await settle();
       expect([reads, findings(), failure()]).toEqual([2, [], 'unreachable']);

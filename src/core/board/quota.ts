@@ -4,6 +4,7 @@
  * its window `unknown` with a named reason. No decoder fills a default or reads
  * a second source for the same field.
  */
+import type { AccountUsageWindow } from '@botiverse/oar/browser';
 import { isRecord } from '../evidence/is-record';
 
 /**
@@ -26,8 +27,17 @@ export const QUOTA_STALE_MS = 30 * 60_000;
 const SURPLUS_RESET_MS = 24 * 3_600_000;
 /** The weekly window decides the account. Codex marks it only by this duration. */
 const WEEKLY_WINDOW_MINUTES = 10_080;
+const FIVE_HOUR_WINDOW_MINUTES = 300;
 
-export type QuotaAccount = 'claude' | 'chatgpt';
+const QUOTA_ACCOUNT_SOURCES = {
+  claude: 'claude_capture_file',
+  chatgpt: 'codex_app_server',
+  agy_gemini: 'agy_account_usage',
+  agy_other: 'agy_account_usage',
+} as const;
+
+export const AGY_QUOTA_ACCOUNTS = ['agy_gemini', 'agy_other'] as const;
+export type QuotaAccount = keyof typeof QUOTA_ACCOUNT_SOURCES;
 export type QuotaState = 'exhausted' | 'tight' | 'normal' | 'surplus' | 'unknown';
 /** An absent non-weekly window is `absent`; it does not change the account state (#1741). */
 export type QuotaWindowState = QuotaState | 'absent';
@@ -67,7 +77,7 @@ interface WindowSample {
 /** A decoded source reading. `reason` set means the whole reading is unknown. */
 export interface QuotaReading {
   account: QuotaAccount;
-  source: 'claude_capture_file' | 'codex_app_server';
+  source: typeof QUOTA_ACCOUNT_SOURCES[QuotaAccount];
   observed_at: string | null;
   reason: string | null;
   windows: WindowSample[];
@@ -125,8 +135,8 @@ export function decodeQuotaReport(value: unknown): QuotaReport {
   expectValid(report.protocol === QUOTA_PROTOCOL && string(report.read_at) && Array.isArray(report.accounts));
   for (const value of report.accounts as unknown[]) {
     const account = object(value, ['account', 'source', 'observed_at', 'state', 'reason', 'windows'], ['codex']);
-    expectValid((account.account === 'claude' || account.account === 'chatgpt')
-      && (account.source === 'claude_capture_file' || account.source === 'codex_app_server')
+    expectValid(typeof account.account === 'string' && Object.hasOwn(QUOTA_ACCOUNT_SOURCES, account.account)
+      && Object.values(QUOTA_ACCOUNT_SOURCES).includes(account.source as QuotaReading['source'])
       && nullableString(account.observed_at) && state(account.state) && nullableString(account.reason) && Array.isArray(account.windows));
     for (const value of account.windows as unknown[]) {
       const window = object(value, ['window', 'window_minutes', 'used_percent', 'resets_at', 'elapsed_percent', 'pace', 'state', 'reason']);
@@ -150,7 +160,52 @@ export function decodeQuotaReport(value: unknown): QuotaReport {
 const ISO_UTC = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d{1,3})?Z$/;
 
 export function unknownQuotaReading(account: QuotaAccount, reason: string): QuotaReading {
-  return { account, source: account === 'claude' ? 'claude_capture_file' : 'codex_app_server', observed_at: null, reason, windows: [] };
+  return { account, source: QUOTA_ACCOUNT_SOURCES[account], observed_at: null, reason, windows: [] };
+}
+
+export function unknownAgyQuota(reason: string): QuotaReading[] {
+  return AGY_QUOTA_ACCOUNTS.map(account => unknownQuotaReading(account, reason));
+}
+
+type AgyUsageWindow = Pick<AccountUsageWindow, 'scope' | 'durationMs' | 'usedRatio'> & { readonly resetsAt?: string };
+
+function agyWindow(window: string, minutes: number, sample: AgyUsageWindow): WindowSample {
+  const resets = sample.resetsAt === undefined ? NaN : Date.parse(sample.resetsAt);
+  const used = Math.round(sample.usedRatio * 1_000_000) / 10_000;
+  return { window, window_minutes: minutes, used_percent: used, absent: false,
+    resets_at: Number.isFinite(resets) ? resets / 1000 : null,
+    reason: Number.isFinite(resets) ? null : `${window} reset time unavailable` };
+}
+
+/** Project only the usage windows from OAR. Provider names, labels and IDs stay here. */
+export function projectAgyQuota(windows: readonly AgyUsageWindow[], observedAt: string): QuotaReading[] {
+  const groups = new Map<string, AgyUsageWindow[]>();
+  for (const window of windows) {
+    if (window.scope?.kind !== 'models') return unknownAgyQuota('agy quota window has no model group');
+    const name = window.scope.name;
+    const group = groups.get(name);
+    if (group) group.push(window);
+    else groups.set(name, [window]);
+  }
+  if (groups.size !== 2) return unknownAgyQuota(`agy quota expected 2 model groups, found ${groups.size}`);
+  const names = [...groups.keys()];
+  const gemini = names.find(name => name.toLowerCase().includes('gemini'));
+  const other = names.find(name => name.toLowerCase() === 'claude and gpt models');
+  if (gemini === undefined || other === undefined) return unknownAgyQuota('agy quota model groups are unrecognized');
+
+  const groupsByAccount = { agy_gemini: groups.get(gemini)!, agy_other: groups.get(other)! };
+  const readings: QuotaReading[] = [];
+  for (const account of AGY_QUOTA_ACCOUNTS) {
+    const group = groupsByAccount[account];
+    const short = group.find(window => window.durationMs === FIVE_HOUR_WINDOW_MINUTES * 60_000);
+    const weekly = group.find(window => window.durationMs === WEEKLY_WINDOW_MINUTES * 60_000);
+    if (group.length !== 2 || short === undefined || weekly === undefined) {
+      return unknownAgyQuota('agy quota expected a weekly and a 5h window for each model group');
+    }
+    readings.push({ account, source: QUOTA_ACCOUNT_SOURCES[account], observed_at: observedAt, reason: null,
+      windows: [agyWindow('5h', FIVE_HOUR_WINDOW_MINUTES, short), agyWindow('weekly', WEEKLY_WINDOW_MINUTES, weekly)] });
+  }
+  return readings;
 }
 
 function claudeWindow(rateLimits: Record<string, unknown>, window: 'five_hour' | 'seven_day', minutes: number): WindowSample {
@@ -174,7 +229,7 @@ export function decodeClaudeQuotaCapture(value: unknown): QuotaReading {
   if (!rateLimits) return { ...unknownQuotaReading('claude', 'rate_limits is not an object'), observed_at: observed };
   return {
     account: 'claude', source: 'claude_capture_file', observed_at: observed, reason: null,
-    windows: [claudeWindow(rateLimits, 'five_hour', 300), claudeWindow(rateLimits, 'seven_day', 10_080)],
+    windows: [claudeWindow(rateLimits, 'five_hour', FIVE_HOUR_WINDOW_MINUTES), claudeWindow(rateLimits, 'seven_day', WEEKLY_WINDOW_MINUTES)],
   };
 }
 

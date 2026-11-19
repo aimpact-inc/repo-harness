@@ -353,6 +353,34 @@ describe("rh seats argv", () => {
     expect(formatSeatRoutes(seats, seatAccountQuotas([classifyQuotaReading(reading, Date.now())], seats.routing))).toContain("route simple_fast: none (chatgpt exhausted)");
   });
 
+  test("an exhausted agy Gemini group skips its seat and leaves the Claude and GPT group available", () => {
+    const gemini = { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: "pi" as const, model: "magpie/agy-cli/gemini-4-neon" };
+    const other = { ...gemini, model: "magpie/agy-cli/claude-opus-5-5" };
+    withHome({ ...DEFAULT_SEATS_CONFIG, worker: gemini, 'worker-deep': other, gatekeeper: gemini, 'gatekeeper-fallback': other }, home => {
+      const agy = join(home, '.quota-bin', 'agy'), log = join(home, 'agy-calls');
+      writeFileSync(agy, `#!${process.execPath}
+const args = process.argv.slice(2).join(' ');
+require('node:fs').appendFileSync(${JSON.stringify(log)}, args + '\\n');
+if (args === 'models') process.exit(0);
+if (args !== '-p /usage --output-format json') process.exit(9);
+const hour = 3_600_000;
+const bucket = (window, remaining_fraction, hours) => ({ id: window, name: window, window, remaining_fraction,
+  reset_time: new Date(Date.now() + hours * hour).toISOString() });
+const group = (name, weekly) => ({ name, buckets: [bucket('weekly', weekly, 84), bucket('5h', 0.9, 2)] });
+const groups = [group('Gemini Models', 0), group('Claude and GPT models', 0.62)];
+console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: { groups } } }));
+`, { mode: 0o755 });
+      const exhausted = argv(home, "worker", "--json");
+      expect(exhausted.status).toBe(1);
+      expect(JSON.parse(exhausted.stderr)).toMatchObject({ error: 'seat_quota_exhausted', message: expect.stringContaining('agy_gemini account is exhausted') });
+      expect(bare(launch(home, 'worker-deep').argv)).toContain('agy-cli/claude-opus-5-5');
+      const fallback = argv(home, "gatekeeper", "--pr", "3288", "--json");
+      expect(fallback.status, fallback.stderr).toBe(0);
+      expect(bare(JSON.parse(fallback.stdout).argv)).toContain('agy-cli/claude-opus-5-5');
+      expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual(Array.from({ length: 3 }, () => ['models', '-p /usage --output-format json']).flat());
+    });
+  });
+
   test("a Pi GPT seat gets its own fleet roles in a generated directory; a DeepSeek seat gets none", () => {
     const worker = { ...DEFAULT_SEATS_CONFIG.worker, runtime: "pi" as const, model: "magpie/codex/gpt-6.1-terra", fleet: ["explorer", "fast-worker"] };
     withHome({ ...DEFAULT_SEATS_CONFIG, worker }, home => {
