@@ -67,7 +67,7 @@ const SEATS_SECTION: SettingsSection<SeatsSettingsV1, SeatsSettingsV1['config'],
   config: settings => settings.config,
   draftOf: seatsDraftOf,
   request: (base, draft) => (sameSeats(seatsDraftOf(base), savedSeats(draft)) ? null : { expected_revision: base.revision, seats: savedSeats(draft) }),
-  sameDraft: sameSeats,
+  sameDraft: (left, right) => sameSeats(savedSeats(left), savedSeats(right)),
   applied: (revision, draft) => ({ revision, ...savedSeats(draft) }),
 };
 
@@ -84,11 +84,12 @@ const patch = (draft: SeatsConfigV1, seat: SeatId, change: Partial<SeatConfigV1>
 /**
  * A new runtime keeps the model and effort only where that runtime accepts
  * them, and keeps fleet roles only where the runtime and model take them. Codex always
- * runs commands, so its shell group is on.
+ * runs commands, so its shell group is on. The active runtime changes nothing.
  */
 export function setSeatRuntime(draft: SeatsConfigV1, seat: SeatId, runtime: SeatRuntime, ranges: SeatsSettingsV1['ranges']): SeatsConfigV1 {
   const range = ranges.runtimes.find(entry => entry.id === runtime)!;
   const current = draft[seat]!;
+  if (current.runtime === runtime) return draft;
   const model = current.model !== null && range.models.includes(current.model) ? current.model : null;
   return patch(draft, seat, {
     runtime,

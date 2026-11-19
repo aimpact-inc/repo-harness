@@ -187,6 +187,10 @@ test('the gatekeeper starts only when the effective gatekeeper is of another kno
   // There the Claude reviewer gives the different-family row, so a gatekeeper of the writer family still starts.
   expect(label(plan([pr(1, { writer_family: 'openai', second_review: 'pending' })]))).toEqual(['1:start']);
   expect(label(plan([pr(1, { tier: 'high', writer_family: 'openai' })], page(), [], route({ ...DEFAULT_SEATS_CONFIG.gatekeeper, model: null })))).toEqual(['1:review_family_unavailable']);
+  // A gatekeeper model with no known family is named by its field; the route line that holds the value stays out of the skip.
+  const pasted = { id: 'gatekeeper', seat: { ...DEFAULT_SEATS_CONFIG.gatekeeper, model: 'sk-live-0123456789' }, line: 'gatekeeper: gatekeeper (codex sk-live-0123456789 high; chatgpt ok)' } as const;
+  expect(plan([pr(1, { tier: 'high', writer_family: 'openai' })], page(), [], pasted)[0])
+    .toMatchObject({ detail: 'the model of seats.gatekeeper.model has no known family; gatekeeper: gatekeeper' });
   expect(plan([pr(1)], page(), [], route(DEFAULT_SEATS_CONFIG.gatekeeper, null))[0]).toMatchObject({ reason: 'review_family_unavailable', detail: 'no gatekeeper seat can launch; gatekeeper: none (chatgpt exhausted)' });
   // The reviewer and the gatekeeper of one family are not independent; an unknown reviewer family starts no reviewer.
   const sameFamily = plan([pr(1, { second_review: 'pending' })], page(), [], GATEKEEPER, 'openai')[0];
