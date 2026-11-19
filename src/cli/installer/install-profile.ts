@@ -291,9 +291,19 @@ export function agentFleetTargetPaths(env: NodeJS.ProcessEnv = process.env): rea
   return fleetTargets(requireHome(env), MANAGED_AGENTS).map(({ path }) => path);
 }
 
+const RETIRED_AGENT_ROLES = ['fast-worker', 'deep-worker', 'root-cause-prover', 'gatekeeper'];
+
 // #3306 keeps these exact historical paths readable while older installs or their vault copies can still name them.
 export function retiredAgentFleetTargets(env: NodeJS.ProcessEnv) {
-  return fleetTargets(requireHome(env), ['fast-worker', 'deep-worker', 'root-cause-prover', 'gatekeeper']);
+  return fleetTargets(requireHome(env), RETIRED_AGENT_ROLES);
+}
+
+/** Exclude legacy adoption by recorded host and filename even after the user moves the host root. */
+export function isHistoricalRetiredAgentRecord(key: string, record: PathRecord): boolean {
+  if (record.owner !== 'core' || record.committed.type !== 'file' || (record.host !== 'claude' && record.host !== 'codex')) return false;
+  const filename = basename(key);
+  const extension = record.host === 'claude' ? '.md' : '.toml';
+  return RETIRED_AGENT_ROLES.some(role => filename === `${role}${extension}`);
 }
 
 function recordKeyOrNull(env: NodeJS.ProcessEnv, path: string): string | null {
@@ -302,7 +312,7 @@ function recordKeyOrNull(env: NodeJS.ProcessEnv, path: string): string | null {
 
 export function retiredAgentRecordCheck(env: NodeJS.ProcessEnv): (key: string, record: PathRecord) => boolean {
   const hosts = new Map(retiredAgentFleetTargets(env).map(({ path, host }) => [recordKeyOrNull(env, path), host] as const));
-  return (key, record) => record.owner === 'core' && record.committed.type === 'file' && hosts.get(key) === record.host;
+  return (key, record) => hosts.get(key) === record.host && isHistoricalRetiredAgentRecord(key, record);
 }
 
 /** Retire recorded agents inside the install/update transaction. */

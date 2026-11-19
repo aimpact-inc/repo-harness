@@ -5,7 +5,7 @@ import { hostConfigPaths, migrateLedgerSchema, projectedLedgerPaths, repositoryL
 import { partitionPathRecords, pathRecordHost, pathRecordIsCurrent, pathRecordKey, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
 import { adoptedIdentity } from '../../effects/host-config/whole-path';
 import { migrateCodexConfigRecords } from './codex-config-migration';
-import { agentFleetTargetPaths, fleetReceiptPath, isLegacyOwnershipSurface, retiredAgentFleetTargets, retiredAgentRecordCheck, validPiPackage, writeState, type InstallState } from './install-profile';
+import { agentFleetTargetPaths, fleetReceiptPath, isHistoricalRetiredAgentRecord, isLegacyOwnershipSurface, retiredAgentFleetTargets, retiredAgentRecordCheck, validPiPackage, writeState, type InstallState } from './install-profile';
 import { enabledPlugins, installProfileStatePath, InstallStateError, invalidOwnership, parseProtocol3InstallState, parseProtocol4InstallState, readRawInstallState, type Protocol3Snapshot, type RecordedInstallSnapshot } from './install-state';
 import { adoptPiPackage, piPackageEntryPresent } from './pi-package';
 import { migrateJsonConfigRecords } from './json-config-migration';
@@ -45,7 +45,7 @@ function readFleetReceipt(env: NodeJS.ProcessEnv): ReadonlyMap<string, string> |
 }
 
 /** One manifest surface as a path record, or as a Pi package source; null for a section record or a marker that never proved currency. */
-function convertSurface(env: NodeJS.ProcessEnv, surface: Record<string, unknown>, statePath: string, isRetired: ReturnType<typeof retiredAgentRecordCheck>):
+function convertSurface(env: NodeJS.ProcessEnv, surface: Record<string, unknown>, statePath: string):
   { readonly key: string; readonly record: PathRecord } | { readonly pi: string } | null {
   const path = surface.path as string;
   if (surface.type === 'pi-package') return { pi: path };
@@ -63,7 +63,7 @@ function convertSurface(env: NodeJS.ProcessEnv, surface: Record<string, unknown>
   const key = pathRecordKey(env, path);
   const record: PathRecord = { owner: surface.owner as string, host, kind: 'created', baseline: { state: 'unknown' }, committed };
   // Retired records need identity measured at the original write. The manifest records only bytes.
-  const identity = isRetired(key, record) || 'proof' in committed ? null : adoptedIdentity(key, record);
+  const identity = isHistoricalRetiredAgentRecord(key, record) || 'proof' in committed ? null : adoptedIdentity(key, record);
   return { key, record: identity === null ? record : { ...record, identity } };
 }
 
@@ -89,7 +89,7 @@ function checkedPiSources(env: NodeJS.ProcessEnv, snapshot: RecordedInstallSnaps
  */
 export function migrateInstallState(env: NodeJS.ProcessEnv): void {
   // The ledger gains its `paths` map before any gate or path-record write reads it; each repository ledger moves with it.
-  migrateLedgerSchema(hostConfigPaths(env), retiredAgentRecordCheck(env));
+  migrateLedgerSchema(hostConfigPaths(env), isHistoricalRetiredAgentRecord);
   for (const ledger of repositoryLedgers(env)) migrateLedgerSchema(ledger);
   if (parseProtocol3InstallState(readRawInstallState(env), installProfileStatePath(env)) !== null) {
     // The section records of the host files leave with the manifest, so their migrations read it first.
@@ -121,12 +121,12 @@ export function planInstallStateMigration(env: NodeJS.ProcessEnv): InstallStateM
   const receipt = readFleetReceipt(env);
   if (legacy === null && protocol4 === null && receipt === null) return null;
   const isRetired = retiredAgentRecordCheck(env);
-  const records: Record<string, PathRecord> = Object.fromEntries(Object.entries(partitionPathRecords(env, projectedLedgerPaths(hostConfigPaths(env), isRetired)).records)
+  const records: Record<string, PathRecord> = Object.fromEntries(Object.entries(partitionPathRecords(env, projectedLedgerPaths(hostConfigPaths(env), isHistoricalRetiredAgentRecord)).records)
     .filter(([key, record]) => legacy === null || record.kind === 'user_managed' || (record.kind === 'replaced' && isRetired(key, record))));
   const pi: string[] = [];
   if (legacy) {
     for (const surface of checkedManifest(env, legacy.current, statePath)) {
-      const converted = convertSurface(env, surface, statePath, isRetired);
+      const converted = convertSurface(env, surface, statePath);
       if (converted === null) continue;
       if ('pi' in converted) { pi.push(converted.pi); continue; }
       const existing = records[converted.key];

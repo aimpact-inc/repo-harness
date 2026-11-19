@@ -1060,7 +1060,9 @@ function readRetiredPathWrite(paths: HostConfigPaths, key: string, record: PathR
   const stat = lstatSync(path, { throwIfNoEntry: false });
   if (!stat) return null;
   if (!stat.isFile()) throw bad();
-  const value: unknown = JSON.parse(readFileSync(path, 'utf8'));
+  const text = readFileSync(path, 'utf8');
+  let value: unknown;
+  try { value = JSON.parse(text); } catch { throw bad(); }
   if (!isRecord(value) || typeof value.record !== 'string'
     || !(value.transaction === null || typeof value.transaction === 'string')
     || !(value.restoredIdentity === null || typeof value.restoredIdentity === 'string')) throw bad();
@@ -1713,6 +1715,9 @@ function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, no
           delete records[key];
           if (old.backup) releasedMaterial.add(old.backup);
         }
+      } else if (current && sameApartFromIdentity(old, current) && pathRecordIsCurrent(key, current)) {
+        // The candidate may already have restored the entry and recorded its new identity.
+        records[key] = current;
       } else if (preimage && hostPathKey(paths, key) === key && retirementLanded(key, old, retirement)) {
         const copy = observeFile(preimagePath(transaction, key)).observation;
         if (copy.existed && copy.type === 'file' && old.committed.type === 'file' && copy.sha256 === old.committed.sha256) {

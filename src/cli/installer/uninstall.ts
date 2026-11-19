@@ -8,7 +8,7 @@ import { hostSkillRoot, providerSkillLock, type ProviderSkillLock } from '../../
 import { piPackageEntry, piPackageRemoval, recordedPiPackages, removePiPackage } from './pi-package';
 import { globalContextPath, inspectUnrecordedGlobalRules, previewGlobalRulesAdoptedRevert } from './global-context';
 import { legacyRepositoryExcludesPath } from './repository-excludes';
-import { readInstallState, retiredAgentRecordCheck } from './install-profile';
+import { isHistoricalRetiredAgentRecord, readInstallState, retiredAgentRecordCheck } from './install-profile';
 import { installStatePendingMigration, migrateInstallState, planInstallStateMigration } from './install-state-migration';
 import type { PathRecord } from '../../core/host-config/types';
 import { partitionPathRecords, pathRecordRoot, pathRecordsDigest, readPathRecords, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
@@ -111,16 +111,15 @@ function readUninstallState(opts: UninstallOptions) {
   const files = hostConfigFiles(home, opts.target);
   const codexMigration = files.codex ? planCodexConfigMigration(env) : null;
   const jsonMigration = files.json.length ? planJsonConfigMigration(env, files.json) : null;
-  // A dry run on a protocol 3 state plans with the migration's projection and writes nothing.
-  const projected = opts.dryRun && installStatePendingMigration(env) ? planInstallStateMigration(env) : null;
+  // A dry run sees both legacy state and a standalone fleet receipt as the migration would leave them.
+  const projected = opts.dryRun ? planInstallStateMigration(env) : null;
   const state = projected?.state ?? readInstallState(env);
-  // A dry run reads the ledger as the schema move would leave it.
-  const records = projected ? projected.records : !state ? {} : opts.dryRun
-    ? partitionPathRecords(env, projectedLedgerPaths(hostConfigPaths(env), retiredAgentRecordCheck(env))).records
+  const records = !state ? {} : projected ? projected.records : opts.dryRun
+    ? partitionPathRecords(env, projectedLedgerPaths(hostConfigPaths(env), isHistoricalRetiredAgentRecord)).records
     : readPathRecords(env);
-  // The Pi package entries that the ledger records under owner `pi`, or that the migration would record as their current text.
+  // Only an install-state migration supplies Pi package claims. A fleet receipt leaves the Pi ledger in force.
   const piPackages: ReadonlyMap<string, string> = opts.target !== 'both' ? new Map()
-    : projected ? new Map(projected.piPackages.flatMap((source) => { const text = piPackageEntry(source, env); return text === null ? [] : [[source, text] as const]; }))
+    : projected?.state ? new Map(projected.piPackages.flatMap((source) => { const text = piPackageEntry(source, env); return text === null ? [] : [[source, text] as const]; }))
     : recordedPiPackages(env, openHostConfigGate({ env, preview: opts.dryRun === true }));
   return { state, records, piPackages, lock, files, codexMigration, jsonMigration };
 }
