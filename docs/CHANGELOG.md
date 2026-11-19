@@ -2,6 +2,54 @@
 
 All notable changes to this skill are documented here.
 
+## [0.35.2] - 2026-11-19
+
+### Added
+
+- The board records seat lifecycle events, CLI refusals and hook summaries in a sanitized index outside task worktrees. (#3204)
+- `rh board retro --parent <n>` or `rh board retro --since <duration>` reports bottlenecks from lifecycle records and GitHub data. The advisor runs it after batch close and release. (#3205)
+- `rh config status`, `diff`, `restore` and `gc` show managed changes, revert a selected file and clear retired backups after 30 days. (#2851)
+- `rh install` and `rh update` accept `--override <owner>:<selector>` to select overrides. `rh update --dry-run` and the install dry run preview host configuration writes. (#2851)
+- `rh config restore --repo <worktree>` restores repository hook files that `rh init` or `rh upgrade` changed when removing retired rh hooks. (#2854)
+- `rh uninstall --with-tools` removes recorded herdr-core files, the `hc` link and the Windows user PATH entry when they still match the ledger. (#2853)
+- A Pi seat can use `magpie/agy-cli/gemini-4-neon`. (#3245)
+
+### Changed
+
+- Plan block protocol 3: a `merge_order` entry is one issue or a bundle unit (an array of two or more issues). `rh board dispatch` starts one seat, one worktree and one PR for each ready unit, with tier and route guards; `--issues` selects one declared unit only; `rh board merge` checks the order by unit. A protocol 2 block reads as `plan block invalid: unsupported protocol 2; repost plan with rh board post plan`. After the install, post the plan comment of each open parent again with `"protocol": 3` (`rh board post plan`), and update every machine that runs seats together. (#3281)
+- `rh uninstall` reverts host configuration through the ledger, checks the baseline before a full restore and keeps edited files when it cannot prove what to revert. Use `--remove-edited-block <path>` to back up a file and remove its recorded block even after edits. (#2851)
+- Pi and Skills CLI installs record declared, verified configuration changes in the ledger and report changes outside the declarations. (#2852)
+- `rh` records herdr-core, its `hc` link, the Windows user PATH entry and a Bun installed by the bootstrap. Plain `rh uninstall` keeps shared tools and reports them. (#2853)
+- `rh` records the runtime-state block in `.git/info/exclude` in the repository ledger. Uninstall keeps and reports an edited, unbalanced or unproved block. (#3080)
+- `rh init` records repository writes for undo with `rh config restore --repo <worktree>`, which replaces `rh init rollback`. Run `rh init` at the worktree root. (#2903)
+- The issue-flow skill requires five user-file states in the PR verification for High-tier changes that can delete or overwrite user files. Releases wait for an open migration or ledger batch unless the release fixes a released I1 or I2 defect and names the open work. (#3242)
+- Fix a second defect of the same rule in the same file in the current PR if you find it before review round 1. (#3274)
+- Seats accept a model ID in the form required by their runtime. An ID with an unknown model family cannot satisfy a different-family review requirement. (#3250)
+- The Seats page suggests models for each seat kind on its selected runtime. (#3252)
+
+### Fixed
+
+- Rebuild the released managed values list for v0.35.1. (#3211)
+- Workflow changes limited to timeouts or path filters qualify for Medium review when the remaining tier checks permit it. (#3187)
+- `rh upgrade --registered --apply --pr` stages changes when the backup directory is ignored. (#3212)
+- Repair two source links in the Operator architecture reference. (#3214)
+- `rh publication merge` blocks a PR with an unresolved review-bot thread that has no human reply. (#3218)
+- Host configuration revert retires a ledger claim before deleting its entry or removing text that rh added. A missing replaced file also releases its claim, and rollback keeps released claims retired. (#2854, #3227)
+- Repository backups and staging files are ignored before `rh init` or `rh upgrade` writes user-file copies. (#3228, #2854)
+- Legacy JSON migration records a `statusLine` or rh-tagged hook command inline in `ledger.json` only when its text matches a released rendering. (#3232, #3237)
+- On Claude, a Bash guard failure denies the command. (#3267, #3271)
+- Hook output and failure records omit the denied command and raw crash text. (#3267, #3273)
+- `rh uninstall` and a plugin switch away from Pi remove only the exact recorded Pi package entry and write the settings atomically. (#3249)
+- The safety hook checks that a recorded path still matches what rh wrote before exempting it from the user-file guard. (#3266, #3272)
+- Whole-path writes check all destinations before writing and refuse links that lead outside the install root. (#3266, #3278)
+- An invalid stored seat setting reports its field path. (#3244)
+
+### Upgrade
+
+- Run `rh update` after installing 0.35.2. It moves install state to protocol 5 and the host configuration ledger to protocol 4. (#2851, #2852, #2853)
+- If you put a secret inline in an rh-tagged hook or statusLine command before upgrading to 0.35.1, check `ledger.json` for it and rotate that secret. (#3237)
+- After the install, use `rh board post plan` to repost the newest plan comment of each open parent with `"protocol": 3`. Update every machine that runs seats together. (#3281)
+
 ## [0.35.1] - 2026-11-18
 
 ### Fixed
