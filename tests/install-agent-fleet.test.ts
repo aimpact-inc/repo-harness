@@ -11,6 +11,7 @@ import { recordInstallOwnership } from "./helpers/install-ownership";
 import { pathRecordKey, readPathRecords } from "../src/effects/host-config/path-records";
 import { openHostConfigGate } from "../src/effects/host-config/gate";
 import { hostConfigPaths, putVault } from "../src/effects/host-config/store";
+import { observeEntryIdentity } from "../src/effects/host-config/whole-path";
 import { sha256Prefixed } from "../src/core/evidence/sha256";
 
 /** The ledger's `user_managed` path records under `home`: the fleet files that the user keeps. */
@@ -492,7 +493,7 @@ describe("install-agent-fleet", () => {
       const backup = putVault(hostConfigPaths({ HOME: home }), Buffer.from("mine\n"));
       const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
       ledger.paths[pathRecordKey({ HOME: home }, linked)] = { owner: "core", host: "claude", kind: "replaced", baseline: { state: "known", existed: true, sha256: sha256Prefixed(Buffer.from("mine\n")) },
-        committed: { type: "file", sha256: sha256Prefixed(fleet) }, backup, link_target: existing };
+        committed: { type: "file", sha256: sha256Prefixed(fleet) }, backup, link_target: existing, identity: observeEntryIdentity(existing) };
       writeFileSync(ledgerPath, JSON.stringify(ledger));
       const moved = join(home, "dotfiles/moved.md");
       rmSync(linked);
