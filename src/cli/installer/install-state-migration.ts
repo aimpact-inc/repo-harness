@@ -5,7 +5,7 @@ import { hostConfigPaths, migrateLedgerSchema, projectedLedgerPaths, repositoryL
 import { partitionPathRecords, pathRecordHost, pathRecordIsCurrent, pathRecordKey, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
 import { adoptedIdentity } from '../../effects/host-config/whole-path';
 import { migrateCodexConfigRecords } from './codex-config-migration';
-import { agentFleetTargetPaths, fleetReceiptPath, isHistoricalRetiredAgentRecord, isLegacyOwnershipSurface, retiredAgentFleetTargets, retiredAgentRecordCheck, validPiPackage, writeState, type InstallState } from './install-profile';
+import { agentFleetTargetPaths, fleetReceiptPath, isHistoricalRetiredAgentRecord, isLegacyOwnershipSurface, recoverRetiredAgentFleet, retiredAgentFleetTargets, retiredAgentRecordCheck, validPiPackage, writeState, type InstallState } from './install-profile';
 import { enabledPlugins, installProfileStatePath, InstallStateError, invalidOwnership, parseProtocol3InstallState, parseProtocol4InstallState, readRawInstallState, type Protocol3Snapshot, type RecordedInstallSnapshot } from './install-state';
 import { adoptPiPackage, piPackageEntryPresent } from './pi-package';
 import { migrateJsonConfigRecords } from './json-config-migration';
@@ -87,9 +87,10 @@ function checkedPiSources(env: NodeJS.ProcessEnv, snapshot: RecordedInstallSnaps
  * stay. Order: ledger, receipt removal, protocol 4 state; a stop between them
  * leaves a state that the next run migrates again.
  */
-export function migrateInstallState(env: NodeJS.ProcessEnv): void {
+export function migrateInstallState(env: NodeJS.ProcessEnv, parentTransaction?: string): void {
   // The ledger gains its `paths` map before any gate or path-record write reads it; each repository ledger moves with it.
   migrateLedgerSchema(hostConfigPaths(env), isHistoricalRetiredAgentRecord);
+  recoverRetiredAgentFleet(env, parentTransaction);
   for (const ledger of repositoryLedgers(env)) migrateLedgerSchema(ledger);
   if (parseProtocol3InstallState(readRawInstallState(env), installProfileStatePath(env)) !== null) {
     // The section records of the host files leave with the manifest, so their migrations read it first.

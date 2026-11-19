@@ -11,6 +11,7 @@ import {
   type FileObservation,
   type HostConfigLedger,
   type HostPath,
+  type PathRecord,
   type Sha256,
 } from '../../core/host-config/types';
 import { publishFileByRename, retryWindowsSharingRace } from '../atomic-append';
@@ -204,7 +205,7 @@ function validPathCommitted(value: unknown): boolean {
 /** `observeEntryIdentity`: device, file id and birth time. */
 const isIdentity = (value: unknown): value is string => isText(value) && /^\d+:\d+:\d+$/u.test(value);
 
-function validPathRecord(record: unknown): boolean {
+export function validPathRecord(record: unknown): record is PathRecord {
   if (!isObject(record) || !isText(record.owner) || record.owner === '' || !PATH_RECORD_HOSTS.includes(record.host as string)
     || !validBaseline(record.baseline) || !validPathCommitted(record.committed)) return false;
   if (record.identity !== undefined && !(isIdentity(record.identity) && record.kind !== 'user_managed' && !(isObject(record.committed) && 'proof' in record.committed))) return false;

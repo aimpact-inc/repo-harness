@@ -53,7 +53,7 @@ export function runCandidateRuntimeReconciliation(
   assertOverridesCarried(request.host_adapters ? request.target : null, request.overrides ?? [], env);
   // A released parent holds the lock; its transaction keeps the state, and the ledger keeps the records.
   migrateInParentTransaction(request.transaction_backup_root, env, () => {
-    migrateInstallState(env);
+    migrateInstallState(env, request.transaction_backup_root);
     if (request.host_adapters) migrateRuntimeHostConfig(env);
   });
   const state = requireInstallState(env);

@@ -5,7 +5,7 @@ import { bunGlobalPackageRoot, expectedSkillProjections } from './skill-projecti
 import { configurationReceiptPath } from './configuration-ownership';
 import { expectedOf, hostConfigPaths, hostConfigPathsAt, observeFile, putVault, removeTarget, replaceTarget, repositoryLedgers, resolveHostPath } from '../../effects/host-config/store';
 import { ensureSelfIgnoringDirectory, isSelfIgnoreGuard, SELF_IGNORE_NAME } from '../../effects/self-ignoring-directory';
-import { openHostConfigGate, planPathRevert, rollbackHostConfigTransaction } from '../../effects/host-config/gate';
+import { openHostConfigGate, planPathRevert, recoverRetiredPathWrites, rollbackHostConfigTransaction } from '../../effects/host-config/gate';
 import { namingTomlFile } from '../../core/host-config/toml-fragment';
 import { migrateCodexConfigRecords } from './codex-config-migration';
 import { migrateJsonConfigRecords } from './json-config-migration';
@@ -310,9 +310,23 @@ function recordKeyOrNull(env: NodeJS.ProcessEnv, path: string): string | null {
   try { return pathRecordKey(env, path); } catch { return null; }
 }
 
+function retiredAgentKeys(env: NodeJS.ProcessEnv): ReadonlyMap<string, 'codex' | 'claude'> {
+  const keys = new Map<string, 'codex' | 'claude'>();
+  for (const { path, host } of retiredAgentFleetTargets(env)) {
+    const key = recordKeyOrNull(env, path);
+    if (key !== null) keys.set(key, host);
+  }
+  return keys;
+}
+
 export function retiredAgentRecordCheck(env: NodeJS.ProcessEnv): (key: string, record: PathRecord) => boolean {
-  const hosts = new Map(retiredAgentFleetTargets(env).map(({ path, host }) => [recordKeyOrNull(env, path), host] as const));
+  const hosts = retiredAgentKeys(env);
   return (key, record) => hosts.get(key) === record.host && isHistoricalRetiredAgentRecord(key, record);
+}
+
+/** Called under the global runtime lock before rebuilding the ledger or taking a new snapshot. */
+export function recoverRetiredAgentFleet(env: NodeJS.ProcessEnv, transaction?: string): void {
+  recoverRetiredPathWrites(hostConfigPaths(env), retiredAgentKeys(env), transaction);
 }
 
 /** Retire recorded agents inside the install/update transaction. */

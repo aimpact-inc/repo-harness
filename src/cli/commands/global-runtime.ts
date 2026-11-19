@@ -41,6 +41,7 @@ import {
   ownerForInstallPath,
   withHostConfigTransaction,
   migrateRuntimeHostConfig,
+  recoverRetiredAgentFleet,
   requireInstallState,
   retireAgentFleet,
 } from "../installer/install-profile";
@@ -1781,7 +1782,10 @@ export function runGlobalRuntimeSetup(opts: GlobalRuntimeOptions = {}): GlobalRu
       const result = runGlobalRuntimeSetupInTransaction({ ...opts, transaction, runtimeLock });
       if (result.exitCode !== 0) throw new RuntimeSetupFailure(result);
       return result;
-    }, opts.hostAdapters === false ? undefined : () => migrateRuntimeHostConfig(env));
+    }, () => {
+      recoverRetiredAgentFleet(env);
+      if (opts.hostAdapters !== false) migrateRuntimeHostConfig(env);
+    });
   } catch (error) {
     if (error instanceof RuntimeSetupFailure) return error.result;
     throw error;

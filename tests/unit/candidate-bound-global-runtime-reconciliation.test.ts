@@ -1004,88 +1004,133 @@ describe('candidate-bound global runtime reconciliation', () => {
     }
   });
 
-  test.each(['unlink', 'restore', 'restore followed by a user copy'] as const)('the next update settles retirement stopped after the first %s', (operation) => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'repo-harness-retirement-interrupt-')));
-    const home = join(root, 'home');
-    const candidate = fixtureCandidate(root);
-    const env = { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun') };
-    try {
-      writeCoreOnlyInstallState(home);
-      seedGlobalPackageFixture(env, { sourceRoot: candidate.root });
-      const agents = join(home, '.codex', 'agents');
-      const first = join(agents, 'fast-worker.toml');
-      const second = join(agents, 'deep-worker.toml');
-      const leased = join(agents, 'gatekeeper.toml');
-      const managed = Buffer.from('Managed agent data\n');
-      const original = Buffer.from('Original user bytes\r\n');
-      const vaultOnly = Buffer.from('Another user agent\n');
-      mkdirSync(agents, { recursive: true });
-      if (operation !== 'unlink') writeFileSync(first, original);
-      writeFileSync(second, original);
-      writeFileSync(leased, vaultOnly);
-      openHostConfigGate({ env }).writePaths([first, second, leased].map(path => ({
-        path, owner: 'core', replace: path !== first || operation !== 'unlink', entry: { type: 'file', bytes: managed },
-      })));
-      writeFileSync(leased, 'Edited while installed\n');
-      const paths = hostConfigPaths(env);
-      const before = readLedger(paths).paths;
-      const vault = vaultPath(paths, before[second]!.backup!);
-      const retainedVault = vaultPath(paths, before[leased]!.backup!);
-      const source = join(candidate.root, 'src/effects/host-config/gate.ts');
-      const unmodified = readFileSync(source, 'utf8');
-      const anchor = '    syncDirectoryDurably(dirname(key));\n  } finally {';
-      expect(unmodified).toContain(anchor);
-      writeFileSync(source, unmodified.replace(anchor, `    process.kill(process.pid, 'SIGKILL');\n${anchor}`));
-      const update = () => spawnSync(process.execPath, [join(candidate.root, 'src/cli/index.ts'), 'update', '--no-cli',
-        '--target', 'codex', '--no-sync-skill', '--no-external-skills', '--no-codegraph', '--json'], { cwd: root, env, encoding: 'utf8' });
-      const stopped = update();
-      expect(stopped.signal, stopped.stderr).toBe('SIGKILL');
-      const interrupted = readLedger(paths);
-      expect([interrupted.paths[first], interrupted.paths[second], interrupted.paths[leased]]).toEqual([before[first], before[second], before[leased]]);
-      if (operation === 'unlink') expect(existsSync(first)).toBe(false);
-      else expect(readFileSync(first)).toEqual(original);
-      expect(readFileSync(second)).toEqual(managed);
-      expect(readFileSync(vault)).toEqual(original);
-      expect(readFileSync(retainedVault)).toEqual(vaultOnly);
-      expect(interrupted.retired).toEqual([]);
-      if (operation === 'unlink') {
-        const journal = join(paths.root, 'retired-path-writes', sha256Hex(first));
-        const saved = readFileSync(journal);
-        writeFileSync(journal, '{');
-        let failure: unknown;
-        try { planPathRevertEntry(paths, first, before[first]!, true); } catch (error) { failure = error; }
-        expect(failure).toBeInstanceOf(HostConfigError);
-        expect(failure).toMatchObject({ code: 'host_config_invalid_state', message: expect.stringContaining(journal) });
-        writeFileSync(journal, saved);
-      }
+  const retirementCheckpoints = [
+    { step: 'preimage copy', side: 'forward', file: 'managed', ledger: 'original' },
+    { step: 'staged vault copy', side: 'forward', file: 'managed', ledger: 'original', replacedOnly: true },
+    { step: 'forward journal', side: 'forward', file: 'managed', ledger: 'original' },
+    { step: 'unlink or vault publish', side: 'forward', file: 'forward', ledger: 'original' },
+    { step: 'forward ledger', side: 'forward', file: 'forward', ledger: 'released' },
+    { step: 'staged preimage', side: 'rollback', file: 'forward', ledger: 'released' },
+    { step: 'rollback journal', side: 'rollback', file: 'forward', ledger: 'released' },
+    { step: 'preimage publish', side: 'rollback', file: 'managed', ledger: 'released' },
+    { step: 'rollback ledger', side: 'rollback', file: 'managed', ledger: 'restored' },
+    { step: 'recovery ledger', side: 'recover', file: 'managed', ledger: 'restored' },
+    { step: 'journal removal', side: 'recover', file: 'managed', ledger: 'restored' },
+    { step: 'same-byte user copy after restore', side: 'forward', file: 'forward', ledger: 'original', replacedOnly: true },
+  ] as const;
 
-      const userReplacedRestore = operation === 'restore followed by a user copy';
-      if (userReplacedRestore) {
-        rmSync(first);
-        writeFileSync(first, original);
+  test.each(retirementCheckpoints.flatMap(row => (['created', 'replaced'] as const)
+    .filter(kind => !('replacedOnly' in row) || kind === 'replaced').map(kind => ({ ...row, kind }))))(
+    'retirement replay keeps $kind file and vault state after $step', ({ step, side, file, ledger: expectedLedger, kind }) => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'repo-harness-retirement-replay-')));
+      const home = join(root, 'home');
+      const candidate = fixtureCandidate(root);
+      const env = { HOME: home, BUN_INSTALL: join(home, '.bun'), PATH: '/usr/bin:/bin' };
+      try {
+        writeCoreOnlyInstallState(home);
+        const agent = join(home, '.codex', 'agents', 'fast-worker.toml');
+        mkdirSync(join(agent, '..'), { recursive: true });
+        const managed = Buffer.from('Managed agent bytes\n');
+        const original = Buffer.from('Original user bytes\r\n');
+        if (kind === 'replaced') writeFileSync(agent, original);
+        openHostConfigGate({ env }).writePaths([{ path: agent, owner: 'core', replace: kind === 'replaced', entry: { type: 'file', bytes: managed } }]);
+        const paths = hostConfigPaths(env);
+        const before = readLedger(paths).paths[agent]!;
+        const vault = before.backup ? vaultPath(paths, before.backup) : null;
+        const marker = join(paths.root, 'retired-path-writes', sha256Hex(agent));
+        const source = join(candidate.root, 'src/effects/host-config/gate.ts');
+        let instrumented = readFileSync(source, 'utf8');
+        const after = (line: string, code: string) => {
+          expect(instrumented).toContain(line);
+          instrumented = instrumented.replace(line, () => line + '\n' + code);
+        };
+        const stop = (name: string) => `checkpoint(${JSON.stringify(name)});`;
+        after('    syncDirectoryDurably(options.transaction);', stop('preimage copy'));
+        after('    if (staged) syncRetirementFile(staged);',
+          '    if (staged) checkpoint(intent(identity).rollbackIdentity ? "staged preimage" : "staged vault copy");');
+        after('    persistRetiredPathWrite(retiredPathWritePath(paths, key), write);',
+          '    checkpoint(write.rollbackIdentity ? "rollback journal" : "forward journal");');
+        after('    syncDirectoryDurably(dirname(key));',
+          '    checkpoint(write.rollbackIdentity ? "preimage publish" : "unlink or vault publish");');
+        after('      ledger = commit(ledger);\n      writeLedger(paths, ledger);', stop('forward ledger'));
+        after('  else writeLedger(paths, restored);', stop('rollback ledger'));
+        after('      writeLedger(paths, next);', stop('recovery ledger'));
+        after('  syncDirectoryDurably(dirname(marker));', stop('journal removal'));
+        writeFileSync(source, instrumented + `
+function checkpoint(step: string) {
+  if (process.env.TEST_RETIREMENT_STOP === step) process.kill(process.pid, 'SIGKILL');
+}
+`);
+        const script = `
+          import { beginInstallHostTransaction, commitInstallHostTransaction, retireAgentFleet, rollbackInstallHostTransaction } from './src/cli/installer/install-profile';
+          import { migrateInstallState } from './src/cli/installer/install-state-migration';
+          import { hostConfigPaths } from './src/effects/host-config/store';
+          import { globalRuntimeScope, withRuntimeTransactionLock } from './src/effects/locking/runtime-transaction-lock';
+          const env = process.env;
+          withRuntimeTransactionLock(globalRuntimeScope(env), () => {
+            migrateInstallState(env);
+            const side = process.argv.at(-1);
+            if (side === 'recover') return;
+            const transaction = beginInstallHostTransaction([hostConfigPaths(env).ledger], env);
+            retireAgentFleet(env, transaction.backup_root);
+            if (side === 'rollback') rollbackInstallHostTransaction(transaction);
+            else commitInstallHostTransaction(transaction);
+          });
+        `;
+        const run = (direction: string, checkpoint = '') => spawnSync(process.execPath, ['-e', script, direction], {
+          cwd: candidate.root, env: { ...env, TEST_RETIREMENT_STOP: checkpoint }, encoding: 'utf8',
+        });
+        const assertStopped = (result: ReturnType<typeof run>) => expect(result.signal, String(result.stderr)).toBe('SIGKILL');
+        if (side === 'recover') assertStopped(run('rollback', 'preimage publish'));
+        const userCopy = step === 'same-byte user copy after restore';
+        assertStopped(run(side, userCopy ? 'unlink or vault publish' : step));
+        const expectedBytes = file === 'managed' ? managed : kind === 'replaced' ? original : null;
+        const onDisk = () => existsSync(agent) ? readFileSync(agent) : null;
+        expect(onDisk()).toEqual(expectedBytes);
+        const interrupted = readLedger(paths);
+        if (expectedLedger === 'released') expect(Object.hasOwn(interrupted.paths, agent)).toBe(false);
+        else if (expectedLedger === 'original') expect(interrupted.paths[agent]).toEqual(before);
+        else expect(interrupted.paths[agent]?.identity).toBe(observeEntryIdentity(agent)!);
+        if (vault) expect(readFileSync(vault)).toEqual(original);
+        if (userCopy) {
+          rmSync(agent);
+          writeFileSync(agent, original);
+        }
+        if (step === 'unlink or vault publish' && kind === 'created') {
+          const saved = readFileSync(marker);
+          writeFileSync(marker, '{');
+          let failure: unknown;
+          try { planPathRevertEntry(paths, agent, before, true); } catch (error) { failure = error; }
+          expect(failure).toBeInstanceOf(HostConfigError);
+          expect(failure).toMatchObject({ code: 'host_config_invalid_state', message: expect.stringContaining(marker) });
+          writeFileSync(marker, saved);
+        }
+        const identity = observeEntryIdentity(agent);
+        const recovered = run('recover');
+        expect(recovered.status, String(recovered.stderr)).toBe(0);
+        expect(onDisk()).toEqual(expectedBytes);
+        expect(observeEntryIdentity(agent)).toBe(identity);
+        const final = readLedger(paths);
+        if (userCopy) expect(final.paths[agent]).toEqual(before);
+        else if (file === 'forward') expect(Object.hasOwn(final.paths, agent)).toBe(false);
+        else expect(final.paths[agent]).toEqual({ ...before, identity: identity! });
+        if (vault) {
+          expect(readFileSync(vault)).toEqual(original);
+          if (file === 'forward' && !userCopy) expect(final.retired).toContainEqual(expect.objectContaining({ sha256: before.backup }));
+          else expect(final.paths[agent]?.backup).toBe(before.backup);
+        }
+        expect(existsSync(marker)).toBe(false);
+        if (step === 'preimage publish') {
+          const retried = run('forward');
+          expect(retried.status, String(retried.stderr)).toBe(0);
+          expect(onDisk()).toEqual(kind === 'replaced' ? original : null);
+          expect(Object.hasOwn(readLedger(paths).paths, agent)).toBe(false);
+          if (vault) expect(readFileSync(vault)).toEqual(original);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
       }
-      const firstIdentity = observeEntryIdentity(first);
-      writeFileSync(source, unmodified);
-      const retried = update();
-      expect(retried.status, retried.stderr + retried.stdout).toBe(0);
-      const finished = readLedger(paths);
-      if (operation === 'unlink') expect(existsSync(first)).toBe(false);
-      else expect(readFileSync(first)).toEqual(original);
-      expect(readFileSync(second)).toEqual(original);
-      expect(readFileSync(leased, 'utf8')).toBe('Edited while installed\n');
-      expect(observeEntryIdentity(first)).toBe(firstIdentity);
-      expect([Object.hasOwn(finished.paths, first), Object.hasOwn(finished.paths, second)]).toEqual([userReplacedRestore, false]);
-      if (userReplacedRestore) {
-        expect(finished.paths[first]).toEqual(before[first]);
-        expect(retried.stdout).toContain(vault);
-      }
-      expect(finished.paths[leased]).toEqual(before[leased]);
-      expect(finished.retired).toContainEqual(expect.objectContaining({ sha256: before[second]!.backup }));
-      expect(readFileSync(retainedVault)).toEqual(vaultOnly);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  }, 60_000);
+    }, 60_000);
 
   test('B parent builder=30 hands one update to distinct C candidate builder=150', () => {
     const root = mkdtempSync(join(tmpdir(), 'repo-harness-candidate-version-bound-'));

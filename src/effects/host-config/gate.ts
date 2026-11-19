@@ -1,4 +1,4 @@
-import { closeSync, constants, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { sha256Hex, sha256Prefixed } from '../../core/evidence/sha256';
@@ -55,6 +55,7 @@ import {
   removeTarget,
   replaceTarget,
   resolveHostPath,
+  validPathRecord,
   writeLedger,
   writeLedgerBytes,
   type HostConfigPaths,
@@ -1044,17 +1045,19 @@ export function planPathRevert(key: string, record: PathRecord): HostConfigRever
 }
 
 interface RetiredPathWrite {
-  readonly record: string;
+  readonly record: PathRecord;
   readonly transaction: string | null;
-  readonly restoredIdentity: string | null;
+  readonly forwardIdentity: string | null;
+  readonly rollbackIdentity?: string;
+  readonly staged?: string;
 }
 
-function retiredPathWritePath(paths: HostConfigPaths, key: string, transaction?: string): string {
-  return transaction ? `${preimagePath(transaction, key)}.retirement` : join(paths.root, 'retired-path-writes', sha256Hex(key));
+function retiredPathWritePath(paths: HostConfigPaths, key: string): string {
+  return join(paths.root, 'retired-path-writes', sha256Hex(key));
 }
 
-function readRetiredPathWrite(paths: HostConfigPaths, key: string, record: PathRecord, transaction?: string): RetiredPathWrite | null {
-  const path = retiredPathWritePath(paths, key, transaction);
+function readRetiredPathWrite(paths: HostConfigPaths, key: string): RetiredPathWrite | null {
+  const path = retiredPathWritePath(paths, key);
   const bad = () => new HostConfigError('host_config_invalid_state', `invalid retirement record: ${path}`);
   if (lstatSync(dirname(path), { throwIfNoEntry: false })?.isSymbolicLink()) throw bad();
   const stat = lstatSync(path, { throwIfNoEntry: false });
@@ -1063,17 +1066,71 @@ function readRetiredPathWrite(paths: HostConfigPaths, key: string, record: PathR
   const text = readFileSync(path, 'utf8');
   let value: unknown;
   try { value = JSON.parse(text); } catch { throw bad(); }
-  if (!isRecord(value) || typeof value.record !== 'string'
+  const identity = (input: unknown): input is string => typeof input === 'string' && /^\d+:\d+:\d+$/u.test(input);
+  if (!isRecord(value) || !validPathRecord(value.record) || value.record.committed.type !== 'file'
+    || value.record.identity === undefined || value.record.link_target !== undefined
     || !(value.transaction === null || typeof value.transaction === 'string')
-    || !(value.restoredIdentity === null || typeof value.restoredIdentity === 'string')) throw bad();
-  if (value.record !== sha256Hex(JSON.stringify(record))) return null;
-  return { record: value.record, transaction: value.transaction, restoredIdentity: value.restoredIdentity };
+    || !(value.record.kind === 'created' ? value.forwardIdentity === null : identity(value.forwardIdentity))
+    || (value.rollbackIdentity !== undefined && !identity(value.rollbackIdentity))
+    || (value.staged !== undefined && (typeof value.staged !== 'string' || !value.staged.startsWith(`${key}.`)
+      || !/^[a-f0-9-]{36}\.rh-stage$/u.test(value.staged.slice(key.length + 1))))) throw bad();
+  return { record: value.record, transaction: value.transaction, forwardIdentity: value.forwardIdentity as string | null,
+    ...(value.rollbackIdentity === undefined ? {} : { rollbackIdentity: value.rollbackIdentity }),
+    ...(value.staged === undefined ? {} : { staged: value.staged }) };
 }
 
-function retirementLanded(key: string, record: PathRecord, write: RetiredPathWrite): boolean {
-  if (record.kind === 'created') return !lstatSync(key, { throwIfNoEntry: false });
-  if (record.kind !== 'replaced' || write.restoredIdentity === null) return false;
-  return pathRecordIsCurrent(key, { ...record, identity: write.restoredIdentity, committed: { type: 'file', sha256: record.backup! } });
+function retirementLanded(key: string, write: RetiredPathWrite): boolean {
+  return write.forwardIdentity === null ? !lstatSync(key, { throwIfNoEntry: false })
+    : pathRecordIsCurrent(key, { ...write.record, identity: write.forwardIdentity, committed: { type: 'file', sha256: write.record.backup! } });
+}
+
+function rollbackLanded(key: string, write: RetiredPathWrite): PathRecord | undefined {
+  if (write.rollbackIdentity === undefined) return undefined;
+  const restored = { ...write.record, identity: write.rollbackIdentity };
+  return pathRecordIsCurrent(key, restored) ? restored : undefined;
+}
+
+function setRetiredPathRecord(ledger: HostConfigLedger, key: string, record?: PathRecord, backup?: Sha256): HostConfigLedger {
+  const { [key]: _gone, ...paths } = ledger.paths;
+  return { ...ledger, paths: record ? { ...paths, [key]: record } : paths,
+    retired: backup && !ledger.retired.some(entry => entry.sha256 === backup) ? retire(ledger.retired, [backup]) : ledger.retired };
+}
+
+function clearRetiredPathWrite(paths: HostConfigPaths, key: string): void {
+  const marker = retiredPathWritePath(paths, key);
+  rmSync(marker);
+  syncDirectoryDurably(dirname(marker));
+}
+
+/** Reconcile an earlier writer's journal using the caller's current retirement paths. Recovery itself changes only the ledger. */
+export function recoverRetiredPathWrites(paths: HostConfigPaths, keys: ReadonlyMap<string, PathRecord['host']>, transaction?: string): void {
+  let ledger = readLedger(paths);
+  for (const [key, host] of keys) {
+    const write = readRetiredPathWrite(paths, key);
+    if (!write || write.record.host !== host || write.record.owner !== 'core') continue;
+    const current = ledger.paths[key];
+    if (current && !sameApartFromIdentity(current, write.record)) continue;
+    // The staged rollback can only regain ownership after its identity lands at the target.
+    // Otherwise an intact forward result is final. An external edit keeps any unresolved backup.
+    const restored = rollbackLanded(key, write);
+    const forward = !restored && retirementLanded(key, write);
+    const unsettledBackup = write.record.kind === 'replaced' && write.rollbackIdentity !== undefined;
+    const { identity: _identity, ...unproved } = write.record;
+    const final = restored ?? (forward ? undefined : current ?? (unsettledBackup ? unproved : undefined));
+    const next = setRetiredPathRecord(ledger, key, final, forward ? write.record.backup : undefined);
+    if (JSON.stringify(current) !== JSON.stringify(final) || next.retired !== ledger.retired) {
+      writeLedger(paths, next);
+      ledger = next;
+    }
+    // A created-file rollback can stop after publishing a hard link to its staged entry.
+    const stagedIdentity = write.rollbackIdentity ?? write.forwardIdentity;
+    if (write.staged && stagedIdentity && observeEntryIdentity(write.staged) === stagedIdentity) {
+      discardStagedEntry(write.staged);
+      syncDirectoryDurably(dirname(write.staged));
+    }
+    // A candidate can recover after its parent took the snapshot. Preserve this proof for their rollback.
+    if (transaction === undefined) clearRetiredPathWrite(paths, key);
+  }
 }
 
 /** Describe a whole-path revert, including the proof and recovery copy when the file stays. */
@@ -1082,8 +1139,8 @@ export function planPathRevertEntry(paths: HostConfigPaths, key: string, record:
   if (retire && record.link_target !== undefined) {
     return { path: key, action: 'kept_edited', code: 'host_config_retired_link', vault };
   }
-  const pending = retire && record.kind !== 'user_managed' ? readRetiredPathWrite(paths, key, record) : null;
-  if (pending && retirementLanded(key, record, pending)) return { path: key, action: 'released' };
+  const pending = retire && record.kind !== 'user_managed' ? readRetiredPathWrite(paths, key) : null;
+  if (pending && sameApartFromIdentity(pending.record, record) && retirementLanded(key, pending)) return { path: key, action: 'released' };
   const action = planPathRevert(key, record);
   if (action === 'released' && retire && record.kind === 'replaced') {
     return { path: key, action: 'kept_edited', code: 'host_config_entry_absent', vault };
@@ -1154,44 +1211,65 @@ function persistRetiredPathWrite(path: string, write: RetiredPathWrite): void {
   syncDirectoryDurably(dirname(dirname(path)));
 }
 
-/** Keep the live claim until its one filesystem operation lands. The journal binds a restored entry by identity. */
-function writeRetiredPath(paths: HostConfigPaths, key: string, record: PathRecord, options: HostConfigPathOptions): void {
-  const assertCurrent = () => {
-    if (hostPathKey(paths, key) !== key || !pathRecordIsCurrent(key, record)) {
-      throw new HostConfigError('host_config_target_changed', `the target changed before retirement: ${key}`);
+/** Publish after the journal records the staged identity and the original claim, including its vault reference. */
+function writeRetiredEntry(paths: HostConfigPaths, key: string, entry: Extract<PathEntry, { type: 'file' }> | null,
+  from: () => boolean, absent: boolean, intent: (identity: string | null) => RetiredPathWrite): RetiredPathWrite {
+  const check = () => {
+    if (hostPathKey(paths, key) !== key || !from()) {
+      throw new HostConfigError('host_config_target_changed', `the target changed before retirement write: ${key}`);
     }
   };
-  assertCurrent();
+  check();
+  const staged = entry ? stagePathEntry(key, entry).staged : null;
+  const identity = staged ? observeEntryIdentity(staged) : null;
+  try {
+    if (staged && identity === null) throw new HostConfigError('host_config_target_changed', `the retirement staging file vanished: ${key}`);
+    if (staged) syncRetirementFile(staged);
+    const write = { ...intent(identity), ...(staged ? { staged } : {}) };
+    persistRetiredPathWrite(retiredPathWritePath(paths, key), write);
+    retryWindowsSharingRace(() => {
+      if (staged && (!observeFile(staged).bytes?.equals(entry!.bytes) || observeEntryIdentity(staged) !== identity)) {
+        throw new HostConfigError('host_config_target_changed', `the retirement staging file changed: ${key}`);
+      }
+      check();
+      if (staged) {
+        if (absent) linkSync(staged, key);
+        else renameSync(staged, key);
+      } else {
+        removeTarget(key as HostPath, { existed: true, sha256: (write.record.committed as Extract<PathCommitted, { type: 'file' }>).sha256 });
+      }
+    });
+    syncDirectoryDurably(dirname(key));
+    return write;
+  } finally {
+    if (staged && identity !== null && observeEntryIdentity(staged) === identity) discardStagedEntry(staged);
+  }
+}
+
+function writeRetiredPath(paths: HostConfigPaths, key: string, record: PathRecord, options: HostConfigPathOptions): void {
+  const current = () => pathRecordIsCurrent(key, record);
+  if (!current()) throw new HostConfigError('host_config_target_changed', `the target changed before retirement: ${key}`);
   if (options.transaction) {
     keepPreimage(options.transaction, key);
-    const copy = preimagePath(options.transaction, key);
-    syncRetirementFile(copy);
+    syncRetirementFile(preimagePath(options.transaction, key));
     syncDirectoryDurably(options.transaction);
   }
-  const staged = record.kind === 'replaced'
-    ? stagePathEntry(key, { type: 'file', bytes: readVault(paths, record.backup!), mode: statSync(key).mode }, options.stage?.(key)).staged
+  const entry = record.kind === 'replaced'
+    ? { type: 'file' as const, bytes: readVault(paths, record.backup!), mode: statSync(key).mode }
     : null;
-  const restoredIdentity = staged ? observeEntryIdentity(staged) : null;
-  try {
-    if (staged && restoredIdentity === null) throw new HostConfigError('host_config_target_changed', `the restore staging file vanished: ${key}`);
-    if (staged) syncRetirementFile(staged);
-    const write: RetiredPathWrite = { record: sha256Hex(JSON.stringify(record)), transaction: options.transaction ?? null, restoredIdentity };
-    if (options.transaction) persistRetiredPathWrite(retiredPathWritePath(paths, key, options.transaction), write);
-    persistRetiredPathWrite(retiredPathWritePath(paths, key), write);
-    if (staged) {
-      if (!retirementLanded(staged, record, write)) throw new HostConfigError('host_config_target_changed', `the restore staging file changed: ${key}`);
-      retryWindowsSharingRace(() => {
-        assertCurrent();
-        renameSync(staged, key);
-      });
-    } else {
-      assertCurrent();
-      removeTarget(key as HostPath, { existed: true, sha256: (record.committed as Extract<PathCommitted, { type: 'file' }>).sha256 });
-    }
-    syncDirectoryDurably(dirname(key));
-  } finally {
-    if (staged && restoredIdentity !== null && observeEntryIdentity(staged) === restoredIdentity) discardStagedEntry(staged);
-  }
+  writeRetiredEntry(paths, key, entry, current, false,
+    forwardIdentity => ({ record, transaction: options.transaction ?? null, forwardIdentity }));
+}
+
+function rollbackRetiredPath(paths: HostConfigPaths, key: string, write: RetiredPathWrite, transaction: string): PathRecord | undefined {
+  const preimage = preimagePath(transaction, key);
+  const { observation, bytes } = observeFile(preimage);
+  const { record } = write;
+  if (!bytes || !observation.existed || observation.type !== 'file' || record.committed.type !== 'file'
+    || observation.sha256 !== record.committed.sha256) return undefined;
+  const pending = writeRetiredEntry(paths, key, { type: 'file', bytes, mode: statSync(preimage).mode }, () => retirementLanded(key, write),
+    write.forwardIdentity === null, identity => ({ ...write, rollbackIdentity: identity! }));
+  return rollbackLanded(key, pending);
 }
 
 function revertWholePaths(paths: HostConfigPaths, only: readonly string[], options: HostConfigPathOptions & { readonly retire?: boolean }): HostConfigRevertEntry[] {
@@ -1216,20 +1294,15 @@ function revertWholePaths(paths: HostConfigPaths, only: readonly string[], optio
     };
     if (options.retire) {
       const changesEntry = action === 'removed' || action === 'restored';
-      const pending = record.kind !== 'user_managed' ? readRetiredPathWrite(paths, key, record) : null;
+      const pending = record.kind !== 'user_managed' ? readRetiredPathWrite(paths, key) : null;
       if (changesEntry) writeRetiredPath(paths, key, record, options);
-      else if (action === 'released' && pending) {
-        if (options.transaction) {
-          // The filesystem write landed in an earlier run. A later rollback must keep this release.
-          persistRetiredPathWrite(retiredPathWritePath(paths, key, options.transaction), pending);
-        }
-        if (!retirementLanded(key, record, pending)) {
-          throw new HostConfigError('host_config_target_changed', `the target changed before releasing its retirement record: ${key}`);
-        }
+      else if (action === 'released' && pending && sameApartFromIdentity(pending.record, record) && !retirementLanded(key, pending)) {
+        throw new HostConfigError('host_config_target_changed', `the target changed before releasing its retirement record: ${key}`);
       }
       ledger = commit(ledger);
       writeLedger(paths, ledger);
-      if (changesEntry || pending) rmSync(retiredPathWritePath(paths, key), { force: true });
+      // Keep the same journal available for compensation until the enclosing install finishes.
+      if (!options.transaction && (changesEntry || pending)) clearRetiredPathWrite(paths, key);
       continue;
     }
     if (action === 'released') { steps.push({ kind: 'release', commit }); continue; }
@@ -1705,26 +1778,27 @@ function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, no
     const old = before.paths[key];
     const current = now.paths[key];
     // A linked record acts on the file that its link names, also for the transaction's preimage.
-    const at = pathRecordEntry(key, (current ?? old)!);
+    const record = current ?? old!;
+    const at = pathRecordEntry(key, record);
     const preimage = hasPreimage(transaction, at);
-    const retirement = old?.committed.type === 'file' && old.kind !== 'user_managed' && old.link_target === undefined
-      ? readRetiredPathWrite(paths, key, old, transaction) : null;
-    if (old && retirement) {
+    const retirement = at === key && record.committed.type === 'file' ? readRetiredPathWrite(paths, key) : null;
+    if (retirement && (!old || sameApartFromIdentity(old, retirement.record))
+      && (!current || sameApartFromIdentity(current, retirement.record))) {
       if (retirement.transaction !== transaction) {
-        if (!current) {
+        // The candidate finished an earlier transaction before running this one.
+        if (current) records[key] = current;
+        else {
           delete records[key];
-          if (old.backup) releasedMaterial.add(old.backup);
+          if (retirement.record.backup) releasedMaterial.add(retirement.record.backup);
         }
-      } else if (current && sameApartFromIdentity(old, current) && pathRecordIsCurrent(key, current)) {
-        // The candidate may already have restored the entry and recorded its new identity.
-        records[key] = current;
-      } else if (preimage && hostPathKey(paths, key) === key && retirementLanded(key, old, retirement)) {
-        const copy = observeFile(preimagePath(transaction, key)).observation;
-        if (copy.existed && copy.type === 'file' && old.committed.type === 'file' && copy.sha256 === old.committed.sha256) {
-          restorePreimage(transaction, key, stage?.(key));
-          records[key] = restoredRecord(old, key);
-        } else unresolved.push(key);
-      } else if (!pathRecordIsCurrent(key, old)) unresolved.push(key);
+      } else {
+        const original = old ?? retirement.record;
+        const restored = rollbackLanded(key, retirement)
+          ?? (current && pathRecordIsCurrent(key, current) ? current : undefined)
+          ?? (preimage && retirementLanded(key, retirement) ? rollbackRetiredPath(paths, key, retirement, transaction) : undefined);
+        records[key] = restored ?? original;
+        if (!restored && !pathRecordIsCurrent(key, original)) unresolved.push(key);
+      }
       continue;
     }
     const marker = replacedPathAdoption(transaction, key);
