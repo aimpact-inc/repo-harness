@@ -111,6 +111,13 @@ test('the JSON migration adopts a tagged entry with the old writer shape, keeps 
     'a status line command edit': ['statusLine', (data) => { data.statusLine.command += '; user-status-command'; }],
     // The tag and the suffix stay, so only an exact match against rh's rendering finds the edit (#3232).
     'a status line inline segment': ['statusLine', (data) => { data.statusLine.command = data.statusLine.command.replace('; exec ', `; EXAMPLE_TOKEN=${INLINE_TOKEN} exec `); }],
+    // No manifest hash, so only an exact match against rh's rendering finds the edit (#3237).
+    'a hook command inline segment': ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].hooks[0].command = data.hooks.PreToolUse[0].hooks[0].command.replace('; export ', `; EXAMPLE_TOKEN=${INLINE_TOKEN}; export `); }],
+    // Text inside a quoted path proves only as the path of an existing file with the released name.
+    'a hook Bun path segment': ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].hooks[0].command = data.hooks.PreToolUse[0].hooks[0].command.replace(/ exec '([^']*)'/, ` exec '$1 --token=${INLINE_TOKEN}'`); }],
+    'a status line bundle path segment': ['statusLine', (data) => { data.statusLine.command = data.statusLine.command.replace("/dist/hook-entry.js'", `/${INLINE_TOKEN}/dist/hook-entry.js'`); }],
+    // A path segment longer than a file name can be: its lookup fails, and the error would name the path.
+    'an overlong Bun path segment': ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].hooks[0].command = data.hooks.PreToolUse[0].hooks[0].command.replace(/ exec '[^']*'/, ` exec '/opt/${INLINE_TOKEN.repeat(10)}/bun'`); }],
     'a manifest hash mismatch': ['hooks.SessionStart[default], hooks.PreToolUse[edit], hooks.PreToolUse[subagent], hooks.PreToolUse[bash], hooks.UserPromptSubmit[inbox], hooks.Stop[default]', (data) => { data.hooks.PreToolUse[0].hooks[0].timeout = 99; }, true],
   };
   for (const [name, [kept, edit, hashed]] of Object.entries(rows)) withClaudeHome((home, settings) => {
@@ -136,13 +143,15 @@ test('the JSON migration adopts a tagged entry with the old writer shape, keeps 
       expect(JSON.parse(readFileSync(settings, 'utf8')).hooks.PreToolUse[0], name).toEqual(hooks.PreToolUse![0]);
       return;
     }
-    if (kept === 'statusLine') {
-      // An unproved status line gets a record with no text: ledger.json holds no copy of the edited command.
-      migrateJsonConfigRecords(env);
-      const record = openHostConfigGate({ env }).recorded(settings).find((entry) => entry.selector === 'statusLine')!;
-      expect({ inserted: record.inserted, preimage: record.preimage }, name).toEqual({ inserted: '', preimage: undefined });
-      expect(readFileSync(join(home, '.repo-harness/config/ledger.json'), 'utf8').includes(INLINE_TOKEN), name).toBe(false);
+    // An unproved fragment gets a record with no text: neither the uninstall preview nor ledger.json holds a copy of the edited value.
+    expect(runUserUninstall({ target: 'claude', env, dryRun: true }).lines.join('\n').includes(INLINE_TOKEN), name).toBe(false);
+    migrateJsonConfigRecords(env);
+    const records = openHostConfigGate({ env }).recorded(settings);
+    for (const selector of kept.split(', ')) {
+      const record = records.find((entry) => entry.selector === selector)!;
+      expect({ selector, inserted: record.inserted, preimage: record.preimage }, name).toEqual({ selector, inserted: '', preimage: undefined });
     }
+    expect(readFileSync(join(home, '.repo-harness/config/ledger.json'), 'utf8').includes(INLINE_TOKEN), name).toBe(false);
     const result = runUserUninstall({ target: 'claude', env });
     expect(result.status, name).toBe('partial');
     expect(result.lines, name).toContain(`[unresolved] ${settings}: changed since rh wrote it; preserved: ${kept}`);
@@ -220,6 +229,14 @@ test('a failed install undoes its gate writes through linked host files outside 
       .filter((path) => lstatSync(path).isFile() && readFileSync(path, 'utf8').includes(secret));
     expect(copies).toEqual([]);
   } finally { rmSync(outside, { recursive: true, force: true }); }
+}));
+
+test('the JSON migration proves a tagged hook only under a route that a release wrote', () => withClaudeHome((home, settings) => {
+  // The route comes from the command itself, so a released template with another route proves nothing.
+  const entry = buildManagedHooks('claude', process.env).Stop![0]!;
+  entry.hooks[0]!.command = entry.hooks[0]!.command.replace(' Stop --route default', ' Stop --route quality');
+  writeFileSync(settings, JSON.stringify({ hooks: { Stop: [entry] } }, null, 2));
+  expect(planJsonConfigMigration(process.env)!.files[0]!.adoption.fragments.map((fragment) => [fragment.selector, fragment.inserted])).toEqual([['hooks.Stop[quality]', '']]);
 }));
 
 test('the JSON migration fails closed on an interrupted receipt entry and on an rh command inside a user hook entry', () => withClaudeHome((home, settings) => {
