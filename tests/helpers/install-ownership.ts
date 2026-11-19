@@ -8,6 +8,7 @@ import { sha256Prefixed } from '../../src/core/evidence/sha256';
 import type { PathRecord } from '../../src/core/host-config/types';
 import type { PluginId, PluginSelection } from '../../src/core/skill-surface/plugin-manifest';
 import { pathRecordHost, pathRecordKey, writePathRecords } from '../../src/effects/host-config/path-records';
+import { observeEntryIdentity } from '../../src/effects/host-config/whole-path';
 import { hashManagedTree } from '../../src/effects/managed-tree';
 
 /**
@@ -77,6 +78,7 @@ export function recordInstallOwnership(paths: string[], env: NodeJS.ProcessEnv):
     return [pathRecordKey(env, path), {
       owner: directory ? 'cross-review' : 'core', host, kind: 'created', baseline: { state: 'unknown' },
       committed: directory ? { type: 'directory', sha256: hashManagedTree(path) } : { type: 'file', sha256: sha256Prefixed(readFileSync(path)) },
+      identity: observeEntryIdentity(path)!,
     }];
   }));
   writeInstallState(env, ['architecture', 'cross-review', 'mcp', 'operator', 'peer-runtime', 'platform', 'product', 'strategy-memory'], 'all', 'owned-upgrade-fixture');

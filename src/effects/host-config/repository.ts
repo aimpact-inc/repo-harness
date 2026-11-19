@@ -8,7 +8,7 @@ import { ensureCheckoutBackupDirectory, FS_BACKUP_ROOT } from '../fs-transaction
 import { isPathInside } from '../path-containment';
 import { selfIgnoringRefusal } from '../self-ignoring-directory';
 import { openRepositoryHostConfigGate, planPathRevert, rollbackHostConfigTransaction, type HostConfigRepositoryGate, type HostConfigRevertEntry, type HostConfigRollbackResult } from './gate';
-import { pathRecordEntry } from './path-records';
+import { pathRecordEntry } from './whole-path';
 import { hostConfigPaths, observeFile, readLedger, type HostConfigPaths } from './store';
 
 /**

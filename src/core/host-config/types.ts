@@ -150,6 +150,12 @@ export interface PathRecord {
    * `committed` is the hash of this file. Absent: the key is the entry.
    */
   readonly link_target?: string;
+  /**
+   * `observeEntryIdentity` of the entry when rh wrote it (#3266): a copy with the same bytes is another entry and is not rh's.
+   * Only `created` and `replaced` records have it. Absent: the protocol 5 move could not prove the entry, so the record proves
+   * nothing for a removal or an overwrite. A Herdr skill record has its marker proof instead.
+   */
+  readonly identity?: string;
 }
 
 /** Vault material that a finished revert released; `rh config gc` deletes it 30 days after `at` while no record references it. */
@@ -221,10 +227,11 @@ export interface ToolRecord {
 
 /**
  * Protocol 2 added `paths` (#2896); protocol 3 adds `retired` and `recovery`
- * (#2851); protocol 4 adds `tools` (#2853). `migrateLedgerSchema` moves an
- * older ledger once at a mutating entry.
+ * (#2851); protocol 4 adds `tools` (#2853); protocol 5 adds the path record
+ * `identity` (#3266). `migrateLedgerSchema` moves an older ledger once at a
+ * mutating entry.
  */
-export const HOST_CONFIG_LEDGER_PROTOCOL = 4;
+export const HOST_CONFIG_LEDGER_PROTOCOL = 5;
 
 export interface HostConfigLedger {
   readonly protocol: typeof HOST_CONFIG_LEDGER_PROTOCOL;

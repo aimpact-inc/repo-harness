@@ -417,7 +417,11 @@ describe('safety hook: Bash host route', () => {
       writeFileSync(ledger, '{');
       expect(ledgerCreated(cli, env)).toBe(false);
       writeFileSync(ledger, recorded);
-      // #3266: a record proves rh's ownership only while the path still holds what rh wrote.
+      // #3266: a record proves rh's ownership only while the path is still the entry that rh wrote: a same-bytes copy, an edit
+      // and a link are the user's.
+      rmSync(cli);
+      writeFileSync(cli, 'cli');
+      expect(ledgerCreated(cli, env)).toBe(false);
       writeFileSync(cli, 'cli\nuser line\n');
       expect(ledgerCreated(cli, env)).toBe(false);
       writeFileSync(join(skill, 'SKILL.md'), 'skill\nuser line\n');

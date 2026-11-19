@@ -54,12 +54,14 @@ import {
   type HostConfigPaths,
 } from './store';
 import { isPathInside } from '../path-containment';
-import { pathRecordEntry, pathRecordHostRoot, pathRecordIsCurrent } from './path-records';
+import { pathRecordHostRoot, pathRecordIsCurrent, pathRecordProof } from './path-records';
 import {
   discardStagedEntry,
   hasPreimage,
   keepPreimage,
+  observeEntryIdentity,
   observePathEntry,
+  pathRecordEntry,
   publishPathEntry,
   removePathEntry,
   restorePreimage,
@@ -186,7 +188,11 @@ export interface HostConfigRevertEntry {
    * rh has no record of the file before it, so equality cannot be proved.
    */
   readonly baseline?: 'proved' | 'unknown';
-  readonly code?: 'host_config_restore_mismatch';
+  /**
+   * With `kept_edited`: `host_config_entry_replaced` when the path holds rh's bytes in another file-system entry (a copy or a
+   * restore), `host_config_identity_missing` when its record has no identity (#3266).
+   */
+  readonly code?: 'host_config_restore_mismatch' | 'host_config_entry_replaced' | 'host_config_identity_missing';
 }
 
 /** A fragment that an earlier rh version wrote, as its old record names it. */
@@ -548,10 +554,24 @@ function ownsEntry(record: PathRecord | undefined, owner: string, key: string): 
   return record !== undefined && record.owner === owner && record.kind !== 'user_managed' && pathRecordIsCurrent(key, record);
 }
 
-function refusal(path: string, record: PathRecord | undefined, owner: string): HostConfigError {
+/**
+ * The refusal of a write over an entry that is not rh's for `owner`. A same-bytes copy and a record with no identity name their
+ * recovery: `--force` for a file that the user's word can replace (`forceable`), else moving the entry aside.
+ */
+function refusal(path: string, record: PathRecord | undefined, owner: string, key: string, forceable: boolean): HostConfigError {
+  const proof = record && record.owner === owner && record.kind !== 'user_managed' ? pathRecordProof(key, record) : null;
   const reason = !record ? 'rh has no record of it' : record.owner !== owner ? `rh records it for ${record.owner}`
-    : record.kind === 'user_managed' ? 'the user keeps it' : 'it changed since rh wrote it';
-  return new HostConfigError('host_config_replacement_refused', `${reason}, so rh does not replace it: ${path}`);
+    : record.kind === 'user_managed' ? 'the user keeps it'
+      : proof === 'replaced' ? 'it holds the bytes that rh wrote, but it is another file-system entry (a copy or a restore)'
+        : proof === 'unproved' ? 'rh recorded no identity for it, so nothing proves that rh wrote it' : 'it changed since rh wrote it';
+  const recovery = proof !== 'replaced' && proof !== 'unproved' ? ''
+    : forceable ? '. To let rh write it, run the command again with --force: rh keeps this file in the vault first' : '. Move it aside, then run rh install';
+  return new HostConfigError('host_config_replacement_refused', `${reason}, so rh does not replace it: ${path}${recovery}`);
+}
+
+/** Two records that differ at most in their identity. */
+function sameApartFromIdentity(left: PathRecord, right: PathRecord): boolean {
+  return JSON.stringify({ ...left, identity: undefined }) === JSON.stringify({ ...right, identity: undefined });
 }
 
 /** The bytes of a user file that `replace` lets rh write over, in the vault. */
@@ -573,11 +593,12 @@ function linkTargetOf(paths: HostConfigPaths, key: string, previous: PathRecord 
 }
 
 function nextPathRecord(previous: PathRecord | undefined, owner: string, host: PathRecord['host'], observed: PathCommitted | null,
-  committed: PathCommitted, backup: Sha256 | undefined, linkTarget?: string): PathRecord {
+  committed: PathCommitted, backup: Sha256 | undefined, identity: string | null, linkTarget?: string): PathRecord {
   const baseline = previous?.baseline ?? (observed === null ? { state: 'known' as const, existed: false as const }
     : observed.type === 'file' ? { state: 'known' as const, existed: true as const, sha256: observed.sha256 } : { state: 'unknown' as const });
   const kept = backup ?? (previous?.kind === 'replaced' ? previous.backup : undefined);
-  return { owner, host, kind: kept ? 'replaced' : 'created', baseline, committed, ...(kept ? { backup: kept } : {}), ...(linkTarget ? { link_target: linkTarget } : {}) };
+  return { owner, host, kind: kept ? 'replaced' : 'created', baseline, committed, ...(kept ? { backup: kept } : {}), ...(linkTarget ? { link_target: linkTarget } : {}),
+    ...(identity !== null ? { identity } : {}) };
 }
 
 /** The record key and host of a whole path that a scope admits; it throws for any other path. */
@@ -618,7 +639,7 @@ function planWholePath(paths: HostConfigPaths, write: HostConfigPathWrite, key: 
   }
   let replaces: WholePathPlan['replaces'];
   if (observed !== null && !ownsEntry(prior, write.owner, key)) {
-    if (!write.replace) throw refusal(write.path, prior, write.owner);
+    if (!write.replace) throw refusal(write.path, prior, write.owner, key, observed.type === 'file' && linkTarget === undefined);
     if (observed.type !== 'file') throw new HostConfigError('host_config_invalid_state', `only a file can be replaced on the user's word: ${write.path}`);
     if (linkTarget !== undefined) throw new HostConfigError('host_config_replacement_refused', `this path is a link to ${linkTarget}, and the user's word to replace a file does not reach through a link: ${write.path}`);
     replaces = observed;
@@ -654,8 +675,8 @@ function writeWholePaths(admit: WholePathAdmit, paths: HostConfigPaths, writes: 
     try {
       const stage = stagePathEntry(entry, write.entry, options.stage?.(entry));
       staged = stage.staged;
-      const next = nextPathRecord(prior, write.owner, host, observed, stage.committed, backup, linkTarget);
-      if (sameCommitted(observed, stage.committed) && prior && JSON.stringify(prior) === JSON.stringify(next)) {
+      const next = nextPathRecord(prior, write.owner, host, observed, stage.committed, backup, observeEntryIdentity(staged), linkTarget);
+      if (sameCommitted(observed, stage.committed) && prior && sameApartFromIdentity(prior, next)) {
         discardStagedEntry(staged);
         continue;
       }
@@ -665,6 +686,12 @@ function writeWholePaths(admit: WholePathAdmit, paths: HostConfigPaths, writes: 
       persist();
       publishPathEntry(staged, entry);
       staged = null;
+      // A rename on one file system keeps the identity; where the published entry shows another one, the record follows it.
+      const published = observeEntryIdentity(entry);
+      if (published !== null && published !== next.identity) {
+        records[key] = { ...next, identity: published };
+        persist();
+      }
       written.push(key);
     } catch (error) {
       if (staged) discardStagedEntry(staged);
@@ -767,7 +794,7 @@ function delegateWrites(env: NodeJS.ProcessEnv, paths: HostConfigPaths, declared
       && declaration.adopt !== undefined && observed.target === declaration.adopt;
     const owned = observed === null || adopted || ownsEntry(previous, declaration.owner, key);
     if (!owned && !(declaration.replace && observed.type === 'file')) {
-      throw observed.type === 'file' || !declaration.replace ? refusal(declaration.path, previous, declaration.owner)
+      throw observed.type === 'file' || !declaration.replace ? refusal(declaration.path, previous, declaration.owner, key, observed.type === 'file')
         : new HostConfigError('host_config_invalid_state', `only a file can be replaced on the user's word: ${declaration.path}`);
     }
     return { declaration, key, host, previous, observed, owned, adopted };
@@ -796,16 +823,24 @@ function delegateWrites(env: NodeJS.ProcessEnv, paths: HostConfigPaths, declared
       if (!sameCommitted(now, observed)) restorePreimage(options.transaction!, key);
       continue;
     }
-    if (sameCommitted(now, observed) && !(adopted && records[key] === undefined)) continue;
+    if (sameCommitted(now, observed) && !(adopted && records[key] === undefined)) {
+      // A writer that put rh's bytes back as a new entry keeps rh's claim on it: the record follows the entry that it owned.
+      const kept = records[key];
+      const identity = observeEntryIdentity(key);
+      if (owned && previous?.identity !== undefined && kept && JSON.stringify(kept) === JSON.stringify(previous) && identity !== null && identity !== previous.identity) {
+        records[key] = { ...previous, identity };
+      }
+      continue;
+    }
     // A failed replacement must keep the vault reference, also when the writer removed the entry.
     if ((backup !== undefined || previous?.kind === 'replaced') && now?.type !== 'file') {
       records[key] = backup !== undefined
-        ? nextPathRecord(undefined, declaration.owner, host, observed, observed!, backup)
+        ? nextPathRecord(undefined, declaration.owner, host, observed, observed!, backup, null)
         : previous!;
       invalid.push(declaration.path);
       continue;
     }
-    const next = now === null ? null : nextPathRecord(owned ? previous : undefined, declaration.owner, host, observed, now, backup);
+    const next = now === null ? null : nextPathRecord(owned ? previous : undefined, declaration.owner, host, observed, now, backup, observeEntryIdentity(key));
     if (next === null) delete records[key]; else records[key] = next;
     changed.push(key);
   }
@@ -842,15 +877,6 @@ function observeTools(paths: HostConfigPaths, ledger: HostConfigLedger, declared
     }
     return { declaration, directory, missing: missingDirectories(join(directory, '_') as HostPath), before: new Map(keys.map((key) => [key, observePathEntry(key)])) };
   });
-}
-
-/**
- * The device, file id and birth time of the entry itself (its links not
- * followed): two names of one hard link share it, and a copy has its own.
- */
-export function observeEntryIdentity(path: string): string | null {
-  const stat = lstatSync(path, { bigint: true, throwIfNoEntry: false });
-  return stat ? `${stat.dev}:${stat.ino}:${stat.birthtimeNs}` : null;
 }
 
 /**
@@ -966,8 +992,9 @@ function adoptReplacedPath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, path:
   const previous = ledger.paths[key];
   const committed = observePathEntry(key);
   if (committed?.type !== 'file') throw new HostConfigError('host_config_invalid_state', `only a file can have replaced a user file: ${path}`);
-  if (previous && !(previous.kind === 'created' && ownsEntry(previous, owner, key))) throw refusal(path, previous, owner);
-  const record: PathRecord = { owner, host, kind: 'replaced', baseline: previous?.baseline ?? { state: 'unknown' }, committed, backup: putVault(paths, backup) };
+  if (previous && !(previous.kind === 'created' && ownsEntry(previous, owner, key))) throw refusal(path, previous, owner, key, false);
+  const identity = observeEntryIdentity(key);
+  const record: PathRecord = { owner, host, kind: 'replaced', baseline: previous?.baseline ?? { state: 'unknown' }, committed, backup: putVault(paths, backup), ...(identity !== null ? { identity } : {}) };
   writeLedger(paths, { ...ledger, paths: { ...ledger.paths, [key]: record } });
 }
 
@@ -1035,7 +1062,8 @@ function revertWholePaths(paths: HostConfigPaths, only: readonly string[], optio
     const record = ledger.paths[key];
     if (!record) continue;
     const action = planPathRevert(key, record);
-    report.push({ path: key, action });
+    const proof = action === 'kept_edited' ? pathRecordProof(key, record) : null;
+    report.push({ path: key, action, ...(proof === 'replaced' ? { code: 'host_config_entry_replaced' as const } : proof === 'unproved' ? { code: 'host_config_identity_missing' as const } : {}) });
     if (action === 'kept_edited') continue;
     const entry = pathRecordEntry(key, record);
     dropped.push(entry);
@@ -1506,14 +1534,22 @@ function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, no
     const current = now.paths[key];
     // A linked record acts on the file that its link names, also for the transaction's preimage.
     const at = pathRecordEntry(key, (current ?? old)!);
-    if (JSON.stringify(old) === JSON.stringify(current) && !hasPreimage(transaction, at)) continue;
+    if (old && current && !hasPreimage(transaction, at)
+      && (JSON.stringify(old) === JSON.stringify(current) || (old.identity === undefined && sameApartFromIdentity(old, current)))) {
+      // A protocol 4 snapshot has no identities: the record keeps the one that the move of the live ledger gave it.
+      records[key] = current;
+      continue;
+    }
     // A claim or release of a file that the user keeps changes no entry.
     if (current?.kind === 'user_managed' || (!current && old?.kind === 'user_managed')) continue;
     if (!current) {
       const entry = observePathEntry(at);
       // A revert in this transaction took the record out: the entry is gone, or it is the user file that came back from the vault.
       const reverted = entry === null || (old!.kind === 'replaced' && entry.type === 'file' && entry.sha256 === old!.backup);
-      if (reverted && hasPreimage(transaction, at)) restorePreimage(transaction, at, stage?.(at));
+      if (reverted && hasPreimage(transaction, at)) {
+        restorePreimage(transaction, at, stage?.(at));
+        records[key] = restoredRecord(old!, at);
+      }
       // A claim released on observation is a fact, not an effect of this transaction: it stays released (P4).
       else if (entry === null) delete records[key];
       else if (!pathRecordIsCurrent(key, old!)) unresolved.push(key);
@@ -1525,10 +1561,22 @@ function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, no
       replaceTarget(at as HostPath, readVault(paths, current.backup!), { existed: true, sha256: committed.sha256 }, stage?.(at));
     } else if (!old && !hasPreimage(transaction, at)) removePathEntry(at);
     // A link that this transaction adopted has a preimage of itself, so it comes back; a created entry has an absent preimage.
-    else if (hasPreimage(transaction, at)) restorePreimage(transaction, at, stage?.(at));
+    else if (hasPreimage(transaction, at)) {
+      restorePreimage(transaction, at, stage?.(at));
+      if (old) records[key] = restoredRecord(old, at);
+    }
     else { records[key] = current; unresolved.push(key); }
   }
   return records;
+}
+
+/**
+ * The record of an entry that a rollback put back from the transaction's preimage, which is a new file-system entry. The
+ * transaction replaced or removed only an entry that rh owned then, so the copy of it is rh's entry, with its new identity.
+ */
+function restoredRecord(record: PathRecord, entry: string): PathRecord {
+  const identity = observeEntryIdentity(entry);
+  return record.kind === 'user_managed' || 'proof' in record.committed || identity === null ? record : { ...record, identity };
 }
 
 type LedgerReader = (paths: HostConfigPaths) => HostConfigLedger;

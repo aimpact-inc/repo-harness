@@ -136,11 +136,16 @@ const REVERT_REASONS: Readonly<Record<HostConfigRevertEntry['action'], string>> 
 
 const BASELINE_UNKNOWN = 'baseline unknown: equality with the file before install cannot be proved';
 
+const KEPT_CODES: Readonly<Partial<Record<NonNullable<HostConfigRevertEntry['code']>, string>>> = {
+  host_config_entry_replaced: 'holds the bytes that rh wrote, but it is another file-system entry (a copy or a restore); preserved',
+  host_config_identity_missing: 'rh recorded no identity for it, so nothing proves that rh wrote it; preserved',
+};
+
 /** The report item of one gate revert entry; `rh config restore` uses the same mapping. */
 export function revertItem(entry: HostConfigRevertEntry): UninstallItem {
   const action: UninstallAction = entry.action === 'kept_edited' ? 'unresolved' : entry.action === 'already_absent' ? 'note'
     : entry.action === 'failed' ? 'failed' : entry.baseline === 'proved' ? 'restored' : 'reverted';
-  const reason = [REVERT_REASONS[entry.action], ...(entry.baseline === 'unknown' && action === 'reverted' ? [BASELINE_UNKNOWN] : [])].join('; ');
+  const reason = [(entry.code && KEPT_CODES[entry.code]) || REVERT_REASONS[entry.action], ...(entry.baseline === 'unknown' && action === 'reverted' ? [BASELINE_UNKNOWN] : [])].join('; ');
   return { path: entry.path, action, reason: entry.kept?.length ? `${reason}: ${entry.kept.join(', ')}` : reason };
 }
 
