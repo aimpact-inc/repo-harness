@@ -106,14 +106,16 @@ const MAGPIE_MISSING = `Magpie extension missing. Checked ${MAGPIE_EXTENSION_PAT
 function runtimeStatus(probe: SeatPoolProbe): ModelStatus {
   if (probe.installation !== 'available') return probe.installation;
   if (probe.id === 'pi') return 'pi_on_path';
-  if (probe.sign_in === 'logged_out' || probe.models === 'unauthenticated') return 'signed_out';
+  if (probe.sign_in === 'logged_out') return 'signed_out';
   return probe.sign_in === 'logged_in' ? 'available' : 'unknown';
 }
 
 function modelStatus(entry: Pick<SeatConfigV1, 'runtime' | 'model'>, probe: SeatPoolProbe, routing: SeatsConfigV1['routing'], checkCatalog: boolean): ModelStatus {
   const status = runtimeStatus(probe);
   if (status === 'pi_on_path') return unavailablePiSeat(entry, routing) === null ? status : 'provider_unavailable';
-  if (status !== 'available' || !checkCatalog) return status;
+  if (status !== 'available') return status;
+  if (probe.models === 'unauthenticated') return 'signed_out';
+  if (!checkCatalog) return status;
   if (probe.models !== 'ok') return 'unknown';
   const model = probe.listed.find(item => item.id === entry.model);
   if (model === undefined) return 'not_listed';
@@ -124,18 +126,23 @@ function runtimeProbe(probes: readonly SeatPoolProbe[], id: SeatRuntime): SeatPo
   return probes.find(probe => probe.id === id) ?? emptySeatPoolProbe(id, 'unknown');
 }
 
+function availabilityBlock(id: SeatId, runtime: SeatRuntime, status: ModelStatus): string | null {
+  if (available(status)) return null;
+  const hint = entryHint(runtime, status);
+  return `${runtime}: ${SEAT_POOL_REASONS[status]}. See seats.${id}.model.${hint === null ? '' : ` ${hint}`}`;
+}
+
+export function seatRuntimeBlock(id: SeatId, runtime: SeatRuntime, probes: readonly SeatPoolProbe[]): string | null {
+  return availabilityBlock(id, runtime, runtimeStatus(runtimeProbe(probes, runtime)));
+}
+
 /** Launch and dispatch share the live status. Free ids get the runtime check and stay out of the result. */
 export function seatModelBlock(id: SeatId, seat: SeatConfigV1, seats: SeatsConfigV1, probes: readonly SeatPoolProbe[], magpieInstalled: () => boolean): string | null {
   const probe = runtimeProbe(probes, seat.runtime);
   const recommended = SEAT_RECOMMENDED_MODELS[id].some(entry => entry.model === seat.model && entry.runtime === seat.runtime);
   const status = modelStatus(seat, probe, seats.routing, recommended);
-  const field = `See seats.${id}.model.`;
-  if (!available(status)) {
-    const hint = entryHint(seat.runtime, status);
-    return `${seat.runtime}: ${SEAT_POOL_REASONS[status]}. ${field}${hint === null ? '' : ` ${hint}`}`;
-  }
-  if (status === 'pi_on_path' && seat.model?.startsWith('magpie/') && !magpieInstalled()) return `${MAGPIE_MISSING} ${field}`;
-  return null;
+  if (status === 'pi_on_path' && seat.model?.startsWith('magpie/') && !magpieInstalled()) return `${MAGPIE_MISSING} See seats.${id}.model.`;
+  return availabilityBlock(id, seat.runtime, status);
 }
 
 function recommendedEntries(id: SeatId, routing: SeatsConfigV1['routing'], probes: readonly SeatPoolProbe[]): PoolEntry[] {

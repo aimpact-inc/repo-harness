@@ -3,7 +3,7 @@ import { planRefusal, requiredCheckDetail } from './merge';
 import type { SeatRouteV1 } from './seat-routing';
 import { isReviewSeat, SEAT_IDS, type SeatId } from './seats-settings';
 import { modelFamily } from '../review/model-family';
-import { carriedPasses } from './review-rules';
+import { gatekeeperReviewEvidence } from './review-rules';
 import { claimStatusTarget, newestProtocolComment, parseAcceptanceRecord, parseClaimStatus, protocolComments, type BoardCommentPageV1, type BoardCommentV1 } from './source';
 
 /**
@@ -84,13 +84,6 @@ function liveMarkers(page: BoardCommentPageV1, seat: ReviewSeat): BoardCommentV1
     .filter(comment => parseClaimStatus(comment)?.status.startsWith('released') === true)
     .map(claimStatusTarget));
   return protocolComments(page, REVIEW_START_HEADER).filter(comment => field(comment, 'Seat') === seat && !released.has(comment.url));
-}
-
-/** The model families of the acceptance rows that cover this head, including a carried gatekeeper PASS. */
-function recordedFamilies(comments: BoardCommentPageV1, head_sha: string): string[] {
-  const rows = protocolComments(comments, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? []);
-  return [...rows.filter(row => row.subject_sha === head_sha), ...carriedPasses({ comments, head_sha })]
-    .flatMap(row => row.model === null ? [] : modelFamily(row.model) ?? []);
 }
 
 /**
@@ -182,14 +175,14 @@ export function planReview(input: ReviewInputV1): readonly ReviewDecisionV1[] {
     const givesDifferentFamily = tier === 'medium' || pr.second_review === 'not_required';
     const gatekeeperGap = seats.some(entry => entry.seat === 'gatekeeper') ? gatekeeperFamilyGap(input.gatekeeper, pr.writer_family, givesDifferentFamily, reviewerRow ? reviewer : null) : null;
     if (gatekeeperGap !== null) return skip('review_family_unavailable', `${gatekeeperGap}; ${routeWithoutModel(input.gatekeeper)}`);
-    const startingGatekeeper = seats.some(entry => entry.seat === 'gatekeeper');
-    const startedFamilies = tier === 'high' && !startingGatekeeper && seats.some(entry => entry.seat === 'reviewer') ? recordedFamilies(page, pr.head_sha) : [];
-    const reviewerGap = seats.some(entry => entry.seat === 'reviewer')
-      ? relayOpen && tier === 'high' && startedFamilies.length === 0
-        ? 'the gatekeeper PASS has no recorded model family'
-        : reviewerFamilyGap(reviewer, startedFamilies.length > 0 ? startedFamilies : [gatekeeperFamily(input.gatekeeper)], tier)
-      : null;
-    if (reviewerGap !== null) return skip('review_family_unavailable', reviewerGap);
+    if (seats.some(entry => entry.seat === 'reviewer')) {
+      const families = tier === 'high' && relayOpen
+        ? gatekeeperReviewEvidence({ comments: page, head_sha: pr.head_sha }, reviewer).passFamilies
+        : [gatekeeperFamily(input.gatekeeper)];
+      if (families.length === 0) return skip('review_family_unavailable', 'the gatekeeper PASS has no recorded model family');
+      const gap = reviewerFamilyGap(reviewer, families, tier);
+      if (gap !== null) return skip('review_family_unavailable', gap);
+    }
     return { pr: pr.number, action: 'start', head_ref: pr.head_ref, head_sha: pr.head_sha, tier, round: roundOf(page, pr.head_sha), seats };
   });
 }

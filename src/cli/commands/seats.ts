@@ -24,7 +24,7 @@ import { handoffIdentity, seatResetAction, seatResetIdentity, seatResetSteps, ty
 import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
 import { PlannerConsultError } from '../../core/board/planner-consult';
 import { runPlannerConsult } from '../../effects/board/planner-consult';
-import { formatSeatPool, seatModelBlock, seatPoolHint } from '../../core/board/seat-pool';
+import { formatSeatPool, seatModelBlock, seatPoolHint, seatRuntimeBlock } from '../../core/board/seat-pool';
 import { collectSeatPoolProbes, magpieExtensionInstalled, refreshSeatPool, SeatsConfigurationError } from '../../effects/board/seats-configuration';
 
 const CLI_ENTRY = fileURLToPath(new URL('../index.ts', import.meta.url));
@@ -238,8 +238,6 @@ async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, configur
   if (id === 'gatekeeper-deep' && deepGatekeeperRepeatsGatekeeper(seats, quota)) {
     throw new SeatsCommandError('seat_model_repeats_gatekeeper', 'The gatekeeper-deep seat runs the same model as the gatekeeper. Set a different model on the Seats page. See the quota routes.');
   }
-  const unavailable = unavailablePiSeat(seat, seats.routing);
-  if (unavailable !== null) throw new SeatsCommandError('seat_provider_unavailable', `The ${id} seat cannot launch: ${unavailable}. See the quota routes.`);
   return { id: launchedId, seat, modeKnown: account === null || quota[account].remaining !== null, claudeSaving: !isPlannerSeat(id) && quota.claude.mode === 'saving' };
 }
 
@@ -298,19 +296,26 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   }
   const labelSet = seatLabels(id, labels);
   const plannedSeat = id === 'gatekeeper' && planned !== undefined ? plannedGatekeeper(planned) : null;
-  const checkedId = plannedSeat?.id === 'gatekeeper-fallback' ? plannedSeat.id : id;
-  const probes = checkAvailability ? collectSeatPoolProbes(env) : null;
-  const check = (modelSeat: SeatId, candidate: SeatConfigV1) => {
-    if (probes === null) return;
-    const reason = seatModelBlock(modelSeat, candidate, seats, probes, () => magpieExtensionInstalled(env));
-    if (reason !== null) throw new SeatProviderUnavailableError(`The ${id} seat cannot launch. ${reason} ${seatPoolHint(modelSeat, seats, probes)}`);
+  const runtimeSeat = plannedSeat?.id === 'gatekeeper-fallback' ? plannedSeat.id : id;
+  const probes = checkAvailability ? collectSeatPoolProbes(env) : [];
+  const unavailable = (modelSeat: SeatId, reason: string) => {
+    throw new SeatProviderUnavailableError(`The ${id} seat cannot launch. ${reason} ${seatPoolHint(modelSeat, seats, probes)}`);
   };
-  check(checkedId, plannedSeat?.seat ?? configured);
+  if (checkAvailability) {
+    const reason = seatRuntimeBlock(runtimeSeat, (plannedSeat?.seat ?? configured).runtime, probes);
+    if (reason !== null) unavailable(runtimeSeat, reason);
+  }
   // A planned gatekeeper route reserves no Claude seat while Claude is saving or exhausted.
   const { id: effectiveId, seat: effective, modeKnown, claudeSaving } = plannedSeat !== null
-    ? { id: checkedId, seat: plannedSeat.seat, modeKnown: true, claudeSaving: false }
+    ? { id: runtimeSeat, seat: plannedSeat.seat, modeKnown: true, claudeSaving: false }
     : await quotaCheckedSeat(id, seats, configured, env, labels.ownerException);
-  if (plannedSeat === null && (effectiveId !== checkedId || effective.model !== configured.model)) check(effectiveId, effective);
+  if (checkAvailability) {
+    const reason = seatModelBlock(effectiveId, effective, seats, probes, () => magpieExtensionInstalled(env));
+    if (reason !== null) unavailable(effectiveId, reason);
+  } else {
+    const reason = unavailablePiSeat(effective, seats.routing);
+    if (reason !== null) throw new SeatsCommandError('seat_provider_unavailable', `The ${id} seat cannot launch: ${reason}. See the quota routes.`);
+  }
   if (effective.runtime === 'pi') await assertPiShell(env, cwd);
   // The pane name needs the registry prefix, so it comes only with the seat labels.
   const name = labels.repositoryId === undefined ? null : seatPaneName({

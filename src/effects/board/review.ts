@@ -76,8 +76,8 @@ function markerBody(decision: StartDecision, start: ReviewSeatStartV1): string {
 }
 
 /**
- * Start each required seat of each `start` decision: refuse unless the writer's worktree is at the head, then post the seat's head
- * marker and open its tab. A launch that failed before any request releases that seat's marker only, so a retry starts that seat
+ * Resolve every launch for a `start` decision in the writer's worktree before posting a marker or opening a tab.
+ * A tab request that failed before sending releases that seat's marker only, so a retry starts that seat
  * without a second one of the other. A launch that may have created the tab keeps its marker and stops, because a retry could
  * start a second seat of that role for the head.
  */
@@ -93,9 +93,13 @@ export async function executeReview(decisions: readonly ReviewDecisionV1[], cont
       refuse(decision.pr, worktree.refusal);
       continue;
     }
+    const launches = [];
+    const labels = { repositoryId: context.repositoryId, pr: String(decision.pr), parent: String(context.parent) };
     for (const start of decision.seats) {
-      // The launch is read before the marker: a configuration error then leaves no marker, so a retry works once it is fixed.
-      const launch = await ports.launch(start.seat, { repositoryId: context.repositoryId, pr: String(decision.pr), parent: String(context.parent) }, worktree.path, context.gatekeeper);
+      const launch = await ports.launch(start.seat, labels, worktree.path, context.gatekeeper);
+      launches.push({ start, launch });
+    }
+    for (const { start, launch } of launches) {
       const markerUrl = ports.comment(decision.pr, markerBody(decision, start));
       try {
         ports.openTab({ ...(launch.tab === null ? {} : { name: launch.tab }), space: context.space, folder: worktree.path, argv: launch.argv, task: reviewPacket(decision, start, launch.runtime) });

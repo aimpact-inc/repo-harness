@@ -7,8 +7,10 @@ import { executeReview, withReviewLock, type ReviewPorts } from '../src/effects/
 import { HerdrCoreError } from '../src/effects/terminal/herdr-core';
 import type { BoardPullRequestV1, BoardV1 } from '../src/core/board/board';
 import type { BoardCommentPageV1, BoardCommentV1, BoardPullRequestReadV1 } from '../src/core/board/source';
+import { renderAcceptanceDispositionComment } from '../src/core/board/protocol-comments';
+import { SeatProviderUnavailableError } from '../src/cli/commands/seats';
 import type { SeatRouteV1 } from '../src/core/board/seat-routing';
-import { DEFAULT_SEATS_CONFIG, type SeatConfigV1 } from '../src/core/board/seats-settings';
+import { DEFAULT_SEATS_CONFIG, type SeatConfigV1, type SeatId } from '../src/core/board/seats-settings';
 import { acceptance, gatekeeperReview, secondReview } from '../src/core/board/review-rules';
 import { renderAcceptanceClaim, renderAcceptanceRecord, type ReviewPublishReceipt } from '../src/core/review/review-publish';
 
@@ -152,6 +154,20 @@ test('each required seat opens its tab with its launch argv in the writer worktr
   expect(p.tabs[1]).toMatchObject({ argv: ['reviewer'], folder: '/tmp/w', name: 'reviewer', space: 's' });
 });
 
+test('a signed-out reviewer leaves the whole High start decision without markers or tabs', async () => {
+  const unavailable = new SeatProviderUnavailableError('The reviewer seat cannot launch. claude: Runtime signed out.');
+  const checked: SeatId[] = [];
+  const p = ports({ launch: async seat => {
+    checked.push(seat);
+    if (seat === 'reviewer') throw unavailable;
+    return { argv: [seat], tab: seat, runtime: 'codex' };
+  } });
+  const decisions = plan([pr(1, { second_review: 'pending' })]);
+  await expect(executeReview(decisions, context, p)).rejects.toBe(unavailable);
+  expect(checked).toEqual(['gatekeeper', 'reviewer']);
+  expect([p.comments, p.tabs]).toEqual([[], []]);
+});
+
 test('a dry run, and a worktree off the head, write no marker and open no seat', async () => {
   const dry = ports();
   await executeReview(high, { ...context, dry_run: true }, dry);
@@ -216,6 +232,20 @@ test('the gatekeeper starts only when the effective gatekeeper is of another kno
   });
   // A Medium head of another writer family starts the Claude reviewer, which the gatekeeper check does not touch.
   expect(label(plan([pr(1, { tier: 'medium', writer_family: 'openai' })], page(), [], route(DEFAULT_SEATS_CONFIG.gatekeeper, null)))).toEqual(['1:start']);
+});
+
+test('a disposed gatekeeper FAIL supplies no family to a model-less gatekeeper PASS', () => {
+  const url = 'https://github.com/example/repo/pull/1#issuecomment-10';
+  const fail = comment(`${record(SHA).body}\n\nFindings:\n\n- P1 resolved-finding at src/review.ts:1: Resolved.`, url);
+  const disposition = comment(renderAcceptanceDispositionComment({
+    record: url, subject: SHA, findings: ['resolved-finding'], decision: 'https://github.com/example/repo/issues/1#issuecomment-11',
+  }));
+  const comments = page(fail, disposition, record(SHA, 'pi', 'PASS'));
+  const verdict = gatekeeperReview({ head_sha: SHA, comments } as BoardPullRequestReadV1, 'anthropic');
+  expect(verdict).toBe('pass');
+  expect(plan([pr(1, { second_review: 'pending', gatekeeper_review: verdict })], comments)[0]).toMatchObject({
+    action: 'skip', reason: 'review_family_unavailable', detail: 'the gatekeeper PASS has no recorded model family',
+  });
 });
 
 test('a reviewer that sent nothing releases its own marker and leaves the started gatekeeper alone', async () => {

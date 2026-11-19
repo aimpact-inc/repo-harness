@@ -702,6 +702,20 @@ describe('rh seats launch availability', () => {
     expect(calls).toEqual(['app-server --help', '--version', 'login status']);
   });
 
+  test('launch checks the quota-selected advisor model when the configured model is absent from the catalog', () => {
+    const f = poolFixture('claude');
+    const catalog = f.run();
+    expect(catalog.status, catalog.stderr).toBe(0);
+    expect(decodeSeatPool(JSON.parse(catalog.stdout)).seats.find(row => row.seat === 'advisor')?.configured)
+      .toMatchObject({ in_pool: false, reason: 'not_listed' });
+    const tab = join(f.home, 'tab.json');
+    fixtureHerdr(f.env, tab);
+    const result = launchSeat('advisor', f.env);
+    expect(result.status, result.stderr).toBe(0);
+    const argv = JSON.parse(readFileSync(tab, 'utf8')).argv as string[];
+    expect(argv.slice(argv.indexOf('--model'), argv.indexOf('--model') + 2)).toEqual(['--model', 'opus']);
+  });
+
   test('launch ignores a stale negative and sends the unchanged free id only to the tab', () => {
     const f = poolFixture('claude');
     const free = 'private-free-id';
