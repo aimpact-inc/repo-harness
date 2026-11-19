@@ -49,6 +49,8 @@ export interface ReviewInputV1 {
   readonly comments: ReadonlyMap<number, BoardCommentPageV1>;
   /** `effectiveGatekeeper`: the seat that `seats argv gatekeeper` launches now, and its route line. */
   readonly gatekeeper: SeatRouteV1;
+  /** The configured `reviewer` seat model, so a refusal names the id; `BoardV1.reviewer_family` stays the family authority. */
+  readonly reviewer_model: string | null;
 }
 
 /** Why the effective gatekeeper cannot give this head its different-family review, or null when it can. */
@@ -63,8 +65,8 @@ function gatekeeperFamilyGap(gatekeeper: SeatRouteV1, writer: string | null, giv
 const gatekeeperFamily = (gatekeeper: SeatRouteV1): string | null => gatekeeper.id === null || gatekeeper.seat.model === null ? null : modelFamily(gatekeeper.seat.model);
 
 /** Why the configured reviewer cannot give this head an independent row, or null when it can. */
-function reviewerFamilyGap(reviewer: string | null, gatekeepers: readonly (string | null)[], tier: 'medium' | 'high'): string | null {
-  if (reviewer === null) return 'the reviewer seat model has no known family';
+function reviewerFamilyGap(reviewer: string | null, model: string | null, gatekeepers: readonly (string | null)[], tier: 'medium' | 'high'): string | null {
+  if (reviewer === null) return `the reviewer seat model ${model ?? 'default'} has no known family, so its row cannot count as another family`;
   return tier === 'high' && gatekeepers.includes(reviewer) ? `the reviewer family ${reviewer} is the gatekeeper family, so the two rows are not independent` : null;
 }
 
@@ -179,7 +181,7 @@ export function planReview(input: ReviewInputV1): readonly ReviewDecisionV1[] {
     // A gatekeeper that already started for this head is the one that counts: its recorded rows give its family, and only a head with no row yet falls back to the current route.
     const startedFamilies = seats.some(entry => entry.seat === 'gatekeeper') ? [] : recordedFamilies(page, pr.head_sha);
     const reviewerGap = seats.some(entry => entry.seat === 'reviewer')
-      ? reviewerFamilyGap(reviewer, startedFamilies.length > 0 ? startedFamilies : [gatekeeperFamily(input.gatekeeper)], tier) : null;
+      ? reviewerFamilyGap(reviewer, input.reviewer_model, startedFamilies.length > 0 ? startedFamilies : [gatekeeperFamily(input.gatekeeper)], tier) : null;
     if (reviewerGap !== null) return skip('review_family_unavailable', reviewerGap);
     return { pr: pr.number, action: 'start', head_ref: pr.head_ref, head_sha: pr.head_sha, tier, round: roundOf(page, pr.head_sha), seats };
   });

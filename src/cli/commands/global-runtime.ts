@@ -13,7 +13,7 @@ import type { SkillHost } from '../../effects/host-skill-roots';
 import { pathRecordIsCurrent, pathRecordKey, readPathRecords } from '../../effects/host-config/path-records';
 import { architecturePort, isArchitectureUnavailable } from '../../core/architecture/contracts';
 import { globalConfigurationWriter, mutateGlobalConfiguration } from '../../effects/configuration/global-configuration';
-import { DEFAULT_SEATS_CONFIG, INTRODUCED_ROUTING_DEFAULTS, ROUTING_CLASSES, SeatsConfigMigrationRequiredError, decodeSeatsConfig } from '../../core/board/seats-settings';
+import { DEFAULT_SEATS_CONFIG, INTRODUCED_ROUTING_DEFAULTS, ROUTING_CLASSES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, seatModelShapeValid } from '../../core/board/seats-settings';
 import { checkSeatRoutingModels, seatsRanges } from '../../effects/board/seats-configuration';
 import { chmodSync, closeSync, constants, cpSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync } from "fs";
 import { syncDirectoryDurably, writeAllSync } from '../../effects/atomic-append';
@@ -1720,10 +1720,9 @@ export function migrateSeatsConfiguration(env: NodeJS.ProcessEnv, runtimeLock?: 
       const ranges = seatsRanges([]);
       for (const target of targets) {
         const value = hyper![target] as Record<string, unknown> | null;
-        const runtime = ranges.runtimes.find(runtime => runtime.id === (target === 'codex' ? 'codex' : 'claude'))!;
         if (typeof value !== 'object' || value === null || Array.isArray(value) || Object.keys(value).length !== 2
           || !Object.hasOwn(value, 'model') || !Object.hasOwn(value, 'effort')
-          || value.model !== null && !runtime.models.includes(value.model as string)
+          || value.model !== null && !seatModelShapeValid(target === 'codex' ? 'codex' : 'claude', value.model)
           || value.effort !== null && !ranges.efforts.includes(value.effort as string)) invalid();
       }
       const { mode: _mode, hyper: _hyper, ...kept } = row;

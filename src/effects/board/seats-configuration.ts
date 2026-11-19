@@ -12,6 +12,7 @@ import {
   WORKER_SEAT_IDS,
   SeatsConfigMigrationRequiredError,
   decodeSeatsConfig,
+  seatsConfigInvalidMessage,
   seatTakesFleet,
   type SeatConfigV1,
   type SeatModelV1,
@@ -80,7 +81,7 @@ const CODEX_MODELS = [...new Set([...Object.values(AGENT_TARGET_OVERRIDES).map(t
     const seat = DEFAULT_SEATS_CONFIG[id];
     return seat?.runtime === 'codex' && seat.model !== null ? [seat.model] : [];
   }),
-  // A full-section save also checks seats that still use these earlier models.
+  // Seats that still use these earlier models keep them as choices.
   'gpt-6-astra', 'gpt-6.1-sol'])];
 
 const RUNTIME_RANGES: Readonly<Record<SeatRuntime, Omit<SeatRuntimeRangeV1, 'id' | 'enabled'>>> = {
@@ -117,7 +118,7 @@ function enabledRuntimesOf(config: Record<string, unknown>): readonly string[] {
 function decodeSeatsSection(value: unknown): SeatsConfigV1 {
   try { return decodeSeatsConfig(value); } catch (error) {
     if (error instanceof SeatsConfigMigrationRequiredError) throw new SeatsConfigurationError(error.code, error.message);
-    throw configInvalid('seats');
+    throw new SeatsConfigurationError('config_invalid', seatsConfigInvalidMessage(error));
   }
 }
 
@@ -131,11 +132,9 @@ export function readSeatsConfiguration(env: NodeJS.ProcessEnv = process.env): Se
   return { revision: document.revision, seats: decodeSeatsSection(document.config.seats), enabled_runtimes: enabledRuntimesOf(document.config) };
 }
 
-function checkModelAndEffort(subject: string, model: SeatModelV1, runtimeId: SeatRuntime): void {
+/** The model id is the user's (#3250): the request decoder owns its shape, and `models` in the ranges only recommends. */
+function checkEffort(subject: string, model: SeatModelV1, runtimeId: SeatRuntime): void {
   const runtime = RUNTIME_RANGES[runtimeId];
-  if (model.model !== null && !runtime.models.includes(model.model)) {
-    throw new SeatsConfigurationError('seat_model_invalid', `The ${subject} cannot use model ${model.model} on ${runtimeId}.`);
-  }
   if (model.effort !== null && (!runtime.effort || !EFFORT_LEVELS.includes(model.effort))) {
     throw new SeatsConfigurationError('seat_effort_invalid', `The ${subject} cannot use effort ${model.effort} on ${runtimeId}.`);
   }
@@ -145,7 +144,7 @@ export function checkSeatRoutingModels(routing: SeatRoutingV1): void {
   if (routing.low_quota_explorer.model === null) {
     throw new SeatsConfigurationError('seat_model_invalid', 'The routing.low_quota_explorer model is required.');
   }
-  checkModelAndEffort('routing.low_quota_explorer', routing.low_quota_explorer, 'claude');
+  checkEffort('routing.low_quota_explorer', routing.low_quota_explorer, 'claude');
 }
 
 function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly string[]): void {
@@ -154,7 +153,7 @@ function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly str
   if (!enabledRuntimes.includes(seat.runtime)) {
     throw new SeatsConfigurationError('seat_runtime_not_enabled', `The ${id} seat runtime ${seat.runtime} is not enabled in Agent settings.`);
   }
-  checkModelAndEffort(`${id} seat`, seat, seat.runtime);
+  checkEffort(`${id} seat`, seat, seat.runtime);
   const tool = seat.tools.find(item => !range.tools.includes(item));
   if (tool !== undefined) throw new SeatsConfigurationError('seat_tool_not_allowed', `The ${id} seat cannot have the ${tool} tool group.`);
   const role = seat.fleet.find(name => !runtime.fleet || !seatTakesFleet(seat) || !range.fleet.includes(name));

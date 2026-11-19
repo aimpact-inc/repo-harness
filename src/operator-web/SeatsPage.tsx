@@ -104,6 +104,22 @@ function PercentInput({ field, label, value, min, max, disabled, commit }: {
   );
 }
 
+/** A typed model id outside the recommended list (#3250). The server checks its shape on save; the agent checks the id at launch. */
+function ModelInput({ label, disabled, commit }: { readonly label: string; readonly disabled: boolean; readonly commit: (model: string) => void }) {
+  const [draft, setDraft] = useState('');
+  const accept = (text: string) => {
+    setDraft('');
+    if (text.trim() !== '') commit(text.trim());
+  };
+  return (
+    <input type="text" value={draft} disabled={disabled} aria-label={label} placeholder={label} spellCheck={false}
+      className={MODEL_INPUT} data-model-input
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={(event) => accept(event.target.value)}
+      onKeyDown={(event) => { if (event.key === 'Enter') accept(event.currentTarget.value); }} />
+  );
+}
+
 function ToggleRow({ name, mono, badge, detail, why, on, locked, aria, onToggle }: {
   readonly name: string; readonly mono: boolean; readonly badge: ReactNode; readonly detail: string; readonly why: string | null;
   readonly on: boolean; readonly locked: boolean; readonly aria: string; readonly onToggle: (on: boolean) => void;
@@ -193,7 +209,7 @@ function SeatCard({ seat, form, agents, settings, setup, locked, t }: {
   const models = [
     { value: null, label: t('seats.model.hostDefault') },
     ...runtime.models.map(model => ({ value: model as string | null, label: model })),
-    // A stored model the runtime no longer offers stays visible; Save then names it.
+    // A typed or stored model outside the recommended list stays visible as a choice.
     ...(draft.model !== null && !runtime.models.includes(draft.model) ? [{ value: draft.model as string | null, label: draft.model }] : []),
   ];
   const efforts = [{ value: null, label: t('seats.effort.default') }, ...ranges.efforts.map(effort => ({ value: effort as string | null, label: effort, off: !runtime.effort }))];
@@ -227,6 +243,7 @@ function SeatCard({ seat, form, agents, settings, setup, locked, t }: {
       <Field label={t('seats.field.model')}>
         <Segmented label={t('seats.field.model')} disabled={locked} value={draft.model} options={models}
           onPick={value => form.edit(current => setSeatModel(current, seat, value))} />
+        <ModelInput label={t('seats.model.custom')} disabled={locked} commit={value => form.edit(current => setSeatModel(current, seat, value))} />
         <span className="text-xs text-kumo-brand">
           {seat === 'worker' ? t('seats.rec.worker') : recommended?.model ? t('seats.rec.model', { model: recommended.model }) + check(draft.model === recommended.model) : ''}
         </span>
@@ -302,6 +319,7 @@ function SeatCard({ seat, form, agents, settings, setup, locked, t }: {
   );
 }
 
+const MODEL_INPUT = 'h-7 w-48 rounded-md border border-kumo-line bg-kumo-base px-2 font-mono text-xs text-kumo-default focus-visible:ring-2 focus-visible:ring-kumo-brand focus-visible:outline-none';
 const NUMBER_INPUT = 'h-7 w-16 rounded-md border border-kumo-line bg-kumo-base px-2 font-mono text-xs text-kumo-default focus-visible:ring-2 focus-visible:ring-kumo-brand focus-visible:outline-none';
 const ICON_BUTTON = 'size-6 cursor-pointer rounded-md text-xs text-kumo-subtle hover:bg-kumo-fill disabled:cursor-not-allowed disabled:opacity-40';
 
@@ -358,6 +376,7 @@ function RoutingEditor({ form, settings, quota, locked, t }: {
         <Segmented label={t('seats.field.model')} disabled={locked} value={explorer.model ?? ''}
           options={[...claude.models, ...(explorer.model !== null && !claude.models.includes(explorer.model) ? [explorer.model] : [])].map(model => ({ value: model, label: model }))}
           onPick={model => form.edit(current => setExplorer(current, { model }))} />
+        <ModelInput label={t('seats.model.custom')} disabled={locked} commit={model => form.edit(current => setExplorer(current, { model }))} />
         <Segmented label={t('seats.field.effort')} disabled={locked} value={explorer.effort}
           options={[{ value: null, label: t('seats.effort.default') }, ...settings.ranges.efforts.map(effort => ({ value: effort as string | null, label: effort }))]}
           onPick={effort => form.edit(current => setExplorer(current, { effort }))} />

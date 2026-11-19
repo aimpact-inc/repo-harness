@@ -194,6 +194,19 @@ describe('agents page seats section', () => {
     expect(choice('Off').getAttribute('aria-pressed')).toBe('true');
   });
 
+  test('a typed model id outside the recommended list becomes the chosen model and saves (#3250)', async () => {
+    const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
+    await mount(seatsProps(posts));
+    await click(pick('Important worker'));
+    const card = '[data-seat-card="worker-important"]';
+    await typeText(`${card} [data-model-input]`, 'claude-opus-9');
+    await leaveField(`${card} [data-model-input]`);
+    const chosen = [...document.querySelectorAll<HTMLButtonElement>(`${card} [role="group"][aria-label="Model"] button`)].find(button => button.textContent === 'claude-opus-9');
+    expect(chosen?.getAttribute('aria-pressed')).toBe('true');
+    await click(seatsSave());
+    expect(posts[0]!.seats['worker-important'].model).toBe('claude-opus-9');
+  });
+
   test('a stored advisor role outside the range can be switched off and saved, and cannot be switched back on', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     const read = await settingsStores(NOW, 'busy').seats.read();

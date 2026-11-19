@@ -316,6 +316,20 @@ describe("rh seats argv", () => {
     }
   });
 
+  test.each([
+    ["claude", "claude-opus-9", ["--model", "claude-opus-9"]],
+    ["codex", "gpt-7-nova", ["-m", "gpt-7-nova"]],
+    ["pi", "acme/mystery-1", ["--provider", "acme", "--model", "mystery-1"]],
+  ] as const)("a user-set %s model id outside the recommended list reaches the argv (#3250)", (runtime, model, flags) => {
+    const worker = { ...DEFAULT_SEATS_CONFIG.worker, runtime, model, fleet: [] };
+    withHome({ ...DEFAULT_SEATS_CONFIG, worker }, home => {
+      const result = argv(home, "worker", "--json");
+      expect(result.status, result.stderr).toBe(0);
+      const args = bare(JSON.parse(result.stdout).argv);
+      expect(args.slice(args.indexOf(flags[0]), args.indexOf(flags[0]) + flags.length)).toEqual([...flags]);
+    });
+  });
+
   test("a Pi GPT worker passes configured thinking and model, and draws on the ChatGPT account", () => {
     const worker = { ...DEFAULT_SEATS_CONFIG.worker, runtime: "pi" as const, model: "magpie/codex/gpt-6.1-terra", fleet: [] };
     withHome({ ...DEFAULT_SEATS_CONFIG, worker }, home => {
@@ -909,6 +923,10 @@ describe("rh seats argv", () => {
       expect(result.status).toBe(1);
       expect(result.stdout).toBe("");
       expect(JSON.parse(result.stderr).error).toBe("config_invalid");
+    });
+    // The refusal names the seat field, not its value (#3244).
+    withHome({ ...DEFAULT_SEATS_CONFIG, advisor: { ...DEFAULT_SEATS_CONFIG.advisor, model: "Claude Opus" } }, (home) => {
+      expect(JSON.parse(argv(home, "worker", "--json").stderr)).toMatchObject({ error: "config_invalid", message: "The seats section of the repo-harness configuration is not valid at seats.advisor.model." });
     });
   });
 });

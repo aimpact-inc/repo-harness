@@ -145,8 +145,8 @@ export function reviewFail(read: BoardPullRequestReadV1): { readonly url: string
 
 /**
  * The verdict of the rows of the head that are not the reviewer's (`BoardPullRequestV1.gatekeeper_review`). A row is the reviewer's when the
- * family of its model is `reviewerFamily`; every other row of the head, a row with no known model included, counts here, so the relay opens
- * for a head that any other seat reviewed. Only a `PASS` row opens the relay: a `FAIL` row that a disposition resolves stops failing the head,
+ * family of its model is `reviewerFamily`; every other row of the head, a row with no `Model` included, counts here, so the relay opens
+ * for a head that any other seat reviewed. A named model with no known family is no seat's row (#3250): it never stands for the other family. Only a `PASS` row opens the relay: a `FAIL` row that a disposition resolves stops failing the head,
  * but a cleared failure is no review, so it sets no pass either. A `FAIL` row that no disposition resolves fails the head. With no row of
  * the head, a carried PASS of another seat (`carriedPasses`) opens the relay, so a fix round starts only the seat that failed.
  */
@@ -157,13 +157,16 @@ export function gatekeeperReview(read: BoardPullRequestReadV1, reviewerFamily: s
   for (const record of protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER)) {
     const rows = parseAcceptanceRecord(record);
     if (rows === null) return 'unknown';
-    for (const row of rows.filter(row => row.subject_sha === read.head_sha && (row.model === null || modelFamily(row.model) !== reviewerFamily))) {
+    for (const row of rows.filter(row => row.subject_sha === read.head_sha && (row.model === null || otherFamily(modelFamily(row.model), reviewerFamily)))) {
       if (row.verdict === 'PASS') verdict = 'pass';
       else if (!resolvedFail(record, row, dispositions)) return 'fail';
     }
   }
-  return verdict === 'none' && carriedPasses(read).some(row => modelFamily(row.model!) !== reviewerFamily) ? 'pass' : verdict;
+  return verdict === 'none' && carriedPasses(read).some(row => otherFamily(modelFamily(row.model!), reviewerFamily)) ? 'pass' : verdict;
 }
+
+/** Only a known family differs from another family: an unknown family, such as a custom model id (#3250), is never the other family. */
+const otherFamily = (family: string | null, than: string | null): boolean => family !== null && family !== than;
 
 /**
  * The round-1 PASS rows that count for the head under the High rule (#3187): in a fix round only the seat that returned FAIL reviews
@@ -177,7 +180,7 @@ function carriedPasses(read: BoardPullRequestReadV1): AcceptanceRowV1[] {
   const family = (row: AcceptanceRowV1): string | null => (row.model === null ? null : modelFamily(row.model));
   const round1 = rows.filter(row => row.round === 1);
   const answered = (pass: AcceptanceRowV1): boolean => pass.verdict === 'PASS' && family(pass) !== null
-    && round1.some(fail => fail.subject_sha === pass.subject_sha && fail.verdict === 'FAIL' && family(fail) !== family(pass) && fail.claim !== pass.claim);
+    && round1.some(fail => fail.subject_sha === pass.subject_sha && fail.verdict === 'FAIL' && otherFamily(family(fail), family(pass)) && fail.claim !== pass.claim);
   const subjects = [...new Set(round1.filter(answered).map(row => row.subject_sha))];
   if (subjects.length !== 1) return [];
   const failing = new Set(round1.filter(row => row.subject_sha === subjects[0] && row.verdict === 'FAIL').map(family));

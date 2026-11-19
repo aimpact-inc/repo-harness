@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { CLAUDE_BUILTIN_AGENT_TYPES, SeatPaneNameError, buildSeatLaunch, seatPaneName, seatTabName, type SeatLaunchV1 } from '../../core/board/seat-launch';
-import { LAUNCH_SEAT_IDS, SeatsConfigMigrationRequiredError, decodeSeatsConfig, isReviewSeat, isWorkerSeat, unavailablePiSeat, type LaunchSeatId, type SeatConfigV1, type SeatsConfigV1 } from '../../core/board/seats-settings';
+import { LAUNCH_SEAT_IDS, SeatsConfigMigrationRequiredError, decodeSeatsConfig, seatsConfigInvalidMessage, isReviewSeat, isWorkerSeat, unavailablePiSeat, type LaunchSeatId, type SeatConfigV1, type SeatsConfigV1 } from '../../core/board/seats-settings';
 import { claudeReserved, deepGatekeeperRepeatsGatekeeper, effectiveGatekeeper, effectiveSeatConfig, seatAccount, seatAccountQuotas, seatState, type SeatRouteV1 } from '../../core/board/seat-routing';
 import { classifyQuotaReading, type QuotaAccount, type QuotaReading } from '../../core/board/quota';
 import { readClaudeQuota, readCodexQuota } from '../../effects/board/quota';
@@ -245,7 +245,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   let seats;
   try { seats = decodeSeatsConfig(config.seats); } catch (error) {
     if (error instanceof SeatsConfigMigrationRequiredError) throw error;
-    throw new SeatsCommandError('config_invalid', 'The seats section of the repo-harness configuration is not valid.');
+    throw new SeatsCommandError('config_invalid', seatsConfigInvalidMessage(error));
   }
   const configured = seats[id];
   if (configured === null) throw new SeatsCommandError('seat_not_configured', `The ${id} seat is not configured. Configure it in the seats section before launch.`);
