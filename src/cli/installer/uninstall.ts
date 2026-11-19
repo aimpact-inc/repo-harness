@@ -5,8 +5,7 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { createHash } from 'crypto';
 import { hostSkillRoot, providerSkillLock, type ProviderSkillLock } from '../../effects/host-skill-roots';
-import { ownedPiPackages, piPackagePresent, removePiPackage } from './pi-package';
-import { piExecutable } from '../../effects/pi-executable';
+import { piPackageEntry, piPackageRemoval, recordedPiPackages, removePiPackage } from './pi-package';
 import { globalContextPath, inspectUnrecordedGlobalRules, previewGlobalRulesAdoptedRevert } from './global-context';
 import { legacyRepositoryExcludesPath } from './repository-excludes';
 import { repositoryLedgers } from '../../effects/host-config/repository';
@@ -118,8 +117,10 @@ function readUninstallState(opts: UninstallOptions) {
   const state = projected?.state ?? readInstallState(env);
   // A dry run reads the ledger as the schema move would leave it.
   const records = projected ? projected.records : !state ? {} : opts.dryRun ? partitionPathRecords(env, projectedLedgerPaths(hostConfigPaths(env))).records : readPathRecords(env);
-  // The Pi package entries that the ledger records under owner `pi`, or that the migration would record.
-  const piPackages = opts.target !== 'both' ? [] : projected ? projected.piPackages : ownedPiPackages(env, openHostConfigGate({ env, preview: opts.dryRun === true }));
+  // The Pi package entries that the ledger records under owner `pi`, or that the migration would record as their current text.
+  const piPackages: ReadonlyMap<string, string> = opts.target !== 'both' ? new Map()
+    : projected ? new Map(projected.piPackages.flatMap((source) => { const text = piPackageEntry(source, env); return text === null ? [] : [[source, text] as const]; }))
+    : recordedPiPackages(env, openHostConfigGate({ env, preview: opts.dryRun === true }));
   return { state, records, piPackages, lock, files, codexMigration, jsonMigration };
 }
 
@@ -233,7 +234,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   const writes = new Map<string, string | null>();
   const originals = new Map<string, string | null>();
   const surfaceRemovals: string[] = [];
-  const piRemovals: string[] = [];
+  const piRemovals: (readonly [source: string, recorded: string])[] = [];
   const piSkills = hostSkillRoot(home, 'pi', env);
   let lock: ProviderSkillLock;
   // The dry-run revert of each repository ledger's file records; the apply must match it.
@@ -253,7 +254,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   const unresolved = (path: string, reason: string): void => { items.push({ path, action: 'unresolved', reason }); };
   let state: ReturnType<typeof readInstallState> = null;
   let records: PathRecords = {};
-  let piPackages: readonly string[] = [];
+  let piPackages: ReadonlyMap<string, string> = new Map();
   let files: ReturnType<typeof hostConfigFiles>;
   let codexMigration: ReturnType<typeof planCodexConfigMigration>;
   let jsonMigration: ReturnType<typeof planJsonConfigMigration>;
@@ -327,17 +328,15 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
     } catch (error) { unresolved(files.codex, String((error as Error).message)); }
   }
 
-  for (const source of piPackages) {
+  for (const [source, recorded] of piPackages) {
     try {
-      if (piExecutable(env) === null) {
-        items.push({ path: source, action: 'kept', reason: 'pi not found on PATH; package removal skipped; ownership retained for retry' });
-        continue;
-      }
-      // An entry that is gone from the Pi settings releases its record with no pi remove, so a later hand registration is never rh's.
-      items.push({ path: source, action: 'reverted', reason: piPackagePresent(source, env)
-        ? 'recorded Pi package entry through pi remove; the entry is read back'
-        : 'recorded Pi package entry is already absent; its record is released with no pi remove' });
-      piRemovals.push(source);
+      // An entry that is gone from the Pi settings releases its record, so a later hand registration is never rh's.
+      const removal = piPackageRemoval(source, recorded, env);
+      if (removal === 'edited') { unresolved(source, REVERT_REASONS.kept_edited); continue; }
+      items.push({ path: source, action: 'reverted', reason: removal === 'remove'
+        ? 'recorded Pi package entry taken out; other entries of the package stay'
+        : 'recorded Pi package entry is already absent; its record is released' });
+      piRemovals.push([source, recorded]);
       removedPi.add(source);
     } catch (error) { unresolved(source, (error as Error).message); }
   }
@@ -406,7 +405,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   let retireRecords = false;
   const recordsDigest = pathRecordsDigest(records);
   if (state) {
-    const pendingPi = piPackages.filter((source) => !removedPi.has(source));
+    const pendingPi = [...piPackages.keys()].filter((source) => !removedPi.has(source));
     if (opts.target === 'both' && !pendingPi.length && !blocking(items)) {
       change(statePath, null, 'install state retired');
       retireRecords = true;
@@ -418,7 +417,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   items.push(...tools.items);
   items.push({ path: join(home, '.repo-harness'), action: 'kept', reason: 'archives, runtime history and the MCP config retained; third-party packages/plugins retained' });
   // The records of another tool's installer cover only what its measurement proved (#2852).
-  if (piPackages.length || hostPaths.includes(lock.path)) {
+  if (piPackages.size || hostPaths.includes(lock.path)) {
     items.push({ path: hostConfigPaths(env).ledger, action: 'note', reason: `installer writes outside the declared sets are not verified, and rh claims nothing there: ${UNVERIFIED_INSTALLER_RANGES.join('; ')}` });
   }
 
@@ -428,8 +427,8 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
         assertConfigurationPath(dirname(path), surfaceRoot(path));
         if (fingerprint(path) !== expected) throw new Error(`configuration changed after preview: ${path}`);
       }
-      // A failed Pi readback stops before the ownership ledger is written.
-      for (const source of piRemovals) removePiPackage(source, env);
+      // A failed Pi entry removal stops before the ownership ledger is written.
+      for (const [source, recorded] of piRemovals) removePiPackage(source, recorded, env);
       const surfaces = [...removedSurfaces];
       if ((surfaces.length || retireRecords) && pathRecordsDigest(readPathRecords(env)) !== recordsDigest) throw new Error(`configuration changed after preview: ${hostConfigPaths(env).ledger}`);
       // The gate undoes each entry and then drops its record, so a stop between them leaves a record of a missing path, which a retry releases.

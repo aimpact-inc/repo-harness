@@ -68,7 +68,7 @@ import { hashManagedTree } from '../../effects/managed-tree';
 import { readWorkflowPolicyDocument } from '../../effects/state/resolve-effective-state';
 import { POLICY_ABSENT, POLICY_PATH, isPolicyObject, policyValue } from '../../core/workflow/policy-schema';
 import { capabilitySourceModeOf } from '../../effects/architecture/capability-resolver';
-import { ownedPiPackages, piPackagePresent, planPiPackage, removePiPackage, type PiPackageStep } from './pi-package';
+import { ownedPiPackages, piPackagePresent, piPackageRemoval, planPiPackage, recordedPiPackages, removePiPackage, type PiPackageStep } from './pi-package';
 import { piExecutable } from '../../effects/pi-executable';
 import skillSurfaceManifest from '../../../assets/skill-commands/manifest.json';
 import { version as PACKAGE_VERSION } from '../../../package.json';
@@ -875,13 +875,15 @@ function removeRetiredOwnedSurfaces(
   if (planned) throw new Error(`refusing plugin switch because managed surface drifted: ${planned}`);
   const ownedSkills = new Set(selectionOwnedSkillNames(loadSkillSurfaceCatalog()));
   const removedSkills = new Set(retired.filter((key) => records[key]!.host === 'staged' && ownedSkills.has(basename(key))).map((key) => basename(key)));
-  // Only an entry that the ledger records under owner `pi` is rh's to remove.
-  const piPackages = plugins.includes('pi') ? [] : ownedPiPackages(env);
-  for (const source of piPackages) removePiPackage(source, env);
+  // Only an entry that the ledger records under owner `pi`, as rh wrote it, is rh's to remove.
+  const piPackages: ReadonlyMap<string, string> = plugins.includes('pi') ? new Map() : recordedPiPackages(env);
+  const editedPi = [...piPackages].find(([source, recorded]) => piPackageRemoval(source, recorded, env) === 'edited');
+  if (editedPi) throw new Error(`refusing plugin switch because managed surface drifted: ${editedPi[0]}`);
+  for (const [source, recorded] of piPackages) removePiPackage(source, recorded, env);
   const changed = openHostConfigGate({ env }).revertPaths(retired, { transaction }).find((entry) => entry.action === 'kept_edited');
   if (changed) throw new Error(`refusing plugin switch because managed surface drifted: ${changed.path}`);
   removeOwnedSkillLockEntries(env, removedSkills);
-  return [...piPackages, ...retired];
+  return [...piPackages.keys(), ...retired];
 }
 
 /**
