@@ -57,6 +57,8 @@ export interface ApplyOperationResult {
   readonly contentHash?: string;
   readonly gitIndexEntry?: GitIndexEntry;
   readonly error?: string;
+  /** Why rh left the entry as it is, for an operation that it skipped on purpose. */
+  readonly kept?: string;
 }
 
 /**
@@ -567,7 +569,8 @@ export function applyAdoptionPlan(plan: AdoptionPlan, options: ApplyAdoptionOpti
   const target = adoptionTarget(plan, options.record, options.env);
   if (target.kind === "refused") return refusedResult(dryRun, planned, "adoption-target", target.reason);
   if (dryRun) {
-    const results = plan.operations.map((operation) => applyOperation(plan.repoRoot, operation, null));
+    const kept = stagedUserRetirements(plan);
+    const results = plan.operations.map((operation) => applyOperation(plan.repoRoot, operation, null, kept));
     return { ok: results.every((result) => result.status !== "failed"), dryRun, results };
   }
   if (target.kind === "direct") return applyDirect(plan, options.record);
@@ -581,9 +584,10 @@ export function applyAdoptionPlan(plan: AdoptionPlan, options: ApplyAdoptionOpti
 
 /** Apply in order and stop at the first failure; the operations after it stay planned. */
 function applyInOrder(plan: AdoptionPlan, run: OperationRun): ApplyOperationResult[] {
+  const kept = stagedUserRetirements(plan);
   const results: ApplyOperationResult[] = [];
   for (const operation of plan.operations) {
-    const result = applyOperation(plan.repoRoot, operation, run);
+    const result = applyOperation(plan.repoRoot, operation, run, kept);
     results.push(result);
     if (result.status === "failed") break;
   }
@@ -653,7 +657,30 @@ function rollbackGateWrites(repository: HostConfigRepository, run: RepositoryWri
   });
 }
 
-function applyOperation(repoRoot: string, operation: AdoptionOperation, run: OperationRun | null): ApplyOperationResult {
+/**
+ * The retirements that rh keeps whole (#2903 review P1). `gitUntrack` drops the
+ * index entry, and neither the run nor the repository ledger keeps a copy of
+ * it. The proof of a retired file covers its working-tree bytes only, so a
+ * retirement goes ahead only while the index entry holds exactly those bytes;
+ * a staged edit of the user keeps the file and the entry. The working tree
+ * matches the proof here, else the remove refuses on its own.
+ */
+function stagedUserRetirements(plan: AdoptionPlan): ReadonlyMap<string, string> {
+  const kept = new Map<string, string>();
+  for (const untrack of plan.operations.filter((operation) => operation.kind === "gitUntrack")) {
+    const indexed = readGitIndexEntry(plan.repoRoot, untrack.path!);
+    if (indexed.kind !== "entry") continue;
+    const remove = plan.operations.find((operation) => operation.kind === "remove" && operation.path === untrack.path);
+    const proved = remove !== undefined && checkExpectedFileState(plan.repoRoot, remove) === null
+      && runGit(["-C", plan.repoRoot, "hash-object", "--no-filters", "--", untrack.path!]).stdout.trim() === indexed.entry.objectId;
+    if (!proved) kept.set(untrack.path!, "the Git index holds other bytes than the retired rh file (a staged edit), so rh keeps the file and its index entry");
+  }
+  return kept;
+}
+
+function applyOperation(repoRoot: string, operation: AdoptionOperation, run: OperationRun | null, kept: ReadonlyMap<string, string>): ApplyOperationResult {
+  const reason = (operation.kind === "remove" || operation.kind === "gitUntrack") ? kept.get(operation.path) : undefined;
+  if (reason !== undefined) return { id: operation.id, kind: operation.kind, path: operation.path, status: "skipped", kept: reason };
   // A thrown error is this operation's failure: it must stop the transaction and
   // trigger rollback, not escape with earlier operations applied and unrecorded.
   try {

@@ -135,6 +135,7 @@ export function renderApplyReport(report: AdoptionApplyReport, json = false): st
     for (const [status, count] of Object.entries(counts).sort()) lines.push(`[init] ${status}: ${count}`);
     // The repository ledger keeps each replaced file; a failed run rolls back by itself.
     if (report.apply.restore) lines.push(`[init] undo: ${report.apply.restore}`);
+    for (const result of report.apply.results.filter((entry) => entry.kept && entry.kind === "gitUntrack")) lines.push(`[init] kept: ${result.path} - ${result.kept}`);
     for (const result of report.apply.results.filter((entry) => entry.status === "failed")) {
       lines.push(`[init] failed operation: ${result.id}${result.error ? ` - ${result.error}` : ""}`);
     }

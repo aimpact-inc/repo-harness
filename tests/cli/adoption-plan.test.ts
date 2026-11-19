@@ -985,20 +985,42 @@ describe("canonical adoption plan", () => {
     }
   });
 
-  test("a failed run puts back the untracked helper and its exact staged index entry, not the working-tree bytes", () => {
+  test("a successful run keeps a retired helper and its index entry when the index holds a staged user edit", () => {
     const repo = tempRepo();
     try {
       mkdirSync(join(repo, "scripts"), { recursive: true });
       const helper = "scripts/check-deploy-sql-order.sh";
       const canonical = readFileSync(join(ROOT, "scripts", "check-deploy-sql-order.sh"), "utf-8");
-      expect(spawnSync("git", ["init", "-q"], { cwd: repo }).status).toBe(0);
       writeFileSync(join(repo, helper), "#!/bin/sh\necho staged custom helper\n");
       expect(spawnSync("git", ["add", helper], { cwd: repo }).status).toBe(0);
       writeFileSync(join(repo, helper), canonical);
       const git = (...args: string[]) => spawnSync("git", args, { cwd: repo, encoding: "utf-8" }).stdout;
       const stagedEntry = git("ls-files", "--stage", "--", helper);
+
+      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }), LEDGER);
+      expect(apply.ok).toBe(true);
+      expect(apply.results.filter((result) => result.path === helper).map((result) => [result.kind, result.status, Boolean(result.kept)]))
+        .toEqual([["remove", "skipped", true], ["gitUntrack", "skipped", true]]);
+      expect([git("ls-files", "--stage", "--", helper), git("show", `:${helper}`), readFileSync(join(repo, helper), "utf-8")])
+        .toEqual([stagedEntry, "#!/bin/sh\necho staged custom helper\n", canonical]);
+      const report = { protocol: 1, command: "init", repoRoot: repo, mode: "standard", ok: true, plan: {} } as const;
+      expect(renderApplyReport({ ...report, apply })).toContain(`[init] kept: ${helper} - the Git index holds other bytes than the retired rh file`);
+    } finally {
+      cleanup(repo);
+    }
+  }, 30_000);
+
+  test("a failed run puts back the untracked helper and its exact index entry", () => {
+    const repo = tempRepo();
+    try {
+      mkdirSync(join(repo, "scripts"), { recursive: true });
+      const helper = "scripts/check-deploy-sql-order.sh";
+      const canonical = readFileSync(join(ROOT, "scripts", "check-deploy-sql-order.sh"), "utf-8");
+      writeFileSync(join(repo, helper), canonical);
+      expect(spawnSync("git", ["add", helper], { cwd: repo }).status).toBe(0);
+      const git = (...args: string[]) => spawnSync("git", args, { cwd: repo, encoding: "utf-8" }).stdout;
+      const stagedEntry = git("ls-files", "--stage", "--", helper);
       const stagedBytes = git("show", `:${helper}`);
-      expect(stagedBytes).toBe("#!/bin/sh\necho staged custom helper\n");
 
       const plan = planAdoption({ repoRoot: repo, mode: "standard", apply: true });
       // The last write fails: its parent is a file that the run wrote just before it.
