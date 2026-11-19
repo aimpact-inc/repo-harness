@@ -581,6 +581,30 @@ When a project builds on the Claude API, an agent can read
 `anthropics/claude-quickstarts` as reference code. Cite the upstream commit
 that the agent followed.
 
+## magpie for AI subscriptions and API keys
+
+[magpie](https://github.com/yetone/magpie) is a desktop app and a local gateway
+for AI subscriptions and API keys. If you use more than one subscription or
+key, you can manage them in magpie and use its routes from Pi. Download magpie
+from [usemagpie.ai](https://usemagpie.ai). Repo-harness does not install or
+update it.
+
+| The user has | Recommended route in rh | Not recommended |
+| --- | --- | --- |
+| Claude subscription | The Claude CLI only, in a Claude seat | A Claude subscription through magpie |
+| Claude models inside another harness (Pi) | The magpie `agy-cli/claude-*` models on the Google Ultra quota | Never use the Claude subscription |
+| Claude API key | The magpie Anthropic preset from Pi | — |
+| Antigravity (agy) | The magpie `agy-cli/` models from Pi. Your own agy CLI makes the calls. | The direct Google sign-in route |
+| ChatGPT plan, DeepSeek, GLM, or other providers | magpie routes from Pi (`magpie/codex/`, `magpie/group/`, `magpie/zcode/`) or the vendor CLI | — |
+
+The magpie README lists Antigravity “through your own agy CLI.” Its reference
+says the direct Google sign-in route uses Google’s Code Assist API and warns,
+“Google may suspend an Antigravity account it sees used outside Antigravity,
+so magpie asks before adding one; use an account you can afford to lose.”
+The same reference says magpie “drives the genuine local `claude` binary for
+every Claude subscription generation.” Check your provider’s terms for the
+route you select. [magpie reference](https://github.com/yetone/magpie/blob/main/docs/reference.md)
+
 ## External Verification Evidence
 
 Runtime-heavy projects often prove work outside normal source files and unit

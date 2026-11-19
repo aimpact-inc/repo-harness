@@ -33,13 +33,16 @@ import { isOptIn, resolveRepoRoot } from '../hook/runtime';
 import { ROUTES } from '../hook/route-registry';
 import { inspectWorkflowMarker } from '../../effects/adoption/workflow-marker';
 import { architecturePort, isArchitectureUnavailable, type ArchitectureDoctorCheck } from '../../core/architecture/contracts';
-import { globalArchitectureSectionPresent } from '../../effects/configuration/global-configuration';
+import { globalArchitectureSectionPresent, readGlobalConfiguration } from '../../effects/configuration/global-configuration';
 import { capabilitySourceMode, loadRegistryAuthority, readWorkflowPolicy } from '../../effects/state/resolve-effective-state';
 import { readText } from '../../effects/state/collect-state-inputs';
 import { hcList } from '../../effects/terminal/herdr-core';
 import { readNotifyInstallRecord, relayIsLive } from '../../effects/terminal/notify-read';
 import { NOTIFY_INSTALL_COMMAND, NOTIFY_START_COMMAND } from '../../core/decision/notify-relay-record';
 import { CLI_NAME, RETIRED_CLI_NAME } from '../../core/skill-surface/cli-name';
+import { readRecordedSelection, recordedPlugins } from '../installer/architecture-selection';
+import { decodeSeatsConfig, SEAT_IDS } from '../../core/board/seats-settings';
+import { MAGPIE_BASE_URL, MAGPIE_PORT, MAGPIE_PROVIDER } from '../../effects/review/magpie-endpoint';
 
 const TRUST_STATE_LINE = /^\[hooks\.state\."[^"]+\/\.codex\/hooks\.json:/;
 const PACKAGE_NAME = 'repo-harness';
@@ -649,6 +652,40 @@ export function notifyRelayDoctorCheck(): DoctorCheckResult {
   return { id, describe, status: 'ok', detail: `Relay terminal ${record.relay.name} is live.` };
 }
 
+export function checkMagpie(port = MAGPIE_PORT): DoctorCheckResult {
+  const result = { id: 'magpie', describe: 'magpie CLI and local gateway' };
+  const guide = 'https://usemagpie.ai';
+  const url = new URL('/', MAGPIE_BASE_URL);
+  url.port = String(port);
+  const binary = findCommandOnPath('magpie');
+  if (binary) {
+    // Keep the synchronous doctor API. The child checks only the gateway's public health route.
+    const probe = spawnSync(process.execPath, ['--no-env-file', `--config=${os.devNull}`, '-e', `
+      const response = await fetch(${JSON.stringify(url.href)}, { method: 'GET', redirect: 'manual' });
+      const ready = response.status === 200 && (await response.json())?.name === 'magpie';
+      process.exit(ready ? 0 : 1);
+    `], { env: {}, stdio: 'ignore', timeout: 2000 });
+    if (probe.status === 0) {
+      return { ...result, status: 'ok', detail: `magpie on PATH and gateway ready at ${url.href}` };
+    }
+  }
+
+  try {
+    const seats = decodeSeatsConfig(readGlobalConfiguration().config.seats);
+    const seatUsesMagpie = SEAT_IDS.some(id => seats[id]?.model?.startsWith(`${MAGPIE_PROVIDER}/`));
+    // With peer-runtime selected, generic review can route Codex and Pi through magpie.
+    const reviewUsesMagpie = recordedPlugins(readRecordedSelection()).includes('peer-runtime');
+    if (!seatUsesMagpie && !reviewUsesMagpie) {
+      return { ...result, status: 'na', detail: 'No configured seat or review route uses magpie.' };
+    }
+  } catch {
+    return { ...result, status: 'warn', detail: `Cannot determine magpie use from the seat or review configuration. See ${guide}.` };
+  }
+
+  const detail = binary ? `Start the magpie gateway at ${url.href}` : 'Add the magpie CLI to PATH';
+  return { ...result, status: 'warn', detail: `${detail}. See ${guide}.` };
+}
+
 export function runDoctor(ports: DoctorPorts, cwd: string = process.cwd(), target: DoctorTarget = 'both'): DoctorReport {
   const checks: DoctorCheckResult[] = [];
   const codegraphChecks = codegraphDoctorChecks(cwd);
@@ -658,6 +695,7 @@ export function runDoctor(ports: DoctorPorts, cwd: string = process.cwd(), targe
   checks.push(checkSkillProjection(target));
   checks.push(checkCodexCliVersion());
   if (target === 'both') checks.push(...checkPiHost(), checkRetiredPiExtension());
+  checks.push(checkMagpie());
   checks.push(checkCliUpdate(target));
   for (const target of ALL_TARGETS) {
     if (target.supportsLocation('global')) {
