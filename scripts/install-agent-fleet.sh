@@ -141,10 +141,11 @@ const recordOf = (targetPath) => records[pathRecordKey(ENV, targetPath)];
 
 // Provider-native source tuples project deterministically to Codex-native labels.
 // Validation remains fail-closed; reasoning effort is carried through unchanged.
-const { MANAGED_AGENTS, WRITABLE_AGENTS, EFFORT_LEVELS, AGENT_TARGET_OVERRIDES,
+const { MANAGED_AGENTS, WRITABLE_AGENTS, EFFORT_LEVELS,
   parseRoleNameScalar, parseFrontmatter, validateFrontmatter } = require(
   path.join(SOURCE_DIR, "../../src/effects/terminal/task-role-profiles.ts"),
 );
+const { AGENT_TARGET_OVERRIDES } = require(path.join(SOURCE_DIR, "../../src/core/board/recommended-models.ts"));
 
 function readSource(agent) {
   try {

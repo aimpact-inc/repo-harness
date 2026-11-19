@@ -1,7 +1,7 @@
 import { connect } from 'node:net';
 import { PI_CODEX_MODEL_PREFIX } from '../../core/board/seats-settings';
 import { GENERIC_REVIEW_ROLE } from '../../core/review/acceptance-receipt';
-import { AGENT_TARGET_OVERRIDES } from '../terminal/task-role-profiles';
+import { AGENT_TARGET_OVERRIDES } from '../../core/board/recommended-models';
 
 /**
  * The local magpie gateway (#2764). A sandboxed review child holds no credential: each model call

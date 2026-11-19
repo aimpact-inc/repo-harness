@@ -1,5 +1,5 @@
 import { weeklyRemainingPercent, type QuotaAccount, type QuotaAccountReport, type QuotaState } from './quota';
-import { modelFamily } from '../review/model-family';
+import { RECOMMENDED_MODELS } from './recommended-models';
 import { PI_CODEX_MODEL_PREFIX, ROUTING_CLASSES, isPiCodexSeat, isReviewSeat, unavailablePiSeat, type CodexCreditMode, type RoutingClass, type SeatConfigV1, type SeatId, type SeatRoutingV1, type SeatsConfigV1 } from './seats-settings';
 
 /** The Claude control-seat model outside its config entry: the orchestrator while Claude is reserved, the advisor outside Claude hyper. */
@@ -72,12 +72,14 @@ export function effectiveSeatConfig(id: SeatId, seats: SeatsConfigV1, quota: Sea
   return seat;
 }
 
+const SHIPPED_MODELS: ReadonlySet<string> = new Set(Object.values(RECOMMENDED_MODELS).flat());
+
 /**
  * The model text that may leave the launch argv (#3250). A user-set id is free text that a pasted secret can fill, so a claim,
- * a route line or a refusal shows an id only when `modelFamily` knows its family, and else the seat field. The argv keeps the raw id.
+ * a route line or a refusal shows an id only when it is a shipped recommended id, and else the seat field. The argv keeps the raw id.
  */
 export const shownModel = (field: string, model: string | null): string =>
-  model === null ? 'default' : modelFamily(model) === null ? field : model;
+  model === null ? 'default' : SHIPPED_MODELS.has(model) ? model : field;
 const modelText = (field: string, seat: { readonly model: string | null; readonly effort: string | null }): string =>
   [shownModel(field, seat.model), seat.effort].filter(value => value !== null).join(' ');
 const launchText = (id: SeatId, seat: SeatConfigV1): string => `${seat.runtime} ${modelText(`seats.${id}.model`, seat)}`;

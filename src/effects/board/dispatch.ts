@@ -58,7 +58,7 @@ function startWorktree(input: DispatchInput, issue: number): { readonly path: st
 
 const issueList = (unit: readonly DispatchedV1[]): string => unit.map(decision => `#${decision.issue}`).join(', ');
 
-/** The claim's `Model:` text: `writerFamily` reads it through `modelFamily`, and an id with no known family shows as its seat field (#3250). */
+/** The claim's `Model:` text (#3250): a shipped id, or else the seat field, which `writerFamily` reads as no known family. */
 const claimModel = (seat: SeatId, model: string | null): string | null => (model === null ? null : shownModel(`seats.${seat}.model`, model));
 
 /** The claim of one issue of a unit. A bundle claim carries the `Issues:` line that the board reads (`issueClaim`). */

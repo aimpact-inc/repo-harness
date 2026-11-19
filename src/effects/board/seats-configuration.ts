@@ -1,11 +1,8 @@
 import { decodeAgentsConfig } from '../../core/board/agents-settings';
 import {
   SEAT_IDS,
-  PI_CODEX_MODEL_PREFIX,
   SEAT_RUNTIMES,
   SEAT_TOOLS,
-  DEFAULT_SEATS_CONFIG,
-  MODEL_FAMILY_LABELS,
   FRONTEND_SEAT_IDS,
   ROUTING_CLASSES,
   ROUTING_KEYS,
@@ -25,8 +22,8 @@ import {
   type SeatsSettingsResultV1,
   type SeatTool,
 } from '../../core/board/seats-settings';
+import { RECOMMENDED_MODELS } from '../../core/board/recommended-models';
 import {
-  AGENT_TARGET_OVERRIDES,
   EFFORT_LEVELS,
   MANAGED_AGENTS,
   WRITABLE_AGENTS,
@@ -75,19 +72,11 @@ const SEAT_RANGES: SeatsRangesV1['seats'] = {
   reviewer: { fleet: [], tools: ['net', 'read', 'shell'] },
 };
 
-/** Claude takes a fleet model family, Codex a fleet target model. Pi takes DeepSeek, GLM or a Codex model behind `magpie/codex/`, takes an effort, and takes fleet roles only on a Codex model. */
-const CODEX_MODELS = [...new Set([...Object.values(AGENT_TARGET_OVERRIDES).map(target => target.model),
-  ...SEAT_IDS.flatMap(id => {
-    const seat = DEFAULT_SEATS_CONFIG[id];
-    return seat?.runtime === 'codex' && seat.model !== null ? [seat.model] : [];
-  }),
-  // Seats that still use these earlier models keep them as choices.
-  'gpt-6-astra', 'gpt-6.1-sol'])];
-
+/** Pi takes fleet roles only on a Codex model behind `magpie/codex/` (`seatTakesFleet`). */
 const RUNTIME_RANGES: Readonly<Record<SeatRuntime, Omit<SeatRuntimeRangeV1, 'id' | 'enabled'>>> = {
-  claude: { models: Object.keys(MODEL_FAMILY_LABELS), effort: true, fleet: true },
-  codex: { models: CODEX_MODELS, effort: true, fleet: true },
-  pi: { models: ['magpie/cursor/deepseek-v41-flash-1017', 'magpie/opencode-go/deepseek-v4.1-flash', 'magpie/group/deepseek-v4.1-flash', 'zai/glm-5.3', 'magpie/zcode/GLM-5.3', 'magpie/zcode/GLM-5.3-Flash', 'magpie/agy-cli/gemini-4-carbon', 'magpie/agy-cli/gemini-4-neon', ...CODEX_MODELS.map(model => `${PI_CODEX_MODEL_PREFIX}${model}`)], effort: true, fleet: true },
+  claude: { models: RECOMMENDED_MODELS.claude, effort: true, fleet: true },
+  codex: { models: RECOMMENDED_MODELS.codex, effort: true, fleet: true },
+  pi: { models: RECOMMENDED_MODELS.pi, effort: true, fleet: true },
 };
 
 export function seatsRanges(enabledRuntimes: readonly string[]): SeatsRangesV1 {

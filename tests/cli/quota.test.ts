@@ -67,7 +67,7 @@ describe('seat quota routing', () => {
     const pi: SeatConfigV1 = { ...DEFAULT_SEATS_CONFIG['worker-light']!, model: 'magpie/anthropic/claude-opus-5-5', effort: 'high' };
     const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-important': pi, 'worker-light': null };
     const lines = formatSeatRoutes(seats, seatAccountQuotas([claude({ seven_day: week(95, 84) })], seats.routing)).split('\n');
-    expect(lines).toContain('route important_deep: worker-important (pi magpie/anthropic/claude-opus-5-5 high)');
+    expect(lines).toContain('route important_deep: worker-important (pi seats.worker-important.model high)');
     expect(lines).toContain('route important_fast: none (worker-light not configured)');
   });
 

@@ -343,10 +343,10 @@ describe("rh seats argv", () => {
     });
     const seats = { ...DEFAULT_SEATS_CONFIG, worker };
     expect(formatSeatRoutes(seats, seatAccountQuotas([], seats.routing))).toContain("route simple_fast: worker (pi magpie/codex/gpt-6.1-terra high; chatgpt unknown)");
-    // The rh quota routes name a model with no known family by its seat field, so a pasted secret stays out (#3250).
-    const pasted = { ...seats, worker: { ...worker, model: "magpie/sk-live-0123456789" }, gatekeeper: { ...seats.gatekeeper, model: "sk-live-0123456789" } };
+    // The rh quota routes show only a shipped recommended id; any other id, such as a pasted secret, shows as its seat field (#3250).
+    const pasted = { ...seats, worker: { ...worker, model: "magpie/o3sk-live-0123456789" }, gatekeeper: { ...seats.gatekeeper, model: "o3sk-live-0123456789" } };
     const routes = formatSeatRoutes(pasted, seatAccountQuotas([], pasted.routing));
-    expect(routes).not.toContain("sk-live-0123456789");
+    expect(routes).not.toContain("o3sk-live-0123456789");
     expect(routes).toContain("route simple_fast: worker (pi seats.worker.model high)");
     expect(routes).toContain("gatekeeper: gatekeeper (codex seats.gatekeeper.model");
     const reading = decodeCodexRateLimitsResult({ rateLimits: { primary: { usedPercent: 95, windowDurationMins: 10080, resetsAt: Math.floor(Date.now() / 1000) + 84 * 3600 } } }, new Date().toISOString());
