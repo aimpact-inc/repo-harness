@@ -659,6 +659,106 @@ describe('rh seats pool', () => {
   });
 });
 
+function launchSeat(seat: string, env: Record<string, string>) {
+  return spawnSync(process.execPath, [CLI, 'seats', 'launch', seat, '--space', 'sp1', '--cwd', ROOT, '--task', 'Test launch', '--json'],
+    { cwd: ROOT, env, encoding: 'utf8', timeout: 40_000 });
+}
+
+function fixtureHerdr(env: Record<string, string>, log: string): void {
+  writeFileSync(join(env.PATH!, 'herdr-app'), `#!${process.execPath}
+require('node:fs').writeFileSync(${JSON.stringify(log)}, process.argv[4]);
+console.log(JSON.stringify({ tab: 'tb1', terminal: 't9' }));
+`, { mode: 0o755 });
+}
+
+describe('rh seats launch availability', () => {
+  test('a missing default runtime reports a redacted pool hint and starts no tab', () => {
+    const f = poolFixture('pi');
+    const tab = join(f.home, 'tab.json');
+    fixtureHerdr(f.env, tab);
+    const refused = launchSeat('worker', f.env);
+    expect([refused.status, refused.stdout, JSON.parse(refused.stderr)]).toEqual([1, '', {
+      ok: false, error: 'seat_provider_unavailable',
+      message: expect.stringMatching(/The worker seat cannot launch\. codex: Runtime not found on PATH\. See seats\.worker\.model\..*Available pool for worker: pi zai\/glm-5\.3-flash/u),
+    }]);
+    expect(existsSync(tab)).toBe(false);
+    expect(existsSync(f.env.SEAT_POOL_LOG)).toBe(false);
+  });
+
+  test('a signed-out runtime refuses a stored free id before quota or tab start', () => {
+    const f = poolFixture('codex');
+    const free = 'private-free-id';
+    const seats = { ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG.worker, model: free } };
+    writeFileSync(join(f.home, '.repo-harness', 'config.json'), JSON.stringify({ seats }));
+    const tab = join(f.home, 'tab.json');
+    fixtureHerdr(f.env, tab);
+    const refused = launchSeat('worker', { ...f.env, SEAT_POOL_CODEX: 'signed_out' });
+    expect([refused.status, refused.stdout]).toEqual([1, '']);
+    expect(JSON.parse(refused.stderr)).toEqual({ ok: false, error: 'seat_provider_unavailable',
+      message: expect.stringMatching(/codex: Runtime signed out\. See seats\.worker\.model\. Run codex login\. Available pool for worker: empty\./u) });
+    expect(refused.stderr).not.toContain(free);
+    expect(existsSync(tab)).toBe(false);
+    const calls = readFileSync(f.env.SEAT_POOL_LOG, 'utf8').trim().split('\n').map(line => JSON.parse(line).call);
+    expect(calls).toEqual(['app-server --help', '--version', 'login status']);
+  });
+
+  test('launch checks the quota-selected advisor model when the configured model is absent from the catalog', () => {
+    const f = poolFixture('claude');
+    const catalog = f.run();
+    expect(catalog.status, catalog.stderr).toBe(0);
+    expect(decodeSeatPool(JSON.parse(catalog.stdout)).seats.find(row => row.seat === 'advisor')?.configured)
+      .toMatchObject({ in_pool: false, reason: 'not_listed' });
+    const tab = join(f.home, 'tab.json');
+    fixtureHerdr(f.env, tab);
+    const result = launchSeat('advisor', f.env);
+    expect(result.status, result.stderr).toBe(0);
+    const argv = JSON.parse(readFileSync(tab, 'utf8')).argv as string[];
+    expect(argv.slice(argv.indexOf('--model'), argv.indexOf('--model') + 2)).toEqual(['--model', 'opus']);
+  });
+
+  test('launch ignores a stale negative and sends the unchanged free id only to the tab', () => {
+    const f = poolFixture('claude');
+    const free = 'private-free-id';
+    const seats = { ...DEFAULT_SEATS_CONFIG, orchestrator: { ...DEFAULT_SEATS_CONFIG.orchestrator, model: free } };
+    writeFileSync(join(f.home, '.repo-harness', 'config.json'), JSON.stringify({ seats }));
+    const negative = f.run(['--json'], { SEAT_POOL_CLAUDE: 'signed_out' });
+    expect(negative.status, negative.stderr).toBe(0);
+    const stale = JSON.stringify({ ...decodeSeatPool(JSON.parse(negative.stdout)), collected_at: '2026-11-01T00:00:00.000Z' });
+    writeFileSync(f.cache, stale);
+    const tab = join(f.home, 'tab.json');
+    fixtureHerdr(f.env, tab);
+    const result = launchSeat('orchestrator', f.env);
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, model: 'seats.orchestrator.model', placement: { tab: 'tb1' } });
+    expect(result.stdout + result.stderr).not.toContain(free);
+    expect(JSON.parse(readFileSync(tab, 'utf8')).argv).toContain(free);
+    expect(readFileSync(f.cache, 'utf8')).toBe(stale);
+  });
+
+  test.each(['default', 'override'])('a Magpie launch checks the %s agent path without executing Pi', (source) => {
+    const f = poolFixture('pi');
+    const agentDirectory = source === 'override' ? join(f.home, 'pi-override') : join(f.home, '.pi', 'agent');
+    const env = source === 'override' ? { ...f.env, PI_CODING_AGENT_DIR: agentDirectory } : f.env;
+    const tab = join(f.home, 'tab.json');
+    fixtureHerdr(env, tab);
+    const refused = launchSeat('worker-light', env);
+    expect([refused.status, refused.stdout]).toEqual([1, '']);
+    expect(JSON.parse(refused.stderr)).toMatchObject({ error: 'seat_provider_unavailable',
+      message: expect.stringMatching(/Magpie extension missing.*extensions\/magpie\.ts.*PI_CODING_AGENT_DIR.*seats\.routing\.unavailable_pi_providers.*seats\.worker-light\.model/u) });
+    expect(existsSync(tab)).toBe(false);
+
+    const shell = join(f.home, 'shell');
+    writeFileSync(shell, "#!/bin/sh\nprintf '%s\\n' 'RESULT[a smile :)' 'then a span `echo INJECTED-BY-BACKTICK`]'\n", { mode: 0o755 });
+    mkdirSync(join(agentDirectory, 'extensions'), { recursive: true });
+    writeFileSync(join(agentDirectory, 'extensions', 'magpie.ts'), 'throw new Error("metadata only");');
+    writeFileSync(join(agentDirectory, 'settings.json'), JSON.stringify({ shellPath: shell }));
+    const result = launchSeat('worker-light', env);
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(tab, 'utf8')).argv).toContain('magpie');
+    expect(existsSync(f.env.SEAT_POOL_LOG)).toBe(false);
+  });
+});
+
 describe('rh quota', () => {
   test('reads both agy groups once through OAR and publishes only the fixed accounts and windows', () => {
     const f = fixture(null, 'two');

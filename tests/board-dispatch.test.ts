@@ -6,6 +6,7 @@ import { WORKER_AUTHORITY, executeDispatch, type DispatchPorts } from '../src/ef
 import { withSeatLine } from '../src/core/board/seat-line';
 import { HerdrCoreError } from '../src/effects/terminal/herdr-core';
 import type { SeatAccountQuotas } from '../src/core/board/seat-routing';
+import { emptySeatPoolProbe, seatModelBlock, type SeatPoolProbe } from '../src/core/board/seat-pool';
 import { DEFAULT_SEATS_CONFIG } from '../src/core/board/seats-settings';
 import type { BoardCommentV1, BoardParentReadV1, BoardSubIssueReadV1 } from '../src/core/board/source';
 
@@ -60,6 +61,20 @@ test('a ready issue dispatches to its route seat; every other state is skipped w
   });
   expect(reasons(plan)).toEqual(['1:dispatch', '2:held', '3:blocked', '4:claimed', '5:kind_label_invalid', '6:closed', '7:dispatch', '8:not_sub_issue']);
   expect(plan.decisions[0]).toMatchObject({ seat: 'worker-important', route_class: 'important_deep' });
+});
+
+test('dispatch skips a signed-out worker and uses the next available seat in that route', () => {
+  const seats = DEFAULT_SEATS_CONFIG;
+  const probes: SeatPoolProbe[] = [
+    { ...emptySeatPoolProbe('claude', 'available'), sign_in: 'logged_out' },
+    { id: 'codex', installation: 'available', sign_in: 'logged_in', models: 'ok', listed: [{ id: 'gpt-6.2-sol', disabled: false }] },
+  ];
+  const plan = planDispatch({ seats, quota: NORMAL, terminals: [], parent: read([issue(1), issue(3, { labels: ['route:frontend'] })]),
+    modelBlock: (id, seat) => seatModelBlock(id, seat, seats, probes, () => false) });
+  expect(plan.decisions[0]).toMatchObject({ action: 'dispatch', seat: 'worker-deep',
+    route_line: expect.stringContaining('skipped worker-important: claude: Runtime signed out. See seats.worker-important.model.') });
+  expect(plan.decisions.find(decision => decision.issue === 3)).toMatchObject({ action: 'skip', reason: 'no_route',
+    detail: expect.stringContaining('claude: Runtime signed out. See seats.worker-important.model.') });
 });
 
 test('the worker limit counts live seats of the parent and stops further dispatch', () => {

@@ -150,19 +150,37 @@ export function reviewFail(read: BoardPullRequestReadV1): { readonly url: string
  * but a cleared failure is no review, so it sets no pass either. A `FAIL` row that no disposition resolves fails the head. With no row of
  * the head, a carried PASS of another seat (`carriedPasses`) opens the relay, so a fix round starts only the seat that failed.
  */
-export function gatekeeperReview(read: BoardPullRequestReadV1, reviewerFamily: string | null): BoardGatekeeperReviewV1 {
-  if (read.comments.truncated) return 'unknown';
+export function gatekeeperReviewEvidence(read: Pick<BoardPullRequestReadV1, 'head_sha' | 'comments'>, reviewerFamily: string | null): {
+  readonly verdict: BoardGatekeeperReviewV1; readonly passFamilies: readonly string[];
+} {
+  if (read.comments.truncated) return { verdict: 'unknown', passFamilies: [] };
   const dispositions = protocolComments(read.comments, ACCEPTANCE_DISPOSITION_HEADER).flatMap(comment => parseAcceptanceDisposition(comment) ?? []);
-  let verdict: BoardGatekeeperReviewV1 = 'none';
+  let passed = false;
+  const passFamilies: string[] = [];
   for (const record of protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER)) {
     const rows = parseAcceptanceRecord(record);
-    if (rows === null) return 'unknown';
-    for (const row of rows.filter(row => row.subject_sha === read.head_sha && (row.model === null || otherFamily(modelFamily(row.model), reviewerFamily)))) {
-      if (row.verdict === 'PASS') verdict = 'pass';
-      else if (!resolvedFail(record, row, dispositions)) return 'fail';
+    if (rows === null) return { verdict: 'unknown', passFamilies: [] };
+    for (const row of rows.filter(row => row.subject_sha === read.head_sha)) {
+      const family = row.model === null ? null : modelFamily(row.model);
+      if (row.model !== null && !otherFamily(family, reviewerFamily)) continue;
+      if (row.verdict === 'PASS') {
+        passed = true;
+        if (family !== null) passFamilies.push(family);
+      } else if (!resolvedFail(record, row, dispositions)) {
+        return { verdict: 'fail', passFamilies: [] };
+      }
     }
   }
-  return verdict === 'none' && carriedPasses(read).some(row => otherFamily(modelFamily(row.model!), reviewerFamily)) ? 'pass' : verdict;
+  if (passed) return { verdict: 'pass', passFamilies };
+  for (const row of carriedPasses(read)) {
+    const family = row.model === null ? null : modelFamily(row.model);
+    if (family !== null && family !== reviewerFamily) passFamilies.push(family);
+  }
+  return { verdict: passFamilies.length === 0 ? 'none' : 'pass', passFamilies };
+}
+
+export function gatekeeperReview(read: BoardPullRequestReadV1, reviewerFamily: string | null): BoardGatekeeperReviewV1 {
+  return gatekeeperReviewEvidence(read, reviewerFamily).verdict;
 }
 
 /** Only a known family differs from another family: an unknown family, such as a custom model id (#3250), is never the other family. */
@@ -175,7 +193,7 @@ const otherFamily = (family: string | null, than: string | null): boolean => fam
  * fix head: the one subject of the failing family's claimed round-2 rows, or the head while that family has no round-2 row. It never reaches a later head, and
  * a family with a row of the head carries nothing. Whether the fix stays inside the findings is the orchestrator's scope call.
  */
-function carriedPasses(read: BoardPullRequestReadV1): AcceptanceRowV1[] {
+function carriedPasses(read: Pick<BoardPullRequestReadV1, 'head_sha' | 'comments'>): AcceptanceRowV1[] {
   const rows = claimedRows(read, protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? []));
   const family = (row: AcceptanceRowV1): string | null => (row.model === null ? null : modelFamily(row.model));
   const round1 = rows.filter(row => row.round === 1);
@@ -244,7 +262,7 @@ export function acceptance(read: BoardPullRequestReadV1, check: BoardRequiredChe
  * The rows of the head whose `Claim:` cites an `acceptance claim` comment of the pull request with the row's `Subject:` and `Round:`
  * (`review publish` writes both); the comment id is the claim identity.
  */
-function claimedRows(read: BoardPullRequestReadV1, head: readonly AcceptanceRowV1[]): AcceptanceRowV1[] {
+function claimedRows(read: Pick<BoardPullRequestReadV1, 'comments'>, head: readonly AcceptanceRowV1[]): AcceptanceRowV1[] {
   const claims = new Map(protocolComments(read.comments, ACCEPTANCE_CLAIM_HEADER).map(claim => [commentId(claim.url), `${field(claim.body, 'Round')} ${field(claim.body, 'Subject')}`] as const));
   return head.filter(row => row.claim !== null && claims.get(row.claim) === `${row.round} ${row.subject_sha}`);
 }

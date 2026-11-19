@@ -22,7 +22,7 @@ import { DispatchError, type DispatchPlanV1 } from '../../core/board/dispatch';
 import { runDispatch } from '../../effects/board/dispatch';
 import { runReview, type ReviewObserver, type ReviewResultV1 } from '../../effects/board/review';
 import { runBoardMerge, type BoardMergeResultV1 } from '../../effects/board/merge';
-import { seatLaunch } from './seats';
+import { seatLaunch, SeatProviderUnavailableError } from './seats';
 import { runBoardCloseout, stopArchitectureDaemons, stopCodegraphServers } from '../../effects/board/closeout';
 import { worktreeProcesses } from '../../effects/git/worktree-processes';
 import { LIFECYCLE_EVENT_PROTOCOL, lifecycleIndexPath, recordLifecycleEvents, sanitized, summarizeWorktreeHooks, type CliFrictionEvent, type LifecycleEvent } from '../../effects/board/lifecycle-index';
@@ -148,6 +148,7 @@ const REVIEW_FRICTION: ReadonlySet<ReviewSkipReason> = new Set(['acceptance_unkn
 
 /** The closed error code of a refused board command; the message is free text and never leaves the command. */
 function boardErrorCode(error: Error): string {
+  if (error instanceof SeatProviderUnavailableError) return error.code;
   return error instanceof DispatchError ? 'dispatch_refused' : error instanceof BoardSourceError ? 'board_source_invalid' : 'board_collect_failed';
 }
 
@@ -374,9 +375,9 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
         process.stdout.write(dispatchText(result.plan, result.started.map(entry => entry.issue)));
         if (options.dryRun !== true) recordLifecycleEvents(() => readRepositoryId({ repo_root: process.cwd() }), dispatchEvents(result), process.env);
       } catch (error) {
-        if (!(error instanceof BoardCollectError || error instanceof BoardSourceError || error instanceof DispatchError)) throw error;
+        if (!(error instanceof BoardCollectError || error instanceof BoardSourceError || error instanceof DispatchError || error instanceof SeatProviderUnavailableError)) throw error;
         recordLifecycleEvents(() => readRepositoryId({ repo_root: process.cwd() }), [friction('board_dispatch', { error_code: boardErrorCode(error) })], process.env);
-        process.stderr.write(`${JSON.stringify({ ok: false, error: error.name, message: error.message })}\n`);
+        process.stderr.write(`${JSON.stringify({ ok: false, error: error instanceof SeatProviderUnavailableError ? error.code : error.name, message: error.message })}\n`);
         process.exitCode = 1;
       }
     });
@@ -396,9 +397,9 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
         process.stdout.write(reviewText(result));
         if (options.dryRun !== true) recordLifecycleEvents(() => readRepositoryId({ repo_root: process.cwd() }), reviewEvents(result), process.env);
       } catch (error) {
-        if (!(error instanceof BoardCollectError || error instanceof BoardSourceError)) throw error;
+        if (!(error instanceof BoardCollectError || error instanceof BoardSourceError || error instanceof SeatProviderUnavailableError)) throw error;
         recordLifecycleEvents(() => readRepositoryId({ repo_root: process.cwd() }), [friction('board_review', { error_code: boardErrorCode(error) })], process.env);
-        process.stderr.write(`${JSON.stringify({ ok: false, error: error.name, message: error.message })}\n`);
+        process.stderr.write(`${JSON.stringify({ ok: false, error: error instanceof SeatProviderUnavailableError ? error.code : error.name, message: error.message })}\n`);
         process.exitCode = 1;
       }
     });

@@ -2,7 +2,7 @@ import { isRecord } from '../evidence/is-record';
 import { modelFamily } from '../review/model-family';
 import { SEAT_RECOMMENDED_MODELS } from './recommended-models';
 import { seatAccount } from './seat-routing';
-import { SEAT_IDS, SEAT_RUNTIMES, unavailablePiSeat, type SeatId, type SeatModelEntryV1, type SeatRuntime, type SeatsConfigV1 } from './seats-settings';
+import { SEAT_IDS, SEAT_RUNTIMES, unavailablePiSeat, type SeatId, type SeatConfigV1, type SeatModelEntryV1, type SeatRuntime, type SeatsConfigV1 } from './seats-settings';
 
 export const SEAT_POOL_STALE_MS = 15 * 60_000;
 export const SEAT_POOL_KIND = 'seat_pool' as const;
@@ -100,14 +100,58 @@ export function recommendedModelIds(runtime: SeatRuntime): ReadonlySet<string> {
   return new Set(Object.values(SEAT_RECOMMENDED_MODELS).flatMap(entries => entries.filter(entry => entry.runtime === runtime).map(entry => entry.model)));
 }
 
-function modelStatus(entry: SeatModelEntryV1, probe: SeatPoolProbe, routing: SeatsConfigV1['routing']): ModelStatus {
+export const MAGPIE_EXTENSION_PATH = 'extensions/magpie.ts';
+const MAGPIE_MISSING = `Magpie extension missing. Checked ${MAGPIE_EXTENSION_PATH} under PI_CODING_AGENT_DIR when set, otherwise under the default Pi agent directory. Set seats.routing.unavailable_pi_providers to mark this provider unavailable.`;
+
+function runtimeStatus(probe: SeatPoolProbe): ModelStatus {
   if (probe.installation !== 'available') return probe.installation;
-  if (entry.runtime === 'pi') return unavailablePiSeat(entry, routing) === null ? 'pi_on_path' : 'provider_unavailable';
-  if (probe.sign_in === 'logged_out' || probe.models === 'unauthenticated') return 'signed_out';
-  if (probe.sign_in !== 'logged_in' || probe.models !== 'ok') return 'unknown';
+  if (probe.id === 'pi') return 'pi_on_path';
+  if (probe.sign_in === 'logged_out') return 'signed_out';
+  return probe.sign_in === 'logged_in' ? 'available' : 'unknown';
+}
+
+function modelStatus(entry: Pick<SeatConfigV1, 'runtime' | 'model'>, probe: SeatPoolProbe, routing: SeatsConfigV1['routing'], checkCatalog: boolean): ModelStatus {
+  const status = runtimeStatus(probe);
+  if (status === 'pi_on_path') return unavailablePiSeat(entry, routing) === null ? status : 'provider_unavailable';
+  if (status !== 'available') return status;
+  if (probe.models === 'unauthenticated') return 'signed_out';
+  if (!checkCatalog) return status;
+  if (probe.models !== 'ok') return 'unknown';
   const model = probe.listed.find(item => item.id === entry.model);
   if (model === undefined) return 'not_listed';
   return model.disabled ? 'disabled' : 'available';
+}
+
+function runtimeProbe(probes: readonly SeatPoolProbe[], id: SeatRuntime): SeatPoolProbe {
+  return probes.find(probe => probe.id === id) ?? emptySeatPoolProbe(id, 'unknown');
+}
+
+function availabilityBlock(id: SeatId, runtime: SeatRuntime, status: ModelStatus): string | null {
+  if (available(status)) return null;
+  const hint = entryHint(runtime, status);
+  return `${runtime}: ${SEAT_POOL_REASONS[status]}. See seats.${id}.model.${hint === null ? '' : ` ${hint}`}`;
+}
+
+export function seatRuntimeBlock(id: SeatId, runtime: SeatRuntime, probes: readonly SeatPoolProbe[]): string | null {
+  return availabilityBlock(id, runtime, runtimeStatus(runtimeProbe(probes, runtime)));
+}
+
+/** Launch and dispatch share the live status. Free ids get the runtime check and stay out of the result. */
+export function seatModelBlock(id: SeatId, seat: SeatConfigV1, seats: SeatsConfigV1, probes: readonly SeatPoolProbe[], magpieInstalled: () => boolean): string | null {
+  const probe = runtimeProbe(probes, seat.runtime);
+  const recommended = SEAT_RECOMMENDED_MODELS[id].some(entry => entry.model === seat.model && entry.runtime === seat.runtime);
+  const status = modelStatus(seat, probe, seats.routing, recommended);
+  if (status === 'pi_on_path' && seat.model?.startsWith('magpie/') && !magpieInstalled()) return `${MAGPIE_MISSING} See seats.${id}.model.`;
+  return availabilityBlock(id, seat.runtime, status);
+}
+
+function recommendedEntries(id: SeatId, routing: SeatsConfigV1['routing'], probes: readonly SeatPoolProbe[]): PoolEntry[] {
+  return SEAT_RECOMMENDED_MODELS[id].map(entry => poolEntry(entry, modelStatus(entry, runtimeProbe(probes, entry.runtime), routing, true)));
+}
+
+export function seatPoolHint(id: SeatId, seats: SeatsConfigV1, probes: readonly SeatPoolProbe[]): string {
+  const pool = recommendedEntries(id, seats.routing, probes).filter(entry => available(entry.status));
+  return `Available pool for ${id}: ${pool.map(entry => `${entry.runtime} ${entry.model}`).join(', ') || 'empty'}.`;
 }
 
 function poolEntry(entry: SeatModelEntryV1, status: ModelStatus): PoolEntry {
@@ -129,11 +173,9 @@ function report(collected_at: string, runtimes: readonly SeatPoolRuntimeV1[], se
 }
 
 export function buildSeatPool(seats: SeatsConfigV1, probes: readonly SeatPoolProbe[], collectedAt: string): SeatPoolV1 {
-  const byRuntime = new Map(probes.map(probe => [probe.id, probe]));
-  const probeFor = (id: SeatRuntime) => byRuntime.get(id) ?? emptySeatPoolProbe(id, 'unknown');
-  return report(collectedAt, SEAT_RUNTIMES.map(id => publicRuntime(probeFor(id))), SEAT_IDS.map(id => {
+  return report(collectedAt, SEAT_RUNTIMES.map(id => publicRuntime(runtimeProbe(probes, id))), SEAT_IDS.map(id => {
     const seat = seats[id];
-    const entries = SEAT_RECOMMENDED_MODELS[id].map(entry => poolEntry(entry, modelStatus(entry, probeFor(entry.runtime), seats.routing)));
+    const entries = recommendedEntries(id, seats.routing, probes);
     const match = entries.find(entry => entry.runtime === seat?.runtime && entry.model === seat.model);
     return poolRow(id, match?.status ?? (seat?.model == null ? 'no_model' : 'outside_recommendations'), entries);
   }));
