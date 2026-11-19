@@ -91,7 +91,7 @@ describe('seat quota routing', () => {
     const unknown = 'pi default provider unknown: give the seat an explicit model or empty seats.routing.unavailable_pi_providers';
     const lines = formatSeatRoutes(seats, seatAccountQuotas([claude({ seven_day: week(10, 84) })], seats.routing)).split('\n');
     expect(lines.filter(line => /^(route simple_|gatekeeper:|reviewer:|advisor:)/u.test(line))).toEqual([
-      'route simple_deep: worker-deep (pi magpie/cursorx/m)',
+      'route simple_deep: worker-deep (pi seats.worker-deep.model)',
       `route simple_fast: none (${unknown})`,
       `gatekeeper: none (${unknown})`, `reviewer: none (${unknown})`, `advisor: none (${unknown})`,
     ]);

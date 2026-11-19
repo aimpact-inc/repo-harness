@@ -1,6 +1,6 @@
 import { DispatchError, planDispatch, type DispatchDecisionV1, type DispatchPlanV1 } from '../../core/board/dispatch';
 import type { BoardHostPortsV1 } from '../../core/board/board';
-import { effectiveSeatConfig, seatAccountQuotas } from '../../core/board/seat-routing';
+import { effectiveSeatConfig, seatAccountQuotas, shownModel } from '../../core/board/seat-routing';
 import { withSeatLine } from '../../core/board/seat-line';
 import { renderBundleLine } from '../../core/board/source';
 import type { SeatConfigV1, SeatId } from '../../core/board/seats-settings';
@@ -57,6 +57,9 @@ function startWorktree(input: DispatchInput, issue: number): { readonly path: st
 }
 
 const issueList = (unit: readonly DispatchedV1[]): string => unit.map(decision => `#${decision.issue}`).join(', ');
+
+/** The claim's `Model:` text: `writerFamily` reads it through `modelFamily`, and an id with no known family shows as its seat field (#3250). */
+const claimModel = (seat: SeatId, model: string | null): string | null => (model === null ? null : shownModel(`seats.${seat}.model`, model));
 
 /** The claim of one issue of a unit. A bundle claim carries the `Issues:` line that the board reads (`issueClaim`). */
 function claimBody(decision: DispatchedV1, unit: readonly DispatchedV1[], branch: string, tab: string | null, runtime: SeatConfigV1['runtime'], model: string | null, coordinator: string): string {
@@ -128,7 +131,7 @@ export async function executeDispatch(plan: DispatchPlanV1, context: { readonly 
     if (lead.credentials && launch.runtime === 'pi') throw new DispatchError(`${issueList(unit)} touches credentials and its launch resolved to a Pi seat; nothing was started`);
     const claims: { readonly issue: number; readonly url: string }[] = [];
     try {
-      for (const decision of unit) claims.push({ issue: decision.issue, url: ports.comment(decision.issue, claimBody(decision, unit, worktree.branch, launch.tab, launch.runtime, context.model(lead.seat), plan.coordinator!)) });
+      for (const decision of unit) claims.push({ issue: decision.issue, url: ports.comment(decision.issue, claimBody(decision, unit, worktree.branch, launch.tab, launch.runtime, claimModel(lead.seat, context.model(lead.seat)), plan.coordinator!)) });
     } catch (error) {
       // No tab opened yet, so the claims of a bundle that posted only in part hold no seat.
       releaseClaims(ports, claims);

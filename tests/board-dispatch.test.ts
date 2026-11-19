@@ -166,6 +166,13 @@ test('the claim names the model from the context; a seat with no model writes no
   await executeDispatch(planOf(['route:important_deep']), context, run.base);
   await executeDispatch(planOf(['route:important_deep']), { ...context, model: () => null }, run.base);
   expect(bodies.map(body => body.split('\n').filter(line => line.startsWith('Model: ')))).toEqual([['Model: claude-sonnet-5-5'], []]);
+  // A user-set id with no known family can be a pasted secret (#3250): the claim names the seat field, in the Model and the Dispatch reading lines.
+  const secret = 'sk-live-0123456789';
+  const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-important': { ...DEFAULT_SEATS_CONFIG['worker-important'], model: secret } };
+  await executeDispatch(planDispatch({ seats, quota: NORMAL, terminals: [], parent: read([issue(1, { labels: ['route:important_deep'] })]) }), { ...context, model: () => secret }, run.base);
+  expect(bodies[2]).not.toContain(secret);
+  expect(bodies[2]).toContain('\nModel: seats.worker-important.model\n');
+  expect(bodies[2]).toContain('Dispatch reading: route important_deep: worker-important (claude seats.worker-important.model');
 });
 
 test('dispatch refuses before any writes without an active coordinator claim', async () => {
