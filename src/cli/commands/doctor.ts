@@ -43,6 +43,12 @@ import { CLI_NAME, RETIRED_CLI_NAME } from '../../core/skill-surface/cli-name';
 import { readRecordedSelection, recordedPlugins } from '../installer/architecture-selection';
 import { decodeSeatsConfig, SEAT_IDS } from '../../core/board/seats-settings';
 import { MAGPIE_BASE_URL, MAGPIE_PORT, MAGPIE_PROVIDER } from '../../effects/review/magpie-endpoint';
+import { isRecord } from '../../core/evidence/is-record';
+import { shellQuote } from '../../core/shell-quote';
+import { AntigravityHooksPathError } from '../../effects/host-config/gate';
+import { ANTIGRAVITY_GUARD_DENIAL, antigravityHookMatcher } from '../hook/host-adapter';
+import { buildAntigravityHooks } from '../installer/managed-entries';
+import { ANTIGRAVITY_WINDOWS_UNSUPPORTED, readAntigravityHooks } from '../installer/targets/antigravity';
 
 const TRUST_STATE_LINE = /^\[hooks\.state\."[^"]+\/\.codex\/hooks\.json:/;
 const PACKAGE_NAME = 'repo-harness';
@@ -370,6 +376,70 @@ function checkTargetInstall(target: (typeof ALL_TARGETS)[number]): DoctorCheckRe
     };
   }
   return { id, describe, status: 'ok', detail: `installed at ${det.configPath}` };
+}
+
+function probeAntigravityGuard(command: string): boolean {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rh-antigravity-doctor-'));
+  try {
+    const home = path.join(root, 'home');
+    const bun = path.join(root, 'bun');
+    const bin = path.join(root, 'bin');
+    const repo = path.join(root, 'fake');
+    for (const dir of [home, bun, bin, path.join(repo, '.git'), path.join(repo, '.ai', 'harness')]) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(repo, '.ai', 'harness', 'workflow-contract.json'), '{}\n');
+    const fakeEnv = path.join(repo, '.env');
+    fs.writeFileSync(fakeEnv, 'FAKE=antigravity-doctor\n');
+    const input = JSON.stringify({ cwd: repo, toolCall: { name: 'run_command', args: { CommandLine: `cat ${shellQuote(fakeEnv)}` } } });
+    const probe = spawnSync('/bin/sh', ['-c', command], {
+      cwd: repo, env: { HOME: home, PATH: bin, BUN_INSTALL: bun, TMPDIR: root }, input, encoding: 'utf8', timeout: 5000, maxBuffer: 64 * 1024,
+    });
+    if (probe.status !== 0 || probe.stderr !== '') return false;
+    const output = parseJsonText(probe.stdout, null);
+    return isRecord(output) && output.decision === 'deny' && output.reason === ANTIGRAVITY_GUARD_DENIAL;
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function configuredAntigravityBashCommand(member: unknown, matcher: string): string | undefined {
+  if (!isRecord(member) || !Array.isArray(member.PreToolUse)) return undefined;
+  const entry = member.PreToolUse.find((entry: unknown) => isRecord(entry) && entry.matcher === matcher);
+  if (!isRecord(entry) || !Array.isArray(entry.hooks) || entry.hooks.length !== 1) return undefined;
+  const handler: unknown = entry.hooks[0];
+  return isRecord(handler) && typeof handler.command === 'string' ? handler.command : undefined;
+}
+
+export function checkAntigravityHooks(env: NodeJS.ProcessEnv = process.env): DoctorCheckResult[] {
+  const native = { id: 'antigravity-native-activation', describe: 'Antigravity on-disk hook activation' };
+  const direct = { id: 'antigravity-direct-command', describe: 'Antigravity direct Bash guard' };
+  const live = 'Live-session reload is unverified.';
+  if (process.platform === 'win32') return [
+    { ...native, status: 'na', detail: `${ANTIGRAVITY_WINDOWS_UNSUPPORTED} ${live}` },
+    { ...direct, status: 'na', detail: ANTIGRAVITY_WINDOWS_UNSUPPORTED },
+  ];
+  let member: unknown;
+  try { member = readAntigravityHooks(env).value; }
+  catch (error) {
+    const detail = error instanceof AntigravityHooksPathError ? error.message : 'Cannot read the Antigravity hook file.';
+    return [{ ...native, status: 'fail', detail: `${detail} ${live}` }, { ...direct, status: 'na', detail: 'Hook file unavailable.' }];
+  }
+  if (member === undefined) return [
+    { ...native, status: 'na', detail: `repo-harness hook member is absent. ${live}` },
+    { ...direct, status: 'na', detail: 'No configured repo-harness hook command.' },
+  ];
+  const active = isRecord(member) && member.enabled !== false;
+  const activation: DoctorCheckResult = { ...native, status: active ? 'ok' : 'warn', detail: `repo-harness hook member is ${active ? 'enabled on disk' : 'disabled or invalid'}. ${live}` };
+  try {
+    const matcher = antigravityHookMatcher('bash');
+    const command = buildAntigravityHooks(env).PreToolUse.find((entry) => entry.matcher === matcher)?.hooks[0]?.command;
+    if (!command || command !== configuredAntigravityBashCommand(member, matcher)) return [activation, {
+      ...direct, status: 'fail', detail: 'The configured Bash hook differs from the current rendering. Run rh update --target antigravity.',
+    }];
+    const denied = probeAntigravityGuard(command);
+    return [activation, { ...direct, status: denied ? 'ok' : 'fail', detail: denied ? 'The direct command denied a synthetic .env read.' : 'The direct command did not return the expected guard denial.' }];
+  } catch {
+    return [activation, { ...direct, status: 'fail', detail: 'Cannot render or run the Antigravity Bash hook. Check the Bun runtime and hook bundle.' }];
+  }
 }
 
 function checkCodexTrustState(): DoctorCheckResult {
@@ -702,7 +772,7 @@ export function runDoctor(ports: DoctorPorts, cwd: string = process.cwd(), targe
       checks.push(checkTargetInstall(target));
     }
   }
-  checks.push(checkCodexTrustState());
+  checks.push(checkCodexTrustState(), ...checkAntigravityHooks());
   checks.push(...codegraphChecks);
   checks.push(...checkArchitectureProjectionSelection(process.env));
   checks.push(checkSecurityConfig(securityReport));

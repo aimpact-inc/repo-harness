@@ -16,12 +16,8 @@ import type { HostConfigFileChange } from '../../effects/host-config/gate';
 
 export type Location = 'global';
 
-/**
- * Stable id for the --target CLI flag and registry lookup.
- * Phase 1 supports codex + claude only; more hosts can be added in
- * Phase 2+ by appending to this union and registry.ts.
- */
-export type TargetId = 'codex' | 'claude';
+export type DefaultTargetId = 'codex' | 'claude';
+export type TargetId = DefaultTargetId | 'antigravity';
 
 export interface DetectionResult {
   installed: boolean;
@@ -57,8 +53,8 @@ export interface InstallOptions {
   readonly overrides?: OverrideSelection;
 }
 
-export interface AgentTarget {
-  readonly id: TargetId;
+export interface AgentTarget<Id extends TargetId = DefaultTargetId> {
+  readonly id: Id;
   readonly displayName: string;
   /**
    * Hook adapters support only the user-level global location.
@@ -71,5 +67,5 @@ export interface AgentTarget {
    * files without a write: the dry run plans them and the override check
    * reads their selectors. A target without it takes no override selection.
    */
-  hostConfigChanges?(loc: Location, opts: InstallOptions): readonly HostConfigFileChange[];
+  hostConfigChanges?(loc: Location, opts: InstallOptions, env?: NodeJS.ProcessEnv): readonly HostConfigFileChange[];
 }

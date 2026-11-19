@@ -17,14 +17,15 @@ import { assertConfigurationPath, configurationReceiptPath, hostConfigurationRoo
 import { migrateCodexConfigRecords, planCodexConfigMigration, previewAdoptedRevert } from './codex-config-migration';
 import { migrateJsonConfigRecords, planJsonConfigMigration, previewJsonAdoptedRevert } from './json-config-migration';
 import { UNVERIFIED_INSTALLER_RANGES } from '../../effects/host-config/delegated';
-import { openHostConfigGate, openRepositoryFileGate, planPathRevertEntry, userPathLabel, type HostConfigAdoption, type HostConfigGate, type HostConfigRepositoryFileGate, type HostConfigRevertEntry, type HostConfigToolRevertEntry } from '../../effects/host-config/gate';
+import { antigravityHooksPath, antigravityHostPath, openHostConfigGate, openRepositoryFileGate, planPathRevertEntry, userPathLabel, type HostConfigAdoption, type HostConfigGate, type HostConfigRepositoryFileGate, type HostConfigRevertEntry, type HostConfigToolRevertEntry } from '../../effects/host-config/gate';
 import { hostConfigPaths, projectedLedgerPaths, readLedger, readProjectedLedger, repositoryLedgers, resolveHostPath } from '../../effects/host-config/store';
 import { planToolRemoval, removeTools, windowsPowershellPath, windowsUserPathPort, type ToolRemovalEntry } from '../../effects/host-config/tools';
 import { HostConfigError, type ToolId, type ToolRecord } from '../../core/host-config/types';
 import { FileSyntaxError, parseJsonText, parseTomlText } from '../../core/evidence/file-syntax';
+import type { TargetId } from './types';
 
 export interface UninstallOptions {
-  target: 'codex' | 'claude' | 'both';
+  target: TargetId | 'both';
   dryRun?: boolean;
   env?: NodeJS.ProcessEnv;
   runtimeLock?: RuntimeTransactionContext;
@@ -277,6 +278,9 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   const gate = openHostConfigGate({ env, preview: opts.dryRun === true });
   // The Skills CLI lock is a staging file: its recorded entries go with a full uninstall only.
   const hostPaths = [...(files.codex ? [files.codex] : []), ...files.json, ...(opts.target === 'both' && gate.recorded(lock.path).length ? [lock.path] : [])];
+  if (opts.target === 'antigravity' || (opts.target === 'both' && (opts.dryRun ? readProjectedLedger : readLedger)(hostConfigPaths(env)).files[antigravityHostPath(env)])) {
+    hostPaths.push(antigravityHooksPath(env));
+  }
   // The Global Working Rules files go by the ledger too. Two host paths that name one file are one revert.
   const rulesAdoptions = new Map<string, HostConfigAdoption>();
   const resolvedHostPaths = new Set<string>();

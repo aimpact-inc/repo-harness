@@ -5,7 +5,7 @@
  * that accepts these flags validates consistently in one place.
  */
 
-import type { InstallTargetSpec } from './install';
+import type { AdapterTargetSpec, InstallTargetSpec } from './install';
 import type { Location } from '../installer/types';
 import type { AdoptionMode } from '../../core/adoption/modes';
 
@@ -15,14 +15,19 @@ import type { AdoptionMode } from '../../core/adoption/modes';
 
 const VALID_TARGETS: readonly InstallTargetSpec[] = ['codex', 'claude', 'both'];
 
-export function assertTarget(raw: string, commandName: string): InstallTargetSpec {
-  if ((VALID_TARGETS as readonly string[]).includes(raw)) {
-    return raw as InstallTargetSpec;
-  }
-  console.error(
-    `rh ${commandName}: invalid --target "${raw}" (expected: ${VALID_TARGETS.join(', ')})`,
-  );
+function validateTarget<T extends string>(raw: string, commandName: string, targets: readonly T[]): T {
+  const target = targets.find((candidate) => candidate === raw);
+  if (target !== undefined) return target;
+  console.error(`rh ${commandName}: invalid --target "${raw}" (expected: ${targets.join(', ')})`);
   process.exit(2);
+}
+
+export function assertTarget(raw: string, commandName: string): InstallTargetSpec {
+  return validateTarget(raw, commandName, VALID_TARGETS);
+}
+
+export function assertAdapterTarget(raw: string, commandName: string): AdapterTargetSpec {
+  return validateTarget(raw, commandName, [...VALID_TARGETS, 'antigravity']);
 }
 
 // ---------------------------------------------------------------------------
