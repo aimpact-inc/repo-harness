@@ -15,8 +15,9 @@ you dispatch. Only you post `issue claim` comments: the claim for each
 worker is yours, and it names the worker. Every later instruction to a
 worker is a comment on its issue or PR.
 
-Contents: §1 Preflight · §2 Split · §3 Write the boundaries · §4 Parent
-issue (§4.1 Release set, §4.2 Intake triage) · §5 Gap review · §6 Publish ·
+Contents: §1 Preflight · §2 Split · §3 Write the boundaries (§3.1
+Planner skeleton) · §4 Parent issue (§4.1 Release set, §4.2 Intake
+triage) · §5 Gap review · §6 Publish ·
 §7 Dispatch (§7.1 Quota check) · §8 Follow up (§8.1 Triage queue) ·
 §9 Merge and integrate (§9.3 Board merge) · §10 Close out.
 
@@ -117,6 +118,38 @@ Give the decision, not a menu: exact names, limits and the variables to
 remove. Default to a clean refactor: change every caller, delete the old
 path and update the tests in the same change. Keep compatibility only
 where the issue names a concrete reason.
+
+### 3.1 Planner skeleton
+
+When an issue is Medium or complex, and always when its route names a
+model that tends to over-defend, open one or more `planner` seats before
+you finish the boundaries:
+
+```bash
+rh seats consult --issue <n> --space <id> [--qualifier <word>] [--question <focus>]
+```
+
+Each call opens one read-only `planner` seat in the `plan` tab of that
+space, on the runtime and model of the `planner` seat, and the planner
+reads the issue itself. Ask for a skeleton of 15 to 30 lines: the target
+functions and their signatures, the explicit delete list, the exact error
+codes, and the forbidden fallback and compatibility branches. Run two
+consultations in parallel with a different `--qualifier` each, because
+one pane writes one plan file.
+
+The planner writes the full plan to `/tmp/rh-plans/<repo>/issue-<n>.md`,
+outside every worktree, and prints one completion line that names it. Read
+that file with `Read` or `hc file read <path>`. Do not read the plan from
+`hc read` scrollback: a long answer truncates in an alternate-screen TUI
+such as Codex or `agy`.
+
+Review each skeleton against the architecture map, the open issues and the
+rules in force. Paste only the decisions you accept into the issue's
+`要做的 / Do` and `边界 / Boundaries`, then dispatch. The GitHub issue stays
+the single requirement authority: a worker reads its issue and its
+dispatch packet, never a file under `/tmp/rh-plans/`. A skeleton is input
+to the issue text. It replaces no issue field, no acceptance row and no
+review row.
 
 ## 4. Parent issue
 
@@ -327,7 +360,10 @@ module is in the title so that a list view shows the write scopes.
   file or propose work to fill a seat.
 - Match the model to the issue. Give a weaker or over-defensive model the
   issues with the tightest boundaries and the clearest acceptance checks.
-  Keep contract-design issues for a strong model.
+  Keep contract-design issues for a strong model. When the assigned model
+  fills open decisions, lock them first with a planner skeleton (§3.1) and
+  paste the accepted decisions into the issue before you dispatch. A
+  worker never reads `/tmp/rh-plans/`.
 - Review rounds converge by the round rules in `acceptor.md` §2.2.
   Include this rule in the worker brief: before asking for round 2,
   check the fix delta against the open findings for sibling cases, missing
