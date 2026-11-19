@@ -1,7 +1,8 @@
 // The fleet roles of one Pi seat as pi-subagents role files (#1977). pi-subagents 0.87.0 reads the PATH-style
 // `PI_SUBAGENT_EXTRA_AGENT_DIRS` per process, so only the seat that `rh seats argv` launches sees them.
 import { sha256Hex } from '../../core/evidence/sha256';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { piRoleName } from '../../core/board/seat-launch';
@@ -49,10 +50,17 @@ export function writePiFleetRoles(fleet: readonly string[], env: NodeJS.ProcessE
   const files = fleet.map(role => [`${piRoleName(role)}.md`, roleFile(role, overrides)] as const);
   const digest = sha256Hex(JSON.stringify(files)).slice(0, 16);
   const directory = join(dirname(globalConfigurationPath(env)), 'seats', 'pi-fleet', digest);
-  mkdirSync(directory, { recursive: true });
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const owner = process.getuid?.();
+  if (owner !== undefined) {
+    const stat = lstatSync(directory);
+    if (!stat.isDirectory() || stat.uid !== owner) throw new PiFleetRolesError('The Pi fleet role directory must be owned by the current user.');
+    // Restrict a directory from an earlier launch before writing any role files.
+    if ((stat.mode & 0o777) !== 0o700) chmodSync(directory, 0o700);
+  }
   for (const [name, text] of files) {
-    const temporary = join(directory, `.${name}.${process.pid}.tmp`);
-    writeFileSync(temporary, text);
+    const temporary = join(directory, `.${name}.${randomUUID()}.tmp`);
+    writeFileSync(temporary, text, { flag: 'wx', mode: 0o600 });
     renameSync(temporary, join(directory, name));
   }
   return directory;

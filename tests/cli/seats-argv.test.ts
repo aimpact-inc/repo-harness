@@ -419,6 +419,30 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
     });
   });
 
+  test.skipIf(process.platform === "win32")("Pi role overrides stay private under umask 022", () => {
+    const advisor = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "pi", model: "magpie/agy-cli/gemini-4-neon" };
+    const override = "synthetic/example-private-model";
+    withHome({ ...DEFAULT_SEATS_CONFIG, advisor, pi_sub_agent_models: { explorer: override } }, home => {
+      const previousUmask = process.umask(0o022);
+      try {
+        const directory = String(bare(launch(home, "advisor").argv)[0]).replace("PI_SUBAGENT_EXTRA_AGENT_DIRS=", "");
+        const explorer = join(directory, "rh-explorer.md");
+        expect(readFileSync(explorer, "utf8")).toContain(`model: ${JSON.stringify(override)}\n`);
+        expect(statSync(directory).mode & 0o777).toBe(0o700);
+        expect(statSync(explorer).mode & 0o777).toBe(0o600);
+        expect(statSync(join(directory, "rh-deep-reasoner.md")).mode & 0o777).toBe(0o600);
+
+        chmodSync(directory, 0o755);
+        chmodSync(explorer, 0o644);
+        expect(bare(launch(home, "advisor").argv)[0]).toBe(`PI_SUBAGENT_EXTRA_AGENT_DIRS=${directory}`);
+        expect(statSync(directory).mode & 0o777).toBe(0o700);
+        expect(statSync(explorer).mode & 0o777).toBe(0o600);
+      } finally {
+        process.umask(previousUmask);
+      }
+    });
+  });
+
   test("every role name in a Pi advisor brief is the generated rh- name", () => {
     const advisor = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "pi" as const, model: "magpie/codex/gpt-6-astra", effort: null, fleet: ["deep-reasoner", "explorer"] };
     withHome({ ...DEFAULT_SEATS_CONFIG, advisor }, home => {
