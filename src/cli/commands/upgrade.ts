@@ -47,7 +47,7 @@ import {
 } from '../installer/install-profile';
 import { ownedPath, pathRecordIsCurrent, pathRecordKey, readPathRecords } from '../../effects/host-config/path-records';
 import { stageInstalledSkillCopy } from '../installer/skill-sync';
-import { openHostConfigGate } from '../../effects/host-config/gate';
+import { openHostConfigGate, sameApartFromIdentity } from '../../effects/host-config/gate';
 import { stripRepositoryHookFiles, type HookStripRecord } from '../../effects/upgrade/repository-hooks';
 import { hostConfigPaths, replaceTarget, resolveHostPath } from '../../effects/host-config/store';
 import type { OwnedPathLookup } from '../../effects/upgrade/legacy-inventory';
@@ -444,7 +444,8 @@ function applyLocked(
         const restored = readPathRecords(env);
         for (const path of [...refreshedPaths]) {
           const record = restored[pathRecordKey(env, path)];
-          if (!record || JSON.stringify(record) !== JSON.stringify(earlierRecords(path)) || !pathRecordIsCurrent(path, record)) continue;
+          const earlier = earlierRecords(path);
+          if (!record || !earlier || !sameApartFromIdentity(record, earlier) || !pathRecordIsCurrent(path, record)) continue;
           rolledBackPaths.push(path);
           refreshedPaths.splice(refreshedPaths.indexOf(path), 1);
         }

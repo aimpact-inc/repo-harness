@@ -1,10 +1,11 @@
-import { chmodSync, cpSync, lstatSync, mkdirSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { sha256Hex, sha256Prefixed } from '../../core/evidence/sha256';
-import { HostConfigError, type PathCommitted } from '../../core/host-config/types';
+import { HostConfigError, type PathCommitted, type PathRecord } from '../../core/host-config/types';
 import { retryWindowsSharingRace } from '../atomic-append';
-import { hashManagedTree } from '../managed-tree';
+import { hashManagedTree, OWNER_MARKER } from '../managed-tree';
+import { ownedSkillIsIntact } from './herdr-skill-marker';
 import { ensureSelfIgnoringDirectory } from '../self-ignoring-directory';
 
 /** The whole entry that a path write puts at a path: a file, a link, or a copy of a directory tree. */
@@ -25,6 +26,72 @@ export function observePathEntry(path: string): PathCommitted | null {
 
 export function sameCommitted(left: PathCommitted | null, right: PathCommitted | null): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+/**
+ * The device, file id and birth time of the entry itself (its links not
+ * followed): two names of one hard link share it, and a copy has its own.
+ */
+export function observeEntryIdentity(path: string): string | null {
+  const stat = lstatSync(path, { bigint: true, throwIfNoEntry: false });
+  return stat ? `${stat.dev}:${stat.ino}:${stat.birthtimeNs}` : null;
+}
+
+/** The entry that a path record acts on: the file that its user link names, or the key itself. */
+export function pathRecordEntry(key: string, record: PathRecord): string {
+  return record.link_target ?? key;
+}
+
+/** Empty directories and special entries have no entry in the recorded tree hash. */
+function treeEntriesAreCovered(path: string): boolean {
+  let covered = false;
+  for (const entry of readdirSync(path, { withFileTypes: true })) {
+    if (entry.name === OWNER_MARKER) {
+      if (!entry.isFile()) return false;
+    } else if (entry.isDirectory()) {
+      if (!treeEntriesAreCovered(join(path, entry.name))) return false;
+      covered = true;
+    } else if (entry.isFile() || entry.isSymbolicLink()) covered = true;
+    else return false;
+  }
+  return covered;
+}
+
+/**
+ * The entry at the key holds what rh recorded, by content only. For a linked
+ * record the key must still be a link that names `link_target`, and that file
+ * must hold `committed`. Ownership needs the identity too (`pathRecordProof`);
+ * only the one-shot adoption (`adoptedIdentity`) reads content alone.
+ */
+export function pathRecordContentHolds(key: string, record: PathRecord): boolean {
+  const stat = lstatSync(key, { throwIfNoEntry: false });
+  if (!stat) return false;
+  const committed = record.committed;
+  try {
+    if (record.link_target !== undefined) {
+      if (!stat.isSymbolicLink() || realpathSync.native(key) !== record.link_target || committed.type !== 'file') return false;
+      return lstatSync(record.link_target).isFile() && sha256Prefixed(readFileSync(record.link_target)) === committed.sha256;
+    }
+    if (committed.type === 'symlink') return stat.isSymbolicLink() && readlinkSync(key) === committed.target;
+    if (committed.type === 'file') return stat.isFile() && sha256Prefixed(readFileSync(key)) === committed.sha256;
+    if (!stat.isDirectory()) return false;
+    if (!treeEntriesAreCovered(key)) return false;
+    return 'proof' in committed ? ownedSkillIsIntact(key) : hashManagedTree(key) === committed.sha256;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The one-shot adoption of a record that has no identity (JD 7001045792): the
+ * identity of an entry that holds what rh recorded, observed before and after
+ * its content check. Null when the content differs or the entry changed during
+ * the check. Only the ledger move and the install-state migration call it.
+ */
+export function adoptedIdentity(key: string, record: PathRecord): string | null {
+  const entry = pathRecordEntry(key, record);
+  const before = observeEntryIdentity(entry);
+  return before !== null && pathRecordContentHolds(key, record) && observeEntryIdentity(entry) === before ? before : null;
 }
 
 /** Write the entry beside the path, or at `staged`; the caller records it and then publishes it. */

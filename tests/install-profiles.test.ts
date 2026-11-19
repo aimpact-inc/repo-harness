@@ -57,7 +57,7 @@ import { writeFakeHc } from './helpers/fake-hc';
 import { writeBunWrapper, writeShellExecutableFixture } from './helpers/repo-fixture';
 import { HC_MIN_VERSION } from '../src/core/terminal/herdr-pin';
 import { openHostConfigGate } from '../src/effects/host-config/gate';
-import { observePathEntry } from '../src/effects/host-config/whole-path';
+import { observeEntryIdentity, observePathEntry } from '../src/effects/host-config/whole-path';
 import { hostConfigPaths } from '../src/effects/host-config/store';
 import { ownedPath, pathRecordHost, pathRecordIsCurrent, pathRecordKey, readPathRecords, readPathRecordSet } from '../src/effects/host-config/path-records';
 import { tomlFragment } from '../src/core/host-config/toml-fragment';
@@ -576,10 +576,10 @@ describe('install selection', () => {
     const receipt = { owner: 'core', host: 'claude', kind: 'created', baseline: { state: 'unknown' }, committed: { type: 'symlink', target: oldSource } } as const;
     writePath(installStateFixturePath(env), `${JSON.stringify(seededState([], []))}\n`);
     seedPathRecords(env, { [pathRecordKey(env, retired)]: receipt });
-    expect(ownedPath(env, retired)).toEqual(receipt);
+    expect(ownedPath(env, retired)).toEqual({ ...receipt, identity: observeEntryIdentity(retired)! });
 
     applyInstallSelection([], [], env, new Date('2026-01-02T00:00:00Z'));
-    expect(ownedPath(env, retired)).toEqual(receipt);
+    expect(ownedPath(env, retired)).toEqual({ ...receipt, identity: observeEntryIdentity(retired)! });
 
     // A record outside the root of its host, or on a path that no install surface names, is never read as owned; both are reported.
     const elsewhere = join(env.HOME!, 'elsewhere', 'repo-harness-handoff');
@@ -1541,12 +1541,13 @@ describe('install selection', () => {
     const created = (path: string, owner: string, committed: object) => ({ owner, host: path === kept ? 'claude' : 'codex', kind: 'created', baseline: { state: 'unknown' }, committed });
     const sha = (path: string) => `sha256:${createHash('sha256').update(readFileSync(path)).digest('hex')}`;
     expect(readPathRecords(env) as object).toEqual({
-      [pathRecordKey(env, fleet)]: created(fleet, 'core', { type: 'file', sha256: sha(fleet) }),
+      // The one-shot move adopts each converted entry that still holds what the manifest recorded (JD 7001045792).
+      [pathRecordKey(env, fleet)]: { ...created(fleet, 'core', { type: 'file', sha256: sha(fleet) }), identity: observeEntryIdentity(fleet) },
       [pathRecordKey(env, kept)]: { ...created(kept, 'core', { type: 'file', sha256: sha(kept) }), kind: 'user_managed' },
-      [pathRecordKey(env, skill)]: created(skill, 'cross-review', { type: 'directory', sha256: hashManagedTree(skill) }),
+      [pathRecordKey(env, skill)]: { ...created(skill, 'cross-review', { type: 'directory', sha256: hashManagedTree(skill) }), identity: observeEntryIdentity(skill) },
     });
     const { paths: _paths, ...migrated } = JSON.parse(readFileSync(ledgerPath, 'utf-8'));
-    expect(migrated).toEqual({ ...textRecords, protocol: 4, retired: [], recovery: [], tools: {} });
+    expect(migrated).toEqual({ ...textRecords, protocol: 5, retired: [], recovery: [], tools: {} });
     const state = JSON.parse(readFileSync(installStateFixturePath(env), 'utf-8'));
     // The manifest claims the Pi package, but its entry is not in the Pi settings: no record.
     expect([state.protocol, 'pi_packages' in state, 'ownership_manifest' in state, ownedPiPackages(env)]).toEqual([5, false, false, []]);

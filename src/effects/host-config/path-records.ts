@@ -1,13 +1,11 @@
-import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { requireHome } from '../repo-harness-home';
-import { dirname, join } from 'node:path';
 import { sha256Prefixed } from '../../core/evidence/sha256';
+import { dirname, join } from 'node:path';
 import type { PathRecord, PathRecordHost } from '../../core/host-config/types';
-import { ownedSkillIsIntact } from './herdr-skill-marker';
 import { hostSkillRoot, stagedSkillRoot, syncSkillRoots } from '../host-skill-roots';
-import { hashManagedTree, OWNER_MARKER } from '../managed-tree';
 import { isPathInside } from '../path-containment';
 import { hostConfigPaths, hostPathKey, readLedger, resolveHostPath, writeLedger } from './store';
+import { observeEntryIdentity, pathRecordContentHolds, pathRecordEntry } from './whole-path';
 
 /**
  * The ledger's path records: the only ownership record of the whole host paths
@@ -159,48 +157,25 @@ export function createdPaths(env: NodeJS.ProcessEnv): readonly { readonly path: 
     .map(([path, record]) => ({ path, type: record.committed.type, current: () => pathRecordIsCurrent(path, record) }));
 }
 
-/** Empty directories and special entries have no entry in the recorded tree hash. */
-function treeEntriesAreCovered(path: string): boolean {
-  let covered = false;
-  for (const entry of readdirSync(path, { withFileTypes: true })) {
-    if (entry.name === OWNER_MARKER) {
-      if (!entry.isFile()) return false;
-    } else if (entry.isDirectory()) {
-      if (!treeEntriesAreCovered(join(path, entry.name))) return false;
-      covered = true;
-    } else if (entry.isFile() || entry.isSymbolicLink()) covered = true;
-    else return false;
-  }
-  return covered;
-}
-
-/** The entry that a path record acts on: the file that its user link names, or the key itself. */
-export function pathRecordEntry(key: string, record: PathRecord): string {
-  return record.link_target ?? key;
-}
-
 /**
- * The entry at the key still is what rh recorded: a removal acts only then.
- * For a linked record the key must still be a link that names `link_target`,
- * and that file must hold `committed`.
+ * `current`: the entry at the key is the one that rh wrote, so a removal or an overwrite acts on it. `changed`: it does not
+ * hold what rh recorded. `replaced`: it holds that, but it is another file-system entry (a copy, a restore or a re-creation).
+ * `unproved`: the record has no identity, so nothing proves that rh wrote the entry (#3266, JD 7001045792). A Herdr skill
+ * record proves itself by its marker, because Herdr rewrites the directory.
  */
+export type PathRecordProof = 'current' | 'changed' | 'replaced' | 'unproved';
+
+export function pathRecordProof(key: string, record: PathRecord): PathRecordProof {
+  const entry = pathRecordEntry(key, record);
+  const before = observeEntryIdentity(entry);
+  if (!pathRecordContentHolds(key, record)) return 'changed';
+  if ('proof' in record.committed) return 'current';
+  if (record.identity === undefined) return 'unproved';
+  return before === record.identity && observeEntryIdentity(entry) === record.identity ? 'current' : 'replaced';
+}
+
 export function pathRecordIsCurrent(key: string, record: PathRecord): boolean {
-  const stat = lstatSync(key, { throwIfNoEntry: false });
-  if (!stat) return false;
-  const committed = record.committed;
-  try {
-    if (record.link_target !== undefined) {
-      if (!stat.isSymbolicLink() || realpathSync.native(key) !== record.link_target || committed.type !== 'file') return false;
-      return lstatSync(record.link_target).isFile() && sha256Prefixed(readFileSync(record.link_target)) === committed.sha256;
-    }
-    if (committed.type === 'symlink') return stat.isSymbolicLink() && readlinkSync(key) === committed.target;
-    if (committed.type === 'file') return stat.isFile() && sha256Prefixed(readFileSync(key)) === committed.sha256;
-    if (!stat.isDirectory()) return false;
-    if (!treeEntriesAreCovered(key)) return false;
-    return 'proof' in committed ? ownedSkillIsIntact(key) : hashManagedTree(key) === committed.sha256;
-  } catch {
-    return false;
-  }
+  return pathRecordProof(key, record) === 'current';
 }
 
 /** Replace the path records and return whether they changed; the keys are sorted so that an unchanged set writes no bytes. */

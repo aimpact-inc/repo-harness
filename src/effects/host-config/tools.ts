@@ -4,9 +4,9 @@ import { HostConfigError, type HostConfigLedger, type HostPath, type ToolId, typ
 import { listsUserPathEntry, removeUserPathEntry, type UserPathPort, type UserPathValue } from '../../core/host-config/path-entry';
 import { spawnSync } from 'node:child_process';
 import { hostConfigPaths, hostPathKey, observeFile, pathRecordOf, readLedger, removeCreatedDirectories, validToolRecord, writeLedger } from './store';
-import { observePathEntry, sameCommitted } from './whole-path';
+import { observeEntryIdentity, observePathEntry, sameCommitted } from './whole-path';
 import { retryWindowsSharingRace } from '../atomic-append';
-import { observeEntryIdentity, retireThenDestroy, userPathLabel, type RevertStep } from './gate';
+import { retireThenDestroy, userPathLabel, type RevertStep } from './gate';
 
 /**
  * The shared tools of the host-config ledger (#2853): the Windows user `Path`

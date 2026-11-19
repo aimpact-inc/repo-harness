@@ -3,10 +3,12 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runConfigDiff, runConfigGc, runConfigRestore, runConfigStatus } from '../../src/cli/commands/config';
+import { migrateInstallState } from '../../src/cli/installer/install-state-migration';
+import { migrateInParentTransaction, rollbackRuntimeHostConfig } from '../../src/cli/installer/install-profile';
 import { runUserUninstall } from '../../src/cli/installer/uninstall';
 import { jsonFragment } from '../../src/core/host-config/json-fragment';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
-import { openRepositoryGate, resolveHostConfigRepository } from '../../src/effects/host-config/repository';
+import { openRepositoryGate, repositoryConfigPaths, resolveHostConfigRepository } from '../../src/effects/host-config/repository';
 
 /** A fake credential: no real token is ever read or written. */
 const FAKE_TOKEN = 'sk-FAKE-2851-not-a-real-token';
@@ -158,6 +160,61 @@ test('gc keeps a retired copy whose entry is no longer the retired bytes, in the
 
 // restore --repo (#2854): the dry run and the apply share one plan, so a record below a nested checkout is kept with the same
 // reason and exit code in both; the apply writes nothing there and leaves no staging copy. Without the nested checkout it restores.
+test('a protocol 4 repository ledger: the dry run projects it, rh update moves it, and restore --repo moves it when no update ran', () => {
+  const f = fixture();
+  const repo = join(f.home, 'repo');
+  const file = join(repo, '.claude', 'settings.json');
+  mkdirSync(join(repo, '.claude'), { recursive: true });
+  expect(Bun.spawnSync(['git', 'init', '-q', repo]).exitCode).toBe(0);
+  writeFileSync(file, 'user\n');
+  const repository = resolveHostConfigRepository(repo);
+  openRepositoryGate(f.env, repository).writePaths([{ path: file, owner: 'core', replace: true, entry: { type: 'file', bytes: Buffer.from('stripped\n') } }]);
+  // The repository ledger as 0.35.2 writes it: protocol 4, records with no identity.
+  const ledgerPath = repositoryConfigPaths(f.env, repository).ledger;
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  for (const record of Object.values(ledger.paths) as Record<string, unknown>[]) delete record.identity;
+  const protocol4 = JSON.stringify({ ...ledger, protocol: 4 });
+  writeFileSync(ledgerPath, protocol4);
+  const preview = runConfigRestore(f.env, undefined, { repo, dryRun: true });
+  expect([preview.exitCode, JSON.parse(readFileSync(ledgerPath, 'utf8')).protocol]).toEqual([0, 4]);
+  migrateInstallState(f.env);
+  expect(JSON.parse(readFileSync(ledgerPath, 'utf8')).protocol).toBe(5);
+  writeFileSync(ledgerPath, protocol4);
+  const restore = runConfigRestore(f.env, undefined, { repo });
+  expect([restore.exitCode, readFileSync(file, 'utf8')]).toEqual([0, 'user\n']);
+  expect(JSON.parse(readFileSync(ledgerPath, 'utf8')).protocol).toBe(5);
+});
+
+test('a failed candidate puts back each repository ledger that holds only its move; a ledger that the run also wrote stays and is reported', () => {
+  const f = fixture();
+  const repositories = ['a', 'b'].map((name) => {
+    const repo = join(f.home, name);
+    const file = join(repo, '.claude', 'settings.json');
+    mkdirSync(join(repo, '.claude'), { recursive: true });
+    expect(Bun.spawnSync(['git', 'init', '-q', repo]).exitCode).toBe(0);
+    writeFileSync(file, 'user\n');
+    const repository = resolveHostConfigRepository(repo);
+    openRepositoryGate(f.env, repository).writePaths([{ path: file, owner: 'core', replace: true, entry: { type: 'file', bytes: Buffer.from('stripped\n') } }]);
+    const ledger = repositoryConfigPaths(f.env, repository).ledger;
+    const { paths, ...rest } = JSON.parse(readFileSync(ledger, 'utf8'));
+    const protocol4 = Buffer.from(JSON.stringify({ ...rest, protocol: 4, paths: Object.fromEntries(Object.entries(paths as Record<string, Record<string, unknown>>)
+      .map(([key, { identity: _identity, ...record }]) => [key, record])) }));
+    writeFileSync(ledger, protocol4);
+    return { repo, repository, ledger, protocol4 };
+  });
+  const [a, b] = [repositories[0]!, repositories[1]!];
+  // The parent's transaction directory: the candidate keeps its copies there, so they leave with the transaction.
+  const transaction = mkdtempSync(join(f.home, 'install-'));
+  migrateInParentTransaction(transaction, f.env, () => migrateInstallState(f.env));
+  expect([a, b].map(({ ledger }) => JSON.parse(readFileSync(ledger, 'utf8')).protocol)).toEqual([5, 5]);
+  expect(readdirSync(transaction).filter((name) => name.startsWith('repository-ledger-')).length).toBe(4);
+  // The failed candidate also writes repository b.
+  openRepositoryGate(f.env, b.repository).writePaths([{ path: join(b.repo, '.claude', 'other.json'), owner: 'core', entry: { type: 'file', bytes: Buffer.from('rh\n') } }]);
+  const written = readFileSync(b.ledger);
+  expect(() => rollbackRuntimeHostConfig(transaction, f.env)).toThrow(`these repository ledgers changed after their move, so they stay at the current protocol: ${b.ledger}; run rh update`);
+  expect([readFileSync(a.ledger).equals(a.protocol4), readFileSync(b.ledger).equals(written)]).toEqual([true, true]);
+});
+
 test('restore --repo keeps a record that the target rule refuses, in the dry run as in the apply', () => {
   const f = fixture();
   const repo = join(f.home, 'repo');
@@ -174,4 +231,14 @@ test('restore --repo keeps a record that the target rule refuses, in the dry run
   rmSync(join(repo, '.claude', '.git'));
   const restore = runConfigRestore(f.env, undefined, { repo });
   expect([restore.exitCode, readFileSync(file, 'utf8'), readdirSync(join(repo, '.claude')), readdirSync(join(repo, '.ai/harness/backups/staging'))]).toEqual([0, 'user\n', ['settings.json'], []]);
+  const paths = repositoryConfigPaths(f.env, repository);
+  openRepositoryGate(f.env, repository).writePaths([{ path: file, owner: 'core', replace: true, entry: { type: 'file', bytes: Buffer.from('rh\n') } }]);
+  const ledger = JSON.parse(readFileSync(paths.ledger, 'utf8'));
+  const record = ledger.paths[file];
+  delete record.identity;
+  writeFileSync(paths.ledger, JSON.stringify(ledger));
+  const copy = join(paths.vault, record.backup.slice('sha256:'.length));
+  const line = `[unresolved] ${file}: rh recorded no identity for it, so nothing proves that rh wrote it; preserved; the file before rh is in ${copy}`;
+  const dryRun = runConfigRestore(f.env, undefined, { repo, dryRun: true });
+  expect([dryRun.exitCode, dryRun.lines[0], readFileSync(file, 'utf8'), readFileSync(copy, 'utf8')]).toEqual([1, line, 'rh\n', 'user\n']);
 });

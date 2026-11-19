@@ -5,8 +5,8 @@ import { join } from 'node:path';
 import type { FragmentEdit, HostConfigStrategy, HostPath } from '../../src/core/host-config/types';
 import { openHostConfigGate, openRepositoryFileGate, rollbackHostConfigTransaction, type HostConfigFileChange } from '../../src/effects/host-config/gate';
 import { openRepositoryGate, repositoryConfigPaths, repositoryExcludePath } from '../../src/effects/host-config/repository';
-import type { PathEntry } from '../../src/effects/host-config/whole-path';
-import { hostConfigPaths, hostConfigPathsAt, migrateLedgerSchema, parseLedger, putVault, replaceTarget } from '../../src/effects/host-config/store';
+import { observeEntryIdentity, type PathEntry } from '../../src/effects/host-config/whole-path';
+import { hostConfigPaths, hostConfigPathsAt, migrateLedgerSchema, parseLedger, putVault, readProjectedLedger, replaceTarget } from '../../src/effects/host-config/store';
 import { hookRenderingKey, jsonFragment, removeJsonHookCommand } from '../../src/core/host-config/json-fragment';
 import { sha256Prefixed } from '../../src/core/evidence/sha256';
 import { tomlFragment } from '../../src/core/host-config/toml-fragment';
@@ -73,6 +73,7 @@ test('an install-owned whole path refuses every gate operation and stays in the 
     [{ ...textRecords, protocol: 1 }, 'the ledger is protocol 1, which has no path records; run: rh update', {}, { retired: [], recovery: [] }],
     [{ ...textRecords, protocol: 2, paths }, 'the ledger is protocol 2, which has no retirement records; run: rh update', paths, { retired: [], recovery: [] }],
     [{ ...textRecords, protocol: 3, paths, ...retirement }, 'the ledger is protocol 3, which has no tool records; run: rh update', paths, retirement],
+    [{ ...textRecords, protocol: 4, paths, ...retirement, tools: {} }, 'the ledger is protocol 4, which has no entry identity; run: rh update', paths, retirement],
   ] as const) {
     writeFileSync(join(f.root, 'ledger.json'), JSON.stringify(old));
     expect(() => f.gate().recorded(f.a)).toThrow(refusal);
@@ -80,7 +81,7 @@ test('an install-owned whole path refuses every gate operation and stays in the 
     expect(openHostConfigGate({ env: { HOME: f.home }, preview: true }).recorded(f.a)).toEqual(textRecords.fragments.filter((entry: { file: string }) => entry.file === f.a));
     // The one-shot move keeps every record and adds the empty new maps; a second run writes nothing.
     migrateLedgerSchema(hostConfigPaths({ HOME: f.home }));
-    expect(f.ledger()).toEqual({ ...textRecords, protocol: 4, paths: moved, ...kept, tools: {} });
+    expect(f.ledger()).toEqual({ ...textRecords, protocol: 5, paths: moved, ...kept, tools: {} });
     const bytes = readFileSync(join(f.root, 'ledger.json'));
     migrateLedgerSchema(hostConfigPaths({ HOME: f.home }));
     expect(readFileSync(join(f.root, 'ledger.json'))).toEqual(bytes);
@@ -130,7 +131,7 @@ test('every write has a ledger record before a revert, and a revert touches no p
   expect({ a: readFileSync(f.a, 'utf8'), mode: statSync(f.a).mode & 0o777, tool: existsSync(join(f.home, '.tool')), c: readFileSync(c, 'utf8') })
     .toEqual({ a: 'keep=1\n', mode: 0o640, tool: false, c: 'rh=user\n' });
   // The revert retires the backup of `a`, which no record references any more.
-  expect(f.ledger()).toEqual({ protocol: 4, files: {}, fragments: [], directories: [], paths: {}, recovery: [], tools: {},
+  expect(f.ledger()).toEqual({ protocol: 5, files: {}, fragments: [], directories: [], paths: {}, recovery: [], tools: {},
     retired: [{ sha256: files[f.a].backup, at: expect.any(String) }] });
 
   // A failed ledger write stops the file write.
@@ -422,7 +423,8 @@ test('a record that an earlier release wrote at a user link keeps the link throu
   f.gate().writePaths([write(join(agents, 'seed.md'), 'seed\n')]);
   const sha = sha256Prefixed(Buffer.from('rh\n'));
   const backup = putVault(hostConfigPathsAt(join(f.home, '.repo-harness')), Buffer.from('mine\n'));
-  const record = (link_target: string) => ({ owner: 'core', host: 'claude', kind: 'created', baseline: { state: 'known', existed: false }, committed: { type: 'file', sha256: sha }, link_target });
+  const record = (link_target: string) => ({ owner: 'core', host: 'claude', kind: 'created', baseline: { state: 'known', existed: false }, committed: { type: 'file', sha256: sha }, link_target,
+    identity: observeEntryIdentity(link_target) });
   writeFileSync(join(f.root, 'ledger.json'), JSON.stringify({ ...f.ledger(), paths: {
     [linked]: { ...record(target), kind: 'replaced', baseline: { state: 'known', existed: true, sha256: sha256Prefixed(Buffer.from('mine\n')) }, backup },
     [owned]: record(ownedTarget), [repointed]: record(first),
@@ -601,6 +603,88 @@ test('a whole-path write checks every destination before it writes any: a refusa
   expect(() => f.gate().writePaths([{ path: agents, owner: 'core', entry: { type: 'symlink', target: user } }, { ...writes[0]!, path: join(agents, 'x.md') }]))
     .toThrow(`a call names this path and a path above it, so rh writes neither: ${join(agents, 'x.md')}`);
   expect({ agents: existsSync(agents), mine: readFileSync(join(user, 'x.md'), 'utf8') }).toEqual({ agents: false, mine: 'mine\n' });
+  let ran = false;
+  expect(() => f.gate().delegate([{ path: agents, owner: 'core' }, { path: join(agents, 'x.md'), owner: 'core' }], () => { ran = true; }))
+    .toThrow(`a call names this path and a path above it, so rh writes neither: ${join(agents, 'x.md')}`);
+  expect(ran).toBe(false);
+});
+
+test('a whole path is rh\'s only while it is the entry that rh wrote: a same-bytes copy and a re-made directory are the user\'s', () => {
+  const f = fixture();
+  const claude = join(f.home, '.claude');
+  const [english, skill, inner] = [join(claude, 'rules', 'english.md'), join(claude, 'skills', 's'), join(claude, 'newdir', 'sub', 'x.md')];
+  const source = mkdtempSync(join(f.home, 'src-'));
+  writeFileSync(join(source, 'SKILL.md'), 'v1\n');
+  const w = (path: string, text: string, replace = false) => ({ path, owner: 'core', entry: { type: 'file', bytes: Buffer.from(text) } as PathEntry, replace });
+  f.gate().writePaths([w(english, 'rh\n'), { path: skill, owner: 'core', entry: { type: 'directory', source } }, w(inner, 'rh\n')]);
+  // A write and a revert of the entry that rh wrote still act on it.
+  expect(f.gate().writePaths([w(english, 'rh\n')])).toEqual([]);
+
+  // The user restores the same bytes from a backup: another file-system entry, so rh neither replaces nor removes it. The old
+  // file stays aside, so the new one cannot reuse its file id.
+  renameSync(english, `${english}.old`);
+  writeFileSync(english, 'rh\n');
+  const copy = 'it holds the bytes that rh wrote, but it is another file-system entry (a copy or a restore), so rh does not replace it';
+  expect(() => f.gate().writePaths([w(english, 'rh2\n')])).toThrow(`${copy}: ${english}. To let rh write it, run the command again with --force: rh keeps this file in the vault first`);
+  expect(f.gate().revertPaths([english])).toEqual([{ path: english, action: 'kept_edited', code: 'host_config_entry_replaced' }]);
+  expect(readFileSync(english, 'utf8')).toBe('rh\n');
+  // On the user's word the copy goes to the vault, and rh records the path as replaced.
+  f.gate().writePaths([w(english, 'rh2\n', true)]);
+  expect({ kind: f.ledger().paths[english].kind, vault: f.vault(f.ledger().paths[english].backup) }).toEqual({ kind: 'replaced', vault: 'rh\n' });
+
+  // A copied skill directory with rh's tree is kept; the user moves it aside.
+  renameSync(skill, `${skill}.moved`);
+  mkdirSync(skill);
+  writeFileSync(join(skill, 'SKILL.md'), 'v1\n');
+  expect(() => f.gate().writePaths([{ path: skill, owner: 'core', entry: { type: 'directory', source } }])).toThrow(`${copy}: ${skill}. Move it aside, then run rh install`);
+
+  // A directory that rh created goes only by rmdir (JD 7001233478): a re-made one that holds a user file stays; an empty one goes.
+  rmSync(join(claude, 'newdir'), { recursive: true });
+  mkdirSync(join(claude, 'newdir', 'sub'), { recursive: true });
+  writeFileSync(join(claude, 'newdir', 'notes.txt'), 'mine\n');
+  expect(f.gate().revertPaths([inner])).toEqual([{ path: inner, action: 'released' }]);
+  expect({ notes: readFileSync(join(claude, 'newdir', 'notes.txt'), 'utf8'), sub: existsSync(join(claude, 'newdir', 'sub')) }).toEqual({ notes: 'mine\n', sub: false });
+
+  // --force always publishes: over a same-bytes copy of a file whose vault copy has rh's bytes, the record follows the new entry.
+  const same = join(claude, 'rules', 'same.md');
+  writeFileSync(same, 'rh\n');
+  f.gate().writePaths([w(same, 'rh\n', true)]);
+  renameSync(same, `${same}.old`);
+  writeFileSync(same, 'rh\n');
+  f.gate().writePaths([w(same, 'rh\n', true)]);
+  expect(f.gate().writePaths([w(same, 'rh2\n')])).toEqual([same]);
+});
+
+test('the protocol 5 move adopts each record that its entry still proves, once; a record with no identity is kept and reported on every run', () => {
+  const f = fixture();
+  const rules = join(f.home, '.claude', 'rules');
+  const [proved, edited, added] = ['proved.md', 'edited.md', 'added.md'].map((name) => join(rules, name)) as [string, string, string];
+  const w = (path: string, text: string, replace = false) => ({ path, owner: 'core', entry: { type: 'file', bytes: Buffer.from(text) } as PathEntry, replace });
+  f.gate().writePaths([w(proved, 'rh\n'), w(edited, 'rh\n')]);
+  // A protocol 4 ledger: the records of 0.35 have no identity, and the user edited one file.
+  const { protocol: _protocol, ...current } = f.ledger();
+  const paths = Object.fromEntries(Object.entries(current.paths as Record<string, Record<string, unknown>>).map(([key, { identity: _identity, ...record }]) => [key, record]));
+  const protocol4 = Buffer.from(JSON.stringify({ ...current, protocol: 4, paths }));
+  writeFileSync(join(f.root, 'ledger.json'), protocol4);
+  writeFileSync(edited, 'rh\nuser\n');
+  const projected = readProjectedLedger(hostConfigPaths({ HOME: f.home })).paths;
+  migrateLedgerSchema(hostConfigPaths({ HOME: f.home }));
+  expect({ proved: f.ledger().paths[proved].identity, edited: f.ledger().paths[edited].identity, projected: projected[proved].identity })
+    .toEqual({ proved: observeEntryIdentity(proved)!, edited: undefined, projected: observeEntryIdentity(proved)! });
+
+  // The user puts rh's bytes back: with no identity the record proves nothing, on this run and the next.
+  writeFileSync(edited, 'rh\n');
+  for (let run = 0; run < 2; run += 1) {
+    expect(() => f.gate().writePaths([w(edited, 'rh2\n')])).toThrow(`rh recorded no identity for it, so nothing proves that rh wrote it, so rh does not replace it: ${edited}. To let rh write it, run the command again with --force`);
+    expect(f.gate().revertPaths([edited])).toEqual([{ path: edited, action: 'kept_edited', code: 'host_config_identity_missing' }]);
+  }
+  expect(readFileSync(edited, 'utf8')).toBe('rh\n');
+
+  // A clean rollback to the protocol 4 snapshot puts its bytes back, so a 0.35 parent reads its ledger again; the next move adopts again.
+  const transaction = mkdtempSync(join(f.home, 'tx-'));
+  f.gate().writePaths([w(added, 'rh\n')], { transaction });
+  expect(rollbackHostConfigTransaction(hostConfigPathsAt(join(f.home, '.repo-harness')), protocol4, transaction).unresolved).toEqual([]);
+  expect({ ledger: readFileSync(join(f.root, 'ledger.json')).equals(protocol4), added: existsSync(added) }).toEqual({ ledger: true, added: false });
 });
 
 test('a delegated writer runs only on paths that rh may write; a replaced path stays a file; a rollback undoes a revert of a replaced file', () => {
@@ -635,7 +719,9 @@ test('a delegated writer runs only on paths that rh may write; a replaced path s
   const transaction = mkdtempSync(join(f.home, 'tx-'));
   expect(f.gate().revertPaths([user], { transaction }).map((entry) => entry.action)).toEqual(['restored']);
   expect(rollbackHostConfigTransaction(hostConfigPathsAt(join(f.home, '.repo-harness')), snapshot, transaction).unresolved).toEqual([]);
-  expect({ bytes: readFileSync(user, 'utf8'), record: f.ledger().paths[user] }).toEqual({ bytes: 'rh\n', record: JSON.parse(snapshot.toString()).paths[user] });
+  // The file that came back is a new file-system entry, so its record has the snapshot's fields and the new identity.
+  expect({ bytes: readFileSync(user, 'utf8'), record: { ...f.ledger().paths[user], identity: undefined }, identity: f.ledger().paths[user].identity })
+    .toEqual({ bytes: 'rh\n', record: { ...JSON.parse(snapshot.toString()).paths[user], identity: undefined }, identity: observeEntryIdentity(user) });
 
   // A file with rh text blocks is no whole path.
   writeFileSync(blocks, 'keep=1\n');
@@ -1012,7 +1098,7 @@ test.each(['created path', 'replaced restore fails', 'replaced ledger write fail
       locked(f.root, () => expect(() => f.gate().revertPaths([user])).toThrow());
       // The user's bytes are back; the stale claim no longer matches them, so a rerun only reports.
       expect({ bytes: readFileSync(user, 'utf8'), record: f.ledger().paths[user] }).toEqual({ bytes: 'mine\n', record });
-      expect(f.gate().revertPaths([user])).toEqual([{ path: user, action: 'kept_edited' }]);
+      expect(f.gate().revertPaths([user])).toEqual([{ path: user, action: 'kept_edited', vault: join(f.root, 'vault', record.backup.slice('sha256:'.length)) }]);
     }
     expect(readFileSync(user, 'utf8')).toBe('mine\n');
   }
@@ -1061,7 +1147,7 @@ test.each([
   if (change === 'absent') rmSync(file);
   if (change === 'edited') writeFileSync(file, 'stripped\nuser\n');
   const action = ({ none: 'restored', absent: 'released', edited: 'kept_edited' } as const)[change];
-  expect(gate.revertPaths([file])).toEqual([{ path: file, action }]);
+  expect(gate.revertPaths([file])).toEqual([{ path: file, action, ...(change === 'edited' ? { vault: join(paths.vault, record.backup.slice('sha256:'.length)) } : {}) }]);
   // Both writes staged in a guarded directory that went with the call: nothing beside the target, no staging left.
   if (change === 'none') expect({ bytes: readFileSync(file, 'utf8'), mode: statSync(file).mode & 0o777, beside: readdirSync(join(worktree, '.claude')), staging: readdirSync(join(worktree, '.ai/harness/backups/staging')) })
     .toEqual({ bytes: 'user\n', mode: 0o640, beside: ['settings.json'], staging: [] });

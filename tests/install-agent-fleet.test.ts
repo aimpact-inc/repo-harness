@@ -11,6 +11,7 @@ import { recordInstallOwnership } from "./helpers/install-ownership";
 import { pathRecordKey, readPathRecords } from "../src/effects/host-config/path-records";
 import { openHostConfigGate } from "../src/effects/host-config/gate";
 import { hostConfigPaths, putVault } from "../src/effects/host-config/store";
+import { observeEntryIdentity } from "../src/effects/host-config/whole-path";
 import { sha256Prefixed } from "../src/core/evidence/sha256";
 
 /** The ledger's `user_managed` path records under `home`: the fleet files that the user keeps. */
@@ -461,6 +462,24 @@ describe("install-agent-fleet", () => {
       expect(stray.status).not.toBe(0);
       expect(stray.stderr).toContain(`${join(dir, "notes.txt")} is not a fleet copy that rh wrote`);
       expect(readFileSync(target, "utf8")).toBe("original\n");
+
+      // The revert released the record and the copies stay. A generated copy that the user puts back has no record:
+      // its import proves nothing, so the uninstall keeps the user's file and names the vault copy.
+      rmSync(join(dir, "notes.txt"));
+      const generated = readFileSync(join(FLEET_SOURCE_DIR, "explorer.md"), "utf8");
+      writeFileSync(target, generated);
+      const reinstalled = runInstaller(home, FLEET_SOURCE_DIR);
+      expect([reinstalled.status, reinstalled.stdout]).toEqual([0, expect.stringContaining(`[fleet] ${target}: the user file in ${earliest} is now in the rh vault; no record proves that rh wrote the file there now, so rh uninstall keeps it and names the vault copy`)]);
+      const [kept] = openHostConfigGate({ env: { HOME: home } }).revertPaths([target]);
+      expect({ action: kept?.action, code: kept?.code, file: readFileSync(target, "utf8") })
+        .toEqual({ action: "kept_edited", code: "host_config_identity_missing", file: generated });
+      expect(readFileSync(kept!.vault!, "utf8")).toBe("original\n");
+
+      const forced = runInstaller(home, FLEET_SOURCE_DIR, ["--force"]);
+      expect(forced.status, forced.stdout + forced.stderr).toBe(0);
+      expect(forced.stdout).toContain("[fleet] claude/explorer.md: replaced (backup:");
+      const [restored] = openHostConfigGate({ env: { HOME: home } }).revertPaths([target]);
+      expect([restored?.action, readFileSync(target, "utf8")]).toEqual(["restored", generated]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -492,7 +511,7 @@ describe("install-agent-fleet", () => {
       const backup = putVault(hostConfigPaths({ HOME: home }), Buffer.from("mine\n"));
       const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
       ledger.paths[pathRecordKey({ HOME: home }, linked)] = { owner: "core", host: "claude", kind: "replaced", baseline: { state: "known", existed: true, sha256: sha256Prefixed(Buffer.from("mine\n")) },
-        committed: { type: "file", sha256: sha256Prefixed(fleet) }, backup, link_target: existing };
+        committed: { type: "file", sha256: sha256Prefixed(fleet) }, backup, link_target: existing, identity: observeEntryIdentity(existing) };
       writeFileSync(ledgerPath, JSON.stringify(ledger));
       const moved = join(home, "dotfiles/moved.md");
       rmSync(linked);
@@ -511,7 +530,7 @@ describe("install-agent-fleet", () => {
     }
   }, 30_000);
 
-  test("--force makes no vault copies for absent, identical or current rh-owned targets", () => {
+  test("--force makes no vault copies for absent or current rh-owned targets", () => {
     const { root, home } = setupFakeHome("install-agent-fleet-force-no-backup");
     const backupDir = join(home, ".repo-harness/config/vault");
     try {
@@ -520,7 +539,6 @@ describe("install-agent-fleet", () => {
       expect(runInstaller(home, FLEET_SOURCE_DIR, ["--force"]).stdout).toContain("explorer.md: up-to-date");
       expect(existsSync(backupDir)).toBe(false);
       const targets = [join(home, ".claude/agents/explorer.md"), join(home, ".codex/agents/explorer.toml")];
-      recordInstallOwnership(targets, { ...process.env, HOME: home });
       const next = join(root, "next");
       cpSync(FLEET_SOURCE_DIR, next, { recursive: true });
       const source = join(next, "explorer.md");

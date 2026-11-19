@@ -251,8 +251,6 @@ function compareAndWrite(targetPath, content, acceptedHash) {
     existing = null;
   }
 
-  if (existing === content) return "up-to-date";
-
   if (existing === null) {
     // A link that now names another file than the one whose user bytes rh replaced stops this file only.
     try { writeAgent(targetPath, content, false); } catch (error) {
@@ -263,8 +261,10 @@ function compareAndWrite(targetPath, content, acceptedHash) {
   }
 
   const owned = recordOf(targetPath);
-  const current = (owned?.kind === "created" || owned?.kind === "replaced") && owned.committed.type === "file"
+  const current = owned?.owner === "core" && (owned.kind === "created" || owned.kind === "replaced") && owned.committed.type === "file"
     && pathRecordIsCurrent(pathRecordKey(ENV, targetPath), owned);
+
+  if (existing === content && (!force || current)) return "up-to-date";
 
   if (force && !current) {
     try {
@@ -342,8 +342,9 @@ const targets = prepared.flatMap(({ agent, source, parsed, mapped }) => {
     },
   ];
 });
-for (const { path: targetPath, copy } of migrateReplacedAgents(ENV, targets)) {
-  console.log(`[fleet] ${targetPath}: the user file in ${copy} is now in the rh vault; rh uninstall puts it back`);
+for (const { path: targetPath, copy, proved } of migrateReplacedAgents(ENV, targets, process.env.REPO_HARNESS_RUNTIME_TRANSACTION)) {
+  console.log(`[fleet] ${targetPath}: the user file in ${copy} is now in the rh vault; ${proved ? "rh uninstall puts it back"
+    : "no record proves that rh wrote the file there now, so rh uninstall keeps it and names the vault copy"}`);
 }
 records = readPathRecords(ENV);
 

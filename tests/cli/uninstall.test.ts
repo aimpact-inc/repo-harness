@@ -272,6 +272,15 @@ test('modified profile-owned rule remains retryable with ownership retained',()=
  const path=join(home,'.codex/rules/anti-patterns.md');put(home,'.codex/rules/anti-patterns.md','user-edited');profile(home,[ownedFile(path,'owned')]);
  expect(runUserUninstall({target:'both',env}).status).toBe('partial');expect(readFileSync(path,'utf8')).toBe('user-edited');expect(existsSync(join(home,'.repo-harness/install-state.json'))).toBe(true);
  expect(Object.keys(ledger(home).paths)).toEqual([pathRecordKey({HOME:home},path)]);
+ const agent=join(home,'.claude/agents/explorer.md');put(home,'.claude/agents/explorer.md','fleet copy');
+ openHostConfigGate({env}).adoptReplacedPath(agent,'core',Buffer.from('old user file'));
+ const copy=join(home,'.repo-harness/config/vault',createHash('sha256').update('old user file').digest('hex'));
+ for (const dryRun of [true,false]) {
+  const result=runUserUninstall({target:'both',env,dryRun});
+  expect(result.status).toBe('partial');
+  expect(result.lines).toContain(`[unresolved] ${agent}: rh recorded no identity for it, so nothing proves that rh wrote it; preserved; the file before rh is in ${copy}`);
+ }
+ expect(readFileSync(agent,'utf8')).toBe('fleet copy');expect(readFileSync(copy,'utf8')).toBe('old user file');
 }));
 test('owned symlink removal never follows the skill source',()=>fixture((home,env)=>{
  put(home,'source/SKILL.md','keep');mkdirSync(join(home,'.codex/skills'),{recursive:true});const path=join(home,'.codex/skills/check');symlinkSync(join(home,'source'),path);

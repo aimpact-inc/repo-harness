@@ -8,7 +8,6 @@ import { hostSkillRoot, providerSkillLock, type ProviderSkillLock } from '../../
 import { piPackageEntry, piPackageRemoval, recordedPiPackages, removePiPackage } from './pi-package';
 import { globalContextPath, inspectUnrecordedGlobalRules, previewGlobalRulesAdoptedRevert } from './global-context';
 import { legacyRepositoryExcludesPath } from './repository-excludes';
-import { repositoryLedgers } from '../../effects/host-config/repository';
 import { readInstallState } from './install-profile';
 import { installStatePendingMigration, migrateInstallState, planInstallStateMigration } from './install-state-migration';
 import type { PathRecord } from '../../core/host-config/types';
@@ -18,8 +17,8 @@ import { assertConfigurationPath, configurationReceiptPath, hostConfigurationRoo
 import { migrateCodexConfigRecords, planCodexConfigMigration, previewAdoptedRevert } from './codex-config-migration';
 import { migrateJsonConfigRecords, planJsonConfigMigration, previewJsonAdoptedRevert } from './json-config-migration';
 import { UNVERIFIED_INSTALLER_RANGES } from '../../effects/host-config/delegated';
-import { openHostConfigGate, openRepositoryFileGate, planPathRevert, userPathLabel, type HostConfigAdoption, type HostConfigGate, type HostConfigRepositoryFileGate, type HostConfigRevertEntry, type HostConfigToolRevertEntry } from '../../effects/host-config/gate';
-import { hostConfigPaths, projectedLedgerPaths, readLedger, readProjectedLedger, resolveHostPath } from '../../effects/host-config/store';
+import { openHostConfigGate, openRepositoryFileGate, planPathRevertEntry, userPathLabel, type HostConfigAdoption, type HostConfigGate, type HostConfigRepositoryFileGate, type HostConfigRevertEntry, type HostConfigToolRevertEntry } from '../../effects/host-config/gate';
+import { hostConfigPaths, projectedLedgerPaths, readLedger, readProjectedLedger, repositoryLedgers, resolveHostPath } from '../../effects/host-config/store';
 import { planToolRemoval, removeTools, windowsPowershellPath, windowsUserPathPort, type ToolRemovalEntry } from '../../effects/host-config/tools';
 import { HostConfigError, type ToolId, type ToolRecord } from '../../core/host-config/types';
 import { FileSyntaxError, parseJsonText, parseTomlText } from '../../core/evidence/file-syntax';
@@ -136,11 +135,17 @@ const REVERT_REASONS: Readonly<Record<HostConfigRevertEntry['action'], string>> 
 
 const BASELINE_UNKNOWN = 'baseline unknown: equality with the file before install cannot be proved';
 
+const KEPT_CODES: Readonly<Partial<Record<NonNullable<HostConfigRevertEntry['code']>, string>>> = {
+  host_config_entry_replaced: 'holds the bytes that rh wrote, but it is another file-system entry (a copy or a restore); preserved',
+  host_config_identity_missing: 'rh recorded no identity for it, so nothing proves that rh wrote it; preserved',
+};
+
 /** The report item of one gate revert entry; `rh config restore` uses the same mapping. */
 export function revertItem(entry: HostConfigRevertEntry): UninstallItem {
   const action: UninstallAction = entry.action === 'kept_edited' ? 'unresolved' : entry.action === 'already_absent' ? 'note'
     : entry.action === 'failed' ? 'failed' : entry.baseline === 'proved' ? 'restored' : 'reverted';
-  const reason = [REVERT_REASONS[entry.action], ...(entry.baseline === 'unknown' && action === 'reverted' ? [BASELINE_UNKNOWN] : [])].join('; ');
+  const reason = [(entry.code && KEPT_CODES[entry.code]) || REVERT_REASONS[entry.action], ...(entry.baseline === 'unknown' && action === 'reverted' ? [BASELINE_UNKNOWN] : []),
+    ...(entry.vault ? [`the file before rh is in ${entry.vault}`] : [])].join('; ');
   return { path: entry.path, action, reason: entry.kept?.length ? `${reason}: ${entry.kept.join(', ')}` : reason };
 }
 
@@ -360,9 +365,10 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       // A record may own the final symlink, but never a symlinked parent directory.
       assertConfigurationPath(dirname(key), surfaceRoot(key));
       // The records of a dry-run migration are not in the ledger yet, so the plan reads them from `records`.
-      const action = planPathRevert(key, record);
-      if (action === 'kept_edited') { unresolved(key, 'owned surface changed since installation; preserved'); continue; }
-      pathReverts.set(key, { path: key, action });
+      const entry = planPathRevertEntry(hostConfigPaths(env), key, record);
+      const { action } = entry;
+      if (action === 'kept_edited') { items.push(revertItem(entry)); continue; }
+      pathReverts.set(key, entry);
       removedSurfaces.add(key);
       if (action === 'released') continue;
       remember(key); surfaceRemovals.push(key);
@@ -390,7 +396,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
     else for (const ledger of repositoryLedgers(env)) {
       let files: string[] = [ledger.ledger];
       try {
-        files = Object.keys(readLedger(ledger).files);
+        files = Object.keys((opts.dryRun ? readProjectedLedger : readLedger)(ledger).files);
         if (!files.length) continue;
         const gate = openRepositoryFileGate(env, ledger);
         const preview = gate.revert({ dryRun: true });

@@ -5,7 +5,7 @@ import { fileFormatOf, fragmentFormat } from '../../core/host-config/registry';
 import { HostConfigError, type FileFormat, type FileRecord, type FragmentRecord, type HostConfigLedger, type Sha256 } from '../../core/host-config/types';
 import { globalRuntimeScope, runtimeTransactionRoot } from '../locking/runtime-transaction-lock';
 import { pathRecordIsCurrent } from './path-records';
-import { hostConfigPaths, observeFile, readLedger, resolveHostPath, writeLedger, type HostConfigPaths } from './store';
+import { hostConfigPaths, observeFile, readLedger, resolveHostPath, vaultPath, writeLedger, type HostConfigPaths } from './store';
 
 /**
  * Read-only views of the host-config ledger for `rh config`, and the GC of
@@ -91,10 +91,6 @@ function baselineOf(record: FileRecord): FileStatus['baseline'] {
 
 function committedMatches(record: FileRecord, current: CurrentFile): boolean {
   return record.committed.type === 'absent' ? current === 'missing' : record.committed.sha256 === current;
-}
-
-function vaultPath(paths: HostConfigPaths, reference: Sha256): string {
-  return join(paths.vault, reference.slice('sha256:'.length));
 }
 
 export function configStatus(env: NodeJS.ProcessEnv): ConfigStatus {

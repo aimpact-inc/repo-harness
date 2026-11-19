@@ -1,4 +1,4 @@
-import { closeSync, fchmodSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, rmdirSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, fchmodSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, rmdirSync, unlinkSync, writeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { sha256Hex, sha256Prefixed } from '../../core/evidence/sha256';
@@ -14,6 +14,7 @@ import {
   type Sha256,
 } from '../../core/host-config/types';
 import { publishFileByRename, retryWindowsSharingRace } from '../atomic-append';
+import { adoptedIdentity } from './whole-path';
 import { ensureSelfIgnoringDirectory } from '../self-ignoring-directory';
 import { globalConfigurationPath } from '../configuration/global-configuration';
 import { isPathInside } from '../path-containment';
@@ -200,9 +201,13 @@ function validPathCommitted(value: unknown): boolean {
   return (keys === 'sha256,type' && isSha(value.sha256)) || (keys === 'proof,type' && value.proof === 'herdr-skill-marker');
 }
 
+/** `observeEntryIdentity`: device, file id and birth time. */
+const isIdentity = (value: unknown): value is string => isText(value) && /^\d+:\d+:\d+$/u.test(value);
+
 function validPathRecord(record: unknown): boolean {
   if (!isObject(record) || !isText(record.owner) || record.owner === '' || !PATH_RECORD_HOSTS.includes(record.host as string)
     || !validBaseline(record.baseline) || !validPathCommitted(record.committed)) return false;
+  if (record.identity !== undefined && !(isIdentity(record.identity) && record.kind !== 'user_managed' && !(isObject(record.committed) && 'proof' in record.committed))) return false;
   const file = isObject(record.committed) && record.committed.type === 'file';
   // A user link at the key: rh acts on the file that it names, which only a created or replaced file record does.
   if (record.link_target !== undefined && !(isText(record.link_target) && isAbsolute(record.link_target) && file && record.kind !== 'user_managed')) return false;
@@ -257,7 +262,7 @@ export function validToolRecord(record: unknown): boolean {
   if (!isObject(record) || !isObject(record.paths) || !Array.isArray(record.directories)) return false;
   return (record.installed_by === 'rh-install' || record.installed_by === 'rh-bootstrap') && isText(record.version) && record.version !== ''
     && Object.entries(record.paths).every(([path, entry]) => isAbsolute(path) && isObject(entry) && validPathCommitted(entry.committed)
-      && Object.keys(entry).every((key) => key === 'committed' || (key === 'identity' && isText(entry.identity) && /^\d+:\d+:\d+$/u.test(entry.identity))))
+      && Object.keys(entry).every((key) => key === 'committed' || (key === 'identity' && isIdentity(entry.identity))))
     && record.directories.every((directory) => isText(directory) && isAbsolute(directory))
     && (record.path_entry === undefined || validUserPathEntry(record.path_entry))
     && (record.profile === undefined || (isObject(record.profile) && isText(record.profile.file) && isAbsolute(record.profile.file) && isText(record.profile.inserted) && record.profile.inserted !== ''))
@@ -277,9 +282,14 @@ const validRetired = (value: unknown): boolean => isObject(value) && isSha(value
 const validRecovery = (value: unknown): boolean => validRetired(value) && isObject(value) && isText(value.file) && isAbsolute(value.file);
 const validRetirement = (value: Record<string, unknown>): boolean => Array.isArray(value.retired) && value.retired.every(validRetired) && Array.isArray(value.recovery) && value.recovery.every(validRecovery);
 
-/** A valid ledger of an older protocol as the schema move leaves it; null for any other value. */
-function movedLedger(value: unknown): HostConfigLedger | null {
-  if (!isObject(value) || !validTextRecords(value) || 'tools' in value) return null;
+/** A valid ledger of an older protocol in the current shape, records as they are; null for any other value. */
+function olderLedger(value: unknown): HostConfigLedger | null {
+  if (!isObject(value) || !validTextRecords(value)) return null;
+  if (value.protocol === 4) {
+    return validPathRecords(value) && validRetirement(value) && validTools(value)
+      ? { ...(value as unknown as HostConfigLedger), protocol: HOST_CONFIG_LEDGER_PROTOCOL } : null;
+  }
+  if ('tools' in value) return null;
   const { files, fragments, directories } = value as unknown as HostConfigLedger;
   const moved = { protocol: HOST_CONFIG_LEDGER_PROTOCOL as typeof HOST_CONFIG_LEDGER_PROTOCOL, files, fragments, directories, tools: {} };
   const empty = !('retired' in value) && !('recovery' in value);
@@ -292,7 +302,25 @@ function movedLedger(value: unknown): HostConfigLedger | null {
   return null;
 }
 
-const RETIRED_PROTOCOLS: Readonly<Record<number, string>> = { 1: 'which has no path records', 2: 'which has no retirement records', 3: 'which has no tool records' };
+/**
+ * An older ledger as the schema move leaves it; null for any other value. The move of the live ledger, and its preview,
+ * adopt each `created` or `replaced` record whose entry holds what rh recorded: it gets that entry's identity, and any other
+ * record stays without one (JD 7001045792). A transaction snapshot (`adopt` false) keeps its records as they are, so a
+ * rollback never opens the adoption again.
+ */
+function movedLedger(value: unknown, adopt: boolean): HostConfigLedger | null {
+  const older = olderLedger(value);
+  if (older === null || !adopt) return older;
+  const paths = Object.fromEntries(Object.entries(older.paths).map(([key, record]) => {
+    const identity = record.kind === 'user_managed' || 'proof' in record.committed ? null : adoptedIdentity(key, record);
+    return [key, identity === null ? record : { ...record, identity }];
+  }));
+  return { ...older, paths };
+}
+
+const RETIRED_PROTOCOLS: Readonly<Record<number, string>> = {
+  1: 'which has no path records', 2: 'which has no retirement records', 3: 'which has no tool records', 4: 'which has no entry identity',
+};
 
 /** The ledger in `bytes`, also a copy of it; `label` names the file in an error. An older protocol names the update step. */
 export function parseLedger(bytes: Buffer, label: string): HostConfigLedger {
@@ -306,10 +334,11 @@ export function parseLedger(bytes: Buffer, label: string): HostConfigLedger {
 }
 
 /**
- * The one-shot move of an older ledger to protocol 4: every record stays as it
- * is; a protocol 1 ledger gets an empty `paths`, protocols 1 and 2 get empty
- * `retired` and `recovery`, and every older ledger gets empty `tools`. A
- * mutating entry runs it under the runtime lock; a later run finds protocol 4.
+ * The one-shot move of an older ledger to protocol 5: a protocol 1 ledger
+ * gets an empty `paths`, protocols 1 and 2 get empty `retired` and `recovery`,
+ * protocols 1 to 3 get empty `tools`, and each path record that the entry
+ * still proves gets its identity (`movedLedger`). A mutating entry runs it
+ * under the runtime lock; a later run finds protocol 5.
  */
 export function migrateLedgerSchema(paths: HostConfigPaths): void {
   const { observation, bytes } = observeFile(paths.ledger);
@@ -317,7 +346,7 @@ export function migrateLedgerSchema(paths: HostConfigPaths): void {
   if (bytes === null) throw invalidState(`the ledger is not a regular file: ${paths.ledger}`);
   const value = parseJson(bytes, paths.ledger);
   if (!isObject(value) || typeof value.protocol !== 'number' || !RETIRED_PROTOCOLS[value.protocol]) return;
-  const moved = movedLedger(value);
+  const moved = movedLedger(value, true);
   if (!moved) throw invalidState(`the protocol ${String(value.protocol)} ledger has an invalid shape: ${paths.ledger}`);
   writeLedger(paths, moved);
 }
@@ -330,7 +359,7 @@ export function readProjectedLedger(paths: HostConfigPaths): HostConfigLedger {
   const { observation, bytes } = observeFile(paths.ledger);
   if (!observation.existed) return EMPTY_LEDGER;
   if (bytes === null) throw invalidState(`the ledger is not a regular file: ${paths.ledger}`);
-  return parseSnapshotLedger(bytes, paths.ledger);
+  return movedLedger(parseJson(bytes, paths.ledger), true) ?? parseLedger(bytes, paths.ledger);
 }
 
 /**
@@ -339,7 +368,7 @@ export function readProjectedLedger(paths: HostConfigPaths): HostConfigLedger {
  * as the move leaves it.
  */
 export function parseSnapshotLedger(bytes: Buffer, label: string): HostConfigLedger {
-  return movedLedger(parseJson(bytes, label)) ?? parseLedger(bytes, label);
+  return movedLedger(parseJson(bytes, label), false) ?? parseLedger(bytes, label);
 }
 
 /** The path records of `readProjectedLedger`. */
@@ -356,7 +385,25 @@ export function writeLedgerBytes(paths: HostConfigPaths, bytes: Buffer): void {
   publishFileByRename(paths.ledger, bytes, `${paths.ledger}.${randomUUID()}.tmp`);
 }
 
+/** The ledger and vault of one clone's repository scope (#2854), keyed by its Git common directory. */
+export function repositoryLedgerLayout(harness: string, key: string): HostConfigPaths {
+  const root = join(harness, 'config', 'repos', key);
+  return { harness, root, ledger: join(root, 'ledger.json'), vault: join(root, 'vault') };
+}
+
+/** Every repository ledger, also of a repository that left the registry or is gone: uninstall reverts each. */
+export function repositoryLedgers(env: NodeJS.ProcessEnv): HostConfigPaths[] {
+  const { harness } = hostConfigPaths(env);
+  const repos = join(harness, 'config', 'repos');
+  if (!lstatSync(repos, { throwIfNoEntry: false })?.isDirectory()) return [];
+  return readdirSync(repos).sort().map((key) => repositoryLedgerLayout(harness, key)).filter((paths) => lstatSync(paths.ledger, { throwIfNoEntry: false }));
+}
+
 // ---- vault --------------------------------------------------------------
+
+export function vaultPath(paths: HostConfigPaths, reference: Sha256): string {
+  return join(paths.vault, reference.slice('sha256:'.length));
+}
 
 /** Content-addressed and shared: a second put of the same bytes reuses the stored copy. */
 export function putVault(paths: HostConfigPaths, bytes: Buffer): Sha256 {

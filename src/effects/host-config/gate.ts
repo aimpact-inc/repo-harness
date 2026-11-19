@@ -1,11 +1,12 @@
-import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { sha256Prefixed } from '../../core/evidence/sha256';
+import { sha256Hex, sha256Prefixed } from '../../core/evidence/sha256';
 import { planFile, type FilePlan, type PlannedFragment } from '../../core/host-config/plan';
 import { fileFormatOf, fragmentFormat, type FragmentFormat } from '../../core/host-config/registry';
 import { isMarkedBlockSelector } from '../../core/host-config/marked-block';
 import { hostConfigRepositoryKey } from '../git/repository-identity';
 import {
+  HOST_CONFIG_LEDGER_PROTOCOL,
   HostConfigError,
   expectedFromCommitted,
   sameExpected,
@@ -45,6 +46,7 @@ import {
   readLedger,
   readProjectedLedger,
   readVault,
+  vaultPath,
   removeCreatedDirectories,
   removeTarget,
   replaceTarget,
@@ -54,12 +56,14 @@ import {
   type HostConfigPaths,
 } from './store';
 import { isPathInside } from '../path-containment';
-import { pathRecordEntry, pathRecordHostRoot, pathRecordIsCurrent } from './path-records';
+import { pathRecordHostRoot, pathRecordIsCurrent, pathRecordProof } from './path-records';
 import {
   discardStagedEntry,
   hasPreimage,
   keepPreimage,
+  observeEntryIdentity,
   observePathEntry,
+  pathRecordEntry,
   publishPathEntry,
   removePathEntry,
   restorePreimage,
@@ -181,12 +185,18 @@ export interface HostConfigRevertEntry {
   readonly action: 'removed' | 'restored' | 'text_removed' | 'released' | 'already_absent' | 'kept_edited' | 'failed';
   /** The selectors of the fragments that stay in a kept file. */
   readonly kept?: readonly string[];
+  /** The vault copy of the file that rh replaced, when a kept record has one: the user's way back. */
+  readonly vault?: string;
   /**
    * `proved`: the result was checked equal to the file before rh. `unknown`:
    * rh has no record of the file before it, so equality cannot be proved.
    */
   readonly baseline?: 'proved' | 'unknown';
-  readonly code?: 'host_config_restore_mismatch';
+  /**
+   * With `kept_edited`: `host_config_entry_replaced` when the path holds rh's bytes in another file-system entry (a copy or a
+   * restore), `host_config_identity_missing` when its record has no identity (#3266).
+   */
+  readonly code?: 'host_config_restore_mismatch' | 'host_config_entry_replaced' | 'host_config_identity_missing';
 }
 
 /** A fragment that an earlier rh version wrote, as its old record names it. */
@@ -292,9 +302,10 @@ export interface HostConfigGate {
    * One-shot migration: rh's current file at `path` replaced the user file
    * `backup` before the ledger had path records. The backup goes to the vault
    * and the record becomes `replaced`. The path must have no record or a
-   * current `created` record of `owner`.
+   * current `created` record of `owner`. The transaction records the import so that
+   * a rollback can undo it without replacing the live file.
    */
-  adoptReplacedPath(path: string, owner: string, backup: Buffer): void;
+  adoptReplacedPath(path: string, owner: string, backup: Buffer, transaction?: string): void;
   /**
    * Undo rh's recorded writes, for the named paths or for all; a path without
    * a record is not touched. With an owner or selector filter, only the
@@ -548,10 +559,25 @@ function ownsEntry(record: PathRecord | undefined, owner: string, key: string): 
   return record !== undefined && record.owner === owner && record.kind !== 'user_managed' && pathRecordIsCurrent(key, record);
 }
 
-function refusal(path: string, record: PathRecord | undefined, owner: string): HostConfigError {
+/**
+ * The refusal of a write over an entry that is not rh's for `owner`. A same-bytes copy and a record with no identity name their
+ * recovery: `--force` for a file that the user's word can replace (`forceable`), else moving the entry aside.
+ */
+function refusal(path: string, record: PathRecord | undefined, owner: string, key: string, forceable: boolean): HostConfigError {
+  const proof = record && record.owner === owner && record.kind !== 'user_managed' ? pathRecordProof(key, record) : null;
   const reason = !record ? 'rh has no record of it' : record.owner !== owner ? `rh records it for ${record.owner}`
-    : record.kind === 'user_managed' ? 'the user keeps it' : 'it changed since rh wrote it';
-  return new HostConfigError('host_config_replacement_refused', `${reason}, so rh does not replace it: ${path}`);
+    : record.kind === 'user_managed' ? 'the user keeps it'
+      : proof === 'replaced' ? 'it holds the bytes that rh wrote, but it is another file-system entry (a copy or a restore)'
+        : proof === 'unproved' ? 'rh recorded no identity for it, so nothing proves that rh wrote it' : 'it changed since rh wrote it';
+  const recovery = proof !== 'replaced' && proof !== 'unproved' ? ''
+    : forceable ? '. To let rh write it, run the command again with --force: rh keeps this file in the vault first' : '. Move it aside, then run rh install';
+  return new HostConfigError('host_config_replacement_refused', `${reason}, so rh does not replace it: ${path}${recovery}`);
+}
+
+/** Two records that differ at most in their identity. */
+/** A rollback or a writer that puts an entry back makes a new file-system entry: only its identity differs. */
+export function sameApartFromIdentity(left: PathRecord, right: PathRecord): boolean {
+  return JSON.stringify({ ...left, identity: undefined }) === JSON.stringify({ ...right, identity: undefined });
 }
 
 /** The bytes of a user file that `replace` lets rh write over, in the vault. */
@@ -573,11 +599,22 @@ function linkTargetOf(paths: HostConfigPaths, key: string, previous: PathRecord 
 }
 
 function nextPathRecord(previous: PathRecord | undefined, owner: string, host: PathRecord['host'], observed: PathCommitted | null,
-  committed: PathCommitted, backup: Sha256 | undefined, linkTarget?: string): PathRecord {
+  committed: PathCommitted, backup: Sha256 | undefined, identity: string | null, linkTarget?: string): PathRecord {
   const baseline = previous?.baseline ?? (observed === null ? { state: 'known' as const, existed: false as const }
     : observed.type === 'file' ? { state: 'known' as const, existed: true as const, sha256: observed.sha256 } : { state: 'unknown' as const });
   const kept = backup ?? (previous?.kind === 'replaced' ? previous.backup : undefined);
-  return { owner, host, kind: kept ? 'replaced' : 'created', baseline, committed, ...(kept ? { backup: kept } : {}), ...(linkTarget ? { link_target: linkTarget } : {}) };
+  return { owner, host, kind: kept ? 'replaced' : 'created', baseline, committed, ...(kept ? { backup: kept } : {}), ...(linkTarget ? { link_target: linkTarget } : {}),
+    ...(identity !== null ? { identity } : {}) };
+}
+
+/**
+ * One call checks every destination against the disk before the first write, so no destination may be another one or lie
+ * below it: a write of the outer path would change what the inner one reaches.
+ */
+function refuseOverlappingPaths(admitted: readonly { readonly path: string; readonly key: string }[]): void {
+  if (new Set(admitted.map(({ key }) => key)).size !== admitted.length) throw new HostConfigError('host_config_invalid_state', 'a call names one path twice');
+  const nested = admitted.find(({ key }) => admitted.some((other) => other.key !== key && isPathInside(other.key, key)));
+  if (nested) throw new HostConfigError('host_config_invalid_state', `a call names this path and a path above it, so rh writes neither: ${nested.path}`);
 }
 
 /** The record key and host of a whole path that a scope admits; it throws for any other path. */
@@ -618,7 +655,7 @@ function planWholePath(paths: HostConfigPaths, write: HostConfigPathWrite, key: 
   }
   let replaces: WholePathPlan['replaces'];
   if (observed !== null && !ownsEntry(prior, write.owner, key)) {
-    if (!write.replace) throw refusal(write.path, prior, write.owner);
+    if (!write.replace) throw refusal(write.path, prior, write.owner, key, observed.type === 'file' && linkTarget === undefined);
     if (observed.type !== 'file') throw new HostConfigError('host_config_invalid_state', `only a file can be replaced on the user's word: ${write.path}`);
     if (linkTarget !== undefined) throw new HostConfigError('host_config_replacement_refused', `this path is a link to ${linkTarget}, and the user's word to replace a file does not reach through a link: ${write.path}`);
     replaces = observed;
@@ -640,10 +677,7 @@ function writeWholePaths(admit: WholePathAdmit, paths: HostConfigPaths, writes: 
   let directories = ledger.directories;
   const persist = () => writeLedger(paths, { ...ledger, paths: records, directories });
   const admitted = writes.map((write) => ({ write, ...admit(ledger, write.path) }));
-  if (new Set(admitted.map(({ key }) => key)).size !== admitted.length) throw new HostConfigError('host_config_invalid_state', 'a call names one path twice');
-  // Every plan reads the disk before the first publish, so no write may change the path of another one.
-  const nested = admitted.find(({ key }) => admitted.some((other) => other.key !== key && isPathInside(other.key, key)));
-  if (nested) throw new HostConfigError('host_config_invalid_state', `a call names this path and a path above it, so rh writes neither: ${nested.write.path}`);
+  refuseOverlappingPaths(admitted.map(({ write, key }) => ({ path: write.path, key })));
   const plans = admitted.map(({ write, key, host }) => planWholePath(paths, write, key, host, records[key]));
   const written: string[] = [];
   for (const { write, key, host, previous, prior, entry, linkTarget, observed, replaces } of plans) {
@@ -654,8 +688,9 @@ function writeWholePaths(admit: WholePathAdmit, paths: HostConfigPaths, writes: 
     try {
       const stage = stagePathEntry(entry, write.entry, options.stage?.(entry));
       staged = stage.staged;
-      const next = nextPathRecord(prior, write.owner, host, observed, stage.committed, backup, linkTarget);
-      if (sameCommitted(observed, stage.committed) && prior && JSON.stringify(prior) === JSON.stringify(next)) {
+      const next = nextPathRecord(prior, write.owner, host, observed, stage.committed, backup, observeEntryIdentity(staged), linkTarget);
+      // A forced replacement always publishes, so its record follows the entry that it writes.
+      if (!replaces && sameCommitted(observed, stage.committed) && prior && sameApartFromIdentity(prior, next)) {
         discardStagedEntry(staged);
         continue;
       }
@@ -665,6 +700,12 @@ function writeWholePaths(admit: WholePathAdmit, paths: HostConfigPaths, writes: 
       persist();
       publishPathEntry(staged, entry);
       staged = null;
+      // A rename on one file system keeps the identity; where the published entry shows another one, the record follows it.
+      const published = observeEntryIdentity(entry);
+      if (published !== null && published !== next.identity) {
+        records[key] = { ...next, identity: published };
+        persist();
+      }
       written.push(key);
     } catch (error) {
       if (staged) discardStagedEntry(staged);
@@ -756,7 +797,7 @@ function delegateWrites(env: NodeJS.ProcessEnv, paths: HostConfigPaths, declared
   const ledger = readLedger(paths);
   const wholes = declared.filter((declaration): declaration is HostConfigPathDeclaration => !isFragmentDeclaration(declaration) && !isToolDeclaration(declaration));
   const admitted = wholes.map((declaration) => ({ declaration, ...admitUserWrite(env, paths, ledger, declaration.path) }));
-  if (new Set(admitted.map(({ key }) => key)).size !== admitted.length) throw new HostConfigError('host_config_invalid_state', 'a call names one path twice');
+  refuseOverlappingPaths(admitted.map(({ declaration, key }) => ({ path: declaration.path, key })));
   const delegatedFiles = observeDelegatedFiles(paths, ledger, declared.filter(isFragmentDeclaration));
   const tools = observeTools(paths, ledger, declared.filter(isToolDeclaration));
   const checked = admitted.map(({ declaration, key, host }) => {
@@ -767,7 +808,7 @@ function delegateWrites(env: NodeJS.ProcessEnv, paths: HostConfigPaths, declared
       && declaration.adopt !== undefined && observed.target === declaration.adopt;
     const owned = observed === null || adopted || ownsEntry(previous, declaration.owner, key);
     if (!owned && !(declaration.replace && observed.type === 'file')) {
-      throw observed.type === 'file' || !declaration.replace ? refusal(declaration.path, previous, declaration.owner)
+      throw observed.type === 'file' || !declaration.replace ? refusal(declaration.path, previous, declaration.owner, key, observed.type === 'file')
         : new HostConfigError('host_config_invalid_state', `only a file can be replaced on the user's word: ${declaration.path}`);
     }
     return { declaration, key, host, previous, observed, owned, adopted };
@@ -796,16 +837,24 @@ function delegateWrites(env: NodeJS.ProcessEnv, paths: HostConfigPaths, declared
       if (!sameCommitted(now, observed)) restorePreimage(options.transaction!, key);
       continue;
     }
-    if (sameCommitted(now, observed) && !(adopted && records[key] === undefined)) continue;
+    if (sameCommitted(now, observed) && !(adopted && records[key] === undefined)) {
+      // A writer that put rh's bytes back as a new entry keeps rh's claim on it: the record follows the entry that it owned.
+      const kept = records[key];
+      const identity = observeEntryIdentity(key);
+      if (owned && observed !== null && previous?.identity !== undefined && kept && JSON.stringify(kept) === JSON.stringify(previous) && identity !== null && identity !== previous.identity) {
+        records[key] = { ...previous, identity };
+      }
+      continue;
+    }
     // A failed replacement must keep the vault reference, also when the writer removed the entry.
     if ((backup !== undefined || previous?.kind === 'replaced') && now?.type !== 'file') {
       records[key] = backup !== undefined
-        ? nextPathRecord(undefined, declaration.owner, host, observed, observed!, backup)
+        ? nextPathRecord(undefined, declaration.owner, host, observed, observed!, backup, null)
         : previous!;
       invalid.push(declaration.path);
       continue;
     }
-    const next = now === null ? null : nextPathRecord(owned ? previous : undefined, declaration.owner, host, observed, now, backup);
+    const next = now === null ? null : nextPathRecord(owned ? previous : undefined, declaration.owner, host, observed, now, backup, observeEntryIdentity(key));
     if (next === null) delete records[key]; else records[key] = next;
     changed.push(key);
   }
@@ -842,15 +891,6 @@ function observeTools(paths: HostConfigPaths, ledger: HostConfigLedger, declared
     }
     return { declaration, directory, missing: missingDirectories(join(directory, '_') as HostPath), before: new Map(keys.map((key) => [key, observePathEntry(key)])) };
   });
-}
-
-/**
- * The device, file id and birth time of the entry itself (its links not
- * followed): two names of one hard link share it, and a copy has its own.
- */
-export function observeEntryIdentity(path: string): string | null {
-  const stat = lstatSync(path, { bigint: true, throwIfNoEntry: false });
-  return stat ? `${stat.dev}:${stat.ino}:${stat.birthtimeNs}` : null;
 }
 
 /**
@@ -960,14 +1000,26 @@ function keepUserPaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, owner: st
   writeLedger(paths, { ...ledger, paths: records });
 }
 
-function adoptReplacedPath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, path: string, owner: string, backup: Buffer): void {
+function replacedPathAdoption(transaction: string, key: string): string {
+  return join(transaction, 'host-config-path-adoptions', sha256Hex(key));
+}
+
+function adoptReplacedPath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, path: string, owner: string, backup: Buffer, transaction?: string): void {
   const ledger = readLedger(paths);
   const { key, host } = admitWholePath(env, paths, ledger, path);
   const previous = ledger.paths[key];
   const committed = observePathEntry(key);
   if (committed?.type !== 'file') throw new HostConfigError('host_config_invalid_state', `only a file can have replaced a user file: ${path}`);
-  if (previous && !(previous.kind === 'created' && ownsEntry(previous, owner, key))) throw refusal(path, previous, owner);
-  const record: PathRecord = { owner, host, kind: 'replaced', baseline: previous?.baseline ?? { state: 'unknown' }, committed, backup: putVault(paths, backup) };
+  if (previous && !(previous.kind === 'created' && ownsEntry(previous, owner, key))) throw refusal(path, previous, owner, key, false);
+  // Only a current record proves the entry. A copy with no record can be a file that the user put back after a revert
+  // released its record, so its record stays unproved and a revert keeps the file (#3266).
+  const identity = previous ? observeEntryIdentity(key) : null;
+  const record: PathRecord = { owner, host, kind: 'replaced', baseline: previous?.baseline ?? { state: 'unknown' }, committed, backup: putVault(paths, backup), ...(identity !== null ? { identity } : {}) };
+  if (transaction !== undefined) {
+    const marker = replacedPathAdoption(transaction, key);
+    ensurePrivateDirectory(dirname(marker));
+    writeFileSync(marker, sha256Hex(JSON.stringify(record)), { mode: 0o600, flag: 'wx' });
+  }
   writeLedger(paths, { ...ledger, paths: { ...ledger.paths, [key]: record } });
 }
 
@@ -982,6 +1034,17 @@ export function planPathRevert(key: string, record: PathRecord): HostConfigRever
   if (observePathEntry(pathRecordEntry(key, record)) === null) return 'released';
   if (!pathRecordIsCurrent(key, record)) return 'kept_edited';
   return record.kind === 'replaced' ? 'restored' : 'removed';
+}
+
+/** Describe a whole-path revert, including the proof and recovery copy when the file stays. */
+export function planPathRevertEntry(paths: HostConfigPaths, key: string, record: PathRecord): HostConfigRevertEntry {
+  const action = planPathRevert(key, record);
+  if (action !== 'kept_edited') return { path: key, action };
+  const proof = pathRecordProof(key, record);
+  const entry: HostConfigRevertEntry = { path: key, action, ...(record.backup && { vault: vaultPath(paths, record.backup) }) };
+  if (proof === 'replaced') return { ...entry, code: 'host_config_entry_replaced' };
+  if (proof === 'unproved') return { ...entry, code: 'host_config_identity_missing' };
+  return entry;
 }
 
 /** One write of a revert and the ledger change that it makes. */
@@ -1034,8 +1097,9 @@ function revertWholePaths(paths: HostConfigPaths, only: readonly string[], optio
   for (const key of new Set(only.map((path) => hostPathKey(paths, path)))) {
     const record = ledger.paths[key];
     if (!record) continue;
-    const action = planPathRevert(key, record);
-    report.push({ path: key, action });
+    const planned = planPathRevertEntry(paths, key, record);
+    report.push(planned);
+    const { action } = planned;
     if (action === 'kept_edited') continue;
     const entry = pathRecordEntry(key, record);
     dropped.push(entry);
@@ -1486,10 +1550,21 @@ export function rollbackHostConfigTransaction(paths: HostConfigPaths, snapshot: 
     retired: [...before.retired.filter((entry) => !releasedMaterial.has(entry.sha256)), ...now.retired.filter((entry) => releasedMaterial.has(entry.sha256))], paths: pathRecords, directories: [...before.directories, ...kept], tools: rollbackTools(before.tools, now.tools) };
   // No ledger before the transaction and no record left: the ledger file goes, as it was.
   if (snapshot === null && JSON.stringify(restored) === JSON.stringify(EMPTY_LEDGER)) rmSync(paths.ledger, { force: true });
-  // A clean rollback puts the snapshot back as it was: a parent of an older protocol reads its ledger again.
-  else if (snapshot !== null && JSON.stringify(restored) === JSON.stringify(before)) writeLedgerBytes(paths, snapshot);
+  // A clean rollback puts the snapshot back as it was: a parent of an older protocol reads its ledger again. A protocol 4
+  // snapshot cannot hold the identities that the live move added, so they alone do not keep a protocol 5 ledger (#3266).
+  else if (snapshot !== null && (JSON.stringify(restored) === JSON.stringify(before)
+    || (!unresolved.length && snapshotProtocol(snapshot) !== HOST_CONFIG_LEDGER_PROTOCOL && JSON.stringify(withoutIdentities(restored)) === JSON.stringify(before)))) writeLedgerBytes(paths, snapshot);
   else writeLedger(paths, restored);
   return { unresolved };
+}
+
+/** The protocol that a snapshot was written with; `parseSnapshotLedger` already checked its shape. */
+function snapshotProtocol(snapshot: Buffer): unknown {
+  return (JSON.parse(snapshot.toString('utf8')) as { protocol?: unknown }).protocol;
+}
+
+function withoutIdentities(ledger: HostConfigLedger): HostConfigLedger {
+  return { ...ledger, paths: Object.fromEntries(Object.entries(ledger.paths).map(([key, { identity: _identity, ...record }]) => [key, record])) };
 }
 
 /**
@@ -1506,29 +1581,54 @@ function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, no
     const current = now.paths[key];
     // A linked record acts on the file that its link names, also for the transaction's preimage.
     const at = pathRecordEntry(key, (current ?? old)!);
-    if (JSON.stringify(old) === JSON.stringify(current) && !hasPreimage(transaction, at)) continue;
+    const preimage = hasPreimage(transaction, at);
+    const marker = replacedPathAdoption(transaction, key);
+    const adopted = lstatSync(marker, { throwIfNoEntry: false })?.isFile() ? readFileSync(marker, 'utf8') : null;
+    // The imported record alone changed no live entry. A later force that backed up the live file changes the record.
+    if (!preimage && adopted !== null && (!current || adopted === sha256Hex(JSON.stringify(current)))) continue;
+    if (old && current && !preimage
+      && (JSON.stringify(old) === JSON.stringify(current) || (old.identity === undefined && sameApartFromIdentity(old, current)))) {
+      // A protocol 4 snapshot has no identities: the record keeps the one that the move of the live ledger gave it.
+      records[key] = current;
+      continue;
+    }
     // A claim or release of a file that the user keeps changes no entry.
     if (current?.kind === 'user_managed' || (!current && old?.kind === 'user_managed')) continue;
     if (!current) {
       const entry = observePathEntry(at);
       // A revert in this transaction took the record out: the entry is gone, or it is the user file that came back from the vault.
       const reverted = entry === null || (old!.kind === 'replaced' && entry.type === 'file' && entry.sha256 === old!.backup);
-      if (reverted && hasPreimage(transaction, at)) restorePreimage(transaction, at, stage?.(at));
+      if (reverted && preimage) {
+        restorePreimage(transaction, at, stage?.(at));
+        records[key] = restoredRecord(old!, at);
+      }
       // A claim released on observation is a fact, not an effect of this transaction: it stays released (P4).
       else if (entry === null) delete records[key];
       else if (!pathRecordIsCurrent(key, old!)) unresolved.push(key);
       continue;
     }
     if (!pathRecordIsCurrent(key, current)) { records[key] = current; unresolved.push(key); continue; }
-    if (current.kind === 'replaced' && current.backup !== old?.backup) {
+    if (current.kind === 'replaced' && current.backup !== old?.backup && !(adopted !== null && preimage)) {
       const committed = current.committed as Extract<PathCommitted, { type: 'file' }>;
       replaceTarget(at as HostPath, readVault(paths, current.backup!), { existed: true, sha256: committed.sha256 }, stage?.(at));
-    } else if (!old && !hasPreimage(transaction, at)) removePathEntry(at);
+    } else if (!old && !preimage) removePathEntry(at);
     // A link that this transaction adopted has a preimage of itself, so it comes back; a created entry has an absent preimage.
-    else if (hasPreimage(transaction, at)) restorePreimage(transaction, at, stage?.(at));
+    else if (preimage) {
+      restorePreimage(transaction, at, stage?.(at));
+      if (old) records[key] = restoredRecord(old, at);
+    }
     else { records[key] = current; unresolved.push(key); }
   }
   return records;
+}
+
+/**
+ * The record of an entry that a rollback put back from the transaction's preimage, which is a new file-system entry. The
+ * transaction replaced or removed only an entry that rh owned then, so the copy of it is rh's entry, with its new identity.
+ */
+function restoredRecord(record: PathRecord, entry: string): PathRecord {
+  const identity = observeEntryIdentity(entry);
+  return record.kind === 'user_managed' || 'proof' in record.committed || identity === null ? record : { ...record, identity };
 }
 
 type LedgerReader = (paths: HostConfigPaths) => HostConfigLedger;
@@ -1604,7 +1704,7 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
     releaseAbsentTools: (port, releaseOptions) => releaseAbsentTools(paths, port, releaseOptions?.dryRun === true, read),
     revertPaths: (only, revertOptions) => revertWholePaths(paths, only, revertOptions ?? {}),
     keepUserPaths: (owner, scope, kept) => keepUserPaths(env, paths, owner, scope, kept),
-    adoptReplacedPath: (path, owner, backup) => adoptReplacedPath(env, paths, path, owner, backup),
+    adoptReplacedPath: (path, owner, backup, transaction) => adoptReplacedPath(env, paths, path, owner, backup, transaction),
     revert: (only, revertOptions) => revertFiles(paths, only, revertOptions ?? {}, read),
     adopt: (path, adoption) => adoptFile(paths, path, adoption),
     removeUnrecordedText: (path, expectedSha256, removals) => removeUnrecordedText(paths, path, expectedSha256, removals),
@@ -1751,9 +1851,11 @@ export function openRepositoryFileGate(env: NodeJS.ProcessEnv, paths: HostConfig
     apply: (changes) => applyChanges(paths, changes, admit),
     adopt: (path, adoption) => adoptFile(paths, path, adoption, admit),
     revert: (options) => {
-      const keys = Object.keys(readLedger(paths).files);
+      // A dry run reads an older ledger as the move leaves it; a revert reads only the current protocol.
+      const read = options?.dryRun === true ? readProjectedLedger : readLedger;
+      const keys = Object.keys(read(paths).files);
       for (const key of keys) admitRepositoryExclude(env, paths, key);
-      return keys.length ? revertFiles(paths, keys, { dryRun: options?.dryRun === true }, readLedger) : [];
+      return keys.length ? revertFiles(paths, keys, { dryRun: options?.dryRun === true }, read) : [];
     },
     recorded: (path) => {
       const resolved = admitRepositoryExclude(env, paths, path);

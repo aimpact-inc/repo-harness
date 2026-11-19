@@ -26,9 +26,10 @@ function replacedAgentsDirectory(env: NodeJS.ProcessEnv): string {
  * becomes `replaced`, so a revert gives the user file back. A `replaced`
  * record is already migrated, so a second run imports nothing. The copies
  * stay where they are. A file in the directory that `--force` did not write
- * stops the migration before any change. Returns the targets it migrated.
+ * stops the migration before any change. Returns the targets it migrated; `proved` is false for a target with no record,
+ * whose record proves nothing, so a revert keeps the file (#3266).
  */
-export function migrateReplacedAgents(env: NodeJS.ProcessEnv, targets: readonly FleetTarget[]): readonly { readonly path: string; readonly copy: string }[] {
+export function migrateReplacedAgents(env: NodeJS.ProcessEnv, targets: readonly FleetTarget[], transaction?: string): readonly { readonly path: string; readonly copy: string; readonly proved: boolean }[] {
   const directory = replacedAgentsDirectory(env);
   if (!lstatSync(directory, { throwIfNoEntry: false })?.isDirectory()) return [];
   const copies = readdirSync(directory).map((name) => {
@@ -40,7 +41,7 @@ export function migrateReplacedAgents(env: NodeJS.ProcessEnv, targets: readonly 
   });
   const records = readPathRecords(env);
   const gate = openHostConfigGate({ env });
-  const migrated: { path: string; copy: string }[] = [];
+  const migrated: { path: string; copy: string; proved: boolean }[] = [];
   for (const target of targets) {
     const [earliest] = copies.filter((copy) => copy.host === target.host && copy.file === target.file).sort((a, b) => a.stamp.localeCompare(b.stamp));
     if (!earliest) continue;
@@ -50,8 +51,8 @@ export function migrateReplacedAgents(env: NodeJS.ProcessEnv, targets: readonly 
     // an unrecorded file must hold this fleet's bytes.
     if (record ? record.kind !== 'created' || record.owner !== 'core' || !pathRecordIsCurrent(key, record)
       : !lstatSync(target.path, { throwIfNoEntry: false })?.isFile() || readFileSync(target.path, 'utf8') !== target.content) continue;
-    gate.adoptReplacedPath(target.path, 'core', readFileSync(earliest.path));
-    migrated.push({ path: target.path, copy: earliest.path });
+    gate.adoptReplacedPath(target.path, 'core', readFileSync(earliest.path), transaction);
+    migrated.push({ path: target.path, copy: earliest.path, proved: record !== undefined });
   }
   return migrated;
 }
