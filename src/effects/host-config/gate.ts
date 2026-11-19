@@ -6,6 +6,7 @@ import { fileFormatOf, fragmentFormat, type FragmentFormat } from '../../core/ho
 import { isMarkedBlockSelector } from '../../core/host-config/marked-block';
 import { hostConfigRepositoryKey } from '../git/repository-identity';
 import {
+  HOST_CONFIG_LEDGER_PROTOCOL,
   HostConfigError,
   expectedFromCommitted,
   sameExpected,
@@ -45,6 +46,7 @@ import {
   readLedger,
   readProjectedLedger,
   readVault,
+  vaultPath,
   removeCreatedDirectories,
   removeTarget,
   replaceTarget,
@@ -183,6 +185,8 @@ export interface HostConfigRevertEntry {
   readonly action: 'removed' | 'restored' | 'text_removed' | 'released' | 'already_absent' | 'kept_edited' | 'failed';
   /** The selectors of the fragments that stay in a kept file. */
   readonly kept?: readonly string[];
+  /** The vault copy of the file that rh replaced, when a kept record has one: the user's way back. */
+  readonly vault?: string;
   /**
    * `proved`: the result was checked equal to the file before rh. `unknown`:
    * rh has no record of the file before it, so equality cannot be proved.
@@ -570,7 +574,8 @@ function refusal(path: string, record: PathRecord | undefined, owner: string, ke
 }
 
 /** Two records that differ at most in their identity. */
-function sameApartFromIdentity(left: PathRecord, right: PathRecord): boolean {
+/** A rollback or a writer that puts an entry back makes a new file-system entry: only its identity differs. */
+export function sameApartFromIdentity(left: PathRecord, right: PathRecord): boolean {
   return JSON.stringify({ ...left, identity: undefined }) === JSON.stringify({ ...right, identity: undefined });
 }
 
@@ -683,7 +688,8 @@ function writeWholePaths(admit: WholePathAdmit, paths: HostConfigPaths, writes: 
       const stage = stagePathEntry(entry, write.entry, options.stage?.(entry));
       staged = stage.staged;
       const next = nextPathRecord(prior, write.owner, host, observed, stage.committed, backup, observeEntryIdentity(staged), linkTarget);
-      if (sameCommitted(observed, stage.committed) && prior && sameApartFromIdentity(prior, next)) {
+      // A forced replacement always publishes, so its record follows the entry that it writes.
+      if (!replaces && sameCommitted(observed, stage.committed) && prior && sameApartFromIdentity(prior, next)) {
         discardStagedEntry(staged);
         continue;
       }
@@ -834,7 +840,7 @@ function delegateWrites(env: NodeJS.ProcessEnv, paths: HostConfigPaths, declared
       // A writer that put rh's bytes back as a new entry keeps rh's claim on it: the record follows the entry that it owned.
       const kept = records[key];
       const identity = observeEntryIdentity(key);
-      if (owned && previous?.identity !== undefined && kept && JSON.stringify(kept) === JSON.stringify(previous) && identity !== null && identity !== previous.identity) {
+      if (owned && observed !== null && previous?.identity !== undefined && kept && JSON.stringify(kept) === JSON.stringify(previous) && identity !== null && identity !== previous.identity) {
         records[key] = { ...previous, identity };
       }
       continue;
@@ -1000,7 +1006,9 @@ function adoptReplacedPath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, path:
   const committed = observePathEntry(key);
   if (committed?.type !== 'file') throw new HostConfigError('host_config_invalid_state', `only a file can have replaced a user file: ${path}`);
   if (previous && !(previous.kind === 'created' && ownsEntry(previous, owner, key))) throw refusal(path, previous, owner, key, false);
-  const identity = observeEntryIdentity(key);
+  // Only a current record proves the entry. A copy with no record can be a file that the user put back after a revert
+  // released its record, so its record stays unproved and a revert keeps the file (#3266).
+  const identity = previous ? observeEntryIdentity(key) : null;
   const record: PathRecord = { owner, host, kind: 'replaced', baseline: previous?.baseline ?? { state: 'unknown' }, committed, backup: putVault(paths, backup), ...(identity !== null ? { identity } : {}) };
   writeLedger(paths, { ...ledger, paths: { ...ledger.paths, [key]: record } });
 }
@@ -1070,7 +1078,8 @@ function revertWholePaths(paths: HostConfigPaths, only: readonly string[], optio
     if (!record) continue;
     const action = planPathRevert(key, record);
     const proof = action === 'kept_edited' ? pathRecordProof(key, record) : null;
-    report.push({ path: key, action, ...(proof === 'replaced' ? { code: 'host_config_entry_replaced' as const } : proof === 'unproved' ? { code: 'host_config_identity_missing' as const } : {}) });
+    report.push({ path: key, action, ...(proof === 'replaced' ? { code: 'host_config_entry_replaced' as const } : proof === 'unproved' ? { code: 'host_config_identity_missing' as const } : {}),
+      ...(action === 'kept_edited' && record.backup ? { vault: vaultPath(paths, record.backup) } : {}) });
     if (action === 'kept_edited') continue;
     const entry = pathRecordEntry(key, record);
     dropped.push(entry);
@@ -1521,10 +1530,21 @@ export function rollbackHostConfigTransaction(paths: HostConfigPaths, snapshot: 
     retired: [...before.retired.filter((entry) => !releasedMaterial.has(entry.sha256)), ...now.retired.filter((entry) => releasedMaterial.has(entry.sha256))], paths: pathRecords, directories: [...before.directories, ...kept], tools: rollbackTools(before.tools, now.tools) };
   // No ledger before the transaction and no record left: the ledger file goes, as it was.
   if (snapshot === null && JSON.stringify(restored) === JSON.stringify(EMPTY_LEDGER)) rmSync(paths.ledger, { force: true });
-  // A clean rollback puts the snapshot back as it was: a parent of an older protocol reads its ledger again.
-  else if (snapshot !== null && JSON.stringify(restored) === JSON.stringify(before)) writeLedgerBytes(paths, snapshot);
+  // A clean rollback puts the snapshot back as it was: a parent of an older protocol reads its ledger again. A protocol 4
+  // snapshot cannot hold the identities that the live move added, so they alone do not keep a protocol 5 ledger (#3266).
+  else if (snapshot !== null && (JSON.stringify(restored) === JSON.stringify(before)
+    || (!unresolved.length && snapshotProtocol(snapshot) !== HOST_CONFIG_LEDGER_PROTOCOL && JSON.stringify(withoutIdentities(restored)) === JSON.stringify(before)))) writeLedgerBytes(paths, snapshot);
   else writeLedger(paths, restored);
   return { unresolved };
+}
+
+/** The protocol that a snapshot was written with; `parseSnapshotLedger` already checked its shape. */
+function snapshotProtocol(snapshot: Buffer): unknown {
+  return (JSON.parse(snapshot.toString('utf8')) as { protocol?: unknown }).protocol;
+}
+
+function withoutIdentities(ledger: HostConfigLedger): HostConfigLedger {
+  return { ...ledger, paths: Object.fromEntries(Object.entries(ledger.paths).map(([key, { identity: _identity, ...record }]) => [key, record])) };
 }
 
 /**
@@ -1806,9 +1826,11 @@ export function openRepositoryFileGate(env: NodeJS.ProcessEnv, paths: HostConfig
     apply: (changes) => applyChanges(paths, changes, admit),
     adopt: (path, adoption) => adoptFile(paths, path, adoption, admit),
     revert: (options) => {
-      const keys = Object.keys(readLedger(paths).files);
+      // A dry run reads an older ledger as the move leaves it; a revert reads only the current protocol.
+      const read = options?.dryRun === true ? readProjectedLedger : readLedger;
+      const keys = Object.keys(read(paths).files);
       for (const key of keys) admitRepositoryExclude(env, paths, key);
-      return keys.length ? revertFiles(paths, keys, { dryRun: options?.dryRun === true }, readLedger) : [];
+      return keys.length ? revertFiles(paths, keys, { dryRun: options?.dryRun === true }, read) : [];
     },
     recorded: (path) => {
       const resolved = admitRepositoryExclude(env, paths, path);

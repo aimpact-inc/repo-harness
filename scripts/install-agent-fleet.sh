@@ -342,8 +342,9 @@ const targets = prepared.flatMap(({ agent, source, parsed, mapped }) => {
     },
   ];
 });
-for (const { path: targetPath, copy } of migrateReplacedAgents(ENV, targets)) {
-  console.log(`[fleet] ${targetPath}: the user file in ${copy} is now in the rh vault; rh uninstall puts it back`);
+for (const { path: targetPath, copy, proved } of migrateReplacedAgents(ENV, targets)) {
+  console.log(`[fleet] ${targetPath}: the user file in ${copy} is now in the rh vault; ${proved ? "rh uninstall puts it back"
+    : "no record proves that rh wrote the file there now, so rh uninstall keeps it and names the vault copy"}`);
 }
 records = readPathRecords(ENV);
 

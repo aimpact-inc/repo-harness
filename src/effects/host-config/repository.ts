@@ -1,4 +1,4 @@
-import { lstatSync, readdirSync, realpathSync, rmSync } from 'node:fs';
+import { lstatSync, realpathSync, rmSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { HostConfigError } from '../../core/host-config/types';
@@ -9,7 +9,7 @@ import { isPathInside } from '../path-containment';
 import { selfIgnoringRefusal } from '../self-ignoring-directory';
 import { openRepositoryHostConfigGate, planPathRevert, rollbackHostConfigTransaction, type HostConfigRepositoryGate, type HostConfigRevertEntry, type HostConfigRollbackResult } from './gate';
 import { pathRecordEntry } from './whole-path';
-import { hostConfigPaths, observeFile, readLedger, type HostConfigPaths } from './store';
+import { hostConfigPaths, migrateLedgerSchema, observeFile, readProjectedLedger, repositoryLedgerLayout, type HostConfigPaths } from './store';
 
 /**
  * The repository scope of the host-config gate (#2854): files that rh writes
@@ -39,21 +39,8 @@ export function resolveHostConfigRepository(directory: string): HostConfigReposi
   return { repositoryId: resolveGitCommonDirectory(worktree, configuredGitBinary(), undefined, env), worktree };
 }
 
-function repositoryLedgerLayout(harness: string, key: string): HostConfigPaths {
-  const root = join(harness, 'config', 'repos', key);
-  return { harness, root, ledger: join(root, 'ledger.json'), vault: join(root, 'vault') };
-}
-
 export function repositoryConfigPaths(env: NodeJS.ProcessEnv, repository: HostConfigRepository): HostConfigPaths {
   return repositoryLedgerLayout(hostConfigPaths(env).harness, hostConfigRepositoryKey(repository.repositoryId));
-}
-
-/** Every repository ledger, also of a repository that left the registry or is gone: uninstall reverts each. */
-export function repositoryLedgers(env: NodeJS.ProcessEnv): HostConfigPaths[] {
-  const { harness } = hostConfigPaths(env);
-  const repos = join(harness, 'config', 'repos');
-  if (!lstatSync(repos, { throwIfNoEntry: false })?.isDirectory()) return [];
-  return readdirSync(repos).sort().map((key) => repositoryLedgerLayout(harness, key)).filter((paths) => lstatSync(paths.ledger, { throwIfNoEntry: false }));
 }
 
 /** The `info/exclude` of the clone: one file for all its worktrees (#3080). */
@@ -124,8 +111,12 @@ export function withRepositoryStaging<T>(worktree: string, run: (stage: (target:
  */
 export function openRepositoryGate(env: NodeJS.ProcessEnv, repository: HostConfigRepository, options: { readonly transaction?: string } = {}): HostConfigRepositoryGate {
   const { worktree } = repository;
-  const call = <T>(run: (gate: HostConfigRepositoryGate) => T): T => withRepositoryStaging(worktree, (stage) => run(openRepositoryHostConfigGate(env,
-    repositoryConfigPaths(env, repository), { worktree, refusal: (target) => repositoryTargetRefusal(worktree, target), stage, transaction: options.transaction })));
+  const paths = repositoryConfigPaths(env, repository);
+  // `rh init` and `rh config restore --repo` run no user-level migration, so each repository write moves an older ledger first.
+  const call = <T>(run: (gate: HostConfigRepositoryGate) => T): T => withRepositoryStaging(worktree, (stage) => {
+    migrateLedgerSchema(paths);
+    return run(openRepositoryHostConfigGate(env, paths, { worktree, refusal: (target) => repositoryTargetRefusal(worktree, target), stage, transaction: options.transaction }));
+  });
   return {
     writePaths: (writes) => call((gate) => gate.writePaths(writes)),
     createDirectories: (directories) => call((gate) => gate.createDirectories(directories)),
@@ -146,6 +137,7 @@ export interface RepositoryWriteRun {
  */
 export function openRepositoryWriteRun(env: NodeJS.ProcessEnv, repository: HostConfigRepository, transaction: string): RepositoryWriteRun {
   const paths = repositoryConfigPaths(env, repository);
+  migrateLedgerSchema(paths);
   const snapshot = observeFile(paths.ledger).bytes;
   return {
     gate: openRepositoryGate(env, repository, { transaction }),
@@ -172,7 +164,8 @@ export function repositoryRestorePlan(env: NodeJS.ProcessEnv, repository: HostCo
   const paths = repositoryConfigPaths(env, repository);
   const unrecorded = (where: string) => new HostConfigError('host_config_repository_unrecorded', `rh records no repository file ${where}`);
   if (!observeFile(paths.ledger).observation.existed) throw unrecorded(`for ${repository.worktree}`);
-  const ledger = readLedger(paths);
+  // A read-only plan: an older ledger reads as the move leaves it; the apply moves it under the lock first.
+  const ledger = readProjectedLedger(paths);
   const records = ledger.paths;
   let keys = Object.keys(records).filter((key) => isPathInside(repository.worktree, key) && (options.owner === undefined || records[key]!.owner === options.owner));
   if (options.only !== undefined) {

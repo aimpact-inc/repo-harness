@@ -938,6 +938,8 @@ describe('upgrade with real release bytes', () => {
     } });
     expect(failed.exitCode).toBe(1);
     expect(readlinkSync(path)).toBe(oldSource);
+    // The rollback put the old link back as a new entry: the path counts as rolled back, not refreshed.
+    expect(failed.refreshedPaths).not.toContain(path);
     expect(JSON.parse(readFileSync(statePath, 'utf8')).transaction_id).toBe('concurrent-writer');
     put(statePath, JSON.stringify(state));
 

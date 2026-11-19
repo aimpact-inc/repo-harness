@@ -644,6 +644,15 @@ test('a whole path is rh\'s only while it is the entry that rh wrote: a same-byt
   writeFileSync(join(claude, 'newdir', 'notes.txt'), 'mine\n');
   expect(f.gate().revertPaths([inner])).toEqual([{ path: inner, action: 'released' }]);
   expect({ notes: readFileSync(join(claude, 'newdir', 'notes.txt'), 'utf8'), sub: existsSync(join(claude, 'newdir', 'sub')) }).toEqual({ notes: 'mine\n', sub: false });
+
+  // --force always publishes: over a same-bytes copy of a file whose vault copy has rh's bytes, the record follows the new entry.
+  const same = join(claude, 'rules', 'same.md');
+  writeFileSync(same, 'rh\n');
+  f.gate().writePaths([w(same, 'rh\n', true)]);
+  renameSync(same, `${same}.old`);
+  writeFileSync(same, 'rh\n');
+  f.gate().writePaths([w(same, 'rh\n', true)]);
+  expect(f.gate().writePaths([w(same, 'rh2\n')])).toEqual([same]);
 });
 
 test('the protocol 5 move adopts each record that its entry still proves, once; a record with no identity is kept and reported on every run', () => {
@@ -671,12 +680,11 @@ test('the protocol 5 move adopts each record that its entry still proves, once; 
   }
   expect(readFileSync(edited, 'utf8')).toBe('rh\n');
 
-  // A rollback that reads the protocol 4 snapshot keeps the identities of the move and takes out the transaction's write.
+  // A clean rollback to the protocol 4 snapshot puts its bytes back, so a 0.35 parent reads its ledger again; the next move adopts again.
   const transaction = mkdtempSync(join(f.home, 'tx-'));
   f.gate().writePaths([w(added, 'rh\n')], { transaction });
   expect(rollbackHostConfigTransaction(hostConfigPathsAt(join(f.home, '.repo-harness')), protocol4, transaction).unresolved).toEqual([]);
-  expect({ protocol: f.ledger().protocol, proved: f.ledger().paths[proved].identity, added: existsSync(added) })
-    .toEqual({ protocol: 5, proved: observeEntryIdentity(proved), added: false });
+  expect({ ledger: readFileSync(join(f.root, 'ledger.json')).equals(protocol4), added: existsSync(added) }).toEqual({ ledger: true, added: false });
 });
 
 test('a delegated writer runs only on paths that rh may write; a replaced path stays a file; a rollback undoes a revert of a replaced file', () => {
@@ -1090,7 +1098,7 @@ test.each(['created path', 'replaced restore fails', 'replaced ledger write fail
       locked(f.root, () => expect(() => f.gate().revertPaths([user])).toThrow());
       // The user's bytes are back; the stale claim no longer matches them, so a rerun only reports.
       expect({ bytes: readFileSync(user, 'utf8'), record: f.ledger().paths[user] }).toEqual({ bytes: 'mine\n', record });
-      expect(f.gate().revertPaths([user])).toEqual([{ path: user, action: 'kept_edited' }]);
+      expect(f.gate().revertPaths([user])).toEqual([{ path: user, action: 'kept_edited', vault: join(f.root, 'vault', record.backup.slice('sha256:'.length)) }]);
     }
     expect(readFileSync(user, 'utf8')).toBe('mine\n');
   }
@@ -1139,7 +1147,7 @@ test.each([
   if (change === 'absent') rmSync(file);
   if (change === 'edited') writeFileSync(file, 'stripped\nuser\n');
   const action = ({ none: 'restored', absent: 'released', edited: 'kept_edited' } as const)[change];
-  expect(gate.revertPaths([file])).toEqual([{ path: file, action }]);
+  expect(gate.revertPaths([file])).toEqual([{ path: file, action, ...(change === 'edited' ? { vault: join(paths.vault, record.backup.slice('sha256:'.length)) } : {}) }]);
   // Both writes staged in a guarded directory that went with the call: nothing beside the target, no staging left.
   if (change === 'none') expect({ bytes: readFileSync(file, 'utf8'), mode: statSync(file).mode & 0o777, beside: readdirSync(join(worktree, '.claude')), staging: readdirSync(join(worktree, '.ai/harness/backups/staging')) })
     .toEqual({ bytes: 'user\n', mode: 0o640, beside: ['settings.json'], staging: [] });

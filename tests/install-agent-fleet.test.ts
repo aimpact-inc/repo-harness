@@ -462,6 +462,18 @@ describe("install-agent-fleet", () => {
       expect(stray.status).not.toBe(0);
       expect(stray.stderr).toContain(`${join(dir, "notes.txt")} is not a fleet copy that rh wrote`);
       expect(readFileSync(target, "utf8")).toBe("original\n");
+
+      // The revert released the record and the copies stay. A generated copy that the user puts back has no record:
+      // its import proves nothing, so the uninstall keeps the user's file and names the vault copy.
+      rmSync(join(dir, "notes.txt"));
+      const generated = readFileSync(join(FLEET_SOURCE_DIR, "explorer.md"), "utf8");
+      writeFileSync(target, generated);
+      const reinstalled = runInstaller(home, FLEET_SOURCE_DIR);
+      expect([reinstalled.status, reinstalled.stdout]).toEqual([0, expect.stringContaining(`[fleet] ${target}: the user file in ${earliest} is now in the rh vault; no record proves that rh wrote the file there now, so rh uninstall keeps it and names the vault copy`)]);
+      const [kept] = openHostConfigGate({ env: { HOME: home } }).revertPaths([target]);
+      expect({ action: kept?.action, code: kept?.code, file: readFileSync(target, "utf8") })
+        .toEqual({ action: "kept_edited", code: "host_config_identity_missing", file: generated });
+      expect(readFileSync(kept!.vault!, "utf8")).toBe("original\n");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

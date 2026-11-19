@@ -1,4 +1,4 @@
-import { closeSync, fchmodSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, rmdirSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, fchmodSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, rmdirSync, unlinkSync, writeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { sha256Hex, sha256Prefixed } from '../../core/evidence/sha256';
@@ -385,7 +385,25 @@ export function writeLedgerBytes(paths: HostConfigPaths, bytes: Buffer): void {
   publishFileByRename(paths.ledger, bytes, `${paths.ledger}.${randomUUID()}.tmp`);
 }
 
+/** The ledger and vault of one clone's repository scope (#2854), keyed by its Git common directory. */
+export function repositoryLedgerLayout(harness: string, key: string): HostConfigPaths {
+  const root = join(harness, 'config', 'repos', key);
+  return { harness, root, ledger: join(root, 'ledger.json'), vault: join(root, 'vault') };
+}
+
+/** Every repository ledger, also of a repository that left the registry or is gone: uninstall reverts each. */
+export function repositoryLedgers(env: NodeJS.ProcessEnv): HostConfigPaths[] {
+  const { harness } = hostConfigPaths(env);
+  const repos = join(harness, 'config', 'repos');
+  if (!lstatSync(repos, { throwIfNoEntry: false })?.isDirectory()) return [];
+  return readdirSync(repos).sort().map((key) => repositoryLedgerLayout(harness, key)).filter((paths) => lstatSync(paths.ledger, { throwIfNoEntry: false }));
+}
+
 // ---- vault --------------------------------------------------------------
+
+export function vaultPath(paths: HostConfigPaths, reference: Sha256): string {
+  return join(paths.vault, reference.slice('sha256:'.length));
+}
 
 /** Content-addressed and shared: a second put of the same bytes reuses the stored copy. */
 export function putVault(paths: HostConfigPaths, bytes: Buffer): Sha256 {

@@ -8,7 +8,6 @@ import { hostSkillRoot, providerSkillLock, type ProviderSkillLock } from '../../
 import { piPackageEntry, piPackageRemoval, recordedPiPackages, removePiPackage } from './pi-package';
 import { globalContextPath, inspectUnrecordedGlobalRules, previewGlobalRulesAdoptedRevert } from './global-context';
 import { legacyRepositoryExcludesPath } from './repository-excludes';
-import { repositoryLedgers } from '../../effects/host-config/repository';
 import { readInstallState } from './install-profile';
 import { installStatePendingMigration, migrateInstallState, planInstallStateMigration } from './install-state-migration';
 import type { PathRecord } from '../../core/host-config/types';
@@ -19,7 +18,7 @@ import { migrateCodexConfigRecords, planCodexConfigMigration, previewAdoptedReve
 import { migrateJsonConfigRecords, planJsonConfigMigration, previewJsonAdoptedRevert } from './json-config-migration';
 import { UNVERIFIED_INSTALLER_RANGES } from '../../effects/host-config/delegated';
 import { openHostConfigGate, openRepositoryFileGate, planPathRevert, userPathLabel, type HostConfigAdoption, type HostConfigGate, type HostConfigRepositoryFileGate, type HostConfigRevertEntry, type HostConfigToolRevertEntry } from '../../effects/host-config/gate';
-import { hostConfigPaths, projectedLedgerPaths, readLedger, readProjectedLedger, resolveHostPath } from '../../effects/host-config/store';
+import { hostConfigPaths, projectedLedgerPaths, readLedger, readProjectedLedger, repositoryLedgers, resolveHostPath } from '../../effects/host-config/store';
 import { planToolRemoval, removeTools, windowsPowershellPath, windowsUserPathPort, type ToolRemovalEntry } from '../../effects/host-config/tools';
 import { HostConfigError, type ToolId, type ToolRecord } from '../../core/host-config/types';
 import { FileSyntaxError, parseJsonText, parseTomlText } from '../../core/evidence/file-syntax';
@@ -145,7 +144,8 @@ const KEPT_CODES: Readonly<Partial<Record<NonNullable<HostConfigRevertEntry['cod
 export function revertItem(entry: HostConfigRevertEntry): UninstallItem {
   const action: UninstallAction = entry.action === 'kept_edited' ? 'unresolved' : entry.action === 'already_absent' ? 'note'
     : entry.action === 'failed' ? 'failed' : entry.baseline === 'proved' ? 'restored' : 'reverted';
-  const reason = [(entry.code && KEPT_CODES[entry.code]) || REVERT_REASONS[entry.action], ...(entry.baseline === 'unknown' && action === 'reverted' ? [BASELINE_UNKNOWN] : [])].join('; ');
+  const reason = [(entry.code && KEPT_CODES[entry.code]) || REVERT_REASONS[entry.action], ...(entry.baseline === 'unknown' && action === 'reverted' ? [BASELINE_UNKNOWN] : []),
+    ...(entry.vault ? [`the file before rh is in ${entry.vault}`] : [])].join('; ');
   return { path: entry.path, action, reason: entry.kept?.length ? `${reason}: ${entry.kept.join(', ')}` : reason };
 }
 
@@ -395,7 +395,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
     else for (const ledger of repositoryLedgers(env)) {
       let files: string[] = [ledger.ledger];
       try {
-        files = Object.keys(readLedger(ledger).files);
+        files = Object.keys((opts.dryRun ? readProjectedLedger : readLedger)(ledger).files);
         if (!files.length) continue;
         const gate = openRepositoryFileGate(env, ledger);
         const preview = gate.revert({ dryRun: true });

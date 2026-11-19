@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { isRecord } from '../../core/evidence/is-record';
 import type { PathRecord } from '../../core/host-config/types';
-import { hostConfigPaths, migrateLedgerSchema, projectedLedgerPaths } from '../../effects/host-config/store';
+import { hostConfigPaths, migrateLedgerSchema, projectedLedgerPaths, repositoryLedgers } from '../../effects/host-config/store';
 import { partitionPathRecords, pathRecordHost, pathRecordIsCurrent, pathRecordKey, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
 import { adoptedIdentity } from '../../effects/host-config/whole-path';
 import { migrateCodexConfigRecords } from './codex-config-migration';
@@ -88,8 +88,9 @@ function checkedPiSources(env: NodeJS.ProcessEnv, snapshot: RecordedInstallSnaps
  * leaves a state that the next run migrates again.
  */
 export function migrateInstallState(env: NodeJS.ProcessEnv): void {
-  // The ledger gains its `paths` map before any gate or path-record write reads it.
+  // The ledger gains its `paths` map before any gate or path-record write reads it; each repository ledger moves with it.
   migrateLedgerSchema(hostConfigPaths(env));
+  for (const ledger of repositoryLedgers(env)) migrateLedgerSchema(ledger);
   if (parseProtocol3InstallState(readRawInstallState(env), installProfileStatePath(env)) !== null) {
     // The section records of the host files leave with the manifest, so their migrations read it first.
     migrateCodexConfigRecords(env);
