@@ -3353,7 +3353,7 @@ describe('worktree cleanup plan review (#1720)', () => {
       } },
       { name: 'seats settings', path: '/api/v1/settings/seats', after: () => saveLocked('seats'), send: async () => {
         await agentsPage();
-        await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Allow gatekeeper"]')!.click());
+        await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Allow deep-reasoner"]')!.click());
         await act(async () => document.querySelector<HTMLButtonElement>('[data-save="seats"]')!.click());
       } },
       { name: 'one-click cleanup', path: CLEANUP_PATH, send: async () => {

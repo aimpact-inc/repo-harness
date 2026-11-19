@@ -164,29 +164,31 @@ describe('agents page seats section', () => {
   const pane = (seat: string) => document.querySelector<HTMLButtonElement>(`[data-pane="${seat}"]`)!;
   const levels = () => [...document.querySelectorAll('[data-seat-card] [data-limit]')].map(node => node.getAttribute('data-limit'));
 
-  test('the advisor cannot take a writable role or GitHub writes, and can take edit; save sends the whole section and leaves running panes alone', async () => {
+  test('the advisor offers only scaffold roles, allows edits and blocks GitHub writes; save sends the whole section', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     await mount(seatsProps(posts));
     expect(document.querySelector('[data-seat-card]')?.getAttribute('data-seat-card')).toBe('advisor');
-    for (const label of ['fast-worker', 'deep-worker', 'GitHub writes']) expect([label, allow(label).disabled]).toEqual([label, true]);
+    expect(all('[data-seat-fleet] button[role="switch"]').map(button => button.getAttribute('aria-label'))).toEqual(['Allow deep-reasoner', 'Allow explorer']);
+    expect(allow('GitHub writes').disabled).toBe(true);
     expect(allow('Edit files').disabled).toBe(false);
     // The levels are those of buildSeatLaunch (#1531): Claude advisor with shell on, tasks, schedule, edit and gh off.
     expect(levels()).toEqual(['common_commands', 'enforced', 'instructions_only', 'common_commands', 'named_types_only']);
     expect(document.querySelector('[data-seat-launch]')?.textContent).toContain('--argv "$(rh seats argv advisor --repository-id <repository-id>)"');
     // The page shows no running pane count: the operator cannot read hc (#1413).
     expect(document.querySelector('[data-seats-page]')?.textContent).not.toMatch(/running \d|\d+ running/u);
-    await click(allow('gatekeeper'));
+    await click(allow('deep-reasoner'));
     await click(seatsSave());
     expect(posts).toHaveLength(1);
     const { request_id, expected_revision, seats } = posts[0]!;
     expect(request_id).toMatch(UUID);
     expect(expected_revision).toMatch(/^sha256:/u);
-    expect(seats.advisor.fleet).toEqual(['deep-reasoner', 'explorer', 'gatekeeper']);
+    expect(seats.advisor.fleet).toEqual(['explorer']);
     expect(Object.keys(seats)).toEqual(['orchestrator', 'advisor', 'worker', 'worker-deep', 'worker-important', 'worker-important-fast', 'worker-light', 'gatekeeper', 'gatekeeper-deep', 'gatekeeper-fallback', 'reviewer', 'routing']);
     expect(document.querySelector('[data-seats-saved]')?.textContent).toContain('Running panes do not change');
 
     await click(pane('orchestrator'));
-    expect([allow('explorer').disabled, allow('fast-worker').disabled]).toEqual([false, true]);
+    expect(allow('explorer').disabled).toBe(false);
+    expect(allow('fast-worker')).toBeNull();
     expect(allow('Edit files').disabled).toBe(true);
   });
 
@@ -267,7 +269,7 @@ describe('agents page seats section', () => {
     await mount({ ...seatsProps(posts), readSeatsSettings: async () => ({ state: 'ok', settings: stored }) });
     expect([allow('fast-worker').disabled, allow('fast-worker').getAttribute('aria-checked')]).toEqual([false, 'true']);
     await click(allow('fast-worker'));
-    expect(allow('fast-worker').disabled).toBe(true);
+    expect(allow('fast-worker')).toBeNull();
     await click(seatsSave());
     expect(posts[0]!.seats.advisor.fleet).toEqual(['explorer']);
   });
@@ -285,8 +287,8 @@ describe('agents page seats section', () => {
       readSeatsSettings: async () => ({ state: 'ok', settings: stored }) });
     expect(choices()).toEqual(['Claude Code', 'Codex']);
     expect(seatsSave().disabled).toBe(true);
-    await click(allow('gatekeeper'));
-    expect(allow('gatekeeper').getAttribute('aria-checked')).toBe('true');
+    await click(allow('deep-reasoner'));
+    expect(allow('deep-reasoner').getAttribute('aria-checked')).toBe('false');
     expect(seatsSave().disabled).toBe(true);
     await click(seatsSave());
     expect(posts).toHaveLength(0);
@@ -517,7 +519,7 @@ describe('agents page seats section', () => {
       readSeatsSettings: stores.seats.read, writeSeatsSettings: async (body) => { posts.push(body); return stores.seats.write(body); } });
     expect(choices()).toEqual(['Claude Code', 'Codex']);
     // An edited seat draft before the Hosts save: it must move to the new revision, not meet a conflict.
-    await click(allow('gatekeeper'));
+    await click(allow('deep-reasoner'));
     await click(inPlace('pi')!);
     // The in-place switch is the Hosts switch on the same draft; Pi is a choice only after the Hosts save.
     expect(toggle('pi')!.getAttribute('aria-checked')).toBe('true');
@@ -526,7 +528,7 @@ describe('agents page seats section', () => {
     await settle();
     expect(choices()).toEqual(['Claude Code', 'Codex', 'Pi']);
     expect(inPlace('pi')).toBeNull();
-    expect(allow('gatekeeper').getAttribute('aria-checked')).toBe('true');
+    expect(allow('deep-reasoner').getAttribute('aria-checked')).toBe('false');
     // Codex: the sandbox blocks edit, but an MCP path stays open; tasks, gh and the fleet are instructions only.
     await click(buttonWithText('Codex'));
     expect(levels()).toEqual(['common_commands', 'instructions_only', 'instructions_only', 'instructions_only']);

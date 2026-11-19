@@ -98,23 +98,24 @@ export type SeatsConfigV1 = { readonly [seat in Exclude<SeatId, OptionalSeatId>]
 };
 
 const WORKER_TOOLS = Object.freeze(['edit', 'gh', 'mcp', 'net', 'read', 'shell', 'tasks'] as const);
-const WORKER_FLEET = Object.freeze(['deep-reasoner', 'deep-worker', 'explorer', 'fast-worker', 'gatekeeper', 'harness-evaluator', 'root-cause-prover']);
+export const SEAT_SCAFFOLD_SUB_AGENTS = Object.freeze(['deep-reasoner', 'explorer'] as const);
+export const RETIRED_SEAT_FLEET_ROLES = Object.freeze(['deep-worker', 'fast-worker', 'gatekeeper', 'root-cause-prover'] as const);
+const isRetiredFleetRole = (id: SeatId, role: unknown): boolean =>
+  RETIRED_SEAT_FLEET_ROLES.some(retired => retired === role) || (role === 'harness-evaluator' && isWorkerSeat(id));
 const REVIEW_TOOLS: readonly SeatTool[] = Object.freeze(['net', 'read', 'shell'] as const);
 
 /**
  * The section an absent `seats` key reads as: the canvas defaults, with the
  * orchestrator on Opus high (G36). `rh seats argv` launches from the
- * same value. No runtime check compares it with the fleet role profiles: a
- * save checks it as any other section, and a route test compares the default
- * worker fleet with the worker range.
+ * same value. The defaults and the Settings ranges share the scaffold role list.
  */
 export const DEFAULT_SEATS_CONFIG: SeatsConfigV1 = Object.freeze({
   orchestrator: Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: Object.freeze(['gh', 'mcp', 'net', 'read', 'shell', 'tasks'] as const), fleet: Object.freeze([]) }),
-  advisor: Object.freeze({ runtime: 'claude', model: 'fable', advisor_model: null, effort: 'high', tools: Object.freeze(['mcp', 'net', 'read', 'shell'] as const), fleet: Object.freeze(['deep-reasoner', 'explorer']) }),
-  worker: Object.freeze({ runtime: 'codex', model: 'gpt-6.1-terra', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: WORKER_FLEET }),
-  'worker-deep': Object.freeze({ runtime: 'codex', model: 'gpt-6.2-sol', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: WORKER_FLEET }),
-  'worker-important': Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'medium', tools: WORKER_TOOLS, fleet: WORKER_FLEET }),
-  'worker-important-fast': Object.freeze({ runtime: 'claude', model: 'sonnet', advisor_model: null, effort: 'medium', tools: WORKER_TOOLS, fleet: WORKER_FLEET }),
+  advisor: Object.freeze({ runtime: 'claude', model: 'fable', advisor_model: null, effort: 'high', tools: Object.freeze(['mcp', 'net', 'read', 'shell'] as const), fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
+  worker: Object.freeze({ runtime: 'codex', model: 'gpt-6.1-terra', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
+  'worker-deep': Object.freeze({ runtime: 'codex', model: 'gpt-6.2-sol', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
+  'worker-important': Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'medium', tools: WORKER_TOOLS, fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
+  'worker-important-fast': Object.freeze({ runtime: 'claude', model: 'sonnet', advisor_model: null, effort: 'medium', tools: WORKER_TOOLS, fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
   'worker-light': Object.freeze({ runtime: 'pi', model: 'magpie/cursor/deepseek-v41-flash-1017', advisor_model: null, effort: null, tools: WORKER_TOOLS, fleet: Object.freeze([]) }),
   gatekeeper: Object.freeze({ runtime: 'codex', model: 'gpt-6.1-terra', advisor_model: null, effort: 'high', tools: REVIEW_TOOLS, fleet: Object.freeze([]) }),
   'gatekeeper-deep': Object.freeze({ runtime: 'codex', model: 'gpt-6.2-sol', advisor_model: null, effort: 'high', tools: REVIEW_TOOLS, fleet: Object.freeze([]) }),
@@ -283,7 +284,7 @@ export function seatModelShapeValid(runtime: SeatRuntime, model: unknown): model
   return typeof model === 'string' && (runtime === 'pi' ? /^[^/]+\/.+$/u.test(model) : TOKEN.test(model));
 }
 
-function decodeSeat(id: SeatId, value: unknown, code: string): SeatConfigV1 {
+function decodeSeat(id: SeatId, value: unknown, code: string, fromSettingsRequest: boolean): SeatConfigV1 {
   const at = (name: string | null): never => invalid(code, name === null ? `seats.${id}` : `seats.${id}.${name}`);
   // A helper refusal carries no field, so each call names the field it decodes.
   const field = <T>(name: string | null, decode: () => T): T => { try { return decode(); } catch { return at(name); } };
@@ -295,10 +296,12 @@ function decodeSeat(id: SeatId, value: unknown, code: string): SeatConfigV1 {
   if (!tools.includes('read')) at('tools');
   const fleet = field('fleet', () => ascending(record.fleet, isRole, code));
   if (isReviewSeat(id) && tools.some(tool => !REVIEW_TOOLS.includes(tool))) at('tools');
-  if (isReviewSeat(id) && fleet.length > 0) at('fleet');
   const model = record.model === null ? null
     : seatModelShapeValid(record.runtime as SeatRuntime, record.model) ? record.model : at('model');
-  if (fleet.length > 0 && !seatTakesFleet({ runtime: record.runtime as SeatRuntime, model })) at('fleet');
+  // Let the Settings save return its typed fleet refusal when the request contains a retired role.
+  const retiredFleetRequest = fromSettingsRequest && fleet.some(role => isRetiredFleetRole(id, role));
+  if (fleet.length > 0 && !retiredFleetRequest && (isReviewSeat(id) || !seatTakesFleet({ runtime: record.runtime as SeatRuntime, model }))) at('fleet');
+  if (!fromSettingsRequest && fleet.some(role => !SEAT_SCAFFOLD_SUB_AGENTS.some(available => available === role))) at('fleet');
   return {
     runtime: record.runtime as SeatRuntime,
     model,
@@ -340,12 +343,12 @@ function decodeRouting(value: unknown, code: string): SeatRoutingV1 {
     unavailable_pi_providers: ascending(record.unavailable_pi_providers, isPiProvider, code) };
 }
 
-function decodeSeatsRecord(record: Record<string, unknown>, code: string, requireExplorerModel = true): SeatsConfigV1 {
+function decodeSeatsRecord(record: Record<string, unknown>, code: string, fromSettingsRequest = false): SeatsConfigV1 {
   const seats = Object.fromEntries(SEAT_IDS.filter(id => id in record)
-    .map(id => [id, isOptionalSeat(id) && record[id] === null ? null : decodeSeat(id, record[id], code)])) as Partial<Omit<SeatsConfigV1, 'routing'>>;
+    .map(id => [id, isOptionalSeat(id) && record[id] === null ? null : decodeSeat(id, record[id], code, fromSettingsRequest)])) as Partial<Omit<SeatsConfigV1, 'routing'>>;
   const routing = 'routing' in record ? decodeRouting(record.routing, code) : undefined;
   if (routing !== undefined) {
-    if (requireExplorerModel && routing.low_quota_explorer.model === null) invalid(code);
+    if (!fromSettingsRequest && routing.low_quota_explorer.model === null) invalid(code);
     if (ROUTING_CLASSES.some(task => routing[task].some(id => seats[id] === null))) invalid(code);
     if (routing.frontend.some(id => seats[id] !== undefined && seats[id]!.runtime !== 'claude')) invalid(code);
   }
@@ -357,11 +360,26 @@ function decodeSeats(value: unknown, code: string): SeatsConfigV1 {
   return decodeSeatsRecord(object(value, SECTION_KEYS, code), code);
 }
 
+/** Prepare the candidate for the update migration. The caller must decode it before use or write. */
+export function stripRetiredSeatFleetRoles(record: Record<string, unknown>): Record<string, unknown> {
+  let changed: Record<string, unknown> | undefined;
+  for (const id of SEAT_IDS) {
+    const value = record[id];
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) continue;
+    const seat = value as Record<string, unknown>;
+    if (!Array.isArray(seat.fleet)) continue;
+    const fleet = seat.fleet.filter(role => !isRetiredFleetRole(id, role));
+    if (fleet.length !== seat.fleet.length) (changed ??= { ...record })[id] = { ...seat, fleet };
+  }
+  return changed ?? record;
+}
+
 /** The shape of the stored `seats` section. An absent section (`undefined`) reads as the defaults. */
 export function decodeSeatsConfig(value: unknown): SeatsConfigV1 {
   if (value === undefined) return DEFAULT_SEATS_CONFIG;
   const code = 'seats_config_invalid';
-  const record = object(value, SECTION_KEYS, code, ['orchestrator', 'advisor', 'worker']);
+  const stored = object(value, SECTION_KEYS, code, ['orchestrator', 'advisor', 'worker']);
+  const record = stripRetiredSeatFleetRoles(stored);
   const routing = record.routing;
   if (typeof routing === 'object' && routing !== null && !Array.isArray(routing)) {
     if ('mode' in routing || 'hyper' in routing) throw new SeatsConfigMigrationRequiredError();
@@ -377,7 +395,9 @@ export function decodeSeatsConfig(value: unknown): SeatsConfigV1 {
       throw new SeatsConfigMigrationRequiredError();
     }
   }
-  return decodeSeatsRecord(record, code);
+  const seats = decodeSeatsRecord(record, code);
+  if (record !== stored) throw new SeatsConfigMigrationRequiredError();
+  return seats;
 }
 
 function decodeRoutingRanges(value: unknown, code: string): SeatsRangesV1['routing'] {
@@ -443,8 +463,8 @@ export function decodeSeatsSettingsRequest(fields: Readonly<Record<string, unkno
   const record = object(fields, ['expected_revision', 'seats'], code);
   const expected = text(record.expected_revision, code);
   if (!REVISION.test(expected)) invalid(code);
-  // Save validation returns seat_model_invalid for a null explorer model.
-  return { expected_revision: expected, seats: decodeSeatsRecord(object(record.seats, SECTION_KEYS, code), code, false) };
+  // The save checks fleet access and the explorer model so it can return structured 422 errors.
+  return { expected_revision: expected, seats: decodeSeatsRecord(object(record.seats, SECTION_KEYS, code), code, true) };
 }
 
 export function decodeSeatsSettingsResult(value: unknown): SeatsSettingsResultV1 {

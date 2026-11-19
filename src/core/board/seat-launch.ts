@@ -110,15 +110,11 @@ function roleParagraphs(seat: LaunchSeatId, config: SeatConfigV1, fleet: readonl
     const queue = config.tools.includes('tasks')
       ? ['Keep worker notices in a triage queue with TaskCreate, TaskUpdate, TaskList and TaskGet, as `references/orchestrator.md` §8.1 of repo-harness-issue-flow says: answer the owner first, then take one queue item at a time by priority.']
       : [];
-    // A gatekeeper sub-agent is an independent reviewer inside this seat; every other review and every writer stays in a seat.
-    const review = fleet.includes('gatekeeper')
-      ? `You do not review a PR yourself. An independent \`${name('gatekeeper')}\` sub-agent may review a PR that you dispatched; route every other review of that PR to another seat.`
-      : 'You do not review a PR that you dispatched; route that review to another seat.';
     const dispatch = fleet.length === 0
       ? 'You do not dispatch sub-agents (the Agent tool) for execution. Dispatch work only to seats through Herdr.'
       : `You may call these read-only sub-agents: ${roleList(fleet, name)}. Call no other agent type. Writers and the Codex review run only in Herdr seats: dispatch them to seats through Herdr.`;
     return [
-      `You are the orchestrator seat. You hold the coordinator and integrator seats of repo-harness-issue-flow. You dispatch, accept and merge. You do not edit product code, tests or configuration. ${review} You push only the branch of a Codex worker seat handoff: commit its worktree diff with its message and explicit paths only, push the branch, open the PR, and push each fix round. On the owner's explicit word for one release you run the command list of \`bash scripts/release-owner-steps.sh plan <version>\` from the release worktree; the owner confirms the npm login. Without that word you do not tag or publish. You do not delete, or change credentials or permissions yourself.`,
+      `You are the orchestrator seat. You hold the coordinator and integrator seats of repo-harness-issue-flow. You dispatch, accept and merge. You do not edit product code, tests or configuration. You do not review a PR that you dispatched; route that review to another seat. You push only the branch of a Codex worker seat handoff: commit its worktree diff with its message and explicit paths only, push the branch, open the PR, and push each fix round. On the owner's explicit word for one release you run the command list of \`bash scripts/release-owner-steps.sh plan <version>\` from the release worktree; the owner confirms the npm login. Without that word you do not tag or publish. You do not delete, or change credentials or permissions yourself.`,
       `${dispatch} When \`publication.acceptance_merge\` is \`on\`, merge only with \`rh publication merge\`. When it is \`off\`, hand each ready PR to the owner.`,
       'Before each dispatch wave, run `rh quota`. Launch each task on the seat its route line names with `rh seats argv <seat>`; state the boundary in the task.',
       ...queue,

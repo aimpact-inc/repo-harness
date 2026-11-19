@@ -835,16 +835,22 @@ describe('seat settings routes', () => {
     expect(stored.routing.simple_fast).toEqual(['worker-light']);
   });
 
-  test('GET reads the defaults and the ranges from the fleet role profiles', async () => {
+  test('GET offers only read-only scaffold roles and matches the non-Pi worker defaults', async () => {
     const harness = await startHarness({ agents: PANE_AGENTS });
     const value = await seats(harness);
     expect(value.config.orchestrator).toEqual({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: ['gh', 'mcp', 'net', 'read', 'shell', 'tasks'], fleet: [] });
-    expect(value.config.advisor.fleet).toEqual(['deep-reasoner', 'explorer']);
-    expect(value.ranges.seats.advisor.fleet).toEqual(['explorer', 'deep-reasoner', 'gatekeeper']);
-    expect(value.ranges.seats.orchestrator.fleet).toEqual(['explorer', 'deep-reasoner', 'gatekeeper']);
-    expect(value.ranges.seats.worker.fleet).not.toContain('orchestrator');
-    // The core defaults stay inside the ranges that the fleet role profiles give.
-    expect(value.defaults.worker.fleet).toEqual([...value.ranges.seats.worker.fleet].sort());
+    const fleet = ['deep-reasoner', 'explorer'];
+    expect(value.config.advisor.fleet).toEqual(fleet);
+    expect(value.ranges.roles).toEqual(fleet.map(name => ({ name, writable: false })));
+    for (const id of ['orchestrator', 'advisor', ...WORKER_SEAT_IDS] as const) {
+      expect(value.ranges.seats[id].fleet).toEqual(fleet);
+    }
+    for (const id of WORKER_SEAT_IDS) {
+      expect(value.defaults[id]?.fleet).toEqual(id === 'worker-light' ? [] : fleet);
+    }
+    for (const id of ['gatekeeper', 'gatekeeper-deep', 'gatekeeper-fallback', 'reviewer'] as const) {
+      expect(value.ranges.seats[id].fleet).toEqual([]);
+    }
     expect(value.ranges.runtimes.map(runtime => [runtime.id, runtime.enabled, runtime.fleet])).toEqual([['claude', true, true], ['codex', true, true], ['pi', true, true]]);
   });
 
@@ -920,22 +926,26 @@ describe('seat settings routes', () => {
     expect((await seats(harness)).config.worker.tools).toEqual(editNet as typeof section.worker.tools);
   });
 
-  test('the orchestrator fleet takes the three read-only roles and refuses every writer', async () => {
+  test('every seat refuses retired roles with 422 and the orchestrator can save the two scaffold roles', async () => {
     const harness = await startHarness({ agents: PANE_AGENTS });
     const { revision, ...section } = (await seats(harness)).config;
-    // The refused rows come first: a refusal writes nothing, so the revision stays valid for the accepted row.
-    for (const [fleet, status] of [
-      [['fast-worker'], 422],
-      [['deep-worker'], 422],
-      [['harness-evaluator'], 422],
-      [['root-cause-prover'], 422],
-      [['deep-reasoner', 'explorer', 'gatekeeper'], 200],
-    ] as const) {
-      const response = await post(harness, { expected_revision: revision, seats: { ...section, orchestrator: { ...section.orchestrator, fleet } } }, 'seats');
-      const body = await response.json();
-      expect([fleet, response.status, status === 422 ? body.error.code : body.changed_keys])
-        .toEqual([fleet, status, status === 422 ? 'seat_fleet_not_allowed' : ['seats.orchestrator.fleet']]);
+    const original = readFileSync(harness.configPath, 'utf8');
+    for (const id of SEAT_IDS) {
+      const seat = section[id] ?? section.gatekeeper;
+      for (const role of ['deep-worker', 'fast-worker', 'gatekeeper', 'root-cause-prover']) {
+        const response = await post(harness, { expected_revision: revision, seats: { ...section, [id]: { ...seat, fleet: [role] } } }, 'seats');
+        expect([id, role, response.status, (await response.json()).error.code]).toEqual([id, role, 422, 'seat_fleet_not_allowed']);
+      }
     }
+    for (const id of ['orchestrator', 'worker'] as const) {
+      const response = await post(harness, { expected_revision: revision, seats: { ...section, [id]: { ...section[id], fleet: ['harness-evaluator'] } } }, 'seats');
+      expect([id, response.status, (await response.json()).error.code]).toEqual([id, 422, 'seat_fleet_not_allowed']);
+    }
+    expect(readFileSync(harness.configPath, 'utf8')).toBe(original);
+    const orchestrator = { ...section.orchestrator, fleet: ['deep-reasoner', 'explorer'] };
+    const saved = await post(harness, { expected_revision: revision, seats: { ...section, orchestrator } }, 'seats');
+    expect(saved.status).toBe(200);
+    expect((await saved.json()).changed_keys).toEqual(['seats.orchestrator.fleet']);
   });
 
   test('a stale revision and a reused request_id with another body get 409', async () => {

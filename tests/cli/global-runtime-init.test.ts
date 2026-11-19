@@ -8,7 +8,10 @@ import { PassThrough, Writable } from 'stream';
 import { createHash } from 'crypto';
 import { checkMcpLocalConfigFile } from '../../src/cli/mcp/local-config-check';
 import { migrateSeatsConfiguration, runGlobalRuntimeSetup, verifyInstalledManagedRuntime } from '../../src/cli/commands/global-runtime';
-import { DEFAULT_SEATS_CONFIG, decodeSeatsConfig } from '../../src/core/board/seats-settings';
+import { DEFAULT_SEATS_CONFIG, SeatsConfigMigrationRequiredError, decodeSeatsConfig } from '../../src/core/board/seats-settings';
+import { buildSeatLaunch } from '../../src/core/board/seat-launch';
+import { writePiFleetRoles } from '../../src/effects/board/pi-fleet-roles';
+import { applySeatsSettings, readSeatsConfiguration } from '../../src/effects/board/seats-configuration';
 import { runCli } from '../../src/cli/index';
 import { registerArchitecturePlugin, resolveOptionalRuntimeDeps, runTransactionalRuntimeRefresh } from '../../src/cli/runtime-transaction';
 import { bunStubPath, copyPackageRuntimeFixture, writeBunWrapper, writeShellExecutableFixture } from '../helpers/repo-fixture';
@@ -178,6 +181,70 @@ test('update removes the Codex hyper threshold once, preserves other settings, a
       expect(() => migrateSeatsConfiguration({ HOME: home })).toThrow('seats_config_invalid');
       expect(readFileSync(path, 'utf8')).toBe(original);
     }
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('update strips retired fleet roles once and leaves the saved seats ready for all three launchers', () => {
+  const home = mkdtempSync(join(tmpdir(), 'seat-fleet-migration-'));
+  try {
+    const directory = join(home, '.repo-harness');
+    mkdirSync(directory);
+    const path = join(directory, 'config.json');
+    const bun = join(home, 'bun');
+    writeExecutable(home, bun, '#!/bin/bash\nif [[ "$1" == "--version" ]]; then echo 1.4.0; fi\nexit 0\n');
+    const env = { ...sanitizedChildEnv(home), REPO_HARNESS_HOME: directory, REPO_HARNESS_BUN_EXECUTABLE: bun };
+    const fleet = ['deep-reasoner', 'explorer'];
+    const legacyFleet = ['deep-reasoner', 'deep-worker', 'explorer', 'fast-worker', 'gatekeeper', 'harness-evaluator', 'root-cause-prover'];
+    const seats = { ...DEFAULT_SEATS_CONFIG,
+      orchestrator: { ...DEFAULT_SEATS_CONFIG.orchestrator, fleet: ['gatekeeper'] },
+      advisor: { ...DEFAULT_SEATS_CONFIG.advisor, advisor_model: 'haiku', fleet: [...fleet, 'gatekeeper'] },
+      worker: { ...DEFAULT_SEATS_CONFIG.worker, model: 'custom-codex-model', effort: 'low', tools: ['edit', 'read', 'shell'], fleet: legacyFleet },
+      'worker-important': { ...DEFAULT_SEATS_CONFIG['worker-important'], model: 'custom-claude-model', fleet: legacyFleet },
+      'worker-light': { ...DEFAULT_SEATS_CONFIG['worker-light']!, model: 'magpie/codex/gpt-6.1-terra', fleet: legacyFleet },
+      routing: { ...DEFAULT_SEATS_CONFIG.routing, simple_fast: ['worker-light', 'worker'], claude_saving_below_remaining: 35 },
+    };
+    const agents = { enabled: ['claude', 'codex', 'pi'], uses: { review: [], docs: [] }, default_docs: null };
+    const original = JSON.stringify({ agents, seats, custom: 'keep me' });
+    writeFileSync(path, original);
+    expect(() => decodeSeatsConfig(JSON.parse(readFileSync(path, 'utf8')).seats)).toThrow(SeatsConfigMigrationRequiredError);
+    const update = runGlobalRuntimeSetup({
+      sourceRoot: ROOT, cwd: home, plugins: [], updateMode: true, installCli: false,
+      syncSkill: false, hostAdapters: false, externalSkills: false, codegraph: false, env,
+    });
+    expect(update.exitCode, update.stdout).toBe(0);
+    expect(update.steps).toContainEqual(expect.objectContaining({ step: 'migrate seats configuration', status: 'ok' }));
+    const backup = readdirSync(directory).find(name => name.startsWith('config.json.bak-'))!;
+    expect(readFileSync(join(directory, backup), 'utf8')).toBe(original);
+    const migrated = readSeatsConfiguration(env);
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ agents, custom: 'keep me', seats: { ...seats,
+      orchestrator: { ...seats.orchestrator, fleet: [] },
+      advisor: { ...seats.advisor, fleet },
+      worker: { ...seats.worker, fleet },
+      'worker-important': { ...seats['worker-important'], fleet },
+      'worker-light': { ...seats['worker-light'], fleet },
+    } });
+    expect(migrateSeatsConfiguration(env)).toBe(false);
+
+    const saved = { ...migrated.seats, worker: { ...migrated.seats.worker, effort: 'medium' } };
+    expect(applySeatsSettings({ expected_revision: migrated.revision, seats: saved }, env).changed_keys).toEqual(['seats.worker.effort']);
+    const current = readSeatsConfiguration(env).seats;
+    expect(current).toEqual(saved);
+    const codex = buildSeatLaunch('worker', current.worker, 'seats', []);
+    expect(codex.argv).toEqual(expect.arrayContaining(['codex', 'custom-codex-model']));
+    expect(codex.brief).toContain('`deep-reasoner`, `explorer`');
+    const claude = buildSeatLaunch('worker-important', current['worker-important'], 'seats', legacyFleet);
+    expect(claude.argv).toEqual(expect.arrayContaining(['claude', 'custom-claude-model', '--disallowedTools', 'Agent(gatekeeper)']));
+    expect(claude.brief).toContain('`deep-reasoner`, `explorer`');
+    const piSeat = current['worker-light']!;
+    const roles = writePiFleetRoles(piSeat.fleet, env);
+    const pi = buildSeatLaunch('worker-light', piSeat, 'seats', [], undefined, undefined, roles);
+    expect(pi.argv).toEqual(expect.arrayContaining(['pi', `PI_SUBAGENT_EXTRA_AGENT_DIRS=${roles}`]));
+    expect(readdirSync(roles).sort()).toEqual(['rh-deep-reasoner.md', 'rh-explorer.md']);
+
+    const malformed = JSON.stringify({ seats: { ...seats, worker: { ...seats.worker, fleet: ['fast-worker', 'unknown-role'] } } });
+    writeFileSync(path, malformed);
+    expect(() => migrateSeatsConfiguration(env)).toThrow('seats_config_invalid: seats.worker.fleet');
+    expect(readFileSync(path, 'utf8')).toBe(malformed);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 

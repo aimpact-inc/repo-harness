@@ -4,7 +4,7 @@ import { createHash } from "crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { delimiter, dirname, join } from "path";
-import { seatPaneName } from "../../src/core/board/seat-launch";
+import { buildSeatLaunch, seatPaneName } from "../../src/core/board/seat-launch";
 import { HANDOFF_SECTIONS, seatResetReason, seatResetSteps, type SeatResetIdentity } from "../../src/core/board/seat-reset";
 import { SeatResetError, runSeatReset, type SeatRelaunch, type SeatResetNotify, type SeatResetOptions } from "../../src/effects/board/seat-reset";
 import { seatResetLaunch } from "../../src/cli/commands/seats";
@@ -178,6 +178,15 @@ describe("rh seats argv", () => {
   test("an old seats section fails closed with the update action", () => {
     const seats = { orchestrator: DEFAULT_SEATS_CONFIG.orchestrator, advisor: DEFAULT_SEATS_CONFIG.advisor, worker: DEFAULT_SEATS_CONFIG.worker };
     withHome(seats, home => {
+      const result = argv(home, "worker", "--json");
+      expect([result.status, result.stdout]).toEqual([1, ""]);
+      expect(JSON.parse(result.stderr)).toMatchObject({ error: "seats_config_migration_required", next_action: "rh update" });
+    });
+  });
+
+  test("a fully configured seat with a retired role refuses launch and directs the user to update", () => {
+    const worker = { ...DEFAULT_SEATS_CONFIG.worker, fleet: ["explorer", "harness-evaluator"] };
+    withHome({ ...DEFAULT_SEATS_CONFIG, worker }, home => {
       const result = argv(home, "worker", "--json");
       expect([result.status, result.stdout]).toEqual([1, ""]);
       expect(JSON.parse(result.stderr)).toMatchObject({ error: "seats_config_migration_required", next_action: "rh update" });
@@ -381,19 +390,19 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   });
 
   test("a Pi GPT seat gets its own fleet roles in a generated directory; a DeepSeek seat gets none", () => {
-    const worker = { ...DEFAULT_SEATS_CONFIG.worker, runtime: "pi" as const, model: "magpie/codex/gpt-6.1-terra", fleet: ["explorer", "fast-worker"] };
+    const worker = { ...DEFAULT_SEATS_CONFIG.worker, runtime: "pi" as const, model: "magpie/codex/gpt-6.1-terra" };
     withHome({ ...DEFAULT_SEATS_CONFIG, worker }, home => {
       writeFileSync(join(home, 'codex-used'), '51');
       const gpt = launch(home, "worker");
       const [assignment, command] = bare(gpt.argv) as string[];
       const directory = assignment!.replace("PI_SUBAGENT_EXTRA_AGENT_DIRS=", "");
       expect([command, directory.startsWith(join(realpathSync(home), ".repo-harness", "seats", "pi-fleet"))]).toEqual(["pi", true]);
-      expect(readdirSync(directory).sort()).toEqual(["rh-explorer.md", "rh-fast-worker.md"]);
+      expect(readdirSync(directory).sort()).toEqual(["rh-deep-reasoner.md", "rh-explorer.md"]);
       const explorer = readFileSync(join(directory, "rh-explorer.md"), "utf8");
       expect(explorer).toContain("name: rh-explorer\n");
       expect(explorer).toContain("model: magpie/codex/gpt-6-luna\nthinking: high\ntools: read, grep, find, ls, bash\n");
-      expect(readFileSync(join(directory, "rh-fast-worker.md"), "utf8")).toContain("tools: read, grep, find, ls, bash, edit, write\n");
-      expect(gpt.brief).toContain("You may call these sub-agents: `rh-explorer`, `rh-fast-worker`.");
+      expect(readFileSync(join(directory, "rh-deep-reasoner.md"), "utf8")).toContain("tools: read, grep, find, ls, bash\n");
+      expect(gpt.brief).toContain("You may call these sub-agents: `rh-deep-reasoner`, `rh-explorer`.");
       expect(gpt.limits).toContainEqual({ subject: "fleet", level: "instructions_only" });
       const light = launch(home, "worker-light");
       expect(bare(light.argv)[0]).toBe("pi");
@@ -551,6 +560,19 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
     });
   });
 
+  test("the Claude important worker blocks retired roles and the evaluator by name", () => {
+    withHome(undefined, home => {
+      const worker = launch(home, "worker-important");
+      expect(tools(worker.argv)).toContain("Agent");
+      expect(denied(worker.argv)).toEqual(expect.arrayContaining([
+        "Agent(deep-worker)", "Agent(fast-worker)", "Agent(gatekeeper)", "Agent(harness-evaluator)", "Agent(root-cause-prover)",
+      ]));
+      expect(denied(worker.argv)).not.toContain("Agent(deep-reasoner)");
+      expect(denied(worker.argv)).not.toContain("Agent(explorer)");
+      expect(worker.brief).toContain("You may call these sub-agents: `deep-reasoner`, `explorer`.");
+    });
+  });
+
   test("an empty advisor fleet refuses every agent type, and a Pi seat says it has no sub-agents", () => {
     const seats = { ...DEFAULT_SEATS_CONFIG, advisor: { ...DEFAULT_SEATS_CONFIG.advisor, fleet: [] }, worker: { runtime: "pi", model: null, effort: null, tools: ["edit", "read", "shell"], fleet: [] } };
     withHome(seats, (home) => {
@@ -611,18 +633,18 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
     const seatReview = "You do not review a PR that you dispatched; route that review to another seat.";
     const gatekeeperReview = "You do not review a PR yourself. An independent `gatekeeper` sub-agent may review a PR that you dispatched; route every other review of that PR to another seat.";
     const seatsOnly = (roles: string) => `You may call these read-only sub-agents: ${roles}. Call no other agent type. Writers and the Codex review run only in Herdr seats: dispatch them to seats through Herdr.`;
-    for (const [fleet, review, dispatch] of [
-      [[], seatReview, "You do not dispatch sub-agents (the Agent tool) for execution. Dispatch work only to seats through Herdr."],
-      [["explorer"], seatReview, seatsOnly("`explorer`")],
-      [["deep-reasoner", "explorer", "gatekeeper"], gatekeeperReview, seatsOnly("`deep-reasoner`, `explorer`, `gatekeeper`")],
+    for (const [fleet, dispatch] of [
+      [[], "You do not dispatch sub-agents (the Agent tool) for execution. Dispatch work only to seats through Herdr."],
+      [["explorer"], seatsOnly("`explorer`")],
+      [["deep-reasoner", "explorer"], seatsOnly("`deep-reasoner`, `explorer`")],
     ] as const) {
       withHome({ ...DEFAULT_SEATS_CONFIG, orchestrator: { ...DEFAULT_SEATS_CONFIG.orchestrator, fleet } }, (home) => {
         const orchestrator = launch(home, "orchestrator");
         expect(orchestrator.brief).toContain("You push only the branch of a Codex worker seat handoff: commit its worktree diff with its message and explicit paths only, push the branch, open the PR, and push each fix round. On the owner's explicit word for one release you run the command list of `bash scripts/release-owner-steps.sh plan <version>` from the release worktree; the owner confirms the npm login. Without that word you do not tag or publish. You do not delete, or change credentials or permissions yourself.");
         expect(orchestrator.brief).not.toContain("You do not push, tag, release, delete, or change credentials or permissions.");
-        // Each row also refuses the conflicting sentences: the other review path, and the Herdr-only rule with a fleet.
-        const other = review === seatReview ? gatekeeperReview : seatReview;
-        expect([fleet, orchestrator.brief.includes(review), orchestrator.brief.includes(dispatch), orchestrator.brief.includes(other)]).toEqual([fleet, true, true, false]);
+        expect(orchestrator.brief).toContain(seatReview);
+        expect(orchestrator.brief).toContain(dispatch);
+        expect(orchestrator.brief).not.toContain(gatekeeperReview);
         if (fleet.length === 0) return;
         expect(orchestrator.brief).not.toContain("Dispatch work only to seats through Herdr.");
         expect(tools(orchestrator.argv)).toContain("Agent");
@@ -631,6 +653,9 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
         expect(orchestrator.limits).toContainEqual({ subject: "fleet", level: "named_types_only" });
       });
     }
+    const legacy = buildSeatLaunch("orchestrator", { ...DEFAULT_SEATS_CONFIG.orchestrator, fleet: ["gatekeeper"] }, "seats", []);
+    expect(legacy.brief).toContain(seatReview);
+    expect(legacy.brief).not.toContain(gatekeeperReview);
   });
 
   test("the Codex argv holds only flags that Codex applies; the fleet goes into the launch instructions only", () => {
