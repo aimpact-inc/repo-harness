@@ -1,4 +1,4 @@
-import { planIssues } from './plan-block';
+import { planIssues, planOrderIssues, planOrderUnits } from './plan-block';
 import { boardMergeDecisions, planSkipReason } from './merge';
 import type { BoardItemV1, BoardPullRequestV1, BoardTerminalV1, BoardV1 } from './board';
 import { hcStatusClass, liveSeats, seatItem, seatPullRequest } from './desk';
@@ -620,7 +620,7 @@ function r5(context: Context): void {
 function r4(context: Context): void {
   const plan = context.board.plan;
   if (plan.status !== 'observed') return skip(context, 'R4', planSkipReason(plan.status));
-  const ordered = new Set(plan.block.merge_order);
+  const ordered = new Set(planOrderIssues(plan.block));
   for (const pr of accepted(context, 'R4')) {
     const waited = context.now - Date.parse(pr.acceptance.accepted_at);
     if (itemsOf(context.board, pr).some(number => ordered.has(number)) && waited > R4_STALLED_MS) {
@@ -630,16 +630,20 @@ function r4(context: Context): void {
   }
 }
 
-/** R7: an accepted pull request waits behind an earlier open entry of the merge order that is held, which blocks each ready pull request behind it. */
+/** R7: an accepted pull request waits behind an open issue of an earlier plan unit that is held, which blocks each ready pull request behind it. */
 function r7(context: Context): void {
   const { board } = context;
   if (board.plan.status !== 'observed') return skip(context, 'R7', planSkipReason(board.plan.status));
-  const { merge_order: order, holds } = board.plan.block;
+  const units = planOrderUnits(board.plan.block);
+  const { holds } = board.plan.block;
   const onBoard = new Map(board.items.map(item => [item.number, item] as const));
   const refused = new Set(boardMergeDecisions(board).filter(decision => !decision.eligible && decision.reason === 'merge_order').map(decision => decision.pr));
   for (const pr of openPullRequests(board).filter(entry => refused.has(entry.number) && entry.acceptance.status === 'accepted')) {
-    const last = Math.max(...itemsOf(board, pr).map(number => order.indexOf(number)));
-    const earlier = order.slice(0, last).filter(number => onBoard.get(number)?.state !== 'closed');
+    // The open items set the unit of the pull request, as in `board merge`; a closed ref in a later unit does not.
+    const linked = itemsOf(board, pr);
+    const open = linked.filter(number => onBoard.get(number)?.state !== 'closed');
+    const last = Math.max(...(open.length > 0 ? open : linked).map(number => units.findIndex(unit => unit.includes(number))));
+    const earlier = units.slice(0, last).flat().filter(number => onBoard.get(number)?.state !== 'closed');
     for (const number of earlier.filter(entry => !onBoard.has(entry))) skip(context, 'R7', 'item_off_board', `#${number}`);
     // An off-board entry has no observed state, so only an open board item is a held candidate.
     const hold = earlier.find(number => onBoard.get(number)?.state === 'open' && (holds.some(entry => entry.issue === number) || onBoard.get(number)!.merge_hold.status === 'held'));

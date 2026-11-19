@@ -1,5 +1,5 @@
 import { planFromComments } from './board';
-import { decodePlanBlock, decodePlanBlockValue, PLAN_COMMENT_HEADER, renderPlanComment, type PlanBlockV2, type PlanCommentFieldsV1 } from './plan-block';
+import { decodePlanBlock, decodePlanBlockValue, PLAN_COMMENT_HEADER, renderPlanComment, type PlanBlockV3, type PlanCommentFieldsV1 } from './plan-block';
 import {
   MERGE_HOLD_HEADER,
   MERGE_HOLD_RELEASED_HEADER,
@@ -143,7 +143,7 @@ function requiredList(body: Record<string, unknown>, key: string, spec: FieldSpe
 }
 
 /** The plan block of the fields, through the block decoder that the board itself uses. */
-function planBlock(body: Record<string, unknown>): PlanBlockV2 {
+function planBlock(body: Record<string, unknown>): PlanBlockV3 {
   const value = body.block;
   if (value === undefined || value === null) throw new BoardPostFieldsError('block', 'required');
   try {
@@ -215,7 +215,7 @@ export function checkPostBody(post: BoardPostFieldsV1, body: string): void {
   const disagree = (what: string): never => { throw new BoardPostRoundtripError(post.kind, `${what} reads back with another value`); };
   switch (post.kind) {
     case 'plan': {
-      let block: PlanBlockV2;
+      let block: PlanBlockV3;
       try { block = decodePlanBlock(body); } catch (error) { throw new BoardPostRoundtripError(post.kind, (error as Error).message); }
       if (JSON.stringify(block) !== JSON.stringify(post.fields.block)) disagree('the plan block');
       return;

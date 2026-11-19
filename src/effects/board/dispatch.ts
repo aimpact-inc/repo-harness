@@ -11,6 +11,7 @@ import { readSeatsConfiguration } from './seats-configuration';
 import { BoardCollectError, readParent, readRepositoryId, runGhText } from './collect';
 
 type DispatchedV1 = Extract<DispatchDecisionV1, { action: 'dispatch' }>;
+type SkippedV1 = Extract<DispatchDecisionV1, { action: 'skip' }>;
 
 /** What `seatLaunch` (the `seats argv` command) answers for one seat; the command layer owns it, so the caller passes it in. */
 export type DispatchLaunch = (seat: SeatId, labels: { readonly repositoryId: string; readonly issue: string; readonly parent: string }, cwd: string) =>
@@ -102,15 +103,18 @@ function releaseClaims(ports: DispatchPorts, claims: readonly { readonly issue: 
   for (const claim of claims) ports.comment(claim.issue, `repo-harness issue claim status\nClaim: ${claim.url}\nStatus: released`);
 }
 
-/** The seats to start: one for each dispatch decision, or one for the whole bundle, which starts only when every issue of it dispatches. */
+/**
+ * The seats to start: one for each ready plan unit. The plan skips a unit that is not ready in part; `--issues` names one unit and
+ * throws instead, because the caller asked for that unit. A closed member is not work, so its skip does not stop the unit.
+ */
 function units(plan: DispatchPlanV1): DispatchedV1[][] {
-  const dispatched = plan.decisions.filter((decision): decision is DispatchedV1 => decision.action === 'dispatch');
-  if (plan.bundle === null) return dispatched.map(decision => [decision]);
-  const skipped = plan.decisions.filter(decision => decision.action === 'skip');
-  if (skipped.length > 0) {
-    throw new DispatchError(`the bundle ${plan.bundle.map(number => `#${number}`).join(', ')} starts only as a whole; ${skipped.map(decision => `#${decision.issue} ${decision.reason}: ${decision.detail}`).join('; ')}; nothing was started`);
+  const dispatched = new Map(plan.decisions.flatMap(decision => (decision.action === 'dispatch' ? [[decision.issue, decision] as const] : [])));
+  if (plan.bundle !== null && plan.units.length === 0) {
+    const skipped = plan.decisions.filter((decision): decision is SkippedV1 => decision.action === 'skip' && decision.reason !== 'closed');
+    const reasons = skipped.length === 0 ? 'every issue is closed' : skipped.map(decision => `#${decision.issue} ${decision.reason}: ${decision.detail}`).join('; ');
+    throw new DispatchError(`the bundle ${plan.bundle.map(number => `#${number}`).join(', ')} starts only as a whole; ${reasons}; nothing was started`);
   }
-  return [dispatched];
+  return plan.units.map(unit => unit.map(number => dispatched.get(number)!));
 }
 
 /**

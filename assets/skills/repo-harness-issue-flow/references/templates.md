@@ -254,10 +254,11 @@ Every template below ends with the line `Seat: <seat id> <hc address>` when a se
 
 `issue claim` is seat-only. The coordinator posts it, including the
 claim of each agent it dispatches. A bundle claim
-(`rh board dispatch --issues <a>,<b>,<c>`) puts one claim with the same
-`Agent:`, `Branch:` and `Issues:` line on each issue of the bundle. The board
+(`rh board dispatch` for a bundle unit of the plan) puts one claim with the same
+`Agent:`, `Branch:` and `Issues:` line on each open issue of the unit. The board
 reads `Issues:` as one writer for the whole bundle (attention rules A4, A12
-and A13, and the merge order); a line that does not parse or omits its own
+and A13, and the blocked-by merge order of a parent without a plan; with a
+plan, the plan unit decides the merge order); a line that does not parse or omits its own
 issue makes the claim unknown. Such a claim names the agent in
 `Agent:` and the coordinator's own claim in `Coordinator:`. Any other
 agent's claim is a request, not a claim role. A claim is valid only from an
@@ -330,6 +331,16 @@ Supersedes: <previous plan URL>   # omit on the first plan
 After the fields comes exactly one fenced `json` block: the plan block.
 `decodePlanBlock` in `src/core/board/plan-block.ts` of repo-harness defines
 its protocol and fields (merge order, holds, seat limit).
+
+```json
+{"protocol": 3, "kind": "repo-harness.plan", "merge_order": [[101, 102], 103], "holds": [{"issue": 103, "reason": "waits for the owner"}], "seat_limits": {"worker": 4}}
+```
+
+Each `merge_order` entry is one unit: an issue number, or an array of two
+or more issue numbers that one worker takes as one bundle (one seat, one
+worktree, one PR). An issue appears once in the whole order. The units
+merge in this order; the issues of one unit merge together. A protocol 2
+block is refused: post the plan again with `rh board post plan`.
 `rh board --parent <n>` decodes the newest plan and fails on an
 invalid block. The block holds no dependency, membership or tier: those are
 GitHub fields (Plan data, above).

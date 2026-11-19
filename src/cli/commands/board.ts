@@ -136,7 +136,7 @@ function mergeText(result: BoardMergeResultV1, requested: number | null, dryRun:
 }
 
 /** Skip reasons that show a routing, quota or plan problem; the other reasons are ordinary board state. */
-const DISPATCH_FRICTION: ReadonlySet<DispatchSkipReason> = new Set(['kind_label_invalid', 'no_route', 'over_limit']);
+const DISPATCH_FRICTION: ReadonlySet<DispatchSkipReason> = new Set(['kind_label_invalid', 'tier_invalid', 'tier_mixed', 'route_conflict', 'no_route', 'over_limit']);
 const REVIEW_FRICTION: ReadonlySet<ReviewSkipReason> = new Set(['acceptance_unknown', 'writer_family_unknown', 'review_family_unavailable', 'plan_unavailable']);
 
 /** The closed error code of a refused board command; the message is free text and never leaves the command. */
@@ -340,10 +340,10 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
       }
     });
   board.command('dispatch')
-    .description('Start a seat for each ready sub-issue of the plan (takes --parent): worktree, claim comment and worker tab, on the seat that the quota route names')
+    .description('Start a seat for each ready unit of the plan (takes --parent): worktree, claim comment on each open issue of the unit and worker tab, on the seat that the quota route names')
     .requiredOption('--space <id>', 'Herdr space that receives the worker tabs')
     .option('--dry-run', 'Print the decision for each plan issue and start nothing')
-    .option('--issues <a,b,c>', 'Start one seat, one worktree and one pull request for these plan issues; each claim names the bundle, and nothing starts unless every issue is ready')
+    .option('--issues <a,b,c>', 'Start only the plan unit with exactly these issues; each claim names the bundle, and nothing starts unless every open issue of the unit is ready')
     .action(async (options: { space: string; dryRun?: boolean; issues?: string }, command: Command) => {
       try {
         const parent = parentNumber(command.optsWithGlobals<BoardOptions>());

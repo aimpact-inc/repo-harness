@@ -146,7 +146,7 @@ function countedBoard({ queue = 0, ci = 0, accepted = 0, limit = null, needsYou 
     ...BOARD, execution: { status: 'observed', terminals: [] },
     daily_run: { ...BOARD.daily_run, conclusion: needsYou ? 'failure' : 'success' },
     plan: limit === null ? { status: 'absent', truncated: false } : { status: 'observed', comment_url: 'https://github.com/plan', created_at: BOARD.observed_at, revision: 1,
-      block: { protocol: 2, kind: 'repo-harness.plan', merge_order: [], holds: [], seat_limits: { worker: limit } } },
+      block: { protocol: 3, kind: 'repo-harness.plan', merge_order: [], holds: [], seat_limits: { worker: limit } } },
     items: BOARD.items.filter(item => members.includes(item.number)).map(item => ({ ...item, open_questions: { status: 'observed', questions: [] }, pull_requests: [item.number + 1000] })),
     pull_requests: [
       ...members.map(number => ({ ...template, number: number + 1000, required_check: done, acceptance: { status: 'accepted', via: 'record', accepted_at: BOARD.observed_at, evidence_url: 'https://github.com/plan#accepted' } })),
@@ -941,7 +941,7 @@ describe('board office (#1755)', () => {
   });
   const PLAN: BoardV1['plan'] = {
     status: 'observed', comment_url: 'https://github.com/Ancienttwo/repo-harness/issues/1474#issuecomment-1', created_at: '2026-11-02T20:00:00Z', revision: 1,
-    block: { protocol: 2, kind: 'repo-harness.plan', merge_order: [1475, 1476, 1479], holds: [{ issue: 1477, reason: 'waits for #1476' }], seat_limits: { worker: 3 } },
+    block: { protocol: 3, kind: 'repo-harness.plan', merge_order: [1475, 1476, 1479], holds: [{ issue: 1477, reason: 'waits for #1476' }], seat_limits: { worker: 3 } },
   };
   /** The parent list that carries the terminals of a board: the seats of the room. */
   const seatsOf = (board: BoardV1): BoardSeatsV1 => ({ ...SEATS, seats: board.execution.status === 'observed' ? board.execution.terminals.map(terminal => ({ ...terminal, seat: terminal.seat_status === 'observed' ? terminal.seat : '', parent: '1474' })) : [] });

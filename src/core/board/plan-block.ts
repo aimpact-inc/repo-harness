@@ -4,7 +4,7 @@
  * membership (sub-issues), dependencies (blocked-by) and tier (labels); the
  * block holds only what GitHub has no field for.
  */
-export const PLAN_BLOCK_PROTOCOL = 2 as const;
+export const PLAN_BLOCK_PROTOCOL = 3 as const;
 export const PLAN_BLOCK_KIND = 'repo-harness.plan' as const;
 /** The first line of a plan comment; `board.ts` and `board dispatch` read the newest one (`templates.md`, plan). */
 export const PLAN_COMMENT_HEADER = 'repo-harness plan' as const;
@@ -17,7 +17,7 @@ export interface PlanCommentFieldsV1 {
   readonly baseline: string;
   /** The plan comment URL that this plan replaces; null on the first plan of a thread. */
   readonly supersedes: string | null;
-  readonly block: PlanBlockV2;
+  readonly block: PlanBlockV3;
 }
 
 export interface PlanHoldV1 {
@@ -25,11 +25,14 @@ export interface PlanHoldV1 {
   readonly reason: string;
 }
 
-export interface PlanBlockV2 {
+/** One merge_order entry: one issue, or a bundle unit of two or more issues that one seat, one worktree and one pull request take. */
+export type PlanOrderEntryV3 = number | readonly number[];
+
+export interface PlanBlockV3 {
   readonly protocol: typeof PLAN_BLOCK_PROTOCOL;
   readonly kind: typeof PLAN_BLOCK_KIND;
-  /** Issue numbers in merge order. */
-  readonly merge_order: readonly number[];
+  /** The units in merge order. It is the only authority for bundle membership; an issue appears once. */
+  readonly merge_order: readonly PlanOrderEntryV3[];
   readonly holds: readonly PlanHoldV1[];
   /** The most worker seats that run at the same time. */
   readonly seat_limits: { readonly worker: number };
@@ -60,20 +63,25 @@ function issueNumber(value: unknown, label: string): number {
   return value as number;
 }
 
-function issueList(value: unknown, label: string): number[] {
-  if (!Array.isArray(value)) fail(`${label} is not an array`);
-  const numbers = value.map((entry, index) => issueNumber(entry, `${label}[${index}]`));
-  if (new Set(numbers).size !== numbers.length) fail(`${label} repeats an issue`);
-  return numbers;
+function mergeOrder(value: unknown): PlanOrderEntryV3[] {
+  if (!Array.isArray(value)) fail('merge_order is not an array');
+  const entries = value.map((entry, index): PlanOrderEntryV3 => {
+    if (!Array.isArray(entry)) return issueNumber(entry, `merge_order[${index}]`);
+    if (entry.length < 2) fail(`merge_order[${index}] is a unit of ${entry.length} issues; a unit has two or more`);
+    return Object.freeze(entry.map((member, position) => issueNumber(member, `merge_order[${index}][${position}]`)));
+  });
+  const issues = entries.flat();
+  if (new Set(issues).size !== issues.length) fail('merge_order repeats an issue');
+  return entries;
 }
 
 /** Protocol and kind are checked first, so an unknown block is refused before any field is read. */
-export function decodePlanBlockValue(value: unknown): PlanBlockV2 {
+export function decodePlanBlockValue(value: unknown): PlanBlockV3 {
   const head = typeof value === 'object' && value !== null ? value as Record<string, unknown> : {};
-  if (head.protocol !== PLAN_BLOCK_PROTOCOL) fail(`unsupported protocol ${JSON.stringify(head.protocol)}`);
+  if (head.protocol !== PLAN_BLOCK_PROTOCOL) fail(`unsupported protocol ${JSON.stringify(head.protocol)}; repost plan with rh board post plan`);
   if (head.kind !== PLAN_BLOCK_KIND) fail(`unsupported kind ${JSON.stringify(head.kind)}`);
   const block = record(value, ['protocol', 'kind', 'merge_order', 'holds', 'seat_limits'], 'plan block');
-  const mergeOrder = issueList(block.merge_order, 'merge_order');
+  const order = mergeOrder(block.merge_order);
   if (!Array.isArray(block.holds)) fail('holds is not an array');
   const holds = block.holds.map((entry, index) => {
     const hold = record(entry, ['issue', 'reason'], `holds[${index}]`);
@@ -85,14 +93,14 @@ export function decodePlanBlockValue(value: unknown): PlanBlockV2 {
   return Object.freeze({
     protocol: PLAN_BLOCK_PROTOCOL,
     kind: PLAN_BLOCK_KIND,
-    merge_order: Object.freeze(mergeOrder),
+    merge_order: Object.freeze(order),
     holds: Object.freeze(holds),
     seat_limits: Object.freeze({ worker: issueNumber(limits.worker, 'seat_limits.worker') }),
   });
 }
 
 /** The comment must hold exactly one fenced `json` block. */
-export function decodePlanBlock(commentBody: string): PlanBlockV2 {
+export function decodePlanBlock(commentBody: string): PlanBlockV3 {
   const blocks = [...commentBody.replace(/\r\n/gu, '\n').matchAll(FENCE)];
   if (blocks.length !== 1) fail(`the plan comment has ${blocks.length} fenced json blocks, expected 1`);
   let value: unknown;
@@ -104,9 +112,19 @@ export function decodePlanBlock(commentBody: string): PlanBlockV2 {
   return decodePlanBlockValue(value);
 }
 
+/** The units of the merge order: a single issue is a unit of one. */
+export function planOrderUnits(block: PlanBlockV3): readonly (readonly number[])[] {
+  return block.merge_order.map(entry => (typeof entry === 'number' ? [entry] : entry));
+}
+
+/** The issues of the merge order, in order. */
+export function planOrderIssues(block: PlanBlockV3): readonly number[] {
+  return block.merge_order.flat();
+}
+
 /** Every issue that the block names. */
-export function planIssues(block: PlanBlockV2): ReadonlySet<number> {
-  return new Set([...block.merge_order, ...block.holds.map(hold => hold.issue)]);
+export function planIssues(block: PlanBlockV3): ReadonlySet<number> {
+  return new Set([...planOrderIssues(block), ...block.holds.map(hold => hold.issue)]);
 }
 
 /** The plan comment of these fields: the header, the field lines, then exactly one fenced block. */

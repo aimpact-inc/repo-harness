@@ -37,7 +37,7 @@ function status(enforced = 'judgment'): RuleStatusV1 {
 function board(item: Partial<BoardItemV1> = {}, pr?: Partial<BoardPullRequestV1>): BoardV1 {
   return { ...recorded,
     plan: { status: 'observed', comment_url: `${URL}/issues/1474#issuecomment-3`, created_at: TIME, revision: 1,
-      block: { protocol: 2, kind: 'repo-harness.plan', merge_order: [1475], holds: [], seat_limits: { worker: 1 } } },
+      block: { protocol: 3, kind: 'repo-harness.plan', merge_order: [1475], holds: [], seat_limits: { worker: 1 } } },
     execution: { status: 'observed', terminals: [] },
     tooling: { hc: { status: 'observed', version: '0.1.30', min_version: '0.1.17' }, herdr_app: { status: 'not_pinned' } },
     items: [{ ...recorded.items[0]!, claim: { status: 'none' }, claim_status: { status_kind: 'none' }, pull_requests: pr ? [1491] : [], ...item }],
