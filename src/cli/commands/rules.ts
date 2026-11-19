@@ -354,7 +354,7 @@ export function buildRulesCommand(host: BoardHostPortsV1): Command {
     .option('--target <path>', 'checkout to read (default: the working directory)')
     .option('--json', 'print the status document instead of the text lines')
     .option('--tasks', 'read promotion task progress from GitHub')
-    .option('--proposals', 'read review findings and rule opportunity markers from GitHub (experimental)')
+    .option('--proposals', 'read review findings and proposals (experimental)')
     .option('--since <commit>', 'start the proposals scan at or after the ledger watermark')
     .option('--include-low', 'include P2 and P3 review findings in proposals status')
     .option('--include-bot', 'include bot review threads in proposals status')
