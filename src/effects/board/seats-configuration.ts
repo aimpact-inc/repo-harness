@@ -142,7 +142,7 @@ function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly str
   const runtime = RUNTIME_RANGES[seat.runtime];
   const range = SEAT_RANGES[id];
   if (!enabledRuntimes.includes(seat.runtime)) {
-    throw new SeatsConfigurationError('seat_runtime_not_enabled', `The ${id} seat runtime ${seat.runtime} is not enabled in Agent settings.`);
+    throw new SeatsConfigurationError('seat_runtime_not_enabled', `Fix the ${id} seat before saving. Its runtime ${seat.runtime} is disabled under Hosts.`);
   }
   checkEffort(`${id} seat`, seat, seat.runtime);
   const tool = seat.tools.find(item => !range.tools.includes(item));

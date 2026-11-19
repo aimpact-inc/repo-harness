@@ -28,7 +28,7 @@ export const SEATS_CONFIGURATION_FAILURES: Readonly<Record<SeatsConfigurationErr
   seats_config_migration_required: { status: 503, next_action: SEATS_CONFIG_UPDATE_ACTION },
   config_is_link: { status: 409, next_action: 'Edit the seats section in the file that ~/.repo-harness/config.json links to, or replace the link with a regular file.' },
   revision_conflict: { status: 409, next_action: 'Reload the settings, then apply your change again.' },
-  seat_runtime_not_enabled: { status: 422, next_action: 'Enable the runtime in Agent settings, or choose an enabled runtime.' },
+  seat_runtime_not_enabled: { status: 422, next_action: 'Change the named seat to an enabled runtime, or enable its runtime under Hosts and save.' },
   seat_model_invalid: { status: 422, next_action: 'Choose or type a model for the low-quota explorer, then save again.' },
   seat_effort_invalid: { status: 422, next_action: CHOOSE_FROM_RANGES },
   seat_tool_not_allowed: { status: 422, next_action: CHOOSE_FROM_RANGES },

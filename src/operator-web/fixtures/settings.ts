@@ -133,6 +133,16 @@ export function settingsStores(now: number, fixture: 'busy' | 'empty' | 'degrade
         if (change.uses.includes(use)) set.add(change.runtime); else set.delete(change.runtime);
       }
     }
+    const affected = SEAT_IDS.flatMap(id => {
+      const runtime = seats[id]?.runtime;
+      return runtime !== undefined && config.enabled.includes(runtime) && !enabled.has(runtime) ? [`${id} (${runtime})`] : [];
+    });
+    if (affected.length > 0) {
+      return refusal(422, {
+        code: 'runtime_in_use', message: `The runtime change would leave ${affected.join(', ')} without an enabled runtime.`,
+        next_action: 'Move the listed seats to an enabled runtime in Seats and save before turning off the runtime in Hosts.',
+      });
+    }
     const revision = nextRevision();
     const next = {
       enabled: [...enabled].sort(), uses: { docs: [...docs].sort(), review: [...review].sort() },
@@ -158,8 +168,8 @@ export function settingsStores(now: number, fixture: 'busy' | 'empty' | 'degrade
     });
     if (off !== undefined) {
       return Promise.resolve({ state: 'refused', status: 422, error: {
-        code: 'seat_runtime_not_enabled', message: `The ${off} seat runtime ${body.seats[off]!.runtime} is not enabled in Agent settings.`,
-        next_action: 'Enable the runtime in Agent settings, or choose an enabled runtime.',
+        code: 'seat_runtime_not_enabled', message: `Fix the ${off} seat before saving. Its runtime ${body.seats[off]!.runtime} is disabled under Hosts.`,
+        next_action: 'Change the named seat to an enabled runtime, or enable its runtime under Hosts and save.',
       } });
     }
     const revision = nextRevision();

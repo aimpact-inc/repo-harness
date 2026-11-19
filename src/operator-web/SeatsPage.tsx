@@ -231,7 +231,7 @@ function SeatCard({ seat, form, agents, settings, setup, locked, t }: {
       {isOptionalSeat(seat) && <OptionalSeatSwitch seat={seat} form={form} settings={settings} locked={locked} t={t} />}
 
       <Field label={t('seats.field.runtime')}>
-        {/* Only saved runtimes are choices, so a save cannot meet seat_runtime_not_enabled; each other runtime shows its Hosts switch. */}
+        {/* Choices use the saved Hosts settings. A stored seat can still use a disabled runtime. */}
         {ranges.runtimes.some(entry => entry.enabled) && (
           <Segmented label={t('seats.field.runtime')} disabled={locked} value={draft.runtime as SeatRuntime}
             options={ranges.runtimes.filter(entry => entry.enabled).map(entry => ({ value: entry.id, label: t(`seats.runtime.${entry.id}`) }))}

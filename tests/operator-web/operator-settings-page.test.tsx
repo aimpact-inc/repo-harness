@@ -529,6 +529,18 @@ describe('agents page seats section', () => {
     expect(read.state === 'ok' && read.settings.config).toMatchObject({ enabled: ['claude', 'codex', 'pi'], uses: { review: ['claude'] } });
   });
 
+  test('a Hosts save names the seats that still use the runtime being turned off', async () => {
+    const stores = settingsStores(NOW, 'busy');
+    await mount({ ...props(server(settings(), [])), readAgentsSettings: stores.agents.read,
+      writeAgentsSettings: stores.agents.write, readSeatsSettings: stores.seats.read });
+    await click(toggle('codex')!);
+    await click(saveButton());
+    const refusal = document.querySelector('[data-save-result="runtime_in_use"]');
+    expect(refusal?.textContent).toContain('gatekeeper-deep (codex)');
+    expect(refusal?.textContent).toContain('Move the listed seats to an enabled runtime');
+    expect(choices()).toEqual(['Claude Code', 'Codex']);
+  });
+
   test('a seat on a runtime that is not enabled keeps Save off and shows the Hosts switch in place of the choice', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     // degraded: agents.enabled is claude and gemini; the stored worker runs on codex.
@@ -538,7 +550,8 @@ describe('agents page seats section', () => {
     await click(pane('worker'));
     expect(choices()).toEqual(['Claude Code']);
     expect(inPlace('codex')!.getAttribute('aria-checked')).toBe('false');
-    await click(allow('gatekeeper'));
+    await click(buttonWithText('review seats'));
+    expect(document.querySelector('[data-save-blocked="gatekeeper-deep"]')?.textContent).toContain('Change its runtime or enable Codex under Hosts.');
     expect(seatsSave().disabled).toBe(true);
     await click(seatsSave());
     expect(posts).toHaveLength(0);

@@ -8,13 +8,17 @@ import { WriteReloadBanner } from './operator-write';
 import { saveNeedsReload, setDefaultDocs, setEnabled, setUse, type AgentsDraft, type AgentsSettingsForm, type SettingsSaveState } from './settings';
 import { StatusDot, type DotTone } from './ui';
 
-/** Copy for a refused save is keyed by its code; a code this bundle does not know shows the server's sentence, marked as such. */
+/** Localize known refusal text and keep details supplied by the server visible. */
 function refusalText(error: OperatorApiErrorV1, t: OperatorTranslate): { readonly message: string; readonly next_action: string; readonly localized: boolean } {
   const message = `settings.error.${error.code}.message`;
   const action = `settings.error.${error.code}.action`;
-  return isOperatorMessageKey(message) && isOperatorMessageKey(action)
-    ? { message: t(message), next_action: t(action), localized: true }
-    : { message: error.message, next_action: error.next_action, localized: false };
+  const knownMessage = isOperatorMessageKey(message);
+  const knownAction = isOperatorMessageKey(action);
+  return {
+    message: knownMessage ? t(message) : error.message,
+    next_action: knownAction ? t(action) : error.next_action,
+    localized: knownMessage && knownAction,
+  };
 }
 
 const INSTALL_TONE: Readonly<Record<AgentRuntimeSettingsEntryV1['installation']['kind'], DotTone>> = {

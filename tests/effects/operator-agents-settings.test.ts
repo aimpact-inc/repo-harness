@@ -483,6 +483,17 @@ describe('agent settings routes', () => {
     const get = await fetch(`${invalid.server.url}/api/v1/settings/agents`);
     expect([get.status, (await get.json()).error.code]).toEqual([503, 'config_invalid']);
 
+    for (const [seats, code] of [
+      [{}, 'seats_config_invalid'],
+      [{ ...DEFAULT_SEATS_CONFIG, routing: { mode: 'normal' } }, 'seats_config_migration_required'],
+    ] as const) {
+      const blocked = await startHarness({ agents: PANE_AGENTS, seats });
+      const before = (await settings(blocked)).config.revision;
+      const disable = await post(blocked, { expected_revision: before, changes: [{ runtime: 'codex', enabled: false, uses: [] }] });
+      expect([disable.status, (await disable.json()).error.code]).toEqual([503, code]);
+      expect(sha256(blocked.configPath)).toBe(before);
+    }
+
     const linked = await startHarness();
     const target = join(linked.home, 'elsewhere.json');
     writeFileSync(target, '{}\n');
@@ -494,6 +505,30 @@ describe('agent settings routes', () => {
     expect([refused.status, linkError.code]).toEqual([409, 'config_is_link']);
     expect(linkError.next_action).toContain('links to');
     expect(readFileSync(target, 'utf8')).toBe('{}\n');
+  });
+
+  test('Hosts refuses to disable Codex until all seats using it move', async () => {
+    const harness = await startHarness({ agents: PANE_AGENTS });
+    const { revision, ...section } = (await seats(harness)).config;
+    const original = readFileSync(harness.configPath, 'utf8');
+    const disable = [{ runtime: 'codex', enabled: false, uses: [] }];
+    const refused = await post(harness, { expected_revision: revision, changes: disable });
+    const { error } = await refused.json();
+    expect([refused.status, error?.code]).toEqual([422, 'runtime_in_use']);
+    const affected = ['worker', 'worker-deep', 'gatekeeper', 'gatekeeper-deep'] as const;
+    for (const id of affected) {
+      expect(error.message).toContain(`${id} (codex)`);
+    }
+    expect(readFileSync(harness.configPath, 'utf8')).toBe(original);
+
+    const moved = { ...section };
+    for (const id of affected) moved[id] = { ...section[id]!, runtime: 'claude', model: null };
+    const saved = await post(harness, { expected_revision: revision, seats: moved }, 'seats');
+    expect(saved.status).toBe(200);
+    const disabled = await post(harness, { expected_revision: (await saved.json()).config_revision, changes: disable });
+    expect(disabled.status).toBe(200);
+    expect((await settings(harness)).config.enabled).toEqual(['claude', 'pi']);
+    expect((await seats(harness)).config['gatekeeper-deep']?.runtime).toBe('claude');
   });
 
   test('disables a runtime that left the registry, and still refuses to enable it', async () => {
@@ -845,6 +880,25 @@ describe('seat settings routes', () => {
       expect([seat, response.status, (await response.json()).error.code]).toEqual([seat, 422, code]);
     }
     expect(readFileSync(harness.configPath, 'utf8')).toBe(original);
+  });
+
+  test('a credit-mode save names the stale seat and succeeds when that seat is repaired', async () => {
+    const worker = { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'claude', model: null };
+    const harness = await startHarness({ agents: { ...PANE_AGENTS, enabled: ['claude', 'pi'] }, seats: {
+      ...DEFAULT_SEATS_CONFIG, worker, 'worker-deep': worker, gatekeeper: { ...DEFAULT_SEATS_CONFIG.gatekeeper!, runtime: 'claude', model: null },
+    } });
+    const { revision, ...section } = (await seats(harness)).config;
+    const edited = { ...section, routing: { ...section.routing, codex_credit_mode: 'review' } };
+    const refused = await post(harness, { expected_revision: revision, seats: edited }, 'seats');
+    expect(refused.status).toBe(422);
+    expect((await refused.json()).error).toMatchObject({
+      code: 'seat_runtime_not_enabled', message: expect.stringContaining('Fix the gatekeeper-deep seat'),
+    });
+    expect((await seats(harness)).config.routing.codex_credit_mode).toBe('off');
+
+    const repaired = { ...edited, 'gatekeeper-deep': { ...section['gatekeeper-deep']!, runtime: 'claude', model: null } };
+    expect((await post(harness, { expected_revision: revision, seats: repaired }, 'seats')).status).toBe(200);
+    expect((await seats(harness)).config.routing.codex_credit_mode).toBe('review');
   });
 
   test('an advisor config with edit saves; an orchestrator config with edit stays refused', async () => {

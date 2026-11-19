@@ -7,6 +7,7 @@ import {
   type AgentRuntimesCacheV1,
   type AgentsSettingsV1,
 } from '../../core/board/agents-settings';
+import { SEATS_CONFIG_UPDATE_ACTION } from '../../core/board/seats-settings';
 import { isDocsHostRuntimeId } from '../../core/operator/docs-host-runtimes';
 import { isReviewRuntimeId, REVIEW_RUNTIME_IDS } from '../../core/review/review-runtimes';
 import {
@@ -30,6 +31,9 @@ export const AGENTS_CONFIGURATION_FAILURES: Readonly<Record<AgentsConfigurationE
   revision_conflict: { status: 409, next_action: 'Reload the settings, then apply your change again.' },
   runtime_unknown: { status: 422, next_action: 'Choose a runtime from the runtime list.' },
   runtime_not_enabled: { status: 422, next_action: 'Enable the runtime, or remove its uses.' },
+  runtime_in_use: { status: 422, next_action: 'Move the listed seats to an enabled runtime in Seats and save before turning off the runtime in Hosts.' },
+  seats_config_invalid: { status: 503, next_action: 'Fix the seats section of ~/.repo-harness/config.json, then reload the page.' },
+  seats_config_migration_required: { status: 503, next_action: SEATS_CONFIG_UPDATE_ACTION },
   use_not_supported: { status: 422, next_action: `Use ${REVIEW_RUNTIME_IDS.join(', ')} for review.` },
   docs_isolation_unverified: { status: 422, next_action: 'Give the docs use only to a runtime with verified docs isolation.' },
   default_docs_invalid: { status: 422, next_action: 'Choose a docs runtime as the default, or clear the default.' },
