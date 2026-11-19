@@ -11,22 +11,50 @@ import {
   CLAUDE_QUOTA_CAPTURE_PATH,
   decodeClaudeQuotaCapture,
   decodeCodexRateLimitsResult,
+  projectAgyQuota,
+  unknownAgyQuota,
   unknownQuotaReading,
   type ClaudeQuotaCapture,
   type QuotaReading,
   type QuotaReport,
 } from '../../core/board/quota';
+import { hasAgySeat } from '../../core/board/seat-routing';
+import { readSeatsConfiguration } from './seats-configuration';
 
 const CODEX_READ_TIMEOUT_MS = 20_000;
+const AGY_READ_TIMEOUT_MS = 20_000;
 
 /**
- * One report from the two provider sources, classified at the given exhaustion line. The seats section
- * (`seats.routing.exhausted_at_or_above_used`, #2909) is the one authority for that line: each caller reads
- * it once and passes the value, so the states and the routing thresholds of one command come from one revision.
+ * Classify the provider readings at the caller's exhaustion line. The configured seats decide whether to query agy.
  */
 export async function readQuotaReport(env: NodeJS.ProcessEnv, exhaustedAtOrAboveUsed: number): Promise<QuotaReport> {
-  const readings = [readClaudeQuota(env), await readCodexQuota(env, PACKAGE_VERSION)];
-  return buildQuotaReport(readings, Date.now(), exhaustedAtOrAboveUsed);
+  const { seats } = readSeatsConfiguration(env);
+  const claude = readClaudeQuota(env);
+  const [codex, agy] = await Promise.all([
+    readCodexQuota(env, PACKAGE_VERSION),
+    hasAgySeat(seats) ? readAgyQuota(env) : [],
+  ]);
+  return buildQuotaReport([claude, codex, ...agy], Date.now(), exhaustedAtOrAboveUsed);
+}
+
+/** Read both model groups through agy's own sign-in. Only quota windows cross this boundary. */
+export async function readAgyQuota(env: NodeJS.ProcessEnv): Promise<QuotaReading[]> {
+  const command = Bun.which('agy', { PATH: env.PATH ?? process.env.PATH });
+  if (command === null) return unknownAgyQuota('agy not on PATH');
+  try {
+    const { antigravityRuntime } = await import('@botiverse/oar/runtimes/antigravity');
+    const environment = Object.fromEntries(Object.entries(env).map(([key, value]) => [key, value ?? null] as const));
+    const snapshot = await antigravityRuntime.accountUsage({ kind: 'available', via: 'executable', command }, { env: environment, timeoutMs: AGY_READ_TIMEOUT_MS });
+    if (snapshot.kind === 'reauth_required') return unknownAgyQuota('agy is signed out');
+    if (snapshot.kind === 'unsupported') return unknownAgyQuota('agy account quota is unavailable');
+    return projectAgyQuota(snapshot.windows, new Date().toISOString());
+  } catch (error) {
+    // Use fixed reasons. An executable or library error can include private text.
+    const message = error instanceof Error ? error.message : '';
+    if (message === 'Antigravity account usage timed out') return unknownAgyQuota('agy quota read timed out after 20 s');
+    if (message === 'Antigravity account usage: agy -p /usage failed (exit 2)') return unknownAgyQuota('agy /usage exited 2 without account quota');
+    return unknownAgyQuota('agy quota reader failed');
+  }
 }
 
 function claudeCapturePath(env: NodeJS.ProcessEnv): string {

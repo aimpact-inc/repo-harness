@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -431,7 +431,44 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
 });
 `;
 
-function fixture(codexMode: string | null) {
+const FAKE_AGY = `#!${process.execPath}
+const args = process.argv.slice(2).join(' ');
+require('node:fs').appendFileSync(process.env.FAKE_AGY_LOG, args + '\\n');
+const mode = process.env.FAKE_AGY_MODE;
+const email = ['agy-private-fixture', 'example.invalid'].join('@');
+if (args === 'models') {
+  if (mode === 'signed-out') {
+    process.stderr.write('Please sign in ' + email);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+if (args !== '-p /usage --output-format json') process.exit(9);
+if (mode === 'api-key' || mode === 'error') {
+  process.stderr.write(email);
+  process.exit(mode === 'api-key' ? 2 : 3);
+}
+const hour = 3_600_000;
+const bucket = (window, remaining_fraction, hours) => ({
+  id: 'private-bucket-id', name: 'private-bucket-label', window, remaining_fraction,
+  reset_time: new Date(Date.now() + hours * hour).toISOString(),
+});
+const group = (name, remaining) => ({ name, description: email,
+  buckets: [bucket('weekly', remaining, 84), bucket('5h', 0.9, 2)],
+});
+const groups = [group('Claude and GPT models', 0.05), group('Gemini Models', 0.62)];
+if (mode === 'one') groups.shift();
+if (mode === 'three') groups.push(group('Third model group', 0.7));
+if (mode === 'unrecognized') groups[0].name = email;
+if (mode === 'missing-window') groups[0].buckets.pop();
+if (mode === 'gemini-exhausted') {
+  groups[0].buckets[0].remaining_fraction = 0.62;
+  groups[1].buckets[0].remaining_fraction = 0;
+}
+console.log(JSON.stringify({ status: 'SUCCESS', account: { email }, command: { name: 'usage', data: { groups } } }));
+`;
+
+function fixture(codexMode: string | null, agyMode: string | null = null) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'quota-')));
   fixtures.push(root);
   const home = join(root, 'home'), bin = join(root, 'bin'), log = join(root, 'codex.jsonl');
@@ -441,8 +478,14 @@ function fixture(codexMode: string | null) {
     writeFileSync(join(bin, 'codex'), FAKE_CODEX);
     chmodSync(join(bin, 'codex'), 0o755);
   }
-  const env = { HOME: home, PATH: bin, TMPDIR: tmpdir(), FAKE_CODEX_LOG: log, FAKE_CODEX_MODE: codexMode ?? '' };
-  return { home, env, log };
+  const agyLog = join(root, 'agy.jsonl');
+  if (agyMode !== null) {
+    writeFileSync(join(bin, 'agy'), FAKE_AGY);
+    chmodSync(join(bin, 'agy'), 0o755);
+  }
+  const env = { HOME: home, PATH: bin, TMPDIR: tmpdir(), BUN_INSTALL: join(home, '.bun'),
+    FAKE_CODEX_LOG: log, FAKE_CODEX_MODE: codexMode ?? '', FAKE_AGY_LOG: agyLog, FAKE_AGY_MODE: agyMode ?? '' };
+  return { home, env, log, agyLog };
 }
 
 function quota(args: string[], env: Record<string, string>) {
@@ -453,7 +496,74 @@ function seatsArgv(args: string[], env: Record<string, string>) {
   return spawnSync(process.execPath, [CLI, 'seats', 'argv', ...args], { cwd: ROOT, env, encoding: 'utf8', timeout: 40_000 });
 }
 
+function configureAgySeats(home: string): void {
+  const worker = { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'pi', model: 'magpie/agy-cli/gemini-4-neon', fleet: [] };
+  const workerDeep = { ...DEFAULT_SEATS_CONFIG['worker-deep'], runtime: 'pi', model: 'magpie/agy-cli/claude-opus-5-5', fleet: [] };
+  writeFileSync(join(home, '.repo-harness', 'config.json'), JSON.stringify({ seats: { ...DEFAULT_SEATS_CONFIG, worker,
+    'worker-deep': workerDeep, routing: { ...DEFAULT_SEATS_CONFIG.routing, simple_fast: ['worker', 'worker-deep'] },
+  } }));
+}
+
 describe('rh quota', () => {
+  test('reads both agy groups once through OAR and publishes only the fixed accounts and windows', () => {
+    const f = fixture(null, 'two');
+    configureAgySeats(f.home);
+    const result = quota(['--json'], f.env);
+    expect(result.status, result.stderr).toBe(0);
+    const report = decodeQuotaReport(JSON.parse(result.stdout));
+    expect(report.accounts.slice(2)).toMatchObject([
+      { account: 'agy_gemini', source: 'agy_account_usage', state: 'normal', reason: null, windows: [
+        { window: '5h', window_minutes: 300, used_percent: 10 }, { window: 'weekly', window_minutes: 10080, used_percent: 38 },
+      ] },
+      { account: 'agy_other', source: 'agy_account_usage', state: 'exhausted', reason: null, windows: [
+        { window: '5h', window_minutes: 300, used_percent: 10 }, { window: 'weekly', window_minutes: 10080, used_percent: 95 },
+      ] },
+    ]);
+    expect(readFileSync(f.agyLog, 'utf8').trim().split('\n')).toEqual(['models', '-p /usage --output-format json']);
+    const text = quota([], f.env);
+    expect(text.status, text.stderr).toBe(0);
+    expect(text.stdout).toContain('agy_gemini weekly: 62% left\nagy_other weekly: 5% left');
+    expect(text.stdout).toContain('route simple_fast: worker (pi magpie/agy-cli/gemini-4-neon high; agy_gemini normal)');
+    expect(text.stdout).toContain('skipped worker-deep: agy_other exhausted');
+    expect(result.stdout + result.stderr + text.stdout + text.stderr).not.toMatch(/agy-private-fixture|private-bucket|Gemini Models|Claude and GPT models/);
+  });
+
+  test.each([
+    [null, 'agy not on PATH'],
+    ['signed-out', 'agy is signed out'],
+    ['api-key', 'agy /usage exited 2 without account quota'],
+    ['error', 'agy quota reader failed'],
+    ['one', 'agy quota expected 2 model groups, found 1'],
+    ['three', 'agy quota expected 2 model groups, found 3'],
+    ['unrecognized', 'agy quota model groups are unrecognized'],
+    ['missing-window', 'agy quota expected a weekly and a 5h window for each model group'],
+  ])('agy mode %p reports unknown for both accounts with its reason and exits 0', (mode, reason) => {
+    const f = fixture(null, mode);
+    configureAgySeats(f.home);
+    const result = quota([], f.env);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.split('\n').filter(line => /^agy_\w+:/.test(line))).toEqual([
+      `agy_gemini: unknown | ${reason}`, `agy_other: unknown | ${reason}`,
+    ]);
+    expect(result.stdout + result.stderr).not.toContain('agy-private-fixture');
+    if (mode === 'signed-out') expect(readFileSync(f.agyLog, 'utf8').trim()).toBe('models');
+  });
+
+  test('routes past exhausted Gemini to a seat on the other agy group', () => {
+    const f = fixture(null, 'gemini-exhausted');
+    configureAgySeats(f.home);
+    const result = quota([], f.env);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('route simple_fast: worker-deep (pi seats.worker-deep.model high; agy_other normal); skipped worker: agy_gemini exhausted');
+  });
+
+  test('does not start agy when no configured seat uses it', () => {
+    const f = fixture(null, 'two');
+    const result = quota(['--json'], f.env);
+    expect(result.status, result.stderr).toBe(0);
+    expect(decodeQuotaReport(JSON.parse(result.stdout)).accounts.map(account => account.account)).toEqual(['claude', 'chatgpt']);
+    expect(existsSync(f.agyLog)).toBe(false);
+  });
   test('the stored exhaustion line decides whether a 95% window blocks the gatekeeper (#2909)', () => {
     const f = fixture('exhausted');
     // An absent seats section reads as the defaults, so the host line is 95: this window is exhausted and refuses.

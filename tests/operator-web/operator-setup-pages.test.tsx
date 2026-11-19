@@ -344,10 +344,10 @@ describe('Agents page quota section', () => {
   const account = (id: string) => document.querySelector<HTMLElement>(`[data-quota-account="${id}"]`)!;
   const inAccount = (id: string, selector: string) => account(id).querySelector(selector)?.textContent ?? '';
 
-  test('busy: each account shows its state, windows, plan and credits as the report gives them; only tight takes the attention style', async () => {
+  test('busy: each account shows its state and windows, and ChatGPT shows its plan and credits', async () => {
     await mount('#agents', props(readySetup(NOW), { readQuota: async () => ({ state: 'ok', settings: busyQuota(NOW) }) }));
     expect(all('[data-quota-account]').map(row => [row.getAttribute('data-quota-account'), row.getAttribute('data-quota-attention')]))
-      .toEqual([['claude', 'true'], ['chatgpt', 'false']]);
+      .toEqual([['claude', 'true'], ['chatgpt', 'false'], ['agy_gemini', 'false'], ['agy_other', 'true']]);
     expect(account('claude').querySelector('[data-quota-state]')!.getAttribute('data-quota-state')).toBe('tight');
     expect(account('claude').querySelector('[data-quota-state]')!.className).toContain('text-kumo-warning');
     expect(inAccount('claude', '[data-quota-window="seven_day"] [data-quota-used]')).toBe('88% used');
@@ -360,6 +360,12 @@ describe('Agents page quota section', () => {
     expect(inAccount('chatgpt', '[data-quota-window="primary"] [data-quota-state]')).toBe('Surplus');
     expect(inAccount('chatgpt', '[data-quota-codex]')).toBe('Plan plus · Credits 12.50');
     expect(account('chatgpt').querySelector('[data-quota-reason]')).toBeNull();
+    expect(account('agy_gemini').textContent).toContain('Antigravity Gemini');
+    expect(inAccount('agy_gemini', '[data-quota-window="5h"] [data-quota-used]')).toBe('10% used');
+    expect(inAccount('agy_gemini', '[data-quota-window="weekly"] [data-quota-used]')).toBe('38% used');
+    expect(account('agy_other').textContent).toContain('Antigravity Claude and GPT');
+    expect(account('agy_other').querySelector('[data-quota-state]')!.getAttribute('data-quota-state')).toBe('exhausted');
+    expect(account('agy_other').querySelector('[data-quota-codex]')).toBeNull();
   });
 
   test('degraded: unknown and exhausted take the attention style; an unknown account and an absent window show their reasons', async () => {
@@ -391,7 +397,7 @@ describe('Agents page quota section', () => {
     expect(text('[data-quota-unavailable]')).toContain('Reason: the operator service returned no quota report. Refresh to read again.');
     await act(async () => document.querySelector<HTMLButtonElement>('[data-quota-refresh]')!.click());
     expect(reads).toBe(2);
-    expect(all('[data-quota-account]')).toHaveLength(2);
+    expect(all('[data-quota-account]')).toHaveLength(4);
     await act(async () => navLink('skills').click());
     await act(async () => navLink('agents').click());
     expect(reads).toBe(3);

@@ -1035,7 +1035,12 @@ test('board read: every sub-issue page of the parent reaches the board and the m
   const release = comment(`repo-harness issue claim status\nClaim: ${claim.url}\nStatus: released`, '2026-11-02T22:30:00Z');
   const coordinator = (released: boolean) => {
     const { parent } = readParent(replayInput(mergeReplay({ parent: (data) => { if (released) data.repository.issue.comments.nodes.push(release); } }, { comments: { older: [[claim]] } })));
-    const quota = { claude: { state: 'normal', remaining: 80, mode: 'normal' }, chatgpt: { state: 'normal', remaining: 30, mode: 'normal', credits: 'off' } } as const;
+    const quota = {
+      claude: { state: 'normal', remaining: 80, mode: 'normal' },
+      chatgpt: { state: 'normal', remaining: 30, mode: 'normal', credits: 'off' },
+      agy_gemini: { state: 'unknown', remaining: null },
+      agy_other: { state: 'unknown', remaining: null },
+    } as const;
     return planDispatch({ seats: DEFAULT_SEATS_CONFIG, quota, terminals: [], parent }).coordinator;
   };
   expect([coordinator(false), coordinator(true)]).toEqual([claim.url, null]);

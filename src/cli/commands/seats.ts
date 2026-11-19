@@ -5,8 +5,8 @@ import { fileURLToPath } from 'url';
 import { CLAUDE_BUILTIN_AGENT_TYPES, SeatPaneNameError, buildSeatLaunch, seatPaneName, seatTabName, type SeatLaunchV1 } from '../../core/board/seat-launch';
 import { LAUNCH_SEAT_IDS, SeatsConfigMigrationRequiredError, decodeSeatsConfig, seatsConfigInvalidMessage, isReviewSeat, isWorkerSeat, unavailablePiSeat, type LaunchSeatId, type SeatConfigV1, type SeatsConfigV1 } from '../../core/board/seats-settings';
 import { claudeReserved, deepGatekeeperRepeatsGatekeeper, effectiveGatekeeper, effectiveSeatConfig, seatAccount, seatAccountQuotas, seatState, type SeatRouteV1 } from '../../core/board/seat-routing';
-import { classifyQuotaReading, type QuotaAccount, type QuotaReading } from '../../core/board/quota';
-import { readClaudeQuota, readCodexQuota } from '../../effects/board/quota';
+import { AGY_QUOTA_ACCOUNTS, classifyQuotaReading, type QuotaAccount, type QuotaReading } from '../../core/board/quota';
+import { readAgyQuota, readClaudeQuota, readCodexQuota } from '../../effects/board/quota';
 import { version as PACKAGE_VERSION } from '../../../package.json';
 import { readGlobalConfiguration } from '../../effects/configuration/global-configuration';
 import { resolveGitCommonDirectory } from '../../effects/git/common-directory';
@@ -165,7 +165,12 @@ async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, configur
   const read = async (account: QuotaAccount | null) => {
     if (account !== null && !done.has(account)) {
       done.add(account);
-      readings.push(account === 'claude' ? readClaudeQuota(env) : await readCodexQuota(env, PACKAGE_VERSION));
+      if (account === 'claude') readings.push(readClaudeQuota(env));
+      else if (account === 'chatgpt') readings.push(await readCodexQuota(env, PACKAGE_VERSION));
+      else {
+        for (const agyAccount of AGY_QUOTA_ACCOUNTS) done.add(agyAccount);
+        readings.push(...await readAgyQuota(env));
+      }
     }
     return seatAccountQuotas(readings.map(reading => classifyQuotaReading(reading, Date.now(), seats.routing.exhausted_at_or_above_used)), seats.routing);
   };
@@ -203,7 +208,7 @@ async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, configur
   const seat = gatekeeper?.id === 'gatekeeper-fallback' ? gatekeeper.seat : effectiveSeatConfig(id, seats, quota)!;
   const unavailable = unavailablePiSeat(seat, seats.routing);
   if (unavailable !== null) throw new SeatsCommandError('seat_provider_unavailable', `The ${id} seat cannot launch: ${unavailable}. See the quota routes.`);
-  return { seat, modeKnown: account === null || quota[account].mode !== 'unknown', claudeSaving: quota.claude.mode === 'saving' };
+  return { seat, modeKnown: account === null || quota[account].remaining !== null, claudeSaving: quota.claude.mode === 'saving' };
 }
 
 type SeatLaunchResult = SeatLaunchV1 & {
