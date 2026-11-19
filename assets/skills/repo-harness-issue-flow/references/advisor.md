@@ -117,7 +117,9 @@ shipped, when a batch parent closes, and when the owner asks.
    issues write one file. Two issues with one design are one issue: propose
    the fold.
 3. Put a train in the set when nothing outside the repository and no owner
-   hold blocks it. List the other trains with their blocker.
+   hold blocks it. List the other trains with their blocker. A train that
+   changes a migration or a ledger path enters the set only after its batch
+   parent closes.
 4. Name the critical path and what blocks it now. Name the seats that the
    scarce account must serve first.
 5. Give the table: train, result, order, tier and route, state. Give an

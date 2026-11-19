@@ -157,6 +157,14 @@ typecheck and the affected test files, and say so. This record and CI on
 the head are the review evidence. Reviewers read them and do not rerun a
 passing check (`acceptor.md` §2.1).
 
+A High-tier change that can delete or overwrite a user file (I2) needs one
+more step before PUSHED. For each step that removes, restores or overwrites
+a path, check five user states of the target: absent; edited; recreated with
+the same bytes; restored from a backup; replaced by a link. Give each state
+one test case or one line that says why the step refuses. Put the table in
+the PR body. Equal bytes do not prove that rh wrote a file; only an identity
+recorded at write time does.
+
 ## 6. Open the PR
 
 - Title: `<type>(<scope>): <outcome> (#<issue>)`.
