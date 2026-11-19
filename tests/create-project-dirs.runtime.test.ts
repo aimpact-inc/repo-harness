@@ -538,7 +538,7 @@ describe("create-project-dirs runtime smoke", () => {
     const installerPath = join(ROOT, "scripts/install-agent-fleet.sh");
     const home = join(cwd, "fakehome");
     const repoDir = join(cwd, "repo");
-    const managedAgents = ["explorer", "deep-reasoner", "fast-worker", "gatekeeper", "root-cause-prover", "harness-evaluator"];
+    const managedAgents = ["deep-reasoner", "explorer", "harness-evaluator"];
     try {
       mkdirSync(join(repoDir, ".ai", "harness"), { recursive: true });
       mkdirSync(home, { recursive: true });
@@ -574,10 +574,8 @@ describe("create-project-dirs runtime smoke", () => {
       );
 
       expect(res.status).toBe(0);
-      for (const agent of managedAgents) {
-        expect(existsSync(join(home, ".claude", "agents", `${agent}.md`))).toBe(true);
-        expect(existsSync(join(home, ".codex", "agents", `${agent}.toml`))).toBe(true);
-      }
+      expect(readdirSync(join(home, ".claude", "agents")).sort()).toEqual(managedAgents.map(agent => `${agent}.md`));
+      expect(readdirSync(join(home, ".codex", "agents")).sort()).toEqual(managedAgents.map(agent => `${agent}.toml`));
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
