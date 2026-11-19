@@ -1,6 +1,10 @@
-import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { sha256Hex, sha256Prefixed } from '../../core/evidence/sha256';
+import { isRecord } from '../../core/evidence/is-record';
+import { publishFileByRename, retryWindowsSharingRace, syncDirectoryDurably } from '../atomic-append';
+import { ensureSelfIgnoringDirectory } from '../self-ignoring-directory';
 import { planFile, type FilePlan, type PlannedFragment } from '../../core/host-config/plan';
 import { fileFormatOf, fragmentFormat, type FragmentFormat } from '../../core/host-config/registry';
 import { isMarkedBlockSelector } from '../../core/host-config/marked-block';
@@ -64,6 +68,7 @@ import {
   observeEntryIdentity,
   observePathEntry,
   pathRecordEntry,
+  preimagePath,
   publishPathEntry,
   removePathEntry,
   restorePreimage,
@@ -1038,12 +1043,45 @@ export function planPathRevert(key: string, record: PathRecord): HostConfigRever
   return record.kind === 'replaced' ? 'restored' : 'removed';
 }
 
+interface RetiredPathWrite {
+  readonly record: string;
+  readonly transaction: string | null;
+  readonly restoredIdentity: string | null;
+}
+
+function retiredPathWritePath(paths: HostConfigPaths, key: string, transaction?: string): string {
+  return transaction ? `${preimagePath(transaction, key)}.retirement` : join(paths.root, 'retired-path-writes', sha256Hex(key));
+}
+
+function readRetiredPathWrite(paths: HostConfigPaths, key: string, record: PathRecord, transaction?: string): RetiredPathWrite | null {
+  const path = retiredPathWritePath(paths, key, transaction);
+  const bad = () => new HostConfigError('host_config_invalid_state', `invalid retirement record: ${path}`);
+  if (lstatSync(dirname(path), { throwIfNoEntry: false })?.isSymbolicLink()) throw bad();
+  const stat = lstatSync(path, { throwIfNoEntry: false });
+  if (!stat) return null;
+  if (!stat.isFile()) throw bad();
+  const value: unknown = JSON.parse(readFileSync(path, 'utf8'));
+  if (!isRecord(value) || typeof value.record !== 'string'
+    || !(value.transaction === null || typeof value.transaction === 'string')
+    || !(value.restoredIdentity === null || typeof value.restoredIdentity === 'string')) throw bad();
+  if (value.record !== sha256Hex(JSON.stringify(record))) return null;
+  return { record: value.record, transaction: value.transaction, restoredIdentity: value.restoredIdentity };
+}
+
+function retirementLanded(key: string, record: PathRecord, write: RetiredPathWrite): boolean {
+  if (record.kind === 'created') return !lstatSync(key, { throwIfNoEntry: false });
+  if (record.kind !== 'replaced' || write.restoredIdentity === null) return false;
+  return pathRecordIsCurrent(key, { ...record, identity: write.restoredIdentity, committed: { type: 'file', sha256: record.backup! } });
+}
+
 /** Describe a whole-path revert, including the proof and recovery copy when the file stays. */
 export function planPathRevertEntry(paths: HostConfigPaths, key: string, record: PathRecord, retire = false): HostConfigRevertEntry {
   const vault = record.backup ? vaultPath(paths, record.backup) : undefined;
   if (retire && record.link_target !== undefined) {
     return { path: key, action: 'kept_edited', code: 'host_config_retired_link', vault };
   }
+  const pending = retire && record.kind !== 'user_managed' ? readRetiredPathWrite(paths, key, record) : null;
+  if (pending && retirementLanded(key, record, pending)) return { path: key, action: 'released' };
   const action = planPathRevert(key, record);
   if (action === 'released' && retire && record.kind === 'replaced') {
     return { path: key, action: 'kept_edited', code: 'host_config_entry_absent', vault };
@@ -1070,7 +1108,7 @@ export interface RevertStep {
 }
 
 /**
- * The order of every revert (P4, #2854). One durable ledger write takes out
+ * The order of a revert without a path journal (P4, #2854). One durable ledger write takes out
  * each claim whose write deletes an entry or only takes out rh's added text
  * (#3227), and each release, before the first
  * write: a failure or a kill then leaves an entry with no claim, never a claim
@@ -1097,8 +1135,65 @@ export function retireThenDestroy(paths: HostConfigPaths, ledger: HostConfigLedg
   return state;
 }
 
+function syncRetirementFile(path: string): void {
+  // Windows FlushFileBuffers needs a handle opened for write access.
+  const access = process.platform === 'win32' ? constants.O_RDWR : constants.O_RDONLY | constants.O_NOFOLLOW;
+  const fd = openSync(path, access);
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+  syncDirectoryDurably(dirname(path));
+}
+
+function persistRetiredPathWrite(path: string, write: RetiredPathWrite): void {
+  if (lstatSync(dirname(path), { throwIfNoEntry: false })?.isSymbolicLink()) {
+    throw new HostConfigError('host_config_invalid_state', `retirement journal directory is a link: ${dirname(path)}`);
+  }
+  ensureSelfIgnoringDirectory(dirname(path));
+  publishFileByRename(path, Buffer.from(JSON.stringify(write)), `${path}.${randomUUID()}.tmp`);
+  syncDirectoryDurably(dirname(dirname(path)));
+}
+
+/** Keep the live claim until its one filesystem operation lands. The journal binds a restored entry by identity. */
+function writeRetiredPath(paths: HostConfigPaths, key: string, record: PathRecord, options: HostConfigPathOptions): void {
+  const assertCurrent = () => {
+    if (hostPathKey(paths, key) !== key || !pathRecordIsCurrent(key, record)) {
+      throw new HostConfigError('host_config_target_changed', `the target changed before retirement: ${key}`);
+    }
+  };
+  assertCurrent();
+  if (options.transaction) {
+    keepPreimage(options.transaction, key);
+    const copy = preimagePath(options.transaction, key);
+    syncRetirementFile(copy);
+    syncDirectoryDurably(options.transaction);
+  }
+  const staged = record.kind === 'replaced'
+    ? stagePathEntry(key, { type: 'file', bytes: readVault(paths, record.backup!), mode: statSync(key).mode }, options.stage?.(key)).staged
+    : null;
+  const restoredIdentity = staged ? observeEntryIdentity(staged) : null;
+  try {
+    if (staged && restoredIdentity === null) throw new HostConfigError('host_config_target_changed', `the restore staging file vanished: ${key}`);
+    if (staged) syncRetirementFile(staged);
+    const write: RetiredPathWrite = { record: sha256Hex(JSON.stringify(record)), transaction: options.transaction ?? null, restoredIdentity };
+    if (options.transaction) persistRetiredPathWrite(retiredPathWritePath(paths, key, options.transaction), write);
+    persistRetiredPathWrite(retiredPathWritePath(paths, key), write);
+    if (staged) {
+      if (!retirementLanded(staged, record, write)) throw new HostConfigError('host_config_target_changed', `the restore staging file changed: ${key}`);
+      retryWindowsSharingRace(() => {
+        assertCurrent();
+        renameSync(staged, key);
+      });
+    } else {
+      assertCurrent();
+      removeTarget(key as HostPath, { existed: true, sha256: (record.committed as Extract<PathCommitted, { type: 'file' }>).sha256 });
+    }
+    syncDirectoryDurably(dirname(key));
+  } finally {
+    if (staged && restoredIdentity !== null && observeEntryIdentity(staged) === restoredIdentity) discardStagedEntry(staged);
+  }
+}
+
 function revertWholePaths(paths: HostConfigPaths, only: readonly string[], options: HostConfigPathOptions & { readonly retire?: boolean }): HostConfigRevertEntry[] {
-  const ledger = readLedger(paths);
+  let ledger = readLedger(paths);
   const report: HostConfigRevertEntry[] = [];
   /** The entries of the dropped records: a created directory goes only with an entry inside it. */
   const dropped: string[] = [];
@@ -1117,15 +1212,27 @@ function revertWholePaths(paths: HostConfigPaths, only: readonly string[], optio
       const { [key]: _gone, ...records } = state.paths;
       return { ...state, paths: records, retired: retire(state.retired, record.backup ? [record.backup] : []) };
     };
-    if (action === 'released' || releaseEdited) { steps.push({ kind: 'release', commit }); continue; }
+    if (options.retire) {
+      const changesEntry = action === 'removed' || action === 'restored';
+      const pending = record.kind !== 'user_managed' ? readRetiredPathWrite(paths, key, record) : null;
+      if (changesEntry) writeRetiredPath(paths, key, record, options);
+      else if (action === 'released' && pending) {
+        if (options.transaction) {
+          // The filesystem write landed in an earlier run. A later rollback must keep this release.
+          persistRetiredPathWrite(retiredPathWritePath(paths, key, options.transaction), pending);
+        }
+        if (!retirementLanded(key, record, pending)) {
+          throw new HostConfigError('host_config_target_changed', `the target changed before releasing its retirement record: ${key}`);
+        }
+      }
+      ledger = commit(ledger);
+      writeLedger(paths, ledger);
+      if (changesEntry || pending) rmSync(retiredPathWritePath(paths, key), { force: true });
+      continue;
+    }
+    if (action === 'released') { steps.push({ kind: 'release', commit }); continue; }
     steps.push({ kind: action === 'removed' ? 'delete' : 'restore', commit, write: () => {
-      if (options.retire && !pathRecordIsCurrent(key, record)) {
-        throw new HostConfigError('host_config_target_changed', `the target changed before retirement: ${key}`);
-      }
       if (options.transaction) keepPreimage(options.transaction, entry);
-      if (options.retire && !pathRecordIsCurrent(key, record)) {
-        throw new HostConfigError('host_config_target_changed', `the target changed before retirement: ${key}`);
-      }
       if (record.kind === 'replaced') {
         const committed = record.committed as Extract<PathCommitted, { type: 'file' }>;
         replaceTarget(entry as HostPath, readVault(paths, record.backup!), { existed: true, sha256: committed.sha256 }, options.stage?.(entry));
@@ -1560,7 +1667,7 @@ export function rollbackHostConfigTransaction(paths: HostConfigPaths, snapshot: 
     if (created && all.some((entry) => fragmentFormat(fileFormat, entry.selector)?.empty(content) === true)) removeTarget(path, current);
     else if (content !== decode(bytes, path)) replaceTarget(path, Buffer.from(content, 'utf8'), current);
   }
-  const pathRecords = rollbackWholePaths(paths, before, now, transaction, unresolved, options.stage);
+  const pathRecords = rollbackWholePaths(paths, before, now, transaction, unresolved, releasedMaterial, options.stage);
   const kept = removeCreatedDirectories(now.directories.filter((directory) => !before.directories.includes(directory)));
   const restored: HostConfigLedger = { ...before, files, fragments: before.fragments.filter((entry) => !releasedFiles.has(entry.file)),
     retired: [...before.retired.filter((entry) => !releasedMaterial.has(entry.sha256)), ...now.retired.filter((entry) => releasedMaterial.has(entry.sha256))], paths: pathRecords, directories: [...before.directories, ...kept], tools: rollbackTools(before.tools, now.tools) };
@@ -1590,7 +1697,7 @@ function withoutIdentities(ledger: HostConfigLedger): HostConfigLedger {
  * preimage when it refreshed or removed rh's entry. An entry that is no longer
  * what the transaction recorded stays with that record, and is returned.
  */
-function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, now: HostConfigLedger, transaction: string, unresolved: string[], stage?: (target: string) => string): Record<string, PathRecord> {
+function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, now: HostConfigLedger, transaction: string, unresolved: string[], releasedMaterial: Set<Sha256>, stage?: (target: string) => string): Record<string, PathRecord> {
   const records: Record<string, PathRecord> = { ...before.paths };
   for (const key of new Set([...Object.keys(before.paths), ...Object.keys(now.paths)])) {
     const old = before.paths[key];
@@ -1598,6 +1705,23 @@ function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, no
     // A linked record acts on the file that its link names, also for the transaction's preimage.
     const at = pathRecordEntry(key, (current ?? old)!);
     const preimage = hasPreimage(transaction, at);
+    const retirement = old?.committed.type === 'file' && old.kind !== 'user_managed' && old.link_target === undefined
+      ? readRetiredPathWrite(paths, key, old, transaction) : null;
+    if (old && retirement) {
+      if (retirement.transaction !== transaction) {
+        if (!current) {
+          delete records[key];
+          if (old.backup) releasedMaterial.add(old.backup);
+        }
+      } else if (preimage && hostPathKey(paths, key) === key && retirementLanded(key, old, retirement)) {
+        const copy = observeFile(preimagePath(transaction, key)).observation;
+        if (copy.existed && copy.type === 'file' && old.committed.type === 'file' && copy.sha256 === old.committed.sha256) {
+          restorePreimage(transaction, key, stage?.(key));
+          records[key] = restoredRecord(old, key);
+        } else unresolved.push(key);
+      } else if (!pathRecordIsCurrent(key, old)) unresolved.push(key);
+      continue;
+    }
     const marker = replacedPathAdoption(transaction, key);
     const adopted = lstatSync(marker, { throwIfNoEntry: false })?.isFile() ? readFileSync(marker, 'utf8') : null;
     // The imported record alone changed no live entry. A later force that backed up the live file changes the record.

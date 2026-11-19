@@ -115,7 +115,9 @@ function readUninstallState(opts: UninstallOptions) {
   const projected = opts.dryRun && installStatePendingMigration(env) ? planInstallStateMigration(env) : null;
   const state = projected?.state ?? readInstallState(env);
   // A dry run reads the ledger as the schema move would leave it.
-  const records = projected ? projected.records : !state ? {} : opts.dryRun ? partitionPathRecords(env, projectedLedgerPaths(hostConfigPaths(env))).records : readPathRecords(env);
+  const records = projected ? projected.records : !state ? {} : opts.dryRun
+    ? partitionPathRecords(env, projectedLedgerPaths(hostConfigPaths(env), retiredAgentRecordCheck(env))).records
+    : readPathRecords(env);
   // The Pi package entries that the ledger records under owner `pi`, or that the migration would record as their current text.
   const piPackages: ReadonlyMap<string, string> = opts.target !== 'both' ? new Map()
     : projected ? new Map(projected.piPackages.flatMap((source) => { const text = piPackageEntry(source, env); return text === null ? [] : [[source, text] as const]; }))

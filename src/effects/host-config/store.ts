@@ -302,16 +302,21 @@ function olderLedger(value: unknown): HostConfigLedger | null {
   return null;
 }
 
+type LegacyIdentityExclusion = (key: string, record: HostConfigLedger['paths'][string]) => boolean;
+
 /**
  * An older ledger as the schema move leaves it; null for any other value. The move of the live ledger, and its preview,
- * adopt each `created` or `replaced` record whose entry holds what rh recorded: it gets that entry's identity, and any other
- * record stays without one (JD 7001045792). A transaction snapshot (`adopt` false) keeps its records as they are, so a
- * rollback never opens the adoption again.
+ * adopt each eligible claim whose entry holds what rh recorded (JD 7001045792). A transaction snapshot (`adopt` false)
+ * keeps its records as they are, so a rollback never opens the adoption again.
  */
-function movedLedger(value: unknown, adopt: boolean): HostConfigLedger | null {
+function movedLedger(value: unknown, adopt: boolean, exclude?: LegacyIdentityExclusion): HostConfigLedger | null {
   const older = olderLedger(value);
   if (older === null || !adopt) return older;
   const paths = Object.fromEntries(Object.entries(older.paths).map(([key, record]) => {
+    if (exclude?.(key, record)) {
+      const { identity: _identity, ...unproved } = record;
+      return [key, unproved];
+    }
     const identity = record.kind === 'user_managed' || 'proof' in record.committed ? null : adoptedIdentity(key, record);
     return [key, identity === null ? record : { ...record, identity }];
   }));
@@ -340,13 +345,13 @@ export function parseLedger(bytes: Buffer, label: string): HostConfigLedger {
  * still proves gets its identity (`movedLedger`). A mutating entry runs it
  * under the runtime lock; a later run finds protocol 5.
  */
-export function migrateLedgerSchema(paths: HostConfigPaths): void {
+export function migrateLedgerSchema(paths: HostConfigPaths, exclude?: LegacyIdentityExclusion): void {
   const { observation, bytes } = observeFile(paths.ledger);
   if (!observation.existed) return;
   if (bytes === null) throw invalidState(`the ledger is not a regular file: ${paths.ledger}`);
   const value = parseJson(bytes, paths.ledger);
   if (!isObject(value) || typeof value.protocol !== 'number' || !RETIRED_PROTOCOLS[value.protocol]) return;
-  const moved = movedLedger(value, true);
+  const moved = movedLedger(value, true, exclude);
   if (!moved) throw invalidState(`the protocol ${String(value.protocol)} ledger has an invalid shape: ${paths.ledger}`);
   writeLedger(paths, moved);
 }
@@ -355,11 +360,11 @@ export function migrateLedgerSchema(paths: HostConfigPaths): void {
  * The ledger as the schema move would leave it, read without moving it. Only a
  * dry run or a preview reads it; every other reader takes `readLedger`.
  */
-export function readProjectedLedger(paths: HostConfigPaths): HostConfigLedger {
+export function readProjectedLedger(paths: HostConfigPaths, exclude?: LegacyIdentityExclusion): HostConfigLedger {
   const { observation, bytes } = observeFile(paths.ledger);
   if (!observation.existed) return EMPTY_LEDGER;
   if (bytes === null) throw invalidState(`the ledger is not a regular file: ${paths.ledger}`);
-  return movedLedger(parseJson(bytes, paths.ledger), true) ?? parseLedger(bytes, paths.ledger);
+  return movedLedger(parseJson(bytes, paths.ledger), true, exclude) ?? parseLedger(bytes, paths.ledger);
 }
 
 /**
@@ -372,8 +377,8 @@ export function parseSnapshotLedger(bytes: Buffer, label: string): HostConfigLed
 }
 
 /** The path records of `readProjectedLedger`. */
-export function projectedLedgerPaths(paths: HostConfigPaths): HostConfigLedger['paths'] {
-  return readProjectedLedger(paths).paths;
+export function projectedLedgerPaths(paths: HostConfigPaths, exclude?: LegacyIdentityExclusion): HostConfigLedger['paths'] {
+  return readProjectedLedger(paths, exclude).paths;
 }
 
 export function writeLedger(paths: HostConfigPaths, ledger: HostConfigLedger): void {

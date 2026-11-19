@@ -10,7 +10,7 @@ import { startFakeHcRelease, writeFakeHc } from '../helpers/fake-hc';
 import { HC_MIN_VERSION } from '../../src/core/terminal/herdr-pin';
 import { installStateFixturePath, recordPluginSelection, seedGlobalPackageFixture } from '../helpers/install-ownership';
 import { buildManagedHooks } from '../../src/cli/installer/managed-entries';
-import { beginInstallHostTransaction, commitInstallHostTransaction, readInstallState, versions, rollbackInstallHostTransaction } from '../../src/cli/installer/install-profile';
+import { beginInstallHostTransaction, commitInstallHostTransaction, readInstallState, retiredAgentRecordCheck, versions, rollbackInstallHostTransaction } from '../../src/cli/installer/install-profile';
 import { planInstallStateMigration } from '../../src/cli/installer/install-state-migration';
 import { runUserUninstall } from '../../src/cli/installer/uninstall';
 import {
@@ -32,7 +32,7 @@ import { EMPTY_LEDGER } from '../../src/core/host-config/types';
 import { globalRuntimeScope, runtimeTransactionRoot } from '../../src/effects/locking/runtime-transaction-lock';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
 import { pathRecordKey, readPathRecords } from '../../src/effects/host-config/path-records';
-import { hostConfigPaths, readLedger, vaultPath, writeLedger } from '../../src/effects/host-config/store';
+import { hostConfigPaths, projectedLedgerPaths, readLedger, vaultPath, writeLedger } from '../../src/effects/host-config/store';
 import { observeEntryIdentity } from '../../src/effects/host-config/whole-path';
 import { acquireExclusiveDirectoryLock } from '../../src/effects/locking/exclusive-directory-lock';
 
@@ -736,6 +736,7 @@ describe('candidate-bound global runtime reconciliation', () => {
       writeFileSync(managed, previousBytes);
       writeFileSync(retiredUser, retiredUserBytes);
       writeFileSync(explorer, explorerBytes);
+      const managedIdentity = observeEntryIdentity(managed);
       const legacyManifest = [{ path: managed, authority: 'repo-harness-install-transaction', owner: 'core', type: 'managed-file',
         removal: 'managed-surfaces-only', managed_marker: 'transaction-created-file', content_hash: sha256Prefixed(previousBytes), symlink_target: null }];
       const fields = { ...versions([]), selection: [], applied_at: '2026-09-04T00:00:00.000Z' };
@@ -771,13 +772,149 @@ describe('candidate-bound global runtime reconciliation', () => {
         expect(existsSync(fleetReceipt)).toBe(false);
         expect(readFileSync(retiredUser)).toEqual(retiredUserBytes);
         expect(readFileSync(explorer)).toEqual(explorerBytes);
-        if (snapshot === 'previous') expect(readFileSync(managed)).toEqual(previousBytes);
-        else expect(existsSync(managed)).toBe(false);
+        expect([readFileSync(managed), observeEntryIdentity(managed)]).toEqual([previousBytes, managedIdentity]);
+        if (snapshot === 'current' && run === 0) {
+          expect(String(result.stderr)).toContain(`${managed}: rh recorded no identity for it`);
+          expect(String(result.stderr)).toContain('Ownership record released.');
+        }
         const records = readPathRecords(env);
         expect(records[pathRecordKey(env, explorer)]?.kind).toBe('user_managed');
         expect(records).not.toHaveProperty(pathRecordKey(env, managed));
         expect(records).not.toHaveProperty(pathRecordKey(env, retiredUser));
       }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test.each([2, 3, 4])('candidate preserves identical-byte retired files and the vault from a protocol %i ledger', (protocol) => {
+    const root = mkdtempSync(join(tmpdir(), 'repo-harness-retired-legacy-ledger-'));
+    const home = join(root, 'home');
+    const candidate = fixtureCandidate(root);
+    const env = { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun') };
+    try {
+      writeCoreOnlyInstallState(home);
+      const agents = join(home, '.codex', 'agents');
+      const created = join(agents, 'fast-worker.toml');
+      const replaced = join(agents, 'deep-worker.toml');
+      const userCopy = Buffer.from('User copy of the old fleet bytes\n');
+      const original = Buffer.from('Original user agent\r\n');
+      mkdirSync(agents, { recursive: true });
+      writeFileSync(replaced, original);
+      openHostConfigGate({ env }).writePaths([created, replaced].map(path => ({
+        path, owner: 'core', replace: path === replaced, entry: { type: 'file', bytes: userCopy },
+      })));
+      const paths = hostConfigPaths(env);
+      const ledger = readLedger(paths);
+      const records = Object.fromEntries(Object.entries(ledger.paths).map(([key, { identity: _identity, ...record }]) => [key, record]));
+      const { retired, recovery, tools, ...legacy } = ledger;
+      const { backup } = records[replaced]!;
+      const vault = vaultPath(paths, backup!);
+      writeFileSync(paths.ledger, JSON.stringify({ ...legacy, protocol, paths: records,
+        ...(protocol >= 3 ? { retired, recovery } : {}), ...(protocol === 4 ? { tools } : {}) }));
+      for (const path of [created, replaced]) {
+        rmSync(path);
+        writeFileSync(path, userCopy);
+      }
+      const copyIdentities = [created, replaced].map(observeEntryIdentity);
+      const projected = projectedLedgerPaths(paths, retiredAgentRecordCheck(env));
+      expect([projected[created]?.identity, projected[replaced]?.identity]).toEqual([undefined, undefined]);
+      const preview = runUserUninstall({ env, target: 'both', dryRun: true });
+      expect(preview.items.filter(item => [created, replaced].includes(item.path))).toEqual([
+        expect.objectContaining({ path: created, action: 'unresolved', reason: expect.stringContaining('rh recorded no identity') }),
+        expect.objectContaining({ path: replaced, action: 'unresolved', reason: expect.stringContaining(vault) }),
+      ]);
+
+      const transaction = beginInstallHostTransaction([paths.ledger], env);
+      const result = runCandidateChild({
+        protocol: 3, parent_token: 'b'.repeat(64), candidate, cwd: root, target: 'codex', sync_skill: false,
+        host_adapters: true, external_skills: false, obsidian_skills: false, codegraph: false,
+        transaction_id: sha256Prefixed(transaction.backup_root), transaction_backup_root: transaction.backup_root,
+      }, env);
+      expect(result.status, String(result.stderr)).toBe(0);
+      commitInstallHostTransaction(transaction);
+      expect(String(result.stderr)).toContain(`${created}: rh recorded no identity for it`);
+      expect(String(result.stderr)).toContain(`${replaced}: rh recorded no identity for it`);
+      expect(String(result.stderr)).toContain(vault);
+      expect([created, replaced].map(path => readFileSync(path))).toEqual([userCopy, userCopy]);
+      expect([created, replaced].map(observeEntryIdentity)).toEqual(copyIdentities);
+      const remaining = readPathRecords(env);
+      expect(Object.hasOwn(remaining, created)).toBe(false);
+      expect(remaining[replaced]).toEqual(records[replaced]);
+      expect(readFileSync(vault)).toEqual(original);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test.each(['unlink', 'restore', 'restore followed by a user copy'] as const)('the next update settles retirement stopped after the first %s', (operation) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'repo-harness-retirement-interrupt-')));
+    const home = join(root, 'home');
+    const candidate = fixtureCandidate(root);
+    const env = { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun') };
+    try {
+      writeCoreOnlyInstallState(home);
+      seedGlobalPackageFixture(env, { sourceRoot: candidate.root });
+      const agents = join(home, '.codex', 'agents');
+      const first = join(agents, 'fast-worker.toml');
+      const second = join(agents, 'deep-worker.toml');
+      const leased = join(agents, 'gatekeeper.toml');
+      const managed = Buffer.from('Managed agent data\n');
+      const original = Buffer.from('Original user bytes\r\n');
+      const vaultOnly = Buffer.from('Another user agent\n');
+      mkdirSync(agents, { recursive: true });
+      if (operation !== 'unlink') writeFileSync(first, original);
+      writeFileSync(second, original);
+      writeFileSync(leased, vaultOnly);
+      openHostConfigGate({ env }).writePaths([first, second, leased].map(path => ({
+        path, owner: 'core', replace: path !== first || operation !== 'unlink', entry: { type: 'file', bytes: managed },
+      })));
+      writeFileSync(leased, 'Edited while installed\n');
+      const paths = hostConfigPaths(env);
+      const before = readLedger(paths).paths;
+      const vault = vaultPath(paths, before[second]!.backup!);
+      const retainedVault = vaultPath(paths, before[leased]!.backup!);
+      const source = join(candidate.root, 'src/effects/host-config/gate.ts');
+      const unmodified = readFileSync(source, 'utf8');
+      const anchor = '    syncDirectoryDurably(dirname(key));\n  } finally {';
+      expect(unmodified).toContain(anchor);
+      writeFileSync(source, unmodified.replace(anchor, `    process.kill(process.pid, 'SIGKILL');\n${anchor}`));
+      const update = () => spawnSync(process.execPath, [join(candidate.root, 'src/cli/index.ts'), 'update', '--no-cli',
+        '--target', 'codex', '--no-sync-skill', '--no-external-skills', '--no-codegraph', '--json'], { cwd: root, env, encoding: 'utf8' });
+      const stopped = update();
+      expect(stopped.signal, stopped.stderr).toBe('SIGKILL');
+      const interrupted = readLedger(paths);
+      expect([interrupted.paths[first], interrupted.paths[second], interrupted.paths[leased]]).toEqual([before[first], before[second], before[leased]]);
+      if (operation === 'unlink') expect(existsSync(first)).toBe(false);
+      else expect(readFileSync(first)).toEqual(original);
+      expect(readFileSync(second)).toEqual(managed);
+      expect(readFileSync(vault)).toEqual(original);
+      expect(readFileSync(retainedVault)).toEqual(vaultOnly);
+      expect(interrupted.retired).toEqual([]);
+
+      const userReplacedRestore = operation === 'restore followed by a user copy';
+      if (userReplacedRestore) {
+        rmSync(first);
+        writeFileSync(first, original);
+      }
+      const firstIdentity = observeEntryIdentity(first);
+      writeFileSync(source, unmodified);
+      const retried = update();
+      expect(retried.status, retried.stderr + retried.stdout).toBe(0);
+      const finished = readLedger(paths);
+      if (operation === 'unlink') expect(existsSync(first)).toBe(false);
+      else expect(readFileSync(first)).toEqual(original);
+      expect(readFileSync(second)).toEqual(original);
+      expect(readFileSync(leased, 'utf8')).toBe('Edited while installed\n');
+      expect(observeEntryIdentity(first)).toBe(firstIdentity);
+      expect([Object.hasOwn(finished.paths, first), Object.hasOwn(finished.paths, second)]).toEqual([userReplacedRestore, false]);
+      if (userReplacedRestore) {
+        expect(finished.paths[first]).toEqual(before[first]);
+        expect(retried.stdout).toContain(vault);
+      }
+      expect(finished.paths[leased]).toEqual(before[leased]);
+      expect(finished.retired).toContainEqual(expect.objectContaining({ sha256: before[second]!.backup }));
+      expect(readFileSync(retainedVault)).toEqual(vaultOnly);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

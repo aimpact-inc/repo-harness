@@ -5,7 +5,7 @@ import { hostConfigPaths, migrateLedgerSchema, projectedLedgerPaths, repositoryL
 import { partitionPathRecords, pathRecordHost, pathRecordIsCurrent, pathRecordKey, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
 import { adoptedIdentity } from '../../effects/host-config/whole-path';
 import { migrateCodexConfigRecords } from './codex-config-migration';
-import { agentFleetTargetPaths, fleetReceiptPath, isLegacyOwnershipSurface, retiredAgentFleetTargets, validPiPackage, writeState, type InstallState } from './install-profile';
+import { agentFleetTargetPaths, fleetReceiptPath, isLegacyOwnershipSurface, retiredAgentFleetTargets, retiredAgentRecordCheck, validPiPackage, writeState, type InstallState } from './install-profile';
 import { enabledPlugins, installProfileStatePath, InstallStateError, invalidOwnership, parseProtocol3InstallState, parseProtocol4InstallState, readRawInstallState, type Protocol3Snapshot, type RecordedInstallSnapshot } from './install-state';
 import { adoptPiPackage, piPackageEntryPresent } from './pi-package';
 import { migrateJsonConfigRecords } from './json-config-migration';
@@ -45,7 +45,7 @@ function readFleetReceipt(env: NodeJS.ProcessEnv): ReadonlyMap<string, string> |
 }
 
 /** One manifest surface as a path record, or as a Pi package source; null for a section record or a marker that never proved currency. */
-function convertSurface(env: NodeJS.ProcessEnv, surface: Record<string, unknown>, statePath: string):
+function convertSurface(env: NodeJS.ProcessEnv, surface: Record<string, unknown>, statePath: string, isRetired: ReturnType<typeof retiredAgentRecordCheck>):
   { readonly key: string; readonly record: PathRecord } | { readonly pi: string } | null {
   const path = surface.path as string;
   if (surface.type === 'pi-package') return { pi: path };
@@ -62,8 +62,8 @@ function convertSurface(env: NodeJS.ProcessEnv, surface: Record<string, unknown>
   if (host === null) throw invalidOwnership(statePath);
   const key = pathRecordKey(env, path);
   const record: PathRecord = { owner: surface.owner as string, host, kind: 'created', baseline: { state: 'unknown' }, committed };
-  // The one-shot adoption of the protocol 5 ledger move (JD 7001045792); a Herdr skill keeps its marker proof.
-  const identity = 'proof' in committed ? null : adoptedIdentity(key, record);
+  // Retired records need identity measured at the original write. The manifest records only bytes.
+  const identity = isRetired(key, record) || 'proof' in committed ? null : adoptedIdentity(key, record);
   return { key, record: identity === null ? record : { ...record, identity } };
 }
 
@@ -89,7 +89,7 @@ function checkedPiSources(env: NodeJS.ProcessEnv, snapshot: RecordedInstallSnaps
  */
 export function migrateInstallState(env: NodeJS.ProcessEnv): void {
   // The ledger gains its `paths` map before any gate or path-record write reads it; each repository ledger moves with it.
-  migrateLedgerSchema(hostConfigPaths(env));
+  migrateLedgerSchema(hostConfigPaths(env), retiredAgentRecordCheck(env));
   for (const ledger of repositoryLedgers(env)) migrateLedgerSchema(ledger);
   if (parseProtocol3InstallState(readRawInstallState(env), installProfileStatePath(env)) !== null) {
     // The section records of the host files leave with the manifest, so their migrations read it first.
@@ -120,23 +120,32 @@ export function planInstallStateMigration(env: NodeJS.ProcessEnv): InstallStateM
   const protocol4 = parseProtocol4InstallState(raw, statePath);
   const receipt = readFleetReceipt(env);
   if (legacy === null && protocol4 === null && receipt === null) return null;
-  const records: Record<string, PathRecord> = Object.fromEntries(Object.entries(partitionPathRecords(env, projectedLedgerPaths(hostConfigPaths(env))).records)
-    .filter(([, record]) => legacy === null || record.kind === 'user_managed'));
+  const isRetired = retiredAgentRecordCheck(env);
+  const records: Record<string, PathRecord> = Object.fromEntries(Object.entries(partitionPathRecords(env, projectedLedgerPaths(hostConfigPaths(env), isRetired)).records)
+    .filter(([key, record]) => legacy === null || record.kind === 'user_managed' || (record.kind === 'replaced' && isRetired(key, record))));
   const pi: string[] = [];
   if (legacy) {
     for (const surface of checkedManifest(env, legacy.current, statePath)) {
-      const converted = convertSurface(env, surface, statePath);
+      const converted = convertSurface(env, surface, statePath, isRetired);
       if (converted === null) continue;
       if ('pi' in converted) { pi.push(converted.pi); continue; }
       const existing = records[converted.key];
-      if (existing && (existing.kind === 'user_managed' || pathRecordIsCurrent(converted.key, existing))) continue;
+      if (existing && (existing.kind !== 'created' || pathRecordIsCurrent(converted.key, existing))) continue;
       records[converted.key] = converted.record;
     }
   }
   for (const [path, sha256] of receipt ?? []) {
     const host = pathRecordHost(env, path);
     if (host === null) throw invalidOwnership(statePath);
-    records[pathRecordKey(env, path)] = { owner: 'core', host, kind: 'user_managed', baseline: { state: 'unknown' }, committed: { type: 'file', sha256 } };
+    const key = pathRecordKey(env, path);
+    const existing = records[key];
+    if (existing?.kind === 'replaced' && isRetired(key, existing)) {
+      // Honor the user's claim without discarding the ledger's only reference to their earlier file.
+      const { identity: _identity, ...unproved } = existing;
+      records[key] = unproved;
+    } else {
+      records[key] = { owner: 'core', host, kind: 'user_managed', baseline: { state: 'unknown' }, committed: { type: 'file', sha256 } };
+    }
   }
   // Only the current snapshot claims an active entry: a previous snapshot is the state before a switch, and Pi may have been switched off since.
   // The previous snapshot is still checked, so an invalid one stops the move.
