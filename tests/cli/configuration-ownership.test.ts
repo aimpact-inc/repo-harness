@@ -116,6 +116,8 @@ test('the JSON migration adopts a tagged entry with the old writer shape, keeps 
     // Text inside a quoted path proves only as the path of an existing file with the released name.
     'a hook Bun path segment': ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].hooks[0].command = data.hooks.PreToolUse[0].hooks[0].command.replace(/ exec '([^']*)'/, ` exec '$1 --token=${INLINE_TOKEN}'`); }],
     'a status line bundle path segment': ['statusLine', (data) => { data.statusLine.command = data.statusLine.command.replace("/dist/hook-entry.js'", `/${INLINE_TOKEN}/dist/hook-entry.js'`); }],
+    // A path segment longer than a file name can be: its lookup fails, and the error would name the path.
+    'an overlong Bun path segment': ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].hooks[0].command = data.hooks.PreToolUse[0].hooks[0].command.replace(/ exec '[^']*'/, ` exec '/opt/${INLINE_TOKEN.repeat(10)}/bun'`); }],
     'a manifest hash mismatch': ['hooks.SessionStart[default], hooks.PreToolUse[edit], hooks.PreToolUse[subagent], hooks.PreToolUse[bash], hooks.UserPromptSubmit[inbox], hooks.Stop[default]', (data) => { data.hooks.PreToolUse[0].hooks[0].timeout = 99; }, true],
   };
   for (const [name, [kept, edit, hashed]] of Object.entries(rows)) withClaudeHome((home, settings) => {
@@ -141,7 +143,8 @@ test('the JSON migration adopts a tagged entry with the old writer shape, keeps 
       expect(JSON.parse(readFileSync(settings, 'utf8')).hooks.PreToolUse[0], name).toEqual(hooks.PreToolUse![0]);
       return;
     }
-    // An unproved fragment gets a record with no text: ledger.json holds no copy of the edited value.
+    // An unproved fragment gets a record with no text: neither the uninstall preview nor ledger.json holds a copy of the edited value.
+    expect(runUserUninstall({ target: 'claude', env, dryRun: true }).lines.join('\n').includes(INLINE_TOKEN), name).toBe(false);
     migrateJsonConfigRecords(env);
     const records = openHostConfigGate({ env }).recorded(settings);
     for (const selector of kept.split(', ')) {
