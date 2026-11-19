@@ -50,7 +50,7 @@ function resolveTargets(spec: AdapterTargetSpec) {
   const t = getTarget(spec);
   if (!t) {
     throw new Error(
-      `rh install: unknown --target "${spec}" (known: ${listTargetIds().join(', ')}, both)`,
+      `rh install: unknown --target "${spec}" (known: ${listTargetIds().join(', ')}, both, antigravity)`,
     );
   }
   return [t];

@@ -100,6 +100,8 @@ export function buildHookExecCommand(env: NodeJS.ProcessEnv = process.env): stri
   return `exec ${shellQuote(bun)} ${shellQuote(entry)}`;
 }
 
+const ANTIGRAVITY_HOOK_TIMEOUT_SECONDS = 30;
+
 interface AntigravityHooks {
   SessionStart: HookCommand[];
   PreToolUse: (HookEntry & { matcher: string })[];
@@ -111,7 +113,9 @@ export function buildAntigravityHooks(env: NodeJS.ProcessEnv): AntigravityHooks 
   const { bun, entry } = resolveHookRuntime(env);
   const hooks: AntigravityHooks = { SessionStart: [], PreToolUse: [], Stop: [] };
   for (const { event, routeId } of routesForHost('antigravity')) {
-    const handler: HookCommand = { type: 'command', command: renderAntigravityHookCommand(bun, entry, event, routeId), timeout: 30 };
+    const handler: HookCommand = {
+      type: 'command', command: renderAntigravityHookCommand(bun, entry, event, routeId), timeout: ANTIGRAVITY_HOOK_TIMEOUT_SECONDS,
+    };
     if (event === 'PreToolUse' && (routeId === 'bash' || routeId === 'edit')) {
       hooks.PreToolUse.push({ matcher: antigravityHookMatcher(routeId), hooks: [handler] });
     } else if (event === 'SessionStart' || event === 'Stop') {
