@@ -280,8 +280,8 @@ function writeFileUnderTargetLock(
 interface RunWriter {
   /** Create the directory at the absolute `target` and its missing ancestors. */
   readonly mkdir: (target: string) => void;
-  /** Write what `decide` returns under the target lock; null when the decision under the lock skips. */
-  readonly write: (repoRoot: string, path: string, decide: (targetPath: string) => FileWriteDecision) => { readonly content: string | Buffer } | null;
+  /** Write what `decide` returns at the repo-relative `path` under the target lock; null when the decision under the lock skips. */
+  readonly write: (path: string, decide: (targetPath: string) => FileWriteDecision) => { readonly content: string | Buffer } | null;
 }
 
 /** One applying run; a dry run has none. `transactionDir` (repo-relative) keeps the files that a `remove` takes away. */
@@ -290,10 +290,12 @@ interface OperationRun {
   readonly transactionDir?: string;
 }
 
-const DIRECT_WRITER: RunWriter = {
-  mkdir: (target) => { mkdirSync(target, { recursive: true }); },
-  write: writeFileUnderTargetLock,
-};
+function directWriter(repoRoot: string): RunWriter {
+  return {
+    mkdir: (target) => { mkdirSync(target, { recursive: true }); },
+    write: (path, decide) => writeFileUnderTargetLock(repoRoot, path, decide),
+  };
+}
 
 /**
  * The ledger writer (#2903): each file goes through the repository gate, which
@@ -301,15 +303,17 @@ const DIRECT_WRITER: RunWriter = {
  * that it creates. The gate needs paths in the real worktree root. The target
  * lock stays around each write, so another rh writer of the file waits.
  */
-function recordedWriter(repository: HostConfigRepository, run: RepositoryWriteRun): RunWriter {
+function recordedWriter(repoRoot: string, repository: HostConfigRepository, run: RepositoryWriteRun): RunWriter {
+  // The plan's root can reach the worktree through a link (`/tmp` on macOS); the gate admits only real worktree paths.
+  const inWorktree = (absolute: string) => join(repository.worktree, relative(resolve(repoRoot), absolute));
   return {
-    mkdir: (target) => { run.gate.createDirectories([target]); },
-    write: (repoRoot, path, decide) => {
+    mkdir: (target) => { run.gate.createDirectories([inWorktree(target)]); },
+    write: (path, decide) => {
       const resolved = resolveInsideRepo(repoRoot, path);
       if (!resolved.ok || !resolved.path) throw new Error(resolved.error ?? "invalid path");
       const symlinkError = assertNoSymlinkInPath(repoRoot, path);
       if (symlinkError) throw new Error(symlinkError);
-      const targetPath = join(repository.worktree, relative(resolve(repoRoot), resolved.path));
+      const targetPath = inWorktree(resolved.path);
       // The target lock lives in the parent, so the gate creates and records the parent first.
       if (!existsSync(dirname(targetPath))) run.gate.createDirectories([dirname(targetPath)]);
       return withTargetLock(targetPath, () => {
@@ -381,7 +385,7 @@ function applyFileWriteOperation(
   if (decision.kind === "skip") return skipped;
   if (!run) return { id: operation.id, kind: operation.kind, path: operation.path, status: "planned" };
   try {
-    const write = run.writer.write(repoRoot, operation.path, decide);
+    const write = run.writer.write(operation.path, decide);
     if (!write) return skipped;
     return { id: operation.id, kind: operation.kind, path: operation.path, status: "applied", contentHash: contentHash(write.content) };
   } catch (error) {
@@ -590,7 +594,7 @@ export function adoptionTarget(plan: AdoptionPlan, record: AdoptionRecord, env: 
   const top = runGit(["-C", root, "rev-parse", "--show-toplevel"], { env: gitEnv, inheritEnv: false });
   if (top.ok && top.stdout.trim()) {
     const worktree = top.stdout.trim();
-    return { kind: "refused", reason: `${root} is inside the Git worktree ${worktree}; rh init writes only at a worktree root. Run: rh init --repo ${worktree}` };
+    return { kind: "refused", reason: `${root} is inside the Git worktree ${worktree}; rh init writes only at a worktree root. Run: rh init --repo ${worktree}, or run git init in ${root} to make it a repository` };
   }
   const changed = plan.operations.filter(changesExistingEntry).map((operation) => operation.path);
   if (changed.length) {
@@ -644,7 +648,7 @@ function applyInOrder(plan: AdoptionPlan, run: OperationRun): ApplyOperationResu
  * rollback, since its worktree goes after the run.
  */
 function applyDirect(plan: AdoptionPlan, record: AdoptionRecord): ApplyAdoptionPlanResult {
-  const results = applyInOrder(plan, { writer: DIRECT_WRITER });
+  const results = applyInOrder(plan, { writer: directWriter(plan.repoRoot) });
   const ok = results.every((result) => result.status !== "failed");
   if (ok || record === "commit") return { ok, dryRun: false, results };
   const rollback = rollbackLocal(resolve(plan.repoRoot), results);
@@ -667,7 +671,7 @@ function applyRecorded(plan: AdoptionPlan, planned: readonly ApplyOperationResul
   catch (error) { return refusedResult(false, planned, "transaction-dir", `rh cannot keep its run directory ${transactionDir}: ${errorMessage(error)}`); }
   const transaction = join(repository.worktree, transactionDir);
   const run = openRepositoryWriteRun(env, repository, transaction);
-  const results = applyInOrder(plan, { writer: recordedWriter(repository, run), transactionDir });
+  const results = applyInOrder(plan, { writer: recordedWriter(repoRoot, repository, run), transactionDir });
   const ok = results.every((result) => result.status !== "failed");
   const restore = `rh config restore --repo ${shellQuote(repository.worktree)}`;
   const recorded = results.some((result) => result.status === "applied" && ["mkdir", "writeFile", "appendManagedBlock"].includes(result.kind));

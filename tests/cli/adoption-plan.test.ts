@@ -761,6 +761,11 @@ describe("canonical adoption plan", () => {
       expect(runAdoptionPlan(sub).output).toContain(refusal);
       expect(runAdoptionApply(sub).output).toContain(refusal);
       expect(readdirSync(join(repo, "sub"))).toEqual([]);
+      // A root reached through a link records the real worktree paths.
+      const link = join(plain, "link");
+      symlinkSync(repo, link);
+      expect(applyAdoptionPlan(planAdoption({ repoRoot: link, mode: "minimal", apply: true }), LEDGER).ok).toBe(true);
+      rmSync(link);
 
       // Outside Git, a change to an existing file has no undo, so the plan stops before any write.
       writeFileSync(join(plain, ".gitignore"), "node_modules\n");
