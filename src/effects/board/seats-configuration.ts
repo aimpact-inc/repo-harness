@@ -36,6 +36,7 @@ import { EFFORT_LEVELS } from '../terminal/task-role-profiles';
 import { GlobalConfigurationError, globalConfigurationPath, mutateGlobalConfiguration, readGlobalConfiguration } from '../configuration/global-configuration';
 import { withExclusiveDirectoryLock } from '../locking/exclusive-directory-lock';
 import { publishFileByRename } from '../atomic-append';
+import { runProcess } from '../process-runner';
 
 export type SeatsConfigurationErrorCode =
   | 'busy'
@@ -186,15 +187,15 @@ async function probeSeatCatalog(id: typeof CATALOG_RUNTIMES[number], command: st
   }
 }
 
-async function collectSeatPoolProbes(): Promise<readonly SeatPoolProbe[]> {
+function collectSeatPoolProbes(): readonly SeatPoolProbe[] {
   const pi = emptySeatPoolProbe('pi', Bun.which('pi') === null ? 'not_installed' : 'available');
   const commands = CATALOG_RUNTIMES.map(id => Bun.which(id) ?? '');
   if (commands.every(command => command === '')) return [...CATALOG_RUNTIMES.map(id => emptySeatPoolProbe(id, 'not_installed')), pi];
   const cwd = mkdtempSync(join(tmpdir(), 'rh-seat-pool-'));
   try {
-    const { runSetupProcess } = await import('../setup/collector');
-    const answer = await runSetupProcess([fileURLToPath(import.meta.url), ...commands], {
-      cwd, env: process.env, timeout_ms: SEAT_POOL_CHILD_MS, signal: new AbortController().signal, service: 'seat-pool-probe',
+    const answer = runProcess(process.execPath, [fileURLToPath(import.meta.url), ...commands], {
+      cwd, timeoutMs: SEAT_POOL_CHILD_MS, processGroup: true,
+      env: { OAR_CHILD_STDERR: 'ignore' },
     });
     if (answer.ok) {
       const rows: unknown = JSON.parse(answer.stdout);
@@ -264,9 +265,9 @@ function storeSeatPool(report: SeatPoolV1): void {
 }
 
 /** The cache only serves settings. A request for the pool always observes the environment again. */
-export async function refreshSeatPool(): Promise<{ readonly report: SeatPoolV1; readonly stored: boolean }> {
+export function refreshSeatPool(): { readonly report: SeatPoolV1; readonly stored: boolean } {
   const { seats } = readSeatsConfiguration();
-  const probes = await collectSeatPoolProbes();
+  const probes = collectSeatPoolProbes();
   const report = buildSeatPool(seats, probes, new Date().toISOString());
   try {
     storeSeatPool(report);

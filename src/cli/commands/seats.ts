@@ -393,9 +393,9 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
   seats.command('pool')
     .description('Check which recommended seat models are available in this environment')
     .option('--json', 'Print the seat pools and exclusions as JSON')
-    .action(async ({ json }: { json?: boolean }) => {
+    .action(({ json }: { json?: boolean }) => {
       try {
-        const { report, stored } = await refreshSeatPool();
+        const { report, stored } = refreshSeatPool();
         process.stdout.write(`${json === true ? JSON.stringify(report, null, 2) : formatSeatPool(report)}\n`);
         if (!stored) process.stderr.write('seat_pool_cache_write_failed: Could not save ~/.repo-harness/seats/pool.json for Settings.\n');
       } catch (error) {
