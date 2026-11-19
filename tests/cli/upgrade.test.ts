@@ -1219,7 +1219,7 @@ describe('upgrade operator decisions', () => {
     expect(stale.items[0]?.reason).toContain('decision is stale');
   }, false));
 
-  test('remove deletes a regular file through the project backup manifest and init rollback restores it', () => sandbox((opts) => {
+  test('remove deletes a regular file that the operator decided to remove', () => sandbox((opts) => {
     const path = join(opts.cwd, library);
     put(path, libraryBytes());
     const decided = runUpgradeDecide({ ...opts, decision: 'remove', paths: [library] });
