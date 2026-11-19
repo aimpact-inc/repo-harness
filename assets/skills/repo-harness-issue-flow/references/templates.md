@@ -167,7 +167,19 @@ Run on `<sha>` (<os>, <runtime version>):
 
 ## Risk and rollback
 Risk: <what could break first>. Rollback: `git revert <squash-commit>`.
+
+## Rule opportunity
+Rule-opportunity: <theme-key> | example: <path>:<line> | check: <architecture | type | check | test> — <one sentence>
 ````
+
+`## Rule opportunity` is optional and experimental (#3257). Omit the
+section when there is none. Write one marker line for each defect class
+that a rule could stop. `<theme-key>` has the form of `Mistake pattern`:
+lowercase words joined by `-`; use a key that `rh rules status` prints
+when one fits. `example: <path>:<line>` names the place of the mistake.
+`check` names the highest ladder level that works: `architecture`, `type`,
+`check` (a check whose error names the fix) or `test`. Do not default to
+`check`. No verdict, check or merge condition reads the section.
 
 Attach the changed slice when this PR changes `.archcontext/model/**` or a
 capability entrypoint. Produce it as `worker.md` §6.1 says: apply the

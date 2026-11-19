@@ -332,6 +332,37 @@ refuses a protocol 1 receipt. A Claude turn has an
 unobserved model, so its value is `unknown`. This does not block the
 merge.
 
+### 5.1 Rule opportunity (optional, experimental)
+
+A round may name a defect class that a rule could stop, in one line per
+class:
+
+```text
+Rule-opportunity: <theme-key> | finding: <finding-id> | check: <architecture | type | check | test> — <one sentence>
+```
+
+Put each marker line after the paragraph of `summary`. The marker lines
+are part of that field, so the receipt schema does not change. Never put a
+marker in the `evidence` or the `fix` of a finding: those fields go into
+the inline thread and the acceptance record.
+
+Write a marker when you judge that the defect class can come back and
+that one level of the enforcement ladder can stop it
+(`docs/reference-configs/agentic-development-flow.md`, Lessons Retro).
+
+- `<theme-key>` has the form of `Mistake pattern`: lowercase words joined
+  by `-`. Use a key that `rh rules status` prints when one fits.
+- `<finding-id>` is the id of a finding of the same receipt.
+- `check` names the highest ladder level that works: `architecture` (one
+  owner or one shape makes the mistake impossible), `type` (a type cannot
+  express it), `check` (a check whose error names the fix) or `test`.
+  Do not default to `check`.
+- The sentence after `—` names the mistake class.
+
+The marker is optional and experimental (#3257). It blocks nothing: no
+verdict, check or merge condition reads it. A receipt without a marker
+stays valid.
+
 ## 6. Resolve threads
 
 A thread that `review publish` opened is resolved only by a later round
