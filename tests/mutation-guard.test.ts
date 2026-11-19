@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
 import { recordInstallOwnership, seedGlobalPackageFixture } from './helpers/install-ownership';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { isAbsolute, join } from 'path';
 import { execFileSync, spawnSync } from 'child_process';
@@ -419,7 +419,7 @@ describe('safety hook: Bash host route', () => {
       writeFileSync(ledger, recorded);
       // #3266: a record proves rh's ownership only while the path is still the entry that rh wrote: a same-bytes copy, an edit
       // and a link are the user's.
-      rmSync(cli);
+      renameSync(cli, `${cli}.old`);
       writeFileSync(cli, 'cli');
       expect(ledgerCreated(cli, env)).toBe(false);
       writeFileSync(cli, 'cli\nuser line\n');

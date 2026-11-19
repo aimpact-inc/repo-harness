@@ -616,8 +616,9 @@ test('a whole path is rh\'s only while it is the entry that rh wrote: a same-byt
   // A write and a revert of the entry that rh wrote still act on it.
   expect(f.gate().writePaths([w(english, 'rh\n')])).toEqual([]);
 
-  // The user restores the same bytes from a backup: another file-system entry, so rh neither replaces nor removes it.
-  rmSync(english);
+  // The user restores the same bytes from a backup: another file-system entry, so rh neither replaces nor removes it. The old
+  // file stays aside, so the new one cannot reuse its file id.
+  renameSync(english, `${english}.old`);
   writeFileSync(english, 'rh\n');
   const copy = 'it holds the bytes that rh wrote, but it is another file-system entry (a copy or a restore), so rh does not replace it';
   expect(() => f.gate().writePaths([w(english, 'rh2\n')])).toThrow(`${copy}: ${english}. To let rh write it, run the command again with --force: rh keeps this file in the vault first`);
