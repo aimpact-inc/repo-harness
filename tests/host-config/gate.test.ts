@@ -589,6 +589,14 @@ test('a whole-path write checks every destination before it writes any: a refusa
   expect(() => f.gate().writePaths(writes)).toThrow(`rh has no record of it, so rh does not replace it: ${leaves[3]}`);
   expect({ entries: readdirSync(rules), mine: readFileSync(leaves[3]!, 'utf8'), paths: existsSync(join(f.root, 'ledger.json')) ? f.ledger().paths : {} })
     .toEqual({ entries: ['english.md'], mine: 'mine\n', paths: {} });
+  // A link and a file below it in one call: the first publish would change the path that the second plan checked.
+  const user = join(f.home, 'dotfiles');
+  mkdirSync(user);
+  writeFileSync(join(user, 'x.md'), 'mine\n');
+  const agents = join(f.home, '.claude', 'agents');
+  expect(() => f.gate().writePaths([{ path: agents, owner: 'core', entry: { type: 'symlink', target: user } }, { ...writes[0]!, path: join(agents, 'x.md') }]))
+    .toThrow(`a call names this path and a path above it, so rh writes neither: ${join(agents, 'x.md')}`);
+  expect({ agents: existsSync(agents), mine: readFileSync(join(user, 'x.md'), 'utf8') }).toEqual({ agents: false, mine: 'mine\n' });
 });
 
 test('a delegated writer runs only on paths that rh may write; a replaced path stays a file; a rollback undoes a revert of a replaced file', () => {

@@ -641,6 +641,9 @@ function writeWholePaths(admit: WholePathAdmit, paths: HostConfigPaths, writes: 
   const persist = () => writeLedger(paths, { ...ledger, paths: records, directories });
   const admitted = writes.map((write) => ({ write, ...admit(ledger, write.path) }));
   if (new Set(admitted.map(({ key }) => key)).size !== admitted.length) throw new HostConfigError('host_config_invalid_state', 'a call names one path twice');
+  // Every plan reads the disk before the first publish, so no write may change the path of another one.
+  const nested = admitted.find(({ key }) => admitted.some((other) => other.key !== key && isPathInside(other.key, key)));
+  if (nested) throw new HostConfigError('host_config_invalid_state', `a call names this path and a path above it, so rh writes neither: ${nested.write.path}`);
   const plans = admitted.map(({ write, key, host }) => planWholePath(paths, write, key, host, records[key]));
   const written: string[] = [];
   for (const { write, key, host, previous, prior, entry, linkTarget, observed, replaces } of plans) {
