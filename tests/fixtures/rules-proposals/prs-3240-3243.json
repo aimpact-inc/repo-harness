@@ -1,0 +1,172 @@
+{
+  "3240": {
+    "commits": [
+      [
+        {
+          "number": 3240,
+          "merge_commit_sha": "974e4d32e6f19f0d9e9ed60641fae2dad7c16a9b",
+          "merged_at": "2026-11-19T01:09:43Z",
+          "base": {
+            "ref": "main"
+          },
+          "body": ""
+        }
+      ]
+    ],
+    "reviews": [
+      [
+        {
+          "body": "<!-- codex-review-receipt:v1 -->"
+        },
+        {
+          "body": "repo-harness acceptance review\nRound: 1\nSubject: 885c1dd6e43aef9280911be742e63df53841a829\nTier: high\nVerdict: FAIL\nReviewer: pi (codex/gpt-6.2-sol)\nModel relation: different-family\n\n## NITs\n\n- init-preview-omits-gate-refusals: P2 follow-up: src/cli/commands/adoption-plan.ts:112 previews the root rule but misses a repository gate refusal such as a nested checkout at docs/ blocking docs/spec.md on apply. Share the read-only target and staging checks with apply.\n- repository-restore-skips-standalone-directories: P2 follow-up: src/effects/host-config/repository.ts:192 selects directories only through dropped file records, so a full restore leaves newly created empty directories such as _ops/secrets. Include standalone directory records in full-worktree restore with scope checks and empty-only removal.\n- project-refresh-bypasses-repository-record: P2 follow-up: the direct project refresh in src/cli/commands/upgrade.ts:390 stages beside CLAUDE.md or AGENTS.md and can make a prior init record appear user-edited. Route project refresh through the repository gate with guarded staging and update the existing record.\n- intent-to-add-coverage-removed: P2 follow-up: the removed git add -N assertion in tests/cli/adoption-plan.test.ts exercised the still-supported intent-to-add refusal and has no replacement in the test-deletion map. Reinstate it alongside the unmerged and non-regular index tests.\n"
+        },
+        {
+          "body": "repo-harness acceptance review\nRound: 1\nSubject: 885c1dd6e43aef9280911be742e63df53841a829\nTier: high\nVerdict: PASS\nReviewer: pi (glm-5.3-flash)\nModel relation: different-family\n\n## NITs\n\n- RH2903R1-F1: P2 follow-up: the deleted tests in tests/cli/adoption-plan.test.ts do not name the retained coverage for two behaviors the source still has — the intent-to-add index-entry refusal (src/effects/fs-transaction.ts:457) and the structured EACCES 'cannot inspect adoption path' refusal (src/effects/fs-transaction.ts:134) now have no test. Fix: add a small case for each in a follow-up.\n- RH2903R1-F2: P2 follow-up: docs/architecture/modules/public-surface/adoption.md §3.5 lines 159-160, unchanged by this PR, still document the removed per-write manifest.json, `rh init rollback --transaction` and move-op rollback. Fix: update the module doc to the repository-ledger undo (`rh config restore --repo`) in a follow-up.\n- RH2903R1-F3: Residual: adoptionTarget's lstatSync on <root>/.git (src/effects/fs-transaction.ts:540) throws uncaught on an unreadable .git (EACCES), surfacing as a crash instead of a structured refusal; permission-edge only, no write and no data risk.\n- RH2903R1-F4: Residual: rollbackGateWrites (src/effects/fs-transaction.ts:650) marks a created mkdir rolled_back even when a created directory went non-empty during the run and removeCreatedDirectories kept it; race-only, the ledger record and the restore --repo directory note keep the state consistent.\n"
+        },
+        {
+          "body": null
+        },
+        {
+          "body": null
+        },
+        {
+          "body": "repo-harness acceptance review\nRound: 2\nSubject: a7acf6c24261e72be7e657008cd042a70be0b6a2\nTier: high\nVerdict: PASS\nReviewer: pi (codex/gpt-6.2-sol)\nModel relation: different-family\n\n## NITs\n\n- init-dry-run-omits-staged-retirement-guard: P2 follow-up: src/cli/commands/adoption-plan.ts:107 renders the original plan for rh init --dry-run without using the transaction preview, so it shows removal and untracking as planned where apply reports both kept. Use the same retirement check in the public preview and cover the staged-edit case through the CLI.\n- init-retirement-hash-argv-includes-repo-root: P2 follow-up: src/effects/fs-transaction.ts:675 passes the absolute repository root to the new hash-object child via -C, exceeding P5's repository-relative argument boundary. Set the child cwd to the repository root and pass only the relative helper path.\n- init-retirement-discards-staged-mode-only-change: P2 follow-up: When a staged executable-bit change leaves the blob unchanged, src/effects/fs-transaction.ts:675 permits retirement and the existing forced untrack drops the changed mode. Extend the retirement proof to cover mode and keep the entry when that proof fails.\n"
+        },
+        {
+          "body": null
+        },
+        {
+          "body": "repo-harness acceptance review\nRound: 2\nSubject: a7acf6c24261e72be7e657008cd042a70be0b6a2\nTier: high\nVerdict: PASS\nReviewer: pi (glm-5.3-flash)\nModel relation: different-family\n\n## NITs\n\nNone.\n"
+        },
+        {
+          "body": "repo-harness acceptance review\nRound: 2\nSubject: a7acf6c24261e72be7e657008cd042a70be0b6a2\nTier: high\nVerdict: PASS\nReviewer: pi (codex/gpt-6.2-sol)\nModel relation: different-family\n\n## NITs\n\n- init-dry-run-omits-staged-retirement-guard: P2 follow-up: src/cli/commands/adoption-plan.ts:107 renders the original plan for rh init --dry-run without using the transaction preview, so it shows removal and untracking as planned where apply reports both kept. Use the same retirement check in the public preview and cover the staged-edit case through the CLI.\n- init-retirement-hash-argv-includes-repo-root: P2 follow-up: src/effects/fs-transaction.ts:675 passes the absolute repository root to the new hash-object child via -C, exceeding P5's repository-relative argument boundary. Set the child cwd to the repository root and pass only the relative helper path.\n- init-retirement-discards-staged-mode-only-change: P2 follow-up: When a staged executable-bit change leaves the blob unchanged, src/effects/fs-transaction.ts:675 permits retirement and the existing forced untrack drops the changed mode. Extend the retirement proof to cover mode and keep the entry when that proof fails.\n"
+        },
+        {
+          "body": null
+        }
+      ]
+    ],
+    "comments": [
+      [
+        {
+          "id": 4622885564,
+          "in_reply_to_id": null,
+          "path": "src/effects/host-config/repository.ts",
+          "line": 193,
+          "original_line": 193,
+          "user": {
+            "type": "Bot"
+          },
+          "body": "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Restore empty directories that init records independently**\n\nAfter `rh init --mode minimal` in a fresh Git repository, `rh config restore --repo` leaves `.ai/harness/checks` behind even though init created and recorded it. This filter includes a directory only when a reverted file lies inside it, so directories that init creates empty never qualify. `revertWholePaths` uses the same restriction. I reproduced this with the reviewed runtime: restore removed the file records but retained the empty directory and its ledger entry; subsequent restore attempts cannot clean it because there are no path records left. Include independently recorded empty directories in both the restore plan and its apply.\n\nUseful? React with 👍 / 👎.\n\n<!-- codex-code-review-finding:v1 -->"
+        },
+        {
+          "id": 4622967652,
+          "in_reply_to_id": null,
+          "path": "src/effects/fs-transaction.ts",
+          "line": 634,
+          "original_line": 630,
+          "user": {
+            "type": "User"
+          },
+          "body": "**P1 init-retirement-discards-staged-user-bytes**\n\nThe retirement proof checks working-tree bytes. Git untrack force-removes the index entry even when it contains a different staged-only blob, a state exercised in tests/cli/adoption-plan.test.ts:988. The new success path keeps no durable record of that blob or its mode, while the converted test restores the exact stage only after an injected failure. The sole undo command has no index record.\n\n**Fix**: Before removing the file or index entry, refuse retirement if the index contains staged-only user content, or durably preserve the blob and mode and restore them through rh config restore --repo. Cover the successful-run case with a regression."
+        },
+        {
+          "id": 4623005406,
+          "in_reply_to_id": 4622967652,
+          "path": "src/effects/fs-transaction.ts",
+          "line": 634,
+          "original_line": 630,
+          "user": {
+            "type": "User"
+          },
+          "body": "Fixed in a7acf6c24. Before any remove or untrack, the run checks each retirement: the index entry must hold exactly the proved working-tree bytes (`git hash-object --no-filters` equals the index object id). Otherwise the remove and the untrack are skipped with a `kept` reason; the file and the index entry stay, the run succeeds, and `rh init` prints `[init] kept: <path> - …`. The dry run uses the same check. Regression: `a successful run keeps a retired helper and its index entry when the index holds a staged user edit` (fails without the fix). The in-run rollback case now stages the canonical bytes, since a staged edit is no longer untracked.\n\nSeat: worker t3hc"
+        },
+        {
+          "id": 4623005768,
+          "in_reply_to_id": 4622885564,
+          "path": "src/effects/host-config/repository.ts",
+          "line": 193,
+          "original_line": 193,
+          "user": {
+            "type": "User"
+          },
+          "body": "Same as gatekeeper P3 repository-restore-skips-standalone-directories; kept in the record.\n\nSeat: worker t3hc"
+        },
+        {
+          "id": 4623046007,
+          "in_reply_to_id": 4622967652,
+          "path": "src/effects/fs-transaction.ts",
+          "line": 634,
+          "original_line": 630,
+          "user": {
+            "type": "User"
+          },
+          "body": "repo-harness review reply\nAgent: pi (codex/gpt-6.2-sol), read-only\nDisposition: confirmed fixed in round 2 on a7acf6c24261e72be7e657008cd042a70be0b6a2\nWhy: https://github.com/aimpact-inc/repo-harness/pull/3240#issuecomment-6996505629\n"
+        },
+        {
+          "id": 4623052349,
+          "in_reply_to_id": 4622885564,
+          "path": "src/effects/host-config/repository.ts",
+          "line": 193,
+          "original_line": 193,
+          "user": {
+            "type": "User"
+          },
+          "body": "Kept in the review record as P3 (same as gatekeeper P3 repository-restore-skips-standalone-directories); no change in this PR. Seat: orchestrator t2mn\n\nSeat: orchestrator t2mn"
+        }
+      ]
+    ]
+  },
+  "3243": {
+    "commits": [
+      [
+        {
+          "number": 3243,
+          "merge_commit_sha": "5f275d501c4ae883b171faaeff23885139416625",
+          "merged_at": "2026-11-19T03:12:10Z",
+          "base": {
+            "ref": "main"
+          },
+          "body": ""
+        }
+      ]
+    ],
+    "reviews": [
+      [
+        {
+          "body": "<!-- codex-review-receipt:v1 -->"
+        },
+        {
+          "body": null
+        }
+      ]
+    ],
+    "comments": [
+      [
+        {
+          "id": 4623784198,
+          "in_reply_to_id": null,
+          "path": "assets/skills/repo-harness-issue-flow/references/advisor.md",
+          "line": null,
+          "original_line": 122,
+          "user": {
+            "type": "Bot"
+          },
+          "body": "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Include closed, unreleased trains in release-set selection**\n\nWhen a migration or ledger train finishes, this new condition prevents its selection until the batch parent closes. However, steps 1–2 build the candidate trains from open issues only, and `orchestrator.md` §10 requires all children to be closed or shelved before parent closeout. Completed trains therefore disappear from the candidate list before they become eligible. Include closed, unreleased trains in the selection procedure so these changes can enter the release milestone and receive release tracking.\n\nUseful? React with 👍 / 👎.\n\n<!-- codex-code-review-finding:v1 -->"
+        },
+        {
+          "id": 4623832048,
+          "in_reply_to_id": 4623784198,
+          "path": "assets/skills/repo-harness-issue-flow/references/advisor.md",
+          "line": null,
+          "original_line": 122,
+          "user": {
+            "type": "User"
+          },
+          "body": "Fixed in 1694d4d45: the rule now gates release timing, not train selection; merged work ships with the first release after the parent closes, and a fix release for a released I1/I2 defect stays allowed. Seat: orchestrator t2mn\n\nSeat: orchestrator t2mn"
+        }
+      ]
+    ]
+  }
+}
