@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { delimiter, dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { CLAUDE_BUILTIN_AGENT_TYPES, SeatPaneNameError, buildSeatLaunch, seatPaneName, seatTabName, type SeatLaunchV1 } from '../../core/board/seat-launch';
-import { LAUNCH_SEAT_IDS, SeatsConfigMigrationRequiredError, decodeSeatsConfig, seatsConfigInvalidMessage, isReviewSeat, isWorkerSeat, unavailablePiSeat, type LaunchSeatId, type SeatConfigV1, type SeatsConfigV1 } from '../../core/board/seats-settings';
+import { LAUNCH_SEAT_IDS, RETIRED_SEAT_FLEET_ROLES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, seatsConfigInvalidMessage, isReviewSeat, isWorkerSeat, unavailablePiSeat, type LaunchSeatId, type SeatConfigV1, type SeatsConfigV1 } from '../../core/board/seats-settings';
 import { claudeReserved, deepGatekeeperRepeatsGatekeeper, effectiveGatekeeper, effectiveSeatConfig, seatAccount, seatAccountQuotas, seatState, type SeatRouteV1 } from '../../core/board/seat-routing';
 import { AGY_QUOTA_ACCOUNTS, classifyQuotaReading, type QuotaAccount, type QuotaReading } from '../../core/board/quota';
 import { readAgyQuota, readClaudeQuota, readCodexQuota } from '../../effects/board/quota';
@@ -284,7 +284,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   });
   const tab = labels.repositoryId === undefined ? null : seatTabName(id, labels.parent);
   const agentTypes = effective.runtime === 'claude' && effective.fleet.length > 0
-    ? [...MANAGED_AGENTS, ...CLAUDE_BUILTIN_AGENT_TYPES, ...claudeHostAgentTypes(env)]
+    ? [...MANAGED_AGENTS, ...RETIRED_SEAT_FLEET_ROLES, ...CLAUDE_BUILTIN_AGENT_TYPES, ...claudeHostAgentTypes(env)]
     : [];
   const piRoleDirectory = effective.runtime === 'pi' && effective.fleet.length > 0 ? writePiFleetRoles(effective.fleet, env) : undefined;
   const piHookExtension = effective.runtime === 'pi' && isReviewSeat(id) ? installedPiExtension(env) : undefined;

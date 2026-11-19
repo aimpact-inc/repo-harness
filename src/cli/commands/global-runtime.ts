@@ -13,7 +13,7 @@ import type { SkillHost } from '../../effects/host-skill-roots';
 import { pathRecordIsCurrent, pathRecordKey, readPathRecords } from '../../effects/host-config/path-records';
 import { architecturePort, isArchitectureUnavailable } from '../../core/architecture/contracts';
 import { globalConfigurationWriter, mutateGlobalConfiguration } from '../../effects/configuration/global-configuration';
-import { DEFAULT_SEATS_CONFIG, INTRODUCED_ROUTING_DEFAULTS, ROUTING_CLASSES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, seatModelShapeValid } from '../../core/board/seats-settings';
+import { DEFAULT_SEATS_CONFIG, INTRODUCED_ROUTING_DEFAULTS, ROUTING_CLASSES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, seatModelShapeValid, stripRetiredSeatFleetRoles } from '../../core/board/seats-settings';
 import { checkSeatRoutingModels, seatsRanges } from '../../effects/board/seats-configuration';
 import { chmodSync, closeSync, constants, cpSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync } from "fs";
 import { syncDirectoryDurably, writeAllSync } from '../../effects/atomic-append';
@@ -1695,7 +1695,7 @@ function withPlugin(plugins: readonly PluginId[], id: PluginId): readonly Plugin
   return [...new Set([...plugins, id])].sort() as PluginId[];
 }
 
-/** Update is the only caller that fills introduced seats and routing keys and removes retired routing keys. */
+/** Update fills introduced keys and removes retired routing keys and fleet roles. */
 export function migrateSeatsConfiguration(env: NodeJS.ProcessEnv, runtimeLock?: RuntimeTransactionContext, beforeWrite?: (path: string, text: string) => void): boolean {
   return mutateGlobalConfiguration(env, config => {
     try {
@@ -1705,7 +1705,7 @@ export function migrateSeatsConfiguration(env: NodeJS.ProcessEnv, runtimeLock?: 
       if (!(error instanceof SeatsConfigMigrationRequiredError)) throw error;
     }
     const { orchestrator: _orchestrator, advisor: _advisor, worker: _worker, ...introduced } = DEFAULT_SEATS_CONFIG;
-    const stored = config.seats as Record<string, unknown>;
+    const stored = stripRetiredSeatFleetRoles(config.seats as Record<string, unknown>);
     let routing = stored.routing;
     if (typeof routing === 'object' && routing !== null && ('mode' in routing || 'hyper' in routing)) {
       const row = routing as Record<string, unknown>;

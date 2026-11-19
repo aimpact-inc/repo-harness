@@ -2,6 +2,7 @@ import { decodeAgentsConfig } from '../../core/board/agents-settings';
 import {
   SEAT_IDS,
   SEAT_RUNTIMES,
+  SEAT_SCAFFOLD_SUB_AGENTS,
   SEAT_TOOLS,
   FRONTEND_SEAT_IDS,
   ROUTING_CLASSES,
@@ -24,11 +25,7 @@ import {
   type SeatTool,
 } from '../../core/board/seats-settings';
 import { SEAT_RECOMMENDED_MODELS } from '../../core/board/recommended-models';
-import {
-  EFFORT_LEVELS,
-  MANAGED_AGENTS,
-  WRITABLE_AGENTS,
-} from '../terminal/task-role-profiles';
+import { EFFORT_LEVELS } from '../terminal/task-role-profiles';
 import { GlobalConfigurationError, mutateGlobalConfiguration, readGlobalConfiguration } from '../configuration/global-configuration';
 
 export type SeatsConfigurationErrorCode =
@@ -50,23 +47,20 @@ export class SeatsConfigurationError extends Error {
   }
 }
 
-// Fleet role profiles supply the allowed sub-agents.
-const READ_ONLY_SUB_AGENTS = MANAGED_AGENTS.filter(role => !WRITABLE_AGENTS.has(role));
 const without = (...excluded: SeatTool[]): readonly SeatTool[] => SEAT_TOOLS.filter(tool => !excluded.includes(tool));
 
 /**
- * Owner rules: the orchestrator and the advisor call only the read-only roles (M40); the writers, root-cause-prover
- * included, and the Codex review run in Herdr seats; the orchestrator does not edit (#1472); the advisor may edit
- * for its proposals (owner decision, #2032) and does not write GitHub (#1472).
+ * Seats can use read-only scaffold roles. Writers and reviewers run in their own Herdr seats (#3305).
+ * The orchestrator does not edit (#1472). The advisor may edit proposals (#2032) and does not write GitHub (#1472).
  */
 const SEAT_ACCESS: { readonly [seat in SeatId]: Omit<SeatRangeV1, 'models'> } = {
-  orchestrator: { fleet: READ_ONLY_SUB_AGENTS, tools: without('edit') },
-  advisor: { fleet: READ_ONLY_SUB_AGENTS, tools: without('gh') },
-  worker: { fleet: MANAGED_AGENTS, tools: SEAT_TOOLS },
-  'worker-deep': { fleet: MANAGED_AGENTS, tools: SEAT_TOOLS },
-  'worker-important': { fleet: MANAGED_AGENTS, tools: SEAT_TOOLS },
-  'worker-important-fast': { fleet: MANAGED_AGENTS, tools: SEAT_TOOLS },
-  'worker-light': { fleet: MANAGED_AGENTS, tools: SEAT_TOOLS },
+  orchestrator: { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: without('edit') },
+  advisor: { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: without('gh') },
+  worker: { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: SEAT_TOOLS },
+  'worker-deep': { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: SEAT_TOOLS },
+  'worker-important': { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: SEAT_TOOLS },
+  'worker-important-fast': { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: SEAT_TOOLS },
+  'worker-light': { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: SEAT_TOOLS },
   gatekeeper: { fleet: [], tools: ['net', 'read', 'shell'] },
   'gatekeeper-deep': { fleet: [], tools: ['net', 'read', 'shell'] },
   'gatekeeper-fallback': { fleet: [], tools: ['net', 'read', 'shell'] },
@@ -85,7 +79,7 @@ export function seatsRanges(enabledRuntimes: readonly string[]): SeatsRangesV1 {
   return {
     runtimes: SEAT_RUNTIMES.map(id => ({ id, enabled: enabledRuntimes.includes(id), ...RUNTIME_RANGES[id] })),
     efforts: EFFORT_LEVELS,
-    roles: MANAGED_AGENTS.map(name => ({ name, writable: WRITABLE_AGENTS.has(name) })),
+    roles: SEAT_SCAFFOLD_SUB_AGENTS.map(name => ({ name, writable: false })),
     seats: SEAT_RANGES,
     routing: { classes: ROUTING_CLASSES, worker_seats: WORKER_SEAT_IDS, frontend_seats: FRONTEND_SEAT_IDS },
   };
