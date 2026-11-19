@@ -23,19 +23,19 @@ advisor` prints. Replan requests follow `replan.md`.
 
 ### 1.1 Cross-harness planner consultation
 
-`rh seats consult --issue <n> --space <id> [--question <focus>]` opens one
-read-only `planner` seat in the `plan` tab of that space, on the runtime
-and model that the seats configuration gives `planner`. Use it for a
-`tier:high` issue (I1, I2 or a protocol change) or for a contested
-cross-module rule, when the second design view must come from a model
-family other than your own. One consultation answers one question.
+`rh seats consult --issue <n> --space <id> [--qualifier <word>]
+[--question <focus>]` opens one read-only `planner` seat in the `plan`
+tab of that space, on the runtime and model that the seats configuration
+gives `planner`. Use it for a `tier:high` issue (I1, I2 or a protocol
+change) or for a contested cross-module rule, when the second design view
+must come from a model family other than your own. One consultation
+answers one question.
 
-- **Read the plan file.** The planner writes the full plan to
-  `/tmp/rh-plans/<repo>/issue-<n>.md`, outside every worktree, and prints
-  only one completion line that names that path. Read the file with `Read`
-  or `hc file read <path>`. Do not take the plan from `hc read`
-  scrollback: a long answer truncates in an alternate-screen TUI such as
-  Codex or `agy`.
+- **Read the plan file, not the scrollback.** The planner writes the full
+  plan outside every worktree and prints only one completion line that
+  names the path. Read the file with `Read` or `hc file read <path>`. Do
+  not take the plan from `hc read` scrollback: a long answer truncates in
+  an alternate-screen TUI such as Codex or `agy`.
 - **Keep the authority.** The planner is read-only and ephemeral, and its
   file is reference input for you. Check it, keep the points you accept
   and send the orchestrator one proposal (§3). Never forward the raw plan
@@ -44,8 +44,12 @@ family other than your own. One consultation answers one question.
   own terminal and refuses to open the tab without `--space`. The planner
   runs on Pi or Claude: the Codex read-only sandbox cannot write the plan,
   and the command fails closed on a Codex planner.
-- **Pass `--qualifier <word>` for a second question.** Each plan path must
-  be new; the planner refuses a path that already exists.
+- **Use the path the command prints.** The default path is
+  `/tmp/rh-plans/<repo>/issue-<n>.md`, and `--qualifier <word>` makes it
+  `/tmp/rh-plans/<repo>/issue-<n>-<word>.md`; `seats consult` prints the
+  resolved path on its line and as `out_path` with `--json`. Each plan
+  path must be new: the planner refuses a path that already exists, so a
+  second question takes its own `--qualifier`.
 
 ## 2. Scheduled review
 

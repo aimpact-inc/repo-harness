@@ -134,12 +134,15 @@ space, on the runtime and model of the `planner` seat, and the planner
 reads the issue itself. Ask for a skeleton of 15 to 30 lines: the target
 functions and their signatures, the explicit delete list, the exact error
 codes, and the forbidden fallback and compatibility branches. Run two
-consultations in parallel with a different `--qualifier` each, because
-one pane writes one plan file.
+consultations in parallel with a different `--qualifier` each, so that
+each pane writes its own plan path.
 
-The planner writes the full plan to `/tmp/rh-plans/<repo>/issue-<n>.md`,
-outside every worktree, and prints one completion line that names it. Read
-that file with `Read` or `hc file read <path>`. Do not read the plan from
+The planner writes the full plan outside every worktree, and prints one
+completion line that names it. The command reports the same path as
+`out_path`. The default is `/tmp/rh-plans/<repo>/issue-<n>.md`;
+`--qualifier <word>` makes it
+`/tmp/rh-plans/<repo>/issue-<n>-<word>.md`. Read the path that the command
+prints, with `Read` or `hc file read <path>`. Do not read the plan from
 `hc read` scrollback: a long answer truncates in an alternate-screen TUI
 such as Codex or `agy`.
 
