@@ -335,12 +335,12 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
         items.push({ path: source, action: 'kept', reason: 'pi not found on PATH; package removal skipped; ownership retained for retry' });
         continue;
       }
-      // An entry that is gone from the Pi settings releases its record with no pi remove, so a later hand registration is never rh's.
+      // An entry that is gone from the Pi settings releases its record, so a later hand registration is never rh's.
       const removal = piPackageRemoval(source, recorded, env);
       if (removal === 'edited') { unresolved(source, REVERT_REASONS.kept_edited); continue; }
       items.push({ path: source, action: 'reverted', reason: removal === 'remove'
-        ? 'recorded Pi package entry through pi remove; the entry is read back'
-        : 'recorded Pi package entry is already absent; its record is released with no pi remove' });
+        ? 'recorded Pi package entry taken out; other entries of the package stay'
+        : 'recorded Pi package entry is already absent; its record is released' });
       piRemovals.push([source, recorded]);
       removedPi.add(source);
     } catch (error) { unresolved(source, (error as Error).message); }
@@ -432,7 +432,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
         assertConfigurationPath(dirname(path), surfaceRoot(path));
         if (fingerprint(path) !== expected) throw new Error(`configuration changed after preview: ${path}`);
       }
-      // A failed Pi readback stops before the ownership ledger is written.
+      // A Pi entry that changed after the plan stops before the ownership ledger is written.
       for (const [source, recorded] of piRemovals) removePiPackage(source, recorded, env);
       const surfaces = [...removedSurfaces];
       if ((surfaces.length || retireRecords) && pathRecordsDigest(readPathRecords(env)) !== recordsDigest) throw new Error(`configuration changed after preview: ${hostConfigPaths(env).ledger}`);

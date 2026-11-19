@@ -1,5 +1,5 @@
 import { parseJsonText } from '../../core/evidence/file-syntax';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { stripVTControlCharacters } from 'node:util';
@@ -8,7 +8,7 @@ import { piAgentDir } from '../../effects/pi-agent-dir';
 import { realPathOrResolved } from '../../effects/path-identity';
 import { piExecutable } from '../../effects/pi-executable';
 import { openHostConfigGate, type HostConfigGate } from '../../effects/host-config/gate';
-import { jsonFragment } from '../../core/host-config/json-fragment';
+import { jsonFragment, removeJsonFragment } from '../../core/host-config/json-fragment';
 import { HostConfigError } from '../../core/host-config/types';
 import { MEASURED_INSTALLERS, type HostConfigFragmentDeclaration } from '../../effects/host-config/delegated';
 
@@ -39,17 +39,12 @@ export function piUserPackageSources(output: string): readonly string[] {
     .map(line => line.slice(2).replace(/ \(filtered\)$/, ''));
 }
 
-/** The user package entries that Pi lists with the package identity of `source` (real path), filtered objects included. */
-function piPackageListed(source: string, env: NodeJS.ProcessEnv): number {
+export function piPackagePresent(source: string, env: NodeJS.ProcessEnv = process.env): boolean {
   const sources = piUserPackageSources(runPi(['list'], env));
-  if (sources.length === 0) return 0;
+  if (sources.length === 0) return false;
   const expected = realPathOrResolved(source);
   const agentDir = piAgentDir(env.HOME ?? env.USERPROFILE ?? homedir(), env);
-  return sources.filter(entry => realPathOrResolved(resolve(agentDir, entry)) === expected).length;
-}
-
-export function piPackagePresent(source: string, env: NodeJS.ProcessEnv = process.env): boolean {
-  return piPackageListed(source, env) > 0;
+  return sources.some(entry => realPathOrResolved(resolve(agentDir, entry)) === expected);
 }
 
 export interface PiPackageStep {
@@ -167,32 +162,31 @@ export function installPiPackage(source: string, enabled: boolean, env: NodeJS.P
 export type PiPackageRemoval = 'remove' | 'released' | 'edited';
 
 /**
- * What an uninstall or a switch may do with a recorded entry (#3249). Pi 1.5.2
- * `pi remove` drops every entry with the package identity, so rh runs it only
- * while the one listed entry of that identity is the text that rh recorded. A
- * package that Pi no longer lists releases its record. Any other form (a
- * filtered object, another spelling of the path, a second entry) is the
- * user's: it stays with its record.
+ * What an uninstall or a switch may do with a recorded entry (#3249), by the
+ * per-fragment rule on the declared selector alone: the exact element that rh
+ * recorded goes, an absent one releases its record, and other text there is
+ * the user's edit. Any other element (a `~/`, `file://` or filtered spelling
+ * of the same package) is never rh's, so Pi's package matching does not decide.
  */
 export function piPackageRemoval(source: string, recorded: string, env: NodeJS.ProcessEnv = process.env): PiPackageRemoval {
-  const listed = piPackageListed(source, env);
-  if (listed === 0) return 'released';
-  return listed === 1 && piPackageEntry(source, env) === recorded ? 'remove' : 'edited';
+  const entry = piPackageEntry(source, env);
+  return entry === null ? 'released' : entry === recorded ? 'remove' : 'edited';
 }
 
 /**
- * `pi remove` runs as a delegated writer, and the declared entry is read back:
- * it is not taken as an exact inverse. A leftover entry keeps its record and
- * fails the removal. The entry is checked again here, since the user can edit
- * it after the plan.
+ * Takes out only the recorded element, as a delegated write so that the gate
+ * settles the record. `pi remove` is not used: Pi 1.5.2 takes out every entry
+ * with the package identity, a user's alias too. The entry is checked again
+ * here, since the user can edit it after the plan.
  */
 export function removePiPackage(source: string, recorded: string, env: NodeJS.ProcessEnv = process.env): void {
   const removal = piPackageRemoval(source, recorded, env);
   if (removal === 'edited') throw new Error(`the Pi package entry changed since rh wrote it; preserved: ${source}`);
   const declaration = piDeclaration(source, env);
-  const gate = openHostConfigGate({ env });
-  gate.delegate([declaration], () => { if (removal === 'remove') runPi(['remove', source], env); });
-  if (piPackagePresent(source, env) || gate.recorded(declaration.path).some((record) => record.selector === declaration.selectors[0])) {
-    throw new Error('PI_PACKAGE_REMOVE_NOT_RECORDED');
-  }
+  openHostConfigGate({ env }).delegate([declaration], ([settings]) => {
+    if (removal !== 'remove') return;
+    const content = readFileSync(settings!, 'utf8');
+    const edit = removeJsonFragment(content, declaration.selectors[0]!);
+    writeFileSync(settings!, content.slice(0, edit.at) + edit.inserted + content.slice(edit.at + edit.removed.length));
+  });
 }

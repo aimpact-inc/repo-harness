@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join, relative } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { copyPackageRuntimeFixture, tmpWorkspace, writeBunWrapper } from '../helpers/repo-fixture';
 import { installPiPackage, ownedPiPackages, piPackagePresent, piUserPackageSources, runPi, planPiPackage } from '../../src/cli/installer/pi-package';
@@ -72,12 +73,13 @@ export const VERSION=process.env.PI_PACKAGE_DIR ? metadata.version || '0.0.0' : 
   const settings = join(env.PI_CODING_AGENT_DIR, 'settings.json');
   /** The stub writes the settings as Pi does: the whole file, two-space JSON. */
   const setPackages = (packages: readonly unknown[], extra: Record<string, unknown> = {}) => write(settings, `${JSON.stringify({ theme: 'user', ...extra, packages }, null, 2)}\n`);
-  const packages = () => JSON.parse(readFileSync(settings, 'utf8')).packages as string[];
+  const packages = () => JSON.parse(readFileSync(settings, 'utf8')).packages as unknown[];
   setPackages(['npm:other-package']);
   write(join(env.PI_CODING_AGENT_DIR, 'auth.json'), '{"fixture":true}\n');
   write(join(host, 'pi'), `#!${process.execPath}
 import {appendFileSync,existsSync,mkdirSync,readFileSync,writeFileSync} from 'node:fs';
 import {relative,resolve} from 'node:path';
+import {fileURLToPath} from 'node:url';
 const root=process.env.PI_FIXTURE_ROOT;
 const agentDir=process.env.PI_CODING_AGENT_DIR.replace(/^~(?=$|[\\\\/])/,process.env.HOME);
 const args=process.argv.slice(2);
@@ -86,12 +88,14 @@ const file=agentDir+'/settings.json';
 const settings=existsSync(file)?JSON.parse(readFileSync(file,'utf8')):{};
 const entries=settings.packages??[];
 const sourceOf=(p)=>typeof p==='string'?p:p.source;
+/** Pi 1.5.2 resolvePathFromBase: trimmed, ~ and ~/ against HOME, file:// URLs as paths, then against the agent dir. */
+const localPath=(s)=>{ s=s.trim(); return s==='~'?process.env.HOME:s.startsWith('~/')?process.env.HOME+s.slice(1):s.startsWith('file://')?fileURLToPath(s):resolve(agentDir,s); };
 const save=(next)=>(mkdirSync(agentDir,{recursive:true}),writeFileSync(file,JSON.stringify({...settings,packages:next},null,2)+'\\n'));
 switch(args[0]) {
 case '--version': console.log(process.env.PI_FIXTURE_VERSION); break;
 case 'list':
   if(process.env.PI_FIXTURE_BAD_LIST==='1') { console.log('invalid'); break; }
-  if(entries.length) { console.log('User packages:'); for(const p of entries) { const s=sourceOf(p); console.log('  '+s+(typeof p==='string'?'':' (filtered)')); if(!s.startsWith('npm:')) console.log('    '+resolve(agentDir,s)); } }
+  if(entries.length) { console.log('User packages:'); for(const p of entries) { const s=sourceOf(p); console.log('  '+s+(typeof p==='string'?'':' (filtered)')); if(!s.startsWith('npm:')) console.log('    '+localPath(s)); } }
   else console.log('No packages installed.');
   break;
 case 'install':
@@ -100,8 +104,7 @@ case 'install':
   break;
 case 'remove':
   if(process.env.PI_FIXTURE_FAIL_REMOVE==='1') { console.error('PI_FIXTURE_REMOVE_FAILED'); process.exit(1); }
-  if(process.env.PI_FIXTURE_KEEP_ENTRY==='1') break;
-  save(entries.filter(p=>sourceOf(p).startsWith('npm:')||resolve(agentDir,sourceOf(p))!==resolve(args[1]))); break;
+  save(entries.filter(p=>sourceOf(p).startsWith('npm:')||localPath(sourceOf(p))!==resolve(args[1]))); break;
 default: process.exit(99);
 }
 `);
@@ -351,7 +354,9 @@ describe('Pi package and skill installation', () => {
     rmSync(f.source, { recursive: true });
     const result = runUserUninstall({ target: 'both', env: f.env });
     expect(result.exitCode).toBe(0);
-    expect(f.argv().filter(args => args[0] === 'remove')).toEqual([['remove', f.source]]);
+    expect(f.argv().filter(args => args[0] === 'remove')).toEqual([]);
+    // The report names the ranges that the installer measurement did not cover.
+    expect(result.items.some(item => item.action === 'note' && item.reason.includes('the Skills CLI lock path without XDG_STATE_HOME'))).toBe(true);
     expect(f.packages()).toEqual(['npm:other-package']);
     expect(readInstallState(f.env)).toBeNull();
   }));
@@ -377,49 +382,57 @@ describe('Pi package and skill installation', () => {
     expect(check.detail).not.toContain('ENOENT');
   }));
 
-  test('unconfirmed removal keeps the Pi package ownership ledger for retry', () => fixture(f => {
-    recordPiSelection(f.env);
-    expect(installPiPackage(f.source, true, f.env).created).toBe(true);
-    const result = runUserUninstall({ target: 'both', env: { ...f.env, PI_FIXTURE_KEEP_ENTRY: '1' } });
-    expect(result.exitCode).toBe(1);
-    expect(result.items.some(item => item.action === 'unresolved' && item.reason.includes('PI_PACKAGE_REMOVE_NOT_RECORDED'))).toBe(true);
-    // The report names the ranges that the installer measurement did not cover.
-    expect(result.items.some(item => item.action === 'note' && item.reason.includes('the Skills CLI lock path without XDG_STATE_HOME'))).toBe(true);
-    expect(ownedPiPackages(f.env)).toEqual([f.source]);
-    expect(piPackagePresent(f.source, f.env)).toBe(true);
-    expect(f.argv().filter(args => args[0] === 'remove')).toEqual([['remove', f.source]]);
-  }));
+  /** The recorded entry and the user's spellings of the same package that Pi 1.5.2 `pi remove` would also match. */
+  function piAliases(f: ReturnType<typeof createFixture>) {
+    const entry = relative(f.env.PI_CODING_AGENT_DIR!, f.source);
+    return { entry, aliases: [{ source: `~/${relative(f.home, f.source)}`, extensions: [] }, pathToFileURL(f.source).href] };
+  }
 
-  test('uninstall keeps an edited Pi package entry, alone or beside the recorded one, with no pi remove', () => {
-    for (const beside of [false, true]) fixture(f => {
+  /** The recorded string with its slashes escaped: the same JSON value, other text at the selector. */
+  function editRecordedText(f: ReturnType<typeof createFixture>, entry: string): void {
+    f.write(f.settings, readFileSync(f.settings, 'utf8').replace(JSON.stringify(entry), JSON.stringify(entry).replaceAll('/', '\\/')));
+  }
+
+  test('uninstall takes out only the recorded Pi package entry: a ~/ or file:// alias stays, alone or beside it; edited text stays unresolved', () => {
+    for (const index of [0, 1]) for (const beside of [false, true]) fixture(f => {
       recordPiSelection(f.env);
       expect(installPiPackage(f.source, true, f.env).created).toBe(true);
-      const entry = relative(f.env.PI_CODING_AGENT_DIR!, f.source);
-      f.setPackages(['npm:other-package', ...(beside ? [entry] : []), { source: entry, extensions: [] }]);
+      const { entry, aliases } = piAliases(f);
+      f.setPackages(['npm:other-package', ...(beside ? [entry] : []), aliases[index]]);
+      expect(runUserUninstall({ target: 'both', env: f.env }).exitCode).toBe(0);
+      expect([f.packages(), f.argv().filter(args => args[0] === 'remove'), ownedPiPackages(f.env)]).toEqual([['npm:other-package', aliases[index]], [], []]);
+    });
+    fixture(f => {
+      recordPiSelection(f.env);
+      expect(installPiPackage(f.source, true, f.env).created).toBe(true);
+      editRecordedText(f, piAliases(f).entry);
       const before = readFileSync(f.settings);
       const result = runUserUninstall({ target: 'both', env: f.env });
       expect(result.exitCode).toBe(1);
       expect(result.items).toContainEqual({ path: f.source, action: 'unresolved', reason: 'changed since rh wrote it; preserved' });
-      expect([readFileSync(f.settings).equals(before), f.argv().filter(args => args[0] === 'remove'), ownedPiPackages(f.env)]).toEqual([true, [], [f.source]]);
+      expect([readFileSync(f.settings).equals(before), ownedPiPackages(f.env)]).toEqual([true, [f.source]]);
     });
   });
 
-  test('a plugin switch away from Pi refuses an edited Pi package entry', () => fixture(f => {
-    recordPiSelection(f.env);
-    expect(installPiPackage(f.source, true, f.env).created).toBe(true);
-    f.setPackages(['npm:other-package', { source: relative(f.env.PI_CODING_AGENT_DIR!, f.source), extensions: [] }]);
-    const before = readFileSync(f.settings);
-    expect(() => prepareInstallSelectionSwitch(PI_FULL_PLUGINS.filter(id => id !== 'pi'), f.env, join(f.root, 'transaction')))
-      .toThrow(`refusing plugin switch because managed surface drifted: ${f.source}`);
-    expect([readFileSync(f.settings).equals(before), f.argv().filter(args => args[0] === 'remove')]).toEqual([true, []]);
-  }));
-
-  test('an unreadable package list preserves ownership instead of retiring the ledger', () => fixture(f => {
-    recordPiSelection(f.env);
-    expect(installPiPackage(f.source, true, f.env).created).toBe(true);
-    expect(runUserUninstall({ target: 'both', env: { ...f.env, PI_FIXTURE_BAD_LIST: '1' } }).exitCode).toBe(1);
-    expect(ownedPiPackages(f.env)).toEqual([f.source]);
-  }));
+  test('a plugin switch away from Pi takes out only the recorded entry and refuses edited text', () => {
+    const away = PI_FULL_PLUGINS.filter(id => id !== 'pi');
+    for (const index of [0, 1]) for (const beside of [false, true]) fixture(f => {
+      recordPiSelection(f.env);
+      expect(installPiPackage(f.source, true, f.env).created).toBe(true);
+      const { entry, aliases } = piAliases(f);
+      f.setPackages(['npm:other-package', ...(beside ? [entry] : []), aliases[index]]);
+      prepareInstallSelectionSwitch(away, f.env, join(f.root, 'transaction'));
+      expect([f.packages(), f.argv().filter(args => args[0] === 'remove'), ownedPiPackages(f.env)]).toEqual([['npm:other-package', aliases[index]], [], []]);
+    });
+    fixture(f => {
+      recordPiSelection(f.env);
+      expect(installPiPackage(f.source, true, f.env).created).toBe(true);
+      editRecordedText(f, piAliases(f).entry);
+      const before = readFileSync(f.settings);
+      expect(() => prepareInstallSelectionSwitch(away, f.env, join(f.root, 'transaction'))).toThrow(`refusing plugin switch because managed surface drifted: ${f.source}`);
+      expect(readFileSync(f.settings).equals(before)).toBe(true);
+    });
+  });
 
   test('failed candidate handoff compensates the new entry recorded in the shared ledger', () => fixture(f => {
     recordPiSelection(f.env);
@@ -467,7 +480,7 @@ describe('Pi package and skill installation', () => {
     expect(f.argv().filter(args => args[0] === 'remove')).toHaveLength(beforePreview);
     const uninstall = f.cli('uninstall', '--json');
     expect(uninstall.status, uninstall.stderr + uninstall.stdout).toBe(0);
-    expect(f.argv().filter(args => args[0] === 'remove')).toEqual([['remove', f.source]]);
+    expect(f.argv().filter(args => args[0] === 'remove')).toEqual([]);
     expect(existsSync(join(piRoot, 'repo-harness'))).toBe(false);
     expect(readFileSync(join(piRoot, 'user-skill/SKILL.md'), 'utf8')).toBe('# user\n');
     expect(f.packages()).toEqual(['npm:other-package']);
