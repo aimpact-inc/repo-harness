@@ -115,8 +115,18 @@ export function pathRecordKey(env: NodeJS.ProcessEnv, path: string): string {
  * Null for a path outside every install root.
  */
 export function pathRecordHost(env: NodeJS.ProcessEnv, path: string): PathRecordHost | null {
-  if (path === join(requireHome(env), '.claude.json')) return 'claude';
-  return HOST_ORDER.find(host => hostRoots(env, host).some(root => path !== root && isPathInside(root, path))) ?? null;
+  return pathRecordHostRoot(env, path)?.host ?? null;
+}
+
+/** As `pathRecordHost`, with the innermost root of that host that holds the path, also before links are followed. */
+export function pathRecordHostRoot(env: NodeJS.ProcessEnv, path: string): { readonly host: PathRecordHost; readonly root: string } | null {
+  const home = requireHome(env);
+  if (path === join(home, '.claude.json')) return { host: 'claude', root: home };
+  for (const host of HOST_ORDER) {
+    const root = hostRoots(env, host).filter(candidate => path !== candidate && isPathInside(candidate, path)).sort((a, b) => b.length - a.length)[0];
+    if (root !== undefined) return { host, root };
+  }
+  return null;
 }
 
 /** The hosts in the order that `pathRecordHost` tries their roots. */
