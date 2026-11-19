@@ -554,7 +554,7 @@ describe('seat settings contract without transport', () => {
     writeFileSync(join(home, '.repo-harness', 'config.json'), JSON.stringify({ agents: PANE_AGENTS, seats: { ...DEFAULT_SEATS_CONFIG, worker } }));
     const env = { HOME: home }, before = readSeatsSettings(env), route = seatsSettingsWriteRoute(env);
     const addedModels = ['magpie/opencode-go/deepseek-v4.1-flash', 'magpie/group/deepseek-v4.1-flash', 'magpie/zcode/GLM-5.3', 'magpie/zcode/GLM-5.3-Flash'];
-    expect(before.ranges.runtimes.find(runtime => runtime.id === 'pi')?.models).toEqual([model, ...addedModels.slice(0, 2), 'zai/glm-5.3', ...addedModels.slice(2), 'magpie/agy-cli/gemini-4-carbon', ...['gpt-6-luna', 'gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6.1-terra', 'gpt-6-astra', 'gpt-6.1-sol'].map(m => `magpie/codex/${m}`)]);
+    expect(before.ranges.runtimes.find(runtime => runtime.id === 'pi')?.models).toEqual([model, ...addedModels.slice(0, 2), 'zai/glm-5.3', ...addedModels.slice(2), 'magpie/agy-cli/gemini-4-carbon', 'magpie/agy-cli/gemini-4-neon', ...['gpt-6-luna', 'gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6.1-terra', 'gpt-6-astra', 'gpt-6.1-sol'].map(m => `magpie/codex/${m}`)]);
     const { revision, ...section } = before.config;
     const saved = await route.decode({ expected_revision: revision, seats: { ...section, advisor: { ...section.advisor, effort: 'medium' } } }, []).execute();
     expect(saved.status).toBe(200);
@@ -576,6 +576,7 @@ describe('seat settings contract without transport', () => {
 
   test.each([
     ['pi', 'magpie/agy-cli/gemini-4-carbon', ['pi', '--provider', 'magpie', '--model', 'agy-cli/gemini-4-carbon', '--thinking', 'high']],
+    ['pi', 'magpie/agy-cli/gemini-4-neon', ['pi', '--provider', 'magpie', '--model', 'agy-cli/gemini-4-neon', '--thinking', 'high']],
     ['pi', 'magpie/codex/gpt-6.2-sol', ['pi', '--provider', 'magpie', '--model', 'codex/gpt-6.2-sol', '--thinking', 'high']],
     ['pi', 'magpie/codex/gpt-6.2-astra', ['pi', '--provider', 'magpie', '--model', 'codex/gpt-6.2-astra', '--thinking', 'high']],
     ['codex', 'gpt-6.2-sol', ['codex', '-m', 'gpt-6.2-sol', '-c', 'model_reasoning_effort="high"']],
