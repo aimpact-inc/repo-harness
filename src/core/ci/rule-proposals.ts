@@ -82,14 +82,22 @@ export function parseRuleOpportunity(line: string, context: 'review_body' | 'pr_
 const NO_FIX = { state: 'none' } as const;
 const UNLOCATED = { path: null, line: null } as const;
 const CONFIRMED = /^repo-harness review reply\r?\nAgent: [^\r\n]+, read-only\r?\nDisposition: confirmed fixed in round [1-9]\d* on ([0-9a-f]{40}|[0-9a-f]{64})\r?\nWhy: [^\r\n]+/u;
-const CLAIMED = /\bfixed\s+(?:(?:in|by|at)\s+)?(?:commit\s+)?`?[0-9a-f]{7,64}\b/iu;
+const FIXED_WORD = /\bfixed\b/iu;
+const COMMIT_REFERENCE = /\b[0-9a-f]{7,64}\b/iu;
+
+function claimsFix(reply: string): boolean {
+  return reply.split(/\r?\n/u).some(line => {
+    const fixed = FIXED_WORD.exec(line);
+    return fixed !== null && COMMIT_REFERENCE.test(line.slice(fixed.index + fixed[0].length));
+  });
+}
 
 function threadFix(replies: readonly string[]): Fix {
   for (const reply of replies) {
     const confirmed = CONFIRMED.exec(reply);
     if (confirmed) return { state: 'confirmed', sha: confirmed[1] };
   }
-  return replies.some(reply => CLAIMED.test(reply)) ? { state: 'claimed' } : NO_FIX;
+  return replies.some(claimsFix) ? { state: 'claimed' } : NO_FIX;
 }
 
 function observation(pull_request: number, source: RuleObservation['source'], location: Location): RuleObservation {

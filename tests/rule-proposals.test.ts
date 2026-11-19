@@ -44,7 +44,7 @@ test('joins a marked outside-diff finding, deduplicates its id and filters unmar
     path: 'src/main.ts', line: 23, check: 'test', fix: { state: 'none' } } as const;
   expect(result.observations).toEqual([
     { pull_request: 3240, theme_key: null, finding_id: blocker.id, source: 'review_thread', severity: 'P1',
-      path: blocker.path, line: blocker.line, check: null, fix: { state: 'none' } },
+      path: blocker.path, line: blocker.line, check: null, fix: { state: 'claimed' } },
     { pull_request: 3240, theme_key: 'guard-file-path', finding_id: low.id, source: 'review_body', severity: 'P2',
       path: low.path, line: low.line, check: 'type', fix: { state: 'none' } },
     example, example,
