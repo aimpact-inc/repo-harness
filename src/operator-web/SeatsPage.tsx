@@ -3,7 +3,7 @@ import { Banner, Button, Empty, Loader, Switch, cn } from '@cloudflare/kumo';
 import { seatAccountQuotas, seatOnCredits } from '../core/board/seat-routing';
 import { EXHAUSTED_AT_OR_ABOVE_USED_RANGE } from '../core/board/quota';
 import { buildSeatLaunch, type SeatLimitLevel } from '../core/board/seat-launch';
-import { CODEX_CREDIT_MODES, SEAT_IDS, SEAT_TOOLS, decodeSeatsSettingsRequest, isReviewSeat, seatTakesFleet, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
+import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, SEAT_IDS, SEAT_TOOLS, decodeSeatsSettingsRequest, isReviewSeat, seatTakesFleet, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
 import type { SetupSnapshotV2 } from '../core/setup/types';
 import type { OperatorTranslate } from './i18n';
 import type { QuotaSection } from './quota';
@@ -170,6 +170,8 @@ function SeatHeader({ seat, runtime, t }: { readonly seat: SeatId; readonly runt
   );
 }
 
+/** The Claude families: the closed range of `advisor_model`, and the Claude choices of the low-quota explorer. */
+const CLAUDE_FAMILIES = Object.keys(MODEL_FAMILY_LABELS);
 const isOptionalSeat = (seat: SeatId): seat is OptionalSeatId => seat === 'worker-light' || seat === 'gatekeeper-fallback';
 
 /** The switch of a seat that may be null: on restores the recommended worker-light, or the gatekeeper-fallback starter. */
@@ -206,11 +208,12 @@ function SeatCard({ seat, form, agents, settings, setup, locked, t }: {
   const recommended = seat !== 'worker' && defaults[seat]?.runtime === draft.runtime ? defaults[seat] : null;
   const review = isReviewSeat(seat);
   const check = (on: boolean) => (on ? ' ✓' : '');
+  const suggested = range.models.filter(entry => entry.runtime === draft.runtime).map(entry => entry.model);
   const models = [
     { value: null, label: t('seats.model.hostDefault') },
-    ...runtime.models.map(model => ({ value: model as string | null, label: model })),
-    // A typed or stored model outside the recommended list stays visible as a choice.
-    ...(draft.model !== null && !runtime.models.includes(draft.model) ? [{ value: draft.model as string | null, label: draft.model }] : []),
+    ...suggested.map(model => ({ value: model as string | null, label: model })),
+    // A typed or stored model outside the seat's recommended list stays visible as a choice.
+    ...(draft.model !== null && !suggested.includes(draft.model) ? [{ value: draft.model as string | null, label: draft.model }] : []),
   ];
   const efforts = [{ value: null, label: t('seats.effort.default') }, ...ranges.efforts.map(effort => ({ value: effort as string | null, label: effort, off: !runtime.effort }))];
   // The host agent types change only the argv; the limit levels do not depend on them, so the page passes none.
@@ -252,7 +255,7 @@ function SeatCard({ seat, form, agents, settings, setup, locked, t }: {
       {draft.runtime === 'claude' && (
         <Field label={t('seats.field.advisor')}>
           <Segmented label={t('seats.field.advisor')} disabled={locked} value={draft.advisor_model}
-            options={[{ value: null, label: t('seats.advisor.off') }, ...runtime.models.map(model => ({ value: model as string | null, label: model }))]}
+            options={[{ value: null, label: t('seats.advisor.off') }, ...CLAUDE_FAMILIES.map(model => ({ value: model as string | null, label: model }))]}
             onPick={value => form.edit(current => setSeatAdvisorModel(current, seat, value))} />
         </Field>
       )}
@@ -358,7 +361,6 @@ function RoutingEditor({ form, settings, quota, locked, t }: {
 }) {
   const draft = form.draft!;
   const accounts = seatAccountQuotas(quota.view.kind === 'ready' ? quota.view.report.accounts : [], draft.routing);
-  const claude = settings.ranges.runtimes.find(entry => entry.id === 'claude')!;
   const explorer = draft.routing.low_quota_explorer;
   const onCredits = SEAT_IDS.filter(id => draft[id] !== null && seatOnCredits(id, draft[id]!, accounts));
   const thresholds = [
@@ -374,7 +376,7 @@ function RoutingEditor({ form, settings, quota, locked, t }: {
       ))}
       <Field label={t('seats.routing.explorer')}>
         <Segmented label={t('seats.field.model')} disabled={locked} value={explorer.model ?? ''}
-          options={[...claude.models, ...(explorer.model !== null && !claude.models.includes(explorer.model) ? [explorer.model] : [])].map(model => ({ value: model, label: model }))}
+          options={[...CLAUDE_FAMILIES, ...(explorer.model !== null && !CLAUDE_FAMILIES.includes(explorer.model) ? [explorer.model] : [])].map(model => ({ value: model, label: model }))}
           onPick={model => form.edit(current => setExplorer(current, { model }))} />
         <ModelInput label={t('seats.model.custom')} disabled={locked} commit={model => form.edit(current => setExplorer(current, { model }))} />
         <Segmented label={t('seats.field.effort')} disabled={locked} value={explorer.effort}

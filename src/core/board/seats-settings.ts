@@ -155,12 +155,11 @@ export class SeatsConfigMigrationRequiredError extends Error {
   }
 }
 
-/** One pane runtime as the seat form may offer it. `models` is empty when the host picks the model. */
+/** One pane runtime as the seat form may offer it. */
 export interface SeatRuntimeRangeV1 {
   readonly id: SeatRuntime;
   /** In `agents.enabled`. A seat can be saved only on an enabled runtime. */
   readonly enabled: boolean;
-  readonly models: readonly string[];
   readonly effort: boolean;
   readonly fleet: boolean;
 }
@@ -170,8 +169,15 @@ export interface SeatRoleV1 {
   readonly writable: boolean;
 }
 
-/** What one seat may select: the fleet roles and the tool groups. */
+/** One recommended model of a seat: the runtime that runs it and its model id. */
+export interface SeatModelEntryV1 {
+  readonly runtime: SeatRuntime;
+  readonly model: string;
+}
+
+/** What one seat may select: the fleet roles and the tool groups. `models` only recommends (#3252); the model id is the user's. */
 export interface SeatRangeV1 {
+  readonly models: readonly SeatModelEntryV1[];
   readonly fleet: readonly string[];
   readonly tools: readonly SeatTool[];
 }
@@ -387,11 +393,10 @@ function decodeRanges(value: unknown, code: string): SeatsRangesV1 {
   const record = object(value, ['runtimes', 'efforts', 'roles', 'seats', 'routing'], code);
   if (!Array.isArray(record.runtimes) || !Array.isArray(record.efforts) || !Array.isArray(record.roles)) invalid(code);
   const runtimes = record.runtimes.map((entry) => {
-    const runtime = object(entry, ['id', 'enabled', 'models', 'effort', 'fleet'], code);
-    if (!SEAT_RUNTIMES.includes(runtime.id as SeatRuntime) || !Array.isArray(runtime.models)) invalid(code);
+    const runtime = object(entry, ['id', 'enabled', 'effort', 'fleet'], code);
+    if (!SEAT_RUNTIMES.includes(runtime.id as SeatRuntime)) invalid(code);
     if (typeof runtime.enabled !== 'boolean' || typeof runtime.effort !== 'boolean' || typeof runtime.fleet !== 'boolean') invalid(code);
-    return { id: runtime.id as SeatRuntime, enabled: runtime.enabled, models: runtime.models.map(model => text(model, code)),
-      effort: runtime.effort, fleet: runtime.fleet };
+    return { id: runtime.id as SeatRuntime, enabled: runtime.enabled, effort: runtime.effort, fleet: runtime.fleet };
   });
   if (runtimes.map(runtime => runtime.id).join() !== SEAT_RUNTIMES.join()) invalid(code);
   const roles = record.roles.map((entry) => {
@@ -401,9 +406,13 @@ function decodeRanges(value: unknown, code: string): SeatsRangesV1 {
   });
   const seats = object(record.seats, SEAT_IDS, code);
   const seat = (id: SeatId): SeatRangeV1 => {
-    const range = object(seats[id], ['fleet', 'tools'], code);
-    if (!Array.isArray(range.fleet) || !Array.isArray(range.tools)) invalid(code);
-    return { fleet: range.fleet.map(name => (isRole(name) ? name : invalid(code))), tools: range.tools.map(tool => (isTool(tool) ? tool : invalid(code))) };
+    const range = object(seats[id], ['models', 'fleet', 'tools'], code);
+    if (!Array.isArray(range.models) || !Array.isArray(range.fleet) || !Array.isArray(range.tools)) invalid(code);
+    const models = range.models.map((item) => {
+      const entry = object(item, ['runtime', 'model'], code);
+      return SEAT_RUNTIMES.includes(entry.runtime as SeatRuntime) ? { runtime: entry.runtime as SeatRuntime, model: text(entry.model, code) } : invalid(code);
+    });
+    return { models, fleet: range.fleet.map(name => (isRole(name) ? name : invalid(code))), tools: range.tools.map(tool => (isTool(tool) ? tool : invalid(code))) };
   };
   return {
     runtimes,

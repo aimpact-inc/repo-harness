@@ -1,6 +1,7 @@
 import { AGENT_RUNTIME_CAPABILITIES, decodeAgentsSettings, type AgentsSettingsV1 } from '../../core/board/agents-settings';
 import { isReviewRuntimeId } from '../../core/review/review-runtimes';
-import { DEFAULT_SEATS_CONFIG, PI_CODEX_MODEL_PREFIX, FRONTEND_SEAT_IDS, ROUTING_CLASSES, SEAT_IDS, WORKER_SEAT_IDS, decodeSeatsSettings, type SeatsConfigV1, type SeatsSettingsRequestV1, type SeatsSettingsV1 } from '../../core/board/seats-settings';
+import { DEFAULT_SEATS_CONFIG, FRONTEND_SEAT_IDS, ROUTING_CLASSES, SEAT_IDS, WORKER_SEAT_IDS, decodeSeatsSettings, type SeatsConfigV1, type SeatsSettingsRequestV1, type SeatsSettingsV1 } from '../../core/board/seats-settings';
+import { SEAT_RECOMMENDED_MODELS } from '../../core/board/recommended-models';
 import type { DocumentationLanguage, DocumentationLanguageReader, DocumentationLanguageWriter, LanguageRead, LanguageReader, LanguageWriter, ReportingHost, ReportingPreset } from '../language-settings';
 import type { OperatorApiErrorV1 } from '../operator-api-error';
 import type { AgentsSettingsRead, AgentsSettingsWrite, AgentsSettingsPost, SettingsRead, SettingsWrite } from '../settings';
@@ -48,31 +49,29 @@ const SUB_AGENTS = [
   { name: 'harness-evaluator', writable: true },
 ];
 
-const CODEX_MODELS = ['gpt-6-luna', 'gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6.1-terra', 'gpt-6-astra', 'gpt-6.1-sol'];
-
 /** The ranges the server derives from the fleet role profiles, written out for the in-page store. */
 function seatsRanges(enabled: readonly string[]) {
   const all = ['read', 'edit', 'shell', 'net', 'tasks', 'schedule', 'mcp', 'gh'];
   return {
     runtimes: [
-      { id: 'claude', enabled: enabled.includes('claude'), models: ['opus', 'sonnet', 'haiku', 'fable'], effort: true, fleet: true },
-      { id: 'codex', enabled: enabled.includes('codex'), models: CODEX_MODELS, effort: true, fleet: true },
-      { id: 'pi', enabled: enabled.includes('pi'), models: ['magpie/cursor/deepseek-v41-flash-1017', 'zai/glm-5.3', ...CODEX_MODELS.map(model => `${PI_CODEX_MODEL_PREFIX}${model}`)], effort: true, fleet: true },
+      { id: 'claude', enabled: enabled.includes('claude'), effort: true, fleet: true },
+      { id: 'codex', enabled: enabled.includes('codex'), effort: true, fleet: true },
+      { id: 'pi', enabled: enabled.includes('pi'), effort: true, fleet: true },
     ],
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     roles: SUB_AGENTS,
     seats: {
-      orchestrator: { fleet: SUB_AGENTS.filter(role => !role.writable).map(role => role.name), tools: all.filter(tool => tool !== 'edit') },
-      advisor: { fleet: SUB_AGENTS.filter(role => !role.writable).map(role => role.name), tools: all.filter(tool => tool !== 'gh') },
-      worker: { fleet: SUB_AGENTS.map(role => role.name), tools: all },
-      'worker-deep': { fleet: SUB_AGENTS.map(role => role.name), tools: all },
-      'worker-important': { fleet: SUB_AGENTS.map(role => role.name), tools: all },
-      'worker-important-fast': { fleet: SUB_AGENTS.map(role => role.name), tools: all },
-      'worker-light': { fleet: SUB_AGENTS.map(role => role.name), tools: all },
-      gatekeeper: { fleet: [], tools: ['net', 'read', 'shell'] },
-      'gatekeeper-deep': { fleet: [], tools: ['net', 'read', 'shell'] },
-      'gatekeeper-fallback': { fleet: [], tools: ['net', 'read', 'shell'] },
-      reviewer: { fleet: [], tools: ['net', 'read', 'shell'] },
+      orchestrator: { models: SEAT_RECOMMENDED_MODELS.orchestrator, fleet: SUB_AGENTS.filter(role => !role.writable).map(role => role.name), tools: all.filter(tool => tool !== 'edit') },
+      advisor: { models: SEAT_RECOMMENDED_MODELS.advisor, fleet: SUB_AGENTS.filter(role => !role.writable).map(role => role.name), tools: all.filter(tool => tool !== 'gh') },
+      worker: { models: SEAT_RECOMMENDED_MODELS.worker, fleet: SUB_AGENTS.map(role => role.name), tools: all },
+      'worker-deep': { models: SEAT_RECOMMENDED_MODELS['worker-deep'], fleet: SUB_AGENTS.map(role => role.name), tools: all },
+      'worker-important': { models: SEAT_RECOMMENDED_MODELS['worker-important'], fleet: SUB_AGENTS.map(role => role.name), tools: all },
+      'worker-important-fast': { models: SEAT_RECOMMENDED_MODELS['worker-important-fast'], fleet: SUB_AGENTS.map(role => role.name), tools: all },
+      'worker-light': { models: SEAT_RECOMMENDED_MODELS['worker-light'], fleet: SUB_AGENTS.map(role => role.name), tools: all },
+      gatekeeper: { models: SEAT_RECOMMENDED_MODELS.gatekeeper, fleet: [], tools: ['net', 'read', 'shell'] },
+      'gatekeeper-deep': { models: SEAT_RECOMMENDED_MODELS['gatekeeper-deep'], fleet: [], tools: ['net', 'read', 'shell'] },
+      'gatekeeper-fallback': { models: SEAT_RECOMMENDED_MODELS['gatekeeper-fallback'], fleet: [], tools: ['net', 'read', 'shell'] },
+      reviewer: { models: SEAT_RECOMMENDED_MODELS.reviewer, fleet: [], tools: ['net', 'read', 'shell'] },
     },
     routing: { classes: ROUTING_CLASSES, worker_seats: WORKER_SEAT_IDS, frontend_seats: FRONTEND_SEAT_IDS },
   };

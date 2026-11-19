@@ -12,7 +12,7 @@ import {
   type AgentRuntimeProbeV1,
   type AgentRuntimesCacheV1,
 } from '../../src/core/board/agents-settings';
-import { DEFAULT_SEATS_CONFIG, ROUTING_CLASSES, SEAT_IDS, decodeSeatsConfig, decodeSeatsSettings, type SeatRoutingV1 } from '../../src/core/board/seats-settings';
+import { DEFAULT_SEATS_CONFIG, MODEL_FAMILY_LABELS, ROUTING_CLASSES, SEAT_IDS, WORKER_SEAT_IDS, decodeSeatsConfig, decodeSeatsSettings, type SeatRoutingV1 } from '../../src/core/board/seats-settings';
 import { readSeatsSettings, seatsSettingsWriteRoute, SEATS_CONFIGURATION_FAILURES } from '../../src/effects/operator/seats-settings-route';
 import { applySeatsSettings, readSeatsConfiguration } from '../../src/effects/board/seats-configuration';
 import { buildSeatLaunch } from '../../src/core/board/seat-launch';
@@ -520,7 +520,7 @@ async function seats(harness: Harness): Promise<ReturnType<typeof decodeSeatsSet
 const filesUnder = (root: string): string[] => readdirSync(root, { recursive: true, encoding: 'utf8' }).sort();
 
 describe('seat settings contract without transport', () => {
-  test('Claude advisors use the runtime range, round-trip on save, and reject other runtimes and models', async () => {
+  test('Claude advisors use the Claude families, round-trip on save, and reject other runtimes and models', async () => {
     const home = mkdtempSync(join(tmpdir(), 'seats-advisor-'));
     cleanups.push(() => rmSync(home, { recursive: true, force: true }));
     mkdirSync(join(home, '.repo-harness'));
@@ -530,7 +530,7 @@ describe('seat settings contract without transport', () => {
     const { advisor_model: _omitted, ...withoutAdvisor } = initial.config['worker-important'];
     const section = { ...DEFAULT_SEATS_CONFIG, 'worker-important': withoutAdvisor };
     expect(decodeSeatsConfig(section)['worker-important'].advisor_model).toBeNull();
-    for (const advisor_model of [...initial.ranges.runtimes.find(runtime => runtime.id === 'claude')!.models, null]) {
+    for (const advisor_model of [...Object.keys(MODEL_FAMILY_LABELS), null]) {
       const { revision, ...seats } = readSeatsSettings(env).config;
       const saved = await route.decode({ expected_revision: revision, seats: { ...seats,
         'worker-important': { ...seats['worker-important'], advisor_model } } }, []).execute();
@@ -554,7 +554,9 @@ describe('seat settings contract without transport', () => {
     writeFileSync(join(home, '.repo-harness', 'config.json'), JSON.stringify({ agents: PANE_AGENTS, seats: { ...DEFAULT_SEATS_CONFIG, worker } }));
     const env = { HOME: home }, before = readSeatsSettings(env), route = seatsSettingsWriteRoute(env);
     const addedModels = ['magpie/opencode-go/deepseek-v4.1-flash', 'magpie/group/deepseek-v4.1-flash', 'magpie/zcode/GLM-5.3', 'magpie/zcode/GLM-5.3-Flash'];
-    expect(before.ranges.runtimes.find(runtime => runtime.id === 'pi')?.models).toEqual([model, ...addedModels.slice(0, 2), 'zai/glm-5.3', ...addedModels.slice(2), 'magpie/agy-cli/gemini-4-carbon', 'magpie/agy-cli/gemini-4-neon', ...['gpt-6-luna', 'gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6.1-terra', 'gpt-6-astra', 'gpt-6.1-sol'].map(m => `magpie/codex/${m}`)]);
+    // Each worker seat recommends the owner's worker list (#3252); the Pi ids that it does not name still save.
+    for (const id of WORKER_SEAT_IDS) expect(before.ranges.seats[id].models).toEqual([{ runtime: 'claude', model: 'opus' }, { runtime: 'claude', model: 'sonnet' },
+      { runtime: 'codex', model: 'gpt-6.2-sol' }, { runtime: 'codex', model: 'gpt-6.1-terra' }, { runtime: 'pi', model: 'zai/glm-5.3-flash' }, { runtime: 'pi', model: 'magpie/group/deepseek-v4.1-flash' }]);
     const { revision, ...section } = before.config;
     const saved = await route.decode({ expected_revision: revision, seats: { ...section, advisor: { ...section.advisor, effort: 'medium' } } }, []).execute();
     expect(saved.status).toBe(200);
@@ -645,7 +647,8 @@ describe('seat settings contract without transport', () => {
     expect(Object.keys(settings.defaults)).toEqual([...SEAT_IDS, 'routing']);
     expect(settings.ranges.routing).toEqual({ classes: ROUTING_CLASSES, worker_seats: ['worker', 'worker-deep', 'worker-important', 'worker-important-fast', 'worker-light'],
       frontend_seats: ['worker-important', 'worker-important-fast'] });
-    for (const id of ['gatekeeper', 'gatekeeper-deep', 'gatekeeper-fallback', 'reviewer'] as const) expect(settings.ranges.seats[id]).toEqual({ tools: ['net', 'read', 'shell'], fleet: [] });
+    for (const id of ['gatekeeper', 'gatekeeper-deep', 'gatekeeper-fallback', 'reviewer'] as const) expect(settings.ranges.seats[id]).toEqual({ tools: ['net', 'read', 'shell'], fleet: [],
+      models: [{ runtime: 'codex', model: 'gpt-6.2-sol' }, { runtime: 'codex', model: 'gpt-6.2-astra' }, { runtime: 'pi', model: 'zai/glm-5.3-flash' }] });
     expect(settings.defaults['gatekeeper-fallback']).toBeNull();
     for (const id of SEAT_IDS.filter(id => id !== 'gatekeeper-fallback')) expect(settings.defaults[id]?.tools).toEqual(expect.arrayContaining(['net']));
   });

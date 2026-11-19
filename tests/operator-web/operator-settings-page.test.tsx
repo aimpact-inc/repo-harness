@@ -194,15 +194,18 @@ describe('agents page seats section', () => {
     expect(choice('Off').getAttribute('aria-pressed')).toBe('true');
   });
 
-  test('a typed model id outside the recommended list becomes the chosen model and saves (#3250)', async () => {
+  test('the seat offers its recommended models on its runtime, and a typed id outside them becomes the chosen model and saves (#3250, #3252)', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     await mount(seatsProps(posts));
     await click(pick('Important worker'));
     const card = '[data-seat-card="worker-important"]';
+    const offered = () => [...document.querySelectorAll(`${card} [role="group"][aria-label="Model"] button`)].map(button => button.textContent);
+    expect(offered()).toEqual(['Host default', 'opus', 'sonnet']);
     await typeText(`${card} [data-model-input]`, 'claude-opus-9');
     await leaveField(`${card} [data-model-input]`);
     const chosen = () => [...document.querySelectorAll<HTMLButtonElement>(`${card} [role="group"][aria-label="Model"] button`)].find(button => button.textContent === 'claude-opus-9');
     expect(chosen()?.getAttribute('aria-pressed')).toBe('true');
+    expect(offered()).toEqual(['Host default', 'opus', 'sonnet', 'claude-opus-9']);
     // Picking the active runtime again changes nothing, so the typed id stays.
     await click(buttonWithText('Claude Code'));
     expect(chosen()?.getAttribute('aria-pressed')).toBe('true');

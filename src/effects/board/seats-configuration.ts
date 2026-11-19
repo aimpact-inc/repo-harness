@@ -16,13 +16,14 @@ import {
   type SeatRoutingV1,
   type SeatId,
   type SeatRuntime,
+  type SeatRangeV1,
   type SeatRuntimeRangeV1,
   type SeatsConfigV1,
   type SeatsRangesV1,
   type SeatsSettingsResultV1,
   type SeatTool,
 } from '../../core/board/seats-settings';
-import { RECOMMENDED_MODELS } from '../../core/board/recommended-models';
+import { SEAT_RECOMMENDED_MODELS } from '../../core/board/recommended-models';
 import {
   EFFORT_LEVELS,
   MANAGED_AGENTS,
@@ -58,7 +59,7 @@ const without = (...excluded: SeatTool[]): readonly SeatTool[] => SEAT_TOOLS.fil
  * included, and the Codex review run in Herdr seats; the orchestrator does not edit (#1472); the advisor may edit
  * for its proposals (owner decision, #2032) and does not write GitHub (#1472).
  */
-const SEAT_RANGES: SeatsRangesV1['seats'] = {
+const SEAT_ACCESS: { readonly [seat in SeatId]: Omit<SeatRangeV1, 'models'> } = {
   orchestrator: { fleet: READ_ONLY_SUB_AGENTS, tools: without('edit') },
   advisor: { fleet: READ_ONLY_SUB_AGENTS, tools: without('gh') },
   worker: { fleet: MANAGED_AGENTS, tools: SEAT_TOOLS },
@@ -71,12 +72,13 @@ const SEAT_RANGES: SeatsRangesV1['seats'] = {
   'gatekeeper-fallback': { fleet: [], tools: ['net', 'read', 'shell'] },
   reviewer: { fleet: [], tools: ['net', 'read', 'shell'] },
 };
+const SEAT_RANGES = Object.fromEntries(SEAT_IDS.map(id => [id, { models: SEAT_RECOMMENDED_MODELS[id], ...SEAT_ACCESS[id] }])) as SeatsRangesV1['seats'];
 
 /** Pi takes fleet roles only on a Codex model behind `magpie/codex/` (`seatTakesFleet`). */
 const RUNTIME_RANGES: Readonly<Record<SeatRuntime, Omit<SeatRuntimeRangeV1, 'id' | 'enabled'>>> = {
-  claude: { models: RECOMMENDED_MODELS.claude, effort: true, fleet: true },
-  codex: { models: RECOMMENDED_MODELS.codex, effort: true, fleet: true },
-  pi: { models: RECOMMENDED_MODELS.pi, effort: true, fleet: true },
+  claude: { effort: true, fleet: true },
+  codex: { effort: true, fleet: true },
+  pi: { effort: true, fleet: true },
 };
 
 export function seatsRanges(enabledRuntimes: readonly string[]): SeatsRangesV1 {
@@ -121,7 +123,7 @@ export function readSeatsConfiguration(env: NodeJS.ProcessEnv = process.env): Se
   return { revision: document.revision, seats: decodeSeatsSection(document.config.seats), enabled_runtimes: enabledRuntimesOf(document.config) };
 }
 
-/** The model id is the user's (#3250): the request decoder owns its shape, and `models` in the ranges only recommends. */
+/** The model id is the user's (#3250): the request decoder owns its shape, and the seat's `models` in the ranges only recommends. */
 function checkEffort(subject: string, model: SeatModelV1, runtimeId: SeatRuntime): void {
   const runtime = RUNTIME_RANGES[runtimeId];
   if (model.effort !== null && (!runtime.effort || !EFFORT_LEVELS.includes(model.effort))) {
