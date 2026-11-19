@@ -1,6 +1,6 @@
 import { parseJsonText } from '../../core/evidence/file-syntax';
 import { existsSync, lstatSync, readFileSync } from 'fs';
-import { join } from 'path';
+import { basename, dirname, isAbsolute, join, normalize, sep } from 'path';
 import { isDeepStrictEqual } from 'node:util';
 import { MANAGED_TAG, isRepoHarnessManagedHookCommand } from '../../core/adoption/managed-hook-config';
 import { CLAUDE_ROOT_CONFIG_BACKUP, CODEGRAPH_MCP_SELECTOR, LEGACY_CODEGRAPH_ALLOWED_TOOLS_SELECTOR, claudeFragmentOwner } from '../../core/host-config/claude-config';
@@ -130,23 +130,25 @@ const MACHINE_EXEC = `exec ${QUOTED} ${QUOTED}`;
 const TAGGED = `: ${MANAGED_TAG}; `;
 
 /**
- * True when a quoted path of a released command is the path of an existing
- * regular file with the released name, and no segment of it is option-shaped.
- * The text inside the quotes is proved by the file system, not by its shape:
- * any other text gets a record with no text (I1, #3237).
+ * True when a quoted path of a released command is, by this platform's path
+ * rules, the path of an existing regular file with the released name (and
+ * parent directory), and no segment of it is option-shaped. The text inside
+ * the quotes is proved by the file system, not by its shape: any other text
+ * gets a record with no text (I1, #3237).
  */
-function isReleasedPath(quoted: string, names: readonly string[]): boolean {
+function isReleasedPath(quoted: string, names: readonly string[], parent?: string): boolean {
   const path = quoted.replaceAll(String.raw`'\''`, "'");
-  const segments = path.split(/[\\/]/);
-  if (!/^(?:\/|[A-Za-z]:[\\/])/.test(path) || !names.includes(segments.at(-1)!) || segments.some((segment) => /(?:^|\s)-/.test(segment))) return false;
-  return lstatSync(path, { throwIfNoEntry: false })?.isFile() === true;
+  if (!isAbsolute(path) || !names.includes(basename(path)) || (parent !== undefined && basename(dirname(path)) !== parent)
+    || normalize(path).split(sep).some((segment) => /(?:^|\s)-/.test(segment))) return false;
+  // Any failed lookup is a failed proof; its error would name the path, which can hold a user's text (I1).
+  try { return lstatSync(path).isFile(); } catch { return false; }
 }
 
 /** True when the command is one that a release wrote with this tail: `exec repo-harness-hook` before v0.26.6, `MACHINE_EXEC` since. */
 function isReleasedExec(command: string, head: string, tail: string): boolean {
   if (command === `${head}exec repo-harness-hook${tail}`) return true;
   const [, bun, bundle] = new RegExp(`^${escapeRegExp(head)}${MACHINE_EXEC}${escapeRegExp(tail)}$`).exec(command) ?? [];
-  return bun !== undefined && isReleasedPath(bun, ['bun', 'bun.exe']) && /[\\/]dist[\\/]hook-entry\.js$/.test(bundle!) && isReleasedPath(bundle!, ['hook-entry.js']);
+  return bun !== undefined && isReleasedPath(bun, ['bun', 'bun.exe']) && isReleasedPath(bundle!, ['hook-entry.js'], 'dist');
 }
 
 /**
