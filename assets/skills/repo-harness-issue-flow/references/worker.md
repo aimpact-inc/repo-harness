@@ -187,6 +187,19 @@ recorded at write time does.
   active`, the PR URL, the head SHA and the CI state, in the shape of
   `templates.md` § issue claim status: not wrapped in a fence, header first.
 
+Add the optional `## Rule opportunity` section (`templates.md`) when CI or
+a review corrected the work, when you copied an old path, or when one
+check would have saved a round. One marker line for each case:
+
+```text
+Rule-opportunity: <theme-key> | example: <path>:<line> | check: <architecture | type | check | test> — <one sentence>
+```
+
+`check` names the highest ladder level that works: `architecture`, `type`,
+`check` (a check whose error names the fix) or `test`. Do not default to
+`check`. The marker is optional and experimental (#3257). It blocks
+nothing.
+
 ### 6.1 Architecture slice in the PR
 
 The PR body carries the changed slice when this branch changes
