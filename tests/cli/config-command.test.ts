@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process';
+import { seedGlobalPackageFixture } from '../helpers/install-ownership';
 import { afterEach, expect, test } from 'bun:test';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -27,6 +29,51 @@ function fixture() {
     openHostConfigGate({ env }).apply([{ path, fragments: [{ owner, selector, kind: 'add', strategy: jsonFragment, value }] }]);
   return { home, env, path, root, ledgerPath, ledger, add };
 }
+
+test.skipIf(process.platform === 'win32')('Antigravity keeps a user hook member and removes only its recorded member from restored containers', () => {
+  const { home, env, ledger } = fixture();
+  env.PATH = join(home, 'bin');
+  env.TMPDIR = home;
+  mkdirSync(env.PATH);
+  seedGlobalPackageFixture(env);
+  const cli = join(import.meta.dir, '../../src/cli/index.ts');
+  const run = (...args: string[]) => {
+    const result = spawnSync(process.execPath, ['--no-env-file', '--config=/dev/null', cli, ...args], { cwd: home, env, encoding: 'utf8' });
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    return result.stdout;
+  };
+  const dir = join(home, '.gemini', 'config');
+  const hooks = join(dir, 'hooks.json');
+  mkdirSync(dir, { recursive: true });
+  const user = '{"repo-harness": {"enabled": false}, "custom": {"enabled": true}}\n';
+  writeFileSync(hooks, user);
+  const install = () => run('install', '--target', 'antigravity');
+  expect(install()).toContain('host_config_override_skipped');
+  expect(readFileSync(hooks, 'utf8')).toBe(user);
+  writeFileSync(hooks, '{"custom": {"enabled": true}}\n');
+  install();
+  expect(Object.keys(JSON.parse(readFileSync(hooks, 'utf8')))).toEqual(['custom', 'repo-harness']);
+  run('uninstall');
+  expect(JSON.parse(readFileSync(hooks, 'utf8'))).toEqual({ custom: { enabled: true } });
+  expect(ledger().files[hooks]).toBeUndefined();
+
+  rmSync(join(home, '.gemini'), { recursive: true });
+  for (const revert of [['uninstall', '--target', 'antigravity'], ['config', 'restore', hooks]]) {
+    install();
+    const installed = readFileSync(hooks, 'utf8');
+    const restored = `\n ${installed.trim()} \n`;
+    rmSync(hooks);
+    writeFileSync(hooks, restored);
+    expect(restored).not.toBe(installed);
+    run(...revert, '--dry-run');
+    expect(readFileSync(hooks, 'utf8')).toBe(restored);
+    run(...revert);
+    expect(JSON.parse(readFileSync(hooks, 'utf8'))).toEqual({});
+    expect(lstatSync(dir).isDirectory()).toBe(true);
+    expect(ledger().files[hooks]).toBeUndefined();
+    rmSync(join(home, '.gemini'), { recursive: true });
+  }
+}, 30_000);
 
 test('status lists hashes and states with no value, names an unknown baseline and old backups, and creates no vault or lock', () => {
   const f = fixture();

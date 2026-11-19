@@ -14,25 +14,26 @@ import { runUserUninstall } from '../installer/uninstall';
  */
 
 import { existsSync, readFileSync } from 'fs';
-import type { Location, TargetId } from '../installer/types';
+import type { DefaultTargetId, Location, TargetId } from '../installer/types';
 import { ALL_TARGETS, getTarget, listTargetIds } from '../installer/targets/registry';
 import { planJsonConfigMigration } from '../installer/json-config-migration';
 import { planFile, type PlannedFragment } from '../../core/host-config/plan';
 import { NO_OVERRIDES, formatOverride, parseOverride, unmatchedOverrides, type OverrideSelection } from '../../core/host-config/override';
 import type { FragmentRecord, SkippedOverride } from '../../core/host-config/types';
-import { openHostConfigGate, type HostConfigFileChange, type HostConfigGate } from '../../effects/host-config/gate';
+import { ANTIGRAVITY_HOOK_SELECTOR, antigravityHooksPath, openHostConfigGate, resolveUserConfigFile, type HostConfigFileChange, type HostConfigGate } from '../../effects/host-config/gate';
 import { hostConfigPaths, resolveHostPath } from '../../effects/host-config/store';
 
-export type InstallTargetSpec = 'codex' | 'claude' | 'both';
+export type InstallTargetSpec = DefaultTargetId | 'both';
+export type AdapterTargetSpec = TargetId | 'both';
 
 export interface InstallCommandOptions {
-  target: InstallTargetSpec;
+  target: AdapterTargetSpec;
   location: Location;
   overrides?: OverrideSelection;
 }
 
 export interface UninstallCommandOptions {
-  target: InstallTargetSpec;
+  target: AdapterTargetSpec;
   location: Location;
   dryRun?: boolean;
   removeEditedBlocks?: readonly string[];
@@ -44,7 +45,7 @@ export interface InstallCommandResult {
   lines: string[];
 }
 
-function resolveTargets(spec: InstallTargetSpec) {
+function resolveTargets(spec: AdapterTargetSpec) {
   if (spec === 'both') return [...ALL_TARGETS];
   const t = getTarget(spec);
   if (!t) {
@@ -85,14 +86,14 @@ export function runInstall(opts: InstallCommandOptions): InstallCommandResult {
 export function resolveOverrides(raw: readonly string[], env: NodeJS.ProcessEnv): OverrideSelection {
   if (!raw.length) return NO_OVERRIDES;
   const paths = hostConfigPaths(env);
-  return raw.map(parseOverride).map((entry) => ({ path: resolveHostPath(paths, entry.path), selector: entry.selector }));
+  return raw.map(parseOverride).map((entry) => ({ path: resolveUserConfigFile(env, entry.path, paths), selector: entry.selector }));
 }
 
 /** The host-config changes of each target that the run installs; null `spec` when the run installs no host adapters. */
-function targetChanges(spec: InstallTargetSpec | null, overrides: OverrideSelection) {
+function targetChanges(spec: AdapterTargetSpec | null, overrides: OverrideSelection, env: NodeJS.ProcessEnv) {
   return (spec === null ? [] : resolveTargets(spec)).map((target) => ({
     target,
-    changes: () => target.hostConfigChanges?.('global', { overrides }) ?? null,
+    changes: () => target.hostConfigChanges?.('global', { overrides }, env) ?? null,
   }));
 }
 
@@ -104,7 +105,7 @@ function targetChanges(spec: InstallTargetSpec | null, overrides: OverrideSelect
 export function assertOverridesCarried(spec: InstallTargetSpec | null, overrides: OverrideSelection, env: NodeJS.ProcessEnv): void {
   if (!overrides.length) return;
   const paths = hostConfigPaths(env);
-  const offered = targetChanges(spec, overrides).flatMap(({ changes }) => changes() ?? [])
+  const offered = targetChanges(spec, overrides, env).flatMap(({ changes }) => changes() ?? [])
     .map((change) => ({ path: resolveHostPath(paths, change.path), selectors: change.fragments.map((fragment) => fragment.selector) }));
   const missing = unmatchedOverrides(overrides, offered);
   if (missing.length) {
@@ -135,17 +136,17 @@ function plannedAction(fragment: PlannedFragment): 'add' | 'refresh' | 'override
 }
 
 /** The records that the install plans against: the projected ledger, or for an unrecorded JSON file the adoption that the install runs first. */
-function previewRecords(gate: HostConfigGate, env: NodeJS.ProcessEnv, requested: string, path: string): readonly FragmentRecord[] {
+function previewRecords(gate: HostConfigGate, env: NodeJS.ProcessEnv, requested: string, path: string, migrate: boolean): readonly FragmentRecord[] {
   const recorded = gate.recorded(requested);
-  if (recorded.length) return recorded;
+  if (recorded.length || !migrate) return recorded;
   const adoption = planJsonConfigMigration(env, [requested])?.files.find((file) => file.path === requested)?.adoption;
   return (adoption?.fragments ?? []).map((fragment) => ({ file: path, ...fragment }));
 }
 
-function previewFile(gate: HostConfigGate, env: NodeJS.ProcessEnv, change: HostConfigFileChange): HostConfigPreviewItem[] {
-  const path = resolveHostPath(hostConfigPaths(env), change.path);
+function previewFile(gate: HostConfigGate, env: NodeJS.ProcessEnv, change: HostConfigFileChange, migrate: boolean): HostConfigPreviewItem[] {
+  const path = resolveUserConfigFile(env, change.path);
   const content = existsSync(path) ? readFileSync(path, 'utf8') : '';
-  const plan = planFile(path, content, change.fragments, previewRecords(gate, env, change.path, path));
+  const plan = planFile(path, content, change.fragments, previewRecords(gate, env, change.path, path, migrate));
   return [
     ...plan.fragments.filter((fragment) => fragment.edit.removed !== fragment.edit.inserted)
       .map((fragment) => ({ path, selector: fragment.selector, action: plannedAction(fragment) })),
@@ -159,15 +160,15 @@ function previewFile(gate: HostConfigGate, env: NodeJS.ProcessEnv, change: HostC
  * schema move would leave it and writes nothing. A target that cannot be
  * planned is listed with the reason, never with a guessed value.
  */
-export function previewHostConfig(spec: InstallTargetSpec | null, overrides: OverrideSelection, env: NodeJS.ProcessEnv): HostConfigPreview {
+export function previewHostConfig(spec: AdapterTargetSpec | null, overrides: OverrideSelection, env: NodeJS.ProcessEnv): HostConfigPreview {
   const gate = openHostConfigGate({ env, preview: true });
   const items: HostConfigPreviewItem[] = [];
   const unplanned: { target: TargetId; reason: string }[] = [];
-  for (const { target, changes } of targetChanges(spec, overrides)) {
+  for (const { target, changes } of targetChanges(spec, overrides, env)) {
     try {
       const built = changes();
       if (built === null) unplanned.push({ target: target.id, reason: 'its host-config writer lists no items yet' });
-      else items.push(...built.flatMap((change) => previewFile(gate, env, change)));
+      else items.push(...built.flatMap((change) => previewFile(gate, env, change, target.id !== 'antigravity')));
     } catch (error) {
       unplanned.push({ target: target.id, reason: (error as Error).message });
     }
@@ -181,6 +182,12 @@ export function formatHostConfigPreview(preview: HostConfigPreview): string[] {
     ...preview.unplanned.map((entry) => `[host-config] not planned for ${entry.target}: ${entry.reason}`),
     ...preview.notListed.map((writer) => `[host-config] not planned: ${writer}; its writer lists no items yet`),
   ];
+}
+
+/** Explicit updates only refresh a member that this installation already records. */
+export function recordedAntigravityHooks(env: NodeJS.ProcessEnv, preview: boolean): boolean {
+  return openHostConfigGate({ env, preview }).recorded(antigravityHooksPath(env)).some((record) =>
+    record.owner === 'core' && record.selector === ANTIGRAVITY_HOOK_SELECTOR && record.kind === 'add');
 }
 
 export function runUninstall(opts: UninstallCommandOptions): InstallCommandResult {

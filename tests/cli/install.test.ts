@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { installStateFixturePath, recordLegacyInstallOwnership, withTempHome } from '../helpers/install-ownership';
+import { installStateFixturePath, recordLegacyInstallOwnership, seedGlobalPackageFixture, withTempHome } from '../helpers/install-ownership';
 import * as fs from 'fs';
 import * as path from 'path';
 import { spawnSync } from 'child_process';
@@ -16,6 +16,83 @@ import { buildManagedHooks, compareManagedHookProjection, hookSelector, managedS
 
 const ROOT = path.join(import.meta.dir, '..', '..');
 const CLI = path.join(ROOT, 'src/cli/index.ts');
+
+function antigravityCli(home: string, args: readonly string[], bunInstall = path.join(home, '.bun')) {
+  const bin = path.join(home, 'probe-bin');
+  fs.mkdirSync(bin, { recursive: true });
+  return spawnSync(process.execPath, ['--no-env-file', '--config=/dev/null', CLI, ...args], {
+    cwd: home, env: { HOME: home, PATH: bin, BUN_INSTALL: bunInstall, TMPDIR: home }, encoding: 'utf8',
+  });
+}
+
+test.skipIf(process.platform === 'win32')('Antigravity refuses a link or wrong entry type at each hook path component', () => {
+  withTempHome('rh-antigravity-path', (home) => {
+    const hooks = path.join(home, '.gemini/config/hooks.json');
+    const target = ['--target', 'antigravity'];
+    const install = antigravityCli(home, ['install', ...target]);
+    expect(install.status, install.stderr).toBe(0);
+    const codex = path.join(home, '.codex/hooks.json');
+    expect(antigravityCli(home, ['install', '--target', 'codex', '--location', 'global']).status).toBe(0);
+    const original = fs.readFileSync(hooks);
+    const originalCodex = fs.readFileSync(codex);
+    const commands = [
+      ['install', ...target], ['install', ...target, '--dry-run'],
+      ['update', ...target], ['update', ...target, '--dry-run'],
+      ['uninstall', ...target], ['uninstall', ...target, '--dry-run'],
+      ['config', 'status'], ['config', 'diff', hooks],
+      ['config', 'restore', hooks], ['config', 'restore', hooks, '--dry-run'],
+    ];
+    for (const entry of [path.join(home, '.gemini'), path.dirname(hooks), hooks]) {
+      const parked = path.join(home, 'parked');
+      fs.renameSync(entry, parked);
+      const referent = path.join(parked, path.relative(entry, hooks));
+      const targetEntry = entry === hooks ? codex : parked;
+      fs.symlinkSync(targetEntry, entry, entry === hooks ? 'file' : 'dir');
+      for (const command of commands) {
+        const result = antigravityCli(home, command);
+        expect(result.status, command.join(' ')).not.toBe(0);
+        expect(result.stdout + result.stderr).toContain('antigravity_hooks_path_linked');
+      }
+      expect(fs.readlinkSync(entry)).toBe(targetEntry);
+      expect(fs.readFileSync(referent)).toEqual(original);
+      expect(fs.readFileSync(codex)).toEqual(originalCodex);
+      fs.unlinkSync(entry);
+      if (entry === hooks) fs.mkdirSync(entry); else fs.writeFileSync(entry, 'fake');
+      const preview = antigravityCli(home, ['install', ...target, '--dry-run']);
+      expect(preview.stdout + preview.stderr).toContain('antigravity_hooks_path_linked');
+      if (entry === hooks) fs.rmdirSync(entry); else fs.unlinkSync(entry);
+      fs.renameSync(parked, entry);
+    }
+  });
+}, 30_000);
+
+test.skipIf(process.platform === 'win32')('default install and update exclude Antigravity, and explicit update refreshes only a recorded member', () => {
+  withTempHome('rh-antigravity-opt-in', (home) => {
+    const hooks = path.join(home, '.gemini/config/hooks.json');
+    const target = ['--target', 'antigravity'];
+    expect(antigravityCli(home, ['update', ...target, '--no-cli']).status).toBe(0);
+    expect(fs.existsSync(path.dirname(path.dirname(hooks)))).toBe(false);
+    expect(antigravityCli(home, ['install', ...target]).status).toBe(0);
+    const installed = fs.readFileSync(hooks, 'utf8');
+    const bunInstall = path.join(home, 'moved-bun');
+    seedGlobalPackageFixture({ HOME: home, BUN_INSTALL: bunInstall }, { mutable: true });
+    const defaultInstall = antigravityCli(home, ['install', '--location', 'global'], bunInstall);
+    expect(defaultInstall.status, defaultInstall.stderr).toBe(0);
+    expect(defaultInstall.stdout).toContain('[claude]');
+    expect(defaultInstall.stdout).toContain('[codex]');
+    for (const command of ['install', 'update']) {
+      const preview = antigravityCli(home, [command, '--dry-run', '--json'], bunInstall);
+      expect(preview.status, preview.stderr).toBe(0);
+      const { host_config } = JSON.parse(preview.stdout);
+      expect(host_config.items.every(({ path: file }: { path: string }) => file !== hooks)).toBe(true);
+      expect(host_config.unplanned.some(({ target }: { target: string }) => target === 'antigravity')).toBe(false);
+    }
+    expect(fs.readFileSync(hooks, 'utf8')).toBe(installed);
+    const update = antigravityCli(home, ['update', ...target, '--no-cli'], bunInstall);
+    expect(update.status, update.stderr).toBe(0);
+    expect(fs.readFileSync(hooks, 'utf8')).toContain(path.join(bunInstall, 'install/global/node_modules/repo-harness/dist/hook-entry.js'));
+  });
+}, 30_000);
 
 describe('issue 698 host configuration ownership', () => {
   test('issue 698 installs and restores only the top-level TOML key', () => {

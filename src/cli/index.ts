@@ -11,7 +11,7 @@ import { globalRuntimeScope, withRuntimeTransactionLock } from '../effects/locki
 
 import { Command, CommanderError } from 'commander';
 import { resolve } from 'path';
-import { assertOverridesCarried, formatHostConfigPreview, previewHostConfig, resolveOverrides, runInstall, runUninstall } from './commands/install';
+import { assertOverridesCarried, formatHostConfigPreview, previewHostConfig, recordedAntigravityHooks, resolveOverrides, runInstall, runUninstall } from './commands/install';
 import { migrateInstallState } from './installer/install-state-migration';
 import { PLUGIN_IDS, type PluginId } from '../core/skill-surface/plugin-manifest';
 import { writeAllSync } from './runtime/write-all-sync';
@@ -61,7 +61,7 @@ import { installStateStatus, readInstallState, rollbackInstallSelection } from '
 import { enabledPlugins } from './installer/install-state';
 import { runAdoptionPlan } from './commands/adoption-plan';
 import { buildCommandsCommand, recordCommandPlugin } from './commands/commands';
-import { assertTarget, assertLocation, assertAdoptionMode } from './commands/validators';
+import { assertAdapterTarget, assertTarget, assertLocation, assertAdoptionMode } from './commands/validators';
 import { migrateInstallStateLocked, registerArchitecturePlugin, runGlobalRuntimeBootstrap, runTransactionalRuntimeRefresh, runTransactionalSelectionProjection, type GlobalRuntimeCommandOptions } from './runtime-transaction';
 import { runCandidateRuntimeReconciliation } from './candidate-runtime-reconciliation';
 
@@ -100,6 +100,7 @@ export const CLI_PORTS: {
 };
 
 const TARGET_HELP = 'codex|claude|both';
+const ADAPTER_TARGET_HELP = `${TARGET_HELP}|antigravity`;
 const LOCATION_HELP = 'global';
 
 const OVERRIDE_HELP = 'Let rh write the fragment at <path>#<selector> over a value that rh did not write (repeatable)';
@@ -118,8 +119,8 @@ export function buildProgram(): Command {
 
   program
     .command('install')
-    .description('Install the repo-harness global runtime; with --location, install only hook adapters')
-    .option('--target <target>', `Target host: ${TARGET_HELP}`, 'both')
+    .description('Install the global runtime or, for --location global or --target antigravity, only hook adapters')
+    .option('--target <target>', `Target host: ${ADAPTER_TARGET_HELP}`, 'both')
     .option('--plugins <ids>', `Enable exactly these comma-separated plugins (${PLUGIN_IDS.join('|')}); omitted, every plugin that this host can run`)
     .option('--no-plugins', 'Enable core only')
     .option('--dry-run', 'Print the install/keep/remove plugin plan without writing')
@@ -136,8 +137,30 @@ export function buildProgram(): Command {
     .option('--override <path#selector>', OVERRIDE_HELP, collectOption, [])
     .option('--json', 'Output JSON instead of human-readable text')
     .action(async (rawOpts: GlobalRuntimeCommandOptions & { location?: string; state?: boolean; rollback?: boolean }, cmd: Command) => {
-      const target = assertTarget(rawOpts.target, 'install');
+      const target = assertAdapterTarget(rawOpts.target, 'install');
       const location = rawOpts.location === undefined ? undefined : assertLocation(rawOpts.location, 'install');
+      // Adapter-only installs validate the install-state protocol under the runtime lock.
+      const installAdapters = () => withRuntimeTransactionLock(globalRuntimeScope(process.env), () => {
+        migrateInstallState(process.env);
+        readInstallState();
+        return runInstall({ target, location: location ?? 'global' });
+      });
+      if (target === 'antigravity') {
+        if (rawOpts.state || rawOpts.rollback || rawOpts.plugins !== undefined || rawOpts.override?.length || rawOpts.reportLanguage !== undefined || rawOpts.withObsidianSkills) {
+          throw new Error('rh install --target antigravity only installs the hook adapter');
+        }
+        if (rawOpts.hooks === false) throw new Error('rh install --target antigravity requires hooks');
+        if (rawOpts.dryRun) {
+          const hostConfig = previewHostConfig(target, [], process.env);
+          if (rawOpts.json) console.log(JSON.stringify({ host_config: hostConfig }, null, 2));
+          else for (const line of formatHostConfigPreview(hostConfig)) console.log(line);
+          process.exit(hostConfig.unplanned.length ? 1 : 0);
+        }
+        const result = installAdapters();
+        if (rawOpts.json) console.log(JSON.stringify(result, null, 2));
+        else for (const line of result.lines) console.log(line);
+        process.exit(result.exitCode);
+      }
       if (rawOpts.reportLanguage !== undefined && rawOpts.location !== undefined) {
         throw new Error('--report-language cannot be combined with --location');
       }
@@ -182,15 +205,7 @@ export function buildProgram(): Command {
         await runGlobalRuntimeBootstrap(rawOpts, cmd);
         return;
       }
-      // Adapter-only installs still mutate a core-owned host surface. Validate
-      // the install-state protocol before touching it so an older state
-      // cannot be mixed with the current route projection.
-      const installAdapters = () => {
-        migrateInstallState(process.env);
-        readInstallState();
-        return runInstall({ target, location });
-      };
-      const result = withRuntimeTransactionLock(globalRuntimeScope(process.env), installAdapters);
+      const result = installAdapters();
       for (const line of result.lines) console.log(line);
       process.exit(result.exitCode);
     });
@@ -254,7 +269,7 @@ export function buildProgram(): Command {
   program
     .command('update')
     .description('Update the global repo-harness CLI and user-level managed runtime')
-    .option('--target <target>', `Host target for adapters and runtime skills: ${TARGET_HELP}`, 'both')
+    .option('--target <target>', `Host target: ${ADAPTER_TARGET_HELP}. Antigravity refreshes its recorded hook locally`, 'both')
     .option('--version <version>', 'Install a specific repo-harness package version')
     .option('--channel <channel>', 'Install package channel: latest|next')
     .option('--no-cli', 'Skip installing the repo-harness CLI globally')
@@ -286,7 +301,30 @@ export function buildProgram(): Command {
       dryRun?: boolean;
       json?: boolean;
     }) => {
-      const target = assertTarget(rawOpts.target, 'update');
+      const target = assertAdapterTarget(rawOpts.target, 'update');
+      if (target === 'antigravity') {
+        if (rawOpts.version || rawOpts.channel || rawOpts.override.length || rawOpts.reportLanguage !== undefined || rawOpts.withObsidianSkills || rawOpts.withExternalSkills || rawOpts.configureCodegraph) {
+          throw new Error('rh update --target antigravity only refreshes the recorded hook adapter; it does not install packages');
+        }
+        const env = process.env;
+        if (rawOpts.dryRun) {
+          const selected = rawOpts.hooks !== false && recordedAntigravityHooks(env, true);
+          const hostConfig = previewHostConfig(selected ? target : null, [], env);
+          if (rawOpts.json) console.log(JSON.stringify({ host_config: hostConfig, candidate_changes: 'unavailable' }, null, 2));
+          else for (const line of formatHostConfigPreview(hostConfig)) console.log(line);
+          process.exit(hostConfig.unplanned.length ? 1 : 0);
+        }
+        const result = rawOpts.hooks === false ? { exitCode: 0, lines: ['[antigravity] hooks skipped'] }
+          : withRuntimeTransactionLock(globalRuntimeScope(env), () => {
+            migrateInstallState(env);
+            return recordedAntigravityHooks(env, false)
+              ? runInstall({ target, location: 'global' })
+              : { exitCode: 0, lines: ['[antigravity] no recorded hook member; run rh install --target antigravity to install it'] };
+          });
+        if (rawOpts.json) console.log(JSON.stringify(result, null, 2));
+        else for (const line of result.lines) console.log(line);
+        process.exit(result.exitCode);
+      }
       if (rawOpts.channel !== undefined && !['latest', 'next'].includes(rawOpts.channel)) {
         console.error('rh update: invalid --channel (expected: latest, next)');
         process.exit(2);
@@ -340,14 +378,14 @@ export function buildProgram(): Command {
   program
     .command('uninstall')
     .description('Remove owned user-level configuration; preserve user changes and static history')
-    .option('--target <target>', `Target host: ${TARGET_HELP}`, 'both')
+    .option('--target <target>', `Target host: ${ADAPTER_TARGET_HELP}`, 'both')
     .option('--location <location>', `Install location: ${LOCATION_HELP}`, 'global')
     .option('--dry-run', 'Preview cleanup without filesystem writes')
     .option('--remove-edited-block <path>', 'Also remove the rules block in this file when you edited it; the whole file goes to the vault first (repeatable)', (value: string, previous: string[]) => [...previous, resolve(value)], [] as string[])
     .option('--with-tools', 'Also remove herdr-core, its hc link and the user PATH entry that rh installed, where they still hold what rh wrote')
     .option('--json', 'Output the cleanup result as JSON')
     .action((rawOpts: { target: string; location: string; dryRun?: boolean; json?: boolean; removeEditedBlock: string[]; withTools?: boolean }) => {
-      const target = assertTarget(rawOpts.target, 'uninstall');
+      const target = assertAdapterTarget(rawOpts.target, 'uninstall');
       const location = assertLocation(rawOpts.location, 'uninstall');
       if (rawOpts.withTools && target !== 'both') {
         console.error('rh uninstall: --with-tools needs --target both; the shared tools serve both hosts');

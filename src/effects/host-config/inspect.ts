@@ -5,7 +5,8 @@ import { fileFormatOf, fragmentFormat } from '../../core/host-config/registry';
 import { HostConfigError, type FileFormat, type FileRecord, type FragmentRecord, type HostConfigLedger, type Sha256 } from '../../core/host-config/types';
 import { globalRuntimeScope, runtimeTransactionRoot } from '../locking/runtime-transaction-lock';
 import { pathRecordIsCurrent } from './path-records';
-import { hostConfigPaths, observeFile, readLedger, resolveHostPath, vaultPath, writeLedger, type HostConfigPaths } from './store';
+import { antigravityHostPath, checkAntigravityPath, resolveUserConfigFile } from './gate';
+import { hostConfigPaths, observeFile, readLedger, vaultPath, writeLedger, type HostConfigPaths } from './store';
 
 /**
  * Read-only views of the host-config ledger for `rh config`, and the GC of
@@ -96,7 +97,9 @@ function committedMatches(record: FileRecord, current: CurrentFile): boolean {
 export function configStatus(env: NodeJS.ProcessEnv): ConfigStatus {
   const paths = hostConfigPaths(env);
   const ledger = readLedger(paths);
+  const antigravity = antigravityHostPath(env, paths);
   const files = Object.entries(ledger.files).map(([path, record]): FileStatus => {
+    if (path === antigravity) checkAntigravityPath(path);
     const { current, bytes } = currentOf(path);
     const content = decoded(bytes);
     return {
@@ -143,7 +146,7 @@ function provedRhText(record: FragmentRecord, text: string): boolean {
 
 export function configDiff(env: NodeJS.ProcessEnv, target: string, options: { readonly showValues?: boolean } = {}): { readonly path: string; readonly fragments: readonly FragmentDiff[] } {
   const paths = hostConfigPaths(env);
-  const path = resolveHostPath(paths, target);
+  const path = resolveUserConfigFile(env, target, paths);
   const ledger = readLedger(paths);
   const record = ledger.files[path];
   if (!record) throw new HostConfigError('host_config_invalid_state', `rh has no record of this file: ${path}`);

@@ -61,6 +61,8 @@ import {
   type HostConfigPaths,
 } from './store';
 import { isPathInside } from '../path-containment';
+import { requireHome } from '../repo-harness-home';
+import { jsonFragment } from '../../core/host-config/json-fragment';
 import { pathRecordHostRoot, pathRecordIsCurrent, pathRecordProof } from './path-records';
 import {
   discardStagedEntry,
@@ -354,9 +356,63 @@ export function decode(bytes: Buffer | null, path: string): string {
   catch { throw new HostConfigError('host_config_invalid_state', `not UTF-8 text: ${path}`); }
 }
 
+export const ANTIGRAVITY_HOOK_SELECTOR = 'repo-harness';
+
+function antigravityHooksPathAt(home: string): string {
+  return join(home, '.gemini', 'config', 'hooks.json');
+}
+
+export function antigravityHooksPath(env: NodeJS.ProcessEnv): string {
+  return antigravityHooksPathAt(requireHome(env));
+}
+
+/** Canonicalize HOME only. The three entries below it must never resolve through links. */
+export function antigravityHostPath(env: NodeJS.ProcessEnv, paths = hostConfigPaths(env)): HostPath {
+  return antigravityHooksPathAt(resolveHostPath(paths, requireHome(env))) as HostPath;
+}
+
+export class AntigravityHooksPathError extends Error {
+  readonly code = 'antigravity_hooks_path_linked';
+
+  constructor(entry: string, kind: 'regular file' | 'directory') {
+    super(`antigravity_hooks_path_linked: expected a ${kind} at ${entry} without a symbolic link`);
+    this.name = 'AntigravityHooksPathError';
+  }
+}
+
+export function checkAntigravityPath(path: string): void {
+  for (const entry of [dirname(dirname(path)), dirname(path), path]) {
+    const stat = lstatSync(entry, { throwIfNoEntry: false });
+    if (stat && (entry === path ? !stat.isFile() : !stat.isDirectory())) {
+      throw new AntigravityHooksPathError(entry, entry === path ? 'regular file' : 'directory');
+    }
+  }
+}
+
+function resolveUserFile(paths: HostConfigPaths, target: string, antigravity: HostPath, requested: string): HostPath {
+  const absolute = isAbsolute(target) ? resolve(target) : null;
+  if (absolute === requested || absolute === antigravity) {
+    if (isPathInside(paths.harness, antigravity)) throw new HostConfigError('host_config_invalid_path', `Antigravity hooks are inside the repo-harness state directory: ${antigravity}`);
+    checkAntigravityPath(antigravity);
+    return antigravity;
+  }
+  const resolved = resolveHostPath(paths, target);
+  if (resolved === antigravity) checkAntigravityPath(antigravity);
+  return resolved;
+}
+
+/** Host config operations follow legacy host links and keep the exact Antigravity entry. */
+export function resolveUserConfigFile(env: NodeJS.ProcessEnv, target: string, paths = hostConfigPaths(env)): HostPath {
+  return resolveUserFile(paths, target, antigravityHostPath(env, paths), antigravityHooksPath(env));
+}
+
+function isAntigravityFragment(fragment: { readonly owner: string; readonly selector: string }): boolean {
+  return fragment.owner === 'core' && fragment.selector === ANTIGRAVITY_HOOK_SELECTOR;
+}
+
 /** Two aliases of one file are one path. */
-function admitPaths(paths: HostConfigPaths, targets: readonly string[]): HostPath[] {
-  const admitted = targets.map((path) => resolveHostPath(paths, path));
+function admitPaths(paths: HostConfigPaths, targets: readonly string[], resolveFile = (target: string) => resolveHostPath(paths, target)): HostPath[] {
+  const admitted = targets.map(resolveFile);
   if (new Set(admitted).size !== admitted.length) throw new HostConfigError('host_config_invalid_state', 'a call names one path twice');
   ensurePrivateDirectory(paths.vault);
   return admitted;
@@ -466,7 +522,7 @@ function fileFragments(plan: FilePlan, recorded: readonly FragmentRecord[]): Fra
 type FileAdmission = (paths: HostConfigPaths, targets: readonly string[]) => HostPath[];
 
 /** Each record reaches the ledger before its write, so every write has its record. */
-function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileChange[], admit: FileAdmission = admitPaths): HostConfigApplyResult {
+function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileChange[], admit: FileAdmission = admitPaths, antigravity?: HostPath): HostConfigApplyResult {
   const targets = admit(paths, changes.map((change) => change.path));
   const ledger = readLedger(paths);
   const files = { ...ledger.files };
@@ -477,11 +533,19 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
   const written: HostPath[] = [];
   for (const [index, change] of changes.entries()) {
     const path = targets[index]!;
+    const guarded = path === antigravity;
+    if (guarded) checkAntigravityPath(path);
     const { observation, bytes } = observeFile(path);
     const preimage = expectedOf(observation, path);
     const content = decode(bytes, path);
     const recorded = fragments.filter((entry) => entry.file === path);
-    const plan = planFile(path, content, change.fragments, recorded);
+    const requests = guarded ? change.fragments.map((request): FragmentRequest => {
+      if (!isAntigravityFragment(request) || request.strategy !== jsonFragment || request.kind === 'override' || request.selected) {
+        throw new HostConfigError('host_config_invalid_state', `${path}: only the repo-harness hook member can be installed`);
+      }
+      return { ...request, kind: jsonFragment.locate(content, request.selector) ? 'refresh' : 'add' };
+    }) : change.fragments;
+    const plan = planFile(path, content, requests, recorded);
     skipped.push(...plan.skipped);
     const unchanged = plan.result === content;
     // A fragment whose text is already in place is still recorded, but its file is not written.
@@ -493,10 +557,11 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
     const before = { fragments, directories };
     const result = Buffer.from(plan.result, 'utf8');
     const createdDirs = unchanged ? [] : missingDirectories(path);
+    if (guarded) checkAntigravityPath(path);
     const removesUserBytes = !plan.fragments.every(keepsUserBytes);
     const backup = change.backup === 'overrides-only' && !removesUserBytes ? null : backupUserBytes(paths, previous, preimage, bytes, removesUserBytes);
     fragments = [...fragments.filter((entry) => entry.file !== path), ...fileFragments(plan, recorded)];
-    directories = [...directories, ...createdDirs];
+    if (!guarded) directories = [...directories, ...createdDirs];
     files[path] = nextFileRecord(previous, { kind: preimage.existed ? 'text_block' : 'created', backup, baselineUnknown: change.baselineUnknown === true, format: fileFormatOf(change.path) },
       preimage, unchanged ? preimage : { existed: true, sha256: sha256Prefixed(result) });
     persist();
@@ -1402,6 +1467,8 @@ export interface FileRevertInput {
   /** Every record of the file. */
   readonly all: readonly FragmentRecord[];
   readonly filtered: boolean;
+  /** The caller scopes the revert to an exact addition and keeps the container. */
+  readonly preserveContainer?: boolean;
   /** The file before rh; absent for a record that a migration has not written yet, which counts as unknown. */
   readonly baseline?: FileBaseline;
   /** The vault reference of `backup`. */
@@ -1441,8 +1508,8 @@ function planRevertWrite(input: FileRevertInput): FileRevertPlan {
   const format = input.format ?? fileFormatOf(path);
   // A dangling link is still there, so the file is not absent: it and its records stay.
   if (!input.existed && input.requestedPresent) return { entry: { path, action: 'kept_edited', kept: own.map((entry) => entry.selector) }, write: null, record: 'keep', removed: [] };
-  if (!filtered && !input.existed) {
-    return { entry: { path, action: 'already_absent' }, write: null, record: 'drop', removed: all };
+  if (!input.existed && (!filtered || input.preserveContainer)) {
+    return { entry: { path, action: 'already_absent' }, write: null, record: own.length === all.length ? 'drop' : 'keep', removed: own };
   }
   if (!filtered && !input.externalChange && input.committed && (kind === 'created' || (input.hasBackup && backupIsBaseline(input)))) {
     if (kind === 'created') return { entry: { path, action: 'removed' }, write: { kind: 'remove' }, record: 'drop', removed: all };
@@ -1459,6 +1526,9 @@ function planRevertWrite(input: FileRevertInput): FileRevertPlan {
   const changed = result.content !== original;
   const content = Buffer.from(result.content, 'utf8');
   const withKept = (action: HostConfigRevertEntry['action']): HostConfigRevertEntry => result.kept.length ? { path, action, kept: result.kept } : { path, action };
+  if (input.preserveContainer && !remaining.length) {
+    return { entry: withKept(changed ? 'text_removed' : 'released'), write: changed ? { kind: 'replace', content, restores: false } : null, record: 'drop', removed: result.removed };
+  }
   if (filtered || result.kept.length || remaining.length) {
     // The file keeps its record; `committed` follows the write, and an outside edit stays recorded.
     const action = result.kept.length || !removed.size ? 'kept_edited' : changed ? 'text_removed' : 'released';
@@ -1529,29 +1599,32 @@ function matchesFilter(record: FragmentRecord, filter: RevertFilter): boolean {
  * after all files, only in an unfiltered revert; a directory that still holds
  * content keeps its record for a later revert.
  */
-function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined, options: HostConfigRevertOptions, read: LedgerReader): HostConfigRevertEntry[] {
+function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined, options: HostConfigRevertOptions, read: LedgerReader,
+  user?: { readonly resolveFile: (target: string) => HostPath; readonly antigravity: HostPath }): HostConfigRevertEntry[] {
   const dryRun = options.dryRun === true;
   const filter: RevertFilter = { owner: options.owner, selectors: options.selectors };
   const filtered = filter.owner !== undefined || filter.selectors !== undefined;
   const ledger = read(paths);
   const report: HostConfigRevertEntry[] = [];
   const steps: RevertStep[] = [];
-  const targets = only ? only.map((path) => resolveHostPath(paths, path)) : (Object.keys(ledger.files) as HostPath[]);
+  const targets = only ? only.map((path) => user ? user.resolveFile(path) : resolveHostPath(paths, path)) : (Object.keys(ledger.files) as HostPath[]);
   refuseRecordedPaths(ledger, targets);
   const seen = new Set<string>();
   for (const [index, path] of targets.entries()) {
     const record = ledger.files[path];
     if (!record || seen.has(path)) continue;
     seen.add(path);
+    const guarded = path === user?.antigravity;
+    if (guarded) checkAntigravityPath(path);
     const { observation, bytes } = observeFile(path);
     const current = expectedOf(observation, path);
     const all = ledger.fragments.filter((entry) => entry.file === path);
-    const own = all.filter((entry) => matchesFilter(entry, filter));
-    if (filtered && !own.length) continue;
+    const own = all.filter((entry) => matchesFilter(entry, filter) && (!guarded || (isAntigravityFragment(entry) && entry.kind === 'add')));
+    if ((filtered || guarded) && !own.length) continue;
     const plan = planFileRevert({
-      path, format: record.format, kind: record.kind, hasBackup: record.backup !== null, externalChange: record.external_change, committed: isCommitted(record, current),
-      existed: current.existed, requestedPresent: only !== undefined && requestedPresent(only[index]!), bytes, backup: () => readVault(paths, record.backup!), own, all, filtered,
-      baseline: record.baseline, backupReference: record.backup,
+      path, format: record.format, kind: record.kind, hasBackup: !guarded && record.backup !== null, externalChange: record.external_change, committed: isCommitted(record, current),
+      existed: current.existed, requestedPresent: only !== undefined && requestedPresent(only[index]!), bytes, backup: () => readVault(paths, record.backup!), own, all,
+      filtered: filtered || guarded, preserveContainer: guarded, baseline: record.baseline, backupReference: record.backup,
     });
     report.push(plan.entry);
     const removed = new Set(plan.removed);
@@ -1567,11 +1640,15 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
     };
     steps.push(write === null ? { kind: 'release', commit }
       : write.kind === 'remove' ? { kind: 'delete', commit, write: () => removeTarget(path, current) }
-        : { kind: write.restores ? 'restore' : 'delete', commit, write: () => replaceTarget(path, write.content, current) });
+        : { kind: write.restores ? 'restore' : 'delete', commit, write: () => {
+          if (guarded) checkAntigravityPath(path);
+          replaceTarget(path, write.content, current);
+        } });
   }
   if (dryRun) return report;
   const state = retireThenDestroy(paths, ledger, steps);
-  const attempted = filtered ? [] : only ? ledger.directories.filter((directory) => targets.some((path) => isPathInside(directory, path))) : ledger.directories;
+  const attempted = filtered ? [] : ledger.directories.filter((directory) =>
+    (!user || !isPathInside(directory, user.antigravity)) && (!only || targets.some((path) => isPathInside(directory, path))));
   const kept = removeCreatedDirectories(attempted);
   writeLedger(paths, { ...state, directories: state.directories.filter((directory) => !attempted.includes(directory) || kept.includes(directory)) });
   return report;
@@ -1906,8 +1983,12 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
   const paths = hostConfigPaths(env);
   const preview = options.preview === true;
   const read: LedgerReader = preview ? readProjectedLedger : readLedger;
+  const antigravity = antigravityHostPath(env, paths);
+  const requested = antigravityHooksPath(env);
+  const resolveFile = (target: string) => resolveUserFile(paths, target, antigravity, requested);
+  const user = { antigravity, resolveFile };
   const recorded = (path: string) => {
-    const resolved = resolveHostPath(paths, path);
+    const resolved = resolveFile(path);
     return read(paths).fragments.filter((entry) => entry.file === resolved);
   };
   if (preview) {
@@ -1915,13 +1996,13 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
       apply: refusePreview, writePaths: refusePreview, delegate: refusePreview, revertPaths: refusePreview, addUserPathEntry: refusePreview,
       releaseAbsentTools: (port) => releaseAbsentTools(paths, port, true, read),
       keepUserPaths: refusePreview, adoptReplacedPath: refusePreview, adopt: refusePreview, removeUnrecordedText: refusePreview,
-      revert: (only, revertOptions) => revertFiles(paths, only, { ...revertOptions, dryRun: true }, read),
+      revert: (only, revertOptions) => revertFiles(paths, only, { ...revertOptions, dryRun: true }, read, user),
       removeEditedBlock: (path) => removeEditedBlock(paths, path, true, read),
       recorded,
     };
   }
   return {
-    apply: (changes) => applyChanges(paths, changes),
+    apply: (changes) => applyChanges(paths, changes, (layout, targets) => admitPaths(layout, targets, resolveFile), antigravity),
     writePaths: (writes, pathOptions) => writeWholePaths((ledger, path) => admitUserWrite(env, paths, ledger, path), paths, writes, pathOptions ?? {}),
     delegate: (declared, run, pathOptions) => delegateWrites(env, paths, declared, run, pathOptions ?? {}),
     addUserPathEntry: (tool, entry, port) => addUserPathEntry(paths, tool, entry, port),
@@ -1929,7 +2010,7 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
     revertPaths: (only, revertOptions) => revertWholePaths(paths, only, revertOptions ?? {}),
     keepUserPaths: (owner, scope, kept) => keepUserPaths(env, paths, owner, scope, kept),
     adoptReplacedPath: (path, owner, backup, transaction) => adoptReplacedPath(env, paths, path, owner, backup, transaction),
-    revert: (only, revertOptions) => revertFiles(paths, only, revertOptions ?? {}, read),
+    revert: (only, revertOptions) => revertFiles(paths, only, revertOptions ?? {}, read, user),
     adopt: (path, adoption) => adoptFile(paths, path, adoption),
     removeUnrecordedText: (path, expectedSha256, removals) => removeUnrecordedText(paths, path, expectedSha256, removals),
     recorded,

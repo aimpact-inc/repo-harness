@@ -1,12 +1,12 @@
 import { Command } from 'commander';
 import { resolve } from 'node:path';
 import { globalRuntimeScope, withRuntimeTransactionLock } from '../../effects/locking/runtime-transaction-lock';
-import { openHostConfigGate, planPathRevert } from '../../effects/host-config/gate';
+import { openHostConfigGate, planPathRevert, resolveUserConfigFile } from '../../effects/host-config/gate';
 import { repositoryConfigPaths, repositoryRestorePlan, resolveHostConfigRepository, revertRepositoryPaths } from '../../effects/host-config/repository';
 import { HostConfigError } from '../../core/host-config/types';
 import { isPathInside } from '../../effects/path-containment';
 import { collectRetired, configDiff, configStatus, type ConfigStatus, type FragmentDiff, type GcResult } from '../../effects/host-config/inspect';
-import { hostConfigPaths, hostPathKey, observeFile, readLedger, readProjectedLedger, resolveHostPath } from '../../effects/host-config/store';
+import { hostConfigPaths, hostPathKey, observeFile, readLedger, readProjectedLedger } from '../../effects/host-config/store';
 import { migrateInstallState } from '../installer/install-state-migration';
 import { exitCodeOf, revertItem, type UninstallItem } from '../installer/uninstall';
 
@@ -75,7 +75,7 @@ export function runConfigRestore(env: NodeJS.ProcessEnv, path: string | undefine
     const revert = (): UninstallItem[] => {
       if (path === undefined) throw new HostConfigError('host_config_invalid_path', 'name a file, or a repository with --repo');
       const paths = hostConfigPaths(env);
-      const target = resolveHostPath(paths, path);
+      const target = resolveUserConfigFile(env, path, paths);
       const gate = openHostConfigGate({ env, preview: options.dryRun === true });
       const others = options.owner === undefined ? [] : (options.dryRun ? readProjectedLedger : readLedger)(paths).fragments.filter((entry) => entry.file === target && entry.owner !== options.owner);
       const entries = gate.revert([path], options.owner === undefined ? {} : { owner: options.owner });

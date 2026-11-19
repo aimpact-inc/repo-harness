@@ -20,6 +20,7 @@ import { isRecord } from '../../core/evidence/is-record';
 import { shellQuote } from '../../core/shell-quote';
 import { bunGlobalPackageRoot } from './skill-projection';
 import { routesForHost, type AdapterHost, type Route } from '../hook/route-registry';
+import { antigravityHookMatcher, renderAntigravityHookCommand } from '../hook/host-adapter';
 import { MANAGED_TAG, isRepoHarnessManagedHookCommand } from '../../core/adoption/managed-hook-config';
 import { jsonFragment, jsonFragmentValue } from '../../core/host-config/json-fragment';
 import { HostConfigError, type FragmentRecord, type FragmentRequest } from '../../core/host-config/types';
@@ -81,18 +82,45 @@ function resolvedHookPath(path: string, label: string, mode: number): string {
     const resolved = realpathSync(path);
     if (!statSync(resolved).isFile()) throw new Error('expected a file');
     accessSync(resolved, mode);
-    return shellQuote(resolved);
+    return resolved;
   } catch (error) {
     throw new Error(`Cannot resolve managed hook ${label} at ${path}: ${(error as Error).message}. Run bun add -g repo-harness, then rh install --location global.`);
   }
 }
 
-export function buildHookExecCommand(env: NodeJS.ProcessEnv = process.env): string {
+function resolveHookRuntime(env: NodeJS.ProcessEnv): { bun: string; entry: string } {
   const bun = resolvedHookPath(process.execPath, 'Bun runtime', constants.X_OK);
   const root = bunGlobalPackageRoot(env);
   if (root === null) throw new Error('Cannot resolve the Bun global repo-harness root: set HOME, USERPROFILE or BUN_INSTALL. Run bun add -g repo-harness.');
-  const entry = resolvedHookPath(join(root, 'dist/hook-entry.js'), 'global bundle', constants.R_OK);
-  return `exec ${bun} ${entry}`;
+  return { bun, entry: resolvedHookPath(join(root, 'dist/hook-entry.js'), 'global bundle', constants.R_OK) };
+}
+
+export function buildHookExecCommand(env: NodeJS.ProcessEnv = process.env): string {
+  const { bun, entry } = resolveHookRuntime(env);
+  return `exec ${shellQuote(bun)} ${shellQuote(entry)}`;
+}
+
+interface AntigravityHooks {
+  SessionStart: HookCommand[];
+  PreToolUse: (HookEntry & { matcher: string })[];
+  Stop: HookCommand[];
+}
+
+/** Antigravity groups tool handlers by matcher and uses flat lists for lifecycle events. */
+export function buildAntigravityHooks(env: NodeJS.ProcessEnv): AntigravityHooks {
+  const { bun, entry } = resolveHookRuntime(env);
+  const hooks: AntigravityHooks = { SessionStart: [], PreToolUse: [], Stop: [] };
+  for (const { event, routeId } of routesForHost('antigravity')) {
+    const handler: HookCommand = { type: 'command', command: renderAntigravityHookCommand(bun, entry, event, routeId), timeout: 30 };
+    if (event === 'PreToolUse' && (routeId === 'bash' || routeId === 'edit')) {
+      hooks.PreToolUse.push({ matcher: antigravityHookMatcher(routeId), hooks: [handler] });
+    } else if (event === 'SessionStart' || event === 'Stop') {
+      hooks[event].push(handler);
+    } else {
+      throw new Error(`Unsupported Antigravity hook route ${event}.${routeId}`);
+    }
+  }
+  return hooks;
 }
 
 export function buildHookCommand(route: Route, host: HookHost, env: NodeJS.ProcessEnv = process.env): string {

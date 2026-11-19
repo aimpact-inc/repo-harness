@@ -20,9 +20,10 @@ import {
   readLatestPackageVersion,
   registerCheck,
   runDoctor,
+  type CheckStatus,
 } from '../../src/cli/commands/doctor';
 import { writeShellExecutableFixture } from '../helpers/repo-fixture';
-import { installStateFixturePath, recordPluginSelection, seedPathRecords, withTempHome } from '../helpers/install-ownership';
+import { installStateFixturePath, recordPluginSelection, seedGlobalPackageFixture, seedPathRecords, withTempHome } from '../helpers/install-ownership';
 import type { PathCommitted } from '../../src/core/host-config/types';
 import { pathRecordHost, pathRecordKey } from '../../src/effects/host-config/path-records';
 import { hostConfigPaths } from '../../src/effects/host-config/store';
@@ -97,6 +98,41 @@ function setupFakeEnvironment(prefix: string) {
   fs.mkdirSync(fakeBin, { recursive: true });
   return { root, home, fakeBin };
 }
+
+test.skipIf(process.platform === 'win32')('doctor measures the installed Antigravity Bash command separately from native activation', () => {
+  const { root, home, fakeBin } = setupFakeEnvironment('rh-antigravity-doctor');
+  try {
+    const bunInstall = path.join(root, 'bun');
+    const env = { HOME: home, PATH: fakeBin, BUN_INSTALL: bunInstall, TMPDIR: root };
+    seedGlobalPackageFixture(env, { mutable: true });
+    const cli = path.join(import.meta.dir, '../../src/cli/index.ts');
+    const run = (...args: string[]) => spawnSync(process.execPath, ['--no-env-file', '--config=/dev/null', cli, ...args], { cwd: root, env, encoding: 'utf8' });
+    const install = run('install', '--target', 'antigravity');
+    expect(install.status, install.stderr).toBe(0);
+    const doctor = (native: CheckStatus, direct: CheckStatus) => {
+      const report = run('doctor', '--json');
+      const { checks } = JSON.parse(report.stdout) as ReturnType<typeof runDoctor>;
+      expect(checks.find((check) => check.id === 'antigravity-native-activation')).toMatchObject({ status: native, detail: expect.stringContaining('Live-session reload is unverified.') });
+      expect(checks.find((check) => check.id === 'antigravity-direct-command')?.status).toBe(direct);
+    };
+    doctor('ok', 'ok');
+    const hooks = path.join(home, '.gemini/config/hooks.json');
+    const installed = JSON.parse(fs.readFileSync(hooks, 'utf8'));
+    installed['repo-harness'].enabled = false;
+    fs.writeFileSync(hooks, JSON.stringify(installed));
+    doctor('warn', 'ok');
+    const ran = path.join(root, 'ran');
+    const bashHook = installed['repo-harness'].PreToolUse.find((entry: { matcher: string }) => entry.matcher === 'run_command');
+    bashHook.hooks[0].command = `/usr/bin/touch '${ran}'`;
+    fs.writeFileSync(hooks, JSON.stringify(installed));
+    doctor('warn', 'fail');
+    expect(fs.existsSync(ran)).toBe(false);
+    fs.writeFileSync(hooks, '{}');
+    doctor('na', 'na');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}, DOCTOR_CHECK_TIMEOUT_MS);
 
 function writeFakeCodeGraph(fakeBin: string, logFile: string): void {
   writeExecutable(fakeBin,
