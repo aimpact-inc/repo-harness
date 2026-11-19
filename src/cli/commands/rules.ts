@@ -359,6 +359,10 @@ export function buildRulesCommand(host: BoardHostPortsV1): Command {
     .option('--include-low', 'include P2 and P3 review findings in proposals status')
     .option('--include-bot', 'include bot review threads in proposals status')
     .action((options: RulesStatusOptions) => {
+      if (!options.proposals && (options.since !== undefined || options.includeLow || options.includeBot)) {
+        statusRefusal('options_invalid', '--since, --include-low and --include-bot require --proposals');
+        return;
+      }
       const target = options.target ?? process.cwd();
       let status: RuleStatusV1;
       let proposals: RuleProposalReport | undefined;
@@ -377,7 +381,7 @@ export function buildRulesCommand(host: BoardHostPortsV1): Command {
         if (proposals) lines.push(...describeRuleProposals(proposals));
         process.stdout.write(`${lines.join('\n')}\n`);
       }
-      process.exitCode = status.ledger.valid || proposals?.truncated ? 0 : 1;
+      process.exitCode = status.ledger.valid ? 0 : 1;
     });
   rules
     .command('promote')

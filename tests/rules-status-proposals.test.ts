@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from 'bun:test';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { RuleProposalReport } from '../src/core/ci/rule-proposals';
 import * as proposals from '../src/effects/rules/proposals';
@@ -90,6 +90,12 @@ test('rules status reads the recorded PRs on the default branch and emits comple
     const plain = await cli('--json');
     expect(plain.status).toBe(0);
     expect(JSON.parse(plain.stdout)).not.toHaveProperty('experimental');
+    for (const flags of [['--since', first], ['--include-low'], ['--include-bot']]) {
+      const refused = await cli('--json', ...flags);
+      expect(refused.status).toBe(1);
+      expect(refused.stderr).toContain('require --proposals');
+      expect(JSON.parse(refused.stdout).error.code).toBe('options_invalid');
+    }
     expect(calls).toEqual([]);
 
     const result = await scan();
@@ -100,6 +106,12 @@ test('rules status reads the recorded PRs on the default branch and emits comple
       path: 'src/effects/fs-transaction.ts', line: 634, source: 'review_thread', check: null,
       fix: { state: 'confirmed', sha: 'a7acf6c24261e72be7e657008cd042a70be0b6a2' },
     }]);
+    const ungrouped = await cli('--proposals');
+    expect(ungrouped.status).toBe(0);
+    expect(ungrouped.stdout).toContain('PRs 2 · observations 1 · proposals 0');
+    expect(ungrouped.stdout.split('\n').filter(line => line.startsWith('#'))).toEqual([
+      '#3240 · init-retirement-discards-staged-user-bytes · P1 · src/effects/fs-transaction.ts:634 · fix confirmed a7acf6c24261e72be7e657008cd042a70be0b6a2',
+    ]);
     const all = await scan('--include-low', '--include-bot');
     const nits = all.observations.filter(row => row.source === 'review_body');
     expect(nits.map(row => row.finding_id).sort()).toEqual([
@@ -113,6 +125,12 @@ test('rules status reads the recorded PRs on the default branch and emits comple
       expect.objectContaining({ pull_request: 3243, severity: 'P2', line: 122, fix: { state: 'claimed' } }),
     ]);
     expect(all.proposals).toEqual([]);
+    const detailed = await cli('--proposals', '--include-low', '--include-bot');
+    expect(detailed.status).toBe(0);
+    const detailRows = detailed.stdout.split('\n').filter(line => line.startsWith('#'));
+    expect(detailRows).toHaveLength(all.observations.length);
+    expect(detailRows).toContain('#3240 · RH2903R1-F1 · P3 · — · fix none');
+    expect(detailRows).toContain('#3243 · bot · P2 · assets/skills/repo-harness-issue-flow/references/advisor.md:122 · fix claimed');
     expect((await scan('--since', first.slice(0, 12))).range).toEqual({ from: first, to: second, pull_requests: 1 });
     for (const commit of [before, side]) {
       const refused = await cli('--proposals', '--json', '--since', commit);
@@ -127,6 +145,16 @@ test('rules status reads the recorded PRs on the default branch and emits comple
     expect(limited.range).toEqual({ from: watermark, to: second, pull_requests: 1 });
     expect(limited.truncated).toEqual({ unread_from: second });
     expect(limited.observations).toEqual(result.observations);
+
+    const ledgerPath = join(repo, 'tasks', 'lessons.md');
+    const validLedger = readFileSync(ledgerPath, 'utf8');
+    writeFileSync(ledgerPath, validLedger.replace('Seen: 3×', 'Seen: bad'));
+    const invalid = await cli('--proposals', '--json');
+    expect(invalid.status).toBe(1);
+    expect(JSON.parse(invalid.stdout)).toMatchObject({
+      ledger: { valid: false }, truncated: { unread_from: second }, observations: result.observations,
+    });
+    writeFileSync(ledgerPath, validLedger);
     budget = undefined;
 
     for (const [number, sha] of [[3240, first], [3243, second]] as const) {
@@ -143,6 +171,7 @@ test('rules status reads the recorded PRs on the default branch and emits comple
     expect(text.status).toBe(0);
     expect(text.stdout).toContain(`${watermark}..${second}`);
     expect(text.stdout).toContain('PRs 2 · observations 4 · proposals 1 · malformed markers 1');
+    expect(text.stdout).toContain('#3243 · guard-file-path · — · src/main.ts:23 · fix none');
     expect(text.stdout).toContain('guard-file-path in #3240, #3243 (in ledger)');
     expect((await cli('--help')).stdout).toMatch(/--proposals[^\n]*\(experimental\)/u);
     expect((await cli('--json')).stdout).toBe(plain.stdout);

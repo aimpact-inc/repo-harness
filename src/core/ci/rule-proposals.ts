@@ -201,12 +201,21 @@ export function groupRuleProposals(observations: readonly RuleObservation[], led
     .map(([theme_key, pulls]) => ({ theme_key, pull_requests: [...pulls].sort((a, b) => a - b), in_ledger: ledgerThemes.has(theme_key) }));
 }
 
+function describeObservation(row: RuleObservation): string {
+  const finding = row.finding_id ?? row.theme_key ?? row.source;
+  const location = `${row.path ?? '—'}${row.line === null ? '' : `:${row.line}`}`;
+  const fix = row.fix.state === 'confirmed' ? `confirmed ${row.fix.sha}` : row.fix.state;
+  return [`#${row.pull_request}`, finding, row.severity ?? '—', location, `fix ${fix}`].join(' · ')
+    .replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, char => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0'));
+}
+
 export function describeRuleProposals(report: RuleProposalReport): string[] {
   const { from, to, pull_requests } = report.range;
   return [
     `Experimental rule proposals ${from}..${to}`,
     `PRs ${pull_requests} · observations ${report.observations.length} · proposals ${report.proposals.length} · malformed markers ${report.malformed}`,
     ...(report.truncated ? [`First unread commit ${report.truncated.unread_from}`] : []),
+    ...report.observations.map(describeObservation),
     ...report.proposals.map(row => `${row.theme_key} in ${row.pull_requests.map(number => `#${number}`).join(', ')}${row.in_ledger ? ' (in ledger)' : ''}`),
   ];
 }
