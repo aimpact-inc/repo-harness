@@ -1,5 +1,5 @@
 # runtime-harness/hook-adapters 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-hook-adapters" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:ad322298d36b8e4ad127387b44adf95eee921a12c6aa5ff21fae7413db8e7c9d" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-hook-adapters" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:02366fc3bffb24827564b1f95d2c1a0f0c7ced6cb41d2219155112641400f69a" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.hook-adapters`(kind `capability`)
 > **Matched Prefixes**:`src/cli/hook/**`、`src/cli/installer/**`、`src/pi/**`、`src/effects/managed-tree.ts`、`src/cli/hook-entry.ts`、`src/effects/loop/**`、`src/effects/segmented-log.ts`、`src/effects/run-summary-retention.ts`、`src/cli/commands/install.ts`、`src/cli/commands/status.ts`、`src/cli/commands/security.ts`
@@ -153,7 +153,7 @@ flowchart LR
 | 組件 | 名稱 | 規模量級 | 宣告入口 |
 | --- | --- | --- | --- |
 | `component.hook-adapters.edit-guards` | Edit Guard Handlers | `2–5` 個文件 / `500–1000` 行 | 未宣告 |
-| `component.hook-adapters.hook-root` | Hook Composition Root | `1–2` 個文件 / `50–100` 行 | 未宣告 |
+| `component.hook-adapters.hook-root` | Hook Composition Root | `1–2` 個文件 / `100–200` 行 | 未宣告 |
 | `component.hook-adapters.host-config` | Host Config Write Gate | `5–10` 個文件 / `1000–2000` 行 | 未宣告 |
 | `component.hook-adapters.host-config-effects` | Host Config Write Gate (effects) | `5–10` 個文件 / `2000–5000` 行 | 未宣告 |
 | `component.hook-adapters.host-installer` | Host Adapter Installer | `20–50` 個文件 / `5000–10000` 行 | `entrypoint.hook-adapters.managed-entries`、`entrypoint.hook-adapters.pi-extension`、`entrypoint.hook-adapters.skill-projection` |
