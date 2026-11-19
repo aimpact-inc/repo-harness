@@ -25,7 +25,6 @@ import type {
   AppendManagedBlockOperation,
   GitUntrackOperation,
   MkdirOperation,
-  MoveOperation,
   RemoveOperation,
   WriteFileOperation,
 } from "../core/adoption/operations";
@@ -109,7 +108,7 @@ function failure(operation: AdoptionOperation, error: string): ApplyOperationRes
 }
 
 export function isSupportedAdoptionOperation(operation: AdoptionOperation): boolean {
-  return ["mkdir", "writeFile", "appendManagedBlock", "move", "remove", "gitUntrack"].includes(operation.kind);
+  return ["mkdir", "writeFile", "appendManagedBlock", "remove", "gitUntrack"].includes(operation.kind);
 }
 
 function unsupportedOperationReason(operation: AdoptionOperation): string {
@@ -406,44 +405,6 @@ function moveIntoTransactionBackup(repoRoot: string, path: string, transactionDi
   return backupPath;
 }
 
-function targetContentHash(targetPath: string): string | undefined {
-  if (!existsSync(targetPath) || !lstatSync(targetPath).isFile()) return undefined;
-  return contentHash(readFileSync(targetPath));
-}
-
-function applyMoveOperation(repoRoot: string, operation: MoveOperation, dryRun: boolean): ApplyOperationResult {
-  const source = resolveInsideRepo(repoRoot, operation.path);
-  const destination = resolveInsideRepo(repoRoot, operation.to);
-  if (!source.ok || !source.path) return failure(operation, source.error ?? "invalid move source");
-  if (!destination.ok || !destination.path) return failure(operation, destination.error ?? "invalid move destination");
-  const sourceSymlinkError = assertNoSymlinkInPath(repoRoot, operation.path);
-  const destinationSymlinkError = assertNoSymlinkInPath(repoRoot, operation.to);
-  if (sourceSymlinkError || destinationSymlinkError) return failure(operation, sourceSymlinkError ?? destinationSymlinkError ?? "invalid move path");
-  const preconditionError = checkExpectedFileState(repoRoot, operation);
-  if (preconditionError) return failure(operation, preconditionError);
-  if (!existsSync(source.path)) return { id: operation.id, kind: operation.kind, path: operation.path, to: operation.to, status: "skipped" };
-  if (!lstatSync(source.path).isFile()) return failure(operation, `move source is not a regular file: ${operation.path}`);
-  if (existsSync(destination.path)) return failure(operation, `move destination already exists: ${operation.to}`);
-  if (dryRun) return { id: operation.id, kind: operation.kind, path: operation.path, to: operation.to, status: "planned" };
-  try {
-    const parentError = ensureParent(repoRoot, operation.to);
-    if (parentError) throw new Error(parentError);
-    renameSync(source.path, destination.path);
-    fsyncDirectory(dirname(source.path));
-    fsyncDirectory(dirname(destination.path));
-    return {
-      id: operation.id,
-      kind: operation.kind,
-      path: operation.path,
-      to: operation.to,
-      status: "applied",
-      contentHash: targetContentHash(destination.path),
-    };
-  } catch (error) {
-    return failure(operation, errorMessage(error));
-  }
-}
-
 function applyRemoveOperation(repoRoot: string, operation: RemoveOperation, run: OperationRun | null): ApplyOperationResult {
   const target = resolveInsideRepo(repoRoot, operation.path);
   if (!target.ok || !target.path) return failure(operation, target.error ?? "invalid remove path");
@@ -527,16 +488,6 @@ function preflightOperation(repoRoot: string, operation: AdoptionOperation): str
   if (symlinkError) return symlinkError;
   const preconditionError = checkExpectedFileState(repoRoot, operation);
   if (preconditionError) return preconditionError;
-
-  if (operation.kind === "move") {
-    const destination = resolveInsideRepo(repoRoot, operation.to);
-    if (!destination.ok || !destination.path) return destination.error ?? "invalid move destination";
-    const destinationSymlinkError = assertNoSymlinkInPath(repoRoot, operation.to);
-    if (destinationSymlinkError) return destinationSymlinkError;
-    if (existsSync(target.path) && existsSync(destination.path)) return `move destination already exists: ${operation.to}`;
-    if (existsSync(target.path) && !lstatSync(target.path).isFile()) return `move source is not a regular file: ${operation.path}`;
-    return null;
-  }
 
   if (operation.kind === "remove" && existsSync(target.path) && !lstatSync(target.path).isFile()) {
     return `remove target is not a regular file: ${operation.path}`;
@@ -712,8 +663,6 @@ function applyOperation(repoRoot: string, operation: AdoptionOperation, run: Ope
       case "writeFile":
       case "appendManagedBlock":
         return applyFileWriteOperation(repoRoot, operation, run);
-      case "move":
-        return applyMoveOperation(repoRoot, operation, !run);
       case "remove":
         return applyRemoveOperation(repoRoot, operation, run);
       case "gitUntrack":
@@ -783,35 +732,6 @@ function rollbackMkdirOperation(repoRoot: string, operation: ApplyOperationResul
   }
 }
 
-function rollbackMoveOperation(repoRoot: string, operation: ApplyOperationResult): RollbackOperationResult {
-  if (!operation.path || !operation.to) return rollbackFailed(operation, "none", "move operation is missing source or destination");
-  const sourceSymlinkError = assertNoSymlinkInPath(repoRoot, operation.path);
-  const destinationSymlinkError = assertNoSymlinkInPath(repoRoot, operation.to);
-  if (sourceSymlinkError || destinationSymlinkError) {
-    return rollbackFailed(operation, "none", sourceSymlinkError ?? destinationSymlinkError ?? "invalid move path");
-  }
-  const source = resolveInsideRepo(repoRoot, operation.path);
-  const destination = resolveInsideRepo(repoRoot, operation.to);
-  if (!source.ok || !source.path) return rollbackFailed(operation, "none", source.error ?? "invalid move source");
-  if (!destination.ok || !destination.path) return rollbackFailed(operation, "none", destination.error ?? "invalid move destination");
-  if (existsSync(source.path)) return rollbackFailed(operation, "none", "move source is occupied; refusing to overwrite it");
-  if (!existsSync(destination.path)) return { id: operation.id, kind: operation.kind, path: operation.path, status: "skipped", action: "none" };
-  try {
-    if (operation.contentHash) {
-      const currentHash = targetContentHash(destination.path);
-      if (currentHash !== operation.contentHash) {
-        return rollbackFailed(operation, "none", "move destination hash differs from transaction content hash");
-      }
-    }
-    renameSync(destination.path, source.path);
-    fsyncDirectory(dirname(destination.path));
-    fsyncDirectory(dirname(source.path));
-    return { id: operation.id, kind: operation.kind, path: operation.path, status: "rolled_back", action: "restore_backup" };
-  } catch (error) {
-    return rollbackFailed(operation, "none", errorMessage(error));
-  }
-}
-
 function rollbackRemoveOperation(repoRoot: string, operation: ApplyOperationResult): RollbackOperationResult {
   if (!operation.path || !operation.backupPath) return rollbackFailed(operation, "restore_backup", "remove operation is missing path or backup");
   const targetSymlinkError = assertNoSymlinkInPath(repoRoot, operation.path);
@@ -843,8 +763,8 @@ function rollbackGitUntrackOperation(repoRoot: string, operation: ApplyOperation
   if (symlinkError) return rollbackFailed(operation, "restore_git_index", symlinkError);
   const target = resolveInsideRepo(repoRoot, operation.path);
   if (!target.ok || !target.path) return rollbackFailed(operation, "restore_git_index", target.error ?? "invalid git path");
-  const recorded = operation.gitIndexEntry;
-  if (!recorded) return rollbackFailed(operation, "restore_git_index", `no index entry was kept for ${operation.path}`);
+  // An applied untrack always kept its entry (`applyGitUntrackOperation`).
+  const recorded = operation.gitIndexEntry!;
   const current = readGitIndexEntry(repoRoot, operation.path);
   if (current.kind === "git_failed" || current.kind === "unsupported") {
     return rollbackFailed(operation, "restore_git_index", current.error);
@@ -875,7 +795,6 @@ function rollbackLocal(repoRoot: string, results: readonly ApplyOperationResult[
   const rolledBack = applied.filter((result) => result.kind !== "gitUntrack").map((operation) => {
     if (operation.kind === "mkdir") return rollbackMkdirOperation(repoRoot, operation);
     if (operation.kind === "writeFile" || operation.kind === "appendManagedBlock") return rollbackCreatedFile(repoRoot, operation);
-    if (operation.kind === "move") return rollbackMoveOperation(repoRoot, operation);
     if (operation.kind === "remove") return rollbackRemoveOperation(repoRoot, operation);
     return rollbackFailed(operation, "none", `unsupported rollback operation kind: ${operation.kind}`);
   });
