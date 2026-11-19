@@ -10,7 +10,7 @@
 3. Make small, bounded commits. Ordinary tasks live in the PR description: goal, changes, verification, risk and rollback.
 4. Freeze the candidate and verify once: typecheck plus affected tests. Reviewers and closeout consume the same evidence. Reopen acceptance only for blocking defects or changed inputs that affect the result. Record non-blocking improvements separately; do not change the frozen candidate for them.
 5. A model may squash-merge into main only when the current task explicitly authorizes main publication, the branch contains the current main tip, the required checks pass on that exact head, and GitHub has no outstanding change requests or unresolved review threads that a person started. A thread that a review bot (a GitHub App account such as Codex or Copilot) started is advisory and does not block the merge. An explicit no-merge instruction always wins. The next merge does not wait for the main push CI of the previous merge. Pending main push CI is not an extra acceptance gate. Read its status before the next merge; when it fails, the next merge is the revert or the fix. Each PR still meets its own exact-head and current-main requirements. Record the GitHub merge SHA and parent SHA. Record `git revert --no-edit <squash-commit>`. Do not create rollback tags.
-6. Run the full suite daily, automatically open a repair task on failure, and produce the daily merge/check/rollback report. Run the [Lessons Retro](#lessons-retro) in the same nightly window.
+6. Run the full suite daily, automatically open a repair task on failure, and produce the daily merge/check/rollback report. This nightly run does not start the [Lessons Retro](#lessons-retro); that retro has its own trigger events.
 7. Use the [Report SOP](#report-sop) for formal progress, phase and final reports to the user, including the daily user summary. Raw automated CI reports are evidence inputs; they do not replace that summary and do not require this format.
 
 ## CI cost
@@ -52,7 +52,10 @@ Manual probe: to see what named test files do on one runner for a branch head, d
 `tasks/lessons.md` is the one lessons ledger. It has the role of a root `LESSONS.md`. Do not add a second lessons file. The retro and maintenance triage read the ledger. Sessions read its active lessons at start. Current code and evidence take precedence. Keep the path; do not move lessons to docs/.
 
 - The ledger keeps one watermark line before the first entry: `reviewed-through: <full commit SHA>`. If the line is missing, the first retro reviews the last 24 hours and adds it.
-- Each night, review the default-branch history after the watermark: `git log --first-parent <watermark>..origin/main`. Skip commits that change only `tasks/lessons.md`.
+- Two events start a retro: the close-out of a batch parent (`repo-harness-issue-flow` `references/orchestrator.md` §10) and a release that shipped. No timer and no workflow starts one.
+- The orchestrator starts the retro and dispatches a worker for the ledger PR. The advisor checks the watermark in its scheduled review (`repo-harness-issue-flow` `references/advisor.md` §2) and sends the orchestrator a notice when the fallback condition holds.
+- Fallback: a retro is due when the watermark commit is older than 7 days or more than 100 first-parent commits behind `origin/main`. Either threshold alone makes the retro due.
+- Review the default-branch history after the watermark: `git log --first-parent <watermark>..origin/main`. Skip commits that change only `tasks/lessons.md`.
 - Look for three signals: a fix that repairs recent work, a change that should not have merged, and verification that was too thin for the changed behavior. A revert or a follow-up hotfix is evidence.
 - Add at most one entry for each theme on one day. Keep the fields that `rh run maintenance-triage` reads. `- Date:` starts each entry:
 
@@ -86,6 +89,7 @@ Manual probe: to see what named test files do on one runner for a branch head, d
 - At `Seen: 3×` with `Enforced by: judgment`, promote the prevention rule into root `AGENTS.md` and root `CLAUDE.md` in the same PR. Add `- Promoted: <PR>` to that entry. A consolidated entry lists every `Promoted` reference of the entries it replaces, separated by `, `. A rule with a structural enforcer does not go into the root files.
 - When the mistake can no longer occur, delete its text rule from the agent instruction files. Keep its ledger entries.
 - Each retro advances the watermark to the last reviewed commit, also when it finds no lesson. If an earlier retro PR is still open, update that PR. Do not open a second retro PR.
+- Reset: with the owner GO for the PR head, a PR may set `reviewed-through` to a named commit without a review of the skipped range. That PR body states the old watermark, the new watermark, the number of skipped first-parent commits and the reason. The GO rule below is unchanged.
 - Every change to `tasks/lessons.md` goes through a PR and merges only after GO. GO is an explicit go-ahead from the repository owner (Aimpact for repo-harness) for one reviewed head SHA. Task-level publication authorization does not replace it. Merge with `gh pr merge <pr> --squash --match-head-commit <reviewed-sha>`. Lessons are not task logs. Ordinary tasks record a one-time decision in the issue or PR. A correction in a task can add an entry; that entry follows the same PR and GO rule.
 
 ## Internal and external PRs

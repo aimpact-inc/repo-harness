@@ -52,7 +52,12 @@ the change, so the check must come from outside its session.
       (`rh doctor`, check `board-attention-watcher`).
    7. A replan trigger of `replan.md` §1. When one holds, send
       `[rh-notice] replan #<parent>`.
-   8. Items for the owner: security and production only.
+   8. The Lessons Retro watermark of `tasks/lessons.md` against
+      `origin/main`. The retro is due when the watermark commit is older
+      than 7 days or more than 100 first-parent commits behind. Send
+      `[rh-notice] lessons-retro due: <watermark> is <n> days and <n>
+      first-parent commits behind origin/main`.
+   9. Items for the owner: security and production only.
 3. **Write the plan** in your scratch space: changes since the last plan,
    blockers, the next bundle for each batch parent (its issues, seat from
    the route line, tier, file boundary, trigger), the joint decisions that
@@ -157,3 +162,9 @@ before the release set of §4, so the set can name the levers.
    `status: unavailable` are gaps, not zero.
 4. Tell the owner the retrospective path and the top bottleneck (§2 step
    5). The owner reviews it before anyone files a workflow change.
+
+The batch retro (`rh board retro`, this section) and the Lessons Retro
+(`docs/reference-configs/agentic-development-flow.md`, Lessons Retro) are
+two tasks. They start on the same two events: a batch parent close-out and
+a release that shipped. This section runs the batch retro. The orchestrator
+runs the Lessons Retro and its ledger PR.

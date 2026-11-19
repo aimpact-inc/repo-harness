@@ -781,5 +781,10 @@ thread.
    clean and pushed, closes each seat terminal of the PR, then removes the
    merged worktree; a checkout with an unpushed commit is kept and the
    command exits 1.
-5. Add a lesson to `tasks/lessons.md` only for a mistake that repeated or
-   that a rule would have prevented.
+5. Start the Lessons Retro for the range after the watermark
+   (`docs/reference-configs/agentic-development-flow.md`, Lessons Retro):
+   `git log --first-parent <watermark>..origin/main`. The retro is also due
+   when the watermark commit is older than 7 days or more than 100
+   first-parent commits behind `origin/main`. Add an entry only for a
+   mistake that repeated or that a rule would have prevented. Dispatch a
+   worker for the ledger PR and wait for the owner GO for that head.
