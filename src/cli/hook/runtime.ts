@@ -16,7 +16,7 @@ import {
 import type { EffectiveState } from '../../core/state/types';
 import type { HookHandlerResult } from './handler-contract';
 import { HookPayloadError, hookIdentity, parseHookPayload, payloadString, type HookIdentity } from './hook-input';
-import { boundedHookDiagnostic, HOST_RENDERERS, type HookOutcome } from './hook-protocol';
+import { HOST_RENDERERS, type HookOutcome } from './hook-protocol';
 import { WORKFLOW_CONTRACT_MARKER_PATH, WORKFLOW_MARKER_GATE_EVENTS } from '../../core/adoption/minimum-harness-version';
 import { inspectWorkflowMarker } from '../../effects/adoption/workflow-marker';
 import { gitExecFileSync } from '../../effects/git/runner';
@@ -190,14 +190,14 @@ export function runHook(opts: RunHookOptions): RunHookResult {
     result = handler.run({ event: opts.event, repoRoot, payload, identity, env, now, collector });
     reason = outcomeReason(result);
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    reason = error instanceof HookPayloadError ? 'invalid-payload' : 'handler-failed';
     // A crash of an admission route must not admit the tool call: hosts read
-    // only exit 2 as a block.
+    // only exit 2 as a block. The text is fixed: an exception message can
+    // carry a path or a value from the command (#3267).
     result = {
       exitCode: route.failClosed ? 2 : 1,
-      diagnostics: boundedHookDiagnostic(`${HOOK_COMMAND_NAME}: ${handler.id} failed: ${detail}\n`),
+      diagnostics: `${HOOK_COMMAND_NAME}: ${handler.id} failed (${reason})\n`,
     };
-    reason = error instanceof HookPayloadError ? 'invalid-payload' : 'handler-failed';
   }
 
   const additionalContext = result.sessionContexts

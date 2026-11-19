@@ -16,7 +16,6 @@ import { existsSync, lstatSync, readdirSync, realpathSync, statSync, type Dirent
 import { homedir, tmpdir } from 'os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { managedWorktreeRoot } from '../../effects/git/managed-worktree';
-import { containsSecret, hasUnredactedSecret, replaceSecrets } from '../../core/security/secret-patterns';
 import type { Denial } from './mutation-guard';
 import type { RouteHost } from './route-registry';
 import {
@@ -390,19 +389,10 @@ export function writeTargetDenial(targets: readonly WriteTarget[], scope: Safety
 }
 
 /**
- * The user runs a one-line command themselves with Claude Code's `!` prefix; a longer command runs in their own shell. A command
- * that holds a secret shows only its redacted form, and none at all when the redaction leaves a secret.
+ * Fixed text: the denial never quotes the command, because a credential in it that no secret pattern matches would reach the
+ * agent and the failure log (#3267).
  */
-function bashUserStep(command: string): string {
-  const line = command.trim();
-  const generic = 'the user can run the command themselves in their own shell (Claude Code: `! <command>`)';
-  if (line.includes('\n') || line.length > 300) return generic;
-  if (!containsSecret(line)) return `the user can run it themselves: \`! ${line}\``;
-  const redacted = replaceSecrets(line);
-  return hasUnredactedSecret(redacted)
-    ? `${generic}; the command holds a secret, so it is not shown`
-    : `the user can run it themselves: \`! ${redacted}\` (secrets redacted; put the real values back)`;
-}
+const BASH_USER_STEP = 'the user can run the command themselves in their own shell (Claude Code: `! <command>`)';
 
 // ---------------------------------------------------------------------------
 // I1: credential stores
@@ -1329,5 +1319,5 @@ export function bashSafetyDenial(command: string, cwd: string | null, scope: Saf
   // HOME comes from the scope, the same source as the allowed roots.
   const home = scope.env.HOME ?? homedir();
   const targets = parsed.flatMap(({ command: cmd, dirs }) => (dirs ?? [null]).flatMap(dir => commandTargets(cmd, dir, home)));
-  return writeTargetDenial(targets, scope, bashUserStep(command));
+  return writeTargetDenial(targets, scope, BASH_USER_STEP);
 }

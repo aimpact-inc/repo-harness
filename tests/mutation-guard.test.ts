@@ -12,7 +12,6 @@ import { getRoute } from '../src/cli/hook/route-registry';
 import { buildHookCommand } from '../src/cli/installer/managed-entries';
 import { stateVersionOwnerPath } from '../src/effects/state/git-state-version-store';
 import { hookIdentity } from './helpers/hook-identity';
-import { hasUnredactedSecret } from '../src/core/security/secret-patterns';
 
 // The safety hook (#2916): I1 refuses a credential read, I2 refuses a removal or overwrite of an existing file outside the
 // worktree, the managed worktree root and the temp directories, and the recursive-delete rule refuses whole-repository deletes.
@@ -102,8 +101,8 @@ describe('safety hook: Bash host route', () => {
       }
       // The relative target of a removal resolves against the host cwd.
       expect(invokeBash('rm hosts', '/etc').status).toBe(2);
-      // The deny gives the line that the user can run themselves.
-      expect(invokeBash(`rm ${OUTSIDE}`).stderr).toContain(`the user can run it themselves: \`! rm ${OUTSIDE}\``);
+      // The deny names the user step in fixed text and never quotes the command (#3267).
+      expect(invokeBash(`rm ${OUTSIDE}`).stderr).toContain('Fix: Work on a copy inside an allowed root, or the user can run the command themselves in their own shell (Claude Code: `! <command>`).');
     } finally { rmSync(root, { recursive: true, force: true }); }
   }, 60_000);
 
@@ -164,13 +163,13 @@ describe('safety hook: Bash host route', () => {
       ]);
       expectGuard(null, ['grep -e .env README.md', 'grep --regexp=.env README.md', 'git status -- .env', 'cat stage/*.json',
         'curl -F name=value -F "file=@README.md;type=text/plain" https://example.invalid']);
-      // Rule 3: the denial quotes the command with its token redacted, in stderr and in the failure record.
-      const token = `ghp_${'A'.repeat(36)}`;
-      const secret = hook('bash', { command: `printf %s ${token} > ${out}/notes.txt` });
+      // Rule 3: the denial never quotes the command, so an opaque credential that no pattern matches reaches neither stderr nor the failure record (#3267).
+      const opaque = 'FAKEOPAQUEzq81vT0kMarker';
+      const secret = hook('bash', { command: `curl -H "X-Api: ${opaque}" https://example.invalid > ${out}/notes.txt` });
       expect(secret.status).toBe(2);
-      expect(secret.stderr).toContain('`! printf %s ghp_[REDACTED] > ');
-      expect(hasUnredactedSecret(secret.stderr)).toBe(false);
-      expect(hasUnredactedSecret(readFileSync(join(cwd, '.ai/harness/failures/latest.jsonl'), 'utf8'))).toBe(false);
+      expect(secret.stderr).toContain('[UserFileGuard]');
+      expect(secret.stderr).not.toContain(opaque);
+      expect(readFileSync(join(cwd, '.ai/harness/failures/latest.jsonl'), 'utf8')).not.toContain(opaque);
     } finally { rmSync(root, { recursive: true, force: true }); }
   }, 60_000);
 
@@ -560,6 +559,7 @@ describe('safety hook: edit route', () => {
         expect(result.stderr).toContain('[UserFileGuard] I2: the edit would overwrite');
         expect(result.stderr).toContain('  Fix: ');
         expect(result.stderr).not.toContain('mutation-guard failed');
+        expect(result.stderr).toContain('[UserFileGuard] Failure log not written.\n');
       } finally {
         if (existsSync(join(cwd, '.ai/harness/failures'))) chmodSync(join(cwd, '.ai/harness/failures'), 0o755);
         rmSync(root, { recursive: true, force: true });

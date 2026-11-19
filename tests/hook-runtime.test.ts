@@ -126,7 +126,8 @@ describe('hook runtime typed dispatch', () => {
         ordinary: { exitCode: 0, handler: 'bash-mutation-guard' },
         failed: { exitCode: 2, reason: 'handler-failed' }, calls: 0,
       });
-      expect(child.stderr).toContain('injected tripwire crash');
+      expect(child.stderr).toContain('repo-harness-hook: bash-mutation-guard failed (handler-failed)');
+      expect(child.stderr).not.toContain('injected tripwire crash');
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -136,7 +137,8 @@ describe('hook runtime typed dispatch', () => {
       for (const host of ['claude', 'codex'] as const) {
         const crashed = crashGuard(root, host);
         expect(crashed.result).toMatchObject({ exitCode: 2, reason: 'handler-failed', handler: 'mutation-guard' });
-        expect(crashed.hostStderr).toContain('repo-harness-hook: mutation-guard failed: injected guard crash');
+        expect(crashed.hostStderr).toContain('repo-harness-hook: mutation-guard failed (handler-failed)');
+        expect(crashed.hostStderr).not.toContain('injected guard crash');
         expect(crashed.hostStdout).toBe('');
       }
     } finally { rmSync(root, { recursive: true, force: true }); }
