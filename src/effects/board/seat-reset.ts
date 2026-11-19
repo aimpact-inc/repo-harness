@@ -4,7 +4,7 @@ import {
   seatResetLogPath, seatResetRequestPath, seatResetDirectory, seatResumePrompt, seatRewriteMessage,
   type SeatLaunchModel, type SeatResetAction, type SeatResetIdentity,
 } from '../../core/board/seat-reset';
-import { HerdrCoreError, RH_LABEL, hcGet, hcKeys, hcList, hcSend, hcWait, type HcLabels, type HcWaitResult, type HerdrCoreOptions } from '../terminal/herdr-core';
+import { HerdrCoreError, RH_LABEL, hcGet, hcKeys, hcList, hcSend, hcWait, type HcLabels, type HcTerminal, type HcWaitResult, type HerdrCoreOptions } from '../terminal/herdr-core';
 import { readNotifyConfig } from '../terminal/notify-read';
 import {
   fileSize, handoffProblem, newSession, readAppended, readRequest, readSeatSession, requestOpen, sentResumed,
@@ -21,7 +21,7 @@ export type SeatResetOutcome = 'nothing_sent' | 'rewrite_requested' | 'no_reset'
 
 export type SeatResetCode = 'handoff_path_invalid' | 'handoff_missing' | 'request_missing' | 'handoff_stale' | 'handoff_sha256_mismatch'
   | 'handoff_sections_missing' | 'already_claimed' | 'claim_failed' | 'caller_unknown' | 'requester_not_found' | 'requester_busy' | 'message_not_sent'
-  | 'hc_failed' | 'resume_not_sent' | 'request_invalid' | 'request_closed';
+  | 'hc_failed' | 'requester_status_untracked' | 'resume_not_sent' | 'request_invalid' | 'request_closed';
 
 export class SeatResetError extends Error {
   constructor(readonly code: SeatResetCode, readonly outcome: SeatResetOutcome, message: string, readonly logErrors: readonly string[] = []) {
@@ -75,8 +75,8 @@ export interface SeatRelaunch extends SeatLaunchModel {
 }
 
 export interface SeatResetOptions extends HerdrCoreOptions {
-  /** The seat launch for the relaunch and for the model check of a tier-2 reset. */
-  readonly relaunch: (identity: SeatResetIdentity) => Promise<SeatRelaunch>;
+  /** The launch for the model check and relaunch, using the checkout of the requester identified by its labels. */
+  readonly relaunch: (identity: SeatResetIdentity, checkout: string) => Promise<SeatRelaunch>;
   /** Tests only: shorter waits. */
   readonly timeouts?: SeatResetTimeouts;
   /** Posts one notice. Only the peer-runtime plugin supplies it; without it every failure records `not_configured`. */
@@ -128,6 +128,7 @@ class SeatResetRun {
   private readonly logPath: string;
   private request: SeatRequest | null = null;
   private requester = '';
+  private requesterCheckout: string | null = null;
   private caller = '';
   private prompt = '';
 
@@ -215,7 +216,7 @@ class SeatResetRun {
     try {
       return await this.resetAndResume();
     } catch (error) {
-      if (error instanceof SeatResetError && error.outcome === 'uncertain') throw error;
+      if (error instanceof SeatResetError && (error.outcome === 'uncertain' || error.code === 'requester_status_untracked')) throw error;
       throw this.refuse('resume_not_sent', 'uncertain', `${this.requester} may have got ${SEAT_RESET_COMMAND[this.request!.action]}, but not the resume prompt: ${sentence(error)}. Send it by hand: ${this.prompt}`);
     }
   }
@@ -287,11 +288,19 @@ class SeatResetRun {
     throw new SeatResetError(problem.code, outcome, `${problem.message} ${result}`);
   }
 
-  /**
-   * A message to the waiting seat also ends its wait (#2305), so the wait goes on for the rest of the WAIT_SECONDS
-   * budget; the remaining budget shrinks with the time that passed. Returns the last result, started or not.
-   */
-  private waitForTurn(): HcWaitResult {
+  private trackedRequester(outcome: 'nothing_sent' | 'uncertain'): HcTerminal {
+    const terminal = hcGet(this.requester, this.options);
+    if (terminal.state === 'live' && terminal.status === null) {
+      throw this.refuse('requester_status_untracked', outcome,
+        `${this.requester} has untracked hc status (status: null, foreground: ${terminal.foreground?.name ?? 'unknown'}). Check the seat, then use hc keys ${this.requester} by hand or restart it with \`rh seats argv ${this.identity.seat} --repository-id ${this.identity.repository}\`.`);
+    }
+    return terminal;
+  }
+
+  /** A message to the waiting seat ends its wait (#2305). Continue for the rest of the same budget. */
+  private waitForTurn(outcome: 'nothing_sent' | 'uncertain'): HcWaitResult {
+    const terminal = this.trackedRequester(outcome);
+    this.requesterCheckout ??= terminal.cwd ?? null;
     const deadline = Date.now() + WAIT_SECONDS * 1000;
     let result = hcWait(this.requester, WAIT_SECONDS, this.options);
     while (!result.ended && result.reason === 'message') {
@@ -304,8 +313,13 @@ class SeatResetRun {
 
   /** Only a requester that still works after the whole budget is busy. */
   private wait(): void {
-    const result = this.waitForTurn();
+    const result = this.waitForTurn('nothing_sent');
     if (!result.ended) throw this.refuse('requester_busy', 'nothing_sent', `${this.requester} did not end its turn in ${WAIT_SECONDS} s (${result.reason}).`);
+  }
+
+  private launchRequester(): Promise<SeatRelaunch> {
+    if (!this.requesterCheckout) throw new Error(`hc did not report the launch directory of ${this.requester}.`);
+    return this.options.relaunch(this.identity, this.requesterCheckout);
   }
 
   private async poll<T>(read: () => T | null, ms: number): Promise<T | null> {
@@ -343,7 +357,7 @@ class SeatResetRun {
     if (session === null || session.model === null) return null;
     let launch: SeatRelaunch;
     try {
-      launch = await this.options.relaunch(this.identity);
+      launch = await this.launchRequester();
     } catch (error) {
       this.record('model_check_failed', `relaunch_argv_failed: ${sentence(error)}`);
       return null;
@@ -389,7 +403,7 @@ class SeatResetRun {
     // A relaunched process has no compaction summary, so it gets the prompt with the git and gh check.
     this.prompt = seatResumePrompt(this.identity, this.caller, 'reset');
     const stop = (detail: string, running = false): SeatResetError => {
-      const next = running ? `No key was typed; its session still runs. Send it: ${this.prompt}`
+      const next = running ? `No relaunch key was typed. Its session still runs. Send it: ${this.prompt}`
         : `Start it from \`rh seats argv ${this.identity.seat} --repository-id ${this.identity.repository}\` and send: ${this.prompt}`;
       this.record('relaunch_failed', detail);
       return new SeatResetError('resume_not_sent', 'uncertain', `The relaunch of ${this.requester} failed (${detail}). ${next}`);
@@ -399,16 +413,24 @@ class SeatResetRun {
     const script = `${seatResetDirectory(this.identity)}/relaunch.sh`;
     if (!TYPABLE.test(script) || script.includes(' ')) throw stop('relaunch_path_untypable', true);
     try {
-      writeFileSync(script, `${(launch ?? await this.options.relaunch(this.identity)).argv.map(shellQuote).join(' ')}\n`, { mode: 0o700 });
+      writeFileSync(script, `exec ${(launch ?? await this.launchRequester()).argv.map(shellQuote).join(' ')}\n`, { mode: 0o700 });
     } catch (error) {
       throw stop(`relaunch_argv_failed: ${sentence(error)}`, true);
     }
-    const turn = this.waitForTurn();
+    const outcome = launch === undefined ? 'uncertain' : 'nothing_sent';
+    const turn = this.waitForTurn(outcome);
     if (!turn.ended) throw stop('requester_busy', true);
+    const terminal = this.trackedRequester(outcome);
+    if (terminal.state === 'finished') throw stop('requester_exited');
+    if (terminal.foreground === null) throw stop('requester_foreground_unavailable', true);
+    if (terminal.foreground.pid === terminal.pid) throw stop('requester_has_no_parent_shell', true);
     typeLine(this.requester, '/exit', this.options);
-    if (await this.poll(() => (hcGet(this.requester, this.options).foreground?.name === 'claude' ? null : true), this.timeouts.exitMs) === null) {
-      throw stop('claude_did_not_exit');
-    }
+    const shellReady = await this.poll(() => {
+      const current = hcGet(this.requester, this.options);
+      if (current.state === 'finished') throw stop('requester_exited');
+      return current.foreground !== null && current.foreground.name !== 'claude' ? true : null;
+    }, this.timeouts.exitMs);
+    if (shellReady === null) throw stop('claude_did_not_exit');
     const startedAt = Date.now();
     typeLine(this.requester, `sh ${script}`, this.options);
     const session = await this.waitForSession(startedAt, 'reset');

@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { existsSync } from 'node:fs';
-import { dirname, join, resolve } from 'path';
+import { delimiter, dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { CLAUDE_BUILTIN_AGENT_TYPES, SeatPaneNameError, buildSeatLaunch, seatPaneName, seatTabName, type SeatLaunchV1 } from '../../core/board/seat-launch';
 import { LAUNCH_SEAT_IDS, SeatsConfigMigrationRequiredError, decodeSeatsConfig, seatsConfigInvalidMessage, isReviewSeat, isWorkerSeat, unavailablePiSeat, type LaunchSeatId, type SeatConfigV1, type SeatsConfigV1 } from '../../core/board/seats-settings';
@@ -108,19 +108,29 @@ function seatId(seat: string): LaunchSeatId {
 }
 
 /**
- * The seat argv labels its own terminal before the agent starts (#1695). `herdr-app do` runs the argv in the new hc
- * terminal, so `seats label` labels `HC_TERMINAL_ID`, then `exec` replaces the shell with the agent. When the label
- * fails, the shell stops before the agent starts. Each token in the script is a seat id or a checked positive integer;
- * the owner exception URL goes in as the positional `$2`, never into the script text.
+ * Label the terminal before starting the agent. Keep the login shell's PATH order and add the launcher's Bun
+ * directory and the caller's rh and hc directories for panes that start with a smaller PATH.
  */
-function selfLabelingArgv(seat: LaunchSeatId, input: SeatLabelInput, agent: readonly string[]): string[] {
+function selfLabelingArgv(seat: LaunchSeatId, input: SeatLabelInput, agent: readonly string[], env: NodeJS.ProcessEnv): string[] {
   const flags = ([['--repository-id', input.repositoryId], ['--issue', input.issue], ['--pr', input.pr], ['--parent', input.parent]] as const)
     .flatMap(([flag, value]) => value === undefined ? [] : [flag, value]);
-  if (input.ownerException === undefined) {
-    return ['/bin/sh', '-c', `"$0" "$1" seats label ${[seat, ...flags].join(' ')} && shift && exec "$@"`, process.execPath, CLI_ENTRY, ...agent];
-  }
-  return ['/bin/sh', '-c', `"$0" "$1" seats label ${[seat, ...flags].join(' ')} --owner-exception "$2" && shift 2 && exec "$@"`,
-    process.execPath, CLI_ENTRY, input.ownerException, ...agent];
+  const toolDirs = ['rh', 'hc'].flatMap(tool => {
+    const path = Bun.which(tool, { PATH: env.PATH ?? '' });
+    return path === null ? [] : [dirname(path)];
+  });
+  const pathSetup = 'export PATH="${PATH:+$PATH:}${2:+$2:}${0%/*}"';
+  const label = `"$0" "$1" seats label ${[seat, ...flags].join(' ')}`;
+  const args = [process.execPath, CLI_ENTRY, [...new Set(toolDirs)].join(delimiter)];
+  // The owner exception URL is positional, so only checked seat and dispatch values enter the script.
+  return input.ownerException === undefined
+    ? ['/bin/sh', '-c', `${pathSetup}; ${label} && shift 2 && exec "$@"`, ...args, ...agent]
+    : ['/bin/sh', '-c', `${pathSetup}; ${label} --owner-exception "$3" && shift 3 && exec "$@"`, ...args, input.ownerException, ...agent];
+}
+
+/** Keep a foreground shell available after the agent exits, including in a direct Herdr pane split. */
+function seatLoginShell(argv: readonly string[]): string[] {
+  const shell = process.platform === 'darwin' ? '/bin/zsh' : '/bin/sh';
+  return [shell, '-lic', '"$@"; result=$?; [ ! -t 0 ] || exec "$0" -li; exit "$result"', shell, ...argv];
 }
 
 /** `seats label`: set the seat labels on the calling hc terminal. The seat argv runs it before the agent starts. */
@@ -218,15 +228,16 @@ type SeatLaunchResult = SeatLaunchV1 & {
 };
 
 export async function seatLaunch(seat: string, labels: SeatLabelInput = {}, env: NodeJS.ProcessEnv = process.env, cwd = process.cwd(), planned?: SeatRouteV1): Promise<SeatLaunchResult> {
-  return (await effectiveSeatLaunch(seat, labels, env, cwd, planned)).launch;
+  return (await effectiveSeatLaunch(seat, labels, env, cwd, { planned })).launch;
 }
 
 /**
  * The launch of a reset seat for `seats reset` (#2633): its argv, its effective model and effort, and whether the quota
- * mode that chose them is known.
+ * mode that chose them is known. The checkout comes from the requester selected by the seat identity.
  */
-export async function seatResetLaunch(identity: SeatResetIdentity, env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): Promise<SeatRelaunch> {
-  const { launch, effective, modeKnown } = await effectiveSeatLaunch(identity.seat, { repositoryId: identity.repository }, env, cwd);
+export async function seatResetLaunch(identity: SeatResetIdentity, env: NodeJS.ProcessEnv, checkout: string): Promise<SeatRelaunch> {
+  // The terminal already has a waiting shell. Run only the agent command to keep one shell across resets.
+  const { launch, effective, modeKnown } = await effectiveSeatLaunch(identity.seat, { repositoryId: identity.repository }, env, checkout, { terminal: 'existing' });
   return { argv: launch.argv, model: effective.model, effort: effective.effort, modeKnown };
 }
 
@@ -241,7 +252,8 @@ function installedPiExtension(env: NodeJS.ProcessEnv): string {
 }
 
 /** The launch and the effective seat config that it starts; the seat reset compares the config with the session record (#2633). */
-async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: NodeJS.ProcessEnv, cwd: string, planned?: SeatRouteV1): Promise<{
+async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: NodeJS.ProcessEnv, cwd: string,
+  { planned, terminal = 'new' }: { readonly planned?: SeatRouteV1; readonly terminal?: 'new' | 'existing' } = {}): Promise<{
   readonly launch: SeatLaunchResult; readonly effective: SeatConfigV1; readonly modeKnown: boolean;
 }> {
   const id = seatId(seat);
@@ -278,9 +290,10 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   const piRoleDirectory = effective.runtime === 'pi' && effective.fleet.length > 0 ? writePiFleetRoles(effective.fleet, env) : undefined;
   const piHookExtension = effective.runtime === 'pi' && isReviewSeat(id) ? installedPiExtension(env) : undefined;
   const launch = buildSeatLaunch(id, effective, config.seats === undefined ? 'defaults' : 'seats', agentTypes, name ?? undefined, labels.repositoryId, piRoleDirectory, piHookExtension, claudeSaving);
+  const argv = labelSet === undefined ? launch.argv : selfLabelingArgv(id, labels, launch.argv, env);
   return { effective, modeKnown, launch: {
     ...launch,
-    argv: labelSet === undefined ? launch.argv : selfLabelingArgv(id, labels, launch.argv),
+    argv: labelSet !== undefined && terminal === 'new' ? seatLoginShell(argv) : argv,
     labels: labelSet === undefined ? [] : hcLabelPairs(labelSet), name, tab, ownerException: labels.ownerException ?? null,
   } };
 }
@@ -487,7 +500,7 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
         const ending = identity === null ? null : readSeatSession(identity);
         const result = await runSeatReset(handoff, sha256, {
           ...(loadNotify === undefined ? {} : { notify: await loadNotify() }),
-          relaunch: identity => seatResetLaunch(identity),
+          relaunch: (identity, checkout) => seatResetLaunch(identity, process.env, checkout),
         });
         process.stdout.write(`${JSON.stringify({ ok: true, ...result })}\n`);
         if (identity !== null) {
