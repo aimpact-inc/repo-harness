@@ -91,7 +91,7 @@ function crashGuard(root: string, host: 'claude' | 'codex'): {
 }
 
 describe('hook runtime typed dispatch', () => {
-  test('Bash skips Effective State and a tripwire crash stays non-blocking', () => {
+  test('Bash skips Effective State and a tripwire crash blocks', () => {
     const root = fixture();
     try {
       const worker = `
@@ -124,7 +124,7 @@ describe('hook runtime typed dispatch', () => {
       expect(child.status, child.stderr).toBe(0);
       expect(JSON.parse(child.stdout)).toMatchObject({
         ordinary: { exitCode: 0, handler: 'bash-mutation-guard' },
-        failed: { exitCode: 1, reason: 'handler-failed' }, calls: 0,
+        failed: { exitCode: 2, reason: 'handler-failed' }, calls: 0,
       });
       expect(child.stderr).toContain('injected tripwire crash');
     } finally { rmSync(root, { recursive: true, force: true }); }
@@ -141,6 +141,17 @@ describe('hook runtime typed dispatch', () => {
       }
     } finally { rmSync(root, { recursive: true, force: true }); }
   }, 60_000);
+
+  // #3267: `cd` through a file throws ENOTDIR in the parser, before the credential check runs.
+  test.skipIf(process.platform === 'win32')('a Bash guard crash on a real command exits 2, so Claude does not run it unguarded', () => {
+    const root = fixture();
+    try {
+      const command = `cd ${join(root, 'README.md', 'x')} && true; cat ~/.ssh/id_rsa`;
+      const result = runHook({ event: 'PreToolUse', routeId: 'bash', cwd: root, env: env(root),
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command } }) });
+      expect(result).toMatchObject({ exitCode: 2, reason: 'handler-failed', handler: 'bash-mutation-guard' });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }, 30_000);
 
   test('a Stop with a symlinked retired handoff directory stays non-blocking and writes nothing', () => {
     const root = fixture();

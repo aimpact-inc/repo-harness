@@ -69,9 +69,9 @@ describe('typed hook route registry', () => {
     ]);
   });
 
-  test('only the edit guard fails closed', () => {
+  test('only the edit and Bash guards fail closed', () => {
     expect(ROUTES.filter((route) => route.failClosed).map((route) => `${route.event}.${route.routeId}`))
-      .toEqual(['PreToolUse.edit']);
+      .toEqual(['PreToolUse.edit', 'PreToolUse.bash']);
   });
 
   test('events and unknown tuples stay stable', () => {
