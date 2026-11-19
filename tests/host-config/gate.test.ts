@@ -603,6 +603,10 @@ test('a whole-path write checks every destination before it writes any: a refusa
   expect(() => f.gate().writePaths([{ path: agents, owner: 'core', entry: { type: 'symlink', target: user } }, { ...writes[0]!, path: join(agents, 'x.md') }]))
     .toThrow(`a call names this path and a path above it, so rh writes neither: ${join(agents, 'x.md')}`);
   expect({ agents: existsSync(agents), mine: readFileSync(join(user, 'x.md'), 'utf8') }).toEqual({ agents: false, mine: 'mine\n' });
+  let ran = false;
+  expect(() => f.gate().delegate([{ path: agents, owner: 'core' }, { path: join(agents, 'x.md'), owner: 'core' }], () => { ran = true; }))
+    .toThrow(`a call names this path and a path above it, so rh writes neither: ${join(agents, 'x.md')}`);
+  expect(ran).toBe(false);
 });
 
 test('a whole path is rh\'s only while it is the entry that rh wrote: a same-bytes copy and a re-made directory are the user\'s', () => {

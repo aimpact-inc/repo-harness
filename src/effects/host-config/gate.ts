@@ -601,6 +601,16 @@ function nextPathRecord(previous: PathRecord | undefined, owner: string, host: P
     ...(identity !== null ? { identity } : {}) };
 }
 
+/**
+ * One call checks every destination against the disk before the first write, so no destination may be another one or lie
+ * below it: a write of the outer path would change what the inner one reaches.
+ */
+function refuseOverlappingPaths(admitted: readonly { readonly path: string; readonly key: string }[]): void {
+  if (new Set(admitted.map(({ key }) => key)).size !== admitted.length) throw new HostConfigError('host_config_invalid_state', 'a call names one path twice');
+  const nested = admitted.find(({ key }) => admitted.some((other) => other.key !== key && isPathInside(other.key, key)));
+  if (nested) throw new HostConfigError('host_config_invalid_state', `a call names this path and a path above it, so rh writes neither: ${nested.path}`);
+}
+
 /** The record key and host of a whole path that a scope admits; it throws for any other path. */
 type WholePathAdmit = (ledger: HostConfigLedger, path: string) => { key: string; host: PathRecord['host'] };
 
@@ -661,10 +671,7 @@ function writeWholePaths(admit: WholePathAdmit, paths: HostConfigPaths, writes: 
   let directories = ledger.directories;
   const persist = () => writeLedger(paths, { ...ledger, paths: records, directories });
   const admitted = writes.map((write) => ({ write, ...admit(ledger, write.path) }));
-  if (new Set(admitted.map(({ key }) => key)).size !== admitted.length) throw new HostConfigError('host_config_invalid_state', 'a call names one path twice');
-  // Every plan reads the disk before the first publish, so no write may change the path of another one.
-  const nested = admitted.find(({ key }) => admitted.some((other) => other.key !== key && isPathInside(other.key, key)));
-  if (nested) throw new HostConfigError('host_config_invalid_state', `a call names this path and a path above it, so rh writes neither: ${nested.write.path}`);
+  refuseOverlappingPaths(admitted.map(({ write, key }) => ({ path: write.path, key })));
   const plans = admitted.map(({ write, key, host }) => planWholePath(paths, write, key, host, records[key]));
   const written: string[] = [];
   for (const { write, key, host, previous, prior, entry, linkTarget, observed, replaces } of plans) {
@@ -783,7 +790,7 @@ function delegateWrites(env: NodeJS.ProcessEnv, paths: HostConfigPaths, declared
   const ledger = readLedger(paths);
   const wholes = declared.filter((declaration): declaration is HostConfigPathDeclaration => !isFragmentDeclaration(declaration) && !isToolDeclaration(declaration));
   const admitted = wholes.map((declaration) => ({ declaration, ...admitUserWrite(env, paths, ledger, declaration.path) }));
-  if (new Set(admitted.map(({ key }) => key)).size !== admitted.length) throw new HostConfigError('host_config_invalid_state', 'a call names one path twice');
+  refuseOverlappingPaths(admitted.map(({ declaration, key }) => ({ path: declaration.path, key })));
   const delegatedFiles = observeDelegatedFiles(paths, ledger, declared.filter(isFragmentDeclaration));
   const tools = observeTools(paths, ledger, declared.filter(isToolDeclaration));
   const checked = admitted.map(({ declaration, key, host }) => {
