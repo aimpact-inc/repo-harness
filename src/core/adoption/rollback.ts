@@ -34,14 +34,14 @@ export function rollbackMetadataForOperation(operation: AdoptionOperation): Adop
         strategy: "restore-or-delete-file",
         paths: [operation.path],
         backup: "runtime-fs-transaction",
-        description: "Restore the fs-transaction backup when present; delete the file if no backup was produced.",
+        description: "rh config restore --repo puts back the file that the repository ledger keeps, or deletes the file that rh created.",
       };
     case "appendManagedBlock":
       return {
         strategy: "restore-or-delete-file",
         paths: [operation.path],
         backup: "runtime-fs-transaction",
-        description: "Restore the fs-transaction backup when present; delete the file if no backup was produced.",
+        description: "rh config restore --repo puts back the file that the repository ledger keeps, or deletes the file that rh created.",
       };
     case "move":
       return {
@@ -55,13 +55,13 @@ export function rollbackMetadataForOperation(operation: AdoptionOperation): Adop
         strategy: "manual",
         paths: [operation.path],
         backup: "runtime-fs-transaction",
-        description: "Restore the retained transaction backup only if no new file occupies the removed path.",
+        description: "A failed run restores the file from its run directory; a committed run keeps no copy of the retired file.",
       };
     case "gitUntrack":
       return {
         strategy: "manual",
         paths: [operation.path],
-        description: "Restore the git index explicitly after reviewing the transaction manifest.",
+        description: "A failed run restores the index entry that it kept; a committed run keeps none.",
       };
     case "runCheck":
       return noRollback("No rollback is needed because this operation is a verification boundary.");

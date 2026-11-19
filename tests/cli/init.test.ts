@@ -253,7 +253,7 @@ describe("init command", () => {
     }
   }, 60000);
 
-  test("init applies while an install transaction holds the host lock and writes no host state", () => {
+  test("init writes nothing while an install transaction holds the runtime lock", () => {
     const tmp = join(tmpdir(), `repo-harness-init-host-lock-${Date.now()}`);
     const source = join(tmp, "source");
     const repo = join(tmp, "repo");
@@ -268,14 +268,13 @@ describe("init command", () => {
       writeFileSync(configPath, original);
       const env = { ...process.env, HOME: home, REPO_HARNESS_HOME: join(home, ".repo-harness") };
       const options = { repo, sourceRoot: source, env, codegraph: false, verify: false };
-      // Init takes no part in the host transaction, so a held update lock and
-      // its rollback preimage neither block init nor see an init write.
+      // Init records its repository writes in a ledger under HOME, so it waits for the runtime lock and then stops (#2903).
       withRuntimeTransactionLock(globalRuntimeScope(env), (runtimeLock) => {
         const transaction = beginInstallHostTransaction([configPath], env, { runtimeLock });
         try {
           const result = runSelectedInit(options);
-          expect(result.exitCode).toBe(0);
-          expect(result.steps.find((step) => step.step === "global automation defaults")).toBeUndefined();
+          expect(result.exitCode).not.toBe(0);
+          expect(existsSync(join(repo, ".ai/harness/workflow-contract.json"))).toBe(false);
           expect(readFileSync(configPath, "utf8")).toBe(original);
         } finally {
           rollbackInstallHostTransaction(transaction);
@@ -330,7 +329,10 @@ describe("init command", () => {
         detail: "missing for claude,codex; run: rh update --target both",
       });
       const after = snapshotTree(home);
-      expect(Object.keys(after).filter((path) => path !== registry)).toEqual(Object.keys(before));
+      // Besides the registry entry, init writes only its repository ledger and the runtime lock root (#2903).
+      const harness = join(home, ".repo-harness");
+      const initOwned = (path: string) => path === registry || path === join(harness, "transactions") || path === join(harness, "config") || path.startsWith(join(harness, "config", "repos"));
+      expect(Object.keys(after).filter((path) => !initOwned(path))).toEqual(Object.keys(before));
       for (const [path, entry] of Object.entries(before)) expect(after[path]).toBe(entry);
     } finally {
       rmSync(tmp, { recursive: true, force: true });

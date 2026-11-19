@@ -8,7 +8,7 @@ import { formatJson } from '../installer/shared';
 import { githubRemoteRepository } from '../../core/board/source';
 import { managedWorktreeRoot } from '../../effects/git/managed-worktree';
 import { gitSpawnSync, withoutRepositorySelectingGitEnv } from '../../effects/git/runner';
-import { applyAdoptionPlan, FS_TRANSACTION_BACKUP_ROOT, type ApplyAdoptionPlanResult } from '../../effects/fs-transaction';
+import { applyAdoptionPlan, type ApplyAdoptionPlanResult } from '../../effects/fs-transaction';
 import { version as PACKAGE_VERSION } from '../../../package.json';
 import {
   assertRegistryRevisionFence,
@@ -52,7 +52,6 @@ export interface RegisteredInitApply {
   readonly planned: number;
   readonly applied: number;
   readonly failed: number;
-  readonly transaction?: string;
   readonly rollbackOk?: boolean;
   readonly errors?: readonly string[];
 }
@@ -247,7 +246,6 @@ function initApplyResult(ok: boolean, planned: number, apply: ApplyAdoptionPlanR
     planned,
     applied: results.filter((result) => result.status === 'applied').length,
     failed: results.filter((result) => result.status === 'failed').length,
-    ...(apply?.transactionManifestPath ? { transaction: apply.transactionManifestPath } : {}),
     ...(apply?.rollback ? { rollbackOk: apply.rollback.ok } : {}),
     ...(errors.length > 0 ? { errors } : {}),
   };
@@ -435,9 +433,9 @@ function refreshInWorktree(path: string, worktree: string, base: RefreshBase, ow
   const planned = planRepoAdoption({ repo: worktree, mode: 'standard', explicitRepo: true, env });
   if (planned.error) return { path, status: 'failed', error: `init plan failed: ${planned.error.code} - ${planned.error.message}` };
   // The repo is already registered; registration from the worktree path would be refused.
-  const applied = applyAdoptionPlan({ ...planned.plan, apply: true });
-  // The transaction records stay in the worktree, which is removed, so no rollback command is reported.
-  const init = initApplyResult(applied.ok, planned.plan.summary.plannedTotal, { ...applied, transactionManifestPath: undefined }, []);
+  // The refresh commit and its pull request are the record (D7): the worktree is removed after the run.
+  const applied = applyAdoptionPlan({ ...planned.plan, apply: true }, { record: 'commit', env });
+  const init = initApplyResult(applied.ok, planned.plan.summary.plannedTotal, applied, []);
   if (!init.ok) return { path, status: 'failed', init, error: `init refresh failed: ${init.errors?.join('; ') || 'not ok'}` };
   const upgrade = runUpgrade({ cwd: worktree, callerCwd, scope: 'project', apply: true, env, legacyWorktreeCleanup: false, repositoryHookRecord: 'commit' });
   if (upgrade.error) return { path, status: 'failed', init, upgrade, error: `project upgrade failed: ${upgrade.error}` };
@@ -447,10 +445,8 @@ function refreshInWorktree(path: string, worktree: string, base: RefreshBase, ow
     if (result.error || result.status !== 0) throw new Error(commandFailure(`git ${args[0]}`, result));
     return result.stdout.trim();
   };
-  // The init and upgrade backups are local rollback records, not refreshed files. They are unstaged after the add:
-  // an exclude pathspec that names an ignored path makes `git add` exit 1, and adopted repos ignore the backup root.
+  // rh's in-checkout storage ignores itself (#3228), so the add takes only refreshed files.
   step(['add', '--all', '--', '.']);
-  step(['reset', '--quiet', '--', FS_TRANSACTION_BACKUP_ROOT]);
   const staged = git(worktree, ['diff', '--cached', '--quiet'], env);
   if (staged.error || (staged.status !== 0 && staged.status !== 1)) throw new Error(commandFailure('git diff --cached', staged));
   if (staged.status === 0) {
@@ -602,7 +598,6 @@ function formatInit(init: RegisteredInitPreview | RegisteredInitApply): string[]
       ...init.operations.map((operation) => `    ${operation.kind}${operation.path === undefined ? '' : ` ${operation.path}`}`)];
   }
   const lines = [`  init: ${init.ok ? 'ok' : 'failed'}; ${init.planned} planned, ${init.applied} applied, ${init.failed} failed`];
-  if (init.transaction) lines.push(`    rollback: rh init rollback --transaction ${init.transaction}`);
   if (init.rollbackOk !== undefined) lines.push(`    automatic rollback: ${init.rollbackOk ? 'complete' : 'incomplete'}`);
   for (const error of init.errors ?? []) lines.push(`    error: ${error}`);
   return lines;

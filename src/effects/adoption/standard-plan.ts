@@ -117,8 +117,9 @@ function directoryExists(repoRoot: string, path: string): boolean {
   return true;
 }
 
-function contentHash(content: string): string {
-  return sha256Prefixed(content);
+/** The sha256 of the file's bytes, as the apply and the host-config gate compare them (#2903). */
+function fileHash(repoRoot: string, path: string): string {
+  return sha256Prefixed(readFileSync(safePath(repoRoot, path)));
 }
 
 function writeOperation(
@@ -141,7 +142,7 @@ function writeOperation(
     risk: opts.risk ?? "low",
     status: existing === undefined ? "planned" : opts.ifMissing || existing === content ? "skipped" : "planned",
     expectedAbsent: existing === undefined,
-    expectedContentHash: existing === undefined ? undefined : contentHash(existing),
+    expectedContentHash: existing === undefined ? undefined : fileHash(repoRoot, path),
   };
 }
 
@@ -167,7 +168,7 @@ function removeOperation(repoRoot: string, path: string, reason: string): Adopti
     reason,
     risk: "medium",
     status: "planned",
-    expectedContentHash: existing === undefined ? undefined : contentHash(existing),
+    expectedContentHash: existing === undefined ? undefined : fileHash(repoRoot, path),
   };
 }
 
@@ -566,7 +567,7 @@ export function planStandardAdoption(opts: StandardPlanOptions): { operations: A
     ...gitignoreOperation,
     status: !gitignoreUpdate.ok || gitignoreUpdate.changed ? "planned" : "skipped",
     expectedAbsent: fileContent(opts.repoRoot, ".gitignore") === undefined,
-    expectedContentHash: fileContent(opts.repoRoot, ".gitignore") === undefined ? undefined : contentHash(gitignore),
+    expectedContentHash: fileContent(opts.repoRoot, ".gitignore") === undefined ? undefined : fileHash(opts.repoRoot, ".gitignore"),
   });
 
   const unknownKeyWarnings: AdoptionWarning[] = unknownKeys.length > 0

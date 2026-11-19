@@ -189,7 +189,7 @@ function validFileRecord(record: unknown): boolean {
     && (record.format === undefined || record.format === 'toml' || record.format === 'json');
 }
 
-const PATH_RECORD_HOSTS: readonly string[] = ['claude', 'codex', 'pi', 'staged', 'bin'];
+const PATH_RECORD_HOSTS: readonly string[] = ['claude', 'codex', 'pi', 'staged', 'bin', 'repository'];
 
 function validPathCommitted(value: unknown): boolean {
   if (!isObject(value)) return false;

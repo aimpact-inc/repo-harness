@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import { cpSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync } from 'fs';
 import { requireHome } from '../../effects/repo-harness-home';
-import { dirname, join, relative, resolve } from 'path';
+import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { Command } from 'commander';
 import {
@@ -33,7 +33,7 @@ import {
   type LegacyWorktreeCandidate,
   type LegacyWorktreeOutcome,
 } from '../../effects/upgrade/legacy-worktree-cleanup';
-import { ensureCheckoutBackupDirectory, FS_TRANSACTION_BACKUP_ROOT, withTargetLock, type FsTransactionManifest, type FsTransactionManifestOperation } from '../../effects/fs-transaction';
+import { ensureCheckoutBackupDirectory, FS_TRANSACTION_BACKUP_ROOT, withTargetLock } from '../../effects/fs-transaction';
 import {
   beginLegacyCleanupBackup,
   beginInstallHostTransaction,
@@ -104,7 +104,6 @@ export interface UpgradeResult {
   readonly operatorKept: readonly LeftoverItem[];
   readonly transactionId?: string;
   readonly backupPath?: string;
-  readonly projectBackupPath?: string;
   readonly legacyWorktrees?: LegacyWorktreeOutcome;
   readonly error?: string;
 }
@@ -239,13 +238,13 @@ function withProjectLocks<T>(paths: readonly string[], run: () => T): T {
   return first === undefined ? run() : withTargetLock(first, () => withProjectLocks(rest, run));
 }
 
-interface ProjectBackup {
-  readonly transaction: InstallHostTransaction;
-  readonly manifestPath: string;
-  readonly operations: FsTransactionManifestOperation[];
-}
-
-function backupProject(cwd: string, paths: readonly string[], id: string): ProjectBackup | undefined {
+/**
+ * The in-run copies of the project files that the cleanup removes or
+ * refreshes, in a guarded directory of the checkout. The run's rollback reads
+ * them; the run deletes them at its end, and keeps them only after a failure
+ * (#2903). Each file holds proved rh bytes (the legacy inventory).
+ */
+function backupProject(cwd: string, paths: readonly string[], id: string): InstallHostTransaction | undefined {
   if (paths.length === 0) return undefined;
   const backupRoot = join(cwd, FS_TRANSACTION_BACKUP_ROOT, `upgrade-${id}`);
   if (!isLegacyPathSafe(cwd, backupRoot, false)) throw new Error(`unsafe project backup path: ${backupRoot}`);
@@ -258,31 +257,7 @@ function backupProject(cwd: string, paths: readonly string[], id: string): Proje
     cpSync(path, backupPath, { force: false, errorOnExist: true });
     return { path, existed: true, backup_path: backupPath };
   });
-  return {
-    transaction: { protocol: 1, backup_root: backupRoot, snapshots },
-    manifestPath: join(backupRoot, 'manifest.json'),
-    operations: snapshots.map((snapshot, index) => ({
-      id: `upgrade:${index}`,
-      kind: 'remove',
-      path: relative(cwd, snapshot.path).replaceAll('\\', '/'),
-      status: 'planned',
-      backupPath: relative(cwd, snapshot.backup_path!).replaceAll('\\', '/'),
-      rollbackStrategy: 'restore-or-delete-file',
-    })),
-  };
-}
-
-function writeProjectManifest(cwd: string, backup: ProjectBackup): void {
-  const manifest: FsTransactionManifest = {
-    protocol: 1,
-    command: 'adopt',
-    createdAt: new Date().toISOString(),
-    repoRoot: cwd,
-    mode: 'standard',
-    operations: backup.operations,
-    rollback: { command: `rh init rollback --transaction ${backup.manifestPath}` },
-  };
-  atomicWriteFileSync(backup.manifestPath, formatJson(manifest), { mode: 0o600 });
+  return { protocol: 1, backup_root: backupRoot, snapshots };
 }
 
 function applyLocked(
@@ -321,7 +296,7 @@ function applyLocked(
   const stateBefore = legacyPathSnapshot(statePath)?.contentHash ?? null;
   let hostBackup: InstallHostTransaction | undefined;
   let gateTransaction: InstallHostTransaction | undefined;
-  let projectBackup: ProjectBackup | undefined;
+  let projectBackup: InstallHostTransaction | undefined;
   const mutatedPaths = new Set<string>();
   // The hash that the gate wrote to each hook file: a rollback restores the file only while it still holds it.
   const gateEdits = new Map<string, Sha256>();
@@ -334,8 +309,7 @@ function applyLocked(
     const prior = legacyPathSnapshot(auditPath) ? readFileSync(auditPath, 'utf-8').split('\n').filter(Boolean) : [];
     const record = { transaction_id: transactionId, removed_paths: removedPaths, refreshed_paths: refreshedPaths, kept_paths: keptPaths,
       attempted_paths: [...mutatedPaths], rolled_back_paths: rolledBackPaths,
-      backup_path: hostBackup?.backup_root ?? projectBackup?.transaction.backup_root,
-      project_backup_path: projectBackup?.manifestPath, ...(error ? { error } : {}) };
+      backup_path: hostBackup?.backup_root ?? (error ? projectBackup?.backup_root : undefined), ...(error ? { error } : {}) };
     const kept = [...prior, JSON.stringify(record)].slice(-UPGRADE_AUDIT_MAX_RECORDS);
     atomicWriteFileSync(auditPath, `${kept.join('\n')}\n`, { mode: 0o600 });
   };
@@ -350,14 +324,13 @@ function applyLocked(
     if (gateRefreshPaths.size || globalHookEdits) gateTransaction = beginInstallHostTransaction([statePath, ledgerPath], env, { runtimeLock });
     if (hostPaths.length > 0) hostBackup = beginLegacyCleanupBackup(hostPaths, env, runtimeLock);
     projectBackup = backupProject(options.cwd, projectPaths, transactionId);
-    if (projectBackup) writeProjectManifest(options.cwd, projectBackup);
     for (const path of [...globalPaths, ...projectPaths]) {
       const targetItems = candidates.filter((item) => item.path === path);
       for (const item of targetItems) dependencies.beforeRemove?.(item);
       assertHostLock();
       const fresh = planUpgrade(options, decisions).items;
       const eligible = targetItems.filter((item) => unchanged(item, options)
-        && (gateRefreshPaths.has(path) || backupMatches(item, item.location === 'global' ? hostBackup : projectBackup?.transaction))
+        && (gateRefreshPaths.has(path) || backupMatches(item, item.location === 'global' ? hostBackup : projectBackup))
         && fresh.some((current) => itemKey(current) === itemKey(item) && removable(current)));
       if (eligible.length !== targetItems.length) {
         if (!keptPaths.includes(path)) keptPaths.push(path);
@@ -420,14 +393,6 @@ function applyLocked(
       }
       if (refreshing) refreshedPaths.push(path);
       else removedPaths.push(path);
-      if (projectBackup && projectPaths.includes(path)) {
-        const index = projectPaths.indexOf(path);
-        projectBackup.operations[index] = {
-          ...projectBackup.operations[index]!, status: 'applied',
-          ...(nextContent === undefined ? {} : { kind: 'writeFile', contentHash: legacyPathSnapshot(path)?.contentHash }),
-        };
-        writeProjectManifest(options.cwd, projectBackup);
-      }
     }
     if (repositoryHooks.length) {
       const stripped = new Set(stripRepositoryHookFiles(options.cwd, { env, record: repositoryHookRecord, runtimeLock }).map((path) => join(options.cwd, path)));
@@ -444,10 +409,11 @@ function applyLocked(
     }
     audit();
     if (gateTransaction) commitInstallHostTransaction(gateTransaction);
+    if (projectBackup) rmSync(projectBackup.backup_root, { recursive: true, force: true });
   } catch (failure) {
     error = failure instanceof Error ? failure.message : String(failure);
     const rollBack = (backup: InstallHostTransaction, snapshot: InstallHostTransaction['snapshots'][number]): void => {
-      const root = projectBackup?.transaction === backup ? options.cwd : options.home;
+      const root = projectBackup === backup ? options.cwd : options.home;
       try {
         if (!isLegacyPathSafe(root, snapshot.path)
           || !isLegacyPathSafe(root, backup.backup_root, false)
@@ -462,10 +428,6 @@ function applyLocked(
         if (removedIndex >= 0) removedPaths.splice(removedIndex, 1);
         const refreshedIndex = refreshedPaths.indexOf(snapshot.path);
         if (refreshedIndex >= 0) refreshedPaths.splice(refreshedIndex, 1);
-        if (projectBackup?.transaction === backup) {
-          const index = projectPaths.indexOf(snapshot.path);
-          projectBackup.operations[index] = { ...projectBackup.operations[index]!, status: 'skipped' };
-        }
       } catch (rollbackError) {
         error += `; ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`;
       }
@@ -488,15 +450,11 @@ function applyLocked(
         }
       } catch (recordError) { error += '; rollback records: ' + String((recordError as Error).message ?? recordError); }
     }
-    for (const backup of [projectBackup?.transaction, hostBackup]) {
+    for (const backup of [projectBackup, hostBackup]) {
       if (!backup) continue;
       for (const snapshot of [...backup.snapshots].reverse()) {
         if (mutatedPaths.has(snapshot.path) && !gateEdits.has(snapshot.path)) rollBack(backup, snapshot);
       }
-    }
-    if (projectBackup) {
-      try { writeProjectManifest(options.cwd, projectBackup); }
-      catch (manifestError) { error += `; rollback manifest failed: ${String(manifestError)}`; }
     }
     for (const item of candidates) {
       if (!removedPaths.includes(item.path) && !refreshedPaths.includes(item.path) && !keptPaths.includes(item.path)) keptPaths.push(item.path);
@@ -504,8 +462,7 @@ function applyLocked(
     try { audit(); } catch (auditError) { error += `; audit failed: ${String(auditError)}`; }
   }
   return { items, apply: true, exitCode: error ? 1 : 0, removedPaths, refreshedPaths, keptPaths, operatorKept, transactionId,
-    backupPath: hostBackup?.backup_root ?? projectBackup?.transaction.backup_root,
-    projectBackupPath: projectBackup?.manifestPath, ...(error ? { error } : {}) };
+    backupPath: hostBackup?.backup_root ?? (error ? projectBackup?.backup_root : undefined), ...(error ? { error } : {}) };
 }
 
 function withLegacyWorktrees(result: UpgradeResult, outcome: LegacyWorktreeOutcome | undefined): UpgradeResult {
@@ -576,7 +533,6 @@ export function formatUpgradeResult(result: UpgradeResult, asJson = false): stri
   }
   if (result.legacyWorktrees) lines.push(...formatLegacyWorktreeOutcome(result.legacyWorktrees));
   if (result.backupPath) lines.push(`Backup: ${result.backupPath}`);
-  if (result.projectBackupPath) lines.push(`Project rollback: rh init rollback --transaction ${result.projectBackupPath}`);
   if (result.status === 'partial') lines.push('Partial: unrecorded skill paths were kept. ' + result.next);
   if (result.error) lines.push(`Failed: ${result.error}`);
   return `${lines.join('\n')}\n`;

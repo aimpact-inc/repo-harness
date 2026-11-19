@@ -13,9 +13,11 @@ import {
   rmSync,
   writeSync,
 } from "fs";
+import { randomUUID } from "crypto";
 import { errorMessage } from "../core/evidence/error-message";
+import { shellQuote } from "../core/shell-quote";
 import { sha256Prefixed } from "../core/evidence/sha256";
-import { basename, dirname, relative, resolve, sep } from "path";
+import { basename, dirname, join, relative, resolve, sep } from "path";
 import type {
   AdoptionOperation,
   AdoptionOperationStatus,
@@ -23,7 +25,6 @@ import type {
   AppendManagedBlockOperation,
   GitUntrackOperation,
   MkdirOperation,
-  MoveOperation,
   RemoveOperation,
   WriteFileOperation,
 } from "../core/adoption/operations";
@@ -33,11 +34,12 @@ import { ignoreBlockProof } from "./adoption/gitignore-plan";
 import { withExclusiveDirectoryLock } from "./locking/exclusive-directory-lock";
 import { runGit } from './git/run-git';
 import { ensureSelfIgnoringDirectory, SELF_IGNORE_NAME } from './self-ignoring-directory';
+import { openRepositoryWriteRun, resolveHostConfigRepository, type HostConfigRepository, type RepositoryWriteRun } from './host-config/repository';
+import { acquireRuntimeTransactionLock, globalRuntimeScope, type RuntimeTransactionLock } from './locking/runtime-transaction-lock';
 
 export const FS_BACKUP_ROOT = ".ai/harness/backups";
 export const FS_TRANSACTION_BACKUP_ROOT = `${FS_BACKUP_ROOT}/fs-transaction`;
 const LOCK_SUFFIX = ".repo-harness.lock";
-let atomicWriteSequence = 0;
 let transactionSequence = 0;
 
 export interface GitIndexEntry {
@@ -55,46 +57,37 @@ export interface ApplyOperationResult {
   readonly contentHash?: string;
   readonly gitIndexEntry?: GitIndexEntry;
   readonly error?: string;
+  /** Why rh left the entry as it is, for an operation that it skipped on purpose. */
+  readonly kept?: string;
+}
+
+/**
+ * Where an adoption keeps its record (#2903). `ledger`: each file write goes
+ * through the repository gate, and `rh config restore --repo` is its undo.
+ * `commit`: an rh-owned refresh worktree, whose commit and pull request are the
+ * record (D7); it writes directly and is removed after the run.
+ */
+export type AdoptionRecord = "ledger" | "commit";
+
+export interface ApplyAdoptionOptions {
+  readonly record: AdoptionRecord;
+  readonly env: NodeJS.ProcessEnv;
+  readonly dryRun?: boolean;
 }
 
 export interface ApplyAdoptionPlanResult {
   readonly ok: boolean;
   readonly dryRun: boolean;
   readonly results: readonly ApplyOperationResult[];
-  readonly transactionManifestPath?: string;
-  /** Automatic rollback, by manifest, of the operations applied before the transaction failed. */
+  /** The rollback of a failed run: what went back and what stayed. */
   readonly rollback?: {
     readonly ok: boolean;
     readonly results: readonly RollbackOperationResult[];
   };
-}
-
-export interface FsTransactionManifestOperation {
-  readonly id: string;
-  readonly kind: AdoptionOperation["kind"];
-  readonly path?: string;
-  readonly to?: string;
-  readonly status: AdoptionOperationStatus;
-  readonly backupPath?: string;
-  readonly contentHash?: string;
-  readonly gitIndexEntry?: GitIndexEntry;
-  readonly rollbackStrategy?: string;
-  readonly error?: string;
-}
-
-export interface FsTransactionManifest {
-  readonly protocol: 1;
-  // protocol-1 frozen: this discriminator is at-rest manifest data, not a CLI command
-  // name. Downstream repos already hold manifests with this literal; readTransactionManifest
-  // below rejects anything else. Do not rename to "init" even though the CLI verb changed.
-  readonly command: "adopt";
-  readonly createdAt: string;
-  readonly repoRoot: string;
-  readonly mode: AdoptionPlan["mode"];
-  readonly operations: readonly FsTransactionManifestOperation[];
-  readonly rollback: {
-    readonly command: string;
-  };
+  /** The undo of the recorded writes, set when the repository ledger recorded one. */
+  readonly restore?: string;
+  /** The run's in-checkout directory, kept only when its rollback could not put every entry back. */
+  readonly transactionDir?: string;
 }
 
 export interface RollbackOperationResult {
@@ -104,15 +97,6 @@ export interface RollbackOperationResult {
   readonly status: "rolled_back" | "skipped" | "failed";
   readonly action: "restore_backup" | "restore_git_index" | "delete_created_file" | "remove_empty_directory" | "none";
   readonly error?: string;
-}
-
-export interface RollbackAdoptionTransactionResult {
-  readonly protocol: 1;
-  readonly command: "init rollback";
-  readonly repoRoot: string;
-  readonly transactionManifestPath: string;
-  readonly ok: boolean;
-  readonly results: readonly RollbackOperationResult[];
 }
 
 function failure(operation: AdoptionOperation, error: string): ApplyOperationResult {
@@ -126,7 +110,7 @@ function failure(operation: AdoptionOperation, error: string): ApplyOperationRes
 }
 
 export function isSupportedAdoptionOperation(operation: AdoptionOperation): boolean {
-  return ["mkdir", "writeFile", "appendManagedBlock", "move", "remove", "gitUntrack"].includes(operation.kind);
+  return ["mkdir", "writeFile", "appendManagedBlock", "remove", "gitUntrack"].includes(operation.kind);
 }
 
 function unsupportedOperationReason(operation: AdoptionOperation): string {
@@ -213,7 +197,7 @@ function checkExpectedFileState(repoRoot: string, operation: AdoptionOperation):
   }
   if (operation.expectedContentHash) {
     if (!exists || !lstatSync(target.path).isFile()) return `target changed after planning: ${operation.path}`;
-    if (contentHash(readFileSync(target.path, "utf-8")) !== operation.expectedContentHash) {
+    if (contentHash(readFileSync(target.path)) !== operation.expectedContentHash) {
       return `target content changed after planning: ${operation.path}`;
     }
   }
@@ -232,20 +216,6 @@ export function ensureCheckoutBackupDirectory(repoRoot: string, directory: strin
     if (parentError) throw new Error(parentError);
     ensureSelfIgnoringDirectory(resolveInsideRepo(repoRoot, level).path!);
   }
-}
-
-function backupRootError(repoRoot: string, transactionDir: string): string | null {
-  try {
-    ensureCheckoutBackupDirectory(repoRoot, transactionDir);
-    return null;
-  } catch (error) {
-    return errorMessage(error);
-  }
-}
-
-function backupPathFor(path: string, backupRoot: string): string {
-  atomicWriteSequence += 1;
-  return `${backupRoot}/${sanitizeBackupStem(path)}.${Date.now()}-${process.pid}-${atomicWriteSequence}.bak`;
 }
 
 function transactionDirFor(): string {
@@ -271,18 +241,13 @@ type FileWriteDecision =
   | { readonly kind: "skip" }
   | { readonly kind: "refuse"; readonly error: string };
 
-export interface AtomicWriteResult {
-  readonly backupPath?: string;
-}
-
 // The decision runs again under the target lock, so a writer that waited for the
 // lock never overwrites a change another writer made while it waited.
 function writeFileUnderTargetLock(
   repoRoot: string,
   path: string,
   decide: (targetPath: string) => FileWriteDecision,
-  backupRoot: string,
-): (AtomicWriteResult & { readonly content: string | Buffer }) | null {
+): { readonly content: string | Buffer } | null {
   const target = resolveInsideRepo(repoRoot, path);
   if (!target.ok || !target.path) throw new Error(target.error ?? "invalid path");
   const targetPath = target.path;
@@ -299,18 +264,6 @@ function writeFileUnderTargetLock(
     if (decision.kind === "refuse") throw new Error(decision.error);
     if (decision.kind === "skip") return null;
     const existingMode = existsSync(targetPath) ? lstatSync(targetPath).mode & 0o777 : undefined;
-
-    let backupPath: string | undefined;
-    if (existingMode !== undefined) {
-      ensureCheckoutBackupDirectory(repoRoot, backupRoot);
-      backupPath = backupPathFor(path, backupRoot);
-      const backup = resolveInsideRepo(repoRoot, backupPath);
-      if (!backup.ok || !backup.path) throw new Error(backup.error ?? "invalid backup path");
-      const resolvedBackupPath = backup.path;
-      writeFileDurably(resolvedBackupPath, readFileSync(targetPath), existingMode);
-      fsyncDirectory(dirname(resolvedBackupPath));
-    }
-
     const tempPath = resolve(dirname(targetPath), `.${basename(targetPath)}.${process.pid}.${Date.now()}.tmp`);
     try {
       writeFileDurably(tempPath, decision.content, decision.mode ?? existingMode);
@@ -320,41 +273,105 @@ function writeFileUnderTargetLock(
       rmSync(tempPath, { force: true });
     }
 
-    return { backupPath, content: decision.content };
+    return { content: decision.content };
   });
 }
 
-export function atomicWriteFile(
-  repoRoot: string,
-  path: string,
-  content: string | Buffer,
-  opts: { readonly mode?: number; readonly backupRoot: string },
-): AtomicWriteResult {
-  const write = writeFileUnderTargetLock(repoRoot, path, () => ({ kind: "write", content, mode: opts.mode }), opts.backupRoot);
-  return { backupPath: write?.backupPath };
+/** How one run puts its writes on disk: directly, or through the repository gate. */
+interface RunWriter {
+  /** Create the directory at the absolute `target` and its missing ancestors. */
+  readonly mkdir: (target: string) => void;
+  /** Write what `decide` returns at the repo-relative `path` under the target lock; null when the decision under the lock skips. */
+  readonly write: (path: string, decide: (targetPath: string) => FileWriteDecision) => { readonly content: string | Buffer } | null;
 }
 
-export function applyMkdirOperation(repoRoot: string, operation: MkdirOperation, dryRun = false): ApplyOperationResult {
+/** One applying run; a dry run has none. `transactionDir` (repo-relative) keeps the files that a `remove` takes away. */
+interface OperationRun {
+  readonly writer: RunWriter;
+  readonly transactionDir?: string;
+}
+
+function directWriter(repoRoot: string): RunWriter {
+  return {
+    mkdir: (target) => { mkdirSync(target, { recursive: true }); },
+    write: (path, decide) => writeFileUnderTargetLock(repoRoot, path, decide),
+  };
+}
+
+/**
+ * The ledger writer (#2903): each file goes through the repository gate, which
+ * keeps a replaced file in the repository vault and records each directory
+ * that it creates. The gate needs paths in the real worktree root. The target
+ * lock stays around each write, so another rh writer of the file waits.
+ */
+function recordedWriter(repoRoot: string, repository: HostConfigRepository, run: RepositoryWriteRun): RunWriter {
+  // The plan's root can reach the worktree through a link (`/tmp` on macOS); the gate admits only real worktree paths.
+  const inWorktree = (absolute: string) => join(repository.worktree, relative(resolve(repoRoot), absolute));
+  return {
+    mkdir: (target) => { run.gate.createDirectories([inWorktree(target)]); },
+    write: (path, decide) => {
+      const resolved = resolveInsideRepo(repoRoot, path);
+      if (!resolved.ok || !resolved.path) throw new Error(resolved.error ?? "invalid path");
+      const symlinkError = assertNoSymlinkInPath(repoRoot, path);
+      if (symlinkError) throw new Error(symlinkError);
+      const targetPath = inWorktree(resolved.path);
+      // The target lock lives in the parent, so the gate creates and records the parent first.
+      if (!existsSync(dirname(targetPath))) run.gate.createDirectories([dirname(targetPath)]);
+      return withTargetLock(targetPath, () => {
+        if (existsSync(targetPath) && !lstatSync(targetPath).isFile()) throw new Error(`file target is not a regular file: ${path}`);
+        const decision = decide(targetPath);
+        if (decision.kind === "refuse") throw new Error(decision.error);
+        if (decision.kind === "skip") return null;
+        const before = existsSync(targetPath) ? readFileSync(targetPath) : null;
+        const mode = decision.mode ?? (before ? lstatSync(targetPath).mode & 0o777 : undefined);
+        run.gate.writePaths([{
+          path: targetPath, owner: "core",
+          entry: { type: "file", bytes: Buffer.from(decision.content), ...(mode === undefined ? {} : { mode }) },
+          ...(before ? { replace: true, expected: contentHash(before) } : {}),
+        }]);
+        return { content: decision.content };
+      });
+    },
+  };
+}
+
+function applyMkdirOperation(repoRoot: string, operation: MkdirOperation, run: OperationRun | null): ApplyOperationResult {
   const target = resolveInsideRepo(repoRoot, operation.path);
   if (!target.ok || !target.path) return failure(operation, target.error ?? "invalid path");
   const symlinkError = assertNoSymlinkInPath(repoRoot, operation.path);
   if (symlinkError) return failure(operation, symlinkError);
-  if (dryRun) return { id: operation.id, kind: operation.kind, path: operation.path, status: "planned" };
+  if (!run) return { id: operation.id, kind: operation.kind, path: operation.path, status: "planned" };
   // Only report an applied (rollback-eligible) result when we actually create the
   // directory. A directory that already existed must never be removed during rollback.
   if (existsSync(target.path)) {
     return { id: operation.id, kind: operation.kind, path: operation.path, status: "skipped" };
   }
-  mkdirSync(target.path, { recursive: true });
+  run.writer.mkdir(target.path);
   return { id: operation.id, kind: operation.kind, path: operation.path, status: "applied" };
+}
+
+/** What a file operation writes, decided from the target as it is now. */
+function fileDecision(repoRoot: string, operation: WriteFileOperation | AppendManagedBlockOperation): (targetPath: string) => FileWriteDecision {
+  return (targetPath) => {
+    const preconditionError = checkExpectedFileState(repoRoot, operation);
+    if (preconditionError) return { kind: "refuse", error: preconditionError };
+    if (operation.kind === "writeFile") {
+      if (operation.ifMissing === true && existsSync(targetPath)) return { kind: "skip" };
+      if (existsSync(targetPath) && readFileSync(targetPath).equals(Buffer.from(operation.content))) return { kind: "skip" };
+      return { kind: "write", content: operation.content, mode: operation.mode };
+    }
+    const existing = existsSync(targetPath) ? readFileSync(targetPath, "utf-8") : "";
+    const update = upsertManagedBlock(existing, operation, ignoreBlockProof(operation));
+    if (!update.ok) return { kind: "refuse", error: update.error ?? "failed to update managed block" };
+    if (!update.changed) return { kind: "skip" };
+    return { kind: "write", content: update.content ?? "" };
+  };
 }
 
 function applyFileWriteOperation(
   repoRoot: string,
   operation: WriteFileOperation | AppendManagedBlockOperation,
-  decide: (targetPath: string) => FileWriteDecision,
-  dryRun: boolean,
-  backupRoot: string | undefined,
+  run: OperationRun | null,
 ): ApplyOperationResult {
   const target = resolveInsideRepo(repoRoot, operation.path);
   if (!target.ok || !target.path) return failure(operation, target.error ?? "invalid path");
@@ -362,65 +379,26 @@ function applyFileWriteOperation(
   if (symlinkError) return failure(operation, symlinkError);
   // The unlocked decision settles dry-run and skips the lock for unchanged targets;
   // a write decides again under the lock before it touches the target.
+  const decide = fileDecision(repoRoot, operation);
   const decision = decide(target.path);
   if (decision.kind === "refuse") return failure(operation, decision.error);
   const skipped: ApplyOperationResult = { id: operation.id, kind: operation.kind, path: operation.path, status: "skipped" };
   if (decision.kind === "skip") return skipped;
-  if (dryRun) return { id: operation.id, kind: operation.kind, path: operation.path, status: "planned" };
-  if (!backupRoot) return failure(operation, "a file write needs its transaction directory for the backup");
+  if (!run) return { id: operation.id, kind: operation.kind, path: operation.path, status: "planned" };
   try {
-    const write = writeFileUnderTargetLock(repoRoot, operation.path, decide, backupRoot);
+    const write = run.writer.write(operation.path, decide);
     if (!write) return skipped;
-    return {
-      id: operation.id,
-      kind: operation.kind,
-      path: operation.path,
-      status: "applied",
-      backupPath: write.backupPath,
-      contentHash: contentHash(write.content),
-    };
+    return { id: operation.id, kind: operation.kind, path: operation.path, status: "applied", contentHash: contentHash(write.content) };
   } catch (error) {
     return failure(operation, errorMessage(error));
   }
-}
-
-export function applyWriteFileOperation(
-  repoRoot: string,
-  operation: WriteFileOperation,
-  dryRun = false,
-  backupRoot?: string,
-): ApplyOperationResult {
-  return applyFileWriteOperation(repoRoot, operation, (targetPath) => {
-    const preconditionError = checkExpectedFileState(repoRoot, operation);
-    if (preconditionError) return { kind: "refuse", error: preconditionError };
-    if (operation.ifMissing === true && existsSync(targetPath)) return { kind: "skip" };
-    if (existsSync(targetPath) && readFileSync(targetPath).equals(Buffer.from(operation.content))) return { kind: "skip" };
-    return { kind: "write", content: operation.content, mode: operation.mode };
-  }, dryRun, backupRoot);
-}
-
-export function applyAppendManagedBlockOperation(
-  repoRoot: string,
-  operation: AppendManagedBlockOperation,
-  dryRun = false,
-  backupRoot?: string,
-): ApplyOperationResult {
-  return applyFileWriteOperation(repoRoot, operation, (targetPath) => {
-    const preconditionError = checkExpectedFileState(repoRoot, operation);
-    if (preconditionError) return { kind: "refuse", error: preconditionError };
-    const existing = existsSync(targetPath) ? readFileSync(targetPath, "utf-8") : "";
-    const update = upsertManagedBlock(existing, operation, ignoreBlockProof(operation));
-    if (!update.ok) return { kind: "refuse", error: update.error ?? "failed to update managed block" };
-    if (!update.changed) return { kind: "skip" };
-    return { kind: "write", content: update.content ?? "" };
-  }, dryRun, backupRoot);
 }
 
 function moveIntoTransactionBackup(repoRoot: string, path: string, transactionDir: string): string {
   const source = resolveInsideRepo(repoRoot, path);
   if (!source.ok || !source.path) throw new Error(source.error ?? "invalid source path");
   ensureCheckoutBackupDirectory(repoRoot, `${transactionDir}/removed`);
-  const backupPath = `${transactionDir}/removed/${sanitizeBackupStem(path)}.${Date.now()}-${process.pid}-${atomicWriteSequence + 1}`;
+  const backupPath = `${transactionDir}/removed/${sanitizeBackupStem(path)}.${randomUUID()}`;
   const backup = resolveInsideRepo(repoRoot, backupPath);
   if (!backup.ok || !backup.path) throw new Error(backup.error ?? "invalid backup path");
   renameSync(source.path, backup.path);
@@ -429,54 +407,7 @@ function moveIntoTransactionBackup(repoRoot: string, path: string, transactionDi
   return backupPath;
 }
 
-function targetContentHash(targetPath: string): string | undefined {
-  if (!existsSync(targetPath) || !lstatSync(targetPath).isFile()) return undefined;
-  return contentHash(readFileSync(targetPath, "utf-8"));
-}
-
-export function applyMoveOperation(
-  repoRoot: string,
-  operation: MoveOperation,
-  dryRun = false,
-): ApplyOperationResult {
-  const source = resolveInsideRepo(repoRoot, operation.path);
-  const destination = resolveInsideRepo(repoRoot, operation.to);
-  if (!source.ok || !source.path) return failure(operation, source.error ?? "invalid move source");
-  if (!destination.ok || !destination.path) return failure(operation, destination.error ?? "invalid move destination");
-  const sourceSymlinkError = assertNoSymlinkInPath(repoRoot, operation.path);
-  const destinationSymlinkError = assertNoSymlinkInPath(repoRoot, operation.to);
-  if (sourceSymlinkError || destinationSymlinkError) return failure(operation, sourceSymlinkError ?? destinationSymlinkError ?? "invalid move path");
-  const preconditionError = checkExpectedFileState(repoRoot, operation);
-  if (preconditionError) return failure(operation, preconditionError);
-  if (!existsSync(source.path)) return { id: operation.id, kind: operation.kind, path: operation.path, to: operation.to, status: "skipped" };
-  if (!lstatSync(source.path).isFile()) return failure(operation, `move source is not a regular file: ${operation.path}`);
-  if (existsSync(destination.path)) return failure(operation, `move destination already exists: ${operation.to}`);
-  if (dryRun) return { id: operation.id, kind: operation.kind, path: operation.path, to: operation.to, status: "planned" };
-  try {
-    const parentError = ensureParent(repoRoot, operation.to);
-    if (parentError) throw new Error(parentError);
-    renameSync(source.path, destination.path);
-    fsyncDirectory(dirname(source.path));
-    fsyncDirectory(dirname(destination.path));
-    return {
-      id: operation.id,
-      kind: operation.kind,
-      path: operation.path,
-      to: operation.to,
-      status: "applied",
-      contentHash: targetContentHash(destination.path),
-    };
-  } catch (error) {
-    return failure(operation, errorMessage(error));
-  }
-}
-
-export function applyRemoveOperation(
-  repoRoot: string,
-  operation: RemoveOperation,
-  dryRun = false,
-  transactionDir?: string,
-): ApplyOperationResult {
+function applyRemoveOperation(repoRoot: string, operation: RemoveOperation, run: OperationRun | null): ApplyOperationResult {
   const target = resolveInsideRepo(repoRoot, operation.path);
   if (!target.ok || !target.path) return failure(operation, target.error ?? "invalid remove path");
   const symlinkError = assertNoSymlinkInPath(repoRoot, operation.path);
@@ -485,10 +416,15 @@ export function applyRemoveOperation(
   if (preconditionError) return failure(operation, preconditionError);
   if (!existsSync(target.path)) return { id: operation.id, kind: operation.kind, path: operation.path, status: "skipped" };
   if (!lstatSync(target.path).isFile()) return failure(operation, `remove target is not a regular file: ${operation.path}`);
-  if (dryRun) return { id: operation.id, kind: operation.kind, path: operation.path, status: "planned" };
-  if (!transactionDir) return failure(operation, "remove operation requires a transaction directory");
+  if (!run) return { id: operation.id, kind: operation.kind, path: operation.path, status: "planned" };
   try {
-    const backupPath = moveIntoTransactionBackup(repoRoot, operation.path, transactionDir);
+    // A run with no transaction directory (`commit`) has no rollback: its worktree goes after the run.
+    if (!run.transactionDir) {
+      rmSync(target.path);
+      fsyncDirectory(dirname(target.path));
+      return { id: operation.id, kind: operation.kind, path: operation.path, status: "applied" };
+    }
+    const backupPath = moveIntoTransactionBackup(repoRoot, operation.path, run.transactionDir);
     return { id: operation.id, kind: operation.kind, path: operation.path, status: "applied", backupPath };
   } catch (error) {
     return failure(operation, errorMessage(error));
@@ -502,7 +438,6 @@ type GitIndexRead =
   | { readonly kind: "unsupported"; readonly error: string };
 
 const GIT_INDEX_FILE_MODES = new Set(["100644", "100755"]);
-const GIT_OBJECT_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 
 // Reads the single stage-0 regular-file index entry for path. Rollback restores
 // this exact entry, because the staged blob can differ from the working-tree bytes.
@@ -526,7 +461,7 @@ function readGitIndexEntry(repoRoot: string, path: string): GitIndexRead {
   return { kind: "entry", entry: { mode: match[1], objectId: match[2] } };
 }
 
-export function applyGitUntrackOperation(repoRoot: string, operation: GitUntrackOperation, dryRun = false): ApplyOperationResult {
+function applyGitUntrackOperation(repoRoot: string, operation: GitUntrackOperation, dryRun: boolean): ApplyOperationResult {
   const target = resolveInsideRepo(repoRoot, operation.path);
   if (!target.ok || !target.path) return failure(operation, target.error ?? "invalid git untrack path");
   const symlinkError = assertNoSymlinkInPath(repoRoot, operation.path);
@@ -546,85 +481,6 @@ export function applyGitUntrackOperation(repoRoot: string, operation: GitUntrack
     : failure(operation, result.stderr || result.error || "git rm --cached failed");
 }
 
-function buildTransactionManifest(plan: AdoptionPlan, manifestPath: string, results: readonly ApplyOperationResult[]): FsTransactionManifest {
-  return {
-    protocol: 1,
-    // protocol-1 frozen literal (see FsTransactionManifest.command); not the CLI verb.
-    command: "adopt",
-    createdAt: new Date().toISOString(),
-    repoRoot: plan.repoRoot,
-    mode: plan.mode,
-    operations: results.map((result) => {
-      const operation = plan.operations.find((entry) => entry.id === result.id);
-      return {
-        id: result.id,
-        kind: result.kind,
-        path: result.path,
-        to: result.to,
-        status: result.status,
-        backupPath: result.backupPath,
-        contentHash: result.contentHash,
-        gitIndexEntry: result.gitIndexEntry,
-        rollbackStrategy: operation?.rollback?.strategy,
-        error: result.error,
-      };
-    }),
-    rollback: {
-      command: `rh init rollback --transaction ${manifestPath}`,
-    },
-  };
-}
-
-function finalizeTransactionManifest(
-  plan: AdoptionPlan,
-  transactionDir: string,
-  results: readonly ApplyOperationResult[],
-): {
-  readonly results: readonly ApplyOperationResult[];
-  readonly manifest: FsTransactionManifest;
-  readonly transactionManifestPath?: string;
-} {
-  const manifestPath = `${transactionDir}/manifest.json`;
-  const manifest = buildTransactionManifest(plan, manifestPath, results);
-  try {
-    atomicWriteFile(plan.repoRoot, manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, backupRoot: transactionDir });
-    return { results, manifest, transactionManifestPath: manifestPath };
-  } catch (error) {
-    return {
-      manifest,
-      results: [
-        ...results,
-        {
-          id: "transaction-manifest",
-          kind: "runCheck",
-          status: "failed",
-          error: `failed to persist transaction manifest: ${errorMessage(error)}`,
-        },
-      ],
-    };
-  }
-}
-
-function preflightTransactionManifest(repoRoot: string, transactionDir: string): string | null {
-  const manifestPath = `${transactionDir}/manifest.json`;
-  const manifest = resolveInsideRepo(repoRoot, manifestPath);
-  if (!manifest.ok || !manifest.path) return manifest.error ?? "invalid transaction manifest path";
-  const symlinkError = assertNoSymlinkInPath(repoRoot, manifestPath);
-  if (symlinkError) return symlinkError;
-  const root = resolve(repoRoot);
-  const parent = dirname(manifest.path);
-  const rel = relative(root, parent);
-  let current = root;
-  for (const part of rel.split(sep)) {
-    if (!part) continue;
-    current = resolve(current, part);
-    if (existsSync(current) && !lstatSync(current).isDirectory()) {
-      return `transaction manifest parent is not a directory: ${relative(root, current).replace(/\\/g, "/")}`;
-    }
-  }
-  return null;
-}
-
 function preflightOperation(repoRoot: string, operation: AdoptionOperation): string | null {
   if (!isSupportedAdoptionOperation(operation)) return unsupportedOperationReason(operation);
   if (!operation.path) return `operation kind ${operation.kind} is missing a path`;
@@ -634,16 +490,6 @@ function preflightOperation(repoRoot: string, operation: AdoptionOperation): str
   if (symlinkError) return symlinkError;
   const preconditionError = checkExpectedFileState(repoRoot, operation);
   if (preconditionError) return preconditionError;
-
-  if (operation.kind === "move") {
-    const destination = resolveInsideRepo(repoRoot, operation.to);
-    if (!destination.ok || !destination.path) return destination.error ?? "invalid move destination";
-    const destinationSymlinkError = assertNoSymlinkInPath(repoRoot, operation.to);
-    if (destinationSymlinkError) return destinationSymlinkError;
-    if (existsSync(target.path) && existsSync(destination.path)) return `move destination already exists: ${operation.to}`;
-    if (existsSync(target.path) && !lstatSync(target.path).isFile()) return `move source is not a regular file: ${operation.path}`;
-    return null;
-  }
 
   if (operation.kind === "remove" && existsSync(target.path) && !lstatSync(target.path).isFile()) {
     return `remove target is not a regular file: ${operation.path}`;
@@ -668,91 +514,186 @@ function preflightOperation(repoRoot: string, operation: AdoptionOperation): str
   return null;
 }
 
-export function applyAdoptionPlan(plan: AdoptionPlan, dryRun = false): ApplyAdoptionPlanResult {
-  const preflight = plan.operations.map((operation) => ({ operation, error: preflightOperation(plan.repoRoot, operation) }));
-  const preflightFailures = preflight.filter((entry) => entry.error);
-  const transactionDir = dryRun ? undefined : transactionDirFor();
-  // The backup root ignores itself before the manifest or any copy lands in it.
-  const manifestPreflightError = transactionDir ? preflightTransactionManifest(plan.repoRoot, transactionDir) ?? backupRootError(plan.repoRoot, transactionDir) : null;
-  if (preflightFailures.length > 0 || manifestPreflightError) {
-    const results: ApplyOperationResult[] = preflight.map(({ operation, error }) =>
-      error
-        ? failure(operation, error)
-        : { id: operation.id, kind: operation.kind, path: operation.path, status: "planned" as const },
-    );
-    if (manifestPreflightError) {
-      results.push({
-        id: "transaction-manifest",
-        kind: "runCheck",
-        status: "failed",
-        error: `transaction manifest preflight failed: ${manifestPreflightError}`,
-      });
-    }
-    const finalized = transactionDir && !manifestPreflightError
-      ? finalizeTransactionManifest(plan, transactionDir, results)
-      : { results, transactionManifestPath: undefined };
-    return {
-      ok: false,
-      dryRun,
-      results: finalized.results,
-      transactionManifestPath: finalized.transactionManifestPath,
-    };
-  }
+/** Where an adoption writes, or why it must not write at all. */
+export type AdoptionTarget =
+  | { readonly kind: "repository"; readonly repository: HostConfigRepository }
+  | { readonly kind: "direct" }
+  | { readonly kind: "refused"; readonly reason: string };
 
+/** A planned operation that changes or removes something that is already there. */
+function changesExistingEntry(operation: AdoptionOperation): boolean {
+  if (operation.status !== "planned") return false;
+  if (operation.kind === "writeFile" || operation.kind === "appendManagedBlock") return operation.expectedAbsent !== true;
+  return operation.kind !== "mkdir";
+}
+
+/**
+ * The one target rule of `rh init` for its dry run and its apply (#2903). A
+ * worktree root (it holds `.git`) records each write in its repository ledger.
+ * A directory below a worktree root has no ledger of its own, so it is
+ * refused. A directory outside Git has no ledger either: it gets only new
+ * files, since a change to an existing file would have no undo. A `commit`
+ * run writes directly. The Git lookup ignores the caller's `GIT_*` variables,
+ * as the repository identity does.
+ */
+export function adoptionTarget(plan: AdoptionPlan, record: AdoptionRecord, env: NodeJS.ProcessEnv): AdoptionTarget {
+  if (record === "commit") return { kind: "direct" };
+  const root = resolve(plan.repoRoot);
+  if (lstatSync(join(root, ".git"), { throwIfNoEntry: false })) {
+    try { return { kind: "repository", repository: resolveHostConfigRepository(root) }; }
+    catch (error) { return { kind: "refused", reason: errorMessage(error) }; }
+  }
+  const gitEnv = Object.fromEntries(Object.entries(env).filter(([name]) => !name.startsWith("GIT_")));
+  const top = runGit(["-C", root, "rev-parse", "--show-toplevel"], { env: gitEnv, inheritEnv: false });
+  if (top.ok && top.stdout.trim()) {
+    const worktree = top.stdout.trim();
+    return { kind: "refused", reason: `${root} is inside the Git worktree ${worktree}; rh init writes only at a worktree root. Run: rh init --repo ${worktree}, or run git init in ${root} to make it a repository` };
+  }
+  const changed = plan.operations.filter(changesExistingEntry).map((operation) => operation.path);
+  if (changed.length) {
+    return { kind: "refused", reason: `${root} is not a Git repository, so rh has no record to undo a change to an existing file there: ${changed.join(", ")}. Run git init in ${root}, then run rh init again` };
+  }
+  return { kind: "direct" };
+}
+
+function refusedResult(dryRun: boolean, results: readonly ApplyOperationResult[], id: string, error: string): ApplyAdoptionPlanResult {
+  return { ok: false, dryRun, results: [...results, { id, kind: "runCheck", status: "failed", error }] };
+}
+
+export function applyAdoptionPlan(plan: AdoptionPlan, options: ApplyAdoptionOptions): ApplyAdoptionPlanResult {
+  const dryRun = options.dryRun === true;
+  const preflight = plan.operations.map((operation) => ({ operation, error: preflightOperation(plan.repoRoot, operation) }));
+  const planned = preflight.map(({ operation, error }): ApplyOperationResult =>
+    error ? failure(operation, error) : { id: operation.id, kind: operation.kind, path: operation.path, status: "planned" });
+  if (preflight.some((entry) => entry.error)) return { ok: false, dryRun, results: planned };
+  const target = adoptionTarget(plan, options.record, options.env);
+  if (target.kind === "refused") return refusedResult(dryRun, planned, "adoption-target", target.reason);
+  if (dryRun) {
+    const kept = stagedUserRetirements(plan);
+    const results = plan.operations.map((operation) => applyOperation(plan.repoRoot, operation, null, kept));
+    return { ok: results.every((result) => result.status !== "failed"), dryRun, results };
+  }
+  if (target.kind === "direct") return applyDirect(plan, options.record);
+  // The repository ledger has other writers (the hook strip, `rh config restore --repo`, `rh update`): they share the runtime lock.
+  let lock: RuntimeTransactionLock;
+  try { lock = acquireRuntimeTransactionLock(globalRuntimeScope(options.env)); }
+  catch (error) { return refusedResult(dryRun, planned, "runtime-lock", `another rh run holds the runtime lock, so rh init writes nothing: ${errorMessage(error)}`); }
+  try { return applyRecorded(plan, planned, target.repository, options.env); }
+  finally { lock.release(); }
+}
+
+/** Apply in order and stop at the first failure; the operations after it stay planned. */
+function applyInOrder(plan: AdoptionPlan, run: OperationRun): ApplyOperationResult[] {
+  const kept = stagedUserRetirements(plan);
   const results: ApplyOperationResult[] = [];
   for (const operation of plan.operations) {
-    const result = applyOperation(plan.repoRoot, operation, dryRun, transactionDir);
+    const result = applyOperation(plan.repoRoot, operation, run, kept);
     results.push(result);
     if (result.status === "failed") break;
   }
-  // Operations after the first failure never run; they stay planned in the report and manifest.
   for (const operation of plan.operations.slice(results.length)) {
     results.push({ id: operation.id, kind: operation.kind, path: operation.path, status: "planned" });
   }
-  if (!transactionDir) {
-    return { ok: results.every((result) => result.status !== "failed"), dryRun, results };
-  }
-
-  const finalized = finalizeTransactionManifest(plan, transactionDir, results);
-  const ok = finalized.results.every((result) => result.status !== "failed");
-  // A failed transaction, including one whose manifest could not be persisted, rolls back
-  // its applied operations from the same manifest records `init rollback` would read.
-  const rollbackResults = ok ? undefined : rollbackManifestOperations(resolve(plan.repoRoot), finalized.manifest.operations, transactionDir);
-
-  return {
-    ok,
-    dryRun,
-    results: finalized.results,
-    transactionManifestPath: finalized.transactionManifestPath,
-    rollback: rollbackResults && {
-      ok: rollbackResults.every((result) => result.status !== "failed"),
-      results: rollbackResults,
-    },
-  };
+  return results;
 }
 
-function applyOperation(
-  repoRoot: string,
-  operation: AdoptionOperation,
-  dryRun: boolean,
-  transactionDir: string | undefined,
-): ApplyOperationResult {
+/**
+ * A `commit` run or a create-only run outside Git. A failed create-only run
+ * takes back the files and directories that it created; a `commit` run has no
+ * rollback, since its worktree goes after the run.
+ */
+function applyDirect(plan: AdoptionPlan, record: AdoptionRecord): ApplyAdoptionPlanResult {
+  const results = applyInOrder(plan, { writer: directWriter(plan.repoRoot) });
+  const ok = results.every((result) => result.status !== "failed");
+  if (ok || record === "commit") return { ok, dryRun: false, results };
+  const rollback = rollbackLocal(resolve(plan.repoRoot), results);
+  return { ok, dryRun: false, results, rollback: { ok: rollback.every((result) => result.status !== "failed"), results: rollback } };
+}
+
+/**
+ * A worktree root: every file write and created directory goes through the
+ * repository gate in one run, under the global runtime lock (#2903). A
+ * retired-file `remove` keeps the file in the run's guarded in-checkout
+ * directory until the run ends, and a `gitUntrack` keeps the index entry in
+ * memory. A failure rolls back the gate writes from the ledger before the run,
+ * then the local operations. The run's directory goes at the end, except when
+ * a rollback leaves an entry that it could not put back.
+ */
+function applyRecorded(plan: AdoptionPlan, planned: readonly ApplyOperationResult[], repository: HostConfigRepository, env: NodeJS.ProcessEnv): ApplyAdoptionPlanResult {
+  const repoRoot = resolve(plan.repoRoot);
+  const transactionDir = transactionDirFor();
+  try { ensureCheckoutBackupDirectory(repoRoot, transactionDir); }
+  catch (error) { return refusedResult(false, planned, "transaction-dir", `rh cannot keep its run directory ${transactionDir}: ${errorMessage(error)}`); }
+  const transaction = join(repository.worktree, transactionDir);
+  const run = openRepositoryWriteRun(env, repository, transaction);
+  const results = applyInOrder(plan, { writer: recordedWriter(repoRoot, repository, run), transactionDir });
+  const ok = results.every((result) => result.status !== "failed");
+  const restore = `rh config restore --repo ${shellQuote(repository.worktree)}`;
+  const recorded = results.some((result) => result.status === "applied" && ["mkdir", "writeFile", "appendManagedBlock"].includes(result.kind));
+  if (ok) {
+    rmSync(transaction, { recursive: true, force: true });
+    return { ok, dryRun: false, results, ...(recorded ? { restore } : {}) };
+  }
+  const local = results.filter((result) => !["mkdir", "writeFile", "appendManagedBlock"].includes(result.kind));
+  const rollback = [...rollbackGateWrites(repository, run, results), ...rollbackLocal(repoRoot, local)];
+  const rollbackOk = rollback.every((result) => result.status !== "failed");
+  if (rollbackOk) rmSync(transaction, { recursive: true, force: true });
+  return { ok, dryRun: false, results, rollback: { ok: rollbackOk, results: rollback }, ...(rollbackOk ? {} : { transactionDir, restore }) };
+}
+
+/** The gate writes of the run go back from the ledger before it; an entry that changed since stays with its record. */
+function rollbackGateWrites(repository: HostConfigRepository, run: RepositoryWriteRun, results: readonly ApplyOperationResult[]): RollbackOperationResult[] {
+  const written = results.filter((result) => result.status === "applied" && ["mkdir", "writeFile", "appendManagedBlock"].includes(result.kind));
+  let unresolved: readonly string[];
+  try { unresolved = run.rollback().unresolved; }
+  catch (error) {
+    return written.map((result) => ({ id: result.id, kind: result.kind, path: result.path, status: "failed", action: "restore_backup", error: errorMessage(error) }));
+  }
+  return written.map((result): RollbackOperationResult => {
+    const action = result.kind === "mkdir" ? "remove_empty_directory" : "restore_backup";
+    return unresolved.includes(join(repository.worktree, result.path!))
+      ? { id: result.id, kind: result.kind, path: result.path, status: "failed", action, error: "the entry changed after rh wrote it; it and its record stay" }
+      : { id: result.id, kind: result.kind, path: result.path, status: "rolled_back", action };
+  });
+}
+
+/**
+ * The retirements that rh keeps whole (#2903 review P1). `gitUntrack` drops the
+ * index entry, and neither the run nor the repository ledger keeps a copy of
+ * it. The proof of a retired file covers its working-tree bytes only, so a
+ * retirement goes ahead only while the index entry holds exactly those bytes;
+ * a staged edit of the user keeps the file and the entry. The working tree
+ * matches the proof here, else the remove refuses on its own.
+ */
+function stagedUserRetirements(plan: AdoptionPlan): ReadonlyMap<string, string> {
+  const kept = new Map<string, string>();
+  for (const untrack of plan.operations.filter((operation) => operation.kind === "gitUntrack")) {
+    const indexed = readGitIndexEntry(plan.repoRoot, untrack.path!);
+    if (indexed.kind !== "entry") continue;
+    const remove = plan.operations.find((operation) => operation.kind === "remove" && operation.path === untrack.path);
+    const proved = remove !== undefined && checkExpectedFileState(plan.repoRoot, remove) === null
+      && runGit(["-C", plan.repoRoot, "hash-object", "--no-filters", "--", untrack.path!]).stdout.trim() === indexed.entry.objectId;
+    if (!proved) kept.set(untrack.path!, "the Git index holds other bytes than the retired rh file (a staged edit), so rh keeps the file and its index entry");
+  }
+  return kept;
+}
+
+function applyOperation(repoRoot: string, operation: AdoptionOperation, run: OperationRun | null, kept: ReadonlyMap<string, string>): ApplyOperationResult {
+  const reason = (operation.kind === "remove" || operation.kind === "gitUntrack") ? kept.get(operation.path) : undefined;
+  if (reason !== undefined) return { id: operation.id, kind: operation.kind, path: operation.path, status: "skipped", kept: reason };
   // A thrown error is this operation's failure: it must stop the transaction and
   // trigger rollback, not escape with earlier operations applied and unrecorded.
   try {
     switch (operation.kind) {
       case "mkdir":
-        return applyMkdirOperation(repoRoot, operation, dryRun);
+        return applyMkdirOperation(repoRoot, operation, run);
       case "writeFile":
-        return applyWriteFileOperation(repoRoot, operation, dryRun, transactionDir);
       case "appendManagedBlock":
-        return applyAppendManagedBlockOperation(repoRoot, operation, dryRun, transactionDir);
-      case "move":
-        return applyMoveOperation(repoRoot, operation, dryRun);
+        return applyFileWriteOperation(repoRoot, operation, run);
       case "remove":
-        return applyRemoveOperation(repoRoot, operation, dryRun, transactionDir);
+        return applyRemoveOperation(repoRoot, operation, run);
       case "gitUntrack":
-        return applyGitUntrackOperation(repoRoot, operation, dryRun);
+        return applyGitUntrackOperation(repoRoot, operation, !run);
       default:
         return failure(operation, `unsupported operation kind: ${operation.kind}`);
     }
@@ -761,55 +702,17 @@ function applyOperation(
   }
 }
 
-function resolveTransactionManifest(repoRoot: string, transaction: string): { ok: true; path: string; rel: string } | { ok: false; error: string } {
-  const root = resolve(repoRoot);
-  const target = resolve(root, transaction);
-  const rel = relative(root, target).replace(/\\/g, "/");
-  if (rel === "" || rel.startsWith("..") || rel.includes("\0")) {
-    return { ok: false, error: `transaction manifest escapes repo root: ${transaction}` };
-  }
-  if (!rel.startsWith(`${FS_TRANSACTION_BACKUP_ROOT}/`) || !rel.endsWith("/manifest.json")) {
-    return { ok: false, error: `transaction manifest must be under ${FS_TRANSACTION_BACKUP_ROOT}/<transaction>/manifest.json` };
-  }
-  return { ok: true, path: target, rel };
-}
-
-function rollbackFailed(operation: FsTransactionManifestOperation, action: RollbackOperationResult["action"], error: string): RollbackOperationResult {
+function rollbackFailed(operation: ApplyOperationResult, action: RollbackOperationResult["action"], error: string): RollbackOperationResult {
   return { id: operation.id, kind: operation.kind, path: operation.path, status: "failed", action, error };
 }
 
-function rollbackFileOperation(repoRoot: string, operation: FsTransactionManifestOperation, backupRoot: string): RollbackOperationResult {
+/** A file that a create-only run wrote goes only while it still holds the bytes that the run wrote. */
+function rollbackCreatedFile(repoRoot: string, operation: ApplyOperationResult): RollbackOperationResult {
   if (!operation.path) return rollbackFailed(operation, "none", "file operation is missing path");
   const targetSymlinkError = assertNoSymlinkInPath(repoRoot, operation.path);
   if (targetSymlinkError) return rollbackFailed(operation, "none", targetSymlinkError);
   const target = resolveInsideRepo(repoRoot, operation.path);
   if (!target.ok || !target.path) return rollbackFailed(operation, "none", target.error ?? "invalid path");
-
-  if (operation.backupPath) {
-    const backupSymlinkError = assertNoSymlinkInPath(repoRoot, operation.backupPath);
-    if (backupSymlinkError) return rollbackFailed(operation, "restore_backup", backupSymlinkError);
-    const backup = resolveInsideRepo(repoRoot, operation.backupPath);
-    if (!backup.ok || !backup.path) return rollbackFailed(operation, "restore_backup", backup.error ?? "invalid backup path");
-    if (!existsSync(backup.path)) return rollbackFailed(operation, "restore_backup", `missing backup: ${operation.backupPath}`);
-    try {
-      // Fail closed: never overwrite a target whose current content diverges from
-      // what this transaction applied (e.g. the user edited the file after apply).
-      // Mirrors the delete_created_file guard so both destructive paths are symmetric.
-      const original = readFileSync(backup.path);
-      writeFileUnderTargetLock(repoRoot, operation.path, (targetPath) => {
-        if (!existsSync(targetPath)) return { kind: "write", content: original };
-        if (!operation.contentHash) return { kind: "refuse", error: "missing content hash for replaced file rollback" };
-        if (contentHash(readFileSync(targetPath, "utf-8")) !== operation.contentHash) {
-          return { kind: "refuse", error: "current file hash differs from transaction content hash" };
-        }
-        return { kind: "write", content: original };
-      }, backupRoot);
-      return { id: operation.id, kind: operation.kind, path: operation.path, status: "rolled_back", action: "restore_backup" };
-    } catch (error) {
-      return rollbackFailed(operation, "restore_backup", errorMessage(error));
-    }
-  }
-
   if (!operation.contentHash) return rollbackFailed(operation, "delete_created_file", "missing content hash for created file rollback");
   if (!existsSync(target.path)) {
     return { id: operation.id, kind: operation.kind, path: operation.path, status: "skipped", action: "delete_created_file" };
@@ -820,7 +723,7 @@ function rollbackFileOperation(repoRoot: string, operation: FsTransactionManifes
     // Read + hash inside the try so an unreadable target (e.g. replaced by a
     // directory) returns a structured failed result instead of throwing to the CLI.
     const deleted = withTargetLock(targetPath, () => {
-      if (contentHash(readFileSync(targetPath, "utf-8")) !== createdHash) return false;
+      if (contentHash(readFileSync(targetPath)) !== createdHash) return false;
       rmSync(targetPath);
       fsyncDirectory(dirname(targetPath));
       return true;
@@ -834,7 +737,7 @@ function rollbackFileOperation(repoRoot: string, operation: FsTransactionManifes
   }
 }
 
-function rollbackMkdirOperation(repoRoot: string, operation: FsTransactionManifestOperation): RollbackOperationResult {
+function rollbackMkdirOperation(repoRoot: string, operation: ApplyOperationResult): RollbackOperationResult {
   if (!operation.path) return rollbackFailed(operation, "remove_empty_directory", "mkdir operation is missing path");
   const symlinkError = assertNoSymlinkInPath(repoRoot, operation.path);
   if (symlinkError) return rollbackFailed(operation, "remove_empty_directory", symlinkError);
@@ -856,60 +759,7 @@ function rollbackMkdirOperation(repoRoot: string, operation: FsTransactionManife
   }
 }
 
-function isValidManifestOperation(operation: unknown, transactionDir: string): operation is FsTransactionManifestOperation {
-  if (typeof operation !== "object" || operation === null) return false;
-  const op = operation as Record<string, unknown>;
-  if (typeof op.id !== "string" || typeof op.kind !== "string" || typeof op.status !== "string") return false;
-  if (op.path !== undefined && typeof op.path !== "string") return false;
-  if (op.to !== undefined && typeof op.to !== "string") return false;
-  if (op.contentHash !== undefined && typeof op.contentHash !== "string") return false;
-  if (op.rollbackStrategy !== undefined && typeof op.rollbackStrategy !== "string") return false;
-  if (op.error !== undefined && typeof op.error !== "string") return false;
-  if (op.gitIndexEntry !== undefined) {
-    const entry = op.gitIndexEntry as Record<string, unknown> | null;
-    if (typeof entry?.mode !== "string" || !GIT_INDEX_FILE_MODES.has(entry.mode)) return false;
-    if (typeof entry.objectId !== "string" || !GIT_OBJECT_ID.test(entry.objectId)) return false;
-  }
-  if (op.backupPath !== undefined) {
-    if (typeof op.backupPath !== "string") return false;
-    // A manifest is untrusted file data: pin the restore source to this manifest's
-    // own transaction directory so a crafted manifest cannot point backups elsewhere.
-    const normalized = op.backupPath.replace(/\\/g, "/");
-    if (!normalized.startsWith(`${transactionDir}/`)) return false;
-  }
-  return true;
-}
-
-function rollbackMoveOperation(repoRoot: string, operation: FsTransactionManifestOperation): RollbackOperationResult {
-  if (!operation.path || !operation.to) return rollbackFailed(operation, "none", "move operation is missing source or destination");
-  const sourceSymlinkError = assertNoSymlinkInPath(repoRoot, operation.path);
-  const destinationSymlinkError = assertNoSymlinkInPath(repoRoot, operation.to);
-  if (sourceSymlinkError || destinationSymlinkError) {
-    return rollbackFailed(operation, "none", sourceSymlinkError ?? destinationSymlinkError ?? "invalid move path");
-  }
-  const source = resolveInsideRepo(repoRoot, operation.path);
-  const destination = resolveInsideRepo(repoRoot, operation.to);
-  if (!source.ok || !source.path) return rollbackFailed(operation, "none", source.error ?? "invalid move source");
-  if (!destination.ok || !destination.path) return rollbackFailed(operation, "none", destination.error ?? "invalid move destination");
-  if (existsSync(source.path)) return rollbackFailed(operation, "none", "move source is occupied; refusing to overwrite it");
-  if (!existsSync(destination.path)) return { id: operation.id, kind: operation.kind, path: operation.path, status: "skipped", action: "none" };
-  try {
-    if (operation.contentHash) {
-      const currentHash = targetContentHash(destination.path);
-      if (currentHash !== operation.contentHash) {
-        return rollbackFailed(operation, "none", "move destination hash differs from transaction content hash");
-      }
-    }
-    renameSync(destination.path, source.path);
-    fsyncDirectory(dirname(destination.path));
-    fsyncDirectory(dirname(source.path));
-    return { id: operation.id, kind: operation.kind, path: operation.path, status: "rolled_back", action: "restore_backup" };
-  } catch (error) {
-    return rollbackFailed(operation, "none", errorMessage(error));
-  }
-}
-
-function rollbackRemoveOperation(repoRoot: string, operation: FsTransactionManifestOperation): RollbackOperationResult {
+function rollbackRemoveOperation(repoRoot: string, operation: ApplyOperationResult): RollbackOperationResult {
   if (!operation.path || !operation.backupPath) return rollbackFailed(operation, "restore_backup", "remove operation is missing path or backup");
   const targetSymlinkError = assertNoSymlinkInPath(repoRoot, operation.path);
   const backupSymlinkError = assertNoSymlinkInPath(repoRoot, operation.backupPath);
@@ -934,20 +784,14 @@ function rollbackRemoveOperation(repoRoot: string, operation: FsTransactionManif
   }
 }
 
-function rollbackGitUntrackOperation(repoRoot: string, operation: FsTransactionManifestOperation): RollbackOperationResult {
+function rollbackGitUntrackOperation(repoRoot: string, operation: ApplyOperationResult): RollbackOperationResult {
   if (!operation.path) return rollbackFailed(operation, "restore_git_index", "git untrack operation is missing path");
   const symlinkError = assertNoSymlinkInPath(repoRoot, operation.path);
   if (symlinkError) return rollbackFailed(operation, "restore_git_index", symlinkError);
   const target = resolveInsideRepo(repoRoot, operation.path);
   if (!target.ok || !target.path) return rollbackFailed(operation, "restore_git_index", target.error ?? "invalid git path");
-  const recorded = operation.gitIndexEntry;
-  if (!recorded) {
-    return rollbackFailed(
-      operation,
-      "restore_git_index",
-      `transaction manifest predates git index entry recording; check ${operation.path} and run \`git add -- ${operation.path}\` by hand to track it again`,
-    );
-  }
+  // An applied untrack always kept its entry (`applyGitUntrackOperation`).
+  const recorded = operation.gitIndexEntry!;
   const current = readGitIndexEntry(repoRoot, operation.path);
   if (current.kind === "git_failed" || current.kind === "unsupported") {
     return rollbackFailed(operation, "restore_git_index", current.error);
@@ -968,87 +812,18 @@ function rollbackGitUntrackOperation(repoRoot: string, operation: FsTransactionM
     : rollbackFailed(operation, "restore_git_index", restore.stderr || restore.error || "git update-index failed");
 }
 
-function readTransactionManifest(repoRoot: string, transaction: string): { manifest?: FsTransactionManifest; rel?: string; error?: string } {
-  const resolved = resolveTransactionManifest(repoRoot, transaction);
-  if (!resolved.ok) return { error: resolved.error };
-  const symlinkError = assertNoSymlinkInPath(repoRoot, resolved.rel);
-  if (symlinkError) return { error: symlinkError };
-  if (!existsSync(resolved.path)) return { error: `transaction manifest not found: ${resolved.rel}` };
-  try {
-    const manifest = JSON.parse(readFileSync(resolved.path, "utf-8")) as FsTransactionManifest;
-    const transactionDir = resolved.rel.replace(/\/manifest\.json$/, "");
-    if (
-      manifest.protocol !== 1 ||
-      // protocol-1 frozen literal (see FsTransactionManifest.command); not the CLI verb.
-      manifest.command !== "adopt" ||
-      !Array.isArray(manifest.operations) ||
-      !manifest.operations.every((operation) => isValidManifestOperation(operation, transactionDir))
-    ) {
-      return { error: `invalid transaction manifest: ${resolved.rel}` };
-    }
-    return { manifest, rel: resolved.rel };
-  } catch (error) {
-    return { error: errorMessage(error) };
-  }
-}
-
-export function rollbackAdoptionTransaction(opts: { readonly repoRoot: string; readonly transaction: string }): RollbackAdoptionTransactionResult {
-  const repoRoot = resolve(opts.repoRoot);
-  const loaded = readTransactionManifest(repoRoot, opts.transaction);
-  if (!loaded.manifest || !loaded.rel) {
-    return {
-      protocol: 1,
-      command: "init rollback",
-      repoRoot,
-      transactionManifestPath: opts.transaction,
-      ok: false,
-      results: [
-        {
-          id: "transaction-manifest",
-          kind: "runCheck",
-          status: "failed",
-          action: "none",
-          error: loaded.error ?? "failed to read transaction manifest",
-        },
-      ],
-    };
-  }
-
-  const results = rollbackManifestOperations(repoRoot, loaded.manifest.operations, loaded.rel.replace(/\/manifest\.json$/, ""));
-  return {
-    protocol: 1,
-    command: "init rollback",
-    repoRoot,
-    transactionManifestPath: loaded.rel,
-    ok: results.every((result) => result.status !== "failed"),
-    results,
-  };
-}
-
-/** A rollback keeps the file that it replaces in `<transaction>/rollback/`, a guarded directory of that transaction. */
-function rollbackManifestOperations(
-  repoRoot: string,
-  operations: readonly FsTransactionManifestOperation[],
-  transactionDir: string,
-): RollbackOperationResult[] {
-  const reversed = [...operations].reverse();
-  const restoreIndex = reversed.filter((operation) => operation.kind === "gitUntrack");
-  const results = reversed.filter((operation) => operation.kind !== "gitUntrack").map((operation) => {
-    if (operation.status !== "applied") {
-      return { id: operation.id, kind: operation.kind, path: operation.path, status: "skipped" as const, action: "none" as const };
-    }
+/**
+ * The local operations of a failed run go back in reverse order: files first,
+ * then the Git index entries, so each restored entry names a file that is
+ * there again.
+ */
+function rollbackLocal(repoRoot: string, results: readonly ApplyOperationResult[]): RollbackOperationResult[] {
+  const applied = [...results].reverse().filter((result) => result.status === "applied");
+  const rolledBack = applied.filter((result) => result.kind !== "gitUntrack").map((operation) => {
     if (operation.kind === "mkdir") return rollbackMkdirOperation(repoRoot, operation);
-    if (operation.kind === "writeFile" || operation.kind === "appendManagedBlock") return rollbackFileOperation(repoRoot, operation, `${transactionDir}/rollback`);
-    if (operation.kind === "move") return rollbackMoveOperation(repoRoot, operation);
+    if (operation.kind === "writeFile" || operation.kind === "appendManagedBlock") return rollbackCreatedFile(repoRoot, operation);
     if (operation.kind === "remove") return rollbackRemoveOperation(repoRoot, operation);
     return rollbackFailed(operation, "none", `unsupported rollback operation kind: ${operation.kind}`);
   });
-  for (const operation of restoreIndex) {
-    results.push(
-      operation.status === "applied"
-        ? rollbackGitUntrackOperation(repoRoot, operation)
-        : { id: operation.id, kind: operation.kind, path: operation.path, status: "skipped", action: "none" },
-    );
-  }
-  return results;
+  return [...rolledBack, ...applied.filter((result) => result.kind === "gitUntrack").map((operation) => rollbackGitUntrackOperation(repoRoot, operation))];
 }

@@ -8,7 +8,7 @@ import { planAdoption } from "../../src/effects/adoption/plan";
 import { planLegacyLeftovers, RETIRED_RUNTIME_IGNORE_RULES } from "../../src/effects/upgrade/legacy-inventory";
 import { GITIGNORE_MANAGED_BLOCK_CONTENT } from "../../src/effects/adoption/gitignore-plan";
 import { isRepoHarnessSourceCheckout } from "../../src/effects/source-checkout";
-import { applyAdoptionPlan, rollbackAdoptionTransaction } from "../../src/effects/fs-transaction";
+import { applyAdoptionPlan } from "../../src/effects/fs-transaction";
 import type { AdoptionOperation, AdoptionPlan } from "../../src/core/adoption/operations";
 import { planRepoAdoption, renderApplyReport, runAdoptionApply, runAdoptionPlan } from "../../src/cli/commands/adoption-plan";
 import { runConfigRestore } from "../../src/cli/commands/config";
@@ -19,6 +19,8 @@ const ROOT = join(import.meta.dir, "..", "..");
 const FS_TRANSACTION = join(ROOT, "src/effects/fs-transaction.ts");
 const CLI = join(ROOT, "src/cli/index.ts");
 const HRD09_LEGACY_FIXTURE = join(ROOT, "tests/fixtures/hrd09-legacy-hook-runtime");
+/** `rh init`: the repository ledger records each write (#2903). */
+const LEDGER = { record: "ledger" as const, env: process.env };
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "repo-harness-adoption-plan-"));
@@ -84,7 +86,7 @@ describe("canonical adoption plan", () => {
         message: "Removed policy keys that no reader uses: agentic_development.routing.simple, context.capability_match_rule, enforcement.worktree_guard, external_tooling.herdr.url, guards.edit_plan_gate, merge_gate.enabled, operations.agent_writable_private_dirs, operations.dir, sidecar_research.default, worktree_strategy.worktree_dir_template",
         risk: "medium",
       });
-      expect(applyAdoptionPlan(plan).ok).toBe(true);
+      expect(applyAdoptionPlan(plan, LEDGER).ok).toBe(true);
       const text = readFileSync(join(repo, ".ai/harness/policy.json"), "utf8");
       expect(text).toContain(`"publication": { "acceptance_merge": "on", "generated_artifacts": {"x": 1} }`);
       expect(text).toContain(`"deploy_sql": { "dir": "deploy/sql" }`);
@@ -204,11 +206,11 @@ describe("canonical adoption plan", () => {
       writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "fixture", scripts: {
         test: "bun test",
       } }, null, 2));
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }));
+      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }), LEDGER);
 
       expect(apply.ok).toBe(true);
       expect(JSON.parse(readFileSync(join(repo, '.ai/harness/policy.json'), 'utf8')).agent_runtime).toBeUndefined();
-      expect(apply.transactionManifestPath).toBeDefined();
+      expect(apply.restore).toBe(`rh config restore --repo ${shellQuote(realpathSync(repo))}`);
       expect(existsSync(join(repo, ".ai", "harness", "workflow-contract.json"))).toBe(true);
       expect(existsSync(join(repo, ".ai", "harness", "policy.json"))).toBe(true);
       expect(existsSync(join(repo, ".ai", "hooks", "lib", "workflow-state.sh"))).toBe(false);
@@ -235,7 +237,8 @@ describe("canonical adoption plan", () => {
       // The evidence rule lives in the user-level runtime-state block, not the tracked block.
       expect(readFileSync(join(ROOT, "assets/templates/runtime-state.gitignore"), "utf-8")).toContain(".ai/harness/evidence/");
       expect(readFileSync(join(repo, ".gitignore"), "utf-8")).not.toContain(".ai/harness/evidence/");
-      expect(readFileSync(join(repo, apply.transactionManifestPath!), "utf-8")).toContain('"command": "adopt"');
+      // The run keeps no manifest or copy in the checkout: its directory goes at commit.
+      expect(readdirSync(join(repo, ".ai/harness/backups/fs-transaction")).filter((name) => name !== ".gitignore")).toEqual([]);
     } finally {
       cleanup(repo);
     }
@@ -259,7 +262,7 @@ describe("canonical adoption plan", () => {
       const releasedRetired = ["", "# Retired runtime state that still exists; repo-harness upgrade lists these files", ...RETIRED_RUNTIME_IGNORE_RULES.slice(0, -1)];
       writeFileSync(join(repo, ".gitignore"), ["# BEGIN: repo-harness generated-runtime", GITIGNORE_MANAGED_BLOCK_CONTENT, ...releasedRetired, "# END: repo-harness generated-runtime", ""].join("\n"));
       const untracked = () => spawnSync("git", ["status", "--porcelain", "--untracked-files=all", "--", codegraph, ...retired], { cwd: repo, encoding: "utf8" }).stdout;
-      const refresh = () => expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true })).ok).toBe(true);
+      const refresh = () => expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }), LEDGER).ok).toBe(true);
 
       refresh();
       expect(untracked()).toBe("");
@@ -286,14 +289,14 @@ describe("canonical adoption plan", () => {
     for (const mode of ["minimal", "standard"] as const) {
       const repo = tempRepo();
       try {
-        expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode, apply: true })).ok).toBe(true);
+        expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode, apply: true }), LEDGER).ok).toBe(true);
         expect(existsSync(join(repo, "tasks/contracts"))).toBe(false);
         expect(existsSync(join(repo, ".claude/templates/contract.template.md"))).toBe(false);
         mkdirSync(join(repo, "tasks/contracts"), { recursive: true });
         mkdirSync(join(repo, ".claude/templates"), { recursive: true });
         writeFileSync(join(repo, "tasks/contracts/history.contract.md"), "# Historical contract\n");
         writeFileSync(join(repo, ".claude/templates/contract.template.md"), "# Local contract template\n");
-        expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode, apply: true })).ok).toBe(true);
+        expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode, apply: true }), LEDGER).ok).toBe(true);
         expect(readFileSync(join(repo, "tasks/contracts/history.contract.md"), "utf8")).toBe("# Historical contract\n");
         expect(readFileSync(join(repo, ".claude/templates/contract.template.md"), "utf8")).toBe("# Local contract template\n");
       } finally { cleanup(repo); }
@@ -338,7 +341,7 @@ describe("canonical adoption plan", () => {
       writeFileSync(join(repo, "package.json"), JSON.stringify({
         name: "fixture", scripts: { "check:task-workflow": "bun run custom-workflow.ts" },
       }));
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }));
+      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }), LEDGER);
       expect(apply.ok).toBe(true);
       expect(JSON.parse(readFileSync(join(repo, "package.json"), "utf-8")).scripts["check:task-workflow"])
         .toBe("bun run custom-workflow.ts");
@@ -357,7 +360,7 @@ describe("canonical adoption plan", () => {
         "sync:brain": "repo-harness brain sync",
         "sync:brain-docs": "repo-harness run sync-brain-docs --all",
       } }, null, 2));
-      expect(applyAdoptionPlan(planAdoption({ repoRoot: generated, mode: "standard", apply: true })).ok).toBe(true);
+      expect(applyAdoptionPlan(planAdoption({ repoRoot: generated, mode: "standard", apply: true }), LEDGER).ok).toBe(true);
       const generatedScripts = JSON.parse(readFileSync(join(generated, "package.json"), "utf-8")).scripts;
       expect(generatedScripts["check:brain-manifest"]).toBeUndefined();
       expect(generatedScripts["sync:brain-docs"]).toBeUndefined();
@@ -373,7 +376,7 @@ describe("canonical adoption plan", () => {
       expect(customizedPlan.warnings.find((warning) => warning.code === "customized-managed-value")?.message)
         .toBe('Preserving package.json scripts that differ from every released value: sync:brain-docs: "bun run custom-sync-brain.ts"; '
           + 'check:deploy-sql: "bash my-sql-check.sh" (current value: "rh run check-deploy-sql-order")');
-      expect(applyAdoptionPlan(customizedPlan).ok).toBe(true);
+      expect(applyAdoptionPlan(customizedPlan, LEDGER).ok).toBe(true);
       const customizedScripts = JSON.parse(readFileSync(join(customized, "package.json"), "utf-8")).scripts;
       expect(customizedScripts["check:brain-manifest"]).toBeUndefined();
       expect(customizedScripts["sync:brain-docs"]).toBe("bun run custom-sync-brain.ts");
@@ -466,8 +469,13 @@ describe("canonical adoption plan", () => {
       expect(readdirSync(join(home, ".repo-harness/config/repos"))).toHaveLength(1);
 
       expect(runConfigRestore(env, join(repo, ".ai/hooks/prompt-guard.sh"), { repo }).lines).toEqual([`[config] rh records no repository file at ${join(repo, ".ai/hooks/prompt-guard.sh")}`]);
+      // The dry run lists what the apply reverts, created directories included (P6).
+      const preview = runConfigRestore(env, undefined, { repo, dryRun: true });
+      expect(preview.lines).toContain(`[note] ${join(realpathSync(repo), "tasks")}: rh created this directory; it goes when it is empty`);
       const restore = runConfigRestore(env, undefined, { repo });
       expect(restore.exitCode, restore.lines.join("\n")).toBe(0);
+      expect(restore.lines.slice(0, -1)).toEqual(preview.lines.slice(0, -1));
+      expect(existsSync(join(repo, "tasks"))).toBe(false);
       hookFiles.forEach((path, index) => expect({ bytes: readFileSync(join(repo, path)), mode: statSync(join(repo, path)).mode & 0o777 }).toEqual(before[index]!));
       // Without a record in this worktree, a restore stops with a named error and writes nothing.
       expect(runConfigRestore(env, undefined, { repo }).lines).toEqual([`[config] rh records no repository file in ${realpathSync(repo)}`]);
@@ -476,11 +484,9 @@ describe("canonical adoption plan", () => {
         expect(runConfigRestore(env, undefined, { repo: other })).toMatchObject({ exitCode: 2, json: { error: `rh records no repository file for ${realpathSync(other)}` } });
       } finally { cleanup(other); }
 
-      // The transaction rollback still brings back the retired runtime.
-      expect(rollbackAdoptionTransaction({ repoRoot: repo, transaction: init.apply!.transactionManifestPath! }).ok).toBe(true);
-      for (const path of retirement.paths) expect(existsSync(join(repo, path))).toBe(true);
-      // `rh init rollback` keeps each file that it replaces in the guarded `<transaction>/rollback/`, never loose in the backup root (#2854 R1).
-      expect(readdirSync(join(repo, ".ai/harness/backups/fs-transaction"), { withFileTypes: true }).every((entry) => entry.isDirectory())).toBe(true);
+      // The same restore takes back every file that init created (#2903); a retired file holds proved rh bytes and has no undo.
+      expect(existsSync(join(repo, ".ai/harness/workflow-contract.json"))).toBe(false);
+      for (const path of retirement.paths) expect(existsSync(join(repo, path))).toBe(path === modifiedPath);
       expect(stagedBackupPaths(repo)).toEqual([]);
     } finally {
       cleanup(repo);
@@ -507,7 +513,7 @@ describe("canonical adoption plan", () => {
       };
       for (const [path, bytes] of Object.entries(userFiles)) writeFileSync(join(repo, path), bytes);
 
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }));
+      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }), LEDGER);
       expect(apply.ok).toBe(true);
       for (const [path, bytes] of Object.entries(userFiles)) expect(readFileSync(join(repo, path), "utf-8")).toBe(bytes);
       expect(existsSync(join(repo, "plans", "archive"))).toBe(false);
@@ -537,7 +543,7 @@ describe("canonical adoption plan", () => {
         "Preserving docs/reference-configs/external-tooling.md: it is not a reference-config stub that a release wrote; delete it to get the current stub",
         "Preserving docs/reference-configs/harness-overview.md: it is not a reference-config stub that a release wrote; delete it to get the current stub",
       ]);
-      const apply = applyAdoptionPlan(plan);
+      const apply = applyAdoptionPlan(plan, LEDGER);
       expect(apply.ok).toBe(true);
       expect(readFileSync(join(repo, "docs", "reference-configs", "harness-overview.md"), "utf-8")).toBe("# Local Operations Guide\n");
       expect(readFileSync(join(repo, "docs", "reference-configs", "external-tooling.md"), "utf-8")).toBe(editedStub);
@@ -557,7 +563,7 @@ describe("canonical adoption plan", () => {
       const plan = planAdoption({ repoRoot: repo, mode: "standard" });
       expect(plan.operations.some((operation) => operation.path === "scripts/check-deploy-sql-order.sh")).toBe(false);
       expect(plan.operations.some((operation) => operation.path === ".codex/hooks.json")).toBe(false);
-      expect(applyAdoptionPlan(plan).ok).toBe(true);
+      expect(applyAdoptionPlan(plan, LEDGER).ok).toBe(true);
       expect(readFileSync(join(repo, ".codex", "hooks.json"), "utf-8")).toContain("custom-hook.sh");
     } finally {
       cleanup(repo);
@@ -591,7 +597,7 @@ describe("canonical adoption plan", () => {
         const plan = planAdoption({ repoRoot: repo, mode: "standard", apply: true });
         expect(plan.operations.filter((operation) => operation.path === ".codex/hooks.json")).toEqual([]);
         expect(plan.warnings).toContainEqual({ code: "hook-settings-not-editable", message: `Preserving .codex/hooks.json: ${reason}`, risk: "medium" });
-        expect(applyAdoptionPlan(plan).ok).toBe(true);
+        expect(applyAdoptionPlan(plan, LEDGER).ok).toBe(true);
         expect(readFileSync(join(repo, ".codex/hooks.json")).toString("base64")).toBe(bytes.toString("base64"));
         expect(planRepositoryHookStrips(repo).map((strip) => [strip.path, strip.next.toString("utf8")])).toEqual([[".claude/settings.json", before.replace(`${released}, `, "")]]);
       }
@@ -611,7 +617,7 @@ describe("canonical adoption plan", () => {
       const repo = tempRepo();
       try {
         const plan = planAdoption({ repoRoot: repo, mode, apply: true });
-        expect(applyAdoptionPlan(plan).ok).toBe(true);
+        expect(applyAdoptionPlan(plan, LEDGER).ok).toBe(true);
         expect(existsSync(join(repo, "tasks", "lessons.md"))).toBe(true);
         expect(existsSync(join(repo, "tasks", "contracts"))).toBe(false);
         expect(existsSync(join(repo, "plans"))).toBe(false);
@@ -639,7 +645,7 @@ describe("canonical adoption plan", () => {
         writeFileSync(join(repo, "tasks", "todos.md"), "# Old Todos\n");
         writeFileSync(join(repo, "tasks", "todo.md"), "# Old Todo\n");
         writeFileSync(join(repo, "tasks", "archive", "legacy-tasks-todo.md"), "# User archive\n");
-        expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode, apply: true })).ok).toBe(true);
+        expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode, apply: true }), LEDGER).ok).toBe(true);
         expect(readFileSync(join(repo, "tasks", "todos.md"), "utf-8")).toBe("# Old Todos\n");
         expect(readFileSync(join(repo, "tasks", "todo.md"), "utf-8")).toBe("# Old Todo\n");
         expect(readFileSync(join(repo, "tasks", "archive", "legacy-tasks-todo.md"), "utf-8")).toBe("# User archive\n");
@@ -657,7 +663,7 @@ describe("canonical adoption plan", () => {
       writeFileSync(join(repo, "docs", "TODO.md"), "# Legacy todo\n");
       writeFileSync(join(repo, "tasks", "research.md"), "# Legacy research\n");
       writeFileSync(join(repo, "docs", "researches", "legacy-research-notes.md"), "# User research\n");
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }));
+      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }), LEDGER);
       expect(apply.ok).toBe(true);
       expect(readFileSync(join(repo, "docs", "TODO.md"), "utf-8")).toBe("# Legacy todo\n");
       expect(readFileSync(join(repo, "tasks", "research.md"), "utf-8")).toBe("# Legacy research\n");
@@ -675,19 +681,18 @@ describe("canonical adoption plan", () => {
       mkdirSync(join(repo, ".ai", "harness"), { recursive: true });
       const target = join(repo, ".ai", "harness", "workflow-contract.json");
       writeFileSync(target, "{}\n", { mode: 0o600 });
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "minimal", apply: true }));
+      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "minimal", apply: true }), LEDGER);
       expect(apply.ok).toBe(true);
       expect(statSync(target).mode & 0o777).toBe(0o600);
-      const manifest = JSON.parse(readFileSync(join(repo, apply.transactionManifestPath!), "utf-8")) as { operations: Array<{ path?: string; backupPath?: string }> };
-      const backup = manifest.operations.find((operation) => operation.path === ".ai/harness/workflow-contract.json")?.backupPath;
-      expect(backup).toBeDefined();
-      expect(statSync(join(repo, backup!)).mode & 0o777).toBe(0o600);
+      // The repository ledger keeps the replaced file; the restore puts it back with its mode.
+      expect(runConfigRestore(LEDGER.env, target, { repo }).exitCode).toBe(0);
+      expect([readFileSync(target, "utf8"), statSync(target).mode & 0o777]).toEqual(["{}\n", 0o600]);
     } finally {
       cleanup(repo);
     }
   });
 
-  test("adoption replaces the v0.19.5 contract body and keeps its bytes in the backup", () => {
+  test("adoption replaces the v0.19.5 contract body and keeps its bytes in the repository ledger", () => {
     const repo = tempRepo();
     try {
       // v0.19.5 commit 55bafc000ad0d4051bb443845ca9a51c4a2bf5dc, asset blob a7f59c40c2026c34920323f30ead61caca4bdc35.
@@ -695,24 +700,19 @@ describe("canonical adoption plan", () => {
       mkdirSync(join(repo, ".ai", "harness"), { recursive: true });
       const target = join(repo, ".ai", "harness", "workflow-contract.json");
       writeFileSync(target, legacy);
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "minimal", apply: true }));
+      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "minimal", apply: true }), LEDGER);
       expect(apply.ok).toBe(true);
       expect(JSON.parse(readFileSync(target, "utf8"))).toEqual({ kind: "repo-harness.workflow-contract-marker", protocol: 1 });
-      const manifest = JSON.parse(readFileSync(join(repo, apply.transactionManifestPath!), "utf8")) as { operations: Array<{ path?: string; backupPath?: string }> };
-      const backup = manifest.operations.find((operation) => operation.path === ".ai/harness/workflow-contract.json")?.backupPath;
-      expect(backup).toBeDefined();
-      expect(readFileSync(join(repo, backup!), "utf8")).toBe(legacy);
-      // The backup root ignores itself before its first copy, with no exclude block and no user-level Git ignore (#3228).
+      // The run directory ignores itself before its first entry, with no exclude block and no user-level Git ignore (#3228).
       expect(stagedBackupPaths(repo)).toEqual([]);
       expect([statSync(join(repo, ".ai/harness/backups")).mode & 0o777, statSync(join(repo, ".ai/harness/backups/.gitignore")).mode & 0o777]).toEqual([0o700, 0o600]);
       const report = { protocol: 1, command: "init", repoRoot: repo, mode: "minimal", ok: true, plan: {} } as const;
-      const restore = `cp '${join(repo, backup!)}' '${target}'`;
-      expect(renderApplyReport({ ...report, apply }))
-        .toContain(`[init] backup: .ai/harness/workflow-contract.json -> ${join(repo, backup!)} (restore: ${restore})\n`);
+      const restore = `rh config restore --repo ${shellQuote(realpathSync(repo))}`;
+      expect(renderApplyReport({ ...report, apply })).toContain(`[init] undo: ${restore}\n`);
       const next = planAdoption({ repoRoot: repo, mode: "minimal", apply: true });
       expect(next.operations.find((operation) => operation.path === ".ai/harness/workflow-contract.json")?.status).toBe("skipped");
-      expect(renderApplyReport({ ...report, apply: applyAdoptionPlan(next) })).not.toContain("[init] backup:");
-      expect(spawnSync("sh", ["-c", restore]).status).toBe(0);
+      expect(renderApplyReport({ ...report, apply: applyAdoptionPlan(next, LEDGER) })).not.toContain("[init] undo:");
+      expect(runConfigRestore(LEDGER.env, target, { repo }).exitCode).toBe(0);
       expect(readFileSync(target, "utf8")).toBe(legacy);
     } finally {
       cleanup(repo);
@@ -725,7 +725,7 @@ describe("canonical adoption plan", () => {
       mkdirSync(join(repo, ".ai", "harness"), { recursive: true });
       const target = join(repo, ".ai", "harness", "workflow-contract.json");
       writeFileSync(target, `${JSON.stringify({ minimum_harness_version: "0.22.1", kind: "repo-harness.workflow-contract-marker", protocol: 1 })}\n`);
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "minimal", apply: true }));
+      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "minimal", apply: true }), LEDGER);
       expect(apply.ok).toBe(true);
       expect(JSON.parse(readFileSync(target, "utf8"))).toEqual({ kind: "repo-harness.workflow-contract-marker", protocol: 1, minimum_harness_version: "0.22.1" });
       const next = planAdoption({ repoRoot: repo, mode: "minimal", apply: true });
@@ -741,13 +741,44 @@ describe("canonical adoption plan", () => {
   test("self-host is rejected before the standard scaffold is created", () => {
     const repo = tempRepo();
     try {
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "self-host", apply: true }));
+      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "self-host", apply: true }), LEDGER);
       expect(apply.ok).toBe(false);
       expect(apply.results.some((result) => result.id.includes("self-host-adoption-boundary-review") && result.status === "failed")).toBe(true);
       expect(existsSync(join(repo, "docs", "spec.md"))).toBe(false);
-      expect(apply.transactionManifestPath).toBeDefined();
     } finally {
       cleanup(repo);
+    }
+  });
+
+  test("init writes only at a worktree root, and outside Git only new files (#2903)", () => {
+    const repo = tempRepo();
+    const plain = tempDir();
+    try {
+      // A Git subdirectory has no ledger of its own: the dry run and the apply refuse it and name the root.
+      mkdirSync(join(repo, "sub"));
+      const sub = { repo: join(repo, "sub"), mode: "minimal" as const, explicitRepo: true, env: process.env };
+      const refusal = `rh init writes only at a worktree root. Run: rh init --repo ${realpathSync(repo)}`;
+      expect(runAdoptionPlan(sub).output).toContain(refusal);
+      expect(runAdoptionApply(sub).output).toContain(refusal);
+      expect(readdirSync(join(repo, "sub"))).toEqual([]);
+      // A root reached through a link records the real worktree paths.
+      const link = join(plain, "link");
+      symlinkSync(repo, link);
+      expect(applyAdoptionPlan(planAdoption({ repoRoot: link, mode: "minimal", apply: true }), LEDGER).ok).toBe(true);
+      rmSync(link);
+
+      // Outside Git, a change to an existing file has no undo, so the plan stops before any write.
+      writeFileSync(join(plain, ".gitignore"), "node_modules\n");
+      const changed = applyAdoptionPlan(planAdoption({ repoRoot: plain, mode: "minimal", apply: true }), LEDGER);
+      expect(changed.results.find((result) => result.id === "adoption-target")?.error).toContain(`Run git init in ${plain}`);
+      expect(readdirSync(plain)).toEqual([".gitignore"]);
+      rmSync(join(plain, ".gitignore"));
+      const created = applyAdoptionPlan(planAdoption({ repoRoot: plain, mode: "minimal", apply: true }), LEDGER);
+      expect([created.ok, created.restore]).toEqual([true, undefined]);
+      expect(existsSync(join(plain, "docs", "spec.md"))).toBe(true);
+    } finally {
+      cleanup(repo);
+      cleanup(plain);
     }
   });
 
@@ -757,7 +788,7 @@ describe("canonical adoption plan", () => {
       const plan = planAdoption({ repoRoot: repo, mode: "standard", apply: true });
       mkdirSync(join(repo, "docs"), { recursive: true });
       writeFileSync(join(repo, "docs", "spec.md"), "# User-authored after planning\n");
-      const apply = applyAdoptionPlan(plan);
+      const apply = applyAdoptionPlan(plan, LEDGER);
       expect(apply.ok).toBe(false);
       expect(apply.results.find((result) => result.path === "docs/spec.md")?.error).toContain("created after planning");
       expect(readFileSync(join(repo, "docs", "spec.md"), "utf-8")).toBe("# User-authored after planning\n");
@@ -766,7 +797,7 @@ describe("canonical adoption plan", () => {
     }
   });
 
-  test("apply stops at the first failed operation and rolls back the applied ones by manifest", () => {
+  test("apply stops at the first failed operation and rolls back the applied ones from the repository ledger", () => {
     const repo = tempRepo();
     try {
       // Invalid UTF-8 bytes prove that backup and restore are byte-exact.
@@ -780,7 +811,7 @@ describe("canonical adoption plan", () => {
         writeOperation("blocker/nested.txt", "never written\n"),
         writeOperation("after.txt", "never written\n"),
       ]);
-      const apply = applyAdoptionPlan(plan);
+      const apply = applyAdoptionPlan(plan, LEDGER);
 
       expect(apply.ok).toBe(false);
       expect(apply.results.map((result) => result.status)).toEqual(["applied", "applied", "applied", "failed", "planned"]);
@@ -789,13 +820,11 @@ describe("canonical adoption plan", () => {
       expect(readFileSync(join(repo, "existing.txt")).equals(original)).toBe(true);
       expect(existsSync(join(repo, "created-dir"))).toBe(false);
       expect(existsSync(join(repo, "blocker"))).toBe(false);
-      // The rollback kept the replaced file in the guarded `<transaction>/rollback/` (#2854 R1).
-      const rollbackDir = join(repo, dirname(apply.transactionManifestPath!), "rollback");
-      expect(readdirSync(rollbackDir).map((name) => name === ".gitignore" ? name : readFileSync(join(rollbackDir, name), "utf8")).sort()).toEqual([".gitignore", "replaced\n"]);
+      // A clean rollback leaves no run directory, no bytes beside a target, no staged bytes and no record (#2903).
+      expect(readdirSync(repo).filter((name) => name.startsWith("existing.txt."))).toEqual([]);
+      expect(readdirSync(join(repo, ".ai/harness/backups/fs-transaction")).filter((name) => name !== ".gitignore")).toEqual([]);
       expect(stagedBackupPaths(repo)).toEqual([]);
-      const manifest = JSON.parse(readFileSync(join(repo, apply.transactionManifestPath!), "utf-8"));
-      expect(manifest.operations.map((operation: { status: string }) => operation.status))
-        .toEqual(["applied", "applied", "applied", "failed", "planned"]);
+      expect(runConfigRestore(LEDGER.env, undefined, { repo }).exitCode).toBe(2);
 
       const report = { protocol: 1, command: "init", repoRoot: repo, mode: "minimal", ok: false, plan: {} } as const;
       expect(renderApplyReport({ ...report, apply })).toContain("[init] rollback: complete - 3 rolled back, 0 failed\n");
@@ -853,7 +882,7 @@ describe("canonical adoption plan", () => {
       await holder.exited;
       expect(existsSync(`${target}.repo-harness.lock`)).toBe(true);
 
-      const apply = applyAdoptionPlan(planWith(repo, [writeOperation("locked.txt", "after\n")]));
+      const apply = applyAdoptionPlan(planWith(repo, [writeOperation("locked.txt", "after\n")]), LEDGER);
       expect(apply.results).toEqual([expect.objectContaining({ status: "applied" })]);
       expect(apply.ok).toBe(true);
       expect(readFileSync(target, "utf-8")).toBe("after\n");
@@ -874,7 +903,7 @@ describe("canonical adoption plan", () => {
       const past = new Date(Date.now() - 60_000);
       utimesSync(lock, past, past);
 
-      const apply = applyAdoptionPlan(planWith(repo, [writeOperation("locked.txt", "after\n")]));
+      const apply = applyAdoptionPlan(planWith(repo, [writeOperation("locked.txt", "after\n")]), LEDGER);
       expect(apply.ok).toBe(true);
       expect(readFileSync(target, "utf-8")).toBe("after\n");
       expect(existsSync(lock)).toBe(false);
@@ -912,7 +941,7 @@ describe("canonical adoption plan", () => {
       } as typeof Atomics.wait;
       let apply: ReturnType<typeof applyAdoptionPlan>;
       try {
-        apply = applyAdoptionPlan(plan);
+        apply = applyAdoptionPlan(plan, LEDGER);
       } finally {
         Atomics.wait = wait;
       }
@@ -933,9 +962,8 @@ describe("canonical adoption plan", () => {
     try {
       const plan = planAdoption({ repoRoot: repo, mode: "minimal", apply: true });
       symlinkSync(outside, join(repo, ".ai"));
-      const apply = applyAdoptionPlan(plan);
+      const apply = applyAdoptionPlan(plan, LEDGER);
       expect(apply.ok).toBe(false);
-      expect(apply.transactionManifestPath).toBeUndefined();
       expect(existsSync(join(outside, "harness", "backups", "fs-transaction"))).toBe(false);
     } finally {
       cleanup(repo);
@@ -943,120 +971,67 @@ describe("canonical adoption plan", () => {
     }
   });
 
-  test("manifest path failures stop before repo mutations and report the missing recovery evidence", () => {
+  test("an unusable run directory stops before repo mutations", () => {
     const repo = tempRepo();
     try {
       mkdirSync(join(repo, ".ai", "harness"), { recursive: true });
       writeFileSync(join(repo, ".ai", "harness", "backups"), "not a directory\n");
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "minimal", apply: true }));
+      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "minimal", apply: true }), LEDGER);
       expect(apply.ok).toBe(false);
-      expect(apply.results.find((result) => result.id === "transaction-manifest")?.error).toContain("parent is not a directory");
+      expect(apply.results.find((result) => result.id === "transaction-dir")?.error).toContain("rh cannot keep its run directory");
       expect(existsSync(join(repo, "docs", "spec.md"))).toBe(false);
-      expect(apply.transactionManifestPath).toBeUndefined();
     } finally {
       cleanup(repo);
     }
   });
 
-  test("rollback restores a legacy move only when its destination has not changed", () => {
-    const repo = tempRepo();
-    try {
-      mkdirSync(join(repo, "docs"), { recursive: true });
-      writeFileSync(join(repo, "docs", "plan.md"), "# Old plan\n");
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }));
-      expect(apply.ok).toBe(true);
-      const rollback = rollbackAdoptionTransaction({ repoRoot: repo, transaction: apply.transactionManifestPath! });
-      expect(rollback.ok).toBe(true);
-      expect(readFileSync(join(repo, "docs", "plan.md"), "utf-8")).toBe("# Old plan\n");
-    } finally {
-      cleanup(repo);
-    }
-  });
-
-  test("rollback refuses symlinked destinations without writing outside the repo", () => {
-    const repo = tempRepo();
-    const outside = tempRepo();
-    try {
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "minimal", apply: true }));
-      expect(apply.ok).toBe(true);
-      rmSync(join(repo, "docs"), { recursive: true, force: true });
-      symlinkSync(outside, join(repo, "docs"));
-      const rollback = rollbackAdoptionTransaction({ repoRoot: repo, transaction: apply.transactionManifestPath! });
-      expect(rollback.ok).toBe(false);
-      expect(rollback.results.some((result) => result.error?.includes("symlink is not allowed"))).toBe(true);
-      expect(existsSync(join(outside, "spec.md"))).toBe(false);
-    } finally {
-      cleanup(repo);
-      cleanup(outside);
-    }
-  });
-
-  test("rollback restores the git index after a generated helper is untracked", () => {
-    const repo = tempRepo();
-    try {
-      mkdirSync(join(repo, "scripts"), { recursive: true });
-      const helper = "scripts/check-deploy-sql-order.sh";
-      writeFileSync(join(repo, helper), readFileSync(join(ROOT, "scripts", "check-deploy-sql-order.sh"), "utf-8"));
-      expect(spawnSync("git", ["init", "-q"], { cwd: repo }).status).toBe(0);
-      expect(spawnSync("git", ["add", helper], { cwd: repo }).status).toBe(0);
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }));
-      expect(apply.ok).toBe(true);
-      expect(existsSync(join(repo, helper))).toBe(false);
-      const rollback = rollbackAdoptionTransaction({ repoRoot: repo, transaction: apply.transactionManifestPath! });
-      expect(rollback.ok).toBe(true);
-      expect(spawnSync("git", ["ls-files", "--error-unmatch", "--", helper], { cwd: repo }).status).toBe(0);
-    } finally {
-      cleanup(repo);
-    }
-  }, 30_000);
-
-  test("rollback restores the exact staged helper entry instead of staging working-tree bytes", () => {
+  test("a successful run keeps a retired helper and its index entry when the index holds a staged user edit", () => {
     const repo = tempRepo();
     try {
       mkdirSync(join(repo, "scripts"), { recursive: true });
       const helper = "scripts/check-deploy-sql-order.sh";
       const canonical = readFileSync(join(ROOT, "scripts", "check-deploy-sql-order.sh"), "utf-8");
-      expect(spawnSync("git", ["init", "-q"], { cwd: repo }).status).toBe(0);
       writeFileSync(join(repo, helper), "#!/bin/sh\necho staged custom helper\n");
       expect(spawnSync("git", ["add", helper], { cwd: repo }).status).toBe(0);
       writeFileSync(join(repo, helper), canonical);
       const git = (...args: string[]) => spawnSync("git", args, { cwd: repo, encoding: "utf-8" }).stdout;
       const stagedEntry = git("ls-files", "--stage", "--", helper);
-      const stagedBytes = git("show", `:${helper}`);
-      expect(stagedBytes).toBe("#!/bin/sh\necho staged custom helper\n");
 
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }));
+      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }), LEDGER);
       expect(apply.ok).toBe(true);
-      expect(apply.results.find((result) => result.kind === "gitUntrack" && result.path === helper)?.status).toBe("applied");
-      const rollback = rollbackAdoptionTransaction({ repoRoot: repo, transaction: apply.transactionManifestPath! });
-      expect(rollback.ok).toBe(true);
-      expect(git("ls-files", "--stage", "--", helper)).toBe(stagedEntry);
-      expect(git("show", `:${helper}`)).toBe(stagedBytes);
-      expect(readFileSync(join(repo, helper), "utf-8")).toBe(canonical);
+      expect(apply.results.filter((result) => result.path === helper).map((result) => [result.kind, result.status, Boolean(result.kept)]))
+        .toEqual([["remove", "skipped", true], ["gitUntrack", "skipped", true]]);
+      expect([git("ls-files", "--stage", "--", helper), git("show", `:${helper}`), readFileSync(join(repo, helper), "utf-8")])
+        .toEqual([stagedEntry, "#!/bin/sh\necho staged custom helper\n", canonical]);
+      const report = { protocol: 1, command: "init", repoRoot: repo, mode: "standard", ok: true, plan: {} } as const;
+      expect(renderApplyReport({ ...report, apply })).toContain(`[init] kept: ${helper} - the Git index holds other bytes than the retired rh file`);
     } finally {
       cleanup(repo);
     }
   }, 30_000);
 
-  test("rollback never stages a file the user created at an untracked helper path after apply", () => {
+  test("a failed run puts back the untracked helper and its exact index entry", () => {
     const repo = tempRepo();
     try {
       mkdirSync(join(repo, "scripts"), { recursive: true });
       const helper = "scripts/check-deploy-sql-order.sh";
-      writeFileSync(join(repo, helper), readFileSync(join(ROOT, "scripts", "check-deploy-sql-order.sh"), "utf-8"));
-      expect(spawnSync("git", ["init", "-q"], { cwd: repo }).status).toBe(0);
+      const canonical = readFileSync(join(ROOT, "scripts", "check-deploy-sql-order.sh"), "utf-8");
+      writeFileSync(join(repo, helper), canonical);
       expect(spawnSync("git", ["add", helper], { cwd: repo }).status).toBe(0);
       const git = (...args: string[]) => spawnSync("git", args, { cwd: repo, encoding: "utf-8" }).stdout;
       const stagedEntry = git("ls-files", "--stage", "--", helper);
+      const stagedBytes = git("show", `:${helper}`);
 
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }));
-      expect(apply.ok).toBe(true);
-      writeFileSync(join(repo, helper), "user file created after apply\n");
-      const rollback = rollbackAdoptionTransaction({ repoRoot: repo, transaction: apply.transactionManifestPath! });
-      expect(rollback.ok).toBe(false);
-      expect(rollback.results.find((result) => result.kind === "remove" && result.path === helper)?.error).toContain("occupied");
+      const plan = planAdoption({ repoRoot: repo, mode: "standard", apply: true });
+      // The last write fails: its parent is a file that the run wrote just before it.
+      const failing = { ...plan, operations: [...plan.operations, writeOperation("blocker", "file in the way\n"), writeOperation("blocker/nested.txt", "never written\n")] };
+      const apply = applyAdoptionPlan(failing, LEDGER);
+      expect(apply.ok).toBe(false);
+      expect(apply.results.find((result) => result.kind === "gitUntrack" && result.path === helper)?.status).toBe("applied");
+      expect(apply.rollback?.ok, JSON.stringify(apply.rollback?.results)).toBe(true);
       expect(git("ls-files", "--stage", "--", helper)).toBe(stagedEntry);
-      expect(readFileSync(join(repo, helper), "utf-8")).toBe("user file created after apply\n");
+      expect(git("show", `:${helper}`)).toBe(stagedBytes);
+      expect(readFileSync(join(repo, helper), "utf-8")).toBe(canonical);
     } finally {
       cleanup(repo);
     }
@@ -1076,30 +1051,12 @@ describe("canonical adoption plan", () => {
 
     function expectRefusedBeforeMutation(repo: string, git: (...args: string[]) => ReturnType<typeof spawnSync>, message: string): void {
       const indexBefore = git("ls-files", "--stage", "--", helper).stdout;
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }));
+      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }), LEDGER);
       expect(apply.ok).toBe(false);
       expect(apply.results.find((result) => result.kind === "gitUntrack" && result.path === helper)?.error).toContain(message);
       expect(existsSync(join(repo, helper))).toBe(true);
       expect(git("ls-files", "--stage", "--", helper).stdout).toBe(indexBefore);
     }
-
-    function editManifest(repo: string, manifestPath: string, edit: (operation: Record<string, any>) => void): void {
-      const path = join(repo, manifestPath);
-      const manifest = JSON.parse(readFileSync(path, "utf-8"));
-      edit(manifest.operations.find((operation: Record<string, any>) => operation.kind === "gitUntrack" && operation.path === helper));
-      writeFileSync(path, JSON.stringify(manifest));
-    }
-
-    test("apply refuses an intent-to-add entry before any mutation", () => {
-      const { repo, git } = helperRepo();
-      try {
-        expect(git("add", "-N", helper).status).toBe(0);
-        expectRefusedBeforeMutation(repo, git, "intent-to-add");
-        expect(git("status", "--porcelain=v2", "--", helper).stdout).toContain(" .A N... ");
-      } finally {
-        cleanup(repo);
-      }
-    }, 30_000);
 
     test("apply refuses an unmerged entry before any mutation", () => {
       const { repo, git } = helperRepo();
@@ -1124,76 +1081,6 @@ describe("canonical adoption plan", () => {
       }
     }, 30_000);
 
-    test("rollback of a manifest without an index entry fails with a manual re-add step", () => {
-      const { repo, git } = helperRepo();
-      try {
-        expect(git("add", helper).status).toBe(0);
-        const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }));
-        expect(apply.ok).toBe(true);
-        editManifest(repo, apply.transactionManifestPath!, (operation) => { delete operation.gitIndexEntry; });
-        const rollback = rollbackAdoptionTransaction({ repoRoot: repo, transaction: apply.transactionManifestPath! });
-        expect(rollback.ok).toBe(false);
-        expect(rollback.results.find((result) => result.kind === "gitUntrack")?.error).toContain(`git add -- ${helper}`);
-        expect(git("ls-files", "--stage", "--", helper).stdout).toBe("");
-      } finally {
-        cleanup(repo);
-      }
-    }, 30_000);
-
-    test("rollback refuses to replace an index entry the user staged after apply", () => {
-      const { repo, git } = helperRepo();
-      try {
-        expect(git("add", helper).status).toBe(0);
-        const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }));
-        expect(apply.ok).toBe(true);
-        writeFileSync(join(repo, helper), "user staged after apply\n");
-        expect(git("add", helper).status).toBe(0);
-        const userEntry = git("ls-files", "--stage", "--", helper).stdout;
-        const rollback = rollbackAdoptionTransaction({ repoRoot: repo, transaction: apply.transactionManifestPath! });
-        expect(rollback.ok).toBe(false);
-        expect(rollback.results.find((result) => result.kind === "gitUntrack")?.error).toContain("changed after apply");
-        expect(git("ls-files", "--stage", "--", helper).stdout).toBe(userEntry);
-      } finally {
-        cleanup(repo);
-      }
-    }, 30_000);
-
-    test("rollback fails closed when Git pruned the recorded blob", () => {
-      const { repo, git } = helperRepo();
-      try {
-        const canonical = readFileSync(join(repo, helper), "utf-8");
-        writeFileSync(join(repo, helper), "#!/bin/sh\necho staged only\n");
-        expect(git("add", helper).status).toBe(0);
-        writeFileSync(join(repo, helper), canonical);
-        const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }));
-        expect(apply.ok).toBe(true);
-        expect(git("prune", "--expire=now").status).toBe(0);
-        const rollback = rollbackAdoptionTransaction({ repoRoot: repo, transaction: apply.transactionManifestPath! });
-        expect(rollback.ok).toBe(false);
-        expect(rollback.results.find((result) => result.kind === "gitUntrack")?.error).toContain("recorded git object is missing");
-        expect(git("ls-files", "--stage", "--", helper).stdout).toBe("");
-      } finally {
-        cleanup(repo);
-      }
-    }, 30_000);
-
-    test("rollback rejects a manifest whose index entry is not a regular file entry", () => {
-      const { repo, git } = helperRepo();
-      try {
-        expect(git("add", helper).status).toBe(0);
-        const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }));
-        expect(apply.ok).toBe(true);
-        for (const gitIndexEntry of [{ mode: "120000", objectId: "a".repeat(40) }, { mode: "100644", objectId: "not-an-oid" }]) {
-          editManifest(repo, apply.transactionManifestPath!, (operation) => { operation.gitIndexEntry = gitIndexEntry; });
-          const rollback = rollbackAdoptionTransaction({ repoRoot: repo, transaction: apply.transactionManifestPath! });
-          expect(rollback.ok).toBe(false);
-          expect(rollback.results[0]?.error).toContain("invalid transaction manifest");
-        }
-        expect(git("ls-files", "--stage", "--", helper).stdout).toBe("");
-      } finally {
-        cleanup(repo);
-      }
-    }, 30_000);
   });
 
   test("apply refuses a dangling symlink at a planned target instead of replacing it", () => {
@@ -1202,7 +1089,7 @@ describe("canonical adoption plan", () => {
     try {
       mkdirSync(join(repo, "docs"), { recursive: true });
       symlinkSync(join(outside, "spec.md"), join(repo, "docs", "spec.md"));
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "minimal", apply: true }));
+      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "minimal", apply: true }), LEDGER);
       expect(apply.ok).toBe(false);
       expect(apply.results.some((result) => result.error?.includes("symlink is not allowed"))).toBe(true);
       expect(lstatSync(join(repo, "docs", "spec.md")).isSymbolicLink()).toBe(true);
@@ -1213,24 +1100,6 @@ describe("canonical adoption plan", () => {
     }
   });
 
-  test.skipIf(process.getuid?.() === 0)("rollback reports a structured failure when a path folder cannot be searched", () => {
-    const repo = tempRepo();
-    try {
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "minimal", apply: true }));
-      expect(apply.ok).toBe(true);
-      chmodSync(join(repo, "docs"), 0o000);
-      try {
-        const rollback = rollbackAdoptionTransaction({ repoRoot: repo, transaction: apply.transactionManifestPath! });
-        expect(rollback.ok).toBe(false);
-        expect(rollback.results.find((result) => result.path === "docs/spec.md")?.error).toContain("cannot inspect adoption path: docs/spec.md (EACCES)");
-      } finally {
-        chmodSync(join(repo, "docs"), 0o755);
-      }
-      expect(existsSync(join(repo, "docs", "spec.md"))).toBe(true);
-    } finally {
-      cleanup(repo);
-    }
-  });
 });
 
 describe("review_base authority", () => {

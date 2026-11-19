@@ -10,7 +10,6 @@ import { LEGACY_WORKTREE_PROVIDER_DEFERRED, runLegacyWorktreeCleanup } from '../
 import { localMergeMode, planManagedWorktreeSweep, sweepManagedWorktrees, type WorktreeSweepPlan } from '../../src/effects/state/coordination-worktree-topology';
 import { taskWorkspaceKey } from '../../src/effects/git/repository-identity';
 import { legacyPathSnapshot, planLegacyLeftovers } from '../../src/effects/upgrade/legacy-inventory';
-import { rollbackAdoptionTransaction } from '../../src/effects/fs-transaction';
 import { migrateInstallState } from '../../src/cli/installer/install-state-migration';
 import { globalRuntimeScope, withRuntimeTransactionLock } from '../../src/effects/locking/runtime-transaction-lock';
 import { readInstallState, withHostConfigTransaction } from '../../src/cli/installer/install-profile';
@@ -390,10 +389,15 @@ describe('upgrade with real release bytes', () => {
     expect(tree(opts.home)).toEqual(beforeHome); expect(tree(opts.cwd)).toEqual(beforeRepo);
   }));
 
-  test('backups restore exact pre-apply target bytes, project rollback uses the adoption manifest, and repository hook files come back by restore --repo', () => sandbox((opts) => {
-    const originals = new Map(planLegacyLeftovers({ ...opts, scope: 'all', installOwnership: ownership(opts) }).items.filter((item) => item.action !== 'report').map((item) => [item.path, lstatSync(item.path).isDirectory() ? tree(item.path) : readFileSync(item.path).toString('base64')]));
+  test('global backups restore exact pre-apply target bytes, a completed run deletes its project copies, and repository hook files come back by restore --repo', () => sandbox((opts) => {
+    // Project files other than hook files hold proved rh bytes; a completed run keeps no copy of them (#2903).
+    const originals = new Map(planLegacyLeftovers({ ...opts, scope: 'all', installOwnership: ownership(opts) }).items
+      .filter((item) => item.action !== 'report' && (item.location === 'global' || item.surface === 'hook-entry'))
+      .map((item) => [item.path, lstatSync(item.path).isDirectory() ? tree(item.path) : readFileSync(item.path).toString('base64')]));
     const result = runUpgrade({ ...opts, apply: true });
-    expect(result.exitCode).toBe(0); expect(result.backupPath).toBeDefined(); expect(result.projectBackupPath).toBeDefined();
+    expect(result.exitCode).toBe(0); expect(result.backupPath).toBeDefined();
+    const copies = join(opts.cwd, '.ai/harness/backups/fs-transaction');
+    expect(existsSync(copies) ? readdirSync(copies).filter((name) => name.startsWith('upgrade-')) : []).toEqual([]);
     // The project backup root ignores itself, with no exclude block and no user-level Git ignore (#3228).
     const isolatedGit = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
     expect(spawnSync('git', ['add', '-A'], { cwd: opts.cwd, env: isolatedGit }).status).toBe(0);
@@ -405,8 +409,6 @@ describe('upgrade with real release bytes', () => {
       rmSync(snapshot.path, { recursive: true, force: true });
       cpSync(snapshot.backup_path, snapshot.path, { recursive: true, verbatimSymlinks: true });
     }
-    const rollback = rollbackAdoptionTransaction({ repoRoot: opts.cwd, transaction: relative(opts.cwd, result.projectBackupPath!) });
-    expect(rollback.ok).toBe(true);
     expect(runConfigRestore({ HOME: opts.home }, undefined, { repo: opts.cwd }).exitCode).toBe(0);
     for (const [path, bytes] of originals) expect(typeof bytes === 'string' ? readFileSync(path).toString('base64') : tree(path)).toEqual(bytes);
   }));
@@ -507,7 +509,6 @@ describe('upgrade with real release bytes', () => {
     const modified = join(opts.cwd, 'docs/reference-configs/sprint-contracts.md');
     writeFileSync(modified, `${readFileSync(modified, 'utf8')}user edit\n`);
     put(join(opts.cwd, 'docs/architecture/snapshots/user-note.md'), '# User snapshot\n');
-    const before = tree(opts.cwd);
     const rootTemplate = readFileSync(join(ROOT, 'assets/templates/root-context.md'), 'utf8');
     const rootHash = legacyPathSnapshot(join(ROOT, 'assets/templates/root-context.md'))?.contentHash;
     const rootFingerprints = workflowContract.migrations.upgrade.actions.find((action) => action.id === 'retired-flow-root-context')?.fingerprints;
@@ -548,14 +549,6 @@ describe('upgrade with real release bytes', () => {
     for (const name of ['CLAUDE.md', 'AGENTS.md']) {
       expect(readFileSync(join(opts.cwd, name), 'utf8')).toBe(rootTemplate);
       expect(result.refreshedPaths).toContain(join(opts.cwd, name));
-    }
-
-    // The one transaction restores every touched path to its original bytes.
-    const rollback = rollbackAdoptionTransaction({ repoRoot: opts.cwd, transaction: relative(opts.cwd, result.projectBackupPath!) });
-    expect(rollback.ok, JSON.stringify(rollback.results)).toBe(true);
-    const afterRollback = tree(opts.cwd);
-    for (const path of retiredRcPaths().concat(['docs/architecture/snapshots/user-note.md'])) {
-      expect(afterRollback[path], path).toBe(before[path]);
     }
 
     // The 0.34 root context capped the test volume; an unchanged copy refreshes.
@@ -628,10 +621,6 @@ describe('upgrade with real release bytes', () => {
     expect(result.error).toContain('injected migration failure');
     const afterFailure = tree(opts.cwd);
     for (const path of retiredRcPaths()) expect(afterFailure[path], path).toBe(before[path]);
-    const rollback = rollbackAdoptionTransaction({ repoRoot: opts.cwd, transaction: relative(opts.cwd, result.projectBackupPath!) });
-    expect(rollback.ok, JSON.stringify(rollback.results)).toBe(true);
-    const afterRollback = tree(opts.cwd);
-    for (const path of retiredRcPaths()) expect(afterRollback[path], path).toBe(before[path]);
   }));
 
   test('minimal init creates no policy file when the repository has none', () => sandbox((opts) => {
@@ -1230,7 +1219,7 @@ describe('upgrade operator decisions', () => {
     expect(stale.items[0]?.reason).toContain('decision is stale');
   }, false));
 
-  test('remove deletes a regular file through the project backup manifest and init rollback restores it', () => sandbox((opts) => {
+  test('remove deletes a regular file that the operator decided to remove', () => sandbox((opts) => {
     const path = join(opts.cwd, library);
     put(path, libraryBytes());
     const decided = runUpgradeDecide({ ...opts, decision: 'remove', paths: [library] });
@@ -1245,11 +1234,6 @@ describe('upgrade operator decisions', () => {
     expect(result.exitCode, result.error).toBe(0);
     expect(result.removedPaths).toEqual([path]);
     expect(existsSync(path)).toBe(false);
-    const manifest = JSON.parse(readFileSync(result.projectBackupPath!, 'utf8'));
-    expect(manifest.operations).toEqual([expect.objectContaining({ kind: 'remove', path: library, status: 'applied', rollbackStrategy: 'restore-or-delete-file' })]);
-    const rollback = rollbackAdoptionTransaction({ repoRoot: opts.cwd, transaction: relative(opts.cwd, result.projectBackupPath!) });
-    expect(rollback.ok).toBe(true);
-    expect(readFileSync(path, 'utf8')).toBe(libraryBytes());
   }, false));
 
   test('remove is rejected for a directory and for a document that refers to a retired path', () => sandbox((opts) => {
@@ -1316,7 +1300,6 @@ describe('upgrade operator decisions', () => {
     const removed = runUpgrade({ ...opts, scope: 'project', apply: true });
     expect(removed.exitCode, removed.error).toBe(0);
     expect(removed.removedPaths).toEqual([path]);
-    expect(removed.projectBackupPath).toBeDefined();
   }, false));
 
   test('retired runtime state below a symlinked .claude is outside the repository and is not listed', () => sandbox((opts) => {

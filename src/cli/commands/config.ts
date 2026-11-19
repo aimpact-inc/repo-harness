@@ -104,7 +104,8 @@ function restoreRepository(env: NodeJS.ProcessEnv, repo: string, path: string | 
   const run = (): UninstallItem[] => {
     const plan = repositoryRestorePlan(env, repository, { only, owner: options.owner });
     const entries = options.dryRun ? plan.entries : revertRepositoryPaths(env, repository, plan);
-    return [...entries.map(revertItem), ...plan.refused.map((entry): UninstallItem => ({ path: entry.path, action: 'kept', reason: entry.reason }))];
+    return [...entries.map(revertItem), ...plan.refused.map((entry): UninstallItem => ({ path: entry.path, action: 'kept', reason: entry.reason })),
+      ...plan.directories.map((directory): UninstallItem => ({ path: directory, action: 'note', reason: 'rh created this directory; it goes when it is empty' }))];
   };
   return options.dryRun ? run() : withRuntimeTransactionLock(globalRuntimeScope(env), run);
 }

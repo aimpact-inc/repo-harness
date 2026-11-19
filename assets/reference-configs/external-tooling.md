@@ -144,14 +144,14 @@ current content hash matches. A changed file is reported again as a stale
 decision. `keep` moves the item to `operatorKept`; it no longer counts as a
 leftover. `remove` is valid only for a regular file that is not a document with
 a retired-path reference. `upgrade --scope project --apply` then removes it
-through the project backup and rollback manifest. An invalid decision file
+through the run's project backup. An invalid decision file
 fails the project upgrade.
 
 `upgrade --apply` backs up eligible targets and checks ownership again before
 removal. It keeps current global typed adapters, sibling user hooks, changed
 files, and files without proof. Apply exits 1 on failure and restores its target
-snapshots. Backup manifests list original paths. Project transactions use
-`rh init rollback`; global backups require manual target replacement from each snapshot.
+snapshots. A completed run deletes its project copies. Global backup manifests
+list original paths; a global backup needs manual target replacement from each snapshot.
 Do not overlay directory contents. Restore symlinks verbatim.
 
 Global upgrade backups stay in `~/.repo-harness/transactions/install-*`.

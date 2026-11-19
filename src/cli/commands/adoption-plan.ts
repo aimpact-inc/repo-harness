@@ -5,7 +5,7 @@ import type { AdoptionPlan } from "../../core/adoption/operations";
 import { planAdoption } from "../../effects/adoption/plan";
 import { ReviewBaseUnresolvedError } from "../../effects/adoption/standard-plan";
 import { renderAdoptionPlanJson, renderAdoptionPlanObject, renderAdoptionPlanText } from "../../core/adoption/render";
-import { applyAdoptionPlan, type ApplyAdoptionPlanResult } from "../../effects/fs-transaction";
+import { adoptionTarget, applyAdoptionPlan, type ApplyAdoptionPlanResult } from "../../effects/fs-transaction";
 import { planRepositoryHookStrips, stripRepositoryHookFiles } from "../../effects/upgrade/repository-hooks";
 import { registerRepoHarnessRepo, type RepoHarnessRegisterResult } from "../../effects/repo-registry";
 import { validateRepoAdoptionTarget } from "../repo-adoption/target";
@@ -108,6 +108,9 @@ export function runAdoptionPlan(opts: RunAdoptionPlanOptions): RunAdoptionPlanRe
   const created = createPlan(opts);
   if (created.error) return created.error;
   const plan = created.plan!;
+  // The dry run refuses what the apply refuses.
+  const target = adoptionTarget(plan, "ledger", opts.env ?? process.env);
+  if (target.kind === "refused") return errorOutput(created.repoRoot, opts.mode, "invalid_repo_target", target.reason, opts.json === true);
   const strips = planRepositoryHookStrips(created.repoRoot).map((strip) => strip.path);
   if (opts.json === true) {
     return { exitCode: 0, output: strips.length ? `${JSON.stringify({ ...renderAdoptionPlanObject(plan), hookCleanup: hookCleanup(created.repoRoot, strips) }, null, 2)}\n` : renderAdoptionPlanJson(plan) };
@@ -130,16 +133,9 @@ export function renderApplyReport(report: AdoptionApplyReport, json = false): st
       return acc;
     }, {});
     for (const [status, count] of Object.entries(counts).sort()) lines.push(`[init] ${status}: ${count}`);
-    if (report.apply.transactionManifestPath) lines.push(`[init] transaction: ${report.apply.transactionManifestPath}`);
-    // A failed transaction rolls back by itself; a committed one keeps each replaced file's copy for a manual restore.
-    if (!report.apply.rollback) {
-      for (const result of report.apply.results) {
-        if (result.status !== "applied" || !result.backupPath || !result.path) continue;
-        const backup = join(report.repoRoot, result.backupPath);
-        const target = join(report.repoRoot, result.path);
-        lines.push(`[init] backup: ${result.path} -> ${backup} (restore: cp ${shellQuote(backup)} ${shellQuote(target)})`);
-      }
-    }
+    // The repository ledger keeps each replaced file; a failed run rolls back by itself.
+    if (report.apply.restore) lines.push(`[init] undo: ${report.apply.restore}`);
+    for (const result of report.apply.results.filter((entry) => entry.kept && entry.kind === "gitUntrack")) lines.push(`[init] kept: ${result.path} - ${result.kept}`);
     for (const result of report.apply.results.filter((entry) => entry.status === "failed")) {
       lines.push(`[init] failed operation: ${result.id}${result.error ? ` - ${result.error}` : ""}`);
     }
@@ -154,6 +150,7 @@ export function renderApplyReport(report: AdoptionApplyReport, json = false): st
       }
       if (!rollback.ok) {
         lines.push(`[init] not restored: ${failed.map((result) => result.path ?? result.id).join(", ")}`);
+        if (report.apply.transactionDir) lines.push(`[init] removed files kept in: ${join(report.repoRoot, report.apply.transactionDir)}`);
       }
     }
   }
@@ -192,11 +189,12 @@ export function runAdoptionApply(opts: RunAdoptionPlanOptions): RunAdoptionApply
     };
     return { exitCode: 2, output: renderApplyReport(report, opts.json === true), report };
   }
-  const apply = applyAdoptionPlan({ ...plan, apply: true });
+  const env = opts.env ?? process.env;
+  const apply = applyAdoptionPlan({ ...plan, apply: true }, { record: "ledger", env });
   let cleanup: HookCleanup | undefined;
   const errors: { code: string; message: string }[] = [];
   if (apply.ok) {
-    try { cleanup = hookCleanup(created.repoRoot, stripRepositoryHookFiles(created.repoRoot, { env: opts.env ?? process.env, record: "ledger" })); }
+    try { cleanup = hookCleanup(created.repoRoot, stripRepositoryHookFiles(created.repoRoot, { env, record: "ledger" })); }
     catch (error) {
       // A file stripped before the failure keeps its record; the restore command puts it back.
       errors.push({ code: "hook_cleanup_failed", message: `${error instanceof Error ? error.message : String(error)}; undo a stripped file with: ${hookCleanup(created.repoRoot, []).restore}` });
