@@ -146,6 +146,22 @@ afterAll(() => {
 });
 
 describe('magpie readiness', () => {
+  async function runMagpieCheck({ root, home, fakeBin }: ReturnType<typeof setupFakeEnvironment>, port: number) {
+    const env = { HOME: home, PATH: fakeBin, BUN_INSTALL: path.join(root, 'bun') };
+    fs.mkdirSync(env.BUN_INSTALL);
+    const modulePath = path.join(import.meta.dir, '../../src/cli/commands/doctor.ts');
+    const child = Bun.spawn([process.execPath, '--no-env-file', '-e',
+      `import { checkMagpie } from ${JSON.stringify(modulePath)}; console.log(JSON.stringify(checkMagpie(${port})));`,
+    ], { cwd: root, env, stdout: 'pipe', stderr: 'pipe' });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+    ]);
+    expect(exitCode, stderr).toBe(0);
+    return { stdout, stderr };
+  }
+
+  const magpieBinary = process.platform === 'win32' ? 'magpie.cmd' : 'magpie';
+
   test.each([
     { status: 'ok', httpStatus: 200, gatewayName: 'magpie' },
     { status: 'na', httpStatus: 200, gatewayName: 'other-service' },
@@ -162,27 +178,17 @@ describe('magpie readiness', () => {
       return Response.json(body, { status: httpStatus, headers: httpStatus === 302 ? { location: '/redirected' } : {} });
     } });
     try {
-      const env = { HOME: home, PATH: fakeBin, BUN_INSTALL: path.join(root, 'bun') };
-      fs.mkdirSync(env.BUN_INSTALL);
       const invocation = path.join(root, 'magpie-invoked');
-      const binary = process.platform === 'win32' ? 'magpie.cmd' : 'magpie';
-      writeExecutable(root, path.join(fakeBin, binary), `#!/bin/sh\nprintf invoked > '${invocation}'\n`);
+      writeExecutable(root, path.join(fakeBin, magpieBinary), `#!/bin/sh\nprintf invoked > '${invocation}'\n`);
       if (status !== 'ok') {
         const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-light': null };
         const configDir = path.join(home, '.repo-harness');
         fs.mkdirSync(configDir);
         fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ seats }));
       }
-      if (status === 'warn') recordPluginSelection(env, ['peer-runtime']);
+      if (status === 'warn') recordPluginSelection({ HOME: home }, ['peer-runtime']);
 
-      const modulePath = path.join(import.meta.dir, '../../src/cli/commands/doctor.ts');
-      const child = Bun.spawn([process.execPath, '--no-env-file', '-e',
-        `import { checkMagpie } from ${JSON.stringify(modulePath)}; console.log(JSON.stringify(checkMagpie(${server.port})));`,
-      ], { cwd: root, env, stdout: 'pipe', stderr: 'pipe' });
-      const [exitCode, stdout, stderr] = await Promise.all([
-        child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
-      ]);
-      expect(exitCode, stderr).toBe(0);
+      const { stdout, stderr } = await runMagpieCheck({ root, home, fakeBin }, server.port!);
       expect(JSON.parse(stdout)).toMatchObject({ id: 'magpie', status });
       if (status === 'warn') expect(stdout).toContain('https://usemagpie.ai');
       expect(requests).toEqual([{ method: 'GET', url: `http://127.0.0.1:${server.port}/`, body: '', authorization: null, key: null }]);
@@ -190,6 +196,44 @@ describe('magpie readiness', () => {
       expect(fs.existsSync(invocation)).toBe(false);
     } finally {
       await server.stop(true);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    { name: 'unreadable config.json', config: 'directory', detail: 'Cannot determine magpie use' },
+    { name: 'invalid seats section', config: 'invalid', detail: 'Cannot determine magpie use' },
+    { name: 'explicit magpie seat with a closed gateway', config: 'seat', detail: 'Start the magpie gateway' },
+    { name: 'default magpie seat in a fresh home', config: 'absent', detail: 'Add the magpie CLI to PATH' },
+    { name: 'live gateway without a magpie binary', config: 'absent', gatewayLive: true, detail: 'Add the magpie CLI to PATH' },
+  ])('warns for $name', async ({ config, detail, gatewayLive }) => {
+    const fixture = setupFakeEnvironment('repo-harness-doctor-magpie-warn');
+    const { root, home, fakeBin } = fixture;
+    const configPath = path.join(home, '.repo-harness', 'config.json');
+    const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => Response.json({ name: 'magpie' }) });
+    const port = server.port!;
+    try {
+      if (!gatewayLive) await server.stop(true);
+      if (config === 'directory') {
+        fs.mkdirSync(configPath, { recursive: true }); // A directory at this path makes the config read fail.
+      } else if (config === 'invalid' || config === 'seat') {
+        const seats = config === 'invalid' ? {} : {
+          ...DEFAULT_SEATS_CONFIG,
+          'worker-light': null,
+          worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'pi', model: 'magpie/group/fixture', fleet: [] },
+        };
+        fs.mkdirSync(path.dirname(configPath), { recursive: true });
+        fs.writeFileSync(configPath, JSON.stringify({ seats }));
+      }
+      if (config === 'seat') writeExecutable(root, path.join(fakeBin, magpieBinary), '#!/bin/sh\nexit 1\n');
+
+      const { stdout } = await runMagpieCheck(fixture, port);
+      const check = JSON.parse(stdout);
+      expect(check).toMatchObject({ id: 'magpie', status: 'warn' });
+      expect(check.detail).toContain(detail);
+      expect(check.detail).toContain('https://usemagpie.ai');
+    } finally {
+      if (gatewayLive) await server.stop(true);
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
