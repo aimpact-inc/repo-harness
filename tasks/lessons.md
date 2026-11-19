@@ -1,6 +1,6 @@
 # Lessons
 
-reviewed-through: 4305f61cd699547276e2434cbf1f1a4675e4036d
+reviewed-through: 52c387beafa85d6792e9cdb07305ac156cc1a54e
 
 - Date: 2026-10-03
 - Name: Verify live state
