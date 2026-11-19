@@ -77,10 +77,10 @@ Make one child issue for each pair of module and observable outcome.
   group the open issues of one module and write scope into one bundle
   unit, an array entry of `merge_order` (`templates.md`, plan): one
   worker, one worktree, one PR, one CI run, one review. The plan block is
-  the only record of bundle membership. A unit takes one tier: a
-  `tier:high` issue never shares a unit with a lower tier. A High unit
-  holds only issues of one file and one rule, two at most: in the #2841
-  retro 30 of 38 PRs failed round 1, PRs 3255, 3256 and 3238 closed after
+  the only record of bundle membership. A `tier:high` issue never shares
+  a unit with a Low or Medium issue; Low and Medium may combine. A High
+  unit holds only issues of one file and one rule, two at most: in the
+  #2841 retro 30 of 38 High PRs failed round 1, a High PR can close after
   round 2, and a larger High diff makes that close more probable and then
   costs the whole unit. A P2 or P3 review finding stays in the review
   record and gets no issue.

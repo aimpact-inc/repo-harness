@@ -1116,13 +1116,17 @@ test('board merge: no plan, a draft, plan holds, plan order for every linked ite
     }
   };
   const closesBoth = (data: Json) => { data.repository.pr1491.body += '\nCloses #1479\n'; };
-  expect(decision({ order: [[1475, 1479]], pulls: closesBoth })).toMatchObject({ reason: 'not_accepted' });
+  expect(mergeReason({ order: [[1475, 1479]], parent: (data) => { issueNode(data, 1479).labels.nodes.push({ name: 'tier:medium' }); }, pulls: closesBoth })).toBe('eligible');
   expect(decision({ order: [1475, 1479], parent: bundleClaims('feat/1475-hc-transport'), pulls: closesBoth }))
     .toMatchObject({ reason: 'merge_order', detail: '#1475 #1479 span 2 plan units; split the PR' });
   // A unit merges only after every issue of each earlier unit is closed; an issue of its own unit does not wait.
   const closed = (...numbers: number[]) => (data: Json) => { for (const number of numbers) issueNode(data, number).state = 'CLOSED'; };
   expect(decision({ order: [[1476, 1479], 1475], parent: closed(1476) })).toMatchObject({ reason: 'merge_order', detail: 'earlier in merge_order and not closed: #1479' });
   expect(mergeReason({ order: [[1476, 1479], 1475], parent: closed(1476, 1479) })).toBe('eligible');
+  // A closed issue that the PR refs spans no unit, and the earlier units still decide.
+  const refsClosed = (data: Json) => { data.repository.pr1491.body += '\nRefs #1476\n'; };
+  expect(decision({ order: [[1476, 1479], 1475], parent: closed(1476), pulls: refsClosed })).toMatchObject({ reason: 'merge_order', detail: 'earlier in merge_order and not closed: #1479' });
+  expect(mergeReason({ order: [[1476, 1479], 1475], parent: (data) => { closed(1476, 1479)(data); issueNode(data, 1476).labels.nodes.push({ name: 'tier:medium' }); }, pulls: refsClosed })).toBe('eligible');
   expect(mergeReason({ order: [[1475, 1479], 1476] })).toBe('eligible');
   expect(decision({ pulls: (data) => { data.repository.pr1491.body += '\nRefs #1460\n'; } })).toMatchObject({ reason: 'item_off_board' });
   // A parent with two children or fewer needs no plan: it merges in blocked-by order.
