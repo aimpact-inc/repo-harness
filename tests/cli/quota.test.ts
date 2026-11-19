@@ -474,8 +474,8 @@ describe('rh quota', () => {
   test('reads the capture file and one app-server rateLimits read, grouped by account', () => {
     const f = fixture('90-left');
     writeFileSync(join(f.home, '.repo-harness', 'config.json'), JSON.stringify({ seats: { ...DEFAULT_SEATS_CONFIG,
-      'worker-deep': { ...DEFAULT_SEATS_CONFIG['worker-deep'], runtime: 'pi', model: 'magpie/codex/gpt-6.1-sol', effort: 'medium' },
-      advisor: { ...DEFAULT_SEATS_CONFIG.advisor, runtime: 'pi', model: 'magpie/codex/gpt-6-astra', effort: null },
+      'worker-deep': { ...DEFAULT_SEATS_CONFIG['worker-deep'], runtime: 'pi', model: 'magpie/codex/gpt-6.2-sol', effort: 'medium' },
+      advisor: { ...DEFAULT_SEATS_CONFIG.advisor, runtime: 'pi', model: 'magpie/codex/gpt-6.2-astra', effort: null },
     } }));
     const resetsAt = Math.floor(Date.now() / 1000) + 2 * 3600;
     writeFileSync(join(f.home, '.repo-harness', 'quota', 'claude.json'), JSON.stringify({ observed_at: new Date().toISOString(), rate_limits: {
@@ -500,9 +500,9 @@ describe('rh quota', () => {
     expect(lines.slice(0, 2).map(line => line.split(' | ')[0])).toEqual(['claude: exhausted', 'chatgpt: normal']);
     expect(lines.slice(2, 4)).toEqual(['claude mode: saving (5% left < 20%)', 'codex mode: normal (90% left)']);
     for (const expected of ['route simple_fast: worker (codex gpt-6.1-terra high',
-      'route simple_deep: worker-deep (pi magpie/codex/gpt-6.1-sol medium',
+      'route simple_deep: worker-deep (pi magpie/codex/gpt-6.2-sol medium',
       'gatekeeper: gatekeeper (codex gpt-6.1-terra high', 'gatekeeper-deep: gatekeeper-deep (codex gpt-6.2-sol high',
-      'advisor: advisor (pi magpie/codex/gpt-6-astra)']) expect(text.stdout).toContain(expected);
+      'advisor: advisor (pi magpie/codex/gpt-6.2-astra)']) expect(text.stdout).toContain(expected);
     expect(lines.slice(4).map(line => line.split(':')[0])).toEqual(['route important_deep', 'route important_fast', 'route simple_deep', 'route simple_fast', 'route frontend', 'explorer', 'gatekeeper', 'gatekeeper-deep', 'reviewer', 'advisor']);
   });
 

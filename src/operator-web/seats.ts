@@ -82,15 +82,15 @@ const toggled = <T extends string>(items: readonly T[], item: T, on: boolean): r
 const patch = (draft: SeatsConfigV1, seat: SeatId, change: Partial<SeatConfigV1>): SeatsConfigV1 => ({ ...draft, [seat]: { ...draft[seat]!, ...change } });
 
 /**
- * A new runtime keeps the model and effort only where that runtime accepts
- * them, and keeps fleet roles only where the runtime and model take them. Codex always
+ * A new runtime keeps the model only when it is a recommended entry of the seat on that runtime, keeps the effort only
+ * where the runtime accepts it, and keeps fleet roles only where the runtime and model take them. Codex always
  * runs commands, so its shell group is on. The active runtime changes nothing.
  */
 export function setSeatRuntime(draft: SeatsConfigV1, seat: SeatId, runtime: SeatRuntime, ranges: SeatsSettingsV1['ranges']): SeatsConfigV1 {
   const range = ranges.runtimes.find(entry => entry.id === runtime)!;
   const current = draft[seat]!;
   if (current.runtime === runtime) return draft;
-  const model = current.model !== null && range.models.includes(current.model) ? current.model : null;
+  const model = ranges.seats[seat].models.some(entry => entry.runtime === runtime && entry.model === current.model) ? current.model : null;
   return patch(draft, seat, {
     runtime,
     model,
