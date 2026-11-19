@@ -41,6 +41,7 @@ import {
 import { architectureModelReady, readArchitectureNativeContext, readArchitectureHandEdits } from '../src/effects/architecture/architecture-read';
 import { trustedNodeCandidates } from '../src/effects/runtime/node-candidates';
 import { selectCompatibleNode } from '../src/effects/runtime/node-runtime';
+import { PROCESS_SUPERVISOR_TERMINATION_GRACE_MS } from '../src/effects/process-supervisor';
 import { buildArchitectureProjectionCommand } from '../src/cli/commands/architecture-projection';
 import { ARCHITECTURE_SETUP_PROVIDER } from '../src/cli/commands/architecture-setup';
 import { architectureProjectionExitCode, humanActionLine } from '../src/cli/commands/architecture-projection-actions';
@@ -1058,9 +1059,19 @@ describe('package-local ArchContext projection provider', () => {
 
   test('bounds a real provider process tree whose descendant keeps captured pipes open', async () => {
     const f = fixture();
-    // Include runtime selection and startup so the provider reaches its descendant
-    // before the timeout exercises process-tree cleanup. Selection has its own test.
+    // Three separate budgets. The fixture prints a start signal after the runtime is usable, and
+    // the provider clock starts there, so a slow first Windows executable spawn cannot consume the
+    // timeout that exercises process-tree cleanup. Runtime selection and provider startup stay
+    // inside the provider call, so the provider still reaches its descendant before the timeout
+    // fires; selection has its own test.
+    const startupAllowanceMs = 6_000;
     const providerBudgetMs = 2_000;
+    const exitProbeAllowanceMs = 2_000;
+    const firstProbeMs = Math.floor(exitProbeAllowanceMs * 0.6);
+    const fallbackProbeMs = Math.floor(exitProbeAllowanceMs * 0.9);
+    // The supervisor reserves the termination grace from an absolute budget, so the provider runs
+    // for the budget minus that reserve. A clock that starts before the start signal expires earlier.
+    const providerExecutionFloorMs = providerBudgetMs - (2 * PROCESS_SUPERVISOR_TERMINATION_GRACE_MS);
     const descendantPidPath = join(f.root, 'descendant.pid');
     const node = resolveCompatibleNodeRuntime(process.env);
     writeFileSync(f.binary, [
@@ -1075,37 +1086,58 @@ describe('package-local ArchContext projection provider', () => {
     const terminationModule = join(import.meta.dir, '..', 'src', 'effects', 'process-group-termination.ts');
     const script = join(f.root, 'provider-timeout.ts');
     writeFileSync(script, [
-      `import { archctxCapabilities } from ${JSON.stringify(providerModule)};`,
+      `import { existsSync, readFileSync } from 'node:fs';`,
+      `import { archctxCapabilities, resolveCompatibleNodeRuntime } from ${JSON.stringify(providerModule)};`,
       `import { processExists } from ${JSON.stringify(terminationModule)};`,
+      `const providerEnv = { ...process.env, REPO_HARNESS_NODE_BIN: ${JSON.stringify(node)}, ARCHCTX_DESCENDANT_PID_PATH: ${JSON.stringify(descendantPidPath)} };`,
+      // Fixture startup: the first spawn of the Node executable is slow on a loaded Windows runner.
+      // Resolve it under its own budget; this line is the start signal for the provider clock.
+      `resolveCompatibleNodeRuntime(providerEnv, () => [], { deadlineMs: Date.now() + ${startupAllowanceMs} });`,
+      `console.log('runtime_ready');`,
       `const started = Date.now();`,
+      `let failure = '';`,
       `try {`,
-      `  archctxCapabilities(${JSON.stringify(f.repoRoot)}, { consumerRoot: ${JSON.stringify(f.consumerRoot)}, policy: { provider: 'archctx', applyMode: 'manual', requiredVersion: '${ARCHCTX_REQUIRED_VERSION}', timeoutMs: ${providerBudgetMs} }, env: { ...process.env, REPO_HARNESS_NODE_BIN: ${JSON.stringify(node)}, ARCHCTX_DESCENDANT_PID_PATH: ${JSON.stringify(descendantPidPath)} }, deadlineMs: Date.now() + ${providerBudgetMs} });`,
+      `  archctxCapabilities(${JSON.stringify(f.repoRoot)}, { consumerRoot: ${JSON.stringify(f.consumerRoot)}, policy: { provider: 'archctx', applyMode: 'manual', requiredVersion: '${ARCHCTX_REQUIRED_VERSION}', timeoutMs: ${providerBudgetMs} }, env: providerEnv, deadlineMs: started + ${providerBudgetMs} });`,
+      `} catch (error) { failure = String(error); }`,
+      `const failedAt = Date.now();`,
+      `const elapsed = failedAt - started;`,
+      `const pidPath = ${JSON.stringify(descendantPidPath)};`,
+      // The timeout must be the provider budget, and it must expire after the provider started and
+      // spawned its descendant. An absent pid file means the clock covered startup, not the tree.
+      `const problem = failure === '' ? 'provider call returned before its budget expired'`,
+      `  : !failure.includes('RH_ARCHCTX_TIMEOUT: archctx capabilities timed out') ? 'unexpected provider failure: ' + failure`,
+      `  : !existsSync(pidPath) ? 'provider clock expired before the descendant pid file existed; elapsed=' + elapsed`,
+      `  : elapsed < ${providerExecutionFloorMs} ? 'provider clock started before the fixture start signal; elapsed=' + elapsed`,
+      `  : '';`,
+      `if (problem !== '') {`,
+      `  console.error(problem);`,
       `  process.exitCode = 2;`,
-      `} catch (error) {`,
-      `  console.error(String(error));`,
-      `  const pid = Number((await import('node:fs')).readFileSync(${JSON.stringify(descendantPidPath)}, 'utf8'));`,
-      // The absence probe is the exit signal; a fixed wait would report a live descendant as gone. Both bounds leave
-      // room inside the 4 s outer bound for the fallback kill and the pipe release, so neither can be cut off.
+      `} else {`,
+      `  const pid = Number(readFileSync(pidPath, 'utf8'));`,
+      // The absence probe is the exit signal; a fixed wait would report a live descendant as gone.
+      // Both bounds count from the moment the provider clock expired, so a slow startup cannot cut
+      // them off, and both stay inside the outer allowance for the fallback kill and the pipe release.
       `  const waitForAbsence = async (untilMs: number): Promise<boolean> => {`,
       `    while (processExists(pid) && Date.now() < untilMs) await new Promise((resolve) => setTimeout(resolve, 20));`,
       `    return !processExists(pid);`,
       `  };`,
-      `  const descendantAlive = !(await waitForAbsence(started + ${providerBudgetMs} + 500));`,
+      `  const descendantAlive = !(await waitForAbsence(failedAt + ${firstProbeMs}));`,
       // Release the captured pipes even when the process tree kill failed, so the fixture never hangs.
       `  if (descendantAlive) {`,
       `    try { process.kill(pid, 'SIGKILL'); } catch {}`,
-      `    await waitForAbsence(started + ${providerBudgetMs} + 1_000);`,
+      `    await waitForAbsence(failedAt + ${fallbackProbeMs});`,
       `  }`,
-      `  console.log(String(error));`,
+      `  console.log('failure=' + failure);`,
+      `  console.log('elapsed=' + elapsed);`,
       `  console.log('descendant_alive=' + descendantAlive);`,
-      `  console.log('elapsed=' + (Date.now() - started));`,
       `}`,
       '',
     ].join('\n'));
-    const result = await runFixtureScript(f, script, 4_000);
+    const result = await runFixtureScript(f, script, startupAllowanceMs + providerBudgetMs + exitProbeAllowanceMs);
     expect(result.timedOut).toBe(false);
     if (result.status !== 0) throw new Error(`provider timeout fixture failed: ${result.stderr || result.stdout}`);
     expect(result.status).toBe(0);
+    expect(result.stdout).toContain('failure=ArchctxClientError: RH_ARCHCTX_TIMEOUT: archctx capabilities timed out');
     expect(result.stdout).toContain('descendant_alive=false');
   });
 
