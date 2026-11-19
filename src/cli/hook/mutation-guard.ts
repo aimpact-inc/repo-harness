@@ -80,7 +80,7 @@ export function runMutationGuard(opts: MutationGuardInput): MutationGuardResult 
 
 /** A caller that owns its own decision reports it through the same denial record and exit code. */
 export function runMutationDenial(opts: MutationGuardInput, found: Denial): MutationGuardResult {
-  // The reason and fix quote the command, which can hold a token; the prompt, stderr and failure record get the redacted text.
+  // A reason or fix can quote a target path or a word of the command, which can hold a token; the prompt, stderr and failure record get the redacted text.
   const denial: Denial = { ...found, reason: replaceSecrets(found.reason), fix: replaceSecrets(found.fix) };
   const mode = payloadString(opts.payload, 'permission_mode');
   if (denial.askable && opts.identity.host === 'claude' && mode !== '' && !NO_PROMPT_MODES.has(mode)) {
@@ -96,8 +96,8 @@ function deny(repoRoot: string, denial: Denial, runId: string | null): MutationG
   // replace this denial's own reason.
   try {
     appendFailureRecord(repoRoot, denial, runId);
-  } catch (error) {
-    stderr += `[${denial.guard}] Failure log not written: ${error instanceof Error ? error.message : String(error)}\n`;
+  } catch {
+    stderr += `[${denial.guard}] Failure log not written.\n`;
   }
   return { exitCode: 2, stdout: '', stderr };
 }
