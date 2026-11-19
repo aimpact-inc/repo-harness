@@ -175,7 +175,7 @@ const otherFamily = (family: string | null, than: string | null): boolean => fam
  * fix head: the one subject of the failing family's claimed round-2 rows, or the head while that family has no round-2 row. It never reaches a later head, and
  * a family with a row of the head carries nothing. Whether the fix stays inside the findings is the orchestrator's scope call.
  */
-function carriedPasses(read: BoardPullRequestReadV1): AcceptanceRowV1[] {
+export function carriedPasses(read: Pick<BoardPullRequestReadV1, 'head_sha' | 'comments'>): AcceptanceRowV1[] {
   const rows = claimedRows(read, protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? []));
   const family = (row: AcceptanceRowV1): string | null => (row.model === null ? null : modelFamily(row.model));
   const round1 = rows.filter(row => row.round === 1);
@@ -244,7 +244,7 @@ export function acceptance(read: BoardPullRequestReadV1, check: BoardRequiredChe
  * The rows of the head whose `Claim:` cites an `acceptance claim` comment of the pull request with the row's `Subject:` and `Round:`
  * (`review publish` writes both); the comment id is the claim identity.
  */
-function claimedRows(read: BoardPullRequestReadV1, head: readonly AcceptanceRowV1[]): AcceptanceRowV1[] {
+function claimedRows(read: Pick<BoardPullRequestReadV1, 'comments'>, head: readonly AcceptanceRowV1[]): AcceptanceRowV1[] {
   const claims = new Map(protocolComments(read.comments, ACCEPTANCE_CLAIM_HEADER).map(claim => [commentId(claim.url), `${field(claim.body, 'Round')} ${field(claim.body, 'Subject')}`] as const));
   return head.filter(row => row.claim !== null && claims.get(row.claim) === `${row.round} ${row.subject_sha}`);
 }

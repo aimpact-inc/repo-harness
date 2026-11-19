@@ -47,7 +47,7 @@ test('an unknown tier is reviewed as High; a head that no seat reviewed starts b
   expect(start).toMatchObject({ action: 'start', tier: 'high' });
   expect(seatsOf(start)).toEqual(['gatekeeper', 'reviewer']);
   // A gatekeeper PASS of the head, also a carried one: that run starts the reviewer only.
-  expect(seatsOf(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })])[0])).toEqual(['reviewer']);
+  expect(seatsOf(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], page(record(SHA, undefined, 'PASS')))[0])).toEqual(['reviewer']);
   // A gatekeeper FAIL of the head starts no reviewer: the fix goes back to the gatekeeper.
   expect(seatsOf(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'fail' })])[0])).toEqual(['gatekeeper']);
   expect(seatsOf(plan([pr(1, { tier: 'high', second_review: 'recorded', gatekeeper_review: 'pass' })])[0])).toEqual(['gatekeeper']);
@@ -86,7 +86,7 @@ test('a marker covers one seat: a started gatekeeper leaves the reviewer of a fr
   expect(seatsOf(plan([pending], page(marker(SHA)))[0])).toEqual(['reviewer']);
   // A gatekeeper FAIL of the head holds the reviewer until a PASS.
   expect(plan([{ ...pending, gatekeeper_review: 'fail' }], page(marker(SHA)))[0]).toMatchObject({ reason: 'started', detail: `the gatekeeper started for ${SHA} and recorded fail; the reviewer starts after a PASS` });
-  expect(seatsOf(plan([{ ...pending, gatekeeper_review: 'pass' }], page(marker(SHA)))[0])).toEqual(['reviewer']);
+  expect(seatsOf(plan([{ ...pending, gatekeeper_review: 'pass' }], page(marker(SHA), record(SHA, undefined, 'PASS')))[0])).toEqual(['reviewer']);
   expect(label(plan([{ ...pending, gatekeeper_review: 'pass' }], page(marker(SHA), marker(SHA, 'https://example.test/m2', 'reviewer'))))).toEqual(['1:started']);
   expect(seatsOf(plan([pr(1)], page(comment(`repo-harness review start\nSubject: ${SHA}`)))[0])).toEqual(['gatekeeper']);
 });
@@ -105,7 +105,9 @@ test('a released marker frees its head', () => {
 test('the delta base of a seat is an earlier head that its own family reviewed; otherwise the seat reviews the whole diff', () => {
   // Each seat's base is read from the same earlier markers and rows, and each base comes from the seat's own family.
   const base = (seat: ReviewSeat, comments: BoardCommentPageV1, reviewer = 'anthropic') => {
-    const started = plan([pr(1, { second_review: 'pending', gatekeeper_review: seat === 'reviewer' ? 'pass' : 'none' })], comments, [], GATEKEEPER, reviewer)[0];
+    const reviewerStart = seat === 'reviewer';
+    const evidence = reviewerStart ? page(...comments.comments, record(SHA, undefined, 'PASS')) : comments;
+    const started = plan([pr(1, { second_review: 'pending', gatekeeper_review: reviewerStart ? 'pass' : 'none' })], evidence, [], GATEKEEPER, reviewer)[0];
     const entry = started.action === 'start' ? started.seats.find(candidate => candidate.seat === seat) : undefined;
     return entry === undefined ? `not ${seat}` : entry.delta_from;
   };
@@ -196,11 +198,12 @@ test('the gatekeeper starts only when the effective gatekeeper is of another kno
   const sameFamily = plan([pr(1, { second_review: 'pending' })], page(), [], GATEKEEPER, 'openai')[0];
   expect(sameFamily).toMatchObject({ action: 'skip', reason: 'review_family_unavailable' });
   // After the gatekeeper PASS the reviewer is the seat of the head, so its own family check applies.
-  const passed = (reviewer: string | null) => label(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], page(marker(SHA)), [], GATEKEEPER, reviewer));
+  const passedPage = page(marker(SHA), record(SHA, undefined, 'PASS'));
+  const passed = (reviewer: string | null) => label(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], passedPage, [], GATEKEEPER, reviewer));
   expect(passed('openai')).toEqual(['1:review_family_unavailable']);
   expect(passed(null)).toEqual(['1:review_family_unavailable']);
   // The skip names the field, never the value: a credential pasted as the model stays out of the output.
-  const unknownReviewer = plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], page(marker(SHA)), [], GATEKEEPER, null)[0];
+  const unknownReviewer = plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], passedPage, [], GATEKEEPER, null)[0];
   expect(unknownReviewer).toMatchObject({ detail: 'the model of seats.reviewer.model has no known family, so its row cannot count as another family' });
   expect(passed('deepseek')).toEqual(['1:start']);
   // A started gatekeeper counts by its recorded row, not by the current route: a fallback gatekeeper of another family than the reviewer opens the relay; a gatekeeper of the reviewer family does not.
@@ -208,6 +211,9 @@ test('the gatekeeper starts only when the effective gatekeeper is of another kno
   const pending = pr(1, { second_review: 'pending', gatekeeper_review: 'pass' });
   expect(label(plan([pending], page(marker(SHA), record(SHA, 'pi (gpt-6.1-sol)', 'PASS')), [], fallback, 'deepseek'))).toEqual(['1:start']);
   expect(label(plan([pending], page(marker(SHA), record(SHA, 'pi (magpie/cursor/deepseek-v41-flash-1017)', 'PASS')), [], fallback, 'deepseek'))).toEqual(['1:review_family_unavailable']);
+  expect(plan([pending], page(marker(SHA), record(SHA, 'pi', 'PASS')))[0]).toMatchObject({
+    action: 'skip', reason: 'review_family_unavailable', detail: 'the gatekeeper PASS has no recorded model family',
+  });
   // A Medium head of another writer family starts the Claude reviewer, which the gatekeeper check does not touch.
   expect(label(plan([pr(1, { tier: 'medium', writer_family: 'openai' })], page(), [], route(DEFAULT_SEATS_CONFIG.gatekeeper, null)))).toEqual(['1:start']);
 });
@@ -270,6 +276,9 @@ test('a round-1 PASS carries only to the fix head of the claimed FAIL, in either
   // Both orders carry the gatekeeper PASS to the fix head, so only the failed reviewer starts there.
   expect(view(FIX, passThenFail)).toEqual(['pass', 'pending', 'not_accepted']);
   expect(view(FIX, failThenPass)).toEqual(['pass', 'pending', 'not_accepted']);
+  const changedRoute: SeatRouteV1 = { ...GATEKEEPER, id: 'gatekeeper-fallback', seat: DEFAULT_SEATS_CONFIG.reviewer };
+  const carried = plan([pr(1, { head_sha: FIX, gatekeeper_review: 'pass', second_review: 'pending' })], read(FIX, passThenFail).comments, [], changedRoute);
+  expect(seatsOf(carried[0])).toEqual(['reviewer']);
   // The reviewer's round-2 PASS of the fix head meets the High rule with the carried row.
   expect(view(FIX, [...failThenPass, ['claude', FIX, 2, 'PASS']])).toEqual(['pass', 'recorded', 'accepted']);
   // A later head after round 2 gets no carry: both seats review it.

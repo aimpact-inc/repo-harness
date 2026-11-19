@@ -3,8 +3,8 @@ import { existsSync } from 'node:fs';
 import { delimiter, dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { CLAUDE_BUILTIN_AGENT_TYPES, SeatPaneNameError, buildSeatLaunch, seatPaneName, seatTabName, type SeatLaunchV1 } from '../../core/board/seat-launch';
-import { LAUNCH_SEAT_IDS, RETIRED_SEAT_FLEET_ROLES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, seatsConfigInvalidMessage, isPlannerSeat, isReviewSeat, isWorkerSeat, unavailablePiSeat, type LaunchSeatId, type SeatConfigV1, type SeatsConfigV1 } from '../../core/board/seats-settings';
-import { claudeReserved, deepGatekeeperRepeatsGatekeeper, effectiveGatekeeper, effectiveSeatConfig, seatAccount, seatAccountQuotas, seatState, type SeatRouteV1 } from '../../core/board/seat-routing';
+import { LAUNCH_SEAT_IDS, RETIRED_SEAT_FLEET_ROLES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, seatsConfigInvalidMessage, isPlannerSeat, isReviewSeat, isWorkerSeat, unavailablePiSeat, type LaunchSeatId, type SeatConfigV1, type SeatId, type SeatsConfigV1 } from '../../core/board/seats-settings';
+import { claudeReserved, deepGatekeeperRepeatsGatekeeper, effectiveGatekeeper, effectiveSeatConfig, seatAccount, seatAccountQuotas, seatState, shownModel, type SeatRouteV1 } from '../../core/board/seat-routing';
 import { AGY_QUOTA_ACCOUNTS, classifyQuotaReading, type QuotaAccount, type QuotaReading } from '../../core/board/quota';
 import { readAgyQuota, readClaudeQuota, readCodexQuota } from '../../effects/board/quota';
 import { version as PACKAGE_VERSION } from '../../../package.json';
@@ -24,14 +24,22 @@ import { handoffIdentity, seatResetAction, seatResetIdentity, seatResetSteps, ty
 import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
 import { PlannerConsultError } from '../../core/board/planner-consult';
 import { runPlannerConsult } from '../../effects/board/planner-consult';
-import { formatSeatPool } from '../../core/board/seat-pool';
-import { refreshSeatPool, SeatsConfigurationError } from '../../effects/board/seats-configuration';
+import { formatSeatPool, seatModelBlock, seatPoolHint } from '../../core/board/seat-pool';
+import { collectSeatPoolProbes, magpieExtensionInstalled, refreshSeatPool, SeatsConfigurationError } from '../../effects/board/seats-configuration';
 
 const CLI_ENTRY = fileURLToPath(new URL('../index.ts', import.meta.url));
 
 class SeatsCommandError extends Error {
   constructor(readonly code: 'seat_unknown' | 'seat_not_configured' | 'seat_quota_exhausted' | 'seat_quota_reserved' | 'seat_provider_unavailable' | 'seat_model_repeats_gatekeeper' | 'owner_exception_invalid' | 'config_invalid' | 'label_value_invalid' | 'repository_id_required' | 'terminal_unknown' | 'seat_identity_missing' | 'seat_session_unknown' | 'seat_context_unknown' | 'pi_extension_missing' | 'seat_space_missing' | 'seat_tab_failed' | 'seat_tab_unknown', message: string) {
     super(message);
+  }
+}
+
+export class SeatProviderUnavailableError extends SeatsCommandError {
+  override readonly code = 'seat_provider_unavailable';
+
+  constructor(message: string) {
+    super('seat_provider_unavailable', message);
   }
 }
 
@@ -171,9 +179,9 @@ function panePrefix(cwd: string, env: NodeJS.ProcessEnv): string {
   return prefix;
 }
 
-function plannedGatekeeper(route: SeatRouteV1): SeatConfigV1 {
+function plannedGatekeeper(route: SeatRouteV1): Exclude<SeatRouteV1, { id: null }> {
   if (route.id === null) throw new SeatsCommandError('seat_quota_exhausted', `No gatekeeper seat can launch. Route ${route.line}`);
-  return route.seat;
+  return route;
 }
 
 /**
@@ -181,7 +189,7 @@ function plannedGatekeeper(route: SeatRouteV1): SeatConfigV1 {
  * account of the launched seat has no fresh weekly reading (missing, unreadable or stale capture), so its mode is unknown.
  */
 async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, configured: SeatConfigV1, env: NodeJS.ProcessEnv, ownerException: string | undefined): Promise<{
-  readonly seat: SeatConfigV1; readonly modeKnown: boolean;
+  readonly id: LaunchSeatId | 'gatekeeper-fallback'; readonly seat: SeatConfigV1; readonly modeKnown: boolean;
   /** The Claude mode that `effectiveSeatConfig` read for this launch (#3091). */
   readonly claudeSaving: boolean;
 }> {
@@ -232,7 +240,7 @@ async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, configur
   }
   const unavailable = unavailablePiSeat(seat, seats.routing);
   if (unavailable !== null) throw new SeatsCommandError('seat_provider_unavailable', `The ${id} seat cannot launch: ${unavailable}. See the quota routes.`);
-  return { seat, modeKnown: account === null || quota[account].remaining !== null, claudeSaving: !isPlannerSeat(id) && quota.claude.mode === 'saving' };
+  return { id: launchedId, seat, modeKnown: account === null || quota[account].remaining !== null, claudeSaving: !isPlannerSeat(id) && quota.claude.mode === 'saving' };
 }
 
 type SeatLaunchResult = SeatLaunchV1 & {
@@ -242,7 +250,7 @@ type SeatLaunchResult = SeatLaunchV1 & {
 };
 
 export async function seatLaunch(seat: string, labels: SeatLabelInput = {}, env: NodeJS.ProcessEnv = process.env, cwd = process.cwd(), planned?: SeatRouteV1): Promise<SeatLaunchResult> {
-  return (await effectiveSeatLaunch(seat, labels, env, cwd, { planned })).launch;
+  return (await effectiveSeatLaunch(seat, labels, env, cwd, { planned, checkAvailability: true })).launch;
 }
 
 /**
@@ -267,8 +275,10 @@ function installedPiExtension(env: NodeJS.ProcessEnv): string {
 
 /** The launch and the effective seat config that it starts; the seat reset compares the config with the session record (#2633). */
 async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: NodeJS.ProcessEnv, cwd: string,
-  { planned, terminal = 'new', prepareFleet = true }: { readonly planned?: SeatRouteV1; readonly terminal?: 'new' | 'existing'; readonly prepareFleet?: boolean } = {}): Promise<{
-  readonly launch: SeatLaunchResult; readonly effective: SeatConfigV1; readonly modeKnown: boolean;
+  { planned, terminal = 'new', prepareFleet = true, checkAvailability = false }: {
+    readonly planned?: SeatRouteV1; readonly terminal?: 'new' | 'existing'; readonly prepareFleet?: boolean; readonly checkAvailability?: boolean;
+  } = {}): Promise<{
+  readonly launch: SeatLaunchResult; readonly effective: SeatConfigV1; readonly effectiveId: LaunchSeatId | 'gatekeeper-fallback'; readonly modeKnown: boolean;
 }> {
   const id = seatId(seat);
   let config: Record<string, unknown>;
@@ -287,10 +297,20 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
     checkOwnerException(labels.ownerException, cwd, env);
   }
   const labelSet = seatLabels(id, labels);
-  // A planned gatekeeper route reserves no Claude seat while Claude is saving or exhausted, so its launch is never a
-  // Claude seat in saving mode.
-  const { seat: effective, modeKnown, claudeSaving } = id === 'gatekeeper' && planned !== undefined ? { seat: plannedGatekeeper(planned), modeKnown: true, claudeSaving: false }
+  const plannedSeat = id === 'gatekeeper' && planned !== undefined ? plannedGatekeeper(planned) : null;
+  const checkedId = plannedSeat?.id === 'gatekeeper-fallback' ? plannedSeat.id : id;
+  const probes = checkAvailability ? collectSeatPoolProbes(env) : null;
+  const check = (modelSeat: SeatId, candidate: SeatConfigV1) => {
+    if (probes === null) return;
+    const reason = seatModelBlock(modelSeat, candidate, seats, probes, () => magpieExtensionInstalled(env));
+    if (reason !== null) throw new SeatProviderUnavailableError(`The ${id} seat cannot launch. ${reason} ${seatPoolHint(modelSeat, seats, probes)}`);
+  };
+  check(checkedId, plannedSeat?.seat ?? configured);
+  // A planned gatekeeper route reserves no Claude seat while Claude is saving or exhausted.
+  const { id: effectiveId, seat: effective, modeKnown, claudeSaving } = plannedSeat !== null
+    ? { id: checkedId, seat: plannedSeat.seat, modeKnown: true, claudeSaving: false }
     : await quotaCheckedSeat(id, seats, configured, env, labels.ownerException);
+  if (plannedSeat === null && (effectiveId !== checkedId || effective.model !== configured.model)) check(effectiveId, effective);
   if (effective.runtime === 'pi') await assertPiShell(env, cwd);
   // The pane name needs the registry prefix, so it comes only with the seat labels.
   const name = labels.repositoryId === undefined ? null : seatPaneName({
@@ -305,7 +325,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   const piHookExtension = effective.runtime === 'pi' && isReviewSeat(id) ? installedPiExtension(env) : undefined;
   const launch = buildSeatLaunch(id, effective, config.seats === undefined ? 'defaults' : 'seats', agentTypes, name ?? undefined, labels.repositoryId, piRoleDirectory, piHookExtension, claudeSaving);
   const argv = labelSet === undefined ? launch.argv : selfLabelingArgv(id, labels, launch.argv, env);
-  return { effective, modeKnown, launch: {
+  return { effective, effectiveId, modeKnown, launch: {
     ...launch,
     argv: labelSet !== undefined && terminal === 'new' ? seatLoginShell(argv) : argv,
     labels: labelSet === undefined ? [] : hcLabelPairs(labelSet), name, tab, ownerException: labels.ownerException ?? null,
@@ -332,27 +352,32 @@ interface SeatTabInput {
  * person, so a refused tab fails the launch and no headless terminal starts in its place.
  */
 async function seatTabLaunch(seat: string, labels: SeatLabelInput, input: SeatTabInput, env: NodeJS.ProcessEnv = process.env): Promise<{
-  readonly launch: SeatLaunchResult; readonly model: string | null; readonly space: string; readonly placement: Record<string, unknown>;
+  readonly launch: Omit<SeatLaunchResult, 'argv'> & { readonly argv?: readonly string[] }; readonly model: string | null;
+  readonly modelField: string | null; readonly space: string; readonly placement: Record<string, unknown>;
 }> {
   const space = input.space ?? callerSpace(env);
   if (space === null || space.trim() === '') {
     throw new SeatsCommandError('seat_space_missing', `No Herdr.app space: ${space === null ? 'the calling terminal has no herdr.space label, so no Herdr.app pane shows it' : 'the space is blank'}. Pass --space <id>, or run the launch in a terminal that a Herdr.app pane shows.`);
   }
-  const { launch, effective } = await effectiveSeatLaunch(seat, labels, env, input.cwd);
-  const args = { ...(launch.tab === null ? {} : { name: launch.tab }), space, folder: input.cwd, argv: launch.argv, task: input.task, focus: input.focus };
-  return { launch, model: effective.model, space, placement: openSeatTab(args, env) };
+  const { launch, effective, effectiveId } = await effectiveSeatLaunch(seat, labels, env, input.cwd, { checkAvailability: true });
+  const { argv, ...summary } = launch;
+  const field = `seats.${effectiveId}.model`;
+  const modelField = shownModel(field, effective.model) === field ? field : null;
+  const args = { ...(launch.tab === null ? {} : { name: launch.tab }), space, folder: input.cwd, argv, task: input.task, focus: input.focus };
+  return { launch: modelField === null ? launch : summary, model: modelField ?? effective.model, modelField, space, placement: openSeatTab(args, env, modelField) };
 }
 
-function openSeatTab(args: Readonly<Record<string, unknown>> & { readonly space: string }, env: NodeJS.ProcessEnv): Record<string, unknown> {
+function openSeatTab(args: Readonly<Record<string, unknown>> & { readonly space: string }, env: NodeJS.ProcessEnv, modelField: string | null = null): Record<string, unknown> {
   const { space } = args;
   try {
     return herdrAppDo('tab.new', args, { env });
   } catch (error) {
     if (!(error instanceof HerdrCoreError)) throw error;
+    const detail = modelField === null ? error.message : `${error.reason}. See ${modelField}`;
     if (HERDR_APP_NOT_SENT.has(error.reason)) {
-      throw new SeatsCommandError('seat_tab_failed', `Herdr.app opened no tab in space ${space}: ${error.message}. No seat started. Run the launch on the machine that shows the Herdr.app window.`);
+      throw new SeatsCommandError('seat_tab_failed', `Herdr.app opened no tab in space ${space}: ${detail}. No seat started. Run the launch on the machine that shows the Herdr.app window.`);
     }
-    throw new SeatsCommandError('seat_tab_unknown', `Herdr.app did not confirm the tab in space ${space}: ${error.message}. The tab may exist: check hc ls before a retry. No headless seat was started.`);
+    throw new SeatsCommandError('seat_tab_unknown', `Herdr.app did not confirm the tab in space ${space}: ${detail}. The tab may exist: check hc ls before a retry. No headless seat was started.`);
   }
 }
 
@@ -431,7 +456,7 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
     .action(async (seat: string, options: SeatLabelInput & { json?: boolean }) => {
       let launch: Awaited<ReturnType<typeof seatLaunch>>;
       try {
-        launch = await seatLaunch(seat, labelInput(options), process.env, process.cwd());
+        launch = (await effectiveSeatLaunch(seat, labelInput(options), process.env, process.cwd())).launch;
       } catch (error) {
         writeLaunchError(error);
         return;
@@ -473,9 +498,10 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
           issues: options.issue === undefined ? [] : [Number(options.issue)], pr: options.pr === undefined ? null : Number(options.pr),
           model: result.model, duration_ms: null, transcript_path: null }], process.env);
       }
-      const { model: _model, ...shown } = result;
-      process.stdout.write(options.json === true ? `${JSON.stringify({ ok: true, ...shown }, null, 2)}\n`
-        : `${JSON.stringify({ ok: true, seat, name: result.launch.name, tab: result.launch.tab, space: result.space, placement: result.placement })}\n`);
+      const { model: _model, modelField, ...shown } = result;
+      const model = modelField === null ? {} : { model: modelField };
+      process.stdout.write(options.json === true ? `${JSON.stringify({ ok: true, ...shown, ...model }, null, 2)}\n`
+        : `${JSON.stringify({ ok: true, seat, name: result.launch.name, tab: result.launch.tab, space: result.space, placement: result.placement, ...model })}\n`);
     });
   seats.command('consult')
     .description('Open a planner pane for one issue and write its plan outside Git worktrees')

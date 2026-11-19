@@ -143,11 +143,14 @@ export type SeatRouteV1 =
   | { readonly id: SeatId; readonly seat: SeatConfigV1; readonly line: string }
   | { readonly id: null; readonly line: string };
 
+export type SeatModelCheck = (id: SeatId, seat: SeatConfigV1) => string | null;
+
 /**
  * The seat for one task class: the one source of the `route` line and of dispatch.
  * `allow` removes seats before the account rules apply (for example Pi seats for work that touches credentials).
  */
-export function selectSeatRoute(task: RoutingClass, seats: SeatsConfigV1, quota: SeatAccountQuotas, allow: (seat: SeatConfigV1) => boolean = () => true): SeatRouteV1 {
+export function selectSeatRoute(task: RoutingClass, seats: SeatsConfigV1, quota: SeatAccountQuotas, allow: (seat: SeatConfigV1) => boolean = () => true,
+  modelBlock: SeatModelCheck = (_id, seat) => unavailablePiSeat(seat, seats.routing)): SeatRouteV1 {
   const reserved = claudeReserved(quota);
   // While Claude is reserved, an important route that holds a Claude-account seat goes to worker-light; another route is read as stored (#1954, #2679).
   const savingRoute = reserved && (task === 'important_deep' || task === 'important_fast')
@@ -158,20 +161,21 @@ export function selectSeatRoute(task: RoutingClass, seats: SeatsConfigV1, quota:
   }
   const ids = savingRoute ? ['worker-light'] as const : seats.routing[task];
   // The section decoder refuses routes that name an unconfigured seat.
-  const candidates = ids.map(id => ({ id, seat: effectiveSeatConfig(id, seats, quota)! })).filter(({ seat }) => allow(seat));
+  const candidates = ids.map(id => ({ id, seat: effectiveSeatConfig(id, seats, quota)! })).filter(({ seat }) => allow(seat))
+    .map(candidate => ({ ...candidate, modelBlock: modelBlock(candidate.id, candidate.seat) }));
   if (candidates.length === 0) return { id: null, line: `route ${task}: none (no seat in the route may take this task)` };
-  const available = candidates.filter(({ id, seat }) => seatState(id, seat, quota) !== 'exhausted' && !(seatAccount(seat) === 'claude' && reserved)
-    && unavailablePiSeat(seat, seats.routing) === null);
+  const available = candidates.filter(({ id, seat, modelBlock }) => modelBlock === null && seatState(id, seat, quota) !== 'exhausted' && !(seatAccount(seat) === 'claude' && reserved));
+  const reason = ({ id, seat, modelBlock }: typeof candidates[number]) => modelBlock ?? accountText(id, seat, quota);
   const selected = available.find(({ id, seat }) => seatState(id, seat, quota) !== 'unknown')
     ?? available.find(({ id, seat }) => seatState(id, seat, quota) === 'unknown');
   if (selected === undefined) {
-    const reasons = [...new Set(candidates.map(({ id, seat }) => blockText(id, seat, quota, seats.routing)))].join('; ');
+    const reasons = [...new Set(candidates.map(reason))].join('; ');
     return { id: null, line: `route ${task}: none (${reasons}${task === 'frontend' ? '; frontend waits for claude' : ''})` };
   }
   const selectedState = seatState(selected.id, selected.seat, quota);
   const showAccount = isAgyAccount(seatAccount(selected.seat)) || selectedState === 'unknown' || selectedState === 'tight';
   const warning = showAccount ? accountSuffix(selected.id, selected.seat, quota) : '';
-  const skipped = candidates.slice(0, candidates.indexOf(selected)).map(({ id, seat }) => `; skipped ${id}: ${blockText(id, seat, quota, seats.routing)}`).join('');
+  const skipped = candidates.slice(0, candidates.indexOf(selected)).map(candidate => `; skipped ${candidate.id}: ${reason(candidate)}`).join('');
   return { id: selected.id, seat: selected.seat, line: `route ${task}: ${selected.id} (${launchText(selected.id, selected.seat)}${warning})${skipped}` };
 }
 

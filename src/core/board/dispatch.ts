@@ -1,6 +1,6 @@
 import { PlanBlockError, decodePlanBlock, planOrderUnits, type PlanBlockV3 } from './plan-block';
 import { tierOf } from './review-rules';
-import { selectSeatRoute, type SeatAccountQuotas } from './seat-routing';
+import { selectSeatRoute, type SeatAccountQuotas, type SeatModelCheck } from './seat-routing';
 import { ROUTING_CLASSES, isWorkerSeat, type RoutingClass, type SeatId, type SeatsConfigV1 } from './seats-settings';
 import { closedClaimUrls, commentId, field, issueClaim, newestProtocolComment, protocolComments, type BoardCommentV1, type BoardParentReadV1, type BoardSubIssueReadV1, type IssueClaimV1 } from './source';
 
@@ -40,6 +40,7 @@ export interface DispatchInputV1 {
   readonly terminals: readonly DispatchTerminalV1[];
   readonly seats: SeatsConfigV1;
   readonly quota: SeatAccountQuotas;
+  readonly modelBlock?: SeatModelCheck;
   /** `--issues`: the member set of one plan unit; absent dispatches every unit of the plan. */
   readonly bundle?: readonly number[];
 }
@@ -209,7 +210,7 @@ export function planDispatch(input: DispatchInputV1): DispatchPlanV1 {
       kind = joined.kind;
     }
     const credentials = open.some(entry => entry.issue.labels.includes(CREDENTIALS_LABEL));
-    const route = selectSeatRoute(kind, seats, quota, credentials ? seat => seat.runtime !== 'pi' : undefined);
+    const route = selectSeatRoute(kind, seats, quota, credentials ? seat => seat.runtime !== 'pi' : undefined, input.modelBlock);
     if (route.id === null) {
       skipAll({ reason: 'no_route', detail: route.line });
       continue;

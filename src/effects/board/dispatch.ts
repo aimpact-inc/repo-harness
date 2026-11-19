@@ -1,13 +1,14 @@
 import { DispatchError, planDispatch, type DispatchDecisionV1, type DispatchPlanV1 } from '../../core/board/dispatch';
 import type { BoardHostPortsV1 } from '../../core/board/board';
 import { effectiveSeatConfig, seatAccountQuotas, shownModel } from '../../core/board/seat-routing';
+import { seatModelBlock } from '../../core/board/seat-pool';
 import { withSeatLine } from '../../core/board/seat-line';
 import { renderBundleLine } from '../../core/board/source';
 import type { SeatConfigV1, SeatId } from '../../core/board/seats-settings';
 import { HERDR_APP_NOT_SENT, HerdrCoreError, herdrAppDo } from '../terminal/herdr-core';
 import { runInternalHelper } from '../runtime/helper-runner';
 import { readQuotaReport } from './quota';
-import { readSeatsConfiguration } from './seats-configuration';
+import { collectSeatPoolProbes, magpieExtensionInstalled, readSeatsConfiguration } from './seats-configuration';
 import { BoardCollectError, readParent, readRepositoryId, runGhText } from './collect';
 
 type DispatchedV1 = Extract<DispatchDecisionV1, { action: 'dispatch' }>;
@@ -164,8 +165,11 @@ export async function runDispatch(input: DispatchInput): Promise<DispatchResultV
   const terminals = input.host.seatTerminals(repositoryId);
   if (terminals.status === 'unavailable') throw new BoardCollectError(`hc could not list the seat terminals: ${terminals.reason}`);
   const { seats } = readSeatsConfiguration(process.env);
+  const probes = collectSeatPoolProbes();
   const quota = seatAccountQuotas((await readQuotaReport(process.env, seats.routing.exhausted_at_or_above_used)).accounts, seats.routing);
-  const plan = planDispatch({ parent, terminals: terminals.terminals, seats, quota, ...(input.bundle === null ? {} : { bundle: input.bundle }) });
+  const plan = planDispatch({ parent, terminals: terminals.terminals, seats, quota,
+    modelBlock: (id, seat) => seatModelBlock(id, seat, seats, probes, () => magpieExtensionInstalled(process.env)),
+    ...(input.bundle === null ? {} : { bundle: input.bundle }) });
   const started = await executeDispatch(plan, { repositoryId, parent: input.parent, space: input.space, dry_run: input.dry_run,
     // The same projection that `seatLaunch` uses for the argv, so the claim names the model that runs.
     model: seat => effectiveSeatConfig(seat, seats, quota)?.model ?? null,

@@ -57,9 +57,15 @@ function withHome(seats: unknown, fn: (home: string) => void) {
     writeFileSync(join(home, 'codex-used'), '51');
     writeFileSync(join(home, 'codex-credits'), 'false');
     writeFileSync(join(home, '.quota-bin', 'codex'), `#!${process.execPath}
+const args = process.argv.slice(2).join(' ');
+if (args === 'app-server --help') process.exit(0);
+if (args === '--version') { console.log('99.0.0'); process.exit(0); }
+if (args === 'login status') { console.error('Logged in using ChatGPT'); process.exit(0); }
 require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
   const message = JSON.parse(line);
   if (message.method === 'initialize') process.stdout.write(JSON.stringify({ id: message.id, result: {} }) + '\\n');
+  if (message.method === 'model/list') console.log(JSON.stringify({ id: message.id, result: { data: [{ model: 'gpt-6.1-terra' }], nextCursor: null } }));
+  if (message.method === 'config/read') console.log(JSON.stringify({ id: message.id, result: { config: { model: 'gpt-6.1-terra' } } }));
   if (message.method === 'account/rateLimits/read') process.stdout.write(JSON.stringify({ id: message.id, result: { rateLimits: {
     primary: { usedPercent: Number(require('node:fs').readFileSync(require('node:path').join(process.env.HOME, 'codex-used'), 'utf8')),
       windowDurationMins: 10080, resetsAt: Math.floor(Date.now() / 1000) + 84 * 3600 },

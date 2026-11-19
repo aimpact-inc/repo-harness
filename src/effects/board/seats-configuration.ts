@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decodeAgentsConfig } from '../../core/board/agents-settings';
@@ -32,7 +32,7 @@ import {
   type SeatTool,
 } from '../../core/board/seats-settings';
 import { SEAT_RECOMMENDED_MODELS } from '../../core/board/recommended-models';
-import { SEAT_POOL_KIND, SEAT_POOL_STALE_MS, buildSeatPool, decodeSeatPool, decodeSeatPoolProbe, emptySeatPoolProbe, recommendedModelIds, type SeatPoolCacheV1, type SeatPoolProbe, type SeatPoolV1 } from '../../core/board/seat-pool';
+import { MAGPIE_EXTENSION_PATH, SEAT_POOL_KIND, SEAT_POOL_STALE_MS, buildSeatPool, decodeSeatPool, decodeSeatPoolProbe, emptySeatPoolProbe, recommendedModelIds, type SeatPoolCacheV1, type SeatPoolProbe, type SeatPoolV1 } from '../../core/board/seat-pool';
 import { EFFORT_LEVELS } from '../terminal/task-role-profiles';
 import { GlobalConfigurationError, globalConfigurationPath, mutateGlobalConfiguration, readGlobalConfiguration } from '../configuration/global-configuration';
 import { withExclusiveDirectoryLock } from '../locking/exclusive-directory-lock';
@@ -189,15 +189,16 @@ async function probeSeatCatalog(id: typeof CATALOG_RUNTIMES[number], command: st
   }
 }
 
-function collectSeatPoolProbes(): readonly SeatPoolProbe[] {
-  const pi = emptySeatPoolProbe('pi', Bun.which('pi') === null ? 'not_installed' : 'available');
-  const commands = CATALOG_RUNTIMES.map(id => Bun.which(id) ?? '');
+export function collectSeatPoolProbes(env: NodeJS.ProcessEnv = process.env): readonly SeatPoolProbe[] {
+  const which = (id: SeatRuntime) => Bun.which(id, { PATH: env.PATH ?? '' });
+  const pi = emptySeatPoolProbe('pi', which('pi') === null ? 'not_installed' : 'available');
+  const commands = CATALOG_RUNTIMES.map(id => which(id) ?? '');
   if (commands.every(command => command === '')) return [...CATALOG_RUNTIMES.map(id => emptySeatPoolProbe(id, 'not_installed')), pi];
   const cwd = mkdtempSync(join(tmpdir(), 'rh-seat-pool-'));
   try {
     const answer = runProcess(process.execPath, [fileURLToPath(import.meta.url), ...commands], {
       cwd, timeoutMs: SEAT_POOL_CHILD_MS, processGroup: true,
-      env: { OAR_CHILD_STDERR: 'ignore' },
+      inheritEnv: false, env: { ...env, OAR_CHILD_STDERR: 'ignore' },
     });
     if (answer.ok) {
       const rows: unknown = JSON.parse(answer.stdout);
@@ -211,6 +212,16 @@ function collectSeatPoolProbes(): readonly SeatPoolProbe[] {
     rmSync(cwd, { recursive: true, force: true });
   }
   return [...CATALOG_RUNTIMES.map((id, index) => emptySeatPoolProbe(id, commands[index] === '' ? 'not_installed' : 'unknown')), pi];
+}
+
+/** Check only the path of the extension that Magpie writes. Its contents can include a gateway key. */
+export function magpieExtensionInstalled(env: NodeJS.ProcessEnv): boolean {
+  const agentDirectory = env.PI_CODING_AGENT_DIR || join(env.HOME ?? homedir(), '.pi', 'agent');
+  try {
+    return lstatSync(join(agentDirectory, MAGPIE_EXTENSION_PATH), { throwIfNoEntry: false })?.isFile() === true;
+  } catch {
+    return false;
+  }
 }
 
 function seatPoolPath(env: NodeJS.ProcessEnv): string {
