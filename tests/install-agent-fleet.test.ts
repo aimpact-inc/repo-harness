@@ -474,6 +474,12 @@ describe("install-agent-fleet", () => {
       expect({ action: kept?.action, code: kept?.code, file: readFileSync(target, "utf8") })
         .toEqual({ action: "kept_edited", code: "host_config_identity_missing", file: generated });
       expect(readFileSync(kept!.vault!, "utf8")).toBe("original\n");
+
+      const forced = runInstaller(home, FLEET_SOURCE_DIR, ["--force"]);
+      expect(forced.status, forced.stdout + forced.stderr).toBe(0);
+      expect(forced.stdout).toContain("[fleet] claude/explorer.md: replaced (backup:");
+      const [restored] = openHostConfigGate({ env: { HOME: home } }).revertPaths([target]);
+      expect([restored?.action, readFileSync(target, "utf8")]).toEqual(["restored", generated]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -524,7 +530,7 @@ describe("install-agent-fleet", () => {
     }
   }, 30_000);
 
-  test("--force makes no vault copies for absent, identical or current rh-owned targets", () => {
+  test("--force makes no vault copies for absent or current rh-owned targets", () => {
     const { root, home } = setupFakeHome("install-agent-fleet-force-no-backup");
     const backupDir = join(home, ".repo-harness/config/vault");
     try {
@@ -533,7 +539,6 @@ describe("install-agent-fleet", () => {
       expect(runInstaller(home, FLEET_SOURCE_DIR, ["--force"]).stdout).toContain("explorer.md: up-to-date");
       expect(existsSync(backupDir)).toBe(false);
       const targets = [join(home, ".claude/agents/explorer.md"), join(home, ".codex/agents/explorer.toml")];
-      recordInstallOwnership(targets, { ...process.env, HOME: home });
       const next = join(root, "next");
       cpSync(FLEET_SOURCE_DIR, next, { recursive: true });
       const source = join(next, "explorer.md");

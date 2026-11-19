@@ -29,7 +29,7 @@ function replacedAgentsDirectory(env: NodeJS.ProcessEnv): string {
  * stops the migration before any change. Returns the targets it migrated; `proved` is false for a target with no record,
  * whose record proves nothing, so a revert keeps the file (#3266).
  */
-export function migrateReplacedAgents(env: NodeJS.ProcessEnv, targets: readonly FleetTarget[]): readonly { readonly path: string; readonly copy: string; readonly proved: boolean }[] {
+export function migrateReplacedAgents(env: NodeJS.ProcessEnv, targets: readonly FleetTarget[], transaction?: string): readonly { readonly path: string; readonly copy: string; readonly proved: boolean }[] {
   const directory = replacedAgentsDirectory(env);
   if (!lstatSync(directory, { throwIfNoEntry: false })?.isDirectory()) return [];
   const copies = readdirSync(directory).map((name) => {
@@ -51,7 +51,7 @@ export function migrateReplacedAgents(env: NodeJS.ProcessEnv, targets: readonly 
     // an unrecorded file must hold this fleet's bytes.
     if (record ? record.kind !== 'created' || record.owner !== 'core' || !pathRecordIsCurrent(key, record)
       : !lstatSync(target.path, { throwIfNoEntry: false })?.isFile() || readFileSync(target.path, 'utf8') !== target.content) continue;
-    gate.adoptReplacedPath(target.path, 'core', readFileSync(earliest.path));
+    gate.adoptReplacedPath(target.path, 'core', readFileSync(earliest.path), transaction);
     migrated.push({ path: target.path, copy: earliest.path, proved: record !== undefined });
   }
   return migrated;

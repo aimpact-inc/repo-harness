@@ -7,7 +7,7 @@ import { hostConfigRepositoryKey } from '../git/repository-identity';
 import { ensureCheckoutBackupDirectory, FS_BACKUP_ROOT } from '../fs-transaction';
 import { isPathInside } from '../path-containment';
 import { selfIgnoringRefusal } from '../self-ignoring-directory';
-import { openRepositoryHostConfigGate, planPathRevert, rollbackHostConfigTransaction, type HostConfigRepositoryGate, type HostConfigRevertEntry, type HostConfigRollbackResult } from './gate';
+import { openRepositoryHostConfigGate, planPathRevertEntry, rollbackHostConfigTransaction, type HostConfigRepositoryGate, type HostConfigRevertEntry, type HostConfigRollbackResult } from './gate';
 import { pathRecordEntry } from './whole-path';
 import { hostConfigPaths, migrateLedgerSchema, observeFile, readProjectedLedger, repositoryLedgerLayout, type HostConfigPaths } from './store';
 
@@ -176,10 +176,10 @@ export function repositoryRestorePlan(env: NodeJS.ProcessEnv, repository: HostCo
   const entries: HostConfigRevertEntry[] = [];
   const refused: { path: string; reason: string }[] = [];
   for (const key of keys) {
-    const action = planPathRevert(key, records[key]!);
-    const reason = repositoryTargetRefusal(repository.worktree, key) ?? (action === 'restored' ? stagingRefusal(repository.worktree, key) : null);
+    const entry = planPathRevertEntry(paths, key, records[key]!);
+    const reason = repositoryTargetRefusal(repository.worktree, key) ?? (entry.action === 'restored' ? stagingRefusal(repository.worktree, key) : null);
     if (reason !== null) refused.push({ path: key, reason });
-    else entries.push({ path: key, action });
+    else entries.push(entry);
   }
   // The revert's own rule: a created directory goes only with an entry inside it.
   const dropped = entries.filter((entry) => entry.action !== 'kept_edited').map((entry) => pathRecordEntry(entry.path, records[entry.path]!));

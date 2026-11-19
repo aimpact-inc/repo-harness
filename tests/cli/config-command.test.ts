@@ -231,4 +231,14 @@ test('restore --repo keeps a record that the target rule refuses, in the dry run
   rmSync(join(repo, '.claude', '.git'));
   const restore = runConfigRestore(f.env, undefined, { repo });
   expect([restore.exitCode, readFileSync(file, 'utf8'), readdirSync(join(repo, '.claude')), readdirSync(join(repo, '.ai/harness/backups/staging'))]).toEqual([0, 'user\n', ['settings.json'], []]);
+  const paths = repositoryConfigPaths(f.env, repository);
+  openRepositoryGate(f.env, repository).writePaths([{ path: file, owner: 'core', replace: true, entry: { type: 'file', bytes: Buffer.from('rh\n') } }]);
+  const ledger = JSON.parse(readFileSync(paths.ledger, 'utf8'));
+  const record = ledger.paths[file];
+  delete record.identity;
+  writeFileSync(paths.ledger, JSON.stringify(ledger));
+  const copy = join(paths.vault, record.backup.slice('sha256:'.length));
+  const line = `[unresolved] ${file}: rh recorded no identity for it, so nothing proves that rh wrote it; preserved; the file before rh is in ${copy}`;
+  const dryRun = runConfigRestore(f.env, undefined, { repo, dryRun: true });
+  expect([dryRun.exitCode, dryRun.lines[0], readFileSync(file, 'utf8'), readFileSync(copy, 'utf8')]).toEqual([1, line, 'rh\n', 'user\n']);
 });

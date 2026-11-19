@@ -17,7 +17,7 @@ import { assertConfigurationPath, configurationReceiptPath, hostConfigurationRoo
 import { migrateCodexConfigRecords, planCodexConfigMigration, previewAdoptedRevert } from './codex-config-migration';
 import { migrateJsonConfigRecords, planJsonConfigMigration, previewJsonAdoptedRevert } from './json-config-migration';
 import { UNVERIFIED_INSTALLER_RANGES } from '../../effects/host-config/delegated';
-import { openHostConfigGate, openRepositoryFileGate, planPathRevert, userPathLabel, type HostConfigAdoption, type HostConfigGate, type HostConfigRepositoryFileGate, type HostConfigRevertEntry, type HostConfigToolRevertEntry } from '../../effects/host-config/gate';
+import { openHostConfigGate, openRepositoryFileGate, planPathRevertEntry, userPathLabel, type HostConfigAdoption, type HostConfigGate, type HostConfigRepositoryFileGate, type HostConfigRevertEntry, type HostConfigToolRevertEntry } from '../../effects/host-config/gate';
 import { hostConfigPaths, projectedLedgerPaths, readLedger, readProjectedLedger, repositoryLedgers, resolveHostPath } from '../../effects/host-config/store';
 import { planToolRemoval, removeTools, windowsPowershellPath, windowsUserPathPort, type ToolRemovalEntry } from '../../effects/host-config/tools';
 import { HostConfigError, type ToolId, type ToolRecord } from '../../core/host-config/types';
@@ -365,9 +365,10 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       // A record may own the final symlink, but never a symlinked parent directory.
       assertConfigurationPath(dirname(key), surfaceRoot(key));
       // The records of a dry-run migration are not in the ledger yet, so the plan reads them from `records`.
-      const action = planPathRevert(key, record);
-      if (action === 'kept_edited') { unresolved(key, 'owned surface changed since installation; preserved'); continue; }
-      pathReverts.set(key, { path: key, action });
+      const entry = planPathRevertEntry(hostConfigPaths(env), key, record);
+      const { action } = entry;
+      if (action === 'kept_edited') { items.push(revertItem(entry)); continue; }
+      pathReverts.set(key, entry);
       removedSurfaces.add(key);
       if (action === 'released') continue;
       remember(key); surfaceRemovals.push(key);

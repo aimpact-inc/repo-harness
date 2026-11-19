@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
@@ -26,6 +26,8 @@ import {
   type CandidateReconciliationReceipt,
 } from '../../src/cli/commands/candidate-reconciliation';
 import { sha256Prefixed } from '../../src/core/evidence/sha256';
+import { EMPTY_LEDGER } from '../../src/core/host-config/types';
+import { globalRuntimeScope, runtimeTransactionRoot } from '../../src/effects/locking/runtime-transaction-lock';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
 import { readPathRecords } from '../../src/effects/host-config/path-records';
 import { acquireExclusiveDirectoryLock } from '../../src/effects/locking/exclusive-directory-lock';
@@ -101,6 +103,7 @@ function writeCandidateSwitchingBun(
   globalPackagePath: string,
   candidateRoot: string,
   replacedPredecessorAsset?: string,
+  runFleet = false,
 ): void {
   const canonicalCandidateRoot = realpathSync(candidateRoot);
   const candidateVersion = JSON.parse(readFileSync(join(candidateRoot, 'package.json'), 'utf-8')).version;
@@ -114,6 +117,7 @@ function writeCandidateSwitchingBun(
     `if [[ "\${1:-}" == add && "\${2:-}" == -g && "\${3:-}" == archctx@* ]]; then mkdir -p "$BUN_INSTALL/bin" "$BUN_INSTALL/install/global/node_modules"; ln -sfn "${candidateRoot}/node_modules/archctx" "$BUN_INSTALL/install/global/node_modules/archctx"; ln -s "$BUN_INSTALL/install/global/node_modules/archctx/bin/archctx.mjs" "$BUN_INSTALL/bin/archctx"; exit 0; fi`,
     `if [[ "$1" == "add" && "$2" == "-g" ]]; then ${replaceAsset}rm -rf "${globalPackagePath}"; ln -s "${candidateRoot}" "${globalPackagePath}"; exit 0; fi`,
     `if [[ "$1" == "${canonicalCandidateRoot}/src/cli/index.ts" || "$1" == "${globalPackagePath}/src/cli/index.ts" ]]; then exec "${process.execPath}" "$@"; fi`,
+    ...(runFleet ? [`if [[ "$1" == - ]]; then exec "${process.execPath}" "$@"; fi`] : []),
     'exit 0',
     '',
   ].join('\n'));
@@ -951,6 +955,78 @@ describe('candidate-bound global runtime reconciliation', () => {
       rmSync(root, { recursive: true, force: true });
     }
   }, 60_000);
+
+  test.each(['repository ledger migration', 'fleet reconciliation'])('a 0.35.2 parent completes rollback after candidate %s fails', (failure) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'repo-harness-candidate-protocol4-')));
+    const home = join(root, 'home');
+    const repo = join(root, 'repo');
+    const bin = join(root, 'bin');
+    const parent = join(root, 'parent');
+    const candidate = join(root, 'candidate');
+    const bun = join(bin, 'bun');
+    const bunInstall = join(root, 'bun-install');
+    const globalPackage = join(bunInstall, 'install', 'global', 'node_modules', 'repo-harness');
+    const env = { HOME: home, BUN_INSTALL: bunInstall, PATH: `${bin}:${fakeHcBin}:/usr/bin:/bin`, REPO_HARNESS_BUN_EXECUTABLE: bun };
+    try {
+      for (const dir of [home, repo, bin, parent, join(globalPackage, '..')]) mkdirSync(dir, { recursive: true });
+      // The unmodified 0.35.2 runtime reads protocol 4 and runs the parent rollback.
+      const archive = spawnSync('git', ['archive', 'c1339a0edde952ea4294df9b307bef4d9d65240c', 'package.json', 'src', 'assets', 'scripts', 'agents', 'interfaces', 'packages'], { cwd: ROOT, env, maxBuffer: 32 * 1024 * 1024 });
+      expect(archive.status, archive.stderr.toString()).toBe(0);
+      const extract = spawnSync('tar', ['-xf', '-', '-C', parent], { input: archive.stdout, env });
+      expect(extract.status, extract.stderr.toString()).toBe(0);
+      symlinkSync(join(ROOT, 'node_modules'), join(parent, 'node_modules'), 'dir');
+      symlinkSync(parent, globalPackage, 'dir');
+      copyRuntimeFixture(candidate, '0.36.0', 30);
+      writeCoreOnlyInstallState(home);
+      writeCandidateSwitchingBun(root, bun, join(root, 'bun.log'), globalPackage, candidate, undefined, true);
+
+      const config = join(home, '.repo-harness', 'config');
+      mkdirSync(config, { recursive: true });
+      const ledger = join(config, 'ledger.json');
+      const protocol4 = { ...EMPTY_LEDGER, protocol: 4, paths: {} as Record<string, unknown> };
+      const movedRepo = join(config, 'repos', 'a', 'ledger.json');
+      const repoBefore = JSON.stringify(protocol4);
+      let liveFiles: Array<{ path: string; bytes: string; identity?: number }> = [];
+      if (failure === 'repository ledger migration') {
+        const brokenRepo = join(config, 'repos', 'b', 'ledger.json');
+        for (const path of [movedRepo, brokenRepo]) mkdirSync(join(path, '..'), { recursive: true });
+        writeFileSync(movedRepo, repoBefore);
+        writeFileSync(brokenRepo, JSON.stringify({ ...protocol4, paths: null }));
+      } else {
+        const agents = join(home, '.claude', 'agents');
+        const backups = join(home, '.repo-harness', 'replaced-agents');
+        mkdirSync(agents, { recursive: true });
+        mkdirSync(backups, { recursive: true });
+        liveFiles = ['explorer', 'gatekeeper', 'deep-worker'].map((name, index) => {
+          const file = name + '.md';
+          const path = join(agents, file);
+          const bytes = readFileSync(join(candidate, 'agents', 'fleet', file), 'utf8') + (index === 2 ? '\nprevious fleet version\n' : '');
+          writeFileSync(path, bytes);
+          writeFileSync(join(backups, `claude-${file}.2026-01-01T00-00-00-000Z-1.bak`), 'original user file\n');
+          if (index > 0) protocol4.paths[path] = { owner: 'core', host: 'claude', kind: 'created', baseline: { state: 'unknown' }, committed: { type: 'file', sha256: sha256Prefixed(bytes) } };
+          return { path, bytes, identity: index < 2 ? lstatSync(path).ino : undefined };
+        });
+        writeFileSync(join(agents, 'fast-worker.md'), 'drift stops reconciliation\n');
+      }
+      const snapshot = Buffer.from(JSON.stringify(protocol4));
+      writeFileSync(ledger, snapshot);
+      const result = spawnSync(process.execPath, [join(parent, 'src', 'cli', 'index.ts'), 'update', '--target', 'claude', '--no-sync-skill', '--no-external-skills', '--no-codegraph', '--json'], {
+        cwd: repo, encoding: 'utf8', env,
+      });
+      expect(result.status, result.stdout + result.stderr).toBe(1);
+      expect(result.stdout + result.stderr).toContain(failure === 'repository ledger migration' ? 'the protocol 4 ledger has an invalid shape' : '[runtime] failed: install agent fleet');
+      expect(readFileSync(ledger)).toEqual(snapshot);
+      expect(realpathSync(globalPackage)).toBe(parent);
+      expect(readdirSync(runtimeTransactionRoot(globalRuntimeScope(env))).filter((name) => name.startsWith('install-'))).toEqual([]);
+      if (failure === 'repository ledger migration') expect(readFileSync(movedRepo, 'utf8')).toBe(repoBefore);
+      for (const { path, bytes, identity } of liveFiles) {
+        expect(readFileSync(path, 'utf8')).toBe(bytes);
+        if (identity !== undefined) expect(lstatSync(path).ino).toBe(identity);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   test('a candidate failure after projection restores the predecessor adapter through the parent transaction', () => {
     const root = mkdtempSync(join(tmpdir(), 'repo-harness-candidate-rollback-'));

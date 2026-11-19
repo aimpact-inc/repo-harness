@@ -1,6 +1,6 @@
-import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { sha256Prefixed } from '../../core/evidence/sha256';
+import { sha256Hex, sha256Prefixed } from '../../core/evidence/sha256';
 import { planFile, type FilePlan, type PlannedFragment } from '../../core/host-config/plan';
 import { fileFormatOf, fragmentFormat, type FragmentFormat } from '../../core/host-config/registry';
 import { isMarkedBlockSelector } from '../../core/host-config/marked-block';
@@ -302,9 +302,10 @@ export interface HostConfigGate {
    * One-shot migration: rh's current file at `path` replaced the user file
    * `backup` before the ledger had path records. The backup goes to the vault
    * and the record becomes `replaced`. The path must have no record or a
-   * current `created` record of `owner`.
+   * current `created` record of `owner`. The transaction records the import so that
+   * a rollback can undo it without replacing the live file.
    */
-  adoptReplacedPath(path: string, owner: string, backup: Buffer): void;
+  adoptReplacedPath(path: string, owner: string, backup: Buffer, transaction?: string): void;
   /**
    * Undo rh's recorded writes, for the named paths or for all; a path without
    * a record is not touched. With an owner or selector filter, only the
@@ -999,7 +1000,11 @@ function keepUserPaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths, owner: st
   writeLedger(paths, { ...ledger, paths: records });
 }
 
-function adoptReplacedPath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, path: string, owner: string, backup: Buffer): void {
+function replacedPathAdoption(transaction: string, key: string): string {
+  return join(transaction, 'host-config-path-adoptions', sha256Hex(key));
+}
+
+function adoptReplacedPath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, path: string, owner: string, backup: Buffer, transaction?: string): void {
   const ledger = readLedger(paths);
   const { key, host } = admitWholePath(env, paths, ledger, path);
   const previous = ledger.paths[key];
@@ -1010,6 +1015,11 @@ function adoptReplacedPath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, path:
   // released its record, so its record stays unproved and a revert keeps the file (#3266).
   const identity = previous ? observeEntryIdentity(key) : null;
   const record: PathRecord = { owner, host, kind: 'replaced', baseline: previous?.baseline ?? { state: 'unknown' }, committed, backup: putVault(paths, backup), ...(identity !== null ? { identity } : {}) };
+  if (transaction !== undefined) {
+    const marker = replacedPathAdoption(transaction, key);
+    ensurePrivateDirectory(dirname(marker));
+    writeFileSync(marker, sha256Hex(JSON.stringify(record)), { mode: 0o600, flag: 'wx' });
+  }
   writeLedger(paths, { ...ledger, paths: { ...ledger.paths, [key]: record } });
 }
 
@@ -1024,6 +1034,17 @@ export function planPathRevert(key: string, record: PathRecord): HostConfigRever
   if (observePathEntry(pathRecordEntry(key, record)) === null) return 'released';
   if (!pathRecordIsCurrent(key, record)) return 'kept_edited';
   return record.kind === 'replaced' ? 'restored' : 'removed';
+}
+
+/** Describe a whole-path revert, including the proof and recovery copy when the file stays. */
+export function planPathRevertEntry(paths: HostConfigPaths, key: string, record: PathRecord): HostConfigRevertEntry {
+  const action = planPathRevert(key, record);
+  if (action !== 'kept_edited') return { path: key, action };
+  const proof = pathRecordProof(key, record);
+  const entry: HostConfigRevertEntry = { path: key, action, ...(record.backup && { vault: vaultPath(paths, record.backup) }) };
+  if (proof === 'replaced') return { ...entry, code: 'host_config_entry_replaced' };
+  if (proof === 'unproved') return { ...entry, code: 'host_config_identity_missing' };
+  return entry;
 }
 
 /** One write of a revert and the ledger change that it makes. */
@@ -1076,10 +1097,9 @@ function revertWholePaths(paths: HostConfigPaths, only: readonly string[], optio
   for (const key of new Set(only.map((path) => hostPathKey(paths, path)))) {
     const record = ledger.paths[key];
     if (!record) continue;
-    const action = planPathRevert(key, record);
-    const proof = action === 'kept_edited' ? pathRecordProof(key, record) : null;
-    report.push({ path: key, action, ...(proof === 'replaced' ? { code: 'host_config_entry_replaced' as const } : proof === 'unproved' ? { code: 'host_config_identity_missing' as const } : {}),
-      ...(action === 'kept_edited' && record.backup ? { vault: vaultPath(paths, record.backup) } : {}) });
+    const planned = planPathRevertEntry(paths, key, record);
+    report.push(planned);
+    const { action } = planned;
     if (action === 'kept_edited') continue;
     const entry = pathRecordEntry(key, record);
     dropped.push(entry);
@@ -1561,7 +1581,12 @@ function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, no
     const current = now.paths[key];
     // A linked record acts on the file that its link names, also for the transaction's preimage.
     const at = pathRecordEntry(key, (current ?? old)!);
-    if (old && current && !hasPreimage(transaction, at)
+    const preimage = hasPreimage(transaction, at);
+    const marker = replacedPathAdoption(transaction, key);
+    const adopted = lstatSync(marker, { throwIfNoEntry: false })?.isFile() ? readFileSync(marker, 'utf8') : null;
+    // The imported record alone changed no live entry. A later force that backed up the live file changes the record.
+    if (!preimage && adopted !== null && (!current || adopted === sha256Hex(JSON.stringify(current)))) continue;
+    if (old && current && !preimage
       && (JSON.stringify(old) === JSON.stringify(current) || (old.identity === undefined && sameApartFromIdentity(old, current)))) {
       // A protocol 4 snapshot has no identities: the record keeps the one that the move of the live ledger gave it.
       records[key] = current;
@@ -1573,7 +1598,7 @@ function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, no
       const entry = observePathEntry(at);
       // A revert in this transaction took the record out: the entry is gone, or it is the user file that came back from the vault.
       const reverted = entry === null || (old!.kind === 'replaced' && entry.type === 'file' && entry.sha256 === old!.backup);
-      if (reverted && hasPreimage(transaction, at)) {
+      if (reverted && preimage) {
         restorePreimage(transaction, at, stage?.(at));
         records[key] = restoredRecord(old!, at);
       }
@@ -1583,12 +1608,12 @@ function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, no
       continue;
     }
     if (!pathRecordIsCurrent(key, current)) { records[key] = current; unresolved.push(key); continue; }
-    if (current.kind === 'replaced' && current.backup !== old?.backup) {
+    if (current.kind === 'replaced' && current.backup !== old?.backup && !(adopted !== null && preimage)) {
       const committed = current.committed as Extract<PathCommitted, { type: 'file' }>;
       replaceTarget(at as HostPath, readVault(paths, current.backup!), { existed: true, sha256: committed.sha256 }, stage?.(at));
-    } else if (!old && !hasPreimage(transaction, at)) removePathEntry(at);
+    } else if (!old && !preimage) removePathEntry(at);
     // A link that this transaction adopted has a preimage of itself, so it comes back; a created entry has an absent preimage.
-    else if (hasPreimage(transaction, at)) {
+    else if (preimage) {
       restorePreimage(transaction, at, stage?.(at));
       if (old) records[key] = restoredRecord(old, at);
     }
@@ -1679,7 +1704,7 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
     releaseAbsentTools: (port, releaseOptions) => releaseAbsentTools(paths, port, releaseOptions?.dryRun === true, read),
     revertPaths: (only, revertOptions) => revertWholePaths(paths, only, revertOptions ?? {}),
     keepUserPaths: (owner, scope, kept) => keepUserPaths(env, paths, owner, scope, kept),
-    adoptReplacedPath: (path, owner, backup) => adoptReplacedPath(env, paths, path, owner, backup),
+    adoptReplacedPath: (path, owner, backup, transaction) => adoptReplacedPath(env, paths, path, owner, backup, transaction),
     revert: (only, revertOptions) => revertFiles(paths, only, revertOptions ?? {}, read),
     adopt: (path, adoption) => adoptFile(paths, path, adoption),
     removeUnrecordedText: (path, expectedSha256, removals) => removeUnrecordedText(paths, path, expectedSha256, removals),

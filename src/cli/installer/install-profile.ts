@@ -3,14 +3,14 @@ import { publishFileByRename, retryWindowsSharingRace } from '../../effects/atom
 import wazaRules from "../../core/skill-surface/waza-shared-rules.json";
 import { bunGlobalPackageRoot, expectedSkillProjections } from './skill-projection';
 import { configurationReceiptPath } from './configuration-ownership';
-import { hostConfigPaths, hostConfigPathsAt, putVault, repositoryLedgers, resolveHostPath } from '../../effects/host-config/store';
+import { expectedOf, hostConfigPaths, hostConfigPathsAt, observeFile, putVault, removeTarget, replaceTarget, repositoryLedgers, resolveHostPath } from '../../effects/host-config/store';
 import { ensureSelfIgnoringDirectory, isSelfIgnoreGuard, SELF_IGNORE_NAME } from '../../effects/self-ignoring-directory';
 import { openHostConfigGate, planPathRevert, rollbackHostConfigTransaction } from '../../effects/host-config/gate';
 import { namingTomlFile } from '../../core/host-config/toml-fragment';
 import { migrateCodexConfigRecords } from './codex-config-migration';
 import { migrateJsonConfigRecords } from './json-config-migration';
 import { pathRecordIsCurrent, pathRecordKey, pathRecordsDigest, readPathRecords, readPathRecordSet, registerSupportedPathRecords, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
-import { HostConfigError, type PathCommitted, type PathRecord, type PathRecordHost, type PathRecordKind } from '../../core/host-config/types';
+import { HostConfigError, type HostPath, type PathCommitted, type PathRecord, type PathRecordHost, type PathRecordKind } from '../../core/host-config/types';
 import { globalContextBackupEligible, globalContextPath } from './global-context';
 import { acquireRuntimeTransactionLock, assertRuntimeTransactionContext, globalRuntimeScope, runtimeTransactionLockRelativePath, runtimeTransactionRoot, withRuntimeTransactionLock, type RuntimeTransactionContext, type RuntimeTransactionLock, type RuntimeTransactionScope } from '../../effects/locking/runtime-transaction-lock';
 import { exclusiveDirectoryLockOwnerLiveness, readExclusiveDirectoryLockOwner } from '../../effects/locking/exclusive-directory-lock';
@@ -863,10 +863,26 @@ function restoreMovedRepositoryLedgers(backupRoot: string, env: NodeJS.ProcessEn
   return kept;
 }
 
-/** The candidate's one-shot migrations in its parent's transaction. Under an rh 0.34.0 parent a failed migration puts the parent's files back. */
+/** The candidate's one-shot migrations in its parent's transaction. A failed move must leave a ledger the parent can read. */
 export function migrateInParentTransaction(backupRoot: string, env: NodeJS.ProcessEnv, migrate: () => void): void {
   if (readTransactionOwner(backupRoot) !== 'none') {
-    keepMovedRepositoryLedgers(backupRoot, env, migrate);
+    const ledger = hostConfigPaths(env).ledger as HostPath;
+    const before = observeFile(ledger);
+    expectedOf(before.observation, ledger);
+    try { keepMovedRepositoryLedgers(backupRoot, env, migrate); } catch (error) {
+      // These migrations adopt records without writing the entries they describe. Put the ledger bytes back directly.
+      try {
+        const after = observeFile(ledger);
+        const expected = expectedOf(after.observation, ledger);
+        if (before.bytes === null) {
+          if (expected.existed) removeTarget(ledger, expected);
+        } else if (!after.bytes?.equals(before.bytes)) replaceTarget(ledger, before.bytes, expected);
+      } catch (restore) {
+        const errors = [error, restore];
+        throw new AggregateError(errors, `restore after a failed migration failed: ${errors.map(item => item instanceof Error ? item.message : String(item)).join('; ')}`);
+      }
+      throw error;
+    }
     return;
   }
   for (const [name, path] of Object.entries(olderParentFiles(env))) keepOlderParentCopy(backupRoot, `${name}-before-migration`, path);
