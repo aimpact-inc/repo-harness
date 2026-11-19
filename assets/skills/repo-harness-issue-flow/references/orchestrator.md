@@ -92,7 +92,7 @@ same code as a careful senior engineer. Make every decision in the issue:
 
 | Decision | Write it as |
 |---|---|
-| Which files change | `模块与位置 / Module and files`: module ID from the map, then the main files and the test files to extend |
+| Module and file scope | Put the module ID from the map in the `module:` label. List the main files and test files in `模块与位置 / Module and files` |
 | What must not change | `边界 / Boundaries`: forbidden files and modules, invariants that must hold |
 | What gets deleted | `边界`: a delete list of old functions, flags, routes, files. Deleted in this PR |
 | Compatibility | `边界`: "No compatibility path. <old thing> is removed, not aliased." When compatibility is really needed, name the exact migration, who runs it and when it is deleted |
@@ -205,6 +205,14 @@ plan:
 | `SHELVE` | An owner roadmap item, or an item that a vendor or upstream blocks | Label `status:deferred` and keep it open, off the dispatch board. It closes only on the owner's word |
 | `CLOSE` | An agent-spawned P2 or P3 issue | Close it as not planned |
 
+Run `rh board cluster --open --json` to review loose issues and
+`rh board cluster --parent <n> --json` to review the issues of a parent.
+Use the module bundles to check write scope, dependencies and tier before
+you choose a plan unit. Use pattern groups to check for a shared fix
+(`advisor.md` §4). Resolve missing or invalid labels and check truncated
+reads before you use the suggested order. Record the final order in the
+parent’s plan comment.
+
 A defect of one rule in one file costs one PR, one CI run and one review.
 Three rules keep it that way:
 
@@ -233,9 +241,10 @@ Before you file a new issue during a batch:
    duplicate into the older issue.
 2. File it only for a P0 or P1 defect, a blocker of the release set or an
    owner-named item. A P2 or P3 review finding stays in the review record.
-3. Give it its parent, its `tier:` and `route:` labels, its blocked-by links
-   and its milestone at once. An issue without a parent is in no plan and no
-   seat takes it.
+3. Give it its parent, its `module:`, `tier:` and `route:` labels, its
+   blocked-by links and its milestone at once. Add a `pattern:` label
+   when the defect matches a known theme key. An issue without a parent
+   is in no plan and no seat takes it.
 4. Read an owner instruction at the scope of its words before it becomes an
    issue. A one-time authorization is an operation for now, not a product
    change; ask for the standing rule when the product needs one.
@@ -264,8 +273,8 @@ findings and the disposition of each.
    with shell interpolation.
 2. Create children in dependency order, then edit the parent table with the
    real numbers (`gh issue edit <parent> --body-file <file>`). Add the
-   sub-issue links, the blocked-by links, the milestone and the `tier:`
-   labels.
+   sub-issue links, the blocked-by links, the milestone and the
+   `module:`, `tier:` and `route:` labels.
 3. Read every issue back (`gh issue view <n>`) and check the links and the
    rendering.
 

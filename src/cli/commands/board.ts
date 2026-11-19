@@ -13,6 +13,8 @@ import { createKeyedSources } from '../../effects/board/keyed-sources';
 import { renderDependencyMigrationPlan } from '../../core/board/dependency-migration';
 import { DependencyMigrationError, runDependencyMigration, type DependencyMigrationResultV1 } from '../../effects/board/dependency-migration';
 import { BoardParentsError, collectBoardParents } from '../../effects/board/parents';
+import { DEFAULT_CLUSTER_MAX_SIZE } from '../../core/board/cluster';
+import { collectBoardCluster } from '../../effects/board/cluster';
 import { BoardSeatsError, collectBoardSeats } from '../../effects/board/seats';
 import { gitHubPostPorts, runBoardPost, type BoardPostPorts } from '../../effects/board/post';
 import { BoardPostFieldsError, BoardPostRoundtripError, BoardPostSupersedesError, BOARD_POST_KINDS } from '../../core/board/post';
@@ -37,6 +39,11 @@ import type { ReviewSkipReason } from '../../core/board/review';
 interface BoardOptions {
   readonly parent?: string;
   readonly json?: boolean;
+}
+
+interface ClusterOptions extends BoardOptions {
+  readonly open?: boolean;
+  readonly maxSize: string;
 }
 
 interface AttentionOptions extends BoardOptions {
@@ -92,7 +99,7 @@ function readFieldsFile(path: string): Record<string, unknown> {
 }
 
 /** A collect or source failure is the whole result; the board has no partial form. */
-function guarded(action: (options: BoardOptions) => void): (options: BoardOptions) => void {
+function guarded<T extends BoardOptions>(action: (options: T) => void): (options: T) => void {
   return (options) => {
     try {
       action(options);
@@ -339,6 +346,19 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
         process.exitCode = 1;
       }
     });
+  board.command('cluster')
+    .description('Group loose open issues or one parent’s open sub-issues (takes --parent and --json)')
+    .option('--open', 'Scan loose open issues of this repository')
+    .option('--max-size <n>', 'Maximum size of a standard-tier bundle', String(DEFAULT_CLUSTER_MAX_SIZE))
+    .action((_options: ClusterOptions, command: Command) => guarded((options: ClusterOptions) => {
+      if (options.json !== true) throw new BoardCollectError('board cluster prints JSON only; pass --json');
+      if ((options.open === true) === (options.parent !== undefined)) throw new BoardCollectError('board cluster takes exactly one of --open and --parent <issue number>');
+      const max_size = Number(options.maxSize);
+      if (!/^[1-9][0-9]*$/u.test(options.maxSize) || !Number.isSafeInteger(max_size)) throw new BoardCollectError('--max-size must be a positive integer');
+      const parent = options.open === true ? null : parentNumber(options);
+      if (parent !== null && !Number.isSafeInteger(parent)) throw new BoardCollectError('--parent must be an issue number');
+      process.stdout.write(`${JSON.stringify(collectBoardCluster({ repo_root: process.cwd(), parent, max_size }))}\n`);
+    })(command.optsWithGlobals<ClusterOptions>()));
   board.command('dispatch')
     .description('Start a seat for each ready unit of the plan (takes --parent): worktree, claim comment on each open issue of the unit and worker tab, on the seat that the quota route names')
     .requiredOption('--space <id>', 'Herdr space that receives the worker tabs')
