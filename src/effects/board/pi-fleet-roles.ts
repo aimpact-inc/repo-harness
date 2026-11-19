@@ -5,33 +5,31 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { piRoleName } from '../../core/board/seat-launch';
-import { PI_CODEX_MODEL_PREFIX } from '../../core/board/seats-settings';
+import { PI_SUB_AGENT_DEFAULTS, isSeatScaffoldSubAgent, piSubAgentModel, type PiSubAgentModels } from '../../core/board/seats-settings';
 import { globalConfigurationPath } from '../configuration/global-configuration';
-import { AGENT_TARGET_OVERRIDES } from '../../core/board/recommended-models';
-import { WRITABLE_AGENTS, parseFrontmatter, validateFrontmatter } from '../terminal/task-role-profiles';
+import { parseFrontmatter, validateFrontmatter } from '../terminal/task-role-profiles';
 
 const FLEET_SOURCE_DIR = fileURLToPath(new URL('../../../agents/fleet/', import.meta.url));
 const READ_ONLY_TOOLS = 'read, grep, find, ls, bash';
-const WRITABLE_TOOLS = `${READ_ONLY_TOOLS}, edit, write`;
 
 export class PiFleetRolesError extends Error {
   readonly code = 'pi_fleet_role_invalid';
 }
 
-/** The role file text: the fleet source body on the Codex target model, with the tools of its writable or read-only class. */
-function roleFile(role: string): string {
-  const target = AGENT_TARGET_OVERRIDES[role];
-  if (target === undefined) throw new PiFleetRolesError(`The ${role} fleet role has no Codex target.`);
+/** Render the scaffold role on its configured Pi model with read-only tools. */
+function roleFile(role: string, overrides: PiSubAgentModels | undefined): string {
+  if (!isSeatScaffoldSubAgent(role)) throw new PiFleetRolesError(`The ${role} fleet role has no Pi model setting.`);
+  const { thinking } = PI_SUB_AGENT_DEFAULTS[role];
   const parsed = parseFrontmatter(readFileSync(join(FLEET_SOURCE_DIR, `${role}.md`), 'utf8'));
   const valid = validateFrontmatter(parsed, role);
   if (!valid.ok) throw new PiFleetRolesError(`The ${role} fleet source is invalid: ${valid.reason}.`);
   return [
     '---',
     `name: ${piRoleName(role)}`,
-    `description: ${parsed!.description!.replace(valid.sourceDescription, target.targetDescription)}`,
-    `model: ${PI_CODEX_MODEL_PREFIX}${target.model}`,
-    `thinking: ${target.effort}`,
-    `tools: ${WRITABLE_AGENTS.has(role) ? WRITABLE_TOOLS : READ_ONLY_TOOLS}`,
+    `description: ${parsed!.description!.replace(` on ${valid.sourceDescription}`, '')}`,
+    `model: ${JSON.stringify(piSubAgentModel(role, overrides))}`,
+    `thinking: ${thinking}`,
+    `tools: ${READ_ONLY_TOOLS}`,
     'systemPromptMode: replace',
     'inheritProjectContext: false',
     'inheritSkills: false',
@@ -47,8 +45,8 @@ function roleFile(role: string): string {
  * so each launch regenerates the same projection of `agents/fleet/` and a concurrent launch writes identical bytes;
  * each file lands by an atomic rename. A source change gives a new directory; nothing reads a stale one.
  */
-export function writePiFleetRoles(fleet: readonly string[], env: NodeJS.ProcessEnv = process.env): string {
-  const files = fleet.map(role => [`${piRoleName(role)}.md`, roleFile(role)] as const);
+export function writePiFleetRoles(fleet: readonly string[], env: NodeJS.ProcessEnv = process.env, overrides?: PiSubAgentModels): string {
+  const files = fleet.map(role => [`${piRoleName(role)}.md`, roleFile(role, overrides)] as const);
   const digest = sha256Hex(JSON.stringify(files)).slice(0, 16);
   const directory = join(dirname(globalConfigurationPath(env)), 'seats', 'pi-fleet', digest);
   mkdirSync(directory, { recursive: true });

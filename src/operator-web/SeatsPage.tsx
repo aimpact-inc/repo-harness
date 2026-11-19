@@ -3,12 +3,12 @@ import { Banner, Button, Empty, Loader, Switch, cn } from '@cloudflare/kumo';
 import { effectiveSeatConfig, seatAccountQuotas, seatOnCredits } from '../core/board/seat-routing';
 import { EXHAUSTED_AT_OR_ABOVE_USED_RANGE } from '../core/board/quota';
 import { buildSeatLaunch, type SeatLimitLevel } from '../core/board/seat-launch';
-import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, SEAT_IDS, SEAT_TOOLS, decodeSeatsSettingsRequest, isReviewSeat, seatTakesFleet, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
+import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, decodeSeatsSettingsRequest, isReviewSeat, isSeatScaffoldSubAgent, piSubAgentModel, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
 import type { SetupSnapshotV2 } from '../core/setup/types';
 import type { OperatorTranslate } from './i18n';
 import type { QuotaSection } from './quota';
 import {
-  GATEKEEPER_FALLBACK_STARTER, savedSeats, seatChanges, setExplorer, setOptionalSeat, setRoute, setSeatAdvisorModel, setSeatEffort, setSeatModel, setSeatRole, setSeatRuntime, setRoutingValue, setSeatTool, type SeatsSettingsForm,
+  GATEKEEPER_FALLBACK_STARTER, seatChanges, setExplorer, setOptionalSeat, setPiSubAgentModel, setRoute, setSeatAdvisorModel, setSeatEffort, setSeatModel, setSeatRole, setSeatRuntime, setRoutingValue, setSeatTool, type SeatsSettingsForm,
 } from './seats';
 import { EnableSwitch, formLocked, runtimeRowOf, SaveResult } from './SettingsPage';
 import type { AgentsSettingsForm } from './settings';
@@ -308,14 +308,17 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
       {!review && <ul aria-label={t('seats.fleet.title')} data-seat-fleet>
         <li className="flex flex-wrap items-center gap-3 bg-kumo-recessed px-4 py-2.5 sm:px-5">
           <span className="flex-1 text-sm font-medium text-kumo-strong">{t('seats.fleet.title')}</span>
-          {fleetLevel === null ? <span className="text-xs text-kumo-subtle">{t('seats.fleet.why.pi')}</span> : <LimitBadge level={fleetLevel} t={t} />}
+          {fleetLevel !== null && <LimitBadge level={fleetLevel} t={t} />}
         </li>
         {roles.map((role) => {
           const on = draft.fleet.includes(role.name);
-          const why = role.writable === null ? t('seats.fleet.why.unknown') : !runtime.fleet || !seatTakesFleet(draft) ? t('seats.fleet.why.pi')
+          const why = role.writable === null ? t('seats.fleet.why.unknown') : !runtime.fleet ? t('seats.fleet.why.runtime')
             : !range.fleet.includes(role.name) ? t('seats.fleet.why.writable') : null;
+          const detail = draft.runtime === 'pi' && isSeatScaffoldSubAgent(role.name)
+            ? piSubAgentModel(role.name, form.draft!.pi_sub_agent_models)
+            : fleetDetail(setup, role.name);
           return (
-            <ToggleRow key={role.name} name={role.name} mono detail={fleetDetail(setup, role.name)}
+            <ToggleRow key={role.name} name={role.name} mono detail={detail}
               badge={role.writable === null ? null
                 : <Badge className={role.writable ? 'bg-kumo-warning-tint text-kumo-warning' : 'bg-kumo-fill text-kumo-subtle'}>{t(role.writable ? 'seats.fleet.writable' : 'seats.fleet.readOnly')}</Badge>}
               why={why} locked={locked || (why !== null && !on)} on={on}
@@ -465,12 +468,12 @@ function SeatsBody({ form, agents, setup, quota, t }: {
   const { settings } = view;
   const locked = formLocked(form);
   const changedElsewhere = base !== null && form.request !== null && form.save.kind !== 'saving' && settings.config.revision !== base.revision;
-  const changes = base !== null && draft !== null ? seatChanges(base, savedSeats(draft)) : 0;
+  const changes = base !== null && draft !== null ? seatChanges(base, draft) : 0;
   const notEnabled = draft === null ? [] : SEAT_IDS.flatMap((id) => {
     const seat = draft[id];
     return seat !== null && !settings.ranges.runtimes.find(entry => entry.id === seat.runtime)!.enabled ? [{ id, runtime: seat.runtime }] : [];
   });
-  const refused = draft === null ? null : sectionRefusal(settings.config.revision, savedSeats(draft));
+  const refused = draft === null ? null : sectionRefusal(settings.config.revision, draft);
   return (
     <div className="flex flex-col gap-5" data-seats-page>
       <p className="text-sm text-kumo-subtle">{t('seats.lead')}</p>
@@ -502,6 +505,20 @@ function SeatsBody({ form, agents, setup, quota, t }: {
       {draft !== null && <>
         <Segmented label={t('seats.pick')} disabled={false} value={seat} options={SEAT_IDS.map(id => ({ value: id, label: t(`seats.${id}.short`) }))} onPick={setSeat} />
         <SeatCard seat={seat} form={form} agents={agents} settings={settings} setup={setup} quota={quota} locked={locked} t={t} />
+        <section aria-labelledby="seats-pi-models-heading" className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
+          <h2 id="seats-pi-models-heading" className="border-b border-kumo-hairline px-4 py-3 text-base font-semibold text-kumo-strong sm:px-5">{t('seats.piModels.title')}</h2>
+          {SEAT_SCAFFOLD_SUB_AGENTS.map(role => (
+            <Field key={role} label={role}>
+              <input type="text" aria-label={t('seats.piModels.model', { role })} disabled={locked} spellCheck={false}
+                className={cn(MODEL_INPUT, 'w-full max-w-sm')} placeholder={PI_SUB_AGENT_DEFAULTS[role].model}
+                value={draft.pi_sub_agent_models?.[role] ?? ''}
+                onChange={event => {
+                  const model = event.target.value;
+                  form.edit(current => setPiSubAgentModel(current, role, model));
+                }} />
+            </Field>
+          ))}
+        </section>
         <RoutingEditor form={form} settings={settings} quota={quota} locked={locked} t={t} />
       </>}
 

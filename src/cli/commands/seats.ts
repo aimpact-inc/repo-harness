@@ -286,7 +286,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   const agentTypes = effective.runtime === 'claude' && effective.fleet.length > 0
     ? [...MANAGED_AGENTS, ...RETIRED_SEAT_FLEET_ROLES, ...CLAUDE_BUILTIN_AGENT_TYPES, ...claudeHostAgentTypes(env)]
     : [];
-  const piRoleDirectory = effective.runtime === 'pi' && effective.fleet.length > 0 ? writePiFleetRoles(effective.fleet, env) : undefined;
+  const piRoleDirectory = effective.runtime === 'pi' && effective.fleet.length > 0 ? writePiFleetRoles(effective.fleet, env, seats.pi_sub_agent_models) : undefined;
   const piHookExtension = effective.runtime === 'pi' && isReviewSeat(id) ? installedPiExtension(env) : undefined;
   const launch = buildSeatLaunch(id, effective, config.seats === undefined ? 'defaults' : 'seats', agentTypes, name ?? undefined, labels.repositoryId, piRoleDirectory, piHookExtension, claudeSaving);
   const argv = labelSet === undefined ? launch.argv : selfLabelingArgv(id, labels, launch.argv, env);

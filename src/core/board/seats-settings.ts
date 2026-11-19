@@ -56,9 +56,8 @@ export interface SeatConfigV1 {
 export const PI_CODEX_MODEL_PREFIX = 'magpie/codex/';
 export const isPiCodexSeat = (seat: { readonly runtime: SeatRuntime; readonly model: string | null }): boolean =>
   seat.runtime === 'pi' && seat.model?.startsWith(PI_CODEX_MODEL_PREFIX) === true;
-/** The fleet roles are pinned to GPT models, so a Pi seat takes them only on a GPT model. */
-export const seatTakesFleet = (seat: { readonly runtime: SeatRuntime; readonly model: string | null }): boolean =>
-  seat.runtime !== 'pi' || isPiCodexSeat(seat);
+/** Fleet access depends on the seat's role range, independent of the model that the runtime runs. */
+export const seatTakesFleet = (seat: { readonly runtime: SeatRuntime }): boolean => SEAT_RUNTIMES.includes(seat.runtime);
 
 export interface SeatModelV1 {
   readonly model: string | null;
@@ -95,10 +94,29 @@ export type SeatsConfigV1 = { readonly [seat in Exclude<SeatId, OptionalSeatId>]
   readonly [seat in OptionalSeatId]: SeatConfigV1 | null;
 } & {
   readonly routing: SeatRoutingV1;
+  /** Pi role model overrides. An omitted role uses its recommended model. */
+  readonly pi_sub_agent_models?: PiSubAgentModels;
 };
 
-const WORKER_TOOLS = Object.freeze(['edit', 'gh', 'mcp', 'net', 'read', 'shell', 'tasks'] as const);
 export const SEAT_SCAFFOLD_SUB_AGENTS = Object.freeze(['deep-reasoner', 'explorer'] as const);
+export type SeatScaffoldSubAgent = typeof SEAT_SCAFFOLD_SUB_AGENTS[number];
+export type PiSubAgentModels = Readonly<Partial<Record<SeatScaffoldSubAgent, string>>>;
+
+const WORKER_LIGHT_MODEL = 'magpie/cursor/deepseek-v41-flash-1017';
+export const PI_SUB_AGENT_DEFAULTS = Object.freeze({
+  'deep-reasoner': Object.freeze({ model: `${PI_CODEX_MODEL_PREFIX}gpt-6.2-sol`, thinking: 'high' }),
+  explorer: Object.freeze({ model: WORKER_LIGHT_MODEL, thinking: 'high' }),
+}) satisfies Readonly<Record<SeatScaffoldSubAgent, { model: string; thinking: string }>>;
+
+export function piSubAgentModel(role: SeatScaffoldSubAgent, overrides?: PiSubAgentModels): string {
+  return overrides?.[role] ?? PI_SUB_AGENT_DEFAULTS[role].model;
+}
+
+export function isSeatScaffoldSubAgent(role: string): role is SeatScaffoldSubAgent {
+  return SEAT_SCAFFOLD_SUB_AGENTS.some(available => available === role);
+}
+
+const WORKER_TOOLS = Object.freeze(['edit', 'gh', 'mcp', 'net', 'read', 'shell', 'tasks'] as const);
 export const RETIRED_SEAT_FLEET_ROLES = Object.freeze(['deep-worker', 'fast-worker', 'gatekeeper', 'root-cause-prover'] as const);
 const isRetiredFleetRole = (id: SeatId, role: unknown): boolean =>
   RETIRED_SEAT_FLEET_ROLES.some(retired => retired === role) || (role === 'harness-evaluator' && isWorkerSeat(id));
@@ -116,7 +134,7 @@ export const DEFAULT_SEATS_CONFIG: SeatsConfigV1 = Object.freeze({
   'worker-deep': Object.freeze({ runtime: 'codex', model: 'gpt-6.2-sol', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
   'worker-important': Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'medium', tools: WORKER_TOOLS, fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
   'worker-important-fast': Object.freeze({ runtime: 'claude', model: 'sonnet', advisor_model: null, effort: 'medium', tools: WORKER_TOOLS, fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
-  'worker-light': Object.freeze({ runtime: 'pi', model: 'magpie/cursor/deepseek-v41-flash-1017', advisor_model: null, effort: null, tools: WORKER_TOOLS, fleet: Object.freeze([]) }),
+  'worker-light': Object.freeze({ runtime: 'pi', model: WORKER_LIGHT_MODEL, advisor_model: null, effort: null, tools: WORKER_TOOLS, fleet: Object.freeze([]) }),
   gatekeeper: Object.freeze({ runtime: 'codex', model: 'gpt-6.1-terra', advisor_model: null, effort: 'high', tools: REVIEW_TOOLS, fleet: Object.freeze([]) }),
   'gatekeeper-deep': Object.freeze({ runtime: 'codex', model: 'gpt-6.2-sol', advisor_model: null, effort: 'high', tools: REVIEW_TOOLS, fleet: Object.freeze([]) }),
   'gatekeeper-fallback': null,
@@ -300,8 +318,8 @@ function decodeSeat(id: SeatId, value: unknown, code: string, fromSettingsReques
     : seatModelShapeValid(record.runtime as SeatRuntime, record.model) ? record.model : at('model');
   // Let the Settings save return its typed fleet refusal when the request contains a retired role.
   const retiredFleetRequest = fromSettingsRequest && fleet.some(role => isRetiredFleetRole(id, role));
-  if (fleet.length > 0 && !retiredFleetRequest && (isReviewSeat(id) || !seatTakesFleet({ runtime: record.runtime as SeatRuntime, model }))) at('fleet');
-  if (!fromSettingsRequest && fleet.some(role => !SEAT_SCAFFOLD_SUB_AGENTS.some(available => available === role))) at('fleet');
+  if (fleet.length > 0 && !retiredFleetRequest && isReviewSeat(id)) at('fleet');
+  if (!fromSettingsRequest && fleet.some(role => !isSeatScaffoldSubAgent(role))) at('fleet');
   return {
     runtime: record.runtime as SeatRuntime,
     model,
@@ -312,7 +330,20 @@ function decodeSeat(id: SeatId, value: unknown, code: string, fromSettingsReques
   };
 }
 
-const SECTION_KEYS = [...SEAT_IDS, 'routing'];
+const REQUIRED_SECTION_KEYS = [...SEAT_IDS, 'routing'];
+const SECTION_KEYS = [...REQUIRED_SECTION_KEYS, 'pi_sub_agent_models'];
+
+function decodePiSubAgentModels(value: unknown, code: string): PiSubAgentModels {
+  const record = object(value, SEAT_SCAFFOLD_SUB_AGENTS, code, []);
+  const models: Partial<Record<SeatScaffoldSubAgent, string>> = {};
+  for (const role of SEAT_SCAFFOLD_SUB_AGENTS) {
+    if (!Object.hasOwn(record, role)) continue;
+    const model = record[role];
+    if (!seatModelShapeValid('pi', model)) invalid(code, `seats.pi_sub_agent_models.${role}`);
+    models[role] = model;
+  }
+  return models;
+}
 
 function decodeModel(value: unknown, code: string): SeatModelV1 {
   const record = object(value, ['model', 'effort'], code);
@@ -345,19 +376,23 @@ function decodeRouting(value: unknown, code: string): SeatRoutingV1 {
 
 function decodeSeatsRecord(record: Record<string, unknown>, code: string, fromSettingsRequest = false): SeatsConfigV1 {
   const seats = Object.fromEntries(SEAT_IDS.filter(id => id in record)
-    .map(id => [id, isOptionalSeat(id) && record[id] === null ? null : decodeSeat(id, record[id], code, fromSettingsRequest)])) as Partial<Omit<SeatsConfigV1, 'routing'>>;
+    .map(id => [id, isOptionalSeat(id) && record[id] === null ? null : decodeSeat(id, record[id], code, fromSettingsRequest)])) as Partial<Pick<SeatsConfigV1, SeatId>>;
   const routing = 'routing' in record ? decodeRouting(record.routing, code) : undefined;
   if (routing !== undefined) {
     if (!fromSettingsRequest && routing.low_quota_explorer.model === null) invalid(code);
     if (ROUTING_CLASSES.some(task => routing[task].some(id => seats[id] === null))) invalid(code);
     if (routing.frontend.some(id => seats[id] !== undefined && seats[id]!.runtime !== 'claude')) invalid(code);
   }
-  if (SECTION_KEYS.some(key => !(key in record))) throw new SeatsConfigMigrationRequiredError();
-  return { ...(seats as Omit<SeatsConfigV1, 'routing'>), routing: routing! };
+  if (REQUIRED_SECTION_KEYS.some(key => !(key in record))) throw new SeatsConfigMigrationRequiredError();
+  const piModels = 'pi_sub_agent_models' in record ? decodePiSubAgentModels(record.pi_sub_agent_models, code) : undefined;
+  return {
+    ...(seats as Pick<SeatsConfigV1, SeatId>), routing: routing!,
+    ...(piModels === undefined || Object.keys(piModels).length === 0 ? {} : { pi_sub_agent_models: piModels }),
+  };
 }
 
 function decodeSeats(value: unknown, code: string): SeatsConfigV1 {
-  return decodeSeatsRecord(object(value, SECTION_KEYS, code), code);
+  return decodeSeatsRecord(object(value, SECTION_KEYS, code, REQUIRED_SECTION_KEYS), code);
 }
 
 /** Prepare the candidate for the update migration. The caller must decode it before use or write. */
@@ -447,7 +482,7 @@ export function decodeSeatsSettings(value: unknown): SeatsSettingsV1 {
   const code = 'seats_settings_invalid';
   const record = object(value, ['protocol', 'kind', 'config', 'defaults', 'ranges'], code);
   if (record.protocol !== 1 || record.kind !== 'operator_seats_settings') invalid(code);
-  const config = object(record.config, ['revision', ...SECTION_KEYS], code);
+  const config = object(record.config, ['revision', ...SECTION_KEYS], code, ['revision', ...REQUIRED_SECTION_KEYS]);
   const revision = text(config.revision, code);
   if (!REVISION.test(revision)) invalid(code);
   const { revision: _revision, ...section } = config;
@@ -464,7 +499,7 @@ export function decodeSeatsSettingsRequest(fields: Readonly<Record<string, unkno
   const expected = text(record.expected_revision, code);
   if (!REVISION.test(expected)) invalid(code);
   // The save checks fleet access and the explorer model so it can return structured 422 errors.
-  return { expected_revision: expected, seats: decodeSeatsRecord(object(record.seats, SECTION_KEYS, code), code, true) };
+  return { expected_revision: expected, seats: decodeSeatsRecord(object(record.seats, SECTION_KEYS, code, REQUIRED_SECTION_KEYS), code, true) };
 }
 
 export function decodeSeatsSettingsResult(value: unknown): SeatsSettingsResultV1 {

@@ -601,8 +601,6 @@ describe('seat settings contract without transport', () => {
       expect(readSeatsSettings(env).config.worker.model).toBe(addedModel);
     }
     const gpt = { ...worker, model: 'magpie/codex/gpt-6.1-terra', effort: 'high' };
-    expect(() => route.decode({ expected_revision: readSeatsSettings(env).config.revision, seats: { ...section, worker: { ...worker, fleet: ['explorer'] } } }, []))
-      .toThrow('seats_settings_request_invalid');
     expect((await route.decode({ expected_revision: readSeatsSettings(env).config.revision, seats: { ...section, worker: { ...gpt, fleet: ['explorer'] } } }, []).execute()).status).toBe(200);
     expect(readSeatsSettings(env).config.worker).toMatchObject({ runtime: 'pi', model: gpt.model, effort: 'high', fleet: ['explorer'] });
     expect((await route.decode({ expected_revision: readSeatsSettings(env).config.revision, seats: { ...section, reviewer: { ...section.reviewer!, runtime: 'pi', model: 'zai/glm-5.3' } } }, []).execute()).status).toBe(200);
@@ -642,10 +640,35 @@ describe('seat settings contract without transport', () => {
     expect(launch.argv.slice(start, start + expectedArgv.length)).toEqual([...expectedArgv]);
   });
 
+  test('saves both scaffold roles for a Neon advisor and persists independent Pi role model overrides', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'seats-pi-roles-'));
+    cleanups.push(() => rmSync(home, { recursive: true, force: true }));
+    mkdirSync(join(home, '.repo-harness'));
+    writeFileSync(join(home, '.repo-harness', 'config.json'), JSON.stringify({ agents: PANE_AGENTS, seats: DEFAULT_SEATS_CONFIG }));
+    const env = { HOME: home }, route = seatsSettingsWriteRoute(env);
+    const { revision, ...section } = readSeatsSettings(env).config;
+    const advisor = { ...section.advisor, runtime: 'pi' as const, model: 'magpie/agy-cli/gemini-4-neon', fleet: ['deep-reasoner', 'explorer'] };
+    const models = { explorer: 'magpie/group/deepseek-v4.1-flash', 'deep-reasoner': 'zai/GLM-5.3' };
+    const saved = await route.decode({ expected_revision: revision, seats: { ...section, advisor, pi_sub_agent_models: models } }, []).execute();
+    expect(saved.status).toBe(200);
+    expect(saved.body).toMatchObject({ changed_keys: ['seats.advisor.runtime', 'seats.advisor.model', 'seats.pi_sub_agent_models.deep-reasoner', 'seats.pi_sub_agent_models.explorer'] });
+    const stored = readSeatsSettings(env).config;
+    expect(stored.advisor).toEqual(advisor);
+    expect(stored.pi_sub_agent_models).toEqual(models);
+    const cleared = await route.decode({ expected_revision: stored.revision, seats: { ...section, advisor, pi_sub_agent_models: { 'deep-reasoner': models['deep-reasoner'] } } }, []).execute();
+    expect(cleared.body).toMatchObject({ changed_keys: ['seats.pi_sub_agent_models.explorer'] });
+    expect(readSeatsSettings(env).config.pi_sub_agent_models).toEqual({ 'deep-reasoner': models['deep-reasoner'] });
+  });
+
   test('Pi models require a provider and model id', () => {
+    const route = seatsSettingsWriteRoute();
     for (const model of ['deepseek', '/deepseek', 'magpie/']) {
       expect(() => decodeSeatsConfig({ ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'pi', model } })).toThrow('seats_config_invalid');
+      const seats = { ...DEFAULT_SEATS_CONFIG, pi_sub_agent_models: { explorer: model } };
+      expect(() => decodeSeatsConfig(seats)).toThrow('seats_config_invalid: seats.pi_sub_agent_models.explorer');
+      expect(() => route.decode({ expected_revision: 'absent', seats }, [])).toThrow('seats_settings_request_invalid: seats.pi_sub_agent_models.explorer');
     }
+    expect(() => decodeSeatsConfig({ ...DEFAULT_SEATS_CONFIG, pi_sub_agent_models: { 'fast-worker': 'zai/glm-5.3' } })).toThrow('seats_config_invalid');
   });
 
   test('review seats reject write tools and every fleet role at the decoder boundary', () => {

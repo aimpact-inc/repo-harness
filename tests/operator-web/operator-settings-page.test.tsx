@@ -233,7 +233,7 @@ describe('agents page seats section', () => {
     expect(posts[0]!.seats['worker-important'].model).toBe('claude-opus-9');
   });
 
-  test('a typo in a typed magpie/codex/ id keeps the fleet roles: the corrected id saves them, and a final model without a fleet sends none (#3250)', async () => {
+  test('a Pi advisor keeps its fleet when switching between GPT and Neon', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     const read = await settingsStores(NOW, 'busy').seats.read();
     if (read.state !== 'ok') throw new Error('fixture read failed');
@@ -249,16 +249,15 @@ describe('agents page seats section', () => {
     }
     await click(seatsSave());
     expect(posts[0]!.seats.advisor).toMatchObject({ model: 'magpie/codex/gpt-6.2-sol', fleet: ['explorer'] });
-    await typeText(input, 'magpie/codx/gpt-6.2-sol');
+    await typeText(input, 'magpie/agy-cli/gemini-4-neon');
     await leaveField(input);
     await click(seatsSave());
-    expect(posts[1]!.seats.advisor).toMatchObject({ model: 'magpie/codx/gpt-6.2-sol', fleet: [] });
-    // The saved section is the new base and draft: the dropped role stays off, and a switch back to a GPT model does not send it again.
-    expect(allow('explorer').getAttribute('aria-checked')).toBe('false');
+    expect(posts[1]!.seats.advisor).toMatchObject({ model: 'magpie/agy-cli/gemini-4-neon', fleet: ['explorer'] });
+    expect(allow('explorer').getAttribute('aria-checked')).toBe('true');
     await typeText(input, 'magpie/codex/gpt-6.2-sol');
     await leaveField(input);
     await click(seatsSave());
-    expect(posts[2]!.seats.advisor).toMatchObject({ model: 'magpie/codex/gpt-6.2-sol', fleet: [] });
+    expect(posts[2]!.seats.advisor).toMatchObject({ model: 'magpie/codex/gpt-6.2-sol', fleet: ['explorer'] });
   });
 
   test('a stored advisor role outside the range can be switched off and saved, and cannot be switched back on', async () => {
@@ -533,15 +532,15 @@ describe('agents page seats section', () => {
     await click(buttonWithText('Codex'));
     expect(levels()).toEqual(['common_commands', 'instructions_only', 'instructions_only', 'instructions_only']);
     await click(buttonWithText('Pi'));
-    expect(levels()).toEqual(['instructions_only', 'instructions_only', 'instructions_only']);
-    expect(allow('explorer').disabled).toBe(true);
+    expect(levels()).toEqual(['instructions_only', 'instructions_only', 'instructions_only', 'instructions_only']);
+    expect(allow('explorer').disabled).toBe(false);
     expect((buttonWithText('max') as HTMLButtonElement).disabled).toBe(false);
     // An agents draft edited before the seats save moves to the seats revision the same way.
     await click(use('codex', 'review'));
     await click(seatsSave());
     await settle();
     expect(posts).toHaveLength(1);
-    expect(posts[0]!.seats.advisor).toMatchObject({ runtime: 'pi', model: null, effort: 'high', fleet: [] });
+    expect(posts[0]!.seats.advisor).toMatchObject({ runtime: 'pi', model: null, effort: 'high', fleet: ['explorer'] });
     expect(document.querySelector('[data-seats-saved]')).not.toBeNull();
     await click(saveButton());
     expect(result()?.getAttribute('data-save-result')).toBe('saved');
