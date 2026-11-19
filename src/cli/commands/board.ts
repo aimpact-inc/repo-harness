@@ -136,7 +136,7 @@ function mergeText(result: BoardMergeResultV1, requested: number | null, dryRun:
 }
 
 /** Skip reasons that show a routing, quota or plan problem; the other reasons are ordinary board state. */
-const DISPATCH_FRICTION: ReadonlySet<DispatchSkipReason> = new Set(['kind_label_invalid', 'no_route', 'over_limit']);
+const DISPATCH_FRICTION: ReadonlySet<DispatchSkipReason> = new Set(['kind_label_invalid', 'tier_invalid', 'tier_mixed', 'route_conflict', 'no_route', 'over_limit']);
 const REVIEW_FRICTION: ReadonlySet<ReviewSkipReason> = new Set(['acceptance_unknown', 'writer_family_unknown', 'review_family_unavailable', 'plan_unavailable']);
 
 /** The closed error code of a refused board command; the message is free text and never leaves the command. */

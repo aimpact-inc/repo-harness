@@ -173,12 +173,13 @@ function refusal(board: BoardV1, pr: BoardPullRequestV1): { readonly reason: Boa
     const unitOf = (number: number): number => units.findIndex(unit => unit.includes(number));
     const unordered = items.filter(number => unitOf(number) < 0);
     if (unordered.length > 0) return { reason: 'not_in_merge_order', detail: `${unordered.map(number => `#${number}`).join(' ')} not in the plan merge_order` };
-    // A pull request across two units can never see the earlier unit closed first. A closed linked issue is done work, so it spans nothing.
+    // A pull request across two units can never see the earlier unit closed first. A closed linked issue is done work: it spans no unit
+    // and does not set the PR's unit, so the PR never waits for itself.
     const open = items.filter(number => onBoard.get(number)!.state !== 'closed');
-    const spanned = new Set((open.length > 0 ? open : items).map(unitOf));
+    const spanned = new Set(open.map(unitOf));
     if (spanned.size > 1) return { reason: 'merge_order', detail: `${open.map(number => `#${number}`).join(' ')} span ${spanned.size} plan units; split the PR` };
     // Every issue of each earlier unit must be closed. An earlier issue outside the board has no observed state, so it blocks like an open one.
-    const earlier = units.slice(0, Math.max(...items.map(unitOf))).flat().filter(number => onBoard.get(number)?.state !== 'closed');
+    const earlier = units.slice(0, open.length > 0 ? unitOf(open[0]!) : Math.max(...items.map(unitOf))).flat().filter(number => onBoard.get(number)?.state !== 'closed');
     if (earlier.length > 0) return { reason: 'merge_order', detail: `earlier in merge_order and not closed: ${earlier.map(number => `#${number}`).join(' ')}` };
   } else {
     // A parent without a plan merges in blocked-by order: every blocker of each linked item must be closed.

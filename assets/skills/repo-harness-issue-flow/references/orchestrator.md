@@ -726,10 +726,11 @@ are true:
 - The PR is open and not draft, and every issue that it closes or refs
   (the parent excluded) is an item of the parent.
 - No hold record is in force on the parent, on the PR's issues or on the PR.
-- The plan does not hold its issues, its issues are in `merge_order`, all
-  of them are in one plan unit, and every issue of each earlier unit is
-  closed. A PR whose issues span two units is refused: split it. A bundle
-  PR closes every open issue of its unit.
+- The plan does not hold its issues, its issues are in `merge_order`, its
+  open issues are in one plan unit, and every issue of each earlier unit
+  is closed. A PR whose open issues span two units is refused: split it.
+  The command checks unit boundaries only; closing every open issue of
+  the unit is the worker's bundle rule (§7).
 - An acceptance record has a PASS row for the head, at every tier. The
   provisional `tier_low` status is not enough: post the Low record after
   you check the verification evidence.

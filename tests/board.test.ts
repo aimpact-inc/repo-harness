@@ -1127,6 +1127,10 @@ test('board merge: no plan, a draft, plan holds, plan order for every linked ite
   const refsClosed = (data: Json) => { data.repository.pr1491.body += '\nRefs #1476\n'; };
   expect(decision({ order: [[1476, 1479], 1475], parent: closed(1476), pulls: refsClosed })).toMatchObject({ reason: 'merge_order', detail: 'earlier in merge_order and not closed: #1479' });
   expect(mergeReason({ order: [[1476, 1479], 1475], parent: (data) => { closed(1476, 1479)(data); issueNode(data, 1476).labels.nodes.push({ name: 'tier:medium' }); }, pulls: refsClosed })).toBe('eligible');
+  // Only open linked issues set the PR's unit: a closed ref in a later unit neither spans nor makes the PR wait for itself.
+  const tiered = (data: Json) => { issueNode(data, 1476).labels.nodes.push({ name: 'tier:medium' }); };
+  expect(mergeReason({ order: [1475, 1476], parent: (data) => { closed(1476)(data); tiered(data); }, pulls: refsClosed })).toBe('eligible');
+  expect(mergeReason({ order: [1475, 1476], parent: (data) => { closed(1475, 1476)(data); tiered(data); }, pulls: refsClosed })).toBe('eligible');
   expect(mergeReason({ order: [[1475, 1479], 1476] })).toBe('eligible');
   expect(decision({ pulls: (data) => { data.repository.pr1491.body += '\nRefs #1460\n'; } })).toMatchObject({ reason: 'item_off_board' });
   // A parent with two children or fewer needs no plan: it merges in blocked-by order.
@@ -2689,6 +2693,12 @@ describe('rule R7', () => {
     expect(r7({ ...off, plan: plan([1477, 1479], [1477]) })).toEqual([]);
     const itemHold = { ...board([]), items: recorded.items.map(item => (item.number === 1477 ? { ...item, merge_hold: { status: 'held', holds: [{ comment_url: 'https://github.com/hold', issues: null }] } as const } : item)) };
     expect(r7(itemHold)).toEqual(['#1494 is accepted and waits behind held #1477 in merge_order; move #1477 to the tail']);
+    // A closed issue that the pull request refs in a later unit does not move it behind the held unit.
+    const refsClosed: BoardV1 = { ...board([1477]), plan: plan([1475, 1479, 1477, 1476], [1477]),
+      items: recorded.items.map(item => (item.number === 1476 ? { ...item, state: 'closed' as const } : item)),
+      pull_requests: board([1477]).pull_requests.map(pr => (pr.number === 1494 ? { ...pr, refs: [...pr.refs, 1476] } : pr)) };
+    expect(boardMergeDecisions(refsClosed).find(decision => decision.pr === 1494)).toMatchObject({ reason: 'merge_order', detail: 'earlier in merge_order and not closed: #1475' });
+    expect(r7(refsClosed)).toEqual([]);
   });
 });
 

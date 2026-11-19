@@ -639,7 +639,10 @@ function r7(context: Context): void {
   const onBoard = new Map(board.items.map(item => [item.number, item] as const));
   const refused = new Set(boardMergeDecisions(board).filter(decision => !decision.eligible && decision.reason === 'merge_order').map(decision => decision.pr));
   for (const pr of openPullRequests(board).filter(entry => refused.has(entry.number) && entry.acceptance.status === 'accepted')) {
-    const last = Math.max(...itemsOf(board, pr).map(number => units.findIndex(unit => unit.includes(number))));
+    // The open items set the unit of the pull request, as in `board merge`; a closed ref in a later unit does not.
+    const linked = itemsOf(board, pr);
+    const open = linked.filter(number => onBoard.get(number)?.state !== 'closed');
+    const last = Math.max(...(open.length > 0 ? open : linked).map(number => units.findIndex(unit => unit.includes(number))));
     const earlier = units.slice(0, last).flat().filter(number => onBoard.get(number)?.state !== 'closed');
     for (const number of earlier.filter(entry => !onBoard.has(entry))) skip(context, 'R7', 'item_off_board', `#${number}`);
     // An off-board entry has no observed state, so only an open board item is a held candidate.
