@@ -87,6 +87,13 @@ reviewer will send it back.
 - **No drive-by changes.** Do not refactor, rename or reformat code that
   the issue does not name, even when it looks wrong. Name it in your PR
   body as a note; it opens no issue.
+- **Same-rule siblings.** After the fix, search the files that the PR
+  changes for the same defect shape. For each sibling of the same rule and
+  the same tier in a file that the PR already changes, send
+  `[rh-question] sibling <file:line> <size>` to the coordinator before
+  PUSHED. Fix it in this PR only when the coordinator answers
+  `CONSOLIDATE` (`orchestrator.md` §4.2). A sibling in another file is a
+  note in the PR body.
 - **Tests prove the issue.** Add or extend the tests that `验收 /
   Acceptance` names, including its negative checks. Never weaken, skip or
   delete an existing assertion to pass. If an existing test is wrong
