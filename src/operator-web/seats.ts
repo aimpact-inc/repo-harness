@@ -20,6 +20,8 @@ import {
   type SeatTool,
   type WorkerSeatId,
 } from '../core/board/seats-settings';
+import { decodeSeatPool } from '../core/board/seat-pool';
+import { isRecord } from '../core/evidence/is-record';
 import {
   fetchSettings,
   postSettings,
@@ -37,7 +39,16 @@ export type SeatsSettingsReader = SettingsReader<SeatsSettingsV1>;
 export type SeatsSettingsWriter = SettingsWriter<SeatsSettingsRequestV1>;
 export type SeatsSettingsForm = SettingsForm<SeatsSettingsV1, SeatsSettingsV1['config'], SeatsConfigV1, SeatsSettingsRequestV1>;
 
-export const fetchSeatsSettings: SeatsSettingsReader = signal => fetchSettings(SEATS_SETTINGS_PATH, decodeSeatsSettings, signal);
+function decodeSeatsSettingsWithPool(value: unknown): SeatsSettingsV1 {
+  if (!isRecord(value)) throw new Error('seats_settings_invalid');
+  const { model_pool, ...settings } = value;
+  const decoded = decodeSeatsSettings(settings);
+  if (model_pool === undefined) return decoded;
+  if (!isRecord(model_pool) || (model_pool.status !== 'ready' && model_pool.status !== 'stale')) throw new Error('seats_settings_invalid');
+  return { ...decoded, model_pool: { status: model_pool.status, report: decodeSeatPool(model_pool.report) } };
+}
+
+export const fetchSeatsSettings: SeatsSettingsReader = signal => fetchSettings(SEATS_SETTINGS_PATH, decodeSeatsSettingsWithPool, signal);
 export const postSeatsSettings: SeatsSettingsWriter = body => postSettings(SEATS_SETTINGS_PATH, decodeSeatsSettingsResult, body);
 
 export function seatsDraftOf(config: SeatsSettingsV1['config']): SeatsConfigV1 {

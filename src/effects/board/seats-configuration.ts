@@ -1,4 +1,10 @@
+import { randomUUID } from 'node:crypto';
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { decodeAgentsConfig } from '../../core/board/agents-settings';
+import { isRecord } from '../../core/evidence/is-record';
 import {
   SEAT_IDS,
   SEAT_RUNTIMES,
@@ -25,8 +31,11 @@ import {
   type SeatTool,
 } from '../../core/board/seats-settings';
 import { SEAT_RECOMMENDED_MODELS } from '../../core/board/recommended-models';
+import { SEAT_POOL_KIND, SEAT_POOL_STALE_MS, buildSeatPool, decodeSeatPool, decodeSeatPoolProbe, emptySeatPoolProbe, recommendedModelIds, type SeatPoolCacheV1, type SeatPoolProbe, type SeatPoolV1 } from '../../core/board/seat-pool';
 import { EFFORT_LEVELS } from '../terminal/task-role-profiles';
-import { GlobalConfigurationError, mutateGlobalConfiguration, readGlobalConfiguration } from '../configuration/global-configuration';
+import { GlobalConfigurationError, globalConfigurationPath, mutateGlobalConfiguration, readGlobalConfiguration } from '../configuration/global-configuration';
+import { withExclusiveDirectoryLock } from '../locking/exclusive-directory-lock';
+import { publishFileByRename } from '../atomic-append';
 
 export type SeatsConfigurationErrorCode =
   | 'busy'
@@ -142,6 +151,136 @@ function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly str
   if (tool !== undefined) throw new SeatsConfigurationError('seat_tool_not_allowed', `The ${id} seat cannot have the ${tool} tool group.`);
   const role = seat.fleet.find(name => !runtime.fleet || !seatTakesFleet(seat) || !range.fleet.includes(name));
   if (role !== undefined) throw new SeatsConfigurationError('seat_fleet_not_allowed', `The ${id} seat on ${seat.runtime} cannot call the ${role} sub-agent.`);
+}
+
+const SEAT_POOL_MEMBER_MS = 15_000;
+// Codex installation can run both a readiness and a version check. Leave time for OAR to close its processes.
+const SEAT_POOL_CHILD_MS = 120_000;
+const SEAT_POOL_FILE_LIMIT = 64 * 1024;
+const CATALOG_RUNTIMES = ['claude', 'codex'] as const;
+
+async function probeSeatCatalog(id: typeof CATALOG_RUNTIMES[number], command: string): Promise<SeatPoolProbe> {
+  if (command === '') return emptySeatPoolProbe(id, 'not_installed');
+  let probe = emptySeatPoolProbe(id, 'unknown');
+  try {
+    const runtime = id === 'claude' ? (await import('@botiverse/oar/runtimes/claude')).claudeRuntime
+      : (await import('@botiverse/oar/runtimes/codex')).codexRuntime;
+    const { installation, authStatus, listModels } = runtime;
+    if (installation === undefined || authStatus === undefined || listModels === undefined) return probe;
+    const env = { [id === 'claude' ? 'OAR_CLAUDE_BIN' : 'OAR_CODEX_BIN']: command };
+    const installed = await installation({ env });
+    if (installed.kind === 'not_found') return emptySeatPoolProbe(id, 'not_installed');
+    if (installed.kind !== 'available') return probe;
+    probe = { ...probe, installation: 'available', sign_in: 'unknown' };
+    const auth = await authStatus(installed, { timeoutMs: SEAT_POOL_MEMBER_MS });
+    if (auth.kind !== 'logged_in') return { ...probe, sign_in: auth.kind };
+    probe = { ...probe, sign_in: 'logged_in', models: 'unknown' };
+    const catalog = await listModels(installed, { cwd: process.cwd(), timeoutMs: SEAT_POOL_MEMBER_MS });
+    if (catalog.kind === 'unauthenticated') return { ...probe, models: 'unauthenticated' };
+    if (catalog.kind !== 'ok') return probe;
+    const wanted = recommendedModelIds(id);
+    return { ...probe, models: 'ok', listed: catalog.models.filter(model => wanted.has(model.id))
+      .map(model => ({ id: model.id, disabled: model.disabled !== undefined })) };
+  } catch {
+    return probe;
+  }
+}
+
+async function collectSeatPoolProbes(): Promise<readonly SeatPoolProbe[]> {
+  const pi = emptySeatPoolProbe('pi', Bun.which('pi') === null ? 'not_installed' : 'available');
+  const commands = CATALOG_RUNTIMES.map(id => Bun.which(id) ?? '');
+  if (commands.every(command => command === '')) return [...CATALOG_RUNTIMES.map(id => emptySeatPoolProbe(id, 'not_installed')), pi];
+  const cwd = mkdtempSync(join(tmpdir(), 'rh-seat-pool-'));
+  try {
+    const { runSetupProcess } = await import('../setup/collector');
+    const answer = await runSetupProcess([fileURLToPath(import.meta.url), ...commands], {
+      cwd, env: process.env, timeout_ms: SEAT_POOL_CHILD_MS, signal: new AbortController().signal, service: 'seat-pool-probe',
+    });
+    if (answer.ok) {
+      const rows: unknown = JSON.parse(answer.stdout);
+      if (Array.isArray(rows) && rows.length === CATALOG_RUNTIMES.length) {
+        return [...CATALOG_RUNTIMES.map((id, index) => decodeSeatPoolProbe(id, rows[index])), pi];
+      }
+    }
+  } catch {
+    // Process errors and raw child output stay private.
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+  return [...CATALOG_RUNTIMES.map((id, index) => emptySeatPoolProbe(id, commands[index] === '' ? 'not_installed' : 'unknown')), pi];
+}
+
+function seatPoolPath(env: NodeJS.ProcessEnv): string {
+  return join(dirname(globalConfigurationPath(env)), 'seats', 'pool.json');
+}
+
+function checkPoolDirectories(path: string, create: boolean): void {
+  for (const directory of [dirname(dirname(path)), dirname(path)]) {
+    if (create) {
+      try { mkdirSync(directory, { mode: 0o700 }); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    }
+    if (!lstatSync(directory).isDirectory()) throw new Error('seat_pool_invalid_path');
+  }
+}
+
+function readPoolFile(path: string): Record<string, unknown> {
+  if (!lstatSync(path).isFile()) throw new Error('seat_pool_invalid_path');
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > SEAT_POOL_FILE_LIMIT) throw new Error('seat_pool_invalid_path');
+    const value: unknown = JSON.parse(readFileSync(fd, 'utf8'));
+    if (!isRecord(value) || value.protocol !== 1 || value.kind !== SEAT_POOL_KIND) throw new Error('seat_pool_unowned_file');
+    return value;
+  } finally { closeSync(fd); }
+}
+
+export function readSeatPoolCache(env: NodeJS.ProcessEnv = process.env, now = Date.now()): SeatPoolCacheV1 | null {
+  try {
+    const path = seatPoolPath(env);
+    checkPoolDirectories(path, false);
+    const report = decodeSeatPool(readPoolFile(path));
+    const age = now - Date.parse(report.collected_at);
+    return { status: age < 0 || age >= SEAT_POOL_STALE_MS ? 'stale' : 'ready', report };
+  } catch {
+    return null;
+  }
+}
+
+function storeSeatPool(report: SeatPoolV1): void {
+  const path = seatPoolPath(process.env);
+  checkPoolDirectories(path, true);
+  withExclusiveDirectoryLock(realpathSync(dirname(path)), 'pool.lock', () => {
+    checkPoolDirectories(path, false);
+    // The protocol marker identifies the cache across changes to the recommended table.
+    let previous: Record<string, unknown> | undefined;
+    try { previous = readPoolFile(path); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    if (typeof previous?.collected_at === 'string' && Date.parse(previous.collected_at) > Date.parse(report.collected_at)
+      && Date.parse(previous.collected_at) <= Date.now()) return;
+    publishFileByRename(path, Buffer.from(`${JSON.stringify(report, null, 2)}\n`), `${path}.tmp-${randomUUID()}`);
+  }, { reclaimStaleOwner: true });
+}
+
+/** The cache only serves settings. A request for the pool always observes the environment again. */
+export async function refreshSeatPool(): Promise<{ readonly report: SeatPoolV1; readonly stored: boolean }> {
+  const { seats } = readSeatsConfiguration();
+  const probes = await collectSeatPoolProbes();
+  const report = buildSeatPool(seats, probes, new Date().toISOString());
+  try {
+    storeSeatPool(report);
+    return { report, stored: true };
+  } catch {
+    return { report, stored: false };
+  }
+}
+
+if (import.meta.main) {
+  // Only the pool probe child runs the OAR catalog members, one runtime at a time.
+  const probes: SeatPoolProbe[] = [];
+  for (const [index, id] of CATALOG_RUNTIMES.entries()) probes.push(await probeSeatCatalog(id, process.argv[index + 2] ?? ''));
+  process.stdout.write(`${JSON.stringify(probes)}\n`, () => process.exit(0));
 }
 
 const FIELDS = ['runtime', 'model', 'advisor_model', 'effort', 'tools', 'fleet'] as const;

@@ -22,6 +22,8 @@ import { MANAGED_AGENTS } from '../../effects/terminal/task-role-profiles';
 import { SeatResetError, readSeatSession, readTranscriptUsage, runSeatReset, writeSeatResetRequest, type SeatRelaunch, type SeatResetNotify, type TranscriptUsage } from '../../effects/board/seat-reset';
 import { handoffIdentity, seatResetAction, seatResetIdentity, seatResetSteps, type SeatResetIdentity } from '../../core/board/seat-reset';
 import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
+import { formatSeatPool } from '../../core/board/seat-pool';
+import { refreshSeatPool, SeatsConfigurationError } from '../../effects/board/seats-configuration';
 
 const CLI_ENTRY = fileURLToPath(new URL('../index.ts', import.meta.url));
 
@@ -387,7 +389,23 @@ export function seatHandoff(env: NodeJS.ProcessEnv = process.env, now = new Date
 
 /** `loadNotify` comes from the composition root, only when peer-runtime is selected. */
 export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): Command {
-  const seats = new Command('seats').description('Seat launch commands for Herdr panes');
+  const seats = new Command('seats').description('Seat model pools and launch commands for Herdr panes');
+  seats.command('pool')
+    .description('Check which recommended seat models are available in this environment')
+    .option('--json', 'Print the seat pools and exclusions as JSON')
+    .action(async ({ json }: { json?: boolean }) => {
+      try {
+        const { report, stored } = await refreshSeatPool();
+        process.stdout.write(`${json === true ? JSON.stringify(report, null, 2) : formatSeatPool(report)}\n`);
+        if (!stored) process.stderr.write('seat_pool_cache_write_failed: Could not save ~/.repo-harness/seats/pool.json for Settings.\n');
+      } catch (error) {
+        const failure = error instanceof SeatsConfigurationError
+          ? { code: error.code, message: error.message }
+          : { code: 'seat_pool_failed', message: 'Could not check seat model availability.' };
+        process.stderr.write(`${JSON.stringify({ ok: false, error: failure.code, message: failure.message })}\n`);
+        process.exitCode = 1;
+      }
+    });
   withSeatLabelOptions(seats
     .command('argv')
     .description('Print the argv that starts a seat, from the seats section of ~/.repo-harness/config.json'))

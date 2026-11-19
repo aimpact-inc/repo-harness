@@ -13,6 +13,7 @@ import {
   type QuotaReport,
 } from '../../src/core/board/quota';
 import { effectiveSeatConfig, formatSeatModes, formatSeatRoutes, seatAccountQuotas } from '../../src/core/board/seat-routing';
+import { decodeSeatPool } from '../../src/core/board/seat-pool';
 import { DEFAULT_SEATS_CONFIG, type CodexCreditMode, type SeatConfigV1 } from '../../src/core/board/seats-settings';
 
 const ROOT = join(import.meta.dir, '../..');
@@ -521,6 +522,142 @@ function configureAgySeats(home: string, advisorModel = 'magpie/agy-cli/gemini-4
     'worker-deep': workerDeep, routing: { ...DEFAULT_SEATS_CONFIG.routing, simple_fast: ['worker', 'worker-deep'] },
   } }));
 }
+
+const FAKE_SEAT_CATALOG = `#!${process.execPath}
+const { appendFileSync } = require('node:fs');
+const { basename } = require('node:path');
+const id = basename(process.argv[1]);
+const record = (call) => appendFileSync(process.env.SEAT_POOL_LOG, JSON.stringify({ id, call, cwd: process.cwd() }) + '\\n');
+const args = process.argv.slice(2).join(' ');
+record(args);
+const mode = id === 'claude' ? process.env.SEAT_POOL_CLAUDE : process.env.SEAT_POOL_CODEX;
+if (args === '--version') { console.log('99.0.0'); process.exit(0); }
+if (args === 'app-server --help') process.exit(0);
+if (args === 'auth status --json') {
+  console.log(JSON.stringify({ loggedIn: mode !== 'signed_out', email: 'private-catalog-fixture@example.invalid' }));
+  process.exit(mode === 'signed_out' ? 1 : 0);
+}
+if (args === 'login status') {
+  console.error(mode === 'signed_out' ? 'Not logged in' : 'Logged in using ChatGPT');
+  process.exit(mode === 'signed_out' ? 1 : 0);
+}
+if (!args.startsWith('-p --input-format stream-json') && args !== 'app-server --listen stdio://') process.exit(9);
+if (mode === 'catalog_error') { console.error('private-catalog-fixture'); process.exit(3); }
+const out = (payload) => console.log(JSON.stringify(payload));
+require('node:readline').createInterface({ input: process.stdin }).on('line', (line) => {
+  const message = JSON.parse(line);
+  const method = id === 'claude' ? message.request.subtype : message.method;
+  record(method);
+  switch (method) {
+    case 'list_models': out({ type: 'control_response', response: { request_id: message.request_id, subtype: 'success', response: { models: [
+      { value: 'opus' }, { value: 'sonnet', disabled: true, description: 'private-catalog-fixture' }, { value: 'private-free-id' },
+    ] } } }); break;
+    case 'initialize': out({ id: message.id, result: {} }); break;
+    case 'initialized': break;
+    case 'model/list': out({ id: message.id, result: { data: [{ model: 'gpt-6.2-sol' }, { model: 'gpt-6.2-astra', hidden: true }], nextCursor: null } }); break;
+    case 'config/read': out({ id: message.id, result: { config: { model: 'private-free-id' } } }); break;
+    default: process.exit(9);
+  }
+});
+`;
+
+function poolFixture(...runtimes: string[]) {
+  const f = fixture(null);
+  const bin = f.env.PATH;
+  const env = { ...f.env, BUN_INSTALL: mkdtempSync(join(f.home, 'bun-install-')), SEAT_POOL_LOG: join(f.home, 'pool-calls.jsonl') };
+  for (const id of runtimes) writeFileSync(join(bin, id), FAKE_SEAT_CATALOG, { mode: 0o755 });
+  const cache = join(f.home, '.repo-harness', 'seats', 'pool.json');
+  const run = (args: string[] = ['--json'], extra: Record<string, string> = {}) =>
+    spawnSync(process.execPath, [CLI, 'seats', 'pool', ...args], { cwd: ROOT, env: { ...env, ...extra }, encoding: 'utf8', timeout: 40_000 });
+  return { ...f, env, cache, run };
+}
+
+describe('rh seats pool', () => {
+  test('Pi uses PATH and the configured provider prefix without running Pi or agy', () => {
+    const f = poolFixture('pi', 'agy');
+    const seats = { ...DEFAULT_SEATS_CONFIG, routing: { ...DEFAULT_SEATS_CONFIG.routing, unavailable_pi_providers: ['magpie/group'] } };
+    writeFileSync(join(f.home, '.repo-harness', 'config.json'), JSON.stringify({ seats }));
+    const result = f.run();
+    expect(result.status, result.stderr).toBe(0);
+    const pool = decodeSeatPool(JSON.parse(result.stdout));
+    expect(pool.runtimes.find(entry => entry.id === 'pi')).toEqual({ id: 'pi', installation: 'available', sign_in: 'not_checked', models: 'not_checked' });
+    expect(pool.seats.find(row => row.seat === 'worker')?.pool).toMatchObject([{ model: 'zai/glm-5.3-flash', reason: 'pi on PATH; provider not checked' }]);
+    expect(pool.seats.find(row => row.seat === 'worker')?.excluded).toContainEqual(expect.objectContaining({ model: 'magpie/group/deepseek-v4.1-flash', status: 'provider_unavailable' }));
+    expect(pool.seats.find(row => row.seat === 'advisor')?.pool.map(entry => [entry.model, entry.account])).toEqual([
+      ['magpie/agy-cli/gemini-4-neon', 'agy_gemini'], ['magpie/agy-cli/gemini-4-carbon', 'agy_gemini'],
+    ]);
+    expect(result.stdout).not.toContain('signed in');
+    expect(existsSync(f.env.SEAT_POOL_LOG)).toBe(false);
+    expect(JSON.parse(readFileSync(f.cache, 'utf8'))).toEqual(JSON.parse(result.stdout));
+  });
+
+  test('Claude and Codex use only OAR installation, sign-in and catalogs and keep table order', () => {
+    const f = poolFixture('claude', 'codex');
+    const seats = { ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG.worker, model: 'private-free-id' } };
+    const config = JSON.stringify({ seats });
+    const configPath = join(f.home, '.repo-harness', 'config.json');
+    writeFileSync(configPath, config);
+    const result = f.run();
+    expect(result.status, result.stderr).toBe(0);
+    const report = decodeSeatPool(JSON.parse(result.stdout));
+    const row = report.seats.find(entry => entry.seat === 'worker')!;
+    expect(row.pool.map(entry => [entry.runtime, entry.model, entry.account])).toEqual([
+      ['claude', 'opus', 'claude'], ['codex', 'gpt-6.2-sol', 'chatgpt'],
+    ]);
+    expect(row.excluded.map(entry => [entry.model, entry.status])).toEqual([
+      ['sonnet', 'disabled'], ['gpt-6.1-terra', 'not_listed'], ['zai/glm-5.3-flash', 'not_installed'], ['magpie/group/deepseek-v4.1-flash', 'not_installed'],
+    ]);
+    expect(row.configured).toEqual({ field: 'seats.worker.model', table_entry: false, in_pool: false, reason: 'outside_recommendations' });
+    const calls = readFileSync(f.env.SEAT_POOL_LOG, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    expect(calls.map(({ id, call }) => `${id} ${call.startsWith('-p ') ? '-p' : call}`)).toEqual([
+      'claude --version', 'claude auth status --json', 'claude -p', 'claude list_models',
+      'codex app-server --help', 'codex --version', 'codex login status', 'codex app-server --listen stdio://',
+      'codex initialize', 'codex initialized', 'codex model/list', 'codex config/read',
+    ]);
+    expect(new Set(calls.map(({ cwd }) => cwd)).size).toBe(1);
+    expect(calls[0].cwd).toContain('/rh-seat-pool-');
+    const human = f.run([]);
+    expect(human.status, human.stderr).toBe(0);
+    expect(human.stdout).toContain('seats.worker.model');
+    for (const output of [result.stdout, result.stderr, human.stdout, human.stderr, readFileSync(f.cache, 'utf8')]) {
+      expect(output).not.toContain('private-free-id');
+      expect(output).not.toContain('private-catalog-fixture');
+    }
+    expect(readFileSync(configPath, 'utf8')).toBe(config);
+  });
+
+  test('a new probe replaces a stale signed-out result and maps a failed catalog to unknown', () => {
+    const f = poolFixture('claude', 'codex');
+    const negative = f.run(['--json'], { SEAT_POOL_CLAUDE: 'signed_out', SEAT_POOL_CODEX: 'signed_out' });
+    expect(negative.status, negative.stderr).toBe(0);
+    const old = decodeSeatPool(JSON.parse(negative.stdout));
+    const oldRow = old.seats.find(row => row.seat === 'orchestrator')!;
+    expect(oldRow.pool).toEqual([]);
+    expect(oldRow.excluded[0]).toMatchObject({ model: 'opus', status: 'signed_out', hint: 'Run claude auth login.' });
+    expect(readFileSync(f.env.SEAT_POOL_LOG, 'utf8')).not.toMatch(/list_models|model\/list/u);
+    writeFileSync(f.cache, JSON.stringify({ ...old, collected_at: '2026-11-01T00:00:00.000Z' }));
+    const fresh = f.run(['--json'], { SEAT_POOL_CODEX: 'catalog_error' });
+    expect(fresh.status, fresh.stderr).toBe(0);
+    const current = decodeSeatPool(JSON.parse(fresh.stdout));
+    expect(current.seats.find(row => row.seat === 'orchestrator')?.configured).toMatchObject({ table_entry: true, in_pool: true, reason: 'available' });
+    expect(current.seats.find(row => row.seat === 'worker')?.excluded).toContainEqual(expect.objectContaining({ model: 'gpt-6.2-sol', status: 'unknown' }));
+    expect(current.collected_at).not.toBe('2026-11-01T00:00:00.000Z');
+    expect(JSON.parse(readFileSync(f.cache, 'utf8'))).toEqual(JSON.parse(fresh.stdout));
+    expect(fresh.stderr).not.toContain('private-catalog-fixture');
+  });
+
+  test('a cache path with an unrelated file leaves the file intact and still reports the fresh pool', () => {
+    const f = poolFixture();
+    mkdirSync(join(f.home, '.repo-harness', 'seats'));
+    const ownerFile = JSON.stringify({ text: 'unrelated fixture' });
+    writeFileSync(f.cache, ownerFile);
+    const fresh = f.run();
+    expect(fresh.status, fresh.stderr).toBe(0);
+    expect(fresh.stderr).toContain('seat_pool_cache_write_failed');
+    expect(decodeSeatPool(JSON.parse(fresh.stdout)).seats.every(row => row.pool.length === 0)).toBe(true);
+    expect(readFileSync(f.cache, 'utf8')).toBe(ownerFile);
+  });
+});
 
 describe('rh quota', () => {
   test('reads both agy groups once through OAR and publishes only the fixed accounts and windows', () => {

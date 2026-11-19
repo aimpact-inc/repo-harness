@@ -10,6 +10,7 @@ import {
 import {
   SeatsConfigurationError,
   applySeatsSettings,
+  readSeatPoolCache,
   readSeatsConfiguration,
   seatsRanges,
   type SeatsConfigurationErrorCode,
@@ -38,8 +39,10 @@ export const SEATS_CONFIGURATION_FAILURES: Readonly<Record<SeatsConfigurationErr
 /** GET: the stored section, or the defaults, with its revision, the defaults and the ranges the form may offer. */
 export function readSeatsSettings(env?: NodeJS.ProcessEnv): SeatsSettingsV1 {
   const { revision, seats, enabled_runtimes } = readSeatsConfiguration(env);
-  return decodeSeatsSettings({ protocol: 1, kind: 'operator_seats_settings', config: { revision, ...seats },
+  const settings = decodeSeatsSettings({ protocol: 1, kind: 'operator_seats_settings', config: { revision, ...seats },
     defaults: DEFAULT_SEATS_CONFIG, ranges: seatsRanges(enabled_runtimes) });
+  const pool = readSeatPoolCache(env);
+  return pool === null ? settings : { ...settings, model_pool: pool };
 }
 
 /** POST: replaces the `seats` section of the host config. It starts, stops and changes no pane. */

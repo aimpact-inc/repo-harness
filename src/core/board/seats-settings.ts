@@ -4,6 +4,7 @@
 // The configuration effect checks the other model, effort and fleet ranges;
 // the GET body carries them as `ranges`, and the browser renders only that.
 import { DEFAULT_EXHAUSTED_AT_OR_ABOVE_USED, EXHAUSTED_AT_OR_ABOVE_USED_RANGE } from './quota';
+import type { SeatPoolCacheV1 } from './seat-pool';
 
 export const WORKER_SEAT_IDS = ['worker', 'worker-deep', 'worker-important', 'worker-important-fast', 'worker-light'] as const;
 export type WorkerSeatId = typeof WORKER_SEAT_IDS[number];
@@ -221,6 +222,7 @@ export interface SeatsSettingsV1 {
   /** The section an absent `seats` key reads as; the form shows it as the recommendation. */
   readonly defaults: SeatsConfigV1;
   readonly ranges: SeatsRangesV1;
+  readonly model_pool?: SeatPoolCacheV1;
 }
 
 /** POST /api/v1/settings/seats without `request_id`. `seats` replaces the whole section. */

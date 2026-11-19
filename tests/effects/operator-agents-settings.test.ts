@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -13,6 +13,8 @@ import {
   type AgentRuntimesCacheV1,
 } from '../../src/core/board/agents-settings';
 import { DEFAULT_SEATS_CONFIG, MODEL_FAMILY_LABELS, ROUTING_CLASSES, SEAT_IDS, WORKER_SEAT_IDS, decodeSeatsConfig, decodeSeatsSettings, type SeatRoutingV1 } from '../../src/core/board/seats-settings';
+import { SEAT_POOL_STALE_MS, buildSeatPool, emptySeatPoolProbe } from '../../src/core/board/seat-pool';
+import { fetchSeatsSettings } from '../../src/operator-web/seats';
 import { readSeatsSettings, seatsSettingsWriteRoute, SEATS_CONFIGURATION_FAILURES } from '../../src/effects/operator/seats-settings-route';
 import { applySeatsSettings, readSeatsConfiguration } from '../../src/effects/board/seats-configuration';
 import { buildSeatLaunch } from '../../src/core/board/seat-launch';
@@ -847,6 +849,47 @@ describe('seat settings contract without transport', () => {
 });
 
 describe('seat settings routes', () => {
+  test('settings GET and the browser decoder serve the cached pool, with a stale mark and no free model id in the pool', async () => {
+    const freeModel = 'private-settings-model';
+    const config = { ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG.worker, model: freeModel } };
+    const harness = await startHarness({ agents: PANE_AGENTS, seats: config });
+    const directory = join(harness.home, '.repo-harness', 'seats');
+    const path = join(directory, 'pool.json');
+    const endpoint = `${harness.server.url}/api/v1/settings/seats`;
+    expect((await (await fetch(endpoint)).json()).model_pool).toBeUndefined();
+    expect(existsSync(directory)).toBe(false);
+    mkdirSync(directory);
+    const pi = emptySeatPoolProbe('pi', 'available');
+    const report = buildSeatPool(config, [pi], new Date().toISOString());
+    writeFileSync(path, JSON.stringify(report));
+    const ready = await (await fetch(endpoint)).json();
+    expect(ready.model_pool).toEqual({ status: 'ready', report });
+    expect(ready.config.worker.model).toBe(freeModel);
+
+    const old = { ...report, collected_at: new Date(Date.now() - SEAT_POOL_STALE_MS).toISOString() };
+    const edited = { ...old, seats: old.seats.map(row => row.seat !== 'worker' ? row : {
+      ...row, configured: { ...row.configured, field: freeModel },
+      pool: row.pool.map(entry => ({ ...entry, reason: freeModel, account: freeModel })),
+    }) };
+    const written = JSON.stringify(edited);
+    writeFileSync(path, written);
+    const realFetch = globalThis.fetch;
+    const browserFetch = spyOn(globalThis, 'fetch').mockImplementation(Object.assign(
+      (...[url, init]: Parameters<typeof fetch>) => realFetch(url === '/api/v1/settings/seats' ? endpoint : url, init),
+      { preconnect: realFetch.preconnect },
+    ));
+    try {
+      const read = await fetchSeatsSettings(new AbortController().signal);
+      expect(read.state).toBe('ok');
+      if (read.state !== 'ok') throw new Error('Expected settings');
+      expect(read.settings.model_pool).toEqual({ status: 'stale', report: old });
+      expect(read.settings.model_pool?.report.seats.find(row => row.seat === 'worker')?.configured).toEqual({
+        field: 'seats.worker.model', table_entry: false, in_pool: false, reason: 'outside_recommendations',
+      });
+      expect(JSON.stringify(read.settings.model_pool)).not.toContain(freeModel);
+      expect(readFileSync(path, 'utf8')).toBe(written);
+    } finally { browserFetch.mockRestore(); }
+  });
   test('a configured Pi worker-light in a non-frontend class saves and reads back', async () => {
     const harness = await startHarness({ agents: PANE_AGENTS });
     const { revision, ...section } = (await seats(harness)).config;
