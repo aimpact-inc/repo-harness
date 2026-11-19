@@ -5,7 +5,7 @@ import { bunGlobalPackageRoot, expectedSkillProjections } from './skill-projecti
 import { configurationReceiptPath } from './configuration-ownership';
 import { expectedOf, hostConfigPaths, hostConfigPathsAt, observeFile, putVault, removeTarget, replaceTarget, repositoryLedgers, resolveHostPath } from '../../effects/host-config/store';
 import { ensureSelfIgnoringDirectory, isSelfIgnoreGuard, SELF_IGNORE_NAME } from '../../effects/self-ignoring-directory';
-import { openHostConfigGate, planPathRevert, rollbackHostConfigTransaction } from '../../effects/host-config/gate';
+import { openHostConfigGate, planPathRevert, recoverRetiredPathWrites, rollbackHostConfigTransaction } from '../../effects/host-config/gate';
 import { namingTomlFile } from '../../core/host-config/toml-fragment';
 import { migrateCodexConfigRecords } from './codex-config-migration';
 import { migrateJsonConfigRecords } from './json-config-migration';
@@ -279,13 +279,62 @@ export function ownerForInstallPath(path: string, env: NodeJS.ProcessEnv = proce
   return null;
 }
 
+function fleetTargets(home: string, roles: readonly string[]) {
+  return roles.flatMap((agent) => [
+    { host: 'codex' as const, path: join(home, '.codex', 'agents', `${agent}.toml`) },
+    { host: 'claude' as const, path: join(home, '.claude', 'agents', `${agent}.md`) },
+  ]);
+}
+
 /** Generated agent fleet targets written by scripts/install-agent-fleet.sh. */
 export function agentFleetTargetPaths(env: NodeJS.ProcessEnv = process.env): readonly string[] {
-  const home = requireHome(env);
-  return MANAGED_AGENTS.flatMap((agent) => [
-    join(home, '.codex', 'agents', `${agent}.toml`),
-    join(home, '.claude', 'agents', `${agent}.md`),
-  ]);
+  return fleetTargets(requireHome(env), MANAGED_AGENTS).map(({ path }) => path);
+}
+
+const RETIRED_AGENT_ROLES = ['fast-worker', 'deep-worker', 'root-cause-prover', 'gatekeeper'];
+
+// #3306 keeps these exact historical paths readable while older installs or their vault copies can still name them.
+export function retiredAgentFleetTargets(env: NodeJS.ProcessEnv) {
+  return fleetTargets(requireHome(env), RETIRED_AGENT_ROLES);
+}
+
+/** Exclude legacy adoption by recorded host and filename even after the user moves the host root. */
+export function isHistoricalRetiredAgentRecord(key: string, record: PathRecord): boolean {
+  if (record.owner !== 'core' || record.committed.type !== 'file' || (record.host !== 'claude' && record.host !== 'codex')) return false;
+  const filename = basename(key);
+  const extension = record.host === 'claude' ? '.md' : '.toml';
+  return RETIRED_AGENT_ROLES.some(role => filename === `${role}${extension}`);
+}
+
+function recordKeyOrNull(env: NodeJS.ProcessEnv, path: string): string | null {
+  try { return pathRecordKey(env, path); } catch { return null; }
+}
+
+function retiredAgentKeys(env: NodeJS.ProcessEnv): ReadonlyMap<string, 'codex' | 'claude'> {
+  const keys = new Map<string, 'codex' | 'claude'>();
+  for (const { path, host } of retiredAgentFleetTargets(env)) {
+    const key = recordKeyOrNull(env, path);
+    if (key !== null) keys.set(key, host);
+  }
+  return keys;
+}
+
+export function retiredAgentRecordCheck(env: NodeJS.ProcessEnv): (key: string, record: PathRecord) => boolean {
+  const hosts = retiredAgentKeys(env);
+  return (key, record) => hosts.get(key) === record.host && isHistoricalRetiredAgentRecord(key, record);
+}
+
+/** Called under the global runtime lock before rebuilding the ledger or taking a new snapshot. */
+export function recoverRetiredAgentFleet(env: NodeJS.ProcessEnv, transaction?: string): void {
+  recoverRetiredPathWrites(hostConfigPaths(env), retiredAgentKeys(env), transaction);
+}
+
+/** Retire recorded agents inside the install/update transaction. */
+export function retireAgentFleet(env: NodeJS.ProcessEnv, transaction: string) {
+  const isRetired = retiredAgentRecordCheck(env);
+  const retired = Object.entries(readPathRecords(env)).filter(([key, record]) => isRetired(key, record)).map(([key]) => key);
+  if (!retired.length) return [];
+  return openHostConfigGate({ env }).revertPaths(retired, { transaction, retire: true });
 }
 
 const FLEET_RECEIPT = 'agent-fleet-user-managed.json';
@@ -384,23 +433,20 @@ export function installProfileHostMutationPaths(env: NodeJS.ProcessEnv = process
 
 /**
  * The install surfaces that a path record may name: the host mutation paths,
- * and a repo-harness-* facade in a host skill root (also one that later left
- * the catalog), by key; a `user_managed` record names a fleet file only; the
- * owner is `core` or a plugin. The protocol 3 reader accepted the same set. A
- * record outside it never grants a write or a removal.
+ * a repo-harness-* facade in a host skill root, and the exact retired fleet
+ * paths for retirement and vault recovery. A record outside this set never
+ * grants a write or a removal.
  */
 export function supportedPathRecord(env: NodeJS.ProcessEnv): (key: string, record: PathRecord) => boolean {
-  const keyOf = (path: string): string | null => {
-    try { return pathRecordKey(env, path); } catch { return null; }
-  };
-  const keys = (paths: readonly string[]) => new Set(paths.map(keyOf).filter((key): key is string => key !== null));
+  const keys = (paths: readonly string[]) => new Set(paths.map(path => recordKeyOrNull(env, path)).filter((key): key is string => key !== null));
+  const isRetired = retiredAgentRecordCheck(env);
   const { repoHarnessSkills } = catalogMutationPathSkillNames(loadSkillSurfaceCatalog());
   const allowed = keys([...installProfileHostMutationPaths(env), ...effectiveSkillRoots(PLUGIN_IDS, env).flatMap(root => repoHarnessSkills.map(name => join(root, name)))]);
   const fleet = keys(agentFleetTargetPaths(env));
   const facadeRoots = new Set([...keys(hostSkillRoots(requireHome(env), env).map((root) => join(root, FACADE_NAME_PREFIX)))].map((key) => dirname(key)));
-  return (key, record) => isSurfaceOwner(record.owner) && (record.kind === 'user_managed'
+  return (key, record) => isRetired(key, record) || (isSurfaceOwner(record.owner) && (record.kind === 'user_managed'
     ? fleet.has(key)
-    : allowed.has(key) || (basename(key).startsWith(FACADE_NAME_PREFIX) && facadeRoots.has(dirname(key))));
+    : allowed.has(key) || (basename(key).startsWith(FACADE_NAME_PREFIX) && facadeRoots.has(dirname(key)))));
 }
 
 registerSupportedPathRecords(supportedPathRecord);
@@ -1000,11 +1046,14 @@ function validSurfaceShape(raw: Record<string, unknown>, env: NodeJS.ProcessEnv)
       && raw.content_hash === null && raw.symlink_target === null;
   }
   const allowedPaths = new Set(installProfileHostMutationPaths(env));
+  const retired = retiredAgentFleetTargets(env).some(({ path }) => path === raw.path);
+  if (retired && !(raw.owner === 'core' && raw.type === 'managed-file' && raw.managed_marker === 'transaction-created-file'
+    && typeof raw.content_hash === 'string' && /^sha256:[a-f0-9]{64}$/.test(raw.content_hash))) return false;
   return (
     raw.authority === 'repo-harness-install-transaction'
     && raw.removal === 'managed-surfaces-only'
     && typeof raw.path === 'string'
-    && (allowedPaths.has(raw.path) || isDiscoveredFacadePath(raw.path, requireHome(env), env))
+    && (retired || allowedPaths.has(raw.path) || isDiscoveredFacadePath(raw.path, requireHome(env), env))
     && ['directory-copy', 'symlink', 'managed-file'].includes(String(raw.type))
     && (raw.content_hash === null || typeof raw.content_hash === 'string')
     && (raw.managed_marker === null || typeof raw.managed_marker === 'string')
@@ -1112,9 +1161,7 @@ function probeCore(env: NodeJS.ProcessEnv, catalog: SkillSurfaceCatalog, hosts: 
     'workflow': canonicalEvidence(home, hosts, ['src/core/workflow/profile.ts'], env),
     'core-skills': completeHostSkillSetEvidence(home, hosts, coreFacades, env, refused),
     'agent-fleet': fleet,
-    'verifier': fleet.some((path) => /\/gatekeeper\.(?:toml|md)$/.test(path))
-      ? canonicalEvidence(home, hosts, ['src/effects/review-runner/task-oar-host.ts'], env)
-      : [],
+    'verifier': canonicalEvidence(home, hosts, ['src/effects/review-runner/task-oar-host.ts'], env),
     'release-gates': allOrNone(home, hosts, ['scripts/verify-sprint.sh', 'scripts/ship-worktrees.sh'], env),
   });
 }

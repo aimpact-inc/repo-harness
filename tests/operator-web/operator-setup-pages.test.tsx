@@ -310,7 +310,7 @@ describe('Agents page', () => {
     expect(all('[data-host-row]').map(row => row.getAttribute('data-host-row'))).toEqual(['claude', 'codex', 'pi']);
     expect(text('[data-host-row="claude"] [data-host-sentence]')).toBe('Connected · 5/5 managed hooks');
     expect(text('[data-host-row="codex"]')).toContain('v0.162.0');
-    expect(all('[data-fleet-role]')).toHaveLength(7);
+    expect(all('[data-fleet-role]').map(row => row.getAttribute('data-fleet-role'))).toEqual(['deep-reasoner', 'explorer', 'harness-evaluator']);
   });
 
   test('a stale read keeps its data, shows its age and reason, and lists failures first', async () => {
@@ -329,7 +329,7 @@ describe('Agents page', () => {
     expect(text('[data-host-row="codex"] [data-host-mismatch-summary]')).toContain('SubagentStart · context · missing');
     expect(text('[data-host-row="codex"] [data-command]')).toContain('rh install --host codex');
     expect(text('[data-host-row="claude"] [data-host-sentence]')).toBe('Connected · 5/5 managed hooks · projection not compared');
-    expect(text('[data-fleet-role="gatekeeper"] [data-host-cell="codex"]')).toContain('missing');
+    expect(text('[data-fleet-role="harness-evaluator"] [data-host-cell="codex"]')).toContain('missing');
     // A check without a command says so instead of inventing one.
     expect(text('[data-check="runtime.skills_cli"]')).toContain('No command · see details');
     // The multi-line detail opens below its row only on request.

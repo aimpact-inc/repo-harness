@@ -70,12 +70,8 @@ function readySkills(): SetupSkill[] {
 
 const FLEET: readonly (Omit<SetupFleetRole, 'hosts'>)[] = [
   { name: 'deep-reasoner', model: 'opus', effort: 'xhigh', description: 'Architecture research and judgment executor on Opus at xhigh effort.' },
-  { name: 'deep-worker', model: 'opus', effort: 'high', description: 'Heavy execution worker on Opus at high effort for hard, well-scoped execution.' },
   { name: 'explorer', model: 'sonnet', effort: 'medium', description: 'Read-only codebase explorer on Sonnet at medium effort.' },
-  { name: 'fast-worker', model: 'sonnet', effort: 'high', description: 'Fast execution worker on Sonnet at high effort.' },
-  { name: 'gatekeeper', model: 'opus', effort: 'high', description: 'Read-only acceptance reviewer on Opus at high effort.' },
   { name: 'harness-evaluator', model: 'opus', effort: 'high', description: 'Disposable-state harness behavior evaluator on Opus at high effort.' },
-  { name: 'root-cause-prover', model: 'opus', effort: 'xhigh', description: 'Bugfix diagnosis specialist on Opus at xhigh effort.' },
 ];
 
 
@@ -143,7 +139,7 @@ export function degradedSetup(now: number): SetupSnapshotV2 {
       },
       {
         id: 'tooling.agent_fleet', status: 'fail', title: 'External tooling: agent_fleet',
-        detail: 'missing; codex lacks gatekeeper and harness-evaluator', command: 'rh install --host codex',
+        detail: 'missing; codex lacks harness-evaluator', command: 'rh install --host codex',
       },
       {
         id: 'doctor.security-config', status: 'needs_agent', title: 'Local hook and VS Code automatic task security scan',
@@ -168,7 +164,7 @@ export function degradedSetup(now: number): SetupSnapshotV2 {
     hook_usage: null,
     fleet: FLEET.map(role => ({
       ...role,
-      hosts: { claude: 'installed', codex: role.name === 'gatekeeper' || role.name === 'harness-evaluator' ? 'missing' : 'installed', pi: null },
+      hosts: { claude: 'installed', codex: role.name === 'harness-evaluator' ? 'missing' : 'installed', pi: null },
     })),
   };
 }

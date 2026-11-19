@@ -1646,7 +1646,7 @@ describe('install selection', () => {
     writeFileSync(custom, customContent);
     expect(runFleet('--accept-user-managed').status).toBe(0);
 
-    const pristine = join(home, '.codex', 'agents', 'deep-worker.toml');
+    const pristine = join(home, '.codex', 'agents', 'deep-reasoner.toml');
     applyInstallSelection('all', ALL_PLUGINS, env);
     // The fleet records its own writes through the gate.
     expect(ownedPath(env, pristine)?.kind).toBe('created');
@@ -1680,7 +1680,7 @@ describe('install selection', () => {
     }
     const upgraded = runFleet();
     expect(upgraded.status).toBe(0);
-    expect(upgraded.stdout).toContain('[fleet] codex/deep-worker.toml: installed');
+    expect(upgraded.stdout).toContain('[fleet] codex/deep-reasoner.toml: installed');
     expect(upgraded.stdout).toContain('[fleet] codex/explorer.toml: user-managed');
     expect(readFileSync(pristine, 'utf-8')).toContain('Updated role instruction.');
     expect(readFileSync(custom, 'utf-8')).toBe(customContent);

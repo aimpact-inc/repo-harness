@@ -946,7 +946,11 @@ describe('install command global runtime bootstrap', () => {
       });
       const fleet = result.steps.find((step) => step.step === 'install agent fleet');
       expect(fleet?.status, `${fleet?.stderr ?? ''}${fleet?.stdout ?? ''}`).toBe('ok');
-      expect(existsSync(join(home, '.codex', 'agents', 'fast-worker.toml'))).toBe(true);
+      for (const [host, ext] of [['claude', 'md'], ['codex', 'toml']]) {
+        expect(readdirSync(join(home, `.${host}`, 'agents')).sort()).toEqual(
+          ['deep-reasoner', 'explorer', 'harness-evaluator'].map(role => `${role}.${ext}`),
+        );
+      }
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

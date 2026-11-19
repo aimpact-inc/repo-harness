@@ -8,7 +8,7 @@ import { hostSkillRoot, providerSkillLock, type ProviderSkillLock } from '../../
 import { piPackageEntry, piPackageRemoval, recordedPiPackages, removePiPackage } from './pi-package';
 import { globalContextPath, inspectUnrecordedGlobalRules, previewGlobalRulesAdoptedRevert } from './global-context';
 import { legacyRepositoryExcludesPath } from './repository-excludes';
-import { readInstallState } from './install-profile';
+import { isHistoricalRetiredAgentRecord, readInstallState, retiredAgentRecordCheck } from './install-profile';
 import { installStatePendingMigration, migrateInstallState, planInstallStateMigration } from './install-state-migration';
 import type { PathRecord } from '../../core/host-config/types';
 import { partitionPathRecords, pathRecordRoot, pathRecordsDigest, readPathRecords, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
@@ -111,14 +111,15 @@ function readUninstallState(opts: UninstallOptions) {
   const files = hostConfigFiles(home, opts.target);
   const codexMigration = files.codex ? planCodexConfigMigration(env) : null;
   const jsonMigration = files.json.length ? planJsonConfigMigration(env, files.json) : null;
-  // A dry run on a protocol 3 state plans with the migration's projection and writes nothing.
-  const projected = opts.dryRun && installStatePendingMigration(env) ? planInstallStateMigration(env) : null;
+  // A dry run sees both legacy state and a standalone fleet receipt as the migration would leave them.
+  const projected = opts.dryRun ? planInstallStateMigration(env) : null;
   const state = projected?.state ?? readInstallState(env);
-  // A dry run reads the ledger as the schema move would leave it.
-  const records = projected ? projected.records : !state ? {} : opts.dryRun ? partitionPathRecords(env, projectedLedgerPaths(hostConfigPaths(env))).records : readPathRecords(env);
-  // The Pi package entries that the ledger records under owner `pi`, or that the migration would record as their current text.
+  const records = !state ? {} : projected ? projected.records : opts.dryRun
+    ? partitionPathRecords(env, projectedLedgerPaths(hostConfigPaths(env), isHistoricalRetiredAgentRecord)).records
+    : readPathRecords(env);
+  // Only an install-state migration supplies Pi package claims. A fleet receipt leaves the Pi ledger in force.
   const piPackages: ReadonlyMap<string, string> = opts.target !== 'both' ? new Map()
-    : projected ? new Map(projected.piPackages.flatMap((source) => { const text = piPackageEntry(source, env); return text === null ? [] : [[source, text] as const]; }))
+    : projected?.state ? new Map(projected.piPackages.flatMap((source) => { const text = piPackageEntry(source, env); return text === null ? [] : [[source, text] as const]; }))
     : recordedPiPackages(env, openHostConfigGate({ env, preview: opts.dryRun === true }));
   return { state, records, piPackages, lock, files, codexMigration, jsonMigration };
 }
@@ -138,6 +139,8 @@ const BASELINE_UNKNOWN = 'baseline unknown: equality with the file before instal
 const KEPT_CODES: Readonly<Partial<Record<NonNullable<HostConfigRevertEntry['code']>, string>>> = {
   host_config_entry_replaced: 'holds the bytes that rh wrote, but it is another file-system entry (a copy or a restore); preserved',
   host_config_identity_missing: 'rh recorded no identity for it, so nothing proves that rh wrote it; preserved',
+  host_config_entry_absent: 'this retired agent is absent; its recovery record stays',
+  host_config_retired_link: 'this retired agent uses a link to another file; preserved',
 };
 
 /** The report item of one gate revert entry; `rh config restore` uses the same mapping. */
@@ -345,6 +348,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       removedPi.add(source);
     } catch (error) { unresolved(source, (error as Error).message); }
   }
+  const isRetiredAgent = retiredAgentRecordCheck(env);
   for (const [key, record] of Object.entries(records) as [string, PathRecord][]) {
     // The host comes from the path as the install named it, so a linked ~/.claude still is `claude`.
     if (opts.target !== 'both' && record.host !== opts.target) continue;
@@ -365,7 +369,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       // A record may own the final symlink, but never a symlinked parent directory.
       assertConfigurationPath(dirname(key), surfaceRoot(key));
       // The records of a dry-run migration are not in the ledger yet, so the plan reads them from `records`.
-      const entry = planPathRevertEntry(hostConfigPaths(env), key, record);
+      const entry = planPathRevertEntry(hostConfigPaths(env), key, record, isRetiredAgent(key, record));
       const { action } = entry;
       if (action === 'kept_edited') { items.push(revertItem(entry)); continue; }
       pathReverts.set(key, entry);
@@ -437,8 +441,13 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       for (const [source, recorded] of piRemovals) removePiPackage(source, recorded, env);
       const surfaces = [...removedSurfaces];
       if ((surfaces.length || retireRecords) && pathRecordsDigest(readPathRecords(env)) !== recordsDigest) throw new Error(`configuration changed after preview: ${hostConfigPaths(env).ledger}`);
-      // The gate undoes each entry and then drops its record, so a stop between them leaves a record of a missing path, which a retry releases.
-      if (surfaces.length && !sameRevert(gate.revertPaths(surfaces), surfaces.map((key) => pathReverts.get(key)!))) throw new Error(`configuration changed after preview: ${surfaces.join(', ')}`);
+      // Hold retired recovery records even if a target disappears between preview and apply.
+      const retired = surfaces.filter(key => isRetiredAgent(key, records[key]!));
+      const active = surfaces.filter(key => !isRetiredAgent(key, records[key]!));
+      if ((active.length && !sameRevert(gate.revertPaths(active), active.map(key => pathReverts.get(key)!)))
+        || (retired.length && !sameRevert(gate.revertPaths(retired, { retire: true }), retired.map(key => pathReverts.get(key)!)))) {
+        throw new Error(`configuration changed after preview: ${surfaces.join(', ')}`);
+      }
       if (retireRecords) writePathRecords(env, {});
       for (const [path, content] of writes) {
         assertConfigurationPath(path, surfaceRoot(path));

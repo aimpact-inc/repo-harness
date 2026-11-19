@@ -31,7 +31,7 @@ const ROOT = join(import.meta.dir, "..");
 const SCRIPT = join(ROOT, "scripts/check-agent-tooling.sh");
 const WAZA_SKILLS = ["think", "hunt", "check", "health"];
 const WAZA_RULES = ["anti-patterns.md", "chinese.md", "durable-context.md", "english.md"];
-const MANAGED_AGENTS = ["explorer", "deep-reasoner", "fast-worker", "deep-worker", "gatekeeper", "root-cause-prover", "harness-evaluator"];
+const MANAGED_AGENTS = ["explorer", "deep-reasoner", "harness-evaluator"];
 const FLEET_SOURCE_DIR = join(ROOT, "agents/fleet");
 // The first lines of `hc --skill` from the pinned herdr-core 0.1.17 release.
 const HERDR_SKILL = "# hc manual (herdr-core)\n\nThe current manual for herdr-core's CLI, `hc`.\n`$HC_TERMINAL_ID` is your address. Terminals you start are your children.\n";
@@ -1098,7 +1098,7 @@ describe("check-agent-tooling", () => {
       writeFakeCodeGraph(envRoot.fakeBin);
 
       mkdirSync(join(envRoot.home, ".claude", "agents"), { recursive: true });
-      for (const agent of ["deep-reasoner", "fast-worker"]) {
+      for (const agent of ["deep-reasoner", "harness-evaluator"]) {
         copyFileSync(join(FLEET_SOURCE_DIR, `${agent}.md`), join(envRoot.home, ".claude", "agents", `${agent}.md`));
       }
 
@@ -1118,13 +1118,9 @@ describe("check-agent-tooling", () => {
       expect(report.tools.codegraph.status).toBe("present");
       expect(report.tools.agent_fleet.status).toBe("partial");
       expect(report.tools.agent_fleet.hosts.claude.status).toBe("partial");
-      expect(report.tools.agent_fleet.hosts.claude.installed_agents).toEqual(["deep-reasoner", "fast-worker"]);
+      expect(report.tools.agent_fleet.hosts.claude.installed_agents).toEqual(["deep-reasoner", "harness-evaluator"]);
       expect(report.tools.agent_fleet.hosts.claude.missing_agents).toEqual([
         "explorer",
-        "deep-worker",
-        "gatekeeper",
-        "root-cause-prover",
-        "harness-evaluator",
       ]);
       expect(res.stderr).toContain("Agent fleet readiness is partial");
       expect(res.stderr.toLowerCase()).toContain("fleet");
@@ -1233,23 +1229,23 @@ describe("check-agent-tooling", () => {
             reason: `fixture ${testCase.evidenceStatus}`,
             agent_id: semanticStatus === "unverified" ? null : "agent-a",
             turn_id: semanticStatus === "unverified" ? null : "turn-a",
-            agent_type: semanticStatus === "unavailable" ? "default" : semanticStatus === "unverified" ? null : "fast-worker",
+            agent_type: semanticStatus === "unavailable" ? "default" : semanticStatus === "unverified" ? null : "harness-evaluator",
             observed_model: semanticStatus === "unverified" ? null : semanticStatus === "mismatch" ? "gpt-5.6-sol" : "gpt-5.6-terra",
             configured_model: semanticStatus === "unavailable" || testCase.evidenceStatus === "unverified" ? null : "gpt-5.6-terra",
             config_path: testCase.evidenceStatus === "malformed-verified"
               ? null
               : semanticStatus === "unavailable" || testCase.evidenceStatus === "unverified"
                 ? null
-                : join(envRoot.home, ".codex", "agents", "fast-worker.toml"),
+                : join(envRoot.home, ".codex", "agents", "harness-evaluator.toml"),
             config_sha256: semanticStatus === "unavailable" || testCase.evidenceStatus === "malformed-verified" || testCase.evidenceStatus === "unverified"
               ? null
-              : sha256File(join(envRoot.home, ".codex", "agents", "fast-worker.toml")),
+              : sha256File(join(envRoot.home, ".codex", "agents", "harness-evaluator.toml")),
             ...("omitObservationEffort" in testCase ? {} : { reasoning_effort_status: "configured_unverified" }),
             checked_at: "2026-07-12T00:00:00.000Z",
           }, null, 2)}\n`,
         );
         if (testCase.evidenceStatus === "verified-config-drift") {
-          const configPath = join(envRoot.home, ".codex", "agents", "fast-worker.toml");
+          const configPath = join(envRoot.home, ".codex", "agents", "harness-evaluator.toml");
           writeFileSync(configPath, `${readFileSync(configPath, "utf8")}# drift\n`);
         }
         writeFakeCodeGraph(envRoot.fakeBin);
@@ -1313,8 +1309,8 @@ describe("check-agent-tooling", () => {
           session_id: "session-hook-e2e",
           turn_id: "turn-hook-e2e",
           agent_id: "agent-hook-e2e",
-          agent_type: "fast-worker",
-          model: "gpt-6.2-sol",
+          agent_type: "harness-evaluator",
+          model: "gpt-6.2-astra",
         },
         identity: { host: "codex", sessionId: "session-hook-e2e", runId: null, turnId: "turn-hook-e2e" },
       });
@@ -1336,8 +1332,8 @@ describe("check-agent-tooling", () => {
       expect(report.tools.agent_fleet.native_role_routing.status).toBe("verified");
       expect(report.tools.agent_fleet.native_role_routing.observations).toEqual([
         expect.objectContaining({
-          agent_type: "fast-worker",
-          observed_model: "gpt-6.2-sol",
+          agent_type: "harness-evaluator",
+          observed_model: "gpt-6.2-astra",
           reasoning_effort_status: "configured_unverified",
         }),
       ]);
@@ -1353,7 +1349,7 @@ describe("check-agent-tooling", () => {
         payload: {
           hook_event_name: "SubagentStart",
           session_id: "session-hook-e2e",
-          agent_type: "fast-worker",
+          agent_type: "harness-evaluator",
           model: "gpt-5.6-luna",
         },
         identity: { host: "codex", sessionId: "session-hook-e2e", runId: null, turnId: null },
@@ -1413,11 +1409,11 @@ describe("check-agent-tooling", () => {
         status: "verified",
         reason: "verified child",
         agent_id: "agent-verified",
-        agent_type: "fast-worker",
+        agent_type: "harness-evaluator",
         observed_model: "gpt-5.6-sol",
         configured_model: "gpt-5.6-sol",
-        config_path: join(envRoot.home, ".codex", "agents", "fast-worker.toml"),
-        config_sha256: sha256File(join(envRoot.home, ".codex", "agents", "fast-worker.toml")),
+        config_path: join(envRoot.home, ".codex", "agents", "harness-evaluator.toml"),
+        config_sha256: sha256File(join(envRoot.home, ".codex", "agents", "harness-evaluator.toml")),
       })}\n`);
       mkdirSync(join(delegationRoot, "role-routing", "empty-current"), { recursive: true });
       writeFileSync(join(delegationRoot, "native-role-routing.json"), `${JSON.stringify({
@@ -1495,7 +1491,7 @@ describe("check-agent-tooling", () => {
       for (const agent of MANAGED_AGENTS) {
         localContent[agent] = readFileSync(join(FLEET_SOURCE_DIR, `${agent}.md`), "utf-8");
       }
-      localContent["fast-worker"] += "\n# local drift\n";
+      localContent["harness-evaluator"] += "\n# local drift\n";
 
       mkdirSync(join(envRoot.home, ".claude", "agents"), { recursive: true });
       mkdirSync(join(envRoot.home, ".codex", "agents"), { recursive: true });
@@ -1524,14 +1520,10 @@ describe("check-agent-tooling", () => {
       const report = JSON.parse(res.stdout);
       const claude = report.tools.agent_fleet.hosts.claude;
       expect(claude.update_status).toBe("drift");
-      expect(claude.drift_agents).toEqual(["fast-worker"]);
+      expect(claude.drift_agents).toEqual(["harness-evaluator"]);
       expect(claude.synced_agents).toEqual([
         "explorer",
         "deep-reasoner",
-        "deep-worker",
-        "gatekeeper",
-        "root-cause-prover",
-        "harness-evaluator",
       ]);
       expect(claude.source_missing_agents).toEqual([]);
       expect(claude.user_managed_agents).toEqual([]);
@@ -1556,7 +1548,7 @@ describe("check-agent-tooling", () => {
         localContent[agent] = readFileSync(join(FLEET_SOURCE_DIR, `${agent}.md`), "utf-8");
       }
       localContent["deep-reasoner"] += "\n# user-managed customization\n";
-      localContent["gatekeeper"] += "\n# user-managed customization\n";
+      localContent["explorer"] += "\n# user-managed customization\n";
 
       mkdirSync(join(envRoot.home, ".claude", "agents"), { recursive: true });
       mkdirSync(join(envRoot.home, ".codex", "agents"), { recursive: true });
@@ -1571,8 +1563,8 @@ describe("check-agent-tooling", () => {
           sha256: sha256Text(localContent["deep-reasoner"]),
         },
         {
-          path: join(envRoot.home, ".claude", "agents", "gatekeeper.md"),
-          sha256: sha256Text(localContent["gatekeeper"]),
+          path: join(envRoot.home, ".claude", "agents", "explorer.md"),
+          sha256: sha256Text(localContent["explorer"]),
         },
       ]);
 
@@ -1597,16 +1589,12 @@ describe("check-agent-tooling", () => {
       const claude = report.tools.agent_fleet.hosts.claude;
       expect(claude.update_status).toBe("up-to-date");
       expect(claude.drift_agents).toEqual([]);
-      expect(claude.user_managed_agents).toEqual(["deep-reasoner", "gatekeeper"]);
+      expect(claude.user_managed_agents).toEqual(["explorer", "deep-reasoner"]);
       expect(claude.synced_agents).toEqual([
-        "explorer",
-        "fast-worker",
-        "deep-worker",
-        "root-cause-prover",
         "harness-evaluator",
       ]);
       expect(claude.source_missing_agents).toEqual([]);
-      expect(claude.update_reason).toContain("deep-reasoner, gatekeeper");
+      expect(claude.update_reason).toContain("explorer, deep-reasoner");
       const codex = report.tools.agent_fleet.hosts.codex;
       expect(codex.user_managed_agents).toEqual([]);
 
@@ -1621,7 +1609,7 @@ describe("check-agent-tooling", () => {
         },
       });
       expect(textRes.status).toBe(0);
-      expect(textRes.stdout).toContain("user-managed (receipt): deep-reasoner, gatekeeper");
+      expect(textRes.stdout).toContain("user-managed (receipt): explorer, deep-reasoner");
       expect(textRes.stdout).not.toContain("updates: drift");
     } finally {
       rmSync(envRoot.root, { recursive: true, force: true });
@@ -1635,8 +1623,8 @@ describe("check-agent-tooling", () => {
       for (const agent of MANAGED_AGENTS) {
         localContent[agent] = readFileSync(join(FLEET_SOURCE_DIR, `${agent}.md`), "utf-8");
       }
-      const acceptedContent = `${localContent["fast-worker"]}\n# accepted customization\n`;
-      localContent["fast-worker"] = `${acceptedContent}\n# edited again after acceptance\n`;
+      const acceptedContent = `${localContent["harness-evaluator"]}\n# accepted customization\n`;
+      localContent["harness-evaluator"] = `${acceptedContent}\n# edited again after acceptance\n`;
 
       mkdirSync(join(envRoot.home, ".claude", "agents"), { recursive: true });
       mkdirSync(join(envRoot.home, ".codex", "agents"), { recursive: true });
@@ -1649,7 +1637,7 @@ describe("check-agent-tooling", () => {
       // file's current (further-edited) content, so it must not exempt it.
       writeUserManagedRecords(envRoot.home, [
         {
-          path: join(envRoot.home, ".claude", "agents", "fast-worker.md"),
+          path: join(envRoot.home, ".claude", "agents", "harness-evaluator.md"),
           sha256: sha256Text(acceptedContent),
         },
       ]);
@@ -1674,7 +1662,7 @@ describe("check-agent-tooling", () => {
       const report = JSON.parse(res.stdout);
       const claude = report.tools.agent_fleet.hosts.claude;
       expect(claude.update_status).toBe("drift");
-      expect(claude.drift_agents).toEqual(["fast-worker"]);
+      expect(claude.drift_agents).toEqual(["harness-evaluator"]);
       expect(claude.user_managed_agents).toEqual([]);
     } finally {
       rmSync(envRoot.root, { recursive: true, force: true });
