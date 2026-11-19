@@ -539,7 +539,7 @@ describe("state inspection and legacy doc migration", () => {
       };
       for (const [path, bytes] of Object.entries(legacy)) writeFileSync(join(repo, path), bytes);
 
-      const summary = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }));
+      const summary = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }), { record: "ledger", env: process.env });
       expect(summary.ok).toBe(true);
       expect(existsSync(join(repo, "tasks/todos.md"))).toBe(false);
       expect(existsSync(join(repo, "docs/researches/README.md"))).toBe(true);
@@ -562,7 +562,7 @@ describe("state inspection and legacy doc migration", () => {
         mkdirSync(join(repo, "tasks"), { recursive: true });
         writeFileSync(join(repo, "tasks", filename), content);
 
-        const summary = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }));
+        const summary = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }), { record: "ledger", env: process.env });
         expect(summary.ok).toBe(true);
         expect(readFileSync(join(repo, "tasks", filename), "utf-8")).toBe(content);
         expect(existsSync(join(repo, "tasks/archive/legacy-tasks-todo.md"))).toBe(false);

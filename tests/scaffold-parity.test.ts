@@ -127,7 +127,7 @@ describe("create-project-dirs scaffold parity", () => {
         expect(spawnSync("git", ["init", "-q", "-b", "main"], { cwd: repo }).status).toBe(0);
         // A stack generator writes package.json; rh init only edits an existing one.
         writeFileSync(join(repo, "package.json"), `${JSON.stringify({ name: "demo", scripts: { "check:task-workflow": "repo-harness run check-task-workflow --strict" } }, null, 2)}\n`);
-        expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true })).ok).toBe(true);
+        expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }), { record: "ledger", env: process.env }).ok).toBe(true);
       }
       const seeds = ["deploy/README.md", "docs/architecture/index.md", "docs/researches/README.md", "docs/spec.md", ".ai/context/context-map.json", ".ai/context/capabilities.json"];
       const managed = (repo: string) => [".gitignore", "package.json", ...seeds, ...readdirSync(join(repo, "docs/reference-configs")).sort().map((name) => `docs/reference-configs/${name}`)]

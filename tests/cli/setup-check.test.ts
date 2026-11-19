@@ -683,7 +683,7 @@ describe('setup check command', () => {
       mkdirSync(join(home, '.codex'), { recursive: true });
       writeFileSync(join(home, '.codex', 'AGENTS.md'), currentRulesBlock());
       expect(spawnSync('git', ['init', '-q'], { cwd: repo }).status).toBe(0);
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: 'standard', apply: false }));
+      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: 'standard', apply: false }), { record: "ledger", env: process.env });
       expect(apply.ok).toBe(true);
 
       const report = runInitHook(CLI_PORTS.doctor, {

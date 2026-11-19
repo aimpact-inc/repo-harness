@@ -115,8 +115,13 @@ bun test
 
 ### Success looks like this
 
-Init writes repo-local files and one file under `HOME`: the repo registry
-entry. It writes no install-managed host files. When the
+Init writes repo-local files and, under `HOME`, the repo registry entry and the
+repository ledger `~/.repo-harness/config/repos/<key>/`. The ledger records
+each file and directory that init writes in the worktree, and keeps a copy of
+each file that init replaces. `rh config restore --repo <worktree>` is the
+undo: it puts back each replaced file and deletes each created file that still
+holds what init wrote. Run init at the worktree root. In a directory outside
+Git, init writes only new files. It writes no install-managed host files. When the
 required Herdr skill or the architecture projection preference is missing, init
 reports a skipped step that names `rh update`. repo-harness supplies tools and evidence; the Bot
 decides what to schedule.
@@ -175,8 +180,8 @@ A second apply with no eligible items changes no bytes. The command prints the
 backup paths and records nonempty runs in
 `~/.repo-harness/upgrade-cleanup.log.jsonl`.
 
-For project rollback, use the printed `rh init rollback` command.
-For global rollback, replace each target with its numbered snapshot at the
+A failed project cleanup restores its files by itself; a completed one deletes
+its project copies. For global rollback, replace each target with its numbered snapshot at the
 original path in the backup manifest. Do not overlay directory contents.
 Restore symlinks verbatim. There is no `install --restore-transaction` command.
 Keep the backup until you verify the cleanup. Homes from the older v3.x–v5.x

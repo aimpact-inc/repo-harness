@@ -47,7 +47,7 @@ export function adoptedRepo(f: RegisteredReposFixture, name: string): string {
   mkdirSync(repo);
   git(f, repo, 'init', '-q', '-b', 'main');
   git(f, repo, 'commit', '-q', '--allow-empty', '-m', 'base');
-  const applied = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: 'standard', apply: true, env: f.env }));
+  const applied = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: 'standard', apply: true, env: f.env }), { record: 'ledger', env: f.env });
   if (!applied.ok) throw new Error(`fixture adoption failed in ${repo}`);
   commitAll(f, repo, 'adopt');
   return repo;

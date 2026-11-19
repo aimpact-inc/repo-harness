@@ -451,7 +451,7 @@ describe("create-project-dirs runtime smoke", () => {
       expect(existsSync(join(cwd, "docs/api"))).toBe(true);
       // rh init reads the same profile and writes the full reference-config stub set.
       expect(spawnSync("git", ["init", "-q", "-b", "main"], { cwd }).status).toBe(0);
-      expect(applyAdoptionPlan(planAdoption({ repoRoot: cwd, mode: "standard", apply: true, env: { REPO_HARNESS_DOCUMENTATION_PROFILE: "full" } })).ok).toBe(true);
+      expect(applyAdoptionPlan(planAdoption({ repoRoot: cwd, mode: "standard", apply: true, env: { REPO_HARNESS_DOCUMENTATION_PROFILE: "full" } }), { record: "ledger", env: process.env }).ok).toBe(true);
       expect(existsSync(join(cwd, "docs/reference-configs/spa-day-protocol.md"))).toBe(true);
       expect(existsSync(join(cwd, "docs/reference-configs/AGENTS.md"))).toBe(false);
       expect(existsSync(join(cwd, "docs/reference-configs/CLAUDE.md"))).toBe(false);

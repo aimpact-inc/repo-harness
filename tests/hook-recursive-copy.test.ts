@@ -12,7 +12,7 @@ describe("adoption hook projection", () => {
     const repo = mkdtempSync(join(tmpdir(), "hook-recursive-adoption-"));
     try {
       expect(spawnSync("git", ["init", "-q"], { cwd: repo }).status).toBe(0);
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }));
+      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }), { record: "ledger", env: process.env });
       expect(apply.ok).toBe(true);
       expect(existsSync(join(repo, ".ai/hooks/lib/workflow-state.sh"))).toBe(false);
       expect(existsSync(join(repo, ".ai/hooks/lib/session-state.sh"))).toBe(false);
@@ -55,7 +55,7 @@ for (const mode of ['minimal', 'standard'] as const) {
       writeFileSync(join(repo, '.ai/hooks/lib/workflow-state.sh'), legacy);
       const plan = planAdoption({ repoRoot: repo, mode, apply: true });
       expect(plan.operations.some((op) => op.path === '.ai/hooks/lib/workflow-state.sh')).toBe(false);
-      expect(applyAdoptionPlan(plan).ok).toBe(true);
+      expect(applyAdoptionPlan(plan, { record: "ledger", env: process.env }).ok).toBe(true);
       expect(readFileSync(join(repo, '.ai/hooks/lib/workflow-state.sh'), 'utf8')).toBe(legacy);
       const result = spawnSync('bash', ['-c', 'source .ai/hooks/lib/workflow-state.sh; workflow_failure_log_file'], { cwd: repo, encoding: 'utf8' });
       expect(result.status, result.stderr).toBe(0);
@@ -68,7 +68,7 @@ for (const mode of ['minimal', 'standard'] as const) {
       expect(oldCaller.stdout).toContain('Handoff:');
       const edited = legacy + '\n# Local operator edit\n';
       writeFileSync(join(repo, '.ai/hooks/lib/workflow-state.sh'), edited);
-      expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode, apply: true })).ok).toBe(true);
+      expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode, apply: true }), { record: "ledger", env: process.env }).ok).toBe(true);
       expect(readFileSync(join(repo, '.ai/hooks/lib/workflow-state.sh'), 'utf8')).toBe(edited);
     } finally {
       rmSync(repo, { recursive: true, force: true });

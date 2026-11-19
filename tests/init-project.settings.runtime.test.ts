@@ -81,7 +81,7 @@ describe("init-project settings runtime", () => {
       );
       expect(res.status).toBe(0);
       // The scaffold leaves the .gitignore block to rh init, which runs next.
-      expect(applyAdoptionPlan(planAdoption({ repoRoot: cwd, mode: "standard", apply: true })).ok).toBe(true);
+      expect(applyAdoptionPlan(planAdoption({ repoRoot: cwd, mode: "standard", apply: true }), { record: "ledger", env: process.env }).ok).toBe(true);
 
       const sources = [".archcontext/manifest.yaml", ".archcontext/product.yaml", ".archcontext/model/nodes/example.yaml"];
       const cache = ".archcontext/cache/index.json";

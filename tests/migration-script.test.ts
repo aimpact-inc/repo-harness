@@ -36,7 +36,7 @@ describe("adoption migration cutover", () => {
       mkdirSync(join(repo, "scripts"), { recursive: true });
       const generated = readFileSync(join(root, "scripts/check-deploy-sql-order.sh"), "utf-8");
       writeFileSync(join(repo, "scripts/check-deploy-sql-order.sh"), generated);
-      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }));
+      const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }), { record: "ledger", env: process.env });
       expect(apply.ok).toBe(true);
       const removed = apply.results.find((result) => result.path === "scripts/check-deploy-sql-order.sh" && result.kind === "remove");
       expect(removed?.status).toBe("applied");

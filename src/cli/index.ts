@@ -61,7 +61,6 @@ import { installStateStatus, readInstallState, rollbackInstallSelection } from '
 import { enabledPlugins } from './installer/install-state';
 import { runAdoptionPlan } from './commands/adoption-plan';
 import { buildCommandsCommand, recordCommandPlugin } from './commands/commands';
-import { rollbackAdoptionTransaction } from '../effects/fs-transaction';
 import { assertTarget, assertLocation, assertAdoptionMode } from './commands/validators';
 import { migrateInstallStateLocked, registerArchitecturePlugin, runGlobalRuntimeBootstrap, runTransactionalRuntimeRefresh, runTransactionalSelectionProjection, type GlobalRuntimeCommandOptions } from './runtime-transaction';
 import { runCandidateRuntimeReconciliation } from './candidate-runtime-reconciliation';
@@ -199,9 +198,7 @@ export function buildProgram(): Command {
   program
     .command('init')
     .description('Install or refresh the repo-local harness workflow in an existing repo')
-    .argument('[action]', 'Optional action: rollback')
     .option('--repo <path>', 'Target repository path (defaults to cwd)')
-    .option('--transaction <path>', 'Adoption transaction manifest to restore when action is rollback')
     .option('--dry-run', 'Plan repo harness changes without applying them')
     .option('--target <target>', `Host target for readiness checks: ${TARGET_HELP}`, 'both')
     .option('--no-verify', 'Skip repo workflow verification after apply')
@@ -209,9 +206,8 @@ export function buildProgram(): Command {
     .option('--mode <mode>', 'Adoption mode: minimal|standard|self-host', 'standard')
     .option('--sync-codegraph', 'Sync the CodeGraph index after ensure')
     .option('--json', 'Output JSON instead of human-readable text')
-    .action(async (action: string | undefined, rawOpts: {
+    .action(async (rawOpts: {
       repo?: string;
-      transaction?: string;
       dryRun?: boolean;
       target: string;
       verify?: boolean;
@@ -220,28 +216,6 @@ export function buildProgram(): Command {
       syncCodegraph?: boolean;
       json?: boolean;
     }) => {
-      if (action) {
-        if (action !== 'rollback') {
-          console.error(`rh init: unknown action "${action}"`);
-          process.exit(2);
-        }
-        if (rawOpts.transaction) {
-          const rollback = rollbackAdoptionTransaction({ repoRoot: rawOpts.repo ?? process.cwd(), transaction: rawOpts.transaction });
-          if (rawOpts.json === true) {
-            console.log(JSON.stringify(rollback, null, 2));
-          } else {
-            console.log(`[init] ${rollback.ok ? 'ok' : 'failed'}: rollback transaction ${rollback.transactionManifestPath}`);
-            for (const result of rollback.results) {
-              const target = result.path ? ` ${result.path}` : '';
-              const detail = result.error ? ` - ${result.error}` : '';
-              console.log(`[init] ${result.status}: ${result.action}${target}${detail}`);
-            }
-          }
-          process.exit(rollback.ok ? 0 : 1);
-        }
-        console.error('rh init rollback: --transaction is required');
-        process.exit(2);
-      }
       const target = assertTarget(rawOpts.target, 'init');
       const mode = assertAdoptionMode(rawOpts.mode ?? 'standard', 'init');
       // The planner reads documentation authoring env only from its options,
