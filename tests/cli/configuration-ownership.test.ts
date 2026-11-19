@@ -231,6 +231,14 @@ test('a failed install undoes its gate writes through linked host files outside 
   } finally { rmSync(outside, { recursive: true, force: true }); }
 }));
 
+test('the JSON migration proves a tagged hook only under a route that a release wrote', () => withClaudeHome((home, settings) => {
+  // The route comes from the command itself, so a released template with another route proves nothing.
+  const entry = buildManagedHooks('claude', process.env).Stop![0]!;
+  entry.hooks[0]!.command = entry.hooks[0]!.command.replace(' Stop --route default', ' Stop --route quality');
+  writeFileSync(settings, JSON.stringify({ hooks: { Stop: [entry] } }, null, 2));
+  expect(planJsonConfigMigration(process.env)!.files[0]!.adoption.fragments.map((fragment) => [fragment.selector, fragment.inserted])).toEqual([['hooks.Stop[quality]', '']]);
+}));
+
 test('the JSON migration fails closed on an interrupted receipt entry and on an rh command inside a user hook entry', () => withClaudeHome((home, settings) => {
   const env = process.env;
   mkdirSync(join(home, '.repo-harness'));
