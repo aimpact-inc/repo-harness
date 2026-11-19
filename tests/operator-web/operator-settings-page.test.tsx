@@ -207,6 +207,26 @@ describe('agents page seats section', () => {
     expect(posts[0]!.seats['worker-important'].model).toBe('claude-opus-9');
   });
 
+  test('a typo in a typed magpie/codex/ id keeps the fleet roles: the corrected id saves them, and a final model without a fleet sends none (#3250)', async () => {
+    const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
+    const read = await settingsStores(NOW, 'busy').seats.read();
+    if (read.state !== 'ok') throw new Error('fixture read failed');
+    const advisor: SeatConfigV1 = { ...read.settings.config.advisor, runtime: 'pi', model: 'magpie/codex/gpt-6.1-terra', advisor_model: null, fleet: ['explorer'] };
+    const ranges = { ...read.settings.ranges, runtimes: read.settings.ranges.runtimes.map(runtime => ({ ...runtime, enabled: true })) };
+    await mount({ ...seatsProps(posts), readSeatsSettings: async () => ({ state: 'ok', settings: { ...read.settings, ranges, config: { ...read.settings.config, advisor } } }) });
+    const input = '[data-seat-card="advisor"] [data-model-input]';
+    for (const model of ['magpie/codx/gpt-6.2-sol', 'magpie/codex/gpt-6.2-sol']) {
+      await typeText(input, model);
+      await leaveField(input);
+    }
+    await click(seatsSave());
+    expect(posts[0]!.seats.advisor).toMatchObject({ model: 'magpie/codex/gpt-6.2-sol', fleet: ['explorer'] });
+    await typeText(input, 'magpie/codx/gpt-6.2-sol');
+    await leaveField(input);
+    await click(seatsSave());
+    expect(posts[1]!.seats.advisor).toMatchObject({ model: 'magpie/codx/gpt-6.2-sol', fleet: [] });
+  });
+
   test('a stored advisor role outside the range can be switched off and saved, and cannot be switched back on', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     const read = await settingsStores(NOW, 'busy').seats.read();

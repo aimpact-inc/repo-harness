@@ -8,7 +8,7 @@ import type { SetupSnapshotV2 } from '../core/setup/types';
 import type { OperatorTranslate } from './i18n';
 import type { QuotaSection } from './quota';
 import {
-  GATEKEEPER_FALLBACK_STARTER, seatChanges, setExplorer, setOptionalSeat, setRoute, setSeatAdvisorModel, setSeatEffort, setSeatModel, setSeatRole, setSeatRuntime, setRoutingValue, setSeatTool, type SeatsSettingsForm,
+  GATEKEEPER_FALLBACK_STARTER, savedSeats, seatChanges, setExplorer, setOptionalSeat, setRoute, setSeatAdvisorModel, setSeatEffort, setSeatModel, setSeatRole, setSeatRuntime, setRoutingValue, setSeatTool, type SeatsSettingsForm,
 } from './seats';
 import { EnableSwitch, formLocked, runtimeRowOf, SaveResult } from './SettingsPage';
 import type { AgentsSettingsForm } from './settings';
@@ -451,12 +451,12 @@ function SeatsBody({ form, agents, setup, quota, t }: {
   const { settings } = view;
   const locked = formLocked(form);
   const changedElsewhere = base !== null && form.request !== null && form.save.kind !== 'saving' && settings.config.revision !== base.revision;
-  const changes = base !== null && draft !== null ? seatChanges(base, draft) : 0;
+  const changes = base !== null && draft !== null ? seatChanges(base, savedSeats(draft)) : 0;
   const notEnabled = draft === null ? [] : SEAT_IDS.flatMap((id) => {
     const seat = draft[id];
     return seat !== null && !settings.ranges.runtimes.find(entry => entry.id === seat.runtime)!.enabled ? [{ id, runtime: seat.runtime }] : [];
   });
-  const refused = draft === null ? null : sectionRefusal(settings.config.revision, draft);
+  const refused = draft === null ? null : sectionRefusal(settings.config.revision, savedSeats(draft));
   return (
     <div className="flex flex-col gap-5" data-seats-page>
       <p className="text-sm text-kumo-subtle">{t('seats.lead')}</p>

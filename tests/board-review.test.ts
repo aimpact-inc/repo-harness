@@ -27,9 +27,8 @@ const record = (head: string, role = 'pi (gpt-6.1-sol)', verdict: 'PASS' | 'FAIL
 const page = (...comments: BoardCommentV1[]): BoardCommentPageV1 => ({ truncated: false, comments });
 
 const GATEKEEPER: SeatRouteV1 = { id: 'gatekeeper', seat: DEFAULT_SEATS_CONFIG.gatekeeper, line: 'gatekeeper: gatekeeper (codex gpt-6.1-terra high)' };
-const REVIEWER_MODEL = DEFAULT_SEATS_CONFIG.reviewer.model;
-function plan(prs: BoardPullRequestV1[], comments: BoardCommentPageV1 = page(), holds: { issue: number; reason: string }[] = [], gatekeeper = GATEKEEPER, reviewer: string | null = 'anthropic', reviewer_model = REVIEWER_MODEL): readonly ReviewDecisionV1[] {
-  return planReview({ board: board(prs, holds, reviewer), comments: new Map(prs.map(entry => [entry.number, comments])), gatekeeper, reviewer_model });
+function plan(prs: BoardPullRequestV1[], comments: BoardCommentPageV1 = page(), holds: { issue: number; reason: string }[] = [], gatekeeper = GATEKEEPER, reviewer: string | null = 'anthropic'): readonly ReviewDecisionV1[] {
+  return planReview({ board: board(prs, holds, reviewer), comments: new Map(prs.map(entry => [entry.number, comments])), gatekeeper });
 }
 const label = (decisions: readonly ReviewDecisionV1[]) => decisions.map(decision => decision.action === 'skip' ? `${decision.pr}:${decision.reason}` : `${decision.pr}:start`);
 
@@ -68,16 +67,16 @@ test('a pull request that links a plan-held issue is skipped; the others still s
 test('an absent plan skips every pull request of a parent with more than two children and none of a smaller parent', () => {
   const unplanned = (children: number) => ({ ...board([pr(1), pr(2)]), items: Array.from({ length: children }, (_, at) => ({ number: 10 + at })), plan: { status: 'absent', truncated: false } }) as unknown as BoardV1;
   const comments = new Map([[1, page()], [2, page()]]);
-  expect(label(planReview({ board: unplanned(3), comments, gatekeeper: GATEKEEPER, reviewer_model: REVIEWER_MODEL }))).toEqual(['1:plan_unavailable', '2:plan_unavailable']);
-  expect(planReview({ board: unplanned(3), comments, gatekeeper: GATEKEEPER, reviewer_model: REVIEWER_MODEL })[0])
+  expect(label(planReview({ board: unplanned(3), comments, gatekeeper: GATEKEEPER }))).toEqual(['1:plan_unavailable', '2:plan_unavailable']);
+  expect(planReview({ board: unplanned(3), comments, gatekeeper: GATEKEEPER })[0])
     .toMatchObject({ reason: 'plan_unavailable', detail: 'the plan is absent and #1 has 3 children; a parent with more than two children needs a plan' });
-  expect(label(planReview({ board: unplanned(2), comments, gatekeeper: GATEKEEPER, reviewer_model: REVIEWER_MODEL }))).toEqual(['1:start', '2:start']);
+  expect(label(planReview({ board: unplanned(2), comments, gatekeeper: GATEKEEPER }))).toEqual(['1:start', '2:start']);
 });
 
 test('an unavailable plan names why the plan block does not decode', () => {
   const reason = 'plan block invalid: unsupported protocol 1';
   const undecoded = { ...board([pr(1)]), plan: { status: 'unavailable', comment_url: 'https://example.test/p1', reason } } as unknown as BoardV1;
-  expect(planReview({ board: undecoded, comments: new Map([[1, page()]]), gatekeeper: GATEKEEPER, reviewer_model: REVIEWER_MODEL })[0])
+  expect(planReview({ board: undecoded, comments: new Map([[1, page()]]), gatekeeper: GATEKEEPER })[0])
     .toMatchObject({ action: 'skip', reason: 'plan_unavailable', detail: `the plan is unavailable: ${reason}` });
 });
 
@@ -94,7 +93,7 @@ test('a marker covers one seat: a started gatekeeper leaves the reviewer of a fr
 
 test('a start marker covers its head; a truncated or missing comment page starts nothing', () => {
   expect(label(plan([pr(1)], page(marker(SHA))))).toEqual(['1:started']);
-  expect(label(planReview({ board: board([pr(1)]), comments: new Map(), gatekeeper: GATEKEEPER, reviewer_model: REVIEWER_MODEL }))).toEqual(['1:started']);
+  expect(label(planReview({ board: board([pr(1)]), comments: new Map(), gatekeeper: GATEKEEPER }))).toEqual(['1:started']);
   expect(label(plan([pr(1)], { truncated: true, comments: [] }))).toEqual(['1:started']);
 });
 
@@ -196,8 +195,9 @@ test('the gatekeeper starts only when the effective gatekeeper is of another kno
   const passed = (reviewer: string | null) => label(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], page(marker(SHA)), [], GATEKEEPER, reviewer));
   expect(passed('openai')).toEqual(['1:review_family_unavailable']);
   expect(passed(null)).toEqual(['1:review_family_unavailable']);
-  expect(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], page(marker(SHA)), [], GATEKEEPER, null, 'acme/mystery-1')[0])
-    .toMatchObject({ detail: 'the reviewer seat model acme/mystery-1 has no known family, so its row cannot count as another family' });
+  // The skip names the field, never the value: a credential pasted as the model stays out of the output.
+  const unknownReviewer = plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], page(marker(SHA)), [], GATEKEEPER, null)[0];
+  expect(unknownReviewer).toMatchObject({ detail: 'the model of seats.reviewer.model has no known family, so its row cannot count as another family' });
   expect(passed('deepseek')).toEqual(['1:start']);
   // A started gatekeeper counts by its recorded row, not by the current route: a fallback gatekeeper of another family than the reviewer opens the relay; a gatekeeper of the reviewer family does not.
   const fallback = route({ ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'pi', model: 'magpie/cursor/deepseek-v41-flash-1017', effort: null });
