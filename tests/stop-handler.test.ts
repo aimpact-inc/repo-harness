@@ -141,7 +141,7 @@ describe('Stop seat reset (#1972)', () => {
     expect(blocked.stderr).toContain('0. Finish the planning and the dispatch that you have in hand. Start nothing new. Then write the handoff.');
     const bytes = statSync(transcript).size;
     expect(blocked.stderr).toContain(`The transcript is ${bytes} bytes, below 33554432, so the reset types /compact.`);
-    expect(JSON.parse(readFileSync(join(dir, 'request.json'), 'utf8'))).toEqual({ requested_at: now.toISOString(), context_tokens: 380_000, transcript_path: transcript, action: 'compact', transcript_bytes: bytes });
+    expect(JSON.parse(readFileSync(join(dir, 'request.json'), 'utf8'))).toEqual({ requested_at: now.toISOString(), context_tokens: 380_000, transcript_path: transcript, action: 'compact', transcript_bytes: bytes, host: 'claude' });
     expect(stop(true)).toEqual({ exitCode: 0, stdout: '', stderr: '' });
     // A later turn of the same segment does not ask again, so the first handoff stays newer than the request.
     expect(stop(false)).toEqual({ exitCode: 0, stdout: '', stderr: '' });
@@ -248,7 +248,7 @@ describe.skipIf(process.platform === 'win32')('Antigravity Stop', () => {
       return result.stdout;
     }
     invoke('SessionStart');
-    expect(readSeatSession(identity)).toMatchObject({ source: 'startup', sessionId: conversationId, transcriptPath });
+    expect(readSeatSession(identity)).toMatchObject({ host: 'antigravity', source: 'startup', sessionId: conversationId, transcriptPath });
     for (const path of [outside, leafLink, join(parentLink, 'outside.jsonl')]) {
       expect(invoke('Stop', { executionNum: 0, transcriptPath: path })).toBe('');
     }
@@ -264,7 +264,7 @@ describe.skipIf(process.platform === 'win32')('Antigravity Stop', () => {
     const continuation = `${JSON.stringify({ decision: 'continue', reason: 'Write your handoff now. The orchestrator relaunches this seat with rh seats launch.' })}\n`;
     expect([0, 1, 0, 1].map(executionNum => invoke('Stop', { executionNum }))).toEqual([continuation, '', continuation, '']);
     const record = readFileSync(request, 'utf8');
-    expect(JSON.parse(record)).toMatchObject({ context_tokens: 380_000, action: 'reset', transcript_path: transcriptPath });
+    expect(JSON.parse(record)).toMatchObject({ context_tokens: 380_000, action: 'reset', transcript_path: transcriptPath, host: 'antigravity' });
     expect(record).not.toContain(marker);
   });
 });

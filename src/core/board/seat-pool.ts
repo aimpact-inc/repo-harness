@@ -25,8 +25,8 @@ type SeatPoolReason = keyof typeof SEAT_POOL_REASONS;
 type ModelStatus = Exclude<SeatPoolReason, 'outside_recommendations' | 'no_model'>;
 const available = (status: SeatPoolReason): boolean => status === 'available' || status === 'pi_on_path';
 
-const installHints = { claude: 'Install Claude Code and add claude to PATH.', codex: 'Install Codex and add codex to PATH.', pi: 'Install Pi and add pi to PATH.' };
-const loginHints = { claude: 'Run claude auth login.', codex: 'Run codex login.', pi: '' };
+const installHints = { claude: 'Install Claude Code and add claude to PATH.', codex: 'Install Codex and add codex to PATH.', pi: 'Install Pi and add pi to PATH.', agy: 'Install a stable agy release of 1.5.0 or later.' };
+const loginHints = { claude: 'Run claude auth login.', codex: 'Run codex login.', pi: '', agy: 'Sign in through agy.' };
 
 function entryHint(runtime: SeatRuntime, status: ModelStatus): string | null {
   switch (status) {
@@ -106,7 +106,7 @@ const MAGPIE_MISSING = `Magpie extension missing. Checked ${MAGPIE_EXTENSION_PAT
 function runtimeStatus(probe: SeatPoolProbe): ModelStatus {
   if (probe.installation !== 'available') return probe.installation;
   if (probe.id === 'pi') return 'pi_on_path';
-  if (probe.sign_in === 'logged_out') return 'signed_out';
+  if (probe.sign_in === 'logged_out' || probe.models === 'unauthenticated') return 'signed_out';
   return probe.sign_in === 'logged_in' ? 'available' : 'unknown';
 }
 
@@ -114,7 +114,6 @@ function modelStatus(entry: Pick<SeatConfigV1, 'runtime' | 'model'>, probe: Seat
   const status = runtimeStatus(probe);
   if (status === 'pi_on_path') return unavailablePiSeat(entry, routing) === null ? status : 'provider_unavailable';
   if (status !== 'available') return status;
-  if (probe.models === 'unauthenticated') return 'signed_out';
   if (!checkCatalog) return status;
   if (probe.models !== 'ok') return 'unknown';
   const model = probe.listed.find(item => item.id === entry.model);

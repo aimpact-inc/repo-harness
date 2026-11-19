@@ -213,7 +213,7 @@ export function effectiveGatekeeper(seats: SeatsConfigV1, quota: SeatAccountQuot
 
 /** The model a seat runs: a Pi seat on `magpie/codex/` runs the Codex model, and a null model is the host default of its runtime. */
 const runModel = (seat: SeatConfigV1): string =>
-  `${seat.runtime === 'pi' && !isPiCodexSeat(seat) ? 'pi' : seat.runtime === 'claude' ? 'claude' : 'codex'}:${seat.model?.replace(PI_CODEX_MODEL_PREFIX, '') ?? 'default'}`;
+  `${isPiCodexSeat(seat) ? 'codex' : seat.runtime}:${seat.model?.replace(PI_CODEX_MODEL_PREFIX, '') ?? 'default'}`;
 
 /**
  * True when the effective gatekeeper-deep runs the same model as the route that `effectiveGatekeeper` selects, which may be

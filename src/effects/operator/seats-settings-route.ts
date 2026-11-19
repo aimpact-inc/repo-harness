@@ -1,5 +1,6 @@
 import type { JsonValue } from '../../core/evidence/types';
 import {
+  AgySeatSettingsError,
   DEFAULT_SEATS_CONFIG,
   SEATS_CONFIG_UPDATE_ACTION,
   decodeSeatsSettings,
@@ -30,7 +31,8 @@ export const SEATS_CONFIGURATION_FAILURES: Readonly<Record<SeatsConfigurationErr
   config_is_link: { status: 409, next_action: 'Edit the seats section in the file that ~/.repo-harness/config.json links to, or replace the link with a regular file.' },
   revision_conflict: { status: 409, next_action: 'Reload the settings, then apply your change again.' },
   seat_runtime_not_enabled: { status: 422, next_action: 'Change the named seat to an enabled runtime, or enable its runtime under Hosts and save.' },
-  seat_model_invalid: { status: 422, next_action: 'Choose or type a model for the low-quota explorer, then save again.' },
+  seat_runtime_not_allowed: { status: 422, next_action: 'Use agy for the advisor seat only.' },
+  seat_model_invalid: { status: 422, next_action: 'Choose or type a model for the named field, then save again.' },
   seat_effort_invalid: { status: 422, next_action: CHOOSE_FROM_RANGES },
   seat_tool_not_allowed: { status: 422, next_action: CHOOSE_FROM_RANGES },
   seat_fleet_not_allowed: { status: 422, next_action: CHOOSE_FROM_RANGES },
@@ -51,7 +53,15 @@ export function seatsSettingsWriteRoute(env?: NodeJS.ProcessEnv): OperatorWriteR
     id: 'settings_seats_write',
     path: OPERATOR_SETTINGS_SEATS_ROUTE,
     decode(fields) {
-      const request = decodeSeatsSettingsRequest(fields);
+      let request;
+      try { request = decodeSeatsSettingsRequest(fields); }
+      catch (error) {
+        if (!(error instanceof AgySeatSettingsError)) throw error;
+        const { status, next_action } = SEATS_CONFIGURATION_FAILURES[error.code];
+        // SAFETY: the HTTP transport parsed fields from JSON. Bind the full rejected request to its request ID.
+        return { operation: 'settings_seats', target: 'config', input: fields as unknown as JsonValue,
+          execute: async () => { throw new OperatorWriteRefusal(status, error.code, error.message, next_action); } };
+      }
       return {
         operation: 'settings_seats',
         target: 'config',

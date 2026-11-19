@@ -12,6 +12,7 @@ export const AGENT_TARGET_OVERRIDES: Record<string, { model: string; effort: str
 const entry = (runtime: SeatModelEntryV1['runtime'], model: string): SeatModelEntryV1 => Object.freeze({ runtime, model });
 const OPUS = entry('claude', 'opus');
 const SOL = entry('codex', 'gpt-6.2-sol');
+export const AGY_ADVISOR_STARTER = entry('agy', 'gemini-4-neon-high');
 // One id per model line, the newest release (#3252). GLM flash: the id that the review launcher runs. DeepSeek flash: the id that the Pi seats run.
 const GLM_FLASH = entry('pi', 'zai/glm-5.3-flash');
 const DEEPSEEK_FLASH = entry('pi', 'magpie/group/deepseek-v4.1-flash');
@@ -25,7 +26,8 @@ const REVIEW = Object.freeze([SOL, entry('codex', 'gpt-6.2-astra'), GLM_FLASH]);
  */
 export const SEAT_RECOMMENDED_MODELS: Readonly<Record<SeatId, readonly SeatModelEntryV1[]>> = Object.freeze({
   orchestrator: Object.freeze([OPUS]),
-  advisor: Object.freeze([OPUS, entry('claude', 'fable'), entry('pi', 'magpie/agy-cli/gemini-4-neon'), entry('pi', 'magpie/agy-cli/gemini-4-carbon')]),
+  advisor: Object.freeze([OPUS, entry('claude', 'fable'), entry('pi', 'magpie/agy-cli/gemini-4-neon'), entry('pi', 'magpie/agy-cli/gemini-4-carbon'),
+    entry('agy', 'gemini-4-neon-low'), entry('agy', 'gemini-4-neon-medium'), AGY_ADVISOR_STARTER, entry('agy', 'gemini-4-neon-xhigh')]),
   planner: Object.freeze([entry('pi', 'magpie/agy-cli/gemini-4-carbon'), entry('pi', 'magpie/agy-cli/gemini-4-neon'), entry('codex', 'gpt-6.2-astra'), OPUS]),
   worker: WORKER,
   'worker-deep': WORKER,

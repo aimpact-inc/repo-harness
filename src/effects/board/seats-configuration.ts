@@ -1,11 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decodeAgentsConfig } from '../../core/board/agents-settings';
 import { isRecord } from '../../core/evidence/is-record';
+import { sha256Hex } from '../../core/evidence/sha256';
+import { AGY_SEAT_AGENT, agySeatBrief } from '../../core/board/seat-launch';
 import {
+  AgySeatSettingsError,
   PLANNER_TOOLS,
   SEAT_IDS,
   SEAT_RUNTIMES,
@@ -18,6 +21,8 @@ import {
   SeatsConfigMigrationRequiredError,
   decodeSeatsConfig,
   seatsConfigInvalidMessage,
+  seatHostId,
+  seatModelShapeValid,
   seatTakesFleet,
   type SeatConfigV1,
   type SeatModelV1,
@@ -45,6 +50,7 @@ export type SeatsConfigurationErrorCode =
   | SeatsConfigMigrationRequiredError['code']
   | 'config_is_link'
   | 'revision_conflict'
+  | AgySeatSettingsError['code']
   | 'seat_runtime_not_enabled'
   | 'seat_model_invalid'
   | 'seat_effort_invalid'
@@ -84,11 +90,12 @@ const RUNTIME_RANGES: Readonly<Record<SeatRuntime, Omit<SeatRuntimeRangeV1, 'id'
   claude: { effort: true, fleet: true },
   codex: { effort: true, fleet: true },
   pi: { effort: true, fleet: true },
+  agy: { effort: false, fleet: false },
 };
 
 export function seatsRanges(enabledRuntimes: readonly string[]): SeatsRangesV1 {
   return {
-    runtimes: SEAT_RUNTIMES.map(id => ({ id, enabled: enabledRuntimes.includes(id), ...RUNTIME_RANGES[id] })),
+    runtimes: SEAT_RUNTIMES.map(id => ({ id, enabled: enabledRuntimes.includes(seatHostId(id)), ...RUNTIME_RANGES[id] })),
     efforts: EFFORT_LEVELS,
     roles: SEAT_SCAFFOLD_SUB_AGENTS.map(name => ({ name, writable: false })),
     seats: SEAT_RANGES,
@@ -105,7 +112,7 @@ export interface SeatsConfiguration {
 const configInvalid = (section: string) =>
   new SeatsConfigurationError('config_invalid', `The ${section} section of the repo-harness configuration is not valid.`);
 
-function enabledRuntimesOf(config: Record<string, unknown>): readonly string[] {
+export function enabledRuntimesOf(config: Record<string, unknown>): readonly string[] {
   if (config.agents === undefined) return [];
   try { return decodeAgentsConfig(config.agents).enabled; } catch { throw configInvalid('agents'); }
 }
@@ -113,7 +120,7 @@ function enabledRuntimesOf(config: Record<string, unknown>): readonly string[] {
 /** Reads and saves enforce the section contract through this one decoder call; only saves enforce the runtime ranges that can change later. */
 function decodeSeatsSection(value: unknown): SeatsConfigV1 {
   try { return decodeSeatsConfig(value); } catch (error) {
-    if (error instanceof SeatsConfigMigrationRequiredError) throw new SeatsConfigurationError(error.code, error.message);
+    if (error instanceof SeatsConfigMigrationRequiredError || error instanceof AgySeatSettingsError) throw new SeatsConfigurationError(error.code, error.message);
     throw new SeatsConfigurationError('config_invalid', seatsConfigInvalidMessage(error));
   }
 }
@@ -146,7 +153,7 @@ export function checkSeatRoutingModels(routing: SeatRoutingV1): void {
 function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly string[]): void {
   const runtime = RUNTIME_RANGES[seat.runtime];
   const range = SEAT_RANGES[id];
-  if (!enabledRuntimes.includes(seat.runtime)) {
+  if (!enabledRuntimes.includes(seatHostId(seat.runtime))) {
     throw new SeatsConfigurationError('seat_runtime_not_enabled', `Fix the ${id} seat before saving. Its runtime ${seat.runtime} is disabled under Hosts.`);
   }
   checkEffort(`${id} seat`, seat, seat.runtime);
@@ -161,6 +168,60 @@ const SEAT_POOL_MEMBER_MS = 15_000;
 const SEAT_POOL_CHILD_MS = 120_000;
 const SEAT_POOL_FILE_LIMIT = 64 * 1024;
 const CATALOG_RUNTIMES = ['claude', 'codex'] as const;
+
+type AgyProbe =
+  | { readonly kind: 'available'; readonly executable: string; readonly models: ReadonlySet<string> }
+  | { readonly kind: 'not_installed' | 'unsupported' | 'signed_out' | 'catalog_unknown' | 'unknown' };
+
+/** Observe the native CLI once. Its login state and raw output stay with the probe. */
+export async function probeAgySeat(env: NodeJS.ProcessEnv = process.env): Promise<AgyProbe> {
+  const probeEnv: NodeJS.ProcessEnv = { HOME: env.HOME ?? homedir(), PATH: env.PATH ?? '', TMPDIR: env.TMPDIR,
+    BUN_INSTALL: env.BUN_INSTALL, OAR_ANTIGRAVITY_BIN: env.OAR_ANTIGRAVITY_BIN, OAR_CHILD_STDERR: 'ignore', NO_COLOR: '1', TERM: 'dumb' };
+  let executable: string;
+  try {
+    const { antigravityRuntime } = await import('@botiverse/oar/runtimes/antigravity');
+    const overlay = Object.fromEntries(Object.keys(process.env).map(key => [key, null]));
+    const installed = await antigravityRuntime.installation?.({ env: { ...overlay, ...Object.fromEntries(Object.entries(probeEnv).map(([key, value]) => [key, value ?? null])) } });
+    if (installed?.kind === 'not_found') return { kind: 'not_installed' };
+    if (installed?.kind === 'unsupported') return { kind: 'unsupported' };
+    if (installed?.kind !== 'available' || installed.via !== 'executable' || !isAbsolute(installed.command)) return { kind: 'unknown' };
+    executable = installed.command;
+  } catch {
+    return { kind: 'unknown' };
+  }
+
+  let cwd: string | undefined;
+  try {
+    cwd = mkdtempSync(join(tmpdir(), 'rh-agy-catalog-'));
+    const result = runProcess(executable, ['models'], { cwd, env: probeEnv, inheritEnv: false, timeoutMs: SEAT_POOL_MEMBER_MS, processGroup: true });
+    if (!result.timedOut && result.status === 1 && /Please sign in\b/iu.test(`${result.stdout}\n${result.stderr}`)) return { kind: 'signed_out' };
+    if (!result.ok) return { kind: 'catalog_unknown' };
+    const models = new Set<string>();
+    for (const line of result.stdout.split(/\r?\n/u)) {
+      if (line.trim() === '') continue;
+      const [id, name, ...rest] = line.split('\t');
+      if (!seatModelShapeValid('agy', id) || !name?.trim() || rest.length !== 0) return { kind: 'catalog_unknown' };
+      models.add(id);
+    }
+    return models.size === 0 ? { kind: 'catalog_unknown' } : { kind: 'available', executable, models };
+  } catch {
+    return { kind: 'catalog_unknown' };
+  } finally {
+    if (cwd !== undefined) rmSync(cwd, { recursive: true, force: true });
+  }
+}
+
+async function probeAgyPool(): Promise<SeatPoolProbe> {
+  const probe = await probeAgySeat();
+  switch (probe.kind) {
+    case 'available': return { id: 'agy', installation: 'available', sign_in: 'logged_in', models: 'ok',
+      listed: [...recommendedModelIds('agy')].filter(id => probe.models.has(id)).map(id => ({ id, disabled: false })) };
+    case 'signed_out': return { ...emptySeatPoolProbe('agy', 'available'), sign_in: 'logged_out', models: 'unauthenticated' };
+    case 'catalog_unknown': return { ...emptySeatPoolProbe('agy', 'available'), sign_in: 'unknown', models: 'unknown' };
+    case 'not_installed': return emptySeatPoolProbe('agy', 'not_installed');
+    default: return emptySeatPoolProbe('agy', 'unknown');
+  }
+}
 
 async function probeSeatCatalog(id: typeof CATALOG_RUNTIMES[number], command: string): Promise<SeatPoolProbe> {
   if (command === '') return emptySeatPoolProbe(id, 'not_installed');
@@ -189,21 +250,22 @@ async function probeSeatCatalog(id: typeof CATALOG_RUNTIMES[number], command: st
   }
 }
 
-export function collectSeatPoolProbes(env: NodeJS.ProcessEnv = process.env): readonly SeatPoolProbe[] {
+export function collectSeatPoolProbes(env: NodeJS.ProcessEnv = process.env, includeAgy = false): readonly SeatPoolProbe[] {
   const which = (id: SeatRuntime) => Bun.which(id, { PATH: env.PATH ?? '' });
   const pi = emptySeatPoolProbe('pi', which('pi') === null ? 'not_installed' : 'available');
   const commands = CATALOG_RUNTIMES.map(id => which(id) ?? '');
-  if (commands.every(command => command === '')) return [...CATALOG_RUNTIMES.map(id => emptySeatPoolProbe(id, 'not_installed')), pi];
+  const runtimes = includeAgy ? [...CATALOG_RUNTIMES, 'agy'] as const : CATALOG_RUNTIMES;
+  if (!includeAgy && commands.every(command => command === '')) return [...CATALOG_RUNTIMES.map(id => emptySeatPoolProbe(id, 'not_installed')), pi];
   const cwd = mkdtempSync(join(tmpdir(), 'rh-seat-pool-'));
   try {
-    const answer = runProcess(process.execPath, [fileURLToPath(import.meta.url), ...commands], {
+    const answer = runProcess(process.execPath, [fileURLToPath(import.meta.url), ...commands, ...(includeAgy ? ['agy'] : [])], {
       cwd, timeoutMs: SEAT_POOL_CHILD_MS, processGroup: true,
       inheritEnv: false, env: { ...env, OAR_CHILD_STDERR: 'ignore' },
     });
     if (answer.ok) {
       const rows: unknown = JSON.parse(answer.stdout);
-      if (Array.isArray(rows) && rows.length === CATALOG_RUNTIMES.length) {
-        return [...CATALOG_RUNTIMES.map((id, index) => decodeSeatPoolProbe(id, rows[index])), pi];
+      if (Array.isArray(rows) && rows.length === runtimes.length) {
+        return [...runtimes.map((id, index) => decodeSeatPoolProbe(id, rows[index])), pi];
       }
     }
   } catch {
@@ -280,7 +342,7 @@ function storeSeatPool(report: SeatPoolV1): void {
 /** The cache only serves settings. A request for the pool always observes the environment again. */
 export function refreshSeatPool(): { readonly report: SeatPoolV1; readonly stored: boolean } {
   const { seats } = readSeatsConfiguration();
-  const probes = collectSeatPoolProbes();
+  const probes = collectSeatPoolProbes(process.env, true);
   const report = buildSeatPool(seats, probes, new Date().toISOString());
   try {
     storeSeatPool(report);
@@ -294,7 +356,42 @@ if (import.meta.main) {
   // Only the pool probe child runs the OAR catalog members, one runtime at a time.
   const probes: SeatPoolProbe[] = [];
   for (const [index, id] of CATALOG_RUNTIMES.entries()) probes.push(await probeSeatCatalog(id, process.argv[index + 2] ?? ''));
+  if (process.argv[2 + CATALOG_RUNTIMES.length] === 'agy') probes.push(await probeAgyPool());
   process.stdout.write(`${JSON.stringify(probes)}\n`, () => process.exit(0));
+}
+
+/** Publish the generated advisor by digest. An existing path can only be reused if it holds these bytes. */
+export function writeAgySeatAgent(config: SeatConfigV1, env: NodeJS.ProcessEnv): string {
+  const content = Buffer.from([
+    '---', `name: ${AGY_SEAT_AGENT}`, 'description: Repo-harness advisor', 'mainAgent: true',
+    'tools: [view_file, run_command, search_web]', 'inheritMcp: false', '---', '', '# System', '', agySeatBrief(config), '',
+  ].join('\n'));
+  const digest = sha256Hex(content);
+  let directory = realpathSync(dirname(dirname(globalConfigurationPath(env))));
+  for (const part of ['.repo-harness', 'seats', 'agy', digest, '.agents', 'agents', AGY_SEAT_AGENT]) {
+    directory = join(directory, part);
+    try { mkdirSync(directory, { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    const stat = lstatSync(directory);
+    if (!stat.isDirectory() || (process.getuid !== undefined && stat.uid !== process.getuid())) throw new Error('agy agent directory must be owned and contain no links.');
+  }
+  const path = join(directory, 'agent.md');
+  const temporary = join(directory, `.agent-${randomUUID()}.tmp`);
+  writeFileSync(temporary, content, { flag: 'wx', mode: 0o600 });
+  try {
+    try { linkSync(temporary, path); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        const stat = fstatSync(fd);
+        if (!stat.isFile() || stat.size !== content.length || !readFileSync(fd).equals(content)) throw new Error('agy agent file differs from its expected content.');
+      } finally { closeSync(fd); }
+    }
+  } finally {
+    unlinkSync(temporary);
+  }
+  return dirname(dirname(dirname(directory)));
 }
 
 const FIELDS = ['runtime', 'model', 'advisor_model', 'effort', 'tools', 'fleet'] as const;

@@ -1,4 +1,5 @@
 import {
+  AGY_SEAT_TOOLS,
   DEFAULT_SEATS_CONFIG,
   PLANNER_TOOLS,
   ROUTING_CLASSES,
@@ -22,6 +23,7 @@ import {
   type SeatTool,
   type WorkerSeatId,
 } from '../core/board/seats-settings';
+import { AGY_ADVISOR_STARTER } from '../core/board/recommended-models';
 import { decodeSeatPool } from '../core/board/seat-pool';
 import { isRecord } from '../core/evidence/is-record';
 import {
@@ -105,6 +107,7 @@ export function setSeatRuntime(draft: SeatsConfigV1, seat: SeatId, runtime: Seat
   const range = ranges.runtimes.find(entry => entry.id === runtime)!;
   const current = draft[seat]!;
   if (current.runtime === runtime) return draft;
+  if (runtime === 'agy') return patch(draft, seat, { ...AGY_ADVISOR_STARTER, advisor_model: null, effort: null, fleet: [], tools: AGY_SEAT_TOOLS });
   const model = ranges.seats[seat].models.some(entry => entry.runtime === runtime && entry.model === current.model) ? current.model : null;
   return patch(draft, seat, {
     runtime,

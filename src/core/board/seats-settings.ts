@@ -24,8 +24,10 @@ export const isReviewSeat = (id: SeatId): boolean => id === 'gatekeeper' || id =
 export const isWorkerSeat = (seat: SeatId): seat is WorkerSeatId => WORKER_SEAT_IDS.includes(seat as WorkerSeatId);
 
 /** The runtimes that run in a Herdr pane. */
-export const SEAT_RUNTIMES = ['claude', 'codex', 'pi'] as const;
+export const SEAT_RUNTIMES = ['claude', 'codex', 'pi', 'agy'] as const;
 export type SeatRuntime = typeof SEAT_RUNTIMES[number];
+
+export const seatHostId = (runtime: SeatRuntime): string => runtime === 'agy' ? 'antigravity' : runtime;
 
 /** The Claude runtime model range and the labels used by fleet role profiles. */
 export const MODEL_FAMILY_LABELS: Readonly<Record<string, string>> = Object.freeze({
@@ -38,6 +40,7 @@ export const MODEL_FAMILY_LABELS: Readonly<Record<string, string>> = Object.free
 /** Tool groups. `read` is always on. */
 export const SEAT_TOOLS = ['read', 'edit', 'shell', 'net', 'tasks', 'schedule', 'mcp', 'gh'] as const;
 export type SeatTool = typeof SEAT_TOOLS[number];
+export const AGY_SEAT_TOOLS = ['net', 'read', 'shell'] as const satisfies readonly SeatTool[];
 
 const TOKEN = /^[a-z0-9][a-z0-9.-]{0,63}$/u;
 const ROLE = /^[a-z][a-z0-9-]{0,63}$/u;
@@ -59,7 +62,7 @@ export const PI_CODEX_MODEL_PREFIX = 'magpie/codex/';
 export const isPiCodexSeat = (seat: { readonly runtime: SeatRuntime; readonly model: string | null }): boolean =>
   seat.runtime === 'pi' && seat.model?.startsWith(PI_CODEX_MODEL_PREFIX) === true;
 /** Fleet access depends on the seat's role range, independent of the model that the runtime runs. */
-export const seatTakesFleet = (seat: { readonly runtime: SeatRuntime }): boolean => SEAT_RUNTIMES.includes(seat.runtime);
+export const seatTakesFleet = (seat: { readonly runtime: SeatRuntime }): boolean => seat.runtime !== 'agy';
 
 export interface SeatModelV1 {
   readonly model: string | null;
@@ -247,6 +250,25 @@ class SeatsDecodeError extends Error {
   }
 }
 
+type AgySeatErrorCode = 'seat_runtime_not_allowed' | 'seat_model_invalid' | 'seat_effort_invalid' | 'seat_tool_not_allowed' | 'seat_fleet_not_allowed';
+
+export class AgySeatSettingsError extends SeatsDecodeError {
+  constructor(readonly code: AgySeatErrorCode, id: SeatId, field: string) {
+    super(code, `seats.${id}.${field}`);
+  }
+}
+
+function checkAgySeat(id: SeatId, seat: SeatConfigV1): void {
+  if (id !== 'advisor') throw new AgySeatSettingsError('seat_runtime_not_allowed', id, 'runtime');
+  if (!seatModelShapeValid('agy', seat.model)) throw new AgySeatSettingsError('seat_model_invalid', id, 'model');
+  if (seat.effort !== null) throw new AgySeatSettingsError('seat_effort_invalid', id, 'effort');
+  if (seat.advisor_model !== null) throw new AgySeatSettingsError('seat_model_invalid', id, 'advisor_model');
+  if (seat.fleet.length !== 0) throw new AgySeatSettingsError('seat_fleet_not_allowed', id, 'fleet');
+  if (seat.tools.length !== AGY_SEAT_TOOLS.length || !AGY_SEAT_TOOLS.every(tool => seat.tools.includes(tool))) {
+    throw new AgySeatSettingsError('seat_tool_not_allowed', id, 'tools');
+  }
+}
+
 function invalid(code: string, field: string | null = null): never {
   throw new SeatsDecodeError(code, field);
 }
@@ -313,20 +335,22 @@ function decodeSeat(id: SeatId, value: unknown, code: string, fromSettingsReques
   const field = <T>(name: string | null, decode: () => T): T => { try { return decode(); } catch { return at(name); } };
   const record = field(null, () => object(value, ['runtime', 'model', 'advisor_model', 'effort', 'tools', 'fleet'], code, ['runtime', 'model', 'effort', 'tools', 'fleet']));
   if (!SEAT_RUNTIMES.includes(record.runtime as SeatRuntime)) at('runtime');
+  if (record.runtime === 'agy' && id !== 'advisor') throw new AgySeatSettingsError('seat_runtime_not_allowed', id, 'runtime');
   const advisor = record.advisor_model === undefined ? null : field('advisor_model', () => nullableToken(record.advisor_model, code));
-  if (advisor !== null && (record.runtime !== 'claude' || !Object.hasOwn(MODEL_FAMILY_LABELS, advisor))) at('advisor_model');
+  if (advisor !== null && record.runtime !== 'agy' && (record.runtime !== 'claude' || !Object.hasOwn(MODEL_FAMILY_LABELS, advisor))) at('advisor_model');
   const tools = field('tools', () => ascending(record.tools, isTool, code));
-  if (!tools.includes('read')) at('tools');
+  if (record.runtime !== 'agy' && !tools.includes('read')) at('tools');
   const fleet = field('fleet', () => ascending(record.fleet, isRole, code));
   if (isReviewSeat(id) && tools.some(tool => !REVIEW_TOOLS.includes(tool))) at('tools');
   if (isPlannerSeat(id) && tools.some(tool => !PLANNER_TOOLS.includes(tool))) at('tools');
   const model = record.model === null ? null
-    : seatModelShapeValid(record.runtime as SeatRuntime, record.model) ? record.model : at('model');
+    : seatModelShapeValid(record.runtime as SeatRuntime, record.model) ? record.model
+      : record.runtime === 'agy' ? null : at('model');
   // Let the Settings save return its typed fleet refusal when the request contains a retired role.
   const retiredFleetRequest = fromSettingsRequest && fleet.some(role => isRetiredFleetRole(id, role));
   if (fleet.length > 0 && !retiredFleetRequest && isReviewSeat(id)) at('fleet');
-  if (!fromSettingsRequest && fleet.some(role => !isSeatScaffoldSubAgent(role))) at('fleet');
-  return {
+  if (record.runtime !== 'agy' && !fromSettingsRequest && fleet.some(role => !isSeatScaffoldSubAgent(role))) at('fleet');
+  const seat: SeatConfigV1 = {
     runtime: record.runtime as SeatRuntime,
     model,
     advisor_model: advisor,
@@ -334,6 +358,8 @@ function decodeSeat(id: SeatId, value: unknown, code: string, fromSettingsReques
     tools,
     fleet,
   };
+  if (seat.runtime === 'agy') checkAgySeat(id, seat);
+  return seat;
 }
 
 const REQUIRED_SECTION_KEYS = [...SEAT_IDS, 'routing'];

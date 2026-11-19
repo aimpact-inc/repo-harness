@@ -96,13 +96,14 @@ export async function executeReview(decisions: readonly ReviewDecisionV1[], cont
     const launches = [];
     const labels = { repositoryId: context.repositoryId, pr: String(decision.pr), parent: String(context.parent) };
     for (const start of decision.seats) {
-      const launch = await ports.launch(start.seat, labels, worktree.path, context.gatekeeper);
-      launches.push({ start, launch });
+      const { runtime, ...launch } = await ports.launch(start.seat, labels, worktree.path, context.gatekeeper);
+      if (runtime === 'agy') throw new BoardCollectError('agy is available only for the advisor seat.');
+      launches.push({ start, launch, runtime });
     }
-    for (const { start, launch } of launches) {
+    for (const { start, launch, runtime } of launches) {
       const markerUrl = ports.comment(decision.pr, markerBody(decision, start));
       try {
-        ports.openTab({ ...(launch.tab === null ? {} : { name: launch.tab }), space: context.space, folder: worktree.path, argv: launch.argv, task: reviewPacket(decision, start, launch.runtime) });
+        ports.openTab({ ...(launch.tab === null ? {} : { name: launch.tab }), space: context.space, folder: worktree.path, argv: launch.argv, task: reviewPacket(decision, start, runtime) });
       } catch (error) {
         if (!(error instanceof HerdrCoreError) || HERDR_APP_NOT_SENT.has(error.reason)) {
           ports.comment(decision.pr, `${REVIEW_START_STATUS_HEADER}\nClaim: ${markerUrl}\nStatus: released`);

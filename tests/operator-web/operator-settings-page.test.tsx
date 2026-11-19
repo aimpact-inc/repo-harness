@@ -164,6 +164,24 @@ describe('agents page seats section', () => {
   const pane = (seat: string) => document.querySelector<HTMLButtonElement>(`[data-pane="${seat}"]`)!;
   const levels = () => [...document.querySelectorAll('[data-seat-card] [data-limit]')].map(node => node.getAttribute('data-limit'));
 
+  test('only the advisor offers agy and a switch sets the approved profile with Neon high', async () => {
+    const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
+    const read = await settingsStores(NOW, 'busy').seats.read();
+    if (read.state !== 'ok') throw new Error('fixture read failed');
+    const { settings: initial } = read;
+    const ranges = { ...initial.ranges, runtimes: initial.ranges.runtimes.map(runtime => runtime.id === 'agy' ? { ...runtime, enabled: true } : runtime) };
+    await mount({ ...seatsProps(posts), readSeatsSettings: async () => ({ state: 'ok', settings: { ...initial, ranges } }) });
+    await click(buttonWithText('Antigravity (agy)'));
+    expect(buttonWithText('Host default')).toBeUndefined();
+    expect(buttonWithText('gemini-4-neon-high').getAttribute('aria-pressed')).toBe('true');
+    expect(allow('Shell').getAttribute('aria-checked')).toBe('true');
+    expect(allow('Shell').disabled).toBe(true);
+    await click(seatsSave());
+    expect(posts[0]?.seats.advisor).toEqual({ runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['net', 'read', 'shell'] });
+    await click(pane('orchestrator'));
+    expect(buttonWithText('Antigravity (agy)')).toBeUndefined();
+  });
+
   test('the advisor offers only scaffold roles, allows edits and blocks GitHub writes; save sends the whole section', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     await mount(seatsProps(posts));

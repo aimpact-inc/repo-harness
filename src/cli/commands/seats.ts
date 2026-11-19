@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { delimiter, dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { CLAUDE_BUILTIN_AGENT_TYPES, SeatPaneNameError, buildSeatLaunch, seatPaneName, seatTabName, type SeatLaunchV1 } from '../../core/board/seat-launch';
-import { LAUNCH_SEAT_IDS, RETIRED_SEAT_FLEET_ROLES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, seatsConfigInvalidMessage, isPlannerSeat, isReviewSeat, isWorkerSeat, unavailablePiSeat, type LaunchSeatId, type SeatConfigV1, type SeatId, type SeatsConfigV1 } from '../../core/board/seats-settings';
+import { AgySeatSettingsError, LAUNCH_SEAT_IDS, RETIRED_SEAT_FLEET_ROLES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, seatsConfigInvalidMessage, seatHostId, isPlannerSeat, isReviewSeat, isWorkerSeat, unavailablePiSeat, type LaunchSeatId, type SeatConfigV1, type SeatId, type SeatsConfigV1 } from '../../core/board/seats-settings';
 import { claudeReserved, deepGatekeeperRepeatsGatekeeper, effectiveGatekeeper, effectiveSeatConfig, seatAccount, seatAccountQuotas, seatState, shownModel, type SeatRouteV1 } from '../../core/board/seat-routing';
 import { AGY_QUOTA_ACCOUNTS, classifyQuotaReading, type QuotaAccount, type QuotaReading } from '../../core/board/quota';
 import { readAgyQuota, readClaudeQuota, readCodexQuota } from '../../effects/board/quota';
@@ -25,12 +25,17 @@ import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
 import { PlannerConsultError } from '../../core/board/planner-consult';
 import { runPlannerConsult } from '../../effects/board/planner-consult';
 import { formatSeatPool, seatModelBlock, seatPoolHint, seatRuntimeBlock } from '../../core/board/seat-pool';
-import { collectSeatPoolProbes, magpieExtensionInstalled, refreshSeatPool, SeatsConfigurationError } from '../../effects/board/seats-configuration';
+import { collectSeatPoolProbes, enabledRuntimesOf, magpieExtensionInstalled, probeAgySeat, refreshSeatPool, SeatsConfigurationError, writeAgySeatAgent } from '../../effects/board/seats-configuration';
+
+import { checkAntigravityHooks } from '../installer/targets/antigravity';
+import { resolveAntigravityRepository } from '../hook/host-adapter';
 
 const CLI_ENTRY = fileURLToPath(new URL('../index.ts', import.meta.url));
 
 class SeatsCommandError extends Error {
-  constructor(readonly code: 'seat_unknown' | 'seat_not_configured' | 'seat_quota_exhausted' | 'seat_quota_reserved' | 'seat_provider_unavailable' | 'seat_model_repeats_gatekeeper' | 'owner_exception_invalid' | 'config_invalid' | 'label_value_invalid' | 'repository_id_required' | 'terminal_unknown' | 'seat_identity_missing' | 'seat_session_unknown' | 'seat_context_unknown' | 'pi_extension_missing' | 'seat_space_missing' | 'seat_tab_failed' | 'seat_tab_unknown', message: string) {
+  constructor(readonly code: 'seat_unknown' | 'seat_not_configured' | 'seat_quota_exhausted' | 'seat_quota_reserved' | 'seat_provider_unavailable' | 'seat_model_repeats_gatekeeper' | 'owner_exception_invalid' | 'config_invalid' | 'label_value_invalid' | 'repository_id_required' | 'terminal_unknown' | 'seat_identity_missing' | 'seat_session_unknown' | 'seat_context_unknown' | 'pi_extension_missing' | 'seat_space_missing' | 'seat_tab_failed' | 'seat_tab_unknown' | 'seat_reset_runtime_unsupported'
+    | 'seat_runtime_missing' | 'seat_runtime_unsupported' | 'seat_runtime_signed_out' | 'seat_runtime_unknown' | 'seat_model_unavailable'
+    | 'seat_checkout_not_opted_in' | 'antigravity_guard_unready', message: string) {
     super(message);
   }
 }
@@ -283,11 +288,12 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   try { config = readGlobalConfiguration(env).config; } catch (error) { throw new SeatsCommandError('config_invalid', (error as Error).message); }
   let seats;
   try { seats = decodeSeatsConfig(config.seats); } catch (error) {
-    if (error instanceof SeatsConfigMigrationRequiredError) throw error;
+    if (error instanceof SeatsConfigMigrationRequiredError || error instanceof AgySeatSettingsError) throw error;
     throw new SeatsCommandError('config_invalid', seatsConfigInvalidMessage(error));
   }
   const configured = seats[id];
   if (configured === null) throw new SeatsCommandError('seat_not_configured', `The ${id} seat is not configured. Configure it in the seats section before launch.`);
+  const agyExecutable = configured.runtime === 'agy' ? await checkedAgyExecutable(config, configured, env, cwd, terminal) : undefined;
   // The board review passes the gatekeeper route that its plan checked: the launched seat is the planned one, with no second quota read.
   // The config is still read for the source of the brief and for the migration error.
   if (labels.ownerException !== undefined) {
@@ -297,11 +303,12 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   const labelSet = seatLabels(id, labels);
   const plannedSeat = id === 'gatekeeper' && planned !== undefined ? plannedGatekeeper(planned) : null;
   const runtimeSeat = plannedSeat?.id === 'gatekeeper-fallback' ? plannedSeat.id : id;
-  const probes = checkAvailability ? collectSeatPoolProbes(env) : [];
+  const checkPool = checkAvailability && agyExecutable === undefined;
+  const probes = checkPool ? collectSeatPoolProbes(env) : [];
   const unavailable = (modelSeat: SeatId, reason: string) => {
     throw new SeatProviderUnavailableError(`The ${id} seat cannot launch. ${reason} ${seatPoolHint(modelSeat, seats, probes)}`);
   };
-  if (checkAvailability) {
+  if (checkPool) {
     const reason = seatRuntimeBlock(runtimeSeat, (plannedSeat?.seat ?? configured).runtime, probes);
     if (reason !== null) unavailable(runtimeSeat, reason);
   }
@@ -309,7 +316,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   const { id: effectiveId, seat: effective, modeKnown, claudeSaving } = plannedSeat !== null
     ? { id: runtimeSeat, seat: plannedSeat.seat, modeKnown: true, claudeSaving: false }
     : await quotaCheckedSeat(id, seats, configured, env, labels.ownerException);
-  if (checkAvailability) {
+  if (checkPool) {
     const reason = seatModelBlock(effectiveId, effective, seats, probes, () => magpieExtensionInstalled(env));
     if (reason !== null) unavailable(effectiveId, reason);
   } else {
@@ -328,13 +335,44 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
     : [];
   const piRoleDirectory = prepareFleet && effective.runtime === 'pi' && effective.fleet.length > 0 ? writePiFleetRoles(effective.fleet, env, seats.pi_sub_agent_models) : undefined;
   const piHookExtension = effective.runtime === 'pi' && isReviewSeat(id) ? installedPiExtension(env) : undefined;
-  const launch = buildSeatLaunch(id, effective, config.seats === undefined ? 'defaults' : 'seats', agentTypes, name ?? undefined, labels.repositoryId, piRoleDirectory, piHookExtension, claudeSaving);
+  const agy = agyExecutable === undefined ? undefined : { executable: agyExecutable, directory: writeAgySeatAgent(effective, env), cwd };
+  const launch = buildSeatLaunch(id, effective, config.seats === undefined ? 'defaults' : 'seats', agentTypes, {
+    paneName: name ?? undefined, repositoryId: labels.repositoryId, piRoleDirectory, piHookExtension, claudeSaving, agy,
+  });
   const argv = labelSet === undefined ? launch.argv : selfLabelingArgv(id, labels, launch.argv, env);
   return { effective, effectiveId, modeKnown, launch: {
     ...launch,
     argv: labelSet !== undefined && terminal === 'new' ? seatLoginShell(argv) : argv,
     labels: labelSet === undefined ? [] : hcLabelPairs(labelSet), name, tab, ownerException: labels.ownerException ?? null,
   } };
+}
+
+async function checkedAgyExecutable(config: Record<string, unknown>, seat: SeatConfigV1, env: NodeJS.ProcessEnv, cwd: string, terminal: 'new' | 'existing'): Promise<string> {
+  if (terminal === 'existing') throw new SeatsCommandError('seat_reset_runtime_unsupported', 'Start a new agy advisor pane with rh seats launch advisor.');
+  if (!enabledRuntimesOf(config).includes(seatHostId('agy'))) {
+    throw new SeatsConfigurationError('seat_runtime_not_enabled', 'Enable Antigravity in Hosts before launching the advisor.');
+  }
+  const probe = await probeAgySeat(env);
+  switch (probe.kind) {
+    case 'not_installed': throw new SeatsCommandError('seat_runtime_missing', 'Install agy before launching the advisor. See seats.advisor.model.');
+    case 'unsupported': throw new SeatsCommandError('seat_runtime_unsupported', 'The advisor requires stable agy 1.5.0 or later. See seats.advisor.model.');
+    case 'signed_out': throw new SeatsCommandError('seat_runtime_signed_out', 'Sign in through agy before launching the advisor. See seats.advisor.model.');
+    case 'unknown':
+    case 'catalog_unknown': throw new SeatsCommandError('seat_runtime_unknown', 'The agy installation or model catalog could not be checked. Retry the launch. See seats.advisor.model.');
+    case 'available':
+      if (seat.model === null || !probe.models.has(seat.model)) {
+        throw new SeatsCommandError('seat_model_unavailable', 'agy does not list the selected advisor model. See seats.advisor.model.');
+      }
+      break;
+  }
+  let optedIn = false;
+  try { optedIn = resolveAntigravityRepository({ cwd }).status === 'opted-in'; } catch { /* refuse unresolved checkouts */ }
+  if (!optedIn) throw new SeatsCommandError('seat_checkout_not_opted_in', 'Start the agy advisor in a repo-harness opt-in checkout.');
+  const [activation, direct] = checkAntigravityHooks(env);
+  if (activation.status !== 'ok' || direct.status !== 'ok') {
+    throw new SeatsCommandError('antigravity_guard_unready', `On-disk activation: ${activation.status}. Direct guard: ${direct.status}. Run rh doctor for details.`);
+  }
+  return probe.executable;
 }
 
 /** The space of the calling terminal: Herdr.app writes it as a label on each terminal that a pane shows. */
@@ -368,17 +406,24 @@ async function seatTabLaunch(seat: string, labels: SeatLabelInput, input: SeatTa
   const { argv, ...summary } = launch;
   const field = `seats.${effectiveId}.model`;
   const modelField = shownModel(field, effective.model) === field ? field : null;
-  const args = { ...(launch.tab === null ? {} : { name: launch.tab }), space, folder: input.cwd, argv, task: input.task, focus: input.focus };
-  return { launch: modelField === null ? launch : summary, model: modelField ?? effective.model, modelField, space, placement: openSeatTab(args, env, modelField) };
+  const agy = launch.runtime === 'agy';
+  const args = { ...(launch.tab === null ? {} : { name: launch.tab }), space, folder: input.cwd, focus: input.focus,
+    ...(agy ? { argv: [...argv, '-i', input.task] } : { argv, task: input.task }),
+  };
+  const placement = openSeatTab(args, env, modelField, agy);
+  return { launch: modelField === null ? launch : summary, model: modelField ?? effective.model, modelField, space, placement };
 }
 
-function openSeatTab(args: Readonly<Record<string, unknown>> & { readonly space: string }, env: NodeJS.ProcessEnv, modelField: string | null = null): Record<string, unknown> {
+function openSeatTab(args: Readonly<Record<string, unknown>> & { readonly space: string }, env: NodeJS.ProcessEnv, modelField: string | null = null, privateTask = false): Record<string, unknown> {
   const { space } = args;
   try {
-    return herdrAppDo('tab.new', args, { env });
+    const placement = herdrAppDo('tab.new', args, { env });
+    if (!privateTask) return placement;
+    return Object.fromEntries(Object.entries(placement).filter(([key, value]) =>
+      ['tab', 'pane', 'terminal', 'space'].includes(key) && typeof value === 'string' && /^[a-z0-9]+$/iu.test(value)));
   } catch (error) {
     if (!(error instanceof HerdrCoreError)) throw error;
-    const detail = modelField === null ? error.message : `${error.reason}. See ${modelField}`;
+    const detail = modelField !== null ? `${error.reason}. See ${modelField}` : privateTask ? error.reason : error.message;
     if (HERDR_APP_NOT_SENT.has(error.reason)) {
       throw new SeatsCommandError('seat_tab_failed', `Herdr.app opened no tab in space ${space}: ${detail}. No seat started. Run the launch on the machine that shows the Herdr.app window.`);
     }
@@ -389,7 +434,8 @@ function openSeatTab(args: Readonly<Record<string, unknown>> & { readonly space:
 /** The structured error line of the seat launch commands. */
 function writeLaunchError(error: unknown): void {
   const code = error instanceof SeatsCommandError || error instanceof ClaudeAgentTypesError || error instanceof PiFleetRolesError || error instanceof PiShellError || error instanceof SeatPaneNameError
-    || error instanceof RepoHarnessRegistryStrictError || error instanceof SeatsConfigMigrationRequiredError || error instanceof PlannerConsultError ? error.code : 'seat_launch_failed';
+    || error instanceof RepoHarnessRegistryStrictError || error instanceof SeatsConfigMigrationRequiredError || error instanceof PlannerConsultError
+    || error instanceof SeatsConfigurationError || error instanceof AgySeatSettingsError ? error.code : 'seat_launch_failed';
   process.stderr.write(`${JSON.stringify({ ok: false, error: code, message: (error as Error).message,
     ...(error instanceof SeatsConfigMigrationRequiredError ? { next_action: error.next_action } : {}) })}\n`);
   process.exitCode = 1;
@@ -422,7 +468,9 @@ export function seatHandoff(env: NodeJS.ProcessEnv = process.env, now = new Date
   if (identity === null) {
     throw new SeatsCommandError('seat_identity_missing', 'REPO_HARNESS_SEAT and REPO_HARNESS_SEAT_REPOSITORY name no orchestrator or advisor seat: start the seat with rh seats argv <seat> --repository-id <id>.');
   }
-  const transcript = readSeatSession(identity)?.transcriptPath;
+  const session = readSeatSession(identity);
+  if (session?.host === 'antigravity') throw new SeatsCommandError('seat_reset_runtime_unsupported', 'Send the agy handoff to the orchestrator for a manual relaunch.');
+  const transcript = session?.transcriptPath;
   if (transcript === undefined) throw new SeatsCommandError('seat_session_unknown', `The SessionStart record of the ${identity.seat} seat is missing or not valid, so the session transcript is unknown.`);
   let usage: TranscriptUsage;
   try { usage = readTranscriptUsage(transcript); } catch (error) {

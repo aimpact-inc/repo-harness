@@ -168,6 +168,13 @@ test('a signed-out reviewer leaves the whole High start decision without markers
   expect([p.comments, p.tabs]).toEqual([[], []]);
 });
 
+test('an agy review launch refuses before any marker or tab', async () => {
+  const p = ports({ launch: async seat => ({ argv: [seat], tab: seat, runtime: seat === 'reviewer' ? 'agy' : 'codex' }) });
+  const decisions = plan([pr(1, { second_review: 'pending' })]);
+  await expect(executeReview(decisions, context, p)).rejects.toThrow('agy is available only for the advisor seat.');
+  expect([p.comments, p.tabs]).toEqual([[], []]);
+});
+
 test('a dry run, and a worktree off the head, write no marker and open no seat', async () => {
   const dry = ports();
   await executeReview(high, { ...context, dry_run: true }, dry);

@@ -80,7 +80,8 @@ function seatReset(payload: HookPayload, env: NodeJS.ProcessEnv, now: Date, hand
     if (!usage || usage.contextTokens === null || usage.contextTokens < SEAT_RESET_CONTEXT_TOKENS) return { notices: [] };
     const { contextTokens, bytes } = usage;
     const action = relaunch ? 'reset' : seatResetAction(bytes);
-    if (!open) writeSeatResetRequest(identity, now, { contextTokens, transcriptPath: transcript, transcriptBytes: bytes, action });
+    if (!open) writeSeatResetRequest(identity, now, { contextTokens, transcriptPath: transcript, transcriptBytes: bytes, action,
+      host: relaunch ? 'antigravity' : 'claude' });
     const message = relaunch ? ANTIGRAVITY_HANDOFF : seatResetReason(identity, contextTokens, bytes, action);
     return { block: { exitCode: 2, stdout: '', stderr: `${message}\n` } };
   } catch (error) {

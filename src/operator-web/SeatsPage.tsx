@@ -2,8 +2,8 @@ import { useState, type ReactNode } from 'react';
 import { Banner, Button, Empty, Loader, Switch, cn } from '@cloudflare/kumo';
 import { effectiveSeatConfig, seatAccountQuotas, seatOnCredits } from '../core/board/seat-routing';
 import { EXHAUSTED_AT_OR_ABOVE_USED_RANGE } from '../core/board/quota';
-import { buildSeatLaunch, type SeatLimitLevel } from '../core/board/seat-launch';
-import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, decodeSeatsSettingsRequest, isOptionalSeat, isPlannerSeat, isReviewSeat, isSeatScaffoldSubAgent, piSubAgentModel, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
+import { AGY_SEAT_LIMITS, buildSeatLaunch, type SeatLimitLevel } from '../core/board/seat-launch';
+import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, decodeSeatsSettingsRequest, isOptionalSeat, isPlannerSeat, isReviewSeat, isSeatScaffoldSubAgent, piSubAgentModel, seatHostId, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
 import type { SetupSnapshotV2 } from '../core/setup/types';
 import type { OperatorTranslate } from './i18n';
 import type { QuotaSection } from './quota';
@@ -145,7 +145,7 @@ function fleetDetail(setup: SetupSnapshotV2 | null, role: string): string {
 
 /** The Hosts switch of a runtime that the last seats read does not report enabled, on the same agents draft. */
 function InPlaceEnable({ runtime, agents, t }: { readonly runtime: SeatRuntime; readonly agents: AgentsSettingsForm; readonly t: OperatorTranslate }) {
-  const row = runtimeRowOf(agents, runtime);
+  const row = runtimeRowOf(agents, seatHostId(runtime));
   if (row === null) return null;
   return (
     <span className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-dashed border-kumo-line px-2" data-runtime-enable={runtime}>
@@ -209,6 +209,8 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
   )) : null;
   const { ranges, defaults } = settings;
   const runtime = ranges.runtimes.find(entry => entry.id === draft.runtime)!;
+  const runtimeChoices = ranges.runtimes.filter(entry => entry.id !== 'agy' || seat === 'advisor');
+  const agy = draft.runtime === 'agy';
   const range = ranges.seats[seat];
   const recommended = seat !== 'worker' && defaults[seat]?.runtime === draft.runtime ? defaults[seat] : null;
   const review = isReviewSeat(seat);
@@ -216,14 +218,14 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
   const check = (on: boolean) => (on ? ' ✓' : '');
   const suggested = range.models.filter(entry => entry.runtime === draft.runtime).map(entry => entry.model);
   const models = [
-    { value: null, label: t('seats.model.hostDefault') },
+    ...(agy ? [] : [{ value: null, label: t('seats.model.hostDefault') }]),
     ...suggested.map(model => ({ value: model as string | null, label: model })),
     // A typed or stored model outside the seat's recommended list stays visible as a choice.
     ...(draft.model !== null && !suggested.includes(draft.model) ? [{ value: draft.model as string | null, label: draft.model }] : []),
   ];
   const efforts = [{ value: null, label: t('seats.effort.default') }, ...ranges.efforts.map(effort => ({ value: effort as string | null, label: effort, off: !runtime.effort }))];
   // The host agent types change only the argv; the limit levels do not depend on them, so the page passes none.
-  const limits = buildSeatLaunch(seat === 'gatekeeper-fallback' ? 'gatekeeper' : seat, draft, 'seats', []).limits;
+  const limits = agy ? AGY_SEAT_LIMITS : buildSeatLaunch(seat === 'gatekeeper-fallback' ? 'gatekeeper' : seat, draft, 'seats', []).limits;
   const levelOf = (subject: string) => limits.find(limit => limit.subject === subject)?.level ?? null;
   const fleetLevel = levelOf('fleet');
   // A stored role the server no longer lists stays visible, as a stored model does, so it can be switched off.
@@ -238,12 +240,12 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
 
       <Field label={t('seats.field.runtime')}>
         {/* Choices use the saved Hosts settings. A stored seat can still use a disabled runtime. */}
-        {ranges.runtimes.some(entry => entry.enabled) && (
+        {runtimeChoices.some(entry => entry.enabled) && (
           <Segmented label={t('seats.field.runtime')} disabled={locked} value={draft.runtime as SeatRuntime}
-            options={ranges.runtimes.filter(entry => entry.enabled).map(entry => ({ value: entry.id, label: t(`seats.runtime.${entry.id}`) }))}
+            options={runtimeChoices.filter(entry => entry.enabled).map(entry => ({ value: entry.id, label: t(`seats.runtime.${entry.id}`) }))}
             onPick={value => form.edit(current => setSeatRuntime(current, seat, value, ranges))} />
         )}
-        {ranges.runtimes.filter(entry => !entry.enabled).map(entry => <InPlaceEnable key={entry.id} runtime={entry.id} agents={agents} t={t} />)}
+        {runtimeChoices.filter(entry => !entry.enabled).map(entry => <InPlaceEnable key={entry.id} runtime={entry.id} agents={agents} t={t} />)}
         {runtime.enabled && seat === 'orchestrator' && draft.runtime !== 'claude' && (
           <span className="text-xs text-kumo-subtle" data-runtime-note>{t('seats.runtime.orchestratorMode')}</span>
         )}
@@ -290,7 +292,7 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
           const on = draft.tools.includes(tool);
           const ruled = !range.tools.includes(tool);
           // Codex always runs commands, so its Shell can be turned on but not off.
-          const hostWhy = draft.runtime === 'pi' ? t('seats.tools.why.pi')
+          const hostWhy = agy ? t('seats.tools.why.agy') : draft.runtime === 'pi' ? t('seats.tools.why.pi')
             : tool === 'read' ? t('seats.tools.why.read')
               : draft.runtime === 'codex' && tool === 'shell' && on ? t('seats.tools.why.codexShell')
                 : draft.runtime === 'codex' && (tool === 'tasks' || tool === 'schedule') ? t('seats.tools.why.codexTasks') : null;

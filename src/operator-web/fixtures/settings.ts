@@ -1,6 +1,6 @@
 import { AGENT_RUNTIME_CAPABILITIES, decodeAgentsSettings, type AgentsSettingsV1 } from '../../core/board/agents-settings';
 import { isReviewRuntimeId } from '../../core/review/review-runtimes';
-import { DEFAULT_SEATS_CONFIG, FRONTEND_SEAT_IDS, PLANNER_TOOLS, ROUTING_CLASSES, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, WORKER_SEAT_IDS, decodeSeatsSettings, type SeatsConfigV1, type SeatsSettingsRequestV1, type SeatsSettingsV1 } from '../../core/board/seats-settings';
+import { DEFAULT_SEATS_CONFIG, FRONTEND_SEAT_IDS, PLANNER_TOOLS, ROUTING_CLASSES, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, WORKER_SEAT_IDS, decodeSeatsSettings, seatHostId, type SeatsConfigV1, type SeatsSettingsRequestV1, type SeatsSettingsV1 } from '../../core/board/seats-settings';
 import { SEAT_RECOMMENDED_MODELS } from '../../core/board/recommended-models';
 import type { DocumentationLanguage, DocumentationLanguageReader, DocumentationLanguageWriter, LanguageRead, LanguageReader, LanguageWriter, ReportingHost, ReportingPreset } from '../language-settings';
 import type { OperatorApiErrorV1 } from '../operator-api-error';
@@ -51,6 +51,7 @@ function seatsRanges(enabled: readonly string[]) {
       { id: 'claude', enabled: enabled.includes('claude'), effort: true, fleet: true },
       { id: 'codex', enabled: enabled.includes('codex'), effort: true, fleet: true },
       { id: 'pi', enabled: enabled.includes('pi'), effort: true, fleet: true },
+      { id: 'agy', enabled: enabled.includes(seatHostId('agy')), effort: false, fleet: false },
     ],
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     roles: SEAT_SCAFFOLD_SUB_AGENTS.map(name => ({ name, writable: false })),

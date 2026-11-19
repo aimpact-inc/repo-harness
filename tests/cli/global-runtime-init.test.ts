@@ -258,7 +258,7 @@ test('update strips retired fleet roles once and leaves the saved seats ready fo
     expect(claude.brief).toContain('`deep-reasoner`, `explorer`');
     const piSeat = current['worker-light']!;
     const roles = writePiFleetRoles(piSeat.fleet, env);
-    const pi = buildSeatLaunch('worker-light', piSeat, 'seats', [], undefined, undefined, roles);
+    const pi = buildSeatLaunch('worker-light', piSeat, 'seats', [], { piRoleDirectory: roles });
     expect(pi.argv).toEqual(expect.arrayContaining(['pi', `PI_SUBAGENT_EXTRA_AGENT_DIRS=${roles}`]));
     expect(readdirSync(roles).sort()).toEqual(['rh-deep-reasoner.md', 'rh-explorer.md']);
 
