@@ -6,7 +6,6 @@ import { fileURLToPath } from 'url';
 import { createHash } from 'crypto';
 import { hostSkillRoot, providerSkillLock, type ProviderSkillLock } from '../../effects/host-skill-roots';
 import { piPackageEntry, piPackageRemoval, recordedPiPackages, removePiPackage } from './pi-package';
-import { piExecutable } from '../../effects/pi-executable';
 import { globalContextPath, inspectUnrecordedGlobalRules, previewGlobalRulesAdoptedRevert } from './global-context';
 import { legacyRepositoryExcludesPath } from './repository-excludes';
 import { repositoryLedgers } from '../../effects/host-config/repository';
@@ -331,10 +330,6 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
 
   for (const [source, recorded] of piPackages) {
     try {
-      if (piExecutable(env) === null) {
-        items.push({ path: source, action: 'kept', reason: 'pi not found on PATH; package removal skipped; ownership retained for retry' });
-        continue;
-      }
       // An entry that is gone from the Pi settings releases its record, so a later hand registration is never rh's.
       const removal = piPackageRemoval(source, recorded, env);
       if (removal === 'edited') { unresolved(source, REVERT_REASONS.kept_edited); continue; }
@@ -432,7 +427,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
         assertConfigurationPath(dirname(path), surfaceRoot(path));
         if (fingerprint(path) !== expected) throw new Error(`configuration changed after preview: ${path}`);
       }
-      // A Pi entry that changed after the plan stops before the ownership ledger is written.
+      // A failed Pi entry removal stops before the ownership ledger is written.
       for (const [source, recorded] of piRemovals) removePiPackage(source, recorded, env);
       const surfaces = [...removedSurfaces];
       if ((surfaces.length || retireRecords) && pathRecordsDigest(readPathRecords(env)) !== recordsDigest) throw new Error(`configuration changed after preview: ${hostConfigPaths(env).ledger}`);

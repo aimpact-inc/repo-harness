@@ -8,6 +8,7 @@ import { installPiPackage, ownedPiPackages, piPackagePresent, piUserPackageSourc
 import { installStateStatus, prepareInstallSelectionSwitch, readInstallState, versions } from '../../src/cli/installer/install-profile';
 import { ownedPath } from '../../src/effects/host-config/path-records';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
+import { hostConfigPaths } from '../../src/effects/host-config/store';
 import { jsonFragment } from '../../src/core/host-config/json-fragment';
 import { buildManagedHooks } from '../../src/cli/installer/managed-entries';
 import { hostSkillRoot } from '../../src/effects/host-skill-roots';
@@ -399,6 +400,10 @@ describe('Pi package and skill installation', () => {
       expect(installPiPackage(f.source, true, f.env).created).toBe(true);
       const { entry, aliases } = piAliases(f);
       f.setPackages(['npm:other-package', ...(beside ? [entry] : []), aliases[index]]);
+      const ledger = hostConfigPaths(f.env).ledger;
+      const before = [readFileSync(f.settings), readFileSync(ledger)];
+      expect(runUserUninstall({ target: 'both', env: f.env, dryRun: true }).exitCode).toBe(0);
+      expect([readFileSync(f.settings), readFileSync(ledger)]).toEqual(before);
       expect(runUserUninstall({ target: 'both', env: f.env }).exitCode).toBe(0);
       expect([f.packages(), f.argv().filter(args => args[0] === 'remove'), ownedPiPackages(f.env)]).toEqual([['npm:other-package', aliases[index]], [], []]);
     });
@@ -413,6 +418,19 @@ describe('Pi package and skill installation', () => {
       expect([readFileSync(f.settings).equals(before), ownedPiPackages(f.env)]).toEqual([true, [f.source]]);
     });
   });
+
+  test('a failed staged write of the Pi settings keeps their bytes and the ownership record', () => fixture(f => {
+    recordPiSelection(f.env);
+    expect(installPiPackage(f.source, true, f.env).created).toBe(true);
+    const before = readFileSync(f.settings);
+    // The temporary file beside the settings cannot be created, so the replacement fails before the rename.
+    chmodSync(dirname(f.settings), 0o555);
+    let result: ReturnType<typeof runUserUninstall>;
+    try { result = runUserUninstall({ target: 'both', env: f.env }); } finally { chmodSync(dirname(f.settings), 0o755); }
+    expect(result.exitCode).toBe(1);
+    expect(result.items.some(item => item.action === 'unresolved' && item.reason.startsWith('uninstall incomplete: '))).toBe(true);
+    expect([readFileSync(f.settings).equals(before), ownedPiPackages(f.env), readInstallState(f.env) !== null]).toEqual([true, [f.source], true]);
+  }));
 
   test('a plugin switch away from Pi takes out only the recorded entry and refuses edited text', () => {
     const away = PI_FULL_PLUGINS.filter(id => id !== 'pi');
@@ -444,14 +462,13 @@ describe('Pi package and skill installation', () => {
     expect([piPackagePresent(f.source, f.env), ownedPiPackages(f.env)]).toEqual([false, []]);
   }));
 
-  test('uninstall skips missing Pi and retains its ownership for a later retry', () => fixture(f => {
+  test('uninstall takes out the recorded Pi entry with no pi on PATH', () => fixture(f => {
     recordPiSelection(f.env);
     expect(installPiPackage(f.source, true, f.env).created).toBe(true);
     const result = runUserUninstall({ target: 'both', env: { ...f.env, PATH: '' } });
     expect(result.exitCode).toBe(0);
-    expect(result.items).toContainEqual({ path: f.source, action: 'kept', reason: 'pi not found on PATH; package removal skipped; ownership retained for retry' });
-    expect(ownedPiPackages(f.env)).toEqual([f.source]);
-    expect(f.argv().some(args => args[0] === 'remove')).toBe(false);
+    expect(result.items).toContainEqual({ path: f.source, action: 'reverted', reason: 'recorded Pi package entry taken out; other entries of the package stay' });
+    expect([f.packages(), ownedPiPackages(f.env), f.argv().some(args => args[0] === 'remove')]).toEqual([['npm:other-package'], [], false]);
   }));
 
   test('dry-run, install, update and uninstall use Pi CLI ownership and preserve user files', () => fixture(f => {

@@ -1,5 +1,5 @@
 import { parseJsonText } from '../../core/evidence/file-syntax';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { stripVTControlCharacters } from 'node:util';
@@ -7,7 +7,8 @@ import { homedir } from 'node:os';
 import { piAgentDir } from '../../effects/pi-agent-dir';
 import { realPathOrResolved } from '../../effects/path-identity';
 import { piExecutable } from '../../effects/pi-executable';
-import { openHostConfigGate, type HostConfigGate } from '../../effects/host-config/gate';
+import { decode, openHostConfigGate, type HostConfigGate } from '../../effects/host-config/gate';
+import { expectedOf, hostConfigPaths, observeFile, replaceTarget, resolveHostPath } from '../../effects/host-config/store';
 import { jsonFragment, removeJsonFragment } from '../../core/host-config/json-fragment';
 import { HostConfigError } from '../../core/host-config/types';
 import { MEASURED_INSTALLERS, type HostConfigFragmentDeclaration } from '../../effects/host-config/delegated';
@@ -175,18 +176,25 @@ export function piPackageRemoval(source: string, recorded: string, env: NodeJS.P
 
 /**
  * Takes out only the recorded element, as a delegated write so that the gate
- * settles the record. `pi remove` is not used: Pi 1.5.2 takes out every entry
- * with the package identity, a user's alias too. The entry is checked again
- * here, since the user can edit it after the plan.
+ * settles the record from the file that it finds after the write. `pi remove`
+ * is not used: Pi 1.5.2 takes out every entry with the package identity, a
+ * user's alias too. The element is checked and taken out on one read of the
+ * file, and the result replaces the file atomically only while the file still
+ * has those bytes, so a failed write leaves the settings and the record as they
+ * were. Text at the selector that is not rh's stops the removal.
  */
 export function removePiPackage(source: string, recorded: string, env: NodeJS.ProcessEnv = process.env): void {
-  const removal = piPackageRemoval(source, recorded, env);
-  if (removal === 'edited') throw new Error(`the Pi package entry changed since rh wrote it; preserved: ${source}`);
   const declaration = piDeclaration(source, env);
+  const selector = declaration.selectors[0]!;
   openHostConfigGate({ env }).delegate([declaration], ([settings]) => {
-    if (removal !== 'remove') return;
-    const content = readFileSync(settings!, 'utf8');
-    const edit = removeJsonFragment(content, declaration.selectors[0]!);
-    writeFileSync(settings!, content.slice(0, edit.at) + edit.inserted + content.slice(edit.at + edit.removed.length));
+    const path = resolveHostPath(hostConfigPaths(env), settings);
+    const { observation, bytes } = observeFile(path);
+    if (bytes === null) return;
+    const content = decode(bytes, path);
+    const range = jsonFragment.locate(content, selector);
+    if (range === null) return;
+    if (content.slice(range.start, range.end) !== recorded) throw new Error(`the Pi package entry changed since rh wrote it; preserved: ${source}`);
+    const edit = removeJsonFragment(content, selector);
+    replaceTarget(path, Buffer.from(content.slice(0, edit.at) + edit.inserted + content.slice(edit.at + edit.removed.length), 'utf8'), expectedOf(observation, path));
   });
 }
