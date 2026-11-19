@@ -31,6 +31,8 @@ import {
   promotionCandidate, renderPromotionPrompt,
 } from '../../core/ci/rule-prompt';
 import { promoteRules, promotionRoute, reconcileRules, type RulesPromoteResult } from '../../effects/rules/promote';
+import { describeRuleProposals, type RuleProposalReport } from '../../core/ci/rule-proposals';
+import { collectRulesProposals, RulesProposalsError } from '../../effects/rules/proposals';
 import { collectRulesTasks } from '../../effects/rules/tasks';
 import type { BoardHostPortsV1 } from '../../core/board/board';
 import type { GithubCommandRunner } from '../../effects/github/issues';
@@ -234,7 +236,7 @@ function readLedger(target: string): RuleLedgerReadV1 {
   const blob = statusGit(target, ['rev-parse', '--verify', '--end-of-options', `HEAD:${RULES_LEDGER_PATH}`], 'ledger_missing').trim();
   if (!COMMIT_SHA.test(blob)) throw new RulesStatusError('ledger_unreadable', `git rev-parse HEAD:${RULES_LEDGER_PATH} gave no blob id`);
   // `status --porcelain` covers a modified, staged, deleted or untracked ledger file.
-  const status = statusGit(target, ['status', '--porcelain', '--untracked-files=all', '--', RULES_LEDGER_PATH], 'ledger_unreadable');
+  const status = statusGit(target, ['--no-optional-locks', 'status', '--porcelain', '--untracked-files=all', '--', RULES_LEDGER_PATH], 'ledger_unreadable');
   return { head, blob, dirty: status.trim() !== '' };
 }
 
@@ -277,6 +279,10 @@ interface RulesStatusOptions {
   target?: string;
   json?: boolean;
   tasks?: boolean;
+  proposals?: boolean;
+  since?: string;
+  includeLow?: boolean;
+  includeBot?: boolean;
 }
 
 export interface RulesPromoteOptions {
@@ -348,20 +354,30 @@ export function buildRulesCommand(host: BoardHostPortsV1): Command {
     .option('--target <path>', 'checkout to read (default: the working directory)')
     .option('--json', 'print the status document instead of the text lines')
     .option('--tasks', 'read promotion task progress from GitHub')
+    .option('--proposals', 'read review findings and rule opportunity markers from GitHub (experimental)')
+    .option('--since <commit>', 'start the proposals scan at or after the ledger watermark')
+    .option('--include-low', 'include P2 and P3 review findings in proposals status')
+    .option('--include-bot', 'include bot review threads in proposals status')
     .action((options: RulesStatusOptions) => {
       const target = options.target ?? process.cwd();
       let status: RuleStatusV1;
+      let proposals: RuleProposalReport | undefined;
       try {
         status = runRulesStatus({ target });
         if (options.tasks) status = collectRulesTasks(status, { repo_root: resolve(target), host });
+        if (options.proposals) proposals = collectRulesProposals(status, { ...options, repo_root: resolve(target) });
       } catch (error) {
-        if (!(error instanceof RulesStatusError)) throw error;
+        if (!(error instanceof RulesStatusError) && !(error instanceof RulesProposalsError)) throw error;
         statusRefusal(error.code, error.message);
         return;
       }
-      if (options.json) process.stdout.write(`${JSON.stringify(status)}\n`);
-      else process.stdout.write(`${describeRuleStatus(status).join('\n')}\n`);
-      process.exitCode = status.ledger.valid ? 0 : 1;
+      if (options.json) process.stdout.write(`${JSON.stringify(proposals ? { ...status, ...proposals } : status)}\n`);
+      else {
+        const lines = describeRuleStatus(status);
+        if (proposals) lines.push(...describeRuleProposals(proposals));
+        process.stdout.write(`${lines.join('\n')}\n`);
+      }
+      process.exitCode = status.ledger.valid || proposals?.truncated ? 0 : 1;
     });
   rules
     .command('promote')
