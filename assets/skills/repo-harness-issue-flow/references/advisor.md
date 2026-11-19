@@ -119,8 +119,9 @@ shipped, when a batch parent closes, and when the owner asks.
 3. Put a train in the set when nothing outside the repository and no owner
    hold blocks it. List the other trains with their blocker. Do not propose
    a release while a train that changes a migration or a ledger path has an
-   open batch parent; its merged work ships with the first release after the
-   parent closes.
+   open batch parent, except to ship a fix for a released I1 or I2 defect;
+   that proposal names the open train. Its merged work ships with the first
+   release after the parent closes.
 4. Name the critical path and what blocks it now. Name the seats that the
    scarce account must serve first.
 5. Give the table: train, result, order, tier and route, state. Give an
