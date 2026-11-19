@@ -198,6 +198,28 @@ plan:
 | `SHELVE` | An owner roadmap item, or an item that a vendor or upstream blocks | Label `status:deferred` and keep it open, off the dispatch board. It closes only on the owner's word |
 | `CLOSE` | An agent-spawned P2 or P3 issue | Close it as not planned |
 
+A defect of one rule in one file costs one PR, one CI run and one review.
+Three rules keep it that way:
+
+- **Same-rule sibling.** A writer sends `[rh-question] sibling <file:line>
+  <size>` before PUSHED (`worker.md` §3). Answer `CONSOLIDATE` when the
+  sibling is in the same file or function, has the same tier, and the
+  total stays inside the reviewable size (§2). The sibling then joins the
+  PR. Post one line on the issue, and add a `Closes` line only when an
+  issue for the sibling exists. Otherwise name the reason. A sibling in
+  another module follows the contract-first order (§2). Before the PR is
+  open, the call is yours. On an open PR it grows the scope, so it is a
+  joint decision.
+- **Base defect in round 1.** A round-1 row can name a base defect of the
+  same rule and the same file. Decide it before the merge. It joins the
+  round-1 fix only when that fix already changes the same function.
+  Otherwise it is one issue, and its dispatch may start from the merged
+  branch state. Round 2 absorbs nothing: it checks only the round-1 fixes,
+  and a new P1 inside them ends the loop.
+- **Standalone lane.** Two open standalone issues with one rule and one
+  file go to one seat as one brief with two `Closes` lines. Issues with
+  different write scopes keep one issue per brief.
+
 Before you file a new issue during a batch:
 
 1. Search the open issues and PRs for the same design and consolidate a
@@ -446,6 +468,9 @@ host's PR events or check when the worker reports.
   for: <paths>` is a map bug. The worker fixes the consumer edge
   (`scripts/ci-path-consumers.ts`) or the test import. Never widen to the
   full suite unless a real full-suite input changed.
+- **Sibling question.** Answer a `[rh-question] sibling` before the
+  writer pushes, and decide a round-1 base defect before the merge. The
+  rules are in §4.2 (Same-rule sibling, Base defect in round 1).
 - **Boundary question.** Decide fast. Either amend the issue (edit the body
   and post a `scope change` comment that says what changed and why), or
   open a new issue for the extra work and keep the PR narrow. Never let the
