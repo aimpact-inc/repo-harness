@@ -3,10 +3,10 @@ import { spawnSync } from "child_process";
 import { createHash } from "crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { basename, delimiter, dirname, join } from "path";
+import { delimiter, dirname, join } from "path";
 import { seatPaneName } from "../../src/core/board/seat-launch";
-import { HANDOFF_SECTIONS, seatResetReason, seatResetSteps } from "../../src/core/board/seat-reset";
-import { SeatResetError, runSeatReset, type SeatRelaunch, type SeatResetNotify } from "../../src/effects/board/seat-reset";
+import { HANDOFF_SECTIONS, seatResetReason, seatResetSteps, type SeatResetIdentity } from "../../src/core/board/seat-reset";
+import { SeatResetError, runSeatReset, type SeatRelaunch, type SeatResetNotify, type SeatResetOptions } from "../../src/effects/board/seat-reset";
 import { seatResetLaunch } from "../../src/cli/commands/seats";
 import { DEFAULT_SEATS_CONFIG, WORKER_SEAT_IDS } from "../../src/core/board/seats-settings";
 import { repoHarnessRepoIdFor } from "../../src/effects/repo-registry";
@@ -121,8 +121,7 @@ function withRepository(home: string, panePrefix: string | undefined, fn: (repo:
   }
 }
 const denied = (args: string[]) => values(args, "--disallowedTools");
-/** With --repository-id the argv is `/bin/sh -c <script> <bun> <cli>` and then the agent argv. */
-const agent = (launch: { argv: string[] }) => launch.argv.slice(5);
+const agent = (launch: { argv: string[] }) => launch.argv.slice(launch.argv.indexOf("env"));
 /** Every seat argv first unsets the seat identity that it inherits and the Pi role directory (#1975, #1977); `bare` checks that prefix and drops it. */
 const UNSET_SEAT = ["env", "-u", "REPO_HARNESS_SEAT", "-u", "REPO_HARNESS_SEAT_REPOSITORY", "-u", "REPO_HARNESS_SEAT_MODEL", "-u", "REPO_HARNESS_SEAT_EFFORT", "-u", "PI_SUBAGENT_EXTRA_AGENT_DIRS"];
 function bare(args: string[]): unknown[] {
@@ -506,8 +505,9 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
       const reviewer = (...args: string[]) => run(registryEnv(home), ["reviewer", "--repository-id", "1", "--pr", "2769", ...args, "--json"], repo);
       const error = (result: ReturnType<typeof run>) => [result.status, result.stdout, JSON.parse(result.stderr).error];
       const accepted = JSON.parse(reviewer("--owner-exception", url).stdout);
-      expect([accepted.ownerException, accepted.labels.at(-1), accepted.argv.slice(2, 6)]).toEqual([url, `repo-harness.owner-exception=${url}`,
-        ['"$0" "$1" seats label reviewer --repository-id 1 --pr 2769 --owner-exception "$2" && shift 2 && exec "$@"', process.execPath, CLI, url]]);
+      expect([accepted.ownerException, accepted.labels.at(-1), accepted.argv.slice(6, 11)]).toEqual([url, `repo-harness.owner-exception=${url}`,
+        [expect.stringContaining('"$0" "$1" seats label reviewer --repository-id 1 --pr 2769 --owner-exception "$3" && shift 3 && exec "$@"'), process.execPath, CLI, expect.any(String), url]]);
+      expect(accepted.argv[6]).not.toContain(url);
       for (const bad of ["https://github.com/other/repo/issues/1", "https://github.com/aimpact-inc/repo-harness/issues/1 ; true", "http://github.com/aimpact-inc/repo-harness/pull/1"]) {
         expect(error(reviewer("--owner-exception", bad))).toEqual([1, "", "owner_exception_invalid"]);
       }
@@ -824,10 +824,10 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
     withHome(undefined, (home) => {
       withRepository(home, "rh", (repo) => {
         const worker = JSON.parse(run(registryEnv(home), ["worker", "--repository-id", "1186405141", "--parent", "1000", "--issue", "1473", "--json"], repo).stdout);
-        expect(worker.argv.slice(0, 2)).toEqual(["/bin/sh", "-c"]);
         // A fake hc and a fake agent on an explicit PATH: no real terminal is labelled or started.
         const bin = join(home, "bin"), log = join(home, "calls.log");
         mkdirSync(bin);
+        for (const profile of [".profile", ".zshrc"]) writeFileSync(join(home, profile), 'export PATH="$HOME/bin:/bin:/usr/bin"\n');
         writeFileSync(join(bin, "hc"), `#!/bin/sh\nprintf 'hc %s\\n' "$*" >> "${log}"\nif [ -n "$FAKE_HC_FAIL" ]; then printf '%s' '{"error":{"kind":"not_found","message":"no terminal"}}' >&2; exit 3; fi\n`
           + `printf '%s' '{"address":"t5","state":"live","labels":{"repo-harness.seat":"worker"},"turn":0}'\n`);
         writeFileSync(join(bin, "codex"), `#!/bin/sh\nprintf 'codex %s %s %s %s %s %s\\n' "$#" "$1" "$2" "\${REPO_HARNESS_SEAT-unset}" "\${REPO_HARNESS_SEAT_REPOSITORY-unset}" "\${PI_SUBAGENT_EXTRA_AGENT_DIRS-unset}" >> "${log}"\n`);
@@ -843,12 +843,31 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
           writeFileSync(log, "");
           const result = spawnSync(worker.argv[0], worker.argv.slice(1), { env: { ...registryEnv(home), PATH: `${bin}:/bin:/usr/bin`, ...env }, encoding: "utf8", cwd: repo });
           const lines = readFileSync(log, "utf8").split("\n").filter(Boolean);
-          const failure = error === null ? null : JSON.parse(result.stderr);
+          const failure = error === null ? null : JSON.parse(result.stderr.trim().split("\n").at(-1)!);
           expect([result.status === 0, failure?.error ?? null, failure?.message.startsWith("The seat did not start: ") ?? null, lines])
             .toEqual([error === null, error, error === null ? null : true, [...calls]]);
         }
       });
     });
+  });
+
+  test("registered Pi argv gives a direct pane launch bun, rh and hc on PATH", () => {
+    withHome(undefined, home => withRepository(home, "rh", repo => {
+      const launchBin = join(home, "launch-bin"), paneBin = join(home, "pane-bin");
+      mkdirSync(launchBin);
+      mkdirSync(paneBin);
+      for (const profile of [".profile", ".zshrc"]) writeFileSync(join(home, profile), 'export PATH="$HOME/pane-bin:/bin:/usr/bin"\n');
+      writeFileSync(join(launchBin, "hc"), `#!/bin/sh\ncase "$1" in\n  --version) echo hc-probe;;\n  label) echo '{"address":"t5","state":"live","labels":{"repo-harness.seat":"worker-light"},"turn":0}';;\nesac\n`, { mode: 0o755 });
+      writeFileSync(join(launchBin, "rh"), "#!/bin/sh\necho rh-probe\n", { mode: 0o755 });
+      writeFileSync(join(paneBin, "pi"), "#!/bin/sh\nset -e\nbun --version\nrh --version\nhc --version\n", { mode: 0o755 });
+      const env = registryEnv(home);
+      const launch = run({ ...env, PATH: `${launchBin}:/bin:/usr/bin` }, ["worker-light", "--repository-id", "1186405141", "--issue", "3300"], repo);
+      expect(launch.status).toBe(0);
+      const [command, ...args] = JSON.parse(launch.stdout);
+      const result = spawnSync(command, args, { cwd: repo, encoding: "utf8",
+        env: { ...env, ZDOTDIR: home, BUN_INSTALL: join(home, ".bun"), HC_TERMINAL_ID: "t5", PATH: `${paneBin}:/bin:/usr/bin` } });
+      expect([result.status, result.stdout.trim().split("\n")]).toEqual([0, [Bun.version, "rh-probe", "hc-probe"]]);
+    }));
   });
 
   test("the pane name and the tab name come from the registry prefix of the primary checkout, one per role", () => {
@@ -1029,7 +1048,7 @@ describe("rh seats reset (#1972)", () => {
    * `sendFail` refuses a send.
    */
   function withReset(fn: (f: { handoff: string; body: string; sha: (text: string) => string; state: (patch: Record<string, unknown>) => void;
-    reset: (input?: { path?: string; text?: string; sha256?: string; caller?: string; request?: boolean; stale?: boolean; handoff?: boolean; relaunch?: () => Promise<SeatRelaunch>; before?: () => void; notify?: SeatResetNotify; action?: "compact" | "reset" | null }) => Promise<unknown>;
+    reset: (input?: { path?: string; text?: string; sha256?: string; caller?: string; request?: boolean; stale?: boolean; handoff?: boolean; relaunch?: SeatResetOptions["relaunch"]; before?: () => void; notify?: SeatResetNotify; action?: "compact" | "reset" | null }) => Promise<unknown>;
     home: string; sends: () => string[]; calls: () => string[]; log: () => { kind: string; detail: string; notice: string; requested_at: string }[] }) => Promise<void>, seat: "advisor" | "orchestrator" = "advisor") {
     return async () => {
       const home = mkdtempSync(join(tmpdir(), "seats-reset-"));
@@ -1048,7 +1067,7 @@ fs.appendFileSync("${home}/calls.log", [cmd, ...rest].join(" ") + "\\n");
 const out = value => process.stdout.write(JSON.stringify(value));
 const session = (transcript, source = "clear") => fs.writeFileSync("${dir}/session.json", JSON.stringify({ session_id: "s", transcript_path: transcript, source, started_at: new Date().toISOString() }));
 if (cmd === "ls") out({ terminals: st.terminals });
-if (cmd === "get") out({ address: rest.at(-1), state: "live", labels: rest.at(-1) === "t2" ? st.callerLabels : { "repo-harness.seat": "${seat}", "repo-harness.repository": "${repository}" }, turn: 3, foreground: { pid: 1, name: st.foreground, argv: [], cwd: "/" } });
+if (cmd === "get") out({ address: rest.at(-1), state: "live", labels: rest.at(-1) === "t2" ? st.callerLabels : { "repo-harness.seat": "${seat}", "repo-harness.repository": "${repository}" }, turn: 3, cwd: st.cwd, pid: st.pid ?? 1, status: st.status, foreground: { pid: 2, name: st.foreground, argv: [], cwd: "/" } });
 // wait is one result, or a sequence: the last result answers every later call.
 // Wait number waitDelayAt (from 1) answers after waitDelayMs, as a message that arrives late does.
 if (cmd === "wait") {
@@ -1060,6 +1079,7 @@ if (cmd === "wait") {
 if (cmd === "keys") {
   const line = rest.slice(2).filter(key => key !== "enter").map(key => (key === "space" ? " " : key)).join("");
   if (line === "/clear" && st.signal) session("${home}/cleared.jsonl");
+  if (line === "/clear" && st.untrackOnClear) st.status = null;
   if (line === "/compact" && st.signal) session("${home}/old.jsonl", "compact");
   if (line === "/exit" && st.exit) st.foreground = "zsh";
   if (line.startsWith("sh ")) session("${home}/relaunched.jsonl");
@@ -1101,14 +1121,14 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
 `);
         chmodSync(join(home, "bin", "hc"), 0o755);
         const callerLabels = { "repo-harness.seat": seat === "advisor" ? "orchestrator" : "advisor", "repo-harness.repository": repository };
-        let current: Record<string, unknown> = { callerLabels, terminals: [{ address: "t5", state: "live" }], wait: ended, signal: true, exit: true, foreground: "claude", prompts: 0, evidenceFrom: 1, errorUntil: 0, answers: [] };
+        let current: Record<string, unknown> = { callerLabels, terminals: [{ address: "t5", state: "live" }], cwd: home, status: { state: "done", app: "claude-code" }, wait: ended, signal: true, exit: true, foreground: "claude", prompts: 0, evidenceFrom: 1, errorUntil: 0, answers: [] };
         const state = (patch: Record<string, unknown>) => { current = { ...current, ...patch }; writeFileSync(join(home, "state.json"), JSON.stringify(current)); };
         state({});
         writeFileSync(join(home, "calls.log"), "");
         const body = HANDOFF_SECTIONS.map(section => `## ${section}\n\nstate\n`).join("\n");
         const sha = (text: string) => createHash("sha256").update(text).digest("hex");
         const requestedAt = new Date(Date.now() - 60_000).toISOString();
-        const reset = async (input: { path?: string; text?: string; sha256?: string; caller?: string; request?: boolean; stale?: boolean; handoff?: boolean; relaunch?: () => Promise<SeatRelaunch>; before?: () => void; notify?: SeatResetNotify; action?: "compact" | "reset" | null } = {}) => {
+        const reset = async (input: { path?: string; text?: string; sha256?: string; caller?: string; request?: boolean; stale?: boolean; handoff?: boolean; relaunch?: SeatResetOptions["relaunch"]; before?: () => void; notify?: SeatResetNotify; action?: "compact" | "reset" | null } = {}) => {
           const text = input.text ?? body;
           writeFileSync(handoff, text);
           if (input.handoff === false) rmSync(handoff);
@@ -1162,6 +1182,21 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     // An invalid handoff path names no seat, so it has no log entry.
     expect(log().map(({ kind }) => kind)).toEqual(["request_missing", "caller_unknown", "requester_not_found", "requester_busy", "requester_busy"]);
     expect(log().at(-1)?.detail).toMatch(/in 600 s \(timeout\)\.$/u);
+  }));
+
+  test("an untracked requester sends no keys and never calls hc wait", withReset(async ({ reset, state, calls, log }) => {
+    state({ status: null, wait: { ...ended, ended: false, reason: "timeout" } });
+    expect(await reset()).toEqual({ error: "requester_status_untracked", outcome: "nothing_sent" });
+    expect(calls()).toEqual([]);
+    expect(log().at(-1)).toMatchObject({ kind: "requester_status_untracked", detail: expect.stringMatching(/t5.*status: null.*claude.*hc keys.*rh seats argv advisor/u) });
+  }));
+
+  test("status lost during reset retries stops the relaunch before a second wait or /exit", withReset(async ({ reset, state, calls, sends, log }) => {
+    state({ signal: false, untrackOnClear: true });
+    expect(await reset()).toEqual({ error: "requester_status_untracked", outcome: "uncertain" });
+    expect(calls().filter(line => line.startsWith("wait "))).toHaveLength(1);
+    expect(sends()).toEqual(Array(4).fill("/clear"));
+    expect(log().at(-1)?.kind).toBe("requester_status_untracked");
   }));
 
   test("a message to the caller ends hc wait, so the reset waits out the rest of the budget and resets (#2305)", withReset(async ({ handoff, reset, state, calls }) => {
@@ -1349,7 +1384,7 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     expect(await reset()).toEqual({ requester: "t5", seat: "advisor", relaunched: true, logErrors: [] });
     const script = join(dirname(handoff), "relaunch.sh");
     expect(sends()).toEqual([...Array(4).fill("/clear"), "/exit", `sh ${script}`, prompt(handoff)]);
-    expect(readFileSync(script, "utf8")).toBe("/bin/sh -c 'exec claude' 'x y'\n");
+    expect(readFileSync(script, "utf8")).toBe("exec /bin/sh -c 'exec claude' 'x y'\n");
     expect(log().map(({ kind, detail }) => [kind, detail])).toEqual([...Array(4).fill(["resume", "no_signal"]), ["reset", "relaunched"]]);
   }));
 
@@ -1361,7 +1396,7 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
       "relaunch_argv_failed: The stored seats section needs a one-shot migration. Run rh update"]);
   }));
 
-  test("a reset request with another effective model starts the seat again from its argv; the same model, a failed launch, a stale quota reading or compact types the command (#2633)", withReset(async ({ home, handoff, reset, sends, log }) => {
+  test("a reset from /tmp uses the requesting seat checkout to compare the effective model (#2633, #3279)", withReset(async ({ home, handoff, reset, state, sends, log }) => {
     const dir = dirname(handoff);
     // A session record of the launch model, older than the request; the claim of the earlier run is removed so the request runs again.
     const recorded = (model: string) => () => {
@@ -1380,15 +1415,19 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     mkdirSync(join(home, ".repo-harness", "quota"), { recursive: true });
     writeFileSync(join(home, ".repo-harness", "registered-repos.json"), JSON.stringify({ version: 1, authorizationRevision: 0,
       repos: [{ id: repoHarnessRepoIdFor(realpathSync(repo)), path: realpathSync(repo), accessMode: "read_only", source: "manual", registeredAt: at, lastSeenAt: at, panePrefix: "rh" }] }));
-    writeFileSync(join(home, ".repo-harness", "quota", "claude.json"), JSON.stringify({ observed_at: new Date(Date.now() - 31 * 60_000).toISOString(), rate_limits: {
+    const quota = join(home, ".repo-harness", "quota", "claude.json");
+    const capture = (minutesAgo: number) => writeFileSync(quota, JSON.stringify({ observed_at: new Date(Date.now() - minutesAgo * 60_000).toISOString(), rate_limits: {
       seven_day: { used_percentage: 10, resets_at: Math.floor(Date.now() / 1000) + 3600 } } }));
     const { CLAUDE_CONFIG_DIR: _claude, PI_CODING_AGENT_DIR: _pi, ...base } = process.env;
-    const stale = () => seatResetLaunch({ seat: "advisor", repository: basename(dirname(dir)) }, { ...base, ...registryEnv(home), PATH: "/bin:/usr/bin" }, repo);
+    const relaunch = (identity: SeatResetIdentity, cwd = "/tmp") => seatResetLaunch(identity, { ...base, ...registryEnv(home), PATH: "/bin:/usr/bin" }, cwd);
+    state({ cwd: repo });
+    capture(0);
     const cleared = { requester: "t5", seat: "advisor", relaunched: false, logErrors: [] };
-    expect(await reset({ before: recorded("fable") })).toEqual(cleared);
-    expect(await reset({ before: recorded("opus") })).toEqual({ ...cleared, relaunched: true });
+    expect(await reset({ before: recorded("fable"), relaunch })).toEqual(cleared);
+    expect(await reset({ before: recorded("opus"), relaunch })).toEqual({ ...cleared, relaunched: true });
     expect(await reset({ before: recorded("opus"), relaunch: failed })).toEqual(cleared);
-    expect(await reset({ before: recorded("fable"), relaunch: stale })).toEqual(cleared);
+    capture(31);
+    expect(await reset({ before: recorded("fable"), relaunch })).toEqual(cleared);
     expect(await reset({ before: recorded("opus"), action: "compact" })).toEqual(cleared);
     expect(sends()).toEqual(["/clear", prompt(handoff), "/exit", `sh ${join(dir, "relaunch.sh")}`, prompt(handoff), "/clear", prompt(handoff),
       "/clear", prompt(handoff), "/compact", compactPrompt(handoff)]);
@@ -1396,6 +1435,12 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
       ["model_check_failed", "relaunch_argv_failed: The seats section of the repo-harness configuration is not valid"], ["reset", "cleared"],
       ["model_check_failed", "quota_unknown: the seat account has no fresh weekly quota reading, so the seat keeps its model"], ["reset", "cleared"],
       ["reset", "compacted"]]);
+  }));
+
+  test("a tracked agent that owns the terminal PID is left running after reset retries", withReset(async ({ reset, state, sends, log }) => {
+    state({ signal: false, pid: 2 });
+    expect(await reset()).toEqual({ error: "resume_not_sent", outcome: "uncertain" });
+    expect([sends(), log().at(-1)?.detail]).toEqual([Array(4).fill("/clear"), "requester_has_no_parent_shell"]);
   }));
 
   test("a relaunch that cannot end claude logs the failure and reports an uncertain reset", withReset(async ({ reset, state, sends, log }) => {
