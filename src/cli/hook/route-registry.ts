@@ -101,6 +101,8 @@ export const ROUTES: readonly Route[] = Object.freeze([
     hosts: ['claude', 'pi'] as const,
     handler: 'bash-mutation-guard',
     // Exit 2 denies a credential read (I1), a removal or overwrite of an existing user file (I2) and a whole-repository recursive delete.
+    // A crash must deny too: on exit 1 Claude runs the command with neither guard (#3267).
+    failClosed: true as const,
   }),
   Object.freeze({
     event: 'UserPromptSubmit' as const,
