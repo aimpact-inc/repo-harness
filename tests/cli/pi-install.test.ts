@@ -4,7 +4,7 @@ import { delimiter, dirname, join, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { copyPackageRuntimeFixture, tmpWorkspace, writeBunWrapper } from '../helpers/repo-fixture';
 import { installPiPackage, ownedPiPackages, piPackagePresent, piUserPackageSources, runPi, planPiPackage } from '../../src/cli/installer/pi-package';
-import { installStateStatus, readInstallState, versions } from '../../src/cli/installer/install-profile';
+import { installStateStatus, prepareInstallSelectionSwitch, readInstallState, versions } from '../../src/cli/installer/install-profile';
 import { ownedPath } from '../../src/effects/host-config/path-records';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
 import { jsonFragment } from '../../src/core/host-config/json-fragment';
@@ -71,7 +71,7 @@ export const VERSION=process.env.PI_PACKAGE_DIR ? metadata.version || '0.0.0' : 
   write(join(host, 'dist/core/tools/path-utils.js'), 'export function resolveToCwd(path) { return path; }');
   const settings = join(env.PI_CODING_AGENT_DIR, 'settings.json');
   /** The stub writes the settings as Pi does: the whole file, two-space JSON. */
-  const setPackages = (packages: readonly string[], extra: Record<string, unknown> = {}) => write(settings, `${JSON.stringify({ theme: 'user', ...extra, packages }, null, 2)}\n`);
+  const setPackages = (packages: readonly unknown[], extra: Record<string, unknown> = {}) => write(settings, `${JSON.stringify({ theme: 'user', ...extra, packages }, null, 2)}\n`);
   const packages = () => JSON.parse(readFileSync(settings, 'utf8')).packages as string[];
   setPackages(['npm:other-package']);
   write(join(env.PI_CODING_AGENT_DIR, 'auth.json'), '{"fixture":true}\n');
@@ -85,12 +85,13 @@ appendFileSync(root+'/argv.jsonl', JSON.stringify(args)+'\\n');
 const file=agentDir+'/settings.json';
 const settings=existsSync(file)?JSON.parse(readFileSync(file,'utf8')):{};
 const entries=settings.packages??[];
+const sourceOf=(p)=>typeof p==='string'?p:p.source;
 const save=(next)=>(mkdirSync(agentDir,{recursive:true}),writeFileSync(file,JSON.stringify({...settings,packages:next},null,2)+'\\n'));
 switch(args[0]) {
 case '--version': console.log(process.env.PI_FIXTURE_VERSION); break;
 case 'list':
   if(process.env.PI_FIXTURE_BAD_LIST==='1') { console.log('invalid'); break; }
-  if(entries.length) { console.log('User packages:'); for(const p of entries) { console.log('  '+p); if(!p.startsWith('npm:')) console.log('    '+resolve(agentDir,p)); } }
+  if(entries.length) { console.log('User packages:'); for(const p of entries) { const s=sourceOf(p); console.log('  '+s+(typeof p==='string'?'':' (filtered)')); if(!s.startsWith('npm:')) console.log('    '+resolve(agentDir,s)); } }
   else console.log('No packages installed.');
   break;
 case 'install':
@@ -100,7 +101,7 @@ case 'install':
 case 'remove':
   if(process.env.PI_FIXTURE_FAIL_REMOVE==='1') { console.error('PI_FIXTURE_REMOVE_FAILED'); process.exit(1); }
   if(process.env.PI_FIXTURE_KEEP_ENTRY==='1') break;
-  save(entries.filter(p=>p.startsWith('npm:')||resolve(agentDir,p)!==resolve(args[1]))); break;
+  save(entries.filter(p=>sourceOf(p).startsWith('npm:')||resolve(agentDir,sourceOf(p))!==resolve(args[1]))); break;
 default: process.exit(99);
 }
 `);
@@ -387,6 +388,30 @@ describe('Pi package and skill installation', () => {
     expect(ownedPiPackages(f.env)).toEqual([f.source]);
     expect(piPackagePresent(f.source, f.env)).toBe(true);
     expect(f.argv().filter(args => args[0] === 'remove')).toEqual([['remove', f.source]]);
+  }));
+
+  test('uninstall keeps an edited Pi package entry, alone or beside the recorded one, with no pi remove', () => {
+    for (const beside of [false, true]) fixture(f => {
+      recordPiSelection(f.env);
+      expect(installPiPackage(f.source, true, f.env).created).toBe(true);
+      const entry = relative(f.env.PI_CODING_AGENT_DIR!, f.source);
+      f.setPackages(['npm:other-package', ...(beside ? [entry] : []), { source: entry, extensions: [] }]);
+      const before = readFileSync(f.settings);
+      const result = runUserUninstall({ target: 'both', env: f.env });
+      expect(result.exitCode).toBe(1);
+      expect(result.items).toContainEqual({ path: f.source, action: 'unresolved', reason: 'changed since rh wrote it; preserved' });
+      expect([readFileSync(f.settings).equals(before), f.argv().filter(args => args[0] === 'remove'), ownedPiPackages(f.env)]).toEqual([true, [], [f.source]]);
+    });
+  });
+
+  test('a plugin switch away from Pi refuses an edited Pi package entry', () => fixture(f => {
+    recordPiSelection(f.env);
+    expect(installPiPackage(f.source, true, f.env).created).toBe(true);
+    f.setPackages(['npm:other-package', { source: relative(f.env.PI_CODING_AGENT_DIR!, f.source), extensions: [] }]);
+    const before = readFileSync(f.settings);
+    expect(() => prepareInstallSelectionSwitch(PI_FULL_PLUGINS.filter(id => id !== 'pi'), f.env, join(f.root, 'transaction')))
+      .toThrow(`refusing plugin switch because managed surface drifted: ${f.source}`);
+    expect([readFileSync(f.settings).equals(before), f.argv().filter(args => args[0] === 'remove')]).toEqual([true, []]);
   }));
 
   test('an unreadable package list preserves ownership instead of retiring the ledger', () => fixture(f => {

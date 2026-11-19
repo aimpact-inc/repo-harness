@@ -39,12 +39,17 @@ export function piUserPackageSources(output: string): readonly string[] {
     .map(line => line.slice(2).replace(/ \(filtered\)$/, ''));
 }
 
-export function piPackagePresent(source: string, env: NodeJS.ProcessEnv = process.env): boolean {
+/** The user package entries that Pi lists with the package identity of `source` (real path), filtered objects included. */
+function piPackageListed(source: string, env: NodeJS.ProcessEnv): number {
   const sources = piUserPackageSources(runPi(['list'], env));
-  if (sources.length === 0) return false;
+  if (sources.length === 0) return 0;
   const expected = realPathOrResolved(source);
   const agentDir = piAgentDir(env.HOME ?? env.USERPROFILE ?? homedir(), env);
-  return sources.some(entry => realPathOrResolved(resolve(agentDir, entry)) === expected);
+  return sources.filter(entry => realPathOrResolved(resolve(agentDir, entry)) === expected).length;
+}
+
+export function piPackagePresent(source: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  return piPackageListed(source, env) > 0;
 }
 
 export interface PiPackageStep {
@@ -70,13 +75,17 @@ function piDeclaration(source: string, env: NodeJS.ProcessEnv): HostConfigFragme
   return { path: piSettingsPath(env), owner: 'pi', selectors: [piPackageSelector(source, env)] };
 }
 
-/** The Pi package sources whose entry the ledger records under owner `pi`: only these may an uninstall or a switch remove. */
-export function ownedPiPackages(env: NodeJS.ProcessEnv = process.env, gate: HostConfigGate = openHostConfigGate({ env })): readonly string[] {
+/** The Pi package sources whose entry the ledger records under owner `pi`, each with the entry text that rh recorded: only these may an uninstall or a switch remove. */
+export function recordedPiPackages(env: NodeJS.ProcessEnv = process.env, gate: HostConfigGate = openHostConfigGate({ env })): ReadonlyMap<string, string> {
   const settings = piSettingsPath(env);
-  return gate.recorded(settings).flatMap((record) => {
+  return new Map(gate.recorded(settings).flatMap((record) => {
     const entry = record.owner === 'pi' ? /^packages\[(.+)\]$/.exec(record.selector)?.[1] : undefined;
-    return entry === undefined ? [] : [resolve(dirname(settings), entry)];
-  });
+    return entry === undefined ? [] : [[resolve(dirname(settings), entry), record.inserted] as const];
+  }));
+}
+
+export function ownedPiPackages(env: NodeJS.ProcessEnv = process.env, gate: HostConfigGate = openHostConfigGate({ env })): readonly string[] {
+  return [...recordedPiPackages(env, gate).keys()];
 }
 
 /** The report line for a Pi version that the write set was not measured at; null at the measured version. */
@@ -86,7 +95,7 @@ export function unmeasuredPiVersionLine(env: NodeJS.ProcessEnv = process.env): s
 }
 
 /** The entry text of the source in the Pi settings, by its declared selector; null when the file or the entry is absent. An unreadable file throws. */
-function piPackageEntry(source: string, env: NodeJS.ProcessEnv): string | null {
+export function piPackageEntry(source: string, env: NodeJS.ProcessEnv = process.env): string | null {
   const settings = piSettingsPath(env);
   if (!existsSync(settings)) return null;
   const content = readFileSync(settings, 'utf8');
@@ -155,16 +164,34 @@ export function installPiPackage(source: string, enabled: boolean, env: NodeJS.P
   }
 }
 
+export type PiPackageRemoval = 'remove' | 'released' | 'edited';
+
+/**
+ * What an uninstall or a switch may do with a recorded entry (#3249). Pi 1.5.2
+ * `pi remove` drops every entry with the package identity, so rh runs it only
+ * while the one listed entry of that identity is the text that rh recorded. A
+ * package that Pi no longer lists releases its record. Any other form (a
+ * filtered object, another spelling of the path, a second entry) is the
+ * user's: it stays with its record.
+ */
+export function piPackageRemoval(source: string, recorded: string, env: NodeJS.ProcessEnv = process.env): PiPackageRemoval {
+  const listed = piPackageListed(source, env);
+  if (listed === 0) return 'released';
+  return listed === 1 && piPackageEntry(source, env) === recorded ? 'remove' : 'edited';
+}
+
 /**
  * `pi remove` runs as a delegated writer, and the declared entry is read back:
  * it is not taken as an exact inverse. A leftover entry keeps its record and
- * fails the removal.
+ * fails the removal. The entry is checked again here, since the user can edit
+ * it after the plan.
  */
-export function removePiPackage(source: string, env: NodeJS.ProcessEnv = process.env): void {
+export function removePiPackage(source: string, recorded: string, env: NodeJS.ProcessEnv = process.env): void {
+  const removal = piPackageRemoval(source, recorded, env);
+  if (removal === 'edited') throw new Error(`the Pi package entry changed since rh wrote it; preserved: ${source}`);
   const declaration = piDeclaration(source, env);
   const gate = openHostConfigGate({ env });
-  const present = piPackagePresent(source, env);
-  gate.delegate([declaration], () => { if (present) runPi(['remove', source], env); });
+  gate.delegate([declaration], () => { if (removal === 'remove') runPi(['remove', source], env); });
   if (piPackagePresent(source, env) || gate.recorded(declaration.path).some((record) => record.selector === declaration.selectors[0])) {
     throw new Error('PI_PACKAGE_REMOVE_NOT_RECORDED');
   }
