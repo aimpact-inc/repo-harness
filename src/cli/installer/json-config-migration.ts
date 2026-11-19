@@ -152,11 +152,22 @@ function isReleasedExec(command: string, head: string, tail: string): boolean {
 }
 
 /**
+ * Every route that a release's route registry held, v0.10.0 to HEAD. The
+ * event and route id of a selector come from the command itself, so they
+ * prove nothing until they are one of these.
+ */
+const RELEASED_ROUTES: ReadonlySet<string> = new Set([
+  'PostToolUse always', 'PostToolUse bash', 'PostToolUse edit', 'PreToolUse bash', 'PreToolUse edit', 'PreToolUse subagent', 'SessionStart default',
+  'Stop default', 'SubagentStart context', 'SubagentStop quality', 'UserPromptSubmit default', 'UserPromptSubmit delegation', 'UserPromptSubmit inbox',
+]);
+
+/**
  * True when the command is a tagged command that a release wrote for one
- * route of a host: v0.10.0 to v0.22.x fell back to `repo-harness hook`;
- * v0.23.0 and later checked the opt-in marker first.
+ * released route of a host: v0.10.0 to v0.22.x fell back to
+ * `repo-harness hook`; v0.23.0 and later checked the opt-in marker first.
  */
 function isReleasedHookCommand(command: string, host: HookHost, event: string, routeId: string): boolean {
+  if (!RELEASED_ROUTES.has(`${event} ${routeId}`)) return false;
   const tail = ` ${event} --route ${routeId}`;
   return command === `${TAGGED}repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; export HOOK_REPO_ROOT="$repo"; if command -v repo-harness-hook >/dev/null 2>&1; then HOOK_HOST=${host} exec repo-harness-hook${tail}; fi; command -v repo-harness >/dev/null 2>&1 || exit 0; HOOK_HOST=${host} exec repo-harness hook${tail}`
     || isReleasedExec(command, `${TAGGED}repo=$(git rev-parse --show-toplevel 2>/dev/null) && [ -f "$repo/.ai/harness/workflow-contract.json" ] || exit 0; export HOOK_REPO_ROOT="$repo"; HOOK_HOST=${host} `, tail);
