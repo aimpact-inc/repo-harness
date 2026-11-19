@@ -38,7 +38,7 @@ function consultPorts(runtime: 'pi' | 'claude' | 'codex' = 'pi', shell = true) {
 
 test('opens one tab from the linked checkout with a task that writes to the canonical scratch path', async () => {
   const outputAlias = join(scratch, 'alias');
-  const outputDir = join(scratch, 'outside');
+  const outputDir = `${repo}-outside`;
   mkdirSync(outputDir);
   symlinkSync(outputDir, outputAlias, 'dir');
   const ports = consultPorts();

@@ -1,6 +1,6 @@
 import { accessSync, constants, lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { PLANNER_CONSULT_KIND, PLANNER_CONSULT_PROTOCOL, PlannerConsultError, defaultConsultPlanPath, renderConsultTask, validateConsultOutPath } from '../../core/board/planner-consult';
 import type { SeatLaunchV1 } from '../../core/board/seat-launch';
 import { githubRemoteRepository } from '../../core/board/source';
@@ -28,6 +28,11 @@ interface PlannerConsultPorts {
     shell: boolean;
   }>;
   readonly openTab: (args: { name: string; space: string; folder: string; argv: readonly string[]; task: string }) => void;
+}
+
+function validateNativeConsultPath(outPath: string, gitRoots: readonly string[]): void {
+  const key = (path: string) => sep === '\\' ? path.replaceAll(sep, '/').toLowerCase() : path;
+  validateConsultOutPath(key(outPath), gitRoots.map(key));
 }
 
 /** Resolve from the nearest existing ancestor so new directories cannot hide a symlink. */
@@ -78,10 +83,10 @@ export async function runPlannerConsult(input: PlannerConsultInput, ports: Plann
   const { worktrees } = parseWorktreeTopology(gitExecFileSync(['worktree', 'list', '--porcelain'], { ...gitOptions, cwd: repoRoot }));
   const repoSlug = basename(worktrees[0]!.path);
   const gitRoots = [repoRoot, gitCommonDir, ...worktrees.map(worktree => worktree.path)];
-  const requested = input.out === undefined ? defaultConsultPlanPath(tmpdir(), repoSlug, input.issue, input.qualifier) : resolve(input.cwd, input.out);
-  validateConsultOutPath(requested, gitRoots);
+  const requested = resolve(input.cwd, input.out ?? defaultConsultPlanPath(tmpdir(), repoSlug, input.issue, input.qualifier));
+  validateNativeConsultPath(requested, gitRoots);
   const { path: outPath, ancestor, exists } = resolveConsultPath(requested);
-  validateConsultOutPath(outPath, gitRoots.map(root => resolveConsultPath(root).path));
+  validateNativeConsultPath(outPath, gitRoots.map(root => resolveConsultPath(root).path));
   checkOutsideGit(exists ? dirname(ancestor) : ancestor, outPath, env);
   if (exists) throw new PlannerConsultError('consult_path_exists', `The plan path ${outPath} already exists. Use --qualifier or --out to choose a new path.`);
 
