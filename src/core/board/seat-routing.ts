@@ -2,8 +2,6 @@ import { AGY_QUOTA_ACCOUNTS, weeklyRemainingPercent, type QuotaAccount, type Quo
 import { SHIPPED_MODEL_IDS } from './recommended-models';
 import { PI_CODEX_MODEL_PREFIX, ROUTING_CLASSES, SEAT_IDS, isPiCodexSeat, isReviewSeat, unavailablePiSeat, type CodexCreditMode, type RoutingClass, type SeatConfigV1, type SeatId, type SeatRoutingV1, type SeatsConfigV1 } from './seats-settings';
 
-/** The Claude control-seat model outside its config entry: the orchestrator while Claude is reserved, the advisor outside Claude hyper. */
-export const CLAUDE_CONTROL_MODEL = Object.freeze({ model: 'opus', effort: 'high' });
 interface AccountQuota { readonly state: QuotaState; readonly remaining: number | null }
 export interface SeatAccountQuotas {
   readonly claude: AccountQuota & { readonly mode: 'hyper' | 'normal' | 'saving' | 'unknown' };
@@ -51,6 +49,11 @@ export const creditsCover = (id: SeatId | null, quota: SeatAccountQuotas): boole
 export const claudeReserved = (quota: SeatAccountQuotas): boolean => quota.claude.mode === 'saving' || quota.claude.state === 'exhausted';
 
 const AGY_MODEL_PREFIX = 'magpie/agy-cli/';
+const AGY_ADVISOR_HYPER_MIN_REMAINING = 50;
+const CONTROL_MODELS = {
+  claude: { model: 'opus', effort: 'high' },
+  agy: { model: `${AGY_MODEL_PREFIX}gemini-4-neon` },
+} as const;
 
 export function seatAccount(seat: SeatConfigV1): QuotaAccount | null {
   if (seat.runtime === 'claude') return 'claude';
@@ -81,16 +84,23 @@ export function seatState(id: SeatId, seat: SeatConfigV1, quota: SeatAccountQuot
 }
 
 /**
- * One model projection serves the launch argv and the human dispatch lines. Claude hyper routes workers as normal; it
- * only lets the advisor take its config entry (#2633).
+ * One model projection serves the launch argv and the human dispatch lines. The advisor takes its config entry in
+ * hyper mode for its route. Claude hyper routes workers as normal.
  */
 export function effectiveSeatConfig<Id extends SeatId>(id: Id, seats: SeatsConfigV1, quota: SeatAccountQuotas): SeatsConfigV1[Id];
 export function effectiveSeatConfig(id: SeatId, seats: SeatsConfigV1, quota: SeatAccountQuotas): SeatConfigV1 | null {
   const configured = seats[id];
   if (configured === null) return configured;
   const seat = configured.runtime === 'claude' && quota.claude.mode === 'saving' ? { ...configured, advisor_model: null } : configured;
-  const control = id === 'orchestrator' ? claudeReserved(quota) : id === 'advisor' && (claudeReserved(quota) || quota.claude.mode !== 'hyper');
-  if (seat.runtime === 'claude' && control) return { ...seat, ...CLAUDE_CONTROL_MODEL };
+  if (seat.runtime === 'claude') {
+    const reserved = claudeReserved(quota);
+    if (id === 'orchestrator' ? reserved : id === 'advisor' && (reserved || quota.claude.mode !== 'hyper')) {
+      return { ...seat, ...CONTROL_MODELS.claude };
+    }
+  } else if (id === 'advisor' && isAgyAccount(seatAccount(seat))) {
+    const remaining = quota.agy_gemini.remaining;
+    if (remaining === null || remaining < AGY_ADVISOR_HYPER_MIN_REMAINING) return { ...seat, ...CONTROL_MODELS.agy };
+  }
   return seat;
 }
 

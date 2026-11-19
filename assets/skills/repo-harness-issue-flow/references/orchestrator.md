@@ -404,8 +404,10 @@ route and not the orchestrator entry. The `advisor:` line of
 model only at a tier-2 reset (`/clear`), where `seats reset` starts it again
 from its argv; see Seat reset in herdr-notify. Codex seats and Pi seats on
 `magpie/codex/` keep their configured model and effort at every quota level.
-A Codex or Pi advisor keeps its own configured model and effort too. Quota
-modes are derived, never stored.
+A Pi advisor on `magpie/agy-cli/` uses its config entry at 50% or more
+`agy_gemini` weekly quota remaining and uses `magpie/agy-cli/gemini-4-neon`
+when the remaining quota is lower or unknown. Quota modes are derived, never
+stored.
 
 Claude in saving mode or exhausted is reserved for the advisor and
 orchestrator; both use `opus` high. An important non-frontend route that

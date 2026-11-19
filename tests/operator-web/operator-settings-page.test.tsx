@@ -142,6 +142,24 @@ describe('agents page seats section', () => {
       writeSeatsSettings: async (body) => { posts.push(body); return { state: 'saved', result: { config_revision: REVISION_B, changed_keys: ['seats.advisor.fleet'] } }; },
     };
   }
+  test('the advisor card shows the model for the next launch from the current Gemini quota', async () => {
+    const read = await settingsStores(NOW, 'busy').seats.read();
+    if (read.state !== 'ok') throw new Error('fixture read failed');
+    const carbon = 'magpie/agy-cli/gemini-4-carbon';
+    const advisor = { ...read.settings.config.advisor, runtime: 'pi' as const, model: carbon, advisor_model: null };
+    const stored = { ...read.settings, config: { ...read.settings.config, advisor } };
+    let report = busyQuota(NOW);
+    await mount({ ...seatsProps([]), readSeatsSettings: async () => ({ state: 'ok', settings: stored }),
+      readQuota: async () => ({ state: 'ok', settings: report }) });
+    const card = '[data-seat-card="advisor"]';
+    const launchModel = () => document.querySelector(`${card} [data-seat-launch-model]`)?.textContent;
+    expect(launchModel()).toBe(carbon);
+    report = degradedQuota(NOW);
+    await click(document.querySelector<HTMLButtonElement>('[data-quota-refresh]')!);
+    expect(launchModel()).toBe('magpie/agy-cli/gemini-4-neon');
+    expect(document.querySelector(`${card} [aria-label="Model"] [aria-pressed="true"]`)?.textContent).toBe(carbon);
+  });
+
   const allow = (label: string) => document.querySelector<HTMLButtonElement>(`[aria-label="Allow ${label}"]`)!;
   const pane = (seat: string) => document.querySelector<HTMLButtonElement>(`[data-pane="${seat}"]`)!;
   const levels = () => [...document.querySelectorAll('[data-seat-card] [data-limit]')].map(node => node.getAttribute('data-limit'));
