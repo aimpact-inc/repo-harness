@@ -1,4 +1,4 @@
-import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import { planFile, type FilePlan, type PlannedFragment } from '../../core/host-config/plan';
@@ -54,7 +54,7 @@ import {
   type HostConfigPaths,
 } from './store';
 import { isPathInside } from '../path-containment';
-import { pathRecordEntry, pathRecordHost, pathRecordIsCurrent } from './path-records';
+import { pathRecordEntry, pathRecordHostRoot, pathRecordIsCurrent } from './path-records';
 import {
   discardStagedEntry,
   hasPreimage,
@@ -499,16 +499,42 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
 
 // ---- whole paths --------------------------------------------------------
 
-/** A path record key, the host that the install root names, and the record of another key whose directory holds it. */
-function admitWholePath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, ledger: HostConfigLedger, path: string): { key: string; host: PathRecord['host'] } {
+/** A path record key, the host and install root that hold the path, and the record of another key whose directory holds it. */
+function admitWholePath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, ledger: HostConfigLedger, path: string): { key: string; host: PathRecord['host']; root: string } {
   const key = hostPathKey(paths, path);
-  const host = pathRecordHost(env, path);
-  if (host === null) throw new HostConfigError('host_config_invalid_path', `not inside an install root, so rh records no whole path there: ${path}`);
+  const held = pathRecordHostRoot(env, path);
+  if (held === null) throw new HostConfigError('host_config_invalid_path', `not inside an install root, so rh records no whole path there: ${path}`);
+  const { host, root } = held;
   const holder = pathRecordOf(ledger, key as HostPath);
   if (holder !== null && toolOf(ledger, holder) !== null) throw new HostConfigError('host_config_invalid_state', `rh records this path for the tool ${toolOf(ledger, holder)}, so it does not write it as an install path: ${path}`);
   if (holder !== null && holder !== key) throw new HostConfigError('host_config_invalid_state', `the recorded directory ${holder} holds this path, so rh does not write it on its own: ${path}`);
   // A whole entry would replace rh's text blocks and the user's bytes around them with no record of either.
   if (ledger.files[key]?.kind === 'text_block') throw new HostConfigError('host_config_invalid_state', `rh text blocks are recorded in this file, so rh does not write it as a whole path: ${path}`);
+  return { key, host, root };
+}
+
+/**
+ * A write below an install root goes through real directories only (#3266). A link between the root and the leaf puts the
+ * entry, and each directory that rh creates for it, outside the root, where no record reaches it. A link at the root itself
+ * is the user's layout and stays while it names an existing path.
+ */
+function refuseLinkedParents(root: string, path: string): void {
+  if (lstatSync(root, { throwIfNoEntry: false })?.isSymbolicLink() && !statSync(root, { throwIfNoEntry: false })) {
+    throw new HostConfigError('host_config_invalid_path', `the install root ${root} is a link to a missing path, so rh writes nothing below it: ${path}`);
+  }
+  let component = root;
+  for (const part of relative(root, dirname(resolve(path))).split(sep).filter(Boolean)) {
+    component = join(component, part);
+    const stat = lstatSync(component, { throwIfNoEntry: false });
+    if (!stat) return;
+    if (stat.isSymbolicLink()) throw new HostConfigError('host_config_invalid_path', `${component} is a link below the install root ${root}, so rh writes nothing through it: ${path}`);
+  }
+}
+
+/** The user-scope admission of a written path: `admitWholePath` and real directories below the root. */
+function admitUserWrite(env: NodeJS.ProcessEnv, paths: HostConfigPaths, ledger: HostConfigLedger, path: string): { key: string; host: PathRecord['host'] } {
+  const { key, host, root } = admitWholePath(env, paths, ledger, path);
+  refuseLinkedParents(root, path);
   return { key, host };
 }
 
@@ -523,9 +549,8 @@ function refusal(path: string, record: PathRecord | undefined, owner: string): H
   return new HostConfigError('host_config_replacement_refused', `${reason}, so rh does not replace it: ${path}`);
 }
 
-/** The bytes of a user file that `replace` lets rh write over, in the vault; only a regular file qualifies. */
-function vaultUserFile(paths: HostConfigPaths, entry: string, observed: PathCommitted, path: string): Sha256 {
-  if (observed.type !== 'file') throw new HostConfigError('host_config_invalid_state', `only a file can be replaced on the user's word: ${path}`);
+/** The bytes of a user file that `replace` lets rh write over, in the vault. */
+function vaultUserFile(paths: HostConfigPaths, entry: string, observed: Extract<PathCommitted, { type: 'file' }>, path: string): Sha256 {
   const kept = putVault(paths, readFileSync(entry));
   // The copy must be the file that the record names as replaced, not a later edit.
   if (kept !== observed.sha256) throw new HostConfigError('host_config_target_changed', `the file changed while rh kept its copy, so rh writes nothing to it: ${path}`);
@@ -550,17 +575,60 @@ function nextPathRecord(previous: PathRecord | undefined, owner: string, host: P
   return { owner, host, kind: kept ? 'replaced' : 'created', baseline, committed, ...(kept ? { backup: kept } : {}), ...(linkTarget ? { link_target: linkTarget } : {}) };
 }
 
-/** `validPathRecord` holds a `replaced` record to a file: the user file that it replaced comes back as a file. */
-function assertReplacedIsFile(record: PathRecord, path: string): void {
-  if (record.kind === 'replaced' && record.committed.type !== 'file') {
-    throw new HostConfigError('host_config_invalid_state', `rh replaced a user file here, so it writes only a file at this path: ${path}`);
-  }
-}
-
 /** The record key and host of a whole path that a scope admits; it throws for any other path. */
 type WholePathAdmit = (ledger: HostConfigLedger, path: string) => { key: string; host: PathRecord['host'] };
 
-/** Each record reaches the ledger before its entry is published, so every whole-path write has its record. */
+/** One admitted whole-path write, checked against what is at its entry now. */
+interface WholePathPlan {
+  readonly write: HostConfigPathWrite;
+  readonly key: string;
+  readonly host: PathRecord['host'];
+  readonly previous: PathRecord | undefined;
+  /** The record that still binds to the entry. */
+  readonly prior: PathRecord | undefined;
+  readonly entry: string;
+  readonly linkTarget: string | undefined;
+  readonly observed: PathCommitted | null;
+  /** The user file that `replace` lets rh write over; it goes to the vault first. */
+  readonly replaces: Extract<PathCommitted, { type: 'file' }> | undefined;
+}
+
+/** Every refusal of one write, with no change on disk. */
+function planWholePath(paths: HostConfigPaths, write: HostConfigPathWrite, key: string, host: PathRecord['host'], previous: PathRecord | undefined): WholePathPlan {
+  const linkTarget = linkTargetOf(paths, key, previous, write.entry);
+  const entry = linkTarget ?? key;
+  // A record binds to its entry. When the key now reaches another file (a re-pointed link), the record does not
+  // move with it: a replaced user file keeps its record and vault copy and stops the write; any other record starts again.
+  const recorded = previous && pathRecordEntry(key, previous);
+  if (previous?.kind === 'replaced' && recorded !== entry) {
+    throw new HostConfigError('host_config_replacement_refused', `rh replaced the user file ${recorded} and keeps it in the vault, but this path now reaches ${entry}, so rh does not write it. Point it back to ${recorded}, then run the command again: ${write.path}`);
+  }
+  const prior = recorded === entry ? previous : undefined;
+  const observed = observePathEntry(entry);
+  if (linkTarget !== undefined && observed === null) {
+    throw new HostConfigError('host_config_invalid_path', `this path is a link to the missing ${linkTarget}, so rh creates nothing through it: ${write.path}`);
+  }
+  if (write.expected !== undefined && !(observed?.type === 'file' && observed.sha256 === write.expected)) {
+    throw new HostConfigError('host_config_target_changed', `the file changed since rh planned its write, so rh writes nothing to it: ${write.path}`);
+  }
+  let replaces: WholePathPlan['replaces'];
+  if (observed !== null && !ownsEntry(prior, write.owner, key)) {
+    if (!write.replace) throw refusal(write.path, prior, write.owner);
+    if (observed.type !== 'file') throw new HostConfigError('host_config_invalid_state', `only a file can be replaced on the user's word: ${write.path}`);
+    if (linkTarget !== undefined) throw new HostConfigError('host_config_invalid_path', `this path is a link to ${linkTarget}, and the user's word to replace a file does not reach through a link: ${write.path}`);
+    replaces = observed;
+  }
+  // `validPathRecord` holds a `replaced` record to a file: the user file that it replaced comes back as a file.
+  if ((replaces || prior?.kind === 'replaced') && write.entry.type !== 'file') {
+    throw new HostConfigError('host_config_invalid_state', `rh replaced a user file here, so it writes only a file at this path: ${write.path}`);
+  }
+  return { write, key, host, previous, prior, entry, linkTarget, observed, replaces };
+}
+
+/**
+ * Each record reaches the ledger before its entry is published, so every whole-path write has its record. Every write is
+ * checked before the first one lands (#3266): a refusal of any destination leaves every entry and record as it was.
+ */
 function writeWholePaths(admit: WholePathAdmit, paths: HostConfigPaths, writes: readonly HostConfigPathWrite[], options: HostConfigPathOptions): string[] {
   const ledger = readLedger(paths);
   const records = { ...ledger.paths };
@@ -568,27 +636,10 @@ function writeWholePaths(admit: WholePathAdmit, paths: HostConfigPaths, writes: 
   const persist = () => writeLedger(paths, { ...ledger, paths: records, directories });
   const admitted = writes.map((write) => ({ write, ...admit(ledger, write.path) }));
   if (new Set(admitted.map(({ key }) => key)).size !== admitted.length) throw new HostConfigError('host_config_invalid_state', 'a call names one path twice');
+  const plans = admitted.map(({ write, key, host }) => planWholePath(paths, write, key, host, records[key]));
   const written: string[] = [];
-  for (const { write, key, host } of admitted) {
-    const previous = records[key];
-    const linkTarget = linkTargetOf(paths, key, previous, write.entry);
-    const entry = linkTarget ?? key;
-    // A record binds to its entry. When the key now reaches another file (a re-pointed link), the record does not
-    // move with it: a replaced user file keeps its record and vault copy and stops the write; any other record starts again.
-    const recorded = previous && pathRecordEntry(key, previous);
-    if (previous?.kind === 'replaced' && recorded !== entry) {
-      throw new HostConfigError('host_config_replacement_refused', `rh replaced the user file ${recorded} and keeps it in the vault, but this path now reaches ${entry}, so rh does not write it. Point it back to ${recorded}, then run the command again: ${write.path}`);
-    }
-    const prior = recorded === entry ? previous : undefined;
-    const observed = observePathEntry(entry);
-    if (write.expected !== undefined && !(observed?.type === 'file' && observed.sha256 === write.expected)) {
-      throw new HostConfigError('host_config_target_changed', `the file changed since rh planned its write, so rh writes nothing to it: ${write.path}`);
-    }
-    let backup: Sha256 | undefined;
-    if (observed !== null && !ownsEntry(prior, write.owner, key)) {
-      if (!write.replace) throw refusal(write.path, prior, write.owner);
-      backup = vaultUserFile(paths, entry, observed, write.path);
-    }
+  for (const { write, key, host, previous, prior, entry, linkTarget, observed, replaces } of plans) {
+    const backup = replaces ? vaultUserFile(paths, entry, replaces, write.path) : undefined;
     const createdDirs = missingDirectories(entry as HostPath);
     createDirectories(createdDirs);
     let staged: string | null = null;
@@ -596,7 +647,6 @@ function writeWholePaths(admit: WholePathAdmit, paths: HostConfigPaths, writes: 
       const stage = stagePathEntry(entry, write.entry, options.stage?.(entry));
       staged = stage.staged;
       const next = nextPathRecord(prior, write.owner, host, observed, stage.committed, backup, linkTarget);
-      assertReplacedIsFile(next, write.path);
       if (sameCommitted(observed, stage.committed) && prior && JSON.stringify(prior) === JSON.stringify(next)) {
         discardStagedEntry(staged);
         continue;
@@ -697,7 +747,7 @@ function delegateWrites(env: NodeJS.ProcessEnv, paths: HostConfigPaths, declared
   run: (destinations: readonly string[]) => void, options: HostConfigPathOptions): HostConfigDelegateResult {
   const ledger = readLedger(paths);
   const wholes = declared.filter((declaration): declaration is HostConfigPathDeclaration => !isFragmentDeclaration(declaration) && !isToolDeclaration(declaration));
-  const admitted = wholes.map((declaration) => ({ declaration, ...admitWholePath(env, paths, ledger, declaration.path) }));
+  const admitted = wholes.map((declaration) => ({ declaration, ...admitUserWrite(env, paths, ledger, declaration.path) }));
   if (new Set(admitted.map(({ key }) => key)).size !== admitted.length) throw new HostConfigError('host_config_invalid_state', 'a call names one path twice');
   const delegatedFiles = observeDelegatedFiles(paths, ledger, declared.filter(isFragmentDeclaration));
   const tools = observeTools(paths, ledger, declared.filter(isToolDeclaration));
@@ -1540,7 +1590,7 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
   }
   return {
     apply: (changes) => applyChanges(paths, changes),
-    writePaths: (writes, pathOptions) => writeWholePaths((ledger, path) => admitWholePath(env, paths, ledger, path), paths, writes, pathOptions ?? {}),
+    writePaths: (writes, pathOptions) => writeWholePaths((ledger, path) => admitUserWrite(env, paths, ledger, path), paths, writes, pathOptions ?? {}),
     delegate: (declared, run, pathOptions) => delegateWrites(env, paths, declared, run, pathOptions ?? {}),
     addUserPathEntry: (tool, entry, port) => addUserPathEntry(paths, tool, entry, port),
     releaseAbsentTools: (port, releaseOptions) => releaseAbsentTools(paths, port, releaseOptions?.dryRun === true, read),

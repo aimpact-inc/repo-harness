@@ -6,7 +6,7 @@ import type { FragmentEdit, HostConfigStrategy, HostPath } from '../../src/core/
 import { openHostConfigGate, openRepositoryFileGate, rollbackHostConfigTransaction, type HostConfigFileChange } from '../../src/effects/host-config/gate';
 import { openRepositoryGate, repositoryConfigPaths, repositoryExcludePath } from '../../src/effects/host-config/repository';
 import type { PathEntry } from '../../src/effects/host-config/whole-path';
-import { hostConfigPaths, hostConfigPathsAt, migrateLedgerSchema, parseLedger, replaceTarget } from '../../src/effects/host-config/store';
+import { hostConfigPaths, hostConfigPathsAt, migrateLedgerSchema, parseLedger, putVault, replaceTarget } from '../../src/effects/host-config/store';
 import { hookRenderingKey, jsonFragment, removeJsonHookCommand } from '../../src/core/host-config/json-fragment';
 import { sha256Prefixed } from '../../src/core/evidence/sha256';
 import { tomlFragment } from '../../src/core/host-config/toml-fragment';
@@ -362,42 +362,73 @@ test('a linked config whose target has no extension reverts by the format record
   expect(f.gate().recorded(config).map((entry) => entry.selector)).toEqual(['statusLine']);
 });
 
-test('a file written at a user link goes to the file that the link names; the link stays through write, rollback and revert', () => {
+test('a whole-path write refuses a dangling link, the user\'s word to replace through a link, and a link below the install root', () => {
+  const f = fixture();
+  const agents = join(f.home, '.claude', 'agents');
+  mkdirSync(agents, { recursive: true });
+  mkdirSync(join(f.home, 'dotfiles', 'rules'), { recursive: true });
+  const [linked, dangling] = [join(agents, 'l.md'), join(agents, 'd.md')];
+  const [target, created] = [join(f.home, 'dotfiles', 'l.md'), join(f.home, 'dotfiles', 'new', 'd.md')];
+  writeFileSync(target, 'mine\n');
+  symlinkSync(target, linked);
+  symlinkSync(created, dangling);
+  const rules = join(f.home, '.claude', 'rules');
+  symlinkSync(join(f.home, 'dotfiles', 'rules'), rules);
+  symlinkSync(join(f.home, 'missing'), join(f.home, '.bun'));
+  const write = (path: string, replace = false) => ({ path, owner: 'core', entry: { type: 'file', bytes: Buffer.from('rh\n') } as PathEntry, replace });
+  for (const [path, replace, message] of [
+    [linked, false, `rh has no record of it, so rh does not replace it: ${linked}`],
+    [linked, true, `the user's word to replace a file does not reach through a link: ${linked}`],
+    [dangling, false, `this path is a link to the missing ${created}, so rh creates nothing through it: ${dangling}`],
+    [join(rules, 'english.md'), false, `${rules} is a link below the install root ${join(f.home, '.claude')}`],
+    [join(f.home, '.bun', 'bin', 'rh'), false, `the install root ${join(f.home, '.bun')} is a link to a missing path`],
+  ] as const) expect(() => f.gate().writePaths([write(path, replace)])).toThrow(message);
+  expect({ target: readFileSync(target, 'utf8'), created: existsSync(join(f.home, 'dotfiles', 'new')), rules: readdirSync(join(f.home, 'dotfiles', 'rules')), missing: existsSync(join(f.home, 'missing')) })
+    .toEqual({ target: 'mine\n', created: false, rules: [], missing: false });
+  // A link at the install root itself is the user's layout: rh writes below the directory that it names and records the path.
+  mkdirSync(join(f.home, 'dotfiles', 'codex'));
+  symlinkSync(join(f.home, 'dotfiles', 'codex'), join(f.home, '.codex'));
+  const codex = join(f.home, 'dotfiles', 'codex', 'agents', 'a.md');
+  expect(f.gate().writePaths([write(join(f.home, '.codex', 'agents', 'a.md'))])).toEqual([codex]);
+  expect(Object.keys(f.ledger().paths)).toEqual([codex]);
+});
+
+test('a record that an earlier release wrote at a user link keeps the link through refresh, rollback and revert', () => {
   const f = fixture();
   const agents = join(f.home, '.claude', 'agents');
   mkdirSync(agents, { recursive: true });
   mkdirSync(join(f.home, 'dotfiles'));
-  const [linked, dangling, repointed] = [join(agents, 'l.md'), join(agents, 'd.md'), join(agents, 'r.md')];
-  const [target, created, other] = [join(f.home, 'dotfiles', 'l.md'), join(f.home, 'dotfiles', 'new', 'd.md'), join(f.home, 'dotfiles', 'r.md')];
-  writeFileSync(target, 'mine\n');
-  writeFileSync(other, 'rh\n');
+  const [linked, owned, repointed] = [join(agents, 'l.md'), join(agents, 'o.md'), join(agents, 'r.md')];
+  const [target, ownedTarget, first, other] = ['l.md', 'o.md', 'first.md', 'r.md'].map((name) => join(f.home, 'dotfiles', name)) as [string, string, string, string];
+  for (const file of [target, ownedTarget, first, other]) writeFileSync(file, 'rh\n');
   symlinkSync(target, linked);
-  symlinkSync(created, dangling);
-  symlinkSync(join(f.home, 'dotfiles', 'first.md'), repointed);
-  const write = (path: string, replace = false) => ({ path, owner: 'core', entry: { type: 'file', bytes: Buffer.from('rh\n') } as PathEntry, replace });
-  const state = () => ({ target: readFileSync(target, 'utf8'), created: existsSync(created) ? readFileSync(created, 'utf8') : null,
-    links: [linked, dangling].map((path) => lstatSync(path).isSymbolicLink()) });
-  expect(() => f.gate().writePaths([write(linked)])).toThrow(`rh has no record of it, so rh does not replace it: ${linked}`);
-
-  // A rollback puts the user file back from the vault and takes out the file and directory that rh created.
-  const transaction = mkdtempSync(join(f.home, 'tx-'));
-  expect(f.gate().writePaths([write(linked, true), write(dangling)], { transaction })).toEqual([linked, dangling]);
-  expect(state()).toEqual({ target: 'rh\n', created: 'rh\n', links: [true, true] });
-  expect(rollbackHostConfigTransaction(hostConfigPathsAt(join(f.home, '.repo-harness')), null, transaction).unresolved).toEqual([]);
-  expect({ ...state(), directory: existsSync(join(f.home, 'dotfiles', 'new')) }).toEqual({ target: 'mine\n', created: null, links: [true, true], directory: false });
-
-  // The record keys the link and names the file; a revert gives the user file back and removes only the created file.
-  f.gate().writePaths([write(linked, true), write(dangling), write(repointed)]);
+  symlinkSync(ownedTarget, owned);
+  symlinkSync(first, repointed);
+  const write = (path: string, text: string) => ({ path, owner: 'core', entry: { type: 'file', bytes: Buffer.from(text) } as PathEntry });
+  f.gate().writePaths([write(join(agents, 'seed.md'), 'seed\n')]);
   const sha = sha256Prefixed(Buffer.from('rh\n'));
-  expect(f.ledger().paths[linked]).toMatchObject({ kind: 'replaced', link_target: target, committed: { type: 'file', sha256: sha } });
-  expect({ vault: f.vault(f.ledger().paths[linked].backup), dangling: f.ledger().paths[dangling] })
-    .toMatchObject({ vault: 'mine\n', dangling: { kind: 'created', link_target: created, baseline: { state: 'known', existed: false } } });
-  // A link that now names another file with the same bytes is not rh's entry.
+  const backup = putVault(hostConfigPathsAt(join(f.home, '.repo-harness')), Buffer.from('mine\n'));
+  const record = (link_target: string) => ({ owner: 'core', host: 'claude', kind: 'created', baseline: { state: 'known', existed: false }, committed: { type: 'file', sha256: sha }, link_target });
+  writeFileSync(join(f.root, 'ledger.json'), JSON.stringify({ ...f.ledger(), paths: {
+    [linked]: { ...record(target), kind: 'replaced', baseline: { state: 'known', existed: true, sha256: sha256Prefixed(Buffer.from('mine\n')) }, backup },
+    [owned]: record(ownedTarget), [repointed]: record(first),
+  } }));
+  const links = () => [linked, owned, repointed].map((path) => lstatSync(path).isSymbolicLink());
+
+  // A refresh writes the file that the link names; a rollback puts rh's earlier bytes back there.
+  const snapshot = readFileSync(join(f.root, 'ledger.json'));
+  const transaction = mkdtempSync(join(f.home, 'tx-'));
+  expect(f.gate().writePaths([write(owned, 'rh2\n')], { transaction })).toEqual([owned]);
+  expect({ bytes: readFileSync(ownedTarget, 'utf8'), links: links() }).toEqual({ bytes: 'rh2\n', links: [true, true, true] });
+  expect(rollbackHostConfigTransaction(hostConfigPathsAt(join(f.home, '.repo-harness')), snapshot, transaction).unresolved).toEqual([]);
+  expect({ bytes: readFileSync(ownedTarget, 'utf8'), links: links() }).toEqual({ bytes: 'rh\n', links: [true, true, true] });
+
+  // A revert gives the user file back and removes the created file; a link that now names another file with the same bytes is not rh's entry.
   rmSync(repointed);
   symlinkSync(other, repointed);
-  expect(f.gate().revertPaths([linked, dangling, repointed]).map((entry) => [entry.path, entry.action]))
-    .toEqual([[linked, 'restored'], [dangling, 'removed'], [repointed, 'kept_edited']]);
-  expect(state()).toEqual({ target: 'mine\n', created: null, links: [true, true] });
+  expect(f.gate().revertPaths([linked, owned, repointed]).map((entry) => [entry.path, entry.action]))
+    .toEqual([[linked, 'restored'], [owned, 'removed'], [repointed, 'kept_edited']]);
+  expect({ target: readFileSync(target, 'utf8'), owned: existsSync(ownedTarget), links: links() }).toEqual({ target: 'mine\n', owned: false, links: [true, true, true] });
 });
 
 test('a refresh with no recorded fragment is an override, adopt records an old write once, and a dry-run revert writes nothing', () => {
@@ -536,6 +567,18 @@ test('a whole-path write records its entry first; delegate, a transaction rollba
   writeFileSync(user, 'rh\n');
   expect(f.gate().revertPaths([user])).toEqual([]);
   expect(readFileSync(user, 'utf8')).toBe('rh\n');
+});
+
+test('a whole-path write checks every destination before it writes any: a refusal on the last leaf leaves no entry and no record', () => {
+  const f = fixture();
+  const rules = join(f.home, '.claude', 'rules');
+  const leaves = ['a.md', 'b.md', 'c.md', 'english.md'].map((name) => join(rules, name));
+  mkdirSync(rules, { recursive: true });
+  writeFileSync(leaves[3]!, 'mine\n');
+  const writes = leaves.map((path) => ({ path, owner: 'core', entry: { type: 'file' as const, bytes: Buffer.from('rh\n') } }));
+  expect(() => f.gate().writePaths(writes)).toThrow(`rh has no record of it, so rh does not replace it: ${leaves[3]}`);
+  expect({ entries: readdirSync(rules), mine: readFileSync(leaves[3]!, 'utf8'), paths: existsSync(join(f.root, 'ledger.json')) ? f.ledger().paths : {} })
+    .toEqual({ entries: ['english.md'], mine: 'mine\n', paths: {} });
 });
 
 test('a delegated writer runs only on paths that rh may write; a replaced path stays a file; a rollback undoes a revert of a replaced file', () => {
