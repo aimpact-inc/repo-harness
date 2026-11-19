@@ -68,7 +68,6 @@ const SEAT_ACCESS: { readonly [seat in SeatId]: Omit<SeatRangeV1, 'models'> } = 
 };
 const SEAT_RANGES = Object.fromEntries(SEAT_IDS.map(id => [id, { models: SEAT_RECOMMENDED_MODELS[id], ...SEAT_ACCESS[id] }])) as SeatsRangesV1['seats'];
 
-/** Pi takes fleet roles only on a Codex model behind `magpie/codex/` (`seatTakesFleet`). */
 const RUNTIME_RANGES: Readonly<Record<SeatRuntime, Omit<SeatRuntimeRangeV1, 'id' | 'enabled'>>> = {
   claude: { effort: true, fleet: true },
   codex: { effort: true, fleet: true },
@@ -156,7 +155,10 @@ function changedKeys(current: SeatsConfigV1, next: SeatsConfigV1): string[] {
   }),
   ...ROUTING_KEYS
     .filter(field => JSON.stringify(current.routing[field]) !== JSON.stringify(next.routing[field]))
-    .map(field => `seats.routing.${field}`)];
+    .map(field => `seats.routing.${field}`),
+  ...SEAT_SCAFFOLD_SUB_AGENTS
+    .filter(role => current.pi_sub_agent_models?.[role] !== next.pi_sub_agent_models?.[role])
+    .map(role => `seats.pi_sub_agent_models.${role}`)];
 }
 
 /** Replaces the `seats` section. It writes only the configuration file; panes that run keep their launch arguments. */

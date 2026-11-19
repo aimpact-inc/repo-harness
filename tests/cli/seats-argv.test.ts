@@ -389,24 +389,57 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
     });
   });
 
-  test("a Pi GPT seat gets its own fleet roles in a generated directory; a DeepSeek seat gets none", () => {
-    const worker = { ...DEFAULT_SEATS_CONFIG.worker, runtime: "pi" as const, model: "magpie/codex/gpt-6.1-terra" };
-    withHome({ ...DEFAULT_SEATS_CONFIG, worker }, home => {
-      writeFileSync(join(home, 'codex-used'), '51');
-      const gpt = launch(home, "worker");
-      const [assignment, command] = bare(gpt.argv) as string[];
+  test("a Neon Pi advisor gets its own read-only roles on the default or overridden model", () => {
+    const advisor = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "pi" as const, model: "magpie/agy-cli/gemini-4-neon" };
+    const seats = { ...DEFAULT_SEATS_CONFIG, advisor };
+    withHome(seats, home => {
+      const neon = launch(home, "advisor");
+      const [assignment, command, providerFlag, provider, modelFlag, model] = bare(neon.argv) as string[];
       const directory = assignment!.replace("PI_SUBAGENT_EXTRA_AGENT_DIRS=", "");
-      expect([command, directory.startsWith(join(realpathSync(home), ".repo-harness", "seats", "pi-fleet"))]).toEqual(["pi", true]);
+      expect(directory.startsWith(join(realpathSync(home), ".repo-harness", "seats", "pi-fleet"))).toBe(true);
+      expect([command, providerFlag, provider, modelFlag, model]).toEqual(["pi", "--provider", "magpie", "--model", "agy-cli/gemini-4-neon"]);
       expect(readdirSync(directory).sort()).toEqual(["rh-deep-reasoner.md", "rh-explorer.md"]);
       const explorer = readFileSync(join(directory, "rh-explorer.md"), "utf8");
       expect(explorer).toContain("name: rh-explorer\n");
-      expect(explorer).toContain("model: magpie/codex/gpt-6-luna\nthinking: high\ntools: read, grep, find, ls, bash\n");
-      expect(readFileSync(join(directory, "rh-deep-reasoner.md"), "utf8")).toContain("tools: read, grep, find, ls, bash\n");
-      expect(gpt.brief).toContain("You may call these sub-agents: `rh-deep-reasoner`, `rh-explorer`.");
-      expect(gpt.limits).toContainEqual({ subject: "fleet", level: "instructions_only" });
+      expect(explorer).toContain(`model: ${JSON.stringify(DEFAULT_SEATS_CONFIG["worker-light"]!.model)}\nthinking: high\ntools: read, grep, find, ls, bash\n`);
+      const reasoner = readFileSync(join(directory, "rh-deep-reasoner.md"), "utf8");
+      expect(reasoner).toContain('model: "magpie/codex/gpt-6.2-sol"\nthinking: high\ntools: read, grep, find, ls, bash\n');
+      expect(neon.brief).toContain("Collect evidence through your sub-agents: `rh-deep-reasoner`, `rh-explorer`.");
+      expect(neon.limits).toContainEqual({ subject: "fleet", level: "instructions_only" });
+
+      const override = "magpie/group/deepseek-v4.1-flash";
+      writeFileSync(join(home, ".repo-harness", "config.json"), JSON.stringify({ seats: { ...seats, pi_sub_agent_models: { explorer: override } } }));
+      const overridden = String(bare(launch(home, "advisor").argv)[0]).replace("PI_SUBAGENT_EXTRA_AGENT_DIRS=", "");
+      expect(overridden).not.toBe(directory);
+      expect(readFileSync(join(overridden, "rh-explorer.md"), "utf8")).toContain(`model: ${JSON.stringify(override)}\n`);
+      expect(readFileSync(join(overridden, "rh-deep-reasoner.md"), "utf8")).toBe(reasoner);
       const light = launch(home, "worker-light");
       expect(bare(light.argv)[0]).toBe("pi");
       expect(light.brief).toContain("You have no sub-agents.");
+    });
+  });
+
+  test.skipIf(process.platform === "win32")("Pi role overrides stay private under umask 022", () => {
+    const advisor = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "pi", model: "magpie/agy-cli/gemini-4-neon" };
+    const override = "synthetic/example-private-model";
+    withHome({ ...DEFAULT_SEATS_CONFIG, advisor, pi_sub_agent_models: { explorer: override } }, home => {
+      const previousUmask = process.umask(0o022);
+      try {
+        const directory = String(bare(launch(home, "advisor").argv)[0]).replace("PI_SUBAGENT_EXTRA_AGENT_DIRS=", "");
+        const explorer = join(directory, "rh-explorer.md");
+        expect(readFileSync(explorer, "utf8")).toContain(`model: ${JSON.stringify(override)}\n`);
+        expect(statSync(directory).mode & 0o777).toBe(0o700);
+        expect(statSync(explorer).mode & 0o777).toBe(0o600);
+        expect(statSync(join(directory, "rh-deep-reasoner.md")).mode & 0o777).toBe(0o600);
+
+        chmodSync(directory, 0o755);
+        chmodSync(explorer, 0o644);
+        expect(bare(launch(home, "advisor").argv)[0]).toBe(`PI_SUBAGENT_EXTRA_AGENT_DIRS=${directory}`);
+        expect(statSync(directory).mode & 0o777).toBe(0o700);
+        expect(statSync(explorer).mode & 0o777).toBe(0o600);
+      } finally {
+        process.umask(previousUmask);
+      }
     });
   });
 

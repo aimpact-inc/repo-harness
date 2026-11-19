@@ -3,7 +3,7 @@ import {
   ROUTING_CLASSES,
   ROUTING_KEYS,
   SEAT_IDS,
-  seatTakesFleet,
+  SEAT_SCAFFOLD_SUB_AGENTS,
   decodeSeatsSettings,
   decodeSeatsSettingsResult,
   type SeatConfigV1,
@@ -13,6 +13,7 @@ import {
   type SeatModelV1,
   type SeatRoutingV1,
   type SeatRuntime,
+  type SeatScaffoldSubAgent,
   type SeatsConfigV1,
   type SeatsSettingsRequestV1,
   type SeatsSettingsV1,
@@ -48,27 +49,28 @@ const sameSeat = (left: SeatConfigV1 | null, right: SeatConfigV1 | null): boolea
   left === null || right === null ? left === right : left.runtime === right.runtime && left.model === right.model && left.effort === right.effort
   && left.advisor_model === right.advisor_model && left.tools.join() === right.tools.join() && left.fleet.join() === right.fleet.join();
 
-const changedRouting = (base: SeatsConfigV1, draft: SeatsConfigV1): number =>
-  ROUTING_KEYS.filter(field => JSON.stringify(base.routing[field]) !== JSON.stringify(draft.routing[field])).length;
+const changedSectionFields = (base: SeatsConfigV1, draft: SeatsConfigV1): number =>
+  ROUTING_KEYS.filter(field => JSON.stringify(base.routing[field]) !== JSON.stringify(draft.routing[field])).length
+  + SEAT_SCAFFOLD_SUB_AGENTS.filter(role => base.pi_sub_agent_models?.[role] !== draft.pi_sub_agent_models?.[role]).length;
 
-export const sameSeats = (left: SeatsConfigV1, right: SeatsConfigV1): boolean => SEAT_IDS.every(id => sameSeat(left[id], right[id])) && changedRouting(left, right) === 0;
+export const sameSeats = (left: SeatsConfigV1, right: SeatsConfigV1): boolean => SEAT_IDS.every(id => sameSeat(left[id], right[id])) && changedSectionFields(left, right) === 0;
 
-/** The number of seat and routing fields that differ, for the save bar. It counts the fields that the server names in `changed_keys`. */
+/** Count the fields that the server names in `changed_keys`. */
 export function seatChanges(base: SeatsConfigV1, draft: SeatsConfigV1): number {
   return SEAT_IDS.reduce((count, id) => {
     const before = base[id], after = draft[id];
     return count + (before === null || after === null ? Number(before !== after) : (['runtime', 'model', 'advisor_model', 'effort', 'tools', 'fleet'] as const)
       .filter(field => String(before[field]) !== String(after[field])).length);
-  }, changedRouting(base, draft));
+  }, changedSectionFields(base, draft));
 }
 
 const SEATS_SECTION: SettingsSection<SeatsSettingsV1, SeatsSettingsV1['config'], SeatsConfigV1, SeatsSettingsRequestV1> = {
   id: 'seats',
   config: settings => settings.config,
   draftOf: seatsDraftOf,
-  request: (base, draft) => (sameSeats(seatsDraftOf(base), savedSeats(draft)) ? null : { expected_revision: base.revision, seats: savedSeats(draft) }),
-  sameDraft: (left, right) => sameSeats(savedSeats(left), savedSeats(right)),
-  applied: (revision, draft) => ({ revision, ...savedSeats(draft) }),
+  request: (base, draft) => (sameSeats(seatsDraftOf(base), draft) ? null : { expected_revision: base.revision, seats: draft }),
+  sameDraft: sameSeats,
+  applied: (revision, draft) => ({ revision, ...draft }),
 };
 
 export function useSeatsSettingsForm(read: SeatsSettingsReader, write: SeatsSettingsWriter, generation: number, agentsSaves: number, enabled: boolean): SeatsSettingsForm {
@@ -83,8 +85,8 @@ const patch = (draft: SeatsConfigV1, seat: SeatId, change: Partial<SeatConfigV1>
 
 /**
  * A new runtime keeps the model only when it is a recommended entry of the seat on that runtime, keeps the effort only
- * where the runtime accepts it, and keeps fleet roles only where the runtime and model take them. Codex always
- * runs commands, so its shell group is on. The active runtime changes nothing.
+ * where the runtime accepts it, and keeps fleet roles where the runtime takes them. Codex always runs commands,
+ * so its shell group is on. The active runtime changes nothing.
  */
 export function setSeatRuntime(draft: SeatsConfigV1, seat: SeatId, runtime: SeatRuntime, ranges: SeatsSettingsV1['ranges']): SeatsConfigV1 {
   const range = ranges.runtimes.find(entry => entry.id === runtime)!;
@@ -96,23 +98,27 @@ export function setSeatRuntime(draft: SeatsConfigV1, seat: SeatId, runtime: Seat
     model,
     advisor_model: runtime === 'claude' ? current.advisor_model : null,
     effort: range.effort ? current.effort : null,
-    fleet: range.fleet && seatTakesFleet({ runtime, model }) ? current.fleet : [],
+    fleet: range.fleet ? current.fleet : [],
     tools: runtime === 'codex' ? toggled(current.tools, 'shell', true) : current.tools,
   });
 }
 
-/** The draft keeps the chosen fleet roles while the model is edited, so a typo in a typed id loses none; `savedSeats` drops them. */
 export const setSeatModel = (draft: SeatsConfigV1, seat: SeatId, model: string | null): SeatsConfigV1 => patch(draft, seat, { model });
 
-/** The section that a save sends: a seat whose final model takes no fleet, such as a Pi seat off the GPT models, sends no roles. */
-export const savedSeats = (draft: SeatsConfigV1): SeatsConfigV1 =>
-  SEAT_IDS.reduce((next, id) => (next[id] === null || next[id]!.fleet.length === 0 || seatTakesFleet(next[id]!) ? next : patch(next, id, { fleet: [] })), draft);
 export const setSeatAdvisorModel = (draft: SeatsConfigV1, seat: SeatId, advisor_model: string | null): SeatsConfigV1 => patch(draft, seat, { advisor_model });
 export const setSeatEffort = (draft: SeatsConfigV1, seat: SeatId, effort: string | null): SeatsConfigV1 => patch(draft, seat, { effort });
 export const setSeatTool = (draft: SeatsConfigV1, seat: SeatId, tool: SeatTool, on: boolean): SeatsConfigV1 =>
   patch(draft, seat, { tools: toggled(draft[seat]!.tools, tool, on) });
 export const setSeatRole = (draft: SeatsConfigV1, seat: SeatId, role: string, on: boolean): SeatsConfigV1 =>
   patch(draft, seat, { fleet: toggled(draft[seat]!.fleet, role, on) });
+
+export function setPiSubAgentModel(draft: SeatsConfigV1, role: SeatScaffoldSubAgent, model: string): SeatsConfigV1 {
+  const { pi_sub_agent_models, ...seats } = draft;
+  const models = { ...pi_sub_agent_models };
+  if (model === '') delete models[role];
+  else models[role] = model;
+  return Object.keys(models).length === 0 ? seats : { ...seats, pi_sub_agent_models: models };
+}
 
 /**
  * Switching the gatekeeper-fallback seat on starts from a Pi seat on the DeepSeek model, outside the model family
