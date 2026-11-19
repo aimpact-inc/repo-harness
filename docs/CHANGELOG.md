@@ -46,7 +46,7 @@ All notable changes to this skill are documented here.
 
 ### Upgrade
 
-- Run `rh update` after installing 0.35.2. It moves install state to protocol 5 and the host configuration ledger to protocol 4. (#2851, #2852, #2853)
+- Run `rh update` after installing 0.35.2. It moves install state to protocol 5 and the host configuration ledger to protocol 4. The move is one-way: 0.35.1 does not read install state protocol 5 or ledger protocol 4. (#2851, #2852, #2853)
 - If you put a secret inline in an rh-tagged hook or statusLine command before upgrading to 0.35.1, check `ledger.json` for it and rotate that secret. (#3237)
 - After the install, use `rh board post plan` to repost the newest plan comment of each open parent with `"protocol": 3`. Update every machine that runs seats together. (#3281)
 
