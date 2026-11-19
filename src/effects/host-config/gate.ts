@@ -523,7 +523,7 @@ function refuseLinkedParents(root: string, path: string): void {
   const base = resolve(root);
   for (let ancestor = base; ; ancestor = dirname(ancestor)) {
     if (lstatSync(ancestor, { throwIfNoEntry: false })?.isSymbolicLink() && !statSync(ancestor, { throwIfNoEntry: false })) {
-      throw new HostConfigError('host_config_invalid_path', `${ancestor} is a link to a missing path, so rh writes nothing below it: ${path}`);
+      throw new HostConfigError('host_config_replacement_refused', `${ancestor} is a link to a missing path, so rh writes nothing below it: ${path}`);
     }
     if (dirname(ancestor) === ancestor) break;
   }
@@ -532,7 +532,7 @@ function refuseLinkedParents(root: string, path: string): void {
     component = join(component, part);
     const stat = lstatSync(component, { throwIfNoEntry: false });
     if (!stat) return;
-    if (stat.isSymbolicLink()) throw new HostConfigError('host_config_invalid_path', `${component} is a link below the install root ${root}, so rh writes nothing through it: ${path}`);
+    if (stat.isSymbolicLink()) throw new HostConfigError('host_config_replacement_refused', `${component} is a link below the install root ${root}, so rh writes nothing through it: ${path}`);
   }
 }
 
@@ -611,7 +611,7 @@ function planWholePath(paths: HostConfigPaths, write: HostConfigPathWrite, key: 
   const prior = recorded === entry ? previous : undefined;
   const observed = observePathEntry(entry);
   if (linkTarget !== undefined && observed === null) {
-    throw new HostConfigError('host_config_invalid_path', `this path is a link to the missing ${linkTarget}, so rh creates nothing through it: ${write.path}`);
+    throw new HostConfigError('host_config_replacement_refused', `this path is a link to the missing ${linkTarget}, so rh creates nothing through it: ${write.path}`);
   }
   if (write.expected !== undefined && !(observed?.type === 'file' && observed.sha256 === write.expected)) {
     throw new HostConfigError('host_config_target_changed', `the file changed since rh planned its write, so rh writes nothing to it: ${write.path}`);
@@ -620,7 +620,7 @@ function planWholePath(paths: HostConfigPaths, write: HostConfigPathWrite, key: 
   if (observed !== null && !ownsEntry(prior, write.owner, key)) {
     if (!write.replace) throw refusal(write.path, prior, write.owner);
     if (observed.type !== 'file') throw new HostConfigError('host_config_invalid_state', `only a file can be replaced on the user's word: ${write.path}`);
-    if (linkTarget !== undefined) throw new HostConfigError('host_config_invalid_path', `this path is a link to ${linkTarget}, and the user's word to replace a file does not reach through a link: ${write.path}`);
+    if (linkTarget !== undefined) throw new HostConfigError('host_config_replacement_refused', `this path is a link to ${linkTarget}, and the user's word to replace a file does not reach through a link: ${write.path}`);
     replaces = observed;
   }
   // `validPathRecord` holds a `replaced` record to a file: the user file that it replaced comes back as a file.

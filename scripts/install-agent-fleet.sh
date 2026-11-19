@@ -229,7 +229,7 @@ function validateUserManagedCodex(agent, content) {
 
 /**
  * One fleet file through the gate; an existing file keeps its mode. `replace` keeps a user file in the vault first.
- * A user link stays: the gate writes the file that it names, and creates that file when the link dangles.
+ * A user link stays: the gate writes the file that it names only for rh's own record, and refuses a dangling link and `replace` through a link.
  */
 function writeAgent(targetPath, content, replace) {
   const stat = fs.statSync(targetPath, { throwIfNoEntry: false });
@@ -268,7 +268,9 @@ function compareAndWrite(targetPath, content, acceptedHash) {
   if (force && !current) {
     try {
       writeAgent(targetPath, content, true);
-    } catch (_error) {
+    } catch (error) {
+      // A user-state refusal (a link that the user's word does not reach through) stops this file only.
+      if (error?.code === "host_config_replacement_refused") return `refused (${error.message})`;
       return "backup-failed";
     }
     const { backup } = readPathRecords(ENV)[pathRecordKey(ENV, targetPath)];

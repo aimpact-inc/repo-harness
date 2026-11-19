@@ -10,6 +10,8 @@ import { installProfileHostMutationPaths } from "../src/cli/installer/install-pr
 import { recordInstallOwnership } from "./helpers/install-ownership";
 import { pathRecordKey, readPathRecords } from "../src/effects/host-config/path-records";
 import { openHostConfigGate } from "../src/effects/host-config/gate";
+import { hostConfigPaths, putVault } from "../src/effects/host-config/store";
+import { sha256Prefixed } from "../src/core/evidence/sha256";
 
 /** The ledger's `user_managed` path records under `home`: the fleet files that the user keeps. */
 function userManagedRecords(home: string) {
@@ -464,7 +466,7 @@ describe("install-agent-fleet", () => {
     }
   }, 30_000);
 
-  test("--force writes a linked agent file through its link: the target goes to the vault, a dangling link gets its target, and the revert keeps both links", () => {
+  test("--force does not write through an agent link: a link to a user file and a dangling link are refused per file; a record of an earlier release keeps its link", () => {
     const { root, home } = setupFakeHome("install-agent-fleet-linked");
     try {
       const [existing, dangling] = [join(home, "dotfiles/explorer.md"), join(home, "dotfiles/gatekeeper.md")];
@@ -475,16 +477,23 @@ describe("install-agent-fleet", () => {
       symlinkSync(existing, linked);
       symlinkSync(dangling, unborn);
       const forced = runInstaller(home, FLEET_SOURCE_DIR, ["--force"]);
-      expect(forced.status, forced.stdout + forced.stderr).toBe(0);
-      expect(forced.stdout).toContain("[fleet] claude/explorer.md: replaced (backup:");
-      expect(forced.stdout).toContain("[fleet] claude/gatekeeper.md: installed");
-      for (const [file, target] of [["explorer.md", existing], ["gatekeeper.md", dangling]]) {
-        expect(readFileSync(target, "utf8")).toBe(readFileSync(join(FLEET_SOURCE_DIR, file), "utf8"));
-      }
+      expect(forced.status, forced.stdout + forced.stderr).toBe(1);
+      expect(forced.stdout).toContain(`[fleet] claude/explorer.md: refused (this path is a link to ${existing}, and the user's word to replace a file does not reach through a link`);
+      expect(forced.stdout).toContain(`[fleet] claude/gatekeeper.md: refused (this path is a link to the missing ${dangling}, so rh creates nothing through it`);
+      expect(forced.stdout).toContain("[fleet] claude/deep-worker.md: installed");
       const records = readPathRecords({ HOME: home });
-      expect(records[pathRecordKey({ HOME: home }, linked)]).toMatchObject({ kind: "replaced", link_target: existing });
-      expect(records[pathRecordKey({ HOME: home }, unborn)]).toMatchObject({ kind: "created", link_target: dangling });
-      // The replaced record stays with the file that it replaced: a link that now names a missing file gets nothing of it.
+      expect({ existing: readFileSync(existing, "utf8"), dangling: existsSync(dangling), recorded: [linked, unborn].map((path) => pathRecordKey({ HOME: home }, path) in records) })
+        .toEqual({ existing: "mine\n", dangling: false, recorded: [false, false] });
+
+      // A replaced record that an earlier release wrote through the link stays with the file that it replaced.
+      const ledgerPath = join(home, ".repo-harness/config/ledger.json");
+      const fleet = readFileSync(join(FLEET_SOURCE_DIR, "explorer.md"));
+      writeFileSync(existing, fleet);
+      const backup = putVault(hostConfigPaths({ HOME: home }), Buffer.from("mine\n"));
+      const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
+      ledger.paths[pathRecordKey({ HOME: home }, linked)] = { owner: "core", host: "claude", kind: "replaced", baseline: { state: "known", existed: true, sha256: sha256Prefixed(Buffer.from("mine\n")) },
+        committed: { type: "file", sha256: sha256Prefixed(fleet) }, backup, link_target: existing };
+      writeFileSync(ledgerPath, JSON.stringify(ledger));
       const moved = join(home, "dotfiles/moved.md");
       rmSync(linked);
       symlinkSync(moved, linked);
@@ -495,9 +504,8 @@ describe("install-agent-fleet", () => {
       expect({ moved: existsSync(moved), record: readPathRecords({ HOME: home })[pathRecordKey({ HOME: home }, linked)] }).toMatchObject({ moved: false, record: { kind: "replaced", link_target: existing } });
       rmSync(linked);
       symlinkSync(existing, linked);
-      expect(openHostConfigGate({ env: { HOME: home } }).revertPaths([linked, unborn]).map((entry) => entry.action)).toEqual(["restored", "removed"]);
-      expect({ existing: readFileSync(existing, "utf8"), dangling: existsSync(dangling), links: [linked, unborn].map((path) => lstatSync(path).isSymbolicLink()) })
-        .toEqual({ existing: "mine\n", dangling: false, links: [true, true] });
+      expect(openHostConfigGate({ env: { HOME: home } }).revertPaths([linked]).map((entry) => entry.action)).toEqual(["restored"]);
+      expect({ existing: readFileSync(existing, "utf8"), link: lstatSync(linked).isSymbolicLink() }).toEqual({ existing: "mine\n", link: true });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

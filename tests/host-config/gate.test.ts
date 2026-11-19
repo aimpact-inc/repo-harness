@@ -382,7 +382,11 @@ test('a whole-path write refuses a dangling link, the user\'s word to replace th
     [dangling, false, `this path is a link to the missing ${created}, so rh creates nothing through it: ${dangling}`],
     [join(rules, 'english.md'), false, `${rules} is a link below the install root ${join(f.home, '.claude')}`],
     [join(f.home, '.bun', 'bin', 'rh'), false, `${join(f.home, '.bun')} is a link to a missing path`],
-  ] as const) expect(() => f.gate().writePaths([write(path, replace)])).toThrow(message);
+  ] as const) {
+    expect(() => f.gate().writePaths([write(path, replace)])).toThrow(message);
+    // A user-state refusal: each caller reports it per path, as any other refusal.
+    expect(() => f.gate().writePaths([write(path, replace)])).toThrow(expect.objectContaining({ code: 'host_config_replacement_refused' }));
+  }
   expect({ target: readFileSync(target, 'utf8'), created: existsSync(join(f.home, 'dotfiles', 'new')), rules: readdirSync(join(f.home, 'dotfiles', 'rules')), missing: existsSync(join(f.home, 'missing')) })
     .toEqual({ target: 'mine\n', created: false, rules: [], missing: false });
   // A link at the install root itself is the user's layout: rh writes below the directory that it names and records the path.
