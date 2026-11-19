@@ -92,7 +92,7 @@ same code as a careful senior engineer. Make every decision in the issue:
 
 | Decision | Write it as |
 |---|---|
-| Which files change | `模块与位置 / Module and files`: module ID from the map, then the main files and the test files to extend |
+| Module and file scope | Put the module ID from the map in the `module:` label. List the main files and test files in `模块与位置 / Module and files` |
 | What must not change | `边界 / Boundaries`: forbidden files and modules, invariants that must hold |
 | What gets deleted | `边界`: a delete list of old functions, flags, routes, files. Deleted in this PR |
 | Compatibility | `边界`: "No compatibility path. <old thing> is removed, not aliased." When compatibility is really needed, name the exact migration, who runs it and when it is deleted |
@@ -273,8 +273,8 @@ findings and the disposition of each.
    with shell interpolation.
 2. Create children in dependency order, then edit the parent table with the
    real numbers (`gh issue edit <parent> --body-file <file>`). Add the
-   sub-issue links, the blocked-by links, the milestone and the `tier:`
-   labels.
+   sub-issue links, the blocked-by links, the milestone and the
+   `module:`, `tier:` and `route:` labels.
 3. Read every issue back (`gh issue view <n>`) and check the links and the
    rendering.
 

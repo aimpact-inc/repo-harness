@@ -14,7 +14,7 @@ const OPEN_CLUSTER_QUERY = `query($owner: String!, $name: String!, $after: Strin
     issues(states: OPEN, first: ${OPEN_ISSUE_PAGE_SIZE}, after: $after, orderBy: { field: CREATED_AT, direction: ASC }) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        number title parent { number }
+        number title parent { number } subIssuesSummary { total }
         labels(first: ${BOARD_PAGE.labels}) { pageInfo { hasNextPage } nodes { name } }
         blockedBy(first: ${BOARD_PAGE.blocked_by}) { pageInfo { hasNextPage } nodes { number state } }
         comments(last: ${BOARD_PAGE.comments}) { pageInfo { hasPreviousPage } nodes { url createdAt authorAssociation body } }
@@ -54,16 +54,16 @@ function number(value: unknown, field: string): number {
 }
 
 function connection(value: unknown, field: string, flag: 'hasNextPage' | 'hasPreviousPage'): {
-  nodes: Record<string, unknown>[]; more: boolean; endCursor: unknown;
+  nodes: unknown[]; more: boolean; endCursor: unknown;
 } {
   const list = record(value, field);
   const info = record(list.pageInfo, `${field}.pageInfo`);
   const more = info[flag];
   if (!Array.isArray(list.nodes) || typeof more !== 'boolean') throw new BoardSourceError(`${field} has invalid nodes or pageInfo`);
-  return { nodes: list.nodes.map((node, index) => record(node, `${field}.nodes[${index}]`)), more, endCursor: info.endCursor };
+  return { nodes: list.nodes, more, endCursor: info.endCursor };
 }
 
-function completeNodes(value: unknown, field: string, flag: 'hasNextPage' | 'hasPreviousPage'): Record<string, unknown>[] {
+function completeNodes(value: unknown, field: string, flag: 'hasNextPage' | 'hasPreviousPage'): unknown[] {
   const { more, nodes } = connection(value, field, flag);
   if (more) throw new BoardSourceError(`${field} has more pages than one read returns`);
   return nodes;
@@ -90,15 +90,24 @@ function decodeOpenIssue(node: Record<string, unknown>, repository: string, link
     return null;
   }
   const path = `#${issue}`;
-  const labels = completeNodes(node.labels, `${path}.labels`, 'hasNextPage').map(label => string(label.name, `${path}.labels.name`));
+  const { total } = record(node.subIssuesSummary, `${path}.subIssuesSummary`);
+  if (typeof total !== 'number' || !Number.isSafeInteger(total) || total < 0) throw new BoardSourceError(`${path}.subIssuesSummary.total is not a count`);
+  if (total > 0) return null;
+
+  const labels = completeNodes(node.labels, `${path}.labels`, 'hasNextPage')
+    .map(label => string(record(label, `${path}.label`).name, `${path}.labels.name`));
   const blocked_by = completeNodes(node.blockedBy, `${path}.blockedBy`, 'hasNextPage').map(blocker => {
-    const { state } = blocker;
+    const edge = record(blocker, `${path}.blocker`);
+    const { state } = edge;
     if (state !== 'OPEN' && state !== 'CLOSED') throw new BoardSourceError(`${path}.blockedBy.state is not OPEN or CLOSED`);
-    return { number: number(blocker.number, `${path}.blockedBy.number`), state: state === 'OPEN' ? 'open' as const : 'closed' as const };
+    return { number: number(edge.number, `${path}.blockedBy.number`), state: state === 'OPEN' ? 'open' as const : 'closed' as const };
   });
   const comments = connection(node.comments, `${path}.comments`, 'hasPreviousPage');
   for (const event of completeNodes(node.timelineItems, `${path}.timelineItems`, 'hasPreviousPage')) {
-    const source = record(event.source, `${path}.timelineItems.source`);
+    if (event === null) continue;
+    const sourceValue = record(event, `${path}.timelineItems.node`).source;
+    if (sourceValue == null) continue;
+    const source = record(sourceValue, `${path}.timelineItems.source`);
     if (string(source.__typename, `${path}.timelineItems.source.__typename`) !== 'PullRequest') continue;
     if (source.state === 'CLOSED' || source.state === 'MERGED') continue;
     if (source.state !== 'OPEN') throw new BoardSourceError(`${path}.timelineItems.source has an invalid pull request state`);
@@ -107,12 +116,15 @@ function decodeOpenIssue(node: Record<string, unknown>, repository: string, link
   }
   return {
     number: issue, title: string(node.title, `${path}.title`), labels, blocked_by,
-    comments: { truncated: comments.more, comments: comments.nodes.map(comment => ({
-      url: string(comment.url, `${path}.comments.url`),
-      created_at: string(comment.createdAt, `${path}.comments.createdAt`),
-      author_association: string(comment.authorAssociation, `${path}.comments.authorAssociation`),
-      body: string(comment.body, `${path}.comments.body`),
-    })) },
+    comments: { truncated: comments.more, comments: comments.nodes.map(value => {
+      const comment = record(value, `${path}.comment`);
+      return {
+        url: string(comment.url, `${path}.comments.url`),
+        created_at: string(comment.createdAt, `${path}.comments.createdAt`),
+        author_association: string(comment.authorAssociation, `${path}.comments.authorAssociation`),
+        body: string(comment.body, `${path}.comments.body`),
+      };
+    }) },
   };
 }
 
@@ -133,7 +145,7 @@ function collectOpen(input: GhInput): { issues: ClusterIssue[]; truncated: boole
     repository = current;
     const { nodes, more, endCursor } = connection(repo.issues, 'repository.issues', 'hasNextPage');
     for (const node of nodes) {
-      const issue = decodeOpenIssue(node, repository, linked);
+      const issue = decodeOpenIssue(record(node, 'repository.issues.node'), repository, linked);
       if (issue !== null) issues.push(issue);
     }
     if (!more) return { issues: issues.map(issue => projectIssue(issue, linked)), truncated: false };

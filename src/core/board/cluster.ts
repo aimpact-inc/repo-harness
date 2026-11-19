@@ -45,6 +45,11 @@ interface ModuleBundle {
   readonly external_blockers: readonly number[];
 }
 
+interface Orphan {
+  readonly issue: number;
+  readonly external_blockers: readonly number[];
+}
+
 interface PatternGroup {
   readonly pattern: string;
   readonly issues: readonly number[];
@@ -59,7 +64,7 @@ export interface BoardClusterV1 {
   readonly in_flight: readonly number[];
   readonly unclassified: readonly UnclassifiedIssue[];
   readonly module_bundles: readonly ModuleBundle[];
-  readonly orphans: readonly number[];
+  readonly orphans: readonly Orphan[];
   readonly cycles: readonly number[];
   readonly pattern_groups: readonly PatternGroup[];
   readonly suggested_merge_order: readonly PlanOrderEntryV3[];
@@ -215,30 +220,31 @@ export function clusterIssues(input: {
 
   const buckets = groupBy(classified, issue => `${issue.module}:${issue.tier_bucket}:${issue.route === 'frontend' ? 'frontend' : 'backend'}`);
   const bundles: ModuleBundle[] = [];
-  const orphans: number[] = [];
+  const orphans: Orphan[] = [];
   const cycles: number[] = [];
   const byIssue = new Map(classified.map(issue => [issue.number, issue]));
   const units = new Map<number, readonly ClassifiedIssue[]>();
   for (const bucket of buckets.values()) {
     const { module, tier_bucket } = bucket[0]!;
-    const size = tier_bucket === 'high' ? 2 : maxSize;
+    const size = tier_bucket === 'high' ? Math.min(2, maxSize) : maxSize;
     const { ordered, stalled } = dependencyOrder(new Map(bucket.map(issue => [issue.number, issue.blocked_by])));
     cycles.push(...stalled);
     for (let at = 0; at < ordered.length; at += size) {
       const numbers = ordered.slice(at, at + size);
       const members = numbers.map(number => byIssue.get(number)!);
       units.set(Math.min(...numbers), members);
+      const memberNumbers = new Set(numbers);
+      const external_blockers = distinctNumbers(members.flatMap(issue => issue.blocked_by.filter(blocker => !memberNumbers.has(blocker))));
       if (numbers.length === 1) {
-        orphans.push(numbers[0]!);
+        orphans.push({ issue: numbers[0]!, external_blockers });
         continue;
       }
-      const memberNumbers = new Set(numbers);
       const route = bundleRouteClass(members.map(issue => issue.route));
       if ('error' in route) throw new BoardSourceError(route.error);
       bundles.push({
         module, tier_bucket, route_class: route.kind, issues: numbers,
         credentials: members.some(issue => issue.labels.includes(CREDENTIALS_LABEL)),
-        external_blockers: distinctNumbers(members.flatMap(issue => issue.blocked_by.filter(blocker => !memberNumbers.has(blocker)))),
+        external_blockers,
       });
     }
   }
@@ -247,7 +253,7 @@ export function clusterIssues(input: {
   return {
     protocol: BOARD_CLUSTER_PROTOCOL, kind: BOARD_CLUSTER_KIND,
     scope: { ...input.scope, max_size: maxSize }, in_flight: inFlight, unclassified,
-    module_bundles: bundles, orphans: orphans.sort(byNumber), cycles: distinctNumbers([...cycles, ...stalled]),
+    module_bundles: bundles, orphans: orphans.sort((left, right) => byNumber(left.issue, right.issue)), cycles: distinctNumbers([...cycles, ...stalled]),
     pattern_groups: patternGroups(classified), suggested_merge_order: plan.merge_order,
   };
 }

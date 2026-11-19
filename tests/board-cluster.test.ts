@@ -28,7 +28,7 @@ test('splits the mixed backlog into deterministic plan units and reports cross-m
     issue(1, ['tier:medium', 'route:simple_fast']), issue(2, ['module:billing', 'tier:medium']),
     issue(3, labels(), [7]), issue(4, labels('billing', 'medium', 'important_fast')),
     issue(5, [...labels('billing', 'medium', 'simple_deep'), 'touches:credentials']), issue(6), issue(7),
-    issue(8, labels(), [50, 6]), issue(9), issue(10, labels('billing', 'high')),
+    issue(8, labels(), [50, 6]), issue(9), issue(10, labels('billing', 'high'), [60]),
     issue(11, [...labels('storage', 'high'), `pattern:${pattern}`]),
     issue(12, [...labels('platform/tokens', 'high'), `pattern:${pattern}`]),
   ];
@@ -41,7 +41,9 @@ test('splits the mixed backlog into deterministic plan units and reports cross-m
     { module: 'billing', tier_bucket: 'standard', route_class: 'important_deep', credentials: true, issues: [4, 5, 6, 7, 3], external_blockers: [] },
     { module: 'billing', tier_bucket: 'standard', route_class: 'simple_fast', credentials: false, issues: [8, 9], external_blockers: [6, 50] },
   ]);
-  expect(result.orphans).toEqual([10, 11, 12]);
+  expect(result.orphans).toEqual([
+    { issue: 10, external_blockers: [60] }, { issue: 11, external_blockers: [] }, { issue: 12, external_blockers: [] },
+  ]);
   expect(result.pattern_groups).toEqual([{ pattern, issues: [11, 12], modules: ['platform/tokens', 'storage'], tier_buckets: ['high'] }]);
   const plan = decodePlanBlockValue({
     protocol: PLAN_BLOCK_PROTOCOL, kind: PLAN_BLOCK_KIND,
@@ -60,7 +62,14 @@ test('caps high units at two and keeps frontend separate from backend', () => {
   expect(result.module_bundles.map(bundle => [bundle.tier_bucket, bundle.route_class, bundle.issues])).toEqual([
     ['high', 'simple_fast', [1, 2]], ['standard', 'frontend', [4, 5]], ['standard', 'simple_fast', [6, 7]],
   ]);
-  expect(result.orphans).toEqual([3]);
+  expect(result.orphans).toEqual([{ issue: 3, external_blockers: [] }]);
+});
+
+test('max_size 1 splits two high issues into singletons', () => {
+  const high = labels('billing', 'high');
+  const result = clusterIssues({ issues: [issue(1, high), issue(2, high)], scope, max_size: 1 });
+  expect(result.module_bundles).toEqual([]);
+  expect(result.suggested_merge_order).toEqual([1, 2]);
 });
 
 test('collects label errors across families and withholds in-flight issues before classification', () => {
@@ -94,7 +103,7 @@ const response = (value: unknown) => ({ status: 0, stdout: JSON.stringify(value)
 const forward = (nodes: readonly unknown[]) => ({ pageInfo: { hasNextPage: false }, nodes });
 const backward = (nodes: readonly unknown[]) => ({ pageInfo: { hasPreviousPage: false }, nodes });
 const openIssue = (number: number, fields: Record<string, unknown> = {}) => ({
-  number, title: `Issue ${number}`, parent: null,
+  number, title: `Issue ${number}`, parent: null, subIssuesSummary: { total: 0 },
   labels: forward(labels().map(name => ({ name }))), blockedBy: forward([]), comments: backward([]), timelineItems: backward([]),
   ...fields,
 });
@@ -117,7 +126,7 @@ test('--open follows a bounded read-only scan and reports a truncated scope', ()
   writeFileSync(tracked, 'unchanged\n');
   const openPr = (body: string) => ({ source: { __typename: 'PullRequest', state: 'OPEN', body, repository: { nameWithOwner: repository } } });
   const pages = [
-    [openIssue(1, { timelineItems: backward([openPr('Closes #5')]) }),
+    [openIssue(1, { timelineItems: backward([null, { source: null }, {}, openPr('Closes #5')]) }),
       openIssue(2, { blockedBy: forward([{ number: 90, state: 'CLOSED' }, { number: 91, state: 'OPEN' }]) }),
       openIssue(3, { comments: backward([{
         url: 'https://github.com/Ancienttwo/repo-harness/issues/3#issuecomment-1', createdAt: '2026-11-19T00:00:00Z',
@@ -140,6 +149,18 @@ test('--open follows a bounded read-only scan and reports a truncated scope', ()
   expect(result.module_bundles[0]?.external_blockers).toEqual([91]);
   expect(readdirSync(checkout)).toEqual(['README.md']);
   expect(readFileSync(tracked, 'utf8')).toBe('unchanged\n');
+});
+
+test('--open skips a batch parent before it reads the truncated timeline', () => {
+  const batchParent = openIssue(1, {
+    subIssuesSummary: { total: 2 },
+    timelineItems: { pageInfo: { hasPreviousPage: true }, nodes: [] },
+  });
+  const result = collectBoardCluster({ repo_root: workspace('board-cluster-open'), parent: null, gh_runner: args => {
+    expect(readQuery(args)).toContain('subIssuesSummary { total }');
+    return response(openPage([batchParent, openIssue(2)], null));
+  } });
+  expect(result.suggested_merge_order).toEqual([2]);
 });
 
 test('--parent reuses the board read for open sub-issues, claims and PR body links', () => {
@@ -187,7 +208,7 @@ console.log(JSON.stringify(${JSON.stringify(page)}));
   expect(result.status).toBe(0);
   expect(JSON.parse(result.stdout)).toMatchObject({
     protocol: 1, kind: 'repo-harness.board-cluster', scope: { ...scope, max_size: 1 },
-    module_bundles: [], orphans: [1, 2], suggested_merge_order: [1, 2],
+    module_bundles: [], orphans: [{ issue: 1, external_blockers: [] }, { issue: 2, external_blockers: [] }], suggested_merge_order: [1, 2],
   });
   expect(readdirSync(checkout)).toEqual([]);
   expect(readdirSync(home)).toEqual(['gh']);
