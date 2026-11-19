@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { execFileSync } from "child_process";
 import { existsSync, readFileSync } from "fs";
 import { join, posix } from "path";
+import { decodePlanBlock } from "../src/core/board/plan-block";
 
 // SSD-06 migration: the pre-cutover 19-facade public action command surface
 // (all living flat under assets/skill-commands/) collapses into the plan's
@@ -578,6 +579,9 @@ describe("repo-harness action command skills", () => {
     for (const field of ["repo-harness plan", "Coordinator:", "Baseline: main@<sha>", "Supersedes:", "src/core/board/plan-block.ts"]) {
       expect(templates).toContain(field);
     }
+    // The plan template is the authoring source of the plan block, so its example must decode with the current protocol.
+    const planSection = templates.slice(templates.indexOf("\n### plan\n"), templates.indexOf("\n### handoff\n"));
+    expect(() => decodePlanBlock(planSection)).not.toThrow();
     for (const field of ["Status:", "Role:", "Agent:", "Branch:", "Scope:", "Not in scope:", "Prior claim:"]) {
       expect(templates).toContain(field);
     }

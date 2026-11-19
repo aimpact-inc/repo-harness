@@ -1,4 +1,5 @@
 import type { BoardItemV1, BoardPullRequestV1, BoardRequiredCheckV1, BoardV1 } from './board';
+import { planOrderUnits } from './plan-block';
 import { protocolComments, type BoardCommentPageV1 } from './source';
 
 /**
@@ -126,9 +127,9 @@ export function planRefusal(board: BoardV1, pr: BoardPullRequestV1): { readonly 
 }
 
 /**
- * The items that this pull request closes as one bundle (`rh board dispatch --issues`): each item it closes whose active claim names the
- * pull request's head branch and lists exactly the board items that the pull request closes. The merge order and the blocked-by order
- * do not split such items; every other item keeps both checks.
+ * The items that this pull request closes as one bundle on a parent without a plan: each item it closes whose active claim names the
+ * pull request's head branch and lists exactly the board items that the pull request closes. The blocked-by order does not split such
+ * items. With a plan, the plan unit decides the order and this claim line does not.
  */
 function bundledItems(pr: BoardPullRequestV1, onBoard: ReadonlyMap<number, BoardItemV1>): ReadonlySet<number> {
   const closed = pr.closes.filter(number => onBoard.has(number));
@@ -168,14 +169,15 @@ function refusal(board: BoardV1, pr: BoardPullRequestV1): { readonly reason: Boa
     const plan = board.plan.block;
     const planHold = planRefusal(board, pr);
     if (planHold !== null) return planHold;
-    const unordered = items.filter(number => !plan.merge_order.includes(number));
+    const units = planOrderUnits(plan);
+    const unitOf = (number: number): number => units.findIndex(unit => unit.includes(number));
+    const unordered = items.filter(number => unitOf(number) < 0);
     if (unordered.length > 0) return { reason: 'not_in_merge_order', detail: `${unordered.map(number => `#${number}`).join(' ')} not in the plan merge_order` };
-    const last = Math.max(...items.map(number => plan.merge_order.indexOf(number)));
-    // Every entry before each linked item must be closed. An earlier issue outside the board has no observed state, so it blocks like an open one.
-    const bundle = bundledItems(pr, onBoard);
-    const earlier = plan.merge_order.slice(0, last).filter(number => onBoard.get(number)?.state !== 'closed' && !bundle.has(number));
-    const own = earlier.find(number => pr.closes.includes(number));
-    if (own !== undefined) return { reason: 'merge_order', detail: `earlier plan item #${own} is closed only by this PR; split the PR` };
+    // A pull request across two units can never see the earlier unit closed first.
+    const spanned = new Set(items.map(unitOf));
+    if (spanned.size > 1) return { reason: 'merge_order', detail: `${items.map(number => `#${number}`).join(' ')} span ${spanned.size} plan units; split the PR` };
+    // Every issue of each earlier unit must be closed. An earlier issue outside the board has no observed state, so it blocks like an open one.
+    const earlier = units.slice(0, unitOf(items[0]!)).flat().filter(number => onBoard.get(number)?.state !== 'closed');
     if (earlier.length > 0) return { reason: 'merge_order', detail: `earlier in merge_order and not closed: ${earlier.map(number => `#${number}`).join(' ')}` };
   } else {
     // A parent without a plan merges in blocked-by order: every blocker of each linked item must be closed.
@@ -198,11 +200,11 @@ function refusal(board: BoardV1, pr: BoardPullRequestV1): { readonly reason: Boa
   return null;
 }
 
-/** One decision for each open pull request, in plan merge order when the plan is observed, else by number; blocked-by order is a refusal. */
+/** One decision for each open pull request, in plan unit order when the plan is observed, else by number; blocked-by order is a refusal. */
 export function boardMergeDecisions(board: BoardV1): BoardMergeDecisionV1[] {
-  const order = board.plan.status === 'observed' ? board.plan.block.merge_order : [];
+  const units = board.plan.status === 'observed' ? planOrderUnits(board.plan.block) : [];
   const rank = (pr: BoardPullRequestV1): number => {
-    const positions = [...pr.closes, ...pr.refs].map(number => order.indexOf(number)).filter(index => index >= 0);
+    const positions = [...pr.closes, ...pr.refs].map(number => units.findIndex(unit => unit.includes(number))).filter(index => index >= 0);
     return positions.length === 0 ? Number.MAX_SAFE_INTEGER : Math.min(...positions);
   };
   return board.pull_requests.filter(pr => pr.state === 'open')

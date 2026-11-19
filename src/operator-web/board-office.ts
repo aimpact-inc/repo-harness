@@ -6,6 +6,7 @@ import {
   type BoardSeatTerminal, type DeskState,
 } from '../core/board/desk';
 import { joinBoardParents, type BoardParentsV1, type BoardSeatsV1 } from '../core/board/parents';
+import { planOrderIssues } from '../core/board/plan-block';
 import { BOARD_CACHE_POLL_MS, type BoardParentsReader, type BoardParentsReason, type BoardParentsView, type BoardRead, type BoardReader, type BoardSeatsReader, type BoardSeatsView } from './board-view';
 import { answered, useObservationRefresh } from './useObservationRefresh';
 
@@ -64,6 +65,7 @@ export interface OfficeHold {
 }
 
 export type OfficePlan =
+  // `merge_order` is the plan issues in merge order (`planOrderIssues`), flattened from the plan units.
   | { readonly status: 'observed'; readonly created_at: string; readonly revision: number | null; readonly merge_order: readonly number[]; readonly worker_limit: number }
   | { readonly status: 'none' };
 
@@ -151,12 +153,13 @@ export function officeRoom(document: BoardSeatsV1, active: { readonly board: Boa
   const desks = seats.filter(hasDesk).map(seat => desk(board, seat));
   const plan = board?.plan.status === 'observed' ? board.plan : null;
   const open = board?.items.filter(item => item.state === 'open') ?? [];
-  const planned = new Set(plan?.block.merge_order ?? []);
+  const order = plan === null ? [] : planOrderIssues(plan.block);
+  const planned = new Set(order);
   const held = new Map((plan?.block.holds ?? []).map(hold => [hold.issue, hold.reason]));
   const seated = (item: BoardItemV1) => seats.some(seat => seat.issue === item.number || (seat.pr !== null && item.pull_requests.includes(seat.pr)));
   return {
     plan: plan === null ? { status: 'none' } : {
-      status: 'observed', created_at: plan.created_at, revision: plan.revision, merge_order: plan.block.merge_order,
+      status: 'observed', created_at: plan.created_at, revision: plan.revision, merge_order: order,
       worker_limit: plan.block.seat_limits.worker,
     },
     orchestrator: lead(seats, 'orchestrator'),

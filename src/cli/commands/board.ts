@@ -340,10 +340,10 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
       }
     });
   board.command('dispatch')
-    .description('Start a seat for each ready sub-issue of the plan (takes --parent): worktree, claim comment and worker tab, on the seat that the quota route names')
+    .description('Start a seat for each ready unit of the plan (takes --parent): worktree, claim comment on each open issue of the unit and worker tab, on the seat that the quota route names')
     .requiredOption('--space <id>', 'Herdr space that receives the worker tabs')
     .option('--dry-run', 'Print the decision for each plan issue and start nothing')
-    .option('--issues <a,b,c>', 'Start one seat, one worktree and one pull request for these plan issues; each claim names the bundle, and nothing starts unless every issue is ready')
+    .option('--issues <a,b,c>', 'Start only the plan unit with exactly these issues; each claim names the bundle, and nothing starts unless every open issue of the unit is ready')
     .action(async (options: { space: string; dryRun?: boolean; issues?: string }, command: Command) => {
       try {
         const parent = parentNumber(command.optsWithGlobals<BoardOptions>());

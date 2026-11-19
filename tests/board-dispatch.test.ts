@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DispatchError, planDispatch, type DispatchPlanV1 } from '../src/core/board/dispatch';
+import { DispatchError, bundleRouteClass, planDispatch, type DispatchPlanV1 } from '../src/core/board/dispatch';
 import { WORKER_AUTHORITY, executeDispatch, type DispatchPorts } from '../src/effects/board/dispatch';
 import { withSeatLine } from '../src/core/board/seat-line';
 import { HerdrCoreError } from '../src/effects/terminal/herdr-core';
@@ -16,8 +16,10 @@ const NORMAL: SeatAccountQuotas = {
 const comment = (body: string, created_at = '2026-11-09T10:00:00Z'): BoardCommentV1 =>
   ({ url: `https://example.test/${created_at}`, created_at, author_association: 'OWNER', body });
 const coordinator = comment('repo-harness issue claim\nStatus: active\nRole: coordinator', '2026-11-09T09:00:00Z');
-const planBody = (limit: number) => `repo-harness plan\n\n\`\`\`json\n${JSON.stringify({
-  protocol: 2, kind: 'repo-harness.plan', merge_order: [1, 2, 3, 4, 5, 6, 7, 8], holds: [{ issue: 2, reason: 'owner first' }],
+type Order = readonly (number | readonly number[])[];
+const ORDER: Order = [1, 2, 3, 4, 5, 6, 7, 8];
+const planBody = (limit: number, order: Order = ORDER) => `repo-harness plan\n\n\`\`\`json\n${JSON.stringify({
+  protocol: 3, kind: 'repo-harness.plan', merge_order: order, holds: [{ issue: 2, reason: 'owner first' }],
   seat_limits: { worker: limit },
 })}\n\`\`\``;
 
@@ -29,10 +31,10 @@ function issue(number: number, extra: Partial<BoardSubIssueReadV1> = {}): BoardS
 }
 const withComments = (...comments: BoardCommentV1[]) => ({ comments: { truncated: false, comments } });
 
-function read(subIssues: BoardSubIssueReadV1[], limit = 4): BoardParentReadV1 {
+function read(subIssues: BoardSubIssueReadV1[], limit = 4, order: Order = ORDER): BoardParentReadV1 {
   return {
     repository: { database_id: 1, name_with_owner: 'o/r', default_branch: 'main' },
-    parent: { number: 100, title: 'parent', url: '', state: 'open', labels: [], milestone: null, comments: { truncated: false, comments: [coordinator, comment(planBody(limit))] } },
+    parent: { number: 100, title: 'parent', url: '', state: 'open', labels: [], milestone: null, comments: { truncated: false, comments: [coordinator, comment(planBody(limit, order))] } },
     sub_issues: subIssues, repair_candidates: [],
   };
 }
@@ -113,15 +115,66 @@ test('zero or several route labels, and an unknown route class, skip the issue',
   expect(reasons(plan).filter((_, index) => index !== 1).slice(0, 3)).toEqual(['1:kind_label_invalid', '3:kind_label_invalid', '4:kind_label_invalid']);
 });
 
-test('a bundle keeps its order, takes one seat and one route, and does not block on a blocker inside it', () => {
+const medium = (route: string, extra: Partial<BoardSubIssueReadV1> = {}) => (number: number) => issue(number, { labels: [route, 'tier:medium'], ...extra });
+
+test('a bundle unit keeps its plan order, takes one seat and one route, and does not block on a blocker inside it', () => {
   const plan = planDispatch({
-    seats: DEFAULT_SEATS_CONFIG, quota: NORMAL, terminals: [], bundle: [3, 4, 1],
-    parent: read([issue(1, { labels: ['route:simple_fast'] }), issue(3, { blocked_by: [{ number: 4, state: 'open' }] }), issue(4)], 1),
+    seats: DEFAULT_SEATS_CONFIG, quota: NORMAL, terminals: [], bundle: [1, 4, 3],
+    parent: read([medium('route:simple_fast')(1), medium('route:important_deep', { blocked_by: [{ number: 4, state: 'open' }] })(3), medium('route:important_deep')(4)], 1, [[3, 4, 1], 5]),
   });
   expect(reasons(plan)).toEqual(['3:dispatch', '4:dispatch', '1:dispatch']);
-  expect(new Set(plan.decisions.map(decision => decision.action === 'dispatch' && decision.seat))).toEqual(new Set(['worker-important']));
-  const outside = planDispatch({ seats: DEFAULT_SEATS_CONFIG, quota: NORMAL, terminals: [], bundle: [1, 10], parent: read([issue(1), issue(10)]) });
-  expect(reasons(outside)).toEqual(['1:dispatch', '10:not_planned']);
+  expect(plan.units).toEqual([[3, 4, 1]]);
+  expect(new Set(plan.decisions.map(decision => decision.action === 'dispatch' && `${decision.seat} ${decision.route_class}`))).toEqual(new Set(['worker-important important_deep']));
+});
+
+test('--issues selects one declared plan unit by its member set; every other set is refused with one error', () => {
+  const parent = read([101, 102, 103].map(medium('route:important_deep')), 4, [[101, 102], 103]);
+  const dispatch = (bundle: number[]) => planDispatch({ seats: DEFAULT_SEATS_CONFIG, quota: NORMAL, terminals: [], bundle, parent });
+  for (const bundle of [[101], [101, 103], [101, 102, 103], [101, 110]]) expect(() => dispatch(bundle)).toThrow(new DispatchError('not a plan unit; post the plan again with rh board post plan'));
+  expect(reasons(dispatch([102, 101]))).toEqual(['101:dispatch', '102:dispatch']);
+});
+
+test('the plan dispatches each unit as one seat; a unit that is not ready in part starts nothing and takes no seat', () => {
+  const units: Order = [[101, 102], 103, [104, 105], 106];
+  const plan = (subIssues: BoardSubIssueReadV1[], limit: number) => planDispatch({ seats: DEFAULT_SEATS_CONFIG, quota: NORMAL, terminals: [], parent: read(subIssues, limit, units) });
+  const ready = plan([101, 102, 103, 104, 105, 106].map(medium('route:important_deep')), 2);
+  expect(reasons(ready)).toEqual(['101:dispatch', '102:dispatch', '103:dispatch', '104:over_limit', '105:over_limit', '106:over_limit']);
+  expect(ready.units).toEqual([[101, 102], [103]]);
+  // #105 is claimed, so its unit skips as a whole and leaves the seat to #106.
+  const partial = plan([...[101, 102, 103, 104].map(medium('route:important_deep')), medium('route:important_deep', withComments(comment('repo-harness issue claim\nStatus: active')))(105), medium('route:important_deep')(106)], 3);
+  expect(reasons(partial)).toEqual(['101:dispatch', '102:dispatch', '103:dispatch', '104:claimed', '105:claimed', '106:dispatch']);
+  expect(partial.decisions[3]).toMatchObject({ detail: expect.stringContaining('#105') });
+  expect(partial.units).toEqual([[101, 102], [103], [106]]);
+});
+
+test('a bundle unit joins its route classes, and a mixed tier, a missing tier or a frontend mix skips the whole unit without a seat', () => {
+  const unit = (first: BoardSubIssueReadV1, second: BoardSubIssueReadV1) => planDispatch({ seats: DEFAULT_SEATS_CONFIG, quota: NORMAL, terminals: [],
+    parent: read([first, second, medium('route:simple_fast')(103)], 1, [[101, 102], 103]) });
+  const escalated = unit(medium('route:simple_deep')(101), medium('route:important_fast')(102));
+  expect(escalated.decisions.slice(0, 2).map(decision => decision.action === 'dispatch' && decision.route_class)).toEqual(['important_deep', 'important_deep']);
+  for (const [first, second, reason] of [
+    [issue(101, { labels: ['route:simple_fast', 'tier:high'] }), medium('route:simple_fast')(102), 'tier_mixed'],
+    [medium('route:simple_fast')(101), issue(102, { labels: ['route:simple_fast'] }), 'tier_invalid'],
+    [medium('route:simple_fast')(101), issue(102, { labels: ['route:simple_fast', 'tier:low', 'tier:medium'] }), 'tier_invalid'],
+    [medium('route:frontend')(101), medium('route:simple_fast')(102), 'route_conflict'],
+  ] as const) expect(reasons(unit(first, second))).toEqual([`101:${reason}`, `102:${reason}`, '103:dispatch']);
+  expect(bundleRouteClass(['frontend', 'frontend'])).toEqual({ kind: 'frontend' });
+  expect(bundleRouteClass(['simple_fast', 'simple_fast'])).toEqual({ kind: 'simple_fast' });
+});
+
+test('a unit is its open members: a closed member does not stop it and gets no claim or Closes line', async () => {
+  const parent = read([medium('route:important_deep')(101), medium('route:important_deep', { state: 'closed' })(102)], 2, [[101, 102]]);
+  for (const bundle of [undefined, [101, 102]]) {
+    const plan = planDispatch({ seats: DEFAULT_SEATS_CONFIG, quota: NORMAL, terminals: [], parent, ...(bundle === undefined ? {} : { bundle }) });
+    expect([reasons(plan), plan.units]).toEqual([['101:dispatch', '102:closed'], [[101]]]);
+    const bodies: string[] = [];
+    const tasks: string[] = [];
+    const run = ports({ comment: (_issue, body) => { bodies.push(body); return 'claim'; }, openTab: args => { tasks.push(String(args.task)); } });
+    expect((await executeDispatch(plan, context, run.base)).map(entry => entry.issue)).toEqual([101]);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).not.toContain('Issues:');
+    expect(tasks[0]).toStartWith('Task: issue #101 ');
+  }
 });
 
 function ports(overrides: Partial<DispatchPorts> = {}) {
@@ -237,19 +290,21 @@ test('a seat comment gets the Seat line only when the seat env and the hc addres
   expect(withSeatLine('body', { HC_TERMINAL_ID: 't5' })).toBe('body');
 });
 
-test('a bundle starts one worktree and one tab with a bundle claim on each issue, only as a whole, and releases every claim when the tab fails before the request', async () => {
-  const bundlePlan = (bundle: number[]) => planDispatch({ seats: DEFAULT_SEATS_CONFIG, quota: NORMAL, terminals: [], bundle, parent: read([issue(1), issue(2), issue(3)]) });
+test('the plan starts one worktree and one tab with a bundle claim on each issue of a unit; --issues starts only as a whole and releases every claim when the tab fails before the request', async () => {
+  const parent = read([1, 2, 3, 4, 5].map(medium('route:important_deep')), 2, [[1, 3], 5, [2, 4]]);
+  const bundlePlan = (bundle?: number[]) => planDispatch({ seats: DEFAULT_SEATS_CONFIG, quota: NORMAL, terminals: [], parent, ...(bundle === undefined ? {} : { bundle }) });
   const bodies: string[] = [];
   const tasks: string[] = [];
   const run = ports({ comment: (issueNumber, body) => { bodies.push(body); run.calls.push(`comment ${issueNumber}`); return `https://example.test/claim-${issueNumber}`; },
     openTab: args => { tasks.push(String(args.task)); run.calls.push(`tab ${String(args.folder)}`); } });
-  const started = await executeDispatch(bundlePlan([1, 3]), context, run.base);
-  expect(run.calls).toEqual(['worktree 1', 'comment 1', 'comment 3', 'tab /tmp/wt-1']);
-  expect(started.map(entry => [entry.issue, entry.worktree])).toEqual([[1, '/tmp/wt-1'], [3, '/tmp/wt-1']]);
-  expect(bodies.map(body => body.split('\n').filter(line => /^(Issues|Branch): /u.test(line)))).toEqual([['Branch: feat/1', 'Issues: #1, #3'], ['Branch: feat/1', 'Issues: #1, #3']]);
+  // Default dispatch: the unit [1, 3] and the unit [5] take the two seats; the held unit [2, 4] starts nothing and throws nothing.
+  const started = await executeDispatch(bundlePlan(), context, run.base);
+  expect(run.calls).toEqual(['worktree 1', 'comment 1', 'comment 3', 'tab /tmp/wt-1', 'worktree 5', 'comment 5', 'tab /tmp/wt-5']);
+  expect(started.map(entry => [entry.issue, entry.worktree])).toEqual([[1, '/tmp/wt-1'], [3, '/tmp/wt-1'], [5, '/tmp/wt-5']]);
+  expect(bodies.slice(0, 2).map(body => body.split('\n').filter(line => /^(Issues|Branch): /u.test(line)))).toEqual([['Branch: feat/1', 'Issues: #1, #3'], ['Branch: feat/1', 'Issues: #1, #3']]);
   expect(tasks[0]).toContain('Closes #1 / Closes #3');
   const held = ports();
-  await expect(executeDispatch(bundlePlan([1, 2]), context, held.base)).rejects.toThrow(/starts only as a whole; #2 held/);
+  await expect(executeDispatch(bundlePlan([2, 4]), context, held.base)).rejects.toThrow(/starts only as a whole; #2 held/);
   expect(held.calls).toEqual([]);
   const lost = ports({ openTab: () => { throw new HerdrCoreError('herdr-app', 'missing'); } });
   await expect(executeDispatch(bundlePlan([1, 3]), context, lost.base)).rejects.toBeInstanceOf(HerdrCoreError);

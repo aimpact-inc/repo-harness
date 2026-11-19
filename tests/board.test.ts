@@ -7,7 +7,7 @@ import { A12_NO_PR_MS, A13_IDLE_MS, A14_RED_MS, A15_FAIL_MS, A16_QUESTION_MS, A1
 import { WINDOW_WITH_WORKERS_MS, WINDOW_WITHOUT_WORKERS_MS, attentionFindingKey, planAttentionDeliveries, type AttentionSentV1 } from '../src/core/board/attention-delivery';
 import { attentionLogPath, attentionWatchDoctorCheck, runAttentionWindow, serviceTerminalRepository, startAttentionWatch } from '../src/effects/board/attention-watch';
 import { decodeBoard, type BoardHostPortsV1, type BoardItemV1, type BoardPullRequestV1, type BoardTerminalV1, type BoardV1 } from '../src/core/board/board';
-import { decodePlanBlock, PlanBlockError } from '../src/core/board/plan-block';
+import { decodePlanBlock, PlanBlockError, planOrderIssues, planOrderUnits } from '../src/core/board/plan-block';
 import { decodeReviewHazards, pathHazardHits, workflowEditAllowed } from '../src/core/board/hazards';
 import type { PullRequestReadinessV2 } from '../src/core/publication/merge-readiness';
 import { collectPullRequestMergeReadiness } from '../src/effects/publication/merge-readiness';
@@ -694,7 +694,7 @@ test('the room counts follow the recorded PRs and the plan: queue and worker lim
   const board = replay();
   const counts = (value: BoardV1) => ({ queue: value.pull_requests.filter(isQueued).length, worker_limit: workerLimit(value) });
   expect(counts(board)).toEqual({ queue: 1, worker_limit: ISSUE_FLOW_WORKER_LIMIT });
-  const block = { protocol: 2, kind: 'repo-harness.plan', merge_order: [], holds: [], seat_limits: { worker: 4 } } as const;
+  const block = { protocol: 3, kind: 'repo-harness.plan', merge_order: [], holds: [], seat_limits: { worker: 4 } } as const;
   const planned: BoardV1 = { ...board, plan: { status: 'observed', comment_url: 'https://github.com/plan', created_at: board.observed_at, revision: 1,
     block },
     pull_requests: board.pull_requests.map(pr => pr.number === 1494 ? { ...pr, required_check: { status: 'failure', completed_at: board.observed_at, contexts: [] } }
@@ -794,10 +794,15 @@ test('decoders refuse an unknown protocol or kind', () => {
   expect(() => decodeBoard({ protocol: 12, kind: 'repo-harness.board' })).toThrow('unsupported board protocol: 12');
   expect(() => decodeBoard({ protocol: 13, kind: 'fleet_board_snapshot' })).toThrow('unsupported board kind: fleet_board_snapshot');
   const block = (value: Json) => `repo-harness plan\n\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\`\n`;
-  const valid = { protocol: 2, kind: 'repo-harness.plan', merge_order: [1475], holds: [], seat_limits: { worker: 3 } } as const;
+  const valid = { protocol: 3, kind: 'repo-harness.plan', merge_order: [1475], holds: [], seat_limits: { worker: 3 } } as const;
   expect(decodePlanBlock(block(valid))).toEqual(valid);
-  // A protocol-1 block has a batches field.
-  expect(() => decodePlanBlock(block({ ...valid, protocol: 1, batches: [] }))).toThrow(new PlanBlockError('unsupported protocol 1'));
+  // Protocol 3: a merge_order entry is one issue or one bundle unit of two or more issues.
+  const units = decodePlanBlock(block({ ...valid, merge_order: [[101, 102], 103] }));
+  expect([planOrderUnits(units), planOrderIssues(units)]).toEqual([[[101, 102], [103]], [101, 102, 103]]);
+  // A protocol-1 block has a batches field; a protocol-2 block has no bundle units. Both are refused, never read.
+  expect(() => decodePlanBlock(block({ ...valid, protocol: 1, batches: [] }))).toThrow(new PlanBlockError('unsupported protocol 1; repost plan with rh board post plan'));
+  expect(() => decodePlanBlock(block({ ...valid, protocol: 2 }))).toThrow(new PlanBlockError('unsupported protocol 2; repost plan with rh board post plan'));
+  for (const merge_order of [[[]], [[101]], [[101, 102], 102], [[101, 0]], [[101, 1.5]]]) expect(() => decodePlanBlock(block({ ...valid, merge_order }))).toThrow(PlanBlockError);
   expect(() => decodePlanBlock(block({ ...valid, kind: 'plan' }))).toThrow(new PlanBlockError('unsupported kind "plan"'));
   expect(() => decodePlanBlock(block({ ...valid, waves: [] }))).toThrow(PlanBlockError);
 });
@@ -831,7 +836,7 @@ test('decoders refuse a missing or invalid plan revision, merge policy or seat b
 });
 
 test('plan revision: the ordinal of the newest plan comment among the write-access plan comments of every parent comment page', () => {
-  const block = { protocol: 2, kind: 'repo-harness.plan', merge_order: [], holds: [], seat_limits: { worker: 3 } };
+  const block = { protocol: 3, kind: 'repo-harness.plan', merge_order: [], holds: [], seat_limits: { worker: 3 } };
   const plan = (at: string, body = `repo-harness plan\n\n\`\`\`json\n${JSON.stringify(block)}\n\`\`\`\n`) => comment(body, at);
   const revision = (nodes: Json[], older?: Json[][]) => {
     const board = replay({ parent: (data) => { data.repository.issue.comments = { pageInfo: { hasPreviousPage: false }, nodes }; }, comments: older && { older } });
@@ -849,12 +854,12 @@ test('plan revision: the ordinal of the newest plan comment among the write-acce
 const POLICY_ON = { status: 0, stdout: JSON.stringify({ type: 'file', path: '.ai/harness/policy.json', encoding: 'base64', content: Buffer.from('{"publication":{"acceptance_merge":"on"}}').toString('base64') }) };
 
 /** #1491 (closes #1475) is accepted by record, green and ready; the plan orders #1475 first and #1475 is tier:medium. */
-function mergeReplay(edit: { parent?: (data: Json) => void; pulls?: (data: Json) => void; order?: number[]; holds?: Json[] } = {}, options: Replay = {}): Replay {
+function mergeReplay(edit: { parent?: (data: Json) => void; pulls?: (data: Json) => void; order?: (number | number[])[]; holds?: Json[] } = {}, options: Replay = {}): Replay {
   return {
     policy: POLICY_ON,
     ...options,
     parent: (data) => {
-      const block = { protocol: 2, kind: 'repo-harness.plan', merge_order: edit.order ?? [1475, 1479], holds: edit.holds ?? [], seat_limits: { worker: 4 } };
+      const block = { protocol: 3, kind: 'repo-harness.plan', merge_order: edit.order ?? [1475, 1479], holds: edit.holds ?? [], seat_limits: { worker: 4 } };
       data.repository.issue.comments.nodes.push(comment(`repo-harness plan\n\n\`\`\`json\n${JSON.stringify(block)}\n\`\`\``, '2026-11-02T22:00:00Z'));
       issueNode(data, 1475).labels.nodes.push({ name: 'tier:medium' });
       edit.parent?.(data);
@@ -1099,11 +1104,11 @@ test('board merge: no plan, a draft, plan holds, plan order for every linked ite
     mergeReason({}, { ready: [] }),
     mergeReason({}, { policy: POLICY_ABSENT }),
   ]).toEqual(['plan_unavailable', 'draft', 'plan_hold', 'merge_order', 'merge_order', 'merge_order', 'not_in_merge_order', 'not_accepted', 'not_accepted', 'required_check', 'not_ready', 'acceptance_merge_off']);
-  // A PR that closes an earlier plan item can never see it closed first; a linked issue outside the board fails closed.
+  // A PR whose items span two plan units can never see the earlier unit closed first; a linked issue outside the board fails closed.
   const decision = (edit: Parameters<typeof mergeReplay>[0]) => boardMergeDecisions(replay(mergeReplay(edit))).find(entry => entry.pr === 1491);
   expect(decision({ order: [1475, 1479], pulls: (data) => { data.repository.pr1491.body += '\nCloses #1479\n'; } }))
-    .toMatchObject({ reason: 'merge_order', detail: 'earlier plan item #1475 is closed only by this PR; split the PR' });
-  // A bundle PR: each item it closes has a claim that names its head branch and the same issue set, so the order does not split it.
+    .toMatchObject({ reason: 'merge_order', detail: '#1475 #1479 span 2 plan units; split the PR' });
+  // With a plan, the plan unit decides the order; a bundle claim on the head branch does not.
   const bundleClaims = (branch: string) => (data: Json) => {
     for (const number of [1475, 1479]) {
       issueNode(data, number).comments.nodes.push({ url: `https://github.com/Ancienttwo/repo-harness/issues/${number}#issuecomment-9${number}`, createdAt: '2026-11-02T23:00:00Z', authorAssociation: 'OWNER',
@@ -1111,9 +1116,14 @@ test('board merge: no plan, a draft, plan holds, plan order for every linked ite
     }
   };
   const closesBoth = (data: Json) => { data.repository.pr1491.body += '\nCloses #1479\n'; };
-  expect(decision({ order: [1475, 1479], parent: bundleClaims('feat/1475-hc-transport'), pulls: closesBoth })).toMatchObject({ reason: 'not_accepted' });
-  expect(decision({ order: [1475, 1479], parent: bundleClaims('feat/other'), pulls: closesBoth }))
-    .toMatchObject({ reason: 'merge_order', detail: 'earlier plan item #1475 is closed only by this PR; split the PR' });
+  expect(decision({ order: [[1475, 1479]], pulls: closesBoth })).toMatchObject({ reason: 'not_accepted' });
+  expect(decision({ order: [1475, 1479], parent: bundleClaims('feat/1475-hc-transport'), pulls: closesBoth }))
+    .toMatchObject({ reason: 'merge_order', detail: '#1475 #1479 span 2 plan units; split the PR' });
+  // A unit merges only after every issue of each earlier unit is closed; an issue of its own unit does not wait.
+  const closed = (...numbers: number[]) => (data: Json) => { for (const number of numbers) issueNode(data, number).state = 'CLOSED'; };
+  expect(decision({ order: [[1476, 1479], 1475], parent: closed(1476) })).toMatchObject({ reason: 'merge_order', detail: 'earlier in merge_order and not closed: #1479' });
+  expect(mergeReason({ order: [[1476, 1479], 1475], parent: closed(1476, 1479) })).toBe('eligible');
+  expect(mergeReason({ order: [[1475, 1479], 1476] })).toBe('eligible');
   expect(decision({ pulls: (data) => { data.repository.pr1491.body += '\nRefs #1460\n'; } })).toMatchObject({ reason: 'item_off_board' });
   // A parent with two children or fewer needs no plan: it merges in blocked-by order.
   const planless = (blocker: string | null) => (data: Json) => {
@@ -1352,7 +1362,7 @@ test('acceptance: every record on the head counts, and one FAIL withholds accept
 
 test('one hit for each rule that the recorded state does not trigger', () => {
   const later = new Date('2026-11-03T02:00:00Z');
-  const plan = { protocol: 2, kind: 'repo-harness.plan', merge_order: [1475, 1476], holds: [], seat_limits: { worker: 3 } };
+  const plan = { protocol: 3, kind: 'repo-harness.plan', merge_order: [1475, 1476], holds: [], seat_limits: { worker: 3 } };
   const hook = 'src/cli/installer/uninstall.ts';
   const board = replay({
     now: later,
@@ -1574,7 +1584,7 @@ test('a plan hold removes a PR from A1 and R4', () => {
     now: new Date('2026-11-03T02:00:00Z'),
     owners: (results) => { results.push(...['a', 'b'].map(path => ({ path, matched: false, ambiguous: false, owningCapabilityId: null }))); },
     parent: (data) => {
-      const plan = { protocol: 2, kind: 'repo-harness.plan', merge_order: [1475, 1476, 1479], holds: holds.map(issue => ({ issue, reason: 'held' })), seat_limits: { worker: 3 } };
+      const plan = { protocol: 3, kind: 'repo-harness.plan', merge_order: [1475, 1476, 1479], holds: holds.map(issue => ({ issue, reason: 'held' })), seat_limits: { worker: 3 } };
       data.repository.issue.comments.nodes.push(comment(`repo-harness plan\n\n\`\`\`json\n${JSON.stringify(plan)}\n\`\`\`\n`, '2026-11-02T23:00:00Z'));
       for (const number of [1476, 1479]) issueNode(data, number).labels.nodes.push({ name: 'tier:low' });
     },
@@ -1596,7 +1606,7 @@ test('rules A12 to A18 fire past their threshold with their message, not at it, 
   const now = Date.parse(recorded.observed_at);
   const at = (ms: number) => new Date(now - ms).toISOString();
   const MIN = 60_000;
-  const block = { protocol: 2, kind: 'repo-harness.plan', merge_order: [], holds: [], seat_limits: { worker: 3 } } as const;
+  const block = { protocol: 3, kind: 'repo-harness.plan', merge_order: [], holds: [], seat_limits: { worker: 3 } } as const;
   const plan = { status: 'observed', comment_url: 'https://github.com/plan', created_at: recorded.observed_at, revision: 1, block } as const;
   // The recorded questions of #1475 and #1479 are cleared, so each case starts from no A12 to A18 finding.
   const base: BoardV1 = { ...recorded, plan, execution: { status: 'observed', terminals: [] },
@@ -1740,7 +1750,7 @@ test('A20 fires for a required check that is pending or missing past the thresho
   const contexts = [{ name: 'Required / CI', status: 'pending' }, { name: 'lint', status: 'success' }, { name: 'build', status: 'missing' }] as const;
   const board = (patch: Partial<BoardPullRequestV1>, held = false): BoardV1 => ({ ...recorded,
     plan: held ? { status: 'observed', comment_url: 'https://github.com/plan', created_at: recorded.observed_at, revision: 1,
-      block: { protocol: 2, kind: 'repo-harness.plan', merge_order: [], holds: [{ issue: 1479, reason: 'held' }], seat_limits: { worker: 3 } } } : recorded.plan,
+      block: { protocol: 3, kind: 'repo-harness.plan', merge_order: [], holds: [{ issue: 1479, reason: 'held' }], seat_limits: { worker: 3 } } } : recorded.plan,
     pull_requests: recorded.pull_requests.map(entry => (entry.number === 1494 ? { ...entry, is_draft: false, ...patch } : entry)) });
   const a20 = (value: BoardV1) => {
     const attention = evaluateBoardAttention(value);
@@ -2660,7 +2670,7 @@ describe('rule R7', () => {
   const recorded = replay();
   const at = recorded.observed_at;
   const plan = (order: number[], holds: number[] = [], worker = 3) => ({ status: 'observed', comment_url: 'https://github.com/plan', created_at: at, revision: 1,
-    block: { protocol: 2, kind: 'repo-harness.plan', merge_order: order, holds: holds.map(issue => ({ issue, reason: 'held' })), seat_limits: { worker } } }) as const;
+    block: { protocol: 3, kind: 'repo-harness.plan', merge_order: order, holds: holds.map(issue => ({ issue, reason: 'held' })), seat_limits: { worker } } }) as const;
   const skipped = (board: BoardV1, id: BoardRuleId) => evaluateBoardAttention(board).unevaluated.filter(entry => entry.rule === id).map(entry => [entry.reason, entry.subject]);
 
   test('R7 fires on an accepted pull request behind a held entry, not behind an open entry that is not held', () => {

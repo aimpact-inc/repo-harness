@@ -73,10 +73,17 @@ Make one child issue for each pair of module and observable outcome.
 - **Order.** Contract and types → core logic → effects and adapters →
   CLI or server → UI → docs and map. Deletion of the old path goes with
   the change that replaces it, never as "cleanup later".
-- **Bundles.** Fine child issues stay requirement units. At dispatch,
-  group the open issues of one module and write scope into one bundle:
-  one worker, one worktree, one PR, one CI run, one review. A P2 or P3
-  review finding stays in the review record and gets no issue.
+- **Bundles.** Fine child issues stay requirement units. In the plan,
+  group the open issues of one module and write scope into one bundle
+  unit, an array entry of `merge_order` (`templates.md`, plan): one
+  worker, one worktree, one PR, one CI run, one review. The plan block is
+  the only record of bundle membership. A unit takes one tier: a
+  `tier:high` issue never shares a unit with a lower tier. A High unit
+  holds only issues of one file and one rule, two at most: in the #2841
+  retro 30 of 38 PRs failed round 1, PRs 3255, 3256 and 3238 closed after
+  round 2, and a larger High diff makes that close more probable and then
+  costs the whole unit. A P2 or P3 review finding stays in the review
+  record and gets no issue.
 
 ## 3. Write the boundaries
 
@@ -276,12 +283,20 @@ module is in the title so that a list view shows the write scopes.
   bundle decisions, so the worker asks no design question. The worker
   replies `DONE <PR> <head>` or `BLOCKED <one question>`.
 - Post the claim, then the packet. `rh board dispatch --parent <n>
-  --space <id> --issues <a>,<b>,<c>` starts one seat, one worktree and one
-  tab for the bundle and posts the bundle claim on each issue, with the
-  required fields in `templates.md` § issue claim and the `Issues:` line.
-  It starts only when every issue is ready, and starts nothing otherwise.
-  The claim is the worker's identity on the board, and the worker never
-  posts one. Dispatch only after the claim is on each issue of the bundle.
+  --space <id>` starts one seat, one worktree and one tab for each ready
+  unit of the plan, and posts the claim on each open issue of the unit,
+  with the required fields in `templates.md` § issue claim and, for a
+  bundle, the `Issues:` line. A unit starts only when every open issue of
+  it is ready, and starts nothing otherwise; a closed issue of a unit is
+  not work and does not stop it. A bundle unit needs one tier label on
+  each issue, never mixes `tier:high` with a lower tier, and never mixes
+  `route:frontend` with another route; its route is the join of the
+  member routes (one `important_*` makes it important, one `*_deep` makes
+  it deep). `--issues <a>,<b>,<c>` selects one declared unit by its exact
+  issue set; any other set is refused with `not a plan unit; post the
+  plan again with rh board post plan`. The claim is the worker's identity
+  on the board, and the worker never posts one. Dispatch only after the
+  claim is on each issue of the bundle.
 - Dispatch in parallel only when the write scopes are disjoint and each
   dependency is merged, or its contract is stable and the issue allows
   early start.
@@ -711,11 +726,10 @@ are true:
 - The PR is open and not draft, and every issue that it closes or refs
   (the parent excluded) is an item of the parent.
 - No hold record is in force on the parent, on the PR's issues or on the PR.
-- The plan does not hold its issues, its issues are in `merge_order`, and
-  every issue before each of them in `merge_order` is closed or is an
-  issue of the PR's bundle claim: a claim on the PR's head branch whose
-  `Issues:` line names exactly the items that the PR closes. A bundle PR
-  closes every plan item that its bundle claim names.
+- The plan does not hold its issues, its issues are in `merge_order`, all
+  of them are in one plan unit, and every issue of each earlier unit is
+  closed. A PR whose issues span two units is refused: split it. A bundle
+  PR closes every open issue of its unit.
 - An acceptance record has a PASS row for the head, at every tier. The
   provisional `tier_low` status is not enough: post the Low record after
   you check the verification evidence.

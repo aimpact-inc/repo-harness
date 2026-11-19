@@ -3,7 +3,7 @@ import type { AcceptanceMergeSwitch } from '../publication/acceptance-merge-poli
 import type { PullRequestReadinessV2 } from '../publication/merge-readiness';
 import { isSeatStatusMessage, seatStatusMessage } from './advisor-seat';
 import { readMergeHold, type BoardMergeHoldV1 } from './merge';
-import { decodePlanBlock, PlanBlockError, PLAN_COMMENT_HEADER, type PlanBlockV2 } from './plan-block';
+import { decodePlanBlock, PlanBlockError, PLAN_COMMENT_HEADER, type PlanBlockV3 } from './plan-block';
 import {
   issueClaim,
   openQuestions,
@@ -70,7 +70,7 @@ const CLAIM_STATUS_HEADER = 'repo-harness issue claim status';
 
 export type BoardPlanV1 =
   /** `revision`: the ordinal of this comment among the parent's plan comments (r1 is the first); null when the comment read is truncated. */
-  | { readonly status: 'observed'; readonly comment_url: string; readonly created_at: string; readonly revision: number | null; readonly block: PlanBlockV2 }
+  | { readonly status: 'observed'; readonly comment_url: string; readonly created_at: string; readonly revision: number | null; readonly block: PlanBlockV3 }
   | { readonly status: 'absent'; readonly truncated: boolean }
   | { readonly status: 'unavailable'; readonly comment_url: string; readonly reason: string };
 
