@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { Banner, Button, Empty, Loader, Switch, cn } from '@cloudflare/kumo';
-import { seatAccountQuotas, seatOnCredits } from '../core/board/seat-routing';
+import { effectiveSeatConfig, seatAccountQuotas, seatOnCredits } from '../core/board/seat-routing';
 import { EXHAUSTED_AT_OR_ABOVE_USED_RANGE } from '../core/board/quota';
 import { buildSeatLaunch, type SeatLimitLevel } from '../core/board/seat-launch';
 import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, SEAT_IDS, SEAT_TOOLS, decodeSeatsSettingsRequest, isReviewSeat, seatTakesFleet, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
@@ -188,9 +188,9 @@ function OptionalSeatSwitch({ seat, form, settings, locked, t }: {
   );
 }
 
-function SeatCard({ seat, form, agents, settings, setup, locked, t }: {
+function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
   readonly seat: SeatId; readonly form: SeatsSettingsForm; readonly agents: AgentsSettingsForm; readonly settings: SeatsSettingsV1; readonly setup: SetupSnapshotV2 | null;
-  readonly locked: boolean; readonly t: OperatorTranslate;
+  readonly quota: QuotaSection; readonly locked: boolean; readonly t: OperatorTranslate;
 }) {
   const configured = form.draft![seat];
   if (configured === null) {
@@ -202,6 +202,10 @@ function SeatCard({ seat, form, agents, settings, setup, locked, t }: {
     );
   }
   const draft = configured;
+  const saved = (form.save.kind === 'saved' ? form.base : null) ?? settings.config;
+  const advisorLaunch = seat === 'advisor' ? effectiveSeatConfig(seat, saved, seatAccountQuotas(
+    quota.view.kind === 'ready' ? quota.view.report.accounts : [], saved.routing,
+  )) : null;
   const { ranges, defaults } = settings;
   const runtime = ranges.runtimes.find(entry => entry.id === draft.runtime)!;
   const range = ranges.seats[seat];
@@ -251,6 +255,14 @@ function SeatCard({ seat, form, agents, settings, setup, locked, t }: {
           {seat === 'worker' ? t('seats.rec.worker') : recommended?.model ? t('seats.rec.model', { model: recommended.model }) + check(draft.model === recommended.model) : ''}
         </span>
       </Field>
+
+      {advisorLaunch !== null && (
+        <Field label={t('seats.field.launchModel')}>
+          <span className="font-mono text-xs text-kumo-strong [overflow-wrap:anywhere]" data-seat-launch-model>
+            {advisorLaunch.model ?? t('seats.model.hostDefault')}
+          </span>
+        </Field>
+      )}
 
       {draft.runtime === 'claude' && (
         <Field label={t('seats.field.advisor')}>
@@ -489,7 +501,7 @@ function SeatsBody({ form, agents, setup, quota, t }: {
 
       {draft !== null && <>
         <Segmented label={t('seats.pick')} disabled={false} value={seat} options={SEAT_IDS.map(id => ({ value: id, label: t(`seats.${id}.short`) }))} onPick={setSeat} />
-        <SeatCard seat={seat} form={form} agents={agents} settings={settings} setup={setup} locked={locked} t={t} />
+        <SeatCard seat={seat} form={form} agents={agents} settings={settings} setup={setup} quota={quota} locked={locked} t={t} />
         <RoutingEditor form={form} settings={settings} quota={quota} locked={locked} t={t} />
       </>}
 

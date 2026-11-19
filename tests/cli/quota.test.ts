@@ -128,6 +128,23 @@ describe('seat quota routing', () => {
     expect(lines.find(line => line.startsWith('route important_deep:'))).toStartWith('route important_deep: worker-important (claude opus medium');
   });
 
+  test.each([
+    [50, 81, 'carbon'],
+    [49, 10, 'neon'],
+    [null, 10, 'neon'],
+  ] as const)('agy advisor with %s%% Gemini weekly remaining and %s%% Claude used runs %s', (remaining, claudeUsed, model) => {
+    const advisor = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: 'pi' as const, model: 'magpie/agy-cli/gemini-4-carbon', effort: 'medium' };
+    const seats = { ...DEFAULT_SEATS_CONFIG, advisor };
+    const gemini = classifyQuotaReading({ account: 'agy_gemini', source: 'agy_account_usage', observed_at: new Date(NOW).toISOString(), reason: null,
+      windows: remaining === null ? [] : [{ window: 'weekly', window_minutes: 10080, used_percent: 100 - remaining,
+        resets_at: (NOW + 84 * HOUR) / 1000, absent: false, reason: null }],
+    }, NOW);
+    const quota = seatAccountQuotas([gemini, claude({ seven_day: week(claudeUsed, 84) })], seats.routing);
+    expect(effectiveSeatConfig('advisor', seats, quota)).toEqual({ ...advisor, model: `magpie/agy-cli/gemini-4-${model}` });
+    const other = { ...advisor, model: 'magpie/codex/gpt-6-astra' };
+    expect(effectiveSeatConfig('advisor', { ...seats, advisor: other }, quota)).toEqual(other);
+  });
+
   test('unknown weekly quota has no derived mode; short-window exhaustion still stops Claude', () => {
     const quota = seatAccountQuotas([claude({ five_hour: week(97, 2) })], DEFAULT_SEATS_CONFIG.routing);
     expect(quota.claude).toMatchObject({ mode: 'unknown', state: 'exhausted', remaining: null });
@@ -496,10 +513,11 @@ function seatsArgv(args: string[], env: Record<string, string>) {
   return spawnSync(process.execPath, [CLI, 'seats', 'argv', ...args], { cwd: ROOT, env, encoding: 'utf8', timeout: 40_000 });
 }
 
-function configureAgySeats(home: string): void {
+function configureAgySeats(home: string, advisorModel = 'magpie/agy-cli/gemini-4-carbon'): void {
   const worker = { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'pi', model: 'magpie/agy-cli/gemini-4-neon', fleet: [] };
   const workerDeep = { ...DEFAULT_SEATS_CONFIG['worker-deep'], runtime: 'pi', model: 'magpie/agy-cli/claude-opus-5-5', fleet: [] };
-  writeFileSync(join(home, '.repo-harness', 'config.json'), JSON.stringify({ seats: { ...DEFAULT_SEATS_CONFIG, worker,
+  const advisor = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: 'pi', model: advisorModel, fleet: [] };
+  writeFileSync(join(home, '.repo-harness', 'config.json'), JSON.stringify({ seats: { ...DEFAULT_SEATS_CONFIG, worker, advisor,
     'worker-deep': workerDeep, routing: { ...DEFAULT_SEATS_CONFIG.routing, simple_fast: ['worker', 'worker-deep'] },
   } }));
 }
@@ -525,6 +543,7 @@ describe('rh quota', () => {
     expect(text.stdout).toContain('agy_gemini weekly: 62% left\nagy_other weekly: 5% left');
     expect(text.stdout).toContain('route simple_fast: worker (pi magpie/agy-cli/gemini-4-neon high; agy_gemini normal)');
     expect(text.stdout).toContain('skipped worker-deep: agy_other exhausted');
+    expect(text.stdout).toContain('advisor: advisor (pi magpie/agy-cli/gemini-4-carbon high; agy_gemini normal)');
     expect(result.stdout + result.stderr + text.stdout + text.stderr).not.toMatch(/agy-private-fixture|private-bucket|Gemini Models|Claude and GPT models/);
   });
 
@@ -545,16 +564,21 @@ describe('rh quota', () => {
     expect(result.stdout.split('\n').filter(line => /^agy_\w+:/.test(line))).toEqual([
       `agy_gemini: unknown | ${reason}`, `agy_other: unknown | ${reason}`,
     ]);
+    expect(result.stdout).toContain('advisor: advisor (pi magpie/agy-cli/gemini-4-neon high; agy_gemini unknown)');
     expect(result.stdout + result.stderr).not.toContain('agy-private-fixture');
     if (mode === 'signed-out') expect(readFileSync(f.agyLog, 'utf8').trim()).toBe('models');
   });
 
-  test('routes past exhausted Gemini to a seat on the other agy group', () => {
+  test('routes past exhausted Gemini for workers and stops the advisor projected onto Gemini', () => {
     const f = fixture(null, 'gemini-exhausted');
-    configureAgySeats(f.home);
+    configureAgySeats(f.home, 'magpie/agy-cli/claude-opus-5-5');
     const result = quota([], f.env);
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain('route simple_fast: worker-deep (pi seats.worker-deep.model high; agy_other normal); skipped worker: agy_gemini exhausted');
+    expect(result.stdout).toContain('advisor: none (agy_gemini exhausted)');
+    const launch = seatsArgv(['advisor', '--json'], f.env);
+    expect(launch.status, launch.stderr).toBe(1);
+    expect(JSON.parse(launch.stderr)).toMatchObject({ error: 'seat_quota_exhausted', message: expect.stringContaining('agy_gemini account is exhausted') });
   });
 
   test('does not start agy when no configured seat uses it', () => {

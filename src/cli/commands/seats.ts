@@ -199,9 +199,9 @@ async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, configur
   }
   const gatekeeper = id === 'gatekeeper' ? effectiveGatekeeper(seats, quota) : null;
   const launchedId = gatekeeper?.id === 'gatekeeper-fallback' ? 'gatekeeper-fallback' : id;
-  const launched = launchedId === 'gatekeeper-fallback' ? fallback! : configured;
-  const account = seatAccount(launched);
-  if (account !== null && seatState(launchedId, launched, quota) === 'exhausted') {
+  const seat = gatekeeper?.id === 'gatekeeper-fallback' ? gatekeeper.seat : effectiveSeatConfig(id, seats, quota)!;
+  const account = seatAccount(seat);
+  if (account !== null && seatState(launchedId, seat, quota) === 'exhausted') {
     throw new SeatsCommandError('seat_quota_exhausted', `The ${account} account is exhausted. Wait for quota before launching ${id}.${gatekeeper === null ? '' : ` Route ${gatekeeper.line}`}`);
   }
   const reserved = account === 'claude' && id !== 'advisor' && id !== 'orchestrator' && claudeReserved(quota);
@@ -215,7 +215,6 @@ async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, configur
   if (id === 'gatekeeper-deep' && deepGatekeeperRepeatsGatekeeper(seats, quota)) {
     throw new SeatsCommandError('seat_model_repeats_gatekeeper', 'The gatekeeper-deep seat runs the same model as the gatekeeper. Set a different model on the Seats page. See the quota routes.');
   }
-  const seat = gatekeeper?.id === 'gatekeeper-fallback' ? gatekeeper.seat : effectiveSeatConfig(id, seats, quota)!;
   const unavailable = unavailablePiSeat(seat, seats.routing);
   if (unavailable !== null) throw new SeatsCommandError('seat_provider_unavailable', `The ${id} seat cannot launch: ${unavailable}. See the quota routes.`);
   return { seat, modeKnown: account === null || quota[account].remaining !== null, claudeSaving: quota.claude.mode === 'saving' };
