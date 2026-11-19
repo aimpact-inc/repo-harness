@@ -194,6 +194,50 @@ describe('agents page seats section', () => {
     expect(choice('Off').getAttribute('aria-pressed')).toBe('true');
   });
 
+  test('a typed model id outside the recommended list becomes the chosen model and saves (#3250)', async () => {
+    const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
+    await mount(seatsProps(posts));
+    await click(pick('Important worker'));
+    const card = '[data-seat-card="worker-important"]';
+    await typeText(`${card} [data-model-input]`, 'claude-opus-9');
+    await leaveField(`${card} [data-model-input]`);
+    const chosen = () => [...document.querySelectorAll<HTMLButtonElement>(`${card} [role="group"][aria-label="Model"] button`)].find(button => button.textContent === 'claude-opus-9');
+    expect(chosen()?.getAttribute('aria-pressed')).toBe('true');
+    // Picking the active runtime again changes nothing, so the typed id stays.
+    await click(buttonWithText('Claude Code'));
+    expect(chosen()?.getAttribute('aria-pressed')).toBe('true');
+    await click(seatsSave());
+    expect(posts[0]!.seats['worker-important'].model).toBe('claude-opus-9');
+  });
+
+  test('a typo in a typed magpie/codex/ id keeps the fleet roles: the corrected id saves them, and a final model without a fleet sends none (#3250)', async () => {
+    const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
+    const read = await settingsStores(NOW, 'busy').seats.read();
+    if (read.state !== 'ok') throw new Error('fixture read failed');
+    const advisor: SeatConfigV1 = { ...read.settings.config.advisor, runtime: 'pi', model: 'magpie/codex/gpt-6.1-terra', advisor_model: null, fleet: ['explorer'] };
+    const ranges = { ...read.settings.ranges, runtimes: read.settings.ranges.runtimes.map(runtime => ({ ...runtime, enabled: true })) };
+    // Like the server, a read after a save returns the saved section.
+    const stored = () => (posts.length === 0 ? { ...read.settings.config, advisor } : { revision: REVISION_B, ...posts.at(-1)!.seats });
+    await mount({ ...seatsProps(posts), readSeatsSettings: async () => ({ state: 'ok', settings: { ...read.settings, ranges, config: stored() } }) });
+    const input = '[data-seat-card="advisor"] [data-model-input]';
+    for (const model of ['magpie/codx/gpt-6.2-sol', 'magpie/codex/gpt-6.2-sol']) {
+      await typeText(input, model);
+      await leaveField(input);
+    }
+    await click(seatsSave());
+    expect(posts[0]!.seats.advisor).toMatchObject({ model: 'magpie/codex/gpt-6.2-sol', fleet: ['explorer'] });
+    await typeText(input, 'magpie/codx/gpt-6.2-sol');
+    await leaveField(input);
+    await click(seatsSave());
+    expect(posts[1]!.seats.advisor).toMatchObject({ model: 'magpie/codx/gpt-6.2-sol', fleet: [] });
+    // The saved section is the new base and draft: the dropped role stays off, and a switch back to a GPT model does not send it again.
+    expect(allow('explorer').getAttribute('aria-checked')).toBe('false');
+    await typeText(input, 'magpie/codex/gpt-6.2-sol');
+    await leaveField(input);
+    await click(seatsSave());
+    expect(posts[2]!.seats.advisor).toMatchObject({ model: 'magpie/codex/gpt-6.2-sol', fleet: [] });
+  });
+
   test('a stored advisor role outside the range can be switched off and saved, and cannot be switched back on', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     const read = await settingsStores(NOW, 'busy').seats.read();

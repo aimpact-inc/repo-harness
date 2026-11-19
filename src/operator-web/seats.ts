@@ -66,9 +66,9 @@ const SEATS_SECTION: SettingsSection<SeatsSettingsV1, SeatsSettingsV1['config'],
   id: 'seats',
   config: settings => settings.config,
   draftOf: seatsDraftOf,
-  request: (base, draft) => (sameSeats(seatsDraftOf(base), draft) ? null : { expected_revision: base.revision, seats: draft }),
-  sameDraft: sameSeats,
-  applied: (revision, draft) => ({ revision, ...draft }),
+  request: (base, draft) => (sameSeats(seatsDraftOf(base), savedSeats(draft)) ? null : { expected_revision: base.revision, seats: savedSeats(draft) }),
+  sameDraft: (left, right) => sameSeats(savedSeats(left), savedSeats(right)),
+  applied: (revision, draft) => ({ revision, ...savedSeats(draft) }),
 };
 
 export function useSeatsSettingsForm(read: SeatsSettingsReader, write: SeatsSettingsWriter, generation: number, agentsSaves: number, enabled: boolean): SeatsSettingsForm {
@@ -84,11 +84,12 @@ const patch = (draft: SeatsConfigV1, seat: SeatId, change: Partial<SeatConfigV1>
 /**
  * A new runtime keeps the model and effort only where that runtime accepts
  * them, and keeps fleet roles only where the runtime and model take them. Codex always
- * runs commands, so its shell group is on.
+ * runs commands, so its shell group is on. The active runtime changes nothing.
  */
 export function setSeatRuntime(draft: SeatsConfigV1, seat: SeatId, runtime: SeatRuntime, ranges: SeatsSettingsV1['ranges']): SeatsConfigV1 {
   const range = ranges.runtimes.find(entry => entry.id === runtime)!;
   const current = draft[seat]!;
+  if (current.runtime === runtime) return draft;
   const model = current.model !== null && range.models.includes(current.model) ? current.model : null;
   return patch(draft, seat, {
     runtime,
@@ -100,11 +101,12 @@ export function setSeatRuntime(draft: SeatsConfigV1, seat: SeatId, runtime: Seat
   });
 }
 
-/** A Pi seat that leaves the GPT models loses its fleet roles, as a runtime change does. */
-export const setSeatModel = (draft: SeatsConfigV1, seat: SeatId, model: string | null): SeatsConfigV1 => {
-  const current = draft[seat]!;
-  return patch(draft, seat, { model, fleet: seatTakesFleet({ runtime: current.runtime, model }) ? current.fleet : [] });
-};
+/** The draft keeps the chosen fleet roles while the model is edited, so a typo in a typed id loses none; `savedSeats` drops them. */
+export const setSeatModel = (draft: SeatsConfigV1, seat: SeatId, model: string | null): SeatsConfigV1 => patch(draft, seat, { model });
+
+/** The section that a save sends: a seat whose final model takes no fleet, such as a Pi seat off the GPT models, sends no roles. */
+export const savedSeats = (draft: SeatsConfigV1): SeatsConfigV1 =>
+  SEAT_IDS.reduce((next, id) => (next[id] === null || next[id]!.fleet.length === 0 || seatTakesFleet(next[id]!) ? next : patch(next, id, { fleet: [] })), draft);
 export const setSeatAdvisorModel = (draft: SeatsConfigV1, seat: SeatId, advisor_model: string | null): SeatsConfigV1 => patch(draft, seat, { advisor_model });
 export const setSeatEffort = (draft: SeatsConfigV1, seat: SeatId, effort: string | null): SeatsConfigV1 => patch(draft, seat, { effort });
 export const setSeatTool = (draft: SeatsConfigV1, seat: SeatId, tool: SeatTool, on: boolean): SeatsConfigV1 =>

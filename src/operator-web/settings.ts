@@ -255,7 +255,9 @@ export function useSettingsForm<S, C extends { readonly revision: string }, D, R
       if (outcome.state === 'saved') {
         pending.current = null;
         staleReadsThrough.current = readsStarted.current;
-        setState(current => ({ ...current, base: applied(outcome.result.config_revision, draft), draft, save: { kind: 'saved', changed: outcome.result.changed_keys.length }, saves: current.saves + 1 }));
+        // The saved configuration is the new base and draft, so a value that the request dropped does not stay in the form.
+        const base = applied(outcome.result.config_revision, draft);
+        setState(current => ({ ...current, base, draft: draftOf(base), save: { kind: 'saved', changed: outcome.result.changed_keys.length }, saves: current.saves + 1 }));
         readNow();
         return;
       }
@@ -265,7 +267,7 @@ export function useSettingsForm<S, C extends { readonly revision: string }, D, R
         save: outcome.state === 'refused' ? { kind: 'refused', status: outcome.status, error: outcome.error } : { kind: outcome.state },
       }));
     });
-  }, [request, state.save, state.draft, write, readNow, applied]);
+  }, [request, state.save, state.draft, write, readNow, applied, draftOf]);
 
   return { view: state.view, base: state.base, draft: state.draft, request, save: state.save, saves: state.saves, edit, discard, submit, reload };
 }

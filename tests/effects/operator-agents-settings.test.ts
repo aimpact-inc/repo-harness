@@ -545,7 +545,7 @@ describe('seat settings contract without transport', () => {
     }
   });
 
-  test('saves a stored Pi model in range and refuses a model outside it', async () => {
+  test('saves a recommended or user-set Pi model and refuses a Pi model without a provider', async () => {
     const model = 'magpie/cursor/deepseek-v41-flash-1017';
     const worker = { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'pi', model, effort: null, fleet: [] };
     const home = mkdtempSync(join(tmpdir(), 'seats-pi-'));
@@ -570,8 +570,11 @@ describe('seat settings contract without transport', () => {
     expect(readSeatsSettings(env).config.worker).toMatchObject({ runtime: 'pi', model: gpt.model, effort: 'high', fleet: ['explorer'] });
     expect((await route.decode({ expected_revision: readSeatsSettings(env).config.revision, seats: { ...section, reviewer: { ...section.reviewer!, runtime: 'pi', model: 'zai/glm-5.3' } } }, []).execute()).status).toBe(200);
     expect(readSeatsSettings(env).config.reviewer).toMatchObject({ runtime: 'pi', model: 'zai/glm-5.3' });
-    await expect(route.decode({ expected_revision: readSeatsSettings(env).config.revision, seats: { ...section, worker: { ...worker, model: 'magpie/other' } } }, []).execute())
-      .rejects.toMatchObject({ status: 422, code: 'seat_model_invalid' });
+    // The recommended list does not limit the id (#3250); the decoder refuses only a shape that the Pi launcher cannot split.
+    expect((await route.decode({ expected_revision: readSeatsSettings(env).config.revision, seats: { ...section, worker: { ...worker, model: 'magpie/other' } } }, []).execute()).status).toBe(200);
+    expect(readSeatsSettings(env).config.worker.model).toBe('magpie/other');
+    expect(() => route.decode({ expected_revision: readSeatsSettings(env).config.revision, seats: { ...section, worker: { ...worker, model: 'magpie' } } }, []))
+      .toThrow('seats_settings_request_invalid');
   });
 
   test.each([
@@ -698,7 +701,7 @@ describe('seat settings contract without transport', () => {
     }
   });
 
-  test('routing override models and efforts must fit their target runtimes before save', async () => {
+  test('the routing explorer takes a required model id of the Claude shape and an effort in range before save', async () => {
     const home = mkdtempSync(join(tmpdir(), 'seats-overrides-'));
     cleanups.push(() => rmSync(home, { recursive: true, force: true }));
     mkdirSync(join(home, '.repo-harness'));
@@ -706,13 +709,17 @@ describe('seat settings contract without transport', () => {
     const original = JSON.stringify({ agents: PANE_AGENTS });
     writeFileSync(path, original);
     const env = { HOME: home }, { revision, ...seats } = readSeatsSettings(env).config;
-    for (const [field, value, code] of [['model', null, 'seat_model_invalid'], ['model', 'gpt-6-astra', 'seat_model_invalid'], ['effort', 'extreme', 'seat_effort_invalid']] as const) {
+    for (const [field, value, code] of [['model', null, 'seat_model_invalid'], ['effort', 'extreme', 'seat_effort_invalid']] as const) {
       const routing = { ...seats.routing, low_quota_explorer: { ...seats.routing.low_quota_explorer, [field]: value } };
       if (value === null) expect(() => decodeSeatsConfig({ ...seats, routing })).toThrow('seats_config_invalid');
       await expect(seatsSettingsWriteRoute(env).decode({ expected_revision: revision, seats: { ...seats, routing } }, []).execute())
         .rejects.toMatchObject({ status: 422, code });
       expect(readFileSync(path, 'utf8')).toBe(original);
     }
+    const explorer = (model: string) => ({ ...seats, routing: { ...seats.routing, low_quota_explorer: { ...seats.routing.low_quota_explorer, model } } });
+    expect(() => seatsSettingsWriteRoute(env).decode({ expected_revision: revision, seats: explorer('Claude Opus') }, [])).toThrow('seats_settings_request_invalid');
+    expect((await seatsSettingsWriteRoute(env).decode({ expected_revision: revision, seats: explorer('claude-opus-5-5') }, []).execute()).status).toBe(200);
+    expect(readSeatsSettings(env).config.routing.low_quota_explorer.model).toBe('claude-opus-5-5');
   });
 
   test('routing accepts percent thresholds and the credit mode range and rejects old stored fields on save', () => {
@@ -828,7 +835,6 @@ describe('seat settings routes', () => {
       ['advisor', { tools: ['gh', 'read'] }, 'seat_tool_not_allowed'],
       ['orchestrator', { tools: ['edit', 'read'] }, 'seat_tool_not_allowed'],
       ['worker', { runtime: 'codex' }, 'seat_runtime_not_enabled'],
-      ['advisor', { model: 'gpt-6-astra' }, 'seat_model_invalid'],
       ['advisor', { effort: 'extreme' }, 'seat_effort_invalid'],
     ] as const) {
       const seats = { ...section, worker: claudeWorker, [seat]: { ...(seat === 'worker' ? claudeWorker : section[seat]), ...patch } };

@@ -187,6 +187,10 @@ test('the gatekeeper starts only when the effective gatekeeper is of another kno
   // There the Claude reviewer gives the different-family row, so a gatekeeper of the writer family still starts.
   expect(label(plan([pr(1, { writer_family: 'openai', second_review: 'pending' })]))).toEqual(['1:start']);
   expect(label(plan([pr(1, { tier: 'high', writer_family: 'openai' })], page(), [], route({ ...DEFAULT_SEATS_CONFIG.gatekeeper, model: null })))).toEqual(['1:review_family_unavailable']);
+  // A gatekeeper model with no known family is named by its field; the route line that holds the value stays out of the skip.
+  const pasted = { id: 'gatekeeper', seat: { ...DEFAULT_SEATS_CONFIG.gatekeeper, model: 'sk-live-0123456789' }, line: 'gatekeeper: gatekeeper (codex sk-live-0123456789 high; chatgpt ok)' } as const;
+  expect(plan([pr(1, { tier: 'high', writer_family: 'openai' })], page(), [], pasted)[0])
+    .toMatchObject({ detail: 'the model of seats.gatekeeper.model has no known family; gatekeeper: gatekeeper' });
   expect(plan([pr(1)], page(), [], route(DEFAULT_SEATS_CONFIG.gatekeeper, null))[0]).toMatchObject({ reason: 'review_family_unavailable', detail: 'no gatekeeper seat can launch; gatekeeper: none (chatgpt exhausted)' });
   // The reviewer and the gatekeeper of one family are not independent; an unknown reviewer family starts no reviewer.
   const sameFamily = plan([pr(1, { second_review: 'pending' })], page(), [], GATEKEEPER, 'openai')[0];
@@ -195,6 +199,9 @@ test('the gatekeeper starts only when the effective gatekeeper is of another kno
   const passed = (reviewer: string | null) => label(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], page(marker(SHA)), [], GATEKEEPER, reviewer));
   expect(passed('openai')).toEqual(['1:review_family_unavailable']);
   expect(passed(null)).toEqual(['1:review_family_unavailable']);
+  // The skip names the field, never the value: a credential pasted as the model stays out of the output.
+  const unknownReviewer = plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], page(marker(SHA)), [], GATEKEEPER, null)[0];
+  expect(unknownReviewer).toMatchObject({ detail: 'the model of seats.reviewer.model has no known family, so its row cannot count as another family' });
   expect(passed('deepseek')).toEqual(['1:start']);
   // A started gatekeeper counts by its recorded row, not by the current route: a fallback gatekeeper of another family than the reviewer opens the relay; a gatekeeper of the reviewer family does not.
   const fallback = route({ ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'pi', model: 'magpie/cursor/deepseek-v41-flash-1017', effort: null });
@@ -241,12 +248,13 @@ test('the packet names the round, tier, head, harness and the RECEIPT-JSON hand-
 test('a round-1 PASS carries only to the fix head of the claimed FAIL, in either publication order; never to a later head or from an unclaimed row (#3187)', () => {
   const FIX = 'c'.repeat(40);
   const LATER = 'd'.repeat(40);
-  const models = { pi: 'magpie/codex/gpt-6.1-sol', claude: 'claude-opus-5-5' } as const;
-  type Row = readonly [harness: 'pi' | 'claude', subject: string, round: number, verdict: 'PASS' | 'FAIL', claimed?: boolean];
+  // `custom` is a Pi seat on a user-set model id with no known family (#3250).
+  const models = { pi: 'magpie/codex/gpt-6.1-sol', claude: 'claude-opus-5-5', custom: 'acme/mystery-1' } as const;
+  type Row = readonly [harness: keyof typeof models, subject: string, round: number, verdict: 'PASS' | 'FAIL', claimed?: boolean];
   const read = (head: string, rows: readonly Row[]) => {
     const comments = rows.flatMap(([harness, subject, round, verdict, claimed = true], at) => {
       const receipt: ReviewPublishReceipt = { protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round, subject_sha: subject, risk_tier: 'high',
-        reviewer: { harness, actual_model: models[harness] }, verdict, model_relation: 'different-family', summary: 'Reviewed.', findings: [] };
+        reviewer: { harness: harness === 'custom' ? 'pi' : harness, actual_model: models[harness] }, verdict, model_relation: 'different-family', summary: 'Reviewed.', findings: [] };
       const claimUrl = `https://github.com/example/repo/pull/1#issuecomment-${100 + at}`;
       const made = (body: string, url: string, minute: number): BoardCommentV1 => ({ url, created_at: `2026-11-18T10:${String(minute).padStart(2, '0')}:00Z`, author_association: 'OWNER', body });
       return [...(claimed ? [made(renderAcceptanceClaim(receipt), claimUrl, at * 2)] : []), made(renderAcceptanceRecord(receipt, claimUrl), `https://github.com/example/repo/pull/1#issuecomment-${200 + at}`, at * 2 + 1)];
@@ -268,4 +276,7 @@ test('a round-1 PASS carries only to the fix head of the claimed FAIL, in either
   expect(view(LATER, [...passThenFail, ['claude', FIX, 2, 'PASS']])).toEqual(['none', 'pending', 'not_accepted']);
   // Unclaimed rows carry nothing.
   expect(view(FIX, passThenFail.map(([harness, subject, round, verdict]) => [harness, subject, round, verdict, false] as const))).toEqual(['none', 'pending', 'not_accepted']);
+  // An unknown family is never the other family: its FAIL carries no PASS, and its PASS of the head does not open the relay.
+  expect(view(FIX, [['pi', OLD, 1, 'PASS'], ['custom', OLD, 1, 'FAIL']])).toEqual(['none', 'pending', 'not_accepted']);
+  expect(view(FIX, [['custom', FIX, 1, 'PASS']])).toEqual(['none', 'pending', 'not_accepted']);
 });

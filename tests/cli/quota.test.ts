@@ -67,7 +67,7 @@ describe('seat quota routing', () => {
     const pi: SeatConfigV1 = { ...DEFAULT_SEATS_CONFIG['worker-light']!, model: 'magpie/anthropic/claude-opus-5-5', effort: 'high' };
     const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-important': pi, 'worker-light': null };
     const lines = formatSeatRoutes(seats, seatAccountQuotas([claude({ seven_day: week(95, 84) })], seats.routing)).split('\n');
-    expect(lines).toContain('route important_deep: worker-important (pi magpie/anthropic/claude-opus-5-5 high)');
+    expect(lines).toContain('route important_deep: worker-important (pi seats.worker-important.model high)');
     expect(lines).toContain('route important_fast: none (worker-light not configured)');
   });
 
@@ -91,7 +91,7 @@ describe('seat quota routing', () => {
     const unknown = 'pi default provider unknown: give the seat an explicit model or empty seats.routing.unavailable_pi_providers';
     const lines = formatSeatRoutes(seats, seatAccountQuotas([claude({ seven_day: week(10, 84) })], seats.routing)).split('\n');
     expect(lines.filter(line => /^(route simple_|gatekeeper:|reviewer:|advisor:)/u.test(line))).toEqual([
-      'route simple_deep: worker-deep (pi magpie/cursorx/m)',
+      'route simple_deep: worker-deep (pi seats.worker-deep.model)',
       `route simple_fast: none (${unknown})`,
       `gatekeeper: none (${unknown})`, `reviewer: none (${unknown})`, `advisor: none (${unknown})`,
     ]);

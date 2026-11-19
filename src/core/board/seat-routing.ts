@@ -1,4 +1,5 @@
 import { weeklyRemainingPercent, type QuotaAccount, type QuotaAccountReport, type QuotaState } from './quota';
+import { RECOMMENDED_MODELS } from './recommended-models';
 import { PI_CODEX_MODEL_PREFIX, ROUTING_CLASSES, isPiCodexSeat, isReviewSeat, unavailablePiSeat, type CodexCreditMode, type RoutingClass, type SeatConfigV1, type SeatId, type SeatRoutingV1, type SeatsConfigV1 } from './seats-settings';
 
 /** The Claude control-seat model outside its config entry: the orchestrator while Claude is reserved, the advisor outside Claude hyper. */
@@ -71,9 +72,17 @@ export function effectiveSeatConfig(id: SeatId, seats: SeatsConfigV1, quota: Sea
   return seat;
 }
 
-const modelText = (seat: { readonly model: string | null; readonly effort: string | null }): string =>
-  [seat.model ?? 'default', seat.effort].filter(value => value !== null).join(' ');
-const launchText = (seat: SeatConfigV1): string => `${seat.runtime} ${modelText(seat)}`;
+const SHIPPED_MODELS: ReadonlySet<string> = new Set(Object.values(RECOMMENDED_MODELS).flat());
+
+/**
+ * The model text that may leave the launch argv (#3250). A user-set id is free text that a pasted secret can fill, so a claim,
+ * a route line or a refusal shows an id only when it is a shipped recommended id, and else the seat field. The argv keeps the raw id.
+ */
+export const shownModel = (field: string, model: string | null): string =>
+  model === null ? 'default' : SHIPPED_MODELS.has(model) ? model : field;
+const modelText = (field: string, seat: { readonly model: string | null; readonly effort: string | null }): string =>
+  [shownModel(field, seat.model), seat.effort].filter(value => value !== null).join(' ');
+const launchText = (id: SeatId, seat: SeatConfigV1): string => `${seat.runtime} ${modelText(`seats.${id}.model`, seat)}`;
 
 function accountText(id: SeatId, seat: SeatConfigV1, quota: SeatAccountQuotas): string | null {
   const account = seatAccount(seat);
@@ -128,7 +137,7 @@ export function selectSeatRoute(task: RoutingClass, seats: SeatsConfigV1, quota:
   const selectedState = seatState(selected.id, selected.seat, quota);
   const warning = selectedState === 'unknown' || selectedState === 'tight' ? `; ${accountText(selected.id, selected.seat, quota)}` : '';
   const skipped = candidates.slice(0, candidates.indexOf(selected)).map(({ id, seat }) => `; skipped ${id}: ${blockText(id, seat, quota, seats.routing)}`).join('');
-  return { id: selected.id, seat: selected.seat, line: `route ${task}: ${selected.id} (${launchText(selected.seat)}${warning})${skipped}` };
+  return { id: selected.id, seat: selected.seat, line: `route ${task}: ${selected.id} (${launchText(selected.id, selected.seat)}${warning})${skipped}` };
 }
 
 /**
@@ -150,7 +159,7 @@ const accountSuffix = (id: SeatId, seat: SeatConfigV1, quota: SeatAccountQuotas)
 export function effectiveGatekeeper(seats: SeatsConfigV1, quota: SeatAccountQuotas): SeatRouteV1 {
   const gatekeeper = effectiveSeatConfig('gatekeeper', seats, quota);
   if (!reviewSeatBlocked('gatekeeper', gatekeeper, quota, seats.routing)) {
-    return { id: 'gatekeeper', seat: gatekeeper, line: `gatekeeper: gatekeeper (${launchText(gatekeeper)}${accountSuffix('gatekeeper', gatekeeper, quota)})` };
+    return { id: 'gatekeeper', seat: gatekeeper, line: `gatekeeper: gatekeeper (${launchText('gatekeeper', gatekeeper)}${accountSuffix('gatekeeper', gatekeeper, quota)})` };
   }
   const cause = blockText('gatekeeper', gatekeeper, quota, seats.routing);
   const fallback = effectiveSeatConfig('gatekeeper-fallback', seats, quota);
@@ -160,7 +169,7 @@ export function effectiveGatekeeper(seats: SeatsConfigV1, quota: SeatAccountQuot
     return { id: null, line: `gatekeeper: none (${cause}; gatekeeper-fallback: ${blockText('gatekeeper-fallback', fallback, quota, seats.routing)})` };
   }
   return { id: 'gatekeeper-fallback', seat: fallback,
-    line: `gatekeeper: gatekeeper-fallback (${launchText(fallback)}${accountSuffix('gatekeeper-fallback', fallback, quota)}; gatekeeper: ${cause})` };
+    line: `gatekeeper: gatekeeper-fallback (${launchText('gatekeeper-fallback', fallback)}${accountSuffix('gatekeeper-fallback', fallback, quota)}; gatekeeper: ${cause})` };
 }
 
 /** The model a seat runs: a Pi seat on `magpie/codex/` runs the Codex model, and a null model is the host default of its runtime. */
@@ -182,20 +191,22 @@ function reviewSeatLine(id: 'gatekeeper-deep' | 'reviewer', seats: SeatsConfigV1
   if (id === 'gatekeeper-deep' && deepGatekeeperRepeatsGatekeeper(seats, quota)) return 'gatekeeper-deep: none (same model as gatekeeper)';
   return reviewSeatBlocked(id, seat, quota, seats.routing)
     ? `${id}: none (${blockText(id, seat, quota, seats.routing)})`
-    : `${id}: ${id} (${launchText(seat)}${accountSuffix(id, seat, quota)})`;
+    : `${id}: ${id} (${launchText(id, seat)}${accountSuffix(id, seat, quota)})`;
 }
+
+const EXPLORER_FIELD = 'seats.routing.low_quota_explorer.model';
 
 /** The saving threshold reserves Claude; pace-based tight is only a display state. */
 export function formatSeatRoutes(seats: SeatsConfigV1, quota: SeatAccountQuotas): string {
   const reserved = claudeReserved(quota);
   const lines: string[] = ROUTING_CLASSES.map(task => selectSeatRoute(task, seats, quota).line);
   lines.push(reserved
-    ? `explorer: ${modelText(seats.routing.low_quota_explorer)} (claude ${quota.claude.state === 'exhausted' ? 'exhausted' : quota.claude.mode}; pass model ${seats.routing.low_quota_explorer.model} when you call the explorer)`
+    ? `explorer: ${modelText(EXPLORER_FIELD, seats.routing.low_quota_explorer)} (claude ${quota.claude.state === 'exhausted' ? 'exhausted' : quota.claude.mode}; pass model ${shownModel(EXPLORER_FIELD, seats.routing.low_quota_explorer.model)} when you call the explorer)`
     : 'explorer: default');
   lines.push(effectiveGatekeeper(seats, quota).line);
   lines.push(reviewSeatLine('gatekeeper-deep', seats, quota), reviewSeatLine('reviewer', seats, quota));
   const advisor = effectiveSeatConfig('advisor', seats, quota);
   const advisorBlock = unavailablePiSeat(advisor, seats.routing);
-  lines.push(advisorBlock === null ? `advisor: advisor (${launchText(advisor)})` : `advisor: none (${advisorBlock})`);
+  lines.push(advisorBlock === null ? `advisor: advisor (${launchText('advisor', advisor)})` : `advisor: none (${advisorBlock})`);
   return lines.join('\n');
 }

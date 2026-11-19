@@ -8,19 +8,6 @@ export interface ParsedRole { name: string | undefined; description: string | un
 export type RoleValidation = {ok: true; sourceDescription: string} | {ok: false; kind?: string; reason: string};
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 
-// Per-agent Codex target overrides — the only model/effort remaps in the fleet.
-// Every role carries an explicit target so Codex model/effort never drift with
-// the Claude-side family default.
-export const AGENT_TARGET_OVERRIDES: Record<string, { model: string; effort: string; targetDescription: string }> = {
-  explorer: { model: "gpt-6-luna", effort: "high", targetDescription: "GPT-6 Luna at high reasoning" },
-  "deep-reasoner": { model: "gpt-6.2-astra", effort: "high", targetDescription: "GPT-6.2 Astra at high reasoning" },
-  "fast-worker": { model: "gpt-6.2-sol", effort: "medium", targetDescription: "GPT-6.2 Sol at medium reasoning" },
-  "deep-worker": { model: "gpt-6.2-sol", effort: "high", targetDescription: "GPT-6.2 Sol at high reasoning" },
-  gatekeeper: { model: "gpt-6.2-astra", effort: "medium", targetDescription: "GPT-6.2 Astra at medium reasoning" },
-  "root-cause-prover": { model: "gpt-6.2-astra", effort: "high", targetDescription: "GPT-6.2 Astra at high reasoning" },
-  "harness-evaluator": { model: "gpt-6.2-astra", effort: "medium", targetDescription: "GPT-6.2 Astra at medium reasoning" },
-};
-
 export function parseRoleNameScalar(rawValue: unknown): string | undefined {
   if (typeof rawValue !== "string") return undefined;
   const match = rawValue.trim().match(/^(?:"([A-Za-z0-9_-]+)"|'([A-Za-z0-9_-]+)'|([A-Za-z0-9_-]+))(?:\s+#.*)?$/);

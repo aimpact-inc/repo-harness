@@ -1,17 +1,15 @@
 import { decodeAgentsConfig } from '../../core/board/agents-settings';
 import {
   SEAT_IDS,
-  PI_CODEX_MODEL_PREFIX,
   SEAT_RUNTIMES,
   SEAT_TOOLS,
-  DEFAULT_SEATS_CONFIG,
-  MODEL_FAMILY_LABELS,
   FRONTEND_SEAT_IDS,
   ROUTING_CLASSES,
   ROUTING_KEYS,
   WORKER_SEAT_IDS,
   SeatsConfigMigrationRequiredError,
   decodeSeatsConfig,
+  seatsConfigInvalidMessage,
   seatTakesFleet,
   type SeatConfigV1,
   type SeatModelV1,
@@ -24,8 +22,8 @@ import {
   type SeatsSettingsResultV1,
   type SeatTool,
 } from '../../core/board/seats-settings';
+import { RECOMMENDED_MODELS } from '../../core/board/recommended-models';
 import {
-  AGENT_TARGET_OVERRIDES,
   EFFORT_LEVELS,
   MANAGED_AGENTS,
   WRITABLE_AGENTS,
@@ -74,19 +72,11 @@ const SEAT_RANGES: SeatsRangesV1['seats'] = {
   reviewer: { fleet: [], tools: ['net', 'read', 'shell'] },
 };
 
-/** Claude takes a fleet model family, Codex a fleet target model. Pi takes DeepSeek, GLM or a Codex model behind `magpie/codex/`, takes an effort, and takes fleet roles only on a Codex model. */
-const CODEX_MODELS = [...new Set([...Object.values(AGENT_TARGET_OVERRIDES).map(target => target.model),
-  ...SEAT_IDS.flatMap(id => {
-    const seat = DEFAULT_SEATS_CONFIG[id];
-    return seat?.runtime === 'codex' && seat.model !== null ? [seat.model] : [];
-  }),
-  // A full-section save also checks seats that still use these earlier models.
-  'gpt-6-astra', 'gpt-6.1-sol'])];
-
+/** Pi takes fleet roles only on a Codex model behind `magpie/codex/` (`seatTakesFleet`). */
 const RUNTIME_RANGES: Readonly<Record<SeatRuntime, Omit<SeatRuntimeRangeV1, 'id' | 'enabled'>>> = {
-  claude: { models: Object.keys(MODEL_FAMILY_LABELS), effort: true, fleet: true },
-  codex: { models: CODEX_MODELS, effort: true, fleet: true },
-  pi: { models: ['magpie/cursor/deepseek-v41-flash-1017', 'magpie/opencode-go/deepseek-v4.1-flash', 'magpie/group/deepseek-v4.1-flash', 'zai/glm-5.3', 'magpie/zcode/GLM-5.3', 'magpie/zcode/GLM-5.3-Flash', 'magpie/agy-cli/gemini-4-carbon', 'magpie/agy-cli/gemini-4-neon', ...CODEX_MODELS.map(model => `${PI_CODEX_MODEL_PREFIX}${model}`)], effort: true, fleet: true },
+  claude: { models: RECOMMENDED_MODELS.claude, effort: true, fleet: true },
+  codex: { models: RECOMMENDED_MODELS.codex, effort: true, fleet: true },
+  pi: { models: RECOMMENDED_MODELS.pi, effort: true, fleet: true },
 };
 
 export function seatsRanges(enabledRuntimes: readonly string[]): SeatsRangesV1 {
@@ -117,7 +107,7 @@ function enabledRuntimesOf(config: Record<string, unknown>): readonly string[] {
 function decodeSeatsSection(value: unknown): SeatsConfigV1 {
   try { return decodeSeatsConfig(value); } catch (error) {
     if (error instanceof SeatsConfigMigrationRequiredError) throw new SeatsConfigurationError(error.code, error.message);
-    throw configInvalid('seats');
+    throw new SeatsConfigurationError('config_invalid', seatsConfigInvalidMessage(error));
   }
 }
 
@@ -131,11 +121,9 @@ export function readSeatsConfiguration(env: NodeJS.ProcessEnv = process.env): Se
   return { revision: document.revision, seats: decodeSeatsSection(document.config.seats), enabled_runtimes: enabledRuntimesOf(document.config) };
 }
 
-function checkModelAndEffort(subject: string, model: SeatModelV1, runtimeId: SeatRuntime): void {
+/** The model id is the user's (#3250): the request decoder owns its shape, and `models` in the ranges only recommends. */
+function checkEffort(subject: string, model: SeatModelV1, runtimeId: SeatRuntime): void {
   const runtime = RUNTIME_RANGES[runtimeId];
-  if (model.model !== null && !runtime.models.includes(model.model)) {
-    throw new SeatsConfigurationError('seat_model_invalid', `The ${subject} cannot use model ${model.model} on ${runtimeId}.`);
-  }
   if (model.effort !== null && (!runtime.effort || !EFFORT_LEVELS.includes(model.effort))) {
     throw new SeatsConfigurationError('seat_effort_invalid', `The ${subject} cannot use effort ${model.effort} on ${runtimeId}.`);
   }
@@ -145,7 +133,7 @@ export function checkSeatRoutingModels(routing: SeatRoutingV1): void {
   if (routing.low_quota_explorer.model === null) {
     throw new SeatsConfigurationError('seat_model_invalid', 'The routing.low_quota_explorer model is required.');
   }
-  checkModelAndEffort('routing.low_quota_explorer', routing.low_quota_explorer, 'claude');
+  checkEffort('routing.low_quota_explorer', routing.low_quota_explorer, 'claude');
 }
 
 function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly string[]): void {
@@ -154,7 +142,7 @@ function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly str
   if (!enabledRuntimes.includes(seat.runtime)) {
     throw new SeatsConfigurationError('seat_runtime_not_enabled', `The ${id} seat runtime ${seat.runtime} is not enabled in Agent settings.`);
   }
-  checkModelAndEffort(`${id} seat`, seat, seat.runtime);
+  checkEffort(`${id} seat`, seat, seat.runtime);
   const tool = seat.tools.find(item => !range.tools.includes(item));
   if (tool !== undefined) throw new SeatsConfigurationError('seat_tool_not_allowed', `The ${id} seat cannot have the ${tool} tool group.`);
   const role = seat.fleet.find(name => !runtime.fleet || !seatTakesFleet(seat) || !range.fleet.includes(name));

@@ -6,6 +6,7 @@ const MODEL_FAMILY_PREFIXES: readonly (readonly [string, string])[] = [
   ['gpt-', 'openai'], ['o3', 'openai'], ['o4', 'openai'],
   ['deepseek-', 'deepseek'],
   ['gemini-', 'google'],
+  ['glm-', 'zhipu'],
   ['grok-', 'xai'],
   ['kimi-', 'moonshot'],
   ['qwen', 'alibaba'],

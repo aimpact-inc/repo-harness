@@ -316,6 +316,20 @@ describe("rh seats argv", () => {
     }
   });
 
+  test.each([
+    ["claude", "claude-opus-9", ["--model", "claude-opus-9"]],
+    ["codex", "gpt-7-nova", ["-m", "gpt-7-nova"]],
+    ["pi", "acme/mystery-1", ["--provider", "acme", "--model", "mystery-1"]],
+  ] as const)("a user-set %s model id outside the recommended list reaches the argv (#3250)", (runtime, model, flags) => {
+    const worker = { ...DEFAULT_SEATS_CONFIG.worker, runtime, model, fleet: [] };
+    withHome({ ...DEFAULT_SEATS_CONFIG, worker }, home => {
+      const result = argv(home, "worker", "--json");
+      expect(result.status, result.stderr).toBe(0);
+      const args = bare(JSON.parse(result.stdout).argv);
+      expect(args.slice(args.indexOf(flags[0]), args.indexOf(flags[0]) + flags.length)).toEqual([...flags]);
+    });
+  });
+
   test("a Pi GPT worker passes configured thinking and model, and draws on the ChatGPT account", () => {
     const worker = { ...DEFAULT_SEATS_CONFIG.worker, runtime: "pi" as const, model: "magpie/codex/gpt-6.1-terra", fleet: [] };
     withHome({ ...DEFAULT_SEATS_CONFIG, worker }, home => {
@@ -329,6 +343,12 @@ describe("rh seats argv", () => {
     });
     const seats = { ...DEFAULT_SEATS_CONFIG, worker };
     expect(formatSeatRoutes(seats, seatAccountQuotas([], seats.routing))).toContain("route simple_fast: worker (pi magpie/codex/gpt-6.1-terra high; chatgpt unknown)");
+    // The rh quota routes show only a shipped recommended id; any other id, such as a pasted secret, shows as its seat field (#3250).
+    const pasted = { ...seats, worker: { ...worker, model: "magpie/o3sk-live-0123456789" }, gatekeeper: { ...seats.gatekeeper, model: "o3sk-live-0123456789" } };
+    const routes = formatSeatRoutes(pasted, seatAccountQuotas([], pasted.routing));
+    expect(routes).not.toContain("o3sk-live-0123456789");
+    expect(routes).toContain("route simple_fast: worker (pi seats.worker.model high)");
+    expect(routes).toContain("gatekeeper: gatekeeper (codex seats.gatekeeper.model");
     const reading = decodeCodexRateLimitsResult({ rateLimits: { primary: { usedPercent: 95, windowDurationMins: 10080, resetsAt: Math.floor(Date.now() / 1000) + 84 * 3600 } } }, new Date().toISOString());
     expect(formatSeatRoutes(seats, seatAccountQuotas([classifyQuotaReading(reading, Date.now())], seats.routing))).toContain("route simple_fast: none (chatgpt exhausted)");
   });
@@ -909,6 +929,10 @@ describe("rh seats argv", () => {
       expect(result.status).toBe(1);
       expect(result.stdout).toBe("");
       expect(JSON.parse(result.stderr).error).toBe("config_invalid");
+    });
+    // The refusal names the seat field, not its value (#3244).
+    withHome({ ...DEFAULT_SEATS_CONFIG, advisor: { ...DEFAULT_SEATS_CONFIG.advisor, model: "Claude Opus" } }, (home) => {
+      expect(JSON.parse(argv(home, "worker", "--json").stderr)).toMatchObject({ error: "config_invalid", message: "The seats section of the repo-harness configuration is not valid at seats.advisor.model." });
     });
   });
 });

@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { piRoleName } from '../../core/board/seat-launch';
 import { PI_CODEX_MODEL_PREFIX } from '../../core/board/seats-settings';
 import { globalConfigurationPath } from '../configuration/global-configuration';
-import { AGENT_TARGET_OVERRIDES, WRITABLE_AGENTS, parseFrontmatter, validateFrontmatter } from '../terminal/task-role-profiles';
+import { AGENT_TARGET_OVERRIDES } from '../../core/board/recommended-models';
+import { WRITABLE_AGENTS, parseFrontmatter, validateFrontmatter } from '../terminal/task-role-profiles';
 
 const FLEET_SOURCE_DIR = fileURLToPath(new URL('../../../agents/fleet/', import.meta.url));
 const READ_ONLY_TOOLS = 'read, grep, find, ls, bash';

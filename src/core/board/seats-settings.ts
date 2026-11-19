@@ -210,8 +210,21 @@ export interface SeatsSettingsResultV1 {
   readonly changed_keys: readonly string[];
 }
 
-function invalid(code: string): never {
-  throw new Error(code);
+/** A decoder refusal. `field` names the seat field, never its value, so a report cannot carry a secret (#3244). */
+class SeatsDecodeError extends Error {
+  constructor(code: string, readonly field: string | null) {
+    super(field === null ? code : `${code}: ${field}`);
+  }
+}
+
+function invalid(code: string, field: string | null = null): never {
+  throw new SeatsDecodeError(code, field);
+}
+
+/** The one message for an invalid stored seats section; it names the refused seat field when the decoder knows it. */
+export function seatsConfigInvalidMessage(error: unknown): string {
+  const field = error instanceof SeatsDecodeError ? error.field : null;
+  return `The seats section of the repo-harness configuration is not valid${field === null ? '' : ` at ${field}`}.`;
 }
 
 function object(value: unknown, keys: readonly string[], code: string, required = keys): Record<string, unknown> {
@@ -256,24 +269,35 @@ export function unavailablePiSeat(seat: { readonly runtime: SeatRuntime; readonl
   return provider === undefined ? null : `pi provider ${provider} unavailable`;
 }
 
+/**
+ * The one model rule of a seat (#3250): the id has the shape that its launcher can pass. A Pi id is `<provider>/<model>`;
+ * any other id is a lowercase token. The recommended lists in the ranges do not limit it; a wrong id fails at launch.
+ */
+export function seatModelShapeValid(runtime: SeatRuntime, model: unknown): model is string {
+  return typeof model === 'string' && (runtime === 'pi' ? /^[^/]+\/.+$/u.test(model) : TOKEN.test(model));
+}
+
 function decodeSeat(id: SeatId, value: unknown, code: string): SeatConfigV1 {
-  const record = object(value, ['runtime', 'model', 'advisor_model', 'effort', 'tools', 'fleet'], code, ['runtime', 'model', 'effort', 'tools', 'fleet']);
-  if (!SEAT_RUNTIMES.includes(record.runtime as SeatRuntime)) invalid(code);
-  const advisor = record.advisor_model === undefined ? null : nullableToken(record.advisor_model, code);
-  if (advisor !== null && (record.runtime !== 'claude' || !Object.hasOwn(MODEL_FAMILY_LABELS, advisor))) invalid(code);
-  const tools = ascending(record.tools, isTool, code);
-  if (!tools.includes('read')) invalid(code);
-  const fleet = ascending(record.fleet, isRole, code);
-  if (isReviewSeat(id) && (tools.some(tool => !REVIEW_TOOLS.includes(tool)) || fleet.length > 0)) invalid(code);
-  const model = record.runtime === 'pi' && record.model !== null
-    ? (typeof record.model === 'string' && /^[^/]+\/.+$/u.test(record.model) ? record.model : invalid(code))
-    : nullableToken(record.model, code);
-  if (fleet.length > 0 && !seatTakesFleet({ runtime: record.runtime as SeatRuntime, model })) invalid(code);
+  const at = (name: string | null): never => invalid(code, name === null ? `seats.${id}` : `seats.${id}.${name}`);
+  // A helper refusal carries no field, so each call names the field it decodes.
+  const field = <T>(name: string | null, decode: () => T): T => { try { return decode(); } catch { return at(name); } };
+  const record = field(null, () => object(value, ['runtime', 'model', 'advisor_model', 'effort', 'tools', 'fleet'], code, ['runtime', 'model', 'effort', 'tools', 'fleet']));
+  if (!SEAT_RUNTIMES.includes(record.runtime as SeatRuntime)) at('runtime');
+  const advisor = record.advisor_model === undefined ? null : field('advisor_model', () => nullableToken(record.advisor_model, code));
+  if (advisor !== null && (record.runtime !== 'claude' || !Object.hasOwn(MODEL_FAMILY_LABELS, advisor))) at('advisor_model');
+  const tools = field('tools', () => ascending(record.tools, isTool, code));
+  if (!tools.includes('read')) at('tools');
+  const fleet = field('fleet', () => ascending(record.fleet, isRole, code));
+  if (isReviewSeat(id) && tools.some(tool => !REVIEW_TOOLS.includes(tool))) at('tools');
+  if (isReviewSeat(id) && fleet.length > 0) at('fleet');
+  const model = record.model === null ? null
+    : seatModelShapeValid(record.runtime as SeatRuntime, record.model) ? record.model : at('model');
+  if (fleet.length > 0 && !seatTakesFleet({ runtime: record.runtime as SeatRuntime, model })) at('fleet');
   return {
     runtime: record.runtime as SeatRuntime,
     model,
     advisor_model: advisor,
-    effort: nullableToken(record.effort, code),
+    effort: field('effort', () => nullableToken(record.effort, code)),
     tools,
     fleet,
   };
@@ -410,7 +434,7 @@ export function decodeSeatsSettingsRequest(fields: Readonly<Record<string, unkno
   const record = object(fields, ['expected_revision', 'seats'], code);
   const expected = text(record.expected_revision, code);
   if (!REVISION.test(expected)) invalid(code);
-  // Save validation returns seat_model_invalid for a null explorer model, as it does for a model outside the runtime range.
+  // Save validation returns seat_model_invalid for a null explorer model.
   return { expected_revision: expected, seats: decodeSeatsRecord(object(record.seats, SECTION_KEYS, code), code, false) };
 }
 

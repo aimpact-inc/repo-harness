@@ -55,16 +55,20 @@ export interface ReviewInputV1 {
 function gatekeeperFamilyGap(gatekeeper: SeatRouteV1, writer: string | null, givesDifferentFamily: boolean, reviewer: string | null): string | null {
   const family = gatekeeperFamily(gatekeeper);
   if (gatekeeper.id === null) return 'no gatekeeper seat can launch';
-  if (family === null) return `the model ${gatekeeper.seat.model ?? 'default'} has no known family`;
+  if (family === null) return `the model of seats.${gatekeeper.id}.model has no known family`;
   if (givesDifferentFamily && family === writer) return `the gatekeeper family ${family} is the writer family`;
   return reviewer !== null && family === reviewer ? `this head takes a reviewer row, so the gatekeeper family ${family} must differ from the reviewer family` : null;
 }
+
+/** A user-set model id is free text that a pasted secret can fill (#3250): a refusal names the seat, and the route line only when it holds no model. */
+const routeWithoutModel = (gatekeeper: SeatRouteV1): string => (gatekeeper.id === null ? gatekeeper.line : `gatekeeper: ${gatekeeper.id}`);
 
 const gatekeeperFamily = (gatekeeper: SeatRouteV1): string | null => gatekeeper.id === null || gatekeeper.seat.model === null ? null : modelFamily(gatekeeper.seat.model);
 
 /** Why the configured reviewer cannot give this head an independent row, or null when it can. */
 function reviewerFamilyGap(reviewer: string | null, gatekeepers: readonly (string | null)[], tier: 'medium' | 'high'): string | null {
-  if (reviewer === null) return 'the reviewer seat model has no known family';
+  // A user-set id is free text that a pasted secret can fill (#3250), so the skip names the field, not its value.
+  if (reviewer === null) return 'the model of seats.reviewer.model has no known family, so its row cannot count as another family';
   return tier === 'high' && gatekeepers.includes(reviewer) ? `the reviewer family ${reviewer} is the gatekeeper family, so the two rows are not independent` : null;
 }
 
@@ -175,7 +179,7 @@ export function planReview(input: ReviewInputV1): readonly ReviewDecisionV1[] {
     // Where the reviewer takes part in a High head, it can give the different-family row, so the gatekeeper may share the writer family.
     const givesDifferentFamily = tier === 'medium' || pr.second_review === 'not_required';
     const gatekeeperGap = seats.some(entry => entry.seat === 'gatekeeper') ? gatekeeperFamilyGap(input.gatekeeper, pr.writer_family, givesDifferentFamily, reviewerRow ? reviewer : null) : null;
-    if (gatekeeperGap !== null) return skip('review_family_unavailable', `${gatekeeperGap}; ${input.gatekeeper.line}`);
+    if (gatekeeperGap !== null) return skip('review_family_unavailable', `${gatekeeperGap}; ${routeWithoutModel(input.gatekeeper)}`);
     // A gatekeeper that already started for this head is the one that counts: its recorded rows give its family, and only a head with no row yet falls back to the current route.
     const startedFamilies = seats.some(entry => entry.seat === 'gatekeeper') ? [] : recordedFamilies(page, pr.head_sha);
     const reviewerGap = seats.some(entry => entry.seat === 'reviewer')
