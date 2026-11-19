@@ -22,6 +22,8 @@ import { MANAGED_AGENTS } from '../../effects/terminal/task-role-profiles';
 import { SeatResetError, readSeatSession, readTranscriptUsage, runSeatReset, writeSeatResetRequest, type SeatRelaunch, type SeatResetNotify, type TranscriptUsage } from '../../effects/board/seat-reset';
 import { handoffIdentity, seatResetAction, seatResetIdentity, seatResetSteps, type SeatResetIdentity } from '../../core/board/seat-reset';
 import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
+import { PlannerConsultError } from '../../core/board/planner-consult';
+import { runPlannerConsult } from '../../effects/board/planner-consult';
 import { formatSeatPool } from '../../core/board/seat-pool';
 import { refreshSeatPool, SeatsConfigurationError } from '../../effects/board/seats-configuration';
 
@@ -47,6 +49,14 @@ export interface SeatLabelInput {
 }
 
 const POSITIVE = /^[1-9][0-9]*$/u;
+
+function consultIssueNumber(value: string, flag: '--issue' | '--parent'): number {
+  const number = Number(value);
+  if (!POSITIVE.test(value) || !Number.isSafeInteger(number)) {
+    throw new SeatsCommandError('label_value_invalid', `${flag} must be a positive decimal integer.`);
+  }
+  return number;
+}
 
 /** The seat labels that the board reads (#1505), or none without `--repository-id`. The GitHub numeric repository id identifies the repository. */
 const OWNER_DECISION_URL = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/(?:issues|pull)\/[1-9][0-9]*(?:#(?:issuecomment-|pullrequestreview-|discussion_r)[1-9][0-9]*)?$/u;
@@ -257,7 +267,7 @@ function installedPiExtension(env: NodeJS.ProcessEnv): string {
 
 /** The launch and the effective seat config that it starts; the seat reset compares the config with the session record (#2633). */
 async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: NodeJS.ProcessEnv, cwd: string,
-  { planned, terminal = 'new' }: { readonly planned?: SeatRouteV1; readonly terminal?: 'new' | 'existing' } = {}): Promise<{
+  { planned, terminal = 'new', prepareFleet = true }: { readonly planned?: SeatRouteV1; readonly terminal?: 'new' | 'existing'; readonly prepareFleet?: boolean } = {}): Promise<{
   readonly launch: SeatLaunchResult; readonly effective: SeatConfigV1; readonly modeKnown: boolean;
 }> {
   const id = seatId(seat);
@@ -291,7 +301,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   const agentTypes = effective.runtime === 'claude' && effective.fleet.length > 0
     ? [...MANAGED_AGENTS, ...RETIRED_SEAT_FLEET_ROLES, ...CLAUDE_BUILTIN_AGENT_TYPES, ...claudeHostAgentTypes(env)]
     : [];
-  const piRoleDirectory = effective.runtime === 'pi' && effective.fleet.length > 0 ? writePiFleetRoles(effective.fleet, env, seats.pi_sub_agent_models) : undefined;
+  const piRoleDirectory = prepareFleet && effective.runtime === 'pi' && effective.fleet.length > 0 ? writePiFleetRoles(effective.fleet, env, seats.pi_sub_agent_models) : undefined;
   const piHookExtension = effective.runtime === 'pi' && isReviewSeat(id) ? installedPiExtension(env) : undefined;
   const launch = buildSeatLaunch(id, effective, config.seats === undefined ? 'defaults' : 'seats', agentTypes, name ?? undefined, labels.repositoryId, piRoleDirectory, piHookExtension, claudeSaving);
   const argv = labelSet === undefined ? launch.argv : selfLabelingArgv(id, labels, launch.argv, env);
@@ -330,8 +340,13 @@ async function seatTabLaunch(seat: string, labels: SeatLabelInput, input: SeatTa
   }
   const { launch, effective } = await effectiveSeatLaunch(seat, labels, env, input.cwd);
   const args = { ...(launch.tab === null ? {} : { name: launch.tab }), space, folder: input.cwd, argv: launch.argv, task: input.task, focus: input.focus };
+  return { launch, model: effective.model, space, placement: openSeatTab(args, env) };
+}
+
+function openSeatTab(args: Readonly<Record<string, unknown>> & { readonly space: string }, env: NodeJS.ProcessEnv): Record<string, unknown> {
+  const { space } = args;
   try {
-    return { launch, model: effective.model, space, placement: herdrAppDo('tab.new', args, { env }) };
+    return herdrAppDo('tab.new', args, { env });
   } catch (error) {
     if (!(error instanceof HerdrCoreError)) throw error;
     if (HERDR_APP_NOT_SENT.has(error.reason)) {
@@ -341,10 +356,10 @@ async function seatTabLaunch(seat: string, labels: SeatLabelInput, input: SeatTa
   }
 }
 
-/** The `ok: false` line of `seats argv` and `seats launch`. */
+/** The structured error line of the seat launch commands. */
 function writeLaunchError(error: unknown): void {
   const code = error instanceof SeatsCommandError || error instanceof ClaudeAgentTypesError || error instanceof PiFleetRolesError || error instanceof PiShellError || error instanceof SeatPaneNameError
-    || error instanceof RepoHarnessRegistryStrictError || error instanceof SeatsConfigMigrationRequiredError ? error.code : 'seat_launch_failed';
+    || error instanceof RepoHarnessRegistryStrictError || error instanceof SeatsConfigMigrationRequiredError || error instanceof PlannerConsultError ? error.code : 'seat_launch_failed';
   process.stderr.write(`${JSON.stringify({ ok: false, error: code, message: (error as Error).message,
     ...(error instanceof SeatsConfigMigrationRequiredError ? { next_action: error.next_action } : {}) })}\n`);
   process.exitCode = 1;
@@ -461,6 +476,39 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
       const { model: _model, ...shown } = result;
       process.stdout.write(options.json === true ? `${JSON.stringify({ ok: true, ...shown }, null, 2)}\n`
         : `${JSON.stringify({ ok: true, seat, name: result.launch.name, tab: result.launch.tab, space: result.space, placement: result.placement })}\n`);
+    });
+  seats.command('consult')
+    .description('Open a planner pane for one issue and write its plan outside Git worktrees')
+    .requiredOption('--issue <number>', 'Issue number to consult on')
+    .option('--space <id>', 'Herdr space that receives the tab, required unless you pass --dry-run')
+    .option('--parent <number>', 'Parent issue number')
+    .option('--qualifier <word>', 'Pane and plan suffix for a separate consultation')
+    .option('--out <path>', 'Plan path, defaults to rh-plans/<repo>/issue-<number>[-<qualifier>].md under the system temp directory')
+    .option('--question <text>', 'Question for the planner to focus on')
+    .option('--repository-id <id>', 'GitHub numeric repository ID, defaults to the current checkout’s repository')
+    .option('--dry-run', 'Print the resolved JSON without creating directories or opening a tab')
+    .option('--json', 'Print the consultation as JSON')
+    .action(async (options: { issue: string; space?: string; parent?: string; qualifier?: string; out?: string; question?: string; repositoryId?: string; dryRun?: boolean; json?: boolean }) => {
+      const env = process.env;
+      try {
+        const result = await runPlannerConsult({
+          ...options,
+          cwd: process.cwd(),
+          issue: consultIssueNumber(options.issue, '--issue'),
+          parent: options.parent === undefined ? undefined : consultIssueNumber(options.parent, '--parent'),
+          dry_run: options.dryRun === true,
+        }, {
+          launch: async (seat, labels, cwd, dryRun) => {
+            const { launch, effective } = await effectiveSeatLaunch(seat, labels, env, cwd, { prepareFleet: !dryRun });
+            return { launch, model: effective.model, shell: effective.tools.includes('shell') };
+          },
+          openTab: args => { openSeatTab(args, env); },
+        });
+        process.stdout.write(options.json === true || result.dry_run ? `${JSON.stringify(result, null, 2)}\n`
+          : `${result.seat} ${result.runtime}/${result.model ?? 'default'} ${result.pane_name} → ${result.out_path}\n`);
+      } catch (error) {
+        writeLaunchError(error);
+      }
     });
   seats
     .command('label')

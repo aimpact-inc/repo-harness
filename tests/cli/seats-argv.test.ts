@@ -3,7 +3,7 @@ import { spawnSync } from "child_process";
 import { createHash } from "crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { delimiter, dirname, join } from "path";
+import { basename, delimiter, dirname, join } from "path";
 import { buildSeatLaunch, seatPaneName } from "../../src/core/board/seat-launch";
 import { HANDOFF_SECTIONS, seatResetReason, seatResetSteps, type SeatResetIdentity } from "../../src/core/board/seat-reset";
 import { SeatResetError, runSeatReset, type SeatRelaunch, type SeatResetNotify, type SeatResetOptions } from "../../src/effects/board/seat-reset";
@@ -1005,6 +1005,74 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
     });
     expect(seatPaneName({ prefix: "rh", seat: "planner", issue: "42" })).toBe("rh-pl-42");
     expect(() => seatPaneName({ prefix: "rh", seat: "planner", issue: "0" })).toThrow(expect.objectContaining({ code: "pane_name_invalid" }));
+  });
+
+  test("seats consult previews without writes and launches the same labeled planner argv in Herdr", () => {
+    const planner = { ...DEFAULT_SEATS_CONFIG.reviewer, runtime: "pi", model: "magpie/agy-cli/gemini-4-carbon", fleet: ["explorer"] };
+    withHome({ ...DEFAULT_SEATS_CONFIG, planner }, home => withRepository(home, "rh", (repo, worktree) => {
+      const bin = join(home, ".quota-bin");
+      const scratch = realpathSync(mkdirSync(join(home, "scratch"), { recursive: true })!);
+      const ghLog = join(home, "gh.log"), tabLog = join(home, "tab.log");
+      const gh = join(bin, "gh");
+      writeFileSync(join(bin, "agy"), "#!/bin/sh\nexit 2\n", { mode: 0o755 });
+      writeFileSync(gh, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${ghLog}"\n`
+        + `test "$*" = 'api --hostname github.com repos/{owner}/{repo}' && test -z "$GH_REPO" && printf '{"id":19}'\n`, { mode: 0o755 });
+      writeFileSync(join(bin, "herdr-app"), `#!/bin/sh\nprintf '%s\\n' "$@" >> "${tabLog}"\nprintf '{"tab":"tb1","terminal":"t9"}'\n`, { mode: 0o755 });
+      const { CLAUDE_CONFIG_DIR: _claude, PI_CODING_AGENT_DIR: _pi, HC_TERMINAL_ID: _terminal, HERDR_ENV: _herdr, ...base } = process.env;
+      const env = { ...base, ...registryEnv(home), TMPDIR: scratch, GH_REPO: "another/repo", REPO_HARNESS_GH_BIN: gh,
+        PATH: [bin, dirname(process.execPath), "/bin", "/usr/bin"].join(delimiter) };
+      const consult = (...args: string[]) => spawnSync(process.execPath, [CLI, "seats", "consult", "--issue", "42", ...args], { env, cwd: worktree, encoding: "utf8" });
+
+      git(repo, "remote", "add", "origin", "https://github.com/example/planner-test.git");
+      const dry = consult("--dry-run", "--json");
+      expect(dry.status, dry.stderr).toBe(0);
+      const planDir = join(scratch, "rh-plans", basename(repo));
+      expect(JSON.parse(dry.stdout)).toEqual({ protocol: 1, kind: "repo-harness.seats.consult", dry_run: true, seat: "planner", runtime: "pi", model: planner.model,
+        issue: 42, parent: null, pane_name: "rh-pl-42", tab: "plan", out_path: join(planDir, "issue-42.md") });
+      const qualified = consult("--repository-id", "20", "--qualifier", "api", "--dry-run");
+      expect(qualified.status, qualified.stderr).toBe(0);
+      expect(JSON.parse(qualified.stdout)).toMatchObject({ pane_name: "rh-pl-42-api", out_path: join(planDir, "issue-42-api.md") });
+      expect(existsSync(join(scratch, "rh-plans"))).toBe(false);
+      expect(existsSync(join(home, ".repo-harness", "seats", "pi-fleet"))).toBe(false);
+      expect(existsSync(tabLog)).toBe(false);
+
+      const out = join(scratch, "plans", "plan.md");
+      const applied = consult("--repository-id", "20", "--space", "sp1", "--parent", "7", "--qualifier", "api", "--out", out);
+      expect(applied.status, applied.stderr).toBe(0);
+      expect(applied.stdout).toContain(`rh-pl-42-api → ${out}`);
+      const [verb, operation, args] = readFileSync(tabLog, "utf8").trimEnd().split("\n");
+      expect([verb, operation]).toEqual(["do", "tab.new"]);
+      const tab = JSON.parse(args!);
+      expect(tab).toMatchObject({ name: "plan", space: "sp1", folder: worktree });
+      expect(tab.argv.some((arg: string) => arg.includes("seats label planner --repository-id 20 --issue 42 --parent 7"))).toBe(true);
+      expect(values(tab.argv, "--exclude-tools")).toEqual(["edit,write"]);
+      expect(tab.task).toContain(out);
+      expect(readFileSync(ghLog, "utf8").trim().split("\n")).toEqual(["api --hostname github.com repos/{owner}/{repo}"]);
+      for (const checkout of [repo, worktree]) {
+        const status = spawnSync("git", ["status", "--porcelain"], { cwd: checkout, env, encoding: "utf8" });
+        expect([status.status, status.stdout]).toEqual([0, ""]);
+      }
+    }));
+  });
+
+  test("seats consult refuses missing launch inputs and an unconfigured or unsupported planner", () => {
+    withHome(undefined, home => withRepository(home, "rh", (repo) => {
+      const { CLAUDE_CONFIG_DIR: _claude, PI_CODING_AGENT_DIR: _pi, ...base } = process.env;
+      const env = { ...base, ...registryEnv(home), PATH: [join(home, ".quota-bin"), dirname(process.execPath), "/bin", "/usr/bin"].join(delimiter) };
+      const consultError = (...args: string[]) => {
+        const result = spawnSync(process.execPath, [CLI, "seats", "consult", ...args], { env, cwd: repo, encoding: "utf8" });
+        expect(result.status, result.stderr).toBe(1);
+        return JSON.parse(result.stderr).error;
+      };
+      expect(consultError("--issue", "42", "--dry-run")).toBe("repository_id_required");
+      const labels = ["--issue", "42", "--repository-id", "19"];
+      expect(consultError(...labels)).toBe("consult_launch_invalid");
+      expect(consultError(...labels, "--parent", "0", "--dry-run")).toBe("label_value_invalid");
+      expect(consultError(...labels, "--dry-run")).toBe("seat_not_configured");
+      const planner = { ...DEFAULT_SEATS_CONFIG.reviewer, runtime: "codex", model: "gpt-6.2-astra" };
+      writeFileSync(join(home, ".repo-harness", "config.json"), JSON.stringify({ seats: { ...DEFAULT_SEATS_CONFIG, planner } }));
+      expect(consultError(...labels, "--dry-run")).toBe("consult_runtime_unsupported");
+    }));
   });
 
   test("a Claude planner keeps its configuration in saving and hyper modes", () => {
