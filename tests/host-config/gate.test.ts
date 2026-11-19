@@ -961,7 +961,7 @@ test.each([
   { label: 'P2 edited', change: 'edited' },
   { label: 'P3 planned bytes changed', change: 'planned' },
   { label: 'D10 the user ledger records it', change: 'user-recorded' },
-  { label: 'outside .claude/ and .codex/', change: 'outside' },
+  { label: 'rh state is never a repository record (#2903)', change: 'outside' },
   { label: 'P6 a link on the way', change: 'link' },
   { label: 'P6 a nested checkout on the way', change: 'nested' },
 ] as const)('repository record: $label', ({ change }) => {
@@ -971,7 +971,7 @@ test.each([
   const repository = { repositoryId: join(worktree, '.git'), worktree };
   const paths = repositoryConfigPaths(env, repository);
   const gate = openRepositoryGate(env, repository);
-  const name = change === 'outside' ? 'notes/settings.json' : '.claude/settings.json';
+  const name = change === 'outside' ? '.repo-harness/settings.json' : '.claude/settings.json';
   const [file, home] = [join(worktree, name), join(f.home, name)];
   for (const [path, text] of [[file, 'user\n'], [home, 'home\n']] as const) { mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, text); chmodSync(path, 0o640); }
   if (change === 'link') { renameSync(join(worktree, '.claude'), join(worktree, 'elsewhere')); symlinkSync(join(worktree, 'elsewhere'), join(worktree, '.claude')); }
@@ -981,7 +981,7 @@ test.each([
   const expected = sha256Prefixed(readFileSync(file));
   if (change === 'planned') writeFileSync(file, 'user edit\n');
   const write = () => gate.writePaths([{ path: file, owner: 'core', replace: true, expected, entry: { type: 'file', bytes: Buffer.from('stripped\n'), mode: 0o640 } }]);
-  const refusals = { planned: 'the file changed since rh planned its write', 'user-recorded': 'the user-level ledger records this file', outside: 'rh records a repository file only under .claude/ or .codex/',
+  const refusals = { planned: 'the file changed since rh planned its write', 'user-recorded': 'the user-level ledger records this file', outside: 'rh records no repository file in .git, .repo-harness, .ai/harness/backups',
     link: `${join(worktree, '.claude')} is a link`, nested: `${join(worktree, '.claude')} holds .git` } as const;
   if (change === 'planned' || change === 'user-recorded' || change === 'outside' || change === 'link' || change === 'nested') {
     expect(write).toThrow(refusals[change]);

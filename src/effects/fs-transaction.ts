@@ -36,7 +36,7 @@ import { withExclusiveDirectoryLock } from "./locking/exclusive-directory-lock";
 import { runGit } from './git/run-git';
 import { ensureSelfIgnoringDirectory, SELF_IGNORE_NAME } from './self-ignoring-directory';
 import { openRepositoryWriteRun, resolveHostConfigRepository, type HostConfigRepository, type RepositoryWriteRun } from './host-config/repository';
-import { globalRuntimeScope, withRuntimeTransactionLock } from './locking/runtime-transaction-lock';
+import { acquireRuntimeTransactionLock, globalRuntimeScope, type RuntimeTransactionLock } from './locking/runtime-transaction-lock';
 
 export const FS_BACKUP_ROOT = ".ai/harness/backups";
 export const FS_TRANSACTION_BACKUP_ROOT = `${FS_BACKUP_ROOT}/fs-transaction`;
@@ -616,7 +616,12 @@ export function applyAdoptionPlan(plan: AdoptionPlan, options: ApplyAdoptionOpti
     return { ok: results.every((result) => result.status !== "failed"), dryRun, results };
   }
   if (target.kind === "direct") return applyDirect(plan, options.record);
-  return withRuntimeTransactionLock(globalRuntimeScope(options.env), () => applyRecorded(plan, planned, target.repository, options.env));
+  // The repository ledger has other writers (the hook strip, `rh config restore --repo`, `rh update`): they share the runtime lock.
+  let lock: RuntimeTransactionLock;
+  try { lock = acquireRuntimeTransactionLock(globalRuntimeScope(options.env)); }
+  catch (error) { return refusedResult(dryRun, planned, "runtime-lock", `another rh run holds the runtime lock, so rh init writes nothing: ${errorMessage(error)}`); }
+  try { return applyRecorded(plan, planned, target.repository, options.env); }
+  finally { lock.release(); }
 }
 
 /** Apply in order and stop at the first failure; the operations after it stay planned. */

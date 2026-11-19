@@ -98,7 +98,7 @@ describe('HRD-09 terminal runtime migration', () => {
       const planned = planAdoption({ repoRoot: repo, mode: 'standard', apply: true });
       const applied = applyAdoptionPlan(planned, { record: 'ledger', env: { HOME: home } });
       expect(applied.ok).toBe(true);
-      expect(applied.restore).toBe(`rh config restore --repo ${realpathSync(repo)}`);
+      expect(applied.restore).toBe(`rh config restore --repo '${realpathSync(repo)}'`);
       // Init strips the repository hook files after the transaction, through the repository gate.
       expect(stripRepositoryHookFiles(repo, { env: { HOME: home }, record: 'ledger' })).toEqual(['.claude/settings.json', '.codex/hooks.json']);
       expect(planAdoption({ repoRoot: repo, mode: 'standard' }).summary.plannedTotal).toBe(0);
