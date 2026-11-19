@@ -8,7 +8,7 @@ import { buildSeatLaunch, seatPaneName } from "../../src/core/board/seat-launch"
 import { HANDOFF_SECTIONS, seatResetReason, seatResetSteps, type SeatResetIdentity } from "../../src/core/board/seat-reset";
 import { SeatResetError, runSeatReset, type SeatRelaunch, type SeatResetNotify, type SeatResetOptions } from "../../src/effects/board/seat-reset";
 import { seatResetLaunch } from "../../src/cli/commands/seats";
-import { DEFAULT_SEATS_CONFIG, WORKER_SEAT_IDS } from "../../src/core/board/seats-settings";
+import { DEFAULT_SEATS_CONFIG, WORKER_SEAT_IDS, isReviewSeat, isWorkerSeat } from "../../src/core/board/seats-settings";
 import { repoHarnessRepoIdFor } from "../../src/effects/repo-registry";
 import { classifyQuotaReading, decodeCodexRateLimitsResult } from "../../src/core/board/quota";
 import { effectiveSeatConfig, formatSeatRoutes, seatAccountQuotas } from "../../src/core/board/seat-routing";
@@ -954,6 +954,66 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
         expect(launch(home, "orchestrator").argv).not.toContain("-n");
       });
     });
+  });
+
+  test("a planner launch labels its issue and keeps the configured model on all three hosts", () => {
+    expect([isWorkerSeat("planner"), isReviewSeat("planner")]).toEqual([false, false]);
+    for (const [runtime, model] of [["pi", "magpie/agy-cli/gemini-4-carbon"], ["codex", "gpt-6.2-astra"], ["claude", "opus"]] as const) {
+      const planner = { ...DEFAULT_SEATS_CONFIG.reviewer, runtime, model, fleet: ["explorer"] };
+      withHome({ ...DEFAULT_SEATS_CONFIG, planner }, home => withRepository(home, "rh", (_repo, worktree) => {
+        // Agy is signed out in this fixture, so the command reads no live quota.
+        writeFileSync(join(home, ".quota-bin", "agy"), "#!/bin/sh\nexit 2\n", { mode: 0o755 });
+        const result = run(registryEnv(home), ["planner", "--repository-id", "1", "--issue", "42", "--parent", "5", "--qualifier", "api", "--json"], worktree);
+        expect(result.status, result.stderr).toBe(0);
+        const value = JSON.parse(result.stdout);
+        expect(value).toMatchObject({ seat: "planner", runtime, name: "rh-pl-42-api", tab: "plan",
+          labels: ["repo-harness.seat=planner", "repo-harness.repository=1", "repo-harness.issue=42", "repo-harness.parent=5"] });
+        expect(value.argv.some((arg: string) => arg.includes("seats label planner --repository-id 1 --issue 42 --parent 5"))).toBe(true);
+        expect(value.brief).toContain("RECOMMENDATION: <one sentence> — confidence: HIGH|MEDIUM|LOW");
+        expect(value.brief).toContain("caller-provided scratch file outside every Git repository and worktree");
+        const args = bare(agent(value)) as string[];
+        if (runtime === "pi") {
+          expect(args.slice(1, 6)).toEqual(["pi", "--provider", "magpie", "--model", "agy-cli/gemini-4-carbon"]);
+          expect(values(args, "--exclude-tools")).toEqual(["edit,write"]);
+          expect(args).not.toContain("--no-extensions");
+          expect(value.brief).toContain("`rh-explorer` in parallel");
+          const directory = args[0]!.replace("PI_SUBAGENT_EXTRA_AGENT_DIRS=", "");
+          expect(directory).not.toBe(args[0]);
+          expect(readdirSync(directory)).toEqual(["rh-explorer.md"]);
+        } else if (runtime === "codex") {
+          expect(args.slice(0, 3)).toEqual(["codex", "-m", model]);
+          expect(args).toContain("read-only");
+        } else {
+          expect(args.slice(0, 5)).toEqual(["claude", "-n", "rh-pl-42-api", "--model", model]);
+          expect(tools(args)).toContain("Agent");
+          expect(tools(args)).not.toContain("Write");
+        }
+      }));
+    }
+  });
+
+  test("a planner requires an issue and a configured seat", () => {
+    withHome(undefined, home => {
+      const result = argv(home, "planner", "--repository-id", "1", "--issue", "42", "--json");
+      expect([result.status, result.stdout, JSON.parse(result.stderr).error]).toEqual([1, "", "seat_not_configured"]);
+    });
+    withHome({ ...DEFAULT_SEATS_CONFIG, planner: DEFAULT_SEATS_CONFIG.reviewer }, home => {
+      for (const flags of [[], ["--pr", "99"], ["--issue", "42", "--pr", "99"], ["--issue", "42", "--release", "0050"]]) {
+        const result = argv(home, "planner", "--repository-id", "1", "--json", ...flags);
+        expect([result.status, result.stdout, JSON.parse(result.stderr).error]).toEqual([1, "", "pane_name_invalid"]);
+      }
+    });
+    expect(seatPaneName({ prefix: "rh", seat: "planner", issue: "42" })).toBe("rh-pl-42");
+    expect(() => seatPaneName({ prefix: "rh", seat: "planner", issue: "0" })).toThrow(expect.objectContaining({ code: "pane_name_invalid" }));
+  });
+
+  test("a Claude planner keeps its configuration in saving and hyper modes", () => {
+    const planner = { ...DEFAULT_SEATS_CONFIG.reviewer, model: "sonnet", advisor_model: "fable", effort: "medium" };
+    const seats = { ...DEFAULT_SEATS_CONFIG, planner };
+    const quota = seatAccountQuotas([], seats.routing);
+    for (const mode of ["saving", "hyper"] as const) {
+      expect(effectiveSeatConfig("planner", seats, { ...quota, claude: { ...quota.claude, mode } })).toEqual(planner);
+    }
   });
 
   test("seats launch opens the seats argv launch in a Herdr.app tab and fails closed without a space or a tab (#3166)", () => {

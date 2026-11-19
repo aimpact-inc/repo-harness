@@ -1,6 +1,6 @@
 import { AGENT_RUNTIME_CAPABILITIES, decodeAgentsSettings, type AgentsSettingsV1 } from '../../core/board/agents-settings';
 import { isReviewRuntimeId } from '../../core/review/review-runtimes';
-import { DEFAULT_SEATS_CONFIG, FRONTEND_SEAT_IDS, ROUTING_CLASSES, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, WORKER_SEAT_IDS, decodeSeatsSettings, type SeatsConfigV1, type SeatsSettingsRequestV1, type SeatsSettingsV1 } from '../../core/board/seats-settings';
+import { DEFAULT_SEATS_CONFIG, FRONTEND_SEAT_IDS, PLANNER_TOOLS, ROUTING_CLASSES, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, WORKER_SEAT_IDS, decodeSeatsSettings, type SeatsConfigV1, type SeatsSettingsRequestV1, type SeatsSettingsV1 } from '../../core/board/seats-settings';
 import { SEAT_RECOMMENDED_MODELS } from '../../core/board/recommended-models';
 import type { DocumentationLanguage, DocumentationLanguageReader, DocumentationLanguageWriter, LanguageRead, LanguageReader, LanguageWriter, ReportingHost, ReportingPreset } from '../language-settings';
 import type { OperatorApiErrorV1 } from '../operator-api-error';
@@ -57,6 +57,7 @@ function seatsRanges(enabled: readonly string[]) {
     seats: {
       orchestrator: { models: SEAT_RECOMMENDED_MODELS.orchestrator, fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all.filter(tool => tool !== 'edit') },
       advisor: { models: SEAT_RECOMMENDED_MODELS.advisor, fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all.filter(tool => tool !== 'gh') },
+      planner: { models: SEAT_RECOMMENDED_MODELS.planner, fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: PLANNER_TOOLS },
       worker: { models: SEAT_RECOMMENDED_MODELS.worker, fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all },
       'worker-deep': { models: SEAT_RECOMMENDED_MODELS['worker-deep'], fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all },
       'worker-important': { models: SEAT_RECOMMENDED_MODELS['worker-important'], fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all },

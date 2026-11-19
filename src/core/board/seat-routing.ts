@@ -1,6 +1,6 @@
 import { AGY_QUOTA_ACCOUNTS, weeklyRemainingPercent, type QuotaAccount, type QuotaAccountReport, type QuotaState } from './quota';
 import { SHIPPED_MODEL_IDS } from './recommended-models';
-import { PI_CODEX_MODEL_PREFIX, ROUTING_CLASSES, SEAT_IDS, isPiCodexSeat, isReviewSeat, unavailablePiSeat, type CodexCreditMode, type RoutingClass, type SeatConfigV1, type SeatId, type SeatRoutingV1, type SeatsConfigV1 } from './seats-settings';
+import { PI_CODEX_MODEL_PREFIX, ROUTING_CLASSES, SEAT_IDS, isPiCodexSeat, isPlannerSeat, isReviewSeat, unavailablePiSeat, type CodexCreditMode, type RoutingClass, type SeatConfigV1, type SeatId, type SeatRoutingV1, type SeatsConfigV1 } from './seats-settings';
 
 interface AccountQuota { readonly state: QuotaState; readonly remaining: number | null }
 export interface SeatAccountQuotas {
@@ -90,7 +90,7 @@ export function seatState(id: SeatId, seat: SeatConfigV1, quota: SeatAccountQuot
 export function effectiveSeatConfig<Id extends SeatId>(id: Id, seats: SeatsConfigV1, quota: SeatAccountQuotas): SeatsConfigV1[Id];
 export function effectiveSeatConfig(id: SeatId, seats: SeatsConfigV1, quota: SeatAccountQuotas): SeatConfigV1 | null {
   const configured = seats[id];
-  if (configured === null) return configured;
+  if (configured === null || isPlannerSeat(id)) return configured;
   const seat = configured.runtime === 'claude' && quota.claude.mode === 'saving' ? { ...configured, advisor_model: null } : configured;
   if (seat.runtime === 'claude') {
     const reserved = claudeReserved(quota);

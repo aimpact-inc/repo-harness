@@ -1,11 +1,13 @@
 import {
   DEFAULT_SEATS_CONFIG,
+  PLANNER_TOOLS,
   ROUTING_CLASSES,
   ROUTING_KEYS,
   SEAT_IDS,
   SEAT_SCAFFOLD_SUB_AGENTS,
   decodeSeatsSettings,
   decodeSeatsSettingsResult,
+  seatTakesFleet,
   type SeatConfigV1,
   type RoutingClass,
   type OptionalSeatId,
@@ -138,6 +140,12 @@ export function setPiSubAgentModel(draft: SeatsConfigV1, role: SeatScaffoldSubAg
 export const GATEKEEPER_FALLBACK_STARTER: SeatConfigV1 = Object.freeze({
   runtime: 'pi', model: DEFAULT_SEATS_CONFIG['worker-light']!.model, advisor_model: null, effort: null, tools: DEFAULT_SEATS_CONFIG.gatekeeper.tools, fleet: [],
 });
+
+export function plannerStarter(ranges: SeatsSettingsV1['ranges']): SeatConfigV1 | null {
+  const recommended = ranges.seats.planner.models.find(entry => ranges.runtimes.some(runtime => runtime.id === entry.runtime && runtime.enabled));
+  if (recommended === undefined) return null;
+  return { ...recommended, advisor_model: null, effort: null, tools: PLANNER_TOOLS, fleet: seatTakesFleet(recommended) ? ['explorer'] : [] };
+}
 
 /** An optional seat set to null leaves the routes, since the section refuses a route that names an unconfigured seat. */
 export function setOptionalSeat(draft: SeatsConfigV1, id: OptionalSeatId, seat: SeatConfigV1 | null): SeatsConfigV1 {

@@ -2,7 +2,7 @@
 // the seat brief. Each limit names what the host does with it, so the output
 // never claims a limit that the host cannot apply.
 import { PANE_PREFIX } from '../terminal/pane-prefix';
-import { isReviewSeat, isWorkerSeat, seatTakesFleet, type LaunchSeatId, type SeatConfigV1, type SeatTool } from './seats-settings';
+import { isPlannerSeat, isReviewSeat, isWorkerSeat, seatTakesFleet, type LaunchSeatId, type SeatConfigV1, type SeatTool } from './seats-settings';
 import { SEAT_EFFORT_ENV, SEAT_ENV, SEAT_MODEL_ENV, SEAT_REPOSITORY_ENV, isResetSeat } from './seat-reset';
 
 /** `seats`: the stored section. `defaults`: no section, so `DEFAULT_SEATS_CONFIG`. */
@@ -134,6 +134,14 @@ function roleParagraphs(seat: LaunchSeatId, config: SeatConfigV1, fleet: readonl
       evidence,
     ];
   }
+  if (isPlannerSeat(seat)) {
+    return [
+      'You are the planner seat. Read the issue and the relevant code. Research the architecture, weigh trade-offs, and give your judgment. Produce an implementation skeleton with the affected files and interfaces, a delete list, a forbidden-additions list, and checks that prove the result.',
+      'Open the plan with `RECOMMENDATION: <one sentence> — confidence: HIGH|MEDIUM|LOW`. Write the plan only to the caller-provided scratch file outside every Git repository and worktree, such as `/tmp/rh-plans/...`. Do not choose an output path yourself. Do not edit source, commit, push, write to GitHub, or message a worker.',
+      fleet.length === 0 ? 'Gather evidence yourself. Do not call sub-agents.'
+        : `Use the configured read-only sub-agents ${roleList(fleet, name)} in parallel to gather codebase context in distinct scopes. Keep judgment and synthesis for yourself. Call no other agent type.`,
+    ];
+  }
   if (isReviewSeat(seat)) {
     // The coordinator publishes the round with `rh review collect` from the receipt the seat prints (#2838).
     return [`You are the ${seat} seat. Perform a read-only review of the assigned PR. Do not edit files, commit, push, or write to GitHub. Report the verdict first, then the findings and evidence.`,
@@ -155,12 +163,12 @@ const KEEP_YOURSELF = {
 
 /**
  * `fleet` is the list that the brief names.
- * Each tool group that the host does not fully enforce goes into a keep-yourself paragraph.
+ * The planner brief already defines its file write rule.
  */
 function brief(seat: LaunchSeatId, config: SeatConfigV1, fleet: readonly string[], limits: readonly SeatLimitV1[], name: RoleName = role => role): string {
   const kept = (Object.keys(KEEP_YOURSELF) as (keyof typeof KEEP_YOURSELF)[]).flatMap((level) => {
     const groups = limits.flatMap(limit => (limit.level === level && limit.subject !== 'fleet' && limit.subject !== 'hook'
-      ? [GROUP_TEXT[limit.subject]] : []));
+      && !(isPlannerSeat(seat) && limit.subject === 'edit') ? [GROUP_TEXT[limit.subject]] : []));
     return groups.length === 0 ? [] : [`${KEEP_YOURSELF[level]} ${groups.join(' ')}`];
   });
   return [...roleParagraphs(seat, config, fleet, name), ...kept].join('\n\n');
@@ -252,11 +260,12 @@ function codexLaunch(seat: LaunchSeatId, config: SeatConfigV1): Omit<SeatLaunchV
 
 function piLaunch(seat: LaunchSeatId, config: SeatConfigV1, roleDirectory: string | undefined, hookExtension: string | undefined): Omit<SeatLaunchV1, 'protocol' | 'kind' | 'seat' | 'runtime' | 'source'> {
   const review = isReviewSeat(seat);
+  const excludeEdits = review || isPlannerSeat(seat);
   // Pi's denylist blocks the edit/write tools; shell paths stay open. pi-subagents does not refuse a role outside the fleet.
   const limits: SeatLimitV1[] = [
     ...OFF_GROUPS(config).map(group => ({
       subject: group,
-      level: review && group === 'edit' ? pathLevel(group, 'enforced', true) : 'instructions_only' as const,
+      level: excludeEdits && group === 'edit' ? pathLevel(group, 'enforced', true) : 'instructions_only' as const,
     })),
     ...(seatTakesFleet(config) ? [{ subject: 'fleet' as const, level: 'instructions_only' as const }] : []),
     // `--no-extensions` drops the rh hook bridge; the explicit `-e` brings it back, so the PreToolUse routes run in the seat.
@@ -267,7 +276,8 @@ function piLaunch(seat: LaunchSeatId, config: SeatConfigV1, roleDirectory: strin
   return {
     argv: [...seatEnv(roleDirectory === undefined ? [] : [`${PI_EXTRA_AGENT_DIRS_ENV}=${roleDirectory}`]), 'pi', ...(config.model === null ? [] : ['--provider', config.model.slice(0, slash), '--model', config.model.slice(slash + 1)]),
       ...(config.effort === null ? [] : ['--thinking', config.effort]),
-      ...(review ? ['--exclude-tools', 'edit,write', '--no-extensions',
+      ...(excludeEdits ? ['--exclude-tools', 'edit,write'] : []),
+      ...(review ? ['--no-extensions',
       ...(hookExtension === undefined ? [] : ['-e', hookExtension]), '--no-skills',
       '--no-prompt-templates', '--no-context-files', '--no-mcp'] : []), '--append-system-prompt', text],
     brief: text, limits,
@@ -290,7 +300,7 @@ export function buildSeatLaunch(seat: LaunchSeatId, config: SeatConfigV1, source
   return { protocol: 1, kind: 'seat_launch', seat, runtime: config.runtime, source, ...launch };
 }
 
-const PANE_ROLE = { orchestrator: 'orch', advisor: 'adv', worker: 'w', 'worker-deep': 'w', 'worker-important': 'w', 'worker-important-fast': 'w', 'worker-light': 'w', gatekeeper: 'gk', 'gatekeeper-deep': 'gd', reviewer: 'rv' } as const;
+const PANE_ROLE = { orchestrator: 'orch', advisor: 'adv', planner: 'pl', worker: 'w', 'worker-deep': 'w', 'worker-important': 'w', 'worker-important-fast': 'w', 'worker-light': 'w', gatekeeper: 'gk', 'gatekeeper-deep': 'gd', reviewer: 'rv' } as const;
 const PANE_NAME_MAX = 32;
 const POSITIVE = /^[1-9][0-9]*$/u;
 const WORD = /^[a-z][a-z0-9]*$/u;
@@ -312,7 +322,7 @@ export interface SeatPaneNameInput {
 
 /**
  * The hc `--name` and Claude `-n` of a seat pane: `<prefix>-<role>[-<item>][-<qualifier>]`. The worker item is its
- * issue or `rel<digits>`; the reviewer item is its PR. The name carries no state, so it never goes stale.
+ * issue or `rel<digits>`; the planner item is its issue; the reviewer item is its PR.
  */
 export function seatPaneName(input: SeatPaneNameInput): string {
   const fail = (why: string): never => { throw new SeatPaneNameError(`Pane name: ${why}.`); };
@@ -331,6 +341,10 @@ export function seatPaneName(input: SeatPaneNameInput): string {
     if (pr === undefined || !POSITIVE.test(pr)) fail(`a ${seat} needs a PR, a positive decimal integer`);
     if (issue !== undefined || release !== undefined) fail(`a ${seat} takes only a PR`);
     item = pr;
+  } else if (isPlannerSeat(seat)) {
+    if (issue === undefined || !POSITIVE.test(issue)) fail('a planner needs an issue, a positive decimal integer');
+    if (pr !== undefined || release !== undefined) fail('a planner takes only an issue');
+    item = issue;
   } else if (issue !== undefined || pr !== undefined || release !== undefined || qualifier !== undefined) {
     fail(`the ${seat} pane takes no item and no qualifier`);
   }
@@ -342,10 +356,11 @@ export function seatPaneName(input: SeatPaneNameInput): string {
 
 /**
  * The Herdr.app tab of a new seat pane, before the fullness suffix: the orchestrator tab, the worker tab of its parent
- * issue (`other` without one), or the review tab. A full tab gets the next number, for example `#1000 2`.
+ * issue (`other` without one), the plan tab, or the review tab. A full tab gets the next number, for example `#1000 2`.
  */
 export function seatTabName(seat: LaunchSeatId, parent?: string): string {
   if (parent !== undefined && !POSITIVE.test(parent)) throw new SeatPaneNameError('Tab name: the parent must be a positive decimal integer.');
+  if (isPlannerSeat(seat)) return 'plan';
   if (isReviewSeat(seat)) return 'review';
   if (isWorkerSeat(seat)) return parent === undefined ? 'other' : `#${parent}`;
   return 'orch';

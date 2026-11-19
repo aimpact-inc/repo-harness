@@ -183,13 +183,48 @@ describe('agents page seats section', () => {
     expect(request_id).toMatch(UUID);
     expect(expected_revision).toMatch(/^sha256:/u);
     expect(seats.advisor.fleet).toEqual(['explorer']);
-    expect(Object.keys(seats)).toEqual(['orchestrator', 'advisor', 'worker', 'worker-deep', 'worker-important', 'worker-important-fast', 'worker-light', 'gatekeeper', 'gatekeeper-deep', 'gatekeeper-fallback', 'reviewer', 'routing']);
+    expect(Object.keys(seats)).toEqual(['orchestrator', 'advisor', 'planner', 'worker', 'worker-deep', 'worker-important', 'worker-important-fast', 'worker-light', 'gatekeeper', 'gatekeeper-deep', 'gatekeeper-fallback', 'reviewer', 'routing']);
     expect(document.querySelector('[data-seats-saved]')?.textContent).toContain('Running panes do not change');
 
     await click(pane('orchestrator'));
     expect(allow('explorer').disabled).toBe(false);
     expect(allow('fast-worker')).toBeNull();
     expect(allow('Edit files').disabled).toBe(true);
+  });
+
+  test.each([
+    [true, 'pi', 'magpie/agy-cli/gemini-4-carbon'],
+    [false, 'codex', 'gpt-6.2-astra'],
+  ] as const)('the planner switch saves the starter for Pi enabled = %s and can turn it off', async (piEnabled, runtime, model) => {
+    const stores = settingsStores(NOW, 'busy');
+    if (piEnabled) {
+      const initial = await stores.agents.read();
+      if (initial.state !== 'ok') throw new Error('fixture read failed');
+      const enabled = await stores.agents.write({ request_id: crypto.randomUUID(), expected_revision: initial.settings.config.revision,
+        changes: [{ runtime: 'pi', enabled: true, uses: [] }] });
+      expect(enabled.state).toBe('saved');
+    }
+    await mount({ ...seatsProps([]), readAgentsSettings: stores.agents.read, writeAgentsSettings: stores.agents.write,
+      readSeatsSettings: stores.seats.read, writeSeatsSettings: stores.seats.write });
+    await click(buttonWithText('Planner'));
+    const card = '[data-seat-card="planner"]';
+    const configured = () => document.querySelector<HTMLButtonElement>(`${card} [aria-label="Configured"]`)!;
+    const storedPlanner = async () => {
+      const read = await stores.seats.read();
+      if (read.state !== 'ok') throw new Error('fixture read failed');
+      return read.settings.config.planner;
+    };
+    expect(configured().getAttribute('aria-checked')).toBe('false');
+    await click(configured());
+    expect(document.querySelector(`${card} [data-seat-launch]`)?.textContent).toContain('rh seats argv planner --repository-id <repository-id> --issue <n>');
+    expect(allow('Edit files')).toBeNull();
+    expect(allow('GitHub writes')).toBeNull();
+    expect(allow('explorer').getAttribute('aria-checked')).toBe('true');
+    await click(seatsSave());
+    expect(await storedPlanner()).toEqual({ runtime, model, advisor_model: null, effort: null, tools: ['net', 'read', 'shell'], fleet: ['explorer'] });
+    await click(configured());
+    await click(seatsSave());
+    expect(await storedPlanner()).toBeNull();
   });
 
   test('Claude advisor choices save one field, clear when off, and clear when the seat leaves Claude', async () => {
@@ -348,7 +383,7 @@ describe('agents page seats section', () => {
 
   test('every seat has a card; a review seat shows only its read, shell and network groups and no fleet; Claude mode stays unknown while quota is not read', async () => {
     await mount(seatsProps([]));
-    expect(all('[role="group"][aria-label="Seat"] button')).toHaveLength(11);
+    expect(all('[role="group"][aria-label="Seat"] button')).toHaveLength(12);
     await click(pick('gatekeeper'));
     expect(document.querySelector('[data-seat-card]')?.getAttribute('data-seat-card')).toBe('gatekeeper');
     expect(all('[data-seat-tools] [role="switch"]').map(node => node.getAttribute('aria-label'))).toEqual(['Allow Read code', 'Allow Shell', 'Allow Network']);

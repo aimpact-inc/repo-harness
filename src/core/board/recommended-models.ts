@@ -26,6 +26,7 @@ const REVIEW = Object.freeze([SOL, entry('codex', 'gpt-6.2-astra'), GLM_FLASH]);
 export const SEAT_RECOMMENDED_MODELS: Readonly<Record<SeatId, readonly SeatModelEntryV1[]>> = Object.freeze({
   orchestrator: Object.freeze([OPUS]),
   advisor: Object.freeze([OPUS, entry('claude', 'fable'), entry('pi', 'magpie/agy-cli/gemini-4-neon'), entry('pi', 'magpie/agy-cli/gemini-4-carbon')]),
+  planner: Object.freeze([entry('pi', 'magpie/agy-cli/gemini-4-carbon'), entry('pi', 'magpie/agy-cli/gemini-4-neon'), entry('codex', 'gpt-6.2-astra'), OPUS]),
   worker: WORKER,
   'worker-deep': WORKER,
   'worker-important': WORKER,

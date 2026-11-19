@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { delimiter, dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { CLAUDE_BUILTIN_AGENT_TYPES, SeatPaneNameError, buildSeatLaunch, seatPaneName, seatTabName, type SeatLaunchV1 } from '../../core/board/seat-launch';
-import { LAUNCH_SEAT_IDS, RETIRED_SEAT_FLEET_ROLES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, seatsConfigInvalidMessage, isReviewSeat, isWorkerSeat, unavailablePiSeat, type LaunchSeatId, type SeatConfigV1, type SeatsConfigV1 } from '../../core/board/seats-settings';
+import { LAUNCH_SEAT_IDS, RETIRED_SEAT_FLEET_ROLES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, seatsConfigInvalidMessage, isPlannerSeat, isReviewSeat, isWorkerSeat, unavailablePiSeat, type LaunchSeatId, type SeatConfigV1, type SeatsConfigV1 } from '../../core/board/seats-settings';
 import { claudeReserved, deepGatekeeperRepeatsGatekeeper, effectiveGatekeeper, effectiveSeatConfig, seatAccount, seatAccountQuotas, seatState, type SeatRouteV1 } from '../../core/board/seat-routing';
 import { AGY_QUOTA_ACCOUNTS, classifyQuotaReading, type QuotaAccount, type QuotaReading } from '../../core/board/quota';
 import { readAgyQuota, readClaudeQuota, readCodexQuota } from '../../effects/board/quota';
@@ -85,6 +85,9 @@ function seatLabels(seat: LaunchSeatId, input: SeatLabelInput): HcLabels | undef
   }
   if (isReviewSeat(seat) && (input.pr === undefined || input.issue !== undefined || release !== undefined)) {
     throw new SeatPaneNameError(`The ${seat} seat needs --pr and takes no --issue or --release.`);
+  }
+  if (isPlannerSeat(seat) && (input.issue === undefined || input.pr !== undefined || release !== undefined)) {
+    throw new SeatPaneNameError('The planner seat needs --issue and takes no --pr or --release.');
   }
   if (repositoryId === undefined) {
     if (isReviewSeat(seat) && input.parent === undefined && qualifier === undefined) return undefined;
@@ -219,7 +222,7 @@ async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, configur
   }
   const unavailable = unavailablePiSeat(seat, seats.routing);
   if (unavailable !== null) throw new SeatsCommandError('seat_provider_unavailable', `The ${id} seat cannot launch: ${unavailable}. See the quota routes.`);
-  return { seat, modeKnown: account === null || quota[account].remaining !== null, claudeSaving: quota.claude.mode === 'saving' };
+  return { seat, modeKnown: account === null || quota[account].remaining !== null, claudeSaving: !isPlannerSeat(id) && quota.claude.mode === 'saving' };
 }
 
 type SeatLaunchResult = SeatLaunchV1 & {
@@ -273,15 +276,15 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
     if (planned !== undefined) throw new SeatsCommandError('owner_exception_invalid', 'A planned gatekeeper launch takes no owner exception.');
     checkOwnerException(labels.ownerException, cwd, env);
   }
+  const labelSet = seatLabels(id, labels);
   // A planned gatekeeper route reserves no Claude seat while Claude is saving or exhausted, so its launch is never a
   // Claude seat in saving mode.
   const { seat: effective, modeKnown, claudeSaving } = id === 'gatekeeper' && planned !== undefined ? { seat: plannedGatekeeper(planned), modeKnown: true, claudeSaving: false }
     : await quotaCheckedSeat(id, seats, configured, env, labels.ownerException);
   if (effective.runtime === 'pi') await assertPiShell(env, cwd);
-  const labelSet = seatLabels(id, labels);
   // The pane name needs the registry prefix, so it comes only with the seat labels.
   const name = labels.repositoryId === undefined ? null : seatPaneName({
-    prefix: panePrefix(cwd, env), seat: id, issue: isWorkerSeat(id) ? labels.issue : undefined,
+    prefix: panePrefix(cwd, env), seat: id, issue: isWorkerSeat(id) || isPlannerSeat(id) ? labels.issue : undefined,
     pr: isReviewSeat(id) ? labels.pr : undefined, release: labels.release, qualifier: labels.qualifier,
   });
   const tab = labels.repositoryId === undefined ? null : seatTabName(id, labels.parent);
@@ -472,8 +475,8 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
       try {
         labelOwnTerminal(seat, { repositoryId: options.repositoryId, issue: options.issue, pr: options.pr, parent: options.parent, ownerException: options.ownerException });
       } catch (error) {
-        if (!(error instanceof SeatsCommandError || error instanceof HerdrCoreError)) throw error;
-        const code = error instanceof SeatsCommandError ? error.code : 'label_failed';
+        if (!(error instanceof SeatsCommandError || error instanceof SeatPaneNameError || error instanceof HerdrCoreError)) throw error;
+        const code = error instanceof HerdrCoreError ? 'label_failed' : error.code;
         process.stderr.write(`${JSON.stringify({ ok: false, error: code, message: `The seat did not start: ${error.message}` })}\n`);
         process.exitCode = 1;
       }
