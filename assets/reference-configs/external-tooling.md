@@ -7,7 +7,7 @@ skill routing lives in `docs/reference-configs/agentic-development-flow.md`.
 - `hai-stack` supplies `geju` for live, pre-contract exploration; only its frozen output enters a contract
 - Codex automation requires `health`, `check`, and `mermaid` from `~/.codex/skills`
 - `CodeGraph` is required agent readiness for code navigation and impact tracing
-- repo-harness's packaged `agent_fleet` supplies the delegation loop's global agent definitions (`explorer`, `deep-reasoner`, `fast-worker`, `gatekeeper`, `root-cause-prover`, `harness-evaluator`) for both hosts
+- repo-harness's packaged `agent_fleet` supplies the delegation loop's global agent definitions (`explorer`, `deep-reasoner`, `harness-evaluator`) for both hosts
 
 Waza is Codex-first in this contract. `~/.codex/skills` is the Codex runtime
 source, while `~/.agents/skills` is only the skills CLI staging/cache path used
@@ -756,8 +756,15 @@ bun add -g @colbymchenry/codegraph@1.6.2 && codegraph sync . && codegraph status
 `.ai/harness/policy.json` under `external_tooling.agent_fleet` and detected by
 `check-agent-tooling.sh`. The single authored source is
 `package:agents/fleet`; it ships inside the npm package and never requires a
-network fetch. The managed list is `explorer`, `deep-reasoner`, `fast-worker`,
-`deep-worker`, `gatekeeper`, `root-cause-prover`, and `harness-evaluator`.
+network fetch. The managed list is `explorer`, `deep-reasoner` and
+`harness-evaluator`.
+
+In-process sub-agent work serves cost control and read-only concurrency only,
+such as an `explorer` fan-out. Each harness maps it to its own lightweight
+family model: `claude` uses `haiku`/`sonnet`, `codex` uses
+`gpt-6-luna`/`gpt-6.1-terra`, `agy`/Gemini uses
+`gemini-4-carbon`/`gemini-4-neon`, and `pi` uses its configured setting. Code
+writes, cross-family planning and formal acceptance reviews run in Herdr seats.
 
 ### Two targets, one source
 
@@ -782,25 +789,17 @@ mapping.
 | `sonnet`, `haiku` | `gpt-6-luna` | `low`, `medium`, `high`, `xhigh`, `max` | same string, unchanged |
 | `fable` | `gpt-6.2-sol` | `low`, `medium`, `high`, `xhigh`, `max` | same string, unchanged |
 
-Seven per-agent target overrides are applied after tuple validation, on top of
+Three per-agent target overrides are applied after tuple validation, on top of
 the family row above, and are the only model/effort remaps in the generator:
 `explorer` (`sonnet`/`medium`) targets `gpt-6-luna` at `high` reasoning;
 `deep-reasoner` (`opus`/`xhigh`) targets `gpt-6.2-astra` at `high` reasoning;
-`fast-worker` (`sonnet`/`high`) targets `gpt-6.2-sol` at `medium` reasoning;
-`deep-worker` (`opus`/`high`) targets `gpt-6.2-sol` at `high` reasoning;
-`gatekeeper` (`opus`/`high`) targets `gpt-6.2-astra` at `medium` reasoning;
-`root-cause-prover` (`opus`/`xhigh`) targets `gpt-6.2-astra` at `high` reasoning;
 `harness-evaluator` (`opus`/`high`) targets `gpt-6.2-astra` at `medium` reasoning.
 `orchestrator` has no Codex target.
 
-`fast-worker`, `deep-worker`, `root-cause-prover`, and `harness-evaluator`
-receive `sandbox_mode = "workspace-write"`; every other role receives
+`harness-evaluator` receives `sandbox_mode = "workspace-write"`; every other role receives
 `sandbox_mode = "read-only"`. Current assignments are explorer
-(`sonnet/medium`), deep-reasoner (`opus/xhigh`), fast-worker (`sonnet/high`),
-deep-worker (`opus/high`), gatekeeper (`opus/high`), root-cause-prover
-(`opus/xhigh`), and harness-evaluator (`opus/high`). Root-cause-prover's prompt further limits
-writes to bugfix evidence inside the active contract's allowed paths;
-harness-evaluator runs existing skill/adoption surfaces only when both repo and
+(`sonnet/medium`), deep-reasoner (`opus/xhigh`) and harness-evaluator
+(`opus/high`). Harness-evaluator runs existing skill/adoption surfaces only when both repo and
 HOME pass the runner's disposable boundary: skills uses `--require-disposable`,
 while adoption uses one `--run-adoption-profile` invocation that injects the
 validated repo/HOME into inspector and init dry-run. Guarded skills overrides
@@ -973,7 +972,7 @@ rh run install-agent-fleet
 The installer resolves `agents/fleet` from its authoritative helper source path,
 not from the target repository's current working directory. There is no source
 override, curl path, remote fallback, or alternate authority. It validates all
-six source files before mutating any target; a missing, malformed, mismatched,
+three source files before mutating any target; a missing, malformed, mismatched,
 or unmapped source makes the whole run fail closed and leaves installed files
 untouched.
 
@@ -1005,7 +1004,7 @@ the current bytes once:
 rh run install-agent-fleet --accept-user-managed
 ```
 
-The acknowledgement validates all twelve target files before writing
+The acknowledgement validates all six target files before writing
 `user_managed` path records into the host-config ledger
 (`~/.repo-harness/config/ledger.json`). Claude files must have
 well-formed frontmatter with the target role identity, model, effort, and body;
@@ -1039,23 +1038,15 @@ generation.
 
 ### Uninstall
 
-There is no uninstall command. Removing the fleet means deleting the fifteen
+There is no uninstall command. Removing the fleet means deleting the six
 managed files by hand:
 
 ```text
 ~/.claude/agents/explorer.md
 ~/.claude/agents/deep-reasoner.md
-~/.claude/agents/fast-worker.md
-~/.claude/agents/deep-worker.md
-~/.claude/agents/gatekeeper.md
-~/.claude/agents/root-cause-prover.md
 ~/.claude/agents/harness-evaluator.md
 ~/.codex/agents/explorer.toml
 ~/.codex/agents/deep-reasoner.toml
-~/.codex/agents/fast-worker.toml
-~/.codex/agents/deep-worker.toml
-~/.codex/agents/gatekeeper.toml
-~/.codex/agents/root-cause-prover.toml
 ~/.codex/agents/harness-evaluator.toml
 ```
 

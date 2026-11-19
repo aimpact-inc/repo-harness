@@ -339,13 +339,11 @@ module is in the title so that a list view shows the write scopes.
 - Use the host's dispatch mechanism (an hc terminal in a Herdr.app pane,
   or a top-level host session). A dispatched agent has its own process. A
   sub-agent runs inside a seat process and is not a dispatch target. You
-  may call only the read-only sub-agents `gatekeeper`, `explorer` and
-  `deep-reasoner`. A writer (`fast-worker`, `deep-worker`,
-  `root-cause-prover`) and the Codex cross-review always run in a seat, for
-  worktree isolation and one writer per file. You do not review a PR
-  yourself. An independent `gatekeeper` sub-agent may review a PR that you
-  dispatched; route every other review of it to another seat. A dispatch
-  does not grant publication, deletion or credential authority.
+  may call only the read-only sub-agents `explorer` and `deep-reasoner`.
+  Every write, the gatekeeper review and the Codex cross-review run in a
+  seat, for worktree isolation and one writer per file. You do not review
+  a PR yourself; route each review of it to another seat. A dispatch does
+  not grant publication, deletion or credential authority.
   For the Herdr pane topology, follow
   [Herdr Dispatch](https://github.com/aimpact-inc/repo-harness/blob/main/docs/reference-configs/herdr-notify.md#herdr-dispatch).
 - Open every worker and reviewer seat in a Herdr.app tab, so the owner

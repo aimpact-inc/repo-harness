@@ -88,7 +88,8 @@ When a task requires broad research, repo archaeology, multi-source synthesis, o
 - Implementation sub-agents may run scoped typecheck and affected tests in their own worktree. They commit early and return their check results. An evidence role whose task is a named check, such as a root-cause reproduction, still runs that check and does not commit.
 - The parent agent owns task management, conflict resolution, build and post-merge integration verification, including typecheck and affected tests.
 - After integration, the parent removes each sub-agent worktree and branch whose commits are in the task branch and whose checkout is clean. It also removes the intermediate build output and temporary files that the work created. Other deletion still needs the user.
-- The orchestrator seat is a long-lived session that starts from `rh seats argv orchestrator`, not a sub-agent. It may call the read-only roles `explorer` and `deep-reasoner` as sub-agents. It dispatches writers (`fast-worker`, `deep-worker`, `root-cause-prover`), the gatekeeper and the Codex cross-review only to Herdr seats, for worktree isolation and one writer per file. It edits no product code.
+- The orchestrator seat is a long-lived session that starts from `rh seats argv orchestrator`, not a sub-agent. It may call the read-only roles `explorer` and `deep-reasoner` as sub-agents. It dispatches the gatekeeper, every writer and the Codex cross-review only to Herdr seats, for worktree isolation and one writer per file. It edits no product code.
+- In-process sub-agents serve cost control and read-only concurrency only, such as an `explorer` fan-out. Each harness maps them to its own lightweight family model: `claude` uses `haiku`/`sonnet`, `codex` uses `gpt-6-luna`/`gpt-6.1-terra`, `agy`/Gemini uses `gemini-4-carbon`/`gemini-4-neon`, and `pi` uses its configured setting. Code writes, cross-family planning and formal acceptance reviews run in Herdr seats.
 
 ## Peer Harness Collaboration
 
