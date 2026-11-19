@@ -28,14 +28,14 @@ executes them or stops and asks.
 A **seat** is a process seat: the orchestrator, the advisor or a worker. A
 **sub-agent** is an `agents/fleet/` role that runs inside a seat process.
 The orchestrator calls only the read-only sub-agents `explorer` and
-`deep-reasoner`. The gatekeeper, the writers, `root-cause-prover`
-included, and the Codex cross-review run in Herdr seats.
+`deep-reasoner`. The gatekeeper, every writer and the Codex cross-review
+run in Herdr seats.
 A **claim role** is the GitHub role that a claim gives: coordinator,
 writer, head owner, integrator or acceptor.
 
 | Agent | Suggested model | Claim roles it holds | Never does |
 |---|---|---|---|
-| Orchestrator | Any host's long-lived top-level session with network access, started from `rh seats argv orchestrator` | Coordinator of the parent issue; integrator. It triages intake (`DO` / `CONSOLIDATE` / `SHELVE`), dispatches bundles, launches reviews and merges | Implements a child issue in its own sub-tree; calls a writer sub-agent (`fast-worker`, `deep-worker`, `root-cause-prover`) or runs the Codex cross-review as a sub-agent |
+| Orchestrator | Any host's long-lived top-level session with network access, started from `rh seats argv orchestrator` | Coordinator of the parent issue; integrator. It triages intake (`DO` / `CONSOLIDATE` / `SHELVE`), dispatches bundles, launches reviews and merges | Implements a child issue in its own sub-tree; calls a writer sub-agent or runs the Codex cross-review as a sub-agent |
 | Advisor | A long-lived session beside the orchestrator, started from `rh seats argv advisor` | None. It is the owner interface, writes the parent bundle plan, audits triage and merges every 2 h and gives its half of a joint decision (`references/advisor.md`) | Writes to GitHub, commits, sends a message to a worker, decides alone |
 | Gap reviewer | A different model family from the orchestrator, when one is available | None. Comments on the drafts | Rewrites the split or decides scope |
 | Worker | Any capable coding model | Writer of one issue or PR slot, dispatched by the coordinator; head owner of its PR | Posts its own claim, widens scope, merges, pushes to another owner's branch |
