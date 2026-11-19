@@ -381,7 +381,7 @@ test('a whole-path write refuses a dangling link, the user\'s word to replace th
     [linked, true, `the user's word to replace a file does not reach through a link: ${linked}`],
     [dangling, false, `this path is a link to the missing ${created}, so rh creates nothing through it: ${dangling}`],
     [join(rules, 'english.md'), false, `${rules} is a link below the install root ${join(f.home, '.claude')}`],
-    [join(f.home, '.bun', 'bin', 'rh'), false, `the install root ${join(f.home, '.bun')} is a link to a missing path`],
+    [join(f.home, '.bun', 'bin', 'rh'), false, `${join(f.home, '.bun')} is a link to a missing path`],
   ] as const) expect(() => f.gate().writePaths([write(path, replace)])).toThrow(message);
   expect({ target: readFileSync(target, 'utf8'), created: existsSync(join(f.home, 'dotfiles', 'new')), rules: readdirSync(join(f.home, 'dotfiles', 'rules')), missing: existsSync(join(f.home, 'missing')) })
     .toEqual({ target: 'mine\n', created: false, rules: [], missing: false });
@@ -391,6 +391,16 @@ test('a whole-path write refuses a dangling link, the user\'s word to replace th
   const codex = join(f.home, 'dotfiles', 'codex', 'agents', 'a.md');
   expect(f.gate().writePaths([write(join(f.home, '.codex', 'agents', 'a.md'))])).toEqual([codex]);
   expect(Object.keys(f.ledger().paths)).toEqual([codex]);
+
+  // A dangling link above the innermost root (`~/.claude` for `~/.claude/skills`) refuses a skill write and a delegated one.
+  const g = fixture();
+  symlinkSync(join(g.home, 'missing'), join(g.home, '.claude'));
+  const skill = join(g.home, '.claude', 'skills', 'herdr');
+  const source = mkdtempSync(join(g.home, 'src-'));
+  writeFileSync(join(source, 'SKILL.md'), 'rh\n');
+  expect(() => g.gate().writePaths([{ path: skill, owner: 'core', entry: { type: 'directory', source } }])).toThrow(`${join(g.home, '.claude')} is a link to a missing path`);
+  expect(() => g.gate().delegate([{ path: skill, owner: 'core' }], () => {})).toThrow(`${join(g.home, '.claude')} is a link to a missing path`);
+  expect(existsSync(join(g.home, 'missing'))).toBe(false);
 });
 
 test('a record that an earlier release wrote at a user link keeps the link through refresh, rollback and revert', () => {

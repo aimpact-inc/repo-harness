@@ -515,15 +515,20 @@ function admitWholePath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, ledger: 
 
 /**
  * A write below an install root goes through real directories only (#3266). A link between the root and the leaf puts the
- * entry, and each directory that rh creates for it, outside the root, where no record reaches it. A link at the root itself
- * is the user's layout and stays while it names an existing path.
+ * entry, and each directory that rh creates for it, outside the root, where no record reaches it. A link at the root or above
+ * it (`~/.claude` for the root `~/.claude/skills`) is the user's layout and stays while it names an existing path; a dangling
+ * one would make rh create its missing target.
  */
 function refuseLinkedParents(root: string, path: string): void {
-  if (lstatSync(root, { throwIfNoEntry: false })?.isSymbolicLink() && !statSync(root, { throwIfNoEntry: false })) {
-    throw new HostConfigError('host_config_invalid_path', `the install root ${root} is a link to a missing path, so rh writes nothing below it: ${path}`);
+  const base = resolve(root);
+  for (let ancestor = base; ; ancestor = dirname(ancestor)) {
+    if (lstatSync(ancestor, { throwIfNoEntry: false })?.isSymbolicLink() && !statSync(ancestor, { throwIfNoEntry: false })) {
+      throw new HostConfigError('host_config_invalid_path', `${ancestor} is a link to a missing path, so rh writes nothing below it: ${path}`);
+    }
+    if (dirname(ancestor) === ancestor) break;
   }
-  let component = root;
-  for (const part of relative(root, dirname(resolve(path))).split(sep).filter(Boolean)) {
+  let component = base;
+  for (const part of relative(base, dirname(resolve(path))).split(sep).filter(Boolean)) {
     component = join(component, part);
     const stat = lstatSync(component, { throwIfNoEntry: false });
     if (!stat) return;
