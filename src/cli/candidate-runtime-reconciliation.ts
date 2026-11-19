@@ -10,7 +10,7 @@ import { assertOverridesCarried } from './commands/install';
 import { migrateRuntimeHostConfig } from './installer/install-profile';
 import { migrateInstallState } from './installer/install-state-migration';
 import { pathRecordsDigest, readPathRecords } from '../effects/host-config/path-records';
-import { GLOBAL_RULES_REFRESH_STEP, RETIRED_CLI_LINK_STEP, RETIRED_CLI_REFERENCES_STEP, HERDR_CORE_STEP, runGlobalRuntimeSetup, type GlobalRuntimeResult } from './commands/global-runtime';
+import { GLOBAL_RULES_REFRESH_STEP, RETIRED_AGENT_FLEET_STEP, RETIRED_CLI_LINK_STEP, RETIRED_CLI_REFERENCES_STEP, HERDR_CORE_STEP, runGlobalRuntimeSetup, type GlobalRuntimeResult } from './commands/global-runtime';
 import { assertCandidateReconciliationReceipt, assertInstalledAdapterProjection, CANDIDATE_RECONCILIATION_PROTOCOL, candidatePackageIdentity, consumeCandidateReconciliationCapability, parseCandidateRequest, routeRegistryDigest, type CandidateReconciliationReceipt } from './commands/candidate-reconciliation';
 import { applyInstallSelection, commandPluginRepairLines, rollbackRuntimeHostConfig, migrateInParentTransaction, requireInstallState, resolveRecordedSelection } from './installer/install-profile';
 import { mcpLocalConfigCheck, refusedPaths, registerArchitecturePlugin, selectionLines } from './runtime-transaction';
@@ -95,8 +95,8 @@ export function runCandidateRuntimeReconciliation(
     // did not sync must stay visible with their next action.
     const globalRules = runtime.steps.find(step => step.step === GLOBAL_RULES_REFRESH_STEP);
     if (globalRules) console.error(`[runtime] ${globalRules.status}: ${globalRules.step} - ${globalRules.detail}`);
-    // The hc step result carries its PATH hint when the install dir is not on PATH; the retired-command steps carry their notices.
-    for (const name of ['back up global configuration', HERDR_CORE_STEP, RETIRED_CLI_LINK_STEP, RETIRED_CLI_REFERENCES_STEP]) {
+    // Keep path and recovery notices visible through the parent handoff.
+    for (const name of ['back up global configuration', HERDR_CORE_STEP, RETIRED_AGENT_FLEET_STEP, RETIRED_CLI_LINK_STEP, RETIRED_CLI_REFERENCES_STEP]) {
       const shown = runtime.steps.find(step => step.step === name);
       if (shown) console.error(`[runtime] ${shown.status}: ${shown.step} - ${shown.detail}`);
     }

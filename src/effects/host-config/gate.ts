@@ -196,7 +196,7 @@ export interface HostConfigRevertEntry {
    * With `kept_edited`: `host_config_entry_replaced` when the path holds rh's bytes in another file-system entry (a copy or a
    * restore), `host_config_identity_missing` when its record has no identity (#3266).
    */
-  readonly code?: 'host_config_restore_mismatch' | 'host_config_entry_replaced' | 'host_config_identity_missing';
+  readonly code?: 'host_config_restore_mismatch' | 'host_config_entry_replaced' | 'host_config_identity_missing' | 'host_config_entry_absent' | 'host_config_retired_link';
 }
 
 /** A fragment that an earlier rh version wrote, as its old record names it. */
@@ -289,9 +289,11 @@ export interface HostConfigGate {
    * records that may grant a removal (`readPathRecords`): a `created` entry goes
    * while it is current, a `replaced` file gets the user file back while it
    * still holds rh's bytes, and a `user_managed` record is released. A changed
-   * entry stays with its record and is reported `kept_edited`.
+   * entry stays with its record and is reported `kept_edited`. Retirement
+   * releases edited created claims and keeps unresolved replaced claims with
+   * their vault paths.
    */
-  revertPaths(paths: readonly string[], options?: HostConfigPathOptions): readonly HostConfigRevertEntry[];
+  revertPaths(paths: readonly string[], options?: HostConfigPathOptions & { readonly retire?: boolean }): readonly HostConfigRevertEntry[];
   /**
    * The user's word that they keep each file in `kept`: its record becomes
    * `user_managed` with the file's current hash. Every other `user_managed`
@@ -1031,17 +1033,24 @@ function adoptReplacedPath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, path:
 export function planPathRevert(key: string, record: PathRecord): HostConfigRevertEntry['action'] {
   if (record.kind === 'user_managed') return 'released';
   // A missing entry ends the claim at this read: a file that appears later is not the one that rh wrote.
-  if (observePathEntry(pathRecordEntry(key, record)) === null) return 'released';
+  if (!lstatSync(pathRecordEntry(key, record), { throwIfNoEntry: false })) return 'released';
   if (!pathRecordIsCurrent(key, record)) return 'kept_edited';
   return record.kind === 'replaced' ? 'restored' : 'removed';
 }
 
 /** Describe a whole-path revert, including the proof and recovery copy when the file stays. */
-export function planPathRevertEntry(paths: HostConfigPaths, key: string, record: PathRecord): HostConfigRevertEntry {
+export function planPathRevertEntry(paths: HostConfigPaths, key: string, record: PathRecord, retire = false): HostConfigRevertEntry {
+  const vault = record.backup ? vaultPath(paths, record.backup) : undefined;
+  if (retire && record.link_target !== undefined) {
+    return { path: key, action: 'kept_edited', code: 'host_config_retired_link', vault };
+  }
   const action = planPathRevert(key, record);
+  if (action === 'released' && retire && record.kind === 'replaced') {
+    return { path: key, action: 'kept_edited', code: 'host_config_entry_absent', vault };
+  }
   if (action !== 'kept_edited') return { path: key, action };
   const proof = pathRecordProof(key, record);
-  const entry: HostConfigRevertEntry = { path: key, action, ...(record.backup && { vault: vaultPath(paths, record.backup) }) };
+  const entry: HostConfigRevertEntry = { path: key, action, ...(vault && { vault }) };
   if (proof === 'replaced') return { ...entry, code: 'host_config_entry_replaced' };
   if (proof === 'unproved') return { ...entry, code: 'host_config_identity_missing' };
   return entry;
@@ -1088,7 +1097,7 @@ export function retireThenDestroy(paths: HostConfigPaths, ledger: HostConfigLedg
   return state;
 }
 
-function revertWholePaths(paths: HostConfigPaths, only: readonly string[], options: HostConfigPathOptions): HostConfigRevertEntry[] {
+function revertWholePaths(paths: HostConfigPaths, only: readonly string[], options: HostConfigPathOptions & { readonly retire?: boolean }): HostConfigRevertEntry[] {
   const ledger = readLedger(paths);
   const report: HostConfigRevertEntry[] = [];
   /** The entries of the dropped records: a created directory goes only with an entry inside it. */
@@ -1097,19 +1106,26 @@ function revertWholePaths(paths: HostConfigPaths, only: readonly string[], optio
   for (const key of new Set(only.map((path) => hostPathKey(paths, path)))) {
     const record = ledger.paths[key];
     if (!record) continue;
-    const planned = planPathRevertEntry(paths, key, record);
+    const planned = planPathRevertEntry(paths, key, record, options.retire);
     report.push(planned);
     const { action } = planned;
-    if (action === 'kept_edited') continue;
+    const releaseEdited = options.retire && action === 'kept_edited' && record.kind === 'created';
+    if (action === 'kept_edited' && !releaseEdited) continue;
     const entry = pathRecordEntry(key, record);
-    dropped.push(entry);
+    if (!releaseEdited) dropped.push(entry);
     const commit = (state: HostConfigLedger): HostConfigLedger => {
       const { [key]: _gone, ...records } = state.paths;
       return { ...state, paths: records, retired: retire(state.retired, record.backup ? [record.backup] : []) };
     };
-    if (action === 'released') { steps.push({ kind: 'release', commit }); continue; }
+    if (action === 'released' || releaseEdited) { steps.push({ kind: 'release', commit }); continue; }
     steps.push({ kind: action === 'removed' ? 'delete' : 'restore', commit, write: () => {
+      if (options.retire && !pathRecordIsCurrent(key, record)) {
+        throw new HostConfigError('host_config_target_changed', `the target changed before retirement: ${key}`);
+      }
       if (options.transaction) keepPreimage(options.transaction, entry);
+      if (options.retire && !pathRecordIsCurrent(key, record)) {
+        throw new HostConfigError('host_config_target_changed', `the target changed before retirement: ${key}`);
+      }
       if (record.kind === 'replaced') {
         const committed = record.committed as Extract<PathCommitted, { type: 'file' }>;
         replaceTarget(entry as HostPath, readVault(paths, record.backup!), { existed: true, sha256: committed.sha256 }, options.stage?.(entry));
@@ -1595,6 +1611,11 @@ function rollbackWholePaths(paths: HostConfigPaths, before: HostConfigLedger, no
     // A claim or release of a file that the user keeps changes no entry.
     if (current?.kind === 'user_managed' || (!current && old?.kind === 'user_managed')) continue;
     if (!current) {
+      // Retirement can release a created claim after an edit, without a preimage or a write to the file.
+      if (!preimage && old!.kind === 'created' && !pathRecordIsCurrent(key, old!)) {
+        delete records[key];
+        continue;
+      }
       const entry = observePathEntry(at);
       // A revert in this transaction took the record out: the entry is gone, or it is the user file that came back from the vault.
       const reverted = entry === null || (old!.kind === 'replaced' && entry.type === 'file' && entry.sha256 === old!.backup);

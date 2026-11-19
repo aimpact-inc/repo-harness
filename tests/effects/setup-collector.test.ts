@@ -219,7 +219,7 @@ setInterval(() => {}, 1000);
 
   test('reads every packaged fleet role through the shared frontmatter parser', () => {
     const roles = readFleetRoles(SETUP_FLEET_SOURCE_DIR);
-    expect(roles.map(role => role.name)).toEqual(['deep-reasoner', 'deep-worker', 'explorer', 'fast-worker', 'gatekeeper', 'harness-evaluator', 'root-cause-prover']);
+    expect(roles.map(role => role.name)).toEqual(['deep-reasoner', 'explorer', 'harness-evaluator']);
     expect(roles.every(role => role.model !== undefined && role.effort !== undefined && role.description !== undefined)).toBe(true);
   });
 
@@ -263,7 +263,7 @@ setInterval(() => {}, 1000);
       const text = JSON.stringify(outcome.snapshot);
       expect(outcome.snapshot.status).toBe('ready');
       expect(outcome.snapshot.hosts.map(host => [host.host, host.reported])).toEqual([['claude', true], ['codex', true], ['pi', true]]);
-      expect(outcome.snapshot.fleet).toHaveLength(7);
+      expect(outcome.snapshot.fleet.map(role => role.name)).toEqual(['deep-reasoner', 'explorer', 'harness-evaluator']);
       expect(outcome.snapshot.hooks.flatMap(event => event.routes)).toHaveLength(ROUTES.length);
       expect(outcome.snapshot.skills.length).toBeGreaterThan(0);
       expect(outcome.snapshot.skill_roots).toEqual([

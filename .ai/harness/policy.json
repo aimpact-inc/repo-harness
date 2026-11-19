@@ -38,10 +38,6 @@
       "managed_agents": [
         "explorer",
         "deep-reasoner",
-        "fast-worker",
-        "deep-worker",
-        "gatekeeper",
-        "root-cause-prover",
         "harness-evaluator"
       ],
       "install_mode": "auto-install-on-init"

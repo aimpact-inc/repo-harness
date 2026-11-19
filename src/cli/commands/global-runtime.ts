@@ -8,6 +8,7 @@ import { configureRequiredHerdrSkill } from "./herdr-skill";
 import type { RuntimeTransactionContext } from '../../effects/locking/runtime-transaction-lock';
 import { bunGlobalPackageRoot, isBunGlobalPackageSource } from "../installer/skill-projection";
 import { installPiPackage } from '../installer/pi-package';
+import { revertItem } from '../installer/uninstall';
 import { realPathOrResolved } from '../../effects/path-identity';
 import type { SkillHost } from '../../effects/host-skill-roots';
 import { pathRecordIsCurrent, pathRecordKey, readPathRecords } from '../../effects/host-config/path-records';
@@ -41,6 +42,7 @@ import {
   withHostConfigTransaction,
   migrateRuntimeHostConfig,
   requireInstallState,
+  retireAgentFleet,
 } from "../installer/install-profile";
 import {
   enabledPlugins,
@@ -1039,6 +1041,26 @@ function findRetiredCliCalls(env: NodeJS.ProcessEnv, target: InstallTargetSpec, 
 }
 
 const AGENT_FLEET_STEP = 'install agent fleet';
+export const RETIRED_AGENT_FLEET_STEP = 'retire former fleet agents';
+
+function retireFleet(env: NodeJS.ProcessEnv, transaction: string): GlobalRuntimeStep | null {
+  const step = RETIRED_AGENT_FLEET_STEP;
+  try {
+    const entries = retireAgentFleet(env, transaction);
+    if (!entries.length) return null;
+    const detail = entries.map(entry => {
+      if (entry.action === 'kept_edited') {
+        return `${entry.path}: ${revertItem(entry).reason}${entry.vault ? '' : '. Ownership record released'}.`;
+      }
+      const action = entry.action === 'restored' ? 'restored the original from the vault'
+        : entry.action === 'removed' ? 'removed the unchanged managed file' : 'released the ownership record';
+      return `${entry.path}: ${action}.`;
+    }).join(' ');
+    return { step, status: 'ok', detail };
+  } catch (error) {
+    return { step, status: 'failed', detail: (error as Error).message };
+  }
+}
 export const GLOBAL_RULES_REFRESH_STEP = 'refresh global working rules';
 
 export const RUNTIME_IGNORE_RULES_STEP = 'write runtime ignore rules';
@@ -2022,6 +2044,10 @@ function runGlobalRuntimeSetupInTransaction(opts: GlobalRuntimeOptions): GlobalR
     steps.push(installPiPackage(bunGlobalPackageRoot(env)!, plugins.includes('pi') && target === 'both' && opts.hostAdapters !== false, env));
   }
   steps.push(...writeRuntimeIgnoreRules(env, updateMode));
+  if (opts.transaction !== undefined && steps.every(step => step.status !== 'failed')) {
+    const retirement = retireFleet(env, opts.transaction);
+    if (retirement) steps.push(retirement);
+  }
   // Last, and only after every other step passed: a failed update keeps the previous command.
   if (updateMode && steps.every(step => step.status !== 'failed')) steps.push(retireCliLink(env));
   return finalizeRuntimeResult(steps);

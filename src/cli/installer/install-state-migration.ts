@@ -5,7 +5,7 @@ import { hostConfigPaths, migrateLedgerSchema, projectedLedgerPaths, repositoryL
 import { partitionPathRecords, pathRecordHost, pathRecordIsCurrent, pathRecordKey, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
 import { adoptedIdentity } from '../../effects/host-config/whole-path';
 import { migrateCodexConfigRecords } from './codex-config-migration';
-import { agentFleetTargetPaths, fleetReceiptPath, isLegacyOwnershipSurface, validPiPackage, writeState, type InstallState } from './install-profile';
+import { agentFleetTargetPaths, fleetReceiptPath, isLegacyOwnershipSurface, retiredAgentFleetTargets, validPiPackage, writeState, type InstallState } from './install-profile';
 import { enabledPlugins, installProfileStatePath, InstallStateError, invalidOwnership, parseProtocol3InstallState, parseProtocol4InstallState, readRawInstallState, type Protocol3Snapshot, type RecordedInstallSnapshot } from './install-state';
 import { adoptPiPackage, piPackageEntryPresent } from './pi-package';
 import { migrateJsonConfigRecords } from './json-config-migration';
@@ -30,7 +30,7 @@ export function installStatePendingMigration(env: NodeJS.ProcessEnv): boolean {
 function readFleetReceipt(env: NodeJS.ProcessEnv): ReadonlyMap<string, string> | null {
   const path = fleetReceiptPath(env);
   if (!existsSync(path)) return null;
-  const allowed = new Set(agentFleetTargetPaths(env));
+  const allowed = new Set([...agentFleetTargetPaths(env), ...retiredAgentFleetTargets(env).map(({ path }) => path)]);
   const malformed = () => new InstallStateError('install_state_invalid', path, `the agent fleet receipt is malformed; fix or remove it, then run rh update: ${path}`);
   let parsed: unknown;
   try { parsed = JSON.parse(readFileSync(path, 'utf-8')); } catch { throw malformed(); }

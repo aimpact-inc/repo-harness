@@ -96,14 +96,17 @@ function occurrences(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1;
 }
 
-/**
- * Copy a real generated persona into the fixture repo so the composed stack is
- * assembled from the same bytes a live Codex child sees: persona
- * developer_instructions + SubagentStart context.
- */
-function installGoldenPersona(repoRoot: string, agent: string): { instructions: string; model: string } {
+const WORKSPACE_WRITE_PERSONA = `name = "fast-worker"
+description = "Bounded test worker"
+model = "gpt-6.2-sol"
+model_reasoning_effort = "medium"
+sandbox_mode = "workspace-write"
+developer_instructions = "Stay in scope."
+`;
+
+/** Write a Codex persona for a native child and read the instructions that Codex composes. */
+function installPersona(repoRoot: string, agent: string, toml = readFileSync(join(REPO_ROOT, '.codex/agents', `${agent}.toml`), 'utf8')): { instructions: string; model: string } {
   mkdirSync(join(repoRoot, '.codex/agents'), { recursive: true });
-  const toml = readFileSync(join(REPO_ROOT, '.codex/agents', `${agent}.toml`), 'utf8');
   writeFileSync(join(repoRoot, '.codex/agents', `${agent}.toml`), toml);
   const parsed = Bun.TOML.parse(toml) as Record<string, unknown>;
   return { instructions: String(parsed.developer_instructions), model: String(parsed.model) };
@@ -126,7 +129,7 @@ function composedChildStack(
   observedModel: string,
   env: NodeJS.ProcessEnv,
 ): { composed: string; startContext: string; personaInstructions: string } {
-  const persona = installGoldenPersona(repoRoot, agent);
+  const persona = installPersona(repoRoot, agent, agent === 'fast-worker' ? WORKSPACE_WRITE_PERSONA : undefined);
   const start = startSubagent(repoRoot, {
     session_id: `session-${agent}`,
     turn_id: `turn-${agent}`,
@@ -813,18 +816,18 @@ describe('typed subagent hook handlers', () => {
       const repoRoot = tempRepo();
       const home = tempDir();
       try {
-        installGoldenPersona(repoRoot, 'gatekeeper');
+        installPersona(repoRoot, 'deep-reasoner');
         const output = startSubagent(repoRoot, {
           session_id: 'session-sandbox-evidence',
           turn_id: 'turn-sandbox-evidence',
           agent_id: 'agent-sandbox-evidence',
-          agent_type: 'gatekeeper',
+          agent_type: 'deep-reasoner',
           model: 'gpt-6.2-astra',
         }, codexEnv({ HOME: home }));
         expect(output.exitCode).toBe(0);
         expect(readRoutingObservations(repoRoot)[0]).toMatchObject({
           status: 'verified',
-          agent_type: 'gatekeeper',
+          agent_type: 'deep-reasoner',
           sandbox_mode: 'read-only',
         });
       } finally {

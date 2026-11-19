@@ -50,10 +50,6 @@ describe("Bootstrap Script Contracts", () => {
     const specs: Array<{ name: string; model: string; effort: string; sandboxMode?: string }> = [
       { name: "explorer", model: "gpt-6-luna", effort: "high", sandboxMode: "read-only" },
       { name: "deep-reasoner", model: "gpt-6.2-astra", effort: "high", sandboxMode: "read-only" },
-      { name: "fast-worker", model: "gpt-6.2-sol", effort: "medium", sandboxMode: "workspace-write" },
-      { name: "deep-worker", model: "gpt-6.2-sol", effort: "high", sandboxMode: "workspace-write" },
-      { name: "gatekeeper", model: "gpt-6.2-astra", effort: "medium", sandboxMode: "read-only" },
-      { name: "root-cause-prover", model: "gpt-6.2-astra", effort: "high", sandboxMode: "workspace-write" },
       { name: "harness-evaluator", model: "gpt-6.2-astra", effort: "medium", sandboxMode: "workspace-write" },
     ];
 
@@ -82,15 +78,6 @@ describe("Bootstrap Script Contracts", () => {
     }
 
     expect(existsSync(join(ROOT, "agents/fleet/explore.md"))).toBe(false);
-    const rootCause = read("agents/fleet/root-cause-prover.md");
-    for (const field of ["root_cause", "repro", "regression_guard"]) {
-      expect(rootCause).toContain(field);
-    }
-    expect(rootCause).toContain("DIAGNOSIS: CONFIRMED");
-    expect(rootCause).toContain("Never edit production source");
-    expect(rootCause).toContain("pipeline is forbidden");
-    expect(rootCause).toContain("Record command, exit code and full failure output");
-    expect(rootCause).not.toContain("PRE_FIX_EXIT=");
 
     const evaluator = read("agents/fleet/harness-evaluator.md");
     expect(evaluator).toContain("EVAL: PASS");

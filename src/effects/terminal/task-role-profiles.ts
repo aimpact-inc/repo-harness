@@ -2,8 +2,8 @@ import { MODEL_FAMILY_LABELS } from '../../core/board/seats-settings';
 
 // Moved from the existing installer: one owner for logical persona parsing,
 // declared writability and the user's configured model/effort projections.
-export const MANAGED_AGENTS = ['explorer', 'deep-reasoner', 'fast-worker', 'deep-worker', 'gatekeeper', 'root-cause-prover', 'harness-evaluator'];
-export const WRITABLE_AGENTS: ReadonlySet<string> = new Set(['fast-worker', 'deep-worker', 'root-cause-prover', 'harness-evaluator']);
+export const MANAGED_AGENTS = ['explorer', 'deep-reasoner', 'harness-evaluator'];
+export const WRITABLE_AGENTS: ReadonlySet<string> = new Set(['harness-evaluator']);
 export interface ParsedRole { name: string | undefined; description: string | undefined; model: string | undefined; effort: string | undefined; body: string }
 export type RoleValidation = {ok: true; sourceDescription: string} | {ok: false; kind?: string; reason: string};
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
