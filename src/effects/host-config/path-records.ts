@@ -138,10 +138,15 @@ export function ownedPath(env: NodeJS.ProcessEnv, path: string, records: PathRec
   return records[pathRecordKey(env, path)] ?? null;
 }
 
-/** The `created` records as the hook's ledger surfaces: a file that the user keeps (`user_managed`) is not one that rh created. */
-export function createdPaths(env: NodeJS.ProcessEnv): readonly { readonly path: string; readonly type: PathRecord['committed']['type'] }[] {
+/**
+ * The `created` records as the hook's ledger surfaces: a file that the user keeps (`user_managed`) is not one that rh created.
+ * `current` is the proof that the path still holds what rh wrote; the hook asks it only for the surface that matches its
+ * target, because a directory proof hashes the whole tree.
+ */
+export function createdPaths(env: NodeJS.ProcessEnv): readonly { readonly path: string; readonly type: PathRecord['committed']['type']; readonly current: () => boolean }[] {
   const { records } = partitionPathRecords(env, readLedger(hostConfigPaths(env)).paths, cachedSupported(env));
-  return Object.entries(records).filter(([, record]) => record.kind === 'created').map(([path, record]) => ({ path, type: record.committed.type }));
+  return Object.entries(records).filter(([, record]) => record.kind === 'created')
+    .map(([path, record]) => ({ path, type: record.committed.type, current: () => pathRecordIsCurrent(path, record) }));
 }
 
 /** Empty directories and special entries have no entry in the recorded tree hash. */

@@ -152,10 +152,11 @@ function leafPath(path: string): string {
   return name === '' || name === '.' || name === '..' ? writeThroughPath(path) : join(writeThroughPath(dirname(path)), name);
 }
 
-/** One `created` path record of the host-config ledger: its key and the type that rh wrote there. */
+/** One `created` path record of the host-config ledger: its key, the type that rh wrote there, and whether it still holds that. */
 export interface LedgerSurface {
   readonly path: string;
   readonly type: 'file' | 'symlink' | 'directory';
+  readonly current: () => boolean;
 }
 
 /**
@@ -168,14 +169,17 @@ export function registerInstallLedger(reader: (env: NodeJS.ProcessEnv) => readon
   ledgerReader = reader;
 }
 
-/** rh created the file when the install ledger records it, or a directory tree above it, as rh-written. An unreadable ledger records nothing. */
+/**
+ * rh created the file when the install ledger records it, or a directory tree above it, as rh-written, and that path still holds
+ * what rh wrote: a user's edit or replacement makes it the user's file again. An unreadable ledger records nothing.
+ */
 export function ledgerCreated(path: string, env: NodeJS.ProcessEnv): boolean {
   let surfaces: readonly LedgerSurface[];
   try { surfaces = ledgerReader?.(env) ?? []; } catch { return false; }
   return surfaces.some((surface) => {
     let recorded: string;
     try { recorded = leafPath(resolve(surface.path)); } catch { return false; }
-    return surface.type === 'directory' ? atOrBelow(recorded, path) : recorded === path;
+    return (surface.type === 'directory' ? atOrBelow(recorded, path) : recorded === path) && surface.current();
   });
 }
 

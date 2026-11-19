@@ -413,7 +413,19 @@ describe('safety hook: Bash host route', () => {
       expect(ledgerCreated(cli, env)).toBe(true);
       expect(ledgerCreated(join(home, '.claude/settings.json'), env)).toBe(false);
       expect(ledgerCreated(join(home, '.bun/bin/rh-other'), env)).toBe(false);
-      writeFileSync(hostConfigPaths(env).ledger, '{');
+      const ledger = hostConfigPaths(env).ledger;
+      const recorded = readFileSync(ledger);
+      writeFileSync(ledger, '{');
+      expect(ledgerCreated(cli, env)).toBe(false);
+      writeFileSync(ledger, recorded);
+      // #3266: a record proves rh's ownership only while the path still holds what rh wrote.
+      writeFileSync(cli, 'cli\nuser line\n');
+      expect(ledgerCreated(cli, env)).toBe(false);
+      writeFileSync(join(skill, 'SKILL.md'), 'skill\nuser line\n');
+      expect(ledgerCreated(join(skill, 'SKILL.md'), env)).toBe(false);
+      writeFileSync(join(home, 'mine.txt'), 'user');
+      rmSync(cli);
+      symlinkSync(join(home, 'mine.txt'), cli);
       expect(ledgerCreated(cli, env)).toBe(false);
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
