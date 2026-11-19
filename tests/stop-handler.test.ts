@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmodSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, writeSync, mkdirSync } from 'fs';
+import { chmodSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync, mkdirSync } from 'fs';
 import { spawnSync } from 'child_process';
 import { dirname, join } from 'path';
 import { tmpdir } from 'os';
 import { runStopHandler as runStopHandlerRuntime } from '../src/cli/hook/stop-handler';
 import { runMutationGuard } from '../src/cli/hook/mutation-guard';
 import { seatHandoffPath, seatResetDirectory, seatResetRequestPath } from '../src/core/board/seat-reset';
+import { renderAntigravityHookCommand } from '../src/cli/hook/host-adapter';
+import { readSeatSession } from '../src/effects/board/seat-reset';
+import { tmpWorkspace } from './helpers/repo-fixture';
 import { agentNoticeFixture, noticeEnv, NOTICE_CAPABILITY, repeatUndeliveredNotice, streamNoticeAttempt } from './helpers/agent-notice';
 import { fixtureWrite, fixtureCommit } from './helpers/module-repository';
 import { hookIdentity } from './helpers/hook-identity';
@@ -192,6 +195,77 @@ describe('Stop seat reset (#1972)', () => {
     // A reader that threw would also exit 0: the no-assistant row gives no reset message and leaves the last request.
     expect(results[2]!.systemMessage ?? '').not.toContain('seat reset');
     expect(JSON.parse(readFileSync(join(dir, 'request.json'), 'utf8')).transcript_path).toBe(join(cwd, 'open.jsonl'));
+  });
+});
+
+describe.skipIf(process.platform === 'win32')('Antigravity Stop', () => {
+  test('records startup, reads only the conversation transcript, and continues once per turn for relaunch', () => {
+    const root = tmpWorkspace('rh-agy-stop');
+    fixtures.push(root);
+    const home = join(root, 'home');
+    const bin = join(root, 'bin');
+    const bunInstall = join(root, 'bun-install');
+    const cwd = join(root, 'repo');
+    const conversationId = 'test-conversation';
+    const logs = join(home, '.gemini/antigravity-cli/brain', conversationId, '.system_generated/logs');
+    for (const dir of [bin, bunInstall, cwd, logs]) mkdirSync(dir, { recursive: true });
+    const identity = { seat: 'advisor', repository: String(9_200_000_000 + process.pid) } as const;
+    const seatDir = seatResetDirectory(identity);
+    expect(existsSync(dirname(seatDir))).toBe(false);
+    fixtures.push(dirname(seatDir));
+    const request = seatResetRequestPath(identity);
+    const env = [
+      `HOME=${home}`, `PATH=${bin}`, `BUN_INSTALL=${bunInstall}`, `TMPDIR=${root}`,
+      `REPO_HARNESS_SEAT=${identity.seat}`, `REPO_HARNESS_SEAT_REPOSITORY=${identity.repository}`,
+    ];
+    const git = Bun.which('git');
+    if (!git) throw new Error('git is required for the Antigravity fixture');
+    const init = spawnSync('/usr/bin/env', ['-i', ...env, git, 'init', '-q', cwd], { cwd: root, env: {}, encoding: 'utf8' });
+    expect(init.status, init.stderr).toBe(0);
+    mkdirSync(join(cwd, '.ai/harness'), { recursive: true });
+    writeFileSync(join(cwd, '.ai/harness/workflow-contract.json'), '{}\n');
+    const transcriptPath = join(logs, 'transcript_full.jsonl');
+    const marker = 'FAKE-SECRET-3251';
+    const planner = (input_tokens: number) => JSON.stringify({ type: 'PLANNER_RESPONSE', input_tokens, cache_read_tokens: 370_000, content: marker });
+    const transcript = `${planner(10_000)}\n${JSON.stringify({ type: 'SYSTEM_MESSAGE', input_tokens: 500_000, content: marker })}\n`;
+    writeFileSync(transcriptPath, transcript);
+    const outside = join(root, 'outside.jsonl');
+    const leafLink = join(logs, 'link.jsonl');
+    const parentLink = join(logs, 'other-logs');
+    writeFileSync(outside, transcript);
+    symlinkSync(transcriptPath, leafLink);
+    symlinkSync(root, parentLink);
+    const entry = join(import.meta.dir, '../src/cli/hook-entry.ts');
+    function invoke(event: 'SessionStart' | 'Stop', options: { executionNum?: number; transcriptPath?: string; conversationId?: string } = {}) {
+      const command = renderAntigravityHookCommand(process.execPath, entry, event, 'default');
+      const result = spawnSync('/usr/bin/env', ['-i', ...env, '/bin/sh', '-c', command], {
+        cwd: root, env: {}, encoding: 'utf8',
+        input: JSON.stringify({ cwd, transcriptPath, conversationId, continuationActive: false, ...options }),
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stderr).toBe('');
+      expect(result.stdout).not.toContain(marker);
+      return result.stdout;
+    }
+    invoke('SessionStart');
+    expect(readSeatSession(identity)).toMatchObject({ source: 'startup', sessionId: conversationId, transcriptPath });
+    for (const path of [outside, leafLink, join(parentLink, 'outside.jsonl')]) {
+      expect(invoke('Stop', { executionNum: 0, transcriptPath: path })).toBe('');
+    }
+    expect(invoke('Stop', { executionNum: 0, conversationId: 'another-conversation' })).toBe('');
+    expect(existsSync(request)).toBe(false);
+
+    // An older planner row and a later system row cannot determine usage.
+    writeFileSync(transcriptPath, `${planner(30_000)}\n${planner(9_999)}\n${transcript.split('\n')[1]}\n`);
+    expect(invoke('Stop', { executionNum: 0 })).toBe('');
+    expect(existsSync(request)).toBe(false);
+    writeFileSync(transcriptPath, transcript);
+    expect(invoke('Stop')).toBe('');
+    const continuation = `${JSON.stringify({ decision: 'continue', reason: 'Write your handoff now. The orchestrator relaunches this seat with rh seats launch.' })}\n`;
+    expect([0, 1, 0, 1].map(executionNum => invoke('Stop', { executionNum }))).toEqual([continuation, '', continuation, '']);
+    const record = readFileSync(request, 'utf8');
+    expect(JSON.parse(record)).toMatchObject({ context_tokens: 380_000, action: 'reset', transcript_path: transcriptPath });
+    expect(record).not.toContain(marker);
   });
 });
 

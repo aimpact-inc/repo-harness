@@ -16,6 +16,7 @@ import {
   type CapabilityPathOwner,
 } from '../../effects/state/resolve-effective-state';
 import type { HookPermission } from './handler-contract';
+import { ANTIGRAVITY_GUARD_DENIAL, HOST_ADAPTERS } from './host-adapter';
 import { payloadString, type HookIdentity, type HookPayload } from './hook-input';
 import { writeTargetDenial, type TargetKind, type WriteTarget } from './safety-hook';
 import { gitExecFileSync } from '../../effects/git/runner';
@@ -69,7 +70,7 @@ export function runMutationGuard(opts: MutationGuardInput): MutationGuardResult 
   const filePath = payloadString(payload, 'tool_input.file_path');
   // Edit and Write name one file that they change or replace.
   const targets: readonly EditTarget[] = command ? extractApplyPatchTargets(command) : (filePath ? [{ kind: 'overwrite', raw: filePath }] : []);
-  if (targets.length === 0) return deny(repoRoot, command ? APPLY_PATCH_SCOPE_DENIAL : EDIT_SCOPE_DENIAL, opts.identity.runId);
+  if (targets.length === 0) return runMutationDenial(opts, command ? APPLY_PATCH_SCOPE_DENIAL : EDIT_SCOPE_DENIAL);
   // The path keeps its `..` parts: the kernel follows each link before the `..` after it.
   const writes: WriteTarget[] = targets.map(({ kind, raw }) => ({ kind, via: command ? 'apply_patch' : 'the edit', spelled: raw, path: isAbsolute(raw) ? raw : `${repoRoot}${sep}${raw}` }));
   const userStep = (path: string) => `the user can edit ${path} themselves`;
@@ -81,9 +82,17 @@ export function runMutationGuard(opts: MutationGuardInput): MutationGuardResult 
 /** A caller that owns its own decision reports it through the same denial record and exit code. */
 export function runMutationDenial(opts: MutationGuardInput, found: Denial): MutationGuardResult {
   // A reason or fix can quote a target path or a word of the command, which can hold a token; the prompt, stderr and failure record get the redacted text.
+  const { host, runId } = opts.identity;
+  if (host === 'antigravity') {
+    return deny(opts.repoRoot, {
+      guard: found.guard,
+      reason: ANTIGRAVITY_GUARD_DENIAL,
+      fix: 'Ask the user to review the operation and run it locally.',
+    }, runId);
+  }
   const denial: Denial = { ...found, reason: replaceSecrets(found.reason), fix: replaceSecrets(found.fix) };
   const mode = payloadString(opts.payload, 'permission_mode');
-  if (denial.askable && opts.identity.host === 'claude' && mode !== '' && !NO_PROMPT_MODES.has(mode)) {
+  if (denial.askable && HOST_ADAPTERS[host].capabilities.ask && mode !== '' && !NO_PROMPT_MODES.has(mode)) {
     return { exitCode: 0, stdout: '', stderr: '', permission: { decision: 'ask', reason: `[${denial.guard}] ${denial.reason}` } };
   }
   return deny(opts.repoRoot, denial, opts.identity.runId);

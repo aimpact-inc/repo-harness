@@ -2,6 +2,7 @@ import { buildSessionStartSections, EDIT_GUARD_SCOPE_SECTION } from './session-c
 import { runMutationGuard } from './mutation-guard';
 import { runBashMutationGuard } from './mutation-bash';
 import { runStopHandler } from './stop-handler';
+import { HOST_ADAPTERS } from './host-adapter';
 import { runReturnChannel } from './return-channel';
 import { runSubagentContext } from './subagent-context';
 import type { HookHandlerId, Route } from './route-registry';
@@ -32,12 +33,13 @@ function textResult(value: { readonly exitCode: number; readonly stdout: string;
 }
 
 /**
- * A new session segment of a Claude reset seat (startup, clear or compact; #1972, #2625) records the new-session
+ * A new session segment of a reset seat (startup, clear or compact; #1972, #2625) records the new-session
  * signal of its reset and closes its open reset request. A failed write gives one
  * diagnostic and leaves the context unchanged. Sessions without the seat env write nothing.
  */
 function seatSessionDiagnostic(context: HookHandlerContext): string {
-  const identity = context.identity.host === 'claude' ? seatResetIdentity(context.env) : null;
+  if (!HOST_ADAPTERS[context.identity.host].capabilities.sessionRecord) return '';
+  const identity = seatResetIdentity(context.env);
   const source = payloadString(context.payload, 'source');
   const transcriptPath = payloadString(context.payload, 'transcript_path');
   if (identity === null || !isSeatSessionSource(source) || transcriptPath === '') return '';
@@ -100,7 +102,7 @@ const handlers: Readonly<Record<HookHandlerId, TypedHookHandler>> = Object.freez
   'agent-notice': {
     id: 'agent-notice',
     run: (context: HookHandlerContext) => {
-      if (context.identity.host !== 'codex' && context.identity.host !== 'pi') return { exitCode: 0 };
+      if (!HOST_ADAPTERS[context.identity.host].capabilities.inbox) return { exitCode: 0 };
       const notice = collectArchitectureNotice(context.repoRoot,
         options => resolveCapabilityOwnership(context.repoRoot, undefined, options), { env: context.env });
       return { exitCode: 0, ...(notice.content ? { additionalContext: notice.content } : {}), ...(notice.diagnostics ? { diagnostics: notice.diagnostics } : {}), ...(notice.logReason ? { reason: notice.logReason } : {}) };

@@ -5,12 +5,15 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import { runMutationGuard } from "../src/cli/hook/mutation-guard";
+import { renderAntigravityHookCommand } from "../src/cli/hook/host-adapter";
+import type { HookEvent, RouteId } from "../src/cli/hook/route-registry";
 import { hookIdentity } from "./helpers/hook-identity";
 import { tmpWorkspace } from "./helpers/repo-fixture";
 
@@ -236,4 +239,153 @@ describe("Claude Code hook protocol compliance", () => {
       rmSync(cwd, { recursive: true, force: true });
     }
   }, 30_000);
+});
+
+const HOOK_ENTRY = join(import.meta.dir, '../src/cli/hook-entry.ts');
+const GUARD_DENIAL = 'rh hook: the tool call is refused';
+
+function withAntigravityFixture(testCase: (fixture: ReturnType<typeof antigravityFixture>) => void) {
+  const root = tmpWorkspace('rh-agy-protocol');
+  try { testCase(antigravityFixture(root)); } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
+function antigravityFixture(root: string) {
+  const config = join(root, "hook config's cwd");
+  const home = join(root, 'home');
+  const bin = join(root, 'bin');
+  const bunInstall = join(root, 'bun-install');
+  const repo = join(root, 'repo');
+  const cwd = join(repo, 'nested');
+  for (const dir of [config, home, bin, bunInstall, cwd]) mkdirSync(dir, { recursive: true });
+  const env = [`HOME=${home}`, `PATH=${bin}`, `BUN_INSTALL=${bunInstall}`, `TMPDIR=${root}`];
+  const git = Bun.which('git');
+  if (!git) throw new Error('git is required for the Antigravity fixture');
+  const init = spawnSync('/usr/bin/env', ['-i', ...env, git, 'init', '-q', repo], { cwd: root, env: {}, encoding: 'utf8' });
+  expect(init.status, init.stderr).toBe(0);
+  mkdirSync(join(repo, '.ai/harness'), { recursive: true });
+  writeFileSync(join(repo, '.ai/harness/workflow-contract.json'), '{}\n');
+  const failures = join(repo, '.ai/harness/failures/latest.jsonl');
+  function run(event: HookEvent, route: RouteId, input: unknown, extraEnv: string[] = [], entry = HOOK_ENTRY) {
+    const command = renderAntigravityHookCommand(process.execPath, entry, event, route);
+    return spawnSync('/usr/bin/env', ['-i', ...env, ...extraEnv, '/bin/sh', '-c', command], {
+      cwd: config, env: {}, input: JSON.stringify(input), encoding: 'utf8',
+    });
+  }
+  return { root, config, repo, cwd, failures, run };
+}
+
+function expectAntigravityDeny(result: { status: number | null; stdout: string; stderr: string }, reason: string) {
+  expect(result.status, result.stderr).toBe(0);
+  expect(result.stdout).toBe(`${JSON.stringify({ decision: 'deny', reason })}\n`);
+  expect(result.stderr).toBe('');
+}
+
+describe.skipIf(process.platform === 'win32')('Antigravity hook protocol', () => {
+  test('canonicalizes a symlink cwd, ignores a forged root, and passes only on confirmed absence', () => withAntigravityFixture(f => {
+    const link = join(f.root, 'nested-link');
+    symlinkSync(f.cwd, link);
+    const toolCall = { name: 'run_command', args: { CommandLine: 'cat .env' } };
+    expectAntigravityDeny(f.run('PreToolUse', 'bash', { cwd: link, toolCall }, [`HOOK_REPO_ROOT=${f.config}`]), GUARD_DENIAL);
+
+    const broken = join(f.root, 'broken-cwd');
+    symlinkSync(join(f.root, 'missing'), broken);
+    for (const cwd of [broken, join(f.root, 'missing'), join(f.repo, '.git/HEAD')]) {
+      expectAntigravityDeny(f.run('PreToolUse', 'bash', { cwd, toolCall }), 'rh hook failed: bash; the call is refused');
+    }
+    const noGit = f.run('PreToolUse', 'bash', { cwd: f.config, toolCall }, [`HOOK_REPO_ROOT=${f.repo}`]);
+    expect([noGit.status, noGit.stdout, noGit.stderr]).toEqual([0, '', '']);
+    rmSync(join(f.repo, '.ai/harness/workflow-contract.json'));
+    const noMarker = f.run('PreToolUse', 'bash', { cwd: link, toolCall });
+    expect([noMarker.status, noMarker.stdout, noMarker.stderr]).toEqual([0, '', '']);
+    rmSync(join(f.repo, '.ai/harness'), { recursive: true });
+    writeFileSync(join(f.repo, '.ai/harness'), 'not a directory');
+    expectAntigravityDeny(f.run('PreToolUse', 'bash', { cwd: link, toolCall }), 'rh hook failed: bash; the call is refused');
+  }));
+
+  test('blocks malformed guard arguments and relative edit paths before dispatch', () => withAntigravityFixture(f => {
+    const rows = [
+      ['bash', 'run_command', {}], ['bash', 'run_command', { CommandLine: 3 }],
+      ['edit', 'write_file', {}], ['edit', 'write_file', { Path: 'relative.txt' }],
+      ['edit', 'edit_file', { Path: 3 }], ['edit', 'edit_file', { Path: 'relative.txt' }],
+    ] as const;
+    for (const [route, name, args] of rows) {
+      expectAntigravityDeny(f.run('PreToolUse', route, { cwd: f.cwd, toolCall: { name, args } }), `rh hook: malformed ${name} input`);
+    }
+    const mismatched = { cwd: f.cwd, toolCall: { name: 'run_command', args: { CommandLine: 'echo okay' } } };
+    expectAntigravityDeny(f.run('PreToolUse', 'edit', mismatched), 'rh hook failed: edit; the call is refused');
+    const unknown = f.run('PreToolUse', 'default', mismatched);
+    expect([unknown.status, unknown.stdout]).toEqual([2, '']);
+  }));
+
+  test('keeps clean Bash silent and denies both absolute file tools', () => withAntigravityFixture(f => {
+    const input = { cwd: f.cwd, toolCall: { name: 'run_command', args: { CommandLine: 'echo okay' } } };
+    const allowed = f.run('PreToolUse', 'bash', input);
+    expect([allowed.status, allowed.stdout, allowed.stderr]).toEqual([0, '', '']);
+    for (const name of ['write_file', 'edit_file']) {
+      const toolCall = { name, args: { Path: '/etc/hosts' } };
+      expectAntigravityDeny(f.run('PreToolUse', 'edit', { cwd: f.cwd, toolCall }), GUARD_DENIAL);
+    }
+  }));
+
+  test('guard exceptions deny both tuples with fixed text', () => withAntigravityFixture(f => {
+    const entry = join(f.config, 'throwing-guard.ts');
+    const hook = join(import.meta.dir, '../src/cli/hook');
+    // Inject a fault at the actual handler call in a separate process.
+    writeFileSync(entry, `
+import { runHookCli } from ${JSON.stringify(HOOK_ENTRY)};
+import { getHandlerForRoute } from ${JSON.stringify(join(hook, 'handler-registry.ts'))};
+import { getRoute } from ${JSON.stringify(join(hook, 'route-registry.ts'))};
+const tuple = getRoute(process.argv[2], process.argv[4]);
+Object.defineProperty(getHandlerForRoute(tuple), 'run', { value() { throw new Error('OPAQUE-CRASH-MARKER-3251'); } });
+process.exit(runHookCli(process.argv.slice(2)));
+`);
+    const toolCalls = {
+      bash: { name: 'run_command', args: { CommandLine: 'echo okay' } },
+      edit: { name: 'write_file', args: { Path: join(f.cwd, 'fixture.txt') } },
+    };
+    for (const route of ['bash', 'edit'] as const) {
+      expectAntigravityDeny(f.run('PreToolUse', route, { cwd: f.cwd, toolCall: toolCalls[route] }, [], entry),
+        `rh hook failed: ${route}; the call is refused`);
+    }
+  }));
+
+  test('rendered command isolates Bun startup and ambient environment before bootstrap', () => withAntigravityFixture(f => {
+    const startup = 'BUN-STARTUP-MARKER-3251';
+    const ambient = 'AMBIENT-SECRET-MARKER-3251';
+    writeFileSync(join(f.config, '.env'), `REPO_HARNESS_SEAT_STARTUP=${startup}\n`);
+    const preload = join(f.config, 'preload.ts');
+    writeFileSync(preload, `console.error(${JSON.stringify(startup)});\n`);
+    writeFileSync(join(f.config, 'bunfig.toml'), `preload = [${JSON.stringify(preload)}]\n`);
+    const toolCall = { name: 'run_command', args: { CommandLine: 'cat .env' } };
+    const extraEnv = [`AMBIENT_SECRET=${ambient}`, 'REPO_HARNESS_WORKTREE_ROOT=/etc'];
+    const result = f.run('PreToolUse', 'bash', { cwd: f.cwd, toolCall }, extraEnv);
+    expectAntigravityDeny(result, GUARD_DENIAL);
+    // The ambient worktree override would otherwise admit this existing outside file.
+    const edit = f.run('PreToolUse', 'edit', { cwd: f.cwd, toolCall: { name: 'write_file', args: { Path: '/etc/hosts' } } }, extraEnv);
+    expectAntigravityDeny(edit, GUARD_DENIAL);
+    // An allowlisted seat variable would survive bootstrap if Bun loaded .env.
+    const auditEntry = join(f.config, 'audit-entry.ts');
+    writeFileSync(auditEntry, `
+import { runHookCli } from ${JSON.stringify(HOOK_ENTRY)};
+for (const key of ['REPO_HARNESS_SEAT_STARTUP', 'AMBIENT_SECRET']) {
+  if (process.env[key]) console.error(process.env[key]);
+}
+process.exit(runHookCli(process.argv.slice(2)));
+`);
+    const audit = f.run('PreToolUse', 'bash', { cwd: f.cwd, toolCall }, extraEnv, auditEntry);
+    expectAntigravityDeny(audit, GUARD_DENIAL);
+    const logs = readFileSync(f.failures, 'utf8');
+    const output = [result, edit, audit].map(({ stdout, stderr }) => stdout + stderr).join('') + logs;
+    for (const marker of [startup, ambient]) expect(output).not.toContain(marker);
+  }));
+
+  test('ordinary Bash denial keeps opaque command words out of the response, stderr, and failure log', () => withAntigravityFixture(f => {
+    const marker = 'OPAQUE-SECRET-MARKER-3251';
+    const toolCall = { name: 'run_command', args: { CommandLine: `rm "$UNKNOWN/${marker}"` } };
+    const result = f.run('PreToolUse', 'bash', { cwd: f.cwd, toolCall });
+    expectAntigravityDeny(result, GUARD_DENIAL);
+    const log = readFileSync(f.failures, 'utf8');
+    expect(JSON.parse(log)).toMatchObject({ guard: 'UserFileGuard', action: 'block', reason: GUARD_DENIAL });
+    expect(result.stdout + result.stderr + log).not.toContain(marker);
+  }));
 });

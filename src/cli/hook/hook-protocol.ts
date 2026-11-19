@@ -1,5 +1,5 @@
 import type { HookPermission } from './handler-contract';
-import type { HookEvent, RouteHost, RouteId } from './route-registry';
+import type { HookEvent, RouteId } from './route-registry';
 import { architecturePort, isArchitectureUnavailable, type AgentNotice, type AgentNoticePoint, type ArchctxProviderOptions } from '../../core/architecture/contracts';
 import type { CapabilityOwnership } from '../../core/capabilities/registry';
 
@@ -117,7 +117,7 @@ function renderBridgeOutput(outcome: HookOutcome): HostOutput {
   return { stdout: `${JSON.stringify(output)}\n`, stderr: outcome.diagnostics };
 }
 
-export const HOST_RENDERERS: Readonly<Record<RouteHost, (outcome: HookOutcome) => HostOutput>> = Object.freeze({
+export const HOST_RENDERERS: Readonly<Record<'claude' | 'codex' | 'pi', (outcome: HookOutcome) => HostOutput>> = Object.freeze({
   claude: (outcome) => renderHookSpecificOutput(outcome, outcome.systemMessage),
   codex: renderCodexOutput,
   pi: renderBridgeOutput,

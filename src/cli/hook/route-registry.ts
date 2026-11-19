@@ -23,7 +23,7 @@ export type HookEvent =
   | 'SubagentStart'
   | 'Stop';
 
-export type RouteHost = 'claude' | 'codex' | 'pi';
+export type RouteHost = 'claude' | 'codex' | 'pi' | 'antigravity';
 
 /**
  * Hosts that read a JSON hook adapter file written by the installer
@@ -98,7 +98,7 @@ export const ROUTES: readonly Route[] = Object.freeze([
     event: 'PreToolUse' as const,
     routeId: 'bash' as const,
     matcher: 'Bash',
-    hosts: ['claude', 'pi'] as const,
+    hosts: ['claude', 'pi', 'antigravity'] as const,
     handler: 'bash-mutation-guard',
     // Exit 2 denies a credential read (I1), a removal or overwrite of an existing user file (I2) and a whole-repository recursive delete.
     // A crash must deny too: on exit 1 Claude runs the command with neither guard (#3267).

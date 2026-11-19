@@ -1,5 +1,5 @@
 /**
- * The safety hook (#2916): the agent-layer security bar on the PreToolUse bash and edit routes of Claude, Codex and Pi.
+ * The safety hook (#2916): the agent-layer security bar on the PreToolUse bash and edit routes.
  *
  * - I1: refuse a call that prints or sends a credential store. Secret redaction stays as the second layer.
  * - I2: refuse a removal or overwrite of an existing file outside the agent's worktree, the managed worktree root, the system temp
@@ -100,6 +100,7 @@ const AGENT_OUTPUT: Readonly<Record<RouteHost, readonly string[]>> = {
   claude: ['.claude/projects/*/memory', '.claude/plans'],
   codex: ['.codex/memories'],
   pi: [],
+  antigravity: [],
 };
 
 /** An allowed root: a canonical directory, with `*` segments for the agent output patterns. */

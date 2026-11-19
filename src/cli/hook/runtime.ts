@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getRoute, routeSupportsHost, type HookEvent, type HookHandlerId, type RouteHost, type RouteId } from './route-registry';
+import { AntigravityToolInputError, HOST_ADAPTERS, antigravityEnvironment, resolveAntigravityRepository } from './host-adapter';
 import { getHandlerForRoute } from './handler-registry';
 import { budgetSessionContext, errorHash } from './session-context-budget';
 import { writeAllSync } from '../runtime/write-all-sync';
@@ -14,15 +15,15 @@ import {
   StateResolutionUnstableError,
 } from '../../effects/state/resolve-effective-state';
 import type { EffectiveState } from '../../core/state/types';
-import type { HookHandlerResult } from './handler-contract';
-import { HookPayloadError, hookIdentity, parseHookPayload, payloadString, type HookIdentity } from './hook-input';
-import { HOST_RENDERERS, type HookOutcome } from './hook-protocol';
+import type { HookHandlerResult, HookPermission } from './handler-contract';
+import { HookPayloadError, hookIdentity, payloadString, type HookIdentity, type HookPayload } from './hook-input';
+import type { HookOutcome } from './hook-protocol';
 import { WORKFLOW_CONTRACT_MARKER_PATH, WORKFLOW_MARKER_GATE_EVENTS } from '../../core/adoption/minimum-harness-version';
 import { inspectWorkflowMarker } from '../../effects/adoption/workflow-marker';
 import { gitExecFileSync } from '../../effects/git/runner';
 
 export const HOOK_COMMAND_NAME = 'repo-harness-hook';
-const HOOK_HOSTS: readonly RouteHost[] = ['claude', 'codex', 'pi'];
+const HOOK_HOSTS = Object.keys(HOST_ADAPTERS);
 
 export interface RunHookOptions {
   readonly event: HookEvent;
@@ -120,7 +121,7 @@ export function resolveHookEffectiveState(
 
 function hostFrom(env: NodeJS.ProcessEnv): RouteHost | null {
   const host = env.HOOK_HOST;
-  return HOOK_HOSTS.includes(host as RouteHost) ? host as RouteHost : null;
+  return host && Object.hasOwn(HOST_ADAPTERS, host) ? host as RouteHost : null;
 }
 
 function writeText(fd: 1 | 2, value: string): void {
@@ -134,30 +135,52 @@ function outcomeReason(result: HookHandlerResult): string {
 }
 
 export function runHook(opts: RunHookOptions): RunHookResult {
-  const env = opts.env ?? process.env;
-  const cwd = opts.cwd ?? process.cwd();
+  const inputEnv = opts.env ?? process.env;
   const route = getRoute(opts.event, opts.routeId);
-  const host = hostFrom(env);
+  const host = hostFrom(inputEnv);
   if (!host) {
     writeText(2, `${HOOK_COMMAND_NAME}: HOOK_HOST must be one of ${HOOK_HOSTS.join(', ')}\n`);
     return { exitCode: route?.failClosed ? 2 : 1, reason: 'unknown-host' };
   }
-  const render = HOST_RENDERERS[host];
-  const emit = (outcome: HookOutcome): void => {
-    const output = render(outcome);
+  const adapter = HOST_ADAPTERS[host];
+  const antigravity = host === 'antigravity';
+  const env = antigravity ? antigravityEnvironment(inputEnv) : inputEnv;
+  const emit = (outcome: HookOutcome): number => {
+    const output = adapter.render(outcome);
     writeText(2, output.stderr);
     writeText(1, output.stdout);
+    return output.exitCode;
   };
-  const early = (exitCode: number, reason: string, repoRoot: string | null, diagnostics = ''): RunHookResult => {
-    emit({
-      event: opts.event, routeId: opts.routeId, repoRoot, exitCode, reason, additionalContext: null, diagnostics,
+  const early = (code: number, reason: string, repoRoot: string | null, diagnostics = '', permission?: HookPermission): RunHookResult => {
+    const exitCode = emit({
+      event: opts.event, routeId: opts.routeId, repoRoot, exitCode: code, reason, additionalContext: null, diagnostics, permission,
     });
     return { exitCode, reason, ...(repoRoot ? { repoRoot } : {}) };
   };
 
-  const repoRoot = resolveHookRepoRoot(cwd, env);
-  if (!repoRoot) return early(0, 'not-in-git-repo', null);
-  if (!isOptIn(repoRoot)) return early(0, 'non-opt-in', repoRoot);
+  let repoRoot: string;
+  let payload: HookPayload | undefined;
+  if (antigravity) {
+    try {
+      payload = adapter.decode(opts.input, opts);
+    } catch (error) {
+      const permission = error instanceof AntigravityToolInputError ? { decision: 'deny' as const, reason: error.message } : undefined;
+      return early(1, 'invalid-payload', null, '', permission);
+    }
+    try {
+      const repository = resolveAntigravityRepository(payload);
+      if (repository.status !== 'opted-in') return early(0, repository.status, repository.repoRoot);
+      repoRoot = repository.repoRoot;
+      payload = { ...payload, cwd: repository.cwd };
+    } catch {
+      return early(1, 'repo-lookup-failed', null);
+    }
+  } else {
+    const resolved = resolveHookRepoRoot(opts.cwd ?? process.cwd(), env);
+    if (!resolved) return early(0, 'not-in-git-repo', null);
+    if (!isOptIn(resolved)) return early(0, 'non-opt-in', resolved);
+    repoRoot = resolved;
+  }
   const repair = `Run rh install --target ${host} --location global.`;
   if (!route) {
     return early(2, 'unknown-route', repoRoot, `${HOOK_COMMAND_NAME}: unknown route ${opts.event}.${opts.routeId}. ${repair}\n`);
@@ -184,9 +207,9 @@ export function runHook(opts: RunHookOptions): RunHookResult {
   let result: HookHandlerResult;
   let reason: string;
   try {
-    const payload = parseHookPayload(opts.input);
+    payload ??= adapter.decode(opts.input, opts);
     identity = hookIdentity(payload, host);
-    if (opts.event === 'PreToolUse') shellCommand = payloadString(payload, 'tool_input.command');
+    if (!antigravity && opts.event === 'PreToolUse') shellCommand = payloadString(payload, 'tool_input.command');
     result = handler.run({ event: opts.event, repoRoot, payload, identity, env, now, collector });
     reason = outcomeReason(result);
   } catch (error) {
@@ -203,12 +226,11 @@ export function runHook(opts: RunHookOptions): RunHookResult {
   const additionalContext = result.sessionContexts
     ? budgetSessionContext(result.sessionContexts) || null
     : result.additionalContext ?? null;
-  const exitCode = result.exitCode;
-  emit({
+  const exitCode = emit({
     event: opts.event,
     routeId: opts.routeId,
     repoRoot,
-    exitCode,
+    exitCode: result.exitCode,
     reason,
     permission: result.permission,
     additionalContext,
@@ -218,7 +240,7 @@ export function runHook(opts: RunHookOptions): RunHookResult {
   telemetry.finalize({
     identity,
     exitCode,
-    blocked: exitCode === 2 || result.permission?.decision === 'deny',
+    blocked: result.exitCode === 2 || result.permission?.decision === 'deny',
     reason,
     command: shellCommand,
   });

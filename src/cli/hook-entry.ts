@@ -8,6 +8,8 @@
  */
 
 import { readFileSync } from 'fs';
+import { declareArchitectureAbsent } from '../core/architecture/contracts';
+import { antigravityEnvironment } from './hook/host-adapter';
 import { HOOK_COMMAND_NAME, runHook } from './hook/runtime';
 import type { HookEvent, RouteId } from './hook/route-registry';
 import { parseHookPayload } from './hook/hook-input';
@@ -20,18 +22,32 @@ import { createdPaths } from '../effects/host-config/path-records';
 import './installer/install-profile';
 import { registerInstallLedger } from './hook/safety-hook';
 
+const antigravity = process.env.HOOK_HOST === 'antigravity';
+if (antigravity) {
+  // Bootstrap readers and their children also use process.env directly.
+  const allowed = antigravityEnvironment(process.env);
+  for (const key of Object.keys(process.env)) {
+    if (!Object.hasOwn(allowed, key)) delete process.env[key];
+  }
+}
+
 registerInstallLedger(createdPaths);
 
 // The hook process root reads the recorded selection once. Core hook code
 // reaches the architecture code only through the ports, which load only for a
 // selected plugin. A read failure registers nothing and changes no core guard.
-await registerSelectedArchitecturePorts(readRecordedSelection(), async () => {
-  const [{ ARCHITECTURE_PROVIDERS }, { AGENT_NOTICE_PROVIDER }] = await Promise.all([
-    import('../effects/architecture/providers'),
-    import('./hook/agent-notice'),
-  ]);
-  return { ...ARCHITECTURE_PROVIDERS, notice: AGENT_NOTICE_PROVIDER };
-});
+try {
+  await registerSelectedArchitecturePorts(readRecordedSelection(process.env), async () => {
+    const [{ ARCHITECTURE_PROVIDERS }, { AGENT_NOTICE_PROVIDER }] = await Promise.all([
+      import('../effects/architecture/providers'),
+      import('./hook/agent-notice'),
+    ]);
+    return { ...ARCHITECTURE_PROVIDERS, notice: AGENT_NOTICE_PROVIDER };
+  });
+} catch (error) {
+  if (!antigravity) throw error;
+  declareArchitectureAbsent('ARCHITECTURE_PROVIDER_UNAVAILABLE', 'Hook architecture providers unavailable.');
+}
 
 export { runHook };
 

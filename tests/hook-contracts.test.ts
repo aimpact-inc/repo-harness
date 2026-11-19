@@ -1,4 +1,5 @@
-import { ROUTES } from '../src/cli/hook/route-registry';
+import { ROUTES, routesForHost } from '../src/cli/hook/route-registry';
+import { antigravityEnvironment, antigravityHookMatcher } from '../src/cli/hook/host-adapter';
 import { getHandlerForRoute } from '../src/cli/hook/handler-registry';
 import { describe, test, expect } from "bun:test";
 import { readFileSync, existsSync } from "fs";
@@ -72,6 +73,24 @@ describe("Hook contracts", () => {
     expect(handler).not.toContain("getActivePlanMarker");
     expect(handler).not.toContain("activePlanForRecovery");
     expect(handler).not.toContain("handoff_refresh");
+  });
+
+  test('Antigravity exposes explicit tuples and matches only the agreed guarded tools', () => {
+    expect(routesForHost('antigravity').map(({ event, routeId }) => [event, routeId])).toEqual([
+      ['SessionStart', 'default'], ['PreToolUse', 'edit'], ['PreToolUse', 'bash'], ['Stop', 'default'],
+    ]);
+    expect(antigravityHookMatcher('bash')).toBe('run_command');
+    expect(antigravityHookMatcher('edit')).toBe('write_file|edit_file');
+  });
+
+  test('Antigravity bootstrap retains only the hook environment allowlist', () => {
+    const allowed = {
+      HOME: '/scratch/home', PATH: '/scratch/bin', TMPDIR: '/scratch/tmp', BUN_INSTALL: '/scratch/bun',
+      HOOK_HOST: 'antigravity', REPO_HARNESS_SEAT: 'advisor', REPO_HARNESS_SEAT_REPOSITORY: '1',
+    };
+    expect(antigravityEnvironment({
+      ...allowed, HOOK_REPO_ROOT: '/other', REPO_HARNESS_HOME: '/other', AMBIENT_SECRET: 'fake',
+    })).toEqual(allowed);
   });
 
 });
