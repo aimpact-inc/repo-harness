@@ -123,12 +123,18 @@ test('cleanup ends the live owner terminal before closeout and exact public remo
   expect(run('git', ['show-ref', '--verify', '--quiet', 'refs/heads/feat/owner'], f.root).status).not.toBe(0);
 });
 
-test('a removed owner terminal falls back to the existing closeout which releases binding, marker, checkout and branch', async () => {
+test('owner closeout retains ignored local data and succeeds after the file is cleared', async () => {
   const f = await fixture(); await f.ownerGone();
   expect(await f.notify()).toEqual({ status: 'owner_gone', reason: 'agent_exited' });
   expect(await cleanupTaskWorktree(f.root, f.checkout)).toEqual({ status: 'closed', pids: [] });
   expect(await f.notify()).toEqual({ status: 'owner_gone', reason: 'workspace_closed' });
-  writeFileSync(join(f.checkout, '.env'), 'ignored fixture data');
+  const local = join(f.checkout, '.env');
+  writeFileSync(local, 'ignored fixture data');
+  expect(f.remove).toThrow('ignored worktree data: ".env"');
+  expect(readFileSync(local, 'utf8')).toBe('ignored fixture data');
+  expect(readFileSync(join(f.checkout, '.ai/harness/active-worktree'), 'utf8').trim()).toBe(f.checkout);
+  expect(run('git', ['show-ref', '--verify', '--quiet', 'refs/heads/codex/owner'], f.root).status).toBe(0);
+  rmSync(local);
   f.remove();
   expect(existsSync(f.checkout)).toBe(false);
   expect(run('git', ['show-ref', '--verify', '--quiet', 'refs/heads/codex/owner'], f.root).status).not.toBe(0);
