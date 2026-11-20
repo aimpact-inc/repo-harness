@@ -2,6 +2,59 @@
 
 All notable changes to this skill are documented here.
 
+## [0.36.0] - 2026-11-20
+
+### Added
+
+- Antigravity is the fourth hook host. `rh install --target antigravity` adds the owned `repo-harness` member in `~/.gemini/config/hooks.json`. `rh doctor` checks the installed Bash guard separately from on-disk activation. The installer and restore commands preserve other members and refuse links in the path. (#3251)
+- The Herdr advisor can run native `agy` with an explicit catalog model and the Antigravity hooks. It supports Stop handoffs and manual relaunch. (#3246)
+- `rh seats pool` and Operator Settings show available recommended models by seat. Pi seats use the provider availability settings and can set separate models for `explorer` and `deep-reasoner` under `seats.pi_sub_agent_models`. (#3253, #3268)
+- Configure an optional planner in Operator Settings. Run `rh seats consult --issue <n> --space <id>` to open a Pi or Claude planner in a Herdr `plan` tab and write a reference plan outside Git. `rh seats argv planner` also supports Codex. (#3297, #3298)
+- `rh board cluster --open --json` or `rh board cluster --parent <n> --json` groups open issues by module and defect pattern. Add `--include-loose` to a parent scan to include loose issues. The command resolves cited files through archctx, groups issues with overlapping files, and keeps cross-capability issues out of multi-issue bundles. It suggests a merge order that can include eligible cross-module pattern groups and reports blockers and cycles. (#3282, #3348, #3357)
+- Experimental `rh rules status --proposals` reports review findings and recurring rule-opportunity themes after the ledger watermark. Add `--include-low` or `--include-bot` for more findings. The scan reports when it reaches its GitHub call limit. (#3263)
+- `rh doctor` checks the local Magpie gateway when a configured seat or review route uses it. The tooling guide lists the supported provider routes. (#3254)
+
+### Changed
+
+- `rh quota` and Operator show separate `agy_gemini` and `agy_other` accounts, each with weekly and five-hour limits. A Pi advisor on Magpie's `agy-cli` route uses its configured model at 50% or more Gemini weekly quota and Neon below 50% or when the reading is unknown. Native `agy` uses its configured model. Launch checks quota for the effective model. (#3286, #3288, #3340)
+- Pi Gemini 4 Neon shares the Claude Opus seat tier. Settings accepts Neon for frontend routes, and dispatch can keep an important route active on Neon when Claude quota is reserved. (#3340)
+- Seat launch, board dispatch and board review check runtime availability before starting an agent. Dispatch skips unavailable workers. A High second review checks the family in the recorded gatekeeper review. (#3253)
+- Herdr seat fleets allow the read-only `explorer` and `deep-reasoner` where the seat supports them. Acceptance runs on a separate seat. Standalone Claude and Codex installs retain those two roles and `harness-evaluator`. (#3305, #3306, #3307)
+- The managed-value index includes the hook and configuration values released in 0.35.2. (#3295)
+- `rh worktrees start` uses archctx 0.16.0 to seed a private CodeGraph index from the shared base when available. It falls back to a full index when seeding cannot run. An occupied index directory is preserved. (#3188)
+- `rh arch refactor recommendations` accepts `--node <capability-id>` or repeatable `--path <repo-relative-path>` and preserves typed provider errors. The archctx client reuses compatible Node probes. Direct archctx `audit`, `investigate`, `agents` and `jobs` now point to the seat and issue-flow commands. `hook` points to `rh install`. (#3346)
+
+### Fixed
+
+- Whole-path ownership requires the recorded file-system entry identity and content. Restore, removal and the hook exemption preserve a user replacement with the same bytes. (#3266)
+- `rh worktrees cleanup` refuses to remove a merged checkout with unrecognized Git-ignored local data. Preview and apply check the Git inventory, and apply checks again under the topology lock. (#3338)
+- A failed acceptance write leaves the previous receipt verifiable. The writer stores the result and observation by digest before it publishes the receipt. (#3335)
+- Seat launch uses the same login shell in tabs and splits. Seat reset refuses an untracked requester immediately and resolves the seat registry from the requester's launch directory. (#3279, #3300, #3302)
+- Operator Settings refuses to disable a runtime while effective seats use it and lists the seats to move first. (#3287)
+
+### Removed
+
+- The bundled `fast-worker`, `deep-worker`, `root-cause-prover` and in-process `gatekeeper` agents are retired. Use the Herdr seats for implementation and acceptance. (#3305, #3306, #3307)
+
+### Documentation
+
+- Issue-flow documents planner consultations for High-risk design, implementation skeletons before dispatch, and the optional `rule-opportunity` review marker. Workers take their requirements from the issue. (#3262, #3299)
+- The advisor and acceptor skills use scoped refactor recommendations, module review prompts and `rh arch verify` for architecture changes and High-risk cross-module changes. (#3349)
+- Refresh the generated architecture projections through `281260593`, including the refactor program documentation. (#3358)
+- ADR-0006 records the design for seat roles, Magpie and native model catalogs, sub-agent access, review attribution and pre-dispatch bundling. The rules review PRD and lessons record the discovery pilot and the new ledger watermark. (#3258, #3259, #3260, #3261, #3265, #3343)
+
+### Upgrade
+
+- Run `rh update` after installing 0.36.0. From 0.35.2 it moves the user and repository host configuration ledgers from protocol 4 to 5. The move records identity for eligible entries that still match the ledger. Install state stays at protocol 5, plan blocks at protocol 3, and the hook bridge at protocol 1. The Antigravity group is a new JSON member without a group protocol field.
+- The update adds `planner: null` to existing seat settings that lack it and removes retired fleet entries from saved seat fleets. It removes or restores retired files only when it can prove ownership. It keeps edited or unproved files and reports any vault copies needed for recovery.
+- Record fresh acceptance if an open review still uses the old local receipt layout. The receipt protocol stays at 4. The new verifier reads the result and observation from digest paths.
+- To enable Antigravity, run `rh install --target antigravity`. Later, `rh update --target antigravity` refreshes the recorded member. Native session activation requires a live check.
+
+### Rollback
+
+- Before publication, close the prep PR or revert its squash commit. After publication, keep the tag and release a corrective patch.
+- Version 0.35.2 cannot read protocol 5 host configuration ledgers. Keep 0.36.0 on migrated hosts, or restore the pre-upgrade ledgers with their matching host state before returning to 0.35.2. Move any seats that use the new `agy` runtime back to a runtime that 0.35.2 supports.
+
 ## [0.35.2] - 2026-11-19
 
 ### Added
