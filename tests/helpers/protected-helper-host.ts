@@ -17,3 +17,10 @@ mock.module(platformPath, () => ({
   resolveTrustedGhExecutable: () => gh,
   resolveProtectedHelperPlatform: (options: Record<string, unknown> = {}) => resolvePlatform({ ...options, accountHome: home }),
 }));
+
+const node = process.env.PROTECTED_HELPER_TEST_NODE;
+if (node) {
+  const candidatesPath = fileURLToPath(new URL('../../src/effects/runtime/node-candidates.ts', import.meta.url));
+  const candidates = { ...(await import(candidatesPath)) };
+  mock.module(candidatesPath, () => ({ ...candidates, trustedNodeCandidates: () => [node] }));
+}

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { knownFailure } from 'archctx-contracts';
 import { ArchitectureModelReader } from '../../src/effects/architecture/model-reader';
 import { decodeArchitectureModuleIndex, decodeArchitectureModuleDetail, decodeArchitectureReviewPrompt } from '../../src/core/operator/architecture';
 import { isArchitectureRequest, parseArchitectureRequest } from '../../src/core/operator/architecture';
@@ -526,7 +527,8 @@ describe('architecture map', () => {
       const policy = { provider: 'archctx', applyMode: 'manual', requiredVersion: ARCHCTX_REQUIRED_VERSION, timeoutMs: 120_000 } as const;
       // The fixture has no CodeGraph index, so `flows check` answers with its own error envelope.
       const flows = readArchVerification(root, ['flows', 'check', '--no-sync', '--json'], { policy });
-      expect(flows).toEqual({ ok: false, error: { code: 'AC_CODE_FACTS_UNAVAILABLE', message: 'Required code facts have no available index. Run codegraph init.' } });
+      const { code, message } = knownFailure('AC_CODE_FACTS_UNAVAILABLE', 'index-missing');
+      expect(flows).toEqual({ ok: false, error: { code, message } });
       expect(archVerifyCheck('flows', flows)).toMatchObject({ status: 'unavailable', count: 0 });
       // The fixture has no product intent, so the model itself is invalid: a measured finding, not an error.
       expect(archVerifyCheck('validate', readArchVerification(root, ['validate', '--format', 'json'], { policy })))

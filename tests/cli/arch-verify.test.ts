@@ -323,9 +323,9 @@ describe('rh arch verify: one verdict', () => {
               : id === 'constraints' ? constraintReport('pass', 'complete')
                 : id === 'docs' ? anchorsReport(0) : projectionReport(null)),
     }));
-    const report = buildArchVerifyReport({ base: 'a'.repeat(40), head: 'b'.repeat(40), archctxVersion: '0.15.0', reads });
+    const report = buildArchVerifyReport({ base: 'a'.repeat(40), head: 'b'.repeat(40), archctxVersion: ARCHCTX_REQUIRED_VERSION, reads });
     expect(Object.keys(report)).toEqual(['kind', 'protocol', 'base', 'head', 'archctx_version', 'verdict', 'checks']);
-    expect(report).toMatchObject({ kind: ARCH_VERIFY_KIND, protocol: ARCH_VERIFY_PROTOCOL, base: 'a'.repeat(40), head: 'b'.repeat(40), archctx_version: '0.15.0' });
+    expect(report).toMatchObject({ kind: ARCH_VERIFY_KIND, protocol: ARCH_VERIFY_PROTOCOL, base: 'a'.repeat(40), head: 'b'.repeat(40), archctx_version: ARCHCTX_REQUIRED_VERSION });
     expect(report.checks.map((entry) => entry.id)).toEqual([...ARCH_VERIFY_CHECK_IDS]);
     expect(report.verdict).toBe('findings');
     expect(report.checks.find((entry) => entry.id === 'debt')).toEqual({ id: 'debt', status: 'findings', count: 2 });
@@ -336,7 +336,7 @@ describe('rh arch verify: one verdict', () => {
   });
 
   test('a check with no read is an error, never a pass', () => {
-    const report = buildArchVerifyReport({ base: 'a'.repeat(40), head: 'b'.repeat(40), archctxVersion: '0.15.0', reads: [] });
+    const report = buildArchVerifyReport({ base: 'a'.repeat(40), head: 'b'.repeat(40), archctxVersion: ARCHCTX_REQUIRED_VERSION, reads: [] });
     expect(report.checks).toHaveLength(ARCH_VERIFY_CHECK_IDS.length);
     expect(report.checks.every((entry) => entry.status === 'error' && entry.error?.code === ARCH_VERIFY_CONTRACT_CODE)).toBe(true);
     expect(report.verdict).toBe('error');
@@ -365,8 +365,7 @@ describe('rh arch verify in a repository', () => {
 
   test('one failing flow proof makes flows findings, the verdict findings, and the exit code 1', () => {
     // The source declares the selector but never calls its sink, so the P2 proof fails.
-    // archctx@0.15.0 answers for this fixture: 1 unproven selector and 3 capability
-    // diagnostics (`selector-evidence-unmatched`), so the count is 4, not 1.
+    // The four findings include one unproven selector and three capability diagnostics (selector-evidence-unmatched).
     const root = validRepository(false);
     indexPackageLocalCodeGraph(root, { policy });
     const result = runArchVerifyCommand(root, { base: 'HEAD', json: false }, { policy });

@@ -244,15 +244,8 @@ resolve_upstream_base() {
 }
 
 bootstrap_worktree_runtime() {
-  # A fresh linked worktree starts without the gitignored runtime artifacts the
-  # verification gates depend on, and both resulting failures name neither cause.
-  # A missing dependency tree surfaces as `state=missing`, because the
-  # projection provider resolves archctx package-locally from the candidate
-  # build, while the globally installed CLI resolves it elsewhere and reports
-  # ready. A missing code index
-  # surfaces as `unresolved-major-change` listing every capability, because
-  # archctx cannot prove a single flow without code facts. Seeding both here
-  # keeps that diagnosis from being re-derived once per worktree.
+  # A fresh linked worktree needs package-local dependencies and a private
+  # index for the architecture verification gates.
   local worktree_path="$1"
 
   if [[ -f "$worktree_path/package.json" ]] \
@@ -267,38 +260,18 @@ bootstrap_worktree_runtime() {
     fi
   fi
 
-  # Mirror only an adoption the primary worktree already made. No .codegraph
-  # directory means the operator did not opt into indexing, and start has no
-  # business opting in on their behalf. CodeGraph belongs to the architecture
-  # plugin: without it in the recorded selection the index step is skipped
-  # with one line, and the worktree is still created.
-  if [[ -d "$REPO_ROOT/.codegraph" ]] && [[ ! -f "$worktree_path/.codegraph/codegraph.db" ]]; then
-    repo_harness_architecture_start "$(cd "$helper_dir/.." && pwd)" "$BUN_BIN" "CodeGraph index of the worktree" \
-      index_worktree_codegraph "$worktree_path" || return 1
+  # Mirror only an adoption the primary worktree already made.
+  if [[ -d "$REPO_ROOT/.codegraph" && ! -f "$worktree_path/.codegraph/codegraph.db" ]]; then
+    local package_root
+    package_root="$(cd "$helper_dir/.." && pwd)"
+    repo_harness_architecture_start "$package_root" "$BUN_BIN" "CodeGraph index of the worktree" \
+      "${BUN_BIN:-bun}" -e 'const { bootstrapWorktreeCodeGraph } = await import(process.argv[1]);
+        try { bootstrapWorktreeCodeGraph(process.argv[2], process.argv[3]); }
+        catch (error) { console.error(`[ContractWorktree] ${error.message}`); process.exitCode = 1; }' \
+      "$package_root/src/effects/architecture/archctx-provider.ts" "$REPO_ROOT" "$worktree_path" || return 1
   fi
 
   return 0
-}
-
-index_worktree_codegraph() {
-  local worktree_path="$1" codegraph_path init_log
-  local -a launcher=()
-  codegraph_path="$(command -v codegraph 2>/dev/null)" || return 0
-  [[ "${contract_worktree_start_json:-0}" -eq 1 ]] \
-    || printf '%s\n' "[ContractWorktree] Indexing CodeGraph (architecture projection requires code facts)"
-  # The protected helper PATH has no node, so a launcher that starts with
-  # `#!/usr/bin/env node` cannot run. Start it with the selected runtime.
-  if [[ -n "${REPO_HARNESS_NODE_BIN:-}" ]] && [[ "$(head -n 1 "$codegraph_path" 2>/dev/null)" =~ ^'#!'.*[[:space:]/]node([[:space:]]|$) ]]; then
-    launcher=("$REPO_HARNESS_NODE_BIN")
-  fi
-  init_log="$(mktemp)"
-  if ! (cd "$worktree_path" && "${launcher[@]}" "$codegraph_path" init </dev/null >/dev/null 2>"$init_log"); then
-    echo "[ContractWorktree] codegraph init failed; architecture projection will report unresolved-major-change for every capability" >&2
-    tail -n 5 "$init_log" | tail -c 2000 >&2
-    rm -f "$init_log"
-    return 1
-  fi
-  rm -f "$init_log"
 }
 
 run_contract_runtime() {

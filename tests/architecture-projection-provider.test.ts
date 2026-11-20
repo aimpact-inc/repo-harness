@@ -91,7 +91,7 @@ afterEach(async () => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
-function fixture() {
+function fixture({ git = true } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'repo-harness-archctx-provider-'));
   roots.push(root);
   const consumerRoot = join(root, 'consumer');
@@ -133,11 +133,13 @@ extensions:
   writeFileSync(join(repoRoot, 'src', 'core', 'index.ts'), 'export const value = 1;\n');
   writeFileSync(join(repoRoot, 'AGENTS.md'), 'ignored projection output\n');
   writeFileSync(join(repoRoot, 'CLAUDE.md'), 'ignored projection output\n');
-  execFileSync('git', ['init'], { cwd: repoRoot, stdio: 'ignore' });
-  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoRoot });
-  execFileSync('git', ['config', 'user.name', 'Repo Harness Test'], { cwd: repoRoot });
-  execFileSync('git', ['add', '.'], { cwd: repoRoot });
-  execFileSync('git', ['commit', '-m', 'fixture'], { cwd: repoRoot, stdio: 'ignore' });
+  if (git) {
+    execFileSync('git', ['init'], { cwd: repoRoot, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoRoot });
+    execFileSync('git', ['config', 'user.name', 'Repo Harness Test'], { cwd: repoRoot });
+    execFileSync('git', ['add', '.'], { cwd: repoRoot });
+    execFileSync('git', ['commit', '-m', 'fixture'], { cwd: repoRoot, stdio: 'ignore' });
+  }
   return { root, consumerRoot, repoRoot, binary };
 }
 
@@ -920,6 +922,7 @@ describe('package-local ArchContext projection provider', () => {
   });
 
   describe('committed projection manifest compatibility', () => {
+    let node: string | undefined;
     const withManifest = (f: ReturnType<typeof fixture>, contents: string) => {
       mkdirSync(join(f.repoRoot, 'docs', 'architecture'), { recursive: true });
       writeFileSync(join(f.repoRoot, 'docs', 'architecture', '.projection-manifest.json'), contents);
@@ -931,12 +934,15 @@ describe('package-local ArchContext projection provider', () => {
       profile: 'repo-harness/v1',
     });
     const readiness = (f: ReturnType<typeof fixture>) => {
-      // A fixed fake Node runtime keeps the result independent of the Node on the test machine.
-      const fakeBin = join(f.root, 'bin');
-      mkdirSync(fakeBin, { recursive: true });
-      writeNodeStub(join(fakeBin, 'node'), { version: '24.1.0' });
+      // The manifest reader is filesystem-only. Keep the version probe's
+      // executable outside the fixture root that afterEach removes on Windows.
+      if (!node) {
+        const bin = mkdtempSync(join(tmpdir(), 'repo-harness-manifest-node-'));
+        stubRoots.push(bin);
+        node = writeNodeStub(join(bin, 'node'), { version: '24.1.0' });
+      }
       return inspectArchitectureProjectionReadiness(f.repoRoot, architectureModelReady, {
-        consumerRoot: f.consumerRoot, policy, env: { PATH: fakeBin }, trustedNodeCandidateSource: () => [], run: runner([], projectionEnvelope(expectedSnapshot)),
+        consumerRoot: f.consumerRoot, policy, env: { REPO_HARNESS_NODE_BIN: node }, run: runner([], projectionEnvelope(expectedSnapshot)),
       });
     };
 
@@ -945,7 +951,7 @@ describe('package-local ArchContext projection provider', () => {
       ['a v3 renderer floor newer than the installed archctx', 'archcontext.docs-renderer/v7', 'v3', 'minimumRendererVersion is unsupported by this engine'],
       ['a v5 manifest', 'archcontext.docs-renderer/v6', 'v5', 'schema is unsupported by this engine'],
     ])('%s is incompatible, not upgrade-required, and keeps apply disabled', (_name, floor, schema, issue) => {
-      const f = fixture();
+      const f = fixture({ git: false });
       withManifest(f, manifest(floor, schema));
       const result = readiness(f);
       expect(result.projectionProvider.state).toBe('mismatch');
@@ -955,13 +961,13 @@ describe('package-local ArchContext projection provider', () => {
     });
 
     test('a floor the installed archctx meets stays ready', () => {
-      const f = fixture();
+      const f = fixture({ git: false });
       withManifest(f, manifest('archcontext.docs-renderer/v6'));
       expect(readiness(f).projectionProvider.state).toBe('ready');
     });
 
     test('a v3 manifest whose floor the installed archctx meets is not ready and keeps apply disabled', () => {
-      const f = fixture();
+      const f = fixture({ git: false });
       withManifest(f, manifest('archcontext.docs-renderer/v6', 'v3'));
       const result = readiness(f);
       expect(result.projectionProvider.state).toBe('mismatch');
@@ -970,7 +976,7 @@ describe('package-local ArchContext projection provider', () => {
     });
 
     test('a malformed committed manifest fails closed', () => {
-      const f = fixture();
+      const f = fixture({ git: false });
       withManifest(f, '{not json');
       const result = readiness(f);
       expect(result.projectionProvider.state).toBe('error');
