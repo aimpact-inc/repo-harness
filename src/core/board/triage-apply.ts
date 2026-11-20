@@ -41,11 +41,26 @@ export interface TriageManifestV1 {
   readonly max_parallel_writers?: number;
 }
 
+export const TRIAGE_LABEL_PREFIXES = ['module:', 'tier:', 'route:', 'pattern:'] as const;
+
 export type TriageOperation =
-  | { readonly kind: 'add_labels'; readonly issue: number; readonly labels: readonly string[] }
+  | { readonly kind: 'set_labels'; readonly issue: number; readonly labels: readonly string[] }
   | { readonly kind: 'add_sub_issue'; readonly parent: number; readonly issue: number }
   | { readonly kind: 'close_duplicate'; readonly issue: number; readonly canonical: number; readonly reason: string; readonly comment: string }
   | { readonly kind: 'post_plan'; readonly parent: number; readonly body: string; readonly supersedes: string | null };
+
+export function computeLabelDelta(
+  existingLabels: readonly string[],
+  desiredLabels: readonly string[],
+): { readonly add: readonly string[]; readonly remove: readonly string[] } {
+  const existing = new Set(existingLabels);
+  const desired = new Set(desiredLabels);
+  const add = desiredLabels.filter(label => !existing.has(label));
+  const remove = [...existing]
+    .filter(label => TRIAGE_LABEL_PREFIXES.some(prefix => label.startsWith(prefix)) && !desired.has(label))
+    .sort();
+  return { add, remove };
+}
 
 export interface TriageApplyPlanV1 {
   readonly manifest: TriageManifestV1;
@@ -322,7 +337,7 @@ export function planTriageApply(
   const operations: TriageOperation[] = [];
   for (const issue of manifest.issues) {
     operations.push({
-      kind: 'add_labels',
+      kind: 'set_labels',
       issue: issue.number,
       labels: issueLabelsForTriage(issue),
     });

@@ -309,7 +309,7 @@ function collectRetro(options: BoardOptions & { readonly since?: string }, env: 
 function triageApplyText(result: TriageApplyResultV1): string {
   const lines = result.operations.map((op) => {
     switch (op.kind) {
-      case 'add_labels': return `add_labels #${op.issue}: ${op.labels.join(', ')}`;
+      case 'set_labels': return `set_labels #${op.issue}: ${op.labels.join(', ')}`;
       case 'add_sub_issue': return `add_sub_issue #${op.parent} <- #${op.issue}`;
       case 'close_duplicate': return `close_duplicate #${op.issue} -> #${op.canonical}`;
       case 'post_plan': return result.dry_run
@@ -322,7 +322,7 @@ function triageApplyText(result: TriageApplyResultV1): string {
 
 export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: AttentionHostPortsV1,
   postPorts: (repo_root: string) => BoardPostPorts = gitHubPostPorts,
-  triagePorts: (repo_root: string) => TriageApplyPorts = repoRoot => gitHubTriageApplyPorts(repoRoot, postPorts)): Command {
+  triagePorts: (repo_root: string) => TriageApplyPorts = repoRoot => gitHubTriageApplyPorts(repoRoot)): Command {
   const board = new Command('board')
     .description('Read a parent issue board, or list the parents and seats of this repository')
     .option('--parent <number>', 'Parent issue number')

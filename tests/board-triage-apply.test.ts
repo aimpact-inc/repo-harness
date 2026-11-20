@@ -6,7 +6,7 @@ import { Command } from 'commander';
 import { buildBoardCommand } from '../src/cli/commands/board';
 import { decodePlanBlock } from '../src/core/board/plan-block';
 import { decodeTriageManifest, planTriageApply, TRIAGE_MANIFEST_SCHEMA_VERSION, TriageApplyValidationError } from '../src/core/board/triage-apply';
-import { runTriageApply, type TriageApplyPorts } from '../src/effects/board/triage-apply';
+import { gitHubTriageApplyPorts, runTriageApply, type TriageApplyPorts } from '../src/effects/board/triage-apply';
 import { attentionHostPorts, boardHostPorts } from '../src/effects/terminal/herdr-core';
 
 const COORDINATOR = 'https://github.com/aimpact-inc/repo-harness/issues/3343#issuecomment-1';
@@ -53,7 +53,7 @@ test('planTriageApply validates all three ADR-0006 §6 red lines and rejects inv
     holds: [],
     seat_limits: { worker: 2 },
   });
-  expect(plan.operations.map(op => op.kind)).toEqual(['add_labels', 'add_sub_issue', 'add_labels', 'add_sub_issue', 'add_labels', 'close_duplicate', 'post_plan']);
+  expect(plan.operations.map(op => op.kind)).toEqual(['set_labels', 'add_sub_issue', 'set_labels', 'add_sub_issue', 'set_labels', 'close_duplicate', 'post_plan']);
 
   expect(() => decodeTriageManifest(baseManifest({
     issues: [
@@ -93,23 +93,29 @@ test('planTriageApply validates all three ADR-0006 §6 red lines and rejects inv
   }))).toThrow('share target file src/shared.ts');
 });
 
-test('runTriageApply shares one operation list between --dry-run and apply and stops before writing when supersedes check fails', () => {
+test('runTriageApply shares one operation list between --dry-run and apply, binds manifest.repository, and removes conflicting labels', () => {
   const calls: string[] = [];
   const ports = (existingPlan = false): TriageApplyPorts => ({
-    comments: () => ({
-      truncated: false,
-      comments: existingPlan
-        ? [{ url: PLAN_URL, created_at: '2026-11-20T00:00:00Z', author_association: 'OWNER', body: 'repo-harness plan\n\n```json\n{"protocol":3,"kind":"repo-harness.plan","merge_order":[],"holds":[],"seat_limits":{"worker":1}}\n```' }]
-        : [],
-    }),
-    read_issue_node_ids: (_repo, nums) => {
-      calls.push(`ids:${nums.join(',')}`);
-      return new Map(nums.map(n => [n, `ID_${n}`]));
+    comments: (repo) => {
+      calls.push(`comments:${repo}`);
+      return {
+        truncated: false,
+        comments: existingPlan
+          ? [{ url: PLAN_URL, created_at: '2026-11-20T00:00:00Z', author_association: 'OWNER', body: 'repo-harness plan\n\n```json\n{"protocol":3,"kind":"repo-harness.plan","merge_order":[],"holds":[],"seat_limits":{"worker":1}}\n```' }]
+          : [],
+      };
     },
-    add_labels: (_repo, issue, labels) => { calls.push(`labels:${issue}:${labels.join(',')}`); },
+    read_issue_metadata: (_repo, nums) => {
+      calls.push(`ids:${nums.join(',')}`);
+      return new Map(nums.map(n => [n, {
+        id: `ID_${n}`,
+        labels: n === 101 ? ['enhancement', 'tier:low', 'route:simple_fast', 'pattern:old'] : [],
+      }]));
+    },
+    set_labels: (_repo, issue, add, remove) => { calls.push(`labels:${issue}:+${add.join(',')}:-${remove.join(',')}`); },
     add_sub_issue: (parentId, childId) => { calls.push(`sub:${parentId}->${childId}`); },
     close_duplicate: (_repo, issue, comment) => { calls.push(`close:${issue}:${comment}`); },
-    post_plan: (parent, body) => { calls.push(`plan:${parent}:${body.split('\n')[0]}`); return PLAN_URL; },
+    post_plan: (repo, parent, body) => { calls.push(`plan:${repo}#${parent}:${body.split('\n')[0]}`); return PLAN_URL; },
   });
 
   const dry = runTriageApply({ repo_root: process.cwd(), manifest: baseManifest(), dry_run: true, ports: ports(), env: {} });
@@ -118,7 +124,8 @@ test('runTriageApply shares one operation list between --dry-run and apply and s
   expect(calls).toEqual([]);
 
   expect(() => runTriageApply({ repo_root: process.cwd(), manifest: baseManifest(), dry_run: false, ports: ports(true), env: {} })).toThrow('supersedes');
-  expect(calls).toEqual([]);
+  expect(calls).toEqual(['comments:aimpact-inc/repo-harness']);
+  calls.length = 0;
 
   const dryWithSupersedes = runTriageApply({ repo_root: process.cwd(), manifest: baseManifest({ supersedes: PLAN_URL }), dry_run: true, ports: ports(true), env: {} });
   const applied = runTriageApply({ repo_root: process.cwd(), manifest: baseManifest({ supersedes: PLAN_URL }), dry_run: false, ports: ports(true), env: {} });
@@ -126,14 +133,58 @@ test('runTriageApply shares one operation list between --dry-run and apply and s
   expect(applied.plan_comment_url).toBe(PLAN_URL);
   expect(applied.operations).toEqual(dryWithSupersedes.operations);
   expect(calls).toEqual([
-    'ids:3343,101,102',
-    'labels:101:module:organization/board,tier:medium,route:simple_fast',
+    'comments:aimpact-inc/repo-harness',
+    'ids:101,102,103,3343',
+    'labels:101:+module:organization/board,tier:medium:-pattern:old,tier:low',
     'sub:ID_3343->ID_101',
-    'labels:102:module:organization/board,tier:low,route:important_fast,pattern:clean-up',
+    'labels:102:+module:organization/board,tier:low,route:important_fast,pattern:clean-up:-',
     'sub:ID_3343->ID_102',
-    'labels:103:module:organization/board,tier:high,route:simple_deep',
+    'labels:103:+module:organization/board,tier:high,route:simple_deep:-',
     'close:104:Duplicate of #101. covered by #101',
-    'plan:3343:repo-harness plan',
+    'plan:aimpact-inc/repo-harness#3343:repo-harness plan',
+  ]);
+
+  const ghCalls: string[][] = [];
+  const ghPorts = gitHubTriageApplyPorts(process.cwd(), {
+    repo_root: process.cwd(),
+    gh_runner: (args) => {
+      ghCalls.push([...args]);
+      if (args[0] === 'api' && args.at(-1)?.includes('/comments')) return { status: 0, stdout: '[[]]' };
+      if (args[0] === 'api' && args[1] === 'graphql' && args.some(a => a.includes('labels('))) {
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            data: {
+              repository: {
+                i101: { id: 'ID_101', number: 101, labels: { pageInfo: { hasNextPage: false }, nodes: [{ name: 'enhancement' }, { name: 'tier:low' }, { name: 'route:simple_fast' }, { name: 'pattern:old' }] } },
+                i3343: { id: 'ID_3343', number: 3343, labels: { pageInfo: { hasNextPage: false }, nodes: [] } },
+              },
+            },
+          }),
+        };
+      }
+      if (args[0] === 'issue' && args[1] === 'comment') return { status: 0, stdout: PLAN_URL };
+      return { status: 0, stdout: '{}' };
+    },
+  });
+  const foreignResult = runTriageApply({
+    repo_root: process.cwd(),
+    manifest: baseManifest({
+      repository: 'other-org/other-repo',
+      issues: [{ number: 101, module: 'organization/board', tier: 'medium', route: 'important_fast', attach_to_parent: false }],
+      duplicates: [],
+      merge_order: [101],
+    }),
+    dry_run: false,
+    ports: ghPorts,
+    env: {},
+  });
+  expect(foreignResult.plan_comment_url).toBe(PLAN_URL);
+  expect(ghCalls).toEqual([
+    ['api', '--hostname', 'github.com', '--paginate', '--slurp', 'repos/other-org/other-repo/issues/3343/comments?per_page=100'],
+    ['api', 'graphql', '--hostname', 'github.com', '-f', expect.stringContaining('labels(first: 100)'), '-f', 'owner=other-org', '-f', 'name=other-repo'],
+    ['issue', 'edit', '101', '--repo', 'other-org/other-repo', '--add-label', 'module:organization/board', '--add-label', 'tier:medium', '--add-label', 'route:important_fast', '--remove-label', 'pattern:old', '--remove-label', 'route:simple_fast', '--remove-label', 'tier:low'],
+    ['issue', 'comment', '3343', '--repo', 'other-org/other-repo', '--body-file', '-'],
   ]);
 });
 
@@ -143,8 +194,8 @@ test('CLI rh board triage-apply --manifest --dry-run --json validates red lines 
   const calls: string[] = [];
   const ports: TriageApplyPorts = {
     comments: () => ({ truncated: false, comments: [] }),
-    read_issue_node_ids: () => new Map(),
-    add_labels: () => { calls.push('add_labels'); },
+    read_issue_metadata: () => new Map(),
+    set_labels: () => { calls.push('set_labels'); },
     add_sub_issue: () => { calls.push('add_sub_issue'); },
     close_duplicate: () => { calls.push('close_duplicate'); },
     post_plan: () => { calls.push('post_plan'); return PLAN_URL; },
