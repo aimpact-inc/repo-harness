@@ -58,6 +58,21 @@ When the repository has `agents/fleet/known-gaps.md`, read the row for the
 PR's producer and run its named checks in addition to the tier's review.
 The table rules govern how the row combines with the review.
 
+When a PR modifies `.archcontext/**`, `docs/architecture/**`, or carries
+`tier:high` cross-module boundary changes, read
+`rh arch verify --base <base-sha> --json` (never run `archctx` from `PATH`;
+never synthesize a pass):
+
+- `pass`: every measured check holds and no check is `error`.
+- `findings`: grade each finding on an active constraint or proof in scope
+  under the diff-scoped P1/P2/P3 bar (§3); pre-existing defects on `main`
+  stay non-blocking notes.
+- `unavailable` (`AC_CODE_FACTS_UNAVAILABLE`, `AC_CODE_FACTS_NOT_READY`, or
+  `AC_MODEL_ADOPTION_REQUIRED`): record an observation gap in the review
+  summary, never a clean pass.
+- `error`: blocks acceptance (`FAIL` or stop before publishing `PASS`) until
+  the check runs cleanly.
+
 ### 2.2 Rounds
 
 A review has at most two rounds. Each round grades only the lines that the

@@ -18,10 +18,23 @@ evidence.
 
 At `done`, run only the cheap checks below: path ownership, and
 `rh arch projection check` when the model or documents changed. Do not run
-`rh arch refactor recommendations --json` at `done`. Run it once per merge,
-on a fixed checkout and branch (the main checkout after the merge), or when the
-user asks about refactors. The scan covers the whole repository, takes about
-30 s and gives the same output on every branch.
+`rh arch refactor recommendations --json` at `done` or on worker `Stop`
+hooks. Run the full-repo scan once per merge on a fixed checkout and branch
+(the `main` checkout after the merge), or run a scoped scan (`--node` /
+`--path`) during `advisor` audit or when the user asks about refactors. A
+full-repo scan takes about 30 s and gives the same output on every branch.
+
+When a PR modifies `.archcontext/**`, `docs/architecture/**`, or carries
+`tier:high` cross-module boundary changes, read
+`rh arch verify --base <base-sha> --json` in the target worktree before
+acceptance (never invoke `archctx` from `PATH`):
+
+| Check status | Meaning | Review decision |
+| --- | --- | --- |
+| `pass` | Measured check passed with zero findings. | Clear on this check. |
+| `findings` | Check counted active constraint or proof findings. | Grade findings in diff scope under P1/P2/P3; pre-existing `main` defects are non-blocking notes. |
+| `unavailable` | Subject unmeasured (`AC_CODE_FACTS_UNAVAILABLE`, `AC_CODE_FACTS_NOT_READY`, or `AC_MODEL_ADOPTION_REQUIRED`). | Record an observation gap, never a clean pass. |
+| `error` | Check or envelope failed (`RH_ARCH_VERIFY_*` or timeout). | Block acceptance until the check runs cleanly. |
 
 Read the cheap signal first:
 
@@ -78,17 +91,22 @@ writer publishes generated files. Do not run apply to refresh a feature PR.
 
 ## Refactor suggestions
 
-Run `rh arch refactor recommendations --json`. The result
-`repo-harness.refactor-recommendations/v2` has a `status` and `candidates`.
-Each candidate gives its kind, subject, risk, confidence, uncertainty,
-`metrics`, bounded `evidence` and module statistics. The `evidence` has a
-`kind`, a `totalCount`, a `truncated` flag and the first items. Module
-statistics are files, lines, fan-in, fan-out, cycles, direction violations
-(filled only when the model declares constraints) and unresolved imports.
-repo-harness does not show instability or test file counts in module statistics.
-A suggestion recorded by an earlier scan has `snapshot: "earlier"` and its own
-`baselineSnapshotDigest`. It keeps its recorded metrics and evidence and shows
-no module statistics, because the current scan measured a different snapshot.
+Run `rh arch refactor recommendations --json` (pass `--node <capability-id>` or
+`--path <repo-relative-path>` once `#3346` lands). Use `--node` or `--path`
+for scoped reads during `advisor` health audits and pre-refactor intake,
+alongside full-repo post-merge scans (without `--node` or `--path`). Never call
+`archctx` from `PATH`. The result `repo-harness.refactor-recommendations/v2` has
+a `status`
+and `candidates`. Each candidate gives its kind, subject, risk, confidence,
+uncertainty, `metrics`, bounded `evidence` and module statistics. The
+`evidence` has a `kind`, a `totalCount`, a `truncated` flag and the first
+items. Module statistics are files, lines, fan-in, fan-out, cycles, direction
+violations (filled only when the model declares constraints) and unresolved
+imports. repo-harness does not show instability or test file counts in module
+statistics. A suggestion recorded by an earlier scan has
+`snapshot: "earlier"` and its own `baselineSnapshotDigest`. It keeps its
+recorded metrics and evidence and shows no module statistics, because the
+current scan measured a different snapshot.
 
 | Status | Bot decision |
 | --- | --- |

@@ -50,6 +50,15 @@ answers one question.
   resolved path on its line and as `out_path` with `--json`. Each plan
   path must be new: the planner refuses a path that already exists, so a
   second question takes its own `--qualifier`.
+- **Cross-capability cycle or boundary split (`L3 council`).** Run
+  `rh arch refactor recommendations --json` (scoped with `--node <capability-id>`
+  or `--path <path>` once `#3346` lands) and
+  `rh arch module review-prompt <capability-id> --json` for each affected
+  capability. Attach the `RefactorRecommendation` metrics (`metrics`,
+  `evidence`, `modules`) and the `review-prompt` output to the L3 `council`
+  consultation brief (`rh seats consult` / planner packet; `council`
+  subcommand per ADR-0006 §4). Workers never read `/tmp/rh-council/` or
+  `/tmp/rh-plans/`.
 
 ## 2. Scheduled review
 
@@ -87,7 +96,25 @@ the change, so the check must come from outside its session.
       than 7 days or more than 100 first-parent commits behind. Send
       `[rh-notice] lessons-retro due: <watermark> is <n> days and <n>
       first-parent commits behind origin/main`.
-   9. Items for the owner: security and production only.
+   9. Structural refactor intake (periodic health audit and pre-refactor
+      check). Run `rh arch refactor recommendations --json` (scoped with
+      `--node <capability-id>` or `--path <path>` once `#3346` lands).
+      Never invoke `archctx` from `PATH` and never run this scan on worker
+      `Stop` hooks. Follow this decision flow:
+      1. Present `recommended` structural observations and their evidence to
+         the owner.
+      2. Record each owner decision via
+         `rh arch refactor decide <id> accept|defer|reject --reason "<text>"`
+         (pass the same `--import-node-limit` if the scan used one). A
+         recommendation never auto-schedules or auto-executes a refactor.
+      3. Route `accepted` single-module observations into `advisor` PR
+         bundles (`orchestrator.md` §4.2 / bundle manifest). For a
+         cross-capability cycle or boundary split, attach the
+         `RefactorRecommendation` metrics and
+         `rh arch module review-prompt <capability-id> --json` output to the
+         L3 `council` consultation brief (`rh seats consult` / planner
+         packet, §1.1; `council` subcommand per ADR-0006 §4).
+   10. Items for the owner: security and production only.
 3. **Write the plan** in your scratch space: changes since the last plan,
    blockers, the next bundle for each batch parent (its issues, seat from
    the route line, tier, file boundary, trigger), the joint decisions that
