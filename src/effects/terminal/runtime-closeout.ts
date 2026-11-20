@@ -118,10 +118,12 @@ export async function registerTaskWorktree(repoRoot: string, endpoint: HerdrCore
   });
 }
 
+export const TASK_REQUEST_OUTBOX_PATH = '.ai/harness/runs/task-agent-outbox';
+
 export function requestOutbox(binding: TaskPaneBinding, dir: string): string {
-  return join(binding.execution_root, '.ai/harness/runs/task-agent-outbox', dir.split('/').pop()!);
+  return join(binding.execution_root, TASK_REQUEST_OUTBOX_PATH, dir.split('/').pop()!);
 }
-function assertTaskRequest(root: string, dir: string, request: TaskRequest): { binding: TaskPaneBinding; outbox: string } {
+export function assertTaskRequest(root: string, dir: string, request: TaskRequest): { binding: TaskPaneBinding; outbox: string } {
   const { binding, dir: expectedDir } = readTaskAgent(root, request.task, request.role);
   const outbox = requestOutbox(binding, dir);
   if (request.protocol !== 2 || dir !== expectedDir || !Number.isSafeInteger(request.round) || request.round < 1

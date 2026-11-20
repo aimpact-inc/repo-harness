@@ -128,9 +128,10 @@ describe('read-only worktree judgment and lifecycle', () => {
     try {
       expect(f.inspect()).toMatchObject({ judgment: 'green', reasons: [], merge: 'ancestor', unpushed_commits: 0, dirty_files: 0 });
       mkdirSync(join(f.tree, 'node_modules')); writeFileSync(join(f.tree, 'node_modules/output'), 'rebuild');
-      // The uncollapsed names exceed execFileSync's default 1 MiB buffer.
+      // Git keeps large ignored trees within the probe budget by collapsing the name.
       for (let index = 0; index < 5000; index++) writeFileSync(join(f.tree, 'node_modules', `${index}-${'x'.repeat(220)}`), '');
-      expect(f.inspect()).toMatchObject({ judgment: 'green', ignored_entries: 1 });
+      expect(f.inspect()).toMatchObject({ judgment: 'yellow', reasons: ['ignored_data'], ignored_entries: 1 });
+      rmSync(join(f.tree, 'node_modules'), { recursive: true });
       writeFileSync(join(f.tree, '.env'), 'private');
       expect(f.inspect()).toMatchObject({ judgment: 'yellow', reasons: ['ignored_data'] });
       writeFileSync(join(f.tree, 'feature.txt'), 'changed');

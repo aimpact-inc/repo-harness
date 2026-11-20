@@ -758,7 +758,8 @@ describe('exact cleanup and contract-worktree start sweep', () => {
     try {
       const payload = join(f.path, 'node_modules/payload');
       mkdirSync(payload, { recursive: true });
-      for (let index = 0; index < 24; index++) writeFileSync(join(payload, `file-${index}`), 'trash data');
+      // Directory scaffolds give the deletion loop real entries without unrelated local files.
+      for (let index = 0; index < 24; index++) mkdirSync(join(payload, `entry-${index}`));
       const directory = await interruptSweep(f, 'branch-deleted');
       return { ...f, directory };
     } catch (error) { f.cleanup(); throw error; }
@@ -826,7 +827,7 @@ describe('exact cleanup and contract-worktree start sweep', () => {
       const other = addMergedSweepWorktree(f);
       const payload = join(f.path, 'node_modules/payload');
       mkdirSync(payload, { recursive: true });
-      for (let index = 0; index < 24; index++) writeFileSync(join(payload, `file-${index}`), 'trash data');
+      for (let index = 0; index < 24; index++) mkdirSync(join(payload, `entry-${index}`));
       const result = sweepWithSlowDeletion(f);
       expect(result).toContain('removed=2');
       expect(result).toContain('trash deletion will resume');

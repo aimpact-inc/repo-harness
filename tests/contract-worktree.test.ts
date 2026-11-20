@@ -18,6 +18,8 @@ import { tmpdir } from "os";
 import { defaultWorktreeTemplate } from "../src/core/worktree-location.mjs";
 
 import { sweepManagedWorktrees } from '../src/effects/state/coordination-worktree-topology';
+import { createHookEventTelemetry } from '../src/cli/hook/event-telemetry';
+import { writeBlob } from '../src/effects/evidence/blob-store';
 import { defaultPolicy } from "../src/effects/adoption/standard-plan";
 import { copyHelpers, ROOT } from "./helpers/helper-script-fixture";
 import { addSelfOrigin, commitAll, initGitRepo, run, tmpWorkspace } from "./helpers/repo-fixture";
@@ -96,15 +98,31 @@ describe("contract-worktree helper integration", () => {
       copyHelpers(cwd, { linkDependencies: false });
       initGitRepo(cwd);
       writeFileSync(join(cwd, "README.md"), "# demo\n");
-      writeFileSync(join(cwd, ".gitignore"), "node_modules/\n.codegraph/\n");
+      writeFileSync(join(cwd, ".gitignore"), "node_modules/\n.codegraph/\n.ai/harness/evidence/\n.ai/harness/runs/\n");
+      mkdirSync(join(cwd, 'tests'));
+      writeFileSync(join(cwd, 'tests/example.test.ts'), "import { expect, test } from 'bun:test';\ntest('example', () => expect(1).toBe(1));\n");
       commitAll(cwd, "init cleanup");
 
       expect(run("git", ["worktree", "add", worktreePath, "-b", "codex/demo"], cwd).status).toBe(0);
-      mkdirSync(join(worktreePath, "node_modules"));
-      mkdirSync(join(worktreePath, ".codegraph"));
-      writeFileSync(join(worktreePath, "node_modules/package.js"), "rebuildable dependency\n");
-      writeFileSync(join(worktreePath, ".codegraph/codegraph.db"), "rebuildable index\n");
-      expect(run("git", ["status", "--porcelain", "--ignored"], worktreePath).stdout).toBe("!! .codegraph/\n!! node_modules/\n");
+      mkdirSync(join(worktreePath, "node_modules/.bin"), { recursive: true });
+      indexPackageLocalCodeGraph(worktreePath, {
+        consumerRoot: ROOT,
+        env: { ...process.env, CODEGRAPH_NO_DOWNLOAD: '1', DO_NOT_TRACK: '1' },
+        policy: { provider: 'archctx', requiredVersion: ARCHCTX_REQUIRED_VERSION, applyMode: 'disabled', timeoutMs: 120_000 },
+      });
+      const ignored = run("git", ["status", "--porcelain", "--ignored"], worktreePath);
+      expect(ignored.stdout).toBe("!! .codegraph/\n");
+      writeBlob(worktreePath, Buffer.from('content-addressed fixture blob'));
+      createHookEventTelemetry({ repoRoot: worktreePath, event: 'PreToolUse', routeId: 'edit' }).finalize({
+        identity: { host: 'pi', sessionId: null, runId: null, turnId: null }, exitCode: 0, blocked: false, reason: 'ok',
+      });
+      const junit = '.ai/harness/runs/junit/20261120T000000Z-1/tests__example.test.ts.xml';
+      mkdirSync(dirname(join(worktreePath, junit)), { recursive: true });
+      const report = run(process.execPath, ['test', '--reporter=junit', `--reporter-outfile=${junit}`, 'tests/example.test.ts'], worktreePath);
+      expect(report.status, report.stderr).toBe(0);
+      expect(existsSync(join(worktreePath, junit))).toBe(true);
+      expect(run("git", ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory"], worktreePath).stdout)
+        .toBe(".ai/harness/evidence/\n.ai/harness/runs/\n.codegraph/\nnode_modules/\n");
       writeStartMetadata(cwd, "demo", "codex/demo");
 
       const dryRun = run("bash", ["scripts/contract-worktree.sh", "cleanup", "--slug", "demo", "--dry-run"], cwd);
@@ -177,13 +195,21 @@ describe("contract-worktree helper integration", () => {
     ["nested ignored dotfile", ".codegraph/notes/.draft", false],
     ["symlink at a generated path", ".codegraph/codegraph.db", true],
     ["whitespace-prefixed directory", " node_modules/notes", false],
-  ] as const)("locked closeout keeps a checkout that gains a %s after precheck", (_label, relative, link) => {
+    ["ignored dotfile inside build output", "build/.env", false],
+    ["unknown file inside an ignored dependency directory", "node_modules/example/notes.txt", false],
+    ["escaping dependency symlink", "node_modules/example/notes", true],
+    ["replacement CodeGraph database", ".codegraph/codegraph.db", false],
+    ["replacement verification evidence ledger", ".ai/harness/evidence/events/log.jsonl", false],
+    ["replacement digest-named blob", `.ai/harness/evidence/blobs/${'0'.repeat(64)}`, false],
+    ["replacement hook log", ".ai/harness/runs/hook-events.jsonl", false],
+  ] as const)("cleanup preview and locked removal refuse %s", (_label, relative, link) => {
     const cwd = tmpWorkspace("helper-contract-cleanup-late-ignored");
     const worktreePath = `${cwd}-wt-demo`;
     try {
-      copyHelpers(cwd);
+      copyHelpers(cwd, { linkDependencies: false });
       initGitRepo(cwd);
-      writeFileSync(join(cwd, ".gitignore"), ".codegraph/\n node_modules/\n");
+      const ignoreRules = ".codegraph/\n node_modules/\nnode_modules/\nbuild/\n.ai/harness/evidence/\n.ai/harness/runs/\n";
+      writeFileSync(join(cwd, ".gitignore"), ignoreRules);
       commitAll(cwd, "init late ignored data check");
       const branch = "codex/demo";
       const head = run("git", ["rev-parse", "HEAD"], cwd).stdout.trim();
@@ -198,6 +224,10 @@ describe("contract-worktree helper integration", () => {
       if (link) symlinkSync(join(cwd, ".gitignore"), file);
       else writeFileSync(file, "keep late local data\n");
       expect(run("git", ["status", "--porcelain"], worktreePath).stdout).toBe("");
+      const blockedPreview = run("bash", ["scripts/contract-worktree.sh", "cleanup", "--slug", "demo", "--dry-run"], cwd);
+      expect(blockedPreview.status, blockedPreview.stderr).toBe(1);
+      expect(blockedPreview.stderr).toContain("ignored local data");
+      expect(blockedPreview.stdout).not.toContain("would remove worktree");
       const apply = run(process.execPath, [
         "scripts/contract-worktree-runtime.ts", "remove-exact", "--repo", cwd, "--worktree", worktreePath,
         "--branch", branch, "--head", head, "--target", "main", "--target-oid", head, "--merge", head,
@@ -205,7 +235,7 @@ describe("contract-worktree helper integration", () => {
       expect(apply.status, apply.stderr).toBe(1);
       expect(apply.stderr).toContain("ignored local data");
       expect(lstatSync(file).isSymbolicLink()).toBe(link);
-      expect(readFileSync(file, "utf8")).toBe(link ? ".codegraph/\n node_modules/\n" : "keep late local data\n");
+      expect(readFileSync(file, "utf8")).toBe(link ? ignoreRules : "keep late local data\n");
       expect(existsSync(worktreePath)).toBe(true);
       expect(run("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], cwd).status).toBe(0);
     } finally {

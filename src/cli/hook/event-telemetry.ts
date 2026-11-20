@@ -1,13 +1,12 @@
-import { createHash, randomUUID } from 'crypto';
+import { randomUUID } from 'crypto';
 import { accessSync, constants, statSync } from 'fs';
 import { performance } from 'perf_hooks';
 import { delimiter, isAbsolute, join } from 'path';
 import type { HookIdentity } from './hook-input';
 import type { HookEvent, RouteHost, RouteId } from './route-registry';
 import { appendSegmentedLog } from '../../effects/segmented-log';
-
-export const HOOK_EVENT_TELEMETRY_PROTOCOL = 'loop-engine-hook-event/v2' as const;
-export const HOOK_EVENT_TELEMETRY_PATH = '.ai/harness/runs/hook-events.jsonl';
+import { HOOK_COMMAND_NAME, HOOK_EVENT_TELEMETRY_PATH, HOOK_EVENT_TELEMETRY_PROTOCOL, hookEventFingerprint } from '../../core/state/hook-event-telemetry';
+export { HOOK_EVENT_TELEMETRY_PATH, HOOK_EVENT_TELEMETRY_PROTOCOL };
 
 /**
  * One record per handled hook event. Telemetry is not an authority: the
@@ -60,12 +59,11 @@ export interface CreateHookEventTelemetryInput {
   readonly pathValue?: string;
 }
 
-const COMMAND_NAME = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/u;
 const COMMAND_NAME_LIMIT = 16;
 /** Words that run the next word as the program. */
 const COMMAND_PREFIXES = new Set(['sudo', 'env', 'exec', 'time', 'command', 'nohup', 'xargs']);
 
-/** A word that held quoted or escaped text; it can never pass COMMAND_NAME. */
+/** A word that held quoted or escaped text; it can never pass HOOK_COMMAND_NAME. */
 const QUOTED = '\u0000';
 
 /** The heredoc delimiter forms the scanner models: `NAME`, `'NAME'`, `"NAME"` and `\NAME`. */
@@ -201,7 +199,7 @@ export function commandNames(command: string): string[] {
     let index = 0;
     while (index < words.length && isPrefixWord(words[index]!)) index += 1;
     const word = words[index];
-    if (word !== undefined && COMMAND_NAME.test(word)) names.add(word);
+    if (word !== undefined && HOOK_COMMAND_NAME.test(word)) names.add(word);
     if (names.size === COMMAND_NAME_LIMIT) break;
   }
   return [...names];
@@ -256,16 +254,9 @@ export function createHookEventTelemetry(options: CreateHookEventTelemetryInput)
         elapsed_ms: roundMs(performance.now() - startedMonotonic),
         command_names: commandNamesOnPath(result.command ?? '', options.pathValue),
       };
-      const semanticFingerprint = {
-        event: options.event,
-        route_id: options.routeId,
-        exit_code: result.exitCode,
-        blocked: result.blocked,
-        reason: result.reason,
-      };
       const record: HookEventTelemetryRecord = {
         ...unsigned,
-        fingerprint: `sha256:${createHash('sha256').update(JSON.stringify(semanticFingerprint)).digest('hex')}`,
+        fingerprint: hookEventFingerprint(unsigned),
       };
       try {
         appendSegmentedLog(join(options.repoRoot, HOOK_EVENT_TELEMETRY_PATH), `${JSON.stringify(record)}\n`, options.repoRoot);

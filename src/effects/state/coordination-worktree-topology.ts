@@ -6,7 +6,7 @@ import { randomUUID } from 'crypto';
 import { sha256Hex } from '../../core/evidence/sha256';
 import { execFileSync } from 'child_process';
 import { gitExecFileSync, gitSpawnSync, withoutProviderTokens, withoutRepositorySelectingGitEnv } from '../git/runner';
-import { existsSync, lstatSync, readFileSync, realpathSync, readdirSync, unlinkSync, mkdirSync } from 'fs';
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync, readdirSync, unlinkSync, mkdirSync, type Stats } from 'fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'path';
 import { publishFileByRename, syncDirectoryDurably } from '../atomic-append';
 import { readPrunedWorktreeIntents, writePrunedWorktreeIntents, prunedIntentKey, type PrunedWorktreeIntent } from './pruned-worktree-intents';
@@ -14,7 +14,17 @@ import { readWorkflowPolicyDocument } from './resolve-effective-state';
 import { POLICY_ABSENT, isPolicyObject, policyValue } from '../../core/workflow/policy-schema';
 import { configuredGitBinary, resolveGitCommonDirectory, resolveGitCommonDirectoryAsync } from '../git/common-directory';
 import { acquireExclusiveDirectoryLock, withExclusiveDirectoryLock } from '../locking/exclusive-directory-lock';
-import { taskWorktreeRuntimeClosed } from '../terminal/task-session-record';
+import { assertSessionDirectory, sameSessionData, TASK_SESSIONS_PATH, taskWorktreeRuntimeClosed } from '../terminal/task-session-record';
+import { assertTaskRequest, validateTaskResult, TASK_REQUEST_OUTBOX_PATH } from '../terminal/runtime-closeout';
+import type { TaskRequest } from '../../core/review/runner-port';
+import { isRecord } from '../../core/evidence/is-record';
+import { parseLogLine } from '../../core/evidence/fold';
+import { parseJsonText } from '../../core/evidence/file-syntax';
+import { canonicalize } from '../../core/evidence/canonical-json';
+import type { EvidenceEventRecord } from '../../core/evidence/types';
+import { BLOBS_DIR_RELATIVE, LOG_FILE_RELATIVE } from '../evidence/paths';
+import { parseJUnitReport } from '../../core/ci/test-report';
+import { HOOK_EVENT_TELEMETRY_PATH, isHookEventTelemetryLine } from '../../core/state/hook-event-telemetry';
 import { parseWorktreeTopology } from '../git/worktree-topology';
 import { observeProviderBranchMergeCommit } from './coordination-provider-merge';
 import { resolveTrustedGhExecutable } from '../runtime/protected-helper-platform';
@@ -144,38 +154,180 @@ export function mergeProof(root: string, branch: string, head: string, targetRef
   return { provider: true, merge_commit_sha: merge };
 }
 
-const REBUILDABLE_IGNORED_ROOTS = /^(node_modules|dist|build|coverage|\.next)\//u;
-// Explicit closeout permits these harness outputs. Automatic sweep retains
-// them. Git can report a whole ignored directory, so inspect these containers
-// for exact output paths and keep local files beside them.
-const HARNESS_ARTIFACT_CONTAINERS = new Set([
-  '.codegraph', '.ai', '.ai/harness', '.ai/harness/evidence', '.ai/harness/evidence/events',
-  '.ai/harness/evidence/blobs', '.ai/harness/runs',
-]);
-const HARNESS_ARTIFACT_FILES = new Set([
-  '.codegraph/.gitignore', '.codegraph/codegraph.db', '.codegraph/codegraph.db-shm',
-  '.codegraph/codegraph.db-wal', '.codegraph/codegraph.db-journal', '.ai/harness/evidence/events/log.jsonl',
-]);
-const EVIDENCE_BLOB_PATH = /^\.ai\/harness\/evidence\/blobs\/[a-f0-9]{64}$/u;
-const VERIFICATION_RUN_PATH = /^\.ai\/harness\/runs\/verification-vx-[a-f0-9]{20}\.(?:json|log)$/u;
+const GENERATED_ROOTS = new Set(['node_modules', 'dist', 'build', 'coverage', '.next']);
 const ACTIVE_WORKTREE_MARKER = '.ai/harness/active-worktree';
+const OUTBOX_FILE = /^(context|result)-([1-9]\d{0,2})\.(txt|json)$/u;
+const VERIFICATION_RUN = /^\.ai\/harness\/runs\/verification-vx-[a-f0-9]{20}\.json$/u;
+const DIGEST = /^[a-f0-9]{64}$/u;
+const JUNIT_DIR = /^\.ai\/harness\/runs\/junit\/\d{8}T\d{6}Z-[1-9]\d*$/u;
+const CLOSEOUT_ARTIFACT_CONTAINERS = new Set([
+  '.ai', '.ai/harness', '.ai/harness/evidence', '.ai/harness/evidence/events', BLOBS_DIR_RELATIVE,
+  '.ai/harness/runs', TASK_REQUEST_OUTBOX_PATH, '.ai/harness/runs/junit',
+]);
+const CODEGRAPH_DB = '.codegraph/codegraph.db';
+// CodeGraph 1.6.2 init writes this file. A different ignore rule can contain user data.
+const CODEGRAPH_IGNORE = '# CodeGraph data files — local to each machine, not for committing.\n'
+  + '# Ignore everything in .codegraph/ except this file itself, so transient\n'
+  + '# files (the database, daemon.pid, sockets, logs) never show up in git.\n*\n!.gitignore\n';
+const ARTIFACT_BYTES_LIMIT = 16 * 1024 * 1024;
 
-function isDisposableIgnoredEntry(worktree: string, entry: string, limits: Limits): boolean {
-  timeout(limits);
-  const rebuildable = REBUILDABLE_IGNORED_ROOTS.exec(entry)?.[1];
-  if (rebuildable) return lstatSync(join(worktree, rebuildable)).isDirectory();
-  if (!limits.closeout) return false;
-  const relative = entry.endsWith('/') ? entry.slice(0, -1) : entry;
-  if (HARNESS_ARTIFACT_CONTAINERS.has(relative)) {
-    const directory = join(worktree, relative);
-    return lstatSync(directory).isDirectory()
-      && readdirSync(directory).every(name => isDisposableIgnoredEntry(worktree, `${relative}/${name}`, limits));
+/** Check each path component before looking at artifact bytes. */
+function artifactStat(worktree: string, relative: string): Stats {
+  const parts = relative.split('/');
+  const leaf = parts.pop()!;
+  let parent = worktree;
+  for (const part of parts) {
+    parent = join(parent, part);
+    if (!lstatSync(parent).isDirectory()) throw new Error('unsafe artifact parent');
   }
-  if (relative !== ACTIVE_WORKTREE_MARKER && !HARNESS_ARTIFACT_FILES.has(relative)
-    && !EVIDENCE_BLOB_PATH.test(relative) && !VERIFICATION_RUN_PATH.test(relative)) return false;
-  const file = join(worktree, relative);
-  return lstatSync(file).isFile()
-    && (relative !== ACTIVE_WORKTREE_MARKER || readFileSync(file, 'utf8').trim() === worktree);
+  return lstatSync(join(parent, leaf));
+}
+
+function readArtifact(worktree: string, relative: string, limits: Limits, prefixBytes?: number): Buffer {
+  const stat = artifactStat(worktree, relative);
+  if (!stat.isFile() || (prefixBytes === undefined && stat.size > ARTIFACT_BYTES_LIMIT)) throw new Error('unsafe artifact file');
+  timeout(limits);
+  const fd = openSync(join(worktree, relative), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino || opened.size !== stat.size) {
+      throw new Error('artifact changed before read');
+    }
+    const bytes = Buffer.alloc(prefixBytes ?? stat.size);
+    if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) throw new Error('incomplete artifact');
+    return bytes;
+  } finally { closeSync(fd); }
+}
+
+function artifactText(bytes: Buffer): string {
+  return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+}
+
+function isCodeGraphOutput(worktree: string, relative: string, limits: Limits): boolean {
+  const database = readArtifact(worktree, CODEGRAPH_DB, limits, 100);
+  if (database.toString('ascii', 0, 16) !== 'SQLite format 3\0') return false;
+  if (relative === CODEGRAPH_DB) return true;
+  if (relative === '.codegraph/.gitignore') return artifactText(readArtifact(worktree, relative, limits)) === CODEGRAPH_IGNORE;
+  if (relative === `${CODEGRAPH_DB}-wal`) {
+    const wal = readArtifact(worktree, relative, limits, 32);
+    return [0x377f0682, 0x377f0683].includes(wal.readUInt32BE(0)) && wal.readUInt32BE(4) === 3007000;
+  }
+  if (relative === `${CODEGRAPH_DB}-shm`) {
+    const shm = readArtifact(worktree, relative, limits, 96);
+    return (shm.readUInt32LE(0) === 3007000 || shm.readUInt32BE(0) === 3007000)
+      && shm.subarray(0, 48).equals(shm.subarray(48));
+  }
+  return readArtifact(worktree, relative, limits, 8).toString('hex') === 'd9d505f920a163d7';
+}
+
+function evidenceEvents(worktree: string, limits: Limits): EvidenceEventRecord[] {
+  const log = artifactText(readArtifact(worktree, LOG_FILE_RELATIVE, limits));
+  if (!log.endsWith('\n')) throw new Error('incomplete evidence log');
+  const [first = '', ...lines] = log.slice(0, -1).split('\n');
+  const genesis = parseLogLine(first);
+  if (!genesis.ok || genesis.record.kind !== 'evidence_genesis') throw new Error('invalid evidence genesis');
+  const worktreeId = genesis.record.worktree_id;
+  return lines.map(line => {
+    timeout(limits);
+    const parsed = parseLogLine(line);
+    if (!parsed.ok || parsed.record.kind !== 'evidence_event' || parsed.record.worktree_id !== worktreeId) {
+      throw new Error('invalid evidence event');
+    }
+    const event = parsed.record;
+    const hash = event.payload === undefined ? event.blob_sha256 : sha256Hex(canonicalize(event.payload));
+    if (!hash || !DIGEST.test(hash) || event.payload_hash !== `sha256:${hash}`) throw new Error('invalid evidence payload identity');
+    return event;
+  });
+}
+
+type ArtifactProbe = Limits & { evidence: () => EvidenceEventRecord[]; primary: () => string };
+
+function isBoundVerificationRun(worktree: string, relative: string, limits: ArtifactProbe): boolean {
+  const bytes = readArtifact(worktree, relative, limits);
+  const run = parseJsonText(artifactText(bytes), null);
+  if (!isRecord(run) || run.protocol !== 1 || run.kind !== 'verification_execution_record'
+    || relative !== `.ai/harness/runs/verification-${run.execution_id}.json`) return false;
+  const hash = `sha256:${sha256Hex(bytes)}`;
+  return limits.evidence().some(event => {
+    if (event.event_type !== 'verification_execution.result' || event.producer !== 'verification-execution'
+      || event.trust_class !== 'authoritative_machine' || event.correlation_run_id !== run.execution_id) return false;
+    const payload = event.blob_sha256
+      ? parseJsonText(artifactText(readEvidenceBlob(worktree, event.blob_sha256, limits)), null) : event.payload;
+    return isRecord(payload) && payload.protocol === 2 && payload.execution_id === run.execution_id
+      && payload.cache_key === run.cache_key && payload.run_file === relative && payload.run_record_hash === hash;
+  });
+}
+
+function readEvidenceBlob(worktree: string, digest: string, limits: Limits): Buffer {
+  if (!DIGEST.test(digest)) throw new Error('invalid evidence blob name');
+  const bytes = readArtifact(worktree, `${BLOBS_DIR_RELATIVE}/${digest}`, limits);
+  if (sha256Hex(bytes) !== digest) throw new Error('evidence blob digest mismatch');
+  return bytes;
+}
+
+function isOutboxDirectory(relative: string): boolean {
+  return relative.startsWith(`${TASK_REQUEST_OUTBOX_PATH}/`)
+    && DIGEST.test(relative.slice(TASK_REQUEST_OUTBOX_PATH.length + 1));
+}
+
+function isBoundOutboxFile(worktree: string, relative: string, limits: ArtifactProbe): boolean {
+  const parent = dirname(relative).replaceAll(sep, '/');
+  if (!isOutboxDirectory(parent)) return false;
+  const name = OUTBOX_FILE.exec(basename(relative));
+  if (!name) return false;
+  const [, kind, round, extension] = name;
+  if (extension !== (kind === 'context' ? 'txt' : 'json')) return false;
+  const primary = limits.primary();
+  const dir = join(primary, TASK_SESSIONS_PATH, basename(parent));
+  assertSessionDirectory(primary, dir);
+  const requestPath = `${TASK_SESSIONS_PATH}/${basename(parent)}/request-${round}.json`;
+  const request = parseJsonText(artifactText(readArtifact(primary, requestPath, limits)), null) as TaskRequest;
+  const { binding } = assertTaskRequest(primary, dir, request);
+  if (binding.execution_root !== worktree || request.round !== Number(round) || request.round > binding.max_requests) return false;
+  const bytes = readArtifact(worktree, relative, limits);
+  if (kind === 'context') return request.context_sha256 === `sha256:${sha256Hex(bytes)}`;
+  const result = validateTaskResult(request, parseJsonText(artifactText(bytes), null));
+  const collected = `${TASK_SESSIONS_PATH}/${basename(parent)}/collected-${round}.json`;
+  if (!lstatSync(join(primary, collected), { throwIfNoEntry: false })) return true;
+  return sameSessionData(result, parseJsonText(artifactText(readArtifact(primary, collected, limits)), null));
+}
+
+function isDisposableIgnoredEntry(worktree: string, relative: string, limits: ArtifactProbe): boolean {
+  timeout(limits);
+  const root = relative.split('/', 1)[0]!;
+  // Generated directory names do not prove ownership of their files.
+  // Allow empty directory scaffolds while retaining files without a receipt.
+  if (GENERATED_ROOTS.has(root)) {
+    return artifactStat(worktree, relative).isDirectory()
+      && readdirSync(join(worktree, relative)).every(name => isDisposableIgnoredEntry(worktree, `${relative}/${name}`, limits));
+  }
+  if (!limits.closeout) return false;
+  if (relative === '.codegraph' || CLOSEOUT_ARTIFACT_CONTAINERS.has(relative) || isOutboxDirectory(relative) || JUNIT_DIR.test(relative)) {
+    return artifactStat(worktree, relative).isDirectory()
+      && readdirSync(join(worktree, relative)).every(name => isDisposableIgnoredEntry(worktree, `${relative}/${name}`, limits));
+  }
+  if (relative === CODEGRAPH_DB || relative === '.codegraph/.gitignore'
+    || ['-wal', '-shm', '-journal'].some(suffix => relative === CODEGRAPH_DB + suffix)) {
+    return isCodeGraphOutput(worktree, relative, limits);
+  }
+  if (relative === ACTIVE_WORKTREE_MARKER) return artifactText(readArtifact(worktree, relative, limits)).trim() === worktree;
+  if (relative === HOOK_EVENT_TELEMETRY_PATH) {
+    const log = artifactText(readArtifact(worktree, relative, limits));
+    return log.endsWith('\n') && log.slice(0, -1).split('\n').every(isHookEventTelemetryLine);
+  }
+  if (relative === LOG_FILE_RELATIVE) { limits.evidence(); return true; }
+  const digest = relative.slice(BLOBS_DIR_RELATIVE.length + 1);
+  if (relative.startsWith(`${BLOBS_DIR_RELATIVE}/`) && DIGEST.test(digest)) { readEvidenceBlob(worktree, digest, limits); return true; }
+  if (VERIFICATION_RUN.test(relative)) return isBoundVerificationRun(worktree, relative, limits);
+  const parent = dirname(relative).replaceAll(sep, '/');
+  if (JUNIT_DIR.test(parent) && relative.endsWith('.xml')) {
+    const report = artifactText(readArtifact(worktree, relative, limits));
+    if (!report.startsWith('<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="bun test" ')
+      || !report.trimEnd().endsWith('</testsuites>')) return false;
+    const { file } = parseJUnitReport(report);
+    return basename(relative) === `${file.replaceAll('/', '__')}.xml`;
+  }
+  return isBoundOutboxFile(worktree, relative, limits);
 }
 
 function inspectIgnoredWorktreeEntries(worktree: string, limits: Limits): { count: number; hasLocalData: boolean } {
@@ -187,7 +339,19 @@ function inspectIgnoredWorktreeEntries(worktree: string, limits: Limits): { coun
     throw new Error('ignored worktree probe failed');
   }
   const ignored = result.stdout ? result.stdout.slice(0, -1).split('\0') : [];
-  return { count: ignored.length, hasLocalData: ignored.some(entry => !isDisposableIgnoredEntry(worktree, entry, limits)) };
+  let evidence: EvidenceEventRecord[] | undefined;
+  let primary: string | undefined;
+  const probe: ArtifactProbe = {
+    ...limits,
+    evidence: () => evidence ??= evidenceEvents(worktree, limits),
+    primary: () => primary ??= checkoutPath(entries(worktree, limits)[0]!.path),
+  };
+  const hasLocalData = ignored.some(entry => {
+    const relative = entry.endsWith('/') ? entry.slice(0, -1) : entry;
+    try { return !isDisposableIgnoredEntry(worktree, relative, probe); }
+    catch { return true; }
+  });
+  return { count: ignored.length, hasLocalData };
 }
 
 export function assertNoIgnoredWorktreeData(worktree: string, limits: Limits = {}): void {
@@ -195,7 +359,7 @@ export function assertNoIgnoredWorktreeData(worktree: string, limits: Limits = {
   try { ({ hasLocalData } = inspectIgnoredWorktreeEntries(worktree, { ...limits, closeout: true })); }
   catch { throw new Error('Cannot verify ignored local data. Keep the worktree and inspect Git status with --ignored before retrying cleanup.'); }
   if (hasLocalData) {
-    throw new Error('Unsafe to remove this worktree because it contains ignored local data. Keep the worktree or use an explicit, reviewed cleanup.');
+    throw new Error('Unsafe to remove this worktree because it contains ignored local data. Inspect it with git status --ignored. Keep the worktree or use an explicit, reviewed cleanup.');
   }
 }
 
