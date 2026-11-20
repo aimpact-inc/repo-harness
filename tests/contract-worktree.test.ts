@@ -9,6 +9,7 @@ import {
   utimesSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   writeFileSync
 } from "fs";
@@ -24,6 +25,9 @@ import { installStateFixturePath, recordPluginSelection } from "./helpers/instal
 import { indexPackageLocalCodeGraph, resolveCompatibleNodeRuntime, resolvePackageLocalArchctx } from '../src/effects/architecture/archctx-provider';
 import { ARCHCTX_REQUIRED_VERSION } from '../src/core/architecture/projection';
 import { shellQuote } from '../src/core/shell-quote';
+import { productVersionManifest } from 'archctx-contracts';
+import { spawnSync } from 'node:child_process';
+import { CleanRoomDaemon } from '../scripts/lib/axr5-clean-room-runtime';
 
 setDefaultTimeout(30000);
 
@@ -237,7 +241,7 @@ describe("contract-worktree helper integration", () => {
     }
   }, 60000);
 
-  const codeGraphCases = ['seeded', 'no-base', 'not-opted-in', 'not-selected', 'unreadable', 'init-failed', 'occupied'] as const;
+  const codeGraphCases = ['seeded', 'retry-ready', 'retry-exhausted', 'no-base', 'not-opted-in', 'not-selected', 'unreadable', 'init-failed', 'occupied'] as const;
   for (const scenario of codeGraphCases) {
     test.skipIf(process.platform === 'win32')(`rh worktrees start CodeGraph bootstrap: ${scenario}`, () => {
       const workspace = tmpWorkspace('shared-codegraph-start');
@@ -249,6 +253,12 @@ describe("contract-worktree helper integration", () => {
       const archctx = resolvePackageLocalArchctx().binaryPath;
       const env = { HOME: home, DO_NOT_TRACK: '1', CODEGRAPH_NO_DOWNLOAD: '1' };
       const arch = (cwd: string, args: string[]) => run(node, [archctx, ...args, '--json'], cwd, env);
+      const baseDir = join(primary, '.git', 'archcontext', 'codegraph', productVersionManifest().runtime.codeGraph.requiredVersion);
+      const pointer = join(baseDir, 'current.json');
+      const hiddenPointer = join(workspace, 'published-pointer.json');
+      const firstSeed = join(workspace, 'first-seed.json');
+      const needsBase = scenario === 'seeded' || scenario === 'retry-ready';
+      const busy = scenario === 'retry-ready' || scenario === 'retry-exhausted';
       mkdirSync(primary);
       mkdirSync(home);
       try {
@@ -259,7 +269,7 @@ describe("contract-worktree helper integration", () => {
         else writeFileSync(join(primary, '.gitignore'), '.codegraph/\n');
         writeFileSync(join(primary, 'index.ts'), 'export const baseSymbol = true;\n');
         commitAll(primary, 'seed CodeGraph fixture');
-        if (scenario === 'seeded') {
+        if (needsBase) {
           indexPackageLocalCodeGraph(primary, {
             env: { ...process.env, ...env },
             policy: { provider: 'archctx', requiredVersion: ARCHCTX_REQUIRED_VERSION, applyMode: 'disabled', timeoutMs: 120_000 },
@@ -267,9 +277,16 @@ describe("contract-worktree helper integration", () => {
           const published = arch(primary, ['sync']);
           expect(published.status, published.stderr || published.stdout).toBe(0);
           expect(JSON.parse(published.stdout).data.codeGraphBase).toBe('published');
-          writeFileSync(join(primary, 'index.ts'), 'export const refreshedSymbol = true;\n');
-          commitAll(primary, 'advance the primary checkout');
+          if (scenario === 'seeded') {
+            writeFileSync(join(primary, 'index.ts'), 'export const refreshedSymbol = true;\n');
+            commitAll(primary, 'advance the primary checkout');
+          } else renameSync(pointer, hiddenPointer);
         }
+        if (busy) {
+          mkdirSync(baseDir, { recursive: true });
+          writeFileSync(join(baseDir, 'refresh.lock'), `${process.pid}\n`, { flag: 'wx' });
+        }
+        const primaryHead = run('git', ['rev-parse', 'HEAD'], primary).stdout.trim();
         addSelfOrigin(primary);
         if (scenario === 'unreadable') {
           mkdirSync(join(home, '.repo-harness'));
@@ -284,6 +301,15 @@ describe("contract-worktree helper integration", () => {
           'case "${1##*/}:${2:-}" in',
           `  archctx.mjs:sync|npm-shim.js:init) printf '%s %s\\n' "$2" "$(pwd -P)" >> ${shellQuote(log)} ;;`,
           'esac',
+          ...(scenario === 'retry-ready' ? [
+            `if [ "$2" = sync ] && [ "$(pwd -P)" = ${shellQuote(linked)} ] && [ -f ${shellQuote(hiddenPointer)} ]; then`,
+            `  ${shellQuote(node)} "$@" > ${shellQuote(firstSeed)}`,
+            '  result=$?',
+            `  mv ${shellQuote(hiddenPointer)} ${shellQuote(pointer)}`,
+            `  cat ${shellQuote(firstSeed)}`,
+            '  exit "$result"',
+            'fi',
+          ] : []),
           ...(scenario === 'init-failed' ? ['if [ "$2" = init ]; then head -c 5000 /dev/zero | tr "\\000" x >&2; exit 1; fi'] : []),
           `exec ${shellQuote(node)} "$@"`,
           '',
@@ -297,19 +323,27 @@ describe("contract-worktree helper integration", () => {
         const calls = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : [];
         const db = '.codegraph/codegraph.db';
         switch (scenario) {
-          case 'seeded': {
-            expect(calls).toEqual([`sync ${primary}`, `sync ${linked}`]);
+          case 'seeded':
+          case 'retry-ready': {
+            expect(calls).toEqual([`sync ${primary}`, `sync ${linked}`, ...(scenario === 'retry-ready' ? [`sync ${linked}`] : [])]);
+            if (scenario === 'retry-ready') {
+              expect(JSON.parse(readFileSync(firstSeed, 'utf8')).error).toMatchObject({ reasonCode: 'index-base-building', retryable: true });
+            }
             const seeded = lstatSync(join(linked, db));
             expect(seeded.isFile()).toBe(true);
             expect(seeded.ino).not.toBe(lstatSync(join(primary, db)).ino);
             const doctor = arch(linked, ['doctor']);
             expect(doctor.status, doctor.stderr || doctor.stdout).toBe(0);
             expect(JSON.parse(doctor.stdout).data.codeFacts).toMatchObject({ state: 'ready', indexPresent: true });
-            const refreshed = arch(primary, ['sync']);
-            expect(refreshed.status, refreshed.stderr || refreshed.stdout).toBe(0);
-            expect(JSON.parse(refreshed.stdout).data.codeGraphBase).toBe('current');
+            expect(JSON.parse(readFileSync(pointer, 'utf8')).headSha).toBe(primaryHead);
             break;
           }
+          case 'retry-exhausted':
+            expect(calls).toEqual([`sync ${linked}`, `sync ${linked}`, `sync ${linked}`, `init ${linked}`]);
+            expect(started.stderr).toContain('(index-base-building)');
+            expect(existsSync(pointer)).toBe(false);
+            expect(lstatSync(join(linked, db)).isFile()).toBe(true);
+            break;
           case 'no-base':
           case 'init-failed':
             expect(calls).toEqual([`sync ${linked}`, `init ${linked}`]);
@@ -332,10 +366,20 @@ describe("contract-worktree helper integration", () => {
             if (scenario === 'unreadable') expect(started.stderr).toContain('the install selection cannot be read');
         }
       } finally {
-        for (const cwd of [linked, primary]) if (existsSync(cwd)) arch(cwd, ['daemon', 'stop']);
+        for (const cwd of [linked, primary]) {
+          if (!existsSync(cwd) || (cwd === primary && !needsBase) || ['not-opted-in', 'not-selected', 'unreadable'].includes(scenario)) continue;
+          const status = arch(cwd, ['daemon', 'status']);
+          expect(status.status, status.stderr).toBe(0);
+          const state = JSON.parse(status.stdout).data;
+          expect(state.lockOwnerPid).toBeUndefined();
+          if (!state.running) continue;
+          const daemon = new CleanRoomDaemon((binary, args, options) => spawnSync(node, [binary, ...args], options));
+          daemon.arm(archctx, cwd, { ...process.env, ...env });
+          daemon.stop();
+        }
         rmSync(workspace, { recursive: true, force: true });
       }
-    });
+    }, 60_000);
   }
 
   test("contract-worktree start bases the worktree on the upstream tip and fails closed without an upstream", () => {

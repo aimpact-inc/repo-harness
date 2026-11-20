@@ -35,6 +35,7 @@ const DEFAULT_RUNNER = (binary: string, args: readonly string[], options: { cwd:
 };
 
 const CODEGRAPH_INIT_ARGS = ['init', '-y', '.'] as const;
+const CODEGRAPH_SEED_RETRY_DELAYS_MS = [250, 750] as const;
 
 function capabilityAuthorityReady(repoRoot: string): boolean {
   return existsSync(join(repoRoot, '.archcontext', 'model', 'nodes'));
@@ -653,7 +654,7 @@ export function bootstrapWorktreeCodeGraph(primaryRoot: string, worktreeRoot: st
   delete env.CODEGRAPH_DIR;
   const policy = readArchitectureProjectionPolicy({ architecture: DEFAULT_GLOBAL_ARCHITECTURE });
   const indexDirectory = join(worktreeRoot, '.codegraph');
-  const sync = (cwd: string) => new ArchctxClient(cwd, policy.requiredVersion, { env }).data(['sync', '--json'], policy.timeoutMs);
+  const sync = (cwd: string, deadlineMs?: number) => new ArchctxClient(cwd, policy.requiredVersion, { env, deadlineMs }).data(['sync', '--json'], policy.timeoutMs);
 
   if (process.platform !== 'win32') {
     // Start uses the upstream tip for the new branch. Publish the actual primary
@@ -668,11 +669,24 @@ export function bootstrapWorktreeCodeGraph(primaryRoot: string, worktreeRoot: st
         reportBootstrapSyncFailure('CodeGraph base refresh', error);
       }
     }
-    try {
-      sync(worktreeRoot);
-      if (hasPrivateCodeGraphIndex(indexDirectory)) return;
-    } catch (error) {
-      reportBootstrapSyncFailure('CodeGraph shared-base seed', error);
+    // All seed attempts share the original command deadline. Only an active
+    // first publisher can turn a missing base into an available one shortly.
+    const seedDeadline = Date.now() + policy.timeoutMs;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        sync(worktreeRoot, seedDeadline);
+        if (hasPrivateCodeGraphIndex(indexDirectory)) return;
+        break;
+      } catch (error) {
+        const delay = CODEGRAPH_SEED_RETRY_DELAYS_MS[attempt];
+        if (!(error instanceof ArchctxClientError && error.code === 'AC_CODE_FACTS_UNAVAILABLE'
+          && error.reasonCode === 'index-base-building' && error.retryable === true)
+          || delay === undefined || Date.now() + delay >= seedDeadline) {
+          reportBootstrapSyncFailure('CodeGraph shared-base seed', error);
+          break;
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+      }
     }
   }
 
