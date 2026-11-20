@@ -13,7 +13,7 @@ import {
   type QuotaReport,
 } from '../../src/core/board/quota';
 import { effectiveSeatConfig, formatSeatModes, formatSeatRoutes, seatAccountQuotas } from '../../src/core/board/seat-routing';
-import { decodeSeatPool } from '../../src/core/board/seat-pool';
+import { decodeSeatPool, seatRuntimeBlock } from '../../src/core/board/seat-pool';
 import { DEFAULT_SEATS_CONFIG, type CodexCreditMode, type SeatConfigV1 } from '../../src/core/board/seats-settings';
 
 const ROOT = join(import.meta.dir, '../..');
@@ -574,7 +574,7 @@ function poolFixture(...runtimes: string[]) {
 
 describe('rh seats pool', () => {
   test('Pi uses PATH and the configured provider prefix without running Pi or agy', () => {
-    const f = poolFixture('pi', 'agy');
+    const f = poolFixture('pi');
     const seats = { ...DEFAULT_SEATS_CONFIG, routing: { ...DEFAULT_SEATS_CONFIG.routing, unavailable_pi_providers: ['magpie/group'] } };
     writeFileSync(join(f.home, '.repo-harness', 'config.json'), JSON.stringify({ seats }));
     const result = f.run();
@@ -590,6 +590,41 @@ describe('rh seats pool', () => {
     expect(existsSync(f.env.SEAT_POOL_LOG)).toBe(false);
     expect(JSON.parse(readFileSync(f.cache, 'utf8'))).toEqual(JSON.parse(result.stdout));
   });
+
+  test.each(['present', 'missing', 'signed out', 'unsupported', 'timeout', 'malformed', 'empty'])(
+    'agy projects one native catalog observation into the advisor pool (%s)', branch => {
+      const f = poolFixture();
+      const free = 'private-free-id';
+      const model = 'gemini-4-neon-high';
+      const advisor = { runtime: 'agy', model: free, effort: null, advisor_model: null, fleet: [], tools: ['net', 'read', 'shell'] } as const;
+      writeFileSync(join(f.home, '.repo-harness', 'config.json'), JSON.stringify({ seats: { ...DEFAULT_SEATS_CONFIG, advisor } }));
+      const catalog = branch === 'present' ? model + '\tNeon high\n' + free + '\tCustom name\n' : free + '\tCustom name\n';
+      if (branch !== 'missing') writeFileSync(join(f.env.PATH, 'agy'), `#!${process.execPath}
+const arg = process.argv[2];
+if (arg === '--version') { console.log(${branch === 'unsupported' ? '"1.4.9"' : '"1.5.12"'}); process.exit(0); }
+if (arg !== 'models') process.exit(9);
+${branch === 'timeout' ? 'setInterval(() => {}, 1000);' : branch === 'signed out' ? 'console.error("Please sign in"); process.exit(1);'
+  : 'process.stdout.write(' + JSON.stringify(branch === 'malformed' ? 'private-catalog-text\n' : branch === 'empty' ? '' : catalog) + ');'}
+`, { mode: 0o755 });
+      const fresh = f.run();
+      expect(fresh.status, fresh.stderr).toBe(0);
+      const report = decodeSeatPool(JSON.parse(fresh.stdout));
+      const row = report.seats.find(item => item.seat === 'advisor')!;
+      const high = [...row.pool, ...row.excluded].find(entry => entry.model === model)!;
+      expect(high.status).toBe(branch === 'present' ? 'available' : branch === 'signed out' ? 'signed_out' : branch === 'missing' ? 'not_installed' : 'unknown');
+      if (branch === 'present') {
+        expect(high.account).toBeNull();
+        expect(effectiveSeatConfig('advisor', { ...DEFAULT_SEATS_CONFIG, advisor }, seatAccountQuotas([], DEFAULT_SEATS_CONFIG.routing))).toEqual(advisor);
+        expect(row.excluded.find(entry => entry.model === 'gemini-4-neon-low')?.status).toBe('not_listed');
+      }
+      const cache = readFileSync(f.cache, 'utf8');
+      for (const output of [fresh.stdout, fresh.stderr, cache]) {
+        expect(output).not.toContain(free);
+        expect(output).not.toContain('private-catalog-text');
+      }
+      expect(row.configured).toMatchObject({ table_entry: false, in_pool: false, field: 'seats.advisor.model' });
+    }, 30_000,
+  );
 
   test('Claude and Codex use only OAR installation, sign-in and catalogs and keep table order', () => {
     const f = poolFixture('claude', 'codex');
@@ -672,6 +707,11 @@ console.log(JSON.stringify({ tab: 'tb1', terminal: 't9' }));
 }
 
 describe('rh seats launch availability', () => {
+  test('catalog auth loss blocks the runtime before the quota-selected model check', () => {
+    expect(seatRuntimeBlock('worker', 'codex', [{
+      id: 'codex', installation: 'available', sign_in: 'logged_in', models: 'unauthenticated', listed: [],
+    }])).toContain('Runtime signed out.');
+  });
   test('a missing default runtime reports a redacted pool hint and starts no tab', () => {
     const f = poolFixture('pi');
     const tab = join(f.home, 'tab.json');

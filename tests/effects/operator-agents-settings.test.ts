@@ -856,6 +856,48 @@ describe('seat settings contract without transport', () => {
 });
 
 describe('seat settings routes', () => {
+  test('saves an explicit agy advisor model and refuses to disable its host while in use', async () => {
+    const harness = await startHarness({ agents: { ...PANE_AGENTS, enabled: ['antigravity', ...PANE_AGENTS.enabled] } });
+    const advisor = { runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['net', 'read', 'shell'] } as const;
+    for (const model of ['gemini-4-neon-high', 'well-shaped-free-model']) {
+      const { revision, ...section } = (await seats(harness)).config;
+      const response = await post(harness, { expected_revision: revision, seats: { ...section, advisor: { ...advisor, model } } }, 'seats');
+      expect(response.status).toBe(200);
+      expect((await seats(harness)).config.advisor).toEqual({ ...advisor, model });
+    }
+    const { config: { revision } } = await settings(harness);
+    const disabled = await post(harness, { expected_revision: revision, changes: [{ runtime: 'antigravity', enabled: false, uses: [] }] });
+    expect(disabled.status).toBe(422);
+    expect((await disabled.json()).error.code).toBe('runtime_in_use');
+  });
+
+  test.each([
+    ['worker', {}, 'seat_runtime_not_allowed'],
+    ['advisor', { model: null }, 'seat_model_invalid'],
+    ['advisor', { model: 'Malformed model' }, 'seat_model_invalid'],
+    ['advisor', { effort: 'high' }, 'seat_effort_invalid'],
+    ['advisor', { advisor_model: 'opus' }, 'seat_model_invalid'],
+    ['advisor', { fleet: ['explorer'] }, 'seat_fleet_not_allowed'],
+    ['advisor', { tools: ['edit', 'net', 'read', 'shell'] }, 'seat_tool_not_allowed'],
+  ] as const)('refuses an invalid agy seat field on %s (%j)', async (id, patch, code) => {
+    const harness = await startHarness({ agents: { ...PANE_AGENTS, enabled: ['antigravity', ...PANE_AGENTS.enabled] } });
+    const { revision, ...section } = (await seats(harness)).config;
+    const agy = { runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['net', 'read', 'shell'], ...patch };
+    const response = await post(harness, { expected_revision: revision, seats: { ...section, [id]: agy } }, 'seats');
+    expect(response.status).toBe(422);
+    expect((await response.json()).error.code).toBe(code);
+    expect(sha256(harness.configPath)).toBe(revision);
+  });
+
+  test('an agy advisor refuses before save when Antigravity is disabled', async () => {
+    const harness = await startHarness({ agents: PANE_AGENTS });
+    const { revision, ...section } = (await seats(harness)).config;
+    const advisor = { runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['net', 'read', 'shell'] };
+    const response = await post(harness, { expected_revision: revision, seats: { ...section, advisor } }, 'seats');
+    expect(response.status).toBe(422);
+    expect((await response.json()).error.code).toBe('seat_runtime_not_enabled');
+  });
+
   test('settings GET and the browser decoder serve the cached pool, with a stale mark and no free model id in the pool', async () => {
     const freeModel = 'private-settings-model';
     const config = { ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG.worker, model: freeModel } };
@@ -868,6 +910,9 @@ describe('seat settings routes', () => {
     mkdirSync(directory);
     const pi = emptySeatPoolProbe('pi', 'available');
     const report = buildSeatPool(config, [pi], new Date().toISOString());
+    const previous = { ...report, runtimes: report.runtimes.filter(runtime => runtime.id !== 'agy') };
+    writeFileSync(path, JSON.stringify(previous));
+    expect((await (await fetch(endpoint)).json()).model_pool).toBeUndefined();
     writeFileSync(path, JSON.stringify(report));
     const ready = await (await fetch(endpoint)).json();
     expect(ready.model_pool).toEqual({ status: 'ready', report });
@@ -924,7 +969,7 @@ describe('seat settings routes', () => {
     for (const id of ['gatekeeper', 'gatekeeper-deep', 'gatekeeper-fallback', 'reviewer'] as const) {
       expect(value.ranges.seats[id].fleet).toEqual([]);
     }
-    expect(value.ranges.runtimes.map(runtime => [runtime.id, runtime.enabled, runtime.fleet])).toEqual([['claude', true, true], ['codex', true, true], ['pi', true, true]]);
+    expect(value.ranges.runtimes.map(runtime => [runtime.id, runtime.enabled, runtime.fleet])).toEqual([['claude', true, true], ['codex', true, true], ['pi', true, true], ['agy', false, false]]);
   });
 
   test('POST replaces only the seats section and touches nothing outside config.json', async () => {

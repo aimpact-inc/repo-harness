@@ -7,13 +7,15 @@ import { basename, delimiter, dirname, join } from "path";
 import { buildSeatLaunch, seatPaneName } from "../../src/core/board/seat-launch";
 import { HANDOFF_SECTIONS, seatResetReason, seatResetSteps, type SeatResetIdentity } from "../../src/core/board/seat-reset";
 import { SeatResetError, runSeatReset, type SeatRelaunch, type SeatResetNotify, type SeatResetOptions } from "../../src/effects/board/seat-reset";
-import { seatResetLaunch } from "../../src/cli/commands/seats";
+import { seatHandoff, seatResetLaunch } from "../../src/cli/commands/seats";
 import { DEFAULT_SEATS_CONFIG, WORKER_SEAT_IDS, isReviewSeat, isWorkerSeat } from "../../src/core/board/seats-settings";
 import { repoHarnessRepoIdFor } from "../../src/effects/repo-registry";
 import { classifyQuotaReading, decodeCodexRateLimitsResult } from "../../src/core/board/quota";
 import { effectiveSeatConfig, formatSeatRoutes, seatAccountQuotas } from "../../src/core/board/seat-routing";
 import { assertPiShell } from "../../src/effects/board/pi-shell";
 import { readClaudeQuota } from "../../src/effects/board/quota";
+import { buildAntigravityHooks } from "../../src/cli/installer/managed-entries";
+import { seedGlobalPackageFixture } from "../helpers/install-ownership";
 
 const CLI = join(import.meta.dir, "..", "..", "src/cli/index.ts");
 
@@ -134,6 +136,193 @@ function bare(args: string[]): unknown[] {
   expect(args.slice(0, UNSET_SEAT.length)).toEqual(UNSET_SEAT);
   return args.slice(UNSET_SEAT.length);
 }
+
+const AGY_ADVISOR = { runtime: "agy", model: "gemini-4-neon-high", advisor_model: null, effort: null, tools: ["net", "read", "shell"], fleet: [] } as const;
+
+type AgyFixture = {
+  home: string; cwd: string; agy: string; hooks: string; tab: string;
+  run: (args: string[], extra?: Record<string, string>) => ReturnType<typeof run>;
+  configure: (advisor?: unknown, enabled?: boolean, worker?: unknown) => void;
+  catalog: (lines: string, version?: string, exit?: number) => void;
+};
+
+function withAgySeat(callback: (fixture: AgyFixture) => void) {
+  return () => withHome(undefined, home => withRepository(home, "rh", (_repo, cwd) => {
+    const bin = join(home, "bin");
+    const setup = { ...registryEnv(home), PATH: [bin, "/usr/bin", "/bin"].join(delimiter), BUN_INSTALL: join(home, ".bun"), TMPDIR: home };
+    mkdirSync(bin);
+    mkdirSync(join(cwd, ".ai", "harness"), { recursive: true });
+    writeFileSync(join(cwd, ".ai", "harness", "workflow-contract.json"), "{}\n");
+    const hooks = join(home, ".gemini", "config", "hooks.json");
+    seedGlobalPackageFixture(setup, { mutable: true });
+    mkdirSync(dirname(hooks), { recursive: true });
+    writeFileSync(hooks, JSON.stringify({ "repo-harness": buildAntigravityHooks(setup) }));
+    const configure = (advisor: unknown = AGY_ADVISOR, enabled = true, worker: unknown = DEFAULT_SEATS_CONFIG.worker) => {
+      writeFileSync(join(home, ".repo-harness", "config.json"), JSON.stringify({
+        agents: { enabled: enabled ? ["antigravity"] : [], uses: { docs: [], review: [] }, default_docs: null },
+        seats: { ...DEFAULT_SEATS_CONFIG, advisor, worker },
+      }));
+    };
+    configure();
+    const agy = join(bin, "agy");
+    const catalog = (lines: string, version = "1.5.12", exit = 0) => writeFileSync(agy, `#!${process.execPath}
+const arg = process.argv[2];
+if (arg === '--version') { console.log(${JSON.stringify(version)}); process.exit(0); }
+if (arg === 'models') { process.stdout.write(${JSON.stringify(lines)}); process.exit(${exit}); }
+process.exit(93);
+`, { mode: 0o755 });
+    catalog("gemini-4-neon-high\tGemini 4 Neon (High)\n");
+    const tab = join(home, "tab.json");
+    writeFileSync(join(bin, "herdr-app"), `#!${process.execPath}
+const args = JSON.parse(process.argv[4]);
+require('node:fs').appendFileSync(${JSON.stringify(tab)}, JSON.stringify(args) + '\\n');
+if (process.env.AGY_HERDR_FAIL) { console.error(JSON.stringify(args)); process.exit(1); }
+console.log(JSON.stringify({ tab: 'tb1', terminal: 't9', args }));
+`, { mode: 0o755 });
+    const run = (args: string[], extra: Record<string, string> = {}) => {
+      const result = spawnSync(process.execPath, [CLI, "seats", ...args], { cwd, env: { ...setup, ...extra }, encoding: "utf8", timeout: 40_000 });
+      return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+    };
+    callback({ home, cwd, agy, hooks, tab, run, configure, catalog });
+  }));
+}
+
+function agyTabArgs(cwd: string, task = "Private first turn"): string[] {
+  return ["launch", "advisor", "--space", "sp1", "--cwd", cwd, "--task", task, "--json"];
+}
+
+describe.skipIf(process.platform === "win32")("agy advisor seat", () => {
+  test("renders the exact labeled and unlabeled argv and sends the first task once through Herdr", withAgySeat(f => {
+    const task = "Private first turn";
+    const labels = ["--repository-id", "1186405141"];
+    const raw = f.run(["argv", "advisor", ...labels, "--json"]);
+    expect(raw.status, raw.stderr).toBe(0);
+    const labeled = JSON.parse(raw.stdout);
+    const directory = labeled.argv[labeled.argv.indexOf("--add-dir") + 1];
+    expect(directory).toStartWith(join(realpathSync(f.home), ".repo-harness", "seats", "agy"));
+    const settings = { trustedWorkspaces: [f.cwd], permissions: {
+      "allow": [
+        "command(hc ls)",
+        "command(hc get)",
+        "command(hc read)",
+        "command(hc wait)",
+        "command(hc send)",
+        "command(git log)",
+        "command(git show)",
+        "command(git diff)",
+        "command(git status)",
+        "command(git grep)",
+        "command(git rev-parse)",
+        "command(git ls-remote)",
+        "command(git fetch)",
+        "command(gh pr view)",
+        "command(gh pr list)",
+        "command(gh pr checks)",
+        "command(gh pr diff)",
+        "command(gh issue view)",
+        "command(gh issue list)",
+        "command(gh run view)",
+        "command(gh run list)",
+        "command(rg)",
+        "command(ls)",
+        "command(cat)"
+      ],
+      "deny": [
+        "command(gh issue close)",
+        "command(gh issue comment)",
+        "command(gh issue create)",
+        "command(gh issue edit)",
+        "command(gh pr close)",
+        "command(gh pr comment)",
+        "command(gh pr create)",
+        "command(gh pr edit)",
+        "command(gh pr merge)",
+        "command(gh pr review)",
+        "command(gh release create)",
+        "command(git push)"
+      ]
+    } };
+    const executable = [f.agy, "--mode", "accept-edits", "--model", "gemini-4-neon-high", "--add-dir", directory,
+      "--agent", "rh-advisor", "--settings", JSON.stringify(settings)];
+    expect(agent(labeled)).toEqual([...UNSET_SEAT, "REPO_HARNESS_SEAT=advisor", "REPO_HARNESS_SEAT_REPOSITORY=1186405141",
+      "REPO_HARNESS_SEAT_MODEL=gemini-4-neon-high", ...executable]);
+    const profile = readFileSync(join(directory, ".agents", "agents", "rh-advisor", "agent.md"), "utf8");
+    expect(profile).toContain("tools: [view_file, run_command, search_web]\ninheritMcp: false");
+    expect(profile).toContain("Never read auth or credential files.");
+    const unlabeled = f.run(["argv", "advisor", "--json"]);
+    expect(unlabeled.status, unlabeled.stderr).toBe(0);
+    expect(JSON.parse(unlabeled.stdout).argv).toEqual([...UNSET_SEAT, ...executable]);
+    const opened = f.run([...agyTabArgs(f.cwd, task), ...labels]);
+    expect(opened.status, opened.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(f.tab, "utf8"))).toEqual({ name: labeled.tab, space: "sp1", folder: f.cwd,
+      focus: false, argv: [...labeled.argv, "-i", task] });
+    expect(opened.stdout).not.toContain(task);
+    expect(JSON.parse(opened.stdout).placement).toEqual({ tab: "tb1", terminal: "t9" });
+  }));
+
+  test.each(["missing", "unsupported", "signed out", "unknown", "model absent", "outside opt-in", "guard absent", "host disabled", "worker"])("agy refuses %s before any agent projection or tab", (branch) => withAgySeat(f => {
+    let cwd = f.cwd;
+    let seat = "advisor";
+    let error: string;
+    switch (branch) {
+      case "missing": rmSync(f.agy); error = "seat_runtime_missing"; break;
+      case "unsupported": f.catalog("", "1.4.9"); error = "seat_runtime_unsupported"; break;
+      case "signed out": f.catalog("Please sign in\n", "1.5.12", 1); error = "seat_runtime_signed_out"; break;
+      case "unknown": f.catalog("private unexpected output\n"); error = "seat_runtime_unknown"; break;
+      case "model absent": f.configure({ ...AGY_ADVISOR, model: "private-free-id" }); error = "seat_model_unavailable"; break;
+      case "outside opt-in": cwd = f.home; error = "seat_checkout_not_opted_in"; break;
+      case "guard absent": rmSync(f.hooks); error = "antigravity_guard_unready"; break;
+      case "host disabled": f.configure(AGY_ADVISOR, false); error = "seat_runtime_not_enabled"; break;
+      default: seat = "worker"; f.configure(AGY_ADVISOR, true, AGY_ADVISOR); error = "seat_runtime_not_allowed";
+    }
+    const args = agyTabArgs(cwd);
+    args[1] = seat;
+    const result = f.run(args);
+    expect([result.status, result.stdout, JSON.parse(result.stderr).error]).toEqual([1, "", error]);
+    expect(result.stderr).not.toContain("private");
+    expect(existsSync(join(f.home, ".repo-harness", "seats", "agy"))).toBe(false);
+    expect(existsSync(f.tab)).toBe(false);
+  })());
+
+  test("a listed free model launches despite a stale cache, and only the local argv carries it", withAgySeat(f => {
+    const model = "private-free-id";
+    f.configure({ ...AGY_ADVISOR, model });
+    f.catalog("Please sign in\n", "1.5.12", 1);
+    const negative = f.run(["pool", "--json"]);
+    expect(negative.status, negative.stderr).toBe(0);
+    const cache = join(f.home, ".repo-harness", "seats", "pool.json");
+    const stale = JSON.stringify({ ...JSON.parse(negative.stdout), collected_at: "2026-01-01T00:00:00.000Z" });
+    writeFileSync(cache, stale);
+    f.catalog(model + "\tA custom model\n");
+    const result = f.run(agyTabArgs(f.cwd));
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).not.toContain(model);
+    expect(JSON.parse(result.stdout).model).toBe("seats.advisor.model");
+    const args = JSON.parse(readFileSync(f.tab, "utf8")).argv;
+    expect(args[args.indexOf("--model") + 1]).toBe(model);
+    expect(readFileSync(cache, "utf8")).toBe(stale);
+  }));
+
+  test("an uncertain tab request stays uncertain and keeps the first task private", withAgySeat(f => {
+    const task = "Private first turn";
+    const result = f.run(agyTabArgs(f.cwd, task), { AGY_HERDR_FAIL: "1" });
+    expect([result.status, JSON.parse(result.stderr).error]).toEqual([1, "seat_tab_unknown"]);
+    expect(result.stderr).not.toContain(task);
+    expect(readFileSync(f.tab, "utf8").trimEnd().split("\n")).toHaveLength(1);
+  }));
+
+  test("the generated agent cannot replace an existing different file", withAgySeat(f => {
+    const argv = ["argv", "advisor", "--json"];
+    const first = f.run(argv);
+    expect(first.status, first.stderr).toBe(0);
+    const args = JSON.parse(first.stdout).argv;
+    const file = join(args[args.indexOf("--add-dir") + 1], ".agents", "agents", "rh-advisor", "agent.md");
+    writeFileSync(file, "user content");
+    const refused = f.run(argv);
+    expect(refused.status).toBe(1);
+    expect(readFileSync(file, "utf8")).toBe("user content");
+  }));
+});
 
 describe("rh seats argv", () => {
   test("a Pi seat launch refuses a shell that fails the heredoc probe, passes a good one and reports a shell that cannot start", () => {
@@ -1274,7 +1463,10 @@ if (cmd === "keys") {
   if (line === "/clear" && st.untrackOnClear) st.status = null;
   if (line === "/compact" && st.signal) session("${home}/old.jsonl", "compact");
   if (line === "/exit" && st.exit) st.foreground = "zsh";
-  if (line.startsWith("sh ")) session("${home}/relaunched.jsonl");
+  if (line.startsWith("sh ")) {
+    st.foreground = "claude";
+    session("${home}/relaunched.jsonl");
+  }
   out({ status: null, turn: 4 });
 }
 if (cmd === "send" && st.sendFail) { process.stderr.write(JSON.stringify({ error: { kind: "blocked", message: "blocked" } })); process.exit(9); }
@@ -1355,6 +1547,28 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     };
   }
   const prompt = (handoff: string) => `You are advisor. Read ${handoff}, then run the Bash command \`hc send t2 RESUMED\` alone, then check the current state with git/gh and continue.`;
+
+  test.each(['request', 'agy foreground', 'unknown foreground'])("an agy or untracked advisor reset refuses before keys or claims (%s)", branch => withReset(async ({ reset, state, handoff, sends }) => {
+    if (branch === 'agy foreground') state({ foreground: 'agy', status: { state: 'done', app: 'antigravity' } });
+    if (branch === 'unknown foreground') state({ foreground: 'unknown', status: null });
+    const directory = dirname(handoff);
+    const before = () => {
+      if (branch !== 'request') return;
+      const request = join(directory, 'request.json');
+      writeFileSync(request, JSON.stringify({ ...JSON.parse(readFileSync(request, 'utf8')), host: 'antigravity' }));
+    };
+    expect(await reset({ before })).toEqual({ error: 'seat_reset_runtime_unsupported', outcome: 'nothing_sent' });
+    expect(sends()).toEqual([]);
+    expect(readdirSync(directory).some(name => name.startsWith('claim-'))).toBe(false);
+  })());
+
+  test("an agy handoff refuses before reading the transcript as Claude", withReset(async ({ handoff }) => {
+    const directory = dirname(handoff);
+    writeFileSync(join(directory, 'session.json'), JSON.stringify({ host: 'antigravity', session_id: 'test',
+      transcript_path: join(directory, 'missing.jsonl'), source: 'startup', started_at: new Date().toISOString() }));
+    expect(() => seatHandoff({ REPO_HARNESS_SEAT: 'advisor', REPO_HARNESS_SEAT_REPOSITORY: basename(dirname(directory)) }))
+      .toThrow(expect.objectContaining({ code: 'seat_reset_runtime_unsupported' }));
+  }));
 
   test("a check that finds no request, no requester or a busy requester sends nothing and logs the failure", withReset(async ({ reset, state, sends, log }) => {
     const rows = [

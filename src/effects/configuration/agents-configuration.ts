@@ -11,6 +11,7 @@ import {
   SeatsConfigMigrationRequiredError,
   decodeSeatsConfig,
   seatsConfigInvalidMessage,
+  seatHostId,
   type SeatsConfigV1,
 } from '../../core/board/seats-settings';
 import { isDocsHostRuntimeId } from '../../core/operator/docs-host-runtimes';
@@ -110,7 +111,10 @@ function nextSection(current: AgentsConfigV1, request: AgentsSettingsRequestV1, 
 }
 
 function checkSeatRuntimes(value: unknown, before: readonly string[], after: readonly string[]): void {
-  const disabled = SEAT_RUNTIMES.filter(runtime => before.includes(runtime) && !after.includes(runtime));
+  const disabled = SEAT_RUNTIMES.filter(runtime => {
+    const host = seatHostId(runtime);
+    return before.includes(host) && !after.includes(host);
+  });
   if (disabled.length === 0) return;
 
   let seats: SeatsConfigV1;

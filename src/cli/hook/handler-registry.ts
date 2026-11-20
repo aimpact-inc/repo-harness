@@ -44,7 +44,8 @@ function seatSessionDiagnostic(context: HookHandlerContext): string {
   const transcriptPath = payloadString(context.payload, 'transcript_path');
   if (identity === null || !isSeatSessionSource(source) || transcriptPath === '') return '';
   try {
-    recordSeatSession(identity, { sessionId: context.identity.sessionId, transcriptPath, source, ...seatLaunchModel(context.env) }, context.now);
+    recordSeatSession(identity, { sessionId: context.identity.sessionId, transcriptPath, source,
+      host: context.identity.host === 'antigravity' ? 'antigravity' : 'claude', ...seatLaunchModel(context.env) }, context.now);
     return '';
   } catch (error) {
     return `repo-harness: seat session not recorded: ${(error as Error).message}\n`;

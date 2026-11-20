@@ -51,7 +51,10 @@ export function readTranscriptUsage(path: string): TranscriptUsage {
   }
 }
 
+type ResetHost = 'claude' | 'antigravity';
+
 export interface SeatResetRequestRecord {
+  readonly host?: ResetHost;
   readonly contextTokens: number;
   readonly transcriptPath: string;
   readonly transcriptBytes: number;
@@ -67,7 +70,7 @@ export function writeSeatResetRequest(identity: SeatResetIdentity, now: Date, re
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(path, `${JSON.stringify({
     requested_at: now.toISOString(), context_tokens: request.contextTokens, transcript_path: request.transcriptPath,
-    action: request.action, transcript_bytes: request.transcriptBytes,
+    action: request.action, transcript_bytes: request.transcriptBytes, host: request.host ?? 'claude',
   })}\n`);
 }
 
@@ -92,14 +95,15 @@ export function requestOpen(identity: SeatResetIdentity, request: SeatRequest): 
  * reset command sends the resume prompt only after this signal. The launch model of the session lets a tier-2 reset
  * see a mode change (#2633).
  */
-export function recordSeatSession(identity: SeatResetIdentity, session: SeatLaunchModel & { readonly sessionId: string | null; readonly transcriptPath: string; readonly source: SeatSessionSource }, now: Date): void {
+export function recordSeatSession(identity: SeatResetIdentity, session: SeatLaunchModel & { readonly sessionId: string | null; readonly transcriptPath: string; readonly source: SeatSessionSource; readonly host?: ResetHost }, now: Date): void {
   const path = seatSessionPath(identity);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(path, `${JSON.stringify({ session_id: session.sessionId, transcript_path: session.transcriptPath, source: session.source, started_at: now.toISOString(),
-    model: session.model, effort: session.effort })}\n`);
+    model: session.model, effort: session.effort, host: session.host ?? 'claude' })}\n`);
 }
 
 export interface SeatSessionRecord extends SeatLaunchModel {
+  readonly host: ResetHost;
   readonly sessionId: string | null;
   readonly transcriptPath: string;
   readonly source: SeatSessionSource;
@@ -114,11 +118,11 @@ export function readSeatSession(identity: SeatResetIdentity): SeatSessionRecord 
   let value: unknown;
   try { value = JSON.parse(readFileSync(seatSessionPath(identity), 'utf8')); } catch { return null; }
   if (typeof value !== 'object' || value === null) return null;
-  const { session_id: sessionId, transcript_path: transcriptPath, source, started_at: startedAt, model = null, effort = null } = value as Record<string, unknown>;
-  const valid = (sessionId === null || typeof sessionId === 'string') && typeof transcriptPath === 'string' && transcriptPath !== ''
+  const { session_id: sessionId, transcript_path: transcriptPath, source, started_at: startedAt, model = null, effort = null, host = 'claude' } = value as Record<string, unknown>;
+  const valid = (host === 'claude' || host === 'antigravity') && (sessionId === null || typeof sessionId === 'string') && typeof transcriptPath === 'string' && transcriptPath !== ''
     && isSeatSessionSource(source) && typeof startedAt === 'string' && isoInstant(startedAt)
     && (model === null || typeof model === 'string') && (effort === null || typeof effort === 'string');
-  return valid ? { sessionId, transcriptPath, source, startedAt, model, effort } : null;
+  return valid ? { sessionId, transcriptPath, source, startedAt, model, effort, host } : null;
 }
 
 /** True for the exact `Date.toISOString()` form that `recordSeatSession` writes. */
@@ -130,6 +134,7 @@ function isoInstant(text: string): boolean {
 type HandoffCode = 'handoff_missing' | 'handoff_stale' | 'handoff_sha256_mismatch' | 'handoff_sections_missing';
 
 export interface SeatRequest {
+  readonly host: ResetHost;
   readonly requestedAt: string;
   readonly transcriptPath: string | null;
   readonly action: SeatResetAction;
@@ -145,9 +150,9 @@ export function readRequest(identity: SeatResetIdentity): SeatRequest | null {
   try { value = JSON.parse(readFileSync(seatResetRequestPath(identity), 'utf8')); } catch { return null; }
   // Any JSON value that is not a plain object (null, an array, a number, a string, a boolean) is not a request.
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-  const { requested_at: requestedAt, transcript_path: transcriptPath, action } = value as Record<string, unknown>;
-  if (typeof requestedAt !== 'string' || !Number.isFinite(Date.parse(requestedAt)) || !isSeatResetAction(action)) return null;
-  return { requestedAt, transcriptPath: typeof transcriptPath === 'string' ? transcriptPath : null, action };
+  const { requested_at: requestedAt, transcript_path: transcriptPath, action, host = 'claude' } = value as Record<string, unknown>;
+  if ((host !== 'claude' && host !== 'antigravity') || typeof requestedAt !== 'string' || !Number.isFinite(Date.parse(requestedAt)) || !isSeatResetAction(action)) return null;
+  return { requestedAt, transcriptPath: typeof transcriptPath === 'string' ? transcriptPath : null, action, host };
 }
 
 /** The first failed check of the handoff of a `RESET-REQUEST`, or null when it passes. */
@@ -172,7 +177,7 @@ export interface NewSession {
  */
 export function newSession(identity: SeatResetIdentity, since: number, request: SeatRequest, action: SeatResetAction): NewSession | null {
   const session = readSeatSession(identity);
-  if (session === null || Date.parse(session.startedAt) < since) return null;
+  if (session === null || session.host !== request.host || Date.parse(session.startedAt) < since) return null;
   const segment = action === 'compact'
     ? session.source === 'compact' && session.transcriptPath === request.transcriptPath
     : session.transcriptPath !== request.transcriptPath;

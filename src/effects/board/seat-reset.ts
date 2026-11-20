@@ -21,7 +21,7 @@ export type SeatResetOutcome = 'nothing_sent' | 'rewrite_requested' | 'no_reset'
 
 export type SeatResetCode = 'handoff_path_invalid' | 'handoff_missing' | 'request_missing' | 'handoff_stale' | 'handoff_sha256_mismatch'
   | 'handoff_sections_missing' | 'already_claimed' | 'claim_failed' | 'caller_unknown' | 'requester_not_found' | 'requester_busy' | 'message_not_sent'
-  | 'hc_failed' | 'requester_status_untracked' | 'resume_not_sent' | 'request_invalid' | 'request_closed';
+  | 'hc_failed' | 'requester_status_untracked' | 'resume_not_sent' | 'request_invalid' | 'request_closed' | 'seat_reset_runtime_unsupported';
 
 export class SeatResetError extends Error {
   constructor(readonly code: SeatResetCode, readonly outcome: SeatResetOutcome, message: string, readonly logErrors: readonly string[] = []) {
@@ -186,6 +186,9 @@ class SeatResetRun {
     try {
       const requestPath = seatResetRequestPath(this.identity);
       this.request = readRequest(this.identity);
+      if (this.request?.host === 'antigravity' || readSeatSession(this.identity)?.host === 'antigravity') {
+        throw this.unsupportedRuntime();
+      }
       if (this.request === null && !existsSync(requestPath)) {
         throw this.refuse('request_missing', 'nothing_sent', `${requestPath} is missing: the Stop hook did not ask for this reset.`);
       }
@@ -202,6 +205,7 @@ class SeatResetRun {
       this.prompt = seatResumePrompt(this.identity, this.caller, this.request.action);
       this.checkHandoff(sha256);
       this.wait();
+      this.requireClaudeAdvisor('nothing_sent');
       this.claim(claim);
       // An auto-compaction or another reset after the request started a new segment: a second action would compact
       // or clear the new summary.
@@ -216,7 +220,7 @@ class SeatResetRun {
     try {
       return await this.resetAndResume();
     } catch (error) {
-      if (error instanceof SeatResetError && (error.outcome === 'uncertain' || error.code === 'requester_status_untracked')) throw error;
+      if (error instanceof SeatResetError && (error.outcome === 'uncertain' || error.code === 'requester_status_untracked' || error.code === 'seat_reset_runtime_unsupported')) throw error;
       throw this.refuse('resume_not_sent', 'uncertain', `${this.requester} may have got ${SEAT_RESET_COMMAND[this.request!.action]}, but not the resume prompt: ${sentence(error)}. Send it by hand: ${this.prompt}`);
     }
   }
@@ -258,6 +262,20 @@ class SeatResetRun {
       }
     }
     this.caller = caller;
+    this.requireClaudeAdvisor('nothing_sent');
+  }
+
+  private unsupportedRuntime(outcome: SeatResetOutcome = 'nothing_sent'): SeatResetError {
+    return new SeatResetError('seat_reset_runtime_unsupported', outcome,
+      'Automated advisor reset requires a Claude foreground. Relaunch an agy advisor through rh seats launch advisor.');
+  }
+
+  private requireClaudeAdvisor(outcome: SeatResetOutcome): void {
+    if (this.identity.seat !== 'advisor') return;
+    const terminal = hcGet(this.requester, this.options);
+    if (terminal.state !== 'live' || terminal.foreground?.name !== 'claude' || terminal.status?.app === 'antigravity') {
+      throw this.unsupportedRuntime(outcome);
+    }
   }
 
   /** Sends one message to the requester and records it once; a refused send records only the failure. */
@@ -379,6 +397,7 @@ class SeatResetRun {
     const changed = action === 'reset' ? await this.modelChange() : null;
     if (changed !== null) return this.relaunch(changed);
     let since = Date.now();
+    this.requireClaudeAdvisor('nothing_sent');
     typeLine(this.requester, SEAT_RESET_COMMAND[action], this.options);
     let session: NewSession | null = null;
     // The log counts across runs; the run counts too, so an unwritable log still ends the retries.
@@ -393,6 +412,7 @@ class SeatResetRun {
       if (failures > SEAT_RESET_RETRIES || this.count('resume') > SEAT_RESET_RETRIES) return this.relaunch();
       if (failure === 'no_signal') {
         since = Date.now();
+        this.requireClaudeAdvisor('uncertain');
         typeLine(this.requester, '/clear', this.options);
       }
     }
@@ -424,6 +444,7 @@ class SeatResetRun {
     if (terminal.state === 'finished') throw stop('requester_exited');
     if (terminal.foreground === null) throw stop('requester_foreground_unavailable', true);
     if (terminal.foreground.pid === terminal.pid) throw stop('requester_has_no_parent_shell', true);
+    this.requireClaudeAdvisor(outcome);
     typeLine(this.requester, '/exit', this.options);
     const shellReady = await this.poll(() => {
       const current = hcGet(this.requester, this.options);

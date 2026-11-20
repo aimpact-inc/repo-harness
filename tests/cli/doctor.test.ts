@@ -121,6 +121,21 @@ test.skipIf(process.platform === 'win32')('doctor measures the installed Antigra
     installed['repo-harness'].enabled = false;
     fs.writeFileSync(hooks, JSON.stringify(installed));
     doctor('warn', 'ok');
+    installed['repo-harness'].enabled = true;
+    const guards = installed['repo-harness'].PreToolUse as { matcher: string }[];
+    const editIndex = guards.findIndex(entry => entry.matcher === 'write_file|edit_file');
+    expect(editIndex).toBeGreaterThanOrEqual(0);
+    const [originalEdit] = guards.splice(editIndex, 1);
+    fs.writeFileSync(hooks, JSON.stringify(installed));
+    doctor('fail', 'ok');
+    guards.splice(editIndex, 0, originalEdit!);
+    fs.writeFileSync(hooks, JSON.stringify(installed));
+    const bundle = path.join(seedGlobalPackageFixture(env, { mutable: true }), 'dist/hook-entry.js');
+    const entry = fs.readFileSync(bundle);
+    fs.writeFileSync(bundle, 'console.log(JSON.stringify({ decision: "allow" }));');
+    doctor('ok', 'fail');
+    fs.writeFileSync(bundle, entry);
+    installed['repo-harness'].enabled = false;
     const ran = path.join(root, 'ran');
     const bashHook = installed['repo-harness'].PreToolUse.find((entry: { matcher: string }) => entry.matcher === 'run_command');
     bashHook.hooks[0].command = `/usr/bin/touch '${ran}'`;
@@ -129,6 +144,10 @@ test.skipIf(process.platform === 'win32')('doctor measures the installed Antigra
     expect(fs.existsSync(ran)).toBe(false);
     fs.writeFileSync(hooks, '{}');
     doctor('na', 'na');
+    const linked = path.join(root, 'hooks.json');
+    fs.renameSync(hooks, linked);
+    fs.symlinkSync(linked, hooks);
+    doctor('fail', 'na');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

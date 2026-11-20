@@ -284,20 +284,79 @@ function piLaunch(seat: LaunchSeatId, config: SeatConfigV1, roleDirectory: strin
   };
 }
 
-/**
- * `claudeAgentTypes` is every agent type that a Claude session of this host can
- * call. A Claude seat with a fleet refuses each of them that is not in the fleet.
- * `paneName` (`seatPaneName`) becomes the Claude session name `-n`. `repositoryId` is the checked label value.
- * `piRoleDirectory` holds the role files of a Pi seat with a fleet; it goes on that seat's argv only.
- * `piHookExtension` is the installed rh Pi extension that a Pi review seat loads with `-e`; the page, which shows limits only, passes none.
- * `claudeSaving` is the Claude quota mode `saving` that the caller already read; a Claude seat then also disables the
- * advisor tool. Only `rh seats argv` reads the quota, so its other callers take the default.
- */
-export function buildSeatLaunch(seat: LaunchSeatId, config: SeatConfigV1, source: SeatLaunchSource, claudeAgentTypes: readonly string[], paneName?: string, repositoryId?: string, piRoleDirectory?: string, piHookExtension?: string, claudeSaving = false): SeatLaunchV1 {
-  const launch = config.runtime === 'claude'
-    ? claudeLaunch(seat, config, claudeAgentTypes, paneName, repositoryId, claudeSaving)
-    : config.runtime === 'codex' ? codexLaunch(seat, config) : piLaunch(seat, config, piRoleDirectory, piHookExtension);
-  return { protocol: 1, kind: 'seat_launch', seat, runtime: config.runtime, source, ...launch };
+type RuntimeLaunch = Pick<SeatLaunchV1, 'argv' | 'brief' | 'limits'>;
+
+const AGY_COMMAND_PREFIXES = [
+  'hc ls', 'hc get', 'hc read', 'hc wait', 'hc send',
+  'git log', 'git show', 'git diff', 'git status', 'git grep', 'git rev-parse', 'git ls-remote', 'git fetch',
+  'gh pr view', 'gh pr list', 'gh pr checks', 'gh pr diff',
+  'gh issue view', 'gh issue list', 'gh run view', 'gh run list', 'rg', 'ls', 'cat',
+];
+
+// MCP and fleet omission must be confirmed in a native agy session before reporting enforcement.
+export const AGY_SEAT_LIMITS: readonly SeatLimitV1[] = [
+  { subject: 'edit', level: 'common_commands' },
+  { subject: 'tasks', level: 'instructions_only' },
+  { subject: 'schedule', level: 'instructions_only' },
+  { subject: 'mcp', level: 'instructions_only' },
+  { subject: 'gh', level: 'common_commands' },
+  { subject: 'fleet', level: 'instructions_only' },
+  { subject: 'hook', level: 'common_commands' },
+];
+
+export const AGY_SEAT_AGENT = 'rh-advisor';
+
+export function agySeatBrief(config: SeatConfigV1): string {
+  return [brief('advisor', config, [], AGY_SEAT_LIMITS), 'Never read auth or credential files.',
+    'When Stop requests a handoff, send it to the orchestrator. After this pane ends, the orchestrator starts a new advisor pane with rh seats launch advisor and gives it the handoff.'].join('\n\n');
+}
+
+interface AgyLaunchInputs {
+  readonly executable: string;
+  readonly directory: string;
+  readonly cwd: string;
+}
+
+function agyLaunch(config: SeatConfigV1, repositoryId: string | undefined, input: AgyLaunchInputs): RuntimeLaunch {
+  const model = config.model;
+  if (model === null) throw new Error('agy requires an explicit model.');
+  const env = repositoryId === undefined ? [] : [`${SEAT_ENV}=advisor`, `${SEAT_REPOSITORY_ENV}=${repositoryId}`, `${SEAT_MODEL_ENV}=${model}`];
+  const settings = JSON.stringify({ trustedWorkspaces: [input.cwd], permissions: {
+    allow: AGY_COMMAND_PREFIXES.map(command => `command(${command})`),
+    deny: GITHUB_WRITE_COMMANDS.map(command => `command(${command})`),
+  } });
+  return {
+    argv: [...seatEnv(env), input.executable, '--mode', 'accept-edits', '--model', model,
+      '--add-dir', input.directory, '--agent', AGY_SEAT_AGENT, '--settings', settings],
+    brief: agySeatBrief(config),
+    limits: AGY_SEAT_LIMITS,
+  };
+}
+
+export interface SeatLaunchOptions {
+  readonly paneName?: string;
+  readonly repositoryId?: string;
+  readonly piRoleDirectory?: string;
+  readonly piHookExtension?: string;
+  readonly claudeSaving?: boolean;
+  readonly agy?: AgyLaunchInputs;
+}
+
+function runtimeLaunch(runtime: SeatConfigV1['runtime'], seat: LaunchSeatId, config: SeatConfigV1, claudeAgentTypes: readonly string[], options: SeatLaunchOptions): RuntimeLaunch {
+  switch (runtime) {
+    case 'claude': return claudeLaunch(seat, config, claudeAgentTypes, options.paneName, options.repositoryId, options.claudeSaving ?? false);
+    case 'codex': return codexLaunch(seat, config);
+    case 'pi': return piLaunch(seat, config, options.piRoleDirectory, options.piHookExtension);
+    case 'agy': {
+      if (options.agy === undefined) throw new Error('agy requires verified launch inputs.');
+      return agyLaunch(config, options.repositoryId, options.agy);
+    }
+    default: throw new Error(`Unsupported seat runtime ${runtime satisfies never}.`);
+  }
+}
+
+export function buildSeatLaunch(seat: LaunchSeatId, config: SeatConfigV1, source: SeatLaunchSource, claudeAgentTypes: readonly string[], options: SeatLaunchOptions = {}): SeatLaunchV1 {
+  return { protocol: 1, kind: 'seat_launch', seat, runtime: config.runtime, source, ...runtimeLaunch(config.runtime, seat, config, claudeAgentTypes, options) };
 }
 
 const PANE_ROLE = { orchestrator: 'orch', advisor: 'adv', planner: 'pl', worker: 'w', 'worker-deep': 'w', 'worker-important': 'w', 'worker-important-fast': 'w', 'worker-light': 'w', gatekeeper: 'gk', 'gatekeeper-deep': 'gd', reviewer: 'rv' } as const;
