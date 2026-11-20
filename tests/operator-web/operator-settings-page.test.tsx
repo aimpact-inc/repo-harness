@@ -211,8 +211,8 @@ describe('agents page seats section', () => {
   });
 
   test.each([
-    [true, 'pi', 'magpie/agy-cli/gemini-4-carbon'],
-    [false, 'codex', 'gpt-6.2-astra'],
+    [true, 'claude', 'fable'],
+    [false, 'claude', 'fable'],
   ] as const)('the planner switch saves the starter for Pi enabled = %s and can turn it off', async (piEnabled, runtime, model) => {
     const stores = settingsStores(NOW, 'busy');
     if (piEnabled) {
@@ -273,12 +273,12 @@ describe('agents page seats section', () => {
     await click(pick('Important worker'));
     const card = '[data-seat-card="worker-important"]';
     const offered = () => [...document.querySelectorAll(`${card} [role="group"][aria-label="Model"] button`)].map(button => button.textContent);
-    expect(offered()).toEqual(['Host default', 'opus', 'sonnet']);
+    expect(offered()).toEqual(['Host default', 'opus']);
     await typeText(`${card} [data-model-input]`, 'claude-opus-9');
     await leaveField(`${card} [data-model-input]`);
     const chosen = () => [...document.querySelectorAll<HTMLButtonElement>(`${card} [role="group"][aria-label="Model"] button`)].find(button => button.textContent === 'claude-opus-9');
     expect(chosen()?.getAttribute('aria-pressed')).toBe('true');
-    expect(offered()).toEqual(['Host default', 'opus', 'sonnet', 'claude-opus-9']);
+    expect(offered()).toEqual(['Host default', 'opus', 'claude-opus-9']);
     // Picking the active runtime again changes nothing, so the typed id stays.
     await click(buttonWithText('Claude Code'));
     expect(chosen()?.getAttribute('aria-pressed')).toBe('true');

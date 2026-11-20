@@ -822,7 +822,7 @@ describe('typed subagent hook handlers', () => {
           turn_id: 'turn-sandbox-evidence',
           agent_id: 'agent-sandbox-evidence',
           agent_type: 'deep-reasoner',
-          model: 'gpt-6.2-astra',
+          model: 'gpt-6.2-sol',
         }, codexEnv({ HOME: home }));
         expect(output.exitCode).toBe(0);
         expect(readRoutingObservations(repoRoot)[0]).toMatchObject({

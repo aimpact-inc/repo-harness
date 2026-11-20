@@ -599,8 +599,13 @@ describe('seat settings contract without transport', () => {
       { runtime: 'claude', model: 'fable' }, { runtime: 'pi', model: 'magpie/agy-cli/gemini-4-carbon' },
       ...['low', 'medium', 'high', 'xhigh'].map(effort => ({ runtime: 'agy' as const, model: `gemini-4-neon-${effort}` })),
     ]);
-    for (const id of WORKER_SEAT_IDS) expect(before.ranges.seats[id].models).toEqual([opus, neon, { runtime: 'claude', model: 'sonnet' },
-      { runtime: 'codex', model: 'gpt-6.2-sol' }, { runtime: 'codex', model: 'gpt-6.1-terra' }, { runtime: 'pi', model: 'zai/glm-5.3-flash' }, { runtime: 'pi', model: 'magpie/group/deepseek-v4.1-flash' }]);
+    for (const id of WORKER_SEAT_IDS) expect(before.ranges.seats[id].models).toEqual([
+      opus, neon,
+      { runtime: 'pi', model: 'magpie/codex/gpt-6.2-sol' }, { runtime: 'codex', model: 'gpt-6.2-sol' },
+      { runtime: 'pi', model: 'magpie/codex/gpt-6.1-terra' }, { runtime: 'codex', model: 'gpt-6.1-terra' },
+      { runtime: 'pi', model: 'zai/glm-5.3-flash' }, { runtime: 'pi', model: 'magpie/group/deepseek-v4.1-flash' },
+      { runtime: 'pi', model: 'magpie/agy-cli/gemini-4-hydrogen' }, { runtime: 'agy', model: 'gemini-4-hydrogen' },
+    ]);
     const { revision, ...section } = before.config;
     const saved = await route.decode({ expected_revision: revision, seats: { ...section, advisor: { ...section.advisor, effort: 'medium' } } }, []).execute();
     expect(saved.status).toBe(200);
@@ -715,12 +720,18 @@ describe('seat settings contract without transport', () => {
     expect(settings.ranges.routing).toEqual({ classes: ROUTING_CLASSES, worker_seats: ['worker', 'worker-deep', 'worker-important', 'worker-important-fast', 'worker-light'],
       frontend_seats: ['worker-important', 'worker-important-fast'] });
     for (const id of ['gatekeeper', 'gatekeeper-deep', 'gatekeeper-fallback', 'reviewer'] as const) expect(settings.ranges.seats[id]).toEqual({ tools: ['net', 'read', 'shell'], fleet: [],
-      models: [{ runtime: 'codex', model: 'gpt-6.2-sol' }, { runtime: 'codex', model: 'gpt-6.2-astra' }, { runtime: 'pi', model: 'zai/glm-5.3-flash' }] });
+      models: [
+        { runtime: 'pi', model: 'magpie/codex/gpt-6.2-sol' }, { runtime: 'codex', model: 'gpt-6.2-sol' },
+        { runtime: 'claude', model: 'opus' }, { runtime: 'pi', model: 'zai/glm-5.3-flash' },
+        { runtime: 'pi', model: 'magpie/group/deepseek-v4.1-flash' }, { runtime: 'pi', model: 'magpie/agy-cli/gemini-4-hydrogen' },
+        { runtime: 'agy', model: 'gemini-4-hydrogen' },
+      ] });
     expect(settings.defaults['gatekeeper-fallback']).toBeNull();
     expect(settings.defaults.planner).toBeNull();
     expect(settings.ranges.seats.planner).toEqual({ tools: ['net', 'read', 'shell'], fleet: ['deep-reasoner', 'explorer'], models: [
-      { runtime: 'pi', model: 'magpie/agy-cli/gemini-4-carbon' }, { runtime: 'pi', model: 'magpie/agy-cli/gemini-4-neon' },
-      { runtime: 'codex', model: 'gpt-6.2-astra' }, { runtime: 'claude', model: 'opus' },
+      { runtime: 'claude', model: 'fable' }, { runtime: 'pi', model: 'magpie/agy-cli/gemini-4-carbon' },
+      { runtime: 'pi', model: 'magpie/codex/gpt-6.2-astra' }, { runtime: 'codex', model: 'gpt-6.2-astra' },
+      { runtime: 'pi', model: 'magpie/agy-cli/gemini-4-neon' }, { runtime: 'claude', model: 'opus' },
     ] });
     for (const id of SEAT_IDS.filter(id => id !== 'gatekeeper-fallback' && id !== 'planner')) {
       expect(settings.defaults[id]?.tools).toEqual(expect.arrayContaining(['net']));

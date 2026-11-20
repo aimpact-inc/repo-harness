@@ -286,11 +286,14 @@ function piLaunch(seat: LaunchSeatId, config: SeatConfigV1, roleDirectory: strin
 
 type RuntimeLaunch = Pick<SeatLaunchV1, 'argv' | 'brief' | 'limits'>;
 
-const AGY_COMMAND_PREFIXES = [
+export const AGY_COMMAND_PREFIXES = [
   'hc ls', 'hc get', 'hc read', 'hc wait', 'hc send',
   'git log', 'git show', 'git diff', 'git status', 'git grep', 'git rev-parse', 'git ls-remote', 'git fetch',
   'gh pr view', 'gh pr list', 'gh pr checks', 'gh pr diff',
-  'gh issue view', 'gh issue list', 'gh run view', 'gh run list', 'rg', 'ls', 'cat',
+  'gh issue view', 'gh issue list', 'gh run view', 'gh run list',
+  'rh board --parent', 'rh board attention --parent', 'rh board parents', 'rh board cluster', 'rh board seats', 'rh board retro',
+  'rh quota', 'rh seats pool',
+  'rg', 'ls', 'cat',
 ];
 
 // MCP and fleet omission must be confirmed in a native agy session before reporting enforcement.
