@@ -338,7 +338,7 @@ test('OAR SessionOptions reuse fleet and authorize only file communication, with
   const claude = reviewSessionOptions('claude', root), codex = reviewSessionOptions('codex', root, home);
   expect(claude.cwd).toBe(root); expect(codex.cwd).toBe(root);
   // Codex runs the review role's target model as its magpie model.
-  expect(claude.model).toBe('opus'); expect(codex.model).toBe('codex/gpt-6.2-astra');
+  expect(claude.model).toBe('opus'); expect(codex.model).toBe('codex/gpt-6.2-sol');
   expect(codex.effort).toBe('high'); expect(codex.env).toEqual({ CODEX_HOME: home });
   expect(() => reviewSessionOptions('codex', root)).toThrow('review_runtime_home_required');
   for (const [options, keys] of [[claude, ['appendSystemPrompt','cwd','effort','model']], [codex, ['appendSystemPrompt','cwd','effort','env','model']]] as const) {
@@ -358,12 +358,12 @@ test('Pi agent directory holds only the magpie constants and an empty auth map; 
   const output = join(root, 'output'); mkdirSync(output);
   // pi's own offline resolver selects the review role's magpie model from the generated files.
   const { directory, model } = isolation.preparePiAgentDirectory(output, CURRENT_REVIEW_MODEL, (agentDirectory, reference) => resolvePiModel(PI_PACKAGE_CLI, agentDirectory, reference));
-  expect(model).toBe('magpie/codex/gpt-6.2-astra');
+  expect(model).toBe('magpie/codex/gpt-6.2-sol');
   expect(lstatSync(directory).mode & 0o777).toBe(0o700);
   expectGeneratedPiDirectory(directory);
   expect(isolation.preparePiAgentDirectory(output, CURRENT_REVIEW_MODEL, piReferenceResolver).directory).toBe(directory);
   expect(() => isolation.preparePiAgentDirectory(output, CURRENT_REVIEW_MODEL, () => ({ provider: 'magpie', model: 'codex/other' })))
-    .toThrow('review_pi_model_not_canonical: pi resolves magpie/codex/gpt-6.2-astra to magpie/codex/other');
+    .toThrow('review_pi_model_not_canonical: pi resolves magpie/codex/gpt-6.2-sol to magpie/codex/other');
   const settings = readFileSync(join(directory, 'settings.json'), 'utf8');
   writeFileSync(join(directory, 'settings.json'), settings + ' ');
   expect(() => isolation.preparePiAgentDirectory(output, CURRENT_REVIEW_MODEL, piReferenceResolver)).toThrow('review_pi_settings_changed');
@@ -431,7 +431,7 @@ import {SessionManager} from ${JSON.stringify(import.meta.resolve('@earendil-wor
 const runtime=reviewRuntime('pi',${JSON.stringify(launcher)});
 const session=await runtime.session({kind:'available',via:'bundled'},{cwd:${JSON.stringify(output)},env:{PI_CODING_AGENT_DIR:${JSON.stringify(directory)},OAR_PI_AGENT_DIR:${JSON.stringify(directory)}}});
 const host=new OarReviewHost(session,()=>{});const id=host.sessionId;
-try{assert.ok(id);assert.equal(host.model('pi'),'magpie/codex/gpt-6.2-astra');const records=readFileSync(${JSON.stringify(capture)},'utf8').trim().split('\\n').map(JSON.parse);const run=records.find(r=>r.argv.includes('--mode'));assert.ok(existsSync(run.env.OAR_PI_RPC_DIRECTORY+'/ready'));}finally{await host.dispose();}
+try{assert.ok(id);assert.equal(host.model('pi'),'magpie/codex/gpt-6.2-sol');const records=readFileSync(${JSON.stringify(capture)},'utf8').trim().split('\\n').map(JSON.parse);const run=records.find(r=>r.argv.includes('--mode'));assert.ok(existsSync(run.env.OAR_PI_RPC_DIRECTORY+'/ready'));}finally{await host.dispose();}
 const output=${JSON.stringify(output)},agentDir=${JSON.stringify(directory)};
 const captured=readFileSync(${JSON.stringify(capture)},'utf8').trim().split('\\n').map(JSON.parse).find(r=>r.argv.includes('--session-dir'));
 const native=SessionManager.create(output,captured.argv[captured.argv.indexOf('--session-dir')+1]);
@@ -445,7 +445,7 @@ console.log(JSON.stringify({session_id:id,model:${JSON.stringify(model)},extensi
     env: { PATH: process.env.PATH, HOME: home, TMPDIR: reviewHostTemporaryDirectory(output) } });
   expect(result.status, result.stderr).toBe(0);
   const observed = JSON.parse(result.stdout);
-  expect(observed.extension_ready).toBe(true); expect(observed.model).toBe('magpie/codex/gpt-6.2-astra'); expect(observed.session_id).toBeTruthy(); expect(observed.resumed).toBe(true);
+  expect(observed.extension_ready).toBe(true); expect(observed.model).toBe('magpie/codex/gpt-6.2-sol'); expect(observed.session_id).toBeTruthy(); expect(observed.resumed).toBe(true);
   const captures = readFileSync(capture, 'utf8').trim().split('\n').map(line => JSON.parse(line));
   const run = captures.find(row => row.argv.includes('--mode'));
   for (const flag of ['--no-extensions', '--no-skills', '--no-context-files', '--no-prompt-templates', '--no-mcp', '--no-approve', '--offline']) expect(run.argv).toContain(flag);
@@ -468,7 +468,7 @@ test('Pi review options run the magpie model in the isolated directory; an unobs
   expect(() => reviewSessionOptions('pi', '/fixture')).toThrow('review_runtime_home_required');
   const options = reviewSessionOptions('pi', '/fixture', '/fixture/.pi-agent');
   expect(options.env).toEqual({ PI_CODING_AGENT_DIR: '/fixture/.pi-agent', OAR_PI_AGENT_DIR: '/fixture/.pi-agent' });
-  expect(options.model).toBe('magpie/codex/gpt-6.2-astra'); expect(options.effort).toBeUndefined();
+  expect(options.model).toBe('magpie/codex/gpt-6.2-sol'); expect(options.effort).toBeUndefined();
   const identity = { request_id: 'fixture', context_sha256: 'sha256:' + 'a'.repeat(64), subject_sha256: 'sha256:' + 'b'.repeat(64),
     actual_harness: 'pi' as const, actual_role: 'deep-reasoner', actual_model: 'fixture-provider/fixture-actual' };
   const result = { ...identity, verdict: 'PASS' as const, summary: '[fixture opinion]', findings: [] };
@@ -647,7 +647,7 @@ test.each(['codex', 'pi'] as const)('a %s review keeps its round-1 model after t
   expect(unpinned).toContain(`Run rh review cancel --repository-id '${f.options.authority.repository_id}' --issue-id '${f.options.authority.issue_id}' --campaign-id '${f.options.authority.campaign_id}'`);
   expect(unpinned).toContain('a restart needs a new campaign and grant: run rh review admit --request <file>');
   // A new review pins the current default.
-  expect(session.review_model).toEqual({ model: 'codex/gpt-6.2-astra', effort: 'high' });
+  expect(session.review_model).toEqual({ model: 'codex/gpt-6.2-sol', effort: 'high' });
 }, 60_000);
 
 test.each(['codex', 'pi'] as const)('a %s review dispatches round 2 on its pin and refuses a configuration that leaves it', async harness => {

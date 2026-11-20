@@ -223,6 +223,14 @@ describe.skipIf(process.platform === "win32")("agy advisor seat", () => {
         "command(gh issue list)",
         "command(gh run view)",
         "command(gh run list)",
+        "command(rh board --parent)",
+        "command(rh board attention --parent)",
+        "command(rh board parents)",
+        "command(rh board cluster)",
+        "command(rh board seats)",
+        "command(rh board retro)",
+        "command(rh quota)",
+        "command(rh seats pool)",
         "command(rg)",
         "command(ls)",
         "command(cat)"
@@ -242,6 +250,9 @@ describe.skipIf(process.platform === "win32")("agy advisor seat", () => {
         "command(git push)"
       ]
     } };
+    for (const mutating of ["rh board dispatch", "rh board review", "rh board merge", "rh board closeout", "rh board post", "rh board migrate-dependencies", "rh seats launch", "rh seats consult", "rh seats council"]) {
+      expect(settings.permissions.allow).not.toContain(`command(${mutating})`);
+    }
     const executable = [f.agy, "--mode", "accept-edits", "--model", "gemini-4-neon-high", "--add-dir", directory,
       "--agent", "rh-advisor", "--settings", JSON.stringify(settings)];
     expect(agent(labeled)).toEqual([...UNSET_SEAT, "REPO_HARNESS_SEAT=advisor", "REPO_HARNESS_SEAT_REPOSITORY=1186405141",

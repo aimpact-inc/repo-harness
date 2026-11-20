@@ -1,4 +1,5 @@
 import { AGY_QUOTA_ACCOUNTS, weeklyRemainingPercent, type QuotaAccount, type QuotaAccountReport, type QuotaState } from './quota';
+import { catalogSeatAccount } from './model-catalog';
 import { SHIPPED_MODEL_IDS } from './recommended-models';
 import { PI_AGY_MODEL_PREFIX, PI_CODEX_MODEL_PREFIX, PI_NEON_MODEL, ROUTING_CLASSES, SEAT_IDS, isNeonSeat, isPiCodexSeat, isPlannerSeat, isReviewSeat, unavailablePiSeat, type CodexCreditMode, type RoutingClass, type SeatConfigV1, type SeatId, type SeatRoutingV1, type SeatsConfigV1 } from './seats-settings';
 
@@ -55,13 +56,7 @@ const CONTROL_MODELS = {
 } as const;
 
 export function seatAccount(seat: Pick<SeatConfigV1, 'runtime' | 'model'>): QuotaAccount | null {
-  if (seat.runtime === 'claude') return 'claude';
-  if (seat.runtime === 'codex' || isPiCodexSeat(seat)) return 'chatgpt';
-  if (seat.runtime === 'agy' && seat.model?.startsWith('gemini-')) return 'agy_gemini';
-  if (seat.runtime === 'pi' && seat.model?.startsWith(PI_AGY_MODEL_PREFIX)) {
-    return seat.model.startsWith(`${PI_AGY_MODEL_PREFIX}gemini-`) ? 'agy_gemini' : 'agy_other';
-  }
-  return null;
+  return catalogSeatAccount(seat);
 }
 
 function isAgyAccount(account: QuotaAccount | null): boolean {

@@ -12,7 +12,9 @@ import {
   formatQuotaReport,
   type QuotaReport,
 } from '../../src/core/board/quota';
-import { effectiveSeatConfig, formatSeatModes, formatSeatRoutes, seatAccountQuotas, selectSeatRoute } from '../../src/core/board/seat-routing';
+import { effectiveSeatConfig, formatSeatModes, formatSeatRoutes, seatAccount, seatAccountQuotas, selectSeatRoute } from '../../src/core/board/seat-routing';
+import { LOGICAL_MODEL_IDS, MODEL_CATALOG, catalogEntry, isCatalogModelPermittedOnSeat, resolveCatalogRoute } from '../../src/core/board/model-catalog';
+import { SHIPPED_MODEL_IDS } from '../../src/core/board/recommended-models';
 import { decodeSeatPool, seatRuntimeBlock } from '../../src/core/board/seat-pool';
 import { DEFAULT_SEATS_CONFIG, type CodexCreditMode, type SeatConfigV1 } from '../../src/core/board/seats-settings';
 
@@ -166,6 +168,23 @@ describe('seat quota routing', () => {
     expect(effectiveSeatConfig('advisor', seats, quota)).toEqual({ ...advisor, model: `magpie/agy-cli/gemini-4-${model}` });
     const other = { ...advisor, model: 'magpie/codex/gpt-6-astra' };
     expect(effectiveSeatConfig('advisor', { ...seats, advisor: other }, quota)).toEqual(other);
+    const nativeCarbon = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: 'agy' as const, model: 'gemini-4-carbon-high', effort: null };
+    expect(effectiveSeatConfig('advisor', { ...seats, advisor: nativeCarbon }, quota)).toEqual(nativeCarbon);
+  });
+
+  test('model-catalog maps logical lines to Magpie/Native routes, quota accounts, and permitted planes', () => {
+    expect(LOGICAL_MODEL_IDS).toContain('hydrogen');
+    expect(resolveCatalogRoute('hydrogen', 'native')).toEqual({ runtime: 'agy', model: 'gemini-4-hydrogen', effort: null });
+    expect(resolveCatalogRoute('hydrogen', 'magpie')).toEqual({ runtime: 'pi', model: 'magpie/agy-cli/gemini-4-hydrogen', effort: 'high' });
+    expect(catalogEntry('sol', 'magpie')).toEqual({ runtime: 'pi', model: 'magpie/codex/gpt-6.2-sol' });
+    expect(seatAccount({ runtime: 'agy', model: 'gemini-4-hydrogen' })).toBe('agy_gemini');
+    expect(seatAccount({ runtime: 'pi', model: 'magpie/agy-cli/gemini-4-hydrogen' })).toBe('agy_gemini');
+    expect(SHIPPED_MODEL_IDS.has('gemini-4-hydrogen')).toBe(true);
+    expect(SHIPPED_MODEL_IDS.has('magpie/agy-cli/gemini-4-hydrogen')).toBe(true);
+    expect(isCatalogModelPermittedOnSeat('worker', catalogEntry('astra', 'native'))).toBe(false);
+    expect(isCatalogModelPermittedOnSeat('planner', catalogEntry('astra', 'native'))).toBe(true);
+    expect(isCatalogModelPermittedOnSeat('worker-light', catalogEntry('hydrogen', 'native'))).toBe(true);
+    expect(MODEL_CATALOG.astra.planes).toEqual(['council']);
   });
 
   test('unknown weekly quota has no derived mode; short-window exhaustion still stops Claude', () => {
@@ -605,7 +624,10 @@ describe('rh seats pool', () => {
     expect(pool.runtimes.find(entry => entry.id === 'pi')).toEqual({ id: 'pi', installation: 'available', sign_in: 'not_checked', models: 'not_checked' });
     expect(pool.seats.find(row => row.seat === 'worker')?.pool).toMatchObject([
       { model: 'magpie/agy-cli/gemini-4-neon', account: 'agy_gemini', reason: 'pi on PATH; provider not checked' },
+      { model: 'magpie/codex/gpt-6.2-sol', account: 'chatgpt', reason: 'pi on PATH; provider not checked' },
+      { model: 'magpie/codex/gpt-6.1-terra', account: 'chatgpt', reason: 'pi on PATH; provider not checked' },
       { model: 'zai/glm-5.3-flash', reason: 'pi on PATH; provider not checked' },
+      { model: 'magpie/agy-cli/gemini-4-hydrogen', account: 'agy_gemini', reason: 'pi on PATH; provider not checked' },
     ]);
     expect(pool.seats.find(row => row.seat === 'worker')?.excluded).toContainEqual(expect.objectContaining({ model: 'magpie/group/deepseek-v4.1-flash', status: 'provider_unavailable' }));
     expect(pool.seats.find(row => row.seat === 'advisor')?.pool.map(entry => [entry.model, entry.account])).toEqual([
@@ -665,8 +687,10 @@ ${branch === 'timeout' ? 'setInterval(() => {}, 1000);' : branch === 'signed out
       ['claude', 'opus', 'claude'], ['codex', 'gpt-6.2-sol', 'chatgpt'],
     ]);
     expect(row.excluded.map(entry => [entry.model, entry.status])).toEqual([
-      ['magpie/agy-cli/gemini-4-neon', 'not_installed'], ['sonnet', 'disabled'], ['gpt-6.1-terra', 'not_listed'],
+      ['magpie/agy-cli/gemini-4-neon', 'not_installed'], ['magpie/codex/gpt-6.2-sol', 'not_installed'],
+      ['magpie/codex/gpt-6.1-terra', 'not_installed'], ['gpt-6.1-terra', 'not_listed'],
       ['zai/glm-5.3-flash', 'not_installed'], ['magpie/group/deepseek-v4.1-flash', 'not_installed'],
+      ['magpie/agy-cli/gemini-4-hydrogen', 'not_installed'], ['gemini-4-hydrogen', 'not_installed'],
     ]);
     expect(row.configured).toEqual({ field: 'seats.worker.model', table_entry: false, in_pool: false, reason: 'outside_recommendations' });
     const calls = readFileSync(f.env.SEAT_POOL_LOG, 'utf8').trim().split('\n').map(line => JSON.parse(line));
@@ -745,7 +769,7 @@ describe('rh seats launch availability', () => {
     const refused = launchSeat('worker', f.env);
     expect([refused.status, refused.stdout, JSON.parse(refused.stderr)]).toEqual([1, '', {
       ok: false, error: 'seat_provider_unavailable',
-      message: expect.stringMatching(/The worker seat cannot launch\. codex: Runtime not found on PATH\. See seats\.worker\.model\..*Available pool for worker: pi magpie\/agy-cli\/gemini-4-neon, pi zai\/glm-5\.3-flash/u),
+      message: expect.stringMatching(/The worker seat cannot launch\. codex: Runtime not found on PATH\. See seats\.worker\.model\..*Available pool for worker: pi magpie\/agy-cli\/gemini-4-neon, pi magpie\/codex\/gpt-6\.2-sol, pi magpie\/codex\/gpt-6\.1-terra, pi zai\/glm-5\.3-flash, pi magpie\/group\/deepseek-v4\.1-flash, pi magpie\/agy-cli\/gemini-4-hydrogen/u),
     }]);
     expect(existsSync(tab)).toBe(false);
     expect(existsSync(f.env.SEAT_POOL_LOG)).toBe(false);
