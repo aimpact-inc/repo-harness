@@ -549,7 +549,7 @@ cleanup_worktree() {
   fi
 
   local target_worktree current_root branch_name worktree_path metadata_file
-  local worktree_status repair_needed=0 merge_mode=""
+  local worktree_status merge_mode=""
   metadata_file=".ai/harness/worktrees/${slug}.json"
   branch_name="$(read_start_branch "$metadata_file" "$slug")" || exit $?
   target_worktree="$(find_worktree_for_branch "$target_branch" || true)"
@@ -595,36 +595,28 @@ cleanup_worktree() {
 
   if [[ -n "$worktree_path" ]]; then
     if ! worktree_status="$(worktree_status_for_cleanup "$worktree_path" "$((1 - dry_run))")"; then
-      if [[ "$dry_run" -eq 1 ]]; then
-        repair_needed=1
-      else
-        echo "contract-worktree: linked worktree status unavailable after repair attempt, refusing cleanup: $worktree_path" >&2
-        echo "contract-worktree: run git worktree repair '$worktree_path' and retry, or inspect the directory manually before removing it" >&2
-        exit 1
-      fi
+      echo "contract-worktree: linked worktree status unavailable, refusing cleanup: $worktree_path" >&2
+      echo "contract-worktree: run git worktree repair '$worktree_path' and retry, or inspect the directory manually before removing it" >&2
+      exit 1
     fi
-    if [[ "$repair_needed" -eq 0 ]]; then
-      local lock_path
-      lock_path="$(git -C "$worktree_path" rev-parse --git-path locked)"
-      if [[ -e "$lock_path" ]]; then
-        echo "contract-worktree: linked worktree is locked, refusing cleanup: $worktree_path" >&2
-        exit 1
-      fi
+    local lock_path
+    lock_path="$(git -C "$worktree_path" rev-parse --git-path locked)"
+    if [[ -e "$lock_path" ]]; then
+      echo "contract-worktree: linked worktree is locked, refusing cleanup: $worktree_path" >&2
+      exit 1
     fi
     if [[ -n "$worktree_status" ]]; then
       echo "contract-worktree: linked worktree is dirty, refusing cleanup: $worktree_path" >&2
       echo "contract-worktree: preserve the dirty worktree and ask the user before any deletion" >&2
       exit 1
     fi
+    run_contract_runtime assert-ignored-cleanup-safe --worktree "$worktree_path"
   else
     echo "[ContractWorktree] Worktree already absent, skipping: $branch_name"
   fi
 
   if [[ "$dry_run" -eq 1 ]]; then
     echo "[ContractWorktree] dry-run cleanup slug=$slug target=$target_branch"
-    if [[ "$repair_needed" -eq 1 ]]; then
-      echo "[ContractWorktree] would repair stale worktree gitdir before dirty check: $worktree_path"
-    fi
     echo "[ContractWorktree] would remove worktree: ${worktree_path:-"(absent)"}"
     echo "[ContractWorktree] would delete branch: $branch_name"
     echo "[ContractWorktree] would remove metadata: $metadata_file"

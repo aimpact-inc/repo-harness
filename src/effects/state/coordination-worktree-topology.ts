@@ -5,7 +5,7 @@ import { readWorktreeRecord, readWorktreeRecordById, endWorktreeRecord } from '.
 import { randomUUID } from 'crypto';
 import { sha256Hex } from '../../core/evidence/sha256';
 import { execFileSync } from 'child_process';
-import { gitExecFileSync, withoutProviderTokens, withoutRepositorySelectingGitEnv } from '../git/runner';
+import { gitExecFileSync, gitSpawnSync, withoutProviderTokens, withoutRepositorySelectingGitEnv } from '../git/runner';
 import { existsSync, lstatSync, readFileSync, realpathSync, readdirSync, unlinkSync, mkdirSync } from 'fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'path';
 import { publishFileByRename, syncDirectoryDurably } from '../atomic-append';
@@ -52,6 +52,83 @@ function timeout(limits: Limits): number | undefined {
 }
 function git(root: string, args: string[], limits: Limits = {}): string {
   return gitExecFileSync(args, { cwd: root, gitBin: gitBinary(limits), env: withoutRepositorySelectingGitEnv(), encoding: 'utf8', timeout: timeout(limits), stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+}
+
+const BUILD_OUTPUTS = new Set(['node_modules/', 'dist/', 'build/', 'coverage/', '.next/']);
+const CLOSEOUT_CONTAINERS = new Set(['.ai/', '.ai/harness/', '.ai/harness/evidence/',
+  '.ai/harness/evidence/events/', '.ai/harness/evidence/blobs/', '.ai/harness/evidence/runs/']);
+const ACTIVE_WORKTREE_MARKER = '.ai/harness/active-worktree';
+const CODEGRAPH_SOCKET = '.codegraph/daemon.sock';
+const IGNORED_GIT_TIMEOUT_MS = 3_000;
+const IGNORED_REVIEW = 'Inspect with git status --ignored before any explicit cleanup.';
+const CLOSEOUT_RUNTIME_FILES = [
+  /^runs\/(?:hook-events\.jsonl|verification-[^/]*\.json|junit\/[^/]+\.xml|task-agent-outbox\/[^/]+)$/u,
+  /^state\/(?:agent-notice|protected-paths\.json)$/u,
+  /^failures\/latest\.jsonl$/u,
+  /^evidence\/(?:events\/log\.jsonl|blobs\/[0-9a-fA-F]{64}|runs\/[^/]+\.json)$/u,
+];
+const CODEGRAPH_FILE = /^\.codegraph\/(?:\.gitignore|codegraph\.db(?:-wal|-shm|-journal)?|daemon\.(?:pid|log|sock)|writer\.pid)$/u;
+
+function isRealPath(worktree: string, rel: string, kind: 'dir' | 'file'): boolean {
+  const components = rel.split('/');
+  const leaf = components.pop()!;
+  for (const component of components) {
+    worktree = join(worktree, component);
+    if (!lstatSync(worktree).isDirectory()) return false;
+  }
+  const stat = lstatSync(join(worktree, leaf));
+  if (kind === 'dir') return stat.isDirectory();
+  return stat.isFile() || (rel === CODEGRAPH_SOCKET && stat.isSocket());
+}
+
+function isCloseoutOutput(worktree: string, entry: string): boolean {
+  if (entry === ACTIVE_WORKTREE_MARKER) {
+    return isRealPath(worktree, entry, 'file') && readFileSync(join(worktree, entry), 'utf8').trim() === worktree;
+  }
+  const runtime = entry.startsWith('.ai/harness/') ? entry.slice('.ai/harness/'.length) : '';
+  if (entry === '.codegraph/' || /^(?:runs\/(?:junit\/|task-agent-outbox\/)?|state\/|failures\/|checks\/)$/u.test(runtime)) {
+    return isRealPath(worktree, entry.slice(0, -1), 'dir');
+  }
+  return (entry === '.ci-affected-tests.json' || CODEGRAPH_FILE.test(entry) || CLOSEOUT_RUNTIME_FILES.some(pattern => pattern.test(runtime)))
+    && isRealPath(worktree, entry, 'file');
+}
+
+export function inspectIgnoredWorktreeEntries(worktree: string, mode: 'sweep' | 'closeout', limits: Limits = {}): { count: number; blockedPaths: string[] } {
+  const result = gitSpawnSync(['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'], {
+    cwd: worktree, gitBin: gitBinary(limits), env: withoutRepositorySelectingGitEnv(),
+    encoding: 'utf8', timeout: Math.min(timeout(limits) ?? Infinity, IGNORED_GIT_TIMEOUT_MS),
+  });
+  const { stdout } = result;
+  if (result.error || result.status !== 0 || result.stderr || (stdout && !stdout.endsWith('\0'))) {
+    throw new Error(`ignored worktree inventory failed for ${worktree}. ${IGNORED_REVIEW}`);
+  }
+  const entries = stdout ? stdout.slice(0, -1).split('\0') : [];
+  const blocked = new Set<string>();
+  function inspect(entry: string): void {
+    timeout(limits);
+    if (BUILD_OUTPUTS.has(entry) && isRealPath(worktree, entry.slice(0, -1), 'dir')) return;
+    if (mode === 'closeout') {
+      // Git can collapse these parents. Inspect their children against the same allowlist.
+      if (CLOSEOUT_CONTAINERS.has(entry) && isRealPath(worktree, entry.slice(0, -1), 'dir')) {
+        for (const child of readdirSync(join(worktree, entry), { withFileTypes: true })) {
+          inspect(entry + child.name + (child.isDirectory() ? '/' : ''));
+        }
+        return;
+      }
+      if (isCloseoutOutput(worktree, entry)) return;
+    }
+    blocked.add(entry);
+  }
+  for (const entry of entries) inspect(entry);
+  return { count: entries.length, blockedPaths: [...blocked] };
+}
+
+export function assertNoIgnoredCloseoutData(worktree: string, limits: Limits = {}): void {
+  const { blockedPaths } = inspectIgnoredWorktreeEntries(worktree, 'closeout', limits);
+  if (blockedPaths.length === 0) return;
+  const names = blockedPaths.slice(0, 5).map(path => JSON.stringify(path)).join(', ');
+  const overflow = blockedPaths.length > 5 ? ` (+${blockedPaths.length - 5} more)` : '';
+  throw new Error(`cleanup blocked by ignored worktree data: ${names}${overflow}. ${IGNORED_REVIEW}`);
 }
 
 const WORKTREE_TOPOLOGY_LOCK = 'repo-harness/coordination/locks/worktree-topology.lock';
@@ -303,12 +380,12 @@ export function cleanupExactWorktree(root: string, expected: ExactWorktreeCleanu
       assertWorktreeBinding(root, path, expected.branch, limits);
       if (git(path, ['rev-parse', 'HEAD'], limits) !== expected.head_sha) throw new Error('cleanup execution head moved');
       if (git(path, ['status', '--porcelain', '--untracked-files=all'], limits)) throw new Error('cleanup_blocked_dirty_worktree');
+      if (limits.closeout) assertNoIgnoredCloseoutData(path, limits);
     }
     if (limits.closeout && path) {
-      const marker = join(path, '.ai/harness/active-worktree');
+      const marker = join(path, ACTIVE_WORKTREE_MARKER);
       try {
-        const stat = lstatSync(marker);
-        if (stat.isFile() && !stat.isSymbolicLink() && readFileSync(marker, 'utf8').trim() === path) unlinkSync(marker);
+        if (isRealPath(path, ACTIVE_WORKTREE_MARKER, 'file') && readFileSync(marker, 'utf8').trim() === path) unlinkSync(marker);
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       assertNoOwner(root, path, limits);
     }
@@ -620,10 +697,9 @@ export function inspectWorktree(root: string, path: string, callerCwd: string | 
         // Rename records have a second NUL field containing the old name.
         result.dirty_files = status.split('\0').filter(line => /^[12u?] /u.test(line)).length;
         if (result.dirty_files > 0) reasons.push('dirty');
-        const ignored = git(path, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'], limits).split('\0').filter(Boolean);
-        result.ignored_entries = ignored.length;
-        // These top-level outputs are reproducible. Everything else needs owner approval.
-        if (ignored.some(file => !/^(?:node_modules|dist|build|coverage|\.next)\//u.test(file))) reasons.push('ignored_data');
+        const ignored = inspectIgnoredWorktreeEntries(path, 'sweep', limits);
+        result.ignored_entries = ignored.count;
+        if (ignored.blockedPaths.length > 0) reasons.push('ignored_data');
         result.unpushed_commits = Number(git(path, ['rev-list', '--count', 'HEAD', '--not', '--remotes'], limits));
         if (!Number.isSafeInteger(result.unpushed_commits)) throw new Error('invalid count');
         if (result.unpushed_commits > 0) reasons.push('unpushed');
