@@ -366,6 +366,31 @@ function sharedTargetFiles(members: readonly ClassifiedIssue[]): string[] {
   return [...counts.entries()].filter(([, count]) => count >= 2).map(([file]) => file).sort();
 }
 
+function transitiveAncestors(
+  ordered: readonly number[],
+  byIssue: ReadonlyMap<number, ClassifiedIssue>,
+): ReadonlyMap<number, ReadonlySet<number>> {
+  const inBucket = new Set(ordered);
+  const direct = new Map<number, number[]>(ordered.map(num => [
+    num,
+    byIssue.get(num)!.blocked_by.filter(blocker => inBucket.has(blocker)),
+  ]));
+  const ancestors = new Map<number, ReadonlySet<number>>();
+  // `ordered` is already in topological order (blockers before dependents).
+  for (const num of ordered) {
+    const reach = new Set<number>();
+    for (const blocker of direct.get(num)!) {
+      reach.add(blocker);
+      const upper = ancestors.get(blocker);
+      if (upper !== undefined) {
+        for (const ancestor of upper) reach.add(ancestor);
+      }
+    }
+    ancestors.set(num, reach);
+  }
+  return ancestors;
+}
+
 function overlapComponents(
   ordered: readonly number[],
   byIssue: ReadonlyMap<number, ClassifiedIssue>,
@@ -385,6 +410,35 @@ function overlapComponents(
     for (const a of group) {
       for (const b of group) {
         if (a !== b) adj.get(a)!.add(b);
+      }
+    }
+  }
+  // Remove overlap edges between u and w if an intermediate v along a directed path u -> ... -> w
+  // does not share a file with {u, w}; contracting {u, w} would otherwise create a unit cycle with {v}.
+  const ancestors = transitiveAncestors(ordered, byIssue);
+  const filesOf = (num: number): ReadonlySet<string> => new Set(byIssue.get(num)!.resolved_target_files);
+  const sharesFile = (a: number, b: number): boolean => {
+    const bFiles = filesOf(b);
+    for (const file of filesOf(a)) {
+      if (bFiles.has(file)) return true;
+    }
+    return false;
+  };
+  for (const a of ordered) {
+    for (const b of [...adj.get(a)!]) {
+      const first = ancestors.get(b)!.has(a) ? a : ancestors.get(a)!.has(b) ? b : null;
+      if (first === null) continue;
+      const later = first === a ? b : a;
+      const blocked = ordered.some(mid =>
+        mid !== first
+        && mid !== later
+        && ancestors.get(later)!.has(mid)
+        && ancestors.get(mid)!.has(first)
+        && !sharesFile(first, mid)
+        && !sharesFile(later, mid));
+      if (blocked) {
+        adj.get(a)!.delete(b);
+        adj.get(b)!.delete(a);
       }
     }
   }

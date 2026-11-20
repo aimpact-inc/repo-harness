@@ -18,6 +18,8 @@ import { collectBoardCluster } from '../../effects/board/cluster';
 import { BoardSeatsError, collectBoardSeats } from '../../effects/board/seats';
 import { gitHubPostPorts, runBoardPost, type BoardPostPorts } from '../../effects/board/post';
 import { BoardPostFieldsError, BoardPostRoundtripError, BoardPostSupersedesError, BOARD_POST_KINDS } from '../../core/board/post';
+import { TriageApplyValidationError } from '../../core/board/triage-apply';
+import { gitHubTriageApplyPorts, readTriageManifestFile, runTriageApply, type TriageApplyPorts, type TriageApplyResultV1 } from '../../effects/board/triage-apply';
 import { DispatchError, type DispatchPlanV1 } from '../../core/board/dispatch';
 import { runDispatch } from '../../effects/board/dispatch';
 import { runReview, type ReviewObserver, type ReviewResultV1 } from '../../effects/board/review';
@@ -64,6 +66,11 @@ interface MigrateDependenciesOptions extends BoardOptions {
 interface PostOptions extends BoardOptions {
   readonly target: string;
   readonly fieldsFile: string;
+  readonly dryRun?: boolean;
+}
+
+interface TriageApplyOptions extends BoardOptions {
+  readonly manifest: string;
   readonly dryRun?: boolean;
 }
 
@@ -299,8 +306,23 @@ function collectRetro(options: BoardOptions & { readonly since?: string }, env: 
  * `postPorts` is the seam of `board post`: the composition root leaves it out, so the command reads and posts through `gh`, and a test
  * passes its own ports to prove that `--dry-run` writes nothing.
  */
+function triageApplyText(result: TriageApplyResultV1): string {
+  const lines = result.operations.map((op) => {
+    switch (op.kind) {
+      case 'add_labels': return `add_labels #${op.issue}: ${op.labels.join(', ')}`;
+      case 'add_sub_issue': return `add_sub_issue #${op.parent} <- #${op.issue}`;
+      case 'close_duplicate': return `close_duplicate #${op.issue} -> #${op.canonical}`;
+      case 'post_plan': return result.dry_run
+        ? `post_plan #${op.parent}: dry-run (${op.body.split('\n').length} lines)`
+        : `post_plan #${op.parent}: ${result.plan_comment_url}`;
+    }
+  });
+  return `${lines.join('\n')}\n`;
+}
+
 export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: AttentionHostPortsV1,
-  postPorts: (repo_root: string) => BoardPostPorts = gitHubPostPorts): Command {
+  postPorts: (repo_root: string) => BoardPostPorts = gitHubPostPorts,
+  triagePorts: (repo_root: string) => TriageApplyPorts = repoRoot => gitHubTriageApplyPorts(repoRoot, postPorts)): Command {
   const board = new Command('board')
     .description('Read a parent issue board, or list the parents and seats of this repository')
     .option('--parent <number>', 'Parent issue number')
@@ -363,6 +385,30 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
       if (parent !== null && !Number.isSafeInteger(parent)) throw new BoardCollectError('--parent must be an issue number');
       process.stdout.write(`${JSON.stringify(collectBoardCluster({ repo_root: process.cwd(), parent, max_size, include_loose: options.includeLoose === true }))}\n`);
     })(command.optsWithGlobals<ClusterOptions>()));
+  board.command('triage-apply')
+    .description('Validate a triage bundle manifest against ADR-0006 §6 split red lines and apply labels, sub-issue links, duplicate closures, and the plan comment')
+    .requiredOption('--manifest <path>', 'Path to the repo-harness.triage-manifest/v1 JSON file')
+    .option('--dry-run', 'Validate manifest and print the planned operations without writing to GitHub')
+    .action((_options: TriageApplyOptions, command: Command) => {
+      const options = command.optsWithGlobals<TriageApplyOptions>();
+      try {
+        const repo_root = process.cwd();
+        const manifest = readTriageManifestFile(options.manifest);
+        const result = runTriageApply({
+          repo_root,
+          manifest,
+          dry_run: options.dryRun === true,
+          ...(options.dryRun === true ? {} : { ports: triagePorts(repo_root) }),
+        });
+        process.stdout.write(options.json === true ? `${JSON.stringify(result)}\n` : triageApplyText(result));
+      } catch (error) {
+        if (!(error instanceof TriageApplyValidationError || error instanceof BoardPostFieldsError || error instanceof BoardPostRoundtripError
+          || error instanceof BoardPostSupersedesError || error instanceof BoardCollectError)) throw error;
+        const code = error instanceof BoardCollectError ? null : error.code;
+        process.stderr.write(`${JSON.stringify({ ok: false, error: code ?? error.name, message: code === null ? error.message : `${code}: ${error.message}` })}\n`);
+        process.exitCode = error instanceof TriageApplyValidationError || error instanceof BoardPostFieldsError || error instanceof BoardPostSupersedesError ? 2 : 1;
+      }
+    });
   board.command('dispatch')
     .description('Start a seat for each ready unit of the plan (takes --parent): worktree, claim comment on each open issue of the unit and worker tab, on the seat that the quota route names')
     .requiredOption('--space <id>', 'Herdr space that receives the worker tabs')

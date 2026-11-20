@@ -517,6 +517,7 @@ test('replay: the recorded #1474 reads project to a board, and its findings come
     ['R3', 'tier_label_missing', '#1499 #1476'],
     ['R4', 'plan_unavailable', null],
     ['R7', 'plan_unavailable', null],
+    ['R8', 'plan_unavailable', null],
   ]);
 });
 
@@ -969,7 +970,7 @@ test('each attention finding names its priority, and a delivery sorts the entrie
   expect(BOARD_RULE_PRIORITY).toEqual({
     A1: 'P2', A3: 'P0', A4: 'P1', A5: 'P1', A6: 'P1', A7: 'P2', A8: 'P3', A9: 'P3', A10: 'P2', A11: 'P2',
     A12: 'P1', A13: 'P1', A14: 'P2', A15: 'P2', A16: 'P1', A17: 'P1', A18: 'P2', A19: 'P1', A20: 'P2', A21: 'P1', A22: 'P1',
-    R1: 'P2', R2: 'P2', R3: 'P1', R4: 'P2', R5: 'P1', R7: 'P2',
+    R1: 'P2', R2: 'P2', R3: 'P1', R4: 'P2', R5: 'P1', R7: 'P2', R8: 'P2',
   });
   expect(attention.findings.map(finding => [finding.rule, finding.priority])).toContainEqual(['A3', 'P0']);
   expect(attention.findings.map(finding => [finding.rule, finding.priority])).toContainEqual(['A11', 'P2']);
@@ -2704,6 +2705,44 @@ describe('rule R7', () => {
       pull_requests: board([1477]).pull_requests.map(pr => (pr.number === 1494 ? { ...pr, refs: [...pr.refs, 1476] } : pr)) };
     expect(boardMergeDecisions(refsClosed).find(decision => decision.pr === 1494)).toMatchObject({ reason: 'merge_order', detail: 'earlier in merge_order and not closed: #1475' });
     expect(r7(refsClosed)).toEqual([]);
+  });
+
+  test('R8 fires with route advisor for >= 2 unblocked unclaimed single-issue units sharing module and tier bucket', () => {
+    const baseItem = recorded.items.find(item => item.number === 1477)!;
+    const item = (number: number, labels: readonly string[], overrides: Partial<BoardItemV1> = {}): BoardItemV1 => ({
+      ...baseItem,
+      number,
+      state: 'open',
+      labels,
+      tier: labels.includes('tier:high') ? 'high' : labels.includes('tier:low') ? 'low' : 'medium',
+      claim: { status: 'none' },
+      blocked_by: [],
+      merge_hold: { status: 'none' },
+      ...overrides,
+    });
+    const r8Board: BoardV1 = {
+      ...recorded,
+      plan: {
+        status: 'observed',
+        comment_url: 'https://github.com/plan',
+        created_at: at,
+        revision: 1,
+        block: { protocol: 3, kind: 'repo-harness.plan', merge_order: [1477, 1478, [1481, 1482], 1483, 1475, 1476], holds: [], seat_limits: { worker: 3 } },
+      },
+      items: [
+        item(1477, ['module:organization/board', 'tier:low']),
+        item(1478, ['module:organization/board', 'tier:medium']),
+        item(1481, ['module:organization/board', 'tier:medium']),
+        item(1482, ['module:organization/board', 'tier:medium']),
+        // Claimed, externally blocked, and high-tier singletons must stay excluded from the standard bundle finding.
+        item(1483, ['module:organization/board', 'tier:medium'], { claim: { status: 'active', url: 'u', created_at: at, role: 'writer', bundle: null, branch: null } }),
+        item(1475, ['module:organization/board', 'tier:medium'], { blocked_by: [{ number: 999, state: 'open' }] }),
+        item(1476, ['module:organization/board', 'tier:high']),
+      ],
+    };
+    const r8Findings = evaluateBoardAttention(r8Board).findings.filter(finding => finding.rule === 'R8');
+    expect(r8Findings).toHaveLength(1);
+    expect(r8Findings[0]).toMatchObject({ rule: 'R8', priority: 'P2', route: 'advisor', issues: [1477, 1478] });
   });
 });
 
