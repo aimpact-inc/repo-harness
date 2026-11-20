@@ -56,22 +56,29 @@ function git(root: string, args: string[], limits: Limits = {}): string {
 }
 
 const BUILD_OUTPUTS = new Set(['node_modules/', 'dist/', 'build/', 'coverage/', '.next/']);
-const CLOSEOUT_CONTAINERS = new Set(['.ai/', '.ai/harness/', '.ai/harness/evidence/',
+const CLOSEOUT_CONTAINERS = new Set(['.codegraph/', '.ai/', '.ai/harness/', '.ai/harness/evidence/',
   '.ai/harness/evidence/events/', '.ai/harness/evidence/blobs/', '.ai/harness/evidence/runs/',
+  '.ai/harness/evidence/checkpoints/',
+  // Publication leaves an empty staging directory. Any child still blocks closeout.
+  '.ai/harness/evidence/checkpoints/.staging/',
   '.ai/harness/state/', '.ai/harness/failures/',
-  '.ai/harness/checks/', '.ai/harness/runs/', '.ai/harness/runs/junit/', '.ai/harness/runs/task-agent-outbox/']);
+  '.ai/harness/checks/', '.ai/harness/runs/', '.ai/harness/runs/junit/', '.ai/harness/runs/task-agent-outbox/',
+  '.ai/harness/runs/hook-events.jsonl.archive/']);
 const CLOSEOUT_RUN_CONTAINER = /^\.ai\/harness\/runs\/(?:junit\/\d{8}T\d{6}Z-\d+|task-agent-outbox\/[a-f0-9]{64})\/$/u;
+const CLOSEOUT_CHECKPOINT_CONTAINER = /^\.ai\/harness\/evidence\/checkpoints\/chk-[0-9a-f]{64}\/$/u;
 const ACTIVE_WORKTREE_MARKER = '.ai/harness/active-worktree';
 const CODEGRAPH_SOCKET = '.codegraph/daemon.sock';
 const IGNORED_GIT_TIMEOUT_MS = 3_000;
 const IGNORED_REVIEW = 'Inspect with git status --ignored before any explicit cleanup.';
 const CLOSEOUT_RUNTIME_FILES = [
   /^runs\/(?:hook-events\.jsonl|verification-[A-Za-z0-9][A-Za-z0-9._-]*\.(?:json|log))$/u,
+  /^runs\/hook-events\.jsonl\.archive\/\d{13}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/u,
   /^runs\/junit\/(?:\d{8}T\d{6}Z-\d+\/)?[^/]+\.xml$/u,
   /^runs\/task-agent-outbox\/(?:[a-f0-9]{64}\/)?(?:result-[1-9]\d*\.json|context-[1-9]\d*\.txt)$/u,
   /^state\/(?:agent-notice(?:-status|-archimap)?|circuit-breaker\.json|protected-paths\.json)$/u,
   /^failures\/latest\.jsonl$/u,
   /^evidence\/(?:events\/log\.jsonl|blobs\/[0-9a-fA-F]{64}|runs\/[A-Za-z0-9][A-Za-z0-9._-]*\.json)$/u,
+  /^evidence\/checkpoints\/(?:last-published\.json|chk-[0-9a-f]{64}\/checkpoint\.(?:json|md))$/u,
 ];
 const CODEGRAPH_FILE = /^\.codegraph\/(?:\.gitignore|codegraph\.db(?:-wal|-shm|-journal)?|daemon\.(?:pid|log|sock)|writer\.pid)$/u;
 
@@ -94,9 +101,6 @@ function isCloseoutOutput(worktree: string, entry: string): boolean {
   const runtime = entry.startsWith('.ai/harness/') ? entry.slice('.ai/harness/'.length) : '';
   // Wildcard output names never authorize hidden local files.
   if (runtime.split('/').some(component => component.startsWith('.'))) return false;
-  if (entry === '.codegraph/') {
-    return isRealPath(worktree, entry.slice(0, -1), 'dir');
-  }
   return (entry === '.ci-affected-tests.json' || entry === CHANGE_ASSESSMENT_EVIDENCE_PATH
     || CODEGRAPH_FILE.test(entry) || CLOSEOUT_RUNTIME_FILES.some(pattern => pattern.test(runtime)))
     && isRealPath(worktree, entry, 'file');
@@ -118,7 +122,8 @@ export function inspectIgnoredWorktreeEntries(worktree: string, mode: 'sweep' | 
     if (BUILD_OUTPUTS.has(entry) && isRealPath(worktree, entry.slice(0, -1), 'dir')) return;
     if (mode === 'closeout') {
       // Git can collapse these parents. Inspect their children against the same allowlist.
-      if ((CLOSEOUT_CONTAINERS.has(entry) || CLOSEOUT_RUN_CONTAINER.test(entry)) && isRealPath(worktree, entry.slice(0, -1), 'dir')) {
+      const container = CLOSEOUT_CONTAINERS.has(entry) || CLOSEOUT_RUN_CONTAINER.test(entry) || CLOSEOUT_CHECKPOINT_CONTAINER.test(entry);
+      if (container && isRealPath(worktree, entry.slice(0, -1), 'dir')) {
         for (const child of readdirSync(join(worktree, entry), { withFileTypes: true })) {
           inspect(entry + child.name + (child.isDirectory() ? '/' : ''));
         }

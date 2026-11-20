@@ -16,6 +16,9 @@ import {
 import { dirname, join } from "path";
 import { tmpdir } from "os";
 import { defaultWorktreeTemplate } from "../src/core/worktree-location.mjs";
+import { publishCheckpointFromLedger } from "../src/effects/evidence/checkpoint-store";
+import { LEDGER_EPOCH_START_SHA } from "../src/effects/evidence/epoch";
+import { appendGenesisRecord } from "../src/effects/evidence/event-log";
 
 import { sweepManagedWorktrees } from '../src/effects/state/coordination-worktree-topology';
 import { defaultPolicy } from "../src/effects/adoption/standard-plan";
@@ -183,6 +186,85 @@ describe("contract-worktree helper integration", () => {
       expect(existsSync(f.worktree)).toBe(false);
       expect(existsSync(f.metadata)).toBe(false);
       expect(f.branchStatus()).not.toBe(0);
+    });
+  });
+
+  const rotatedHookSegment = "1795132800000-12345678-1234-4321-9876-123456789abc.jsonl";
+
+  test.each([
+    { container: ".codegraph", outputs: [".gitignore", "codegraph.db"], label: "CodeGraph indexes" },
+    { container: ".ai/harness/runs/hook-events.jsonl.archive", outputs: [rotatedHookSegment], label: "rotated hook telemetry" },
+  ])("slug cleanup accepts generated $label", ({ container, outputs }) => {
+    withIgnoredCleanupFixture(`.ai/harness/active-worktree\n${container}/`, f => {
+      writeIgnoredFiles(f.worktree, outputs.map(path => `${container}/${path}`));
+      const preview = f.cli(...f.cleanup, "--dry-run");
+      expect(preview.status, preview.stdout + preview.stderr).toBe(0);
+      f.retained();
+      const removal = f.cli(...f.cleanup);
+      expect(removal.status, removal.stdout + removal.stderr).toBe(0);
+      expect(existsSync(f.worktree)).toBe(false);
+    });
+  });
+
+  test("slug cleanup accepts a published checkpoint and empty staging directory", () => {
+    withIgnoredCleanupFixture(".ai/harness/active-worktree\n.ai/harness/evidence/", f => {
+      appendGenesisRecord(f.worktree, LEDGER_EPOCH_START_SHA, { worktreeId: "fixture" });
+      const checkpoint = publishCheckpointFromLedger(f.worktree, () => new Date("2026-11-20T00:00:00Z"));
+      expect(checkpoint.status).toBe("published");
+      expect(readdirSync(join(f.worktree, ".ai/harness/evidence/checkpoints/.staging"))).toEqual([]);
+      const preview = f.cli(...f.cleanup, "--dry-run");
+      expect(preview.status, preview.stdout + preview.stderr).toBe(0);
+      f.retained();
+      const removal = f.cli(...f.cleanup);
+      expect(removal.status, removal.stdout + removal.stderr).toBe(0);
+      expect(existsSync(f.worktree)).toBe(false);
+    });
+  });
+
+  const checkpointDir = `chk-${"b".repeat(64)}`;
+  test.each([
+    { container: ".codegraph", generated: ["codegraph.db"], local: ["notes.local", ".env", "backup/copy"],
+      blocked: ["notes.local", ".env", "backup/"] },
+    { container: ".ai/harness/evidence/checkpoints", generated: ["last-published.json", `${checkpointDir}/checkpoint.json`],
+      local: ["notes.local", `${checkpointDir}/notes.local`, "chk-invalid/checkpoint.json", ".staging/stage-leftover/notes.local"],
+      blocked: ["notes.local", `${checkpointDir}/notes.local`, "chk-invalid/", ".staging/stage-leftover/"] },
+    { container: ".ai/harness/runs/hook-events.jsonl.archive", generated: [rotatedHookSegment],
+      local: ["custom.jsonl"], blocked: ["custom.jsonl"] },
+  ])("closeout retains unknown files in collapsed $container", ({ container, generated, local, blocked }) => {
+    withIgnoredCleanupFixture(`.ai/harness/active-worktree\n${container}/`, f => {
+      const paths = [...generated, ...local].map(path => `${container}/${path}`);
+      writeIgnoredFiles(f.worktree, paths);
+      const inventory = run("git", ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"], f.worktree);
+      expect(inventory.status).toBe(0);
+      expect(inventory.stdout.split("\0").filter(path => path.startsWith(`${container}/`))).toEqual([`${container}/`]);
+      for (const args of [[...f.cleanup, "--dry-run"], ["runtime", ...f.removeExact]]) {
+        const result = f.cli(...args);
+        expect(result.status, result.stdout + result.stderr).toBe(1);
+        for (const path of blocked) expect(result.stderr).toContain(JSON.stringify(`${container}/${path}`));
+        for (const path of paths) expect(readFileSync(join(f.worktree, path), "utf8")).toBe("fixture\n");
+        f.retained();
+      }
+    });
+  });
+
+  test.each([".codegraph", ".codegraph/codegraph.db"])("closeout retains symlinked %s", path => {
+    withIgnoredCleanupFixture(".ai/harness/active-worktree\n/.codegraph", f => {
+      const target = join(f.parent, "outside");
+      const link = join(f.worktree, path);
+      const directoryLink = path === ".codegraph";
+      const contents = directoryLink ? join(target, "codegraph.db") : target;
+      mkdirSync(dirname(contents), { recursive: true });
+      writeFileSync(contents, "outside fixture\n");
+      mkdirSync(dirname(link), { recursive: true });
+      symlinkSync(target, link, directoryLink ? "dir" : "file");
+      for (const args of [[...f.cleanup, "--dry-run"], ["runtime", ...f.removeExact]]) {
+        const result = f.cli(...args);
+        expect(result.status, result.stdout + result.stderr).toBe(1);
+        expect(result.stderr).toContain(JSON.stringify(path));
+        expect(lstatSync(link).isSymbolicLink()).toBe(true);
+        expect(readFileSync(contents, "utf8")).toBe("outside fixture\n");
+        f.retained();
+      }
     });
   });
 
