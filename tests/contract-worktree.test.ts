@@ -87,13 +87,13 @@ function writeStartMetadata(cwd: string, slug: string, branch: string): void {
   writeFileSync(join(cwd, ".ai/harness/worktrees", `${slug}.json`), `${JSON.stringify({ slug, branch })}\n`);
 }
 
-function withIgnoredCleanupFixture(ignores: string, use: (f: ReturnType<typeof ignoredCleanupFixture>) => void) {
+function withIgnoredCleanupFixture(ignores: string, use: (f: ReturnType<typeof ignoredCleanupFixture>) => void, tracked: string[] = []) {
   const parent = tmpWorkspace("ignored-cleanup");
-  try { use(ignoredCleanupFixture(parent, ignores)); }
+  try { use(ignoredCleanupFixture(parent, ignores, tracked)); }
   finally { rmSync(parent, { recursive: true, force: true }); }
 }
 
-function ignoredCleanupFixture(parent: string, ignores: string) {
+function ignoredCleanupFixture(parent: string, ignores: string, tracked: string[]) {
   const cwd = join(parent, "repo");
   const worktree = join(parent, "repo-wt-demo");
   const marker = join(worktree, ".ai/harness/active-worktree");
@@ -104,6 +104,10 @@ function ignoredCleanupFixture(parent: string, ignores: string) {
   mkdirSync(cwd);
   initGitRepo(cwd);
   writeFileSync(join(cwd, ".gitignore"), `${ignores}\n`);
+  if (tracked.length > 0) {
+    writeIgnoredFiles(cwd, tracked);
+    expect(run("git", ["add", "-f", "--", ...tracked], cwd).status).toBe(0);
+  }
   commitAll(cwd, "ignored cleanup fixture");
   expect(run("git", ["worktree", "add", "-b", branch, worktree], cwd).status).toBe(0);
   writeStartMetadata(cwd, "demo", branch);
@@ -163,7 +167,9 @@ describe("contract-worktree helper integration", () => {
     withIgnoredCleanupFixture(".ai/harness/\nnode_modules/\ndist/\n.codegraph/\n.ci-affected-tests.json", f => {
       writeIgnoredFiles(f.worktree, [
         "node_modules/pkg/index.js", "dist/out.js", ".codegraph/codegraph.db", ".codegraph/daemon.log", ".codegraph/daemon.pid",
-        ".ai/harness/runs/hook-events.jsonl", ".ai/harness/runs/junit/report.xml", ".ai/harness/runs/task-agent-outbox/result-1.json",
+        ".ai/harness/runs/hook-events.jsonl", ".ai/harness/runs/junit/report.xml",
+        ".ai/harness/runs/junit/20261120T000000Z-123/tests__contract-worktree.test.ts.xml",
+        ".ai/harness/runs/task-agent-outbox/result-1.json", `.ai/harness/runs/task-agent-outbox/${"a".repeat(64)}/result-1.json`,
         ".ai/harness/state/protected-paths.json", ".ai/harness/failures/latest.jsonl", ".ci-affected-tests.json",
       ]);
       const preview = f.cli(...f.cleanup, "--dry-run");
@@ -175,6 +181,47 @@ describe("contract-worktree helper integration", () => {
       expect(existsSync(f.metadata)).toBe(false);
       expect(f.branchStatus()).not.toBe(0);
     });
+  });
+
+  test("slug cleanup retains dotfiles under collapsed harness outputs", () => {
+    withIgnoredCleanupFixture(".ai/harness/", f => {
+      const paths = ["evidence/.env", "evidence/runs/.env.local.json", "evidence/runs/.env.local",
+        "runs/junit/20261120T000000Z-123/.private.xml", `runs/task-agent-outbox/${"a".repeat(64)}/.env`]
+        .map(path => `.ai/harness/${path}`);
+      writeIgnoredFiles(f.worktree, paths);
+      for (const extra of [["--dry-run"], []]) {
+        const result = f.cli(...f.cleanup, ...extra);
+        expect(result.status, result.stdout + result.stderr).toBe(1);
+        for (const path of paths) {
+          expect(result.stderr).toContain(JSON.stringify(path));
+          expect(readFileSync(join(f.worktree, path), "utf8")).toBe("fixture\n");
+        }
+        f.retained();
+      }
+    });
+  });
+
+  test("slug cleanup allows named outputs in directories with tracked placeholders", () => {
+    const tracked = ["checks", "runs", "failures"].map(dir => `.ai/harness/${dir}/.gitkeep`);
+    withIgnoredCleanupFixture(".ai/harness/", f => {
+      writeIgnoredFiles(f.worktree, ["checks/change-assessment.latest.json", "runs/verification-vx-123.log",
+        "runs/verification-vx-123.json", "failures/latest.jsonl"].map(path => `.ai/harness/${path}`));
+      const preview = f.cli(...f.cleanup, "--dry-run");
+      expect(preview.status, preview.stdout + preview.stderr).toBe(0);
+      const unknown = [".ai/harness/checks/notes.local", ".ai/harness/runs/.env", ".ai/harness/runs/verification-.env.log"];
+      writeIgnoredFiles(f.worktree, unknown);
+      const blocked = f.cli(...f.cleanup);
+      expect(blocked.status).toBe(1);
+      for (const path of unknown) {
+        expect(blocked.stderr).toContain(JSON.stringify(path));
+        expect(readFileSync(join(f.worktree, path), "utf8")).toBe("fixture\n");
+      }
+      f.retained();
+      for (const path of unknown) rmSync(join(f.worktree, path));
+      const result = f.cli(...f.cleanup);
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(existsSync(f.worktree)).toBe(false);
+    }, tracked);
   });
 
   test("remove-exact rechecks ignored data added after a successful preview", () => {
