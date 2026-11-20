@@ -1,6 +1,6 @@
 import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
-import { loadArchitectureProjectionPolicy, readGlobalArchitectureConfiguration } from './projection-config';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { DEFAULT_GLOBAL_ARCHITECTURE, loadArchitectureProjectionPolicy, readGlobalArchitectureConfiguration } from './projection-config';
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { userInfo } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
@@ -14,7 +14,7 @@ import { trustedNodeCandidates } from '../runtime/node-candidates';
 import { selectCompatibleNode } from '../runtime/node-runtime';
 import { runProcess } from '../process-runner';
 import type { CapabilityOwnership } from '../../core/capabilities/registry';
-import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError, assertArchctxVersion, assertProjectionApplyReadbackResult, assertProjectionResult, decodeArchitectureDebtReport, decodeDocsAnchorsReport } from '../../core/architecture/projection';
+import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError, assertArchctxVersion, assertProjectionApplyReadbackResult, assertProjectionResult, decodeArchitectureDebtReport, decodeDocsAnchorsReport, readArchitectureProjectionPolicy } from '../../core/architecture/projection';
 import type { ArchctxProcessResult, ArchctxProviderOptions, ArchitectureDaemonStopFailure, ArchitectureDaemonStopReportV1, ResolvedArchctxPackage, ArchitectureProjectionReadinessV1 } from '../../core/architecture/contracts';
 import { gitExecFileSync } from '../git/runner';
 
@@ -605,7 +605,7 @@ export function prepareArchitectureTask(repoRoot: string, task: string, options:
     }
   };
   requirePrepareTime();
-  // In archctx 0.15.0, status never starts a daemon; prepare can start one if none answers.
+  // Status never starts a daemon. Prepare can start one if none answers.
   if (!hasUsableArchctxDaemon(repoRoot, { ...options, policy })) {
     throw new ArchctxClientError({ code: 'AC_RUNTIME_UNAVAILABLE', action: 'start-or-reconnect-runtime', message: 'architecture prepare skipped: no usable daemon answered' });
   }
@@ -640,6 +640,56 @@ function decodeCompleteArchitectureDebt(data: unknown, headSha: string): Archite
   catch (error) {
     throw new ArchctxClientError({ code: 'RH_ARCHCTX_DEBT_INVALID', action: 'update-repo-harness', reasonCode: 'architecture-debt-invalid', details: { headSha }, message: error instanceof Error ? error.message : String(error) });
   }
+}
+
+function hasPrivateCodeGraphIndex(directory: string): boolean {
+  return lstatSync(directory, { throwIfNoEntry: false })?.isDirectory() === true
+    && lstatSync(join(directory, 'codegraph.db'), { throwIfNoEntry: false })?.isFile() === true;
+}
+
+/** Called after the primary checkout and plugin have opted into CodeGraph. */
+export function bootstrapWorktreeCodeGraph(primaryRoot: string, worktreeRoot: string): void {
+  const env: NodeJS.ProcessEnv = { ...process.env, CODEGRAPH_NO_DOWNLOAD: '1', DO_NOT_TRACK: '1' };
+  delete env.CODEGRAPH_DIR;
+  const policy = readArchitectureProjectionPolicy({ architecture: DEFAULT_GLOBAL_ARCHITECTURE });
+  const indexDirectory = join(worktreeRoot, '.codegraph');
+  const sync = (cwd: string) => new ArchctxClient(cwd, policy.requiredVersion, { env }).data(['sync', '--json'], policy.timeoutMs);
+
+  if (process.platform !== 'win32') {
+    // Start uses the upstream tip for the new branch. Publish the actual primary
+    // HEAD and let archctx sync the private copy against the worktree sources.
+    if (hasPrivateCodeGraphIndex(join(primaryRoot, '.codegraph'))) {
+      try {
+        const data = sync(primaryRoot);
+        if (isRecord(data) && (data.codeGraphBase === 'failed' || data.codeGraphBase === 'skipped-unproven')) {
+          console.error(`[ContractWorktree] CodeGraph base refresh: ${data.codeGraphBase}`);
+        }
+      } catch (error) {
+        reportBootstrapSyncFailure('CodeGraph base refresh', error);
+      }
+    }
+    try {
+      sync(worktreeRoot);
+      if (hasPrivateCodeGraphIndex(indexDirectory)) return;
+    } catch (error) {
+      reportBootstrapSyncFailure('CodeGraph shared-base seed', error);
+    }
+  }
+
+  // Init can write the ignore file and SQLite sidecars. Preserve an occupied
+  // directory, including an index that appeared during an unsuccessful sync.
+  const index = lstatSync(indexDirectory, { throwIfNoEntry: false });
+  if (index && (!index.isDirectory() || readdirSync(indexDirectory).length > 0)) {
+    throw new Error('CodeGraph bootstrap could not verify the worktree index. Inspect .codegraph before running codegraph init.');
+  }
+  console.error('[ContractWorktree] Running CodeGraph init in the worktree');
+  indexPackageLocalCodeGraph(worktreeRoot, { env: { ...env, CODEGRAPH_DIR: '.codegraph' }, policy });
+  if (!hasPrivateCodeGraphIndex(indexDirectory)) throw new Error('codegraph init did not create a worktree index');
+}
+
+function reportBootstrapSyncFailure(step: string, error: unknown): void {
+  const reason = error instanceof ArchctxClientError ? error.reasonCode ?? error.code : '';
+  console.error(`[ContractWorktree] ${step} did not complete${/^[a-zA-Z0-9_-]+$/.test(reason) ? ` (${reason})` : ''}`);
 }
 
 /**
