@@ -138,7 +138,7 @@ describe("SessionStart host envelope", () => {
       expect(existsSync(signal)).toBe(false);
       start("clear");
       // The record holds the launch model of the seat env (#2633).
-      expect(JSON.parse(readFileSync(signal, "utf8"))).toEqual({ session_id: "s-1", transcript_path: "/x/new.jsonl", source: "clear", started_at: now.toISOString(), model: "fable", effort: "high" });
+      expect(JSON.parse(readFileSync(signal, "utf8"))).toEqual({ session_id: "s-1", transcript_path: "/x/new.jsonl", source: "clear", started_at: now.toISOString(), model: "fable", effort: "high", host: "claude" });
       start("compact");
       expect(JSON.parse(readFileSync(signal, "utf8")).source).toBe("compact");
       expect(start("startup").diagnostics ?? "").toBe("");
