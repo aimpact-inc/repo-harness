@@ -6,7 +6,7 @@ import type { ArchitectureDebtItemV1, ArchitectureDebtReportV1 } from 'archctx-c
 import { version as PACKAGE_VERSION } from '../../../package.json';
 import {
   completeArchitectureDebt,
-  indexPackageLocalCodeGraph,
+  seedWorktreeCodeGraph,
   stopWorkspaceArchitectureDaemons,
 } from '../../effects/architecture/archctx-provider';
 import { loadArchitectureProjectionPolicy } from '../../effects/architecture/projection-config';
@@ -46,7 +46,7 @@ export function architectureDebtReport(repoRoot: string, baseRef: string | undef
   const head = completeArchitectureDebt(repoRoot, headSha, options);
   if (baseCommit === null) return { kind: 'repo-harness-architecture-debt', head: { sha: headSha, debt: head }, base: null, introduced: null, resolvedIds: null };
   const base = cachedBaseDebt(repoRoot, baseCommit.sha, options, () => withBaseCheckout(repoRoot, baseCommit.sha, options, (checkout) => {
-    indexPackageLocalCodeGraph(checkout, options);
+    seedWorktreeCodeGraph(checkout, options);
     return completeArchitectureDebt(checkout, baseCommit.sha, options);
   }));
   const baseIds = new Set(base.items.map((item) => item.id));

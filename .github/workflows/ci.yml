@@ -314,6 +314,10 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.4
+      - uses: actions/cache@v4
+        with:
+          path: .git/repo-harness/cache/arch-debt
+          key: arch-debt-base-${{ runner.os }}-${{ github.event.pull_request.base.sha }}
       - name: Check the plugin-internals constraint and warn about architecture debt
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}

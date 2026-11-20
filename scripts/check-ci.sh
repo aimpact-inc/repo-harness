@@ -201,7 +201,7 @@ if [[ "$lane" == architecture-advisory ]]; then
   echo "[ci] plugin-internals constraint"
   constraint_json="$(mktemp /tmp/rh-arch-constraints-XXXXXX)"
   constraint_status=0
-  with_architecture_home repo_harness_architecture_start "$ROOT" "" "plugin-internals constraint" npm exec --no -- archctx constraints check --json > "$constraint_json" || true
+  with_architecture_home bun src/cli/index.ts arch constraints check --json > "$constraint_json" || true
   constraint_failures="$(bun -e 'const { decodeConstraintEvaluation } = await import("./src/core/architecture/projection.ts"); const id = "constraint.surface.plugin-internals"; const envelope = JSON.parse(await Bun.file(process.argv[1]).text()); if (envelope.ok !== true) throw new Error(`archctx constraints check failed: ${JSON.stringify(envelope.error ?? null)}`); const r = decodeConstraintEvaluation(envelope.data); const failures = []; if (!r.constraintIds.includes(id)) failures.push(`${id} was not evaluated`); if (r.coverage !== "complete") failures.push(`coverage is ${r.coverage}`); if (r.reasonCodes.length > 0) failures.push(`reason codes: ${r.reasonCodes.join(", ")}`); for (const u of r.unresolvedImports) failures.push(`unresolved import ${u.specifier} from ${u.from}`); for (const v of r.violations) if (v.constraintId === id) failures.push(`${v.fromPath} imports ${v.toPath} (${v.fromNode} -> ${v.toNode})`); console.log(failures.map(f => f.replace(/\s+/g, " ")).join("\n"));' "$constraint_json")" || constraint_status=$?
   if [[ "$constraint_status" -ne 0 ]]; then
     echo "::error title=Plugin internals constraint::archctx constraints check --json gave no valid report. Read the job log."

@@ -1041,7 +1041,13 @@ describe('single affected verification and daily fallback', () => {
     expect(advisory.if).toBe("needs.selection.outputs.mode == 'affected'");
     expect(advisory.permissions).toBeUndefined();
     expect(jobs.required.steps[0].env.ARCHITECTURE_RESULT).toBe('${{ needs.architecture-advisory.result }}');
+    const debtCache = advisory.steps.find((step: any) => step.uses === 'actions/cache@v4');
+    expect(debtCache.with).toEqual({
+      path: '.git/repo-harness/cache/arch-debt',
+      key: 'arch-debt-base-${{ runner.os }}-${{ github.event.pull_request.base.sha }}',
+    });
     const warn = advisory.steps.find((step: any) => step.name === 'Check the plugin-internals constraint and warn about architecture debt');
+    expect(advisory.steps.indexOf(debtCache)).toBeLessThan(advisory.steps.indexOf(warn));
     expect(warn.env).toEqual({ BASE_SHA: '${{ github.event.pull_request.base.sha }}' });
     expect(warn.run).toBe('bash scripts/check-ci.sh architecture-advisory --base "$BASE_SHA"');
     expect(advisory.steps.find((step: any) => step.uses === 'actions/checkout@v4').with['fetch-depth']).toBe(0);
@@ -1105,16 +1111,17 @@ describe('architecture lanes', () => {
       writeFileSync(join(bin, 'bun'), [
         '#!/bin/bash',
         'if [[ "$1" == install ]]; then exit 0; fi',
+        `if [[ "$1" == src/cli/index.ts && "$2" == arch && "$3" == constraints ]]; then cat ${JSON.stringify(join(root, 'constraints.json'))}; exit 0; fi`,
         `if [[ "$1" == src/cli/index.ts && "$2" == arch && "$3" == debt ]]; then echo "$*" > ${JSON.stringify(join(root, 'debt-args'))}; cat ${JSON.stringify(join(root, 'debt.json'))}; if [[ ${fixture.debtExit ?? 0} -ne 0 ]]; then echo "$6 does not resolve to a commit" >&2; fi; exit ${fixture.debtExit ?? 0}; fi`,
         // The fixture has no architecture model; the clock rule is covered by the provider test.
         ...(fixture.clockStart === undefined ? [] : [`if [[ "$1" == -e && "$2" == *readRenderClockStart* ]]; then git rev-list --first-parent --reverse HEAD | sed -n ${fixture.clockStart + 1}p; exit 0; fi`]),
         `if [[ "$1" == src/cli/index.ts && "$2" == arch && "$3" == projection ]]; then touch ${JSON.stringify(join(root, 'checked'))}; cat ${JSON.stringify(join(root, 'check.json'))}; exit ${fixture.checkExit ?? 1}; fi`,
         `exec ${JSON.stringify(process.execPath)} "$@"`,
       ].join('\n'), { mode: 0o755 });
-      // archctx exits 0 for every report, as 0.11.2 does for violated and undetermined.
+      // `rh arch constraints check --json` runs through `bun`; npm exec must never run archctx.
       writeFileSync(join(bin, 'npm'), [
         '#!/bin/bash',
-        `if [[ "$4" == archctx ]]; then cat ${JSON.stringify(join(root, 'constraints.json'))}; exit 0; fi`,
+        `if [[ "$4" == archctx ]]; then echo "unexpected raw npm exec archctx call" >&2; exit 99; fi`,
         `exit ${fixture.codegraphExit ?? 0}`,
       ].join('\n'), { mode: 0o755 });
       // The released-CHANGELOG check reads git; this stub records its arguments and reports fixture.results.
