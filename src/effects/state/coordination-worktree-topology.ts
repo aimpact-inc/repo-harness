@@ -5,7 +5,7 @@ import { readWorktreeRecord, readWorktreeRecordById, endWorktreeRecord } from '.
 import { randomUUID } from 'crypto';
 import { sha256Hex } from '../../core/evidence/sha256';
 import { execFileSync } from 'child_process';
-import { gitExecFileSync, withoutProviderTokens, withoutRepositorySelectingGitEnv } from '../git/runner';
+import { gitExecFileSync, gitSpawnSync, withoutProviderTokens, withoutRepositorySelectingGitEnv } from '../git/runner';
 import { existsSync, lstatSync, readFileSync, realpathSync, readdirSync, unlinkSync, mkdirSync } from 'fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'path';
 import { publishFileByRename, syncDirectoryDurably } from '../atomic-append';
@@ -144,9 +144,64 @@ export function mergeProof(root: string, branch: string, head: string, targetRef
   return { provider: true, merge_commit_sha: merge };
 }
 
+const REBUILDABLE_IGNORED_ROOTS = /^(node_modules|dist|build|coverage|\.next)\//u;
+// Explicit closeout permits these harness outputs. Automatic sweep retains
+// them. Git can report a whole ignored directory, so inspect these containers
+// for exact output paths and keep local files beside them.
+const HARNESS_ARTIFACT_CONTAINERS = new Set([
+  '.codegraph', '.ai', '.ai/harness', '.ai/harness/evidence', '.ai/harness/evidence/events',
+  '.ai/harness/evidence/blobs', '.ai/harness/runs',
+]);
+const HARNESS_ARTIFACT_FILES = new Set([
+  '.codegraph/.gitignore', '.codegraph/codegraph.db', '.codegraph/codegraph.db-shm',
+  '.codegraph/codegraph.db-wal', '.codegraph/codegraph.db-journal', '.ai/harness/evidence/events/log.jsonl',
+]);
+const EVIDENCE_BLOB_PATH = /^\.ai\/harness\/evidence\/blobs\/[a-f0-9]{64}$/u;
+const VERIFICATION_RUN_PATH = /^\.ai\/harness\/runs\/verification-vx-[a-f0-9]{20}\.(?:json|log)$/u;
+const ACTIVE_WORKTREE_MARKER = '.ai/harness/active-worktree';
+
+function isDisposableIgnoredEntry(worktree: string, entry: string, limits: Limits): boolean {
+  timeout(limits);
+  const rebuildable = REBUILDABLE_IGNORED_ROOTS.exec(entry)?.[1];
+  if (rebuildable) return lstatSync(join(worktree, rebuildable)).isDirectory();
+  if (!limits.closeout) return false;
+  const relative = entry.endsWith('/') ? entry.slice(0, -1) : entry;
+  if (HARNESS_ARTIFACT_CONTAINERS.has(relative)) {
+    const directory = join(worktree, relative);
+    return lstatSync(directory).isDirectory()
+      && readdirSync(directory).every(name => isDisposableIgnoredEntry(worktree, `${relative}/${name}`, limits));
+  }
+  if (relative !== ACTIVE_WORKTREE_MARKER && !HARNESS_ARTIFACT_FILES.has(relative)
+    && !EVIDENCE_BLOB_PATH.test(relative) && !VERIFICATION_RUN_PATH.test(relative)) return false;
+  const file = join(worktree, relative);
+  return lstatSync(file).isFile()
+    && (relative !== ACTIVE_WORKTREE_MARKER || readFileSync(file, 'utf8').trim() === worktree);
+}
+
+function inspectIgnoredWorktreeEntries(worktree: string, limits: Limits): { count: number; hasLocalData: boolean } {
+  const result = gitSpawnSync(['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'], {
+    cwd: worktree, gitBin: gitBinary(limits), env: withoutRepositorySelectingGitEnv(),
+    encoding: 'utf8', timeout: timeout(limits), stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.error || result.status !== 0 || result.stderr || (result.stdout && !result.stdout.endsWith('\0'))) {
+    throw new Error('ignored worktree probe failed');
+  }
+  const ignored = result.stdout ? result.stdout.slice(0, -1).split('\0') : [];
+  return { count: ignored.length, hasLocalData: ignored.some(entry => !isDisposableIgnoredEntry(worktree, entry, limits)) };
+}
+
+export function assertNoIgnoredWorktreeData(worktree: string, limits: Limits = {}): void {
+  let hasLocalData: boolean;
+  try { ({ hasLocalData } = inspectIgnoredWorktreeEntries(worktree, { ...limits, closeout: true })); }
+  catch { throw new Error('Cannot verify ignored local data. Keep the worktree and inspect Git status with --ignored before retrying cleanup.'); }
+  if (hasLocalData) {
+    throw new Error('Unsafe to remove this worktree because it contains ignored local data. Keep the worktree or use an explicit, reviewed cleanup.');
+  }
+}
+
 export function assertNoOwner(root: string, worktree: string, limits: Limits, allowSelfMarker = false): void {
   for (const entry of entries(root, limits)) {
-    const marker = join(entry.path, '.ai/harness/active-worktree');
+    const marker = join(entry.path, ACTIVE_WORKTREE_MARKER);
     timeout(limits);
     let stat;
     try { stat = lstatSync(marker); }
@@ -303,9 +358,10 @@ export function cleanupExactWorktree(root: string, expected: ExactWorktreeCleanu
       assertWorktreeBinding(root, path, expected.branch, limits);
       if (git(path, ['rev-parse', 'HEAD'], limits) !== expected.head_sha) throw new Error('cleanup execution head moved');
       if (git(path, ['status', '--porcelain', '--untracked-files=all'], limits)) throw new Error('cleanup_blocked_dirty_worktree');
+      if (limits.closeout) assertNoIgnoredWorktreeData(path, limits);
     }
     if (limits.closeout && path) {
-      const marker = join(path, '.ai/harness/active-worktree');
+      const marker = join(path, ACTIVE_WORKTREE_MARKER);
       try {
         const stat = lstatSync(marker);
         if (stat.isFile() && !stat.isSymbolicLink() && readFileSync(marker, 'utf8').trim() === path) unlinkSync(marker);
@@ -620,10 +676,9 @@ export function inspectWorktree(root: string, path: string, callerCwd: string | 
         // Rename records have a second NUL field containing the old name.
         result.dirty_files = status.split('\0').filter(line => /^[12u?] /u.test(line)).length;
         if (result.dirty_files > 0) reasons.push('dirty');
-        const ignored = git(path, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'], limits).split('\0').filter(Boolean);
-        result.ignored_entries = ignored.length;
-        // These top-level outputs are reproducible. Everything else needs owner approval.
-        if (ignored.some(file => !/^(?:node_modules|dist|build|coverage|\.next)\//u.test(file))) reasons.push('ignored_data');
+        const ignored = inspectIgnoredWorktreeEntries(path, limits);
+        result.ignored_entries = ignored.count;
+        if (ignored.hasLocalData) reasons.push('ignored_data');
         result.unpushed_commits = Number(git(path, ['rev-list', '--count', 'HEAD', '--not', '--remotes'], limits));
         if (!Number.isSafeInteger(result.unpushed_commits)) throw new Error('invalid count');
         if (result.unpushed_commits > 0) reasons.push('unpushed');

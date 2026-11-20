@@ -13,7 +13,7 @@ import {
   rmSync,
   writeFileSync
 } from "fs";
-import { join } from "path";
+import { dirname, join } from "path";
 import { tmpdir } from "os";
 import { defaultWorktreeTemplate } from "../src/core/worktree-location.mjs";
 
@@ -93,12 +93,18 @@ describe("contract-worktree helper integration", () => {
     const cwd = tmpWorkspace("helper-contract-cleanup");
     const worktreePath = `${cwd}-wt-demo`;
     try {
-      copyHelpers(cwd);
+      copyHelpers(cwd, { linkDependencies: false });
       initGitRepo(cwd);
       writeFileSync(join(cwd, "README.md"), "# demo\n");
+      writeFileSync(join(cwd, ".gitignore"), "node_modules/\n.codegraph/\n");
       commitAll(cwd, "init cleanup");
 
       expect(run("git", ["worktree", "add", worktreePath, "-b", "codex/demo"], cwd).status).toBe(0);
+      mkdirSync(join(worktreePath, "node_modules"));
+      mkdirSync(join(worktreePath, ".codegraph"));
+      writeFileSync(join(worktreePath, "node_modules/package.js"), "rebuildable dependency\n");
+      writeFileSync(join(worktreePath, ".codegraph/codegraph.db"), "rebuildable index\n");
+      expect(run("git", ["status", "--porcelain", "--ignored"], worktreePath).stdout).toBe("!! .codegraph/\n!! node_modules/\n");
       writeStartMetadata(cwd, "demo", "codex/demo");
 
       const dryRun = run("bash", ["scripts/contract-worktree.sh", "cleanup", "--slug", "demo", "--dry-run"], cwd);
@@ -118,6 +124,134 @@ describe("contract-worktree helper integration", () => {
       expect(existsSync(join(cwd, ".ai/harness/worktrees/demo.json"))).toBe(false);
     } finally {
       run("git", ["worktree", "remove", "--force", worktreePath], cwd);
+      rmSync(worktreePath, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  test("rh worktrees cleanup refuses a merged worktree with ignored local data", () => {
+    const cwd = tmpWorkspace("helper-contract-cleanup-ignored");
+    const worktreePath = join(cwd, "linked");
+    const repo = join(cwd, "repo");
+    const home = join(cwd, "home");
+    mkdirSync(repo);
+    mkdirSync(home);
+    try {
+      initGitRepo(repo);
+      writeFileSync(join(repo, ".gitignore"), "scratch.local\n");
+      commitAll(repo, "ignore local scratch file");
+      const branch = "codex/demo";
+      const ref = `refs/heads/${branch}`;
+      expect(run("git", ["worktree", "add", "-b", branch, worktreePath], repo).status).toBe(0);
+      writeStartMetadata(repo, "demo", branch);
+      const ignored = join(worktreePath, "scratch.local");
+      writeFileSync(ignored, "keep this local file\n");
+      expect(run("git", ["status", "--porcelain"], worktreePath).stdout).toBe("");
+      expect(run("git", ["status", "--porcelain", "--ignored"], worktreePath).stdout).toBe("!! scratch.local\n");
+
+      const cleanup = (...args: string[]) => run(process.execPath, [
+        "--preload", join(ROOT, "tests/helpers/protected-helper-host.ts"),
+        join(ROOT, "src/cli/index.ts"), "worktrees", "cleanup", "--slug", "demo", ...args,
+      ], repo, { HOME: home, PROTECTED_HELPER_TEST_GH: join(GH_DIR, "gh"), PROTECTED_HELPER_TEST_HOME: home });
+      const dryRun = cleanup("--dry-run");
+      const apply = cleanup();
+      expect({
+        dryRun: dryRun.status,
+        apply: apply.status,
+        contents: existsSync(ignored) ? readFileSync(ignored, "utf8") : null,
+        checkoutPresent: existsSync(worktreePath),
+        branchPresent: run("git", ["show-ref", "--verify", "--quiet", ref], repo).status === 0,
+        metadataPresent: existsSync(join(repo, ".ai/harness/worktrees/demo.json")),
+      }).toEqual({ dryRun: 1, apply: 1, contents: "keep this local file\n", checkoutPresent: true, branchPresent: true, metadataPresent: true });
+      for (const result of [dryRun, apply]) {
+        expect(result.stderr).toContain("ignored local data");
+        expect(result.stderr).toContain("Keep the worktree");
+        expect(result.stdout).not.toContain("would remove worktree");
+      }
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  test.each([
+    ["nested ignored dotfile", ".codegraph/notes/.draft", false],
+    ["symlink at a generated path", ".codegraph/codegraph.db", true],
+    ["whitespace-prefixed directory", " node_modules/notes", false],
+  ] as const)("locked closeout keeps a checkout that gains a %s after precheck", (_label, relative, link) => {
+    const cwd = tmpWorkspace("helper-contract-cleanup-late-ignored");
+    const worktreePath = `${cwd}-wt-demo`;
+    try {
+      copyHelpers(cwd);
+      initGitRepo(cwd);
+      writeFileSync(join(cwd, ".gitignore"), ".codegraph/\n node_modules/\n");
+      commitAll(cwd, "init late ignored data check");
+      const branch = "codex/demo";
+      const head = run("git", ["rev-parse", "HEAD"], cwd).stdout.trim();
+      expect(run("git", ["worktree", "add", "-b", branch, worktreePath], cwd).status).toBe(0);
+      writeStartMetadata(cwd, "demo", branch);
+      const preview = run("bash", ["scripts/contract-worktree.sh", "cleanup", "--slug", "demo", "--dry-run"], cwd);
+      expect(preview.status, preview.stderr).toBe(0);
+      expect(preview.stdout).toContain("would remove worktree");
+
+      const file = join(worktreePath, relative);
+      mkdirSync(dirname(file), { recursive: true });
+      if (link) symlinkSync(join(cwd, ".gitignore"), file);
+      else writeFileSync(file, "keep late local data\n");
+      expect(run("git", ["status", "--porcelain"], worktreePath).stdout).toBe("");
+      const apply = run(process.execPath, [
+        "scripts/contract-worktree-runtime.ts", "remove-exact", "--repo", cwd, "--worktree", worktreePath,
+        "--branch", branch, "--head", head, "--target", "main", "--target-oid", head, "--merge", head,
+      ], cwd);
+      expect(apply.status, apply.stderr).toBe(1);
+      expect(apply.stderr).toContain("ignored local data");
+      expect(lstatSync(file).isSymbolicLink()).toBe(link);
+      expect(readFileSync(file, "utf8")).toBe(link ? ".codegraph/\n node_modules/\n" : "keep late local data\n");
+      expect(existsSync(worktreePath)).toBe(true);
+      expect(run("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], cwd).status).toBe(0);
+    } finally {
+      rmSync(worktreePath, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  test("cleanup fails closed when Git warns that the ignored scan is incomplete", () => {
+    const cwd = tmpWorkspace("helper-contract-cleanup-ignored-probe-failure");
+    const worktreePath = `${cwd}-wt-demo`;
+    try {
+      copyHelpers(cwd);
+      initGitRepo(cwd);
+      commitAll(cwd, "init ignored probe failure check");
+      expect(run("git", ["worktree", "add", "-b", "codex/demo", worktreePath], cwd).status).toBe(0);
+      writeStartMetadata(cwd, "demo", "codex/demo");
+      const gitBin = join(cwd, "git-with-incomplete-scan");
+      writeFileSync(gitBin, [
+        "#!/bin/sh",
+        'if [ "$1" = ls-files ] && [ "$3" = --ignored ]; then',
+        '  printf "%s\\n" "warning: cannot open directory" >&2',
+        "  exit 0",
+        "fi",
+        'exec /usr/bin/git "$@"',
+        "",
+      ].join("\n"), { mode: 0o755 });
+      const head = run("git", ["rev-parse", "HEAD"], cwd).stdout.trim();
+      const env = { REPO_HARNESS_GIT_BIN: gitBin };
+      const apply = ["scripts/contract-worktree.sh", "cleanup", "--slug", "demo"];
+      const results = [
+        run("bash", [...apply, "--dry-run"], cwd, env),
+        run("bash", apply, cwd, env),
+        run(process.execPath, [
+          "scripts/contract-worktree-runtime.ts", "remove-exact", "--repo", cwd, "--worktree", worktreePath,
+          "--branch", "codex/demo", "--head", head, "--target", "main", "--target-oid", head, "--merge", head,
+        ], cwd, env),
+      ];
+      for (const result of results) {
+        expect(result.status, result.stderr).toBe(1);
+        expect(result.stderr).toContain("Cannot verify ignored local data. Keep the worktree");
+        expect(result.stdout).not.toContain("would remove worktree");
+        expect(existsSync(worktreePath)).toBe(true);
+        expect(run("git", ["show-ref", "--verify", "--quiet", "refs/heads/codex/demo"], cwd).status).toBe(0);
+      }
+    } finally {
       rmSync(worktreePath, { recursive: true, force: true });
       rmSync(cwd, { recursive: true, force: true });
     }
@@ -503,9 +637,11 @@ describe("contract-worktree helper integration", () => {
       writeFileSync(join(worktreePath, ".git"), "gitdir: /tmp/moved-repo/.git/worktrees/wt-demo\n");
 
       const dryRun = run("bash", ["scripts/contract-worktree.sh", "cleanup", "--slug", "demo", "--dry-run"], cwd);
-      expect(dryRun.status).toBe(0);
+      expect(dryRun.status).toBe(1);
       expect(dryRun.stderr).not.toContain("fatal:");
-      expect(dryRun.stdout).toContain("would repair stale worktree gitdir before dirty check");
+      expect(dryRun.stderr).toContain("linked worktree status unavailable, refusing cleanup");
+      expect(dryRun.stderr).toContain("git worktree repair");
+      expect(dryRun.stdout).not.toContain("would remove worktree");
       expect(existsSync(worktreePath)).toBe(true);
       expect(run("git", ["show-ref", "--verify", "--quiet", "refs/heads/codex/demo"], cwd).status).toBe(0);
 
