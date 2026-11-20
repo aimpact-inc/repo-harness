@@ -13,9 +13,12 @@ import {
   rmSync,
   writeFileSync
 } from "fs";
-import { join } from "path";
+import { dirname, join } from "path";
 import { tmpdir } from "os";
 import { defaultWorktreeTemplate } from "../src/core/worktree-location.mjs";
+import { publishCheckpointFromLedger } from "../src/effects/evidence/checkpoint-store";
+import { LEDGER_EPOCH_START_SHA } from "../src/effects/evidence/epoch";
+import { appendGenesisRecord } from "../src/effects/evidence/event-log";
 
 import { sweepManagedWorktrees } from '../src/effects/state/coordination-worktree-topology';
 import { defaultPolicy } from "../src/effects/adoption/standard-plan";
@@ -87,7 +90,312 @@ function writeStartMetadata(cwd: string, slug: string, branch: string): void {
   writeFileSync(join(cwd, ".ai/harness/worktrees", `${slug}.json`), `${JSON.stringify({ slug, branch })}\n`);
 }
 
+function withIgnoredCleanupFixture(ignores: string, use: (f: ReturnType<typeof ignoredCleanupFixture>) => void, tracked: string[] = []) {
+  const parent = tmpWorkspace("ignored-cleanup");
+  try { use(ignoredCleanupFixture(parent, ignores, tracked)); }
+  finally { rmSync(parent, { recursive: true, force: true }); }
+}
+
+function ignoredCleanupFixture(parent: string, ignores: string, tracked: string[]) {
+  const cwd = join(parent, "repo");
+  const worktree = join(parent, "repo-wt-demo");
+  const marker = join(worktree, ".ai/harness/active-worktree");
+  const metadata = join(cwd, ".ai/harness/worktrees/demo.json");
+  const branch = "codex/demo";
+  const entry = join(ROOT, "src/cli/index.ts");
+  const scripts = join(ROOT, "scripts");
+  mkdirSync(cwd);
+  initGitRepo(cwd);
+  writeFileSync(join(cwd, ".gitignore"), `${ignores}\n`);
+  if (tracked.length > 0) {
+    writeIgnoredFiles(cwd, tracked);
+    expect(run("git", ["add", "-f", "--", ...tracked], cwd).status).toBe(0);
+  }
+  commitAll(cwd, "ignored cleanup fixture");
+  expect(run("git", ["worktree", "add", "-b", branch, worktree], cwd).status).toBe(0);
+  writeStartMetadata(cwd, "demo", branch);
+  mkdirSync(join(worktree, ".ai/harness"), { recursive: true });
+  writeFileSync(marker, `${worktree}\n`);
+  const head = run("git", ["rev-parse", "HEAD"], cwd).stdout.trim();
+  const cleanup = ["cleanup", "--slug", "demo"];
+  const removeExact = ["remove-exact", "--repo", cwd, "--worktree", worktree, "--branch", branch,
+    "--head", head, "--target", "main", "--target-oid", head, "--merge", head];
+  const branchStatus = () => run("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], cwd).status;
+  return {
+    parent, worktree, metadata, branchStatus,
+    cli: (...args: string[]) => run(process.execPath, [entry, "worktrees", ...args], cwd),
+    cleanup, removeExact,
+    shell: (env: NodeJS.ProcessEnv, ...args: string[]) => run("bash", [join(scripts, "contract-worktree.sh"), ...args], cwd,
+      { ...env, REPO_HARNESS_TARGET_REPO_ROOT: cwd }),
+    runtime: (env: NodeJS.ProcessEnv) => run(process.execPath, [join(scripts, "contract-worktree-runtime.ts"), ...removeExact], cwd, env),
+    retained() {
+      expect(existsSync(worktree)).toBe(true);
+      expect(readFileSync(marker, "utf8").trim()).toBe(worktree);
+      expect(branchStatus()).toBe(0);
+      expect(JSON.parse(readFileSync(metadata, "utf8"))).toEqual({ slug: "demo", branch });
+    },
+  };
+}
+
+function writeIgnoredFiles(worktree: string, paths: readonly string[]): void {
+  for (const path of paths) {
+    const file = join(worktree, path);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, "fixture\n");
+  }
+}
+
 describe("contract-worktree helper integration", () => {
+
+  test("slug cleanup refuses ignored local data in preview and apply", () => {
+    withIgnoredCleanupFixture(".ai/\n.env\nscratch.local\n/node_modules", f => {
+      const paths = ["scratch.local", ".env", "build/.env", ".ai/harness/backups/keep.txt"];
+      writeIgnoredFiles(f.worktree, paths);
+      symlinkSync(f.parent, join(f.worktree, "node_modules"), "dir");
+      for (const extra of [["--dry-run"], []]) {
+        const result = f.cli(...f.cleanup, ...extra);
+        expect(result.status, result.stdout + result.stderr).toBe(1);
+        for (const path of ["scratch.local", ".env", "build/.env", ".ai/harness/backups/", "node_modules"]) {
+          expect(result.stderr).toContain(JSON.stringify(path));
+        }
+        expect(result.stderr).toContain("git status --ignored");
+        f.retained();
+        for (const path of paths) expect(readFileSync(join(f.worktree, path), "utf8")).toBe("fixture\n");
+        expect(lstatSync(join(f.worktree, "node_modules")).isSymbolicLink()).toBe(true);
+      }
+    });
+  });
+
+  test("slug cleanup accepts populated dependency, build and harness runtime outputs", () => {
+    withIgnoredCleanupFixture(".ai/harness/\nnode_modules/\ndist/\n.codegraph/\n.ci-affected-tests.json", f => {
+      writeIgnoredFiles(f.worktree, [
+        "node_modules/pkg/index.js", "dist/out.js", ".codegraph/codegraph.db", ".codegraph/daemon.log", ".codegraph/daemon.pid",
+        ".ai/harness/runs/hook-events.jsonl", ".ai/harness/runs/junit/report.xml",
+        ".ai/harness/runs/junit/20261120T000000Z-123/tests__contract-worktree.test.ts.xml",
+        ".ai/harness/runs/task-agent-outbox/result-1.json", `.ai/harness/runs/task-agent-outbox/${"a".repeat(64)}/result-1.json`,
+        `.ai/harness/runs/task-agent-outbox/${"a".repeat(64)}/context-1.txt`,
+        ".ai/harness/state/agent-notice", ".ai/harness/state/agent-notice-status", ".ai/harness/state/agent-notice-archimap",
+        ".ai/harness/state/circuit-breaker.json", ".ai/harness/state/protected-paths.json",
+        ".ai/harness/failures/latest.jsonl", ".ci-affected-tests.json",
+      ]);
+      const preview = f.cli(...f.cleanup, "--dry-run");
+      expect(preview.status, preview.stdout + preview.stderr).toBe(0);
+      f.retained();
+      const result = f.cli(...f.cleanup);
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(existsSync(f.worktree)).toBe(false);
+      expect(existsSync(f.metadata)).toBe(false);
+      expect(f.branchStatus()).not.toBe(0);
+    });
+  });
+
+  const rotatedHookSegment = "1795132800000-12345678-1234-4321-9876-123456789abc.jsonl";
+
+  test.each([
+    { container: ".codegraph", outputs: [".gitignore", "codegraph.db"], label: "CodeGraph indexes" },
+    { container: ".ai/harness/runs/hook-events.jsonl.archive", outputs: [rotatedHookSegment], label: "rotated hook telemetry" },
+  ])("slug cleanup accepts generated $label", ({ container, outputs }) => {
+    withIgnoredCleanupFixture(`.ai/harness/active-worktree\n${container}/`, f => {
+      writeIgnoredFiles(f.worktree, outputs.map(path => `${container}/${path}`));
+      const preview = f.cli(...f.cleanup, "--dry-run");
+      expect(preview.status, preview.stdout + preview.stderr).toBe(0);
+      f.retained();
+      const removal = f.cli(...f.cleanup);
+      expect(removal.status, removal.stdout + removal.stderr).toBe(0);
+      expect(existsSync(f.worktree)).toBe(false);
+    });
+  });
+
+  test("slug cleanup accepts a published checkpoint and empty staging directory", () => {
+    withIgnoredCleanupFixture(".ai/harness/active-worktree\n.ai/harness/evidence/", f => {
+      appendGenesisRecord(f.worktree, LEDGER_EPOCH_START_SHA, { worktreeId: "fixture" });
+      const checkpoint = publishCheckpointFromLedger(f.worktree, () => new Date("2026-11-20T00:00:00Z"));
+      expect(checkpoint.status).toBe("published");
+      expect(readdirSync(join(f.worktree, ".ai/harness/evidence/checkpoints/.staging"))).toEqual([]);
+      const preview = f.cli(...f.cleanup, "--dry-run");
+      expect(preview.status, preview.stdout + preview.stderr).toBe(0);
+      f.retained();
+      const removal = f.cli(...f.cleanup);
+      expect(removal.status, removal.stdout + removal.stderr).toBe(0);
+      expect(existsSync(f.worktree)).toBe(false);
+    });
+  });
+
+  const checkpointDir = `chk-${"b".repeat(64)}`;
+  test.each([
+    { container: ".codegraph", generated: ["codegraph.db"], local: ["notes.local", ".env", "backup/copy"],
+      blocked: ["notes.local", ".env", "backup/"] },
+    { container: ".ai/harness/evidence/checkpoints", generated: ["last-published.json", `${checkpointDir}/checkpoint.json`],
+      local: ["notes.local", `${checkpointDir}/notes.local`, "chk-invalid/checkpoint.json", ".staging/stage-leftover/notes.local"],
+      blocked: ["notes.local", `${checkpointDir}/notes.local`, "chk-invalid/", ".staging/stage-leftover/"] },
+    { container: ".ai/harness/runs/hook-events.jsonl.archive", generated: [rotatedHookSegment],
+      local: ["custom.jsonl"], blocked: ["custom.jsonl"] },
+  ])("closeout retains unknown files in collapsed $container", ({ container, generated, local, blocked }) => {
+    withIgnoredCleanupFixture(`.ai/harness/active-worktree\n${container}/`, f => {
+      const paths = [...generated, ...local].map(path => `${container}/${path}`);
+      writeIgnoredFiles(f.worktree, paths);
+      const inventory = run("git", ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"], f.worktree);
+      expect(inventory.status).toBe(0);
+      expect(inventory.stdout.split("\0").filter(path => path.startsWith(`${container}/`))).toEqual([`${container}/`]);
+      for (const args of [[...f.cleanup, "--dry-run"], ["runtime", ...f.removeExact]]) {
+        const result = f.cli(...args);
+        expect(result.status, result.stdout + result.stderr).toBe(1);
+        for (const path of blocked) expect(result.stderr).toContain(JSON.stringify(`${container}/${path}`));
+        for (const path of paths) expect(readFileSync(join(f.worktree, path), "utf8")).toBe("fixture\n");
+        f.retained();
+      }
+    });
+  });
+
+  test.each([".codegraph", ".codegraph/codegraph.db"])("closeout retains symlinked %s", path => {
+    withIgnoredCleanupFixture(".ai/harness/active-worktree\n/.codegraph", f => {
+      const target = join(f.parent, "outside");
+      const link = join(f.worktree, path);
+      const directoryLink = path === ".codegraph";
+      const contents = directoryLink ? join(target, "codegraph.db") : target;
+      mkdirSync(dirname(contents), { recursive: true });
+      writeFileSync(contents, "outside fixture\n");
+      mkdirSync(dirname(link), { recursive: true });
+      symlinkSync(target, link, directoryLink ? "dir" : "file");
+      for (const args of [[...f.cleanup, "--dry-run"], ["runtime", ...f.removeExact]]) {
+        const result = f.cli(...args);
+        expect(result.status, result.stdout + result.stderr).toBe(1);
+        expect(result.stderr).toContain(JSON.stringify(path));
+        expect(lstatSync(link).isSymbolicLink()).toBe(true);
+        expect(readFileSync(contents, "utf8")).toBe("outside fixture\n");
+        f.retained();
+      }
+    });
+  });
+
+  test("slug cleanup retains dotfiles under collapsed harness outputs", () => {
+    withIgnoredCleanupFixture(".ai/harness/", f => {
+      const paths = ["evidence/.env", "evidence/runs/.env.local.json", "evidence/runs/.env.local",
+        "runs/junit/20261120T000000Z-123/.private.xml", `runs/task-agent-outbox/${"a".repeat(64)}/.env`]
+        .map(path => `.ai/harness/${path}`);
+      writeIgnoredFiles(f.worktree, paths);
+      for (const extra of [["--dry-run"], []]) {
+        const result = f.cli(...f.cleanup, ...extra);
+        expect(result.status, result.stdout + result.stderr).toBe(1);
+        for (const path of paths) {
+          expect(result.stderr).toContain(JSON.stringify(path));
+          expect(readFileSync(join(f.worktree, path), "utf8")).toBe("fixture\n");
+        }
+        f.retained();
+      }
+    });
+  });
+
+  test.each(["collapsed", "individual"])("slug cleanup retains unknown outbox files in %s Git listings", listing => {
+    const outbox = `.ai/harness/runs/task-agent-outbox/${"a".repeat(64)}`;
+    const notes = `${outbox}/notes.local`;
+    const paths = [`${outbox}/result-1.json`, `${outbox}/context-1.txt`, notes];
+    const tracked = listing === "individual" ? [`${outbox}/.gitkeep`] : [];
+    withIgnoredCleanupFixture(`.ai/harness/active-worktree\n${outbox}/`, f => {
+      writeIgnoredFiles(f.worktree, paths);
+      const inventory = run("git", ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"], f.worktree);
+      expect(inventory.status).toBe(0);
+      expect(inventory.stdout.split("\0").filter(path => path.startsWith(outbox)).sort())
+        .toEqual(listing === "individual" ? [...paths].sort() : [`${outbox}/`]);
+      for (const extra of [["--dry-run"], []]) {
+        const result = f.cli(...f.cleanup, ...extra);
+        expect(result.status, result.stdout + result.stderr).toBe(1);
+        expect(result.stderr).toContain(JSON.stringify(notes));
+        f.retained();
+        for (const path of paths) expect(readFileSync(join(f.worktree, path), "utf8")).toBe("fixture\n");
+      }
+    }, tracked);
+  });
+
+  test("slug cleanup retains unknown files under collapsed state and failures directories", () => {
+    const generated = [".ai/harness/state/protected-paths.json", ".ai/harness/failures/latest.jsonl"];
+    const unknown = [".ai/harness/state/.env", ".ai/harness/state/notes.local", ".ai/harness/failures/notes.local"];
+    withIgnoredCleanupFixture(".ai/harness/active-worktree\n.ai/harness/state/\n.ai/harness/failures/", f => {
+      writeIgnoredFiles(f.worktree, [...generated, ...unknown]);
+      const inventory = run("git", ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"], f.worktree);
+      expect(inventory.status).toBe(0);
+      expect(inventory.stdout.split("\0").filter(Boolean).sort())
+        .toEqual([".ai/harness/active-worktree", ".ai/harness/failures/", ".ai/harness/state/"]);
+      for (const extra of [["--dry-run"], []]) {
+        const result = f.cli(...f.cleanup, ...extra);
+        expect(result.status, result.stdout + result.stderr).toBe(1);
+        for (const path of unknown) expect(result.stderr).toContain(JSON.stringify(path));
+        f.retained();
+        for (const path of [...generated, ...unknown]) expect(readFileSync(join(f.worktree, path), "utf8")).toBe("fixture\n");
+      }
+    }, [".ai/harness/checks/.gitkeep"]);
+  });
+
+  test("slug cleanup allows named outputs in directories with tracked placeholders", () => {
+    const tracked = ["checks", "runs", "failures"].map(dir => `.ai/harness/${dir}/.gitkeep`);
+    withIgnoredCleanupFixture(".ai/harness/", f => {
+      writeIgnoredFiles(f.worktree, ["checks/change-assessment.latest.json", "runs/verification-vx-123.log",
+        "runs/verification-vx-123.json", "failures/latest.jsonl"].map(path => `.ai/harness/${path}`));
+      const preview = f.cli(...f.cleanup, "--dry-run");
+      expect(preview.status, preview.stdout + preview.stderr).toBe(0);
+      const unknown = [".ai/harness/checks/notes.local", ".ai/harness/runs/.env", ".ai/harness/runs/verification-.env.log"];
+      writeIgnoredFiles(f.worktree, unknown);
+      const blocked = f.cli(...f.cleanup);
+      expect(blocked.status).toBe(1);
+      for (const path of unknown) {
+        expect(blocked.stderr).toContain(JSON.stringify(path));
+        expect(readFileSync(join(f.worktree, path), "utf8")).toBe("fixture\n");
+      }
+      f.retained();
+      for (const path of unknown) rmSync(join(f.worktree, path));
+      const result = f.cli(...f.cleanup);
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(existsSync(f.worktree)).toBe(false);
+    }, tracked);
+  });
+
+  test("remove-exact rechecks ignored data added after a successful preview", () => {
+    withIgnoredCleanupFixture(".ai/harness/active-worktree\n.ai/harness/evidence/\n.env\n/node_modules\n/ private/", f => {
+      const ledger = ".ai/harness/evidence/events/log.jsonl";
+      writeIgnoredFiles(f.worktree, [ledger]);
+      const preview = f.cli(...f.cleanup, "--dry-run");
+      expect(preview.status, preview.stdout + preview.stderr).toBe(0);
+      const paths = ["build/.env", " private/keep.txt", ".ai/harness/evidence/events/unknown.txt"];
+      writeIgnoredFiles(f.worktree, paths);
+      symlinkSync(f.parent, join(f.worktree, "node_modules"), "dir");
+      const result = f.cli("runtime", ...f.removeExact);
+      expect(result.status, result.stdout + result.stderr).toBe(1);
+      for (const path of ["build/.env", " private/", ".ai/harness/evidence/events/unknown.txt", "node_modules"]) {
+        expect(result.stderr).toContain(JSON.stringify(path));
+      }
+      expect(result.stderr).toContain("git status --ignored");
+      f.retained();
+      for (const path of [ledger, ...paths]) expect(readFileSync(join(f.worktree, path), "utf8")).toBe("fixture\n");
+      expect(lstatSync(join(f.worktree, "node_modules")).isSymbolicLink()).toBe(true);
+    });
+  });
+
+  test("ignored inventory refuses Git exit errors, stderr and truncated output before removal", () => {
+    withIgnoredCleanupFixture(".ai/", f => {
+      const git = join(f.parent, "git");
+      const realGit = realpathSync(Bun.which("git")!);
+      writeFileSync(git, `#!/bin/sh
+if [ "$1" = ls-files ] && [ "$2" = --others ] && [ "$3" = --ignored ]; then
+  case "$FIXTURE_GIT_FAILURE" in
+    exit) exit 3 ;;
+    stderr) printf '\\n' >&2; exit 0 ;;
+    truncated) printf 'node_modules/'; exit 0 ;;
+  esac
+fi
+exec ${shellQuote(realGit)} "$@"
+`, { mode: 0o700 });
+      for (const failure of ["exit", "stderr", "truncated"]) {
+        const env = { REPO_HARNESS_GIT_BIN: git, FIXTURE_GIT_FAILURE: failure };
+        for (const attempt of [() => f.shell(env, ...f.cleanup, "--dry-run"), () => f.shell(env, ...f.cleanup), () => f.runtime(env)]) {
+          const result = attempt();
+          expect(result.status, result.stdout + result.stderr).toBe(1);
+          expect(result.stderr).toContain("ignored worktree inventory failed");
+          expect(result.stderr).toContain("git status --ignored");
+          f.retained();
+        }
+      }
+    });
+  });
 
   test("contract-worktree cleanup should dry-run then remove merged worktree, branch, and metadata", () => {
     const cwd = tmpWorkspace("helper-contract-cleanup");
@@ -500,12 +808,14 @@ describe("contract-worktree helper integration", () => {
 
       expect(run("git", ["worktree", "add", worktreePath, "-b", "codex/demo"], cwd).status).toBe(0);
       writeStartMetadata(cwd, "demo", "codex/demo");
-      writeFileSync(join(worktreePath, ".git"), "gitdir: /tmp/moved-repo/.git/worktrees/wt-demo\n");
+      const staleGitdir = "gitdir: /tmp/moved-repo/.git/worktrees/wt-demo\n";
+      writeFileSync(join(worktreePath, ".git"), staleGitdir);
 
       const dryRun = run("bash", ["scripts/contract-worktree.sh", "cleanup", "--slug", "demo", "--dry-run"], cwd);
-      expect(dryRun.status).toBe(0);
-      expect(dryRun.stderr).not.toContain("fatal:");
-      expect(dryRun.stdout).toContain("would repair stale worktree gitdir before dirty check");
+      expect(dryRun.status).toBe(1);
+      expect(dryRun.stderr).toContain("linked worktree status unavailable");
+      expect(dryRun.stderr).toContain(`git worktree repair '${worktreePath}'`);
+      expect(readFileSync(join(worktreePath, ".git"), "utf8")).toBe(staleGitdir);
       expect(existsSync(worktreePath)).toBe(true);
       expect(run("git", ["show-ref", "--verify", "--quiet", "refs/heads/codex/demo"], cwd).status).toBe(0);
 

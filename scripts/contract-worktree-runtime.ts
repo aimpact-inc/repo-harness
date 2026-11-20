@@ -132,6 +132,9 @@ try {
       console.log(JSON.stringify(result));
       if (result.status === 'cleanup_pending') process.exitCode = 1;
     }
+  } else if (action === 'assert-ignored-cleanup-safe') {
+    const { assertNoIgnoredCloseoutData } = await import(pathToFileURL(join(packageRoot, 'src/effects/state/coordination-worktree-topology.ts')).href) as typeof import('../src/effects/state/coordination-worktree-topology');
+    assertNoIgnoredCloseoutData(value('--worktree'));
   } else if (action === 'remove-exact') {
     const { removeExactWorktree } = await import(pathToFileURL(join(packageRoot, 'src/effects/state/coordination-worktree-topology.ts')).href) as typeof import('../src/effects/state/coordination-worktree-topology');
     removeExactWorktree(value('--repo'), {
