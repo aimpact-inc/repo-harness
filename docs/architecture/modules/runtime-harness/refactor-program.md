@@ -117,38 +117,41 @@ sequenceDiagram
 
 ### 3.1 必须保持的不变量
 
-1. **ArchContext 是结构观测的唯一权威。** repo-harness 不计算模块统计、依赖、环、重构评分或规模。建议的 id、生命周期状态和度量都来自 `archctx refactor scan` 和 `book recommendations`（`src/effects/refactor/archctx-provider.ts:28-37`）。
-2. **只展示同一次扫描的证据。** 每条建议带上产生它的观测度量和受影响模块的统计（`recommendations.ts:70-91`）。repo-harness 不合成其他内容。
-3. **有决定的建议不再显示。** 状态为 accepted、rejected、deferred、waived、resolved、superseded、expired 的建议被过滤（`recommendations.ts:52`、`:63`）。repo-harness 不保存投递账本、冷却时间或本地建议状态。
-4. **证据不完整时不给建议。** code facts 不完整或被截断时返回 `proof_required`（`recommendations.ts:103-105`）。任何文件有多个归属 capability 时也返回 `proof_required`，因为模块统计会重复计数这些文件（`recommendations.ts:106-110`）。模型未初始化时返回 `unavailable`（`:100`）。
-5. **只记录用户决定，从不执行重构。** `rh arch refactor decide` 在建议尚未记录时先记录扫描，再把 accept、defer 或 reject 连同理由交给 ArchContext（`src/cli/commands/refactor.ts:33-40`）。接受的建议走普通的 plan 和 PR 流程。
+1. **ArchContext 是结构观测的唯一权威。** repo-harness 不计算模块统计、依赖、环、重构评分或规模。建议的 id、生命周期状态和度量都来自 `archctx refactor scan` 和 `recommendations list`（`src/effects/refactor/archctx-provider.ts`）。`--node` 与 `--path` 只构造 `RefactorScopeV1` 传给 `refactor scan`，由 ArchContext 执行过滤。
+2. **只展示同一次扫描的证据。** 每条建议带上产生它的观测度量和受影响模块的统计（`src/effects/refactor/recommendations.ts`）。repo-harness 不合成其他内容。
+3. **有决定的建议不再显示。** 只读取 `recommendations list --status open` 与尚未被记录的扫描候选；已决定的建议由 ArchContext 过滤。repo-harness 不保存投递账本、冷却时间或本地建议状态。
+4. **证据不完整时不给建议。** code facts 不完整、达到 import limit 或被截断时返回 `proof_required`（`src/effects/refactor/recommendations.ts`）。`multiplyOwnedFileCount > 0` 时也返回 `proof_required`，防止重复计数污染统计；模型未初始化时返回 `unavailable`。
+5. **只记录用户决定，从不执行重构。** `rh arch refactor decide` 把 `accept`、`defer` 或 `reject` 连同理由交给 ArchContext（`src/cli/commands/refactor.ts`、`src/cli/commands/refactor-actions.ts`）。接受的建议走普通的 plan 和 PR 流程。
 6. **建议是按需证据，不是推送。** 没有 hook 扫描建议。Bot 调用 `rh arch refactor recommendations --json` 读取证据，再决定是否调度工作（PR #617；`assets/skill-commands/repo-harness-check/references/architecture-evidence.md`）。
-7. **包内 archctx 先过版本检查。** 每个仓库根第一次调用时检查 `capabilities --json` 的精确版本（`archctx-provider.ts:17-20`）。provider 错误统一转成 `refactor_provider_unavailable`（`:24`）。archctx 超时转成 `refactor_provider_timeout`，动作为 `raise-timeout-and-retry`。
+7. **包内 archctx 统一经 `ArchctxClient` 校验并透传类型化错误。** `ArchctxClient` 已校验 `archcontext.envelope/v1` 与精确版本；provider 保留 `ArchctxClientError` 的 `code`、`reasonCode`、`action` 与 `providerMessage` 到 `RefactorProviderError`，超时转成 `refactor_provider_timeout`（动作为 `raise-timeout-and-retry`），非类型化过程异常转成 `refactor_provider_unavailable`。
 
 ### 3.2 关键权衡
 
 | 决策 | 权衡 |
 | --- | --- |
-| 删除 Refactor Program 执行栈（PR #617） | 没有 skill 或 MCP 工具使用它，Stop 也只打印 `recommended: undefined`。删除后本 capability 只剩 4 个文件、约 285 行。代价是接受的建议要由 Bot 或人重新写成 plan。 |
-| 多归属文件存在时一律 `proof_required` | 不会给出基于重复计数的建议。代价是本仓库目前有 45 个多归属文件，所以 `rh arch refactor recommendations` 在本仓库总是返回 `proof_required`，直到 arch-context#296 和 resolver 改动完成。 |
-| `decide` 每次重新扫描 | 决定总是针对当前扫描里存在的建议，未知 id 直接报错（`refactor.ts:36`）。代价是每次决定都付一次完整扫描（provider 超时默认 120 秒，`--timeout-ms` 可覆盖）。 |
-| CLI 退出码区分证据状态 | `unavailable` 和 `proof_required` 退出码为 1（`refactor.ts:56`），Bot 可以不解析 JSON 就知道证据不可用。代价是"没有建议"与"无法给建议"在退出码层面不同，调用方必须区分。 |
+| 删除 Refactor Program 执行栈（PR #617） | 没有 skill 或 MCP 工具使用它，Stop 也只打印 `recommended: undefined`。删除后本 capability 只剩 4 个文件。代价是接受的建议要由 Bot 或人重新写成 plan。 |
+| 多归属文件存在时一律 `proof_required` | 不会给出基于重复计数的建议。在当前 `main`（206 个节点）上 `multiplyOwnedFileCount = 0`，不再因历史多归属文件阻塞；当模型出现多归属或 CodeGraph 索引未就绪时仍 fail closed 返回 `proof_required`。 |
+| 支持 `--node` 与可重复 `--path` 范围参数 | 调用方可在不重写 `.archcontext` 模型的情况下按节点或 repo-relative POSIX 路径聚焦扫描，两者互斥且在参数校验阶段拒绝混合或非法路径；代价是 `recommendations list --status open` 仍返回全库 open 记录，只对本次 scan 应用 `RefactorScopeV1`。 |
+| `decide` 由 ArchContext 校验并在必要时隐式记录 | 未知或陈旧 id 由 `AC_REFACTOR_STALE` 等上游错误码与 `reasonCode` 原样返回；需要按扫描相同 `--import-node-limit` 调用 `decide`。 |
+| CLI 退出码区分证据状态 | `unavailable` 和 `proof_required` 退出码为 1（`src/cli/commands/refactor.ts`），调用方不解析 JSON 也能区分证据不可用与 `no_action`。 |
 
-### 3.3 组件与关系（2026-10-11）
+### 3.3 组件与关系（2026-11-20）
 
 | 节点 | footprint | 说明 |
 | --- | --- | --- |
-| `component.refactor-program.archctx-provider` | `src/effects/refactor/archctx-provider.ts` | 运行 scan、读取建议记录、记录扫描、提交决定 |
-| capability 自身 | `src/core/refactor/**`、`src/effects/refactor/recommendations.ts`、`src/cli/commands/refactor.ts` | 证据整理、proof 判定、CLI |
+| `component.refactor-program.archctx-provider` | `src/effects/refactor/archctx-provider.ts` | 构造 `RefactorScopeV1`、调用 `runPackageLocalArchctxJson` 扫描与提交决定 |
+| `component.refactor-program.core-layer` | `src/core/refactor/**` | `RefactorProviderError`、`normalizeRefactorScope`、响应负载拆包 |
+| `component.refactor-program.cli-layer` | `src/cli/commands/refactor.ts`、`src/cli/commands/refactor-actions.ts` | `--node` / `--path` 参数校验、文本与 JSON 格式化、decision 入口 |
+| capability 自身 | `src/effects/refactor/recommendations.ts` | 合并扫描与 open 记录、proof 门判定 |
 
 对外关系：
 
-- archctx-provider → `global-runtime-reconciliation`：调用 `runPackageLocalArchctxJson`（`archctx-provider.ts:9`、`:21`），并使用 `assertArchctxVersion`（`:2`）。
-- capability → `mcp-sidecar`：`refactor.ts` 用 `canonicalRepoPath` 解析仓库根（`refactor.ts:2`）。
+- archctx-provider → `global-runtime-reconciliation`：调用 `runPackageLocalArchctxJson` 与 `commandLabel`（`src/effects/refactor/archctx-provider.ts`）。
+- capability → `mcp-sidecar`：`refactor.ts` 用 `canonicalRepoPath` 解析仓库根。
 
 ### 3.4 开放问题
 
-- `archctx-provider.ts:4` 引用 `src/core/evidence/canonical-json.ts`。该文件归 `evidence-ledger`。集成步骤声明了 archctx-provider → evidence-ledger。
+- `src/effects/refactor/archctx-provider.ts` 引用 `src/core/evidence/canonical-json.ts`（归 `evidence-ledger`）规范化 `--request-json`。
 
 ## Verification
 
@@ -162,6 +165,12 @@ Run the root required checks and the focused tests recorded in the capability no
 - `refactor recommendations` 显示建议和同一次扫描的度量。`refactor decide <id> accept|defer|reject --reason` 记录决定。
 - Stop 不再扫描建议，全局 `refactor_recommendations` 设置被删除。证据由 Bot 按需读取。
 - 恢复多归属文件的 proof 门：`multiplyOwnedFileCount > 0` 时返回 `proof_required`。
+
+### 范围读取、多归属清零与错误透传（2026-11-20，#3346）
+
+- `main` 模型重构后 206 个节点的 `multiplyOwnedFileCount` 已降为 `0`，文档中"45 个多归属文件阻塞推荐"的过期描述移除。
+- `rh arch refactor recommendations` 新增互斥的 `--node <nodeId>` 与可重复 `--path <repo-relative-path>`，通过 `RefactorScopeV1` 透传给 `archctx refactor scan`。
+- `src/effects/refactor/archctx-provider.ts` 不再跳过 `ArchctxClient` 的错误信封解码，改由 `RefactorProviderError` 保留上游 `code`、`reasonCode` 与 `action`。
 
 ### 旧版 P3 原文（2026-10-11 之前，逐字保留）
 
@@ -177,4 +186,4 @@ Run the root required checks and the focused tests recorded in the capability no
 ## Optimization Backlog
 
 - capability 名称仍是 "Refactor Recommendations"，id 仍是 `refactor-program`。id 是持久数据键，按用户决定不改名。文档和 Bot 引用时需要说明两者对应。
-- `rh arch refactor recommendations` 在本仓库被多归属文件阻塞（§3.2）。arch-context#296 完成并收窄 umbrella include 后，用本命令验证 proof 门是否放开。
+- 后续待 `Ancienttwo/arch-context#619` 与 `0.17` 切面到位后，评估 `decide` 免重复全库扫描的 daemon 缓存路径。

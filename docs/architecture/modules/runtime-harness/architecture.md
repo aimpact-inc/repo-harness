@@ -157,6 +157,30 @@ sequenceDiagram
 
 ## 3. P3:設計決策與不變量
 
+### 3.1 必须保持的不变量
+
+1. **包内 `archctx` 与 Node 版本门禁。** 所有架构读写、投影与核验只运行包内精确版本的 `archctx`（`ARCHCTX_REQUIRED_VERSION`，`src/core/architecture/projection.ts`）。`resolveCompatibleNodeRuntime` 按 `REPO_HARNESS_NODE_BIN`、`PATH`、受信任候选列表的顺序探测兼容版本，并在未传自定义候选源且无超紧截止预算（> 5 s）时按 `(REPO_HARNESS_NODE_BIN, PATH, PATHEXT)` 进程内记忆化（`src/effects/architecture/archctx-provider.ts`）。
+2. **`rh arch` 处置表是唯一入口。** `ARCHCTX_COMMAND_DISPOSITIONS` 覆盖 `archctx help` 的全部命令并只放行 `pass` 命令；`projection`、`debt`、`refactor`、`recommendations` 归 `owned`，`install`、`uninstall`、`update`、`hooks`、`mcp`、`tunnel`、`audit`、`investigate`、`agents`、`jobs`、`hook` 在启动子进程前按 `refused` 退出码 2 拒绝（`src/core/architecture/projection.ts`、`src/cli/commands/arch-actions.ts`）。
+3. **只读核验与写投影严格分离。** `readArchVerification`（`rh arch verify`）与 `readArchitectureView` 只调用只读命令并保留上游错误码与消息（`src/effects/architecture/architecture-read.ts`）。`projection apply` 和 `adopt` 受策略开关控制，并在提交后以 `readback` 与 `receiptDigest` 验证（`src/effects/architecture/projection-apply.ts`）。
+4. **Core 与 Plugin 通过契约端口解耦。** `src/core/**` 只通过 `src/core/architecture/contracts.ts` 的注册端口访问 `ownership`、`display`、`notice`、`runtime`、`setup`、`codegraph`；未选择 `architecture` 插件时返回类型化不可用状态，从不直接导入插件实现。
+5. **模型就绪与 Hook 通知在预算内 Fail Closed/Open。** `inspectArchitectureProjectionReadiness` 在清单不兼容、CodeGraph 未就绪或守护进程版本不匹配时阻止 `apply`。`AgentNotice` 严格受限于 3 s 预算、单行诊断与脱敏输出。
+6. **辅助投影与边界检查字节一致。** `scripts/sync-helper-sources.ts`、`scripts/check-state-boundaries.ts` 和 `scripts/project-test-capabilities.ts` 确保独立解析器投影与分层依赖规则无漂移。
+
+### 3.2 关键权衡
+
+| 决策 | 权衡 |
+| --- | --- |
+| 按环境元组记忆化 `resolveCompatibleNodeRuntime` | 同进程多次 `ArchctxClient` 调用只探测一次 `node --version`；仅当未注入自定义候选源且剩余预算大于 5 s 时命中缓存，避免测试替身与紧截止探针读取过期路径。 |
+| 退役 `#2869` 的 `held` 处置状态 | 将 `audit`、`investigate`、`agents`、`jobs` 归入 `refused`（指向 `rh seats` 与 `repo-harness-issue-flow`），将 `hook` 归入 `refused`（指向 `rh install`），删除 `held` 分支使处置表只有 `pass`、`owned`、`refused` 三态。 |
+| 面向端口注册而非静态直接调用 | 核心层可独立于安装插件进行单测与边界校验；代价是 CLI/Hook 入口必须显式调用 `registerArchitecturePorts`。 |
+
 ## 4. 歷史決策記錄(append-only)
 
+### Node 探针记忆化与 `#2869` 处置收口（2026-11-20，#3346）
+
+- `resolveCompatibleNodeRuntime` 对默认候选源与宽松截止时间按 `(REPO_HARNESS_NODE_BIN, PATH, PATHEXT)` 进程内记忆化，消除同一进程重复派生 `node --version`。
+- 将 `audit`、`investigate`、`agents`、`jobs` 与 `hook` 从 `held` 改为 `refused`，移除 `ArchctxDisposition` 中的 `held` 变体。
+
 ## Optimization Backlog
+
+- 保持各架构子命令对 `ArchctxClient` 错误信封与 `ArchctxClientError` 类型字段的直接透传，避免在下游调用点重复包裹错误文本。

@@ -3,9 +3,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { RefactorProviderError } from '../../src/core/refactor/provider-contract';
+import { RefactorProviderError, type RefactorScopeV1 } from '../../src/core/refactor/provider-contract';
 import { observeRefactorRecommendations, refactorCandidates, type RefactorDiscovery } from '../../src/effects/refactor/recommendations';
-import { formatRefactorRecommendations } from '../../src/cli/commands/refactor';
+import { buildRefactorCommand, formatRefactorRecommendations } from '../../src/cli/commands/refactor';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -157,12 +157,12 @@ test('the import node limit reaches the scan and its remedy is a larger limit, n
   expect(limits).toEqual([100, undefined]);
 });
 
-test('a provider error keeps its code, action and full message', () => {
+test('a provider error keeps its code, reasonCode, action and full message', () => {
   const f = fixture();
   const message = `repository state is stale: ${'x'.repeat(1500)}`;
-  const failed = observeRefactorRecommendations(f.repo, { env: f.env, discover: () => { throw new RefactorProviderError('AC_REFACTOR_STALE', message, 'rerun-refactor-scan'); } });
-  expect(failed).toMatchObject({ status: 'unavailable', candidates: [], code: 'AC_REFACTOR_STALE', action: 'rerun-refactor-scan', message });
-  expect(formatRefactorRecommendations(failed)).toBe(`[RefactorRecommendations] unavailable: AC_REFACTOR_STALE: ${message} (action: rerun-refactor-scan)\n`);
+  const failed = observeRefactorRecommendations(f.repo, { env: f.env, discover: () => { throw new RefactorProviderError('AC_REFACTOR_STALE', message, 'rerun-refactor-scan', 'refactor-measurement-changed'); } });
+  expect(failed).toMatchObject({ status: 'unavailable', candidates: [], code: 'AC_REFACTOR_STALE', reasonCode: 'refactor-measurement-changed', action: 'rerun-refactor-scan', message });
+  expect(formatRefactorRecommendations(failed)).toBe(`[RefactorRecommendations] unavailable: AC_REFACTOR_STALE: ${message} (reasonCode: refactor-measurement-changed) (action: rerun-refactor-scan)\n`);
 });
 
 test('a refactor scan timeout stays unavailable with its code and action', () => {
@@ -183,4 +183,33 @@ test('an unavailable provider or a missing model reports unavailable without a s
   expect(failed.code).toBeUndefined();
   rmSync(join(f.repo, '.archcontext'), { recursive: true });
   expect(observeRefactorRecommendations(f.repo, { env: f.env, discover: () => { throw new Error('must not scan'); } }).status).toBe('unavailable');
+});
+
+test('forwards node and sorted-unique paths scopes and refuses conflicting or invalid scopes', () => {
+  const f = fixture();
+  const scopes: Array<RefactorScopeV1 | undefined> = [];
+  observeRefactorRecommendations(f.repo, {
+    env: f.env,
+    scope: { kind: 'node', nodeId: 'capability.runtime-harness.architecture' },
+    discover: (_root, _provider, _limit, _timeout, scope) => { scopes.push(scope); return discovery(); },
+  });
+  observeRefactorRecommendations(f.repo, {
+    env: f.env,
+    scope: { kind: 'paths', paths: ['src/b.ts', 'src/a.ts', 'src/b.ts'] },
+    discover: (_root, _provider, _limit, _timeout, scope) => { scopes.push(scope); return discovery(); },
+  });
+  expect(scopes).toEqual([
+    { kind: 'node', nodeId: 'capability.runtime-harness.architecture' },
+    { kind: 'paths', paths: ['src/a.ts', 'src/b.ts'] },
+  ]);
+  const badPath = observeRefactorRecommendations(f.repo, { env: f.env, scope: { kind: 'paths', paths: ['../escape.ts'] } });
+  expect(badPath).toMatchObject({ status: 'unavailable', code: 'refactor_invalid_scope' });
+
+  const command = buildRefactorCommand();
+  const recommendations = command.commands.find((entry) => entry.name() === 'recommendations')!;
+  recommendations.exitOverride();
+  recommendations.configureOutput({ writeOut: () => {}, writeErr: () => {} });
+  expect(() => recommendations.parse(['--node', 'capability.a', '--path', 'src/a.ts'], { from: 'user' })).toThrow();
+  expect(recommendations.options.map((option) => option.long)).toContain('--node');
+  expect(recommendations.options.map((option) => option.long)).toContain('--path');
 });
