@@ -61,6 +61,18 @@ export interface SeatConfigV1 {
 export const PI_CODEX_MODEL_PREFIX = 'magpie/codex/';
 export const isPiCodexSeat = (seat: { readonly runtime: SeatRuntime; readonly model: string | null }): boolean =>
   seat.runtime === 'pi' && seat.model?.startsWith(PI_CODEX_MODEL_PREFIX) === true;
+
+export const PI_AGY_MODEL_PREFIX = 'magpie/agy-cli/';
+const AGY_NEON_MODEL = 'gemini-4-neon';
+export const PI_NEON_MODEL = `${PI_AGY_MODEL_PREFIX}${AGY_NEON_MODEL}`;
+
+export const isNeonSeat = (seat: Pick<SeatConfigV1, 'runtime' | 'model'>): boolean =>
+  (seat.runtime === 'pi' && seat.model === PI_NEON_MODEL)
+  || (seat.runtime === 'agy' && seat.model?.startsWith(AGY_NEON_MODEL) === true);
+
+export const isClaudeOrNeonSeat = (seat: Pick<SeatConfigV1, 'runtime' | 'model'>): boolean =>
+  seat.runtime === 'claude' || isNeonSeat(seat);
+
 /** Fleet access depends on the seat's role range, independent of the model that the runtime runs. */
 export const seatTakesFleet = (seat: { readonly runtime: SeatRuntime }): boolean => seat.runtime !== 'agy';
 
@@ -413,7 +425,7 @@ function decodeSeatsRecord(record: Record<string, unknown>, code: string, fromSe
   if (routing !== undefined) {
     if (!fromSettingsRequest && routing.low_quota_explorer.model === null) invalid(code);
     if (ROUTING_CLASSES.some(task => routing[task].some(id => seats[id] === null))) invalid(code);
-    if (routing.frontend.some(id => seats[id] !== undefined && seats[id]!.runtime !== 'claude')) invalid(code);
+    if (routing.frontend.some(id => seats[id] !== undefined && !isClaudeOrNeonSeat(seats[id]!))) invalid(code);
   }
   if (REQUIRED_SECTION_KEYS.some(key => !(key in record))) throw new SeatsConfigMigrationRequiredError();
   const piModels = 'pi_sub_agent_models' in record ? decodePiSubAgentModels(record.pi_sub_agent_models, code) : undefined;
