@@ -123,4 +123,36 @@ describe("refactor archctx provider", () => {
     expect(decideRecommendation("rec.1", "defer", "after the release", root, { consumerRoot: process.cwd(), run }, 100).status).toBe("deferred");
     expect(calls).toEqual([["recommendations", "defer", "--id", "rec.1", "--reason", "after the release", "--import-node-limit", "100", "--json"]]);
   });
+
+  test("forwards node and paths scopes to refactor scan", () => {
+    const root = repo(); const calls: string[][] = [];
+    const run = runner(calls, () => envelope("refactor.scan", shippedScan()));
+    runRefactorScan(root, { consumerRoot: process.cwd(), run }, undefined, undefined, { kind: "node", nodeId: "capability.runtime-harness.architecture" });
+    runRefactorScan(root, { consumerRoot: process.cwd(), run }, undefined, undefined, { kind: "paths", paths: ["src/core/refactor/provider-contract.ts", "src/effects/refactor/recommendations.ts"] });
+    expect(calls.map((args) => JSON.parse(args[3]!))).toEqual([
+      { schemaVersion: "archcontext.refactor-request/v1", scope: { kind: "node", nodeId: "capability.runtime-harness.architecture" } },
+      { schemaVersion: "archcontext.refactor-request/v1", scope: { kind: "paths", paths: ["src/core/refactor/provider-contract.ts", "src/effects/refactor/recommendations.ts"] } },
+    ]);
+  });
+
+  test("preserves ArchctxClientError code, reasonCode, action and message instead of flattening non-timeout errors", () => {
+    const root = repo();
+    const withReason = runner([], () => errorEnvelope("refactor.scan", "AC_SCHEMA_INVALID", "invalid scope node", "refactor-scan-invalid"));
+    try {
+      runRefactorScan(root, { consumerRoot: process.cwd(), run: withReason });
+      throw new Error("expected failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(RefactorProviderError);
+      expect(error).toMatchObject({ code: "AC_SCHEMA_INVALID", reasonCode: "refactor-scan-invalid", action: "repair-model", message: "invalid scope node" });
+    }
+
+    const missingPackageRoot = repo();
+    try {
+      runRefactorScan(root, { consumerRoot: missingPackageRoot, run: runner([], () => envelope("refactor.scan", shippedScan())) });
+      throw new Error("expected failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(RefactorProviderError);
+      expect(error).toMatchObject({ code: "RH_ARCHCTX_PACKAGE_MISSING", action: "update-repo-harness" });
+    }
+  });
 });

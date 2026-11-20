@@ -26,6 +26,7 @@ import {
 import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError, classifyArchitectureFreshness, decodeNativeContextExport, firstRenderChangeCommit, summarizeArchitectureRender, decodeArchitectureHandEdits, type NativeContextSource } from '../src/core/architecture/projection';
 import type { ArchctxProcessResult, ArchitectureProjectionPolicy, RunArchctxProcess } from '../src/core/architecture/contracts';
 import {
+  ArchctxClient,
   archctxCapabilities,
   architectureProjectionRequest,
   verifyArchctxDaemonRuntime,
@@ -2059,4 +2060,46 @@ test('does not scan fallback Node locations after explicit or PATH selection', (
   expect(resolveCompatibleNodeRuntime({ PATH: '', REPO_HARNESS_NODE_BIN: node }, inaccessibleFallback)).toBe(realpathSync(node));
   expect(resolveCompatibleNodeRuntime({ PATH: bin }, inaccessibleFallback)).toBe(realpathSync(node));
   expect(() => resolveCompatibleNodeRuntime({ PATH: '', REPO_HARNESS_NODE_BIN: 'node' }, inaccessibleFallback)).toThrow('must be an absolute path');
+});
+
+test('memoizes node --version probes across repeated ArchctxClient calls with matching env and bypasses tight deadlines', () => {
+  if (process.platform === 'win32') return;
+  const f = fixture();
+  const bin = join(f.root, 'memo-bin');
+  const otherBin = join(f.root, 'other-bin');
+  mkdirSync(bin);
+  mkdirSync(otherBin);
+  const countFile = join(f.root, 'probe-count');
+  const realNode = resolveCompatibleNodeRuntime(process.env);
+  const probeCounter = (dir: string, version: string) => {
+    const path = join(dir, 'node');
+    writeFileSync(path, [
+      '#!/bin/sh',
+      `if [ "$1" = "--version" ]; then echo x >> ${JSON.stringify(countFile)}; echo v${version}; exit 0; fi`,
+      `exec ${JSON.stringify(realNode)} "$@"`,
+      '',
+    ].join('\n'));
+    chmodSync(path, 0o755);
+    return path;
+  };
+  const countingNode = probeCounter(bin, '24.18.0');
+  probeCounter(otherBin, '24.19.0');
+  writeFileSync(f.binary, [
+    '#!/usr/bin/env node',
+    `console.log(JSON.stringify({ schemaVersion: 'archcontext.capabilities/v1', package: { name: 'archctx', version: ${JSON.stringify(ARCHCTX_REQUIRED_VERSION)} } }));`,
+    '',
+  ].join('\n'));
+  const env: NodeJS.ProcessEnv = { ...process.env, PATH: `${bin}:/usr/bin:/bin` };
+  delete env.REPO_HARNESS_NODE_BIN;
+  for (let i = 0; i < 5; i += 1) {
+    const client = new ArchctxClient(f.repoRoot, ARCHCTX_REQUIRED_VERSION, { consumerRoot: f.consumerRoot, env });
+    expect((client.json(['capabilities', '--json']) as { package: { version: string } }).package.version).toBe(ARCHCTX_REQUIRED_VERSION);
+  }
+  expect(readFileSync(countFile, 'utf8').trim().split('\n')).toHaveLength(1);
+  // Different PATH invalidates cache key and probes once for the new key.
+  expect(resolveCompatibleNodeRuntime({ ...process.env, PATH: `${otherBin}:/usr/bin:/bin` })).toBe(realpathSync(join(otherBin, 'node')));
+  expect(readFileSync(countFile, 'utf8').trim().split('\n')).toHaveLength(2);
+  // Tight <= 5s caller deadline bypasses cache so the caller timeout controls the probe.
+  expect(resolveCompatibleNodeRuntime(env, undefined, { deadlineMs: 4_000, nowMs: () => 0 })).toBe(realpathSync(countingNode));
+  expect(readFileSync(countFile, 'utf8').trim().split('\n')).toHaveLength(3);
 });

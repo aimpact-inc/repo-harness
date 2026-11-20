@@ -1,7 +1,7 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
-import type { RecommendationV3 } from 'archctx-contracts';
-import { RefactorProviderError, type RefactorScanResultV1 } from '../../core/refactor/provider-contract';
+import type { RecommendationV3, RefactorScopeV1 } from 'archctx-contracts';
+import { normalizeRefactorScope, RefactorProviderError, type RefactorScanResultV1 } from '../../core/refactor/provider-contract';
 import type { ArchctxProviderOptions } from '../../core/architecture/contracts';
 import { listOpenRecommendations, runRefactorScan } from './archctx-provider';
 
@@ -43,8 +43,9 @@ export interface RefactorRecommendationResult {
   status: 'recommended' | 'no_action' | 'proof_required' | 'unavailable';
   candidates: readonly RefactorRecommendation[];
   message?: string;
-  /** Provider error code and the remedy archctx names for it, kept when status is `unavailable`. */
+  /** Provider error code, reasonCode, and the remedy archctx names for it, kept when status is `unavailable`. */
   code?: string;
+  reasonCode?: string;
   action?: string;
 }
 /** Open suggestions come from two places: records the ledger already holds as `open`, and scan candidates it does not hold yet. */
@@ -58,15 +59,23 @@ export interface RefactorRecommendationOptions {
   importNodeLimit?: number;
   /** Per archctx call limit in ms; the default is 120000. `rh arch refactor decide` takes the same option. */
   timeoutMs?: number;
-  discover?: (repoRoot: string, provider: ArchctxProviderOptions, importNodeLimit?: number, timeoutMs?: number) => RefactorDiscovery;
+  /** Limits scan observations to a declared node or repository-relative paths. */
+  scope?: RefactorScopeV1;
+  discover?: (repoRoot: string, provider: ArchctxProviderOptions, importNodeLimit?: number, timeoutMs?: number, scope?: RefactorScopeV1) => RefactorDiscovery;
 }
 
 const result = (status: RefactorRecommendationResult['status'], message?: string): RefactorRecommendationResult => ({
   schemaVersion: 'repo-harness.refactor-recommendations/v2', status, candidates: [], ...(message ? { message } : {}),
 });
 
-export function discoverRefactorRecommendations(repoRoot: string, provider: ArchctxProviderOptions, importNodeLimit?: number, timeoutMs?: number): RefactorDiscovery {
-  return { scan: runRefactorScan(repoRoot, provider, importNodeLimit, timeoutMs), open: listOpenRecommendations(repoRoot, provider, timeoutMs) };
+export function discoverRefactorRecommendations(
+  repoRoot: string,
+  provider: ArchctxProviderOptions,
+  importNodeLimit?: number,
+  timeoutMs?: number,
+  scope: RefactorScopeV1 = { kind: 'repository' },
+): RefactorDiscovery {
+  return { scan: runRefactorScan(repoRoot, provider, importNodeLimit, timeoutMs, scope), open: listOpenRecommendations(repoRoot, provider, timeoutMs) };
 }
 
 export function refactorCandidates({ scan, open }: RefactorDiscovery): RefactorRecommendation[] {
@@ -107,9 +116,18 @@ function moduleEvidence(entry: ModuleStatistics): RefactorModuleEvidence {
  */
 export function observeRefactorRecommendations(repoRoot: string, options: RefactorRecommendationOptions = {}): RefactorRecommendationResult {
   try {
+    const scope = options.scope === undefined
+      ? undefined
+      : options.scope.kind === 'node'
+        ? normalizeRefactorScope({ node: options.scope.nodeId })
+        : options.scope.kind === 'paths'
+          ? normalizeRefactorScope({ paths: options.scope.paths })
+          : { kind: 'repository' as const };
     const root = realpathSync(repoRoot);
     if (!existsSync(join(root, '.archcontext/manifest.yaml'))) return result('unavailable', 'repository architecture model is not initialized');
-    const discovery = (options.discover ?? discoverRefactorRecommendations)(root, { env: options.env }, options.importNodeLimit, options.timeoutMs);
+    const discovery = scope === undefined
+      ? (options.discover ?? discoverRefactorRecommendations)(root, { env: options.env }, options.importNodeLimit, options.timeoutMs)
+      : (options.discover ?? discoverRefactorRecommendations)(root, { env: options.env }, options.importNodeLimit, options.timeoutMs, scope);
     const { codeFacts: facts, repositorySummary } = discovery.scan.snapshot;
     if (facts.reasonCodes.includes('code-facts-import-limit')) {
       return result('proof_required', importLimitRemedy(facts));
@@ -126,7 +144,12 @@ export function observeRefactorRecommendations(repoRoot: string, options: Refact
     return { ...result(candidates.length ? 'recommended' : 'no_action'), candidates };
   } catch (error) {
     if (error instanceof RefactorProviderError) {
-      return { ...result('unavailable', error.message), code: error.code, ...(error.action ? { action: error.action } : {}) };
+      return {
+        ...result('unavailable', error.message),
+        code: error.code,
+        ...(error.reasonCode ? { reasonCode: error.reasonCode } : {}),
+        ...(error.action ? { action: error.action } : {}),
+      };
     }
     return result('unavailable', error instanceof Error ? error.message : String(error));
   }

@@ -1,4 +1,4 @@
-import type { RecommendationV3 } from "archctx-contracts";
+import type { RecommendationV3, RefactorScopeV1 } from "archctx-contracts";
 import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError } from "../../core/architecture/projection";
 import type { ArchctxProviderOptions } from "../../core/architecture/contracts";
 import { canonicalize } from "../../core/evidence/canonical-json";
@@ -15,21 +15,30 @@ import { commandLabel, runPackageLocalArchctxJson } from "../architecture/archct
 /** Package resolution refuses an installed archctx whose manifest is not the pinned version. */
 function invoke(repoRoot: string, args: readonly string[], options: ArchctxProviderOptions, timeoutMs: number): unknown {
   try {
-    return runPackageLocalArchctxJson(repoRoot, ARCHCTX_REQUIRED_VERSION, args, options, timeoutMs, true).value;
+    return runPackageLocalArchctxJson(repoRoot, ARCHCTX_REQUIRED_VERSION, args, options, timeoutMs).value;
   } catch (error) {
     if (error instanceof RefactorProviderError) throw error;
-    if (error instanceof ArchctxClientError && error.code === "RH_ARCHCTX_TIMEOUT") {
-      // A decision call can finish inside archctx after repo-harness stops waiting.
-      const isDecision = args[0] === "recommendations" && args[1] !== "list";
-      const outcome = isDecision ? " Decision outcome unknown: archctx may already have recorded the decision. Run `rh arch refactor recommendations` to check before retrying." : "";
-      throw new RefactorProviderError("refactor_provider_timeout", `${commandLabel(args)} timed out after ${timeoutMs} ms.${outcome} Retry with --timeout-ms <larger value> (max ${REFACTOR_MAX_TIMEOUT_MS}).`, "raise-timeout-and-retry");
+    if (error instanceof ArchctxClientError) {
+      if (error.code === "RH_ARCHCTX_TIMEOUT") {
+        // A decision call can finish inside archctx after repo-harness stops waiting.
+        const isDecision = args[0] === "recommendations" && args[1] !== "list";
+        const outcome = isDecision ? " Decision outcome unknown: archctx may already have recorded the decision. Run `rh arch refactor recommendations` to check before retrying." : "";
+        throw new RefactorProviderError("refactor_provider_timeout", `${commandLabel(args)} timed out after ${timeoutMs} ms.${outcome} Retry with --timeout-ms <larger value> (max ${REFACTOR_MAX_TIMEOUT_MS}).`, "raise-timeout-and-retry", error.reasonCode);
+      }
+      throw new RefactorProviderError(error.code, error.providerMessage, error.action, error.reasonCode);
     }
     throw new RefactorProviderError("refactor_provider_unavailable", error instanceof Error ? error.message : String(error));
   }
 }
 
-export function runRefactorScan(repoRoot: string, options: ArchctxProviderOptions = {}, importNodeLimit?: number, timeoutMs = REFACTOR_DEFAULT_TIMEOUT_MS): RefactorScanResultV1 {
-  const request = { schemaVersion: "archcontext.refactor-request/v1", scope: { kind: "repository" } };
+export function runRefactorScan(
+  repoRoot: string,
+  options: ArchctxProviderOptions = {},
+  importNodeLimit?: number,
+  timeoutMs = REFACTOR_DEFAULT_TIMEOUT_MS,
+  scope: RefactorScopeV1 = { kind: "repository" },
+): RefactorScanResultV1 {
+  const request = { schemaVersion: "archcontext.refactor-request/v1", scope };
   const value = invoke(repoRoot, ["refactor", "scan", "--request-json", canonicalize(request as never), ...importNodeLimitArgs(importNodeLimit), "--json"], options, timeoutMs);
   return refactorEnvelopeData(value, "refactor.scan", "archcontext.runtime-refactor-scan/v1") as unknown as RefactorScanResultV1;
 }

@@ -1,5 +1,12 @@
-import { Command, InvalidArgumentError } from 'commander';
-import { REFACTOR_DEFAULT_TIMEOUT_MS, REFACTOR_MAX_TIMEOUT_MS, REFACTOR_MIN_TIMEOUT_MS, RefactorProviderError, type RefactorDecision } from '../../core/refactor/provider-contract';
+import { Command, InvalidArgumentError, Option } from 'commander';
+import {
+  normalizeRefactorScope,
+  REFACTOR_DEFAULT_TIMEOUT_MS,
+  REFACTOR_MAX_TIMEOUT_MS,
+  REFACTOR_MIN_TIMEOUT_MS,
+  RefactorProviderError,
+  type RefactorDecision,
+} from '../../core/refactor/provider-contract';
 import { canonicalRepoPath } from '../../effects/repo-registry';
 import type { RefactorRecommendation, RefactorRecommendationResult } from '../../effects/refactor/recommendations';
 
@@ -9,7 +16,8 @@ const EVIDENCE_ITEMS_SHOWN = 5;
 export function formatRefactorRecommendations(value: RefactorRecommendationResult): string {
   if (value.status !== 'recommended') {
     const detail = [value.code, value.message].filter(Boolean).join(': ');
-    return `[RefactorRecommendations] ${value.status}${detail ? `: ${detail}` : ''}${value.action ? ` (action: ${value.action})` : ''}\n`;
+    const reason = value.reasonCode ? ` (reasonCode: ${value.reasonCode})` : '';
+    return `[RefactorRecommendations] ${value.status}${detail ? `: ${detail}` : ''}${reason}${value.action ? ` (action: ${value.action})` : ''}\n`;
   }
   return value.candidates.map(formatCandidate).join('\n');
 }
@@ -58,9 +66,14 @@ function parseTimeoutMs(value: string): number {
   return Number(value);
 }
 
+function collectScopePath(value: string, previous: string[] = []): string[] {
+  return [...previous, value];
+}
+
 function fail(error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`${error instanceof RefactorProviderError ? `${error.code}: ${message}${error.action ? ` (action: ${error.action})` : ''}` : message}\n`);
+  const reason = error instanceof RefactorProviderError && error.reasonCode ? ` (reasonCode: ${error.reasonCode})` : '';
+  process.stderr.write(`${error instanceof RefactorProviderError ? `${error.code}: ${message}${reason}${error.action ? ` (action: ${error.action})` : ''}` : message}\n`);
   process.exitCode = 1;
 }
 
@@ -69,14 +82,23 @@ export function buildRefactorCommand(): Command {
   command.command('recommendations')
     .description('Show measured suggestions with evidence; never executes a refactor')
     .option('--repo <path>', 'Repository root', '.')
+    .addOption(new Option('--node <nodeId>', 'Limit scan observations to one declared architecture node').conflicts('path'))
+    .addOption(new Option('--path <repo-relative-path>', 'Limit scan observations to the owners of these repository-relative POSIX paths (repeatable)').argParser(collectScopePath).conflicts('node'))
     .option('--import-node-limit <n>', 'Raise the CodeGraph import read cap; use the same value for decide', parseImportNodeLimit)
     .option('--timeout-ms <ms>', `Per archctx call timeout in ms (default ${REFACTOR_DEFAULT_TIMEOUT_MS}, max ${REFACTOR_MAX_TIMEOUT_MS})`, parseTimeoutMs)
     .option('--json', 'Output machine-readable JSON')
-    .action(async (options: { repo: string; importNodeLimit?: number; timeoutMs?: number; json?: boolean }) => {
-      const { observeRefactorRecommendations } = await import('../../effects/refactor/recommendations');
-      const value = observeRefactorRecommendations(canonicalRepoPath(options.repo), { importNodeLimit: options.importNodeLimit, timeoutMs: options.timeoutMs });
-      process.stdout.write(options.json ? `${JSON.stringify(value, null, 2)}\n` : formatRefactorRecommendations(value));
-      if (value.status === 'unavailable' || value.status === 'proof_required') process.exitCode = 1;
+    .action(async (options: { repo: string; node?: string; path?: string[]; importNodeLimit?: number; timeoutMs?: number; json?: boolean }) => {
+      try {
+        const scope = normalizeRefactorScope({ node: options.node, paths: options.path });
+        const { observeRefactorRecommendations } = await import('../../effects/refactor/recommendations');
+        const value = observeRefactorRecommendations(canonicalRepoPath(options.repo), {
+          importNodeLimit: options.importNodeLimit,
+          timeoutMs: options.timeoutMs,
+          ...(scope.kind === 'repository' ? {} : { scope }),
+        });
+        process.stdout.write(options.json ? `${JSON.stringify(value, null, 2)}\n` : formatRefactorRecommendations(value));
+        if (value.status === 'unavailable' || value.status === 'proof_required') process.exitCode = 1;
+      } catch (error) { fail(error); }
     });
   command.command('decide')
     .description('Record the user decision on one suggestion in ArchContext')

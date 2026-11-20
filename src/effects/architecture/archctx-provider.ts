@@ -67,6 +67,17 @@ export function resolvePackageLocalArchctx(consumerRoot?: string, requiredVersio
   return { binaryPath: realBinary, nodeRange: ARCHCONTEXT_NODE_RANGE, packageRoot: realPackage, version: requiredVersion };
 }
 
+const DEFAULT_TRUSTED_NODE_CANDIDATE_SOURCE = () => trustedNodeCandidates(userInfo().homedir);
+const compatibleNodeRuntimeCache = new Map<string, string>();
+
+function compatibleNodeRuntimeCacheKey(env: NodeJS.ProcessEnv): string {
+  return JSON.stringify([env.REPO_HARNESS_NODE_BIN ?? '', env.PATH ?? '', env.PATHEXT ?? '']);
+}
+
+export function clearCompatibleNodeRuntimeCacheForTests(): void {
+  compatibleNodeRuntimeCache.clear();
+}
+
 /**
  * Resolution order: the explicit `REPO_HARNESS_NODE_BIN` authority, then the
  * inherited PATH, then the shared trusted-candidate scan. The third tier exists
@@ -78,11 +89,17 @@ export function resolvePackageLocalArchctx(consumerRoot?: string, requiredVersio
  */
 export function resolveCompatibleNodeRuntime(
   env: NodeJS.ProcessEnv,
-  trustedCandidateSource: () => readonly string[] = () => trustedNodeCandidates(userInfo().homedir),
+  trustedCandidateSource: () => readonly string[] = DEFAULT_TRUSTED_NODE_CANDIDATE_SOURCE,
   budget: Pick<ArchctxProviderOptions, 'deadlineMs' | 'nowMs'> = {},
 ): string {
+  const callerLimitsProbe = budget.deadlineMs !== undefined && budget.deadlineMs - (budget.nowMs ?? Date.now)() <= 5_000;
+  const cacheable = trustedCandidateSource === DEFAULT_TRUSTED_NODE_CANDIDATE_SOURCE && !callerLimitsProbe;
+  const cacheKey = cacheable ? compatibleNodeRuntimeCacheKey(env) : null;
+  if (cacheKey !== null) {
+    const cached = compatibleNodeRuntimeCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+  }
   const version = (candidate: string): string | null => {
-    const callerLimitsProbe = budget.deadlineMs !== undefined && budget.deadlineMs - (budget.nowMs ?? Date.now)() <= 5_000;
     const timeoutMs = remainingTimeout(budget, 5_000, 'Node runtime selection');
     const deadlineMs = budget.deadlineMs === undefined ? undefined : budget.nowMs === undefined
       ? Math.min(budget.deadlineMs, Date.now() + timeoutMs)
@@ -110,7 +127,10 @@ export function resolveCompatibleNodeRuntime(
     candidates: () => (trustedCandidates = trustedCandidateSource()),
     versionOf: version,
   });
-  if (selected.status === 'selected') return selected.path;
+  if (selected.status === 'selected') {
+    if (cacheKey !== null) compatibleNodeRuntimeCache.set(cacheKey, selected.path);
+    return selected.path;
+  }
   if (selected.status === 'explicit-rejected') {
     if (selected.reason === 'not-absolute') throw new Error('REPO_HARNESS_NODE_BIN must be an absolute path');
     if (selected.reason === 'not-executable') throw new Error('REPO_HARNESS_NODE_BIN is not an executable file');

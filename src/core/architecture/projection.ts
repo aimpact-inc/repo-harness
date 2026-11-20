@@ -338,7 +338,7 @@ function record(value: unknown, label: string): JsonRecord {
   return value as JsonRecord;
 }
 
-export type ArchctxDisposition = 'pass' | 'owned' | 'refused' | 'held';
+export type ArchctxDisposition = 'pass' | 'owned' | 'refused';
 export interface ArchctxCommandDisposition { readonly disposition: ArchctxDisposition; readonly use?: string }
 
 const passCommands = [
@@ -348,7 +348,6 @@ const passCommands = [
 ] as const;
 const owned = (use: string): ArchctxCommandDisposition => ({ disposition: 'owned', use });
 const refused = (use: string): ArchctxCommandDisposition => ({ disposition: 'refused', use });
-const held = (): ArchctxCommandDisposition => ({ disposition: 'held', use: 'waits for an owner decision (repo-harness #2869)' });
 
 /**
  * One entry for each command of the pinned archctx help envelope, plus `docs`.
@@ -367,11 +366,11 @@ export const ARCHCTX_COMMAND_DISPOSITIONS: Readonly<Record<string, ArchctxComman
   hooks: refused('rh install'),
   mcp: refused('rh install'),
   tunnel: refused('not available through rh'),
-  audit: held(),
-  investigate: held(),
-  agents: held(),
-  jobs: held(),
-  hook: held(),
+  audit: refused('rh seats and repo-harness-issue-flow'),
+  investigate: refused('rh seats and repo-harness-issue-flow'),
+  agents: refused('rh seats and repo-harness-issue-flow'),
+  jobs: refused('rh seats and repo-harness-issue-flow'),
+  hook: refused('rh install'),
 };
 
 /**
