@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from 'bun:test';
-import { readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { clusterIssues, type ClusterIssue } from '../src/core/board/cluster';
+import { clusterIssues, extractIssueTargetPaths, type ClusterIssue } from '../src/core/board/cluster';
 import { decodePlanBlockValue, PLAN_BLOCK_KIND, PLAN_BLOCK_PROTOCOL } from '../src/core/board/plan-block';
 import { collectBoardCluster } from '../src/effects/board/cluster';
 import { run, tmpWorkspace } from './helpers/repo-fixture';
@@ -41,15 +41,13 @@ test('splits the mixed backlog into deterministic plan units and reports cross-m
     { module: 'billing', tier_bucket: 'standard', route_class: 'important_deep', credentials: true, issues: [4, 5, 6, 7, 3], external_blockers: [] },
     { module: 'billing', tier_bucket: 'standard', route_class: 'simple_fast', credentials: false, issues: [8, 9], external_blockers: [6, 50] },
   ]);
-  expect(result.orphans).toEqual([
-    { issue: 10, external_blockers: [60] }, { issue: 11, external_blockers: [] }, { issue: 12, external_blockers: [] },
-  ]);
+  expect(result.orphans).toEqual([{ issue: 10, external_blockers: [60] }]);
   expect(result.pattern_groups).toEqual([{ pattern, issues: [11, 12], modules: ['platform/tokens', 'storage'], tier_buckets: ['high'] }]);
   const plan = decodePlanBlockValue({
     protocol: PLAN_BLOCK_PROTOCOL, kind: PLAN_BLOCK_KIND,
     merge_order: result.suggested_merge_order, holds: [], seat_limits: { worker: 2 },
   });
-  expect(plan.merge_order).toEqual([[4, 5, 6, 7, 3], [8, 9], 10, 11, 12]);
+  expect(plan.merge_order).toEqual([[4, 5, 6, 7, 3], [8, 9], 10, [11, 12]]);
 });
 
 test('caps high units at two and keeps frontend separate from backend', () => {
@@ -98,12 +96,52 @@ test('omits an in-bucket cycle and a cycle between contracted units from the sug
   expect(result.suggested_merge_order).toEqual([8, 9, 7]);
 });
 
+test('groups same-module issues by target-file overlap before slicing and guards cross-capability issues', () => {
+  const issues: ClusterIssue[] = [
+    { ...issue(1, ['tier:medium', 'route:simple_fast']), body: 'Change: `src/effects/refactor/recommendations.ts:10-20`' },
+    { ...issue(2, labels('runtime-harness/refactor-program')), target_files: ['src/effects/refactor/recommendations.ts'] },
+    { ...issue(3, labels('billing', 'medium', 'simple_fast')), target_files: ['src/a.ts'] },
+    { ...issue(4, labels('billing', 'medium', 'simple_fast')), target_files: ['src/b.ts'] },
+    { ...issue(5, labels('billing', 'medium', 'simple_fast')), target_files: ['src/a.ts'] },
+    { ...issue(6, labels('billing', 'medium', 'simple_fast')), target_files: ['src/b.ts'] },
+    { ...issue(7, labels('billing', 'high', 'simple_fast')), target_files: ['src/h.ts'] },
+    { ...issue(8, labels('billing', 'high', 'simple_fast')), target_files: ['src/h.ts'] },
+    { ...issue(9, labels('billing', 'high', 'simple_fast')), target_files: ['src/h.ts'] },
+    { ...issue(10, labels('organization/board', 'medium', 'simple_fast')), body: 'Touch `src/core/board/review.ts` and `src/operator-web/SeatsPage.tsx`.\n## Out of scope\n- `src/ignore/me.ts`' },
+  ];
+  const result = clusterIssues({
+    issues, scope, max_size: 2, ownership_status: 'observed',
+    path_owners: [
+      { path: 'src/effects/refactor/recommendations.ts', status: 'owned', capability: 'capability.runtime-harness.refactor-program' },
+      { path: 'src/core/board/review.ts', status: 'owned', capability: 'capability.organization.board' },
+      { path: 'src/operator-web/SeatsPage.tsx', status: 'owned', capability: 'capability.runtime-harness.operator' },
+      { path: 'src/a.ts', status: 'owned', capability: 'capability.billing.core' },
+      { path: 'src/b.ts', status: 'owned', capability: 'capability.billing.core' },
+      { path: 'src/h.ts', status: 'owned', capability: 'capability.billing.core' },
+    ],
+  });
+  expect(result.ownership_status).toBe('observed');
+  expect(result.issue_metadata.find(m => m.issue === 1)?.inferred_module).toBe('runtime-harness/refactor-program');
+  expect(result.issue_metadata.find(m => m.issue === 10)?.cross_capability).toEqual(['organization/board', 'runtime-harness/operator']);
+  expect(extractIssueTargetPaths('## Module and files\n`./src/x.ts:5-9`\n## Out of scope\n`src/y.ts`')).toEqual(['src/x.ts']);
+  expect(result.module_bundles.map(bundle => [bundle.module, bundle.tier_bucket, bundle.issues, bundle.shared_files])).toEqual([
+    ['runtime-harness/refactor-program', 'standard', [1, 2], ['src/effects/refactor/recommendations.ts']],
+    ['billing', 'standard', [3, 5], ['src/a.ts']],
+    ['billing', 'standard', [4, 6], ['src/b.ts']],
+    ['billing', 'high', [7, 8], ['src/h.ts']],
+  ]);
+  expect(result.orphans).toEqual([
+    { issue: 9, external_blockers: [] },
+    { issue: 10, external_blockers: [], cross_capability: ['organization/board', 'runtime-harness/operator'] },
+  ]);
+});
+
 const repository = 'Ancienttwo/repo-harness';
 const response = (value: unknown) => ({ status: 0, stdout: JSON.stringify(value) });
 const forward = (nodes: readonly unknown[]) => ({ pageInfo: { hasNextPage: false }, nodes });
 const backward = (nodes: readonly unknown[]) => ({ pageInfo: { hasPreviousPage: false }, nodes });
 const openIssue = (number: number, fields: Record<string, unknown> = {}) => ({
-  number, title: `Issue ${number}`, parent: null, subIssuesSummary: { total: 0 },
+  number, title: `Issue ${number}`, body: '', parent: null, subIssuesSummary: { total: 0 },
   labels: forward(labels().map(name => ({ name }))), blockedBy: forward([]), comments: backward([]), timelineItems: backward([]),
   ...fields,
 });
@@ -187,6 +225,87 @@ test('--parent reuses the board read for open sub-issues, claims and PR body lin
   expect(readdirSync(checkout)).toEqual([]);
 });
 
+test('collectBoardCluster batches existing paths in one pathOwners call and --include-loose deduplicates', () => {
+  const checkout = workspace('board-cluster-resolve');
+  for (const rel of ['src/effects/refactor/recommendations.ts', 'src/core/board/review.ts', 'src/operator-web/SeatsPage.tsx']) {
+    mkdirSync(join(checkout, rel, '..'), { recursive: true });
+    writeFileSync(join(checkout, rel), '// stub\n');
+  }
+  const board = JSON.parse(readFileSync(join(import.meta.dir, 'fixtures/board/parent-1474.graphql.json'), 'utf8'));
+  const pulls = JSON.parse(readFileSync(join(import.meta.dir, 'fixtures/board/pull-requests-1474.graphql.json'), 'utf8'));
+  const nodes = board.data.repository.issue.subIssues.nodes;
+  for (const node of nodes) {
+    node.state = node.number === 1477 || node.number === 1478 ? 'OPEN' : 'CLOSED';
+    node.comments = backward([]);
+    node.labels = forward(['tier:medium', 'route:simple_fast'].map(name => ({ name })));
+  }
+  nodes.find((n: { number: number }) => n.number === 1477).body = 'Change: `src/effects/refactor/recommendations.ts:10`, `src/missing.ts`';
+  const issue1478 = nodes.find((n: { number: number }) => n.number === 1478);
+  issue1478.labels = forward(['module:organization/board', 'tier:medium', 'route:simple_fast'].map(name => ({ name })));
+  issue1478.body = 'Touch `src/core/board/review.ts` and `src/operator-web/SeatsPage.tsx`';
+  pulls.data.repository.pr1499.body = 'Refs #1474';
+  const looseNodes = [
+    openIssue(1477, { labels: forward(['tier:medium', 'route:simple_fast'].map(name => ({ name }))) }),
+    openIssue(2001, { labels: forward(['tier:medium', 'route:simple_fast'].map(name => ({ name }))), body: 'See `src/effects/refactor/recommendations.ts`' }),
+  ];
+  let archctxCalls = 0;
+  let requestedPaths: string[] = [];
+  const capMap: Record<string, string> = {
+    'src/effects/refactor/recommendations.ts': 'capability.runtime-harness.refactor-program',
+    'src/core/board/review.ts': 'capability.organization.board',
+    'src/operator-web/SeatsPage.tsx': 'capability.runtime-harness.operator',
+  };
+  const result = collectBoardCluster({
+    repo_root: checkout, parent: 1474, include_loose: true,
+    gh_runner: args => {
+      if (args.join(' ') === 'repo view --json nameWithOwner') return response({ nameWithOwner: repository });
+      const query = readQuery(args);
+      if (query.includes('subIssues(')) return response(board);
+      if (query.includes(': pullRequest(number:')) return response(pulls);
+      if (query.includes('issues(states: OPEN')) return response(openPage(looseNodes, null));
+      throw new Error('unexpected gh call');
+    },
+    archctx: {
+      run: (_bin, args) => {
+        archctxCalls += 1;
+        expect(args[0]).toBe('resolve');
+        requestedPaths = readFileSync(args[2]!, 'utf8').trim().split('\n');
+        return {
+          status: 0, signal: null, stderr: '',
+          stdout: JSON.stringify({
+            schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'resolve',
+            data: { results: requestedPaths.map(path => ({ path, matched: true, ambiguous: false, stableId: capMap[path]!, kind: 'capability', name: path, owningCapabilityId: capMap[path]! })) },
+          }),
+        };
+      },
+    },
+  });
+  expect(archctxCalls).toBe(1);
+  expect(requestedPaths).toEqual(['src/core/board/review.ts', 'src/effects/refactor/recommendations.ts', 'src/operator-web/SeatsPage.tsx']);
+  expect(result.scope).toEqual({ mode: 'parent', parent: 1474, include_loose: true, max_size: 5, truncated: false });
+  expect(result.ownership_status).toBe('observed');
+  expect(result.module_bundles).toEqual([{
+    module: 'runtime-harness/refactor-program', tier_bucket: 'standard', route_class: 'simple_fast',
+    credentials: false, issues: [1477, 2001], external_blockers: [], shared_files: ['src/effects/refactor/recommendations.ts'],
+  }]);
+  expect(result.orphans).toEqual([{ issue: 1478, external_blockers: [], cross_capability: ['organization/board', 'runtime-harness/operator'] }]);
+
+  const degraded = collectBoardCluster({
+    repo_root: checkout, parent: 1474,
+    gh_runner: args => {
+      if (args.join(' ') === 'repo view --json nameWithOwner') return response({ nameWithOwner: repository });
+      const query = readQuery(args);
+      if (query.includes('subIssues(')) return response(board);
+      if (query.includes(': pullRequest(number:')) return response(pulls);
+      throw new Error('unexpected gh call');
+    },
+    archctx: { run: () => ({ status: 1, signal: null, stdout: '', stderr: 'archctx unavailable' }) },
+  });
+  expect(degraded.ownership_status).toBe('unavailable');
+  expect(degraded.unclassified.map(entry => [entry.issue, entry.missing])).toEqual([[1477, ['module']]]);
+  expect(degraded.orphans).toEqual([{ issue: 1478, external_blockers: [] }]);
+});
+
 const cli = join(import.meta.dir, '../src/cli/index.ts');
 
 test.skipIf(process.platform === 'win32')('CLI prints the cluster document with a custom standard size', () => {
@@ -216,6 +335,8 @@ console.log(JSON.stringify(${JSON.stringify(page)}));
 
 test.each([
   { flags: ['--open', '--parent', '9', '--json'], message: 'exactly one' },
+  { flags: ['--open', '--include-loose', '--json'], message: '--include-loose requires --parent' },
+  { flags: ['--include-loose', '--json'], message: 'exactly one' },
   { flags: ['--json'], message: 'exactly one' },
   { flags: ['--open'], message: 'pass --json' },
   { flags: ['--open', '--json', '--max-size', '0'], message: 'positive integer' },
