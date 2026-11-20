@@ -59,7 +59,7 @@ State at `main@8d7017ea6682ca840a84163f1d96c75675c80b54` exhibits seven structur
 | Plane | Seat ID | Magpie-First preset | Native-First preset | Role boundary |
 |---|---|---|---|---|
 | Control | `orchestrator` | `claude` / `opus` (`high`) | `claude` / `opus` (`high`) | Coordinator and integrator; owns L1 plans, plan publication, and merges |
-| Control | `advisor` | `pi` / `magpie/agy-cli/gemini-4-neon` (`high`) | `agy` / `gemini-4-neon-high` (or `claude/opus`) | Owner interface, pre-dispatch triage and bundling, L2 plans, `council` (`N=0..3`), 2 h audit |
+| Control | `advisor` | `pi` / `magpie/agy-cli/gemini-4-neon` (`xhigh`) | `agy` / `gemini-4-neon-high` (or `claude/opus`) | Owner interface, pre-dispatch triage and bundling, L2 plans, `council` (`N=0..3`), 2 h audit |
 | Council | `council` | `{claude:fable, pi:magpie/agy-cli/gemini-4-carbon, pi:magpie/codex/gpt-6.2-astra}` | `{claude:fable, agy:gemini-4-carbon-high, codex:gpt-6.2-astra}` | Read-only L3 competing proposals under `/tmp/rh-council/<repo>/issue-<n>-<member>.md` |
 | Execution (Tier S) | `worker-opus` | `claude` / `opus` (`high`) | `claude` / `opus` (`high`) | UI/UX #1 (`frontend`), cross-module contracts #1 (`important_deep`), `touches:credentials` #1 |
 | Execution (Tier S) | `worker-neon` | `pi` / `magpie/agy-cli/gemini-4-neon` (`high`) | `agy` / `gemini-4-neon-high` (when enabled) | UI/UX #2 (`frontend`), `important_deep` #2, `simple_deep` #1 (`agy_gemini >= 25%`) |
