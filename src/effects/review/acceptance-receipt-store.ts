@@ -3,11 +3,10 @@ import { gatesDirectoryName } from '../git/repository-identity';
 import { observationReadFileSync as readFileSync } from '../readonly-observation';
 import { randomUUID } from 'crypto';
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'fs';
-import { basename, isAbsolute, join } from 'path';
+import { isAbsolute, join } from 'path';
 import {
   ACCEPTANCE_VERIFICATION_OBSERVATION_KIND,
   ACCEPTANCE_VERIFICATION_OBSERVATION_PROTOCOL,
-  acceptanceVerificationObservationSubjectKey,
   assertReviewFields,
   assertUserWaiverGrant,
   buildAcceptanceVerificationObservation,
@@ -15,7 +14,6 @@ import {
   stableJson,
   validateFindings,
   type AcceptanceReceipt,
-  type AcceptanceReviewResult,
   type AcceptanceVerificationObservationV1,
   type UserWaiverGrant,
 } from '../../core/review/acceptance-receipt';
@@ -25,28 +23,37 @@ import { sha256Prefixed } from '../../core/evidence/sha256';
 import { validateRequiredCheckFailureEvidenceList } from '../../core/evidence/required-check-evidence';
 import { validateRequiredCheckCoverageEvidenceOrNull } from '../../core/publication/required-check-coverage';
 
-export function reviewResultPath(root: string, authorityHome: string): string {
-  return acceptanceReceiptPath(root, authorityHome).replace('acceptance.latest.json', 'acceptance.review-result.json');
-}
-
-
 function stateRoot(authorityHome: string): string {
   const home = realpathSync(authorityHome);
   if (!isAbsolute(home)) fail('authority home must be absolute');
   return join(home, '.repo-harness');
 }
 
+function gateDirectory(root: string, authorityHome: string): string {
+  return join(stateRoot(authorityHome), 'gates', gatesDirectoryName(realpathSync(root)));
+}
+
+function ensurePrivateDirectory(path: string): void {
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  if (!lstatSync(path).isDirectory()) fail('Acceptance record directory is unsafe');
+  chmodSync(path, 0o700);
+}
+
 export function acceptanceReceiptPath(root: string, authorityHome: string, createParent = false): string {
-  const parent = join(stateRoot(authorityHome), 'gates', gatesDirectoryName(realpathSync(root)));
-  if (createParent) {
-    mkdirSync(parent, { recursive: true, mode: 0o700 });
-    chmodSync(parent, 0o700);
-  }
+  const parent = gateDirectory(root, authorityHome);
+  if (createParent) ensurePrivateDirectory(parent);
   return join(parent, 'acceptance.latest.json');
 }
 
+function digestRecordPath(parent: string, digest: string, createParent: boolean): string {
+  if (typeof digest !== 'string' || !SHA256_PREFIXED_PATTERN.test(digest)) fail('Acceptance record digest is invalid');
+  if (createParent) ensurePrivateDirectory(parent);
+  return join(parent, `${digest.slice('sha256:'.length)}.json`);
+}
 
-
+export function reviewResultPath(root: string, authorityHome: string, resultSha256: string, createParent = false): string {
+  return digestRecordPath(join(gateDirectory(root, authorityHome), 'acceptance-review-results'), resultSha256, createParent);
+}
 
 /**
  * `acceptance.latest.json` is replaced by every later review in this checkout.
@@ -55,18 +62,10 @@ export function acceptanceReceiptPath(root: string, authorityHome: string, creat
  * exact receipt it was built from.
  */
 export function acceptanceReceiptRecordPath(root: string, authorityHome: string, receiptSha256: string, createParent = false): string {
-  if (!SHA256_PREFIXED_PATTERN.test(receiptSha256)) fail('AcceptanceReceipt record digest is invalid');
-  const parent = join(stateRoot(authorityHome), 'gates', gatesDirectoryName(realpathSync(root)), 'acceptance-receipts');
-  if (createParent) {
-    mkdirSync(parent, { recursive: true, mode: 0o700 });
-    chmodSync(parent, 0o700);
-  }
-  return join(parent, `${receiptSha256.slice('sha256:'.length)}.json`);
+  return digestRecordPath(join(gateDirectory(root, authorityHome), 'acceptance-receipts'), receiptSha256, createParent);
 }
 
-function persistAcceptanceReceiptRecord(root: string, authorityHome: string, bytes: Buffer): string {
-  const digest = sha256Prefixed(bytes);
-  const path = acceptanceReceiptRecordPath(root, authorityHome, digest, true);
+function persistImmutableRecord(path: string, bytes: Buffer): void {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   writeFileSync(temporary, bytes, { mode: 0o600, flag: 'wx' });
   try {
@@ -74,11 +73,10 @@ function persistAcceptanceReceiptRecord(root: string, authorityHome: string, byt
     linkSync(temporary, path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    if (!readFileSync(path).equals(bytes)) fail('AcceptanceReceipt record conflicts with existing bytes');
+    if (!lstatSync(path).isFile() || !readFileSync(path).equals(bytes)) fail('Acceptance record conflicts with existing bytes');
   } finally {
     unlinkSync(temporary);
   }
-  return digest;
 }
 
 export function readAcceptanceReceiptRecord(
@@ -114,20 +112,11 @@ export function userWaiverGrantPath(root: string, authorityHome: string, createP
 export function acceptanceVerificationObservationPath(
   root: string,
   authorityHome: string,
-  campaignSha256: string,
-  admissionSha256: string,
+  receiptSha256: string,
   createParent = false,
 ): string {
-  const parent = join(stateRoot(authorityHome), 'gates', gatesDirectoryName(realpathSync(root)), 'acceptance-observations');
-  if (createParent) {
-    mkdirSync(parent, { recursive: true, mode: 0o700 });
-    chmodSync(parent, 0o700);
-  }
-  const key = acceptanceVerificationObservationSubjectKey(campaignSha256, admissionSha256);
-  return join(parent, `${key.slice('sha256:'.length)}.json`);
+  return digestRecordPath(join(gateDirectory(root, authorityHome), 'acceptance-observations'), receiptSha256, createParent);
 }
-
-
 
 export function writeAcceptanceVerificationObservation(args: {
   root: string;
@@ -135,9 +124,12 @@ export function writeAcceptanceVerificationObservation(args: {
   receipt: AcceptanceReceipt;
 }): AcceptanceVerificationObservationV1 {
   const root = realpathSync(args.root);
+  const receiptBytes = serializedRecord(args.receipt);
+  const receiptSha256 = sha256Prefixed(receiptBytes);
+  persistImmutableRecord(acceptanceReceiptRecordPath(root, args.authorityHome, receiptSha256, true), receiptBytes);
   const observation = buildAcceptanceVerificationObservation({
     repository_root: root,
-    acceptance_receipt_sha256: persistAcceptanceReceiptRecord(root, args.authorityHome, serializedRecord(args.receipt)),
+    acceptance_receipt_sha256: receiptSha256,
     campaign_sha256: args.receipt.campaign_sha256,
     admission_sha256: args.receipt.admission_sha256,
     grant_sha256: args.receipt.grant_sha256,
@@ -150,17 +142,8 @@ export function writeAcceptanceVerificationObservation(args: {
     archive_projection_sha256: null,
     verified_at: args.receipt.issued_at,
   });
-  const path = acceptanceVerificationObservationPath(
-    root,
-    args.authorityHome,
-    observation.campaign_sha256,
-    observation.admission_sha256,
-    true,
-  );
-  const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, `${stableJson(observation)}\n`, { mode: 0o600 });
-  chmodSync(temporary, 0o600);
-  retryWindowsSharingRace(() => renameSync(temporary, path));
+  const path = acceptanceVerificationObservationPath(root, args.authorityHome, receiptSha256, true);
+  persistImmutableRecord(path, Buffer.from(`${stableJson(observation)}\n`, 'utf-8'));
   return observation;
 }
 
@@ -169,10 +152,12 @@ export function readAcceptanceVerificationObservation(
   authorityHome: string,
   campaignSha256: string,
   admissionSha256: string,
+  receiptSha256: string,
 ): AcceptanceVerificationObservationV1 | null {
   const repositoryRoot = realpathSync(root);
-  const path = acceptanceVerificationObservationPath(repositoryRoot, authorityHome, campaignSha256, admissionSha256);
+  const path = acceptanceVerificationObservationPath(repositoryRoot, authorityHome, receiptSha256);
   if (!existsSync(path)) return null;
+  if (!lstatSync(path).isFile()) fail('AcceptanceVerificationObservation must be a regular file');
   const raw = readFileSync(path, 'utf-8');
   let value: unknown;
   try {
@@ -211,18 +196,14 @@ export function readAcceptanceVerificationObservation(
   });
   if (record.observation_id !== rebuilt.observation_id) fail('AcceptanceVerificationObservation id is stale');
   if (`${stableJson(rebuilt)}\n` !== raw) fail('AcceptanceVerificationObservation bytes are not canonical');
-  const key = acceptanceVerificationObservationSubjectKey(rebuilt.campaign_sha256, rebuilt.admission_sha256);
-  if (basename(path) !== `${key.slice('sha256:'.length)}.json`) {
-    fail('AcceptanceVerificationObservation is misfiled');
-  }
+  if (record.acceptance_receipt_sha256 !== receiptSha256) fail('AcceptanceVerificationObservation is misfiled');
   return rebuilt;
 }
 
-
-
-export function readReceipt(path: string): AcceptanceReceipt {
+export function readReceipt(path: string): { receipt: AcceptanceReceipt; sha256: string } {
   if (!existsSync(path)) fail(`AcceptanceReceipt is missing: ${path}`);
-  return parseReceipt(readFileSync(path, 'utf-8'));
+  const bytes = readFileSync(path);
+  return { receipt: parseReceipt(bytes.toString('utf-8')), sha256: sha256Prefixed(bytes) };
 }
 
 function parseReceipt(text: string): AcceptanceReceipt {
@@ -273,13 +254,13 @@ function parseReceipt(text: string): AcceptanceReceipt {
  * these bytes for the receipt being recorded, never a re-read of the latest
  * file another acceptance in the same checkout may have replaced.
  */
-function serializedRecord(receipt: AcceptanceReceipt | AcceptanceReviewResult): Buffer {
+function serializedRecord(receipt: AcceptanceReceipt): Buffer {
   return Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`, 'utf-8');
 }
 
-export function writeReceipt(path: string, receipt: AcceptanceReceipt | AcceptanceReviewResult): void {
-  const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, serializedRecord(receipt), { mode: 0o600 });
+function writeReceipt(path: string, receipt: AcceptanceReceipt): void {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, serializedRecord(receipt), { mode: 0o600, flag: 'wx' });
   chmodSync(temporary, 0o600);
   retryWindowsSharingRace(() => renameSync(temporary, path));
 }
@@ -307,48 +288,21 @@ export function writeUserWaiverGrant(path: string, grant: UserWaiverGrant): void
   retryWindowsSharingRace(() => renameSync(temporary, path));
 }
 
-
-
-
-
 export function writeAcceptanceWithObservation(
   root: string,
   authorityHome: string,
   receipt: AcceptanceReceipt,
+  reviewResult?: string,
 ): void {
   const acceptancePath = acceptanceReceiptPath(root, authorityHome, true);
-  const observationPath = acceptanceVerificationObservationPath(
-    root,
-    authorityHome,
-    receipt.campaign_sha256,
-    receipt.admission_sha256,
-    true,
-  );
-  const previousObservation = existsSync(observationPath) ? readFileSync(observationPath) : null;
-  const restoreObservation = (): void => {
-    if (previousObservation === null) {
-      if (existsSync(observationPath)) unlinkSync(observationPath);
-      return;
+  if (receipt.result_sha256 !== null) {
+    if (reviewResult === undefined || sha256Prefixed(reviewResult) !== receipt.result_sha256) {
+      fail('AcceptanceReceipt generic-review result_sha256 mismatch');
     }
-    writeFileSync(observationPath, previousObservation, { mode: 0o600 });
-    chmodSync(observationPath, 0o600);
-  };
-  const previousAcceptance = existsSync(acceptancePath) ? readFileSync(acceptancePath) : null;
-  try {
-    writeReceipt(acceptancePath, receipt);
-    // The observation is part of the same acceptance transaction: an
-    // acceptance that cannot publish its verified observation is rolled back
-    // rather than left readable without one.
-    writeAcceptanceVerificationObservation({ root, authorityHome, receipt });
-  } catch (error) {
-    if (previousAcceptance === null) {
-      if (existsSync(acceptancePath)) unlinkSync(acceptancePath);
-    } else {
-      writeFileSync(acceptancePath, previousAcceptance, { mode: 0o600 });
-      chmodSync(acceptancePath, 0o600);
-    }
-    restoreObservation();
-    throw error;
+    const path = reviewResultPath(root, authorityHome, receipt.result_sha256, true);
+    persistImmutableRecord(path, Buffer.from(reviewResult, 'utf-8'));
   }
-
+  // Replacing latest commits the receipt only after its immutable records exist.
+  writeAcceptanceVerificationObservation({ root, authorityHome, receipt });
+  writeReceipt(acceptancePath, receipt);
 }

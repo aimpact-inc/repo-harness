@@ -9,12 +9,12 @@ import { readSessionArtifact, writeSessionArtifact } from '../src/effects/termin
 import { taskSessionDirectory as importedTaskDir, type HerdrCoreEndpoint, type TaskPaneBinding } from '../src/effects/terminal/task-session-record';
 import type { TaskRequest } from '../src/core/review/runner-port';
 import { taskReviewRunner } from '../src/effects/review-runner/task-review-runner';
-import { fixtureTemplate, recordFixtureAcceptance, fixtureReviewResult } from './helpers/repo-fixture';
+import { fixtureTemplate, recordFixtureAcceptance, fixtureReviewResult, run } from './helpers/repo-fixture';
 import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { darwinTest } from './helpers/darwin-test';
 import { existsSync, mkdtempSync, mkdirSync, realpathSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { join, resolve } from 'path';
+import { dirname, join, resolve } from 'path';
 import { spawnSync } from 'child_process';
 import { createHash } from 'crypto';
 import { buildReviewSubject } from '../src/effects/review/diff-fingerprint';
@@ -26,6 +26,7 @@ import { applyReviewerDisagreement, assessChange, buildReviewSelectionPacket } f
 import { executeAdmittedVerification, evaluateAdmittedVerification, materializeVerificationExecutionReport } from '../src/effects/evidence/verification-execution';
 import { acceptanceContext, authorityFingerprint, acceptanceReceiptPath, acceptanceVerificationObservationPath, inspectAcceptanceEvidence, inspectAcceptanceCurrentBinding, projectAcceptance, recordAcceptance, recordUserWaiverAcceptance, recordUserWaiverGrant, revokeUserWaiverGrant, verifyAcceptance, verifyUserWaiverGrant } from '../scripts/acceptance-receipt';
 import { readAcceptanceReceiptRecord } from '../src/effects/review/acceptance-receipt';
+import { reviewResultPath } from '../src/effects/review/acceptance-receipt-store';
 import { assertionThenPassedEvidence, productFailureEvidence } from './helpers/required-check-evidence-fixture';
 import { installFakeGh, passingScenario, POLICY_COVERAGE, PR, REPOSITORY, REPOSITORY_ID } from './helpers/publication-merge-fake-gh';
 
@@ -114,11 +115,21 @@ test('generic review Receipt is launcher-independent and rejects every added bin
   const valid = JSON.parse(bytes[0]!);
   for (const field of ['pane_id','herdr_session','pid','process_proof','host_launch_mode','provider_log_path']) expect(Object.hasOwn(valid,field)).toBe(false);
   const mutations = { request_id: 'other-request', context_sha256: `sha256:${'a'.repeat(64)}`,
-    result_sha256: `sha256:${'b'.repeat(64)}`, actual_harness: 'codex', actual_role: 'fast-worker', actual_model: 'other-model' };
+    actual_harness: 'codex', actual_role: 'fast-worker', actual_model: 'other-model' };
   for (const [field,value] of Object.entries(mutations)) {
     writeFileSync(acceptanceReceiptPath(root,home),JSON.stringify({ ...valid,[field]:value }));
     await expect(verifyAcceptance({root, authority: authorityFor(root),authorityHome:home})).rejects.toThrow(`AcceptanceReceipt generic-review ${field} mismatch`);
   }
+  writeFileSync(acceptanceReceiptPath(root, home), JSON.stringify({ ...valid, result_sha256: `sha256:${'b'.repeat(64)}` }));
+  await expect(verifyAcceptance({ root, authority: authorityFor(root), authorityHome: home }))
+    .rejects.toThrow('generic-review result record is missing');
+  writeFileSync(acceptanceReceiptPath(root, home), bytes[0]!);
+  const resultPath = reviewResultPath(root, home, valid.result_sha256);
+  const resultBytes = readFileSync(resultPath);
+  writeFileSync(resultPath, JSON.stringify({ ...reviewResult, request_id: 'wrong-result' }));
+  await expect(verifyAcceptance({ root, authority: authorityFor(root), authorityHome: home }))
+    .rejects.toThrow('AcceptanceReceipt generic-review result_sha256 mismatch');
+  writeFileSync(resultPath, resultBytes);
   // Null is a valid unobserved model, so a null tamper fails the Result join.
   writeFileSync(acceptanceReceiptPath(root,home),JSON.stringify({ ...valid,actual_model:null }));
   await expect(verifyAcceptance({root, authority:authorityFor(root),authorityHome:home})).rejects.toThrow('AcceptanceReceipt generic-review actual_model mismatch');
@@ -290,6 +301,84 @@ async function externalPass(root: string, home: string) {
     findings: [],
   });
 }
+
+async function verifyReceiptAfterWriteFault(fault: 'observation' | 'writer exit') {
+  const { root, home } = makeFixture();
+  const prior = await externalPass(root, home);
+  const fixture = admissions.get(root)!;
+  const receiptPath = acceptanceReceiptPath(root, home);
+  const observationDirectory = join(dirname(receiptPath), 'acceptance-observations');
+  const [priorObservation] = readdirSync(observationDirectory);
+  const observationPath = join(observationDirectory, priorObservation!);
+  const receiptBytes = readFileSync(receiptPath);
+  const observationBytes = readFileSync(observationPath);
+  const repositoryPath = `repos${new URL(fixture.issue.html_url).pathname.split('/issues/')[0]}`;
+  const issuePath = `${repositoryPath}/issues/${fixture.issue.number}`;
+  const providerReplies = Object.fromEntries([repositoryPath, issuePath].map(path => [path,
+    fixture.source.runner!([path], { timeout_ms: 1000, max_buffer: 65536 }),
+  ]));
+  const input = { root, authorityHome: home, authority: authorityFor(root) };
+  const child = (body: string) => run(process.execPath, ['--no-env-file', '-e', `
+    import * as fs from 'fs';
+    import { basename, dirname } from 'path';
+    import { spyOn } from 'bun:test';
+    import { recordAcceptance, verifyAcceptance } from ${JSON.stringify(resolve(import.meta.dir, '../scripts/acceptance-receipt.ts'))};
+    const input = ${JSON.stringify(input)};
+    const replies = ${JSON.stringify(providerReplies)};
+    input.authority.runner = args => replies[args[3]];
+    ${body}
+  `], root, { HOME: home, USERPROFILE: home, REPO_HARNESS_HOME: home });
+  const verify = () => {
+    const result = child('console.log(JSON.stringify(await verifyAcceptance(input)));');
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual(prior);
+  };
+  verify();
+
+  const second = { ...input, author: null, verification: prior.verification_file,
+    disposition: 'external_pass' as const, reviewer: 'Claude', source: 'generic-review', actor: null,
+    summary: 'a second review of the same subject', findings: [] };
+  const reviewResult = { ...await fixtureReviewResult(second), request_id: 'second-request' };
+  const writer = child(`
+    const { request_id, verdict } = ${JSON.stringify(reviewResult)};
+    const gate = ${JSON.stringify(dirname(receiptPath))};
+    const fault = ${JSON.stringify(fault)};
+    let injected = false;
+    for (const method of ['renameSync', 'linkSync']) {
+      const publish = fs[method];
+      spyOn(fs, method).mockImplementation((source, target) => {
+        if (fault === 'observation' && !injected && dirname(target) === ${JSON.stringify(observationDirectory)}) {
+          injected = true;
+          throw Object.assign(new Error('injected observation I/O failure'), { code: 'EIO' });
+        }
+        publish(source, target);
+        if (fault === 'writer exit' && target.startsWith(gate) && basename(target).endsWith('.json')) {
+          const written = JSON.parse(fs.readFileSync(target, 'utf8'));
+          if (written.request_id === request_id && written.verdict === verdict) process.exit(73);
+        }
+      });
+    }
+    try {
+      await recordAcceptance({ ...${JSON.stringify(second)}, authority: input.authority, reviewResult: ${JSON.stringify(reviewResult)} });
+    } catch (error) {
+      if (injected && error.code === 'EIO') process.exit(74);
+      throw error;
+    }
+    throw new Error('writer completed without reaching the fault');
+  `);
+  expect(writer.status, writer.stderr).toBe(fault === 'observation' ? 74 : 73);
+  expect(readFileSync(receiptPath)).toEqual(receiptBytes);
+  expect(readFileSync(observationPath)).toEqual(observationBytes);
+  verify();
+}
+
+test('acceptance write fault at observation publication leaves the prior receipt verifiable', async () => {
+  await verifyReceiptAfterWriteFault('observation');
+}, 60_000);
+
+test('acceptance write fault that exits after Result publication leaves the prior receipt verifiable', async () => {
+  await verifyReceiptAfterWriteFault('writer exit');
+}, 60_000);
 
 describe('AcceptanceReceipt', () => {
   test('strictly parses the contract-frozen reviewer and waiver policy', () => {
@@ -942,7 +1031,7 @@ test('tampered empty and missing approved plans refuse external and waiver accep
     await expect(externalPass(root, home)).rejects.toThrow('grant_digest');
     await expect(recordUserWaiverAcceptance({ root, authorityHome: home, authority: authorityFor(root), verification: '.ai/harness/runs/acceptance.report.json' })).rejects.toThrow('grant_digest');
     expect(existsSync(acceptanceReceiptPath(root, home))).toBe(false);
-    expect(existsSync(acceptanceVerificationObservationPath(root, home, fixture.admission.campaign_sha256, fixture.admission.admission_sha256))).toBe(false);
+    expect(existsSync(dirname(acceptanceVerificationObservationPath(root, home, fixture.grant)))).toBe(false);
   }
 }, 30000);
 
@@ -965,7 +1054,9 @@ test('synchronous binding inspection rejects missing observations and revoked wa
   const evidence = inspectAcceptanceEvidence({ root, authority: authorityFor(root), report: materializeVerificationExecutionReport(report), subject, current: true });
   const args = { root, authority: authorityFor(root), authorityHome: home, subject, evidence };
   expect(inspectAcceptanceCurrentBinding(args)).toEqual(receipt);
-  const observation = acceptanceVerificationObservationPath(root, home, receipt.campaign_sha256, receipt.admission_sha256);
+  const receiptBytes = readFileSync(acceptanceReceiptPath(root, home));
+  const receiptDigest = `sha256:${createHash('sha256').update(receiptBytes).digest('hex')}`;
+  const observation = acceptanceVerificationObservationPath(root, home, receiptDigest);
   const bytes = readFileSync(observation);
   rmSync(observation);
   expect(() => inspectAcceptanceCurrentBinding(args)).toThrow('Observation is missing or stale');

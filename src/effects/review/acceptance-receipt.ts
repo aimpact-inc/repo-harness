@@ -22,7 +22,6 @@ import {
   reviewResultPath,
   userWaiverGrantPath,
   writeAcceptanceWithObservation,
-  writeReceipt,
   writeUserWaiverGrant,
 } from './acceptance-receipt-store';
 import {
@@ -124,15 +123,17 @@ export type { RequiredCheckCoverageEvidenceV1 } from '../../core/publication/req
 
 
 function verifyReviewResult(root: string, authorityHome: string, receipt: AcceptanceReceipt, contextDigest: string): void {
-  assertReviewFields(receipt); if (receipt.disposition === 'user_waiver') return;
-  const path = reviewResultPath(root, authorityHome);
-  const stat = lstatSync(path); if (!stat.isFile() || stat.isSymbolicLink()) fail('generic-review result authority is unsafe');
-  const review = validateDomainReview(parseJsonText(readFileSync(path,'utf8'), path));
+  if (receipt.result_sha256 === null) return;
+  const path = reviewResultPath(root, authorityHome, receipt.result_sha256);
+  if (!existsSync(path)) fail('generic-review result record is missing. Record a fresh acceptance.');
+  if (!lstatSync(path).isFile()) fail('generic-review result authority is unsafe');
+  const bytes = readFileSync(path);
+  if (receipt.result_sha256 !== sha256Prefixed(bytes)) fail('AcceptanceReceipt generic-review result_sha256 mismatch');
+  const review = validateDomainReview(parseJsonText(bytes.toString('utf-8'), path));
   for (const field of ['request_id','context_sha256','actual_harness','actual_role','actual_model'] as const) {
     if (receipt[field] !== review[field]) fail(`AcceptanceReceipt generic-review ${field} mismatch`);
   }
   if (receipt.context_sha256 !== contextDigest || review.subject_sha256 !== receipt.subject_sha256) fail('AcceptanceReceipt generic-review context/subject mismatch');
-  if (receipt.result_sha256 !== authorityFingerprint(stableJson(review))) fail('AcceptanceReceipt generic-review result_sha256 mismatch');
   if (review.verdict !== (receipt.disposition === 'external_pass' ? 'PASS' : 'FAIL')
     || review.summary !== receipt.summary || stableJson(review.findings) !== stableJson(receipt.findings)) fail('AcceptanceReceipt generic-review verdict/findings mismatch');
 }
@@ -591,17 +592,16 @@ export async function recordAcceptance(args: {
   );
   const review = validateDomainReview(args.reviewResult);
   if (review.context_sha256 !== acceptanceReviewContextDigest(context) || review.subject_sha256 !== receipt.subject_sha256) fail('generic-review result context/subject is stale');
+  const reviewResult = stableJson(review);
   Object.assign(receipt, { request_id: review.request_id, context_sha256: review.context_sha256,
-    result_sha256: authorityFingerprint(stableJson(review)), actual_harness: review.actual_harness,
+    result_sha256: sha256Prefixed(reviewResult), actual_harness: review.actual_harness,
     actual_role: review.actual_role, actual_model: review.actual_model,
     author_session_binding_sha256: args.author?.binding_sha256 ?? null, author_actual_models: args.author?.models ?? null,
     model_relation: modelRelation(args.author?.models ?? null, review.actual_model) });
   if (review.verdict !== (args.disposition === 'external_pass' ? 'PASS' : 'FAIL') || review.summary !== args.summary
     || stableJson(review.findings) !== stableJson(args.findings)) fail('generic-review result verdict/findings mismatch');
   assertRecordedReceiptPolicy(context, receipt, null);
-  acceptanceReceiptPath(context.root,args.authorityHome,true);
-  writeReceipt(reviewResultPath(context.root,args.authorityHome),review);
-  writeAcceptanceWithObservation(context.root, args.authorityHome, receipt);
+  writeAcceptanceWithObservation(context.root, args.authorityHome, receipt, reviewResult);
   return receipt;
 }
 
@@ -646,21 +646,30 @@ export async function verifyAcceptance(args: {
   root: string; authorityHome: string; authority: ReviewAdmissionSource; verification?: string;
 }): Promise<AcceptanceReceipt> {
   const root = realpathSync(args.root);
-  const receipt = readReceipt(acceptanceReceiptPath(root, args.authorityHome));
+  const current = readReceipt(acceptanceReceiptPath(root, args.authorityHome));
+  const { receipt } = current;
   const subject = currentSubject(root, receipt.target_ref, receipt.target_revision);
   if (subject.review_subject_sha256 !== receipt.subject_sha256) fail('AcceptanceReceipt semantic subject is stale');
   const context = await acceptanceContext({ ...args, root, verification: args.verification ?? receipt.verification_file,
     targetRef: receipt.target_ref, targetRevision: receipt.target_revision });
-  return inspectAcceptanceCurrentBinding({ root, authorityHome: args.authorityHome, authority: args.authority,
-    subject: context.subject, evidence: context.evidence });
+  return inspectAcceptanceBinding({ root, authorityHome: args.authorityHome, authority: args.authority,
+    subject: context.subject, evidence: context.evidence }, current);
 }
 
-/** Reobserve admission even when the evaluator supplies current subject evidence. */
-export function inspectAcceptanceCurrentBinding(args: {
+type AcceptanceBindingInput = {
   root: string; authorityHome: string; authority: ReviewAdmissionSource; subject: ReviewSubject; evidence: AcceptanceEvidence;
-}): AcceptanceReceipt {
-  const root = realpathSync(args.root), active = currentAdmission(root, args.authority);
-  const receipt = readReceipt(acceptanceReceiptPath(root, args.authorityHome)), subject = args.subject;
+};
+
+/** Reobserve admission even when the evaluator supplies current subject evidence. */
+export function inspectAcceptanceCurrentBinding(args: AcceptanceBindingInput): AcceptanceReceipt {
+  const root = realpathSync(args.root);
+  return inspectAcceptanceBinding({ ...args, root }, readReceipt(acceptanceReceiptPath(root, args.authorityHome)));
+}
+
+function inspectAcceptanceBinding(args: AcceptanceBindingInput, current: ReturnType<typeof readReceipt>): AcceptanceReceipt {
+  const { root, subject } = args;
+  const { receipt, sha256 } = current;
+  const active = currentAdmission(root, args.authority);
   if (subject.review_subject_sha256 !== receipt.subject_sha256 || subject.target_ref !== receipt.target_ref
     || subject.target_rev !== receipt.target_revision || stableJson(subject.paths) !== stableJson(receipt.reviewed_paths)) fail('AcceptanceReceipt semantic subject is stale');
   const diff = requireFromHelper(join(PACKAGE_ROOT, 'src/effects/review/diff-fingerprint.ts')) as typeof import('./diff-fingerprint');
@@ -678,9 +687,8 @@ export function inspectAcceptanceCurrentBinding(args: {
   const verdict = validateAcceptanceReceiptAgainstPolicy({ receipt, repositoryRoot: root, admission: active.admission, grantSha256: active.grant_sha256,
     waiverGrant: receipt.disposition === 'user_waiver' ? verifyUserWaiverGrant(args) : null });
   if (!verdict.ok) fail(verdict.reason);
-  const observation = readAcceptanceVerificationObservation(root, args.authorityHome, receipt.campaign_sha256, receipt.admission_sha256);
-  if (!observation || observation.acceptance_receipt_sha256 !== sha256Prefixed(readFileSync(acceptanceReceiptPath(root, args.authorityHome)))
-    || observation.grant_sha256 !== receipt.grant_sha256 || observation.goal_sha256 !== receipt.goal_sha256
+  const observation = readAcceptanceVerificationObservation(root, args.authorityHome, receipt.campaign_sha256, receipt.admission_sha256, sha256);
+  if (!observation || observation.grant_sha256 !== receipt.grant_sha256 || observation.goal_sha256 !== receipt.goal_sha256
     || observation.target_ref !== receipt.target_ref || observation.target_revision !== receipt.target_revision
     || observation.subject_sha256 !== receipt.subject_sha256 || observation.verification_evidence_sha256 !== receipt.verification_evidence_sha256
     || observation.disposition !== receipt.disposition) fail('AcceptanceVerificationObservation is missing or stale');
