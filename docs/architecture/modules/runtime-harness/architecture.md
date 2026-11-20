@@ -1,6 +1,6 @@
 # runtime-harness/architecture 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-architecture" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:cf88a393f57c0ecfb5de72e1c3da49d093c9dce1f7c8bb08dd0bb27eed243ef7" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-architecture" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:31cf18b413e2e9d7d68582dc22238757cc547bba124b14bf835d33de076be14c" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.architecture`(kind `capability`)
 > **Matched Prefixes**:`src/effects/architecture/**`、`src/core/architecture/projection.ts`、`src/core/architecture/module-view.ts`、`src/core/review/module-review-prompt.ts`、`src/cli/commands/module.ts`、`src/cli/hook/agent-notice.ts`、`scripts/axr5-archctx-clean-room.ts`、`scripts/check-state-boundaries.ts`、`scripts/project-test-capabilities.ts`、`scripts/sync-helper-sources.ts`、`assets/skills/repo-harness-archimap/**`、`assets/skill-commands/repo-harness-architecture/**`、`docs/verification/**`
@@ -128,7 +128,7 @@ flowchart LR
 | `component.architecture.skills` | Architecture Skills | `5–10` 個文件 / `1000–2000` 行 | 未宣告 |
 | `component.architecture.state-boundaries-check` | State Boundaries Check | `1–2` 個文件 / `1000–2000` 行 | 未宣告 |
 | `component.architecture.test-projection-check` | Test Capability Projection Check | `1–2` 個文件 / `100–200` 行 | 未宣告 |
-| `component.global-runtime-reconciliation.archctx-closure` | ArchContext Closure | `10–20` 個文件 / `1000–2000` 行 | 未宣告 |
+| `component.global-runtime-reconciliation.archctx-closure` | ArchContext Closure | `10–20` 個文件 / `2000–5000` 行 | 未宣告 |
 | `component.global-runtime-reconciliation.archctx-closure-cli` | ArchContext Closure (cli) | `5–10` 個文件 / `500–1000` 行 | 未宣告 |
 | `component.global-runtime-reconciliation.archctx-closure-core` | ArchContext Closure (core) | `2–5` 個文件 / `500–1000` 行 | 未宣告 |
 | `component.global-runtime-reconciliation.archctx-closure-scripts` | ArchContext Closure (scripts) | `1–2` 個文件 / `200–500` 行 | 未宣告 |
