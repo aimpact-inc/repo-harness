@@ -2102,4 +2102,11 @@ test('memoizes node --version probes across repeated ArchctxClient calls with ma
   // Tight <= 5s caller deadline bypasses cache so the caller timeout controls the probe.
   expect(resolveCompatibleNodeRuntime(env, undefined, { deadlineMs: 4_000, nowMs: () => 0 })).toBe(realpathSync(countingNode));
   expect(readFileSync(countFile, 'utf8').trim().split('\n')).toHaveLength(3);
+  // Removing a cached binary evicts its cache entry and re-probes the next compatible PATH entry.
+  const combinedEnv: NodeJS.ProcessEnv = { ...env, PATH: `${bin}:${otherBin}:/usr/bin:/bin` };
+  expect(resolveCompatibleNodeRuntime(combinedEnv)).toBe(realpathSync(countingNode));
+  const beforeEvict = readFileSync(countFile, 'utf8').trim().split('\n').length;
+  rmSync(countingNode);
+  expect(resolveCompatibleNodeRuntime(combinedEnv)).toBe(realpathSync(join(otherBin, 'node')));
+  expect(readFileSync(countFile, 'utf8').trim().split('\n')).toHaveLength(beforeEvict + 1);
 });

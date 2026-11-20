@@ -1,12 +1,19 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { digestJson, errorEnvelope, type ArchitectureDebtItemV1, type ArchitectureDebtReportV1, type Json } from 'archctx-contracts';
 import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError, decodeArchitectureDebtReport } from '../src/core/architecture/projection';
 import type { ArchctxProcessResult, ArchitectureProjectionPolicy, RunArchctxProcess } from '../src/core/architecture/contracts';
-import { completeArchitectureDebt, checkpointArchitectureDebt } from '../src/effects/architecture/archctx-provider';
+import {
+  completeArchitectureDebt,
+  checkpointArchitectureDebt,
+  resolveCompatibleNodeRuntime,
+  resolvePackageLocalArchctx,
+  seedWorktreeCodeGraph,
+  stopWorkspaceArchitectureDaemons,
+} from '../src/effects/architecture/archctx-provider';
 import { currentProcessStartTime } from '../src/effects/locking/process-start-time';
 import { architectureDebtReport, architectureDebtSummary } from '../src/cli/commands/architecture-debt-report';
 import { version as packageVersion } from '../package.json';
@@ -82,15 +89,33 @@ function fixture() {
 type Call = { tool: 'archctx' | 'codegraph'; args: readonly string[]; cwd: string };
 
 /** Answers like archctx@0.8.0: the debt depends on which checkout runs `complete`. */
-function fakeProvider(f: ReturnType<typeof fixture>, debt: { head: ArchitectureDebtReportV1; base: ArchitectureDebtReportV1 | ArchctxProcessResult }, daemonStop: 'ok' | 'fail' = 'ok') {
+function fakeProvider(
+  f: ReturnType<typeof fixture>,
+  debt: { head: ArchitectureDebtReportV1; base: ArchitectureDebtReportV1 | ArchctxProcessResult },
+  daemonStop: 'ok' | 'fail' = 'ok',
+  syncOutcome: 'no-base' | 'seeded' | 'partial-index' = 'no-base',
+) {
   const calls: Call[] = [];
   let baseCheckout: string | null = null;
   const run: RunArchctxProcess = (binary, args, options) => {
     const tool = binary === f.codegraphBin ? 'codegraph' : 'archctx';
     calls.push({ tool, args, cwd: options.cwd });
     if (tool === 'codegraph') {
-      mkdirSync(join(options.cwd, '.codegraph'));
+      mkdirSync(join(options.cwd, '.codegraph'), { recursive: true });
+      writeFileSync(join(options.cwd, '.codegraph', 'codegraph.db'), 'cold-init');
       return { status: 0, signal: null, stdout: '', stderr: '' };
+    }
+    if (args[0] === 'sync') {
+      if (syncOutcome === 'seeded') {
+        mkdirSync(join(options.cwd, '.codegraph'), { recursive: true });
+        writeFileSync(join(options.cwd, '.codegraph', 'codegraph.db'), 'seeded-from-base');
+        return ok({ schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'sync', data: { codeFactsDigest: 'sha256:seed', indexedAt: new Date(0).toISOString(), codeGraphBase: 'current' } });
+      }
+      if (syncOutcome === 'partial-index') {
+        mkdirSync(join(options.cwd, '.codegraph'), { recursive: true });
+        writeFileSync(join(options.cwd, '.codegraph', 'codegraph.lock'), 'stale-lock');
+      }
+      return failed(errorEnvelope('sync', 'AC_CODE_FACTS_UNAVAILABLE', 'no shared base', 'index-missing'));
     }
     if (args[0] === 'doctor') return ok(doctorEnvelope());
     if (args[0] === 'complete') {
@@ -267,6 +292,7 @@ describe('architecture-debt command', () => {
     expect(output.resolvedIds).toEqual([goneItem.id]);
     const checkout = provider.baseCheckout()!;
     expect(provider.calls.filter((call) => call.cwd === checkout).map(({ tool, args }) => [tool, ...args])).toEqual([
+      ...(process.platform === 'win32' ? [] : [['archctx', 'sync', '--json']]),
       ['codegraph', 'init', '-y', '.'], ['archctx', 'doctor', '--json'], ['archctx', 'complete', '--head-sha', f.baseSha, '--json'],
     ]);
     // The R5 closeout helper stops only the daemon of the base checkout, by state directory.
@@ -275,6 +301,81 @@ describe('architecture-debt command', () => {
     expect(worktrees(f.repoRoot)).toEqual([f.repoRoot]);
     expect(architectureDebtSummary(output)).toContain('introduced 1, resolved 1');
   });
+
+  test('a shared CodeGraph base seeds the temporary checkout without cold codegraph init; partial seed fails closed and cleans up', () => {
+    if (process.platform === 'win32') return;
+    const f = fixture();
+    const seeded = fakeProvider(f, { head: recordedDebt, base: withItems([flowItem, goneItem]) }, 'ok', 'seeded');
+    const output = architectureDebtReport(f.repoRoot, 'HEAD~1', { consumerRoot: f.consumerRoot, policy, run: seeded.run });
+    expect(output.introduced).toEqual([unownedItem]);
+    expect(output.resolvedIds).toEqual([goneItem.id]);
+    const seededCheckout = seeded.baseCheckout()!;
+    expect(seeded.calls.filter((call) => call.cwd === seededCheckout).map(({ tool, args }) => [tool, ...args])).toEqual([
+      ['archctx', 'sync', '--json'], ['archctx', 'doctor', '--json'], ['archctx', 'complete', '--head-sha', f.baseSha, '--json'],
+    ]);
+    expect(seeded.calls.some((call) => call.tool === 'codegraph')).toBe(false);
+    expect(existsSync(dirname(seededCheckout))).toBe(false);
+
+    const fPartial = fixture();
+    const partial = fakeProvider(fPartial, { head: recordedDebt, base: recordedDebt }, 'ok', 'partial-index');
+    let caught: unknown;
+    try { architectureDebtReport(fPartial.repoRoot, 'HEAD~1', { consumerRoot: fPartial.consumerRoot, policy, run: partial.run }); } catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(ArchctxClientError);
+    expect(caught).toMatchObject({ code: 'RH_ARCHCTX_CODE_FACTS_NOT_READY', reasonCode: 'code-facts-not-ready' });
+    expect(partial.calls.some((call) => call.tool === 'codegraph')).toBe(false);
+    expect(worktrees(fPartial.repoRoot)).toEqual([fPartial.repoRoot]);
+  });
+
+  test('real archctx sync seeds base checkout without running cold codegraph init when shared base is published', () => {
+    if (process.platform === 'win32') return;
+    const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'rh-debt-real-seed-')));
+    roots.push(workspace);
+    const primary = join(workspace, 'primary');
+    const checkout = join(workspace, 'checkout');
+    const home = join(workspace, 'home');
+    mkdirSync(primary, { recursive: true });
+    mkdirSync(home, { recursive: true });
+    const nodeBin = resolveCompatibleNodeRuntime(process.env);
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, REPO_HARNESS_NODE_BIN: nodeBin, DO_NOT_TRACK: '1', CODEGRAPH_NO_DOWNLOAD: '1', CODEGRAPH_TELEMETRY: '0' };
+    git(primary, ['init', '-q']);
+    writeFileSync(join(primary, '.gitignore'), '.codegraph/\n');
+    writeFileSync(join(primary, 'index.ts'), 'export const value = 1;\n');
+    git(primary, ['add', '.']);
+    git(primary, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base']);
+    const baseSha = git(primary, ['rev-parse', 'HEAD']);
+    writeFileSync(join(primary, 'index.ts'), 'export const value = 2;\n');
+    git(primary, ['add', '.']);
+    git(primary, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'head']);
+
+    const codegraphShim = join(dirname(resolvePackageLocalArchctx().packageRoot), '@colbymchenry', 'codegraph', 'npm-shim.js');
+    execFileSync(nodeBin, [codegraphShim, 'init', '-y', '.'], { cwd: primary, env, encoding: 'utf8' });
+    const archctxBin = resolvePackageLocalArchctx().binaryPath;
+    const published = execFileSync(nodeBin, [archctxBin, 'sync', '--json'], { cwd: primary, env, encoding: 'utf8' });
+    expect(JSON.parse(published).data.codeGraphBase).toBe('published');
+    git(primary, ['worktree', 'add', '--detach', checkout, baseSha]);
+    const realCheckout = realpathSync(checkout);
+
+    const calls: string[] = [];
+    const runReal: RunArchctxProcess = (binary, args, opts) => {
+      calls.push(`${binary} ${args.join(' ')}`);
+      const result = spawnSync(nodeBin, [binary, ...args], { cwd: opts.cwd, env: opts.env, encoding: 'utf8', timeout: opts.timeoutMs });
+      return { status: result.status ?? 1, signal: result.signal, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+    };
+
+    try {
+      const seededFromBase = seedWorktreeCodeGraph(realCheckout, { env, policy, run: runReal });
+      expect(seededFromBase).toBe(true);
+      expect(existsSync(join(realCheckout, '.codegraph', 'codegraph.db'))).toBe(true);
+      expect(calls.some((line) => line.includes('sync --json'))).toBe(true);
+      expect(calls.some((line) => line.includes('init -y .'))).toBe(false);
+    } finally {
+      if (existsSync(checkout)) {
+        stopWorkspaceArchitectureDaemons(primary, realCheckout, { env, policy, run: runReal });
+        git(primary, ['worktree', 'remove', '--force', checkout]);
+      }
+      stopWorkspaceArchitectureDaemons(primary, realpathSync(primary), { env, policy, run: runReal });
+    }
+  }, 60_000);
 
   test('a failed base run still stops and removes the base checkout', () => {
     const f = fixture();
