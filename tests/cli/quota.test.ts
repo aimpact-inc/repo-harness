@@ -12,7 +12,7 @@ import {
   formatQuotaReport,
   type QuotaReport,
 } from '../../src/core/board/quota';
-import { effectiveSeatConfig, formatSeatModes, formatSeatRoutes, seatAccountQuotas } from '../../src/core/board/seat-routing';
+import { effectiveSeatConfig, formatSeatModes, formatSeatRoutes, seatAccountQuotas, selectSeatRoute } from '../../src/core/board/seat-routing';
 import { decodeSeatPool, seatRuntimeBlock } from '../../src/core/board/seat-pool';
 import { DEFAULT_SEATS_CONFIG, type CodexCreditMode, type SeatConfigV1 } from '../../src/core/board/seats-settings';
 
@@ -54,6 +54,28 @@ describe('seat quota routing', () => {
       ? { ...seats.orchestrator, model: 'opus', effort: 'high' } : seats.orchestrator);
     if (reserved) expect(lines).toContain(`reviewer: none (claude ${account.state}, reserved for advisor and orchestrator)`);
     expect(lines.some(line => line.includes('fallback'))).toBe(false);
+  });
+
+  test.each([81, 95])('Neon keeps important and frontend routes active with Claude %s%% used', used => {
+    const neon = { ...DEFAULT_SEATS_CONFIG['worker-light']!, model: 'magpie/agy-cli/gemini-4-neon' };
+    const route = ['worker-important', 'worker-important-fast'] as const;
+    const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-important-fast': neon,
+      routing: { ...DEFAULT_SEATS_CONFIG.routing, important_deep: route, important_fast: route, frontend: route } };
+    const quota = seatAccountQuotas([claude({ seven_day: week(used, 84) })], seats.routing);
+    for (const task of ['important_deep', 'important_fast', 'frontend'] as const) {
+      expect(selectSeatRoute(task, seats, quota)).toMatchObject({ id: 'worker-important-fast', seat: neon });
+    }
+    const exhausted = { ...quota, agy_gemini: { state: 'exhausted' as const, remaining: 0 } };
+    const unavailable = { ...seats, routing: { ...seats.routing, unavailable_pi_providers: ['magpie/agy-cli'] } };
+    for (const task of ['important_deep', 'important_fast'] as const) {
+      expect(selectSeatRoute(task, seats, exhausted).id).toBe('worker-light');
+      expect(selectSeatRoute(task, unavailable, quota).id).toBe('worker-light');
+      expect(selectSeatRoute(task, seats, quota, seat => seat !== neon).id).toBe('worker-light');
+      expect(selectSeatRoute(task, seats, quota, undefined, id => id === 'worker-important-fast' ? 'model unavailable' : null).id).toBe('worker-light');
+    }
+    expect(selectSeatRoute('frontend', seats, exhausted).line).toEndWith('agy_gemini exhausted; frontend waits for claude or neon)');
+    const neonOnly = { ...seats, routing: { ...seats.routing, frontend: ['worker-important-fast'] as const } };
+    expect(selectSeatRoute('frontend', neonOnly, exhausted).line).toBe('route frontend: none (agy_gemini exhausted; frontend waits for neon)');
   });
 
   test('saving fails closed when worker-light is null', () => {
@@ -581,7 +603,10 @@ describe('rh seats pool', () => {
     expect(result.status, result.stderr).toBe(0);
     const pool = decodeSeatPool(JSON.parse(result.stdout));
     expect(pool.runtimes.find(entry => entry.id === 'pi')).toEqual({ id: 'pi', installation: 'available', sign_in: 'not_checked', models: 'not_checked' });
-    expect(pool.seats.find(row => row.seat === 'worker')?.pool).toMatchObject([{ model: 'zai/glm-5.3-flash', reason: 'pi on PATH; provider not checked' }]);
+    expect(pool.seats.find(row => row.seat === 'worker')?.pool).toMatchObject([
+      { model: 'magpie/agy-cli/gemini-4-neon', account: 'agy_gemini', reason: 'pi on PATH; provider not checked' },
+      { model: 'zai/glm-5.3-flash', reason: 'pi on PATH; provider not checked' },
+    ]);
     expect(pool.seats.find(row => row.seat === 'worker')?.excluded).toContainEqual(expect.objectContaining({ model: 'magpie/group/deepseek-v4.1-flash', status: 'provider_unavailable' }));
     expect(pool.seats.find(row => row.seat === 'advisor')?.pool.map(entry => [entry.model, entry.account])).toEqual([
       ['magpie/agy-cli/gemini-4-neon', 'agy_gemini'], ['magpie/agy-cli/gemini-4-carbon', 'agy_gemini'],
@@ -613,7 +638,7 @@ ${branch === 'timeout' ? 'setInterval(() => {}, 1000);' : branch === 'signed out
       const high = [...row.pool, ...row.excluded].find(entry => entry.model === model)!;
       expect(high.status).toBe(branch === 'present' ? 'available' : branch === 'signed out' ? 'signed_out' : branch === 'missing' ? 'not_installed' : 'unknown');
       if (branch === 'present') {
-        expect(high.account).toBeNull();
+        expect(high.account).toBe('agy_gemini');
         expect(effectiveSeatConfig('advisor', { ...DEFAULT_SEATS_CONFIG, advisor }, seatAccountQuotas([], DEFAULT_SEATS_CONFIG.routing))).toEqual(advisor);
         expect(row.excluded.find(entry => entry.model === 'gemini-4-neon-low')?.status).toBe('not_listed');
       }
@@ -640,7 +665,8 @@ ${branch === 'timeout' ? 'setInterval(() => {}, 1000);' : branch === 'signed out
       ['claude', 'opus', 'claude'], ['codex', 'gpt-6.2-sol', 'chatgpt'],
     ]);
     expect(row.excluded.map(entry => [entry.model, entry.status])).toEqual([
-      ['sonnet', 'disabled'], ['gpt-6.1-terra', 'not_listed'], ['zai/glm-5.3-flash', 'not_installed'], ['magpie/group/deepseek-v4.1-flash', 'not_installed'],
+      ['magpie/agy-cli/gemini-4-neon', 'not_installed'], ['sonnet', 'disabled'], ['gpt-6.1-terra', 'not_listed'],
+      ['zai/glm-5.3-flash', 'not_installed'], ['magpie/group/deepseek-v4.1-flash', 'not_installed'],
     ]);
     expect(row.configured).toEqual({ field: 'seats.worker.model', table_entry: false, in_pool: false, reason: 'outside_recommendations' });
     const calls = readFileSync(f.env.SEAT_POOL_LOG, 'utf8').trim().split('\n').map(line => JSON.parse(line));
@@ -719,7 +745,7 @@ describe('rh seats launch availability', () => {
     const refused = launchSeat('worker', f.env);
     expect([refused.status, refused.stdout, JSON.parse(refused.stderr)]).toEqual([1, '', {
       ok: false, error: 'seat_provider_unavailable',
-      message: expect.stringMatching(/The worker seat cannot launch\. codex: Runtime not found on PATH\. See seats\.worker\.model\..*Available pool for worker: pi zai\/glm-5\.3-flash/u),
+      message: expect.stringMatching(/The worker seat cannot launch\. codex: Runtime not found on PATH\. See seats\.worker\.model\..*Available pool for worker: pi magpie\/agy-cli\/gemini-4-neon, pi zai\/glm-5\.3-flash/u),
     }]);
     expect(existsSync(tab)).toBe(false);
     expect(existsSync(f.env.SEAT_POOL_LOG)).toBe(false);

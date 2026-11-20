@@ -1,6 +1,6 @@
 import { AGY_QUOTA_ACCOUNTS, weeklyRemainingPercent, type QuotaAccount, type QuotaAccountReport, type QuotaState } from './quota';
 import { SHIPPED_MODEL_IDS } from './recommended-models';
-import { PI_CODEX_MODEL_PREFIX, ROUTING_CLASSES, SEAT_IDS, isPiCodexSeat, isPlannerSeat, isReviewSeat, unavailablePiSeat, type CodexCreditMode, type RoutingClass, type SeatConfigV1, type SeatId, type SeatRoutingV1, type SeatsConfigV1 } from './seats-settings';
+import { PI_AGY_MODEL_PREFIX, PI_CODEX_MODEL_PREFIX, PI_NEON_MODEL, ROUTING_CLASSES, SEAT_IDS, isNeonSeat, isPiCodexSeat, isPlannerSeat, isReviewSeat, unavailablePiSeat, type CodexCreditMode, type RoutingClass, type SeatConfigV1, type SeatId, type SeatRoutingV1, type SeatsConfigV1 } from './seats-settings';
 
 interface AccountQuota { readonly state: QuotaState; readonly remaining: number | null }
 export interface SeatAccountQuotas {
@@ -48,18 +48,18 @@ export const creditsCover = (id: SeatId | null, quota: SeatAccountQuotas): boole
 
 export const claudeReserved = (quota: SeatAccountQuotas): boolean => quota.claude.mode === 'saving' || quota.claude.state === 'exhausted';
 
-const AGY_MODEL_PREFIX = 'magpie/agy-cli/';
 const AGY_ADVISOR_HYPER_MIN_REMAINING = 50;
 const CONTROL_MODELS = {
   claude: { model: 'opus', effort: 'high' },
-  agy: { model: `${AGY_MODEL_PREFIX}gemini-4-neon` },
+  agy: { model: PI_NEON_MODEL },
 } as const;
 
 export function seatAccount(seat: Pick<SeatConfigV1, 'runtime' | 'model'>): QuotaAccount | null {
   if (seat.runtime === 'claude') return 'claude';
   if (seat.runtime === 'codex' || isPiCodexSeat(seat)) return 'chatgpt';
-  if (seat.runtime === 'pi' && seat.model?.startsWith(AGY_MODEL_PREFIX)) {
-    return seat.model.startsWith(`${AGY_MODEL_PREFIX}gemini-`) ? 'agy_gemini' : 'agy_other';
+  if (seat.runtime === 'agy' && seat.model?.startsWith('gemini-')) return 'agy_gemini';
+  if (seat.runtime === 'pi' && seat.model?.startsWith(PI_AGY_MODEL_PREFIX)) {
+    return seat.model.startsWith(`${PI_AGY_MODEL_PREFIX}gemini-`) ? 'agy_gemini' : 'agy_other';
   }
   return null;
 }
@@ -97,7 +97,7 @@ export function effectiveSeatConfig(id: SeatId, seats: SeatsConfigV1, quota: Sea
     if (id === 'orchestrator' ? reserved : id === 'advisor' && (reserved || quota.claude.mode !== 'hyper')) {
       return { ...seat, ...CONTROL_MODELS.claude };
     }
-  } else if (id === 'advisor' && isAgyAccount(seatAccount(seat))) {
+  } else if (id === 'advisor' && seat.runtime === 'pi' && isAgyAccount(seatAccount(seat))) {
     const remaining = quota.agy_gemini.remaining;
     if (remaining === null || remaining < AGY_ADVISOR_HYPER_MIN_REMAINING) return { ...seat, ...CONTROL_MODELS.agy };
   }
@@ -152,25 +152,34 @@ export type SeatModelCheck = (id: SeatId, seat: SeatConfigV1) => string | null;
 export function selectSeatRoute(task: RoutingClass, seats: SeatsConfigV1, quota: SeatAccountQuotas, allow: (seat: SeatConfigV1) => boolean = () => true,
   modelBlock: SeatModelCheck = (_id, seat) => unavailablePiSeat(seat, seats.routing)): SeatRouteV1 {
   const reserved = claudeReserved(quota);
-  // While Claude is reserved, an important route that holds a Claude-account seat goes to worker-light; another route is read as stored (#1954, #2679).
-  const savingRoute = reserved && (task === 'important_deep' || task === 'important_fast')
-    && seats.routing[task].some(id => seatAccount(seats[id]!) === 'claude');
-  if (savingRoute) {
+  const ids = seats.routing[task];
+  // The section decoder refuses routes that name an unconfigured seat.
+  const hasClaude = ids.some(id => seats[id]!.runtime === 'claude');
+  const hasNeon = ids.some(id => isNeonSeat(seats[id]!));
+  const savingRoute = reserved && hasClaude && (task === 'important_deep' || task === 'important_fast');
+  const candidatesFor = (ids: readonly SeatId[]) => ids
+    .map(id => ({ id, seat: effectiveSeatConfig(id, seats, quota)! })).filter(({ seat }) => allow(seat))
+    .map(candidate => ({ ...candidate, modelBlock: modelBlock(candidate.id, candidate.seat) }));
+  const isAvailable = ({ id, seat, modelBlock }: ReturnType<typeof candidatesFor>[number]) =>
+    modelBlock === null && seatState(id, seat, quota) !== 'exhausted' && !(seatAccount(seat) === 'claude' && reserved);
+
+  let candidates = savingRoute && !hasNeon ? [] : candidatesFor(ids);
+  let available = candidates.filter(isAvailable);
+  // An eligible Neon seat keeps the configured route active. Otherwise the Claude reservation sends it to worker-light.
+  if (savingRoute && !available.some(({ seat }) => isNeonSeat(seat))) {
     if (seats['worker-light'] === null) return { id: null, line: `route ${task}: none (worker-light not configured)` };
     if (seats['worker-light'].runtime !== 'pi') return { id: null, line: `route ${task}: none (worker-light is not a Pi seat)` };
+    candidates = candidatesFor(['worker-light']);
+    available = candidates.filter(isAvailable);
   }
-  const ids = savingRoute ? ['worker-light'] as const : seats.routing[task];
-  // The section decoder refuses routes that name an unconfigured seat.
-  const candidates = ids.map(id => ({ id, seat: effectiveSeatConfig(id, seats, quota)! })).filter(({ seat }) => allow(seat))
-    .map(candidate => ({ ...candidate, modelBlock: modelBlock(candidate.id, candidate.seat) }));
   if (candidates.length === 0) return { id: null, line: `route ${task}: none (no seat in the route may take this task)` };
-  const available = candidates.filter(({ id, seat, modelBlock }) => modelBlock === null && seatState(id, seat, quota) !== 'exhausted' && !(seatAccount(seat) === 'claude' && reserved));
   const reason = ({ id, seat, modelBlock }: typeof candidates[number]) => modelBlock ?? accountText(id, seat, quota);
   const selected = available.find(({ id, seat }) => seatState(id, seat, quota) !== 'unknown')
     ?? available.find(({ id, seat }) => seatState(id, seat, quota) === 'unknown');
   if (selected === undefined) {
     const reasons = [...new Set(candidates.map(reason))].join('; ');
-    return { id: null, line: `route ${task}: none (${reasons}${task === 'frontend' ? '; frontend waits for claude' : ''})` };
+    const waitingFor = hasNeon ? (hasClaude ? 'claude or neon' : 'neon') : 'claude';
+    return { id: null, line: `route ${task}: none (${reasons}${task === 'frontend' ? `; frontend waits for ${waitingFor}` : ''})` };
   }
   const selectedState = seatState(selected.id, selected.seat, quota);
   const showAccount = isAgyAccount(seatAccount(selected.seat)) || selectedState === 'unknown' || selectedState === 'tight';

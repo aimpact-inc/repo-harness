@@ -286,6 +286,39 @@ describe('agents page seats section', () => {
     expect(posts[0]!.seats['worker-important'].model).toBe('claude-opus-9');
   });
 
+  test('Pi Neon clears the orchestrator note and can be added to a frontend route', async () => {
+    const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
+    const read = await settingsStores(NOW, 'busy').seats.read();
+    if (read.state !== 'ok') throw new Error('fixture read failed');
+    const ranges = { ...read.settings.ranges, runtimes: read.settings.ranges.runtimes.map(runtime =>
+      runtime.id === 'pi' ? { ...runtime, enabled: true } : runtime) };
+    await mount({ ...seatsProps(posts), readSeatsSettings: async () => ({ state: 'ok', settings: { ...read.settings, ranges } }) });
+    const neon = 'magpie/agy-cli/gemini-4-neon';
+    const note = () => document.querySelector('[data-seat-card="orchestrator"] [data-runtime-note]');
+    await click(pick('Orchestrator'));
+    await click(buttonWithText('Codex'));
+    expect(note()).not.toBeNull();
+    await click(buttonWithText('Pi'));
+    expect(note()).not.toBeNull();
+    await click(buttonWithText(neon));
+    expect(note()).toBeNull();
+
+    await click(document.querySelector<HTMLElement>('[data-route="frontend"] [aria-label="Remove worker-important"]')!);
+    await click(pick('Important worker'));
+    await click(buttonWithText('Pi'));
+    const add = () => document.querySelector<HTMLElement>('[data-route="frontend"] ~ [aria-label="Add worker-important"]');
+    expect(add()).toBeNull();
+    await click(buttonWithText(neon));
+    await click(add()!);
+    expect(seatsSave().disabled).toBe(false);
+    await click(seatsSave());
+    expect(posts[0]?.seats).toMatchObject({
+      orchestrator: { runtime: 'pi', model: neon },
+      'worker-important': { runtime: 'pi', model: neon },
+      routing: { frontend: ['worker-important-fast', 'worker-important'] },
+    });
+  });
+
   test('a Pi advisor keeps its fleet when switching between GPT and Neon', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     const read = await settingsStores(NOW, 'busy').seats.read();
@@ -449,7 +482,7 @@ describe('agents page seats section', () => {
     expect(posts[0]!.seats['gatekeeper-fallback']).toBeNull();
   });
 
-  test('the routing lists reorder, add and remove; frontend offers only the Claude worker seats; save sends the routes, thresholds and credit mode', async () => {
+  test('the routing lists reorder, add and remove; save sends the routes, thresholds and credit mode', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     await mount(seatsProps(posts));
     expect(routeSeats('important_deep')).toEqual(['worker-important', 'worker-deep']);

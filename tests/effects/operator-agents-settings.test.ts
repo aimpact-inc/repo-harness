@@ -591,8 +591,15 @@ describe('seat settings contract without transport', () => {
     writeFileSync(join(home, '.repo-harness', 'config.json'), JSON.stringify({ agents: PANE_AGENTS, seats: { ...DEFAULT_SEATS_CONFIG, worker } }));
     const env = { HOME: home }, before = readSeatsSettings(env), route = seatsSettingsWriteRoute(env);
     const addedModels = ['magpie/opencode-go/deepseek-v4.1-flash', 'magpie/group/deepseek-v4.1-flash', 'magpie/zcode/GLM-5.3', 'magpie/zcode/GLM-5.3-Flash'];
-    // Each worker seat recommends the owner's worker list (#3252); the Pi ids that it does not name still save.
-    for (const id of WORKER_SEAT_IDS) expect(before.ranges.seats[id].models).toEqual([{ runtime: 'claude', model: 'opus' }, { runtime: 'claude', model: 'sonnet' },
+    // The seat ranges recommend models in the owner's order. Other valid Pi ids still save.
+    const opus = { runtime: 'claude', model: 'opus' } as const;
+    const neon = { runtime: 'pi', model: 'magpie/agy-cli/gemini-4-neon' } as const;
+    expect(before.ranges.seats.orchestrator.models).toEqual([opus, neon]);
+    expect(before.ranges.seats.advisor.models).toEqual([opus, neon,
+      { runtime: 'claude', model: 'fable' }, { runtime: 'pi', model: 'magpie/agy-cli/gemini-4-carbon' },
+      ...['low', 'medium', 'high', 'xhigh'].map(effort => ({ runtime: 'agy' as const, model: `gemini-4-neon-${effort}` })),
+    ]);
+    for (const id of WORKER_SEAT_IDS) expect(before.ranges.seats[id].models).toEqual([opus, neon, { runtime: 'claude', model: 'sonnet' },
       { runtime: 'codex', model: 'gpt-6.2-sol' }, { runtime: 'codex', model: 'gpt-6.1-terra' }, { runtime: 'pi', model: 'zai/glm-5.3-flash' }, { runtime: 'pi', model: 'magpie/group/deepseek-v4.1-flash' }]);
     const { revision, ...section } = before.config;
     const saved = await route.decode({ expected_revision: revision, seats: { ...section, advisor: { ...section.advisor, effort: 'medium' } } }, []).execute();
@@ -814,7 +821,7 @@ describe('seat settings contract without transport', () => {
     } }, [])).toThrow('seats_settings_request_invalid');
   });
 
-  test('routing refuses unknown, duplicate, empty, non-worker and non-Claude frontend seats', () => {
+  test('routing refuses unknown, duplicate, empty and non-worker routes and Codex frontend seats', () => {
     const home = mkdtempSync(join(tmpdir(), 'seats-contract-'));
     cleanups.push(() => rmSync(home, { recursive: true, force: true }));
     mkdirSync(join(home, '.repo-harness'));
@@ -839,7 +846,7 @@ describe('seat settings contract without transport', () => {
     expect(readFileSync(path, 'utf8')).toBe(original);
   });
 
-  test('a save refuses a frontend route to a Pi seat as the read path does and writes nothing', () => {
+  test('a save refuses a frontend route to a Pi DeepSeek seat as the read path does and writes nothing', () => {
     const home = mkdtempSync(join(tmpdir(), 'seats-save-decoder-')), dir = join(home, '.repo-harness'), path = join(dir, 'config.json'), env = { HOME: home };
     cleanups.push(() => rmSync(home, { recursive: true, force: true }));
     const written = JSON.stringify({ agents: PANE_AGENTS, seats: { ...DEFAULT_SEATS_CONFIG, routing: { ...DEFAULT_SEATS_CONFIG.routing, frontend: ['worker-important'] },
@@ -942,6 +949,17 @@ describe('seat settings routes', () => {
       expect(readFileSync(path, 'utf8')).toBe(written);
     } finally { browserFetch.mockRestore(); }
   });
+  test('a frontend route with a Pi Neon worker saves and reads back', async () => {
+    const harness = await startHarness({ agents: PANE_AGENTS });
+    const { revision, ...section } = (await seats(harness)).config;
+    const neon = { ...section['worker-important'], runtime: 'pi' as const, model: 'magpie/agy-cli/gemini-4-neon' };
+    const response = await post(harness, { expected_revision: revision, seats: { ...section, 'worker-important': neon } }, 'seats');
+    expect(response.status).toBe(200);
+    const stored = (await seats(harness)).config;
+    expect(stored['worker-important']).toEqual(neon);
+    expect(stored.routing.frontend).toEqual(['worker-important', 'worker-important-fast']);
+  });
+
   test('a configured Pi worker-light in a non-frontend class saves and reads back', async () => {
     const harness = await startHarness({ agents: PANE_AGENTS });
     const { revision, ...section } = (await seats(harness)).config;

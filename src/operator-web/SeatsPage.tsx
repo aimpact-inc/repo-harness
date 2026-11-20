@@ -3,7 +3,7 @@ import { Banner, Button, Empty, Loader, Switch, cn } from '@cloudflare/kumo';
 import { effectiveSeatConfig, seatAccountQuotas, seatOnCredits } from '../core/board/seat-routing';
 import { EXHAUSTED_AT_OR_ABOVE_USED_RANGE } from '../core/board/quota';
 import { AGY_SEAT_LIMITS, buildSeatLaunch, type SeatLimitLevel } from '../core/board/seat-launch';
-import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, decodeSeatsSettingsRequest, isOptionalSeat, isPlannerSeat, isReviewSeat, isSeatScaffoldSubAgent, piSubAgentModel, seatHostId, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
+import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, decodeSeatsSettingsRequest, isClaudeOrNeonSeat, isOptionalSeat, isPlannerSeat, isReviewSeat, isSeatScaffoldSubAgent, piSubAgentModel, seatHostId, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
 import type { SetupSnapshotV2 } from '../core/setup/types';
 import type { OperatorTranslate } from './i18n';
 import type { QuotaSection } from './quota';
@@ -246,7 +246,7 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
             onPick={value => form.edit(current => setSeatRuntime(current, seat, value, ranges))} />
         )}
         {runtimeChoices.filter(entry => !entry.enabled).map(entry => <InPlaceEnable key={entry.id} runtime={entry.id} agents={agents} t={t} />)}
-        {runtime.enabled && seat === 'orchestrator' && draft.runtime !== 'claude' && (
+        {runtime.enabled && seat === 'orchestrator' && !isClaudeOrNeonSeat(draft) && (
           <span className="text-xs text-kumo-subtle" data-runtime-note>{t('seats.runtime.orchestratorMode')}</span>
         )}
       </Field>
@@ -352,7 +352,10 @@ function RouteRow({ task, draft, settings, locked, edit, t }: {
 }) {
   const route = draft.routing[task];
   const { routing } = settings.ranges;
-  const candidates = (task === 'frontend' ? routing.frontend_seats : routing.worker_seats).filter(id => draft[id] !== null && !route.includes(id));
+  const candidates = (task === 'frontend' ? routing.frontend_seats : routing.worker_seats).filter(id => {
+    const seat = draft[id];
+    return seat !== null && !route.includes(id) && (task !== 'frontend' || isClaudeOrNeonSeat(seat));
+  });
   const moved = (from: number, to: number) => route.map((id, index) => (index === from ? route[to]! : index === to ? route[from]! : id));
   return (
     <Field label={t(`seats.routing.${task}`)}>

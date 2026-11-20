@@ -1,4 +1,4 @@
-import { DEFAULT_SEATS_CONFIG, PI_CODEX_MODEL_PREFIX, SEAT_IDS, type SeatId, type SeatModelEntryV1 } from './seats-settings';
+import { DEFAULT_SEATS_CONFIG, PI_CODEX_MODEL_PREFIX, PI_NEON_MODEL, SEAT_IDS, type SeatId, type SeatModelEntryV1 } from './seats-settings';
 
 // Per-agent Codex target overrides — the only model/effort remaps in the fleet.
 // Every role carries an explicit target so Codex model/effort never drift with
@@ -11,12 +11,13 @@ export const AGENT_TARGET_OVERRIDES: Record<string, { model: string; effort: str
 
 const entry = (runtime: SeatModelEntryV1['runtime'], model: string): SeatModelEntryV1 => Object.freeze({ runtime, model });
 const OPUS = entry('claude', 'opus');
+const NEON = entry('pi', PI_NEON_MODEL);
 const SOL = entry('codex', 'gpt-6.2-sol');
 export const AGY_ADVISOR_STARTER = entry('agy', 'gemini-4-neon-high');
 // One id per model line, the newest release (#3252). GLM flash: the id that the review launcher runs. DeepSeek flash: the id that the Pi seats run.
 const GLM_FLASH = entry('pi', 'zai/glm-5.3-flash');
 const DEEPSEEK_FLASH = entry('pi', 'magpie/group/deepseek-v4.1-flash');
-const WORKER = Object.freeze([OPUS, entry('claude', 'sonnet'), SOL, entry('codex', 'gpt-6.1-terra'), GLM_FLASH, DEEPSEEK_FLASH]);
+const WORKER = Object.freeze([OPUS, NEON, entry('claude', 'sonnet'), SOL, entry('codex', 'gpt-6.1-terra'), GLM_FLASH, DEEPSEEK_FLASH]);
 const REVIEW = Object.freeze([SOL, entry('codex', 'gpt-6.2-astra'), GLM_FLASH]);
 
 /**
@@ -25,10 +26,10 @@ const REVIEW = Object.freeze([SOL, entry('codex', 'gpt-6.2-astra'), GLM_FLASH]);
  * Every worker seat offers the whole worker list, ordered from the hardest work to the lightest.
  */
 export const SEAT_RECOMMENDED_MODELS: Readonly<Record<SeatId, readonly SeatModelEntryV1[]>> = Object.freeze({
-  orchestrator: Object.freeze([OPUS]),
-  advisor: Object.freeze([OPUS, entry('claude', 'fable'), entry('pi', 'magpie/agy-cli/gemini-4-neon'), entry('pi', 'magpie/agy-cli/gemini-4-carbon'),
+  orchestrator: Object.freeze([OPUS, NEON]),
+  advisor: Object.freeze([OPUS, NEON, entry('claude', 'fable'), entry('pi', 'magpie/agy-cli/gemini-4-carbon'),
     entry('agy', 'gemini-4-neon-low'), entry('agy', 'gemini-4-neon-medium'), AGY_ADVISOR_STARTER, entry('agy', 'gemini-4-neon-xhigh')]),
-  planner: Object.freeze([entry('pi', 'magpie/agy-cli/gemini-4-carbon'), entry('pi', 'magpie/agy-cli/gemini-4-neon'), entry('codex', 'gpt-6.2-astra'), OPUS]),
+  planner: Object.freeze([entry('pi', 'magpie/agy-cli/gemini-4-carbon'), NEON, entry('codex', 'gpt-6.2-astra'), OPUS]),
   worker: WORKER,
   'worker-deep': WORKER,
   'worker-important': WORKER,
