@@ -17,6 +17,8 @@ mkdir -p "$SMOKE_HOME"
 # Keep the registry beside HOME: the nested test runner rejects registries
 # below its caller HOME, even when that HOME is temporary.
 export HOME="$SMOKE_HOME" REPO_HARNESS_HOME="$TMP_DIR/registry"
+# Use Pi settings under $SMOKE_HOME/.pi/agent instead of the caller's Pi config.
+unset PI_CODING_AGENT_DIR
 
 cleanup() {
   local exit_code=$?
@@ -646,6 +648,32 @@ const status = run('status', '--json');
 if (status.status !== 0 || status.loaded !== 0) fail(`status --json with selection [] returned ${status.status} and loaded ${status.loaded} MCP modules`);
 console.log(`[tarball-smoke] OK: mcp serve loads ${selected.loaded} MCP modules with all, 0 with selection []; status --json loads 0.`);
 JS_EOF
+
+# Pi defaults to /bin/bash, which is Bash 3.2 on macOS.
+if [[ -x /bin/bash ]] && /bin/bash -c '(( BASH_VERSINFO[0] < 4 ))'; then
+  smoke_bash=""
+  # End the search list with a colon so each iteration can consume one entry.
+  bash_search_path="${PATH-}:/opt/homebrew/bin:/usr/local/bin:"
+  while [[ -n "$bash_search_path" ]]; do
+    bash_dir="${bash_search_path%%:*}"
+    bash_search_path="${bash_search_path#*:}"
+    candidate="${bash_dir:-.}/bash"
+    if [[ "$candidate" != /* ]]; then
+      candidate="$PWD/$candidate"
+    fi
+    if [[ -f "$candidate" && -x "$candidate" ]] && "$candidate" -c '(( BASH_VERSINFO[0] >= 4 ))'; then
+      smoke_bash="$candidate"
+      break
+    fi
+  done
+  if [[ -n "$smoke_bash" ]]; then
+    mkdir -p "$SMOKE_HOME/.pi/agent"
+    bun -e 'console.log(JSON.stringify({ shellPath: process.argv[1] }))' "$smoke_bash" >"$SMOKE_HOME/.pi/agent/settings.json"
+  else
+    echo "[tarball-smoke] ERROR: Pi needs Bash 4+ on this host. Install Bash 4+ and put it on PATH." >&2
+    exit 1
+  fi
+fi
 
 # The selection gates the Operator code in the installed package. The owner
 # paths are the model nodes of capability.runtime-harness.operator; the command
