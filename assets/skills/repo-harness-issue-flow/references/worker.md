@@ -152,7 +152,11 @@ reason (`AC_MODEL_ADOPTION_REQUIRED`, `AC_CODE_FACTS_UNAVAILABLE`,
 Sometimes the issue cannot be done inside its boundary. Typical causes: a
 needed file belongs to another issue or module, the named contract does
 not exist, a delete would break a consumer that the issue does not
-mention, or the error behavior is not specified.
+mention, or the error behavior is not specified. The same rule applies
+when observed code shows a simpler existing authoritative path that
+achieves the goal: do not widen or shrink the PR yourself; report it in
+`Blocker` and `Options` of a `boundary question` with `file:line`
+evidence and wait for a `decision` or `scope change`.
 
 Stop. Post a `boundary question` with `To: coordinator`. Give the exact
 blocker, the evidence (file:line, command output) and the smallest options

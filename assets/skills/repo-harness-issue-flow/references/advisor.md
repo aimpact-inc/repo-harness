@@ -227,8 +227,9 @@ before the release set of §4, so the set can name the levers.
 3. Write a retrospective of 30 lines or fewer in your scratch space. Name
    the top one to three bottlenecks. For each: the mechanism, the wasted
    minutes or rounds from the retro numbers, and the exact lever (a seats
-   setting, a rule of the issue-flow skill, or a code path). Metrics with
-   `status: unavailable` are gaps, not zero.
+   setting, a rule of the issue-flow skill, or a code path). Tag the
+   mechanism `over-engineered` or `over-relaxed` when it applies. Metrics
+   with `status: unavailable` are gaps, not zero.
 4. Tell the owner the retrospective path and the top bottleneck (§2 step
    5). The owner reviews it before anyone files a workflow change.
 

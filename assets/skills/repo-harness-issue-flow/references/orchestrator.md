@@ -89,7 +89,10 @@ Make one child issue for each pair of module and observable outcome.
 ## 3. Write the boundaries
 
 Write each child issue so that a literal and cautious worker produces the
-same code as a careful senior engineer. Make every decision in the issue:
+same code as a careful senior engineer. Before writing `要做的 / Do`,
+check whether relaxing one non-I1/I2 requirement or reusing an existing
+authoritative value removes code; record each dropped case and its reason
+in `不做 / Out of scope`. Make every decision in the issue:
 
 | Decision | Write it as |
 |---|---|
