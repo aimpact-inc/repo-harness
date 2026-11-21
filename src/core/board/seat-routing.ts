@@ -1,14 +1,14 @@
-import { AGY_QUOTA_ACCOUNTS, weeklyRemainingPercent, type QuotaAccount, type QuotaAccountReport, type QuotaState } from './quota';
+import { weeklyRemainingPercent, type QuotaAccount, type QuotaAccountReport, type QuotaState } from './quota';
 import { catalogSeatAccount } from './model-catalog';
 import { SHIPPED_MODEL_IDS } from './recommended-models';
-import { PI_AGY_MODEL_PREFIX, PI_CODEX_MODEL_PREFIX, PI_NEON_MODEL, ROUTING_CLASSES, SEAT_IDS, isNeonSeat, isPiCodexSeat, isPlannerSeat, isReviewSeat, unavailablePiSeat, type CodexCreditMode, type RoutingClass, type SeatConfigV1, type SeatId, type SeatRoutingV1, type SeatsConfigV1 } from './seats-settings';
+import { PI_NEON_MODEL, ROUTING_CLASSES, SEAT_IDS, isCouncilSeat, isNeonSeat, isReviewSeat, isWorkerSeat, unavailablePiSeat, type CodexCreditMode, type RoutingClass, type SeatConfigV1, type SeatId, type SeatRoutingV1, type SeatsConfigV1 } from './seats-settings';
 
 interface AccountQuota { readonly state: QuotaState; readonly remaining: number | null }
 export interface SeatAccountQuotas {
   readonly claude: AccountQuota & { readonly mode: 'hyper' | 'normal' | 'saving' | 'unknown' };
   /** `credits`: the owner's credit mode where it acts now (#2630); `off` unless the account is exhausted and has credits at or above the floor. */
   readonly chatgpt: AccountQuota & { readonly mode: 'normal' | 'unknown'; readonly credits: CodexCreditMode };
-  readonly agy_gemini: AccountQuota;
+  readonly agy_gemini: AccountQuota & { readonly mode: 'normal' | 'saving' | 'unknown' };
   readonly agy_other: AccountQuota;
 }
 
@@ -32,27 +32,28 @@ export function seatAccountQuotas(accounts: readonly QuotaAccountReport[], routi
     const account = accounts.find(account => account.account === id);
     return { state: account?.state ?? 'unknown', remaining: weeklyRemainingPercent(account) };
   };
-  const claude = quota('claude'), chatgpt = quota('chatgpt');
+  const claude = quota('claude'), chatgpt = quota('chatgpt'), agyGemini = quota('agy_gemini');
   return {
     claude: { ...claude, mode: claude.remaining === null ? 'unknown' : claude.remaining < routing.claude_saving_below_remaining ? 'saving'
       : claude.remaining >= routing.claude_hyper_at_or_above_remaining ? 'hyper' : 'normal' },
     chatgpt: { ...chatgpt, credits: codexCreditMode(accounts.find(account => account.account === 'chatgpt'), routing),
       mode: chatgpt.remaining === null ? 'unknown' : 'normal' },
-    agy_gemini: quota('agy_gemini'),
+    agy_gemini: { ...agyGemini, mode: agyGemini.remaining === null ? 'unknown' : agyGemini.remaining < routing.agy_saving_below_remaining ? 'saving' : 'normal' },
     agy_other: quota('agy_other'),
   };
 }
 
 /** `null` is a Codex turn that is no seat, such as the operator cleanup investigation: only `all` covers it. */
 export const creditsCover = (id: SeatId | null, quota: SeatAccountQuotas): boolean =>
-  quota.chatgpt.credits === 'all' || quota.chatgpt.credits === 'review' && id !== null && isReviewSeat(id) && id !== 'gatekeeper-deep';
+  quota.chatgpt.credits === 'all' || quota.chatgpt.credits === 'review' && id !== null && isReviewSeat(id);
 
 export const claudeReserved = (quota: SeatAccountQuotas): boolean => quota.claude.mode === 'saving' || quota.claude.state === 'exhausted';
+export const agyGeminiReserved = (quota: SeatAccountQuotas): boolean => quota.agy_gemini.mode === 'saving' || quota.agy_gemini.state === 'exhausted';
 
 const AGY_ADVISOR_HYPER_MIN_REMAINING = 50;
 const CONTROL_MODELS = {
   claude: { model: 'opus', effort: 'high' },
-  agy: { model: PI_NEON_MODEL },
+  agy: { model: PI_NEON_MODEL, effort: 'xhigh' },
 } as const;
 
 export function seatAccount(seat: Pick<SeatConfigV1, 'runtime' | 'model'>): QuotaAccount | null {
@@ -85,7 +86,7 @@ export function seatState(id: SeatId, seat: SeatConfigV1, quota: SeatAccountQuot
 export function effectiveSeatConfig<Id extends SeatId>(id: Id, seats: SeatsConfigV1, quota: SeatAccountQuotas): SeatsConfigV1[Id];
 export function effectiveSeatConfig(id: SeatId, seats: SeatsConfigV1, quota: SeatAccountQuotas): SeatConfigV1 | null {
   const configured = seats[id];
-  if (configured === null || isPlannerSeat(id)) return configured;
+  if (configured === null || isCouncilSeat(id)) return configured;
   const seat = configured.runtime === 'claude' && quota.claude.mode === 'saving' ? { ...configured, advisor_model: null } : configured;
   if (seat.runtime === 'claude') {
     const reserved = claudeReserved(quota);
@@ -112,7 +113,12 @@ const launchText = (id: SeatId, seat: SeatConfigV1): string => `${seat.runtime} 
 function accountText(id: SeatId, seat: SeatConfigV1, quota: SeatAccountQuotas): string | null {
   const account = seatAccount(seat);
   const credits = seatOnCredits(id, seat, quota) ? ', on credits' : '';
-  return account === null ? null : `${account} ${quota[account].state}${credits}${account === 'claude' && claudeReserved(quota) ? ', reserved for advisor and orchestrator' : ''}`;
+  const reservation = account === 'claude' && claudeReserved(quota)
+    ? ', reserved for advisor and orchestrator'
+    : account === 'agy_gemini' && isWorkerSeat(id) && agyGeminiReserved(quota)
+      ? ', reserved for advisor'
+      : '';
+  return account === null ? null : `${account} ${quota[account].state}${credits}${reservation}`;
 }
 
 /** Why the seat cannot take work now, or its account line: an unavailable Pi provider comes first (#2769). */
@@ -121,7 +127,7 @@ function blockText(id: SeatId, seat: SeatConfigV1, quota: SeatAccountQuotas, rou
 }
 
 export function formatSeatModes(seats: SeatsConfigV1, quota: SeatAccountQuotas): string {
-  const { claude_saving_below_remaining: saving, claude_hyper_at_or_above_remaining: hyper } = seats.routing;
+  const { claude_saving_below_remaining: saving, claude_hyper_at_or_above_remaining: hyper, agy_saving_below_remaining: agySaving } = seats.routing;
   const weekly = (account: AccountQuota): string => account.remaining === null ? 'weekly quota unavailable' : `${account.remaining}% left`;
   const bounds = { saving: ` < ${saving}%`, hyper: ` >= ${hyper}%`, normal: ` >= ${saving}% and < ${hyper}%`, unknown: '' }[quota.claude.mode];
   const lines = [
@@ -129,7 +135,9 @@ export function formatSeatModes(seats: SeatsConfigV1, quota: SeatAccountQuotas):
     `codex mode: ${quota.chatgpt.mode} (${weekly(quota.chatgpt)})`,
   ];
   if (hasAgySeat(seats)) {
-    for (const account of AGY_QUOTA_ACCOUNTS) lines.push(`${account} weekly: ${weekly(quota[account])}`);
+    const agyBounds = { saving: ` < ${agySaving}%`, normal: ` >= ${agySaving}%`, unknown: '' }[quota.agy_gemini.mode];
+    lines.push(`agy_gemini mode: ${quota.agy_gemini.mode} (${weekly(quota.agy_gemini)}${agyBounds})`);
+    lines.push(`agy_other weekly: ${weekly(quota.agy_other)}`);
   }
   return lines.join('\n');
 }
@@ -142,31 +150,26 @@ export type SeatModelCheck = (id: SeatId, seat: SeatConfigV1) => string | null;
 
 /**
  * The seat for one task class: the one source of the `route` line and of dispatch.
+ * Evaluates strictly left-to-right after filtering disallowed, unavailable, exhausted, or reserved seats.
  * `allow` removes seats before the account rules apply (for example Pi seats for work that touches credentials).
  */
 export function selectSeatRoute(task: RoutingClass, seats: SeatsConfigV1, quota: SeatAccountQuotas, allow: (seat: SeatConfigV1) => boolean = () => true,
   modelBlock: SeatModelCheck = (_id, seat) => unavailablePiSeat(seat, seats.routing)): SeatRouteV1 {
   const reserved = claudeReserved(quota);
+  const agyReserved = agyGeminiReserved(quota);
   const ids = seats.routing[task];
   // The section decoder refuses routes that name an unconfigured seat.
   const hasClaude = ids.some(id => seats[id]!.runtime === 'claude');
   const hasNeon = ids.some(id => isNeonSeat(seats[id]!));
-  const savingRoute = reserved && hasClaude && (task === 'important_deep' || task === 'important_fast');
-  const candidatesFor = (ids: readonly SeatId[]) => ids
-    .map(id => ({ id, seat: effectiveSeatConfig(id, seats, quota)! })).filter(({ seat }) => allow(seat))
+  const candidates = ids
+    .map(id => ({ id, seat: effectiveSeatConfig(id, seats, quota)! }))
+    .filter(({ seat }) => allow(seat))
     .map(candidate => ({ ...candidate, modelBlock: modelBlock(candidate.id, candidate.seat) }));
-  const isAvailable = ({ id, seat, modelBlock }: ReturnType<typeof candidatesFor>[number]) =>
-    modelBlock === null && seatState(id, seat, quota) !== 'exhausted' && !(seatAccount(seat) === 'claude' && reserved);
-
-  let candidates = savingRoute && !hasNeon ? [] : candidatesFor(ids);
-  let available = candidates.filter(isAvailable);
-  // An eligible Neon seat keeps the configured route active. Otherwise the Claude reservation sends it to worker-light.
-  if (savingRoute && !available.some(({ seat }) => isNeonSeat(seat))) {
-    if (seats['worker-light'] === null) return { id: null, line: `route ${task}: none (worker-light not configured)` };
-    if (seats['worker-light'].runtime !== 'pi') return { id: null, line: `route ${task}: none (worker-light is not a Pi seat)` };
-    candidates = candidatesFor(['worker-light']);
-    available = candidates.filter(isAvailable);
-  }
+  const available = candidates.filter(({ id, seat, modelBlock }) =>
+    modelBlock === null
+    && seatState(id, seat, quota) !== 'exhausted'
+    && !(seatAccount(seat) === 'claude' && reserved)
+    && !(seatAccount(seat) === 'agy_gemini' && agyReserved));
   if (candidates.length === 0) return { id: null, line: `route ${task}: none (no seat in the route may take this task)` };
   const reason = ({ id, seat, modelBlock }: typeof candidates[number]) => modelBlock ?? accountText(id, seat, quota);
   const selected = available.find(({ id, seat }) => seatState(id, seat, quota) !== 'unknown')
@@ -215,23 +218,9 @@ export function effectiveGatekeeper(seats: SeatsConfigV1, quota: SeatAccountQuot
     line: `gatekeeper: gatekeeper-fallback (${launchText('gatekeeper-fallback', fallback)}${accountSuffix('gatekeeper-fallback', fallback, quota)}; gatekeeper: ${cause})` };
 }
 
-/** The model a seat runs: a Pi seat on `magpie/codex/` runs the Codex model, and a null model is the host default of its runtime. */
-const runModel = (seat: SeatConfigV1): string =>
-  `${isPiCodexSeat(seat) ? 'codex' : seat.runtime}:${seat.model?.replace(PI_CODEX_MODEL_PREFIX, '') ?? 'default'}`;
-
-/**
- * True when the effective gatekeeper-deep runs the same model as the route that `effectiveGatekeeper` selects, which may be
- * the gatekeeper-fallback: the second row would then repeat the first. The route line and the launch fail closed on it.
- */
-export function deepGatekeeperRepeatsGatekeeper(seats: SeatsConfigV1, quota: SeatAccountQuotas): boolean {
-  const route = effectiveGatekeeper(seats, quota);
-  return route.id !== null && runModel(route.seat) === runModel(effectiveSeatConfig('gatekeeper-deep', seats, quota));
-}
-
 /** The route line of a review seat that has no fallback. */
-function reviewSeatLine(id: 'gatekeeper-deep' | 'reviewer', seats: SeatsConfigV1, quota: SeatAccountQuotas): string {
+function reviewSeatLine(id: 'reviewer', seats: SeatsConfigV1, quota: SeatAccountQuotas): string {
   const seat = effectiveSeatConfig(id, seats, quota);
-  if (id === 'gatekeeper-deep' && deepGatekeeperRepeatsGatekeeper(seats, quota)) return 'gatekeeper-deep: none (same model as gatekeeper)';
   return reviewSeatBlocked(id, seat, quota, seats.routing)
     ? `${id}: none (${blockText(id, seat, quota, seats.routing)})`
     : `${id}: ${id} (${launchText(id, seat)}${accountSuffix(id, seat, quota)})`;
@@ -247,7 +236,7 @@ export function formatSeatRoutes(seats: SeatsConfigV1, quota: SeatAccountQuotas)
     ? `explorer: ${modelText(EXPLORER_FIELD, seats.routing.low_quota_explorer)} (claude ${quota.claude.state === 'exhausted' ? 'exhausted' : quota.claude.mode}; pass model ${shownModel(EXPLORER_FIELD, seats.routing.low_quota_explorer.model)} when you call the explorer)`
     : 'explorer: default');
   lines.push(effectiveGatekeeper(seats, quota).line);
-  lines.push(reviewSeatLine('gatekeeper-deep', seats, quota), reviewSeatLine('reviewer', seats, quota));
+  lines.push(reviewSeatLine('reviewer', seats, quota));
   const advisor = effectiveSeatConfig('advisor', seats, quota);
   const agyAdvisor = isAgyAccount(seatAccount(advisor));
   const advisorQuota = agyAdvisor ? accountSuffix('advisor', advisor, quota) : '';

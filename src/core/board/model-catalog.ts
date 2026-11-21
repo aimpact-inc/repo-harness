@@ -257,10 +257,6 @@ export function isCatalogModelPermittedOnSeat(seatId: SeatId, entry: SeatModelEn
     || (item.native?.runtime === entry.runtime && item.native.model === entry.model),
   );
   if (matched.length === 0) return true;
-  if (seatId === 'planner') return matched.some(item => item.planes.includes('council'));
-  if (seatId === 'worker-important') return matched.some(item => item.planes.includes('worker-opus'));
-  if (seatId === 'worker-important-fast') return matched.some(item => item.planes.includes('worker-neon'));
-  if (seatId === 'gatekeeper-deep') return matched.some(item => item.planes.includes('gatekeeper'));
   return matched.some(item => item.planes.includes(seatId));
 }
 

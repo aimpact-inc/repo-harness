@@ -1,6 +1,6 @@
 import { AGENT_RUNTIME_CAPABILITIES, decodeAgentsSettings, type AgentsSettingsV1 } from '../../core/board/agents-settings';
 import { isReviewRuntimeId } from '../../core/review/review-runtimes';
-import { DEFAULT_SEATS_CONFIG, FRONTEND_SEAT_IDS, PLANNER_TOOLS, ROUTING_CLASSES, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, WORKER_SEAT_IDS, decodeSeatsSettings, seatHostId, type SeatsConfigV1, type SeatsSettingsRequestV1, type SeatsSettingsV1 } from '../../core/board/seats-settings';
+import { COUNCIL_TOOLS, DEFAULT_SEATS_CONFIG, FRONTEND_SEAT_IDS, NATIVE_CLAUDE_ADVISOR, NATIVE_SEATS_PRESET, ROUTING_CLASSES, SEAT_ALLOWED_FLEET, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, WORKER_SEAT_IDS, decodeSeatsSettings, seatHostId, type SeatsConfigV1, type SeatsSettingsRequestV1, type SeatsSettingsV1 } from '../../core/board/seats-settings';
 import { SEAT_RECOMMENDED_MODELS } from '../../core/board/recommended-models';
 import type { DocumentationLanguage, DocumentationLanguageReader, DocumentationLanguageWriter, LanguageRead, LanguageReader, LanguageWriter, ReportingHost, ReportingPreset } from '../language-settings';
 import type { OperatorApiErrorV1 } from '../operator-api-error';
@@ -56,18 +56,17 @@ function seatsRanges(enabled: readonly string[]) {
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     roles: SEAT_SCAFFOLD_SUB_AGENTS.map(name => ({ name, writable: false })),
     seats: {
-      orchestrator: { models: SEAT_RECOMMENDED_MODELS.orchestrator, fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all.filter(tool => tool !== 'edit') },
-      advisor: { models: SEAT_RECOMMENDED_MODELS.advisor, fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all.filter(tool => tool !== 'gh') },
-      planner: { models: SEAT_RECOMMENDED_MODELS.planner, fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: PLANNER_TOOLS },
-      worker: { models: SEAT_RECOMMENDED_MODELS.worker, fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all },
-      'worker-deep': { models: SEAT_RECOMMENDED_MODELS['worker-deep'], fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all },
-      'worker-important': { models: SEAT_RECOMMENDED_MODELS['worker-important'], fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all },
-      'worker-important-fast': { models: SEAT_RECOMMENDED_MODELS['worker-important-fast'], fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all },
-      'worker-light': { models: SEAT_RECOMMENDED_MODELS['worker-light'], fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all },
-      gatekeeper: { models: SEAT_RECOMMENDED_MODELS.gatekeeper, fleet: [], tools: ['net', 'read', 'shell'] },
-      'gatekeeper-deep': { models: SEAT_RECOMMENDED_MODELS['gatekeeper-deep'], fleet: [], tools: ['net', 'read', 'shell'] },
-      'gatekeeper-fallback': { models: SEAT_RECOMMENDED_MODELS['gatekeeper-fallback'], fleet: [], tools: ['net', 'read', 'shell'] },
-      reviewer: { models: SEAT_RECOMMENDED_MODELS.reviewer, fleet: [], tools: ['net', 'read', 'shell'] },
+      orchestrator: { models: SEAT_RECOMMENDED_MODELS.orchestrator, fleet: SEAT_ALLOWED_FLEET.orchestrator, tools: all.filter(tool => tool !== 'edit') },
+      advisor: { models: SEAT_RECOMMENDED_MODELS.advisor, fleet: SEAT_ALLOWED_FLEET.advisor, tools: all.filter(tool => tool !== 'gh') },
+      council: { models: SEAT_RECOMMENDED_MODELS.council, fleet: SEAT_ALLOWED_FLEET.council, tools: COUNCIL_TOOLS },
+      worker: { models: SEAT_RECOMMENDED_MODELS.worker, fleet: SEAT_ALLOWED_FLEET.worker, tools: all },
+      'worker-deep': { models: SEAT_RECOMMENDED_MODELS['worker-deep'], fleet: SEAT_ALLOWED_FLEET['worker-deep'], tools: all },
+      'worker-opus': { models: SEAT_RECOMMENDED_MODELS['worker-opus'], fleet: SEAT_ALLOWED_FLEET['worker-opus'], tools: all },
+      'worker-neon': { models: SEAT_RECOMMENDED_MODELS['worker-neon'], fleet: SEAT_ALLOWED_FLEET['worker-neon'], tools: all },
+      'worker-light': { models: SEAT_RECOMMENDED_MODELS['worker-light'], fleet: SEAT_ALLOWED_FLEET['worker-light'], tools: all },
+      gatekeeper: { models: SEAT_RECOMMENDED_MODELS.gatekeeper, fleet: SEAT_ALLOWED_FLEET.gatekeeper, tools: ['net', 'read', 'shell'] },
+      'gatekeeper-fallback': { models: SEAT_RECOMMENDED_MODELS['gatekeeper-fallback'], fleet: SEAT_ALLOWED_FLEET['gatekeeper-fallback'], tools: ['net', 'read', 'shell'] },
+      reviewer: { models: SEAT_RECOMMENDED_MODELS.reviewer, fleet: SEAT_ALLOWED_FLEET.reviewer, tools: ['net', 'read', 'shell'] },
     },
     routing: { classes: ROUTING_CLASSES, worker_seats: WORKER_SEAT_IDS, frontend_seats: FRONTEND_SEAT_IDS },
   };
@@ -92,7 +91,18 @@ export function settingsStores(now: number, fixture: 'busy' | 'empty' | 'degrade
     })
     : agentsSettingsFixture(now, fixture);
   let seats: SeatsConfigV1 = fixture === 'busy'
-    ? { ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'claude', model: 'sonnet' }, 'worker-light': null }
+    ? {
+      ...NATIVE_SEATS_PRESET,
+      advisor: NATIVE_CLAUDE_ADVISOR,
+      worker: { ...NATIVE_SEATS_PRESET.worker, runtime: 'claude', model: 'sonnet' },
+      'worker-neon': { ...NATIVE_SEATS_PRESET['worker-opus'], model: 'sonnet' },
+      'worker-light': null,
+      routing: {
+        ...NATIVE_SEATS_PRESET.routing,
+        important_fast: NATIVE_SEATS_PRESET.routing.important_fast.filter(id => id !== 'worker-light'),
+        simple_fast: NATIVE_SEATS_PRESET.routing.simple_fast.filter(id => id !== 'worker-light'),
+      },
+    }
     : DEFAULT_SEATS_CONFIG;
   let serial = 0;
   const nextRevision = () => { serial += 1; return `sha256:${serial.toString(16).padStart(64, '0')}`; };

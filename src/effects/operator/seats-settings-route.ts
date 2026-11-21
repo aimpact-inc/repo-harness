@@ -31,7 +31,7 @@ export const SEATS_CONFIGURATION_FAILURES: Readonly<Record<SeatsConfigurationErr
   config_is_link: { status: 409, next_action: 'Edit the seats section in the file that ~/.repo-harness/config.json links to, or replace the link with a regular file.' },
   revision_conflict: { status: 409, next_action: 'Reload the settings, then apply your change again.' },
   seat_runtime_not_enabled: { status: 422, next_action: 'Change the named seat to an enabled runtime, or enable its runtime under Hosts and save.' },
-  seat_runtime_not_allowed: { status: 422, next_action: 'Use agy for the advisor seat only.' },
+  seat_runtime_not_allowed: { status: 422, next_action: 'Use agy only on advisor, worker-neon, worker-light, or gatekeeper-fallback.' },
   seat_model_invalid: { status: 422, next_action: 'Choose or type a model for the named field, then save again.' },
   seat_effort_invalid: { status: 422, next_action: CHOOSE_FROM_RANGES },
   seat_tool_not_allowed: { status: 422, next_action: CHOOSE_FROM_RANGES },

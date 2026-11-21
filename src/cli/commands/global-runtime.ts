@@ -14,8 +14,8 @@ import type { SkillHost } from '../../effects/host-skill-roots';
 import { pathRecordIsCurrent, pathRecordKey, readPathRecords } from '../../effects/host-config/path-records';
 import { architecturePort, isArchitectureUnavailable } from '../../core/architecture/contracts';
 import { globalConfigurationWriter, mutateGlobalConfiguration } from '../../effects/configuration/global-configuration';
-import { DEFAULT_SEATS_CONFIG, INTRODUCED_ROUTING_DEFAULTS, ROUTING_CLASSES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, seatModelShapeValid, stripRetiredSeatFleetRoles } from '../../core/board/seats-settings';
-import { checkSeatRoutingModels, seatsRanges } from '../../effects/board/seats-configuration';
+import { DEFAULT_SEATS_CONFIG, INTRODUCED_ROUTING_DEFAULTS, NATIVE_CLAUDE_ADVISOR, ROUTING_CLASSES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, defaultSeatsConfig, normalizeLegacySeatsRecord, seatModelShapeValid, type SeatConfigV1, type SeatsConfigV1 } from '../../core/board/seats-settings';
+import { checkSeatRoutingModels, enabledRuntimesOf, magpieExtensionInstalled, seatsRanges } from '../../effects/board/seats-configuration';
 import { chmodSync, closeSync, constants, cpSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync } from "fs";
 import { syncDirectoryDurably, writeAllSync } from '../../effects/atomic-append';
 import { renderJsonObjectUpdate } from "../../effects/adoption/standard-plan";
@@ -1718,7 +1718,20 @@ function withPlugin(plugins: readonly PluginId[], id: PluginId): readonly Plugin
   return [...new Set([...plugins, id])].sort() as PluginId[];
 }
 
-/** Update fills introduced keys and removes retired routing keys and fleet roles. */
+function hostPresetForMigration(
+  config: Record<string, unknown>,
+  env: NodeJS.ProcessEnv,
+): { readonly preset: SeatsConfigV1; readonly advisor: SeatConfigV1 } {
+  const enabled = enabledRuntimesOf(config);
+  if (magpieExtensionInstalled(env) && (enabled.length === 0 || enabled.includes('pi'))) {
+    const preset = defaultSeatsConfig('magpie');
+    return { preset, advisor: preset.advisor };
+  }
+  const preset = defaultSeatsConfig('native');
+  return { preset, advisor: enabled.includes('antigravity') ? preset.advisor : NATIVE_CLAUDE_ADVISOR };
+}
+
+/** Update fills introduced keys, renames legacy 12-seat keys to the 11-seat schema, migrates legacy claude/fable advisor, and strips retired routing keys and fleet roles. */
 export function migrateSeatsConfiguration(env: NodeJS.ProcessEnv, runtimeLock?: RuntimeTransactionContext, beforeWrite?: (path: string, text: string) => void): boolean {
   return mutateGlobalConfiguration(env, config => {
     try {
@@ -1727,8 +1740,9 @@ export function migrateSeatsConfiguration(env: NodeJS.ProcessEnv, runtimeLock?: 
     } catch (error) {
       if (!(error instanceof SeatsConfigMigrationRequiredError)) throw error;
     }
-    const { orchestrator: _orchestrator, advisor: _advisor, worker: _worker, ...introduced } = DEFAULT_SEATS_CONFIG;
-    const stored = stripRetiredSeatFleetRoles(config.seats as Record<string, unknown>);
+    const { preset, advisor } = hostPresetForMigration(config, env);
+    const { orchestrator: _orchestrator, advisor: _advisor, worker: _worker, ...introduced } = preset;
+    const { record: stored } = normalizeLegacySeatsRecord(config.seats as Record<string, unknown>, advisor);
     let routing = stored.routing;
     if (typeof routing === 'object' && routing !== null && ('mode' in routing || 'hyper' in routing)) {
       const row = routing as Record<string, unknown>;

@@ -3,9 +3,10 @@ import { existsSync } from 'node:fs';
 import { delimiter, dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { CLAUDE_BUILTIN_AGENT_TYPES, SeatPaneNameError, buildSeatLaunch, seatPaneName, seatTabName, type SeatLaunchV1 } from '../../core/board/seat-launch';
-import { AgySeatSettingsError, LAUNCH_SEAT_IDS, RETIRED_SEAT_FLEET_ROLES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, seatsConfigInvalidMessage, seatHostId, isPlannerSeat, isReviewSeat, isWorkerSeat, unavailablePiSeat, type LaunchSeatId, type SeatConfigV1, type SeatId, type SeatsConfigV1 } from '../../core/board/seats-settings';
-import { claudeReserved, deepGatekeeperRepeatsGatekeeper, effectiveGatekeeper, effectiveSeatConfig, seatAccount, seatAccountQuotas, seatState, shownModel, type SeatRouteV1 } from '../../core/board/seat-routing';
+import { AgySeatSettingsError, LAUNCH_SEAT_IDS, RETIRED_SEAT_FLEET_ROLES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, seatsConfigInvalidMessage, seatHostId, isCouncilSeat, isReviewSeat, isWorkerSeat, unavailablePiSeat, type LaunchSeatId, type SeatConfigV1, type SeatId, type SeatsConfigV1 } from '../../core/board/seats-settings';
+import { agyGeminiReserved, claudeReserved, effectiveGatekeeper, effectiveSeatConfig, seatAccount, seatAccountQuotas, seatState, shownModel, type SeatRouteV1 } from '../../core/board/seat-routing';
 import { AGY_QUOTA_ACCOUNTS, classifyQuotaReading, type QuotaAccount, type QuotaReading } from '../../core/board/quota';
+import type { TransportPreset } from '../../core/board/model-catalog';
 import { readAgyQuota, readClaudeQuota, readCodexQuota } from '../../effects/board/quota';
 import { version as PACKAGE_VERSION } from '../../../package.json';
 import { readGlobalConfiguration } from '../../effects/configuration/global-configuration';
@@ -22,8 +23,8 @@ import { MANAGED_AGENTS } from '../../effects/terminal/task-role-profiles';
 import { SeatResetError, readSeatSession, readTranscriptUsage, runSeatReset, writeSeatResetRequest, type SeatRelaunch, type SeatResetNotify, type TranscriptUsage } from '../../effects/board/seat-reset';
 import { handoffIdentity, seatResetAction, seatResetIdentity, seatResetSteps, type SeatResetIdentity } from '../../core/board/seat-reset';
 import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
-import { PlannerConsultError } from '../../core/board/planner-consult';
-import { runPlannerConsult } from '../../effects/board/planner-consult';
+import { CouncilError, parseCouncilMembers, resolveCouncilMemberConfig, type CouncilMemberId } from '../../core/board/council';
+import { runCouncil, type CouncilMemberLaunchResult } from '../../effects/board/council';
 import { formatSeatPool, seatModelBlock, seatPoolHint, seatRuntimeBlock } from '../../core/board/seat-pool';
 import { collectSeatPoolProbes, enabledRuntimesOf, magpieExtensionInstalled, probeAgySeat, refreshSeatPool, SeatsConfigurationError, writeAgySeatAgent } from '../../effects/board/seats-configuration';
 
@@ -33,7 +34,7 @@ import { resolveAntigravityRepository } from '../hook/host-adapter';
 const CLI_ENTRY = fileURLToPath(new URL('../index.ts', import.meta.url));
 
 class SeatsCommandError extends Error {
-  constructor(readonly code: 'seat_unknown' | 'seat_not_configured' | 'seat_quota_exhausted' | 'seat_quota_reserved' | 'seat_provider_unavailable' | 'seat_model_repeats_gatekeeper' | 'owner_exception_invalid' | 'config_invalid' | 'label_value_invalid' | 'repository_id_required' | 'terminal_unknown' | 'seat_identity_missing' | 'seat_session_unknown' | 'seat_context_unknown' | 'pi_extension_missing' | 'seat_space_missing' | 'seat_tab_failed' | 'seat_tab_unknown' | 'seat_reset_runtime_unsupported'
+  constructor(readonly code: 'seat_unknown' | 'seat_not_configured' | 'seat_quota_exhausted' | 'seat_quota_reserved' | 'seat_provider_unavailable' | 'owner_exception_invalid' | 'config_invalid' | 'label_value_invalid' | 'repository_id_required' | 'terminal_unknown' | 'seat_identity_missing' | 'seat_session_unknown' | 'seat_context_unknown' | 'pi_extension_missing' | 'seat_space_missing' | 'seat_tab_failed' | 'seat_tab_unknown' | 'seat_reset_runtime_unsupported'
     | 'seat_runtime_missing' | 'seat_runtime_unsupported' | 'seat_runtime_signed_out' | 'seat_runtime_unknown' | 'seat_model_unavailable'
     | 'seat_checkout_not_opted_in' | 'antigravity_guard_unready', message: string) {
     super(message);
@@ -63,7 +64,7 @@ export interface SeatLabelInput {
 
 const POSITIVE = /^[1-9][0-9]*$/u;
 
-function consultIssueNumber(value: string, flag: '--issue' | '--parent'): number {
+function councilIssueNumber(value: string, flag: '--issue' | '--parent'): number {
   const number = Number(value);
   if (!POSITIVE.test(value) || !Number.isSafeInteger(number)) {
     throw new SeatsCommandError('label_value_invalid', `${flag} must be a positive decimal integer.`);
@@ -109,8 +110,8 @@ function seatLabels(seat: LaunchSeatId, input: SeatLabelInput): HcLabels | undef
   if (isReviewSeat(seat) && (input.pr === undefined || input.issue !== undefined || release !== undefined)) {
     throw new SeatPaneNameError(`The ${seat} seat needs --pr and takes no --issue or --release.`);
   }
-  if (isPlannerSeat(seat) && (input.issue === undefined || input.pr !== undefined || release !== undefined)) {
-    throw new SeatPaneNameError('The planner seat needs --issue and takes no --pr or --release.');
+  if (isCouncilSeat(seat) && (input.issue === undefined || input.pr !== undefined || release !== undefined)) {
+    throw new SeatPaneNameError('The council seat needs --issue and takes no --pr or --release.');
   }
   if (repositoryId === undefined) {
     if (isReviewSeat(seat) && input.parent === undefined && qualifier === undefined) return undefined;
@@ -219,18 +220,15 @@ async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, configur
   if (id === 'gatekeeper' && fallback !== null && own !== null && quota[own].state === 'exhausted' && seatAccount(fallback) !== own) {
     quota = await read(seatAccount(fallback));
   }
-  // The duplicate-model check compares with the route that the gatekeeper launch selects, so it reads the accounts of that selection.
-  if (id === 'gatekeeper-deep') {
-    const gatekeeperAccount = seatAccount(seats.gatekeeper);
-    quota = await read(gatekeeperAccount);
-    if (gatekeeperAccount !== null && quota[gatekeeperAccount].state === 'exhausted' && fallback !== null) quota = await read(seatAccount(fallback));
-  }
   const gatekeeper = id === 'gatekeeper' ? effectiveGatekeeper(seats, quota) : null;
   const launchedId = gatekeeper?.id === 'gatekeeper-fallback' ? 'gatekeeper-fallback' : id;
   const seat = gatekeeper?.id === 'gatekeeper-fallback' ? gatekeeper.seat : effectiveSeatConfig(id, seats, quota)!;
   const account = seatAccount(seat);
   if (account !== null && seatState(launchedId, seat, quota) === 'exhausted') {
     throw new SeatsCommandError('seat_quota_exhausted', `The ${account} account is exhausted. Wait for quota before launching ${id}.${gatekeeper === null ? '' : ` Route ${gatekeeper.line}`}`);
+  }
+  if (account === 'agy_gemini' && isWorkerSeat(id) && agyGeminiReserved(quota)) {
+    throw new SeatsCommandError('seat_quota_reserved', 'Google Ultra (agy_gemini) is reserved for the advisor. Use the quota routes.');
   }
   const reserved = account === 'claude' && id !== 'advisor' && id !== 'orchestrator' && claudeReserved(quota);
   if (reserved && ownerException === undefined) {
@@ -240,10 +238,7 @@ async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, configur
   if (!reserved && ownerException !== undefined) {
     throw new SeatsCommandError('owner_exception_invalid', `The ${id} launch has no Claude quota reservation to lift. Launch it without --owner-exception.`);
   }
-  if (id === 'gatekeeper-deep' && deepGatekeeperRepeatsGatekeeper(seats, quota)) {
-    throw new SeatsCommandError('seat_model_repeats_gatekeeper', 'The gatekeeper-deep seat runs the same model as the gatekeeper. Set a different model on the Seats page. See the quota routes.');
-  }
-  return { id: launchedId, seat, modeKnown: account === null || quota[account].remaining !== null, claudeSaving: !isPlannerSeat(id) && quota.claude.mode === 'saving' };
+  return { id: launchedId, seat, modeKnown: account === null || quota[account].remaining !== null, claudeSaving: !isCouncilSeat(id) && quota.claude.mode === 'saving' };
 }
 
 type SeatLaunchResult = SeatLaunchV1 & {
@@ -293,7 +288,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   }
   const configured = seats[id];
   if (configured === null) throw new SeatsCommandError('seat_not_configured', `The ${id} seat is not configured. Configure it in the seats section before launch.`);
-  const agyExecutable = configured.runtime === 'agy' ? await checkedAgyExecutable(config, configured, env, cwd, terminal) : undefined;
+  const agyExecutable = configured.runtime === 'agy' ? await checkedAgyExecutable(id, config, configured, env, cwd, terminal) : undefined;
   // The board review passes the gatekeeper route that its plan checked: the launched seat is the planned one, with no second quota read.
   // The config is still read for the source of the brief and for the migration error.
   if (labels.ownerException !== undefined) {
@@ -326,7 +321,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   if (effective.runtime === 'pi') await assertPiShell(env, cwd);
   // The pane name needs the registry prefix, so it comes only with the seat labels.
   const name = labels.repositoryId === undefined ? null : seatPaneName({
-    prefix: panePrefix(cwd, env), seat: id, issue: isWorkerSeat(id) || isPlannerSeat(id) ? labels.issue : undefined,
+    prefix: panePrefix(cwd, env), seat: id, issue: isWorkerSeat(id) || isCouncilSeat(id) ? labels.issue : undefined,
     pr: isReviewSeat(id) ? labels.pr : undefined, release: labels.release, qualifier: labels.qualifier,
   });
   const tab = labels.repositoryId === undefined ? null : seatTabName(id, labels.parent);
@@ -347,7 +342,70 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   } };
 }
 
-async function checkedAgyExecutable(config: Record<string, unknown>, seat: SeatConfigV1, env: NodeJS.ProcessEnv, cwd: string, terminal: 'new' | 'existing'): Promise<string> {
+/** Resolve and build the launch argv for one council member from `MODEL_CATALOG` under the active transport preset. */
+async function councilMemberLaunch(
+  member: CouncilMemberId,
+  preset: TransportPreset,
+  labels: { readonly repositoryId: string; readonly issue: string; readonly parent?: string; readonly qualifier?: string },
+  cwd: string,
+  dryRun: boolean,
+  outPath: string,
+  task: string,
+  env: NodeJS.ProcessEnv,
+): Promise<CouncilMemberLaunchResult> {
+  let config: Record<string, unknown>;
+  try { config = readGlobalConfiguration(env).config; } catch (error) { throw new SeatsCommandError('config_invalid', (error as Error).message); }
+  let seats: SeatsConfigV1;
+  try { seats = decodeSeatsConfig(config.seats); } catch (error) {
+    if (error instanceof SeatsConfigMigrationRequiredError || error instanceof AgySeatSettingsError) throw error;
+    throw new SeatsCommandError('config_invalid', seatsConfigInvalidMessage(error));
+  }
+  const effective = resolveCouncilMemberConfig(member, preset, seats.council);
+  if (effective.runtime === 'agy' && !dryRun) {
+    throw new CouncilError('council_runtime_unsupported', `Native agy launch for council member ${member} is pending #3377. Install Magpie for Pi council routes, or use --dry-run.`);
+  }
+  const unavailable = unavailablePiSeat(effective, seats.routing);
+  if (unavailable !== null) {
+    throw new SeatsCommandError('seat_provider_unavailable', `Council member ${member} cannot launch: ${unavailable}. See the quota routes.`);
+  }
+  if (!dryRun && effective.runtime === 'pi') await assertPiShell(env, cwd);
+  const labelSet = seatLabels('council', labels);
+  const name = seatPaneName({ prefix: panePrefix(cwd, env), seat: 'council', issue: labels.issue, qualifier: labels.qualifier });
+  const tab = seatTabName('council', labels.parent);
+  const agentTypes = effective.runtime === 'claude' && effective.fleet.length > 0
+    ? [...MANAGED_AGENTS, ...RETIRED_SEAT_FLEET_ROLES, ...CLAUDE_BUILTIN_AGENT_TYPES, ...claudeHostAgentTypes(env)]
+    : [];
+  const piRoleDirectory = !dryRun && effective.runtime === 'pi' && effective.fleet.length > 0
+    ? writePiFleetRoles(effective.fleet, env, seats.pi_sub_agent_models)
+    : undefined;
+  const agy = effective.runtime === 'agy' ? { executable: 'agy', directory: '<dry-run>', cwd } : undefined;
+  const codexExec = effective.runtime === 'codex' ? { outPath, task } : undefined;
+  const built = buildSeatLaunch('council', effective, config.seats === undefined ? 'defaults' : 'seats', agentTypes, {
+    paneName: name,
+    repositoryId: labels.repositoryId,
+    piRoleDirectory,
+    agy,
+    codexExec,
+  });
+  const argv = labelSet === undefined ? built.argv : selfLabelingArgv('council', labels, built.argv, env);
+  return {
+    launch: {
+      ...built,
+      argv: labelSet !== undefined ? seatLoginShell(argv) : argv,
+      name,
+      tab,
+    },
+    model: effective.model,
+    effort: effective.effort,
+    shell: effective.tools.includes('shell'),
+    taskInArgv: effective.runtime === 'codex',
+  };
+}
+
+async function checkedAgyExecutable(id: LaunchSeatId, config: Record<string, unknown>, seat: SeatConfigV1, env: NodeJS.ProcessEnv, cwd: string, terminal: 'new' | 'existing'): Promise<string> {
+  if (id !== 'advisor') {
+    throw new SeatsCommandError('seat_runtime_unsupported', `Direct agy launch is only supported on the advisor seat in this release; ${id} agy launch is pending #3377.`);
+  }
   if (terminal === 'existing') throw new SeatsCommandError('seat_reset_runtime_unsupported', 'Start a new agy advisor pane with rh seats launch advisor.');
   if (!enabledRuntimesOf(config).includes(seatHostId('agy'))) {
     throw new SeatsConfigurationError('seat_runtime_not_enabled', 'Enable Antigravity in Hosts before launching the advisor.');
@@ -434,7 +492,7 @@ function openSeatTab(args: Readonly<Record<string, unknown>> & { readonly space:
 /** The structured error line of the seat launch commands. */
 function writeLaunchError(error: unknown): void {
   const code = error instanceof SeatsCommandError || error instanceof ClaudeAgentTypesError || error instanceof PiFleetRolesError || error instanceof PiShellError || error instanceof SeatPaneNameError
-    || error instanceof RepoHarnessRegistryStrictError || error instanceof SeatsConfigMigrationRequiredError || error instanceof PlannerConsultError
+    || error instanceof RepoHarnessRegistryStrictError || error instanceof SeatsConfigMigrationRequiredError || error instanceof CouncilError
     || error instanceof SeatsConfigurationError || error instanceof AgySeatSettingsError ? error.code : 'seat_launch_failed';
   process.stderr.write(`${JSON.stringify({ ok: false, error: code, message: (error as Error).message,
     ...(error instanceof SeatsConfigMigrationRequiredError ? { next_action: error.next_action } : {}) })}\n`);
@@ -556,35 +614,50 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
       process.stdout.write(options.json === true ? `${JSON.stringify({ ok: true, ...shown, ...model }, null, 2)}\n`
         : `${JSON.stringify({ ok: true, seat, name: result.launch.name, tab: result.launch.tab, space: result.space, placement: result.placement, ...model })}\n`);
     });
-  seats.command('consult')
-    .description('Open a planner pane for one issue and write its plan outside Git worktrees')
-    .requiredOption('--issue <number>', 'Issue number to consult on')
-    .option('--space <id>', 'Herdr space that receives the tab, required unless you pass --dry-run')
+  seats.command('council')
+    .description('Open 1 to 3 blind council panes (fable, carbon, astra) for one issue and write proposals outside Git worktrees')
+    .requiredOption('--issue <number>', 'Issue number to convene council on')
+    .requiredOption('--members <csv>', '1 to 3 distinct council members from: fable, carbon, astra')
+    .option('--space <id>', 'Herdr space that receives the tabs; default: the herdr.space label of the calling terminal')
     .option('--parent <number>', 'Parent issue number')
-    .option('--qualifier <word>', 'Pane and plan suffix for a separate consultation')
-    .option('--out <path>', 'Plan path, defaults to rh-plans/<repo>/issue-<number>[-<qualifier>].md under the system temp directory')
-    .option('--question <text>', 'Question for the planner to focus on')
+    .option('--qualifier <word>', 'Pane and proposal suffix for a separate council session')
+    .option('--question <text>', 'Question for the council members to focus on')
     .option('--repository-id <id>', 'GitHub numeric repository ID, defaults to the current checkout’s repository')
-    .option('--dry-run', 'Print the resolved JSON without creating directories or opening a tab')
-    .option('--json', 'Print the consultation as JSON')
-    .action(async (options: { issue: string; space?: string; parent?: string; qualifier?: string; out?: string; question?: string; repositoryId?: string; dryRun?: boolean; json?: boolean }) => {
+    .option('--dry-run', 'Print the resolved JSON without creating directories or opening tabs')
+    .option('--json', 'Print the council launch plan as JSON')
+    .action(async (options: { issue: string; members: string; space?: string; parent?: string; qualifier?: string; question?: string; repositoryId?: string; dryRun?: boolean; json?: boolean }) => {
       const env = process.env;
       try {
-        const result = await runPlannerConsult({
-          ...options,
+        const dryRun = options.dryRun === true;
+        const members = parseCouncilMembers(options.members);
+        const space = dryRun ? options.space : (options.space ?? callerSpace(env) ?? undefined);
+        if (!dryRun && (space === undefined || space.trim() === '')) {
+          throw new SeatsCommandError('seat_space_missing', `No Herdr.app space: ${space === undefined ? 'the calling terminal has no herdr.space label, so no Herdr.app pane shows it' : 'the space is blank'}. Pass --space <id>, or run the launch in a terminal that a Herdr.app pane shows.`);
+        }
+        const preset: TransportPreset = magpieExtensionInstalled(env) ? 'magpie' : 'native';
+        const result = await runCouncil({
           cwd: process.cwd(),
-          issue: consultIssueNumber(options.issue, '--issue'),
-          parent: options.parent === undefined ? undefined : consultIssueNumber(options.parent, '--parent'),
-          dry_run: options.dryRun === true,
+          issue: councilIssueNumber(options.issue, '--issue'),
+          members,
+          preset,
+          parent: options.parent === undefined ? undefined : councilIssueNumber(options.parent, '--parent'),
+          qualifier: options.qualifier,
+          repositoryId: options.repositoryId,
+          space,
+          question: options.question,
+          dry_run: dryRun,
         }, {
-          launch: async (seat, labels, cwd, dryRun) => {
-            const { launch, effective } = await effectiveSeatLaunch(seat, labels, env, cwd, { prepareFleet: !dryRun });
-            return { launch, model: effective.model, shell: effective.tools.includes('shell') };
-          },
+          launch: (member, labels, cwd, isDryRun, outPath, task) =>
+            councilMemberLaunch(member, preset, labels, cwd, isDryRun, outPath, task, env),
           openTab: args => { openSeatTab(args, env); },
         });
-        process.stdout.write(options.json === true || result.dry_run ? `${JSON.stringify(result, null, 2)}\n`
-          : `${result.seat} ${result.runtime}/${result.model ?? 'default'} ${result.pane_name} → ${result.out_path}\n`);
+        if (options.json === true || result.dry_run) {
+          process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        } else {
+          for (const entry of result.members) {
+            process.stdout.write(`${entry.member} ${entry.runtime}/${entry.model ?? 'default'} ${entry.pane_name} → ${entry.out_path}\n`);
+          }
+        }
       } catch (error) {
         writeLaunchError(error);
       }

@@ -6,21 +6,21 @@
 import { DEFAULT_EXHAUSTED_AT_OR_ABOVE_USED, EXHAUSTED_AT_OR_ABOVE_USED_RANGE } from './quota';
 import type { SeatPoolCacheV1 } from './seat-pool';
 
-export const WORKER_SEAT_IDS = ['worker', 'worker-deep', 'worker-important', 'worker-important-fast', 'worker-light'] as const;
+export const WORKER_SEAT_IDS = ['worker', 'worker-deep', 'worker-opus', 'worker-neon', 'worker-light'] as const;
 export type WorkerSeatId = typeof WORKER_SEAT_IDS[number];
-export const FRONTEND_SEAT_IDS = ['worker-important', 'worker-important-fast'] as const;
+export const FRONTEND_SEAT_IDS = ['worker-opus', 'worker-neon'] as const;
 export const ROUTING_CLASSES = ['important_deep', 'important_fast', 'simple_deep', 'simple_fast', 'frontend'] as const;
 export type RoutingClass = typeof ROUTING_CLASSES[number];
-export const SEAT_IDS = ['orchestrator', 'advisor', 'planner', ...WORKER_SEAT_IDS, 'gatekeeper', 'gatekeeper-deep', 'gatekeeper-fallback', 'reviewer'] as const;
+export const SEAT_IDS = ['orchestrator', 'advisor', 'council', ...WORKER_SEAT_IDS, 'gatekeeper', 'gatekeeper-fallback', 'reviewer'] as const;
 export type SeatId = typeof SEAT_IDS[number];
 /** The gatekeeper-fallback seat launches only as the effective gatekeeper (#2253), under the gatekeeper label and brief. */
 export type LaunchSeatId = Exclude<SeatId, 'gatekeeper-fallback'>;
 export const LAUNCH_SEAT_IDS = SEAT_IDS.filter((id): id is LaunchSeatId => id !== 'gatekeeper-fallback');
 /** The seats that may be null in the section. */
-export type OptionalSeatId = 'worker-light' | 'gatekeeper-fallback' | 'planner';
-export const isPlannerSeat = (id: SeatId): boolean => id === 'planner';
-export const isOptionalSeat = (id: SeatId): id is OptionalSeatId => id === 'worker-light' || id === 'gatekeeper-fallback' || isPlannerSeat(id);
-export const isReviewSeat = (id: SeatId): boolean => id === 'gatekeeper' || id === 'gatekeeper-deep' || id === 'gatekeeper-fallback' || id === 'reviewer';
+export type OptionalSeatId = 'worker-light' | 'gatekeeper-fallback' | 'council';
+export const isCouncilSeat = (id: SeatId): boolean => id === 'council';
+export const isOptionalSeat = (id: SeatId): id is OptionalSeatId => id === 'worker-light' || id === 'gatekeeper-fallback' || isCouncilSeat(id);
+export const isReviewSeat = (id: SeatId): boolean => id === 'gatekeeper' || id === 'gatekeeper-fallback' || id === 'reviewer';
 export const isWorkerSeat = (seat: SeatId): seat is WorkerSeatId => WORKER_SEAT_IDS.includes(seat as WorkerSeatId);
 
 /** The runtimes that run in a Herdr pane. */
@@ -64,6 +64,7 @@ export const isPiCodexSeat = (seat: { readonly runtime: SeatRuntime; readonly mo
 
 export const PI_AGY_MODEL_PREFIX = 'magpie/agy-cli/';
 const AGY_NEON_MODEL = 'gemini-4-neon';
+const AGY_HYDROGEN_MODEL = 'gemini-4-hydrogen';
 export const PI_NEON_MODEL = `${PI_AGY_MODEL_PREFIX}${AGY_NEON_MODEL}`;
 
 export const isNeonSeat = (seat: Pick<SeatConfigV1, 'runtime' | 'model'>): boolean =>
@@ -72,6 +73,20 @@ export const isNeonSeat = (seat: Pick<SeatConfigV1, 'runtime' | 'model'>): boole
 
 export const isClaudeOrNeonSeat = (seat: Pick<SeatConfigV1, 'runtime' | 'model'>): boolean =>
   seat.runtime === 'claude' || isNeonSeat(seat);
+
+/** Models restricted exclusively to the council plane (ADR-0006 §1). */
+export const isCouncilOnlyModel = (seat: Pick<SeatConfigV1, 'runtime' | 'model'>): boolean =>
+  seat.model !== null && (
+    (seat.runtime === 'claude' && seat.model === 'fable')
+    || (seat.runtime === 'codex' && seat.model === 'gpt-6.2-astra')
+    || (seat.runtime === 'pi' && seat.model === `${PI_CODEX_MODEL_PREFIX}gpt-6.2-astra`)
+  );
+
+/** The retired pre-ADR-0006 default advisor (`claude / fable`), which `rh update` migrates to the active preset. */
+export const isLegacyDefaultAdvisor = (value: unknown): boolean =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+  && (value as Record<string, unknown>).runtime === 'claude'
+  && (value as Record<string, unknown>).model === 'fable';
 
 /** Fleet access depends on the seat's role range, independent of the model that the runtime runs. */
 export const seatTakesFleet = (seat: { readonly runtime: SeatRuntime }): boolean => seat.runtime !== 'agy';
@@ -89,6 +104,8 @@ export type SeatRoutingV1 = { readonly [task in RoutingClass]: readonly WorkerSe
   readonly claude_saving_below_remaining: number;
   /** Claude hyper mode (#2633): weekly remaining at or above this percent. Saving wins below its own threshold. */
   readonly claude_hyper_at_or_above_remaining: number;
+  /** Google Ultra (`agy_gemini`) saving floor (ADR-0006 §1): blocks `agy_gemini` workers below this percent while keeping `advisor` active. */
+  readonly agy_saving_below_remaining: number;
   /**
    * A window at or above this percent used is `exhausted` (#2909). The default is the reading's own
    * `DEFAULT_EXHAUSTED_AT_OR_ABOVE_USED`, so the quota classifier and the section keep one value. A
@@ -106,7 +123,7 @@ export type SeatRoutingV1 = { readonly [task in RoutingClass]: readonly WorkerSe
   readonly unavailable_pi_providers: readonly string[];
 };
 export const ROUTING_KEYS = [...ROUTING_CLASSES, 'claude_saving_below_remaining', 'claude_hyper_at_or_above_remaining',
-  'exhausted_at_or_above_used', 'codex_credit_mode', 'codex_credit_floor', 'low_quota_explorer', 'unavailable_pi_providers'] as const satisfies readonly (keyof SeatRoutingV1)[];
+  'agy_saving_below_remaining', 'exhausted_at_or_above_used', 'codex_credit_mode', 'codex_credit_floor', 'low_quota_explorer', 'unavailable_pi_providers'] as const satisfies readonly (keyof SeatRoutingV1)[];
 export type SeatsConfigV1 = { readonly [seat in Exclude<SeatId, OptionalSeatId>]: SeatConfigV1 } & {
   readonly [seat in OptionalSeatId]: SeatConfigV1 | null;
 } & {
@@ -119,7 +136,25 @@ export const SEAT_SCAFFOLD_SUB_AGENTS = Object.freeze(['deep-reasoner', 'explore
 export type SeatScaffoldSubAgent = typeof SEAT_SCAFFOLD_SUB_AGENTS[number];
 export type PiSubAgentModels = Readonly<Partial<Record<SeatScaffoldSubAgent, string>>>;
 
-const WORKER_LIGHT_MODEL = 'magpie/cursor/deepseek-v41-flash-1017';
+const EXPLORER_ONLY_FLEET: readonly SeatScaffoldSubAgent[] = Object.freeze(['explorer'] as const);
+const EMPTY_FLEET: readonly SeatScaffoldSubAgent[] = Object.freeze([] as const);
+
+/** Per-seat permitted sub-agent roles (ADR-0006 §3). Single authority for config decoding, migration stripping, and Settings ranges. */
+export const SEAT_ALLOWED_FLEET: Readonly<Record<SeatId, readonly SeatScaffoldSubAgent[]>> = Object.freeze({
+  orchestrator: EXPLORER_ONLY_FLEET,
+  advisor: SEAT_SCAFFOLD_SUB_AGENTS,
+  council: EXPLORER_ONLY_FLEET,
+  worker: EXPLORER_ONLY_FLEET,
+  'worker-deep': EXPLORER_ONLY_FLEET,
+  'worker-opus': EXPLORER_ONLY_FLEET,
+  'worker-neon': EXPLORER_ONLY_FLEET,
+  'worker-light': EMPTY_FLEET,
+  gatekeeper: EMPTY_FLEET,
+  'gatekeeper-fallback': EMPTY_FLEET,
+  reviewer: EMPTY_FLEET,
+});
+
+const WORKER_LIGHT_MODEL = 'zai/glm-5.3-flash';
 export const PI_SUB_AGENT_DEFAULTS = Object.freeze({
   'deep-reasoner': Object.freeze({ model: `${PI_CODEX_MODEL_PREFIX}gpt-6.2-sol`, thinking: 'high' }),
   explorer: Object.freeze({ model: WORKER_LIGHT_MODEL, thinking: 'high' }),
@@ -133,54 +168,104 @@ export function isSeatScaffoldSubAgent(role: string): role is SeatScaffoldSubAge
   return SEAT_SCAFFOLD_SUB_AGENTS.some(available => available === role);
 }
 
-const WORKER_TOOLS = Object.freeze(['edit', 'gh', 'mcp', 'net', 'read', 'shell', 'tasks'] as const);
+const ORCHESTRATOR_TOOLS: readonly SeatTool[] = Object.freeze(['gh', 'mcp', 'net', 'read', 'shell', 'tasks'] as const);
+const ADVISOR_TOOLS: readonly SeatTool[] = Object.freeze(['mcp', 'net', 'read', 'shell'] as const);
+const WORKER_TOOLS: readonly SeatTool[] = Object.freeze(['edit', 'gh', 'mcp', 'net', 'read', 'shell', 'tasks'] as const);
 export const RETIRED_SEAT_FLEET_ROLES = Object.freeze(['deep-worker', 'fast-worker', 'gatekeeper', 'root-cause-prover'] as const);
-const isRetiredFleetRole = (id: SeatId, role: unknown): boolean =>
-  RETIRED_SEAT_FLEET_ROLES.some(retired => retired === role) || (role === 'harness-evaluator' && isWorkerSeat(id));
+const isDisallowedFleetRole = (id: SeatId, role: unknown): boolean =>
+  RETIRED_SEAT_FLEET_ROLES.some(retired => retired === role)
+  || (role === 'harness-evaluator' && isWorkerSeat(id))
+  || (!isReviewSeat(id) && typeof role === 'string' && isSeatScaffoldSubAgent(role) && !SEAT_ALLOWED_FLEET[id].includes(role));
 const REVIEW_TOOLS: readonly SeatTool[] = Object.freeze(['net', 'read', 'shell'] as const);
-export const PLANNER_TOOLS: readonly SeatTool[] = Object.freeze(['net', 'read', 'shell'] as const);
+export const COUNCIL_TOOLS: readonly SeatTool[] = Object.freeze(['net', 'read', 'shell'] as const);
+
+const DEFAULT_ROUTING: SeatRoutingV1 = Object.freeze({
+  claude_saving_below_remaining: 20,
+  claude_hyper_at_or_above_remaining: 50,
+  agy_saving_below_remaining: 25,
+  exhausted_at_or_above_used: DEFAULT_EXHAUSTED_AT_OR_ABOVE_USED,
+  codex_credit_mode: 'off',
+  codex_credit_floor: 0,
+  important_deep: Object.freeze(['worker-opus', 'worker-neon', 'worker-deep'] as const),
+  important_fast: Object.freeze(['worker-opus', 'worker-neon', 'worker', 'worker-light'] as const),
+  simple_deep: Object.freeze(['worker-neon', 'worker-deep'] as const),
+  simple_fast: Object.freeze(['worker-light', 'worker'] as const),
+  frontend: Object.freeze(['worker-opus', 'worker-neon'] as const),
+  low_quota_explorer: Object.freeze({ model: 'haiku', effort: 'high' }),
+  unavailable_pi_providers: Object.freeze([]),
+});
+
+/** Native Claude fallback advisor when neither Magpie nor Antigravity is enabled (ADR-0006 §2). */
+export const NATIVE_CLAUDE_ADVISOR: SeatConfigV1 = Object.freeze({
+  runtime: 'claude',
+  model: 'opus',
+  advisor_model: null,
+  effort: 'high',
+  tools: ADVISOR_TOOLS,
+  fleet: SEAT_SCAFFOLD_SUB_AGENTS,
+});
 
 /**
- * The section an absent `seats` key reads as: the canvas defaults, with the
- * orchestrator on Opus high (G36). `rh seats argv` launches from the
- * same value. The defaults and the Settings ranges share the scaffold role list.
+ * The 11-seat preset for Magpie-First (`'magpie'`) or Native-First (`'native'`) transport (ADR-0006 §2).
+ * Both presets decode cleanly under `decodeSeatsConfig`.
  */
-export const DEFAULT_SEATS_CONFIG: SeatsConfigV1 = Object.freeze({
-  orchestrator: Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: Object.freeze(['gh', 'mcp', 'net', 'read', 'shell', 'tasks'] as const), fleet: Object.freeze([]) }),
-  advisor: Object.freeze({ runtime: 'claude', model: 'fable', advisor_model: null, effort: 'high', tools: Object.freeze(['mcp', 'net', 'read', 'shell'] as const), fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
-  planner: null,
-  worker: Object.freeze({ runtime: 'codex', model: 'gpt-6.1-terra', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
-  'worker-deep': Object.freeze({ runtime: 'codex', model: 'gpt-6.2-sol', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
-  'worker-important': Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'medium', tools: WORKER_TOOLS, fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
-  'worker-important-fast': Object.freeze({ runtime: 'claude', model: 'sonnet', advisor_model: null, effort: 'medium', tools: WORKER_TOOLS, fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
-  'worker-light': Object.freeze({ runtime: 'pi', model: WORKER_LIGHT_MODEL, advisor_model: null, effort: null, tools: WORKER_TOOLS, fleet: Object.freeze([]) }),
-  gatekeeper: Object.freeze({ runtime: 'codex', model: 'gpt-6.1-terra', advisor_model: null, effort: 'high', tools: REVIEW_TOOLS, fleet: Object.freeze([]) }),
-  'gatekeeper-deep': Object.freeze({ runtime: 'codex', model: 'gpt-6.2-sol', advisor_model: null, effort: 'high', tools: REVIEW_TOOLS, fleet: Object.freeze([]) }),
-  'gatekeeper-fallback': null,
-  reviewer: Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: REVIEW_TOOLS, fleet: Object.freeze([]) }),
-  routing: Object.freeze({
-    claude_saving_below_remaining: 20,
-    claude_hyper_at_or_above_remaining: 50,
-    exhausted_at_or_above_used: DEFAULT_EXHAUSTED_AT_OR_ABOVE_USED,
-    codex_credit_mode: 'off',
-    codex_credit_floor: 0,
-    important_deep: Object.freeze(['worker-important', 'worker-deep'] as const),
-    important_fast: Object.freeze(['worker-important-fast', 'worker'] as const),
-    simple_deep: Object.freeze(['worker-deep', 'worker-important'] as const),
-    simple_fast: Object.freeze(['worker'] as const),
-    frontend: Object.freeze(['worker-important', 'worker-important-fast'] as const),
-    low_quota_explorer: Object.freeze({ model: 'haiku', effort: 'high' }),
-    unavailable_pi_providers: Object.freeze([]),
-  }),
-});
+export function defaultSeatsConfig(preset: 'magpie' | 'native' = 'magpie'): SeatsConfigV1 {
+  const orchestrator: SeatConfigV1 = Object.freeze({
+    runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: ORCHESTRATOR_TOOLS, fleet: SEAT_ALLOWED_FLEET.orchestrator,
+  });
+  const workerOpus: SeatConfigV1 = Object.freeze({
+    runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: SEAT_ALLOWED_FLEET['worker-opus'],
+  });
+  const reviewer: SeatConfigV1 = Object.freeze({
+    runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: REVIEW_TOOLS, fleet: SEAT_ALLOWED_FLEET.reviewer,
+  });
+  if (preset === 'native') {
+    return Object.freeze({
+      orchestrator,
+      advisor: Object.freeze({ runtime: 'agy', model: 'gemini-4-neon-high', advisor_model: null, effort: null, tools: AGY_SEAT_TOOLS, fleet: EMPTY_FLEET }),
+      council: null,
+      worker: Object.freeze({ runtime: 'codex', model: 'gpt-6.1-terra', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: SEAT_ALLOWED_FLEET.worker }),
+      'worker-deep': Object.freeze({ runtime: 'codex', model: 'gpt-6.2-sol', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: SEAT_ALLOWED_FLEET['worker-deep'] }),
+      'worker-opus': workerOpus,
+      'worker-neon': Object.freeze({ runtime: 'agy', model: 'gemini-4-neon-high', advisor_model: null, effort: null, tools: AGY_SEAT_TOOLS, fleet: EMPTY_FLEET }),
+      'worker-light': Object.freeze({ runtime: 'agy', model: AGY_HYDROGEN_MODEL, advisor_model: null, effort: null, tools: AGY_SEAT_TOOLS, fleet: EMPTY_FLEET }),
+      gatekeeper: Object.freeze({ runtime: 'codex', model: 'gpt-6.2-sol', advisor_model: null, effort: 'high', tools: REVIEW_TOOLS, fleet: SEAT_ALLOWED_FLEET.gatekeeper }),
+      'gatekeeper-fallback': null,
+      reviewer,
+      routing: DEFAULT_ROUTING,
+    });
+  }
+  return Object.freeze({
+    orchestrator,
+    advisor: Object.freeze({ runtime: 'pi', model: PI_NEON_MODEL, advisor_model: null, effort: 'xhigh', tools: ADVISOR_TOOLS, fleet: SEAT_ALLOWED_FLEET.advisor }),
+    council: null,
+    worker: Object.freeze({ runtime: 'pi', model: `${PI_CODEX_MODEL_PREFIX}gpt-6.1-terra`, advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: SEAT_ALLOWED_FLEET.worker }),
+    'worker-deep': Object.freeze({ runtime: 'pi', model: `${PI_CODEX_MODEL_PREFIX}gpt-6.2-sol`, advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: SEAT_ALLOWED_FLEET['worker-deep'] }),
+    'worker-opus': workerOpus,
+    'worker-neon': Object.freeze({ runtime: 'pi', model: PI_NEON_MODEL, advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: SEAT_ALLOWED_FLEET['worker-neon'] }),
+    'worker-light': Object.freeze({ runtime: 'pi', model: WORKER_LIGHT_MODEL, advisor_model: null, effort: null, tools: WORKER_TOOLS, fleet: SEAT_ALLOWED_FLEET['worker-light'] }),
+    gatekeeper: Object.freeze({ runtime: 'pi', model: `${PI_CODEX_MODEL_PREFIX}gpt-6.2-sol`, advisor_model: null, effort: 'high', tools: REVIEW_TOOLS, fleet: SEAT_ALLOWED_FLEET.gatekeeper }),
+    'gatekeeper-fallback': Object.freeze({ runtime: 'pi', model: WORKER_LIGHT_MODEL, advisor_model: null, effort: null, tools: REVIEW_TOOLS, fleet: SEAT_ALLOWED_FLEET['gatekeeper-fallback'] }),
+    reviewer,
+    routing: DEFAULT_ROUTING,
+  });
+}
+
+/**
+ * The section an absent `seats` key reads as: the Magpie-First 11-seat preset (ADR-0006 §2).
+ * `rh seats argv` launches from the same value. The defaults and Settings ranges share `SEAT_ALLOWED_FLEET`.
+ */
+export const DEFAULT_SEATS_CONFIG: SeatsConfigV1 = defaultSeatsConfig('magpie');
+export const NATIVE_SEATS_PRESET: SeatsConfigV1 = defaultSeatsConfig('native');
 
 export const SEATS_CONFIG_UPDATE_ACTION = 'rh update';
 
-/** The routing keys that came after the first stored sections (#2630, #2633, #2769): `rh update` adds each with its default. */
+/** The routing keys that came after the first stored sections (#2630, #2633, #2769, #3366): `rh update` adds each with its default. */
 export const INTRODUCED_ROUTING_DEFAULTS = Object.freeze({
   codex_credit_mode: DEFAULT_SEATS_CONFIG.routing.codex_credit_mode,
   codex_credit_floor: DEFAULT_SEATS_CONFIG.routing.codex_credit_floor,
   claude_hyper_at_or_above_remaining: DEFAULT_SEATS_CONFIG.routing.claude_hyper_at_or_above_remaining,
+  agy_saving_below_remaining: DEFAULT_SEATS_CONFIG.routing.agy_saving_below_remaining,
   exhausted_at_or_above_used: DEFAULT_SEATS_CONFIG.routing.exhausted_at_or_above_used,
   unavailable_pi_providers: DEFAULT_SEATS_CONFIG.routing.unavailable_pi_providers,
 }) satisfies Partial<SeatRoutingV1>;
@@ -270,9 +355,18 @@ export class AgySeatSettingsError extends SeatsDecodeError {
   }
 }
 
+/** Seats allowed to carry `runtime: 'agy'` in decoded config (ADR-0006 §2; non-advisor launch stays guarded until #3377). */
+const AGY_ALLOWED_SEAT_IDS: ReadonlySet<SeatId> = new Set(['advisor', 'worker-neon', 'worker-light', 'gatekeeper-fallback']);
+
 function checkAgySeat(id: SeatId, seat: SeatConfigV1): void {
-  if (id !== 'advisor') throw new AgySeatSettingsError('seat_runtime_not_allowed', id, 'runtime');
+  if (!AGY_ALLOWED_SEAT_IDS.has(id)) throw new AgySeatSettingsError('seat_runtime_not_allowed', id, 'runtime');
   if (!seatModelShapeValid('agy', seat.model)) throw new AgySeatSettingsError('seat_model_invalid', id, 'model');
+  if ((id === 'worker-light' || id === 'gatekeeper-fallback') && seat.model !== AGY_HYDROGEN_MODEL) {
+    throw new AgySeatSettingsError('seat_model_invalid', id, 'model');
+  }
+  if (id === 'worker-neon' && !seat.model.startsWith(AGY_NEON_MODEL)) {
+    throw new AgySeatSettingsError('seat_model_invalid', id, 'model');
+  }
   if (seat.effort !== null) throw new AgySeatSettingsError('seat_effort_invalid', id, 'effort');
   if (seat.advisor_model !== null) throw new AgySeatSettingsError('seat_model_invalid', id, 'advisor_model');
   if (seat.fleet.length !== 0) throw new AgySeatSettingsError('seat_fleet_not_allowed', id, 'fleet');
@@ -347,21 +441,21 @@ function decodeSeat(id: SeatId, value: unknown, code: string, fromSettingsReques
   const field = <T>(name: string | null, decode: () => T): T => { try { return decode(); } catch { return at(name); } };
   const record = field(null, () => object(value, ['runtime', 'model', 'advisor_model', 'effort', 'tools', 'fleet'], code, ['runtime', 'model', 'effort', 'tools', 'fleet']));
   if (!SEAT_RUNTIMES.includes(record.runtime as SeatRuntime)) at('runtime');
-  if (record.runtime === 'agy' && id !== 'advisor') throw new AgySeatSettingsError('seat_runtime_not_allowed', id, 'runtime');
+  if (record.runtime === 'agy' && !AGY_ALLOWED_SEAT_IDS.has(id)) throw new AgySeatSettingsError('seat_runtime_not_allowed', id, 'runtime');
   const advisor = record.advisor_model === undefined ? null : field('advisor_model', () => nullableToken(record.advisor_model, code));
   if (advisor !== null && record.runtime !== 'agy' && (record.runtime !== 'claude' || !Object.hasOwn(MODEL_FAMILY_LABELS, advisor))) at('advisor_model');
   const tools = field('tools', () => ascending(record.tools, isTool, code));
   if (record.runtime !== 'agy' && !tools.includes('read')) at('tools');
   const fleet = field('fleet', () => ascending(record.fleet, isRole, code));
   if (isReviewSeat(id) && tools.some(tool => !REVIEW_TOOLS.includes(tool))) at('tools');
-  if (isPlannerSeat(id) && tools.some(tool => !PLANNER_TOOLS.includes(tool))) at('tools');
+  if (isCouncilSeat(id) && tools.some(tool => !COUNCIL_TOOLS.includes(tool))) at('tools');
   const model = record.model === null ? null
     : seatModelShapeValid(record.runtime as SeatRuntime, record.model) ? record.model
       : record.runtime === 'agy' ? null : at('model');
-  // Let the Settings save return its typed fleet refusal when the request contains a retired role.
-  const retiredFleetRequest = fromSettingsRequest && fleet.some(role => isRetiredFleetRole(id, role));
-  if (fleet.length > 0 && !retiredFleetRequest && isReviewSeat(id)) at('fleet');
-  if (record.runtime !== 'agy' && !fromSettingsRequest && fleet.some(role => !isSeatScaffoldSubAgent(role))) at('fleet');
+  // Let the Settings save return its typed fleet refusal when the request contains a retired or disallowed role.
+  const disallowedFleetRequest = fromSettingsRequest && fleet.some(role => isDisallowedFleetRole(id, role));
+  if (fleet.length > 0 && !disallowedFleetRequest && isReviewSeat(id)) at('fleet');
+  if (record.runtime !== 'agy' && !fromSettingsRequest && fleet.some(role => !SEAT_ALLOWED_FLEET[id].includes(role as SeatScaffoldSubAgent))) at('fleet');
   const seat: SeatConfigV1 = {
     runtime: record.runtime as SeatRuntime,
     model,
@@ -371,11 +465,24 @@ function decodeSeat(id: SeatId, value: unknown, code: string, fromSettingsReques
     fleet,
   };
   if (seat.runtime === 'agy') checkAgySeat(id, seat);
+  if (!fromSettingsRequest && !isCouncilSeat(id) && isCouncilOnlyModel(seat)) at('model');
   return seat;
 }
 
 const REQUIRED_SECTION_KEYS = [...SEAT_IDS, 'routing'];
 const SECTION_KEYS = [...REQUIRED_SECTION_KEYS, 'pi_sub_agent_models'];
+
+const LEGACY_SEAT_RENAMES = Object.freeze([
+  ['planner', 'council'],
+  ['worker-important', 'worker-opus'],
+  ['worker-important-fast', 'worker-neon'],
+] as const);
+const LEGACY_DROPPED_SEAT_KEYS = Object.freeze(['gatekeeper-deep'] as const);
+const LEGACY_SEAT_KEYS = [...LEGACY_SEAT_RENAMES.map(([oldKey]) => oldKey), ...LEGACY_DROPPED_SEAT_KEYS];
+const LEGACY_ROUTING_SEAT_MAP: Readonly<Record<string, WorkerSeatId>> = Object.freeze({
+  'worker-important': 'worker-opus',
+  'worker-important-fast': 'worker-neon',
+});
 
 function decodePiSubAgentModels(value: unknown, code: string): PiSubAgentModels {
   const record = object(value, SEAT_SCAFFOLD_SUB_AGENTS, code, []);
@@ -410,6 +517,7 @@ function decodeRouting(value: unknown, code: string): SeatRoutingV1 {
   })) as Pick<SeatRoutingV1, RoutingClass>;
   return { ...routes, claude_saving_below_remaining: percent(record.claude_saving_below_remaining),
     claude_hyper_at_or_above_remaining: percent(record.claude_hyper_at_or_above_remaining),
+    agy_saving_below_remaining: percent(record.agy_saving_below_remaining),
     exhausted_at_or_above_used: exhaustedAtOrAboveUsed,
     codex_credit_mode: CODEX_CREDIT_MODES.includes(record.codex_credit_mode as CodexCreditMode) ? record.codex_credit_mode as CodexCreditMode : invalid(code),
     codex_credit_floor: typeof record.codex_credit_floor === 'number' && Number.isFinite(record.codex_credit_floor) && record.codex_credit_floor >= 0
@@ -447,18 +555,78 @@ export function stripRetiredSeatFleetRoles(record: Record<string, unknown>): Rec
     if (typeof value !== 'object' || value === null || Array.isArray(value)) continue;
     const seat = value as Record<string, unknown>;
     if (!Array.isArray(seat.fleet)) continue;
-    const fleet = seat.fleet.filter(role => !isRetiredFleetRole(id, role));
+    const fleet = seat.fleet.filter(role => !isDisallowedFleetRole(id, role));
     if (fleet.length !== seat.fleet.length) (changed ??= { ...record })[id] = { ...seat, fleet };
   }
   return changed ?? record;
+}
+
+/**
+ * One-shot 12-to-11 seat migration transform shared by `decodeSeatsConfig` (validation) and `migrateSeatsConfiguration` (apply).
+ * Renames `planner` → `council`, `worker-important` → `worker-opus`, `worker-important-fast` → `worker-neon`,
+ * drops `gatekeeper-deep`, remaps routing class seat names, strips disallowed fleet roles, and replaces the
+ * retired default `claude/fable` advisor when `replacementAdvisor` is provided.
+ */
+export function normalizeLegacySeatsRecord(
+  stored: Record<string, unknown>,
+  replacementAdvisor?: SeatConfigV1,
+): { readonly record: Record<string, unknown>; readonly migrated: boolean } {
+  let migrated = false;
+  const next: Record<string, unknown> = { ...stored };
+  for (const [oldKey, newKey] of LEGACY_SEAT_RENAMES) {
+    if (oldKey in next) {
+      if (newKey in next) invalid('seats_config_invalid', `seats.${oldKey}`);
+      next[newKey] = next[oldKey];
+      delete next[oldKey];
+      migrated = true;
+    }
+  }
+  for (const dropped of LEGACY_DROPPED_SEAT_KEYS) {
+    if (dropped in next) {
+      delete next[dropped];
+      migrated = true;
+    }
+  }
+  if (replacementAdvisor !== undefined && isLegacyDefaultAdvisor(next.advisor)) {
+    next.advisor = replacementAdvisor;
+    migrated = true;
+  }
+  if (typeof next.routing === 'object' && next.routing !== null && !Array.isArray(next.routing)) {
+    const routing = next.routing as Record<string, unknown>;
+    let routingChanged = false;
+    const nextRouting: Record<string, unknown> = { ...routing };
+    for (const task of ROUTING_CLASSES) {
+      const list = routing[task];
+      if (!Array.isArray(list)) continue;
+      let listChanged = false;
+      const mapped = list.map(entry => {
+        if (typeof entry === 'string' && Object.hasOwn(LEGACY_ROUTING_SEAT_MAP, entry)) {
+          listChanged = true;
+          return LEGACY_ROUTING_SEAT_MAP[entry]!;
+        }
+        return entry;
+      });
+      if (listChanged) {
+        nextRouting[task] = mapped;
+        routingChanged = true;
+      }
+    }
+    if (routingChanged) {
+      next.routing = nextRouting;
+      migrated = true;
+    }
+  }
+  const stripped = stripRetiredSeatFleetRoles(next);
+  if (stripped !== next) migrated = true;
+  return { record: stripped, migrated };
 }
 
 /** The shape of the stored `seats` section. An absent section (`undefined`) reads as the defaults. */
 export function decodeSeatsConfig(value: unknown): SeatsConfigV1 {
   if (value === undefined) return DEFAULT_SEATS_CONFIG;
   const code = 'seats_config_invalid';
-  const stored = object(value, SECTION_KEYS, code, ['orchestrator', 'advisor', 'worker']);
-  const record = stripRetiredSeatFleetRoles(stored);
+  const stored = object(value, [...SECTION_KEYS, ...LEGACY_SEAT_KEYS], code, ['orchestrator', 'advisor', 'worker']);
+  const { record, migrated } = normalizeLegacySeatsRecord(stored, DEFAULT_SEATS_CONFIG.advisor);
   const routing = record.routing;
   if (typeof routing === 'object' && routing !== null && !Array.isArray(routing)) {
     if ('mode' in routing || 'hyper' in routing) throw new SeatsConfigMigrationRequiredError();
@@ -475,7 +643,7 @@ export function decodeSeatsConfig(value: unknown): SeatsConfigV1 {
     }
   }
   const seats = decodeSeatsRecord(record, code);
-  if (record !== stored) throw new SeatsConfigMigrationRequiredError();
+  if (migrated) throw new SeatsConfigMigrationRequiredError();
   return seats;
 }
 

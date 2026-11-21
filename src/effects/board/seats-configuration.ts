@@ -9,7 +9,8 @@ import { sha256Hex } from '../../core/evidence/sha256';
 import { AGY_SEAT_AGENT, agySeatBrief } from '../../core/board/seat-launch';
 import {
   AgySeatSettingsError,
-  PLANNER_TOOLS,
+  COUNCIL_TOOLS,
+  SEAT_ALLOWED_FLEET,
   SEAT_IDS,
   SEAT_RUNTIMES,
   SEAT_SCAFFOLD_SUB_AGENTS,
@@ -20,6 +21,8 @@ import {
   WORKER_SEAT_IDS,
   SeatsConfigMigrationRequiredError,
   decodeSeatsConfig,
+  isCouncilOnlyModel,
+  isCouncilSeat,
   seatsConfigInvalidMessage,
   seatHostId,
   seatModelShapeValid,
@@ -71,18 +74,17 @@ const without = (...excluded: SeatTool[]): readonly SeatTool[] => SEAT_TOOLS.fil
  * The orchestrator does not edit (#1472). The advisor may edit proposals (#2032) and does not write GitHub (#1472).
  */
 const SEAT_ACCESS: { readonly [seat in SeatId]: Omit<SeatRangeV1, 'models'> } = {
-  orchestrator: { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: without('edit') },
-  advisor: { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: without('gh') },
-  planner: { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: PLANNER_TOOLS },
-  worker: { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: SEAT_TOOLS },
-  'worker-deep': { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: SEAT_TOOLS },
-  'worker-important': { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: SEAT_TOOLS },
-  'worker-important-fast': { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: SEAT_TOOLS },
-  'worker-light': { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: SEAT_TOOLS },
-  gatekeeper: { fleet: [], tools: ['net', 'read', 'shell'] },
-  'gatekeeper-deep': { fleet: [], tools: ['net', 'read', 'shell'] },
-  'gatekeeper-fallback': { fleet: [], tools: ['net', 'read', 'shell'] },
-  reviewer: { fleet: [], tools: ['net', 'read', 'shell'] },
+  orchestrator: { fleet: SEAT_ALLOWED_FLEET.orchestrator, tools: without('edit') },
+  advisor: { fleet: SEAT_ALLOWED_FLEET.advisor, tools: without('gh') },
+  council: { fleet: SEAT_ALLOWED_FLEET.council, tools: COUNCIL_TOOLS },
+  worker: { fleet: SEAT_ALLOWED_FLEET.worker, tools: SEAT_TOOLS },
+  'worker-deep': { fleet: SEAT_ALLOWED_FLEET['worker-deep'], tools: SEAT_TOOLS },
+  'worker-opus': { fleet: SEAT_ALLOWED_FLEET['worker-opus'], tools: SEAT_TOOLS },
+  'worker-neon': { fleet: SEAT_ALLOWED_FLEET['worker-neon'], tools: SEAT_TOOLS },
+  'worker-light': { fleet: SEAT_ALLOWED_FLEET['worker-light'], tools: SEAT_TOOLS },
+  gatekeeper: { fleet: SEAT_ALLOWED_FLEET.gatekeeper, tools: ['net', 'read', 'shell'] },
+  'gatekeeper-fallback': { fleet: SEAT_ALLOWED_FLEET['gatekeeper-fallback'], tools: ['net', 'read', 'shell'] },
+  reviewer: { fleet: SEAT_ALLOWED_FLEET.reviewer, tools: ['net', 'read', 'shell'] },
 };
 const SEAT_RANGES = Object.fromEntries(SEAT_IDS.map(id => [id, { models: SEAT_RECOMMENDED_MODELS[id], ...SEAT_ACCESS[id] }])) as SeatsRangesV1['seats'];
 
@@ -155,6 +157,9 @@ function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly str
   const range = SEAT_RANGES[id];
   if (!enabledRuntimes.includes(seatHostId(seat.runtime))) {
     throw new SeatsConfigurationError('seat_runtime_not_enabled', `Fix the ${id} seat before saving. Its runtime ${seat.runtime} is disabled under Hosts.`);
+  }
+  if (!isCouncilSeat(id) && isCouncilOnlyModel(seat)) {
+    throw new SeatsConfigurationError('seat_model_invalid', `The ${id} seat cannot use ${seat.model}. That model is restricted to the council seat.`);
   }
   checkEffort(`${id} seat`, seat, seat.runtime);
   const tool = seat.tools.find(item => !range.tools.includes(item));
