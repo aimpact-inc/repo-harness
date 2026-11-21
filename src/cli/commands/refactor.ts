@@ -19,7 +19,7 @@ export function formatRefactorRecommendations(value: RefactorRecommendationResul
     const reason = value.reasonCode ? ` (reasonCode: ${value.reasonCode})` : '';
     return `[RefactorRecommendations] ${value.status}${detail ? `: ${detail}` : ''}${reason}${value.action ? ` (action: ${value.action})` : ''}\n`;
   }
-  return value.candidates.map(formatCandidate).join('\n');
+  return [`snapshot digest: ${value.snapshotDigest}\n`, ...value.candidates.map(formatCandidate)].join('\n');
 }
 
 /** First lines of the bounded evidence sample; `--json` carries all of it. */
@@ -105,14 +105,15 @@ export function buildRefactorCommand(): Command {
     .argument('<recommendation-id>')
     .argument('<decision>', DECISIONS.join('|'))
     .requiredOption('--reason <text>', 'Why the user decided this way')
+    .requiredOption('--snapshot-digest <digest>', 'Snapshot digest from rh arch refactor recommendations')
     .option('--repo <path>', 'Repository root', '.')
     .option('--import-node-limit <n>', 'Same limit the suggestion was scanned with', parseImportNodeLimit)
     .option('--timeout-ms <ms>', `Per archctx call timeout in ms (default ${REFACTOR_DEFAULT_TIMEOUT_MS}, max ${REFACTOR_MAX_TIMEOUT_MS})`, parseTimeoutMs)
-    .action(async (recommendationId: string, decision: string, options: { reason: string; repo: string; importNodeLimit?: number; timeoutMs?: number }) => {
+    .action(async (recommendationId: string, decision: string, options: { reason: string; snapshotDigest: string; repo: string; importNodeLimit?: number; timeoutMs?: number }) => {
       try {
         if (!DECISIONS.includes(decision as RefactorDecision)) throw new Error(`decision must be one of ${DECISIONS.join('|')}`);
         const { decideRefactorRecommendation } = await import('./refactor-actions');
-        const status = decideRefactorRecommendation(canonicalRepoPath(options.repo), recommendationId, decision as RefactorDecision, options.reason, options.importNodeLimit, options.timeoutMs);
+        const status = decideRefactorRecommendation(canonicalRepoPath(options.repo), recommendationId, decision as RefactorDecision, options.reason, options.snapshotDigest, options.importNodeLimit, options.timeoutMs);
         process.stdout.write(`${JSON.stringify({ recommendationId, status }, null, 2)}\n`);
       } catch (error) { fail(error); }
     });

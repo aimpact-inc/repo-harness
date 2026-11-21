@@ -11,7 +11,7 @@ participants:
   - id: reconciler
     nodeId: component.global-runtime-reconciliation.primary
   - id: archctx-closure
-    nodeId: component.global-runtime-reconciliation.archctx-closure
+    nodeId: component.architecture.archctx-closure
   - id: hook-adapters
     nodeId: capability.runtime-harness.hook-adapters
 steps:

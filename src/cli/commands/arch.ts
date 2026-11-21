@@ -14,7 +14,7 @@ export function buildArchCommand(): Command {
     .helpOption(false)
     .action(async () => (await import('./arch-actions')).runArch(process.argv.slice(process.argv.indexOf('arch') + 1)));
   arch.command('verify')
-    .description('Report one verdict over the ArchContext checks of a change')
+    .description('Report one verdict over the ArchContext checks of a change. The validate check reads the checkout YAML.')
     .option('--base <ref>', 'The commit or ref the change is measured against')
     .option('--json', 'Output the verdict document instead of one line per check')
     .action(async (options: { base?: string; json?: boolean }) => (await import('./arch-verify')).runArchVerify(options));

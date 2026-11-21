@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { digestJson, type Json } from 'archctx-contracts';
 import {
   ARCH_VERIFY_CHECK_IDS,
@@ -18,10 +19,10 @@ import {
   type ArchVerifyCheckV1,
 } from '../../src/core/architecture/arch-verify';
 import { ARCH_VERIFY_BASE_INVALID, archVerify, runArchVerifyCommand } from '../../src/cli/commands/arch-verify';
-import { indexPackageLocalCodeGraph, resolveCompatibleNodeRuntime } from '../../src/effects/architecture/archctx-provider';
+import { ArchctxClient, indexPackageLocalCodeGraph, resolveCompatibleNodeRuntime } from '../../src/effects/architecture/archctx-provider';
 import { ARCHCTX_REQUIRED_VERSION } from '../../src/core/architecture/projection';
 import type { ArchitectureProjectionPolicy, RunArchctxProcess } from '../../src/core/architecture/contracts';
-import { fixtureCommit, fixtureWrite, fixtureYaml, moduleRepository } from '../helpers/module-repository';
+import { fixtureCommit, fixtureGit, fixtureWrite, fixtureYaml, moduleRepository } from '../helpers/module-repository';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -48,6 +49,14 @@ function validRepository(proven = true): string {
   fixtureCommit(root);
   return root;
 }
+
+const realRunner = (calls: string[][]): RunArchctxProcess => (binary, args, options) => {
+  calls.push([...args]);
+  const result = spawnSync(resolveCompatibleNodeRuntime(options.env), [binary, ...args], {
+    cwd: options.cwd, env: options.env, encoding: 'utf8', timeout: options.timeoutMs, maxBuffer: 8 * 1024 * 1024,
+  });
+  return { status: result.status, signal: result.signal, stdout: result.stdout, stderr: result.stderr };
+};
 
 const check = (id: ArchVerifyCheckId, status: ArchVerifyCheckV1['status'], count = 0): ArchVerifyCheckV1 => ({ id, status, count });
 const data = (value: unknown): ArchVerifyCheckRead => ({ ok: true, data: value });
@@ -344,17 +353,49 @@ describe('rh arch verify: one verdict', () => {
 });
 
 describe('rh arch verify in a repository', () => {
-  test('a valid model with no finding gives pass and exit 0', () => {
+  test('one real composite verify runs passing nested checks and gives exit 0', () => {
     const root = validRepository();
-    const result = runArchVerifyCommand(root, { base: 'HEAD', json: true }, { policy });
+    indexPackageLocalCodeGraph(root, { policy });
+    const head = fixtureGit(root, ['rev-parse', 'HEAD']);
+    const calls: string[][] = [];
+    const result = runArchVerifyCommand(root, { base: 'HEAD', json: true }, { policy, run: realRunner(calls) });
     if (!result.ok) throw new Error(result.error);
-    const report = JSON.parse(result.document) as { verdict: string; checks: ArchVerifyCheckV1[] };
+    const report = JSON.parse(result.document);
+    expect(calls).toEqual([['verify', '--base', head, '--json']]);
     expect(result.exitCode).toBe(0);
-    expect(report.verdict).toBe('pass');
-    expect(report.checks.map((entry) => entry.id)).toEqual([...ARCH_VERIFY_CHECK_IDS]);
-    // No CodeGraph index exists here, so the two code-fact checks cannot pass.
-    expect(report.checks.filter((entry) => entry.status !== 'unavailable').every((entry) => entry.status === 'pass')).toBe(true);
-  }, 120_000);
+    expect(report).toMatchObject({ archctx_version: '0.17.0', verdict: 'pass', base: head, head });
+    expect(report.checks).toEqual(ARCH_VERIFY_CHECK_IDS.map(id => check(id, 'pass')));
+  });
+
+  test('composite verify validates checkout YAML with the ledger in authoritative mode', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'rh-verify-ledger-')));
+    roots.push(root);
+    fixtureGit(root, ['init', '-q']);
+    fixtureWrite(root, '.gitignore', 'state/\n.codegraph/\n');
+    const env = { ...process.env, ARCHCONTEXT_STATE_DIR: join(root, 'state'), ARCHCONTEXT_LEDGER_MODE: 'ledger-authoritative' };
+    const client = new ArchctxClient(root, ARCHCTX_REQUIRED_VERSION, { env });
+    const invoke = (...args: string[]) => client.data([...args, '--json'], 30_000);
+    invoke('init', '--name', 'Verify ledger authority');
+    fixtureCommit(root);
+    const path = '.archcontext/model/nodes/module.verify.ledger.yaml';
+    const id = 'changeset.verify-ledger-node';
+    try {
+      const plan = invoke('plan', '--id', id, '--op', 'create_entity', '--path', path, '--expected-hash', 'missing', '--body', fixtureYaml({
+        schemaVersion: 'archcontext.node/v2', id: 'module.verify.ledger', kind: 'module', name: 'Ledger node', status: 'active', summary: 'Retained in the ledger.',
+      })) as { draft: { base: { worktreeDigest: string } } };
+      expect(invoke('apply', '--id', id, '--approved', '--expected-worktree-digest', plan.draft.base.worktreeDigest)).toMatchObject({ status: 'applied' });
+      fixtureCommit(root);
+      // The ledger still holds the valid entity. The checkout contains a bad node with the same ID.
+      fixtureWrite(root, path, fixtureYaml({ schemaVersion: 'archcontext.node/v2', id: 'module.verify.ledger' }));
+      expect(invoke('validate')).toMatchObject({ valid: true, architectureLedger: { readAuthority: 'ledger' } });
+      const result = runArchVerifyCommand(root, { base: 'HEAD', json: true }, { policy, env });
+      if (!result.ok) throw new Error(result.error);
+      expect(JSON.parse(result.document).checks.find((entry: ArchVerifyCheckV1) => entry.id === 'validate'))
+        .toMatchObject({ status: 'findings', count: expect.any(Number) });
+    } finally {
+      invoke('daemon', 'stop');
+    }
+  }, 60_000);
 
   test('a base ref that resolves to no commit exits 2 with arch_verify_base_invalid', () => {
     const root = validRepository();
@@ -388,23 +429,17 @@ describe('rh arch verify in a repository', () => {
     expect(result.exitCode).toBe(0);
   }, 120_000);
 
-  test('a timeout of one check is an error for that check, so the verdict is error with exit 2', () => {
+  test('a composite timeout produces an error verdict and exit 2', () => {
     const root = validRepository();
-    const node = resolveCompatibleNodeRuntime(process.env);
-    // The flows check reports a timeout; every other command runs the real pinned archctx.
-    const run: RunArchctxProcess = (binary, args, options) => {
-      if (args[0] === 'flows') return { status: null, signal: null, timedOut: true, stdout: '', stderr: '' };
-      const result = spawnSync(node, [binary, ...args], { cwd: options.cwd, env: options.env, encoding: 'utf8', timeout: options.timeoutMs, maxBuffer: 64 * 1024 * 1024 });
-      return { status: result.status, signal: result.signal, stdout: result.stdout, stderr: result.stderr };
-    };
-    const base = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-    const result = archVerify(root, base, base, true, { run });
+    const base = fixtureGit(root, ['rev-parse', 'HEAD']);
+    const run: RunArchctxProcess = () => ({ status: null, signal: null, timedOut: true, stdout: '', stderr: '' });
+    const result = archVerify(root, base, base, true, { policy, run });
     if (!result.ok) throw new Error(result.error);
     const report = JSON.parse(result.document) as { verdict: string; checks: ArchVerifyCheckV1[] };
-    expect(report.checks.find((entry) => entry.id === 'flows')).toMatchObject({ status: 'error', count: 0, error: { code: 'RH_ARCHCTX_TIMEOUT' } });
-    expect(report.verdict).toBe('error');
     expect(result.exitCode).toBe(2);
-  }, 120_000);
+    expect(report.verdict).toBe('error');
+    expect(report.checks.every(entry => entry.status === 'error' && entry.error?.code === 'RH_ARCHCTX_TIMEOUT')).toBe(true);
+  });
 
   test('every producer envelope failing leaves nothing measured, so the verdict is error with exit 2', () => {
     // The `unavailable` codes keep their own status; the verdict still cannot claim a pass.

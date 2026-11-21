@@ -116,7 +116,7 @@ current scan measured a different snapshot.
 | `unavailable` | Read `code`, `action` and `message`. A missing model or provider means schedule nothing. A code with an `action` has a fix: do it first. |
 
 Record only a decision that the user made:
-`rh arch refactor decide <id> accept|defer|reject --reason "<text>"`.
+`rh arch refactor decide <id> accept|defer|reject --reason "<text>" --snapshot-digest <digest>`.
 A decided suggestion is not shown again in the same worktree path and branch
 (Ancienttwo/arch-context#321). `decide` works for a recorded id or a fresh
 candidate in one call. Pass `--import-node-limit` if the scan used one. A

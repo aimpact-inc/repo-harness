@@ -3,6 +3,7 @@ import {
   NATIVE_CONTEXT_PROFILE,
   NATIVE_CONTEXT_SCHEMA_VERSION,
   nativeContextSchemaResolver,
+  jsonSchemaResolver,
   type ArchContextError,
   type ArchitectureDocsProjectionManifestTargetV4,
   type NativeContextExportV1,
@@ -21,6 +22,9 @@ import {
   type ProjectionRequestV1,
   type ProjectionResultV3,
   type RefImpactV1,
+  type RefImpactBatchV1,
+  type RuntimeVerifyV1,
+  type ProjectionSliceV1,
 } from 'archctx-contracts';
 import projectionResultSchema from 'archctx-contracts/schemas/runtime/projection-result.schema.json';
 import projectionReadbackSchema from 'archctx-contracts/schemas/runtime/projection-apply-readback.schema.json';
@@ -29,6 +33,11 @@ import architectureDebtSchema from 'archctx-contracts/schemas/runtime/architectu
 import flowSelectorCheckSchema from 'archctx-contracts/schemas/runtime/flow-selector-check.schema.json';
 import dependencyConstraintEvaluationSchema from 'archctx-contracts/schemas/runtime/dependency-constraint-evaluation.schema.json';
 import refImpactSchema from 'archctx-contracts/schemas/runtime/ref-impact.schema.json';
+import refImpactBatchSchema from 'archctx-contracts/schemas/runtime/ref-impact-batch.schema.json';
+import runtimeVerifySchema from 'archctx-contracts/schemas/runtime/runtime-verify.schema.json';
+import projectionSliceSchema from 'archctx-contracts/schemas/runtime/projection-slice.schema.json';
+import stateMachineCheckSchema from 'archctx-contracts/schemas/runtime/state-machine-check.schema.json';
+import projectionPrVerificationSchema from 'archctx-contracts/schemas/runtime/projection-pr-verification.schema.json';
 import nativeContextExportSchema from 'archctx-contracts/schemas/runtime/native-context-export.schema.json';
 import nodeSchema from 'archctx-contracts/schemas/repo/architecture-node.schema.json';
 import relationSchema from 'archctx-contracts/schemas/repo/architecture-relation.schema.json';
@@ -37,6 +46,12 @@ import { dependencies } from '../../../package.json';
 import type { ArchitectureProjectionPolicy } from './contracts';
 
 export const ARCHCTX_REQUIRED_VERSION = dependencies.archctx;
+
+// Resolve published references offline, including in the bundled CLI.
+const resolveSchema = jsonSchemaResolver([
+  architectureDebtSchema, dependencyConstraintEvaluationSchema, docsAnchorsSchema,
+  flowSelectorCheckSchema, projectionPrVerificationSchema, refImpactSchema, stateMachineCheckSchema,
+] as Parameters<typeof jsonSchemaResolver>[0]);
 
 /**
  * A delivery view of archctx's per-target output decisions. `changes[]` has one entry per targetId;
@@ -285,9 +300,21 @@ export function decodeDocsAnchorsReport(value: unknown): DocsAnchorsReportV1 {
  * schema and invariants. The digest binds the whole report, so any change fails.
  */
 export function decodeArchitectureDebtReport(value: unknown): ArchitectureDebtReportV1 {
-  const report = decode(architectureDebtSchema, value, 'architecture debt report') as unknown as ArchitectureDebtReportV1;
+  const report = decode<ArchitectureDebtReportV1>(architectureDebtSchema, value, 'architecture debt report');
   const issues = architectureDebtReportIssues(report);
   if (issues.length > 0) throw new Error(`architecture debt report invalid: ${issues.join('; ')}`);
+  return report;
+}
+
+export function decodeRuntimeVerify(value: unknown, base: string, head: string): RuntimeVerifyV1 {
+  const report = decode<RuntimeVerifyV1>(runtimeVerifySchema, value, 'runtime verify report');
+  if (report.base !== base || report.baseSha !== base || report.headSha !== head) throw new Error('runtime verify report snapshot mismatch');
+  return report;
+}
+
+export function decodeProjectionSlice(value: unknown, base: string, head: string): ProjectionSliceV1 {
+  const report = decode<ProjectionSliceV1>(projectionSliceSchema, value, 'projection slice');
+  if (report.base !== base || report.baseSha !== base || report.headSha !== head) throw new Error('projection slice snapshot mismatch');
   return report;
 }
 
@@ -301,19 +328,36 @@ export function decodeConstraintEvaluation(value: unknown): DependencyConstraint
   return decode(dependencyConstraintEvaluationSchema, value, 'constraints check report') as unknown as DependencyConstraintEvaluationV1;
 }
 
-/** `refs`: `archctx impact --base --head`; `paths`: `--paths-from`, which reads the worktree model at `head`. */
+/** `refs` reads commits. `paths` reads the worktree model at `head`. */
 export type RefImpactSource =
   | { readonly kind: 'refs'; readonly base: string; readonly head: string }
   | { readonly kind: 'paths'; readonly head: string };
 
 /** ArchContext owns the `impact` report contract; this applies its published schema and binds the snapshots to the request. */
 export function decodeRefImpact(value: unknown, source: RefImpactSource): RefImpactV1 {
-  const report = decode(refImpactSchema, value, 'impact report') as unknown as RefImpactV1;
+  const report = decode<RefImpactV1>(refImpactSchema, value, 'impact report');
+  bindRefImpact(report, source);
+  return report;
+}
+
+function bindRefImpact(report: RefImpactV1, source: RefImpactSource): void {
   const bound = source.kind === 'refs'
     ? report.base?.source === 'ref' && report.base.commitSha === source.base && report.head.source === 'ref' && report.head.commitSha === source.head
     : report.base === null && report.head.source === 'worktree' && report.head.headSha === source.head;
   if (!bound) throw new Error('impact report snapshot mismatch');
-  return report;
+}
+
+export function decodeRefImpactBatch(value: unknown, ids: readonly string[], head: string): ReadonlyMap<string, RefImpactBatchV1['items'][number]> {
+  const report = decode<RefImpactBatchV1>(refImpactBatchSchema, value, 'impact batch');
+  const remaining = new Set(ids);
+  const items = new Map<string, RefImpactBatchV1['items'][number]>();
+  for (const item of report.items) {
+    if (!remaining.delete(item.id)) throw new Error('impact batch returned an unexpected or duplicate ID');
+    if ('impact' in item) bindRefImpact(item.impact, { kind: 'paths', head });
+    items.set(item.id, item);
+  }
+  if (remaining.size > 0) throw new Error('impact batch omitted a requested ID');
+  return items;
 }
 
 export const ARCHITECTURE_DEBT_COMMAND = 'rh arch debt --json';
@@ -327,10 +371,11 @@ export function managedArchctxAction(raw: string): string {
   return MANAGED_ARCHCTX_ACTIONS.get(action) ?? (/^archctx(\s|$)/.test(action) ? ARCHITECTURE_DEBT_COMMAND : action);
 }
 
-function decode(schema: unknown, value: unknown, label: string): JsonRecord {
-  const validation = validateJsonSchema(schema as Parameters<typeof validateJsonSchema>[0], value as Json);
+function decode<T = JsonRecord>(schema: unknown, value: unknown, label: string): T {
+  const validation = validateJsonSchema(schema as Parameters<typeof validateJsonSchema>[0], value as Json, { resolveSchema });
   if (!validation.valid) throw new Error(`${label} invalid: ${validation.issues.slice(0, 5).map((issue) => `${issue.path} ${issue.message}`).join('; ')}`);
-  return value as JsonRecord;
+  // SAFETY: The published schema above validates the report type selected by the caller.
+  return value as T;
 }
 
 function record(value: unknown, label: string): JsonRecord {
@@ -358,6 +403,7 @@ export const ARCHCTX_COMMAND_DISPOSITIONS: Readonly<Record<string, ArchctxComman
   ...Object.fromEntries(passCommands.map(name => [name, { disposition: 'pass' } as ArchctxCommandDisposition])),
   projection: owned('rh arch projection'),
   debt: owned('rh arch debt'),
+  verify: owned('rh arch verify'),
   refactor: owned('rh arch refactor'),
   recommendations: owned('rh arch refactor'),
   install: refused('rh install'),
@@ -383,6 +429,7 @@ const ARCHCTX_PROJECTION_SUBCOMMAND_DISPOSITIONS: Readonly<Record<string, Archct
   freshness: { disposition: 'pass' },
   'publish-status': { disposition: 'pass' },
   'verify-pr': { disposition: 'pass' },
+  slice: { disposition: 'pass' },
   run: owned('rh arch projection check|plan|apply'),
   recover: owned('rh arch projection check|plan|apply'),
   readback: owned('rh arch projection check|plan|apply'),

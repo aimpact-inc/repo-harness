@@ -2,13 +2,16 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { analyzeAffectedTests, bundleInputPaths, discoverDailyInputs, discoverPlatformInputs, nativeTriggers, platformImportClosure, selectAffectedTests, selectCoverage, selectPlatformCoverage } from '../scripts/select-ci-coverage';
 import { auditDroppedTests } from '../scripts/ci-edge-audit';
 import { replayNeedsSource } from '../scripts/replay-ci-coverage';
 import { changelogPreamble, checkReleasedSections, fragmentMessage, releasedSections, sectionDrift, unreleasedHeading, withoutUnreleasedSection } from '../scripts/check-changelog-released-sections';
 import { assemble, FRAGMENT_PATH_FORM, fragmentPaths, isFragmentPath, KEPT_FILE, parseFragment, renderSection } from '../scripts/changelog-fragments';
 import { ARCHITECTURE_JOB, ARCHITECTURE_SUMMARY_PATH } from '../scripts/report-ci';
+import { ARCHCTX_REQUIRED_VERSION } from '../src/core/architecture/projection';
+import { ArchctxClient, indexPackageLocalCodeGraph } from '../src/effects/architecture/archctx-provider';
+import { fixtureCommit, fixtureWrite, fixtureYaml, moduleRepository } from './helpers/module-repository';
 
 const ROOT = resolve(import.meta.dir, '..');
 const workflow = Bun.YAML.parse(readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8')) as any;
@@ -1180,6 +1183,73 @@ describe('architecture lanes', () => {
       '::warning title=Architecture generated output hand edited::docs/architecture/a.md: projection-generated-region-manually-edited. Keep model and human prose changes in this PR; the archctx rolling writer owns generated output.',
     ]);
   });
+
+  test('the plugin constraint allows the public contract and blocks unlisted internal imports', () => {
+    const root = moduleRepository({ flow: false });
+    const env = { ...process.env, ARCHCONTEXT_STATE_DIR: join(root, '.fixture-state') };
+    const policy = { provider: 'archctx', applyMode: 'manual', requiredVersion: ARCHCTX_REQUIRED_VERSION, timeoutMs: 30_000 } as const;
+    const client = new ArchctxClient(root, ARCHCTX_REQUIRED_VERSION, { env });
+    const constraintPath = '.archcontext/model/constraints/constraint.surface.plugin-internals.yaml';
+    const constraintBody = readFileSync(join(ROOT, constraintPath), 'utf8');
+    const node = (id: string, parent?: string, include?: string[]) => {
+      fixtureWrite(root, `.archcontext/model/nodes/${id}.yaml`, fixtureYaml({
+        schemaVersion: 'archcontext.node/v2', id, kind: parent ? 'component' : 'capability', parent,
+        name: id, status: 'active', summary: id, ...(include ? { source: { include } } : {}),
+      }));
+    };
+    const cap = 'capability.runtime-harness.';
+    const publicPath = 'src/core/architecture/projection.ts';
+    const deniedImports = [
+      ['src/effects/terminal/task-session.ts', '../terminal/task-session'],
+      ['src/effects/refactor/recommendations.ts', '../refactor/recommendations'],
+      ['src/effects/architecture/new-internal.ts', '../architecture/new-internal'],
+    ] as const;
+    const importFrom = (path: string) => `import { value } from "${path}";\nexport const answer = value;\n`;
+    try {
+      fixtureWrite(root, '.gitignore', '.codegraph/\n.fixture-state/\n');
+      fixtureWrite(root, constraintPath, constraintBody);
+      node(cap + 'operator', undefined, ['src/effects/operator/**']);
+      node(cap + 'mcp-sidecar');
+      node('capability.organization.task-fleet');
+      node('capability.runtime-mcp.general-repo-access');
+      node(cap + 'architecture');
+      node('capability.verification.codegraph-readiness');
+      node(cap + 'task-agent-host', undefined, [deniedImports[0][0]]);
+      node(cap + 'refactor-program', undefined, [deniedImports[1][0]]);
+      for (const name of ['architecture-read', 'module-view', 'model-reader']) node('component.architecture.' + name, cap + 'architecture');
+      node('component.architecture.archctx-closure-core', cap + 'architecture', [publicPath]);
+      node('component.codegraph-readiness.mcp-adapter', 'capability.verification.codegraph-readiness');
+      fixtureWrite(root, publicPath, 'export const value = 1;\n');
+      fixtureWrite(root, 'src/effects/operator/architecture.ts', importFrom('../../core/architecture/projection'));
+      const base = fixtureCommit(root);
+      indexPackageLocalCodeGraph(root, { env, policy });
+      const advisory = () => runLane(['architecture-advisory', '--base', base], {
+        constraints: JSON.stringify(client.json(['constraints', 'check', '--json'], policy.timeoutMs)),
+        debt: debt([]), check: noop, checkExit: 0,
+      });
+      const pass = advisory();
+      expect(pass.status, pass.stdout + pass.stderr).toBe(0);
+      expect(pass.stdout).toContain(`[ci] ${PLUGIN_INTERNALS}: 0 violations, coverage complete.`);
+
+      node('component.architecture.new-internal', cap + 'architecture', [deniedImports[2][0]]);
+      for (const [path, specifier] of deniedImports) {
+        fixtureWrite(root, path, 'export const value = 1;\n');
+        fixtureWrite(root, `src/effects/operator/${path.split('/').at(-1)}`, importFrom(specifier));
+      }
+      fixtureCommit(root);
+      execFileSync(join(ROOT, 'node_modules/.bin/codegraph'), ['sync', '-q', '.'], { cwd: root, env });
+      const gated = advisory();
+      expect(gated.status, gated.stdout + gated.stderr).toBe(1);
+      expect(errors(gated.stdout)).toHaveLength(3);
+      for (const [path] of deniedImports) {
+        expect(errors(gated.stdout).some(annotation => annotation.includes(` imports ${path} (`))).toBe(true);
+      }
+      expect(readFileSync(join(root, constraintPath), 'utf8')).toBe(constraintBody);
+    } finally {
+      try { client.json(['daemon', 'stop', '--json'], policy.timeoutMs, true); }
+      finally { rmSync(root, { recursive: true, force: true }); }
+    }
+  }, 60_000);
 
   test('a stale-anchor action names the repo-harness anchors command, never a bare archctx from PATH', () => {
     const staleAnchor = { ...debtItem(1), kind: 'stale-anchor', reasonCode: 'missing-path', action: 'archctx docs anchors --json' };

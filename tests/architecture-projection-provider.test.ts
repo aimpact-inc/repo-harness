@@ -1175,7 +1175,7 @@ describe('package-local ArchContext projection provider', () => {
 
   test('exposes projection commands without a separate acceptance authority', () => {
     const command = buildArchitectureProjectionCommand();
-    expect(command.commands.map((entry) => entry.name())).toEqual(['policy', 'status', 'check', 'plan', 'apply', 'adopt', 'anchors', 'render-check', 'hand-edits', 'publish']);
+    expect(command.commands.map((entry) => entry.name())).toEqual(['policy', 'status', 'check', 'plan', 'apply', 'adopt', 'slice', 'anchors', 'render-check', 'hand-edits', 'publish']);
     for (const name of ['check', 'plan', 'apply', 'adopt', 'publish']) {
       const subcommand = command.commands.find((candidate) => candidate.name() === name);
       expect(subcommand!.options.map((option) => option.long)).not.toContain('--accepted-change-set-id');

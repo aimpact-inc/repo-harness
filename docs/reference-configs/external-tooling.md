@@ -1452,7 +1452,7 @@ Read evidence and record a decision with:
 
 ```bash
 rh arch refactor recommendations [--json] [--import-node-limit <n>] [--timeout-ms <ms>]
-rh arch refactor decide <recommendation-id> accept|defer|reject --reason "<text>" [--import-node-limit <n>] [--timeout-ms <ms>]
+rh arch refactor decide <recommendation-id> accept|defer|reject --reason "<text>" --snapshot-digest <digest> [--import-node-limit <n>] [--timeout-ms <ms>]
 ```
 
 `recommendations` shows each open suggestion with its explanation, the metrics

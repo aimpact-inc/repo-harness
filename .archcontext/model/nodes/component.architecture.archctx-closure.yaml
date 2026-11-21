@@ -1,5 +1,5 @@
 schemaVersion: archcontext.node/v2
-id: component.global-runtime-reconciliation.archctx-closure
+id: component.architecture.archctx-closure
 kind: component
 name: ArchContext Closure
 status: active

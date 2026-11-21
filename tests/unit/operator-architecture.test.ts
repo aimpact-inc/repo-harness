@@ -1,10 +1,11 @@
 import { describe, expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { knownFailure } from 'archctx-contracts';
 import { ArchitectureModelReader } from '../../src/effects/architecture/model-reader';
 import { decodeArchitectureModuleIndex, decodeArchitectureModuleDetail, decodeArchitectureReviewPrompt } from '../../src/core/operator/architecture';
 import { isArchitectureRequest, parseArchitectureRequest } from '../../src/core/operator/architecture';
 import { MODULE_ID, MODULE_NODE, MODULE_FLOW, moduleRepository, fixtureWrite, fixtureCommit, fixtureGit, fixtureYaml, writeStateMachine } from '../helpers/module-repository';
-import { readArchitectureView, readArchVerification } from '../../src/effects/architecture/architecture-read';
+import { readArchitectureImpactBatch, readArchitectureView, readArchVerification } from '../../src/effects/architecture/architecture-read';
 import { archVerifyCheck } from '../../src/core/architecture/arch-verify';
 import { readFileSync, realpathSync, rmSync } from 'node:fs';
 import {
@@ -29,6 +30,8 @@ import type { TestsSnapshotV1 } from '../../src/core/operator/tests';
 import { anchorsSection, collectArchitectureMap, debtSection, flowProofSection, layerDirectionSection, localMidnight, readCommitLineCounts, recheckCheckout, recheckLayers } from '../../src/effects/operator/architecture-map-worker';
 import { ARCHCTX_REQUIRED_VERSION, decodeArchitectureDebtReport, decodeConstraintEvaluation, decodeDocsAnchorsReport, decodeFlowSelectorCheck } from '../../src/core/architecture/projection';
 import { join } from 'node:path';
+import { resolveCompatibleNodeRuntime } from '../../src/effects/architecture/archctx-provider';
+import type { RunArchctxProcess } from '../../src/core/architecture/contracts';
 
 const reader = new ArchitectureModelReader(import.meta.dir + '/../..');
 const id = reader.list().modules[0].id;
@@ -521,24 +524,19 @@ describe('architecture map', () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  test('the arch verify reads reuse the operator envelope read: an archctx code survives, so no check turns it into a pass', () => {
+  test('composite verify keeps an unavailable flow error and reports the other checks', () => {
     const root = realpathSync(moduleRepository());
     try {
       const policy = { provider: 'archctx', applyMode: 'manual', requiredVersion: ARCHCTX_REQUIRED_VERSION, timeoutMs: 120_000 } as const;
-      // The fixture has no CodeGraph index, so `flows check` answers with its own error envelope.
-      const flows = readArchVerification(root, ['flows', 'check', '--no-sync', '--json'], { policy });
-      const { code, message } = knownFailure('AC_CODE_FACTS_UNAVAILABLE', 'index-missing');
-      expect(flows).toEqual({ ok: false, error: { code, message } });
-      expect(archVerifyCheck('flows', flows)).toMatchObject({ status: 'unavailable', count: 0 });
-      // The fixture has no product intent, so the model itself is invalid: a measured finding, not an error.
-      expect(archVerifyCheck('validate', readArchVerification(root, ['validate', '--format', 'json'], { policy })))
-        .toMatchObject({ status: 'findings', count: 1 });
-      // A partial debt read still reports its measured items through the same envelope.
-      expect(archVerifyCheck('debt', readArchVerification(root, ['debt', '--json'], { policy }))).toMatchObject({ status: 'pass', count: 0 });
-      // The verified base is a commit, so `verify-pr` answers the empty range the operator map also accepts.
       const head = fixtureGit(root, ['rev-parse', 'HEAD']);
-      expect(archVerifyCheck('projection', readArchVerification(root, ['projection', 'verify-pr', '--base', head, '--json'], { policy })))
-        .toMatchObject({ status: 'pass', count: 0 });
+      const verify = readArchVerification(root, head, head, { policy });
+      if (!verify.ok) throw new Error(verify.error.message);
+      const { code, message } = knownFailure('AC_CODE_FACTS_UNAVAILABLE', 'index-missing');
+      expect(verify.checks.flows).toMatchObject({ ok: false, error: { code, message } });
+      expect(archVerifyCheck('flows', verify.checks.flows)).toMatchObject({ status: 'unavailable', count: 0 });
+      expect(archVerifyCheck('validate', verify.checks.validate)).toMatchObject({ status: 'findings', count: 1 });
+      expect(archVerifyCheck('debt', verify.checks.debt)).toMatchObject({ status: 'pass', count: 0 });
+      expect(archVerifyCheck('projection', verify.checks.projection)).toMatchObject({ status: 'pass', count: 0 });
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -967,10 +965,13 @@ describe('architecture map', () => {
       });
       const head = 'a'.repeat(40);
       const source: ArchitecturePullRequestsSource = { state: 'ok', observed_at: '2026-10-27T12:59:00.000Z', pull_requests: [
-        { number: 5, title: 'Read more', url: 'https://github.com/acme/module/pull/5', head_sha: head, changed_files: { state: 'ok', paths: ['docs/notes.md', 'src/module/read.ts'] } }] };
+        { number: 5, title: 'Read more', url: 'https://github.com/acme/module/pull/5', head_sha: head, changed_files: { state: 'ok', paths: ['docs/notes.md', 'src/module/read.ts'] } },
+        { number: 6, title: 'Project facts', url: 'https://github.com/acme/module/pull/6', head_sha: 'b'.repeat(40), changed_files: { state: 'ok', paths: ['src/module/core.ts'] } },
+        { number: 7, title: 'Invalid path', url: 'https://github.com/acme/module/pull/7', head_sha: 'c'.repeat(40), changed_files: { state: 'ok', paths: ['src\\invalid.ts'] } },
+      ] };
       const result = collectArchitectureMap('repo_0123456789abcdef', root, '2026-10-27T13:00:00.000Z', '2026-10-27T00:00:00.000Z', source);
       if (!result.ok) throw new Error('worker failed');
-      // `--paths-from` has no line counts; the owners come from the map commit's model.
+      // The batch has no line counts. The owners come from the map commit's model.
       expect(result.snapshot.layers.pull_requests).toEqual({ state: 'ok', observed_at: '2026-10-27T12:59:00.000Z', pull_requests: [
         { number: 5, title: 'Read more', url: 'https://github.com/acme/module/pull/5', head_sha: head, impact: {
           state: 'ok',
@@ -978,7 +979,14 @@ describe('architecture map', () => {
             { path: 'src/module/read.ts', added: null, deleted: null, owners: [MODULE_ID], reason_codes: ['paths-only'] }],
           unowned_paths: ['docs/notes.md'], nodes: [{ id: MODULE_ID, files: 1 }], dependents: [], dependency_coverage: 'complete',
           flow_steps: { status: 'unknown', reason_codes: ['line-impact-unavailable', 'ref-code-facts-unavailable'], items: null }, truncated: whole,
-        } }] });
+        } },
+        { number: 6, title: 'Project facts', url: 'https://github.com/acme/module/pull/6', head_sha: 'b'.repeat(40), impact: {
+          state: 'ok', paths: [{ path: 'src/module/core.ts', added: null, deleted: null, owners: [MODULE_ID], reason_codes: ['paths-only'] }],
+          unowned_paths: [], nodes: [{ id: MODULE_ID, files: 1 }], dependents: [], dependency_coverage: 'complete',
+          flow_steps: { status: 'unknown', reason_codes: ['line-impact-unavailable', 'ref-code-facts-unavailable'], items: null }, truncated: whole,
+        } },
+        { number: 7, title: 'Invalid path', url: 'https://github.com/acme/module/pull/7', head_sha: 'c'.repeat(40), impact: { state: 'unavailable', reason: 'files_invalid' } },
+      ] });
       // The model file is not in any node's footprint; the fixture has no CodeGraph index, so flow steps stay unknown.
       expect(result.snapshot.layers.changes).toEqual({
         state: 'ok', since: '2026-10-27T00:00:00.000Z', base, commits: [{ sha: today, subject: 'Fixture', nodes: [MODULE_ID] }],
@@ -1004,6 +1012,49 @@ describe('architecture map', () => {
       // A window that holds the whole history has no base commit.
       const all = collectArchitectureMap('repo_0123456789abcdef', root, '2026-10-27T13:00:00.000Z', '2026-10-19T00:00:00.000Z', pending);
       expect(all.ok && all.snapshot.layers.changes).toEqual({ state: 'unavailable', reason: 'history_starts_today' });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test('the real batch decodes successes and typed overflow and refuses unbound results', () => {
+    const root = realpathSync(moduleRepository());
+    try {
+      const commit = fixtureGit(root, ['rev-parse', 'HEAD']);
+      const large = (prefix: string) => Array.from({ length: 1000 }, (_, index) => `${prefix}/${'界'.repeat(950)}/${index}.txt`);
+      const items = [
+        { id: 'pr-11', paths: large('first') },
+        { id: 'pr-12', paths: large('second') },
+        { id: 'pr-13', paths: ['src/module/read.ts'] },
+      ];
+      const calls: string[][] = [];
+      let wire = '';
+      const run: RunArchctxProcess = (binary, args, options) => {
+        calls.push([...args]);
+        const result = spawnSync(resolveCompatibleNodeRuntime(options.env), [binary, ...args], {
+          cwd: options.cwd, env: options.env, timeout: options.timeoutMs, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024,
+        });
+        wire = result.stdout;
+        return { status: result.status, signal: result.signal, stdout: result.stdout, stderr: result.stderr };
+      };
+      const batch = readArchitectureImpactBatch(root, items, commit, { run });
+      expect(calls).toEqual([['impact', '--batch-file', expect.any(String), '--json']]);
+      expect(batch.get('pr-11')).toMatchObject({ impact: { head: { source: 'worktree', headSha: commit } } });
+      expect(batch.get('pr-12')).toEqual({ id: 'pr-12', status: 'unavailable', reasonCode: 'batch-response-bytes' });
+      expect(batch.get('pr-13')).toMatchObject({ impact: { changedPaths: [{ path: 'src/module/read.ts' }] } });
+
+      for (const [alter, message] of [
+        [(rows: Array<{ id: string }>) => { rows[0]!.id = 'pr-99'; }, 'unexpected or duplicate ID'],
+        [(rows: Array<{ id: string }>) => { rows[1]!.id = 'pr-11'; }, 'unexpected or duplicate ID'],
+        [(rows: Array<{ id: string }>) => { rows.pop(); }, 'omitted a requested ID'],
+      ] as const) {
+        const envelope = JSON.parse(wire);
+        alter(envelope.data.items);
+        expect(() => readArchitectureImpactBatch(root, items, commit, {
+          run: () => ({ status: 0, signal: null, stdout: JSON.stringify(envelope), stderr: '' }),
+        })).toThrow(message);
+      }
+      expect(() => readArchitectureImpactBatch(root, items, '0'.repeat(40), {
+        run: () => ({ status: 0, signal: null, stdout: wire, stderr: '' }),
+      })).toThrow('snapshot mismatch');
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 

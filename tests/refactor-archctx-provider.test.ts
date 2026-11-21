@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { decideRecommendation, listOpenRecommendations, runRefactorScan } from "../src/effects/refactor/archctx-provider";
+import { decideRecommendation, runRefactorScan } from "../src/effects/refactor/archctx-provider";
 import { RefactorProviderError } from "../src/core/refactor/provider-contract";
 import { ARCHCTX_REQUIRED_VERSION } from "../src/core/architecture/projection";
 
@@ -16,6 +16,7 @@ function repo(): string { const root = mkdtempSync(join(tmpdir(), "refactor-prov
 const shipped = (name: string) => JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.resolve("archctx-contracts"))), "../fixtures/valid", name), "utf8"));
 const shippedScan = () => shipped("runtime-refactor-scan.json");
 const shippedRecord = () => shipped("recommendation-v3.json");
+const scanDigest = shippedScan().snapshotDigest;
 
 const envelope = (requestId: string, data: Record<string, unknown>) => ({ schemaVersion: "archcontext.envelope/v1", ok: true, requestId, data });
 const lifecycle = (decision: string, status: string) => envelope(`recommendations.${decision}`, {
@@ -30,18 +31,14 @@ function runner(calls: string[][], respond: (args: readonly string[]) => unknown
 }
 
 describe("refactor archctx provider", () => {
-  test("scans and lists the open records without a capabilities handshake", () => {
+  test("gets proposed and open recommendations and the decision digest from one scan", () => {
     const root = repo(); const calls: string[][] = [];
-    const run = runner(calls, (args) => args[0] === "refactor"
-      ? envelope("refactor.scan", shippedScan())
-      : envelope("recommendations.list", { schemaVersion: "archcontext.runtime-recommendation-list/v1", status: "open", count: 1, recommendations: [shippedRecord()] }));
-    expect(runRefactorScan(root, { consumerRoot: process.cwd(), run }).proposedRecommendations).toHaveLength(2);
-    expect(listOpenRecommendations(root, { consumerRoot: process.cwd(), run }).map((entry) => entry.recommendationId)).toEqual([shippedRecord().recommendationId]);
-    expect(calls.map((args) => args.slice(0, 4))).toEqual([
-      ["refactor", "scan", "--request-json", expect.any(String)],
-      ["recommendations", "list", "--status", "open"],
-    ]);
-    expect(calls[1]).toEqual(["recommendations", "list", "--status", "open", "--json"]);
+    const run = runner(calls, () => envelope("refactor.scan", { ...shippedScan(), openRecommendations: [shippedRecord()] }));
+    const scan = runRefactorScan(root, { consumerRoot: process.cwd(), run });
+    expect(scan.proposedRecommendations).toHaveLength(2);
+    expect(scan.openRecommendations.map((entry) => entry.recommendationId)).toEqual([shippedRecord().recommendationId]);
+    expect(scan.snapshotDigest).toBe(scanDigest);
+    expect(calls).toEqual([["refactor", "scan", "--request-json", expect.any(String), "--json"]]);
   });
 
   test("passes the import node limit to the scan only when one is set", () => {
@@ -69,7 +66,7 @@ describe("refactor archctx provider", () => {
       expect(message).not.toContain("request id");
     }
     try {
-      decideRecommendation("rec.x", "accept", "reason", repo(), { consumerRoot: process.cwd(), run: timedOut }, undefined, 5000);
+      decideRecommendation("rec.x", "accept", "reason", scanDigest, repo(), { consumerRoot: process.cwd(), run: timedOut }, undefined, 5000);
       throw new Error("expected failure");
     } catch (error) {
       expect(error).toMatchObject({ code: "refactor_provider_timeout", action: "raise-timeout-and-retry" });
@@ -85,7 +82,7 @@ describe("refactor archctx provider", () => {
     };
     runRefactorScan(repo(), { consumerRoot: process.cwd(), run });
     runRefactorScan(repo(), { consumerRoot: process.cwd(), run }, undefined, 300_000);
-    decideRecommendation("rec.x", "reject", "no", repo(), { consumerRoot: process.cwd(), run }, undefined, 45_000);
+    decideRecommendation("rec.x", "reject", "no", scanDigest, repo(), { consumerRoot: process.cwd(), run }, undefined, 45_000);
     expect(seen).toEqual([120_000, 300_000, 45_000]);
   });
 
@@ -100,7 +97,7 @@ describe("refactor archctx provider", () => {
     expect(calls).toEqual([]);
     const failing = runner([], () => errorEnvelope("recommendations.accept", "AC_REFACTOR_STALE", "recommendation not found: rec.x"));
     try {
-      decideRecommendation("rec.x", "accept", "user agreed", repo(), { consumerRoot: process.cwd(), run: failing });
+      decideRecommendation("rec.x", "accept", "user agreed", scanDigest, repo(), { consumerRoot: process.cwd(), run: failing });
       throw new Error("expected failure");
     } catch (error) {
       expect(error).toBeInstanceOf(RefactorProviderError);
@@ -113,15 +110,15 @@ describe("refactor archctx provider", () => {
     // The book lists at most 12 records and would answer "truncated" for an id beyond that budget; the decision never asks it.
     const run = runner(calls, () => lifecycle("reject", "rejected"));
     const outsideBookBudget = shippedRecord().recommendationId;
-    expect(decideRecommendation(outsideBookBudget, "reject", "not worth it", root, { consumerRoot: process.cwd(), run }).status).toBe("rejected");
-    expect(calls).toEqual([["recommendations", "reject", "--id", outsideBookBudget, "--reason", "not worth it", "--json"]]);
+    expect(decideRecommendation(outsideBookBudget, "reject", "not worth it", scanDigest, root, { consumerRoot: process.cwd(), run }).status).toBe("rejected");
+    expect(calls).toEqual([["recommendations", "reject", "--id", outsideBookBudget, "--reason", "not worth it", "--snapshot-digest", scanDigest, "--json"]]);
   });
 
   test("sends the scan import node limit with the user decision", () => {
     const root = repo(); const calls: string[][] = [];
     const run = runner(calls, () => lifecycle("defer", "deferred"));
-    expect(decideRecommendation("rec.1", "defer", "after the release", root, { consumerRoot: process.cwd(), run }, 100).status).toBe("deferred");
-    expect(calls).toEqual([["recommendations", "defer", "--id", "rec.1", "--reason", "after the release", "--import-node-limit", "100", "--json"]]);
+    expect(decideRecommendation("rec.1", "defer", "after the release", scanDigest, root, { consumerRoot: process.cwd(), run }, 100).status).toBe("deferred");
+    expect(calls).toEqual([["recommendations", "defer", "--id", "rec.1", "--reason", "after the release", "--snapshot-digest", scanDigest, "--import-node-limit", "100", "--json"]]);
   });
 
   test("forwards node and paths scopes to refactor scan", () => {

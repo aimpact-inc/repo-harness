@@ -21,7 +21,7 @@ function invoke(repoRoot: string, args: readonly string[], options: ArchctxProvi
     if (error instanceof ArchctxClientError) {
       if (error.code === "RH_ARCHCTX_TIMEOUT") {
         // A decision call can finish inside archctx after repo-harness stops waiting.
-        const isDecision = args[0] === "recommendations" && args[1] !== "list";
+        const isDecision = args[0] === "recommendations";
         const outcome = isDecision ? " Decision outcome unknown: archctx may already have recorded the decision. Run `rh arch refactor recommendations` to check before retrying." : "";
         throw new RefactorProviderError("refactor_provider_timeout", `${commandLabel(args)} timed out after ${timeoutMs} ms.${outcome} Retry with --timeout-ms <larger value> (max ${REFACTOR_MAX_TIMEOUT_MS}).`, "raise-timeout-and-retry", error.reasonCode);
       }
@@ -40,19 +40,17 @@ export function runRefactorScan(
 ): RefactorScanResultV1 {
   const request = { schemaVersion: "archcontext.refactor-request/v1", scope };
   const value = invoke(repoRoot, ["refactor", "scan", "--request-json", canonicalize(request as never), ...importNodeLimitArgs(importNodeLimit), "--json"], options, timeoutMs);
-  return refactorEnvelopeData(value, "refactor.scan", "archcontext.runtime-refactor-scan/v1") as unknown as RefactorScanResultV1;
+  const data = refactorEnvelopeData(value, "refactor.scan", "archcontext.runtime-refactor-scan/v1");
+  if (typeof data.snapshotDigest !== "string" || !/^sha256:[a-f0-9]{64}$/.test(data.snapshotDigest) || !Array.isArray(data.openRecommendations)) {
+    throw new RefactorProviderError("refactor_provider_result_invalid", "refactor.scan returned no decision snapshot digest or open recommendations array");
+  }
+  // SAFETY: The scan envelope identifies the pinned provider's result, including the decision fields checked above.
+  return data as unknown as RefactorScanResultV1;
 }
 
-/** Recorded suggestions the user has not decided yet. A scan no longer proposes these, because archctx suppresses a candidate whose fingerprint is already recorded. */
-export function listOpenRecommendations(repoRoot: string, options: ArchctxProviderOptions = {}, timeoutMs = REFACTOR_DEFAULT_TIMEOUT_MS): readonly RecommendationV3[] {
-  const data = refactorEnvelopeData(invoke(repoRoot, ["recommendations", "list", "--status", "open", "--json"], options, timeoutMs), "recommendations.list", "archcontext.runtime-recommendation-list/v1");
-  if (!Array.isArray(data.recommendations)) throw new RefactorProviderError("refactor_provider_result_invalid", "recommendations.list returned no recommendations array");
-  return data.recommendations as RecommendationV3[];
-}
-
-/** One call decides a recorded suggestion or a fresh scan candidate. archctx requires the scan's import node limit here. */
-export function decideRecommendation(recommendationId: string, decision: RefactorDecision, reason: string, repoRoot: string, options: ArchctxProviderOptions = {}, importNodeLimit?: number, timeoutMs = REFACTOR_DEFAULT_TIMEOUT_MS): RecommendationV3 {
-  const data = refactorEnvelopeData(invoke(repoRoot, ["recommendations", decision, "--id", recommendationId, "--reason", reason, ...importNodeLimitArgs(importNodeLimit), "--json"], options, timeoutMs),
+/** Decide against the exact scan that returned the suggestion. */
+export function decideRecommendation(recommendationId: string, decision: RefactorDecision, reason: string, snapshotDigest: string, repoRoot: string, options: ArchctxProviderOptions = {}, importNodeLimit?: number, timeoutMs = REFACTOR_DEFAULT_TIMEOUT_MS): RecommendationV3 {
+  const data = refactorEnvelopeData(invoke(repoRoot, ["recommendations", decision, "--id", recommendationId, "--reason", reason, "--snapshot-digest", snapshotDigest, ...importNodeLimitArgs(importNodeLimit), "--json"], options, timeoutMs),
     `recommendations.${decision}`, "archcontext.runtime-recommendation-lifecycle/v1");
   return data.recommendation as RecommendationV3;
 }
