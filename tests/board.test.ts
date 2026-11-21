@@ -2810,7 +2810,17 @@ if (args[0] === 'repo' && args[1] === 'view') out('repo.json');
 else if (args[0] === 'pr' && args[1] === 'list') out('prs.json');
 else if (args[0] === 'issue' && args[1] === 'list') out('issues.json');
 else if (args.includes('repos/{owner}/{repo}')) console.log('{"id":${REPOSITORY_ID}}');
-else if (args.some(arg => arg.includes('/actions/runs?branch=feat%2F1479-notify-relay&event=pull_request'))) out('runs.json');
+else if (args.includes('repos/Ancienttwo/repo-harness/pulls/1494')) out('pr1494.json');
+else if (args.some(arg => arg.includes('/actions/runs?branch=feat%2F1479-notify-relay&event=pull_request'))) {
+  const url = new URL(args.at(-1), 'https://api.github.com/');
+  const range = url.searchParams.get('created');
+  const runs = JSON.parse(readFileSync(dir + '/runs.json', 'utf8')).filter(run => {
+    if (range === null) return true;
+    const [from, to] = range.split('..');
+    return run.created_at >= from && run.created_at <= to;
+  });
+  console.log(JSON.stringify({ total_count: runs.length, workflow_runs: runs.slice(0, Number(url.searchParams.get('per_page'))) }));
+}
 else if (args[1] === 'graphql' && args.some(arg => arg.includes('subIssues'))) out('parent.json');
 else if (args[1] === 'graphql') out('pulls.json');
 else process.exit(2);
@@ -2828,8 +2838,8 @@ else process.exit(2);
     { ...at('2026-11-02T21:00:00.000Z'), kind: 'cli.friction', command: 'board_dispatch', issue: 9999, pr: null, error_code: 'no_route', blocker_codes: [] },
   ];
 
-  /** A repository whose PR #1494 merged at 22:00 with three Actions runs before the merge and one after it. */
-  function retro(args: readonly string[], index: readonly unknown[] | null) {
+  /** A reused branch with three runs during PR #1494, a full page from earlier PRs, and one run after the merge. */
+  function retro(args: readonly string[], index: readonly unknown[] | null, additionalRuns = 0) {
     const root = tmpWorkspace('board-retro'); roots.push(root);
     const home = join(root, 'rh-home');
     const gh = join(root, 'gh'); mkdirSync(gh);
@@ -2842,9 +2852,12 @@ else process.exit(2);
     const files: Record<string, unknown> = {
       'repo.json': { nameWithOwner: 'Ancienttwo/repo-harness' }, 'parent.json': parent, 'pulls.json': pulls,
       'prs.json': [{ number: 1494 }], 'issues.json': [{ number: 1479 }, { number: 1480 }],
+      'pr1494.json': { created_at: '2026-11-02T19:30:00Z' },
       // Run 14 was cancelled by a newer push: it counts as a run, not as a failure.
-      'runs.json': { total_count: 4, workflow_runs: [run_(11, 'failure', '2026-11-02T20:00:00Z', '2026-11-02T20:10:00Z'), run_(14, 'cancelled', '2026-11-02T20:15:00Z', '2026-11-02T20:20:00Z'),
-        run_(12, 'success', '2026-11-02T20:30:00Z', '2026-11-02T20:45:00Z'), run_(13, 'success', '2026-11-02T22:30:00Z', '2026-11-02T22:40:00Z')] },
+      'runs.json': [run_(11, 'failure', '2026-11-02T20:00:00Z', '2026-11-02T20:10:00Z'), run_(14, 'cancelled', '2026-11-02T20:15:00Z', '2026-11-02T20:20:00Z'),
+        run_(12, 'success', '2026-11-02T20:30:00Z', '2026-11-02T20:45:00Z'), run_(13, 'success', '2026-11-02T22:30:00Z', '2026-11-02T22:40:00Z'),
+        ...Array.from({ length: 100 }, (_, i) => run_(100 + i, 'failure', '2026-11-02T19:29:59Z', '2026-11-02T19:40:00Z')),
+        ...Array.from({ length: additionalRuns }, (_, i) => run_(200 + i, 'success', '2026-11-02T21:00:00Z', '2026-11-02T21:10:00Z'))],
     };
     for (const [name, value] of Object.entries(files)) writeFileSync(join(gh, name), JSON.stringify(value));
     if (index !== null) {
@@ -2892,6 +2905,12 @@ else process.exit(2);
     expect(calls.find(args => args[0] === 'pr')).toEqual(['pr', 'list', '--state', 'merged', '--search', `merged:>=${document.scope.since}`, '--json', 'number', '--limit', '501']);
     // The recorded events of 2026-11-02 are older than any window that ends now.
     expect([document.closed_issues, document.merged_prs, document.consolidation_ratio, document.top_friction_codes, document.phase_median_ms.write]).toEqual([2, 1, 2, [], { median_ms: null, n: 0 }]);
+  });
+
+  test('a PR with more than one page of its own runs ends the retro with no document', () => {
+    const { result } = retro(['--parent', '1474', '--json'], EVENTS, 98);
+    expect([result.status, result.stdout]).toEqual([1, '']);
+    expect(JSON.parse(result.stderr)).toMatchObject({ ok: false, error: 'BoardCollectError', message: 'PR #1494 has more than 100 Actions runs' });
   });
 
   test('a missing index, or a line that the I1 gate refuses, ends the retro with no document', () => {

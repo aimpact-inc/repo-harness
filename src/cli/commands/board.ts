@@ -216,17 +216,20 @@ function readLifecycleIndex(repositoryId: number, env: NodeJS.ProcessEnv): Index
   });
 }
 
-/** The most Actions runs of one pull request branch that one read returns; a branch with more refuses the retro. */
+/** The most Actions runs that one read returns for a pull request. */
 const RETRO_RUN_PAGE = 100;
 /** The most merged pull requests or closed issues of one `--since` window. */
 const RETRO_LIST_LIMIT = 500;
 const CHECK_NAME = /^[A-Za-z0-9][A-Za-z0-9 ._:/()-]{0,127}$/u;
 const isTime = (value: unknown): value is string => typeof value === 'string' && !Number.isNaN(Date.parse(value));
 
-/** The Actions runs of a merged pull request: the `pull_request` runs of its head branch up to its merge. */
+/** Scope the Actions page and its count to the lifetime of the merged pull request. */
 function readRetroRuns(repo_root: string, repository: string, read: BoardPullRequestReadV1): RetroRunV1[] {
+  const pull = readGhJson({ repo_root }, ['api', '--hostname', 'github.com', `repos/${repository}/pulls/${read.number}`]) as { created_at?: unknown } | null;
+  if (!isTime(pull?.created_at) || read.merged_at === null) throw new BoardCollectError(`the lifetime of PR #${read.number} is unavailable`);
+  const created = encodeURIComponent(`${pull.created_at}..${read.merged_at}`);
   const body = readGhJson({ repo_root }, ['api', '--hostname', 'github.com',
-    `repos/${repository}/actions/runs?branch=${encodeURIComponent(read.head_ref)}&event=pull_request&per_page=${RETRO_RUN_PAGE}`]) as { total_count?: unknown; workflow_runs?: unknown } | null;
+    `repos/${repository}/actions/runs?branch=${encodeURIComponent(read.head_ref)}&event=pull_request&created=${created}&per_page=${RETRO_RUN_PAGE}`]) as { total_count?: unknown; workflow_runs?: unknown } | null;
   const runs = body?.workflow_runs;
   if (!Array.isArray(runs) || typeof body?.total_count !== 'number') throw new BoardCollectError(`the Actions runs of PR #${read.number} are not a run list`);
   if (body.total_count > runs.length) throw new BoardCollectError(`PR #${read.number} has more than ${RETRO_RUN_PAGE} Actions runs`);
@@ -236,7 +239,7 @@ function readRetroRuns(repo_root: string, repository: string, read: BoardPullReq
       throw new BoardCollectError(`an Actions run of PR #${read.number} has an invalid field`);
     }
     return { id: id as number, name: typeof name === 'string' && CHECK_NAME.test(name) ? name : null, conclusion, created_at, started_at: run_started_at, updated_at, completed: status === 'completed' };
-  }).filter(run => read.merged_at === null || Date.parse(run.created_at) <= Date.parse(read.merged_at));
+  });
 }
 
 /** The numbers of a `gh pr list` or `gh issue list` answer; a full page refuses the window, because a count would be short. */
