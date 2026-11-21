@@ -23,6 +23,8 @@ export type SeatResetCode = 'handoff_path_invalid' | 'handoff_missing' | 'reques
   | 'handoff_sections_missing' | 'already_claimed' | 'claim_failed' | 'caller_unknown' | 'requester_not_found' | 'requester_busy' | 'message_not_sent'
   | 'hc_failed' | 'requester_status_untracked' | 'resume_not_sent' | 'request_invalid' | 'request_closed' | 'seat_reset_runtime_unsupported';
 
+const RESET_FOREGROUNDS: ReadonlySet<string> = new Set(['claude', 'pi']);
+
 export class SeatResetError extends Error {
   constructor(readonly code: SeatResetCode, readonly outcome: SeatResetOutcome, message: string, readonly logErrors: readonly string[] = []) {
     super(message);
@@ -205,7 +207,7 @@ class SeatResetRun {
       this.prompt = seatResumePrompt(this.identity, this.caller, this.request.action);
       this.checkHandoff(sha256);
       this.wait();
-      this.requireClaudeAdvisor('nothing_sent');
+      this.requireResettableAdvisor('nothing_sent');
       this.claim(claim);
       // An auto-compaction or another reset after the request started a new segment: a second action would compact
       // or clear the new summary.
@@ -262,18 +264,18 @@ class SeatResetRun {
       }
     }
     this.caller = caller;
-    this.requireClaudeAdvisor('nothing_sent');
+    this.requireResettableAdvisor('nothing_sent');
   }
 
   private unsupportedRuntime(outcome: SeatResetOutcome = 'nothing_sent'): SeatResetError {
     return new SeatResetError('seat_reset_runtime_unsupported', outcome,
-      'Automated advisor reset requires a Claude foreground. Relaunch an agy advisor through rh seats launch advisor.');
+      'Automated advisor reset requires a Claude or Pi foreground. Relaunch an agy advisor through rh seats launch advisor.');
   }
 
-  private requireClaudeAdvisor(outcome: SeatResetOutcome): void {
+  private requireResettableAdvisor(outcome: SeatResetOutcome): void {
     if (this.identity.seat !== 'advisor') return;
     const terminal = hcGet(this.requester, this.options);
-    if (terminal.state !== 'live' || terminal.foreground?.name !== 'claude' || terminal.status?.app === 'antigravity') {
+    if (terminal.state !== 'live' || !terminal.foreground || !RESET_FOREGROUNDS.has(terminal.foreground.name) || terminal.status?.app === 'antigravity') {
       throw this.unsupportedRuntime(outcome);
     }
   }
@@ -397,7 +399,7 @@ class SeatResetRun {
     const changed = action === 'reset' ? await this.modelChange() : null;
     if (changed !== null) return this.relaunch(changed);
     let since = Date.now();
-    this.requireClaudeAdvisor('nothing_sent');
+    this.requireResettableAdvisor('nothing_sent');
     typeLine(this.requester, SEAT_RESET_COMMAND[action], this.options);
     let session: NewSession | null = null;
     // The log counts across runs; the run counts too, so an unwritable log still ends the retries.
@@ -412,7 +414,7 @@ class SeatResetRun {
       if (failures > SEAT_RESET_RETRIES || this.count('resume') > SEAT_RESET_RETRIES) return this.relaunch();
       if (failure === 'no_signal') {
         since = Date.now();
-        this.requireClaudeAdvisor('uncertain');
+        this.requireResettableAdvisor('uncertain');
         typeLine(this.requester, '/clear', this.options);
       }
     }
@@ -444,12 +446,12 @@ class SeatResetRun {
     if (terminal.state === 'finished') throw stop('requester_exited');
     if (terminal.foreground === null) throw stop('requester_foreground_unavailable', true);
     if (terminal.foreground.pid === terminal.pid) throw stop('requester_has_no_parent_shell', true);
-    this.requireClaudeAdvisor(outcome);
+    this.requireResettableAdvisor(outcome);
     typeLine(this.requester, '/exit', this.options);
     const shellReady = await this.poll(() => {
       const current = hcGet(this.requester, this.options);
       if (current.state === 'finished') throw stop('requester_exited');
-      return current.foreground !== null && current.foreground.name !== 'claude' ? true : null;
+      return current.foreground !== null && !RESET_FOREGROUNDS.has(current.foreground.name) ? true : null;
     }, this.timeouts.exitMs);
     if (shellReady === null) throw stop('claude_did_not_exit');
     const startedAt = Date.now();

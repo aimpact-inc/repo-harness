@@ -258,7 +258,7 @@ function codexLaunch(seat: LaunchSeatId, config: SeatConfigV1): Omit<SeatLaunchV
   };
 }
 
-function piLaunch(seat: LaunchSeatId, config: SeatConfigV1, roleDirectory: string | undefined, hookExtension: string | undefined): Omit<SeatLaunchV1, 'protocol' | 'kind' | 'seat' | 'runtime' | 'source'> {
+function piLaunch(seat: LaunchSeatId, config: SeatConfigV1, roleDirectory: string | undefined, hookExtension: string | undefined, repositoryId: string | undefined): Omit<SeatLaunchV1, 'protocol' | 'kind' | 'seat' | 'runtime' | 'source'> {
   const review = isReviewSeat(seat);
   const excludeEdits = review || isPlannerSeat(seat);
   // Pi's denylist blocks the edit/write tools; shell paths stay open. pi-subagents does not refuse a role outside the fleet.
@@ -273,8 +273,17 @@ function piLaunch(seat: LaunchSeatId, config: SeatConfigV1, roleDirectory: strin
   ];
   const text = brief(seat, config, config.fleet, limits, piRoleName);
   const slash = config.model?.indexOf('/') ?? -1;
+  const env = [
+    ...(isResetSeat(seat) && repositoryId !== undefined ? [
+      `${SEAT_ENV}=${seat}`,
+      `${SEAT_REPOSITORY_ENV}=${repositoryId}`,
+      ...(config.model === null ? [] : [`${SEAT_MODEL_ENV}=${config.model}`]),
+      ...(config.effort === null ? [] : [`${SEAT_EFFORT_ENV}=${config.effort}`]),
+    ] : []),
+    ...(roleDirectory === undefined ? [] : [`${PI_EXTRA_AGENT_DIRS_ENV}=${roleDirectory}`]),
+  ];
   return {
-    argv: [...seatEnv(roleDirectory === undefined ? [] : [`${PI_EXTRA_AGENT_DIRS_ENV}=${roleDirectory}`]), 'pi', ...(config.model === null ? [] : ['--provider', config.model.slice(0, slash), '--model', config.model.slice(slash + 1)]),
+    argv: [...seatEnv(env), 'pi', ...(config.model === null ? [] : ['--provider', config.model.slice(0, slash), '--model', config.model.slice(slash + 1)]),
       ...(config.effort === null ? [] : ['--thinking', config.effort]),
       ...(excludeEdits ? ['--exclude-tools', 'edit,write'] : []),
       ...(review ? ['--no-extensions',
@@ -291,9 +300,17 @@ export const AGY_COMMAND_PREFIXES = [
   'git log', 'git show', 'git diff', 'git status', 'git grep', 'git rev-parse', 'git ls-remote', 'git fetch',
   'gh pr view', 'gh pr list', 'gh pr checks', 'gh pr diff',
   'gh issue view', 'gh issue list', 'gh run view', 'gh run list',
-  'rh board --parent', 'rh board attention --parent', 'rh board parents', 'rh board cluster', 'rh board seats', 'rh board retro',
+  'rh board attention --parent', 'rh board parents', 'rh board cluster', 'rh board seats', 'rh board retro',
   'rh quota', 'rh seats pool',
   'rg', 'ls', 'cat',
+];
+
+export const AGY_DENIED_COMMANDS: readonly string[] = [
+  ...GITHUB_WRITE_COMMANDS,
+  'rh board merge', 'rh board dispatch', 'rh board review', 'rh board post',
+  'rh board triage-apply', 'rh board closeout', 'rh board migrate-dependencies',
+  'rh seats launch', 'rh seats reset', 'rh publication merge',
+  'rh review collect', 'rh review publish',
 ];
 
 // MCP and fleet omission must be confirmed in a native agy session before reporting enforcement.
@@ -326,7 +343,7 @@ function agyLaunch(config: SeatConfigV1, repositoryId: string | undefined, input
   const env = repositoryId === undefined ? [] : [`${SEAT_ENV}=advisor`, `${SEAT_REPOSITORY_ENV}=${repositoryId}`, `${SEAT_MODEL_ENV}=${model}`];
   const settings = JSON.stringify({ trustedWorkspaces: [input.cwd], permissions: {
     allow: AGY_COMMAND_PREFIXES.map(command => `command(${command})`),
-    deny: GITHUB_WRITE_COMMANDS.map(command => `command(${command})`),
+    deny: AGY_DENIED_COMMANDS.map(command => `command(${command})`),
   } });
   return {
     argv: [...seatEnv(env), input.executable, '--mode', 'accept-edits', '--model', model,
@@ -349,7 +366,7 @@ function runtimeLaunch(runtime: SeatConfigV1['runtime'], seat: LaunchSeatId, con
   switch (runtime) {
     case 'claude': return claudeLaunch(seat, config, claudeAgentTypes, options.paneName, options.repositoryId, options.claudeSaving ?? false);
     case 'codex': return codexLaunch(seat, config);
-    case 'pi': return piLaunch(seat, config, options.piRoleDirectory, options.piHookExtension);
+    case 'pi': return piLaunch(seat, config, options.piRoleDirectory, options.piHookExtension, options.repositoryId);
     case 'agy': {
       if (options.agy === undefined) throw new Error('agy requires verified launch inputs.');
       return agyLaunch(config, options.repositoryId, options.agy);

@@ -51,7 +51,9 @@ export function readTranscriptUsage(path: string): TranscriptUsage {
   }
 }
 
-type ResetHost = 'claude' | 'antigravity';
+export type ResetHost = 'claude' | 'pi' | 'antigravity';
+const RESET_HOSTS: ReadonlySet<unknown> = new Set<ResetHost>(['claude', 'pi', 'antigravity']);
+const isResetHost = (host: unknown): host is ResetHost => RESET_HOSTS.has(host);
 
 export interface SeatResetRequestRecord {
   readonly host?: ResetHost;
@@ -119,7 +121,7 @@ export function readSeatSession(identity: SeatResetIdentity): SeatSessionRecord 
   try { value = JSON.parse(readFileSync(seatSessionPath(identity), 'utf8')); } catch { return null; }
   if (typeof value !== 'object' || value === null) return null;
   const { session_id: sessionId, transcript_path: transcriptPath, source, started_at: startedAt, model = null, effort = null, host = 'claude' } = value as Record<string, unknown>;
-  const valid = (host === 'claude' || host === 'antigravity') && (sessionId === null || typeof sessionId === 'string') && typeof transcriptPath === 'string' && transcriptPath !== ''
+  const valid = isResetHost(host) && (sessionId === null || typeof sessionId === 'string') && typeof transcriptPath === 'string' && transcriptPath !== ''
     && isSeatSessionSource(source) && typeof startedAt === 'string' && isoInstant(startedAt)
     && (model === null || typeof model === 'string') && (effort === null || typeof effort === 'string');
   return valid ? { sessionId, transcriptPath, source, startedAt, model, effort, host } : null;
@@ -151,7 +153,7 @@ export function readRequest(identity: SeatResetIdentity): SeatRequest | null {
   // Any JSON value that is not a plain object (null, an array, a number, a string, a boolean) is not a request.
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   const { requested_at: requestedAt, transcript_path: transcriptPath, action, host = 'claude' } = value as Record<string, unknown>;
-  if ((host !== 'claude' && host !== 'antigravity') || typeof requestedAt !== 'string' || !Number.isFinite(Date.parse(requestedAt)) || !isSeatResetAction(action)) return null;
+  if (!isResetHost(host) || typeof requestedAt !== 'string' || !Number.isFinite(Date.parse(requestedAt)) || !isSeatResetAction(action)) return null;
   return { requestedAt, transcriptPath: typeof transcriptPath === 'string' ? transcriptPath : null, action, host };
 }
 

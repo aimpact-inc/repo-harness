@@ -4,9 +4,9 @@ import { createHash } from "crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { basename, delimiter, dirname, join } from "path";
-import { buildSeatLaunch, seatPaneName } from "../../src/core/board/seat-launch";
+import { AGY_COMMAND_PREFIXES, buildSeatLaunch, seatPaneName } from "../../src/core/board/seat-launch";
 import { HANDOFF_SECTIONS, seatResetReason, seatResetSteps, type SeatResetIdentity } from "../../src/core/board/seat-reset";
-import { SeatResetError, runSeatReset, type SeatRelaunch, type SeatResetNotify, type SeatResetOptions } from "../../src/effects/board/seat-reset";
+import { SeatResetError, readSeatSession, recordSeatSession, runSeatReset, type SeatRelaunch, type SeatResetNotify, type SeatResetOptions } from "../../src/effects/board/seat-reset";
 import { seatHandoff, seatResetLaunch } from "../../src/cli/commands/seats";
 import { DEFAULT_SEATS_CONFIG, WORKER_SEAT_IDS, isReviewSeat, isWorkerSeat } from "../../src/core/board/seats-settings";
 import { repoHarnessRepoIdFor } from "../../src/effects/repo-registry";
@@ -223,7 +223,6 @@ describe.skipIf(process.platform === "win32")("agy advisor seat", () => {
         "command(gh issue list)",
         "command(gh run view)",
         "command(gh run list)",
-        "command(rh board --parent)",
         "command(rh board attention --parent)",
         "command(rh board parents)",
         "command(rh board cluster)",
@@ -247,12 +246,25 @@ describe.skipIf(process.platform === "win32")("agy advisor seat", () => {
         "command(gh pr merge)",
         "command(gh pr review)",
         "command(gh release create)",
-        "command(git push)"
+        "command(git push)",
+        "command(rh board merge)",
+        "command(rh board dispatch)",
+        "command(rh board review)",
+        "command(rh board post)",
+        "command(rh board triage-apply)",
+        "command(rh board closeout)",
+        "command(rh board migrate-dependencies)",
+        "command(rh seats launch)",
+        "command(rh seats reset)",
+        "command(rh publication merge)",
+        "command(rh review collect)",
+        "command(rh review publish)"
       ]
     } };
     for (const mutating of ["rh board dispatch", "rh board review", "rh board merge", "rh board closeout", "rh board post", "rh board migrate-dependencies", "rh seats launch", "rh seats consult", "rh seats council"]) {
       expect(settings.permissions.allow).not.toContain(`command(${mutating})`);
     }
+    expect(AGY_COMMAND_PREFIXES.some(prefix => "rh board --parent 123 merge".startsWith(prefix))).toBe(false);
     const executable = [f.agy, "--mode", "accept-edits", "--model", "gemini-4-neon-high", "--add-dir", directory,
       "--agent", "rh-advisor", "--settings", JSON.stringify(settings)];
     expect(agent(labeled)).toEqual([...UNSET_SEAT, "REPO_HARNESS_SEAT=advisor", "REPO_HARNESS_SEAT_REPOSITORY=1186405141",
@@ -623,6 +635,24 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
       expect(bare(light.argv)[0]).toBe("pi");
       expect(light.brief).toContain("You have no sub-agents.");
     });
+  });
+
+  test("Pi reset seats inject REPO_HARNESS_SEAT* only with repositoryId while Pi workers never inject them", () => {
+    const piAdvisor = buildSeatLaunch("advisor", { runtime: "pi", model: "magpie/agy-cli/gemini-4-neon", advisor_model: null, effort: "xhigh", tools: ["read", "shell", "net"], fleet: [] }, "seats", [], { repositoryId: "12345" });
+    expect(bare([...piAdvisor.argv]).slice(0, 5)).toEqual([
+      "REPO_HARNESS_SEAT=advisor",
+      "REPO_HARNESS_SEAT_REPOSITORY=12345",
+      "REPO_HARNESS_SEAT_MODEL=magpie/agy-cli/gemini-4-neon",
+      "REPO_HARNESS_SEAT_EFFORT=xhigh",
+      "pi",
+    ]);
+    const piAdvisorUnlabeled = buildSeatLaunch("advisor", { runtime: "pi", model: "magpie/agy-cli/gemini-4-neon", advisor_model: null, effort: "xhigh", tools: ["read", "shell", "net"], fleet: [] }, "seats", []);
+    expect(bare([...piAdvisorUnlabeled.argv])[0]).toBe("pi");
+    const piWorker = buildSeatLaunch("worker", { runtime: "pi", model: "magpie/agy-cli/gemini-4-neon", advisor_model: null, effort: "xhigh", tools: ["edit", "read", "shell"], fleet: [] }, "seats", [], { repositoryId: "12345" });
+    const workerBare = bare([...piWorker.argv]);
+    expect(workerBare[0]).toBe("pi");
+    expect(workerBare.some(arg => typeof arg === "string" && arg.startsWith("REPO_HARNESS_SEAT"))).toBe(false);
+    expect(piWorker.argv.some(arg => arg.startsWith("REPO_HARNESS_SEAT") && arg.includes("="))).toBe(false);
   });
 
   test.skipIf(process.platform === "win32")("Pi role overrides stay private under umask 022", () => {
@@ -1420,6 +1450,12 @@ describe("rh seats handoff (#2175)", () => {
       const request = JSON.parse(readFileSync(join(dir, "request.json"), "utf8"));
       expect([request.context_tokens, request.transcript_path, Number.isFinite(Date.parse(request.requested_at)), request.action, request.transcript_bytes])
         .toEqual([200_015, transcript, true, "compact", statSync(transcript).size]);
+
+      const piNow = new Date();
+      recordSeatSession({ seat: "advisor", repository }, { sessionId: "pi-s", transcriptPath: transcript, source: "startup", host: "pi", model: "magpie/agy-cli/gemini-4-neon", effort: "xhigh" }, piNow);
+      expect(readSeatSession({ seat: "advisor", repository })).toMatchObject({ host: "pi", sessionId: "pi-s", transcriptPath: transcript });
+      expect(seatHandoff({ REPO_HARNESS_SEAT: "advisor", REPO_HARNESS_SEAT_REPOSITORY: repository })).toBe(seatResetSteps({ seat: "advisor", repository }, "compact"));
+      expect(JSON.parse(readFileSync(join("/tmp/repo-harness-seats", repository, "advisor", "request.json"), "utf8")).host).toBe("pi");
     } finally {
       rmSync(join("/tmp/repo-harness-seats", repository), { recursive: true, force: true });
       rmSync(home, { recursive: true, force: true });
@@ -1457,7 +1493,7 @@ const [cmd, , ...rest] = process.argv.slice(2);
 const st = JSON.parse(fs.readFileSync("${home}/state.json", "utf8"));
 fs.appendFileSync("${home}/calls.log", [cmd, ...rest].join(" ") + "\\n");
 const out = value => process.stdout.write(JSON.stringify(value));
-const session = (transcript, source = "clear") => fs.writeFileSync("${dir}/session.json", JSON.stringify({ session_id: "s", transcript_path: transcript, source, started_at: new Date().toISOString() }));
+const session = (transcript, source = "clear") => fs.writeFileSync("${dir}/session.json", JSON.stringify({ session_id: "s", transcript_path: transcript, source, started_at: new Date().toISOString(), ...(st.host ? { host: st.host } : {}) }));
 if (cmd === "ls") out({ terminals: st.terminals });
 if (cmd === "get") out({ address: rest.at(-1), state: "live", labels: rest.at(-1) === "t2" ? st.callerLabels : { "repo-harness.seat": "${seat}", "repo-harness.repository": "${repository}" }, turn: 3, cwd: st.cwd, pid: st.pid ?? 1, status: st.status, foreground: { pid: 2, name: st.foreground, argv: [], cwd: "/" } });
 // wait is one result, or a sequence: the last result answers every later call.
@@ -1579,6 +1615,20 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
       transcript_path: join(directory, 'missing.jsonl'), source: 'startup', started_at: new Date().toISOString() }));
     expect(() => seatHandoff({ REPO_HARNESS_SEAT: 'advisor', REPO_HARNESS_SEAT_REPOSITORY: basename(dirname(directory)) }))
       .toThrow(expect.objectContaining({ code: 'seat_reset_runtime_unsupported' }));
+  }));
+
+  test("a pi advisor with foreground 'pi' and host 'pi' resets cleanly", withReset(async ({ home, handoff, reset, state, calls, log }) => {
+    const directory = dirname(handoff);
+    state({ foreground: 'pi', host: 'pi', status: { state: 'done', app: 'pi' } });
+    const before = () => {
+      const request = join(directory, 'request.json');
+      writeFileSync(request, JSON.stringify({ ...JSON.parse(readFileSync(request, 'utf8')), host: 'pi' }));
+      writeFileSync(join(directory, 'session.json'), JSON.stringify({ host: 'pi', session_id: 's-pi',
+        transcript_path: join(home, 'old.jsonl'), source: 'startup', started_at: new Date(Date.now() - 120_000).toISOString() }));
+    };
+    expect(await reset({ before })).toEqual({ requester: 't5', seat: 'advisor', relaunched: false, logErrors: [] });
+    expect(calls()).toEqual(['wait --timeout 600 -- t5', 'keys -- t5 / c l e a r enter', `send -- t5 ${prompt(handoff)}`]);
+    expect(log().map(({ kind, detail }) => [kind, detail])).toEqual([['reset', 'cleared']]);
   }));
 
   test("a check that finds no request, no requester or a busy requester sends nothing and logs the failure", withReset(async ({ reset, state, sends, log }) => {
