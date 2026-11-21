@@ -2,7 +2,15 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import type { Json } from 'archctx-contracts';
 import type { ModuleDetailV1, ModuleIndexV1, ModuleState } from '../core/architecture/module-view';
 import type { ModuleReviewPromptV1 } from '../core/review/module-review-prompt';
-import { decodeArchitectureModuleDetail, decodeArchitectureModuleIndex, decodeArchitectureReviewPrompt } from '../core/operator/architecture';
+import {
+  ARCHITECTURE_CAPABILITY_ID,
+  ARCHITECTURE_REFACTOR_STATUS_ORDER,
+  decodeArchitectureModuleDetail,
+  decodeArchitectureModuleIndex,
+  decodeArchitectureRefactorDecisions,
+  decodeArchitectureReviewPrompt,
+  type ArchitectureRefactorDecisionsV1,
+} from '../core/operator/architecture';
 import { ArchitectureHistory, type ArchitectureRefusal, type HistoryReader, type HistorySummary } from './ArchitectureHistory';
 import { ArchitectureMap, type ArchitectureSelect, type ArchitectureSelections, type ArchitectureBaseMap, type ArchitectureMapReader, type ArchitectureMapSummary } from './ArchitectureMap';
 import type { OperatorMessageKey, OperatorTranslate } from './i18n';
@@ -78,6 +86,9 @@ function repositoryPath(repositoryId: string): string {
 }
 function historyPath(repositoryId: string): string {
   return `/api/v1/repositories/${encodeURIComponent(repositoryId)}/architecture/history`;
+}
+function refactorPath(repositoryId: string): string {
+  return `/api/v1/repositories/${encodeURIComponent(repositoryId)}/architecture/refactor`;
 }
 
 /** The exact command the Bot runs for the shard on screen. */
@@ -248,14 +259,74 @@ function ModulePage({ detail, base, generation, onModule, t }: {
   </article>;
 }
 
+const REFACTOR_RECOMMENDATIONS_COMMAND = 'rh arch refactor recommendations';
+const REFACTOR_ACTIVE_STATUSES = new Set<string>(['accepted', 'acknowledged', 'deferred']);
+const REFACTOR_STATUS_TONE: Readonly<Record<typeof ARCHITECTURE_REFACTOR_STATUS_ORDER[number], string>> = {
+  accepted: 'tone-user',
+  acknowledged: 'tone-user',
+  deferred: 'tone-unknown',
+  resolved: 'tone-ok',
+  rejected: 'tone-neutral',
+  waived: 'tone-neutral',
+};
+
+function RefactorDecisionsView({ value, onModule, t }: {
+  readonly value: ArchitectureRefactorDecisionsV1;
+  readonly onModule: (id: string) => void;
+  readonly t: OperatorTranslate;
+}) {
+  const activeCount = value.counts.accepted + value.counts.acknowledged + value.counts.deferred;
+  const showRecommendationsHint = !value.adopted || value.decisions.length === 0 || activeCount > 0;
+  return <div className="architecture-map-view" data-refactor-view>
+    <ul className="module-states" data-refactor-counts>
+      {ARCHITECTURE_REFACTOR_STATUS_ORDER.map(status => (
+        <li key={status} className={`operator-badge ${REFACTOR_STATUS_TONE[status]}`} data-refactor-status={status}>
+          {t(`architecture.refactor.status.${status}`)}: <strong>{value.counts[status]}</strong>
+        </li>
+      ))}
+    </ul>
+    {showRecommendationsHint && <div className="copy-value">
+      <code data-refactor-command="recommendations">{REFACTOR_RECOMMENDATIONS_COMMAND}</code>
+      <CopyButton label={t('architecture.refactor.recommendationsCommand')} value={REFACTOR_RECOMMENDATIONS_COMMAND} t={t} />
+    </div>}
+    {!value.adopted ? <p className="empty-inline" data-refactor-empty="unadopted">{t('architecture.refactor.unadopted')}</p>
+      : value.decisions.length === 0 ? <p className="empty-inline" data-refactor-empty="none">{t('architecture.refactor.empty')}</p>
+      : <ul className="module-domains" data-refactor-decisions>
+        {value.decisions.map(item => {
+          const metrics = item.metrics ? Object.entries(item.metrics) : [];
+          return <li key={item.recommendation_id} className="architecture-card" data-refactor-decision={item.recommendation_id} data-status={item.status}>
+            <div className="module-states">
+              <span className={`operator-badge ${REFACTOR_STATUS_TONE[item.status]}`}>{t(`architecture.refactor.status.${item.status}`)}</span>
+              <code>{item.kind ?? item.category}</code>
+              <strong>{item.subject}</strong>
+              <code className="mono-value">{item.recommendation_id}</code>
+            </div>
+            {item.affected_node_ids.length > 0 && <div className="module-states" data-refactor-nodes>
+              {item.affected_node_ids.map(nodeId => ARCHITECTURE_CAPABILITY_ID.test(nodeId)
+                ? <button key={nodeId} type="button" className="module-row__open" onClick={() => onModule(nodeId)}><code>{nodeId}</code></button>
+                : <code key={nodeId}>{nodeId}</code>)}
+            </div>}
+            {metrics.length > 0 && <p className="mono-value" data-refactor-metrics>{metrics.map(([key, metric]) => `${key}=${metric ?? 'null'}`).join(' · ')}</p>}
+            <p data-refactor-reason>{item.reason}</p>
+            <p className="detail-quiet"><time dateTime={item.decided_at}>{item.decided_at}</time> · <code>{item.head_sha.slice(0, 7)}</code></p>
+            {REFACTOR_ACTIVE_STATUSES.has(item.status) && <div className="copy-value">
+              <code data-refactor-verify={item.recommendation_id}>{item.cli_verify_command}</code>
+              <CopyButton label={t('architecture.refactor.verifyCommand')} value={item.cli_verify_command} t={t} />
+            </div>}
+          </li>;
+        })}
+      </ul>}
+  </div>;
+}
+
 /**
  * Read-only view of the committed architecture model. Every action is a command
  * for the Bot to copy; the board sends no request that acts on it.
  */
-/** Design order: the module base map (capabilities in domain groups), layers, sequence, topology, the module list, then history. */
-type ArchitectureView = 'map' | 'layers' | 'sequence' | 'topology' | 'modules' | 'history';
-const ARCHITECTURE_VIEWS: readonly ArchitectureView[] = ['map', 'layers', 'sequence', 'topology', 'modules', 'history'];
-const BASE_MAPS: Readonly<Record<Exclude<ArchitectureView, 'modules' | 'history'>, ArchitectureBaseMap>> = { map: 'modules', layers: 'layers', sequence: 'sequence', topology: 'topology' };
+/** Design order: the module base map (capabilities in domain groups), layers, sequence, topology, the module list, history, then refactor. */
+type ArchitectureView = 'map' | 'layers' | 'sequence' | 'topology' | 'modules' | 'history' | 'refactor';
+const ARCHITECTURE_VIEWS: readonly ArchitectureView[] = ['map', 'layers', 'sequence', 'topology', 'modules', 'history', 'refactor'];
+const BASE_MAPS: Readonly<Record<Exclude<ArchitectureView, 'modules' | 'history' | 'refactor'>, ArchitectureBaseMap>> = { map: 'modules', layers: 'layers', sequence: 'sequence', topology: 'topology' };
 
 /**
  * The source of the view on screen, for the header row: the model commit (a map also has its
@@ -321,6 +392,7 @@ export function ArchitectureWorkspace({ repositoryId, github, moduleId, onModule
   const root = repositoryPath(repositoryId);
   const modulePath = moduleId === null ? null : `${root}/${moduleId}`;
   const index = useArchitectureRead(moduleId === null && view === 'modules' ? root : null, decodeArchitectureModuleIndex, refreshGeneration);
+  const refactor = useArchitectureRead(moduleId === null && view === 'refactor' ? refactorPath(repositoryId) : null, decodeArchitectureRefactorDecisions, refreshGeneration);
   const detail = useArchitectureRead(modulePath, decodeArchitectureModuleDetail, refreshGeneration);
   // The tab counts of the last map stay while another view shows; a new repository starts without them.
   // The map source is only the map on screen: the base map clears it when it shows no map or closes.
@@ -340,8 +412,11 @@ export function ArchitectureWorkspace({ repositoryId, github, moduleId, onModule
     setHistorySource(summary);
     if (summary !== null) count({ history: summary.total });
   }, [count]);
-  const commit = moduleId !== null ? detail.value?.commit : view === 'modules' ? index.value?.commit : view === 'history' ? undefined : mapSource?.commit;
-  const shownMap = moduleId === null && view !== 'modules' && view !== 'history' ? mapSource : null;
+  useEffect(() => {
+    if (refactor.value !== null) count({ refactor: refactor.value.decisions.length });
+  }, [refactor.value, count]);
+  const commit = moduleId !== null ? detail.value?.commit : view === 'modules' ? index.value?.commit : view === 'history' || view === 'refactor' ? undefined : mapSource?.commit;
+  const shownMap = moduleId === null && view !== 'modules' && view !== 'history' && view !== 'refactor' ? mapSource : null;
   const history = moduleId === null && view === 'history' ? historySource : null;
   useEffect(() => {
     onSource(history ?? (commit === undefined ? null : {
@@ -354,6 +429,10 @@ export function ArchitectureWorkspace({ repositoryId, github, moduleId, onModule
       <ViewTabs view={view} counts={counts?.repositoryId === repositoryId ? counts.value : {}} onChange={setView} t={t} />
       <div id="architecture-view" className="architecture-view" role="tabpanel" aria-labelledby={`architecture-tab-${view}`}>
         {view === 'history' ? <ArchitectureHistory path={historyPath(repositoryId)} github={github} read={readHistory} refreshGeneration={refreshGeneration} selection={selections.history ?? null} select={select} onSummary={onHistory} t={t} />
+          : view === 'refactor' ? <>
+            <ReadStatus read={refactor} loading="architecture.refactor.loading" t={t} />
+            {refactor.value && <RefactorDecisionsView value={refactor.value} onModule={onModule} t={t} />}
+          </>
           : view !== 'modules' ? <ArchitectureMap repositoryId={repositoryId} view={BASE_MAPS[view]} read={readMap} refreshGeneration={refreshGeneration} selections={selections} select={select} onModule={onModule} onSummary={onSummary} t={t} /> : <>
             <ReadStatus read={index} loading="architecture.loading" t={t} />
             {index.value && <ModuleList index={index.value} onModule={onModule} t={t} />}

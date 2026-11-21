@@ -1,3 +1,4 @@
+import { REFACTOR_DECISION_STATUSES, REFACTOR_OBSERVATION_KINDS, type RefactorDecisionStatus, type RefactorObservationKind } from 'archctx-contracts';
 import { isGroupNode, type ModuleIndexV1, type ModuleDetailV1 } from '../architecture/module-view';
 import type { ModuleReviewPromptV1 } from '../review/module-review-prompt';
 
@@ -7,6 +8,32 @@ export const OPERATOR_ARCHITECTURE_MODULES_ROUTE = /^\/api\/v1\/repositories\/([
 export const OPERATOR_ARCHITECTURE_MODULE_ROUTE = /^\/api\/v1\/repositories\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/architecture\/modules\/(capability\.[a-z0-9-]+(?:\.[a-z0-9-]+)+)$/u;
 export const OPERATOR_ARCHITECTURE_REVIEW_PROMPT_ROUTE = /^\/api\/v1\/repositories\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/architecture\/modules\/(capability\.[a-z0-9-]+(?:\.[a-z0-9-]+)+)\/review-prompt$/u;
 export const OPERATOR_ARCHITECTURE_HISTORY_ROUTE = /^\/api\/v1\/repositories\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/architecture\/history$/u;
+export const OPERATOR_ARCHITECTURE_REFACTOR_ROUTE = /^\/api\/v1\/repositories\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/architecture\/refactor$/u;
+
+export const ARCHITECTURE_REFACTOR_STATUS_ORDER = ['accepted', 'acknowledged', 'deferred', 'resolved', 'rejected', 'waived'] as const satisfies readonly RefactorDecisionStatus[];
+
+export type ArchitectureRefactorCountsV1 = Readonly<Record<RefactorDecisionStatus, number>>;
+
+export interface ArchitectureRefactorDecisionV1 {
+  readonly recommendation_id: string;
+  readonly category: 'structural_observation' | 'refactor_proposal';
+  readonly kind: RefactorObservationKind | null;
+  readonly subject: string;
+  readonly affected_node_ids: readonly string[];
+  readonly status: RefactorDecisionStatus;
+  readonly metrics: Readonly<Record<string, number | null>> | null;
+  readonly reason: string;
+  readonly decided_at: string;
+  readonly head_sha: string;
+  readonly cli_verify_command: string;
+}
+
+export interface ArchitectureRefactorDecisionsV1 {
+  readonly schema_version: 'repo-harness.architecture-refactor.v1';
+  readonly adopted: boolean;
+  readonly counts: ArchitectureRefactorCountsV1;
+  readonly decisions: readonly ArchitectureRefactorDecisionV1[];
+}
 
 export const ARCHITECTURE_FAILURES = ['repository_not_found', 'capability_not_found', 'commit_not_found', 'invalid_request', 'unavailable', 'timeout',
   'model_invalid', 'model_missing', 'path_escape', 'secret_detected', 'worktree_changed_during_read', 'shard_out_of_range', 'budget_too_small', 'diff_refs_required', 'dirty_path_invalid', 'git_path_encoding_invalid', 'git_read_failed',
@@ -30,9 +57,18 @@ const object = (fields: Record<string, Check>): Check => value => {
   return Object.keys(record).length === Object.keys(fields).length
     && Object.entries(fields).every(([key, check]) => Object.hasOwn(record, key) && check(record[key]));
 };
+const boundedLine = (max: number): Check => value => text(value) && (value as string).length > 0 && (value as string).length <= max
+  && (value as string) === (value as string).trim() && !/[\x00-\x1f\x7f]/u.test(value as string);
+const metricsMap: Check = value => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.entries(value as Record<string, unknown>).every(([key, metric]) =>
+    boundedLine(128)(key) && (metric === null || (typeof metric === 'number' && Number.isFinite(metric))));
+};
 const hash = match(/^[0-9a-f]{64}$/);
 const commit = match(ARCHITECTURE_COMMIT);
 const capability = match(ARCHITECTURE_CAPABILITY_ID);
+const recommendationId = match(/^recommendation\.[0-9a-f]{16}$/u);
+const isoTimestamp = match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u);
 const path: Check = value => text(value) && !(value as string).startsWith('/') && !/^[A-Za-z]:/.test(value as string)
   && !/[\\\x00-\x1f\x7f]/.test(value as string) && (value as string).split('/').every(part => part !== '' && part !== '.' && part !== '..');
 const state = object({ model_valid: one('valid', 'invalid', 'unknown'), generated_summary: one('fresh', 'stale', 'unknown'), section3: one('present', 'pending') });
@@ -60,6 +96,36 @@ const prompt = object({ schema_version: one('repo-harness.module-review-prompt.v
   sources: list(object({ path, sha256: hash, bytes: integer, class: one('required', 'optional'), disposition: one('included', 'omitted', 'chunked') })),
   budget: object({ input_cap_bytes: positive, used_bytes: integer, incomplete: bool, omitted_sections: list(text) }),
   shard: object({ index: positive, count: positive, bytes: integer }), full_prompt_sha256: hash, prompt: text, digest: hash });
+const refactorCounts = object({ accepted: integer, acknowledged: integer, deferred: integer, resolved: integer, rejected: integer, waived: integer });
+const refactorDecision = object({
+  recommendation_id: recommendationId,
+  category: one('structural_observation', 'refactor_proposal'),
+  kind: nullable(one(...REFACTOR_OBSERVATION_KINDS)),
+  subject: boundedLine(512),
+  affected_node_ids: list(boundedLine(256)),
+  status: one(...REFACTOR_DECISION_STATUSES),
+  metrics: nullable(metricsMap),
+  reason: boundedLine(1024),
+  decided_at: isoTimestamp,
+  head_sha: commit,
+  cli_verify_command: boundedLine(128),
+});
+const refactorDecisions = object({
+  schema_version: one('repo-harness.architecture-refactor.v1'),
+  adopted: bool,
+  counts: refactorCounts,
+  decisions: list(refactorDecision),
+});
+
+export function architectureRefactorVerifyCommand(id: string): string {
+  return `rh arch refactor verify ${id} --json`;
+}
+
+export function compareArchitectureRefactorDecisions(left: Pick<ArchitectureRefactorDecisionV1, 'status' | 'recommendation_id'>, right: Pick<ArchitectureRefactorDecisionV1, 'status' | 'recommendation_id'>): number {
+  const rank = ARCHITECTURE_REFACTOR_STATUS_ORDER.indexOf(left.status) - ARCHITECTURE_REFACTOR_STATUS_ORDER.indexOf(right.status);
+  if (rank !== 0) return rank;
+  return left.recommendation_id < right.recommendation_id ? -1 : left.recommendation_id > right.recommendation_id ? 1 : 0;
+}
 
 export function decodeArchitectureModuleIndex(value: unknown): ModuleIndexV1 {
   if (!index(value)) throw new Error('architecture_module_index_invalid');
@@ -81,6 +147,25 @@ export function decodeArchitectureReviewPrompt(value: unknown): ModuleReviewProm
     || (result.worktree_dirty_paths.length === 0) !== (result.dirty_content_sha256 === null)) throw new Error('architecture_review_prompt_invalid');
   return result;
 }
+export function decodeArchitectureRefactorDecisions(value: unknown): ArchitectureRefactorDecisionsV1 {
+  if (!refactorDecisions(value)) throw new Error('architecture_refactor_decisions_invalid');
+  const result = value as ArchitectureRefactorDecisionsV1;
+  if (!result.adopted && result.decisions.length > 0) throw new Error('architecture_refactor_decisions_invalid');
+  const seen = new Set<string>();
+  for (let i = 0; i < result.decisions.length; i++) {
+    const item = result.decisions[i]!;
+    if (seen.has(item.recommendation_id)) throw new Error('architecture_refactor_decisions_invalid');
+    seen.add(item.recommendation_id);
+    if ((item.category === 'structural_observation') !== (item.kind !== null)) throw new Error('architecture_refactor_decisions_invalid');
+    if (item.cli_verify_command !== architectureRefactorVerifyCommand(item.recommendation_id)) throw new Error('architecture_refactor_decisions_invalid');
+    if (item.affected_node_ids.some((id, idx) => idx > 0 && id <= item.affected_node_ids[idx - 1]!)) throw new Error('architecture_refactor_decisions_invalid');
+    if (i > 0 && compareArchitectureRefactorDecisions(result.decisions[i - 1]!, item) >= 0) throw new Error('architecture_refactor_decisions_invalid');
+  }
+  for (const status of ARCHITECTURE_REFACTOR_STATUS_ORDER) {
+    if (result.counts[status] !== result.decisions.filter(item => item.status === status).length) throw new Error('architecture_refactor_decisions_invalid');
+  }
+  return result;
+}
 
 export type ArchitectureRequest = { repository_id: string } & (
   | { kind: 'architecture_modules' }
@@ -88,10 +173,16 @@ export type ArchitectureRequest = { repository_id: string } & (
   | { kind: 'architecture_review_prompt'; capability_id: string; shard: number; base?: string; head?: string }
   /** One page of `archctx history`. `ref` pins later pages to the `head` of the first page. */
   | { kind: 'architecture_history'; offset: number; limit: number; ref: string | null }
+  | { kind: 'architecture_refactor' }
 );
 // A page of at most 200 milestones stays below the 8 MB archctx stdout cap (about 16 KB per milestone here).
 const HISTORY_OFFSET = /^(?:0|[1-9][0-9]{0,5})$/, HISTORY_LIMIT = /^(?:[1-9][0-9]?|1[0-9]{2}|200)$/;
 export function parseArchitectureRequest(url: URL): ArchitectureRequest | null {
+  const refactor = OPERATOR_ARCHITECTURE_REFACTOR_ROUTE.exec(url.pathname);
+  if (refactor) {
+    if (url.search !== '') throw new Error('invalid_request');
+    return { kind: 'architecture_refactor', repository_id: refactor[1]! };
+  }
   const history = OPERATOR_ARCHITECTURE_HISTORY_ROUTE.exec(url.pathname);
   if (history) {
     const query = url.searchParams;
@@ -125,7 +216,7 @@ export function isArchitectureRequest(value: unknown): value is ArchitectureRequ
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   if (!match(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)(record.repository_id)) return false;
-  if (record.kind === 'architecture_modules') return object({ kind: one(record.kind), repository_id: text })(value);
+  if (record.kind === 'architecture_modules' || record.kind === 'architecture_refactor') return object({ kind: one(record.kind), repository_id: text })(value);
   if (record.kind === 'architecture_module') return object({ kind: one(record.kind), repository_id: text, capability_id: capability })(value);
   if (record.kind === 'architecture_history') {
     return object({ kind: one(record.kind), repository_id: text, offset: value => integer(value) && HISTORY_OFFSET.test(String(value)),

@@ -1146,7 +1146,7 @@ describe('sequence and topology base maps', () => {
     await mount(workspace({ readMap: reader(runtimeMap()) }));
     // The module map tab counts capabilities and the sequence tab counts flows.
     expect([...document.querySelectorAll('.architecture-tabs [role="tab"]')].map(item => [item.firstChild?.textContent, item.querySelector('.architecture-tabs__count')?.textContent ?? null]))
-      .toEqual([['Modules', '2'], ['Layers', null], ['Sequence', '2'], ['Topology', null], ['Module list', null], ['History', null]]);
+      .toEqual([['Modules', '2'], ['Layers', null], ['Sequence', '2'], ['Topology', null], ['Module list', null], ['History', null], ['Refactor', null]]);
     await chooseLayer('violations');
     await tab('sequence');
     expect(document.querySelector('#architecture-tab-sequence')?.getAttribute('aria-selected')).toBe('true');
@@ -1262,10 +1262,20 @@ describe('sequence and topology base maps', () => {
       'Flow "Append a ledger row", step 2 (Step append): archctx reports no-direct-call.flows check',
       `Imports Name ${CALLER} with no declared relation (3 imports)deps`]);
     expect([...inspector().querySelectorAll('[data-fix-command]')].map(item => item.textContent)).toEqual([architectureViolationCommand('flows'), architectureViolationCommand('dependencies')]);
-    expect(architectureViolationCommand('flows')).toBe('archctx flows check --no-sync --json');
+    expect(architectureViolationCommand('flows')).toBe('rh arch flows check --no-sync --json');
+    expect(architectureViolationCommand('debt')).toBe('rh arch debt --json');
     // The PR changes the capability's component, and its flow step ends there: the third step, the first of an outcome.
     expect([...inspector().querySelectorAll('[data-module-impact="21"] > li')].map(item => item.textContent))
       .toEqual(['Changes 1 file here.', 'Reaches step 3 of the flow "Append a ledger row".']);
+
+    const debt = { state: 'ok', items: [{ kind: 'stale-anchor', nodes: [CALLER], paths: ['src/router.ts'], severity: 'warning', message: 'document · line 12 · line-moved', action: 'rh arch docs anchors --json' }] } as const;
+    await act(async () => root?.render(workspace({ repositoryId: 'repo-debt-detail', readMap: reader(runtimeMap({ layers: { ...layers, violations: { ...layers.violations, debt } } })) })));
+    await settle();
+    await click(`.react-flow__node[data-id="${CALLER}"]`);
+    expect([...inspector().querySelectorAll('[data-layer-facts="violations"] > li')].map(item => item.textContent)).toEqual([
+      '[warning] Model anchor out of date — document · line 12 · line-movedsrc/router.tsdebt',
+    ]);
+    expect(inspector().querySelector('[data-fix-command="debt"]')?.textContent).toBe('rh arch debt --json');
   });
 
   test('a node lists each stale doc citation with its origin and location; the violations count and summary count the findings', async () => {
@@ -1317,7 +1327,7 @@ describe('sequence and topology base maps', () => {
     expect(inspector().querySelector('[data-step-proof]')?.textContent).toBe('Not proven: archctx reports no-direct-call.');
     expect(inspector().querySelector('[data-call-sites]')).toBeNull();
     expect(inspector().querySelector('[data-step-today]')).not.toBeNull();
-    expect(inspector().querySelector('[data-fix-command="flows"]')?.textContent).toBe('archctx flows check --no-sync --json');
+    expect(inspector().querySelector('[data-fix-command="flows"]')?.textContent).toBe('rh arch flows check --no-sync --json');
 
     await click('.react-flow__edge[data-id="message:kept:commit"]');
     expect(inspector().querySelector('[data-gap="evidence"]')?.getAttribute('data-reason')).toBe('selector_undeclared');
@@ -1677,6 +1687,73 @@ describe('architecture history', () => {
     expect(document.querySelector('.architecture-history__whole-error')?.getAttribute('data-error-code')).toBe('history_shallow_repository');
     expect(document.querySelector('[data-command] code')?.textContent).toBe('git fetch --unshallow');
     expect(document.querySelector('li[data-milestone-rev]')).toBeNull();
+  });
+});
+
+describe('architecture refactor view', () => {
+  test('renders status counts, empty command hint, active verify commands, metrics, and module links', async () => {
+    const opened: (string | null)[] = [];
+    respond = () => json({
+      schema_version: 'repo-harness.architecture-refactor.v1',
+      adopted: true,
+      counts: { accepted: 0, acknowledged: 0, deferred: 0, resolved: 0, rejected: 0, waived: 0 },
+      decisions: [],
+    });
+    await mount(workspace({ onModule: id => opened.push(id) }));
+    await act(async () => document.querySelector<HTMLButtonElement>('#architecture-tab-refactor')!.click());
+    await settle();
+    expect(calls.at(-1)?.path).toBe(`/api/v1/repositories/${REPO}/architecture/refactor`);
+    expect(document.querySelector('[data-refactor-empty="none"]')?.textContent).toBe('No refactor decisions recorded.');
+    expect(document.querySelector('[data-refactor-command="recommendations"]')?.textContent).toBe('rh arch refactor recommendations');
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-refactor-view] .copy-value button')!.click());
+    expect(copied).toEqual(['rh arch refactor recommendations']);
+
+    const activeId = 'recommendation.0000000000000001';
+    const resolvedId = 'recommendation.0000000000000002';
+    respond = () => json({
+      schema_version: 'repo-harness.architecture-refactor.v1',
+      adopted: true,
+      counts: { accepted: 1, acknowledged: 0, deferred: 0, resolved: 1, rejected: 0, waived: 0 },
+      decisions: [
+        {
+          recommendation_id: activeId,
+          category: 'structural_observation',
+          kind: 'cycle',
+          subject: `node:${CENTER}`,
+          affected_node_ids: [CENTER, 'component.pipeline.ledger'],
+          status: 'accepted',
+          metrics: { cycleCount: 2, instability: null },
+          reason: 'Break cycle in pipeline',
+          decided_at: '2026-11-21T08:00:00.000Z',
+          head_sha: COMMIT,
+          cli_verify_command: `rh arch refactor verify ${activeId} --json`,
+        },
+        {
+          recommendation_id: resolvedId,
+          category: 'refactor_proposal',
+          kind: null,
+          subject: 'repository',
+          affected_node_ids: [],
+          status: 'resolved',
+          metrics: null,
+          reason: 'Completed split',
+          decided_at: '2026-11-21T09:00:00.000Z',
+          head_sha: COMMIT,
+          cli_verify_command: `rh arch refactor verify ${resolvedId} --json`,
+        },
+      ],
+    });
+    await act(async () => root?.render(workspace({ refreshGeneration: 1, onModule: id => opened.push(id) })));
+    await settle();
+    expect(document.querySelector('#architecture-tab-refactor .architecture-tabs__count')?.textContent).toBe('2');
+    expect([...document.querySelectorAll('[data-refactor-counts] li')].map(li => li.textContent)).toEqual([
+      'accepted: 1', 'acknowledged: 0', 'deferred: 0', 'resolved: 1', 'rejected: 0', 'waived: 0',
+    ]);
+    expect(document.querySelector(`[data-refactor-decision="${activeId}"] [data-refactor-metrics]`)?.textContent).toBe('cycleCount=2 · instability=null');
+    expect(document.querySelector(`[data-refactor-verify="${activeId}"]`)?.textContent).toBe(`rh arch refactor verify ${activeId} --json`);
+    expect(document.querySelector(`[data-refactor-verify="${resolvedId}"]`)).toBeNull();
+    await act(async () => document.querySelector<HTMLButtonElement>(`[data-refactor-decision="${activeId}"] [data-refactor-nodes] button`)!.click());
+    expect(opened).toEqual([CENTER]);
   });
 });
 

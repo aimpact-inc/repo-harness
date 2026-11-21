@@ -103,7 +103,7 @@ export const ARCHITECTURE_VIOLATION_READS = {
 
 /** The shell command for one violation part's read. */
 export function architectureViolationCommand(part: keyof ArchitectureViolationsLayerV1): string {
-  return ['archctx', ...ARCHITECTURE_VIOLATION_READS[part]].join(' ');
+  return ['rh', 'arch', ...ARCHITECTURE_VIOLATION_READS[part]].join(' ');
 }
 
 /** The debt kinds that `archctx debt` reports itself; it defers dependency, flow and practice checks. A stale anchor or a machine rule may name no path. */
@@ -271,7 +271,14 @@ export function architectureImpact(report: RefImpactV1): ArchitectureImpactV1 {
   };
 }
 
-export interface ArchitectureDebtItemV1 { readonly kind: ArchitectureDebtKind; readonly nodes: readonly string[]; readonly paths: readonly string[] }
+export interface ArchitectureDebtItemV1 {
+  readonly kind: ArchitectureDebtKind;
+  readonly nodes: readonly string[];
+  readonly paths: readonly string[];
+  readonly severity?: string;
+  readonly message?: string;
+  readonly action?: string;
+}
 
 /** The evidence of a flow step: archctx's selector key, an entrypoint symbol and a sink of one model node. */
 export interface ArchitectureFlowSelectorV1 { readonly entrypoint: string; readonly source_symbol: string; readonly sink: string }

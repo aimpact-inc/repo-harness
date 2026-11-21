@@ -225,8 +225,19 @@ const flowEvidence = object({ ...selectorFields, node: id, source_path: nullable
 const anchorFindings: Check = value => list(object({
   kind: match(ARCHCTX_TOKEN), origin: one('document', 'node-summary', 'node-responsibility'), path: nullable(repoPath), line: nullable(positive), citation: prose(nonEmpty),
 }))(value) && (value as unknown[]).length > 0;
+const debtOptional: Record<string, Check> = { severity: singleLine, message: singleLine, action: singleLine };
+const debtItem: Check = value => {
+  if (!isRecord(value)) return false;
+  const record = value as Record<string, unknown>;
+  const baseKeys = ['kind', 'nodes', 'paths'];
+  return baseKeys.every(key => Object.hasOwn(record, key))
+    && one(...ARCHITECTURE_DEBT_KINDS)(record.kind)
+    && ids(record.nodes)
+    && list(repoPath)(record.paths)
+    && Object.keys(record).every(key => baseKeys.includes(key) || (Object.hasOwn(debtOptional, key) && debtOptional[key]!(record[key])));
+};
 const violations = object({
-  debt: section({ items: list(object({ kind: one(...ARCHITECTURE_DEBT_KINDS), nodes: ids, paths: list(repoPath) })) }, ARCHITECTURE_VIOLATION_REASONS),
+  debt: section({ items: list(debtItem) }, ARCHITECTURE_VIOLATION_REASONS),
   flows: either(section({
     selectors: count, proven: count, unproven: count, used_unproven: count, unprovable: list(object({ id, diagnostics: count })),
     evidence: list(object({ ...selectorFields, status: match(ARCHCTX_TOKEN), call_sites: list(object({ path: repoPath, line: nullable(positive) })) })),

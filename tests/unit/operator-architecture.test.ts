@@ -1,15 +1,27 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { knownFailure } from 'archctx-contracts';
+import { knownFailure, REFACTOR_DECISION_DIRECTORY, REFACTOR_DECISION_SCHEMA_VERSION, REFACTOR_RECOMMENDATION_FINGERPRINT_SCHEMA_VERSION, serializeRefactorDecision, type RefactorDecisionV1 } from 'archctx-contracts';
 import { ArchitectureModelReader } from '../../src/effects/architecture/model-reader';
-import { decodeArchitectureModuleIndex, decodeArchitectureModuleDetail, decodeArchitectureReviewPrompt } from '../../src/core/operator/architecture';
-import { isArchitectureRequest, parseArchitectureRequest } from '../../src/core/operator/architecture';
+import {
+  architectureRefactorVerifyCommand,
+  decodeArchitectureModuleIndex,
+  decodeArchitectureModuleDetail,
+  decodeArchitectureRefactorDecisions,
+  decodeArchitectureReviewPrompt,
+  isArchitectureRequest,
+  parseArchitectureRequest,
+} from '../../src/core/operator/architecture';
+import { readRefactorDecisions } from '../../src/effects/operator/architecture';
+import { startOperatorServer } from '../../src/effects/operator/server';
+import { repoHarnessRepoIdFor } from '../../src/effects/repo-registry';
 import { MODULE_ID, MODULE_NODE, MODULE_FLOW, moduleRepository, fixtureWrite, fixtureCommit, fixtureGit, fixtureYaml, writeStateMachine } from '../helpers/module-repository';
 import { readArchitectureImpactBatch, readArchitectureView, readArchVerification } from '../../src/effects/architecture/architecture-read';
 import { archVerifyCheck } from '../../src/core/architecture/arch-verify';
-import { readFileSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import {
   archctxRefusal,
+  architectureViolationCommand,
   decodeArchitectureMap,
   decodeArchitecturePullRequestsSource,
   flowSelectorKey,
@@ -130,6 +142,10 @@ test('request parser uses closed query fields and mode-specific full SHA inputs'
   for (const query of ['?limit=25', '?offset=0', '?offset=0&limit=201', '?offset=0&limit=1000', '?offset=01&limit=25', '?offset=0&limit=25&ref=HEAD', '?offset=0&limit=25&cursor=x']) {
     expect(() => history(query)).toThrow('invalid_request');
   }
+  const refactor = parseArchitectureRequest(new URL('http://localhost/api/v1/repositories/repo_0123456789abcdef/architecture/refactor'));
+  expect(refactor).toEqual({ kind: 'architecture_refactor', repository_id: 'repo_0123456789abcdef' });
+  expect(isArchitectureRequest(refactor)).toBe(true);
+  expect(() => parseArchitectureRequest(new URL('http://localhost/api/v1/repositories/repo_0123456789abcdef/architecture/refactor?x=1'))).toThrow('invalid_request');
 });
 
 
@@ -513,12 +529,36 @@ describe('architecture map', () => {
       fixtureCommit(root);
       const result = collectArchitectureMap('repo_0123456789abcdef', root, '2026-10-27T09:00:00.000Z', '2026-10-27T00:00:00.000Z', pending);
       if (!result.ok) throw new Error('worker failed');
-      // The broken rule carries a finding mark, so archctx reports no rule item for it.
-      expect(result.snapshot.layers.violations.debt).toEqual({ state: 'ok', items: [{ kind: 'state-machine-stale', nodes: [MODULE_ID], paths: ['src/module/read.ts'] }] });
+      // The broken rule carries a finding mark, so archctx reports no rule item for it; debt diagnostics and rh arch action stay intact.
+      expect(result.snapshot.layers.violations.debt).toEqual({
+        state: 'ok',
+        items: [{
+          kind: 'state-machine-stale',
+          nodes: [MODULE_ID],
+          paths: ['src/module/read.ts'],
+          message: 'state-machine.module.read · event · finish · anchor-unconfirmed',
+          action: 'rh arch state-machines check --json',
+        }],
+      });
+      expect(architectureViolationCommand('debt')).toBe('rh arch debt --json');
       const read = readArchitectureView(root, ['debt', '--json']);
       if (!read.ok) throw new Error('debt failed');
       const report = decodeArchitectureDebtReport(read.data);
       const known = new Set(result.snapshot.nodes.map(node => node.id));
+      expect(debtSection({
+        ...report,
+        items: report.items.map(item => ({ ...item, severity: 'warning', message: 'Check /Users/alice/secret', action: 'archctx plan --id x' } as unknown as typeof item)),
+      }, known)).toEqual({
+        state: 'ok',
+        items: [{
+          kind: 'state-machine-stale',
+          nodes: [MODULE_ID],
+          paths: ['src/module/read.ts'],
+          severity: 'warning',
+          message: 'Check [private path]',
+          action: 'rh arch debt --json',
+        }],
+      });
       expect(debtSection({ ...report, items: report.items.map(item => ({ ...item, kind: 'practice-regression' as const })) }, known))
         .toEqual({ state: 'unavailable', reason: 'archctx_failed' });
     } finally { rmSync(root, { recursive: true, force: true }); }
@@ -690,6 +730,8 @@ describe('architecture map', () => {
     refused(copy => { copy.layers.violations.debt.items[0].paths = ['/Users/someone/repo/src/orphan.ts']; });
     refused(copy => { copy.layers.violations.debt.items[0].paths = ['src/../../outside.ts']; });
     refused(copy => { copy.layers.violations.debt.items[0].kind = 'undeclared-dependency'; });
+    refused(copy => { copy.layers.violations.debt.items[0].message = 'Leak /Users/someone/secret'; });
+    refused(copy => { copy.layers.violations.debt.items[0].extra = 'bad'; });
     refused(copy => { copy.layers.violations.flows.unprovable[0].id = PART; });
     refused(copy => { copy.layers.violations.flows = { state: 'unavailable', reason: 'archctx_error', code: 'schema invalid', reason_code: null }; });
     refused(copy => { copy.layers.violations.flows = { state: 'unavailable', reason: 'archctx_error', code: 'AC_SCHEMA_INVALID', reason_code: 'Not_Kebab' }; });
@@ -1130,5 +1172,99 @@ describe('architecture map', () => {
       const pulls = result.snapshot.layers.pull_requests;
       expect(pulls.state === 'ok' && pulls.pull_requests.map(pr => pr.impact)).toEqual([{ state: 'unavailable', reason: 'path_not_public' }]);
     } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe('operator architecture refactor decisions', () => {
+  const makeDecision = (hex: string, status: RefactorDecisionV1['status'], reason = 'Decided for module boundary', extra: Partial<RefactorDecisionV1> = {}): RefactorDecisionV1 => ({
+    schemaVersion: REFACTOR_DECISION_SCHEMA_VERSION,
+    namespace: 'product.repo-harness',
+    recommendationId: `recommendation.${hex.padStart(16, '0')}`,
+    fingerprint: `sha256:${hex.padStart(64, 'a')}`,
+    fingerprintSchemaVersion: REFACTOR_RECOMMENDATION_FINGERPRINT_SCHEMA_VERSION,
+    category: 'structural_observation',
+    kind: 'cycle',
+    subject: { selectorKind: 'node', stableKey: `node:${MODULE_ID}`, subjectSelectorId: `subject.node.${hex.padStart(16, 'b')}` },
+    affectedNodeIds: [MODULE_ID],
+    affectedNodeCount: 1,
+    regressesFrom: null,
+    status,
+    observationMetrics: { cycleCount: 2, instability: null },
+    reason,
+    actor: { kind: 'cli', id: 'advisor' },
+    decidedAt: '2026-11-21T08:00:00.000Z',
+    provenance: { headSha: '1'.repeat(40), assessmentDigest: `sha256:${'2'.repeat(64)}`, baselineSnapshotDigest: `sha256:${'3'.repeat(64)}` },
+    ...extra,
+  });
+
+  test('reads unadopted, empty, sorted active-first decisions, skips transient ChangeSet files, redacts secrets, and serves GET /architecture/refactor', async () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'operator-refactor-')));
+    try {
+      const repo = join(base, 'repo'), home = join(base, 'home');
+      mkdirSync(repo, { recursive: true }); mkdirSync(home, { recursive: true });
+      expect(readRefactorDecisions(repo)).toEqual({
+        schema_version: 'repo-harness.architecture-refactor.v1',
+        adopted: false,
+        counts: { accepted: 0, acknowledged: 0, deferred: 0, resolved: 0, rejected: 0, waived: 0 },
+        decisions: [],
+      });
+      mkdirSync(join(repo, '.archcontext'), { recursive: true });
+      writeFileSync(join(repo, '.archcontext/manifest.yaml'), 'schemaVersion: archcontext.manifest/v1\n');
+      expect(readRefactorDecisions(repo).adopted).toBe(true);
+      expect(readRefactorDecisions(repo).decisions).toEqual([]);
+
+      const dir = join(repo, REFACTOR_DECISION_DIRECTORY);
+      mkdirSync(dir, { recursive: true });
+      const resolved = makeDecision('1', 'resolved');
+      const deferred = makeDecision('3', 'deferred');
+      const acceptedB = makeDecision('4', 'accepted', `Fix ${repo}/src/secret.ts and /Users/alice/key`);
+      const acceptedA = makeDecision('2', 'accepted', 'Split cycle', { category: 'refactor_proposal', kind: null, observationMetrics: null });
+      for (const item of [resolved, deferred, acceptedB, acceptedA]) {
+        writeFileSync(join(dir, `${item.recommendationId}.json`), serializeRefactorDecision(item));
+      }
+      // Transient ChangeSet backup and temp files are skipped cleanly.
+      writeFileSync(join(dir, `${resolved.recommendationId}.json.archctx-backup`), 'transient');
+      writeFileSync(join(dir, `${resolved.recommendationId}.json.archctx-tmp-123-1`), 'transient');
+
+      const snapshot = readRefactorDecisions(repo);
+      expect(snapshot.counts).toEqual({ accepted: 2, acknowledged: 0, deferred: 1, resolved: 1, rejected: 0, waived: 0 });
+      expect(snapshot.decisions.map(item => [item.recommendation_id, item.status, item.cli_verify_command])).toEqual([
+        [acceptedA.recommendationId, 'accepted', architectureRefactorVerifyCommand(acceptedA.recommendationId)],
+        [acceptedB.recommendationId, 'accepted', architectureRefactorVerifyCommand(acceptedB.recommendationId)],
+        [deferred.recommendationId, 'deferred', architectureRefactorVerifyCommand(deferred.recommendationId)],
+        [resolved.recommendationId, 'resolved', architectureRefactorVerifyCommand(resolved.recommendationId)],
+      ]);
+      expect(snapshot.decisions[1]!.reason).toBe('Fix [redacted]/src/secret.ts and [redacted]');
+      expect(JSON.stringify(snapshot)).not.toContain(repo);
+      expect(() => decodeArchitectureRefactorDecisions({ ...snapshot, counts: { ...snapshot.counts, accepted: 0 } })).toThrow('architecture_refactor_decisions_invalid');
+      expect(() => decodeArchitectureRefactorDecisions({ ...snapshot, decisions: [...snapshot.decisions].reverse() })).toThrow('architecture_refactor_decisions_invalid');
+
+      const repoId = repoHarnessRepoIdFor(repo), at = '2026-11-21T08:00:00.000Z';
+      writeFileSync(join(home, 'registered-repos.json'), JSON.stringify({
+        version: 1, authorizationRevision: 1,
+        repos: [{ id: repoId, path: repo, accessMode: 'read_only', source: 'adopt', registeredAt: at, lastSeenAt: at }],
+      }));
+      const server = await startOperatorServer({ port: 0, env: { REPO_HARNESS_HOME: home } });
+      try {
+        const res = await fetch(`${server.url}/api/v1/repositories/${repoId}/architecture/refactor`);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual(snapshot);
+        const cached = await fetch(`${server.url}/api/v1/repositories/${repoId}/architecture/refactor`, { headers: { 'If-None-Match': res.headers.get('ETag')! } });
+        expect(cached.status).toBe(304);
+
+        // Malformed decision file fails closed with 422 model_invalid.
+        writeFileSync(join(dir, 'recommendation.ffffffffffffffff.json'), '{"broken":true}\n');
+        const bad = await fetch(`${server.url}/api/v1/repositories/${repoId}/architecture/refactor`);
+        expect([bad.status, await bad.json()]).toEqual([422, { code: 'model_invalid' }]);
+        rmSync(join(dir, 'recommendation.ffffffffffffffff.json'));
+
+        // Symlinked decision file fails closed with 422 path_escape.
+        const outside = join(base, 'outside.json');
+        writeFileSync(outside, serializeRefactorDecision(makeDecision('9', 'waived')));
+        symlinkSync(outside, join(dir, 'recommendation.0000000000000009.json'));
+        const escaped = await fetch(`${server.url}/api/v1/repositories/${repoId}/architecture/refactor`);
+        expect([escaped.status, await escaped.json()]).toEqual([422, { code: 'path_escape' }]);
+      } finally { await server.close(); }
+    } finally { rmSync(base, { recursive: true, force: true }); }
   });
 });
