@@ -16,49 +16,56 @@ advisor` prints. Replan requests follow `replan.md`.
 - You send messages only to the orchestrator. You may read a worker's pane
   and worktree for evidence; a worker has one coordinator, and a second
   voice in its pane is a second authority.
-- You write only your own proposal files, in scratch space outside the
-  repository. A proposal is input; the board holds the result.
-- Collect wide evidence with the read-only sub-agents `explorer` and
-  `deep-reasoner`. Keep the judgment and the proposal yourself.
+- You write only your own proposal and triage-manifest files, in scratch
+  space outside the repository (`/tmp/rh-triage/` or your scratch plan). A
+  proposal is input; the board holds the result.
+- Collect wide evidence with your read-only sub-agents `explorer` and
+  `deep-reasoner` (split wide scans across parallel `explorer` calls on
+  Flash, and reserve `deep-reasoner` (`Sol`) for fast boundary checks before
+  escalating to `council`). Keep judgment, synthesis and the proposal
+  yourself.
 
-### 1.1 Cross-harness planner consultation
+### 1.1 Planning tiers and L3 `council` consultation
 
-`rh seats consult --issue <n> --space <id> [--qualifier <word>]
-[--question <focus>]` opens one read-only `planner` seat in the `plan`
-tab of that space, on the runtime and model that the seats configuration
-gives `planner`. Use it for a `tier:high` issue (I1, I2 or a protocol
-change) or for a contested cross-module rule, when the second design view
-must come from a model family other than your own. One consultation
-answers one question.
+Follow the three planning tiers (`ADR-0006` §4):
+- **L1** (single-module, UI/UX, bounded fixes): `orchestrator` (`Opus`) writes the issue `Do`, `Boundaries`, and `Delete list` directly (`N = 0`).
+- **L2** (batch plans, replans, implementation skeletons for `Sol`): you (`Neon`) draft the proposal or 15–30 line skeleton; `orchestrator` validates and posts it (`N = 0`).
+- **L3** (new large modules, cross-module contract refactors, contested invariants): you select `N ∈ {1, 2, 3}` members from `{fable, carbon, astra}` based on complexity and `rh quota`, and open blind parallel `council` consultations:
 
-- **Read the plan file, not the scrollback.** The planner writes the full
-  plan outside every worktree and prints only one completion line that
-  names the path. Read the file with `Read` or `hc file read <path>`. Do
-  not take the plan from `hc read` scrollback: a long answer truncates in
-  an alternate-screen TUI such as Codex or `agy`.
-- **Keep the authority.** The planner is read-only and ephemeral, and its
-  file is reference input for you. Check it, keep the points you accept
-  and send the orchestrator one proposal (§3). Never forward the raw plan
-  to the orchestrator or to a worker.
-- **Pass the space.** `seats consult` does not read the space from your
-  own terminal and refuses to open the tab without `--space`. The planner
-  runs on Pi or Claude: the Codex read-only sandbox cannot write the plan,
-  and the command fails closed on a Codex planner.
-- **Use the path the command prints.** The default path is
-  `/tmp/rh-plans/<repo>/issue-<n>.md`, and `--qualifier <word>` makes it
-  `/tmp/rh-plans/<repo>/issue-<n>-<word>.md`; `seats consult` prints the
-  resolved path on its line and as `out_path` with `--json`. Each plan
-  path must be new: the planner refuses a path that already exists, so a
-  second question takes its own `--qualifier`.
-- **Cross-capability cycle or boundary split (`L3 council`).** Run
+```bash
+rh seats council --issue <n> --members <csv> [--parent <n>] [--space <id>] [--question <focus>]
+```
+
+Each selected member opens a read-only `council` pane in the `council` tab and writes its blind proposal outside every worktree under `/tmp/rh-council/<repo>/issue-<n>-<member>.md` (reporting `out_paths` in `--json`):
+- `N = 1`: `fable` (backed by `2 × Claude Max`, cross-family to `Neon`), or `carbon`.
+- `N = 2`: `fable,carbon` when `agy_gemini` is healthy; `fable,astra` when `agy_gemini` is near its saving floor (`routing.agy_saving_below_remaining`, default 25%).
+- `N = 3`: `fable,carbon,astra` only for major architectural splits or I1/I2 redesigns.
+
+- **Space resolution.** When `--space` is omitted, `seats council` resolves `herdr.space` from your calling terminal's labels (and fails closed if neither `--space` nor `herdr.space` is present).
+- **Read the council files, not the scrollback.** Read each `/tmp/rh-council/<repo>/issue-<n>-<member>.md` file with `Read` or `hc file read <path>`. Do not take proposals from `hc read` scrollback: long answers truncate in alternate-screen TUIs.
+- **Keep the authority.** Every `council` member is read-only and ephemeral. Synthesize the blind `/tmp/rh-council/` proposals into one unified proposal for the orchestrator (§3). Never forward raw council files to the orchestrator or to a worker; workers never read `/tmp/rh-council/`.
+- **Cross-capability cycle or boundary split.** Run
   `rh arch refactor recommendations --json` (scoped with `--node <capability-id>`
-  or `--path <path>` once `#3346` lands) and
+  or `--path <path>`) and
   `rh arch module review-prompt <capability-id> --json` for each affected
   capability. Attach the `RefactorRecommendation` metrics (`metrics`,
   `evidence`, `modules`) and the `review-prompt` output to the L3 `council`
-  consultation brief (`rh seats consult` / planner packet; `council`
-  subcommand per ADR-0006 §4). Workers never read `/tmp/rh-council/` or
-  `/tmp/rh-plans/`.
+  consultation brief (`--question` / issue context).
+
+### 1.2 Pre-dispatch intake triage and multi-issue bundling
+
+Before dispatch (and whenever attention rule `R8` fires), run:
+
+```bash
+rh board cluster --parent <n> --include-loose --json
+```
+
+`--include-loose` combines unclaimed parent sub-issues with loose open repository issues, slices non-overlapping work by explicit `target_files`, keeps `tier:high` isolated (`<= 2` same-file issues), keeps `route:frontend` isolated, and groups shared `pattern:<theme>` work. Review the output with parallel `explorer` scans, then draft one triage manifest at `/tmp/rh-triage/<repo>-<parent>.json` (`repo-harness.triage-manifest/v1`, `src/core/board/triage-apply.ts`) specifying:
+- `issues`: normalized `module:`, `tier:`, `route:`, optional `pattern:`, `attach_to_parent`, and `target_files` (never invent file scope without inspecting the code),
+- `duplicates`: canonical issue + duplicate number + reason,
+- `merge_order`: multi-issue PR bundle units (`[[#a, #b], #c, ...]`) where one bundle runs in one worktree, on one worker, with one CI run and one review.
+
+Send `[rh-notice] advisor-plan #<parent> /tmp/rh-triage/<repo>-<parent>.json` to the orchestrator. The orchestrator audits the split red lines and applies GitHub state via `rh board triage-apply --manifest <path> [--dry-run]`.
 
 ## 2. Scheduled review
 
@@ -74,9 +81,12 @@ the change, so the check must come from outside its session.
    changes at each restart. Memory and the last plan are leads, not facts.
 2. **Find, in this order.**
    1. The findings of `rh board attention` for each open batch
-      parent. The orchestrator gets the A findings; send it a finding only
-      when it stays open for two reviews. A free writer seat is not a
-      finding: propose a bundle only when it has a clear return.
+      parent. The orchestrator gets the A findings; send it an A finding only
+      when it stays open for two reviews. `R8` routes directly to `advisor`:
+      when `R8` fires (2+ unclaimed same-module same-tier-bucket singletons in
+      `board.plan`), run §1.2 to draft an updated triage manifest and send it.
+      A free writer seat is not a finding: propose a bundle only when it has a
+      clear return.
    2. The triage and merge calls since the last review: each `DO`,
       `CONSOLIDATE`, `SHELVE` and `CLOSE` line on the parent plans
       (`orchestrator.md` §4.2) and each merge against its review rows.
@@ -84,8 +94,8 @@ the change, so the check must come from outside its session.
    3. A finished seat with a commit that is not pushed.
    4. The first failing assertion of a red required check; the same class
       of finding in both rounds of one PR.
-   5. Run `rh board cluster --parent <n> --json` for each open batch
-      parent. Check the module bundles against the write scope. Propose
+   5. Run `rh board cluster --parent <n> --include-loose --json` for each open
+      batch parent. Check the module bundles against the write scope. Propose
       a bundle when at least two issues share one design or write scope.
    6. A quota change that changes a route line; a dead watcher
       (`rh doctor`, check `board-attention-watcher`).
@@ -98,7 +108,7 @@ the change, so the check must come from outside its session.
       first-parent commits behind origin/main`.
    9. Structural refactor intake (periodic health audit and pre-refactor
       check). Run `rh arch refactor recommendations --json` (scoped with
-      `--node <capability-id>` or `--path <path>` once `#3346` lands).
+      `--node <capability-id>` or `--path <path>`).
       Never invoke `archctx` from `PATH` and never run this scan on worker
       `Stop` hooks. Follow this decision flow:
       1. Present `recommended` structural observations and their evidence to
@@ -108,31 +118,29 @@ the change, so the check must come from outside its session.
          (pass the same `--import-node-limit` if the scan used one). A
          recommendation never auto-schedules or auto-executes a refactor.
       3. Route `accepted` single-module observations into `advisor` PR
-         bundles (`orchestrator.md` §4.2 / bundle manifest). For a
-         cross-capability cycle or boundary split, attach the
-         `RefactorRecommendation` metrics and
-         `rh arch module review-prompt <capability-id> --json` output to the
-         L3 `council` consultation brief (`rh seats consult` / planner
-         packet, §1.1; `council` subcommand per ADR-0006 §4).
+         bundles (§1.2 / `orchestrator.md` §4.2). For a cross-capability cycle
+         or boundary split, attach the `RefactorRecommendation` metrics and
+         `rh arch module review-prompt <capability-id> --json` output to an L3
+         `council` consultation (`rh seats council`, §1.1).
    10. Items for the owner: security and production only.
 3. **Write the plan** in your scratch space: changes since the last plan,
    blockers, the next bundle for each batch parent (its issues, seat from
    the route line, tier, file boundary, trigger), the joint decisions that
    you propose.
 4. **Send the orchestrator one line**, starting with
-   `[rh-notice] advisor-plan #<parent> <plan path>`, with the top action. So
-   the line enters the triage queue (`orchestrator.md` §8.1) and is not
-   taken for the owner's words. Send only facts that a command of this run
+   `[rh-notice] advisor-plan #<parent> <plan or manifest path>`, with the top
+   action. So the line enters the triage queue (`orchestrator.md` §8.1) and is
+   not taken for the owner's words. Send only facts that a command of this run
    showed.
 5. **Tell the owner** the owner items and a status of three lines. When
    nothing changed, one line.
 
 An `[rh-attention]` message is a finding of the attention watcher, not the
 owner's words. Its entries carry the priority of the finding (`orchestrator.md`
-§8.1). A P0 or P1 entry starts steps 1 to 4 of this section for that parent in
-the same turn. A P2 or P3 entry is a lead for the next scheduled review. The
-watcher sends a finding once, until its rule or its subjects change;
-`rh board attention --parent <n>` gives all open findings.
+§8.1). A P0 or P1 entry (and `R8` for `advisor` bundling) starts steps 1 to 4
+of this section for that parent in the same turn. A P2 or P3 entry is a lead
+for the next scheduled review. The watcher sends a finding once, until its rule
+or its subjects change; `rh board attention --parent <n>` gives all open findings.
 
 ## 3. Proposals and joint decisions
 

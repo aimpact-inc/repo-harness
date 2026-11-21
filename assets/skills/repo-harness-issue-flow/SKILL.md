@@ -25,25 +25,20 @@ executes them or stops and asks.
 
 ## Seats, sub-agents and claim roles
 
-A **seat** is a process seat: the orchestrator, the advisor or a worker. A
-**sub-agent** is an `agents/fleet/` role that runs inside a seat process.
-The orchestrator calls only the read-only sub-agents `explorer` and
-`deep-reasoner`. The gatekeeper, every writer and the Codex cross-review
-run in Herdr seats.
-A **claim role** is the GitHub role that a claim gives: coordinator,
-writer, head owner, integrator or acceptor.
+A **seat** is a Herdr process seat (the 11-seat topology of `docs/adr/ADR-0006-issue-flow-seat-model-decoupling.md`: `orchestrator`, `advisor`, `council`, `worker-opus`, `worker-neon`, `worker-deep`, `worker`, `worker-light`, `gatekeeper`, `gatekeeper-fallback`, `reviewer`). A **sub-agent** is an `agents/fleet/` role that runs inside a seat process.
+`advisor` calls `explorer` and `deep-reasoner`; `orchestrator`, `council`, and non-light workers (`worker-opus`, `worker-neon`, `worker-deep`, `worker`) call `explorer` only; `worker-light` and review seats (`gatekeeper`, `gatekeeper-fallback`, `reviewer`) call no sub-agents (`[]`). The gatekeeper, reviewer, council members, and every writer run in Herdr seats.
+A **claim role** is the GitHub role that a claim gives: coordinator, writer, head owner, integrator or acceptor.
 
 | Agent | Suggested model | Claim roles it holds | Never does |
 |---|---|---|---|
-| Orchestrator | Any host's long-lived top-level session with network access, started from `rh seats argv orchestrator` | Coordinator of the parent issue; integrator. It triages intake (`DO` / `CONSOLIDATE` / `SHELVE`), dispatches bundles, launches reviews and merges | Implements a child issue in its own sub-tree; calls a writer sub-agent or runs the Codex cross-review as a sub-agent |
-| Advisor | A long-lived session beside the orchestrator, started from `rh seats argv advisor` | None. It is the owner interface, writes the parent bundle plan, audits triage and merges every 2 h and gives its half of a joint decision (`references/advisor.md`) | Writes to GitHub, commits, sends a message to a worker, decides alone |
+| Orchestrator | `claude` / `opus` (`high`) in a long-lived session with network access, started from `rh seats argv orchestrator` | Coordinator of the parent issue; integrator. It runs L1 plans directly, audits and applies `advisor` triage manifests (`rh board triage-apply`), dispatches bundles, launches reviews and merges | Implements a child issue in its own sub-tree; calls a writer sub-agent or runs a PR review as a sub-agent |
+| Advisor | `pi` / `magpie/agy-cli/gemini-4-neon` (`xhigh`) (or `agy` / `claude` on native-only hosts) in the pane beside `orchestrator`, started from `rh seats argv advisor` | None. It is the owner interface, leads pre-dispatch intake triage and multi-issue bundling (`rh board cluster --include-loose`, `/tmp/rh-triage/`), writes L2 plans/skeletons and triggers L3 `rh seats council` (`{fable, carbon, astra}`), audits triage and merges every 2 h, and gives its half of a joint decision (`references/advisor.md`) | Writes to GitHub, commits, sends a message to a worker, decides alone |
+| Council | `advisor`-triggered L3 consultation (`rh seats council --issue <n> --members <csv>`) across `{fable, carbon, astra}` | None. Writes read-only competing proposals to `/tmp/rh-council/<repo>/issue-<n>-<member>.md` | Edits source, commits, writes to GitHub, or talks to workers |
 | Gap reviewer | A different model family from the orchestrator, when one is available | None. Comments on the drafts | Rewrites the split or decides scope |
-| Worker | Any capable coding model | Writer of one issue or PR slot, dispatched by the coordinator; head owner of its PR | Posts its own claim, widens scope, merges, pushes to another owner's branch |
-| Acceptor | A seat holds the acceptor role. The default reviewer is the gatekeeper in its own Herdr seat; the acceptor does not call it as a sub-agent. The orchestrator does not review a PR itself; a gatekeeper seat reviews each PR that the orchestrator dispatches. The Codex cross-review and every other review run in another seat. One reviewer by default. For the High tier (I1, I2 or a repository-configured I3 path), two reviews of each head in parallel, at least one from a model family different from the writer's; the other can be a fresh same-family context (`references/acceptor.md` §2.2) | Acceptor of one review in one round | Reviews its own code, pushes code |
+| Worker | `worker-opus` (`opus` `high`), `worker-neon` (`neon` `high`), `worker-deep` (`sol` `high`), `worker` (`terra` `high`), `worker-light` (`glm-5.3-flash` / `deepseek-v4.1-flash`) | Writer of one bundle or PR slot, dispatched by the coordinator; head owner of its PR (except native `codex` sandbox workers, where the coordinator pushes) | Posts its own claim, widens scope, merges, pushes to another owner's branch |
+| Acceptor | `gatekeeper` (`sol` `high`, or `gatekeeper-fallback` when `chatgpt` is exhausted) is the default Medium acceptor for non-OpenAI writers and High parallel acceptor #1; `reviewer` (`opus` `high`) is the Medium acceptor for OpenAI writers and High parallel acceptor #2. Read-only in its own Herdr seat (`references/acceptor.md` §1, §2.2) | Acceptor of one review in one round (`Seat: gatekeeper` or `Seat: reviewer`) | Reviews its own code, edits files, pushes code |
 
-The suggested models are advice, not a requirement. Any capable host may
-hold any claim role. The High tier records its `model_relation` in the
-acceptance record (`references/acceptor.md`).
+Any host's long-lived top-level session may hold any claim role under the stored `~/.repo-harness/config.json#seats` config. The High tier records two `PASS` rows (`Seat: gatekeeper` and `Seat: reviewer`), at least one with `Model relation: different-family` (`references/acceptor.md`).
 
 A Claude seat can use the Claude Code advisor tool through its
 `advisor_model` setting. Advice from that tool is not an acceptance or
@@ -146,8 +141,9 @@ map ─▶ split ─▶ gap review ─▶ publish ─▶ dispatch ─▶ worker 
 - CI is the verification authority. A local pass does not replace a red
   required check.
 - The worker pushes its branch, opens its PR and runs its own fix rounds
-  (`references/worker.md` §6, §7). The orchestrator sends no push or PR go
-  and no finding relay. A Codex-runtime worker is the exception
+  (`references/worker.md` §6, §7). This includes `pi` `magpie/codex/*`
+  workers (`worker-deep`, `worker`). The orchestrator sends no push or PR go
+  and no finding relay. A native `codex`-runtime worker is the exception
   (`references/board.md`): the orchestrator pushes for it.
 - Only the orchestrator merges, and only with
   `rh publication merge`. The owner turns that on with
@@ -166,7 +162,9 @@ map ─▶ split ─▶ gap review ─▶ publish ─▶ dispatch ─▶ worker 
   has at most two rounds. Round 2 checks only the round-1 fix delta. A
   round-1 `PASS` row carries forward while the fix stays inside the
   failing reviewer's files; otherwise its reviewer checks only that
-  delta. The orchestrator merges on round
+  delta. Only a failure reachable in ordinary use or an I1/I2/I3 defect is
+  P0 or P1; adversarial-only assumptions and unrequested fallbacks are P3
+  notes. The orchestrator merges on round
   2 when only P2 or P3 findings remain. A blocking finding after round 2
   ends the loop: the orchestrator narrows the PR, or closes it and
   dispatches the bundle again. P2 and P3 findings stay in the review

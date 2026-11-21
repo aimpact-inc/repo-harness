@@ -14,9 +14,7 @@ Review by risk). The board marks such a PR `accepted` via `tier_low` from
 provisional: the merging seat confirms the verification evidence in the PR
 body before the merge.
 
-The gatekeeper is the default acceptor. It reviews the diff and
-returns a verdict and findings. A seat without the `net` tool group has no
-network, so the session that runs the round publishes the result.
+The `gatekeeper` (`Sol`) is the default Medium acceptor for non-OpenAI writers and High parallel acceptor #1. `reviewer` (`Opus`) is the Medium acceptor for OpenAI writers and High parallel acceptor #2. Each review seat is read-only and has no sub-agents (`fleet: []`); because it has no `net` write path, the coordinator publishes its receipt via `rh review collect`.
 
 No host and no model is mandatory. Any host that can read the PR and
 return the result schema can accept.
@@ -27,10 +25,12 @@ return the result schema can accept.
   risk. Code that writes comments, records, reviews or labels to GitHub is
   Medium unless it also hits the High list.
 - For the Medium tier, the one review comes from a model family different
-  from the writer's.
+  from the writer's (`gatekeeper` when `gatekeeperFamily !== writer_family`,
+  or `reviewer` when `writer_family === 'openai'`).
 - The High tier is a diff that touches I1, I2 or a repository-configured
-  I3 path. At least one of its two reviews of a head comes from a model
-  family different from the writer's, and the two run in parallel (§2.2).
+  I3 path. Two reviews (`Seat: gatekeeper` and `Seat: reviewer`) run in
+  parallel on the head (§2.2); at least one comes from a model family
+  different from the writer's.
 - The other High review can use a fresh context of the writer's family.
   Record `model_relation: same-family` in its receipt.
 - When the author model or the reviewer model is unknown, record
@@ -79,16 +79,16 @@ A review has at most two rounds. Each round grades only the lines that the
 PR changes.
 
 1. **Round 1** is the full tier review of one subject SHA. A Medium head
-   has one reviewer. A High head has two: the gatekeeper and a second
-   reviewer, at least one of them from a model family different from the
-   writer's (§1). The two start in parallel on the same SHA and take the
-   same round number. Each review has its own `acceptance claim` and its
-   own record row. `review publish` keys a claim by round, subject and
-   `Agent:` line, so two reviewers with an identical `Agent:` line on one
-   round share one claim and count once. This is the one row rule for
-   every head. The board accepts a High head, or a head of unknown tier,
-   only when it has `PASS` rows (its own, or carried to it by rule 2) that
-   cite two
+   has one reviewer (`gatekeeper` for non-OpenAI writers, `reviewer` for
+   OpenAI writers). A High head has two: `gatekeeper` and `reviewer`, at
+   least one of them from a model family different from the writer's (§1).
+   The two start in parallel on the same SHA and take the same round number.
+   Each review has its own `acceptance claim` (carrying `Seat: gatekeeper`
+   or `Seat: reviewer`) and its own record row (`Seat: gatekeeper` or
+   `Seat: reviewer`). `review publish` keys a claim by round, subject,
+   `Seat:`, and `Agent:` line. This is the one row rule for every head.
+   The board accepts a High head, or a head of unknown tier, only when it
+   has `PASS` rows (its own, or carried to it by rule 2) that cite two
    distinct `acceptance claim` comments of the PR, each with the row's
    `Subject` and `Round`, at least one of them with `Model relation:
    different-family`, and no `FAIL` row. A Medium head needs one `PASS`
@@ -207,11 +207,12 @@ finding that touches I1 (a credential leak by rh code) or I2 (an
 unauthorized deletion or overwrite of a user file) is rated at least P1, so
 it blocks. That rating is your duty: code reads a severity, not a subject.
 
-Judge a product PR on its own behavior and on I1 (no credential leak) and
-I2 (no deletion or overwrite of a user file without authorization). P0 and
-P1 are for failures that ordinary use or an accident can cause. An
-adversarial-only finding (attacker, race, alias, shell trick), a
-client-side cache timing window and a duplicate JSON key are P3 notes.
+Judge a product PR on its own behavior and on I1 (no credential leak),
+I2 (no deletion or overwrite of a user file without authorization), and
+configured I3 paths. Only defects reachable in ordinary use (or by an
+accident) or touching I1/I2/I3 are P0 or P1. An adversarial-only finding
+(attacker, race, alias, shell trick), a client-side cache timing window,
+an unrequested defensive fallback, and a duplicate JSON key are P3 notes.
 
 A finding gives the file, the line, the evidence and the smallest fix.
 Grade only the lines that the PR changes. A defect that main already has
@@ -264,7 +265,9 @@ the one `reviewer.harness` value of its runtime. The seat ends its reply
 with a `RECEIPT-JSON` marker and the receipt as one JSON object, and does
 not publish. After the pane status is `done`, the coordinator runs
 `rh review collect --seat <terminal> --pr <n> [--owner-record <url>] [--json]`.
-The command reads the session records of the seat's worktree: Pi under
+It records `Seat: gatekeeper` when the terminal's `repo-harness.seat` label
+is `gatekeeper` or `gatekeeper-fallback`, and `Seat: reviewer` when it is
+`reviewer`. The command reads the session records of the seat's worktree: Pi under
 `~/.pi/agent/sessions`, Claude Code under `~/.claude/projects` (or
 `CLAUDE_CONFIG_DIR`), and Codex rollout files under `~/.codex/sessions` (or
 `CODEX_HOME`) whose `session_meta` names that worktree. It binds a session
