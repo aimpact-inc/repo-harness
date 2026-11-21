@@ -201,7 +201,7 @@ describe('agents page seats section', () => {
     expect(request_id).toMatch(UUID);
     expect(expected_revision).toMatch(/^sha256:/u);
     expect(seats.advisor.fleet).toEqual(['explorer']);
-    expect(Object.keys(seats)).toEqual(['orchestrator', 'advisor', 'planner', 'worker', 'worker-deep', 'worker-important', 'worker-important-fast', 'worker-light', 'gatekeeper', 'gatekeeper-deep', 'gatekeeper-fallback', 'reviewer', 'routing']);
+    expect(Object.keys(seats)).toEqual(['orchestrator', 'advisor', 'council', 'worker', 'worker-deep', 'worker-opus', 'worker-neon', 'worker-light', 'gatekeeper', 'gatekeeper-fallback', 'reviewer', 'routing']);
     expect(document.querySelector('[data-seats-saved]')?.textContent).toContain('Running panes do not change');
 
     await click(pane('orchestrator'));
@@ -213,7 +213,7 @@ describe('agents page seats section', () => {
   test.each([
     [true, 'claude', 'fable'],
     [false, 'claude', 'fable'],
-  ] as const)('the planner switch saves the starter for Pi enabled = %s and can turn it off', async (piEnabled, runtime, model) => {
+  ] as const)('the council switch saves the starter for Pi enabled = %s and can turn it off', async (piEnabled, runtime, model) => {
     const stores = settingsStores(NOW, 'busy');
     if (piEnabled) {
       const initial = await stores.agents.read();
@@ -224,31 +224,31 @@ describe('agents page seats section', () => {
     }
     await mount({ ...seatsProps([]), readAgentsSettings: stores.agents.read, writeAgentsSettings: stores.agents.write,
       readSeatsSettings: stores.seats.read, writeSeatsSettings: stores.seats.write });
-    await click(buttonWithText('Planner'));
-    const card = '[data-seat-card="planner"]';
+    await click(buttonWithText('Council'));
+    const card = '[data-seat-card="council"]';
     const configured = () => document.querySelector<HTMLButtonElement>(`${card} [aria-label="Configured"]`)!;
-    const storedPlanner = async () => {
+    const storedCouncil = async () => {
       const read = await stores.seats.read();
       if (read.state !== 'ok') throw new Error('fixture read failed');
-      return read.settings.config.planner;
+      return read.settings.config.council;
     };
     expect(configured().getAttribute('aria-checked')).toBe('false');
     await click(configured());
-    expect(document.querySelector(`${card} [data-seat-launch]`)?.textContent).toContain('rh seats argv planner --repository-id <repository-id> --issue <n>');
+    expect(document.querySelector(`${card} [data-seat-launch]`)?.textContent).toContain('rh seats council --issue <n> --members fable,carbon');
     expect(allow('Edit files')).toBeNull();
     expect(allow('GitHub writes')).toBeNull();
     expect(allow('explorer').getAttribute('aria-checked')).toBe('true');
     await click(seatsSave());
-    expect(await storedPlanner()).toEqual({ runtime, model, advisor_model: null, effort: null, tools: ['net', 'read', 'shell'], fleet: ['explorer'] });
+    expect(await storedCouncil()).toEqual({ runtime, model, advisor_model: null, effort: null, tools: ['net', 'read', 'shell'], fleet: ['explorer'] });
     await click(configured());
     await click(seatsSave());
-    expect(await storedPlanner()).toBeNull();
+    expect(await storedCouncil()).toBeNull();
   });
 
   test('Claude advisor choices save one field, clear when off, and clear when the seat leaves Claude', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     await mount(seatsProps(posts));
-    await click(pick('Important worker'));
+    await click(pick('Opus worker'));
     const advisor = () => document.querySelector<HTMLElement>('[role="group"][aria-label="Advisor model"]');
     const choice = (name: string) => [...advisor()!.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === name)!;
     expect([...advisor()!.querySelectorAll('button')].map(button => button.textContent)).toEqual(['Off', 'opus', 'sonnet', 'haiku', 'fable']);
@@ -260,7 +260,7 @@ describe('agents page seats section', () => {
     expect(seatsSave().disabled).toBe(true);
     await click(choice('fable'));
     await click(seatsSave());
-    expect(posts[0]!.seats['worker-important'].advisor_model).toBe('fable');
+    expect(posts[0]!.seats['worker-opus'].advisor_model).toBe('fable');
     await click(buttonWithText('Codex'));
     expect(advisor()).toBeNull();
     await click(buttonWithText('Claude Code'));
@@ -270,8 +270,8 @@ describe('agents page seats section', () => {
   test('the seat offers its recommended models on its runtime, and a typed id outside them becomes the chosen model and saves (#3250, #3252)', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     await mount(seatsProps(posts));
-    await click(pick('Important worker'));
-    const card = '[data-seat-card="worker-important"]';
+    await click(pick('Opus worker'));
+    const card = '[data-seat-card="worker-opus"]';
     const offered = () => [...document.querySelectorAll(`${card} [role="group"][aria-label="Model"] button`)].map(button => button.textContent);
     expect(offered()).toEqual(['Host default', 'opus']);
     await typeText(`${card} [data-model-input]`, 'claude-opus-9');
@@ -283,7 +283,7 @@ describe('agents page seats section', () => {
     await click(buttonWithText('Claude Code'));
     expect(chosen()?.getAttribute('aria-pressed')).toBe('true');
     await click(seatsSave());
-    expect(posts[0]!.seats['worker-important'].model).toBe('claude-opus-9');
+    expect(posts[0]!.seats['worker-opus'].model).toBe('claude-opus-9');
   });
 
   test('Pi Neon clears the orchestrator note and can be added to a frontend route', async () => {
@@ -303,10 +303,10 @@ describe('agents page seats section', () => {
     await click(buttonWithText(neon));
     expect(note()).toBeNull();
 
-    await click(document.querySelector<HTMLElement>('[data-route="frontend"] [aria-label="Remove worker-important"]')!);
-    await click(pick('Important worker'));
+    await click(document.querySelector<HTMLElement>('[data-route="frontend"] [aria-label="Remove worker-opus"]')!);
+    await click(pick('Opus worker'));
     await click(buttonWithText('Pi'));
-    const add = () => document.querySelector<HTMLElement>('[data-route="frontend"] ~ [aria-label="Add worker-important"]');
+    const add = () => document.querySelector<HTMLElement>('[data-route="frontend"] ~ [aria-label="Add worker-opus"]');
     expect(add()).toBeNull();
     await click(buttonWithText(neon));
     await click(add()!);
@@ -314,8 +314,8 @@ describe('agents page seats section', () => {
     await click(seatsSave());
     expect(posts[0]?.seats).toMatchObject({
       orchestrator: { runtime: 'pi', model: neon },
-      'worker-important': { runtime: 'pi', model: neon },
-      routing: { frontend: ['worker-important-fast', 'worker-important'] },
+      'worker-opus': { runtime: 'pi', model: neon },
+      routing: { frontend: ['worker-neon', 'worker-opus'] },
     });
   });
 
@@ -362,12 +362,18 @@ describe('agents page seats section', () => {
   const choices = () => all('[data-seat-card] [role="group"][aria-label="Runtime"] button').map(button => button.textContent);
   const inPlace = (runtime: string) => document.querySelector<HTMLButtonElement>(`[data-runtime-enable="${runtime}"] [aria-label="Enable ${runtime}"]`);
 
-  test('the default Pi worker-light keeps Save off when only Claude and Codex are enabled', async () => {
+  test('a stored Pi worker-light keeps Save off when only Claude and Codex are enabled', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     const stores = settingsStores(NOW, 'busy');
     const read = await stores.seats.read();
     if (read.state !== 'ok') throw new Error('fixture read failed');
-    const stored = { ...read.settings, config: { revision: read.settings.config.revision, ...DEFAULT_SEATS_CONFIG } };
+    const stored = {
+      ...read.settings,
+      config: {
+        ...read.settings.config,
+        'worker-light': DEFAULT_SEATS_CONFIG['worker-light'],
+      },
+    };
     await mount({ ...seatsProps(posts), readAgentsSettings: stores.agents.read,
       readSeatsSettings: async () => ({ state: 'ok', settings: stored }) });
     expect(choices()).toEqual(['Claude Code', 'Codex']);
@@ -434,7 +440,7 @@ describe('agents page seats section', () => {
 
   test('every seat has a card; a review seat shows only its read, shell and network groups and no fleet; Claude mode stays unknown while quota is not read', async () => {
     await mount(seatsProps([]));
-    expect(all('[role="group"][aria-label="Seat"] button')).toHaveLength(12);
+    expect(all('[role="group"][aria-label="Seat"] button')).toHaveLength(11);
     await click(pick('gatekeeper'));
     expect(document.querySelector('[data-seat-card]')?.getAttribute('data-seat-card')).toBe('gatekeeper');
     expect(all('[data-seat-tools] [role="switch"]').map(node => node.getAttribute('aria-label'))).toEqual(['Allow Read code', 'Allow Shell', 'Allow Network']);
@@ -445,7 +451,7 @@ describe('agents page seats section', () => {
     expect([document.querySelector('[aria-label="Configured"]')?.getAttribute('aria-checked'), document.querySelector('[data-seat-tools]')]).toEqual(['false', null]);
     expect(mode('claude').getAttribute('data-mode')).toBe('unknown');
     // A frontend route seat on Codex: the request decoder refuses the section, so Save stays off with its code.
-    await click(pick('Important worker'));
+    await click(pick('Opus worker'));
     await click(buttonWithText('Codex'));
     expect([document.querySelector('[data-save-refused]')?.textContent, seatsSave().disabled]).toEqual(['The section is not valid: seats_settings_request_invalid', true]);
   });
@@ -485,18 +491,19 @@ describe('agents page seats section', () => {
   test('the routing lists reorder, add and remove; save sends the routes, thresholds and credit mode', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     await mount(seatsProps(posts));
-    expect(routeSeats('important_deep')).toEqual(['worker-important', 'worker-deep']);
-    await click(document.querySelector<HTMLButtonElement>('[aria-label="Move worker-deep up"]')!);
-    expect(routeSeats('important_deep')).toEqual(['worker-deep', 'worker-important']);
+    expect(routeSeats('important_deep')).toEqual(['worker-opus', 'worker-neon', 'worker-deep']);
+    await click(document.querySelector<HTMLButtonElement>('[data-route="important_deep"] [aria-label="Move worker-deep up"]')!);
+    expect(routeSeats('important_deep')).toEqual(['worker-opus', 'worker-deep', 'worker-neon']);
     await click(document.querySelector<HTMLButtonElement>('[data-route="simple_fast"] ~ [aria-label="Add worker-deep"]')!);
     expect(routeSeats('simple_fast')).toEqual(['worker', 'worker-deep']);
     await click(document.querySelector<HTMLButtonElement>('[data-route="simple_fast"] [aria-label="Remove worker"]')!);
     expect(routeSeats('simple_fast')).toEqual(['worker-deep']);
     expect(document.querySelector<HTMLButtonElement>('[data-route="simple_fast"] [aria-label="Remove worker-deep"]')!.disabled).toBe(true);
-    await click(document.querySelector<HTMLButtonElement>('[data-route="frontend"] [aria-label="Remove worker-important"]')!);
+    await click(document.querySelector<HTMLButtonElement>('[data-route="frontend"] [aria-label="Remove worker-opus"]')!);
     // worker-light is null in busy, so no list offers it.
-    expect(all('[data-route="frontend"] ~ button').map(button => button.getAttribute('aria-label'))).toEqual(['Add worker-important']);
+    expect(all('[data-route="frontend"] ~ button').map(button => button.getAttribute('aria-label'))).toEqual(['Add worker-opus']);
     await setNumber('[data-threshold="claude_hyper_at_or_above_remaining"]', '70');
+    await typeNumber('[data-threshold="agy_saving_below_remaining"]', '30');
     // The exhaustion line is a routing setting of its own (#2909): 100 typed over 95 passes through 1 and 10, and neither
     // intermediate text may be refused or snap back.
     expect(document.querySelector<HTMLInputElement>('[data-threshold="exhausted_at_or_above_used"]')!.value).toBe('95');
@@ -506,8 +513,8 @@ describe('agents page seats section', () => {
     await setNumber('[data-credit-floor]', '2000');
     await click(seatsSave());
     expect(posts[0]!.seats.routing).toMatchObject({
-      important_deep: ['worker-deep', 'worker-important'], simple_fast: ['worker-deep'], frontend: ['worker-important-fast'],
-      claude_saving_below_remaining: 20, claude_hyper_at_or_above_remaining: 70, exhausted_at_or_above_used: 100,
+      important_deep: ['worker-opus', 'worker-deep', 'worker-neon'], simple_fast: ['worker-deep'], frontend: ['worker-neon'],
+      claude_saving_below_remaining: 20, claude_hyper_at_or_above_remaining: 70, agy_saving_below_remaining: 30, exhausted_at_or_above_used: 100,
       codex_credit_mode: 'review', codex_credit_floor: 2000,
     });
     // worker-light as the only seat of a route: setting it to not configured empties the route, and the decoder refusal keeps Save off.
@@ -527,7 +534,7 @@ describe('agents page seats section', () => {
     await mount({ ...seatsProps([]), writeSeatsSettings: async () => ({ state: 'refused', status: 400, error: {
       code: 'seats_settings_request_invalid', message: 'The seats section is not valid.', next_action: 'Fix the routing and save again.',
     } }) });
-    await click(document.querySelector<HTMLButtonElement>('[aria-label="Move worker-deep up"]')!);
+    await click(document.querySelector<HTMLButtonElement>('[data-route="important_deep"] [aria-label="Move worker-deep up"]')!);
     await click(seatsSave());
     expect(result()?.getAttribute('data-save-result')).toBe('seats_settings_request_invalid');
   });
@@ -641,7 +648,7 @@ describe('agents page seats section', () => {
     await click(toggle('codex')!);
     await click(saveButton());
     const refusal = document.querySelector('[data-save-result="runtime_in_use"]');
-    expect(refusal?.textContent).toContain('gatekeeper-deep (codex)');
+    expect(refusal?.textContent).toContain('gatekeeper (codex)');
     expect(refusal?.textContent).toContain('Move the listed seats to an enabled runtime');
     expect(choices()).toEqual(['Claude Code', 'Codex']);
   });
@@ -656,7 +663,7 @@ describe('agents page seats section', () => {
     expect(choices()).toEqual(['Claude Code']);
     expect(inPlace('codex')!.getAttribute('aria-checked')).toBe('false');
     await click(buttonWithText('review seats'));
-    expect(document.querySelector('[data-save-blocked="gatekeeper-deep"]')?.textContent).toContain('Change its runtime or enable Codex under Hosts.');
+    expect(document.querySelector('[data-save-blocked="gatekeeper"]')?.textContent).toContain('Change its runtime or enable Codex under Hosts.');
     expect(seatsSave().disabled).toBe(true);
     await click(seatsSave());
     expect(posts).toHaveLength(0);

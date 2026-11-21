@@ -677,7 +677,7 @@ test('attention rules and delivery windows recognize all worker seat kinds', () 
   const board = replay();
   if (board.execution.status !== 'observed') throw new Error('the replay observes the seats');
   const [blocked, done] = board.execution.terminals;
-  for (const seat of ['worker', 'worker-deep', 'worker-important', 'worker-important-fast', 'worker-light', 'orchestrator', 'worker-custom']) {
+  for (const seat of ['worker', 'worker-deep', 'worker-opus', 'worker-neon', 'worker-light', 'orchestrator', 'worker-custom']) {
     const terminals = [{ ...blocked!, seat }, { ...done!, seat }] as BoardTerminalV1[];
     const candidate: BoardV1 = { ...board, items: board.items.map(item => item.number === 1475 ? { ...item, claim_status: { status_kind: 'none' } } : item), execution: { status: 'observed', terminals } };
     const attention = evaluateBoardAttention(candidate);
@@ -1041,7 +1041,7 @@ test('board read: every sub-issue page of the parent reaches the board and the m
     const quota = {
       claude: { state: 'normal', remaining: 80, mode: 'normal' },
       chatgpt: { state: 'normal', remaining: 30, mode: 'normal', credits: 'off' },
-      agy_gemini: { state: 'unknown', remaining: null },
+      agy_gemini: { state: 'unknown', remaining: null, mode: 'unknown' },
       agy_other: { state: 'unknown', remaining: null },
     } as const;
     return planDispatch({ seats: DEFAULT_SEATS_CONFIG, quota, terminals: [], parent }).coordinator;
@@ -2160,7 +2160,7 @@ test('board seats: the issue or pr label of a board item selects a seat with no 
   const hc = watchHc({
     FAKE_LS: ['t1', 't2', 't3', 't4', 't5'].map(address => ({ address, state: 'live' })),
     FAKE_TERMINALS: {
-      t1: room({ 'repo-harness.seat': 'worker-important', 'repo-harness.issue': '1477' }),
+      t1: room({ 'repo-harness.seat': 'worker-opus', 'repo-harness.issue': '1477' }),
       t2: room({ 'repo-harness.seat': 'gatekeeper', 'repo-harness.pr': '1491' }),
       t3: room({ 'repo-harness.seat': 'worker', 'repo-harness.issue': '1721', 'repo-harness.parent': '1474' }),
       t4: room({ 'repo-harness.seat': 'reviewer', 'repo-harness.pr': '1462' }),
