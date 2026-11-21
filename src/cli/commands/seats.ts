@@ -469,9 +469,9 @@ export function seatHandoff(env: NodeJS.ProcessEnv = process.env, now = new Date
     throw new SeatsCommandError('seat_identity_missing', 'REPO_HARNESS_SEAT and REPO_HARNESS_SEAT_REPOSITORY name no orchestrator or advisor seat: start the seat with rh seats argv <seat> --repository-id <id>.');
   }
   const session = readSeatSession(identity);
-  if (session?.host === 'antigravity') throw new SeatsCommandError('seat_reset_runtime_unsupported', 'Send the agy handoff to the orchestrator for a manual relaunch.');
-  const transcript = session?.transcriptPath;
-  if (transcript === undefined) throw new SeatsCommandError('seat_session_unknown', `The SessionStart record of the ${identity.seat} seat is missing or not valid, so the session transcript is unknown.`);
+  if (session === null) throw new SeatsCommandError('seat_session_unknown', `The SessionStart record of the ${identity.seat} seat is missing or not valid, so the session transcript is unknown.`);
+  if (session.host === 'antigravity') throw new SeatsCommandError('seat_reset_runtime_unsupported', 'Send the agy handoff to the orchestrator for a manual relaunch.');
+  const transcript = session.transcriptPath;
   let usage: TranscriptUsage;
   try { usage = readTranscriptUsage(transcript); } catch (error) {
     throw new SeatsCommandError('seat_context_unknown', `The transcript ${transcript} cannot be read: ${(error as Error).message}`);
@@ -479,8 +479,8 @@ export function seatHandoff(env: NodeJS.ProcessEnv = process.env, now = new Date
   const { contextTokens, bytes } = usage;
   if (contextTokens === null) throw new SeatsCommandError('seat_context_unknown', `The transcript ${transcript} has no assistant entry with a context size.`);
   const action = seatResetAction(bytes);
-  writeSeatResetRequest(identity, now, { contextTokens, transcriptPath: transcript, transcriptBytes: bytes, action });
-  return seatResetSteps(identity, action);
+  writeSeatResetRequest(identity, now, { contextTokens, transcriptPath: transcript, transcriptBytes: bytes, action, host: session.host });
+  return seatResetSteps(identity, action, session.host === 'pi' ? 'pi' : 'claude');
 }
 
 /** `loadNotify` comes from the composition root, only when peer-runtime is selected. */

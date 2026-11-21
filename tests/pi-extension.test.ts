@@ -17,6 +17,8 @@ import type { BridgeHookOutput } from '../src/cli/hook/hook-protocol';
 import { commitAll, initGitRepo, sandboxEnv, tmpWorkspace } from './helpers/repo-fixture';
 import { writeNoticeRegistry } from './helpers/agent-notice';
 import { recordPluginSelection } from './helpers/install-ownership';
+import { seatResetDirectory, seatResetRequestPath } from '../src/core/board/seat-reset';
+import { readSeatSession } from '../src/effects/board/seat-reset';
 
 const buildRoot = tmpWorkspace('pi-hook-bundle');
 // test:files builds dist/hook-entry.js before this file. Exercise the same-package default.
@@ -62,6 +64,8 @@ async function fixture(options: {
   mode?: 'print' | 'json' | 'rpc';
   nativeEntry?: boolean;
   gitProbe?: 'missing' | keyof typeof GIT_PROBE_SCRIPTS;
+  sessionFile?: boolean;
+  extraEnv?: NodeJS.ProcessEnv;
 } = {}) {
   const workspace = tmpWorkspace('pi-sdk-fixture');
   const root = join(workspace, 'repo');
@@ -89,7 +93,7 @@ async function fixture(options: {
   chmodSync(join(bin, 'repo-harness-hook'), 0o755);
   const env = { ...process.env, HOME: home, PI_CODING_AGENT_DIR: agentDir,
     PATH: `${bin}${delimiter}${process.env.PATH}`, HOOK_HOST: 'codex', HOOK_REPO_ROOT: '/stale-root', REPO_HARNESS_RUN_ID: 'stale-run',
-    TMPDIR: join(workspace, 'tmp'), REPO_HARNESS_WORKTREE_ROOT: join(workspace, 'managed') };
+    TMPDIR: join(workspace, 'tmp'), REPO_HARNESS_WORKTREE_ROOT: join(workspace, 'managed'), ...options.extraEnv };
   const bridges: ObservedBridge[] = [];
   const script: AssistantMessage[] = [];
   const providerContexts: unknown[] = [];
@@ -135,9 +139,12 @@ async function fixture(options: {
   });
   await loader.reload();
   expect(loader.getExtensions().errors).toEqual([]);
+  const sessionManager = options.sessionFile
+    ? SessionManager.create(root, join(home, 'sessions'))
+    : SessionManager.inMemory(root);
   const { session } = await createAgentSession({
     cwd: root, agentDir, modelRuntime, model: modelRuntime.getModel('scripted-fixture', 'fixture'),
-    sessionManager: SessionManager.inMemory(root), settingsManager, resourceLoader: loader,
+    sessionManager, settingsManager, resourceLoader: loader,
     tools: ['edit', 'write', 'bash', 'codemode'], thinkingLevel: 'off',
   });
   const previousGit = process.env.REPO_HARNESS_GIT_BIN;
@@ -155,7 +162,7 @@ async function fixture(options: {
   }
   let counter = 0;
   return {
-    root, home, session, bridges, providerContexts, protected: protectedFile,
+    root, home, session, bridges, providerContexts, protected: protectedFile, script,
     async tool(name: string, args: ToolCall['arguments']) {
       const id = `fixture-${++counter}`;
       script.push(assistant([{ type: 'toolCall', id, name, arguments: args }], 'toolUse'));
@@ -258,6 +265,67 @@ describe('Pi real SDK with scripted provider fixture', () => {
       expect(existsSync(join(f.root, '.ai/harness/handoff/current.md'))).toBe(false);
       expect(existsSync(join(f.root, '.ai/harness/handoff/resume.md'))).toBe(false);
     } finally { await f.close(); }
+  });
+
+  test('reset seat records Pi SessionStart and Stop blocks once at threshold without looping', async () => {
+    const repository = String(9_300_000_000 + process.pid);
+    const identity = { seat: 'advisor', repository } as const;
+    const f = await fixture({
+      sessionFile: true,
+      extraEnv: {
+        REPO_HARNESS_SEAT: identity.seat,
+        REPO_HARNESS_SEAT_REPOSITORY: identity.repository,
+        REPO_HARNESS_SEAT_MODEL: 'magpie/agy-cli/gemini-4-neon',
+        REPO_HARNESS_SEAT_EFFORT: 'xhigh',
+      },
+    });
+    try {
+      const sessionFile = f.session.sessionManager.getSessionFile();
+      expect(sessionFile).toBeDefined();
+      expect(readSeatSession(identity)).toMatchObject({
+        host: 'pi',
+        source: 'startup',
+        transcriptPath: sessionFile,
+        model: 'magpie/agy-cli/gemini-4-neon',
+        effort: 'xhigh',
+      });
+
+      const highUsageMessage: AssistantMessage = {
+        ...assistant([{ type: 'text', text: 'first answer' }]),
+        usage: {
+          input: 200_000, output: 10, cacheRead: 190_000, cacheWrite: 0, totalTokens: 390_010,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+      };
+      f.script.push(highUsageMessage);
+      f.script.push(assistant([{ type: 'text', text: 'handoff done' }]));
+
+      await f.session.prompt('Reach the context threshold.', { expandPromptTemplates: false });
+
+      const requestPath = seatResetRequestPath(identity);
+      expect(existsSync(requestPath)).toBe(true);
+      expect(JSON.parse(readFileSync(requestPath, 'utf8'))).toMatchObject({
+        host: 'pi',
+        action: 'compact',
+        context_tokens: 390_000,
+        transcript_path: sessionFile,
+      });
+
+      const stops = f.bridges.flatMap(bridge => bridge.requests).filter(request => request.event === 'Stop');
+      expect(stops).toHaveLength(2);
+      expect(stops.map(request => request.payload.stop_hook_active)).toEqual([false, true]);
+      const stopOutputs = f.bridges.flatMap(bridge => bridge.outputs).filter(output => output.event === 'Stop');
+      expect(stopOutputs.map(output => output.decision)).toEqual(['block', 'none']);
+
+      const messages = customMessages(f.session);
+      const handoffMsg = messages.find(message => message.role === 'custom' && typeof message.content === 'string' && message.content.includes('RESET-REQUEST'));
+      expect(handoffMsg).toBeDefined();
+      expect(handoffMsg!.role === 'custom' ? handoffMsg!.content : '').toContain('/compact');
+      expect(f.providerContexts.length).toBe(2);
+    } finally {
+      rmSync(seatResetDirectory(identity), { recursive: true, force: true });
+      await f.close();
+    }
   });
 
   test.each(['print', 'json', 'rpc'] as const)('%s mode blocks without UI or hook stdout', async (mode) => {
