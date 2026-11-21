@@ -3,7 +3,7 @@ import { Banner, Button, Empty, Loader, Switch, cn } from '@cloudflare/kumo';
 import { effectiveSeatConfig, seatAccountQuotas, seatOnCredits } from '../core/board/seat-routing';
 import { EXHAUSTED_AT_OR_ABOVE_USED_RANGE } from '../core/board/quota';
 import { agySeatLimits, buildSeatLaunch, type SeatLimitLevel } from '../core/board/seat-launch';
-import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, decodeSeatsSettingsRequest, isAgyAllowedSeat, isClaudeOrNeonSeat, isCouncilSeat, isOptionalSeat, isReviewSeat, isSeatScaffoldSubAgent, piSubAgentModel, seatHostId, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
+import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, decodeSeatsSettingsRequest, isAgyAllowedSeat, isClaudeOrNeonSeat, isCouncilSeat, isOptionalSeat, isReviewSeat, isSeatScaffoldSubAgent, isWorkerSeat, piSubAgentModel, seatHostId, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
 import type { SetupSnapshotV2 } from '../core/setup/types';
 import type { OperatorTranslate } from './i18n';
 import type { QuotaSection } from './quota';
@@ -225,7 +225,8 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
   ];
   const efforts = [{ value: null, label: t('seats.effort.default') }, ...ranges.efforts.map(effort => ({ value: effort as string | null, label: effort, off: !runtime.effort }))];
   // The host agent types change only the argv; the limit levels do not depend on them, so the page passes none.
-  const limits = agy ? agySeatLimits(seat === 'gatekeeper-fallback' ? 'gatekeeper' : seat) : buildSeatLaunch(seat === 'gatekeeper-fallback' ? 'gatekeeper' : seat, draft, 'seats', []).limits;
+  const launchSeat = seat === 'gatekeeper-fallback' ? 'gatekeeper' : seat;
+  const limits = agy ? agySeatLimits(launchSeat, draft) : buildSeatLaunch(launchSeat, draft, 'seats', []).limits;
   const levelOf = (subject: string) => limits.find(limit => limit.subject === subject)?.level ?? null;
   const fleetLevel = levelOf('fleet');
   // A stored role the server no longer lists stays visible, as a stored model does, so it can be switched off.
@@ -291,8 +292,9 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
         {SEAT_TOOLS.filter(tool => !(review || council) || range.tools.includes(tool)).map((tool) => {
           const on = draft.tools.includes(tool);
           const ruled = !range.tools.includes(tool);
+          const agyLockedTool = agy && !(isWorkerSeat(seat) && tool === 'gh');
           // Codex always runs commands, so its Shell can be turned on but not off.
-          const hostWhy = agy ? t('seats.tools.why.agy') : draft.runtime === 'pi' ? t('seats.tools.why.pi')
+          const hostWhy = agyLockedTool ? t('seats.tools.why.agy') : draft.runtime === 'pi' ? t('seats.tools.why.pi')
             : tool === 'read' ? t('seats.tools.why.read')
               : draft.runtime === 'codex' && tool === 'shell' && on ? t('seats.tools.why.codexShell')
                 : draft.runtime === 'codex' && (tool === 'tasks' || tool === 'schedule') ? t('seats.tools.why.codexTasks') : null;

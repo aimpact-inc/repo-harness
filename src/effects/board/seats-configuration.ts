@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { decodeAgentsConfig } from '../../core/board/agents-settings';
 import { isRecord } from '../../core/evidence/is-record';
 import { sha256Hex } from '../../core/evidence/sha256';
-import { agySeatAgentName, agySeatBrief } from '../../core/board/seat-launch';
+import { agySeatAgentName, agySeatAgentTools, agySeatBrief } from '../../core/board/seat-launch';
 import {
   AgySeatSettingsError,
   ALLOWED_SEAT_FLEET_ROLES,
@@ -361,15 +361,21 @@ if (import.meta.main) {
   process.stdout.write(`${JSON.stringify(probes)}\n`, () => process.exit(0));
 }
 
+const AGY_AGENT_DESCRIPTIONS: Readonly<Record<string, string>> = {
+  'rh-advisor': 'Repo-harness advisor',
+  'rh-council': 'Repo-harness council',
+  'rh-gatekeeper-fallback': 'Repo-harness gatekeeper fallback',
+  'rh-worker': 'Repo-harness worker',
+};
+
 /** Publish the generated agy seat agent by digest. An existing path can only be reused if it holds these bytes. */
-export function writeAgySeatAgent(config: SeatConfigV1, env: NodeJS.ProcessEnv, seat: LaunchSeatId = 'advisor'): string {
+export function writeAgySeatAgent(seat: LaunchSeatId, config: SeatConfigV1, env: NodeJS.ProcessEnv): string {
   const agentName = agySeatAgentName(seat);
-  const tools = WORKER_SEAT_IDS.includes(seat as typeof WORKER_SEAT_IDS[number])
-    ? '[view_file, write_to_file, replace_file_content, multi_replace_file_content, run_command, search_web]'
-    : '[view_file, run_command, search_web]';
+  const tools = agySeatAgentTools(seat);
+  const description = AGY_AGENT_DESCRIPTIONS[agentName] ?? `Repo-harness ${seat}`;
   const content = Buffer.from([
-    '---', `name: ${agentName}`, `description: Repo-harness ${seat}`, 'mainAgent: true',
-    `tools: ${tools}`, 'inheritMcp: false', '---', '', '# System', '', agySeatBrief(config, seat), '',
+    '---', `name: ${agentName}`, `description: ${description}`, 'mainAgent: true',
+    `tools: [${tools.join(', ')}]`, 'inheritMcp: false', '---', '', '# System', '', agySeatBrief(seat, config), '',
   ].join('\n'));
   const digest = sha256Hex(content);
   let directory = realpathSync(dirname(dirname(globalConfigurationPath(env))));

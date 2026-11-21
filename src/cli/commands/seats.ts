@@ -4,7 +4,7 @@ import { delimiter, dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { CLAUDE_BUILTIN_AGENT_TYPES, SeatPaneNameError, buildSeatLaunch, seatPaneName, seatTabName, type SeatLaunchV1 } from '../../core/board/seat-launch';
 import {
-  AGY_SEAT_TOOLS,
+  AGY_READONLY_SEAT_TOOLS,
   ALLOWED_SEAT_FLEET_ROLES,
   AgySeatSettingsError,
   COUNCIL_TOOLS,
@@ -12,6 +12,7 @@ import {
   RETIRED_SEAT_FLEET_ROLES,
   SeatsConfigMigrationRequiredError,
   decodeSeatsConfig,
+  isAgyAllowedSeat,
   isCouncilSeat,
   isReviewSeat,
   isWorkerSeat,
@@ -310,7 +311,7 @@ function resolveCouncilMemberSeat(member: CouncilMember, seats: SeatsConfigV1, e
     model: selected.model,
     advisor_model: null,
     effort: matchesStored ? stored.effort : (selected.effort ?? null),
-    tools: selected.runtime === 'agy' ? AGY_SEAT_TOOLS : (stored?.tools ?? COUNCIL_TOOLS),
+    tools: selected.runtime === 'agy' ? AGY_READONLY_SEAT_TOOLS : (stored?.tools ?? COUNCIL_TOOLS),
     fleet: selected.runtime === 'agy' ? [] : (stored?.fleet ?? ALLOWED_SEAT_FLEET_ROLES.council),
   };
 }
@@ -343,7 +344,9 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   const plannedSeat = id === 'gatekeeper' && planned !== undefined ? plannedGatekeeper(planned) : null;
   const runtimeSeat: SeatId = plannedSeat?.id === 'gatekeeper-fallback' ? plannedSeat.id : id;
   const initialCandidate = plannedSeat?.seat ?? configured;
-  let agyExecutable = initialCandidate.runtime === 'agy' ? await checkedAgyExecutable(runtimeSeat, config, initialCandidate, env, cwd, terminal) : undefined;
+  let agyExecutable = prepareFleet && initialCandidate.runtime === 'agy'
+    ? await checkedAgyExecutable(runtimeSeat, config, initialCandidate, env, cwd, terminal)
+    : undefined;
   const checkPool = checkAvailability && agyExecutable === undefined;
   const probes = checkPool ? collectSeatPoolProbes(env) : [];
   const unavailable = (modelSeat: SeatId, reason: string) => {
@@ -357,7 +360,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   const { id: effectiveId, seat: effective, modeKnown, claudeSaving } = plannedSeat !== null
     ? { id: runtimeSeat, seat: plannedSeat.seat, modeKnown: true, claudeSaving: false }
     : await quotaCheckedSeat(id, seats, configured, env, labels.ownerException);
-  if (effective.runtime === 'agy' && agyExecutable === undefined) {
+  if (prepareFleet && effective.runtime === 'agy' && agyExecutable === undefined) {
     agyExecutable = await checkedAgyExecutable(effectiveId, config, effective, env, cwd, terminal);
   }
   if (checkPool && effective.runtime !== 'agy') {
@@ -379,7 +382,11 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
     : [];
   const piRoleDirectory = prepareFleet && effective.runtime === 'pi' && effective.fleet.length > 0 ? writePiFleetRoles(effective.fleet, env, seats.pi_sub_agent_models) : undefined;
   const piHookExtension = effective.runtime === 'pi' && isReviewSeat(id) ? installedPiExtension(env) : undefined;
-  const agy = agyExecutable === undefined ? undefined : { executable: agyExecutable, directory: writeAgySeatAgent(effective, env, id), cwd };
+  const agy = effective.runtime !== 'agy'
+    ? undefined
+    : prepareFleet
+      ? { executable: agyExecutable!, directory: writeAgySeatAgent(id, effective, env), cwd }
+      : { executable: 'agy', directory: '<dry-run>', cwd };
   const launch = buildSeatLaunch(id, effective, config.seats === undefined ? 'defaults' : 'seats', agentTypes, {
     paneName: name ?? undefined, repositoryId: labels.repositoryId, piRoleDirectory, piHookExtension, claudeSaving, agy,
   });
@@ -392,6 +399,9 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
 }
 
 async function checkedAgyExecutable(id: SeatId, config: Record<string, unknown>, seat: SeatConfigV1, env: NodeJS.ProcessEnv, cwd: string, terminal: 'new' | 'existing'): Promise<string> {
+  if (!isAgyAllowedSeat(id)) {
+    throw new SeatsCommandError('seat_runtime_unsupported', `Direct agy launch is not supported on the ${id} seat.`);
+  }
   if (terminal === 'existing') throw new SeatsCommandError('seat_reset_runtime_unsupported', `Start a new agy ${id} pane with rh seats launch ${id}.`);
   if (!enabledRuntimesOf(config).includes(seatHostId('agy'))) {
     throw new SeatsConfigurationError('seat_runtime_not_enabled', `Enable Antigravity in Hosts before launching the ${id}.`);
@@ -650,8 +660,8 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
             });
             return { launch, model: effective.model, shell: effective.tools.includes('shell') };
           },
-          openTab: ({ task, ...rest }) => {
-            openSeatTab(task === undefined ? rest : { ...rest, task }, env);
+          openTab: ({ task, ...rest }, opts) => {
+            openSeatTab(task === undefined ? rest : { ...rest, task }, env, null, opts?.privateTask === true);
           },
         });
         process.stdout.write(options.json === true || result.dry_run

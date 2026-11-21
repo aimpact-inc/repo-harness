@@ -25,12 +25,20 @@ const TERRA = catalogEntry('terra', 'native');
 const ASTRA = catalogEntry('astra', 'native');
 const PI_ASTRA = catalogEntry('astra', 'magpie');
 export const AGY_ADVISOR_STARTER = catalogEntry('neon', 'native');
+export const AGY_COUNCIL_STARTER = catalogEntry('carbon', 'native');
 const GLM_FLASH = catalogEntry('glm-5.3-flash', 'magpie');
 const DEEPSEEK_FLASH = catalogEntry('deepseek-v4.1-flash', 'magpie');
+
+export function agySeatStarter(seat: SeatId): SeatModelEntryV1 {
+  if (seat === 'council') return AGY_COUNCIL_STARTER;
+  if (seat === 'worker-light' || seat === 'gatekeeper-fallback') return AGY_HYDROGEN_ENTRY;
+  return AGY_ADVISOR_STARTER;
+}
 
 const WORKER = Object.freeze([
   OPUS,
   NEON,
+  ...AGY_NEON_VARIANTS,
   PI_SOL,
   SOL,
   PI_TERRA,
@@ -55,12 +63,10 @@ const REVIEW = Object.freeze([
  * The settings page offers them; the user can set any other id (#3250). A release that moves a model
  * line changes its entry in `model-catalog.ts`; a stored value is never rewritten.
  */
-const NATIVE_CARBON = catalogEntry('carbon', 'native');
-
 export const SEAT_RECOMMENDED_MODELS: Readonly<Record<SeatId, readonly SeatModelEntryV1[]>> = Object.freeze({
   orchestrator: Object.freeze([OPUS, NEON]),
   advisor: Object.freeze([OPUS, NEON, FABLE, CARBON, ...AGY_NEON_VARIANTS]),
-  council: Object.freeze([FABLE, CARBON, NATIVE_CARBON, PI_ASTRA, ASTRA]),
+  council: Object.freeze([FABLE, CARBON, AGY_COUNCIL_STARTER, PI_ASTRA, ASTRA]),
   worker: WORKER,
   'worker-deep': WORKER,
   'worker-opus': WORKER,
