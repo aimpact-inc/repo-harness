@@ -364,6 +364,41 @@ function readDebt(root: string, known: ReadonlySet<string>): ArchitectureViolati
   return report === null ? { state: 'unavailable', reason: 'archctx_failed' } : debtSection(report, known);
 }
 
+const DEBT_DIRECT_ACTIONS: Readonly<Record<string, string>> = {
+  'archctx docs anchors --json': 'rh arch docs anchors --json',
+  'archctx state-machines check --json': 'rh arch state-machines check --json',
+  'archctx flows check --json': 'rh arch flows check --json',
+};
+
+function cleanSingleLine(raw: string): string {
+  return publicDevActivityText(raw.replace(/[\r\n\t]+/gu, ' ').trim());
+}
+
+function debtItemMessage(item: ArchitectureDebtReportV1['items'][number]): string {
+  const explicit = (item as { readonly message?: unknown }).message;
+  if (typeof explicit === 'string' && explicit.trim() !== '') return cleanSingleLine(explicit);
+  const { details } = item;
+  if (item.kind === 'state-machine-stale') {
+    return cleanSingleLine([details.stateMachineId, details.owner, details.ownerId, details.symbol, item.reasonCode].filter(Boolean).join(' · '));
+  }
+  if (item.kind === 'state-machine-rule') {
+    const target = details.ruleId ?? (details.region !== undefined ? `${details.region}.${details.state}`
+      : details.event !== undefined ? `${details.event} step ${details.step}` : undefined);
+    return cleanSingleLine([details.stateMachineId, target, item.reasonCode].filter(Boolean).join(' · '));
+  }
+  if (item.kind === 'stale-anchor') {
+    const line = details.documentLine !== undefined ? `line ${details.documentLine}` : undefined;
+    return cleanSingleLine([details.origin, line, details.symbol, item.reasonCode].filter(Boolean).join(' · '));
+  }
+  return cleanSingleLine([details.modelField, item.reasonCode].filter(Boolean).join(' · '));
+}
+
+function debtItemAction(raw: string): string {
+  const normalized = raw.replace(/[\r\n\t]+/gu, ' ').trim();
+  const mapped = DEBT_DIRECT_ACTIONS[normalized] ?? (/^archctx(?:\s|$)/u.test(normalized) ? 'rh arch debt --json' : normalized);
+  return cleanSingleLine(mapped);
+}
+
 /**
  * The map's form of a debt report. Its ownership and anchor checks must both be complete; it defers the others.
  * The state-machines check is not gated: archctx emits no item for an anchor it could not measure,
@@ -385,7 +420,20 @@ export function debtSection(report: ArchitectureDebtReportV1, known: ReadonlySet
       || new Set(item.nodeIds).size !== item.nodeIds.length || new Set(item.paths).size !== item.paths.length) {
       return { state: 'unavailable', reason: 'archctx_failed' };
     }
-    items.push({ kind, nodes: item.nodeIds, paths: item.paths });
+    const rawSeverity = typeof (item as { readonly severity?: unknown }).severity === 'string'
+      ? (item as unknown as { readonly severity: string }).severity
+      : typeof item.details.severity === 'string' ? item.details.severity : '';
+    const severity = rawSeverity.trim() === '' ? undefined : cleanSingleLine(rawSeverity);
+    const message = debtItemMessage(item);
+    const action = item.action.trim() === '' ? undefined : debtItemAction(item.action);
+    items.push({
+      kind,
+      nodes: item.nodeIds,
+      paths: item.paths,
+      ...(severity ? { severity } : {}),
+      ...(message ? { message } : {}),
+      ...(action ? { action } : {}),
+    });
   }
   return { state: 'ok', items };
 }

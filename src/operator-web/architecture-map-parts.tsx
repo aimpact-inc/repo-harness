@@ -130,7 +130,10 @@ export function violationFacts(map: ArchitectureMapV1, nodeIds: ReadonlySet<stri
   const facts: Fact[] = [];
   if (debt.state === 'ok') {
     debt.items.forEach((item, index) => {
-      if (item.nodes.some(id => nodeIds.has(id))) facts.push({ key: `debt-${index}`, text: t(`architecture.layer.debt.${item.kind}`), paths: item.paths, part: 'debt' });
+      if (!item.nodes.some(id => nodeIds.has(id))) return;
+      const head = item.severity ? `[${item.severity}] ${t(`architecture.layer.debt.${item.kind}`)}` : t(`architecture.layer.debt.${item.kind}`);
+      const text = item.message ? `${head} — ${item.message}` : head;
+      facts.push({ key: `debt-${index}`, text, paths: item.paths, part: 'debt' });
     });
   }
   if (flows.state === 'ok') {
