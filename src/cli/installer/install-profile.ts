@@ -5,7 +5,7 @@ import { bunGlobalPackageRoot, expectedSkillProjections } from './skill-projecti
 import { configurationReceiptPath } from './configuration-ownership';
 import { expectedOf, hostConfigPaths, hostConfigPathsAt, observeFile, putVault, removeTarget, replaceTarget, repositoryLedgers, resolveHostPath } from '../../effects/host-config/store';
 import { ensureSelfIgnoringDirectory, isSelfIgnoreGuard, SELF_IGNORE_NAME } from '../../effects/self-ignoring-directory';
-import { openHostConfigGate, planPathRevert, recoverRetiredPathWrites, rollbackHostConfigTransaction } from '../../effects/host-config/gate';
+import { antigravitySkillsDirHostPath, openHostConfigGate, planPathRevert, recoverRetiredPathWrites, rollbackHostConfigTransaction } from '../../effects/host-config/gate';
 import { namingTomlFile } from '../../core/host-config/toml-fragment';
 import { migrateCodexConfigRecords } from './codex-config-migration';
 import { migrateJsonConfigRecords } from './json-config-migration';
@@ -440,13 +440,30 @@ export function installProfileHostMutationPaths(env: NodeJS.ProcessEnv = process
 export function supportedPathRecord(env: NodeJS.ProcessEnv): (key: string, record: PathRecord) => boolean {
   const keys = (paths: readonly string[]) => new Set(paths.map(path => recordKeyOrNull(env, path)).filter((key): key is string => key !== null));
   const isRetired = retiredAgentRecordCheck(env);
-  const { repoHarnessSkills } = catalogMutationPathSkillNames(loadSkillSurfaceCatalog());
+  const catalog = loadSkillSurfaceCatalog();
+  const { repoHarnessSkills } = catalogMutationPathSkillNames(catalog);
+  const antigravitySkillNames = new Set(
+    catalog.packages
+      .filter((pkg) => pkg.source !== null && !pkg.explicitOnly && (pkg.kind === 'router' || pkg.kind === 'facade' || pkg.kind === 'provider-skill'))
+      .map((pkg) => pkg.name),
+  );
+  const antigravitySkillsRoot = antigravitySkillsDirHostPath(env);
   const allowed = keys([...installProfileHostMutationPaths(env), ...effectiveSkillRoots(PLUGIN_IDS, env).flatMap(root => repoHarnessSkills.map(name => join(root, name)))]);
   const fleet = keys(agentFleetTargetPaths(env));
   const facadeRoots = new Set([...keys(hostSkillRoots(requireHome(env), env).map((root) => join(root, FACADE_NAME_PREFIX)))].map((key) => dirname(key)));
-  return (key, record) => isRetired(key, record) || (isSurfaceOwner(record.owner) && (record.kind === 'user_managed'
-    ? fleet.has(key)
-    : allowed.has(key) || (basename(key).startsWith(FACADE_NAME_PREFIX) && facadeRoots.has(dirname(key)))));
+  return (key, record) => {
+    if (isRetired(key, record)) return true;
+    if (!isSurfaceOwner(record.owner)) return false;
+    if (record.host === 'antigravity') {
+      const name = basename(key);
+      return record.kind === 'created'
+        && dirname(key) === antigravitySkillsRoot
+        && (antigravitySkillNames.has(name) || name.startsWith(FACADE_NAME_PREFIX));
+    }
+    return record.kind === 'user_managed'
+      ? fleet.has(key)
+      : allowed.has(key) || (basename(key).startsWith(FACADE_NAME_PREFIX) && facadeRoots.has(dirname(key)));
+  };
 }
 
 registerSupportedPathRecords(supportedPathRecord);

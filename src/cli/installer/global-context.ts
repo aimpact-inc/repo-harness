@@ -14,8 +14,17 @@ import { accessSync, constants, lstatSync, readFileSync, statSync, type Stats } 
 import { join } from 'path';
 import { HostConfigError, type FragmentEdit, type HostConfigStrategy } from '../../core/host-config/types';
 import { insertMarkedBlock, markedBlock, markedBlockLayout, markedBlockMarkers, removeMarkedBlock, MARKED_BLOCK_FRAGMENTS } from '../../core/host-config/marked-block';
-import { openHostConfigGate, planFileRevert, type HostConfigAdoption, type HostConfigGate, type HostConfigRevertEntry } from '../../effects/host-config/gate';
-import { hostConfigPaths, resolveHostPath } from '../../effects/host-config/store';
+import {
+  AntigravityHooksPathError,
+  openHostConfigGate,
+  planFileRevert,
+  resolveUserConfigFile,
+  type HostConfigAdoption,
+  type HostConfigFileChange,
+  type HostConfigGate,
+  type HostConfigRevertEntry,
+} from '../../effects/host-config/gate';
+import { hostConfigPaths } from '../../effects/host-config/store';
 import { isReleasedGlobalRulesBlock, isReleasedGlobalRulesSection } from '../../effects/upgrade/released-values';
 
 export const GLOBAL_RULES_SELECTOR = 'global-working-rules';
@@ -45,7 +54,7 @@ export interface ReportingLanguage {
   readonly instruction: string;
 }
 
-export type GlobalContextHost = 'codex' | 'claude';
+export type GlobalContextHost = 'codex' | 'claude' | 'antigravity';
 
 /** One state per file. Only the two managed states with recorded inputs sync without a flag. */
 export type GlobalContextState =
@@ -102,7 +111,9 @@ export function parseReportLanguageFlag(value: string): ReportLanguageFlag {
 }
 
 export function globalContextPath(home: string, host: GlobalContextHost): string {
-  return host === 'codex' ? join(home, '.codex', 'AGENTS.md') : join(home, '.claude', 'CLAUDE.md');
+  if (host === 'codex') return join(home, '.codex', 'AGENTS.md');
+  if (host === 'claude') return join(home, '.claude', 'CLAUDE.md');
+  return join(home, '.gemini', 'config', 'AGENTS.md');
 }
 
 function readGlobalRulesTemplate(sourceRoot: string): string {
@@ -488,12 +499,15 @@ export function planGlobalContextFile(
   const unreadable = (current: string | null, detail: string): GlobalContextFilePlan => (
     { path, state: 'unreadable', outcome: 'skipped', current, recorded: null, block: null, legacy: false, detail }
   );
+  const env = { ...process.env, HOME: home };
   let current: string | null;
   let recorded: GlobalRulesRecord;
   try {
+    resolveUserConfigFile(env, path);
     current = readGlobalContextFile(path);
     recorded = recordedBlock(rulesGate(home), path);
   } catch (error) {
+    if (error instanceof AntigravityHooksPathError) throw error;
     return unreadable(null, `skipped-unreadable:${path} (${(error as Error).message}; make it a readable regular file to enable managed sync)`);
   }
   let inspection: GlobalContextInspection;
@@ -608,6 +622,49 @@ function globalRulesStrategy(sourceRoot: string, recorded: GlobalRulesRecord): H
 }
 
 /**
+ * Builds the HostConfigFileChange for one planned Global Working Rules file.
+ * Dry-run preview and apply share this operation model.
+ */
+export function globalContextFileChange(
+  file: GlobalContextFilePlan,
+  sourceRoot: string,
+  recorded: GlobalRulesRecord = file.recorded,
+  options: { readonly includeEditedSkip?: boolean } = {},
+): HostConfigFileChange | null {
+  if (file.outcome === 'write' && file.block !== null) {
+    const kind = file.current !== null && markedBlockLayout(file.current, GLOBAL_RULES_SELECTOR).kind === 'balanced' ? 'refresh' : 'add';
+    return {
+      path: file.path,
+      backup: 'overrides-only',
+      fragments: [{
+        owner: GLOBAL_RULES_OWNER,
+        selector: GLOBAL_RULES_SELECTOR,
+        kind,
+        strategy: globalRulesStrategy(sourceRoot, recorded),
+        value: file.block,
+        // Selected: released rh sections outside the markers, which the plan proved but the ledger does not hold; or
+        // a block that the user deleted after rh recorded it, which only the --report-language flag writes again.
+        ...(file.legacy || (kind === 'add' && recorded !== null) ? { selected: true } : {}),
+      }],
+    };
+  }
+  if (options.includeEditedSkip && file.edited) {
+    return {
+      path: file.path,
+      backup: 'overrides-only',
+      fragments: [{
+        owner: GLOBAL_RULES_OWNER,
+        selector: GLOBAL_RULES_SELECTOR,
+        kind: 'refresh',
+        strategy: markedBlock,
+        value: '',
+      }],
+    };
+  }
+  return null;
+}
+
+/**
  * Writes the preflight plan through the host-config gate. rh's own add and
  * refresh keep no whole-file copy (`overrides-only`, owner C1 on #2849); a
  * legacy migration takes out text that the ledger does not hold, so the gate
@@ -619,8 +676,9 @@ export function applyGlobalContextRefresh(plan: GlobalContextRefreshPlan, home: 
   const details: string[] = [];
   let failed = false;
   let skipped = plan.files.some((file) => file.outcome === 'skipped');
+  const env = { ...process.env, HOME: home };
   const gate = rulesGate(home);
-  const paths = hostConfigPaths({ ...process.env, HOME: home });
+  const paths = hostConfigPaths(env);
   const written = new Map<string, string>();
   for (const file of plan.files) {
     if (file.outcome !== 'write') {
@@ -628,7 +686,7 @@ export function applyGlobalContextRefresh(plan: GlobalContextRefreshPlan, home: 
       continue;
     }
     try {
-      const target = resolveHostPath(paths, file.path);
+      const target = resolveUserConfigFile(env, file.path, paths);
       const first = written.get(target);
       if (first !== undefined) {
         details.push(`${file.detail} (same file as ${first})`);
@@ -643,26 +701,14 @@ export function applyGlobalContextRefresh(plan: GlobalContextRefreshPlan, home: 
       }
       adoptGlobalRulesBlock(gate, file.path, plan.sourceRoot);
       const recorded = recordedBlock(gate, file.path);
-      const kind = file.current !== null && markedBlockLayout(file.current, GLOBAL_RULES_SELECTOR).kind === 'balanced' ? 'refresh' : 'add';
-      const result = gate.apply([{
-        path: file.path,
-        backup: 'overrides-only',
-        fragments: [{
-          owner: GLOBAL_RULES_OWNER,
-          selector: GLOBAL_RULES_SELECTOR,
-          kind,
-          strategy: globalRulesStrategy(plan.sourceRoot, recorded),
-          value: file.block!,
-          // Selected: released rh sections outside the markers, which the plan proved but the ledger does not hold; or
-          // a block that the user deleted after rh recorded it, which only the --report-language flag writes again.
-          ...(file.legacy || (kind === 'add' && recorded !== null) ? { selected: true } : {}),
-        }],
-      }]);
+      const change = globalContextFileChange(file, plan.sourceRoot, recorded)!;
+      const result = gate.apply([change]);
       if (result.skipped.length) {
         skipped = true;
         details.push(`skipped-edited:${file.path} (${GLOBAL_RULES_EDITED})`);
       } else details.push(file.detail);
     } catch (error) {
+      if (error instanceof AntigravityHooksPathError) throw error;
       failed = true;
       details.push(`failed:${file.path} (${(error as Error).message})`);
     }

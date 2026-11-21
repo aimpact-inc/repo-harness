@@ -14,14 +14,18 @@ import { runUserUninstall } from '../installer/uninstall';
  */
 
 import { existsSync, readFileSync } from 'fs';
-import type { DefaultTargetId, Location, TargetId } from '../installer/types';
+import type { DefaultTargetId, InstallOptions, Location, TargetId } from '../installer/types';
+import type { ReportLanguageFlag } from '../installer/global-context';
+import { hasRecordedAntigravityState, recordedAntigravityHooks } from '../installer/targets/antigravity';
 import { ALL_TARGETS, getTarget, listTargetIds } from '../installer/targets/registry';
 import { planJsonConfigMigration } from '../installer/json-config-migration';
 import { planFile, type PlannedFragment } from '../../core/host-config/plan';
 import { NO_OVERRIDES, formatOverride, parseOverride, unmatchedOverrides, type OverrideSelection } from '../../core/host-config/override';
 import type { FragmentRecord, SkippedOverride } from '../../core/host-config/types';
-import { ANTIGRAVITY_HOOK_SELECTOR, antigravityHooksPath, openHostConfigGate, resolveUserConfigFile, type HostConfigFileChange, type HostConfigGate } from '../../effects/host-config/gate';
+import { openHostConfigGate, resolveUserConfigFile, type HostConfigFileChange, type HostConfigGate } from '../../effects/host-config/gate';
 import { hostConfigPaths, resolveHostPath } from '../../effects/host-config/store';
+
+export { hasRecordedAntigravityState, recordedAntigravityHooks };
 
 export type InstallTargetSpec = DefaultTargetId | 'both';
 export type AdapterTargetSpec = TargetId | 'both';
@@ -30,6 +34,9 @@ export interface InstallCommandOptions {
   target: AdapterTargetSpec;
   location: Location;
   overrides?: OverrideSelection;
+  reportLanguage?: ReportLanguageFlag;
+  updateMode?: boolean;
+  hooks?: boolean;
 }
 
 export interface UninstallCommandOptions {
@@ -66,7 +73,12 @@ export function runInstall(opts: InstallCommandOptions): InstallCommandResult {
 
   for (const target of targets) {
     try {
-      const result = target.install(opts.location, { overrides: opts.overrides ?? NO_OVERRIDES });
+      const result = target.install(opts.location, {
+        overrides: opts.overrides ?? NO_OVERRIDES,
+        ...(opts.reportLanguage !== undefined ? { reportLanguage: opts.reportLanguage } : {}),
+        ...(opts.updateMode !== undefined ? { updateMode: opts.updateMode } : {}),
+        ...(opts.hooks !== undefined ? { hooks: opts.hooks } : {}),
+      });
       for (const file of result.files) {
         lines.push(`[${target.id}] ${file.action}: ${file.detail ?? file.path}`);
       }
@@ -90,10 +102,10 @@ export function resolveOverrides(raw: readonly string[], env: NodeJS.ProcessEnv)
 }
 
 /** The host-config changes of each target that the run installs; null `spec` when the run installs no host adapters. */
-function targetChanges(spec: AdapterTargetSpec | null, overrides: OverrideSelection, env: NodeJS.ProcessEnv) {
+function targetChanges(spec: AdapterTargetSpec | null, opts: InstallOptions, env: NodeJS.ProcessEnv) {
   return (spec === null ? [] : resolveTargets(spec)).map((target) => ({
     target,
-    changes: () => target.hostConfigChanges?.('global', { overrides }, env) ?? null,
+    changes: () => target.hostConfigChanges?.('global', opts, env) ?? null,
   }));
 }
 
@@ -105,7 +117,7 @@ function targetChanges(spec: AdapterTargetSpec | null, overrides: OverrideSelect
 export function assertOverridesCarried(spec: InstallTargetSpec | null, overrides: OverrideSelection, env: NodeJS.ProcessEnv): void {
   if (!overrides.length) return;
   const paths = hostConfigPaths(env);
-  const offered = targetChanges(spec, overrides, env).flatMap(({ changes }) => changes() ?? [])
+  const offered = targetChanges(spec, { overrides }, env).flatMap(({ changes }) => changes() ?? [])
     .map((change) => ({ path: resolveHostPath(paths, change.path), selectors: change.fragments.map((fragment) => fragment.selector) }));
   const missing = unmatchedOverrides(overrides, offered);
   if (missing.length) {
@@ -116,7 +128,7 @@ export function assertOverridesCarried(spec: InstallTargetSpec | null, overrides
 export interface HostConfigPreviewItem {
   readonly path: string;
   readonly selector: string;
-  readonly action: 'add' | 'refresh' | 'override' | SkippedOverride['code'];
+  readonly action: 'add' | 'refresh' | 'override' | 'create' | 'update' | 'remove' | SkippedOverride['code'];
 }
 
 export interface HostConfigPreview {
@@ -160,20 +172,32 @@ function previewFile(gate: HostConfigGate, env: NodeJS.ProcessEnv, change: HostC
  * schema move would leave it and writes nothing. A target that cannot be
  * planned is listed with the reason, never with a guessed value.
  */
-export function previewHostConfig(spec: AdapterTargetSpec | null, overrides: OverrideSelection, env: NodeJS.ProcessEnv): HostConfigPreview {
+export function previewHostConfig(
+  spec: AdapterTargetSpec | null,
+  overrides: OverrideSelection,
+  env: NodeJS.ProcessEnv,
+  options: Omit<InstallOptions, 'overrides'> = {},
+): HostConfigPreview {
   const gate = openHostConfigGate({ env, preview: true });
   const items: HostConfigPreviewItem[] = [];
   const unplanned: { target: TargetId; reason: string }[] = [];
-  for (const { target, changes } of targetChanges(spec, overrides, env)) {
+  for (const { target, changes } of targetChanges(spec, { overrides, ...options }, env)) {
     try {
       const built = changes();
       if (built === null) unplanned.push({ target: target.id, reason: 'its host-config writer lists no items yet' });
       else items.push(...built.flatMap((change) => previewFile(gate, env, change, target.id !== 'antigravity')));
+      if (target.hostConfigPathPreview) {
+        const pathPreview = target.hostConfigPathPreview('global', { overrides, ...options }, env);
+        items.push(...pathPreview.items);
+        for (const reason of pathPreview.refusals) {
+          unplanned.push({ target: target.id, reason });
+        }
+      }
     } catch (error) {
       unplanned.push({ target: target.id, reason: (error as Error).message });
     }
   }
-  return { items, unplanned, notListed: NOT_LISTED };
+  return { items, unplanned, notListed: spec === 'antigravity' ? [] : NOT_LISTED };
 }
 
 export function formatHostConfigPreview(preview: HostConfigPreview): string[] {
@@ -182,12 +206,6 @@ export function formatHostConfigPreview(preview: HostConfigPreview): string[] {
     ...preview.unplanned.map((entry) => `[host-config] not planned for ${entry.target}: ${entry.reason}`),
     ...preview.notListed.map((writer) => `[host-config] not planned: ${writer}; its writer lists no items yet`),
   ];
-}
-
-/** Explicit updates only refresh a member that this installation already records. */
-export function recordedAntigravityHooks(env: NodeJS.ProcessEnv, preview: boolean): boolean {
-  return openHostConfigGate({ env, preview }).recorded(antigravityHooksPath(env)).some((record) =>
-    record.owner === 'core' && record.selector === ANTIGRAVITY_HOOK_SELECTOR && record.kind === 'add');
 }
 
 export function runUninstall(opts: UninstallCommandOptions): InstallCommandResult {

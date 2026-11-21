@@ -5,7 +5,13 @@ import { fileFormatOf, fragmentFormat } from '../../core/host-config/registry';
 import { HostConfigError, type FileFormat, type FileRecord, type FragmentRecord, type HostConfigLedger, type Sha256 } from '../../core/host-config/types';
 import { globalRuntimeScope, runtimeTransactionRoot } from '../locking/runtime-transaction-lock';
 import { pathRecordIsCurrent } from './path-records';
-import { antigravityHostPath, checkAntigravityPath, resolveUserConfigFile } from './gate';
+import {
+  antigravityGlobalRulesHostPath,
+  antigravityHostPath,
+  antigravitySkillsDirHostPath,
+  checkAntigravityPath,
+  resolveUserConfigFile,
+} from './gate';
 import { hostConfigPaths, observeFile, readLedger, vaultPath, writeLedger, type HostConfigPaths } from './store';
 
 /**
@@ -97,9 +103,11 @@ function committedMatches(record: FileRecord, current: CurrentFile): boolean {
 export function configStatus(env: NodeJS.ProcessEnv): ConfigStatus {
   const paths = hostConfigPaths(env);
   const ledger = readLedger(paths);
-  const antigravity = antigravityHostPath(env, paths);
+  const antigravityHooks = antigravityHostPath(env, paths);
+  const antigravityRules = antigravityGlobalRulesHostPath(env, paths);
+  const antigravitySkills = antigravitySkillsDirHostPath(env, paths);
   const files = Object.entries(ledger.files).map(([path, record]): FileStatus => {
-    if (path === antigravity) checkAntigravityPath(path);
+    if (path === antigravityHooks || path === antigravityRules) checkAntigravityPath(path);
     const { current, bytes } = currentOf(path);
     const content = decoded(bytes);
     return {
@@ -112,7 +120,10 @@ export function configStatus(env: NodeJS.ProcessEnv): ConfigStatus {
   return {
     ledger: paths.ledger,
     files,
-    paths: Object.entries(ledger.paths).map(([path, record]) => ({ path, owner: record.owner, kind: record.kind, current: pathRecordIsCurrent(path, record) })),
+    paths: Object.entries(ledger.paths).map(([path, record]) => {
+      if (record.host === 'antigravity') checkAntigravityPath(antigravitySkills, 'directory');
+      return { path, owner: record.owner, kind: record.kind, current: pathRecordIsCurrent(path, record) };
+    }),
     recovery: ledger.recovery.map((entry) => ({ file: entry.file, copy: vaultPath(paths, entry.sha256), at: entry.at })),
     retired: ledger.retired.length,
     baselineCandidates: existsSync(backups) ? readdirSync(backups).filter((name) => name.endsWith('.bak')).sort().map((name) => join(backups, name)) : [],

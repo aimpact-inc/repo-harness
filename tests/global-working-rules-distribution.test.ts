@@ -1,16 +1,21 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, readdirSync, readFileSync } from "fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
 import { join } from "path";
 import {
+  applyGlobalContextRefresh,
   formatGlobalContextWrite,
+  globalContextPath,
   inspectGlobalContext,
   mergeManagedBlock,
   planGlobalRulesAdoption,
+  preflightGlobalContextRefresh,
   renderGlobalRulesBlock,
   SHIPPED_GLOBAL_RULES_H1,
   SHIPPED_GLOBAL_RULES_SECTIONS,
   type ReportingLanguagePreset,
 } from "../src/cli/installer/global-context";
+import { AntigravityHooksPathError } from "../src/effects/host-config/gate";
 import { legacySections } from "../scripts/check-released-managed-values";
 import { insertMarkedBlock, removeMarkedBlock } from "../src/core/host-config/marked-block";
 
@@ -261,6 +266,33 @@ describe("global working rules distribution", () => {
     const inspection = inspectGlobalContext(merged.content, ROOT);
     expect(inspection.state).toBe("managed-current");
     expect(inspection.language).toEqual({ preset: "custom", instruction });
+  });
+
+  test.skipIf(process.platform === "win32")("antigravity host maps to ~/.gemini/config/AGENTS.md, syncs through the gate, and refuses symlinks", () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "rh-antigravity-global-context-")));
+    try {
+      const target = globalContextPath(home, "antigravity");
+      expect(target).toBe(join(home, ".gemini", "config", "AGENTS.md"));
+      mkdirSync(join(home, ".gemini", "config"), { recursive: true });
+      writeFileSync(target, "# User header\n");
+      const plan = preflightGlobalContextRefresh(ROOT, home, ["antigravity"], "en");
+      expect(plan.files[0]?.outcome).toBe("write");
+      const applied = applyGlobalContextRefresh(plan, home);
+      expect(applied.status).toBe("ok");
+      const written = readFileSync(target, "utf8");
+      expect(written).toContain("# User header\n");
+      expect(written).toContain("Use English to report to user.");
+      expect(inspectGlobalContext(written, ROOT).state).toBe("managed-current");
+
+      // Symlinked AGENTS.md fails closed before reading.
+      const linked = join(home, "external-agents.md");
+      writeFileSync(linked, "# External\n");
+      rmSync(target);
+      symlinkSync(linked, target);
+      expect(() => preflightGlobalContextRefresh(ROOT, home, ["antigravity"], "en")).toThrow(AntigravityHooksPathError);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 

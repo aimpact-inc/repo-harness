@@ -114,7 +114,7 @@ export interface FragmentRecord {
  * followed: an uninstall selects by it. `repository`: a file that `rh init`
  * writes in a worktree outside `.claude/` and `.codex/` (#2903).
  */
-export type PathRecordHost = 'claude' | 'codex' | 'pi' | 'staged' | 'bin' | 'repository';
+export type PathRecordHost = 'claude' | 'codex' | 'pi' | 'antigravity' | 'staged' | 'bin' | 'repository';
 
 /**
  * `created`: an install wrote the whole path and an uninstall removes it while

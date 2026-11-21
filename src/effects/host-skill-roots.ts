@@ -15,6 +15,11 @@ export function hostSkillRoot(home: string, host: SkillHost, env: Readonly<Recor
   return join(home, `.${host}`, 'skills');
 }
 
+/** Antigravity is opt-in; default skill sync and SKILL_HOSTS never touch ~/.gemini. */
+export function antigravitySkillRoot(home: string): string {
+  return join(home, '.gemini', 'config', 'skills');
+}
+
 /** The Skills CLI staging root. Host roots link staged skills from here. */
 export function stagedSkillRoot(home: string): string {
   return join(home, '.agents', 'skills');

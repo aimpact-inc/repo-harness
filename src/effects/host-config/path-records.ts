@@ -2,7 +2,7 @@ import { requireHome } from '../repo-harness-home';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import { dirname, join } from 'node:path';
 import type { PathRecord, PathRecordHost } from '../../core/host-config/types';
-import { hostSkillRoot, stagedSkillRoot, syncSkillRoots } from '../host-skill-roots';
+import { antigravitySkillRoot, hostSkillRoot, stagedSkillRoot, syncSkillRoots } from '../host-skill-roots';
 import { isPathInside } from '../path-containment';
 import { hostConfigPaths, hostPathKey, readLedger, resolveHostPath, writeLedger } from './store';
 import { observeEntryIdentity, pathRecordContentHolds, pathRecordEntry } from './whole-path';
@@ -91,6 +91,11 @@ export function partitionPathRecords(env: NodeJS.ProcessEnv, all: PathRecords,
 export function pathRecordRoot(env: NodeJS.ProcessEnv, key: string, record: PathRecord): string | null {
   const paths = hostConfigPaths(env);
   if (record.host === 'claude' && key === hostPathKey(paths, join(requireHome(env), '.claude.json'))) return dirname(key);
+  if (record.host === 'antigravity') {
+    // Canonicalize HOME only: ~/.gemini, config, and skills must never resolve through links.
+    const root = antigravitySkillRoot(resolveHostPath(paths, requireHome(env)));
+    return key !== root && isPathInside(root, key) ? root : null;
+  }
   return hostRoots(env, record.host).map(root => resolveHostPath(paths, root)).find(root => key !== root && isPathInside(root, key)) ?? null;
 }
 
@@ -128,12 +133,13 @@ export function pathRecordHostRoot(env: NodeJS.ProcessEnv, path: string): { read
 }
 
 /** The hosts in the order that `pathRecordHost` tries their roots. */
-const HOST_ORDER: readonly PathRecordHost[] = ['pi', 'claude', 'codex', 'staged', 'bin'];
+const HOST_ORDER: readonly PathRecordHost[] = ['pi', 'claude', 'codex', 'antigravity', 'staged', 'bin'];
 
 /** The install root of a host, before links are followed. */
 function hostRoots(env: NodeJS.ProcessEnv, host: PathRecordHost): readonly string[] {
   const home = requireHome(env);
   if (host === 'pi') return [hostSkillRoot(home, 'pi', env)];
+  if (host === 'antigravity') return [antigravitySkillRoot(home)];
   if (host === 'staged') return [join(stagedSkillRoot(home), '..')];
   if (host === 'bin') return [env.BUN_INSTALL ?? join(home, '.bun')];
   // A repository record lives in a worktree, never under a host root of the user.

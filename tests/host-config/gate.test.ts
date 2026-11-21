@@ -3,7 +3,17 @@ import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, rea
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FragmentEdit, HostConfigStrategy, HostPath } from '../../src/core/host-config/types';
-import { openHostConfigGate, openRepositoryFileGate, rollbackHostConfigTransaction, type HostConfigFileChange } from '../../src/effects/host-config/gate';
+import {
+  AntigravityHooksPathError,
+  antigravityGlobalRulesPath,
+  antigravitySkillsDirPath,
+  openHostConfigGate,
+  openRepositoryFileGate,
+  rollbackHostConfigTransaction,
+  type HostConfigFileChange,
+} from '../../src/effects/host-config/gate';
+import { configDiff, configStatus } from '../../src/effects/host-config/inspect';
+import { pathRecordHost } from '../../src/effects/host-config/path-records';
 import { openRepositoryGate, repositoryConfigPaths, repositoryExcludePath } from '../../src/effects/host-config/repository';
 import { observeEntryIdentity, type PathEntry } from '../../src/effects/host-config/whole-path';
 import { hostConfigPaths, hostConfigPathsAt, migrateLedgerSchema, parseLedger, putVault, readProjectedLedger, replaceTarget } from '../../src/effects/host-config/store';
@@ -1271,4 +1281,65 @@ test.each(['git-managed HOME', 'bare repository with --work-tree=HOME', 'linked 
   const staged = new TextDecoder().decode(git('ls-files', '--cached').stdout).split('\n').filter(Boolean);
   expect(staged.filter((path) => path.startsWith('.repo-harness/config/vault/') || path.startsWith('.repo-harness/transactions/'))).toEqual([]);
   expect(staged).toContain('.claude/agents/rh.md');
+});
+
+test.skipIf(process.platform === 'win32')('Antigravity AGENTS.md and narrow skills root enforce no-symlink guards and preserve ~/.gemini/config', () => {
+  const f = fixture();
+  const env = { HOME: f.home };
+  const rulesPath = antigravityGlobalRulesPath(env);
+  const skillsDir = antigravitySkillsDirPath(env);
+  const configDir = join(f.home, '.gemini', 'config');
+  const skillDest = join(skillsDir, 'repo-harness');
+  const sourceDir = join(f.home, 'skill-src');
+  mkdirSync(sourceDir, { recursive: true });
+  writeFileSync(join(sourceDir, 'SKILL.md'), '# test\n');
+
+  // Narrow root: only ~/.gemini/config/skills/* maps to host 'antigravity', never all of ~/.gemini.
+  expect(pathRecordHost(env, skillDest)).toBe('antigravity');
+  expect(pathRecordHost(env, join(f.home, '.gemini', 'other'))).toBeNull();
+  expect(pathRecordHost(env, join(configDir, 'other'))).toBeNull();
+  expect(() => f.gate().writePaths([{ path: join(f.home, '.gemini', 'other'), owner: 'core', entry: { type: 'symlink', target: sourceDir } }]))
+    .toThrow('not inside an install root');
+
+  // Write AGENTS.md block and skill symlink through the gate.
+  const block = '<!-- BEGIN: repo-harness global-working-rules -->\n# Global Working Rules\n<!-- END: repo-harness global-working-rules -->';
+  f.gate().apply([{ path: rulesPath, backup: 'overrides-only', fragments: [{ owner: 'core', selector: 'global-working-rules', kind: 'add', strategy: markedBlock, value: block }] }]);
+  expect(f.gate().writePaths([{ path: skillDest, owner: 'core', entry: { type: 'symlink', target: sourceDir } }])).toEqual([skillDest]);
+  expect(f.ledger().paths[skillDest]?.host).toBe('antigravity');
+  expect(f.ledger().directories).not.toContain(configDir);
+  expect(f.ledger().directories).not.toContain(join(f.home, '.gemini'));
+
+  // Pre-existing unowned user skill directory is refused without overwriting.
+  const userSkill = join(skillsDir, 'repo-harness-check');
+  mkdirSync(userSkill, { recursive: true });
+  writeFileSync(join(userSkill, 'SKILL.md'), '# user skill\n');
+  expect(() => f.gate().writePaths([{ path: userSkill, owner: 'core', entry: { type: 'symlink', target: sourceDir } }]))
+    .toThrow('rh has no record of it');
+  expect(readFileSync(join(userSkill, 'SKILL.md'), 'utf8')).toBe('# user skill\n');
+
+  // Symlinked AGENTS.md or skills directory fails closed across gate and inspect operations.
+  const parkedRules = join(f.home, 'parked-agents.md');
+  renameSync(rulesPath, parkedRules);
+  symlinkSync(parkedRules, rulesPath);
+  expect(() => f.gate().apply([{ path: rulesPath, backup: 'overrides-only', fragments: [{ owner: 'core', selector: 'global-working-rules', kind: 'refresh', strategy: markedBlock, value: block }] }])).toThrow(AntigravityHooksPathError);
+  expect(() => f.gate().revert([rulesPath])).toThrow(AntigravityHooksPathError);
+  expect(() => configStatus(env)).toThrow(AntigravityHooksPathError);
+  expect(() => configDiff(env, rulesPath)).toThrow(AntigravityHooksPathError);
+  rmSync(rulesPath);
+  renameSync(parkedRules, rulesPath);
+
+  const parkedSkills = join(f.home, 'parked-skills');
+  renameSync(skillsDir, parkedSkills);
+  symlinkSync(parkedSkills, skillsDir, 'dir');
+  expect(() => f.gate().writePaths([{ path: skillDest, owner: 'core', entry: { type: 'symlink', target: sourceDir } }])).toThrow(AntigravityHooksPathError);
+  expect(() => f.gate().revertPaths([skillDest])).toThrow(AntigravityHooksPathError);
+  expect(() => configStatus(env)).toThrow(AntigravityHooksPathError);
+  rmSync(skillsDir);
+  renameSync(parkedSkills, skillsDir);
+
+  // Revert removes only rh-owned entries and preserves ~/.gemini/config and user skills.
+  expect(f.gate().revertPaths([skillDest]).map((entry) => entry.action)).toEqual(['removed']);
+  expect(f.gate().revert([rulesPath]).map((entry) => entry.action)).toEqual(['removed']);
+  expect(lstatSync(configDir).isDirectory()).toBe(true);
+  expect(readFileSync(join(userSkill, 'SKILL.md'), 'utf8')).toBe('# user skill\n');
 });
