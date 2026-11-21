@@ -27,9 +27,9 @@ Generality: These are general working rules. Do not tailor behavior to any speci
 
 Before non-trivial design or edits, complete P1/P2/P3:
 
-- **P1 — Map:** establish system boundaries, modules, ownership, entrypoints, configuration, runtime paths, authoritative files, strong/weak dependencies, and scope from observed code, not filenames alone.
-- **P2 — Trace:** follow a concrete input through contracts, type transformations, ownership handoffs, sync/async and error paths to its output; locate the pressure point. Mandatory before a bug fix.
-- **P3 — Decide:** explain existing compatibility, deployment, persistence, performance, security, product, or migration constraints; preserve the invariant, choose the smallest coherent change, and state its tradeoff and what fails first at 10x scale.
+- **P1 — Map:** read the code that the task touches before you design or edit; rely on observed code, not on filenames or reports.
+- **P2 — Trace:** follow one concrete input to its output and locate the pressure point. Mandatory before a bug fix.
+- **P3 — Decide:** choose the smallest coherent change that preserves the invariant; state what it gives up and what it does not handle.
 
 ## Code Optimization Principles
 
