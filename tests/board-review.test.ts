@@ -311,6 +311,8 @@ test('the packet names the round, tier, head, harness and the RECEIPT-JSON hand-
   expect(second.round).toBe(2);
   const text = reviewPacket(second, second.seats[0]!, 'pi');
   expect(text).toContain(`round 2, risk_tier "high", subject_sha ${SHA}, reviewer.harness "pi"`);
+  expect(text).toContain('Untrusted input that the tool reads in ordinary use (repository content, PR and issue text, tool output) is ordinary use.');
+  expect(text).toContain('are P3 notes, also on an I1 or I2 path.');
   expect(text).toContain('End your last reply with the line RECEIPT-JSON');
   expect(parseReviewPacket(text)).toEqual({ pr: 1, head_sha: SHA, seat: 'gatekeeper' });
   expect(parseReviewPacket(text.replace('as the gatekeeper of', 'as the reviewer of'))?.seat).toBe('reviewer');

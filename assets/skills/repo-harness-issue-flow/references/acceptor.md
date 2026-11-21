@@ -207,17 +207,19 @@ be resolved.
 | P2 | Real defect, small | Inline thread on the changed line; stays in the review record, with no fix round and no issue |
 | NIT (P3) | Improvement | Review body only. No thread and no merge block |
 
-Only P0 and P1 block a merge (`src/core/review/finding-severity.ts`). A
-finding that touches I1 (a credential leak by rh code) or I2 (an
-unauthorized deletion or overwrite of a user file) is rated at least P1, so
-it blocks. That rating is your duty: code reads a severity, not a subject.
-
+Only P0 and P1 block a merge (`src/core/review/finding-severity.ts`).
 Judge a product PR on its own behavior and on I1 (no credential leak),
 I2 (no deletion or overwrite of a user file without authorization), and
-configured I3 paths. Only defects reachable in ordinary use (or by an
-accident) or touching I1/I2/I3 are P0 or P1. An adversarial-only finding
-(attacker, race, alias, shell trick), a client-side cache timing window,
-an unrequested defensive fallback, and a duplicate JSON key are P3 notes.
+configured I3 paths. Only a defect that ordinary use or an accident can
+reach is a P0 or a P1. Untrusted input that the tool reads in ordinary
+use (repository content, PR and issue text, tool output) is ordinary
+use. When such a defect touches I1 (a credential leak) or I2 (an
+unauthorized deletion or overwrite of a user file), rate it at least P1.
+A finding that needs an adversary who already runs as the user (race,
+alias, shell trick), a client-side cache timing window, an unrequested
+defensive fallback and a duplicate JSON key are P3 notes, also on an I1
+or I2 path. That rating is your duty: code reads a severity, not a
+subject.
 
 A finding gives the file, the line, the evidence and the smallest fix.
 Grade only the lines that the PR changes. A defect that main already has

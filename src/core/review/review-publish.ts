@@ -14,7 +14,7 @@ import type { ModelRelation } from './acceptance-receipt';
  *
  * - P0/P1/P2 findings carry a path, a line, evidence and a bounded fix, so
  *   each one becomes exactly one inline review thread. Only P0 and P1 block
- *   the merge; a P2 becomes a follow-up issue (`finding-severity.ts`).
+ *   the merge; a P2 stays in the review record and opens no issue (`finding-severity.ts`).
  * - P3 findings are NITs. They carry no location, so they can appear only in
  *   the review body.
  * - `confirmed_fixed` names, by GitHub node id, the earlier-round review
