@@ -29,6 +29,11 @@ export function buildArchitectureProjectionCommand(): Command {
     .option('--changed-path <path...>', 'Changed repository-relative paths')
     .option('--request-id <id>', 'Stable request id')
     .action(async (options: ProjectionCommandOptions) => (await actions()).execute('adopt', options));
+  command.command('slice')
+    .description('Print the changed architecture slice for the pull request')
+    .requiredOption('--base <ref>', 'Review base')
+    .option('--json', 'Output the ArchContext envelope')
+    .action(async (options: { base: string; json?: boolean }) => (await actions()).slice(options));
   // A signal, not a gate: findings keep exit 0. Only a failed run exits 1.
   command.command('anchors').requiredOption('--json', 'Output the read-only archctx docs anchors report').action(async () => (await actions()).anchors());
   command.command('render-check').requiredOption('--json', 'Compare generated output using archctx target decisions').action(async () => (await actions()).renderCheck());

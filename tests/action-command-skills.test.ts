@@ -467,23 +467,15 @@ describe("repo-harness action command skills", () => {
     expect(orchestrator.replace(/\s+/g, " ")).toContain("does not carry `modelAuthority` or `next`");
   });
 
-  test("issue-flow worker derives the PR slice from the projection plan preview", () => {
+  test("issue-flow worker uses the native PR slice and links the committed base document", () => {
     const worker = readReference("repo-harness-issue-flow", "worker.md");
+    const slice = worker.split("### 6.1 Architecture slice in the PR")[1]?.split("\n## 7.")[0] ?? "";
 
-    expect(worker).toContain("### 6.1 Architecture slice");
-    expect(worker).toContain("rh arch projection plan --json --changed-path");
-    expect(worker).toContain("preview.format");
-    expect(worker).toContain("unified-diff");
-    expect(worker).toContain("preview.content");
-    expect(worker).toContain("§1.1");
-    expect(worker).toContain("preview.truncated");
-    expect(worker).toContain("Status: blocked; claim remains");
-    expect(worker).toMatch(/[Nn]ever hand-draw/);
-    expect(worker).toContain("scratch path");
-    expect(worker).toContain("Never modify or restore the worktree document");
-    expect(worker).not.toMatch(/Restore the worktree copy/);
-    expect(worker).toMatch(/No second source/);
-    expect(worker).toContain("codegraph index .");
+    expect(slice).toContain("rh arch projection slice --base <ref>");
+    expect(slice).toContain("its path and SHA at the PR base");
+    expect(slice).toContain("capability document absent at base");
+    expect(slice).toContain("report the error in the issue claim status");
+    expect(slice).not.toContain("rh arch projection plan");
   });
 
   test("archimap takes the model and the node links from ArchContext only", () => {

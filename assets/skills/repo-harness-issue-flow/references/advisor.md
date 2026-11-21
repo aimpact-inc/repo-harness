@@ -104,7 +104,7 @@ the change, so the check must come from outside its session.
       1. Present `recommended` structural observations and their evidence to
          the owner.
       2. Record each owner decision via
-         `rh arch refactor decide <id> accept|defer|reject --reason "<text>"`
+         `rh arch refactor decide <id> accept|defer|reject --reason "<text>" --snapshot-digest <digest>`
          (pass the same `--import-node-limit` if the scan used one). A
          recommendation never auto-schedules or auto-executes a refactor.
       3. Route `accepted` single-module observations into `advisor` PR

@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import type { RecommendationV3, RefactorScopeV1 } from 'archctx-contracts';
 import { normalizeRefactorScope, RefactorProviderError, type RefactorScanResultV1 } from '../../core/refactor/provider-contract';
 import type { ArchctxProviderOptions } from '../../core/architecture/contracts';
-import { listOpenRecommendations, runRefactorScan } from './archctx-provider';
+import { runRefactorScan } from './archctx-provider';
 
 type Observation = RecommendationV3 & { category: 'structural_observation' };
 type ModuleStatistics = RefactorScanResultV1['snapshot']['modules'][number];
@@ -42,16 +42,13 @@ export interface RefactorRecommendationResult {
   schemaVersion: 'repo-harness.refactor-recommendations/v2';
   status: 'recommended' | 'no_action' | 'proof_required' | 'unavailable';
   candidates: readonly RefactorRecommendation[];
+  /** The scan identity to pass to decide. It binds open and proposed recommendations. */
+  snapshotDigest?: string;
   message?: string;
   /** Provider error code, reasonCode, and the remedy archctx names for it, kept when status is `unavailable`. */
   code?: string;
   reasonCode?: string;
   action?: string;
-}
-/** Open suggestions come from two places: records the ledger already holds as `open`, and scan candidates it does not hold yet. */
-export interface RefactorDiscovery {
-  readonly scan: RefactorScanResultV1;
-  readonly open: readonly RecommendationV3[];
 }
 export interface RefactorRecommendationOptions {
   env?: NodeJS.ProcessEnv;
@@ -61,27 +58,17 @@ export interface RefactorRecommendationOptions {
   timeoutMs?: number;
   /** Limits scan observations to a declared node or repository-relative paths. */
   scope?: RefactorScopeV1;
-  discover?: (repoRoot: string, provider: ArchctxProviderOptions, importNodeLimit?: number, timeoutMs?: number, scope?: RefactorScopeV1) => RefactorDiscovery;
+  discover?: (repoRoot: string, provider: ArchctxProviderOptions, importNodeLimit?: number, timeoutMs?: number, scope?: RefactorScopeV1) => RefactorScanResultV1;
 }
 
 const result = (status: RefactorRecommendationResult['status'], message?: string): RefactorRecommendationResult => ({
   schemaVersion: 'repo-harness.refactor-recommendations/v2', status, candidates: [], ...(message ? { message } : {}),
 });
 
-export function discoverRefactorRecommendations(
-  repoRoot: string,
-  provider: ArchctxProviderOptions,
-  importNodeLimit?: number,
-  timeoutMs?: number,
-  scope: RefactorScopeV1 = { kind: 'repository' },
-): RefactorDiscovery {
-  return { scan: runRefactorScan(repoRoot, provider, importNodeLimit, timeoutMs, scope), open: listOpenRecommendations(repoRoot, provider, timeoutMs) };
-}
-
-export function refactorCandidates({ scan, open }: RefactorDiscovery): RefactorRecommendation[] {
+export function refactorCandidates(scan: RefactorScanResultV1): RefactorRecommendation[] {
   const modules = new Map(scan.snapshot.modules.map((entry) => [entry.nodeId, entry]));
-  const listed = new Set(open.map((entry) => entry.recommendationId));
-  return [...open, ...scan.proposedRecommendations.filter((entry) => !listed.has(entry.recommendationId))]
+  const listed = new Set(scan.openRecommendations.map((entry) => entry.recommendationId));
+  return [...scan.openRecommendations, ...scan.proposedRecommendations.filter((entry) => !listed.has(entry.recommendationId))]
     .filter((entry): entry is Observation => entry.category === 'structural_observation')
     .map((entry) => present(entry, modules, scan.snapshot.snapshotDigest));
 }
@@ -116,32 +103,7 @@ function moduleEvidence(entry: ModuleStatistics): RefactorModuleEvidence {
  */
 export function observeRefactorRecommendations(repoRoot: string, options: RefactorRecommendationOptions = {}): RefactorRecommendationResult {
   try {
-    const scope = options.scope === undefined
-      ? undefined
-      : options.scope.kind === 'node'
-        ? normalizeRefactorScope({ node: options.scope.nodeId })
-        : options.scope.kind === 'paths'
-          ? normalizeRefactorScope({ paths: options.scope.paths })
-          : { kind: 'repository' as const };
-    const root = realpathSync(repoRoot);
-    if (!existsSync(join(root, '.archcontext/manifest.yaml'))) return result('unavailable', 'repository architecture model is not initialized');
-    const discovery = scope === undefined
-      ? (options.discover ?? discoverRefactorRecommendations)(root, { env: options.env }, options.importNodeLimit, options.timeoutMs)
-      : (options.discover ?? discoverRefactorRecommendations)(root, { env: options.env }, options.importNodeLimit, options.timeoutMs, scope);
-    const { codeFacts: facts, repositorySummary } = discovery.scan.snapshot;
-    if (facts.reasonCodes.includes('code-facts-import-limit')) {
-      return result('proof_required', importLimitRemedy(facts));
-    }
-    if (facts.coverage !== 'complete' || facts.truncated) {
-      return result('proof_required', 'code facts are incomplete; run `codegraph init` and scan again');
-    }
-    // Module statistics double-count a file that several capabilities own, so
-    // suggestions wait for unambiguous ownership (tasks/todos.md, recommendation proof).
-    if (repositorySummary.multiplyOwnedFileCount > 0) {
-      return result('proof_required', `${repositorySummary.multiplyOwnedFileCount} files have more than one owning capability; resolve model ownership and scan again`);
-    }
-    const candidates = refactorCandidates(discovery);
-    return { ...result(candidates.length ? 'recommended' : 'no_action'), candidates };
+    return discoverRefactorRecommendations(repoRoot, options);
   } catch (error) {
     if (error instanceof RefactorProviderError) {
       return {
@@ -153,6 +115,36 @@ export function observeRefactorRecommendations(repoRoot: string, options: Refact
     }
     return result('unavailable', error instanceof Error ? error.message : String(error));
   }
+}
+
+function discoverRefactorRecommendations(repoRoot: string, options: RefactorRecommendationOptions): RefactorRecommendationResult {
+  const scope = options.scope === undefined
+    ? undefined
+    : options.scope.kind === 'node'
+      ? normalizeRefactorScope({ node: options.scope.nodeId })
+      : options.scope.kind === 'paths'
+        ? normalizeRefactorScope({ paths: options.scope.paths })
+        : { kind: 'repository' as const };
+  const root = realpathSync(repoRoot);
+  if (!existsSync(join(root, '.archcontext/manifest.yaml'))) return result('unavailable', 'repository architecture model is not initialized');
+  const provider = { env: options.env };
+  const scan = options.discover
+    ? options.discover(root, provider, options.importNodeLimit, options.timeoutMs, scope)
+    : runRefactorScan(root, provider, options.importNodeLimit, options.timeoutMs, scope);
+  const { codeFacts: facts, repositorySummary } = scan.snapshot;
+  if (facts.reasonCodes.includes('code-facts-import-limit')) {
+    return result('proof_required', importLimitRemedy(facts));
+  }
+  if (facts.coverage !== 'complete' || facts.truncated) {
+    return result('proof_required', 'code facts are incomplete; run `codegraph init` and scan again');
+  }
+  // Module statistics double-count a file that several capabilities own, so
+  // suggestions wait for unambiguous ownership (tasks/todos.md, recommendation proof).
+  if (repositorySummary.multiplyOwnedFileCount > 0) {
+    return result('proof_required', `${repositorySummary.multiplyOwnedFileCount} files have more than one owning capability; resolve model ownership and scan again`);
+  }
+  const candidates = refactorCandidates(scan);
+  return { ...result(candidates.length ? 'recommended' : 'no_action'), candidates, snapshotDigest: scan.snapshotDigest };
 }
 
 /** A new CodeGraph index cannot fix this: only a larger read limit can. `rh arch refactor decide` needs the same limit as the scan. */

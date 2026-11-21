@@ -5,14 +5,14 @@
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NATIVE_CONTEXT_PROFILE, architectureDocsProjectionManifestIssues, decodeArchitectureHistory, type ArchContextError, type ArchitectureDocsProjectionManifestV4, type ArchitectureHistory, type NativeContextExportV1 } from 'archctx-contracts';
+import { REF_IMPACT_BATCH_REQUEST_SCHEMA_VERSION, NATIVE_CONTEXT_PROFILE, type RefImpactBatchRequestV1, type RuntimeVerifyV1, architectureDocsProjectionManifestIssues, decodeArchitectureHistory, type ArchContextError, type ArchitectureDocsProjectionManifestV4, type ArchitectureHistory, type NativeContextExportV1 } from 'archctx-contracts';
 import { isRecord } from '../../core/evidence/is-record';
 import { capabilityRegistryFromNativeContext, type ArchcontextPathOwner } from '../../core/capabilities/registry';
-import { ARCHCTX_REQUIRED_VERSION, ARCHCONTEXT_MANIFEST, ArchctxClientError, decodeArchitectureHandEdits, decodeNativeContextExport, firstRenderChangeCommit, type DifferingRenderTarget, type NativeContextSource } from '../../core/architecture/projection';
+import { ARCHCTX_REQUIRED_VERSION, ARCHCONTEXT_MANIFEST, ArchctxClientError, decodeArchitectureHandEdits, decodeNativeContextExport, decodeRefImpactBatch, decodeRuntimeVerify, firstRenderChangeCommit, type DifferingRenderTarget, type NativeContextSource } from '../../core/architecture/projection';
 import type { ArchctxProviderOptions } from '../../core/architecture/contracts';
-import type { ArchVerifyCheckRead } from '../../core/architecture/arch-verify';
+import { ARCH_VERIFY_CONTRACT_CODE, type ArchVerifyCheckErrorV1 } from '../../core/architecture/arch-verify';
 import { gitExecFileSync } from '../git/runner';
-import { ArchctxClient, commandLabel } from './archctx-provider';
+import { ArchctxClient } from './archctx-provider';
 import { loadArchitectureProjectionPolicy } from './projection-config';
 
 /** A cold `archctx history` derives every model revision (10.9 s for 50 milestones), so it has its own limit. */
@@ -198,77 +198,63 @@ export type ArchitectureViewArgs =
   | readonly ['docs', 'anchors', '--json']
   | readonly ['deps', '--json']
   | readonly ['constraints', 'check', '--json']
-  | readonly ['impact', '--base', string, '--head', string, '--json']
-  | readonly ['impact', '--paths-from', string, '--json'];
+  | readonly ['impact', '--base', string, '--head', string, '--json'];
 
-/** The one envelope read behind the operator views and `rh arch verify`. */
-type ArchctxEnvelopeRead =
-  | { readonly state: 'data'; readonly data: Record<string, unknown> }
-  | { readonly state: 'envelope-error'; readonly error: Record<string, unknown> }
-  | { readonly state: 'invalid' }
-  | { readonly state: 'failed'; readonly failure: unknown };
-
-/** An error envelope is data, so a check keeps archctx's own code and message. */
-function readArchctxEnvelope(repoRoot: string, args: readonly string[], maximumMs: number, options: ArchctxProviderOptions): ArchctxEnvelopeRead {
-  let value: unknown;
-  try { value = new ArchctxClient(repoRoot, ARCHCTX_REQUIRED_VERSION, options).json(args, maximumMs, true); }
-  catch (failure) { return { state: 'failed', failure }; }
-  if (isRecord(value) && value.ok === true && isRecord(value.data)) return { state: 'data', data: value.data };
-  if (isRecord(value) && value.ok === false && isRecord(value.error)) return { state: 'envelope-error', error: value.error };
-  return { state: 'invalid' };
-}
-
-/** One view read: its data, or its error envelope's fields. `error: null`: the run failed or gave no envelope. */
+/** One view read, with the producer's error fields when it refused the request. */
 export function readArchitectureView(
   repoRoot: string,
   args: ArchitectureViewArgs,
   options: ArchctxProviderOptions = {},
 ): { readonly ok: true; readonly data: Record<string, unknown> } | { readonly ok: false; readonly error: Record<string, unknown> | null } {
-  const read = readArchctxEnvelope(repoRoot, args, ARCHITECTURE_VIEW_TIMEOUT_MS, options);
-  if (read.state === 'data') return { ok: true, data: read.data };
-  return { ok: false, error: read.state === 'envelope-error' ? read.error : null };
+  try {
+    const client = new ArchctxClient(repoRoot, ARCHCTX_REQUIRED_VERSION, options);
+    const value = client.json(args, ARCHITECTURE_VIEW_TIMEOUT_MS, true);
+    if (isRecord(value) && value.ok === true && isRecord(value.data)) return { ok: true, data: value.data };
+    if (isRecord(value) && value.ok === false && isRecord(value.error)) return { ok: false, error: value.error };
+  } catch { return { ok: false, error: null }; }
+  return { ok: false, error: null };
 }
 
-/** The read commands of `rh arch verify`, in the order it runs them. No write command is in this list. */
-export type ArchitectureVerifyArgs =
-  | readonly ['validate', '--format', 'json']
-  | readonly ['flows', 'check', '--no-sync', '--json']
-  | readonly ['state-machines', 'check', '--json']
-  | readonly ['constraints', 'check', '--json']
-  | readonly ['docs', 'anchors', '--json']
-  | readonly ['projection', 'verify-pr', '--base', string, '--json']
-  | readonly ['debt', '--json'];
+export function readArchitectureImpactBatch(
+  repoRoot: string,
+  items: RefImpactBatchRequestV1['items'],
+  head: string,
+  options: ArchctxProviderOptions,
+) {
+  const dir = mkdtempSync(join(tmpdir(), 'repo-harness-architecture-map-'));
+  try {
+    const path = join(dir, 'pr-impact.json');
+    const request: RefImpactBatchRequestV1 = { schemaVersion: REF_IMPACT_BATCH_REQUEST_SCHEMA_VERSION, items };
+    writeFileSync(path, JSON.stringify(request), { mode: 0o600 });
+    const client = new ArchctxClient(repoRoot, ARCHCTX_REQUIRED_VERSION, options);
+    return decodeRefImpactBatch(client.data(['impact', '--batch-file', path, '--json'], ARCHITECTURE_VIEW_TIMEOUT_MS), items.map(item => item.id), head);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
-/** A run that started no read and reported no archctx code. */
-export const ARCH_VERIFY_READ_FAILED = 'RH_ARCH_VERIFY_READ_FAILED';
-/** A run whose answer broke the envelope contract. */
-export const ARCH_VERIFY_ENVELOPE_INVALID = 'RH_ARCH_VERIFY_ENVELOPE_INVALID';
-
-/**
- * One `rh arch verify` read with the policy timeout. The policy controls projection
- * writes, not reads, so a disabled provider still allows every check. archctx's own
- * error code and message survive, so the caller can tell an unobservable subject
- * from a failure. A missing or mismatched package and a timeout are failures.
- */
+/** One read-only composite verify. ArchContext's typed refusal keeps its code and message. */
 export function readArchVerification(
   repoRoot: string,
-  args: ArchitectureVerifyArgs,
+  base: string,
+  head: string,
   options: ArchctxProviderOptions = {},
-): ArchVerifyCheckRead {
-  const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
-  const read = readArchctxEnvelope(repoRoot, args, policy.timeoutMs, options);
-  if (read.state === 'data') return { ok: true, data: read.data };
-  if (read.state === 'envelope-error') {
-    const code = typeof read.error.code === 'string' && read.error.code !== '' ? read.error.code : ARCH_VERIFY_ENVELOPE_INVALID;
-    const message = typeof read.error.message === 'string' ? read.error.message : `${commandLabel(args)} reported no message`;
-    return { ok: false, error: { code, message } };
+): { readonly ok: true; readonly checks: RuntimeVerifyV1['checks'] } | { readonly ok: false; readonly error: ArchVerifyCheckErrorV1 } {
+  let value: unknown;
+  try {
+    const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
+    const client = new ArchctxClient(repoRoot, ARCHCTX_REQUIRED_VERSION, options);
+    value = client.data(['verify', '--base', base, '--json'], policy.timeoutMs);
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof ArchctxClientError
+        ? { code: error.code, message: error.providerMessage }
+        : { code: 'RH_ARCH_VERIFY_READ_FAILED', message: error instanceof Error ? error.message : String(error) },
+    };
   }
-  if (read.state === 'invalid') return { ok: false, error: { code: ARCH_VERIFY_ENVELOPE_INVALID, message: `${commandLabel(args)} returned no valid archcontext envelope` } };
-  const failure = read.failure;
-  return {
-    ok: false,
-    error: failure instanceof ArchctxClientError
-      ? { code: failure.code, message: failure.providerMessage }
-      : { code: ARCH_VERIFY_READ_FAILED, message: failure instanceof Error ? failure.message : String(failure) },
-  };
+  try { return { ok: true, checks: decodeRuntimeVerify(value, base, head).checks }; }
+  catch (error) {
+    return { ok: false, error: { code: ARCH_VERIFY_CONTRACT_CODE, message: error instanceof Error ? error.message : String(error) } };
+  }
 }

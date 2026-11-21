@@ -7,29 +7,14 @@ import {
   archVerifyExitCode,
   buildArchVerifyReport,
   formatArchVerifyText,
-  type ArchVerifyCheckId,
-  type ArchVerifyCheckRead,
 } from '../../core/architecture/arch-verify';
 import { ARCHCTX_REQUIRED_VERSION } from '../../core/architecture/projection';
 import type { ArchctxProviderOptions } from '../../core/architecture/contracts';
 import { gitSpawnSync } from '../../effects/git/runner';
-import { ARCH_VERIFY_READ_FAILED, readArchVerification, type ArchitectureVerifyArgs } from '../../effects/architecture/architecture-read';
+import { readArchVerification } from '../../effects/architecture/architecture-read';
 
 export const ARCH_VERIFY_BASE_INVALID = 'arch_verify_base_invalid';
 export const ARCH_VERIFY_USAGE = 'arch_verify_usage';
-
-/** The archctx command of each check, bound to the resolved base commit. */
-function checkArgs(id: ArchVerifyCheckId, baseSha: string): ArchitectureVerifyArgs {
-  switch (id) {
-    case 'validate': return ['validate', '--format', 'json'];
-    case 'flows': return ['flows', 'check', '--no-sync', '--json'];
-    case 'state-machines': return ['state-machines', 'check', '--json'];
-    case 'constraints': return ['constraints', 'check', '--json'];
-    case 'docs': return ['docs', 'anchors', '--json'];
-    case 'projection': return ['projection', 'verify-pr', '--base', baseSha, '--json'];
-    case 'debt': return ['debt', '--json'];
-  }
-}
 
 /** A full commit, or null when git cannot resolve the ref. */
 export function resolveCommit(repoRoot: string, ref: string): string | null {
@@ -59,12 +44,10 @@ export function archVerify(
   json: boolean,
   options: ArchctxProviderOptions = {},
 ): ArchVerifyCommandResult {
-  const reads = ARCH_VERIFY_CHECK_IDS.map((id) => {
-    let read: ArchVerifyCheckRead;
-    try { read = readArchVerification(repoRoot, checkArgs(id, baseSha), options); }
-    catch (error) { read = { ok: false, error: { code: ARCH_VERIFY_READ_FAILED, message: error instanceof Error ? error.message : String(error) } }; }
-    return { id, read };
-  });
+  const verification = readArchVerification(repoRoot, baseSha, headSha, options);
+  const reads = ARCH_VERIFY_CHECK_IDS.map((id) => ({
+    id, read: verification.ok ? verification.checks[id] : verification,
+  }));
   const report = buildArchVerifyReport({ base: baseSha, head: headSha, archctxVersion: ARCHCTX_REQUIRED_VERSION, reads });
   return { ok: true, exitCode: archVerifyExitCode(report.verdict), document: json ? `${JSON.stringify(report, null, 2)}\n` : formatArchVerifyText(report) };
 }

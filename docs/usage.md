@@ -219,12 +219,28 @@ PRD or Goal work, [repo-harness-issue-flow](../assets/skills/repo-harness-issue-
 for issue backlog splitting and dispatch, and [repo-harness-check](../assets/skill-commands/repo-harness-check/SKILL.md)
 for scope and recorded verification.
 
+### Architecture review
+
+`rh arch verify --base <ref>` reports the ArchContext checks for the change. Its
+validate check reads the checkout YAML even when standalone `rh arch validate`
+uses the architecture ledger.
+
+`rh arch projection slice --base <ref>` prints the changed architecture slice
+from a clean checkout with a current CodeGraph index. It links to the document
+at the resolved base SHA or marks it absent at base.
+
 ### Refactor recommendations
 
 ```bash
 rh arch refactor recommendations [--import-node-limit <n>]   # measured suggestions with evidence
-rh arch refactor decide <id> accept|defer|reject --reason "<text>" [--import-node-limit <n>]
+rh arch refactor decide <id> accept|defer|reject --reason "<text>" --snapshot-digest <digest> [--import-node-limit <n>]
 ```
+
+Use the snapshot digest printed by `recommendations` to record the decision.
+ArchContext keeps eight snapshots in the daemon's memory. A restart or cache
+eviction can expire a digest. If `decide` reports
+`recommendation-snapshot-changed`, repeat the same scoped scan. Confirm that
+it still shows the recommendation, then retry `decide` with the fresh digest.
 
 ArchContext measures structural problems such as cycles and direction
 violations. repo-harness shows each suggestion with its metrics, bounded evidence

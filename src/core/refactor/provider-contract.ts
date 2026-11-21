@@ -37,6 +37,8 @@ export interface RefactorScanResultV1 {
   snapshot: ModuleStatisticsSnapshotV1;
   assessment: RefactorAssessmentV1;
   proposedRecommendations: RecommendationV3[];
+  openRecommendations: RecommendationV3[];
+  snapshotDigest: string;
 }
 
 export function normalizeRefactorScope(input: { node?: string; paths?: readonly string[] }): RefactorScopeV1 {

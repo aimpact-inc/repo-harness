@@ -85,7 +85,7 @@ during its periodic health audit (`repo-harness-issue-flow` `references/advisor.
   / `--path <path>` option once `#3346` lands). Never run this on worker `Stop` hooks
   or call `archctx` from `PATH`.
 - Present `recommended` observations to the owner and record each owner decision with
-  `rh arch refactor decide <id> accept|defer|reject --reason "<text>"`.
+  `rh arch refactor decide <id> accept|defer|reject --reason "<text>" --snapshot-digest <digest>`.
 - Route `accepted` single-module observations into `advisor` PR bundles. For a
   cross-capability cycle or boundary split, attach the `RefactorRecommendation`
   metrics and `rh arch module review-prompt <capability-id> --json` output to the
