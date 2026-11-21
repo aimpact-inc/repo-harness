@@ -4,7 +4,7 @@ import { createHash } from "crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { basename, delimiter, dirname, join } from "path";
-import { AGY_COMMAND_PREFIXES, buildSeatLaunch, seatPaneName } from "../../src/core/board/seat-launch";
+import { AGY_READONLY_COMMAND_PREFIXES, AGY_WORKER_COMMAND_PREFIXES, agySeatCommandRules, agySeatLimits, buildSeatLaunch, seatPaneName } from "../../src/core/board/seat-launch";
 import { HANDOFF_SECTIONS, seatResetReason, seatResetSteps, type SeatResetIdentity } from "../../src/core/board/seat-reset";
 import { SeatResetError, readSeatSession, recordSeatSession, runSeatReset, type SeatRelaunch, type SeatResetNotify, type SeatResetOptions } from "../../src/effects/board/seat-reset";
 import { seatHandoff, seatResetLaunch } from "../../src/cli/commands/seats";
@@ -138,11 +138,14 @@ function bare(args: string[]): unknown[] {
 }
 
 const AGY_ADVISOR = { runtime: "agy", model: "gemini-4-neon-high", advisor_model: null, effort: null, tools: ["net", "read", "shell"], fleet: [] } as const;
+const AGY_WORKER = { runtime: "agy", model: "gemini-4-neon-high", advisor_model: null, effort: null, tools: ["edit", "gh", "net", "read", "shell"], fleet: [] } as const;
+const AGY_WORKER_NO_GH = { runtime: "agy", model: "gemini-4-hydrogen", advisor_model: null, effort: null, tools: ["edit", "net", "read", "shell"], fleet: [] } as const;
+const AGY_FALLBACK = { runtime: "agy", model: "gemini-4-hydrogen", advisor_model: null, effort: null, tools: ["net", "read", "shell"], fleet: [] } as const;
 
 type AgyFixture = {
   home: string; cwd: string; agy: string; hooks: string; tab: string;
   run: (args: string[], extra?: Record<string, string>) => ReturnType<typeof run>;
-  configure: (advisor?: unknown, enabled?: boolean, worker?: unknown) => void;
+  configure: (advisor?: unknown, enabled?: boolean, overrides?: Record<string, unknown>) => void;
   catalog: (lines: string, version?: string, exit?: number) => void;
 };
 
@@ -157,10 +160,10 @@ function withAgySeat(callback: (fixture: AgyFixture) => void) {
     seedGlobalPackageFixture(setup, { mutable: true });
     mkdirSync(dirname(hooks), { recursive: true });
     writeFileSync(hooks, JSON.stringify({ "repo-harness": buildAntigravityHooks(setup) }));
-    const configure = (advisor: unknown = AGY_ADVISOR, enabled = true, worker: unknown = DEFAULT_SEATS_CONFIG.worker) => {
+    const configure = (advisor: unknown = AGY_ADVISOR, enabled = true, overrides: Record<string, unknown> = {}) => {
       writeFileSync(join(home, ".repo-harness", "config.json"), JSON.stringify({
-        agents: { enabled: enabled ? ["antigravity"] : [], uses: { docs: [], review: [] }, default_docs: null },
-        seats: { ...DEFAULT_SEATS_CONFIG, advisor, worker },
+        agents: { enabled: enabled ? ["antigravity", "claude", "codex", "pi"] : [], uses: { docs: [], review: [] }, default_docs: null },
+        seats: { ...DEFAULT_SEATS_CONFIG, advisor, ...overrides },
       }));
     };
     configure();
@@ -171,7 +174,7 @@ if (arg === '--version') { console.log(${JSON.stringify(version)}); process.exit
 if (arg === 'models') { process.stdout.write(${JSON.stringify(lines)}); process.exit(${exit}); }
 process.exit(93);
 `, { mode: 0o755 });
-    catalog("gemini-4-neon-high\tGemini 4 Neon (High)\n");
+    catalog("gemini-4-neon-high\tGemini 4 Neon (High)\ngemini-4-carbon-high\tGemini 4 Carbon (High)\ngemini-4-hydrogen\tGemini 4 Hydrogen\n");
     const tab = join(home, "tab.json");
     writeFileSync(join(bin, "herdr-app"), `#!${process.execPath}
 const args = JSON.parse(process.argv[4]);
@@ -191,8 +194,8 @@ function agyTabArgs(cwd: string, task = "Private first turn"): string[] {
   return ["launch", "advisor", "--space", "sp1", "--cwd", cwd, "--task", task, "--json"];
 }
 
-describe.skipIf(process.platform === "win32")("agy advisor seat", () => {
-  test("renders the exact labeled and unlabeled argv and sends the first task once through Herdr", withAgySeat(f => {
+describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
+  test("renders the exact labeled and unlabeled advisor argv and sends the first task once through Herdr", withAgySeat(f => {
     const task = "Private first turn";
     const labels = ["--repository-id", "1186405141"];
     const raw = f.run(["argv", "advisor", ...labels, "--json"]);
@@ -230,6 +233,7 @@ describe.skipIf(process.platform === "win32")("agy advisor seat", () => {
         "command(rh board retro)",
         "command(rh quota)",
         "command(rh seats pool)",
+        "command(rh seats council)",
         "command(rg)",
         "command(ls)",
         "command(cat)"
@@ -259,13 +263,17 @@ describe.skipIf(process.platform === "win32")("agy advisor seat", () => {
         "command(rh seats reset)",
         "command(rh publication merge)",
         "command(rh review collect)",
-        "command(rh review publish)"
+        "command(rh review publish)",
+        "command(git reset --hard)",
+        "command(git clean)"
       ]
     } };
-    for (const mutating of ["rh board dispatch", "rh board review", "rh board merge", "rh board closeout", "rh board post", "rh board migrate-dependencies", "rh seats launch", "rh seats consult", "rh seats council"]) {
+    for (const mutating of ["rh board dispatch", "rh board review", "rh board merge", "rh board closeout", "rh board post", "rh board migrate-dependencies", "rh seats launch", "rh seats consult"]) {
       expect(settings.permissions.allow).not.toContain(`command(${mutating})`);
     }
-    expect(AGY_COMMAND_PREFIXES.some(prefix => "rh board --parent 123 merge".startsWith(prefix))).toBe(false);
+    expect(AGY_READONLY_COMMAND_PREFIXES.some(prefix => "rh board --parent 123 merge".startsWith(prefix))).toBe(false);
+    expect(AGY_WORKER_COMMAND_PREFIXES.some(prefix => ["git", "gh", "hc", "rh"].includes(prefix))).toBe(false);
+    expect(AGY_READONLY_COMMAND_PREFIXES.some(prefix => ["git", "gh", "hc", "rh"].includes(prefix))).toBe(false);
     expect(settings.permissions.deny).toContain("command(rh board attention start)");
     const executable = [f.agy, "--mode", "accept-edits", "--model", "gemini-4-neon-high", "--add-dir", directory,
       "--agent", "rh-advisor", "--settings", JSON.stringify(settings)];
@@ -285,10 +293,11 @@ describe.skipIf(process.platform === "win32")("agy advisor seat", () => {
     expect(JSON.parse(opened.stdout).placement).toEqual({ tab: "tb1", terminal: "t9" });
   }));
 
-  test.each(["missing", "unsupported", "signed out", "unknown", "model absent", "outside opt-in", "guard absent", "host disabled", "worker"])("agy refuses %s before any agent projection or tab", (branch) => withAgySeat(f => {
+  test.each(["missing", "unsupported", "signed out", "unknown", "model absent", "outside opt-in", "guard absent", "host disabled", "orchestrator", "gatekeeper", "reviewer"])("agy refuses %s before any agent projection or tab", (branch) => withAgySeat(f => {
     let cwd = f.cwd;
     let seat = "advisor";
     let error: string;
+    const extraArgs: string[] = [];
     switch (branch) {
       case "missing": rmSync(f.agy); error = "seat_runtime_missing"; break;
       case "unsupported": f.catalog("", "1.4.9"); error = "seat_runtime_unsupported"; break;
@@ -298,9 +307,11 @@ describe.skipIf(process.platform === "win32")("agy advisor seat", () => {
       case "outside opt-in": cwd = f.home; error = "seat_checkout_not_opted_in"; break;
       case "guard absent": rmSync(f.hooks); error = "antigravity_guard_unready"; break;
       case "host disabled": f.configure(AGY_ADVISOR, false); error = "seat_runtime_not_enabled"; break;
-      default: seat = "worker"; f.configure(AGY_ADVISOR, true, AGY_ADVISOR); error = "seat_runtime_not_allowed";
+      case "orchestrator": seat = "orchestrator"; f.configure(AGY_ADVISOR, true, { orchestrator: AGY_ADVISOR }); error = "seat_runtime_not_allowed"; break;
+      case "gatekeeper": seat = "gatekeeper"; extraArgs.push("--pr", "3377"); f.configure(AGY_ADVISOR, true, { gatekeeper: AGY_ADVISOR }); error = "seat_runtime_not_allowed"; break;
+      default: seat = "reviewer"; extraArgs.push("--pr", "3377"); f.configure(AGY_ADVISOR, true, { reviewer: AGY_ADVISOR }); error = "seat_runtime_not_allowed"; break;
     }
-    const args = agyTabArgs(cwd);
+    const args = [...agyTabArgs(cwd), ...extraArgs];
     args[1] = seat;
     const result = f.run(args);
     expect([result.status, result.stdout, JSON.parse(result.stderr).error]).toEqual([1, "", error]);
@@ -328,31 +339,107 @@ describe.skipIf(process.platform === "win32")("agy advisor seat", () => {
     expect(readFileSync(cache, "utf8")).toBe(stale);
   }));
 
-  test("native agy worker-light gets worker permissions, and exhausted gatekeeper launches agy gatekeeper-fallback", withAgySeat(f => {
-    const hydrogen = { runtime: "agy", model: "gemini-4-hydrogen", advisor_model: null, effort: null, tools: ["net", "read", "shell"], fleet: [] } as const;
-    f.catalog("gemini-4-hydrogen\tGemini 4 Hydrogen\ngemini-4-neon-high\tGemini 4 Neon (High)\n");
-    writeFileSync(join(f.home, "codex-used"), "97");
-    writeFileSync(join(f.home, ".repo-harness", "config.json"), JSON.stringify({
-      agents: { enabled: ["antigravity", "codex"], uses: { docs: [], review: [] }, default_docs: null },
-      seats: { ...DEFAULT_SEATS_CONFIG, advisor: AGY_ADVISOR, "worker-light": hydrogen, "gatekeeper-fallback": hydrogen },
-    }));
-    const workerRaw = f.run(["argv", "worker-light", "--json"]);
-    expect(workerRaw.status, workerRaw.stderr).toBe(0);
-    const workerLaunch = JSON.parse(workerRaw.stdout);
-    expect(workerLaunch.brief).not.toContain("Do not edit files.");
-    expect(workerLaunch.brief).not.toContain("Do not write to GitHub.");
-    const workerSettings = JSON.parse(workerLaunch.argv[workerLaunch.argv.indexOf("--settings") + 1]);
-    expect(workerSettings.permissions.deny).not.toContain("command(git push)");
-    expect(workerSettings.permissions.deny).toContain("command(gh pr merge)");
-    const workerDir = workerLaunch.argv[workerLaunch.argv.indexOf("--add-dir") + 1];
-    expect(readFileSync(join(workerDir, ".agents", "agents", "rh-worker-light", "agent.md"), "utf8")).toContain("write_to_file");
+  test("worker agy launches generate rh-worker with writable tools, zero REPO_HARNESS_SEAT* env vars, and gh-aware command rules", withAgySeat(f => {
+    f.configure(AGY_ADVISOR, true, { "worker-neon": AGY_WORKER, "worker-light": AGY_WORKER_NO_GH });
+    const raw = f.run(["argv", "worker-neon", "--repository-id", "1186405141", "--issue", "3377", "--parent", "3375", "--json"]);
+    expect(raw.status, raw.stderr).toBe(0);
+    const worker = JSON.parse(raw.stdout);
+    const workerAgentArgs = agent(worker);
+    expect(workerAgentArgs.slice(0, UNSET_SEAT.length)).toEqual(UNSET_SEAT);
+    expect(workerAgentArgs[UNSET_SEAT.length]).toBe(f.agy);
+    expect(worker.argv.some((arg: string) => arg.startsWith("REPO_HARNESS_SEAT") && arg.includes("="))).toBe(false);
+    expect(worker.argv).not.toContain("--dangerously-skip-permissions");
+    expect(worker.argv[worker.argv.indexOf("--agent") + 1]).toBe("rh-worker");
+    expect(worker.brief).not.toContain("Do not edit files.");
+    expect(worker.brief).not.toContain("Do not write to GitHub.");
+    const directory = worker.argv[worker.argv.indexOf("--add-dir") + 1];
+    const profile = readFileSync(join(directory, ".agents", "agents", "rh-worker", "agent.md"), "utf8");
+    expect(profile).toContain("name: rh-worker\ndescription: Repo-harness worker\nmainAgent: true\ntools: [view_file, write_file, edit_file, run_command, search_web]\ninheritMcp: false");
+    expect(profile).toContain("Never read auth or credential files.");
+    expect(profile).not.toContain("When Stop requests a handoff");
+    const parsedSettings = JSON.parse(worker.argv[worker.argv.indexOf("--settings") + 1]);
+    expect(parsedSettings.permissions.allow).toContain("command(bun)");
+    expect(parsedSettings.permissions.allow).toContain("command(git commit)");
+    expect(parsedSettings.permissions.allow).toContain("command(git push)");
+    expect(parsedSettings.permissions.allow).toContain("command(gh pr create)");
+    expect(parsedSettings.permissions.deny).not.toContain("command(git push)");
+    expect(parsedSettings.permissions.deny).toEqual(expect.arrayContaining([
+      "command(rh publication merge)", "command(rh board merge)", "command(gh pr merge)", "command(gh release create)",
+      "command(gh issue close)", "command(git reset --hard)", "command(git clean)",
+    ]));
+    expect(worker.limits).toEqual(agySeatLimits("worker-neon", AGY_WORKER));
+    expect(worker.limits.some((limit: { subject: string }) => limit.subject === "edit" || limit.subject === "gh")).toBe(false);
 
-    const fallbackRaw = f.run(["argv", "gatekeeper", "--pr", "42", "--json"], { PATH: `${join(f.home, ".quota-bin")}${delimiter}${join(f.home, "bin")}:/usr/bin:/bin` });
-    expect(fallbackRaw.status, fallbackRaw.stderr).toBe(0);
-    const fallbackLaunch = JSON.parse(fallbackRaw.stdout);
-    expect(fallbackLaunch.runtime).toBe("agy");
-    expect(fallbackLaunch.argv[fallbackLaunch.argv.indexOf("--model") + 1]).toBe("gemini-4-hydrogen");
-    expect(fallbackLaunch.brief).toContain("Do not edit files.");
+    // Worker with gh disabled denies git push and gh pr create and reports gh: common_commands.
+    const noGhRaw = f.run(["argv", "worker-light", "--repository-id", "1186405141", "--issue", "3377", "--json"]);
+    expect(noGhRaw.status, noGhRaw.stderr).toBe(0);
+    const noGh = JSON.parse(noGhRaw.stdout);
+    const noGhSettings = JSON.parse(noGh.argv[noGh.argv.indexOf("--settings") + 1]);
+    expect(noGhSettings.permissions.allow).not.toContain("command(git push)");
+    expect(noGhSettings.permissions.allow).not.toContain("command(gh pr create)");
+    expect(noGhSettings.permissions.deny).toEqual(expect.arrayContaining(["command(git push)", "command(gh pr create)", "command(gh pr merge)", "command(git reset --hard)"]));
+    expect(noGh.limits).toContainEqual({ subject: "gh", level: "common_commands" });
+    expect(noGh.limits.some((limit: { subject: string }) => limit.subject === "edit")).toBe(false);
+  }));
+
+  test("gatekeeper-fallback on agy launches read-only rh-gatekeeper-fallback when primary gatekeeper is exhausted and fails closed when hooks are missing", withAgySeat(f => {
+    f.configure(AGY_ADVISOR, true, {
+      gatekeeper: { runtime: "codex", model: "gpt-6.2-sol", advisor_model: null, effort: "high", tools: ["net", "read", "shell"], fleet: [] },
+      "gatekeeper-fallback": AGY_FALLBACK,
+    });
+    writeFileSync(join(f.home, "codex-used"), "97");
+    const extraPath = { PATH: [join(f.home, "bin"), join(f.home, ".quota-bin"), "/usr/bin", "/bin"].join(delimiter) };
+    const raw = f.run(["argv", "gatekeeper", "--repository-id", "1186405141", "--pr", "42", "--json"], extraPath);
+    expect(raw.status, raw.stderr).toBe(0);
+    const gk = JSON.parse(raw.stdout);
+    expect(gk.runtime).toBe("agy");
+    expect(gk.argv[gk.argv.indexOf("--model") + 1]).toBe("gemini-4-hydrogen");
+    expect(gk.argv[gk.argv.indexOf("--agent") + 1]).toBe("rh-gatekeeper-fallback");
+    expect(gk.argv.some((arg: string) => arg.startsWith("REPO_HARNESS_SEAT") && arg.includes("="))).toBe(false);
+    expect(gk.brief).toContain("Do not edit files.");
+    const directory = gk.argv[gk.argv.indexOf("--add-dir") + 1];
+    const profile = readFileSync(join(directory, ".agents", "agents", "rh-gatekeeper-fallback", "agent.md"), "utf8");
+    expect(profile).toContain("name: rh-gatekeeper-fallback\ndescription: Repo-harness gatekeeper fallback\nmainAgent: true\ntools: [view_file, run_command, search_web]\ninheritMcp: false");
+    const parsedSettings = JSON.parse(gk.argv[gk.argv.indexOf("--settings") + 1]);
+    expect(parsedSettings.permissions.allow).not.toContain("command(rh seats council)");
+    expect(parsedSettings.permissions.deny).toEqual(expect.arrayContaining(["command(rh publication merge)", "command(rh board merge)", "command(gh pr merge)", "command(git reset --hard)"]));
+
+    // Removing hooks fails closed before creating any agent dir or tab.
+    rmSync(join(f.home, ".repo-harness", "seats", "agy"), { recursive: true, force: true });
+    rmSync(f.hooks);
+    const refused = f.run(["argv", "gatekeeper", "--pr", "42", "--json"], extraPath);
+    expect([refused.status, JSON.parse(refused.stderr).error]).toEqual([1, "antigravity_guard_unready"]);
+    expect(existsSync(join(f.home, ".repo-harness", "seats", "agy"))).toBe(false);
+  }));
+
+  test("native agy council launches rh-council with -i <task>, zero seat env vars, dry-run without writes, and private task redaction", withAgySeat(f => {
+    const dry = f.run(["council", "--issue", "3377", "--members", "carbon", "--repository-id", "1186405141", "--dry-run", "--json"]);
+    expect(dry.status, dry.stderr).toBe(0);
+    expect(JSON.parse(dry.stdout).members[0]).toMatchObject({ member: "carbon", runtime: "agy", model: "gemini-4-carbon-high" });
+    expect(existsSync(join(f.home, ".repo-harness", "seats", "agy"))).toBe(false);
+
+    const res = f.run(["council", "--issue", "3377", "--members", "carbon", "--repository-id", "1186405141", "--space", "sp1", "--question", "Secret focus?", "--json"]);
+    expect(res.status, res.stderr).toBe(0);
+    const out = JSON.parse(res.stdout);
+    expect(out.members[0]).toMatchObject({ member: "carbon", runtime: "agy", model: "gemini-4-carbon-high" });
+    const tabArg = JSON.parse(readFileSync(f.tab, "utf8").trim());
+    expect(tabArg.task).toBeUndefined();
+    expect(tabArg.argv.at(-2)).toBe("-i");
+    expect(tabArg.argv.at(-1)).toContain("Secret focus?");
+    expect(tabArg.argv.some((arg: string) => arg.startsWith("REPO_HARNESS_SEAT") && arg.includes("="))).toBe(false);
+    expect(tabArg.argv[tabArg.argv.indexOf("--agent") + 1]).toBe("rh-council");
+    const directory = tabArg.argv[tabArg.argv.indexOf("--add-dir") + 1];
+    const profile = readFileSync(join(directory, ".agents", "agents", "rh-council", "agent.md"), "utf8");
+    expect(profile).toContain("name: rh-council\ndescription: Repo-harness council\nmainAgent: true\ntools: [view_file, run_command, search_web]\ninheritMcp: false");
+    const parsedSettings = JSON.parse(tabArg.argv[tabArg.argv.indexOf("--settings") + 1]);
+    expect(parsedSettings.permissions.allow).not.toContain("command(rh seats council)");
+    expect(parsedSettings.permissions.deny).toEqual(expect.arrayContaining(["command(rh publication merge)", "command(rh board merge)", "command(gh pr merge)", "command(git reset --hard)"]));
+
+    // Herdr failure redacts the private task in stderr.
+    const failed = f.run(["council", "--issue", "3377", "--members", "carbon", "--qualifier", "b", "--repository-id", "1186405141", "--space", "sp1", "--question", "Secret focus?"], { AGY_HERDR_FAIL: "1" });
+    expect([failed.status, JSON.parse(failed.stderr).error]).toEqual([1, "seat_tab_unknown"]);
+    expect(failed.stderr).not.toContain("Secret focus?");
+    rmSync(dirname(out.members[0].out_path), { recursive: true, force: true });
   }));
 
   test("an uncertain tab request stays uncertain and keeps the first task private", withAgySeat(f => {
@@ -374,6 +461,22 @@ describe.skipIf(process.platform === "win32")("agy advisor seat", () => {
     expect(refused.status).toBe(1);
     expect(readFileSync(file, "utf8")).toBe("user content");
   }));
+
+  test("agySeatCommandRules enforces no bare git/gh/hc/rh prefixes across all allowed seats", () => {
+    for (const [seat, config] of [
+      ["advisor", AGY_ADVISOR],
+      ["council", AGY_ADVISOR],
+      ["gatekeeper", AGY_FALLBACK],
+      ["worker", AGY_WORKER],
+      ["worker-light", AGY_WORKER_NO_GH],
+    ] as const) {
+      const rules = agySeatCommandRules(seat, config);
+      for (const prefix of rules.allow) {
+        expect(["git", "gh", "hc", "rh"]).not.toContain(prefix);
+      }
+      expect(rules.deny).toEqual(expect.arrayContaining(["rh publication merge", "rh board merge", "gh pr merge", "git reset --hard"]));
+    }
+  });
 });
 
 describe("rh seats argv", () => {

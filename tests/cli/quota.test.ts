@@ -700,7 +700,10 @@ ${branch === 'timeout' ? 'setInterval(() => {}, 1000);' : branch === 'signed out
       ['claude', 'opus', 'claude'], ['codex', 'gpt-6.2-sol', 'chatgpt'],
     ]);
     expect(row.excluded.map(entry => [entry.model, entry.status])).toEqual([
-      ['magpie/agy-cli/gemini-4-neon', 'not_installed'], ['magpie/codex/gpt-6.2-sol', 'not_installed'],
+      ['magpie/agy-cli/gemini-4-neon', 'not_installed'],
+      ['gemini-4-neon-low', 'not_installed'], ['gemini-4-neon-medium', 'not_installed'],
+      ['gemini-4-neon-high', 'not_installed'], ['gemini-4-neon-xhigh', 'not_installed'],
+      ['magpie/codex/gpt-6.2-sol', 'not_installed'],
       ['magpie/codex/gpt-6.1-terra', 'not_installed'], ['gpt-6.1-terra', 'not_listed'],
       ['zai/glm-5.3-flash', 'not_installed'], ['magpie/group/deepseek-v4.1-flash', 'not_installed'],
       ['magpie/agy-cli/gemini-4-hydrogen', 'not_installed'], ['gemini-4-hydrogen', 'not_installed'],
