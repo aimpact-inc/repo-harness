@@ -17,6 +17,7 @@ mkdir -p "$SMOKE_HOME"
 # Keep the registry beside HOME: the nested test runner rejects registries
 # below its caller HOME, even when that HOME is temporary.
 export HOME="$SMOKE_HOME" REPO_HARNESS_HOME="$TMP_DIR/registry"
+# Use Pi settings under $SMOKE_HOME/.pi/agent instead of the caller's Pi config.
 unset PI_CODING_AGENT_DIR
 
 cleanup() {
@@ -668,7 +669,7 @@ if [[ -x /bin/bash ]] && /bin/bash -c '(( BASH_VERSINFO[0] < 4 ))'; then
   if [[ -n "$smoke_bash" ]]; then
     mkdir -p "$SMOKE_HOME/.pi/agent"
     bun -e 'console.log(JSON.stringify({ shellPath: process.argv[1] }))' "$smoke_bash" >"$SMOKE_HOME/.pi/agent/settings.json"
-  elif command -v pi >/dev/null 2>&1; then
+  else
     echo "[tarball-smoke] ERROR: Pi needs Bash 4+ on this host. Install Bash 4+ and put it on PATH." >&2
     exit 1
   fi
