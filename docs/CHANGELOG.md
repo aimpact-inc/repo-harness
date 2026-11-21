@@ -2,6 +2,64 @@
 
 All notable changes to this skill are documented here.
 
+## [0.36.0] - 2026-11-21
+
+### Added
+
+- Antigravity is the fourth hook host. `rh install --target antigravity` adds the owned `repo-harness` member in `~/.gemini/config/hooks.json`, a Global Working Rules block in `~/.gemini/config/AGENTS.md`, and skill links under `~/.gemini/config/skills/`. Targeted update refreshes managed entries. Uninstall preserves user entries and parent directories. `rh doctor` checks the hooks, rules and skill links. Default install and update exclude Antigravity. (#3251, #3376, #3380)
+- Native Antigravity (`agy`) can run the Herdr advisor, council, workers and `gatekeeper-fallback`. Launch requires stable `agy` 1.5.0 or later and checks the repository opt-in, installed hooks, sign-in and exact catalog model. The advisor supports Stop handoffs and manual relaunch. Workers have a write tool profile with optional GitHub access. The advisor, council and gatekeeper fallback have read-only tool profiles. (#3246, #3377, #3383)
+- Configure an optional council in Operator Settings. Run `rh seats council --issue <n> --members <csv>` to open Herdr consultation tabs for up to three distinct members from `fable`, `carbon` and `astra`. Each member writes a reference plan outside Git. (#3297, #3298, #3366, #3378)
+- `rh seats pool` and Operator Settings show available recommended models by seat. Pi seats can set separate scaffold models for `explorer` and `deep-reasoner` under `seats.pi_sub_agent_models`, within each seat's fleet grants. (#3253, #3268)
+- `rh board cluster --open --json` and `rh board cluster --parent <n> --json` group open issues by module and defect pattern. Add `--include-loose` to a parent scan to include loose issues. The command resolves cited files through ArchContext and groups issues with overlapping files. It reports blockers and cycles. If overlapping issues have an intervening dependency, it splits the overlap to keep the proposed merge order valid. (#3282, #3348, #3357, #3359, #3362)
+- Board attention rule R8 alerts the advisor when a plan has two or more ready, unclaimed single-issue units in the same module and tier group. `rh board triage-apply --manifest <path>` checks the plan and split rules before changing labels, sub-issues or the parent plan. `--dry-run` shows the operations without writes. (#3359, #3362)
+- Experimental `rh rules status --proposals` reports review findings and recurring rule-opportunity themes after the ledger watermark. Add `--include-low` or `--include-bot` for more findings. The scan reports when it reaches its GitHub call limit. (#3263)
+- `rh doctor` checks the local Magpie gateway when a configured seat or review route uses it. The tooling guide lists the supported provider routes. (#3254)
+
+### Changed
+
+- The logical model catalog supplies the vendor families, native and Magpie routes, quota accounts, and seat recommendations. Astra and Sonnet leave the non-council recommendations. Explorer uses Haiku at high effort. Codex deep-reasoner and harness-evaluator use GPT-6.2 Sol. Pi Gemini 4 Neon shares the Claude Opus seat tier. (#3340, #3352, #3363)
+- `rh quota` and Operator show separate `agy_gemini` and `agy_other` accounts with weekly and five-hour limits. A Pi advisor on Magpie's `agy-cli` route uses its configured model at 50% or more Gemini weekly quota. It uses Neon below 50% or when the reading is unknown. Native `agy` uses its configured model. Worker routes check seats in configured order and reserve Gemini quota for the advisor below `routing.agy_saving_below_remaining`, which defaults to 25%. (#3286, #3288, #3366, #3378)
+- The seat schema has 11 seats and narrower fleet grants. Herdr seats can use the read-only scaffold roles where their grants permit. Standalone Claude and Codex installs retain `explorer`, `deep-reasoner` and `harness-evaluator`. (#3305, #3306, #3307, #3366, #3378)
+- Seat launch, board dispatch and board review check runtime availability before starting an agent. Dispatch skips unavailable workers. Board protocol 14 attributes review seats from GitHub acceptance evidence. Medium PRs prefer the gatekeeper and use the reviewer when the writer shares the gatekeeper model family or the gatekeeper is unavailable. A High second review checks the recorded gatekeeper family. Manual `rh review publish` requires `--seat gatekeeper` or `--seat reviewer`. (#3253, #3353, #3369, #3371, #3374)
+- `rh worktrees start` can seed a private CodeGraph index from the shared base. It builds a full index when a seed is unavailable and preserves occupied index directories. The architecture advisory checks constraints through `rh arch constraints check`. (#3188, #3347, #3361)
+- The ArchContext 0.17.0 adoption batches architecture verification and PR impact and uses the same Git base for both formats of `rh arch projection slice`. The release ships ArchContext and contracts 0.17.1 with CodeGraph 1.6.4. Native `archctx debt --base` now owns shared-base indexing, comparison and cache management for `rh arch debt --base <ref>`. Standalone `rh arch debt` still measures the current checkout with `archctx complete`. (#3350, #3373, #3372, #3381)
+- `rh arch refactor recommendations` accepts `--node <capability-id>` or repeatable `--path <repo-relative-path>` and preserves typed provider errors. Refactor decisions use the recommendation scan digest. The ArchContext client reuses compatible Node probes and rechecks the executable before reuse. (#3346, #3347, #3361, #3373)
+
+### Fixed
+
+- Whole-path ownership requires the recorded file-system entry identity and content. Restore, removal and the hook exemption preserve a user replacement with the same bytes. (#3266)
+- `rh worktrees cleanup` keeps a merged checkout with unrecognized Git-ignored local data. Preview and apply check the Git inventory. Apply checks it again under the topology lock. (#3338)
+- A failed acceptance write leaves the previous receipt verifiable. The writer stores the result and observation by digest before it publishes the receipt. (#3335)
+- Seat launch uses the same login shell in tabs and splits. Seat reset refuses an untracked requester immediately and reads the registry from the requester's launch directory. Pi reset seats receive their seat environment and support Pi session records, Stop handoffs and peer reset. (#3279, #3300, #3302, #3364, #3368)
+- Native Antigravity denies state-changing board commands, including the paths through `rh board --parent` and `rh board attention start`. Use `rh board cluster --parent <n>` for a read-only parent scan. (#3364, #3368)
+- Operator Settings refuses to disable a runtime while effective seats use it and lists the seats to move first. (#3287)
+
+### Removed
+
+- The bundled `fast-worker`, `deep-worker`, `root-cause-prover` and in-process `gatekeeper` agents are retired. Use the Herdr seats for implementation and acceptance. (#3305, #3306, #3307)
+- `rh seats consult` and the `planner` seat give way to `rh seats council`. The `gatekeeper-deep` seat is retired. (#3366, #3378)
+- Direct ArchContext `audit`, `investigate`, `agents` and `jobs` point to the seat and issue-flow commands. `hook` points to `rh install`. (#3346)
+
+### Documentation and maintenance
+
+- ADR-0006 records the seat, model, fleet, review and bundling design. The issue-flow procedures cover council consultation, dispatch skeletons and the optional `rule-opportunity` marker. Advisor and acceptor skills use scoped refactor recommendations, module review prompts and `rh arch verify` for architecture changes and High-risk cross-module changes. (#3262, #3299, #3343, #3349, #3367, #3378)
+- The rules review PRD and lessons record the discovery pilot, retro responsibilities, enforcement reconciliation and ledger watermark. (#3258, #3259, #3260, #3261, #3265)
+- Refresh generated architecture projections through `281260593`, `edf29b3ab` and `284404e4a`, with earlier refreshes in the release checklist. (#3301, #3318, #3322, #3328, #3358, #3365, #3379)
+- Record the 0.35.2 released managed values. The architecture provider timeout test now starts its timer after the fixture signals readiness. (#3295, #3294)
+
+### Upgrade
+
+- Run `rh update` once on each host to install 0.36.0 and migrate the entry-identity ledger. From 0.35.2, the user and repository host configuration ledgers move from protocol 4 to 5. The update records identity for eligible entries that still match the ledger. It removes or restores retired files only when it can prove ownership. It keeps edited or unproved files and reports retained vault copies. Install state stays at protocol 5, plan blocks at protocol 3 and the hook bridge at protocol 1. (#3266, #3306)
+- The same update moves saved seat settings to the 11-seat schema. Review `planner` → `council`, `worker-important` → `worker-opus`, `worker-important-fast` → `worker-neon`, the removal of `gatekeeper-deep`, and the new Gemini saving threshold. Update automation that refers to the old names or `rh seats consult`. Relaunch the seats after all participating hosts update. (#3366, #3367, #3378)
+- Record fresh acceptance if an open review still uses the old local receipt layout. Receipt protocol 4 now reads the result and observation from digest paths. Pass `--seat` when publishing manually. (#3335, #3371, #3374)
+- To opt in to Antigravity, run `rh install --target antigravity`. If the host is already opted in, run `rh update --target antigravity` to refresh its managed entries. Run `rh doctor` and confirm that the installed hook commands resolve to the current executable. On the actual seat host, verify guard activation in fresh `agy` sessions and launch the advisor through Herdr in an opted-in checkout. Record the live results before relying on native seats. (#3251, #3246, #3380)
+- After upgrading the tools and checking a successful `rh arch debt --base <ref>` run, remove the retired repo-harness cache at `.git/repo-harness/cache/arch-debt` if it still exists. In a linked worktree, look for `repo-harness/cache/arch-debt` under the directory that `git rev-parse --git-common-dir` prints. ArchContext manages its own cache. (#3372, #3381)
+
+### Rollback
+
+- Before publication, close the prep PR or revert its squash commit. After publication, keep the tag and release a corrective patch.
+- Version 0.35.2 rejects protocol 5 host configuration ledgers. Keep 0.36.0 on migrated hosts, or restore the pre-upgrade ledgers with their matching host state and seat settings before returning to 0.35.2. Before a downgrade, move native `agy` seats to a supported runtime. If the host state restore does not cover Antigravity, remove the new managed entries with 0.36.0 first.
+
 ## [0.35.2] - 2026-11-19
 
 ### Added
