@@ -1,6 +1,6 @@
 # organization/board 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-organization-board" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:57c456a731982056b3b770c4e4bc133d00c65c510fc0a1f82ca87557d0058e55" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-organization-board" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:b375eb208d4c3d1ea0e24be561d9d3937c0a0cc0dab13600f24570ef49a76687" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.organization.board`(kind `capability`)
 > **Matched Prefixes**:`src/core/board/**`、`src/effects/board/**`、`src/cli/commands/board.ts`、`src/cli/commands/quota.ts`、`src/cli/commands/seats.ts`
@@ -67,6 +67,7 @@ flowchart LR
 入向關係:
 
 - `depends-on` ← `capability.verification.acceptance-review` — Read seat settings and board review sources for review collection and publication.
+- `depends-on` ← `capability.runtime-harness.architecture` — Resolve the GitHub repository for projection slice base links.
 - `depends-on` ← `capability.workflow-engine.contract-assets` — Render the change hazard table in agentic-development-flow.md from the board hazard list reader.
 - `depends-on` ← `capability.verification.evals-checks` — Test Board behavior through its source modules
 - `depends-on` ← `component.execution-primitives.hc-client` — Implement the board host port (seat terminals by parent label and the hc version) and the attention host port (start watcher terminals with hc run, read watcher terminals, and send to and wait on seat terminals)
