@@ -8,7 +8,7 @@ import { AGY_READONLY_COMMAND_PREFIXES, AGY_WORKER_COMMAND_PREFIXES, agySeatComm
 import { HANDOFF_SECTIONS, seatResetReason, seatResetSteps, type SeatResetIdentity } from "../../src/core/board/seat-reset";
 import { SeatResetError, readSeatSession, recordSeatSession, runSeatReset, type SeatRelaunch, type SeatResetNotify, type SeatResetOptions } from "../../src/effects/board/seat-reset";
 import { seatHandoff, seatResetLaunch } from "../../src/cli/commands/seats";
-import { DEFAULT_SEATS_CONFIG, LAUNCH_SEAT_IDS, WORKER_SEAT_IDS, isCouncilSeat, isReviewSeat, isWorkerSeat } from "../../src/core/board/seats-settings";
+import { DEFAULT_SEATS_CONFIG, LAUNCH_SEAT_IDS, NATIVE_SEATS_PRESET, WORKER_SEAT_IDS, isCouncilSeat, isReviewSeat, isWorkerSeat } from "../../src/core/board/seats-settings";
 import { repoHarnessRepoIdFor } from "../../src/effects/repo-registry";
 import { classifyQuotaReading, decodeCodexRateLimitsResult } from "../../src/core/board/quota";
 import { effectiveSeatConfig, formatSeatRoutes, seatAccountQuotas } from "../../src/core/board/seat-routing";
@@ -460,6 +460,38 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     const refused = f.run(argv);
     expect(refused.status).toBe(1);
     expect(readFileSync(file, "utf8")).toBe("user content");
+  }));
+
+  test("stored main@76675c2 Native preset with read-only agy workers lets unrelated seats render argv while failing closed on read-only agy worker launch", withAgySeat(f => {
+    const legacyNativeSeats = {
+      ...NATIVE_SEATS_PRESET,
+      "worker-neon": { ...NATIVE_SEATS_PRESET["worker-neon"], tools: ["net", "read", "shell"] as const },
+      "worker-light": { ...NATIVE_SEATS_PRESET["worker-light"]!, tools: ["net", "read", "shell"] as const },
+    };
+    writeFileSync(join(f.home, ".repo-harness", "config.json"), JSON.stringify({
+      agents: { enabled: ["antigravity", "claude", "codex", "pi"], uses: { docs: [], review: [] }, default_docs: null },
+      seats: legacyNativeSeats,
+    }));
+
+    const orch = f.run(["argv", "orchestrator", "--json"]);
+    expect(orch.status, orch.stderr).toBe(0);
+    expect(JSON.parse(orch.stdout).runtime).toBe("claude");
+
+    const adv = f.run(["argv", "advisor", "--json"]);
+    expect(adv.status, adv.stderr).toBe(0);
+    expect(JSON.parse(adv.stdout).runtime).toBe("agy");
+
+    rmSync(join(f.home, ".repo-harness", "seats", "agy"), { recursive: true, force: true });
+    for (const workerSeat of ["worker-neon", "worker-light"] as const) {
+      const refused = f.run(["argv", workerSeat, "--json"]);
+      expect(refused.status).toBe(1);
+      expect(refused.stdout).toBe("");
+      const body = JSON.parse(refused.stderr);
+      expect(body.error).toBe("seat_tool_not_allowed");
+      expect(body.message).toContain(`The ${workerSeat} agy worker seat is configured read-only (missing edit).`);
+      expect(body.message).toContain(`Enable edit for seats.${workerSeat}.tools in Settings`);
+    }
+    expect(existsSync(join(f.home, ".repo-harness", "seats", "agy"))).toBe(false);
   }));
 
   test("agySeatCommandRules enforces no bare git/gh/hc/rh prefixes across all allowed seats", () => {

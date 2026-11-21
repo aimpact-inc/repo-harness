@@ -409,6 +409,9 @@ interface AgyLaunchInputs {
 function agyLaunch(seat: LaunchSeatId, config: SeatConfigV1, repositoryId: string | undefined, input: AgyLaunchInputs): RuntimeLaunch {
   const model = config.model;
   if (model === null) throw new Error('agy requires an explicit model.');
+  if (isWorkerSeat(seat) && !config.tools.includes('edit')) {
+    throw new Error(`The ${seat} agy worker seat is configured read-only (missing edit). Enable edit for seats.${seat}.tools in Settings before launching it.`);
+  }
   const env = isResetSeat(seat) && repositoryId !== undefined
     ? [`${SEAT_ENV}=${seat}`, `${SEAT_REPOSITORY_ENV}=${repositoryId}`, `${SEAT_MODEL_ENV}=${model}`]
     : [];

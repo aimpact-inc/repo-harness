@@ -97,21 +97,15 @@ export async function executeReview(decisions: readonly ReviewDecisionV1[], cont
     const labels = { repositoryId: context.repositoryId, pr: String(decision.pr), parent: String(context.parent) };
     for (const start of decision.seats) {
       const { runtime, ...launch } = await ports.launch(start.seat, labels, worktree.path, context.gatekeeper);
-      if (runtime === 'agy' && !(start.seat === 'gatekeeper' && context.gatekeeper.id === 'gatekeeper-fallback')) {
-        throw new BoardCollectError('agy is available only for gatekeeper-fallback on review launches.');
+      if (runtime === 'agy') {
+        throw new BoardCollectError('agy review seats cannot collect or publish acceptance receipts yet; configure gatekeeper-fallback on claude, codex, or pi.');
       }
       launches.push({ start, launch, runtime });
     }
     for (const { start, launch, runtime } of launches) {
       const markerUrl = ports.comment(decision.pr, markerBody(decision, start));
-      const task = reviewPacket(decision, start, runtime);
       try {
-        ports.openTab({
-          ...(launch.tab === null ? {} : { name: launch.tab }),
-          space: context.space,
-          folder: worktree.path,
-          ...(runtime === 'agy' ? { argv: [...launch.argv, '-i', task] } : { argv: launch.argv, task }),
-        });
+        ports.openTab({ ...(launch.tab === null ? {} : { name: launch.tab }), space: context.space, folder: worktree.path, argv: launch.argv, task: reviewPacket(decision, start, runtime) });
       } catch (error) {
         if (!(error instanceof HerdrCoreError) || HERDR_APP_NOT_SENT.has(error.reason)) {
           ports.comment(decision.pr, `${REVIEW_START_STATUS_HEADER}\nClaim: ${markerUrl}\nStatus: released`);

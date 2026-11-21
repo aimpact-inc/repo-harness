@@ -292,7 +292,7 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
         {SEAT_TOOLS.filter(tool => !(review || council) || range.tools.includes(tool)).map((tool) => {
           const on = draft.tools.includes(tool);
           const ruled = !range.tools.includes(tool);
-          const agyLockedTool = agy && !(isWorkerSeat(seat) && tool === 'gh');
+          const agyLockedTool = agy && !(isWorkerSeat(seat) && ((tool === 'gh' && (draft.tools.includes('edit') || on)) || (tool === 'edit' && !on)));
           // Codex always runs commands, so its Shell can be turned on but not off.
           const hostWhy = agyLockedTool ? t('seats.tools.why.agy') : draft.runtime === 'pi' ? t('seats.tools.why.pi')
             : tool === 'read' ? t('seats.tools.why.read')

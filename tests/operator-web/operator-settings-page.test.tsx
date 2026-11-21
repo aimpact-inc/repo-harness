@@ -225,6 +225,32 @@ describe('agents page seats section', () => {
     }
   });
 
+  test('a stored read-only agy worker allows explicitly enabling edit in Settings UI and unlocks gh afterwards', async () => {
+    const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
+    const read = await settingsStores(NOW, 'busy').seats.read();
+    if (read.state !== 'ok') throw new Error('fixture read failed');
+    const agyEnabled = {
+      ...read.settings,
+      config: {
+        ...read.settings.config,
+        'worker-neon': { runtime: 'agy' as const, model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['net', 'read', 'shell'] as const },
+      },
+      ranges: { ...read.settings.ranges, runtimes: read.settings.ranges.runtimes.map(entry => (entry.id === 'agy' ? { ...entry, enabled: true } : entry)) },
+    };
+    await mount({ ...seatsProps(posts), readSeatsSettings: async () => ({ state: 'ok', settings: agyEnabled }) });
+    await click(buttonWithText('Neon worker'));
+    expect(allow('Edit files').getAttribute('aria-checked')).toBe('false');
+    expect(allow('Edit files').disabled).toBe(false);
+    expect(allow('GitHub writes').getAttribute('aria-checked')).toBe('false');
+    expect(allow('GitHub writes').disabled).toBe(true);
+    await click(allow('Edit files'));
+    expect(allow('Edit files').getAttribute('aria-checked')).toBe('true');
+    expect(allow('Edit files').disabled).toBe(true);
+    expect(allow('GitHub writes').disabled).toBe(false);
+    await click(seatsSave());
+    expect(posts[0]?.seats['worker-neon']).toEqual({ runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['edit', 'net', 'read', 'shell'] });
+  });
+
   test('the advisor offers only scaffold roles, allows edits and blocks GitHub writes; save sends the whole section', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     await mount(seatsProps(posts));

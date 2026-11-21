@@ -52,12 +52,13 @@ export function agySeatTools(id: SeatId): readonly SeatTool[] {
 }
 
 export function isAgyToolsValid(id: SeatId, tools: readonly SeatTool[]): boolean {
-  if (isWorkerSeat(id)) {
-    return AGY_WORKER_REQUIRED_TOOLS.every(tool => tools.includes(tool))
-      && tools.every(tool => (AGY_WORKER_SEAT_TOOLS as readonly SeatTool[]).includes(tool));
-  }
-  return tools.length === AGY_READONLY_SEAT_TOOLS.length
+  const isReadonly = tools.length === AGY_READONLY_SEAT_TOOLS.length
     && AGY_READONLY_SEAT_TOOLS.every(tool => tools.includes(tool));
+  if (isWorkerSeat(id)) {
+    return isReadonly || (AGY_WORKER_REQUIRED_TOOLS.every(tool => tools.includes(tool))
+      && tools.every(tool => (AGY_WORKER_SEAT_TOOLS as readonly SeatTool[]).includes(tool)));
+  }
+  return isReadonly;
 }
 
 const TOKEN = /^[a-z0-9][a-z0-9.-]{0,63}$/u;

@@ -4,12 +4,12 @@ import { effectiveSeatConfig, seatAccountQuotas, shownModel } from '../../core/b
 import { seatModelBlock } from '../../core/board/seat-pool';
 import { withSeatLine } from '../../core/board/seat-line';
 import { renderBundleLine } from '../../core/board/source';
-import type { SeatConfigV1, SeatId } from '../../core/board/seats-settings';
+import { SEAT_IDS, isWorkerSeat, type SeatConfigV1, type SeatId } from '../../core/board/seats-settings';
 import { HERDR_APP_NOT_SENT, HerdrCoreError, herdrAppDo } from '../terminal/herdr-core';
 import { runInternalHelper } from '../runtime/helper-runner';
 import { readQuotaReport } from './quota';
 import { collectSeatPoolProbes, magpieExtensionInstalled, readSeatsConfiguration } from './seats-configuration';
-import { BoardCollectError, readParent, readRepositoryId, runGhText } from './collect';
+import { BoardCollectError, readParent, readRepositoryId, runGhText, type BoardCollectInput } from './collect';
 
 type DispatchedV1 = Extract<DispatchDecisionV1, { action: 'dispatch' }>;
 type SkippedV1 = Extract<DispatchDecisionV1, { action: 'skip' }>;
@@ -20,6 +20,7 @@ export type DispatchLaunch = (seat: SeatId, labels: { readonly repositoryId: str
 
 export interface DispatchInput {
   readonly repo_root: string;
+  readonly repository?: string;
   readonly parent: number;
   /** The Herdr space that receives the worker tabs. */
   readonly space: string;
@@ -29,6 +30,8 @@ export interface DispatchInput {
   readonly dry_run: boolean;
   /** `--issues`: the issues that one seat and one pull request take; null dispatches the plan. */
   readonly bundle: readonly number[] | null;
+  readonly gh_runner?: BoardCollectInput['gh_runner'];
+  readonly env?: NodeJS.ProcessEnv;
 }
 
 /** The writes of one dispatch. Each is a process boundary, so tests replace them. */
@@ -142,9 +145,13 @@ export async function executeDispatch(plan: DispatchPlanV1, context: { readonly 
       releaseClaims(ports, claims);
       throw error;
     }
+    const task = packet(unit, worktree.path, claims.map(claim => claim.url));
     try {
       ports.openTab({
-        ...(launch.tab === null ? {} : { name: launch.tab }), space: context.space, folder: worktree.path, argv: launch.argv, task: packet(unit, worktree.path, claims.map(claim => claim.url)),
+        ...(launch.tab === null ? {} : { name: launch.tab }),
+        space: context.space,
+        folder: worktree.path,
+        ...(launch.runtime === 'agy' ? { argv: [...launch.argv, '-i', task] } : { argv: launch.argv, task }),
       });
     } catch (error) {
       if (error instanceof HerdrCoreError && HERDR_APP_NOT_SENT.has(error.reason)) {
@@ -160,22 +167,25 @@ export async function executeDispatch(plan: DispatchPlanV1, context: { readonly 
 
 /** Plan the dispatch of one parent and, unless `dry_run`, execute it. */
 export async function runDispatch(input: DispatchInput): Promise<DispatchResultV1> {
+  const env = input.env ?? process.env;
   const { parent } = readParent(input);
   const repositoryId = String(readRepositoryId(input));
   const terminals = input.host.seatTerminals(repositoryId);
   if (terminals.status === 'unavailable') throw new BoardCollectError(`hc could not list the seat terminals: ${terminals.reason}`);
-  const { seats } = readSeatsConfiguration(process.env);
-  const probes = collectSeatPoolProbes();
-  const quota = seatAccountQuotas((await readQuotaReport(process.env, seats.routing.exhausted_at_or_above_used)).accounts, seats.routing);
+  const { seats } = readSeatsConfiguration(env);
+  const probes = collectSeatPoolProbes(env, SEAT_IDS.some(id => seats[id]?.runtime === 'agy'));
+  const quota = seatAccountQuotas((await readQuotaReport(env, seats.routing.exhausted_at_or_above_used)).accounts, seats.routing);
   const plan = planDispatch({ parent, terminals: terminals.terminals, seats, quota,
-    modelBlock: (id, seat) => seatModelBlock(id, seat, seats, probes, () => magpieExtensionInstalled(process.env)),
+    modelBlock: (id, seat) => (isWorkerSeat(id) && seat.runtime === 'agy' && !seat.tools.includes('edit')
+      ? `agy: ${id} is configured read-only (missing edit). Enable edit for seats.${id}.tools in Settings.`
+      : seatModelBlock(id, seat, seats, probes, () => magpieExtensionInstalled(env))),
     ...(input.bundle === null ? {} : { bundle: input.bundle }) });
   const started = await executeDispatch(plan, { repositoryId, parent: input.parent, space: input.space, dry_run: input.dry_run,
     // The same projection that `seatLaunch` uses for the argv, so the claim names the model that runs.
     model: seat => effectiveSeatConfig(seat, seats, quota)?.model ?? null,
   }, {
     startWorktree: issue => startWorktree(input, issue),
-    comment: (issue, body) => runGhText(input, ['issue', 'comment', String(issue), '--body-file', '-'], withSeatLine(body)),
+    comment: (issue, body) => runGhText(input, ['issue', 'comment', String(issue), '--body-file', '-'], withSeatLine(body, env)),
     openTab: args => { herdrAppDo('tab.new', args); },
     launch: input.launch,
   });

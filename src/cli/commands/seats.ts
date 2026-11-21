@@ -10,6 +10,7 @@ import {
   COUNCIL_TOOLS,
   LAUNCH_SEAT_IDS,
   RETIRED_SEAT_FLEET_ROLES,
+  SEAT_IDS,
   SeatsConfigMigrationRequiredError,
   decodeSeatsConfig,
   isAgyAllowedSeat,
@@ -348,7 +349,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
     ? await checkedAgyExecutable(runtimeSeat, config, initialCandidate, env, cwd, terminal)
     : undefined;
   const checkPool = checkAvailability && agyExecutable === undefined;
-  const probes = checkPool ? collectSeatPoolProbes(env) : [];
+  const probes = checkPool ? collectSeatPoolProbes(env, SEAT_IDS.some(seatId => seats[seatId]?.runtime === 'agy')) : [];
   const unavailable = (modelSeat: SeatId, reason: string) => {
     throw new SeatProviderUnavailableError(`The ${id} seat cannot launch. ${reason} ${seatPoolHint(modelSeat, seats, probes)}`);
   };
@@ -401,6 +402,12 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
 async function checkedAgyExecutable(id: SeatId, config: Record<string, unknown>, seat: SeatConfigV1, env: NodeJS.ProcessEnv, cwd: string, terminal: 'new' | 'existing'): Promise<string> {
   if (!isAgyAllowedSeat(id)) {
     throw new SeatsCommandError('seat_runtime_unsupported', `Direct agy launch is not supported on the ${id} seat.`);
+  }
+  if (isWorkerSeat(id) && !seat.tools.includes('edit')) {
+    throw new SeatsConfigurationError(
+      'seat_tool_not_allowed',
+      `The ${id} agy worker seat is configured read-only (missing edit). Enable edit for seats.${id}.tools in Settings before launching it.`,
+    );
   }
   if (terminal === 'existing') throw new SeatsCommandError('seat_reset_runtime_unsupported', `Start a new agy ${id} pane with rh seats launch ${id}.`);
   if (!enabledRuntimesOf(config).includes(seatHostId('agy'))) {

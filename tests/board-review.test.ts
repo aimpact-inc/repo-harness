@@ -175,14 +175,15 @@ test('a signed-out reviewer leaves the whole High start decision without markers
   expect([p.comments, p.tabs]).toEqual([[], []]);
 });
 
-test('an agy review launch is allowed only for gatekeeper-fallback (passing -i <task>) and refuses primary gatekeeper and reviewer before any marker or tab', async () => {
+test('an agy review launch refuses gatekeeper-fallback, primary gatekeeper, and reviewer before any marker or tab', async () => {
+  const expectedMessage = 'agy review seats cannot collect or publish acceptance receipts yet; configure gatekeeper-fallback on claude, codex, or pi.';
   const reviewerAgy = ports({ launch: async seat => ({ argv: [seat], tab: seat, runtime: seat === 'reviewer' ? 'agy' : 'codex' }) });
   const decisions = plan([pr(1, { second_review: 'pending' })]);
-  await expect(executeReview(decisions, context, reviewerAgy)).rejects.toThrow('agy is available only for gatekeeper-fallback on review launches.');
+  await expect(executeReview(decisions, context, reviewerAgy)).rejects.toThrow(expectedMessage);
   expect([reviewerAgy.comments, reviewerAgy.tabs]).toEqual([[], []]);
 
   const primaryGatekeeperAgy = ports({ launch: async seat => ({ argv: [seat], tab: seat, runtime: seat === 'gatekeeper' ? 'agy' : 'claude' }) });
-  await expect(executeReview(decisions, context, primaryGatekeeperAgy)).rejects.toThrow('agy is available only for gatekeeper-fallback on review launches.');
+  await expect(executeReview(decisions, context, primaryGatekeeperAgy)).rejects.toThrow(expectedMessage);
   expect([primaryGatekeeperAgy.comments, primaryGatekeeperAgy.tabs]).toEqual([[], []]);
 
   const fallbackRoute: SeatRouteV1 = {
@@ -191,14 +192,8 @@ test('an agy review launch is allowed only for gatekeeper-fallback (passing -i <
     line: 'gatekeeper: gatekeeper-fallback (agy gemini-4-hydrogen)',
   };
   const fallbackPorts = ports({ launch: async seat => ({ argv: [seat, '--model', 'gemini-4-hydrogen'], tab: 'review', runtime: 'agy' }) });
-  const result = await executeReview(high, { ...context, gatekeeper: fallbackRoute }, fallbackPorts);
-  expect(result.started).toMatchObject([{ pr: 1, seat: 'gatekeeper' }]);
-  expect(fallbackPorts.comments).toHaveLength(1);
-  expect(fallbackPorts.tabs).toHaveLength(1);
-  const tab = fallbackPorts.tabs[0]!;
-  expect(tab.task).toBeUndefined();
-  expect((tab.argv as string[]).slice(0, 4)).toEqual(['gatekeeper', '--model', 'gemini-4-hydrogen', '-i']);
-  expect((tab.argv as string[])[4]).toContain('reviewer.harness "agy"');
+  await expect(executeReview(high, { ...context, gatekeeper: fallbackRoute }, fallbackPorts)).rejects.toThrow(expectedMessage);
+  expect([fallbackPorts.comments, fallbackPorts.tabs]).toEqual([[], []]);
 });
 
 test('a dry run, and a worktree off the head, write no marker and open no seat', async () => {
