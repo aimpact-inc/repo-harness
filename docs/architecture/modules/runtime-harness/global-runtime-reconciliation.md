@@ -1,6 +1,6 @@
 # runtime-harness/global-runtime-reconciliation 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-global-runtime-reconciliation" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:e822bdb5612845318c89061bda2a2baf69666be747d86c44d0c1e8adab8ee17b" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-global-runtime-reconciliation" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:0f2431acb8dc85f7575897740db4da17f76dbf21b9e6cc231824218762a7ad77" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.global-runtime-reconciliation`(kind `capability`)
 > **Matched Prefixes**:`package.json`、`bun.lock`、`scripts/check-managed-runtime.ts`、`scripts/sync-codex-installed-copies.sh`、`assets/reference-configs/external-tooling.md`、`docs/reference-configs/external-tooling.md`、`docs/reference-configs/install-profiles.md`、`src/effects/upgrade/**`、`src/effects/runtime/node-candidates.ts`、`src/effects/runtime/protected-helper-platform.ts`、`src/effects/skill-tree-integrity.ts`、`src/effects/host-skill-roots.ts`、`src/effects/configuration/**`、`src/core/release/**`、`src/effects/release/**`、`scripts/check-npm-release.sh`、`scripts/check-release-published.sh`、`scripts/check-tarball-install-smoke.sh`、`scripts/check-release-upgrade-rehearsal.sh`、`scripts/check-pi-package-smoke.ts`、`scripts/runtime-evidence-receipt.ts`、`install.sh`、`install.ps1`、`tsconfig.json`、`src/effects/runtime/node-runtime.ts`
@@ -17,7 +17,7 @@ Reconciles the installed repo-harness runtime and the external tooling that core
 flowchart LR
   p1_capability_runtime_harness_global_runtime_reconciliation_401730e8["Global Runtime Reconciliation"]:::component
   p1_capability_runtime_harness_hook_adapters_75a11743["Hook Adapters"]:::component
-  p1_component_global_runtime_reconciliation_archctx_closure_1b9b31b7["ArchContext Closure"]:::component
+  p1_component_architecture_archctx_closure_ab1057a2["ArchContext Closure"]:::component
   p1_component_global_runtime_reconciliation_cli_diagnostics_95dbb784["CLI Diagnostics and Shared Options"]:::component
   p1_component_global_runtime_reconciliation_cli_layer_c602aa84["Global Runtime Reconciliation (cli)"]:::component
   p1_component_global_runtime_reconciliation_cli_root_389856ab["CLI Composition Root"]:::component
@@ -31,17 +31,17 @@ flowchart LR
   p1_component_global_runtime_reconciliation_release_packaging_core_40f9fec6["Release Packaging (core)"]:::component
   p1_component_global_runtime_reconciliation_release_packaging_effects_c2f69754["Release Packaging (effects)"]:::component
   p1_component_global_runtime_reconciliation_tests_layer_04289ccd["Global Runtime Reconciliation (tests)"]:::component
-  p1_component_global_runtime_reconciliation_archctx_closure_1b9b31b7 -->|"Read the architecture section through the global configuration store"| p1_component_global_runtime_reconciliation_global_configuration_17512409
-  p1_component_global_runtime_reconciliation_archctx_closure_1b9b31b7 -->|"Write the private global configuration through the installer ownership writer"| p1_capability_runtime_harness_hook_adapters_75a11743
+  p1_component_architecture_archctx_closure_ab1057a2 -->|"Read the architecture section through the global configuration store"| p1_component_global_runtime_reconciliation_global_configuration_17512409
+  p1_component_architecture_archctx_closure_ab1057a2 -->|"Write the private global configuration through the installer ownership writer"| p1_capability_runtime_harness_hook_adapters_75a11743
   p1_component_global_runtime_reconciliation_cli_diagnostics_95dbb784 -->|"Read the install state#44; skill projections#44; host targets#44; the Pi host probe#44; hook routes and status for the doctor and setup check reports"| p1_capability_runtime_harness_hook_adapters_75a11743
   p1_component_global_runtime_reconciliation_cli_diagnostics_95dbb784 -->|"Read the staged host skill roots and the upgrade operator decisions"| p1_component_global_runtime_reconciliation_primary_d41cdd38
   p1_component_global_runtime_reconciliation_cli_diagnostics_95dbb784 -->|"Plan the upgrade for the setup check checklist"| p1_component_global_runtime_reconciliation_primary_cli_6acfbdac
-  p1_component_global_runtime_reconciliation_cli_root_389856ab -->|"Register the rh arch projection command and the archctx providers"| p1_component_global_runtime_reconciliation_archctx_closure_1b9b31b7
+  p1_component_global_runtime_reconciliation_cli_root_389856ab -->|"Register the rh arch projection command and the archctx providers"| p1_component_architecture_archctx_closure_ab1057a2
   p1_component_global_runtime_reconciliation_cli_root_389856ab -->|"Register the doctor and setup check commands and validate the shared CLI options"| p1_component_global_runtime_reconciliation_cli_diagnostics_95dbb784
   p1_component_global_runtime_reconciliation_cli_root_389856ab -->|"Register the install and status and security and hook commands and run host transactions for the plugin selection"| p1_capability_runtime_harness_hook_adapters_75a11743
   p1_component_global_runtime_reconciliation_cli_root_389856ab -->|"Register the update and upgrade commands and run the setup inside the candidate runtime"| p1_component_global_runtime_reconciliation_primary_d41cdd38
   p1_capability_runtime_harness_global_runtime_reconciliation_401730e8 -->|"Reconcile and verify the selected global runtime closure"| p1_component_global_runtime_reconciliation_primary_d41cdd38
-  p1_component_global_runtime_reconciliation_primary_d41cdd38 -->|"Configure the global architecture projection and verify the archctx daemon handshake through the architecture setup port"| p1_component_global_runtime_reconciliation_archctx_closure_1b9b31b7
+  p1_component_global_runtime_reconciliation_primary_d41cdd38 -->|"Configure the global architecture projection and verify the archctx daemon handshake through the architecture setup port"| p1_component_architecture_archctx_closure_ab1057a2
   p1_component_global_runtime_reconciliation_primary_d41cdd38 -->|"Install host adapters#44; project owned host skills#44; and register the Pi package from the installed candidate after mandatory setup succeeds"| p1_capability_runtime_harness_hook_adapters_75a11743
   p1_component_global_runtime_reconciliation_release_packaging_b4257d9e -->|"Smoke the packed tarball CLI and hook binaries in a clean app"| p1_component_global_runtime_reconciliation_cli_root_389856ab
   classDef actor fill:#111827,color:#ffffff,stroke:#f9fafb,stroke-width:2px
@@ -50,7 +50,7 @@ flowchart LR
   classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-- Proof: `proven` (`sha256:961677a53c9a854755b623b6e58498c279f9f78899575d27993f3e189fe5340c`).
+- Proof: `proven` (`sha256:95fd5fe8dd6deab093c1c4efd3a5dc05bc44fd55afc9d6ab40c324399e391656`).
 - Semantic nodes: `16`; declared relations: `13`.
 
 ### 1.2 模組職責表
@@ -119,7 +119,7 @@ flowchart LR
   - `deployed-on` → `process.cli` — The CLI root dispatches commands in the per-command process.
   - `calls` → `capability.verification.acceptance-review` — Register the review command
   - `calls` → `capability.public-surface.adoption` — Register the adoption-plan command and run the adoption plan for the setup check
-  - `calls` → `component.global-runtime-reconciliation.archctx-closure` — Register the rh arch projection command and the archctx providers
+  - `calls` → `component.architecture.archctx-closure` — Register the rh arch projection command and the archctx providers
   - `calls` → `component.contract-assets.architecture-contracts` — Register the architecture providers after the contract version check
   - `calls` → `capability.organization.board` — Register the board, seats and quota commands
   - `calls` → `component.execution-primitives.cli-layer` — Register the bots command
@@ -147,7 +147,7 @@ flowchart LR
   - 無。
 - `component.global-runtime-reconciliation.primary`:
   - `calls` → `capability.public-surface.adoption` — Classify retired surfaces with the adoption fingerprints and back up removals in an FsTransaction manifest under the target lock
-  - `calls` → `component.global-runtime-reconciliation.archctx-closure` — Configure the global architecture projection and verify the archctx daemon handshake through the architecture setup port
+  - `calls` → `component.architecture.archctx-closure` — Configure the global architecture projection and verify the archctx daemon handshake through the architecture setup port
   - `calls` → `capability.workflow-engine.contract-assets` — Sync the cross-review skills through the init command
   - `calls` → `capability.workflow-engine.execution-primitives` — Run processes and read lock owners during runtime reconciliation
   - `calls` → `capability.runtime-harness.hook-adapters` — Install host adapters, project owned host skills, and register the Pi package from the installed candidate after mandatory setup succeeds
@@ -188,7 +188,7 @@ flowchart LR
 
 ## 2. P2:端到端數據流
 
-> **Proof**: `proven` (`sha256:961677a53c9a854755b623b6e58498c279f9f78899575d27993f3e189fe5340c`); selectors `5/5`.
+> **Proof**: `proven` (`sha256:95fd5fe8dd6deab093c1c4efd3a5dc05bc44fd55afc9d6ab40c324399e391656`); selectors `5/5`.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%

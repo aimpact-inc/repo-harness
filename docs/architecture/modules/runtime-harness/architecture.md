@@ -1,6 +1,6 @@
 # runtime-harness/architecture 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-architecture" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:31cf18b413e2e9d7d68582dc22238757cc547bba124b14bf835d33de076be14c" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-architecture" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:6eb7d6acce8524ec3c65483dc3607fbc3514c950cf44cf2ab43d69e006538602" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.architecture`(kind `capability`)
 > **Matched Prefixes**:`src/effects/architecture/**`、`src/core/architecture/projection.ts`、`src/core/architecture/module-view.ts`、`src/core/review/module-review-prompt.ts`、`src/cli/commands/module.ts`、`src/cli/hook/agent-notice.ts`、`scripts/axr5-archctx-clean-room.ts`、`scripts/check-state-boundaries.ts`、`scripts/project-test-capabilities.ts`、`scripts/sync-helper-sources.ts`、`assets/skills/repo-harness-archimap/**`、`assets/skill-commands/repo-harness-architecture/**`、`docs/verification/**`
@@ -16,6 +16,11 @@ The Architecture plugin: the rh arch command tree, the pinned archctx closure, a
 ```mermaid
 flowchart LR
   p1_capability_runtime_harness_architecture_b2e483c3["Architecture"]:::component
+  p1_component_architecture_archctx_closure_ab1057a2["ArchContext Closure"]:::component
+  p1_component_architecture_archctx_closure_cli_e356d3af["ArchContext Closure (cli)"]:::component
+  p1_component_architecture_archctx_closure_core_36e646c8["ArchContext Closure (core)"]:::component
+  p1_component_architecture_archctx_closure_scripts_0c75e245["ArchContext Closure (scripts)"]:::component
+  p1_component_architecture_architecture_read_367307ea["Architecture Read"]:::component
   p1_component_architecture_helper_projection_4f90d353["Capability Resolver Projection"]:::component
   p1_component_architecture_model_reader_a34f9503["Architecture Model Reader"]:::component
   p1_component_architecture_module_cli_9d2922f4["Module Command"]:::component
@@ -25,22 +30,17 @@ flowchart LR
   p1_component_architecture_skills_17de03c8["Architecture Skills"]:::component
   p1_component_architecture_state_boundaries_check_139ea12c["State Boundaries Check"]:::component
   p1_component_architecture_test_projection_check_3217626c["Test Capability Projection Check"]:::component
-  p1_component_global_runtime_reconciliation_archctx_closure_1b9b31b7["ArchContext Closure"]:::component
-  p1_component_global_runtime_reconciliation_archctx_closure_cli_a2249d79["ArchContext Closure (cli)"]:::component
-  p1_component_global_runtime_reconciliation_archctx_closure_core_8aa566c4["ArchContext Closure (core)"]:::component
-  p1_component_global_runtime_reconciliation_archctx_closure_scripts_f4032cbc["ArchContext Closure (scripts)"]:::component
-  p1_component_global_runtime_reconciliation_architecture_read_33d34b6e["Architecture Read"]:::component
   p1_capability_runtime_harness_architecture_b2e483c3 -->|"Project the standalone capability resolver helper"| p1_component_architecture_helper_projection_4f90d353
   p1_component_architecture_module_cli_9d2922f4 -->|"List modules and export review prompts through the shared ArchitectureModelReader"| p1_component_architecture_model_reader_a34f9503
-  p1_component_global_runtime_reconciliation_archctx_closure_cli_a2249d79 -->|"Read the hand edits and the model readiness for the rh arch projection command"| p1_component_global_runtime_reconciliation_architecture_read_33d34b6e
-  p1_component_global_runtime_reconciliation_architecture_read_33d34b6e -->|"Run each read through the package-local archctx client and read the projection policy"| p1_component_global_runtime_reconciliation_archctx_closure_1b9b31b7
+  p1_component_architecture_archctx_closure_cli_e356d3af -->|"Read the hand edits and the model readiness for the rh arch projection command"| p1_component_architecture_architecture_read_367307ea
+  p1_component_architecture_architecture_read_367307ea -->|"Run each read through the package-local archctx client and read the projection policy"| p1_component_architecture_archctx_closure_ab1057a2
   classDef actor fill:#111827,color:#ffffff,stroke:#f9fafb,stroke-width:2px
   classDef component fill:#075985,color:#ffffff,stroke:#bae6fd,stroke-width:2px
   classDef datastore fill:#3f6212,color:#ffffff,stroke:#d9f99d,stroke-width:2px
   classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-- Proof: `proven` (`sha256:96595f54d9eb365704697b99fc3e9e0f09b3ede0cf5bded0e78dd3e360d64058`).
+- Proof: `proven` (`sha256:afde94c9f73fb6afd4557d78d1461268fbb8b6bfbf2be367d28608ff400a198c`).
 - Semantic nodes: `15`; declared relations: `4`.
 
 ### 1.2 模組職責表
@@ -69,6 +69,7 @@ flowchart LR
 
 - `calls` → `component.architecture.helper-projection` — Project the standalone capability resolver helper
 - `depends-on` → `capability.public-surface.adoption` — Resolve the source checkout for the projection writer.
+- `depends-on` → `capability.organization.board` — Resolve the GitHub repository for projection slice base links.
 - `depends-on` → `capability.verification.evals-checks` — Read CI coverage selection and test reports for capability projection.
 - `depends-on` → `capability.workflow-engine.inspection-migration` — Use the shared clean-room runtime for the architecture probe.
 
@@ -79,6 +80,19 @@ flowchart LR
 
 組件出向關係:
 
+- `component.architecture.archctx-closure`:
+  - `calls` → `capability.workflow-engine.execution-primitives` — Run the archctx binary through the process runner
+  - `calls` → `component.global-runtime-reconciliation.global-configuration` — Read the architecture section through the global configuration store
+  - `calls` → `capability.runtime-harness.hook-adapters` — Write the private global configuration through the installer ownership writer
+  - `reads` → `capability.workflow-engine.workflow-state` — Read the capability ownership type for archctx resolve results
+- `component.architecture.archctx-closure-cli`:
+  - `calls` → `component.architecture.architecture-read` — Read the hand edits and the model readiness for the rh arch projection command
+- `component.architecture.archctx-closure-core`:
+  - 無。
+- `component.architecture.archctx-closure-scripts`:
+  - 無。
+- `component.architecture.architecture-read`:
+  - `calls` → `component.architecture.archctx-closure` — Run each read through the package-local archctx client and read the projection policy
 - `component.architecture.helper-projection`:
   - 無。
 - `component.architecture.model-reader`:
@@ -101,24 +115,16 @@ flowchart LR
   - 無。
 - `component.architecture.test-projection-check`:
   - 無。
-- `component.global-runtime-reconciliation.archctx-closure`:
-  - `calls` → `capability.workflow-engine.execution-primitives` — Run the archctx binary through the process runner
-  - `calls` → `component.global-runtime-reconciliation.global-configuration` — Read the architecture section through the global configuration store
-  - `calls` → `capability.runtime-harness.hook-adapters` — Write the private global configuration through the installer ownership writer
-  - `reads` → `capability.workflow-engine.workflow-state` — Read the capability ownership type for archctx resolve results
-- `component.global-runtime-reconciliation.archctx-closure-cli`:
-  - `calls` → `component.global-runtime-reconciliation.architecture-read` — Read the hand edits and the model readiness for the rh arch projection command
-- `component.global-runtime-reconciliation.archctx-closure-core`:
-  - 無。
-- `component.global-runtime-reconciliation.archctx-closure-scripts`:
-  - 無。
-- `component.global-runtime-reconciliation.architecture-read`:
-  - `calls` → `component.global-runtime-reconciliation.archctx-closure` — Run each read through the package-local archctx client and read the projection policy
 
 ### 1.5 組件結構
 
 | 組件 | 名稱 | 規模量級 | 宣告入口 |
 | --- | --- | --- | --- |
+| `component.architecture.archctx-closure` | ArchContext Closure | `10–20` 個文件 / `2000–5000` 行 | 未宣告 |
+| `component.architecture.archctx-closure-cli` | ArchContext Closure (cli) | `5–10` 個文件 / `500–1000` 行 | 未宣告 |
+| `component.architecture.archctx-closure-core` | ArchContext Closure (core) | `2–5` 個文件 / `500–1000` 行 | 未宣告 |
+| `component.architecture.archctx-closure-scripts` | ArchContext Closure (scripts) | `1–2` 個文件 / `200–500` 行 | 未宣告 |
+| `component.architecture.architecture-read` | Architecture Read | `1–2` 個文件 / `200–500` 行 | 未宣告 |
 | `component.architecture.helper-projection` | Capability Resolver Projection | `1–2` 個文件 / `200–500` 行 | 未宣告 |
 | `component.architecture.model-reader` | Architecture Model Reader | `1–2` 個文件 / `200–500` 行 | 未宣告 |
 | `component.architecture.module-cli` | Module Command | `1–2` 個文件 / `50–100` 行 | 未宣告 |
@@ -128,15 +134,10 @@ flowchart LR
 | `component.architecture.skills` | Architecture Skills | `5–10` 個文件 / `1000–2000` 行 | 未宣告 |
 | `component.architecture.state-boundaries-check` | State Boundaries Check | `1–2` 個文件 / `1000–2000` 行 | 未宣告 |
 | `component.architecture.test-projection-check` | Test Capability Projection Check | `1–2` 個文件 / `100–200` 行 | 未宣告 |
-| `component.global-runtime-reconciliation.archctx-closure` | ArchContext Closure | `10–20` 個文件 / `2000–5000` 行 | 未宣告 |
-| `component.global-runtime-reconciliation.archctx-closure-cli` | ArchContext Closure (cli) | `5–10` 個文件 / `500–1000` 行 | 未宣告 |
-| `component.global-runtime-reconciliation.archctx-closure-core` | ArchContext Closure (core) | `2–5` 個文件 / `500–1000` 行 | 未宣告 |
-| `component.global-runtime-reconciliation.archctx-closure-scripts` | ArchContext Closure (scripts) | `1–2` 個文件 / `200–500` 行 | 未宣告 |
-| `component.global-runtime-reconciliation.architecture-read` | Architecture Read | `1–2` 個文件 / `200–500` 行 | 未宣告 |
 
 ## 2. P2:端到端數據流
 
-> **Proof**: `proven` (`sha256:96595f54d9eb365704697b99fc3e9e0f09b3ede0cf5bded0e78dd3e360d64058`); selectors `3/3`.
+> **Proof**: `proven` (`sha256:afde94c9f73fb6afd4557d78d1461268fbb8b6bfbf2be367d28608ff400a198c`); selectors `3/3`.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%

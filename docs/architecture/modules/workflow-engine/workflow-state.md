@@ -1,6 +1,6 @@
 # workflow-engine/workflow-state 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-workflow-state" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:754947a6d435d82ce40f2c6e5e7bb4faa74f9583909666fc1aefcaba1d7deff6" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-workflow-state" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:98edc98951948c0c27cba96ec83011b2fc6fcfa4e58285331fb9fa9cbdc64c3e" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.workflow-engine.workflow-state`(kind `capability`)
 > **Matched Prefixes**:`src/core/state/**`、`src/effects/state/**`、`src/core/workflow/**`、`interfaces/**`、`src/core/worktree-location.mjs`、`src/core/worktree-location.d.mts`、`src/cli/commands/state.ts`
@@ -80,7 +80,7 @@ flowchart LR
 - `calls` ← `component.contract-assets.contract-worktree-lifecycle` — Create and remove task worktrees and sweep merged managed worktrees at start under the worktree topology lock
 - `depends-on` ← `capability.verification.evals-checks` — Test Workflow State behavior through its source modules.
 - `depends-on` ← `capability.runtime-harness.evidence-ledger` — Read state artifacts and read-only observations for evidence.
-- `reads` ← `component.global-runtime-reconciliation.archctx-closure` — Read the capability ownership type for archctx resolve results
+- `reads` ← `component.architecture.archctx-closure` — Read the capability ownership type for archctx resolve results
 - `calls` ← `component.global-runtime-reconciliation.cli-diagnostics` — Read the workflow policy and the capability registry authority for the doctor report
 - `calls` ← `component.global-runtime-reconciliation.cli-root` — Register the state command
 - `calls` ← `component.hook-adapters.edit-guards` — Canonicalize edit paths and resolve the owners of edited paths

@@ -1,5 +1,5 @@
 # runtime-harness/hook-adapters 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-hook-adapters" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:02366fc3bffb24827564b1f95d2c1a0f0c7ced6cb41d2219155112641400f69a" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-hook-adapters" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:3e2dd44943e0071dbcf4e74f17df1f9b0748bbfe683067cd48707816d043fef6" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.hook-adapters`(kind `capability`)
 > **Matched Prefixes**:`src/cli/hook/**`、`src/cli/installer/**`、`src/pi/**`、`src/effects/managed-tree.ts`、`src/cli/hook-entry.ts`、`src/effects/loop/**`、`src/effects/segmented-log.ts`、`src/effects/run-summary-retention.ts`、`src/cli/commands/install.ts`、`src/cli/commands/status.ts`、`src/cli/commands/security.ts`
@@ -95,7 +95,7 @@ flowchart LR
 - `reads` ← `component.evals-checks.evals-and-benchmarks` — Read hook event telemetry records to measure hook cost in profile benchmarks
 - `depends-on` ← `capability.runtime-harness.evidence-ledger` — Collect loop state inputs for recovery evidence.
 - `depends-on` ← `capability.runtime-mcp.general-repo-access` — Write repository access events through the shared segmented log.
-- `calls` ← `component.global-runtime-reconciliation.archctx-closure` — Write the private global configuration through the installer ownership writer
+- `calls` ← `component.architecture.archctx-closure` — Write the private global configuration through the installer ownership writer
 - `calls` ← `component.global-runtime-reconciliation.cli-diagnostics` — Read the install state, skill projections, host targets, the Pi host probe, hook routes and status for the doctor and setup check reports
 - `calls` ← `component.global-runtime-reconciliation.cli-root` — Register the install and status and security and hook commands and run host transactions for the plugin selection
 - `calls` ← `component.global-runtime-reconciliation.primary` — Install host adapters, project owned host skills, and register the Pi package from the installed candidate after mandatory setup succeeds
@@ -111,7 +111,7 @@ flowchart LR
   - `depends-on` → `component.hook-adapters.primary` — Implement the typed handler contract and read hook input through the shared parsers
   - `calls` → `capability.workflow-engine.workflow-state` — Canonicalize edit paths and resolve the owners of edited paths
 - `component.hook-adapters.hook-root`:
-  - `calls` → `component.global-runtime-reconciliation.archctx-closure` — Register the archctx ownership, display and runtime providers
+  - `calls` → `component.architecture.archctx-closure` — Register the archctx ownership, display and runtime providers
   - `calls` → `component.contract-assets.architecture-contracts` — Register the architecture providers after the contract version check
   - `calls` → `component.hook-adapters.primary` — Run the hook route runtime for one host event
 - `component.hook-adapters.host-config`:
