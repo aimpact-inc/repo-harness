@@ -106,14 +106,18 @@ test.skipIf(process.platform === 'win32')('Antigravity install --report-language
     fs.mkdirSync(configDir, { recursive: true });
     fs.writeFileSync(rules, '# My Antigravity Notes\n\nKeep personal rules.\n');
 
-    // Dry-run lists both hooks.json and AGENTS.md and writes nothing.
+    // Dry-run lists hooks.json, AGENTS.md, and projected skill symlinks and writes nothing.
     const dryRun = antigravityCli(home, ['install', ...target, '--report-language', 'zh-CN', '--dry-run', '--json']);
     expect(dryRun.status, dryRun.stderr).toBe(0);
     const preview = JSON.parse(dryRun.stdout).host_config;
     expect(preview.items).toEqual(expect.arrayContaining([
       { path: hooks, selector: 'repo-harness', action: 'add' },
       { path: rules, selector: 'global-working-rules', action: 'add' },
+      { path: path.join(skillsDir, 'repo-harness'), selector: 'symlink', action: 'create' },
+      { path: path.join(skillsDir, 'repo-harness-check'), selector: 'symlink', action: 'create' },
+      { path: path.join(skillsDir, 'repo-harness-issue-flow'), selector: 'symlink', action: 'create' },
     ]));
+    expect(preview.unplanned).toEqual([]);
     expect(preview.notListed).toEqual([]);
     expect(fs.existsSync(hooks)).toBe(false);
     expect(fs.existsSync(skillsDir)).toBe(false);
@@ -141,6 +145,11 @@ test.skipIf(process.platform === 'win32')('Antigravity install --report-language
     expect(antigravityCli(home, ['install', ...target, '--report-language', 'fr']).status).not.toBe(0);
     expect(antigravityCli(home, ['update', ...target, '--version', '1.0.0']).status).not.toBe(0);
 
+    // Re-running install/update dry-run reports no pending changes when already current.
+    const idempotentDryRun = antigravityCli(home, ['install', ...target, '--dry-run', '--json']);
+    expect(idempotentDryRun.status, idempotentDryRun.stderr).toBe(0);
+    expect(JSON.parse(idempotentDryRun.stdout).host_config).toEqual({ items: [], unplanned: [], notListed: [] });
+
     // Re-running install/update preserves recorded zh-CN language and user edits inside markers.
     const idempotent = antigravityCli(home, ['install', ...target]);
     expect(idempotent.status, idempotent.stderr).toBe(0);
@@ -151,6 +160,60 @@ test.skipIf(process.platform === 'win32')('Antigravity install --report-language
     const update = antigravityCli(home, ['update', ...target, '--no-cli']);
     expect(update.status, update.stdout + update.stderr).toBe(0);
     expect(fs.readFileSync(rules, 'utf8')).toBe(edited);
+  });
+}, 30_000);
+
+test.skipIf(process.platform === 'win32')('Antigravity --dry-run reports unowned skill collisions and exits non-zero, matching apply', () => {
+  withTempHome('rh-antigravity-dry-run-collision', (home) => {
+    const configDir = path.join(home, '.gemini', 'config');
+    const hooks = path.join(configDir, 'hooks.json');
+    const rules = path.join(configDir, 'AGENTS.md');
+    const skillsDir = path.join(configDir, 'skills');
+    const target = ['--target', 'antigravity'];
+    const userSkill = path.join(skillsDir, 'repo-harness');
+
+    fs.mkdirSync(userSkill, { recursive: true });
+    fs.writeFileSync(path.join(userSkill, 'SKILL.md'), '# User owned skill\n');
+
+    const dryRunJson = antigravityCli(home, ['install', ...target, '--dry-run', '--json']);
+    expect(dryRunJson.status).toBe(1);
+    const preview = JSON.parse(dryRunJson.stdout).host_config;
+    expect(preview.unplanned).toContainEqual({
+      target: 'antigravity',
+      reason: expect.stringContaining('rh has no record of it'),
+    });
+    expect(preview.unplanned[0].reason).toContain(userSkill);
+    expect(fs.existsSync(hooks)).toBe(false);
+    expect(fs.existsSync(rules)).toBe(false);
+    expect(fs.readFileSync(path.join(userSkill, 'SKILL.md'), 'utf8')).toBe('# User owned skill\n');
+
+    const dryRunText = antigravityCli(home, ['install', ...target, '--dry-run']);
+    expect(dryRunText.status).toBe(1);
+    expect(dryRunText.stdout + dryRunText.stderr).toContain('rh has no record of it');
+
+    const apply = antigravityCli(home, ['install', ...target]);
+    expect(apply.status).toBe(1);
+    expect(apply.stdout + apply.stderr).toContain('rh has no record of it');
+
+    // After clean install, replacing a managed skill with an unowned directory fails both update --dry-run and update.
+    fs.rmSync(userSkill, { recursive: true, force: true });
+    expect(antigravityCli(home, ['install', ...target]).status).toBe(0);
+    const checkSkill = path.join(skillsDir, 'repo-harness-check');
+    fs.unlinkSync(checkSkill);
+    fs.mkdirSync(checkSkill, { recursive: true });
+    fs.writeFileSync(path.join(checkSkill, 'SKILL.md'), '# User replacement\n');
+
+    const updateDryRun = antigravityCli(home, ['update', ...target, '--dry-run', '--json']);
+    expect(updateDryRun.status).toBe(1);
+    const updatePreview = JSON.parse(updateDryRun.stdout).host_config;
+    expect(updatePreview.unplanned).toContainEqual({
+      target: 'antigravity',
+      reason: expect.stringContaining(checkSkill),
+    });
+    const updateApply = antigravityCli(home, ['update', ...target]);
+    expect(updateApply.status).toBe(1);
+    expect(updateApply.stdout + updateApply.stderr).toContain(checkSkill);
+    expect(fs.readFileSync(path.join(checkSkill, 'SKILL.md'), 'utf8')).toBe('# User replacement\n');
   });
 }, 30_000);
 

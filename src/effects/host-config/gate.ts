@@ -256,8 +256,26 @@ export interface HostConfigBlockRemoval {
   readonly recovery: string | null;
 }
 
+export interface HostConfigPlannedPath {
+  readonly path: string;
+  readonly key: string;
+  readonly host: PathRecord['host'];
+  readonly action: 'create' | 'update' | 'unchanged';
+}
+
+export interface HostConfigPathPlan {
+  readonly entries: readonly HostConfigPlannedPath[];
+  readonly refusals: readonly Error[];
+}
+
 export interface HostConfigGate {
   apply(changes: readonly HostConfigFileChange[]): HostConfigApplyResult;
+  /**
+   * Read-only preflight and action planner for whole-path writes, using the
+   * same admission, overlap, link-boundary, and ownership checks as
+   * `writePaths` without writing anything to disk.
+   */
+  planPaths(writes: readonly HostConfigPathWrite[]): HostConfigPathPlan;
   /**
    * Write whole entries (a file, a link, a directory tree) and record each as
    * a path record before it is published. An existing path must be rh's (a
@@ -679,7 +697,7 @@ function admitUserWrite(env: NodeJS.ProcessEnv, paths: HostConfigPaths, ledger: 
 }
 
 /** True when the entry at the key is rh's to replace for `owner`: a current record of that owner that the user does not keep. */
-function ownsEntry(record: PathRecord | undefined, owner: string, key: string): record is PathRecord {
+export function ownsPathEntry(record: PathRecord | undefined, owner: string, key: string): boolean {
   return record !== undefined && record.owner === owner && record.kind !== 'user_managed' && pathRecordIsCurrent(key, record);
 }
 
@@ -778,7 +796,7 @@ function planWholePath(paths: HostConfigPaths, write: HostConfigPathWrite, key: 
     throw new HostConfigError('host_config_target_changed', `the file changed since rh planned its write, so rh writes nothing to it: ${write.path}`);
   }
   let replaces: WholePathPlan['replaces'];
-  if (observed !== null && !ownsEntry(prior, write.owner, key)) {
+  if (observed !== null && !ownsPathEntry(prior, write.owner, key)) {
     if (!write.replace) throw refusal(write.path, prior, write.owner, key, observed.type === 'file' && linkTarget === undefined);
     if (observed.type !== 'file') throw new HostConfigError('host_config_invalid_state', `only a file can be replaced on the user's word: ${write.path}`);
     if (linkTarget !== undefined) throw new HostConfigError('host_config_replacement_refused', `this path is a link to ${linkTarget}, and the user's word to replace a file does not reach through a link: ${write.path}`);
@@ -789,6 +807,78 @@ function planWholePath(paths: HostConfigPaths, write: HostConfigPathWrite, key: 
     throw new HostConfigError('host_config_invalid_state', `rh replaced a user file here, so it writes only a file at this path: ${write.path}`);
   }
   return { write, key, host, previous, prior, entry, linkTarget, observed, replaces };
+}
+
+function expectedWriteCommitted(entry: PathEntry): PathCommitted | null {
+  if (entry.type === 'symlink') return { type: 'symlink', target: entry.target };
+  if (entry.type === 'file') return { type: 'file', sha256: sha256Prefixed(entry.bytes) };
+  return null;
+}
+
+/**
+ * Read-only preflight and action planner for whole-path writes. Runs the same
+ * admission, overlap, link-boundary, and ownership checks as `writeWholePaths`
+ * without touching disk.
+ */
+function planWholePaths(
+  admit: WholePathAdmit,
+  paths: HostConfigPaths,
+  writes: readonly HostConfigPathWrite[],
+  read: LedgerReader,
+  antigravity?: AntigravityGuardedPaths,
+): HostConfigPathPlan {
+  if (writes.length === 0) return { entries: [], refusals: [] };
+  const ledger = read(paths);
+  const admitted: Array<{ write: HostConfigPathWrite; key: string; host: PathRecord['host'] }> = [];
+  const refusals: Error[] = [];
+  const seenRefusals = new Set<string>();
+  const recordRefusal = (error: unknown) => {
+    const err = error instanceof Error ? error : new Error(String(error));
+    if (seenRefusals.has(err.message)) return;
+    seenRefusals.add(err.message);
+    refusals.push(err);
+  };
+  for (const write of writes) {
+    try {
+      admitted.push({ write, ...admit(ledger, write.path) });
+    } catch (error) {
+      recordRefusal(error);
+    }
+  }
+  if (admitted.length > 0) {
+    try {
+      refuseOverlappingPaths(admitted.map(({ write, key }) => ({ path: write.path, key })));
+    } catch (error) {
+      recordRefusal(error);
+      return { entries: [], refusals };
+    }
+  }
+  const entries: HostConfigPlannedPath[] = [];
+  for (const { write, key, host } of admitted) {
+    try {
+      if (host === 'antigravity' && antigravity) checkAntigravityPath(antigravity.skillsDir, 'directory');
+      const plan = planWholePath(paths, write, key, host, ledger.paths[key]);
+      let action: HostConfigPlannedPath['action'];
+      if (plan.observed === null) {
+        action = 'create';
+      } else if (!plan.replaces && plan.prior) {
+        const committed = expectedWriteCommitted(write.entry);
+        const unchanged = committed !== null
+          && sameCommitted(plan.observed, committed)
+          && sameApartFromIdentity(
+            plan.prior,
+            nextPathRecord(plan.prior, write.owner, host, plan.observed, committed, undefined, null, plan.linkTarget),
+          );
+        action = unchanged ? 'unchanged' : 'update';
+      } else {
+        action = 'update';
+      }
+      entries.push({ path: write.path, key, host, action });
+    } catch (error) {
+      recordRefusal(error);
+    }
+  }
+  return { entries, refusals };
 }
 
 /**
@@ -934,7 +1024,7 @@ function delegateWrites(env: NodeJS.ProcessEnv, paths: HostConfigPaths, declared
     // Adoption needs the transaction's preimage: a failure must put the link back.
     const adopted = previous === undefined && options.transaction !== undefined && observed?.type === 'symlink'
       && declaration.adopt !== undefined && observed.target === declaration.adopt;
-    const owned = observed === null || adopted || ownsEntry(previous, declaration.owner, key);
+    const owned = observed === null || adopted || ownsPathEntry(previous, declaration.owner, key);
     if (!owned && !(declaration.replace && observed.type === 'file')) {
       throw observed.type === 'file' || !declaration.replace ? refusal(declaration.path, previous, declaration.owner, key, observed.type === 'file')
         : new HostConfigError('host_config_invalid_state', `only a file can be replaced on the user's word: ${declaration.path}`);
@@ -1138,7 +1228,7 @@ function adoptReplacedPath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, path:
   const previous = ledger.paths[key];
   const committed = observePathEntry(key);
   if (committed?.type !== 'file') throw new HostConfigError('host_config_invalid_state', `only a file can have replaced a user file: ${path}`);
-  if (previous && !(previous.kind === 'created' && ownsEntry(previous, owner, key))) throw refusal(path, previous, owner, key, false);
+  if (previous && !(previous.kind === 'created' && ownsPathEntry(previous, owner, key))) throw refusal(path, previous, owner, key, false);
   // Only a current record proves the entry. A copy with no record can be a file that the user put back after a revert
   // released its record, so its record stays unproved and a revert keeps the file (#3266).
   const identity = previous ? observeEntryIdentity(key) : null;
@@ -2060,9 +2150,11 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
     const resolved = resolveFile(path);
     return read(paths).fragments.filter((entry) => entry.file === resolved);
   };
+  const planPaths = (writes: readonly HostConfigPathWrite[]) =>
+    planWholePaths((ledger, path) => admitUserWrite(env, paths, ledger, path), paths, writes, read, antigravity);
   if (preview) {
     return {
-      apply: refusePreview, writePaths: refusePreview, delegate: refusePreview, revertPaths: refusePreview, addUserPathEntry: refusePreview,
+      apply: refusePreview, planPaths, writePaths: refusePreview, delegate: refusePreview, revertPaths: refusePreview, addUserPathEntry: refusePreview,
       releaseAbsentTools: (port) => releaseAbsentTools(paths, port, true, read),
       keepUserPaths: refusePreview, adoptReplacedPath: refusePreview, adopt: refusePreview, removeUnrecordedText: refusePreview,
       revert: (only, revertOptions) => revertFiles(paths, only, { ...revertOptions, dryRun: true }, read, user),
@@ -2072,6 +2164,7 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
   }
   return {
     apply: (changes) => applyChanges(paths, changes, admitUserFiles, antigravity),
+    planPaths,
     writePaths: (writes, pathOptions) => writeWholePaths((ledger, path) => admitUserWrite(env, paths, ledger, path), paths, writes, pathOptions ?? {}, antigravity),
     delegate: (declared, run, pathOptions) => delegateWrites(env, paths, declared, run, pathOptions ?? {}),
     addUserPathEntry: (tool, entry, port) => addUserPathEntry(paths, tool, entry, port),

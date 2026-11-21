@@ -128,7 +128,7 @@ export function assertOverridesCarried(spec: InstallTargetSpec | null, overrides
 export interface HostConfigPreviewItem {
   readonly path: string;
   readonly selector: string;
-  readonly action: 'add' | 'refresh' | 'override' | SkippedOverride['code'];
+  readonly action: 'add' | 'refresh' | 'override' | 'create' | 'update' | 'remove' | SkippedOverride['code'];
 }
 
 export interface HostConfigPreview {
@@ -186,6 +186,13 @@ export function previewHostConfig(
       const built = changes();
       if (built === null) unplanned.push({ target: target.id, reason: 'its host-config writer lists no items yet' });
       else items.push(...built.flatMap((change) => previewFile(gate, env, change, target.id !== 'antigravity')));
+      if (target.hostConfigPathPreview) {
+        const pathPreview = target.hostConfigPathPreview('global', { overrides, ...options }, env);
+        items.push(...pathPreview.items);
+        for (const reason of pathPreview.refusals) {
+          unplanned.push({ target: target.id, reason });
+        }
+      }
     } catch (error) {
       unplanned.push({ target: target.id, reason: (error as Error).message });
     }

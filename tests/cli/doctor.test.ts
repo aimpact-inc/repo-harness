@@ -230,6 +230,50 @@ test.skipIf(process.platform === 'win32')('doctor checks Antigravity global rule
   }
 }, 30_000);
 
+test.skipIf(process.platform === 'win32')('doctor reports matching-but-unmanaged for an Antigravity skill symlink without a ledger record', () => {
+  const { root, home, fakeBin } = setupFakeEnvironment('rh-antigravity-doctor-unmanaged');
+  try {
+    const bunInstall = path.join(root, 'bun');
+    const env = { HOME: home, PATH: fakeBin, BUN_INSTALL: bunInstall, TMPDIR: root };
+    seedGlobalPackageFixture(env);
+    const cli = path.join(import.meta.dir, '../../src/cli/index.ts');
+    const run = (...args: string[]) => spawnSync(process.execPath, ['--no-env-file', '--config=/dev/null', cli, ...args], { cwd: root, env, encoding: 'utf8' });
+
+    const install = run('install', '--target', 'antigravity');
+    expect(install.status, install.stdout + install.stderr).toBe(0);
+
+    // Drop the ledger record for one valid symlink pointing to the expected source.
+    const ledgerPath = path.join(home, '.repo-harness', 'config', 'ledger.json');
+    const checkSkill = path.join(home, '.gemini', 'config', 'skills', 'repo-harness-check');
+    const linkTargetBefore = fs.readlinkSync(checkSkill);
+    const ledger = JSON.parse(fs.readFileSync(ledgerPath, 'utf8'));
+    const skillKey = path.join(fs.realpathSync(home), '.gemini', 'config', 'skills', 'repo-harness-check');
+    expect(ledger.paths[skillKey]).toBeDefined();
+    delete ledger.paths[skillKey];
+    const ledgerBytesBefore = Buffer.from(`${JSON.stringify(ledger, null, 2)}\n`, 'utf8');
+    fs.writeFileSync(ledgerPath, ledgerBytesBefore);
+
+    const report = run('doctor', '--json');
+    const { checks } = JSON.parse(report.stdout) as ReturnType<typeof runDoctor>;
+    const skills = checks.find((check) => check.id === 'antigravity-skills');
+    expect(skills?.status).not.toBe('ok');
+    expect(skills?.status).toBe('warn');
+    expect(skills?.detail).toContain('matching-but-unmanaged');
+    expect(skills?.detail).toContain('repo-harness-check');
+
+    // Read-only check: ledger and symlink remain untouched (never auto-adopted).
+    expect(fs.readFileSync(ledgerPath)).toEqual(ledgerBytesBefore);
+    expect(fs.readlinkSync(checkSkill)).toBe(linkTargetBefore);
+
+    // Confirm rh update refuses to manage the same unrecorded symlink.
+    const update = run('update', '--target', 'antigravity');
+    expect(update.status).not.toBe(0);
+    expect(update.stdout + update.stderr).toContain('rh has no record of it');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}, 30_000);
+
 function writeFakeCodeGraph(fakeBin: string, logFile: string): void {
   writeExecutable(fakeBin,
     path.join(fakeBin, 'codegraph'),
