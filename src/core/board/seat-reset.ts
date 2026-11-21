@@ -40,8 +40,20 @@ export function isSeatResetAction(value: unknown): value is SeatResetAction {
 
 export const seatResetAction = (transcriptBytes: number): SeatResetAction => (transcriptBytes < SEAT_RESET_TRANSCRIPT_BYTES ? 'compact' : 'reset');
 
+/** The interactive hosts that support automated peer-typed reset commands. */
+export type InteractiveResetHost = 'claude' | 'pi';
+
 /** The slash command that the peer types for each action. */
 export const SEAT_RESET_COMMAND: Readonly<Record<SeatResetAction, '/compact' | '/clear'>> = { compact: '/compact', reset: '/clear' };
+
+export function seatResetCommand(action: SeatResetAction, host: InteractiveResetHost = 'claude'): '/compact' | '/clear' | '/new' {
+  if (action === 'compact') return '/compact';
+  return host === 'pi' ? '/new' : '/clear';
+}
+
+export function seatExitCommand(host: InteractiveResetHost = 'claude'): '/exit' | '/quit' {
+  return host === 'pi' ? '/quit' : '/exit';
+}
 
 /** The issue fixes this path; a resumed seat reads it after `/compact` or `/clear`. */
 const SEATS_ROOT = '/tmp/repo-harness-seats';
@@ -119,12 +131,15 @@ export function missingHandoffSections(text: string): string[] {
 
 const PEER: Readonly<Record<ResetSeat, ResetSeat>> = { orchestrator: 'advisor', advisor: 'orchestrator' };
 
+const autoCompactionNotice = (host: InteractiveResetHost): string =>
+  host === 'pi' ? 'Pi auto-compaction handles the context.' : 'Claude Code auto-compaction handles the context.';
+
 /**
  * The handoff steps: the model finishes the work in hand, writes the handoff, then asks its peer seat for the reset.
  * The Stop hook and `seats handoff` print them. Step 0 is the joint decision of #2625 (owner word 2026-11-12): no hard
  * stop, but no new work after the threshold.
  */
-export function seatResetSteps(identity: SeatResetIdentity, action: SeatResetAction): string {
+export function seatResetSteps(identity: SeatResetIdentity, action: SeatResetAction, host: InteractiveResetHost = 'claude'): string {
   const path = seatHandoffPath(identity);
   return [
     '0. Finish the planning and the dispatch that you have in hand. Start nothing new. Then write the handoff.',
@@ -132,22 +147,22 @@ export function seatResetSteps(identity: SeatResetIdentity, action: SeatResetAct
     '',
     seatHandoffTemplate(),
     `2. Take its sha256 with \`shasum -a 256 ${path}\`.`,
-    `3. Send \`RESET-REQUEST ${path} <sha256>\` to the ${PEER[identity.seat]} seat (repo-harness.seat=${PEER[identity.seat]}) with hc send, then end your turn. The ${PEER[identity.seat]} seat types ${SEAT_RESET_COMMAND[action]} in this session.`,
+    `3. Send \`RESET-REQUEST ${path} <sha256>\` to the ${PEER[identity.seat]} seat (repo-harness.seat=${PEER[identity.seat]}) with hc send, then end your turn. The ${PEER[identity.seat]} seat types ${seatResetCommand(action, host)} in this session.`,
     `On REWRITE, write the handoff again and send RESET-REQUEST again. On NO-RESET, continue.`,
-    `When the ${PEER[identity.seat]} seat is missing or does not answer, continue without a reset: Claude Code auto-compaction handles the context.`,
+    `When the ${PEER[identity.seat]} seat is missing or does not answer, continue without a reset: ${autoCompactionNotice(host)}`,
   ].join('\n');
 }
 
 /** The block reason of the Stop hook: the token reason and the action, then the handoff steps. */
-export function seatResetReason(identity: SeatResetIdentity, contextTokens: number, transcriptBytes: number, action: SeatResetAction): string {
+export function seatResetReason(identity: SeatResetIdentity, contextTokens: number, transcriptBytes: number, action: SeatResetAction, host: InteractiveResetHost = 'claude'): string {
   const side = action === 'compact' ? 'below' : 'at or above';
   return `repo-harness: the ${identity.seat} seat context is ${contextTokens} tokens, at or above ${SEAT_RESET_CONTEXT_TOKENS}. Reset before auto-compaction. `
-    + `The transcript is ${transcriptBytes} bytes, ${side} ${SEAT_RESET_TRANSCRIPT_BYTES}, so the reset types ${SEAT_RESET_COMMAND[action]}.\n${seatResetSteps(identity, action)}`;
+    + `The transcript is ${transcriptBytes} bytes, ${side} ${SEAT_RESET_TRANSCRIPT_BYTES}, so the reset types ${seatResetCommand(action, host)}.\n${seatResetSteps(identity, action, host)}`;
 }
 
 /**
  * The prompt that the peer sends after the new-session signal. RESUMED comes first, so its hc send is the resume
- * evidence. After `/compact` the summary holds the live state, so only `/clear` asks for the git and gh check.
+ * evidence. After `/compact` the summary holds the live state, so only `/clear` or `/new` asks for the git and gh check.
  */
 export function seatResumePrompt(identity: SeatResetIdentity, peerAddress: string, action: SeatResetAction): string {
   const next = action === 'compact' ? 'then continue.' : 'then check the current state with git/gh and continue.';
@@ -160,6 +175,6 @@ export function seatRewriteMessage(identity: SeatResetIdentity, problem: string,
 }
 
 /** The message that releases the requester with no reset: it continues, and auto-compaction handles the context. */
-export function seatNoResetMessage(reason: string): string {
-  return `NO-RESET: ${reason}. Continue your work; Claude Code auto-compaction handles the context.`;
+export function seatNoResetMessage(reason: string, host: InteractiveResetHost = 'claude'): string {
+  return `NO-RESET: ${reason}. Continue your work; ${autoCompactionNotice(host)}`;
 }

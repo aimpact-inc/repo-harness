@@ -15,6 +15,8 @@ type Session = {
   capability: PiCapability | { readonly state: 'inactive' } | { readonly state: 'unknown'; readonly code: typeof REPO_PROBE_FAILED };
   start: Promise<BridgeHookOutput | null>;
   contextDelivered: boolean;
+  stopBlocked: boolean;
+  stopSettled: boolean;
   runId: string | null;
   readonly calls: Map<string, string>;
 };
@@ -49,11 +51,12 @@ export function registerPiHooks(pi: ExtensionAPI, options: {
       cwd: ctx.cwd, session_id: state.id, run_id: state.runId, ...payload,
     } });
 
-  pi.on('session_start', async (_event, ctx) => {
+  pi.on('session_start', async (event, ctx) => {
     current?.bridge.close();
     const state: Session = {
       id: ctx.sessionManager.getSessionId(), bridge: options.bridge?.() ?? new PiHookBridge(),
-      capability: { state: 'inactive' }, start: Promise.resolve(null), contextDelivered: false, runId: null, calls: new Map(),
+      capability: { state: 'inactive' }, start: Promise.resolve(null), contextDelivered: false,
+      stopBlocked: false, stopSettled: false, runId: null, calls: new Map(),
     };
     current = state;
     const repoProbe = probeRepoOptIn(ctx.cwd);
@@ -66,15 +69,32 @@ export function registerPiHooks(pi: ExtensionAPI, options: {
     if (!active(state, ctx)) return;
     state.capability = capability;
     if (capability.state === 'unavailable') return;
+    const source = event.reason === 'startup' ? 'startup' : event.reason === 'new' ? 'clear' : undefined;
+    const sessionFile = ctx.sessionManager.getSessionFile();
     // Cache the outcome, not a second invocation at the first prompt.
-    state.start = call(state, ctx, 'SessionStart', 'default').catch(() => null);
+    state.start = call(state, ctx, 'SessionStart', 'default', {
+      ...(source ? { source } : {}),
+      ...(sessionFile ? { transcript_path: sessionFile } : {}),
+    }).catch(() => null);
     await state.start;
+  });
+
+  pi.on('session_compact', async (_event, ctx) => {
+    const state = current;
+    if (!state || !active(state, ctx) || state.capability.state !== 'ready') return;
+    const sessionFile = ctx.sessionManager.getSessionFile();
+    await call(state, ctx, 'SessionStart', 'default', {
+      source: 'compact',
+      ...(sessionFile ? { transcript_path: sessionFile } : {}),
+    }).catch(() => null);
   });
 
   pi.on('before_agent_start', async (_event, ctx) => {
     const state = current;
     if (!state || !active(state, ctx) || state.capability.state === 'inactive') return;
     state.runId = randomUUID();
+    state.stopBlocked = false;
+    state.stopSettled = false;
     const runId = state.runId;
     if (state.capability.state === 'unavailable' || state.capability.state === 'unknown') {
       if (state.capability.state === 'unknown') {
@@ -125,10 +145,44 @@ export function registerPiHooks(pi: ExtensionAPI, options: {
     } finally { state.calls.delete(event.toolCallId); }
   });
 
+  pi.on('agent_before_settle', async (event, ctx) => {
+    const state = current;
+    if (!state || !active(state, ctx) || state.capability.state !== 'ready' || event.outcome !== 'completed') return;
+    state.stopSettled = false;
+    try {
+      const sessionFile = ctx.sessionManager.getSessionFile();
+      const output = await call(state, ctx, 'Stop', 'default', {
+        aborted: false,
+        stop_hook_active: state.stopBlocked,
+        ...(sessionFile ? { transcript_path: sessionFile } : {}),
+      });
+      state.stopSettled = true;
+      if (output.decision === 'block') {
+        state.stopBlocked = true;
+        const content = (output.diagnostics || output.reason).trimEnd();
+        return {
+          entries: [...event.entries, { type: 'custom_message' as const, customType: 'repo-harness', content, display: false }],
+          continue: true,
+        };
+      }
+    } catch { /* Stop is advisory. Never retry an uncertain effect. */ }
+  });
+
   pi.on('agent_settled', async (event, ctx) => {
     const state = current;
     if (!state || !active(state, ctx) || state.capability.state !== 'ready') return;
-    try { await call(state, ctx, 'Stop', 'default', { aborted: event.aborted }); }
+    if (state.stopSettled && !event.aborted) {
+      state.stopSettled = false;
+      return;
+    }
+    state.stopSettled = false;
+    try {
+      const sessionFile = ctx.sessionManager.getSessionFile();
+      await call(state, ctx, 'Stop', 'default', {
+        aborted: event.aborted,
+        ...(sessionFile ? { transcript_path: sessionFile } : {}),
+      });
+    }
     catch { /* Stop is advisory. Never retry an uncertain effect. */ }
   });
   pi.on('session_shutdown', (_event, ctx) => {

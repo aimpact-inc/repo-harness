@@ -307,6 +307,7 @@ export const AGY_COMMAND_PREFIXES = [
 
 export const AGY_DENIED_COMMANDS: readonly string[] = [
   ...GITHUB_WRITE_COMMANDS,
+  'rh board attention start',
   'rh board merge', 'rh board dispatch', 'rh board review', 'rh board post',
   'rh board triage-apply', 'rh board closeout', 'rh board migrate-dependencies',
   'rh seats launch', 'rh seats reset', 'rh publication merge',

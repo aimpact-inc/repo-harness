@@ -247,6 +247,7 @@ describe.skipIf(process.platform === "win32")("agy advisor seat", () => {
         "command(gh pr review)",
         "command(gh release create)",
         "command(git push)",
+        "command(rh board attention start)",
         "command(rh board merge)",
         "command(rh board dispatch)",
         "command(rh board review)",
@@ -265,6 +266,7 @@ describe.skipIf(process.platform === "win32")("agy advisor seat", () => {
       expect(settings.permissions.allow).not.toContain(`command(${mutating})`);
     }
     expect(AGY_COMMAND_PREFIXES.some(prefix => "rh board --parent 123 merge".startsWith(prefix))).toBe(false);
+    expect(settings.permissions.deny).toContain("command(rh board attention start)");
     const executable = [f.agy, "--mode", "accept-edits", "--model", "gemini-4-neon-high", "--add-dir", directory,
       "--agent", "rh-advisor", "--settings", JSON.stringify(settings)];
     expect(agent(labeled)).toEqual([...UNSET_SEAT, "REPO_HARNESS_SEAT=advisor", "REPO_HARNESS_SEAT_REPOSITORY=1186405141",
@@ -1452,9 +1454,14 @@ describe("rh seats handoff (#2175)", () => {
         .toEqual([200_015, transcript, true, "compact", statSync(transcript).size]);
 
       const piNow = new Date();
-      recordSeatSession({ seat: "advisor", repository }, { sessionId: "pi-s", transcriptPath: transcript, source: "startup", host: "pi", model: "magpie/agy-cli/gemini-4-neon", effort: "xhigh" }, piNow);
-      expect(readSeatSession({ seat: "advisor", repository })).toMatchObject({ host: "pi", sessionId: "pi-s", transcriptPath: transcript });
-      expect(seatHandoff({ REPO_HARNESS_SEAT: "advisor", REPO_HARNESS_SEAT_REPOSITORY: repository })).toBe(seatResetSteps({ seat: "advisor", repository }, "compact"));
+      const piTranscript = join(home, "pi-transcript.jsonl");
+      writeFileSync(piTranscript, `${JSON.stringify({
+        type: "message", id: "m1", parentId: null, timestamp: piNow.toISOString(),
+        message: { role: "assistant", content: [{ type: "text", text: "done" }], api: "openai-completions", provider: "magpie", model: "agy-cli/gemini-4-neon", stopReason: "stop", timestamp: piNow.getTime(), usage: { input: 200_000, output: 10, cacheRead: 190_000, cacheWrite: 0, totalTokens: 390_010 } },
+      })}\n`);
+      recordSeatSession({ seat: "advisor", repository }, { sessionId: "pi-s", transcriptPath: piTranscript, source: "startup", host: "pi", model: "magpie/agy-cli/gemini-4-neon", effort: "xhigh" }, piNow);
+      expect(readSeatSession({ seat: "advisor", repository })).toMatchObject({ host: "pi", sessionId: "pi-s", transcriptPath: piTranscript });
+      expect(seatHandoff({ REPO_HARNESS_SEAT: "advisor", REPO_HARNESS_SEAT_REPOSITORY: repository })).toBe(seatResetSteps({ seat: "advisor", repository }, "compact", "pi"));
       expect(JSON.parse(readFileSync(join("/tmp/repo-harness-seats", repository, "advisor", "request.json"), "utf8")).host).toBe("pi");
     } finally {
       rmSync(join("/tmp/repo-harness-seats", repository), { recursive: true, force: true });
@@ -1506,12 +1513,12 @@ if (cmd === "wait") {
 // As the real hc: keys arrive as typed input; send wraps its text in an envelope, so a sent slash command is chat text.
 if (cmd === "keys") {
   const line = rest.slice(2).filter(key => key !== "enter").map(key => (key === "space" ? " " : key)).join("");
-  if (line === "/clear" && st.signal) session("${home}/cleared.jsonl");
-  if (line === "/clear" && st.untrackOnClear) st.status = null;
+  if ((line === "/clear" || line === "/new") && st.signal) session("${home}/cleared.jsonl");
+  if ((line === "/clear" || line === "/new") && st.untrackOnClear) st.status = null;
   if (line === "/compact" && st.signal) session("${home}/old.jsonl", "compact");
-  if (line === "/exit" && st.exit) st.foreground = "zsh";
+  if ((line === "/exit" || line === "/quit") && st.exit) st.foreground = "zsh";
   if (line.startsWith("sh ")) {
-    st.foreground = "claude";
+    st.foreground = st.host === "pi" ? "pi" : "claude";
     session("${home}/relaunched.jsonl");
   }
   out({ status: null, turn: 4 });
@@ -1531,6 +1538,17 @@ if (cmd === "send") {
         message: { role: "assistant", content: [{ type: "tool_use", id: "f1", name: "Bash", input: { command: "hc send t2 RESUMED" } }] } }) + "\\n");
       fs.appendFileSync(transcript, JSON.stringify({ type: "user", message: { role: "user",
         content: [{ type: "tool_result", tool_use_id: "f1", is_error: false, content: "" }] } }) + "\\n");
+    } else if (st.host === "pi") {
+      fs.appendFileSync(transcript, JSON.stringify({ type: "message", id: "u" + st.prompts, parentId: null, timestamp: new Date().toISOString(),
+        message: { role: "user", content: [{ type: "text", text: wrapped }], timestamp: Date.now() } }) + "\\n");
+      const step = st.answers[st.prompts - 1] ?? { command: "hc send t2 RESUMED", result: st.prompts < st.errorUntil ? "error" : "ok" };
+      const answer = st.prompts >= st.evidenceFrom
+        ? { type: "toolCall", id: "u1", name: "bash", arguments: { command: step.command } } : { type: "text", text: "Reading the handoff." };
+      fs.appendFileSync(transcript, JSON.stringify({ type: "message", id: "a" + st.prompts, parentId: "u" + st.prompts, timestamp: new Date().toISOString(),
+        message: { role: "assistant", content: [answer], stopReason: answer.type === "toolCall" ? "toolUse" : "stop", timestamp: Date.now(),
+          usage: { input: 100, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 110 } } }) + "\\n");
+      if (answer.type === "toolCall" && step.result !== "none") fs.appendFileSync(transcript, JSON.stringify({ type: "message", id: "r" + st.prompts, parentId: "a" + st.prompts, timestamp: new Date().toISOString(),
+        message: { role: "toolResult", toolCallId: "u1", toolName: "bash", content: [{ type: "text", text: "" }], isError: step.result === "error", timestamp: Date.now() } }) + "\\n");
     } else {
       // A queued prompt arrives as an attachment entry; hc wraps the text in both forms.
       fs.appendFileSync(transcript, JSON.stringify(st.queuedPrompt
@@ -1617,7 +1635,7 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
       .toThrow(expect.objectContaining({ code: 'seat_reset_runtime_unsupported' }));
   }));
 
-  test("a pi advisor with foreground 'pi' and host 'pi' resets cleanly", withReset(async ({ home, handoff, reset, state, calls, log }) => {
+  test("a pi advisor with foreground 'pi' and host 'pi' resets with /new and relaunches with /quit on Pi JSONL transcripts", withReset(async ({ home, handoff, reset, state, calls, sends, log }) => {
     const directory = dirname(handoff);
     state({ foreground: 'pi', host: 'pi', status: { state: 'done', app: 'pi' } });
     const before = () => {
@@ -1627,8 +1645,18 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
         transcript_path: join(home, 'old.jsonl'), source: 'startup', started_at: new Date(Date.now() - 120_000).toISOString() }));
     };
     expect(await reset({ before })).toEqual({ requester: 't5', seat: 'advisor', relaunched: false, logErrors: [] });
-    expect(calls()).toEqual(['wait --timeout 600 -- t5', 'keys -- t5 / c l e a r enter', `send -- t5 ${prompt(handoff)}`]);
+    expect(calls()).toEqual(['wait --timeout 600 -- t5', 'keys -- t5 / n e w enter', `send -- t5 ${prompt(handoff)}`]);
     expect(log().map(({ kind, detail }) => [kind, detail])).toEqual([['reset', 'cleared']]);
+
+    state({ signal: false });
+    const beforeRelaunch = () => {
+      for (const name of readdirSync(directory).filter(entry => entry.startsWith('claim-'))) rmSync(join(directory, name));
+      before();
+    };
+    expect(await reset({ before: beforeRelaunch })).toEqual({ requester: 't5', seat: 'advisor', relaunched: true, logErrors: [] });
+    const script = join(directory, 'relaunch.sh');
+    expect(sends().slice(-7)).toEqual([...Array(4).fill('/new'), '/quit', `sh ${script}`, prompt(handoff)]);
+    expect(log().at(-1)).toMatchObject({ kind: 'reset', detail: 'relaunched' });
   }));
 
   test("a check that finds no request, no requester or a busy requester sends nothing and logs the failure", withReset(async ({ reset, state, sends, log }) => {

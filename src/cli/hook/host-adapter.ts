@@ -131,7 +131,7 @@ function renderAntigravity(outcome: HookOutcome): ReturnType<HostAdapter['render
 export const HOST_ADAPTERS: Readonly<Record<RouteHost, HostAdapter>> = Object.freeze({
   claude: legacyAdapter('claude', { handoff: 'compact-or-clear', sessionRecord: true, ask: true }),
   codex: legacyAdapter('codex', { inbox: true }),
-  pi: legacyAdapter('pi', { inbox: true }),
+  pi: legacyAdapter('pi', { handoff: 'compact-or-clear', sessionRecord: true, inbox: true }),
   antigravity: {
     decode: decodeAntigravity,
     render: renderAntigravity,

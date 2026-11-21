@@ -480,7 +480,7 @@ export function seatHandoff(env: NodeJS.ProcessEnv = process.env, now = new Date
   if (contextTokens === null) throw new SeatsCommandError('seat_context_unknown', `The transcript ${transcript} has no assistant entry with a context size.`);
   const action = seatResetAction(bytes);
   writeSeatResetRequest(identity, now, { contextTokens, transcriptPath: transcript, transcriptBytes: bytes, action, host: session.host });
-  return seatResetSteps(identity, action);
+  return seatResetSteps(identity, action, session.host === 'pi' ? 'pi' : 'claude');
 }
 
 /** `loadNotify` comes from the composition root, only when peer-runtime is selected. */

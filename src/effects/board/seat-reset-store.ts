@@ -13,11 +13,23 @@ function entryContext(line: string): number | null {
   let entry: unknown;
   try { entry = JSON.parse(line); } catch { return null; }
   if (typeof entry !== 'object' || entry === null) return null;
-  const { type, isSidechain, message } = entry as { type?: unknown; isSidechain?: unknown; message?: { usage?: Record<string, unknown> } };
+  const { type, isSidechain, message } = entry as {
+    type?: unknown;
+    isSidechain?: unknown;
+    message?: { role?: unknown; stopReason?: unknown; usage?: Record<string, unknown> };
+  };
   const usage = message?.usage;
-  if (type !== 'assistant' || isSidechain === true || typeof usage !== 'object' || usage === null) return null;
-  const counts = ['input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'].map(key => usage[key] ?? 0);
-  return counts.every(count => Number.isSafeInteger(count)) ? (counts as number[]).reduce((sum, count) => sum + count, 0) : null;
+  if (typeof usage !== 'object' || usage === null) return null;
+  if (type === 'assistant' && isSidechain !== true) {
+    const counts = ['input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'].map(key => usage[key] ?? 0);
+    return counts.every(count => Number.isSafeInteger(count)) ? (counts as number[]).reduce((sum, count) => sum + count, 0) : null;
+  }
+  if (type === 'message' && message?.role === 'assistant' && message.stopReason !== 'aborted' && message.stopReason !== 'error') {
+    const keys = ['input', 'cacheRead', 'cacheWrite'] as const;
+    if (!keys.every(key => Number.isSafeInteger(usage[key]))) return null;
+    return keys.reduce((sum, key) => sum + (usage[key] as number), 0);
+  }
+  return null;
 }
 
 export interface TranscriptUsage {
@@ -214,15 +226,27 @@ function isResumedSend(command: string, peer: string): boolean {
   return words.length === 4 && words[0] === 'hc' && words[1] === 'send' && words[2] === peer && RESUMED_WORDS.includes(words[3]!);
 }
 
-type Part = { type?: unknown; name?: unknown; text?: unknown; id?: unknown; tool_use_id?: unknown; is_error?: unknown; input?: { command?: unknown } } | null;
+type Part = {
+  type?: unknown;
+  name?: unknown;
+  text?: unknown;
+  id?: unknown;
+  tool_use_id?: unknown;
+  is_error?: unknown;
+  input?: { command?: unknown };
+  arguments?: { command?: unknown };
+} | null;
 
 /** The fields that the resume evidence reads from one transcript line. */
 interface TranscriptLine {
   readonly type: unknown;
+  readonly role: unknown;
   /** `message.content`: the prompt text, or the parts, of the entry. */
   readonly content: unknown;
   /** `attachment` of the entry: a prompt that arrives during a turn comes as a queued command here. */
   readonly attachment: { readonly type: unknown; readonly prompt: unknown } | null;
+  readonly toolCallId: unknown;
+  readonly isError: unknown;
 }
 
 /**
@@ -233,9 +257,20 @@ function transcriptLine(line: string): TranscriptLine | null {
   let entry: unknown;
   try { entry = JSON.parse(line); } catch { return null; }
   if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return null;
-  const { type, message, attachment } = entry as { type?: unknown; message?: { content?: unknown } | null; attachment?: unknown };
+  const { type, message, attachment } = entry as {
+    type?: unknown;
+    message?: { role?: unknown; content?: unknown; toolCallId?: unknown; isError?: unknown } | null;
+    attachment?: unknown;
+  };
   const queued = typeof attachment === 'object' && attachment !== null ? attachment as { type?: unknown; prompt?: unknown } : null;
-  return { type, content: message?.content, attachment: queued === null ? null : { type: queued.type, prompt: queued.prompt } };
+  return {
+    type,
+    role: message?.role,
+    content: message?.content,
+    attachment: queued === null ? null : { type: queued.type, prompt: queued.prompt },
+    toolCallId: message?.toolCallId,
+    isError: message?.isError,
+  };
 }
 
 /**
@@ -247,7 +282,8 @@ function holdsPrompt(entry: TranscriptLine, parts: readonly Part[], prompt: stri
   const holds = (value: unknown) => typeof value === 'string' && value.includes(prompt);
   const queued = entry.type === 'attachment' && entry.attachment !== null && entry.attachment.type === 'queued_command'
     && holds(entry.attachment.prompt);
-  return queued || (entry.type === 'user' && (holds(entry.content) || parts.some(part => holds(part?.text))));
+  const userText = holds(entry.content) || parts.some(part => holds(part?.text));
+  return queued || ((entry.type === 'user' || (entry.type === 'message' && entry.role === 'user')) && userText);
 }
 
 /**
@@ -263,11 +299,18 @@ export function sentResumed(appended: string, prompt: string, peer: string): boo
     if (entry === null) continue;
     const parts = Array.isArray(entry.content) ? entry.content as Part[] : [];
     if (entry.type === 'user' && parts.some(part => part?.type === 'tool_result' && sends.has(part.tool_use_id) && part.is_error !== true)) return true;
+    if (entry.type === 'message' && entry.role === 'toolResult' && sends.has(entry.toolCallId) && entry.isError !== true) return true;
     if (holdsPrompt(entry, parts, prompt)) asked = true;
-    if (!asked || entry.type !== 'assistant') continue;
+    if (!asked) continue;
+    const isAssistant = entry.type === 'assistant' || (entry.type === 'message' && entry.role === 'assistant');
+    if (!isAssistant) continue;
     for (const part of parts) {
-      const command = part?.type === 'tool_use' && part.name === 'Bash' ? part.input?.command : undefined;
-      if (typeof command === 'string' && isResumedSend(command, peer)) sends.add(part!.id);
+      const command = entry.type === 'assistant' && part?.type === 'tool_use' && part.name === 'Bash'
+        ? part.input?.command
+        : entry.type === 'message' && part?.type === 'toolCall' && part.name === 'bash'
+          ? part.arguments?.command
+          : undefined;
+      if (typeof command === 'string' && isResumedSend(command, peer) && part?.id !== undefined && part.id !== null) sends.add(part.id);
     }
   }
   return false;

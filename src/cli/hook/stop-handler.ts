@@ -52,7 +52,7 @@ export function runStopHandler(opts: StopHandlerInput): StopHandlerResult {
   try { publishCheckpointFromLedger(repoRoot, () => now); } catch { /* a failed publish never blocks the turn */ }
   const { handoff } = HOST_ADAPTERS[opts.identity.host].capabilities;
   if (!handoff) return codexNotices(repoRoot, env);
-  const reset = seatReset(opts.payload, env, now, handoff);
+  const reset = seatReset(opts.payload, env, now, handoff, opts.identity.host);
   if ('block' in reset) return reset.block;
   return handoff === 'relaunch' ? codexNotices(repoRoot, env) : claudeNotices(repoRoot, env, reset.notices);
 }
@@ -68,8 +68,9 @@ interface StopNotice {
  * asks once per session segment. Antigravity repeats an open request once per
  * user turn until the seat relaunches.
  */
-function seatReset(payload: HookPayload, env: NodeJS.ProcessEnv, now: Date, handoff: 'compact-or-clear' | 'relaunch'): { readonly block: StopHandlerResult } | { readonly notices: readonly StopNotice[] } {
+function seatReset(payload: HookPayload, env: NodeJS.ProcessEnv, now: Date, handoff: 'compact-or-clear' | 'relaunch', host: HookIdentity['host']): { readonly block: StopHandlerResult } | { readonly notices: readonly StopNotice[] } {
   const relaunch = handoff === 'relaunch';
+  const resetHost = host === 'antigravity' ? 'antigravity' : host === 'pi' ? 'pi' : 'claude';
   try {
     const identity = seatResetIdentity(env);
     const transcript = payloadString(payload, 'transcript_path');
@@ -81,8 +82,8 @@ function seatReset(payload: HookPayload, env: NodeJS.ProcessEnv, now: Date, hand
     const { contextTokens, bytes } = usage;
     const action = relaunch ? 'reset' : seatResetAction(bytes);
     if (!open) writeSeatResetRequest(identity, now, { contextTokens, transcriptPath: transcript, transcriptBytes: bytes, action,
-      host: relaunch ? 'antigravity' : 'claude' });
-    const message = relaunch ? ANTIGRAVITY_HANDOFF : seatResetReason(identity, contextTokens, bytes, action);
+      host: resetHost });
+    const message = relaunch ? ANTIGRAVITY_HANDOFF : seatResetReason(identity, contextTokens, bytes, action, resetHost === 'pi' ? 'pi' : 'claude');
     return { block: { exitCode: 2, stdout: '', stderr: `${message}\n` } };
   } catch (error) {
     return { notices: relaunch ? [] : [{ systemMessage: `repo-harness: seat reset skipped: ${(error as Error).message}` }] };
