@@ -2,6 +2,7 @@ import { ACCEPTANCE_RECORD_HEADER, type BoardV1 } from './board';
 import { planRefusal, requiredCheckDetail } from './merge';
 import type { SeatRouteV1 } from './seat-routing';
 import { DEFAULT_SEATS_CONFIG, isReviewSeat, SEAT_IDS, type SeatConfigV1, type SeatId } from './seats-settings';
+import { REVIEW_SEVERITY_BAR } from '../review/finding-severity';
 import { modelFamily } from '../review/model-family';
 import type { ReviewRuntimeId } from '../review/review-runtimes';
 import {
@@ -149,7 +150,7 @@ export function reviewPacket(decision: Extract<ReviewDecisionV1, { action: 'star
   const scope = start.delta_from === null
     ? 'Review the whole diff.'
     : `This is a delta review. Review the hunks that changed since ${start.delta_from} and the sibling cases of each earlier finding.`;
-  return `Task: review PR #${decision.pr} at head ${decision.head_sha} (tier ${decision.tier}, round ${decision.round}), as the ${start.seat} of repo-harness-issue-flow. The worktree is at that head. ${scope} Read the PR body, the issue and the recorded evidence first: gh pr view ${decision.pr} --comments. You are read-only. Receipt values (repo-harness-review-publish-receipt protocol 2): round ${decision.round}, risk_tier "${decision.tier}", subject_sha ${decision.head_sha}, reviewer.harness "${harness}" (exactly this value); confirmed_fixed lists the node ids of the earlier-round review publish threads whose fix you confirmed at this head, or []. Do not publish. End your last reply with the line RECEIPT-JSON and then the receipt as one JSON object; the orchestrator publishes it with rh review collect.`;
+  return `Task: review PR #${decision.pr} at head ${decision.head_sha} (tier ${decision.tier}, round ${decision.round}), as the ${start.seat} of repo-harness-issue-flow. The worktree is at that head. ${scope} Read the PR body, the issue and the recorded evidence first: gh pr view ${decision.pr} --comments. You are read-only. ${REVIEW_SEVERITY_BAR} Receipt values (repo-harness-review-publish-receipt protocol 2): round ${decision.round}, risk_tier "${decision.tier}", subject_sha ${decision.head_sha}, reviewer.harness "${harness}" (exactly this value); confirmed_fixed lists the node ids of the earlier-round review publish threads whose fix you confirmed at this head, or []. Do not publish. End your last reply with the line RECEIPT-JSON and then the receipt as one JSON object; the orchestrator publishes it with rh review collect.`;
 }
 
 export function planReview(input: ReviewInputV1): readonly ReviewDecisionV1[] {
