@@ -43,7 +43,7 @@ import { CLI_NAME, RETIRED_CLI_NAME } from '../../core/skill-surface/cli-name';
 import { readRecordedSelection, recordedPlugins } from '../installer/architecture-selection';
 import { decodeSeatsConfig, SEAT_IDS } from '../../core/board/seats-settings';
 import { MAGPIE_BASE_URL, MAGPIE_PORT, MAGPIE_PROVIDER } from '../../effects/review/magpie-endpoint';
-import { checkAntigravityHooks } from '../installer/targets/antigravity';
+import { checkAntigravityGlobalRules, checkAntigravityHooks, checkAntigravitySkills } from '../installer/targets/antigravity';
 
 const TRUST_STATE_LINE = /^\[hooks\.state\."[^"]+\/\.codex\/hooks\.json:/;
 const PACKAGE_NAME = 'repo-harness';
@@ -703,7 +703,7 @@ export function runDoctor(ports: DoctorPorts, cwd: string = process.cwd(), targe
       checks.push(checkTargetInstall(target));
     }
   }
-  checks.push(checkCodexTrustState(), ...checkAntigravityHooks());
+  checks.push(checkCodexTrustState(), ...checkAntigravityHooks(), checkAntigravityGlobalRules(), checkAntigravitySkills());
   checks.push(...codegraphChecks);
   checks.push(...checkArchitectureProjectionSelection(process.env));
   checks.push(checkSecurityConfig(securityReport));

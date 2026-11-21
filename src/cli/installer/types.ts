@@ -13,6 +13,7 @@
 
 import type { OverrideSelection } from '../../core/host-config/override';
 import type { HostConfigFileChange } from '../../effects/host-config/gate';
+import type { ReportLanguageFlag } from './global-context';
 
 export type Location = 'global';
 
@@ -51,6 +52,12 @@ export interface WriteResult {
 export interface InstallOptions {
   /** The user's `--override` selection; a target without `hostConfigChanges` takes none. */
   readonly overrides?: OverrideSelection;
+  /** Reporting language for Global Working Rules on targets that manage global rules. */
+  readonly reportLanguage?: ReportLanguageFlag;
+  /** True on `rh update`: refresh only already-recorded surfaces rather than opting in fresh. */
+  readonly updateMode?: boolean;
+  /** False when `--no-hooks` is passed on update. */
+  readonly hooks?: boolean;
 }
 
 export interface AgentTarget<Id extends TargetId = DefaultTargetId> {

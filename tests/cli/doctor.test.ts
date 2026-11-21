@@ -153,6 +153,83 @@ test.skipIf(process.platform === 'win32')('doctor measures the installed Antigra
   }
 }, DOCTOR_CHECK_TIMEOUT_MS);
 
+test.skipIf(process.platform === 'win32')('doctor checks Antigravity global rules and projected skills across absent, ok, stale, unbalanced, and linked states', () => {
+  const { root, home, fakeBin } = setupFakeEnvironment('rh-antigravity-doctor-rules-skills');
+  try {
+    const bunInstall = path.join(root, 'bun');
+    const env = { HOME: home, PATH: fakeBin, BUN_INSTALL: bunInstall, TMPDIR: root };
+    seedGlobalPackageFixture(env);
+    const cli = path.join(import.meta.dir, '../../src/cli/index.ts');
+    const run = (...args: string[]) => spawnSync(process.execPath, ['--no-env-file', '--config=/dev/null', cli, ...args], { cwd: root, env, encoding: 'utf8' });
+    const doctorStatuses = () => {
+      const report = run('doctor', '--json');
+      const { checks } = JSON.parse(report.stdout) as ReturnType<typeof runDoctor>;
+      return {
+        rules: checks.find((check) => check.id === 'antigravity-global-rules'),
+        skills: checks.find((check) => check.id === 'antigravity-skills'),
+      };
+    };
+
+    // Before install: both checks report na.
+    const before = doctorStatuses();
+    expect(before.rules?.status).toBe('na');
+    expect(before.skills?.status).toBe('na');
+
+    // After install: both checks report ok.
+    const install = run('install', '--target', 'antigravity');
+    expect(install.status, install.stdout + install.stderr).toBe(0);
+    const installed = doctorStatuses();
+    expect(installed.rules?.status).toBe('ok');
+    expect(installed.skills?.status).toBe('ok');
+
+    const rulesPath = path.join(home, '.gemini', 'config', 'AGENTS.md');
+    const skillsDir = path.join(home, '.gemini', 'config', 'skills');
+    const originalRules = fs.readFileSync(rulesPath, 'utf8');
+
+    // Edited managed block -> warn; unbalanced markers -> fail.
+    fs.writeFileSync(rulesPath, originalRules.replace("Use the user's language for reports", 'Edited line'));
+    expect(doctorStatuses().rules?.status).toBe('warn');
+    fs.writeFileSync(rulesPath, '<!-- BEGIN: repo-harness global-working-rules -->\nbroken\n');
+    expect(doctorStatuses().rules?.status).toBe('fail');
+    fs.writeFileSync(rulesPath, originalRules);
+
+    // Missing skill symlink -> fail; wrong symlink target -> fail; restored original symlink -> ok.
+    const checkSkill = path.join(skillsDir, 'repo-harness-check');
+    const parkedSkill = path.join(root, 'repo-harness-check-link');
+    fs.renameSync(checkSkill, parkedSkill);
+    expect(doctorStatuses().skills?.status).toBe('fail');
+    fs.symlinkSync(home, checkSkill, 'dir');
+    expect(doctorStatuses().skills?.status).toBe('fail');
+    fs.unlinkSync(checkSkill);
+    fs.renameSync(parkedSkill, checkSkill);
+    expect(doctorStatuses().skills?.status).toBe('ok');
+
+    // Symlinked AGENTS.md or skills directory -> fail with antigravity_hooks_path_linked.
+    const parkedRules = path.join(root, 'AGENTS.md');
+    fs.renameSync(rulesPath, parkedRules);
+    fs.symlinkSync(parkedRules, rulesPath);
+    expect(doctorStatuses().rules).toMatchObject({ status: 'fail', detail: expect.stringContaining('antigravity_hooks_path_linked') });
+    fs.unlinkSync(rulesPath);
+    fs.renameSync(parkedRules, rulesPath);
+
+    const parkedSkills = path.join(root, 'skills');
+    fs.renameSync(skillsDir, parkedSkills);
+    fs.symlinkSync(parkedSkills, skillsDir, 'dir');
+    expect(doctorStatuses().skills).toMatchObject({ status: 'fail', detail: expect.stringContaining('antigravity_hooks_path_linked') });
+    fs.unlinkSync(skillsDir);
+    fs.renameSync(parkedSkills, skillsDir);
+
+    // After uninstall: both return to na.
+    const uninstall = run('uninstall', '--target', 'antigravity');
+    expect(uninstall.status, uninstall.stdout + uninstall.stderr).toBe(0);
+    const after = doctorStatuses();
+    expect(after.rules?.status).toBe('na');
+    expect(after.skills?.status).toBe('na');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}, 30_000);
+
 function writeFakeCodeGraph(fakeBin: string, logFile: string): void {
   writeExecutable(fakeBin,
     path.join(fakeBin, 'codegraph'),

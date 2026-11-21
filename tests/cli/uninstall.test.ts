@@ -754,3 +754,61 @@ test.each([
   expect([again.exitCode,toolItems(again),hostTree(home),existsSync(registry)?readFileSync(registry,'utf8'):null]).toEqual([0,[],before,registryBefore]);
  }finally{rmSync(root,{recursive:true,force:true});}
 },30_000);
+
+test.skipIf(process.platform === 'win32')('Antigravity uninstall removes hooks, rules block, and skills while preserving user text, user skills, and ~/.gemini/config', () => {
+ withTempHome('user-uninstall-antigravity', (home) => {
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun') };
+  const configDir = join(home, '.gemini', 'config');
+  const hooks = join(configDir, 'hooks.json');
+  const rules = join(configDir, 'AGENTS.md');
+  const skillsDir = join(configDir, 'skills');
+  const userSkill = join(skillsDir, 'my-custom-skill');
+  mkdirSync(userSkill, { recursive: true });
+  writeFileSync(join(userSkill, 'SKILL.md'), '# My custom skill\n');
+  writeFileSync(hooks, '{"custom":{"enabled":true}}\n');
+  const userProse = '# Personal Antigravity Rules\n\nKeep this section.\n';
+  writeFileSync(rules, userProse);
+
+  // Install Antigravity without any install-state.json (Antigravity-only user).
+  expect(runInstall({ target: 'antigravity', location: 'global', reportLanguage: 'zh-CN' }).exitCode).toBe(0);
+  expect(existsSync(join(home, '.repo-harness', 'install-state.json'))).toBe(false);
+  expect(lstatSync(join(skillsDir, 'repo-harness')).isSymbolicLink()).toBe(true);
+  expect(readFileSync(rules, 'utf8')).toContain('<!-- BEGIN: repo-harness global-working-rules -->');
+
+  // Uninstalling --target codex leaves Antigravity untouched.
+  expect(runUserUninstall({ target: 'codex', env }).exitCode).toBe(0);
+  expect(lstatSync(join(skillsDir, 'repo-harness')).isSymbolicLink()).toBe(true);
+  expect(JSON.parse(readFileSync(hooks, 'utf8'))['repo-harness']).toBeDefined();
+
+  // Dry run writes nothing.
+  const beforeDry = readFileSync(rules, 'utf8');
+  const dry = runUserUninstall({ target: 'antigravity', dryRun: true, env });
+  expect(dry.exitCode).toBe(0);
+  expect(readFileSync(rules, 'utf8')).toBe(beforeDry);
+  expect(lstatSync(join(skillsDir, 'repo-harness')).isSymbolicLink()).toBe(true);
+
+  // Real --target antigravity uninstall removes rh-owned hooks, rules block, and skills; keeps user prose, user skill, and ~/.gemini/config.
+  const removed = runUserUninstall({ target: 'antigravity', env });
+  expect(removed.exitCode, removed.lines.join('\n')).toBe(0);
+  expect(JSON.parse(readFileSync(hooks, 'utf8'))).toEqual({ custom: { enabled: true } });
+  expect(readFileSync(rules, 'utf8')).toBe(userProse);
+  expect(existsSync(join(skillsDir, 'repo-harness'))).toBe(false);
+  expect(existsSync(join(skillsDir, 'repo-harness-check'))).toBe(false);
+  expect(readFileSync(join(userSkill, 'SKILL.md'), 'utf8')).toBe('# My custom skill\n');
+  expect(lstatSync(configDir).isDirectory()).toBe(true);
+  expect(Object.values(ledger(home).paths).filter((r: any) => r.host === 'antigravity')).toEqual([]);
+  expect(ledger(home).files[hooks]).toBeUndefined();
+  expect(ledger(home).files[rules]).toBeUndefined();
+
+  // Re-install Antigravity, edit inside AGENTS.md markers, and run --target both: edited block is preserved, hooks/skills removed.
+  expect(runInstall({ target: 'antigravity', location: 'global' }).exitCode).toBe(0);
+  const edited = readFileSync(rules, 'utf8').replace("Use the user's language for reports", 'Use custom edited wording');
+  writeFileSync(rules, edited);
+  const both = runUserUninstall({ target: 'both', env });
+  expect(both.status).toBe('partial');
+  expect(readFileSync(rules, 'utf8')).toBe(edited);
+  expect(existsSync(join(skillsDir, 'repo-harness'))).toBe(false);
+  expect(JSON.parse(readFileSync(hooks, 'utf8'))).toEqual({ custom: { enabled: true } });
+  expect(lstatSync(configDir).isDirectory()).toBe(true);
+ });
+});

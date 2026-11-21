@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import { createHash } from 'crypto';
 import { hostSkillRoot, providerSkillLock, type ProviderSkillLock } from '../../effects/host-skill-roots';
 import { piPackageEntry, piPackageRemoval, recordedPiPackages, removePiPackage } from './pi-package';
-import { globalContextPath, inspectUnrecordedGlobalRules, previewGlobalRulesAdoptedRevert } from './global-context';
+import { globalContextPath, inspectUnrecordedGlobalRules, previewGlobalRulesAdoptedRevert, type GlobalContextHost } from './global-context';
 import { legacyRepositoryExcludesPath } from './repository-excludes';
 import { isHistoricalRetiredAgentRecord, readInstallState, retiredAgentRecordCheck } from './install-profile';
 import { installStatePendingMigration, migrateInstallState, planInstallStateMigration } from './install-state-migration';
@@ -17,8 +17,24 @@ import { assertConfigurationPath, configurationReceiptPath, hostConfigurationRoo
 import { migrateCodexConfigRecords, planCodexConfigMigration, previewAdoptedRevert } from './codex-config-migration';
 import { migrateJsonConfigRecords, planJsonConfigMigration, previewJsonAdoptedRevert } from './json-config-migration';
 import { UNVERIFIED_INSTALLER_RANGES } from '../../effects/host-config/delegated';
-import { antigravityHooksPath, antigravityHostPath, openHostConfigGate, openRepositoryFileGate, planPathRevertEntry, userPathLabel, type HostConfigAdoption, type HostConfigGate, type HostConfigRepositoryFileGate, type HostConfigRevertEntry, type HostConfigToolRevertEntry } from '../../effects/host-config/gate';
-import { hostConfigPaths, projectedLedgerPaths, readLedger, readProjectedLedger, repositoryLedgers, resolveHostPath } from '../../effects/host-config/store';
+import {
+  antigravityGlobalRulesHostPath,
+  antigravityHooksPath,
+  antigravityHostPath,
+  antigravitySkillsDirHostPath,
+  checkAntigravityPath,
+  openHostConfigGate,
+  openRepositoryFileGate,
+  planPathRevertEntry,
+  resolveUserConfigFile,
+  userPathLabel,
+  type HostConfigAdoption,
+  type HostConfigGate,
+  type HostConfigRepositoryFileGate,
+  type HostConfigRevertEntry,
+  type HostConfigToolRevertEntry,
+} from '../../effects/host-config/gate';
+import { hostConfigPaths, projectedLedgerPaths, readLedger, readProjectedLedger, repositoryLedgers } from '../../effects/host-config/store';
 import { planToolRemoval, removeTools, windowsPowershellPath, windowsUserPathPort, type ToolRemovalEntry } from '../../effects/host-config/tools';
 import { HostConfigError, type ToolId, type ToolRecord } from '../../core/host-config/types';
 import { FileSyntaxError, parseJsonText, parseTomlText } from '../../core/evidence/file-syntax';
@@ -99,6 +115,11 @@ function hostConfigFiles(home: string, target: UninstallOptions['target']): { co
   return { codex: selected(codex, target, home) ? codex : null, json: json.filter((path) => selected(path, target, home)) };
 }
 
+/** Without an install-state file, only opt-in Antigravity path records can exist. */
+function selectUninstallRecords(state: ReturnType<typeof readInstallState>, raw: PathRecords): PathRecords {
+  return state ? raw : Object.fromEntries(Object.entries(raw).filter(([, record]) => record.host === 'antigravity'));
+}
+
 /**
  * Before the migrations run (a dry run, or the check before the lock), they
  * are planned in memory. A target leaves the files of the other host and their
@@ -115,9 +136,10 @@ function readUninstallState(opts: UninstallOptions) {
   // A dry run sees both legacy state and a standalone fleet receipt as the migration would leave them.
   const projected = opts.dryRun ? planInstallStateMigration(env) : null;
   const state = projected?.state ?? readInstallState(env);
-  const records = !state ? {} : projected ? projected.records : opts.dryRun
+  const rawRecords = projected ? projected.records : opts.dryRun
     ? partitionPathRecords(env, projectedLedgerPaths(hostConfigPaths(env), isHistoricalRetiredAgentRecord)).records
     : readPathRecords(env);
+  const records = selectUninstallRecords(state, rawRecords);
   // Only an install-state migration supplies Pi package claims. A fleet receipt leaves the Pi ledger in force.
   const piPackages: ReadonlyMap<string, string> = opts.target !== 'both' ? new Map()
     : projected?.state ? new Map(projected.piPackages.flatMap((source) => { const text = piPackageEntry(source, env); return text === null ? [] : [[source, text] as const]; }))
@@ -278,19 +300,40 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   const gate = openHostConfigGate({ env, preview: opts.dryRun === true });
   // The Skills CLI lock is a staging file: its recorded entries go with a full uninstall only.
   const hostPaths = [...(files.codex ? [files.codex] : []), ...files.json, ...(opts.target === 'both' && gate.recorded(lock.path).length ? [lock.path] : [])];
-  if (opts.target === 'antigravity' || (opts.target === 'both' && (opts.dryRun ? readProjectedLedger : readLedger)(hostConfigPaths(env)).files[antigravityHostPath(env)])) {
+  const currentLedger = (opts.dryRun ? readProjectedLedger : readLedger)(hostConfigPaths(env));
+  if (opts.target === 'antigravity') {
+    const antigravityChecks: readonly [string, 'regular file' | 'directory'][] = [
+      [antigravityHostPath(env), 'regular file'],
+      [antigravityGlobalRulesHostPath(env), 'regular file'],
+      [antigravitySkillsDirHostPath(env), 'directory'],
+    ];
+    for (const [entry, kind] of antigravityChecks) {
+      try { checkAntigravityPath(entry, kind); }
+      catch (error) {
+        unresolved(entry, String((error as Error).message));
+        return result();
+      }
+    }
+  }
+  if (opts.target === 'antigravity' || (opts.target === 'both' && currentLedger.files[antigravityHostPath(env)])) {
     hostPaths.push(antigravityHooksPath(env));
   }
   // The Global Working Rules files go by the ledger too. Two host paths that name one file are one revert.
   const rulesAdoptions = new Map<string, HostConfigAdoption>();
   const resolvedHostPaths = new Set<string>();
   const globalContextPaths = new Set<string>();
-  for (const host of ['codex', 'claude'] as const) {
-    if (opts.target !== 'both' && opts.target !== host) continue;
+  const includeAntigravityRules = opts.target === 'antigravity'
+    || (opts.target === 'both' && Boolean(currentLedger.files[antigravityGlobalRulesHostPath(env)]));
+  const rulesHosts: readonly GlobalContextHost[] = [
+    ...(opts.target === 'both' || opts.target === 'codex' ? ['codex' as const] : []),
+    ...(opts.target === 'both' || opts.target === 'claude' ? ['claude' as const] : []),
+    ...(includeAntigravityRules ? ['antigravity' as const] : []),
+  ];
+  for (const host of rulesHosts) {
     const contextPath = globalContextPath(home, host);
     globalContextPaths.add(contextPath);
     try {
-      const resolved = resolveHostPath(hostConfigPaths(env), contextPath);
+      const resolved = resolveUserConfigFile(env, contextPath);
       if (resolvedHostPaths.has(resolved)) continue;
       resolvedHostPaths.add(resolved);
       if (!gate.recorded(contextPath).length) {
@@ -306,8 +349,8 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   }
   for (const named of opts.removeEditedBlocks ?? []) {
     try {
-      const target = resolveHostPath(hostConfigPaths(env), named);
-      const rulesPath = [...globalContextPaths].find((path) => hostPaths.includes(path) && resolveHostPath(hostConfigPaths(env), path) === target);
+      const target = resolveUserConfigFile(env, named);
+      const rulesPath = [...globalContextPaths].find((path) => hostPaths.includes(path) && resolveUserConfigFile(env, path) === target);
       if (!rulesPath) throw new Error('not a recorded rules file of this target; nothing removed');
       const removal = gate.removeEditedBlock(rulesPath);
       // The dry run cannot plan the revert of the file after the removal, so it leaves the file out.
@@ -366,6 +409,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       continue;
     }
     try {
+      if (record.host === 'antigravity') checkAntigravityPath(antigravitySkillsDirHostPath(env), 'directory');
       // The record is checked beneath its own host root, which a link can put outside HOME.
       const root = pathRecordRoot(env, key, record);
       if (root === null) throw new Error(`the record is outside the root of its host: ${key}`);
@@ -444,7 +488,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       // A failed Pi entry removal stops before the ownership ledger is written.
       for (const [source, recorded] of piRemovals) removePiPackage(source, recorded, env);
       const surfaces = [...removedSurfaces];
-      if ((surfaces.length || retireRecords) && pathRecordsDigest(readPathRecords(env)) !== recordsDigest) throw new Error(`configuration changed after preview: ${hostConfigPaths(env).ledger}`);
+      if ((surfaces.length || retireRecords) && pathRecordsDigest(selectUninstallRecords(state, readPathRecords(env))) !== recordsDigest) throw new Error(`configuration changed after preview: ${hostConfigPaths(env).ledger}`);
       // Hold retired recovery records even if a target disappears between preview and apply.
       const retired = surfaces.filter(key => isRetiredAgent(key, records[key]!));
       const active = surfaces.filter(key => !isRetiredAgent(key, records[key]!));

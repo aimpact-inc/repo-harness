@@ -94,6 +94,111 @@ test.skipIf(process.platform === 'win32')('default install and update exclude An
   });
 }, 30_000);
 
+test.skipIf(process.platform === 'win32')('Antigravity install --report-language zh-CN writes hooks, AGENTS.md, and skill symlinks; dry-run previews AGENTS.md; update preserves user edits', () => {
+  withTempHome('rh-antigravity-rules-skills', (home) => {
+    const configDir = path.join(home, '.gemini', 'config');
+    const hooks = path.join(configDir, 'hooks.json');
+    const rules = path.join(configDir, 'AGENTS.md');
+    const skillsDir = path.join(configDir, 'skills');
+    const target = ['--target', 'antigravity'];
+
+    // Pre-existing user text in AGENTS.md is preserved outside markers.
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(rules, '# My Antigravity Notes\n\nKeep personal rules.\n');
+
+    // Dry-run lists both hooks.json and AGENTS.md and writes nothing.
+    const dryRun = antigravityCli(home, ['install', ...target, '--report-language', 'zh-CN', '--dry-run', '--json']);
+    expect(dryRun.status, dryRun.stderr).toBe(0);
+    const preview = JSON.parse(dryRun.stdout).host_config;
+    expect(preview.items).toEqual(expect.arrayContaining([
+      { path: hooks, selector: 'repo-harness', action: 'add' },
+      { path: rules, selector: 'global-working-rules', action: 'add' },
+    ]));
+    expect(preview.notListed).toEqual([]);
+    expect(fs.existsSync(hooks)).toBe(false);
+    expect(fs.existsSync(skillsDir)).toBe(false);
+    expect(fs.readFileSync(rules, 'utf8')).toBe('# My Antigravity Notes\n\nKeep personal rules.\n');
+
+    // Install with --report-language zh-CN writes hooks, zh-CN global rules, and projected skill symlinks.
+    const install = antigravityCli(home, ['install', ...target, '--report-language', 'zh-CN']);
+    expect(install.status, install.stdout + install.stderr).toBe(0);
+    const hookMember = JSON.parse(fs.readFileSync(hooks, 'utf8'))['repo-harness'];
+    expect(hookMember?.enabled).not.toBe(false);
+    expect(Array.isArray(hookMember?.PreToolUse)).toBe(true);
+    const rulesContent = fs.readFileSync(rules, 'utf8');
+    expect(rulesContent).toContain('# My Antigravity Notes\n\nKeep personal rules.');
+    expect(rulesContent).toContain('<!-- BEGIN: repo-harness global-working-rules -->');
+    expect(rulesContent).toContain('Use Chinese to report to user.');
+    expect(rulesContent).toContain('下一刀');
+    expect(fs.lstatSync(path.join(skillsDir, 'repo-harness')).isSymbolicLink()).toBe(true);
+    expect(fs.lstatSync(path.join(skillsDir, 'repo-harness-check')).isSymbolicLink()).toBe(true);
+    expect(fs.lstatSync(path.join(skillsDir, 'repo-harness-issue-flow')).isSymbolicLink()).toBe(true);
+    expect(fs.existsSync(path.join(skillsDir, 'repo-harness-setup'))).toBe(false);
+
+    // Unrelated flags and invalid --report-language are rejected.
+    expect(antigravityCli(home, ['install', ...target, '--plugins', 'core']).status).not.toBe(0);
+    expect(antigravityCli(home, ['install', ...target, '--with-obsidian-skills']).status).not.toBe(0);
+    expect(antigravityCli(home, ['install', ...target, '--report-language', 'fr']).status).not.toBe(0);
+    expect(antigravityCli(home, ['update', ...target, '--version', '1.0.0']).status).not.toBe(0);
+
+    // Re-running install/update preserves recorded zh-CN language and user edits inside markers.
+    const idempotent = antigravityCli(home, ['install', ...target]);
+    expect(idempotent.status, idempotent.stderr).toBe(0);
+    expect(fs.readFileSync(rules, 'utf8')).toBe(rulesContent);
+
+    const edited = rulesContent.replace('Use Chinese to report to user.', 'Use Chinese to report to user. User edit.');
+    fs.writeFileSync(rules, edited);
+    const update = antigravityCli(home, ['update', ...target, '--no-cli']);
+    expect(update.status, update.stdout + update.stderr).toBe(0);
+    expect(fs.readFileSync(rules, 'utf8')).toBe(edited);
+  });
+}, 30_000);
+
+test.skipIf(process.platform === 'win32')('Antigravity refuses symlinked AGENTS.md or skills and preserves pre-existing user skill directories', () => {
+  withTempHome('rh-antigravity-i2', (home) => {
+    const configDir = path.join(home, '.gemini', 'config');
+    const hooks = path.join(configDir, 'hooks.json');
+    const rules = path.join(configDir, 'AGENTS.md');
+    const skillsDir = path.join(configDir, 'skills');
+    const target = ['--target', 'antigravity'];
+
+    // Pre-existing user skill directory at ~/.gemini/config/skills/repo-harness is refused before any write.
+    const userSkill = path.join(skillsDir, 'repo-harness');
+    fs.mkdirSync(userSkill, { recursive: true });
+    fs.writeFileSync(path.join(userSkill, 'SKILL.md'), '# User owned skill\n');
+    const collision = antigravityCli(home, ['install', ...target]);
+    expect(collision.status).not.toBe(0);
+    expect(collision.stdout + collision.stderr).toContain('rh has no record of it');
+    expect(fs.readFileSync(path.join(userSkill, 'SKILL.md'), 'utf8')).toBe('# User owned skill\n');
+    expect(fs.existsSync(hooks)).toBe(false);
+    expect(fs.existsSync(rules)).toBe(false);
+    fs.rmSync(userSkill, { recursive: true, force: true });
+
+    // Clean install succeeds, then symlinked AGENTS.md and skills directory fail closed across CLI commands.
+    expect(antigravityCli(home, ['install', ...target]).status).toBe(0);
+    const originalRules = fs.readFileSync(rules);
+    for (const [entry, isDir] of [[rules, false], [skillsDir, true]] as const) {
+      const parked = path.join(home, 'parked-entry');
+      fs.renameSync(entry, parked);
+      fs.symlinkSync(parked, entry, isDir ? 'dir' : 'file');
+      for (const command of [
+        ['install', ...target], ['install', ...target, '--dry-run'],
+        ['update', ...target], ['update', ...target, '--dry-run'],
+        ['uninstall', ...target], ['uninstall', ...target, '--dry-run'],
+        ['config', 'status'],
+      ]) {
+        const res = antigravityCli(home, command);
+        expect(res.status, `${entry}: ${command.join(' ')}`).not.toBe(0);
+        expect(res.stdout + res.stderr).toContain('antigravity_hooks_path_linked');
+      }
+      expect(fs.readlinkSync(entry)).toBe(parked);
+      fs.unlinkSync(entry);
+      fs.renameSync(parked, entry);
+    }
+    expect(fs.readFileSync(rules)).toEqual(originalRules);
+  });
+}, 30_000);
+
 describe('issue 698 host configuration ownership', () => {
   test('issue 698 installs and restores only the top-level TOML key', () => {
     withTempHome('repo-harness-install', (home) => {
