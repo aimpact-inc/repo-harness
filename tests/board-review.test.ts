@@ -21,16 +21,17 @@ const pr = (number: number, extra: Partial<BoardPullRequestV1> = {}): BoardPullR
   closes: [number * 10], refs: [], files: [], cleared_hazard_paths: [], required_check: { status: 'success', completed_at: '', contexts: [] }, acceptance: { status: 'not_accepted' }, merge_readiness: null, merge_readiness_observed_at: null,
   tier: 'high', second_review: 'not_required', gatekeeper_review: 'none', writer_family: null, merge_hold: { status: 'none' }, review_fail: null, review_records: { status: 'observed', gatekeeper: null, reviewer: null }, open_questions: { status: 'observed', questions: [] }, ...extra,
 });
-const board = (prs: BoardPullRequestV1[], holds: { issue: number; reason: string }[] = [], reviewer_family: string | null = 'anthropic'): BoardV1 =>
-  ({ pull_requests: prs, reviewer_family, parent: { number: 1 }, plan: { status: 'observed', block: { holds } } }) as unknown as BoardV1;
+const board = (prs: BoardPullRequestV1[], holds: { issue: number; reason: string }[] = []): BoardV1 =>
+  ({ pull_requests: prs, parent: { number: 1 }, plan: { status: 'observed', block: { holds } } }) as unknown as BoardV1;
 const comment = (body: string, url = 'https://example.test/c'): BoardCommentV1 => ({ url, created_at: '2026-11-09T10:00:00Z', author_association: 'OWNER', body });
 const marker = (head: string, url = 'https://example.test/m1', seat = 'gatekeeper') => comment(`repo-harness review start\nSubject: ${head}\nSeat: ${seat}`, url);
-const record = (head: string, role = 'pi (gpt-6.1-sol)', verdict: 'PASS' | 'FAIL' = 'FAIL') => comment(`repo-harness acceptance record\n\n| Round | Role | Subject | Verdict |\n|---|---|---|---|\n| 1 | ${role} | \`${head}\` | ${verdict}: 1 P1 |`);
+const record = (head: string, role = 'pi (gpt-6.1-sol)', verdict: 'PASS' | 'FAIL' = 'FAIL', seat?: 'gatekeeper' | 'reviewer') =>
+  comment(`repo-harness acceptance record\n${seat === undefined ? '' : `Seat: ${seat}\n`}\n| Round | Role | Subject | Verdict |\n|---|---|---|---|\n| 1 | ${role} | \`${head}\` | ${verdict}: 1 P1 |`);
 const page = (...comments: BoardCommentV1[]): BoardCommentPageV1 => ({ truncated: false, comments });
 
 const GATEKEEPER: SeatRouteV1 = { id: 'gatekeeper', seat: DEFAULT_SEATS_CONFIG.gatekeeper, line: 'gatekeeper: gatekeeper (codex gpt-6.1-terra high)' };
-function plan(prs: BoardPullRequestV1[], comments: BoardCommentPageV1 = page(), holds: { issue: number; reason: string }[] = [], gatekeeper = GATEKEEPER, reviewer: string | null = 'anthropic'): readonly ReviewDecisionV1[] {
-  return planReview({ board: board(prs, holds, reviewer), comments: new Map(prs.map(entry => [entry.number, comments])), gatekeeper });
+function plan(prs: BoardPullRequestV1[], comments: BoardCommentPageV1 = page(), holds: { issue: number; reason: string }[] = [], gatekeeper = GATEKEEPER, reviewer: SeatConfigV1 = DEFAULT_SEATS_CONFIG.reviewer): readonly ReviewDecisionV1[] {
+  return planReview({ board: board(prs, holds), comments: new Map(prs.map(entry => [entry.number, comments])), gatekeeper, reviewer });
 }
 const label = (decisions: readonly ReviewDecisionV1[]) => decisions.map(decision => decision.action === 'skip' ? `${decision.pr}:${decision.reason}` : `${decision.pr}:start`);
 
@@ -49,15 +50,18 @@ test('an unknown tier is reviewed as High; a head that no seat reviewed starts b
   expect(start).toMatchObject({ action: 'start', tier: 'high' });
   expect(seatsOf(start)).toEqual(['gatekeeper', 'reviewer']);
   // A gatekeeper PASS of the head, also a carried one: that run starts the reviewer only.
-  expect(seatsOf(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], page(record(SHA, undefined, 'PASS')))[0])).toEqual(['reviewer']);
+  expect(seatsOf(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], page(record(SHA, undefined, 'PASS', 'gatekeeper')))[0])).toEqual(['reviewer']);
   // A gatekeeper FAIL of the head starts no reviewer: the fix goes back to the gatekeeper.
   expect(seatsOf(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'fail' })])[0])).toEqual(['gatekeeper']);
   expect(seatsOf(plan([pr(1, { tier: 'high', second_review: 'recorded', gatekeeper_review: 'pass' })])[0])).toEqual(['gatekeeper']);
 });
 
-test('a Medium head starts the one seat of the other family than the writer; an unknown writer family starts none', () => {
+test('a Medium head prefers the gatekeeper unless the writer shares its family; an unknown writer family starts none', () => {
   const medium = (writer_family: BoardPullRequestV1['writer_family']) => plan([pr(1, { tier: 'medium', writer_family })]);
   expect(medium('anthropic')[0]).toMatchObject({ action: 'start', seats: [{ seat: 'gatekeeper' }] });
+  expect(medium('google')[0]).toMatchObject({ action: 'start', seats: [{ seat: 'gatekeeper' }] });
+  expect(medium('zhipu')[0]).toMatchObject({ action: 'start', seats: [{ seat: 'gatekeeper' }] });
+  expect(medium('deepseek')[0]).toMatchObject({ action: 'start', seats: [{ seat: 'gatekeeper' }] });
   expect(medium('openai')[0]).toMatchObject({ action: 'start', seats: [{ seat: 'reviewer' }] });
   expect(label(medium(null))).toEqual(['1:writer_family_unknown']);
 });
@@ -104,25 +108,28 @@ test('a released marker frees its head', () => {
   expect(label(plan([pr(1)], page(marker(SHA), released)))).toEqual(['1:start']);
 });
 
-test('the delta base of a seat is an earlier head that its own family reviewed; otherwise the seat reviews the whole diff', () => {
-  // Each seat's base is read from the same earlier markers and rows, and each base comes from the seat's own family.
-  const base = (seat: ReviewSeat, comments: BoardCommentPageV1, reviewer = 'anthropic') => {
+test('the delta base of a seat is an earlier head that the seat reviewed by Seat:, start marker, or legacy model family; otherwise the whole diff', () => {
+  const seatConfig = (model: string | null): SeatConfigV1 => ({ ...DEFAULT_SEATS_CONFIG.reviewer, runtime: model === null || model.startsWith('claude') || model === 'opus' ? 'claude' : 'pi', model });
+  const base = (seat: ReviewSeat, comments: BoardCommentPageV1, reviewerModel: string | null = 'opus') => {
     const reviewerStart = seat === 'reviewer';
-    const evidence = reviewerStart ? page(...comments.comments, record(SHA, undefined, 'PASS')) : comments;
-    const started = plan([pr(1, { second_review: 'pending', gatekeeper_review: reviewerStart ? 'pass' : 'none' })], evidence, [], GATEKEEPER, reviewer)[0];
+    const evidence = reviewerStart ? page(...comments.comments, record(SHA, undefined, 'PASS', 'gatekeeper')) : comments;
+    const started = plan([pr(1, { second_review: 'pending', gatekeeper_review: reviewerStart ? 'pass' : 'none' })], evidence, [], GATEKEEPER, seatConfig(reviewerModel))[0];
     const entry = started.action === 'start' ? started.seats.find(candidate => candidate.seat === seat) : undefined;
     return entry === undefined ? `not ${seat}` : entry.delta_from;
   };
   const reviewerMarker = marker(OLD, 'https://example.test/m2', 'reviewer');
-  const both = (comments: BoardCommentPageV1, reviewer = 'anthropic') => [base('gatekeeper', comments, reviewer), base('reviewer', comments, reviewer)];
+  const both = (comments: BoardCommentPageV1, reviewerModel: string | null = 'opus') => [base('gatekeeper', comments, reviewerModel), base('reviewer', comments, reviewerModel)];
   expect(both(page(marker(OLD)))).toEqual([null, null]);
+  // One live start marker on OLD establishes the row's seat; a second marker on OLD leaves an unestablished row to model-family matching.
   expect(both(page(marker(OLD), record(OLD)))).toEqual([OLD, null]);
-  // A gatekeeper row alone gives the reviewer no base, and a reviewer-family row alone gives the gatekeeper none.
   expect(both(page(marker(OLD), reviewerMarker, record(OLD, 'claude (opus)')))).toEqual([null, OLD]);
-  expect(both(page(marker(OLD), record(OLD, 'acceptor')))).toEqual([null, null]);
-  // The family of the row's model decides, not the harness: with a DeepSeek reviewer, a Pi DeepSeek row is the reviewer's and a Pi Codex row the gatekeeper's.
-  expect(both(page(marker(OLD), reviewerMarker, record(OLD, 'pi (magpie/cursor/deepseek-v41-flash-1017)')), 'deepseek')).toEqual([null, OLD]);
-  expect(both(page(marker(OLD), reviewerMarker, record(OLD)), 'deepseek')).toEqual([OLD, null]);
+  expect(both(page(marker(OLD), reviewerMarker, record(OLD, 'acceptor')))).toEqual([null, null]);
+  // Explicit Seat: header overrides model-family attribution (e.g. a Pi DeepSeek reviewer vs a Pi DeepSeek gatekeeper-fallback).
+  expect(both(page(marker(OLD), reviewerMarker, record(OLD, 'pi (magpie/cursor/deepseek-v41-flash-1017)', 'FAIL', 'reviewer')))).toEqual([null, OLD]);
+  expect(both(page(marker(OLD), reviewerMarker, record(OLD, 'pi (magpie/cursor/deepseek-v41-flash-1017)', 'FAIL', 'gatekeeper')))).toEqual([OLD, null]);
+  // Pre-#3353 legacy records without Seat: on a two-marker head still attribute via configured seat families.
+  expect(both(page(marker(OLD), reviewerMarker, record(OLD, 'pi (magpie/cursor/deepseek-v41-flash-1017)')), 'magpie/cursor/deepseek-v41-flash-1017')).toEqual([null, OLD]);
+  expect(both(page(marker(OLD), reviewerMarker, record(OLD)), 'magpie/cursor/deepseek-v41-flash-1017')).toEqual([OLD, null]);
 });
 
 function ports(overrides: Partial<ReviewPorts> = {}): ReviewPorts & { comments: string[]; tabs: Record<string, unknown>[] } {
@@ -195,18 +202,22 @@ test('a launch that sent nothing releases the marker; an ambiguous one keeps it'
 
 test('a reviewer seat on Pi starts after its marker and gets a packet for its own harness', async () => {
   const p = ports({ launch: async seat => ({ argv: [seat], tab: seat, runtime: 'pi' }) });
-  const result = await executeReview(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], page(marker(SHA), record(SHA, 'pi (gpt-6.1-sol)', 'PASS')), [], GATEKEEPER, 'deepseek'), context, p);
+  const deepseekReviewer: SeatConfigV1 = { ...DEFAULT_SEATS_CONFIG.reviewer, runtime: 'pi', model: 'magpie/cursor/deepseek-v41-flash-1017', effort: null };
+  const result = await executeReview(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], page(marker(SHA), record(SHA, 'pi (gpt-6.1-sol)', 'PASS', 'gatekeeper')), [], GATEKEEPER, deepseekReviewer), context, p);
   expect(result.started).toMatchObject([{ seat: 'reviewer' }]);
   expect(p.tabs[0]!.task).toContain('reviewer.harness "pi"');
 });
 
 test('the gatekeeper starts only when the effective gatekeeper is of another known family than the writer, and not Claude where the head needs that', () => {
   const route = (seat: SeatConfigV1, id: SeatRouteV1['id'] = 'gatekeeper-fallback'): SeatRouteV1 => (id === null ? { id, line: 'gatekeeper: none (chatgpt exhausted)' } : { id, seat, line: `gatekeeper: ${id}` });
+  const seatConfig = (model: string | null): SeatConfigV1 => ({ ...DEFAULT_SEATS_CONFIG.reviewer, runtime: model === null || model.startsWith('claude') || model === 'opus' ? 'claude' : 'pi', model });
   const pi = route({ ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'pi', model: 'magpie/cursor/deepseek-v41-flash-1017', effort: null });
   const claude = route({ ...DEFAULT_SEATS_CONFIG.reviewer });
   const medium = pr(1, { tier: 'medium', writer_family: 'anthropic' });
   expect(label(plan([medium], page(), [], pi))).toEqual(['1:start']);
-  expect(plan([medium], page(), [], claude)[0]).toMatchObject({ action: 'skip', reason: 'review_family_unavailable', detail: 'the gatekeeper family anthropic is the writer family; gatekeeper: gatekeeper-fallback' });
+  // When the effective gatekeeper matches the writer family, Medium routing falls back to the reviewer seat; it skips only if the reviewer also matches or has no known family.
+  expect(plan([medium], page(), [], claude)[0]).toMatchObject({ action: 'skip', reason: 'review_family_unavailable', detail: 'the reviewer family anthropic is the writer family' });
+  expect(label(plan([medium], page(), [], claude, seatConfig('gpt-6.1-terra')))).toEqual(['1:start']);
   // A High head with a pending Claude review needs a non-Claude gatekeeper; one with no second review takes a Claude gatekeeper.
   expect(label(plan([pr(1, { second_review: 'pending' }), pr(2)], page(), [], claude))).toEqual(['1:review_family_unavailable', '2:start']);
   // There the Claude reviewer gives the different-family row, so a gatekeeper of the writer family still starts.
@@ -218,27 +229,33 @@ test('the gatekeeper starts only when the effective gatekeeper is of another kno
     .toMatchObject({ detail: 'the model of seats.gatekeeper.model has no known family; gatekeeper: gatekeeper' });
   expect(plan([pr(1)], page(), [], route(DEFAULT_SEATS_CONFIG.gatekeeper, null))[0]).toMatchObject({ reason: 'review_family_unavailable', detail: 'no gatekeeper seat can launch; gatekeeper: none (chatgpt exhausted)' });
   // The reviewer and the gatekeeper of one family are not independent; an unknown reviewer family starts no reviewer.
-  const sameFamily = plan([pr(1, { second_review: 'pending' })], page(), [], GATEKEEPER, 'openai')[0];
+  const sameFamily = plan([pr(1, { second_review: 'pending' })], page(), [], GATEKEEPER, seatConfig('gpt-6.1-terra'))[0];
   expect(sameFamily).toMatchObject({ action: 'skip', reason: 'review_family_unavailable' });
   // After the gatekeeper PASS the reviewer is the seat of the head, so its own family check applies.
-  const passedPage = page(marker(SHA), record(SHA, undefined, 'PASS'));
-  const passed = (reviewer: string | null) => label(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], passedPage, [], GATEKEEPER, reviewer));
-  expect(passed('openai')).toEqual(['1:review_family_unavailable']);
+  const passedPage = page(marker(SHA), record(SHA, undefined, 'PASS', 'gatekeeper'));
+  const passed = (reviewerModel: string | null) => label(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], passedPage, [], GATEKEEPER, seatConfig(reviewerModel)));
+  expect(passed('gpt-6.1-terra')).toEqual(['1:review_family_unavailable']);
   expect(passed(null)).toEqual(['1:review_family_unavailable']);
   // The skip names the field, never the value: a credential pasted as the model stays out of the output.
-  const unknownReviewer = plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], passedPage, [], GATEKEEPER, null)[0];
+  const unknownReviewer = plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], passedPage, [], GATEKEEPER, seatConfig('sk-live-secret'))[0];
   expect(unknownReviewer).toMatchObject({ detail: 'the model of seats.reviewer.model has no known family, so its row cannot count as another family' });
-  expect(passed('deepseek')).toEqual(['1:start']);
+  expect(passed('magpie/cursor/deepseek-v41-flash-1017')).toEqual(['1:start']);
   // A started gatekeeper counts by its recorded row, not by the current route: a fallback gatekeeper of another family than the reviewer opens the relay; a gatekeeper of the reviewer family does not.
   const fallback = route({ ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'pi', model: 'magpie/cursor/deepseek-v41-flash-1017', effort: null });
   const pending = pr(1, { second_review: 'pending', gatekeeper_review: 'pass' });
-  expect(label(plan([pending], page(marker(SHA), record(SHA, 'pi (gpt-6.1-sol)', 'PASS')), [], fallback, 'deepseek'))).toEqual(['1:start']);
-  expect(label(plan([pending], page(marker(SHA), record(SHA, 'pi (magpie/cursor/deepseek-v41-flash-1017)', 'PASS')), [], fallback, 'deepseek'))).toEqual(['1:review_family_unavailable']);
-  expect(plan([pending], page(marker(SHA), record(SHA, 'pi', 'PASS')))[0]).toMatchObject({
+  expect(label(plan([pending], page(marker(SHA), record(SHA, 'pi (gpt-6.1-sol)', 'PASS', 'gatekeeper')), [], fallback, seatConfig('magpie/cursor/deepseek-v41-flash-1017')))).toEqual(['1:start']);
+  expect(label(plan([pending], page(marker(SHA), record(SHA, 'pi (magpie/cursor/deepseek-v41-flash-1017)', 'PASS', 'gatekeeper')), [], fallback, seatConfig('magpie/cursor/deepseek-v41-flash-1017')))).toEqual(['1:review_family_unavailable']);
+  expect(plan([pending], page(marker(SHA), record(SHA, 'pi', 'PASS', 'gatekeeper')))[0]).toMatchObject({
     action: 'skip', reason: 'review_family_unavailable', detail: 'the gatekeeper PASS has no recorded model family',
   });
-  // A Medium head of another writer family starts the Claude reviewer, which the gatekeeper check does not touch.
+  // A Medium head written by OpenAI selects the reviewer even if no gatekeeper can launch, and fails closed if reviewer matches writer family.
   expect(label(plan([pr(1, { tier: 'medium', writer_family: 'openai' })], page(), [], route(DEFAULT_SEATS_CONFIG.gatekeeper, null)))).toEqual(['1:start']);
+  expect(plan([pr(1, { tier: 'medium', writer_family: 'openai' })], page(), [], GATEKEEPER, seatConfig('gpt-6.1-terra'))[0]).toMatchObject({
+    action: 'skip', reason: 'review_family_unavailable', detail: 'the reviewer family openai is the writer family',
+  });
+  expect(plan([pr(1, { tier: 'medium', writer_family: 'anthropic' })], page(), [], route(DEFAULT_SEATS_CONFIG.gatekeeper, null))[0]).toMatchObject({
+    action: 'skip', reason: 'review_family_unavailable', detail: 'no gatekeeper seat can launch; gatekeeper: none (chatgpt exhausted)',
+  });
 });
 
 test('a disposed gatekeeper FAIL supplies no family to a model-less gatekeeper PASS', () => {
@@ -247,8 +264,8 @@ test('a disposed gatekeeper FAIL supplies no family to a model-less gatekeeper P
   const disposition = comment(renderAcceptanceDispositionComment({
     record: url, subject: SHA, findings: ['resolved-finding'], decision: 'https://github.com/example/repo/issues/1#issuecomment-11',
   }));
-  const comments = page(fail, disposition, record(SHA, 'pi', 'PASS'));
-  const verdict = gatekeeperReview({ head_sha: SHA, comments } as BoardPullRequestReadV1, 'anthropic');
+  const comments = page(fail, disposition, record(SHA, 'pi', 'PASS', 'gatekeeper'));
+  const verdict = gatekeeperReview({ head_sha: SHA, comments } as BoardPullRequestReadV1);
   expect(verdict).toBe('pass');
   expect(plan([pr(1, { second_review: 'pending', gatekeeper_review: verdict })], comments)[0]).toMatchObject({
     action: 'skip', reason: 'review_family_unavailable', detail: 'the gatekeeper PASS has no recorded model family',
@@ -296,17 +313,21 @@ test('a round-1 PASS carries only to the fix head of the claimed FAIL, in either
   type Row = readonly [harness: keyof typeof models, subject: string, round: number, verdict: 'PASS' | 'FAIL', claimed?: boolean];
   const read = (head: string, rows: readonly Row[]) => {
     const comments = rows.flatMap(([harness, subject, round, verdict, claimed = true], at) => {
+      const seat = harness === 'claude' ? 'reviewer' : 'gatekeeper';
       const receipt: ReviewPublishReceipt = { protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round, subject_sha: subject, risk_tier: 'high',
         reviewer: { harness: harness === 'custom' ? 'pi' : harness, actual_model: models[harness] }, verdict, model_relation: 'different-family', summary: 'Reviewed.', findings: [] };
       const claimUrl = `https://github.com/example/repo/pull/1#issuecomment-${100 + at}`;
       const made = (body: string, url: string, minute: number): BoardCommentV1 => ({ url, created_at: `2026-11-18T10:${String(minute).padStart(2, '0')}:00Z`, author_association: 'OWNER', body });
-      return [...(claimed ? [made(renderAcceptanceClaim(receipt), claimUrl, at * 2)] : []), made(renderAcceptanceRecord(receipt, claimUrl), `https://github.com/example/repo/pull/1#issuecomment-${200 + at}`, at * 2 + 1)];
+      return [
+        ...(claimed ? [made(renderAcceptanceClaim(receipt, undefined, seat), claimUrl, at * 2)] : []),
+        made(renderAcceptanceRecord(receipt, claimUrl, undefined, seat), `https://github.com/example/repo/pull/1#issuecomment-${200 + at}`, at * 2 + 1),
+      ];
     });
     return { state: 'open', head_sha: head, comments: page(...comments) } as unknown as BoardPullRequestReadV1;
   };
   const view = (head: string, rows: readonly Row[]) => {
     const pr = read(head, rows);
-    return [gatekeeperReview(pr, 'anthropic'), secondReview(pr, 'high', 'anthropic'), acceptance(pr, { status: 'pending', contexts: [] }, ['high'], 'high').status];
+    return [gatekeeperReview(pr), secondReview(pr, 'high'), acceptance(pr, { status: 'pending', contexts: [] }, ['high'], 'high').status];
   };
   const passThenFail: Row[] = [['pi', OLD, 1, 'PASS'], ['claude', OLD, 1, 'FAIL']];
   const failThenPass: Row[] = [['claude', OLD, 1, 'FAIL'], ['pi', OLD, 1, 'PASS']];
@@ -325,4 +346,95 @@ test('a round-1 PASS carries only to the fix head of the claimed FAIL, in either
   // An unknown family is never the other family: its FAIL carries no PASS, and its PASS of the head does not open the relay.
   expect(view(FIX, [['pi', OLD, 1, 'PASS'], ['custom', OLD, 1, 'FAIL']])).toEqual(['none', 'pending', 'not_accepted']);
   expect(view(FIX, [['custom', FIX, 1, 'PASS']])).toEqual(['none', 'pending', 'not_accepted']);
+});
+
+test('Seat: attributes records across mixed Seat: and legacy rows on one head and fails closed on invalid or conflicting Seat:', () => {
+  const mkRecord = (head: string, role: string, verdict: 'PASS' | 'FAIL', seat?: 'gatekeeper' | 'reviewer') => {
+    const receipt: ReviewPublishReceipt = { protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 1, subject_sha: head, risk_tier: 'high',
+      reviewer: { harness: 'pi', actual_model: role }, verdict, model_relation: 'different-family', summary: 'Reviewed.', findings: [] };
+    return { receipt, seat };
+  };
+  const prWith = (comments: BoardCommentV1[]) => ({ state: 'open', head_sha: SHA, comments: page(...comments) }) as unknown as BoardPullRequestReadV1;
+  const stripSeat = (text: string) => text.replace(/^Seat: .*\n/gmu, '');
+  const ghUrl = (n: number) => `https://github.com/example/repo/pull/1#issuecomment-${n}`;
+  // Mixed head: Seat: reviewer FAIL (from claim) + Seat: gatekeeper PASS on a custom model, then Seat: gatekeeper PASS with known model.
+  const c1 = comment(renderAcceptanceClaim(mkRecord(SHA, 'claude-opus-5-5', 'FAIL').receipt, undefined, 'reviewer'), ghUrl(101));
+  const c2 = comment(renderAcceptanceClaim(mkRecord(SHA, 'acme/custom-model', 'PASS').receipt, undefined, 'gatekeeper'), ghUrl(102));
+  const c3 = comment(renderAcceptanceClaim(mkRecord(SHA, 'gpt-6.2-sol', 'PASS').receipt, undefined, 'gatekeeper'), ghUrl(103));
+  const reviewerFail = comment(stripSeat(renderAcceptanceRecord(mkRecord(SHA, 'claude-opus-5-5', 'FAIL').receipt, c1.url)), '2026-11-09T10:01:00Z');
+  const customGatekeeperPass = comment(renderAcceptanceRecord(mkRecord(SHA, 'acme/custom-model', 'PASS').receipt, c2.url, undefined, 'gatekeeper'), '2026-11-09T10:02:00Z');
+  const knownGatekeeperPass = comment(renderAcceptanceRecord(mkRecord(SHA, 'gpt-6.2-sol', 'PASS').receipt, c3.url, undefined, 'gatekeeper'), '2026-11-09T10:03:00Z');
+  const mixed = prWith([c1, c2, c3, reviewerFail, customGatekeeperPass, knownGatekeeperPass]);
+  expect(gatekeeperReview(mixed)).toBe('pass');
+  expect(secondReview(mixed, 'high')).toBe('recorded');
+  expect(acceptance(mixed, { status: 'pending', contexts: [] }, ['high'], 'high').status).toBe('not_accepted');
+  // Without an established Seat: on claim/record/single-start, an unattributed FAIL still blocks the relay, while an unattributed PASS never opens it.
+  const unattributedClaim = comment(stripSeat(renderAcceptanceClaim(mkRecord(SHA, 'claude-opus-5-5', 'FAIL').receipt)), ghUrl(104));
+  const unattributedFail = comment(stripSeat(renderAcceptanceRecord(mkRecord(SHA, 'claude-opus-5-5', 'FAIL').receipt, unattributedClaim.url)), '2026-11-09T10:01:00Z');
+  const unattributedPass = comment(stripSeat(renderAcceptanceRecord(mkRecord(SHA, 'gpt-6.2-sol', 'PASS').receipt, unattributedClaim.url)), '2026-11-09T10:02:00Z');
+  expect(gatekeeperReview(prWith([unattributedClaim, unattributedFail]))).toBe('fail');
+  expect(gatekeeperReview(prWith([unattributedClaim, unattributedPass]))).toBe('none');
+  // Explicit Seat: reviewer on a DeepSeek PASS satisfies secondReview without reading config, while Model relation stays checked by acceptance.
+  const seatReviewerPass = comment(renderAcceptanceRecord({
+    protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 1, subject_sha: SHA, risk_tier: 'high',
+    reviewer: { harness: 'pi', actual_model: 'magpie/group/deepseek-v4.1-flash' }, verdict: 'PASS', model_relation: 'different-family', summary: 'Ok.', findings: [],
+  }, c1.url, undefined, 'reviewer'), '2026-11-09T10:03:00Z');
+  const onlyReviewer = prWith([c1, seatReviewerPass]);
+  expect([gatekeeperReview(onlyReviewer), secondReview(onlyReviewer, 'high')]).toEqual(['none', 'recorded']);
+  // Malformed or conflicting Seat: line fails closed as acceptance_record_unparsed rather than misattributing.
+  const badSeat = comment(renderAcceptanceRecord(mkRecord(SHA, 'gpt-6.2-sol', 'PASS').receipt, c1.url).replace('Seat: gatekeeper', 'Seat: worker'), '2026-11-09T10:04:00Z');
+  expect(acceptance(prWith([c1, badSeat]), { status: 'pending', contexts: [] }, ['high'], 'high')).toMatchObject({ status: 'unknown', reason: 'acceptance_record_unparsed' });
+  const conflictSeat = comment(renderAcceptanceRecord(mkRecord(SHA, 'gpt-6.2-sol', 'PASS').receipt, c1.url, undefined, 'reviewer').replace('| pi (gpt-6.2-sol), read-only |', '| gatekeeper (gpt-6.2-sol), read-only |'), '2026-11-09T10:05:00Z');
+  expect(acceptance(prWith([c1, conflictSeat]), { status: 'pending', contexts: [] }, ['high'], 'high')).toMatchObject({ status: 'unknown', reason: 'acceptance_record_unparsed' });
+});
+
+test('in-flight High PR with pre-#3353 seatless Round-1 DeepSeek reviewer PASS and Sol gatekeeper FAIL starts only gatekeeper on fix head (#3353)', () => {
+  const stripSeat = (text: string) => text.replace(/^Seat: .*\n/gmu, '');
+  const ghUrl = (n: number) => `https://github.com/example/repo/pull/1#issuecomment-${n}`;
+  const gkConfig: SeatRouteV1 = {
+    id: 'gatekeeper',
+    seat: { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'codex', model: 'gpt-6.2-sol' },
+    line: 'gatekeeper: gatekeeper (codex gpt-6.2-sol high)',
+  };
+  const deepseekReviewer: SeatConfigV1 = { ...DEFAULT_SEATS_CONFIG.reviewer, runtime: 'pi', model: 'magpie/group/deepseek-v4.1-flash', effort: null };
+  const deepseekPass: ReviewPublishReceipt = {
+    protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 1, subject_sha: OLD, risk_tier: 'high',
+    reviewer: { harness: 'pi', actual_model: 'magpie/group/deepseek-v4.1-flash' }, verdict: 'PASS', model_relation: 'different-family', summary: 'Reviewer passed.', findings: [],
+  };
+  const solFail: ReviewPublishReceipt = {
+    protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 1, subject_sha: OLD, risk_tier: 'high',
+    reviewer: { harness: 'codex', actual_model: 'gpt-6.2-sol' }, verdict: 'FAIL', model_relation: 'different-family', summary: 'Gatekeeper failed.',
+    findings: [{ id: 'F1', severity: 'P1', path: 'src/a.ts', line: 1, evidence: 'Broken.', fix: 'Fix it.' }],
+  };
+  const r1Comments: BoardCommentV1[] = [
+    marker(OLD, 'https://example.test/m-gk', 'gatekeeper'),
+    marker(OLD, 'https://example.test/m-rv', 'reviewer'),
+    comment(stripSeat(renderAcceptanceClaim(deepseekPass)), ghUrl(201)),
+    comment(stripSeat(renderAcceptanceRecord(deepseekPass, ghUrl(201))), ghUrl(202)),
+    comment(stripSeat(renderAcceptanceClaim(solFail)), ghUrl(203)),
+    comment(stripSeat(renderAcceptanceRecord(solFail, ghUrl(203))), ghUrl(204)),
+  ];
+  const fixRead = { state: 'open', head_sha: SHA, comments: page(...r1Comments) } as unknown as BoardPullRequestReadV1;
+  // 1) Board projection must NOT misattribute the seatless DeepSeek PASS to gatekeeper.
+  expect(gatekeeperReview(fixRead)).toBe('none');
+  expect(secondReview(fixRead, 'high')).toBe('pending');
+  expect(acceptance(fixRead, { status: 'pending', contexts: [] }, ['high'], 'high').status).toBe('not_accepted');
+  // 2) planReview preserves the carried DeepSeek reviewer PASS and starts only the failed gatekeeper with delta_from OLD.
+  const fixPr = pr(1, { head_sha: SHA, tier: 'high', writer_family: 'anthropic', gatekeeper_review: gatekeeperReview(fixRead), second_review: secondReview(fixRead, 'high') });
+  expect(plan([fixPr], fixRead.comments, [], gkConfig, deepseekReviewer)).toEqual([
+    { pr: 1, action: 'start', head_ref: 'feat/1', head_sha: SHA, tier: 'high', round: 2, seats: [{ seat: 'gatekeeper', delta_from: OLD }] },
+  ]);
+  // 3) Once gatekeeper publishes a Round-2 Seat: gatekeeper PASS on SHA, acceptance succeeds via carried DeepSeek PASS + Round-2 PASS.
+  const solPass: ReviewPublishReceipt = {
+    protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 2, subject_sha: SHA, risk_tier: 'high',
+    reviewer: { harness: 'codex', actual_model: 'gpt-6.2-sol' }, verdict: 'PASS', model_relation: 'different-family', summary: 'Gatekeeper passed.', findings: [],
+  };
+  const r2Comments = [
+    ...r1Comments,
+    comment(renderAcceptanceClaim(solPass, undefined, 'gatekeeper'), ghUrl(205)),
+    comment(renderAcceptanceRecord(solPass, ghUrl(205), undefined, 'gatekeeper'), ghUrl(206)),
+  ];
+  const acceptedRead = { state: 'open', head_sha: SHA, comments: page(...r2Comments) } as unknown as BoardPullRequestReadV1;
+  expect(gatekeeperReview(acceptedRead)).toBe('pass');
+  expect(acceptance(acceptedRead, { status: 'pending', contexts: [] }, ['high'], 'high').status).toBe('accepted');
 });

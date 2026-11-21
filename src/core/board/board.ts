@@ -62,7 +62,7 @@ export type {
  * It is a read model. GitHub and hc stay the authorities; the board keeps
  * their observation time and never writes back.
  */
-export const BOARD_PROTOCOL = 13 as const;
+export const BOARD_PROTOCOL = 14 as const;
 export const BOARD_KIND = 'repo-harness.board' as const;
 
 const PLAN_HEADER = PLAN_COMMENT_HEADER;
@@ -127,10 +127,10 @@ export interface BoardPullRequestV1 {
   readonly tier: BoardTier | null;
   /**
    * An unknown tier counts as High here (fail closed). `pending`: an open High pull request whose head does not meet the High acceptance rule and has no acceptance row
-   * of the configured reviewer's model family (`BoardV1.reviewer_family`). `recorded`: such a row exists. `not_required` for any other pull request, and for a High head that meets the rule without such a row.
+   * from the reviewer seat (`acceptanceRowSeat(row) === 'reviewer'`). `recorded`: such a row exists. `not_required` for any other pull request, and for a High head that meets the rule without such a row.
    */
   readonly second_review: BoardSecondReviewV1;
-  /** `gatekeeperReview`: the verdict of the rows of the head that are not the reviewer's, which opens the relay of the second review. */
+  /** `gatekeeperReview`: the verdict of the rows of the head that belong to the gatekeeper, which opens the relay of the second review. */
   readonly gatekeeper_review: BoardGatekeeperReviewV1;
   /**
    * The family of the `Runtime:` that the newest writer claim bound to the head branch names, the same on every linked issue (the parent
@@ -296,8 +296,6 @@ export interface BoardV1 {
   readonly plan: BoardPlanV1;
   /** The hold record on the parent: it holds the whole batch, or the issues of its `Issues:` line. */
   readonly merge_hold: BoardMergeHoldV1;
-  /** The model family of the configured `reviewer` seat (seats config); null when its model names no known family. It decides which acceptance rows are the reviewer's. */
-  readonly reviewer_family: string | null;
   readonly items: readonly BoardItemV1[];
   readonly pull_requests: readonly BoardPullRequestV1[];
   readonly path_owners: BoardPathOwnersV1;
@@ -322,7 +320,6 @@ export interface BoardInputV1 {
   readonly observed_at: string;
   readonly parent: BoardParentReadV1;
   readonly acceptance_merge: BoardAcceptanceMergeV1;
-  readonly reviewer_family: string | null;
   /** The I3 globs of the default-branch policy and the diff evidence of each open pull request; missing evidence makes a pull request High. */
   readonly review_evidence: BoardReviewEvidenceV1;
   readonly pull_requests: readonly BoardPullRequestReadV1[];
@@ -394,7 +391,6 @@ export function decodeBoard(value: unknown): BoardV1 {
     const { revision } = board.plan;
     if (revision !== null && (!Number.isSafeInteger(revision) || revision < 1)) throw new Error(`invalid board plan revision: ${String(revision)}`);
   }
-  if (board.reviewer_family !== null && (typeof board.reviewer_family !== 'string' || board.reviewer_family === '')) throw new Error(`invalid board reviewer_family: ${String(board.reviewer_family)}`);
   if (board.execution?.status === 'observed') checkSeatTerminals(board.execution.terminals);
   if (!isSeatLiveness(board.seat_liveness)) throw new Error('invalid board seat_liveness');
   for (const item of board.items ?? []) {
@@ -467,7 +463,7 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
     if (required === undefined) throw new Error(`board input has no required contexts for base ${read.base_ref} of PR #${read.number}`);
     const check = requiredCheck(read, required);
     const tier = effectiveTier(read, closes, refs, input.parent, tiers, input.review_evidence);
-    const second = secondReview(read, tier, input.reviewer_family);
+    const second = secondReview(read, tier);
     const readiness = read.state === 'open' ? input.readiness.find(entry => entry.readiness.pr_number === read.number) : undefined;
     if (read.state === 'open' && readiness === undefined) throw new Error(`board input has no merge readiness for open PR #${read.number}`);
     return Object.freeze({
@@ -489,13 +485,13 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
       // An issue outside this board has no observed tier, so it withholds the Low path; so does any non-Low linked issue.
       acceptance: acceptance(read, check, [tier], reviewRule(read, tier)),
       review_fail: reviewFail(read),
-      review_records: reviewRecords(read, input.reviewer_family),
+      review_records: reviewRecords(read),
       open_questions: openQuestions(read.comments),
       merge_readiness: readiness?.readiness ?? null,
       merge_readiness_observed_at: readiness?.observed_at ?? null,
       tier,
       second_review: second,
-      gatekeeper_review: gatekeeperReview(read, input.reviewer_family),
+      gatekeeper_review: gatekeeperReview(read),
       writer_family: writerFamily(read, closes, refs, input.parent),
       merge_hold: readMergeHold(read.comments, false),
     });
@@ -535,7 +531,6 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
     parent: Object.freeze({ number: parent.number, title: parent.title, url: parent.url, state: parent.state, labels: parent.labels, milestone: parent.milestone }),
     plan: planFromComments(parent.comments),
     merge_hold: readMergeHold(parent.comments, true),
-    reviewer_family: input.reviewer_family,
     items: Object.freeze(items),
     pull_requests: Object.freeze(pullRequests),
     path_owners: input.path_owners,
