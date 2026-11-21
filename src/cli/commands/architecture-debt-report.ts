@@ -16,18 +16,36 @@ export interface ArchitectureDebtOutputV1 {
 /** Measure the checkout and optional Git base in complete mode. ArchContext owns delta coverage and item identity. */
 export function architectureDebtReport(repoRoot: string, baseRef: string | undefined, options: ArchctxProviderOptions = {}): ArchitectureDebtOutputV1 {
   const headSha = requireCommit(repoRoot, 'HEAD');
-  const baseSha = baseRef === undefined ? null : requireCommit(repoRoot, baseRef);
+  const base = baseRef === undefined ? null : { ref: baseRef, sha: requireCommit(repoRoot, baseRef) };
   const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
   if (policy.provider === 'disabled') throw new Error('architecture projection provider is disabled');
   const client = new ArchctxClient(repoRoot, ARCHCTX_REQUIRED_VERSION, options);
-  if (baseRef === undefined) {
+  if (base === null) {
     const debt = decodeArchitectureDebtReport(client.data(['debt', '--complete', '--json'], policy.timeoutMs));
     if (resolveCommit(repoRoot, 'HEAD') !== headSha) throw new Error('architecture debt checkout changed during measurement');
     return { kind: 'repo-harness-architecture-debt', head: { sha: headSha, debt }, base: null, introduced: null, resolvedIds: null };
   }
-  const { head, base, introduced, resolvedIds } = decodeArchitectureDebtDelta(client.data(['debt', '--base', baseRef, '--complete', '--json'], policy.timeoutMs));
-  if (head.sha !== headSha || base.sha !== baseSha || base.ref !== baseRef) throw new Error('architecture debt delta snapshot mismatch');
-  return { kind: 'repo-harness-architecture-debt', head, base, introduced, resolvedIds };
+  const report = readDebtDelta(client, base.sha, headSha, policy.timeoutMs);
+  return { kind: 'repo-harness-architecture-debt', ...report, base: { ...report.base, ref: base.ref } };
+}
+
+function readDebtDelta(client: ArchctxClient, baseSha: string, headSha: string, timeoutMs: number) {
+  const measure = () => {
+    const { head, base, introduced, resolvedIds } = decodeArchitectureDebtDelta(client.data(['debt', '--base', baseSha, '--complete', '--json'], timeoutMs));
+    if (head.sha !== headSha || base.sha !== baseSha || base.ref !== baseSha) throw new Error('architecture debt delta snapshot mismatch');
+    return { head, base, introduced, resolvedIds };
+  };
+  const indexMissing = (base: ArchitectureDebtDeltaReportV1['base']) => base.coverageReasonCodes.some(code => code.endsWith(':index-missing'));
+  const first = measure();
+  if (!indexMissing(first.base)) return first;
+
+  // ArchContext can seed its detached base after sync publishes the shared CodeGraph snapshot.
+  client.data(['sync', '--json'], timeoutMs);
+  const retried = measure();
+  if (indexMissing(retried.base)) {
+    throw new Error('Architecture debt base has no CodeGraph index after sync. Run `rh arch sync --json` in the primary checkout and retry.');
+  }
+  return retried;
 }
 
 export function architectureDebtSummary(output: ArchitectureDebtOutputV1): string {

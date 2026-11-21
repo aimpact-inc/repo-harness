@@ -89,7 +89,7 @@ describe('architecture-debt command', () => {
     return {
       schemaVersion: 'archcontext.architecture-debt-delta/v1',
       head: { sha: f.headSha, debt: recordedDebt },
-      base: { ref: 'HEAD~1', sha: f.baseSha, debtDigest: recordedDebt.digest, coverage: recordedDebt.coverage, coverageReasonCodes: recordedDebt.coverageReasonCodes },
+      base: { ref: f.baseSha, sha: f.baseSha, debtDigest: recordedDebt.digest, coverage: recordedDebt.coverage, coverageReasonCodes: recordedDebt.coverageReasonCodes },
       introduced: [recordedDebt.items[0]!], resolvedIds: [`debt.${'c'.repeat(64)}`],
     };
   }
@@ -116,9 +116,22 @@ describe('architecture-debt command', () => {
       return envelope(delta(f));
     };
     const output = architectureDebtReport(f.repoRoot, 'HEAD~1', { consumerRoot: f.consumerRoot, policy, run });
-    expect(output).toEqual({ kind: 'repo-harness-architecture-debt', ...data });
-    expect(calls).toEqual([['debt', '--base', 'HEAD~1', '--complete', '--json']]);
+    expect(output).toEqual({ kind: 'repo-harness-architecture-debt', ...data, base: { ...data.base, ref: 'HEAD~1' } });
+    expect(calls).toEqual([['debt', '--base', f.baseSha, '--complete', '--json']]);
     expect(architectureDebtSummary(output)).toContain('introduced 1, resolved 1');
+  });
+
+  test('resolves a Git reflog date and preserves the original base expression', () => {
+    const f = fixture();
+    const ref = 'HEAD@{1 hour ago}';
+    const output = architectureDebtReport(f.repoRoot, ref, {
+      consumerRoot: f.consumerRoot, policy,
+      run: (_binary, args) => {
+        expect(args).toEqual(['debt', '--base', f.baseSha, '--complete', '--json']);
+        return envelope(delta(f));
+      },
+    });
+    expect(output.base).toMatchObject({ ref, sha: f.baseSha });
   });
 
   test('refuses malformed envelopes, invalid deltas and a delta bound to another commit', () => {
@@ -127,7 +140,21 @@ describe('architecture-debt command', () => {
     expect(() => measure(ok({ ok: true, data: delta(f) }))).toThrow('invalid envelope');
     expect(() => measure(envelope({ ...delta(f), resolvedIds: [false] }))).toThrow('architecture debt delta invalid');
     expect(() => measure(envelope({ ...delta(f), head: { sha: f.baseSha, debt: recordedDebt } }))).toThrow('snapshot mismatch');
+    expect(() => measure(envelope({ ...delta(f), base: { ...delta(f).base, sha: f.headSha } }))).toThrow('snapshot mismatch');
     expect(() => measure(failed(errorEnvelope('debt', 'AC_SCHEMA_INVALID', 'bad debt input')))).toThrow(ArchctxClientError);
+  });
+
+  test('reports a base index gap when sync cannot make the comparison measurable', () => {
+    const f = fixture();
+    const data = delta(f);
+    data.base.coverageReasonCodes = ['dependencies:index-missing'];
+    const calls: string[] = [];
+    const run: RunArchctxProcess = (_binary, args) => {
+      calls.push(args[0]!);
+      return args[0] === 'sync' ? ok(okEnvelope('sync', { codeGraphBase: 'not-primary' })) : envelope(data);
+    };
+    expect(() => architectureDebtReport(f.repoRoot, 'HEAD~1', { consumerRoot: f.consumerRoot, policy, run })).toThrow('base has no CodeGraph index after sync');
+    expect(calls).toEqual(['debt', 'sync', 'debt']);
   });
 
   test('an unresolvable base, disabled provider or package mismatch runs no archctx process', () => {

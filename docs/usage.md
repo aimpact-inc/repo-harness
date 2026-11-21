@@ -226,7 +226,8 @@ validate check reads the checkout YAML even when standalone `rh arch validate`
 uses the architecture ledger.
 
 `rh arch projection slice --base <ref>` prints the changed architecture slice
-from a clean checkout with a current CodeGraph index.
+from a clean checkout with a current CodeGraph index. It links to the document
+at the resolved base SHA or marks it absent at base.
 
 ### Refactor recommendations
 
@@ -236,6 +237,10 @@ rh arch refactor decide <id> accept|defer|reject --reason "<text>" --snapshot-di
 ```
 
 Use the snapshot digest printed by `recommendations` to record the decision.
+ArchContext keeps eight snapshots in the daemon's memory. A restart or cache
+eviction can expire a digest. If `decide` reports
+`recommendation-snapshot-changed`, repeat the same scoped scan. Confirm that
+it still shows the recommendation, then retry `decide` with the fresh digest.
 
 ArchContext measures structural problems such as cycles and direction
 violations. repo-harness shows each suggestion with its metrics, bounded evidence

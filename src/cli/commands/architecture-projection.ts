@@ -35,7 +35,8 @@ export function buildArchitectureProjectionCommand(): Command {
     .requiredOption('--base <ref>', 'Review base')
     .option('--json', 'Output the ArchContext envelope')
     .action(async (options: { base: string; json?: boolean }) => {
-      (await import('./arch-actions')).runArch(['projection', 'slice', '--base', options.base, ...(options.json ? ['--json'] : ['--format', 'markdown'])]);
+      if (options.json) (await import('./arch-actions')).runArch(['projection', 'slice', '--base', options.base, '--json']);
+      else (await actions()).slice(options);
     });
   command.command('anchors').requiredOption('--json', 'Output the read-only archctx docs anchors report').action(async () => (await actions()).anchors());
   command.command('render-check').requiredOption('--json', 'Compare generated output using archctx target decisions').action(async () => (await actions()).renderCheck());

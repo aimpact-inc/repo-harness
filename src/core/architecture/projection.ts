@@ -24,6 +24,7 @@ import {
   type RefImpactV1,
   type RefImpactBatchV1,
   type RuntimeVerifyV1,
+  type ProjectionSliceV1,
   type ArchitectureDebtDeltaReportV1,
 } from 'archctx-contracts';
 import projectionResultSchema from 'archctx-contracts/schemas/runtime/projection-result.schema.json';
@@ -35,6 +36,7 @@ import dependencyConstraintEvaluationSchema from 'archctx-contracts/schemas/runt
 import refImpactSchema from 'archctx-contracts/schemas/runtime/ref-impact.schema.json';
 import refImpactBatchSchema from 'archctx-contracts/schemas/runtime/ref-impact-batch.schema.json';
 import runtimeVerifySchema from 'archctx-contracts/schemas/runtime/runtime-verify.schema.json';
+import projectionSliceSchema from 'archctx-contracts/schemas/runtime/projection-slice.schema.json';
 import stateMachineCheckSchema from 'archctx-contracts/schemas/runtime/state-machine-check.schema.json';
 import projectionPrVerificationSchema from 'archctx-contracts/schemas/runtime/projection-pr-verification.schema.json';
 import architectureDebtDeltaSchema from 'archctx-contracts/schemas/runtime/architecture-debt-delta.schema.json';
@@ -319,6 +321,12 @@ function assertArchitectureDebt(report: ArchitectureDebtReportV1): void {
 export function decodeRuntimeVerify(value: unknown, base: string, head: string): RuntimeVerifyV1 {
   const report = decode<RuntimeVerifyV1>(runtimeVerifySchema, value, 'runtime verify report');
   if (report.base !== base || report.baseSha !== base || report.headSha !== head) throw new Error('runtime verify report snapshot mismatch');
+  return report;
+}
+
+export function decodeProjectionSlice(value: unknown, base: string, head: string): ProjectionSliceV1 {
+  const report = decode<ProjectionSliceV1>(projectionSliceSchema, value, 'projection slice');
+  if (report.base !== base || report.baseSha !== base || report.headSha !== head) throw new Error('projection slice snapshot mismatch');
   return report;
 }
 

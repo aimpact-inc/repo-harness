@@ -1,0 +1,6 @@
+schemaVersion: archcontext.relation/v1
+id: relation.architecture.imports.board
+kind: depends-on
+source: capability.runtime-harness.architecture
+target: capability.organization.board
+intent: Resolve the GitHub repository for projection slice base links.

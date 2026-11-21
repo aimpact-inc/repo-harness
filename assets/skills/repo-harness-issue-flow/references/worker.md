@@ -202,7 +202,7 @@ nothing.
 
 ### 6.1 Architecture slice in the PR
 
-Run `rh arch projection slice --base <ref>` after committing the change. Paste its Markdown into the PR body when the branch changes the model or a capability entrypoint. If the command fails, report the error in the issue claim status.
+Run `rh arch projection slice --base <ref>` after committing the change. Paste its Markdown into the PR body when the branch changes the model or a capability entrypoint. The slice links to each capability document at its path and SHA at the PR base. It marks a capability document absent at base when no base document exists. If the command fails, report the error in the issue claim status.
 
 ## 7. CI and review loop
 

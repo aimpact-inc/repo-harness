@@ -1,11 +1,13 @@
 import { readGlobalArchitectureConfiguration } from '../../effects/architecture/projection-config';
-import type { ProjectionHumanActionReasonCode, ProjectionHumanActionV1, ProjectionMode } from 'archctx-contracts';
-import { architectureProjectionRequest, inspectArchitectureProjectionReadiness, readArchitectureDocsAnchors, runArchitectureProjection } from '../../effects/architecture/archctx-provider';
+import { ARCHITECTURE_DOCS_PROJECTION_MANIFEST_PATH, architectureDocsProjectionManifestIssues, type ArchitectureDocsProjectionManifestV4, type ProjectionHumanActionReasonCode, type ProjectionHumanActionV1, type ProjectionMode } from 'archctx-contracts';
+import { ArchctxClient, architectureProjectionRequest, inspectArchitectureProjectionReadiness, readArchitectureDocsAnchors, runArchitectureProjection } from '../../effects/architecture/archctx-provider';
 import { architectureModelReady, readArchitectureHandEdits } from '../../effects/architecture/architecture-read';
-import { ARCHITECTURE_DEBT_COMMAND, summarizeArchitectureRender } from '../../core/architecture/projection';
+import { ARCHCTX_REQUIRED_VERSION, ARCHITECTURE_DEBT_COMMAND, decodeProjectionSlice, summarizeArchitectureRender } from '../../core/architecture/projection';
 import { applyArchitectureProjection } from '../../effects/architecture/projection-apply';
 import { runArchitectureWriter } from '../../effects/architecture/projection-writer';
-import { gitExecFileSync } from '../../effects/git/runner';
+import { gitExecFileSync, gitSpawnSync } from '../../effects/git/runner';
+import { githubRemoteRepository } from '../../core/board/source';
+import { resolveCommit } from './arch-verify';
 import type { ProjectionCommandOptions } from './architecture-projection';
 
 /** `rh arch projection` loads this module only after the architecture selection check. */
@@ -23,6 +25,60 @@ export function status(): void {
     write({ ...inspectArchitectureProjectionReadiness(root, architectureModelReady), configuration: { scope: 'global', path, initialized } });
   }
   catch (error) { fail(error); }
+}
+
+export function slice(options: { base: string }): void {
+  try {
+    const root = repositoryRoot();
+    const base = resolveCommit(root, options.base);
+    const head = resolveCommit(root, 'HEAD');
+    if (base === null || head === null) throw new Error('Projection slice needs a resolvable base and HEAD.');
+    const { policy } = readGlobalArchitectureConfiguration();
+    if (policy.provider === 'disabled') throw new Error('architecture projection provider is disabled');
+    const client = new ArchctxClient(root, ARCHCTX_REQUIRED_VERSION);
+    const report = decodeProjectionSlice(client.data(['projection', 'slice', '--base', base, '--json'], policy.timeoutMs), base, head);
+    if (!report.changed) { process.stdout.write(report.markdown); return; }
+    const paths = baseModulePaths(root, base);
+    const origin = gitSpawnSync(['-C', root, 'remote', 'get-url', 'origin'], { encoding: 'utf8' });
+    const repository = origin.status === 0 ? githubRemoteRepository(origin.stdout) : null;
+    const sections = report.affectedCapabilities.map(entry => {
+      const path = paths === null ? entry.modulePath : paths.get(entry.capabilityId);
+      const location = path && baseDocumentExists(root, base, path) ? { repository, path } : null;
+      const reference = baseModuleReference(base, location);
+      const divider = entry.markdown.indexOf('\n');
+      if (divider < 0) throw new Error('Projection slice omitted its capability heading.');
+      // ArchContext owns the body. Replace its relative heading link with the base evidence.
+      return `### ${entry.capabilityId}\n\n${reference}${entry.markdown.slice(divider)}`;
+    });
+    process.stdout.write(`## Architecture slice\n\n${sections.join('\n\n')}\n`);
+  } catch (error) { fail(error); }
+}
+
+function baseDocumentExists(root: string, sha: string, path: string): boolean {
+  return /^100(?:644|755) blob /.test(git(root, ['--literal-pathspecs', 'ls-tree', sha, '--', path]));
+}
+
+function baseModulePaths(root: string, sha: string): ReadonlyMap<string, string> | null {
+  const path = ARCHITECTURE_DOCS_PROJECTION_MANIFEST_PATH;
+  if (!baseDocumentExists(root, sha, path)) return null;
+  const value: unknown = JSON.parse(git(root, ['show', `${sha}:${path}`]));
+  const issues = architectureDocsProjectionManifestIssues(value);
+  if (issues.length > 0) throw new Error(`Projection manifest at ${sha} is invalid: ${issues.join(', ')}`);
+  const paths = new Map<string, string>();
+  for (const target of Object.values((value as ArchitectureDocsProjectionManifestV4).targets)) {
+    if (target.type === 'entity-summary' && target.scope.entityKind === 'capability' && target.scope.id) {
+      paths.set(target.scope.id, target.path);
+    }
+  }
+  return paths;
+}
+
+function baseModuleReference(base: string, location: { repository: string | null; path: string } | null): string {
+  if (location === null) return `Capability document absent at base \`${base}\`.`;
+  const { repository, path } = location;
+  if (repository === null) return `Base document at \`${base}:${path}\`.`;
+  const url = `https://github.com/${repository}/blob/${base}/${path.split('/').map(encodeURIComponent).join('/')}`;
+  return `[Base document](<${url}>)`;
 }
 
 export function anchors(): void {

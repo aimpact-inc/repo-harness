@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ARCHCTX_COMMAND_DISPOSITIONS, ARCHCTX_REQUIRED_VERSION, archctxRefusal } from '../../src/core/architecture/projection';
 import { indexPackageLocalCodeGraph, resolveCompatibleNodeRuntime, resolvePackageLocalArchctx, runArchctxPassThrough } from '../../src/effects/architecture/archctx-provider';
 import { pluginSelectionEnv, recordPluginSelection } from '../helpers/install-ownership';
-import { MODULE_NODE, fixtureCommit, fixtureGit, fixtureWrite, moduleRepository } from '../helpers/module-repository';
+import { MODULE_DOC, MODULE_ID, MODULE_NODE, fixtureCommit, fixtureGit, fixtureWrite, fixtureYaml, moduleRepository } from '../helpers/module-repository';
 
 const ROOT = join(import.meta.dir, '..', '..');
 const CLI = join(ROOT, 'src', 'cli', 'index.ts');
@@ -80,29 +80,59 @@ describe('rh arch', () => {
     expect(without.stderr).toContain('install_plugin_unavailable');
   });
 
-  test('projection slice prints the committed change as Markdown and exposes the native JSON', () => {
+  test('projection slice links the renamed base document and marks a new capability absent at base', () => {
     const root = realpathSync(moduleRepository());
     roots.push(root);
     const env = { ...process.env, HOME: join(root, 'home') };
     recordPluginSelection(env);
     fixtureWrite(root, 'home/.repo-harness/config.json', JSON.stringify({ architecture: { projection_provider: 'archctx', projection_apply: 'manual' } }));
     const policy = { provider: 'archctx', applyMode: 'manual', requiredVersion: ARCHCTX_REQUIRED_VERSION, timeoutMs: 30_000 } as const;
-    const base = fixtureGit(root, ['rev-parse', 'HEAD']);
+    fixtureGit(root, ['remote', 'add', 'origin', 'https://github.com/test/slice.git']);
     fixtureWrite(root, '.gitignore', '.codegraph/\nhome/\n');
+    const manifestPath = 'docs/architecture/.projection-manifest.json';
+    const manifest = JSON.parse(readFileSync(join(ROOT, manifestPath), 'utf8'));
+    const priorDoc = 'docs/architecture/modules/capability-test-module.md';
+    renameSync(join(root, MODULE_DOC), join(root, priorDoc));
+    const recordDocument = (profile: string, path: string) => fixtureWrite(root, manifestPath, JSON.stringify({
+      ...manifest, profile, semanticBaseline: { ...manifest.semanticBaseline, capabilities: [] }, targets: {
+        'projection_target.entity.capability-test-module': {
+          type: 'entity-summary', scope: { kind: 'entity', id: MODULE_ID, entityKind: 'capability' },
+          path, ownership: 'mixed', format: 'markdown', outputDigest: `sha256:${'a'.repeat(64)}`,
+        },
+      },
+    }));
+    recordDocument('default', priorDoc);
+    const base = fixtureCommit(root);
+    fixtureGit(root, ['branch', 'review-base', base]);
+    renameSync(join(root, priorDoc), join(root, MODULE_DOC));
+    recordDocument('repo-harness/v1', MODULE_DOC);
     const node = readFileSync(join(root, MODULE_NODE), 'utf8');
     fixtureWrite(root, MODULE_NODE, node.replace('entrypoint.module.read', 'entrypoint.module.read-updated'));
+    const newId = 'capability.test.added';
+    fixtureWrite(root, `.archcontext/model/nodes/${newId}.yaml`, fixtureYaml({
+      ...JSON.parse(node), id: newId, source: { include: ['src/added/**'] },
+    }));
+    fixtureWrite(root, 'docs/architecture/modules/test/added.md', '# Added\n');
     const head = fixtureCommit(root);
     indexPackageLocalCodeGraph(root, { policy });
-    const run = (...args: string[]) => spawnSync(process.execPath, [CLI, 'arch', 'projection', 'slice', '--base', base, ...args], {
+    const run = (...args: string[]) => spawnSync(process.execPath, [CLI, 'arch', 'projection', 'slice', '--base', 'review-base', ...args], {
       cwd: root, env, encoding: 'utf8', timeout: 30_000,
     });
     const json = run('--json');
     expect(json.status, json.stderr + json.stdout).toBe(0);
     const { data } = JSON.parse(json.stdout);
-    expect(data).toMatchObject({ baseSha: base, headSha: head, changed: true, changedPaths: ['.archcontext/model/nodes/capability.test.module.yaml', '.gitignore'] });
+    expect(data).toMatchObject({ baseSha: base, headSha: head, changed: true });
+    expect(data.affectedCapabilities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ capabilityId: MODULE_ID, modulePath: MODULE_DOC, diagramMermaid: expect.any(String) }),
+      expect.objectContaining({ capabilityId: newId, modulePath: 'docs/architecture/modules/test/added.md' }),
+    ]));
     const markdown = run();
     expect(markdown.status, markdown.stderr + markdown.stdout).toBe(0);
-    expect(markdown.stdout.trimEnd()).toBe(data.markdown.trimEnd());
+    expect(markdown.stdout).toContain(`https://github.com/test/slice/blob/${base}/${priorDoc}`);
+    expect(markdown.stdout).toContain(`Capability document absent at base \`${base}\`.`);
+    expect(markdown.stdout).not.toContain(`/blob/${base}/${MODULE_DOC}`);
+    expect(markdown.stdout).not.toContain(`/blob/${base}/docs/architecture/modules/test/added.md`);
+    expect(markdown.stdout).toContain(data.affectedCapabilities.find((entry: { capabilityId: string }) => entry.capabilityId === MODULE_ID).diagramMermaid);
     expect(markdown.stdout).toContain('entrypoint.module.read-updated');
     expect(fixtureGit(root, ['status', '--porcelain'])).toBe('');
   }, 60_000);
