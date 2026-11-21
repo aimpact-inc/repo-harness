@@ -1,6 +1,6 @@
 # runtime-harness/architecture 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-architecture" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:6eb7d6acce8524ec3c65483dc3607fbc3514c950cf44cf2ab43d69e006538602" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-architecture" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:449be3cf295894eabb30c68ca526aa80e59522cfabcb6d58b74243b1c016d5d6" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.architecture`(kind `capability`)
 > **Matched Prefixes**:`src/effects/architecture/**`、`src/core/architecture/projection.ts`、`src/core/architecture/module-view.ts`、`src/core/review/module-review-prompt.ts`、`src/cli/commands/module.ts`、`src/cli/hook/agent-notice.ts`、`scripts/axr5-archctx-clean-room.ts`、`scripts/check-state-boundaries.ts`、`scripts/project-test-capabilities.ts`、`scripts/sync-helper-sources.ts`、`assets/skills/repo-harness-archimap/**`、`assets/skill-commands/repo-harness-architecture/**`、`docs/verification/**`
@@ -120,7 +120,7 @@ flowchart LR
 
 | 組件 | 名稱 | 規模量級 | 宣告入口 |
 | --- | --- | --- | --- |
-| `component.architecture.archctx-closure` | ArchContext Closure | `10–20` 個文件 / `2000–5000` 行 | 未宣告 |
+| `component.architecture.archctx-closure` | ArchContext Closure | `10–20` 個文件 / `1000–2000` 行 | 未宣告 |
 | `component.architecture.archctx-closure-cli` | ArchContext Closure (cli) | `5–10` 個文件 / `500–1000` 行 | 未宣告 |
 | `component.architecture.archctx-closure-core` | ArchContext Closure (core) | `2–5` 個文件 / `500–1000` 行 | 未宣告 |
 | `component.architecture.archctx-closure-scripts` | ArchContext Closure (scripts) | `1–2` 個文件 / `200–500` 行 | 未宣告 |

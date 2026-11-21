@@ -3,7 +3,7 @@
   "rendererVersion": "archcontext.docs-renderer/v6",
   "profile": "repo-harness/v1",
   "layoutVersion": "archcontext.docs-layout/v1",
-  "generatedFrom": {"codeGraphPackage":"@colbymchenry/codegraph","codeGraphVersion":"1.6.2"},
+  "generatedFrom": {"codeGraphPackage":"@colbymchenry/codegraph","codeGraphVersion":"1.6.4"},
   "semanticBaseline": {
     "modelDigest": "sha256:e5f2ca631a1afea6ffe055ecd9cc34af47e66c0fc1f9f959efe50e573e5a896c",
     "capabilities": [
@@ -774,7 +774,7 @@
     "projection_target.entity.capability-public-surface-strategy-reflection":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.public-surface.strategy-reflection","entityKind":"capability"},"path":"docs/architecture/modules/public-surface/strategy-reflection.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:2dfb67ea7a6b58a840d0f6a49756864317c9219324d301317036e104b1e4f33e"},
     "projection_target.entity.capability-runtime-harness-architecture":
-      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.architecture","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/architecture.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:6eb7d6acce8524ec3c65483dc3607fbc3514c950cf44cf2ab43d69e006538602"},
+      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.architecture","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/architecture.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:449be3cf295894eabb30c68ca526aa80e59522cfabcb6d58b74243b1c016d5d6"},
     "projection_target.entity.capability-runtime-harness-evidence-ledger":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.evidence-ledger","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/evidence-ledger.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:20e50b16a1f22219776a205b2b84b91be71dc82a056966596d6241b708427b74"},
     "projection_target.entity.capability-runtime-harness-global-runtime-reconciliation":

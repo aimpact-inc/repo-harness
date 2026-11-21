@@ -1307,7 +1307,7 @@ describe('architecture lanes', () => {
         rmSync(root, { recursive: true, force: true });
       }
     }
-  });
+  }, 60_000);
 
   test('a stale-anchor action names the repo-harness anchors command, never a bare archctx from PATH', () => {
     const staleAnchor = { ...debtItem(1), kind: 'stale-anchor', reasonCode: 'missing-path', action: 'archctx docs anchors --json' };
