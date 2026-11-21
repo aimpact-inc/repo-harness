@@ -3419,8 +3419,14 @@ describe('Global Working Rules refresh during install and update', () => {
   const userBefore = '## Model Routing\n\nUse the orchestrator model.\n\n';
   const userBetween = '## Herdr 跨 harness 协作\n\n- Talk to the peer pane.\n\n';
   const userAfter = '## Disk hygiene on the Mac mini\n\n- Keep the disk clean.\n';
-  // Sync replaces only released text; the current template is a released template.
-  const released = new Map(legacySections(readFileSync(join(ROOT, 'assets/reference-configs/global-working-rules.md'), 'utf8').match(/```md\n([\s\S]*?)\n```/)![1]!));
+  // A block that v0.23.1 wrote: it records no reporting language.
+  const releasedUnrecorded = readFileSync(join(ROOT, 'tests/fixtures/global-rules/released-v0.23.1-en.md'), 'utf8');
+  // Sync replaces only released text; read the released v0.23.1 Progressive Due Diligence section rather than the unreleased template edit.
+  const releasedV0231 = new Map(legacySections(releasedUnrecorded.replace(/^<!--[\s\S]*?-->\n/gm, '')));
+  const released = new Map([
+    ...legacySections(readFileSync(join(ROOT, 'assets/reference-configs/global-working-rules.md'), 'utf8').match(/```md\n([\s\S]*?)\n```/)![1]!),
+    ['## Progressive Due Diligence', releasedV0231.get('## Progressive Due Diligence')!],
+  ]);
   const mixedLegacy = [
     userBefore,
     `${released.get('# Global Working Rules')}\n\n`,
@@ -3429,8 +3435,6 @@ describe('Global Working Rules refresh during install and update', () => {
     `${released.get('## Progressive Due Diligence')}\n\n`,
     userAfter,
   ].join('');
-  // A block that v0.23.1 wrote: it records no reporting language.
-  const releasedUnrecorded = readFileSync(join(ROOT, 'tests/fixtures/global-rules/released-v0.23.1-en.md'), 'utf8');
 
   function withRulesRuntime(body: (fixture: {
     home: string;
