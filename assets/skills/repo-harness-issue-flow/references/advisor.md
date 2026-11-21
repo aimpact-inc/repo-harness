@@ -108,18 +108,22 @@ the change, so the check must come from outside its session.
       first-parent commits behind origin/main`.
    9. Structural refactor intake (periodic health audit and pre-refactor
       check). Run `rh arch refactor recommendations --json` (scoped with
-      `--node <capability-id>` or `--path <path>`).
+      `--node <capability-id>` or `--path <path>`), and inspect existing
+      decisions via `rh arch refactor list --json` or
+      `rh arch refactor show <id> --json`.
       Never invoke `archctx` from `PATH` and never run this scan on worker
       `Stop` hooks. Follow this decision flow:
-      1. Present `recommended` structural observations and their evidence to
-         the owner.
+      1. Present `recommended` structural observations or proposals and their
+         evidence to the owner.
       2. Record each owner decision via
-         `rh arch refactor decide <id> accept|defer|reject --reason "<text>" --snapshot-digest <digest>`
+         `rh arch refactor decide <id> accept|defer|reject|acknowledge|waive --reason "<text>" --snapshot-digest <digest>`
          (pass the same `--import-node-limit` if the scan used one). A
          recommendation never auto-schedules or auto-executes a refactor.
       3. Route `accepted` single-module observations into `advisor` PR
-         bundles (§1.2 / `orchestrator.md` §4.2). For a cross-capability cycle
-         or boundary split, attach the `RefactorRecommendation` metrics and
+         bundles (§1.2 / `orchestrator.md` §4.2) and bind `refactor_ids` on
+         each owning issue in the `rh board triage-apply` manifest. For a
+         cross-capability cycle or boundary split, attach the
+         `RefactorRecommendation` metrics and
          `rh arch module review-prompt <capability-id> --json` output to an L3
          `council` consultation (`rh seats council`, §1.1).
    10. Items for the owner: security and production only.

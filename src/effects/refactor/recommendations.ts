@@ -1,11 +1,12 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
-import type { RecommendationV3, RefactorScopeV1 } from 'archctx-contracts';
+import type { RecommendationV3, RefactorKillListEntryV1, RefactorProposalPayloadV1, RefactorScopeV1, RefactorTargetOutcomeV1 } from 'archctx-contracts';
 import { normalizeRefactorScope, RefactorProviderError, type RefactorScanResultV1 } from '../../core/refactor/provider-contract';
 import type { ArchctxProviderOptions } from '../../core/architecture/contracts';
 import { runRefactorScan } from './archctx-provider';
 
 type Observation = RecommendationV3 & { category: 'structural_observation' };
+type ProposalRecommendation = RecommendationV3 & { category: 'refactor_proposal'; payload: RefactorProposalPayloadV1 };
 type ModuleStatistics = RefactorScanResultV1['snapshot']['modules'][number];
 
 /** Measured facts behind one suggestion, taken from the same scan that produced it. */
@@ -19,10 +20,20 @@ export interface RefactorModuleEvidence {
   /** Filled only when the model declares constraints; archctx 0.9.1 leaves instability and test files unmeasured. */
   directionViolations: number | null;
   unresolvedImports: number;
+  ambiguousOwnership?: boolean;
 }
+
+export interface RefactorProposalSummary {
+  scale: RefactorProposalPayloadV1['scale'];
+  majorChangeReasons: readonly RefactorProposalPayloadV1['majorChangeReasons'][number][];
+  targetOutcomes: readonly RefactorTargetOutcomeV1[];
+  killList: readonly RefactorKillListEntryV1[];
+}
+
 export interface RefactorRecommendation {
   recommendationId: string;
-  kind: Observation['payload']['kind'];
+  category?: 'structural_observation' | 'refactor_proposal';
+  kind: Observation['payload']['kind'] | 'refactor-proposal';
   subject: string;
   affectedNodeIds: readonly string[];
   confidence: string;
@@ -31,7 +42,10 @@ export interface RefactorRecommendation {
   explanation: readonly string[];
   metrics: Readonly<Record<string, number | null>>;
   /** Bounded by archctx: `totalCount` is the population, `truncated` says the item list is a prefix of it. */
-  evidence: Observation['payload']['evidence'];
+  evidence?: Observation['payload']['evidence'];
+  proposal?: RefactorProposalSummary;
+  /** True when this observation reports contested ownership or touches a module with multiply-owned files. */
+  ambiguousOwnership?: boolean;
   /** The snapshot the metrics and evidence were measured on. */
   baselineSnapshotDigest: string;
   /** `current` when that snapshot is the scan just taken. `earlier` marks a record from an older scan, whose module statistics are left out. */
@@ -44,6 +58,11 @@ export interface RefactorRecommendationResult {
   candidates: readonly RefactorRecommendation[];
   /** The scan identity to pass to decide. It binds open and proposed recommendations. */
   snapshotDigest?: string;
+  /** Assessment and worktree digests so callers can record the scan via `rh arch refactor record`. */
+  assessmentDigest?: string;
+  worktreeDigest?: string;
+  /** Non-zero when one or more files match multiple capability globs; clean modules remain visible. */
+  multiplyOwnedFileCount?: number;
   message?: string;
   /** Provider error code, reasonCode, and the remedy archctx names for it, kept when status is `unavailable`. */
   code?: string;
@@ -69,22 +88,68 @@ export function refactorCandidates(scan: RefactorScanResultV1): RefactorRecommen
   const modules = new Map(scan.snapshot.modules.map((entry) => [entry.nodeId, entry]));
   const listed = new Set(scan.openRecommendations.map((entry) => entry.recommendationId));
   return [...scan.openRecommendations, ...scan.proposedRecommendations.filter((entry) => !listed.has(entry.recommendationId))]
-    .filter((entry): entry is Observation => entry.category === 'structural_observation')
-    .map((entry) => present(entry, modules, scan.snapshot.snapshotDigest));
+    .flatMap((entry) => {
+      if (entry.category === 'structural_observation') return [presentObservation(entry as Observation, modules, scan.snapshot.snapshotDigest)];
+      if (entry.category === 'refactor_proposal') return [presentProposal(entry as ProposalRecommendation, modules, scan.snapshot.snapshotDigest)];
+      return [];
+    });
 }
 
 /** Module statistics come from the current scan, so they join only a suggestion measured on that same snapshot. */
-function present(value: Observation, modules: ReadonlyMap<string, ModuleStatistics>, currentSnapshotDigest: string): RefactorRecommendation {
+function presentObservation(value: Observation, modules: ReadonlyMap<string, ModuleStatistics>, currentSnapshotDigest: string): RefactorRecommendation {
   const current = value.payload.baselineSnapshotDigest === currentSnapshotDigest;
+  const moduleList = current ? value.payload.affectedNodeIds.flatMap((nodeId) => {
+    const entry = modules.get(nodeId);
+    return entry ? [moduleEvidence(entry)] : [];
+  }) : [];
+  const ambiguous = value.payload.kind === 'ownership-ambiguous' || moduleList.some((m) => m.ambiguousOwnership === true);
   return {
-    recommendationId: value.recommendationId, kind: value.payload.kind, subject: value.subject, affectedNodeIds: value.payload.affectedNodeIds,
-    confidence: value.confidence, risk: value.risk, uncertainty: value.uncertainty, explanation: value.explanation,
-    metrics: value.payload.metrics, evidence: value.payload.evidence,
-    baselineSnapshotDigest: value.payload.baselineSnapshotDigest, snapshot: current ? 'current' : 'earlier',
-    modules: current ? value.payload.affectedNodeIds.flatMap((nodeId) => {
-      const entry = modules.get(nodeId);
-      return entry ? [moduleEvidence(entry)] : [];
-    }) : [],
+    recommendationId: value.recommendationId,
+    category: 'structural_observation',
+    kind: value.payload.kind,
+    subject: value.subject,
+    affectedNodeIds: value.payload.affectedNodeIds,
+    confidence: value.confidence,
+    risk: value.risk,
+    uncertainty: value.uncertainty,
+    explanation: value.explanation,
+    metrics: value.payload.metrics,
+    evidence: value.payload.evidence,
+    ...(ambiguous ? { ambiguousOwnership: true } : {}),
+    baselineSnapshotDigest: value.payload.baselineSnapshotDigest,
+    snapshot: current ? 'current' : 'earlier',
+    modules: moduleList,
+  };
+}
+
+function presentProposal(value: ProposalRecommendation, modules: ReadonlyMap<string, ModuleStatistics>, currentSnapshotDigest: string): RefactorRecommendation {
+  const current = value.payload.baselineSnapshotDigest === currentSnapshotDigest;
+  const moduleList = current ? value.payload.affectedNodeIds.flatMap((nodeId) => {
+    const entry = modules.get(nodeId);
+    return entry ? [moduleEvidence(entry)] : [];
+  }) : [];
+  const ambiguous = moduleList.some((m) => m.ambiguousOwnership === true);
+  return {
+    recommendationId: value.recommendationId,
+    category: 'refactor_proposal',
+    kind: 'refactor-proposal',
+    subject: value.subject,
+    affectedNodeIds: value.payload.affectedNodeIds,
+    confidence: value.confidence,
+    risk: value.risk,
+    uncertainty: value.uncertainty,
+    explanation: value.explanation,
+    metrics: {},
+    proposal: {
+      scale: value.payload.scale,
+      majorChangeReasons: value.payload.majorChangeReasons,
+      targetOutcomes: value.payload.targetOutcomes,
+      killList: value.payload.killList,
+    },
+    ...(ambiguous ? { ambiguousOwnership: true } : {}),
+    baselineSnapshotDigest: value.payload.baselineSnapshotDigest,
+    snapshot: current ? 'current' : 'earlier',
+    modules: moduleList,
   };
 }
 
@@ -94,6 +159,7 @@ function moduleEvidence(entry: ModuleStatistics): RefactorModuleEvidence {
     fanIn: entry.dependencyGraph?.fanIn ?? null, fanOut: entry.dependencyGraph?.fanOut ?? null,
     cycles: entry.dependencyGraph?.cycleCount ?? null, directionViolations: entry.dependencyGraph?.directionViolationCount ?? null,
     unresolvedImports: entry.uncertainty.unresolvedImports,
+    ...(entry.uncertainty.ambiguousOwnership ? { ambiguousOwnership: true } : {}),
   };
 }
 
@@ -138,13 +204,19 @@ function discoverRefactorRecommendations(repoRoot: string, options: RefactorReco
   if (facts.coverage !== 'complete' || facts.truncated) {
     return result('proof_required', 'code facts are incomplete; run `codegraph init` and scan again');
   }
-  // Module statistics double-count a file that several capabilities own, so
-  // suggestions wait for unambiguous ownership (tasks/todos.md, recommendation proof).
-  if (repositorySummary.multiplyOwnedFileCount > 0) {
-    return result('proof_required', `${repositorySummary.multiplyOwnedFileCount} files have more than one owning capability; resolve model ownership and scan again`);
-  }
   const candidates = refactorCandidates(scan);
-  return { ...result(candidates.length ? 'recommended' : 'no_action'), candidates, snapshotDigest: scan.snapshotDigest };
+  const multiplyOwned = repositorySummary.multiplyOwnedFileCount;
+  const ambiguityNote = multiplyOwned > 0
+    ? `${multiplyOwned} files have more than one owning capability; affected candidates mark ambiguousOwnership=true`
+    : undefined;
+  return {
+    ...result(candidates.length ? 'recommended' : 'no_action', ambiguityNote),
+    candidates,
+    snapshotDigest: scan.snapshotDigest,
+    ...(scan.assessment?.assessmentDigest ? { assessmentDigest: scan.assessment.assessmentDigest } : {}),
+    ...(scan.worktree?.worktreeDigest ? { worktreeDigest: scan.worktree.worktreeDigest } : {}),
+    ...(multiplyOwned > 0 ? { multiplyOwnedFileCount: multiplyOwned } : {}),
+  };
 }
 
 /** A new CodeGraph index cannot fix this: only a larger read limit can. `rh arch refactor decide` needs the same limit as the scan. */

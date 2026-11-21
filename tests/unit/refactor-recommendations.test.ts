@@ -130,14 +130,50 @@ test('no open record and no scan candidate means no action', () => {
   expect(observeRefactorRecommendations(f.repo, { env: f.env, discover: () => discovery({ scan: { proposedRecommendations: [] } }) }).status).toBe('no_action');
 });
 
-test('incomplete code facts or ambiguous ownership withhold suggestions', () => {
+test('incomplete code facts withhold suggestions while ambiguous ownership surfaces candidates with metadata', () => {
   const f = fixture();
   const partial = observeRefactorRecommendations(f.repo, { env: f.env, discover: () => discovery({ codeFacts: { coverage: 'partial', reasonCodes: ['code-facts-missing'] } }) });
   expect(partial).toMatchObject({ status: 'proof_required', candidates: [] });
   expect(partial.message).toContain('codegraph init');
   const ambiguous = observeRefactorRecommendations(f.repo, { env: f.env, discover: () => discovery({ multiplyOwned: 75 }) });
-  expect(ambiguous).toMatchObject({ status: 'proof_required', candidates: [] });
+  expect(ambiguous.status).toBe('recommended');
+  expect(ambiguous.multiplyOwnedFileCount).toBe(75);
+  expect(ambiguous.candidates).toHaveLength(2);
   expect(ambiguous.message).toContain('75 files have more than one owning capability');
+  expect(formatRefactorRecommendations(ambiguous)).toContain('note: 75 files have more than one owning capability');
+});
+
+test('includes refactor_proposal records alongside structural observations and exposes full CLI subcommands', () => {
+  const proposal = {
+    ...shippedRecord(),
+    recommendationId: 'recommendation.abcdef0123456789',
+    category: 'refactor_proposal' as const,
+    subject: 'proposal:split-board',
+    explanation: ['Split monolithic board handler into focused modules'],
+    payload: {
+      assessmentDigest: `sha256:${'1'.repeat(64)}`,
+      proposalDigest: `sha256:${'a'.repeat(64)}`,
+      scale: 'module' as const,
+      affectedNodeIds: ['capability.architecture.context'],
+      majorChangeReasons: [],
+      baselineSnapshotDigest: shippedScan().snapshot.snapshotDigest,
+      targetOutcomes: [{ outcomeId: 'outcome.0123456789abcdef', metric: 'module.footprint.lineCount', subjectSelectorId: 'capability.architecture.context', nodeId: 'capability.architecture.context', operator: 'less_than' as const, value: 400, required: true }],
+      killList: [{ kind: 'path' as const, selectorId: 'src/cli/commands/legacy-board.ts', required: true }],
+    },
+  };
+  const candidates = refactorCandidates(discovery({ open: [proposal] }));
+  expect(candidates[0]).toMatchObject({
+    recommendationId: 'recommendation.abcdef0123456789',
+    category: 'refactor_proposal',
+    kind: 'refactor-proposal',
+    proposal: { scale: 'module' },
+  });
+  const text = formatRefactorRecommendations({ schemaVersion: 'repo-harness.refactor-recommendations/v2', status: 'recommended', snapshotDigest: shippedScan().snapshotDigest, candidates });
+  expect(text).toContain('proposal: scale=module (1 target outcome(s), 1 kill entry/entries)');
+  expect(text).toContain('- kill path: src/cli/commands/legacy-board.ts');
+
+  const command = buildRefactorCommand();
+  expect(command.commands.map((c) => c.name())).toEqual(['recommendations', 'decide', 'verify', 'resolve', 'record', 'list', 'show']);
 });
 
 test('the import node limit reaches the scan and its remedy is a larger limit, not a new index', () => {

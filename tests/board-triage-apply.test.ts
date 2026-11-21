@@ -229,3 +229,54 @@ test('CLI rh board triage-apply --manifest --dry-run --json validates red lines 
   expect(JSON.parse(bad.stderr)).toMatchObject({ ok: false, error: 'triage_apply_validation_failed' });
   expect(calls).toEqual([]);
 });
+
+test('triage-apply validates refactor_ids format, blocks cross-unit refactor_ids overlap, and posts bind_refactor comments', () => {
+  const recA = 'recommendation.4aa8477d81e9d473';
+  const recB = 'recommendation.abcdef0123456789';
+
+  expect(() => decodeTriageManifest(baseManifest({
+    issues: [{ number: 101, module: 'organization/board', tier: 'medium', route: 'simple_fast', refactor_ids: ['bad-id'] }],
+    duplicates: [],
+    merge_order: [101],
+  }))).toThrow('recommendation.<16-hex>');
+
+  expect(() => decodeTriageManifest(baseManifest({
+    issues: [
+      { number: 101, module: 'organization/board', tier: 'medium', route: 'simple_fast', refactor_ids: [recA] },
+      { number: 102, module: 'organization/board', tier: 'medium', route: 'simple_fast', refactor_ids: [recA] },
+    ],
+    duplicates: [],
+    merge_order: [101, 102],
+  }))).toThrow(`share refactor decision ${recA}`);
+
+  const boundCalls: string[] = [];
+  const result = runTriageApply({
+    repo_root: process.cwd(),
+    manifest: baseManifest({
+      issues: [
+        { number: 101, module: 'organization/board', tier: 'medium', route: 'simple_fast', refactor_ids: [recB, recA] },
+      ],
+      duplicates: [],
+      merge_order: [101],
+    }),
+    dry_run: false,
+    env: { REPO_HARNESS_SEAT: 'advisor', HC_TERMINAL_ID: 't1ad' },
+    ports: {
+      comments: () => ({ truncated: false, comments: [] }),
+      read_issue_metadata: (_repo, nums) => new Map(nums.map((n) => [n, { id: `ID_${n}`, labels: [] }])),
+      set_labels: () => {},
+      add_sub_issue: () => {},
+      bind_refactor: (repo, issue, body) => { boundCalls.push(`${repo}#${issue}:${body}`); },
+      close_duplicate: () => {},
+      post_plan: () => PLAN_URL,
+    },
+  });
+  expect(result.operations.find((op) => op.kind === 'bind_refactor')).toMatchObject({
+    kind: 'bind_refactor',
+    issue: 101,
+    refactor_ids: [recA, recB],
+  });
+  expect(boundCalls).toHaveLength(1);
+  expect(boundCalls[0]).toContain(`aimpact-inc/repo-harness#101:repo-harness refactor binding\nRefactor IDs: ${recA}, ${recB}`);
+  expect(boundCalls[0]).toContain('Seat: advisor t1ad');
+});

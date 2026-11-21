@@ -82,11 +82,15 @@ The advisor seat reads structural observations before planning a module refactor
 during its periodic health audit (`repo-harness-issue-flow` `references/advisor.md` §2):
 
 - Run `rh arch refactor recommendations --json` (or pass `--node <capability-id>`
-  / `--path <path>` for a scoped slice). Never run this on worker `Stop` hooks
-  or call `archctx` from `PATH`.
-- Present `recommended` observations to the owner and record each owner decision with
-  `rh arch refactor decide <id> accept|defer|reject --reason "<text>" --snapshot-digest <digest>`.
-- Route `accepted` single-module observations into `advisor` PR bundles. For a
-  cross-capability cycle or boundary split, attach the `RefactorRecommendation`
-  metrics and `rh arch module review-prompt <capability-id> --json` output to the
-  L3 `council` consultation brief (`rh seats council --issue <n> --members <csv>`).
+  / `--path <path>` for a scoped slice; inspect recorded decisions with
+  `rh arch refactor list` / `rh arch refactor show <id>`). Never run this on
+  worker `Stop` hooks or call `archctx` from `PATH`.
+- Present `recommended` observations and proposals to the owner and record each
+  owner decision with
+  `rh arch refactor decide <id> accept|defer|reject|acknowledge|waive --reason "<text>" --snapshot-digest <digest>`
+  (persist an unscanned assessment first when needed via `rh arch refactor record`).
+- Bind `accepted` recommendation IDs (`refactor_ids`) on the owning issue in
+  `rh board triage-apply --manifest <path>`. For a cross-capability cycle or
+  boundary split, attach the `RefactorRecommendation` metrics and
+  `rh arch module review-prompt <capability-id> --json` output to the L3
+  `council` consultation brief (`rh seats council --issue <n> --members <csv>`).

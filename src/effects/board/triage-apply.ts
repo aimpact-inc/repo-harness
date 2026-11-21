@@ -41,6 +41,7 @@ export interface TriageApplyPorts {
   readonly read_issue_metadata: (repository: string, numbers: readonly number[]) => ReadonlyMap<number, IssuePreflightMetadata>;
   readonly set_labels: (repository: string, issue: number, add: readonly string[], remove: readonly string[]) => void;
   readonly add_sub_issue: (parentId: string, childId: string) => void;
+  readonly bind_refactor?: (repository: string, issue: number, body: string) => void;
   readonly close_duplicate: (repository: string, issue: number, comment: string) => void;
   readonly post_plan: (repository: string, parent: number, body: string) => string;
 }
@@ -178,6 +179,9 @@ export function gitHubTriageApplyPorts(
         throw new BoardCollectError(`GitHub GraphQL addSubIssue failed: ${JSON.stringify((response as { errors?: unknown } | null)?.errors ?? response).slice(0, 300)}`);
       }
     },
+    bind_refactor: (repository, issue, body) => {
+      runGhTextWithRunner(ghInput, ['issue', 'comment', String(issue), '--repo', repository, '--body-file', '-'], body);
+    },
     close_duplicate: (repository, issue, comment) => {
       runGhTextWithRunner(ghInput, [
         'issue', 'close', String(issue), '--repo', repository,
@@ -198,10 +202,14 @@ export function runTriageApply(input: {
   readonly env?: NodeJS.ProcessEnv;
 }): TriageApplyResultV1 {
   const plan = planTriageApply(input.manifest);
-  const rendered = withSeatLine(plan.rendered_plan, input.env ?? process.env);
+  const env = input.env ?? process.env;
+  const rendered = withSeatLine(plan.rendered_plan, env);
   checkPostBody({ kind: 'plan', fields: plan.post_fields }, rendered);
-  const operations = plan.operations.map((op): TriageOperation =>
-    op.kind === 'post_plan' ? { ...op, body: rendered } : op);
+  const operations = plan.operations.map((op): TriageOperation => {
+    if (op.kind === 'post_plan') return { ...op, body: rendered };
+    if (op.kind === 'bind_refactor') return { ...op, comment: withSeatLine(op.comment, env) };
+    return op;
+  });
 
   if (input.dry_run) {
     return {
@@ -250,6 +258,13 @@ export function runTriageApply(input: {
         ports.add_sub_issue(parentMeta.id, childMeta.id);
         break;
       }
+      case 'bind_refactor':
+        if (ports.bind_refactor !== undefined) {
+          ports.bind_refactor(plan.manifest.repository, op.issue, op.comment);
+        } else {
+          ports.post_plan(plan.manifest.repository, op.issue, op.comment);
+        }
+        break;
       case 'close_duplicate':
         ports.close_duplicate(plan.manifest.repository, op.issue, op.comment);
         break;

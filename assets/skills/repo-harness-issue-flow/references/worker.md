@@ -131,12 +131,19 @@ Otherwise skip it.
 3. **Before you open or update the PR:** `rh arch complete --head-sha <head> --json`.
    Put each item of the answer in the PR body section `Architecture slice`,
    or fix it. On a `stale-context` finding, run step 1 again.
+4. **When the issue binds `Refactor IDs:` (`recommendation.<hex>`):** commit your
+   code fix first, run `rh arch refactor verify <id> --json` to confirm
+   `disposition === "resolved"`, then run
+   `rh arch refactor resolve <id> --evidence-digest <resolutionDigest> --reason "Resolved in #<issue>"`
+   and commit the updated `.archcontext/refactor-decisions/<id>.json` file on
+   the PR branch.
 
 This section names commands only. Practice text, matching rules and
 checker logic stay in ArchContext. A model change follows the
 `repo-harness-architecture` skill.
 
-The loop is advice, not a gate. When a command exits non-zero for a setup
+The loop is advice, not a gate, except step 4 when `Refactor IDs:` are
+explicitly bound on the issue. When a command exits non-zero for a setup
 reason (`AC_MODEL_ADOPTION_REQUIRED`, `AC_CODE_FACTS_UNAVAILABLE`,
 `AC_CODE_FACTS_NOT_READY`), report it in the PR body and continue.
 
