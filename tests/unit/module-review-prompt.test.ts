@@ -510,4 +510,55 @@ describe('issue 677 architecture readers', () => {
     const unrelated = fixtureCommit(root);
     expect(new ArchitectureModelReader(root).reviewPrompt(MODULE_ID, { base: head, head: unrelated }).prompt).not.toContain('ONLY UNRELATED');
   });
+
+  test('includes committed active refactor decisions for the module without changing model_sha256, and fails closed on malformed decision files', async () => {
+    const { serializeRefactorDecision } = await import('archctx-contracts');
+    const root = repo();
+    const baseline = new ArchitectureModelReader(root).reviewPrompt(MODULE_ID);
+    const recAccepted = 'recommendation.4aa8477d81e9d473';
+    const recRejected = 'recommendation.1111222233334444';
+    const makeDecision = (id: string, status: 'accepted' | 'rejected', nodeId: string) => serializeRefactorDecision({
+      schemaVersion: 'archcontext.refactor-decision/v1',
+      namespace: 'product.test',
+      recommendationId: id,
+      fingerprint: `sha256:${'5'.repeat(64)}`,
+      fingerprintSchemaVersion: 'archcontext.recommendation-fingerprint/v3',
+      category: 'structural_observation',
+      kind: 'cycle',
+      subject: {
+        selectorKind: 'repository',
+        stableKey: `pair:${nodeId}|capability.other.peer`,
+        subjectSelectorId: 'subject.repository.b7c61fc13826e1e3',
+      },
+      affectedNodeIds: [nodeId, 'capability.other.peer'].sort(),
+      affectedNodeCount: 2,
+      regressesFrom: null,
+      status,
+      observationMetrics: { thinDirectionEdgeCount: 2, totalEdgeCount: 5 },
+      reason: status === 'accepted' ? 'Break thin edge in next sprint.' : 'Intentional seam.',
+      actor: { kind: 'cli', id: 'developer' },
+      decidedAt: '2026-11-21T00:00:00.000Z',
+      provenance: {
+        headSha: '0'.repeat(40),
+        assessmentDigest: `sha256:${'3'.repeat(64)}`,
+        baselineSnapshotDigest: `sha256:${'b'.repeat(64)}`,
+      },
+    });
+    fixtureWrite(root, `.archcontext/refactor-decisions/${recAccepted}.json`, makeDecision(recAccepted, 'accepted', MODULE_ID));
+    fixtureWrite(root, `.archcontext/refactor-decisions/${recRejected}.json`, makeDecision(recRejected, 'rejected', MODULE_ID));
+    fixtureCommit(root);
+
+    const withDecision = new ArchitectureModelReader(root).reviewPrompt(MODULE_ID);
+    expect(withDecision.model_sha256).toBe(baseline.model_sha256);
+    expect(withDecision.prompt).toContain('REFACTOR DECISIONS');
+    expect(withDecision.prompt).toContain(recAccepted);
+    expect(withDecision.prompt).toContain('Break thin edge in next sprint.');
+    expect(withDecision.prompt).not.toContain(recRejected);
+    expect(withDecision.sources.map((s) => s.path)).toContain(`.archcontext/refactor-decisions/${recAccepted}.json`);
+    expect(decodeArchitectureReviewPrompt(withDecision)).toEqual(withDecision);
+
+    fixtureWrite(root, '.archcontext/refactor-decisions/recommendation.deadbeefdeadbeef.json', '{ malformed\n');
+    fixtureCommit(root);
+    expect(() => new ArchitectureModelReader(root)).toThrow('model_invalid: .archcontext/refactor-decisions/recommendation.deadbeefdeadbeef.json');
+  });
 });

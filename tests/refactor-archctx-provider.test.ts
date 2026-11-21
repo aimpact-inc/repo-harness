@@ -152,4 +152,95 @@ describe("refactor archctx provider", () => {
       expect(error).toMatchObject({ code: "RH_ARCHCTX_PACKAGE_MISSING", action: "update-repo-harness" });
     }
   });
+
+  test("supports verify (rewriting resolveCommand to rh), resolve, record, list, show, and acknowledge/waive decisions", async () => {
+    const {
+      listRefactorRecommendations,
+      resolveRecommendation,
+      runRefactorRecord,
+      runRefactorVerify,
+      showRefactorRecommendation,
+    } = await import("../src/effects/refactor/archctx-provider");
+    const root = repo();
+    const calls: string[][] = [];
+    const resolutionDigest = `sha256:${"b".repeat(64)}`;
+    const assessmentDigest = `sha256:${"c".repeat(64)}`;
+    const worktreeDigest = `sha256:${"d".repeat(64)}`;
+    const headSha = "e".repeat(40);
+    const recId = shippedRecord().recommendationId;
+    const run = runner(calls, (args) => {
+      if (args[0] === "refactor" && args[1] === "verify") {
+        return envelope("refactor.verify", {
+          schemaVersion: "archcontext.runtime-refactor-verify/v1",
+          repository: shippedScan().repository,
+          worktree: shippedScan().worktree,
+          recommendationId: recId,
+          recommendationStatus: "accepted",
+          disposition: "resolved",
+          resolutionDigest,
+          evidence: null,
+          resolveCommand: `archctx recommendations resolve --id ${recId} --evidence-digest ${resolutionDigest} --reason <why>`,
+          evidenceItemIds: [],
+          evidenceBindingIds: [],
+        });
+      }
+      if (args[0] === "refactor" && args[1] === "record") {
+        return envelope("refactor.record", {
+          schemaVersion: "archcontext.runtime-refactor-record/v1",
+          repository: shippedScan().repository,
+          worktree: shippedScan().worktree,
+          assessmentDigest,
+          runId: "run.1",
+          recommendationIds: [recId],
+          recommendations: [shippedRecord()],
+        });
+      }
+      if (args[0] === "recommendations" && args[1] === "list") {
+        return envelope("recommendations.list", {
+          schemaVersion: "archcontext.runtime-recommendation-list/v1",
+          status: "accepted",
+          count: 1,
+          recommendations: [shippedRecord()],
+          decisions: [],
+        });
+      }
+      if (args[0] === "recommendations" && args[1] === "show") {
+        return envelope("recommendations.show", shipped("runtime-recommendation-show.json"));
+      }
+      return envelope(`recommendations.${args[1]}`, {
+        schemaVersion: "archcontext.runtime-recommendation-lifecycle/v1",
+        action: args[1],
+        recommendationId: recId,
+        previousStatus: "accepted",
+        nextStatus: args[1] === "resolve" ? "resolved" : "waived",
+        recommendation: { ...shippedRecord(), status: args[1] === "resolve" ? "resolved" : "waived" },
+        decisionFile: `.archcontext/refactor-decisions/${recId}.json`,
+      });
+    });
+
+    const verified = runRefactorVerify(root, { recommendationId: recId, expectedHeadSha: headSha, expectedWorktreeDigest: worktreeDigest, importNodeLimit: 500 }, { consumerRoot: process.cwd(), run });
+    expect(verified.disposition).toBe("resolved");
+    expect(verified.resolveCommand).toBe(`rh arch refactor resolve ${recId} --evidence-digest ${resolutionDigest} --reason <why>`);
+    expect(JSON.parse(calls[0]![3]!)).toEqual({
+      schemaVersion: "archcontext.refactor-verification-request/v1",
+      recommendationId: recId,
+      expectedHeadSha: headSha,
+      expectedWorktreeDigest: worktreeDigest,
+    });
+
+    const resolved = resolveRecommendation(root, { recommendationId: recId, evidenceDigest: resolutionDigest, reason: "Resolved in #3385" }, { consumerRoot: process.cwd(), run });
+    expect(resolved.nextStatus).toBe("resolved");
+    expect(resolved.decisionFile).toBe(`.archcontext/refactor-decisions/${recId}.json`);
+
+    const recorded = runRefactorRecord(root, assessmentDigest, worktreeDigest, { consumerRoot: process.cwd(), run });
+    expect(recorded.recommendationIds).toEqual([recId]);
+
+    const listed = listRefactorRecommendations(root, "accepted", { consumerRoot: process.cwd(), run });
+    expect(listed.count).toBe(1);
+
+    const shown = showRefactorRecommendation(root, recId, { consumerRoot: process.cwd(), run });
+    expect(shown.schemaVersion).toBe("archcontext.runtime-recommendation-show/v1");
+
+    expect(decideRecommendation(recId, "waive", "accepted residual", scanDigest, root, { consumerRoot: process.cwd(), run }).status).toBe("waived");
+  });
 });

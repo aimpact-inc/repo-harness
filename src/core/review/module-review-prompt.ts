@@ -30,6 +30,20 @@ export interface ModulePromptInput {
   backlog: string | null;
   /** `archctx docs anchors` entries for the module and its components; null when the caller did not run it. */
   stale_citations: ModuleStaleCitations | null;
+  /** Active `.archcontext/refactor-decisions/*.json` records affecting the module; null when none are present. */
+  refactor_decisions?: readonly ModuleRefactorDecision[] | null;
+}
+/** Committed Git refactor decision affecting a capability or one of its child components. */
+export interface ModuleRefactorDecision {
+  recommendation_id: string;
+  category: string;
+  kind: string;
+  subject: string;
+  affected_node_ids: string[];
+  status: string;
+  metrics: Record<string, number | null>;
+  reason: string;
+  decided_at: string;
 }
 /** The part of one `docs anchors` report that belongs to one module. */
 export interface ModuleStaleCitations {
@@ -80,6 +94,7 @@ export function buildModuleReviewPrompt(input: ModulePromptInput, shardIndex = 1
   if (detail.section3 && containsSecret(detail.section3)) throw new ModuleReadError('secret_detected', input.module_doc_path);
   if (input.backlog && containsSecret(input.backlog)) throw new ModuleReadError('secret_detected', input.module_doc_path);
   if (input.diff && containsSecret(input.diff)) throw new ModuleReadError('secret_detected', 'diff');
+  const refactorDecisions = input.refactor_decisions && input.refactor_decisions.length > 0 ? input.refactor_decisions : null;
   const identity = {
     repository_id: input.repository_id, capability_id: detail.module.id, commit: detail.commit,
     mode: input.base ? 'diff' : 'module', base: input.base, head: input.head,
@@ -95,6 +110,7 @@ export function buildModuleReviewPrompt(input: ModulePromptInput, shardIndex = 1
     { name: 'flows', text: `FLOWS\n${canonicalize(detail.flows as unknown as JsonValue)}`, optional: true },
     { name: 'section3', text: `SECTION 3\n${detail.section3 ?? '§3 pending'}`, optional: true },
     ...(input.backlog === null ? [] : [{ name: 'backlog', text: `BACKLOG\n${input.backlog}`, optional: true }]),
+    ...(refactorDecisions === null ? [] : [{ name: 'refactor_decisions', text: `REFACTOR DECISIONS\n${canonicalize(refactorDecisions as unknown as JsonValue)}`, optional: true }]),
     ...(input.stale_citations === null ? [] : [{ name: 'stale_citations', text: `STALE CITATIONS\n${canonicalize(input.stale_citations as unknown as JsonValue)}`, optional: true }]),
     { name: 'linked_docs', text: `LINKED DOCUMENTS (paths and status only)\n${canonicalize(detail.linked_docs as unknown as JsonValue)}`, optional: true },
     ...(input.diff === null ? [] : [{ name: 'diff', text: `DIFF\n${input.diff}`, optional: false }]),

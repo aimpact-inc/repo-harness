@@ -10,6 +10,7 @@ export const DEFAULT_MAX_PARALLEL_WRITERS = 3;
 
 const MODULE_VALUE = /^[a-z0-9][a-z0-9._/-]{0,63}$/u;
 const PATTERN_VALUE = /^[a-z0-9]+(-[a-z0-9]+)*$/u;
+const REFACTOR_ID_VALUE = /^recommendation\.[a-f0-9]{16}$/u;
 const TIERS: readonly BoardTier[] = ['low', 'medium', 'high'];
 
 export interface TriageManifestIssue {
@@ -20,6 +21,7 @@ export interface TriageManifestIssue {
   readonly pattern?: string | null;
   readonly attach_to_parent?: boolean;
   readonly target_files?: readonly string[];
+  readonly refactor_ids?: readonly string[];
 }
 
 export interface TriageManifestDuplicate {
@@ -46,6 +48,7 @@ export const TRIAGE_LABEL_PREFIXES = ['module:', 'tier:', 'route:', 'pattern:'] 
 export type TriageOperation =
   | { readonly kind: 'set_labels'; readonly issue: number; readonly labels: readonly string[] }
   | { readonly kind: 'add_sub_issue'; readonly parent: number; readonly issue: number }
+  | { readonly kind: 'bind_refactor'; readonly issue: number; readonly refactor_ids: readonly string[]; readonly comment: string }
   | { readonly kind: 'close_duplicate'; readonly issue: number; readonly canonical: number; readonly reason: string; readonly comment: string }
   | { readonly kind: 'post_plan'; readonly parent: number; readonly body: string; readonly supersedes: string | null };
 
@@ -112,7 +115,7 @@ const MANIFEST_KEYS = new Set([
   'max_parallel_writers',
 ]);
 
-const ISSUE_KEYS = new Set(['number', 'module', 'tier', 'route', 'pattern', 'attach_to_parent', 'target_files']);
+const ISSUE_KEYS = new Set(['number', 'module', 'tier', 'route', 'pattern', 'attach_to_parent', 'target_files', 'refactor_ids']);
 const DUPLICATE_KEYS = new Set(['number', 'canonical', 'reason']);
 
 function decodeIssue(raw: unknown, index: number): TriageManifestIssue {
@@ -143,6 +146,15 @@ function decodeIssue(raw: unknown, index: number): TriageManifestIssue {
     if (!Array.isArray(raw.target_files)) fail(`issues[${index}].target_files must be an array`);
     targetFiles = [...new Set(raw.target_files.map((entry, pos) => normalizePath(entry as string, `issues[${index}].target_files[${pos}]`)))].sort();
   }
+  let refactorIds: string[] | undefined = undefined;
+  if (raw.refactor_ids !== undefined) {
+    if (!Array.isArray(raw.refactor_ids)) fail(`issues[${index}].refactor_ids must be an array`);
+    refactorIds = [...new Set(raw.refactor_ids.map((entry, pos) => {
+      const id = nonEmptyString(entry, `issues[${index}].refactor_ids[${pos}]`);
+      if (!REFACTOR_ID_VALUE.test(id)) fail(`issues[${index}].refactor_ids[${pos}] ${JSON.stringify(id)} must match recommendation.<16-hex>`);
+      return id;
+    }))].sort();
+  }
   return {
     number,
     module,
@@ -151,6 +163,7 @@ function decodeIssue(raw: unknown, index: number): TriageManifestIssue {
     ...(pattern === undefined ? {} : { pattern }),
     ...(raw.attach_to_parent === undefined ? {} : { attach_to_parent: raw.attach_to_parent }),
     ...(targetFiles === undefined ? {} : { target_files: targetFiles }),
+    ...(refactorIds === undefined ? {} : { refactor_ids: refactorIds }),
   };
 }
 
@@ -256,16 +269,26 @@ export function decodeTriageManifest(value: unknown): TriageManifestV1 {
     }
   }
 
-  // Red line (c): distinct units that have no dependency ordering edge must not share a target_files entry.
+  // Red line (c): distinct units that have no dependency ordering edge must not share a target_files entry or refactor_ids entry.
   const unitFiles = units.map(unit => new Set(unit.flatMap(num => issueByNumber.get(num)!.target_files ?? [])));
+  const unitRefactors = units.map(unit => new Set(unit.flatMap(num => issueByNumber.get(num)!.refactor_ids ?? [])));
   for (let i = 0; i < units.length; i += 1) {
     const leftFiles = unitFiles[i]!;
-    if (leftFiles.size === 0) continue;
+    const leftRefactors = unitRefactors[i]!;
     for (let j = i + 1; j < units.length; j += 1) {
-      const rightFiles = unitFiles[j]!;
-      const overlap = [...leftFiles].filter(file => rightFiles.has(file)).sort();
-      if (overlap.length > 0) {
-        fail(`red line violation (target_files): units [${units[i]!.join(', ')}] and [${units[j]!.join(', ')}] share target file ${overlap[0]} with no dependency edge`);
+      if (leftFiles.size > 0) {
+        const rightFiles = unitFiles[j]!;
+        const overlap = [...leftFiles].filter(file => rightFiles.has(file)).sort();
+        if (overlap.length > 0) {
+          fail(`red line violation (target_files): units [${units[i]!.join(', ')}] and [${units[j]!.join(', ')}] share target file ${overlap[0]} with no dependency edge`);
+        }
+      }
+      if (leftRefactors.size > 0) {
+        const rightRefactors = unitRefactors[j]!;
+        const overlapRefactor = [...leftRefactors].filter(id => rightRefactors.has(id)).sort();
+        if (overlapRefactor.length > 0) {
+          fail(`red line violation (refactor_ids): units [${units[i]!.join(', ')}] and [${units[j]!.join(', ')}] share refactor decision ${overlapRefactor[0]} with no dependency edge`);
+        }
       }
     }
   }
@@ -346,6 +369,14 @@ export function planTriageApply(
         kind: 'add_sub_issue',
         parent: manifest.parent,
         issue: issue.number,
+      });
+    }
+    if (issue.refactor_ids && issue.refactor_ids.length > 0) {
+      operations.push({
+        kind: 'bind_refactor',
+        issue: issue.number,
+        refactor_ids: issue.refactor_ids,
+        comment: `repo-harness refactor binding\nRefactor IDs: ${issue.refactor_ids.join(', ')}`,
       });
     }
   }

@@ -1,9 +1,9 @@
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
-import type { DocsAnchorsReportV1, NativeContextExportV1 } from 'archctx-contracts';
+import { parseRefactorDecisionFile, REFACTOR_DECISION_DIRECTORY, type DocsAnchorsReportV1, type NativeContextExportV1, type RefactorDecisionV1 } from 'archctx-contracts';
 import { capabilityRegistryFromNativeContext, archcontextNodeId, type ArchcontextCapabilityOwners } from '../../core/capabilities/registry';
 import { generatedSummaryState, moduleDetail, ModuleReadError, type ModelNode, type ModelRelation, type ModelFlow, type ModuleIndexV1, type ModuleDetailV1, type LinkedModuleDoc } from '../../core/architecture/module-view';
-import { buildModuleReviewPrompt, moduleStaleCitations, type ModuleReviewPromptV1, type PromptSource } from '../../core/review/module-review-prompt';
+import { buildModuleReviewPrompt, moduleStaleCitations, type ModuleRefactorDecision, type ModuleReviewPromptV1, type PromptSource } from '../../core/review/module-review-prompt';
 import { sha256Hex } from '../../core/evidence/sha256';
 import { ARCHCONTEXT_MANIFEST, ArchctxClientError, type GeneratedSummaryFreshness } from '../../core/architecture/projection';
 import { architecturePort, isArchitectureUnavailable, type ArchctxProviderOptions } from '../../core/architecture/contracts';
@@ -171,6 +171,7 @@ export class ArchitectureModelReader {
   private readonly relations: ModelFile<ModelRelation>[];
   private readonly flows: ModelFile<ModelFlow>[];
   private readonly docs: { path: string; kind: 'plan'; bytes: Buffer; capability: string | null; status: string | null }[];
+  private readonly refactorDecisions: { path: string; bytes: Buffer; value: RefactorDecisionV1 }[];
   private readonly budget: number;
 
   constructor(cwd: string, options: ArchctxProviderOptions = {}) {
@@ -181,7 +182,10 @@ export class ArchitectureModelReader {
     catch (error) { throw modelReadFailure(error); }
     const docIndex = DOC_INDEX.flatMap(([dir, kind]) => this.snapshot.regularFiles(path => path.startsWith(`${dir}/`) && !path.includes('/', dir.length + 1) && path.endsWith('.md'))
       .sort((a, b) => a.localeCompare(b, 'en')).map(path => ({ path, kind })));
-    this.snapshot.load(docIndex.map(doc => doc.path));
+    const decisionPrefix = `${REFACTOR_DECISION_DIRECTORY}/`;
+    const decisionPaths = this.snapshot.regularFiles(path => path.startsWith(decisionPrefix) && !path.includes('/', decisionPrefix.length) && path.endsWith('.json'))
+      .sort((a, b) => a.localeCompare(b, 'en'));
+    this.snapshot.load([...docIndex.map(doc => doc.path), ...decisionPaths]);
     this.safePath(ARCHCONTEXT_MANIFEST);
     this.budget = this.context.contextBudgetBytes;
     const { model } = this.context;
@@ -209,6 +213,15 @@ export class ArchitectureModelReader {
     this.docs = docIndex.map(({ path, kind }) => {
       const bytes = this.snapshot.bytes(path), text = bytes.toString('utf8');
       return { path, bytes, kind, capability: markdownHeader(text, 'Capability ID'), status: markdownHeader(text, 'Status') };
+    });
+    this.refactorDecisions = decisionPaths.map((path) => {
+      this.safePath(path);
+      const bytes = this.snapshot.bytes(path);
+      try {
+        return { path, bytes, value: parseRefactorDecisionFile(path, bytes.toString('utf8')) };
+      } catch {
+        throw new ModuleReadError('model_invalid', path);
+      }
     });
   }
 
@@ -376,6 +389,20 @@ export class ArchitectureModelReader {
     const model = [...this.nodes.filter(file => neighborhood.has(file.value.id)), ...relations,
       ...this.flows.filter(file => detail.flows.some(flow => flow.id === file.value.id))].sort((a, b) => a.path.localeCompare(b.path, 'en'));
     const linked = this.linkedDocs(id);
+    const activeDecisions = this.refactorDecisions.filter(({ value }) =>
+      (value.status === 'accepted' || value.status === 'acknowledged' || value.status === 'deferred')
+      && value.affectedNodeIds.some(nodeId => local.has(nodeId)));
+    const refactorDecisions: ModuleRefactorDecision[] | null = activeDecisions.length === 0 ? null : activeDecisions.map(({ value }) => ({
+      recommendation_id: value.recommendationId,
+      category: value.category,
+      kind: value.kind ?? 'refactor-proposal',
+      subject: value.subject.stableKey,
+      affected_node_ids: [...value.affectedNodeIds],
+      status: value.status,
+      metrics: value.observationMetrics ? { ...value.observationMetrics } : {},
+      reason: value.reason,
+      decided_at: value.decidedAt,
+    }));
     const staleCitations = options.anchors === undefined ? null : moduleStaleCitations(options.anchors, local);
     const anchorsText = staleCitations === null ? null : canonicalize(staleCitations as unknown as Parameters<typeof canonicalize>[0]);
     const sources: PromptSource[] = [
@@ -383,21 +410,23 @@ export class ArchitectureModelReader {
       ...model.map(file => ({ ...this.requiredInput(file.path), class: file.path.includes('/flows/') ? 'optional' as const : 'required' as const, disposition: 'included' as const })),
       ...(doc ? [{ ...doc, class: 'optional' as const, disposition: 'included' as const }] : []),
       ...linked.map(file => ({ path: file.path, bytes: file.bytes.length, sha256: sha256Hex(file.bytes), class: 'optional' as const, disposition: 'included' as const })),
+      ...activeDecisions.map(file => ({ path: file.path, bytes: file.bytes.length, sha256: sha256Hex(file.bytes), class: 'optional' as const, disposition: 'included' as const })),
       ...(diff === null ? [] : [{ path: 'diff', bytes: Buffer.byteLength(diff), sha256: sha256Hex(diff), class: 'required' as const, disposition: 'included' as const }]),
       ...(anchorsText === null ? [] : [{ path: 'anchors', bytes: Buffer.byteLength(anchorsText), sha256: sha256Hex(anchorsText), class: 'optional' as const, disposition: 'included' as const }]),
     ].sort((a, b) => a.path.localeCompare(b.path, 'en'));
     const sourceSections: Record<string, string[]> = { [ARCHCONTEXT_MANIFEST]: ['identity'], [docPath]: ['section3', 'backlog'], diff: ['diff'], anchors: ['stale_citations'] };
     for (const file of model) sourceSections[file.path] = file.path.includes('/flows/') ? ['flows'] : file.path.includes('/relations/') ? ['relations'] : ['model', 'relations'];
     for (const file of linked) sourceSections[file.path] = ['linked_docs'];
-    // The whole model directory is in scope, so new and deleted model files show as dirty too.
-    const scope = [...new Set([...this.anchors(node), ARCHCONTEXT_MANIFEST, MODEL_ROOT, docPath, ...linked.map(file => file.path)])].sort();
+    for (const file of activeDecisions) sourceSections[file.path] = ['refactor_decisions'];
+    // The whole model and refactor-decisions directories are in scope, so new and deleted files show as dirty too.
+    const scope = [...new Set([...this.anchors(node), ARCHCONTEXT_MANIFEST, MODEL_ROOT, REFACTOR_DECISION_DIRECTORY, docPath, ...linked.map(file => file.path)])].sort();
     for (let attempt = 0; attempt < 2; attempt++) {
       const before = this.dirty(scope);
       const packet = buildModuleReviewPrompt({ detail, package_version: PACKAGE_VERSION, repository_id: repoHarnessRepoIdFor(this.root), input_cap_bytes: this.budget,
         worktree_dirty_paths: before.paths, dirty_content_sha256: before.digest,
         model_sha256: sha256Hex(canonicalize(model.map(file => ({ path: file.path, sha256: this.requiredInput(file.path).sha256 })))),
         doc_sha256: doc?.sha256 ?? null, sources, source_sections: sourceSections, module_doc_path: docPath, base, head, diff,
-        backlog: this.section(docPath, 'backlog'), stale_citations: staleCitations }, options.shard);
+        backlog: this.section(docPath, 'backlog'), stale_citations: staleCitations, refactor_decisions: refactorDecisions }, options.shard);
       const after = this.dirty(scope);
       if (before.digest === after.digest) return packet;
     }

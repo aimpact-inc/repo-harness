@@ -73,6 +73,11 @@ never synthesize a pass):
 - `error`: blocks acceptance (`FAIL` or stop before publishing `PASS`) until
   the check runs cleanly.
 
+When an issue in the PR carries `Refactor IDs:` (`recommendation.<hex>`) or the
+diff resolves an entry in `.archcontext/refactor-decisions/`, run
+`rh arch refactor verify <id> --json` and verify `disposition === "resolved"`
+(or record an explicit code-facts observation gap when the index is unavailable).
+
 ### 2.2 Rounds
 
 A review has at most two rounds. Each round grades only the lines that the
