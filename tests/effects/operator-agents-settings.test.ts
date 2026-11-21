@@ -510,14 +510,20 @@ describe('agent settings routes', () => {
   });
 
   test('Hosts refuses to disable Codex until all seats using it move', async () => {
-    const harness = await startHarness({ agents: PANE_AGENTS });
+    const codexSeats = {
+      ...DEFAULT_SEATS_CONFIG,
+      worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex' as const, model: 'gpt-6.1-terra' },
+      'worker-deep': { ...DEFAULT_SEATS_CONFIG['worker-deep'], runtime: 'codex' as const, model: 'gpt-6.2-sol' },
+      gatekeeper: { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'codex' as const, model: 'gpt-6.2-sol' },
+    };
+    const harness = await startHarness({ agents: PANE_AGENTS, seats: codexSeats });
     const { revision, ...section } = (await seats(harness)).config;
     const original = readFileSync(harness.configPath, 'utf8');
     const disable = [{ runtime: 'codex', enabled: false, uses: [] }];
     const refused = await post(harness, { expected_revision: revision, changes: disable });
     const { error } = await refused.json();
     expect([refused.status, error?.code]).toEqual([422, 'runtime_in_use']);
-    const affected = ['worker', 'worker-deep', 'gatekeeper', 'gatekeeper-deep'] as const;
+    const affected = ['worker', 'worker-deep', 'gatekeeper'] as const;
     for (const id of affected) {
       expect(error.message).toContain(`${id} (codex)`);
     }
@@ -530,7 +536,7 @@ describe('agent settings routes', () => {
     const disabled = await post(harness, { expected_revision: (await saved.json()).config_revision, changes: disable });
     expect(disabled.status).toBe(200);
     expect((await settings(harness)).config.enabled).toEqual(['claude', 'pi']);
-    expect((await seats(harness)).config['gatekeeper-deep']?.runtime).toBe('claude');
+    expect((await seats(harness)).config.gatekeeper.runtime).toBe('claude');
   });
 
   test('disables a runtime that left the registry, and still refuses to enable it', async () => {
@@ -564,19 +570,19 @@ describe('seat settings contract without transport', () => {
     writeFileSync(join(home, '.repo-harness', 'config.json'), JSON.stringify({ agents: PANE_AGENTS }));
     const env = { HOME: home }, initial = readSeatsSettings(env), route = seatsSettingsWriteRoute(env);
     for (const id of SEAT_IDS) if (initial.defaults[id] !== null) expect(initial.defaults[id]!.advisor_model).toBeNull();
-    const { advisor_model: _omitted, ...withoutAdvisor } = initial.config['worker-important'];
-    const section = { ...DEFAULT_SEATS_CONFIG, 'worker-important': withoutAdvisor };
-    expect(decodeSeatsConfig(section)['worker-important'].advisor_model).toBeNull();
+    const { advisor_model: _omitted, ...withoutAdvisor } = initial.config['worker-opus'];
+    const section = { ...DEFAULT_SEATS_CONFIG, 'worker-opus': withoutAdvisor };
+    expect(decodeSeatsConfig(section)['worker-opus'].advisor_model).toBeNull();
     for (const advisor_model of [...Object.keys(MODEL_FAMILY_LABELS), null]) {
       const { revision, ...seats } = readSeatsSettings(env).config;
       const saved = await route.decode({ expected_revision: revision, seats: { ...seats,
-        'worker-important': { ...seats['worker-important'], advisor_model } } }, []).execute();
-      expect(saved).toMatchObject({ status: 200, body: { changed_keys: ['seats.worker-important.advisor_model'] } });
-      expect(readSeatsSettings(env).config['worker-important'].advisor_model).toBe(advisor_model);
+        'worker-opus': { ...seats['worker-opus'], advisor_model } } }, []).execute();
+      expect(saved).toMatchObject({ status: 200, body: { changed_keys: ['seats.worker-opus.advisor_model'] } });
+      expect(readSeatsSettings(env).config['worker-opus'].advisor_model).toBe(advisor_model);
     }
     for (const patch of [{ runtime: 'codex', advisor_model: 'fable' }, { runtime: 'pi', model: 'zai/glm-5.3', fleet: [], advisor_model: 'fable' },
       ...['unknown', 'toString', '', 42].map(advisor_model => ({ advisor_model }))]) {
-      const seats = { ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG['worker-important'], ...patch } };
+      const seats = { ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG['worker-opus'], ...patch } };
       expect(() => decodeSeatsConfig(seats)).toThrow('seats_config_invalid');
       expect(() => route.decode({ expected_revision: 'absent', seats }, [])).toThrow('seats_settings_request_invalid');
     }
@@ -627,31 +633,42 @@ describe('seat settings contract without transport', () => {
   });
 
   test.each([
-    ['pi', 'magpie/agy-cli/gemini-4-carbon', ['pi', '--provider', 'magpie', '--model', 'agy-cli/gemini-4-carbon', '--thinking', 'high']],
-    ['pi', 'magpie/agy-cli/gemini-4-neon', ['pi', '--provider', 'magpie', '--model', 'agy-cli/gemini-4-neon', '--thinking', 'high']],
-    ['pi', 'magpie/codex/gpt-6.2-sol', ['pi', '--provider', 'magpie', '--model', 'codex/gpt-6.2-sol', '--thinking', 'high']],
-    ['pi', 'magpie/codex/gpt-6.2-astra', ['pi', '--provider', 'magpie', '--model', 'codex/gpt-6.2-astra', '--thinking', 'high']],
-    ['codex', 'gpt-6.2-sol', ['codex', '-m', 'gpt-6.2-sol', '-c', 'model_reasoning_effort="high"']],
-    ['codex', 'gpt-6.2-astra', ['codex', '-m', 'gpt-6.2-astra', '-c', 'model_reasoning_effort="high"']],
-  ] as const)('saves a %s advisor on %s and builds its launch argv', async (runtime, model, expectedArgv) => {
-    const advisor = { ...DEFAULT_SEATS_CONFIG.advisor, runtime, model, effort: 'high', fleet: [] };
+    ['advisor', 'pi', 'magpie/agy-cli/gemini-4-carbon', ['pi', '--provider', 'magpie', '--model', 'agy-cli/gemini-4-carbon', '--thinking', 'high']],
+    ['advisor', 'pi', 'magpie/agy-cli/gemini-4-neon', ['pi', '--provider', 'magpie', '--model', 'agy-cli/gemini-4-neon', '--thinking', 'high']],
+    ['advisor', 'pi', 'magpie/codex/gpt-6.2-sol', ['pi', '--provider', 'magpie', '--model', 'codex/gpt-6.2-sol', '--thinking', 'high']],
+    ['council', 'pi', 'magpie/codex/gpt-6.2-astra', ['pi', '--provider', 'magpie', '--model', 'codex/gpt-6.2-astra', '--thinking', 'high']],
+    ['advisor', 'codex', 'gpt-6.2-sol', ['codex', '-m', 'gpt-6.2-sol', '-c', 'model_reasoning_effort="high"']],
+    ['council', 'codex', 'gpt-6.2-astra', ['codex', '-m', 'gpt-6.2-astra', '-c', 'model_reasoning_effort="high"']],
+  ] as const)('saves a %s on %s/%s and builds its launch argv', async (seatId, runtime, model, expectedArgv) => {
+    const seatConfig = {
+      ...(seatId === 'council' ? DEFAULT_SEATS_CONFIG.gatekeeper : DEFAULT_SEATS_CONFIG.advisor),
+      runtime,
+      model,
+      effort: 'high',
+      fleet: [],
+    };
     const home = mkdtempSync(join(tmpdir(), 'seats-model-launch-'));
     cleanups.push(() => rmSync(home, { recursive: true, force: true }));
     mkdirSync(join(home, '.repo-harness'));
-    const gatekeeperDeep = { ...DEFAULT_SEATS_CONFIG['gatekeeper-deep'], model: 'gpt-6-astra' };
+    const gatekeeperFallback = { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'codex' as const, model: 'gpt-6-astra' };
     writeFileSync(join(home, '.repo-harness', 'config.json'), JSON.stringify({ agents: PANE_AGENTS,
-      seats: { ...DEFAULT_SEATS_CONFIG, 'gatekeeper-deep': gatekeeperDeep } }));
+      seats: { ...DEFAULT_SEATS_CONFIG, 'gatekeeper-fallback': gatekeeperFallback } }));
     const env = { HOME: home }, before = readSeatsSettings(env), route = seatsSettingsWriteRoute(env);
     const { revision, ...section } = before.config;
-    const saved = await route.decode({ expected_revision: revision, seats: { ...section, advisor } }, []).execute();
+    const saved = await route.decode({ expected_revision: revision, seats: { ...section, [seatId]: seatConfig } }, []).execute();
     expect(saved.status).toBe(200);
-    const { advisor: stored, 'gatekeeper-deep': storedGatekeeper } = readSeatsSettings(env).config;
-    expect(storedGatekeeper.model).toBe('gpt-6-astra');
+    const storedConfig = readSeatsSettings(env).config;
+    const stored = storedConfig[seatId]!;
+    expect(storedConfig['gatekeeper-fallback']?.model).toBe('gpt-6-astra');
     expect(stored).toMatchObject({ runtime, model, effort: 'high', fleet: [] });
-    const launch = buildSeatLaunch('advisor', stored, 'seats', []);
+    const launch = buildSeatLaunch(seatId, stored, 'seats', []);
     expect(launch.runtime).toBe(runtime);
     const start = launch.argv.indexOf(runtime);
     expect(launch.argv.slice(start, start + expectedArgv.length)).toEqual([...expectedArgv]);
+    for (const [badRuntime, badModel] of [['pi', 'magpie/codex/gpt-6.2-astra'], ['codex', 'gpt-6.2-astra']] as const) {
+      expect(() => route.decode({ expected_revision: storedConfig.revision, seats: { ...section, advisor: { ...DEFAULT_SEATS_CONFIG.advisor, runtime: badRuntime, model: badModel, effort: 'high', fleet: [] } } }, []))
+        .toThrow('seats_settings_request_invalid: seats.advisor.model');
+    }
   });
 
   test('saves both scaffold roles for a Neon advisor and persists independent Pi role model overrides', async () => {
@@ -665,7 +682,7 @@ describe('seat settings contract without transport', () => {
     const models = { explorer: 'magpie/group/deepseek-v4.1-flash', 'deep-reasoner': 'zai/GLM-5.3' };
     const saved = await route.decode({ expected_revision: revision, seats: { ...section, advisor, pi_sub_agent_models: models } }, []).execute();
     expect(saved.status).toBe(200);
-    expect(saved.body).toMatchObject({ changed_keys: ['seats.advisor.runtime', 'seats.advisor.model', 'seats.pi_sub_agent_models.deep-reasoner', 'seats.pi_sub_agent_models.explorer'] });
+    expect(saved.body).toMatchObject({ changed_keys: ['seats.pi_sub_agent_models.deep-reasoner', 'seats.pi_sub_agent_models.explorer'] });
     const stored = readSeatsSettings(env).config;
     expect(stored.advisor).toEqual(advisor);
     expect(stored.pi_sub_agent_models).toEqual(models);
@@ -687,7 +704,7 @@ describe('seat settings contract without transport', () => {
 
   test('review seats reject write tools and every fleet role at the decoder boundary', () => {
     const route = seatsSettingsWriteRoute();
-    for (const id of ['gatekeeper', 'gatekeeper-deep', 'gatekeeper-fallback', 'reviewer'] as const) {
+    for (const id of ['gatekeeper', 'gatekeeper-fallback', 'reviewer'] as const) {
       const seat = DEFAULT_SEATS_CONFIG[id] ?? { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'pi', model: 'magpie/cursor/deepseek-v41-flash-1017', effort: null };
       expect(decodeSeatsConfig({ ...DEFAULT_SEATS_CONFIG, [id]: seat })[id]).toEqual(seat);
       for (const patch of [...['edit', 'gh', 'mcp', 'tasks'].map(tool => ({ tools: ['read', tool].sort() })), { fleet: ['explorer'] }]) {
@@ -708,7 +725,7 @@ describe('seat settings contract without transport', () => {
 
   test('old stored sections require update and GET exposes all seats and routing ranges', () => {
     const original = { orchestrator: DEFAULT_SEATS_CONFIG.orchestrator, advisor: DEFAULT_SEATS_CONFIG.advisor,
-      worker: { ...DEFAULT_SEATS_CONFIG.worker, model: 'gpt-6.1-sol' } };
+      worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex' as const, model: 'gpt-6.1-sol' } };
     expect(() => decodeSeatsConfig(original)).toThrow(expect.objectContaining({ code: 'seats_config_migration_required', next_action: 'rh update' }));
     expect(SEATS_CONFIGURATION_FAILURES.seats_config_migration_required.next_action).toBe('rh update');
     expect(() => decodeSeatsConfig({ ...original, extra: {} })).toThrow('seats_config_invalid');
@@ -717,9 +734,9 @@ describe('seat settings contract without transport', () => {
     cleanups.push(() => rmSync(home, { recursive: true, force: true }));
     const settings = readSeatsSettings({ HOME: home });
     expect(Object.keys(settings.defaults)).toEqual([...SEAT_IDS, 'routing']);
-    expect(settings.ranges.routing).toEqual({ classes: ROUTING_CLASSES, worker_seats: ['worker', 'worker-deep', 'worker-important', 'worker-important-fast', 'worker-light'],
-      frontend_seats: ['worker-important', 'worker-important-fast'] });
-    for (const id of ['gatekeeper', 'gatekeeper-deep', 'gatekeeper-fallback', 'reviewer'] as const) expect(settings.ranges.seats[id]).toEqual({ tools: ['net', 'read', 'shell'], fleet: [],
+    expect(settings.ranges.routing).toEqual({ classes: ROUTING_CLASSES, worker_seats: ['worker', 'worker-deep', 'worker-opus', 'worker-neon', 'worker-light'],
+      frontend_seats: ['worker-opus', 'worker-neon'] });
+    for (const id of ['gatekeeper', 'gatekeeper-fallback', 'reviewer'] as const) expect(settings.ranges.seats[id]).toEqual({ tools: ['net', 'read', 'shell'], fleet: [],
       models: [
         { runtime: 'pi', model: 'magpie/codex/gpt-6.2-sol' }, { runtime: 'codex', model: 'gpt-6.2-sol' },
         { runtime: 'claude', model: 'opus' }, { runtime: 'pi', model: 'zai/glm-5.3-flash' },
@@ -727,13 +744,13 @@ describe('seat settings contract without transport', () => {
         { runtime: 'agy', model: 'gemini-4-hydrogen' },
       ] });
     expect(settings.defaults['gatekeeper-fallback']).toBeNull();
-    expect(settings.defaults.planner).toBeNull();
-    expect(settings.ranges.seats.planner).toEqual({ tools: ['net', 'read', 'shell'], fleet: ['deep-reasoner', 'explorer'], models: [
+    expect(settings.defaults.council).toBeNull();
+    expect(settings.ranges.seats.council).toEqual({ tools: ['net', 'read', 'shell'], fleet: ['explorer'], models: [
       { runtime: 'claude', model: 'fable' }, { runtime: 'pi', model: 'magpie/agy-cli/gemini-4-carbon' },
+      { runtime: 'agy', model: 'gemini-4-carbon-high' },
       { runtime: 'pi', model: 'magpie/codex/gpt-6.2-astra' }, { runtime: 'codex', model: 'gpt-6.2-astra' },
-      { runtime: 'pi', model: 'magpie/agy-cli/gemini-4-neon' }, { runtime: 'claude', model: 'opus' },
     ] });
-    for (const id of SEAT_IDS.filter(id => id !== 'gatekeeper-fallback' && id !== 'planner')) {
+    for (const id of SEAT_IDS.filter(id => id !== 'gatekeeper-fallback' && id !== 'council')) {
       expect(settings.defaults[id]?.tools).toEqual(expect.arrayContaining(['net']));
     }
   });
@@ -744,8 +761,9 @@ describe('seat settings contract without transport', () => {
     mkdirSync(join(home, '.repo-harness'));
     const path = join(home, '.repo-harness', 'config.json');
     const agents = { ...PANE_AGENTS, enabled: ['claude', 'codex'] };
-    const originalSeats = { orchestrator: DEFAULT_SEATS_CONFIG.orchestrator, advisor: DEFAULT_SEATS_CONFIG.advisor,
-      worker: { ...DEFAULT_SEATS_CONFIG.worker, model: 'gpt-6.1-sol' } };
+    const originalSeats = { orchestrator: DEFAULT_SEATS_CONFIG.orchestrator, advisor: { ...DEFAULT_SEATS_CONFIG.advisor, runtime: 'claude' as const, model: 'opus' },
+      worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex' as const, model: 'gpt-6.1-sol' },
+      'worker-light': DEFAULT_SEATS_CONFIG['worker-light'] };
     writeFileSync(path, JSON.stringify({ agents, security: { mode: 'strict' }, seats: originalSeats }));
     const env = { HOME: home };
     expect(() => readSeatsSettings(env)).toThrow(expect.objectContaining({ code: 'seats_config_migration_required' }));
@@ -755,18 +773,26 @@ describe('seat settings contract without transport', () => {
     expect(readFileSync(path, 'utf8')).toBe(migratedBytes);
     const before = readSeatsSettings(env);
     const decoded = decodeSeatsConfig(JSON.parse(migratedBytes).seats);
-    for (const id of ['orchestrator', 'advisor', 'worker'] as const) expect(decoded[id]).toEqual(originalSeats[id]);
+    for (const id of ['orchestrator', 'advisor', 'worker', 'worker-light'] as const) expect(decoded[id]).toEqual(originalSeats[id]);
     expect(decoded.worker.model).toBe('gpt-6.1-sol');
     expect(decoded['worker-deep']).toEqual(DEFAULT_SEATS_CONFIG['worker-deep']);
     expect(decoded.routing).toEqual(DEFAULT_SEATS_CONFIG.routing);
-    expect(before.config['worker-light']).toBeNull();
     const routing: SeatRoutingV1 = { ...before.config.routing, claude_saving_below_remaining: 30, claude_hyper_at_or_above_remaining: 60, codex_credit_mode: 'review', codex_credit_floor: 2000,
-      simple_fast: ['worker-deep', 'worker'], frontend: ['worker-important-fast'] };
+      important_fast: ['worker-opus', 'worker-neon', 'worker'], simple_fast: ['worker-deep', 'worker'], frontend: ['worker-neon'] };
     const { revision: _revision, ...storedSection } = before.config;
-    const section = { ...storedSection, routing };
+    const section = { ...storedSection,
+      'worker-deep': { ...storedSection['worker-deep'], runtime: 'codex' as const, model: 'gpt-6.2-sol' },
+      'worker-neon': { ...storedSection['worker-neon'], runtime: 'claude' as const, model: 'opus' },
+      'worker-light': null,
+      gatekeeper: { ...storedSection.gatekeeper, runtime: 'codex' as const, model: 'gpt-6.2-sol' },
+      routing };
     const response = await seatsSettingsWriteRoute(env).decode({ expected_revision: before.config.revision, seats: section }, []).execute();
     expect(response.status).toBe(200);
-    expect(response.body).toEqual({ config_revision: sha256(path), changed_keys: ['seats.routing.simple_fast', 'seats.routing.frontend', 'seats.routing.claude_saving_below_remaining', 'seats.routing.claude_hyper_at_or_above_remaining',
+    expect(response.body).toEqual({ config_revision: sha256(path), changed_keys: [
+      'seats.worker-deep.runtime', 'seats.worker-deep.model', 'seats.worker-neon.runtime', 'seats.worker-neon.model',
+      'seats.worker-light',
+      'seats.gatekeeper.runtime', 'seats.gatekeeper.model',
+      'seats.routing.important_fast', 'seats.routing.simple_fast', 'seats.routing.frontend', 'seats.routing.claude_saving_below_remaining', 'seats.routing.claude_hyper_at_or_above_remaining',
       'seats.routing.codex_credit_mode', 'seats.routing.codex_credit_floor'] });
     const after = readSeatsSettings(env);
     expect(after.config).toEqual({ revision: sha256(path), ...section });
@@ -851,7 +877,7 @@ describe('seat settings contract without transport', () => {
     expect(() => route.decode({ expected_revision: settings.config.revision, seats: {
       ...settings.defaults, 'worker-light': null, routing: { ...settings.defaults.routing, simple_fast: ['worker-light'] },
     } }, [])).toThrow('seats_settings_request_invalid');
-    const changedRuntime = { ...settings.defaults, 'worker-important': { ...settings.defaults['worker-important'], runtime: 'codex', model: 'gpt-6.1-terra' } };
+    const changedRuntime = { ...settings.defaults, 'worker-opus': { ...settings.defaults['worker-opus'], runtime: 'codex', model: 'gpt-6.1-terra' } };
     expect(() => route.decode({ expected_revision: settings.config.revision, seats: changedRuntime }, []))
       .toThrow('seats_settings_request_invalid');
     expect(readFileSync(path, 'utf8')).toBe(original);
@@ -860,12 +886,12 @@ describe('seat settings contract without transport', () => {
   test('a save refuses a frontend route to a Pi DeepSeek seat as the read path does and writes nothing', () => {
     const home = mkdtempSync(join(tmpdir(), 'seats-save-decoder-')), dir = join(home, '.repo-harness'), path = join(dir, 'config.json'), env = { HOME: home };
     cleanups.push(() => rmSync(home, { recursive: true, force: true }));
-    const written = JSON.stringify({ agents: PANE_AGENTS, seats: { ...DEFAULT_SEATS_CONFIG, routing: { ...DEFAULT_SEATS_CONFIG.routing, frontend: ['worker-important'] },
-      'worker-important-fast': { ...DEFAULT_SEATS_CONFIG['worker-important-fast'], runtime: 'pi', model: 'magpie/cursor/deepseek-v41-flash-1017', effort: null, fleet: [] } } });
+    const written = JSON.stringify({ agents: PANE_AGENTS, seats: { ...DEFAULT_SEATS_CONFIG, routing: { ...DEFAULT_SEATS_CONFIG.routing, frontend: ['worker-opus'] },
+      'worker-neon': { ...DEFAULT_SEATS_CONFIG['worker-neon'], runtime: 'pi', model: 'magpie/cursor/deepseek-v41-flash-1017', effort: null, fleet: [] } } });
     mkdirSync(dir); writeFileSync(path, written);
     const { revision, seats } = readSeatsConfiguration(env);
     // The request decoder takes this section; the read decoder refuses it, so the save refuses it with the read path's code.
-    expect(() => applySeatsSettings({ expected_revision: revision, seats: { ...seats, routing: { ...seats.routing, frontend: ['worker-important-fast'] } } }, env))
+    expect(() => applySeatsSettings({ expected_revision: revision, seats: { ...seats, routing: { ...seats.routing, frontend: ['worker-neon'] } } }, env))
       .toThrow(expect.objectContaining({ code: 'config_invalid' }));
     expect(readFileSync(path, 'utf8')).toBe(written);
     expect([applySeatsSettings({ expected_revision: revision, seats: { ...seats, advisor: { ...seats.advisor, effort: 'medium' } } }, env).changed_keys,
@@ -916,8 +942,24 @@ describe('seat settings routes', () => {
     expect((await response.json()).error.code).toBe('seat_runtime_not_enabled');
   });
 
+  test('saves agy gemini-4-hydrogen on worker-light and gatekeeper-fallback, and rejects it on disallowed seats', async () => {
+    const harness = await startHarness({ agents: { ...PANE_AGENTS, enabled: ['antigravity', ...PANE_AGENTS.enabled] } });
+    const hydrogen = { runtime: 'agy', model: 'gemini-4-hydrogen', effort: null, advisor_model: null, fleet: [], tools: ['net', 'read', 'shell'] } as const;
+    for (const id of ['worker-light', 'gatekeeper-fallback'] as const) {
+      const { revision, ...section } = (await seats(harness)).config;
+      const response = await post(harness, { expected_revision: revision, seats: { ...section, [id]: hydrogen } }, 'seats');
+      expect(response.status).toBe(200);
+      expect((await seats(harness)).config[id]).toEqual(hydrogen);
+    }
+    const { revision, ...section } = (await seats(harness)).config;
+    for (const id of ['orchestrator', 'worker-opus', 'gatekeeper', 'reviewer'] as const) {
+      const response = await post(harness, { expected_revision: revision, seats: { ...section, [id]: hydrogen } }, 'seats');
+      expect([id, response.status, (await response.json()).error.code]).toEqual([id, 422, 'seat_runtime_not_allowed']);
+    }
+  });
+
   test('settings GET and the browser decoder serve the cached pool, with a stale mark and no free model id in the pool', async () => {
-    const freeModel = 'private-settings-model';
+    const freeModel = 'custom/private-settings-model';
     const config = { ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG.worker, model: freeModel } };
     const harness = await startHarness({ agents: PANE_AGENTS, seats: config });
     const directory = join(harness.home, '.repo-harness', 'seats');
@@ -928,7 +970,7 @@ describe('seat settings routes', () => {
     mkdirSync(directory);
     const pi = emptySeatPoolProbe('pi', 'available');
     const report = buildSeatPool(config, [pi], new Date().toISOString());
-    const previous = { ...report, runtimes: report.runtimes.filter(runtime => runtime.id !== 'agy') };
+    const previous = { ...report, seats: report.seats.filter(row => row.seat !== 'reviewer') };
     writeFileSync(path, JSON.stringify(previous));
     expect((await (await fetch(endpoint)).json()).model_pool).toBeUndefined();
     writeFileSync(path, JSON.stringify(report));
@@ -963,12 +1005,12 @@ describe('seat settings routes', () => {
   test('a frontend route with a Pi Neon worker saves and reads back', async () => {
     const harness = await startHarness({ agents: PANE_AGENTS });
     const { revision, ...section } = (await seats(harness)).config;
-    const neon = { ...section['worker-important'], runtime: 'pi' as const, model: 'magpie/agy-cli/gemini-4-neon' };
-    const response = await post(harness, { expected_revision: revision, seats: { ...section, 'worker-important': neon } }, 'seats');
+    const neon = { ...section['worker-opus'], runtime: 'pi' as const, model: 'magpie/agy-cli/gemini-4-neon' };
+    const response = await post(harness, { expected_revision: revision, seats: { ...section, 'worker-opus': neon } }, 'seats');
     expect(response.status).toBe(200);
     const stored = (await seats(harness)).config;
-    expect(stored['worker-important']).toEqual(neon);
-    expect(stored.routing.frontend).toEqual(['worker-important', 'worker-important-fast']);
+    expect(stored['worker-opus']).toEqual(neon);
+    expect(stored.routing.frontend).toEqual(['worker-opus', 'worker-neon']);
   });
 
   test('a configured Pi worker-light in a non-frontend class saves and reads back', async () => {
@@ -982,20 +1024,21 @@ describe('seat settings routes', () => {
     expect(stored.routing.simple_fast).toEqual(['worker-light']);
   });
 
-  test('GET offers only read-only scaffold roles and matches the non-Pi worker defaults', async () => {
+  test('GET offers only read-only scaffold roles and matches the seat fleet defaults', async () => {
     const harness = await startHarness({ agents: PANE_AGENTS });
     const value = await seats(harness);
-    expect(value.config.orchestrator).toEqual({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: ['gh', 'mcp', 'net', 'read', 'shell', 'tasks'], fleet: [] });
+    expect(value.config.orchestrator).toEqual({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: ['gh', 'mcp', 'net', 'read', 'shell', 'tasks'], fleet: ['explorer'] });
     const fleet = ['deep-reasoner', 'explorer'];
     expect(value.config.advisor.fleet).toEqual(fleet);
     expect(value.ranges.roles).toEqual(fleet.map(name => ({ name, writable: false })));
-    for (const id of ['orchestrator', 'advisor', ...WORKER_SEAT_IDS] as const) {
-      expect(value.ranges.seats[id].fleet).toEqual(fleet);
+    expect(value.ranges.seats.advisor.fleet).toEqual(fleet);
+    for (const id of ['orchestrator', 'council', 'worker', 'worker-deep', 'worker-opus', 'worker-neon'] as const) {
+      expect(value.ranges.seats[id].fleet).toEqual(['explorer']);
     }
     for (const id of WORKER_SEAT_IDS) {
-      expect(value.defaults[id]?.fleet).toEqual(id === 'worker-light' ? [] : fleet);
+      expect(value.defaults[id]?.fleet).toEqual(id === 'worker-light' ? [] : ['explorer']);
     }
-    for (const id of ['gatekeeper', 'gatekeeper-deep', 'gatekeeper-fallback', 'reviewer'] as const) {
+    for (const id of ['worker-light', 'gatekeeper', 'gatekeeper-fallback', 'reviewer'] as const) {
       expect(value.ranges.seats[id].fleet).toEqual([]);
     }
     expect(value.ranges.runtimes.map(runtime => [runtime.id, runtime.enabled, runtime.fleet])).toEqual([['claude', true, true], ['codex', true, true], ['pi', true, true], ['agy', false, false]]);
@@ -1036,20 +1079,23 @@ describe('seat settings routes', () => {
   });
 
   test('a credit-mode save names the stale seat and succeeds when that seat is repaired', async () => {
-    const worker = { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'claude', model: null };
+    const claudeSeat = { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'claude' as const, model: null };
     const harness = await startHarness({ agents: { ...PANE_AGENTS, enabled: ['claude', 'pi'] }, seats: {
-      ...DEFAULT_SEATS_CONFIG, worker, 'worker-deep': worker, gatekeeper: { ...DEFAULT_SEATS_CONFIG.gatekeeper!, runtime: 'claude', model: null },
+      ...DEFAULT_SEATS_CONFIG,
+      worker: claudeSeat,
+      'worker-deep': claudeSeat,
+      gatekeeper: { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'codex', model: 'gpt-6.2-sol' },
     } });
     const { revision, ...section } = (await seats(harness)).config;
     const edited = { ...section, routing: { ...section.routing, codex_credit_mode: 'review' } };
     const refused = await post(harness, { expected_revision: revision, seats: edited }, 'seats');
     expect(refused.status).toBe(422);
     expect((await refused.json()).error).toMatchObject({
-      code: 'seat_runtime_not_enabled', message: expect.stringContaining('Fix the gatekeeper-deep seat'),
+      code: 'seat_runtime_not_enabled', message: expect.stringContaining('Fix the gatekeeper seat'),
     });
     expect((await seats(harness)).config.routing.codex_credit_mode).toBe('off');
 
-    const repaired = { ...edited, 'gatekeeper-deep': { ...section['gatekeeper-deep']!, runtime: 'claude', model: null } };
+    const repaired = { ...edited, gatekeeper: { ...section.gatekeeper, runtime: 'claude', model: null } };
     expect((await post(harness, { expected_revision: revision, seats: repaired }, 'seats')).status).toBe(200);
     expect((await seats(harness)).config.routing.codex_credit_mode).toBe('review');
   });
@@ -1073,26 +1119,26 @@ describe('seat settings routes', () => {
     expect((await seats(harness)).config.worker.tools).toEqual(editNet as typeof section.worker.tools);
   });
 
-  test('the planner settings save accepts a read-only fleet and the decoder rejects other tool groups', async () => {
+  test('the council settings save accepts an explorer fleet and the decoder rejects other tool groups', async () => {
     const harness = await startHarness({ agents: PANE_AGENTS });
     const { revision, ...section } = (await seats(harness)).config;
-    const planner = { ...section.reviewer, runtime: 'pi' as const, model: 'magpie/agy-cli/gemini-4-carbon', fleet: ['explorer'] };
+    const council = { ...section.reviewer, runtime: 'pi' as const, model: 'magpie/agy-cli/gemini-4-carbon', fleet: ['explorer'] };
     for (const tool of ['edit', 'gh', 'mcp', 'schedule', 'tasks']) {
-      expect(() => decodeSeatsConfig({ ...section, planner: { ...planner, tools: [tool, 'read'].sort() } }))
-        .toThrow('seats_config_invalid: seats.planner.tools');
+      expect(() => decodeSeatsConfig({ ...section, council: { ...council, tools: [tool, 'read'].sort() } }))
+        .toThrow('seats_config_invalid: seats.council.tools');
     }
-    const saved = await post(harness, { expected_revision: revision, seats: { ...section, planner } }, 'seats');
+    const saved = await post(harness, { expected_revision: revision, seats: { ...section, council } }, 'seats');
     expect(saved.status).toBe(200);
-    expect((await saved.json()).changed_keys).toEqual(['seats.planner']);
-    expect((await seats(harness)).config.planner).toEqual(planner);
+    expect((await saved.json()).changed_keys).toEqual(['seats.council']);
+    expect((await seats(harness)).config.council).toEqual(council);
   });
 
-  test('every seat refuses retired roles with 422 and the orchestrator can save the two scaffold roles', async () => {
+  test('every seat refuses retired roles with 422 and the advisor can save the two scaffold roles', async () => {
     const harness = await startHarness({ agents: PANE_AGENTS });
     const { revision, ...section } = (await seats(harness)).config;
     const original = readFileSync(harness.configPath, 'utf8');
     for (const id of SEAT_IDS) {
-      const seat = section[id] ?? section.gatekeeper;
+      const seat = id === 'council' ? { ...section.reviewer, runtime: 'claude' as const, model: 'fable' } : (section[id] ?? section.gatekeeper);
       for (const role of ['deep-worker', 'fast-worker', 'gatekeeper', 'root-cause-prover']) {
         const response = await post(harness, { expected_revision: revision, seats: { ...section, [id]: { ...seat, fleet: [role] } } }, 'seats');
         expect([id, role, response.status, (await response.json()).error.code]).toEqual([id, role, 422, 'seat_fleet_not_allowed']);
@@ -1103,10 +1149,10 @@ describe('seat settings routes', () => {
       expect([id, response.status, (await response.json()).error.code]).toEqual([id, 422, 'seat_fleet_not_allowed']);
     }
     expect(readFileSync(harness.configPath, 'utf8')).toBe(original);
-    const orchestrator = { ...section.orchestrator, fleet: ['deep-reasoner', 'explorer'] };
-    const saved = await post(harness, { expected_revision: revision, seats: { ...section, orchestrator } }, 'seats');
+    const advisor = { ...section.advisor, fleet: ['explorer'] };
+    const saved = await post(harness, { expected_revision: revision, seats: { ...section, advisor } }, 'seats');
     expect(saved.status).toBe(200);
-    expect((await saved.json()).changed_keys).toEqual(['seats.orchestrator.fleet']);
+    expect((await saved.json()).changed_keys).toEqual(['seats.advisor.fleet']);
   });
 
   test('a stale revision and a reused request_id with another body get 409', async () => {

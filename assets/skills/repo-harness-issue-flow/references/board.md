@@ -26,12 +26,13 @@ Rules that keep the topology safe:
   agent that needs a change in it (a reviewer's fix, a conflict with main, a repair)
   either asks the head owner on the board, or takes the head-owner role
   through a handoff comment first. Two pushers on one branch lose work.
-  Exception: for a Codex worker seat in a linked contract worktree, the
+  Exception: for a native `codex` worker seat in a linked contract worktree, the
   orchestrator is the head owner of record. It commits the worker's diff
   with the worker's message and explicit paths only, pushes the branch,
   opens the PR and pushes each fix round. No other agent pushes to that
   PR. The Codex seat remains the content author and answers review threads
-  through the orchestrator.
+  through the orchestrator. (`pi` workers on `magpie/codex/*` commit, push,
+  and run fix rounds directly as normal head owners.)
 - **Acceptor ≠ writer.** The acceptor of a round did not write the subject
   SHA. A High head needs two reviews, and at least one of them comes from a
   model family different from the writer's (`acceptor.md` §2.2). The other
@@ -215,8 +216,8 @@ lines, then at most a short free-text body. The exact shapes are in
 | `decision` | Issue (parent for cross-issue ones) | Coordinator | A decision that the body does not hold yet, with its reason |
 | `plan` | Parent issue | Coordinator | The plan block of a large parent: merge order, holds, seat limit. A revision supersedes the previous plan |
 | `handoff` | Issue and PR | Current holder, or coordinator on the owner's instruction | Move a claim role. Names prior claim, next holder, exact state |
-| `acceptance claim` | PR | Acceptor, or the coordinator for a gatekeeper round | Take one review in a round: role, round, subject SHA, tier (`acceptor.md`) |
-| `acceptance record` | PR | Acceptor or coordinator | One row per review: round, role, subject SHA, verdict; then the model relation and the findings. The same shape for every review (`templates.md`) |
+| `acceptance claim` | PR | Acceptor, or the coordinator for a gatekeeper/reviewer round | Take one review in a round: role, `Seat: gatekeeper \| reviewer`, round, subject SHA, tier (`acceptor.md`) |
+| `acceptance record` | PR | Acceptor or coordinator | One row per review: `Seat: gatekeeper \| reviewer`, round, role, subject SHA, verdict; then the model relation and the findings. The same shape for every review (`templates.md`) |
 | `unblocked` | PR or issue | Coordinator | A dependency merged. Retarget and continue; merge main only on a conflict |
 | `integration status` | PR | Head owner or integrator | The result of a merge of main (delta, new head, CI), or a merge result with the executor exit code |
 

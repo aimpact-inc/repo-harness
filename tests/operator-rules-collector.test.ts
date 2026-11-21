@@ -43,7 +43,7 @@ function snapshot(id = 'repo-a'): RulesSnapshotV1 {
   const [enforce, promote] = ledger.themes[0]!.actions;
   const status = { ...ledger, orchestration: { parent: 7, plan_comment: true, coordinator_claim: false }, themes: [{ ...ledger.themes[0]!, actions: [
     { ...enforce!, task: { issue: 8, url: 'https://github.com/owner/repo/issues/8', route: 'important_fast', progress: 'unknown', reason: 'claim_unknown',
-      seat: 'worker-important', pull_request: { number: 9, url: 'https://github.com/owner/repo/pull/9', head_sha: 'c'.repeat(40), base_sha: 'd'.repeat(40) } } },
+      seat: 'worker-opus', pull_request: { number: 9, url: 'https://github.com/owner/repo/pull/9', head_sha: 'c'.repeat(40), base_sha: 'd'.repeat(40) } } },
     { ...promote!, task: null },
   ] }] } as RulesSnapshotV1['status'];
   const prompts = [enforce!, promote!].flatMap(action => ROUTING_CLASSES.map(route => ({

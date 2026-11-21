@@ -1,6 +1,6 @@
 import { AGENT_RUNTIME_CAPABILITIES, decodeAgentsSettings, type AgentsSettingsV1 } from '../../core/board/agents-settings';
 import { isReviewRuntimeId } from '../../core/review/review-runtimes';
-import { DEFAULT_SEATS_CONFIG, FRONTEND_SEAT_IDS, PLANNER_TOOLS, ROUTING_CLASSES, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, WORKER_SEAT_IDS, decodeSeatsSettings, seatHostId, type SeatsConfigV1, type SeatsSettingsRequestV1, type SeatsSettingsV1 } from '../../core/board/seats-settings';
+import { ALLOWED_SEAT_FLEET_ROLES, COUNCIL_TOOLS, DEFAULT_SEATS_CONFIG, FRONTEND_SEAT_IDS, ROUTING_CLASSES, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, WORKER_SEAT_IDS, decodeSeatsSettings, seatHostId, type SeatsConfigV1, type SeatsSettingsRequestV1, type SeatsSettingsV1 } from '../../core/board/seats-settings';
 import { SEAT_RECOMMENDED_MODELS } from '../../core/board/recommended-models';
 import type { DocumentationLanguage, DocumentationLanguageReader, DocumentationLanguageWriter, LanguageRead, LanguageReader, LanguageWriter, ReportingHost, ReportingPreset } from '../language-settings';
 import type { OperatorApiErrorV1 } from '../operator-api-error';
@@ -56,24 +56,38 @@ function seatsRanges(enabled: readonly string[]) {
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     roles: SEAT_SCAFFOLD_SUB_AGENTS.map(name => ({ name, writable: false })),
     seats: {
-      orchestrator: { models: SEAT_RECOMMENDED_MODELS.orchestrator, fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all.filter(tool => tool !== 'edit') },
-      advisor: { models: SEAT_RECOMMENDED_MODELS.advisor, fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all.filter(tool => tool !== 'gh') },
-      planner: { models: SEAT_RECOMMENDED_MODELS.planner, fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: PLANNER_TOOLS },
-      worker: { models: SEAT_RECOMMENDED_MODELS.worker, fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all },
-      'worker-deep': { models: SEAT_RECOMMENDED_MODELS['worker-deep'], fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all },
-      'worker-important': { models: SEAT_RECOMMENDED_MODELS['worker-important'], fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all },
-      'worker-important-fast': { models: SEAT_RECOMMENDED_MODELS['worker-important-fast'], fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all },
-      'worker-light': { models: SEAT_RECOMMENDED_MODELS['worker-light'], fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: all },
-      gatekeeper: { models: SEAT_RECOMMENDED_MODELS.gatekeeper, fleet: [], tools: ['net', 'read', 'shell'] },
-      'gatekeeper-deep': { models: SEAT_RECOMMENDED_MODELS['gatekeeper-deep'], fleet: [], tools: ['net', 'read', 'shell'] },
-      'gatekeeper-fallback': { models: SEAT_RECOMMENDED_MODELS['gatekeeper-fallback'], fleet: [], tools: ['net', 'read', 'shell'] },
-      reviewer: { models: SEAT_RECOMMENDED_MODELS.reviewer, fleet: [], tools: ['net', 'read', 'shell'] },
+      orchestrator: { models: SEAT_RECOMMENDED_MODELS.orchestrator, fleet: ALLOWED_SEAT_FLEET_ROLES.orchestrator, tools: all.filter(tool => tool !== 'edit') },
+      advisor: { models: SEAT_RECOMMENDED_MODELS.advisor, fleet: ALLOWED_SEAT_FLEET_ROLES.advisor, tools: all.filter(tool => tool !== 'gh') },
+      council: { models: SEAT_RECOMMENDED_MODELS.council, fleet: ALLOWED_SEAT_FLEET_ROLES.council, tools: COUNCIL_TOOLS },
+      worker: { models: SEAT_RECOMMENDED_MODELS.worker, fleet: ALLOWED_SEAT_FLEET_ROLES.worker, tools: all },
+      'worker-deep': { models: SEAT_RECOMMENDED_MODELS['worker-deep'], fleet: ALLOWED_SEAT_FLEET_ROLES['worker-deep'], tools: all },
+      'worker-opus': { models: SEAT_RECOMMENDED_MODELS['worker-opus'], fleet: ALLOWED_SEAT_FLEET_ROLES['worker-opus'], tools: all },
+      'worker-neon': { models: SEAT_RECOMMENDED_MODELS['worker-neon'], fleet: ALLOWED_SEAT_FLEET_ROLES['worker-neon'], tools: all },
+      'worker-light': { models: SEAT_RECOMMENDED_MODELS['worker-light'], fleet: ALLOWED_SEAT_FLEET_ROLES['worker-light'], tools: all },
+      gatekeeper: { models: SEAT_RECOMMENDED_MODELS.gatekeeper, fleet: ALLOWED_SEAT_FLEET_ROLES.gatekeeper, tools: ['net', 'read', 'shell'] },
+      'gatekeeper-fallback': { models: SEAT_RECOMMENDED_MODELS['gatekeeper-fallback'], fleet: ALLOWED_SEAT_FLEET_ROLES['gatekeeper-fallback'], tools: ['net', 'read', 'shell'] },
+      reviewer: { models: SEAT_RECOMMENDED_MODELS.reviewer, fleet: ALLOWED_SEAT_FLEET_ROLES.reviewer, tools: ['net', 'read', 'shell'] },
     },
     routing: { classes: ROUTING_CLASSES, worker_seats: WORKER_SEAT_IDS, frontend_seats: FRONTEND_SEAT_IDS },
   };
 }
 
 type SeatsWrite = SeatsSettingsRequestV1 & { readonly request_id: string };
+
+const CLAUDE_CODEX_SEATS_FIXTURE: SeatsConfigV1 = {
+  ...DEFAULT_SEATS_CONFIG,
+  advisor: { ...DEFAULT_SEATS_CONFIG.advisor, runtime: 'claude', model: 'opus', effort: 'high' },
+  worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex', model: 'gpt-6.1-terra' },
+  'worker-deep': { ...DEFAULT_SEATS_CONFIG['worker-deep'], runtime: 'codex', model: 'gpt-6.2-sol' },
+  'worker-neon': { ...DEFAULT_SEATS_CONFIG['worker-neon'], runtime: 'claude', model: 'opus' },
+  'worker-light': null,
+  gatekeeper: { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'codex', model: 'gpt-6.2-sol' },
+  routing: {
+    ...DEFAULT_SEATS_CONFIG.routing,
+    important_fast: ['worker-opus', 'worker-neon', 'worker'],
+    simple_fast: ['worker'],
+  },
+};
 
 /**
  * In-page stand-ins for the two settings routes. They share one file, as the
@@ -92,8 +106,10 @@ export function settingsStores(now: number, fixture: 'busy' | 'empty' | 'degrade
     })
     : agentsSettingsFixture(now, fixture);
   let seats: SeatsConfigV1 = fixture === 'busy'
-    ? { ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'claude', model: 'sonnet' }, 'worker-light': null }
-    : DEFAULT_SEATS_CONFIG;
+    ? { ...CLAUDE_CODEX_SEATS_FIXTURE, worker: { ...CLAUDE_CODEX_SEATS_FIXTURE.worker, runtime: 'claude', model: 'opus' } }
+    : fixture === 'degraded'
+      ? CLAUDE_CODEX_SEATS_FIXTURE
+      : DEFAULT_SEATS_CONFIG;
   let serial = 0;
   const nextRevision = () => { serial += 1; return `sha256:${serial.toString(16).padStart(64, '0')}`; };
   const conflict: SettingsWrite = { state: 'refused', status: 409, error: {
@@ -160,7 +176,7 @@ export function settingsStores(now: number, fixture: 'busy' | 'empty' | 'degrade
     // The route checks every seat against agents.enabled before it writes.
     const off = SEAT_IDS.find(id => {
       const seat = body.seats[id];
-      return seat !== null && !agents.config.enabled.includes(seat.runtime);
+      return seat !== null && !agents.config.enabled.includes(seatHostId(seat.runtime));
     });
     if (off !== undefined) {
       return Promise.resolve({ state: 'refused', status: 422, error: {

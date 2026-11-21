@@ -727,7 +727,7 @@ test('collect binds a session by seat, PR and the PR head, across Pi, Claude and
 
   // Two Pi gatekeeper seats and an earlier round share one worktree; the other seat's and the earlier round's sessions are newer.
   const pi = seatFixture([receiptBlock(publishReceipt())]);
-  for (const [name, text] of [['deep.jsonl', session('gatekeeper-deep', PUBLISH_HEAD)], ['round0.jsonl', session('gatekeeper', OLD_HEAD)]] as const) {
+  for (const [name, text] of [['fallback.jsonl', session('gatekeeper-fallback', PUBLISH_HEAD)], ['round0.jsonl', session('gatekeeper', OLD_HEAD)]] as const) {
     writeFileSync(join(pi.directory, name), text);
     newer(join(pi.directory, name));
   }
@@ -736,8 +736,8 @@ test('collect binds a session by seat, PR and the PR head, across Pi, Claude and
   const own = await runCollect(pi);
   expect(own.status, own.stderr).toBe(0);
   expect(JSON.parse(own.stdout)).toMatchObject({ ok: true, head_sha: PUBLISH_HEAD });
-  const deep = await runCollect(pi, undefined, 'gatekeeper-deep');
-  expect(deep.status, deep.stderr).toBe(0);
+  const fallback = await runCollect(pi, undefined, 'gatekeeper-fallback');
+  expect(fallback.status, fallback.stderr).toBe(0);
 
   // Claude Code: string user content under CLAUDE_CONFIG_DIR/projects, with a hook entry before the packet.
   const claude = seatFixture(null);

@@ -382,6 +382,7 @@ The coordinator then posts the receiver's `issue claim` with
 ```text
 repo-harness acceptance claim
 Role: acceptor
+Seat: <gatekeeper | reviewer>
 Round: <n>
 Subject: <head sha>
 Tier: low | medium | high
@@ -393,6 +394,7 @@ Agent: <kind and model>, read-only
 ```text
 repo-harness acceptance record
 Claim: <acceptance claim URL>
+Seat: <gatekeeper | reviewer>
 
 | Round | Role | Subject | Verdict |
 |---|---|---|---|
@@ -406,12 +408,13 @@ Findings:
 - <none when the round has no finding>
 ```
 
-Every review writes this record, one row per review. The fields are `Round`,
-`Role`, `Subject` (the full 40-hex head SHA in backticks), `Verdict`
-(`PASS` or `FAIL`, a colon, then the finding counts) and the
-`Model relation` line. `rh review publish` writes it for rounds
-1 to 5 (`acceptor.md` §4). The board reads only this shape. A record that it cannot
-read makes the PR state unknown, not accepted.
+Every review writes this record, one row per review. The fields are `Seat`
+(`gatekeeper` or `reviewer`, written by `rh review publish` /
+`rh review collect`), `Round`, `Role`, `Subject` (the full 40-hex head SHA
+in backticks), `Verdict` (`PASS` or `FAIL`, a colon, then the finding
+counts) and the `Model relation` line. `rh review publish` writes it for
+rounds 1 to 5 (`acceptor.md` §4). The board reads only this shape. A record
+that it cannot read makes the PR state unknown, not accepted.
 
 ### acceptance disposition (on the PR, coordinator only)
 

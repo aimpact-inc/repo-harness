@@ -6,10 +6,11 @@ import { fileURLToPath } from 'node:url';
 import { decodeAgentsConfig } from '../../core/board/agents-settings';
 import { isRecord } from '../../core/evidence/is-record';
 import { sha256Hex } from '../../core/evidence/sha256';
-import { AGY_SEAT_AGENT, agySeatBrief } from '../../core/board/seat-launch';
+import { agySeatAgentName, agySeatBrief } from '../../core/board/seat-launch';
 import {
   AgySeatSettingsError,
-  PLANNER_TOOLS,
+  ALLOWED_SEAT_FLEET_ROLES,
+  COUNCIL_TOOLS,
   SEAT_IDS,
   SEAT_RUNTIMES,
   SEAT_SCAFFOLD_SUB_AGENTS,
@@ -24,6 +25,7 @@ import {
   seatHostId,
   seatModelShapeValid,
   seatTakesFleet,
+  type LaunchSeatId,
   type SeatConfigV1,
   type SeatModelV1,
   type SeatRoutingV1,
@@ -67,22 +69,21 @@ export class SeatsConfigurationError extends Error {
 const without = (...excluded: SeatTool[]): readonly SeatTool[] => SEAT_TOOLS.filter(tool => !excluded.includes(tool));
 
 /**
- * Seats can use read-only scaffold roles. Writers and reviewers run in their own Herdr seats (#3305).
+ * Per-seat scaffold sub-agent and tool grants (ADR-0006 §3).
  * The orchestrator does not edit (#1472). The advisor may edit proposals (#2032) and does not write GitHub (#1472).
  */
 const SEAT_ACCESS: { readonly [seat in SeatId]: Omit<SeatRangeV1, 'models'> } = {
-  orchestrator: { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: without('edit') },
-  advisor: { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: without('gh') },
-  planner: { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: PLANNER_TOOLS },
-  worker: { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: SEAT_TOOLS },
-  'worker-deep': { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: SEAT_TOOLS },
-  'worker-important': { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: SEAT_TOOLS },
-  'worker-important-fast': { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: SEAT_TOOLS },
-  'worker-light': { fleet: SEAT_SCAFFOLD_SUB_AGENTS, tools: SEAT_TOOLS },
-  gatekeeper: { fleet: [], tools: ['net', 'read', 'shell'] },
-  'gatekeeper-deep': { fleet: [], tools: ['net', 'read', 'shell'] },
-  'gatekeeper-fallback': { fleet: [], tools: ['net', 'read', 'shell'] },
-  reviewer: { fleet: [], tools: ['net', 'read', 'shell'] },
+  orchestrator: { fleet: ALLOWED_SEAT_FLEET_ROLES.orchestrator, tools: without('edit') },
+  advisor: { fleet: ALLOWED_SEAT_FLEET_ROLES.advisor, tools: without('gh') },
+  council: { fleet: ALLOWED_SEAT_FLEET_ROLES.council, tools: COUNCIL_TOOLS },
+  worker: { fleet: ALLOWED_SEAT_FLEET_ROLES.worker, tools: SEAT_TOOLS },
+  'worker-deep': { fleet: ALLOWED_SEAT_FLEET_ROLES['worker-deep'], tools: SEAT_TOOLS },
+  'worker-opus': { fleet: ALLOWED_SEAT_FLEET_ROLES['worker-opus'], tools: SEAT_TOOLS },
+  'worker-neon': { fleet: ALLOWED_SEAT_FLEET_ROLES['worker-neon'], tools: SEAT_TOOLS },
+  'worker-light': { fleet: ALLOWED_SEAT_FLEET_ROLES['worker-light'], tools: SEAT_TOOLS },
+  gatekeeper: { fleet: ALLOWED_SEAT_FLEET_ROLES.gatekeeper, tools: ['net', 'read', 'shell'] },
+  'gatekeeper-fallback': { fleet: ALLOWED_SEAT_FLEET_ROLES['gatekeeper-fallback'], tools: ['net', 'read', 'shell'] },
+  reviewer: { fleet: ALLOWED_SEAT_FLEET_ROLES.reviewer, tools: ['net', 'read', 'shell'] },
 };
 const SEAT_RANGES = Object.fromEntries(SEAT_IDS.map(id => [id, { models: SEAT_RECOMMENDED_MODELS[id], ...SEAT_ACCESS[id] }])) as SeatsRangesV1['seats'];
 
@@ -360,15 +361,19 @@ if (import.meta.main) {
   process.stdout.write(`${JSON.stringify(probes)}\n`, () => process.exit(0));
 }
 
-/** Publish the generated advisor by digest. An existing path can only be reused if it holds these bytes. */
-export function writeAgySeatAgent(config: SeatConfigV1, env: NodeJS.ProcessEnv): string {
+/** Publish the generated agy seat agent by digest. An existing path can only be reused if it holds these bytes. */
+export function writeAgySeatAgent(config: SeatConfigV1, env: NodeJS.ProcessEnv, seat: LaunchSeatId = 'advisor'): string {
+  const agentName = agySeatAgentName(seat);
+  const tools = WORKER_SEAT_IDS.includes(seat as typeof WORKER_SEAT_IDS[number])
+    ? '[view_file, write_to_file, replace_file_content, multi_replace_file_content, run_command, search_web]'
+    : '[view_file, run_command, search_web]';
   const content = Buffer.from([
-    '---', `name: ${AGY_SEAT_AGENT}`, 'description: Repo-harness advisor', 'mainAgent: true',
-    'tools: [view_file, run_command, search_web]', 'inheritMcp: false', '---', '', '# System', '', agySeatBrief(config), '',
+    '---', `name: ${agentName}`, `description: Repo-harness ${seat}`, 'mainAgent: true',
+    `tools: ${tools}`, 'inheritMcp: false', '---', '', '# System', '', agySeatBrief(config, seat), '',
   ].join('\n'));
   const digest = sha256Hex(content);
   let directory = realpathSync(dirname(dirname(globalConfigurationPath(env))));
-  for (const part of ['.repo-harness', 'seats', 'agy', digest, '.agents', 'agents', AGY_SEAT_AGENT]) {
+  for (const part of ['.repo-harness', 'seats', 'agy', digest, '.agents', 'agents', agentName]) {
     directory = join(directory, part);
     try { mkdirSync(directory, { mode: 0o700 }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }

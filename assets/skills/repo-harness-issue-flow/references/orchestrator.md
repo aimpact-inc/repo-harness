@@ -16,7 +16,7 @@ worker is yours, and it names the worker. Every later instruction to a
 worker is a comment on its issue or PR.
 
 Contents: §1 Preflight · §2 Split · §3 Write the boundaries (§3.1
-Planner skeleton) · §4 Parent issue (§4.1 Release set, §4.2 Intake
+Planning tiers and `council`) · §4 Parent issue (§4.1 Release set, §4.2 Intake
 triage) · §5 Gap review · §6 Publish ·
 §7 Dispatch (§7.1 Quota check) · §8 Follow up (§8.1 Triage queue) ·
 §9 Merge and integrate (§9.3 Board merge) · §10 Close out.
@@ -119,40 +119,31 @@ remove. Default to a clean refactor: change every caller, delete the old
 path and update the tests in the same change. Keep compatibility only
 where the issue names a concrete reason.
 
-### 3.1 Planner skeleton
+### 3.1 Planning tiers and `council`
 
-When an issue is Medium or complex, and always when its route names a
-model that tends to over-defend, open one or more `planner` seats before
-you finish the boundaries:
+Follow the three planning tiers (`ADR-0006` §4):
 
-```bash
-rh seats consult --issue <n> --space <id> [--qualifier <word>] [--question <focus>]
-```
+- **L1 (single-module, UI/UX, bounded fixes):** Write the issue `Do`,
+  `Boundaries`, and `Delete list` directly (`N = 0`).
+- **L2 (batch plans, replans, skeleton locking for `Sol`):** Ask `advisor`
+  (`Neon`) to draft the proposal or a 15–30 line skeleton (target
+  functions and signatures, delete list, exact error codes, forbidden
+  fallback and compatibility branches); validate and post it (`N = 0`).
+- **L3 (new large modules, cross-module contract refactors, contested
+  invariants):** `advisor` selects `N ∈ {1, 2, 3}` members from
+  `{fable, carbon, astra}` and triggers `rh seats council --issue <n>
+  --members <csv> [--parent <n>] [--space <id>] [--question <focus>]`
+  (`advisor.md` §1.1), writing blind proposals to
+  `/tmp/rh-council/<repo>/issue-<n>-<member>.md` and synthesizing one
+  unified proposal for you.
 
-Each call opens one read-only `planner` seat in the `plan` tab of that
-space, on the runtime and model of the `planner` seat, and the planner
-reads the issue itself. Ask for a skeleton of 15 to 30 lines: the target
-functions and their signatures, the explicit delete list, the exact error
-codes, and the forbidden fallback and compatibility branches. Run two
-consultations in parallel with a different `--qualifier` each, so that
-each pane writes its own plan path.
-
-The planner writes the full plan outside every worktree, and prints one
-completion line that names it. The command reports the same path as
-`out_path`. The default is `/tmp/rh-plans/<repo>/issue-<n>.md`;
-`--qualifier <word>` makes it
-`/tmp/rh-plans/<repo>/issue-<n>-<word>.md`. Read the path that the command
-prints, with `Read` or `hc file read <path>`. Do not read the plan from
-`hc read` scrollback: a long answer truncates in an alternate-screen TUI
-such as Codex or `agy`.
-
-Review each skeleton against the architecture map, the open issues and the
-rules in force. Paste only the decisions you accept into the issue's
-`要做的 / Do` and `边界 / Boundaries`, then dispatch. The GitHub issue stays
-the single requirement authority: a worker reads its issue and its
-dispatch packet, never a file under `/tmp/rh-plans/`. A skeleton is input
-to the issue text. It replaces no issue field, no acceptance row and no
-review row.
+Review the `advisor` proposal against the architecture map, the open issues
+and the rules in force. Paste only the decisions you accept into the
+issue's `要做的 / Do` and `边界 / Boundaries`, then dispatch. The GitHub
+issue stays the single requirement authority: a worker reads its issue and
+its dispatch packet, never a file under `/tmp/rh-council/`. A proposal or
+skeleton is input to the issue text. It replaces no issue field, no
+acceptance row and no review row.
 
 ## 4. Parent issue
 
@@ -241,13 +232,14 @@ plan:
 | `SHELVE` | An owner roadmap item, or an item that a vendor or upstream blocks | Label `status:deferred` and keep it open, off the dispatch board. It closes only on the owner's word |
 | `CLOSE` | An agent-spawned P2 or P3 issue | Close it as not planned |
 
-Run `rh board cluster --open --json` to review loose issues and
-`rh board cluster --parent <n> --json` to review the issues of a parent.
-Use the module bundles to check write scope, dependencies and tier before
-you choose a plan unit. Use pattern groups to check for a shared fix
-(`advisor.md` §4). Resolve missing or invalid labels and check truncated
-reads before you use the suggested order. Record the final order in the
-parent’s plan comment.
+`advisor` leads pre-dispatch intake triage and bundling (`advisor.md` §1.2): it runs `rh board cluster --parent <n> --include-loose --json` (and handles attention rule `R8`), groups non-overlapping issues by `target_files` and `pattern:<theme>`, and sends `/tmp/rh-triage/<repo>-<parent>.json`. Audit the manifest against the three split red lines (`tier:high` isolated and `<= 2` per bundle; `route:frontend` isolated; distinct parallel units sharing zero `target_files`), resolve missing/invalid labels or truncated reads, then preview and apply labels, sub-issue links, duplicate closures, and the `plan` comment in one step:
+
+```bash
+rh board triage-apply --manifest /tmp/rh-triage/<repo>-<parent>.json --dry-run
+rh board triage-apply --manifest /tmp/rh-triage/<repo>-<parent>.json
+```
+
+Use `rh board cluster --open --json` for loose issues outside a parent.
 
 A defect of one rule in one file costs one PR, one CI run and one review.
 Three rules keep it that way:
@@ -364,22 +356,24 @@ module is in the title so that a list view shows the write scopes.
 - Match the model to the issue. Give a weaker or over-defensive model the
   issues with the tightest boundaries and the clearest acceptance checks.
   Keep contract-design issues for a strong model. When the assigned model
-  fills open decisions, lock them first with a planner skeleton (§3.1) and
+  fills open decisions, lock them first with an L2/L3 skeleton (§3.1) and
   paste the accepted decisions into the issue before you dispatch. A
-  worker never reads `/tmp/rh-plans/`.
+  worker never reads `/tmp/rh-council/`.
 - Review rounds converge by the round rules in `acceptor.md` §2.2.
   Include this rule in the worker brief: before asking for round 2,
   check the fix delta against the open findings for sibling cases, missing
-  test branches and changelog fragment text against behavior. A Claude writer runs
-  one read-only sub-agent for this check. A Pi writer has no sub-agents and
-  does a self-check. The pre-check writes no record and does not replace
-  the review.
+  test branches and changelog fragment text against behavior. Claude and
+  non-light Pi workers (`worker-opus`, `worker-neon`, `worker-deep`,
+  `worker`) may call `explorer` for discovery; `worker-light` has no
+  sub-agents and does a self-check. The pre-check writes no record and
+  does not replace the review.
 - Never wait for the review bot. Answer every bot comment by `acceptor.md` §2.3, and triage a bot finding after merge once.
 - Use the host's dispatch mechanism (an hc terminal in a Herdr.app pane,
   or a top-level host session). A dispatched agent has its own process. A
-  sub-agent runs inside a seat process and is not a dispatch target. You
-  may call only the read-only sub-agents `explorer` and `deep-reasoner`.
-  Every write, the gatekeeper review and the Codex cross-review run in a
+  sub-agent runs inside a seat process and is not a dispatch target.
+  `orchestrator` may call only the read-only sub-agent `explorer` (use
+  `advisor` for `deep-reasoner` boundary checks).
+  Every write, `gatekeeper` review, and `reviewer` review run in a
   seat, for worktree isolation and one writer per file. You do not review
   a PR yourself; route each review of it to another seat. A dispatch does
   not grant publication, deletion or credential authority.
@@ -427,31 +421,35 @@ route line names the fallback seat, and `rh seats launch gatekeeper
 Never start a seat with an argv that `rh seats argv` did not print, and
 never outside a Herdr.app tab.
 `rh board dispatch --parent <n> --space <id>` applies this step to every ready issue of the plan: it reads the `route:<class>` label of each issue (and `touches:credentials`), starts the worktree, posts the claim and opens the worker tab. `--dry-run` prints the decisions only. An issue without one `route:<class>` label is reported and not dispatched.
-`rh board review --parent <n> --space <id>` starts the gatekeeper seat for each ready, green High pull request that has no gatekeeper start marker for its head. The two High seats start in parallel on the same head: one run starts the gatekeeper and the reviewer seat of the configured reviewer's model family (a row belongs to a seat by the family of its model, and the family of the `reviewer` seat of the seats config is the one reviewer family). Each seat has its own marker, so a seat that was not sent retries alone. In round 2 the run starts the seat that raised a blocking finding, and the passing seat only for a delta check when the fix leaves the failing reviewer's files (`acceptor.md` §2.2). A Medium head gets one seat of the other family than the board's `writer_family` (the `modelFamily` of the `Model:` line of the writer claim of the head branch): the gatekeeper for a writer of the reviewer family, the reviewer for any other known family. An unknown writer family (no such claim, no `Model:` line, an unmatched model, or linked issues that disagree) starts no seat and is skipped as `writer_family_unknown`; the orchestrator then starts by hand one reviewer seat of a model family known to differ from the writer's, and that review records its own `Model relation:`. `--pr <n>` reviews that pull request only. A pull request that links a plan-held issue is skipped as `plan_hold`. A head whose gatekeeper is about to start is skipped as `review_family_unavailable` when the effective gatekeeper (the seat of the `gatekeeper:` route line) cannot launch, has a model with no known family, is of the writer's family where it gives the different-family row, or is of the reviewer family where the head takes a reviewer row; the detail names the gap and the route line. The reviewer seat is skipped the same way when its model has no known family, or on a High head when its family is the gatekeeper's, because the two rows are then not independent. `--dry-run` prints the decisions only. The rows that a head, a fix head included, needs and counts are the row rule of `acceptor.md` §2.2.
-Apply the explorer line through the Claude Agent tool's `model` parameter when you call the explorer.
+`rh board review --parent <n> --space <id>` starts the `gatekeeper` (`Sol`) and/or `reviewer` (`Opus`) seats for ready, green pull requests. For a High PR with no start marker for its head, `gatekeeper` and `reviewer` start in parallel on the same head; each carries its own `Seat: gatekeeper | reviewer` marker, so one missed seat retries without restarting the other. In round 2, only the seat that raised a blocking finding restarts (and the passing seat runs a delta check only when the fix leaves the failing reviewer's files; `acceptor.md` §2.2). A Medium PR prefers `gatekeeper` (`Sol`) whenever `gatekeeperFamily !== writer_family` (covering `Opus`, `Neon`, and Flash writers) and selects `reviewer` (`Opus`) when `writer_family === 'openai'` (or when `gatekeeper` cannot launch and `reviewer` differs from `writer_family`). An unknown writer family (no claim `Model:` line, an unmatched model, or linked issues that disagree) skips as `writer_family_unknown`; start one different-family reviewer seat by hand and record its `Model relation:`. `--pr <n>` reviews that pull request only. A pull request that links a plan-held issue skips as `plan_hold`. `--dry-run` prints the decisions only.
+Apply the `explorer` line through the sub-agent call when Claude is reserved (`routing.low_quota_explorer`, default `haiku` high).
 
 Claude saving mode applies when weekly remaining quota is below
 `routing.claude_saving_below_remaining` (default 20). Claude hyper mode applies
 when weekly remaining quota is at or above
 `routing.claude_hyper_at_or_above_remaining` (default 50); saving wins below its
-own threshold. Only in Claude hyper does the advisor take its config entry; in
-every other Claude mode it uses `opus` high. Claude hyper changes no worker
-route and not the orchestrator entry. The `advisor:` line of
-`rh quota` names the advisor model. A seat that runs takes a new
-model only at a tier-2 reset (`/clear`), where `seats reset` starts it again
-from its argv; see Seat reset in herdr-notify. Codex seats and Pi seats on
-`magpie/codex/` keep their configured model and effort at every quota level.
-A Pi advisor on `magpie/agy-cli/` uses its config entry at 50% or more
-`agy_gemini` weekly quota remaining and uses `magpie/agy-cli/gemini-4-neon`
-when the remaining quota is lower or unknown. Quota modes are derived, never
-stored.
+own threshold. Only in Claude hyper does a Claude `advisor` take its config
+entry; in every other Claude mode it uses `opus` high. Claude hyper changes no
+worker route and not the `orchestrator` entry. `routing.agy_saving_below_remaining`
+(default 25) reserves `agy_gemini` for `advisor` (`Neon`) by blocking
+`worker-neon` dispatches below 25% remaining. A Pi `advisor` on `magpie/agy-cli/`
+uses its config entry at 50% or more `agy_gemini` weekly quota remaining and
+uses `magpie/agy-cli/gemini-4-neon` when lower or unknown. A seat takes a new
+model only at a tier-2 reset (`/clear` on Claude, `/new` on Pi), where
+`seats reset` relaunches from argv; see Seat reset in `herdr-notify.md`.
+`pi` `magpie/codex/*` and native `codex` seats keep their configured model
+and effort at every quota level. Quota modes are derived, never stored.
 
-Claude in saving mode or exhausted is reserved for the advisor and
-orchestrator; both use `opus` high. An important non-frontend route that
-holds a Claude-account seat then uses a configured Pi `worker-light`; a null
-or non-Pi `worker-light` gives a `none` route. An important route without a
-Claude-account seat is read as stored.
-Frontend waits for Claude; it has no non-Claude fallback.
+Routes evaluate strictly left-to-right across configured seats after excluding
+reserved or exhausted accounts (for example `important_deep`:
+`['worker-opus', 'worker-neon', 'worker-deep']`; `important_fast`:
+`['worker-opus', 'worker-neon', 'worker', 'worker-light']`; `simple_deep`:
+`['worker-neon', 'worker-deep']`; `simple_fast`: `['worker-light', 'worker']`;
+`frontend`: `['worker-opus', 'worker-neon']`). Claude in saving mode or
+exhausted is reserved for `advisor` and `orchestrator`; routing skips
+`worker-opus` and selects the next eligible non-Claude seat (`worker-neon`,
+`worker-deep`, `worker`, `worker-light`). `frontend` waits for an eligible
+Claude or Neon seat.
 `rh seats launch <seat> --repository-id <id> --owner-exception <url> --cwd <worktree> --task <packet>` lifts the
 reservation refusal (`seat_quota_reserved`) for one launch. The URL must be an
 owner decision on an issue or PR of the checkout's origin repository. The
@@ -467,16 +465,17 @@ such a seat an explicit model, or empty the list.
 An exhausted account takes no new dispatch, review seats included, except
 under the stored credit mode `routing.codex_credit_mode` (`off`, `review` or
 `all`; default `off`). While the ChatGPT account is exhausted and reports
-credits at or above `routing.codex_credit_floor`, `review` admits the
-gatekeeper, the gatekeeper fallback and a ChatGPT-bound reviewer (not
-`gatekeeper-deep`), and `all`
+credits at or above `routing.codex_credit_floor`, `review` admits `gatekeeper`,
+`gatekeeper-fallback`, and a ChatGPT-bound `reviewer`, and `all`
 admits every ChatGPT-bound seat. Those route and seat lines say `on credits`;
 name it in the dispatch note. Only the owner sets `codex_credit_mode`; a seat
 does not write it, and a joint decision does not cover it.
 `tight` is a display state only; it does not reserve Claude or change routing.
 
-Claude seats use the Claude account, Codex seats and Pi seats on `magpie/codex/` use ChatGPT, and the DeepSeek Pi seat
-has no account reading. Put the reading in the `Dispatch reading:` line of each claim:
+Claude seats use `claude`; native `codex` and `pi` `magpie/codex/*` seats use
+`chatgpt`; native `agy` and `pi` `magpie/agy-cli/*` seats use `agy_gemini` (or
+`agy_other`); Flash API `worker-light` / `gatekeeper-fallback` seats have no
+account reading. Put the reading in the `Dispatch reading:` line of each claim:
 account state, used %, pace, reset time and reading time.
 
 | Account state | Route rule | Coordinator action |
@@ -542,45 +541,43 @@ host's PR events or check when the worker reports.
   that meets the Low accept-seat skip gets no Codex, Herdr or OAR accept
   seat (`docs/reference-configs/agentic-development-flow.md`, Review by
   risk). Give each ready PR that needs review its own review seat at once.
-  A Medium PR takes one reviewer. A High PR takes its two reviews in
-  parallel on the same head. In round 2 the reviewer that raised a
+  A Medium PR takes one reviewer (`gatekeeper` for non-OpenAI writers,
+  `reviewer` for OpenAI writers). A High PR takes `gatekeeper` and `reviewer`
+  in parallel on the same head. In round 2 the reviewer that raised a
   blocking finding runs again; the passing reviewer runs a delta check
   only when the fix leaves the failing reviewer's files (`acceptor.md`
   §2.2).
-  A coordinator may add `gatekeeper-deep` as an optional second Codex
-  review row: a read-only Codex seat on a different model than
-  `gatekeeper`. Start it with `rh seats launch gatekeeper-deep --repository-id <id> --pr <n> --cwd <worktree> --task <packet>`.
-  Both Codex rows write the Agent line `codex (<model>)`. When the host
-  observes no model, both write `codex (unobserved)`, share one claim and
-  count once toward the High two-claim rule.
   Send each reviewer the review packet of `acceptor.md` §2.1. Each reviewer
-  posts an `acceptance claim` before it reads. Who reviews each
-  round, and how many claims a round has, follow `acceptor.md` §2.2.
+  posts an `acceptance claim` (carrying `Seat: gatekeeper` or `Seat: reviewer`)
+  before it reads. Who reviews each round, and how many claims a round
+  has, follow `acceptor.md` §2.2.
   Ship the whole verdict bundle of a round before the worker pushes: the
   worker fixes and pushes once per round, not once per finding.
-  Findings take the severities of `acceptor.md` §3. A P2 and a P3 do not
-  block the PR and open no issue: the `PASS` record carries them, and you
-  resolve their threads with the `noted` reply (`acceptor.md` §2.2,
-  `templates.md`).
+  Findings take the severities of `acceptor.md` §3. Only defects reachable
+  in ordinary use (or by an accident) or touching I1/I2/I3 are P0 or P1;
+  adversarial-only assumptions and unrequested defensive fallbacks stay P3
+  notes. A P2 and a P3 do not block the PR and open no issue: the `PASS`
+  record carries them, and you resolve their threads with the `noted` reply
+  (`acceptor.md` §2.2, `templates.md`).
   Send the findings to the worker that
   wrote the PR only when the worker cannot read them: the worker reads the
   acceptance records and review threads on its PR and runs its own fix
-  rounds (`worker.md` §7). A Codex worker is the exception: you push its
-  fix rounds (`board.md`). You make the second-finding choice of the class rule
-  (`worker.md` §7). For the design change, post a `scope change` with one
-  mechanism rule that covers the class, and require the fix to show the rule
-  on each case that the reviews found (one table-driven test or a replay of
-  those inputs). Round 2 reviews the rule. A fix of one instance leaves
-  the class open after the last round.
+  rounds (`worker.md` §7). A native `codex`-runtime worker is the exception:
+  you push its fix rounds (`board.md`). You make the second-finding choice of
+  the class rule (`worker.md` §7). For the design change, post a
+  `scope change` with one mechanism rule that covers the class, and require
+  the fix to show the rule on each case that the reviews found (one
+  table-driven test or a replay of those inputs). Round 2 reviews the rule.
+  A fix of one instance leaves the class open after the last round.
   Record the result in one acceptance record comment on
-  the PR, in the row shape of `templates.md`: round, role, subject,
+  the PR, in the row shape of `templates.md`: `Seat`, round, role, subject,
   verdict and model relation.
   The review brief forbids every GitHub write: the coordinator publishes
-  a review row with `rh review collect`. Attention rule A19 names a review seat that is done
-  or idle for more than 10 min while its PR has no record of its harness
-  after that time: read its pane and publish its row. The record is
-  per harness, not per seat: a `gatekeeper` record from the same harness
-  hides A19 for a `gatekeeper-deep` pane that has no row of its own.
+  a review row with `rh review collect` (which sets `Seat: gatekeeper` for
+  `gatekeeper` and `gatekeeper-fallback`, and `Seat: reviewer` for
+  `reviewer`). Attention rule A19 names a review seat that is done or idle
+  for more than 10 min while its PR has no record of its seat after that
+  time: read its pane and publish its row.
 - **Defensive code.** Reject compatibility branches, fallbacks and
   speculative guards that the issue did not ask for, even when the tests
   pass. Quote the boundary line. This is the most common reason to send a

@@ -180,8 +180,9 @@ recorded at write time does.
   the producer's branch as its base.
 - Open as draft while a dependency is unmerged, otherwise ready.
 - Commit, push the branch and open the PR yourself as soon as your checks
-  pass (§5). Do not wait for a push or PR go from the coordinator. A Codex
-  worker in a linked contract worktree does not push: the coordinator
+  pass (§5). Do not wait for a push or PR go from the coordinator. (`pi`
+  workers on `magpie/codex/*` commit and push directly too.) A native
+  `codex` worker in a linked contract worktree does not push: the coordinator
   pushes for it (`board.md`, One pusher per PR).
 - Post `issue claim status` with `Status: ready for review; claim remains
   active`, the PR URL, the head SHA and the CI state, in the shape of
@@ -240,10 +241,11 @@ You are the head owner. Only you push to this branch.
   §2.2.
 - **Pre-check before review.** Before asking for round 2, check the
   fix delta against the open findings for sibling cases, missing test
-  branches and changelog fragment text against behavior. A Claude writer runs one
-  read-only sub-agent for this check. A Pi writer has no sub-agents and
-  does a self-check. The pre-check writes no record and does not replace
-  the review.
+  branches and changelog fragment text against behavior. Claude and
+  non-light Pi workers (`worker-opus`, `worker-neon`, `worker-deep`,
+  `worker`) may call `explorer` for discovery; `worker-light` has no
+  sub-agents and does a self-check. The pre-check writes no record and
+  does not replace the review.
 - **Main moved.** A PR whose base is behind main merges with no sync, so
   merge main into your branch only for a conflict with main. A stale base
   is not a reason (`orchestrator.md` §8, CI red). When the coordinator

@@ -2,7 +2,7 @@
 // the seat brief. Each limit names what the host does with it, so the output
 // never claims a limit that the host cannot apply.
 import { PANE_PREFIX } from '../terminal/pane-prefix';
-import { isPlannerSeat, isReviewSeat, isWorkerSeat, seatTakesFleet, type LaunchSeatId, type SeatConfigV1, type SeatTool } from './seats-settings';
+import { isCouncilSeat, isReviewSeat, isWorkerSeat, seatTakesFleet, type LaunchSeatId, type SeatConfigV1, type SeatTool } from './seats-settings';
 import { SEAT_EFFORT_ENV, SEAT_ENV, SEAT_MODEL_ENV, SEAT_REPOSITORY_ENV, isResetSeat } from './seat-reset';
 
 /** `seats`: the stored section. `defaults`: no section, so `DEFAULT_SEATS_CONFIG`. */
@@ -134,10 +134,10 @@ function roleParagraphs(seat: LaunchSeatId, config: SeatConfigV1, fleet: readonl
       evidence,
     ];
   }
-  if (isPlannerSeat(seat)) {
+  if (isCouncilSeat(seat)) {
     return [
-      'You are the planner seat. Read the issue and the relevant code. Research the architecture, weigh trade-offs, and give your judgment. Produce an implementation skeleton with the affected files and interfaces, a delete list, a forbidden-additions list, and checks that prove the result.',
-      'Open the plan with `RECOMMENDATION: <one sentence> — confidence: HIGH|MEDIUM|LOW`. Write the plan only to the caller-provided scratch file outside every Git repository and worktree, such as `/tmp/rh-plans/...`. Do not choose an output path yourself. Do not edit source, commit, push, write to GitHub, or message a worker.',
+      'You are a council seat. Read the issue and the relevant code. Research the architecture, weigh trade-offs, and give your independent judgment. Produce an implementation skeleton with the affected files and interfaces, a delete list, a forbidden-additions list, and checks that prove the result.',
+      'Open the proposal with `RECOMMENDATION: <one sentence> — confidence: HIGH|MEDIUM|LOW`. Write the proposal only to the caller-provided scratch file outside every Git repository and worktree, such as `/tmp/rh-council/...`. Do not choose an output path yourself. Do not edit source, commit, push, write to GitHub, or message a worker.',
       fleet.length === 0 ? 'Gather evidence yourself. Do not call sub-agents.'
         : `Use the configured read-only sub-agents ${roleList(fleet, name)} in parallel to gather codebase context in distinct scopes. Keep judgment and synthesis for yourself. Call no other agent type.`,
     ];
@@ -163,12 +163,12 @@ const KEEP_YOURSELF = {
 
 /**
  * `fleet` is the list that the brief names.
- * The planner brief already defines its file write rule.
+ * The council brief already defines its file write rule.
  */
 function brief(seat: LaunchSeatId, config: SeatConfigV1, fleet: readonly string[], limits: readonly SeatLimitV1[], name: RoleName = role => role): string {
   const kept = (Object.keys(KEEP_YOURSELF) as (keyof typeof KEEP_YOURSELF)[]).flatMap((level) => {
     const groups = limits.flatMap(limit => (limit.level === level && limit.subject !== 'fleet' && limit.subject !== 'hook'
-      && !(isPlannerSeat(seat) && limit.subject === 'edit') ? [GROUP_TEXT[limit.subject]] : []));
+      && !(isCouncilSeat(seat) && limit.subject === 'edit') ? [GROUP_TEXT[limit.subject]] : []));
     return groups.length === 0 ? [] : [`${KEEP_YOURSELF[level]} ${groups.join(' ')}`];
   });
   return [...roleParagraphs(seat, config, fleet, name), ...kept].join('\n\n');
@@ -260,7 +260,7 @@ function codexLaunch(seat: LaunchSeatId, config: SeatConfigV1): Omit<SeatLaunchV
 
 function piLaunch(seat: LaunchSeatId, config: SeatConfigV1, roleDirectory: string | undefined, hookExtension: string | undefined, repositoryId: string | undefined): Omit<SeatLaunchV1, 'protocol' | 'kind' | 'seat' | 'runtime' | 'source'> {
   const review = isReviewSeat(seat);
-  const excludeEdits = review || isPlannerSeat(seat);
+  const excludeEdits = review || isCouncilSeat(seat);
   // Pi's denylist blocks the edit/write tools; shell paths stay open. pi-subagents does not refuse a role outside the fleet.
   const limits: SeatLimitV1[] = [
     ...OFF_GROUPS(config).map(group => ({
@@ -305,13 +305,22 @@ export const AGY_COMMAND_PREFIXES = [
   'rg', 'ls', 'cat',
 ];
 
-export const AGY_DENIED_COMMANDS: readonly string[] = [
-  ...GITHUB_WRITE_COMMANDS,
+const AGY_COORDINATOR_DENIED_COMMANDS: readonly string[] = [
   'rh board attention start',
   'rh board merge', 'rh board dispatch', 'rh board review', 'rh board post',
   'rh board triage-apply', 'rh board closeout', 'rh board migrate-dependencies',
   'rh seats launch', 'rh seats reset', 'rh publication merge',
   'rh review collect', 'rh review publish',
+];
+
+export const AGY_DENIED_COMMANDS: readonly string[] = [
+  ...GITHUB_WRITE_COMMANDS,
+  ...AGY_COORDINATOR_DENIED_COMMANDS,
+];
+
+export const AGY_WORKER_DENIED_COMMANDS: readonly string[] = [
+  'gh issue close', 'gh pr close', 'gh pr merge', 'gh release create',
+  ...AGY_COORDINATOR_DENIED_COMMANDS,
 ];
 
 // MCP and fleet omission must be confirmed in a native agy session before reporting enforcement.
@@ -325,11 +334,25 @@ export const AGY_SEAT_LIMITS: readonly SeatLimitV1[] = [
   { subject: 'hook', level: 'common_commands' },
 ];
 
+export const AGY_WORKER_LIMITS: readonly SeatLimitV1[] = AGY_SEAT_LIMITS.filter(
+  limit => limit.subject !== 'edit' && limit.subject !== 'gh',
+);
+
+export const agySeatLimits = (seat: LaunchSeatId = 'advisor'): readonly SeatLimitV1[] =>
+  isWorkerSeat(seat) ? AGY_WORKER_LIMITS : AGY_SEAT_LIMITS;
+
 export const AGY_SEAT_AGENT = 'rh-advisor';
 
-export function agySeatBrief(config: SeatConfigV1): string {
-  return [brief('advisor', config, [], AGY_SEAT_LIMITS), 'Never read auth or credential files.',
-    'When Stop requests a handoff, send it to the orchestrator. After this pane ends, the orchestrator starts a new advisor pane with rh seats launch advisor and gives it the handoff.'].join('\n\n');
+export const agySeatAgentName = (seat: LaunchSeatId = 'advisor'): string => seat === 'advisor' ? AGY_SEAT_AGENT : `rh-${seat}`;
+
+export function agySeatBrief(config: SeatConfigV1, seat: LaunchSeatId = 'advisor'): string {
+  return [
+    brief(seat, config, [], agySeatLimits(seat)),
+    'Never read auth or credential files.',
+    ...(seat === 'advisor' ? [
+      'When Stop requests a handoff, send it to the orchestrator. After this pane ends, the orchestrator starts a new advisor pane with rh seats launch advisor and gives it the handoff.',
+    ] : []),
+  ].join('\n\n');
 }
 
 interface AgyLaunchInputs {
@@ -338,19 +361,22 @@ interface AgyLaunchInputs {
   readonly cwd: string;
 }
 
-function agyLaunch(config: SeatConfigV1, repositoryId: string | undefined, input: AgyLaunchInputs): RuntimeLaunch {
+function agyLaunch(seat: LaunchSeatId, config: SeatConfigV1, repositoryId: string | undefined, input: AgyLaunchInputs): RuntimeLaunch {
   const model = config.model;
   if (model === null) throw new Error('agy requires an explicit model.');
-  const env = repositoryId === undefined ? [] : [`${SEAT_ENV}=advisor`, `${SEAT_REPOSITORY_ENV}=${repositoryId}`, `${SEAT_MODEL_ENV}=${model}`];
+  const env = isResetSeat(seat) && repositoryId !== undefined
+    ? [`${SEAT_ENV}=${seat}`, `${SEAT_REPOSITORY_ENV}=${repositoryId}`, `${SEAT_MODEL_ENV}=${model}`]
+    : [];
+  const denied = isWorkerSeat(seat) ? AGY_WORKER_DENIED_COMMANDS : AGY_DENIED_COMMANDS;
   const settings = JSON.stringify({ trustedWorkspaces: [input.cwd], permissions: {
     allow: AGY_COMMAND_PREFIXES.map(command => `command(${command})`),
-    deny: AGY_DENIED_COMMANDS.map(command => `command(${command})`),
+    deny: denied.map(command => `command(${command})`),
   } });
   return {
     argv: [...seatEnv(env), input.executable, '--mode', 'accept-edits', '--model', model,
-      '--add-dir', input.directory, '--agent', AGY_SEAT_AGENT, '--settings', settings],
-    brief: agySeatBrief(config),
-    limits: AGY_SEAT_LIMITS,
+      '--add-dir', input.directory, '--agent', agySeatAgentName(seat), '--settings', settings],
+    brief: agySeatBrief(config, seat),
+    limits: agySeatLimits(seat),
   };
 }
 
@@ -370,7 +396,7 @@ function runtimeLaunch(runtime: SeatConfigV1['runtime'], seat: LaunchSeatId, con
     case 'pi': return piLaunch(seat, config, options.piRoleDirectory, options.piHookExtension, options.repositoryId);
     case 'agy': {
       if (options.agy === undefined) throw new Error('agy requires verified launch inputs.');
-      return agyLaunch(config, options.repositoryId, options.agy);
+      return agyLaunch(seat, config, options.repositoryId, options.agy);
     }
     default: throw new Error(`Unsupported seat runtime ${runtime satisfies never}.`);
   }
@@ -380,7 +406,7 @@ export function buildSeatLaunch(seat: LaunchSeatId, config: SeatConfigV1, source
   return { protocol: 1, kind: 'seat_launch', seat, runtime: config.runtime, source, ...runtimeLaunch(config.runtime, seat, config, claudeAgentTypes, options) };
 }
 
-const PANE_ROLE = { orchestrator: 'orch', advisor: 'adv', planner: 'pl', worker: 'w', 'worker-deep': 'w', 'worker-important': 'w', 'worker-important-fast': 'w', 'worker-light': 'w', gatekeeper: 'gk', 'gatekeeper-deep': 'gd', reviewer: 'rv' } as const;
+const PANE_ROLE = { orchestrator: 'orch', advisor: 'adv', council: 'cn', worker: 'w', 'worker-deep': 'w', 'worker-opus': 'w', 'worker-neon': 'w', 'worker-light': 'w', gatekeeper: 'gk', reviewer: 'rv' } as const;
 const PANE_NAME_MAX = 32;
 const POSITIVE = /^[1-9][0-9]*$/u;
 const WORD = /^[a-z][a-z0-9]*$/u;
@@ -402,7 +428,7 @@ export interface SeatPaneNameInput {
 
 /**
  * The hc `--name` and Claude `-n` of a seat pane: `<prefix>-<role>[-<item>][-<qualifier>]`. The worker item is its
- * issue or `rel<digits>`; the planner item is its issue; the reviewer item is its PR.
+ * issue or `rel<digits>`; the council item is its issue; the reviewer item is its PR.
  */
 export function seatPaneName(input: SeatPaneNameInput): string {
   const fail = (why: string): never => { throw new SeatPaneNameError(`Pane name: ${why}.`); };
@@ -421,9 +447,9 @@ export function seatPaneName(input: SeatPaneNameInput): string {
     if (pr === undefined || !POSITIVE.test(pr)) fail(`a ${seat} needs a PR, a positive decimal integer`);
     if (issue !== undefined || release !== undefined) fail(`a ${seat} takes only a PR`);
     item = pr;
-  } else if (isPlannerSeat(seat)) {
-    if (issue === undefined || !POSITIVE.test(issue)) fail('a planner needs an issue, a positive decimal integer');
-    if (pr !== undefined || release !== undefined) fail('a planner takes only an issue');
+  } else if (isCouncilSeat(seat)) {
+    if (issue === undefined || !POSITIVE.test(issue)) fail('a council seat needs an issue, a positive decimal integer');
+    if (pr !== undefined || release !== undefined) fail('a council seat takes only an issue');
     item = issue;
   } else if (issue !== undefined || pr !== undefined || release !== undefined || qualifier !== undefined) {
     fail(`the ${seat} pane takes no item and no qualifier`);
@@ -436,11 +462,11 @@ export function seatPaneName(input: SeatPaneNameInput): string {
 
 /**
  * The Herdr.app tab of a new seat pane, before the fullness suffix: the orchestrator tab, the worker tab of its parent
- * issue (`other` without one), the plan tab, or the review tab. A full tab gets the next number, for example `#1000 2`.
+ * issue (`other` without one), the council tab, or the review tab. A full tab gets the next number, for example `#1000 2`.
  */
 export function seatTabName(seat: LaunchSeatId, parent?: string): string {
   if (parent !== undefined && !POSITIVE.test(parent)) throw new SeatPaneNameError('Tab name: the parent must be a positive decimal integer.');
-  if (isPlannerSeat(seat)) return 'plan';
+  if (isCouncilSeat(seat)) return 'council';
   if (isReviewSeat(seat)) return 'review';
   if (isWorkerSeat(seat)) return parent === undefined ? 'other' : `#${parent}`;
   return 'orch';

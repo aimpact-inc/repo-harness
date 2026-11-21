@@ -1,7 +1,7 @@
 import {
   AGY_SEAT_TOOLS,
+  COUNCIL_TOOLS,
   DEFAULT_SEATS_CONFIG,
-  PLANNER_TOOLS,
   ROUTING_CLASSES,
   ROUTING_KEYS,
   SEAT_IDS,
@@ -23,6 +23,7 @@ import {
   type SeatTool,
   type WorkerSeatId,
 } from '../core/board/seats-settings';
+import { AGY_HYDROGEN_ENTRY } from '../core/board/model-catalog';
 import { AGY_ADVISOR_STARTER } from '../core/board/recommended-models';
 import { decodeSeatPool } from '../core/board/seat-pool';
 import { isRecord } from '../core/evidence/is-record';
@@ -100,21 +101,30 @@ const patch = (draft: SeatsConfigV1, seat: SeatId, change: Partial<SeatConfigV1>
 
 /**
  * A new runtime keeps the model only when it is a recommended entry of the seat on that runtime, keeps the effort only
- * where the runtime accepts it, and keeps fleet roles where the runtime takes them. Codex always runs commands,
+ * where the runtime accepts it, and keeps fleet roles where the runtime and seat take them. Codex always runs commands,
  * so its shell group is on. The active runtime changes nothing.
  */
 export function setSeatRuntime(draft: SeatsConfigV1, seat: SeatId, runtime: SeatRuntime, ranges: SeatsSettingsV1['ranges']): SeatsConfigV1 {
   const range = ranges.runtimes.find(entry => entry.id === runtime)!;
   const current = draft[seat]!;
   if (current.runtime === runtime) return draft;
-  if (runtime === 'agy') return patch(draft, seat, { ...AGY_ADVISOR_STARTER, advisor_model: null, effort: null, fleet: [], tools: AGY_SEAT_TOOLS });
-  const model = ranges.seats[seat].models.some(entry => entry.runtime === runtime && entry.model === current.model) ? current.model : null;
+  if (runtime === 'agy') {
+    const starter = seat === 'advisor' || seat === 'worker-neon'
+      ? AGY_ADVISOR_STARTER
+      : seat === 'council'
+        ? (ranges.seats.council.models.find(entry => entry.runtime === 'agy') ?? AGY_ADVISOR_STARTER)
+        : AGY_HYDROGEN_ENTRY;
+    return patch(draft, seat, { ...starter, advisor_model: null, effort: null, fleet: [], tools: AGY_SEAT_TOOLS });
+  }
+  const model = ranges.seats[seat].models.some(entry => entry.runtime === runtime && entry.model === current.model)
+    ? current.model
+    : seat === 'council' ? (ranges.seats.council.models.find(entry => entry.runtime === runtime)?.model ?? null) : null;
   return patch(draft, seat, {
     runtime,
     model,
     advisor_model: runtime === 'claude' ? current.advisor_model : null,
     effort: range.effort ? current.effort : null,
-    fleet: range.fleet ? current.fleet : [],
+    fleet: range.fleet ? current.fleet.filter(role => ranges.seats[seat].fleet.includes(role)) : [],
     tools: runtime === 'codex' ? toggled(current.tools, 'shell', true) : current.tools,
   });
 }
@@ -137,17 +147,23 @@ export function setPiSubAgentModel(draft: SeatsConfigV1, role: SeatScaffoldSubAg
 }
 
 /**
- * Switching the gatekeeper-fallback seat on starts from a Pi seat on the DeepSeek model, outside the model family
+ * Switching the gatekeeper-fallback seat on starts from a Pi Flash seat outside the model family
  * and the account of the default gatekeeper; the seat has no default of its own.
  */
 export const GATEKEEPER_FALLBACK_STARTER: SeatConfigV1 = Object.freeze({
   runtime: 'pi', model: DEFAULT_SEATS_CONFIG['worker-light']!.model, advisor_model: null, effort: null, tools: DEFAULT_SEATS_CONFIG.gatekeeper.tools, fleet: [],
 });
 
-export function plannerStarter(ranges: SeatsSettingsV1['ranges']): SeatConfigV1 | null {
-  const recommended = ranges.seats.planner.models.find(entry => ranges.runtimes.some(runtime => runtime.id === entry.runtime && runtime.enabled));
+export function councilStarter(ranges: SeatsSettingsV1['ranges']): SeatConfigV1 | null {
+  const recommended = ranges.seats.council.models.find(entry => ranges.runtimes.some(runtime => runtime.id === entry.runtime && runtime.enabled));
   if (recommended === undefined) return null;
-  return { ...recommended, advisor_model: null, effort: null, tools: PLANNER_TOOLS, fleet: seatTakesFleet(recommended) ? ['explorer'] : [] };
+  return {
+    ...recommended,
+    advisor_model: null,
+    effort: null,
+    tools: recommended.runtime === 'agy' ? AGY_SEAT_TOOLS : COUNCIL_TOOLS,
+    fleet: seatTakesFleet(recommended) ? ['explorer'] : [],
+  };
 }
 
 /** An optional seat set to null leaves the routes, since the section refuses a route that names an unconfigured seat. */
@@ -159,7 +175,7 @@ export function setOptionalSeat(draft: SeatsConfigV1, id: OptionalSeatId, seat: 
 
 export const setRoute = (draft: SeatsConfigV1, task: RoutingClass, seats: readonly WorkerSeatId[]): SeatsConfigV1 =>
   ({ ...draft, routing: { ...draft.routing, [task]: seats } });
-type RoutingValueField = 'claude_saving_below_remaining' | 'claude_hyper_at_or_above_remaining' | 'exhausted_at_or_above_used' | 'codex_credit_mode' | 'codex_credit_floor';
+type RoutingValueField = 'claude_saving_below_remaining' | 'claude_hyper_at_or_above_remaining' | 'agy_saving_below_remaining' | 'exhausted_at_or_above_used' | 'codex_credit_mode' | 'codex_credit_floor';
 export const setRoutingValue = <Field extends RoutingValueField>(draft: SeatsConfigV1, field: Field, value: SeatRoutingV1[Field]): SeatsConfigV1 =>
   ({ ...draft, routing: { ...draft.routing, [field]: value } });
 export const setExplorer = (draft: SeatsConfigV1, change: Partial<SeatModelV1>): SeatsConfigV1 =>

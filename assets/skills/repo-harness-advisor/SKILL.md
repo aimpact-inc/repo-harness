@@ -81,13 +81,12 @@ agent starts. Report the `limits` of the `seats argv` JSON.
 The advisor seat reads structural observations before planning a module refactor or
 during its periodic health audit (`repo-harness-issue-flow` `references/advisor.md` §2):
 
-- Run `rh arch refactor recommendations --json` (or pass the scoped `--node <capability-id>`
-  / `--path <path>` option once `#3346` lands). Never run this on worker `Stop` hooks
+- Run `rh arch refactor recommendations --json` (or pass `--node <capability-id>`
+  / `--path <path>` for a scoped slice). Never run this on worker `Stop` hooks
   or call `archctx` from `PATH`.
 - Present `recommended` observations to the owner and record each owner decision with
   `rh arch refactor decide <id> accept|defer|reject --reason "<text>" --snapshot-digest <digest>`.
 - Route `accepted` single-module observations into `advisor` PR bundles. For a
   cross-capability cycle or boundary split, attach the `RefactorRecommendation`
   metrics and `rh arch module review-prompt <capability-id> --json` output to the
-  L3 `council` consultation brief (`rh seats consult` / planner packet;
-  `council` subcommand per ADR-0006 §4).
+  L3 `council` consultation brief (`rh seats council --issue <n> --members <csv>`).
