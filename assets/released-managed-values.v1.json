@@ -102,7 +102,8 @@
     "v0.34.0",
     "v0.35.0",
     "v0.35.1",
-    "v0.35.2"
+    "v0.35.2",
+    "v0.36.1"
   ],
   "packageScripts": {
     "check:architecture-sync": [
@@ -2325,6 +2326,7 @@
         "sha256:0867ebf51d139e026dc8c3ebff1e0aff7577ea408be5722974f10caae5afc842",
         "sha256:6038a74d11852a4bcc85e23eb34377456df21ebce358c6bb6ab2aa85f7f85a73",
         "sha256:731954322da34a273e628f5b8f839f0da2634f87d5c6e165d9321e6d7bdbcdba",
+        "sha256:756d24d99f788fd9ce38095c979594d20b3c3cf66e89d2e2ebee6b9a0c601109",
         "sha256:7b27af328e11769155744764affd5c5417b3363e1b059ae964372ee185eff020",
         "sha256:e5215b2dc5f3915de77b95b1ef5d7e0932a232e4cf92a386e34a7c9d358e4c4a"
       ],
