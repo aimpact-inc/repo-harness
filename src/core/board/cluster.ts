@@ -366,10 +366,72 @@ function sharedTargetFiles(members: readonly ClassifiedIssue[]): string[] {
   return [...counts.entries()].filter(([, count]) => count >= 2).map(([file]) => file).sort();
 }
 
+function transitiveAncestors(
+  ordered: readonly number[],
+  byIssue: ReadonlyMap<number, ClassifiedIssue>,
+): ReadonlyMap<number, ReadonlySet<number>> {
+  const inBucket = new Set(ordered);
+  const direct = new Map<number, number[]>(ordered.map(num => [
+    num,
+    byIssue.get(num)!.blocked_by.filter(blocker => inBucket.has(blocker)),
+  ]));
+  const ancestors = new Map<number, ReadonlySet<number>>();
+  // `ordered` is already in topological order (blockers before dependents).
+  for (const num of ordered) {
+    const reach = new Set<number>();
+    for (const blocker of direct.get(num)!) {
+      reach.add(blocker);
+      const upper = ancestors.get(blocker);
+      if (upper !== undefined) {
+        for (const ancestor of upper) reach.add(ancestor);
+      }
+    }
+    ancestors.set(num, reach);
+  }
+  return ancestors;
+}
+
+function isOrderConvex(
+  component: readonly number[],
+  ancestors: ReadonlyMap<number, ReadonlySet<number>>,
+  ordered: readonly number[],
+): boolean {
+  const memberSet = new Set(component);
+  for (const mid of ordered) {
+    if (memberSet.has(mid)) continue;
+    const reachesMember = component.some(u => ancestors.get(mid)!.has(u));
+    if (!reachesMember) continue;
+    const memberReachesFromMid = component.some(w => ancestors.get(w)!.has(mid));
+    if (memberReachesFromMid) return false;
+  }
+  return true;
+}
+
+function sliceOrderConvex(
+  nodes: readonly number[],
+  size: number,
+  ancestors: ReadonlyMap<number, ReadonlySet<number>>,
+  allOrdered: readonly number[],
+): number[][] {
+  const chunks: number[][] = [];
+  let current: number[] = [];
+  for (const node of nodes) {
+    const candidate = [...current, node];
+    if (candidate.length <= size && isOrderConvex(candidate, ancestors, allOrdered)) {
+      current = candidate;
+    } else {
+      if (current.length > 0) chunks.push(current);
+      current = [node];
+    }
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
 function overlapComponents(
   ordered: readonly number[],
   byIssue: ReadonlyMap<number, ClassifiedIssue>,
-): { readonly components: number[][]; readonly nonOverlapping: number[] } {
+): { readonly components: number[][]; readonly nonOverlapping: number[]; readonly ancestors: ReadonlyMap<number, ReadonlySet<number>> } {
   const orderIndex = new Map(ordered.map((num, idx) => [num, idx]));
   const byFile = new Map<string, number[]>();
   for (const num of ordered) {
@@ -388,8 +450,36 @@ function overlapComponents(
       }
     }
   }
+  // Remove overlap edges between u and w if ANY intermediate v along a directed path u -> ... -> w
+  // does not share a file with both (otherwise contracting {u, w} without {v} creates a unit cycle).
+  const ancestors = transitiveAncestors(ordered, byIssue);
+  const filesOf = (num: number): ReadonlySet<string> => new Set(byIssue.get(num)!.resolved_target_files);
+  const sharesFile = (a: number, b: number): boolean => {
+    const bFiles = filesOf(b);
+    for (const file of filesOf(a)) {
+      if (bFiles.has(file)) return true;
+    }
+    return false;
+  };
+  for (const a of ordered) {
+    for (const b of [...adj.get(a)!]) {
+      const first = ancestors.get(b)!.has(a) ? a : ancestors.get(a)!.has(b) ? b : null;
+      if (first === null) continue;
+      const later = first === a ? b : a;
+      const blocked = ordered.some(mid =>
+        mid !== first
+        && mid !== later
+        && ancestors.get(later)!.has(mid)
+        && ancestors.get(mid)!.has(first)
+        && (!sharesFile(first, mid) || !sharesFile(later, mid)));
+      if (blocked) {
+        adj.get(a)!.delete(b);
+        adj.get(b)!.delete(a);
+      }
+    }
+  }
   const visited = new Set<number>();
-  const components: number[][] = [];
+  const rawComponents: number[][] = [];
   const nonOverlapping: number[] = [];
   for (const start of ordered) {
     if (visited.has(start)) continue;
@@ -413,9 +503,35 @@ function overlapComponents(
       }
     }
     comp.sort((a, b) => orderIndex.get(a)! - orderIndex.get(b)!);
-    components.push(comp);
+    rawComponents.push(comp);
   }
-  return { components, nonOverlapping };
+  // Ensure every emitted component is order-convex over bucket dependencies.
+  const components: number[][] = [];
+  const splitNonConvex = (comp: number[]): void => {
+    if (comp.length < 2 || isOrderConvex(comp, ancestors, ordered)) {
+      if (comp.length === 1) nonOverlapping.push(comp[0]!);
+      else if (comp.length >= 2) components.push(comp);
+      return;
+    }
+    const memberSet = new Set(comp);
+    let splitAt = comp.length - 1;
+    for (let i = 1; i < comp.length; i += 1) {
+      const later = comp[i]!;
+      const bridged = ordered.some(mid =>
+        !memberSet.has(mid)
+        && ancestors.get(later)!.has(mid)
+        && comp.slice(0, i).some(earlier => ancestors.get(mid)!.has(earlier)));
+      if (bridged) {
+        splitAt = i;
+        break;
+      }
+    }
+    splitNonConvex(comp.slice(0, splitAt));
+    splitNonConvex(comp.slice(splitAt));
+  };
+  for (const comp of rawComponents) splitNonConvex(comp);
+  nonOverlapping.sort((a, b) => orderIndex.get(a)! - orderIndex.get(b)!);
+  return { components, nonOverlapping, ancestors };
 }
 
 function packPatternUnits(
@@ -536,16 +652,15 @@ export function clusterIssues(input: {
     const size = tier_bucket === 'high' ? Math.min(2, maxSize) : maxSize;
     const { ordered, stalled } = dependencyOrder(new Map(bucket.map(issue => [issue.number, issue.blocked_by])));
     cycles.push(...stalled);
-    const { components, nonOverlapping } = overlapComponents(ordered, byIssue);
+    const { components, nonOverlapping, ancestors } = overlapComponents(ordered, byIssue);
     for (const component of components) {
-      for (let at = 0; at < component.length; at += size) {
-        const chunk = component.slice(at, at + size);
+      for (const chunk of sliceOrderConvex(component, size, ancestors, ordered)) {
         const members = chunk.map(number => byIssue.get(number)!);
         emitChunk(module, tier_bucket, chunk, sharedTargetFiles(members));
       }
     }
-    for (let at = 0; at < nonOverlapping.length; at += size) {
-      emitChunk(module, tier_bucket, nonOverlapping.slice(at, at + size), []);
+    for (const chunk of sliceOrderConvex(nonOverlapping, size, ancestors, ordered)) {
+      emitChunk(module, tier_bucket, chunk, []);
     }
   }
 

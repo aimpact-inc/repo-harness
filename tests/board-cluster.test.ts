@@ -136,6 +136,31 @@ test('groups same-module issues by target-file overlap before slicing and guards
   ]);
 });
 
+test('keeps transitively dependent overlapping issues separate when an intermediate touches another file', () => {
+  const issues: ClusterIssue[] = [
+    { ...issue(1, labels('billing', 'medium', 'simple_fast')), target_files: ['src/a.ts'] },
+    { ...issue(2, labels('billing', 'medium', 'simple_fast'), [1]), target_files: ['src/b.ts'] },
+    { ...issue(3, labels('billing', 'medium', 'simple_fast'), [2]), target_files: ['src/a.ts'] },
+  ];
+  const result = clusterIssues({ issues, scope, max_size: 2 });
+  expect(result.cycles).toEqual([]);
+  expect(result.module_bundles).toEqual([
+    { module: 'billing', tier_bucket: 'standard', route_class: 'simple_fast', credentials: false, issues: [1, 2], external_blockers: [] },
+  ]);
+  expect(result.orphans).toEqual([{ issue: 3, external_blockers: [2] }]);
+  expect(result.suggested_merge_order).toEqual([[1, 2], 3]);
+
+  const fourChain: ClusterIssue[] = [
+    { ...issue(1, labels('billing', 'medium', 'simple_fast')), target_files: ['src/a.ts'] },
+    { ...issue(2, labels('billing', 'medium', 'simple_fast'), [1]), target_files: ['src/b.ts'] },
+    { ...issue(3, labels('billing', 'medium', 'simple_fast'), [2]), target_files: ['src/b.ts'] },
+    { ...issue(4, labels('billing', 'medium', 'simple_fast'), [3]), target_files: ['src/a.ts'] },
+  ];
+  const fourResult = clusterIssues({ issues: fourChain, scope, max_size: 2 });
+  expect(fourResult.cycles).toEqual([]);
+  expect(fourResult.suggested_merge_order).toEqual([1, [2, 3], 4]);
+});
+
 const repository = 'Ancienttwo/repo-harness';
 const response = (value: unknown) => ({ status: 0, stdout: JSON.stringify(value) });
 const forward = (nodes: readonly unknown[]) => ({ pageInfo: { hasNextPage: false }, nodes });

@@ -1,6 +1,7 @@
 import { planIssues, planOrderIssues, planOrderUnits } from './plan-block';
 import { boardMergeDecisions, planSkipReason } from './merge';
 import type { BoardItemV1, BoardPullRequestV1, BoardTerminalV1, BoardV1 } from './board';
+import { moduleOf } from './cluster';
 import { hcStatusClass, liveSeats, seatItem, seatPullRequest } from './desk';
 import { pathHazardHits, pathHighHits } from './hazards';
 import { compareHcVersions } from '../terminal/herdr-pin';
@@ -45,7 +46,7 @@ const WORKER_SEATS = new Set<string>(WORKER_SEAT_IDS);
 const REVIEW_SEATS = new Set<string>(SEAT_IDS.filter(isReviewSeat));
 const RED_CONCLUSIONS = new Set(['failure', 'timed_out', 'startup_failure']);
 
-export type BoardRuleId = 'A1' | 'A3' | 'A4' | 'A5' | 'A6' | 'A7' | 'A8' | 'A9' | 'A10' | 'A11' | 'A12' | 'A13' | 'A14' | 'A15' | 'A16' | 'A17' | 'A18' | 'A19' | 'A20' | 'A21' | 'A22' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R7';
+export type BoardRuleId = 'A1' | 'A3' | 'A4' | 'A5' | 'A6' | 'A7' | 'A8' | 'A9' | 'A10' | 'A11' | 'A12' | 'A13' | 'A14' | 'A15' | 'A16' | 'A17' | 'A18' | 'A19' | 'A20' | 'A21' | 'A22' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R7' | 'R8';
 export type BoardAttentionRoute = 'orchestrator' | 'advisor';
 /** P0: a seat cannot continue. P1: a worker or an issue waits for the coordinator, or a High change has a lower tier. P2: a pull request or the plan waits. P3: housekeeping. */
 export type BoardPriority = 'P0' | 'P1' | 'P2' | 'P3';
@@ -60,7 +61,7 @@ export const BOARD_PRIORITY_ORDER: readonly BoardPriority[] = Object.freeze(['P0
 export const BOARD_RULE_PRIORITY: Readonly<Record<BoardRuleId, BoardPriority>> = Object.freeze({
   A1: 'P2', A3: 'P0', A4: 'P1', A5: 'P1', A6: 'P1', A7: 'P2', A8: 'P3', A9: 'P3', A10: 'P2', A11: 'P2',
   A12: 'P1', A13: 'P1', A14: 'P2', A15: 'P2', A16: 'P1', A17: 'P1', A18: 'P2', A19: 'P1', A20: 'P2', A21: 'P1', A22: 'P1',
-  R1: 'P2', R2: 'P2', R3: 'P1', R4: 'P2', R5: 'P1', R7: 'P2',
+  R1: 'P2', R2: 'P2', R3: 'P1', R4: 'P2', R5: 'P1', R7: 'P2', R8: 'P2',
 });
 
 export interface BoardFindingV1 {
@@ -653,6 +654,55 @@ function r7(context: Context): void {
   }
 }
 
+/**
+ * R8: `board.plan` contains two or more unclaimed open single-issue plan units (`unit.length === 1`)
+ * without open external blockers that share the same `module:` label and `tier_bucket` (`high` vs `standard`).
+ */
+function r8(context: Context): void {
+  const { board } = context;
+  if (board.plan.status !== 'observed') return skip(context, 'R8', planSkipReason(board.plan.status));
+  const onBoard = new Map(board.items.map(item => [item.number, item] as const));
+  const holds = new Set(board.plan.block.holds.map(entry => entry.issue));
+  const units = planOrderUnits(board.plan.block);
+  const singletons = units.filter(unit => unit.length === 1).map(unit => unit[0]!);
+  const groups = new Map<string, number[]>();
+  for (const number of singletons) {
+    const item = onBoard.get(number);
+    if (item === undefined) {
+      skip(context, 'R8', 'item_off_board', `#${number}`);
+      continue;
+    }
+    if (item.state !== 'open') continue;
+    if (item.claim.status === 'unknown') {
+      skip(context, 'R8', 'comments_truncated', `#${number}`);
+      continue;
+    }
+    if (item.claim.status !== 'none') continue;
+    if (holds.has(number) || item.merge_hold.status === 'held') continue;
+    if (item.blocked_by.some(blocker => blocker.state === 'open')) continue;
+    if (item.tier === null) continue;
+    let moduleId: string | null;
+    try {
+      moduleId = moduleOf(item.labels);
+    } catch {
+      continue;
+    }
+    if (moduleId === null) continue;
+    const tierBucket = item.tier === 'high' ? 'high' : 'standard';
+    const key = `${moduleId}:${tierBucket}`;
+    const list = groups.get(key);
+    if (list === undefined) groups.set(key, [number]);
+    else list.push(number);
+  }
+  for (const key of [...groups.keys()].sort()) {
+    const issues = groups.get(key)!.sort((left, right) => left - right);
+    if (issues.length < 2) continue;
+    const [moduleId, tierBucket] = key.split(':') as [string, string];
+    find(context, 'R8', { issues },
+      `${issues.length} unclaimed ${moduleId} (${tierBucket}) single-issue plan units can bundle: ${issues.map(number => `#${number}`).join(' ')}`);
+  }
+}
+
 /** One finding line of `rh board attention`: the priority first, so no line is without one. */
 export function attentionFindingLine(finding: BoardFindingV1): string {
   return `${finding.priority} ${finding.rule} ${finding.route}: ${finding.message}`;
@@ -669,7 +719,7 @@ export function renderAttentionText(attention: BoardAttentionV1): string {
 /** `previous`: the board read before this one; A22 needs it, and a single read lists each candidate seat of A22 as unevaluated. */
 export function evaluateBoardAttention(board: BoardV1, previous: BoardV1 | null = null): BoardAttentionV1 {
   const context: Context = { board, previous, now: Date.parse(board.observed_at), findings: [], unevaluated: [] };
-  for (const rule of [a1, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, r1, r2, r3, r4, r5, r7]) rule(context);
+  for (const rule of [a1, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, r1, r2, r3, r4, r5, r7, r8]) rule(context);
   return Object.freeze({
     protocol: BOARD_ATTENTION_PROTOCOL,
     kind: BOARD_ATTENTION_KIND,
