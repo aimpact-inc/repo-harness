@@ -72,7 +72,8 @@ export function renderCouncilTask(input: { issue: number; parent?: number; membe
     `Provide an independent read-only council proposal (${input.member}) for issue #${input.issue}${input.parent === undefined ? '' : ` in parent #${input.parent}`}.`,
     `From the checkout, read the issue body with \`env -u GH_REPO gh issue view ${input.issue} --json title,body\` and all comments with \`env -u GH_REPO gh issue view ${input.issue} --comments\`. Inspect the relevant source files.`,
     ...(input.question === undefined ? [] : [`Focus the proposal on this question: ${JSON.stringify(input.question)}`]),
-    'Open with `RECOMMENDATION: <one sentence> — confidence: HIGH|MEDIUM|LOW`. Include these sections: Recommendation, Files and symbols, Implementation skeleton, Delete list, Forbidden additions, Acceptance and risks.',
+    'Open with `RECOMMENDATION: <one sentence> — confidence: HIGH|MEDIUM|LOW`. Include these sections: Recommendation, Cheapest alternative, Files and symbols, Implementation skeleton, Delete list, Forbidden additions, Acceptance and risks.',
+    'In Cheapest alternative, name the one requirement of the issue that removes the most code when it is relaxed, and each existing authoritative value (an exit code, a schema field, a stored record, a Git fact) that can replace a new module or a new model call. State what the alternative gives up and the condition in which it fails. Do not relax a credential path or a user-file deletion path, and do not replace an authoritative value with a local heuristic. When the issue has no such requirement, write `none` and the reason.',
     writeStep,
     'Keep the checkout read-only. Do not change repository files, create worktrees, commit, push, post claims, write to GitHub, message a worker, or read credentials.',
   ].join('\n');

@@ -65,7 +65,7 @@ test('opens council tabs for fable and carbon in canonical scratch directory and
   const carbonPath = join(outputDir, 'nested', 'issue-42-carbon-api.md');
   const tab0 = ports.openTab.mock.calls[0]![0];
   expect(tab0).toMatchObject({ name: 'council', space: 'sp1', folder: linked, argv: ['fable-argv'] });
-  for (const part of ['gh issue view 42 --json title,body', 'gh issue view 42 --comments', 'parent #7', fablePath, 'Which boundaries change?', 'Keep the checkout read-only']) {
+  for (const part of ['gh issue view 42 --json title,body', 'gh issue view 42 --comments', 'parent #7', fablePath, 'Which boundaries change?', 'Cheapest alternative', 'Keep the checkout read-only']) {
     expect(tab0.task).toContain(part);
   }
   expect(ports.openTab.mock.calls[1]![0].task).toContain(carbonPath);
