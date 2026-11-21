@@ -295,7 +295,15 @@ function piLaunch(seat: LaunchSeatId, config: SeatConfigV1, roleDirectory: strin
 
 type RuntimeLaunch = Pick<SeatLaunchV1, 'argv' | 'brief' | 'limits'>;
 
-export const AGY_COMMAND_PREFIXES = [
+const AGY_DENIED_RH_COMMANDS: readonly string[] = [
+  'rh board attention start',
+  'rh board merge', 'rh board dispatch', 'rh board review', 'rh board post',
+  'rh board triage-apply', 'rh board closeout', 'rh board migrate-dependencies',
+  'rh seats launch', 'rh seats reset', 'rh publication merge',
+  'rh review collect', 'rh review publish',
+];
+
+export const AGY_READONLY_COMMAND_PREFIXES: readonly string[] = [
   'hc ls', 'hc get', 'hc read', 'hc wait', 'hc send',
   'git log', 'git show', 'git diff', 'git status', 'git grep', 'git rev-parse', 'git ls-remote', 'git fetch',
   'gh pr view', 'gh pr list', 'gh pr checks', 'gh pr diff',
@@ -305,49 +313,86 @@ export const AGY_COMMAND_PREFIXES = [
   'rg', 'ls', 'cat',
 ];
 
-const AGY_COORDINATOR_DENIED_COMMANDS: readonly string[] = [
-  'rh board attention start',
-  'rh board merge', 'rh board dispatch', 'rh board review', 'rh board post',
-  'rh board triage-apply', 'rh board closeout', 'rh board migrate-dependencies',
-  'rh seats launch', 'rh seats reset', 'rh publication merge',
-  'rh review collect', 'rh review publish',
+export const AGY_READONLY_DENIED_COMMANDS: readonly string[] = [
+  ...GITHUB_WRITE_COMMANDS,
+  ...AGY_DENIED_RH_COMMANDS,
+  'git reset --hard', 'git clean',
 ];
 
-export const AGY_DENIED_COMMANDS: readonly string[] = [
-  ...GITHUB_WRITE_COMMANDS,
-  ...AGY_COORDINATOR_DENIED_COMMANDS,
+export const AGY_WORKER_COMMAND_PREFIXES: readonly string[] = [
+  'hc ls', 'hc get', 'hc read', 'hc wait', 'hc send',
+  'git log', 'git show', 'git diff', 'git status', 'git grep', 'git rev-parse', 'git ls-remote', 'git fetch',
+  'git add', 'git commit', 'git checkout', 'git switch', 'git branch',
+  'gh pr view', 'gh pr list', 'gh pr checks', 'gh pr diff',
+  'gh issue view', 'gh issue list', 'gh run view', 'gh run list',
+  'bun', 'node', 'npm',
+  'rg', 'ls', 'cat',
+];
+
+const AGY_WORKER_GH_COMMAND_PREFIXES: readonly string[] = [
+  'git push', 'gh pr create', 'gh pr edit', 'gh pr comment', 'gh issue comment',
 ];
 
 export const AGY_WORKER_DENIED_COMMANDS: readonly string[] = [
-  'gh issue close', 'gh pr close', 'gh pr merge', 'gh release create',
-  ...AGY_COORDINATOR_DENIED_COMMANDS,
+  ...AGY_DENIED_RH_COMMANDS,
+  'gh pr merge', 'gh release create', 'gh issue close',
+  'git reset --hard', 'git clean',
 ];
+
+const AGY_READONLY_AGENT_TOOLS = Object.freeze(['view_file', 'run_command', 'search_web'] as const);
+const AGY_WORKER_AGENT_TOOLS = Object.freeze(['view_file', 'write_file', 'edit_file', 'run_command', 'search_web'] as const);
+
+export function agySeatAgentName(seat: LaunchSeatId): string {
+  if (seat === 'advisor') return 'rh-advisor';
+  if (seat === 'council') return 'rh-council';
+  if (seat === 'gatekeeper') return 'rh-gatekeeper-fallback';
+  if (isWorkerSeat(seat)) return 'rh-worker';
+  throw new Error(`agy is not supported on seat ${seat}.`);
+}
+
+export function agySeatAgentTools(seat: LaunchSeatId): readonly string[] {
+  if (isWorkerSeat(seat)) return AGY_WORKER_AGENT_TOOLS;
+  if (seat === 'advisor' || seat === 'council' || seat === 'gatekeeper') return AGY_READONLY_AGENT_TOOLS;
+  throw new Error(`agy is not supported on seat ${seat}.`);
+}
+
+export function agySeatCommandRules(seat: LaunchSeatId, config: SeatConfigV1): { readonly allow: readonly string[]; readonly deny: readonly string[] } {
+  if (isWorkerSeat(seat)) {
+    const hasGh = config.tools.includes('gh');
+    return {
+      allow: hasGh ? [...AGY_WORKER_COMMAND_PREFIXES, ...AGY_WORKER_GH_COMMAND_PREFIXES] : AGY_WORKER_COMMAND_PREFIXES,
+      deny: hasGh ? AGY_WORKER_DENIED_COMMANDS : [...new Set([...AGY_WORKER_DENIED_COMMANDS, ...GITHUB_WRITE_COMMANDS])],
+    };
+  }
+  if (seat === 'advisor' || seat === 'council' || seat === 'gatekeeper') {
+    const poolIndex = AGY_READONLY_COMMAND_PREFIXES.indexOf('rh seats pool') + 1;
+    const allow = seat === 'advisor'
+      ? [...AGY_READONLY_COMMAND_PREFIXES.slice(0, poolIndex), 'rh seats council', ...AGY_READONLY_COMMAND_PREFIXES.slice(poolIndex)]
+      : AGY_READONLY_COMMAND_PREFIXES;
+    return { allow, deny: AGY_READONLY_DENIED_COMMANDS };
+  }
+  throw new Error(`agy is not supported on seat ${seat}.`);
+}
+
+const AGY_OFF_GROUPS = (config: SeatConfigV1): SeatGroup[] =>
+  (['edit', 'shell', 'net', 'tasks', 'schedule', 'mcp', 'gh'] as const).filter(group => !config.tools.includes(group));
 
 // MCP and fleet omission must be confirmed in a native agy session before reporting enforcement.
-export const AGY_SEAT_LIMITS: readonly SeatLimitV1[] = [
-  { subject: 'edit', level: 'common_commands' },
-  { subject: 'tasks', level: 'instructions_only' },
-  { subject: 'schedule', level: 'instructions_only' },
-  { subject: 'mcp', level: 'instructions_only' },
-  { subject: 'gh', level: 'common_commands' },
-  { subject: 'fleet', level: 'instructions_only' },
-  { subject: 'hook', level: 'common_commands' },
-];
-
-export const AGY_WORKER_LIMITS: readonly SeatLimitV1[] = AGY_SEAT_LIMITS.filter(
-  limit => limit.subject !== 'edit' && limit.subject !== 'gh',
-);
-
-export const agySeatLimits = (seat: LaunchSeatId = 'advisor'): readonly SeatLimitV1[] =>
-  isWorkerSeat(seat) ? AGY_WORKER_LIMITS : AGY_SEAT_LIMITS;
-
-export const AGY_SEAT_AGENT = 'rh-advisor';
-
-export const agySeatAgentName = (seat: LaunchSeatId = 'advisor'): string => seat === 'advisor' ? AGY_SEAT_AGENT : `rh-${seat}`;
-
-export function agySeatBrief(config: SeatConfigV1, seat: LaunchSeatId = 'advisor'): string {
+export function agySeatLimits(_seat: LaunchSeatId, config: SeatConfigV1): readonly SeatLimitV1[] {
   return [
-    brief(seat, config, [], agySeatLimits(seat)),
+    ...AGY_OFF_GROUPS(config).map((group): SeatLimitV1 => ({
+      subject: group,
+      level: group === 'edit' || group === 'gh' ? 'common_commands' : 'instructions_only',
+    })),
+    { subject: 'fleet', level: 'instructions_only' },
+    { subject: 'hook', level: 'common_commands' },
+  ];
+}
+
+export function agySeatBrief(seat: LaunchSeatId, config: SeatConfigV1): string {
+  const limits = agySeatLimits(seat, config);
+  return [
+    brief(seat, config, [], limits),
     'Never read auth or credential files.',
     ...(seat === 'advisor' ? [
       'When Stop requests a handoff, send it to the orchestrator. After this pane ends, the orchestrator starts a new advisor pane with rh seats launch advisor and gives it the handoff.',
@@ -364,19 +409,28 @@ interface AgyLaunchInputs {
 function agyLaunch(seat: LaunchSeatId, config: SeatConfigV1, repositoryId: string | undefined, input: AgyLaunchInputs): RuntimeLaunch {
   const model = config.model;
   if (model === null) throw new Error('agy requires an explicit model.');
+  if (isWorkerSeat(seat) && !config.tools.includes('edit')) {
+    throw new Error(`The ${seat} agy worker seat is configured read-only (missing edit). Enable edit for seats.${seat}.tools in Settings before launching it.`);
+  }
   const env = isResetSeat(seat) && repositoryId !== undefined
     ? [`${SEAT_ENV}=${seat}`, `${SEAT_REPOSITORY_ENV}=${repositoryId}`, `${SEAT_MODEL_ENV}=${model}`]
     : [];
-  const denied = isWorkerSeat(seat) ? AGY_WORKER_DENIED_COMMANDS : AGY_DENIED_COMMANDS;
-  const settings = JSON.stringify({ trustedWorkspaces: [input.cwd], permissions: {
-    allow: AGY_COMMAND_PREFIXES.map(command => `command(${command})`),
-    deny: denied.map(command => `command(${command})`),
-  } });
+  const rules = agySeatCommandRules(seat, config);
+  const settings = JSON.stringify({
+    trustedWorkspaces: [input.cwd],
+    permissions: {
+      allow: rules.allow.map(command => `command(${command})`),
+      deny: rules.deny.map(command => `command(${command})`),
+    },
+  });
+  const limits = agySeatLimits(seat, config);
   return {
-    argv: [...seatEnv(env), input.executable, '--mode', 'accept-edits', '--model', model,
-      '--add-dir', input.directory, '--agent', agySeatAgentName(seat), '--settings', settings],
-    brief: agySeatBrief(config, seat),
-    limits: agySeatLimits(seat),
+    argv: [
+      ...seatEnv(env), input.executable, '--mode', 'accept-edits', '--model', model,
+      '--add-dir', input.directory, '--agent', agySeatAgentName(seat), '--settings', settings,
+    ],
+    brief: agySeatBrief(seat, config),
+    limits,
   };
 }
 

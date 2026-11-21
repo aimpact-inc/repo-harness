@@ -3,6 +3,7 @@ import { planRefusal, requiredCheckDetail } from './merge';
 import type { SeatRouteV1 } from './seat-routing';
 import { DEFAULT_SEATS_CONFIG, isReviewSeat, SEAT_IDS, type SeatConfigV1, type SeatId } from './seats-settings';
 import { modelFamily } from '../review/model-family';
+import type { ReviewRuntimeId } from '../review/review-runtimes';
 import {
   acceptanceRowSeat,
   carriedPasses,
@@ -144,7 +145,7 @@ export function parseReviewPacket(text: string): ReviewPacketBinding | null {
  * The task text of a review seat. It states each value of the receipt that the seat cannot know, and the hand-off: a read-only seat
  * cannot write a file or publish, so it ends its reply with the receipt and the orchestrator publishes it with `rh review collect`.
  */
-export function reviewPacket(decision: Extract<ReviewDecisionV1, { action: 'start' }>, start: ReviewSeatStartV1, harness: 'claude' | 'codex' | 'pi'): string {
+export function reviewPacket(decision: Extract<ReviewDecisionV1, { action: 'start' }>, start: ReviewSeatStartV1, harness: ReviewRuntimeId): string {
   const scope = start.delta_from === null
     ? 'Review the whole diff.'
     : `This is a delta review. Review the hunks that changed since ${start.delta_from} and the sibling cases of each earlier finding.`;

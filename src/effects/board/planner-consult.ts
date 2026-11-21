@@ -43,7 +43,7 @@ export interface CouncilConsultPorts {
     model: string | null;
     shell: boolean;
   }>;
-  readonly openTab: (args: { name: string; space: string; folder: string; argv: readonly string[]; task?: string }) => void;
+  readonly openTab: (args: { name: string; space: string; folder: string; argv: readonly string[]; task?: string }, options?: { readonly privateTask?: boolean }) => void;
 }
 
 function validateNativeCouncilPath(outPath: string, gitRoots: readonly string[]): void {
@@ -169,7 +169,7 @@ export async function runCouncilConsult(input: CouncilConsultInput, ports: Counc
       if (item.launch.runtime === 'codex') {
         ports.openTab({ name: item.launch.tab!, space: input.space!, folder: repoRoot, argv: [...item.launch.argv, 'exec', '-o', item.outPath, task] });
       } else if (item.launch.runtime === 'agy') {
-        ports.openTab({ name: item.launch.tab!, space: input.space!, folder: repoRoot, argv: [...item.launch.argv, '-i', task] });
+        ports.openTab({ name: item.launch.tab!, space: input.space!, folder: repoRoot, argv: [...item.launch.argv, '-i', task] }, { privateTask: true });
       } else {
         ports.openTab({ name: item.launch.tab!, space: input.space!, folder: repoRoot, argv: item.launch.argv, task });
       }

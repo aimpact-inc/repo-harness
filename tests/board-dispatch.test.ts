@@ -1,13 +1,14 @@
 import { expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { delimiter, join } from 'node:path';
 import { DispatchError, bundleRouteClass, planDispatch, type DispatchPlanV1 } from '../src/core/board/dispatch';
-import { WORKER_AUTHORITY, executeDispatch, type DispatchPorts } from '../src/effects/board/dispatch';
+import { WORKER_AUTHORITY, executeDispatch, runDispatch, type DispatchPorts } from '../src/effects/board/dispatch';
 import { withSeatLine } from '../src/core/board/seat-line';
 import { HerdrCoreError } from '../src/effects/terminal/herdr-core';
 import type { SeatAccountQuotas } from '../src/core/board/seat-routing';
 import { emptySeatPoolProbe, seatModelBlock, type SeatPoolProbe } from '../src/core/board/seat-pool';
-import { DEFAULT_SEATS_CONFIG } from '../src/core/board/seats-settings';
+import { DEFAULT_SEATS_CONFIG, NATIVE_SEATS_PRESET } from '../src/core/board/seats-settings';
 import type { BoardCommentV1, BoardParentReadV1, BoardSubIssueReadV1 } from '../src/core/board/source';
 
 const NORMAL: SeatAccountQuotas = {
@@ -326,4 +327,131 @@ test('the plan starts one worktree and one tab with a bundle claim on each issue
   const lost = ports({ openTab: () => { throw new HerdrCoreError('herdr-app', 'missing'); } });
   await expect(executeDispatch(bundlePlan([1, 3]), context, lost.base)).rejects.toBeInstanceOf(HerdrCoreError);
   expect(lost.calls.slice(-2)).toEqual(['comment 1: repo-harness issue claim status Status: released', 'comment 3: repo-harness issue claim status Status: released']);
+});
+
+test('executeDispatch passes -i <task> in argv and omits task when launching an agy worker seat', async () => {
+  const tabs: Record<string, unknown>[] = [];
+  const run = ports({
+    launch: async () => ({ argv: ['agy', '--model', 'gemini-4-neon-high'], tab: '#100', runtime: 'agy' }),
+    openTab: args => { tabs.push({ ...args }); },
+  });
+  await executeDispatch(planOf(['route:important_deep']), context, run.base);
+  expect(tabs).toHaveLength(1);
+  expect(tabs[0]!.task).toBeUndefined();
+  expect((tabs[0]!.argv as string[]).slice(0, 4)).toEqual(['agy', '--model', 'gemini-4-neon-high', '-i']);
+  expect((tabs[0]!.argv as string[])[4]).toContain('Task: issue #1 ');
+});
+
+test.skipIf(process.platform === 'win32')('runDispatch includes agy probes and dispatches a healthy native agy worker seat, while skipping read-only legacy agy workers', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'dispatch-agy-'));
+  try {
+    const bin = join(home, 'bin');
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(join(home, '.repo-harness'), { recursive: true });
+    const agy = join(bin, 'agy');
+    writeFileSync(agy, `#!${process.execPath}
+const arg = process.argv[2];
+if (arg === '--version') { console.log('1.5.12'); process.exit(0); }
+if (arg === 'models') { process.stdout.write('gemini-4-neon-high\\tGemini 4 Neon (High)\\ngemini-4-hydrogen\\tGemini 4 Hydrogen\\n'); process.exit(0); }
+process.exit(93);
+`, { mode: 0o755 });
+    const env: NodeJS.ProcessEnv = {
+      HOME: home,
+      PATH: [bin, '/usr/bin', '/bin'].join(delimiter),
+      TMPDIR: home,
+      OAR_ANTIGRAVITY_BIN: agy,
+    };
+    const ghRunner = (args: readonly string[]) => {
+      if (args.includes('repos/{owner}/{repo}')) return { status: 0, stdout: JSON.stringify({ id: 1 }), stderr: '' };
+      return {
+        status: 0,
+        stderr: '',
+        stdout: JSON.stringify({
+          data: {
+            repository: {
+              databaseId: 1,
+              nameWithOwner: 'o/r',
+              defaultBranchRef: { name: 'main' },
+              issue: {
+                number: 100,
+                title: 'parent',
+                url: 'https://github.com/o/r/issues/100',
+                state: 'OPEN',
+                labels: { pageInfo: { hasNextPage: false }, nodes: [] },
+                milestone: null,
+                comments: {
+                  pageInfo: { hasPreviousPage: false, startCursor: null },
+                  nodes: [
+                    { url: coordinator.url, createdAt: coordinator.created_at, authorAssociation: 'OWNER', body: coordinator.body },
+                    { url: 'https://example.test/plan', createdAt: '2026-11-09T10:00:00Z', authorAssociation: 'OWNER', body: planBody(4, [1]) },
+                  ],
+                },
+                subIssues: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [{
+                    number: 1,
+                    title: 'issue 1',
+                    url: 'https://github.com/o/r/issues/1',
+                    state: 'OPEN',
+                    labels: { pageInfo: { hasNextPage: false }, nodes: [{ name: 'route:simple_deep' }] },
+                    milestone: null,
+                    comments: { pageInfo: { hasPreviousPage: false }, nodes: [] },
+                    blockedBy: { pageInfo: { hasNextPage: false }, nodes: [] },
+                    timelineItems: { pageInfo: { hasPreviousPage: false }, nodes: [] },
+                  }],
+                },
+              },
+            },
+            repairs: { issueCount: 0, nodes: [] },
+          },
+        }),
+      };
+    };
+    const host = {
+      seatTerminals: () => ({ status: 'observed' as const, terminals: [] }),
+    } as unknown as Parameters<typeof runDispatch>[0]['host'];
+    const baseInput = {
+      repo_root: home,
+      repository: 'o/r',
+      parent: 100,
+      space: 's1',
+      host,
+      launch: async () => ({ argv: ['agy'], tab: '#100', runtime: 'agy' as const }),
+      dry_run: true,
+      bundle: null,
+      gh_runner: ghRunner,
+      env,
+    };
+
+    // Writable native agy worker-neon is probed and dispatched (not skipped as unknown / no_route).
+    const nativeOnly = {
+      ...NATIVE_SEATS_PRESET,
+      routing: { ...NATIVE_SEATS_PRESET.routing, simple_deep: ['worker-neon'] as const },
+    };
+    writeFileSync(join(home, '.repo-harness', 'config.json'), JSON.stringify({
+      agents: { enabled: ['antigravity', 'claude', 'codex'], uses: { docs: [], review: [] }, default_docs: null },
+      seats: nativeOnly,
+    }));
+    const writable = await runDispatch(baseInput);
+    expect(writable.plan.decisions[0]).toMatchObject({ action: 'dispatch', issue: 1, seat: 'worker-neon', route_class: 'simple_deep' });
+
+    // Legacy read-only agy worker-neon (main@76675c2 shape) is skipped cleanly with actionable guidance.
+    const readonlyLegacy = {
+      ...nativeOnly,
+      'worker-neon': { ...nativeOnly['worker-neon'], tools: ['net', 'read', 'shell'] as const },
+    };
+    writeFileSync(join(home, '.repo-harness', 'config.json'), JSON.stringify({
+      agents: { enabled: ['antigravity', 'claude', 'codex'], uses: { docs: [], review: [] }, default_docs: null },
+      seats: readonlyLegacy,
+    }));
+    const skipped = await runDispatch(baseInput);
+    expect(skipped.plan.decisions[0]).toMatchObject({
+      action: 'skip',
+      issue: 1,
+      reason: 'no_route',
+      detail: expect.stringContaining('worker-neon is configured read-only (missing edit)'),
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

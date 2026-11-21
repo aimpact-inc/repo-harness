@@ -164,7 +164,7 @@ describe('agents page seats section', () => {
   const pane = (seat: string) => document.querySelector<HTMLButtonElement>(`[data-pane="${seat}"]`)!;
   const levels = () => [...document.querySelectorAll('[data-seat-card] [data-limit]')].map(node => node.getAttribute('data-limit'));
 
-  test('only the advisor offers agy and a switch sets the approved profile with Neon high', async () => {
+  test('all agy-allowed seats offer agy with seat-specific starters, dynamic limits, and worker gh toggle; orchestrator/gatekeeper/reviewer hide agy', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     const read = await settingsStores(NOW, 'busy').seats.read();
     if (read.state !== 'ok') throw new Error('fixture read failed');
@@ -176,10 +176,79 @@ describe('agents page seats section', () => {
     expect(buttonWithText('gemini-4-neon-high').getAttribute('aria-pressed')).toBe('true');
     expect(allow('Shell').getAttribute('aria-checked')).toBe('true');
     expect(allow('Shell').disabled).toBe(true);
+    expect(allow('Edit files').disabled).toBe(true);
     await click(seatsSave());
     expect(posts[0]?.seats.advisor).toEqual({ runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['net', 'read', 'shell'] });
-    await click(pane('orchestrator'));
-    expect(buttonWithText('Antigravity (agy)')).toBeUndefined();
+
+    // Worker seat gets Neon High + writable agy worker tools, unlocked gh toggle, and dynamic limits (no edit limit).
+    await click(pane('worker'));
+    await click(buttonWithText('Antigravity (agy)'));
+    expect(buttonWithText('gemini-4-neon-high').getAttribute('aria-pressed')).toBe('true');
+    expect(allow('Edit files').getAttribute('aria-checked')).toBe('true');
+    expect(allow('Edit files').disabled).toBe(true);
+    expect(allow('GitHub writes').getAttribute('aria-checked')).toBe('true');
+    expect(allow('GitHub writes').disabled).toBe(false);
+    expect(levels()).toEqual(['instructions_only', 'instructions_only', 'instructions_only', 'instructions_only']);
+    await click(allow('GitHub writes'));
+    expect(allow('GitHub writes').getAttribute('aria-checked')).toBe('false');
+    expect(levels()).toEqual(['instructions_only', 'instructions_only', 'instructions_only', 'common_commands', 'instructions_only']);
+    await click(seatsSave());
+    expect(posts[1]?.seats.worker).toEqual({ runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['edit', 'net', 'read', 'shell'] });
+
+    // Council seat gets Carbon High + read-only agy tools.
+    await click(buttonWithText('Council'));
+    await click(document.querySelector<HTMLButtonElement>('[data-seat-card="council"] [aria-label="Configured"]')!);
+    await click(buttonWithText('Antigravity (agy)'));
+    expect(buttonWithText('gemini-4-carbon-high').getAttribute('aria-pressed')).toBe('true');
+    expect(allow('Shell').disabled).toBe(true);
+    await click(seatsSave());
+    expect(posts[2]?.seats.council).toEqual({ runtime: 'agy', model: 'gemini-4-carbon-high', effort: null, advisor_model: null, fleet: [], tools: ['net', 'read', 'shell'] });
+
+    // Light worker and gatekeeper-fallback get Hydrogen + role-appropriate tools.
+    await click(buttonWithText('Light worker'));
+    await click(document.querySelector<HTMLButtonElement>('[data-seat-card="worker-light"] [aria-label="Configured"]')!);
+    await click(buttonWithText('Antigravity (agy)'));
+    expect(buttonWithText('gemini-4-hydrogen').getAttribute('aria-pressed')).toBe('true');
+    expect(allow('Edit files').getAttribute('aria-checked')).toBe('true');
+    expect(allow('GitHub writes').disabled).toBe(false);
+
+    await click(buttonWithText('Gatekeeper fallback'));
+    await click(document.querySelector<HTMLButtonElement>('[data-seat-card="gatekeeper-fallback"] [aria-label="Configured"]')!);
+    await click(buttonWithText('Antigravity (agy)'));
+    expect(buttonWithText('gemini-4-hydrogen').getAttribute('aria-pressed')).toBe('true');
+    expect(allow('Shell').disabled).toBe(true);
+
+    // Disallowed seats hide agy.
+    for (const disallowed of ['Orchestrator', 'Gatekeeper', 'Reviewer']) {
+      await click(buttonWithText(disallowed));
+      expect(buttonWithText('Antigravity (agy)')).toBeUndefined();
+    }
+  });
+
+  test('a stored read-only agy worker allows explicitly enabling edit in Settings UI and unlocks gh afterwards', async () => {
+    const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
+    const read = await settingsStores(NOW, 'busy').seats.read();
+    if (read.state !== 'ok') throw new Error('fixture read failed');
+    const agyEnabled = {
+      ...read.settings,
+      config: {
+        ...read.settings.config,
+        'worker-neon': { runtime: 'agy' as const, model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['net', 'read', 'shell'] as const },
+      },
+      ranges: { ...read.settings.ranges, runtimes: read.settings.ranges.runtimes.map(entry => (entry.id === 'agy' ? { ...entry, enabled: true } : entry)) },
+    };
+    await mount({ ...seatsProps(posts), readSeatsSettings: async () => ({ state: 'ok', settings: agyEnabled }) });
+    await click(buttonWithText('Neon worker'));
+    expect(allow('Edit files').getAttribute('aria-checked')).toBe('false');
+    expect(allow('Edit files').disabled).toBe(false);
+    expect(allow('GitHub writes').getAttribute('aria-checked')).toBe('false');
+    expect(allow('GitHub writes').disabled).toBe(true);
+    await click(allow('Edit files'));
+    expect(allow('Edit files').getAttribute('aria-checked')).toBe('true');
+    expect(allow('Edit files').disabled).toBe(true);
+    expect(allow('GitHub writes').disabled).toBe(false);
+    await click(seatsSave());
+    expect(posts[0]?.seats['worker-neon']).toEqual({ runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['edit', 'net', 'read', 'shell'] });
   });
 
   test('the advisor offers only scaffold roles, allows edits and blocks GitHub writes; save sends the whole section', async () => {

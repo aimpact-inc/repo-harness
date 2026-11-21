@@ -1,11 +1,12 @@
 import {
-  AGY_SEAT_TOOLS,
+  AGY_READONLY_SEAT_TOOLS,
   COUNCIL_TOOLS,
   DEFAULT_SEATS_CONFIG,
   ROUTING_CLASSES,
   ROUTING_KEYS,
   SEAT_IDS,
   SEAT_SCAFFOLD_SUB_AGENTS,
+  agySeatTools,
   decodeSeatsSettings,
   decodeSeatsSettingsResult,
   seatTakesFleet,
@@ -23,8 +24,7 @@ import {
   type SeatTool,
   type WorkerSeatId,
 } from '../core/board/seats-settings';
-import { AGY_HYDROGEN_ENTRY } from '../core/board/model-catalog';
-import { AGY_ADVISOR_STARTER } from '../core/board/recommended-models';
+import { agySeatStarter } from '../core/board/recommended-models';
 import { decodeSeatPool } from '../core/board/seat-pool';
 import { isRecord } from '../core/evidence/is-record';
 import {
@@ -109,12 +109,7 @@ export function setSeatRuntime(draft: SeatsConfigV1, seat: SeatId, runtime: Seat
   const current = draft[seat]!;
   if (current.runtime === runtime) return draft;
   if (runtime === 'agy') {
-    const starter = seat === 'advisor' || seat === 'worker-neon'
-      ? AGY_ADVISOR_STARTER
-      : seat === 'council'
-        ? (ranges.seats.council.models.find(entry => entry.runtime === 'agy') ?? AGY_ADVISOR_STARTER)
-        : AGY_HYDROGEN_ENTRY;
-    return patch(draft, seat, { ...starter, advisor_model: null, effort: null, fleet: [], tools: AGY_SEAT_TOOLS });
+    return patch(draft, seat, { ...agySeatStarter(seat), advisor_model: null, effort: null, fleet: [], tools: agySeatTools(seat) });
   }
   const model = ranges.seats[seat].models.some(entry => entry.runtime === runtime && entry.model === current.model)
     ? current.model
@@ -161,7 +156,7 @@ export function councilStarter(ranges: SeatsSettingsV1['ranges']): SeatConfigV1 
     ...recommended,
     advisor_model: null,
     effort: null,
-    tools: recommended.runtime === 'agy' ? AGY_SEAT_TOOLS : COUNCIL_TOOLS,
+    tools: recommended.runtime === 'agy' ? AGY_READONLY_SEAT_TOOLS : COUNCIL_TOOLS,
     fleet: seatTakesFleet(recommended) ? ['explorer'] : [],
   };
 }

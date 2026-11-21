@@ -97,7 +97,9 @@ export async function executeReview(decisions: readonly ReviewDecisionV1[], cont
     const labels = { repositoryId: context.repositoryId, pr: String(decision.pr), parent: String(context.parent) };
     for (const start of decision.seats) {
       const { runtime, ...launch } = await ports.launch(start.seat, labels, worktree.path, context.gatekeeper);
-      if (runtime === 'agy') throw new BoardCollectError('agy is available only for the advisor seat.');
+      if (runtime === 'agy') {
+        throw new BoardCollectError('agy review seats cannot collect or publish acceptance receipts yet; configure gatekeeper-fallback on claude, codex, or pi.');
+      }
       launches.push({ start, launch, runtime });
     }
     for (const { start, launch, runtime } of launches) {

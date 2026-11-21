@@ -93,6 +93,21 @@ test('opens council tabs for fable and carbon in canonical scratch directory and
   expect(git(linked, 'status', '--porcelain')).toBe('');
 });
 
+test('passes -i <task> in argv and privateTask: true for native agy council members without duplicating task', async () => {
+  const agyOut = join(scratch, 'agy-carbon.md');
+  const agyPorts = councilPorts({ carbon: { runtime: 'agy', model: 'gemini-4-carbon-high', shell: true } });
+  await runCouncilConsult({
+    cwd: linked, repositoryId: '19', issue: 42, space: 'sp1', members: ['carbon'], out: agyOut, question: 'Private council question', dry_run: false,
+  }, agyPorts);
+  expect(agyPorts.openTab).toHaveBeenCalledTimes(1);
+  const [tabArgs, tabOptions] = agyPorts.openTab.mock.calls[0]!;
+  expect(tabArgs.task).toBeUndefined();
+  expect(tabArgs.argv.slice(0, 2)).toEqual(['carbon-argv', '-i']);
+  expect(tabArgs.argv[2]).toContain('Private council question');
+  expect(tabArgs.argv[2]).toContain(agyOut);
+  expect(tabOptions).toEqual({ privateTask: true });
+});
+
 test('refuses invalid or duplicate council members and protects Git roots and symlinks', async () => {
   for (const bad of ['', 'neon', 'opus', 'fable,fable', 'fable,carbon,astra,fable']) {
     expect(() => parseCouncilMembers(bad)).toThrow(expect.objectContaining({ code: 'council_member_invalid' }));
