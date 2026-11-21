@@ -252,7 +252,7 @@ function snapshotEnvelope(expected: ProjectionExpectedSnapshotV1 = expectedSnaps
 
 const doctorEnvelope = (state = 'index-missing', issues: Array<{ code: string; message: string }> = []) => ({
   schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'doctor',
-  data: { codeFacts: { schemaVersion: 'archcontext.repository-code-facts/v1', state, indexPresent: state !== 'index-missing', requiredVersion: '1.6.2', codeGraphVersion: '1.6.2', issues } },
+  data: { codeFacts: { schemaVersion: 'archcontext.repository-code-facts/v1', state, indexPresent: state !== 'index-missing', requiredVersion: '1.6.4', codeGraphVersion: '1.6.4', issues } },
 });
 
 /** Answers `projection snapshot` before the wrapped runner sees or records a call. */
@@ -273,7 +273,7 @@ function projectionEnvelope(expected: ProjectionRequestV1['expected']) {
     projectionInputDigest: digest('5'),
     rendererVersion: 'archcontext.docs-renderer/v6' as const,
     layoutVersion: 'archcontext.docs-layout/v1' as const,
-    generatedFrom: { codeGraphPackage: '@colbymchenry/codegraph' as const, codeGraphVersion: '1.6.2' as const, codeGraphStatus: 'ready' as const },
+    generatedFrom: { codeGraphPackage: '@colbymchenry/codegraph' as const, codeGraphVersion: '1.6.4' as const, codeGraphStatus: 'ready' as const },
   };
   const withoutReceipt = {
     schemaVersion: 'archcontext.projection-result/v3' as const,
@@ -301,7 +301,7 @@ function applyEnvelope(
     sourceTreeDigest: digest('2'), modelDigest: digest('3'), codeGraphDigest: digest('4'), indexedWorktreeDigest: digest('1'), projectionInputDigest: digest('5'),
     rendererVersion: 'archcontext.docs-renderer/v6' as const,
     layoutVersion: 'archcontext.docs-layout/v1' as const,
-    generatedFrom: { codeGraphPackage: '@colbymchenry/codegraph' as const, codeGraphVersion: '1.6.2' as const, codeGraphStatus: 'ready' as const },
+    generatedFrom: { codeGraphPackage: '@colbymchenry/codegraph' as const, codeGraphVersion: '1.6.4' as const, codeGraphStatus: 'ready' as const },
   };
   const applyReceipt = {
     schemaVersion: 'archcontext.projection-apply-identity/v1' as const,
@@ -764,8 +764,7 @@ describe('package-local ArchContext projection provider', () => {
 
   test('declined-unprovable-proof reaches the CLI with the debt report next step', () => {
     const f = fixture();
-    // Recorded from a real archctx 0.8.0 single-request apply (acceptObservedMajorChange) in a disposable repository,
-    // then moved to the projection-result/v3 shape of archctx 0.14.0: refresh signals carry no source tree digest.
+    // Recorded from archctx 0.8.0, then updated to projection-result/v3 and the pinned CodeGraph version.
     const declined = JSON.parse(readFileSync(join(import.meta.dir, 'fixtures/architecture-projection/declined-unprovable-proof-0.8.0.json'), 'utf8')) as ProjectionResultV3;
     expect(projectionResultInvariantIssues(declined)).toEqual([]);
     const result = projectionCli(f, { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'projection.run', data: declined }, declined.requestId);
@@ -898,7 +897,7 @@ describe('package-local ArchContext projection provider', () => {
     expect(invalid.projectionProvider.state).toBe('error');
     expect(invalid.projectionProvider.reason).toContain('RH_ARCHCTX_DOCTOR_INVALID');
     expect(invalid.apply.enabled).toBe(false);
-    const facts = { schemaVersion: 'archcontext.repository-code-facts/v1', state: 'unavailable' as const, requiredVersion: '1.6.2', reasonCode: 'codegraph-unavailable', message: 'CodeGraph binary is unavailable' };
+    const facts = { schemaVersion: 'archcontext.repository-code-facts/v1', state: 'unavailable' as const, requiredVersion: '1.6.4', reasonCode: 'codegraph-unavailable', message: 'CodeGraph binary is unavailable' };
     doctor = { ...doctorEnvelope(), data: { codeFacts: facts } };
     const unavailable = inspectArchitectureProjectionReadiness(f.repoRoot, architectureModelReady, options);
     expect(unavailable.codeFacts).toEqual({ requirement: 'required', state: facts.state, issues: [], reasonCode: facts.reasonCode, message: facts.message });

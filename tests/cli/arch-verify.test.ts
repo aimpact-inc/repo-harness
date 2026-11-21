@@ -136,7 +136,7 @@ const unprovable = (diagnostics: string[]) => ({
  */
 const flowsReport = (proven: number, unproven: number, capabilities: unknown[] = [], ok = unproven === 0) => ({
   schemaVersion: 'archcontext.flow-selector-check/v1', ok,
-  codeGraph: { availability: 'ready', version: '1.6.2' },
+  codeGraph: { availability: 'ready', version: '1.6.4' },
   summary: { selectors: proven + unproven, proven, unproven, usedUnproven: 0 },
   selectors: [
     ...Array.from({ length: proven }, (_, index) => ({
@@ -207,7 +207,7 @@ describe('rh arch verify: one status per check', () => {
   test('flows reports one finding per unproven selector, and an unavailable index is not a pass', () => {
     expect(archVerifyCheck('flows', data(flowsReport(3, 0)))).toMatchObject({ status: 'pass', count: 0 });
     expect(archVerifyCheck('flows', data(flowsReport(2, 1)))).toMatchObject({ status: 'findings', count: 1 });
-    expect(archVerifyCheck('flows', data({ ...flowsReport(0, 0), codeGraph: { availability: 'unavailable', version: '1.6.2' } })))
+    expect(archVerifyCheck('flows', data({ ...flowsReport(0, 0), codeGraph: { availability: 'unavailable', version: '1.6.4' } })))
       .toMatchObject({ status: 'unavailable', count: 0, error: { code: 'AC_CODE_FACTS_UNAVAILABLE' } });
   });
 
@@ -363,7 +363,7 @@ describe('rh arch verify in a repository', () => {
     const report = JSON.parse(result.document);
     expect(calls).toEqual([['verify', '--base', head, '--json']]);
     expect(result.exitCode).toBe(0);
-    expect(report).toMatchObject({ archctx_version: '0.17.0', verdict: 'pass', base: head, head });
+    expect(report).toMatchObject({ archctx_version: ARCHCTX_REQUIRED_VERSION, verdict: 'pass', base: head, head });
     expect(report.checks).toEqual(ARCH_VERIFY_CHECK_IDS.map(id => check(id, 'pass')));
   });
 
@@ -462,7 +462,7 @@ describe('rh arch verify in a repository', () => {
     const unmeasuredDebt = redigest({ ...debtReport(0), coverage: 'unknown', coverageReasonCodes: ['anchors:not-evaluated', 'dependencies:not-evaluated', 'flows:not-evaluated', 'ownership:not-evaluated', 'practices:not-evaluated', 'state-machines:not-evaluated'],
       checks: (debtReport(0).checks as Array<{ check: string }>).map((entry) => ({ check: entry.check, coverage: 'unknown', reasonCodes: ['not-evaluated'] })) });
     const gaps = [
-      archVerifyCheck('flows', data({ ...flowsReport(0, 0), codeGraph: { availability: 'unavailable', version: '1.6.2' } })),
+      archVerifyCheck('flows', data({ ...flowsReport(0, 0), codeGraph: { availability: 'unavailable', version: '1.6.4' } })),
       archVerifyCheck('docs', data(anchorsReport(0, 0, 'unavailable'))),
       archVerifyCheck('debt', data(unmeasuredDebt)),
       archVerifyCheck('constraints', data(constraintReport('undetermined', 'unknown'))),

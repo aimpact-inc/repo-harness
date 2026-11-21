@@ -435,10 +435,12 @@ CI and operators use the full debt comparison:
 rh arch debt --json --base origin/main
 ```
 
-The command measures the debt at HEAD and at the base, and reports the items
-whose ids are new at HEAD. It measures the base in a temporary checkout and
-removes that checkout. Measured debt exits 0. An unresolvable base exits 1
-with the reason on stderr. A failure of archctx does the same.
+ArchContext compares the debt at HEAD and at the resolved base. It reports
+introduced and resolved items when the corresponding check on the other side
+has complete coverage. A valid comparison exits 0, including when CodeGraph
+is unavailable or another check has a coverage gap. The JSON lists the gaps
+in `head.debt.coverageReasonCodes` and `base.coverageReasonCodes`. An unresolvable
+base or a failed comparison exits 1 and reports the reason on stderr.
 
 Agents author semantic snapshots and diagrams. Hooks do not spawn LLM agents or
 long-running commands. Deterministic execution belongs in explicit CLI commands

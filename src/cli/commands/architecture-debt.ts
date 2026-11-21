@@ -7,7 +7,8 @@ export function buildArchitectureDebtCommand(): Command {
   return new Command('debt')
     .description('Report ArchContext architecture debt at HEAD, and the debt that is new since a base ref')
     .option('--json', 'Output the debt report JSON')
-    .option('--base <ref>', 'Compare with the debt of this commit, measured in a temporary checkout')
+    .option('--base <ref>', 'Compare with this Git ref')
+    .addHelpText('after', '\nWith --base, a valid report exits 0 even when CodeGraph is unavailable.\nJSON lists coverage gaps for HEAD and base. A failed comparison exits 1.')
     .action(async (options: ArchitectureDebtCommandOptions) => {
       const { runArchitectureDebtCommand } = await import('./architecture-debt-report');
       runArchitectureDebtCommand(options);

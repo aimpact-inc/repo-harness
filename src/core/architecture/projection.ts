@@ -12,6 +12,7 @@ import {
   projectionApplyReadbackResultInvariantIssues,
   projectionResultInvariantIssues,
   validateJsonSchema,
+  type ArchitectureDebtDeltaReportV1,
   type ArchitectureDebtReportV1,
   type ArchitectureFlowSelectorCheckV1,
   type DependencyConstraintEvaluationV1,
@@ -30,6 +31,7 @@ import projectionResultSchema from 'archctx-contracts/schemas/runtime/projection
 import projectionReadbackSchema from 'archctx-contracts/schemas/runtime/projection-apply-readback.schema.json';
 import docsAnchorsSchema from 'archctx-contracts/schemas/runtime/docs-anchors.schema.json';
 import architectureDebtSchema from 'archctx-contracts/schemas/runtime/architecture-debt.schema.json';
+import architectureDebtDeltaSchema from 'archctx-contracts/schemas/runtime/architecture-debt-delta.schema.json';
 import flowSelectorCheckSchema from 'archctx-contracts/schemas/runtime/flow-selector-check.schema.json';
 import dependencyConstraintEvaluationSchema from 'archctx-contracts/schemas/runtime/dependency-constraint-evaluation.schema.json';
 import refImpactSchema from 'archctx-contracts/schemas/runtime/ref-impact.schema.json';
@@ -301,9 +303,21 @@ export function decodeDocsAnchorsReport(value: unknown): DocsAnchorsReportV1 {
  */
 export function decodeArchitectureDebtReport(value: unknown): ArchitectureDebtReportV1 {
   const report = decode<ArchitectureDebtReportV1>(architectureDebtSchema, value, 'architecture debt report');
+  assertArchitectureDebtReport(report);
+  return report;
+}
+
+/** Validate the native delta and bind its snapshots to the requested commits. */
+export function decodeArchitectureDebtDelta(value: unknown, baseSha: string, headSha: string): ArchitectureDebtDeltaReportV1 {
+  const report = decode<ArchitectureDebtDeltaReportV1>(architectureDebtDeltaSchema, value, 'architecture debt delta');
+  if (report.base.ref !== baseSha || report.base.sha !== baseSha || report.head.sha !== headSha) throw new Error('architecture debt delta snapshot mismatch');
+  assertArchitectureDebtReport(report.head.debt);
+  return report;
+}
+
+function assertArchitectureDebtReport(report: ArchitectureDebtReportV1): void {
   const issues = architectureDebtReportIssues(report);
   if (issues.length > 0) throw new Error(`architecture debt report invalid: ${issues.join('; ')}`);
-  return report;
 }
 
 export function decodeRuntimeVerify(value: unknown, base: string, head: string): RuntimeVerifyV1 {

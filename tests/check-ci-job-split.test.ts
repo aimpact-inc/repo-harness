@@ -9,9 +9,10 @@ import { replayNeedsSource } from '../scripts/replay-ci-coverage';
 import { changelogPreamble, checkReleasedSections, fragmentMessage, releasedSections, sectionDrift, unreleasedHeading, withoutUnreleasedSection } from '../scripts/check-changelog-released-sections';
 import { assemble, FRAGMENT_PATH_FORM, fragmentPaths, isFragmentPath, KEPT_FILE, parseFragment, renderSection } from '../scripts/changelog-fragments';
 import { ARCHITECTURE_JOB, ARCHITECTURE_SUMMARY_PATH } from '../scripts/report-ci';
+import type { ArchitectureDebtOutputV1 } from '../src/cli/commands/architecture-debt-report';
 import { ARCHCTX_REQUIRED_VERSION } from '../src/core/architecture/projection';
 import { ArchctxClient, indexPackageLocalCodeGraph } from '../src/effects/architecture/archctx-provider';
-import { fixtureCommit, fixtureWrite, fixtureYaml, moduleRepository } from './helpers/module-repository';
+import { fixtureCommit, fixtureGit, fixtureWrite, fixtureYaml, moduleRepository } from './helpers/module-repository';
 
 const ROOT = resolve(import.meta.dir, '..');
 const workflow = Bun.YAML.parse(readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8')) as any;
@@ -1044,13 +1045,8 @@ describe('single affected verification and daily fallback', () => {
     expect(advisory.if).toBe("needs.selection.outputs.mode == 'affected'");
     expect(advisory.permissions).toBeUndefined();
     expect(jobs.required.steps[0].env.ARCHITECTURE_RESULT).toBe('${{ needs.architecture-advisory.result }}');
-    const debtCache = advisory.steps.find((step: any) => step.uses === 'actions/cache@v4');
-    expect(debtCache.with).toEqual({
-      path: '.git/repo-harness/cache/arch-debt',
-      key: 'arch-debt-base-${{ runner.os }}-${{ github.event.pull_request.base.sha }}',
-    });
+    expect(advisory.steps.some((step: any) => step.with?.path === '.git/repo-harness/cache/arch-debt')).toBe(false);
     const warn = advisory.steps.find((step: any) => step.name === 'Check the plugin-internals constraint and warn about architecture debt');
-    expect(advisory.steps.indexOf(debtCache)).toBeLessThan(advisory.steps.indexOf(warn));
     expect(warn.env).toEqual({ BASE_SHA: '${{ github.event.pull_request.base.sha }}' });
     expect(warn.run).toBe('bash scripts/check-ci.sh architecture-advisory --base "$BASE_SHA"');
     expect(advisory.steps.find((step: any) => step.uses === 'actions/checkout@v4').with['fetch-depth']).toBe(0);
@@ -1077,8 +1073,8 @@ describe('architecture lanes', () => {
     schemaVersion: 'archcontext.dependency-constraint-evaluation/v1', status: 'violated', coverage: 'complete', reasonCodes: [], warnings: [],
     constraintIds: [LAYER_DIRECTION, PLUGIN_INTERNALS], importEdgeCount: 5521, unresolvedImports: [], violations: [constraintViolation(LAYER_DIRECTION)], ...fields } });
 
-  // Real check-ci.sh with stub CLI results. `bun -e` and the shell logic stay real.
-  function runLane(args: string[], fixture: { debt?: string; debtExit?: number; check?: string; checkExit?: number; codegraphExit?: number; constraints?: string; summary?: boolean; history?: Array<{ manifest: boolean; hoursAgo: number }>; clockStart?: number; shallow?: boolean; gitFails?: string; changelog?: string; changelogExit?: number; links?: { dead: string[]; missing: string[] } }) {
+  // Run the real lane with fixture CLI results, or route its debt command to a real checkout.
+  function runLane(args: string[], fixture: { debt?: string; debtCheckout?: { root: string; env: NodeJS.ProcessEnv }; debtExit?: number; check?: string; checkExit?: number; codegraphExit?: number; constraints?: string; summary?: boolean; history?: Array<{ manifest: boolean; hoursAgo: number }>; clockStart?: number; shallow?: boolean; gitFails?: string; changelog?: string; changelogExit?: number; links?: { dead: string[]; missing: string[] } }) {
     const root = mkdtempSync(join(tmpdir(), 'rh-ci-architecture-'));
     const bin = join(root, 'bin');
     try {
@@ -1114,6 +1110,12 @@ describe('architecture lanes', () => {
       writeFileSync(join(bin, 'bun'), [
         '#!/bin/bash',
         'if [[ "$1" == install ]]; then exit 0; fi',
+        'if [[ -n "$RH_TEST_DEBT_CHECKOUT" && "$1" == src/cli/index.ts && "$2" == arch && "$3" == debt ]]; then',
+        '  cd "$RH_TEST_DEBT_CHECKOUT" || exit 1',
+        '  set -o pipefail',
+        '  "$RH_TEST_DEBT_BUN" "$RH_TEST_DEBT_CLI" "${@:2}" | tee "$RH_TEST_DEBT_JSON"',
+        '  exit $?',
+        'fi',
         `if [[ "$1" == src/cli/index.ts && "$2" == arch && "$3" == constraints ]]; then cat ${JSON.stringify(join(root, 'constraints.json'))}; exit 0; fi`,
         `if [[ "$1" == src/cli/index.ts && "$2" == arch && "$3" == debt ]]; then echo "$*" > ${JSON.stringify(join(root, 'debt-args'))}; cat ${JSON.stringify(join(root, 'debt.json'))}; if [[ ${fixture.debtExit ?? 0} -ne 0 ]]; then echo "$6 does not resolve to a commit" >&2; fi; exit ${fixture.debtExit ?? 0}; fi`,
         // The fixture has no architecture model; the clock rule is covered by the provider test.
@@ -1137,13 +1139,23 @@ describe('architecture lanes', () => {
       const links = fixture.links ?? { dead: [], missing: [] };
       writeFileSync(join(root, 'repo/scripts/check-archimap-links.ts'), `console.log(${JSON.stringify(JSON.stringify(links))}); process.exit(${links.dead.length + links.missing.length > 0 ? 1 : 0});`);
       const summaryPath = join(root, 'out/architecture/summary.json');
+      const debtOutput = join(root, 'real-debt.json');
       const result = spawnSync('/bin/bash', ['scripts/check-ci.sh', ...args], {
         cwd: join(root, 'repo'), encoding: 'utf8',
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ...(fixture.summary ? { ARCHITECTURE_SUMMARY: summaryPath } : {}) },
+        env: {
+          ...process.env, ...fixture.debtCheckout?.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          RH_TEST_DEBT_CHECKOUT: fixture.debtCheckout?.root,
+          RH_TEST_DEBT_BUN: process.execPath,
+          RH_TEST_DEBT_CLI: join(ROOT, 'src/cli/index.ts'),
+          RH_TEST_DEBT_JSON: debtOutput,
+          ...(fixture.summary ? { ARCHITECTURE_SUMMARY: summaryPath } : {}),
+        },
       });
       return {
         status: result.status, stdout: result.stdout, stderr: result.stderr,
         checked: existsSync(join(root, 'checked')),
+        debtOutput: existsSync(debtOutput) ? readFileSync(debtOutput, 'utf8') : null,
         debtArgs: existsSync(join(root, 'debt-args')) ? readFileSync(join(root, 'debt-args'), 'utf8').trim() : null,
         changelogArgs: existsSync(join(root, 'changelog-args')) ? readFileSync(join(root, 'changelog-args'), 'utf8').trim() : null,
         summary: existsSync(summaryPath) ? JSON.parse(readFileSync(summaryPath, 'utf8')) : null,
@@ -1184,15 +1196,24 @@ describe('architecture lanes', () => {
     ]);
   });
 
-  test('the plugin constraint allows the public contract and blocks unlisted internal imports', () => {
-    const root = moduleRepository({ flow: false });
-    const env = { ...process.env, ARCHCONTEXT_STATE_DIR: join(root, '.fixture-state') };
+  test.each(['primary', 'linked'])('the advisory measures cold-base dependency and flow debt from a %s checkout and gates plugin imports', (layout) => {
+    const root = moduleRepository();
+    const scratch = mkdtempSync(join(tmpdir(), 'rh-debt-advisory-'));
+    const temporary = join(scratch, 'tmp');
+    const home = join(scratch, 'home');
+    const trace = join(scratch, 'git-trace');
+    const env = {
+      ...process.env, HOME: home, TMPDIR: temporary, TMP: temporary, TEMP: temporary,
+      ARCHCONTEXT_STATE_DIR: join(scratch, 'state'), ARCHCONTEXT_LOCAL_STORE_PATH: undefined,
+      GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TRACE: trace,
+      CODEGRAPH_DIR: undefined, CODEGRAPH_NO_DOWNLOAD: '1', DO_NOT_TRACK: '1',
+    };
     const policy = { provider: 'archctx', applyMode: 'manual', requiredVersion: ARCHCTX_REQUIRED_VERSION, timeoutMs: 30_000 } as const;
-    const client = new ArchctxClient(root, ARCHCTX_REQUIRED_VERSION, { env });
+
     const constraintPath = '.archcontext/model/constraints/constraint.surface.plugin-internals.yaml';
     const constraintBody = readFileSync(join(ROOT, constraintPath), 'utf8');
-    const node = (id: string, parent?: string, include?: string[]) => {
-      fixtureWrite(root, `.archcontext/model/nodes/${id}.yaml`, fixtureYaml({
+    const node = (id: string, parent?: string, include?: string[], checkout = root) => {
+      fixtureWrite(checkout, `.archcontext/model/nodes/${id}.yaml`, fixtureYaml({
         schemaVersion: 'archcontext.node/v2', id, kind: parent ? 'component' : 'capability', parent,
         name: id, status: 'active', summary: id, ...(include ? { source: { include } } : {}),
       }));
@@ -1205,8 +1226,11 @@ describe('architecture lanes', () => {
       ['src/effects/architecture/new-internal.ts', '../architecture/new-internal'],
     ] as const;
     const importFrom = (path: string) => `import { value } from "${path}";\nexport const answer = value;\n`;
+    let client: ArchctxClient | undefined;
     try {
-      fixtureWrite(root, '.gitignore', '.codegraph/\n.fixture-state/\n');
+      mkdirSync(temporary);
+      mkdirSync(home);
+      fixtureWrite(root, '.gitignore', '.codegraph/\n');
       fixtureWrite(root, constraintPath, constraintBody);
       node(cap + 'operator', undefined, ['src/effects/operator/**']);
       node(cap + 'mcp-sidecar');
@@ -1221,33 +1245,67 @@ describe('architecture lanes', () => {
       node('component.codegraph-readiness.mcp-adapter', 'capability.verification.codegraph-readiness');
       fixtureWrite(root, publicPath, 'export const value = 1;\n');
       fixtureWrite(root, 'src/effects/operator/architecture.ts', importFrom('../../core/architecture/projection'));
+      fixtureWrite(root, 'src/module/read.ts', 'import { project } from "./core";\nexport function read() { return project(); }\n');
+      fixtureWrite(root, 'src/to-resolve.ts', 'export const old = 1;\n');
       const base = fixtureCommit(root);
-      indexPackageLocalCodeGraph(root, { env, policy });
-      const advisory = () => runLane(['architecture-advisory', '--base', base], {
-        constraints: JSON.stringify(client.json(['constraints', 'check', '--json'], policy.timeoutMs)),
-        debt: debt([]), check: noop, checkExit: 0,
-      });
-      const pass = advisory();
+      const checkout = layout === 'primary' ? root : join(scratch, 'linked');
+      if (layout === 'linked') fixtureGit(root, ['worktree', 'add', '--detach', checkout, base]);
+      client = new ArchctxClient(checkout, ARCHCTX_REQUIRED_VERSION, { env });
+      indexPackageLocalCodeGraph(checkout, { env, policy });
+      const constraintReport = () => JSON.stringify(client!.json(['constraints', 'check', '--json'], policy.timeoutMs));
+      const pass = runLane(['architecture-advisory', '--base', base], { constraints: constraintReport(), debt: debt([]), check: noop, checkExit: 0 });
       expect(pass.status, pass.stdout + pass.stderr).toBe(0);
       expect(pass.stdout).toContain(`[ci] ${PLUGIN_INTERNALS}: 0 violations, coverage complete.`);
 
-      node('component.architecture.new-internal', cap + 'architecture', [deniedImports[2][0]]);
+      node('component.architecture.new-internal', cap + 'architecture', [deniedImports[2][0]], checkout);
       for (const [path, specifier] of deniedImports) {
-        fixtureWrite(root, path, 'export const value = 1;\n');
-        fixtureWrite(root, `src/effects/operator/${path.split('/').at(-1)}`, importFrom(specifier));
+        fixtureWrite(checkout, path, 'export const value = 1;\n');
+        fixtureWrite(checkout, `src/effects/operator/${path.split('/').at(-1)}`, importFrom(specifier));
       }
-      fixtureCommit(root);
-      execFileSync(join(ROOT, 'node_modules/.bin/codegraph'), ['sync', '-q', '.'], { cwd: root, env });
-      const gated = advisory();
+      fixtureWrite(checkout, 'src/module/read.ts', 'export function read() { return 2; }\n');
+      rmSync(join(checkout, 'src/to-resolve.ts'));
+      const head = fixtureCommit(checkout);
+      execFileSync(join(ROOT, 'node_modules/.bin/codegraph'), ['sync', '-q', '.'], { cwd: checkout, env });
+
+      const worktrees = fixtureGit(root, ['worktree', 'list', '--porcelain']);
+      expect(existsSync(join(root, '.git/archcontext/codegraph'))).toBe(false);
+      const ref = 'HEAD^';
+      const gated = runLane(['architecture-advisory', '--base', ref], {
+        constraints: constraintReport(), debtCheckout: { root: checkout, env }, check: noop, checkExit: 0,
+      });
       expect(gated.status, gated.stdout + gated.stderr).toBe(1);
+      expect(gated.debtOutput, gated.stdout + gated.stderr).toBeTruthy();
+      const report = JSON.parse(gated.debtOutput!) as ArchitectureDebtOutputV1;
+      expect(report).toMatchObject({ kind: 'repo-harness-architecture-debt', head: { sha: head }, base: { ref, sha: base } });
+      expect(report.head.debt.checks).toContainEqual({ check: 'dependencies', coverage: 'complete', reasonCodes: [] });
+      expect(report.head.debt.checks).toContainEqual({ check: 'flows', coverage: 'complete', reasonCodes: [] });
+      expect(report.base?.coverageReasonCodes.filter(code => /^(dependencies|flows):/.test(code))).toEqual([]);
+      expect(report.introduced).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'undeclared-dependency' }),
+        expect.objectContaining({ kind: 'flow-proof-failed', reasonCode: 'no-direct-call' }),
+      ]));
+      expect(report.resolvedIds).toHaveLength(1);
+      expect(warnings(gated.stdout)).toEqual(expect.arrayContaining([
+        expect.stringContaining('Architecture debt introduced::undeclared-dependency'),
+        expect.stringContaining('Architecture debt introduced::flow-proof-failed (no-direct-call)'),
+      ]));
+      expect(fixtureGit(root, ['worktree', 'list', '--porcelain'])).toBe(worktrees);
+      const adds = readFileSync(trace, 'utf8').split('\n').filter(line => line.includes('worktree add --detach'));
+      expect(adds).toEqual([expect.stringContaining('/archctx-debt-base-')]);
+      expect(adds[0]).toContain(base);
+      expect(readdirSync(temporary).filter(name => name.startsWith('repo-harness-debt-base-'))).toEqual([]);
+      expect(existsSync(join(root, '.git/repo-harness/cache/arch-debt'))).toBe(false);
       expect(errors(gated.stdout)).toHaveLength(3);
       for (const [path] of deniedImports) {
         expect(errors(gated.stdout).some(annotation => annotation.includes(` imports ${path} (`))).toBe(true);
       }
-      expect(readFileSync(join(root, constraintPath), 'utf8')).toBe(constraintBody);
+      expect(readFileSync(join(checkout, constraintPath), 'utf8')).toBe(constraintBody);
     } finally {
-      try { client.json(['daemon', 'stop', '--json'], policy.timeoutMs, true); }
-      finally { rmSync(root, { recursive: true, force: true }); }
+      try { client?.json(['daemon', 'stop', '--json'], policy.timeoutMs, true); }
+      finally {
+        rmSync(scratch, { recursive: true, force: true });
+        rmSync(root, { recursive: true, force: true });
+      }
     }
   }, 60_000);
 

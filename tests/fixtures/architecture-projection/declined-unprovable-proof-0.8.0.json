@@ -17,7 +17,7 @@
     "layoutVersion": "archcontext.docs-layout/v1",
     "generatedFrom": {
       "codeGraphPackage": "@colbymchenry/codegraph",
-      "codeGraphVersion": "1.6.2",
+      "codeGraphVersion": "1.6.4",
       "codeGraphStatus": "unavailable"
     }
   },
@@ -36,7 +36,7 @@
     "layoutVersion": "archcontext.docs-layout/v1",
     "generatedFrom": {
       "codeGraphPackage": "@colbymchenry/codegraph",
-      "codeGraphVersion": "1.6.2",
+      "codeGraphVersion": "1.6.4",
       "codeGraphStatus": "unavailable"
     }
   },
@@ -154,9 +154,9 @@
       },
       "signalId": "sha256:943b4073f5f892c672886888c8c47149ed0e612eddec023f5b26b69fd14da501",
       "idempotencyKey": "sha256:943b4073f5f892c672886888c8c47149ed0e612eddec023f5b26b69fd14da501",
-      "projectionReceiptDigest": "sha256:16a42cd7797d727489ff375631eec5c70a07567e212339e0aa7386294a15b868"
+      "projectionReceiptDigest": "sha256:1fcb95bbe75742ae1dad648010926e47145ede9c7cb8ce0bb53b28d16c324676"
     }
   ],
   "majorChangeAcceptance": "declined-unprovable-proof",
-  "receiptDigest": "sha256:16a42cd7797d727489ff375631eec5c70a07567e212339e0aa7386294a15b868"
+  "receiptDigest": "sha256:1fcb95bbe75742ae1dad648010926e47145ede9c7cb8ce0bb53b28d16c324676"
 }

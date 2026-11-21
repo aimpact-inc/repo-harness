@@ -1,22 +1,13 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { digestJson, errorEnvelope, type ArchitectureDebtItemV1, type ArchitectureDebtReportV1, type Json } from 'archctx-contracts';
+import { join } from 'node:path';
+import { ARCHITECTURE_DEBT_DELTA_SCHEMA_VERSION, digestJson, errorEnvelope, type ArchitectureDebtDeltaReportV1, type ArchitectureDebtReportV1, type Json } from 'archctx-contracts';
 import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError, decodeArchitectureDebtReport } from '../src/core/architecture/projection';
 import type { ArchctxProcessResult, ArchitectureProjectionPolicy, RunArchctxProcess } from '../src/core/architecture/contracts';
-import {
-  completeArchitectureDebt,
-  checkpointArchitectureDebt,
-  resolveCompatibleNodeRuntime,
-  resolvePackageLocalArchctx,
-  seedWorktreeCodeGraph,
-  stopWorkspaceArchitectureDaemons,
-} from '../src/effects/architecture/archctx-provider';
-import { currentProcessStartTime } from '../src/effects/locking/process-start-time';
+import { completeArchitectureDebt, checkpointArchitectureDebt } from '../src/effects/architecture/archctx-provider';
 import { architectureDebtReport, architectureDebtSummary } from '../src/cli/commands/architecture-debt-report';
-import { version as packageVersion } from '../package.json';
 
 /**
  * Recorded from archctx@0.8.0 `complete --head-sha <sha> --json` in a disposable
@@ -40,106 +31,45 @@ function redigest(report: Omit<ArchitectureDebtReportV1, 'digest'> & { digest?: 
   const { digest: _digest, ...body } = report;
   return { ...body, digest: digestJson(body as unknown as Json) };
 }
-function withItems(items: ArchitectureDebtItemV1[]): ArchitectureDebtReportV1 {
-  return redigest({ ...clone(recordedDebt), items, actionsRequired: [...new Set(items.map((item) => item.action))].sort() });
-}
 const ok = (value: unknown): ArchctxProcessResult => ({ status: 0, signal: null, stdout: JSON.stringify(value), stderr: '' });
 const failed = (value: unknown): ArchctxProcessResult => ({ status: 1, signal: null, stdout: JSON.stringify(value), stderr: '' });
 const completeEnvelope = (headSha: string, debt: unknown) => ({ ...clone(recorded), data: { ...clone(recorded.data), snapshot: { ...recorded.data.snapshot, headSha }, debt } });
 // The code facts shape comes from package-local archctx@0.8.0 doctor in a disposable repository.
 const doctorEnvelope = (state = 'ready', issues: Array<{ code: string; message: string }> = []) => ({
   schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'doctor',
-  data: { codeFacts: { schemaVersion: 'archcontext.repository-code-facts/v1', state, indexPresent: state !== 'index-missing', requiredVersion: '1.6.2', codeGraphVersion: '1.6.2', issues } },
+  data: { codeFacts: { schemaVersion: 'archcontext.repository-code-facts/v1', state, indexPresent: state !== 'index-missing', requiredVersion: '1.6.4', codeGraphVersion: '1.6.4', issues } },
 });
 
-function git(cwd: string, args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim();
+function git(cwd: string, args: string[], date?: string): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8', env: {
+    ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    ...(date ? { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } : {}),
+  } }).trim();
 }
 
-/** A fake package-local archctx with its declared CodeGraph, and a real two-commit Git repository. */
+/** A fake package-local archctx and a real two-commit Git repository. */
 function fixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'repo-harness-architecture-debt-')));
   roots.push(root);
   const consumerRoot = join(root, 'consumer');
   const archctxRoot = join(consumerRoot, 'node_modules', 'archctx');
-  const codegraphRoot = join(consumerRoot, 'node_modules', '@colbymchenry', 'codegraph');
   mkdirSync(join(archctxRoot, 'bin'), { recursive: true });
-  mkdirSync(codegraphRoot, { recursive: true });
-  writeFileSync(join(archctxRoot, 'package.json'), JSON.stringify({ name: 'archctx', version: ARCHCTX_REQUIRED_VERSION, engines: { node: '>=22.22 <26' }, bin: { archctx: './bin/archctx' }, dependencies: { '@colbymchenry/codegraph': '1.6.2' } }));
+  writeFileSync(join(archctxRoot, 'package.json'), JSON.stringify({ name: 'archctx', version: ARCHCTX_REQUIRED_VERSION, engines: { node: '>=22.22 <26' }, bin: { archctx: './bin/archctx' } }));
   writeFileSync(join(archctxRoot, 'bin', 'archctx'), '#!/bin/sh\nexit 99\n');
   chmodSync(join(archctxRoot, 'bin', 'archctx'), 0o755);
-  writeFileSync(join(codegraphRoot, 'package.json'), JSON.stringify({ name: '@colbymchenry/codegraph', version: '1.6.2', bin: { codegraph: 'npm-shim.js' } }));
-  writeFileSync(join(codegraphRoot, 'npm-shim.js'), 'process.exit(99);\n');
   const repoRoot = join(root, 'repo');
   mkdirSync(join(repoRoot, 'src'), { recursive: true });
   git(repoRoot, ['init', '-q']);
-  writeFileSync(join(repoRoot, 'src', 'a.ts'), 'export const a = 1;\n');
-  git(repoRoot, ['add', '.']);
-  git(repoRoot, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base']);
-  const baseSha = git(repoRoot, ['rev-parse', 'HEAD']);
-  writeFileSync(join(repoRoot, 'src', 'b.ts'), 'export const b = 2;\n');
-  git(repoRoot, ['add', '.']);
-  git(repoRoot, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'head']);
-  const headSha = git(repoRoot, ['rev-parse', 'HEAD']);
-  // The index at HEAD is the operator's; the base index is built by the command.
-  mkdirSync(join(repoRoot, '.codegraph'));
-  return { consumerRoot, repoRoot, baseSha, headSha, codegraphBin: realpathSync(join(codegraphRoot, 'npm-shim.js')) };
-}
-
-type Call = { tool: 'archctx' | 'codegraph'; args: readonly string[]; cwd: string };
-
-/** Answers like archctx@0.8.0: the debt depends on which checkout runs `complete`. */
-function fakeProvider(
-  f: ReturnType<typeof fixture>,
-  debt: { head: ArchitectureDebtReportV1; base: ArchitectureDebtReportV1 | ArchctxProcessResult },
-  daemonStop: 'ok' | 'fail' = 'ok',
-  syncOutcome: 'no-base' | 'seeded' | 'partial-index' = 'no-base',
-) {
-  const calls: Call[] = [];
-  let baseCheckout: string | null = null;
-  const run: RunArchctxProcess = (binary, args, options) => {
-    const tool = binary === f.codegraphBin ? 'codegraph' : 'archctx';
-    calls.push({ tool, args, cwd: options.cwd });
-    if (tool === 'codegraph') {
-      mkdirSync(join(options.cwd, '.codegraph'), { recursive: true });
-      writeFileSync(join(options.cwd, '.codegraph', 'codegraph.db'), 'cold-init');
-      return { status: 0, signal: null, stdout: '', stderr: '' };
-    }
-    if (args[0] === 'sync') {
-      if (syncOutcome === 'seeded') {
-        mkdirSync(join(options.cwd, '.codegraph'), { recursive: true });
-        writeFileSync(join(options.cwd, '.codegraph', 'codegraph.db'), 'seeded-from-base');
-        return ok({ schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'sync', data: { codeFactsDigest: 'sha256:seed', indexedAt: new Date(0).toISOString(), codeGraphBase: 'current' } });
-      }
-      if (syncOutcome === 'partial-index') {
-        mkdirSync(join(options.cwd, '.codegraph'), { recursive: true });
-        writeFileSync(join(options.cwd, '.codegraph', 'codegraph.lock'), 'stale-lock');
-      }
-      return failed(errorEnvelope('sync', 'AC_CODE_FACTS_UNAVAILABLE', 'no shared base', 'index-missing'));
-    }
-    if (args[0] === 'doctor') return ok(doctorEnvelope());
-    if (args[0] === 'complete') {
-      const sha = args[args.indexOf('--head-sha') + 1]!;
-      if (options.cwd === f.repoRoot) return ok(completeEnvelope(sha, debt.head));
-      baseCheckout = options.cwd;
-      return 'status' in debt.base ? debt.base : ok(completeEnvelope(sha, debt.base));
-    }
-    if (args[0] === 'daemon' && args[1] === 'list') {
-      const daemons = baseCheckout === null ? [] : [{ stateDir: '/state/base', connection: 'valid', root: baseCheckout }, { stateDir: '/state/head', connection: 'valid', root: f.repoRoot }];
-      return ok({ schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'daemon.list', data: { stateRoot: '/state', daemons } });
-    }
-    if (args[0] === 'daemon' && args[1] === 'stop') {
-      return daemonStop === 'ok'
-        ? ok({ schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'daemon.stop', data: { stopping: true } })
-        : failed(errorEnvelope('daemon.stop', 'AC_RUNTIME_UNAVAILABLE', 'no connection file'));
-    }
-    throw new Error(`unexpected archctx call ${args.join(' ')}`);
+  const commit = (message: string, date: string) => {
+    git(repoRoot, ['add', '.']);
+    git(repoRoot, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', message], date);
+    return git(repoRoot, ['rev-parse', 'HEAD']);
   };
-  return { calls, run, baseCheckout: () => baseCheckout };
-}
-
-function worktrees(repoRoot: string): string[] {
-  return git(repoRoot, ['worktree', 'list', '--porcelain']).split('\n').filter((line) => line.startsWith('worktree ')).map((line) => line.slice('worktree '.length));
+  writeFileSync(join(repoRoot, 'src', 'a.ts'), 'export const a = 1;\n');
+  const baseSha = commit('base', '2020-01-01T00:00:00Z');
+  writeFileSync(join(repoRoot, 'src', 'b.ts'), 'export const b = 2;\n');
+  const headSha = commit('head', '2020-01-03T00:00:00Z');
+  return { consumerRoot, repoRoot, baseSha, headSha };
 }
 
 describe('architecture debt report decoder', () => {
@@ -162,24 +92,19 @@ describe('architecture debt report decoder', () => {
 });
 
 describe('completeArchitectureDebt', () => {
-  test('doctor not-ready stops debt with a typed fix before complete or base indexing', () => {
+  test('doctor not-ready stops HEAD-only debt with a typed fix before complete', () => {
     const f = fixture();
     const calls: Array<readonly string[]> = [];
     const issues = [{ code: 'version-mismatch', message: 'CodeGraph repository status version mismatch' }, { code: 'pending-source-changes', message: 'CodeGraph repository index has pending source changes' }];
-    const provider = fakeProvider(f, { head: recordedDebt, base: recordedDebt });
-    const run: RunArchctxProcess = (binary, args, options) => {
-      calls.push(args);
-      return args[0] === 'doctor' ? ok(doctorEnvelope('not-ready', issues)) : provider.run(binary, args, options);
-    };
+    const run: RunArchctxProcess = (_binary, args) => { calls.push(args); return ok(doctorEnvelope('not-ready', issues)); };
     let caught: unknown;
-    try { architectureDebtReport(f.repoRoot, 'HEAD~1', { consumerRoot: f.consumerRoot, policy, run }); } catch (error) { caught = error; }
+    try { architectureDebtReport(f.repoRoot, undefined, { consumerRoot: f.consumerRoot, policy, run }); } catch (error) { caught = error; }
     expect(caught).toBeInstanceOf(ArchctxClientError);
     expect(caught).toMatchObject({ code: 'RH_ARCHCTX_CODE_FACTS_NOT_READY', reasonCode: 'code-facts-not-ready', details: { state: 'not-ready', issues } });
     expect((caught as Error).message).toContain('version-mismatch, pending-source-changes');
     expect((caught as Error).message).toContain('codegraph index .');
     expect((caught as Error).message).toContain(f.repoRoot);
     expect(calls).toEqual([['doctor', '--json']]);
-    expect(worktrees(f.repoRoot)).toEqual([f.repoRoot]);
   });
 
   test('doctor unknown or malformed code facts fail closed before complete', () => {
@@ -251,7 +176,7 @@ describe('completeArchitectureDebt', () => {
 
   test('doctor index-missing and unavailable use the same typed error without complete', () => {
     const f = fixture();
-    const unavailable = { ...doctorEnvelope(), data: { codeFacts: { schemaVersion: 'archcontext.repository-code-facts/v1', state: 'unavailable', requiredVersion: '1.6.2', reasonCode: 'codegraph-unavailable', message: 'CodeGraph binary is unavailable' } } };
+    const unavailable = { ...doctorEnvelope(), data: { codeFacts: { schemaVersion: 'archcontext.repository-code-facts/v1', state: 'unavailable', requiredVersion: '1.6.4', reasonCode: 'codegraph-unavailable', message: 'CodeGraph binary is unavailable' } } };
     for (const envelope of [doctorEnvelope('index-missing'), unavailable]) {
       const calls: Array<readonly string[]> = [];
       const run: RunArchctxProcess = (_binary, args) => { calls.push(args); return ok(envelope); };
@@ -270,189 +195,87 @@ describe('completeArchitectureDebt', () => {
 });
 
 describe('architecture-debt command', () => {
-  const [flowItem, unownedItem] = recordedDebt.items as [ArchitectureDebtItemV1, ArchitectureDebtItemV1];
-  const goneItem: ArchitectureDebtItemV1 = { ...clone(unownedItem), id: `debt.${'c'.repeat(64)}`, paths: ['src/gone.ts'] };
+  function delta(f: ReturnType<typeof fixture>): ArchitectureDebtDeltaReportV1 {
+    const unowned = recordedDebt.items.find(item => item.kind === 'unowned-path')!;
+    const resolved: ArchitectureDebtReportV1['items'][number] = { ...unowned, id: `debt.${'c'.repeat(64)}`, paths: ['src/gone.ts'] };
+    const baseDebt = redigest({
+      ...recordedDebt,
+      checks: recordedDebt.checks.map(check => check.check === 'flows' ? { ...check, coverage: 'unknown', reasonCodes: ['index-missing'] } : check),
+      coverageReasonCodes: ['flows:index-missing', ...recordedDebt.coverageReasonCodes],
+      items: [resolved],
+      actionsRequired: [resolved.action],
+    });
+    return {
+      schemaVersion: ARCHITECTURE_DEBT_DELTA_SCHEMA_VERSION,
+      head: { sha: f.headSha, debt: recordedDebt },
+      base: { ref: f.baseSha, sha: f.baseSha, debtDigest: baseDebt.digest, coverage: baseDebt.coverage, coverageReasonCodes: baseDebt.coverageReasonCodes },
+      introduced: [unowned],
+      resolvedIds: [resolved.id],
+    };
+  }
 
   test('without a base it reports only the HEAD debt', () => {
     const f = fixture();
-    const provider = fakeProvider(f, { head: recordedDebt, base: recordedDebt });
-    const output = architectureDebtReport(f.repoRoot, undefined, { consumerRoot: f.consumerRoot, policy, run: provider.run });
+    const calls: Array<readonly string[]> = [];
+    const run: RunArchctxProcess = (_binary, args) => {
+      calls.push(args);
+      return ok(args[0] === 'doctor' ? doctorEnvelope() : completeEnvelope(f.headSha, recordedDebt));
+    };
+    const output = architectureDebtReport(f.repoRoot, undefined, { consumerRoot: f.consumerRoot, policy, run });
     expect(output).toEqual({ kind: 'repo-harness-architecture-debt', head: { sha: f.headSha, debt: recordedDebt }, base: null, introduced: null, resolvedIds: null });
-    expect(provider.calls.map(({ tool, args, cwd }) => [tool, args[0], cwd])).toEqual([['archctx', 'doctor', f.repoRoot], ['archctx', 'complete', f.repoRoot]]);
+    expect(calls).toEqual([['doctor', '--json'], ['complete', '--head-sha', f.headSha, '--json']]);
     expect(architectureDebtSummary(output)).toContain('2 items, coverage partial');
   });
 
-  test('with a base it reports debt new at HEAD and base ids gone at HEAD, then closes the base checkout', () => {
+  test('passes the exact SHA for a dated Git selector and reports the native delta', () => {
     const f = fixture();
-    const base = withItems([flowItem, goneItem]);
-    const provider = fakeProvider(f, { head: recordedDebt, base });
-    const output = architectureDebtReport(f.repoRoot, 'HEAD~1', { consumerRoot: f.consumerRoot, policy, run: provider.run });
-    expect(output.base).toEqual({ ref: 'HEAD~1', sha: f.baseSha, debtDigest: base.digest, coverage: base.coverage, coverageReasonCodes: base.coverageReasonCodes });
-    expect(output.introduced).toEqual([unownedItem]);
-    expect(output.resolvedIds).toEqual([goneItem.id]);
-    const checkout = provider.baseCheckout()!;
-    expect(provider.calls.filter((call) => call.cwd === checkout).map(({ tool, args }) => [tool, ...args])).toEqual([
-      ...(process.platform === 'win32' ? [] : [['archctx', 'sync', '--json']]),
-      ['codegraph', 'init', '-y', '.'], ['archctx', 'doctor', '--json'], ['archctx', 'complete', '--head-sha', f.baseSha, '--json'],
-    ]);
-    // The R5 closeout helper stops only the daemon of the base checkout, by state directory.
-    expect(provider.calls.filter((call) => call.args[0] === 'daemon').map(({ args }) => args)).toEqual([['daemon', 'list', '--json'], ['daemon', 'stop', '--state-dir', '/state/base', '--json']]);
-    expect(existsSync(dirname(checkout))).toBe(false);
-    expect(worktrees(f.repoRoot)).toEqual([f.repoRoot]);
+    const ref = 'HEAD@{2020-01-02 00:00:00 +0000}';
+    const { head, base, introduced, resolvedIds } = delta(f);
+    const calls: Array<readonly string[]> = [];
+    const run: RunArchctxProcess = (_binary, args, opts) => {
+      calls.push(args);
+      expect(opts.cwd).toBe(f.repoRoot);
+      return ok({ schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'debt', data: delta(f) });
+    };
+    const before = git(f.repoRoot, ['worktree', 'list', '--porcelain']);
+    const output = architectureDebtReport(f.repoRoot, ref, { consumerRoot: f.consumerRoot, policy, run });
+    expect(output).toEqual({ kind: 'repo-harness-architecture-debt', head, base: { ...base, ref }, introduced, resolvedIds });
+    expect(calls).toEqual([['debt', '--base', f.baseSha, '--complete', '--json']]);
+    expect(git(f.repoRoot, ['worktree', 'list', '--porcelain'])).toBe(before);
     expect(architectureDebtSummary(output)).toContain('introduced 1, resolved 1');
   });
 
-  test('a shared CodeGraph base seeds the temporary checkout without cold codegraph init; partial seed fails closed and cleans up', () => {
-    if (process.platform === 'win32') return;
+  test('rejects malformed or unbound native deltas', () => {
     const f = fixture();
-    const seeded = fakeProvider(f, { head: recordedDebt, base: withItems([flowItem, goneItem]) }, 'ok', 'seeded');
-    const output = architectureDebtReport(f.repoRoot, 'HEAD~1', { consumerRoot: f.consumerRoot, policy, run: seeded.run });
-    expect(output.introduced).toEqual([unownedItem]);
-    expect(output.resolvedIds).toEqual([goneItem.id]);
-    const seededCheckout = seeded.baseCheckout()!;
-    expect(seeded.calls.filter((call) => call.cwd === seededCheckout).map(({ tool, args }) => [tool, ...args])).toEqual([
-      ['archctx', 'sync', '--json'], ['archctx', 'doctor', '--json'], ['archctx', 'complete', '--head-sha', f.baseSha, '--json'],
-    ]);
-    expect(seeded.calls.some((call) => call.tool === 'codegraph')).toBe(false);
-    expect(existsSync(dirname(seededCheckout))).toBe(false);
-
-    const fPartial = fixture();
-    const partial = fakeProvider(fPartial, { head: recordedDebt, base: recordedDebt }, 'ok', 'partial-index');
-    let caught: unknown;
-    try { architectureDebtReport(fPartial.repoRoot, 'HEAD~1', { consumerRoot: fPartial.consumerRoot, policy, run: partial.run }); } catch (error) { caught = error; }
-    expect(caught).toBeInstanceOf(ArchctxClientError);
-    expect(caught).toMatchObject({ code: 'RH_ARCHCTX_CODE_FACTS_NOT_READY', reasonCode: 'code-facts-not-ready' });
-    expect(partial.calls.some((call) => call.tool === 'codegraph')).toBe(false);
-    expect(worktrees(fPartial.repoRoot)).toEqual([fPartial.repoRoot]);
+    const data = delta(f);
+    const measure = (response: unknown) => architectureDebtReport(f.repoRoot, f.baseSha, { consumerRoot: f.consumerRoot, policy,
+      run: () => ok({ schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'debt', data: response }) });
+    expect(() => measure({ ...data, introduced: [{}] })).toThrow('architecture debt delta invalid');
+    expect(() => measure({ ...data, head: { ...data.head, debt: { ...data.head.debt, digest: 'sha256:' + '0'.repeat(64) } } })).toThrow('digest must bind the debt report');
+    expect(() => measure({ ...data, head: { ...data.head, sha: f.baseSha } })).toThrow('architecture debt delta snapshot mismatch');
+    expect(() => measure({ ...data, base: { ...data.base, sha: f.headSha } })).toThrow('architecture debt delta snapshot mismatch');
+    expect(() => measure({ ...data, base: { ...data.base, ref: 'HEAD~1' } })).toThrow('architecture debt delta snapshot mismatch');
   });
 
-  test('real archctx sync seeds base checkout without running cold codegraph init when shared base is published', () => {
-    if (process.platform === 'win32') return;
-    const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'rh-debt-real-seed-')));
-    roots.push(workspace);
-    const primary = join(workspace, 'primary');
-    const checkout = join(workspace, 'checkout');
-    const home = join(workspace, 'home');
-    mkdirSync(primary, { recursive: true });
-    mkdirSync(home, { recursive: true });
-    const nodeBin = resolveCompatibleNodeRuntime(process.env);
-    const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, REPO_HARNESS_NODE_BIN: nodeBin, DO_NOT_TRACK: '1', CODEGRAPH_NO_DOWNLOAD: '1', CODEGRAPH_TELEMETRY: '0' };
-    git(primary, ['init', '-q']);
-    writeFileSync(join(primary, '.gitignore'), '.codegraph/\n');
-    writeFileSync(join(primary, 'index.ts'), 'export const value = 1;\n');
-    git(primary, ['add', '.']);
-    git(primary, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base']);
-    const baseSha = git(primary, ['rev-parse', 'HEAD']);
-    writeFileSync(join(primary, 'index.ts'), 'export const value = 2;\n');
-    git(primary, ['add', '.']);
-    git(primary, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'head']);
-
-    const codegraphShim = join(dirname(resolvePackageLocalArchctx().packageRoot), '@colbymchenry', 'codegraph', 'npm-shim.js');
-    execFileSync(nodeBin, [codegraphShim, 'init', '-y', '.'], { cwd: primary, env, encoding: 'utf8' });
-    const archctxBin = resolvePackageLocalArchctx().binaryPath;
-    const published = execFileSync(nodeBin, [archctxBin, 'sync', '--json'], { cwd: primary, env, encoding: 'utf8' });
-    expect(JSON.parse(published).data.codeGraphBase).toBe('published');
-    git(primary, ['worktree', 'add', '--detach', checkout, baseSha]);
-    const realCheckout = realpathSync(checkout);
-
-    const calls: string[] = [];
-    const runReal: RunArchctxProcess = (binary, args, opts) => {
-      calls.push(`${binary} ${args.join(' ')}`);
-      const result = spawnSync(nodeBin, [binary, ...args], { cwd: opts.cwd, env: opts.env, encoding: 'utf8', timeout: opts.timeoutMs });
-      return { status: result.status ?? 1, signal: result.signal, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+  test('surfaces a native debt failure after one call', () => {
+    const f = fixture();
+    const calls: Array<readonly string[]> = [];
+    const run: RunArchctxProcess = (_binary, args) => {
+      calls.push(args);
+      return failed(errorEnvelope('debt', 'AC_PRECONDITION_FAILED', 'sparse checkout', 'debt-head-sparse-checkout'));
     };
-
-    try {
-      const seededFromBase = seedWorktreeCodeGraph(realCheckout, { env, policy, run: runReal });
-      expect(seededFromBase).toBe(true);
-      expect(existsSync(join(realCheckout, '.codegraph', 'codegraph.db'))).toBe(true);
-      expect(calls.some((line) => line.includes('sync --json'))).toBe(true);
-      expect(calls.some((line) => line.includes('init -y .'))).toBe(false);
-    } finally {
-      if (existsSync(checkout)) {
-        stopWorkspaceArchitectureDaemons(primary, realCheckout, { env, policy, run: runReal });
-        git(primary, ['worktree', 'remove', '--force', checkout]);
-      }
-      stopWorkspaceArchitectureDaemons(primary, realpathSync(primary), { env, policy, run: runReal });
-    }
-  }, 60_000);
-
-  test('a failed base run still stops and removes the base checkout', () => {
-    const f = fixture();
-    const provider = fakeProvider(f, { head: recordedDebt, base: failed(errorEnvelope('complete', 'AC_UNCLASSIFIED_FAILURE', 'base failed')) });
-    expect(() => architectureDebtReport(f.repoRoot, f.baseSha, { consumerRoot: f.consumerRoot, policy, run: provider.run })).toThrow('AC_UNCLASSIFIED_FAILURE');
-    const checkout = provider.baseCheckout()!;
-    expect(provider.calls.some((call) => call.args[1] === 'stop' && call.args[3] === '/state/base')).toBe(true);
-    expect(existsSync(dirname(checkout))).toBe(false);
-    expect(worktrees(f.repoRoot)).toEqual([f.repoRoot]);
-  });
-
-  test('a daemon stop failure is reported after the checkout is removed', () => {
-    const f = fixture();
-    const provider = fakeProvider(f, { head: recordedDebt, base: recordedDebt }, 'fail');
-    let caught: unknown;
-    try { architectureDebtReport(f.repoRoot, 'HEAD~1', { consumerRoot: f.consumerRoot, policy, run: provider.run }); } catch (error) { caught = error; }
-    expect((caught as ArchctxClientError).code).toBe('RH_ARCHITECTURE_DEBT_CLEANUP_FAILED');
-    expect((caught as ArchctxClientError).message).toContain('archctx daemon stop /state/base: AC_RUNTIME_UNAVAILABLE');
-    expect(existsSync(dirname(provider.baseCheckout()!))).toBe(false);
-    expect(worktrees(f.repoRoot)).toEqual([f.repoRoot]);
-  });
-
-  test('cleanup removes only its own checkout and never prunes other registrations', () => {
-    const f = fixture();
-    const stale = join(dirname(f.repoRoot), 'stale-worktree');
-    git(f.repoRoot, ['worktree', 'add', '--detach', stale, 'HEAD']);
-    rmSync(stale, { recursive: true, force: true });
-    const provider = fakeProvider(f, { head: recordedDebt, base: recordedDebt });
-    architectureDebtReport(f.repoRoot, 'HEAD~1', { consumerRoot: f.consumerRoot, policy, run: provider.run });
-    expect(existsSync(dirname(provider.baseCheckout()!))).toBe(false);
-    const listed = worktrees(f.repoRoot);
-    expect(listed).toContain(stale);
-    expect(listed).not.toContain(provider.baseCheckout()!);
-  });
-
-  test('a second run on the same base reads the cached base report and builds no checkout', () => {
-    const f = fixture();
-    const base = withItems([flowItem, goneItem]);
-    const first = fakeProvider(f, { head: recordedDebt, base });
-    const measured = architectureDebtReport(f.repoRoot, 'HEAD~1', { consumerRoot: f.consumerRoot, policy, run: first.run });
-    const cacheDirectory = join(f.repoRoot, '.git', 'repo-harness', 'cache', 'arch-debt');
-    expect(readdirSync(cacheDirectory).filter((name) => name.endsWith('.json'))).toEqual([`${f.baseSha}-none-${packageVersion}.json`]);
-    const second = fakeProvider(f, { head: recordedDebt, base: failed(errorEnvelope('complete', 'AC_UNCLASSIFIED_FAILURE', 'base must not run')) });
-    expect(architectureDebtReport(f.repoRoot, f.baseSha, { consumerRoot: f.consumerRoot, policy, run: second.run })).toEqual({ ...measured, base: { ...measured.base!, ref: f.baseSha } });
-    expect(second.calls.map(({ tool, args, cwd }) => [tool, args[0], cwd])).toEqual([['archctx', 'doctor', f.repoRoot], ['archctx', 'complete', f.repoRoot]]);
-    expect(worktrees(f.repoRoot)).toEqual([f.repoRoot]);
-  });
-
-  test('a base run reaps base checkouts whose owner process is gone and keeps live and user ones', () => {
-    const f = fixture();
-    const stale = join(dirname(f.repoRoot), 'stale-worktree');
-    git(f.repoRoot, ['worktree', 'add', '--detach', stale, 'HEAD']);
-    rmSync(stale, { recursive: true, force: true });
-    const orphan = (startTime: string): string => {
-      const parent = mkdtempSync(join(tmpdir(), 'repo-harness-debt-base-'));
-      roots.push(parent);
-      writeFileSync(join(parent, 'owner.json'), JSON.stringify({ pid: process.pid, start_time: startTime }));
-      git(f.repoRoot, ['worktree', 'add', '--detach', join(parent, 'checkout'), f.baseSha]);
-      return realpathSync(join(parent, 'checkout'));
-    };
-    const dead = orphan('a start time of an exited process');
-    const live = orphan(currentProcessStartTime());
-    const provider = fakeProvider(f, { head: recordedDebt, base: recordedDebt });
-    architectureDebtReport(f.repoRoot, 'HEAD~1', { consumerRoot: f.consumerRoot, policy, run: provider.run });
-    expect(existsSync(dirname(dead))).toBe(false);
-    expect(worktrees(f.repoRoot).map((path) => existsSync(path) ? realpathSync(path) : path).sort()).toEqual([f.repoRoot, stale, live].sort());
-    git(f.repoRoot, ['worktree', 'remove', '--force', live]);
+    expect(() => architectureDebtReport(f.repoRoot, f.baseSha, { consumerRoot: f.consumerRoot, policy, run })).toThrow('AC_PRECONDITION_FAILED');
+    expect(calls).toEqual([['debt', '--base', f.baseSha, '--complete', '--json']]);
   });
 
   test('an unresolvable base fails before archctx runs', () => {
     const f = fixture();
-    const provider = fakeProvider(f, { head: recordedDebt, base: recordedDebt });
-    expect(() => architectureDebtReport(f.repoRoot, 'no-such-ref', { consumerRoot: f.consumerRoot, policy, run: provider.run })).toThrow('RH_ARCHITECTURE_DEBT_REF_UNRESOLVED');
-    expect(provider.calls).toEqual([]);
+    const calls: Array<readonly string[]> = [];
+    const run: RunArchctxProcess = (_binary, args) => { calls.push(args); return ok({}); };
+    expect(() => architectureDebtReport(f.repoRoot, 'no-such-ref', { consumerRoot: f.consumerRoot, policy, run })).toThrow('RH_ARCHITECTURE_DEBT_REF_UNRESOLVED');
+    expect(calls).toEqual([]);
   });
 });
-
 
 describe('checkpointArchitectureDebt', () => {
   function ownership(f: ReturnType<typeof fixture>) {

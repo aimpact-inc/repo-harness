@@ -747,7 +747,7 @@ diff -qr ~/.agents/skills/geju ~/.codex/skills/geju
 ### CodeGraph
 
 ```bash
-bun add -g @colbymchenry/codegraph@1.6.2 && codegraph sync . && codegraph status .
+bun add -g @colbymchenry/codegraph@1.6.4 && codegraph sync . && codegraph status .
 ```
 
 ## Agent Fleet
