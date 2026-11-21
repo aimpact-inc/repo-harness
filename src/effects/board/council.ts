@@ -139,8 +139,7 @@ export async function runCouncil(input: CouncilInput, ports: CouncilPorts): Prom
   const repoRoot = realpathSync(gitExecFileSync(['rev-parse', '--show-toplevel'], { ...gitOptions, cwd: input.cwd }).trim());
   const gitCommonDir = resolveGitCommonDirectory(repoRoot, undefined, undefined, env);
   const { worktrees } = parseWorktreeTopology(gitExecFileSync(['worktree', 'list', '--porcelain'], { ...gitOptions, cwd: repoRoot }));
-  // A repository with --separate-git-dir lists its bare git dir first (head === null); use the primary working tree for the slug.
-  const repoSlug = basename((worktrees.find(worktree => worktree.head !== null) ?? worktrees[0]!).path);
+  const repoSlug = basename(worktrees[0]!.path);
   const gitRoots = [repoRoot, gitCommonDir, ...worktrees.map(worktree => worktree.path)];
   const canonicalGitRoots = gitRoots.map(root => resolveCouncilPath(root).path);
 

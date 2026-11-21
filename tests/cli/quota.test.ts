@@ -67,7 +67,7 @@ describe('seat quota routing', () => {
   ] as const)('Claude %s%% used derives %s and routes strictly left-to-right', (used, mode, selected, reserved) => {
     const seats = { ...DEFAULT_SEATS_CONFIG, orchestrator: { ...DEFAULT_SEATS_CONFIG.orchestrator, model: 'sonnet', effort: 'low' } };
     const account = claude({ seven_day: week(used, 84) });
-    const quota = seatAccountQuotas([account], seats.routing);
+    const quota = seatAccountQuotas([account, agyGeminiReading(60)], seats.routing);
     // All three readings are pace-based tight or exhausted. Only the remaining threshold reserves Claude.
     expect(quota.claude.mode).toBe(mode);
     const lines = formatSeatRoutes(seats, quota).split('\n');
@@ -85,7 +85,7 @@ describe('seat quota routing', () => {
   test.each([81, 95])('Neon keeps important and frontend routes active with Claude %s%% used and falls through left-to-right when Neon is blocked', used => {
     const seats = DEFAULT_SEATS_CONFIG;
     const neon = seats['worker-neon'];
-    const quota = seatAccountQuotas([claude({ seven_day: week(used, 84) }), codexReading(30)], seats.routing);
+    const quota = seatAccountQuotas([claude({ seven_day: week(used, 84) }), codexReading(30), agyGeminiReading(60)], seats.routing);
     for (const task of ['important_deep', 'important_fast', 'frontend'] as const) {
       expect(selectSeatRoute(task, seats, quota)).toMatchObject({ id: 'worker-neon', seat: neon });
     }
@@ -125,7 +125,7 @@ describe('seat quota routing', () => {
     const lines = formatSeatRoutes(seats, quota).split('\n');
     expect(lines.find(line => line.startsWith('route important_deep:'))).toContain('worker-deep (');
     expect(lines.find(line => line.startsWith('route important_fast:'))).toContain('worker (');
-    expect(lines.find(line => line.startsWith('route frontend:'))).toContain('none (claude tight, reserved for advisor and orchestrator; agy_gemini normal, reserved for advisor; frontend waits for claude or neon)');
+    expect(lines.find(line => line.startsWith('route frontend:'))).toContain('none (claude tight, reserved for advisor and orchestrator; agy_gemini tight, reserved for advisor; frontend waits for claude or neon)');
   });
 
   test('saving reads an important route without a Claude-account seat as stored (#2679)', () => {
@@ -288,7 +288,7 @@ describe('seat quota routing', () => {
   test.each([
     [undefined, 10, 'worker-neon'], [undefined, 97, 'worker-neon'], [30, 97, 'worker-opus'], [undefined, 80, 'worker-neon'],
   ])('ordered routing with Claude used %s and Codex used %s selects %s', (used, codexUsed, selected) => {
-    const accounts = [claude(used === undefined ? {} : { seven_day: week(used, 84) }), codexReading(codexUsed)];
+    const accounts = [claude(used === undefined ? {} : { seven_day: week(used, 84) }), codexReading(codexUsed), agyGeminiReading(60)];
     const seats = { ...DEFAULT_SEATS_CONFIG, 'gatekeeper-fallback': null };
     const routes = formatSeatRoutes(seats, seatAccountQuotas(accounts, seats.routing));
     expect(routes).toContain(`route important_deep: ${selected} (`);
@@ -903,7 +903,7 @@ describe('rh seats launch availability', () => {
     writeFileSync(join(agentDirectory, 'settings.json'), JSON.stringify({ shellPath: shell }));
     const result = launchSeat('worker-neon', env);
     expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(readFileSync(tab, 'utf8')).argv).toContain('magpie/agy-cli/gemini-4-neon');
+    expect(JSON.parse(readFileSync(tab, 'utf8')).argv).toEqual(expect.arrayContaining(['--provider', 'magpie', '--model', 'agy-cli/gemini-4-neon']));
     expect(existsSync(f.env.SEAT_POOL_LOG)).toBe(false);
   });
 });

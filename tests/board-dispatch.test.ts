@@ -13,7 +13,7 @@ import type { BoardCommentV1, BoardParentReadV1, BoardSubIssueReadV1 } from '../
 const NORMAL: SeatAccountQuotas = {
   claude: { state: 'normal', remaining: 80, mode: 'normal' },
   chatgpt: { state: 'normal', remaining: 30, mode: 'normal', credits: 'off' },
-  agy_gemini: { state: 'unknown', remaining: null, mode: 'unknown' },
+  agy_gemini: { state: 'normal', remaining: 60, mode: 'normal' },
   agy_other: { state: 'unknown', remaining: null },
 };
 const comment = (body: string, created_at = '2026-11-09T10:00:00Z'): BoardCommentV1 =>

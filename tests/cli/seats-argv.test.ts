@@ -602,7 +602,7 @@ describe("rh seats argv", () => {
       const exhausted = argv(home, "worker", "--json");
       expect([exhausted.status, JSON.parse(exhausted.stderr).error]).toEqual([1, "seat_quota_exhausted"]);
     });
-    const seats = { ...DEFAULT_SEATS_CONFIG, worker };
+    const seats = { ...NATIVE_SEATS_PRESET, worker, 'worker-light': null, routing: { ...NATIVE_SEATS_PRESET.routing, important_fast: ['worker-opus', 'worker-neon', 'worker'] as const, simple_fast: ['worker'] as const } };
     expect(formatSeatRoutes(seats, seatAccountQuotas([], seats.routing))).toContain("route simple_fast: worker (pi magpie/codex/gpt-6.1-terra high; chatgpt unknown)");
     // The rh quota routes show only a shipped recommended id; any other id, such as a pasted secret, shows as its seat field (#3250).
     const pasted = { ...seats, worker: { ...worker, model: "magpie/o3sk-live-0123456789" }, gatekeeper: { ...seats.gatekeeper, model: "o3sk-live-0123456789" } };
@@ -1246,7 +1246,7 @@ console.log(JSON.stringify({ status: 'SUCCESS', account: {}, command: { name: 'u
         const advisor = named(repo, "advisor", "--parent", "1000");
         expect([advisor.name, advisor.tab]).toEqual(["rh-adv", "orch"]);
         expect(agent(advisor).slice(0, 17)).toEqual([...UNSET_SEAT, "REPO_HARNESS_SEAT=advisor", "REPO_HARNESS_SEAT_REPOSITORY=1186405141",
-          "REPO_HARNESS_SEAT_MODEL=magpie/agy-cli/gemini-4-neon", "REPO_HARNESS_SEAT_EFFORT=xhigh", expect.stringMatching(/^PI_SUBAGENT_EXTRA_AGENT_DIRS=/u)]);
+          "REPO_HARNESS_SEAT_MODEL=magpie/agy-cli/gemini-4-neon", "REPO_HARNESS_SEAT_EFFORT=xhigh", expect.stringMatching(/^PI_SUBAGENT_EXTRA_AGENT_DIRS=/u), "pi"]);
         // A linked worktree resolves to its primary checkout; Pi workers carry no Claude -n session name flag.
         const worker = named(worktree, "worker", "--parent", "1000", "--issue", "1508", "--pr", "1521", "--qualifier", "device");
         expect([worker.name, worker.tab]).toEqual(["rh-w-1508-device", "#1000"]);
@@ -1337,11 +1337,11 @@ console.log(JSON.stringify({ status: 'SUCCESS', account: {}, command: { name: 'u
       expect(dry.status, dry.stderr).toBe(0);
       const councilDir = join(scratch, "rh-council", basename(repo));
       expect(JSON.parse(dry.stdout)).toEqual({
-        protocol: 1, kind: "repo-harness.seats.council", dry_run: true, preset: "magpie", issue: 42, parent: null,
+        protocol: 1, kind: "repo-harness.seats.council", dry_run: true, preset: "magpie", seat: "council", issue: 42, parent: null,
         members: [
-          { member: "fable", runtime: "claude", model: "fable", effort: "high", pane_name: "rh-cn-42-fable", tab: "council", out_path: join(councilDir, "issue-42-fable.md") },
-          { member: "carbon", runtime: "pi", model: "magpie/agy-cli/gemini-4-carbon", effort: "xhigh", pane_name: "rh-cn-42-carbon", tab: "council", out_path: join(councilDir, "issue-42-carbon.md") },
-          { member: "astra", runtime: "pi", model: "magpie/codex/gpt-6.2-astra", effort: "high", pane_name: "rh-cn-42-astra", tab: "council", out_path: join(councilDir, "issue-42-astra.md") },
+          { member: "fable", runtime: "claude", model: "fable", effort: "high", pane_name: "rh-cn-42-fable", tab: "council", out_path: join(councilDir, "issue-42-fable.md"), argv: expect.any(Array) },
+          { member: "carbon", runtime: "pi", model: "magpie/agy-cli/gemini-4-carbon", effort: "high", pane_name: "rh-cn-42-carbon", tab: "council", out_path: join(councilDir, "issue-42-carbon.md"), argv: expect.any(Array) },
+          { member: "astra", runtime: "pi", model: "magpie/codex/gpt-6.2-astra", effort: "high", pane_name: "rh-cn-42-astra", tab: "council", out_path: join(councilDir, "issue-42-astra.md"), argv: expect.any(Array) },
         ],
       });
       expect(existsSync(join(scratch, "rh-council"))).toBe(false);
@@ -1374,7 +1374,7 @@ console.log(JSON.stringify({ status: 'SUCCESS', account: {}, command: { name: 'u
         preset: "native",
         members: [
           { member: "fable", runtime: "claude", model: "fable", effort: "high" },
-          { member: "carbon", runtime: "agy", model: "gemini-4-carbon", effort: null },
+          { member: "carbon", runtime: "agy", model: "gemini-4-carbon-high", effort: null },
           { member: "astra", runtime: "codex", model: "gpt-6.2-astra", effort: "high" },
         ],
       });
@@ -1433,10 +1433,10 @@ console.log(JSON.stringify({ status: 'SUCCESS', account: {}, command: { name: 'u
       "worker-important": { runtime: "claude", model: "opus", advisor_model: null, effort: "high", tools: ["edit", "mcp", "net", "read", "shell"], fleet: ["deep-reasoner", "explorer"] },
       "worker-important-fast": { runtime: "claude", model: "sonnet", advisor_model: null, effort: "medium", tools: ["edit", "mcp", "net", "read", "shell"], fleet: ["deep-reasoner", "explorer"] },
       "worker-light": { runtime: "pi", model: "zai/glm-5.3-flash", advisor_model: null, effort: null, tools: ["edit", "mcp", "net", "read", "shell"], fleet: [] },
-      gatekeeper: { runtime: "codex", model: "gpt-6.2-sol", advisor_model: null, effort: "high", tools: ["gh", "mcp", "net", "read", "shell"], fleet: [] },
-      "gatekeeper-deep": { runtime: "codex", model: "gpt-6.2-sol", advisor_model: null, effort: "high", tools: ["gh", "mcp", "net", "read", "shell"], fleet: [] },
+      gatekeeper: { runtime: "codex", model: "gpt-6.2-sol", advisor_model: null, effort: "high", tools: ["net", "read", "shell"], fleet: [] },
+      "gatekeeper-deep": { runtime: "codex", model: "gpt-6.2-sol", advisor_model: null, effort: "high", tools: ["net", "read", "shell"], fleet: [] },
       "gatekeeper-fallback": null,
-      reviewer: { runtime: "claude", model: "opus", advisor_model: null, effort: "high", tools: ["gh", "mcp", "net", "read", "shell"], fleet: [] },
+      reviewer: { runtime: "claude", model: "opus", advisor_model: null, effort: "high", tools: ["net", "read", "shell"], fleet: [] },
       routing: {
         frontend: ["worker-important", "worker-important-fast"],
         important_deep: ["worker-important", "worker-deep"],
@@ -1449,6 +1449,7 @@ console.log(JSON.stringify({ status: 'SUCCESS', account: {}, command: { name: 'u
         codex_credit_mode: "off",
         codex_credit_floor: 0,
         unavailable_pi_providers: [],
+        low_quota_explorer: { model: "haiku", effort: "high" },
       },
       pi_sub_agent_models: {},
     };

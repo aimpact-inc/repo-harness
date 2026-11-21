@@ -58,7 +58,7 @@ function snapshot({ herdr = 'ready', task = null, evidence = false }: { readonly
     themes: BASE.themes.map(theme => ({ ...theme, actions: theme.actions.map(action => ({ ...action, task: action.kind === 'enforce' ? task : null })) })),
   };
   const prompts = evidence ? [] : BASE.themes[0]!.actions.flatMap(action => ROUTING_CLASSES.map(route => ({ candidate_id: action.candidate_id, route, prompt: renderPromotionPrompt(promotionCandidate(BASE, action.candidate_id), route) })));
-  const routes = ROUTING_CLASSES.map(name => (name === 'frontend' ? { class: name, seat: 'worker-important', runtime: 'claude', model: 'opus' } : { class: name, seat: null, runtime: null, model: null }));
+  const routes = ROUTING_CLASSES.map(name => (name === 'frontend' ? { class: name, seat: 'worker-opus', runtime: 'claude', model: 'opus' } : { class: name, seat: null, runtime: null, model: null }));
   return decodeRulesSnapshot({ protocol: 1, kind: 'operator_rules', repository_id: REPOSITORY_ID, collected_at: new Date(NOW - 60_000).toISOString(), status, prompts, routes, herdr });
 }
 
@@ -108,7 +108,7 @@ describe('rules candidate drawer', () => {
     await click('[data-rules-open="worktree-cleanup"]');
     expect(window.location.hash).toBe(`#rules/candidate/${ENFORCE}`);
     expect(one('[data-rules-corrections]')!.querySelector('a')!.getAttribute('href')).toBe('https://github.com/owner/repo/issues/2104');
-    expect(one('[data-rules-route-seat="worker-important"]')!.textContent).toBe('worker-important · claude · opus');
+    expect(one('[data-rules-route-seat="worker-opus"]')!.textContent).toBe('worker-opus · claude · opus');
     expect(one<HTMLButtonElement>('[data-rules-submit-button]')!.disabled).toBe(true);
 
     await click('[data-rules-route="frontend"]');
@@ -266,14 +266,14 @@ describe('rules candidate drawer', () => {
   test('UX-rules-review-P3: ready_for_go shows two labels and the GO command as copyable text; no request is sent', async () => {
     const pr = { number: 2960, url: 'https://github.com/owner/repo/pull/2960', head_sha: 'c'.repeat(40), base_sha: 'd'.repeat(40) };
     const writes: string[] = [];
-    await mount(`#rules/candidate/${ENFORCE}`, snapshot({ task: { issue: 2950, url: ISSUE_URL, route: 'frontend', progress: 'ready_for_go', seat: 'worker-important', pull_request: pr } }), {
+    await mount(`#rules/candidate/${ENFORCE}`, snapshot({ task: { issue: 2950, url: ISSUE_URL, route: 'frontend', progress: 'ready_for_go', seat: 'worker-opus', pull_request: pr } }), {
       writeRulesPromote: async () => { writes.push('promote'); return filed(1); },
       writeRulesReconcile: async () => { writes.push('reconcile'); return filed(1); },
     });
     const view = one('[data-rules-task="ready_for_go"]')!;
     expect(view.querySelector('[data-rules-progress="ready_for_go"]')!.textContent).toBe('Waiting for your GO');
     expect(view.querySelector('[data-rules-governance="judgment_unpromoted"]')).not.toBeNull();
-    expect(one('[data-rules-task-seat]')!.textContent).toBe('worker-important');
+    expect(one('[data-rules-task-seat]')!.textContent).toBe('worker-opus');
     expect(one('[data-rules-go] [data-command] code')!.textContent)
       .toBe(`rh publication merge --repository owner/repo --repository-id 987654 --pr 2960 --head ${pr.head_sha} --base ${pr.base_sha} --json`);
     expect(one('[data-rules-go] button')!.getAttribute('aria-label')).toContain('Copy');

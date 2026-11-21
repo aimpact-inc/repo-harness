@@ -81,9 +81,9 @@ test('parseCouncilMembers accepts 1 to 3 distinct members from {fable, carbon, a
 
 test('resolveCouncilMemberConfig maps magpie and native presets from MODEL_CATALOG', () => {
   expect(resolveCouncilMemberConfig('fable', 'magpie', null)).toMatchObject({ runtime: 'claude', model: 'fable', effort: 'high' });
-  expect(resolveCouncilMemberConfig('carbon', 'magpie', null)).toMatchObject({ runtime: 'pi', model: 'magpie/agy-cli/gemini-4-carbon', effort: 'xhigh' });
+  expect(resolveCouncilMemberConfig('carbon', 'magpie', null)).toMatchObject({ runtime: 'pi', model: 'magpie/agy-cli/gemini-4-carbon', effort: 'high' });
   expect(resolveCouncilMemberConfig('astra', 'magpie', null)).toMatchObject({ runtime: 'pi', model: 'magpie/codex/gpt-6.2-astra', effort: 'high' });
-  expect(resolveCouncilMemberConfig('carbon', 'native', null)).toMatchObject({ runtime: 'agy', model: 'gemini-4-carbon', effort: null, fleet: [] });
+  expect(resolveCouncilMemberConfig('carbon', 'native', null)).toMatchObject({ runtime: 'agy', model: 'gemini-4-carbon-high', effort: null, fleet: [] });
   expect(resolveCouncilMemberConfig('astra', 'native', null)).toMatchObject({ runtime: 'codex', model: 'gpt-6.2-astra', effort: 'high' });
 });
 
@@ -110,8 +110,8 @@ test('opens one tab per council member under /tmp/rh-council/<repo>/ with blind 
 
   expect(result.seat).toBe('council');
   expect(result.members.map(m => m.member)).toEqual(['fable', 'astra']);
-  expect(result.members[0]!.out_path).toEndWith(`/rh-council/repo/issue-42-fable-${qualifier}.md`);
-  expect(result.members[1]!.out_path).toEndWith(`/rh-council/repo/issue-42-astra-${qualifier}.md`);
+  expect(result.members[0]!.out_path).toEndWith(`/rh-council/git-store/issue-42-fable-${qualifier}.md`);
+  expect(result.members[1]!.out_path).toEndWith(`/rh-council/git-store/issue-42-astra-${qualifier}.md`);
   expect(ports.openTab).toHaveBeenCalledTimes(2);
 
   const fableTab = ports.openTab.mock.calls[0]![0];
@@ -131,7 +131,7 @@ test('opens one tab per council member under /tmp/rh-council/<repo>/ with blind 
 test('validateCouncilOutPath refuses paths inside any git root and runCouncil refuses existing proposal files or missing shell', async () => {
   expect(() => validateCouncilOutPath('/repo/plan.md', ['/repo'])).toThrow(/inside/);
   const qualifier = `e${Date.now().toString(36).slice(-5)}`;
-  const existing = defaultCouncilPlanPath(tmpdir(), 'repo', 42, 'fable', qualifier);
+  const existing = defaultCouncilPlanPath(tmpdir(), 'git-store', 42, 'fable', qualifier);
   mkdirSync(dirname(existing), { recursive: true });
   writeFileSync(existing, 'previous proposal');
   createdCouncilDirs.push(dirname(existing));

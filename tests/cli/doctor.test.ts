@@ -3,7 +3,7 @@ import { registerArchitecturePlugin } from '../../src/cli/runtime-transaction';
 import { ownerForInstallPath, versions } from '../../src/cli/installer/install-profile';
 import { installSelectionCommand, type PluginId } from '../../src/core/skill-surface/plugin-manifest';
 import { hashManagedTree } from '../../src/effects/managed-tree';
-import { DEFAULT_SEATS_CONFIG } from '../../src/core/board/seats-settings';
+import { NATIVE_SEATS_PRESET } from '../../src/core/board/seats-settings';
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -236,7 +236,7 @@ describe('magpie readiness', () => {
       const invocation = path.join(root, 'magpie-invoked');
       writeExecutable(root, path.join(fakeBin, magpieBinary), `#!/bin/sh\nprintf invoked > '${invocation}'\n`);
       if (status !== 'ok') {
-        const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-light': null };
+        const seats = NATIVE_SEATS_PRESET;
         const configDir = path.join(home, '.repo-harness');
         fs.mkdirSync(configDir);
         fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ seats }));
@@ -273,9 +273,8 @@ describe('magpie readiness', () => {
         fs.mkdirSync(configPath, { recursive: true }); // A directory at this path makes the config read fail.
       } else if (config === 'invalid' || config === 'seat') {
         const seats = config === 'invalid' ? {} : {
-          ...DEFAULT_SEATS_CONFIG,
-          'worker-light': null,
-          worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'pi', model: 'magpie/group/fixture', fleet: [] },
+          ...NATIVE_SEATS_PRESET,
+          worker: { ...NATIVE_SEATS_PRESET.worker, runtime: 'pi', model: 'magpie/group/fixture', fleet: [] },
         };
         fs.mkdirSync(path.dirname(configPath), { recursive: true });
         fs.writeFileSync(configPath, JSON.stringify({ seats }));

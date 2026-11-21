@@ -663,7 +663,7 @@ describe('agents page seats section', () => {
     expect(choices()).toEqual(['Claude Code']);
     expect(inPlace('codex')!.getAttribute('aria-checked')).toBe('false');
     await click(buttonWithText('review seats'));
-    expect(document.querySelector('[data-save-blocked="gatekeeper"]')?.textContent).toContain('Change its runtime or enable Codex under Hosts.');
+    expect(document.querySelector('[data-save-blocked="gatekeeper"]')?.textContent).toContain('Change its runtime or enable Pi under Hosts.');
     expect(seatsSave().disabled).toBe(true);
     await click(seatsSave());
     expect(posts).toHaveLength(0);

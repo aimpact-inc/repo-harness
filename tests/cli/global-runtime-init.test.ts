@@ -228,7 +228,7 @@ test('update adds the disabled council seat, migrates legacy 12-seat keys and ol
       agy_saving_below_remaining: 25,
     });
     const piLaunch = buildSeatLaunch('advisor', migrated.advisor, 'seats', []);
-    expect(piLaunch.argv).toEqual(expect.arrayContaining(['pi', '--model', 'magpie/agy-cli/gemini-4-neon', '--thinking', 'xhigh']));
+    expect(piLaunch.argv).toEqual(expect.arrayContaining(['pi', '--provider', 'magpie', '--model', 'agy-cli/gemini-4-neon', '--thinking', 'xhigh']));
     expect(migrateSeatsConfiguration({ HOME: magpieHome })).toBe(false);
   } finally { rmSync(magpieHome, { recursive: true, force: true }); }
 
