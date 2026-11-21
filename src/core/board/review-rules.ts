@@ -2,6 +2,7 @@ import { PROJECTION_WRITER_DEFAULT_BRANCH } from 'archctx-contracts';
 import { documentationOnly } from '../ci/documentation-path';
 import { modelFamily } from '../review/model-family';
 import { pathHighHits, pathSecondReviewHits } from './hazards';
+import { MODEL_CATALOG } from './model-catalog';
 import {
   ACCEPTANCE_DISPOSITION_HEADER,
   BoardSourceError,
@@ -67,8 +68,9 @@ export type BoardGatekeeperReviewV1 = 'pass' | 'fail' | 'none' | 'unknown';
 
 /**
  * The comment time of the newest acceptance record with a row of each review seat, any subject SHA; null when no record has one.
- * A row is the reviewer's when the family of its model is `BoardV1.reviewer_family`; any other known family is the gatekeeper's
- * (the gatekeeper, gatekeeper-fallback and gatekeeper-deep seats). A row with no known model belongs to no seat.
+ * A row's explicit `Seat:` line (`gatekeeper` or `reviewer`) is authoritative; pre-#3353 rows without `Seat:` fall back to
+ * `modelFamily(row.model)` against the architectural reviewer family (`MODEL_CATALOG.opus.family`). A row with neither `Seat:`
+ * nor a known model belongs to no seat.
  * `unknown`: an older comment outside the read, or a record without a table row, can hold a row of any seat.
  */
 export type BoardReviewRecordsV1 =
@@ -144,13 +146,24 @@ export function reviewFail(read: BoardPullRequestReadV1): { readonly url: string
 }
 
 /**
- * The verdict of the rows of the head that are not the reviewer's (`BoardPullRequestV1.gatekeeper_review`). A row is the reviewer's when the
- * family of its model is `reviewerFamily`; every other row of the head, a row with no `Model` included, counts here, so the relay opens
- * for a head that any other seat reviewed. A named model with no known family is no seat's row (#3250): it never stands for the other family. Only a `PASS` row opens the relay: a `FAIL` row that a disposition resolves stops failing the head,
- * but a cleared failure is no review, so it sets no pass either. A `FAIL` row that no disposition resolves fails the head. With no row of
- * the head, a carried PASS of another seat (`carriedPasses`) opens the relay, so a fix round starts only the seat that failed.
+ * Which review seat an acceptance row belongs to. An explicit `Seat:` header on the record is authoritative regardless of model;
+ * pre-#3353 rows without `Seat:` fall back to `modelFamily` against the architectural reviewer family (`MODEL_CATALOG.opus.family`).
  */
-export function gatekeeperReviewEvidence(read: Pick<BoardPullRequestReadV1, 'head_sha' | 'comments'>, reviewerFamily: string | null): {
+export function acceptanceRowSeat(row: Pick<AcceptanceRowV1, 'seat' | 'model'>): 'gatekeeper' | 'reviewer' | null {
+  if (row.seat !== null) return row.seat;
+  const family = row.model === null ? null : modelFamily(row.model);
+  return family === null ? null : family === MODEL_CATALOG.opus.family ? 'reviewer' : 'gatekeeper';
+}
+
+/**
+ * The verdict of the rows of the head that belong to the gatekeeper (`BoardPullRequestV1.gatekeeper_review`). A row belongs to the
+ * reviewer when `acceptanceRowSeat(row) === 'reviewer'`; every other row of the head, a row with no `Model` included, counts here
+ * (unless it names an unknown model without an explicit `Seat:` header, #3250), so the relay opens for a head that the gatekeeper
+ * reviewed. Only a `PASS` row opens the relay: a `FAIL` row that a disposition resolves stops failing the head, but a cleared failure
+ * is no review, so it sets no pass either. A `FAIL` row that no disposition resolves fails the head. With no row of the head, a
+ * carried PASS of the gatekeeper (`carriedPasses`) opens the relay, so a fix round starts only the seat that failed.
+ */
+export function gatekeeperReviewEvidence(read: Pick<BoardPullRequestReadV1, 'head_sha' | 'comments'>): {
   readonly verdict: BoardGatekeeperReviewV1; readonly passFamilies: readonly string[];
 } {
   if (read.comments.truncated) return { verdict: 'unknown', passFamilies: [] };
@@ -161,8 +174,10 @@ export function gatekeeperReviewEvidence(read: Pick<BoardPullRequestReadV1, 'hea
     const rows = parseAcceptanceRecord(record);
     if (rows === null) return { verdict: 'unknown', passFamilies: [] };
     for (const row of rows.filter(row => row.subject_sha === read.head_sha)) {
+      if (acceptanceRowSeat(row) === 'reviewer') continue;
       const family = row.model === null ? null : modelFamily(row.model);
-      if (row.model !== null && !otherFamily(family, reviewerFamily)) continue;
+      // A named model with no known family is no seat's row (#3250) unless an explicit `Seat: gatekeeper` header attributes it.
+      if (row.seat === null && row.model !== null && family === null) continue;
       if (row.verdict === 'PASS') {
         passed = true;
         if (family !== null) passFamilies.push(family);
@@ -173,14 +188,15 @@ export function gatekeeperReviewEvidence(read: Pick<BoardPullRequestReadV1, 'hea
   }
   if (passed) return { verdict: 'pass', passFamilies };
   for (const row of carriedPasses(read)) {
+    if (acceptanceRowSeat(row) === 'reviewer') continue;
     const family = row.model === null ? null : modelFamily(row.model);
-    if (family !== null && family !== reviewerFamily) passFamilies.push(family);
+    if (family !== null) passFamilies.push(family);
   }
   return { verdict: passFamilies.length === 0 ? 'none' : 'pass', passFamilies };
 }
 
-export function gatekeeperReview(read: BoardPullRequestReadV1, reviewerFamily: string | null): BoardGatekeeperReviewV1 {
-  return gatekeeperReviewEvidence(read, reviewerFamily).verdict;
+export function gatekeeperReview(read: BoardPullRequestReadV1): BoardGatekeeperReviewV1 {
+  return gatekeeperReviewEvidence(read).verdict;
 }
 
 /** Only a known family differs from another family: an unknown family, such as a custom model id (#3250), is never the other family. */
@@ -211,16 +227,15 @@ function carriedPasses(read: Pick<BoardPullRequestReadV1, 'head_sha' | 'comments
 }
 
 /** The newest acceptance record of each review seat (`BoardPullRequestV1.review_records`). */
-export function reviewRecords(read: BoardPullRequestReadV1, reviewerFamily: string | null): BoardReviewRecordsV1 {
+export function reviewRecords(read: BoardPullRequestReadV1): BoardReviewRecordsV1 {
   if (read.comments.truncated) return Object.freeze({ status: 'unknown', reason: 'comments_truncated' });
   const newest = { gatekeeper: '', reviewer: '' };
   for (const record of protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER)) {
     const rows = parseAcceptanceRecord(record);
     if (rows === null) return Object.freeze({ status: 'unknown', reason: 'acceptance_record_unparsed' });
     for (const row of rows) {
-      const family = row.model === null ? null : modelFamily(row.model);
-      if (family === null) continue;
-      const seat = family === reviewerFamily ? 'reviewer' : 'gatekeeper';
+      const seat = acceptanceRowSeat(row);
+      if (seat === null) continue;
       if (record.created_at > newest[seat]) newest[seat] = record.created_at;
     }
   }
@@ -350,15 +365,15 @@ export function effectiveTier(read: BoardPullRequestReadV1, closes: readonly num
 }
 
 /**
- * The second-review state of a pull request: a projection of the High rule, not a second rule. `recorded`: a row of the configured
- * reviewer's model family exists for the head, or carries to it (`carriedPasses`). `pending`: the High rule is not met for the head and no such row exists, so the reviewer
- * seat supplies the missing review. A reviewer with no known family, or a row with no known model, matches no row.
+ * The second-review state of a pull request: a projection of the High rule, not a second rule. `recorded`: a reviewer row
+ * (`acceptanceRowSeat(row) === 'reviewer'`) exists for the head, or carries to it (`carriedPasses`). `pending`: the High rule is
+ * not met for the head and no such row exists, so the reviewer seat supplies the missing review.
  */
-export function secondReview(read: BoardPullRequestReadV1, tier: BoardTier | null, reviewerFamily: string | null): BoardSecondReviewV1 {
+export function secondReview(read: BoardPullRequestReadV1, tier: BoardTier | null): BoardSecondReviewV1 {
   if (reviewRule(read, tier) !== 'high') return 'not_required';
   const head = [...protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? [])
     .filter(row => row.subject_sha === read.head_sha), ...carriedPasses(read)];
-  if (reviewerFamily !== null && head.some(row => row.model !== null && modelFamily(row.model) === reviewerFamily)) return 'recorded';
+  if (head.some(row => acceptanceRowSeat(row) === 'reviewer' && (row.seat === 'reviewer' || (row.model !== null && modelFamily(row.model) !== null)))) return 'recorded';
   return highRuleMet(read, head) ? 'not_required' : 'pending';
 }
 

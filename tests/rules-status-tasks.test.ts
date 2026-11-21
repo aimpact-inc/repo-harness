@@ -2,7 +2,6 @@ import { afterEach, expect, spyOn, test } from 'bun:test';
 import { mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { decodeBoard, type BoardHostPortsV1, type BoardItemV1, type BoardPullRequestV1, type BoardV1 } from '../src/core/board/board';
-import { DEFAULT_SEATS_CONFIG } from '../src/core/board/seats-settings';
 import { candidateId, describeRuleStatus, ruleStatus, type RuleStatusV1, type RuleTaskProgress } from '../src/core/ci/rule-candidates';
 import { candidateMarker, RULES_PARENT_MARKER } from '../src/core/ci/rule-prompt';
 import * as collector from '../src/effects/board/collect';
@@ -176,7 +175,7 @@ test('a board read that does not end stops at the gh call limit and keeps discov
 test('the real board collector and source decoder compose without a live seat', () => {
   const source = remote({ coordinator: false });
   withTempRepo('rules-tasks-board', repo => {
-    const result = collectRulesTasks(status(), { repo_root: repo, host, gh_runner: source.runner, seats: DEFAULT_SEATS_CONFIG });
+    const result = collectRulesTasks(status(), { repo_root: repo, host, gh_runner: source.runner });
     expect(task(result)).toMatchObject({ progress: 'in_progress', seat: 'worker-important-fast' });
     expect(result.orchestration).toEqual({ parent: 1474, plan_comment: false, coordinator_claim: false });
   });
@@ -206,7 +205,7 @@ test.each(['acme/override', undefined])('status board reads keep the status repo
       return source.runner(args);
     };
     withTempRepo('rules-tasks-repository', repo => {
-      const result = collectRulesTasks(status(), { repo_root: repo, host, gh_runner: runner, seats: DEFAULT_SEATS_CONFIG });
+      const result = collectRulesTasks(status(), { repo_root: repo, host, gh_runner: runner });
       expect(task(result)).toMatchObject({ url: `${URL}/issues/1475`, progress: 'in_progress', seat: 'worker-important-fast' });
       expect(result.orchestration?.coordinator_claim).toBe(true);
       expect(queries).toHaveLength(2);

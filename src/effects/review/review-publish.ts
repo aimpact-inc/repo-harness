@@ -7,6 +7,7 @@ import {
   validateReviewPublishReceipt,
   type ReviewDiffLines,
   type ReviewPublishReceipt,
+  type ReviewRecordSeat,
 } from '../../core/review/review-publish';
 import { errorMessage } from '../../core/evidence/error-message';
 import {
@@ -53,6 +54,7 @@ export interface ReviewPublishInput {
   readonly prNumber: number;
   /** Rule 1 stops a review at round 5; a later round needs this owner decision comment. */
   readonly ownerRecord?: string;
+  readonly seat?: ReviewRecordSeat;
   readonly ghBin?: string;
   /** Test seam. Production runs the configured gh binary. */
   readonly ghRunner?: ReviewPublishGhRunner;
@@ -133,7 +135,7 @@ export function publishReceipt(input: ReviewPublishInput, receipt: ReviewPublish
       'review receipt subject ' + receipt.subject_sha + ' is not the PR head ' + pr.headSha + '; nothing was posted', 2);
   }
   checkOwnerRecord(input.ownerRecord, receipt.round, pr, input.prNumber);
-  const claimBody = renderAcceptanceClaim(receipt, input.ownerRecord);
+  const claimBody = renderAcceptanceClaim(receipt, input.ownerRecord, input.seat);
   let diffLines: ReviewDiffLines;
   let existingClaim: string | null;
   let alreadyResolved: ReadonlySet<string>;
@@ -185,7 +187,7 @@ export function publishReceipt(input: ReviewPublishInput, receipt: ReviewPublish
   confirmHead('record');
   let recordUrl: string;
   try {
-    recordUrl = postComment(run, pr.slug, input.prNumber, renderAcceptanceRecord(receipt, claimUrl, input.ownerRecord));
+    recordUrl = postComment(run, pr.slug, input.prNumber, renderAcceptanceRecord(receipt, claimUrl, input.ownerRecord, input.seat));
   } catch (error) {
     if (error instanceof GhMutationUnknownError) {
       if (error.confirmedUrl !== undefined) posted.push(error.confirmedUrl);

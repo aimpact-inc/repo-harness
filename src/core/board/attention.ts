@@ -361,7 +361,7 @@ function a22(context: Context): void {
 function a10(context: Context): void {
   for (const pr of openPullRequests(context.board).filter(entry => !entry.is_draft && entry.second_review === 'pending' && entry.gatekeeper_review === 'pass')) {
     find(context, 'A10', { issues: itemsOf(context.board, pr), pull_requests: [pr.number] },
-      `#${pr.number} is ${pr.tier === null ? 'of unknown tier (counted as High)' : 'High tier'}, the gatekeeper passed ${pr.head_sha.slice(0, 9)}, and it has no review of that head from the reviewer seat (${context.board.reviewer_family === null ? 'family unknown' : `family ${context.board.reviewer_family}`}); start the reviewer seat`);
+      `#${pr.number} is ${pr.tier === null ? 'of unknown tier (counted as High)' : 'High tier'}, the gatekeeper passed ${pr.head_sha.slice(0, 9)}, and it has no review of that head from the reviewer seat; start the reviewer seat`);
   }
 }
 

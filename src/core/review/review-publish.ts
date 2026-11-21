@@ -25,6 +25,7 @@ import type { ModelRelation } from './acceptance-receipt';
  */
 export type ReviewRiskTier = 'low' | 'medium' | 'high';
 export type ReviewPublishSeverity = ReviewSeverity;
+export type ReviewRecordSeat = 'gatekeeper' | 'reviewer';
 
 export interface ReviewPublishBlockingFinding {
   readonly id: string;
@@ -209,10 +210,11 @@ function findingSummary(finding: ReviewPublishFinding): string {
   return finding.severity + ' ' + finding.id + ' at ' + finding.path + ':' + finding.line + ': ' + finding.evidence + ' -> ' + finding.fix;
 }
 
-export function renderAcceptanceClaim(receipt: ReviewPublishReceipt, ownerRecord?: string): string {
+export function renderAcceptanceClaim(receipt: ReviewPublishReceipt, ownerRecord?: string, seat?: ReviewRecordSeat): string {
   return [
     'repo-harness acceptance claim',
     'Role: acceptor',
+    ...(seat === undefined ? [] : ['Seat: ' + seat]),
     'Round: ' + receipt.round,
     'Subject: ' + receipt.subject_sha,
     'Tier: ' + receipt.risk_tier,
@@ -259,11 +261,12 @@ export function renderConfirmedReply(receipt: ReviewPublishReceipt, recordUrl: s
   ].join('\n');
 }
 
-export function renderAcceptanceRecord(receipt: ReviewPublishReceipt, claimUrl: string, ownerRecord?: string): string {
+export function renderAcceptanceRecord(receipt: ReviewPublishReceipt, claimUrl: string, ownerRecord?: string, seat?: ReviewRecordSeat): string {
   const verdict = receipt.verdict + ': ' + severityCounts(receipt);
   return [
     'repo-harness acceptance record',
     'Claim: ' + claimUrl,
+    ...(seat === undefined ? [] : ['Seat: ' + seat]),
     '',
     '| Round | Role | Subject | Verdict |',
     '|---|---|---|---|',

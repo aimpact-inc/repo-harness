@@ -171,9 +171,11 @@ export interface AcceptanceRowV1 {
   readonly round: number;
   readonly subject_sha: string;
   readonly verdict: 'PASS' | 'FAIL';
+  /** The review seat from the record's `Seat:` line (`gatekeeper` or `reviewer`); null when absent on pre-#3353 or standalone `review publish` records. */
+  readonly seat: 'gatekeeper' | 'reviewer' | null;
   /** The review runtime that the Role cell starts with (`review publish` writes `<harness> (<model>), read-only`); null when the cell names no known runtime. */
   readonly harness: 'claude' | 'codex' | 'pi' | null;
-  /** The model in the Role cell's parentheses; null when the cell names none or `unobserved`. Its family says which review seat wrote the row. */
+  /** The model in the Role cell's parentheses; null when the cell names none or `unobserved`. */
   readonly model: string | null;
   /** The issue comment id of the record's `Claim:` URL, which identifies one review; null when the line is missing or is not a comment URL. */
   readonly claim: string | null;
@@ -193,12 +195,15 @@ export function commentId(url: string): string | null {
 
 /**
  * The rows of an `acceptance record` comment: the table rows that `review
- * publish` writes. Null when the record has no table row; the caller reports
- * `acceptance_record_unparsed` and does not guess a verdict.
+ * publish` writes. Null when the record has no table row or carries an invalid
+ * `Seat:` line; the caller reports `acceptance_record_unparsed` and does not guess a verdict.
  */
 export function parseAcceptanceRecord(comment: BoardCommentV1): readonly AcceptanceRowV1[] | null {
+  const rawSeat = field(comment.body, 'Seat');
+  if (rawSeat !== null && rawSeat !== 'gatekeeper' && rawSeat !== 'reviewer') return null;
+  const seat: AcceptanceRowV1['seat'] = rawSeat;
   const rows: AcceptanceRowV1[] = [];
-  const record = { claim: commentId(field(comment.body, 'Claim') ?? ''), different_family: field(comment.body, 'Model relation') === 'different-family' };
+  const record = { seat, claim: commentId(field(comment.body, 'Claim') ?? ''), different_family: field(comment.body, 'Model relation') === 'different-family' };
   for (const line of comment.body.replace(/\r\n/gu, '\n').split('\n')) {
     const table = RECORD_TABLE_ROW.exec(line);
     if (table) {

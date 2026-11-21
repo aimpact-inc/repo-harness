@@ -786,3 +786,21 @@ test('collect skips a RECEIPT-JSON marker inside a string and takes the last rec
   expect(result.status, result.stderr).toBe(0);
   expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, head_sha: PUBLISH_HEAD });
 });
+
+test('collect writes Seat: gatekeeper or Seat: reviewer into acceptance claim and record, mapping gatekeeper-fallback to gatekeeper and refusing non-review seats', async () => {
+  const posted = (fixture: ReturnType<typeof seatFixture>) =>
+    fixture.gh.inputs().filter((entry) => entry.input !== '').map((entry) => JSON.parse(entry.input).body as string);
+  for (const [seatLabel, expectedSeat] of [['gatekeeper', 'gatekeeper'], ['gatekeeper-fallback', 'gatekeeper'], ['reviewer', 'reviewer']] as const) {
+    const fixture = seatFixture([receiptBlock(publishReceipt())], { seat: seatLabel });
+    const result = await runCollect(fixture, undefined, seatLabel);
+    expect(result.status, result.stderr).toBe(0);
+    const bodies = posted(fixture);
+    expect(bodies[0]).toContain(`Role: acceptor\nSeat: ${expectedSeat}\n`);
+    expect(bodies[2]).toContain(`\nSeat: ${expectedSeat}\n`);
+  }
+  const worker = seatFixture([receiptBlock(publishReceipt())], { seat: 'worker' });
+  const refused = await runCollect(worker, undefined, 'worker');
+  expect(refused.status).toBe(2);
+  expect(JSON.parse(refused.stdout)).toMatchObject({ ok: false, error: 'review_receipt_invalid', posted: [] });
+  expect(JSON.parse(refused.stdout).message).toContain('non-review seat worker');
+});

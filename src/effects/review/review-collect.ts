@@ -7,6 +7,7 @@ import { piAgentDir } from '../pi-agent-dir';
 import { osAccountHome } from '../runtime/os-account-home';
 import { parseReviewPacket } from '../../core/board/review';
 import { errorMessage } from '../../core/evidence/error-message';
+import type { ReviewRecordSeat } from '../../core/review/review-publish';
 import {
   parseReceipt, publishReceipt, readPrHeadSha, ReviewPublishError, type ReviewPublishInput, type ReviewPublishResult,
 } from './review-publish';
@@ -14,7 +15,7 @@ import {
 const MARKER = 'RECEIPT-JSON';
 const RECEIPT_KIND = 'repo-harness-review-publish-receipt';
 
-export interface ReviewCollectInput extends ReviewPublishInput {
+export interface ReviewCollectInput extends Omit<ReviewPublishInput, 'seat'> {
   /** The review seat's `hc` terminal address (Pi, Claude or Codex). */
   readonly seat: string;
 }
@@ -173,6 +174,7 @@ export function collectReview(input: ReviewCollectInput): ReviewCollectResult {
   if (cwd == null) throw invalid('terminal ' + input.seat + ' reports no working directory');
   const seat = terminal.labels[RH_LABEL.seat];
   if (seat === undefined) throw invalid('terminal ' + input.seat + ' carries no ' + RH_LABEL.seat + ' label; launch the seat with `rh seats argv <seat> --repository-id <id> --pr <n>`');
+  if (!isReviewSeat(seat as SeatId)) throw invalid('terminal ' + input.seat + ' carries non-review seat ' + seat);
   let realCwd: string;
   try { realCwd = realpathSync(cwd); } catch (error) { throw invalid('the seat working directory is unreadable: ' + errorMessage(error)); }
   const home = osAccountHome();
@@ -186,7 +188,8 @@ export function collectReview(input: ReviewCollectInput): ReviewCollectResult {
   if (bound.length === 0) {
     throw invalid('the seat session record is missing: no session in ' + piDirectory + ', in ' + claudeDirectory + ' or in a Codex rollout of ' + realCwd + ' holds the review packet of the ' + seat + ' for PR #' + input.prNumber);
   }
-  const head = readPrHeadSha(input);
+  const { seat: _terminalAddress, ...publishBase } = input;
+  const head = readPrHeadSha(publishBase);
   const atHead = bound.filter((session) => parseReviewPacket(session.packet)!.head_sha === head);
   if (atHead.length === 0) {
     throw new ReviewPublishError('review_subject_stale', 'no session of the ' + seat + ' for PR #' + input.prNumber + ' holds a packet for the PR head ' + head + '; nothing was posted', 2);
@@ -199,6 +202,7 @@ export function collectReview(input: ReviewCollectInput): ReviewCollectResult {
   // The one session at the head reports its own error when it holds no valid receipt.
   const receipt = finished.length === 1 ? finished[0]!.receipt : parseReceipt(lastReceiptValue(atHead[0]!.assistant));
   if (receipt.subject_sha !== head) throw invalid('the receipt names ' + receipt.subject_sha + ', not the packet head ' + head);
-  const published = publishReceipt(input, receipt);
+  const reviewSeat: ReviewRecordSeat = seat === 'reviewer' ? 'reviewer' : 'gatekeeper';
+  const published = publishReceipt({ ...publishBase, seat: reviewSeat }, receipt);
   return { ...published, seat_close: closeReviewSeat(terminal, seat, input.prNumber, receipt.subject_sha) };
 }
