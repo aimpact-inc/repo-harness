@@ -14,7 +14,7 @@ import type { SkillHost } from '../../effects/host-skill-roots';
 import { pathRecordIsCurrent, pathRecordKey, readPathRecords } from '../../effects/host-config/path-records';
 import { architecturePort, isArchitectureUnavailable } from '../../core/architecture/contracts';
 import { globalConfigurationWriter, mutateGlobalConfiguration } from '../../effects/configuration/global-configuration';
-import { DEFAULT_SEATS_CONFIG, INTRODUCED_ROUTING_DEFAULTS, ROUTING_CLASSES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, seatModelShapeValid, stripRetiredSeatFleetRoles } from '../../core/board/seats-settings';
+import { DEFAULT_SEATS_CONFIG, INTRODUCED_ROUTING_DEFAULTS, ROUTING_CLASSES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, migrateLegacySeatsRecord, seatModelShapeValid, stripRetiredSeatFleetRoles } from '../../core/board/seats-settings';
 import { checkSeatRoutingModels, seatsRanges } from '../../effects/board/seats-configuration';
 import { chmodSync, closeSync, constants, cpSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync } from "fs";
 import { syncDirectoryDurably, writeAllSync } from '../../effects/atomic-append';
@@ -1728,7 +1728,8 @@ export function migrateSeatsConfiguration(env: NodeJS.ProcessEnv, runtimeLock?: 
       if (!(error instanceof SeatsConfigMigrationRequiredError)) throw error;
     }
     const { orchestrator: _orchestrator, advisor: _advisor, worker: _worker, ...introduced } = DEFAULT_SEATS_CONFIG;
-    const stored = stripRetiredSeatFleetRoles(config.seats as Record<string, unknown>);
+    const { record: legacyMigrated } = migrateLegacySeatsRecord(config.seats as Record<string, unknown>);
+    const stored = stripRetiredSeatFleetRoles(legacyMigrated);
     let routing = stored.routing;
     if (typeof routing === 'object' && routing !== null && ('mode' in routing || 'hyper' in routing)) {
       const row = routing as Record<string, unknown>;
@@ -1755,7 +1756,15 @@ export function migrateSeatsConfiguration(env: NodeJS.ProcessEnv, runtimeLock?: 
       const { codex_hyper_at_or_above_remaining: _codexHyper, ...kept } = routing as Record<string, unknown>;
       routing = { ...INTRODUCED_ROUTING_DEFAULTS, ...kept };
     }
-    const seats = decodeSeatsConfig({ ...introduced, 'worker-light': null, ...stored, ...(routing === undefined ? {} : { routing }) });
+    const base = { ...introduced, 'worker-light': null, ...stored };
+    const effectiveRouting = routing ?? (base['worker-light'] === null
+      ? {
+          ...introduced.routing,
+          important_fast: introduced.routing.important_fast.filter(id => id !== 'worker-light'),
+          simple_fast: introduced.routing.simple_fast.filter(id => id !== 'worker-light'),
+        }
+      : introduced.routing);
+    const seats = decodeSeatsConfig({ ...base, routing: effectiveRouting });
     checkSeatRoutingModels(seats.routing);
     return { config: { ...config, seats }, value: true };
   }, { runtimeLock, beforeWrite }).value;

@@ -54,7 +54,7 @@ function remote(options: { children?: ReturnType<typeof wireIssue>[]; parents?: 
   const child = parent.subIssues.nodes[0];
   parent.subIssues.nodes = [child];
   child.timelineItems.nodes = [];
-  child.comments.nodes = [comment('repo-harness issue claim\nRole: writer\nAgent: worker-important-fast, session t7\nSeat: orchestrator t1')];
+  child.comments.nodes = [comment('repo-harness issue claim\nRole: writer\nAgent: worker-neon, session t7\nSeat: orchestrator t1')];
   parent.comments.nodes = options.coordinator === false ? [] : [comment('repo-harness issue claim\nRole: coordinator')];
   const calls: readonly string[][] = [];
   const answer = (value: unknown) => ({ status: 0, stdout: JSON.stringify(value) });
@@ -120,7 +120,7 @@ test('newest issue wins across pages; returns the claim seat and PR identity wit
   const fixture = board({ claim: ACTIVE }, { acceptance: accepted });
   const result = enrich(fixture, remote({ children: [wireIssue(1470, candidateMarker(ID, 'simple_fast')),
     wireIssue(1475, candidateMarker(ID, 'important_deep'))] }));
-  expect(task(result)).toMatchObject({ issue: 1475, route: 'important_deep', seat: 'worker-important-fast',
+  expect(task(result)).toMatchObject({ issue: 1475, route: 'important_deep', seat: 'worker-neon',
     pull_request: { number: 1491, url: fixture.pull_requests[0]!.url,
       head_sha: fixture.pull_requests[0]!.head_sha, base_sha: fixture.pull_requests[0]!.base_sha } });
   expect(result.themes[0]!.actions[1]!.task).toBeNull();
@@ -176,7 +176,7 @@ test('the real board collector and source decoder compose without a live seat', 
   const source = remote({ coordinator: false });
   withTempRepo('rules-tasks-board', repo => {
     const result = collectRulesTasks(status(), { repo_root: repo, host, gh_runner: source.runner });
-    expect(task(result)).toMatchObject({ progress: 'in_progress', seat: 'worker-important-fast' });
+    expect(task(result)).toMatchObject({ progress: 'in_progress', seat: 'worker-neon' });
     expect(result.orchestration).toEqual({ parent: 1474, plan_comment: false, coordinator_claim: false });
   });
 });
@@ -206,7 +206,7 @@ test.each(['acme/override', undefined])('status board reads keep the status repo
     };
     withTempRepo('rules-tasks-repository', repo => {
       const result = collectRulesTasks(status(), { repo_root: repo, host, gh_runner: runner });
-      expect(task(result)).toMatchObject({ url: `${URL}/issues/1475`, progress: 'in_progress', seat: 'worker-important-fast' });
+      expect(task(result)).toMatchObject({ url: `${URL}/issues/1475`, progress: 'in_progress', seat: 'worker-neon' });
       expect(result.orchestration?.coordinator_claim).toBe(true);
       expect(queries).toHaveLength(2);
       for (const args of queries) { expect(args).toContain('owner=Ancienttwo'); expect(args).toContain('name=repo-harness'); }

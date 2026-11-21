@@ -55,17 +55,18 @@ const REVIEW = Object.freeze([
  * The settings page offers them; the user can set any other id (#3250). A release that moves a model
  * line changes its entry in `model-catalog.ts`; a stored value is never rewritten.
  */
+const NATIVE_CARBON = catalogEntry('carbon', 'native');
+
 export const SEAT_RECOMMENDED_MODELS: Readonly<Record<SeatId, readonly SeatModelEntryV1[]>> = Object.freeze({
   orchestrator: Object.freeze([OPUS, NEON]),
   advisor: Object.freeze([OPUS, NEON, FABLE, CARBON, ...AGY_NEON_VARIANTS]),
-  planner: Object.freeze([FABLE, CARBON, PI_ASTRA, ASTRA, NEON, OPUS]),
+  council: Object.freeze([FABLE, CARBON, NATIVE_CARBON, PI_ASTRA, ASTRA]),
   worker: WORKER,
   'worker-deep': WORKER,
-  'worker-important': WORKER,
-  'worker-important-fast': WORKER,
+  'worker-opus': WORKER,
+  'worker-neon': WORKER,
   'worker-light': WORKER,
   gatekeeper: REVIEW,
-  'gatekeeper-deep': REVIEW,
   'gatekeeper-fallback': REVIEW,
   reviewer: REVIEW,
 });

@@ -8,7 +8,7 @@ import { AGY_COMMAND_PREFIXES, buildSeatLaunch, seatPaneName } from "../../src/c
 import { HANDOFF_SECTIONS, seatResetReason, seatResetSteps, type SeatResetIdentity } from "../../src/core/board/seat-reset";
 import { SeatResetError, readSeatSession, recordSeatSession, runSeatReset, type SeatRelaunch, type SeatResetNotify, type SeatResetOptions } from "../../src/effects/board/seat-reset";
 import { seatHandoff, seatResetLaunch } from "../../src/cli/commands/seats";
-import { DEFAULT_SEATS_CONFIG, WORKER_SEAT_IDS, isReviewSeat, isWorkerSeat } from "../../src/core/board/seats-settings";
+import { DEFAULT_SEATS_CONFIG, LAUNCH_SEAT_IDS, WORKER_SEAT_IDS, isCouncilSeat, isReviewSeat, isWorkerSeat } from "../../src/core/board/seats-settings";
 import { repoHarnessRepoIdFor } from "../../src/effects/repo-registry";
 import { classifyQuotaReading, decodeCodexRateLimitsResult } from "../../src/core/board/quota";
 import { effectiveSeatConfig, formatSeatRoutes, seatAccountQuotas } from "../../src/core/board/seat-routing";
@@ -414,7 +414,9 @@ describe("rh seats argv", () => {
   });
 
   test("an unconfigured worker-light fails with seat_not_configured", () => {
-    withHome({ ...DEFAULT_SEATS_CONFIG, 'worker-light': null }, home => {
+    const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-light': null,
+      routing: { ...DEFAULT_SEATS_CONFIG.routing, important_fast: ['worker-opus', 'worker-neon', 'worker'] as const, simple_fast: ['worker'] as const } };
+    withHome(seats, home => {
       const result = argv(home, "worker-light", "--json");
       expect([result.status, result.stdout]).toEqual([1, ""]);
       expect(JSON.parse(result.stderr).error).toBe("seat_not_configured");
@@ -422,10 +424,12 @@ describe("rh seats argv", () => {
   });
 
   test("saving routes reject a non-Pi worker-light; its launch is judged on its own account", () => {
-    for (const configured of [DEFAULT_SEATS_CONFIG.worker, DEFAULT_SEATS_CONFIG['worker-important-fast']]) {
-      const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-light': configured };
+    for (const configured of [DEFAULT_SEATS_CONFIG.worker, DEFAULT_SEATS_CONFIG['worker-opus']]) {
+      const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-light': { ...configured, fleet: [] },
+        routing: { ...DEFAULT_SEATS_CONFIG.routing, important_deep: ['worker-light'] as const, important_fast: ['worker-light'] as const, simple_fast: ['worker-light', 'worker'] as const } };
       withHome(seats, home => {
-        expect(argv(home, 'worker-light', '--json').status).toBe(0);
+        const initial = argv(home, 'worker-light', '--json');
+        expect(initial.status, initial.stderr).toBe(0);
         mkdirSync(join(home, '.repo-harness', 'quota'));
         for (const used of [81, 95]) {
           writeFileSync(join(home, '.repo-harness', 'quota', 'claude.json'), JSON.stringify({ observed_at: new Date().toISOString(), rate_limits: {
@@ -437,10 +441,10 @@ describe("rh seats argv", () => {
             routes: formatSeatRoutes(seats, quota).split('\n').filter(line => /^route important_/u.test(line)),
             launch: [result.status, result.stdout, result.stderr ? JSON.parse(result.stderr).error : null],
           }).toEqual({
-            routes: ['route important_deep: none (worker-light is not a Pi seat)', 'route important_fast: none (worker-light is not a Pi seat)'],
-            // Routing decides the seat; the launch never recomputes a route (#2679). A Codex worker-light launches on its
-            // own account; a Claude worker-light is a reserved, or at 95% exhausted, Claude seat.
-            launch: configured.runtime === 'codex' ? [0, expect.any(String), null]
+            routes: configured.runtime === 'pi'
+              ? ['route important_deep: worker-light (pi magpie/codex/gpt-6.1-terra high; chatgpt unknown)', 'route important_fast: worker-light (pi magpie/codex/gpt-6.1-terra high; chatgpt unknown)']
+              : [`route important_deep: none (claude ${used === 95 ? 'exhausted' : 'normal'}, reserved for advisor and orchestrator)`, `route important_fast: none (claude ${used === 95 ? 'exhausted' : 'normal'}, reserved for advisor and orchestrator)`],
+            launch: configured.runtime === 'pi' ? [0, expect.any(String), null]
               : [1, '', used === 95 ? 'seat_quota_exhausted' : 'seat_quota_reserved'],
           });
         }
@@ -463,14 +467,15 @@ describe("rh seats argv", () => {
     }));
   });
 
-  test("gatekeeper and reviewer require a PR and launch read-only reviews", () => {
-    withHome(undefined, home => withRepository(home, "rh", repo => {
-      for (const [seat, role] of [["gatekeeper", "gk"], ["gatekeeper-deep", "gd"], ["reviewer", "rv"]]) {
-        const missing = argv(home, seat!, "--json");
+  test("gatekeeper and reviewer require a PR and launch read-only reviews; gatekeeper-deep is retired", () => {
+    const seats = { ...DEFAULT_SEATS_CONFIG, gatekeeper: { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: "codex" as const, model: "gpt-6.2-sol" } };
+    withHome(seats, home => withRepository(home, "rh", repo => {
+      for (const [seat, role] of [["gatekeeper", "gk"], ["reviewer", "rv"]] as const) {
+        const missing = argv(home, seat, "--json");
         expect([missing.status, JSON.parse(missing.stderr).error]).toEqual([1, "pane_name_invalid"]);
-        const bare = argv(home, seat!, "--pr", "1925", "--json");
+        const bare = argv(home, seat, "--pr", "1925", "--json");
         expect(bare.status, bare.stderr).toBe(0);
-        const result = run(registryEnv(home), [seat!, "--repository-id", "1", "--pr", "1925", "--json"], repo);
+        const result = run(registryEnv(home), [seat, "--repository-id", "1", "--pr", "1925", "--json"], repo);
         expect(result.status, result.stderr).toBe(0);
         const value = JSON.parse(result.stdout);
         expect([value.name, value.tab]).toEqual([`rh-${role}-1925`, "review"]);
@@ -483,18 +488,14 @@ describe("rh seats argv", () => {
         } else expect(tools(agent(value))).toEqual(["WebFetch", "WebSearch", "Read", "Glob", "Grep", "Bash", "Monitor", "TaskStop"]);
         expect(value.brief).not.toContain("Do not use the network.");
       }
+      const retired = argv(home, "gatekeeper-deep", "--pr", "1925", "--json");
+      expect([retired.status, JSON.parse(retired.stderr).error]).toEqual([1, "seat_unknown"]);
+      expect(LAUNCH_SEAT_IDS).toEqual(["orchestrator", "advisor", "council", "worker", "worker-deep", "worker-opus", "worker-neon", "worker-light", "gatekeeper", "reviewer"]);
     }));
   });
 
-  test("gatekeeper-deep refuses to launch on the gatekeeper's model", () => {
-    const seats = { ...DEFAULT_SEATS_CONFIG, "gatekeeper-deep": { ...DEFAULT_SEATS_CONFIG["gatekeeper-deep"], model: DEFAULT_SEATS_CONFIG.gatekeeper.model } };
-    withHome(seats, home => expect(JSON.parse(argv(home, "gatekeeper-deep", "--pr", "1", "--json").stderr).error).toBe("seat_model_repeats_gatekeeper"));
-    const defaults = { ...seats, gatekeeper: { ...seats.gatekeeper, model: null }, "gatekeeper-deep": { ...seats["gatekeeper-deep"], model: null } };
-    withHome(defaults, home => expect(JSON.parse(argv(home, "gatekeeper-deep", "--pr", "1", "--json").stderr).error).toBe("seat_model_repeats_gatekeeper"));
-  });
-
   test("Pi review seats exclude edit and write tools and report the shell path as common_commands", () => {
-    for (const seat of ["gatekeeper", "gatekeeper-deep", "reviewer"] as const) {
+    for (const seat of ["gatekeeper", "reviewer"] as const) {
       withHome({ ...DEFAULT_SEATS_CONFIG, [seat]: { ...DEFAULT_SEATS_CONFIG[seat], runtime: "pi", model: null, effort: null } }, home => {
         const result = argv(home, seat, "--pr", "1928", "--json");
         expect(result.status, result.stderr).toBe(0);
@@ -517,14 +518,14 @@ describe("rh seats argv", () => {
   });
 
   test("an exhausted gatekeeper account launches the fallback seat as the gatekeeper; gatekeeper-fallback is no launch target", () => {
-    const fallback = { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: "pi" as const, model: "magpie/cursor/deepseek-v41-flash-1017", effort: null };
+    const fallback = { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: "pi" as const, model: "magpie/group/deepseek-v4.1-flash", effort: null };
     withHome({ ...DEFAULT_SEATS_CONFIG, "gatekeeper-fallback": fallback }, home => {
       const gatekeeper = () => JSON.parse(argv(home, "gatekeeper", "--pr", "2253", "--json").stdout);
       writeFileSync(join(home, "codex-used"), "60");
-      expect(bare(gatekeeper().argv).slice(0, 3)).toEqual(["codex", "-m", DEFAULT_SEATS_CONFIG.gatekeeper.model]);
+      expect(bare(gatekeeper().argv).slice(0, 5)).toEqual(["pi", "--provider", "magpie", "--model", "codex/gpt-6.2-sol"]);
       writeFileSync(join(home, "codex-used"), "97");
       const value = gatekeeper();
-      expect([value.seat, value.runtime, bare(value.argv).slice(0, 5)]).toEqual(["gatekeeper", "pi", ["pi", "--provider", "magpie", "--model", "cursor/deepseek-v41-flash-1017"]]);
+      expect([value.seat, value.runtime, bare(value.argv).slice(0, 5)]).toEqual(["gatekeeper", "pi", ["pi", "--provider", "magpie", "--model", "group/deepseek-v4.1-flash"]]);
       expect(value.brief).toContain("You are the gatekeeper seat.");
       const refused = argv(home, "gatekeeper-fallback", "--pr", "2253", "--json");
       expect([refused.status, JSON.parse(refused.stderr).error]).toEqual([1, "seat_unknown"]);
@@ -570,23 +571,24 @@ describe("rh seats argv", () => {
       expect([exhausted.status, JSON.parse(exhausted.stderr).error]).toEqual([1, "seat_quota_exhausted"]);
     });
     const seats = { ...DEFAULT_SEATS_CONFIG, worker };
-    expect(formatSeatRoutes(seats, seatAccountQuotas([], seats.routing))).toContain("route simple_fast: worker (pi magpie/codex/gpt-6.1-terra high; chatgpt unknown)");
+    expect(formatSeatRoutes(seats, seatAccountQuotas([], seats.routing))).toContain("route simple_fast: worker-light (pi zai/glm-5.3-flash)");
     // The rh quota routes show only a shipped recommended id; any other id, such as a pasted secret, shows as its seat field (#3250).
-    const pasted = { ...seats, worker: { ...worker, model: "magpie/o3sk-live-0123456789" }, gatekeeper: { ...seats.gatekeeper, model: "o3sk-live-0123456789" } };
+    const pasted = { ...seats, worker: { ...worker, model: "magpie/o3sk-live-0123456789" }, gatekeeper: { ...seats.gatekeeper, runtime: "codex" as const, model: "o3sk-live-0123456789" },
+      routing: { ...seats.routing, simple_fast: ["worker"] as const } };
     const routes = formatSeatRoutes(pasted, seatAccountQuotas([], pasted.routing));
     expect(routes).not.toContain("o3sk-live-0123456789");
     expect(routes).toContain("route simple_fast: worker (pi seats.worker.model high)");
     expect(routes).toContain("gatekeeper: gatekeeper (codex seats.gatekeeper.model");
     const reading = decodeCodexRateLimitsResult({ rateLimits: { primary: { usedPercent: 95, windowDurationMins: 10080, resetsAt: Math.floor(Date.now() / 1000) + 84 * 3600 } } }, new Date().toISOString());
-    expect(formatSeatRoutes(seats, seatAccountQuotas([classifyQuotaReading(reading, Date.now())], seats.routing))).toContain("route simple_fast: none (chatgpt exhausted)");
+    expect(formatSeatRoutes({ ...seats, routing: { ...seats.routing, simple_fast: ["worker"] as const } }, seatAccountQuotas([classifyQuotaReading(reading, Date.now())], seats.routing))).toContain("route simple_fast: none (chatgpt exhausted)");
   });
 
-  test("an exhausted agy Gemini group skips its seat and leaves the Claude and GPT group available", () => {
+  test("an exhausted or reserved agy Gemini group blocks workers while keeping advisor and Claude/GPT seats available", () => {
     const gemini = { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: "pi" as const, model: "magpie/agy-cli/gemini-4-neon" };
     const other = { ...gemini, model: "magpie/agy-cli/claude-opus-5-5" };
     withHome({ ...DEFAULT_SEATS_CONFIG, worker: gemini, 'worker-deep': other, gatekeeper: gemini, 'gatekeeper-fallback': other }, home => {
       const agy = join(home, '.quota-bin', 'agy'), log = join(home, 'agy-calls');
-      writeFileSync(agy, `#!${process.execPath}
+      const writeAgy = (weekly: number) => writeFileSync(agy, `#!${process.execPath}
 const args = process.argv.slice(2).join(' ');
 require('node:fs').appendFileSync(${JSON.stringify(log)}, args + '\\n');
 if (args === 'models') process.exit(0);
@@ -595,9 +597,10 @@ const hour = 3_600_000;
 const bucket = (window, remaining_fraction, hours) => ({ id: window, name: window, window, remaining_fraction,
   reset_time: new Date(Date.now() + hours * hour).toISOString() });
 const group = (name, weekly) => ({ name, buckets: [bucket('weekly', weekly, 84), bucket('5h', 0.9, 2)] });
-const groups = [group('Gemini Models', 0), group('Claude and GPT models', 0.62)];
+const groups = [group('Gemini Models', ${weekly}), group('Claude and GPT models', 0.62)];
 console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: { groups } } }));
 `, { mode: 0o755 });
+      writeAgy(0);
       const exhausted = argv(home, "worker", "--json");
       expect(exhausted.status).toBe(1);
       expect(JSON.parse(exhausted.stderr)).toMatchObject({ error: 'seat_quota_exhausted', message: expect.stringContaining('agy_gemini account is exhausted') });
@@ -606,6 +609,10 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
       expect(fallback.status, fallback.stderr).toBe(0);
       expect(bare(JSON.parse(fallback.stdout).argv)).toContain('agy-cli/claude-opus-5-5');
       expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual(Array.from({ length: 3 }, () => ['models', '-p /usage --output-format json']).flat());
+      writeAgy(0.24);
+      const reserved = argv(home, "worker-neon", "--json");
+      expect([reserved.status, JSON.parse(reserved.stderr).error]).toEqual([1, "seat_quota_reserved"]);
+      expect(argv(home, "advisor", "--json").status).toBe(0);
     });
   });
 
@@ -695,15 +702,15 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   test("Claude advisor flags follow the setting and disappear in saving mode", () => {
     // #3091: a null advisor_model outside saving mode keeps the user's own persistent Claude Code advisorModel setting.
     withHome(DEFAULT_SEATS_CONFIG, home => {
-      const args = launch(home, 'worker-important').argv;
+      const args = launch(home, 'worker-opus').argv;
       expect(args).not.toContain('--advisor');
       expect(args).not.toContain('CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1');
     });
     const seats = { ...DEFAULT_SEATS_CONFIG,
-      'worker-important': { ...DEFAULT_SEATS_CONFIG['worker-important'], advisor_model: 'fable' },
+      'worker-opus': { ...DEFAULT_SEATS_CONFIG['worker-opus'], advisor_model: 'fable' },
       orchestrator: { ...DEFAULT_SEATS_CONFIG.orchestrator, advisor_model: 'fable' } };
     withHome(seats, home => {
-      const args = launch(home, 'worker-important').argv;
+      const args = launch(home, 'worker-opus').argv;
       expect(args.slice(args.indexOf('--advisor'), args.indexOf('--advisor') + 2)).toEqual(['--advisor', 'fable']);
       mkdirSync(join(home, '.repo-harness', 'quota'));
       for (const used of [80, 81]) {
@@ -715,19 +722,25 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
         // #3091: saving mode also disables the advisor tool of a persistent Claude Code advisorModel setting.
         expect(orchestrator.includes('CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1')).toBe(used === 81);
         const quota = seatAccountQuotas([classifyQuotaReading(readClaudeQuota({ HOME: home }), Date.now())], seats.routing);
-        expect(effectiveSeatConfig('worker-important', seats, quota).advisor_model).toBe(used === 80 ? 'fable' : null);
+        expect(effectiveSeatConfig('worker-opus', seats, quota).advisor_model).toBe(used === 80 ? 'fable' : null);
       }
     });
   });
 
   test("quota preserves Codex models and Pi, changes Claude control-seat effort, and stops exhaustion", () => {
-    withHome(DEFAULT_SEATS_CONFIG, home => {
+    const seats = { ...DEFAULT_SEATS_CONFIG,
+      advisor: { ...DEFAULT_SEATS_CONFIG.advisor, runtime: 'claude' as const, model: 'fable', effort: 'high', tools: ['mcp', 'net', 'read', 'shell'] as const },
+      worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex' as const, model: 'gpt-6.1-terra', effort: 'high' },
+      'worker-neon': { ...DEFAULT_SEATS_CONFIG['worker-neon'], runtime: 'claude' as const, model: 'sonnet', effort: 'medium' },
+      gatekeeper: { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'codex' as const, model: 'gpt-6.1-terra', effort: 'high' },
+    };
+    withHome(seats, home => {
       writeFileSync(join(home, 'codex-used'), '10');
-      expect(bare(launch(home, "worker").argv).slice(0, 5)).toEqual(["codex", "-m", DEFAULT_SEATS_CONFIG.worker.model, "-c", 'model_reasoning_effort="high"']);
+      expect(bare(launch(home, "worker").argv).slice(0, 5)).toEqual(["codex", "-m", seats.worker.model, "-c", 'model_reasoning_effort="high"']);
       writeFileSync(join(home, 'codex-used'), '51');
-      expect(bare(launch(home, "worker").argv).slice(0, 3)).toEqual(["codex", "-m", DEFAULT_SEATS_CONFIG.worker.model]);
-      expect(bare(launch(home, "worker-important-fast").argv).slice(0, 5)).toEqual(["claude", "--model", "sonnet", "--effort", "medium"]);
-      expect(bare(launch(home, "worker-light").argv).slice(0, 5)).toEqual(["pi", "--provider", "magpie", "--model", "cursor/deepseek-v41-flash-1017"]);
+      expect(bare(launch(home, "worker").argv).slice(0, 5)).toEqual(["codex", "-m", seats.worker.model, "-c", 'model_reasoning_effort="high"']);
+      expect(bare(launch(home, "worker-neon").argv).slice(0, 5)).toEqual(["claude", "--model", "sonnet", "--effort", "medium"]);
+      expect(bare(launch(home, "worker-light").argv).slice(0, 5)).toEqual(["pi", "--provider", "zai", "--model", "glm-5.3-flash"]);
       mkdirSync(join(home, ".repo-harness", "quota"));
       const claudeUsed = (used: number) => writeFileSync(join(home, ".repo-harness", "quota", "claude.json"), JSON.stringify({ observed_at: new Date().toISOString(), rate_limits: {
         seven_day: { used_percentage: used, resets_at: Math.floor(Date.now() / 1000) + 3600 },
@@ -739,9 +752,9 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
       }
       for (const used of [81, 95]) {
         claudeUsed(used);
-        for (const id of ['advisor', 'orchestrator', 'worker-important-fast']) {
+        for (const id of ['advisor', 'orchestrator', 'worker-neon']) {
           const result = argv(home, id, '--json');
-          if (used === 95 || id === 'worker-important-fast') {
+          if (used === 95 || id === 'worker-neon') {
             expect([result.status, result.stdout, JSON.parse(result.stderr).error]).toEqual([1, '', used === 95 ? 'seat_quota_exhausted' : 'seat_quota_reserved']);
           } else {
             const value = JSON.parse(result.stdout);
@@ -758,12 +771,12 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
     });
     // #2630: the stored credit mode admits the seats it names while the account is exhausted and has credits.
     for (const mode of ['review', 'all'] as const) {
-      withHome({ ...DEFAULT_SEATS_CONFIG, routing: { ...DEFAULT_SEATS_CONFIG.routing, codex_credit_mode: mode, codex_credit_floor: 2000 } }, home => {
+      withHome({ ...seats, routing: { ...seats.routing, codex_credit_mode: mode, codex_credit_floor: 2000 } }, home => {
         writeFileSync(join(home, 'codex-used'), '95');
         writeFileSync(join(home, 'codex-credits'), 'true');
         const worker = argv(home, 'worker', '--json');
         expect([mode, worker.status, worker.stderr ? JSON.parse(worker.stderr).error : null]).toEqual([mode, mode === 'all' ? 0 : 1, mode === 'all' ? null : 'seat_quota_exhausted']);
-        expect(bare(JSON.parse(argv(home, 'gatekeeper', '--pr', '2630', '--json').stdout).argv).slice(0, 3)).toEqual(['codex', '-m', DEFAULT_SEATS_CONFIG.gatekeeper.model]);
+        expect(bare(JSON.parse(argv(home, 'gatekeeper', '--pr', '2630', '--json').stdout).argv).slice(0, 3)).toEqual(['codex', '-m', seats.gatekeeper.model]);
         writeFileSync(join(home, 'codex-credits'), 'false');
         expect(JSON.parse(argv(home, 'gatekeeper', '--pr', '2630', '--json').stderr).error).toBe('seat_quota_exhausted');
       });
@@ -811,41 +824,39 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
     withHome(undefined, (home) => {
       const advisor = launch(home, "advisor");
       expect(advisor.source).toBe("defaults");
-      expect(advisor.brief).toContain("Collect evidence through your sub-agents: `deep-reasoner`, `explorer`.");
-      // No Claude quota reading gives the unknown mode, which is not hyper, so the advisor takes opus high (#2633).
-      expect(bare(advisor.argv).slice(0, 5)).toEqual(["claude", "--model", "opus", "--effort", "high"]);
+      expect(advisor.brief).toContain("Collect evidence through your sub-agents: `rh-deep-reasoner`, `rh-explorer`.");
+      expect(bare(advisor.argv).slice(1, 6)).toEqual(["pi", "--provider", "magpie", "--model", "agy-cli/gemini-4-neon"]);
       expect(advisor.argv.at(-1)).toBe(advisor.brief);
-      // The allow list holds only the tools of the enabled groups; every other built-in tool, such as Workflow, is off.
-      expect(tools(advisor.argv)).toEqual(["ToolSearch", "ListMcpResourcesTool", "ReadMcpResourceTool", "WebFetch", "WebSearch", "Read", "Glob", "Grep",
-        "Bash", "Monitor", "TaskStop", "Agent"]);
-      expect(advisor.argv).not.toContain("--strict-mcp-config");
-      // `--tools` cannot name agent types, so every agent type outside the fleet is refused by name: managed roles,
-      // built-in types, fork, nested user types and plugin types by the host identity rule.
-      expect(denied(advisor.argv)).toEqual(expect.arrayContaining(["Agent(fast-worker)", "Agent(general-purpose)", "Agent(fork)",
-        "Agent(nested-auditor)", "Agent(demo:helper)", "Agent(demo:review:security)", "Bash(gh pr create *)"]));
-      expect(denied(advisor.argv)).not.toContain("Agent(explorer)");
-      expect(advisor.limits).toContainEqual({ subject: "fleet", level: "named_types_only" });
-      // With a shell on, Bash can still write files, so the edit limit is partial.
-      expect(advisor.limits).toContainEqual({ subject: "edit", level: "common_commands" });
-      expect(advisor.brief).toContain("The host refuses only common commands for these limits. Keep them yourself. Do not edit files. Do not write to GitHub.");
+      const claudeAdvisor = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "claude" as const, model: "opus", effort: "high", tools: ["mcp", "net", "read", "shell"] as const };
+      withHome({ ...DEFAULT_SEATS_CONFIG, advisor: claudeAdvisor }, claudeHome => {
+        const ca = launch(claudeHome, "advisor");
+        expect(tools(ca.argv)).toEqual(["ToolSearch", "ListMcpResourcesTool", "ReadMcpResourceTool", "WebFetch", "WebSearch", "Read", "Glob", "Grep",
+          "Bash", "Monitor", "TaskStop", "Agent"]);
+        expect(ca.argv).not.toContain("--strict-mcp-config");
+        expect(denied(ca.argv)).toEqual(expect.arrayContaining(["Agent(fast-worker)", "Agent(general-purpose)", "Agent(fork)",
+          "Agent(nested-auditor)", "Agent(demo:helper)", "Agent(demo:review:security)", "Bash(gh pr create *)"]));
+        expect(denied(ca.argv)).not.toContain("Agent(explorer)");
+        expect(ca.limits).toContainEqual({ subject: "fleet", level: "named_types_only" });
+        expect(ca.limits).toContainEqual({ subject: "edit", level: "common_commands" });
+        expect(ca.brief).toContain("The host refuses only common commands for these limits. Keep them yourself. Do not edit files. Do not write to GitHub.");
+      });
     });
   });
 
-  test("the Claude important worker blocks retired roles and the evaluator by name", () => {
+  test("the Claude opus worker blocks retired roles and the evaluator by name", () => {
     withHome(undefined, home => {
-      const worker = launch(home, "worker-important");
+      const worker = launch(home, "worker-opus");
       expect(tools(worker.argv)).toContain("Agent");
       expect(denied(worker.argv)).toEqual(expect.arrayContaining([
-        "Agent(deep-worker)", "Agent(fast-worker)", "Agent(gatekeeper)", "Agent(harness-evaluator)", "Agent(root-cause-prover)",
+        "Agent(deep-reasoner)", "Agent(deep-worker)", "Agent(fast-worker)", "Agent(gatekeeper)", "Agent(harness-evaluator)", "Agent(root-cause-prover)",
       ]));
-      expect(denied(worker.argv)).not.toContain("Agent(deep-reasoner)");
       expect(denied(worker.argv)).not.toContain("Agent(explorer)");
-      expect(worker.brief).toContain("You may call these sub-agents: `deep-reasoner`, `explorer`.");
+      expect(worker.brief).toContain("You may call these sub-agents: `explorer`.");
     });
   });
 
   test("an empty advisor fleet refuses every agent type, and a Pi seat says it has no sub-agents", () => {
-    const seats = { ...DEFAULT_SEATS_CONFIG, advisor: { ...DEFAULT_SEATS_CONFIG.advisor, fleet: [] }, worker: { runtime: "pi", model: null, effort: null, tools: ["edit", "read", "shell"], fleet: [] } };
+    const seats = { ...DEFAULT_SEATS_CONFIG, advisor: { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "claude" as const, model: "opus", effort: "high", tools: ["mcp", "net", "read", "shell"] as const, fleet: [] }, worker: { runtime: "pi", model: null, effort: null, tools: ["edit", "read", "shell"], fleet: [] } };
     withHome(seats, (home) => {
       const advisor = launch(home, "advisor");
       expect(advisor.source).toBe("seats");
@@ -860,19 +871,20 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
     });
   });
 
-  test("the orchestrator seat names its triage queue and allows exactly its groups' tools, without the Agent tool", () => {
+  test("the orchestrator seat names its triage queue and allows exactly its groups' tools, with explorer Agent", () => {
     withHome(undefined, (home) => {
       const orchestrator = launch(home, "orchestrator").argv;
       expect(bare(orchestrator).slice(0, 2)).toEqual(["CLAUDE_CODE_TASK_LIST_ID=repo-harness-orchestrator", "claude"]);
       expect(tools(orchestrator)).toEqual(["ToolSearch", "ListMcpResourcesTool", "ReadMcpResourceTool", "WebFetch", "WebSearch", "Read", "Glob", "Grep",
-        "Bash", "Monitor", "TaskStop", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate"]);
-      expect(orchestrator).not.toContain("--disallowedTools");
+        "Bash", "Monitor", "TaskStop", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "Agent"]);
+      expect(denied(orchestrator)).not.toContain("Agent(explorer)");
+      expect(denied(orchestrator)).toContain("Agent(deep-reasoner)");
       expect(orchestrator).not.toContain("--strict-mcp-config");
     });
   });
 
   test("the schedule group adds the Cron tools to --tools and is off by default", () => {
-    const advisor = { ...DEFAULT_SEATS_CONFIG.advisor, tools: [...DEFAULT_SEATS_CONFIG.advisor.tools, "schedule"].sort() };
+    const advisor = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "claude" as const, model: "opus", effort: "high", tools: ["mcp", "net", "read", "schedule", "shell"] };
     withHome({ ...DEFAULT_SEATS_CONFIG, advisor }, home => {
       expect(tools(launch(home, "advisor").argv)).toEqual(expect.arrayContaining(["CronCreate", "CronList", "CronDelete"]));
       const off = tools(launch(home, "orchestrator").argv);
@@ -881,7 +893,7 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
       expect(launch(home, "orchestrator").limits).toContainEqual({ subject: "schedule", level: "instructions_only" });
       expect(launch(home, "orchestrator").brief).toContain("Do not schedule recurring jobs.");
       // Shell off, MCP on: the MCP path alone keeps the limit instructions_only.
-      const mcpOnly = { ...DEFAULT_SEATS_CONFIG.advisor, tools: ["mcp", "read"] };
+      const mcpOnly = { ...advisor, tools: ["mcp", "read"] };
       withHome({ ...DEFAULT_SEATS_CONFIG, advisor: mcpOnly }, home2 => expect(launch(home2, "advisor").limits).toContainEqual({ subject: "schedule", level: "instructions_only" }));
     });
   });
@@ -907,7 +919,6 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
     for (const [fleet, dispatch] of [
       [[], "You do not dispatch sub-agents (the Agent tool) for execution. Dispatch work only to seats through Herdr."],
       [["explorer"], seatsOnly("`explorer`")],
-      [["deep-reasoner", "explorer"], seatsOnly("`deep-reasoner`, `explorer`")],
     ] as const) {
       withHome({ ...DEFAULT_SEATS_CONFIG, orchestrator: { ...DEFAULT_SEATS_CONFIG.orchestrator, fleet } }, (home) => {
         const orchestrator = launch(home, "orchestrator");
@@ -930,7 +941,7 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   });
 
   test("the Codex argv holds only flags that Codex applies; the fleet goes into the launch instructions only", () => {
-    const seats = { ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG.worker, tools: ["edit", "read", "shell"] } };
+    const seats = { ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: "codex" as const, model: "gpt-6.1-terra", tools: ["edit", "read", "shell"] } };
     const handoff = "As a Codex worker seat in a linked contract worktree, edit files and run checks only. Do not run `git fetch`, `git commit` or `git push`. In your last message, give the commit subject and body, the PR title and body, and the check results. The orchestrator commits your worktree diff with that message and explicit paths only, pushes the branch and opens the PR. It is the head owner of record and pushes each fix round; no other agent pushes to that PR. You remain the content author and answer review threads through the orchestrator.";
     withHome(seats, (home) => {
       const result = argv(home, "worker");
@@ -953,7 +964,7 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
     const seats = {
       ...DEFAULT_SEATS_CONFIG,
       advisor: { runtime: "codex", model: null, effort: null, tools: ["mcp", "read", "shell"], fleet: [] },
-      worker: { ...DEFAULT_SEATS_CONFIG.worker, tools: ["edit", "read", "shell"] },
+      worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: "codex" as const, model: "gpt-6.1-terra", tools: ["edit", "read", "shell"] },
     };
     withHome(seats, (home) => {
       const worker = launch(home, "worker");
@@ -970,14 +981,15 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   });
 
   test("a writable Codex seat enables sandbox network with net, and other seats keep net", () => {
-    withHome(undefined, (home) => {
+    const codexWorker = { ...DEFAULT_SEATS_CONFIG.worker, runtime: "codex" as const, model: "gpt-6.1-terra" };
+    withHome({ ...DEFAULT_SEATS_CONFIG, worker: codexWorker }, (home) => {
       const worker = launch(home, "worker");
       expect(worker.argv).toEqual(expect.arrayContaining(["workspace-write", "sandbox_workspace_write.network_access=true"]));
       expect(worker.argv).not.toContain('web_search="disabled"');
       expect(worker.brief).not.toContain("Do not use the network.");
     });
     const editNet = ["edit", "net", "read", "shell"];
-    withHome({ ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG.worker, tools: editNet } }, (home) => {
+    withHome({ ...DEFAULT_SEATS_CONFIG, worker: { ...codexWorker, tools: editNet } }, (home) => {
       expect(launch(home, "worker").argv).toEqual(expect.arrayContaining(["workspace-write", "sandbox_workspace_write.network_access=true"]));
     });
     const seats = {
@@ -1020,7 +1032,8 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   });
 
   test("the agent types come from CLAUDE_CONFIG_DIR when it is set", () => {
-    withHome(undefined, (home) => {
+    const claudeAdvisor = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "claude" as const, model: "opus", effort: "high", tools: ["mcp", "net", "read", "shell"] as const };
+    withHome({ ...DEFAULT_SEATS_CONFIG, advisor: claudeAdvisor }, (home) => {
       const root = join(home, "alternate");
       mkdirSync(join(root, "agents"), { recursive: true });
       writeFileSync(join(root, "agents", "other.md"), "---\nname: alternate-auditor\ndescription: Demo\n---\nBody\n");
@@ -1031,7 +1044,8 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   });
 
   test("an agent file with list and nested frontmatter fields is read by its name", () => {
-    withHome(undefined, (home) => {
+    const claudeAdvisor = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "claude" as const, model: "opus", effort: "high", tools: ["mcp", "net", "read", "shell"] as const };
+    withHome({ ...DEFAULT_SEATS_CONFIG, advisor: claudeAdvisor }, (home) => {
       writeFileSync(join(home, ".claude", "agents", "api.md"),
         "---\nname: api-developer\ndescription: Builds APIs: REST and RPC\nskills:\n  - api-design\n  - testing\nhooks:\n  PreToolUse:\n    - matcher: Bash\n---\nBody\n");
       expect(denied(launch(home, "advisor").argv)).toContain("Agent(api-developer)");
@@ -1039,7 +1053,8 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   });
 
   test("an empty CLAUDE_CONFIG_DIR fails closed", () => {
-    withHome(undefined, (home) => {
+    const claudeAdvisor = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "claude" as const, model: "opus", effort: "high", tools: ["mcp", "net", "read", "shell"] as const };
+    withHome({ ...DEFAULT_SEATS_CONFIG, advisor: claudeAdvisor }, (home) => {
       const result = run({ HOME: home, CLAUDE_CONFIG_DIR: "" }, ["advisor", "--json"]);
       expect(result.status).toBe(1);
       expect(result.stdout).toBe("");
@@ -1048,7 +1063,8 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   });
 
   test("an agent name that does not parse fails closed", () => {
-    withHome(undefined, (home) => {
+    const claudeAdvisor = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "claude" as const, model: "opus", effort: "high", tools: ["mcp", "net", "read", "shell"] as const };
+    withHome({ ...DEFAULT_SEATS_CONFIG, advisor: claudeAdvisor }, (home) => {
       writeFileSync(join(home, "plugin", "agents", "bad.md"), "---\nname: [oops\ndescription: Demo\n---\nBody\n");
       const result = argv(home, "advisor", "--json");
       expect(result.status).toBe(1);
@@ -1058,7 +1074,8 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   });
 
   test("an enabled plugin without a manifest uses its entry name even when marked orphaned", () => {
-    withHome(undefined, (home) => {
+    const claudeAdvisor = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "claude" as const, model: "opus", effort: "high", tools: ["mcp", "net", "read", "shell"] as const };
+    withHome({ ...DEFAULT_SEATS_CONFIG, advisor: claudeAdvisor }, (home) => {
       rmSync(join(home, "plugin", ".claude-plugin"), { recursive: true });
       writeFileSync(join(home, "plugin", ".orphaned_at"), "1793467681012");
       const result = argv(home, "advisor", "--json");
@@ -1068,8 +1085,9 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   });
 
   test("a scoped npm plugin without a manifest fails closed with the missing name cause and repair", () => {
+    const claudeAdvisor = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "claude" as const, model: "opus", effort: "high", tools: ["mcp", "net", "read", "shell"] as const };
     const key = "@scope/pkg@npm";
-    withHome(undefined, (home) => {
+    withHome({ ...DEFAULT_SEATS_CONFIG, advisor: claudeAdvisor }, (home) => {
       rmSync(join(home, "plugin", ".claude-plugin"), { recursive: true });
       writeFileSync(join(home, ".claude", "settings.json"), JSON.stringify({ enabledPlugins: { [key]: true } }));
       writeFileSync(join(home, ".claude", "plugins", "installed_plugins.json"), JSON.stringify({ plugins: { [key]: [{ installPath: join(home, "plugin") }] } }));
@@ -1083,7 +1101,8 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   });
 
   test("a present plugin manifest without a name fails closed with a repair", () => {
-    withHome(undefined, (home) => {
+    const claudeAdvisor = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "claude" as const, model: "opus", effort: "high", tools: ["mcp", "net", "read", "shell"] as const };
+    withHome({ ...DEFAULT_SEATS_CONFIG, advisor: claudeAdvisor }, (home) => {
       const manifestPath = join(home, "plugin", ".claude-plugin", "plugin.json");
       writeFileSync(manifestPath, "{}");
       const result = argv(home, "advisor", "--json");
@@ -1094,7 +1113,8 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   });
 
   test("a present plugin manifest name takes precedence over its entry name", () => {
-    withHome(undefined, (home) => {
+    const claudeAdvisor = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "claude" as const, model: "opus", effort: "high", tools: ["mcp", "net", "read", "shell"] as const };
+    withHome({ ...DEFAULT_SEATS_CONFIG, advisor: claudeAdvisor }, (home) => {
       writeFileSync(join(home, "plugin", ".claude-plugin", "plugin.json"), JSON.stringify({ name: "manifest-name" }));
       const rules = denied(launch(home, "advisor").argv);
       expect(rules).toContain("Agent(manifest-name:helper)");
@@ -1126,13 +1146,13 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
         for (const profile of [".profile", ".zshrc"]) writeFileSync(join(home, profile), 'export PATH="$HOME/bin:/bin:/usr/bin"\n');
         writeFileSync(join(bin, "hc"), `#!/bin/sh\nprintf 'hc %s\\n' "$*" >> "${log}"\nif [ -n "$FAKE_HC_FAIL" ]; then printf '%s' '{"error":{"kind":"not_found","message":"no terminal"}}' >&2; exit 3; fi\n`
           + `printf '%s' '{"address":"t5","state":"live","labels":{"repo-harness.seat":"worker"},"turn":0}'\n`);
-        writeFileSync(join(bin, "codex"), `#!/bin/sh\nprintf 'codex %s %s %s %s %s %s\\n' "$#" "$1" "$2" "\${REPO_HARNESS_SEAT-unset}" "\${REPO_HARNESS_SEAT_REPOSITORY-unset}" "\${PI_SUBAGENT_EXTRA_AGENT_DIRS-unset}" >> "${log}"\n`);
-        for (const name of ["hc", "codex"]) chmodSync(join(bin, name), 0o755);
+        writeFileSync(join(bin, "pi"), `#!/bin/sh\nprintf 'pi %s %s %s %s %s\\n' "$1" "$2" "$3" "\${REPO_HARNESS_SEAT-unset}" "\${PI_SUBAGENT_EXTRA_AGENT_DIRS-unset}" >> "${log}"\n`);
+        for (const name of ["hc", "pi"]) chmodSync(join(bin, name), 0o755);
         const label = "hc label --json -- t5 repo-harness.seat=worker repo-harness.repository=1186405141 repo-harness.issue=1473 repo-harness.parent=1000";
         for (const [env, error, calls] of [
           // A worker started from a reset seat's env does not inherit the seat identity or a parent's Pi role directory (#1975, #1977).
           [{ HC_TERMINAL_ID: "t5", REPO_HARNESS_SEAT: "orchestrator", REPO_HARNESS_SEAT_REPOSITORY: "1186405141", PI_SUBAGENT_EXTRA_AGENT_DIRS: "/parent/pi-fleet" }, null,
-            [label, `codex ${agent(worker).length - agent(worker).indexOf("codex") - 1} -m gpt-6.1-terra unset unset unset`]],
+            [label, `pi --provider magpie --model unset ${join(realpathSync(home), ".repo-harness", "seats", "pi-fleet")}`]],
           [{ HC_TERMINAL_ID: "t5", FAKE_HC_FAIL: "1" }, "label_failed", [label]],
           [{}, "terminal_unknown", []],
         ] as const) {
@@ -1140,8 +1160,14 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
           const result = spawnSync(worker.argv[0], worker.argv.slice(1), { env: { ...registryEnv(home), PATH: `${bin}:/bin:/usr/bin`, ...env }, encoding: "utf8", cwd: repo });
           const lines = readFileSync(log, "utf8").split("\n").filter(Boolean);
           const failure = error === null ? null : JSON.parse(result.stderr.trim().split("\n").at(-1)!);
-          expect([result.status === 0, failure?.error ?? null, failure?.message.startsWith("The seat did not start: ") ?? null, lines])
-            .toEqual([error === null, error, error === null ? null : true, [...calls]]);
+          if (error === null) {
+            expect(result.status).toBe(0);
+            expect(lines[0]).toBe(label);
+            expect(lines[1]).toStartWith("pi --provider magpie --model unset ");
+          } else {
+            expect([result.status === 0, failure?.error ?? null, failure?.message.startsWith("The seat did not start: ") ?? null, lines])
+              .toEqual([false, error, true, [...calls]]);
+          }
         }
       });
     });
@@ -1157,8 +1183,8 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
       writeFileSync(join(launchBin, "rh"), "#!/bin/sh\necho rh-probe\n", { mode: 0o755 });
       writeFileSync(join(paneBin, "pi"), "#!/bin/sh\nset -e\nbun --version\nrh --version\nhc --version\n", { mode: 0o755 });
       const env = registryEnv(home);
-      const launch = run({ ...env, PATH: `${launchBin}:/bin:/usr/bin` }, ["worker-light", "--repository-id", "1186405141", "--issue", "3300"], repo);
-      expect(launch.status).toBe(0);
+      const launch = run({ ...env, PATH: `${launchBin}:${dirname(Bun.which("bun") ?? process.execPath)}:/bin:/usr/bin` }, ["worker-light", "--repository-id", "1186405141", "--issue", "3300"], repo);
+      expect(launch.status, launch.stderr).toBe(0);
       const [command, ...args] = JSON.parse(launch.stdout);
       const result = spawnSync(command, args, { cwd: repo, encoding: "utf8",
         env: { ...env, ZDOTDIR: home, BUN_INSTALL: join(home, ".bun"), HC_TERMINAL_ID: "t5", PATH: `${paneBin}:/bin:/usr/bin` } });
@@ -1167,20 +1193,21 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   });
 
   test("the pane name and the tab name come from the registry prefix of the primary checkout, one per role", () => {
-    withHome(undefined, (home) => {
+    const seats = { ...DEFAULT_SEATS_CONFIG,
+      advisor: { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "claude" as const, model: "opus", effort: "high", tools: ["mcp", "net", "read", "shell"] as const },
+      worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: "codex" as const, model: "gpt-6.1-terra" } };
+    withHome(seats, (home) => {
       withRepository(home, "rh", (repo, worktree) => {
         const named = (cwd: string, ...args: string[]) => JSON.parse(run(registryEnv(home), [...args, "--repository-id", "1186405141", "--json"], cwd).stdout);
         const orchestrator = named(repo, "orchestrator");
         expect([orchestrator.name, orchestrator.tab]).toEqual(["rh-orch", "orch"]);
-        // A Claude seat carries the same name as its session name; the reset seats name their seat and repository (#1972)
-        // and their effective model and effort (#2633) in the env: the advisor has no quota reading, so it gets opus high.
         expect(agent(orchestrator).slice(0, 19)).toEqual([...UNSET_SEAT, "CLAUDE_CODE_TASK_LIST_ID=repo-harness-orchestrator",
           "REPO_HARNESS_SEAT=orchestrator", "REPO_HARNESS_SEAT_REPOSITORY=1186405141", "REPO_HARNESS_SEAT_MODEL=opus", "REPO_HARNESS_SEAT_EFFORT=high", "claude", "-n", "rh-orch"]);
         const advisor = named(repo, "advisor", "--parent", "1000");
         expect([advisor.name, advisor.tab]).toEqual(["rh-adv", "orch"]);
         expect(agent(advisor).slice(0, 18)).toEqual([...UNSET_SEAT, "REPO_HARNESS_SEAT=advisor", "REPO_HARNESS_SEAT_REPOSITORY=1186405141",
           "REPO_HARNESS_SEAT_MODEL=opus", "REPO_HARNESS_SEAT_EFFORT=high", "claude", "-n", "rh-adv"]);
-        // A linked worktree resolves to its primary checkout; the default worker runs Codex, which has no session name flag.
+        // A linked worktree resolves to its primary checkout; the Codex worker has no session name flag.
         const worker = named(worktree, "worker", "--parent", "1000", "--issue", "1508", "--pr", "1521", "--qualifier", "device");
         expect([worker.name, worker.tab]).toEqual(["rh-w-1508-device", "#1000"]);
         expect(worker.argv).not.toContain("rh-w-1508-device");
@@ -1194,19 +1221,18 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
     });
   });
 
-  test("a planner launch labels its issue and keeps the configured model on all three hosts", () => {
-    expect([isWorkerSeat("planner"), isReviewSeat("planner")]).toEqual([false, false]);
-    for (const [runtime, model] of [["pi", "magpie/agy-cli/gemini-4-carbon"], ["codex", "gpt-6.2-astra"], ["claude", "opus"]] as const) {
-      const planner = { ...DEFAULT_SEATS_CONFIG.reviewer, runtime, model, fleet: ["explorer"] };
-      withHome({ ...DEFAULT_SEATS_CONFIG, planner }, home => withRepository(home, "rh", (_repo, worktree) => {
-        // Agy is signed out in this fixture, so the command reads no live quota.
+  test("a council launch labels its issue and keeps the configured model on all three hosts", () => {
+    expect([isWorkerSeat("council"), isReviewSeat("council"), isCouncilSeat("council")]).toEqual([false, false, true]);
+    for (const [runtime, model] of [["pi", "magpie/agy-cli/gemini-4-carbon"], ["codex", "gpt-6.2-astra"], ["claude", "fable"]] as const) {
+      const council = { ...DEFAULT_SEATS_CONFIG.reviewer, runtime, model, fleet: ["explorer"] };
+      withHome({ ...DEFAULT_SEATS_CONFIG, council }, home => withRepository(home, "rh", (_repo, worktree) => {
         writeFileSync(join(home, ".quota-bin", "agy"), "#!/bin/sh\nexit 2\n", { mode: 0o755 });
-        const result = run(registryEnv(home), ["planner", "--repository-id", "1", "--issue", "42", "--parent", "5", "--qualifier", "api", "--json"], worktree);
+        const result = run(registryEnv(home), ["council", "--repository-id", "1", "--issue", "42", "--parent", "5", "--qualifier", "fable", "--json"], worktree);
         expect(result.status, result.stderr).toBe(0);
         const value = JSON.parse(result.stdout);
-        expect(value).toMatchObject({ seat: "planner", runtime, name: "rh-pl-42-api", tab: "plan",
-          labels: ["repo-harness.seat=planner", "repo-harness.repository=1", "repo-harness.issue=42", "repo-harness.parent=5"] });
-        expect(value.argv.some((arg: string) => arg.includes("seats label planner --repository-id 1 --issue 42 --parent 5"))).toBe(true);
+        expect(value).toMatchObject({ seat: "council", runtime, name: "rh-cn-42-fable", tab: "council",
+          labels: ["repo-harness.seat=council", "repo-harness.repository=1", "repo-harness.issue=42", "repo-harness.parent=5"] });
+        expect(value.argv.some((arg: string) => arg.includes("seats label council --repository-id 1 --issue 42 --parent 5"))).toBe(true);
         expect(value.brief).toContain("RECOMMENDATION: <one sentence> — confidence: HIGH|MEDIUM|LOW");
         expect(value.brief).toContain("caller-provided scratch file outside every Git repository and worktree");
         const args = bare(agent(value)) as string[];
@@ -1222,7 +1248,7 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
           expect(args.slice(0, 3)).toEqual(["codex", "-m", model]);
           expect(args).toContain("read-only");
         } else {
-          expect(args.slice(0, 5)).toEqual(["claude", "-n", "rh-pl-42-api", "--model", model]);
+          expect(args.slice(0, 5)).toEqual(["claude", "-n", "rh-cn-42-fable", "--model", model]);
           expect(tools(args)).toContain("Agent");
           expect(tools(args)).not.toContain("Write");
         }
@@ -1230,61 +1256,70 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
     }
   });
 
-  test("a planner requires an issue and a configured seat", () => {
+  test("a council seat requires an issue and a configured seat", () => {
     withHome(undefined, home => {
-      const result = argv(home, "planner", "--repository-id", "1", "--issue", "42", "--json");
+      const result = argv(home, "council", "--repository-id", "1", "--issue", "42", "--json");
       expect([result.status, result.stdout, JSON.parse(result.stderr).error]).toEqual([1, "", "seat_not_configured"]);
     });
-    withHome({ ...DEFAULT_SEATS_CONFIG, planner: DEFAULT_SEATS_CONFIG.reviewer }, home => {
+    withHome({ ...DEFAULT_SEATS_CONFIG, council: { ...DEFAULT_SEATS_CONFIG.reviewer, model: "fable" } }, home => {
       for (const flags of [[], ["--pr", "99"], ["--issue", "42", "--pr", "99"], ["--issue", "42", "--release", "0050"]]) {
-        const result = argv(home, "planner", "--repository-id", "1", "--json", ...flags);
+        const result = argv(home, "council", "--repository-id", "1", "--json", ...flags);
         expect([result.status, result.stdout, JSON.parse(result.stderr).error]).toEqual([1, "", "pane_name_invalid"]);
       }
     });
-    expect(seatPaneName({ prefix: "rh", seat: "planner", issue: "42" })).toBe("rh-pl-42");
-    expect(() => seatPaneName({ prefix: "rh", seat: "planner", issue: "0" })).toThrow(expect.objectContaining({ code: "pane_name_invalid" }));
+    expect(seatPaneName({ prefix: "rh", seat: "council", issue: "42", qualifier: "fable" })).toBe("rh-cn-42-fable");
+    expect(() => seatPaneName({ prefix: "rh", seat: "council", issue: "0" })).toThrow(expect.objectContaining({ code: "pane_name_invalid" }));
   });
 
-  test("seats consult previews without writes and launches the same labeled planner argv in Herdr", () => {
-    const planner = { ...DEFAULT_SEATS_CONFIG.reviewer, runtime: "pi", model: "magpie/agy-cli/gemini-4-carbon", fleet: ["explorer"] };
-    withHome({ ...DEFAULT_SEATS_CONFIG, planner }, home => withRepository(home, "rh", (repo, worktree) => {
+  test("seats council previews without writes and launches member panes via Herdr with auto herdr.space resolution", () => {
+    withHome(DEFAULT_SEATS_CONFIG, home => withRepository(home, "rh", (repo, worktree) => {
       const bin = join(home, ".quota-bin");
       const scratch = realpathSync(mkdirSync(join(home, "scratch"), { recursive: true })!);
       const ghLog = join(home, "gh.log"), tabLog = join(home, "tab.log");
       const gh = join(bin, "gh");
+      mkdirSync(join(home, ".pi", "agent", "extensions"), { recursive: true });
+      writeFileSync(join(home, ".pi", "agent", "extensions", "magpie.ts"), "");
+      writeFileSync(join(bin, "pi"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
       writeFileSync(join(bin, "agy"), "#!/bin/sh\nexit 2\n", { mode: 0o755 });
+      writeFileSync(join(bin, "hc"), `#!/bin/sh\nprintf '{"address":"t5","state":"live","turn":0,"labels":{"herdr.space":"sp-auto"}}'\n`, { mode: 0o755 });
       writeFileSync(gh, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${ghLog}"\n`
         + `test "$*" = 'api --hostname github.com repos/{owner}/{repo}' && test -z "$GH_REPO" && printf '{"id":19}'\n`, { mode: 0o755 });
       writeFileSync(join(bin, "herdr-app"), `#!/bin/sh\nprintf '%s\\n' "$@" >> "${tabLog}"\nprintf '{"tab":"tb1","terminal":"t9"}'\n`, { mode: 0o755 });
       const { CLAUDE_CONFIG_DIR: _claude, PI_CODING_AGENT_DIR: _pi, HC_TERMINAL_ID: _terminal, HERDR_ENV: _herdr, ...base } = process.env;
-      const env = { ...base, ...registryEnv(home), TMPDIR: scratch, GH_REPO: "another/repo", REPO_HARNESS_GH_BIN: gh,
+      const env = { ...base, ...registryEnv(home), TMPDIR: scratch, GH_REPO: "another/repo", REPO_HARNESS_GH_BIN: gh, HC_TERMINAL_ID: "t5",
         PATH: [bin, dirname(process.execPath), "/bin", "/usr/bin"].join(delimiter) };
-      const consult = (...args: string[]) => spawnSync(process.execPath, [CLI, "seats", "consult", "--issue", "42", ...args], { env, cwd: worktree, encoding: "utf8" });
+      const council = (...args: string[]) => spawnSync(process.execPath, [CLI, "seats", "council", "--issue", "42", "--members", "fable,carbon", ...args], { env, cwd: worktree, encoding: "utf8" });
 
-      git(repo, "remote", "add", "origin", "https://github.com/example/planner-test.git");
-      const dry = consult("--dry-run", "--json");
+      git(repo, "remote", "add", "origin", "https://github.com/example/council-test.git");
+      const dry = council("--dry-run", "--json");
       expect(dry.status, dry.stderr).toBe(0);
-      const planDir = join(scratch, "rh-plans", basename(repo));
-      expect(JSON.parse(dry.stdout)).toEqual({ protocol: 1, kind: "repo-harness.seats.consult", dry_run: true, seat: "planner", runtime: "pi", model: planner.model,
-        issue: 42, parent: null, pane_name: "rh-pl-42", tab: "plan", out_path: join(planDir, "issue-42.md") });
-      const qualified = consult("--repository-id", "20", "--qualifier", "api", "--dry-run");
-      expect(qualified.status, qualified.stderr).toBe(0);
-      expect(JSON.parse(qualified.stdout)).toMatchObject({ pane_name: "rh-pl-42-api", out_path: join(planDir, "issue-42-api.md") });
-      expect(existsSync(join(scratch, "rh-plans"))).toBe(false);
+      const councilDir = join(scratch, "rh-council", basename(repo));
+      expect(JSON.parse(dry.stdout)).toEqual({
+        protocol: 1, kind: "repo-harness.seats.council", dry_run: true, seat: "council", issue: 42, parent: null,
+        members: [
+          { member: "fable", runtime: "claude", model: "fable", pane_name: "rh-cn-42-fable", tab: "council", out_path: join(councilDir, "issue-42-fable.md") },
+          { member: "carbon", runtime: "pi", model: "magpie/agy-cli/gemini-4-carbon", pane_name: "rh-cn-42-carbon", tab: "council", out_path: join(councilDir, "issue-42-carbon.md") },
+        ],
+      });
+      expect(existsSync(join(scratch, "rh-council"))).toBe(false);
       expect(existsSync(join(home, ".repo-harness", "seats", "pi-fleet"))).toBe(false);
       expect(existsSync(tabLog)).toBe(false);
 
-      const out = join(scratch, "plans", "plan.md");
-      const applied = consult("--repository-id", "20", "--space", "sp1", "--parent", "7", "--qualifier", "api", "--out", out);
+      const outDir = join(scratch, "out");
+      const applied = council("--repository-id", "20", "--parent", "7", "--qualifier", "api", "--out-dir", outDir);
       expect(applied.status, applied.stderr).toBe(0);
-      expect(applied.stdout).toContain(`rh-pl-42-api → ${out}`);
-      const [verb, operation, args] = readFileSync(tabLog, "utf8").trimEnd().split("\n");
-      expect([verb, operation]).toEqual(["do", "tab.new"]);
-      const tab = JSON.parse(args!);
-      expect(tab).toMatchObject({ name: "plan", space: "sp1", folder: worktree });
-      expect(tab.argv.some((arg: string) => arg.includes("seats label planner --repository-id 20 --issue 42 --parent 7"))).toBe(true);
-      expect(values(tab.argv, "--exclude-tools")).toEqual(["edit,write"]);
-      expect(tab.task).toContain(out);
+      expect(applied.stdout).toContain(`rh-cn-42-fableapi → ${join(outDir, "issue-42-fable-api.md")}`);
+      expect(applied.stdout).toContain(`rh-cn-42-carbonapi → ${join(outDir, "issue-42-carbon-api.md")}`);
+      const lines = readFileSync(tabLog, "utf8").trimEnd().split("\n");
+      expect(lines).toHaveLength(6);
+      const tab0 = JSON.parse(lines[2]!);
+      const tab1 = JSON.parse(lines[5]!);
+      expect([lines[0], lines[1], tab0]).toEqual(["do", "tab.new", expect.objectContaining({ name: "council", space: "sp-auto", folder: worktree })]);
+      expect(tab1).toMatchObject({ name: "council", space: "sp-auto", folder: worktree });
+      expect(tab0.argv.some((arg: string) => arg.includes("seats label council --repository-id 20 --issue 42 --parent 7"))).toBe(true);
+      expect(values(tab1.argv, "--exclude-tools")).toEqual(["edit,write"]);
+      expect(tab0.task).toContain(join(outDir, "issue-42-fable-api.md"));
+      expect(tab1.task).toContain(join(outDir, "issue-42-carbon-api.md"));
       expect(readFileSync(ghLog, "utf8").trim().split("\n")).toEqual(["api --hostname github.com repos/{owner}/{repo}"]);
       for (const checkout of [repo, worktree]) {
         const status = spawnSync("git", ["status", "--porcelain"], { cwd: checkout, env, encoding: "utf8" });
@@ -1293,32 +1328,31 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
     }));
   });
 
-  test("seats consult refuses missing launch inputs and an unconfigured or unsupported planner", () => {
+  test("seats council refuses missing launch inputs and invalid members", () => {
     withHome(undefined, home => withRepository(home, "rh", (repo) => {
-      const { CLAUDE_CONFIG_DIR: _claude, PI_CODING_AGENT_DIR: _pi, ...base } = process.env;
+      const { CLAUDE_CONFIG_DIR: _claude, PI_CODING_AGENT_DIR: _pi, HC_TERMINAL_ID: _terminal, ...base } = process.env;
       const env = { ...base, ...registryEnv(home), PATH: [join(home, ".quota-bin"), dirname(process.execPath), "/bin", "/usr/bin"].join(delimiter) };
-      const consultError = (...args: string[]) => {
-        const result = spawnSync(process.execPath, [CLI, "seats", "consult", ...args], { env, cwd: repo, encoding: "utf8" });
+      const councilError = (...args: string[]) => {
+        const result = spawnSync(process.execPath, [CLI, "seats", "council", ...args], { env, cwd: repo, encoding: "utf8" });
         expect(result.status, result.stderr).toBe(1);
         return JSON.parse(result.stderr).error;
       };
-      expect(consultError("--issue", "42", "--dry-run")).toBe("repository_id_required");
-      const labels = ["--issue", "42", "--repository-id", "19"];
-      expect(consultError(...labels)).toBe("consult_launch_invalid");
-      expect(consultError(...labels, "--parent", "0", "--dry-run")).toBe("label_value_invalid");
-      expect(consultError(...labels, "--dry-run")).toBe("seat_not_configured");
-      const planner = { ...DEFAULT_SEATS_CONFIG.reviewer, runtime: "codex", model: "gpt-6.2-astra" };
-      writeFileSync(join(home, ".repo-harness", "config.json"), JSON.stringify({ seats: { ...DEFAULT_SEATS_CONFIG, planner } }));
-      expect(consultError(...labels, "--dry-run")).toBe("consult_runtime_unsupported");
+      expect(councilError("--issue", "42", "--members", "neon", "--dry-run")).toBe("council_member_invalid");
+      expect(councilError("--issue", "42", "--members", "fable,fable", "--dry-run")).toBe("council_member_invalid");
+      expect(councilError("--issue", "42", "--members", "fable", "--dry-run")).toBe("repository_id_required");
+      const labels = ["--issue", "42", "--members", "fable", "--repository-id", "19"];
+      expect(councilError(...labels)).toBe("seat_space_missing");
+      expect(councilError(...labels, "--parent", "0", "--dry-run")).toBe("label_value_invalid");
+      expect(councilError("--issue", "42", "--members", "fable,carbon", "--repository-id", "19", "--out", "/tmp/a.md", "--dry-run")).toBe("council_launch_invalid");
     }));
   });
 
-  test("a Claude planner keeps its configuration in saving and hyper modes", () => {
-    const planner = { ...DEFAULT_SEATS_CONFIG.reviewer, model: "sonnet", advisor_model: "fable", effort: "medium" };
-    const seats = { ...DEFAULT_SEATS_CONFIG, planner };
+  test("a Claude council keeps its configuration in saving and hyper modes", () => {
+    const council = { ...DEFAULT_SEATS_CONFIG.reviewer, model: "fable", advisor_model: null, effort: "medium" };
+    const seats = { ...DEFAULT_SEATS_CONFIG, council };
     const quota = seatAccountQuotas([], seats.routing);
     for (const mode of ["saving", "hyper"] as const) {
-      expect(effectiveSeatConfig("planner", seats, { ...quota, claude: { ...quota.claude, mode } })).toEqual(planner);
+      expect(effectiveSeatConfig("council", seats, { ...quota, claude: { ...quota.claude, mode } })).toEqual(council);
     }
   });
 
@@ -1326,19 +1360,24 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
     withHome(undefined, (home) => {
       withRepository(home, "rh", (repo, worktree) => {
         // A fake hc and a fake herdr-app first on PATH: no real terminal or tab is touched.
-        const bin = join(home, "bin"), log = join(home, "calls.log");
+        const bin = join(home, "bin"), piBin = join(home, "pi-bin"), log = join(home, "calls.log");
         mkdirSync(bin);
+        mkdirSync(piBin);
+        mkdirSync(join(home, ".pi", "agent", "extensions"), { recursive: true });
+        writeFileSync(join(home, ".pi", "agent", "extensions", "magpie.ts"), "");
+        writeFileSync(join(piBin, "pi"), "#!/bin/sh\nexit 0\n");
         writeFileSync(join(bin, "hc"), `#!/bin/sh\nprintf 'hc %s\\n' "$*" >> "${log}"\n`
           + `printf '{"address":"t5","state":"live","turn":0,"labels":{%s}}' "\${FAKE_SPACE+\\"herdr.space\\":\\"$FAKE_SPACE\\"}"\n`);
         writeFileSync(join(bin, "herdr-app"), `#!/bin/sh\nprintf 'herdr-app %s\\n' "$*" >> "${log}"\n`
           + `if [ -n "$FAKE_HERDR_FAIL" ]; then printf '%s' '{"error":"no window"}'; exit 1; fi\nprintf '%s' '{"tab":"tb1","terminal":"t9"}'\n`);
+        chmodSync(join(piBin, "pi"), 0o755);
         for (const name of ["hc", "herdr-app"]) chmodSync(join(bin, name), 0o755);
         const { CLAUDE_CONFIG_DIR: _c, PI_CODING_AGENT_DIR: _p, HC_TERMINAL_ID: _t, HERDR_ENV: _h, ...base } = process.env;
         const labels = ["worker", "--repository-id", "1186405141", "--parent", "1000", "--issue", "1473"];
         const seats = (env: Record<string, string>, args: string[]) => {
           writeFileSync(log, "");
           const result = spawnSync(process.execPath, [CLI, "seats", ...args], { cwd: repo, encoding: "utf8",
-            env: { ...base, ...registryEnv(home), BUN_INSTALL: join(home, ".bun"), PATH: `${bin}${delimiter}${join(home, ".quota-bin")}${delimiter}${dirname(process.execPath)}${delimiter}/bin${delimiter}/usr/bin`, ...env } });
+            env: { ...base, ...registryEnv(home), BUN_INSTALL: join(home, ".bun"), PATH: `${bin}${delimiter}${piBin}${delimiter}${join(home, ".quota-bin")}${delimiter}${dirname(process.execPath)}${delimiter}/bin${delimiter}/usr/bin`, ...env } });
           return { status: result.status, stdout: result.stdout, error: result.status === 0 ? null : JSON.parse(result.stderr).error, calls: readFileSync(log, "utf8").split("\n").filter(Boolean) };
         };
         const argvLaunch = JSON.parse(seats({}, ["argv", ...labels, "--json"]).stdout);
@@ -1362,7 +1401,7 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
         const refused = seats({ FAKE_HERDR_FAIL: "1" }, ["launch", ...launchArgs, "--space", "mini-cf/sp2"]);
         expect([refused.status, refused.error, refused.calls.map(line => line.split(" ").slice(0, 3).join(" "))]).toEqual([1, "seat_tab_unknown", ["herdr-app do tab.new"]]);
         // No herdr-app on PATH: no request was sent, so the tab surely does not exist.
-        const absent = seats({ PATH: `${join(home, ".quota-bin")}${delimiter}${dirname(process.execPath)}${delimiter}/bin${delimiter}/usr/bin` }, ["launch", ...launchArgs, "--space", "sp1"]);
+        const absent = seats({ PATH: `${piBin}${delimiter}${join(home, ".quota-bin")}${delimiter}${dirname(process.execPath)}${delimiter}/bin${delimiter}/usr/bin` }, ["launch", ...launchArgs, "--space", "sp1"]);
         expect([absent.status, absent.error, absent.calls]).toEqual([1, "seat_tab_failed", []]);
       });
     });
@@ -1908,6 +1947,9 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init");
     const at = "2026-11-03T00:00:00.000Z";
     mkdirSync(join(home, ".repo-harness", "quota"), { recursive: true });
+    writeFileSync(join(home, ".repo-harness", "config.json"), JSON.stringify({
+      seats: { ...DEFAULT_SEATS_CONFIG, advisor: { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "claude", model: "fable", effort: "high", tools: ["mcp", "net", "read", "shell"] } },
+    }));
     writeFileSync(join(home, ".repo-harness", "registered-repos.json"), JSON.stringify({ version: 1, authorizationRevision: 0,
       repos: [{ id: repoHarnessRepoIdFor(realpathSync(repo)), path: realpathSync(repo), accessMode: "read_only", source: "manual", registeredAt: at, lastSeenAt: at, panePrefix: "rh" }] }));
     const quota = join(home, ".repo-harness", "quota", "claude.json");

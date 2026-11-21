@@ -236,7 +236,21 @@ describe('magpie readiness', () => {
       const invocation = path.join(root, 'magpie-invoked');
       writeExecutable(root, path.join(fakeBin, magpieBinary), `#!/bin/sh\nprintf invoked > '${invocation}'\n`);
       if (status !== 'ok') {
-        const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-light': null };
+        const nonMagpie = { runtime: 'claude' as const, model: 'opus', advisor_model: null, effort: 'high', tools: DEFAULT_SEATS_CONFIG.gatekeeper.tools, fleet: [] };
+        const seats = {
+          ...DEFAULT_SEATS_CONFIG,
+          advisor: { ...DEFAULT_SEATS_CONFIG.advisor, runtime: 'claude' as const, model: 'opus' },
+          worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex' as const, model: 'gpt-6.1-terra' },
+          'worker-deep': { ...DEFAULT_SEATS_CONFIG['worker-deep'], runtime: 'codex' as const, model: 'gpt-6.2-sol' },
+          'worker-neon': { ...DEFAULT_SEATS_CONFIG['worker-neon'], runtime: 'claude' as const, model: 'opus' },
+          'worker-light': null,
+          gatekeeper: nonMagpie,
+          routing: {
+            ...DEFAULT_SEATS_CONFIG.routing,
+            important_fast: ['worker-opus', 'worker-neon', 'worker'],
+            simple_fast: ['worker'],
+          },
+        };
         const configDir = path.join(home, '.repo-harness');
         fs.mkdirSync(configDir);
         fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ seats }));
@@ -275,7 +289,12 @@ describe('magpie readiness', () => {
         const seats = config === 'invalid' ? {} : {
           ...DEFAULT_SEATS_CONFIG,
           'worker-light': null,
-          worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'pi', model: 'magpie/group/fixture', fleet: [] },
+          worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'pi' as const, model: 'magpie/group/fixture', fleet: [] },
+          routing: {
+            ...DEFAULT_SEATS_CONFIG.routing,
+            important_fast: ['worker-opus', 'worker-neon', 'worker'],
+            simple_fast: ['worker'],
+          },
         };
         fs.mkdirSync(path.dirname(configPath), { recursive: true });
         fs.writeFileSync(configPath, JSON.stringify({ seats }));

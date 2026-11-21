@@ -120,17 +120,20 @@ test('update removes stored routing mode and hyper values once, keeps a null wor
   try {
     mkdirSync(join(home, '.repo-harness'));
     const path = join(home, '.repo-harness', 'config.json');
-    const { claude_saving_below_remaining: _claude, claude_hyper_at_or_above_remaining: _claudeHyper, exhausted_at_or_above_used: _exhausted, codex_credit_mode: _mode, codex_credit_floor: _floor, unavailable_pi_providers: _unavailable, ...routes } = DEFAULT_SEATS_CONFIG.routing;
-    const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-light': null, routing: { ...routes, mode: 'hyper', hyper: {
-      claude: { model: 'opus', effort: 'high' }, advisor: { model: 'opus', effort: 'max' }, codex: { model: 'gpt-6-astra', effort: 'high' },
-    } } };
+    const { claude_saving_below_remaining: _claude, claude_hyper_at_or_above_remaining: _claudeHyper, agy_saving_below_remaining: _agy, exhausted_at_or_above_used: _exhausted, codex_credit_mode: _mode, codex_credit_floor: _floor, unavailable_pi_providers: _unavailable, ...routes } = DEFAULT_SEATS_CONFIG.routing;
+    const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-light': null,
+      routing: { ...routes, important_fast: ['worker-opus', 'worker-neon', 'worker'] as const, simple_fast: ['worker'] as const,
+        mode: 'hyper', hyper: { claude: { model: 'opus', effort: 'high' }, advisor: { model: 'opus', effort: 'max' }, codex: { model: 'gpt-6-astra', effort: 'high' } } } };
     expect(() => decodeSeatsConfig(seats)).toThrow(expect.objectContaining({ code: 'seats_config_migration_required' }));
     const original = JSON.stringify({ seats, security: { mode: 'strict' } });
     writeFileSync(path, original);
     expect(migrateSeatsConfiguration({ HOME: home })).toBe(true);
     const migrated = readFileSync(path, 'utf8');
-    expect(JSON.parse(migrated)).toEqual({ seats: { ...DEFAULT_SEATS_CONFIG, 'worker-light': null }, security: { mode: 'strict' } });
-    expect(decodeSeatsConfig(JSON.parse(migrated).seats).routing).toEqual(DEFAULT_SEATS_CONFIG.routing);
+    expect(JSON.parse(migrated)).toEqual({ seats: { ...DEFAULT_SEATS_CONFIG, 'worker-light': null,
+      routing: { ...DEFAULT_SEATS_CONFIG.routing, important_fast: ['worker-opus', 'worker-neon', 'worker'], simple_fast: ['worker'] } }, security: { mode: 'strict' } });
+    expect(decodeSeatsConfig(JSON.parse(migrated).seats).routing).toEqual({
+      ...DEFAULT_SEATS_CONFIG.routing, important_fast: ['worker-opus', 'worker-neon', 'worker'], simple_fast: ['worker'],
+    });
     expect(migrateSeatsConfiguration({ HOME: home })).toBe(false);
     expect(readFileSync(path, 'utf8')).toBe(migrated);
     for (const routing of [{ ...seats.routing, mode: 'other' }, { ...seats.routing, hyper: {} }, { ...seats.routing, extra: true }]) {
@@ -139,7 +142,7 @@ test('update removes stored routing mode and hyper values once, keeps a null wor
       expect(() => migrateSeatsConfiguration({ HOME: home })).toThrow('seats_config_invalid');
       expect(readFileSync(path, 'utf8')).toBe(invalid);
     }
-    const { 'gatekeeper-fallback': _fallback, 'gatekeeper-deep': _deep, ...withoutFallback } = DEFAULT_SEATS_CONFIG;
+    const { 'gatekeeper-fallback': _fallback, ...withoutFallback } = DEFAULT_SEATS_CONFIG;
     expect(() => decodeSeatsConfig(withoutFallback)).toThrow(expect.objectContaining({ code: 'seats_config_migration_required' }));
     writeFileSync(path, JSON.stringify({ seats: withoutFallback }));
     expect(migrateSeatsConfiguration({ HOME: home })).toBe(true);
@@ -153,22 +156,51 @@ test('update removes stored routing mode and hyper values once, keeps a null wor
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
-test('update adds the disabled planner and preserves the stored seats and runtimes', () => {
-  const home = mkdtempSync(join(tmpdir(), 'planner-migration-'));
+test('update migrates 12-seat configs to 11 seats, remaps routing, strips disallowed fleet roles, and preserves stored runtimes', () => {
+  const home = mkdtempSync(join(tmpdir(), 'council-migration-'));
   try {
     const directory = join(home, '.repo-harness');
     mkdirSync(directory);
     const path = join(directory, 'config.json');
     const env = { HOME: home };
-    const { planner: _planner, ...stored } = DEFAULT_SEATS_CONFIG;
-    const seats = { ...stored, advisor: { ...stored.advisor, model: 'sonnet' }, pi_sub_agent_models: { explorer: 'custom/model' } };
+    const { council: _council, 'worker-opus': workerOpus, 'worker-neon': workerNeon, routing, ...rest } = DEFAULT_SEATS_CONFIG;
+    const { agy_saving_below_remaining: _agy, ...legacyRouting } = routing;
+    const legacySeats = {
+      ...rest,
+      planner: { runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: ['net', 'read', 'shell'], fleet: ['deep-reasoner', 'explorer'] },
+      'worker-important': { ...workerOpus, fleet: ['deep-reasoner', 'explorer'] },
+      'worker-important-fast': { ...workerNeon, fleet: ['deep-reasoner', 'explorer'] },
+      'gatekeeper-deep': { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'codex', model: 'gpt-6.1-terra' },
+      advisor: { ...rest.advisor, runtime: 'claude', model: 'sonnet', fleet: ['deep-reasoner', 'explorer'] },
+      'worker-light': { ...rest['worker-light']!, fleet: ['explorer'] },
+      routing: {
+        ...legacyRouting,
+        important_deep: ['worker-important', 'worker-important-fast', 'worker-deep'],
+        important_fast: ['worker-important', 'worker-important-fast', 'worker', 'worker-light'],
+        simple_deep: ['worker-important-fast', 'worker-deep'],
+        frontend: ['worker-important', 'worker-important-fast'],
+      },
+      pi_sub_agent_models: { explorer: 'custom/model' },
+    };
     const agents = { enabled: ['claude'], uses: { docs: [], review: [] }, default_docs: null };
-    expect(decodeSeatsConfig(undefined).planner).toBeNull();
-    expect(() => decodeSeatsConfig(seats)).toThrow(SeatsConfigMigrationRequiredError);
-    writeFileSync(path, JSON.stringify({ seats, agents }));
+    expect(decodeSeatsConfig(undefined).council).toBeNull();
+    expect(() => decodeSeatsConfig(legacySeats)).toThrow(SeatsConfigMigrationRequiredError);
+    writeFileSync(path, JSON.stringify({ seats: legacySeats, agents }));
     expect(migrateSeatsConfiguration(env)).toBe(true);
     const migrated = readFileSync(path, 'utf8');
-    expect(JSON.parse(migrated)).toEqual({ seats: { ...seats, planner: null }, agents });
+    const parsed = JSON.parse(migrated);
+    expect(parsed.agents).toEqual(agents);
+    expect('planner' in parsed.seats).toBe(false);
+    expect('worker-important' in parsed.seats).toBe(false);
+    expect('worker-important-fast' in parsed.seats).toBe(false);
+    expect('gatekeeper-deep' in parsed.seats).toBe(false);
+    expect(parsed.seats.council).toEqual({ runtime: 'claude', model: 'fable', advisor_model: null, effort: 'high', tools: ['net', 'read', 'shell'], fleet: ['explorer'] });
+    expect(parsed.seats['worker-opus'].fleet).toEqual(['explorer']);
+    expect(parsed.seats['worker-neon'].fleet).toEqual(['explorer']);
+    expect(parsed.seats['worker-light'].fleet).toEqual([]);
+    expect(parsed.seats.advisor).toEqual({ ...rest.advisor, runtime: 'claude', model: 'sonnet', fleet: ['deep-reasoner', 'explorer'] });
+    expect(parsed.seats.routing).toEqual({ ...DEFAULT_SEATS_CONFIG.routing });
+    expect(parsed.seats.pi_sub_agent_models).toEqual({ explorer: 'custom/model' });
     expect(migrateSeatsConfiguration(env)).toBe(false);
     expect(readFileSync(path, 'utf8')).toBe(migrated);
   } finally { rmSync(home, { recursive: true, force: true }); }
@@ -218,9 +250,9 @@ test('update strips retired fleet roles once and leaves the saved seats ready fo
     const legacyFleet = ['deep-reasoner', 'deep-worker', 'explorer', 'fast-worker', 'gatekeeper', 'harness-evaluator', 'root-cause-prover'];
     const seats = { ...DEFAULT_SEATS_CONFIG,
       orchestrator: { ...DEFAULT_SEATS_CONFIG.orchestrator, fleet: ['gatekeeper'] },
-      advisor: { ...DEFAULT_SEATS_CONFIG.advisor, advisor_model: 'haiku', fleet: [...fleet, 'gatekeeper'] },
-      worker: { ...DEFAULT_SEATS_CONFIG.worker, model: 'custom-codex-model', effort: 'low', tools: ['edit', 'read', 'shell'], fleet: legacyFleet },
-      'worker-important': { ...DEFAULT_SEATS_CONFIG['worker-important'], model: 'custom-claude-model', fleet: legacyFleet },
+      advisor: { ...DEFAULT_SEATS_CONFIG.advisor, advisor_model: null, fleet: [...fleet, 'gatekeeper'] },
+      worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex' as const, model: 'custom-codex-model', effort: 'low', tools: ['edit', 'read', 'shell'], fleet: legacyFleet },
+      'worker-opus': { ...DEFAULT_SEATS_CONFIG['worker-opus'], model: 'custom-claude-model', fleet: legacyFleet },
       'worker-light': { ...DEFAULT_SEATS_CONFIG['worker-light']!, model: 'magpie/codex/gpt-6.1-terra', fleet: legacyFleet },
       routing: { ...DEFAULT_SEATS_CONFIG.routing, simple_fast: ['worker-light', 'worker'], claude_saving_below_remaining: 35 },
     };
@@ -240,9 +272,9 @@ test('update strips retired fleet roles once and leaves the saved seats ready fo
     expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ agents, custom: 'keep me', seats: { ...seats,
       orchestrator: { ...seats.orchestrator, fleet: [] },
       advisor: { ...seats.advisor, fleet },
-      worker: { ...seats.worker, fleet },
-      'worker-important': { ...seats['worker-important'], fleet },
-      'worker-light': { ...seats['worker-light'], fleet },
+      worker: { ...seats.worker, fleet: ['explorer'] },
+      'worker-opus': { ...seats['worker-opus'], fleet: ['explorer'] },
+      'worker-light': { ...seats['worker-light'], fleet: [] },
     } });
     expect(migrateSeatsConfiguration(env)).toBe(false);
 
@@ -252,13 +284,13 @@ test('update strips retired fleet roles once and leaves the saved seats ready fo
     expect(current).toEqual(saved);
     const codex = buildSeatLaunch('worker', current.worker, 'seats', []);
     expect(codex.argv).toEqual(expect.arrayContaining(['codex', 'custom-codex-model']));
-    expect(codex.brief).toContain('`deep-reasoner`, `explorer`');
-    const claude = buildSeatLaunch('worker-important', current['worker-important'], 'seats', legacyFleet);
-    expect(claude.argv).toEqual(expect.arrayContaining(['claude', 'custom-claude-model', '--disallowedTools', 'Agent(gatekeeper)']));
-    expect(claude.brief).toContain('`deep-reasoner`, `explorer`');
-    const piSeat = current['worker-light']!;
+    expect(codex.brief).toContain('`explorer`');
+    const claude = buildSeatLaunch('worker-opus', current['worker-opus'], 'seats', legacyFleet);
+    expect(claude.argv).toEqual(expect.arrayContaining(['claude', 'custom-claude-model', '--disallowedTools', 'Agent(deep-reasoner)']));
+    expect(claude.brief).toContain('`explorer`');
+    const piSeat = current.advisor;
     const roles = writePiFleetRoles(piSeat.fleet, env);
-    const pi = buildSeatLaunch('worker-light', piSeat, 'seats', [], { piRoleDirectory: roles });
+    const pi = buildSeatLaunch('advisor', piSeat, 'seats', [], { piRoleDirectory: roles });
     expect(pi.argv).toEqual(expect.arrayContaining(['pi', `PI_SUBAGENT_EXTRA_AGENT_DIRS=${roles}`]));
     expect(readdirSync(roles).sort()).toEqual(['rh-deep-reasoner.md', 'rh-explorer.md']);
 
@@ -283,7 +315,7 @@ test('update keeps one exact configuration backup for both migrations, skips unc
         const routing = kind === 'brain-only' || kind === 'unchanged' ? DEFAULT_SEATS_CONFIG.routing
           : { ...DEFAULT_SEATS_CONFIG.routing, codex_hyper_at_or_above_remaining: 70 };
         const seats = kind === 'both' || kind === 'backup-failure'
-          ? { ...DEFAULT_SEATS_CONFIG, routing, 'gatekeeper-deep': undefined } : { ...DEFAULT_SEATS_CONFIG, routing };
+          ? { ...DEFAULT_SEATS_CONFIG, routing, 'gatekeeper-fallback': undefined } : { ...DEFAULT_SEATS_CONFIG, routing };
         const original = Buffer.from(`${JSON.stringify({ seats, ...(kind === 'unchanged' || kind === 'threshold-only' ? {} : { brainRoot: '/old-vault' }), custom: '雪' }, null, 4)}\r\n`);
         writeFileSync(path, original);
         if (kind === 'backup-failure') mkdirSync(backup);

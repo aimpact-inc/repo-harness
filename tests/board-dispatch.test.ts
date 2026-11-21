@@ -13,7 +13,7 @@ import type { BoardCommentV1, BoardParentReadV1, BoardSubIssueReadV1 } from '../
 const NORMAL: SeatAccountQuotas = {
   claude: { state: 'normal', remaining: 80, mode: 'normal' },
   chatgpt: { state: 'normal', remaining: 30, mode: 'normal', credits: 'off' },
-  agy_gemini: { state: 'unknown', remaining: null },
+  agy_gemini: { state: 'unknown', remaining: null, mode: 'unknown' },
   agy_other: { state: 'unknown', remaining: null },
 };
 const comment = (body: string, created_at = '2026-11-09T10:00:00Z'): BoardCommentV1 =>
@@ -60,11 +60,11 @@ test('a ready issue dispatches to its route seat; every other state is skipped w
     ]),
   });
   expect(reasons(plan)).toEqual(['1:dispatch', '2:held', '3:blocked', '4:claimed', '5:kind_label_invalid', '6:closed', '7:dispatch', '8:not_sub_issue']);
-  expect(plan.decisions[0]).toMatchObject({ seat: 'worker-important', route_class: 'important_deep' });
+  expect(plan.decisions[0]).toMatchObject({ seat: 'worker-opus', route_class: 'important_deep' });
 });
 
 test('dispatch skips a signed-out worker and uses the next available seat in that route', () => {
-  const seats = DEFAULT_SEATS_CONFIG;
+  const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-deep': { ...DEFAULT_SEATS_CONFIG['worker-deep'], runtime: 'codex' as const, model: 'gpt-6.2-sol' } };
   const probes: SeatPoolProbe[] = [
     { ...emptySeatPoolProbe('claude', 'available'), sign_in: 'logged_out' },
     { id: 'codex', installation: 'available', sign_in: 'logged_in', models: 'ok', listed: [{ id: 'gpt-6.2-sol', disabled: false }] },
@@ -72,9 +72,9 @@ test('dispatch skips a signed-out worker and uses the next available seat in tha
   const plan = planDispatch({ seats, quota: NORMAL, terminals: [], parent: read([issue(1), issue(3, { labels: ['route:frontend'] })]),
     modelBlock: (id, seat) => seatModelBlock(id, seat, seats, probes, () => false) });
   expect(plan.decisions[0]).toMatchObject({ action: 'dispatch', seat: 'worker-deep',
-    route_line: expect.stringContaining('skipped worker-important: claude: Runtime signed out. See seats.worker-important.model.') });
+    route_line: expect.stringContaining('skipped worker-opus: claude: Runtime signed out. See seats.worker-opus.model.') });
   expect(plan.decisions.find(decision => decision.issue === 3)).toMatchObject({ action: 'skip', reason: 'no_route',
-    detail: expect.stringContaining('claude: Runtime signed out. See seats.worker-important.model.') });
+    detail: expect.stringContaining('claude: Runtime signed out. See seats.worker-opus.model.') });
 });
 
 test('the worker limit counts live seats of the parent and stops further dispatch', () => {
@@ -100,7 +100,7 @@ test('work that touches credentials never routes to a Pi seat', () => {
   const parent = (labels: string[]) => read([issue(1, { labels })]);
   const plain = planDispatch({ seats: DEFAULT_SEATS_CONFIG, quota: saving, terminals: [], parent: parent(['route:important_deep']) });
   const secret = planDispatch({ seats: DEFAULT_SEATS_CONFIG, quota: saving, terminals: [], parent: parent(['route:important_deep', 'touches:credentials']) });
-  expect(plain.decisions[0]).toMatchObject({ action: 'dispatch', seat: 'worker-light' });
+  expect(plain.decisions[0]).toMatchObject({ action: 'dispatch', seat: 'worker-deep' });
   expect(secret.decisions[0]).toMatchObject({ action: 'skip', reason: 'no_route' });
 });
 
@@ -141,7 +141,7 @@ test('a bundle unit keeps its plan order, takes one seat and one route, and does
   });
   expect(reasons(plan)).toEqual(['3:dispatch', '4:dispatch', '1:dispatch']);
   expect(plan.units).toEqual([[3, 4, 1]]);
-  expect(new Set(plan.decisions.map(decision => decision.action === 'dispatch' && `${decision.seat} ${decision.route_class}`))).toEqual(new Set(['worker-important important_deep']));
+  expect(new Set(plan.decisions.map(decision => decision.action === 'dispatch' && `${decision.seat} ${decision.route_class}`))).toEqual(new Set(['worker-opus important_deep']));
 });
 
 test('--issues selects one declared plan unit by its member set; every other set is refused with one error', () => {
@@ -205,7 +205,7 @@ function ports(overrides: Partial<DispatchPorts> = {}) {
   };
   return { calls, base };
 }
-const context = { repositoryId: '9', parent: 100, space: 's1', dry_run: false, model: (): string | null => 'sonnet' };
+const context = { repositoryId: '9', parent: 100, space: 's1', dry_run: false, model: (): string | null => 'opus' };
 const planOf = (labels: string[]): DispatchPlanV1 => planDispatch({ seats: DEFAULT_SEATS_CONFIG, quota: NORMAL, terminals: [], parent: read([issue(1, { labels })]) });
 
 test('execute starts the worktree, posts the claim, then opens the tab; a dry run writes nothing', async () => {
@@ -235,14 +235,14 @@ test('the claim names the model from the context; a seat with no model writes no
   const run = ports({ comment: (_issue, text) => { bodies.push(text); return 'claim'; } });
   await executeDispatch(planOf(['route:important_deep']), context, run.base);
   await executeDispatch(planOf(['route:important_deep']), { ...context, model: () => null }, run.base);
-  expect(bodies.map(body => body.split('\n').filter(line => line.startsWith('Model: ')))).toEqual([['Model: sonnet'], []]);
+  expect(bodies.map(body => body.split('\n').filter(line => line.startsWith('Model: ')))).toEqual([['Model: opus'], []]);
   // A user-set id can be a pasted secret (#3250), even one whose last segment looks like a model family: the claim names the seat field, in the Model and the Dispatch reading lines.
   const secret = 'magpie/o3sk-live-0123456789';
-  const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-important': { ...DEFAULT_SEATS_CONFIG['worker-important'], model: secret } };
+  const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-opus': { ...DEFAULT_SEATS_CONFIG['worker-opus'], model: secret } };
   await executeDispatch(planDispatch({ seats, quota: NORMAL, terminals: [], parent: read([issue(1, { labels: ['route:important_deep'] })]) }), { ...context, model: () => secret }, run.base);
   expect(bodies[2]).not.toContain(secret);
-  expect(bodies[2]).toContain('\nModel: seats.worker-important.model\n');
-  expect(bodies[2]).toContain('Dispatch reading: route important_deep: worker-important (claude seats.worker-important.model');
+  expect(bodies[2]).toContain('\nModel: seats.worker-opus.model\n');
+  expect(bodies[2]).toContain('Dispatch reading: route important_deep: worker-opus (claude seats.worker-opus.model');
 });
 
 test('dispatch refuses before any writes without an active coordinator claim', async () => {

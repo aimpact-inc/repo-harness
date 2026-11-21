@@ -3,12 +3,12 @@ import { Banner, Button, Empty, Loader, Switch, cn } from '@cloudflare/kumo';
 import { effectiveSeatConfig, seatAccountQuotas, seatOnCredits } from '../core/board/seat-routing';
 import { EXHAUSTED_AT_OR_ABOVE_USED_RANGE } from '../core/board/quota';
 import { AGY_SEAT_LIMITS, buildSeatLaunch, type SeatLimitLevel } from '../core/board/seat-launch';
-import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, decodeSeatsSettingsRequest, isClaudeOrNeonSeat, isOptionalSeat, isPlannerSeat, isReviewSeat, isSeatScaffoldSubAgent, piSubAgentModel, seatHostId, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
+import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, decodeSeatsSettingsRequest, isAgyAllowedSeat, isClaudeOrNeonSeat, isCouncilSeat, isOptionalSeat, isReviewSeat, isSeatScaffoldSubAgent, piSubAgentModel, seatHostId, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
 import type { SetupSnapshotV2 } from '../core/setup/types';
 import type { OperatorTranslate } from './i18n';
 import type { QuotaSection } from './quota';
 import {
-  GATEKEEPER_FALLBACK_STARTER, plannerStarter, seatChanges, setExplorer, setOptionalSeat, setPiSubAgentModel, setRoute, setSeatAdvisorModel, setSeatEffort, setSeatModel, setSeatRole, setSeatRuntime, setRoutingValue, setSeatTool, type SeatsSettingsForm,
+  GATEKEEPER_FALLBACK_STARTER, councilStarter, seatChanges, setExplorer, setOptionalSeat, setPiSubAgentModel, setRoute, setSeatAdvisorModel, setSeatEffort, setSeatModel, setSeatRole, setSeatRuntime, setRoutingValue, setSeatTool, type SeatsSettingsForm,
 } from './seats';
 import { EnableSwitch, formLocked, runtimeRowOf, SaveResult } from './SettingsPage';
 import type { AgentsSettingsForm } from './settings';
@@ -32,7 +32,7 @@ export const ARGV: Readonly<Record<FormSeatId, string>> = {
 function launchOf(seat: SeatId): string {
   if (seat === 'orchestrator') return `herdr-app do tab.new --name "$(${ARGV.orchestrator} --json | jq -r .tab)" --space <id> --folder <repo> --argv "$(${ARGV.orchestrator})"`;
   if (seat === 'advisor') return `herdr-app do pane.split --direction right --pane <orchestrator-pane> --argv "$(${ARGV.advisor})"`;
-  if (isPlannerSeat(seat)) return 'rh seats argv planner --repository-id <repository-id> --issue <n>';
+  if (isCouncilSeat(seat)) return 'rh seats council --issue <n> --members fable,carbon';
   // The fallback launches as the effective gatekeeper, so its card shows the gatekeeper command.
   const argv = isReviewSeat(seat)
     ? `rh seats argv ${seat === 'gatekeeper-fallback' ? 'gatekeeper' : seat} --repository-id <repository-id> --pr <n>`
@@ -180,7 +180,7 @@ function OptionalSeatSwitch({ seat, form, settings, locked, t }: {
 }) {
   const on = form.draft![seat] !== null;
   const recommended = seat === 'worker-light' ? settings.defaults['worker-light']
-    : seat === 'planner' ? plannerStarter(settings.ranges) : GATEKEEPER_FALLBACK_STARTER;
+    : seat === 'council' ? councilStarter(settings.ranges) : GATEKEEPER_FALLBACK_STARTER;
   return (
     <Field label={t('seats.field.configured')}>
       <Switch checked={on} disabled={locked || (!on && recommended === null)} aria-label={t('seats.field.configured')}
@@ -209,16 +209,16 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
   )) : null;
   const { ranges, defaults } = settings;
   const runtime = ranges.runtimes.find(entry => entry.id === draft.runtime)!;
-  const runtimeChoices = ranges.runtimes.filter(entry => entry.id !== 'agy' || seat === 'advisor');
+  const runtimeChoices = ranges.runtimes.filter(entry => entry.id !== 'agy' || isAgyAllowedSeat(seat));
   const agy = draft.runtime === 'agy';
   const range = ranges.seats[seat];
   const recommended = seat !== 'worker' && defaults[seat]?.runtime === draft.runtime ? defaults[seat] : null;
   const review = isReviewSeat(seat);
-  const planner = isPlannerSeat(seat);
+  const council = isCouncilSeat(seat);
   const check = (on: boolean) => (on ? ' ✓' : '');
   const suggested = range.models.filter(entry => entry.runtime === draft.runtime).map(entry => entry.model);
   const models = [
-    ...(agy ? [] : [{ value: null, label: t('seats.model.hostDefault') }]),
+    ...(agy || council ? [] : [{ value: null, label: t('seats.model.hostDefault') }]),
     ...suggested.map(model => ({ value: model as string | null, label: model })),
     // A typed or stored model outside the seat's recommended list stays visible as a choice.
     ...(draft.model !== null && !suggested.includes(draft.model) ? [{ value: draft.model as string | null, label: draft.model }] : []),
@@ -254,9 +254,9 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
       <Field label={t('seats.field.model')}>
         <Segmented label={t('seats.field.model')} disabled={locked} value={draft.model} options={models}
           onPick={value => form.edit(current => setSeatModel(current, seat, value))} />
-        <ModelInput label={t('seats.model.custom')} disabled={locked} commit={value => form.edit(current => setSeatModel(current, seat, value))} />
+        {!council && <ModelInput label={t('seats.model.custom')} disabled={locked} commit={value => form.edit(current => setSeatModel(current, seat, value))} />}
         <span className="text-xs text-kumo-brand">
-          {planner ? t('seats.rec.planner') : seat === 'worker' ? t('seats.rec.worker')
+          {council ? t('seats.rec.council') : seat === 'worker' ? t('seats.rec.worker')
             : recommended?.model ? t('seats.rec.model', { model: recommended.model }) + check(draft.model === recommended.model) : ''}
         </span>
       </Field>
@@ -287,8 +287,8 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
         <li className="flex flex-wrap items-center gap-3 bg-kumo-recessed px-4 py-2.5 sm:px-5">
           <span className="flex-1 text-sm font-medium text-kumo-strong">{t('seats.tools.title')}</span>
         </li>
-        {/* The section limits the tool range for review seats and the planner. */}
-        {SEAT_TOOLS.filter(tool => !(review || planner) || range.tools.includes(tool)).map((tool) => {
+        {/* The section limits the tool range for review seats and the council. */}
+        {SEAT_TOOLS.filter(tool => !(review || council) || range.tools.includes(tool)).map((tool) => {
           const on = draft.tools.includes(tool);
           const ruled = !range.tools.includes(tool);
           // Codex always runs commands, so its Shell can be turned on but not off.
@@ -389,6 +389,7 @@ function RoutingEditor({ form, settings, quota, locked, t }: {
   const thresholds = [
     { field: 'claude_saving_below_remaining', account: 'claude', quota: accounts.claude },
     { field: 'claude_hyper_at_or_above_remaining', account: 'claude', quota: accounts.claude },
+    { field: 'agy_saving_below_remaining', account: 'agy_gemini', quota: accounts.agy_gemini },
   ] as const;
   return (
     <section aria-labelledby="seats-routing-heading" className="flex flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base" data-seats-routing>
