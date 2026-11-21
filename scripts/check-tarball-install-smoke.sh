@@ -17,6 +17,7 @@ mkdir -p "$SMOKE_HOME"
 # Keep the registry beside HOME: the nested test runner rejects registries
 # below its caller HOME, even when that HOME is temporary.
 export HOME="$SMOKE_HOME" REPO_HARNESS_HOME="$TMP_DIR/registry"
+unset PI_CODING_AGENT_DIR
 
 cleanup() {
   local exit_code=$?
@@ -37,6 +38,23 @@ cleanup() {
   exit "$exit_code"
 }
 trap cleanup EXIT
+
+# Pi defaults to /bin/bash, which is Bash 3.2 on macOS.
+if [[ -x /bin/bash ]] && /bin/bash -c '(( BASH_VERSINFO[0] < 4 ))'; then
+  smoke_bash=""
+  for candidate in "$(command -v bash || true)" /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    if [[ "$candidate" == /* && -x "$candidate" ]] && "$candidate" -c '(( BASH_VERSINFO[0] >= 4 ))'; then
+      smoke_bash="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$smoke_bash" ]]; then
+    echo "[tarball-smoke] ERROR: /bin/bash is older than Bash 4. Install Bash 4+ and put it on PATH." >&2
+    exit 1
+  fi
+  mkdir -p "$SMOKE_HOME/.pi/agent"
+  bun -e 'console.log(JSON.stringify({ shellPath: process.argv[1] }))' "$smoke_bash" >"$SMOKE_HOME/.pi/agent/settings.json"
+fi
 
 PACK_JSON="$TMP_DIR/pack.json"
 npm pack --json --pack-destination "$TMP_DIR" >"$PACK_JSON"
