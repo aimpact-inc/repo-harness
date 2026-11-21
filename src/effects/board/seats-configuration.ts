@@ -364,9 +364,12 @@ if (import.meta.main) {
 /** Publish the generated agy seat agent by digest. An existing path can only be reused if it holds these bytes. */
 export function writeAgySeatAgent(config: SeatConfigV1, env: NodeJS.ProcessEnv, seat: LaunchSeatId = 'advisor'): string {
   const agentName = agySeatAgentName(seat);
+  const tools = WORKER_SEAT_IDS.includes(seat as typeof WORKER_SEAT_IDS[number])
+    ? '[view_file, write_to_file, replace_file_content, multi_replace_file_content, run_command, search_web]'
+    : '[view_file, run_command, search_web]';
   const content = Buffer.from([
     '---', `name: ${agentName}`, `description: Repo-harness ${seat}`, 'mainAgent: true',
-    'tools: [view_file, run_command, search_web]', 'inheritMcp: false', '---', '', '# System', '', agySeatBrief(config, seat), '',
+    `tools: ${tools}`, 'inheritMcp: false', '---', '', '# System', '', agySeatBrief(config, seat), '',
   ].join('\n'));
   const digest = sha256Hex(content);
   let directory = realpathSync(dirname(dirname(globalConfigurationPath(env))));

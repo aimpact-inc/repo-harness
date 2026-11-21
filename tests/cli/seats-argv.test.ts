@@ -328,6 +328,33 @@ describe.skipIf(process.platform === "win32")("agy advisor seat", () => {
     expect(readFileSync(cache, "utf8")).toBe(stale);
   }));
 
+  test("native agy worker-light gets worker permissions, and exhausted gatekeeper launches agy gatekeeper-fallback", withAgySeat(f => {
+    const hydrogen = { runtime: "agy", model: "gemini-4-hydrogen", advisor_model: null, effort: null, tools: ["net", "read", "shell"], fleet: [] } as const;
+    f.catalog("gemini-4-hydrogen\tGemini 4 Hydrogen\ngemini-4-neon-high\tGemini 4 Neon (High)\n");
+    writeFileSync(join(f.home, "codex-used"), "97");
+    writeFileSync(join(f.home, ".repo-harness", "config.json"), JSON.stringify({
+      agents: { enabled: ["antigravity", "codex"], uses: { docs: [], review: [] }, default_docs: null },
+      seats: { ...DEFAULT_SEATS_CONFIG, advisor: AGY_ADVISOR, "worker-light": hydrogen, "gatekeeper-fallback": hydrogen },
+    }));
+    const workerRaw = f.run(["argv", "worker-light", "--json"]);
+    expect(workerRaw.status, workerRaw.stderr).toBe(0);
+    const workerLaunch = JSON.parse(workerRaw.stdout);
+    expect(workerLaunch.brief).not.toContain("Do not edit files.");
+    expect(workerLaunch.brief).not.toContain("Do not write to GitHub.");
+    const workerSettings = JSON.parse(workerLaunch.argv[workerLaunch.argv.indexOf("--settings") + 1]);
+    expect(workerSettings.permissions.deny).not.toContain("command(git push)");
+    expect(workerSettings.permissions.deny).toContain("command(gh pr merge)");
+    const workerDir = workerLaunch.argv[workerLaunch.argv.indexOf("--add-dir") + 1];
+    expect(readFileSync(join(workerDir, ".agents", "agents", "rh-worker-light", "agent.md"), "utf8")).toContain("write_to_file");
+
+    const fallbackRaw = f.run(["argv", "gatekeeper", "--pr", "42", "--json"], { PATH: `${join(f.home, ".quota-bin")}${delimiter}${join(f.home, "bin")}:/usr/bin:/bin` });
+    expect(fallbackRaw.status, fallbackRaw.stderr).toBe(0);
+    const fallbackLaunch = JSON.parse(fallbackRaw.stdout);
+    expect(fallbackLaunch.runtime).toBe("agy");
+    expect(fallbackLaunch.argv[fallbackLaunch.argv.indexOf("--model") + 1]).toBe("gemini-4-hydrogen");
+    expect(fallbackLaunch.brief).toContain("Do not edit files.");
+  }));
+
   test("an uncertain tab request stays uncertain and keeps the first task private", withAgySeat(f => {
     const task = "Private first turn";
     const result = f.run(agyTabArgs(f.cwd, task), { AGY_HERDR_FAIL: "1" });

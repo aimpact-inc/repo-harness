@@ -305,13 +305,22 @@ export const AGY_COMMAND_PREFIXES = [
   'rg', 'ls', 'cat',
 ];
 
-export const AGY_DENIED_COMMANDS: readonly string[] = [
-  ...GITHUB_WRITE_COMMANDS,
+const AGY_COORDINATOR_DENIED_COMMANDS: readonly string[] = [
   'rh board attention start',
   'rh board merge', 'rh board dispatch', 'rh board review', 'rh board post',
   'rh board triage-apply', 'rh board closeout', 'rh board migrate-dependencies',
   'rh seats launch', 'rh seats reset', 'rh publication merge',
   'rh review collect', 'rh review publish',
+];
+
+export const AGY_DENIED_COMMANDS: readonly string[] = [
+  ...GITHUB_WRITE_COMMANDS,
+  ...AGY_COORDINATOR_DENIED_COMMANDS,
+];
+
+export const AGY_WORKER_DENIED_COMMANDS: readonly string[] = [
+  'gh issue close', 'gh pr close', 'gh pr merge', 'gh release create',
+  ...AGY_COORDINATOR_DENIED_COMMANDS,
 ];
 
 // MCP and fleet omission must be confirmed in a native agy session before reporting enforcement.
@@ -325,13 +334,20 @@ export const AGY_SEAT_LIMITS: readonly SeatLimitV1[] = [
   { subject: 'hook', level: 'common_commands' },
 ];
 
+export const AGY_WORKER_LIMITS: readonly SeatLimitV1[] = AGY_SEAT_LIMITS.filter(
+  limit => limit.subject !== 'edit' && limit.subject !== 'gh',
+);
+
+export const agySeatLimits = (seat: LaunchSeatId = 'advisor'): readonly SeatLimitV1[] =>
+  isWorkerSeat(seat) ? AGY_WORKER_LIMITS : AGY_SEAT_LIMITS;
+
 export const AGY_SEAT_AGENT = 'rh-advisor';
 
 export const agySeatAgentName = (seat: LaunchSeatId = 'advisor'): string => seat === 'advisor' ? AGY_SEAT_AGENT : `rh-${seat}`;
 
 export function agySeatBrief(config: SeatConfigV1, seat: LaunchSeatId = 'advisor'): string {
   return [
-    brief(seat, config, [], AGY_SEAT_LIMITS),
+    brief(seat, config, [], agySeatLimits(seat)),
     'Never read auth or credential files.',
     ...(seat === 'advisor' ? [
       'When Stop requests a handoff, send it to the orchestrator. After this pane ends, the orchestrator starts a new advisor pane with rh seats launch advisor and gives it the handoff.',
@@ -351,15 +367,16 @@ function agyLaunch(seat: LaunchSeatId, config: SeatConfigV1, repositoryId: strin
   const env = isResetSeat(seat) && repositoryId !== undefined
     ? [`${SEAT_ENV}=${seat}`, `${SEAT_REPOSITORY_ENV}=${repositoryId}`, `${SEAT_MODEL_ENV}=${model}`]
     : [];
+  const denied = isWorkerSeat(seat) ? AGY_WORKER_DENIED_COMMANDS : AGY_DENIED_COMMANDS;
   const settings = JSON.stringify({ trustedWorkspaces: [input.cwd], permissions: {
     allow: AGY_COMMAND_PREFIXES.map(command => `command(${command})`),
-    deny: AGY_DENIED_COMMANDS.map(command => `command(${command})`),
+    deny: denied.map(command => `command(${command})`),
   } });
   return {
     argv: [...seatEnv(env), input.executable, '--mode', 'accept-edits', '--model', model,
       '--add-dir', input.directory, '--agent', agySeatAgentName(seat), '--settings', settings],
     brief: agySeatBrief(config, seat),
-    limits: AGY_SEAT_LIMITS,
+    limits: agySeatLimits(seat),
   };
 }
 

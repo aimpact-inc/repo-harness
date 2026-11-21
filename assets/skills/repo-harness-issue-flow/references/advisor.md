@@ -36,7 +36,7 @@ Follow the three planning tiers (`ADR-0006` §4):
 rh seats council --issue <n> --members <csv> [--parent <n>] [--space <id>] [--question <focus>]
 ```
 
-Each selected member opens a read-only `council` pane in the `council` tab and writes its blind proposal outside every worktree under `/tmp/rh-council/<repo>/issue-<n>-<member>.md` (reporting `out_paths` in `--json`):
+Each selected member opens a read-only `council` pane in the `council` tab and writes its blind proposal outside every worktree under `/tmp/rh-council/<repo>/issue-<n>-<member>.md` (reporting `members[].out_path` in `--json`):
 - `N = 1`: `fable` (backed by `2 × Claude Max`, cross-family to `Neon`), or `carbon`.
 - `N = 2`: `fable,carbon` when `agy_gemini` is healthy; `fable,astra` when `agy_gemini` is near its saving floor (`routing.agy_saving_below_remaining`, default 25%).
 - `N = 3`: `fable,carbon,astra` only for major architectural splits or I1/I2 redesigns.

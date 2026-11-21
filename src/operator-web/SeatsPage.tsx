@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react';
 import { Banner, Button, Empty, Loader, Switch, cn } from '@cloudflare/kumo';
 import { effectiveSeatConfig, seatAccountQuotas, seatOnCredits } from '../core/board/seat-routing';
 import { EXHAUSTED_AT_OR_ABOVE_USED_RANGE } from '../core/board/quota';
-import { AGY_SEAT_LIMITS, buildSeatLaunch, type SeatLimitLevel } from '../core/board/seat-launch';
+import { agySeatLimits, buildSeatLaunch, type SeatLimitLevel } from '../core/board/seat-launch';
 import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, decodeSeatsSettingsRequest, isAgyAllowedSeat, isClaudeOrNeonSeat, isCouncilSeat, isOptionalSeat, isReviewSeat, isSeatScaffoldSubAgent, piSubAgentModel, seatHostId, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
 import type { SetupSnapshotV2 } from '../core/setup/types';
 import type { OperatorTranslate } from './i18n';
@@ -225,7 +225,7 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
   ];
   const efforts = [{ value: null, label: t('seats.effort.default') }, ...ranges.efforts.map(effort => ({ value: effort as string | null, label: effort, off: !runtime.effort }))];
   // The host agent types change only the argv; the limit levels do not depend on them, so the page passes none.
-  const limits = agy ? AGY_SEAT_LIMITS : buildSeatLaunch(seat === 'gatekeeper-fallback' ? 'gatekeeper' : seat, draft, 'seats', []).limits;
+  const limits = agy ? agySeatLimits(seat === 'gatekeeper-fallback' ? 'gatekeeper' : seat) : buildSeatLaunch(seat === 'gatekeeper-fallback' ? 'gatekeeper' : seat, draft, 'seats', []).limits;
   const levelOf = (subject: string) => limits.find(limit => limit.subject === subject)?.level ?? null;
   const fleetLevel = levelOf('fleet');
   // A stored role the server no longer lists stays visible, as a stored model does, so it can be switched off.

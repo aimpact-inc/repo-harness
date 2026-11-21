@@ -333,7 +333,6 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   }
   const configured = configuredOverride ?? seats[id];
   if (configured === null) throw new SeatsCommandError('seat_not_configured', `The ${id} seat is not configured. Configure it in the seats section before launch.`);
-  const agyExecutable = configured.runtime === 'agy' ? await checkedAgyExecutable(id, config, configured, env, cwd, terminal) : undefined;
   // The board review passes the gatekeeper route that its plan checked: the launched seat is the planned one, with no second quota read.
   // The config is still read for the source of the brief and for the migration error.
   if (labels.ownerException !== undefined) {
@@ -342,24 +341,29 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   }
   const labelSet = seatLabels(id, labels);
   const plannedSeat = id === 'gatekeeper' && planned !== undefined ? plannedGatekeeper(planned) : null;
-  const runtimeSeat = plannedSeat?.id === 'gatekeeper-fallback' ? plannedSeat.id : id;
+  const runtimeSeat: SeatId = plannedSeat?.id === 'gatekeeper-fallback' ? plannedSeat.id : id;
+  const initialCandidate = plannedSeat?.seat ?? configured;
+  let agyExecutable = initialCandidate.runtime === 'agy' ? await checkedAgyExecutable(runtimeSeat, config, initialCandidate, env, cwd, terminal) : undefined;
   const checkPool = checkAvailability && agyExecutable === undefined;
   const probes = checkPool ? collectSeatPoolProbes(env) : [];
   const unavailable = (modelSeat: SeatId, reason: string) => {
     throw new SeatProviderUnavailableError(`The ${id} seat cannot launch. ${reason} ${seatPoolHint(modelSeat, seats, probes)}`);
   };
   if (checkPool) {
-    const reason = seatRuntimeBlock(runtimeSeat, (plannedSeat?.seat ?? configured).runtime, probes);
+    const reason = seatRuntimeBlock(runtimeSeat, initialCandidate.runtime, probes);
     if (reason !== null) unavailable(runtimeSeat, reason);
   }
   // A planned gatekeeper route reserves no Claude seat while Claude is saving or exhausted.
   const { id: effectiveId, seat: effective, modeKnown, claudeSaving } = plannedSeat !== null
     ? { id: runtimeSeat, seat: plannedSeat.seat, modeKnown: true, claudeSaving: false }
     : await quotaCheckedSeat(id, seats, configured, env, labels.ownerException);
-  if (checkPool) {
+  if (effective.runtime === 'agy' && agyExecutable === undefined) {
+    agyExecutable = await checkedAgyExecutable(effectiveId, config, effective, env, cwd, terminal);
+  }
+  if (checkPool && effective.runtime !== 'agy') {
     const reason = seatModelBlock(effectiveId, effective, seats, probes, () => magpieExtensionInstalled(env));
     if (reason !== null) unavailable(effectiveId, reason);
-  } else {
+  } else if (effective.runtime !== 'agy') {
     const reason = unavailablePiSeat(effective, seats.routing);
     if (reason !== null) throw new SeatsCommandError('seat_provider_unavailable', `The ${id} seat cannot launch: ${reason}. See the quota routes.`);
   }
@@ -387,7 +391,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   } };
 }
 
-async function checkedAgyExecutable(id: LaunchSeatId, config: Record<string, unknown>, seat: SeatConfigV1, env: NodeJS.ProcessEnv, cwd: string, terminal: 'new' | 'existing'): Promise<string> {
+async function checkedAgyExecutable(id: SeatId, config: Record<string, unknown>, seat: SeatConfigV1, env: NodeJS.ProcessEnv, cwd: string, terminal: 'new' | 'existing'): Promise<string> {
   if (terminal === 'existing') throw new SeatsCommandError('seat_reset_runtime_unsupported', `Start a new agy ${id} pane with rh seats launch ${id}.`);
   if (!enabledRuntimesOf(config).includes(seatHostId('agy'))) {
     throw new SeatsConfigurationError('seat_runtime_not_enabled', `Enable Antigravity in Hosts before launching the ${id}.`);
