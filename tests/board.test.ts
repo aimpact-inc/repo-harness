@@ -363,8 +363,9 @@ test('High acceptance: PASS rows of the head from two distinct claims, one recor
       withoutHazards(pr1494);
       pr1494.body += '\nCloses #1460\n';
       for (const [pr, harness] of [[pr1494, 'pi'], [pr1499, 'claude']] as const) {
-        pr.comments.nodes.push(comment(renderAcceptanceClaim(receipt(harness, pr.headRefOid)), claimAt(1)));
-        pr.comments.nodes.push(comment(renderAcceptanceRecord(receipt(harness, pr.headRefOid), claimUrl(1, `pull/${pr.number}`)), '2026-11-02T22:00:00Z'));
+        const seat = harness === 'claude' ? 'reviewer' : 'gatekeeper';
+        pr.comments.nodes.push(comment(renderAcceptanceClaim(receipt(harness, pr.headRefOid), undefined, seat), claimAt(1)));
+        pr.comments.nodes.push(comment(renderAcceptanceRecord(receipt(harness, pr.headRefOid), claimUrl(1, `pull/${pr.number}`), undefined, seat), '2026-11-02T22:00:00Z'));
       }
     },
   });
@@ -393,7 +394,7 @@ test('High acceptance: PASS rows of the head from two distinct claims, one recor
       // Claims 1-3 are round 1 of the head; claims 4 and 6 are round 1 of an earlier head; claim 5 is round 2 and claims 7-8 round 4 of the head.
       const claims: readonly (readonly [number, string, number])[] = [[1, pr1491.headRefOid, 1], [2, pr1491.headRefOid, 1], [3, pr1491.headRefOid, 1], [4, OLD, 1], [5, pr1491.headRefOid, 2], [6, OLD, 1], [7, pr1491.headRefOid, 4], [8, pr1491.headRefOid, 4]];
       pr1491.comments.nodes.push(...claims.map(([n, sha, round]) => comment(renderAcceptanceClaim(receipt('codex', sha, 'different-family', 'PASS', round)), claimAt(n))));
-      pr1491.comments.nodes.push(...rows.map(([harness, claimLine, relation = 'different-family', verdict = 'PASS', sha = pr1491.headRefOid, round = 1, model, seat], at) => {
+      pr1491.comments.nodes.push(...rows.map(([harness, claimLine, relation = 'different-family', verdict = 'PASS', sha = pr1491.headRefOid, round = 1, model, seat = harness === 'claude' ? 'reviewer' : 'gatekeeper'], at) => {
         const body = renderAcceptanceRecord(receipt(harness, sha, relation ?? 'unknown', verdict, round, model), claimLine, undefined, seat);
         return comment(relation === null ? body.replace(/^Model relation: .*\n/mu, '') : body, `2026-11-02T22:0${at}:00Z`);
       }));
@@ -430,7 +431,7 @@ test('High acceptance: PASS rows of the head from two distinct claims, one recor
   const pr1491 = (projection: BoardV1) => projection.pull_requests.find(pr => pr.number === 1491)!;
   expect(projected.map(pr1491).map(pr => [pr.acceptance.status, pr.second_review] as string[])).toEqual(cases.map(([, status, claude]) => [status, claude]));
   expect(evaluateBoardAttention(projected[1]!).findings.filter(finding => finding.rule === 'A10')).toEqual([]);
-  // Explicit Seat: header attributes a non-Anthropic reviewer without reading local seats config; without Seat:, a DeepSeek row counts as gatekeeper.
+  // Explicit Seat: header attributes a non-Anthropic reviewer without reading local seats config.
   const reviewed = head([gatekeeper, ['pi', claimUrl(2), 'different-family', 'PASS', undefined, 1, 'magpie/cursor/deepseek-v41-flash-1017', 'reviewer']]);
   expect([pr1491(reviewed).acceptance.status, pr1491(reviewed).second_review]).toEqual(['accepted', 'recorded']);
   const waiting = head([gatekeeper]);
@@ -1554,8 +1555,8 @@ test('acceptance disposition: a FAIL row is ignored only when every finding of i
   const disposition = (findings: string, record = failUrl, subject = replay().pull_requests.find(entry => entry.number === 1499)!.head_sha) =>
     `repo-harness acceptance disposition\nRecord: ${record}\nSubject: ${subject}\nFindings: ${findings}\nDecision: ${base}/issues/2202#issuecomment-1\n`;
   expect(status([])).toBe('not_accepted');
-  // The newest record of each seat, any subject: a row that names no model (`unobserved`: the recorded Claude row and the two added records) belongs to no seat.
-  expect(projected([]).pull_requests.find(entry => entry.number === 1499)!.review_records).toEqual({ status: 'observed', reviewer: null, gatekeeper: '2026-11-02T20:56:58Z' });
+  // The newest record of each seat, any subject: the pre-#3353 seatless records on #1499 belong to no seat, while the two added gatekeeper records update gatekeeper.
+  expect(projected([]).pull_requests.find(entry => entry.number === 1499)!.review_records).toEqual({ status: 'observed', reviewer: null, gatekeeper: '2026-11-02T22:30:00Z' });
   expect(status([disposition('R1-1')])).toBe('not_accepted');
   expect(status([disposition('R1-1'), disposition('R1-2')])).toBe('accepted');
   expect(status([disposition('R1-1, R1-2')])).toBe('accepted');
@@ -1568,8 +1569,7 @@ test('acceptance disposition: a FAIL row is ignored only when every finding of i
     evaluateBoardAttention(board).findings.filter(finding => finding.rule === 'A15').map(finding => finding.message.replace(/\(.*\)$/u, ''))];
   expect(a15(projected([disposition('R1-1')]))).toEqual([failAt, ['#1499 has a FAIL record on 23627c4f5 for 89 min and no new head ']]);
   expect(a15(projected([disposition('R1-1, R1-2')]))).toEqual([null, []]);
-  // The relay (#2910) opens on a real `PASS` row only: a disposition clears a failure, it does not supply the review. #1499's records name no
-  // model, so every row of the head counts as a row that is not the reviewer's.
+  // The relay (#2910) opens on a real `PASS` row only: a disposition clears a failure, it does not supply the review. The rendered records carry `Seat: gatekeeper`.
   const verdict = (board: BoardV1) => board.pull_requests.find(entry => entry.number === 1499)!.gatekeeper_review;
   expect([verdict(projected([])), verdict(projected([disposition('R1-1, R1-2')]))]).toEqual(['fail', 'pass']);
   expect([verdict(projected([], false, false)), verdict(projected([disposition('R1-1, R1-2')], false, false))]).toEqual(['fail', 'none']);

@@ -3,8 +3,16 @@ import { planRefusal, requiredCheckDetail } from './merge';
 import type { SeatRouteV1 } from './seat-routing';
 import { DEFAULT_SEATS_CONFIG, isReviewSeat, SEAT_IDS, type SeatConfigV1, type SeatId } from './seats-settings';
 import { modelFamily } from '../review/model-family';
-import { gatekeeperReviewEvidence } from './review-rules';
+import {
+  acceptanceRowSeat,
+  carriedPasses,
+  gatekeeperReviewEvidence,
+  REVIEW_START_HEADER,
+  REVIEW_START_STATUS_HEADER,
+} from './review-rules';
 import { claimStatusTarget, newestProtocolComment, parseAcceptanceRecord, parseClaimStatus, protocolComments, type BoardCommentPageV1, type BoardCommentV1 } from './source';
+
+export { REVIEW_START_HEADER, REVIEW_START_STATUS_HEADER };
 
 /**
  * Review start (#2002): which open pull requests need a review seat now, and which seats. It is a pure projection
@@ -13,21 +21,23 @@ import { claimStatusTarget, newestProtocolComment, parseAcceptanceRecord, parseC
  * A start marker is one `repo-harness review start` comment with `Subject: <head sha>` and `Seat: gatekeeper|reviewer`. It covers
  * that head for that seat until a `repo-harness review start status` comment with `Status: released` names it. The marker is the
  * one record that a seat started for a head, so a second run, or a seat that ended without a record, never starts a second seat
- * of the same role, and a seat that was not sent retries without restarting the other. A High head starts the
- * gatekeeper, and the reviewer too while the board reports `second_review: pending`. A Medium head prefers the gatekeeper when
- * the effective gatekeeper's family differs from the writer's, and selects the reviewer when the writer shares the gatekeeper's
- * family. An unknown writer family starts no seat, because no seat is sure to record `different-family`. A gatekeeper starts only when the effective
- * gatekeeper (#2253) has a known model family, is not of the writer's family where it gives the different-family row (a Medium head,
- * or a High head that takes no reviewer row), and is not of the reviewer family where the head takes a reviewer row. The reviewer
- * starts only with a known family that differs from the gatekeeper's on a High head and from the writer's on a Medium head.
+ * of the same role, and a seat that was not sent retries without restarting the other. Review records are attributed by
+ * `acceptanceRowSeat` (explicit `Seat:` on record or claim, or an unambiguous single start marker) and `planReview` reads the
+ * configured `reviewer` seat (`ReviewInputV1.reviewer`). A High head starts the gatekeeper, and the reviewer too while the board
+ * reports `second_review: pending` (unless a carried seatless Round-1 PASS already covers one seat's family). A Medium head prefers
+ * the gatekeeper when the effective gatekeeper's family differs from the writer's, and selects the reviewer when the writer shares
+ * the gatekeeper's family or the gatekeeper cannot launch. An unknown writer family starts no seat, because no seat is sure to
+ * record `different-family`. A gatekeeper starts only when the effective gatekeeper (#2253) has a known model family, is not of
+ * the writer's family where it gives the different-family row (a Medium head, or a High head that takes no reviewer row), and is not
+ * of the reviewer family where the head takes a reviewer row. The reviewer starts only with a known family that differs from the
+ * gatekeeper's on a High head and from the writer's on a Medium head.
  *
  * The two High seats of a head that no seat reviewed start in parallel on the same head (#3190 section 2.3). The reviewer alone starts
  * when the gatekeeper of the head is `pass` (`BoardPullRequestV1.gatekeeper_review`), and the gatekeeper alone after a gatekeeper FAIL.
  * In a fix round only the seat that returned FAIL starts: the PASS of the other seat carries to the fix head (#3187). The delta base
- * stays the newest earlier head that this seat finished reviewing (by explicit `Seat:` or legacy model family), else the whole diff.
+ * stays the newest earlier head that this seat finished reviewing (by `acceptanceRowSeat`, or legacy seatless family match against the
+ * configured seats when two start markers existed), else the whole diff.
  */
-export const REVIEW_START_HEADER = 'repo-harness review start';
-export const REVIEW_START_STATUS_HEADER = 'repo-harness review start status';
 
 export type ReviewSkipReason = 'not_open' | 'draft' | 'ci_not_green' | 'accepted' | 'acceptance_unknown' | 'started' | 'writer_family_unknown' | 'review_family_unavailable' | 'plan_hold' | 'plan_unavailable';
 
@@ -90,14 +100,16 @@ function liveMarkers(page: BoardCommentPageV1, seat: ReviewSeat): BoardCommentV1
 
 /**
  * The newest earlier head that a live marker of this seat started and that has an acceptance row belonging to this seat
- * (explicit `Seat:` header when present, else pre-#3353 fallback via `modelFamily` against `reviewer`). A start without
- * such a row gives no base, so that seat reviews the whole diff, whatever the other seat finished.
+ * (`acceptanceRowSeat` first, else legacy seatless row on an earlier head with two start markers matched against distinct
+ * configured `reviewer` and `gkFamily`). A start without such a row gives no base, so that seat reviews the whole diff.
  */
-function deltaBase(page: BoardCommentPageV1, head: string, seat: ReviewSeat, reviewer: string | null): string | null {
-  const own = (row: { readonly seat: 'gatekeeper' | 'reviewer' | null; readonly model: string | null }): boolean => {
-    if (row.seat !== null) return row.seat === seat;
+function deltaBase(page: BoardCommentPageV1, head: string, seat: ReviewSeat, reviewer: string | null, gkFamily: string | null): string | null {
+  const own = (row: NonNullable<ReturnType<typeof parseAcceptanceRecord>>[number]): boolean => {
+    const resolved = acceptanceRowSeat(row, page);
+    if (resolved !== null) return resolved === seat;
+    if (reviewer === null || gkFamily === null || reviewer === gkFamily) return false;
     const family = row.model === null ? null : modelFamily(row.model);
-    return family !== null && (seat === 'reviewer' ? family === reviewer : family !== reviewer);
+    return family !== null && (seat === 'reviewer' ? family === reviewer : family === gkFamily);
   };
   const recorded = new Set(protocolComments(page, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? []).filter(own).map(row => row.subject_sha));
   const earlier = liveMarkers(page, seat).filter(marker => field(marker, 'Subject') !== head && recorded.has(field(marker, 'Subject') ?? ''));
@@ -165,15 +177,27 @@ export function planReview(input: ReviewInputV1): readonly ReviewDecisionV1[] {
     // different-family review (`gkFamily !== null && gkFamily !== pr.writer_family`), and falls back to `reviewer` when gatekeeper
     // shares the writer's family or has no launchable route while `reviewer` is a known other family.
     const relayOpen = pr.gatekeeper_review === 'pass';
+    const carried = tier === 'high' ? carriedPasses({ head_sha: pr.head_sha, comments: page }) : [];
+    const carriedFamilies = carried.map(row => (row.model === null ? null : modelFamily(row.model))).filter((family): family is string => family !== null);
+    // When a High head carries an unattributed legacy Round-1 PASS (`pr.gatekeeper_review === 'none'` and `pr.second_review === 'pending'`),
+    // match its model family against the configured seats so only the seat that failed re-runs.
+    const carriedReviewerOnly = carried.length > 0 && pr.second_review === 'pending' && !relayOpen && pr.gatekeeper_review === 'none'
+      && reviewer !== null && reviewer !== gkFamily && carriedFamilies.includes(reviewer);
+    const carriedGatekeeperOnly = carried.length > 0 && pr.second_review === 'pending' && !relayOpen && pr.gatekeeper_review === 'none'
+      && gkFamily !== null && gkFamily !== reviewer && carriedFamilies.includes(gkFamily);
     const mediumUseReviewer = (gkFamily === null && input.gatekeeper.id === null && reviewer !== null && reviewer !== pr.writer_family)
       || (gkFamily !== null && pr.writer_family === gkFamily);
     const required: readonly ReviewSeat[] = tier === 'medium' ? [mediumUseReviewer ? 'reviewer' : 'gatekeeper']
-      : pr.second_review !== 'pending' ? ['gatekeeper'] : relayOpen ? ['reviewer'] : pr.gatekeeper_review === 'none' ? ['gatekeeper', 'reviewer'] : ['gatekeeper'];
+      : pr.second_review !== 'pending' ? ['gatekeeper']
+      : relayOpen || carriedGatekeeperOnly ? ['reviewer']
+      : carriedReviewerOnly ? ['gatekeeper']
+      : pr.gatekeeper_review === 'none' ? ['gatekeeper', 'reviewer']
+      : ['gatekeeper'];
     const seats = required.filter(seat => !liveMarkers(page, seat).some(marker => field(marker, 'Subject') === pr.head_sha))
-      .map((seat): ReviewSeatStartV1 => ({ seat, delta_from: deltaBase(page, pr.head_sha, seat, reviewer) }));
+      .map((seat): ReviewSeatStartV1 => ({ seat, delta_from: deltaBase(page, pr.head_sha, seat, reviewer, gkFamily) }));
     if (seats.length === 0) {
       // A High head whose gatekeeper failed, or whose verdict is unknown, waits for the gatekeeper; the reviewer starts after a PASS.
-      if (tier === 'high' && pr.second_review === 'pending' && !relayOpen && pr.gatekeeper_review !== 'none') {
+      if (tier === 'high' && pr.second_review === 'pending' && !relayOpen && !carriedReviewerOnly && pr.gatekeeper_review !== 'none') {
         return skip('started', `the gatekeeper started for ${pr.head_sha} and recorded ${pr.gatekeeper_review}; the reviewer starts after a PASS`);
       }
       return skip('started', `a start marker of every required seat covers ${pr.head_sha}`);
@@ -187,7 +211,9 @@ export function planReview(input: ReviewInputV1): readonly ReviewDecisionV1[] {
     if (seats.some(entry => entry.seat === 'reviewer')) {
       const families = tier === 'high' && relayOpen
         ? gatekeeperReviewEvidence({ comments: page, head_sha: pr.head_sha }).passFamilies
-        : [gkFamily];
+        : carriedGatekeeperOnly
+          ? carriedFamilies
+          : [gkFamily];
       if (families.length === 0) return skip('review_family_unavailable', 'the gatekeeper PASS has no recorded model family');
       const gap = reviewerFamilyGap(reviewer, pr.writer_family, families, tier);
       if (gap !== null) return skip('review_family_unavailable', gap);

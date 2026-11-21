@@ -210,11 +210,11 @@ function findingSummary(finding: ReviewPublishFinding): string {
   return finding.severity + ' ' + finding.id + ' at ' + finding.path + ':' + finding.line + ': ' + finding.evidence + ' -> ' + finding.fix;
 }
 
-export function renderAcceptanceClaim(receipt: ReviewPublishReceipt, ownerRecord?: string, seat?: ReviewRecordSeat): string {
+export function renderAcceptanceClaim(receipt: ReviewPublishReceipt, ownerRecord?: string, seat: ReviewRecordSeat = 'gatekeeper'): string {
   return [
     'repo-harness acceptance claim',
     'Role: acceptor',
-    ...(seat === undefined ? [] : ['Seat: ' + seat]),
+    'Seat: ' + seat,
     'Round: ' + receipt.round,
     'Subject: ' + receipt.subject_sha,
     'Tier: ' + receipt.risk_tier,
@@ -261,12 +261,12 @@ export function renderConfirmedReply(receipt: ReviewPublishReceipt, recordUrl: s
   ].join('\n');
 }
 
-export function renderAcceptanceRecord(receipt: ReviewPublishReceipt, claimUrl: string, ownerRecord?: string, seat?: ReviewRecordSeat): string {
+export function renderAcceptanceRecord(receipt: ReviewPublishReceipt, claimUrl: string, ownerRecord?: string, seat: ReviewRecordSeat = 'gatekeeper'): string {
   const verdict = receipt.verdict + ': ' + severityCounts(receipt);
   return [
     'repo-harness acceptance record',
     'Claim: ' + claimUrl,
-    ...(seat === undefined ? [] : ['Seat: ' + seat]),
+    'Seat: ' + seat,
     '',
     '| Round | Role | Subject | Verdict |',
     '|---|---|---|---|',

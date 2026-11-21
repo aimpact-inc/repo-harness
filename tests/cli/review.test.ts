@@ -211,7 +211,7 @@ test('publish posts the claim, one review thread per P1/P2, then the record', as
 
   const posts = fixture.gh.inputs().filter((entry) => entry.input !== '').map((entry) => JSON.parse(entry.input));
   expect(posts).toHaveLength(3);
-  expect(posts[0].body).toContain('repo-harness acceptance claim\nRole: acceptor\n');
+  expect(posts[0].body).toContain('repo-harness acceptance claim\nRole: acceptor\nSeat: gatekeeper\n');
   expect(posts[0].body).toContain('Tier: high');
   expect(posts[0].body).toContain('Agent: codex (gpt-5.1-codex), read-only');
   expect(posts[1]).toMatchObject({ commit_id: PUBLISH_HEAD, event: 'COMMENT' });
@@ -223,11 +223,24 @@ test('publish posts the claim, one review thread per P1/P2, then the record', as
   expect(posts[1].body).not.toContain('The guard drops the last item.');
   expect(posts[1].comments[0].body).not.toContain('Rename the helper for clarity.');
   expect(posts[2].body).toContain('repo-harness acceptance record');
+  expect(posts[2].body).toContain('\nSeat: gatekeeper\n');
   expect(posts[2].body).toContain('Model relation: different-family');
   expect(posts[2].body).toContain('FAIL: 1 P1, 1 P3');
   expect(posts[2].body).toContain(output.claim_url);
   expect(posts[2].body).toContain('read-only');
   expect(posts[2].body).not.toContain('fresh context');
+
+  const reviewerFixture = publishFixture();
+  const reviewerResult = await runPublish(reviewerFixture, publishReceipt(), ['--seat', 'reviewer']);
+  expect(reviewerResult.status, reviewerResult.stderr).toBe(0);
+  const reviewerPosts = reviewerFixture.gh.inputs().filter((entry) => entry.input !== '').map((entry) => JSON.parse(entry.input));
+  expect(reviewerPosts[0].body).toContain('\nSeat: reviewer\n');
+  expect(reviewerPosts[2].body).toContain('\nSeat: reviewer\n');
+
+  const badSeatFixture = publishFixture();
+  const badSeatResult = await runPublish(badSeatFixture, publishReceipt(), ['--seat', 'worker']);
+  expect(badSeatResult.status).toBe(2);
+  expect(JSON.parse(badSeatResult.stdout)).toMatchObject({ ok: false, error: 'review_receipt_invalid', exit_code: 2, posted: [] });
 });
 
 test('a FAIL receipt with no blocking finding is invalid and posts nothing', async () => {

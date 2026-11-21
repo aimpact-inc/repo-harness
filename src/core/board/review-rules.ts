@@ -2,17 +2,19 @@ import { PROJECTION_WRITER_DEFAULT_BRANCH } from 'archctx-contracts';
 import { documentationOnly } from '../ci/documentation-path';
 import { modelFamily } from '../review/model-family';
 import { pathHighHits, pathSecondReviewHits } from './hazards';
-import { MODEL_CATALOG } from './model-catalog';
 import {
   ACCEPTANCE_DISPOSITION_HEADER,
   BoardSourceError,
+  claimStatusTarget,
   commentId,
   field,
   newestProtocolComment,
   parseAcceptanceDisposition,
   parseAcceptanceRecord,
+  parseClaimStatus,
   parseRecordFindings,
   protocolComments,
+  type BoardCommentPageV1,
   type BoardCommentV1,
   type BoardParentReadV1,
   type BoardPullRequestReadV1,
@@ -20,6 +22,9 @@ import {
   type AcceptanceDispositionV1,
   type AcceptanceRowV1,
 } from './source';
+
+export const REVIEW_START_HEADER = 'repo-harness review start';
+export const REVIEW_START_STATUS_HEADER = 'repo-harness review start status';
 
 export type BoardTier = 'low' | 'medium' | 'high';
 const TIER_LABELS: Readonly<Record<string, BoardTier>> = { 'tier:low': 'low', 'tier:medium': 'medium', 'tier:high': 'high' };
@@ -68,9 +73,8 @@ export type BoardGatekeeperReviewV1 = 'pass' | 'fail' | 'none' | 'unknown';
 
 /**
  * The comment time of the newest acceptance record with a row of each review seat, any subject SHA; null when no record has one.
- * A row's explicit `Seat:` line (`gatekeeper` or `reviewer`) is authoritative; pre-#3353 rows without `Seat:` fall back to
- * `modelFamily(row.model)` against the architectural reviewer family (`MODEL_CATALOG.opus.family`). A row with neither `Seat:`
- * nor a known model belongs to no seat.
+ * A row belongs to a seat only when GitHub facts on the record, its cited claim, or an unambiguous start marker establish `gatekeeper`
+ * or `reviewer` (`acceptanceRowSeat`). Unestablished legacy rows without `Seat:` belong to no seat (`null`).
  * `unknown`: an older comment outside the read, or a record without a table row, can hold a row of any seat.
  */
 export type BoardReviewRecordsV1 =
@@ -145,23 +149,47 @@ export function reviewFail(read: BoardPullRequestReadV1): { readonly url: string
   return newest === null ? null : Object.freeze({ url: newest.url, recorded_at: newest.created_at });
 }
 
-/**
- * Which review seat an acceptance row belongs to. An explicit `Seat:` header on the record is authoritative regardless of model;
- * pre-#3353 rows without `Seat:` fall back to `modelFamily` against the architectural reviewer family (`MODEL_CATALOG.opus.family`).
- */
-export function acceptanceRowSeat(row: Pick<AcceptanceRowV1, 'seat' | 'model'>): 'gatekeeper' | 'reviewer' | null {
-  if (row.seat !== null) return row.seat;
-  const family = row.model === null ? null : modelFamily(row.model);
-  return family === null ? null : family === MODEL_CATALOG.opus.family ? 'reviewer' : 'gatekeeper';
+/** Live `repo-harness review start` seats on `page` for `subjectSha` whose marker has no `released` status. */
+export function liveReviewStartSeats(page: BoardCommentPageV1, subjectSha: string): ReadonlySet<'gatekeeper' | 'reviewer'> {
+  const released = new Set(protocolComments(page, REVIEW_START_STATUS_HEADER)
+    .filter(comment => parseClaimStatus(comment)?.status.startsWith('released') === true)
+    .map(claimStatusTarget));
+  const seats = new Set<'gatekeeper' | 'reviewer'>();
+  for (const comment of protocolComments(page, REVIEW_START_HEADER)) {
+    if (released.has(comment.url) || field(comment.body, 'Subject') !== subjectSha) continue;
+    const seat = field(comment.body, 'Seat');
+    if (seat === 'gatekeeper' || seat === 'reviewer') seats.add(seat);
+  }
+  return seats;
 }
 
 /**
- * The verdict of the rows of the head that belong to the gatekeeper (`BoardPullRequestV1.gatekeeper_review`). A row belongs to the
- * reviewer when `acceptanceRowSeat(row) === 'reviewer'`; every other row of the head, a row with no `Model` included, counts here
- * (unless it names an unknown model without an explicit `Seat:` header, #3250), so the relay opens for a head that the gatekeeper
- * reviewed. Only a `PASS` row opens the relay: a `FAIL` row that a disposition resolves stops failing the head, but a cleared failure
- * is no review, so it sets no pass either. A `FAIL` row that no disposition resolves fails the head. With no row of the head, a
- * carried PASS of the gatekeeper (`carriedPasses`) opens the relay, so a fix round starts only the seat that failed.
+ * Which review seat an acceptance row belongs to from GitHub comments alone:
+ * 1) explicit `Seat: gatekeeper | reviewer` (or Role cell prefix) on the acceptance record,
+ * 2) explicit `Seat: gatekeeper | reviewer` on the cited `acceptance claim`,
+ * 3) an unambiguous single live `repo-harness review start` marker for `row.subject_sha`.
+ * Otherwise null — never guesses a model family or misattributes an unestablished row to the other seat.
+ */
+export function acceptanceRowSeat(
+  row: Pick<AcceptanceRowV1, 'seat' | 'claim' | 'subject_sha'>,
+  page: BoardCommentPageV1,
+): 'gatekeeper' | 'reviewer' | null {
+  if (row.seat !== null) return row.seat;
+  if (row.claim !== null) {
+    const claim = protocolComments(page, ACCEPTANCE_CLAIM_HEADER).find(entry => commentId(entry.url) === row.claim);
+    const claimSeat = claim === undefined ? null : field(claim.body, 'Seat');
+    if (claimSeat === 'gatekeeper' || claimSeat === 'reviewer') return claimSeat;
+  }
+  const started = liveReviewStartSeats(page, row.subject_sha);
+  if (started.size === 1) return [...started][0]!;
+  return null;
+}
+
+/**
+ * The verdict of the rows of the head that belong to the gatekeeper (`BoardPullRequestV1.gatekeeper_review`).
+ * A `FAIL` row that does not belong to `reviewer` (explicit `gatekeeper` or unestablished `seat === null`) fails the relay unless a disposition resolves it.
+ * A `PASS` row opens the relay only when `acceptanceRowSeat(row, read.comments) === 'gatekeeper'` and any named model has a known family (#3250).
+ * With no row of the head, a carried `PASS` attributed to `gatekeeper` (`carriedPasses`) opens the relay, so a fix round starts only the seat that failed.
  */
 export function gatekeeperReviewEvidence(read: Pick<BoardPullRequestReadV1, 'head_sha' | 'comments'>): {
   readonly verdict: BoardGatekeeperReviewV1; readonly passFamilies: readonly string[];
@@ -174,21 +202,23 @@ export function gatekeeperReviewEvidence(read: Pick<BoardPullRequestReadV1, 'hea
     const rows = parseAcceptanceRecord(record);
     if (rows === null) return { verdict: 'unknown', passFamilies: [] };
     for (const row of rows.filter(row => row.subject_sha === read.head_sha)) {
-      if (acceptanceRowSeat(row) === 'reviewer') continue;
-      const family = row.model === null ? null : modelFamily(row.model);
-      // A named model with no known family is no seat's row (#3250) unless an explicit `Seat: gatekeeper` header attributes it.
-      if (row.seat === null && row.model !== null && family === null) continue;
-      if (row.verdict === 'PASS') {
-        passed = true;
-        if (family !== null) passFamilies.push(family);
-      } else if (!resolvedFail(record, row, dispositions)) {
-        return { verdict: 'fail', passFamilies: [] };
+      const seat = acceptanceRowSeat(row, read.comments);
+      if (seat === 'reviewer') continue;
+      if (row.verdict === 'FAIL') {
+        if (!resolvedFail(record, row, dispositions)) return { verdict: 'fail', passFamilies: [] };
+        continue;
       }
+      if (seat !== 'gatekeeper') continue;
+      const family = row.model === null ? null : modelFamily(row.model);
+      // A named model with no known family never opens the relay or supplies a model family (#3250).
+      if (row.model !== null && family === null) continue;
+      passed = true;
+      if (family !== null) passFamilies.push(family);
     }
   }
   if (passed) return { verdict: 'pass', passFamilies };
   for (const row of carriedPasses(read)) {
-    if (acceptanceRowSeat(row) === 'reviewer') continue;
+    if (acceptanceRowSeat(row, read.comments) !== 'gatekeeper') continue;
     const family = row.model === null ? null : modelFamily(row.model);
     if (family !== null) passFamilies.push(family);
   }
@@ -209,7 +239,7 @@ const otherFamily = (family: string | null, than: string | null): boolean => fam
  * fix head: the one subject of the failing family's claimed round-2 rows, or the head while that family has no round-2 row. It never reaches a later head, and
  * a family with a row of the head carries nothing. Whether the fix stays inside the findings is the orchestrator's scope call.
  */
-function carriedPasses(read: Pick<BoardPullRequestReadV1, 'head_sha' | 'comments'>): AcceptanceRowV1[] {
+export function carriedPasses(read: Pick<BoardPullRequestReadV1, 'head_sha' | 'comments'>): AcceptanceRowV1[] {
   const rows = claimedRows(read, protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? []));
   const family = (row: AcceptanceRowV1): string | null => (row.model === null ? null : modelFamily(row.model));
   const round1 = rows.filter(row => row.round === 1);
@@ -234,7 +264,7 @@ export function reviewRecords(read: BoardPullRequestReadV1): BoardReviewRecordsV
     const rows = parseAcceptanceRecord(record);
     if (rows === null) return Object.freeze({ status: 'unknown', reason: 'acceptance_record_unparsed' });
     for (const row of rows) {
-      const seat = acceptanceRowSeat(row);
+      const seat = acceptanceRowSeat(row, read.comments);
       if (seat === null) continue;
       if (record.created_at > newest[seat]) newest[seat] = record.created_at;
     }
@@ -366,14 +396,14 @@ export function effectiveTier(read: BoardPullRequestReadV1, closes: readonly num
 
 /**
  * The second-review state of a pull request: a projection of the High rule, not a second rule. `recorded`: a reviewer row
- * (`acceptanceRowSeat(row) === 'reviewer'`) exists for the head, or carries to it (`carriedPasses`). `pending`: the High rule is
+ * (`acceptanceRowSeat(row, read.comments) === 'reviewer'`) exists for the head, or carries to it (`carriedPasses`). `pending`: the High rule is
  * not met for the head and no such row exists, so the reviewer seat supplies the missing review.
  */
 export function secondReview(read: BoardPullRequestReadV1, tier: BoardTier | null): BoardSecondReviewV1 {
   if (reviewRule(read, tier) !== 'high') return 'not_required';
   const head = [...protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? [])
     .filter(row => row.subject_sha === read.head_sha), ...carriedPasses(read)];
-  if (head.some(row => acceptanceRowSeat(row) === 'reviewer' && (row.seat === 'reviewer' || (row.model !== null && modelFamily(row.model) !== null)))) return 'recorded';
+  if (head.some(row => acceptanceRowSeat(row, read.comments) === 'reviewer' && (row.model === null || modelFamily(row.model) !== null))) return 'recorded';
   return highRuleMet(read, head) ? 'not_required' : 'pending';
 }
 

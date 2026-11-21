@@ -84,9 +84,15 @@ export function buildReviewCommand<Session, Endpoint>(loadRunner: () => Promise<
   command.command('publish').description('Publish one gatekeeper receipt as an acceptance claim, one COMMENT PR review, and an acceptance record')
     .requiredOption('--pr <number>', 'Pull request number')
     .requiredOption('--receipt <path>', 'Review publish receipt JSON; the gatekeeper owns its content')
+    .option('--seat <seat>', 'Review seat recorded on the claim and record (gatekeeper or reviewer)', 'gatekeeper')
     .option('--owner-record <url>', 'Owner decision comment URL on the PR or an issue it closes; required for a round above 5')
     .option('--repo <path>', 'Owner repository worktree', process.cwd()).option('--json', 'Print compact JSON')
-    .action(publishAction('publish', opts => publishReview({ repoRoot: opts.repo, prNumber: Number(opts.pr), receiptPath: opts.receipt, ownerRecord: opts.ownerRecord })));
+    .action(publishAction('publish', opts => {
+      if (opts.seat !== 'gatekeeper' && opts.seat !== 'reviewer') {
+        throw new ReviewPublishError('review_receipt_invalid', 'review publish --seat must be gatekeeper or reviewer', 2);
+      }
+      return publishReview({ repoRoot: opts.repo, prNumber: Number(opts.pr), receiptPath: opts.receipt, ownerRecord: opts.ownerRecord, seat: opts.seat });
+    }));
   command.command('collect').description('Publish the last RECEIPT-JSON block of a review seat session record (Pi, Claude Code or Codex) through the same path as publish')
     .requiredOption('--seat <terminal>', 'The review seat hc terminal; its session record is the one whose packet names the seat label, this PR and the PR head')
     .requiredOption('--pr <number>', 'Pull request number')

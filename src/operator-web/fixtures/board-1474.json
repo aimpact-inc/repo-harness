@@ -354,8 +354,8 @@
       "review_fail": null,
       "review_records": {
         "status": "observed",
-        "gatekeeper": "2026-11-02T19:20:22Z",
-        "reviewer": "2026-11-02T19:47:57Z"
+        "gatekeeper": "2026-11-02T21:12:35Z",
+        "reviewer": null
       },
       "open_questions": {
         "status": "observed",
@@ -473,8 +473,8 @@
       "review_fail": null,
       "review_records": {
         "status": "observed",
-        "gatekeeper": "2026-11-02T21:10:40Z",
-        "reviewer": "2026-11-02T21:11:11Z"
+        "gatekeeper": null,
+        "reviewer": null
       },
       "open_questions": {
         "status": "observed",
@@ -576,8 +576,8 @@
       "review_fail": null,
       "review_records": {
         "status": "observed",
-        "gatekeeper": "2026-11-02T20:56:58Z",
-        "reviewer": "2026-11-02T20:52:14Z"
+        "gatekeeper": null,
+        "reviewer": null
       },
       "open_questions": {
         "status": "observed",
