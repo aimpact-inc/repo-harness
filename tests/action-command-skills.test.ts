@@ -620,7 +620,7 @@ describe("repo-harness action command skills", () => {
     expect(worker).toContain("Status: released");
     expect(worker).toContain("Read the claim back");
 
-    expect(acceptor).toContain("rh review publish --pr <n> --receipt <path>");
+    expect(acceptor).toContain("rh review publish --pr <n> --receipt <path> --seat <gatekeeper|reviewer>");
     expect(acceptor).toContain("repo-harness-review-publish-receipt");
     expect(acceptor).toContain("review_publish_unknown");
     expect(acceptor).toContain("model_relation");

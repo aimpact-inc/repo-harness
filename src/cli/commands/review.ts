@@ -81,15 +81,15 @@ export function buildReviewCommand<Session, Endpoint>(loadRunner: () => Promise<
       process.exitCode = 1;
     }
   };
-  command.command('publish').description('Publish one gatekeeper receipt as an acceptance claim, one COMMENT PR review, and an acceptance record')
+  command.command('publish').description('Publish a gatekeeper or reviewer receipt as an acceptance claim, one COMMENT PR review, and an acceptance record')
     .requiredOption('--pr <number>', 'Pull request number')
-    .requiredOption('--receipt <path>', 'Review publish receipt JSON; the gatekeeper owns its content')
-    .option('--seat <seat>', 'Review seat recorded on the claim and record (gatekeeper or reviewer)', 'gatekeeper')
+    .requiredOption('--receipt <path>', 'Review publish receipt JSON')
+    .option('--seat <gatekeeper|reviewer>', 'Required review seat recorded on the claim and record')
     .option('--owner-record <url>', 'Owner decision comment URL on the PR or an issue it closes; required for a round above 5')
     .option('--repo <path>', 'Owner repository worktree', process.cwd()).option('--json', 'Print compact JSON')
     .action(publishAction('publish', opts => {
       if (opts.seat !== 'gatekeeper' && opts.seat !== 'reviewer') {
-        throw new ReviewPublishError('review_receipt_invalid', 'review publish --seat must be gatekeeper or reviewer', 2);
+        throw new ReviewPublishError('review_receipt_invalid', 'review publish requires --seat gatekeeper or --seat reviewer', 2);
       }
       return publishReview({ repoRoot: opts.repo, prNumber: Number(opts.pr), receiptPath: opts.receipt, ownerRecord: opts.ownerRecord, seat: opts.seat });
     }));
