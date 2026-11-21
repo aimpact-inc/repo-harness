@@ -3,20 +3,20 @@
   "status": "verified",
   "source": {
     "repository": "Ancienttwo/arch-context",
-    "revision": "c1e6d51229b7cf49cfe2a5fd619f2297824193c2",
+    "revision": "b4244ac5e1755ad84194d25a6fae4036e91da1c7",
     "archiveMode": "git-archive",
     "dirtySourceUsed": false
   },
   "packages": {
     "contracts": {
       "name": "archctx-contracts",
-      "version": "0.17.0",
-      "file": "archctx-contracts-0.17.0.tgz"
+      "version": "0.17.1",
+      "file": "archctx-contracts-0.17.1.tgz"
     },
     "archctx": {
       "name": "archctx",
-      "version": "0.17.0",
-      "file": "archctx-0.17.0.tgz"
+      "version": "0.17.1",
+      "file": "archctx-0.17.1.tgz"
     }
   },
   "consumer": {
@@ -31,7 +31,7 @@
       "schemaVersion": "archcontext.capabilities/v1",
       "package": {
         "name": "archctx",
-        "version": "0.17.0"
+        "version": "0.17.1"
       },
       "protocols": {
         "projectionRequest": "archcontext.projection-request/v1",
@@ -93,7 +93,7 @@
       "layoutVersion": "archcontext.docs-layout/v1",
       "codeGraph": {
         "codeGraphPackage": "@colbymchenry/codegraph",
-        "codeGraphVersion": "1.6.2",
+        "codeGraphVersion": "1.6.4",
         "codeGraphStatus": "ready"
       }
     }

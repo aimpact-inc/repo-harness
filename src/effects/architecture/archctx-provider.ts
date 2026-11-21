@@ -6,7 +6,7 @@ import { userInfo } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { ARCHCONTEXT_NODE_RANGE, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_SCHEMA_VERSION, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_UPGRADE_COMMAND, ERROR_CATALOG, PROJECTION_MANIFEST_UPGRADE_REQUIRED, failureIssues, architectureDocsProjectionCompatibilityIssues, PROJECTION_REQUEST_SCHEMA_VERSION, digestJson, type ArchContextError, type ArchctxCapabilitiesV1, type ArchitectureDebtReportV1, type DocsAnchorsReportV1, type Json, type ProjectionApplyReadbackResultV2, type ProjectionExpectedSnapshotV1, type ProjectionMode, type ProjectionRequestV1, type ProjectionResultV3 } from 'archctx-contracts';
+import { ARCHCONTEXT_NODE_RANGE, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_SCHEMA_VERSION, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_UPGRADE_COMMAND, ERROR_CATALOG, PROJECTION_MANIFEST_UPGRADE_REQUIRED, failureIssues, architectureDocsProjectionCompatibilityIssues, PROJECTION_REQUEST_SCHEMA_VERSION, digestJson, type ArchContextError, type ArchctxCapabilitiesV1, type ArchitectureDebtDeltaReportV1, type ArchitectureDebtReportV1, type DocsAnchorsReportV1, type Json, type ProjectionApplyReadbackResultV2, type ProjectionExpectedSnapshotV1, type ProjectionMode, type ProjectionRequestV1, type ProjectionResultV3 } from 'archctx-contracts';
 import { isRecord } from '../../core/evidence/is-record';
 import { readWorkflowPolicyDocument } from '../state/resolve-effective-state';
 import { POLICY_ABSENT, isPolicyObject, policyValue } from '../../core/workflow/policy-schema';
@@ -14,7 +14,7 @@ import { trustedNodeCandidates } from '../runtime/node-candidates';
 import { selectCompatibleNode } from '../runtime/node-runtime';
 import { runProcess } from '../process-runner';
 import type { CapabilityOwnership } from '../../core/capabilities/registry';
-import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError, assertArchctxVersion, assertProjectionApplyReadbackResult, assertProjectionResult, decodeArchitectureDebtReport, decodeDocsAnchorsReport, readArchitectureProjectionPolicy } from '../../core/architecture/projection';
+import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError, assertArchctxVersion, assertProjectionApplyReadbackResult, assertProjectionResult, decodeArchitectureDebtDelta, decodeArchitectureDebtReport, decodeDocsAnchorsReport, readArchitectureProjectionPolicy } from '../../core/architecture/projection';
 import type { ArchctxProcessResult, ArchctxProviderOptions, ArchitectureDaemonStopFailure, ArchitectureDaemonStopReportV1, ResolvedArchctxPackage, ArchitectureProjectionReadinessV1 } from '../../core/architecture/contracts';
 import { gitExecFileSync } from '../git/runner';
 
@@ -557,6 +557,14 @@ export function readArchitectureDocsAnchors(repoRoot: string, options: ArchctxPr
   return decodeDocsAnchorsReport(client.data(['docs', 'anchors', '--json'], policy.timeoutMs));
 }
 
+/** ArchContext measures and caches the base, and reports deltas for checks with comparable coverage. */
+export function readArchitectureDebtDelta(repoRoot: string, baseSha: string, headSha: string, options: ArchctxProviderOptions = {}): ArchitectureDebtDeltaReportV1 {
+  const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
+  if (policy.provider === 'disabled') throw new Error('architecture projection provider is disabled');
+  const client = new ArchctxClient(repoRoot, policy.requiredVersion, options);
+  return decodeArchitectureDebtDelta(client.data(['debt', '--base', baseSha, '--complete', '--json'], policy.timeoutMs), baseSha, headSha);
+}
+
 /**
  * Runs `archctx complete` for one commit and returns the architecture debt in
  * its review result. archctx omits the debt when it cannot measure it, so a
@@ -708,52 +716,6 @@ function seedRetryLoop(
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
     }
   }
-}
-
-/**
- * Seeds a temporary detached checkout (such as `rh arch debt --base`) from
- * archctx's shared CodeGraph base using the caller's options, falling back to
- * a local `codegraph init` only when no complete index was materialized and
- * `.codegraph` was not left occupied.
- */
-export function seedWorktreeCodeGraph(checkoutRoot: string, options: ArchctxProviderOptions = {}): boolean {
-  const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
-  if (policy.provider === 'disabled') throw new Error('architecture projection provider is disabled');
-  const indexDirectory = join(checkoutRoot, '.codegraph');
-  if (hasPrivateCodeGraphIndex(indexDirectory)) return true;
-  if (process.platform !== 'win32') {
-    const baseEnv: NodeJS.ProcessEnv = { ...(options.env ?? process.env), CODEGRAPH_NO_DOWNLOAD: '1', DO_NOT_TRACK: '1' };
-    delete baseEnv.CODEGRAPH_DIR;
-    const seeded = seedRetryLoop(
-      checkoutRoot,
-      policy.requiredVersion,
-      policy.timeoutMs,
-      { ...options, env: baseEnv, policy },
-      () => { /* Incomplete or absent shared base falls through to index check / cold init below. */ },
-    );
-    if (seeded) return true;
-  }
-  const index = lstatSync(indexDirectory, { throwIfNoEntry: false });
-  if (index && (!index.isDirectory() || readdirSync(indexDirectory).length > 0)) {
-    throw new ArchctxClientError({
-      code: 'RH_ARCHCTX_CODE_FACTS_NOT_READY',
-      action: 'build-codegraph-index',
-      reasonCode: 'code-facts-not-ready',
-      details: { checkout: checkoutRoot },
-      message: `shared-base seed left an incomplete index in ${indexDirectory}; inspect .codegraph before running codegraph init`,
-    });
-  }
-  indexPackageLocalCodeGraph(checkoutRoot, { ...options, policy });
-  if (!hasPrivateCodeGraphIndex(indexDirectory)) {
-    throw new ArchctxClientError({
-      code: 'RH_ARCHCTX_CODE_FACTS_NOT_READY',
-      action: 'build-codegraph-index',
-      reasonCode: 'code-facts-not-ready',
-      details: { checkout: checkoutRoot },
-      message: `codegraph init did not create an index in ${indexDirectory}`,
-    });
-  }
-  return false;
 }
 
 /** Called after the primary checkout and plugin have opted into CodeGraph. */

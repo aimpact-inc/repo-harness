@@ -75,7 +75,7 @@ export function projectionCheckResult(commit: string, stalePaths: string[],
     repositoryId: 'repo.0123456789abcdef', workspaceId: 'workspace.0123456789abcdef', headSha: commit, worktreeDigest: digest('1'),
     baseHeadSha: commit, sourceTreeDigest: digest('2'), modelDigest: digest('3'), codeGraphDigest: digest('4'), indexedWorktreeDigest: digest('1'),
     projectionInputDigest: digest('5'), rendererVersion: 'archcontext.docs-renderer/v6', layoutVersion: 'archcontext.docs-layout/v1',
-    generatedFrom: { codeGraphPackage: '@colbymchenry/codegraph', codeGraphVersion: '1.6.2', codeGraphStatus: 'ready' },
+    generatedFrom: { codeGraphPackage: '@colbymchenry/codegraph', codeGraphVersion: '1.6.4', codeGraphStatus: 'ready' },
   };
   const body: Omit<ProjectionResultV3, 'receiptDigest'> = {
     schemaVersion: 'archcontext.projection-result/v3', requestId: 'repo-harness.check', status: 'noop',

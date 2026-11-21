@@ -824,7 +824,7 @@ describe('architecture map', () => {
       referenceSites: [], rejectedBuiltinCallSites: [], flowSteps,
     });
     const report = (fields: Record<string, unknown> = {}) => decodeFlowSelectorCheck({
-      schemaVersion: 'archcontext.flow-selector-check/v1', ok: false, codeGraph: { availability: 'ready', version: '1.6.2' },
+      schemaVersion: 'archcontext.flow-selector-check/v1', ok: false, codeGraph: { availability: 'ready', version: '1.6.4' },
       summary: { selectors: 3, proven: 1, unproven: 2, usedUnproven: 1 },
       selectors: [
         selector(WRITE.entrypoint, WRITE.source_symbol, WRITE.sink, 'proven', [{ flowId: FLOW, stepId: 'store' }]),
@@ -844,7 +844,7 @@ describe('architecture map', () => {
     expect(flowProofSection(report(), new Set([CAP]), steps, new Set([flowSelectorKey(WRITE)]))).toEqual(failed);
     const twice = report();
     expect(flowProofSection({ ...twice, selectors: [...twice.selectors, twice.selectors[0]!] }, new Set([CAP]), steps, steps)).toEqual(failed);
-    expect(flowProofSection(report({ codeGraph: { availability: 'unavailable', version: '1.6.2' } }), new Set([CAP]), steps, steps)).toEqual({ state: 'unavailable', reason: 'code_facts_unavailable' });
+    expect(flowProofSection(report({ codeGraph: { availability: 'unavailable', version: '1.6.4' } }), new Set([CAP]), steps, steps)).toEqual({ state: 'unavailable', reason: 'code_facts_unavailable' });
     const unsafe = report();
     unsafe.selectors[0]!.callSites = [{ path: '/Users/someone/src/ledger.ts', line: 17 }, { path: '../ledger.ts' }, { path: 'src/ledger.ts', line: 19 }];
     const withheld = flowProofSection(decodeFlowSelectorCheck(unsafe), new Set([CAP]), steps, steps);
