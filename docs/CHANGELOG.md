@@ -2,6 +2,50 @@
 
 All notable changes to this skill are documented here.
 
+## [0.36.1] - 2026-11-21
+
+Version 0.36.1 is the first published 0.36.x release. Version 0.36.0 was not published to npm or tagged. This release includes all changes from 0.36.0 and the changes in [#3390](https://github.com/aimpact-inc/repo-harness/pull/3390), [#3392](https://github.com/aimpact-inc/repo-harness/pull/3392) and [#3391](https://github.com/aimpact-inc/repo-harness/pull/3391).
+
+### Added
+
+- Antigravity is an opt-in hook host. Native `agy` 1.5.0 or later can run the advisor, council, workers and gatekeeper fallback in Herdr. Seat launch checks repository opt-in, installed hooks, sign-in and model availability. (#3251, #3246, #3380, #3383)
+- `rh seats council` starts consultations for up to three members in Herdr. Seat settings show recommended models and allow separate Pi models for the permitted read-only scaffold roles. (#3253, #3268, #3378)
+- `rh board cluster` groups issues by module, defect pattern and overlapping files. Rule R8 alerts the advisor to ready groups. `rh board triage-apply` checks the split rules and supports a dry run. (#3282, #3348, #3359, #3362)
+- `rh arch refactor` adds `verify`, `resolve`, `record`, `list` and `show`. `decide` accepts `acknowledge` and `waive` in addition to `accept`, `defer` and `reject`. `verify` exits with an error when the disposition is other than `resolved`. (#3390, #3385)
+- `rh board triage-apply` records `refactor_ids` bindings on issues and blocks reuse of the same ID across triage units. `rh arch module review-prompt` shows active decisions from Git. The issue-flow skills tell seats when to bind, verify and resolve those decisions. (#3390, #3386)
+- Operator Web adds a read-only Refactor tab with decision counts, status, affected capabilities, metrics and commands to copy. The architecture map shows debt severity and messages and supplies `rh arch` commands for violations. (#3392, #3387)
+
+### Changed
+
+- The 11-seat schema uses a shared model catalog and limits Herdr fleets to read-only roles. Board protocol 14 uses GitHub evidence to identify review seats and prefers the gatekeeper for Medium PRs when the runtime and model-family rules permit it. (#3305, #3352, #3366, #3369, #3378)
+- `rh quota` and Operator report separate Gemini and other Antigravity quota. The Pi advisor and worker routes use the Gemini balance to select models and reserve quota for the advisor. (#3286, #3288, #3366, #3378)
+- This release ships ArchContext and contracts 0.17.1 with CodeGraph 1.6.4. `rh arch debt --base <ref>` uses native ArchContext comparison and caching. `rh worktrees start` can seed a private CodeGraph index from the shared base. (#3188, #3350, #3372, #3381)
+- `rh arch refactor recommendations` includes refactor proposals and reports ambiguous ownership. Other candidates remain visible when files have multiple owners. Use `--node <capability-id>` or repeat `--path <repo-relative-path>` to limit the scan. (#3346, #3390, #3385)
+
+### Fixed
+
+- Host configuration requires the recorded file-system entry identity and content before it restores or removes a whole path. Worktree cleanup keeps merged checkouts with unrecognized ignored data. A failed acceptance write keeps the previous receipt verifiable. (#3266, #3338, #3335)
+- The macOS tarball smoke test uses temporary Pi settings. If `/bin/bash` is older than Bash 4, the test finds Bash 4 or later on `PATH` or in a standard Homebrew location and sets it for the packaged Pi seat checks. (#3391)
+
+### Removed
+
+- Herdr seats replace the bundled writer agents and the in-process gatekeeper. The `council` seat and `rh seats council` replace `planner` and `rh seats consult`. The `gatekeeper-deep` seat is retired. (#3305, #3306, #3307, #3366, #3378)
+
+### Upgrade
+
+- Run `rh update` once on each host to install 0.36.1 from 0.35.2. Keep a pre-upgrade copy of the host configuration ledgers, their matching host state and the saved seat settings if you need a downgrade path.
+- The update moves the user and repository host configuration ledgers from protocol 4 to 5. It records the file-system entry identity for eligible entries that still match the ledger. It restores or removes retired files only when it can prove ownership. It keeps edited or unproved files and reports retained vault copies. Install state uses protocol 5, plan blocks use protocol 3 and the hook bridge uses protocol 1. (#3266, #3306)
+- The update also moves saved seat settings to the 11-seat schema. `planner` becomes `council`, `worker-important` becomes `worker-opus` and `worker-important-fast` becomes `worker-neon`. The update removes `gatekeeper-deep`. Review these settings and the Gemini saving threshold. Update automation that uses the old seat names or `rh seats consult`. Relaunch the seats after all participating hosts update. (#3366, #3367, #3378)
+- Record fresh acceptance for open reviews that use the old local receipt layout. Receipt protocol 4 reads the result and observation from digest paths. For manual `rh review publish`, pass `--seat gatekeeper` or `--seat reviewer` as applicable. (#3335, #3371, #3374)
+- To opt in to Antigravity, run `rh install --target antigravity`. To refresh an existing opt-in, run `rh update --target antigravity`. Run `rh doctor` and confirm that the installed hook commands resolve to the current executable. On the seat host, verify guard activation in fresh `agy` sessions for #3251. Launch the native advisor through Herdr in an opted-in checkout and verify its Stop handoff for #3246. Record the live results before relying on native seats. (#3251, #3246, #3380)
+- Run `rh arch debt --base <ref>` after you update the tools. After a successful run, remove the retired `.git/repo-harness/cache/arch-debt` cache if it exists. In a linked worktree, look for `repo-harness/cache/arch-debt` under the directory that `git rev-parse --git-common-dir` prints. ArchContext manages its own cache. (#3372, #3381)
+
+### Rollback
+
+- Before publication, close the prep PR or run `git revert <squash-commit>` after merge. After publication, keep the tag and release a corrective patch.
+- Version 0.35.2 rejects protocol 5 host configuration ledgers. Keep 0.36.1 on migrated hosts, or restore the pre-upgrade protocol 4 ledgers with their matching host state and seat settings before you return to 0.35.2.
+- Before downgrade, move native `agy` seats to a runtime that 0.35.2 supports. If the host state restore excludes Antigravity, use 0.36.1 to remove its managed entries before you restore the old state.
+
 ## [0.36.0] - 2026-11-21
 
 ### Added
