@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ARCHCTX_COMMAND_DISPOSITIONS, ARCHCTX_REQUIRED_VERSION, archctxRefusal } from '../../src/core/architecture/projection';
-import { resolveCompatibleNodeRuntime, resolvePackageLocalArchctx, runArchctxPassThrough } from '../../src/effects/architecture/archctx-provider';
+import { indexPackageLocalCodeGraph, resolveCompatibleNodeRuntime, resolvePackageLocalArchctx, runArchctxPassThrough } from '../../src/effects/architecture/archctx-provider';
 import { pluginSelectionEnv, recordPluginSelection } from '../helpers/install-ownership';
+import { MODULE_NODE, fixtureCommit, fixtureGit, fixtureWrite, moduleRepository } from '../helpers/module-repository';
 
 const ROOT = join(import.meta.dir, '..', '..');
 const CLI = join(ROOT, 'src', 'cli', 'index.ts');
@@ -78,6 +79,33 @@ describe('rh arch', () => {
     expect(without.status).not.toBe(0);
     expect(without.stderr).toContain('install_plugin_unavailable');
   });
+
+  test('projection slice prints the committed change as Markdown and exposes the native JSON', () => {
+    const root = realpathSync(moduleRepository());
+    roots.push(root);
+    const env = { ...process.env, HOME: join(root, 'home') };
+    recordPluginSelection(env);
+    fixtureWrite(root, 'home/.repo-harness/config.json', JSON.stringify({ architecture: { projection_provider: 'archctx', projection_apply: 'manual' } }));
+    const policy = { provider: 'archctx', applyMode: 'manual', requiredVersion: ARCHCTX_REQUIRED_VERSION, timeoutMs: 30_000 } as const;
+    const base = fixtureGit(root, ['rev-parse', 'HEAD']);
+    fixtureWrite(root, '.gitignore', '.codegraph/\nhome/\n');
+    const node = readFileSync(join(root, MODULE_NODE), 'utf8');
+    fixtureWrite(root, MODULE_NODE, node.replace('entrypoint.module.read', 'entrypoint.module.read-updated'));
+    const head = fixtureCommit(root);
+    indexPackageLocalCodeGraph(root, { policy });
+    const run = (...args: string[]) => spawnSync(process.execPath, [CLI, 'arch', 'projection', 'slice', '--base', base, ...args], {
+      cwd: root, env, encoding: 'utf8', timeout: 30_000,
+    });
+    const json = run('--json');
+    expect(json.status, json.stderr + json.stdout).toBe(0);
+    const { data } = JSON.parse(json.stdout);
+    expect(data).toMatchObject({ baseSha: base, headSha: head, changed: true, changedPaths: ['.archcontext/model/nodes/capability.test.module.yaml', '.gitignore'] });
+    const markdown = run();
+    expect(markdown.status, markdown.stderr + markdown.stdout).toBe(0);
+    expect(markdown.stdout.trimEnd()).toBe(data.markdown.trimEnd());
+    expect(markdown.stdout).toContain('entrypoint.module.read-updated');
+    expect(fixtureGit(root, ['status', '--porcelain'])).toBe('');
+  }, 60_000);
 
   test('the architecture commands run under rh arch, and their old top-level names are unknown', () => {
     const root = mkdtempSync(join(tmpdir(), 'repo-harness-arch-cli-'));

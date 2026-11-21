@@ -9,6 +9,10 @@ import { replayNeedsSource } from '../scripts/replay-ci-coverage';
 import { changelogPreamble, checkReleasedSections, fragmentMessage, releasedSections, sectionDrift, unreleasedHeading, withoutUnreleasedSection } from '../scripts/check-changelog-released-sections';
 import { assemble, FRAGMENT_PATH_FORM, fragmentPaths, isFragmentPath, KEPT_FILE, parseFragment, renderSection } from '../scripts/changelog-fragments';
 import { ARCHITECTURE_JOB, ARCHITECTURE_SUMMARY_PATH } from '../scripts/report-ci';
+import { ARCHCTX_REQUIRED_VERSION, decodeArchitectureDebtDelta } from '../src/core/architecture/projection';
+import { ArchctxClient, indexPackageLocalCodeGraph } from '../src/effects/architecture/archctx-provider';
+import { architectureDebtReport } from '../src/cli/commands/architecture-debt-report';
+import { fixtureCommit, fixtureGit, fixtureWrite, fixtureYaml, moduleRepository } from './helpers/module-repository';
 
 const ROOT = resolve(import.meta.dir, '..');
 const workflow = Bun.YAML.parse(readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8')) as any;
@@ -1180,6 +1184,94 @@ describe('architecture lanes', () => {
       '::warning title=Architecture generated output hand edited::docs/architecture/a.md: projection-generated-region-manually-edited. Keep model and human prose changes in this PR; the archctx rolling writer owns generated output.',
     ]);
   });
+
+  test('the advisory consumes real complete debt and gates the real plugin constraint', () => {
+    const root = moduleRepository({ flow: false });
+    const trace = join(root, '.fixture-state', 'git-trace');
+    const env = { ...process.env, ARCHCONTEXT_STATE_DIR: join(root, '.fixture-state'), GIT_TRACE: trace };
+    const policy = { provider: 'archctx', applyMode: 'manual', requiredVersion: ARCHCTX_REQUIRED_VERSION, timeoutMs: 30_000 } as const;
+    const client = new ArchctxClient(root, ARCHCTX_REQUIRED_VERSION, { env });
+    const constraintPath = '.archcontext/model/constraints/constraint.surface.plugin-internals.yaml';
+    const constraintBody = readFileSync(join(ROOT, constraintPath), 'utf8');
+    const node = (id: string, parent?: string, include?: string[]) => {
+      fixtureWrite(root, `.archcontext/model/nodes/${id}.yaml`, fixtureYaml({
+        schemaVersion: 'archcontext.node/v2', id, kind: parent ? 'component' : 'capability', parent,
+        name: id, status: 'active', summary: id, ...(include ? { source: { include } } : {}),
+      }));
+    };
+    const cap = 'capability.runtime-harness.';
+    const paths = [
+      ['src/effects/terminal/task-session.ts', cap + 'task-agent-host'],
+      ['src/effects/refactor/recommendations.ts', cap + 'refactor-program'],
+      ['src/effects/architecture/new-internal.ts', 'component.architecture.new-internal'],
+      ['src/core/architecture/projection.ts', 'component.architecture.archctx-closure-core'],
+    ] as const;
+    try {
+      fixtureWrite(root, '.gitignore', '.codegraph/\n.fixture-state/\n');
+      fixtureWrite(root, constraintPath, constraintBody);
+      node(cap + 'operator', undefined, ['src/effects/operator/**']);
+      node(cap + 'mcp-sidecar');
+      node('capability.organization.task-fleet');
+      node('capability.runtime-mcp.general-repo-access');
+      node(cap + 'architecture');
+      node('capability.verification.codegraph-readiness');
+      node(paths[0][1], undefined, [paths[0][0]]);
+      node(paths[1][1], undefined, [paths[1][0]]);
+      for (const name of ['architecture-read', 'module-view', 'model-reader']) node('component.architecture.' + name, cap + 'architecture');
+      node(paths[3][1], cap + 'architecture', [paths[3][0]]);
+      node('component.codegraph-readiness.mcp-adapter', 'capability.verification.codegraph-readiness');
+      for (const [path] of [paths[0], paths[1], paths[3]]) fixtureWrite(root, path, 'export const value = 1;\n');
+      fixtureWrite(root, 'src/to-resolve.ts', 'export const old = 1;\n');
+      const base = fixtureCommit(root);
+      const source = 'src/effects/operator/architecture.ts';
+      const importFrom = (path: string) => `import { value } from "${path}";\nexport const answer = value;\n`;
+      fixtureWrite(root, source, importFrom('../../core/architecture/projection'));
+      fixtureCommit(root);
+      indexPackageLocalCodeGraph(root, { env, policy });
+      const check = () => JSON.stringify(client.json(['constraints', 'check', '--json'], policy.timeoutMs));
+      const pass = runLane(['architecture-advisory', '--base', base], { constraints: check(), debt: debt([]), check: noop, checkExit: 0 });
+      expect(pass.status, pass.stdout + pass.stderr).toBe(0);
+      expect(pass.stdout).toContain(`[ci] ${PLUGIN_INTERNALS}: 0 violations, coverage complete.`);
+
+      node(paths[2][1], cap + 'architecture', [paths[2][0]]);
+      fixtureWrite(root, paths[2][0], 'export const value = 1;\n');
+      fixtureWrite(root, 'src/effects/operator/host.ts', importFrom('../terminal/task-session'));
+      fixtureWrite(root, 'src/effects/operator/refactor.ts', importFrom('../refactor/recommendations'));
+      fixtureWrite(root, 'src/effects/operator/internal.ts', importFrom('../architecture/new-internal'));
+      rmSync(join(root, 'src/to-resolve.ts'));
+      const head = fixtureCommit(root);
+      client.data(['sync', '--json'], policy.timeoutMs);
+      const before = fixtureGit(root, ['worktree', 'list', '--porcelain']);
+      const resolved = decodeArchitectureDebtDelta(client.data(['debt', '--base', base, '--json'], policy.timeoutMs));
+      const report = architectureDebtReport(root, base, { env, policy });
+      expect(report).toMatchObject({ kind: 'repo-harness-architecture-debt', head: { sha: head, debt: { coverage: 'partial' } }, base: { sha: base, coverage: 'partial' } });
+      expect(report.resolvedIds).toEqual(resolved.resolvedIds);
+      expect(report.resolvedIds).toHaveLength(1);
+      expect(report.head.debt.items.some(item => item.kind === 'undeclared-dependency')).toBe(true);
+      expect(resolved.head.debt.items.some(item => item.kind === 'undeclared-dependency')).toBe(false);
+      expect(report.head.debt.checks).toContainEqual({ check: 'dependencies', coverage: 'complete', reasonCodes: [] });
+      expect(report.introduced?.some(item => item.kind === 'undeclared-dependency')).toBe(true);
+      expect(fixtureGit(root, ['worktree', 'list', '--porcelain'])).toBe(before);
+      const worktreeAdds = readFileSync(trace, 'utf8').split('\n').filter(line => line.includes('worktree add --detach'));
+      expect(worktreeAdds.length).toBeGreaterThan(0);
+      expect(worktreeAdds.every(line => line.includes('/archctx-debt-base-'))).toBe(true);
+      expect(readFileSync(join(root, constraintPath), 'utf8')).toBe(constraintBody);
+
+      const gated = runLane(['architecture-advisory', '--base', base], { constraints: check(), debt: JSON.stringify(report), check: noop, checkExit: 0 });
+      expect(gated.status).toBe(1);
+      expect(errors(gated.stdout)).toHaveLength(3);
+      for (const path of paths.slice(0, 3).map(([path]) => path)) {
+        expect(errors(gated.stdout).some(annotation => annotation.includes(` imports ${path} (`))).toBe(true);
+      }
+      expect(gated.stdout).toContain('[ci] Head coverage is partial.');
+      expect(gated.stdout).toContain(`Introduced ${report.introduced?.length}. Resolved 1.`);
+      expect(warnings(gated.stdout).some(line => line.startsWith('::warning title=Architecture debt introduced::undeclared-dependency'))).toBe(true);
+      expect(warnings(gated.stdout).some(line => line.includes('Architecture debt check failed'))).toBe(false);
+    } finally {
+      try { client.json(['daemon', 'stop', '--json'], policy.timeoutMs, true); }
+      finally { rmSync(root, { recursive: true, force: true }); }
+    }
+  }, 60_000);
 
   test('a stale-anchor action names the repo-harness anchors command, never a bare archctx from PATH', () => {
     const staleAnchor = { ...debtItem(1), kind: 'stale-anchor', reasonCode: 'missing-path', action: 'archctx docs anchors --json' };

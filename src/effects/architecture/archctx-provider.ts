@@ -557,30 +557,6 @@ export function readArchitectureDocsAnchors(repoRoot: string, options: ArchctxPr
   return decodeDocsAnchorsReport(client.data(['docs', 'anchors', '--json'], policy.timeoutMs));
 }
 
-/**
- * Runs `archctx complete` for one commit and returns the architecture debt in
- * its review result. archctx omits the debt when it cannot measure it, so a
- * missing or invalid report fails closed. The checkout needs a CodeGraph index.
- * Package resolution already refuses an archctx that is not the pinned version.
- */
-export function completeArchitectureDebt(repoRoot: string, headSha: string, options: ArchctxProviderOptions = {}): ArchitectureDebtReportV1 {
-  const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
-  if (policy.provider === 'disabled') throw new Error('architecture projection provider is disabled');
-  const client = new ArchctxClient(repoRoot, policy.requiredVersion, options);
-  const facts = readArchitectureCodeFacts(client, policy.timeoutMs);
-  if (facts.state !== 'ready') {
-    const reasons = facts.issues.map((issue) => issue.code);
-    if (facts.reasonCode) reasons.push(facts.reasonCode);
-    const command = codeFactsFixCommand(facts.state);
-    throw new ArchctxClientError({
-      code: 'RH_ARCHCTX_CODE_FACTS_NOT_READY', action: facts.state === 'unavailable' ? 'update-repo-harness' : 'build-codegraph-index', reasonCode: 'code-facts-not-ready',
-      details: { ...facts, command },
-      message: `code facts for ${repoRoot} are ${facts.state} (${reasons.join(', ') || facts.state})${facts.message ? `: ${facts.message}` : ''}; run ${command} in this repository${facts.state === 'unavailable' ? '' : ' with the package-local CodeGraph'}`,
-    });
-  }
-  return decodeCompleteArchitectureDebt(client.data(['complete', '--head-sha', headSha, '--json'], policy.timeoutMs), headSha);
-}
-
 /** One notice phase: each Git call gets the time left before the caller's deadline, at most 3 s. */
 function noticeGit(repoRoot: string, bounded: ArchctxProviderOptions): (args: string[]) => string {
   return args => gitExecFileSync(['-C', repoRoot, ...args], {
@@ -656,27 +632,6 @@ export function prepareArchitectureTask(repoRoot: string, task: string, options:
   return { posture: context.posture as string, constraints: context.constraints.length };
 }
 
-/** The client already refused an error envelope; this binds the review to the commit and decodes its debt. */
-function decodeCompleteArchitectureDebt(data: unknown, headSha: string): ArchitectureDebtReportV1 {
-  const review = isRecord(data) ? data : {};
-  const snapshot = isRecord(review.snapshot) ? review.snapshot : {};
-  if (review.schemaVersion !== 'archcontext.review/v1' || snapshot.headSha !== headSha) {
-    throw new ArchctxClientError({ code: 'RH_ARCHCTX_DEBT_INVALID', action: 'update-repo-harness', reasonCode: 'review-result-mismatch', details: { headSha }, message: `archctx complete did not return a review result for ${headSha}` });
-  }
-  if (review.debt === undefined) {
-    const actionsRequired = Array.isArray(review.actionsRequired) ? review.actionsRequired.filter((entry): entry is string => typeof entry === 'string') : [];
-    throw new ArchctxClientError({
-      code: 'RH_ARCHCTX_DEBT_MISSING', action: 'follow-review-actions', reasonCode: 'architecture-debt-missing',
-      details: { headSha, result: typeof review.result === 'string' ? review.result : null, actionsRequired },
-      message: `archctx complete measured no architecture debt for ${headSha}; required actions: ${actionsRequired.join(', ') || 'none'}`,
-    });
-  }
-  try { return decodeArchitectureDebtReport(review.debt); }
-  catch (error) {
-    throw new ArchctxClientError({ code: 'RH_ARCHCTX_DEBT_INVALID', action: 'update-repo-harness', reasonCode: 'architecture-debt-invalid', details: { headSha }, message: error instanceof Error ? error.message : String(error) });
-  }
-}
-
 function hasPrivateCodeGraphIndex(directory: string): boolean {
   return lstatSync(directory, { throwIfNoEntry: false })?.isDirectory() === true
     && lstatSync(join(directory, 'codegraph.db'), { throwIfNoEntry: false })?.isFile() === true;
@@ -708,52 +663,6 @@ function seedRetryLoop(
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
     }
   }
-}
-
-/**
- * Seeds a temporary detached checkout (such as `rh arch debt --base`) from
- * archctx's shared CodeGraph base using the caller's options, falling back to
- * a local `codegraph init` only when no complete index was materialized and
- * `.codegraph` was not left occupied.
- */
-export function seedWorktreeCodeGraph(checkoutRoot: string, options: ArchctxProviderOptions = {}): boolean {
-  const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
-  if (policy.provider === 'disabled') throw new Error('architecture projection provider is disabled');
-  const indexDirectory = join(checkoutRoot, '.codegraph');
-  if (hasPrivateCodeGraphIndex(indexDirectory)) return true;
-  if (process.platform !== 'win32') {
-    const baseEnv: NodeJS.ProcessEnv = { ...(options.env ?? process.env), CODEGRAPH_NO_DOWNLOAD: '1', DO_NOT_TRACK: '1' };
-    delete baseEnv.CODEGRAPH_DIR;
-    const seeded = seedRetryLoop(
-      checkoutRoot,
-      policy.requiredVersion,
-      policy.timeoutMs,
-      { ...options, env: baseEnv, policy },
-      () => { /* Incomplete or absent shared base falls through to index check / cold init below. */ },
-    );
-    if (seeded) return true;
-  }
-  const index = lstatSync(indexDirectory, { throwIfNoEntry: false });
-  if (index && (!index.isDirectory() || readdirSync(indexDirectory).length > 0)) {
-    throw new ArchctxClientError({
-      code: 'RH_ARCHCTX_CODE_FACTS_NOT_READY',
-      action: 'build-codegraph-index',
-      reasonCode: 'code-facts-not-ready',
-      details: { checkout: checkoutRoot },
-      message: `shared-base seed left an incomplete index in ${indexDirectory}; inspect .codegraph before running codegraph init`,
-    });
-  }
-  indexPackageLocalCodeGraph(checkoutRoot, { ...options, policy });
-  if (!hasPrivateCodeGraphIndex(indexDirectory)) {
-    throw new ArchctxClientError({
-      code: 'RH_ARCHCTX_CODE_FACTS_NOT_READY',
-      action: 'build-codegraph-index',
-      reasonCode: 'code-facts-not-ready',
-      details: { checkout: checkoutRoot },
-      message: `codegraph init did not create an index in ${indexDirectory}`,
-    });
-  }
-  return false;
 }
 
 /** Called after the primary checkout and plugin have opted into CodeGraph. */

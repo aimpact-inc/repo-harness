@@ -67,13 +67,13 @@ export const ARCHITECTURE_TEST_REASONS = [...TESTS_UNAVAILABLE_REASONS, 'project
 export type ArchitectureTestReason = typeof ARCHITECTURE_TEST_REASONS[number];
 /**
  * The Dev Activity cache has not collected yet, or has no complete GitHub read
- * for the repository. `archctx impact --paths-from` reads the worktree model,
+ * for the repository. `archctx impact --batch-file` reads the worktree model,
  * so the model must be clean at the map commit.
  */
 export const ARCHITECTURE_PR_LAYER_REASONS = ['model_worktree_dirty', 'checkout_changed', 'git_read_failed', 'dev_activity_pending', 'dev_activity_unavailable'] as const;
 export type ArchitecturePullRequestsReason = typeof ARCHITECTURE_PR_LAYER_REASONS[number];
 /** One open PR without impact: gh gave no head commit or no complete file list, archctx failed, or a path in its valid answer fails the public-path guard. */
-export const ARCHITECTURE_PR_REASONS = ['head_missing', ...PULL_REQUEST_FILES_REASONS, 'archctx_failed', 'path_not_public'] as const;
+export const ARCHITECTURE_PR_REASONS = ['head_missing', ...PULL_REQUEST_FILES_REASONS, 'archctx_failed', 'batch-response-bytes', 'path_not_public'] as const;
 export type ArchitecturePullRequestReason = typeof ARCHITECTURE_PR_REASONS[number];
 /** Why the map has no layer order: the model declares no ordered `model.layers`. */
 export const ARCHITECTURE_LAYER_ORDER_REASONS = ['model_layers_undeclared'] as const;

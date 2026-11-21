@@ -97,7 +97,7 @@ function decodeContract<T>(schema: unknown, value: unknown, label: string): T {
   return value as T;
 }
 
-/** `validate --format json`: one finding per error the model reports. */
+/** Composite verify checks checkout YAML. Count one finding per model error. */
 function validateFindings(data: unknown): ArchVerifyFindings {
   if (!isRecord(data) || typeof data.valid !== 'boolean' || !Array.isArray(data.errors)
     || data.errors.some((entry) => typeof entry !== 'string')) {

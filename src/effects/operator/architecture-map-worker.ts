@@ -5,11 +5,9 @@
 // reads the repository registry with the environment it got and writes one
 // JSON line: the result for that repository.
 
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFileSync, realpathSync } from 'node:fs';
 
-import type { ArchitectureDebtReportV1, ArchitectureFlowSelectorCheckV1, DependencyConstraintEvaluationV1, DocsAnchorsReportV1, NativeContextExportV1, RefImpactV1 } from 'archctx-contracts';
+import { isRepoRelativePosixPath, type ArchitectureDebtReportV1, type ArchitectureFlowSelectorCheckV1, type DependencyConstraintEvaluationV1, type DocsAnchorsReportV1, type NativeContextExportV1, type RefImpactV1 } from 'archctx-contracts';
 import {
   ARCHCTX_REQUIRED_VERSION,
   ArchctxClientError,
@@ -60,7 +58,7 @@ import {
 import { isRecord } from '../../core/evidence/is-record';
 import { isPublicDevActivityText, isPublicRepoPath, publicDevActivityText } from '../../core/public-projections/public-text';
 import { readCommittedNativeContext } from '../architecture/model-reader';
-import { ARCHITECTURE_VIEW_TIMEOUT_MS, readArchitectureView, resolveArchitecturePaths, type ArchitectureViewArgs } from '../architecture/architecture-read';
+import { ARCHITECTURE_VIEW_TIMEOUT_MS, readArchitectureImpactBatch, readArchitectureView, resolveArchitecturePaths, type ArchitectureViewArgs } from '../architecture/architecture-read';
 import { gitSpawnSync } from '../git/runner';
 import { readRepoHarnessRegistryStrictSnapshot } from '../repo-registry';
 import { publicValue } from './architecture';
@@ -264,8 +262,8 @@ const lineList = (stdout: Buffer): string[] => stdout.toString('utf8').split('\n
  * error keeps its codes; a failed run or an answer that breaks the published
  * contract is `archctx_failed`. There is no local fallback.
  */
-function readImpact(root: string, args: Extract<ArchitectureViewArgs, readonly ['impact', ...string[]]>, source: RefImpactSource, deadlineMs?: number): { readonly ok: true; readonly report: RefImpactV1 } | { readonly ok: false; readonly gap: typeof ARCHCTX_FAILED | ArchctxRefusalV1 } {
-  const read = readArchitectureView(root, args, { deadlineMs });
+function readImpact(root: string, args: Extract<ArchitectureViewArgs, readonly ['impact', ...string[]]>, source: RefImpactSource): { readonly ok: true; readonly report: RefImpactV1 } | { readonly ok: false; readonly gap: typeof ARCHCTX_FAILED | ArchctxRefusalV1 } {
+  const read = readArchitectureView(root, args);
   if (!read.ok) return { ok: false, gap: (read.error && archctxRefusal(read.error.code, read.error.reasonCode)) ?? ARCHCTX_FAILED };
   const report = decoded(value => decodeRefImpact(value, source), read.data);
   return report === null ? { ok: false, gap: ARCHCTX_FAILED } : { ok: true, report };
@@ -318,35 +316,44 @@ function readChanges(root: string, commit: string, since: string): ArchitectureC
   return { state: 'ok', since, base, commits: changed, model: modelDelta.changes as ArchitectureModelChangeV1[], ...answer };
 }
 
-/** `archctx impact --paths-from` for one open PR's changed files, against the map commit's worktree model. */
-function readPullRequestImpact(root: string, commit: string, dir: string, pr: ArchitecturePullRequestSourceV1, deadlineMs: number): ArchitecturePullRequestImpactV1['impact'] {
+function pullRequestImpactInput(pr: ArchitecturePullRequestSourceV1):
+  | { state: 'ok'; item: { id: string; paths: string[] } }
+  | Extract<ArchitecturePullRequestImpactV1['impact'], { state: 'unavailable' }> {
   if (pr.head_sha === null) return { state: 'unavailable', reason: 'head_missing' };
   if (pr.changed_files.state === 'unavailable') return pr.changed_files;
-  // A spent budget must not start another child or write another path list.
-  if (Date.now() >= deadlineMs) return ARCHCTX_FAILED;
-  try {
-    const file = join(dir, `pull-request-${pr.number}.txt`);
-    writeFileSync(file, pr.changed_files.paths.map(path => `${path}\n`).join(''), { mode: 0o600 });
-    const impact = readImpact(root, ['impact', '--paths-from', file, '--json'], { kind: 'paths', head: commit }, deadlineMs);
-    return impact.ok ? { state: 'ok', ...architectureImpact(impact.report) } : impact.gap;
-  } catch { return ARCHCTX_FAILED; }
+  if (!pr.changed_files.paths.every(isRepoRelativePosixPath)) return { state: 'unavailable', reason: 'files_invalid' };
+  return { state: 'ok', item: { id: String(pr.number), paths: [...pr.changed_files.paths] } };
 }
 
-/** The open PRs' impact. The files come from the PR heads; owners and dependents come from the map commit's model. */
+/** PR paths come from GitHub. Impact comes from the worktree model at the map commit. */
 function readPullRequests(root: string, commit: string, checkout: CheckoutState, source: ArchitecturePullRequestsSource, budgetMs: number): ArchitecturePullRequestsLayerV1 {
   if (source.state === 'unavailable') return source;
   const gate = modelGate(commit, checkout);
   if (gate !== null) return { state: 'unavailable', reason: gate };
   const deadlineMs = Date.now() + budgetMs;
-  const dir = mkdtempSync(join(tmpdir(), 'repo-harness-architecture-map-'));
-  try {
-    return {
-      state: 'ok', observed_at: source.observed_at,
-      pull_requests: source.pull_requests.map(pr => ({ number: pr.number, title: pr.title, url: pr.url, head_sha: pr.head_sha, impact: readPullRequestImpact(root, commit, dir, pr, deadlineMs) })),
-    };
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
+  const requests = source.pull_requests.map(pr => ({ pr, input: pullRequestImpactInput(pr) }));
+  const items = requests.flatMap(({ input }) => input.state === 'ok' ? [input.item] : []);
+  let batch: ReturnType<typeof readArchitectureImpactBatch> | undefined;
+  let gap: ArchitecturePullRequestImpactV1['impact'] = ARCHCTX_FAILED;
+  if (items.length > 0 && Date.now() < deadlineMs) {
+    try { batch = readArchitectureImpactBatch(root, items, commit, { deadlineMs }); }
+    catch (error) {
+      if (error instanceof ArchctxClientError && error.code.startsWith('AC_')) {
+        gap = archctxRefusal(error.code, error.reasonCode) ?? ARCHCTX_FAILED;
+      }
+    }
   }
+  return {
+    state: 'ok', observed_at: source.observed_at,
+    pull_requests: requests.map(({ pr, input }) => {
+      const entry = { number: pr.number, title: pr.title, url: pr.url, head_sha: pr.head_sha };
+      if (input.state === 'unavailable') return { ...entry, impact: input };
+      const result = batch?.get(input.item.id);
+      if (result === undefined) return { ...entry, impact: gap };
+      if ('impact' in result) return { ...entry, impact: { state: 'ok', ...architectureImpact(result.impact) } };
+      return { ...entry, impact: { state: 'unavailable', reason: result.reasonCode } };
+    }),
+  };
 }
 
 /** `archctx debt`. */

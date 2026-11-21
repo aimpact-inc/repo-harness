@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { RefactorProviderError, type RefactorScopeV1 } from '../../src/core/refactor/provider-contract';
-import { observeRefactorRecommendations, refactorCandidates, type RefactorDiscovery } from '../../src/effects/refactor/recommendations';
+import { RefactorProviderError, type RefactorScanResultV1, type RefactorScopeV1 } from '../../src/core/refactor/provider-contract';
+import { observeRefactorRecommendations, refactorCandidates } from '../../src/effects/refactor/recommendations';
 import { buildRefactorCommand, formatRefactorRecommendations } from '../../src/cli/commands/refactor';
 
 const roots: string[] = [];
@@ -23,17 +23,18 @@ const shippedScan = () => shipped('runtime-refactor-scan.json');
 const shippedRecord = () => shipped('recommendation-v3.json');
 
 /** The shipped scan has unknown code facts; the tests that need suggestions start from a complete read of it. */
-function discovery(options: { codeFacts?: Record<string, unknown>; multiplyOwned?: number; scan?: Record<string, unknown>; open?: unknown[] } = {}): RefactorDiscovery {
+function discovery(options: { codeFacts?: Record<string, unknown>; multiplyOwned?: number; scan?: Record<string, unknown>; open?: unknown[] } = {}): RefactorScanResultV1 {
   const scan = shippedScan();
   scan.snapshot.codeFacts = { ...scan.snapshot.codeFacts, coverage: 'complete', truncated: false, reasonCodes: [], ...options.codeFacts };
   scan.snapshot.repositorySummary.multiplyOwnedFileCount = options.multiplyOwned ?? 0;
-  return { scan: { ...scan, ...options.scan }, open: options.open ?? [] } as unknown as RefactorDiscovery;
+  return { ...scan, ...options.scan, openRecommendations: options.open ?? [] };
 }
 
 test('each suggestion carries the metrics and bounded evidence of its own observation and no state is written', () => {
   const f = fixture();
   const value = observeRefactorRecommendations(f.repo, { env: f.env, discover: () => discovery() });
   expect(value.status).toBe('recommended');
+  expect(value.snapshotDigest).toBe(shippedScan().snapshotDigest);
   expect(value.candidates.map((entry) => entry.kind)).toEqual(['undeclared-footprint', 'evidence-gap']);
   expect(value.candidates[1]).toMatchObject({
     subject: 'repository:repo.537182127c5f2134',

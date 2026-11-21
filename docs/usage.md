@@ -219,12 +219,23 @@ PRD or Goal work, [repo-harness-issue-flow](../assets/skills/repo-harness-issue-
 for issue backlog splitting and dispatch, and [repo-harness-check](../assets/skill-commands/repo-harness-check/SKILL.md)
 for scope and recorded verification.
 
+### Architecture review
+
+`rh arch verify --base <ref>` reports the ArchContext checks for the change. Its
+validate check reads the checkout YAML even when standalone `rh arch validate`
+uses the architecture ledger.
+
+`rh arch projection slice --base <ref>` prints the changed architecture slice
+from a clean checkout with a current CodeGraph index.
+
 ### Refactor recommendations
 
 ```bash
 rh arch refactor recommendations [--import-node-limit <n>]   # measured suggestions with evidence
-rh arch refactor decide <id> accept|defer|reject --reason "<text>" [--import-node-limit <n>]
+rh arch refactor decide <id> accept|defer|reject --reason "<text>" --snapshot-digest <digest> [--import-node-limit <n>]
 ```
+
+Use the snapshot digest printed by `recommendations` to record the decision.
 
 ArchContext measures structural problems such as cycles and direction
 violations. repo-harness shows each suggestion with its metrics, bounded evidence
