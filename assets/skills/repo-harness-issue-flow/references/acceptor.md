@@ -220,9 +220,10 @@ is a non-blocking note, never a `FAIL`.
 ## 4. Publish
 
 The session that runs the round writes one publish receipt and runs
-`rh review publish --pr <n> --receipt <path> [--json]`.
-The command reads the PR head, refuses a stale subject, then
-posts in this order:
+`rh review publish --pr <n> --receipt <path> --seat <gatekeeper|reviewer> [--json]`.
+Pass `--seat gatekeeper` for a gatekeeper receipt or `--seat reviewer` for
+a reviewer receipt. The command requires one of these seats before it reads
+the PR head. It refuses a stale subject and posts in this order:
 
 - the `acceptance claim`;
 - one COMMENT review, with one inline thread for each P0, P1 and P2

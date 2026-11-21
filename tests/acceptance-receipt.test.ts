@@ -1131,7 +1131,7 @@ test('review publish turns a P1 receipt into one unresolved thread that merge re
 
   const writes: Array<{ readonly args: string[]; readonly input: string }> = [];
   const result = publishReview({
-    repoRoot: root, prNumber: PR_NUMBER, receiptPath,
+    repoRoot: root, prNumber: PR_NUMBER, receiptPath, seat: 'gatekeeper',
     ghRunner: (args, input = '') => {
       writes.push({ args: [...args], input });
       if (args[0] === 'pr' && args[1] === 'view') {

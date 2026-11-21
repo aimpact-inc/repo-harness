@@ -54,7 +54,7 @@ export interface ReviewPublishInput {
   readonly prNumber: number;
   /** Rule 1 stops a review at round 5; a later round needs this owner decision comment. */
   readonly ownerRecord?: string;
-  readonly seat?: ReviewRecordSeat;
+  readonly seat: ReviewRecordSeat;
   readonly ghBin?: string;
   /** Test seam. Production runs the configured gh binary. */
   readonly ghRunner?: ReviewPublishGhRunner;
@@ -107,7 +107,7 @@ function unknownOutcome(message: string, posted: readonly string[], cause?: unkn
 }
 
 /** The head SHA of the PR now, read through the same gh runner and checks as `publishReceipt`. */
-export function readPrHeadSha(input: ReviewPublishInput): string {
+export function readPrHeadSha(input: Omit<ReviewPublishInput, 'seat'>): string {
   try {
     return prHead(input.ghRunner ?? createGhRunner(input.repoRoot, input.ghBin), input.prNumber).headSha.toLowerCase();
   } catch (error) {

@@ -66,7 +66,7 @@ test('core commands and help load no peer-runtime modules; a selected action loa
   for (const args of [
     ['status', '--json'], ['doctor', '--json'], ['seats', 'argv', 'worker', '--json'],
     ['review', 'admit', '--request', 'missing.json'], ['review', 'revoke', '--request', 'missing.json'],
-    ['review', 'publish', '--pr', '1', '--receipt', 'missing.json'],
+    ['review', 'publish', '--pr', '1', '--receipt', 'missing.json', '--seat', 'gatekeeper'],
     ['review', 'round', '--help'], ['herdr', 'notify', 'install', '--help'], ['events', 'install', '--help'],
   ]) {
     const result = f.run(args);
@@ -183,12 +183,13 @@ function publishFixture(scenario = publishScenario()) {
   return { root, gh, receipt: join(root, 'receipt.json') };
 }
 
-async function runPublish(fixture: ReturnType<typeof publishFixture>, receipt: unknown, extraArgs: readonly string[] = []) {
+async function runPublish(fixture: ReturnType<typeof publishFixture>, seat: string | undefined, receipt: unknown, extraArgs: readonly string[] = []) {
   writeFileSync(fixture.receipt, JSON.stringify(receipt));
   const previous = process.env.REPO_HARNESS_GH_BIN;
   process.env.REPO_HARNESS_GH_BIN = fixture.gh.bin;
   try {
-    return await runReview(publishHome(), ['publish', '--repo', fixture.root, '--pr', String(PUBLISH_PR), '--receipt', fixture.receipt, '--json', ...extraArgs]);
+    const seatArgs = seat === undefined ? [] : ['--seat', seat];
+    return await runReview(publishHome(), ['publish', '--repo', fixture.root, '--pr', String(PUBLISH_PR), '--receipt', fixture.receipt, '--json', ...seatArgs, ...extraArgs]);
   } finally {
     if (previous === undefined) delete process.env.REPO_HARNESS_GH_BIN;
     else process.env.REPO_HARNESS_GH_BIN = previous;
@@ -201,7 +202,7 @@ function postedInputs(fixture: ReturnType<typeof publishFixture>, suffix: string
 
 test('publish posts the claim, one review thread per P1/P2, then the record', async () => {
   const fixture = publishFixture();
-  const result = await runPublish(fixture, publishReceipt());
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt());
   expect(result.status, result.stderr).toBe(0);
   const output = JSON.parse(result.stdout);
   expect(output).toMatchObject({ ok: true, pr: PUBLISH_PR, head_sha: PUBLISH_HEAD, round: 1, threads: 1, resolved_threads: [] });
@@ -231,21 +232,28 @@ test('publish posts the claim, one review thread per P1/P2, then the record', as
   expect(posts[2].body).not.toContain('fresh context');
 
   const reviewerFixture = publishFixture();
-  const reviewerResult = await runPublish(reviewerFixture, publishReceipt(), ['--seat', 'reviewer']);
+  const reviewerResult = await runPublish(reviewerFixture, 'reviewer', publishReceipt());
   expect(reviewerResult.status, reviewerResult.stderr).toBe(0);
   const reviewerPosts = reviewerFixture.gh.inputs().filter((entry) => entry.input !== '').map((entry) => JSON.parse(entry.input));
   expect(reviewerPosts[0].body).toContain('\nSeat: reviewer\n');
   expect(reviewerPosts[2].body).toContain('\nSeat: reviewer\n');
+});
 
-  const badSeatFixture = publishFixture();
-  const badSeatResult = await runPublish(badSeatFixture, publishReceipt(), ['--seat', 'worker']);
-  expect(badSeatResult.status).toBe(2);
-  expect(JSON.parse(badSeatResult.stdout)).toMatchObject({ ok: false, error: 'review_receipt_invalid', exit_code: 2, posted: [] });
+test.each([['omitted', undefined], ['invalid', 'worker']] as const)('publish refuses an %s seat before calling GitHub', async (_case, seat) => {
+  const fixture = publishFixture();
+  const result = await runPublish(fixture, seat, publishReceipt());
+
+  expect(fixture.gh.calls()).toEqual([]);
+  expect(result.status).toBe(2);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    ok: false, error: 'review_receipt_invalid', exit_code: 2, posted: [],
+    message: 'review publish requires --seat gatekeeper or --seat reviewer',
+  });
 });
 
 test('a FAIL receipt with no blocking finding is invalid and posts nothing', async () => {
   const fixture = publishFixture();
-  const result = await runPublish(fixture, publishReceipt({ findings: [{ id: 'N1', severity: 'P3', message: 'Only a NIT.' }] }));
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt({ findings: [{ id: 'N1', severity: 'P3', message: 'Only a NIT.' }] }));
   expect(result.status).toBe(2);
   expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, error: 'review_receipt_invalid', exit_code: 2, posted: [] });
   expect(fixture.gh.calls()).toEqual([]);
@@ -253,7 +261,7 @@ test('a FAIL receipt with no blocking finding is invalid and posts nothing', asy
 
 test('a FAIL receipt whose only finding is a P2 is invalid: P2 does not block the merge', async () => {
   const fixture = publishFixture();
-  const result = await runPublish(fixture, publishReceipt({ findings: [
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt({ findings: [
     { id: 'F1', severity: 'P2', path: 'src/example.ts', line: 12, evidence: 'A small real defect.', fix: 'Close the boundary case.' }] }));
   expect(result.status).toBe(2);
   expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, error: 'review_receipt_invalid', exit_code: 2, posted: [] });
@@ -263,7 +271,7 @@ test('a FAIL receipt whose only finding is a P2 is invalid: P2 does not block th
 
 test('a PASS receipt that carries a P2 is accepted, and the P2 gets its own follow-up thread', async () => {
   const fixture = publishFixture();
-  const result = await runPublish(fixture, publishReceipt({ verdict: 'PASS', findings: [
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt({ verdict: 'PASS', findings: [
     { id: 'F2', severity: 'P2', path: 'src/example.ts', line: 12, evidence: 'A small real defect.', fix: 'Close the boundary case.' }] }));
   expect(result.status, result.stderr).toBe(0);
   expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, threads: 1 });
@@ -278,7 +286,7 @@ const ownerRecord = (path: string) => OWNER_BASE + path + '#issuecomment-900';
 
 test('a round above 5 without an owner record is refused and posts nothing', async () => {
   const fixture = publishFixture();
-  const result = await runPublish(fixture, publishReceipt({ round: 6 }));
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt({ round: 6 }));
   expect(result.status).toBe(2);
   expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, error: 'review_receipt_invalid', posted: [] });
   expect(fixture.gh.inputs().some((entry) => entry.input !== '')).toBe(false);
@@ -287,7 +295,7 @@ test('a round above 5 without an owner record is refused and posts nothing', asy
 test('a round above 5 with an owner record on the PR names it in the claim and the record', async () => {
   const url = ownerRecord('/pull/' + PUBLISH_PR);
   const fixture = publishFixture();
-  const result = await runPublish(fixture, publishReceipt({ round: 6 }), ['--owner-record', url]);
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt({ round: 6 }), ['--owner-record', url]);
   expect(result.status, result.stderr).toBe(0);
   const posts = fixture.gh.inputs().filter((entry) => entry.input !== '').map((entry) => JSON.parse(entry.input));
   expect(posts[0].body).toContain('Round: 6\n');
@@ -297,10 +305,10 @@ test('a round above 5 with an owner record on the PR names it in the claim and t
 
 test('a round above 5 accepts an owner record on an issue the PR closes and refuses other issues', async () => {
   const closing = publishFixture(publishScenario({ closing: ['example/repo-harness#2000'] }));
-  const accepted = await runPublish(closing, publishReceipt({ round: 6 }), ['--owner-record', ownerRecord('/issues/2000')]);
+  const accepted = await runPublish(closing, 'gatekeeper', publishReceipt({ round: 6 }), ['--owner-record', ownerRecord('/issues/2000')]);
   expect(accepted.status, accepted.stderr).toBe(0);
   const other = publishFixture(publishScenario({ closing: ['example/repo-harness#2000'] }));
-  const refused = await runPublish(other, publishReceipt({ round: 6 }), ['--owner-record', ownerRecord('/issues/2001')]);
+  const refused = await runPublish(other, 'gatekeeper', publishReceipt({ round: 6 }), ['--owner-record', ownerRecord('/issues/2001')]);
   expect(refused.status).toBe(2);
   expect(other.gh.inputs().some((entry) => entry.input !== '')).toBe(false);
 });
@@ -308,7 +316,7 @@ test('a round above 5 accepts an owner record on an issue the PR closes and refu
 test('an owner record must match the closing issue repository and the path kind', async () => {
   const refuse = async (closing: string, path: string) => {
     const fixture = publishFixture(publishScenario({ closing: [closing] }));
-    const result = await runPublish(fixture, publishReceipt({ round: 6 }), ['--owner-record', ownerRecord(path)]);
+    const result = await runPublish(fixture, 'gatekeeper', publishReceipt({ round: 6 }), ['--owner-record', ownerRecord(path)]);
     expect(result.status).toBe(2);
     expect(fixture.gh.inputs().some((entry) => entry.input !== '')).toBe(false);
   };
@@ -318,14 +326,14 @@ test('an owner record must match the closing issue repository and the path kind'
 
 test('an owner record with a round up to 5 is refused', async () => {
   const fixture = publishFixture();
-  const result = await runPublish(fixture, publishReceipt({ round: 5 }), ['--owner-record', ownerRecord('/pull/' + PUBLISH_PR)]);
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt({ round: 5 }), ['--owner-record', ownerRecord('/pull/' + PUBLISH_PR)]);
   expect(result.status).toBe(2);
   expect(fixture.gh.inputs().some((entry) => entry.input !== '')).toBe(false);
 });
 
 test('a stale subject exits 2 and posts nothing', async () => {
   const fixture = publishFixture();
-  const result = await runPublish(fixture, publishReceipt({ subject_sha: 'b'.repeat(40) }));
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt({ subject_sha: 'b'.repeat(40) }));
   expect(result.status).toBe(2);
   expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, error: 'review_subject_stale', exit_code: 2, posted: [] });
   expect(fixture.gh.calls().some((args) => args.includes('POST'))).toBe(false);
@@ -334,7 +342,7 @@ test('a stale subject exits 2 and posts nothing', async () => {
 
 test('a PASS receipt with no P1/P2 opens no review thread', async () => {
   const fixture = publishFixture();
-  const result = await runPublish(fixture, publishReceipt({ verdict: 'PASS', findings: [
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt({ verdict: 'PASS', findings: [
     { id: 'N1', severity: 'P3', message: 'Rename the helper for clarity.' },
   ] }));
   expect(result.status, result.stderr).toBe(0);
@@ -354,7 +362,7 @@ const threadMutations = (fixture: ReturnType<typeof publishFixture>) => fixture.
 
 test('publish replies on and resolves an earlier-round thread that its receipt confirms, after the record', async () => {
   const fixture = publishFixture(publishScenario({ threadNodes: { PRRT_one: { reviewBody: earlierReview(1) } } }));
-  const result = await runPublish(fixture, confirmReceipt(['PRRT_one']));
+  const result = await runPublish(fixture, 'gatekeeper', confirmReceipt(['PRRT_one']));
   expect(result.status, result.stderr).toBe(0);
   const output = JSON.parse(result.stdout);
   expect(output.resolved_threads).toEqual(['PRRT_one']);
@@ -372,7 +380,7 @@ test('a confirmed id that is not an earlier publish thread of this PR is refused
   for (const thread of [{ reviewBody: 'Looks good to me.' }, { pr: PUBLISH_PR + 1, reviewBody: earlierReview(1) }, { reviewBody: earlierReview(2) },
     { association: 'NONE', reviewBody: earlierReview(1) }]) {
     const fixture = publishFixture(publishScenario({ threadNodes: { PRRT_one: thread } }));
-    const result = await runPublish(fixture, confirmReceipt(['PRRT_one']));
+    const result = await runPublish(fixture, 'gatekeeper', confirmReceipt(['PRRT_one']));
     expect(result.status, JSON.stringify(thread)).toBe(2);
     expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, error: 'review_receipt_invalid', posted: [] });
     expect(fixture.gh.inputs().some((entry) => entry.input !== '')).toBe(false);
@@ -382,12 +390,12 @@ test('a confirmed id that is not an earlier publish thread of this PR is refused
 
 test('an already-resolved confirmed thread is left as is only when it passes the provenance rule', async () => {
   const fixture = publishFixture(publishScenario({ threadNodes: { PRRT_one: { reviewBody: earlierReview(1) }, PRRT_done: { isResolved: true, reviewBody: earlierReview(1) } } }));
-  const result = await runPublish(fixture, confirmReceipt(['PRRT_done', 'PRRT_one']));
+  const result = await runPublish(fixture, 'gatekeeper', confirmReceipt(['PRRT_done', 'PRRT_one']));
   expect(result.status, result.stderr).toBe(0);
   expect(JSON.parse(result.stdout)).toMatchObject({ resolved_threads: ['PRRT_one'], already_resolved_threads: ['PRRT_done'] });
   expect(fixture.gh.calls().filter((args) => args.includes('id=PRRT_done') && args.some((arg) => arg.startsWith('query=mutation')))).toEqual([]);
   const outside = publishFixture(publishScenario({ threadNodes: { PRRT_done: { isResolved: true, association: 'NONE', reviewBody: earlierReview(1) } } }));
-  const refused = await runPublish(outside, confirmReceipt(['PRRT_done']));
+  const refused = await runPublish(outside, 'gatekeeper', confirmReceipt(['PRRT_done']));
   expect(JSON.parse(refused.stdout)).toMatchObject({ ok: false, error: 'review_receipt_invalid', posted: [] });
   expect(outside.gh.inputs().some((entry) => entry.input !== '')).toBe(false);
   expect(threadMutations(outside)).toEqual([]);
@@ -398,7 +406,7 @@ test('a failed or unknown thread write stops publish, names the record and both 
   for (const [stage, outcome, error] of [['reply', 'rejected', 'review_publish_partial'], ['resolve', 'unknown', 'review_publish_unknown'],
     ['reply', 'unconfirmed', 'review_publish_unknown'], ['resolve', 'unconfirmed', 'review_publish_unknown']] as const) {
     const fixture = publishFixture(publishScenario({ threadNodes, failThread: { stage, id: 'PRRT_two', outcome } }));
-    const result = await runPublish(fixture, confirmReceipt(['PRRT_one', 'PRRT_two', 'PRRT_three']));
+    const result = await runPublish(fixture, 'gatekeeper', confirmReceipt(['PRRT_one', 'PRRT_two', 'PRRT_three']));
     expect(result.status, stage).toBe(5);
     const output = JSON.parse(result.stdout);
     expect(output).toMatchObject({ ok: false, error });
@@ -414,7 +422,7 @@ test('a failed or unknown thread write stops publish, names the record and both 
 test('head movement between thread writes stops before the next write with the thread progress', async () => {
   const fixture = publishFixture(publishScenario({ threadNodes: { PRRT_one: { reviewBody: earlierReview(1) }, PRRT_two: { reviewBody: earlierReview(1) } },
     headSequence: [PUBLISH_HEAD, PUBLISH_HEAD, PUBLISH_HEAD, PUBLISH_HEAD, PUBLISH_HEAD, 'f'.repeat(40)] }));
-  const result = await runPublish(fixture, confirmReceipt(['PRRT_one', 'PRRT_two']));
+  const result = await runPublish(fixture, 'gatekeeper', confirmReceipt(['PRRT_one', 'PRRT_two']));
   expect(result.status).toBe(5);
   const output = JSON.parse(result.stdout);
   expect(output).toMatchObject({ ok: false, error: 'review_publish_partial' });
@@ -425,7 +433,7 @@ test('head movement between thread writes stops before the next write with the t
 test('a finding outside the diff goes into the review body, not an inline comment', async () => {
   const fixture = publishFixture();
   const outside = { id: 'F2', severity: 'P2', path: 'src/example.ts', line: 15, evidence: 'A pre-existing call site ignores the result.', fix: 'Check the result.' };
-  const result = await runPublish(fixture, publishReceipt({ findings: [
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt({ findings: [
     { id: 'F1', severity: 'P1', path: 'src/example.ts', line: 12, evidence: 'The guard drops the last item.', fix: 'Use the inclusive bound.' }, outside] }));
   expect(result.status, result.stderr).toBe(0);
   expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, threads: 1 });
@@ -441,7 +449,7 @@ test('a retry reuses the claim already on the PR instead of posting a second one
   const claimUrl = 'https://github.com/example/repo-harness/pull/' + PUBLISH_PR + '#issuecomment-777';
   const claimBody = renderAcceptanceClaim(validateReviewPublishReceipt(publishReceipt()));
   const fixture = publishFixture(publishScenario({ existingComments: [{ body: claimBody, html_url: claimUrl }] }));
-  const result = await runPublish(fixture, publishReceipt());
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt());
   expect(result.status, result.stderr).toBe(0);
   expect(JSON.parse(result.stdout).claim_url).toBe(claimUrl);
   expect(fixture.gh.inputs().filter((entry) => entry.input.includes('repo-harness acceptance claim'))).toHaveLength(0);
@@ -453,7 +461,7 @@ test('a later conflicting claim for the same subject and round stops the retry e
   const fixture = publishFixture(publishScenario({ existingComments: [
     { body: renderAcceptanceClaim(validateReviewPublishReceipt(publishReceipt())), html_url: 'https://github.com/example/repo-harness/pull/' + PUBLISH_PR + '#issuecomment-777' },
     { body: claimBody, html_url: 'https://github.com/example/repo-harness/pull/' + PUBLISH_PR + '#issuecomment-778' }] }));
-  const result = await runPublish(fixture, publishReceipt());
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt());
   expect(result.status).toBe(2);
   expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, error: 'review_publish_conflict', exit_code: 2, posted: [] });
   expect(fixture.gh.inputs().some((entry) => entry.input !== '')).toBe(false);
@@ -465,12 +473,12 @@ test('a second reviewer agent of the same subject and round posts its own claim 
   const posted = (fixture: ReturnType<typeof publishFixture>) => postedInputs(fixture, '/issues/' + PUBLISH_PR + '/comments')
     .filter((entry) => entry.input !== '').map((entry) => (JSON.parse(entry.input) as { body: string }).body);
   const first = publishFixture();
-  const gatekeeper = await runPublish(first, pass('codex', 'gpt-5.1-codex'));
+  const gatekeeper = await runPublish(first, 'gatekeeper', pass('codex', 'gpt-5.1-codex'));
   expect(gatekeeper.status, gatekeeper.stderr).toBe(0);
   const firstClaim = JSON.parse(gatekeeper.stdout).claim_url as string;
   const [claimBody, recordBody] = posted(first);
   const second = publishFixture(publishScenario({ existingComments: [{ body: claimBody!, html_url: firstClaim }, { body: recordBody!, html_url: JSON.parse(gatekeeper.stdout).record_url }] }));
-  const reviewer = await runPublish(second, pass('claude', 'claude-opus-5-5'));
+  const reviewer = await runPublish(second, 'reviewer', pass('claude', 'claude-opus-5-5'));
   expect(reviewer.status, reviewer.stderr).toBe(0);
   const secondClaim = JSON.parse(reviewer.stdout).claim_url as string;
   expect(secondClaim).not.toBe(firstClaim);
@@ -480,7 +488,7 @@ test('a second reviewer agent of the same subject and round posts its own claim 
 
 test('a failure after the claim stops with review_publish_partial and the posted URLs', async () => {
   const fixture = publishFixture(publishScenario({ failPost: 'review' }));
-  const result = await runPublish(fixture, publishReceipt());
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt());
   expect(result.status).toBe(5);
   const output = JSON.parse(result.stdout);
   expect(output).toMatchObject({ ok: false, error: 'review_publish_partial', exit_code: 5 });
@@ -492,7 +500,7 @@ test('a failure after the claim stops with review_publish_partial and the posted
 
 test('a POST with an unknown outcome exits 5 with the confirmed URLs and is not retried', async () => {
   const fixture = publishFixture(publishScenario({ unknownPost: 'review' }));
-  const result = await runPublish(fixture, publishReceipt());
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt());
   expect(result.status).toBe(5);
   const output = JSON.parse(result.stdout);
   expect(output).toMatchObject({ ok: false, error: 'review_publish_unknown', exit_code: 5, inspect_required: true });
@@ -506,7 +514,7 @@ test('a POST with an unknown outcome exits 5 with the confirmed URLs and is not 
 
 test('a claim POST with no provider answer exits 5 with no confirmed URL and requires inspection', async () => {
   const fixture = publishFixture(publishScenario({ unknownPost: 'claim', unknownPostMode: 'timeout' }));
-  const result = await runPublish(fixture, publishReceipt());
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt());
   expect(result.status).toBe(5);
   const output = JSON.parse(result.stdout);
   expect(output).toMatchObject({ ok: false, error: 'review_publish_unknown', exit_code: 5, inspect_required: true, posted: [] });
@@ -517,7 +525,7 @@ test('a claim POST with no provider answer exits 5 with no confirmed URL and req
 
 test('a POST transport failure with exit 1 and EOF reports the unknown outcome', async () => {
   const fixture = publishFixture(publishScenario({ unknownPost: 'review', unknownPostMode: 'transport' }));
-  const result = await runPublish(fixture, publishReceipt());
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt());
   expect(result.status).toBe(5);
   const output = JSON.parse(result.stdout);
   expect(output).toMatchObject({ ok: false, error: 'review_publish_unknown', exit_code: 5, inspect_required: true });
@@ -530,7 +538,7 @@ test('a POST transport failure with exit 1 and EOF reports the unknown outcome',
 
 test('a record POST whose response fails URL validation exits 5 and keeps the confirmed URLs', async () => {
   const fixture = publishFixture(publishScenario({ unknownPost: 'record', unknownPostMode: 'bad_url' }));
-  const result = await runPublish(fixture, publishReceipt());
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt());
   expect(result.status).toBe(5);
   const output = JSON.parse(result.stdout);
   expect(output).toMatchObject({ ok: false, error: 'review_publish_unknown', exit_code: 5, inspect_required: true });
@@ -544,7 +552,7 @@ test('a record POST whose response fails URL validation exits 5 and keeps the co
 test('a valid review URL with a wrong binding or state is retained in the unknown outcome', async () => {
   for (const reviewBinding of ['wrong_commit', 'wrong_state'] as const) {
     const fixture = publishFixture(publishScenario({ reviewBinding }));
-    const result = await runPublish(fixture, publishReceipt());
+    const result = await runPublish(fixture, 'gatekeeper', publishReceipt());
     expect(result.status).toBe(5);
     const output = JSON.parse(result.stdout);
     expect(output).toMatchObject({ ok: false, error: 'review_publish_unknown', exit_code: 5, inspect_required: true });
@@ -560,7 +568,7 @@ test('a valid review URL with a wrong binding or state is retained in the unknow
 test('head movement between the claim and the review stops before the review', async () => {
   const moved = 'f'.repeat(40);
   const fixture = publishFixture(publishScenario({ headSequence: [PUBLISH_HEAD, moved] }));
-  const result = await runPublish(fixture, publishReceipt());
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt());
   expect(result.status).toBe(5);
   const output = JSON.parse(result.stdout);
   expect(output).toMatchObject({ ok: false, error: 'review_publish_partial', exit_code: 5 });
@@ -575,7 +583,7 @@ test('head movement between the claim and the review stops before the review', a
 test('head movement between the review and the record stops before the record', async () => {
   const moved = 'f'.repeat(40);
   const fixture = publishFixture(publishScenario({ headSequence: [PUBLISH_HEAD, PUBLISH_HEAD, moved] }));
-  const result = await runPublish(fixture, publishReceipt());
+  const result = await runPublish(fixture, 'gatekeeper', publishReceipt());
   expect(result.status).toBe(5);
   const output = JSON.parse(result.stdout);
   expect(output).toMatchObject({ ok: false, error: 'review_publish_partial', exit_code: 5 });

@@ -388,8 +388,11 @@ test('Seat: attributes records across mixed Seat: and legacy rows on one head an
   expect(acceptance(prWith([c1, conflictSeat]), { status: 'pending', contexts: [] }, ['high'], 'high')).toMatchObject({ status: 'unknown', reason: 'acceptance_record_unparsed' });
 });
 
-test('in-flight High PR with pre-#3353 seatless Round-1 DeepSeek reviewer PASS and Sol gatekeeper FAIL starts only gatekeeper on fix head (#3353)', () => {
-  const stripSeat = (text: string) => text.replace(/^Seat: .*\n/gmu, '');
+test.each([
+  ['seatless', 'pending'],
+  ['explicit', 'recorded'],
+] as const)('High round-1 reviewer PASS and gatekeeper FAIL with %s records start only gatekeeper on the fix head', (seatMode, reviewerState) => {
+  const round1Body = (body: string) => seatMode === 'seatless' ? body.replace(/^Seat: .*\n/gmu, '') : body;
   const ghUrl = (n: number) => `https://github.com/example/repo/pull/1#issuecomment-${n}`;
   const gkConfig: SeatRouteV1 = {
     id: 'gatekeeper',
@@ -409,22 +412,20 @@ test('in-flight High PR with pre-#3353 seatless Round-1 DeepSeek reviewer PASS a
   const r1Comments: BoardCommentV1[] = [
     marker(OLD, 'https://example.test/m-gk', 'gatekeeper'),
     marker(OLD, 'https://example.test/m-rv', 'reviewer'),
-    comment(stripSeat(renderAcceptanceClaim(deepseekPass)), ghUrl(201)),
-    comment(stripSeat(renderAcceptanceRecord(deepseekPass, ghUrl(201))), ghUrl(202)),
-    comment(stripSeat(renderAcceptanceClaim(solFail)), ghUrl(203)),
-    comment(stripSeat(renderAcceptanceRecord(solFail, ghUrl(203))), ghUrl(204)),
+    comment(round1Body(renderAcceptanceClaim(deepseekPass, undefined, 'reviewer')), ghUrl(201)),
+    comment(round1Body(renderAcceptanceRecord(deepseekPass, ghUrl(201), undefined, 'reviewer')), ghUrl(202)),
+    comment(round1Body(renderAcceptanceClaim(solFail, undefined, 'gatekeeper')), ghUrl(203)),
+    comment(round1Body(renderAcceptanceRecord(solFail, ghUrl(203), undefined, 'gatekeeper')), ghUrl(204)),
   ];
   const fixRead = { state: 'open', head_sha: SHA, comments: page(...r1Comments) } as unknown as BoardPullRequestReadV1;
-  // 1) Board projection must NOT misattribute the seatless DeepSeek PASS to gatekeeper.
   expect(gatekeeperReview(fixRead)).toBe('none');
-  expect(secondReview(fixRead, 'high')).toBe('pending');
+  expect(secondReview(fixRead, 'high')).toBe(reviewerState);
   expect(acceptance(fixRead, { status: 'pending', contexts: [] }, ['high'], 'high').status).toBe('not_accepted');
-  // 2) planReview preserves the carried DeepSeek reviewer PASS and starts only the failed gatekeeper with delta_from OLD.
   const fixPr = pr(1, { head_sha: SHA, tier: 'high', writer_family: 'anthropic', gatekeeper_review: gatekeeperReview(fixRead), second_review: secondReview(fixRead, 'high') });
   expect(plan([fixPr], fixRead.comments, [], gkConfig, deepseekReviewer)).toEqual([
     { pr: 1, action: 'start', head_ref: 'feat/1', head_sha: SHA, tier: 'high', round: 2, seats: [{ seat: 'gatekeeper', delta_from: OLD }] },
   ]);
-  // 3) Once gatekeeper publishes a Round-2 Seat: gatekeeper PASS on SHA, acceptance succeeds via carried DeepSeek PASS + Round-2 PASS.
+  // The Round-2 gatekeeper PASS completes acceptance with the carried reviewer PASS.
   const solPass: ReviewPublishReceipt = {
     protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 2, subject_sha: SHA, risk_tier: 'high',
     reviewer: { harness: 'codex', actual_model: 'gpt-6.2-sol' }, verdict: 'PASS', model_relation: 'different-family', summary: 'Gatekeeper passed.', findings: [],
