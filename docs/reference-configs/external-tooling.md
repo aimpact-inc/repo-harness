@@ -1462,7 +1462,8 @@ rh arch refactor resolve <recommendation-id> --resolution-digest <sha256:...> --
 `metrics` and bounded `evidence` scalars) and `suppressed`.
 
 `decide` writes one Git-tracked decision file at
-`.archcontext/refactor-decisions/<recommendation-id>.json` in one step. Keep
+`.archcontext/refactor-decisions/<recommendation-id>.json` in one step
+(`--kill-symbol`, `--kill-path` and `--kill-relation` apply to `accept`). Keep
 `.archcontext/refactor-decisions/` unignored in `.gitignore` so every clone
 reads the same decisions. `list` and `show` inspect recorded decision files
 (`list`'s `openFindings` is best-effort; `recommendations` is the authoritative

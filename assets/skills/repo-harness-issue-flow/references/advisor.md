@@ -116,8 +116,8 @@ the change, so the check must come from outside its session.
       1. Present `recommended` findings and their evidence to the owner.
       2. Record each owner decision via
          `rh arch refactor decide <id> accept|defer|reject|acknowledge|waive --reason "<text>"`
-         (pass optional `--kill-symbol`, `--kill-path` or `--kill-relation`, and
-         the same `--import-node-limit` if the scan used one). `decide` writes
+         (pass optional `--kill-symbol`, `--kill-path` or `--kill-relation` on
+         `accept`, and the same `--import-node-limit` if the scan used one). `decide` writes
          `.archcontext/refactor-decisions/<id>.json` in Git directly; after a
          worker commits the fix, `rh arch refactor verify <id> --json` and
          `rh arch refactor resolve <id> --resolution-digest <resolutionDigest> --reason "<text>"`

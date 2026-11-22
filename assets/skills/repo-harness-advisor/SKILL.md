@@ -88,7 +88,7 @@ during its periodic health audit (`repo-harness-issue-flow` `references/advisor.
 - Present `recommended` findings to the owner and record each owner decision
   with
   `rh arch refactor decide <id> accept|defer|reject|acknowledge|waive --reason "<text>"`
-  (optional `--kill-symbol`, `--kill-path` and `--kill-relation` targets).
+  (optional `--kill-symbol`, `--kill-path` and `--kill-relation` targets on `accept`).
   `decide` writes `.archcontext/refactor-decisions/<id>.json` in Git directly.
   After a worker commits the fix, `rh arch refactor verify <id> --json` and
   `rh arch refactor resolve <id> --resolution-digest <resolutionDigest> --reason "<text>"`

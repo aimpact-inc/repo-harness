@@ -109,8 +109,8 @@ coverage) and `rh arch refactor show <id> --json`.
 Record only a decision that the user made:
 `rh arch refactor decide <id> accept|defer|reject|acknowledge|waive --reason "<text>"`
 (add optional `--kill-symbol <path#sym>`, `--kill-path <path>` or
-`--kill-relation <id>` targets, and pass `--import-node-limit <n>` if the scan
-used one). `decide` writes `.archcontext/refactor-decisions/<id>.json` in Git in one step. Commit that
+`--kill-relation <id>` targets on `accept`, and pass `--import-node-limit <n>`
+if the scan used one). `decide` writes `.archcontext/refactor-decisions/<id>.json` in Git in one step. Commit that
 decision file with the work. After a code fix lands, verify it read-only with
 `rh arch refactor verify <id> --json` (exit 0 only when `disposition === "resolved"`),
 then close the decision with

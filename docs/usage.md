@@ -221,9 +221,9 @@ for scope and recorded verification.
 
 ### Architecture review
 
-`rh arch verify --base <ref>` reports the ArchContext checks for the change. Its
-validate check reads the checkout YAML even when standalone `rh arch validate`
-uses the architecture ledger.
+`rh arch verify --base <ref>` runs the ArchContext checks for the change
+in-process against the checkout YAML, with no background service. Standalone
+`rh arch validate` validates the same checkout YAML directly.
 
 `rh arch projection slice --base <ref>` prints the changed architecture slice
 from a clean checkout with a current CodeGraph index. It links to the document
@@ -232,20 +232,28 @@ at the resolved base SHA or marks it absent at base.
 ### Refactor recommendations
 
 ```bash
-rh arch refactor recommendations [--import-node-limit <n>]   # measured suggestions with evidence
-rh arch refactor decide <id> accept|defer|reject --reason "<text>" --snapshot-digest <digest> [--import-node-limit <n>]
+rh arch refactor recommendations [--node <id> | --path <p>...] [--import-node-limit <n>]   # measured findings with evidence
+rh arch refactor decide <id> accept|defer|reject|acknowledge|waive --reason "<text>" [--import-node-limit <n>]
+rh arch refactor verify <id> [--import-node-limit <n>]                                    # read-only resolution check
+rh arch refactor resolve <id> --resolution-digest <sha256:...> --reason "<text>" [--import-node-limit <n>]
 ```
 
-Use the snapshot digest printed by `recommendations` to record the decision.
-ArchContext keeps eight snapshots in the daemon's memory. A restart or cache
-eviction can expire a digest. If `decide` reports
-`recommendation-snapshot-changed`, repeat the same scoped scan. Confirm that
-it still shows the recommendation, then retry `decide` with the fresh digest.
+ArchContext runs in-process and stores human decisions as Git-tracked JSON files
+under `.archcontext/refactor-decisions/<id>.json`. `decide` writes that file in
+one step (with optional `--kill-symbol`, `--kill-path` or `--kill-relation`
+targets on `accept`). Inspect committed decisions with `rh arch refactor list`
+and `rh arch refactor show <id>`.
 
-ArchContext measures structural problems such as cycles and direction
-violations. repo-harness shows each suggestion with its metrics, bounded evidence
-and module statistics, and records the user decision. It never executes a refactor; an
-accepted suggestion goes through the normal plan and pull request workflow.
+After a code fix lands, `verify` checks `killListChecks` and `metricChecks`
+read-only and prints `disposition` and `resolutionDigest` (exiting 0 only on
+`resolved`). Pass that digest to `resolve --resolution-digest` to mark the
+decision file resolved.
+
+ArchContext measures structural problems such as cycles, purity and direction
+violations. repo-harness shows each finding with its metrics, bounded evidence,
+affected paths and kill list, and records the user decision. It never executes
+a refactor; an accepted finding goes through the normal plan and pull request
+workflow.
 
 ## Persistent acceptance review
 
