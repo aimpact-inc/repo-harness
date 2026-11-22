@@ -1,11 +1,13 @@
 import {
   ARCHCTX_CAPABILITIES_SCHEMA_VERSION,
+  INDEX_SEED_SCHEMA_VERSION,
   NATIVE_CONTEXT_PROFILE,
   NATIVE_CONTEXT_SCHEMA_VERSION,
   nativeContextSchemaResolver,
   jsonSchemaResolver,
   type ArchContextError,
   type ArchitectureDocsProjectionManifestTargetV4,
+  type IndexSeedResultV1,
   type NativeContextExportV1,
   architectureDebtReportIssues,
   docsAnchorsReportIssues,
@@ -41,6 +43,7 @@ import projectionSliceSchema from 'archctx-contracts/schemas/runtime/projection-
 import stateMachineCheckSchema from 'archctx-contracts/schemas/runtime/state-machine-check.schema.json';
 import projectionPrVerificationSchema from 'archctx-contracts/schemas/runtime/projection-pr-verification.schema.json';
 import nativeContextExportSchema from 'archctx-contracts/schemas/runtime/native-context-export.schema.json';
+import indexSeedSchema from 'archctx-contracts/schemas/runtime/index-seed.schema.json';
 import nodeSchema from 'archctx-contracts/schemas/repo/architecture-node.schema.json';
 import relationSchema from 'archctx-contracts/schemas/repo/architecture-relation.schema.json';
 import flowSchema from 'archctx-contracts/schemas/repo/architecture-flow.schema.json';
@@ -284,6 +287,13 @@ export function decodeProjectionCheckFreshness(value: unknown): GeneratedSummary
     stalePaths: new Set(result.freshness.staleTargets.map((target) => target.path)),
     complete: result.freshness.reasonCodes.every((code) => PER_TARGET_FRESHNESS_REASONS.has(code)),
   };
+}
+
+/** ArchContext owns the `index seed` result contract; this applies its published schema. */
+export function decodeIndexSeedResult(value: unknown): IndexSeedResultV1 {
+  const result = decode<IndexSeedResultV1>(indexSeedSchema, value, 'index seed result');
+  if (result.schemaVersion !== INDEX_SEED_SCHEMA_VERSION) throw new Error('index seed result schema mismatch');
+  return result;
 }
 
 /** ArchContext owns the `docs anchors` report contract; this applies its schema and invariants. */

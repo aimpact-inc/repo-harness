@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { copyFileSync, cpSync, chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
@@ -29,6 +29,7 @@ import {
   ArchctxClient,
   archctxCapabilities,
   architectureProjectionRequest,
+  bootstrapWorktreeCodeGraph,
   inspectArchitectureProjectionReadiness,
   readArchitectureProjectionSnapshot,
   resolveCompatibleNodeRuntime,
@@ -2015,4 +2016,68 @@ test('memoizes node --version probes across repeated ArchctxClient calls with ma
   rmSync(countingNode);
   expect(resolveCompatibleNodeRuntime(combinedEnv)).toBe(realpathSync(join(otherBin, 'node')));
   expect(readFileSync(countFile, 'utf8').trim().split('\n')).toHaveLength(beforeEvict + 1);
+});
+
+describe('bootstrapWorktreeCodeGraph index seed cutover', () => {
+  test.skipIf(process.platform === 'win32')('fails closed on code-facts-not-ready and symlink .codegraph without overwriting, and logs primary copiedFiles=0', () => {
+    const f = fixture({ git: false });
+    const primary = join(f.root, 'primary');
+    const linked = join(f.root, 'linked');
+    mkdirSync(join(primary, '.codegraph'), { recursive: true });
+    writeFileSync(join(primary, '.codegraph', 'codegraph.db'), 'primary-db');
+    mkdirSync(join(linked, '.codegraph'), { recursive: true });
+    writeFileSync(join(linked, '.codegraph', 'codegraph.db'), 'preserve-unready');
+    const calls: Array<{ cwd: string; args: readonly string[] }> = [];
+    const logged: string[] = [];
+    const origError = console.error;
+    console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
+    try {
+      const runNotReady: RunArchctxProcess = (_binary, args, opts) => {
+        calls.push({ cwd: opts.cwd, args });
+        if (opts.cwd === primary) {
+          return { status: 0, signal: null, stderr: '', stdout: JSON.stringify({
+            schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'index.seed',
+            data: { schemaVersion: 'archcontext.index-seed/v1', mode: 'primary-refresh', worktreeRole: 'primary', seededFromBase: false, hardlinkedFiles: 0, copiedFiles: 0, elapsedMs: 5 },
+          }) };
+        }
+        return { status: 1, signal: null, stderr: '', stdout: JSON.stringify(errorEnvelope('index.seed', 'AC_CODE_FACTS_NOT_READY', 'index is not ready', 'code-facts-not-ready')) };
+      };
+      expect(() => bootstrapWorktreeCodeGraph(primary, linked, { consumerRoot: f.consumerRoot, policy, run: runNotReady })).toThrow('AC_CODE_FACTS_NOT_READY');
+      expect(readFileSync(join(linked, '.codegraph', 'codegraph.db'), 'utf8')).toBe('preserve-unready');
+      expect(logged).toContain('[ContractWorktree] CodeGraph base refresh did not publish a shared base');
+      expect(calls.map(c => `${c.args[0]} ${c.args[1]}`)).toEqual(['index seed', 'index seed']);
+
+      // A symlink .codegraph must fail closed even when index seed returns AC_CODE_FACTS_UNAVAILABLE (index-missing).
+      const linkedSymlink = join(f.root, 'linked-symlink');
+      const targetDir = join(f.root, 'external-dir');
+      mkdirSync(linkedSymlink, { recursive: true });
+      mkdirSync(targetDir, { recursive: true });
+      symlinkSync(targetDir, join(linkedSymlink, '.codegraph'));
+      const runMissing: RunArchctxProcess = (_binary, args, opts) => {
+        if (opts.cwd === primary) {
+          return { status: 0, signal: null, stderr: '', stdout: JSON.stringify({
+            schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'index.seed',
+            data: { schemaVersion: 'archcontext.index-seed/v1', mode: 'primary-refresh', worktreeRole: 'primary', seededFromBase: false, hardlinkedFiles: 0, copiedFiles: 1, elapsedMs: 5 },
+          }) };
+        }
+        if (args[0] === 'init') throw new Error('codegraph init must not run on symlink .codegraph');
+        return { status: 1, signal: null, stderr: '', stdout: JSON.stringify(errorEnvelope('index.seed', 'AC_CODE_FACTS_UNAVAILABLE', 'missing index', 'index-missing')) };
+      };
+      expect(() => bootstrapWorktreeCodeGraph(primary, linkedSymlink, { consumerRoot: f.consumerRoot, policy, run: runMissing }))
+        .toThrow('Inspect .codegraph before running codegraph init');
+      expect(lstatSync(join(linkedSymlink, '.codegraph')).isSymbolicLink()).toBe(true);
+
+      // An unexpected requestId from index seed fails closed instead of falling back to init.
+      const linkedBad = join(f.root, 'linked-bad');
+      mkdirSync(linkedBad, { recursive: true });
+      const runWrongId: RunArchctxProcess = () => ({ status: 0, signal: null, stderr: '', stdout: JSON.stringify({
+        schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'sync',
+        data: { schemaVersion: 'archcontext.index-seed/v1', mode: 'worktree-seed', worktreeRole: 'linked', seededFromBase: true, hardlinkedFiles: 1, copiedFiles: 0, elapsedMs: 5 },
+      }) });
+      expect(() => bootstrapWorktreeCodeGraph(join(f.root, 'absent-primary'), linkedBad, { consumerRoot: f.consumerRoot, policy, run: runWrongId }))
+        .toThrow('unexpected requestId');
+    } finally {
+      console.error = origError;
+    }
+  });
 });
