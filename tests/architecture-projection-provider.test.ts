@@ -42,6 +42,7 @@ import { architectureModelReady, readArchitectureNativeContext, readArchitecture
 import { trustedNodeCandidates } from '../src/effects/runtime/node-candidates';
 import { selectCompatibleNode } from '../src/effects/runtime/node-runtime';
 import { PROCESS_SUPERVISOR_TERMINATION_GRACE_MS } from '../src/effects/process-supervisor';
+import { runProcess } from '../src/effects/process-runner';
 import { buildArchitectureProjectionCommand } from '../src/cli/commands/architecture-projection';
 import { ARCHITECTURE_SETUP_PROVIDER } from '../src/cli/commands/architecture-setup';
 import { architectureProjectionExitCode, humanActionLine } from '../src/cli/commands/architecture-projection-actions';
@@ -772,21 +773,54 @@ describe('package-local ArchContext projection provider', () => {
     expect((validationErr as Error).message).toContain('receiptDigest');
     expect((validationErr as Error).message).toContain('outcome unknown');
 
-    // 5. Pre-launch spawn ENOENT stays distinct (`RH_ARCHCTX_LAUNCH_FAILED`, NOT reconcile-projection-state).
-    const launchErr = captureApply(withCapabilities(() => ({
-      status: null, signal: null, stdout: '', stderr: '', error: 'spawn node ENOENT',
-    })));
+    // 5. Real supervised pre-launch spawn ENOENT (`runProcess` sets stderr and status=1, plus typed `launchFailed: true`)
+    // stays distinct (`RH_ARCHCTX_LAUNCH_FAILED`, NOT reconcile-projection-state).
+    const launchErr = captureApply(withCapabilities((_binary, args, opts) => {
+      const r = runProcess(join(f.root, 'missing-node-executable'), args, {
+        cwd: opts.cwd,
+        env: opts.env,
+        inheritEnv: false,
+        timeoutMs: opts.timeoutMs,
+        processGroup: true,
+      });
+      expect(r.launchFailed).toBe(true);
+      expect(r.stderr).not.toBe('');
+      expect(r.status).toBe(1);
+      return { status: r.status, signal: r.signal, timedOut: r.timedOut, stdout: r.stdout, stderr: r.stderr, ...(r.error ? { error: r.error } : {}), ...(r.launchFailed ? { launchFailed: true } : {}) };
+    }));
     expect(launchErr).toMatchObject({ code: 'RH_ARCHCTX_LAUNCH_FAILED', action: 'inspect-diagnostics' });
     expect((launchErr as Error).message).not.toContain('outcome unknown');
 
-    // 6. Structured `AC_*` refusal stays distinct (not wrapped into reconcile-projection-state).
-    const refusalErr = captureApply(withCapabilities(() => ({
-      status: 1, signal: null, stdout: JSON.stringify(errorEnvelope('projection.run', 'AC_PRECONDITION_FAILED', 'snapshot mismatch', 'expected-snapshot-mismatch')), stderr: '',
-    })));
-    expect(refusalErr).toMatchObject({ code: 'AC_PRECONDITION_FAILED', reasonCode: 'expected-snapshot-mismatch' });
-    expect((refusalErr as ArchctxClientError).action).not.toBe('reconcile-projection-state');
+    // 6. Post-write or generic catalog errors (`AC_UNCLASSIFIED_FAILURE`, `projection-result-invalid`, `changeset-rollback-conflict`,
+    // unknown precondition reason) reconcile instead of being treated as no-write refusals.
+    for (const postWriteEnvelope of [
+      errorEnvelope('projection.run', 'AC_UNCLASSIFIED_FAILURE', 'cache delete failed after apply', 'failure-unclassified'),
+      errorEnvelope('projection.run', 'AC_SCHEMA_INVALID', 'Projection result invalid.', 'projection-result-invalid'),
+      errorEnvelope('projection.run', 'AC_PRECONDITION_FAILED', 'ChangeSet rollback is incomplete', 'changeset-rollback-conflict'),
+      errorEnvelope('projection.run', 'AC_PRECONDITION_FAILED', 'unclassified precondition'),
+    ]) {
+      const err = captureApply(withCapabilities(() => ({
+        status: 1, signal: null, stdout: JSON.stringify(postWriteEnvelope), stderr: '',
+      })));
+      expect(err).toMatchObject({ code: postWriteEnvelope.error!.code, action: 'reconcile-projection-state' });
+      expect((err as Error).message).toContain('outcome unknown');
+    }
 
-    // 7. Read-only `check` timeout stays `action: 'retry'`.
+    // 7. Proven pre-write structured refusals stay distinct (not wrapped into reconcile-projection-state).
+    for (const preWriteEnvelope of [
+      errorEnvelope('projection.run', 'AC_PRECONDITION_FAILED', 'Worktree digest changed before apply.', 'apply-worktree-changed'),
+      errorEnvelope('projection.run', 'AC_PRECONDITION_FAILED', 'architecture-docs-projection-inputs-changed-during-run', 'projection-inputs-changed-during-run'),
+      errorEnvelope('projection.run', 'AC_SCHEMA_INVALID', 'Projection input invalid.', 'projection-input-invalid'),
+      errorEnvelope('projection.run', 'AC_CODE_FACTS_NOT_READY', 'Repository code facts are not ready.', 'code-facts-not-ready'),
+    ]) {
+      const refusalErr = captureApply(withCapabilities(() => ({
+        status: 1, signal: null, stdout: JSON.stringify(preWriteEnvelope), stderr: '',
+      })));
+      expect(refusalErr).toMatchObject({ code: preWriteEnvelope.error!.code, reasonCode: preWriteEnvelope.error!.reasonCode });
+      expect((refusalErr as ArchctxClientError).action).not.toBe('reconcile-projection-state');
+    }
+
+    // 8. Read-only `check` timeout stays `action: 'retry'`.
     let checkErr: unknown;
     try {
       runArchitectureProjection({ ...request(), mode: 'check' }, f.repoRoot, {
@@ -2040,14 +2074,15 @@ describe('bootstrapWorktreeCodeGraph index seed cutover', () => {
       expect(calls.map(c => `${c.args[0]} ${c.args[1]}`)).toEqual(['index seed', 'index seed']);
       // CODEGRAPH_DIR must stay unset for `archctx index seed` (setting it disables shared-base seeding in archctx).
       expect(calls.every(c => c.codegraphDir === undefined)).toBe(true);
-      // WSL /mnt/<drive> paths without a checked .codegraph-only resolution fail closed on direct index seed with init remedy.
+      // WSL /mnt/<drive> paths without a checked .codegraph-only resolution fail closed on direct index seed with non-destructive inspection guidance.
       expect(effectiveCodeGraphDirName('/mnt/c/work/repo', { platform: 'linux', env: { WSL_DISTRO_NAME: 'Ubuntu' } })).toBe('.codegraph-wsl');
       let wslErr = '';
       try { assertSafeCodeGraphDestination('/mnt/c/work/repo', { platform: 'linux', env: { WSL_DISTRO_NAME: 'Ubuntu' } }); }
       catch (error) { wslErr = (error as Error).message; }
       expect(wslErr).toContain('CodeGraph resolves .codegraph-wsl instead of .codegraph');
-      expect(wslErr).toContain('CODEGRAPH_DIR=.codegraph');
-      expect(wslErr).toContain('codegraph init -y .');
+      expect(wslErr).toContain('Inspect .codegraph and .codegraph-wsl');
+      expect(wslErr).toContain('rh worktrees start');
+      expect(wslErr).not.toContain('codegraph init');
       expect(effectiveCodeGraphDirName('/mnt/c/work/repo', { platform: 'linux', env: { WSL_DISTRO_NAME: 'Ubuntu' }, pinDefaultDir: true })).toBe('.codegraph');
 
       // A symlink .codegraph fails closed BEFORE invoking archctx index seed or codegraph init.
@@ -2093,6 +2128,39 @@ describe('bootstrapWorktreeCodeGraph index seed cutover', () => {
       rmSync(join(absentDir, '.codegraph', 'errors.log'));
       writeFileSync(join(absentDir, '.codegraph', '.gitignore'), '# CodeGraph data files\n*.db\n');
       expect(() => assertSafeCodeGraphDestination(absentDir)).toThrow('stale-default pattern');
+      rmSync(join(absentDir, '.codegraph', '.gitignore'));
+
+      // Live WAL-mode CodeGraph DB probe (active -wal + -shm, and 0-byte -wal after TRUNCATE checkpoint) succeeds without modifying workspace files.
+      const walRepo = join(f.root, 'wal-live-dest');
+      mkdirSync(join(walRepo, '.codegraph'), { recursive: true });
+      const walDbPath = join(walRepo, '.codegraph', 'codegraph.db');
+      writeCodeGraphSchemaDb(walDbPath, 'wal-live');
+      const liveWal = new Database(walDbPath);
+      try {
+        liveWal.exec("PRAGMA journal_mode=WAL; INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, start_line, end_line, start_column, end_column, updated_at) VALUES ('n2', 'function', 'g', 'g', 'a.ts', 'typescript', 1, 1, 0, 1, 0);");
+        expect(() => assertSafeCodeGraphDestination(walRepo)).not.toThrow();
+        liveWal.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+        expect(() => assertSafeCodeGraphDestination(walRepo)).not.toThrow();
+      } finally {
+        liveWal.close();
+      }
+      // After closing, foreign sidecars beside a proven CodeGraph DB fail closed and keep their exact bytes.
+      for (const s of ['codegraph.db-shm', 'codegraph.db-wal', 'codegraph.db-journal'] as const) {
+        rmSync(join(walRepo, '.codegraph', s), { force: true });
+      }
+      for (const [sidecar, content, pattern] of [
+        ['codegraph.db-shm', Buffer.alloc(32_768, 0), 'SQLite WAL-index header'],
+        ['codegraph.db-shm', Buffer.from('not-shm'), 'not a valid SQLite WAL-index'],
+        ['codegraph.db-wal', Buffer.alloc(0), 'empty without a valid SQLite WAL-index'],
+        ['codegraph.db-wal', Buffer.from('x'.repeat(64)), 'SQLite WAL header'],
+        ['codegraph.db-journal', Buffer.from('rollback-data'), 'codegraph.db-journal is present'],
+      ] as const) {
+        const sidecarPath = join(walRepo, '.codegraph', sidecar);
+        writeFileSync(sidecarPath, content);
+        expect(() => assertSafeCodeGraphDestination(walRepo)).toThrow(pattern);
+        expect(readFileSync(sidecarPath)).toEqual(content);
+        rmSync(sidecarPath, { force: true });
+      }
 
       // An unexpected requestId from index seed fails closed instead of falling back to init.
       const linkedBad = join(f.root, 'linked-bad');

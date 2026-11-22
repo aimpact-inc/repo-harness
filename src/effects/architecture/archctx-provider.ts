@@ -1,11 +1,11 @@
 import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
 import { DEFAULT_GLOBAL_ARCHITECTURE, loadArchitectureProjectionPolicy, readGlobalArchitectureConfiguration } from './projection-config';
 import { Database } from 'bun:sqlite';
-import { accessSync, closeSync, constants as fsConstants, existsSync, lstatSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { accessSync, chmodSync, closeSync, constants as fsConstants, copyFileSync, existsSync, lstatSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { userInfo } from 'node:os';
+import { endianness, tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { ARCHCONTEXT_NODE_RANGE, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_SCHEMA_VERSION, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_UPGRADE_COMMAND, ERROR_CATALOG, PROJECTION_MANIFEST_UPGRADE_REQUIRED, failureIssues, architectureDocsProjectionCompatibilityIssues, PROJECTION_REQUEST_SCHEMA_VERSION, digestJson, type ArchContextError, type ArchctxCapabilitiesV1, type ArchitectureDebtDeltaReportV1, type ArchitectureDebtReportV1, type DocsAnchorsReportV1, type IndexSeedResultV1, type Json, type ProjectionExpectedSnapshotV1, type ProjectionMode, type ProjectionRequestV1, type ProjectionResultV3 } from 'archctx-contracts';
 import { isRecord } from '../../core/evidence/is-record';
@@ -32,7 +32,15 @@ const DEFAULT_RUNNER = (binary: string, args: readonly string[], options: { cwd:
     processGroup: true,
   });
   const overflow = Buffer.byteLength(result.stdout, 'utf8') > ARCHCTX_MAX_OUTPUT_BYTES || Buffer.byteLength(result.stderr, 'utf8') > ARCHCTX_MAX_OUTPUT_BYTES;
-  return { status: overflow ? 1 : result.status, signal: result.signal, timedOut: result.timedOut, stdout: result.stdout, stderr: result.stderr, ...((overflow ? 'archctx output exceeded maxBuffer' : result.error) ? { error: overflow ? 'archctx output exceeded maxBuffer' : result.error } : {}) };
+  return {
+    status: overflow ? 1 : result.status,
+    signal: result.signal,
+    timedOut: result.timedOut,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    ...((overflow ? 'archctx output exceeded maxBuffer' : result.error) ? { error: overflow ? 'archctx output exceeded maxBuffer' : result.error } : {}),
+    ...(result.launchFailed ? { launchFailed: true } : {}),
+  };
 };
 
 const CODEGRAPH_INIT_ARGS = ['init', '-y', '.'] as const;
@@ -197,8 +205,8 @@ export class ArchctxClient {
       throw new ArchctxClientError({ code: 'RH_ARCHCTX_TIMEOUT', action: 'retry', message: `${label} timed out` });
     }
     if (Buffer.byteLength(result.stdout, 'utf8') > ARCHCTX_MAX_OUTPUT_BYTES || Buffer.byteLength(result.stderr, 'utf8') > ARCHCTX_MAX_OUTPUT_BYTES) throw new Error(`${label} output exceeded maxBuffer`);
-    // Distinguish pre-launch spawn errors (no child started) from post-launch failures; never print argv/request-json.
-    if (isPreLaunchSpawnFailure(result)) {
+    // Distinguish proven pre-launch spawn failures (no target started) from post-launch failures; never print argv/request-json.
+    if (result.launchFailed === true) {
       throw new ArchctxClientError({ code: 'RH_ARCHCTX_LAUNCH_FAILED', action: 'inspect-diagnostics', message: `${label} failed to launch` });
     }
     // Process errors can contain argv, including request-json. Do not print them.
@@ -604,7 +612,13 @@ const SQLITE_HEADER_MAGIC = Buffer.from('SQLite format 3\0', 'ascii');
 const SQLITE_HEADER_MIN_BYTES = 100;
 const CODEGRAPH_LOCK_MAX_BYTES = 32;
 const CODEGRAPH_PID_LOCK_PATTERN = /^[1-9]\d*$/;
-const CODEGRAPH_SQLITE_SIDECARS = ['codegraph.db-wal', 'codegraph.db-shm', 'codegraph.db-journal'] as const;
+const SQLITE_WAL_MAGIC_LE = 0x377f0682;
+const SQLITE_WAL_MAGIC_BE = 0x377f0683;
+const SQLITE_WAL_HEADER_BYTES = 32;
+const SQLITE_SHM_CHUNK_BYTES = 32_768;
+const SQLITE_SHM_HEADER_PAIR_BYTES = 96;
+const SQLITE_SHM_HEADER_HALF_BYTES = 48;
+const SQLITE_SHM_VERSION = 3_007_000;
 const CODEGRAPH_LOCK_FILES = [
   'codegraph.lock',
   'codegraph.lock.break',
@@ -776,16 +790,106 @@ export function effectiveCodeGraphDirName(repoRoot: string, probe: CodeGraphDest
   return CODEGRAPH_WSL_DIR;
 }
 
+function readNativeUInt32(buffer: Buffer, offset: number): number {
+  return endianness() === 'BE' ? buffer.readUInt32BE(offset) : buffer.readUInt32LE(offset);
+}
+
 /**
- * Proves in immutable read-only SQLite (zero writes, zero `-wal`/`-shm` creation) that an
- * existing `codegraph.db` carries pinned CodeGraph 1.6.4's full schema signature. This guarantees
- * both `isInitialized(repoRoot) === true` (blocking parent-directory walk in `codegraph sync`)
- * and CodeGraph ownership (refusing foreign SQLite databases, even ones with a `nodes` table).
+ * Validates any existing SQLite sidecars beside `.codegraph/codegraph.db` before opening
+ * or invoking CodeGraph/SQLite in WAL mode. Refuses `codegraph.db-journal` unconditionally,
+ * proves SQLite WAL-index headers on `codegraph.db-shm`, and proves SQLite WAL headers on
+ * `codegraph.db-wal` (allowing a 0-byte `-wal` only alongside a validated `-shm`).
  */
-function assertProvenCodeGraphDatabase(dbPath: string): void {
+function assertProvenCodeGraphSidecars(indexDirectory: string): { readonly hasNonEmptyWal: boolean } {
+  const journalPath = join(indexDirectory, 'codegraph.db-journal');
+  const journalStat = lstatSync(journalPath, { throwIfNoEntry: false });
+  if (journalStat) {
+    throw unsafeCodeGraphDestination(
+      'CodeGraph destination .codegraph/codegraph.db-journal is present and could be overwritten or unlinked by SQLite. Inspect .codegraph before seeding or running codegraph init.',
+    );
+  }
+
+  let hasValidatedShm = false;
+  const shmPath = join(indexDirectory, 'codegraph.db-shm');
+  const shmStat = lstatSync(shmPath, { throwIfNoEntry: false });
+  if (shmStat) {
+    if (!shmStat.isFile()) {
+      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db-shm must be a regular file, not a symlink or directory. Inspect .codegraph before seeding or running codegraph init.');
+    }
+    if (shmStat.size < SQLITE_SHM_CHUNK_BYTES || shmStat.size % SQLITE_SHM_CHUNK_BYTES !== 0) {
+      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db-shm is not a valid SQLite WAL-index file and could be overwritten or unlinked. Inspect .codegraph/codegraph.db-shm before seeding.');
+    }
+    let shmHeader: Buffer;
+    try {
+      shmHeader = readPrefixBytes(shmPath, SQLITE_SHM_HEADER_PAIR_BYTES);
+    } catch (error) {
+      throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/codegraph.db-shm is unreadable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const headersMatch = shmHeader.length === SQLITE_SHM_HEADER_PAIR_BYTES
+      && shmHeader.subarray(0, SQLITE_SHM_HEADER_HALF_BYTES).equals(shmHeader.subarray(SQLITE_SHM_HEADER_HALF_BYTES, SQLITE_SHM_HEADER_PAIR_BYTES));
+    const versionMatches = headersMatch
+      && readNativeUInt32(shmHeader, 0) === SQLITE_SHM_VERSION
+      && readNativeUInt32(shmHeader, SQLITE_SHM_HEADER_HALF_BYTES) === SQLITE_SHM_VERSION;
+    if (!versionMatches) {
+      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db-shm does not carry a valid SQLite WAL-index header and could be overwritten or unlinked. Inspect .codegraph/codegraph.db-shm before seeding.');
+    }
+    hasValidatedShm = true;
+  }
+
+  let hasNonEmptyWal = false;
+  const walPath = join(indexDirectory, 'codegraph.db-wal');
+  const walStat = lstatSync(walPath, { throwIfNoEntry: false });
+  if (walStat) {
+    if (!walStat.isFile()) {
+      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db-wal must be a regular file, not a symlink or directory. Inspect .codegraph before seeding or running codegraph init.');
+    }
+    if (walStat.size === 0) {
+      if (!hasValidatedShm) {
+        throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db-wal is empty without a valid SQLite WAL-index (.codegraph/codegraph.db-shm) and could be overwritten or unlinked. Inspect .codegraph/codegraph.db-wal before seeding.');
+      }
+    } else if (walStat.size < SQLITE_WAL_HEADER_BYTES) {
+      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db-wal is not a valid SQLite WAL file and could be overwritten or unlinked. Inspect .codegraph/codegraph.db-wal before seeding.');
+    } else {
+      let walHeader: Buffer;
+      try {
+        walHeader = readPrefixBytes(walPath, 4);
+      } catch (error) {
+        throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/codegraph.db-wal is unreadable: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const magic = walHeader.length === 4 ? walHeader.readUInt32BE(0) : 0;
+      if (magic !== SQLITE_WAL_MAGIC_LE && magic !== SQLITE_WAL_MAGIC_BE) {
+        throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db-wal does not carry a valid SQLite WAL header and could be overwritten or unlinked. Inspect .codegraph/codegraph.db-wal before seeding.');
+      }
+      hasNonEmptyWal = true;
+    }
+  }
+
+  return { hasNonEmptyWal };
+}
+
+/**
+ * Proves on a disposable private temp copy (zero workspace writes, zero `-wal`/`-shm` creation
+ * inside `.codegraph/`, plain file path so Linux Bun SQLite without URI support works cleanly)
+ * that an existing `codegraph.db` carries pinned CodeGraph 1.6.4's full schema signature. This
+ * guarantees both `isInitialized(repoRoot) === true` (blocking parent-directory walk in
+ * `codegraph sync`) and CodeGraph ownership (refusing foreign SQLite databases, even ones with
+ * a `nodes` table).
+ */
+function assertProvenCodeGraphDatabase(dbPath: string, copyWal: boolean): void {
+  let probeDir: string | undefined;
   let db: Database | undefined;
   try {
-    db = new Database(`${pathToFileURL(dbPath).href}?mode=ro&immutable=1`, { readonly: true });
+    probeDir = mkdtempSync(join(tmpdir(), 'rh-codegraph-probe-'));
+    const tempDb = join(probeDir, 'codegraph.db');
+    copyFileSync(dbPath, tempDb, fsConstants.COPYFILE_FICLONE);
+    chmodSync(tempDb, 0o600);
+    if (copyWal) {
+      const tempWal = `${tempDb}-wal`;
+      copyFileSync(`${dbPath}-wal`, tempWal, fsConstants.COPYFILE_FICLONE);
+      chmodSync(tempWal, 0o600);
+    }
+    db = new Database(tempDb, { create: false });
+    db.exec('PRAGMA query_only = ON;');
     const tables = new Set(
       (db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name),
     );
@@ -816,7 +920,11 @@ function assertProvenCodeGraphDatabase(dbPath: string): void {
       `CodeGraph destination .codegraph/codegraph.db failed read-only schema verification: ${error instanceof Error ? error.message : String(error)}. Inspect .codegraph/codegraph.db before seeding.`,
     );
   } finally {
-    db?.close();
+    try {
+      db?.close();
+    } finally {
+      if (probeDir !== undefined) rmSync(probeDir, { recursive: true, force: true });
+    }
   }
 }
 
@@ -824,14 +932,14 @@ function assertProvenCodeGraphDatabase(dbPath: string): void {
  * Verifies `<repoRoot>/.codegraph` before `archctx index seed` or worktree `codegraph init`.
  * Fails closed when pinned CodeGraph would select another directory (such as `.codegraph-wsl` on
  * WSL Windows drives), or on symlinks, non-directories, occupied directories without `codegraph.db`,
- * non-CodeGraph or schemaless `codegraph.db`, unproven lock or error-log files that pinned CodeGraph
- * could unlink/overwrite, or a `.gitignore` that pinned CodeGraph would rewrite.
+ * non-CodeGraph or schemaless `codegraph.db`, unproven SQLite sidecars, unproven lock or error-log
+ * files that pinned CodeGraph could unlink/overwrite, or a `.gitignore` that pinned CodeGraph would rewrite.
  */
 export function assertSafeCodeGraphDestination(repoRoot: string, probe: CodeGraphDestinationProbe = {}): void {
   const effectiveDir = effectiveCodeGraphDirName(repoRoot, probe);
   if (effectiveDir !== CODEGRAPH_DEFAULT_DIR) {
     throw unsafeCodeGraphDestination(
-      `CodeGraph resolves ${effectiveDir} instead of ${CODEGRAPH_DEFAULT_DIR} for ${repoRoot}; refusing to seed an unchecked destination. Run CODEGRAPH_DIR=.codegraph codegraph init -y . in the checkout instead.`,
+      `CodeGraph resolves ${effectiveDir} instead of ${CODEGRAPH_DEFAULT_DIR} for ${repoRoot}; refusing to seed an unchecked destination. Inspect ${CODEGRAPH_DEFAULT_DIR} and ${effectiveDir} (remove ${effectiveDir} if unused), or initialize linked worktrees via guarded rh worktrees start.`,
     );
   }
   const indexDirectory = join(repoRoot, CODEGRAPH_DEFAULT_DIR);
@@ -890,14 +998,8 @@ export function assertSafeCodeGraphDestination(repoRoot: string, probe: CodeGrap
   if (dbStat.size < SQLITE_HEADER_MIN_BYTES || !header.equals(SQLITE_HEADER_MAGIC)) {
     throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db is not a valid SQLite 3 database. Inspect .codegraph/codegraph.db before seeding.');
   }
-  assertProvenCodeGraphDatabase(dbPath);
-
-  for (const sidecar of CODEGRAPH_SQLITE_SIDECARS) {
-    const stat = lstatSync(join(indexDirectory, sidecar), { throwIfNoEntry: false });
-    if (stat && !stat.isFile()) {
-      throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/${sidecar} must be a regular file, not a symlink or directory. Inspect .codegraph before seeding or running codegraph init.`);
-    }
-  }
+  const { hasNonEmptyWal } = assertProvenCodeGraphSidecars(indexDirectory);
+  assertProvenCodeGraphDatabase(dbPath, hasNonEmptyWal);
   for (const lockName of CODEGRAPH_LOCK_FILES) {
     assertProvenCodeGraphLockFile(indexDirectory, lockName);
   }
@@ -1066,15 +1168,80 @@ function resolvePackageLocalCodeGraph(archctx: ResolvedArchctxPackage): string {
 const PROJECTION_WRITE_RECONCILE_GUIDANCE =
   'outcome unknown. Run rh arch projection check --json and git diff to reconcile before authorizing a fresh apply.';
 
-function isPreLaunchSpawnFailure(result: ArchctxProcessResult): boolean {
-  return !result.timedOut
-    && !result.signal
-    && typeof result.error === 'string'
-    && result.error !== ''
-    && result.error !== 'archctx output exceeded maxBuffer'
-    && result.stdout === ''
-    && result.stderr === ''
-    && (result.status === null || /\b(ENOENT|EACCES|EPERM|ENOTDIR|EISDIR)\b/.test(result.error));
+/**
+ * Structured `archctx@0.18.0` error codes emitted exclusively before `changeSetEngine.apply`
+ * writes files. Never include `AC_UNCLASSIFIED_FAILURE`, `AC_RUNTIME_UNAVAILABLE`,
+ * `AC_PROJECTION_APPLY_COMMITTED`, or unvetted codes that can surface after partial or committed writes.
+ */
+const PRE_WRITE_PROJECTION_ERROR_CODES = new Set<string>([
+  'AC_REPO_NOT_FOUND',
+  'AC_RUNTIME_VERSION_UNSUPPORTED',
+  'AC_NODE_VERSION_UNSUPPORTED',
+  'AC_CODEGRAPH_UNAVAILABLE',
+  'AC_CODE_FACTS_UNAVAILABLE',
+  'AC_CODE_FACTS_NOT_READY',
+  'AC_MODEL_ADOPTION_REQUIRED',
+  'AC_POLICY_VIOLATION',
+  'AC_PATH_DENIED',
+  'AC_USER_CONFIRMATION_REQUIRED',
+  'AC_CAPABILITY_UNSUPPORTED',
+]);
+
+/** `AC_SCHEMA_INVALID` reasons proven pre-write (explicitly excludes post-write `projection-result-invalid`). */
+const PRE_WRITE_PROJECTION_SCHEMA_REASONS = new Set<string>([
+  'projection-input-invalid',
+  'projection-adoption-profile-invalid',
+  'projection-adoption-approval-input-invalid',
+  'plan-input-invalid',
+  'apply-input-invalid',
+  'constraint-model-invalid',
+  'state-machine-model-invalid',
+  'cli-input-invalid',
+  'product-id-invalid',
+  'workspace-exports-unsupported',
+]);
+
+/** `AC_PRECONDITION_FAILED` reasons proven pre-write (explicitly excludes post-write `changeset-rollback-conflict`). */
+const PRE_WRITE_PROJECTION_PRECONDITION_REASONS = new Set<string>([
+  'projection-snapshot-mismatch',
+  'projection-inputs-changed-during-run',
+  'projection-manifest-upgrade-required',
+  'projection-manifest-invalid',
+  'projection-manifest-incompatible',
+  'architecture-model-ignored',
+  'projection-footprint-uncovered',
+  'projection-ownership-repair-required',
+  'projection-orphan-review-required',
+  'projection-adoption-refused',
+  'projection-adoption-preimage-missing',
+  'projection-adoption-preview-mismatch',
+  'projection-adoption-fixed-point-unproven',
+  'projection-accepted-fixed-point-unproven',
+  'projection-ambiguous-ownership',
+  'plan-worktree-changed',
+  'plan-model-invalid',
+  'apply-repository-mismatch',
+  'apply-draft-missing',
+  'apply-profile-missing',
+  'apply-profile-changed',
+  'apply-worktree-changed',
+  'apply-head-changed',
+  'apply-model-invalid',
+  'apply-model-changed',
+  'apply-preimage-changed',
+  'runtime-writer-locked',
+  'runtime-writer-owned',
+]);
+
+function isProvenPreWriteProjectionRefusal(error: ArchctxClientError): boolean {
+  if (PRE_WRITE_PROJECTION_ERROR_CODES.has(error.code)) return true;
+  if (error.code === 'AC_SCHEMA_INVALID') {
+    return error.reasonCode !== undefined && PRE_WRITE_PROJECTION_SCHEMA_REASONS.has(error.reasonCode);
+  }
+  if (error.code === 'AC_PRECONDITION_FAILED') {
+    return error.reasonCode !== undefined && PRE_WRITE_PROJECTION_PRECONDITION_REASONS.has(error.reasonCode);
+  }
+  return false;
 }
 
 function runProjectionCommand(request: ProjectionRequestV1, repoRoot: string, options: ArchctxProviderOptions): ProjectionResultV3 {
@@ -1095,7 +1262,7 @@ function runProjectionCommand(request: ProjectionRequestV1, repoRoot: string, op
     if (!writeMode) throw error;
     if (error instanceof ArchctxClientError && (
       error.code === 'RH_ARCHCTX_LAUNCH_FAILED'
-      || Object.hasOwn(ERROR_CATALOG, error.code)
+      || isProvenPreWriteProjectionRefusal(error)
       || (error.code === 'RH_ARCHCTX_TIMEOUT' && error.providerMessage.startsWith('architecture projection timeout before '))
     )) {
       throw error;

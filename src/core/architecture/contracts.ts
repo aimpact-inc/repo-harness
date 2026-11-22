@@ -46,7 +46,7 @@ export interface ArchitectureProjectionReadinessV1 {
   next: string | null;
 }
 
-export interface ArchctxProcessResult { status: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string; error?: string; timedOut?: boolean }
+export interface ArchctxProcessResult { status: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string; error?: string; timedOut?: boolean; launchFailed?: boolean }
 export type RunArchctxProcess = (binary: string, args: readonly string[], options: { cwd: string; timeoutMs: number; env: NodeJS.ProcessEnv }) => ArchctxProcessResult;
 
 export interface ArchctxProviderOptions {

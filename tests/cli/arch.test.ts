@@ -383,6 +383,31 @@ describe('rh arch', () => {
     writeFileSync(parentIgnorePath, originalParentIgnore);
     rmSync(nestedChild, { recursive: true, force: true });
 
+    // 8c. Real pinned-provider test: foreign regular SQLite sidecars (-shm, -wal, -journal) beside a valid CodeGraph DB
+    // are refused before CodeGraph opens WAL mode, preserving exact sidecar bytes and directory entries.
+    const cleanCgDir = join(cleanCase.repo, '.codegraph');
+    const cleanDbPath = join(cleanCgDir, 'codegraph.db');
+    for (const sidecar of ['codegraph.db-shm', 'codegraph.db-wal', 'codegraph.db-journal'] as const) {
+      rmSync(join(cleanCgDir, sidecar), { force: true });
+    }
+    for (const [sidecar, payload, expectedErr] of [
+      ['codegraph.db-shm', 'foreign-shm-user-data\n', 'codegraph.db-shm is not a valid SQLite WAL-index'],
+      ['codegraph.db-wal', 'foreign-wal-user-data\n', 'codegraph.db-wal is not a valid SQLite WAL'],
+      ['codegraph.db-journal', 'foreign-journal-user-data\n', 'codegraph.db-journal is present'],
+    ] as const) {
+      const sidecarPath = join(cleanCgDir, sidecar);
+      writeFileSync(sidecarPath, payload);
+      const dbBefore = readFileSync(cleanDbPath);
+      const entriesBefore = readdirSync(cleanCgDir).sort();
+      const sidecarRes = runSeed(cleanCase.repo, cleanCase.env);
+      expect(sidecarRes.status).toBe(1);
+      expect(sidecarRes.stderr).toContain(expectedErr);
+      expect(readFileSync(sidecarPath, 'utf8')).toBe(payload);
+      expect(readFileSync(cleanDbPath)).toEqual(dbBefore);
+      expect(readdirSync(cleanCgDir).sort()).toEqual(entriesBefore);
+      rmSync(sidecarPath, { force: true });
+    }
+
     // 9. Non-PID / empty user files at codegraph.lock and codegraph.lock.break refused on real primary index without unlinking.
     const lockPath = join(cleanCase.repo, '.codegraph/codegraph.lock');
     writeFileSync(lockPath, 'user notes — do not delete\n');

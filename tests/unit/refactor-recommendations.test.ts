@@ -246,11 +246,20 @@ test('exposes only repository-scoped v2 CLI subcommands and options, and formats
     repo: "/tmp/target repo/work's",
     importNodeLimit: 20_000,
     timeoutMs: 300_000,
+    platform: 'linux',
   });
   expect(verifyWithFlags).toContain(
     `next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>" --repo '/tmp/target repo/work'\\''s' --import-node-limit 20000 --timeout-ms 300000\n`,
   );
-  expect(formatRefactorVerify(verifyResult, { repo: '/tmp/target-repo', importNodeLimit: 5_000 })).toContain(
+  const verifyWinFlags = formatRefactorVerify(verifyResult, {
+    repo: "C:\\Users\\O'Connor\\target repo's",
+    importNodeLimit: 20_000,
+    platform: 'win32',
+  });
+  expect(verifyWinFlags).toContain(
+    `next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>" --repo 'C:\\Users\\O''Connor\\target repo''s' --import-node-limit 20000\n`,
+  );
+  expect(formatRefactorVerify(verifyResult, { repo: '/tmp/target-repo', importNodeLimit: 5_000, platform: 'linux' })).toContain(
     `next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>" --repo /tmp/target-repo --import-node-limit 5000\n`,
   );
 
@@ -281,10 +290,19 @@ test('decide and resolve commit hints bind to the target Git root and commit onl
   const otherCheckout = realpathSync(mkdirSync(join(scratch, 'other-checkout'), { recursive: true }) ?? join(scratch, 'other-checkout'));
   const nestedDir = join(targetRepo, 'src', 'nested');
   mkdirSync(nestedDir, { recursive: true });
+  const nullGitConfig = process.platform === 'win32' ? 'NUL' : '/dev/null';
+  const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: nullGitConfig, GIT_CONFIG_NOSYSTEM: '1' };
   const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], {
     encoding: 'utf8',
-    env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
+    env: gitEnv,
   }).trim();
+  const runHint = (cwd: string, cmd: string) => {
+    if (process.platform === 'win32') {
+      execFileSync('powershell.exe', ['-NoProfile', '-Command', cmd], { cwd, env: gitEnv });
+      return;
+    }
+    execFileSync('sh', ['-c', cmd], { cwd, env: gitEnv });
+  };
 
   for (const repo of [targetRepo, otherCheckout]) {
     git(repo, 'init', '-q');
@@ -304,6 +322,17 @@ test('decide and resolve commit hints bind to the target Git root and commit onl
   writeFileSync(join(targetRepo, 'unrelated.txt'), 'keep staged\n');
   git(targetRepo, 'add', 'unrelated.txt');
 
+  // Verify PowerShell apostrophe escaping and path restriction deterministically on every host OS.
+  const winDecideHint = formatRefactorDecide({
+    recommendationId: REC_ID,
+    status: 'accepted',
+    filePath: decisionPath,
+    decision: shippedDecision(),
+  }, "C:\\Users\\O'Connor\\target repo's", 'win32');
+  expect(winDecideHint).toContain(
+    `next: git -C 'C:\\Users\\O''Connor\\target repo''s' add '--' ${decisionPath}; if ($LASTEXITCODE -eq 0) { git -C 'C:\\Users\\O''Connor\\target repo''s' commit --only -m 'chore(architecture): record refactor decision ${REC_ID} (accepted)' '--' ${decisionPath} }\n`,
+  );
+
   const decideHint = formatRefactorDecide({
     recommendationId: REC_ID,
     status: 'accepted',
@@ -314,13 +343,10 @@ test('decide and resolve commit hints bind to the target Git root and commit onl
   expect(decideCmd).toBeDefined();
   expect(decideCmd).toContain('git -C ');
   expect(decideCmd).toContain(`commit --only -m `);
-  expect(decideCmd).toContain(` -- ${decisionPath}`);
+  expect(decideCmd).toContain(decisionPath);
 
   // Run emitted decide command from a DIFFERENT checkout (`otherCheckout`).
-  execFileSync('sh', ['-c', decideCmd!], {
-    cwd: otherCheckout,
-    env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
-  });
+  runHint(otherCheckout, decideCmd!);
   expect(git(targetRepo, 'show', '--name-only', '--pretty=format:', 'HEAD')).toBe(decisionPath);
   expect(git(targetRepo, 'status', '--porcelain')).toBe('A  unrelated.txt');
   expect(git(otherCheckout, 'status', '--porcelain')).toBe(`?? .archcontext/`);
@@ -328,29 +354,30 @@ test('decide and resolve commit hints bind to the target Git root and commit onl
   // Run emitted resolve command from a NESTED subdirectory of targetRepo (verifying nested subdir resolves to top-level Git root).
   expect(resolveDecisionCommitRoot(nestedDir)).toBe(targetRepo);
   writeFileSync(join(targetRepo, decisionPath), '{"status":"resolved"}\n');
-  const resolveHint = formatRefactorResolve({
+  const resolvePayload = {
     recommendationId: REC_ID,
-    status: 'resolved',
+    status: 'resolved' as const,
     filePath: decisionPath,
     decision: shippedDecision(),
     verification: {
-      schemaVersion: 'archcontext.refactor-verify/v2',
+      schemaVersion: 'archcontext.refactor-verify/v2' as const,
       recommendationId: REC_ID,
       headSha: HEAD_SHA,
       snapshotDigest: SNAPSHOT_DIGEST,
-      disposition: 'resolved',
+      disposition: 'resolved' as const,
       resolutionDigest: RESOLUTION_DIGEST,
       killListChecks: [],
       metricChecks: [],
       blockingReasons: [],
     },
-  }, resolveDecisionCommitRoot(nestedDir));
+  };
+  expect(formatRefactorResolve(resolvePayload, "C:\\Users\\O'Connor\\target repo's", 'win32')).toContain(
+    `next: git -C 'C:\\Users\\O''Connor\\target repo''s' add '--' ${decisionPath}; if ($LASTEXITCODE -eq 0) { git -C 'C:\\Users\\O''Connor\\target repo''s' commit --only -m 'chore(architecture): mark refactor decision ${REC_ID} resolved' '--' ${decisionPath} }\n`,
+  );
+  const resolveHint = formatRefactorResolve(resolvePayload, resolveDecisionCommitRoot(nestedDir));
   const resolveCmd = resolveHint.split('\n').find((line) => line.startsWith('  next: '))?.slice('  next: '.length);
   expect(resolveCmd).toBeDefined();
-  execFileSync('sh', ['-c', resolveCmd!], {
-    cwd: nestedDir,
-    env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
-  });
+  runHint(nestedDir, resolveCmd!);
   expect(git(targetRepo, 'show', '--name-only', '--pretty=format:', 'HEAD')).toBe(decisionPath);
   expect(git(targetRepo, 'status', '--porcelain')).toBe('A  unrelated.txt');
 });

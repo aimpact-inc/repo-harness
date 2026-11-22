@@ -108,21 +108,41 @@ export function resolveDecisionCommitRoot(targetPath: string): string {
   return topLevel ? canonicalRepoPath(topLevel) : targetPath;
 }
 
-function formatDecisionCommitHint(repoRoot: string | undefined, filePath: string, message: string): string {
-  const gitPrefix = repoRoot ? `git -C ${formatShellArg(repoRoot)}` : 'git';
-  const quotedPath = formatShellArg(filePath);
-  const quotedMessage = shellQuote(message);
+function quoteCommandArg(value: string, platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' ? `'${value.replaceAll("'", "''")}'` : shellQuote(value);
+}
+
+function formatShellArg(value: string, platform: NodeJS.Platform = process.platform): string {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : quoteCommandArg(value, platform);
+}
+
+function formatDecisionCommitHint(
+  repoRoot: string | undefined,
+  filePath: string,
+  message: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const gitPrefix = repoRoot ? `git -C ${formatShellArg(repoRoot, platform)}` : 'git';
+  const quotedPath = formatShellArg(filePath, platform);
+  const quotedMessage = quoteCommandArg(message, platform);
+  if (platform === 'win32') {
+    return `${gitPrefix} add '--' ${quotedPath}; if ($LASTEXITCODE -eq 0) { ${gitPrefix} commit --only -m ${quotedMessage} '--' ${quotedPath} }`;
+  }
   return `${gitPrefix} add -- ${quotedPath} && ${gitPrefix} commit --only -m ${quotedMessage} -- ${quotedPath}`;
 }
 
-export function formatRefactorDecide(result: RefactorDecideResultV1, repoRoot?: string): string {
+export function formatRefactorDecide(
+  result: RefactorDecideResultV1,
+  repoRoot?: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
   const killCount = result.decision.killList?.length ?? 0;
   const commitMessage = `chore(architecture): record refactor decision ${result.recommendationId} (${result.status})`;
   return [
     `[RefactorDecide] ${result.recommendationId}: status=${result.status}`,
     `  file: ${result.filePath}`,
     ...(killCount > 0 ? [`  killList: ${killCount} target(s)`] : []),
-    `  next: ${formatDecisionCommitHint(repoRoot, result.filePath, commitMessage)}`,
+    `  next: ${formatDecisionCommitHint(repoRoot, result.filePath, commitMessage, platform)}`,
     '',
   ].join('\n');
 }
@@ -131,18 +151,16 @@ export interface RefactorVerifyFormatOptions {
   readonly repo?: string;
   readonly importNodeLimit?: number;
   readonly timeoutMs?: number;
-}
-
-function formatShellArg(value: string): string {
-  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : shellQuote(value);
+  readonly platform?: NodeJS.Platform;
 }
 
 export function formatRefactorVerify(result: RefactorVerifyV2, invocation: RefactorVerifyFormatOptions = {}): string {
+  const platform = invocation.platform ?? process.platform;
   const nextParts = [
     `rh arch refactor resolve ${result.recommendationId}`,
     `--resolution-digest ${result.resolutionDigest}`,
     '--reason "<reason>"',
-    ...(invocation.repo !== undefined && invocation.repo !== '' ? [`--repo ${formatShellArg(invocation.repo)}`] : []),
+    ...(invocation.repo !== undefined && invocation.repo !== '' ? [`--repo ${formatShellArg(invocation.repo, platform)}`] : []),
     ...(invocation.importNodeLimit !== undefined ? [`--import-node-limit ${invocation.importNodeLimit}`] : []),
     ...(invocation.timeoutMs !== undefined ? [`--timeout-ms ${invocation.timeoutMs}`] : []),
   ];
@@ -169,13 +187,17 @@ export function formatRefactorVerify(result: RefactorVerifyV2, invocation: Refac
   ].join('\n');
 }
 
-export function formatRefactorResolve(result: RefactorResolveResultV1, repoRoot?: string): string {
+export function formatRefactorResolve(
+  result: RefactorResolveResultV1,
+  repoRoot?: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
   const commitMessage = `chore(architecture): mark refactor decision ${result.recommendationId} resolved`;
   return [
     `[RefactorResolve] ${result.recommendationId}: status=${result.status}`,
     `  file: ${result.filePath}`,
     `  resolutionDigest: ${result.verification.resolutionDigest}`,
-    `  next: ${formatDecisionCommitHint(repoRoot, result.filePath, commitMessage)}`,
+    `  next: ${formatDecisionCommitHint(repoRoot, result.filePath, commitMessage, platform)}`,
     '',
   ].join('\n');
 }
