@@ -85,12 +85,17 @@ during its periodic health audit (`repo-harness-issue-flow` `references/advisor.
   / `--path <path>` for a scoped slice; inspect recorded decisions with
   `rh arch refactor list` / `rh arch refactor show <id>`). Never run this on
   worker `Stop` hooks or call `archctx` from `PATH`.
-- Present `recommended` observations and proposals to the owner and record each
-  owner decision with
-  `rh arch refactor decide <id> accept|defer|reject|acknowledge|waive --reason "<text>" --snapshot-digest <digest>`
-  (persist an unscanned assessment first when needed via `rh arch refactor record`).
+- Present `recommended` findings to the owner and record each owner decision
+  with
+  `rh arch refactor decide <id> accept|defer|reject|acknowledge|waive --reason "<text>"`
+  (optional `--kill-symbol`, `--kill-path` and `--kill-relation` targets).
+  `decide` writes `.archcontext/refactor-decisions/<id>.json` in Git directly.
+  After a worker commits the fix, `rh arch refactor verify <id> --json` and
+  `rh arch refactor resolve <id> --resolution-digest <resolutionDigest> --reason "<text>"`
+  close the decision.
 - Bind `accepted` recommendation IDs (`refactor_ids`) on the owning issue in
   `rh board triage-apply --manifest <path>`. For a cross-capability cycle or
-  boundary split, attach the `RefactorRecommendation` metrics and
-  `rh arch module review-prompt <capability-id> --json` output to the L3
-  `council` consultation brief (`rh seats council --issue <n> --members <csv>`).
+  boundary split, attach the finding `metrics`, `evidence`, `affectedPaths` and
+  `killList` with `rh arch module review-prompt <capability-id> --json` output
+  to the L3 `council` consultation brief
+  (`rh seats council --issue <n> --members <csv>`).

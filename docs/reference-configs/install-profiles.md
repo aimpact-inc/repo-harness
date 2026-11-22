@@ -157,9 +157,9 @@ third-party providers: `install` fetches them by default
 (`--no-external-skills` opts out), and `update` refreshes them only with
 `--with-external-skills`.
 
-The installed candidate verifies its own dependency and daemon contracts before
-it writes host surfaces. The parent owns the transaction and restores the prior
-CLI and host state when candidate verification fails. Registry installs ignore
+The installed candidate verifies its own dependency and in-process ArchContext
+capability contracts before it writes host surfaces. The parent owns the transaction
+and restores the prior CLI and host state when candidate verification fails. Registry installs ignore
 Bun's manifest cache. Package channels resolve to an exact version first.
 
 The candidate request is protocol 2 and has no `profile` field. A candidate

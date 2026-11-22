@@ -52,14 +52,10 @@ Read the cheap signal first:
    or `rh arch module review-prompt` with `--projection-check <file>`. Then
    `generated_summary` is `fresh` or `stale`. Without the file it is `unknown`.
    The file must come from a check at the current HEAD.
-3. ChangeSet receipt. When the diff changes files under `.archcontext/model/`,
-   read the ChangeSet receipt JSON (`ledger receipt`) in the PR body. Compare each receipt
-   `bodyHash` and file path with the changed model files at HEAD. A `bodyHash` is
-   `sha256:` plus the hex SHA-256 of the canonical JSON `{"body":"<file text>"}`
-   (keys sorted, UTF-8). It is not a Git blob id or a SHA-256 of the file bytes. A deletion has
-   `bodyHash: missing`. Every changed model path must have a receipt record.
-   The receipt is unsigned (`approvalAuthenticity: unverified`); it shows
-   recorded content, not human approval.
+3. Model diff and validation. When the diff changes files under `.archcontext/model/`,
+   inspect `git diff -- .archcontext/model/` and the inline `rh arch apply`
+   output in the PR body. Confirm `rh arch validate --format json` and
+   `rh arch projection check --json` (or `rh arch sync --check --json`) pass at HEAD.
 
 Human-written sections have a citation signal. Run
 `rh arch projection anchors --json`. The command is read-only
@@ -92,32 +88,31 @@ writer publishes generated files. Do not run apply to refresh a feature PR.
 ## Refactor suggestions
 
 Run `rh arch refactor recommendations --json` (pass `--node <capability-id>` or
-`--path <repo-relative-path>` once `#3346` lands). Use `--node` or `--path`
-for scoped reads during `advisor` health audits and pre-refactor intake,
-alongside full-repo post-merge scans (without `--node` or `--path`). Never call
-`archctx` from `PATH`. The result `repo-harness.refactor-recommendations/v2` has
-a `status`
-and `candidates`. Each candidate gives its kind, subject, risk, confidence,
-uncertainty, `metrics`, bounded `evidence` and module statistics. The
-`evidence` has a `kind`, a `totalCount`, a `truncated` flag and the first
-items. Module statistics are files, lines, fan-in, fan-out, cycles, direction
-violations (filled only when the model declares constraints) and unresolved
-imports. repo-harness does not show instability or test file counts in module
-statistics. A suggestion recorded by an earlier scan has
-`snapshot: "earlier"` and its own `baselineSnapshotDigest`. It keeps its
-recorded metrics and evidence and shows no module statistics, because the
-current scan measured a different snapshot.
+`--path <repo-relative-path>` for a scoped read during `advisor` health audits
+and pre-refactor intake, or omit both for a full-repo post-merge scan). Never
+invoke `archctx` from `PATH`. The result `repo-harness.refactor-recommendations/v3`
+carries `status`, `headSha`, `snapshotDigest`, `scope`, `coverage` (`imports`,
+`gitHistory`, `reasonCodes`), `findings` and `suppressed`. Each finding lists
+its `recommendationId`, `detector`, `severity`, `blocking`, `capabilityId`,
+`affectedNodeIds`, `affectedPaths`, `killList`, `metrics` and bounded `evidence`
+scalars. Inspect committed decisions with `rh arch refactor list --json` (whose
+`openFindings` is best-effort; `recommendations` is the authoritative scan with
+coverage) and `rh arch refactor show <id> --json`.
 
 | Status | Bot decision |
 | --- | --- |
-| `recommended` | Show the candidates and their evidence to the user, or schedule a bounded refactor task in the normal plan and pull request flow. |
+| `recommended` | Show the findings and their evidence to the user, or schedule a bounded refactor task in the normal plan and pull request flow. |
 | `no_action` | Schedule nothing. |
-| `proof_required` | The message names the cause. Missing code facts: run `codegraph init`. `code-facts-import-limit`: run again with a larger `--import-node-limit <n>` and use the same value on `decide`. Ambiguous ownership: schedule a model ownership fix. |
+| `proof_required` | Read `coverage` and the message. Missing code facts: run `codegraph init` (or `rh arch index seed --json` in a linked worktree). `code-facts-import-limit`: run again with a larger `--import-node-limit <n>` and pass the same value to `decide`, `verify` and `resolve`. |
 | `unavailable` | Read `code`, `action` and `message`. A missing model or provider means schedule nothing. A code with an `action` has a fix: do it first. |
 
 Record only a decision that the user made:
-`rh arch refactor decide <id> accept|defer|reject --reason "<text>" --snapshot-digest <digest>`.
-A decided suggestion is not shown again in the same worktree path and branch
-(Ancienttwo/arch-context#321). `decide` works for a recorded id or a fresh
-candidate in one call. Pass `--import-node-limit` if the scan used one. A
-suggestion is evidence. It does not authorize a refactor.
+`rh arch refactor decide <id> accept|defer|reject|acknowledge|waive --reason "<text>"`
+(add optional `--kill-symbol <path#sym>`, `--kill-path <path>` or
+`--kill-relation <id>` targets, and pass `--import-node-limit <n>` if the scan
+used one). `decide` writes `.archcontext/refactor-decisions/<id>.json` in Git in one step. Commit that
+decision file with the work. After a code fix lands, verify it read-only with
+`rh arch refactor verify <id> --json` (exit 0 only when `disposition === "resolved"`),
+then close the decision with
+`rh arch refactor resolve <id> --resolution-digest <resolutionDigest> --reason "<text>"`.
+A finding is evidence. It does not authorize a refactor.

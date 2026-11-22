@@ -75,8 +75,10 @@ never synthesize a pass):
 
 When an issue in the PR carries `Refactor IDs:` (`recommendation.<hex>`) or the
 diff resolves an entry in `.archcontext/refactor-decisions/`, run
-`rh arch refactor verify <id> --json` and verify `disposition === "resolved"`
-(or record an explicit code-facts observation gap when the index is unavailable).
+`rh arch refactor verify <id> --json` and verify `disposition === "resolved"`,
+zero `blockingReasons`, and a matching `resolutionDigest` in
+`.archcontext/refactor-decisions/<id>.json` (or record an explicit code-facts
+observation gap when the index is unavailable).
 
 ### 2.2 Rounds
 

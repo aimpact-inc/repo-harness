@@ -133,8 +133,8 @@ Otherwise skip it.
    or fix it. On a `stale-context` finding, run step 1 again.
 4. **When the issue binds `Refactor IDs:` (`recommendation.<hex>`):** commit your
    code fix first, run `rh arch refactor verify <id> --json` to confirm
-   `disposition === "resolved"`, then run
-   `rh arch refactor resolve <id> --evidence-digest <resolutionDigest> --reason "Resolved in #<issue>"`
+   `disposition === "resolved"` and read `resolutionDigest`, then run
+   `rh arch refactor resolve <id> --resolution-digest <resolutionDigest> --reason "Resolved in #<issue>"`
    and commit the updated `.archcontext/refactor-decisions/<id>.json` file on
    the PR branch.
 

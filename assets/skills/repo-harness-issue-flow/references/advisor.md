@@ -48,9 +48,9 @@ Each selected member opens a read-only `council` pane in the `council` tab and w
   `rh arch refactor recommendations --json` (scoped with `--node <capability-id>`
   or `--path <path>`) and
   `rh arch module review-prompt <capability-id> --json` for each affected
-  capability. Attach the `RefactorRecommendation` metrics (`metrics`,
-  `evidence`, `modules`) and the `review-prompt` output to the L3 `council`
-  consultation brief (`--question` / issue context).
+  capability. Attach the finding `metrics`, `evidence`, `affectedPaths` and
+  `killList` with the `review-prompt` output to the L3 `council` consultation
+  brief (`--question` / issue context).
 
 ### 1.2 Pre-dispatch intake triage and multi-issue bundling
 
@@ -113,17 +113,21 @@ the change, so the check must come from outside its session.
       `rh arch refactor show <id> --json`.
       Never invoke `archctx` from `PATH` and never run this scan on worker
       `Stop` hooks. Follow this decision flow:
-      1. Present `recommended` structural observations or proposals and their
-         evidence to the owner.
+      1. Present `recommended` findings and their evidence to the owner.
       2. Record each owner decision via
-         `rh arch refactor decide <id> accept|defer|reject|acknowledge|waive --reason "<text>" --snapshot-digest <digest>`
-         (pass the same `--import-node-limit` if the scan used one). A
-         recommendation never auto-schedules or auto-executes a refactor.
-      3. Route `accepted` single-module observations into `advisor` PR
+         `rh arch refactor decide <id> accept|defer|reject|acknowledge|waive --reason "<text>"`
+         (pass optional `--kill-symbol`, `--kill-path` or `--kill-relation`, and
+         the same `--import-node-limit` if the scan used one). `decide` writes
+         `.archcontext/refactor-decisions/<id>.json` in Git directly; after a
+         worker commits the fix, `rh arch refactor verify <id> --json` and
+         `rh arch refactor resolve <id> --resolution-digest <resolutionDigest> --reason "<text>"`
+         close the decision. A finding never auto-schedules or auto-executes a
+         refactor.
+      3. Route `accepted` single-module findings into `advisor` PR
          bundles (§1.2 / `orchestrator.md` §4.2) and bind `refactor_ids` on
          each owning issue in the `rh board triage-apply` manifest. For a
-         cross-capability cycle or boundary split, attach the
-         `RefactorRecommendation` metrics and
+         cross-capability cycle or boundary split, attach the finding `metrics`,
+         `evidence`, `affectedPaths` and `killList` with
          `rh arch module review-prompt <capability-id> --json` output to an L3
          `council` consultation (`rh seats council`, §1.1).
    10. Items for the owner: security and production only.
