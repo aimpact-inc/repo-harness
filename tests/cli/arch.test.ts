@@ -47,15 +47,19 @@ describe('rh arch', () => {
   test('refuses an unknown, owned or refused command and lets the read-only projection subcommands through', () => {
     expect(archctxRefusal(['nosuch'])).toBe('arch_command_unknown: nosuch');
     expect(archctxRefusal(['install', '--host', 'codex'])).toBe('arch_command_refused: install. Use: rh install');
-    for (const retired of ['audit', 'investigate', 'agents', 'jobs']) {
-      expect(archctxRefusal([retired, 'status'])).toBe(`arch_command_refused: ${retired}. Use: rh seats and repo-harness-issue-flow`);
+    for (const removed of ['daemon', 'ledger', 'audit', 'investigate', 'agents', 'jobs']) {
+      expect(archctxRefusal([removed, 'status'])).toBe(`arch_command_unknown: ${removed}`);
     }
     expect(archctxRefusal(['hook', 'enqueue'])).toBe('arch_command_refused: hook. Use: rh install');
-    expect(archctxRefusal(['recommendations'])).toBe('arch_command_owned: recommendations. Use: rh arch refactor');
+    for (const owned of ['recommendations', 'scan', 'decide']) {
+      expect(archctxRefusal([owned])).toBe(`arch_command_owned: ${owned}. Use: rh arch refactor`);
+    }
     expect(archctxRefusal(['projection', 'run'])).toBe('arch_command_owned: projection run. Use: rh arch projection check|plan|apply');
-    expect(archctxRefusal(['projection', 'nosuch'])).toBe('arch_command_unknown: projection nosuch');
+    for (const removedSub of ['nosuch', 'recover', 'readback']) {
+      expect(archctxRefusal(['projection', removedSub])).toBe(`arch_command_unknown: projection ${removedSub}`);
+    }
     for (const sub of ['snapshot', 'freshness', 'publish-status', 'verify-pr']) expect(archctxRefusal(['projection', sub, '--json'])).toBeNull();
-    expect(archctxRefusal(['validate', '--format', 'json'])).toBeNull();
+    for (const pass of ['validate', 'index', 'check', 'model']) expect(archctxRefusal([pass, '--json'])).toBeNull();
   });
 
   test('passes the arguments unchanged and returns the archctx exit code', () => {
@@ -72,8 +76,8 @@ describe('rh arch', () => {
     const selected = pluginSelectionEnv(['architecture']);
     expect(run(selected, 'nosuch')).toMatchObject({ status: 2, stderr: 'arch_command_unknown: nosuch\n' });
     expect(run(selected, 'install', '--host', 'codex').status).toBe(2);
-    expect(run(selected, 'audit')).toMatchObject({ status: 2, stderr: 'arch_command_refused: audit. Use: rh seats and repo-harness-issue-flow\n' });
-    expect(run(selected, 'jobs')).toMatchObject({ status: 2, stderr: 'arch_command_refused: jobs. Use: rh seats and repo-harness-issue-flow\n' });
+    expect(run(selected, 'daemon')).toMatchObject({ status: 2, stderr: 'arch_command_unknown: daemon\n' });
+    expect(run(selected, 'scan')).toMatchObject({ status: 2, stderr: 'arch_command_owned: scan. Use: rh arch refactor\n' });
     expect(run(selected, 'hook')).toMatchObject({ status: 2, stderr: 'arch_command_refused: hook. Use: rh install\n' });
     const without = run(pluginSelectionEnv([]), 'validate');
     expect(without.status).not.toBe(0);

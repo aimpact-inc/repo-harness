@@ -165,8 +165,6 @@ export function decodeArchitectureHandEdits(value: unknown): Array<{ path: strin
     || diff.reasonCode === 'projection-generated-file-manually-edited');
 }
 
-const ARCHCTX_MAINTENANCE_REMINDER = 'User authorization required: ask before replacing the shared daemon with daemon upgrade; this interrupts other clients. Use the same managed package-local archctx and Node runtime, then verify daemon status. After replacement, check the configured CodeGraph index for this repository; request authorization to rebuild only if it is missing or stale. Do not delete shared state or automatically restart/reindex.';
-
 export class ArchctxClientError extends Error {
   readonly code: string;
   readonly action: string;
@@ -176,8 +174,7 @@ export class ArchctxClientError extends Error {
   readonly providerMessage: string;
 
   constructor(error: Pick<ArchContextError, 'message' | 'action'> & { code: string } & Partial<Omit<ArchContextError, 'code' | 'message' | 'action'>>) {
-    const maintenance = error.code === 'AC_RUNTIME_VERSION_UNSUPPORTED' && error.action === 'upgrade-archctx-runtime' ? ` ${ARCHCTX_MAINTENANCE_REMINDER}` : '';
-    super(`${error.code}: ${error.message}${maintenance}${error.reasonCode ? ` (reasonCode: ${error.reasonCode})` : ''}; action: ${error.action}`);
+    super(`${error.code}: ${error.message}${error.reasonCode ? ` (reasonCode: ${error.reasonCode})` : ''}; action: ${error.action}`);
     this.name = 'ArchctxClientError';
     this.code = error.code;
     this.action = error.action;
@@ -401,9 +398,9 @@ export type ArchctxDisposition = 'pass' | 'owned' | 'refused';
 export interface ArchctxCommandDisposition { readonly disposition: ArchctxDisposition; readonly use?: string }
 
 const passCommands = [
-  'capabilities', 'init', 'sync', 'validate', 'context', 'status', 'daemon', 'state', 'repo', 'landscape', 'ledger', 'book', 'explore', 'prepare',
-  'practices', 'checkpoint', 'plan', 'apply', 'hash', 'review', 'complete', 'manifest', 'config', 'doctor', 'paths', 'privacy-audit', 'export',
-  'import', 'resolve', 'impact', 'history', 'flows', 'state-machines', 'deps', 'constraints', 'docs',
+  'capabilities', 'init', 'index', 'sync', 'validate', 'check', 'model', 'context', 'status', 'repo', 'landscape', 'explore', 'prepare',
+  'practices', 'checkpoint', 'plan', 'apply', 'hash', 'review', 'complete', 'manifest', 'doctor', 'paths', 'export',
+  'resolve', 'impact', 'history', 'flows', 'state-machines', 'deps', 'constraints', 'docs',
 ] as const;
 const owned = (use: string): ArchctxCommandDisposition => ({ disposition: 'owned', use });
 const refused = (use: string): ArchctxCommandDisposition => ({ disposition: 'refused', use });
@@ -420,16 +417,12 @@ export const ARCHCTX_COMMAND_DISPOSITIONS: Readonly<Record<string, ArchctxComman
   verify: owned('rh arch verify'),
   refactor: owned('rh arch refactor'),
   recommendations: owned('rh arch refactor'),
+  scan: owned('rh arch refactor'),
+  decide: owned('rh arch refactor'),
   install: refused('rh install'),
   uninstall: refused('rh uninstall'),
   update: refused('rh update'),
   hooks: refused('rh install'),
-  mcp: refused('rh install'),
-  tunnel: refused('not available through rh'),
-  audit: refused('rh seats and repo-harness-issue-flow'),
-  investigate: refused('rh seats and repo-harness-issue-flow'),
-  agents: refused('rh seats and repo-harness-issue-flow'),
-  jobs: refused('rh seats and repo-harness-issue-flow'),
   hook: refused('rh install'),
 };
 
@@ -445,8 +438,6 @@ const ARCHCTX_PROJECTION_SUBCOMMAND_DISPOSITIONS: Readonly<Record<string, Archct
   'verify-pr': { disposition: 'pass' },
   slice: { disposition: 'pass' },
   run: owned('rh arch projection check|plan|apply'),
-  recover: owned('rh arch projection check|plan|apply'),
-  readback: owned('rh arch projection check|plan|apply'),
 };
 
 /** The refusal text for a command that `rh arch` does not start, or null when it starts. */

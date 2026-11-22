@@ -263,7 +263,6 @@ describe('status command (Phase 1C)', () => {
             reason: 'global architecture configuration is missing; run rh update once',
           },
           codeFacts: { requirement: 'required', state: 'not-evaluated' },
-          daemonRuntime: { state: 'not-evaluated' },
           apply: { mode: 'disabled', enabled: false },
           next: null,
         });

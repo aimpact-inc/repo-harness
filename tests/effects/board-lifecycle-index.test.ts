@@ -55,7 +55,7 @@ test('the hook summary counts declared routes by outcome and never throws', () =
 test('closeout records a closed seat pane, and the hook counts only when the checkout is gone', () => {
   const pane = (address: string, seat: string | null, outcome: 'closed' | 'kept') => ({ address, seat, outcome, reason: outcome === 'kept' ? 'dirty' : null });
   const worktree = (checkout_present: boolean) => ({ path: '/tmp/repo-harness-wt-3204-x', outcome: checkout_present ? 'kept' as const : 'removed' as const, reason: null, checkout_present, branch_present: checkout_present });
-  const result = (checkout_present: boolean) => ({ kind: 'repo-harness.board-closeout' as const, pr: 3210, merge_commit: 'c'.repeat(40), daemon_stop_failures: [], stopped_codegraph_servers: [],
+  const result = (checkout_present: boolean) => ({ kind: 'repo-harness.board-closeout' as const, pr: 3210, merge_commit: 'c'.repeat(40), codegraph_stop_failures: [], stopped_codegraph_servers: [],
     panes: [pane('t1', 'worker', 'closed'), pane('t2', 'reviewer', 'kept')], stale_terminals: [pane('t9', 'gatekeeper', 'closed'), pane('t8', null, 'closed')],
     worktree: worktree(checkout_present), hook_summary: { branch: 'feat/3204-x', counts_by_code: { 'PreToolUse.bash.blocked': 2 } } });
   const closes = [{ ...close, terminal: 't1', issues: [] }, { ...close, seat: 'gatekeeper', terminal: 't9', issues: [], pr: null }];

@@ -18,7 +18,7 @@ import {
  * plugin is selected; a port without a provider is a typed unavailable
  * result, never a fallback.
  */
-export const ARCHITECTURE_CONTRACT_VERSION = 2;
+export const ARCHITECTURE_CONTRACT_VERSION = 3;
 export type ArchitectureContractVersion = typeof ARCHITECTURE_CONTRACT_VERSION;
 
 export type ProjectionProvider = 'disabled' | 'archctx';
@@ -41,7 +41,6 @@ export interface ArchitectureProjectionReadinessV1 {
    */
   projectionProvider: { provider: ProjectionProvider; state: 'disabled' | 'missing' | 'mismatch' | 'error' | 'ready'; binaryPath: string | null; nodePath: string | null; command: [string, string] | null; version: string | null; reason: string; reasonCode?: string };
   codeFacts: { requirement: 'required'; state: 'not-evaluated' | 'ready' | 'not-ready' | 'index-missing' | 'unavailable'; issues?: Array<{ code: string; message: string }>; reasonCode?: string; message?: string };
-  daemonRuntime: { state: 'not-evaluated' | 'compatible' | 'mismatch' | 'error' };
   apply: { mode: ProjectionApplyMode; enabled: boolean };
   /** The next operator step for adoption, code facts or provider repair; null when none is needed. */
   next: string | null;
@@ -145,30 +144,11 @@ export interface ResolvedArchctxPackage {
   version: string;
 }
 
-export interface ArchitectureDaemonStopFailure {
-  /** Null when the daemon listing failed before a state directory was known. */
-  stateDir: string | null;
-  code: string;
-  action: string;
-  reasonCode?: string;
-  retryable?: boolean;
-  message: string;
-}
-
-export interface ArchitectureDaemonStopReportV1 {
-  schemaVersion: 'repo-harness.architecture-daemon-stop/v1';
-  worktree: string;
-  provider: ArchitectureProjectionPolicy['provider'];
-  stopped: string[];
-  failures: ArchitectureDaemonStopFailure[];
-}
-
-/** The managed archctx runtime for the setup check and the worktree closeout. */
+/** The managed archctx runtime for the setup check. */
 export interface ArchitectureRuntimePort {
   readonly contractVersion: ArchitectureContractVersion;
   readonly requiredArchctxVersion: string;
   resolvePackageLocalArchctx(consumerRoot: string): ResolvedArchctxPackage;
-  stopWorkspaceDaemons(repoRoot: string, canonicalWorktree: string): ArchitectureDaemonStopReportV1;
 }
 
 export interface ArchitectureDoctorCheck {
@@ -222,8 +202,6 @@ export interface ArchitectureSetupPort {
   readonly codegraphVersion: string;
   /** archctx and archctx-contracts as declared, the archctx Node range, its CodeGraph, and one handshake. */
   readManagedPackages(globalPackageRoot: string, cwd: string, env: NodeJS.ProcessEnv): ManagedArchctxReadback;
-  /** Throws when the shared daemon is not compatible and does not stop cleanly. */
-  verifyDaemon(cwd: string, env: NodeJS.ProcessEnv): void;
   /** Migrates a retired section and writes the default section when it is absent. */
   ensureGlobalConfiguration(env: NodeJS.ProcessEnv, write: GlobalConfigurationWrite): ArchitectureSetupStep;
   readiness(repoRoot: string, env?: NodeJS.ProcessEnv): ArchitectureProjectionReadinessV1;

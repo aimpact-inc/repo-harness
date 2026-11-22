@@ -1,10 +1,9 @@
 import { ARCHCONTEXT_NODE_RANGE, productVersionManifest } from 'archctx-contracts';
 import { ARCHITECTURE_CONTRACT_VERSION, type ArchitectureSetupPort, type ManagedArchctxReadback } from '../../core/architecture/contracts';
-import { archctxCapabilities, inspectArchitectureProjectionReadiness, verifyArchctxDaemonRuntime } from '../../effects/architecture/archctx-provider';
+import { archctxCapabilities, inspectArchitectureProjectionReadiness } from '../../effects/architecture/archctx-provider';
 import { architectureModelReady } from '../../effects/architecture/architecture-read';
 import { readGlobalArchitectureConfiguration } from '../../effects/architecture/projection-config';
 import { ARCHCTX_PACKAGES } from '../installer/install-profile';
-import { bunGlobalPackageRoot } from '../installer/skill-projection';
 import { ensureGlobalArchitectureProjection } from './architecture-configuration';
 import { findInstalledPackageRoot, readPackageManifest, recordValue } from './global-runtime';
 
@@ -56,27 +55,11 @@ function readManagedPackages(globalPackageRoot: string, cwd: string, env: NodeJS
   return { status: 'ready', versions };
 }
 
-function verifyDaemon(cwd: string, env: NodeJS.ProcessEnv): void {
-  const globalPackageRoot = bunGlobalPackageRoot(env);
-  if (!globalPackageRoot) throw new Error('unable to resolve Bun global package root');
-  const requiredVersion = recordValue(readPackageManifest(globalPackageRoot).dependencies).archctx;
-  if (typeof requiredVersion !== 'string') throw new Error('managed archctx dependency version is unavailable');
-  const archctxRoot = findInstalledPackageRoot(globalPackageRoot, 'archctx');
-  if (archctxRoot === null) {
-    throw new Error(`mandatory dependency is missing: archctx@${requiredVersion}`);
-  }
-  verifyArchctxDaemonRuntime(cwd, {
-    consumerRoot: globalPackageRoot, env,
-    policy: { provider: 'archctx', applyMode: 'manual', requiredVersion, timeoutMs: 10_000 },
-  }, archctxRoot);
-}
-
 /** The setup provider that only the CLI root registers, and only when the architecture plugin is selected. */
 export const ARCHITECTURE_SETUP_PROVIDER: ArchitectureSetupPort = {
   contractVersion: ARCHITECTURE_CONTRACT_VERSION,
   codegraphVersion: productVersionManifest().runtime.codeGraph.requiredVersion,
   readManagedPackages,
-  verifyDaemon,
   ensureGlobalConfiguration: ensureGlobalArchitectureProjection,
   readiness: (repoRoot, env) => inspectArchitectureProjectionReadiness(repoRoot, architectureModelReady, { env }),
   configuration: (env) => {
