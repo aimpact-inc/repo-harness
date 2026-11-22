@@ -41,12 +41,10 @@ guard rechecks merge proof, dirty state, lock, branch/path and both OIDs.
 
 ```sh
 rh worktrees runtime cleanup --repo <primary> --worktree <canonical-path>
-rh worktrees runtime stop-architecture-daemons --repo <primary> --worktree <canonical-path>
 rh worktrees runtime remove-exact --repo <primary> --worktree <canonical-path> --branch <exact-branch> --head <observed-head> --target <local-target-ref> --target-oid <observed-target-oid> --merge <confirmed-merge-sha>
 ```
 
-Stop on a failed runtime cleanup. Report a daemon-stop failure as the existing
-cleanup path does. Runtime cleanup precedes marker release and Git removal.
+Stop on a failed runtime cleanup. Runtime cleanup precedes marker release and Git removal.
 When notification returns `owner_gone`, the orchestrator uses the same closeout.
 Notification is not a deletion prerequisite or a new grant. Keep and report any
 cleanup refusal. Sweep still preserves unknown or open runtime state.

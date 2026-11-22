@@ -1199,7 +1199,7 @@ function checkpoint(step: string) {
     }
   }, 30_000);
 
-  for (const scenario of ['parent-renderer', 'candidate-renderer', 'wrong-version', 'candidate-daemon'] as const) {
+  for (const scenario of ['parent-renderer', 'candidate-renderer', 'wrong-version'] as const) {
     test(`#699 ${scenario}: update binds verification to the installed candidate`, () => {
       const root = mkdtempSync(join(tmpdir(), 'repo-harness-update-699-'));
       const home = join(root, 'home');
@@ -1215,20 +1215,11 @@ function checkpoint(step: string) {
         copyRuntimeFixture(candidateRoot, '0.22.1', 150);
         if (scenario === 'parent-renderer') requireLegacyRenderer(parentRoot);
         if (scenario === 'candidate-renderer') requireLegacyRenderer(candidateRoot);
-        if (scenario === 'candidate-daemon') {
-          // Inject a daemon status failure without starting or changing any shared daemon.
-          const providerPath = join(candidateRoot, 'src', 'effects', 'architecture', 'archctx-provider.ts');
-          const provider = readFileSync(providerPath, 'utf-8');
-          const anchor = 'export function verifyArchctxDaemonRuntime(repoRoot: string, options: ArchctxProviderOptions = {}, packageRoot?: string): void {';
-          if (!provider.includes(anchor)) throw new Error('fixture requires the daemon inspector');
-          writeFileSync(providerPath, provider.replace(anchor, `${anchor}
-  throw new Error('User authorization required: daemon fixture needs maintenance');`));
-        }
         const globalRoot = join(home, '.bun', 'install', 'global');
         const globalPackage = join(globalRoot, 'node_modules', 'repo-harness');
         mkdirSync(join(globalRoot, 'node_modules'), { recursive: true });
         symlinkSync(parentRoot, globalPackage, 'dir');
-        // The renderer and daemon checks belong to the architecture plugin.
+        // The renderer checks belong to the architecture plugin.
         recordPluginSelection({ HOME: home });
         const globalManifest = join(globalRoot, 'package.json');
         const oldManifest = JSON.stringify({ dependencies: { 'repo-harness': '^0.21.2' } });
@@ -1261,7 +1252,7 @@ function checkpoint(step: string) {
         const runtime = JSON.parse(result.stdout);
         const handoff = runtime.steps.find((step: { step: string }) => step.step === 'reconcile installed candidate runtime');
         const log = readFileSync(bunLog, 'utf-8');
-        if (scenario === 'parent-renderer' || scenario === 'candidate-daemon') {
+        if (scenario === 'parent-renderer') {
           expect(result.status, `${result.stderr}\n${result.stdout}`).toBe(0);
           expect(handoff.status).toBe('ok');
           expect(handoff.detail).toContain('candidate=0.22.1');
@@ -1270,10 +1261,6 @@ function checkpoint(step: string) {
           expect(JSON.parse(readFileSync(globalManifest, 'utf-8')).dependencies['repo-harness']).toBe('^0.22.1');
           expect(readFileSync(cliBin, 'utf-8')).toContain('0.22.1');
           expect(JSON.parse(readFileSync(hookPath, 'utf-8')).hooks.Stop[0].hooks[0].timeout).toBe(150);
-          if (scenario === 'candidate-daemon') {
-            expect(handoff.detail).toContain('Daemon readiness pending');
-            expect(runtime.lines.join('\n')).toContain('User authorization required: daemon fixture needs maintenance');
-          }
           // The same parent verifier must still reject v5 without a handoff.
           if (scenario === 'parent-renderer') {
             const noCli = spawnSync(process.execPath, [join(parentRoot, 'src', 'cli', 'index.ts'), ...args,

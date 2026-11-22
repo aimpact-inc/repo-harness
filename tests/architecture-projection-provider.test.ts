@@ -29,7 +29,6 @@ import {
   ArchctxClient,
   archctxCapabilities,
   architectureProjectionRequest,
-  verifyArchctxDaemonRuntime,
   inspectArchitectureProjectionReadiness,
   readArchitectureProjectionSnapshot,
   resolveCompatibleNodeRuntime,
@@ -37,7 +36,6 @@ import {
   readArchitectureDocsAnchors,
   readArchitectureProjectionApply,
   runArchitectureProjection,
-  stopWorkspaceArchitectureDaemons,
 } from '../src/effects/architecture/archctx-provider';
 import { architectureModelReady, readArchitectureNativeContext, readArchitectureHandEdits } from '../src/effects/architecture/architecture-read';
 import { trustedNodeCandidates } from '../src/effects/runtime/node-candidates';
@@ -425,7 +423,7 @@ function writeAppliedOutputs(repoRoot: string): void {
 function runner(calls: Array<{ binary: string; args: readonly string[] }>, docs: ReturnType<typeof projectionEnvelope>): RunArchctxProcess {
   return (binary, args): ArchctxProcessResult => {
     calls.push({ binary, args });
-    return { status: 0, signal: null, stdout: JSON.stringify(args[0] === 'capabilities' ? capabilities() : args[0] === 'doctor' ? doctorEnvelope() : args[0] === 'daemon' ? { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'daemon.status', data: { running: false } } : args[1] === 'snapshot' ? snapshotEnvelope() : docs), stderr: '' };
+    return { status: 0, signal: null, stdout: JSON.stringify(args[0] === 'capabilities' ? capabilities() : args[0] === 'doctor' ? doctorEnvelope() : args[1] === 'snapshot' ? snapshotEnvelope() : docs), stderr: '' };
   };
 }
 
@@ -848,7 +846,7 @@ describe('package-local ArchContext projection provider', () => {
     expect(calls.some((call) => call.args[0] === 'projection' && call.args[1] === 'run')).toBe(true);
   });
 
-  test('readiness reports missing policy and incompatible daemon as typed states', () => {
+  test('readiness reports missing repository policy', () => {
     const f = fixture();
     const options = { consumerRoot: f.consumerRoot, policy, run: runner([], projectionEnvelope(expectedSnapshot)) };
     rmSync(join(f.repoRoot, '.ai/harness/policy.json'));
@@ -856,14 +854,6 @@ describe('package-local ArchContext projection provider', () => {
     expect(missing.modelAuthority.source).toBe('unadopted');
     expect(missing.projectionProvider.state).toBe('missing');
     expect(missing.projectionProvider.reason).toContain('run rh init');
-    writeFileSync(join(f.repoRoot, '.ai/harness/policy.json'), JSON.stringify({ context: { capability_source: 'archcontext' } }));
-    const run: RunArchctxProcess = (_bin, args) => ({ status: 0, signal: null, stderr: '', stdout: JSON.stringify(args[0] === 'capabilities' ? capabilities() : {
-      schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'daemon.status', data: { running: true, versionUnsupported: { reason: 'product-version-mismatch', expected: ARCHCTX_REQUIRED_VERSION, received: '0.6.3', action: 'upgrade-archctx-runtime', command: 'archctx daemon upgrade' } },
-    }) });
-    const mismatch = inspectArchitectureProjectionReadiness(f.repoRoot, architectureModelReady, { ...options, run });
-    expect(mismatch.projectionProvider.state).toBe('mismatch');
-    expect(mismatch.daemonRuntime.state).toBe('mismatch');
-    expect(mismatch.apply.enabled).toBe(false);
   });
 
   test('readiness maps doctor not-ready and issues to code facts and the fix', () => {
@@ -882,7 +872,7 @@ describe('package-local ArchContext projection provider', () => {
     expect(readiness.codeFacts).toEqual({ requirement: 'required', state: 'not-ready', issues });
     expect(readiness.apply.enabled).toBe(false);
     expect(readiness.next).toBe('codegraph index .');
-    expect(calls.map(({ args }) => args[0])).toEqual(['capabilities', 'daemon', 'doctor']);
+    expect(calls.map(({ args }) => args[0])).toEqual(['capabilities', 'doctor']);
   });
 
   test('readiness keeps doctor failures closed and preserves unavailable diagnostics', () => {
@@ -982,57 +972,6 @@ describe('package-local ArchContext projection provider', () => {
       expect(result.projectionProvider.state).toBe('error');
       expect(result.projectionProvider.reason).toContain('is not valid JSON');
       expect(result.apply.enabled).toBe(false);
-    });
-  });
-
-  describe('closeout architecture daemon stop', () => {
-    const worktree = '/private/tmp/repo-harness-wt-closed';
-    const listing = (daemons: unknown[]) => ({ schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'daemon.list', data: { stateRoot: '/state', daemons } });
-    const entry = (stateDir: string, root: string | undefined, connection = 'valid') => ({ storageRepositoryId: 'repo.0000000000000001', storageWorkspaceId: 'ws.0000000000000001', stateDir, connectionPath: `${stateDir}/archctxd.json`, connection, ...(root === undefined ? {} : { root, rootExists: false, pid: 1, pidAlive: true }) });
-    const daemons = [entry('/state/closed', worktree), entry('/state/other', '/private/tmp/repo-harness-wt-other'), entry('/state/orphan', undefined, 'invalid')];
-
-    test('stops only the daemon whose listed root is the removed checkout, by state directory', () => {
-      const f = fixture();
-      const calls: Array<{ args: readonly string[]; cwd: string }> = [];
-      const run: RunArchctxProcess = (_binary, args, options) => {
-        calls.push({ args, cwd: options.cwd });
-        return { status: 0, signal: null, stderr: '', stdout: JSON.stringify(args[1] === 'list' ? listing(daemons) : { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'daemon.stop', data: { stopping: true } }) };
-      };
-      expect(stopWorkspaceArchitectureDaemons(f.repoRoot, worktree, { consumerRoot: f.consumerRoot, policy, run })).toEqual({
-        schemaVersion: 'repo-harness.architecture-daemon-stop/v1', worktree, provider: 'archctx', stopped: ['/state/closed'], failures: [],
-      });
-      expect(calls).toEqual([
-        { args: ['daemon', 'list', '--json'], cwd: f.repoRoot },
-        { args: ['daemon', 'stop', '--state-dir', '/state/closed', '--json'], cwd: f.repoRoot },
-      ]);
-    });
-
-    test('a disabled provider reports disabled and never resolves or runs archctx', () => {
-      const run: RunArchctxProcess = () => { throw new Error('must not run'); };
-      expect(stopWorkspaceArchitectureDaemons('/missing-repo', worktree, { consumerRoot: '/missing-consumer', policy: { ...policy, provider: 'disabled', applyMode: 'disabled' }, run })).toEqual({
-        schemaVersion: 'repo-harness.architecture-daemon-stop/v1', worktree, provider: 'disabled', stopped: [], failures: [],
-      });
-    });
-
-    test('typed stop and listing failures are reported with their archctx fields', () => {
-      const f = fixture();
-      const unavailable = errorEnvelope('daemon.stop', 'AC_RUNTIME_UNAVAILABLE', 'No archctxd connection file found in /state/closed');
-      const stopFailed: RunArchctxProcess = (_binary, args) => args[1] === 'list'
-        ? { status: 0, signal: null, stderr: '', stdout: JSON.stringify(listing(daemons)) }
-        : { status: 1, signal: null, stderr: '', stdout: JSON.stringify(unavailable) };
-      expect(stopWorkspaceArchitectureDaemons(f.repoRoot, worktree, { consumerRoot: f.consumerRoot, policy, run: stopFailed }).failures).toEqual([
-        { stateDir: '/state/closed', code: 'AC_RUNTIME_UNAVAILABLE', action: 'start-or-reconnect-runtime', retryable: true, message: 'No archctxd connection file found in /state/closed' },
-      ]);
-      const listFailed: RunArchctxProcess = () => ({ status: 1, signal: null, stderr: '', stdout: JSON.stringify(errorEnvelope('daemon.list', 'AC_RUNTIME_UNAVAILABLE', 'state root unreadable')) });
-      const report = stopWorkspaceArchitectureDaemons(f.repoRoot, worktree, { consumerRoot: f.consumerRoot, policy, run: listFailed });
-      expect(report.stopped).toEqual([]);
-      expect(report.failures).toEqual([{ stateDir: null, code: 'AC_RUNTIME_UNAVAILABLE', action: 'start-or-reconnect-runtime', retryable: true, message: 'state root unreadable' }]);
-    });
-
-    test('an invalid stop envelope fails closed instead of counting as stopped', () => {
-      const f = fixture();
-      const run: RunArchctxProcess = (_binary, args) => ({ status: 0, signal: null, stderr: '', stdout: JSON.stringify(args[1] === 'list' ? listing(daemons) : { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'daemon.stop', data: {} }) });
-      expect(() => stopWorkspaceArchitectureDaemons(f.repoRoot, worktree, { consumerRoot: f.consumerRoot, policy, run })).toThrow('archctx daemon stop returned an invalid envelope');
     });
   });
 
@@ -1863,8 +1802,8 @@ describe('package-local ArchContext projection provider', () => {
 });
 
 
-describe('ArchContext maintenance reminders', () => {
-  test('managed daemon check finds a hoisted Bun global install and fails when missing', () => {
+describe('Managed ArchContext packages and errors', () => {
+  test('managed package check finds a hoisted Bun global install and fails when missing', () => {
     const f = fixture();
     const bunRoot = join(f.root, '.bun');
     const globalRoot = join(bunRoot, 'install', 'global');
@@ -1888,64 +1827,9 @@ describe('ArchContext maintenance reminders', () => {
     expect(createRequire(join(harnessRoot, 'package.json')).resolve('archctx/package.json')).toBe(join(nestedRoot, 'package.json'));
     rmSync(nestedRoot, { recursive: true });
     const env = { ...process.env, BUN_INSTALL: bunRoot };
-    expect(() => ARCHITECTURE_SETUP_PROVIDER.verifyDaemon(f.repoRoot, env)).not.toThrow();
     expect(ARCHITECTURE_SETUP_PROVIDER.readManagedPackages(harnessRoot, f.repoRoot, env).status).toBe('ready');
     rmSync(selectedRoot, { recursive: true });
-    expect(() => ARCHITECTURE_SETUP_PROVIDER.verifyDaemon(f.repoRoot, env)).toThrow();
-  });
-
-  const incompatible = {
-    schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'daemon.status',
-    data: { running: true, versionUnsupported: {
-      reason: 'product-version-mismatch', expected: ARCHCTX_REQUIRED_VERSION, received: '0.2.3',
-      action: 'upgrade-archctx-runtime', command: 'archctx daemon upgrade',
-    } },
-  };
-
-  test('daemon lifecycle mismatch requests authorization without running recovery', () => {
-    const f = fixture();
-    const calls: string[][] = [];
-    const run: RunArchctxProcess = (_binary, args) => {
-      calls.push([...args]);
-      return { status: 0, signal: null, stdout: JSON.stringify(incompatible), stderr: '' };
-    };
-    expect(() => verifyArchctxDaemonRuntime(f.repoRoot, { consumerRoot: f.consumerRoot, policy, run }))
-      .toThrow('received 0.2.3. User authorization required');
-    expect(calls).toEqual([['daemon', 'status', '--json']]);
-  });
-
-  test('healthy and stopped daemons need no maintenance; malformed status fails closed', () => {
-    const f = fixture();
-    const check = (data: unknown) => verifyArchctxDaemonRuntime(f.repoRoot, {
-      consumerRoot: f.consumerRoot, policy,
-      run: () => ({ status: 0, signal: null, stdout: JSON.stringify({ schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'daemon.status', data }), stderr: '' }),
-    });
-    expect(() => check({ running: false })).not.toThrow();
-    expect(() => check({ running: true, rpcVersionCompatible: true, productVersionCompatible: true })).not.toThrow();
-    expect(() => check({ running: true })).toThrow('did not prove runtime compatibility');
-    expect(() => check({ running: 'true' })).toThrow('invalid envelope');
-    expect(() => check({ running: false, staleConnection: true })).toThrow('unhealthy connection');
-    expect(() => check({ ...incompatible.data, versionUnsupported: { ...incompatible.data.versionUnsupported, action: 'unknown' } }))
-      .toThrow('invalid versionUnsupported diagnostic');
-  });
-
-  test('projection failure preserves typed maintenance guidance beyond diagnostic truncation', () => {
-    const f = fixture();
-    const calls: string[][] = [];
-    const run: RunArchctxProcess = (_binary, args) => {
-      calls.push([...args]);
-      return { status: args[0] === 'capabilities' ? 0 : 1, signal: null, stderr: 'short stderr', stdout: JSON.stringify(args[0] === 'capabilities' ? capabilities() : {
-        schemaVersion: 'archcontext.envelope/v1', ok: false, requestId: 'projection',
-        error: { ...errorEnvelope('projection', 'AC_RUNTIME_VERSION_UNSUPPORTED', 'x'.repeat(400) + ' daemon 0.2.3 requires replacement').error },
-      }) };
-    };
-    let message = '';
-    try { runArchitectureProjection(request(), f.repoRoot, { consumerRoot: f.consumerRoot, policy, run }); }
-    catch (error) { message = (error as Error).message; }
-    expect(message).toContain('daemon 0.2.3 requires replacement');
-    expect(message).toContain('User authorization required');
-    expect(message).toContain('only if it is missing or stale');
-    expect(calls.map((args) => args[0])).toEqual(['capabilities', 'projection']);
+    expect(ARCHITECTURE_SETUP_PROVIDER.readManagedPackages(harnessRoot, f.repoRoot, env).status).toBe('package-mismatch');
   });
 
   test('untyped stderr and wrong envelope schemas never produce a reset recommendation', () => {

@@ -2,7 +2,7 @@
 import { verifyInstalledManagedRuntime } from '../src/cli/commands/global-runtime';
 import { readRecordedSelection, recordedPlugins, registerSelectedArchitecturePorts } from '../src/cli/installer/architecture-selection';
 
-// The archctx readback and daemon check run only for a selected architecture plugin.
+// The archctx package check runs only for a selected architecture plugin.
 const selection = readRecordedSelection();
 await registerSelectedArchitecturePorts(selection, async () => {
   const [{ ARCHITECTURE_PROVIDERS }, { ARCHITECTURE_SETUP_PROVIDER }] = await Promise.all([

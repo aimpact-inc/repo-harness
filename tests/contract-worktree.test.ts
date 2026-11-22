@@ -1059,7 +1059,6 @@ describe('W2/W3/W4 start and closeout ownership', () => {
       expect(result.status, result.stderr).toBe(0); expect(existsSync(f.target)).toBe(false);
       expect(run('git', ['branch', '--list', 'codex/owned'], f.cwd).stdout.trim()).toBe('');
       // The fixture HOME has no global architecture configuration, so the provider is disabled.
-      expect(result.stdout).toContain(JSON.stringify({ schemaVersion: 'repo-harness.architecture-daemon-stop/v1', worktree: f.target, provider: 'disabled', stopped: [], failures: [] }));
     } finally { f.cleanup(); }
   }, 15000);
   test('retry recovers the same registered branch and marker', () => {

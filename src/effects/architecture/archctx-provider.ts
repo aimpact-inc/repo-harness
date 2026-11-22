@@ -3,7 +3,7 @@ import { DEFAULT_GLOBAL_ARCHITECTURE, loadArchitectureProjectionPolicy, readGlob
 import { accessSync, constants as fsConstants, existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { userInfo } from 'node:os';
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { ARCHCONTEXT_NODE_RANGE, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_SCHEMA_VERSION, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_UPGRADE_COMMAND, ERROR_CATALOG, PROJECTION_MANIFEST_UPGRADE_REQUIRED, failureIssues, architectureDocsProjectionCompatibilityIssues, PROJECTION_REQUEST_SCHEMA_VERSION, digestJson, type ArchContextError, type ArchctxCapabilitiesV1, type ArchitectureDebtDeltaReportV1, type ArchitectureDebtReportV1, type DocsAnchorsReportV1, type Json, type ProjectionApplyReadbackResultV2, type ProjectionExpectedSnapshotV1, type ProjectionMode, type ProjectionRequestV1, type ProjectionResultV3 } from 'archctx-contracts';
@@ -15,7 +15,7 @@ import { selectCompatibleNode } from '../runtime/node-runtime';
 import { runProcess } from '../process-runner';
 import type { CapabilityOwnership } from '../../core/capabilities/registry';
 import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError, assertArchctxVersion, assertProjectionApplyReadbackResult, assertProjectionResult, decodeArchitectureDebtDelta, decodeArchitectureDebtReport, decodeDocsAnchorsReport, readArchitectureProjectionPolicy } from '../../core/architecture/projection';
-import type { ArchctxProcessResult, ArchctxProviderOptions, ArchitectureDaemonStopFailure, ArchitectureDaemonStopReportV1, ResolvedArchctxPackage, ArchitectureProjectionReadinessV1 } from '../../core/architecture/contracts';
+import type { ArchctxProcessResult, ArchctxProviderOptions, ResolvedArchctxPackage, ArchitectureProjectionReadinessV1 } from '../../core/architecture/contracts';
 import { gitExecFileSync } from '../git/runner';
 
 const ARCHCTX_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -200,9 +200,6 @@ export class ArchctxClient {
     if (result.stdout.trim() === '') throw new Error(`${label} failed: exit ${result.status}: ${result.stderr.trim()}`);
     const value = parseJson(result, label);
     if (args[0] === 'capabilities' && result.status === 0) return value;
-    // Daemon lifecycle readback is not a request-scoped command and carries no
-    // requestId; its caller validates the lifecycle envelope itself.
-    if (args[0] === 'daemon' && result.status === 0) return value;
     if (!isRecord(value) || value.schemaVersion !== 'archcontext.envelope/v1' || typeof value.ok !== 'boolean' || typeof value.requestId !== 'string') throw new Error(`${label} returned an invalid envelope`);
     if (value.ok === false) {
       const error = decodeArchctxError(value.error);
@@ -298,89 +295,6 @@ export function runArchctxPassThrough(cwd: string, args: readonly string[], opti
   return result.status ?? 1;
 }
 
-/** Lifecycle readback is separate from the CLI-only capabilities handshake. */
-export function verifyArchctxDaemonRuntime(repoRoot: string, options: ArchctxProviderOptions = {}, packageRoot?: string): void {
-  hasUsableArchctxDaemon(repoRoot, options, packageRoot);
-}
-
-/** Validate status without starting a daemon. True means a usable daemon answered. */
-function hasUsableArchctxDaemon(repoRoot: string, options: ArchctxProviderOptions = {}, packageRoot?: string): boolean {
-  const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
-  const client = new ArchctxClient(repoRoot, policy.requiredVersion, options, packageRoot);
-  const resolved = client.resolved;
-  const value = client.json(['daemon', 'status', '--json'], Math.min(policy.timeoutMs, 10_000));
-  if (!isRecord(value) || value.schemaVersion !== 'archcontext.envelope/v1' || value.ok !== true || !isRecord(value.data) || typeof value.data.running !== 'boolean') {
-    throw new Error('archctx daemon status returned an invalid envelope');
-  }
-  const data = value.data;
-  if (data.staleConnection === true) {
-    throw new Error('archctx daemon status reports an unhealthy connection; runtime compatibility is unverified. Ask the user before daemon repair; do not automatically restart or clear shared state.');
-  }
-  if (data.versionUnsupported !== undefined) {
-    const issue = data.versionUnsupported;
-    if (!isRecord(issue) || typeof issue.reason !== 'string' || typeof issue.expected !== 'string' || typeof issue.received !== 'string' || issue.action !== 'upgrade-archctx-runtime' || issue.command !== 'archctx daemon upgrade') {
-      throw new Error('archctx daemon status returned an invalid versionUnsupported diagnostic');
-    }
-    throw new ArchctxClientError({ code: 'AC_RUNTIME_VERSION_UNSUPPORTED', action: 'upgrade-archctx-runtime', reasonCode: issue.reason, message: `managed archctx@${resolved.version}; daemon ${issue.reason}: expected ${issue.expected}, received ${issue.received}.` });
-  }
-  if (data.running && (data.rpcVersionCompatible !== true || data.productVersionCompatible !== true)) {
-    throw new Error('archctx daemon status did not prove runtime compatibility');
-  }
-  return data.running === true && data.responding !== false && data.usable !== false;
-}
-
-function daemonStopFailure(stateDir: string | null, error: ArchctxClientError): ArchitectureDaemonStopFailure {
-  return {
-    stateDir, code: error.code, action: error.action, message: error.providerMessage,
-    ...(error.reasonCode === undefined ? {} : { reasonCode: error.reasonCode }),
-    ...(error.retryable === undefined ? {} : { retryable: error.retryable }),
-  };
-}
-
-/** Closeout calls archctx outside the topology lock; each call still stays short. */
-const ARCHCTX_DAEMON_STOP_BUDGET_MS = 3_000;
-
-/**
- * Closeout stops the daemons that archctx lists for a checkout it is about to
- * remove. The listed connection root is archctx's own canonical workspace
- * root, so a daemon is selected only by exact root equality and stopped by its
- * state directory. Typed archctx failures are reported; contract violations throw.
- */
-export function stopWorkspaceArchitectureDaemons(repoRoot: string, canonicalWorktree: string, options: ArchctxProviderOptions = {}): ArchitectureDaemonStopReportV1 {
-  if (!isAbsolute(canonicalWorktree)) throw new Error('architecture daemon stop requires an absolute canonical worktree path');
-  const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
-  const report: ArchitectureDaemonStopReportV1 = { schemaVersion: 'repo-harness.architecture-daemon-stop/v1', worktree: canonicalWorktree, provider: policy.provider, stopped: [], failures: [] };
-  if (policy.provider === 'disabled') return report;
-  const client = new ArchctxClient(repoRoot, policy.requiredVersion, options);
-  const maximumMs = Math.min(policy.timeoutMs, ARCHCTX_DAEMON_STOP_BUDGET_MS);
-  let listed: unknown;
-  try { listed = client.json(['daemon', 'list', '--json'], maximumMs); }
-  catch (error) {
-    if (!(error instanceof ArchctxClientError)) throw error;
-    report.failures.push(daemonStopFailure(null, error));
-    return report;
-  }
-  if (!isRecord(listed) || listed.schemaVersion !== 'archcontext.envelope/v1' || listed.ok !== true || !isRecord(listed.data) || !Array.isArray(listed.data.daemons)) {
-    throw new Error('archctx daemon list returned an invalid envelope');
-  }
-  for (const entry of listed.data.daemons) {
-    if (!isRecord(entry) || typeof entry.stateDir !== 'string' || typeof entry.connection !== 'string') throw new Error('archctx daemon list returned an invalid daemon entry');
-    if (entry.connection !== 'valid' || entry.root !== canonicalWorktree) continue;
-    let stopped: unknown;
-    try { stopped = client.json(['daemon', 'stop', '--state-dir', entry.stateDir, '--json'], maximumMs); }
-    catch (error) {
-      if (!(error instanceof ArchctxClientError)) throw error;
-      report.failures.push(daemonStopFailure(entry.stateDir, error));
-      continue;
-    }
-    if (!isRecord(stopped) || stopped.schemaVersion !== 'archcontext.envelope/v1' || stopped.ok !== true || !isRecord(stopped.data) || stopped.data.stopping !== true) {
-      throw new Error('archctx daemon stop returned an invalid envelope');
-    }
-    report.stopped.push(entry.stateDir);
-  }
-  return report;
-}
-
 const PROJECTION_MANIFEST_INCOMPATIBLE = 'projection-manifest-incompatible';
 const COMMITTED_PROJECTION_MANIFEST = 'docs/architecture/.projection-manifest.json';
 
@@ -422,13 +336,11 @@ export function inspectArchitectureProjectionReadiness(
 ): ArchitectureProjectionReadinessV1 {
   const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
   let source: ArchitectureProjectionReadinessV1['modelAuthority']['source'] = 'unadopted';
-  let daemonState: ArchitectureProjectionReadinessV1['daemonRuntime']['state'] = 'not-evaluated';
   let codeFacts: ArchitectureProjectionReadinessV1['codeFacts'] = { requirement: 'required', state: 'not-evaluated' };
   const base = () => ({
     schemaVersion: 'repo-harness.architecture-projection-readiness/v1' as const,
     modelAuthority: { source, ready: source !== 'unadopted' && capabilityAuthorityReady(repoRoot) },
     codeFacts,
-    daemonRuntime: { state: daemonState },
     apply: { mode: policy.applyMode, enabled: false },
   });
   try {
@@ -442,14 +354,12 @@ export function inspectArchitectureProjectionReadiness(
     const nodePath = resolveCompatibleNodeRuntime(options.env ?? process.env, options.trustedNodeCandidateSource);
     const handshake = archctxCapabilities(repoRoot, options);
     assertCommittedProjectionManifestCompatible(repoRoot, handshake.capabilities);
-    try { verifyArchctxDaemonRuntime(repoRoot, options); daemonState = 'compatible'; }
-    catch (error) { daemonState = error instanceof ArchctxClientError && error.code === 'AC_RUNTIME_VERSION_UNSUPPORTED' ? 'mismatch' : 'error'; throw error; }
     const facts = readArchitectureCodeFacts(new ArchctxClient(repoRoot, policy.requiredVersion, options), policy.timeoutMs);
     codeFacts = { requirement: 'required', ...facts };
     const modelReady = readModelReady(repoRoot, options);
     return {
       ...base(),
-      projectionProvider: { provider: 'archctx', state: 'ready', binaryPath: handshake.resolved.binaryPath, nodePath, command: [nodePath, handshake.resolved.binaryPath], version: handshake.resolved.version, reason: 'exact package-local handshake and daemon runtime check passed; code facts are reported separately' },
+      projectionProvider: { provider: 'archctx', state: 'ready', binaryPath: handshake.resolved.binaryPath, nodePath, command: [nodePath, handshake.resolved.binaryPath], version: handshake.resolved.version, reason: 'exact package-local handshake passed; code facts are reported separately' },
       apply: { mode: policy.applyMode, enabled: policy.applyMode !== 'disabled' && modelReady && codeFacts.state === 'ready' },
       next: facts.state !== 'ready' ? codeFactsFixCommand(facts.state) : source !== 'archcontext' || !modelReady ? architectureAdoptionStep() : null,
     };
@@ -647,11 +557,6 @@ export function prepareArchitectureTask(repoRoot: string, task: string, options:
       throw new ArchctxClientError({ code: 'RH_ARCHCTX_TIMEOUT', action: 'retry', message: 'architecture prepare skipped: less than 1500 ms remains' });
     }
   };
-  requirePrepareTime();
-  // Status never starts a daemon. Prepare can start one if none answers.
-  if (!hasUsableArchctxDaemon(repoRoot, { ...options, policy })) {
-    throw new ArchctxClientError({ code: 'AC_RUNTIME_UNAVAILABLE', action: 'start-or-reconnect-runtime', message: 'architecture prepare skipped: no usable daemon answered' });
-  }
   requirePrepareTime();
   const data = new ArchctxClient(repoRoot, policy.requiredVersion, options).data(['prepare', '--task', task, '--json'], 3_000);
   remainingTimeout(options, 3_000, 'notice prepare decode');

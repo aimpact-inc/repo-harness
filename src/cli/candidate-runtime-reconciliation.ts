@@ -87,10 +87,6 @@ export function runCandidateRuntimeReconciliation(
     if (runtime.exitCode !== 0) {
       throw new Error(`candidate reconciliation failed: ${runtime.lines.join('; ')}`);
     }
-    // Stdout is the receipt. Keep maintenance advice visible without
-    // changing the receipt parsed by an already released parent.
-    const daemon = runtime.steps.find(step => step.step === 'check shared ArchContext daemon');
-    if (daemon?.status === 'skipped') console.error(daemon.detail);
     // The parent shows candidate stderr in its reconcile step. Files that update
     // did not sync must stay visible with their next action.
     const globalRules = runtime.steps.find(step => step.step === GLOBAL_RULES_REFRESH_STEP);

@@ -47,9 +47,7 @@ describe('rh arch', () => {
   test('refuses an unknown, owned or refused command and lets the read-only projection subcommands through', () => {
     expect(archctxRefusal(['nosuch'])).toBe('arch_command_unknown: nosuch');
     expect(archctxRefusal(['install', '--host', 'codex'])).toBe('arch_command_refused: install. Use: rh install');
-    for (const retired of ['audit', 'investigate', 'agents', 'jobs']) {
-      expect(archctxRefusal([retired, 'status'])).toBe(`arch_command_refused: ${retired}. Use: rh seats and repo-harness-issue-flow`);
-    }
+    expect(archctxRefusal(['daemon', 'status'])).toBe('arch_command_unknown: daemon');
     expect(archctxRefusal(['hook', 'enqueue'])).toBe('arch_command_refused: hook. Use: rh install');
     expect(archctxRefusal(['recommendations'])).toBe('arch_command_owned: recommendations. Use: rh arch refactor');
     expect(archctxRefusal(['projection', 'run'])).toBe('arch_command_owned: projection run. Use: rh arch projection check|plan|apply');
