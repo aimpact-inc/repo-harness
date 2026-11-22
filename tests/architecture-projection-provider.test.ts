@@ -10,10 +10,8 @@ import {
   errorEnvelope,
   failureEnvelope,
   knownFailure,
-  projectionApplyReadbackRequestFromReceipt,
   createProjectionApplyIdentity,
   digestJson,
-  projectionApplyLookupKey,
   projectionResultInvariantIssues,
   projectionResultReceiptDigest,
   type ArchitectureRefreshSignalV2,
@@ -35,7 +33,6 @@ import {
   resolveCompatibleNodeRuntime,
   resolvePackageLocalArchctx,
   readArchitectureDocsAnchors,
-  readArchitectureProjectionApply,
   runArchitectureProjection,
 } from '../src/effects/architecture/archctx-provider';
 import { architectureModelReady, readArchitectureNativeContext, readArchitectureHandEdits } from '../src/effects/architecture/architecture-read';
@@ -229,7 +226,7 @@ function capabilities(version = ARCHCTX_REQUIRED_VERSION) {
       architectureRefreshSignal: 'archcontext.architecture-refresh-signal/v2',
     },
     renderers: { architectureDocs: 'archcontext.docs-renderer/v6', agentContext: 'archcontext.agent-context-renderer/v2' },
-    features: ['architecture-docs-renderer-v2', 'architecture-refresh-signal-v1', 'projection-apply-receipt-v1', 'projection-prior-committed-applies-v1', 'projection-protocol-v2', 'projection-apply-readback-v1', 'projection-snapshot-v1'],
+    features: ['architecture-docs-renderer-v2', 'architecture-refresh-signal-v1', 'index-seed-v1', 'projection-apply-receipt-v1', 'projection-prior-committed-applies-v1', 'projection-protocol-v2', 'projection-snapshot-v1'],
   };
 }
 
@@ -361,53 +358,6 @@ function committedApplyEnvelope(request: ProjectionRequestV1) {
     refreshSignals: body.refreshSignals.map((signal) => ({ ...signal, projectionReceiptDigest: receiptDigest })),
   };
   return { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'projection.run', data };
-}
-
-function committedApplyReadback(request: ProjectionRequestV1, result: ReturnType<typeof committedApplyEnvelope>['data']) {
-  const signal = result.refreshSignals[0]!;
-  const resultingDigests = {
-    modelDigest: signal.resultingDigests.modelDigest!,
-    flowProofDigest: signal.resultingDigests.flowProofDigest!,
-    projectionDigest: signal.resultingDigests.projectionDigest!,
-  };
-  const ownedOutputDigest = digest('c');
-  const recovery = {
-    schemaVersion: 'archcontext.projection-apply-recovery-binding/v2' as const,
-    targets: request.targets,
-    changedPaths: request.changedPaths,
-    originalExpectedSnapshot: request.expected,
-    expectedResultingDigests: resultingDigests,
-    rendererVersion: result.outputSnapshot.rendererVersion,
-    layoutVersion: result.outputSnapshot.layoutVersion,
-    generatedFrom: result.outputSnapshot.generatedFrom,
-    ownedOutputDigest,
-    receiptDigest: result.receiptDigest,
-  };
-  const body = {
-    schemaVersion: 'archcontext.projection-apply-readback-result/v2' as const,
-    requestId: request.requestId,
-    requestDigest: digestProjectionJson(request),
-    receipt: { schemaVersion: 'archcontext.projection-apply-receipt/v1' as const, identity: result.applyReceipt, result, recovery },
-    current: { snapshot: result.outputSnapshot, resultingDigests, ownedOutputDigest, fixedPointDigest: digest('d') },
-  };
-  return { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'projection.readback', data: { ...body, readbackDigest: digestProjectionJson(body) } };
-}
-
-function absentApplyReadback(request: ProjectionRequestV1) {
-  if (!request.acceptedChange) throw new Error('fixture requires acceptedChange');
-  const body = {
-    schemaVersion: 'archcontext.projection-apply-absence/v1' as const,
-    requestId: request.requestId,
-    requestDigest: digestProjectionJson(request),
-    lookupKey: projectionApplyLookupKey({
-      repositoryId: request.expected.repositoryId,
-      workspaceId: request.expected.workspaceId,
-      acceptedChange: request.acceptedChange,
-    }),
-    current: request.expected,
-  };
-  return { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'projection.readback',
-    data: { ...body, absenceDigest: digestProjectionJson(body) } };
 }
 
 // Acceptance is producer data. The consumer sends only acceptObservedMajorChange.
@@ -679,41 +629,16 @@ describe('package-local ArchContext projection provider', () => {
     expect(calls.filter((call) => call.args[0] === 'projection')).toHaveLength(1);
   });
 
-  test.each(['projection-accepted-change-committed', 'projection-apply-request-differs'])('typed committed error %s reads back unchanged but succeeds only for the accepted change', (reasonCode) => {
+  test('apply propagates provider errors directly without invoking any retired replay or readback', () => {
     const f = fixture();
-    let applies = 0;
-    let readbacks = 0;
-    let committed: ReturnType<typeof committedApplyEnvelope>;
-    let readbackRequest: ProjectionRequestV1;
+    const calls: readonly string[][] = [];
     const run: RunArchctxProcess = withSnapshot((_binary, args) => {
+      (calls as string[][]).push([...args]);
       if (args[0] === 'capabilities') return { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' };
-      const wireRequest = JSON.parse(args[3]!) as ProjectionRequestV1;
-      if (args[1] === 'readback') {
-        readbacks += 1;
-        expect(args[3]).toBe(JSON.stringify(readbackRequest));
-        return { status: 0, signal: null, stdout: JSON.stringify(committedApplyReadback(wireRequest, committed.data)), stderr: '' };
-      }
-      applies += 1;
-      const accepted = producerAcceptedRequest(wireRequest);
-      committed = committedApplyEnvelope(accepted);
-      const receipt = committedApplyReadback(accepted, committed.data).data.receipt;
-      readbackRequest = projectionApplyReadbackRequestFromReceipt(receipt)!;
-      writeAppliedOutputs(f.repoRoot);
-      return { status: 1, signal: null, stdout: JSON.stringify(errorEnvelope('projection.run', 'AC_PROJECTION_APPLY_COMMITTED',
-        'this accepted change was already applied; send error.details.readbackRequest unchanged as the projection readback request', reasonCode,
-        { requestId: accepted.requestId, lookupKey: committed.data.applyReceipt.lookupKey, applyId: committed.data.applyReceipt.applyId, readbackRequest: readbackRequest as unknown as Json })), stderr: '' };
+      return { status: 1, signal: null, stdout: JSON.stringify(errorEnvelope('projection.run', 'AC_PRECONDITION_FAILED', 'worktree changed during apply', 'expected-snapshot-mismatch')), stderr: '' };
     });
-    if (reasonCode === 'projection-accepted-change-committed') {
-      const result = applyArchitectureProjection(f.repoRoot, { consumerRoot: f.consumerRoot, policy, run });
-      expect(result).toEqual(committed!.data);
-    } else {
-      let error: unknown;
-      try { applyArchitectureProjection(f.repoRoot, { consumerRoot: f.consumerRoot, policy, run }); } catch (caught) { error = caught; }
-      expect(error).toBeInstanceOf(ArchctxClientError);
-      expect(error).toMatchObject({ code: 'AC_PROJECTION_APPLY_COMMITTED', reasonCode: 'projection-apply-request-differs' });
-    }
-    expect(applies).toBe(1);
-    expect(readbacks).toBe(1);
+    expect(() => applyArchitectureProjection(f.repoRoot, { consumerRoot: f.consumerRoot, policy, run })).toThrow('AC_PRECONDITION_FAILED');
+    expect(calls.filter((args) => args[0] === 'projection').map((args) => args[1])).toEqual(['run']);
   });
 
   test('the complete recorded code-facts envelope preserves the remedy and typed reason', () => {
@@ -725,21 +650,6 @@ describe('package-local ArchContext projection provider', () => {
     expect(error).toBeInstanceOf(ArchctxClientError);
     expect(error).toMatchObject({ code: 'AC_CODE_FACTS_UNAVAILABLE', action: 'codegraph-init', reasonCode: 'index-missing', retryable: true });
     expect((error as Error).message).toContain('run `codegraph init` and retry');
-  });
-
-  test('prose cannot authorize readback and oversized typed details fail closed', () => {
-    const f = fixture();
-    let readbacks = 0;
-    for (const response of [
-      { stdout: '', stderr: 'AC_PRECONDITION_FAILED: committed projection receipt requires recovery' },
-      { stdout: JSON.stringify(errorEnvelope('projection.run', 'AC_PROJECTION_APPLY_COMMITTED', 'committed', 'projection-accepted-change-committed', { readbackRequest: { oversized: 'x'.repeat(256 * 1024) } })), stderr: '' },
-    ]) {
-      const run: RunArchctxProcess = withSnapshot((_binary, args) => args[0] === 'capabilities'
-        ? { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' }
-        : { status: 1, signal: null, ...response });
-      expect(() => applyArchitectureProjection(f.repoRoot, { consumerRoot: f.consumerRoot, policy, run, runReadback: () => { readbacks++; throw new Error('must not read back'); } })).toThrow();
-    }
-    expect(readbacks).toBe(0);
   });
 
   test('a second capability edit cannot be rebound by a second apply request', () => {
@@ -979,33 +889,6 @@ describe('package-local ArchContext projection provider', () => {
       expect(result.projectionProvider.reason).toContain('is not valid JSON');
       expect(result.apply.enabled).toBe(false);
     });
-  });
-
-  test('rejects a re-digested readback whose current output proof differs from the committed receipt', () => {
-    const f = fixture();
-    const accepted = request();
-    accepted.mode = 'apply';
-    accepted.acceptedChange = {
-      changeSetId: 'changeset.docs-projection-readback-proof', eventId: 'event.readback-proof',
-      reasonCodes: ['responsibility-changed'], affectedNodeIds: ['capability.test.core'],
-    };
-    const committed = committedApplyEnvelope(accepted);
-    const forged = committedApplyReadback(accepted, committed.data);
-    forged.data.current.ownedOutputDigest = digest('e');
-    const { readbackDigest: _old, ...body } = forged.data;
-    forged.data.readbackDigest = digestProjectionJson(body);
-    const run: RunArchctxProcess = (_binary, args) => ({
-      status: 0, signal: null,
-      stdout: JSON.stringify(args[0] === 'capabilities' ? capabilities() : forged), stderr: '',
-    });
-    expect(() => readArchitectureProjectionApply(accepted, f.repoRoot, { consumerRoot: f.consumerRoot, policy, run }))
-      .toThrow('readback current state differs from committed recovery binding');
-    const absent: RunArchctxProcess = (_binary, args) => ({
-      status: 0, signal: null,
-      stdout: JSON.stringify(args[0] === 'capabilities' ? capabilities() : absentApplyReadback(accepted)), stderr: '',
-    });
-    expect(() => readArchitectureProjectionApply(accepted, f.repoRoot, { consumerRoot: f.consumerRoot, policy, run: absent }))
-      .toThrow('no committed projection apply exists for request.axr5');
   });
 
   test('bounds a real provider process tree whose descendant keeps captured pipes open', async () => {
@@ -1716,6 +1599,14 @@ describe('package-local ArchContext projection provider', () => {
     expect(readback.consumer.authoritativeNodeSchema).toBe('archcontext.node/v2');
     expect(readback.consumer.authoritativeNodeSchemaDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(readback.consumer.projection.codeGraph.codeGraphStatus).toBe('ready');
+    expect(readback.consumer.inProcessNoDaemon).toEqual({ daemonCommandAbsent: true, noDaemonArtifacts: true });
+    expect(readback.consumer.fixedPoint).toMatchObject({
+      applyStatus: 'applied',
+      checkStatus: 'noop',
+      checkRenderEquivalent: true,
+      secondApplyStatus: 'noop',
+      secondApplyFiles: 0,
+    });
     expect(readback.source.dirtySourceUsed).toBe(false);
   });
 

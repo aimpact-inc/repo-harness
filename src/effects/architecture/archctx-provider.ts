@@ -6,7 +6,7 @@ import { userInfo } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { ARCHCONTEXT_NODE_RANGE, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_SCHEMA_VERSION, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_UPGRADE_COMMAND, ERROR_CATALOG, PROJECTION_MANIFEST_UPGRADE_REQUIRED, failureIssues, architectureDocsProjectionCompatibilityIssues, PROJECTION_REQUEST_SCHEMA_VERSION, digestJson, type ArchContextError, type ArchctxCapabilitiesV1, type ArchitectureDebtDeltaReportV1, type ArchitectureDebtReportV1, type DocsAnchorsReportV1, type IndexSeedResultV1, type Json, type ProjectionApplyReadbackResultV2, type ProjectionExpectedSnapshotV1, type ProjectionMode, type ProjectionRequestV1, type ProjectionResultV3 } from 'archctx-contracts';
+import { ARCHCONTEXT_NODE_RANGE, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_SCHEMA_VERSION, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_UPGRADE_COMMAND, ERROR_CATALOG, PROJECTION_MANIFEST_UPGRADE_REQUIRED, failureIssues, architectureDocsProjectionCompatibilityIssues, PROJECTION_REQUEST_SCHEMA_VERSION, digestJson, type ArchContextError, type ArchctxCapabilitiesV1, type ArchitectureDebtDeltaReportV1, type ArchitectureDebtReportV1, type DocsAnchorsReportV1, type IndexSeedResultV1, type Json, type ProjectionExpectedSnapshotV1, type ProjectionMode, type ProjectionRequestV1, type ProjectionResultV3 } from 'archctx-contracts';
 import { isRecord } from '../../core/evidence/is-record';
 import { readWorkflowPolicyDocument } from '../state/resolve-effective-state';
 import { POLICY_ABSENT, isPolicyObject, policyValue } from '../../core/workflow/policy-schema';
@@ -14,7 +14,7 @@ import { trustedNodeCandidates } from '../runtime/node-candidates';
 import { selectCompatibleNode } from '../runtime/node-runtime';
 import { runProcess } from '../process-runner';
 import type { CapabilityOwnership } from '../../core/capabilities/registry';
-import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError, assertArchctxVersion, assertProjectionApplyReadbackResult, assertProjectionResult, decodeArchitectureDebtDelta, decodeArchitectureDebtReport, decodeDocsAnchorsReport, decodeIndexSeedResult, readArchitectureProjectionPolicy } from '../../core/architecture/projection';
+import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError, assertArchctxVersion, assertProjectionResult, decodeArchitectureDebtDelta, decodeArchitectureDebtReport, decodeDocsAnchorsReport, decodeIndexSeedResult, readArchitectureProjectionPolicy } from '../../core/architecture/projection';
 import type { ArchctxProcessResult, ArchctxProviderOptions, ResolvedArchctxPackage, ArchitectureProjectionReadinessV1 } from '../../core/architecture/contracts';
 import { gitExecFileSync } from '../git/runner';
 
@@ -449,12 +449,7 @@ function architectureAdoptionStep(): string {
 }
 
 export function runArchitectureProjection(request: ProjectionRequestV1, repoRoot: string, options: ArchctxProviderOptions = {}): ProjectionResultV3 {
-  return assertProjectionResult(runProjectionCommand('run', request, repoRoot, options), request.requestId);
-}
-
-/** Read an existing committed apply; this operation never invokes projection run/apply. */
-export function readArchitectureProjectionApply(request: ProjectionRequestV1, repoRoot: string, options: ArchctxProviderOptions = {}): ProjectionApplyReadbackResultV2 {
-  return assertProjectionApplyReadbackResult(runProjectionCommand('readback', request, repoRoot, options), request);
+  return assertProjectionResult(runProjectionCommand(request, repoRoot, options), request.requestId);
 }
 
 /**
@@ -703,12 +698,12 @@ function resolvePackageLocalCodeGraph(archctx: ResolvedArchctxPackage): string {
   return realBinary;
 }
 
-function runProjectionCommand(command: 'run' | 'readback', request: ProjectionRequestV1, repoRoot: string, options: ArchctxProviderOptions): unknown {
+function runProjectionCommand(request: ProjectionRequestV1, repoRoot: string, options: ArchctxProviderOptions): unknown {
   const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
   if ((request.mode === 'apply' || request.mode === 'adopt') && policy.applyMode === 'disabled') throw new Error('architecture projection apply is disabled');
   archctxCapabilities(repoRoot, { ...options, policy });
   const client = new ArchctxClient(repoRoot, policy.requiredVersion, options);
-  try { return client.data(['projection', command, '--request-json', JSON.stringify(request)], policy.timeoutMs); }
+  try { return client.data(['projection', 'run', '--request-json', JSON.stringify(request)], policy.timeoutMs); }
   catch (error) {
     if (error instanceof ArchctxClientError && error.code === 'RH_ARCHCTX_TIMEOUT') throw new ArchctxClientError({ code: error.code, action: error.action, message: `${error.message} Retry with --request-id ${request.requestId}.` });
     throw error;

@@ -11,7 +11,6 @@ import {
   type NativeContextExportV1,
   architectureDebtReportIssues,
   docsAnchorsReportIssues,
-  projectionApplyReadbackResultInvariantIssues,
   projectionResultInvariantIssues,
   validateJsonSchema,
   type ArchitectureDebtDeltaReportV1,
@@ -20,9 +19,7 @@ import {
   type DependencyConstraintEvaluationV1,
   type DocsAnchorsReportV1,
   type Json,
-  type ProjectionApplyReadbackResultV2,
   type ProjectionFreshnessReasonCode,
-  type ProjectionRequestV1,
   type ProjectionResultV3,
   type RefImpactV1,
   type RefImpactBatchV1,
@@ -30,7 +27,6 @@ import {
   type ProjectionSliceV1,
 } from 'archctx-contracts';
 import projectionResultSchema from 'archctx-contracts/schemas/runtime/projection-result.schema.json';
-import projectionReadbackSchema from 'archctx-contracts/schemas/runtime/projection-apply-readback.schema.json';
 import docsAnchorsSchema from 'archctx-contracts/schemas/runtime/docs-anchors.schema.json';
 import architectureDebtSchema from 'archctx-contracts/schemas/runtime/architecture-debt.schema.json';
 import architectureDebtDeltaSchema from 'archctx-contracts/schemas/runtime/architecture-debt-delta.schema.json';
@@ -246,16 +242,6 @@ export function assertProjectionResult(value: unknown, expectedRequestId: string
   const issues = projectionResultInvariantIssues(result);
   if (result.requestId !== expectedRequestId) issues.push('requestId mismatch');
   if (issues.length > 0) throw new Error(`projection result invalid: ${issues.join('; ')}`);
-  return result;
-}
-
-/** A readback proves an earlier committed apply of this exact request; an absence proof means none exists. */
-export function assertProjectionApplyReadbackResult(value: unknown, request: ProjectionRequestV1): ProjectionApplyReadbackResultV2 {
-  const readback = decode(projectionReadbackSchema, value, 'projection readback');
-  if (readback.schemaVersion === 'archcontext.projection-apply-absence/v1') throw new Error(`no committed projection apply exists for ${request.requestId}`);
-  const result = readback as unknown as ProjectionApplyReadbackResultV2;
-  const issues = projectionApplyReadbackResultInvariantIssues(result, request);
-  if (issues.length > 0) throw new Error(`projection readback invalid: ${issues.join('; ')}`);
   return result;
 }
 
