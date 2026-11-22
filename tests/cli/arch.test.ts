@@ -268,11 +268,12 @@ describe('rh arch', () => {
     expect(lstatSync(join(dbLinkCase.repo, '.codegraph/codegraph.db')).isSymbolicLink()).toBe(true);
 
     // 5. Symlinked .codegraph/.gitignore refused.
+    const validSqliteStub = Buffer.concat([Buffer.from('SQLite format 3\0', 'ascii'), Buffer.alloc(84)]);
     const ignoreLinkCase = makeRepo('ignorelink');
     const externalIgnore = join(externalDir, 'external.gitignore');
     writeFileSync(externalIgnore, '# CodeGraph data files\n*.db\n');
     mkdirSync(join(ignoreLinkCase.repo, '.codegraph'), { recursive: true });
-    writeFileSync(join(ignoreLinkCase.repo, '.codegraph/codegraph.db'), 'db-bytes');
+    writeFileSync(join(ignoreLinkCase.repo, '.codegraph/codegraph.db'), validSqliteStub);
     symlinkSync(externalIgnore, join(ignoreLinkCase.repo, '.codegraph/.gitignore'));
     const ignoreLinkRes = runSeed(ignoreLinkCase.repo, ignoreLinkCase.env);
     expect(ignoreLinkRes.status).toBe(1);
@@ -282,16 +283,25 @@ describe('rh arch', () => {
     // 6. Stale-default .codegraph/.gitignore that CodeGraph would overwrite refused.
     const staleIgnoreCase = makeRepo('staleignore');
     mkdirSync(join(staleIgnoreCase.repo, '.codegraph'), { recursive: true });
-    writeFileSync(join(staleIgnoreCase.repo, '.codegraph/codegraph.db'), 'db-bytes');
+    writeFileSync(join(staleIgnoreCase.repo, '.codegraph/codegraph.db'), validSqliteStub);
     writeFileSync(join(staleIgnoreCase.repo, '.codegraph/.gitignore'), '# CodeGraph data files\n*.db\n');
     const staleIgnoreRes = runSeed(staleIgnoreCase.repo, staleIgnoreCase.env);
     expect(staleIgnoreRes.status).toBe(1);
     expect(staleIgnoreRes.stderr).toContain('stale-default pattern');
     expect(readFileSync(join(staleIgnoreCase.repo, '.codegraph/.gitignore'), 'utf8')).toBe('# CodeGraph data files\n*.db\n');
 
-    // 7. Valid clean repository succeeds through public CLI.
+    // 7. Non-SQLite user file at .codegraph/codegraph.db refused without modifying bytes.
+    const foreignDbCase = makeRepo('foreigndb');
+    mkdirSync(join(foreignDbCase.repo, '.codegraph'), { recursive: true });
+    writeFileSync(join(foreignDbCase.repo, '.codegraph/codegraph.db'), 'not-a-sqlite-database\n');
+    const foreignDbRes = runSeed(foreignDbCase.repo, foreignDbCase.env);
+    expect(foreignDbRes.status).toBe(1);
+    expect(foreignDbRes.stderr).toContain('not a valid SQLite 3 database');
+    expect(readFileSync(join(foreignDbCase.repo, '.codegraph/codegraph.db'), 'utf8')).toBe('not-a-sqlite-database\n');
+
+    // 8. Valid clean repository succeeds through public CLI, pinning CODEGRAPH_DIR to .codegraph.
     const cleanCase = makeRepo('clean');
-    const cleanRes = runSeed(cleanCase.repo, cleanCase.env);
+    const cleanRes = runSeed(cleanCase.repo, { ...cleanCase.env, CODEGRAPH_DIR: '.codegraph-custom' });
     expect(cleanRes.status, `${cleanRes.stderr}\n${cleanRes.stdout}`).toBe(0);
     expect(JSON.parse(cleanRes.stdout)).toMatchObject({
       schemaVersion: 'archcontext.envelope/v1',
@@ -300,5 +310,44 @@ describe('rh arch', () => {
       data: { schemaVersion: 'archcontext.index-seed/v1', worktreeRole: 'primary' },
     });
     expect(lstatSync(join(cleanCase.repo, '.codegraph/codegraph.db')).isFile()).toBe(true);
+    expect(existsSync(join(cleanCase.repo, '.codegraph-custom'))).toBe(false);
+
+    // 9. Non-PID / empty user files at codegraph.lock and codegraph.lock.break refused on real primary index without unlinking.
+    const lockPath = join(cleanCase.repo, '.codegraph/codegraph.lock');
+    writeFileSync(lockPath, 'user notes — do not delete\n');
+    const textLockRes = runSeed(cleanCase.repo, cleanCase.env);
+    expect(textLockRes.status).toBe(1);
+    expect(textLockRes.stderr).toContain('PID lock format');
+    expect(readFileSync(lockPath, 'utf8')).toBe('user notes — do not delete\n');
+
+    writeFileSync(lockPath, '');
+    const emptyLockRes = runSeed(cleanCase.repo, cleanCase.env);
+    expect(emptyLockRes.status).toBe(1);
+    expect(emptyLockRes.stderr).toContain('PID lock format');
+    expect(existsSync(lockPath)).toBe(true);
+    rmSync(lockPath);
+
+    const breakLockPath = join(cleanCase.repo, '.codegraph/codegraph.lock.break');
+    writeFileSync(breakLockPath, 'custom break file\n');
+    const breakLockRes = runSeed(cleanCase.repo, cleanCase.env);
+    expect(breakLockRes.status).toBe(1);
+    expect(breakLockRes.stderr).toContain('PID lock format');
+    expect(readFileSync(breakLockPath, 'utf8')).toBe('custom break file\n');
+    rmSync(breakLockPath);
+
+    // 10. Nested subdir blocked by GIT_CEILING_DIRECTORIES fails closed instead of falling back to cwd while archctx walks up.
+    const ceilingRes = runSeed(join(cleanCase.repo, 'src/module'), {
+      ...cleanCase.env,
+      GIT_CEILING_DIRECTORIES: cleanCase.repo,
+    });
+    expect(ceilingRes.status).toBe(1);
+    expect(ceilingRes.stderr).toContain('git rev-parse --show-toplevel failed');
+
+    // 11. Non-Git directory fails closed without invoking archctx.
+    const nonGitDir = mkdtempSync(join(tmpdir(), 'repo-harness-seed-nongit-'));
+    roots.push(nonGitDir);
+    const nonGitRes = runSeed(nonGitDir, cleanCase.env);
+    expect(nonGitRes.status).toBe(1);
+    expect(nonGitRes.stderr).toContain('git rev-parse --show-toplevel failed');
   }, 120_000);
 });

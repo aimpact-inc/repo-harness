@@ -15,6 +15,7 @@ import {
   type RefactorScanFindingV2,
   type RefactorVerifyV2,
 } from '../../core/refactor/provider-contract';
+import { shellQuote } from '../../core/shell-quote';
 import { canonicalRepoPath } from '../../effects/repo-registry';
 import type { RefactorRecommendationResult, RefactorScanCoverage } from '../../effects/refactor/recommendations';
 
@@ -111,7 +112,25 @@ export function formatRefactorDecide(result: RefactorDecideResultV1): string {
   ].join('\n');
 }
 
-export function formatRefactorVerify(result: RefactorVerifyV2): string {
+export interface RefactorVerifyFormatOptions {
+  readonly repo?: string;
+  readonly importNodeLimit?: number;
+  readonly timeoutMs?: number;
+}
+
+function formatShellArg(value: string): string {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : shellQuote(value);
+}
+
+export function formatRefactorVerify(result: RefactorVerifyV2, invocation: RefactorVerifyFormatOptions = {}): string {
+  const nextParts = [
+    `rh arch refactor resolve ${result.recommendationId}`,
+    `--resolution-digest ${result.resolutionDigest}`,
+    '--reason "<reason>"',
+    ...(invocation.repo !== undefined && invocation.repo !== '' ? [`--repo ${formatShellArg(invocation.repo)}`] : []),
+    ...(invocation.importNodeLimit !== undefined ? [`--import-node-limit ${invocation.importNodeLimit}`] : []),
+    ...(invocation.timeoutMs !== undefined ? [`--timeout-ms ${invocation.timeoutMs}`] : []),
+  ];
   return [
     `[RefactorVerify] ${result.recommendationId}: disposition=${result.disposition}`,
     `  headSha: ${result.headSha}`,
@@ -129,7 +148,7 @@ export function formatRefactorVerify(result: RefactorVerifyV2): string {
     ] : []),
     ...(result.blockingReasons.length > 0 ? [`  blockingReasons: ${result.blockingReasons.join(', ')}`] : []),
     ...(result.disposition === 'resolved' ? [
-      `  next: rh arch refactor resolve ${result.recommendationId} --resolution-digest ${result.resolutionDigest} --reason "<reason>"`,
+      `  next: ${nextParts.join(' ')}`,
     ] : []),
     '',
   ].join('\n');
@@ -279,14 +298,19 @@ export function buildRefactorCommand(): Command {
     .option('--repo <path>', 'Repository root', '.')
     .option('--timeout-ms <ms>', `Per archctx call timeout in ms (default ${REFACTOR_DEFAULT_TIMEOUT_MS}, max ${REFACTOR_MAX_TIMEOUT_MS})`, parseTimeoutMs)
     .option('--json', 'Output machine-readable JSON')
-    .action(async (recommendationId: string, options: { importNodeLimit?: number; repo: string; timeoutMs?: number; json?: boolean }) => {
+    .action(async (recommendationId: string, options: { importNodeLimit?: number; repo: string; timeoutMs?: number; json?: boolean }, cmd: Command) => {
       try {
         const { verifyRefactorRecommendation } = await import('./refactor-actions');
         const result = verifyRefactorRecommendation(canonicalRepoPath(options.repo), recommendationId, {
           importNodeLimit: options.importNodeLimit,
           timeoutMs: options.timeoutMs,
         });
-        process.stdout.write(options.json ? `${JSON.stringify(result, null, 2)}\n` : formatRefactorVerify(result));
+        const formatOptions: RefactorVerifyFormatOptions = {
+          ...(cmd.getOptionValueSource('repo') === 'cli' ? { repo: options.repo } : {}),
+          ...(options.importNodeLimit !== undefined ? { importNodeLimit: options.importNodeLimit } : {}),
+          ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+        };
+        process.stdout.write(options.json ? `${JSON.stringify(result, null, 2)}\n` : formatRefactorVerify(result, formatOptions));
         if (result.disposition !== 'resolved') process.exitCode = 1;
       } catch (error) { fail(error); }
     });

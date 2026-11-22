@@ -29,6 +29,7 @@ import {
   architectureProjectionRequest,
   assertSafeCodeGraphDestination,
   bootstrapWorktreeCodeGraph,
+  effectiveCodeGraphDirName,
   inspectArchitectureProjectionReadiness,
   readArchitectureProjectionSnapshot,
   resolveCompatibleNodeRuntime,
@@ -1926,22 +1927,29 @@ test('memoizes node --version probes across repeated ArchctxClient calls with ma
 });
 
 describe('bootstrapWorktreeCodeGraph index seed cutover', () => {
-  test.skipIf(process.platform === 'win32')('enforces safe destination preflight, fails closed on code-facts-not-ready, and avoids copiedFiles=0 false alarm', () => {
+  test.skipIf(process.platform === 'win32')('enforces safe destination preflight, pins CODEGRAPH_DIR, fails closed on code-facts-not-ready, and avoids copiedFiles=0 false alarm', () => {
     const f = fixture({ git: false });
     const primary = join(f.root, 'primary');
     const linked = join(f.root, 'linked');
+    const sqliteStub = (tag: string) => {
+      const buf = Buffer.alloc(100);
+      buf.write('SQLite format 3\0', 0, 'ascii');
+      buf.write(tag, 16, 'utf8');
+      return buf;
+    };
+    const linkedBytes = sqliteStub('preserve-unready');
     mkdirSync(join(primary, '.codegraph'), { recursive: true });
-    writeFileSync(join(primary, '.codegraph', 'codegraph.db'), 'primary-db');
+    writeFileSync(join(primary, '.codegraph', 'codegraph.db'), sqliteStub('primary-db'));
     writeFileSync(join(primary, '.codegraph', '.gitignore'), '*\n');
     mkdirSync(join(linked, '.codegraph'), { recursive: true });
-    writeFileSync(join(linked, '.codegraph', 'codegraph.db'), 'preserve-unready');
-    const calls: Array<{ cwd: string; args: readonly string[] }> = [];
+    writeFileSync(join(linked, '.codegraph', 'codegraph.db'), linkedBytes);
+    const calls: Array<{ cwd: string; args: readonly string[]; codegraphDir: string | undefined }> = [];
     const logged: string[] = [];
     const origError = console.error;
     console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
     try {
       const runNotReady: RunArchctxProcess = (_binary, args, opts) => {
-        calls.push({ cwd: opts.cwd, args });
+        calls.push({ cwd: opts.cwd, args, codegraphDir: opts.env.CODEGRAPH_DIR });
         if (opts.cwd === primary) {
           return { status: 0, signal: null, stderr: '', stdout: JSON.stringify({
             schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'index.seed',
@@ -1950,11 +1958,23 @@ describe('bootstrapWorktreeCodeGraph index seed cutover', () => {
         }
         return { status: 1, signal: null, stderr: '', stdout: JSON.stringify(errorEnvelope('index.seed', 'AC_CODE_FACTS_NOT_READY', 'index is not ready', 'code-facts-not-ready')) };
       };
-      expect(() => bootstrapWorktreeCodeGraph(primary, linked, { consumerRoot: f.consumerRoot, policy, run: runNotReady })).toThrow('AC_CODE_FACTS_NOT_READY');
-      expect(readFileSync(join(linked, '.codegraph', 'codegraph.db'), 'utf8')).toBe('preserve-unready');
+      expect(() => bootstrapWorktreeCodeGraph(primary, linked, {
+        consumerRoot: f.consumerRoot,
+        policy,
+        env: { ...process.env, CODEGRAPH_DIR: '.codegraph-wsl' },
+        run: runNotReady,
+      })).toThrow('AC_CODE_FACTS_NOT_READY');
+      expect(readFileSync(join(linked, '.codegraph', 'codegraph.db'))).toEqual(linkedBytes);
       // Primary refresh copiedFiles=0 is normal when the shared base is already current.
       expect(logged).toEqual([]);
       expect(calls.map(c => `${c.args[0]} ${c.args[1]}`)).toEqual(['index seed', 'index seed']);
+      // CODEGRAPH_DIR must stay unset for `archctx index seed` (setting it disables shared-base seeding in archctx).
+      expect(calls.every(c => c.codegraphDir === undefined)).toBe(true);
+      // WSL /mnt/<drive> paths without a checked .codegraph-only resolution fail closed before invoking archctx.
+      expect(effectiveCodeGraphDirName('/mnt/c/work/repo', { platform: 'linux', env: { WSL_DISTRO_NAME: 'Ubuntu' } })).toBe('.codegraph-wsl');
+      expect(() => assertSafeCodeGraphDestination('/mnt/c/work/repo', { platform: 'linux', env: { WSL_DISTRO_NAME: 'Ubuntu' } }))
+        .toThrow('CodeGraph resolves .codegraph-wsl instead of .codegraph');
+      expect(effectiveCodeGraphDirName('/mnt/c/work/repo', { platform: 'linux', env: { WSL_DISTRO_NAME: 'Ubuntu' }, pinDefaultDir: true })).toBe('.codegraph');
 
       // A symlink .codegraph fails closed BEFORE invoking archctx index seed or codegraph init.
       const linkedSymlink = join(f.root, 'linked-symlink');
@@ -1967,15 +1987,25 @@ describe('bootstrapWorktreeCodeGraph index seed cutover', () => {
         .toThrow('.codegraph must be a regular directory');
       expect(lstatSync(join(linkedSymlink, '.codegraph')).isSymbolicLink()).toBe(true);
 
-      // Shared destination preflight checks absent, empty, safe-ready, and all unsafe shapes.
+      // Shared destination preflight checks absent, empty, safe-ready, lock/log ownership, and unsafe shapes.
       const absentDir = join(f.root, 'absent-dest');
       mkdirSync(absentDir, { recursive: true });
       expect(() => assertSafeCodeGraphDestination(absentDir)).not.toThrow();
       mkdirSync(join(absentDir, '.codegraph'));
       expect(() => assertSafeCodeGraphDestination(absentDir)).not.toThrow();
-      writeFileSync(join(absentDir, '.codegraph', 'codegraph.db'), 'db');
+      writeFileSync(join(absentDir, '.codegraph', 'codegraph.db'), 'not-sqlite');
+      expect(() => assertSafeCodeGraphDestination(absentDir)).toThrow('not a valid SQLite 3 database');
+      writeFileSync(join(absentDir, '.codegraph', 'codegraph.db'), sqliteStub('valid'));
       writeFileSync(join(absentDir, '.codegraph', '.gitignore'), '# CodeGraph data files\n*\n!.gitignore\n');
+      writeFileSync(join(absentDir, '.codegraph', 'codegraph.lock'), '12345\n');
+      writeFileSync(join(absentDir, '.codegraph', 'errors.log'), 'CodeGraph Error Log - 2026-11-23T00:00:00.000Z\n');
       expect(() => assertSafeCodeGraphDestination(absentDir)).not.toThrow();
+      writeFileSync(join(absentDir, '.codegraph', 'codegraph.lock'), 'user notes\n');
+      expect(() => assertSafeCodeGraphDestination(absentDir)).toThrow('PID lock format');
+      writeFileSync(join(absentDir, '.codegraph', 'codegraph.lock'), '12345');
+      writeFileSync(join(absentDir, '.codegraph', 'errors.log'), 'custom user log\n');
+      expect(() => assertSafeCodeGraphDestination(absentDir)).toThrow('not a CodeGraph error log');
+      rmSync(join(absentDir, '.codegraph', 'errors.log'));
       writeFileSync(join(absentDir, '.codegraph', '.gitignore'), '# CodeGraph data files\n*.db\n');
       expect(() => assertSafeCodeGraphDestination(absentDir)).toThrow('stale-default pattern');
 

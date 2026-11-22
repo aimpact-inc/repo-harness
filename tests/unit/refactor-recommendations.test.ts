@@ -234,9 +234,21 @@ test('exposes only repository-scoped v2 CLI subcommands and options, and formats
   };
   const verifyText = formatRefactorVerify(verifyResult);
   expect(verifyText).toContain(`disposition=resolved`);
-  expect(verifyText).toContain(`next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>"`);
+  expect(verifyText).toContain(`next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>"\n`);
   expect(verifyText).toContain('historicalReceipt: status=accepted');
   expect(verifyText).toContain('symbol src/mod/legacy.ts#oldFn: removed');
+
+  const verifyWithFlags = formatRefactorVerify(verifyResult, {
+    repo: "/tmp/target repo/work's",
+    importNodeLimit: 20_000,
+    timeoutMs: 300_000,
+  });
+  expect(verifyWithFlags).toContain(
+    `next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>" --repo '/tmp/target repo/work'\\''s' --import-node-limit 20000 --timeout-ms 300000\n`,
+  );
+  expect(formatRefactorVerify(verifyResult, { repo: '/tmp/target-repo', importNodeLimit: 5_000 })).toContain(
+    `next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>" --repo /tmp/target-repo --import-node-limit 5000\n`,
+  );
 
   const listText = formatRefactorList({
     schemaVersion: 'archcontext.refactor-decide-list/v1',

@@ -1,6 +1,6 @@
 import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
 import { DEFAULT_GLOBAL_ARCHITECTURE, loadArchitectureProjectionPolicy, readGlobalArchitectureConfiguration } from './projection-config';
-import { accessSync, constants as fsConstants, existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { accessSync, closeSync, constants as fsConstants, existsSync, lstatSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { userInfo } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
@@ -289,13 +289,20 @@ export function archctxCapabilities(repoRoot: string, options: ArchctxProviderOp
  * arguments, inherited stdio and no output cap. Returns the archctx exit code; a signal exit is 1.
  */
 export function runArchctxPassThrough(cwd: string, args: readonly string[], options: ArchctxProviderOptions = {}): number {
-  const env: NodeJS.ProcessEnv = { ...(options.env ?? process.env) };
+  let spawnCwd = cwd;
+  let env: NodeJS.ProcessEnv = { ...(options.env ?? process.env) };
   if (args[0] === 'index' && !args.includes('--help') && !args.includes('-h')) {
+    const seedRoot = resolveCodeGraphSeedRoot(cwd, env);
+    spawnCwd = seedRoot;
+    env = sanitizeGitDiscoveryEnv(env);
+    // `archctx index seed` disables shared-base seeding if CODEGRAPH_DIR is set (`index-base.ts:189`).
     delete env.CODEGRAPH_DIR;
-    assertSafeCodeGraphDestination(resolveCodeGraphSeedRoot(cwd, env));
+    env.CODEGRAPH_FORCE_WATCH = '1';
+    delete env.CODEGRAPH_NO_WATCH;
+    assertSafeCodeGraphDestination(seedRoot, { env });
   }
-  const { resolved } = archctxCapabilities(cwd, { ...options, env });
-  const result = spawnSync(resolveCompatibleNodeRuntime(env, options.trustedNodeCandidateSource), [resolved.binaryPath, ...args], { cwd, env, stdio: 'inherit' });
+  const { resolved } = archctxCapabilities(spawnCwd, { ...options, env });
+  const result = spawnSync(resolveCompatibleNodeRuntime(env, options.trustedNodeCandidateSource), [resolved.binaryPath, ...args], { cwd: spawnCwd, env, stdio: 'inherit' });
   if (result.error) throw result.error;
   return result.status ?? 1;
 }
@@ -588,7 +595,28 @@ function decodeCompleteArchitectureDebt(data: unknown, headSha: string): Archite
 }
 
 const CODEGRAPH_GITIGNORE_MARKER = '# CodeGraph data files';
-const CODEGRAPH_LIVE_SIDECARS = ['codegraph.db-wal', 'codegraph.db-shm', 'codegraph.db-journal', 'codegraph.lock'] as const;
+const SQLITE_HEADER_MAGIC = Buffer.from('SQLite format 3\0', 'ascii');
+const SQLITE_HEADER_MIN_BYTES = 100;
+const CODEGRAPH_LOCK_MAX_BYTES = 32;
+const CODEGRAPH_PID_LOCK_PATTERN = /^[1-9]\d*$/;
+const CODEGRAPH_SQLITE_SIDECARS = ['codegraph.db-wal', 'codegraph.db-shm', 'codegraph.db-journal'] as const;
+const CODEGRAPH_LOCK_FILES = [
+  'codegraph.lock',
+  'codegraph.lock.break',
+  'codegraph.lock.break.break',
+  'codegraph.lock.break.break.break',
+] as const;
+const CODEGRAPH_LOCK_TEMP_PATTERN = /^codegraph\.lock(?:\.break){0,3}\.\d+\.\d+\.tmp$/;
+const CODEGRAPH_ERROR_LOG_MARKER = 'CodeGraph Error Log - ';
+const GIT_DISCOVERY_ENV_KEYS = [
+  'GIT_CEILING_DIRECTORIES',
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_COMMON_DIR',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+] as const;
 
 /** Matches pinned CodeGraph 1.6.4 `isStaleDefaultGitignore` (`directory.js:491-495`). */
 function codeGraphRewritesGitignore(content: string): boolean {
@@ -605,19 +633,129 @@ function unsafeCodeGraphDestination(message: string): ArchctxClientError {
   });
 }
 
-function resolveCodeGraphSeedRoot(cwd: string, env: NodeJS.ProcessEnv): string {
-  const top = gitSpawnSync(['-C', cwd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', env });
-  const resolved = top.status === 0 ? top.stdout.trim() : '';
-  return resolved || cwd;
+function sanitizeGitDiscoveryEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const clean: NodeJS.ProcessEnv = { ...env };
+  for (const key of GIT_DISCOVERY_ENV_KEYS) delete clean[key];
+  return clean;
+}
+
+/**
+ * Resolves and proves the exact Git worktree root that `archctx index seed` will mutate.
+ * Fails closed when Git discovery fails (never falling back to `cwd`) or when caller Git
+ * environment overrides disagree with the repository root at that directory.
+ */
+function resolveCodeGraphSeedRoot(cwd: string, callerEnv: NodeJS.ProcessEnv): string {
+  const callerProbe = gitSpawnSync(['-C', cwd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', env: callerEnv });
+  const callerRoot = callerProbe.status === 0 ? callerProbe.stdout.trim() : '';
+  if (!callerRoot) {
+    throw unsafeCodeGraphDestination(
+      `CodeGraph index seed requires a Git repository worktree; git rev-parse --show-toplevel failed in ${cwd}.`,
+    );
+  }
+  const canonicalRoot = realpathSync(callerRoot);
+  const cleanProbe = gitSpawnSync(['-C', canonicalRoot, 'rev-parse', '--show-toplevel'], {
+    encoding: 'utf8',
+    env: sanitizeGitDiscoveryEnv(callerEnv),
+  });
+  const cleanRoot = cleanProbe.status === 0 ? cleanProbe.stdout.trim() : '';
+  if (!cleanRoot || realpathSync(cleanRoot) !== canonicalRoot) {
+    throw unsafeCodeGraphDestination(
+      `CodeGraph index seed refused ambiguous Git repository root (${callerRoot}); unset GIT_DIR/GIT_WORK_TREE or run inside the target checkout.`,
+    );
+  }
+  return canonicalRoot;
+}
+
+function readPrefixBytes(path: string, maxBytes: number): Buffer {
+  const fd = openSync(path, 'r');
+  try {
+    const buffer = Buffer.alloc(maxBytes);
+    const bytesRead = readSync(fd, buffer, 0, maxBytes, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function assertProvenCodeGraphLockFile(indexDirectory: string, name: string): void {
+  const lockPath = join(indexDirectory, name);
+  const stat = lstatSync(lockPath, { throwIfNoEntry: false });
+  if (!stat) return;
+  if (!stat.isFile()) {
+    throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/${name} must be a regular file, not a symlink or directory. Inspect .codegraph before seeding or running codegraph init.`);
+  }
+  if (stat.size === 0 || stat.size > CODEGRAPH_LOCK_MAX_BYTES) {
+    throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/${name} does not match the PID lock format and could be unlinked as stale. Inspect .codegraph/${name} before seeding.`);
+  }
+  let content: string;
+  try {
+    content = readPrefixBytes(lockPath, CODEGRAPH_LOCK_MAX_BYTES).toString('utf8').trim();
+  } catch (error) {
+    throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/${name} is unreadable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!CODEGRAPH_PID_LOCK_PATTERN.test(content)) {
+    throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/${name} does not match the PID lock format and could be unlinked as stale. Inspect .codegraph/${name} before seeding.`);
+  }
+}
+
+const CODEGRAPH_DEFAULT_DIR = '.codegraph';
+const CODEGRAPH_WSL_DIR = '.codegraph-wsl';
+const WSL_WINDOWS_DRIVE_PATTERN = /^\/mnt\/[a-z](\/|$)/i;
+
+export interface CodeGraphDestinationProbe {
+  readonly env?: NodeJS.ProcessEnv;
+  readonly platform?: NodeJS.Platform;
+  readonly procVersion?: string;
+  /** True when the caller pins `CODEGRAPH_DIR=.codegraph` (e.g. direct `codegraph init`), false when `CODEGRAPH_DIR` stays unset for `archctx index seed`. */
+  readonly pinDefaultDir?: boolean;
+}
+
+function isWslRuntime(probe: CodeGraphDestinationProbe): boolean {
+  const platform = probe.platform ?? process.platform;
+  if (platform !== 'linux') return false;
+  const env = probe.env ?? process.env;
+  if (env.WSL_DISTRO_NAME || env.WSL_INTEROP) return true;
+  if (probe.procVersion !== undefined) {
+    const lower = probe.procVersion.toLowerCase();
+    return lower.includes('microsoft') || lower.includes('wsl');
+  }
+  try {
+    const version = readFileSync('/proc/version', 'utf8').toLowerCase();
+    return version.includes('microsoft') || version.includes('wsl');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Computes the effective CodeGraph data directory name that pinned CodeGraph 1.6.4
+ * (`directory.js:102-117`, `watch-policy.js:47-76`) resolves when `CODEGRAPH_DIR` is unset.
+ */
+export function effectiveCodeGraphDirName(repoRoot: string, probe: CodeGraphDestinationProbe = {}): string {
+  if (probe.pinDefaultDir) return CODEGRAPH_DEFAULT_DIR;
+  if (!isWslRuntime(probe) || !WSL_WINDOWS_DRIVE_PATTERN.test(resolve(repoRoot))) return CODEGRAPH_DEFAULT_DIR;
+  try {
+    if (statSync(join(repoRoot, CODEGRAPH_WSL_DIR)).isDirectory()) return CODEGRAPH_WSL_DIR;
+  } catch { /* absent or unreadable */ }
+  if (existsSync(join(repoRoot, CODEGRAPH_DEFAULT_DIR, 'codegraph.db'))) return CODEGRAPH_DEFAULT_DIR;
+  return CODEGRAPH_WSL_DIR;
 }
 
 /**
  * Verifies `<repoRoot>/.codegraph` before any write-capable CodeGraph command (`archctx index seed`
- * or `codegraph init`). Fails closed on symlinks, non-directories, occupied directories without
- * `codegraph.db`, or a `.gitignore` that pinned CodeGraph would overwrite.
+ * or `codegraph init`). Fails closed when pinned CodeGraph would select another directory (such as
+ * `.codegraph-wsl` on WSL Windows drives), or on symlinks, non-directories, occupied directories
+ * without `codegraph.db`, non-SQLite `codegraph.db`, unproven lock or error-log files that pinned
+ * CodeGraph could unlink/overwrite, or a `.gitignore` that pinned CodeGraph would rewrite.
  */
-export function assertSafeCodeGraphDestination(repoRoot: string): void {
-  const indexDirectory = join(repoRoot, '.codegraph');
+export function assertSafeCodeGraphDestination(repoRoot: string, probe: CodeGraphDestinationProbe = {}): void {
+  const effectiveDir = effectiveCodeGraphDirName(repoRoot, probe);
+  if (effectiveDir !== CODEGRAPH_DEFAULT_DIR) {
+    throw unsafeCodeGraphDestination(
+      `CodeGraph resolves ${effectiveDir} instead of ${CODEGRAPH_DEFAULT_DIR} for ${repoRoot}; refusing to seed an unchecked destination.`,
+    );
+  }
+  const indexDirectory = join(repoRoot, CODEGRAPH_DEFAULT_DIR);
   let dirStat: ReturnType<typeof lstatSync> | undefined;
   try {
     dirStat = lstatSync(indexDirectory, { throwIfNoEntry: false });
@@ -664,10 +802,45 @@ export function assertSafeCodeGraphDestination(repoRoot: string): void {
   if (!dbStat.isFile()) {
     throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db must be a regular file, not a symlink or directory. Inspect .codegraph before seeding or running codegraph init.');
   }
-  for (const sidecar of CODEGRAPH_LIVE_SIDECARS) {
+  let header: Buffer;
+  try {
+    header = readPrefixBytes(dbPath, SQLITE_HEADER_MAGIC.length);
+  } catch (error) {
+    throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/codegraph.db is unreadable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (dbStat.size < SQLITE_HEADER_MIN_BYTES || !header.equals(SQLITE_HEADER_MAGIC)) {
+    throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db is not a valid SQLite 3 database. Inspect .codegraph/codegraph.db before seeding.');
+  }
+
+  for (const sidecar of CODEGRAPH_SQLITE_SIDECARS) {
     const stat = lstatSync(join(indexDirectory, sidecar), { throwIfNoEntry: false });
     if (stat && !stat.isFile()) {
       throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/${sidecar} must be a regular file, not a symlink or directory. Inspect .codegraph before seeding or running codegraph init.`);
+    }
+  }
+  for (const lockName of CODEGRAPH_LOCK_FILES) {
+    assertProvenCodeGraphLockFile(indexDirectory, lockName);
+  }
+  for (const entry of entries) {
+    if (CODEGRAPH_LOCK_TEMP_PATTERN.test(entry)) {
+      assertProvenCodeGraphLockFile(indexDirectory, entry);
+    }
+  }
+
+  const errorLogPath = join(indexDirectory, 'errors.log');
+  const errorLogStat = lstatSync(errorLogPath, { throwIfNoEntry: false });
+  if (errorLogStat) {
+    if (!errorLogStat.isFile()) {
+      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/errors.log must be a regular file, not a symlink or directory. Inspect .codegraph before seeding.');
+    }
+    let prefix: string;
+    try {
+      prefix = readPrefixBytes(errorLogPath, Buffer.byteLength(CODEGRAPH_ERROR_LOG_MARKER, 'utf8')).toString('utf8');
+    } catch (error) {
+      throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/errors.log is unreadable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (prefix !== CODEGRAPH_ERROR_LOG_MARKER) {
+      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/errors.log is not a CodeGraph error log and could be overwritten or unlinked. Inspect .codegraph/errors.log before seeding.');
     }
   }
 }
@@ -684,8 +857,15 @@ function runArchctxIndexSeed(
   options: ArchctxProviderOptions,
   processTimeoutMs = timeoutMs,
 ): IndexSeedResultV1 {
-  assertSafeCodeGraphDestination(repoRoot);
-  const envelope = new ArchctxClient(repoRoot, requiredVersion, options).json(
+  const env: NodeJS.ProcessEnv = {
+    ...sanitizeGitDiscoveryEnv(options.env ?? process.env),
+    CODEGRAPH_FORCE_WATCH: '1',
+  };
+  // `archctx index seed` disables shared-base seeding when CODEGRAPH_DIR is set (`index-base.ts:189`).
+  delete env.CODEGRAPH_DIR;
+  delete env.CODEGRAPH_NO_WATCH;
+  assertSafeCodeGraphDestination(repoRoot, { env });
+  const envelope = new ArchctxClient(repoRoot, requiredVersion, { ...options, env }).json(
     ['index', 'seed', '--timeout-ms', String(timeoutMs), '--json'],
     processTimeoutMs,
   );
@@ -702,12 +882,18 @@ function runArchctxIndexSeed(
 
 /** Called after the primary checkout and plugin have opted into CodeGraph. */
 export function bootstrapWorktreeCodeGraph(primaryRoot: string, worktreeRoot: string, options: ArchctxProviderOptions = {}): void {
-  const env: NodeJS.ProcessEnv = { ...(options.env ?? process.env), CODEGRAPH_NO_DOWNLOAD: '1', DO_NOT_TRACK: '1' };
+  const env: NodeJS.ProcessEnv = {
+    ...sanitizeGitDiscoveryEnv(options.env ?? process.env),
+    CODEGRAPH_NO_DOWNLOAD: '1',
+    CODEGRAPH_FORCE_WATCH: '1',
+    DO_NOT_TRACK: '1',
+  };
   delete env.CODEGRAPH_DIR;
+  delete env.CODEGRAPH_NO_WATCH;
   const policy = options.policy ?? readArchitectureProjectionPolicy({ architecture: DEFAULT_GLOBAL_ARCHITECTURE });
   const indexDirectory = join(worktreeRoot, '.codegraph');
 
-  assertSafeCodeGraphDestination(worktreeRoot);
+  assertSafeCodeGraphDestination(worktreeRoot, { env });
 
   if (process.platform !== 'win32') {
     // Only refresh primary when it already has a private CodeGraph index; never init primary.
@@ -736,7 +922,7 @@ export function bootstrapWorktreeCodeGraph(primaryRoot: string, worktreeRoot: st
   }
 
   // Init writes the ignore file and SQLite sidecars. Re-check safety and refuse an existing database.
-  assertSafeCodeGraphDestination(worktreeRoot);
+  assertSafeCodeGraphDestination(worktreeRoot, { env, pinDefaultDir: true });
   if (lstatSync(join(indexDirectory, 'codegraph.db'), { throwIfNoEntry: false })) {
     throw unsafeCodeGraphDestination('CodeGraph destination .codegraph already contains codegraph.db. Inspect .codegraph before running codegraph init.');
   }
@@ -758,7 +944,15 @@ export function indexPackageLocalCodeGraph(checkoutRoot: string, options: Archct
   const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
   if (policy.provider === 'disabled') throw new Error('architecture projection provider is disabled');
   const binaryPath = resolvePackageLocalCodeGraph(resolvePackageLocalArchctx(options.consumerRoot, policy.requiredVersion));
-  const env = { ...(options.env ?? process.env), CODEGRAPH_NO_DOWNLOAD: '1', CODEGRAPH_TELEMETRY: '0' };
+  const env: NodeJS.ProcessEnv = {
+    ...(options.env ?? process.env),
+    CODEGRAPH_DIR: '.codegraph',
+    CODEGRAPH_NO_DOWNLOAD: '1',
+    CODEGRAPH_FORCE_WATCH: '1',
+    CODEGRAPH_TELEMETRY: '0',
+    DO_NOT_TRACK: '1',
+  };
+  delete env.CODEGRAPH_NO_WATCH;
   const args = CODEGRAPH_INIT_ARGS;
   const result = options.run
     ? options.run(binaryPath, args, { cwd: checkoutRoot, timeoutMs: policy.timeoutMs, env })
