@@ -27,6 +27,7 @@ import {
   ArchctxClient,
   archctxCapabilities,
   architectureProjectionRequest,
+  assertSafeCodeGraphDestination,
   bootstrapWorktreeCodeGraph,
   inspectArchitectureProjectionReadiness,
   readArchitectureProjectionSnapshot,
@@ -711,19 +712,34 @@ describe('package-local ArchContext projection provider', () => {
     }
   });
 
-  test('a timeout reports outcome unknown and the same id without the request JSON', () => {
+  test('a write timeout reports outcome unknown and reconciliation guidance without request-id replay or request JSON', () => {
     const f = fixture();
     const run: RunArchctxProcess = withSnapshot((_binary, args) => args[0] === 'capabilities'
       ? { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' }
       : { status: 1, signal: 'SIGTERM', stdout: '', stderr: '', timedOut: true, error: 'process timed out: --request-json secret-payload' });
-    let message = '';
+    let applyErr: unknown;
     try { applyArchitectureProjection(f.repoRoot, { consumerRoot: f.consumerRoot, policy, requestId: 'same.retry.id', run }); }
-    catch (error) { message = (error as Error).message; }
+    catch (error) { applyErr = error; }
+    expect(applyErr).toBeInstanceOf(ArchctxClientError);
+    expect((applyErr as ArchctxClientError).code).toBe('RH_ARCHCTX_TIMEOUT');
+    expect((applyErr as ArchctxClientError).action).toBe('reconcile-projection-state');
+    const message = (applyErr as Error).message;
     expect(message).toContain('outcome unknown');
-    expect(message).toContain('check --json');
-    expect(message).toContain('--request-id same.retry.id');
+    expect(message).toContain('rh arch projection check --json');
+    expect(message).toContain('git diff');
+    expect(message).not.toContain('--request-id');
+    expect(message).not.toContain('same request id');
     expect(message).not.toContain('--request-json');
     expect(message).not.toContain('secret-payload');
+
+    let checkErr: unknown;
+    try { runArchitectureProjection({ ...request(), mode: 'check' }, f.repoRoot, { consumerRoot: f.consumerRoot, policy, run }); }
+    catch (error) { checkErr = error; }
+    expect(checkErr).toBeInstanceOf(ArchctxClientError);
+    expect((checkErr as ArchctxClientError).code).toBe('RH_ARCHCTX_TIMEOUT');
+    expect((checkErr as ArchctxClientError).action).toBe('retry');
+    expect((checkErr as Error).message).not.toContain('--request-id');
+    expect((checkErr as Error).message).not.toContain('same request id');
   });
 
   test('reviewed worktree digest binds apply before any projection run', () => {
@@ -1910,12 +1926,13 @@ test('memoizes node --version probes across repeated ArchctxClient calls with ma
 });
 
 describe('bootstrapWorktreeCodeGraph index seed cutover', () => {
-  test.skipIf(process.platform === 'win32')('fails closed on code-facts-not-ready and symlink .codegraph without overwriting, and logs primary copiedFiles=0', () => {
+  test.skipIf(process.platform === 'win32')('enforces safe destination preflight, fails closed on code-facts-not-ready, and avoids copiedFiles=0 false alarm', () => {
     const f = fixture({ git: false });
     const primary = join(f.root, 'primary');
     const linked = join(f.root, 'linked');
     mkdirSync(join(primary, '.codegraph'), { recursive: true });
     writeFileSync(join(primary, '.codegraph', 'codegraph.db'), 'primary-db');
+    writeFileSync(join(primary, '.codegraph', '.gitignore'), '*\n');
     mkdirSync(join(linked, '.codegraph'), { recursive: true });
     writeFileSync(join(linked, '.codegraph', 'codegraph.db'), 'preserve-unready');
     const calls: Array<{ cwd: string; args: readonly string[] }> = [];
@@ -1935,28 +1952,32 @@ describe('bootstrapWorktreeCodeGraph index seed cutover', () => {
       };
       expect(() => bootstrapWorktreeCodeGraph(primary, linked, { consumerRoot: f.consumerRoot, policy, run: runNotReady })).toThrow('AC_CODE_FACTS_NOT_READY');
       expect(readFileSync(join(linked, '.codegraph', 'codegraph.db'), 'utf8')).toBe('preserve-unready');
-      expect(logged).toContain('[ContractWorktree] CodeGraph base refresh did not publish a shared base');
+      // Primary refresh copiedFiles=0 is normal when the shared base is already current.
+      expect(logged).toEqual([]);
       expect(calls.map(c => `${c.args[0]} ${c.args[1]}`)).toEqual(['index seed', 'index seed']);
 
-      // A symlink .codegraph must fail closed even when index seed returns AC_CODE_FACTS_UNAVAILABLE (index-missing).
+      // A symlink .codegraph fails closed BEFORE invoking archctx index seed or codegraph init.
       const linkedSymlink = join(f.root, 'linked-symlink');
       const targetDir = join(f.root, 'external-dir');
       mkdirSync(linkedSymlink, { recursive: true });
       mkdirSync(targetDir, { recursive: true });
       symlinkSync(targetDir, join(linkedSymlink, '.codegraph'));
-      const runMissing: RunArchctxProcess = (_binary, args, opts) => {
-        if (opts.cwd === primary) {
-          return { status: 0, signal: null, stderr: '', stdout: JSON.stringify({
-            schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'index.seed',
-            data: { schemaVersion: 'archcontext.index-seed/v1', mode: 'primary-refresh', worktreeRole: 'primary', seededFromBase: false, hardlinkedFiles: 0, copiedFiles: 1, elapsedMs: 5 },
-          }) };
-        }
-        if (args[0] === 'init') throw new Error('codegraph init must not run on symlink .codegraph');
-        return { status: 1, signal: null, stderr: '', stdout: JSON.stringify(errorEnvelope('index.seed', 'AC_CODE_FACTS_UNAVAILABLE', 'missing index', 'index-missing')) };
-      };
-      expect(() => bootstrapWorktreeCodeGraph(primary, linkedSymlink, { consumerRoot: f.consumerRoot, policy, run: runMissing }))
-        .toThrow('Inspect .codegraph before running codegraph init');
+      const mustNotRun: RunArchctxProcess = () => { throw new Error('provider must not run on unsafe .codegraph'); };
+      expect(() => bootstrapWorktreeCodeGraph(primary, linkedSymlink, { consumerRoot: f.consumerRoot, policy, run: mustNotRun }))
+        .toThrow('.codegraph must be a regular directory');
       expect(lstatSync(join(linkedSymlink, '.codegraph')).isSymbolicLink()).toBe(true);
+
+      // Shared destination preflight checks absent, empty, safe-ready, and all unsafe shapes.
+      const absentDir = join(f.root, 'absent-dest');
+      mkdirSync(absentDir, { recursive: true });
+      expect(() => assertSafeCodeGraphDestination(absentDir)).not.toThrow();
+      mkdirSync(join(absentDir, '.codegraph'));
+      expect(() => assertSafeCodeGraphDestination(absentDir)).not.toThrow();
+      writeFileSync(join(absentDir, '.codegraph', 'codegraph.db'), 'db');
+      writeFileSync(join(absentDir, '.codegraph', '.gitignore'), '# CodeGraph data files\n*\n!.gitignore\n');
+      expect(() => assertSafeCodeGraphDestination(absentDir)).not.toThrow();
+      writeFileSync(join(absentDir, '.codegraph', '.gitignore'), '# CodeGraph data files\n*.db\n');
+      expect(() => assertSafeCodeGraphDestination(absentDir)).toThrow('stale-default pattern');
 
       // An unexpected requestId from index seed fails closed instead of falling back to init.
       const linkedBad = join(f.root, 'linked-bad');

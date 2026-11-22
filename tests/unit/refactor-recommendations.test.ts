@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { RefactorDecisionV1, RefactorScanFindingV2, RefactorScanV2, RefactorScopeV1, RefactorVerifyV2 } from 'archctx-contracts';
+import type { RefactorDecisionV1, RefactorScanFindingV2, RefactorScanV2, RefactorVerifyV2 } from 'archctx-contracts';
 import {
   buildRefactorCommand,
   formatRefactorList,
@@ -195,30 +195,13 @@ test('preserves provider errors, timeouts, and missing-model unavailable states'
   expect(observeRefactorRecommendations(f.repo, { env: f.env, discover: () => { throw new Error('must not scan'); } }).status).toBe('unavailable');
 });
 
-test('forwards normalized scopes, exposes only v2 CLI subcommands and options, and formats verify/list/show cleanly', () => {
-  const f = fixture();
-  const scopes: Array<RefactorScopeV1 | undefined> = [];
-  observeRefactorRecommendations(f.repo, {
-    env: f.env,
-    scope: { kind: 'node', nodeId: 'capability.runtime-harness.architecture' },
-    discover: (_root, _provider, _limit, _timeout, scope) => { scopes.push(scope); return scanV2(); },
-  });
-  observeRefactorRecommendations(f.repo, {
-    env: f.env,
-    scope: { kind: 'paths', paths: ['src/b.ts', 'src/a.ts', 'src/b.ts'] },
-    discover: (_root, _provider, _limit, _timeout, scope) => { scopes.push(scope); return scanV2(); },
-  });
-  expect(scopes).toEqual([
-    { kind: 'node', nodeId: 'capability.runtime-harness.architecture' },
-    { kind: 'paths', paths: ['src/a.ts', 'src/b.ts'] },
-  ]);
-  expect(observeRefactorRecommendations(f.repo, { env: f.env, scope: { kind: 'paths', paths: ['../escape.ts'] } }))
-    .toMatchObject({ status: 'unavailable', code: 'refactor_invalid_scope' });
-
+test('exposes only repository-scoped v2 CLI subcommands and options, and formats verify/list/show cleanly', () => {
   const command = buildRefactorCommand();
   expect(command.commands.map((sub) => sub.name())).toEqual(['recommendations', 'decide', 'verify', 'resolve', 'list', 'show']);
 
   const optionLongs = (name: string) => command.commands.find((sub) => sub.name() === name)!.options.map((opt) => opt.long);
+  expect(optionLongs('recommendations')).not.toContain('--node');
+  expect(optionLongs('recommendations')).not.toContain('--path');
   expect(optionLongs('decide')).toContain('--kill-symbol');
   expect(optionLongs('decide')).toContain('--kill-path');
   expect(optionLongs('decide')).toContain('--kill-relation');
@@ -234,7 +217,8 @@ test('forwards normalized scopes, exposes only v2 CLI subcommands and options, a
   const recommendations = command.commands.find((sub) => sub.name() === 'recommendations')!;
   recommendations.exitOverride();
   recommendations.configureOutput({ writeOut: () => {}, writeErr: () => {} });
-  expect(() => recommendations.parse(['--node', 'capability.a', '--path', 'src/a.ts'], { from: 'user' })).toThrow();
+  expect(() => recommendations.parse(['--node', 'capability.a'], { from: 'user' })).toThrow();
+  expect(() => recommendations.parse(['--path', 'src/a.ts'], { from: 'user' })).toThrow();
 
   const verifyResult: RefactorVerifyV2 = {
     schemaVersion: 'archcontext.refactor-verify/v2',

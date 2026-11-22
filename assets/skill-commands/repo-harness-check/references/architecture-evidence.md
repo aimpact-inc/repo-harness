@@ -19,10 +19,10 @@ evidence.
 At `done`, run only the cheap checks below: path ownership, and
 `rh arch projection check` when the model or documents changed. Do not run
 `rh arch refactor recommendations --json` at `done` or on worker `Stop`
-hooks. Run the full-repo scan once per merge on a fixed checkout and branch
-(the `main` checkout after the merge), or run a scoped scan (`--node` /
-`--path`) during `advisor` audit or when the user asks about refactors. A
-full-repo scan takes about 30 s and gives the same output on every branch.
+hooks. Run the repository-scoped scan once per merge on a fixed checkout and
+branch (the `main` checkout after the merge), during `advisor` audit, or when
+the user asks about refactors. A full-repo scan takes about 30 s and gives the
+same output on every branch.
 
 When a PR modifies `.archcontext/**`, `docs/architecture/**`, or carries
 `tier:high` cross-module boundary changes, read
@@ -87,9 +87,8 @@ writer publishes generated files. Do not run apply to refresh a feature PR.
 
 ## Refactor suggestions
 
-Run `rh arch refactor recommendations --json` (pass `--node <capability-id>` or
-`--path <repo-relative-path>` for a scoped read during `advisor` health audits
-and pre-refactor intake, or omit both for a full-repo post-merge scan). Never
+Run `rh arch refactor recommendations --json` (repository-scoped so every
+reported ID resolves in `decide` and `show`). Never
 invoke `archctx` from `PATH`. The result `repo-harness.refactor-recommendations/v3`
 carries `status`, `headSha`, `snapshotDigest`, `scope`, `coverage` (`imports`,
 `gitHistory`, `reasonCodes`), `findings` and `suppressed`. Each finding lists

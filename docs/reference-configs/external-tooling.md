@@ -1446,7 +1446,7 @@ or code edit.
 Read evidence, record decisions and verify resolutions with:
 
 ```bash
-rh arch refactor recommendations [--node <id> | --path <p>...] [--import-node-limit <n>] [--timeout-ms <ms>] [--json]
+rh arch refactor recommendations [--import-node-limit <n>] [--timeout-ms <ms>] [--json]
 rh arch refactor list [--status <status>] [--import-node-limit <n>] [--timeout-ms <ms>] [--json]
 rh arch refactor show <recommendation-id> [--import-node-limit <n>] [--timeout-ms <ms>] [--json]
 rh arch refactor decide <recommendation-id> accept|defer|reject|acknowledge|waive --reason "<text>" [--kill-symbol <path#sym>...] [--kill-path <path>...] [--kill-relation <id>...] [--import-node-limit <n>] [--timeout-ms <ms>] [--json]
@@ -1471,9 +1471,13 @@ scan with coverage). Pass the same `--import-node-limit` to `decide`, `verify`
 and `resolve` when the scan used one.
 
 `verify` is read-only: it checks `killListChecks` and `metricChecks`, prints
-`disposition`, `resolutionDigest` and `blockingReasons`, and exits 0 only when
-`disposition === "resolved"`. `resolve` requires `--resolution-digest <sha256:...>`
-from `verify` and updates `.archcontext/refactor-decisions/<recommendation-id>.json`
-to `resolved`. repo-harness keeps no local delivery state; Git-tracked decision
+`disposition`, `headSha`, `resolutionDigest`, `blockingReasons` and
+`historicalReceipt`, and exits 0 only when `disposition === "resolved"`.
+`resolve` requires `--resolution-digest <sha256:...>` from `verify` and updates
+`.archcontext/refactor-decisions/<recommendation-id>.json` to `resolved`.
+Because `verify` hashes live `headSha` into live `resolutionDigest`, committing
+the resolved decision file shifts subsequent live `resolutionDigest` while
+preserving the committed digest in `historicalReceipt.resolutionDigest`.
+repo-harness keeps no local delivery state; Git-tracked decision
 files and ArchContext own the recommendation lifecycle. Execution of an accepted
 finding uses the normal plan and pull request workflow.

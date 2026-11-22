@@ -2,7 +2,6 @@ import { existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ArchctxProviderOptions } from '../../core/architecture/contracts';
 import {
-  normalizeRefactorScope,
   RefactorProviderError,
   type RefactorScanFindingV2,
   type RefactorScanV2,
@@ -38,14 +37,11 @@ export interface RefactorRecommendationOptions {
   importNodeLimit?: number;
   /** Per archctx call limit in ms; the default is 120000. */
   timeoutMs?: number;
-  /** Limits scan observations to a declared node or repository-relative paths. */
-  scope?: RefactorScopeV1;
   discover?: (
     repoRoot: string,
     provider: ArchctxProviderOptions,
     importNodeLimit?: number,
     timeoutMs?: number,
-    scope?: RefactorScopeV1,
   ) => RefactorScanV2;
 }
 
@@ -86,21 +82,14 @@ function discoverRefactorRecommendations(
   repoRoot: string,
   options: RefactorRecommendationOptions,
 ): RefactorRecommendationResult {
-  const scope = options.scope === undefined
-    ? undefined
-    : options.scope.kind === 'node'
-      ? normalizeRefactorScope({ node: options.scope.nodeId })
-      : options.scope.kind === 'paths'
-        ? normalizeRefactorScope({ paths: options.scope.paths })
-        : { kind: 'repository' as const };
   const root = realpathSync(repoRoot);
   if (!existsSync(join(root, '.archcontext/manifest.yaml'))) {
     return emptyResult('unavailable', 'repository architecture model is not initialized');
   }
   const provider = { env: options.env };
   const scan = options.discover
-    ? options.discover(root, provider, options.importNodeLimit, options.timeoutMs, scope)
-    : runRefactorScan(root, provider, options.importNodeLimit, options.timeoutMs, scope);
+    ? options.discover(root, provider, options.importNodeLimit, options.timeoutMs)
+    : runRefactorScan(root, provider, options.importNodeLimit, options.timeoutMs);
   const common = {
     headSha: scan.headSha,
     snapshotDigest: scan.snapshotDigest,

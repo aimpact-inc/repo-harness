@@ -10,7 +10,6 @@ import {
   decodeRefactorResolveResult,
   decodeRefactorScanV2,
   decodeRefactorVerifyV2,
-  normalizeRefactorScope,
   REFACTOR_DECISIONS,
   REFACTOR_DEFAULT_TIMEOUT_MS,
   REFACTOR_LIST_STATUSES,
@@ -25,7 +24,6 @@ import {
   type RefactorKillListFlags,
   type RefactorResolveResultV1,
   type RefactorScanV2,
-  type RefactorScopeV1,
   type RefactorVerifyV2,
 } from "../../core/refactor/provider-contract";
 import { commandLabel, runPackageLocalArchctxJson } from "../architecture/archctx-provider";
@@ -58,30 +56,18 @@ function invoke(repoRoot: string, args: readonly string[], options: ArchctxProvi
   }
 }
 
-function scopeArgs(scope: RefactorScopeV1): string[] {
-  const normalized = scope.kind === "node"
-    ? normalizeRefactorScope({ node: scope.nodeId })
-    : scope.kind === "paths"
-      ? normalizeRefactorScope({ paths: scope.paths })
-      : { kind: "repository" as const };
-  if (normalized.kind === "node") return ["--node", normalized.nodeId];
-  if (normalized.kind === "paths") return normalized.paths.flatMap((path) => ["--path", path]);
-  return [];
-}
-
 function importNodeLimitArgs(importNodeLimit: number | undefined): string[] {
   return importNodeLimit === undefined ? [] : ["--import-node-limit", String(importNodeLimit)];
 }
 
-/** Pure-Git v2 refactor radar scan (`archctx scan --json`). Read-only. */
+/** Pure-Git v2 refactor radar scan (`archctx scan --json`). Read-only, repository-scoped to match `decide` and `show`. */
 export function runRefactorScan(
   repoRoot: string,
   options: ArchctxProviderOptions = {},
   importNodeLimit?: number,
   timeoutMs = REFACTOR_DEFAULT_TIMEOUT_MS,
-  scope: RefactorScopeV1 = { kind: "repository" },
 ): RefactorScanV2 {
-  const args = ["scan", ...scopeArgs(scope), ...importNodeLimitArgs(importNodeLimit), "--json"];
+  const args = ["scan", ...importNodeLimitArgs(importNodeLimit), "--json"];
   return decodeRefactorScanV2(invoke(repoRoot, args, options, timeoutMs));
 }
 

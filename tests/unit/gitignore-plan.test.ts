@@ -93,7 +93,7 @@ describe("gitignore managed block .repo-harness rule", () => {
     expect(ensure(edited)).toMatchObject({ ok: true, changed: false, kept: "# BEGIN: claude-runtime-temp (managed by repo-harness)", content: edited });
 
     // A released v0.32.0 block with a retired-rule section, in a CRLF file, is replaced and keeps CRLF.
-    const releasedV032Base = GITIGNORE_MANAGED_BLOCK_CONTENT.replace("!.archcontext/refactor-decisions/\n", "");
+    const releasedV032Base = GITIGNORE_MANAGED_BLOCK_CONTENT.replace("!.archcontext/refactor-decisions/\n.archcontext/refactor-decisions/*.tmp-*\n", "");
     const retiredSection = ["", "# Retired runtime state that still exists; repo-harness upgrade lists these files", ".claude/.session-id", "tasks/current.md"];
     const releasedRetired = ["# BEGIN: repo-harness generated-runtime", releasedV032Base, ...retiredSection, "# END: repo-harness generated-runtime"].join("\n");
     expect(ensure(`before/\n${releasedRetired}\nafter/\n`.replaceAll("\n", "\r\n")))
@@ -119,6 +119,7 @@ describe("gitignore managed block .repo-harness rule", () => {
         ".ai/harness/handoff/gptpro/gptpro-stamp-slug.md", // repo-harness-chatgpt delegate skill
         ".ai/harness/mcp/index-events.jsonl", // mcp general-repo-access.ts
         ".ai/harness/backups/fs-transaction/entry", // fs-transaction.ts BACKUP_ROOT
+        ".archcontext/refactor-decisions/recommendation.0123456789abcdef.json.tmp-123-456", // archctx atomic decision write temp
         ".claude/worktrees/task/README.md", // Claude Code task worktrees
       ];
       const result = spawnSync("git", ["check-ignore", "--no-index", "--stdin"], { cwd, encoding: "utf8", input: `${runtimePaths.join("\n")}\n` });

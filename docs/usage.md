@@ -232,7 +232,7 @@ at the resolved base SHA or marks it absent at base.
 ### Refactor recommendations
 
 ```bash
-rh arch refactor recommendations [--node <id> | --path <p>...] [--import-node-limit <n>]   # measured findings with evidence
+rh arch refactor recommendations [--import-node-limit <n>]                                  # measured findings with evidence
 rh arch refactor decide <id> accept|defer|reject|acknowledge|waive --reason "<text>" [--import-node-limit <n>]
 rh arch refactor verify <id> [--import-node-limit <n>]                                    # read-only resolution check
 rh arch refactor resolve <id> --resolution-digest <sha256:...> --reason "<text>" [--import-node-limit <n>]
@@ -245,9 +245,11 @@ targets on `accept`). Inspect committed decisions with `rh arch refactor list`
 and `rh arch refactor show <id>`.
 
 After a code fix lands, `verify` checks `killListChecks` and `metricChecks`
-read-only and prints `disposition` and `resolutionDigest` (exiting 0 only on
-`resolved`). Pass that digest to `resolve --resolution-digest` to mark the
-decision file resolved.
+read-only and prints `disposition`, `headSha`, `resolutionDigest` and
+`historicalReceipt` (exiting 0 only on `resolved`). Pass that digest to
+`resolve --resolution-digest` to mark the decision file resolved; after
+committing the decision file, `verify` still reports `resolved` at the new
+`headSha` and surfaces the stored digest in `historicalReceipt.resolutionDigest`.
 
 ArchContext measures structural problems such as cycles, purity and direction
 violations. repo-harness shows each finding with its metrics, bounded evidence,

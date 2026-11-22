@@ -45,8 +45,7 @@ Each selected member opens a read-only `council` pane in the `council` tab and w
 - **Read the council files, not the scrollback.** Read each `/tmp/rh-council/<repo>/issue-<n>-<member>.md` file with `Read` or `hc file read <path>`. Do not take proposals from `hc read` scrollback: long answers truncate in alternate-screen TUIs.
 - **Keep the authority.** Every `council` member is read-only and ephemeral. Synthesize the blind `/tmp/rh-council/` proposals into one unified proposal for the orchestrator (§3). Never forward raw council files to the orchestrator or to a worker; workers never read `/tmp/rh-council/`.
 - **Cross-capability cycle or boundary split.** Run
-  `rh arch refactor recommendations --json` (scoped with `--node <capability-id>`
-  or `--path <path>`) and
+  `rh arch refactor recommendations --json` and
   `rh arch module review-prompt <capability-id> --json` for each affected
   capability. Attach the finding `metrics`, `evidence`, `affectedPaths` and
   `killList` with the `review-prompt` output to the L3 `council` consultation
@@ -107,8 +106,7 @@ the change, so the check must come from outside its session.
       `[rh-notice] lessons-retro due: <watermark> is <n> days and <n>
       first-parent commits behind origin/main`.
    9. Structural refactor intake (periodic health audit and pre-refactor
-      check). Run `rh arch refactor recommendations --json` (scoped with
-      `--node <capability-id>` or `--path <path>`), and inspect existing
+      check). Run `rh arch refactor recommendations --json`, and inspect existing
       decisions via `rh arch refactor list --json` or
       `rh arch refactor show <id> --json`.
       Never invoke `archctx` from `PATH` and never run this scan on worker

@@ -394,7 +394,7 @@ export type ArchctxDisposition = 'pass' | 'owned' | 'refused';
 export interface ArchctxCommandDisposition { readonly disposition: ArchctxDisposition; readonly use?: string }
 
 const passCommands = [
-  'capabilities', 'init', 'index', 'sync', 'validate', 'check', 'model', 'context', 'status', 'repo', 'landscape', 'explore', 'prepare',
+  'capabilities', 'init', 'index', 'validate', 'check', 'model', 'context', 'status', 'repo', 'landscape', 'explore', 'prepare',
   'practices', 'checkpoint', 'plan', 'apply', 'hash', 'review', 'complete', 'manifest', 'doctor', 'paths', 'export',
   'resolve', 'impact', 'history', 'flows', 'state-machines', 'deps', 'constraints', 'docs',
 ] as const;
@@ -403,11 +403,12 @@ const refused = (use: string): ArchctxCommandDisposition => ({ disposition: 'ref
 
 /**
  * One entry for each command of the pinned archctx help envelope, plus `docs`.
- * `rh arch` starts archctx only for `pass`; a test fails when the help list and
- * these keys differ.
+ * `rh arch` starts archctx only for `pass` (and read-only `sync --check`); a
+ * test fails when the help list and these keys differ.
  */
 export const ARCHCTX_COMMAND_DISPOSITIONS: Readonly<Record<string, ArchctxCommandDisposition>> = {
   ...Object.fromEntries(passCommands.map(name => [name, { disposition: 'pass' } as ArchctxCommandDisposition])),
+  sync: owned('rh arch projection apply (or rh arch sync --check)'),
   projection: owned('rh arch projection'),
   debt: owned('rh arch debt'),
   verify: owned('rh arch verify'),
@@ -436,9 +437,26 @@ const ARCHCTX_PROJECTION_SUBCOMMAND_DISPOSITIONS: Readonly<Record<string, Archct
   run: owned('rh arch projection check|plan|apply'),
 };
 
+const SYNC_READONLY_FLAGS: ReadonlySet<string> = new Set(['--check', '--help', '-h']);
+const SYNC_VALUE_FLAGS: ReadonlySet<string> = new Set(['--changed', '--format']);
+
+function hasStandaloneSyncFlag(rest: readonly string[]): boolean {
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index]!;
+    if (token === '--') return false;
+    if (SYNC_VALUE_FLAGS.has(token)) {
+      index += 1;
+      continue;
+    }
+    if (SYNC_READONLY_FLAGS.has(token)) return true;
+  }
+  return false;
+}
+
 /** The refusal text for a command that `rh arch` does not start, or null when it starts. */
 export function archctxRefusal(args: readonly string[]): string | null {
   const [command = '', sub = ''] = args;
+  if (command === 'sync' && hasStandaloneSyncFlag(args.slice(1))) return null;
   const nested = command === 'projection';
   const table = nested ? ARCHCTX_PROJECTION_SUBCOMMAND_DISPOSITIONS : ARCHCTX_COMMAND_DISPOSITIONS;
   const key = nested ? sub : command;

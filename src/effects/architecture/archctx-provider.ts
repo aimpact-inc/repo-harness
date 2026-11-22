@@ -16,7 +16,7 @@ import { runProcess } from '../process-runner';
 import type { CapabilityOwnership } from '../../core/capabilities/registry';
 import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError, assertArchctxVersion, assertProjectionResult, decodeArchitectureDebtDelta, decodeArchitectureDebtReport, decodeDocsAnchorsReport, decodeIndexSeedResult, readArchitectureProjectionPolicy } from '../../core/architecture/projection';
 import type { ArchctxProcessResult, ArchctxProviderOptions, ResolvedArchctxPackage, ArchitectureProjectionReadinessV1 } from '../../core/architecture/contracts';
-import { gitExecFileSync } from '../git/runner';
+import { gitExecFileSync, gitSpawnSync } from '../git/runner';
 
 const ARCHCTX_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const DEFAULT_RUNNER = (binary: string, args: readonly string[], options: { cwd: string; timeoutMs?: number; deadlineMs?: number; env: NodeJS.ProcessEnv }): ArchctxProcessResult => {
@@ -193,7 +193,7 @@ export class ArchctxClient {
       if (args[0] === 'checkpoint') {
         throw new ArchctxClientError({ code: 'RH_ARCHCTX_TIMEOUT', action: 'inspect-diagnostics', message: 'architecture checkpoint did not finish in the notice time budget' });
       }
-      throw new ArchctxClientError({ code: 'RH_ARCHCTX_TIMEOUT', action: 'check-and-retry-same-request', message: `${label} timed out; outcome unknown. Run rh arch projection check --json, then retry with the same request id.` });
+      throw new ArchctxClientError({ code: 'RH_ARCHCTX_TIMEOUT', action: 'retry', message: `${label} timed out` });
     }
     if (Buffer.byteLength(result.stdout, 'utf8') > ARCHCTX_MAX_OUTPUT_BYTES || Buffer.byteLength(result.stderr, 'utf8') > ARCHCTX_MAX_OUTPUT_BYTES) throw new Error(`${label} output exceeded maxBuffer`);
     // Process errors can contain argv, including request-json. Do not print them.
@@ -289,8 +289,12 @@ export function archctxCapabilities(repoRoot: string, options: ArchctxProviderOp
  * arguments, inherited stdio and no output cap. Returns the archctx exit code; a signal exit is 1.
  */
 export function runArchctxPassThrough(cwd: string, args: readonly string[], options: ArchctxProviderOptions = {}): number {
-  const { resolved } = archctxCapabilities(cwd, options);
-  const env = options.env ?? process.env;
+  const env: NodeJS.ProcessEnv = { ...(options.env ?? process.env) };
+  if (args[0] === 'index' && !args.includes('--help') && !args.includes('-h')) {
+    delete env.CODEGRAPH_DIR;
+    assertSafeCodeGraphDestination(resolveCodeGraphSeedRoot(cwd, env));
+  }
+  const { resolved } = archctxCapabilities(cwd, { ...options, env });
   const result = spawnSync(resolveCompatibleNodeRuntime(env, options.trustedNodeCandidateSource), [resolved.binaryPath, ...args], { cwd, env, stdio: 'inherit' });
   if (result.error) throw result.error;
   return result.status ?? 1;
@@ -583,6 +587,91 @@ function decodeCompleteArchitectureDebt(data: unknown, headSha: string): Archite
   }
 }
 
+const CODEGRAPH_GITIGNORE_MARKER = '# CodeGraph data files';
+const CODEGRAPH_LIVE_SIDECARS = ['codegraph.db-wal', 'codegraph.db-shm', 'codegraph.db-journal', 'codegraph.lock'] as const;
+
+/** Matches pinned CodeGraph 1.6.4 `isStaleDefaultGitignore` (`directory.js:491-495`). */
+function codeGraphRewritesGitignore(content: string): boolean {
+  if (!content.trimStart().startsWith(CODEGRAPH_GITIGNORE_MARKER)) return false;
+  return !content.split('\n').some((line) => line.trim() === '*');
+}
+
+function unsafeCodeGraphDestination(message: string): ArchctxClientError {
+  return new ArchctxClientError({
+    code: 'RH_CODEGRAPH_DESTINATION_UNSAFE',
+    action: 'inspect-codegraph-index',
+    reasonCode: 'codegraph-destination-unsafe',
+    message,
+  });
+}
+
+function resolveCodeGraphSeedRoot(cwd: string, env: NodeJS.ProcessEnv): string {
+  const top = gitSpawnSync(['-C', cwd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', env });
+  const resolved = top.status === 0 ? top.stdout.trim() : '';
+  return resolved || cwd;
+}
+
+/**
+ * Verifies `<repoRoot>/.codegraph` before any write-capable CodeGraph command (`archctx index seed`
+ * or `codegraph init`). Fails closed on symlinks, non-directories, occupied directories without
+ * `codegraph.db`, or a `.gitignore` that pinned CodeGraph would overwrite.
+ */
+export function assertSafeCodeGraphDestination(repoRoot: string): void {
+  const indexDirectory = join(repoRoot, '.codegraph');
+  let dirStat: ReturnType<typeof lstatSync> | undefined;
+  try {
+    dirStat = lstatSync(indexDirectory, { throwIfNoEntry: false });
+  } catch (error) {
+    throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph is unreadable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!dirStat) return;
+  if (!dirStat.isDirectory()) {
+    throw unsafeCodeGraphDestination('CodeGraph destination .codegraph must be a regular directory, not a symlink or file. Inspect .codegraph before seeding or running codegraph init.');
+  }
+
+  let entries: string[];
+  try {
+    entries = readdirSync(indexDirectory);
+  } catch (error) {
+    throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph cannot be listed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const gitignorePath = join(indexDirectory, '.gitignore');
+  const gitignoreStat = lstatSync(gitignorePath, { throwIfNoEntry: false });
+  if (gitignoreStat) {
+    if (!gitignoreStat.isFile()) {
+      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/.gitignore must be a regular file, not a symlink or directory. Inspect .codegraph before seeding or running codegraph init.');
+    }
+    let content: string;
+    try {
+      content = readFileSync(gitignorePath, 'utf8');
+    } catch (error) {
+      throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/.gitignore is unreadable and would be overwritten: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (codeGraphRewritesGitignore(content)) {
+      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/.gitignore matches the stale-default pattern and would be overwritten. Inspect .codegraph/.gitignore before seeding or running codegraph init.');
+    }
+  }
+
+  const dbPath = join(indexDirectory, 'codegraph.db');
+  const dbStat = lstatSync(dbPath, { throwIfNoEntry: false });
+  if (!dbStat) {
+    if (entries.length > 0) {
+      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph is occupied without codegraph.db. Inspect .codegraph before seeding or running codegraph init.');
+    }
+    return;
+  }
+  if (!dbStat.isFile()) {
+    throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db must be a regular file, not a symlink or directory. Inspect .codegraph before seeding or running codegraph init.');
+  }
+  for (const sidecar of CODEGRAPH_LIVE_SIDECARS) {
+    const stat = lstatSync(join(indexDirectory, sidecar), { throwIfNoEntry: false });
+    if (stat && !stat.isFile()) {
+      throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/${sidecar} must be a regular file, not a symlink or directory. Inspect .codegraph before seeding or running codegraph init.`);
+    }
+  }
+}
+
 function hasPrivateCodeGraphIndex(directory: string): boolean {
   return lstatSync(directory, { throwIfNoEntry: false })?.isDirectory() === true
     && lstatSync(join(directory, 'codegraph.db'), { throwIfNoEntry: false })?.isFile() === true;
@@ -595,6 +684,7 @@ function runArchctxIndexSeed(
   options: ArchctxProviderOptions,
   processTimeoutMs = timeoutMs,
 ): IndexSeedResultV1 {
+  assertSafeCodeGraphDestination(repoRoot);
   const envelope = new ArchctxClient(repoRoot, requiredVersion, options).json(
     ['index', 'seed', '--timeout-ms', String(timeoutMs), '--json'],
     processTimeoutMs,
@@ -617,14 +707,13 @@ export function bootstrapWorktreeCodeGraph(primaryRoot: string, worktreeRoot: st
   const policy = options.policy ?? readArchitectureProjectionPolicy({ architecture: DEFAULT_GLOBAL_ARCHITECTURE });
   const indexDirectory = join(worktreeRoot, '.codegraph');
 
+  assertSafeCodeGraphDestination(worktreeRoot);
+
   if (process.platform !== 'win32') {
     // Only refresh primary when it already has a private CodeGraph index; never init primary.
     if (hasPrivateCodeGraphIndex(join(primaryRoot, '.codegraph'))) {
       try {
-        const seeded = runArchctxIndexSeed(primaryRoot, policy.requiredVersion, policy.timeoutMs, { ...options, env, policy });
-        if (seeded.copiedFiles === 0) {
-          console.error('[ContractWorktree] CodeGraph base refresh did not publish a shared base');
-        }
+        runArchctxIndexSeed(primaryRoot, policy.requiredVersion, policy.timeoutMs, { ...options, env, policy });
       } catch (error) {
         reportBootstrapSyncFailure('CodeGraph base refresh', error);
       }
@@ -646,11 +735,10 @@ export function bootstrapWorktreeCodeGraph(primaryRoot: string, worktreeRoot: st
     }
   }
 
-  // Init can write the ignore file and SQLite sidecars. Preserve an occupied
-  // directory or symlink, including any entry present before an unsuccessful seed.
-  const index = lstatSync(indexDirectory, { throwIfNoEntry: false });
-  if (index && (!index.isDirectory() || readdirSync(indexDirectory).length > 0)) {
-    throw new Error('CodeGraph bootstrap could not verify the worktree index. Inspect .codegraph before running codegraph init.');
+  // Init writes the ignore file and SQLite sidecars. Re-check safety and refuse an existing database.
+  assertSafeCodeGraphDestination(worktreeRoot);
+  if (lstatSync(join(indexDirectory, 'codegraph.db'), { throwIfNoEntry: false })) {
+    throw unsafeCodeGraphDestination('CodeGraph destination .codegraph already contains codegraph.db. Inspect .codegraph before running codegraph init.');
   }
   console.error('[ContractWorktree] Running CodeGraph init in the worktree');
   indexPackageLocalCodeGraph(worktreeRoot, { ...options, env: { ...env, CODEGRAPH_DIR: '.codegraph' }, policy });
@@ -705,7 +793,13 @@ function runProjectionCommand(request: ProjectionRequestV1, repoRoot: string, op
   const client = new ArchctxClient(repoRoot, policy.requiredVersion, options);
   try { return client.data(['projection', 'run', '--request-json', JSON.stringify(request)], policy.timeoutMs); }
   catch (error) {
-    if (error instanceof ArchctxClientError && error.code === 'RH_ARCHCTX_TIMEOUT') throw new ArchctxClientError({ code: error.code, action: error.action, message: `${error.message} Retry with --request-id ${request.requestId}.` });
+    if (error instanceof ArchctxClientError && error.code === 'RH_ARCHCTX_TIMEOUT' && (request.mode === 'apply' || request.mode === 'adopt')) {
+      throw new ArchctxClientError({
+        code: error.code,
+        action: 'reconcile-projection-state',
+        message: `${error.providerMessage}; outcome unknown. Run rh arch projection check --json and git diff to reconcile before authorizing a fresh apply.`,
+      });
+    }
     throw error;
   }
 }

@@ -104,28 +104,6 @@ export interface RefactorKillListFlags {
 type JsonSchema = Parameters<typeof validateJsonSchema>[0];
 const REFACTOR_SCAN_FINDING_V2_SCHEMA = refactorScanV2Schema.properties.findings.items as unknown as JsonSchema;
 
-export function normalizeRefactorScope(input: { node?: string; paths?: readonly string[] }): RefactorScopeV1 {
-  const nodeId = input.node?.trim();
-  const paths = input.paths;
-  if (nodeId !== undefined && paths !== undefined && paths.length > 0) {
-    throw new RefactorProviderError("refactor_invalid_scope", "--node and --path cannot be combined");
-  }
-  if (input.node !== undefined) {
-    if (!nodeId) throw new RefactorProviderError("refactor_invalid_scope", "--node requires a non-empty node id");
-    return { kind: "node", nodeId };
-  }
-  if (paths !== undefined && paths.length > 0) {
-    const uniqueSorted = [...new Set(paths)].sort();
-    for (const path of uniqueSorted) {
-      if (!isRepoRelativePosixPath(path)) {
-        throw new RefactorProviderError("refactor_invalid_scope", `--path must be a repo-relative POSIX path: ${path}`);
-      }
-    }
-    return { kind: "paths", paths: uniqueSorted };
-  }
-  return { kind: "repository" };
-}
-
 export function assertRefactorRecommendationId(value: string): string {
   if (!REFACTOR_RECOMMENDATION_ID.test(value)) {
     throw new RefactorProviderError("refactor_invalid_input", "recommendationId must match recommendation.<16-hex>");

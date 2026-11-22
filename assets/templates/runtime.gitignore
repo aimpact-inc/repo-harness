@@ -19,6 +19,7 @@ _ref/
 !.archcontext/model/flows/
 !.archcontext/decisions/
 !.archcontext/refactor-decisions/
+.archcontext/refactor-decisions/*.tmp-*
 !.archcontext/policies/
 !.archcontext/practices/
 !.archcontext/projections/

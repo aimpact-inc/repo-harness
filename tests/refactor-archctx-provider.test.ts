@@ -107,12 +107,10 @@ function runner(calls: string[][], respond: (args: readonly string[]) => unknown
 }
 
 describe("refactor v2 archctx provider", () => {
-  test("routes scan with optional scope and import-node-limit and validates against refactor-scan-v2 schema", () => {
+  test("routes repository-scoped scan with optional import-node-limit and validates against refactor-scan-v2 schema", () => {
     const root = scratchDir();
     const calls: string[][] = [];
     const run = runner(calls, (args) => {
-      if (args.includes("--node")) return envelope("scan", sampleScan({ scope: { kind: "node", nodeId: "capability.test.alpha" } }));
-      if (args.includes("--path")) return envelope("scan", sampleScan({ scope: { kind: "paths", paths: ["src/alpha/index.ts", "src/beta/index.ts"] } }));
       if (args.includes("--import-node-limit")) return envelope("scan", sampleScan({ importNodeLimit: 500 }));
       return envelope("scan", sampleScan());
     });
@@ -120,14 +118,10 @@ describe("refactor v2 archctx provider", () => {
     const repoScan = runRefactorScan(root, { consumerRoot: REPO_ROOT, run });
     expect(repoScan.findings).toHaveLength(1);
     runRefactorScan(root, { consumerRoot: REPO_ROOT, run }, 500);
-    runRefactorScan(root, { consumerRoot: REPO_ROOT, run }, undefined, undefined, { kind: "node", nodeId: "capability.test.alpha" });
-    runRefactorScan(root, { consumerRoot: REPO_ROOT, run }, undefined, undefined, { kind: "paths", paths: ["src/beta/index.ts", "src/alpha/index.ts", "src/beta/index.ts"] });
 
     expect(calls).toEqual([
       ["scan", "--json"],
       ["scan", "--import-node-limit", "500", "--json"],
-      ["scan", "--node", "capability.test.alpha", "--json"],
-      ["scan", "--path", "src/alpha/index.ts", "--path", "src/beta/index.ts", "--json"],
     ]);
 
     const malformed = runner([], () => envelope("scan", { ...sampleScan(), coverage: { imports: "bogus", gitHistory: "complete", reasonCodes: [] } }));
@@ -450,9 +444,14 @@ describe("real archctx 0.18.0 pure-Git refactor lifecycle (end-to-end)", () => {
     expect(decided.filePath).toBe(`.archcontext/refactor-decisions/${recId}.json`);
     expect(existsSync(join(repoRoot, decided.filePath))).toBe(true);
 
-    // 5. Verify runtime.gitignore tracks `.archcontext/refactor-decisions/<id>.json` (git check-ignore exits 1).
+    // 5. Verify runtime.gitignore tracks `.archcontext/refactor-decisions/<id>.json` (exit 1) and ignores atomic temp files (exit 0),
+    // and confirm the canonical archctx CLI still reads the valid decision when an orphan temp file exists.
     const ignoreCheck = spawnSync("git", ["check-ignore", "-q", decided.filePath], { cwd: repoRoot, env });
     expect(ignoreCheck.status).toBe(1);
+    const orphanTmpPath = `${decided.filePath}.tmp-12345-1700000000000`;
+    writeRepoFile(repoRoot, orphanTmpPath, "{interrupted write");
+    const tmpIgnoreCheck = spawnSync("git", ["check-ignore", "-q", orphanTmpPath], { cwd: repoRoot, env });
+    expect(tmpIgnoreCheck.status).toBe(0);
 
     runGit(repoRoot, ["add", decided.filePath], env);
     runGit(repoRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Accept cycle refactor decision"], env);
@@ -462,6 +461,7 @@ describe("real archctx 0.18.0 pure-Git refactor lifecycle (end-to-end)", () => {
     const shownAfter = showRefactorRecommendation(repoRoot, { recommendationId: recId }, { consumerRoot: REPO_ROOT, env });
     expect(shownAfter.decision?.status).toBe("accepted");
     expect(shownAfter.finding).toBeNull();
+    unlinkSync(join(repoRoot, orphanTmpPath));
 
     // 6. Verify before code fix -> unresolved (cycle metric unsatisfied + killList still-present).
     const unresolved = runRefactorVerify(repoRoot, { recommendationId: recId }, { consumerRoot: REPO_ROOT, env });

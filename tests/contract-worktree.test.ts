@@ -659,7 +659,7 @@ exec ${shellQuote(realGit)} "$@"
             }
             break;
           case 'occupied':
-            expect(calls).toEqual([`index seed ${linked}`]);
+            expect(calls).toEqual([]);
             expect(readFileSync(join(linked, '.codegraph/user.txt'), 'utf8')).toBe('keep this file');
             break;
           default:

@@ -1,6 +1,5 @@
-import { Command, InvalidArgumentError, Option } from 'commander';
+import { Command, InvalidArgumentError } from 'commander';
 import {
-  normalizeRefactorScope,
   REFACTOR_DECISIONS,
   REFACTOR_DEFAULT_TIMEOUT_MS,
   REFACTOR_LIST_STATUSES,
@@ -212,19 +211,15 @@ export function buildRefactorCommand(): Command {
   command.command('recommendations')
     .description('Show measured v2 refactor findings with coverage; never executes a refactor')
     .option('--repo <path>', 'Repository root', '.')
-    .addOption(new Option('--node <nodeId>', 'Limit scan observations to one declared architecture node').conflicts('path'))
-    .addOption(new Option('--path <repo-relative-path>', 'Limit scan observations to the owners of these repository-relative POSIX paths (repeatable)').argParser(collectValues).conflicts('node'))
     .option('--import-node-limit <n>', 'Raise the CodeGraph import read cap; use the same value for decide and verify', parseImportNodeLimit)
     .option('--timeout-ms <ms>', `Per archctx call timeout in ms (default ${REFACTOR_DEFAULT_TIMEOUT_MS}, max ${REFACTOR_MAX_TIMEOUT_MS})`, parseTimeoutMs)
     .option('--json', 'Output machine-readable JSON')
-    .action(async (options: { repo: string; node?: string; path?: string[]; importNodeLimit?: number; timeoutMs?: number; json?: boolean }) => {
+    .action(async (options: { repo: string; importNodeLimit?: number; timeoutMs?: number; json?: boolean }) => {
       try {
-        const scope = normalizeRefactorScope({ node: options.node, paths: options.path });
         const { observeRefactorRecommendations } = await import('../../effects/refactor/recommendations');
         const value = observeRefactorRecommendations(canonicalRepoPath(options.repo), {
           importNodeLimit: options.importNodeLimit,
           timeoutMs: options.timeoutMs,
-          ...(scope.kind === 'repository' ? {} : { scope }),
         });
         process.stdout.write(options.json ? `${JSON.stringify(value, null, 2)}\n` : formatRefactorRecommendations(value));
         if (value.status === 'unavailable' || value.status === 'proof_required') process.exitCode = 1;
