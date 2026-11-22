@@ -92,9 +92,10 @@ describe("gitignore managed block .repo-harness rule", () => {
     const edited = "before/\n# BEGIN: claude-runtime-temp (managed by repo-harness)\nstale-entry/\n# END: claude-runtime-temp\nafter/\n";
     expect(ensure(edited)).toMatchObject({ ok: true, changed: false, kept: "# BEGIN: claude-runtime-temp (managed by repo-harness)", content: edited });
 
-    // A released block with a retired-rule section, in a CRLF file, is replaced and keeps CRLF.
+    // A released v0.32.0 block with a retired-rule section, in a CRLF file, is replaced and keeps CRLF.
+    const releasedV032Base = GITIGNORE_MANAGED_BLOCK_CONTENT.replace("!.archcontext/refactor-decisions/\n", "");
     const retiredSection = ["", "# Retired runtime state that still exists; repo-harness upgrade lists these files", ".claude/.session-id", "tasks/current.md"];
-    const releasedRetired = ["# BEGIN: repo-harness generated-runtime", GITIGNORE_MANAGED_BLOCK_CONTENT, ...retiredSection, "# END: repo-harness generated-runtime"].join("\n");
+    const releasedRetired = ["# BEGIN: repo-harness generated-runtime", releasedV032Base, ...retiredSection, "# END: repo-harness generated-runtime"].join("\n");
     expect(ensure(`before/\n${releasedRetired}\nafter/\n`.replaceAll("\n", "\r\n")))
       .toMatchObject({ ok: true, changed: true, content: `before/\n${current}\nafter/\n`.replaceAll("\n", "\r\n") });
   });
@@ -122,6 +123,8 @@ describe("gitignore managed block .repo-harness rule", () => {
       ];
       const result = spawnSync("git", ["check-ignore", "--no-index", "--stdin"], { cwd, encoding: "utf8", input: `${runtimePaths.join("\n")}\n` });
       expect(result.stdout.trimEnd().split("\n")).toEqual(runtimePaths);
+      const trackedDecision = spawnSync("git", ["check-ignore", "-q", "--no-index", ".archcontext/refactor-decisions/recommendation.0123456789abcdef.json"], { cwd });
+      expect(trackedDecision.status).toBe(1);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

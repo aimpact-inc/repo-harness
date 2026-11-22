@@ -18,6 +18,7 @@ _ref/
 !.archcontext/model/relations/
 !.archcontext/model/flows/
 !.archcontext/decisions/
+!.archcontext/refactor-decisions/
 !.archcontext/policies/
 !.archcontext/practices/
 !.archcontext/projections/
