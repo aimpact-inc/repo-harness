@@ -1,10 +1,11 @@
 import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
 import { DEFAULT_GLOBAL_ARCHITECTURE, loadArchitectureProjectionPolicy, readGlobalArchitectureConfiguration } from './projection-config';
+import { Database } from 'bun:sqlite';
 import { accessSync, closeSync, constants as fsConstants, existsSync, lstatSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { userInfo } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { ARCHCONTEXT_NODE_RANGE, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_SCHEMA_VERSION, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_UPGRADE_COMMAND, ERROR_CATALOG, PROJECTION_MANIFEST_UPGRADE_REQUIRED, failureIssues, architectureDocsProjectionCompatibilityIssues, PROJECTION_REQUEST_SCHEMA_VERSION, digestJson, type ArchContextError, type ArchctxCapabilitiesV1, type ArchitectureDebtDeltaReportV1, type ArchitectureDebtReportV1, type DocsAnchorsReportV1, type IndexSeedResultV1, type Json, type ProjectionExpectedSnapshotV1, type ProjectionMode, type ProjectionRequestV1, type ProjectionResultV3 } from 'archctx-contracts';
 import { isRecord } from '../../core/evidence/is-record';
@@ -196,6 +197,10 @@ export class ArchctxClient {
       throw new ArchctxClientError({ code: 'RH_ARCHCTX_TIMEOUT', action: 'retry', message: `${label} timed out` });
     }
     if (Buffer.byteLength(result.stdout, 'utf8') > ARCHCTX_MAX_OUTPUT_BYTES || Buffer.byteLength(result.stderr, 'utf8') > ARCHCTX_MAX_OUTPUT_BYTES) throw new Error(`${label} output exceeded maxBuffer`);
+    // Distinguish pre-launch spawn errors (no child started) from post-launch failures; never print argv/request-json.
+    if (isPreLaunchSpawnFailure(result)) {
+      throw new ArchctxClientError({ code: 'RH_ARCHCTX_LAUNCH_FAILED', action: 'inspect-diagnostics', message: `${label} failed to launch` });
+    }
     // Process errors can contain argv, including request-json. Do not print them.
     if (result.signal || result.error) throw new Error(`${label} process failed${result.signal ? `: signal ${result.signal}` : ''}`);
     if (result.stdout.trim() === '') throw new Error(`${label} failed: exit ${result.status}: ${result.stderr.trim()}`);
@@ -460,7 +465,7 @@ function architectureAdoptionStep(): string {
 }
 
 export function runArchitectureProjection(request: ProjectionRequestV1, repoRoot: string, options: ArchctxProviderOptions = {}): ProjectionResultV3 {
-  return assertProjectionResult(runProjectionCommand(request, repoRoot, options), request.requestId);
+  return runProjectionCommand(request, repoRoot, options);
 }
 
 /**
@@ -701,14 +706,43 @@ function assertProvenCodeGraphLockFile(indexDirectory: string, name: string): vo
 const CODEGRAPH_DEFAULT_DIR = '.codegraph';
 const CODEGRAPH_WSL_DIR = '.codegraph-wsl';
 const WSL_WINDOWS_DRIVE_PATTERN = /^\/mnt\/[a-z](\/|$)/i;
+const CODEGRAPH_REQUIRED_TABLES = [
+  'schema_versions',
+  'nodes',
+  'edges',
+  'files',
+  'unresolved_refs',
+  'name_segment_vocab',
+  'synthesis_inputs',
+  'project_metadata',
+] as const;
+const CODEGRAPH_REQUIRED_NODE_COLUMNS = [
+  'id',
+  'kind',
+  'name',
+  'qualified_name',
+  'file_path',
+  'language',
+  'start_line',
+  'end_line',
+  'start_column',
+  'end_column',
+  'updated_at',
+] as const;
 
 export interface CodeGraphDestinationProbe {
   readonly env?: NodeJS.ProcessEnv;
   readonly platform?: NodeJS.Platform;
   readonly procVersion?: string;
+  /** Optional logical path used only for WSL drive-mount classification in tests (never for filesystem I/O). */
+  readonly pathForWslCheck?: string;
   /** True when the caller pins `CODEGRAPH_DIR=.codegraph` (e.g. direct `codegraph init`), false when `CODEGRAPH_DIR` stays unset for `archctx index seed`. */
   readonly pinDefaultDir?: boolean;
 }
+
+export type BootstrapWorktreeCodeGraphOptions = ArchctxProviderOptions & {
+  readonly destinationProbe?: Omit<CodeGraphDestinationProbe, 'env' | 'pinDefaultDir'>;
+};
 
 function isWslRuntime(probe: CodeGraphDestinationProbe): boolean {
   const platform = probe.platform ?? process.platform;
@@ -733,7 +767,8 @@ function isWslRuntime(probe: CodeGraphDestinationProbe): boolean {
  */
 export function effectiveCodeGraphDirName(repoRoot: string, probe: CodeGraphDestinationProbe = {}): string {
   if (probe.pinDefaultDir) return CODEGRAPH_DEFAULT_DIR;
-  if (!isWslRuntime(probe) || !WSL_WINDOWS_DRIVE_PATTERN.test(resolve(repoRoot))) return CODEGRAPH_DEFAULT_DIR;
+  const wslPath = probe.pathForWslCheck ?? resolve(repoRoot);
+  if (!isWslRuntime(probe) || !WSL_WINDOWS_DRIVE_PATTERN.test(wslPath)) return CODEGRAPH_DEFAULT_DIR;
   try {
     if (statSync(join(repoRoot, CODEGRAPH_WSL_DIR)).isDirectory()) return CODEGRAPH_WSL_DIR;
   } catch { /* absent or unreadable */ }
@@ -742,17 +777,61 @@ export function effectiveCodeGraphDirName(repoRoot: string, probe: CodeGraphDest
 }
 
 /**
- * Verifies `<repoRoot>/.codegraph` before any write-capable CodeGraph command (`archctx index seed`
- * or `codegraph init`). Fails closed when pinned CodeGraph would select another directory (such as
- * `.codegraph-wsl` on WSL Windows drives), or on symlinks, non-directories, occupied directories
- * without `codegraph.db`, non-SQLite `codegraph.db`, unproven lock or error-log files that pinned
- * CodeGraph could unlink/overwrite, or a `.gitignore` that pinned CodeGraph would rewrite.
+ * Proves in immutable read-only SQLite (zero writes, zero `-wal`/`-shm` creation) that an
+ * existing `codegraph.db` carries pinned CodeGraph 1.6.4's full schema signature. This guarantees
+ * both `isInitialized(repoRoot) === true` (blocking parent-directory walk in `codegraph sync`)
+ * and CodeGraph ownership (refusing foreign SQLite databases, even ones with a `nodes` table).
+ */
+function assertProvenCodeGraphDatabase(dbPath: string): void {
+  let db: Database | undefined;
+  try {
+    db = new Database(`${pathToFileURL(dbPath).href}?mode=ro&immutable=1`, { readonly: true });
+    const tables = new Set(
+      (db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name),
+    );
+    const missingTables = CODEGRAPH_REQUIRED_TABLES.filter((table) => !tables.has(table));
+    if (missingTables.length > 0) {
+      throw unsafeCodeGraphDestination(
+        `CodeGraph destination .codegraph/codegraph.db does not match the pinned CodeGraph 1.6.4 schema (missing tables: ${missingTables.join(', ')}). Inspect .codegraph/codegraph.db before seeding.`,
+      );
+    }
+    const nodeColumns = new Set(
+      (db.query('PRAGMA table_info(nodes)').all() as Array<{ name: string }>).map((row) => row.name),
+    );
+    const missingColumns = CODEGRAPH_REQUIRED_NODE_COLUMNS.filter((column) => !nodeColumns.has(column));
+    if (missingColumns.length > 0) {
+      throw unsafeCodeGraphDestination(
+        `CodeGraph destination .codegraph/codegraph.db nodes table does not match the pinned CodeGraph 1.6.4 schema (missing columns: ${missingColumns.join(', ')}). Inspect .codegraph/codegraph.db before seeding.`,
+      );
+    }
+    const versionRow = db.query("SELECT 1 AS ok FROM schema_versions WHERE typeof(version) = 'integer' AND version >= 1 LIMIT 1").get();
+    if (!versionRow) {
+      throw unsafeCodeGraphDestination(
+        'CodeGraph destination .codegraph/codegraph.db has no schema_versions entry matching pinned CodeGraph 1.6.4. Inspect .codegraph/codegraph.db before seeding.',
+      );
+    }
+  } catch (error) {
+    if (error instanceof ArchctxClientError) throw error;
+    throw unsafeCodeGraphDestination(
+      `CodeGraph destination .codegraph/codegraph.db failed read-only schema verification: ${error instanceof Error ? error.message : String(error)}. Inspect .codegraph/codegraph.db before seeding.`,
+    );
+  } finally {
+    db?.close();
+  }
+}
+
+/**
+ * Verifies `<repoRoot>/.codegraph` before `archctx index seed` or worktree `codegraph init`.
+ * Fails closed when pinned CodeGraph would select another directory (such as `.codegraph-wsl` on
+ * WSL Windows drives), or on symlinks, non-directories, occupied directories without `codegraph.db`,
+ * non-CodeGraph or schemaless `codegraph.db`, unproven lock or error-log files that pinned CodeGraph
+ * could unlink/overwrite, or a `.gitignore` that pinned CodeGraph would rewrite.
  */
 export function assertSafeCodeGraphDestination(repoRoot: string, probe: CodeGraphDestinationProbe = {}): void {
   const effectiveDir = effectiveCodeGraphDirName(repoRoot, probe);
   if (effectiveDir !== CODEGRAPH_DEFAULT_DIR) {
     throw unsafeCodeGraphDestination(
-      `CodeGraph resolves ${effectiveDir} instead of ${CODEGRAPH_DEFAULT_DIR} for ${repoRoot}; refusing to seed an unchecked destination.`,
+      `CodeGraph resolves ${effectiveDir} instead of ${CODEGRAPH_DEFAULT_DIR} for ${repoRoot}; refusing to seed an unchecked destination. Run CODEGRAPH_DIR=.codegraph codegraph init -y . in the checkout instead.`,
     );
   }
   const indexDirectory = join(repoRoot, CODEGRAPH_DEFAULT_DIR);
@@ -811,6 +890,7 @@ export function assertSafeCodeGraphDestination(repoRoot: string, probe: CodeGrap
   if (dbStat.size < SQLITE_HEADER_MIN_BYTES || !header.equals(SQLITE_HEADER_MAGIC)) {
     throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db is not a valid SQLite 3 database. Inspect .codegraph/codegraph.db before seeding.');
   }
+  assertProvenCodeGraphDatabase(dbPath);
 
   for (const sidecar of CODEGRAPH_SQLITE_SIDECARS) {
     const stat = lstatSync(join(indexDirectory, sidecar), { throwIfNoEntry: false });
@@ -881,7 +961,7 @@ function runArchctxIndexSeed(
 }
 
 /** Called after the primary checkout and plugin have opted into CodeGraph. */
-export function bootstrapWorktreeCodeGraph(primaryRoot: string, worktreeRoot: string, options: ArchctxProviderOptions = {}): void {
+export function bootstrapWorktreeCodeGraph(primaryRoot: string, worktreeRoot: string, options: BootstrapWorktreeCodeGraphOptions = {}): void {
   const env: NodeJS.ProcessEnv = {
     ...sanitizeGitDiscoveryEnv(options.env ?? process.env),
     CODEGRAPH_NO_DOWNLOAD: '1',
@@ -892,10 +972,13 @@ export function bootstrapWorktreeCodeGraph(primaryRoot: string, worktreeRoot: st
   delete env.CODEGRAPH_NO_WATCH;
   const policy = options.policy ?? readArchitectureProjectionPolicy({ architecture: DEFAULT_GLOBAL_ARCHITECTURE });
   const indexDirectory = join(worktreeRoot, '.codegraph');
+  const destinationProbe: CodeGraphDestinationProbe = { ...options.destinationProbe, env };
+  const runtimePlatform = options.destinationProbe?.platform ?? process.platform;
 
-  assertSafeCodeGraphDestination(worktreeRoot, { env });
+  // Validate `.codegraph` up front with pinDefaultDir: true so WSL /mnt/<drive> worktrees fall through cleanly to pinned `codegraph init`.
+  assertSafeCodeGraphDestination(worktreeRoot, { ...destinationProbe, pinDefaultDir: true });
 
-  if (process.platform !== 'win32') {
+  if (runtimePlatform !== 'win32' && effectiveCodeGraphDirName(worktreeRoot, destinationProbe) === CODEGRAPH_DEFAULT_DIR) {
     // Only refresh primary when it already has a private CodeGraph index; never init primary.
     if (hasPrivateCodeGraphIndex(join(primaryRoot, '.codegraph'))) {
       try {
@@ -922,7 +1005,7 @@ export function bootstrapWorktreeCodeGraph(primaryRoot: string, worktreeRoot: st
   }
 
   // Init writes the ignore file and SQLite sidecars. Re-check safety and refuse an existing database.
-  assertSafeCodeGraphDestination(worktreeRoot, { env, pinDefaultDir: true });
+  assertSafeCodeGraphDestination(worktreeRoot, { ...destinationProbe, pinDefaultDir: true });
   if (lstatSync(join(indexDirectory, 'codegraph.db'), { throwIfNoEntry: false })) {
     throw unsafeCodeGraphDestination('CodeGraph destination .codegraph already contains codegraph.db. Inspect .codegraph before running codegraph init.');
   }
@@ -980,21 +1063,52 @@ function resolvePackageLocalCodeGraph(archctx: ResolvedArchctxPackage): string {
   return realBinary;
 }
 
-function runProjectionCommand(request: ProjectionRequestV1, repoRoot: string, options: ArchctxProviderOptions): unknown {
+const PROJECTION_WRITE_RECONCILE_GUIDANCE =
+  'outcome unknown. Run rh arch projection check --json and git diff to reconcile before authorizing a fresh apply.';
+
+function isPreLaunchSpawnFailure(result: ArchctxProcessResult): boolean {
+  return !result.timedOut
+    && !result.signal
+    && typeof result.error === 'string'
+    && result.error !== ''
+    && result.error !== 'archctx output exceeded maxBuffer'
+    && result.stdout === ''
+    && result.stderr === ''
+    && (result.status === null || /\b(ENOENT|EACCES|EPERM|ENOTDIR|EISDIR)\b/.test(result.error));
+}
+
+function runProjectionCommand(request: ProjectionRequestV1, repoRoot: string, options: ArchctxProviderOptions): ProjectionResultV3 {
   const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
-  if ((request.mode === 'apply' || request.mode === 'adopt') && policy.applyMode === 'disabled') throw new Error('architecture projection apply is disabled');
+  const writeMode = request.mode === 'apply' || request.mode === 'adopt';
+  if (writeMode && policy.applyMode === 'disabled') throw new Error('architecture projection apply is disabled');
   archctxCapabilities(repoRoot, { ...options, policy });
   const client = new ArchctxClient(repoRoot, policy.requiredVersion, options);
-  try { return client.data(['projection', 'run', '--request-json', JSON.stringify(request)], policy.timeoutMs); }
-  catch (error) {
-    if (error instanceof ArchctxClientError && error.code === 'RH_ARCHCTX_TIMEOUT' && (request.mode === 'apply' || request.mode === 'adopt')) {
-      throw new ArchctxClientError({
-        code: error.code,
-        action: 'reconcile-projection-state',
-        message: `${error.providerMessage}; outcome unknown. Run rh arch projection check --json and git diff to reconcile before authorizing a fresh apply.`,
-      });
+  // Pre-launch deadline and runtime checks stay distinct from started write mutations.
+  remainingTimeout(options, policy.timeoutMs, 'archctx projection run');
+  if (!options.run) {
+    resolveCompatibleNodeRuntime(options.env ?? process.env, options.trustedNodeCandidateSource);
+  }
+  try {
+    const data = client.data(['projection', 'run', '--request-json', JSON.stringify(request)], policy.timeoutMs);
+    return assertProjectionResult(data, request.requestId);
+  } catch (error) {
+    if (!writeMode) throw error;
+    if (error instanceof ArchctxClientError && (
+      error.code === 'RH_ARCHCTX_LAUNCH_FAILED'
+      || Object.hasOwn(ERROR_CATALOG, error.code)
+      || (error.code === 'RH_ARCHCTX_TIMEOUT' && error.providerMessage.startsWith('architecture projection timeout before '))
+    )) {
+      throw error;
     }
-    throw error;
+    const code = error instanceof ArchctxClientError ? error.code : 'RH_ARCHCTX_WRITE_OUTCOME_UNKNOWN';
+    const detail = error instanceof ArchctxClientError
+      ? error.providerMessage
+      : error instanceof Error ? error.message : String(error);
+    throw new ArchctxClientError({
+      code,
+      action: 'reconcile-projection-state',
+      message: `${detail}; ${PROJECTION_WRITE_RECONCILE_GUIDANCE}`,
+    });
   }
 }
 

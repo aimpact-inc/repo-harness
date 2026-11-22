@@ -1,15 +1,19 @@
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RefactorDecisionV1, RefactorScanFindingV2, RefactorScanV2, RefactorVerifyV2 } from 'archctx-contracts';
 import {
   buildRefactorCommand,
+  formatRefactorDecide,
   formatRefactorList,
   formatRefactorRecommendations,
+  formatRefactorResolve,
   formatRefactorShow,
   formatRefactorVerify,
+  resolveDecisionCommitRoot,
 } from '../../src/cli/commands/refactor';
 import { RefactorProviderError } from '../../src/core/refactor/provider-contract';
 import { observeRefactorRecommendations } from '../../src/effects/refactor/recommendations';
@@ -268,4 +272,85 @@ test('exposes only repository-scoped v2 CLI subcommands and options, and formats
   });
   expect(showText).toContain(`status=${shippedDecision().status}`);
   expect(showText).toContain('best-effort');
+});
+
+test('decide and resolve commit hints bind to the target Git root and commit only the decision file without sweeping unrelated staged files', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'refactor-commit-hint-'));
+  roots.push(scratch);
+  const targetRepo = realpathSync(mkdirSync(join(scratch, "target repo's"), { recursive: true }) ?? join(scratch, "target repo's"));
+  const otherCheckout = realpathSync(mkdirSync(join(scratch, 'other-checkout'), { recursive: true }) ?? join(scratch, 'other-checkout'));
+  const nestedDir = join(targetRepo, 'src', 'nested');
+  mkdirSync(nestedDir, { recursive: true });
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
+  }).trim();
+
+  for (const repo of [targetRepo, otherCheckout]) {
+    git(repo, 'init', '-q');
+    git(repo, 'config', 'user.name', 'Test');
+    git(repo, 'config', 'user.email', 'test@example.invalid');
+    writeFileSync(join(repo, 'README.md'), 'base\n');
+    git(repo, 'add', 'README.md');
+    git(repo, 'commit', '-qm', 'init');
+  }
+
+  const decisionPath = `.archcontext/refactor-decisions/${REC_ID}.json`;
+  mkdirSync(join(targetRepo, '.archcontext', 'refactor-decisions'), { recursive: true });
+  mkdirSync(join(otherCheckout, '.archcontext', 'refactor-decisions'), { recursive: true });
+  writeFileSync(join(otherCheckout, decisionPath), '{"other":true}\n');
+  writeFileSync(join(targetRepo, decisionPath), '{"status":"accepted"}\n');
+  // Stage an unrelated file in targetRepo to prove `--only -- <path>` does not commit it.
+  writeFileSync(join(targetRepo, 'unrelated.txt'), 'keep staged\n');
+  git(targetRepo, 'add', 'unrelated.txt');
+
+  const decideHint = formatRefactorDecide({
+    recommendationId: REC_ID,
+    status: 'accepted',
+    filePath: decisionPath,
+    decision: shippedDecision(),
+  }, targetRepo);
+  const decideCmd = decideHint.split('\n').find((line) => line.startsWith('  next: '))?.slice('  next: '.length);
+  expect(decideCmd).toBeDefined();
+  expect(decideCmd).toContain('git -C ');
+  expect(decideCmd).toContain(`commit --only -m `);
+  expect(decideCmd).toContain(` -- ${decisionPath}`);
+
+  // Run emitted decide command from a DIFFERENT checkout (`otherCheckout`).
+  execFileSync('sh', ['-c', decideCmd!], {
+    cwd: otherCheckout,
+    env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
+  });
+  expect(git(targetRepo, 'show', '--name-only', '--pretty=format:', 'HEAD')).toBe(decisionPath);
+  expect(git(targetRepo, 'status', '--porcelain')).toBe('A  unrelated.txt');
+  expect(git(otherCheckout, 'status', '--porcelain')).toBe(`?? .archcontext/`);
+
+  // Run emitted resolve command from a NESTED subdirectory of targetRepo (verifying nested subdir resolves to top-level Git root).
+  expect(resolveDecisionCommitRoot(nestedDir)).toBe(targetRepo);
+  writeFileSync(join(targetRepo, decisionPath), '{"status":"resolved"}\n');
+  const resolveHint = formatRefactorResolve({
+    recommendationId: REC_ID,
+    status: 'resolved',
+    filePath: decisionPath,
+    decision: shippedDecision(),
+    verification: {
+      schemaVersion: 'archcontext.refactor-verify/v2',
+      recommendationId: REC_ID,
+      headSha: HEAD_SHA,
+      snapshotDigest: SNAPSHOT_DIGEST,
+      disposition: 'resolved',
+      resolutionDigest: RESOLUTION_DIGEST,
+      killListChecks: [],
+      metricChecks: [],
+      blockingReasons: [],
+    },
+  }, resolveDecisionCommitRoot(nestedDir));
+  const resolveCmd = resolveHint.split('\n').find((line) => line.startsWith('  next: '))?.slice('  next: '.length);
+  expect(resolveCmd).toBeDefined();
+  execFileSync('sh', ['-c', resolveCmd!], {
+    cwd: nestedDir,
+    env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
+  });
+  expect(git(targetRepo, 'show', '--name-only', '--pretty=format:', 'HEAD')).toBe(decisionPath);
+  expect(git(targetRepo, 'status', '--porcelain')).toBe('A  unrelated.txt');
 });

@@ -16,6 +16,7 @@ import {
   type RefactorVerifyV2,
 } from '../../core/refactor/provider-contract';
 import { shellQuote } from '../../core/shell-quote';
+import { gitSpawnSync } from '../../effects/git/runner';
 import { canonicalRepoPath } from '../../effects/repo-registry';
 import type { RefactorRecommendationResult, RefactorScanCoverage } from '../../effects/refactor/recommendations';
 
@@ -101,13 +102,27 @@ export function formatRefactorRecommendations(value: RefactorRecommendationResul
   ].join('\n');
 }
 
-export function formatRefactorDecide(result: RefactorDecideResultV1): string {
+export function resolveDecisionCommitRoot(targetPath: string): string {
+  const probe = gitSpawnSync(['-C', targetPath, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' });
+  const topLevel = probe.status === 0 ? probe.stdout.trim() : '';
+  return topLevel ? canonicalRepoPath(topLevel) : targetPath;
+}
+
+function formatDecisionCommitHint(repoRoot: string | undefined, filePath: string, message: string): string {
+  const gitPrefix = repoRoot ? `git -C ${formatShellArg(repoRoot)}` : 'git';
+  const quotedPath = formatShellArg(filePath);
+  const quotedMessage = shellQuote(message);
+  return `${gitPrefix} add -- ${quotedPath} && ${gitPrefix} commit --only -m ${quotedMessage} -- ${quotedPath}`;
+}
+
+export function formatRefactorDecide(result: RefactorDecideResultV1, repoRoot?: string): string {
   const killCount = result.decision.killList?.length ?? 0;
+  const commitMessage = `chore(architecture): record refactor decision ${result.recommendationId} (${result.status})`;
   return [
     `[RefactorDecide] ${result.recommendationId}: status=${result.status}`,
     `  file: ${result.filePath}`,
     ...(killCount > 0 ? [`  killList: ${killCount} target(s)`] : []),
-    `  next: git add ${result.filePath} && git commit`,
+    `  next: ${formatDecisionCommitHint(repoRoot, result.filePath, commitMessage)}`,
     '',
   ].join('\n');
 }
@@ -154,12 +169,13 @@ export function formatRefactorVerify(result: RefactorVerifyV2, invocation: Refac
   ].join('\n');
 }
 
-export function formatRefactorResolve(result: RefactorResolveResultV1): string {
+export function formatRefactorResolve(result: RefactorResolveResultV1, repoRoot?: string): string {
+  const commitMessage = `chore(architecture): mark refactor decision ${result.recommendationId} resolved`;
   return [
     `[RefactorResolve] ${result.recommendationId}: status=${result.status}`,
     `  file: ${result.filePath}`,
     `  resolutionDigest: ${result.verification.resolutionDigest}`,
-    `  next: git add ${result.filePath} && git commit`,
+    `  next: ${formatDecisionCommitHint(repoRoot, result.filePath, commitMessage)}`,
     '',
   ].join('\n');
 }
@@ -275,8 +291,9 @@ export function buildRefactorCommand(): Command {
           throw new RefactorProviderError('refactor_invalid_input', `decision must be one of ${REFACTOR_DECISIONS.join('|')}`);
         }
         const { decideRefactorRecommendation } = await import('./refactor-actions');
+        const targetRepo = canonicalRepoPath(options.repo);
         const result = decideRefactorRecommendation(
-          canonicalRepoPath(options.repo),
+          targetRepo,
           recommendationId,
           decision as RefactorDecision,
           options.reason,
@@ -288,7 +305,7 @@ export function buildRefactorCommand(): Command {
             timeoutMs: options.timeoutMs,
           },
         );
-        process.stdout.write(options.json ? `${JSON.stringify(result, null, 2)}\n` : formatRefactorDecide(result));
+        process.stdout.write(options.json ? `${JSON.stringify(result, null, 2)}\n` : formatRefactorDecide(result, resolveDecisionCommitRoot(targetRepo)));
       } catch (error) { fail(error); }
     });
   command.command('verify')
@@ -329,14 +346,15 @@ export function buildRefactorCommand(): Command {
     ) => {
       try {
         const { resolveRefactorRecommendation } = await import('./refactor-actions');
+        const targetRepo = canonicalRepoPath(options.repo);
         const result = resolveRefactorRecommendation(
-          canonicalRepoPath(options.repo),
+          targetRepo,
           recommendationId,
           options.resolutionDigest,
           options.reason,
           { importNodeLimit: options.importNodeLimit, timeoutMs: options.timeoutMs },
         );
-        process.stdout.write(options.json ? `${JSON.stringify(result, null, 2)}\n` : formatRefactorResolve(result));
+        process.stdout.write(options.json ? `${JSON.stringify(result, null, 2)}\n` : formatRefactorResolve(result, resolveDecisionCommitRoot(targetRepo)));
       } catch (error) { fail(error); }
     });
   command.command('list')

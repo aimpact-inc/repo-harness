@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ARCHCTX_COMMAND_DISPOSITIONS, ARCHCTX_REQUIRED_VERSION, archctxRefusal } from '../../src/core/architecture/projection';
@@ -268,12 +269,29 @@ describe('rh arch', () => {
     expect(lstatSync(join(dbLinkCase.repo, '.codegraph/codegraph.db')).isSymbolicLink()).toBe(true);
 
     // 5. Symlinked .codegraph/.gitignore refused.
-    const validSqliteStub = Buffer.concat([Buffer.from('SQLite format 3\0', 'ascii'), Buffer.alloc(84)]);
+    const writeCodeGraphSchemaDb = (dbPath: string) => {
+      const db = new Database(dbPath);
+      try {
+        db.exec(`
+          CREATE TABLE schema_versions (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL, description TEXT);
+          INSERT INTO schema_versions (version, applied_at, description) VALUES (1, 1, 'init');
+          CREATE TABLE nodes (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, qualified_name TEXT NOT NULL, file_path TEXT NOT NULL, language TEXT NOT NULL, start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, start_column INTEGER NOT NULL, end_column INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+          CREATE TABLE edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, target TEXT NOT NULL, kind TEXT NOT NULL);
+          CREATE TABLE files (path TEXT PRIMARY KEY, content_hash TEXT NOT NULL);
+          CREATE TABLE unresolved_refs (id INTEGER PRIMARY KEY AUTOINCREMENT, from_node_id TEXT NOT NULL);
+          CREATE TABLE name_segment_vocab (segment TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY (segment, name)) WITHOUT ROWID;
+          CREATE TABLE synthesis_inputs (file_path TEXT PRIMARY KEY);
+          CREATE TABLE project_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);
+        `);
+      } finally {
+        db.close();
+      }
+    };
     const ignoreLinkCase = makeRepo('ignorelink');
     const externalIgnore = join(externalDir, 'external.gitignore');
     writeFileSync(externalIgnore, '# CodeGraph data files\n*.db\n');
     mkdirSync(join(ignoreLinkCase.repo, '.codegraph'), { recursive: true });
-    writeFileSync(join(ignoreLinkCase.repo, '.codegraph/codegraph.db'), validSqliteStub);
+    writeCodeGraphSchemaDb(join(ignoreLinkCase.repo, '.codegraph/codegraph.db'));
     symlinkSync(externalIgnore, join(ignoreLinkCase.repo, '.codegraph/.gitignore'));
     const ignoreLinkRes = runSeed(ignoreLinkCase.repo, ignoreLinkCase.env);
     expect(ignoreLinkRes.status).toBe(1);
@@ -283,7 +301,7 @@ describe('rh arch', () => {
     // 6. Stale-default .codegraph/.gitignore that CodeGraph would overwrite refused.
     const staleIgnoreCase = makeRepo('staleignore');
     mkdirSync(join(staleIgnoreCase.repo, '.codegraph'), { recursive: true });
-    writeFileSync(join(staleIgnoreCase.repo, '.codegraph/codegraph.db'), validSqliteStub);
+    writeCodeGraphSchemaDb(join(staleIgnoreCase.repo, '.codegraph/codegraph.db'));
     writeFileSync(join(staleIgnoreCase.repo, '.codegraph/.gitignore'), '# CodeGraph data files\n*.db\n');
     const staleIgnoreRes = runSeed(staleIgnoreCase.repo, staleIgnoreCase.env);
     expect(staleIgnoreRes.status).toBe(1);
@@ -299,7 +317,23 @@ describe('rh arch', () => {
     expect(foreignDbRes.stderr).toContain('not a valid SQLite 3 database');
     expect(readFileSync(join(foreignDbCase.repo, '.codegraph/codegraph.db'), 'utf8')).toBe('not-a-sqlite-database\n');
 
-    // 8. Valid clean repository succeeds through public CLI, pinning CODEGRAPH_DIR to .codegraph.
+    // 7b. Real pinned-provider test: foreign SQLite DB WITH a `nodes` table is refused without writes or sidecars.
+    const foreignNodesCase = makeRepo('foreignnodes');
+    const foreignNodesDir = join(foreignNodesCase.repo, '.codegraph');
+    mkdirSync(foreignNodesDir, { recursive: true });
+    const foreignNodesPath = join(foreignNodesDir, 'codegraph.db');
+    const foreignNodesDb = new Database(foreignNodesPath);
+    foreignNodesDb.exec('CREATE TABLE nodes (id TEXT PRIMARY KEY, label TEXT); INSERT INTO nodes VALUES ("u1", "keep");');
+    foreignNodesDb.close();
+    const foreignBytesBefore = readFileSync(foreignNodesPath);
+    const foreignEntriesBefore = readdirSync(foreignNodesDir).sort();
+    const foreignNodesRes = runSeed(foreignNodesCase.repo, foreignNodesCase.env);
+    expect(foreignNodesRes.status).toBe(1);
+    expect(foreignNodesRes.stderr).toContain('CodeGraph 1.6.4 schema');
+    expect(readFileSync(foreignNodesPath)).toEqual(foreignBytesBefore);
+    expect(readdirSync(foreignNodesDir).sort()).toEqual(foreignEntriesBefore);
+
+    // 8. Valid clean repository succeeds through public CLI (stripping caller CODEGRAPH_DIR) and refreshes on a second run.
     const cleanCase = makeRepo('clean');
     const cleanRes = runSeed(cleanCase.repo, { ...cleanCase.env, CODEGRAPH_DIR: '.codegraph-custom' });
     expect(cleanRes.status, `${cleanRes.stderr}\n${cleanRes.stdout}`).toBe(0);
@@ -311,6 +345,43 @@ describe('rh arch', () => {
     });
     expect(lstatSync(join(cleanCase.repo, '.codegraph/codegraph.db')).isFile()).toBe(true);
     expect(existsSync(join(cleanCase.repo, '.codegraph-custom'))).toBe(false);
+
+    // Second primary refresh against the real CodeGraph 1.6.4 initialized DB passes schema verification and succeeds.
+    const refreshRes = runSeed(cleanCase.repo, cleanCase.env);
+    expect(refreshRes.status, `${refreshRes.stderr}\n${refreshRes.stdout}`).toBe(0);
+    expect(JSON.parse(refreshRes.stdout)).toMatchObject({
+      schemaVersion: 'archcontext.envelope/v1',
+      ok: true,
+      requestId: 'index.seed',
+      data: { schemaVersion: 'archcontext.index-seed/v1', mode: 'primary-refresh', worktreeRole: 'primary' },
+    });
+
+    // 8b. Real pinned-provider test: nested Git checkout with schemaless SQLite DB inside an initialized parent checkout
+    // refuses before CodeGraph can walk up to the parent and overwrite parent's stale-default .codegraph/.gitignore.
+    const parentIgnorePath = join(cleanCase.repo, '.codegraph/.gitignore');
+    const originalParentIgnore = readFileSync(parentIgnorePath, 'utf8');
+    writeFileSync(parentIgnorePath, '# CodeGraph data files\n*.db\n');
+    const parentDbBefore = readFileSync(join(cleanCase.repo, '.codegraph/codegraph.db'));
+    const nestedChild = join(cleanCase.repo, 'nested-child');
+    mkdirSync(join(nestedChild, '.codegraph'), { recursive: true });
+    fixtureGit(nestedChild, ['init', '-q']);
+    fixtureWrite(nestedChild, 'index.ts', 'export const child = 1;\n');
+    fixtureCommit(nestedChild);
+    const childDbPath = join(nestedChild, '.codegraph/codegraph.db');
+    const childDb = new Database(childDbPath);
+    childDb.exec('CREATE TABLE user_notes (id INTEGER PRIMARY KEY);');
+    childDb.close();
+    const childBytesBefore = readFileSync(childDbPath);
+    const childEntriesBefore = readdirSync(join(nestedChild, '.codegraph')).sort();
+    const nestedRes = runSeed(nestedChild, cleanCase.env);
+    expect(nestedRes.status).toBe(1);
+    expect(nestedRes.stderr).toContain('CodeGraph 1.6.4 schema');
+    expect(readFileSync(childDbPath)).toEqual(childBytesBefore);
+    expect(readdirSync(join(nestedChild, '.codegraph')).sort()).toEqual(childEntriesBefore);
+    expect(readFileSync(parentIgnorePath, 'utf8')).toBe('# CodeGraph data files\n*.db\n');
+    expect(readFileSync(join(cleanCase.repo, '.codegraph/codegraph.db'))).toEqual(parentDbBefore);
+    writeFileSync(parentIgnorePath, originalParentIgnore);
+    rmSync(nestedChild, { recursive: true, force: true });
 
     // 9. Non-PID / empty user files at codegraph.lock and codegraph.lock.break refused on real primary index without unlinking.
     const lockPath = join(cleanCase.repo, '.codegraph/codegraph.lock');
