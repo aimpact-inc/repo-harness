@@ -1,6 +1,6 @@
 # Lessons
 
-reviewed-through: 06744d5ea5a7f8d90e46b1a57953a6be993d24c0
+reviewed-through: 66c187281ead7631385d2347a257bd961ce8e9bf
 
 - Date: 2026-10-03
 - Name: Verify live state
@@ -361,3 +361,63 @@ reviewed-through: 06744d5ea5a7f8d90e46b1a57953a6be993d24c0
 - Why: A reset from a directory outside Git could not check the seat's model. The original verification record does not show reset from that directory.
 - Triggered by correction: #3310
 - Seen: 1×
+
+- Date: 2026-11-22
+- Name: Check sign-in before quota
+- Mistake pattern: check-catalog-auth-before-quota
+- Prevention rule: Treat a catalog sign-in failure as a runtime refusal before checking model quota. Test when the two probes disagree and quota is exhausted or reserved.
+- Enforced by: tests/cli/quota.test.ts
+- Missed by: self-verify
+- Why: In #3333, a catalog sign-in failure could produce a quota refusal if the runtime probe still reported signed in. Review found the diagnostic error and deferred its fix to #3334. The launch still refused to start.
+- Triggered by correction: 9ecbed98b
+- Seen: 1×
+
+- Date: 2026-11-22
+- Name: Publish complete acceptance records
+- Mistake pattern: publish-acceptance-after-companion-writes
+- Prevention rule: Write the result and observation under immutable identifiers before publishing the receipt that selects them. Verify that an interrupted write leaves the prior acceptance usable.
+- Enforced by: tests/acceptance-receipt.test.ts
+- Missed by: unknown
+- Why: A failed or interrupted write could leave the previous receipt pointing to a different result. A fresh verifier then rejected the valid acceptance. The earlier verification record does not show a fault test with an existing receipt.
+- Triggered by correction: 7ba980291
+- Seen: 1×
+
+- Date: 2026-11-22
+- Name: Keep ignored local data
+- Mistake pattern: inventory-ignored-data-before-worktree-removal
+- Prevention rule: Check for ignored local data in cleanup preview and again under the removal lock. Keep the worktree when the inventory finds an ignored path outside the generated outputs or cannot complete.
+- Enforced by: tests/contract-worktree.test.ts
+- Missed by: unknown
+- Why: Slug cleanup used ordinary Git status, which hid ignored local files that removal could delete. The earlier verification record does not show an ignored-only checkout through the cleanup command.
+- Triggered by correction: 9b6879ed6
+- Seen: 1×
+
+- Date: 2026-11-22
+- Name: Test read-only command matches
+- Mistake pattern: verify-readonly-command-prefix-matches
+- Prevention rule: Limit read-only tool permissions to complete read commands. Test how the host matches full command lines with options and subcommands.
+- Enforced by: tests/cli/seats-argv.test.ts
+- Missed by: self-verify
+- Why: The test in #3363 checked that exact write commands were absent. A broader allowed prefix still matched write operations and needed a follow-up fix.
+- Triggered by correction: 71fb12c57
+- Seen: 1×
+
+- Date: 2026-11-22
+- Name: Require explicit review seat
+- Mistake pattern: require-explicit-seat-for-review-publication
+- Prevention rule: Require the producing seat before writing a manual review record. Exercise the documented command for each seat and check what round two carries forward.
+- Enforced by: tests/cli/review.test.ts
+- Missed by: human
+- Why: The documented command defaulted a reviewer PASS to gatekeeper, so round two could schedule the wrong seat. A reviewer flagged the defect as P1 on the final head of #3369 before it merged.
+- Triggered by correction: 47a528867
+- Seen: 1×
+
+- Date: 2026-11-22
+- Name: Isolate packaged Pi smoke
+- Mistake pattern: isolate-mutable-state
+- Prevention rule: Keep the packaged smoke HOME and Pi settings in the same scratch environment. Configure the required shell there and run the smoke without caller overrides.
+- Enforced by: scripts/check-tarball-install-smoke.sh
+- Missed by: human
+- Why: The 0.36.0 release prep smoke hit macOS Bash 3.2. The recorded pass used a caller-supplied Pi config to select Bash 5.3. The packaged smoke needed a follow-up fix to pass with its own settings for 0.36.1.
+- Triggered by correction: dc5ae3646
+- Seen: 6×
