@@ -1,5 +1,5 @@
 # Refactor Program
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-refactor-program" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:4a872ba0ad49c1689d9a6d674516cabf7772e4ebcf4b7dd87fe936f492ecc42d" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-refactor-program" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:bb5a26ccd248f7b0eb642c06e4acb59ab1f47aeb8d1070dbf046c9b0884d4b83" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.refactor-program`(kind `capability`)
 > **Matched Prefixes**:`src/effects/refactor/**`
@@ -73,9 +73,9 @@ flowchart LR
 
 | 組件 | 名稱 | 規模量級 | 宣告入口 |
 | --- | --- | --- | --- |
-| `component.refactor-program.archctx-provider` | Refactor ArchContext Provider Boundary | `1–2` 個文件 / `50–100` 行 | 未宣告 |
-| `component.refactor-program.cli-layer` | Refactor Recommendations (cli) | `2–5` 個文件 / `100–200` 行 | 未宣告 |
-| `component.refactor-program.core-layer` | Refactor Recommendations (core) | `1–2` 個文件 / `50–100` 行 | 未宣告 |
+| `component.refactor-program.archctx-provider` | Refactor ArchContext Provider Boundary | `1–2` 個文件 / `200–500` 行 | 未宣告 |
+| `component.refactor-program.cli-layer` | Refactor Recommendations (cli) | `2–5` 個文件 / `200–500` 行 | 未宣告 |
+| `component.refactor-program.core-layer` | Refactor Recommendations (core) | `1–2` 個文件 / `100–200` 行 | 未宣告 |
 
 ## 2. P2:端到端數據流
 
