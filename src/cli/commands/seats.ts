@@ -44,7 +44,7 @@ import { bunGlobalPackageRoot } from '../installer/skill-projection';
 import { PiFleetRolesError, writePiFleetRoles } from '../../effects/board/pi-fleet-roles';
 import { PiShellError, assertPiShell } from '../../effects/board/pi-shell';
 import { MANAGED_AGENTS } from '../../effects/terminal/task-role-profiles';
-import { SeatResetError, readSeatSession, readTranscriptUsage, runSeatReset, writeSeatResetRequest, type SeatRelaunch, type SeatResetNotify, type TranscriptUsage } from '../../effects/board/seat-reset';
+import { SeatResetError, readSeatSession, readTranscriptUsage, runSeatReset, writeSeatResetRequest, type SeatRelaunch, type SeatResetNotify, type SeatResetTarget, type TranscriptUsage } from '../../effects/board/seat-reset';
 import { handoffIdentity, seatResetAction, seatResetIdentity, seatResetSteps, type SeatResetIdentity } from '../../core/board/seat-reset';
 import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
 import { COUNCIL_MEMBERS, CouncilConsultError, parseCouncilMembers, type CouncilMember } from '../../core/board/planner-consult';
@@ -52,7 +52,11 @@ import { runCouncilConsult } from '../../effects/board/planner-consult';
 import { formatSeatPool, seatModelBlock, seatPoolHint, seatRuntimeBlock } from '../../core/board/seat-pool';
 import { collectSeatPoolProbes, enabledRuntimesOf, magpieExtensionInstalled, probeAgySeat, refreshSeatPool, resolveAgyInstallation, SeatsConfigurationError, writeAgySeatAgent } from '../../effects/board/seats-configuration';
 
+import { buildManagedHooks, compareManagedHooks } from '../installer/managed-entries';
+import { piPackagePresent } from '../installer/pi-package';
+import { readJsonOrEmpty } from '../installer/shared';
 import { checkAntigravityHooks } from '../installer/targets/antigravity';
+import { requireHome } from '../../effects/repo-harness-home';
 import { resolveAntigravityRepository } from '../hook/host-adapter';
 
 const CLI_ENTRY = fileURLToPath(new URL('../index.ts', import.meta.url));
@@ -304,15 +308,46 @@ export async function seatLaunch(seat: string, labels: SeatLabelInput = {}, env:
   return (await effectiveSeatLaunch(seat, labels, env, cwd, { planned, checkAvailability: true })).launch;
 }
 
-/**
- * The launch of a reset seat for `seats reset` (#2633): its argv, runtime, model and effort, and whether the quota
- * mode that chose them is known. The checkout comes from the requester selected by the seat identity.
- */
+export function seatResetTarget(identity: SeatResetIdentity, env: NodeJS.ProcessEnv): SeatResetTarget {
+  const { seats } = configuredSeats(env);
+  const configured = seats[identity.seat];
+  return {
+    runtime: configured.runtime,
+    model: async () => {
+      const { seat, modeKnown } = await quotaCheckedSeat(identity.seat, seats, configured, env, undefined, () => readAgyQuota(env));
+      return { model: seat.model, effort: seat.effort, modeKnown };
+    },
+  };
+}
+
+/** Prepare the relaunch only when reset will start a new process. */
 export async function seatResetLaunch(identity: SeatResetIdentity, env: NodeJS.ProcessEnv, checkout: string): Promise<SeatRelaunch> {
   // The terminal already has a waiting shell. Run only the agent command to keep one shell across resets.
   const { launch, effective, modeKnown } = await effectiveSeatLaunch(identity.seat, { repositoryId: identity.repository }, env, checkout,
     { terminal: 'existing', checkAvailability: true });
+  checkResetStartup(launch.runtime, env, checkout);
   return { argv: launch.argv, runtime: launch.runtime, model: effective.model, effort: effective.effort, modeKnown };
+}
+
+function checkResetStartup(runtime: SeatLaunchV1['runtime'], env: NodeJS.ProcessEnv, cwd: string): void {
+  if (runtime !== 'claude' && runtime !== 'pi') return;
+  const checkout = resolveAntigravityRepository({ cwd });
+  if (checkout.status !== 'opted-in') throw new Error('SessionStart needs a repo-harness opt-in checkout.');
+  if (runtime === 'pi') {
+    const source = bunGlobalPackageRoot(env);
+    if (source === null || !piPackagePresent(source, env)) throw new Error('Pi has no repo-harness user package registration. Run rh install.');
+    installedPiExtension(env);
+    return;
+  }
+  const home = env.CLAUDE_CONFIG_DIR ?? join(requireHome(env), '.claude');
+  const user = readJsonOrEmpty(join(home, 'settings.json'));
+  const project = readJsonOrEmpty(join(checkout.repoRoot, '.claude', 'settings.json'));
+  const local = readJsonOrEmpty(join(checkout.repoRoot, '.claude', 'settings.local.json'));
+  if ((local.disableAllHooks ?? project.disableAllHooks ?? user.disableAllHooks) === true) throw new Error('Claude hooks are disabled. Enable SessionStart before relaunch.');
+  const { SessionStart } = buildManagedHooks('claude', env);
+  if (compareManagedHooks(user.hooks, { SessionStart: SessionStart! }).mismatches.some(row => row.event === 'SessionStart')) {
+    throw new Error('Claude has no ready repo-harness SessionStart hook. Run rh install.');
+  }
 }
 
 /** The rh Pi extension of the installed package. A Pi review seat without it would run with no hook, so a missing file stops the launch. */
@@ -344,7 +379,16 @@ function resolveCouncilMemberSeat(member: CouncilMember, seats: SeatsConfigV1, e
   };
 }
 
-/** The launch and the effective seat config that it starts; the seat reset compares the config with the session record (#2633). */
+function configuredSeats(env: NodeJS.ProcessEnv): { config: Record<string, unknown>; seats: SeatsConfigV1 } {
+  let config: Record<string, unknown>;
+  try { config = readGlobalConfiguration(env).config; } catch (error) { throw new SeatsCommandError('config_invalid', (error as Error).message); }
+  try { return { config, seats: decodeSeatsConfig(config.seats) }; } catch (error) {
+    if (error instanceof SeatsConfigMigrationRequiredError || error instanceof AgySeatSettingsError) throw error;
+    throw new SeatsCommandError('config_invalid', seatsConfigInvalidMessage(error));
+  }
+}
+
+/** The launch and the effective seat config that it starts. */
 async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: NodeJS.ProcessEnv, cwd: string,
   { planned, terminal = 'new', prepareFleet = true, checkAvailability = false, configuredOverride }: {
     readonly planned?: SeatRouteV1; readonly terminal?: 'new' | 'existing'; readonly prepareFleet?: boolean; readonly checkAvailability?: boolean;
@@ -353,13 +397,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   readonly launch: SeatLaunchResult; readonly effective: SeatConfigV1; readonly effectiveId: LaunchSeatId | 'gatekeeper-fallback'; readonly modeKnown: boolean;
 }> {
   const id = seatId(seat);
-  let config: Record<string, unknown>;
-  try { config = readGlobalConfiguration(env).config; } catch (error) { throw new SeatsCommandError('config_invalid', (error as Error).message); }
-  let seats;
-  try { seats = decodeSeatsConfig(config.seats); } catch (error) {
-    if (error instanceof SeatsConfigMigrationRequiredError || error instanceof AgySeatSettingsError) throw error;
-    throw new SeatsCommandError('config_invalid', seatsConfigInvalidMessage(error));
-  }
+  const { config, seats } = configuredSeats(env);
   const configured = configuredOverride ?? seats[id];
   if (configured === null) throw new SeatsCommandError('seat_not_configured', `The ${id} seat is not configured. Configure it in the seats section before launch.`);
   // The board review passes the gatekeeper route that its plan checked: the launched seat is the planned one, with no second quota read.
@@ -786,6 +824,7 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
         const ending = identity === null ? null : readSeatSession(identity);
         const result = await runSeatReset(handoff, sha256, {
           ...(loadNotify === undefined ? {} : { notify: await loadNotify() }),
+          resolveLaunch: identity => seatResetTarget(identity, process.env),
           relaunch: (identity, checkout) => seatResetLaunch(identity, process.env, checkout),
         });
         process.stdout.write(`${JSON.stringify({ ok: true, ...result })}\n`);
