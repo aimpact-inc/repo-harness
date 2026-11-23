@@ -10,7 +10,6 @@ import { requestUserInputFragment } from "../../src/cli/installer/targets/codex"
 import { openHostConfigGate } from "../../src/effects/host-config/gate";
 import { acquireRuntimeTransactionLock, globalRuntimeScope } from "../../src/effects/locking/runtime-transaction-lock";
 import { configureAntigravityCodegraphStep } from "../../src/cli/tools/codegraph";
-import { prepareInstallSelectionSwitch } from "../../src/cli/installer/install-profile";
 import { buildManagedHooks } from "../../src/cli/installer/managed-entries";
 import { jsonFragment } from "../../src/core/host-config/json-fragment";
 
@@ -21,13 +20,13 @@ function writeExecutable(temporaryRoot: string, filePath: string, content: strin
   writeShellExecutableFixture(temporaryRoot, filePath, content);
 }
 
-function setupFakeEnvironment(prefix: string, plugins?: Parameters<typeof recordPluginSelection>[1]) {
+function setupFakeEnvironment(prefix: string) {
   const root = mkdtempSync(join(tmpdir(), `${prefix}-`));
   const home = join(root, "home");
   const fakeBin = join(root, "fakebin");
   mkdirSync(home, { recursive: true });
   mkdirSync(fakeBin, { recursive: true });
-  recordPluginSelection({ HOME: home }, plugins);
+  recordPluginSelection({ HOME: home });
   return { root, home, fakeBin };
 }
 
@@ -263,7 +262,7 @@ test.skipIf(process.platform === 'win32')('Antigravity CodeGraph configure check
     const original = JSON.stringify({ mcpServers: user });
     writeFileSync(outside, original);
     symlinkSync(outside, config);
-    expect(configureAntigravityCodegraphStep(root, env, false)).toBeUndefined();
+    expect(configureAntigravityCodegraphStep(root, env)).toBeUndefined();
     expect(existsSync(log)).toBe(false);
     doctor('na');
     expect(readFileSync(outside, 'utf8')).toBe(original);
@@ -272,46 +271,28 @@ test.skipIf(process.platform === 'win32')('Antigravity CodeGraph configure check
     writeFileSync(config, original);
     const adapters = cli('install', ...target, '--no-external-skills');
     expect(adapters.status, adapters.stdout + adapters.stderr).toBe(0);
-    doctor('warn', 'Run rh update --target antigravity --configure-codegraph');
+    doctor('warn', 'Run rh update --configure-codegraph');
     const customCodegraph = JSON.stringify({ mcpServers: { ...user, codegraph: { command: 'my-codegraph', args: ['serve', '--mcp'] } } });
     writeFileSync(config, customCodegraph);
     const userRemedy = doctor('warn', `Edit mcpServers.codegraph in ${config}`);
     expect(userRemedy).not.toContain('rh update');
-    const preserved = cli('update', ...target, '--configure-codegraph');
-    expect(preserved.status, preserved.stdout + preserved.stderr).toBe(0);
-    expect(JSON.parse(preserved.stdout).lines.join('\n')).toContain('mcpServers.codegraph');
+    expect(configureAntigravityCodegraphStep(root, env)).toMatchObject({ status: 'skipped', detail: expect.stringContaining('mcpServers.codegraph') });
     expect(readFileSync(config, 'utf8')).toBe(customCodegraph);
     expect(openHostConfigGate({ env }).recorded(config)).toEqual([]);
     writeFileSync(config, original);
 
-    const install = cli('install', ...target, '--configure-codegraph', '--no-external-skills');
-    expect(install.status, install.stdout + install.stderr).toBe(0);
+    expect(configureAntigravityCodegraphStep(root, env)).toMatchObject({ status: 'ok', detail: 'changed' });
     const args = ['serve', '--mcp', '--path', '.'];
     expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ mcpServers: { ...user, codegraph: { command: '/opt/codegraph-first', args } } });
 
     printServer('/opt/codegraph-update');
-    const update = cli('update', ...target, '--configure-codegraph');
-    expect(update.status, update.stdout + update.stderr).toBe(0);
+    expect(configureAntigravityCodegraphStep(root, env)).toMatchObject({ status: 'ok', detail: 'changed' });
     expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ mcpServers: { ...user, codegraph: { command: '/opt/codegraph-update', args } } });
     doctor('ok');
-    printServer('/opt/codegraph-opted-in');
-    expect(configureAntigravityCodegraphStep(root, env, false)).toMatchObject({ status: 'ok', detail: 'changed' });
-    expect(JSON.parse(readFileSync(config, 'utf8')).mcpServers.codegraph).toEqual({ command: '/opt/codegraph-opted-in', args });
-
-    const hooks = join(home, '.gemini/config/hooks.json');
-    const beforeHooks = readFileSync(hooks);
-    const beforeLedger = readFileSync(join(home, '.repo-harness/config/ledger.json'));
-    const beforePrints = readFileSync(log);
     rmSync(config);
     symlinkSync(outside, config);
-    const refused = cli('update', ...target, '--configure-codegraph');
-    expect(refused.status).toBe(1);
-    expect(refused.stdout + refused.stderr).toContain('antigravity_hooks_path_linked');
-    expect(readFileSync(hooks)).toEqual(beforeHooks);
-    expect(readFileSync(join(home, '.repo-harness/config/ledger.json'))).toEqual(beforeLedger);
-    expect(readFileSync(log)).toEqual(beforePrints);
-    expect(readFileSync(outside, 'utf8')).toBe(original);
     doctor('fail');
+    expect(readFileSync(outside, 'utf8')).toBe(original);
   } finally { rmSync(root, { recursive: true, force: true }); }
 }, 30000);
 
@@ -343,41 +324,6 @@ test.skipIf(process.platform === 'win32')('global update refuses malformed Antig
     expect(result.stderr).toContain('the file is not valid JSON');
     expect(existsSync(called)).toBe(false);
     expect(state()).toEqual(before);
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
-
-for (const command of ['install', 'update'] as const) {
-  test.skipIf(process.platform === 'win32')(`Antigravity ${command} refuses CodeGraph when architecture is unselected`, () => {
-    const { root, home, fakeBin } = setupFakeEnvironment('core-antigravity-codegraph', []);
-    try {
-      const env = { HOME: home, TMPDIR: root, PATH: `${fakeBin}:/bin:/usr/bin`, BUN_INSTALL: join(home, '.bun') };
-      seedGlobalPackageFixture(env);
-      const log = join(root, 'codegraph-called');
-      writeFakeCodeGraph(fakeBin, log);
-      const args = [command, '--target', 'antigravity', '--configure-codegraph', '--json'];
-      const result = spawnSync(process.execPath, [CLI, ...args], { cwd: root, env, encoding: 'utf8' });
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain('the architecture plugin is not selected; run: rh install --plugins architecture');
-      expect(existsSync(join(home, '.gemini'))).toBe(false);
-      expect(existsSync(log)).toBe(false);
-    } finally { rmSync(root, { recursive: true, force: true }); }
-  });
-}
-
-test('dropping architecture reverts only its recorded Antigravity CodeGraph fragment', () => {
-  const { root, home } = setupFakeEnvironment('remove-antigravity-codegraph');
-  try {
-    const env = { HOME: home, BUN_INSTALL: join(home, '.bun') };
-    const config = join(home, '.gemini/config/mcp_config.json');
-    const user = { mcpServers: { personal: { command: 'my-tool' } } };
-    mkdirSync(join(home, '.gemini/config'), { recursive: true });
-    writeFileSync(config, JSON.stringify(user));
-    const gate = openHostConfigGate({ env });
-    gate.apply([{ path: config, fragments: [{ owner: 'architecture', selector: 'mcpServers.codegraph', kind: 'add', strategy: jsonFragment, value: { command: 'codegraph' } }] }]);
-    expect(gate.recorded(config)).toHaveLength(1);
-    prepareInstallSelectionSwitch([], env, join(root, 'transaction'));
-    expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual(user);
-    expect(gate.recorded(config)).toEqual([]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

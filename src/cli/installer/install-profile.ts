@@ -3,9 +3,9 @@ import { publishFileByRename, retryWindowsSharingRace } from '../../effects/atom
 import wazaRules from "../../core/skill-surface/waza-shared-rules.json";
 import { bunGlobalPackageRoot, expectedSkillProjections } from './skill-projection';
 import { configurationReceiptPath } from './configuration-ownership';
-import { expectedOf, hostConfigPaths, hostConfigPathsAt, observeFile, putVault, readLedger, removeTarget, replaceTarget, repositoryLedgers, resolveHostPath } from '../../effects/host-config/store';
+import { expectedOf, hostConfigPaths, hostConfigPathsAt, observeFile, putVault, removeTarget, replaceTarget, repositoryLedgers, resolveHostPath } from '../../effects/host-config/store';
 import { ensureSelfIgnoringDirectory, isSelfIgnoreGuard, SELF_IGNORE_NAME } from '../../effects/self-ignoring-directory';
-import { AntigravityHooksPathError, antigravityMcpConfigHostPath, antigravityMcpConfigPath, antigravitySkillsDirHostPath, openHostConfigGate, planPathRevert, recoverRetiredPathWrites, rollbackHostConfigTransaction } from '../../effects/host-config/gate';
+import { antigravitySkillsDirHostPath, openHostConfigGate, planPathRevert, recoverRetiredPathWrites, rollbackHostConfigTransaction } from '../../effects/host-config/gate';
 import { namingTomlFile } from '../../core/host-config/toml-fragment';
 import { migrateCodexConfigRecords } from './codex-config-migration';
 import { migrateJsonConfigRecords } from './json-config-migration';
@@ -1030,17 +1030,10 @@ function removeRetiredOwnedSurfaces(
  */
 function removeArchitectureHostFragments(env: NodeJS.ProcessEnv): void {
   const home = requireHome(env);
-  const paths = hostConfigPaths(env);
-  const files = [join(home, '.codex', 'config.toml'), join(home, '.claude.json'), join(home, '.claude', 'settings.json')];
-  if (readLedger(paths).files[antigravityMcpConfigHostPath(env, paths)]) files.push(antigravityMcpConfigPath(env));
   const gate = openHostConfigGate({ env });
-  for (const path of files) {
+  for (const path of [join(home, '.codex', 'config.toml'), join(home, '.claude.json'), join(home, '.claude', 'settings.json')]) {
     let entries;
     try { entries = gate.revert([path], { owner: 'architecture' }); } catch (error) {
-      if (error instanceof AntigravityHooksPathError) {
-        process.stderr.write(`[install] kept_edited ${path}: ${error.message}\n`);
-        continue;
-      }
       // Only config.toml goes through Bun's TOML parser; the gate keeps a JSON file that does not parse with its fragments.
       if (!(error instanceof SyntaxError)) throw error;
       process.stderr.write(`[install] kept_edited ${(namingTomlFile(path, error) as Error).message}\n`);

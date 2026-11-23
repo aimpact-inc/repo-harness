@@ -593,8 +593,8 @@ function readAntigravityMcpConfig(env: NodeJS.ProcessEnv) {
 }
 
 /** Validate the config with the same JSON edit strategy the gate will apply. */
-export function preflightAntigravityCodegraph(env: NodeJS.ProcessEnv, explicitTarget: boolean): void {
-  if (!explicitTarget && !optedIntoAntigravity(env)) return;
+export function preflightAntigravityCodegraph(env: NodeJS.ProcessEnv): void {
+  if (!optedIntoAntigravity(env)) return;
   const { path, content } = readAntigravityMcpConfig(env);
   try {
     jsonFragment.apply(content, CODEGRAPH_MCP_SELECTOR, null);
@@ -612,7 +612,7 @@ function checkAntigravityCodegraphMcp(id: string, describe: string, env: NodeJS.
     if (isRecord(server) && typeof server.command === 'string' && server.command.trim() && codegraphArgsAreScoped(server.args)) {
       return { id, describe, status: 'ok', detail: 'CodeGraph MCP args are scoped to the working directory' };
     }
-    const configure = 'Run rh update --target antigravity --configure-codegraph';
+    const configure = 'Run rh update --configure-codegraph';
     if (server === undefined) return { id, describe, status: 'warn', detail: `CodeGraph MCP entry is missing. ${configure}` };
     const range = jsonFragment.locate(content, CODEGRAPH_MCP_SELECTOR)!;
     const text = content.slice(range.start, range.end);
@@ -770,12 +770,10 @@ function configureCodegraphMcpStep(cwd: string, target: CodegraphHostTarget, env
   }
 }
 
-export function configureAntigravityCodegraphStep(cwd: string, env: NodeJS.ProcessEnv, explicitTarget: true): CodegraphSetupStep;
-export function configureAntigravityCodegraphStep(cwd: string, env: NodeJS.ProcessEnv, explicitTarget: boolean): CodegraphSetupStep | undefined;
-export function configureAntigravityCodegraphStep(cwd: string, env: NodeJS.ProcessEnv, explicitTarget: boolean): CodegraphSetupStep | undefined {
+export function configureAntigravityCodegraphStep(cwd: string, env: NodeJS.ProcessEnv): CodegraphSetupStep | undefined {
   const step = 'configure Antigravity CodeGraph MCP';
   try {
-    if (!explicitTarget && !optedIntoAntigravity(env)) return undefined;
+    if (!optedIntoAntigravity(env)) return undefined;
     const result = configureCodegraph({ repoRoot: cwd, target: 'antigravity', location: 'global', env });
     const action = result.actions[0]!;
     return {
