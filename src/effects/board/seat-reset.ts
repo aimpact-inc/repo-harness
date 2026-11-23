@@ -9,7 +9,7 @@ import { seatHostId, type SeatRuntime } from '../../core/board/seats-settings';
 import { HerdrCoreError, RH_LABEL, hcGet, hcKeys, hcList, hcSend, hcWait, type HcLabels, type HcTerminal, type HcWaitResult, type HerdrCoreOptions } from '../terminal/herdr-core';
 import { readNotifyConfig } from '../terminal/notify-read';
 import {
-  handoffProblem, newSession, readRequest, readResumeTranscript, readSeatSession, requestOpen, seatResetEventCount, sentResumed,
+  handoffProblem, newSession, readRequest, readResumeTranscript, readSeatSession, seatResetEventCount, seatResetRequestState, sentResumed,
   type NewSession, type SeatRequest, type SeatSessionRecord,
 } from './seat-reset-store';
 
@@ -23,7 +23,7 @@ export type SeatResetOutcome = 'nothing_sent' | 'rewrite_requested' | 'no_reset'
 
 export type SeatResetCode = 'handoff_path_invalid' | 'handoff_missing' | 'request_missing' | 'handoff_stale' | 'handoff_sha256_mismatch'
   | 'handoff_sections_missing' | 'already_claimed' | 'claim_failed' | 'caller_unknown' | 'requester_not_found' | 'requester_busy' | 'message_not_sent'
-  | 'hc_failed' | 'requester_status_untracked' | 'requester_exited' | 'resume_not_sent' | 'request_invalid' | 'request_closed'
+  | 'hc_failed' | 'requester_status_untracked' | 'requester_exited' | 'resume_not_sent' | 'request_invalid' | 'request_closed' | 'request_released'
   | 'seat_reset_runtime_unsupported' | 'seat_reset_destination_unavailable' | 'seat_reset_runtime_changed' | 'seat_reset_session_unconfirmed';
 
 const RESET_FOREGROUNDS: Readonly<Record<InteractiveResetHost, string>> = { claude: 'claude', pi: 'pi', antigravity: 'agy' };
@@ -205,10 +205,10 @@ class SeatResetRun {
       this.findRequester();
       this.requireResettableRequester(this.trackedRequester());
       this.prompt = seatResumePrompt(this.identity, this.caller, this.request.action);
-      this.checkHandoff(sha256);
-      const turn = this.wait();
       this.claim(claim);
       claimed = claim;
+      this.checkHandoff(sha256);
+      const turn = this.wait();
       return await this.resetAndResume(turn, sha256);
     } catch (error) {
       if (error instanceof SeatResetError) throw error;
@@ -233,16 +233,19 @@ class SeatResetRun {
     typeLine(this.requester, line, this.options);
   }
 
-  private requireFreshRequest(session: SeatSessionRecord | null): void {
+  private requireOpenRequest(session = readSeatSession(this.identity)): void {
     const request = this.request!;
-    const current = readRequest(this.identity);
-    if (current?.requestedAt !== request.requestedAt || current.host !== request.host || current.action !== request.action
-      || current.transcriptPath !== request.transcriptPath) {
-      throw this.refuse('request_closed', this.keyOutcome, `The reset request of ${request.requestedAt} is no longer current.`);
+    const status = seatResetRequestState(this.identity, request, session);
+    if (status.state === 'open') return;
+    if (status.state === 'released') {
+      throw this.refuse('request_released', this.keyOutcome, `The peer already sent NO-RESET for the request of ${request.requestedAt}.`);
     }
-    if (!this.attemptedKeys && !requestOpen(this.identity, request, session)) {
+    if (status.reason === 'session_started') {
+      // A recovery relaunch can use the segment created by this run's earlier keys.
+      if (this.attemptedKeys) return;
       throw this.release('request_closed', `a session segment started after the reset request of ${request.requestedAt}, so nothing was typed`);
     }
+    throw this.refuse('request_closed', this.keyOutcome, `The reset request of ${request.requestedAt} is no longer current.`);
   }
 
   private alreadyClaimed(): SeatResetError {
@@ -315,6 +318,7 @@ class SeatResetRun {
 
   /** A failed check asks for a rewrite, at most 3 times per request; then the requester continues without a reset. */
   private checkHandoff(sha256: string): void {
+    this.requireOpenRequest();
     const problem = handoffProblem(this.path, sha256, this.request!);
     if (problem === null) return;
     const rewrites = this.count('rewrite');
@@ -467,7 +471,7 @@ class SeatResetRun {
       if (problem !== null) throw this.refuse(problem.code, this.keyOutcome, problem.message);
     }
     const session = readSeatSession(this.identity);
-    this.requireFreshRequest(session);
+    this.requireOpenRequest(session);
     if (relaunch !== undefined) this.requireRelaunchReady(terminal, session, relaunch.transcriptPath);
     this.requireSameRuntime(this.options.resolveLaunch(this.identity).runtime);
     const since = Date.now();
@@ -500,7 +504,11 @@ class SeatResetRun {
     try {
       plan = await this.options.relaunch(this.identity, this.launchDirectory());
     } catch (error) {
-      throw this.relaunchFailed(`relaunch_argv_failed: ${sentence(error)}`);
+      const detail = `relaunch_argv_failed: ${sentence(error)}`;
+      let runtime: SeatRuntime;
+      try { runtime = this.options.resolveLaunch(this.identity).runtime; } catch { throw this.relaunchFailed(detail); }
+      this.requireSameRuntime(runtime);
+      throw this.relaunchFailed(detail);
     }
     this.requireSameRuntime(plan.runtime);
     // The shell reads the argv from a script because hc keys can only type a subset of its characters.

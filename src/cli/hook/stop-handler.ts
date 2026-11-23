@@ -73,15 +73,15 @@ function seatReset(payload: HookPayload, env: NodeJS.ProcessEnv, now: Date, hand
     const identity = seatResetIdentity(env);
     const transcript = payloadString(payload, 'transcript_path');
     if (identity === null || transcript === '') return { notices: [] };
-    const request = seatResetRequestState(identity, transcript);
-    if (request === 'released' || (request === 'open' && !relaunch)) return { notices: [] };
+    const { state } = seatResetRequestState(identity, transcript);
+    if (state === 'released' || (state === 'open' && !relaunch)) return { notices: [] };
     const usage = relaunch
       ? readAntigravityTranscript(payloadString(payload, 'session_id'), transcript, env)
       : readTranscriptUsage(transcript);
     if (!usage || usage.contextTokens === null || usage.contextTokens < SEAT_RESET_CONTEXT_TOKENS) return { notices: [] };
     const { contextTokens, bytes } = usage;
     const action = seatResetAction(bytes, resetHost);
-    if (request === 'absent') writeSeatResetRequest(identity, now, { contextTokens, transcriptPath: transcript, transcriptBytes: bytes, action,
+    if (state === 'closed') writeSeatResetRequest(identity, now, { contextTokens, transcriptPath: transcript, transcriptBytes: bytes, action,
       host: resetHost });
     const message = seatResetReason(identity, contextTokens, bytes, action, resetHost);
     return { block: { exitCode: 2, stdout: '', stderr: `${message}\n` } };

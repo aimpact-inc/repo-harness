@@ -88,26 +88,33 @@ export function writeSeatResetRequest(identity: SeatResetIdentity, now: Date, re
   })}\n`);
 }
 
-/** An outcome belongs to the request whose timestamp was recorded with it. */
-export function seatResetEventCount(identity: SeatResetIdentity, requestedAt: string, kind: string): number {
+function seatResetEvents(identity: SeatResetIdentity, requestedAt: string): Record<string, unknown>[] {
   let lines: string[];
-  try { lines = readFileSync(seatResetLogPath(identity), 'utf8').split('\n'); } catch { return 0; }
-  return lines.filter((line) => {
-    const entry = parseJsonObject(line);
-    return entry?.requested_at === requestedAt && entry.kind === kind;
-  }).length;
+  try { lines = readFileSync(seatResetLogPath(identity), 'utf8').split('\n'); } catch { return []; }
+  return lines.map(parseJsonObject).filter((entry): entry is Record<string, unknown> => entry?.requested_at === requestedAt);
 }
 
-/** A release suppresses reminders for this request until the seat starts a new session segment. */
-export function seatResetRequestState(identity: SeatResetIdentity, transcriptPath: string): 'absent' | 'open' | 'released' {
+export function seatResetEventCount(identity: SeatResetIdentity, requestedAt: string, kind: string): number {
+  return seatResetEvents(identity, requestedAt).filter(entry => entry.kind === kind).length;
+}
+
+type SeatResetRequestState = { readonly state: 'open' } | { readonly state: 'released' }
+  | { readonly state: 'closed'; readonly reason: 'request_changed' | 'session_started' | 'finished' };
+
+/** Classify the current request for a transcript or check that a specific request can still be acted on. */
+export function seatResetRequestState(identity: SeatResetIdentity, expected: string | SeatRequest, session = readSeatSession(identity)): SeatResetRequestState {
   const request = readRequest(identity);
-  if (request === null || request.transcriptPath !== transcriptPath || !requestOpen(identity, request)) return 'absent';
-  return seatResetEventCount(identity, request.requestedAt, 'no_reset') > 0 ? 'released' : 'open';
-}
-
-/** A request is open while no SessionStart record is newer than it: a newer record means a new session segment. */
-export function requestOpen(identity: SeatResetIdentity, request: SeatRequest, session = readSeatSession(identity)): boolean {
-  return session === null || Date.parse(session.startedAt) <= Date.parse(request.requestedAt);
+  const matches = request !== null && (typeof expected === 'string' ? request.transcriptPath === expected
+    : request.requestedAt === expected.requestedAt && request.transcriptPath === expected.transcriptPath
+      && request.host === expected.host && request.action === expected.action);
+  if (!matches) return { state: 'closed', reason: 'request_changed' };
+  const events = seatResetEvents(identity, request.requestedAt);
+  if (events.some(entry => entry.kind === 'reset')) return { state: 'closed', reason: 'finished' };
+  const released = events.some(entry => entry.kind === 'no_reset');
+  if (session !== null && Date.parse(session.startedAt) > Date.parse(request.requestedAt)) {
+    return { state: 'closed', reason: released ? 'finished' : 'session_started' };
+  }
+  return { state: released ? 'released' : 'open' };
 }
 
 /**

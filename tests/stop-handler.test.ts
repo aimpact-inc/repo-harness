@@ -279,6 +279,9 @@ describe.skipIf(process.platform === 'win32')('Antigravity Stop', () => {
     writeFileSync(seatResetLogPath(identity), `${JSON.stringify({ requested_at, kind: 'no_reset', detail: 'handoff_sections_missing' })}\n`);
     expect(invoke('Stop', { executionNum: 0 })).toBe('');
     expect(readFileSync(request, 'utf8')).toBe(record);
+    invoke('SessionStart');
+    expect(invoke('Stop', { executionNum: 0 })).toBe(continuation);
+    expect(JSON.parse(readFileSync(request, 'utf8')).requested_at).not.toBe(requested_at);
     for (const surface of ['antigravity', 'antigravity-ide']) {
       const dir = join(home, '.gemini', surface, 'brain', conversationId, '.system_generated/logs');
       mkdirSync(dir, { recursive: true });
