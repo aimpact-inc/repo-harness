@@ -6,7 +6,7 @@ import { initGitRepo, run, tmpWorkspace } from './helpers/repo-fixture';
 import { A12_NO_PR_MS, A13_IDLE_MS, A14_RED_MS, A15_FAIL_MS, A16_QUESTION_MS, A17_BLOCKED_MS, A20_STUCK_MS, STALLED_WORKING_MS, BOARD_PRIORITY_ORDER, BOARD_RULE_PRIORITY, evaluateBoardAttention, renderAttentionText, type BoardPriority, type BoardRuleId } from '../src/core/board/attention';
 import { ADVISOR_WAKES_PER_DAY, MAX_SENDS_PER_FINDING, RENUDGE_INTERVAL_MS, WINDOW_WITH_WORKERS_MS, WINDOW_WITHOUT_WORKERS_MS, attentionFindingKey, planAttentionDeliveries, type AttentionSentV1 } from '../src/core/board/attention-delivery';
 import { attentionLogPath, attentionWatchDoctorCheck, runAttentionWindow, serviceTerminalRepository, startAttentionWatch } from '../src/effects/board/attention-watch';
-import { decodeBoard, type BoardHostPortsV1, type BoardItemV1, type BoardPullRequestV1, type BoardTerminalV1, type BoardV1 } from '../src/core/board/board';
+import { BOARD_PROTOCOL, decodeBoard, type BoardHostPortsV1, type BoardItemV1, type BoardPullRequestV1, type BoardTerminalV1, type BoardV1 } from '../src/core/board/board';
 import { decodePlanBlock, PlanBlockError, planOrderIssues, planOrderUnits } from '../src/core/board/plan-block';
 import { decodeReviewHazards, pathHazardHits, workflowEditAllowed } from '../src/core/board/hazards';
 import type { PullRequestReadinessV2 } from '../src/core/publication/merge-readiness';
@@ -790,7 +790,8 @@ test('decoders refuse an unknown protocol or kind', () => {
   // A protocol-12 board has no claim bundle or branch and no seat liveness; a protocol-13 board carries reviewer_family.
   expect(() => decodeBoard({ protocol: 12, kind: 'repo-harness.board' })).toThrow('unsupported board protocol: 12');
   expect(() => decodeBoard({ protocol: 13, kind: 'repo-harness.board' })).toThrow('unsupported board protocol: 13');
-  expect(() => decodeBoard({ protocol: 14, kind: 'fleet_board_snapshot' })).toThrow('unsupported board kind: fleet_board_snapshot');
+  expect(() => decodeBoard({ protocol: 14, kind: 'repo-harness.board' })).toThrow('unsupported board protocol: 14');
+  expect(() => decodeBoard({ protocol: BOARD_PROTOCOL, kind: 'fleet_board_snapshot' })).toThrow('unsupported board kind: fleet_board_snapshot');
   const block = (value: Json) => `repo-harness plan\n\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\`\n`;
   const valid = { protocol: 3, kind: 'repo-harness.plan', merge_order: [1475], holds: [], seat_limits: { worker: 3 } } as const;
   expect(decodePlanBlock(block(valid))).toEqual(valid);
@@ -818,7 +819,9 @@ test('decoders refuse a missing or invalid plan revision, merge policy or seat b
   for (const invalid of [plan(undefined), plan(0), plan(1.5), plan('1'), noPolicy, { ...recorded, acceptance_merge: 'maybe' }, board(undefined), board(''),
     item({ claim: undefined }), item({ claim: { status: 'active', url: 'u' } }), ...[{ bundle: [1475], branch: null }, { bundle: null, branch: 7 }]
       .map(patch => item({ claim: { status: 'active', url: 'u', created_at: '2026-11-02T18:34:59Z', role: null, ...patch } })), item({ open_questions: { status: 'observed' } }), pull({ open_questions: undefined }), pull({ review_fail: { url: 'u' } }),
-    pull({ review_records: undefined }), pull({ review_records: { status: 'observed', gatekeeper: 'x', reviewer: null } }), pull({ review_records: { status: 'observed', claude: null, codex: null, pi: null } }),
+    item({ writer_completion: undefined }), item({ writer_completion: { pr: 1491, head_sha: 'bad', branch: 'main' } }),
+    pull({ review_records: undefined }), pull({ review_records: { status: 'observed', gatekeeper: 'x', reviewer: null, head: { gatekeeper: false, reviewer: false } } }),
+    pull({ review_records: { status: 'observed', gatekeeper: null, reviewer: null } }), pull({ review_records: { status: 'observed', claude: null, codex: null, pi: null } }),
     pull({ second_review: undefined }), pull({ second_review: 'maybe' }), pull({ gatekeeper_review: undefined }), pull({ gatekeeper_review: 'maybe' }),
     { ...recorded, seat_liveness: undefined }, { ...recorded, seat_liveness: { status: 'observed', probes: [{ address: 't1', status_ms: 1, turn: 1, children: -1, screen_hash: null }] } }]) {
     expect(() => decodeBoard(invalid)).toThrow('invalid board');
@@ -1556,7 +1559,8 @@ test('acceptance disposition: a FAIL row is ignored only when every finding of i
     `repo-harness acceptance disposition\nRecord: ${record}\nSubject: ${subject}\nFindings: ${findings}\nDecision: ${base}/issues/2202#issuecomment-1\n`;
   expect(status([])).toBe('not_accepted');
   // The newest record of each seat, any subject: the pre-#3353 seatless records on #1499 belong to no seat, while the two added gatekeeper records update gatekeeper.
-  expect(projected([]).pull_requests.find(entry => entry.number === 1499)!.review_records).toEqual({ status: 'observed', reviewer: null, gatekeeper: '2026-11-02T22:30:00Z' });
+  expect(projected([]).pull_requests.find(entry => entry.number === 1499)!.review_records)
+    .toEqual({ status: 'observed', reviewer: null, gatekeeper: '2026-11-02T22:30:00Z', head: { gatekeeper: true, reviewer: false } });
   expect(status([disposition('R1-1')])).toBe('not_accepted');
   expect(status([disposition('R1-1'), disposition('R1-2')])).toBe('accepted');
   expect(status([disposition('R1-1, R1-2')])).toBe('accepted');
@@ -1715,6 +1719,93 @@ test('A22 flags a seat that works past the bound with no child process and the s
   expect([replay({ host }).seat_liveness, screens]).toEqual([{ status: 'observed', probes: [{ address: 't7', status_ms: since, turn: 3, children: 0, screen_hash: screen('\u2819 Working (9m 1s)') }] }, ['t7']]);
 });
 
+describe('A22 task seats with unreported status', () => {
+  const minute = 60_000;
+  const now = REPLAY_NOW.getTime();
+  const at = (minutesAgo: number) => new Date(now - minutesAgo * minute).toISOString();
+  const branch = 'feat/a22-replay';
+  const head = 'a'.repeat(40);
+  const oldHead = 'b'.repeat(40);
+  const oldClaim = comment(`repo-harness issue claim\nStatus: active\nRole: writer\nBranch: ${branch}\nIssues: #1477, #1479`, at(30));
+  const currentClaim = comment(oldClaim.body, at(12));
+  const claimStatus = (claim: Json, status: string, pr = 1494, sha = head, minutesAgo = 8) =>
+    comment(`repo-harness issue claim status\nClaim: ${claim.url}\nStatus: ${status}\nPR: #${pr} head ${sha.slice(0, 9)}`, at(minutesAgo));
+  const reviewRecord = (role: string, sha: string) =>
+    comment(`repo-harness acceptance record\nSeat: ${role}\n\n| Round | Role | Subject | Verdict |\n| 1 | ${role} | ${sha} | PASS |`, at(sha === head ? 7 : 8));
+  const setup = (labels: { seat: string; pr?: string; issue?: string }, options: {
+    historical?: 'same-branch' | 'sibling';
+    mergedAssignment?: boolean;
+    statuses?: readonly Json[];
+    replacement?: boolean;
+    records?: readonly Json[];
+  } = {}): BoardV1 => {
+    const cwd = tmpWorkspace('a22-seat'); roots.push(cwd);
+    initGitRepo(cwd);
+    expect(run('git', ['symbolic-ref', 'HEAD', `refs/heads/${branch}`], cwd).status).toBe(0);
+    const terminal = { address: 't7', name: null, agent: 'pi', state: 'live', status: null, status_kind: null, status_msg: null,
+      status_ms: null, turn: 1, cwd, where: 'repo-harness / 1', agent_pid: 4242, labels: { parent: '1474', ...labels } } as const;
+    const host: BoardHostPortsV1 = { ...boardHostPorts({ env: { PATH: '/nonexistent' } }),
+      seatTerminals: () => ({ status: 'observed', terminals: [terminal, { ...terminal, address: 't8', agent_pid: 4343, labels: { seat: 'orchestrator' } }] }),
+      childProcessCounts: () => ({ status: 'observed', counts: new Map() }),
+      seatRead: () => ({ status: 'observed', text: 'Waiting for output', complete: true, why: null }),
+    };
+    return replay({ host, parent: (data) => {
+      issueNode(data, 1479).comments.nodes = [oldClaim, ...(options.replacement ? [currentClaim] : []), ...(options.statuses ?? [])];
+    }, pulls: (data) => {
+      const { pr1491, pr1494 } = data.repository;
+      Object.assign(pr1494, { headRefName: branch, headRefOid: head });
+      pr1494.commits.nodes[0].commit.oid = head;
+      pr1494.comments.nodes = options.records ?? [];
+      if (options.mergedAssignment) Object.assign(pr1494, { state: 'MERGED', mergedAt: at(3) });
+      if (options.historical !== undefined) {
+        Object.assign(pr1491, { body: 'Closes #1477', state: 'MERGED', mergedAt: at(45) });
+        if (options.historical === 'same-branch') pr1491.headRefName = branch;
+      }
+    } });
+  };
+  const findings = (board: BoardV1, minutesAgo = 6) => evaluateBoardAttention(board, { ...board, observed_at: at(minutesAgo) })
+    .findings.filter(finding => finding.rule === 'A22');
+
+  test('resolves a branch without letting an older merge hide an open assignment', () => {
+    const worker = { seat: 'worker' };
+    expect(findings(setup(worker))).toHaveLength(1);
+    const reused = setup(worker, { historical: 'same-branch' });
+    const probe = { address: 't7', status_ms: null, turn: 1, children: 0, screen_hash: seatScreenHash('Waiting for output') };
+    expect(decodeBoard(reused).seat_liveness).toEqual({ status: 'observed', probes: [probe] });
+    expect(findings(reused)).toMatchObject([{ pull_requests: [1494], terminals: ['t7'] }]);
+    expect(findings(reused, 5)).toHaveLength(0);
+    const labeled = { seat: 'worker', issue: '1479' };
+    expect(findings(setup(labeled, { mergedAssignment: true }))).toHaveLength(0);
+    expect(findings(setup(labeled, { mergedAssignment: true, historical: 'same-branch' }))).toHaveLength(1);
+  });
+
+  test('requires a completion status for the assigned PR, head and current writer claim', () => {
+    const worker = { seat: 'worker', issue: '1479' };
+    const ready = 'ready for review; claim remains active';
+    expect(findings(setup(worker, { statuses: [claimStatus(oldClaim, ready)] }))).toHaveLength(0);
+    expect(findings(setup(worker, { statuses: [claimStatus(oldClaim, 'done')] }))).toHaveLength(0);
+    const cases = [
+      ['status older than the replacement claim', { replacement: true, statuses: [claimStatus(oldClaim, ready, 1494, head, 15)] }],
+      ['status naming the replaced claim', { replacement: true, statuses: [claimStatus(oldClaim, ready)] }],
+      ['earlier head', { statuses: [claimStatus(oldClaim, ready, 1494, oldHead)] }],
+      ['blocked', { statuses: [claimStatus(oldClaim, 'blocked; claim remains active')] }],
+      ['merged sibling', { historical: 'sibling' }],
+      ['sibling status', { statuses: [claimStatus(oldClaim, ready, 1491)] }],
+    ] as const;
+    for (const [name, options] of cases) expect([name, findings(setup(worker, options)).length]).toEqual([name, 1]);
+    expect(findings(setup(worker, { replacement: true, statuses: [claimStatus(currentClaim, ready)] }))).toHaveLength(0);
+  });
+
+  test('requires the review seat’s own acceptance record on the current head', () => {
+    for (const role of ['gatekeeper', 'reviewer']) {
+      const labels = { seat: role, pr: '1494' };
+      const otherRole = role === 'gatekeeper' ? 'reviewer' : 'gatekeeper';
+      expect(findings(setup(labels, { records: [reviewRecord(role, oldHead), reviewRecord(otherRole, head)] }))).toHaveLength(1);
+      expect(findings(setup(labels, { records: [reviewRecord(role, head)] }))).toHaveLength(0);
+    }
+  });
+});
+
 test('A19 fires for a done review seat whose pull request has no record of that seat after the seat status time', () => {
   const recorded = replay();
   const now = Date.parse(recorded.observed_at);
@@ -1723,7 +1814,7 @@ test('A19 fires for a done review seat whose pull request has no record of that 
   const iso = (ms: number) => new Date(ms).toISOString();
   const seat = (patch: Json = {}) => ({ address: 't9', name: null, agent: 'codex', state: 'live', status: 'done', status_kind: null, status_msg: null, status_ms: done, turn: 1, branch: null,
     seat_status: 'observed', seat: 'gatekeeper', issue: null, pr: 1494, ...patch }) as BoardTerminalV1;
-  const none = { status: 'observed', gatekeeper: null, reviewer: null } as const;
+  const none = { status: 'observed', gatekeeper: null, reviewer: null, head: { gatekeeper: false, reviewer: false } } as const;
   const board = (terminal: BoardTerminalV1, review_records: BoardPullRequestV1['review_records'] = none): BoardV1 => ({ ...recorded, execution: { status: 'observed', terminals: [terminal] },
     pull_requests: recorded.pull_requests.map(entry => (entry.number === 1494 ? { ...entry, review_records } : entry)) });
   const a19 = (value: BoardV1) => {

@@ -73,12 +73,13 @@ export type BoardGatekeeperReviewV1 = 'pass' | 'fail' | 'none' | 'unknown';
 
 /**
  * The comment time of the newest acceptance record with a row of each review seat, any subject SHA; null when no record has one.
+ * `head` marks the seats with a row for the current PR head.
  * A row belongs to a seat only when GitHub facts on the record, its cited claim, or an unambiguous start marker establish `gatekeeper`
  * or `reviewer` (`acceptanceRowSeat`). Unestablished legacy rows without `Seat:` belong to no seat (`null`).
  * `unknown`: an older comment outside the read, or a record without a table row, can hold a row of any seat.
  */
 export type BoardReviewRecordsV1 =
-  | { readonly status: 'observed'; readonly gatekeeper: string | null; readonly reviewer: string | null }
+  | { readonly status: 'observed'; readonly gatekeeper: string | null; readonly reviewer: string | null; readonly head: Readonly<Record<'gatekeeper' | 'reviewer', boolean>> }
   | { readonly status: 'unknown'; readonly reason: 'comments_truncated' | 'acceptance_record_unparsed' };
 
 /** The model family of a writer, from `modelFamily` on the `Model:` line of its claim. */
@@ -256,10 +257,11 @@ export function carriedPasses(read: Pick<BoardPullRequestReadV1, 'head_sha' | 'c
   return round1.filter(row => row.subject_sha === subjects[0] && answered(row) && !onHead.has(family(row)));
 }
 
-/** The newest acceptance record of each review seat (`BoardPullRequestV1.review_records`). */
+/** The newest acceptance record and current-head record presence of each review seat (`BoardPullRequestV1.review_records`). */
 export function reviewRecords(read: BoardPullRequestReadV1): BoardReviewRecordsV1 {
   if (read.comments.truncated) return Object.freeze({ status: 'unknown', reason: 'comments_truncated' });
   const newest = { gatekeeper: '', reviewer: '' };
+  const head = { gatekeeper: false, reviewer: false };
   for (const record of protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER)) {
     const rows = parseAcceptanceRecord(record);
     if (rows === null) return Object.freeze({ status: 'unknown', reason: 'acceptance_record_unparsed' });
@@ -267,9 +269,10 @@ export function reviewRecords(read: BoardPullRequestReadV1): BoardReviewRecordsV
       const seat = acceptanceRowSeat(row, read.comments);
       if (seat === null) continue;
       if (record.created_at > newest[seat]) newest[seat] = record.created_at;
+      if (row.subject_sha === read.head_sha) head[seat] = true;
     }
   }
-  return Object.freeze({ status: 'observed', gatekeeper: newest.gatekeeper || null, reviewer: newest.reviewer || null });
+  return Object.freeze({ status: 'observed', gatekeeper: newest.gatekeeper || null, reviewer: newest.reviewer || null, head: Object.freeze(head) });
 }
 
 export function acceptance(read: BoardPullRequestReadV1, check: BoardRequiredCheckV1, closedTiers: readonly (BoardTier | null)[], rule: ReviewRule): BoardAcceptanceV1 {

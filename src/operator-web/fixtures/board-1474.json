@@ -1,5 +1,5 @@
 {
-  "protocol": 14,
+  "protocol": 15,
   "kind": "repo-harness.board",
   "observed_at": "2026-11-02T23:29:42.936Z",
   "repository": "Ancienttwo/repo-harness",
@@ -26,6 +26,7 @@
   "items": [
     {
       "number": 1475,
+      "writer_completion": null,
       "title": "herdr-core 迁移 1｜transport：hc 与 herdr-app 传输层",
       "url": "https://github.com/Ancienttwo/repo-harness/issues/1475",
       "state": "open",
@@ -69,6 +70,7 @@
     },
     {
       "number": 1476,
+      "writer_completion": null,
       "title": "herdr-core 迁移 2｜sessions：任务会话改到 herdr-app 和 hc",
       "url": "https://github.com/Ancienttwo/repo-harness/issues/1476",
       "state": "open",
@@ -107,6 +109,7 @@
     },
     {
       "number": 1477,
+      "writer_completion": null,
       "title": "herdr-core 迁移 3｜review：评审宿主在 herdr-core 上启动",
       "url": "https://github.com/Ancienttwo/repo-harness/issues/1477",
       "state": "open",
@@ -133,6 +136,7 @@
     },
     {
       "number": 1478,
+      "writer_completion": null,
       "title": "herdr-core 迁移 4｜operator：从 hc 读运行状态",
       "url": "https://github.com/Ancienttwo/repo-harness/issues/1478",
       "state": "open",
@@ -159,6 +163,7 @@
     },
     {
       "number": 1479,
+      "writer_completion": null,
       "title": "herdr-core 迁移 5｜notify：blocked/done 通知的投递位置",
       "url": "https://github.com/Ancienttwo/repo-harness/issues/1479",
       "state": "open",
@@ -206,6 +211,7 @@
     },
     {
       "number": 1480,
+      "writer_completion": null,
       "title": "herdr-core 迁移 6｜readiness：只认 herdr-core，删除 classic pin",
       "url": "https://github.com/Ancienttwo/repo-harness/issues/1480",
       "state": "open",
@@ -232,6 +238,7 @@
     },
     {
       "number": 1481,
+      "writer_completion": null,
       "title": "herdr-core 迁移 7｜ci：安装 pin 住的 herdr-core",
       "url": "https://github.com/Ancienttwo/repo-harness/issues/1481",
       "state": "open",
@@ -258,6 +265,7 @@
     },
     {
       "number": 1482,
+      "writer_completion": null,
       "title": "herdr-core 迁移 8｜docs：技能与指引只讲 herdr-core",
       "url": "https://github.com/Ancienttwo/repo-harness/issues/1482",
       "state": "open",
@@ -284,6 +292,7 @@
     },
     {
       "number": 1483,
+      "writer_completion": null,
       "title": "herdr-core 迁移 9｜architecture：模型换成 herdr-core 节点",
       "url": "https://github.com/Ancienttwo/repo-harness/issues/1483",
       "state": "open",
@@ -355,7 +364,8 @@
       "review_records": {
         "status": "observed",
         "gatekeeper": "2026-11-02T21:12:35Z",
-        "reviewer": null
+        "reviewer": null,
+        "head": { "gatekeeper": true, "reviewer": false }
       },
       "open_questions": {
         "status": "observed",
@@ -474,7 +484,8 @@
       "review_records": {
         "status": "observed",
         "gatekeeper": null,
-        "reviewer": null
+        "reviewer": null,
+        "head": { "gatekeeper": false, "reviewer": false }
       },
       "open_questions": {
         "status": "observed",
@@ -577,7 +588,8 @@
       "review_records": {
         "status": "observed",
         "gatekeeper": null,
-        "reviewer": null
+        "reviewer": null,
+        "head": { "gatekeeper": false, "reviewer": false }
       },
       "open_questions": {
         "status": "observed",
