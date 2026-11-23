@@ -1,7 +1,7 @@
 /** Stop publishes the evidence checkpoint and reports notices; it never grants publication permission. */
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'fs';
 import { isAbsolute, join, normalize, relative, sep } from 'path';
-import { ANTIGRAVITY_HANDOFF, HOST_ADAPTERS } from './host-adapter';
+import { ANTIGRAVITY_BRAIN_ROOTS, ANTIGRAVITY_HANDOFF, HOST_ADAPTERS } from './host-adapter';
 import { collectArchitectureNotice } from './hook-protocol';
 import { collectProtectedPathNotice } from './protected-path-notice';
 import { publishCheckpointFromLedger } from '../../effects/evidence/checkpoint-store';
@@ -77,7 +77,9 @@ function seatReset(payload: HookPayload, env: NodeJS.ProcessEnv, now: Date, hand
     if (identity === null || transcript === '') return { notices: [] };
     const open = seatResetRequested(identity, transcript);
     if (open && !relaunch) return { notices: [] };
-    const usage = relaunch ? readAntigravityTranscript(payload, env) : readTranscriptUsage(transcript);
+    const usage = relaunch
+      ? readAntigravityTranscript(payloadString(payload, 'session_id'), transcript, env)
+      : readTranscriptUsage(transcript);
     if (!usage || usage.contextTokens === null || usage.contextTokens < SEAT_RESET_CONTEXT_TOKENS) return { notices: [] };
     const { contextTokens, bytes } = usage;
     const action = relaunch ? 'reset' : seatResetAction(bytes);
@@ -90,17 +92,15 @@ function seatReset(payload: HookPayload, env: NodeJS.ProcessEnv, now: Date, hand
   }
 }
 
-function readAntigravityTranscript(payload: HookPayload, env: NodeJS.ProcessEnv): TranscriptUsage | null {
-  const id = payloadValue(payload, 'session_id');
-  const transcript = payloadString(payload, 'transcript_path');
-  if (typeof id !== 'string' || !/^[\w-]+$/.test(id) || !isAbsolute(transcript) || normalize(transcript) !== transcript) return null;
+export function readAntigravityTranscript(sessionId: string, transcriptPath: string, env: NodeJS.ProcessEnv): TranscriptUsage | null {
+  if (!/^[\w-]+$/.test(sessionId) || !isAbsolute(transcriptPath) || normalize(transcriptPath) !== transcriptPath) return null;
   const home = requireHome(env);
-  const logs = join('.gemini', 'antigravity-cli', 'brain', id, '.system_generated', 'logs');
-  const fromLogs = relative(join(home, logs), transcript);
-  if (!fromLogs || isAbsolute(fromLogs) || fromLogs === '..' || fromLogs.startsWith(`..${sep}`)) return null;
-  const entry = lstatSync(transcript);
-  const expected = join(realpathSync(home), logs, fromLogs);
-  if (!entry.isFile() || realpathSync(transcript) !== expected) return null;
+  const withinHome = relative(home, transcriptPath);
+  const inLogs = ANTIGRAVITY_BRAIN_ROOTS.some(root => withinHome.startsWith(`${join(root, sessionId, '.system_generated', 'logs')}${sep}`));
+  if (!inLogs) return null;
+  const entry = lstatSync(transcriptPath);
+  const expected = join(realpathSync(home), withinHome);
+  if (!entry.isFile() || realpathSync(transcriptPath) !== expected) return null;
 
   const fd = openSync(expected, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {

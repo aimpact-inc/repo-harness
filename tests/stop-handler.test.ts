@@ -266,6 +266,14 @@ describe.skipIf(process.platform === 'win32')('Antigravity Stop', () => {
     const record = readFileSync(request, 'utf8');
     expect(JSON.parse(record)).toMatchObject({ context_tokens: 380_000, action: 'reset', transcript_path: transcriptPath, host: 'antigravity' });
     expect(record).not.toContain(marker);
+    for (const surface of ['antigravity', 'antigravity-ide']) {
+      const dir = join(home, '.gemini', surface, 'brain', conversationId, '.system_generated/logs');
+      mkdirSync(dir, { recursive: true });
+      const path = join(dir, 'transcript_full.jsonl');
+      writeFileSync(path, transcript);
+      expect(invoke('Stop', { executionNum: 0, transcriptPath: path })).toBe(continuation);
+      expect(JSON.parse(readFileSync(request, 'utf8')).transcript_path).toBe(path);
+    }
   });
 });
 

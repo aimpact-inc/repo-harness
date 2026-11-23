@@ -280,6 +280,11 @@ function expectAntigravityDeny(result: { status: number | null; stdout: string; 
   expect(result.stderr).toBe('');
 }
 
+function expectAntigravityAsk(result: { status: number | null; stdout: string; stderr: string }) {
+  expect([result.status, result.stderr]).toEqual([0, '']);
+  expect(JSON.parse(result.stdout)).toEqual({ decision: 'ask', reason: expect.stringContaining('[UserFileGuard] I2:') });
+}
+
 describe.skipIf(process.platform === 'win32')('Antigravity hook protocol', () => {
   test('canonicalizes a symlink cwd, ignores a forged root, and passes only on confirmed absence', () => withAntigravityFixture(f => {
     const link = join(f.root, 'nested-link');
@@ -317,13 +322,13 @@ describe.skipIf(process.platform === 'win32')('Antigravity hook protocol', () =>
     expect([unknown.status, unknown.stdout]).toEqual([2, '']);
   }));
 
-  test('keeps clean Bash silent and denies both absolute file tools', () => withAntigravityFixture(f => {
+  test('keeps clean Bash silent and asks before either file tool overwrites a protected file', () => withAntigravityFixture(f => {
     const input = { cwd: f.cwd, toolCall: { name: 'run_command', args: { CommandLine: 'echo okay' } } };
     const allowed = f.run('PreToolUse', 'bash', input);
     expect([allowed.status, allowed.stdout, allowed.stderr]).toEqual([0, '', '']);
     for (const name of ['write_file', 'edit_file']) {
       const toolCall = { name, args: { Path: '/etc/hosts' } };
-      expectAntigravityDeny(f.run('PreToolUse', 'edit', { cwd: f.cwd, toolCall }), GUARD_DENIAL);
+      expectAntigravityAsk(f.run('PreToolUse', 'edit', { cwd: f.cwd, toolCall }));
     }
   }));
 
@@ -362,7 +367,7 @@ process.exit(runHookCli(process.argv.slice(2)));
     expectAntigravityDeny(result, GUARD_DENIAL);
     // The ambient worktree override would otherwise admit this existing outside file.
     const edit = f.run('PreToolUse', 'edit', { cwd: f.cwd, toolCall: { name: 'write_file', args: { Path: '/etc/hosts' } } }, extraEnv);
-    expectAntigravityDeny(edit, GUARD_DENIAL);
+    expectAntigravityAsk(edit);
     // An allowlisted seat variable would survive bootstrap if Bun loaded .env.
     const auditEntry = join(f.config, 'audit-entry.ts');
     writeFileSync(auditEntry, `
@@ -379,13 +384,16 @@ process.exit(runHookCli(process.argv.slice(2)));
     for (const marker of [startup, ambient]) expect(output).not.toContain(marker);
   }));
 
-  test('ordinary Bash denial keeps opaque command words out of the response, stderr, and failure log', () => withAntigravityFixture(f => {
+  test('Bash ask and deny keep opaque command words out of the response, stderr, and failure log', () => withAntigravityFixture(f => {
     const marker = 'OPAQUE-SECRET-MARKER-3251';
-    const toolCall = { name: 'run_command', args: { CommandLine: `rm "$UNKNOWN/${marker}"` } };
-    const result = f.run('PreToolUse', 'bash', { cwd: f.cwd, toolCall });
-    expectAntigravityDeny(result, GUARD_DENIAL);
+    const invoke = (CommandLine: string) => f.run('PreToolUse', 'bash', { cwd: f.cwd, toolCall: { name: 'run_command', args: { CommandLine } } });
+    const command = `rm "$UNKNOWN/${marker}"`;
+    const asked = invoke(command);
+    expectAntigravityAsk(asked);
+    const denied = invoke(`${command}; cat .env`);
+    expectAntigravityDeny(denied, GUARD_DENIAL);
     const log = readFileSync(f.failures, 'utf8');
-    expect(JSON.parse(log)).toMatchObject({ guard: 'UserFileGuard', action: 'block', reason: GUARD_DENIAL });
-    expect(result.stdout + result.stderr + log).not.toContain(marker);
+    expect(JSON.parse(log)).toMatchObject({ guard: 'CredentialGuard', action: 'block', reason: GUARD_DENIAL });
+    expect(asked.stdout + denied.stdout + log).not.toContain(marker);
   }));
 });

@@ -40,7 +40,7 @@ export interface Denial {
   readonly guard: string;
   readonly reason: string;
   readonly fix: string;
-  /** The user can authorize the call locally (I2), so an interactive Claude session asks instead of denying. */
+  /** The user can authorize the call locally (I2) on a host that supports an approval prompt. */
   readonly askable?: true;
 }
 
@@ -81,21 +81,22 @@ export function runMutationGuard(opts: MutationGuardInput): MutationGuardResult 
 
 /** A caller that owns its own decision reports it through the same denial record and exit code. */
 export function runMutationDenial(opts: MutationGuardInput, found: Denial): MutationGuardResult {
-  // A reason or fix can quote a target path or a word of the command, which can hold a token; the prompt, stderr and failure record get the redacted text.
   const { host, runId } = opts.identity;
-  if (host === 'antigravity') {
-    return deny(opts.repoRoot, {
-      guard: found.guard,
-      reason: ANTIGRAVITY_GUARD_DENIAL,
-      fix: 'Ask the user to review the operation and run it locally.',
-    }, runId);
-  }
-  const denial: Denial = { ...found, reason: replaceSecrets(found.reason), fix: replaceSecrets(found.fix) };
+  const antigravity = host === 'antigravity';
   const mode = payloadString(opts.payload, 'permission_mode');
-  if (denial.askable && HOST_ADAPTERS[host].capabilities.ask && mode !== '' && !NO_PROMPT_MODES.has(mode)) {
-    return { exitCode: 0, stdout: '', stderr: '', permission: { decision: 'ask', reason: `[${denial.guard}] ${denial.reason}` } };
+  const ask = found.askable && HOST_ADAPTERS[host].capabilities.ask
+    && (antigravity ? found.guard === 'UserFileGuard' : mode !== '' && !NO_PROMPT_MODES.has(mode));
+  // Antigravity responses and logs use fixed text because a target can contain an unrecognized secret from the command.
+  if (ask) {
+    const reason = antigravity
+      ? 'I2: This tool call may overwrite or remove an existing file outside the allowed roots.'
+      : replaceSecrets(found.reason);
+    return { exitCode: 0, stdout: '', stderr: '', permission: { decision: 'ask', reason: `[${found.guard}] ${reason}` } };
   }
-  return deny(opts.repoRoot, denial, opts.identity.runId);
+  const denial: Denial = antigravity
+    ? { guard: found.guard, reason: ANTIGRAVITY_GUARD_DENIAL, fix: 'Ask the user to review the operation and run it locally.' }
+    : { ...found, reason: replaceSecrets(found.reason), fix: replaceSecrets(found.fix) };
+  return deny(opts.repoRoot, denial, runId);
 }
 
 function deny(repoRoot: string, denial: Denial, runId: string | null): MutationGuardResult {

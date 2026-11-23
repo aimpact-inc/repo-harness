@@ -105,19 +105,22 @@ const ANTIGRAVITY_HOOK_TIMEOUT_SECONDS = 30;
 interface AntigravityHooks {
   SessionStart: HookCommand[];
   PreToolUse: (HookEntry & { matcher: string })[];
+  PreInvocation: HookCommand[];
   Stop: HookCommand[];
 }
 
 /** Antigravity groups tool handlers by matcher and uses flat lists for lifecycle events. */
 export function buildAntigravityHooks(env: NodeJS.ProcessEnv): AntigravityHooks {
   const { bun, entry } = resolveHookRuntime(env);
-  const hooks: AntigravityHooks = { SessionStart: [], PreToolUse: [], Stop: [] };
+  const hooks: AntigravityHooks = { SessionStart: [], PreToolUse: [], PreInvocation: [], Stop: [] };
   for (const { event, routeId } of routesForHost('antigravity')) {
     const handler: HookCommand = {
       type: 'command', command: renderAntigravityHookCommand(bun, entry, event, routeId), timeout: ANTIGRAVITY_HOOK_TIMEOUT_SECONDS,
     };
     if (event === 'PreToolUse' && (routeId === 'bash' || routeId === 'edit')) {
       hooks.PreToolUse.push({ matcher: antigravityHookMatcher(routeId), hooks: [handler] });
+    } else if (event === 'UserPromptSubmit' && routeId === 'inbox') {
+      hooks.PreInvocation.push(handler);
     } else if (event === 'SessionStart' || event === 'Stop') {
       hooks[event].push(handler);
     } else {
