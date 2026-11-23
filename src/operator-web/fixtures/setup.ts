@@ -43,7 +43,7 @@ const SUMMARY: Readonly<Record<string, string>> = {
 };
 
 function skill(name: string, claude: SetupSkillHostRow | null, codex: SetupSkillHostRow | null): SetupSkill {
-  return { name, summary: SUMMARY[name] ?? null, catalog_hosts: ['claude', 'codex', 'pi'], hosts: { claude, codex, pi: null } };
+  return { name, summary: SUMMARY[name] ?? null, catalog_hosts: ['claude', 'codex', 'pi'], hosts: { claude, codex, pi: null, antigravity: null } };
 }
 
 /** Pi is not installed, so its root does not exist. */
@@ -51,6 +51,7 @@ const SKILL_ROOTS: SetupHostSkillRoot[] = [
   { host: 'claude', root: '~/.claude/skills', other_skills: ['frontend-design', 'pdf'] },
   { host: 'codex', root: '~/.codex/skills', other_skills: [] },
   { host: 'pi', root: '~/.pi/agent/skills', other_skills: null },
+  { host: 'antigravity', root: '~/.gemini/config/skills', other_skills: null },
 ];
 
 function readySkills(): SetupSkill[] {
@@ -99,13 +100,14 @@ export function readySetup(now: number): SetupSnapshotV2 {
       { host: 'codex', reported: true, adapter_check: 'ok', detected: true, cli_version: '0.162.0',
         adapter: { configured: true, managed_entries: 5, expected_entries: 5, projection: 'consistent', projection_error: null, mismatches: [] } },
       { host: 'pi', reported: true, adapter_check: null, detected: false, cli_version: null, adapter: null, package_check: 'na' },
+      { host: 'antigravity', reported: true, adapter_check: 'na', detected: false, cli_version: null, adapter: null },
     ],
     skills: readySkills(),
     skill_roots: SKILL_ROOTS,
     install_selection: 'all',
     hooks: HOOKS,
     hook_usage: null,
-    fleet: FLEET.map(role => ({ ...role, hosts: { claude: 'installed', codex: 'installed', pi: null } })),
+    fleet: FLEET.map(role => ({ ...role, hosts: { claude: 'installed', codex: 'installed', pi: null, antigravity: null } })),
   };
 }
 
@@ -156,6 +158,7 @@ export function degradedSetup(now: number): SetupSnapshotV2 {
           { kind: 'unexpected', event: 'PreToolUse', route_id: null, field: null },
         ] } },
       { host: 'pi', reported: true, adapter_check: null, detected: false, cli_version: null, adapter: null, package_check: 'na' },
+      { host: 'antigravity', reported: true, adapter_check: 'na', detected: false, cli_version: null, adapter: null },
     ],
     skills,
     skill_roots: SKILL_ROOTS,
@@ -164,7 +167,7 @@ export function degradedSetup(now: number): SetupSnapshotV2 {
     hook_usage: null,
     fleet: FLEET.map(role => ({
       ...role,
-      hosts: { claude: 'installed', codex: role.name === 'harness-evaluator' ? 'missing' : 'installed', pi: null },
+      hosts: { claude: 'installed', codex: role.name === 'harness-evaluator' ? 'missing' : 'installed', pi: null, antigravity: null },
     })),
   };
 }

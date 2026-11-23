@@ -85,6 +85,7 @@ function input(overrides: Partial<SetupProjectionInput> = {}): SetupProjectionIn
       { host: 'claude', root: '/Users/alice/.claude/skills', entries: ['zeta', 'think', '.system', `key-${FAKE_SECRETS[0]}`, 'alpha'] },
       { host: 'codex', root: '/Users/alice/.codex/skills', entries: null },
       { host: 'pi', root: '/opt/pi/agent/skills', entries: [] },
+      { host: 'antigravity', root: '/Users/alice/.gemini/config/skills', entries: null },
     ],
     install_selection: ['architecture', 'product'],
     routes: ROUTES,
@@ -117,6 +118,16 @@ describe('setup snapshot projection', () => {
     expect(snapshot.skills[0]?.hosts.pi).toEqual({ state: 'ok link', ok: true });
     expect(snapshot.fleet.every(role => role.hosts.pi === null)).toBe(true);
   });
+  test('projects Antigravity adapter and CLI facts into the host row', () => {
+    const snapshot = decodeSetupSnapshot(projectSetupSnapshot(input({
+      checks: [{ id: 'status.adapter.antigravity', title: 'Antigravity', status: 'ok', detail: '5/5' }],
+      adapters: [{ id: 'antigravity', installed: true, alreadyConfigured: true, managedEntryCount: 5, expectedEntryCount: 5 }],
+      cli_versions: { antigravity: '1.5.15' },
+    })));
+    expect(snapshot.hosts.find(row => row.host === 'antigravity')).toMatchObject({
+      reported: true, adapter_check: 'ok', detected: true, cli_version: '1.5.15', adapter: { configured: true },
+    });
+  });
   test('projects one setup check build into the public contract', () => {
     const snapshot = decodeSetupSnapshot(projectSetupSnapshot(input()));
     expect(snapshot.status).toBe('ready');
@@ -137,13 +148,14 @@ describe('setup snapshot projection', () => {
     });
     expect(snapshot.hosts[0]).toMatchObject({ host: 'claude', adapter_check: 'ok', cli_version: null });
     expect(snapshot.skills).toEqual([
-      { name: 'repo-harness', summary: 'Root router Skill.', catalog_hosts: ['claude', 'codex', 'pi'], hosts: { claude: { state: 'ok link', ok: true }, codex: { state: 'ok copy', ok: false }, pi: null } },
-      { name: 'think', summary: 'Plans authoring work; authoritative for authorization reviews.', catalog_hosts: ['claude', 'codex'], hosts: { claude: { state: 'stale copy', ok: false }, codex: { state: 'missing', ok: false }, pi: null } },
+      { name: 'repo-harness', summary: 'Root router Skill.', catalog_hosts: ['claude', 'codex', 'pi'], hosts: { claude: { state: 'ok link', ok: true }, codex: { state: 'ok copy', ok: false }, pi: null, antigravity: null } },
+      { name: 'think', summary: 'Plans authoring work; authoritative for authorization reviews.', catalog_hosts: ['claude', 'codex'], hosts: { claude: { state: 'stale copy', ok: false }, codex: { state: 'missing', ok: false }, pi: null, antigravity: null } },
     ]);
     expect(snapshot.skill_roots).toEqual([
       { host: 'claude', root: '~/.claude/skills', other_skills: ['[configured]', 'alpha', 'zeta'] },
       { host: 'codex', root: '~/.codex/skills', other_skills: null },
       { host: 'pi', root: '[private path]', other_skills: [] },
+      { host: 'antigravity', root: '~/.gemini/config/skills', other_skills: null },
     ]);
     expect(snapshot.install_selection).toEqual(['architecture', 'product']);
     expect(snapshot.hooks.flatMap(event => event.routes.map(route => `${event.event}.${route.route_id}`)))
@@ -151,8 +163,8 @@ describe('setup snapshot projection', () => {
     expect(snapshot.hooks.map(event => event.event)).not.toContain('SubagentStop');
     expect(snapshot.hooks.find(event => event.event === 'Stop')?.routes[0]?.hosts).toEqual([...SETUP_HOSTS]);
     expect(snapshot.fleet).toEqual([
-      { name: 'explorer', description: 'Read-only explorer.', model: 'sonnet', effort: 'medium', hosts: { claude: 'installed', codex: 'installed', pi: null } },
-      { name: 'gatekeeper', description: null, model: 'opus', effort: null, hosts: { claude: 'missing', codex: 'installed', pi: null } },
+      { name: 'explorer', description: 'Read-only explorer.', model: 'sonnet', effort: 'medium', hosts: { claude: 'installed', codex: 'installed', pi: null, antigravity: null } },
+      { name: 'gatekeeper', description: null, model: 'opus', effort: null, hosts: { claude: 'missing', codex: 'installed', pi: null, antigravity: null } },
     ]);
   });
 

@@ -11,6 +11,7 @@ import * as os from 'os';
 import { fileURLToPath } from 'url';
 import { execFileSync, execSync, spawnSync } from 'child_process';
 import {
+  checkAgyHost,
   checkRetiredPiExtension,
   checkSkillProjection,
   clearRegisteredChecks,
@@ -108,6 +109,25 @@ function seedAntigravitySkillInputs(home: string, bin: string): void {
     fs.writeFileSync(path.join(staged, 'SKILL.md'), `# ${skill} fixture\n`);
   }
 }
+
+test.skipIf(process.platform === 'win32')('doctor measures agy on PATH with a version-only probe', () => {
+  const { root, home, fakeBin } = setupFakeEnvironment('rh-agy-version');
+  try {
+    withEnv({ HOME: home, PATH: fakeBin }, () => {
+      expect(checkAgyHost().map(check => [check.id, check.status])).toEqual([['agy-path', 'na'], ['agy-cli-version', 'na']]);
+      const executable = path.join(fakeBin, 'agy');
+      writeExecutable(root, executable, '#!/bin/sh\n[ "$#:$1" = "1:--version" ] || exit 2\nprintf "1.5.15\\n"\n');
+      expect(checkAgyHost()).toMatchObject([
+        { id: 'agy-path', status: 'ok', detail: executable },
+        { id: 'agy-cli-version', status: 'ok', version: '1.5.15' },
+      ]);
+      writeExecutable(root, executable, '#!/bin/sh\nprintf "1.4.9\\n"\n');
+      expect(checkAgyHost()[1]).toMatchObject({ status: 'ok', version: '1.4.9' });
+      writeExecutable(root, executable, '#!/bin/sh\nprintf "unexpected version output\\n"\n');
+      expect(checkAgyHost()[1]).toMatchObject({ status: 'warn', detail: 'agy --version did not return a release version.' });
+    });
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
 
 test.skipIf(process.platform === 'win32')('doctor measures the installed Antigravity Bash command separately from native activation', () => {
   const { root, home, fakeBin } = setupFakeEnvironment('rh-antigravity-doctor');

@@ -17,9 +17,10 @@ import { HOOK_EVENT_TELEMETRY_PATH, HOOK_EVENT_TELEMETRY_PROTOCOL } from '../hoo
 import { ROUTES } from '../hook/route-registry';
 import { resolveRepoRoot } from '../hook/runtime';
 import { projectSetupSnapshot, type SetupRawCatalogPackage, type SetupRawFleetRole, type SetupRawSkillRoot } from '../../core/setup/projection';
-import type { SetupHookUsage, SetupSnapshotV2 } from '../../core/setup/types';
+import { SETUP_HOSTS, type SetupHookUsage, type SetupSnapshotV2 } from '../../core/setup/types';
 import { parseSkillSurfaceCatalog } from '../../core/skill-surface/catalog';
-import { hostSkillRoot, SKILL_HOSTS } from '../../effects/host-skill-roots';
+import { antigravitySkillRoot, hostSkillRoot } from '../../effects/host-skill-roots';
+import { AntigravityHooksPathError, checkAntigravityPath } from '../../effects/host-config/gate';
 import { readHookUsage } from '../../effects/setup/hook-usage';
 import { parseFrontmatter } from '../../effects/terminal/task-role-profiles';
 
@@ -53,15 +54,19 @@ function skillHome(env: NodeJS.ProcessEnv): string {
 }
 
 /** The directories and links in each host skill root. Read only: nothing in a root is changed. */
-export function readHostSkillRoots(env: NodeJS.ProcessEnv): SetupRawSkillRoot[] {
+export function readHostSkillRoots(env: NodeJS.ProcessEnv, antigravityOptedIn: boolean): SetupRawSkillRoot[] {
   const home = skillHome(env);
-  return SKILL_HOSTS.map((host) => {
-    const root = hostSkillRoot(home, host, env);
+  return SETUP_HOSTS.map((host) => {
+    const root = host === 'antigravity' ? antigravitySkillRoot(home) : hostSkillRoot(home, host, env);
     try {
+      if (host === 'antigravity') {
+        if (!antigravityOptedIn) return { host, root, entries: null };
+        checkAntigravityPath(root, 'directory');
+      }
       const entries = readdirSync(root, { withFileTypes: true });
       return { host, root, entries: entries.filter(entry => entry.isDirectory() || entry.isSymbolicLink()).map(entry => entry.name) };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { host, root, entries: null };
+      if (error instanceof AntigravityHooksPathError || (error as NodeJS.ErrnoException).code === 'ENOENT') return { host, root, entries: null };
       throw error;
     }
   });
@@ -76,6 +81,8 @@ export function projectSetupBuild(build: SetupCheckBuild, options: {
   const doctorCheck = (id: string) => build.doctor.checks.find(check => check.id === id);
   const codexVersion = doctorCheck('codex-cli-version')?.version;
   const piVersion = doctorCheck('pi-cli-version')?.version;
+  const agyVersion = doctorCheck('agy-cli-version')?.version;
+  const antigravityOptedIn = build.report.checks.some(check => check.id === 'status.adapter.antigravity' && (check.status === 'ok' || check.status === 'warn'));
   const tools = build.tooling?.tools as Record<string, { hosts?: unknown }> | undefined;
   return projectSetupSnapshot({
     collected_at: options.collected_at,
@@ -84,11 +91,15 @@ export function projectSetupBuild(build: SetupCheckBuild, options: {
     checks: build.report.checks,
     check_commands: new Map([...build.check_actions].map(([checkId, action]) => [checkId, action.command])),
     adapters: build.status.targets,
-    cli_versions: { ...(codexVersion === undefined ? {} : { codex: codexVersion }), ...(piVersion === undefined ? {} : { pi: piVersion }) },
+    cli_versions: {
+      ...(codexVersion === undefined ? {} : { codex: codexVersion }),
+      ...(piVersion === undefined ? {} : { pi: piVersion }),
+      ...(agyVersion === undefined ? {} : { antigravity: agyVersion }),
+    },
     skill_rows: doctorCheck('skill-projection')?.skills ?? null,
     skill_catalog: skillCatalog(options.env),
     home: skillHome(options.env),
-    skill_roots: readHostSkillRoots(options.env),
+    skill_roots: readHostSkillRoots(options.env, antigravityOptedIn),
     install_selection: build.status.installState.recorded === true ? build.status.installState.selection : null,
     routes: ROUTES,
     fleet_roles: readFleetRoles(options.fleet_dir),
