@@ -9,8 +9,11 @@ import { isRecord } from '../../core/evidence/is-record';
 import { antigravityGlobalRulesHostPath, antigravityHostPath, antigravityMcpConfigHostPath, antigravityMcpConfigPath, decode, openHostConfigGate, resolveUserConfigFile, type HostConfigFileChange } from '../../effects/host-config/gate';
 import { hostConfigPaths, observeFile, readProjectedLedger } from '../../effects/host-config/store';
 import { resolveRepoRoot } from '../hook/runtime';
-import { existsSync, mkdirSync, readFileSync } from "fs";
-import { dirname, join } from "path";
+import { isPathInside } from '../../effects/path-containment';
+import { requireHome } from '../../effects/repo-harness-home';
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "fs";
+import { tmpdir } from "os";
+import { delimiter, dirname, isAbsolute, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { runProcess as runBoundedProcess } from "../../effects/process-runner";
 import { ARCHITECTURE_CONTRACT_VERSION, type ArchitectureDoctorCheck, type CodegraphHostTarget, type CodegraphPort, type CodegraphSetupStep } from "../../core/architecture/contracts";
@@ -608,13 +611,74 @@ export function preflightAntigravityCodegraph(env: NodeJS.ProcessEnv, explicit =
   }
 }
 
+const HOMEBREW_PREFIXES = ['/opt/homebrew', '/usr/local', '/home/linuxbrew/.linuxbrew'];
+const HOMEBREW_INSTALL_DIRS = ['bin', 'Cellar', 'lib', 'opt'];
+
+/** Inspect checkout ownership without running a Git executable from PATH. */
+function codegraphCheckoutRoot(path: string, allowHomebrewInstall = false): string | null {
+  for (let parent = path; parent !== dirname(parent); parent = dirname(parent)) {
+    if (!existsSync(join(parent, '.git'))) continue;
+    // A Homebrew prefix can contain Homebrew's own checkout as well as installed tools.
+    if (allowHomebrewInstall && HOMEBREW_PREFIXES.includes(parent)
+      && HOMEBREW_INSTALL_DIRS.some(dir => isPathInside(join(parent, dir), path))) continue;
+    return parent;
+  }
+  return null;
+}
+
+function installedHostPath(path: string, workingTree: string | null): string | undefined {
+  if (!isAbsolute(path)) return;
+  const isUntrusted = (candidate: string) => (workingTree !== null && isPathInside(workingTree, candidate)) || codegraphCheckoutRoot(candidate, true) !== null;
+  const requested = resolve(path);
+  if (isUntrusted(requested)) return;
+  try {
+    const real = realpathSync(requested);
+    if (!isUntrusted(real)) return real;
+  } catch { return undefined; }
+}
+
+function installedCodegraphRenderer(cwd: string, env: NodeJS.ProcessEnv) {
+  const home = requireHome(env);
+  const working = realpathSync(cwd);
+  const workingTree = codegraphCheckoutRoot(working) ?? (working === realpathSync(home) || working === dirname(working) ? null : working);
+  const hostPath = (path: string) => installedHostPath(path, workingTree);
+  const installedPath = (env.PATH ?? '').split(delimiter).flatMap(directory => {
+    try {
+      const real = hostPath(directory);
+      if (!real || !statSync(real).isDirectory()) return [];
+      // CodeGraph's launcher uses env node and its renderer can look up codegraph again.
+      const redirectsToCheckout = ['node', 'codegraph'].some(name => {
+        const executable = join(real, name);
+        return existsSync(executable) && !hostPath(executable);
+      });
+      return redirectsToCheckout ? [] : [real];
+    } catch { return []; }
+  });
+  const override = env.REPO_HARNESS_CODEGRAPH_GLOBAL_BIN;
+  const candidates = override ? [override] : installedPath.map(directory => join(directory, 'codegraph'));
+  for (const candidate of env.REPO_HARNESS_CODEGRAPH_ALLOW_GLOBAL === '0' ? [] : candidates) {
+    try {
+      const command = hostPath(candidate);
+      if (!command || !statSync(command).isFile()) continue;
+      accessSync(command, constants.X_OK);
+      return { command, path: installedPath.join(delimiter) };
+    } catch { continue; }
+  }
+  throw new Error('CodeGraph CLI is missing or outside a trusted install path; install CodeGraph globally and retry.');
+}
+
 /** Both targeted entries use the installed CLI's read-only renderer in preview and apply. */
 export function prepareAntigravityCodegraph(cwd: string, env: NodeJS.ProcessEnv): HostConfigFileChange {
-  const { binPath } = checkCodegraph({ repoRoot: cwd, env, host: 'codex' }).resolution;
-  if (!binPath) throw new Error('CodeGraph CLI is missing; run rh arch codegraph ensure first.');
-  const printed = run(binPath, ['install', '--print-config', 'antigravity'], cwd, env);
-  if (!printed.ok) throw new Error('codegraph install --print-config antigravity failed');
-  return jsonMcpChange('antigravity', antigravityMcpConfigPath(env), printed.stdout);
+  const { command, path } = installedCodegraphRenderer(cwd, env);
+  // CodeGraph can initialize its cache even when it only prints config.
+  const scratch = mkdtempSync(join(tmpdir(), 'rh-codegraph-render-'));
+  try {
+    const printed = runBoundedProcess(command, ['install', '--print-config', 'antigravity'], {
+      cwd: scratch, env: { HOME: scratch, PATH: path, DO_NOT_TRACK: '1' }, inheritEnv: false,
+    });
+    if (!printed.ok) throw new Error('codegraph install --print-config antigravity failed');
+    return jsonMcpChange('antigravity', antigravityMcpConfigPath(env), printed.stdout);
+  } finally { rmSync(scratch, { recursive: true, force: true }); }
 }
 
 function checkAntigravityCodegraphMcp(id: string, describe: string, env: NodeJS.ProcessEnv): ArchitectureDoctorCheck {

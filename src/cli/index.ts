@@ -2,7 +2,7 @@
 import { buildStrategyCommand } from './commands/strategy';
 import { CLI_NAME } from '../core/skill-surface/cli-name';
 import { globalRuntimeScope, withRuntimeTransactionLock, type RuntimeTransactionContext } from '../effects/locking/runtime-transaction-lock';
-import { openHostConfigGate } from '../effects/host-config/gate';
+import { openHostConfigGate, type AntigravityMcpUndo } from '../effects/host-config/gate';
 import { hostConfigPaths } from '../effects/host-config/store';
 /**
  * repo-harness CLI entry.
@@ -150,14 +150,15 @@ function runTargetedCodegraph(
   runAdapters: (transaction: string) => InstallCommandResult,
 ): InstallCommandResult {
   const change = targetedCodegraphChange(command, env, false);
+  let mcpUndo: AntigravityMcpUndo | undefined;
   try {
     return withHostConfigTransaction(env, undefined, transaction => {
-      const config = openHostConfigGate({ env }).apply([change]);
+      const config = openHostConfigGate({ env }).apply([change], { onAntigravityMcpWrite: undo => { mcpUndo = undo; } });
       const status = config.skipped[0]?.code ?? (config.written.length ? 'changed' : 'unchanged');
       const adapters = runAdapters(transaction);
       if (adapters.exitCode !== 0) throw new TargetedAdapterFailure(adapters);
       return { exitCode: 0, lines: [...adapters.lines, `[antigravity] ${status}: configure CodeGraph MCP - ${change.path}`] };
-    }, undefined, { runtimeLock, snapshotPaths: [hostConfigPaths(env).ledger] });
+    }, undefined, { runtimeLock, snapshotPaths: [hostConfigPaths(env).ledger], antigravityMcpUndo: () => mcpUndo });
   } catch (error) {
     if (error instanceof TargetedAdapterFailure) return error.result;
     throw error;

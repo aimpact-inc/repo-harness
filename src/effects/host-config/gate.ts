@@ -97,6 +97,11 @@ export interface HostConfigApplyResult {
   readonly skipped: readonly SkippedOverride[];
 }
 
+interface HostConfigApplyOptions {
+  /** Keep the Antigravity MCP preimage until the enclosing runtime transaction commits. */
+  readonly onAntigravityMcpWrite?: (undo: AntigravityMcpUndo) => void;
+}
+
 export interface AntigravityMcpPreview {
   readonly path: HostPath;
   readonly selector: string;
@@ -238,14 +243,14 @@ export interface HostConfigAdoption {
   readonly externalChange: boolean;
 }
 
-export interface AntigravityMcpRevertUndo {
+export interface AntigravityMcpUndo {
   readonly path: HostPath;
   restore(): boolean;
 }
 
 export interface HostConfigRevertOptions {
   /** Capture a successful Antigravity MCP removal for the active runtime transaction. */
-  readonly onAntigravityMcpRemoval?: (undo: AntigravityMcpRevertUndo) => void;
+  readonly onAntigravityMcpRemoval?: (undo: AntigravityMcpUndo) => void;
   /** Report what the revert would do and write nothing. */
   readonly dryRun?: boolean;
   /** Take out only the fragments of this owner; the file records stay. */
@@ -284,7 +289,7 @@ export interface HostConfigPathPlan {
 }
 
 export interface HostConfigGate {
-  apply(changes: readonly HostConfigFileChange[]): HostConfigApplyResult;
+  apply(changes: readonly HostConfigFileChange[], options?: HostConfigApplyOptions): HostConfigApplyResult;
   /**
    * Read-only preflight and action planner for whole-path writes, using the
    * same admission, overlap, link-boundary, and ownership checks as
@@ -653,7 +658,8 @@ function previewAntigravityMcp(path: HostPath, change: HostConfigFileChange, led
 }
 
 /** Each record reaches the ledger before its write, so every write has its record. */
-function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileChange[], admit: FileAdmission = admitPaths, antigravity?: AntigravityGuardedPaths): HostConfigApplyResult {
+function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileChange[], admit: FileAdmission = admitPaths, antigravity?: AntigravityGuardedPaths,
+  options?: HostConfigApplyOptions): HostConfigApplyResult {
   const targets = admit(paths, changes.map((change) => change.path));
   const ledger = readLedger(paths);
   const files = { ...ledger.files };
@@ -696,7 +702,9 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
     if (unchanged) continue;
     try {
       createDirectories(createdDirs);
-      replaceTarget(path, result, preimage);
+      if (isMcp && options?.onAntigravityMcpWrite) {
+        options.onAntigravityMcpWrite(replaceAntigravityMcp(path, bytes, preimage, result));
+      } else replaceTarget(path, result, preimage);
     } catch (error) {
       removeCreatedDirectories(createdDirs);
       ({ fragments, directories } = before);
@@ -1803,24 +1811,33 @@ function matchesFilter(record: FragmentRecord, filter: RevertFilter): boolean {
   return (filter.owner === undefined || record.owner === filter.owner) && (filter.selectors === undefined || filter.selectors.includes(record.selector));
 }
 
-/** Keep the scoped revert's preimage in memory for this runtime transaction. */
-function replaceRevertedAntigravityMcp(path: HostPath, bytes: Buffer, current: ExpectedFile, result: Buffer,
-  onRemoval: (undo: AntigravityMcpRevertUndo) => void): void {
-  const originalIdentity = observeEntryIdentity(path);
+/** Capture the exact preimage and the identity of the entry that this write publishes. */
+function replaceAntigravityMcp(path: HostPath, bytes: Buffer | null, current: ExpectedFile, result: Buffer): AntigravityMcpUndo {
   const forward: ExpectedFile = { existed: true, sha256: sha256Prefixed(result) };
   let forwardIdentity: string | null = null;
-  onRemoval({ path, restore: () => {
+  replaceTarget(path, result, current, undefined, staged => {
+    forwardIdentity = observeEntryIdentity(staged);
+  });
+  return { path, restore: () => {
     checkAntigravityPath(path);
-    const identity = observeEntryIdentity(path);
-    const observed = observeFile(path).bytes;
-    // If publishing the revert failed, the original entry can still prove its claim.
-    if (forwardIdentity === null) return originalIdentity !== null && identity === originalIdentity && observed?.equals(bytes) === true;
-    if (identity !== forwardIdentity || !observed?.equals(result)) return false;
-    replaceTarget(path, bytes, forward);
+    if (forwardIdentity === null || observeEntryIdentity(path) !== forwardIdentity || !observeFile(path).bytes?.equals(result)) return false;
+    if (bytes === null) removeTarget(path, forward);
+    else replaceTarget(path, bytes, forward);
     return true;
+  } };
+}
+
+/** Preserve the original claim if the scoped revert retires it but cannot publish. */
+function replaceRevertedAntigravityMcp(path: HostPath, bytes: Buffer, current: ExpectedFile, result: Buffer,
+  onRemoval: (undo: AntigravityMcpUndo) => void): void {
+  const originalIdentity = observeEntryIdentity(path);
+  let undo: AntigravityMcpUndo | undefined;
+  onRemoval({ path, restore: () => {
+    if (undo) return undo.restore();
+    checkAntigravityPath(path);
+    return originalIdentity !== null && observeEntryIdentity(path) === originalIdentity && observeFile(path).bytes?.equals(bytes) === true;
   } });
-  replaceTarget(path, result, current);
-  forwardIdentity = observeEntryIdentity(path);
+  undo = replaceAntigravityMcp(path, bytes, current, result);
 }
 
 /**
@@ -1977,13 +1994,14 @@ export interface HostConfigRollbackResult {
   readonly unresolved: readonly string[];
 }
 
-function restoreAntigravityMcpRevert(undo: AntigravityMcpRevertUndo, before: HostConfigLedger, unresolved: string[]): HostPath | undefined {
+function restoreAntigravityMcp(undo: AntigravityMcpUndo, unresolved: string[]): boolean {
   try {
-    if (before.files[undo.path] && undo.restore()) return undo.path;
+    if (undo.restore()) return true;
   } catch (error) {
     if (!(error instanceof HostConfigError || error instanceof AntigravityHooksPathError)) throw error;
   }
   unresolved.push(`${undo.path}: ${CODEGRAPH_MCP_SELECTOR}`);
+  return false;
 }
 
 const fragmentKey = (record: FragmentRecord): string => `${record.owner}\0${record.selector}`;
@@ -2007,23 +2025,23 @@ const fragmentKey = (record: FragmentRecord): string => `${record.owner}\0${reco
  * fragment change) gets its record before the transaction only when the
  * caller already put the file back to that backup; otherwise the record
  * stays. A dropped file record stays dropped with its fragments and the
- * retirement of its vault copies (P4, #3227). A plugin switch can restore its
- * Antigravity MCP edit with proof from the active transaction. Every other
- * entry stays and is returned.
+ * retirement of its vault copies (P4, #3227). An Antigravity MCP write or
+ * revert uses the active transaction's exact preimage and entry proof.
  */
 export function rollbackHostConfigTransaction(paths: HostConfigPaths, snapshot: Buffer | null, transaction: string, options: Pick<HostConfigPathOptions, 'stage'> & {
-  readonly antigravityMcpRevert?: AntigravityMcpRevertUndo;
+  readonly antigravityMcpUndo?: AntigravityMcpUndo;
 } = {}): HostConfigRollbackResult {
   const before = snapshot === null ? EMPTY_LEDGER : parseSnapshotLedger(snapshot, `${paths.ledger} (transaction snapshot)`);
   const now = readLedger(paths);
   const unresolved: string[] = [];
-  const undo = options.antigravityMcpRevert;
-  const restoredRevert = undo && restoreAntigravityMcpRevert(undo, before, unresolved);
-  const releasedFiles = new Set(Object.keys(before.files).filter(path => !now.files[path] && path !== restoredRevert));
+  const undo = options.antigravityMcpUndo;
+  const restoredMcp = undo && restoreAntigravityMcp(undo, unresolved) ? undo.path : undefined;
+  const releasedFiles = new Set(Object.keys(before.files).filter(path => !now.files[path] && path !== restoredMcp));
   const files = Object.fromEntries(Object.entries(before.files).filter(([path]) => !releasedFiles.has(path)));
   const releasedMaterial = new Set([...releasedFiles].flatMap((path) => materialOf(before.files[path]!)));
   for (const path of Object.keys(now.files) as HostPath[]) {
-    if (path === restoredRevert) continue;
+    // A refused MCP undo also bypasses fragment reconstruction. Its new claim leaves with the failed write.
+    if (path === undo?.path) continue;
     const record = now.files[path]!;
     const previous = before.files[path];
     const all = now.fragments.filter((entry) => entry.file === path);
@@ -2267,7 +2285,7 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
     };
   }
   return {
-    apply: (changes) => applyChanges(paths, changes, admitUserFiles, antigravity),
+    apply: (changes, applyOptions) => applyChanges(paths, changes, admitUserFiles, antigravity, applyOptions),
     planPaths,
     writePaths: (writes, pathOptions) => writeWholePaths((ledger, path) => admitUserWrite(env, paths, ledger, path), paths, writes, pathOptions ?? {}, antigravity),
     delegate: (declared, run, pathOptions) => delegateWrites(env, paths, declared, run, pathOptions ?? {}),

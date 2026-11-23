@@ -21,7 +21,7 @@ import { publishCandidateReconciliationCapability } from './commands/candidate-r
 import { sha256Prefixed } from '../core/evidence/sha256';
 import { windowsProtectedHelperConfigPath } from '../effects/runtime/protected-helper-platform';
 import { providerSkillLock } from '../effects/host-skill-roots';
-import type { AntigravityMcpRevertUndo } from '../effects/host-config/gate';
+import type { AntigravityMcpUndo } from '../effects/host-config/gate';
 import { applyInstallSelection, assertArchitecturePolicySelection, beginInstallHostTransaction, commitInstallHostTransaction, planSkillSync, installProfileTransactionPaths, keptPluginLine, commandPluginRepairLines, notAddedPluginLine, planInstallSelection, prepareInstallSelectionSwitch, readInstallState, requireInstallState, resolveRecordedSelection, rollbackInstallHostTransaction, skippedPluginLine, type InstallState, type SelectionResolution } from './installer/install-profile';
 import { enabledPlugins } from './installer/install-state';
 import { type ExclusiveDirectoryLockHandle } from '../effects/locking/exclusive-directory-lock';
@@ -136,7 +136,7 @@ export function runTransactionalSelectionProjection(
     migrateInstallState(transactionEnv);
     if (options.hostAdapters !== false) migrateRuntimeHostConfig(transactionEnv);
     const transaction = beginInstallHostTransaction(runtimeHostMutationPaths(transactionEnv), transactionEnv, { runtimeLock: lock });
-    let antigravityMcpRevert: AntigravityMcpRevertUndo | undefined;
+    let antigravityMcpRevert: AntigravityMcpUndo | undefined;
     const rollback = (cause: unknown) => rollbackRuntimeTransaction(transaction, cause, antigravityMcpRevert);
     let result: GlobalRuntimeResult;
     try {
@@ -177,9 +177,9 @@ function restoreTransactionBytes(transaction: ReturnType<typeof beginInstallHost
 
 /** The ledger rollback also takes out a Pi package entry that the transaction recorded. */
 function rollbackRuntimeTransaction(transaction: ReturnType<typeof beginInstallHostTransaction>, cause: unknown,
-  antigravityMcpRevert?: AntigravityMcpRevertUndo): void {
+  antigravityMcpRevert?: AntigravityMcpUndo): void {
   const failures: unknown[] = [];
-  try { rollbackInstallHostTransaction(transaction, { antigravityMcpRevert }); } catch (error) { failures.push(error); }
+  try { rollbackInstallHostTransaction(transaction, { antigravityMcpUndo: antigravityMcpRevert }); } catch (error) { failures.push(error); }
   if (failures.length) {
     const errors = [cause, ...failures];
     throw new AggregateError(errors, `runtime transaction failed and compensation was incomplete: ${errors.map(error => error instanceof Error ? error.message : String(error)).join('; ')}`);

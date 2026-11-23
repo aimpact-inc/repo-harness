@@ -5,7 +5,7 @@ import { bunGlobalPackageRoot, expectedSkillProjections } from './skill-projecti
 import { configurationReceiptPath } from './configuration-ownership';
 import { expectedOf, hostConfigPaths, hostConfigPathsAt, observeFile, putVault, readLedger, removeTarget, replaceTarget, repositoryLedgers, resolveHostPath } from '../../effects/host-config/store';
 import { ensureSelfIgnoringDirectory, isSelfIgnoreGuard, SELF_IGNORE_NAME } from '../../effects/self-ignoring-directory';
-import { antigravityMcpConfigHostPath, AntigravityHooksPathError, antigravitySkillsDirHostPath, openHostConfigGate, planPathRevert, recoverRetiredPathWrites, rollbackHostConfigTransaction, type AntigravityMcpRevertUndo } from '../../effects/host-config/gate';
+import { antigravityMcpConfigHostPath, AntigravityHooksPathError, antigravitySkillsDirHostPath, openHostConfigGate, planPathRevert, recoverRetiredPathWrites, rollbackHostConfigTransaction, type AntigravityMcpUndo } from '../../effects/host-config/gate';
 import { namingTomlFile } from '../../core/host-config/toml-fragment';
 import { migrateCodexConfigRecords } from './codex-config-migration';
 import { migrateJsonConfigRecords } from './json-config-migration';
@@ -570,7 +570,7 @@ export function hostPathReplacementRefused(error: unknown): error is HostConfigE
 /** Standalone writers use the same runtime lock and transaction as install. */
 export function withHostConfigTransaction<T>(env: NodeJS.ProcessEnv, transaction: string | undefined,
   run: (root: string, runtimeLock?: RuntimeTransactionContext) => T, beforeSnapshot?: () => void,
-  held?: { readonly runtimeLock: RuntimeTransactionContext; readonly snapshotPaths: readonly string[] }): T {
+  held?: { readonly runtimeLock: RuntimeTransactionContext; readonly snapshotPaths: readonly string[]; readonly antigravityMcpUndo?: () => AntigravityMcpUndo | undefined }): T {
   requireHome(env);
   if (transaction !== undefined) return run(transaction);
   return withRuntimeTransactionContext(globalRuntimeScope(env), held?.runtimeLock, runtimeLock => {
@@ -582,7 +582,7 @@ export function withHostConfigTransaction<T>(env: NodeJS.ProcessEnv, transaction
       commitInstallHostTransaction(current);
       return result;
     } catch (error) {
-      try { rollbackInstallHostTransaction(current); }
+      try { rollbackInstallHostTransaction(current, { antigravityMcpUndo: held?.antigravityMcpUndo?.() }); }
       catch (restore) { throw new AggregateError([error, restore], 'host writer rollback failed'); }
       throw error;
     }
@@ -806,7 +806,7 @@ export function refreshInstallStateVersions(env: NodeJS.ProcessEnv): void {
 
 export function rollbackInstallHostTransaction(
   transaction: InstallHostTransaction,
-  options: { readonly runtimeLock?: RuntimeTransactionContext; readonly antigravityMcpRevert?: AntigravityMcpRevertUndo } = {},
+  options: { readonly runtimeLock?: RuntimeTransactionContext; readonly antigravityMcpUndo?: AntigravityMcpUndo } = {},
 ): void {
   assertTransactionLock(transaction, options.runtimeLock);
   try {
@@ -816,7 +816,7 @@ export function rollbackInstallHostTransaction(
       try {
         const result = rollbackHostConfigTransaction(hostConfigPathsAt(dirname(dirname(ledger.path))),
           ledger.existed && ledger.backup_path !== null ? readFileSync(ledger.backup_path) : null, transaction.backup_root,
-          { antigravityMcpRevert: options.antigravityMcpRevert });
+          { antigravityMcpUndo: options.antigravityMcpUndo });
         failures.push(...result.unresolved.map(entry => entry + ': rh cannot prove this host configuration entry; run rh update'));
       } catch (error) { failures.push('host configuration rollback: ' + String((error as Error).message ?? error) + '; run rh update'); }
     }
@@ -1030,7 +1030,7 @@ function removeRetiredOwnedSurfaces(
  * switch names the file, and it goes on with the other files. Each file is
  * its own revert, so a failure in one leaves the records of the others right.
  */
-function removeArchitectureHostFragments(env: NodeJS.ProcessEnv, onAntigravityMcpRemoval?: (undo: AntigravityMcpRevertUndo) => void): void {
+function removeArchitectureHostFragments(env: NodeJS.ProcessEnv, onAntigravityMcpRemoval?: (undo: AntigravityMcpUndo) => void): void {
   const home = requireHome(env);
   const gate = openHostConfigGate({ env });
   const targets = [join(home, '.codex', 'config.toml'), join(home, '.claude.json'), join(home, '.claude', 'settings.json')];
@@ -1060,7 +1060,7 @@ export function prepareInstallSelectionSwitch(
   plugins: readonly PluginId[],
   env: NodeJS.ProcessEnv,
   transaction: string,
-  onAntigravityMcpRemoval?: (undo: AntigravityMcpRevertUndo) => void,
+  onAntigravityMcpRemoval?: (undo: AntigravityMcpUndo) => void,
 ): readonly string[] {
   // The old records of the host files move to the ledger first, so the architecture revert below finds them.
   migrateCodexConfigRecords(env);
