@@ -458,8 +458,8 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
         "rh arch projection status", "rh arch projection slice", "rh arch prepare", "rh arch checkpoint", "rh arch complete",
         "rh arch verify", "rh arch debt", "rh arch refactor verify", "rh arch refactor resolve", "rh capability resolve",
         "rh state", "rh doctor", "rh quota", "rh seats pool", "rh run", "bash scripts/check-ci.sh",
-        "git worktree add", "git worktree prune", "git worktree list", "git merge-tree",
-        "git restore --staged -- ./", "git rm -- ./", "git mv -- ./", "git stash push", "git stash list", "git stash show",
+        "git worktree list", "git merge-tree",
+        "git restore --staged -- ./", "git mv -- ./", "git stash push", "git stash list", "git stash show",
       ].map(command => `command(${command})`),
     ]));
     expect(parsedSettings.permissions.deny).not.toContain("command(git push)");
@@ -608,6 +608,13 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
   ])("an agy worker needs approval for %s", command => {
     const { allow } = agySeatCommandRules("worker", AGY_WORKER);
     expect(allow.find(prefix => command.startsWith(prefix))).toBeUndefined();
+  });
+
+  test("an agy worker needs approval for submodule removal and worktree creation or pruning", () => {
+    const { allow } = agySeatCommandRules("worker", AGY_WORKER);
+    for (const command of ["git rm -- ./submodule", "git worktree add -B existing ../checkout", "git worktree prune"]) {
+      expect(allow.find(prefix => command.startsWith(prefix))).toBeUndefined();
+    }
   });
 
   test("agySeatCommandRules refuses bare command names and mutation-capable prefixes across all allowed seats", () => {
