@@ -421,6 +421,7 @@ if (import.meta.main) {
 }
 
 const AGY_AGENT_DESCRIPTIONS: Readonly<Record<string, string>> = {
+  'rh-orchestrator': 'Repo-harness orchestrator',
   'rh-advisor': 'Repo-harness advisor',
   'rh-council': 'Repo-harness council',
   'rh-gatekeeper-fallback': 'Repo-harness gatekeeper fallback',

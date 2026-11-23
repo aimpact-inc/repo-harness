@@ -108,7 +108,9 @@ const roleList = (fleet: readonly string[], name: RoleName) => fleet.map(role =>
 function roleParagraphs(seat: LaunchSeatId, config: SeatConfigV1, fleet: readonly string[], name: RoleName): string[] {
   if (seat === 'orchestrator') {
     const queue = config.tools.includes('tasks')
-      ? ['Keep worker notices in a triage queue with TaskCreate, TaskUpdate, TaskList and TaskGet, as `references/orchestrator.md` §8.1 of repo-harness-issue-flow says: answer the owner first, then take one queue item at a time by priority.']
+      ? [config.runtime === 'agy'
+        ? 'Keep worker notices in a triage queue in your own scratch files under /tmp. Answer the owner first, then take one queue item at a time by priority.'
+        : 'Keep worker notices in a triage queue with TaskCreate, TaskUpdate, TaskList and TaskGet, as `references/orchestrator.md` §8.1 of repo-harness-issue-flow says: answer the owner first, then take one queue item at a time by priority.']
       : [];
     const dispatch = fleet.length === 0
       ? 'You do not dispatch sub-agents (the Agent tool) for execution. Dispatch work only to seats through Herdr.'
@@ -168,7 +170,7 @@ const KEEP_YOURSELF = {
 function brief(seat: LaunchSeatId, config: SeatConfigV1, fleet: readonly string[], limits: readonly SeatLimitV1[], name: RoleName = role => role): string {
   const kept = (Object.keys(KEEP_YOURSELF) as (keyof typeof KEEP_YOURSELF)[]).flatMap((level) => {
     const groups = limits.flatMap(limit => (limit.level === level && limit.subject !== 'fleet' && limit.subject !== 'hook'
-      && !(isCouncilSeat(seat) && limit.subject === 'edit') ? [GROUP_TEXT[limit.subject]] : []));
+      && !((isCouncilSeat(seat) || (seat === 'orchestrator' && config.runtime === 'agy')) && limit.subject === 'edit') ? [GROUP_TEXT[limit.subject]] : []));
     return groups.length === 0 ? [] : [`${KEEP_YOURSELF[level]} ${groups.join(' ')}`];
   });
   return [...roleParagraphs(seat, config, fleet, name), ...kept].join('\n\n');
@@ -295,6 +297,25 @@ function piLaunch(seat: LaunchSeatId, config: SeatConfigV1, roleDirectory: strin
 
 type RuntimeLaunch = Pick<SeatLaunchV1, 'argv' | 'brief' | 'limits'>;
 
+const AGY_ORCHESTRATOR_COMMAND_PREFIXES: readonly string[] = [
+  'rh board attention', 'rh board parents', 'rh board cluster', 'rh board triage-apply',
+  'rh board dispatch', 'rh board review', 'rh board merge', 'rh board seats', 'rh board retro',
+  'rh board closeout', 'rh board post', 'rh board migrate-dependencies',
+  'rh seats argv', 'rh seats launch', 'rh seats council', 'rh seats pool', 'rh seats reset', 'rh seats handoff',
+  'rh publication readiness', 'rh publication merge', 'rh review collect', 'rh review publish',
+  'rh worktrees start', 'rh worktrees list', 'rh worktrees clean',
+  'rh arch projection status', 'rh arch projection slice', 'rh arch projection publish', 'rh quota', 'rh doctor',
+  'hc ls', 'hc get', 'hc read', 'hc wait', 'hc send', 'hc label', 'hc file read', 'herdr-app do',
+  'gh issue view', 'gh issue list', 'gh issue create', 'gh issue comment', 'gh issue edit', 'gh issue close', 'gh issue reopen',
+  'gh pr view', 'gh pr list', 'gh pr checks', 'gh pr diff', 'gh pr create', 'gh pr comment', 'gh pr edit', 'gh pr ready',
+  'gh run view', 'gh run list', 'gh run watch', 'gh run rerun',
+  'git fetch', 'git status', 'git worktree list',
+];
+
+const AGY_ORCHESTRATOR_DENIED_COMMANDS: readonly string[] = [
+  'git reset --hard', 'git clean', 'gh release create', 'npm publish', 'bun publish',
+];
+
 const AGY_DENIED_RH_COMMANDS: readonly string[] = [
   'rh board attention start',
   'rh board merge', 'rh board dispatch', 'rh board review', 'rh board post',
@@ -353,6 +374,7 @@ const AGY_READONLY_AGENT_TOOLS = Object.freeze(['view_file', 'run_command', 'sea
 const AGY_WORKER_AGENT_TOOLS = Object.freeze(['view_file', 'write_file', 'edit_file', 'run_command', 'search_web'] as const);
 
 export function agySeatAgentName(seat: LaunchSeatId): string {
+  if (seat === 'orchestrator') return 'rh-orchestrator';
   if (seat === 'advisor') return 'rh-advisor';
   if (seat === 'council') return 'rh-council';
   if (seat === 'gatekeeper') return 'rh-gatekeeper-fallback';
@@ -366,11 +388,12 @@ export function agySeatAgentTools(seat: LaunchSeatId, config: SeatConfigV1): rea
     ...(config.tools.includes('edit') ? AGY_WORKER_AGENT_TOOLS : AGY_READONLY_AGENT_TOOLS),
     ...(config.tools.includes('schedule') ? ['schedule'] : []),
   ];
-  if (seat === 'council' || seat === 'gatekeeper') return AGY_READONLY_AGENT_TOOLS;
+  if (seat === 'orchestrator' || seat === 'council' || seat === 'gatekeeper') return AGY_READONLY_AGENT_TOOLS;
   throw new Error(`agy is not supported on seat ${seat}.`);
 }
 
 export function agySeatCommandRules(seat: LaunchSeatId, config: SeatConfigV1): { readonly allow: readonly string[]; readonly deny: readonly string[] } {
+  if (seat === 'orchestrator') return { allow: AGY_ORCHESTRATOR_COMMAND_PREFIXES, deny: AGY_ORCHESTRATOR_DENIED_COMMANDS };
   if (isWorkerSeat(seat)) {
     const hasGh = config.tools.includes('gh');
     return {
@@ -408,6 +431,9 @@ export function agySeatBrief(seat: LaunchSeatId, config: SeatConfigV1): string {
   return [
     brief(seat, config, [], limits),
     'Never read auth or credential files.',
+    ...(seat === 'orchestrator' ? [
+      'Write only your own scratch files under /tmp and outside every repository and worktree. Never edit repository files.',
+    ] : []),
     ...(seat === 'advisor' ? [
       'Edit only your own files under /tmp/rh-triage/ and your scratch proposal or retro files outside every repository. Never edit repository source.',
       'Record a refactor decision only after the owner gives it.',

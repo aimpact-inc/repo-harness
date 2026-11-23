@@ -164,7 +164,7 @@ describe('agents page seats section', () => {
   const pane = (seat: string) => document.querySelector<HTMLButtonElement>(`[data-pane="${seat}"]`)!;
   const levels = () => [...document.querySelectorAll('[data-seat-card] [data-limit]')].map(node => node.getAttribute('data-limit'));
 
-  test('all agy-allowed seats offer agy with seat-specific starters, dynamic limits, and worker gh toggle; orchestrator/gatekeeper/reviewer hide agy', async () => {
+  test('eligible seats offer agy and save their starter tools, while the primary review seats hide it', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     const read = await settingsStores(NOW, 'busy').seats.read();
     if (read.state !== 'ok') throw new Error('fixture read failed');
@@ -172,7 +172,7 @@ describe('agents page seats section', () => {
     const ranges = { ...initial.ranges, runtimes: initial.ranges.runtimes.map(runtime => runtime.id === 'agy' ? { ...runtime, enabled: true } : runtime) };
     await mount({ ...seatsProps(posts), readSeatsSettings: async () => ({ state: 'ok', settings: { ...initial, ranges } }) });
     await click(buttonWithText('Antigravity (agy)'));
-    expect(buttonWithText('Host default')).toBeUndefined();
+    expect(Boolean(buttonWithText('Host default'))).toBe(false);
     expect(buttonWithText('gemini-4-neon-high').getAttribute('aria-pressed')).toBe('true');
     expect(allow('Shell').getAttribute('aria-checked')).toBe('true');
     expect(allow('Shell').disabled).toBe(true);
@@ -226,10 +226,21 @@ describe('agents page seats section', () => {
     await click(document.querySelector<HTMLButtonElement>('[data-seat-card="worker-neon-deep"] [aria-label="Configured"]')!);
     expect(buttonWithText('gemini-4-neon-xhigh').getAttribute('aria-pressed')).toBe('true');
 
-    // Disallowed seats hide agy.
-    for (const disallowed of ['Orchestrator', 'Gatekeeper', 'Reviewer']) {
-      await click(buttonWithText(disallowed));
-      expect(buttonWithText('Antigravity (agy)')).toBeUndefined();
+    await click(pane('orchestrator'));
+    await click(buttonWithText('Antigravity (agy)'));
+    expect(buttonWithText('gemini-4-neon-high').getAttribute('aria-pressed')).toBe('true');
+    expect(allow('Edit files').getAttribute('aria-checked')).toBe('false');
+    expect(allow('Edit files').disabled).toBe(true);
+    await click(seatsSave());
+    expect(posts[3]?.seats.orchestrator).toEqual({
+      runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [],
+      tools: ['gh', 'mcp', 'net', 'read', 'shell', 'tasks'],
+    });
+
+    for (const [id, label] of [['gatekeeper', 'Gatekeeper'], ['reviewer', 'Reviewer']] as const) {
+      await click(buttonWithText(label));
+      expect(document.querySelector('[data-seat-card]')?.getAttribute('data-seat-card')).toBe(id);
+      expect(Boolean(buttonWithText('Antigravity (agy)')), label).toBe(false);
     }
   });
 
