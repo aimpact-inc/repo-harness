@@ -437,7 +437,7 @@ export function agySeatBrief(seat: LaunchSeatId, config: SeatConfigV1): string {
     ...(seat === 'advisor' ? [
       'Edit only your own files under /tmp/rh-triage/ and your scratch proposal or retro files outside every repository. Never edit repository source.',
       'Record a refactor decision only after the owner gives it.',
-      'When Stop requests a handoff, send it to the orchestrator. After this pane ends, the orchestrator starts a new advisor pane with rh seats launch advisor and gives it the handoff.',
+      'Follow the handoff steps printed by the Stop hook or rh seats handoff to request an in-pane relaunch from the orchestrator.',
     ] : []),
   ].join('\n\n');
 }

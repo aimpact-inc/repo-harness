@@ -65,7 +65,7 @@ export function readTranscriptUsage(path: string): TranscriptUsage {
 }
 
 const RESET_HOSTS: ReadonlySet<unknown> = new Set<InteractiveResetHost>(['claude', 'pi', 'antigravity']);
-const isResetHost = (host: unknown): host is InteractiveResetHost => RESET_HOSTS.has(host);
+export const isResetHost = (host: unknown): host is InteractiveResetHost => RESET_HOSTS.has(host);
 
 export interface SeatResetRequestRecord {
   readonly host?: InteractiveResetHost;
@@ -187,15 +187,16 @@ export type NewSession = { readonly transcript: string } & (
 );
 
 /**
- * The session segment that started at or after `since`: for `/compact` a `compact` record of the transcript of the
- * request, for `/clear` and a relaunch a record of another transcript.
+ * The segment must match the expected host. Compaction keeps the transcript. A reset needs a different transcript,
+ * and a process relaunch also needs a startup record.
  */
-export function newSession(identity: SeatResetIdentity, since: number, request: SeatRequest, action: SeatResetAction): NewSession | null {
+export function newSession(identity: SeatResetIdentity, since: number, previousTranscript: string | null, expectedHost: InteractiveResetHost, action: SeatResetAction | 'startup'): NewSession | null {
   const session = readSeatSession(identity);
-  if (session === null || session.host !== request.host || Date.parse(session.startedAt) < since) return null;
+  if (session === null || session.host !== expectedHost || Date.parse(session.startedAt) < since) return null;
+  if (action === 'startup' && session.source !== 'startup') return null;
   const segment = action === 'compact'
-    ? session.source === 'compact' && session.transcriptPath === request.transcriptPath
-    : session.transcriptPath !== request.transcriptPath;
+    ? session.source === 'compact' && session.transcriptPath === previousTranscript
+    : session.transcriptPath !== previousTranscript;
   if (!segment) return null;
   const { host, sessionId, transcriptPath: transcript } = session;
   if (host !== 'antigravity') return { host, sessionId, transcript };

@@ -312,6 +312,7 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     expect(profile).toContain("Edit only your own files under /tmp/rh-triage/");
     expect(profile).toContain("Never edit repository source.");
     expect(profile).toContain("Never read auth or credential files.");
+    expect(profile).toContain("Follow the handoff steps printed by the Stop hook or rh seats handoff");
     const unlabeled = f.run(["argv", "advisor", "--json"]);
     expect(unlabeled.status, unlabeled.stderr).toBe(0);
     expect(JSON.parse(unlabeled.stdout).argv).toEqual([...UNSET_SEAT, ...executable]);
@@ -409,7 +410,8 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
 console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: "${repository}" }, process.env, process.cwd())));`;
     const result = spawnSync(process.execPath, ["--eval", program], { cwd: f.cwd, env: f.env, encoding: "utf8" });
     expect(result.status, result.stderr).toBe(0);
-    const { argv, model } = JSON.parse(result.stdout);
+    const { argv, model, runtime } = JSON.parse(result.stdout);
+    expect(runtime).toBe("agy");
     expect(model).toBe("gemini-4-neon-high");
     expect(argv.slice(0, 2)).toEqual(["/bin/sh", "-c"]);
     expect(argv).toEqual(expect.arrayContaining([f.agy, "rh-advisor", `REPO_HARNESS_SEAT_REPOSITORY=${repository}`]));
@@ -1919,13 +1921,14 @@ fs.appendFileSync("${home}/calls.log", [cmd, ...rest].join(" ") + "\\n");
 const out = value => process.stdout.write(JSON.stringify(value));
 const session = (transcript, source = "clear") => fs.writeFileSync("${dir}/session.json", JSON.stringify({ session_id: "s", transcript_path: transcript, source, started_at: new Date().toISOString(), ...(st.host ? { host: st.host } : {}) }));
 if (cmd === "ls") out({ terminals: st.terminals });
-if (cmd === "get") out({ address: rest.at(-1), state: "live", labels: rest.at(-1) === "t2" ? st.callerLabels : { "repo-harness.seat": "${seat}", "repo-harness.repository": "${repository}" }, turn: 3, cwd: st.cwd, pid: st.pid ?? 1, status: st.status, foreground: { pid: st.foreground === "zsh" ? st.pid ?? 1 : 2, name: st.foreground, argv: [], cwd: "/" } });
+if (cmd === "get") out({ address: rest.at(-1), state: "live", labels: rest.at(-1) === "t2" ? st.callerLabels : { "repo-harness.seat": "${seat}", "repo-harness.repository": "${repository}" }, turn: st.turn ?? 3, cwd: st.cwd, pid: st.pid ?? 1, status: st.status, foreground: { pid: st.foreground === "zsh" ? st.pid ?? 1 : 2, name: st.foreground, argv: [], cwd: "/" } });
 // wait is one result, or a sequence: the last result answers every later call.
 // Wait number waitDelayAt (from 1) answers after waitDelayMs, as a message that arrives late does.
 if (cmd === "wait") {
   st.waits = (st.waits ?? 0) + 1;
   if (st.waitDelayAt === st.waits) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, st.waitDelayMs);
   out(Array.isArray(st.wait) ? (st.wait.length > 1 ? st.wait.shift() : st.wait[0]) : st.wait);
+  if (st.waits === 2 && st.afterRelaunchWait) Object.assign(st, st.afterRelaunchWait);
 }
 // As the real hc: keys arrive as typed input; send wraps its text in an envelope, so a sent slash command is chat text.
 if (cmd === "keys") {
@@ -1938,12 +1941,13 @@ if (cmd === "keys") {
     if (st.exit) st.foreground = st.exitForeground ?? "zsh";
   }
   if (line.startsWith("sh ")) {
+    st.host = st.launchHost ?? st.host;
     st.foreground = st.host === "antigravity" ? "agy" : st.host === "pi" ? "pi" : "claude";
     if (st.host === "antigravity") {
       const logs = "${home}/.gemini/antigravity-cli/brain/s/.system_generated/logs";
       fs.mkdirSync(logs, { recursive: true });
       session(logs + "/transcript.jsonl", "startup");
-    } else session("${home}/relaunched.jsonl");
+    } else session("${home}/relaunched.jsonl", "startup");
   }
   out({ status: null, turn: 4 });
 }
@@ -2021,10 +2025,11 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
             ...(input.action === null ? {} : { action: input.action ?? "reset" }), ...(input.host === undefined ? {} : { host: input.host }) }));
           const { HERDR_ENV: _nested, ...base } = process.env;
           input.before?.();
+          const runtime = current.host === "antigravity" ? "agy" : current.host === "pi" ? "pi" : "claude";
           try {
             return await runSeatReset(input.path ?? handoff, input.sha256 ?? sha(text), {
               env: { ...base, HOME: home, REPO_HARNESS_HOME: join(home, ".repo-harness"), HC_TERMINAL_ID: input.caller ?? "t2", PATH: `${join(home, "bin")}:/bin:/usr/bin` },
-              timeouts, notify: input.notify, relaunch: input.relaunch ?? (async () => ({ argv: ["/bin/sh", "-c", "exec claude", "x y"], model: "fable", effort: "high", modeKnown: true })),
+              timeouts, notify: input.notify, relaunch: input.relaunch ?? (async () => ({ argv: ["/bin/sh", "-c", `exec ${runtime}`, "x y"], runtime, model: "fable", effort: "high", modeKnown: true })),
             });
           } catch (error) {
             return { error: (error as SeatResetError).code, outcome: (error as SeatResetError).outcome };
@@ -2046,6 +2051,39 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
   }
   const prompt = (handoff: string, seat = "advisor") => `You are ${seat}. Read ${handoff}, then run the Bash command \`hc send t2 RESUMED\` alone, then check the current state with git/gh and continue.`;
   const agyStatus = { state: "done", app: "antigravity" };
+
+  test.each([["antigravity", "claude", "claude"], ["claude", "antigravity", "agy"]] as const)(
+    "a %s requester resumes from the new %s startup record", (oldHost, newHost, runtime) => withReset(async ({ home, handoff, reset, state, sends }) => {
+      const oldAgy = oldHost === "antigravity";
+      const identity = { seat: "advisor", repository: basename(dirname(dirname(handoff))) } as const;
+      recordSeatSession(identity, { sessionId: "old", host: oldHost, transcriptPath: join(home, "old.jsonl"), source: "startup", model: null, effort: null }, new Date(0));
+      state({ foreground: oldAgy ? "agy" : "claude", host: oldHost, launchHost: newHost, ...(oldAgy ? { status: agyStatus } : {}) });
+      const relaunch = async () => ({ argv: [runtime], runtime, model: null, effort: null, modeKnown: false });
+      expect(await reset({ host: oldAgy ? oldHost : undefined, relaunch })).toEqual({ requester: "t5", seat: "advisor", relaunched: true, logErrors: [] });
+      const script = join(dirname(handoff), "relaunch.sh");
+      expect(sends()).toEqual(["/exit", `sh ${script}`, prompt(handoff)]);
+      expect(readFileSync(script, "utf8")).toBe(`exec ${runtime}\n`);
+      expect(readSeatSession(identity)).toMatchObject({ host: newHost, source: "startup" });
+    })());
+
+  test("an agy requester stays running when the configured runtime cannot record startup", withReset(async ({ handoff, reset, state, sends }) => {
+    state({ foreground: "agy", host: "antigravity", status: agyStatus });
+    const relaunch = async (): Promise<SeatRelaunch> => ({ argv: ["codex"], runtime: "codex", model: null, effort: null, modeKnown: true });
+    expect(await reset({ host: "antigravity", relaunch })).toEqual({ error: "seat_reset_runtime_unsupported", outcome: "nothing_sent" });
+    expect(sends()).toEqual([]);
+    expect(existsSync(join(dirname(handoff), "relaunch.sh"))).toBe(false);
+  }));
+
+  test.each([
+    ["the wait ended at a blocked prompt", { ...ended, status: "blocked" }, {}],
+    ["the requester became blocked after the wait", ended, { status: { ...agyStatus, state: "blocked" } }],
+    ["another turn began after the wait", ended, { turn: ended.turn + 1 }],
+  ] as const)("an agy requester gets no relaunch keys when %s", (_reason, finalWait, afterRelaunchWait) => withReset(async ({ reset, state, calls, sends }) => {
+    state({ foreground: "agy", host: "antigravity", status: agyStatus, wait: [ended, finalWait], afterRelaunchWait });
+    expect(await reset({ host: "antigravity" })).toEqual({ error: "requester_busy", outcome: "nothing_sent" });
+    expect(calls()).toHaveLength(2);
+    expect(sends()).toEqual([]);
+  })());
 
   test.each(["advisor", "orchestrator"] as const)("a native agy %s relaunches in the same pane and verifies RESUMED", seat => withReset(async ({ handoff, reset, state, sends, log }) => {
     state({ foreground: "agy", host: "antigravity", status: agyStatus });

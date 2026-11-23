@@ -289,13 +289,13 @@ export async function seatLaunch(seat: string, labels: SeatLabelInput = {}, env:
 }
 
 /**
- * The launch of a reset seat for `seats reset` (#2633): its argv, its effective model and effort, and whether the quota
+ * The launch of a reset seat for `seats reset` (#2633): its argv, runtime, model and effort, and whether the quota
  * mode that chose them is known. The checkout comes from the requester selected by the seat identity.
  */
 export async function seatResetLaunch(identity: SeatResetIdentity, env: NodeJS.ProcessEnv, checkout: string): Promise<SeatRelaunch> {
   // The terminal already has a waiting shell. Run only the agent command to keep one shell across resets.
   const { launch, effective, modeKnown } = await effectiveSeatLaunch(identity.seat, { repositoryId: identity.repository }, env, checkout, { terminal: 'existing' });
-  return { argv: launch.argv, model: effective.model, effort: effective.effort, modeKnown };
+  return { argv: launch.argv, runtime: launch.runtime, model: effective.model, effort: effective.effort, modeKnown };
 }
 
 /** The rh Pi extension of the installed package. A Pi review seat without it would run with no hook, so a missing file stops the launch. */
