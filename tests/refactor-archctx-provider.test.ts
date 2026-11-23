@@ -364,6 +364,8 @@ describe("real archctx 0.18.3 pure-Git refactor lifecycle (end-to-end)", () => {
     };
 
     runGit(repoRoot, ["init", "-q"], env);
+    runGit(repoRoot, ["config", "user.name", "Test"], env);
+    runGit(repoRoot, ["config", "user.email", "test@example.invalid"], env);
     runGit(repoRoot, ["config", "maintenance.auto", "false"], env);
     runGit(repoRoot, ["config", "gc.auto", "0"], env);
 
