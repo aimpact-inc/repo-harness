@@ -119,8 +119,10 @@ export function expectedOf(observation: FileObservation, path: string): Expected
  * Replace the target by a `wx` temporary file beside it and a rename. The
  * target must still match `expected` right before the rename, so rh never
  * overwrites a change that it did not see. An existing file keeps its mode.
+ * A transaction can observe the staged entry's identity before it is published.
  */
-export function replaceTarget(path: HostPath, bytes: Buffer, expected: ExpectedFile, temporary = `${path}.${randomUUID()}.tmp`): void {
+export function replaceTarget(path: HostPath, bytes: Buffer, expected: ExpectedFile, temporary = `${path}.${randomUUID()}.tmp`,
+  observeStaged?: (staged: string) => void): void {
   const mode = lstatSync(path, { throwIfNoEntry: false })?.mode ?? 0o600;
   const fd = openSync(temporary, 'wx', 0o600);
   try {
@@ -129,6 +131,7 @@ export function replaceTarget(path: HostPath, bytes: Buffer, expected: ExpectedF
       fchmodSync(fd, mode & 0o777);
       fsyncSync(fd);
     } finally { closeSync(fd); }
+    observeStaged?.(temporary);
     if (!matchesExpected(observeFile(path).observation, expected)) {
       throw new HostConfigError('host_config_target_changed', `the target changed before the write: ${path}`);
     }

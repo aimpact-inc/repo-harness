@@ -1,13 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
-import { spawnSync } from "child_process";
-import { pluginSelectionEnv, recordPluginSelection, seedGlobalPackageFixture } from "../helpers/install-ownership";
-import { writeShellExecutableFixture } from "../helpers/repo-fixture";
+import { dirname, join } from "path";
+import { spawnSync, type SpawnSyncReturns } from "child_process";
+import { installStateFixturePath, pluginSelectionEnv, recordPluginSelection, seedGlobalPackageFixture } from "../helpers/install-ownership";
+import { initGitRepo, writeShellExecutableFixture } from "../helpers/repo-fixture";
 import { writeFakeHc } from "../helpers/fake-hc";
 import { requestUserInputFragment } from "../../src/cli/installer/targets/codex";
 import { openHostConfigGate } from "../../src/effects/host-config/gate";
+import { hostConfigPaths, readLedger } from "../../src/effects/host-config/store";
+import { hashManagedTree } from "../../src/effects/managed-tree";
 import { acquireRuntimeTransactionLock, globalRuntimeScope } from "../../src/effects/locking/runtime-transaction-lock";
 import { configureAntigravityCodegraphStep } from "../../src/cli/tools/codegraph";
 import { buildManagedHooks } from "../../src/cli/installer/managed-entries";
@@ -326,6 +328,240 @@ test.skipIf(process.platform === 'win32')('global update refuses malformed Antig
     expect(state()).toEqual(before);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+describe.skipIf(process.platform === 'win32')('targeted Antigravity CodeGraph', () => {
+  function withTargetedFixture(command: 'install' | 'update', run: (fixture: {
+    env: NodeJS.ProcessEnv; root: string; repo: string; fakeBin: string; codegraph: string; config: string; statePath: string; cliPath: string;
+    cli: (...args: string[]) => SpawnSyncReturns<string>;
+    launch: (bunArgs: readonly string[], args: readonly string[]) => SpawnSyncReturns<string>;
+  }) => void) {
+    const { root, home, fakeBin } = setupFakeEnvironment('targeted-antigravity');
+    try {
+      const codegraph = join(fakeBin, 'codegraph');
+      const env = { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun'), PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+        BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0' };
+      seedGlobalPackageFixture(env);
+      writeFakeHc(fakeBin);
+      writeFakeSkillsCli(fakeBin);
+      writeExecutable(fakeBin, codegraph, `#!/bin/sh
+case "$*" in
+  --version) echo 1.6.4 ;;
+  'status .') echo 'Index is up to date' ;;
+  'install --print-config antigravity') printf '%s\\n' '{"mcpServers":{"codegraph":{"command":"codegraph"}}}' ;;
+  *) exit 2 ;;
+esac
+`);
+      const config = join(home, '.gemini/config/mcp_config.json');
+      const cliPath = join(env.BUN_INSTALL, 'bin/rh');
+      const managedConfig = join(home, '.repo-harness/config.json');
+      for (const [path, value] of [[config, '{"mcpServers":{"personal":{"command":"my-tool"}}}'], [cliPath, 'prior CLI'], [managedConfig, '{}\n']] as const) {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, value);
+      }
+      const repo = join(root, 'repo');
+      const cwd = join(repo, 'nested');
+      mkdirSync(cwd, { recursive: true });
+      initGitRepo(repo);
+      const launch = (bunArgs: readonly string[], args: readonly string[]) => spawnSync(process.execPath, [...bunArgs, CLI, ...args, '--target', 'antigravity', '--json'], { cwd, env, encoding: 'utf8' });
+      const cli = (...args: string[]) => launch([], args);
+      if (command === 'update') {
+        const installed = cli('install', '--no-external-skills');
+        expect(installed.status, installed.stdout + installed.stderr).toBe(0);
+      }
+      run({ env, root, repo, fakeBin, codegraph: realpathSync(codegraph), config, statePath: installStateFixturePath(env), cliPath, cli, launch });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+
+  for (const command of ['install', 'update'] as const) {
+    const options = command === 'install' ? ['--no-external-skills'] : [];
+
+    test(`${command} previews and applies a scoped MCP change after protocol 4 migration`, () => withTargetedFixture(command, ({ env, root, codegraph, config, statePath, cli }) => {
+      const state = JSON.parse(readFileSync(statePath, 'utf8'));
+      writeFileSync(statePath, JSON.stringify({ ...state, protocol: 4, pi_packages: [] }));
+      const before = hashManagedTree(root);
+      const args = [command, '--configure-codegraph', ...options];
+      const dryRun = cli(...args, '--dry-run');
+      expect(dryRun.status, dryRun.stdout + dryRun.stderr).toBe(0);
+      expect(JSON.parse(dryRun.stdout).host_config.items).toEqual(expect.arrayContaining([
+        { path: realpathSync(config), selector: 'mcpServers.codegraph', action: 'add' },
+        { path: hostConfigPaths(env).ledger, selector: `${realpathSync(config)}#mcpServers.codegraph`, action: 'record' },
+      ]));
+      expect(hashManagedTree(root)).toBe(before);
+
+      const result = cli(...args);
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(statePath, 'utf8')).protocol).toBe(5);
+      expect(JSON.parse(readFileSync(config, 'utf8')).mcpServers).toEqual({
+        personal: { command: 'my-tool' }, codegraph: { command: codegraph, args: ['serve', '--mcp', '--path', '.'] },
+      });
+      expect(openHostConfigGate({ env }).recorded(config)).toMatchObject([{ owner: 'architecture', selector: 'mcpServers.codegraph' }]);
+    }), 30000);
+
+    test(`${command} binds MCP to the trusted PATH launcher in preview and apply`, () => withTargetedFixture(command, ({ env, root, repo, fakeBin, codegraph, config, cli }) => {
+      const checkoutBin = join(repo, 'bin');
+      const pathAlias = join(root, 'path-alias');
+      const refused = join(root, 'checkout-renderer-ran');
+      mkdirSync(checkoutBin);
+      mkdirSync(pathAlias);
+      const local = join(checkoutBin, 'codegraph');
+      writeExecutable(checkoutBin, local, `#!/bin/sh\nprintf '%s' "$*" > '${refused}'\nexit 2\n`);
+      symlinkSync(local, join(pathAlias, 'codegraph'));
+      const args = [command, '--configure-codegraph', ...options];
+      const installedPath = env.PATH;
+      env.REPO_HARNESS_CODEGRAPH_LOCAL_BIN = local;
+      env.REPO_HARNESS_CODEGRAPH_ALLOW_REPO_LOCAL = '1';
+      const checkoutPath = `../bin:${checkoutBin}:${pathAlias}`;
+      env.PATH = checkoutPath;
+      for (const mode of [['--dry-run'], []]) {
+        const rejected = cli(...args, ...mode);
+        expect(rejected.status).toBe(1);
+        expect(rejected.stderr).toContain('CodeGraph CLI is missing');
+        expect(existsSync(refused)).toBe(false);
+      }
+
+      env.PATH = `${checkoutPath}:${installedPath}`;
+      writeExecutable(fakeBin, join(fakeBin, 'codegraph'), `#!/bin/sh
+[ "$*" = 'install --print-config antigravity' ] || exit 2
+[ "$(command -v codegraph)" = '${codegraph}' ] || exit 3
+printf 'cache' > "$HOME/renderer-cache"
+printf '%s\\n' '{"mcpServers":{"codegraph":{"command":"codegraph-from-renderer","args":["serve","--mcp"]}}}'
+`);
+      const before = hashManagedTree(root);
+      const dryRun = cli(...args, '--dry-run');
+      expect(dryRun.status, dryRun.stdout + dryRun.stderr).toBe(0);
+      expect(JSON.parse(dryRun.stdout).host_config.items).toContainEqual({ path: realpathSync(config), selector: 'mcpServers.codegraph', action: 'add' });
+      expect(hashManagedTree(root)).toBe(before);
+      const applied = cli(...args);
+      expect(applied.status, applied.stdout + applied.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(config, 'utf8')).mcpServers.codegraph).toEqual({ command: codegraph, args: ['serve', '--mcp', '--path', '.'] });
+      expect(existsSync(join(env.HOME!, 'renderer-cache'))).toBe(false);
+      expect(existsSync(refused)).toBe(false);
+    }), 30000);
+
+    test.each(['formatted', 'absent', 'replaced'] as const)(`${command} handles adapter failure with %s MCP preimage`, (input) => withTargetedFixture(command, ({ env, root, codegraph, config, launch }) => {
+      const original = '{\r\n\t"mcpServers" : {  \r\n  }\r\n}\r\n';
+      if (input === 'formatted') writeFileSync(config, original);
+      else rmSync(config);
+      const ledger = hostConfigPaths(env).ledger;
+      const ledgerBytes = () => existsSync(ledger) ? readFileSync(ledger) : null;
+      const before = ledgerBytes();
+      const preload = join(root, 'fail-adapter.ts');
+      const replacement = join(root, 'replacement.json');
+      writeFileSync(preload, `
+import { copyFileSync, readFileSync, renameSync } from 'node:fs';
+import { antigravityTarget } from ${JSON.stringify(join(ROOT, 'src/cli/installer/targets/antigravity.ts'))};
+antigravityTarget.install = () => {
+  const config = ${JSON.stringify(config)};
+  if (JSON.parse(readFileSync(config, 'utf8')).mcpServers.codegraph.command !== ${JSON.stringify(codegraph)}) throw new Error('MCP write missing');
+  ${input === 'replaced' ? `const copy = ${JSON.stringify(replacement)}; copyFileSync(config, copy); renameSync(copy, config);` : ''}
+  throw new Error('injected adapter failure after MCP write');
+};
+`);
+      const result = launch(['--preload', preload], [command, '--configure-codegraph', ...options]);
+      expect(result.status).toBe(1);
+      if (input === 'replaced') {
+        expect(result.stderr).toContain('rollback failed');
+        expect(JSON.parse(readFileSync(config, 'utf8')).mcpServers.codegraph.command).toBe(codegraph);
+      } else {
+        expect(result.stdout).toContain('injected adapter failure after MCP write');
+        expect(existsSync(config) ? readFileSync(config, 'utf8') : null).toBe(input === 'formatted' ? original : null);
+      }
+      expect(ledgerBytes()).toEqual(before);
+    }), 30000);
+
+    test.each(['core-only', 'malformed', 'linked'] as const)(`${command} refuses %s before adapter writes`, (input) => withTargetedFixture(command, ({ env, config, statePath, cliPath, cli }) => {
+      if (input === 'core-only') recordPluginSelection(env, []);
+      if (input === 'malformed') {
+        const state = JSON.parse(readFileSync(statePath, 'utf8'));
+        writeFileSync(statePath, JSON.stringify({ ...state, protocol: 4, pi_packages: [] }));
+        writeFileSync(config, '{"mcpServers":');
+      }
+      const outside = join(env.HOME!, 'other.json');
+      if (input === 'linked') {
+        writeFileSync(outside, readFileSync(config));
+        rmSync(config);
+        symlinkSync(outside, config);
+      }
+      const paths = [cliPath, config, outside, statePath, hostConfigPaths(env).ledger, join(env.HOME!, '.repo-harness/config.json'),
+        join(dirname(config), 'hooks.json'), join(dirname(config), 'AGENTS.md')];
+      const snapshot = () => paths.map(path => existsSync(path) ? { bytes: readFileSync(path), ino: statSync(path).ino } : null);
+      const before = snapshot();
+      const result = cli(command, '--configure-codegraph', ...options);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain({ 'core-only': 'rh install --plugins architecture', malformed: 'the file is not valid JSON', linked: 'antigravity_hooks_path_linked' }[input]);
+      expect(snapshot()).toEqual(before);
+    }), 30000);
+  }
+});
+
+test.skipIf(process.platform === 'win32')('architecture switch removes only a recorded Antigravity MCP fragment and restores it on failure', () => {
+  const { root, home, fakeBin } = setupFakeEnvironment('antigravity-architecture-switch');
+  try {
+    const bunBin = join(fakeBin, 'bun');
+    const env = { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun'), REPO_HARNESS_BUN_EXECUTABLE: bunBin,
+      PATH: `${fakeBin}:${process.env.PATH ?? ''}` };
+    const installedPackage = seedGlobalPackageFixture(env);
+    const bin = join(env.BUN_INSTALL, 'bin');
+    mkdirSync(bin, { recursive: true });
+    symlinkSync(join(installedPackage, 'src/cli/index.ts'), join(bin, 'rh'));
+    writeFakeHc(fakeBin);
+    const config = join(home, '.gemini/config/mcp_config.json');
+    const paths = hostConfigPaths(env);
+    const statePath = installStateFixturePath(env);
+    const state = readFileSync(statePath);
+    const original = '{"mcpServers":{"personal":{"command":"my-tool"}}}';
+    mkdirSync(dirname(config), { recursive: true });
+    writeFileSync(config, original);
+    const gate = openHostConfigGate({ env });
+    const change = { path: config, fragments: [{ owner: 'architecture', selector: 'mcpServers.codegraph', kind: 'add' as const, strategy: jsonFragment, value: { command: 'codegraph' } }] };
+    gate.apply([change]);
+    const recorded = readLedger(paths);
+    const configured = readFileSync(config, 'utf8');
+    const key = realpathSync(config);
+    const failAfterRemoval = (after = '') => writeExecutable(fakeBin, bunBin, `#!/bin/bash
+[ "$1" = --version ] || exit 2
+[ "$(< '${config}')" = '${original}' ] || exit 3
+${after}
+printf 'observed scoped removal\\n' >&2
+exit 4
+`);
+    const cli = (...args: string[]) => spawnSync(process.execPath, [CLI, 'install', '--no-plugins', '--no-cli', '--no-external-skills', '--json', ...args], { cwd: root, env, encoding: 'utf8' });
+    failAfterRemoval();
+    const failed = cli();
+    expect(failed.status).toBe(1);
+    expect(failed.stdout + failed.stderr).toContain('observed scoped removal');
+    expect(readFileSync(statePath)).toEqual(state);
+    expect(readFileSync(config, 'utf8')).toBe(configured);
+    expect(readLedger(paths).files[key]).toEqual(recorded.files[key]);
+    expect(gate.recorded(config)).toEqual(recorded.fragments.filter(fragment => fragment.file === key));
+
+    failAfterRemoval(`cp '${config}' '${config}.copy' && mv '${config}.copy' '${config}' || exit 5`);
+    const replaced = cli();
+    expect(replaced.status).toBe(1);
+    expect(replaced.stderr).toContain('cannot prove this host configuration entry');
+    expect(readFileSync(statePath)).toEqual(state);
+    expect(readFileSync(config, 'utf8')).toBe(original);
+    expect(readLedger(paths).files[key]).toBeUndefined();
+    gate.apply([change]);
+
+    writeExecutable(fakeBin, bunBin, `#!/bin/sh\nexec '${process.execPath}' "$@"\n`);
+    const switched = cli();
+    expect(switched.status, switched.stdout + switched.stderr).toBe(0);
+    expect(readFileSync(config, 'utf8')).toBe(original);
+    expect(readLedger(paths).files[key]).toBeUndefined();
+    expect(gate.recorded(config)).toEqual([]);
+
+    recordPluginSelection(env);
+    rmSync(join(home, '.gemini'), { recursive: true });
+    const outside = join(root, 'other');
+    mkdirSync(join(outside, 'config'), { recursive: true });
+    writeFileSync(join(outside, 'config/mcp_config.json'), configured);
+    symlinkSync(outside, join(home, '.gemini'));
+    const unrecorded = cli('--no-hooks');
+    expect(unrecorded.status, unrecorded.stdout + unrecorded.stderr).toBe(0);
+    expect(readFileSync(join(outside, 'config/mcp_config.json'), 'utf8')).toBe(configured);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}, 60000);
 
 test('a concurrent rh install and CodeGraph configure for Claude serialize on the global lock, and the ledger keeps the records of both', async () => {
   const fixture = setupFakeEnvironment('concurrent-claude-writers');

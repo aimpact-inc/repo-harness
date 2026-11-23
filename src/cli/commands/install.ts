@@ -132,7 +132,7 @@ export function assertOverridesCarried(spec: InstallTargetSpec | null, overrides
 export interface HostConfigPreviewItem {
   readonly path: string;
   readonly selector: string;
-  readonly action: 'add' | 'refresh' | 'override' | 'create' | 'update' | 'remove' | SkippedOverride['code'];
+  readonly action: 'add' | 'refresh' | 'override' | 'create' | 'update' | 'remove' | 'record' | 'mark-external-change' | SkippedOverride['code'];
 }
 
 export interface HostConfigPreview {

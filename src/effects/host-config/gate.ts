@@ -97,6 +97,18 @@ export interface HostConfigApplyResult {
   readonly skipped: readonly SkippedOverride[];
 }
 
+interface HostConfigApplyOptions {
+  /** Keep the Antigravity MCP preimage until the enclosing runtime transaction commits. */
+  readonly onAntigravityMcpWrite?: (undo: AntigravityMcpUndo) => void;
+}
+
+export interface AntigravityMcpPreview {
+  readonly path: HostPath;
+  readonly selector: string;
+  readonly action: 'add' | 'refresh' | SkippedOverride['code'] | undefined;
+  readonly ledgerAction: 'record' | 'refresh' | 'mark-external-change' | undefined;
+}
+
 export interface HostConfigDelegateResult {
   /** The path-record keys whose entry the writer changed, and the files whose declared fragment records changed. */
   readonly changed: readonly string[];
@@ -231,7 +243,14 @@ export interface HostConfigAdoption {
   readonly externalChange: boolean;
 }
 
+export interface AntigravityMcpUndo {
+  readonly path: HostPath;
+  restore(): boolean;
+}
+
 export interface HostConfigRevertOptions {
+  /** Capture a successful Antigravity MCP removal for the active runtime transaction. */
+  readonly onAntigravityMcpRemoval?: (undo: AntigravityMcpUndo) => void;
   /** Report what the revert would do and write nothing. */
   readonly dryRun?: boolean;
   /** Take out only the fragments of this owner; the file records stay. */
@@ -270,7 +289,7 @@ export interface HostConfigPathPlan {
 }
 
 export interface HostConfigGate {
-  apply(changes: readonly HostConfigFileChange[]): HostConfigApplyResult;
+  apply(changes: readonly HostConfigFileChange[], options?: HostConfigApplyOptions): HostConfigApplyResult;
   /**
    * Read-only preflight and action planner for whole-path writes, using the
    * same admission, overlap, link-boundary, and ownership checks as
@@ -342,6 +361,7 @@ export interface HostConfigGate {
    * matching fragments go, by the per-fragment rule.
    */
   revert(paths?: readonly string[], options?: HostConfigRevertOptions): readonly HostConfigRevertEntry[];
+  previewAntigravityMcp(change: HostConfigFileChange): AntigravityMcpPreview;
   /**
    * Record a file that has no record, with `baseline.state: unknown` and
    * `committed` set to the current file. It writes no host file. A path that
@@ -610,8 +630,36 @@ function fileFragments(plan: FilePlan, recorded: readonly FragmentRecord[]): Fra
 /** The admission of the files of one call: the user scope admits any host path, a repository scope only its own files. */
 type FileAdmission = (paths: HostConfigPaths, targets: readonly string[]) => HostPath[];
 
+function planGuardedJsonFile(path: HostPath, content: string, fragments: readonly FragmentRequest[], recorded: readonly FragmentRecord[], mcp: boolean): FilePlan {
+  const requests = fragments.map((request): FragmentRequest => {
+    const allowed = mcp ? isAntigravityCodegraphFragment(request) : isAntigravityFragment(request);
+    if (!allowed || request.strategy !== jsonFragment || request.kind === 'override' || request.selected) {
+      const member = mcp ? 'CodeGraph MCP' : 'repo-harness hook';
+      throw new HostConfigError('host_config_invalid_state', `${path}: only the ${member} member can be installed`);
+    }
+    return { ...request, kind: jsonFragment.locate(content, request.selector) ? 'refresh' : 'add' };
+  });
+  return planFile(path, content, requests, recorded);
+}
+
+/** Preview the same guarded edit and ledger changes that apply uses. */
+function previewAntigravityMcp(path: HostPath, change: HostConfigFileChange, ledger: HostConfigLedger): AntigravityMcpPreview {
+  refuseRecordedPaths(ledger, [path]);
+  const { observation, bytes } = observeFile(path);
+  const content = decode(bytes, path);
+  const recorded = ledger.fragments.filter(entry => entry.file === path);
+  const plan = planGuardedJsonFile(path, content, change.fragments, recorded, true);
+  const changed = plan.result !== content;
+  const edit = plan.fragments[0];
+  const files = { ...ledger.files };
+  const ledgerAction = changed || plan.fragments.some(fragmentChanges) ? (edit?.previous ? 'refresh' : 'record')
+    : markExternalChange(files, path, expectedOf(observation, path)) ? 'mark-external-change' : undefined;
+  return { path, selector: CODEGRAPH_MCP_SELECTOR, action: changed ? (edit?.previous ? 'refresh' : 'add') : plan.skipped[0]?.code, ledgerAction };
+}
+
 /** Each record reaches the ledger before its write, so every write has its record. */
-function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileChange[], admit: FileAdmission = admitPaths, antigravity?: AntigravityGuardedPaths): HostConfigApplyResult {
+function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileChange[], admit: FileAdmission = admitPaths, antigravity?: AntigravityGuardedPaths,
+  options?: HostConfigApplyOptions): HostConfigApplyResult {
   const targets = admit(paths, changes.map((change) => change.path));
   const ledger = readLedger(paths);
   const files = { ...ledger.files };
@@ -630,15 +678,8 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
     const preimage = expectedOf(observation, path);
     const content = decode(bytes, path);
     const recorded = fragments.filter((entry) => entry.file === path);
-    const requests = isHooks || isMcp ? change.fragments.map((request): FragmentRequest => {
-      const allowed = isHooks ? isAntigravityFragment(request) : isAntigravityCodegraphFragment(request);
-      if (!allowed || request.strategy !== jsonFragment || request.kind === 'override' || request.selected) {
-        const member = isHooks ? 'repo-harness hook' : 'CodeGraph MCP';
-        throw new HostConfigError('host_config_invalid_state', `${path}: only the ${member} member can be installed`);
-      }
-      return { ...request, kind: jsonFragment.locate(content, request.selector) ? 'refresh' : 'add' };
-    }) : change.fragments;
-    const plan = planFile(path, content, requests, recorded);
+    const plan = isHooks || isMcp ? planGuardedJsonFile(path, content, change.fragments, recorded, isMcp)
+      : planFile(path, content, change.fragments, recorded);
     skipped.push(...plan.skipped);
     const unchanged = plan.result === content;
     // A fragment whose text is already in place is still recorded, but its file is not written.
@@ -661,7 +702,9 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
     if (unchanged) continue;
     try {
       createDirectories(createdDirs);
-      replaceTarget(path, result, preimage);
+      if (isMcp && options?.onAntigravityMcpWrite) {
+        options.onAntigravityMcpWrite(replaceAntigravityMcp(path, bytes, preimage, result));
+      } else replaceTarget(path, result, preimage);
     } catch (error) {
       removeCreatedDirectories(createdDirs);
       ({ fragments, directories } = before);
@@ -1768,6 +1811,35 @@ function matchesFilter(record: FragmentRecord, filter: RevertFilter): boolean {
   return (filter.owner === undefined || record.owner === filter.owner) && (filter.selectors === undefined || filter.selectors.includes(record.selector));
 }
 
+/** Capture the exact preimage and the identity of the entry that this write publishes. */
+function replaceAntigravityMcp(path: HostPath, bytes: Buffer | null, current: ExpectedFile, result: Buffer): AntigravityMcpUndo {
+  const forward: ExpectedFile = { existed: true, sha256: sha256Prefixed(result) };
+  let forwardIdentity: string | null = null;
+  replaceTarget(path, result, current, undefined, staged => {
+    forwardIdentity = observeEntryIdentity(staged);
+  });
+  return { path, restore: () => {
+    checkAntigravityPath(path);
+    if (forwardIdentity === null || observeEntryIdentity(path) !== forwardIdentity || !observeFile(path).bytes?.equals(result)) return false;
+    if (bytes === null) removeTarget(path, forward);
+    else replaceTarget(path, bytes, forward);
+    return true;
+  } };
+}
+
+/** Preserve the original claim if the scoped revert retires it but cannot publish. */
+function replaceRevertedAntigravityMcp(path: HostPath, bytes: Buffer, current: ExpectedFile, result: Buffer,
+  onRemoval: (undo: AntigravityMcpUndo) => void): void {
+  const originalIdentity = observeEntryIdentity(path);
+  let undo: AntigravityMcpUndo | undefined;
+  onRemoval({ path, restore: () => {
+    if (undo) return undo.restore();
+    checkAntigravityPath(path);
+    return originalIdentity !== null && observeEntryIdentity(path) === originalIdentity && observeFile(path).bytes?.equals(bytes) === true;
+  } });
+  undo = replaceAntigravityMcp(path, bytes, current, result);
+}
+
 /**
  * A file that hashes to `committed` with no external change and a backup (or
  * that rh created) reverts as a whole: the backup, or no file, is exactly the
@@ -1827,7 +1899,9 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
       } }
         : { kind: write.restores ? 'restore' : 'delete', commit, write: () => {
           if (guarded) checkAntigravityPath(path);
-          replaceTarget(path, write.content, current);
+          if (isMcp && bytes !== null && options.onAntigravityMcpRemoval) {
+            replaceRevertedAntigravityMcp(path, bytes, current, write.content, options.onAntigravityMcpRemoval);
+          } else replaceTarget(path, write.content, current);
         } });
   }
   if (dryRun) return report;
@@ -1920,6 +1994,16 @@ export interface HostConfigRollbackResult {
   readonly unresolved: readonly string[];
 }
 
+function restoreAntigravityMcp(undo: AntigravityMcpUndo, unresolved: string[]): boolean {
+  try {
+    if (undo.restore()) return true;
+  } catch (error) {
+    if (!(error instanceof HostConfigError || error instanceof AntigravityHooksPathError)) throw error;
+  }
+  unresolved.push(`${undo.path}: ${CODEGRAPH_MCP_SELECTOR}`);
+  return false;
+}
+
 const fragmentKey = (record: FragmentRecord): string => `${record.owner}\0${record.selector}`;
 
 /**
@@ -1940,19 +2024,24 @@ const fragmentKey = (record: FragmentRecord): string => `${record.owner}\0${reco
  * unrecorded text the transaction removed (a new `external_backup` and no
  * fragment change) gets its record before the transaction only when the
  * caller already put the file back to that backup; otherwise the record
- * stays. A file record that the transaction dropped stays dropped with its
- * fragments and the retirement of its vault copies (P4, #3227): this rollback
- * does not undo a file revert, so a claim from the snapshot would have no text
- * on disk. Every other entry stays and is returned.
+ * stays. A dropped file record stays dropped with its fragments and the
+ * retirement of its vault copies (P4, #3227). An Antigravity MCP write or
+ * revert uses the active transaction's exact preimage and entry proof.
  */
-export function rollbackHostConfigTransaction(paths: HostConfigPaths, snapshot: Buffer | null, transaction: string, options: Pick<HostConfigPathOptions, 'stage'> = {}): HostConfigRollbackResult {
+export function rollbackHostConfigTransaction(paths: HostConfigPaths, snapshot: Buffer | null, transaction: string, options: Pick<HostConfigPathOptions, 'stage'> & {
+  readonly antigravityMcpUndo?: AntigravityMcpUndo;
+} = {}): HostConfigRollbackResult {
   const before = snapshot === null ? EMPTY_LEDGER : parseSnapshotLedger(snapshot, `${paths.ledger} (transaction snapshot)`);
   const now = readLedger(paths);
   const unresolved: string[] = [];
-  const releasedFiles = new Set(Object.keys(before.files).filter((path) => !now.files[path]));
+  const undo = options.antigravityMcpUndo;
+  const restoredMcp = undo && restoreAntigravityMcp(undo, unresolved) ? undo.path : undefined;
+  const releasedFiles = new Set(Object.keys(before.files).filter(path => !now.files[path] && path !== restoredMcp));
   const files = Object.fromEntries(Object.entries(before.files).filter(([path]) => !releasedFiles.has(path)));
   const releasedMaterial = new Set([...releasedFiles].flatMap((path) => materialOf(before.files[path]!)));
   for (const path of Object.keys(now.files) as HostPath[]) {
+    // A refused MCP undo also bypasses fragment reconstruction. Its new claim leaves with the failed write.
+    if (path === undo?.path) continue;
     const record = now.files[path]!;
     const previous = before.files[path];
     const all = now.fragments.filter((entry) => entry.file === path);
@@ -2173,6 +2262,11 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
   const resolveFile = (target: string) => resolveUserFile(paths, target, antigravity);
   const admitUserFiles: FileAdmission = (layout, targets) => admitPaths(layout, targets, resolveFile);
   const user = { antigravity, resolveFile };
+  const previewMcp = (change: HostConfigFileChange) => {
+    const path = resolveFile(change.path);
+    if (path !== antigravity.mcp) throw new HostConfigError('host_config_invalid_path', `not the Antigravity MCP file: ${path}`);
+    return previewAntigravityMcp(path, change, read(paths));
+  };
   const recorded = (path: string) => {
     const resolved = resolveFile(path);
     return read(paths).fragments.filter((entry) => entry.file === resolved);
@@ -2186,11 +2280,12 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
       keepUserPaths: refusePreview, adoptReplacedPath: refusePreview, adopt: refusePreview, removeUnrecordedText: refusePreview,
       revert: (only, revertOptions) => revertFiles(paths, only, { ...revertOptions, dryRun: true }, read, user),
       removeEditedBlock: (path) => removeEditedBlock(paths, path, true, read, resolveFile),
+      previewAntigravityMcp: previewMcp,
       recorded,
     };
   }
   return {
-    apply: (changes) => applyChanges(paths, changes, admitUserFiles, antigravity),
+    apply: (changes, applyOptions) => applyChanges(paths, changes, admitUserFiles, antigravity, applyOptions),
     planPaths,
     writePaths: (writes, pathOptions) => writeWholePaths((ledger, path) => admitUserWrite(env, paths, ledger, path), paths, writes, pathOptions ?? {}, antigravity),
     delegate: (declared, run, pathOptions) => delegateWrites(env, paths, declared, run, pathOptions ?? {}),
@@ -2200,6 +2295,7 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
     keepUserPaths: (owner, scope, kept) => keepUserPaths(env, paths, owner, scope, kept),
     adoptReplacedPath: (path, owner, backup, transaction) => adoptReplacedPath(env, paths, path, owner, backup, transaction),
     revert: (only, revertOptions) => revertFiles(paths, only, revertOptions ?? {}, read, user),
+    previewAntigravityMcp: previewMcp,
     adopt: (path, adoption) => adoptFile(paths, path, adoption, admitUserFiles),
     removeUnrecordedText: (path, expectedSha256, removals) => removeUnrecordedText(paths, path, expectedSha256, removals),
     recorded,
