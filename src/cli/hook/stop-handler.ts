@@ -1,7 +1,6 @@
 /** Stop publishes the evidence checkpoint and reports notices; it never grants publication permission. */
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'fs';
-import { isAbsolute, join, normalize, relative, sep } from 'path';
-import { ANTIGRAVITY_BRAIN_ROOTS, ANTIGRAVITY_HANDOFF, HOST_ADAPTERS } from './host-adapter';
+import { ANTIGRAVITY_HANDOFF, HOST_ADAPTERS } from './host-adapter';
+import { readAntigravityTranscript } from '../../effects/board/antigravity-transcript';
 import { collectArchitectureNotice } from './hook-protocol';
 import { collectProtectedPathNotice } from './protected-path-notice';
 import { publishCheckpointFromLedger } from '../../effects/evidence/checkpoint-store';
@@ -9,8 +8,7 @@ import type { StateInputCollector } from '../../effects/loop/state-input-collect
 import { resolveCapabilityOwnership } from '../../effects/state/resolve-effective-state';
 import { payloadString, payloadValue, type HookIdentity, type HookPayload } from './hook-input';
 import { SEAT_RESET_CONTEXT_TOKENS, seatResetAction, seatResetIdentity, seatResetReason } from '../../core/board/seat-reset';
-import { readTranscriptUsage, seatResetRequested, writeSeatResetRequest, type TranscriptUsage } from '../../effects/board/seat-reset';
-import { requireHome } from '../../effects/repo-harness-home';
+import { readTranscriptUsage, seatResetRequested, writeSeatResetRequest } from '../../effects/board/seat-reset';
 
 export type StopCollector = Pick<StateInputCollector, 'getRepoRoot'>;
 
@@ -90,49 +88,6 @@ function seatReset(payload: HookPayload, env: NodeJS.ProcessEnv, now: Date, hand
   } catch (error) {
     return { notices: relaunch ? [] : [{ systemMessage: `repo-harness: seat reset skipped: ${(error as Error).message}` }] };
   }
-}
-
-export function readAntigravityTranscript(sessionId: string, transcriptPath: string, env: NodeJS.ProcessEnv): TranscriptUsage | null {
-  if (!/^[\w-]+$/.test(sessionId) || !isAbsolute(transcriptPath) || normalize(transcriptPath) !== transcriptPath) return null;
-  const home = requireHome(env);
-  const withinHome = relative(home, transcriptPath);
-  const inLogs = ANTIGRAVITY_BRAIN_ROOTS.some(root => withinHome.startsWith(`${join(root, sessionId, '.system_generated', 'logs')}${sep}`));
-  if (!inLogs) return null;
-  const entry = lstatSync(transcriptPath);
-  const expected = join(realpathSync(home), withinHome);
-  if (!entry.isFile() || realpathSync(transcriptPath) !== expected) return null;
-
-  const fd = openSync(expected, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try {
-    const file = fstatSync(fd);
-    if (!file.isFile() || file.dev !== entry.dev || file.ino !== entry.ino) return null;
-    const bytes = file.size;
-    for (let window = Math.min(1024 * 1024, bytes); ; window = Math.min(window * 2, bytes)) {
-      const buffer = Buffer.alloc(window);
-      if (readSync(fd, buffer, 0, window, bytes - window) !== window) return null;
-      const lines = buffer.toString('utf8').split('\n');
-      // A partial tail can begin inside a JSON line.
-      for (let index = lines.length - 1; index >= (window < bytes ? 1 : 0); index -= 1) {
-        const contextTokens = plannerContext(lines[index]!);
-        if (contextTokens !== undefined) return { bytes, contextTokens };
-      }
-      if (window === bytes) return { bytes, contextTokens: null };
-    }
-  } finally {
-    closeSync(fd);
-  }
-}
-
-/** Undefined skips other lines. Null means the latest planner entry has invalid counts. */
-function plannerContext(line: string): number | null | undefined {
-  let entry: unknown;
-  try { entry = JSON.parse(line); } catch { return undefined; }
-  if (typeof entry !== 'object' || entry === null || !('type' in entry) || entry.type !== 'PLANNER_RESPONSE') return undefined;
-  const input = 'input_tokens' in entry ? entry.input_tokens : 0;
-  const cached = 'cache_read_tokens' in entry ? entry.cache_read_tokens : 0;
-  if (typeof input !== 'number' || typeof cached !== 'number' || !Number.isSafeInteger(input) || !Number.isSafeInteger(cached) || input < 0 || cached < 0) return null;
-  const total = input + cached;
-  return Number.isSafeInteger(total) ? total : null;
 }
 
 /** The architecture and protected path notices fail independently. A quiet architecture failure is logged, not shown. */
