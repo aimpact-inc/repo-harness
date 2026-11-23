@@ -16,6 +16,7 @@ export const serialFiles = new Set([
   'tests/herdr-task-lifecycle.test.ts',
   'tests/agent-notice.test.ts',
   'tests/stop-handler.test.ts',
+  'tests/hook-runtime.test.ts',
   'tests/cli/install.test.ts',
   'tests/cli/doctor.test.ts',
   'tests/cli/status.test.ts',

@@ -1320,7 +1320,7 @@ All delivery points share the id marker. Claude also gets a one-sentence
 `systemMessage` from the same notice. Codex gets no human line.
 
 Manual projection apply remains available for explicitly authorized adoption
-and repair. It is not a feature-PR freshness step. `archctx@0.18.1` runs every
+and repair. It is not a feature-PR freshness step. `archctx@0.18.2` runs every
 command in-process with no background service and no projection replay.
 `rh arch projection apply --json` returns its result directly; verify zero drift
 with `rh arch projection check --json` (or `rh arch sync --check --json`).
@@ -1435,7 +1435,7 @@ semantics. The retired `archcontext-boundaries-v1` format is rejected.
 
 ## Refactor recommendations
 
-repo-harness supplies pure-Git refactor evidence on demand through `archctx@0.18.1`
+repo-harness supplies pure-Git refactor evidence on demand through `archctx@0.18.2`
 in-process commands (`scan`, `decide`, `verify`). No hook scans for it and no
 setting enables it. The Bot reads the evidence and decides whether to schedule
 work or ask the user. Incomplete import coverage returns `proof_required` with a

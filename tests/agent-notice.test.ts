@@ -848,13 +848,13 @@ describe('AgentNotice', () => {
     const plainBytesBefore = readFileSync(plainUserFile);
     const plainEntriesBefore = readdirSync(plainTargetDir).sort();
 
-    // Put repo on an issue branch so SessionStart triggers prepareArchitectureTask against real pinned archctx@0.18.1.
+    // Put repo on an issue branch so SessionStart triggers prepareArchitectureTask against real pinned archctx@0.18.2.
     fixtureGit(root, ['checkout', '-q', '-b', 'feat/3388-store-guard']);
     fixtureWrite(root, '.archcontext/product.yaml', 'schemaVersion: archcontext.product/v1\nid: prod.notice\nname: Notice\n');
     const ownership = () => noticeOwnership(root);
     const baseEnv = noticeEnv(root);
 
-    // Run real pinned archctx@0.18.1 prepare via SessionStart with both inherited overrides.
+    // Run real pinned archctx@0.18.2 prepare via SessionStart with both inherited overrides.
     collectAgentNotice(root, ownership, {
       consumerRoot: packageRoot,
       env: { ...baseEnv, ARCHCONTEXT_LOCAL_STORE_PATH: unrelatedSqlitePath, ARCHCONTEXT_STATE_DIR: stateOverrideDir },

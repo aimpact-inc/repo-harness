@@ -452,7 +452,7 @@ describe('rh arch', () => {
       expect(existsSync(join(spacedSibling, '.codegraph'))).toBe(false);
     }
 
-    // 8e. Real pinned archctx@0.18.1 read-only commands leave zero SQLite sidecars so subsequent public seed succeeds.
+    // 8e. Real pinned archctx@0.18.2 read-only commands leave zero SQLite sidecars so subsequent public seed succeeds.
     const readChecks: Array<{ args: readonly string[]; allowedStatuses: readonly number[] }> = [
       { args: ['doctor', '--json'], allowedStatuses: [0] },
       { args: ['prepare', '--task', 'verify-zero-sidecars', '--json'], allowedStatuses: [0] },
@@ -495,6 +495,60 @@ describe('rh arch', () => {
       expect(crEnvRes.status).toBe(1);
       expect(readFileSync(join(cleanSibling, '.codegraph/codegraph.db'))).toEqual(siblingDbBefore);
       expect(existsSync(join(crSibling, '.codegraph'))).toBe(false);
+    }
+
+    // 8g. Real lockfile-installed archctx@0.18.2 fails closed on an unrelated SQLite DB with overlapping table names
+    // (preserving exact DB, -wal, and -shm bytes when ARCHCONTEXT_LOCAL_STORE_PATH is passed via rh arch).
+    const foreignStoreDir = mkdtempSync(join(tmpdir(), 'repo-harness-foreign-store-'));
+    roots.push(foreignStoreDir);
+    const overlappingPath = join(foreignStoreDir, 'overlapping.sqlite');
+    const overlappingWalPath = `${overlappingPath}-wal`;
+    const overlappingShmPath = `${overlappingPath}-shm`;
+    const overlappingDb = new Database(overlappingPath);
+    try {
+      overlappingDb.exec(`
+        PRAGMA journal_mode = WAL;
+        CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);
+        CREATE TABLE snapshots (id INTEGER PRIMARY KEY, payload BLOB NOT NULL);
+        CREATE TABLE waivers (id INTEGER PRIMARY KEY, ticket TEXT NOT NULL);
+        CREATE TABLE kv_cache (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+        INSERT INTO schema_migrations VALUES (1, 'foreign_v1');
+        INSERT INTO waivers VALUES (42, 'SEC-42');
+      `);
+      const dbBytesBefore = readFileSync(overlappingPath);
+      const walBytesBefore = readFileSync(overlappingWalPath);
+      const shmBytesBefore = readFileSync(overlappingShmPath);
+      expect(walBytesBefore.length).toBeGreaterThan(0);
+      expect(shmBytesBefore.length).toBeGreaterThan(0);
+
+      const foreignStoreRes = spawnSync(
+        process.execPath,
+        [CLI, 'arch', 'prepare', '--task', 'verify-foreign-store', '--json'],
+        {
+          cwd: cleanCase.repo,
+          env: { ...cleanCase.env, ARCHCONTEXT_LOCAL_STORE_PATH: overlappingPath },
+          encoding: 'utf8',
+          timeout: 60_000,
+        },
+      );
+      expect(foreignStoreRes.status).not.toBe(0);
+      const foreignStoreEnvelope = JSON.parse(foreignStoreRes.stdout) as {
+        ok: boolean;
+        error?: { code?: string; reasonCode?: string };
+      };
+      expect(foreignStoreEnvelope.ok).toBe(false);
+      expect(foreignStoreEnvelope.error?.code).toBe('AC_PRECONDITION_FAILED');
+      expect(foreignStoreEnvelope.error?.reasonCode).toBe('local-store-unproven-file');
+      expect(readFileSync(overlappingPath).equals(dbBytesBefore)).toBe(true);
+      expect(readFileSync(overlappingWalPath).equals(walBytesBefore)).toBe(true);
+      expect(readFileSync(overlappingShmPath).equals(shmBytesBefore)).toBe(true);
+      expect(readdirSync(foreignStoreDir).sort()).toEqual([
+        'overlapping.sqlite',
+        'overlapping.sqlite-shm',
+        'overlapping.sqlite-wal',
+      ]);
+    } finally {
+      overlappingDb.close();
     }
 
     // 9. Non-PID / empty user files at codegraph.lock and codegraph.lock.break refused on real primary index without unlinking.
