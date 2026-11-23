@@ -287,6 +287,25 @@ test.skipIf(process.platform === 'win32')('Antigravity --dry-run reports unowned
   });
 }, 30_000);
 
+test.skipIf(process.platform === 'win32')('Antigravity install and preview both skip catalog paths with --no-sync-skill', () => {
+  withTempHome('rh-antigravity-no-sync', (home) => {
+    const skills = path.join(home, '.gemini', 'config', 'skills');
+    const collision = path.join(skills, 'repo-harness-check');
+    fs.mkdirSync(collision, { recursive: true });
+    fs.writeFileSync(path.join(collision, 'SKILL.md'), '# User skill\n');
+    const args = ['install', '--target', 'antigravity', '--no-sync-skill', '--no-external-skills', '--json'];
+    const preview = antigravityCli(home, [...args, '--dry-run']);
+    expect(preview.status, preview.stdout + preview.stderr).toBe(0);
+    const config = JSON.parse(preview.stdout).host_config;
+    expect(config.unplanned).toEqual([]);
+    expect(config.items.map(({ selector }: { selector: string }) => selector)).toEqual(['repo-harness', 'global-working-rules']);
+    const applied = antigravityCli(home, args);
+    expect(applied.status, applied.stdout + applied.stderr).toBe(0);
+    expect(fs.readdirSync(skills).sort()).toEqual(['herdr', 'repo-harness-check']);
+    expect(fs.readFileSync(path.join(collision, 'SKILL.md'), 'utf8')).toBe('# User skill\n');
+  });
+});
+
 test.skipIf(process.platform === 'win32')('Antigravity refuses symlinked AGENTS.md or skills and preserves pre-existing user skill directories', () => {
   withTempHome('rh-antigravity-i2', (home) => {
     const configDir = path.join(home, '.gemini', 'config');

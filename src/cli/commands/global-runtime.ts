@@ -29,7 +29,7 @@ import { CLI_NAME, namesRetiredCli, RETIRED_CLI_NAME } from "../../core/skill-su
 import { shellQuote } from "../../core/shell-quote";
 import { syncCrossReviewSkills } from "./init";
 import { antigravitySourceRoot, hasRecordedAntigravityState } from "../installer/targets/antigravity";
-import { runInstall, type InstallCommandResult, type InstallTargetSpec } from "./install";
+import { runInstall, type InstallCommandOptions, type InstallCommandResult, type InstallTargetSpec } from "./install";
 import type { OverrideSelection } from "../../core/host-config/override";
 import { jsonFragment } from "../../core/host-config/json-fragment";
 import { compareVersions, readLatestPackageVersion } from "./doctor";
@@ -64,7 +64,7 @@ import {
   writeWindowsProtectedHelperContract,
 } from "../../effects/runtime/protected-helper-platform";
 import {
-  CANDIDATE_RECONCILIATION_PROTOCOL,
+  CANDIDATE_RECONCILIATION_REQUEST_PROTOCOL,
   assertReceiptSelection,
   candidatePackageIdentity,
   encodeCandidateRequest,
@@ -829,7 +829,7 @@ function reconcileWithInstalledCandidate(
     };
   }
   const request: CandidateReconciliationRequest = {
-    protocol: CANDIDATE_RECONCILIATION_PROTOCOL,
+    protocol: CANDIDATE_RECONCILIATION_REQUEST_PROTOCOL,
     transaction_id: handoff.transactionId,
     transaction_backup_root: handoff.transactionBackupRoot,
     parent_token: handoff.parentToken,
@@ -838,7 +838,8 @@ function reconcileWithInstalledCandidate(
     target,
     sync_skill: opts.syncSkill !== false,
     host_adapters: opts.hostAdapters !== false,
-    external_skills: opts.externalSkills === true,
+    external_skills_refresh: opts.externalSkills === true,
+    external_skills_opt_out: opts.externalSkills === false,
     obsidian_skills: opts.obsidianSkills === true,
     codegraph: opts.codegraph ?? true,
     report_language: opts.reportLanguage,
@@ -1789,16 +1790,16 @@ class AntigravityRuntimeInstallFailure extends Error {
 export function installAntigravityRuntime(
   env: NodeJS.ProcessEnv,
   runtimeLock: RuntimeTransactionContext,
-  options: { reportLanguage?: ReportLanguageFlag; externalSkills?: boolean; syncSkill?: boolean },
+  options: Pick<InstallCommandOptions, 'reportLanguage' | 'syncSkill' | 'hooks' | 'updateMode'> & { externalSkills?: boolean },
 ): InstallCommandResult {
   try {
     return withHostConfigTransaction(env, undefined, (transaction) => {
       const target = 'antigravity';
-      const result = runInstall({ target, location: 'global', transaction,
-        reportLanguage: options.reportLanguage, syncSkill: options.syncSkill });
+      const { externalSkills, ...adapterOptions } = options;
+      const result = runInstall({ target, location: 'global', transaction, ...adapterOptions });
       if (result.exitCode !== 0) throw new AntigravityRuntimeInstallFailure(result);
       const herdr = configureRequiredHerdrSkill(target, env, transaction);
-      const steps = herdr.status === 'ok' && options.externalSkills !== false
+      const steps = herdr.status === 'ok' && externalSkills !== false
         ? [herdr, installWazaSkills(antigravitySourceRoot(env), target, false, env, false, transaction)]
         : [herdr];
       for (const step of steps) result.lines.push(`[${target}] ${step.status}: ${step.step}${step.detail ? ` (${step.detail})` : ''}`);

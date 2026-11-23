@@ -76,7 +76,7 @@ export function runCandidateRuntimeReconciliation(
       installSpec: `repo-harness@${candidate.version}`,
       syncSkill: request.sync_skill,
       hostAdapters: request.host_adapters,
-      externalSkills: request.external_skills,
+      externalSkills: request.external_skills_opt_out ? false : (request.external_skills_refresh || undefined),
       obsidianSkills: request.obsidian_skills,
       codegraph: request.codegraph,
       reportLanguage: request.report_language,

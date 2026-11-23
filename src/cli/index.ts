@@ -11,7 +11,7 @@ import { globalRuntimeScope, withRuntimeTransactionLock } from '../effects/locki
 
 import { Command, CommanderError } from 'commander';
 import { resolve } from 'path';
-import { assertOverridesCarried, formatHostConfigPreview, hasRecordedAntigravityState, previewHostConfig, resolveOverrides, runInstall, runUninstall } from './commands/install';
+import { assertOverridesCarried, formatHostConfigPreview, hasRecordedAntigravityState, previewHostConfig, resolveOverrides, runInstall, runUninstall, type InstallCommandOptions } from './commands/install';
 import { migrateInstallState } from './installer/install-state-migration';
 import { PLUGIN_IDS, type PluginId } from '../core/skill-surface/plugin-manifest';
 import { writeAllSync } from './runtime/write-all-sync';
@@ -140,27 +140,29 @@ export function buildProgram(): Command {
       const target = assertAdapterTarget(rawOpts.target, 'install');
       const location = rawOpts.location === undefined ? undefined : assertLocation(rawOpts.location, 'install');
       // Adapter-only installs validate the install-state protocol under the runtime lock.
-      const installAdapters = (reportLanguage?: ReportLanguageFlag) => withRuntimeTransactionLock(globalRuntimeScope(process.env), (runtimeLock) => {
-        migrateInstallState(process.env);
-        readInstallState();
-        if (target === 'antigravity') {
-          return installAntigravityRuntime(process.env, runtimeLock, { reportLanguage, externalSkills: rawOpts.externalSkills, syncSkill: rawOpts.syncSkill });
-        }
-        return runInstall({ target, location: location ?? 'global', reportLanguage });
-      });
+      const installAdapters = (adapterOptions: Pick<InstallCommandOptions, 'reportLanguage' | 'syncSkill' | 'hooks' | 'updateMode'> = {}) =>
+        withRuntimeTransactionLock(globalRuntimeScope(process.env), (runtimeLock) => {
+          migrateInstallState(process.env);
+          readInstallState();
+          if (target === 'antigravity') {
+            return installAntigravityRuntime(process.env, runtimeLock, { ...adapterOptions, externalSkills: rawOpts.externalSkills });
+          }
+          return runInstall({ target, location: location ?? 'global' });
+        });
       if (target === 'antigravity') {
         if (rawOpts.state || rawOpts.rollback || rawOpts.plugins !== undefined || rawOpts.override?.length || rawOpts.withObsidianSkills) {
           throw new Error('rh install --target antigravity only installs Antigravity hooks, global rules, and skills');
         }
         if (rawOpts.hooks === false) throw new Error('rh install --target antigravity requires hooks');
         const reportLanguage = rawOpts.reportLanguage === undefined ? undefined : parseReportLanguageFlag(rawOpts.reportLanguage);
+        const adapterOptions = { reportLanguage, syncSkill: rawOpts.syncSkill, hooks: true, updateMode: false };
         if (rawOpts.dryRun) {
-          const hostConfig = previewHostConfig(target, [], process.env, { reportLanguage });
+          const hostConfig = previewHostConfig(target, [], process.env, adapterOptions);
           if (rawOpts.json) console.log(JSON.stringify({ host_config: hostConfig }, null, 2));
           else for (const line of formatHostConfigPreview(hostConfig)) console.log(line);
           process.exit(hostConfig.unplanned.length ? 1 : 0);
         }
-        const result = installAdapters(reportLanguage);
+        const result = installAdapters(adapterOptions);
         if (rawOpts.json) console.log(JSON.stringify(result, null, 2));
         else for (const line of result.lines) console.log(line);
         process.exit(result.exitCode);
@@ -312,9 +314,10 @@ export function buildProgram(): Command {
         }
         const reportLanguage = rawOpts.reportLanguage === undefined ? undefined : parseReportLanguageFlag(rawOpts.reportLanguage);
         const env = process.env;
+        const adapterOptions = { reportLanguage, syncSkill: rawOpts.syncSkill, updateMode: true, hooks: rawOpts.hooks !== false };
         if (rawOpts.dryRun) {
           const selected = hasRecordedAntigravityState(env, true);
-          const hostConfig = previewHostConfig(selected ? target : null, [], env, { reportLanguage, updateMode: true, hooks: rawOpts.hooks !== false });
+          const hostConfig = previewHostConfig(selected ? target : null, [], env, adapterOptions);
           if (rawOpts.json) console.log(JSON.stringify({ host_config: hostConfig, candidate_changes: 'unavailable' }, null, 2));
           else for (const line of formatHostConfigPreview(hostConfig)) console.log(line);
           process.exit(hostConfig.unplanned.length ? 1 : 0);
@@ -324,7 +327,7 @@ export function buildProgram(): Command {
           if (!hasRecordedAntigravityState(env, false)) {
             return { exitCode: 0, lines: ['[antigravity] no recorded hook member; run rh install --target antigravity to install it'] };
           }
-          return runInstall({ target, location: 'global', reportLanguage, updateMode: true, hooks: rawOpts.hooks !== false });
+          return runInstall({ target, location: 'global', ...adapterOptions });
         });
         if (rawOpts.json) console.log(JSON.stringify(result, null, 2));
         else for (const line of result.lines) console.log(line);
