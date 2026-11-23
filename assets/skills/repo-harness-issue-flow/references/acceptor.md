@@ -261,8 +261,7 @@ unresolved ids; inspect the PR before a new publish. On success the result
 lists the resolved ids in `resolved_threads`.
 
 It posts no APPROVE review and no REQUEST_CHANGES review. A review seat
-writes no file and no GitHub comment: the session that runs the round
-publishes its receipt with `rh review collect` (below). On every seat,
+writes no file and no GitHub comment. On every seat,
 Codex and Pi included, the read-only limit is a brief rule only. On a Codex
 seat the sandbox limits files only.
 
@@ -270,7 +269,13 @@ A read-only review seat of any runtime (Pi, Claude, Codex) cannot write a
 receipt file. Its packet states the round, `risk_tier`, `subject_sha` and
 the one `reviewer.harness` value of its runtime. The seat ends its reply
 with a `RECEIPT-JSON` marker and the receipt as one JSON object, and does
-not publish. After the pane status is `done`, the coordinator runs
+not publish.
+
+The attention watcher (`rh board attention --watch --review`) publishes each PASS receipt when its seat is
+done. A FAIL receipt stays unpublished until the coordinator runs `rh review collect`. No merge reads an
+unpublished receipt.
+
+For manual collection, run
 `rh review collect --seat <terminal> --pr <n> [--owner-record <url>] [--json]`.
 It records `Seat: gatekeeper` when the terminal's `repo-harness.seat` label
 is `gatekeeper` or `gatekeeper-fallback`, and `Seat: reviewer` when it is
@@ -290,7 +295,7 @@ way. It fails closed when the record, the block, the JSON, the receipt or
 the PR head subject is missing or wrong, or when two sessions hold a packet
 for the head, and it does not read pane text.
 
-Every review round publishes its claim and record with this command.
+Every review round publishes its claim and record through this publication path.
 Do not post a claim or a record by hand, and do not write the verdict in
 free prose: the board counts a High row only when it cites a published
 claim, and the PR does not count as accepted.
