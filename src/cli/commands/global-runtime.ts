@@ -64,7 +64,7 @@ import {
   writeWindowsProtectedHelperContract,
 } from "../../effects/runtime/protected-helper-platform";
 import {
-  CANDIDATE_RECONCILIATION_REQUEST_PROTOCOL,
+  CANDIDATE_RECONCILIATION_PROTOCOL,
   assertReceiptSelection,
   candidatePackageIdentity,
   encodeCandidateRequest,
@@ -829,7 +829,7 @@ function reconcileWithInstalledCandidate(
     };
   }
   const request: CandidateReconciliationRequest = {
-    protocol: CANDIDATE_RECONCILIATION_REQUEST_PROTOCOL,
+    protocol: CANDIDATE_RECONCILIATION_PROTOCOL,
     transaction_id: handoff.transactionId,
     transaction_backup_root: handoff.transactionBackupRoot,
     parent_token: handoff.parentToken,
@@ -838,8 +838,7 @@ function reconcileWithInstalledCandidate(
     target,
     sync_skill: opts.syncSkill !== false,
     host_adapters: opts.hostAdapters !== false,
-    external_skills_refresh: opts.externalSkills === true,
-    external_skills_opt_out: opts.externalSkills === false,
+    external_skills: opts.externalSkills === true,
     obsidian_skills: opts.obsidianSkills === true,
     codegraph: opts.codegraph ?? true,
     report_language: opts.reportLanguage,
@@ -1821,17 +1820,6 @@ function refreshAntigravityRuntime(env: NodeJS.ProcessEnv, opts: GlobalRuntimeOp
   return { step, status: result.exitCode === 0 ? 'ok' : 'failed', detail: result.lines.join('; ') };
 }
 
-function projectAvailableAntigravitySkills(sourceRoot: string, env: NodeJS.ProcessEnv, transaction?: string): GlobalRuntimeStep {
-  const staged = stagedSkillRoot(homeDir(env));
-  const skills = loadSkillSurfaceCatalog(sourceRoot).packages
-    .filter(pkg => pkg.kind === 'external' && !pkg.explicitOnly && pkg.hosts.includes('antigravity') && pkg.name !== 'herdr')
-    .map(pkg => pkg.name)
-    .filter(name => existsSync(join(staged, name, 'SKILL.md')));
-  const step = 'project staged Antigravity skills';
-  if (skills.length === 0) return { step, status: 'skipped', detail: 'no staged external skills' };
-  return projectStagedSkills(skills, 'antigravity', false, env, step, transaction);
-}
-
 class RuntimeSetupFailure extends Error {
   constructor(readonly result: GlobalRuntimeResult) { super('runtime setup failed'); }
 }
@@ -2028,11 +2016,6 @@ function runGlobalRuntimeSetupInTransaction(opts: GlobalRuntimeOptions): GlobalR
   } else {
     steps.push({ step: "configure Waza skills", status: "skipped", detail: "disabled" });
     steps.push({ step: "configure Mermaid skill", status: "skipped", detail: "disabled" });
-    if (refreshAntigravity && opts.externalSkills !== false) {
-      const projection = projectAvailableAntigravitySkills(sourceRoot, env, opts.transaction);
-      steps.push(projection);
-      if (projection.status === 'failed') return finalizeRuntimeResult(steps);
-    }
   }
 
   if (opts.obsidianSkills === true && !plugins.includes('strategy-memory')) {

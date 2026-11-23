@@ -23,7 +23,7 @@ import wazaRules from '../../src/core/skill-surface/waza-shared-rules.json';
 import { syncWazaSharedRules } from "../../src/cli/installer/waza-rules";
 import { beginInstallHostTransaction, installProfileHostMutationPaths, installProfileTransactionPaths, installStateStatus, readInstallState, rollbackInstallHostTransaction, versions } from '../../src/cli/installer/install-profile';
 import { applyGlobalContextRefresh, GLOBAL_RULES_EDITED, GLOBAL_RULES_END, inspectGlobalContext, preflightGlobalContextRefresh, renderGlobalRulesBlock, setReportingLanguage } from '../../src/cli/installer/global-context';
-import { CANDIDATE_RECONCILIATION_REQUEST_PROTOCOL, CandidateRequestProtocolRetiredError, assertReceiptSelection, encodeCandidateRequest, parseCandidateReceipt, parseCandidateRequest, type CandidateReconciliationRequest } from '../../src/cli/commands/candidate-reconciliation';
+import { CandidateRequestProtocolRetiredError, assertReceiptSelection, encodeCandidateRequest, parseCandidateReceipt, parseCandidateRequest, type CandidateReconciliationRequest } from '../../src/cli/commands/candidate-reconciliation';
 import type { PluginId } from '../../src/core/skill-surface/plugin-manifest';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
 import { hostConfigPaths } from '../../src/effects/host-config/store';
@@ -542,7 +542,7 @@ function seedAntigravityStagedWaza(home: string): void {
   }
 }
 
-test.skipIf(process.platform === 'win32')('default runtime update refreshes the recorded Antigravity adapter and staged skills only after opt-in', () => {
+test.skipIf(process.platform === 'win32')('default runtime update refreshes the recorded Antigravity adapter after opt-in and skips staged Waza links', () => {
   const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'repo-harness-antigravity-update-')));
   try {
     const home = join(tmp, 'home');
@@ -577,6 +577,7 @@ test.skipIf(process.platform === 'win32')('default runtime update refreshes the 
     expect(installed.status, installed.stdout + installed.stderr).toBe(0);
     const hooks = join(gemini, 'config', 'hooks.json');
     const skill = join(gemini, 'config', 'skills', 'think');
+    expect(readlinkSync(skill)).toBe(join(home, '.agents', 'skills', 'think'));
     rmSync(skill);
     const movedEnv = { ...env, BUN_INSTALL: join(home, 'moved-bun') };
     const packageRoot = seedGlobalPackageFixture(movedEnv, { mutable: true });
@@ -584,7 +585,8 @@ test.skipIf(process.platform === 'win32')('default runtime update refreshes the 
     expect(updated.exitCode, updated.stdout + updated.stderr).toBe(0);
     expect(updated.steps.find(step => step.step === 'refresh Antigravity runtime')).toMatchObject({ status: 'ok' });
     expect(readFileSync(hooks, 'utf8')).toContain(join(packageRoot, 'dist/hook-entry.js'));
-    expect(readlinkSync(skill)).toBe(join(home, '.agents', 'skills', 'think'));
+    expect(lstatSync(skill, { throwIfNoEntry: false })).toBeUndefined();
+    expect(readFileSync(join(home, '.agents', 'skills', 'think', 'SKILL.md'), 'utf8')).toBe('# think\n');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -3857,35 +3859,6 @@ describe('Global Working Rules refresh during install and update', () => {
     // A protocol 3 request that still carries a retired field is refused, not silently ignored.
     for (const retired of [{ profile: 'full' }, { reverse_skill: true }, { reverse_skill: false }]) {
       expect(() => parseCandidateRequest(encodeCandidateRequest({ ...request, ...retired } as unknown as CandidateReconciliationRequest), '9.9.9')).toThrow('invalid shape');
-    }
-  });
-
-  test('candidate request v4 preserves external skill intent and v3 keeps its released semantics', () => {
-    const fields = {
-      transaction_id: 't', transaction_backup_root: '/tmp/b', parent_token: 'p', cwd: '/tmp',
-      candidate: { root: '/tmp/c', version: '9.9.9', package_digest: 'sha256:00' },
-      target: 'both', sync_skill: true, host_adapters: true, obsidian_skills: false, codegraph: false,
-    } as const;
-    const decode = (request: CandidateReconciliationRequest) => parseCandidateRequest(encodeCandidateRequest(request), '9.9.9');
-    const v4 = { ...fields, protocol: CANDIDATE_RECONCILIATION_REQUEST_PROTOCOL } as const;
-    for (const [refresh, optOut] of [[false, false], [true, false], [false, true]]) {
-      const intent = { external_skills_refresh: refresh, external_skills_opt_out: optOut };
-      expect(decode({ ...v4, ...intent })).toEqual({ ...fields, ...intent });
-    }
-    const v3 = { ...fields, protocol: 3, external_skills: false } as const;
-    for (const refresh of [false, true]) {
-      expect(decode({ ...v3, external_skills: refresh })).toEqual({ ...fields, external_skills_refresh: refresh, external_skills_opt_out: !refresh });
-    }
-    const disabled = { ...v4, external_skills_refresh: false, external_skills_opt_out: true };
-    for (const invalid of [
-      { ...v4, external_skills_refresh: false },
-      { ...disabled, external_skills_refresh: 'false' },
-      { ...disabled, external_skills_refresh: true },
-      { ...disabled, external_skills: false },
-      { ...disabled, target: ['both'] },
-      { ...v3, external_skills_opt_out: true },
-    ]) {
-      expect(() => decode(invalid as CandidateReconciliationRequest)).toThrow('invalid shape');
     }
   });
 });

@@ -1303,67 +1303,6 @@ function checkpoint(step: string) {
     }, 60_000);
   }
 
-  test.skipIf(process.platform === 'win32')('candidate update restores staged Antigravity links unless external skills are explicitly disabled', () => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'rh-candidate-antigravity-')));
-    const home = join(root, 'home');
-    const bin = join(root, 'bin');
-    const parent = join(root, 'parent');
-    const candidate = join(root, 'candidate');
-    const bunInstall = join(home, '.bun');
-    const globalPackage = join(bunInstall, 'install', 'global', 'node_modules', 'repo-harness');
-    const bun = join(bin, 'bun');
-    const bunLog = join(root, 'bun.log');
-    const providerLog = join(root, 'provider.log');
-    const env = { HOME: home, BUN_INSTALL: bunInstall, PATH: `${bin}:${fakeHcBin}:/usr/bin:/bin`,
-      REPO_HARNESS_BUN_EXECUTABLE: bun, TMPDIR: root };
-    const cli = join(parent, 'src', 'cli', 'index.ts');
-    const run = (...args: string[]) => spawnSync(process.execPath, ['--no-env-file', cli, ...args], {
-      cwd: root, env, encoding: 'utf8',
-    });
-    try {
-      mkdirSync(bin);
-      mkdirSync(join(globalPackage, '..'), { recursive: true });
-      copyRuntimeFixture(parent, '0.36.0', 30);
-      copyRuntimeFixture(candidate, '0.36.1', 30);
-      symlinkSync(parent, globalPackage, 'dir');
-      const binRoot = join(bunInstall, 'bin');
-      mkdirSync(binRoot);
-      // Bun's launcher points through the global package path before and after the switch.
-      symlinkSync(join(globalPackage, 'src', 'cli', 'index.ts'), join(binRoot, 'rh'));
-      writeCoreOnlyInstallState(home);
-      writeCandidateSwitchingBun(root, bun, bunLog, globalPackage, candidate, undefined, true);
-      const wrapper = readFileSync(`${bun}.fixture-body`, 'utf8');
-      writeShellExecutableFixture(root, bun, wrapper.replace(/exit 0\n$/, `if [[ "$1" == "${candidate}/scripts/skill-surface-select.ts" ]]; then exec "${process.execPath}" "$@"; fi\nexit 0\n`));
-      for (const command of ['bunx', 'curl']) {
-        writeExecutable(join(bin, command), `#!/bin/sh\nprintf '%s\\n' '${command}' >> '${providerLog}'\nexit 1\n`);
-      }
-      for (const name of ['think', 'hunt', 'check', 'health']) {
-        const staged = join(home, '.agents', 'skills', name);
-        mkdirSync(staged, { recursive: true });
-        writeFileSync(join(staged, 'SKILL.md'), `# ${name}\n`);
-      }
-      const install = run('install', '--target', 'antigravity');
-      expect(install.status, install.stdout + install.stderr).toBe(0);
-      const link = join(home, '.gemini', 'config', 'skills', 'think');
-      expect(realpathSync(link)).toBe(join(home, '.agents', 'skills', 'think'));
-      rmSync(link);
-
-      for (const args of [['--no-external-skills'], []]) {
-        const update = run('update', '--no-codegraph', '--json', ...args);
-        const runtime = JSON.parse(update.stdout);
-        expect(update.status, runtime.stderr).toBe(0);
-        expect(runtime.steps).toContainEqual(expect.objectContaining({ step: 'reconcile installed candidate runtime', status: 'ok' }));
-        expect(realpathSync(globalPackage)).toBe(candidate);
-        expect(existsSync(providerLog)).toBe(false);
-        expect(existsSync(link)).toBe(args.length === 0);
-      }
-      expect(realpathSync(link)).toBe(join(home, '.agents', 'skills', 'think'));
-      expect(readFileSync(join(link, 'SKILL.md'), 'utf8')).toBe('# think\n');
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  }, 30_000);
-
   test('the leftover summary comes from candidate C after B assets change in place', () => {
     const root = mkdtempSync(join(tmpdir(), 'repo-harness-candidate-leftovers-'));
     const home = join(root, 'home');

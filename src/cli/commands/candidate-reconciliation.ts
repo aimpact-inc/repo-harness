@@ -40,8 +40,8 @@ import {
   type RuntimeTransactionScope,
 } from '../../effects/locking/runtime-transaction-lock';
 
+/** Protocol 2 drops the request profile: the candidate reads the recorded plugin selection from the install state. */
 export const CANDIDATE_RECONCILIATION_PROTOCOL = 3;
-export const CANDIDATE_RECONCILIATION_REQUEST_PROTOCOL = 4;
 export const CANDIDATE_RECONCILIATION_CAPABILITY_PROTOCOL = 1;
 const CANDIDATE_CAPABILITY_NAME = '.candidate-runtime-reconciliation-capability.v1.json';
 
@@ -91,7 +91,8 @@ export interface CandidateReconciliationReceipt {
   readonly overrides?: OverrideSelection;
 }
 
-interface CandidateReconciliationRequestFields {
+export interface CandidateReconciliationRequest {
+  readonly protocol: typeof CANDIDATE_RECONCILIATION_PROTOCOL;
   readonly transaction_id: string;
   readonly transaction_backup_root: string;
   readonly parent_token: string;
@@ -100,24 +101,13 @@ interface CandidateReconciliationRequestFields {
   readonly target: InstallTargetSpec;
   readonly sync_skill: boolean;
   readonly host_adapters: boolean;
+  readonly external_skills: boolean;
   readonly obsidian_skills: boolean;
   readonly codegraph: boolean;
   readonly report_language?: ReportLanguageFlag;
   /** The user's `--override` selection, paths resolved by the parent; the candidate checks it against its own requests. */
   readonly overrides?: OverrideSelection;
 }
-
-interface CandidateExternalSkillIntent {
-  readonly external_skills_refresh: boolean;
-  readonly external_skills_opt_out: boolean;
-}
-
-export type CandidateReconciliationRequest = CandidateReconciliationRequestFields & (
-  | { readonly protocol: 3; readonly external_skills: boolean }
-  | ({ readonly protocol: typeof CANDIDATE_RECONCILIATION_REQUEST_PROTOCOL } & CandidateExternalSkillIntent)
-);
-
-type DecodedCandidateReconciliationRequest = CandidateReconciliationRequestFields & CandidateExternalSkillIntent;
 
 export interface CandidateReceiptExpectation {
   readonly transaction_id: string;
@@ -238,7 +228,7 @@ export function publishCandidateReconciliationCapability(
  * all agree; argv/env values alone are never authority.
  */
 export function consumeCandidateReconciliationCapability(
-  request: CandidateReconciliationRequestFields,
+  request: CandidateReconciliationRequest,
   scope: RuntimeTransactionScope,
 ): CandidateReconciliationCapability {
   if (request.transaction_id !== sha256Prefixed(request.transaction_backup_root)) {
@@ -507,7 +497,7 @@ function isOverrideSelection(value: unknown): boolean {
     && typeof entry.selector === 'string' && entry.selector.length > 0);
 }
 
-export function parseCandidateRequest(encoded: string, candidateVersion: string): DecodedCandidateReconciliationRequest {
+export function parseCandidateRequest(encoded: string, candidateVersion: string): CandidateReconciliationRequest {
   let parsed: unknown;
   try {
     parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf-8'));
@@ -521,22 +511,21 @@ export function parseCandidateRequest(encoded: string, candidateVersion: string)
   if (request.protocol === 1 || request.protocol === 2) {
     throw new CandidateRequestProtocolRetiredError(request.protocol, candidateVersion);
   }
-  const v3 = request.protocol === 3;
   const requiredStrings = ['transaction_id', 'transaction_backup_root', 'parent_token', 'cwd'];
-  const externalSkillFields = v3 ? ['external_skills'] : ['external_skills_refresh', 'external_skills_opt_out'];
-  const booleans = ['sync_skill', 'host_adapters', 'obsidian_skills', 'codegraph', ...externalSkillFields];
-  // Each wire version has its own closed field set.
+  const booleans = [
+    'sync_skill', 'host_adapters', 'external_skills', 'obsidian_skills', 'codegraph',
+  ];
+  // A field that this version does not read (a retired one, or one of a newer parent) is refused, not dropped.
   const known = new Set([...requiredStrings, ...booleans, 'protocol', 'candidate', 'target', 'report_language', 'overrides']);
   if (
-    (!v3 && request.protocol !== CANDIDATE_RECONCILIATION_REQUEST_PROTOCOL)
+    request.protocol !== CANDIDATE_RECONCILIATION_PROTOCOL
     || requiredStrings.some((key) => typeof request[key] !== 'string' || !(request[key] as string).length)
     || typeof request.candidate !== 'object'
     || request.candidate === null
     || Array.isArray(request.candidate)
-    || typeof request.target !== 'string' || !['codex', 'claude', 'both'].includes(request.target)
+    || !['codex', 'claude', 'both'].includes(String(request.target))
     || Object.keys(request).some((key) => !known.has(key))
     || booleans.some((key) => typeof request[key] !== 'boolean')
-    || (request.external_skills_refresh === true && request.external_skills_opt_out === true)
     || (request.report_language !== undefined
       && !REPORT_LANGUAGE_FLAG_VALUES.includes(request.report_language as ReportLanguageFlag))
     || (request.overrides !== undefined && !isOverrideSelection(request.overrides))
@@ -552,13 +541,5 @@ export function parseCandidateRequest(encoded: string, candidateVersion: string)
   ) {
     throw new Error('candidate reconciliation request has invalid package identity');
   }
-  // SAFETY: The checks above prove the closed field set and the types for this wire version.
-  const wire = request as unknown as CandidateReconciliationRequest;
-  if (wire.protocol === 3) {
-    const { protocol: _protocol, external_skills, ...fields } = wire;
-    // Released parents use false to disable external projection. Keep that behavior at the old wire boundary.
-    return { ...fields, external_skills_refresh: external_skills, external_skills_opt_out: !external_skills };
-  }
-  const { protocol: _protocol, ...fields } = wire;
-  return fields;
+  return request as unknown as CandidateReconciliationRequest;
 }
