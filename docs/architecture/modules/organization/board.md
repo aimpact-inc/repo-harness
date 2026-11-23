@@ -1,6 +1,6 @@
 # organization/board 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-organization-board" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:b375eb208d4c3d1ea0e24be561d9d3937c0a0cc0dab13600f24570ef49a76687" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-organization-board" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:3a25d6b968110d753964855ad23961a52dcce6c940aeb49548978fff90489453" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.organization.board`(kind `capability`)
 > **Matched Prefixes**:`src/core/board/**`、`src/effects/board/**`、`src/cli/commands/board.ts`、`src/cli/commands/quota.ts`、`src/cli/commands/seats.ts`
@@ -94,7 +94,7 @@ flowchart LR
 | `component.board.assets-layer` | Board (assets) | `2–5` 個文件 / `20–50` 行 | 未宣告 |
 | `component.board.cli` | Board (cli) | `2–5` 個文件 / `1000–2000` 行 | 未宣告 |
 | `component.board.core` | Board (core) | `20–50` 個文件 / `5000–10000` 行 | 未宣告 |
-| `component.board.effects` | Board (effects) | `20–50` 個文件 / `2000–5000` 行 | 未宣告 |
+| `component.board.effects` | Board (effects) | `20–50` 個文件 / `5000–10000` 行 | 未宣告 |
 
 ## 2. P2:端到端數據流
 

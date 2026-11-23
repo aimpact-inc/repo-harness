@@ -760,7 +760,7 @@
     "projection_target.diagram.runtime-topology":
       {"type":"diagram-runtime-topology","scope":{"kind":"diagram","id":"runtime-topology"},"path":"docs/architecture/diagrams/runtime-topology.mmd","ownership":"generated","format":"mermaid","outputDigest":"sha256:f311c261cd11f00f966e85f701aaf77b1fd287453d9e66b3b66052c6827a55f8"},
     "projection_target.entity.capability-organization-board":
-      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.organization.board","entityKind":"capability"},"path":"docs/architecture/modules/organization/board.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:b375eb208d4c3d1ea0e24be561d9d3937c0a0cc0dab13600f24570ef49a76687"},
+      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.organization.board","entityKind":"capability"},"path":"docs/architecture/modules/organization/board.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:3a25d6b968110d753964855ad23961a52dcce6c940aeb49548978fff90489453"},
     "projection_target.entity.capability-organization-publication":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.organization.publication","entityKind":"capability"},"path":"docs/architecture/modules/organization/publication.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:f32b651d8d64d12f5c85f3d8ab74b2404fa2c9df837d633b2d2dd45b9794eee9"},
     "projection_target.entity.capability-organization-task-fleet":
