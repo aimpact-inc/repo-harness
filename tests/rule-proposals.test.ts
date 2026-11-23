@@ -3,12 +3,15 @@ import { groupRuleProposals, observeRuleProposals, parseRuleOpportunity } from '
 import { renderInlineComment, reviewPayloadFromReceipt, type ReviewPublishBlockingFinding, type ReviewPublishReceipt } from '../src/core/review/review-publish';
 
 const blocker: ReviewPublishBlockingFinding = {
-  id: 'missing-guard', severity: 'P1', path: 'src/guard.ts', line: 17, evidence: 'Missing file check.', fix: 'Check the file.',
+  id: 'missing-guard', severity: 'P1', path: 'src/guard.ts', line: 17, trigger: 'Run the command with the input file absent.',
+  evidence: 'Missing file check.', fix: 'Check the file.',
 };
-const low: ReviewPublishBlockingFinding = { ...blocker, id: 'unclear-error', severity: 'P2', line: 28 };
+const low = {
+  id: 'unclear-error', severity: 'P2', path: 'src/guard.ts', line: 28, evidence: 'The error omits the path.', fix: 'Name the file.',
+} as const;
 const nit = { id: 'long-description', severity: 'P3', message: 'Shorten the description.' } as const;
 const receipt: ReviewPublishReceipt = {
-  protocol: 2, kind: 'repo-harness-review-publish-receipt', round: 1, subject_sha: 'a'.repeat(40), risk_tier: 'medium',
+  protocol: 3, kind: 'repo-harness-review-publish-receipt', round: 1, subject_sha: 'a'.repeat(40), risk_tier: 'medium',
   reviewer: { harness: 'pi', actual_model: null }, model_relation: 'same-family', verdict: 'FAIL',
   summary: 'Review summary.', findings: [low, nit], confirmed_fixed: [],
 };

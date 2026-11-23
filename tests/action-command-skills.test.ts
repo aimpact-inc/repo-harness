@@ -3,6 +3,7 @@ import { execFileSync } from "child_process";
 import { existsSync, readFileSync } from "fs";
 import { join, posix } from "path";
 import { decodePlanBlock } from "../src/core/board/plan-block";
+import { REVIEW_SEVERITY_BAR } from "../src/core/review/finding-severity";
 
 // SSD-06 migration: the pre-cutover 19-facade public action command surface
 // (all living flat under assets/skill-commands/) collapses into the plan's
@@ -618,6 +619,10 @@ describe("repo-harness action command skills", () => {
     expect(acceptor).toContain("model_relation");
     // M32: reviewers read CI and the recorded evidence. #2936: a FAIL needs a P0 or P1; a merge needs a PASS. #3190: two rounds; a P2 stays in the review record.
     const flat = (text: string) => text.replace(/\s+/g, " ");
+    expect(flat(acceptor)).toContain(REVIEW_SEVERITY_BAR);
+    for (const file of ["AGENTS.md", "CLAUDE.md"]) {
+      expect(flat(readFileSync(join(ROOT, file), "utf8"))).toContain(REVIEW_SEVERITY_BAR);
+    }
     expect(flat(acceptor)).toContain("Never rerun a passing typecheck or test.");
     expect(flat(acceptor)).toContain("There is no round 3: a blocking finding after round 2 ends the loop.");
     expect(flat(acceptor)).toContain("A `FAIL` has at least one P0 or P1 finding. A P2 and a P3 do not block a merge: a `PASS` record carries them in the review record. Rule 3 decides what follows a `FAIL` in round 2. A merge always needs a `PASS` record.");

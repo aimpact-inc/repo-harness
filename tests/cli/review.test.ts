@@ -158,7 +158,7 @@ const publishHome = () => { const home = tmpWorkspace('review-publish-home'); ro
 
 function publishReceipt(overrides: Record<string, unknown> = {}) {
   return {
-    protocol: 2,
+    protocol: 3,
     kind: 'repo-harness-review-publish-receipt',
     round: 1,
     subject_sha: PUBLISH_HEAD,
@@ -168,7 +168,7 @@ function publishReceipt(overrides: Record<string, unknown> = {}) {
     model_relation: 'different-family',
     summary: 'One blocking finding and one NIT.',
     findings: [
-      { id: 'F1', severity: 'P1', path: 'src/example.ts', line: 12, evidence: 'The guard drops the last item.', fix: 'Use the inclusive bound.' },
+      { id: 'F1', severity: 'P1', path: 'src/example.ts', line: 12, trigger: 'Pass a list with one item to the guard.', evidence: 'The guard drops the last item.', fix: 'Use the inclusive bound.' },
       { id: 'N1', severity: 'P3', message: 'Rename the helper for clarity.' },
     ],
     confirmed_fixed: [],
@@ -228,7 +228,7 @@ test('publish posts the claim, one review thread per P1/P2, then the record', as
   expect(posts[1]).toMatchObject({ commit_id: PUBLISH_HEAD, event: 'COMMENT' });
   expect(posts[1].comments).toHaveLength(1);
   expect(posts[1].comments[0]).toMatchObject({ path: 'src/example.ts', line: 12, side: 'RIGHT' });
-  expect(posts[1].comments[0].body).toContain('The guard drops the last item.');
+  expect(posts[1].comments[0].body).toContain('**Trigger**: Pass a list with one item to the guard.\n\nThe guard drops the last item.');
   expect(posts[1].comments[0].body).toContain('Use the inclusive bound.');
   expect(posts[1].body).toContain('Rename the helper for clarity.');
   expect(posts[1].body).not.toContain('The guard drops the last item.');
@@ -237,6 +237,7 @@ test('publish posts the claim, one review thread per P1/P2, then the record', as
   expect(posts[2].body).toContain('\nSeat: gatekeeper\n');
   expect(posts[2].body).toContain('Model relation: different-family');
   expect(posts[2].body).toContain('FAIL: 1 P1, 1 P3');
+  expect(posts[2].body).toContain('- P1 F1 at src/example.ts:12: trigger: Pass a list with one item to the guard.; The guard drops the last item. -> Use the inclusive bound.');
   expect(posts[2].body).toContain(output.claim_url);
   expect(posts[2].body).toContain('read-only');
   expect(posts[2].body).not.toContain('fresh context');
@@ -287,8 +288,9 @@ test('a PASS receipt that carries a P2 is accepted, and the P2 gets its own foll
   expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, threads: 1 });
   const posts = fixture.gh.inputs().filter((entry) => entry.input !== '').map((entry) => JSON.parse(entry.input));
   expect(posts[1].comments).toHaveLength(1);
-  expect(posts[1].comments[0].body).toContain('**P2 F2**');
+  expect(posts[1].comments[0].body).toContain('**P2 F2**\n\nA small real defect.');
   expect(posts[2].body).toContain('PASS: 1 P2');
+  expect(posts[2].body).toContain('- P2 F2 at src/example.ts:12: A small real defect. -> Close the boundary case.');
 });
 
 const OWNER_BASE = 'https://github.com/example/repo-harness';
@@ -444,7 +446,7 @@ test('a finding outside the diff goes into the review body, not an inline commen
   const fixture = publishFixture();
   const outside = { id: 'F2', severity: 'P2', path: 'src/example.ts', line: 15, evidence: 'A pre-existing call site ignores the result.', fix: 'Check the result.' };
   const result = await runPublish(fixture, 'gatekeeper', publishReceipt({ findings: [
-    { id: 'F1', severity: 'P1', path: 'src/example.ts', line: 12, evidence: 'The guard drops the last item.', fix: 'Use the inclusive bound.' }, outside] }));
+    { id: 'F1', severity: 'P1', path: 'src/example.ts', line: 12, trigger: 'Pass a list with one item to the guard.', evidence: 'The guard drops the last item.', fix: 'Use the inclusive bound.' }, outside] }));
   expect(result.status, result.stderr).toBe(0);
   expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, threads: 1 });
   const review = JSON.parse(postedInputs(fixture, '/reviews')[0]!.input);
@@ -804,7 +806,7 @@ test('collect refuses malformed, unbound and unsafe agy transcripts before publi
     { label: 'bad JSON', contents: agyLine('PLANNER_RESPONSE', 'RECEIPT-JSON\n{'), message: 'final RECEIPT-JSON block does not decode' },
     { label: 'later malformed reply', contents: agyLine('PLANNER_RESPONSE', good) + agyLine('PLANNER_RESPONSE', 'RECEIPT-JSON\n{'), message: 'final RECEIPT-JSON block does not decode' },
     { label: 'malformed final block in the same reply', contents: agyLine('PLANNER_RESPONSE', `${good}RECEIPT-JSON:\n{"round": `), message: 'final RECEIPT-JSON block does not decode' },
-    { label: 'bad receipt', contents: agyLine('PLANNER_RESPONSE', receiptBlock(publishReceipt({ reviewer: AGY_REVIEWER, protocol: 1 }))), message: 'protocol 1 is retired' },
+    { label: 'retired receipt protocol', contents: agyLine('PLANNER_RESPONSE', receiptBlock(publishReceipt({ reviewer: AGY_REVIEWER, protocol: 1 }))), message: 'protocol must be 3' },
     { label: 'other harness', contents: agyLine('PLANNER_RESPONSE', receiptBlock(publishReceipt())), message: 'must name reviewer.harness agy' },
     { label: 'other subject', contents: agyLine('PLANNER_RESPONSE', receiptBlock(publishReceipt({ reviewer: AGY_REVIEWER, subject_sha: 'b'.repeat(40) }))), message: 'not the packet head' },
     { label: 'other seat', seat: 'reviewer', message: 'no complete agy gatekeeper-fallback launch packet' },

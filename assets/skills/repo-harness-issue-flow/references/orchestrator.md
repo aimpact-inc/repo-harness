@@ -563,10 +563,8 @@ host's PR events or check when the worker reports.
   has, follow `acceptor.md` §2.2.
   Ship the whole verdict bundle of a round before the worker pushes: the
   worker fixes and pushes once per round, not once per finding.
-  Findings take the severities of `acceptor.md` §3. Only defects reachable
-  in ordinary use (or by an accident) or touching I1/I2/I3 are P0 or P1;
-  adversarial-only assumptions and unrequested defensive fallbacks stay P3
-  notes. A P2 and a P3 do not block the PR and open no issue: the `PASS`
+  Apply the finding bar in `acceptor.md` §3.
+  A P2 and a P3 do not block the PR and open no issue: the `PASS`
   record carries them, and you resolve their threads with the `noted` reply
   (`acceptor.md` §2.2, `templates.md`).
   Send the findings to the worker that
@@ -592,6 +590,17 @@ host's PR events or check when the worker reports.
   speculative guards that the issue did not ask for, even when the tests
   pass. Quote the boundary line. This is the most common reason to send a
   PR back.
+- **Trigger challenge.** Before you publish a FAIL receipt, read the trigger
+  of each P0 and P1. When a trigger is outside the bar (`acceptor.md` §3),
+  you may challenge that seat once for that head.
+  1. Post a `repo-harness decision` comment on the PR with the seat, subject
+     SHA, finding IDs and the sentence of the bar that the trigger does
+     not meet.
+  2. Send the challenge text in `templates.md` to the seat.
+
+  The reviewer's answer is final. The watcher publishes a PASS answer.
+  Publish a FAIL answer with `rh review collect`. Never name a severity
+  that you want. Never send a second challenge to that seat for that head.
 - **Stalled worker.** Rule A12 of `rh board attention` finds a
   stalled writer: a writer claim two hours old with no PR and no
   `issue claim status` after the claim. Read its pane, its branch

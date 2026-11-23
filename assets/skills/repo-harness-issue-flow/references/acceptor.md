@@ -101,9 +101,9 @@ PR changes.
    records `Model relation: different-family`, and no `FAIL` row. A
    `same-family` or `unknown` row does not count for Medium.
 
-   The review brief requires each reviewer, in its first round, to group
-   findings by bug family. For each family, list every sibling case and
-   every missing test branch in one finding.
+   The full-review packet groups findings by bug family. List every sibling
+   case in one finding. The High second review packet limits the reviewer
+   to I1 and I2 defects and defects on a configured I3 path.
 
    **New head.** The rows of a record count for their subject SHA only,
    except the round-1 `PASS` row that rule 2 carries to the fix head. A PR
@@ -120,13 +120,13 @@ PR changes.
    check row under the Medium rule above. A High head needs two delta
    check rows from distinct claims, at least one different-family, started
    in parallel.
-2. **Round 2** checks only the round-1 fix delta (the hunks that changed
-   after round 1) and the sibling cases of each blocking finding. Only a
-   reviewer that raised a blocking finding runs it. A round-1 `PASS` row
-   does not run again when the fix stays inside the files of the failing
-   reviewer's findings: that row counts for the fix head. A fix outside
-   those files takes a delta check from the passing reviewer, on that
-   delta only.
+2. **Round 2 is a fix check.** The reviewer that raised a blocking finding
+   confirms each fix and reviews the hunks that changed after round 1. A
+   new finding outside those hunks blocks only as a P0, or as an I1 or I2
+   finding with a trigger. Every other new finding outside those hunks is
+   a P2 or a P3. A round-1 `PASS` row counts for the fix head when the fix
+   stays inside the files of the failing reviewer's findings. A fix outside
+   those files takes a delta check from the passing reviewer.
 3. **Merge or stop.** The orchestrator merges on round 2 when only P2 or
    P3 findings remain. There is no round 3: a blocking finding after round
    2 ends the loop. The orchestrator then narrows the PR to the part that
@@ -138,9 +138,8 @@ PR changes.
 A P2 or a P3 finding does not block a merge and opens no issue. It stays
 in the review record: the round records `PASS` with it, and the
 coordinator resolves each P2 thread with a `noted` reply (§6). Only a P0
-or P1 defect, or an item that the owner names, opens a GitHub issue. A
-finding that touches I1 or I2 is not a P2: the reviewer rates it at least
-P1 (§3).
+or P1 defect, or an item that the owner names, opens a GitHub issue. The
+reviewer applies the finding bar in §3.
 
 The worker fixes each finding by the class rule (`worker.md` §7), so that
 round 2 closes the whole family.
@@ -204,24 +203,30 @@ be resolved.
 |---|---|---|
 | P0 | Data loss, a security defect or an unusable result | Inline thread on the changed line; blocks the merge |
 | P1 | Wrong behavior or broken boundary | Inline thread on the changed line; blocks the merge |
-| P2 | Real defect, small | Inline thread on the changed line; stays in the review record, with no fix round and no issue |
+| P2 | Real defect below the blocking bar | Inline thread on the changed line; stays in the review record, with no fix round and no issue |
 | NIT (P3) | Improvement | Review body only. No thread and no merge block |
 
 Only P0 and P1 block a merge (`src/core/review/finding-severity.ts`).
 Judge a product PR on its own behavior and on I1 (no credential leak),
 I2 (no deletion or overwrite of a user file without authorization), and
-configured I3 paths. Only a defect that ordinary use or an accident can
-reach is a P0 or a P1. Untrusted input that the tool reads in ordinary
-use (repository content, PR and issue text, tool output) is ordinary
-use. When such a defect touches I1 (a credential leak) or I2 (an
-unauthorized deletion or overwrite of a user file), rate it at least P1.
-A finding that needs an adversary who already runs as the user (race,
-alias, shell trick), a client-side cache timing window, an unrequested
-defensive fallback and a duplicate JSON key are P3 notes, also on an I1
-or I2 path. That rating is your duty: code reads a severity, not a
-subject.
+configured I3 paths.
 
-A finding gives the file, the line, the evidence and the smallest fix.
+Fail the PR only for a defect that ordinary use or one accident reaches at
+this head. A P0 or a P1 needs a trigger: the command or input, in a default
+environment, that reaches the defect. Documented commands, options and
+settings are ordinary use. Untrusted input that the tool reads in ordinary
+use (repository content, PR and issue text, tool output) is ordinary use. A
+trigger that needs an undocumented override, hand-edited tool state, a second
+independent fault, or an adversary who already runs as the user (race, alias,
+shell trick) is not ordinary use, also on an I1 or I2 path. A client-side
+cache timing window, an unrequested defensive fallback and a duplicate JSON
+key are P3 notes. A real defect that has no such trigger, or that has a small
+effect and an easy recovery, is a P2. When the trigger leaks a credential
+(I1) or deletes or overwrites a user file without authorization (I2), rate
+the finding at least P1.
+
+The reviewer rates each finding. A P0 or P1 gives the file, line, trigger,
+evidence and smallest fix that removes the trigger.
 Grade only the lines that the PR changes. A defect that main already has
 is a non-blocking note, never a `FAIL`.
 
@@ -332,11 +337,11 @@ summary: <one paragraph>
 findings: [{ severity: P0 | P1 | P2 | P3, message: <text> }]
 ```
 
-The runner turns it into the publish receipt that `review publish` reads,
-from `src/core/review/review-publish.ts`:
+The board review seat writes the publish receipt in its final reply. The
+packet includes the protocol 3 shape from `src/core/review/review-publish.ts`.
 
 ```text
-protocol: 2
+protocol: 3
 kind: repo-harness-review-publish-receipt
 round: <1..5>
 subject_sha: <the PR head>
@@ -345,21 +350,21 @@ reviewer: { harness: <review runtime id>, actual_model: <model> | null }
 verdict: PASS | FAIL
 model_relation: different-family | same-family | unknown
 summary: <one paragraph>
-findings: [{ id, severity: P0 | P1 | P2, path, line, evidence, fix }
+findings: [{ id, severity: P0 | P1, path, line, trigger, evidence, fix }
+         | { id, severity: P2, path, line, evidence, fix }
          | { id, severity: P3, message }]
 confirmed_fixed: [<review thread node id>]
 ```
 
-`PASS` carries no P0 or P1 finding; it may carry P2 and P3 findings,
-which stay in the review record. `FAIL` carries at least one P0 or P1. Each
-blocking finding names one path, one line, the evidence and the smallest
-fix. A P3 finding carries no location. `model_relation` comes from the
-closed family table in `acceptance-receipt.ts`.
+`PASS` may carry P2 and P3 findings. `FAIL` carries at least one P0 or P1.
+Each P0 or P1 requires a non-empty `trigger` and the smallest fix that
+removes it. A P3 carries a one-line message. `model_relation` comes from
+the closed family table in `acceptance-receipt.ts`.
 `confirmed_fixed` lists the node ids of the earlier-round threads whose
 fix this round confirms on its subject SHA. It is `[]` in round 1 and when
 the round confirms no fix. The reviewer reads the PR review threads with
 a read-only GraphQL query, which also gives each node id. `review publish`
-refuses a protocol 1 receipt. A Claude turn has an
+accepts protocol 3. A Claude turn has an
 unobserved model, so its value is `unknown`. This does not block the
 merge.
 

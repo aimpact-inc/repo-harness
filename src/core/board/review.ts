@@ -4,7 +4,7 @@ import type { SeatRouteV1 } from './seat-routing';
 import { DEFAULT_SEATS_CONFIG, isReviewSeat, SEAT_IDS, type SeatConfigV1, type SeatId } from './seats-settings';
 import { REVIEW_SEVERITY_BAR } from '../review/finding-severity';
 import { modelFamily } from '../review/model-family';
-import type { SeatReviewHarness } from '../review/review-publish';
+import { receiptSkeleton, type SeatReviewHarness } from '../review/review-publish';
 import {
   acceptanceRowSeat,
   carriedPasses,
@@ -155,15 +155,30 @@ export function reviewPacketHeader(decision: Extract<ReviewDecisionV1, { action:
   return `Task: review PR #${decision.pr} at head ${decision.head_sha} (tier ${decision.tier}, round ${decision.round}), as the ${start.seat} of repo-harness-issue-flow.`;
 }
 
-/**
- * The task text of a review seat. It states each value of the receipt that the seat cannot know, and the hand-off: a read-only seat
- * cannot write a file or publish, so it ends its reply with the receipt and the orchestrator publishes it with `rh review collect`.
- */
+function reviewScope(tier: 'medium' | 'high', seat: ReviewSeat, deltaFrom: string | null): string {
+  if (deltaFrom !== null) {
+    return `This is a fix check. Confirm the fix of each earlier blocking finding at this head, and review the hunks that changed since ${deltaFrom}. A new finding outside those hunks blocks only as a P0, or as an I1 or I2 finding with a trigger.`;
+  }
+  if (tier === 'high' && seat === 'reviewer') {
+    return 'You are the second review of a High head. Report only I1 and I2 defects, and defects on a configured I3 path. The gatekeeper reviews the rest.';
+  }
+  return 'Review the whole diff. Group findings by bug family: one finding lists every sibling case.';
+}
+
+/** The task text and receipt format for a read-only review seat. */
 export function reviewPacket(decision: Extract<ReviewDecisionV1, { action: 'start' }>, start: ReviewSeatStartV1, harness: SeatReviewHarness): string {
-  const scope = start.delta_from === null
-    ? 'Review the whole diff.'
-    : `This is a delta review. Review the hunks that changed since ${start.delta_from} and the sibling cases of each earlier finding.`;
-  return `${reviewPacketHeader(decision, start)} The worktree is at that head. ${scope} Read the PR body, the issue and the recorded evidence first: gh pr view ${decision.pr} --comments. You are read-only. ${REVIEW_SEVERITY_BAR} Receipt values (repo-harness-review-publish-receipt protocol 2): round ${decision.round}, risk_tier "${decision.tier}", subject_sha ${decision.head_sha}, reviewer.harness "${harness}" (exactly this value); confirmed_fixed lists the node ids of the earlier-round review publish threads whose fix you confirmed at this head, or []. Do not publish. End your last reply with the line RECEIPT-JSON and then the receipt as one JSON object; the orchestrator publishes it with rh review collect.`;
+  const receipt = receiptSkeleton({ round: decision.round, subject_sha: decision.head_sha, risk_tier: decision.tier, harness });
+  return [
+    reviewPacketHeader(decision, start),
+    `The worktree is at that head. ${reviewScope(decision.tier, start.seat, start.delta_from)}`,
+    `Read the PR body, the issue and the recorded evidence first: gh pr view ${decision.pr} --comments. You are read-only.`,
+    'Grade only the lines that the PR changes; a defect that main already has is a P3.',
+    REVIEW_SEVERITY_BAR,
+    'In each P0 or P1 finding, "trigger" holds that command or input, and "fix" names the smallest change that removes it. Do not ask for a wider guard.',
+    'Write at most five P3 notes, one line each.',
+    'Do not publish. End your last reply with the line RECEIPT-JSON and then this receipt as one JSON object, with your values in place of each <...>. Include only your findings and write each line number as an integer.',
+    receipt,
+  ].join('\n');
 }
 
 export function planReview(input: ReviewInputV1): readonly ReviewDecisionV1[] {

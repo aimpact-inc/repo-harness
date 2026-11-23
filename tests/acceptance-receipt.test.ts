@@ -20,7 +20,7 @@ import { createHash } from 'crypto';
 import { buildReviewSubject } from '../src/effects/review/diff-fingerprint';
 import { publishReview } from '../src/effects/review/review-publish';
 import { collectPullRequestMergeReadiness } from '../src/effects/publication/merge-readiness';
-import { validateReviewPublishReceipt } from '../src/core/review/review-publish';
+import { receiptSkeleton, validateReviewPublishReceipt } from '../src/core/review/review-publish';
 import { prepareChangeAssessment } from '../src/effects/review/change-assessment';
 import { applyReviewerDisagreement, assessChange, buildReviewSelectionPacket } from '../src/core/review/change-assessment';
 import { executeAdmittedVerification, evaluateAdmittedVerification, materializeVerificationExecutionReport } from '../src/effects/evidence/verification-execution';
@@ -1103,23 +1103,56 @@ test('external acceptance and current inspection survive HEAD-only provenance ch
   expect(inspectAcceptanceCurrentBinding({ root, authority: authorityFor(root), authorityHome: home, subject: context.subject, evidence })).toEqual(receipt);
 });
 
+test('the filled protocol 3 receipt skeleton passes the publish validator', () => {
+  const values = { round: 2, subject_sha: 'd'.repeat(40), risk_tier: 'high', harness: 'claude' } as const;
+  const skeleton = receiptSkeleton(values);
+  expect(skeleton.split('\n')).toHaveLength(1);
+  const filled: Record<string, unknown> = {
+    '<observed model or null>': null,
+    '<PASS or FAIL>': 'FAIL',
+    '<different-family, same-family or unknown>': 'unknown',
+    '<one paragraph>': 'One blocker, one small defect and one note.',
+    '<P1 finding id>': 'F1', '<P2 finding id>': 'F2', '<P3 finding id>': 'N1',
+    '<path>': 'src/example.ts', '<integer line number>': 12,
+    '<command or input in a default environment>': 'Pass a list with one item to the guard.',
+    '<evidence>': 'The guard drops the last item.', '<smallest fix>': 'Use the inclusive bound.',
+    '<one-line note>': 'Rename the helper.',
+  };
+  const receipt = JSON.parse(skeleton, (key, value) => {
+    if (key === 'confirmed_fixed') return ['PRRT_fixed'];
+    return typeof value === 'string' && Object.hasOwn(filled, value) ? filled[value] : value;
+  });
+  expect(JSON.stringify(receipt)).not.toContain('<');
+  expect(validateReviewPublishReceipt(receipt)).toEqual(receipt);
+  expect(receipt).toMatchObject({
+    protocol: 3, round: values.round, subject_sha: values.subject_sha, risk_tier: values.risk_tier,
+    reviewer: { harness: values.harness }, findings: [{ severity: 'P1' }, { severity: 'P2' }, { severity: 'P3' }],
+  });
+});
+
 test('review publish turns a P1 receipt into one unresolved thread that merge readiness reports', () => {
   const PUBLISH_HEAD = 'd'.repeat(40), PUBLISH_BASE = 'e'.repeat(40), PR_NUMBER = 7, SLUG = 'example/repo';
   const root = mkdtempSync(join(tmpdir(), 'repo-harness-review-publish-')); tempDirs.push(root);
   const receiptPath = join(root, 'receipt.json');
   const receipt = {
-    protocol: 2 as const, kind: 'repo-harness-review-publish-receipt' as const, round: 2, confirmed_fixed: [],
+    protocol: 3 as const, kind: 'repo-harness-review-publish-receipt' as const, round: 2, confirmed_fixed: [],
     subject_sha: PUBLISH_HEAD, risk_tier: 'high' as const,
     reviewer: { harness: 'claude' as const, actual_model: null },
     verdict: 'FAIL' as const, model_relation: 'unknown' as const, summary: 'One blocking finding and one NIT.',
     findings: [
-      { id: 'F1', severity: 'P1' as const, path: 'src/example.ts', line: 12, evidence: 'The guard drops the last item.', fix: 'Use the inclusive bound.' },
+      { id: 'F1', severity: 'P1' as const, path: 'src/example.ts', line: 12, trigger: 'Pass a list with one item to the guard.', evidence: 'The guard drops the last item.', fix: 'Use the inclusive bound.' },
       { id: 'N1', severity: 'P3' as const, message: 'Rename the helper for clarity.' },
     ],
   };
   writeFileSync(receiptPath, JSON.stringify(receipt));
   const { confirmed_fixed: _confirmed, ...withoutConfirmed } = receipt;
-  expect(() => validateReviewPublishReceipt({ ...withoutConfirmed, protocol: 1 })).toThrow('protocol 1 is retired; protocol 2 requires confirmed_fixed');
+  for (const protocol of [1, 2]) {
+    expect(() => validateReviewPublishReceipt({ ...receipt, protocol })).toThrow('protocol must be 3');
+  }
+  const { trigger: _trigger, ...withoutTrigger } = receipt.findings[0]!;
+  expect(() => validateReviewPublishReceipt({ ...receipt, findings: [withoutTrigger] })).toThrow('missing trigger');
+  expect(() => validateReviewPublishReceipt({ ...receipt, findings: [{ ...withoutTrigger, trigger: ' ' }] })).toThrow('finding.trigger must be a non-empty string');
+  expect(() => validateReviewPublishReceipt({ ...receipt, findings: [{ ...withoutTrigger, severity: 'P2', trigger: 'input' }] })).toThrow('extra trigger');
   expect(() => validateReviewPublishReceipt(withoutConfirmed)).toThrow('missing confirmed_fixed');
   expect(() => validateReviewPublishReceipt({ ...receipt, unexpected: true })).toThrow('extra unexpected');
   expect(() => validateReviewPublishReceipt({ ...receipt, findings: receipt.findings.slice(1) })).toThrow('FAIL requires');

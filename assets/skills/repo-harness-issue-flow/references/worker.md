@@ -244,9 +244,10 @@ You are the head owner. Only you push to this branch.
   stays in the review record, with no fix round and no issue: the
   coordinator resolves its thread. For a P3 or a finding that you dispute, reply with
   your reason and leave the disposition to the coordinator.
-- **Fix the class.** For each finding, list the sibling inputs: the other
-  inputs that reach the same defect. Cover the finding and its siblings in
-  one table-driven case, and name the siblings in the fix commit. After a
+- **Fix the class.** A fix removes the trigger of the finding and of each
+  sibling that the finding lists. A new guard, migration or fallback that
+  no finding names needs the word of the coordinator first. Cover the
+  listed inputs in one table-driven case and name them in the fix commit. After a
   second finding in one bug family, push no other instance fix. The
   coordinator first chooses a design change or rule 3 of `acceptor.md`
   §2.2.
