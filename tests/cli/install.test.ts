@@ -129,6 +129,7 @@ test.skipIf(process.platform === 'win32')('Antigravity install --report-language
     const hookMember = JSON.parse(fs.readFileSync(hooks, 'utf8'))['repo-harness'];
     expect(hookMember?.enabled).not.toBe(false);
     expect(Array.isArray(hookMember?.PreToolUse)).toBe(true);
+    expect(hookMember.PreInvocation).toEqual([{ type: 'command', command: expect.stringMatching(/ UserPromptSubmit --route inbox$/), timeout: 30 }]);
     const rulesContent = fs.readFileSync(rules, 'utf8');
     expect(rulesContent).toContain('# My Antigravity Notes\n\nKeep personal rules.');
     expect(rulesContent).toContain('<!-- BEGIN: repo-harness global-working-rules -->');

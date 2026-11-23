@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, test } from 'bun:test';
 import { recordInstallOwnership, seedGlobalPackageFixture } from './helpers/install-ownership';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { isAbsolute, join } from 'path';
+import { dirname, isAbsolute, join } from 'path';
 import { execFileSync, spawnSync } from 'child_process';
 import { runMutationGuard } from '../src/cli/hook/mutation-guard';
 import { bashSafetyDenial, ledgerCreated, registerInstallLedger } from '../src/cli/hook/safety-hook';
@@ -479,6 +479,38 @@ describe('safety hook: edit route', () => {
       expect(existsSync(join(cwd, '.ai/harness/state/circuit-breaker.json'))).toBe(false);
     } finally { rmSync(cwd, { recursive: true, force: true }); }
   });
+  posixOnly('Antigravity asks for protected HOME writes and leaves brain artifacts writable', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'agy-guard-')));
+    const [cwd, home, scratch] = ['repo', 'home', 'tmp'].map(name => join(root, name));
+    const savedTmp = process.env.TMPDIR;
+    try {
+      for (const dir of [cwd, home, scratch]) mkdirSync(dir);
+      initRepo(cwd);
+      process.env.TMPDIR = scratch;
+      const edit = (file_path: string) => runMutationGuard({
+        repoRoot: cwd, payload: { tool_input: { file_path } }, identity: hookIdentity({ host: 'antigravity' }),
+        env: { HOME: home, REPO_HARNESS_WORKTREE_ROOT: scratch },
+      });
+      const ask = { decision: 'ask' as const, reason: expect.stringContaining('[UserFileGuard] I2:') };
+      const gemini = join(home, '.gemini');
+      for (const file of ['antigravity/brain/s/notes.md', 'antigravity-cli/brain/s/notes.md', 'antigravity-ide/brain/s/notes.md',
+        'config/AGENTS.md', 'antigravity-cli/antigravity-oauth-token']) {
+        const path = join(gemini, file);
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, 'synthetic fixture');
+        expect(edit(path)).toEqual({ exitCode: 0, stdout: '', stderr: '', ...(file.includes('/brain/') ? {} : { permission: ask }) });
+      }
+      const brain = join(gemini, 'antigravity/brain');
+      renameSync(brain, join(gemini, 'antigravity/parked'));
+      symlinkSync(gemini, brain);
+      expect(edit(join(brain, 'config/AGENTS.md')).permission).toEqual(ask);
+      expect(failureRecords(cwd)).toEqual([]);
+    } finally {
+      if (savedTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = savedTmp;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('a missing edit target fails closed and legacy path aliases are not read', () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-missing-path-')));
     try {

@@ -16,6 +16,7 @@ import { existsSync, lstatSync, readdirSync, realpathSync, statSync, type Dirent
 import { homedir, tmpdir } from 'os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { managedWorktreeRoot } from '../../effects/git/managed-worktree';
+import { ANTIGRAVITY_BRAIN_ROOTS } from './host-adapter';
 import type { Denial } from './mutation-guard';
 import type { RouteHost } from './route-registry';
 import {
@@ -93,14 +94,13 @@ function matchesDirectory(path: string): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * The host agent's own output below HOME: the files it writes as memory and plans. `*` is one path segment. The rest of
- * `~/.claude`, `~/.codex` and `~/.pi` (settings, context files, hooks, skills, credentials) stays protected.
+ * The host agent's memory, plans and artifacts below HOME. `*` is one path segment.
  */
 const AGENT_OUTPUT: Readonly<Record<RouteHost, readonly string[]>> = {
   claude: ['.claude/projects/*/memory', '.claude/plans'],
   codex: ['.codex/memories'],
   pi: [],
-  antigravity: [],
+  antigravity: ANTIGRAVITY_BRAIN_ROOTS.map(root => `${root}/*`),
 };
 
 /** An allowed root: a canonical directory, with `*` segments for the agent output patterns. */
@@ -129,6 +129,8 @@ function allowedRoots(scope: SafetyScope): Root[] {
     const literal = join(home, ...(glob < 0 ? parts : parts.slice(0, glob)));
     let base: string;
     try { base = writeThroughPath(literal); } catch { continue; }
+    // A linked Antigravity brain root cannot grant write access outside the brain directory.
+    if (scope.host === 'antigravity' && base !== literal) continue;
     roots.push([...segments(base), ...(glob < 0 ? [] : parts.slice(glob))]);
   }
   return roots;

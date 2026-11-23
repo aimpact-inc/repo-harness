@@ -32,6 +32,11 @@ function legacyAdapter(host: keyof typeof HOST_RENDERERS, capabilities: Partial<
 
 export const ANTIGRAVITY_GUARD_DENIAL = 'rh hook: the tool call is refused';
 export const ANTIGRAVITY_HANDOFF = 'Write your handoff now. The orchestrator relaunches this seat with rh seats launch.';
+export const ANTIGRAVITY_BRAIN_ROOTS = [
+  '.gemini/antigravity/brain',
+  '.gemini/antigravity-cli/brain',
+  '.gemini/antigravity-ide/brain',
+] as const;
 
 const ANTIGRAVITY_TOOLS = {
   bash: { run_command: 'Bash' },
@@ -73,6 +78,7 @@ function decodeAntigravity(input: string | Buffer | undefined, tuple: Pick<Route
   }
   if (tuple.event === 'SessionStart') return { ...payload, source: 'startup' };
   if (tuple.event === 'Stop') return { ...payload, stop_hook_active: wire.executionNum !== 0 };
+  // PreInvocation uses the common fields for the inbox route.
   return payload;
 }
 
@@ -113,18 +119,21 @@ function renderAntigravity(outcome: HookOutcome): ReturnType<HostAdapter['render
     if (outcome.reason === 'invalid-payload' && outcome.permission?.decision === 'deny') {
       return emit({ decision: 'deny', reason: outcome.permission.reason });
     }
-    if (outcome.reason === 'blocked' || outcome.permission?.decision === 'deny' || outcome.permission?.decision === 'ask') {
+    if (outcome.reason === 'blocked' || outcome.permission?.decision === 'deny') {
       return emit({ decision: 'deny', reason: ANTIGRAVITY_GUARD_DENIAL });
     }
     if (outcome.exitCode !== 0) return emit({ decision: 'deny', reason: `rh hook failed: ${outcome.routeId}; the call is refused` });
+    // force_ask prompts even when Antigravity has a cached approval for this tool.
+    if (outcome.permission?.decision === 'ask') return emit({ decision: 'force_ask', reason: outcome.permission.reason });
   }
   if (outcome.event === 'Stop' && outcome.reason === 'blocked') {
     return emit({ decision: 'continue', reason: ANTIGRAVITY_HANDOFF });
   }
-  if (outcome.event === 'SessionStart' && outcome.exitCode === 0) {
+  if ((outcome.event === 'SessionStart' || outcome.event === 'UserPromptSubmit') && outcome.exitCode === 0) {
     const context = [outcome.additionalContext, outcome.systemMessage].filter(Boolean).join('\n');
     if (context) return emit({ injectSteps: [{ systemMessage: { systemMessage: context } }] });
   }
+  // Empty tool and Stop responses leave permission and termination to Antigravity.
   return { stdout: '', stderr: '', exitCode: 0 };
 }
 
@@ -135,7 +144,7 @@ export const HOST_ADAPTERS: Readonly<Record<RouteHost, HostAdapter>> = Object.fr
   antigravity: {
     decode: decodeAntigravity,
     render: renderAntigravity,
-    capabilities: { ...LEGACY_CAPABILITIES, handoff: 'relaunch', sessionRecord: true },
+    capabilities: { handoff: 'relaunch', sessionRecord: true, ask: true, inbox: true },
   },
 });
 

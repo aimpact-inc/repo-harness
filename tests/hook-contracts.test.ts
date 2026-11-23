@@ -26,7 +26,7 @@ describe("Hook contracts", () => {
 
   test("the installed inbox tuple resolves to the notice handler", () => {
     const route = ROUTES.find(route => route.event === 'UserPromptSubmit' && route.routeId === 'inbox');
-    expect(route).toMatchObject({ hosts: ['claude', 'codex', 'pi'], handler: 'agent-notice' });
+    expect(route).toMatchObject({ hosts: ['claude', 'codex', 'pi', 'antigravity'], handler: 'agent-notice' });
     if (!route) throw new Error('inbox adapter tuple is missing');
     expect(getHandlerForRoute(route).id).toBe('agent-notice');
   });
@@ -77,7 +77,7 @@ describe("Hook contracts", () => {
 
   test('Antigravity exposes explicit tuples and matches only the agreed guarded tools', () => {
     expect(routesForHost('antigravity').map(({ event, routeId }) => [event, routeId])).toEqual([
-      ['SessionStart', 'default'], ['PreToolUse', 'edit'], ['PreToolUse', 'bash'], ['Stop', 'default'],
+      ['SessionStart', 'default'], ['PreToolUse', 'edit'], ['PreToolUse', 'bash'], ['UserPromptSubmit', 'inbox'], ['Stop', 'default'],
     ]);
     expect(antigravityHookMatcher('bash')).toBe('run_command');
     expect(antigravityHookMatcher('edit')).toBe('write_file|edit_file');

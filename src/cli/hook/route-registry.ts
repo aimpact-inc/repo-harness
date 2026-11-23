@@ -109,7 +109,7 @@ export const ROUTES: readonly Route[] = Object.freeze([
     routeId: 'inbox' as const,
     // Preserve the installed tuple and adapter order.
     handler: 'agent-notice',
-    hosts: ['claude', 'codex', 'pi'] as const,
+    hosts: ['claude', 'codex', 'pi', 'antigravity'] as const,
   }),
   Object.freeze({
     event: 'SubagentStart' as const,

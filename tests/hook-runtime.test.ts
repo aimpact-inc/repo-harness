@@ -11,12 +11,13 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'fs';
-import { fixtureWrite } from './helpers/module-repository';
+import { fixtureCommit, fixtureGit, fixtureWrite } from './helpers/module-repository';
 import { recordPluginSelection } from './helpers/install-ownership';
 import { agentNoticeFixture, registryNoticeFixture, registryProjectedFixture, repeatUndeliveredNotice, streamNoticeAttempt, unignoreNoticeState } from './helpers/agent-notice';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { resolveCompatibleNodeRuntime } from '../src/effects/architecture/archctx-provider';
+import { HOST_ADAPTERS } from '../src/cli/hook/host-adapter';
 import { runHook } from '../src/cli/hook/runtime';
 import { buildTaskMessageEvent } from '../src/core/fleet/admitted-task-message';
 import { sendTaskMessage } from '../src/effects/fleet/task-inbox';
@@ -277,7 +278,7 @@ describe('host envelopes on the real hook entry (#678)', () => {
   }
 
   /** The bytes the host reads from fd 1 and fd 2 of `repo-harness-hook`. */
-  function host(root: string, hostName: 'claude' | 'codex', event: string, route: string, input: unknown, extraEnv: NodeJS.ProcessEnv = {}) {
+  function host(root: string, hostName: 'claude' | 'codex' | 'antigravity', event: string, route: string, input: unknown, extraEnv: NodeJS.ProcessEnv = {}) {
     // These hosts exercise the architecture notices, so the fixture HOME selects the architecture plugin.
     recordPluginSelection({ HOME: join(root, 'home') });
     const result = spawnSync(process.execPath, [HOOK_ENTRY, event, '--route', route], {
@@ -307,6 +308,34 @@ describe('host envelopes on the real hook entry (#678)', () => {
     expect(envelope.hookSpecificOutput.hookEventName).toBe(event);
     return envelope.hookSpecificOutput.additionalContext;
   }
+
+  test('Antigravity PreInvocation injects Archimap drift once', () => {
+    const root = registryNoticeFixture();
+    try {
+      fixtureGit(root, ['checkout', '-q', 'main']);
+      fixtureWrite(root, 'docs/architecture/archimap.html', '<title>Architecture</title>\n');
+      fixtureCommit(root);
+      fixtureGit(root, ['checkout', '-qb', 'agy-archimap']);
+      fixtureWrite(root, '.archcontext/model/nodes/capability.test.yaml', 'name: Test\n');
+      const invoke = (invocationNum: number) => host(root, 'antigravity', 'UserPromptSubmit', 'inbox', {
+        hookEventName: 'PreInvocation', cwd: root, conversationId: 'agy-3409', invocationNum,
+      });
+      const first = invoke(0);
+      expect(first.status).toBe(0);
+      expect(JSON.parse(first.stdout)).toEqual({ injectSteps: [{ systemMessage: { systemMessage: expect.stringContaining('[Archimap]') } }] });
+      expect(telemetry(root).at(-1)).toMatchObject({ host: 'antigravity', event: 'UserPromptSubmit', session_id: 'agy-3409' });
+      expect(invoke(1).stdout).not.toContain('[Archimap]');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test('Antigravity tool and Stop advisories emit no decision', () => {
+    const outcome = { exitCode: 0, reason: 'ok', repoRoot: null, diagnostics: '' };
+    const render = HOST_ADAPTERS.antigravity.render;
+    expect(render({ ...outcome, event: 'PreToolUse', routeId: 'edit', additionalContext: '[CapabilityOwner] source file owner' }))
+      .toEqual({ exitCode: 0, stdout: '', stderr: '' });
+    expect(render({ ...outcome, event: 'Stop', routeId: 'default', additionalContext: null, systemMessage: 'Protected paths changed' }))
+      .toEqual({ exitCode: 0, stdout: '', stderr: '' });
+  });
 
   test('edit and session advisories reach both hosts as additionalContext', () => {
     const root = owedFixture();
