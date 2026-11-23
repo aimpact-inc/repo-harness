@@ -1,252 +1,479 @@
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { RefactorProviderError, type RefactorScanResultV1, type RefactorScopeV1 } from '../../src/core/refactor/provider-contract';
-import { observeRefactorRecommendations, refactorCandidates } from '../../src/effects/refactor/recommendations';
-import { buildRefactorCommand, formatRefactorRecommendations } from '../../src/cli/commands/refactor';
+import type { RefactorDecisionV1, RefactorScanFindingV2, RefactorScanV2, RefactorVerifyV2 } from 'archctx-contracts';
+import {
+  buildRefactorCommand,
+  formatRefactorDecide,
+  formatRefactorList,
+  formatRefactorRecommendations,
+  formatRefactorResolve,
+  formatRefactorShow,
+  formatRefactorVerify,
+  resolveDecisionCommitRoot,
+} from '../../src/cli/commands/refactor';
+import { RefactorProviderError } from '../../src/core/refactor/provider-contract';
+import { observeRefactorRecommendations } from '../../src/effects/refactor/recommendations';
 
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), 'refactor-recommendation-')); roots.push(root);
-  const home = join(root, 'home'); mkdirSync(join(home, '.repo-harness'), { recursive: true });
-  const repo = join(root, 'repo'); mkdirSync(join(repo, '.archcontext'), { recursive: true });
+  const root = mkdtempSync(join(tmpdir(), 'refactor-recommendation-'));
+  roots.push(root);
+  const home = join(root, 'home');
+  mkdirSync(join(home, '.repo-harness'), { recursive: true });
+  const repo = join(root, 'repo');
+  mkdirSync(join(repo, '.archcontext'), { recursive: true });
   writeFileSync(join(repo, '.archcontext/manifest.yaml'), 'fixture: true\n');
   return { root, repo, env: { ...process.env, HOME: home } };
 }
 
-// The archctx-contracts package ships these 0.7.2 fixtures: a real scan result and one recorded open suggestion.
-const shipped = (name: string) => JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.resolve('archctx-contracts'))), '../fixtures/valid', name), 'utf8'));
-const shippedScan = () => shipped('runtime-refactor-scan.json');
-const shippedRecord = () => shipped('recommendation-v3.json');
+const shippedDecision = (): RefactorDecisionV1 =>
+  JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.resolve('archctx-contracts'))), '../fixtures/valid/refactor-decision.json'), 'utf8')) as RefactorDecisionV1;
 
-/** The shipped scan has unknown code facts; the tests that need suggestions start from a complete read of it. */
-function discovery(options: { codeFacts?: Record<string, unknown>; multiplyOwned?: number; scan?: Record<string, unknown>; open?: unknown[] } = {}): RefactorScanResultV1 {
-  const scan = shippedScan();
-  scan.snapshot.codeFacts = { ...scan.snapshot.codeFacts, coverage: 'complete', truncated: false, reasonCodes: [], ...options.codeFacts };
-  scan.snapshot.repositorySummary.multiplyOwnedFileCount = options.multiplyOwned ?? 0;
-  return { ...scan, ...options.scan, openRecommendations: options.open ?? [] };
+const HEAD_SHA = 'a'.repeat(40);
+const SNAPSHOT_DIGEST = `sha256:${'1'.repeat(64)}`;
+const RESOLUTION_DIGEST = `sha256:${'2'.repeat(64)}`;
+const REC_ID = shippedDecision().recommendationId;
+
+function scanFinding(overrides: Partial<RefactorScanFindingV2> = {}): RefactorScanFindingV2 {
+  return {
+    recommendationId: REC_ID,
+    fingerprint: shippedDecision().fingerprint,
+    detector: 'component-cycle',
+    severity: 'error',
+    blocking: true,
+    capabilityId: 'capability.runtime-harness.architecture',
+    affectedNodeIds: ['capability.runtime-harness.architecture', 'capability.runtime-harness.refactor-program'],
+    affectedPaths: Array.from({ length: 7 }, (_, index) => `src/mod/file-${index}.ts`),
+    killList: [{ kind: 'path', target: 'src/mod/legacy.ts', required: true }],
+    metrics: { thinDirectionEdgeCount: 2, totalEdgeCount: 5 },
+    evidence: {
+      summary: 'Thin-direction edges form a cycle.',
+      thinDirectionEdgeCount: 2,
+      sccSize: 3,
+      splitClusterCount: 2,
+      lcomScore: 1.5,
+      instabilitySource: 0.75,
+      instabilityTarget: 0.25,
+      coChangeSupport: 6,
+      coChangeCoverageOk: true,
+      testCallerCoverage: null,
+    },
+    ...overrides,
+  };
 }
 
-test('each suggestion carries the metrics and bounded evidence of its own observation and no state is written', () => {
+function scanV2(overrides: Partial<RefactorScanV2> = {}): RefactorScanV2 {
+  return {
+    schemaVersion: 'archcontext.refactor-scan/v2',
+    scope: { kind: 'repository' },
+    headSha: HEAD_SHA,
+    snapshotDigest: SNAPSHOT_DIGEST,
+    coverage: { imports: 'complete', gitHistory: 'complete', reasonCodes: [] },
+    findings: [scanFinding()],
+    suppressed: [],
+    ...overrides,
+  };
+}
+
+test('maps RefactorScanV2 to v3 recommendations with typed evidence scalars, affectedPaths, killList, and suppressed entries without writing state', () => {
   const f = fixture();
-  const value = observeRefactorRecommendations(f.repo, { env: f.env, discover: () => discovery() });
-  expect(value.status).toBe('recommended');
-  expect(value.snapshotDigest).toBe(shippedScan().snapshotDigest);
-  expect(value.candidates.map((entry) => entry.kind)).toEqual(['undeclared-footprint', 'evidence-gap']);
-  expect(value.candidates[1]).toMatchObject({
-    subject: 'repository:repo.537182127c5f2134',
-    metrics: { unresolvedImportCount: 0, edgeLimit: 5000 },
-    evidence: { kind: 'evidence-gap', coverage: 'unknown', totalCount: 0, truncated: false },
+  const value = observeRefactorRecommendations(f.repo, {
+    env: f.env,
+    discover: () => scanV2({
+      suppressed: [{ recommendationId: 'recommendation.abcdef0123456789', detector: 'co-change-coupling', decisionStatus: 'deferred', reason: 'Planned after release.' }],
+    }),
   });
-  expect(value.candidates[0]).toMatchObject({
-    metrics: {},
-    evidence: { kind: 'undeclared-footprint', paths: [], totalCount: 0, truncated: false },
-    snapshot: 'current',
-    modules: [{ nodeId: 'capability.architecture.context', files: null, directionViolations: null, unresolvedImports: 0 }],
+  expect(value).toMatchObject({
+    schemaVersion: 'repo-harness.refactor-recommendations/v3',
+    status: 'recommended',
+    headSha: HEAD_SHA,
+    snapshotDigest: SNAPSHOT_DIGEST,
+    coverage: { imports: 'complete', gitHistory: 'complete', reasonCodes: [] },
   });
-  // archctx 0.7.2 never measures these, so they are not part of the module evidence.
-  expect(Object.keys(value.candidates[0]!.modules[0]!)).not.toContain('instability');
-  expect(Object.keys(value.candidates[0]!.modules[0]!)).not.toContain('testFiles');
-  const text = formatRefactorRecommendations(value);
-  expect(text).toContain('metrics: unresolvedImportCount=0, edgeLimit=5000');
-  expect(text).toContain('evidence: evidence-gap, 0 total');
+  expect(value.findings).toHaveLength(1);
+  expect(value.suppressed).toHaveLength(1);
   expect(existsSync(join(f.repo, '.ai/harness/runs'))).toBe(false);
+
+  const text = formatRefactorRecommendations(value);
+  expect(text).toContain(`head: ${HEAD_SHA}`);
+  expect(text).toContain(`snapshot digest: ${SNAPSHOT_DIGEST}`);
+  expect(text).toContain('coverage: imports=complete, gitHistory=complete');
+  expect(text).toContain('1. component-cycle [error, blocking] (capability: capability.runtime-harness.architecture)');
+  expect(text).toContain('summary: Thin-direction edges form a cycle.');
+  expect(text).toContain('evidence: thinDirectionEdgeCount=2, sccSize=3, splitClusterCount=2, lcomScore=1.5, instabilitySource=0.75, instabilityTarget=0.25, coChangeSupport=6, coChangeCoverageOk=true, testCallerCoverage=n/a');
+  expect(text).toContain('affectedPaths (7):');
+  expect(text).toContain('- src/mod/file-0.ts');
+  expect(text).toContain('- src/mod/file-4.ts');
+  expect(text).toContain('... (+2 more)');
+  expect(text).not.toContain('src/mod/file-5.ts');
+  expect(text).toContain('- path: src/mod/legacy.ts');
+  expect(text).toContain('suppressed (1):');
+  expect(text).toContain('recommendation.abcdef0123456789 (co-change-coupling, deferred): Planned after release.');
 });
 
-test('the text view lists the first items of a truncated evidence sample', () => {
-  const record = shippedRecord();
-  record.payload = {
-    ...record.payload, kind: 'cycle', affectedNodeIds: [], metrics: { memberCount: 64, cycleEdgeCount: 444 },
-    evidence: {
-      kind: 'cycle', memberNodeIds: ['module.a', 'module.b'], totalCount: 444, truncated: true,
-      edges: Array.from({ length: 8 }, (_, index) => ({ fromPath: `src/a${index}.ts`, fromLine: index + 1, toPath: 'src/b.ts', specifier: './b', fromNodeId: 'module.a', toNodeId: 'module.b' })),
-    },
-  };
-  const [candidate] = refactorCandidates(discovery({ scan: { proposedRecommendations: [] }, open: [record] }));
-  expect(candidate).toMatchObject({ kind: 'cycle', metrics: { memberCount: 64, cycleEdgeCount: 444 } });
-  const text = formatRefactorRecommendations({ schemaVersion: 'repo-harness.refactor-recommendations/v2', status: 'recommended', candidates: [candidate!] });
-  expect(text).toContain('metrics: memberCount=64, cycleEdgeCount=444');
-  expect(text).toContain('evidence: cycle, 444 total (sample is truncated)');
-  expect(text).toContain('- src/a0.ts:1 -> src/b.ts');
-  expect(text).toContain('- src/a4.ts:5 -> src/b.ts');
-  expect(text).not.toContain('src/a5.ts');
-});
-
-test('the text view lists the sampled edges of a residual cycle', () => {
-  const record = shippedRecord();
-  record.payload = {
-    ...record.payload, kind: 'residual-cycle', affectedNodeIds: ['module.a', 'module.b', 'module.c'], metrics: { memberCount: 3 },
-    evidence: {
-      kind: 'residual-cycle', memberNodeIds: ['module.a', 'module.b', 'module.c'], totalCount: 3, truncated: false,
-      edges: [
-        { fromPath: 'src/a.ts', fromLine: 2, toPath: 'src/b.ts', specifier: './b', fromNodeId: 'module.a', toNodeId: 'module.b' },
-        { fromPath: 'src/b.ts', fromLine: null, toPath: 'src/c.ts', specifier: './c', fromNodeId: 'module.b', toNodeId: 'module.c' },
-        { fromPath: 'src/c.ts', fromLine: 7, toPath: 'src/a.ts', specifier: './a', fromNodeId: 'module.c', toNodeId: 'module.a' },
-      ],
-    },
-  };
-  const [candidate] = refactorCandidates(discovery({ scan: { proposedRecommendations: [] }, open: [record] }));
-  expect(candidate).toMatchObject({ kind: 'residual-cycle', evidence: { kind: 'residual-cycle', totalCount: 3, truncated: false } });
-  const text = formatRefactorRecommendations({ schemaVersion: 'repo-harness.refactor-recommendations/v2', status: 'recommended', candidates: [candidate!] });
-  expect(text).toContain('evidence: residual-cycle, 3 total\n');
-  expect(text).toContain('- src/a.ts:2 -> src/b.ts');
-  expect(text).toContain('- src/b.ts:? -> src/c.ts');
-  expect(text).toContain('- src/c.ts:7 -> src/a.ts');
-});
-
-test('a recorded open suggestion that the scan suppresses is still listed, once, next to new scan candidates', () => {
+test('empty findings with complete import coverage produces no_action while surfacing shallow gitHistory coverage', () => {
   const f = fixture();
-  const record = shippedRecord();
-  // archctx suppresses a scan candidate whose fingerprint is already recorded, so the scan no longer proposes it.
-  const scanned = shippedScan().proposedRecommendations;
-  const onlyRecorded = observeRefactorRecommendations(f.repo, { env: f.env, discover: () => discovery({ scan: { proposedRecommendations: [], suppressed: [{ reasonCode: 'duplicate-active-fingerprint' }] }, open: [record] }) });
-  expect(onlyRecorded.status).toBe('recommended');
-  expect(onlyRecorded.candidates.map((entry) => entry.recommendationId)).toEqual([record.recommendationId]);
-  // The shipped record is also a scan candidate, so a second recorded suggestion needs its own id.
-  const second = { ...record, recommendationId: 'recommendation.recorded-elsewhere' };
-  const mixed = observeRefactorRecommendations(f.repo, { env: f.env, discover: () => discovery({ open: [second] }) });
-  expect(mixed.candidates.map((entry) => entry.recommendationId)).toEqual([second.recommendationId, ...scanned.map((entry: { recommendationId: string }) => entry.recommendationId)]);
-  const listedTwice = observeRefactorRecommendations(f.repo, { env: f.env, discover: () => discovery({ open: [scanned[0]] }) });
-  expect(listedTwice.candidates.map((entry) => entry.recommendationId)).toEqual(scanned.map((entry: { recommendationId: string }) => entry.recommendationId));
-});
-
-test('a recorded suggestion from an earlier snapshot keeps its own metrics and gets no current module statistics', () => {
-  const stale = { ...shippedRecord(), payload: { ...shippedRecord().payload, baselineSnapshotDigest: `sha256:${'0'.repeat(64)}`, metrics: { unownedFileCount: 218 } } };
-  const scan = { proposedRecommendations: [] };
-  const [earlier] = refactorCandidates(discovery({ scan, open: [stale] }));
-  expect(earlier).toMatchObject({ snapshot: 'earlier', baselineSnapshotDigest: stale.payload.baselineSnapshotDigest, metrics: { unownedFileCount: 218 }, modules: [] });
-  const [current] = refactorCandidates(discovery({ scan, open: [shippedRecord()] }));
-  expect(current).toMatchObject({ snapshot: 'current', modules: [{ nodeId: 'capability.architecture.context' }] });
-  const text = formatRefactorRecommendations({ schemaVersion: 'repo-harness.refactor-recommendations/v2', status: 'recommended', candidates: [earlier!] });
-  expect(text).toContain(`recorded on an earlier snapshot (${stale.payload.baselineSnapshotDigest})`);
-  expect(text).not.toContain('modules:');
-});
-
-test('no open record and no scan candidate means no action', () => {
-  const f = fixture();
-  expect(observeRefactorRecommendations(f.repo, { env: f.env, discover: () => discovery({ scan: { proposedRecommendations: [] } }) }).status).toBe('no_action');
-});
-
-test('incomplete code facts withhold suggestions while ambiguous ownership surfaces candidates with metadata', () => {
-  const f = fixture();
-  const partial = observeRefactorRecommendations(f.repo, { env: f.env, discover: () => discovery({ codeFacts: { coverage: 'partial', reasonCodes: ['code-facts-missing'] } }) });
-  expect(partial).toMatchObject({ status: 'proof_required', candidates: [] });
-  expect(partial.message).toContain('codegraph init');
-  const ambiguous = observeRefactorRecommendations(f.repo, { env: f.env, discover: () => discovery({ multiplyOwned: 75 }) });
-  expect(ambiguous.status).toBe('recommended');
-  expect(ambiguous.multiplyOwnedFileCount).toBe(75);
-  expect(ambiguous.candidates).toHaveLength(2);
-  expect(ambiguous.message).toContain('75 files have more than one owning capability');
-  expect(formatRefactorRecommendations(ambiguous)).toContain('note: 75 files have more than one owning capability');
-});
-
-test('includes refactor_proposal records alongside structural observations and exposes full CLI subcommands', () => {
-  const proposal = {
-    ...shippedRecord(),
-    recommendationId: 'recommendation.abcdef0123456789',
-    category: 'refactor_proposal' as const,
-    subject: 'proposal:split-board',
-    explanation: ['Split monolithic board handler into focused modules'],
-    payload: {
-      assessmentDigest: `sha256:${'1'.repeat(64)}`,
-      proposalDigest: `sha256:${'a'.repeat(64)}`,
-      scale: 'module' as const,
-      affectedNodeIds: ['capability.architecture.context'],
-      majorChangeReasons: [],
-      baselineSnapshotDigest: shippedScan().snapshot.snapshotDigest,
-      targetOutcomes: [{ outcomeId: 'outcome.0123456789abcdef', metric: 'module.footprint.lineCount', subjectSelectorId: 'capability.architecture.context', nodeId: 'capability.architecture.context', operator: 'less_than' as const, value: 400, required: true }],
-      killList: [{ kind: 'path' as const, selectorId: 'src/cli/commands/legacy-board.ts', required: true }],
-    },
-  };
-  const candidates = refactorCandidates(discovery({ open: [proposal] }));
-  expect(candidates[0]).toMatchObject({
-    recommendationId: 'recommendation.abcdef0123456789',
-    category: 'refactor_proposal',
-    kind: 'refactor-proposal',
-    proposal: { scale: 'module' },
+  const value = observeRefactorRecommendations(f.repo, {
+    env: f.env,
+    discover: () => scanV2({
+      findings: [],
+      coverage: { imports: 'complete', gitHistory: 'shallow', reasonCodes: ['git-history-shallow'] },
+    }),
   });
-  const text = formatRefactorRecommendations({ schemaVersion: 'repo-harness.refactor-recommendations/v2', status: 'recommended', snapshotDigest: shippedScan().snapshotDigest, candidates });
-  expect(text).toContain('proposal: scale=module (1 target outcome(s), 1 kill entry/entries)');
-  expect(text).toContain('- kill path: src/cli/commands/legacy-board.ts');
-
-  const command = buildRefactorCommand();
-  expect(command.commands.map((c) => c.name())).toEqual(['recommendations', 'decide', 'verify', 'resolve', 'record', 'list', 'show']);
+  expect(value.status).toBe('no_action');
+  expect(value.coverage).toEqual({ imports: 'complete', gitHistory: 'shallow', reasonCodes: ['git-history-shallow'] });
+  expect(formatRefactorRecommendations(value)).toContain('coverage: imports=complete, gitHistory=shallow (reasons: git-history-shallow)');
 });
 
-test('the import node limit reaches the scan and its remedy is a larger limit, not a new index', () => {
+test('withholds findings with proof_required on code-facts-import-limit or incomplete import coverage', () => {
   const f = fixture();
   const limits: Array<number | undefined> = [];
   const limited = observeRefactorRecommendations(f.repo, {
-    env: f.env, importNodeLimit: 100,
-    discover: (_root, _provider, limit) => { limits.push(limit); return discovery({ codeFacts: { coverage: 'partial', reasonCodes: ['code-facts-import-limit'], edgeLimit: 100, importNodeCount: 6145 } }); },
+    env: f.env,
+    importNodeLimit: 100,
+    discover: (_root, _provider, limit) => {
+      limits.push(limit);
+      return scanV2({
+        importNodeLimit: 100,
+        coverage: { imports: 'partial', gitHistory: 'complete', reasonCodes: ['code-facts-import-limit'] },
+      });
+    },
   });
   expect(limits).toEqual([100]);
-  expect(limited).toMatchObject({ status: 'proof_required', candidates: [] });
-  expect(limited.message).toContain('6145 import nodes');
-  expect(limited.message).toContain('limit of 100');
+  expect(limited).toMatchObject({ status: 'proof_required', findings: [], importNodeLimit: 100 });
+  expect(limited.message).toContain('limit 100');
   expect(limited.message).toContain('`rh arch refactor recommendations --import-node-limit <n>`');
-  expect(limited.message).toContain('`rh arch refactor decide`');
   expect(limited.message).not.toContain('codegraph init');
-  observeRefactorRecommendations(f.repo, { env: f.env, discover: (_root, _provider, limit) => { limits.push(limit); return discovery(); } });
-  expect(limits).toEqual([100, undefined]);
+
+  const partial = observeRefactorRecommendations(f.repo, {
+    env: f.env,
+    discover: () => scanV2({
+      coverage: { imports: 'unavailable', gitHistory: 'shallow', reasonCodes: ['code-facts-missing'] },
+    }),
+  });
+  expect(partial).toMatchObject({
+    status: 'proof_required',
+    findings: [],
+    coverage: { imports: 'unavailable', gitHistory: 'shallow', reasonCodes: ['code-facts-missing'] },
+  });
+  expect(partial.message).toContain('codegraph init');
 });
 
-test('a provider error keeps its code, reasonCode, action and full message', () => {
+test('preserves provider errors, timeouts, and missing-model unavailable states', () => {
   const f = fixture();
-  const message = `repository state is stale: ${'x'.repeat(1500)}`;
-  const failed = observeRefactorRecommendations(f.repo, { env: f.env, discover: () => { throw new RefactorProviderError('AC_REFACTOR_STALE', message, 'rerun-refactor-scan', 'refactor-measurement-changed'); } });
-  expect(failed).toMatchObject({ status: 'unavailable', candidates: [], code: 'AC_REFACTOR_STALE', reasonCode: 'refactor-measurement-changed', action: 'rerun-refactor-scan', message });
-  expect(formatRefactorRecommendations(failed)).toBe(`[RefactorRecommendations] unavailable: AC_REFACTOR_STALE: ${message} (reasonCode: refactor-measurement-changed) (action: rerun-refactor-scan)\n`);
-});
+  const stale = observeRefactorRecommendations(f.repo, {
+    env: f.env,
+    discover: () => {
+      throw new RefactorProviderError('AC_REFACTOR_STALE', 'stale scan', 'rerun-refactor-scan', 'refactor-measurement-changed');
+    },
+  });
+  expect(stale).toMatchObject({
+    schemaVersion: 'repo-harness.refactor-recommendations/v3',
+    status: 'unavailable',
+    findings: [],
+    code: 'AC_REFACTOR_STALE',
+    reasonCode: 'refactor-measurement-changed',
+    action: 'rerun-refactor-scan',
+  });
+  expect(formatRefactorRecommendations(stale)).toBe(
+    '[RefactorRecommendations] unavailable: AC_REFACTOR_STALE: stale scan (reasonCode: refactor-measurement-changed) (action: rerun-refactor-scan)\n',
+  );
 
-test('a refactor scan timeout stays unavailable with its code and action', () => {
-  const f = fixture();
-  const message = 'archctx refactor scan timed out after 120000 ms. Retry with --timeout-ms <larger value> (max 600000).';
-  const failed = observeRefactorRecommendations(f.repo, { env: f.env, discover: () => { throw new RefactorProviderError('refactor_provider_timeout', message, 'raise-timeout-and-retry'); } });
-  expect(failed).toMatchObject({ status: 'unavailable', candidates: [], code: 'refactor_provider_timeout', action: 'raise-timeout-and-retry', message });
-  expect(formatRefactorRecommendations(failed)).toBe(`[RefactorRecommendations] unavailable: refactor_provider_timeout: ${message} (action: raise-timeout-and-retry)\n`);
   const times: Array<number | undefined> = [];
-  observeRefactorRecommendations(f.repo, { env: f.env, timeoutMs: 300_000, discover: (_root, _provider, _limit, timeoutMs) => { times.push(timeoutMs); return discovery(); } });
+  observeRefactorRecommendations(f.repo, {
+    env: f.env,
+    timeoutMs: 300_000,
+    discover: (_root, _provider, _limit, timeoutMs) => { times.push(timeoutMs); return scanV2(); },
+  });
   expect(times).toEqual([300_000]);
-});
 
-test('an unavailable provider or a missing model reports unavailable without a scan', () => {
-  const f = fixture();
-  const failed = observeRefactorRecommendations(f.repo, { env: f.env, discover: () => { throw new Error('archctx missing'); } });
-  expect(failed).toMatchObject({ status: 'unavailable', message: 'archctx missing' });
-  expect(failed.code).toBeUndefined();
   rmSync(join(f.repo, '.archcontext'), { recursive: true });
   expect(observeRefactorRecommendations(f.repo, { env: f.env, discover: () => { throw new Error('must not scan'); } }).status).toBe('unavailable');
 });
 
-test('forwards node and sorted-unique paths scopes and refuses conflicting or invalid scopes', () => {
-  const f = fixture();
-  const scopes: Array<RefactorScopeV1 | undefined> = [];
-  observeRefactorRecommendations(f.repo, {
-    env: f.env,
-    scope: { kind: 'node', nodeId: 'capability.runtime-harness.architecture' },
-    discover: (_root, _provider, _limit, _timeout, scope) => { scopes.push(scope); return discovery(); },
-  });
-  observeRefactorRecommendations(f.repo, {
-    env: f.env,
-    scope: { kind: 'paths', paths: ['src/b.ts', 'src/a.ts', 'src/b.ts'] },
-    discover: (_root, _provider, _limit, _timeout, scope) => { scopes.push(scope); return discovery(); },
-  });
-  expect(scopes).toEqual([
-    { kind: 'node', nodeId: 'capability.runtime-harness.architecture' },
-    { kind: 'paths', paths: ['src/a.ts', 'src/b.ts'] },
-  ]);
-  const badPath = observeRefactorRecommendations(f.repo, { env: f.env, scope: { kind: 'paths', paths: ['../escape.ts'] } });
-  expect(badPath).toMatchObject({ status: 'unavailable', code: 'refactor_invalid_scope' });
+function wrapExpectedWinEnvScope(command: string): string {
+  return `& { $s=@{}; foreach ($k in 'GIT_CEILING_DIRECTORIES','GIT_DIR','GIT_WORK_TREE','GIT_COMMON_DIR','GIT_INDEX_FILE','GIT_OBJECT_DIRECTORY','GIT_ALTERNATE_OBJECT_DIRECTORIES') { foreach ($i in @(Get-Item "Env:$k" -ErrorAction SilentlyContinue)) { $s[$i.Name]=$i.Value; Remove-Item "Env:$($i.Name)" -ErrorAction SilentlyContinue } }; try { ${command} } finally { foreach ($e in $s.GetEnumerator()) { Set-Item "Env:$($e.Key)" -Value $e.Value } } }`;
+}
 
+test('exposes only repository-scoped v2 CLI subcommands and options, and formats verify/list/show cleanly', () => {
   const command = buildRefactorCommand();
-  const recommendations = command.commands.find((entry) => entry.name() === 'recommendations')!;
+  expect(command.commands.map((sub) => sub.name())).toEqual(['recommendations', 'decide', 'verify', 'resolve', 'list', 'show']);
+
+  const optionLongs = (name: string) => command.commands.find((sub) => sub.name() === name)!.options.map((opt) => opt.long);
+  expect(optionLongs('recommendations')).not.toContain('--node');
+  expect(optionLongs('recommendations')).not.toContain('--path');
+  expect(optionLongs('decide')).toContain('--kill-symbol');
+  expect(optionLongs('decide')).toContain('--kill-path');
+  expect(optionLongs('decide')).toContain('--kill-relation');
+  expect(optionLongs('decide')).toContain('--json');
+  expect(optionLongs('decide')).not.toContain('--snapshot-digest');
+  expect(optionLongs('verify')).not.toContain('--expected-head-sha');
+  expect(optionLongs('verify')).not.toContain('--expected-worktree-digest');
+  expect(optionLongs('resolve')).toContain('--resolution-digest');
+  expect(optionLongs('resolve')).not.toContain('--evidence-digest');
+  expect(optionLongs('resolve')).not.toContain('--snapshot-digest');
+  expect(optionLongs('list')).toContain('--import-node-limit');
+
+  const recommendations = command.commands.find((sub) => sub.name() === 'recommendations')!;
   recommendations.exitOverride();
   recommendations.configureOutput({ writeOut: () => {}, writeErr: () => {} });
-  expect(() => recommendations.parse(['--node', 'capability.a', '--path', 'src/a.ts'], { from: 'user' })).toThrow();
-  expect(recommendations.options.map((option) => option.long)).toContain('--node');
-  expect(recommendations.options.map((option) => option.long)).toContain('--path');
+  expect(() => recommendations.parse(['--node', 'capability.a'], { from: 'user' })).toThrow();
+  expect(() => recommendations.parse(['--path', 'src/a.ts'], { from: 'user' })).toThrow();
+
+  const verifyResult: RefactorVerifyV2 = {
+    schemaVersion: 'archcontext.refactor-verify/v2',
+    recommendationId: REC_ID,
+    headSha: HEAD_SHA,
+    snapshotDigest: SNAPSHOT_DIGEST,
+    disposition: 'resolved',
+    resolutionDigest: RESOLUTION_DIGEST,
+    killListChecks: [{ kind: 'symbol', target: 'src/mod/legacy.ts#oldFn', required: true, status: 'removed' }],
+    metricChecks: [{ metric: 'moduleDependencies.pairThinDirectionEdgeCount', before: 2, after: 0, satisfied: true }],
+    blockingReasons: [],
+    historicalReceipt: { status: 'accepted', headSha: HEAD_SHA, resolutionDigest: null },
+  };
+  const verifyText = formatRefactorVerify(verifyResult);
+  expect(verifyText).toContain(`disposition=resolved`);
+  expect(verifyText).toContain(`next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>"\n`);
+  expect(verifyText).toContain('historicalReceipt: status=accepted');
+  expect(verifyText).toContain('symbol src/mod/legacy.ts#oldFn: removed');
+
+  const verifyWithFlags = formatRefactorVerify(verifyResult, {
+    repo: "/tmp/target repo/work's",
+    importNodeLimit: 20_000,
+    timeoutMs: 300_000,
+    platform: 'linux',
+  });
+  expect(verifyWithFlags).toContain(
+    `next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>" --repo '/tmp/target repo/work'\\''s' --import-node-limit 20000 --timeout-ms 300000\n`,
+  );
+  const verifyWinFlags = formatRefactorVerify(verifyResult, {
+    repo: "C:\\Users\\O'Connor,Team\\target repo's",
+    importNodeLimit: 20_000,
+    platform: 'win32',
+  });
+  expect(verifyWinFlags).toContain(
+    `next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>" --repo 'C:\\Users\\O''Connor,Team\\target repo''s' --import-node-limit 20000\n`,
+  );
+  // Comma alone in a win32 path must also be quoted (PowerShell treats unquoted commas as arrays).
+  expect(formatRefactorVerify(verifyResult, { repo: 'repo,a', platform: 'win32' })).toContain("--repo 'repo,a'");
+  // Legacy 0.17.1 proposal lacking baseline metadata surfaces explicit repo-bound retire/replace workflow.
+  const posixEnvReset = 'env -u GIT_CEILING_DIRECTORIES -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES';
+  const staleLegacyText = formatRefactorVerify({
+    ...verifyResult,
+    disposition: 'stale',
+    blockingReasons: ['baseline-metadata-missing'],
+    killListChecks: [],
+    metricChecks: [],
+  }, { repo: '/tmp/target-repo', platform: 'linux' });
+  expect(staleLegacyText).toContain('legacy decision lacks baseline proof metadata');
+  expect(staleLegacyText).toContain(`rh arch refactor decide ${REC_ID} accept --reason "<reason>" --kill-path <path> --repo /tmp/target-repo`);
+  expect(staleLegacyText).toContain(`rh arch refactor decide ${REC_ID} reject --reason "<reason>" --repo /tmp/target-repo`);
+  expect(staleLegacyText).toContain(`${posixEnvReset} git -C /tmp/target-repo rm -- .archcontext/refactor-decisions/${REC_ID}.json`);
+  const staleLegacyWinText = formatRefactorVerify({
+    ...verifyResult,
+    disposition: 'stale',
+    blockingReasons: ['baseline-metadata-missing'],
+    killListChecks: [],
+    metricChecks: [],
+  }, { repo: "C:\\Users\\O'Connor,Team\\target repo's", platform: 'win32' });
+  expect(staleLegacyWinText).toContain(
+    `rh arch refactor decide ${REC_ID} reject --reason "<reason>" --repo 'C:\\Users\\O''Connor,Team\\target repo''s'`,
+  );
+  expect(staleLegacyWinText).toContain(
+    wrapExpectedWinEnvScope(`git -C 'C:\\Users\\O''Connor,Team\\target repo''s' rm '--' .archcontext/refactor-decisions/${REC_ID}.json`),
+  );
+  expect(formatRefactorVerify(verifyResult, { repo: '/tmp/target-repo', importNodeLimit: 5_000, platform: 'linux' })).toContain(
+    `next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>" --repo /tmp/target-repo --import-node-limit 5000\n`,
+  );
+  // Verified absolute repoRoot overrides omitted and relative --repo across resolve, legacy decide, and rm hints.
+  const absPosix = '/one/project';
+  const absWin = "C:\\Users\\O'Connor\\one\\project";
+  for (const repo of [undefined, '../project']) {
+    const resolvedPosix = formatRefactorVerify(verifyResult, { repo, repoRoot: absPosix, platform: 'darwin' });
+    expect(resolvedPosix).toContain(
+      `next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>" --repo ${absPosix}\n`,
+    );
+    const legacyPosix = formatRefactorVerify({
+      ...verifyResult,
+      disposition: 'stale',
+      blockingReasons: ['baseline-metadata-missing'],
+      killListChecks: [],
+      metricChecks: [],
+    }, { repo, repoRoot: absPosix, platform: 'darwin' });
+    expect(legacyPosix).toContain(`decide ${REC_ID} accept --reason "<reason>" --kill-path <path> --repo ${absPosix}\``);
+    expect(legacyPosix).toContain(`decide ${REC_ID} reject --reason "<reason>" --repo ${absPosix}\``);
+    expect(legacyPosix).toContain(`${posixEnvReset} git -C ${absPosix} rm -- .archcontext/refactor-decisions/${REC_ID}.json`);
+  }
+  for (const repo of [undefined, '..\\project']) {
+    const resolvedWin = formatRefactorVerify(verifyResult, { repo, repoRoot: absWin, platform: 'win32' });
+    expect(resolvedWin).toContain(
+      `next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>" --repo 'C:\\Users\\O''Connor\\one\\project'\n`,
+    );
+    const legacyWin = formatRefactorVerify({
+      ...verifyResult,
+      disposition: 'stale',
+      blockingReasons: ['baseline-metadata-missing'],
+      killListChecks: [],
+      metricChecks: [],
+    }, { repo, repoRoot: absWin, platform: 'win32' });
+    expect(legacyWin).toContain(`decide ${REC_ID} accept --reason "<reason>" --kill-path <path> --repo 'C:\\Users\\O''Connor\\one\\project'\``);
+    expect(legacyWin).toContain(`decide ${REC_ID} reject --reason "<reason>" --repo 'C:\\Users\\O''Connor\\one\\project'\``);
+    expect(legacyWin).toContain(
+      wrapExpectedWinEnvScope(`git -C 'C:\\Users\\O''Connor\\one\\project' rm '--' .archcontext/refactor-decisions/${REC_ID}.json`),
+    );
+  }
+
+  const listText = formatRefactorList({
+    schemaVersion: 'archcontext.refactor-decide-list/v1',
+    status: 'all',
+    count: 2,
+    decisions: [shippedDecision()],
+    openFindings: [scanFinding()],
+  });
+  expect(listText).toContain('openFindings is best-effort');
+  expect(listText).toContain('rh arch refactor recommendations');
+
+  const showText = formatRefactorShow({
+    schemaVersion: 'archcontext.refactor-decide-show/v1',
+    recommendationId: REC_ID,
+    decision: shippedDecision(),
+    finding: null,
+  });
+  expect(showText).toContain(`status=${shippedDecision().status}`);
+  expect(showText).toContain('best-effort');
+});
+
+test('decide and resolve commit hints bind to the target Git root and commit only the decision file without sweeping unrelated staged files', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'refactor-commit-hint-'));
+  roots.push(scratch);
+  const targetRepo = realpathSync(mkdirSync(join(scratch, "target repo's"), { recursive: true }) ?? join(scratch, "target repo's"));
+  const otherCheckout = realpathSync(mkdirSync(join(scratch, 'other-checkout'), { recursive: true }) ?? join(scratch, 'other-checkout'));
+  const nestedDir = join(targetRepo, 'src', 'nested');
+  mkdirSync(nestedDir, { recursive: true });
+  const nullGitConfig = process.platform === 'win32' ? 'NUL' : '/dev/null';
+  const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: nullGitConfig, GIT_CONFIG_NOSYSTEM: '1' };
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf8',
+    env: gitEnv,
+  }).trim();
+  const runHint = (cwd: string, cmd: string) => {
+    if (process.platform === 'win32') {
+      execFileSync('powershell.exe', ['-NoProfile', '-Command', cmd], { cwd, env: gitEnv });
+      return;
+    }
+    execFileSync('sh', ['-c', cmd], { cwd, env: gitEnv });
+  };
+
+  for (const repo of [targetRepo, otherCheckout]) {
+    git(repo, 'init', '-q');
+    git(repo, 'config', 'user.name', 'Test');
+    git(repo, 'config', 'user.email', 'test@example.invalid');
+    writeFileSync(join(repo, 'README.md'), 'base\n');
+    git(repo, 'add', 'README.md');
+    git(repo, 'commit', '-qm', 'init');
+  }
+
+  const decisionPath = `.archcontext/refactor-decisions/${REC_ID}.json`;
+  mkdirSync(join(targetRepo, '.archcontext', 'refactor-decisions'), { recursive: true });
+  mkdirSync(join(otherCheckout, '.archcontext', 'refactor-decisions'), { recursive: true });
+  writeFileSync(join(otherCheckout, decisionPath), '{"other":true}\n');
+  writeFileSync(join(targetRepo, decisionPath), '{"status":"accepted"}\n');
+  // Stage an unrelated file in targetRepo to prove `--only -- <path>` does not commit it.
+  writeFileSync(join(targetRepo, 'unrelated.txt'), 'keep staged\n');
+  git(targetRepo, 'add', 'unrelated.txt');
+
+  // Verify PowerShell apostrophe escaping, session-env restoration, and path restriction deterministically on every host OS.
+  const winDecideHint = formatRefactorDecide({
+    recommendationId: REC_ID,
+    status: 'accepted',
+    filePath: decisionPath,
+    decision: shippedDecision(),
+  }, "C:\\Users\\O'Connor\\target repo's", 'win32');
+  expect(winDecideHint).toContain(
+    `next: ${wrapExpectedWinEnvScope(`git -C 'C:\\Users\\O''Connor\\target repo''s' add '--' ${decisionPath}; if ($LASTEXITCODE -eq 0) { git -C 'C:\\Users\\O''Connor\\target repo''s' commit --only -m 'chore(architecture): record refactor decision ${REC_ID} (accepted)' '--' ${decisionPath} }`)}\n`,
+  );
+
+  const decideHint = formatRefactorDecide({
+    recommendationId: REC_ID,
+    status: 'accepted',
+    filePath: decisionPath,
+    decision: shippedDecision(),
+  }, targetRepo);
+  const decideCmd = decideHint.split('\n').find((line) => line.startsWith('  next: '))?.slice('  next: '.length);
+  expect(decideCmd).toBeDefined();
+  expect(decideCmd).toContain('git -C ');
+  expect(decideCmd).toContain(`commit --only -m `);
+  expect(decideCmd).toContain(decisionPath);
+
+  // Run emitted decide command from a DIFFERENT checkout (`otherCheckout`) even with inherited GIT_DIR/GIT_WORK_TREE pointing to otherCheckout.
+  const crossGitEnv = { ...gitEnv, GIT_DIR: join(otherCheckout, '.git'), GIT_WORK_TREE: otherCheckout };
+  if (process.platform === 'win32') {
+    const missingRepoCmd = formatRefactorDecide({
+      recommendationId: REC_ID,
+      status: 'accepted',
+      filePath: decisionPath,
+      decision: shippedDecision(),
+    }, join(scratch, 'missing-target-repo'), 'win32').split('\n').find((line) => line.startsWith('  next: '))!.slice('  next: '.length);
+    const sessionProbe = execFileSync('powershell.exe', [
+      '-NoProfile',
+      '-Command',
+      [
+        '$ErrorActionPreference = "Stop"',
+        decideCmd!,
+        'if ($LASTEXITCODE -ne 0) { throw "decideCmd failed: $LASTEXITCODE" }',
+        missingRepoCmd,
+        'if ($LASTEXITCODE -eq 0) { throw "missingRepoCmd unexpectedly succeeded" }',
+        'Write-Output "$($Env:git_dir)|$($Env:Git_Work_Tree)"',
+      ].join('\n'),
+    ], {
+      cwd: otherCheckout,
+      env: { ...gitEnv, git_dir: join(otherCheckout, '.git'), Git_Work_Tree: otherCheckout },
+      encoding: 'utf8',
+    }).trim();
+    expect(sessionProbe).toBe(`${join(otherCheckout, '.git')}|${otherCheckout}`);
+  } else {
+    execFileSync('sh', ['-c', decideCmd!], { cwd: otherCheckout, env: crossGitEnv });
+  }
+  expect(git(targetRepo, 'show', '--name-only', '--pretty=format:', 'HEAD')).toBe(decisionPath);
+  expect(git(targetRepo, 'status', '--porcelain')).toBe('A  unrelated.txt');
+  expect(git(otherCheckout, 'status', '--porcelain')).toBe(`?? .archcontext/`);
+
+  // Run emitted resolve command from a NESTED subdirectory of targetRepo (verifying nested subdir resolves to top-level Git root).
+  expect(resolveDecisionCommitRoot(nestedDir)).toBe(targetRepo);
+  writeFileSync(join(targetRepo, decisionPath), '{"status":"resolved"}\n');
+  const resolvePayload = {
+    recommendationId: REC_ID,
+    status: 'resolved' as const,
+    filePath: decisionPath,
+    decision: shippedDecision(),
+    verification: {
+      schemaVersion: 'archcontext.refactor-verify/v2' as const,
+      recommendationId: REC_ID,
+      headSha: HEAD_SHA,
+      snapshotDigest: SNAPSHOT_DIGEST,
+      disposition: 'resolved' as const,
+      resolutionDigest: RESOLUTION_DIGEST,
+      killListChecks: [],
+      metricChecks: [],
+      blockingReasons: [],
+    },
+  };
+  expect(formatRefactorResolve(resolvePayload, "C:\\Users\\O'Connor\\target repo's", 'win32')).toContain(
+    `next: ${wrapExpectedWinEnvScope(`git -C 'C:\\Users\\O''Connor\\target repo''s' add '--' ${decisionPath}; if ($LASTEXITCODE -eq 0) { git -C 'C:\\Users\\O''Connor\\target repo''s' commit --only -m 'chore(architecture): mark refactor decision ${REC_ID} resolved' '--' ${decisionPath} }`)}\n`,
+  );
+  const resolveHint = formatRefactorResolve(resolvePayload, resolveDecisionCommitRoot(nestedDir));
+  const resolveCmd = resolveHint.split('\n').find((line) => line.startsWith('  next: '))?.slice('  next: '.length);
+  expect(resolveCmd).toBeDefined();
+  runHint(nestedDir, resolveCmd!);
+  expect(git(targetRepo, 'show', '--name-only', '--pretty=format:', 'HEAD')).toBe(decisionPath);
+  expect(git(targetRepo, 'status', '--porcelain')).toBe('A  unrelated.txt');
 });

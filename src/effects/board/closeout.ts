@@ -1,7 +1,6 @@
 import { execFileSync } from 'child_process';
 import { lstatSync, readdirSync, readlinkSync, realpathSync } from 'fs';
 import { parseRefs } from '../../core/board/source';
-import { architecturePort, isArchitectureUnavailable } from '../../core/architecture/contracts';
 import type { BoardHostPortsV1, BoardSeatTerminalReadV1 } from '../../core/board/board';
 import { gitSpawnSync, withoutRepositorySelectingGitEnv } from '../git/runner';
 import type { WorktreeProcess } from '../git/worktree-processes';
@@ -41,8 +40,8 @@ export interface BoardCloseoutV1 {
     readonly path: string; readonly outcome: 'removed' | 'kept' | 'partial' | 'unknown'; readonly reason: string | null;
     readonly checkout_present: boolean | null; readonly branch_present: boolean | null;
   };
-  /** The architecture daemon stop of the removed worktree; it never blocks the removal, as in `contract-worktree cleanup`. */
-  readonly daemon_stop_failures: readonly string[];
+  /** Failures stopping CodeGraph MCP servers bound to the worktree; it never blocks removal. */
+  readonly codegraph_stop_failures: readonly string[];
   /** PIDs of the CodeGraph MCP servers bound to the worktree that closeout stopped; the seat that started them is gone. */
   readonly stopped_codegraph_servers: readonly number[];
   /** The hook event counts of the PR head worktree, read before the removal step; null when its log is missing or unreadable. */
@@ -54,8 +53,6 @@ export interface CodegraphStop { readonly stopped: readonly number[]; readonly f
 export interface BoardCloseoutInput extends GhInput {
   readonly pr: number;
   readonly host: Pick<BoardHostPortsV1, 'closeoutTerminals' | 'closeTerminal'>;
-  /** Stops the architecture daemons of a checkout and returns the failures. */
-  readonly stopDaemons: (worktree: string) => readonly string[];
   /** The process inventory (`worktreeProcesses`); null means occupancy is unproven, which keeps the worktree. */
   readonly processes: (deadline: number) => WorktreeProcess[] | null;
   /** Sends SIGTERM to the CodeGraph MCP servers bound to exactly this worktree among the given processes that hold it; returns the signalled PIDs and the signal failures. */
@@ -246,7 +243,7 @@ async function processesGone(input: BoardCloseoutInput, path: string): Promise<s
   }
 }
 
-/** The exact closeout path of `contract-worktree cleanup`: runtime cleanup, daemon stop, then the exact removal, which drops only this worktree's own marker. */
+/** The exact closeout path of `contract-worktree cleanup`: runtime cleanup, CodeGraph MCP server stop, then the exact removal, which drops only this worktree's own marker. */
 async function removeWorktree(input: BoardCloseoutInput, pr: MergedPullRequest, proof: CloseoutProof, panes: readonly BoardCloseoutPaneV1[]): Promise<WorktreeOutcome> {
   if (panes.some(pane => pane.outcome === 'kept')) return observed(proof, pr, 'a pane of the pull request is kept', []);
   let failures: readonly string[] = [];
@@ -256,13 +253,11 @@ async function removeWorktree(input: BoardCloseoutInput, pr: MergedPullRequest, 
     if (runtime.status !== 'closed' && runtime.status !== 'not_registered') {
       return observed(proof, pr, `runtime ${runtime.status}${'reason' in runtime && runtime.reason ? ` (${runtime.reason})` : ''}`, failures);
     }
-    // A daemon in the checkout would otherwise keep the process wait from ever passing.
-    failures = input.stopDaemons(proof.path);
     // Only a server bound to exactly this path stops; any other process still keeps the worktree.
     const inventory = input.processes(Date.now() + 5_000);
     if (inventory !== null) {
       const stop = input.stopCodegraphServers(proof.path, inventory.filter(item => protectsCwd(proof.path, item.cwd)));
-      stopped = stop.stopped; failures = [...failures, ...stop.failures];
+      stopped = stop.stopped; failures = stop.failures;
     }
     const busy = await processesGone(input, proof.path);
     if (busy !== null) return observed(proof, pr, busy, failures, stopped);
@@ -274,10 +269,10 @@ async function removeWorktree(input: BoardCloseoutInput, pr: MergedPullRequest, 
   }
 }
 
-type WorktreeOutcome = Pick<BoardCloseoutV1, 'worktree' | 'daemon_stop_failures' | 'stopped_codegraph_servers'>;
+type WorktreeOutcome = Pick<BoardCloseoutV1, 'worktree' | 'codegraph_stop_failures' | 'stopped_codegraph_servers'>;
 
 /** The worktree result as observed after the last step, so a partial removal reports what is left. */
-function observed(proof: CloseoutProof, pr: MergedPullRequest, reason: string | null, daemon_stop_failures: readonly string[], stopped_codegraph_servers: readonly number[] = []): WorktreeOutcome {
+function observed(proof: CloseoutProof, pr: MergedPullRequest, reason: string | null, codegraph_stop_failures: readonly string[], stopped_codegraph_servers: readonly number[] = []): WorktreeOutcome {
   let checkout_present: boolean | null;
   try { lstatSync(proof.path); checkout_present = true; }
   catch (error) { checkout_present = (error as NodeJS.ErrnoException).code === 'ENOENT' ? false : null; }
@@ -286,7 +281,7 @@ function observed(proof: CloseoutProof, pr: MergedPullRequest, reason: string | 
   const branch_present = ref === 0 ? true : ref === 1 ? false : null;
   const unknown = checkout_present === null || branch_present === null;
   const outcome = unknown ? 'unknown' : !checkout_present && !branch_present && reason === null ? 'removed' : checkout_present && branch_present ? 'kept' : 'partial';
-  return { worktree: { path: proof.path, outcome, reason: unknown && reason === null ? 'worktree or branch readback failed' : reason, checkout_present, branch_present }, daemon_stop_failures, stopped_codegraph_servers };
+  return { worktree: { path: proof.path, outcome, reason: unknown && reason === null ? 'worktree or branch readback failed' : reason, checkout_present, branch_present }, codegraph_stop_failures, stopped_codegraph_servers };
 }
 
 export async function runBoardCloseout(input: BoardCloseoutInput): Promise<BoardCloseoutV1> {
@@ -342,11 +337,4 @@ export function stopCodegraphServers(worktree: string, processes: readonly Workt
     }
   }
   return { stopped, failures };
-}
-
-/** The daemon stop of `contract-worktree cleanup`: without the architecture plugin there is no daemon to stop. */
-export function stopArchitectureDaemons(repoRoot: string, worktree: string): readonly string[] {
-  const runtime = architecturePort('runtime');
-  if (isArchitectureUnavailable(runtime)) return runtime.code === 'ARCHITECTURE_PLUGIN_NOT_SELECTED' ? [] : [runtime.message];
-  return runtime.stopWorkspaceDaemons(repoRoot, worktree).failures.map(failure => failure.message);
 }

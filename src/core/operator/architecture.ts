@@ -1,4 +1,4 @@
-import { REFACTOR_DECISION_STATUSES, REFACTOR_OBSERVATION_KINDS, type RefactorDecisionStatus, type RefactorObservationKind } from 'archctx-contracts';
+import { ALL_REFACTOR_DECISION_KINDS, REFACTOR_DECISION_STATUSES, type RefactorDecisionStatus, type RefactorDecisionV1 } from 'archctx-contracts';
 import { isGroupNode, type ModuleIndexV1, type ModuleDetailV1 } from '../architecture/module-view';
 import type { ModuleReviewPromptV1 } from '../review/module-review-prompt';
 
@@ -17,7 +17,7 @@ export type ArchitectureRefactorCountsV1 = Readonly<Record<RefactorDecisionStatu
 export interface ArchitectureRefactorDecisionV1 {
   readonly recommendation_id: string;
   readonly category: 'structural_observation' | 'refactor_proposal';
-  readonly kind: RefactorObservationKind | null;
+  readonly kind: RefactorDecisionV1['kind'];
   readonly subject: string;
   readonly affected_node_ids: readonly string[];
   readonly status: RefactorDecisionStatus;
@@ -100,7 +100,7 @@ const refactorCounts = object({ accepted: integer, acknowledged: integer, deferr
 const refactorDecision = object({
   recommendation_id: recommendationId,
   category: one('structural_observation', 'refactor_proposal'),
-  kind: nullable(one(...REFACTOR_OBSERVATION_KINDS)),
+  kind: nullable(one(...ALL_REFACTOR_DECISION_KINDS)),
   subject: boundedLine(512),
   affected_node_ids: list(boundedLine(256)),
   status: one(...REFACTOR_DECISION_STATUSES),

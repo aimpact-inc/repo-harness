@@ -1,15 +1,16 @@
 import {
   ARCHCTX_CAPABILITIES_SCHEMA_VERSION,
+  INDEX_SEED_SCHEMA_VERSION,
   NATIVE_CONTEXT_PROFILE,
   NATIVE_CONTEXT_SCHEMA_VERSION,
   nativeContextSchemaResolver,
   jsonSchemaResolver,
   type ArchContextError,
   type ArchitectureDocsProjectionManifestTargetV4,
+  type IndexSeedResultV1,
   type NativeContextExportV1,
   architectureDebtReportIssues,
   docsAnchorsReportIssues,
-  projectionApplyReadbackResultInvariantIssues,
   projectionResultInvariantIssues,
   validateJsonSchema,
   type ArchitectureDebtDeltaReportV1,
@@ -18,9 +19,7 @@ import {
   type DependencyConstraintEvaluationV1,
   type DocsAnchorsReportV1,
   type Json,
-  type ProjectionApplyReadbackResultV2,
   type ProjectionFreshnessReasonCode,
-  type ProjectionRequestV1,
   type ProjectionResultV3,
   type RefImpactV1,
   type RefImpactBatchV1,
@@ -28,7 +27,6 @@ import {
   type ProjectionSliceV1,
 } from 'archctx-contracts';
 import projectionResultSchema from 'archctx-contracts/schemas/runtime/projection-result.schema.json';
-import projectionReadbackSchema from 'archctx-contracts/schemas/runtime/projection-apply-readback.schema.json';
 import docsAnchorsSchema from 'archctx-contracts/schemas/runtime/docs-anchors.schema.json';
 import architectureDebtSchema from 'archctx-contracts/schemas/runtime/architecture-debt.schema.json';
 import architectureDebtDeltaSchema from 'archctx-contracts/schemas/runtime/architecture-debt-delta.schema.json';
@@ -41,6 +39,7 @@ import projectionSliceSchema from 'archctx-contracts/schemas/runtime/projection-
 import stateMachineCheckSchema from 'archctx-contracts/schemas/runtime/state-machine-check.schema.json';
 import projectionPrVerificationSchema from 'archctx-contracts/schemas/runtime/projection-pr-verification.schema.json';
 import nativeContextExportSchema from 'archctx-contracts/schemas/runtime/native-context-export.schema.json';
+import indexSeedSchema from 'archctx-contracts/schemas/runtime/index-seed.schema.json';
 import nodeSchema from 'archctx-contracts/schemas/repo/architecture-node.schema.json';
 import relationSchema from 'archctx-contracts/schemas/repo/architecture-relation.schema.json';
 import flowSchema from 'archctx-contracts/schemas/repo/architecture-flow.schema.json';
@@ -165,8 +164,6 @@ export function decodeArchitectureHandEdits(value: unknown): Array<{ path: strin
     || diff.reasonCode === 'projection-generated-file-manually-edited');
 }
 
-const ARCHCTX_MAINTENANCE_REMINDER = 'User authorization required: ask before replacing the shared daemon with daemon upgrade; this interrupts other clients. Use the same managed package-local archctx and Node runtime, then verify daemon status. After replacement, check the configured CodeGraph index for this repository; request authorization to rebuild only if it is missing or stale. Do not delete shared state or automatically restart/reindex.';
-
 export class ArchctxClientError extends Error {
   readonly code: string;
   readonly action: string;
@@ -176,8 +173,7 @@ export class ArchctxClientError extends Error {
   readonly providerMessage: string;
 
   constructor(error: Pick<ArchContextError, 'message' | 'action'> & { code: string } & Partial<Omit<ArchContextError, 'code' | 'message' | 'action'>>) {
-    const maintenance = error.code === 'AC_RUNTIME_VERSION_UNSUPPORTED' && error.action === 'upgrade-archctx-runtime' ? ` ${ARCHCTX_MAINTENANCE_REMINDER}` : '';
-    super(`${error.code}: ${error.message}${maintenance}${error.reasonCode ? ` (reasonCode: ${error.reasonCode})` : ''}; action: ${error.action}`);
+    super(`${error.code}: ${error.message}${error.reasonCode ? ` (reasonCode: ${error.reasonCode})` : ''}; action: ${error.action}`);
     this.name = 'ArchctxClientError';
     this.code = error.code;
     this.action = error.action;
@@ -249,16 +245,6 @@ export function assertProjectionResult(value: unknown, expectedRequestId: string
   return result;
 }
 
-/** A readback proves an earlier committed apply of this exact request; an absence proof means none exists. */
-export function assertProjectionApplyReadbackResult(value: unknown, request: ProjectionRequestV1): ProjectionApplyReadbackResultV2 {
-  const readback = decode(projectionReadbackSchema, value, 'projection readback');
-  if (readback.schemaVersion === 'archcontext.projection-apply-absence/v1') throw new Error(`no committed projection apply exists for ${request.requestId}`);
-  const result = readback as unknown as ProjectionApplyReadbackResultV2;
-  const issues = projectionApplyReadbackResultInvariantIssues(result, request);
-  if (issues.length > 0) throw new Error(`projection readback invalid: ${issues.join('; ')}`);
-  return result;
-}
-
 /**
  * Generated-summary freshness from one `rh arch projection check` result.
  * `stalePaths` holds the paths of targets whose render differs from the committed manifest row.
@@ -287,6 +273,13 @@ export function decodeProjectionCheckFreshness(value: unknown): GeneratedSummary
     stalePaths: new Set(result.freshness.staleTargets.map((target) => target.path)),
     complete: result.freshness.reasonCodes.every((code) => PER_TARGET_FRESHNESS_REASONS.has(code)),
   };
+}
+
+/** ArchContext owns the `index seed` result contract; this applies its published schema. */
+export function decodeIndexSeedResult(value: unknown): IndexSeedResultV1 {
+  const result = decode<IndexSeedResultV1>(indexSeedSchema, value, 'index seed result');
+  if (result.schemaVersion !== INDEX_SEED_SCHEMA_VERSION) throw new Error('index seed result schema mismatch');
+  return result;
 }
 
 /** ArchContext owns the `docs anchors` report contract; this applies its schema and invariants. */
@@ -401,35 +394,32 @@ export type ArchctxDisposition = 'pass' | 'owned' | 'refused';
 export interface ArchctxCommandDisposition { readonly disposition: ArchctxDisposition; readonly use?: string }
 
 const passCommands = [
-  'capabilities', 'init', 'sync', 'validate', 'context', 'status', 'daemon', 'state', 'repo', 'landscape', 'ledger', 'book', 'explore', 'prepare',
-  'practices', 'checkpoint', 'plan', 'apply', 'hash', 'review', 'complete', 'manifest', 'config', 'doctor', 'paths', 'privacy-audit', 'export',
-  'import', 'resolve', 'impact', 'history', 'flows', 'state-machines', 'deps', 'constraints', 'docs',
+  'capabilities', 'init', 'index', 'validate', 'check', 'model', 'context', 'status', 'repo', 'landscape', 'explore', 'prepare',
+  'practices', 'checkpoint', 'plan', 'apply', 'hash', 'review', 'complete', 'manifest', 'doctor', 'paths', 'export',
+  'resolve', 'impact', 'history', 'flows', 'state-machines', 'deps', 'constraints', 'docs',
 ] as const;
 const owned = (use: string): ArchctxCommandDisposition => ({ disposition: 'owned', use });
 const refused = (use: string): ArchctxCommandDisposition => ({ disposition: 'refused', use });
 
 /**
  * One entry for each command of the pinned archctx help envelope, plus `docs`.
- * `rh arch` starts archctx only for `pass`; a test fails when the help list and
- * these keys differ.
+ * `rh arch` starts archctx only for `pass` (and read-only `sync --check`); a
+ * test fails when the help list and these keys differ.
  */
 export const ARCHCTX_COMMAND_DISPOSITIONS: Readonly<Record<string, ArchctxCommandDisposition>> = {
   ...Object.fromEntries(passCommands.map(name => [name, { disposition: 'pass' } as ArchctxCommandDisposition])),
+  sync: owned('rh arch projection apply (or rh arch sync --check)'),
   projection: owned('rh arch projection'),
   debt: owned('rh arch debt'),
   verify: owned('rh arch verify'),
   refactor: owned('rh arch refactor'),
   recommendations: owned('rh arch refactor'),
+  scan: owned('rh arch refactor'),
+  decide: owned('rh arch refactor'),
   install: refused('rh install'),
   uninstall: refused('rh uninstall'),
   update: refused('rh update'),
   hooks: refused('rh install'),
-  mcp: refused('rh install'),
-  tunnel: refused('not available through rh'),
-  audit: refused('rh seats and repo-harness-issue-flow'),
-  investigate: refused('rh seats and repo-harness-issue-flow'),
-  agents: refused('rh seats and repo-harness-issue-flow'),
-  jobs: refused('rh seats and repo-harness-issue-flow'),
   hook: refused('rh install'),
 };
 
@@ -445,13 +435,28 @@ const ARCHCTX_PROJECTION_SUBCOMMAND_DISPOSITIONS: Readonly<Record<string, Archct
   'verify-pr': { disposition: 'pass' },
   slice: { disposition: 'pass' },
   run: owned('rh arch projection check|plan|apply'),
-  recover: owned('rh arch projection check|plan|apply'),
-  readback: owned('rh arch projection check|plan|apply'),
 };
+
+const SYNC_READONLY_FLAGS: ReadonlySet<string> = new Set(['--check', '--help', '-h']);
+const SYNC_VALUE_FLAGS: ReadonlySet<string> = new Set(['--changed', '--format']);
+
+function hasStandaloneSyncFlag(rest: readonly string[]): boolean {
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index]!;
+    if (token === '--') return false;
+    if (SYNC_VALUE_FLAGS.has(token)) {
+      index += 1;
+      continue;
+    }
+    if (SYNC_READONLY_FLAGS.has(token)) return true;
+  }
+  return false;
+}
 
 /** The refusal text for a command that `rh arch` does not start, or null when it starts. */
 export function archctxRefusal(args: readonly string[]): string | null {
   const [command = '', sub = ''] = args;
+  if (command === 'sync' && hasStandaloneSyncFlag(args.slice(1))) return null;
   const nested = command === 'projection';
   const table = nested ? ARCHCTX_PROJECTION_SUBCOMMAND_DISPOSITIONS : ARCHCTX_COMMAND_DISPOSITIONS;
   const key = nested ? sub : command;

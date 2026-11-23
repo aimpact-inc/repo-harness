@@ -560,19 +560,6 @@ function reconcileManagedRuntime(
   };
 }
 
-function inspectManagedDaemonRuntime(cwd: string, env: NodeJS.ProcessEnv, plugins: readonly PluginId[]): GlobalRuntimeStep {
-  const step = 'check shared ArchContext daemon';
-  if (!plugins.includes('architecture')) return { step, status: 'skipped', detail: 'architecture plugin not selected' };
-  const setup = architecturePort('setup');
-  if (isArchitectureUnavailable(setup)) return { step, status: 'failed', detail: setup.message };
-  try {
-    setup.verifyDaemon(cwd, env);
-    return { step, status: 'ok', detail: 'daemon is compatible or cleanly stopped' };
-  } catch (error) {
-    return { step, status: 'failed', detail: error instanceof Error ? error.message : String(error) };
-  }
-}
-
 /** The global architecture projection section follows the architecture plugin; without it the section stays as it is. */
 function configureArchitectureProjection(env: NodeJS.ProcessEnv, plugins: readonly PluginId[], runtimeLock: RuntimeTransactionContext | undefined): GlobalRuntimeStep {
   const step = 'global architecture projection';
@@ -593,10 +580,7 @@ export function verifyInstalledManagedRuntime(
   const cwd = opts.cwd ?? process.cwd();
   const bunExecutable = resolveBunExecutable(opts.env);
   const env = bindBunRuntimeEnv(commandEnv(sourceRoot, opts.env), bunExecutable);
-  const packages = reconcileManagedRuntime(cwd, bunExecutable, env, `repo-harness@${version}`, opts.plugins);
-  if (packages.status !== 'ok') return packages;
-  const daemon = inspectManagedDaemonRuntime(cwd, env, opts.plugins);
-  return daemon.status === 'failed' ? { ...packages, status: 'failed', detail: daemon.detail } : packages;
+  return reconcileManagedRuntime(cwd, bunExecutable, env, `repo-harness@${version}`, opts.plugins);
 }
 
 // Best-effort: readLatestPackageVersion() already swallows offline/npm-missing/
@@ -1965,7 +1949,7 @@ function runGlobalRuntimeSetupInTransaction(opts: GlobalRuntimeOptions): GlobalR
     steps.push(install);
     if (updateMode && install.status === 'failed') return finalizeRuntimeResult(steps);
     // The parent has loaded predecessor contracts. The installed candidate owns
-    // dependency and daemon verification as well as later host writes.
+    // dependency verification as well as later host writes.
     if (updateMode && install.status === 'ok' && opts.installSpec && opts.candidateHandoff) {
       steps.push(reconcileWithInstalledCandidate(opts, cwd, bunExecutable, env, target));
       return finalizeRuntimeResult(steps);
@@ -1986,16 +1970,6 @@ function runGlobalRuntimeSetupInTransaction(opts: GlobalRuntimeOptions): GlobalR
     : { step: 'ensure operator console', status: 'skipped' as const, detail: 'operator plugin not selected' };
   steps.push(consoleStep);
   if (consoleStep.status === 'failed') return finalizeRuntimeResult(steps);
-
-  if (updateMode && opts.installSpec) {
-    const daemon = inspectManagedDaemonRuntime(cwd, env, plugins);
-    // Package installation succeeded. Shared-daemon maintenance must not roll
-    // that candidate back and strand hoisted dependencies at a newer version.
-    // The strict installed-runtime verifier above still fails on this state.
-    steps.push(daemon.status === 'failed'
-      ? { ...daemon, status: 'skipped', detail: `Daemon readiness pending; verified packages retained. ${daemon.detail}` }
-      : daemon);
-  }
 
   const architectureConfiguration = configureArchitectureProjection(env, plugins, opts.runtimeLock);
   steps.push(architectureConfiguration);
