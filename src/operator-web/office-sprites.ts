@@ -3,8 +3,8 @@
  * (docs/design/operator-console/mockups/board-pixel-office.html, #1790 M82):
  * one 32-colour palette with a day and a night set, a 3x5 sign font, 16x24
  * characters and the carrot boss. Each sprite is rows of palette letters.
- * Claude Code is its official pixel mascot (M82), Codex a blue owl, and every
- * other agent a person.
+ * Claude Code is its official pixel mascot (M82), Codex a blue owl,
+ * Antigravity a green hover robot, and every other agent a person.
  */
 export const PX_COLORS = [
   'ink', 'ink2', 'slate', 'mist', 'cloud', 'paper', 'wall', 'wallSh', 'wood', 'woodDk', 'floorA', 'floorB', 'floorSh', 'deskTop', 'deskFr', 'skin',
@@ -230,25 +230,62 @@ const OWL_BODY: Body = {
   },
 };
 
+// Hover robot rows: h/H shell, j visor, w eye shine, e eye, y antenna light and hover glow.
+const HOVER: Sprite = [
+  '.......yy.......', '.......HH.......', '....hhhhhhhh....', '...hhhhhhhhhh...', '..hhjjjjjjjjhh..', '..hjjwejjwejjh..', '..hjjeejjeejjh..',
+  '..hhjjjjjjjjhh..', '...hhhhhhhhhh...', '.HH.hhhhhhhh.HH.', '.HH.hHhhhhHh.HH.', '....hhhhhhhh....', '.....HHHHHH.....', '......yyyy......',
+];
+const HOVER_ARMS_DOWN: Edit = { 9: { 1: '.', 2: '.', 13: '.', 14: '.' }, 10: { 1: '.', 2: '.', 13: '.', 14: '.' } };
+const hoverArmsAt = (row: number, left: boolean, right: boolean): Edit => {
+  const cells = Object.fromEntries([...(left ? [0, 1] : []), ...(right ? [14, 15] : [])].map(column => [column, 'H']));
+  return { [row]: cells, [row + 1]: cells };
+};
+const HOVER_EYES_SHUT: Edit = { 5: { 5: 'j', 6: 'j', 9: 'j', 10: 'j' } };
+const HOVER_FRONT: Readonly<Record<FrontPose, Edit>> = {
+  front: {}, sipA: {}, sipB: HOVER_EYES_SHUT, cheerB: {},
+  blink: HOVER_EYES_SHUT,
+  sleep: merge(HOVER_EYES_SHUT, { 0: { 7: '.', 8: '.' }, 13: { 6: '.', 9: '.' } }),
+  step: { 13: { 6: '.', 10: 'y' } },
+  arms: merge(HOVER_ARMS_DOWN, hoverArmsAt(7, true, true)), cheerA: merge(HOVER_ARMS_DOWN, hoverArmsAt(7, true, true)),
+  panicA: merge(HOVER_ARMS_DOWN, hoverArmsAt(7, true, true)), panicB: merge(HOVER_ARMS_DOWN, hoverArmsAt(6, true, true)),
+  waveA: merge({ 9: { 13: '.', 14: '.' }, 10: { 13: '.', 14: '.' } }, hoverArmsAt(7, false, true)),
+  waveB: merge({ 9: { 13: '.', 14: '.' }, 10: { 13: '.', 14: '.' } }, hoverArmsAt(5, false, true)),
+  think: { 5: { 5: 'e', 6: 'e', 9: 'e', 10: 'e' }, 6: { 5: 'j', 6: 'j', 9: 'j', 10: 'j' } },
+};
+const HOVER_BACK: Readonly<Record<BackPose, Edit>> = {
+  back: {}, backSip: {}, backType: { 9: { 1: '.', 14: '.' }, 10: { 0: 'H', 15: 'H' } },
+  backUpA: merge(HOVER_ARMS_DOWN, hoverArmsAt(7, true, true)), backUpB: merge(HOVER_ARMS_DOWN, hoverArmsAt(6, true, true)),
+};
+const hoverBack = (rows: Sprite): Sprite => rows.map((row, index) => (index >= 4 && index <= 7 ? row.replace(/[jwe]/gu, 'h') : row));
+const HOVER_BODY: Body = {
+  dx: -1, top: 8, topBack: 1, hat: 0,
+  poses: {
+    ...fromEntries(FRONT_POSES, pose => pad(outline(edit(HOVER, HOVER_FRONT[pose])), 8, 24)),
+    ...fromEntries(BACK_POSES, pose => pad(outline(hoverBack(edit(HOVER, HOVER_BACK[pose]))), 1, 19)),
+  },
+};
+
 /** The body family of an hc agent kind. */
-export type AgentKind = 'claude' | 'codex' | 'other' | 'unknown';
+export type AgentKind = 'claude' | 'codex' | 'antigravity' | 'other' | 'unknown';
 
 export interface SceneAgent {
   readonly kind: AgentKind;
   readonly badge: string;
 }
 
-/** `BoardTerminalV1.agent` is the hc agent word; a word that is not Claude Code or Codex is another agent, badged with its first letters. */
+/** `BoardTerminalV1.agent` is the hc agent word; a word that is not Claude Code, Codex or Antigravity is another agent, badged with its first letters. */
 export function sceneAgent(agent: string | null): SceneAgent {
   if (agent === null) return { kind: 'unknown', badge: '?' };
   if (agent === 'claude-code') return { kind: 'claude', badge: 'CC' };
   if (agent === 'codex') return { kind: 'codex', badge: 'CX' };
+  if (agent === 'antigravity') return { kind: 'antigravity', badge: 'AG' };
   return { kind: 'other', badge: agent.slice(0, 2).toUpperCase() };
 }
 
 const AGENT_COLORS: Readonly<Record<AgentKind, { readonly h: PxColor; readonly H: PxColor; readonly j: PxColor; readonly tag: PxColor | null }>> = {
   claude: { h: 'claude', H: 'claudeDk', j: 'accent', tag: 'claudeDk' },
   codex: { h: 'codex', H: 'codexDk', j: 'screen', tag: 'codexDk' },
+  antigravity: { h: 'ok', H: 'okDk', j: 'screen', tag: 'okDk' },
   other: { h: 'mist', H: 'slate', j: 'cloud', tag: 'slate' },
   unknown: { h: 'paper', H: 'cloud', j: 'paper', tag: null },
 };
@@ -257,6 +294,7 @@ export const agentTagColor = (kind: AgentKind): PxColor | null => AGENT_COLORS[k
 
 export function agentBody(kind: AgentKind, outfit: Outfit): Body {
   if (kind === 'claude') return mascotBody(outfit);
+  if (kind === 'antigravity') return HOVER_BODY;
   return kind === 'codex' ? OWL_BODY : PERSON;
 }
 
@@ -267,14 +305,15 @@ export function agentPalette(kind: AgentKind, outfit: Outfit): SpritePalette {
 }
 
 /** The 7-8 pixel agents of the overview's mini rooms: the same bodies at the mini grid, in the same palette. */
-const MINI_SPRITES: Readonly<Record<'person' | 'claude' | 'codex', { readonly front: Sprite; readonly back: Sprite }>> = {
+const MINI_SPRITES: Readonly<Record<'person' | 'claude' | 'codex' | 'antigravity', { readonly front: Sprite; readonly back: Sprite }>> = {
   person: { front: ['.kkkkk.', 'kjhhhhk', 'kHHHHHk', 'ksesesk', '.kssSk.', 'kbbbbbk', 'kbbbbbk', '.kd.dk.'], back: ['.kkkkk.', 'kjhhhhk', 'kHHHHHk', 'krrrrrk', '.kbbbk.', 'kbbbbbk', 'kbbbbbk'] },
   claude: { front: ['........', '.jhhhhh.', '.hehheh.', 'hhhhhhhh', '.HHHHHH.', '.H.HH.H.'], back: ['.jhhhhh.', '.hhhhhh.', 'hhhhhhhh', '.HHHHHH.', '.H.HH.H.'] },
   codex: { front: ['.h....h.', '.hhhhhh.', 'hweyyewh', '.hjjjjh.', '.hjjjjh.', '..y..y..'], back: ['.h....h.', '.hhhhhh.', 'HhhhhhhH', '.hHhhHh.', '.hhhhhh.'] },
+  antigravity: { front: ['...yy...', '.hhhhhh.', 'hjejjejh', '.hhhhhh.', 'H.hhhh.H', '...yy...'], back: ['...yy...', '.hhhhhh.', 'hhhhhhhh', '.hHhhHh.', 'H.hhhh.H'] },
 };
 
 export function miniAgent(kind: AgentKind, facing: 'front' | 'back'): Sprite {
-  return MINI_SPRITES[kind === 'claude' || kind === 'codex' ? kind : 'person'][facing];
+  return MINI_SPRITES[kind === 'unknown' || kind === 'other' ? 'person' : kind][facing];
 }
 
 export const CHAIR: Sprite = [

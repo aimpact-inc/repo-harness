@@ -250,7 +250,7 @@ const clockText = (milliseconds: number): string => {
 
 function agentName(agent: string | null, t: OperatorTranslate): string {
   if (agent === null) return t('board.office.agent.unknown');
-  return agent === 'claude-code' ? 'Claude Code' : agent === 'codex' ? 'Codex' : agent;
+  return agent === 'claude-code' ? 'Claude Code' : agent === 'codex' ? 'Codex' : agent === 'antigravity' ? 'Antigravity' : agent;
 }
 
 function deskNumber(desk: OfficeDesk, t: OperatorTranslate): string {

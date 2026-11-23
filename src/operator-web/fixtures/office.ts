@@ -128,7 +128,7 @@ const SAMPLE_ROOMS: Readonly<Record<string, SampleRoom>> = {
     plan: { limit: 4, accepted: 2 },
   },
   repo_a2a2a2a2a2a2a2a2: {
-    name: 'AstroZi', parent: 87, orchestrator: { agent: 'codex' }, advisor: { agent: 'claude-code' },
+    name: 'AstroZi', parent: 87, orchestrator: { agent: 'codex' }, advisor: { agent: 'antigravity' },
     workers: [['claude-code', 'idle', 'ci_pending'], ['codex', 'idle', 'no_claim_status'], ['claude-code', 'idle', 'acceptance_queue']],
     plan: { limit: 3, accepted: 0 },
   },
