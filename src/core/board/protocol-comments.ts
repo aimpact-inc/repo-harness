@@ -199,7 +199,7 @@ export interface AcceptanceRowV1 {
   /** The review seat from the record's `Seat:` line or explicit Role cell (`gatekeeper` or `reviewer`); null when absent on legacy records. */
   readonly seat: 'gatekeeper' | 'reviewer' | null;
   /** The review runtime that the Role cell starts with (`review publish` writes `<harness> (<model>), read-only`); null when the cell names no known runtime. */
-  readonly harness: 'claude' | 'codex' | 'pi' | null;
+  readonly harness: 'claude' | 'codex' | 'pi' | 'agy' | null;
   /** The model in the Role cell's parentheses; null when the cell names none or `unobserved`. */
   readonly model: string | null;
   /** The issue comment id of the record's `Claim:` URL, which identifies one review; null when the line is missing or is not a comment URL. */
@@ -237,7 +237,7 @@ export function parseAcceptanceRecord(comment: BoardCommentV1): readonly Accepta
       const roleSeat = /^\s*(gatekeeper|reviewer)\b/u.exec(roleCell)?.[1] as 'gatekeeper' | 'reviewer' | undefined;
       if (rawSeat !== null && roleSeat !== undefined && rawSeat !== roleSeat) return null;
       const seat: AcceptanceRowV1['seat'] = (rawSeat as 'gatekeeper' | 'reviewer' | null) ?? roleSeat ?? null;
-      const role = /^\s*(?:(claude|codex|pi)|(?:gatekeeper|reviewer))\b(?: \(([^)]*)\))?/u.exec(roleCell);
+      const role = /^\s*(?:(claude|codex|pi|agy)|(?:gatekeeper|reviewer))\b(?: \(([^)]*)\))?/u.exec(roleCell);
       const model = role?.[2]?.trim() ?? '';
       rows.push(Object.freeze({
         round: Number(table[1]),

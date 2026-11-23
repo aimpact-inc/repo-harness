@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseReviewPacket, planReview, reviewPacket, type ReviewDecisionV1, type ReviewSeat } from '../src/core/board/review';
@@ -10,8 +10,8 @@ import { effectiveGatekeeper, seatAccountQuotas } from '../src/core/board/seat-r
 import { HerdrCoreError, RH_LABEL } from '../src/effects/terminal/herdr-core';
 import type { BoardPullRequestV1, BoardV1 } from '../src/core/board/board';
 import type { BoardCommentPageV1, BoardCommentV1, BoardPullRequestReadV1 } from '../src/core/board/source';
-import { renderAcceptanceDispositionComment } from '../src/core/board/protocol-comments';
-import { SeatProviderUnavailableError } from '../src/cli/commands/seats';
+import { parseAcceptanceRecord, renderAcceptanceDispositionComment } from '../src/core/board/protocol-comments';
+import { labeledSeatArgv, SeatProviderUnavailableError } from '../src/cli/commands/seats';
 import type { SeatRouteV1 } from '../src/core/board/seat-routing';
 import { DEFAULT_SEATS_CONFIG, type SeatConfigV1, type SeatId } from '../src/core/board/seats-settings';
 import { acceptance, gatekeeperReview, secondReview } from '../src/core/board/review-rules';
@@ -200,20 +200,29 @@ function nativeGatekeeperRoute() {
   });
 }
 
-test.skipIf(process.platform === 'win32').each([0, 1])('an agy launch reports the terminal binding result (hc exit %i)', async (bindExit) => {
+test.skipIf(process.platform === 'win32').each([0, 1])('an agy launch reports the production seat labeling result (hc exit %i)', async (bindExit) => {
   const gatekeeper = nativeGatekeeperRoute();
   expect(gatekeeper.id).toBe('gatekeeper-fallback');
   const root = mkdtempSync(join(tmpdir(), 'rh-agy-review-'));
   const hc = join(root, 'hc');
   const agy = join(root, 'agy');
-  writeFileSync(hc, `#!/bin/sh\nexit ${bindExit}\n`, { mode: 0o700 });
+  const labelCalls = join(root, 'labels');
+  const env = { HOME: root, ZDOTDIR: root, PATH: `${root}:/usr/bin:/bin`, HC_TERMINAL_ID: 't9' };
+  writeFileSync(hc, `#!${process.execPath}
+const { appendFileSync } = require('node:fs');
+const [command, json, separator, address, ...pairs] = process.argv.slice(2);
+appendFileSync(${JSON.stringify(labelCalls)}, JSON.stringify([command, json, separator, address, ...pairs]) + '\\n');
+if (${bindExit}) process.exit(${bindExit});
+const labels = Object.fromEntries(pairs.map(pair => [pair.slice(0, pair.indexOf('=')), pair.slice(pair.indexOf('=') + 1)]));
+console.log(JSON.stringify({ address, state: 'live', turn: 0, labels }));
+`, { mode: 0o700 });
   writeFileSync(agy, `#!/bin/sh\nprintf '%s\\n' "$${AGY_REVIEW_LAUNCH_ENV}"\n`, { mode: 0o700 });
   const tab = Promise.withResolvers<Readonly<Record<string, unknown>>>();
   const events: string[] = [];
-  const p = ports({ agy: { hc, env: { HOME: root } }, openTab: tab.resolve, launch: async (seat, _labels, _cwd, route) => {
+  const p = ports({ agy: { hc, env }, openTab: tab.resolve, launch: async (seat, labels, _cwd, route) => {
     expect(seat).toBe('gatekeeper');
     expect(route).toBe(gatekeeper);
-    return { argv: [agy, '--agent', 'rh-gatekeeper-fallback'], tab: 'review', runtime: 'agy' };
+    return { argv: labeledSeatArgv(seat, labels, [agy, '--agent', 'rh-gatekeeper-fallback'], env, 'new'), tab: 'review', runtime: 'agy' };
   } });
   const decisions = plan([pr(1)], page(), [], gatekeeper);
   const run = executeReview(decisions, { ...context, gatekeeper, observe: ({ kind }) => events.push(kind) }, p);
@@ -229,12 +238,18 @@ test.skipIf(process.platform === 'win32').each([0, 1])('an agy launch reports th
     expect(packet).toContain('reviewer.harness "agy"');
     expect(args.at(-2)).toBe(AGY_REVIEW_PROMPT_OPTION);
     expect(args).toContain(`${AGY_REVIEW_LAUNCH_ENV}=${launchId}`);
-    const binding = args.find(arg => arg.startsWith(`${RH_LABEL.agyReview}=${launchId} `))!;
     const expected = { pr: 1, seat: 'gatekeeper', head_sha: SHA, tier: 'high', round: 1 } as const;
-    expect(parseReviewPacket(binding)).toEqual(expected);
     expect(parseReviewPacket(packet)).toEqual(expected);
-    const result = spawnSync(shell, args, { env: { HC_TERMINAL_ID: 't9' }, encoding: 'utf8' });
+    const result = spawnSync(shell, args, { env, cwd: root, encoding: 'utf8' });
     expect(result.status, result.stderr).toBe(bindExit);
+    const calls: string[][] = readFileSync(labelCalls, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    expect(calls).toHaveLength(1);
+    const call = calls[0]!;
+    expect(call.slice(0, -1)).toEqual(['label', '--json', '--', 't9',
+      `${RH_LABEL.seat}=gatekeeper`, `${RH_LABEL.repository}=1`, `${RH_LABEL.pr}=1`, `${RH_LABEL.parent}=100`]);
+    const binding = call.at(-1)!;
+    expect(binding).toStartWith(`${RH_LABEL.agyReview}=${launchId} `);
+    expect(parseReviewPacket(binding)).toEqual(expected);
     expect(result.stdout.trim()).toBe(bindExit === 0 ? launchId : '');
     if (bindExit === 0) {
       expect(await run).toMatchObject({ started: [{ pr: 1, seat: 'gatekeeper' }], refused: [] });
@@ -382,7 +397,7 @@ test('a round-1 PASS carries only to the fix head of the claimed FAIL, in either
   const FIX = 'c'.repeat(40);
   const LATER = 'd'.repeat(40);
   // `custom` is a Pi seat on a user-set model id with no known family (#3250).
-  const models = { pi: 'magpie/codex/gpt-6.1-sol', claude: 'claude-opus-5-5', custom: 'acme/mystery-1' } as const;
+  const models = { pi: 'magpie/codex/gpt-6.1-sol', claude: 'claude-opus-5-5', agy: 'gemini-4-hydrogen-high', custom: 'acme/mystery-1' } as const;
   type Row = readonly [harness: keyof typeof models, subject: string, round: number, verdict: 'PASS' | 'FAIL', claimed?: boolean];
   const read = (head: string, rows: readonly Row[]) => {
     const comments = rows.flatMap(([harness, subject, round, verdict, claimed = true], at) => {
@@ -410,6 +425,13 @@ test('a round-1 PASS carries only to the fix head of the claimed FAIL, in either
   const changedRoute: SeatRouteV1 = { ...GATEKEEPER, id: 'gatekeeper-fallback', seat: DEFAULT_SEATS_CONFIG.reviewer };
   const carried = plan([pr(1, { head_sha: FIX, gatekeeper_review: 'pass', second_review: 'pending' })], read(FIX, passThenFail).comments, [], changedRoute);
   expect(seatsOf(carried[0])).toEqual(['reviewer']);
+  const agyPass: Row[] = [['agy', OLD, 1, 'PASS'], ['claude', OLD, 1, 'FAIL']];
+  const agyRead = read(FIX, agyPass);
+  const agyPr = pr(1, { head_sha: FIX, gatekeeper_review: gatekeeperReview(agyRead), second_review: secondReview(agyRead, 'high') });
+  const agyRecord = agyRead.comments.comments[1]!;
+  expect(parseAcceptanceRecord(agyRecord)?.[0]).toMatchObject({ harness: 'agy', model: models.agy, seat: 'gatekeeper' });
+  expect(seatsOf(plan([agyPr], agyRead.comments, [], nativeGatekeeperRoute())[0])).toEqual(['reviewer']);
+  expect(view(FIX, [...agyPass, ['claude', FIX, 2, 'PASS']])).toEqual(['pass', 'recorded', 'accepted']);
   // The reviewer's round-2 PASS of the fix head meets the High rule with the carried row.
   expect(view(FIX, [...failThenPass, ['claude', FIX, 2, 'PASS']])).toEqual(['pass', 'recorded', 'accepted']);
   // A later head after round 2 gets no carry: both seats review it.

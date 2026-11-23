@@ -4,11 +4,11 @@ import { join } from 'node:path';
 import { collectBoard, type BoardCollectInput, BoardCollectError, readRepositoryId, runGhText } from './collect';
 import { planReview, reviewPacket, reviewPacketHeader, REVIEW_START_HEADER, REVIEW_START_STATUS_HEADER, type ReviewDecisionV1, type ReviewSeatStartV1 } from '../../core/board/review';
 import type { BoardCommentPageV1 } from '../../core/board/source';
-import type { SeatConfigV1, SeatId } from '../../core/board/seats-settings';
+import type { SeatConfigV1 } from '../../core/board/seats-settings';
 import type { SeatRouteV1 } from '../../core/board/seat-routing';
 import { gitSpawnSync, withoutRepositorySelectingGitEnv } from '../git/runner';
-import { hcLabelPairs, HERDR_APP_NOT_SENT, HerdrCoreError, herdrAppDo, RH_LABEL } from '../terminal/herdr-core';
-import { AGY_REVIEW_LAUNCH_ENV, AGY_REVIEW_LAUNCH_LINE, AGY_REVIEW_PROMPT_OPTION, prepareAgyReviewStartup, waitForAgyReviewBinding } from './agy-review-session';
+import { HERDR_APP_NOT_SENT, HerdrCoreError, herdrAppDo } from '../terminal/herdr-core';
+import { AGY_REVIEW_LAUNCH_ENV, AGY_REVIEW_LAUNCH_LINE, AGY_REVIEW_PROMPT_OPTION, prepareAgyReviewStartup, waitForAgyReviewBinding, type AgyReviewBinding } from './agy-review-session';
 import { acquireExclusiveDirectoryLock, ExclusiveLockContentionError } from '../locking/exclusive-directory-lock';
 import { repoHarnessHome } from '../repo-harness-home';
 import { effectiveGatekeeper, seatAccountQuotas } from '../../core/board/seat-routing';
@@ -21,7 +21,7 @@ type StartDecision = Extract<ReviewDecisionV1, { action: 'start' }>;
  * What `seatLaunch` (the `seats argv` command) answers for one review seat; the command layer owns it, so the caller passes it in.
  * `gatekeeper` is the effective gatekeeper that the plan checked: the launch starts that seat and reads quota no second time.
  */
-export type ReviewLaunch = (seat: SeatId, labels: { readonly repositoryId: string; readonly pr: string; readonly parent: string }, cwd: string, gatekeeper: SeatRouteV1) =>
+export type ReviewLaunch = (seat: ReviewSeatStartV1['seat'], labels: { readonly repositoryId: string; readonly pr: string; readonly parent: string; readonly agyReview?: AgyReviewBinding }, cwd: string, gatekeeper: SeatRouteV1) =>
   Promise<{ readonly argv: readonly string[]; readonly tab: string | null; readonly runtime: SeatConfigV1['runtime'] }>;
 
 export interface ReviewInput extends Pick<BoardCollectInput, 'repo_root' | 'parent' | 'host'> {
@@ -78,18 +78,11 @@ function markerBody(decision: StartDecision, start: ReviewSeatStartV1): string {
   return [REVIEW_START_HEADER, `Subject: ${decision.head_sha}`, `Seat: ${start.seat}`, `PR: #${decision.pr}`, `Reading: ${reading}`].join('\n');
 }
 
-function agyPlacement(argv: readonly string[], packet: string, header: string, ports: ReviewPorts) {
+function agyBinding(header: string, ports: ReviewPorts): AgyReviewBinding & { readonly launchId: string } {
   const agy = ports.agy;
   if (agy?.hc == null) throw new BoardCollectError('hc is required to bind the agy review launch to its terminal.');
   const launchId = randomUUID();
-  const startup = prepareAgyReviewStartup(launchId, agy.env);
-  const [label] = hcLabelPairs({ [RH_LABEL.agyReview]: `${launchId} ${header}` });
-  // The board waits for this explicit result before reporting a start or releasing the marker.
-  const script = 'if [ -z "${HC_TERMINAL_ID:-}" ] || ! "$0" label -- "$HC_TERMINAL_ID" "$1" >/dev/null; then /bin/mkdir "$2/failed"; exit 1; fi; /bin/mkdir "$2/bound" && shift 2 && exec "$@"';
-  return { startup, argv: [
-    '/bin/sh', '-c', script, agy.hc, label!, startup, '/usr/bin/env', `${AGY_REVIEW_LAUNCH_ENV}=${launchId}`,
-    ...argv, AGY_REVIEW_PROMPT_OPTION, packet + AGY_REVIEW_LAUNCH_LINE + launchId,
-  ] };
+  return { launchId, startup: prepareAgyReviewStartup(launchId, agy.env), label: `${launchId} ${header}` };
 }
 
 /**
@@ -113,15 +106,19 @@ export async function executeReview(decisions: readonly ReviewDecisionV1[], cont
     const launches = [];
     const labels = { repositoryId: context.repositoryId, pr: String(decision.pr), parent: String(context.parent) };
     for (const start of decision.seats) {
-      const { runtime, argv, tab } = await ports.launch(start.seat, labels, worktree.path, context.gatekeeper);
+      const gatekeeper = context.gatekeeper;
+      const native = start.seat === 'gatekeeper' && gatekeeper.id === 'gatekeeper-fallback' && gatekeeper.seat.runtime === 'agy'
+        ? agyBinding(reviewPacketHeader(decision, start), ports)
+        : undefined;
+      const launchLabels = native === undefined ? labels : { ...labels, agyReview: native };
+      const { runtime, argv, tab } = await ports.launch(start.seat, launchLabels, worktree.path, gatekeeper);
       const packet = reviewPacket(decision, start, runtime);
       const tabArgs = { ...(tab === null ? {} : { name: tab }), space: context.space, folder: worktree.path };
       if (runtime === 'agy') {
-        if (start.seat !== 'gatekeeper' || context.gatekeeper.id !== 'gatekeeper-fallback') {
-          throw new BoardCollectError('agy review launches require the effective gatekeeper-fallback seat.');
-        }
-        const native = agyPlacement(argv, packet, reviewPacketHeader(decision, start), ports);
-        launches.push({ start, placement: { ...tabArgs, argv: native.argv }, startup: native.startup });
+        if (native === undefined) throw new BoardCollectError('agy review launches require the effective gatekeeper-fallback seat.');
+        const { launchId, startup } = native;
+        const nativeArgv = ['/usr/bin/env', `${AGY_REVIEW_LAUNCH_ENV}=${launchId}`, ...argv, AGY_REVIEW_PROMPT_OPTION, packet + AGY_REVIEW_LAUNCH_LINE + launchId];
+        launches.push({ start, placement: { ...tabArgs, argv: nativeArgv }, startup });
       } else {
         launches.push({ start, placement: { ...tabArgs, argv, task: packet } });
       }

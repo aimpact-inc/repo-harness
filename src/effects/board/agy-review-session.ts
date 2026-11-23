@@ -6,6 +6,12 @@ import { requireHome } from '../repo-harness-home';
 import { ensureSessionDirectory, readSessionArtifact, writeSessionArtifact } from '../terminal/task-session-io';
 
 export const AGY_REVIEW_LAUNCH_ENV = 'REPO_HARNESS_SEAT_AGY_REVIEW_LAUNCH';
+export const AGY_REVIEW_BINDING_ENV = 'REPO_HARNESS_AGY_REVIEW_BINDING';
+
+export interface AgyReviewBinding {
+  readonly label: string;
+  readonly startup: string;
+}
 export const AGY_REVIEW_PROMPT_OPTION = '--prompt-interactive';
 export const AGY_REVIEW_LAUNCH_LINE = '\nAgy review launch: ';
 const LAUNCH_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u;
