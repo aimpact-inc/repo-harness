@@ -513,11 +513,12 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
 });
 `;
 
-const FAKE_AGY = `#!${process.execPath}
+const fakeAgy = (log: string, mode: string) => `#!${process.execPath}
 const args = process.argv.slice(2).join(' ');
-require('node:fs').appendFileSync(process.env.FAKE_AGY_LOG, args + '\\n');
-const mode = process.env.FAKE_AGY_MODE;
+require('node:fs').appendFileSync(${JSON.stringify(log)}, args + '\\n');
+const mode = ${JSON.stringify(mode)};
 const email = ['agy-private-fixture', 'example.invalid'].join('@');
+if (args === '--help') { console.log('Usage of agy: --conversation'); process.exit(0); }
 if (args === '--version') { console.log('1.5.12'); process.exit(0); }
 if (args === 'models') {
   if (mode === 'signed-out') {
@@ -563,11 +564,11 @@ function fixture(codexMode: string | null, agyMode: string | null = null) {
   }
   const agyLog = join(root, 'agy.jsonl');
   if (agyMode !== null) {
-    writeFileSync(join(bin, 'agy'), FAKE_AGY);
+    writeFileSync(join(bin, 'agy'), fakeAgy(agyLog, agyMode));
     chmodSync(join(bin, 'agy'), 0o755);
   }
   const env = { HOME: home, PATH: bin, TMPDIR: tmpdir(), BUN_INSTALL: join(home, '.bun'),
-    FAKE_CODEX_LOG: log, FAKE_CODEX_MODE: codexMode ?? '', FAKE_AGY_LOG: agyLog, FAKE_AGY_MODE: agyMode ?? '' };
+    FAKE_CODEX_LOG: log, FAKE_CODEX_MODE: codexMode ?? '' };
   return { home, env, log, agyLog };
 }
 
@@ -915,7 +916,7 @@ describe('rh quota', () => {
         { window: '5h', window_minutes: 300, used_percent: 10 }, { window: 'weekly', window_minutes: 10080, used_percent: 95 },
       ] },
     ]);
-    expect(readFileSync(f.agyLog, 'utf8').trim().split('\n')).toEqual(['--version', 'models', '-p /usage --output-format json']);
+    expect(readFileSync(f.agyLog, 'utf8').trim().split('\n')).toEqual(['--help', '--version', 'models', '-p /usage --output-format json']);
     const text = quota([], f.env);
     expect(text.status, text.stderr).toBe(0);
     expect(text.stdout).toContain('agy_gemini weekly: 62% left\nagy_other weekly: 5% left');
@@ -926,7 +927,7 @@ describe('rh quota', () => {
   });
 
   test.each([
-    [null, 'agy not on PATH'],
+    [null, 'agy not installed'],
     ['signed-out', 'agy is signed out'],
     ['api-key', 'agy /usage exited 2 without account quota'],
     ['error', 'agy quota reader failed'],
@@ -944,7 +945,7 @@ describe('rh quota', () => {
     ]);
     expect(result.stdout).toContain('advisor: advisor (pi magpie/agy-cli/gemini-4-neon xhigh; agy_gemini unknown)');
     expect(result.stdout + result.stderr).not.toContain('agy-private-fixture');
-    if (mode === 'signed-out') expect(readFileSync(f.agyLog, 'utf8').trim().split('\n')).toEqual(['--version', 'models']);
+    if (mode === 'signed-out') expect(readFileSync(f.agyLog, 'utf8').trim().split('\n')).toEqual(['--help', '--version', 'models']);
   });
 
   test('routes past exhausted Gemini for workers and stops the advisor projected onto Gemini', () => {
@@ -1051,7 +1052,7 @@ describe('rh quota', () => {
     const report = JSON.parse(result.stdout) as QuotaReport;
     expect(report.accounts.map(account => [account.account, account.state, account.reason])).toEqual([
       ['claude', 'unknown', 'no capture'], ['chatgpt', 'unknown', reason],
-      ['agy_gemini', 'unknown', 'agy not on PATH'], ['agy_other', 'unknown', 'agy not on PATH'],
+      ['agy_gemini', 'unknown', 'agy not installed'], ['agy_other', 'unknown', 'agy not installed'],
     ]);
   });
 });

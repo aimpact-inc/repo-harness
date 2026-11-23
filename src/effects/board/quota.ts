@@ -1,4 +1,4 @@
-import type { AccountUsageSnapshot } from '@botiverse/oar/browser';
+import type { AccountUsageSnapshot, InstallationSnapshot } from '@botiverse/oar/browser';
 import { spawn } from 'node:child_process';
 import { retryWindowsSharingRace } from '../atomic-append';
 import { randomUUID } from 'node:crypto';
@@ -20,7 +20,7 @@ import {
   type QuotaReport,
 } from '../../core/board/quota';
 import { hasAgySeat } from '../../core/board/seat-routing';
-import { readSeatsConfiguration } from './seats-configuration';
+import { readSeatsConfiguration, resolveAgyInstallation } from './seats-configuration';
 
 const CODEX_READ_TIMEOUT_MS = 20_000;
 const AGY_READ_TIMEOUT_MS = 20_000;
@@ -46,14 +46,15 @@ export function decodeAgyQuota(snapshot: AccountUsageSnapshot, observedAt: strin
 }
 
 /** Read both model groups through agy's own sign-in. */
-export async function readAgyQuota(env: NodeJS.ProcessEnv): Promise<QuotaReading[]> {
-  const command = Bun.which('agy', { PATH: env.PATH ?? process.env.PATH });
-  if (command === null) return unknownAgyQuota('agy not on PATH');
+export async function readAgyQuota(env: NodeJS.ProcessEnv, verified?: Promise<InstallationSnapshot>): Promise<QuotaReading[]> {
   try {
+    const installation = await (verified ?? resolveAgyInstallation(env));
+    if (installation.kind === 'not_found') return unknownAgyQuota('agy not installed');
+    if (installation.kind !== 'available' || installation.via !== 'executable') return unknownAgyQuota('agy installation is unsupported');
     const { antigravityRuntime } = await import('@botiverse/oar/runtimes/antigravity');
     const environment = Object.fromEntries(Object.entries(env).map(([key, value]) => [key, value ?? null] as const));
     const options = { env: environment, timeoutMs: AGY_READ_TIMEOUT_MS };
-    return decodeAgyQuota(await antigravityRuntime.accountUsage({ kind: 'available', via: 'executable', command }, options), new Date().toISOString());
+    return decodeAgyQuota(await antigravityRuntime.accountUsage(installation, options), new Date().toISOString());
   } catch (error) {
     // Use fixed reasons. An executable or library error can include private text.
     const message = error instanceof Error ? error.message : '';

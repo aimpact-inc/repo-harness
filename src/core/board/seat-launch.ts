@@ -325,9 +325,11 @@ export const AGY_READONLY_DENIED_COMMANDS: readonly string[] = [
 export const AGY_WORKER_COMMAND_PREFIXES: readonly string[] = [
   'hc ls', 'hc get', 'hc read', 'hc wait', 'hc send',
   'git log', 'git show', 'git diff', 'git status', 'git grep', 'git rev-parse', 'git ls-remote', 'git fetch',
-  'git add', 'git commit', 'git checkout', 'git switch', 'git branch',
-  'git worktree add', 'git worktree remove', 'git worktree prune', 'git worktree list',
-  'git merge-tree', 'git merge', 'git restore', 'git rm', 'git mv', 'git stash',
+  'git add', 'git commit', 'git branch',
+  'git worktree add', 'git worktree prune', 'git worktree list',
+  // Include the first path's ./ so even a string prefix cannot match an option after the `--`.
+  'git merge-tree', 'git restore --staged -- ./', 'git rm -- ./', 'git mv -- ./',
+  'git stash push', 'git stash list', 'git stash show',
   'gh pr view', 'gh pr list', 'gh pr checks', 'gh pr diff',
   'gh issue view', 'gh issue list', 'gh run view', 'gh run list',
   'rh arch projection status', 'rh arch projection slice', 'rh arch prepare', 'rh arch checkpoint',

@@ -1,3 +1,4 @@
+import type { ExecutableInstallation } from '@botiverse/oar/browser';
 import { randomUUID } from 'node:crypto';
 import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -172,13 +173,34 @@ const AGY_CATALOG_CHILD_ARG = '--agy-catalog';
 const SEAT_POOL_FILE_LIMIT = 64 * 1024;
 const CATALOG_RUNTIMES = ['claude', 'codex'] as const;
 
+export interface AgyCatalogModel {
+  readonly id: string;
+  readonly efforts: readonly string[];
+}
+
 type AgyProbe =
-  | { readonly kind: 'available'; readonly executable: string; readonly models: readonly string[] }
+  | { readonly kind: 'available'; readonly installation: ExecutableInstallation; readonly models: readonly AgyCatalogModel[] }
   | { readonly kind: 'not_installed' | 'unsupported' | 'signed_out' | 'catalog_unknown' | 'unknown' };
 
 function agyProbeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return { HOME: env.HOME ?? homedir(), USERPROFILE: env.USERPROFILE, LOCALAPPDATA: env.LOCALAPPDATA, PATH: env.PATH ?? '',
     TMPDIR: env.TMPDIR, OAR_ANTIGRAVITY_BIN: env.OAR_ANTIGRAVITY_BIN, OAR_CHILD_STDERR: 'ignore', NO_COLOR: '1', TERM: 'dumb' };
+}
+
+function agyEnvironment(env: NodeJS.ProcessEnv): Record<string, string | null> {
+  return { ...Object.fromEntries(Object.keys(process.env).map(key => [key, null])),
+    ...Object.fromEntries(Object.entries(agyProbeEnv(env)).map(([key, value]) => [key, value ?? null])) };
+}
+
+/** Resolve the installation through OAR for both standalone quota reads and the seat catalog. */
+export async function resolveAgyInstallation(env: NodeJS.ProcessEnv) {
+  const { antigravityRuntime } = await import('@botiverse/oar/runtimes/antigravity');
+  return antigravityRuntime.installation({ env: agyEnvironment(env) });
+}
+
+function isAgyCatalogModel(row: unknown): row is AgyCatalogModel {
+  return isRecord(row) && seatModelShapeValid('agy', row.id) && Array.isArray(row.efforts)
+    && row.efforts.every(effort => seatModelShapeValid('agy', effort));
 }
 
 /** Read the native catalog in a child with a scratch cwd. Only its typed projection returns. */
@@ -194,9 +216,9 @@ export function probeAgySeat(env: NodeJS.ProcessEnv = process.env): AgyProbe {
     switch (row.kind) {
       case 'not_installed': case 'unsupported': case 'signed_out': case 'catalog_unknown': return { kind: row.kind };
       case 'available':
-        if (typeof row.executable === 'string' && isAbsolute(row.executable) && Array.isArray(row.models)
-          && row.models.every(id => seatModelShapeValid('agy', id))) {
-          return { kind: row.kind, executable: row.executable, models: row.models };
+        if (typeof row.executable === 'string' && isAbsolute(row.executable) && typeof row.version === 'string'
+          && /^\d+\.\d+\.\d+$/u.test(row.version) && Array.isArray(row.models) && row.models.every(isAgyCatalogModel)) {
+          return { kind: row.kind, installation: { kind: 'available', via: 'executable', command: row.executable, version: row.version }, models: row.models };
         }
     }
     return { kind: 'unknown' };
@@ -208,23 +230,34 @@ export function probeAgySeat(env: NodeJS.ProcessEnv = process.env): AgyProbe {
 }
 
 async function readAgyCatalog(): Promise<AgyProbe> {
-  const env = { ...Object.fromEntries(Object.keys(process.env).map(key => [key, null])),
-    ...Object.fromEntries(Object.entries(agyProbeEnv(process.env)).map(([key, value]) => [key, value ?? null])) };
+  const env = agyEnvironment(process.env);
   let stage: 'unknown' | 'catalog_unknown' = 'unknown';
   try {
-    const { antigravityRuntime } = await import('@botiverse/oar/runtimes/antigravity');
-    const installed = await antigravityRuntime.installation({ env });
+    const installed = await resolveAgyInstallation(process.env);
     if (installed.kind === 'not_found') return { kind: 'not_installed' };
     if (installed.kind === 'unsupported') return { kind: 'unsupported' };
     if (installed.via !== 'executable' || !isAbsolute(installed.command)) return { kind: 'unknown' };
     stage = 'catalog_unknown';
     // The catalog reports sign-in directly. The auth endpoint also reads account identity.
+    const { antigravityRuntime } = await import('@botiverse/oar/runtimes/antigravity');
     const catalog = await antigravityRuntime.listModels(installed, { env, timeoutMs: SEAT_POOL_MEMBER_MS });
     if (catalog.kind === 'unauthenticated') return { kind: 'signed_out' };
     if (catalog.kind !== 'ok') return { kind: 'catalog_unknown' };
-    const models = new Set(catalog.models.flatMap(({ id, disabled, effortLevels = [] }) => disabled === undefined
-      ? [id, ...effortLevels.map(effort => `${id}-${effort}`)] : []).filter(id => seatModelShapeValid('agy', id)));
-    return models.size === 0 ? { kind: 'catalog_unknown' } : { kind: 'available', executable: installed.command, models: [...models] };
+    const models = new Map<string, AgyCatalogModel>();
+    for (const { id, disabled, effortLevels = [] } of catalog.models) {
+      if (disabled === undefined && seatModelShapeValid('agy', id)) {
+        models.set(id, { id, efforts: effortLevels.filter(effort => seatModelShapeValid('agy', effort)) });
+      }
+    }
+    // OAR's ACP catalog exposes base IDs plus effort menus. The interactive CLI also takes suffixed IDs.
+    const nativeIds = new Set(catalog.models.map(model => model.id));
+    for (const { id, efforts } of [...models.values()]) {
+      for (const effort of efforts) {
+        const variant = `${id}-${effort}`;
+        if (!nativeIds.has(variant) && seatModelShapeValid('agy', variant)) models.set(variant, { id: variant, efforts: [effort] });
+      }
+    }
+    return models.size === 0 ? { kind: 'catalog_unknown' } : { kind: 'available', installation: installed, models: [...models.values()] };
   } catch {
     return { kind: stage };
   }
@@ -234,7 +267,7 @@ async function probeAgyPool(): Promise<SeatPoolProbe> {
   const probe = await readAgyCatalog();
   switch (probe.kind) {
     case 'available': return { id: 'agy', installation: 'available', sign_in: 'logged_in', models: 'ok',
-      listed: [...recommendedModelIds('agy')].filter(id => probe.models.includes(id)).map(id => ({ id, disabled: false })) };
+      listed: [...recommendedModelIds('agy')].filter(id => probe.models.some(model => model.id === id)).map(id => ({ id, disabled: false })) };
     case 'signed_out': return { ...emptySeatPoolProbe('agy', 'available'), sign_in: 'logged_out', models: 'unauthenticated' };
     case 'catalog_unknown': return { ...emptySeatPoolProbe('agy', 'available'), sign_in: 'unknown', models: 'unknown' };
     case 'not_installed': return emptySeatPoolProbe('agy', 'not_installed');
@@ -373,7 +406,11 @@ export function refreshSeatPool(): { readonly report: SeatPoolV1; readonly store
 
 if (import.meta.main) {
   if (process.argv[2] === AGY_CATALOG_CHILD_ARG) {
-    process.stdout.write(`${JSON.stringify(await readAgyCatalog())}\n`, () => process.exit(0));
+    const probe = await readAgyCatalog();
+    const row = probe.kind === 'available'
+      ? { kind: probe.kind, executable: probe.installation.command, version: probe.installation.version, models: probe.models }
+      : probe;
+    process.stdout.write(`${JSON.stringify(row)}\n`, () => process.exit(0));
   } else {
     const probes: SeatPoolProbe[] = [];
     for (const [index, id] of CATALOG_RUNTIMES.entries()) probes.push(await probeSeatCatalog(id, process.argv[index + 2] ?? ''));

@@ -405,6 +405,34 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     expect(JSON.parse(refused.stderr).message).toContain("agy_other");
   }));
 
+  test("agy refuses an explicit effort outside the listed model's menu before writing a profile or opening a pane", withAgySeat(f => {
+    const model = "gemini-4-hydrogen";
+    f.configure({ ...AGY_ADVISOR, model, effort: "max" });
+    f.catalog([{ id: model, efforts: ["low", "medium", "high", "xhigh"] }]);
+    const refused = f.run(agyTabArgs(f.cwd));
+    expect([refused.status, JSON.parse(refused.stderr).error]).toEqual([1, "seat_effort_invalid"]);
+    expect(existsSync(join(f.home, ".repo-harness", "seats", "agy"))).toBe(false);
+    expect(existsSync(f.tab)).toBe(false);
+  }));
+
+  test.each(["explicit override with a different agy on PATH", "official install outside PATH"] as const)(
+    "agy quota and launch use the same executable for %s", (branch) => withAgySeat(f => {
+      const model = "claude-opus-5-5-high";
+      f.configure(AGY_ADVISOR, true, { worker: { ...AGY_WORKER, model } });
+      const explicit = branch.startsWith("explicit");
+      const installation = join(f.home, explicit ? "override" : ".local/bin", "agy");
+      mkdirSync(dirname(installation), { recursive: true });
+      f.catalog([model], undefined, { gemini: 0.60, other: 0.01 });
+      writeFileSync(installation, readFileSync(f.agy), { mode: 0o755 });
+      if (explicit) f.catalog([model], undefined, { gemini: 0.60, other: 0.60 });
+      else rmSync(f.agy);
+      const env: Record<string, string> = explicit ? { OAR_ANTIGRAVITY_BIN: installation } : {};
+      const refused = f.run(["argv", "worker", "--json"], env);
+      expect(refused.status, refused.stdout || refused.stderr).toBe(1);
+      expect(JSON.parse(refused.stderr)).toMatchObject({ error: "seat_quota_exhausted", message: expect.stringContaining("agy_other") });
+    })(),
+  );
+
   test("worker agy launches generate rh-worker with writable tools, zero REPO_HARNESS_SEAT* env vars, and gh-aware command rules", withAgySeat(f => {
     f.configure(AGY_ADVISOR, true, { "worker-neon": AGY_WORKER, "worker-light": AGY_WORKER_NO_GH });
     const raw = f.run(["argv", "worker-neon", "--repository-id", "1186405141", "--issue", "3377", "--parent", "3375", "--json"]);
@@ -430,8 +458,8 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
         "rh arch projection status", "rh arch projection slice", "rh arch prepare", "rh arch checkpoint", "rh arch complete",
         "rh arch verify", "rh arch debt", "rh arch refactor verify", "rh arch refactor resolve", "rh capability resolve",
         "rh state", "rh doctor", "rh quota", "rh seats pool", "rh run", "bash scripts/check-ci.sh",
-        "git worktree add", "git worktree remove", "git worktree prune", "git worktree list", "git merge-tree", "git merge",
-        "git restore", "git rm", "git mv", "git stash",
+        "git worktree add", "git worktree prune", "git worktree list", "git merge-tree",
+        "git restore --staged -- ./", "git rm -- ./", "git mv -- ./", "git stash push", "git stash list", "git stash show",
       ].map(command => `command(${command})`),
     ]));
     expect(parsedSettings.permissions.deny).not.toContain("command(git push)");
@@ -568,6 +596,19 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     }
     expect(existsSync(join(f.home, ".repo-harness", "seats", "agy"))).toBe(false);
   }));
+
+  test.each([
+    "git worktree remove --force ../dirty", "git worktree remove ../dirty --force", "git worktree remove ../dirty -f",
+    "git restore -- src/file.ts", "git restore --staged --worktree src/file.ts", "git restore --staged src/file.ts --worktree",
+    "git restore --staged --no-staged src/file.ts", "git rm -f src/file.ts", "git rm --force src/file.ts", "git rm src/file.ts --force",
+    "git stash drop stash@{0}", "git stash clear",
+    "git checkout -- src/file.ts", "git checkout -f main", "git checkout main --force",
+    "git switch -f main", "git switch main --discard-changes", "git switch --discard-changes main",
+    "git mv src/file.ts dst.ts --force", "git merge --abort",
+  ])("an agy worker needs approval for %s", command => {
+    const { allow } = agySeatCommandRules("worker", AGY_WORKER);
+    expect(allow.find(prefix => command.startsWith(prefix))).toBeUndefined();
+  });
 
   test("agySeatCommandRules refuses bare command names and mutation-capable prefixes across all allowed seats", () => {
     for (const [seat, config] of [
@@ -832,6 +873,7 @@ describe("rh seats argv", () => {
       const writeAgy = (weekly: number) => writeFileSync(agy, `#!${process.execPath}
 const args = process.argv.slice(2).join(' ');
 require('node:fs').appendFileSync(${JSON.stringify(log)}, args + '\\n');
+if (args === '--help') { console.log('Usage of agy: --conversation'); process.exit(0); }
 if (args === '--version') { console.log('1.5.12'); process.exit(0); }
 if (args === 'models') process.exit(0);
 if (args !== '-p /usage --output-format json') process.exit(9);
@@ -850,7 +892,7 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
       const fallback = argv(home, "gatekeeper", "--pr", "3288", "--json");
       expect(fallback.status, fallback.stderr).toBe(0);
       expect(bare(JSON.parse(fallback.stdout).argv)).toContain('agy-cli/claude-opus-5-5');
-      expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual(Array.from({ length: 3 }, () => ['--version', 'models', '-p /usage --output-format json']).flat());
+      expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual(Array.from({ length: 3 }, () => ['--help', '--version', 'models', '-p /usage --output-format json']).flat());
       writeAgy(0.24);
       const reserved = argv(home, "worker-neon", "--json");
       expect([reserved.status, JSON.parse(reserved.stderr).error]).toEqual([1, "seat_quota_reserved"]);
