@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
 import { buildStrategyCommand } from './commands/strategy';
 import { CLI_NAME } from '../core/skill-surface/cli-name';
-import { globalRuntimeScope, withRuntimeTransactionLock } from '../effects/locking/runtime-transaction-lock';
+import { globalRuntimeScope, withRuntimeTransactionLock, type RuntimeTransactionContext } from '../effects/locking/runtime-transaction-lock';
+import { openHostConfigGate } from '../effects/host-config/gate';
+import { hostConfigPaths } from '../effects/host-config/store';
 /**
  * repo-harness CLI entry.
  *
@@ -11,8 +13,8 @@ import { globalRuntimeScope, withRuntimeTransactionLock } from '../effects/locki
 
 import { Command, CommanderError } from 'commander';
 import { resolve } from 'path';
-import { assertOverridesCarried, formatHostConfigPreview, hasRecordedAntigravityState, previewHostConfig, resolveOverrides, runInstall, runUninstall, type InstallCommandOptions } from './commands/install';
-import { migrateInstallState } from './installer/install-state-migration';
+import { assertOverridesCarried, formatHostConfigPreview, hasRecordedAntigravityState, previewHostConfig, resolveOverrides, runInstall, runUninstall, type HostConfigPreview, type HostConfigPreviewItem, type InstallCommandOptions, type InstallCommandResult } from './commands/install';
+import { installStatePendingMigration, migrateInstallState, planInstallStateMigration } from './installer/install-state-migration';
 import { PLUGIN_IDS, type PluginId } from '../core/skill-surface/plugin-manifest';
 import { writeAllSync } from './runtime/write-all-sync';
 import { runInit } from './commands/init';
@@ -57,7 +59,7 @@ import { TASK_INBOX_V2_RELATIVE_PATH } from '../core/fleet/task-inbox-layout';
 import { formatSecurityScan, runSecurityScan } from './commands/security';
 import { MIN_BUN_VERSION, bunVersionIsSupported, installAntigravityRuntime, runGlobalRuntimeSetup, updateLeftoverSummary, updateRegisteredUpgradeSummary, type GlobalRuntimeOptions, type GlobalRuntimeResult } from './commands/global-runtime';
 import { parseReportLanguageFlag, REPORT_LANGUAGE_FLAG_VALUES, type ReportLanguageFlag } from './installer/global-context';
-import { installStateStatus, readInstallState, rollbackInstallSelection } from './installer/install-profile';
+import { installStateStatus, readInstallState, rollbackInstallSelection, withHostConfigTransaction } from './installer/install-profile';
 import { enabledPlugins } from './installer/install-state';
 import { runAdoptionPlan } from './commands/adoption-plan';
 import { buildCommandsCommand, recordCommandPlugin } from './commands/commands';
@@ -113,6 +115,55 @@ function loadAntigravityCodegraph() {
   return require('./tools/codegraph') as typeof import('./tools/codegraph');
 }
 
+function targetedCodegraphChange(command: 'install' | 'update', env: NodeJS.ProcessEnv, dryRun: boolean) {
+  const codegraph = loadAntigravityCodegraph();
+  const name = `${command} --target antigravity --configure-codegraph`;
+  const projected = installStatePendingMigration(env) ? planInstallStateMigration(env)?.state : null;
+  if (projected) {
+    // Refuse an ineligible legacy state or MCP path before committing its migration.
+    assertPluginCommandSelected({ status: 'recorded', selection: projected.selection, plugins: enabledPlugins(projected) }, 'architecture', name, env);
+    codegraph.preflightAntigravityCodegraph(env, true);
+  }
+  if (!dryRun) migrateInstallState(env);
+  if (!dryRun || !projected) assertPluginCommandSelected(readRecordedSelection(env), 'architecture', name, env);
+  if (!projected) codegraph.preflightAntigravityCodegraph(env, true);
+  return codegraph.prepareAntigravityCodegraph(process.cwd(), env);
+}
+
+function previewTargetedCodegraph(command: 'install' | 'update', env: NodeJS.ProcessEnv, hostConfig: HostConfigPreview): HostConfigPreview {
+  const change = targetedCodegraphChange(command, env, true);
+  const { path, selector, action, ledgerAction } = openHostConfigGate({ env, preview: true }).previewAntigravityMcp(change);
+  const items: HostConfigPreviewItem[] = [...hostConfig.items];
+  if (action) items.push({ path, selector, action });
+  if (ledgerAction) items.push({ path: hostConfigPaths(env).ledger, selector: `${path}#${selector}`, action: ledgerAction });
+  return { ...hostConfig, items, notListed: hostConfig.notListed.filter(writer => writer !== 'CodeGraph configuration') };
+}
+
+class TargetedAdapterFailure extends Error {
+  constructor(readonly result: InstallCommandResult) { super(result.lines.join('\n')); }
+}
+
+function runTargetedCodegraph(
+  command: 'install' | 'update',
+  env: NodeJS.ProcessEnv,
+  runtimeLock: RuntimeTransactionContext,
+  runAdapters: (transaction: string) => InstallCommandResult,
+): InstallCommandResult {
+  const change = targetedCodegraphChange(command, env, false);
+  try {
+    return withHostConfigTransaction(env, undefined, transaction => {
+      const config = openHostConfigGate({ env }).apply([change]);
+      const status = config.skipped[0]?.code ?? (config.written.length ? 'changed' : 'unchanged');
+      const adapters = runAdapters(transaction);
+      if (adapters.exitCode !== 0) throw new TargetedAdapterFailure(adapters);
+      return { exitCode: 0, lines: [...adapters.lines, `[antigravity] ${status}: configure CodeGraph MCP - ${change.path}`] };
+    }, undefined, { runtimeLock, snapshotPaths: [hostConfigPaths(env).ledger] });
+  } catch (error) {
+    if (error instanceof TargetedAdapterFailure) return error.result;
+    throw error;
+  }
+}
+
 /** The runtime transaction invokes this while it still holds its lock and rollback snapshot. */
 function refreshRuntimeWithAntigravityCodegraph(options: GlobalRuntimeOptions): GlobalRuntimeResult {
   const result = runGlobalRuntimeSetup(options);
@@ -154,22 +205,26 @@ export function buildProgram(): Command {
     .option('--no-hooks', 'Skip global hook adapter installation during full runtime install')
     .option('--no-external-skills', 'Skip mutable third-party Waza and Mermaid skill bootstrap')
     .option('--with-obsidian-skills', 'Explicitly install the pinned obsidian-markdown and obsidian-cli companion Skills')
+    .option('--configure-codegraph', 'Configure CodeGraph MCP with --target antigravity')
     .option('--no-codegraph', 'Skip CodeGraph CLI/MCP configuration')
     .option('--report-language <language>', `Reporting language for Global Working Rules that record none: ${REPORT_LANGUAGE_FLAG_VALUES.join('|')}`)
     .option('--override <path#selector>', OVERRIDE_HELP, collectOption, [])
     .option('--json', 'Output JSON instead of human-readable text')
-    .action(async (rawOpts: GlobalRuntimeCommandOptions & { location?: string; state?: boolean; rollback?: boolean }, cmd: Command) => {
+    .action(async (rawOpts: GlobalRuntimeCommandOptions & { location?: string; state?: boolean; rollback?: boolean; configureCodegraph?: boolean }, cmd: Command) => {
       const target = assertAdapterTarget(rawOpts.target, 'install');
       const location = rawOpts.location === undefined ? undefined : assertLocation(rawOpts.location, 'install');
+      if (rawOpts.configureCodegraph && target !== 'antigravity') throw new Error('rh install --configure-codegraph requires --target antigravity');
+      const configureCodegraph = rawOpts.configureCodegraph === true && rawOpts.codegraph !== false;
+      const env = process.env;
       // Adapter-only installs validate the install-state protocol under the runtime lock.
       const installAdapters = (adapterOptions: Pick<InstallCommandOptions, 'reportLanguage' | 'syncSkill' | 'hooks' | 'updateMode'> = {}) =>
-        withRuntimeTransactionLock(globalRuntimeScope(process.env), (runtimeLock) => {
-          migrateInstallState(process.env);
-          readInstallState();
-          if (target === 'antigravity') {
-            return installAntigravityRuntime(process.env, runtimeLock, { ...adapterOptions, externalSkills: rawOpts.externalSkills });
-          }
-          return runInstall({ target, location: location ?? 'global' });
+        withRuntimeTransactionLock(globalRuntimeScope(env), runtimeLock => {
+          const installAntigravity = () => installAntigravityRuntime(env, runtimeLock, { ...adapterOptions, externalSkills: rawOpts.externalSkills });
+          // The scoped MCP edit precedes the runtime's adapter transaction under the same lock.
+          if (configureCodegraph) return runTargetedCodegraph('install', env, runtimeLock, () => installAntigravity());
+          migrateInstallState(env);
+          readInstallState(env);
+          return target === 'antigravity' ? installAntigravity() : runInstall({ target, location: location ?? 'global' });
         });
       if (target === 'antigravity') {
         if (rawOpts.state || rawOpts.rollback || rawOpts.plugins !== undefined || rawOpts.override?.length || rawOpts.withObsidianSkills) {
@@ -179,7 +234,8 @@ export function buildProgram(): Command {
         const reportLanguage = rawOpts.reportLanguage === undefined ? undefined : parseReportLanguageFlag(rawOpts.reportLanguage);
         const adapterOptions = { reportLanguage, syncSkill: rawOpts.syncSkill, hooks: true, updateMode: false };
         if (rawOpts.dryRun) {
-          const hostConfig = previewHostConfig(target, [], process.env, adapterOptions);
+          const adapters = previewHostConfig(target, [], env, adapterOptions);
+          const hostConfig = configureCodegraph ? previewTargetedCodegraph('install', env, adapters) : adapters;
           if (rawOpts.json) console.log(JSON.stringify({ host_config: hostConfig }, null, 2));
           else for (const line of formatHostConfigPreview(hostConfig)) console.log(line);
           process.exit(hostConfig.unplanned.length ? 1 : 0);
@@ -306,7 +362,7 @@ export function buildProgram(): Command {
     .option('--with-external-skills', 'Also refresh mutable third-party Waza and Mermaid providers')
     .option('--with-obsidian-skills', 'Explicitly install or verify the pinned obsidian-markdown and obsidian-cli companion Skills')
     .option('--no-external-skills', 'Do not refresh third-party Waza and Mermaid providers (default)')
-    .option('--configure-codegraph', 'Refresh CodeGraph CLI/MCP (default during update)')
+    .option('--configure-codegraph', 'Refresh CodeGraph CLI/MCP or configure MCP for --target antigravity')
     .option('--no-codegraph', 'Skip refreshing the global CodeGraph CLI/MCP')
     .option('--report-language <language>', `Reporting language for Global Working Rules that record none: ${REPORT_LANGUAGE_FLAG_VALUES.join('|')}`)
     .option('--override <path#selector>', OVERRIDE_HELP, collectOption, [])
@@ -330,26 +386,29 @@ export function buildProgram(): Command {
       json?: boolean;
     }) => {
       const target = assertAdapterTarget(rawOpts.target, 'update');
+      const configureCodegraph = rawOpts.configureCodegraph === true && rawOpts.codegraph !== false;
       if (target === 'antigravity') {
-        if (rawOpts.version || rawOpts.channel || rawOpts.override.length || rawOpts.withObsidianSkills || rawOpts.withExternalSkills || rawOpts.configureCodegraph) {
-          throw new Error('rh update --target antigravity only refreshes recorded Antigravity hooks, global rules, and skills; it does not install packages');
+        if (rawOpts.version || rawOpts.channel || rawOpts.override.length || rawOpts.withObsidianSkills || rawOpts.withExternalSkills) {
+          throw new Error('rh update --target antigravity refreshes recorded Antigravity hooks, global rules, skills, and optional CodeGraph MCP');
         }
         const reportLanguage = rawOpts.reportLanguage === undefined ? undefined : parseReportLanguageFlag(rawOpts.reportLanguage);
         const env = process.env;
         const adapterOptions = { reportLanguage, syncSkill: rawOpts.syncSkill, updateMode: true, hooks: rawOpts.hooks !== false };
         if (rawOpts.dryRun) {
           const selected = hasRecordedAntigravityState(env, true);
-          const hostConfig = previewHostConfig(selected ? target : null, [], env, adapterOptions);
+          const adapters = previewHostConfig(selected ? target : null, [], env, adapterOptions);
+          const hostConfig = configureCodegraph ? previewTargetedCodegraph('update', env, adapters) : adapters;
           if (rawOpts.json) console.log(JSON.stringify({ host_config: hostConfig, candidate_changes: 'unavailable' }, null, 2));
           else for (const line of formatHostConfigPreview(hostConfig)) console.log(line);
           process.exit(hostConfig.unplanned.length ? 1 : 0);
         }
-        const result = withRuntimeTransactionLock(globalRuntimeScope(env), () => {
+        const refreshAdapters = (transaction?: string) => hasRecordedAntigravityState(env, false)
+          ? runInstall({ target, location: 'global', ...adapterOptions, transaction })
+          : { exitCode: 0, lines: ['[antigravity] no recorded hook member; run rh install --target antigravity to install it'] };
+        const result = withRuntimeTransactionLock(globalRuntimeScope(env), runtimeLock => {
+          if (configureCodegraph) return runTargetedCodegraph('update', env, runtimeLock, refreshAdapters);
           migrateInstallState(env);
-          if (!hasRecordedAntigravityState(env, false)) {
-            return { exitCode: 0, lines: ['[antigravity] no recorded hook member; run rh install --target antigravity to install it'] };
-          }
-          return runInstall({ target, location: 'global', ...adapterOptions });
+          return refreshAdapters();
         });
         if (rawOpts.json) console.log(JSON.stringify(result, null, 2));
         else for (const line of result.lines) console.log(line);
@@ -380,7 +439,7 @@ export function buildProgram(): Command {
         : rawOpts.channel
           ? `repo-harness@${rawOpts.channel}`
           : 'repo-harness@latest';
-      const refreshAntigravity = target === 'both' && rawOpts.configureCodegraph === true && rawOpts.codegraph !== false;
+      const refreshAntigravity = target === 'both' && configureCodegraph;
       const result = runTransactionalRuntimeRefresh({
         target,
         installCli: rawOpts.cli !== false,

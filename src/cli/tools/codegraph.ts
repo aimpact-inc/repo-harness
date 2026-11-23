@@ -6,7 +6,7 @@ import { CLAUDE_ROOT_CONFIG_BACKUP, CODEGRAPH_MCP_SELECTOR, CODEGRAPH_PERMISSION
 import { jsonFragment, jsonFragmentValue } from '../../core/host-config/json-fragment';
 import { HostConfigError } from '../../core/host-config/types';
 import { isRecord } from '../../core/evidence/is-record';
-import { antigravityGlobalRulesHostPath, antigravityHostPath, antigravityMcpConfigHostPath, antigravityMcpConfigPath, decode, openHostConfigGate, resolveUserConfigFile } from '../../effects/host-config/gate';
+import { antigravityGlobalRulesHostPath, antigravityHostPath, antigravityMcpConfigHostPath, antigravityMcpConfigPath, decode, openHostConfigGate, resolveUserConfigFile, type HostConfigFileChange } from '../../effects/host-config/gate';
 import { hostConfigPaths, observeFile, readProjectedLedger } from '../../effects/host-config/store';
 import { resolveRepoRoot } from '../hook/runtime';
 import { existsSync, mkdirSync, readFileSync } from "fs";
@@ -354,6 +354,19 @@ function scopedJsonCodegraphServer(printed: string, host: "claude" | "antigravit
   return host === "claude" ? { ...server, args, alwaysLoad: true } : { command: server.command, args };
 }
 
+function jsonMcpChange(host: 'claude' | 'antigravity', path: string, printed: string): HostConfigFileChange {
+  const value = scopedJsonCodegraphServer(printed, host);
+  const claude = host === 'claude';
+  // The gate chooses add or refresh from the guarded Antigravity file.
+  const content = claude && existsSync(path) ? readFileSync(path, 'utf8') : '';
+  const kind = jsonFragment.locate(content, CODEGRAPH_MCP_SELECTOR) ? 'refresh' : 'add';
+  return {
+    path,
+    backup: claude ? CLAUDE_ROOT_CONFIG_BACKUP : undefined,
+    fragments: [{ owner: 'architecture', selector: CODEGRAPH_MCP_SELECTOR, kind, strategy: jsonFragment, value }],
+  };
+}
+
 /** Apply the printed server through the gate. An unrecorded server entry stays the user's. */
 function configureJsonMcp(actions: CodegraphAction[], host: "claude" | "antigravity", binPath: string, repoRoot: string, env?: NodeJS.ProcessEnv): void {
   const action = `configure-${host}`;
@@ -370,16 +383,7 @@ function configureJsonMcp(actions: CodegraphAction[], host: "claude" | "antigrav
     return;
   }
   try {
-    const value = scopedJsonCodegraphServer(printed.stdout, host);
-    // The gate chooses add or refresh from the guarded Antigravity file.
-    const claude = host === "claude";
-    const content = claude && existsSync(path) ? readFileSync(path, "utf8") : "";
-    const kind = jsonFragment.locate(content, CODEGRAPH_MCP_SELECTOR) ? "refresh" : "add";
-    const result = openHostConfigGate({ env: effectiveEnv }).apply([{
-      path,
-      backup: claude ? CLAUDE_ROOT_CONFIG_BACKUP : undefined,
-      fragments: [{ owner: "architecture", selector: CODEGRAPH_MCP_SELECTOR, kind, strategy: jsonFragment, value }],
-    }]);
+    const result = openHostConfigGate({ env: effectiveEnv }).apply([jsonMcpChange(host, path, printed.stdout)]);
     if (result.skipped.length) {
       appendSkippedAction(actions, action, command, `kept: ${CODEGRAPH_MCP_SELECTOR} in ${path} is your configuration; rh did not change it.`);
     } else {
@@ -593,8 +597,8 @@ function readAntigravityMcpConfig(env: NodeJS.ProcessEnv) {
 }
 
 /** Validate the config with the same JSON edit strategy the gate will apply. */
-export function preflightAntigravityCodegraph(env: NodeJS.ProcessEnv): void {
-  if (!optedIntoAntigravity(env)) return;
+export function preflightAntigravityCodegraph(env: NodeJS.ProcessEnv, explicit = false): void {
+  if (!explicit && !optedIntoAntigravity(env)) return;
   const { path, content } = readAntigravityMcpConfig(env);
   try {
     jsonFragment.apply(content, CODEGRAPH_MCP_SELECTOR, null);
@@ -602,6 +606,15 @@ export function preflightAntigravityCodegraph(env: NodeJS.ProcessEnv): void {
     if (!(error instanceof HostConfigError)) throw error;
     throw new HostConfigError(error.code, `${path}: ${error.message}`, { cause: error });
   }
+}
+
+/** Both targeted entries use the installed CLI's read-only renderer in preview and apply. */
+export function prepareAntigravityCodegraph(cwd: string, env: NodeJS.ProcessEnv): HostConfigFileChange {
+  const { binPath } = checkCodegraph({ repoRoot: cwd, env, host: 'codex' }).resolution;
+  if (!binPath) throw new Error('CodeGraph CLI is missing; run rh arch codegraph ensure first.');
+  const printed = run(binPath, ['install', '--print-config', 'antigravity'], cwd, env);
+  if (!printed.ok) throw new Error('codegraph install --print-config antigravity failed');
+  return jsonMcpChange('antigravity', antigravityMcpConfigPath(env), printed.stdout);
 }
 
 function checkAntigravityCodegraphMcp(id: string, describe: string, env: NodeJS.ProcessEnv): ArchitectureDoctorCheck {

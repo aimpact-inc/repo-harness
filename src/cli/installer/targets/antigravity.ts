@@ -41,6 +41,7 @@ import {
   preflightGlobalContextRefresh,
 } from '../global-context';
 import { defaultPluginSelection, readInstallState } from '../install-profile';
+import { installStatePendingMigration, planInstallStateMigration } from '../install-state-migration';
 import { enabledPlugins } from '../install-state';
 import { buildAntigravityHooks } from '../managed-entries';
 import { bunGlobalPackageRoot, skillLinkMatches } from '../skill-projection';
@@ -68,8 +69,9 @@ export function checkAntigravityAllPaths(env: NodeJS.ProcessEnv = process.env): 
   checkAntigravityPath(antigravitySkillsDirHostPath(env, paths), 'directory');
 }
 
-function antigravityPlugins(env: NodeJS.ProcessEnv): readonly PluginId[] {
-  const installed = readInstallState(env);
+function antigravityPlugins(env: NodeJS.ProcessEnv, preview = false): readonly PluginId[] {
+  const projected = preview && installStatePendingMigration(env) ? planInstallStateMigration(env)?.state : null;
+  const installed = projected ?? readInstallState(env);
   return installed ? enabledPlugins(installed) : defaultPluginSelection('both', env).plugins;
 }
 
@@ -449,7 +451,7 @@ export function planAntigravitySkills(
   const home = requireHome(env);
   const sourceRoot = antigravitySourceRoot(env);
   const catalog = readAntigravityCatalog(sourceRoot);
-  const projections = expectedAntigravitySkillProjections(sourceRoot, home, antigravityPlugins(env), catalog);
+  const projections = expectedAntigravitySkillProjections(sourceRoot, home, antigravityPlugins(env, preview), catalog);
   const writes: HostConfigPathWrite[] = projections.map((projection) => ({
     path: projection.destination,
     owner: projection.owner,

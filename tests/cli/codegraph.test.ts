@@ -1,13 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
-import { spawnSync } from "child_process";
-import { pluginSelectionEnv, recordPluginSelection, seedGlobalPackageFixture } from "../helpers/install-ownership";
+import { dirname, join } from "path";
+import { spawnSync, type SpawnSyncReturns } from "child_process";
+import { installStateFixturePath, pluginSelectionEnv, recordPluginSelection, seedGlobalPackageFixture } from "../helpers/install-ownership";
 import { writeShellExecutableFixture } from "../helpers/repo-fixture";
 import { writeFakeHc } from "../helpers/fake-hc";
 import { requestUserInputFragment } from "../../src/cli/installer/targets/codex";
 import { openHostConfigGate } from "../../src/effects/host-config/gate";
+import { hostConfigPaths, readLedger } from "../../src/effects/host-config/store";
+import { hashManagedTree } from "../../src/effects/managed-tree";
 import { acquireRuntimeTransactionLock, globalRuntimeScope } from "../../src/effects/locking/runtime-transaction-lock";
 import { configureAntigravityCodegraphStep } from "../../src/cli/tools/codegraph";
 import { buildManagedHooks } from "../../src/cli/installer/managed-entries";
@@ -326,6 +328,159 @@ test.skipIf(process.platform === 'win32')('global update refuses malformed Antig
     expect(state()).toEqual(before);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+describe.skipIf(process.platform === 'win32')('targeted Antigravity CodeGraph', () => {
+  function withTargetedFixture(command: 'install' | 'update', run: (fixture: {
+    env: NodeJS.ProcessEnv; root: string; config: string; statePath: string; cliPath: string;
+    cli: (...args: string[]) => SpawnSyncReturns<string>;
+  }) => void) {
+    const { root, home, fakeBin } = setupFakeEnvironment('targeted-antigravity');
+    try {
+      const codegraph = join(fakeBin, 'codegraph');
+      const env = { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun'), PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+        REPO_HARNESS_CODEGRAPH_ALLOW_REPO_LOCAL: '0', REPO_HARNESS_CODEGRAPH_GLOBAL_BIN: codegraph, BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0' };
+      seedGlobalPackageFixture(env);
+      writeFakeHc(fakeBin);
+      writeFakeSkillsCli(fakeBin);
+      writeExecutable(fakeBin, codegraph, `#!/bin/sh
+case "$*" in
+  --version) echo 1.6.4 ;;
+  'status .') echo 'Index is up to date' ;;
+  'install --print-config antigravity') printf '%s\\n' '{"mcpServers":{"codegraph":{"command":"codegraph"}}}' ;;
+  *) exit 2 ;;
+esac
+`);
+      const config = join(home, '.gemini/config/mcp_config.json');
+      const cliPath = join(env.BUN_INSTALL, 'bin/rh');
+      const managedConfig = join(home, '.repo-harness/config.json');
+      for (const [path, value] of [[config, '{"mcpServers":{"personal":{"command":"my-tool"}}}'], [cliPath, 'prior CLI'], [managedConfig, '{}\n']] as const) {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, value);
+      }
+      const cli = (...args: string[]) => spawnSync(process.execPath, [CLI, ...args, '--target', 'antigravity', '--json'], { cwd: root, env, encoding: 'utf8' });
+      if (command === 'update') {
+        const installed = cli('install', '--no-external-skills');
+        expect(installed.status, installed.stdout + installed.stderr).toBe(0);
+      }
+      run({ env, root, config, statePath: installStateFixturePath(env), cliPath, cli });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+
+  for (const command of ['install', 'update'] as const) {
+    const options = command === 'install' ? ['--no-external-skills'] : [];
+
+    test(`${command} previews and applies a scoped MCP change after protocol 4 migration`, () => withTargetedFixture(command, ({ env, root, config, statePath, cli }) => {
+      const state = JSON.parse(readFileSync(statePath, 'utf8'));
+      writeFileSync(statePath, JSON.stringify({ ...state, protocol: 4, pi_packages: [] }));
+      const before = hashManagedTree(root);
+      const args = [command, '--configure-codegraph', ...options];
+      const dryRun = cli(...args, '--dry-run');
+      expect(dryRun.status, dryRun.stdout + dryRun.stderr).toBe(0);
+      expect(JSON.parse(dryRun.stdout).host_config.items).toEqual(expect.arrayContaining([
+        { path: realpathSync(config), selector: 'mcpServers.codegraph', action: 'add' },
+        { path: hostConfigPaths(env).ledger, selector: `${realpathSync(config)}#mcpServers.codegraph`, action: 'record' },
+      ]));
+      expect(hashManagedTree(root)).toBe(before);
+
+      const result = cli(...args);
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(statePath, 'utf8')).protocol).toBe(5);
+      expect(JSON.parse(readFileSync(config, 'utf8')).mcpServers).toEqual({
+        personal: { command: 'my-tool' }, codegraph: { command: 'codegraph', args: ['serve', '--mcp', '--path', '.'] },
+      });
+      expect(openHostConfigGate({ env }).recorded(config)).toMatchObject([{ owner: 'architecture', selector: 'mcpServers.codegraph' }]);
+    }), 30000);
+
+    test.each(['core-only', 'malformed', 'linked'] as const)(`${command} refuses %s before adapter writes`, (input) => withTargetedFixture(command, ({ env, config, statePath, cliPath, cli }) => {
+      if (input === 'core-only') recordPluginSelection(env, []);
+      if (input === 'malformed') {
+        const state = JSON.parse(readFileSync(statePath, 'utf8'));
+        writeFileSync(statePath, JSON.stringify({ ...state, protocol: 4, pi_packages: [] }));
+        writeFileSync(config, '{"mcpServers":');
+      }
+      const outside = join(env.HOME!, 'other.json');
+      if (input === 'linked') {
+        writeFileSync(outside, readFileSync(config));
+        rmSync(config);
+        symlinkSync(outside, config);
+      }
+      const paths = [cliPath, config, outside, statePath, hostConfigPaths(env).ledger, join(env.HOME!, '.repo-harness/config.json'),
+        join(dirname(config), 'hooks.json'), join(dirname(config), 'AGENTS.md')];
+      const snapshot = () => paths.map(path => existsSync(path) ? { bytes: readFileSync(path), ino: statSync(path).ino } : null);
+      const before = snapshot();
+      const result = cli(command, '--configure-codegraph', ...options);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain({ 'core-only': 'rh install --plugins architecture', malformed: 'the file is not valid JSON', linked: 'antigravity_hooks_path_linked' }[input]);
+      expect(snapshot()).toEqual(before);
+    }), 30000);
+  }
+});
+
+test.skipIf(process.platform === 'win32')('architecture switch removes only a recorded Antigravity MCP fragment and restores it on failure', () => {
+  const { root, home, fakeBin } = setupFakeEnvironment('antigravity-architecture-switch');
+  try {
+    const bunBin = join(fakeBin, 'bun');
+    const env = { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun'), REPO_HARNESS_BUN_EXECUTABLE: bunBin,
+      PATH: `${fakeBin}:${process.env.PATH ?? ''}` };
+    seedGlobalPackageFixture(env);
+    writeFakeHc(fakeBin);
+    const config = join(home, '.gemini/config/mcp_config.json');
+    const paths = hostConfigPaths(env);
+    const statePath = installStateFixturePath(env);
+    const state = readFileSync(statePath);
+    const original = '{"mcpServers":{"personal":{"command":"my-tool"}}}';
+    mkdirSync(dirname(config), { recursive: true });
+    writeFileSync(config, original);
+    const gate = openHostConfigGate({ env });
+    const change = { path: config, fragments: [{ owner: 'architecture', selector: 'mcpServers.codegraph', kind: 'add' as const, strategy: jsonFragment, value: { command: 'codegraph' } }] };
+    gate.apply([change]);
+    const recorded = readLedger(paths);
+    const configured = readFileSync(config, 'utf8');
+    const key = realpathSync(config);
+    const failAfterRemoval = (after = '') => writeExecutable(fakeBin, bunBin, `#!/bin/bash
+[ "$1" = --version ] || exit 2
+[ "$(< '${config}')" = '${original}' ] || exit 3
+${after}
+printf 'observed scoped removal\\n' >&2
+exit 4
+`);
+    const cli = (...args: string[]) => spawnSync(process.execPath, [CLI, 'install', '--no-plugins', '--no-cli', '--no-external-skills', '--json', ...args], { cwd: root, env, encoding: 'utf8' });
+    failAfterRemoval();
+    const failed = cli();
+    expect(failed.status).toBe(1);
+    expect(failed.stdout + failed.stderr).toContain('observed scoped removal');
+    expect(readFileSync(statePath)).toEqual(state);
+    expect(readFileSync(config, 'utf8')).toBe(configured);
+    expect(readLedger(paths).files[key]).toEqual(recorded.files[key]);
+    expect(gate.recorded(config)).toEqual(recorded.fragments.filter(fragment => fragment.file === key));
+
+    failAfterRemoval(`cp '${config}' '${config}.copy' && mv '${config}.copy' '${config}' || exit 5`);
+    const replaced = cli();
+    expect(replaced.status).toBe(1);
+    expect(replaced.stderr).toContain('cannot prove this host configuration entry');
+    expect(readFileSync(statePath)).toEqual(state);
+    expect(readFileSync(config, 'utf8')).toBe(original);
+    expect(readLedger(paths).files[key]).toBeUndefined();
+    gate.apply([change]);
+
+    writeExecutable(fakeBin, bunBin, `#!/bin/sh\nexec '${process.execPath}' "$@"\n`);
+    const switched = cli();
+    expect(switched.status, switched.stdout + switched.stderr).toBe(0);
+    expect(readFileSync(config, 'utf8')).toBe(original);
+    expect(readLedger(paths).files[key]).toBeUndefined();
+    expect(gate.recorded(config)).toEqual([]);
+
+    recordPluginSelection(env);
+    rmSync(join(home, '.gemini'), { recursive: true });
+    const outside = join(root, 'other');
+    mkdirSync(join(outside, 'config'), { recursive: true });
+    writeFileSync(join(outside, 'config/mcp_config.json'), configured);
+    symlinkSync(outside, join(home, '.gemini'));
+    const unrecorded = cli('--no-hooks');
+    expect(unrecorded.status, unrecorded.stdout + unrecorded.stderr).toBe(0);
+    expect(readFileSync(join(outside, 'config/mcp_config.json'), 'utf8')).toBe(configured);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}, 60000);
 
 test('a concurrent rh install and CodeGraph configure for Claude serialize on the global lock, and the ledger keeps the records of both', async () => {
   const fixture = setupFakeEnvironment('concurrent-claude-writers');
