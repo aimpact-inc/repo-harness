@@ -55,7 +55,7 @@ import { buildRetentionCommand, type RetentionPorts } from './commands/retention
 import { MCP_AUDIT_LOG_RELATIVE_PATH } from '../core/public-projections/mcp-audit-log';
 import { TASK_INBOX_V2_RELATIVE_PATH } from '../core/fleet/task-inbox-layout';
 import { formatSecurityScan, runSecurityScan } from './commands/security';
-import { MIN_BUN_VERSION, bunVersionIsSupported, installAntigravityRuntime, updateLeftoverSummary, updateRegisteredUpgradeSummary } from './commands/global-runtime';
+import { MIN_BUN_VERSION, bunVersionIsSupported, installAntigravityRuntime, runGlobalRuntimeSetup, updateLeftoverSummary, updateRegisteredUpgradeSummary, type GlobalRuntimeOptions, type GlobalRuntimeResult } from './commands/global-runtime';
 import { parseReportLanguageFlag, REPORT_LANGUAGE_FLAG_VALUES, type ReportLanguageFlag } from './installer/global-context';
 import { installStateStatus, readInstallState, rollbackInstallSelection } from './installer/install-profile';
 import { enabledPlugins } from './installer/install-state';
@@ -107,6 +107,28 @@ const OVERRIDE_HELP = 'Let rh write the fragment at <path>#<selector> over a val
 
 function collectOption(value: string, previous: string[]): string[] {
   return [...previous, value];
+}
+
+function loadAntigravityCodegraph() {
+  return require('./tools/codegraph') as typeof import('./tools/codegraph');
+}
+
+/** The runtime transaction invokes this while it still holds its lock and rollback snapshot. */
+function refreshRuntimeWithAntigravityCodegraph(options: GlobalRuntimeOptions): GlobalRuntimeResult {
+  const result = runGlobalRuntimeSetup(options);
+  if (result.exitCode !== 0 || !options.plugins?.includes('architecture')) return result;
+  const env = options.env ?? process.env;
+  const step = loadAntigravityCodegraph().configureAntigravityCodegraphStep(options.cwd ?? process.cwd(), env);
+  if (!step) return result;
+  const line = `[runtime] ${step.status}: ${step.step} - ${step.detail}`;
+  return {
+    ...result,
+    exitCode: step.status === 'failed' ? 1 : 0,
+    steps: [...result.steps, step],
+    lines: [...result.lines, line],
+    stdout: [result.stdout, line].filter(Boolean).join('\n'),
+    stderr: step.status === 'failed' ? step.detail ?? '' : result.stderr,
+  };
 }
 
 export function buildProgram(): Command {
@@ -358,6 +380,7 @@ export function buildProgram(): Command {
         : rawOpts.channel
           ? `repo-harness@${rawOpts.channel}`
           : 'repo-harness@latest';
+      const refreshAntigravity = target === 'both' && rawOpts.configureCodegraph === true && rawOpts.codegraph !== false;
       const result = runTransactionalRuntimeRefresh({
         target,
         installCli: rawOpts.cli !== false,
@@ -370,7 +393,9 @@ export function buildProgram(): Command {
         codegraph: rawOpts.codegraph === false ? false : rawOpts.configureCodegraph === true ? true : undefined,
         reportLanguage: rawOpts.reportLanguage as ReportLanguageFlag | undefined,
         overrides,
-      });
+      }, refreshAntigravity ? refreshRuntimeWithAntigravityCodegraph : undefined, refreshAntigravity ? (env, plugins) => {
+        if (plugins.includes('architecture')) loadAntigravityCodegraph().preflightAntigravityCodegraph(env);
+      } : undefined);
       if (result.exitCode === 0) {
         result.lines.push(updateLeftoverSummary(process.cwd(), rawOpts.cli !== false));
         result.lines.push(updateRegisteredUpgradeSummary(process.cwd(), rawOpts.cli !== false));

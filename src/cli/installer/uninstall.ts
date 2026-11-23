@@ -21,6 +21,8 @@ import {
   antigravityGlobalRulesHostPath,
   antigravityHooksPath,
   antigravityHostPath,
+  antigravityMcpConfigHostPath,
+  antigravityMcpConfigPath,
   antigravitySkillsDirHostPath,
   checkAntigravityPath,
   openHostConfigGate,
@@ -300,24 +302,30 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   const gate = openHostConfigGate({ env, preview: opts.dryRun === true });
   // The Skills CLI lock is a staging file: its recorded entries go with a full uninstall only.
   const hostPaths = [...(files.codex ? [files.codex] : []), ...files.json, ...(opts.target === 'both' && gate.recorded(lock.path).length ? [lock.path] : [])];
-  const currentLedger = (opts.dryRun ? readProjectedLedger : readLedger)(hostConfigPaths(env));
+  const paths = hostConfigPaths(env);
+  const currentLedger = (opts.dryRun ? readProjectedLedger : readLedger)(paths);
+  const antigravityMcp = antigravityMcpConfigHostPath(env, paths);
+  const includeAntigravityMcp = opts.target === 'antigravity' || (opts.target === 'both' && Boolean(currentLedger.files[antigravityMcp]));
+  const antigravityChecks: [string, 'regular file' | 'directory'][] = [];
+  if (includeAntigravityMcp) antigravityChecks.push([antigravityMcp, 'regular file']);
   if (opts.target === 'antigravity') {
-    const antigravityChecks: readonly [string, 'regular file' | 'directory'][] = [
+    antigravityChecks.push(
       [antigravityHostPath(env), 'regular file'],
       [antigravityGlobalRulesHostPath(env), 'regular file'],
       [antigravitySkillsDirHostPath(env), 'directory'],
-    ];
-    for (const [entry, kind] of antigravityChecks) {
-      try { checkAntigravityPath(entry, kind); }
-      catch (error) {
-        unresolved(entry, String((error as Error).message));
-        return result();
-      }
-    }
-  }
-  if (opts.target === 'antigravity' || (opts.target === 'both' && currentLedger.files[antigravityHostPath(env)])) {
+    );
+    hostPaths.push(antigravityHooksPath(env));
+  } else if (opts.target === 'both' && currentLedger.files[antigravityHostPath(env)]) {
     hostPaths.push(antigravityHooksPath(env));
   }
+  for (const [entry, kind] of antigravityChecks) {
+    try { checkAntigravityPath(entry, kind); }
+    catch (error) {
+      unresolved(entry, String((error as Error).message));
+      return result();
+    }
+  }
+  if (includeAntigravityMcp) hostPaths.push(antigravityMcpConfigPath(env));
   // The Global Working Rules files go by the ledger too. Two host paths that name one file are one revert.
   const rulesAdoptions = new Map<string, HostConfigAdoption>();
   const resolvedHostPaths = new Set<string>();

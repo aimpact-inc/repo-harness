@@ -64,6 +64,7 @@ import { isPathInside } from '../path-containment';
 import { antigravitySkillRoot } from '../host-skill-roots';
 import { requireHome } from '../repo-harness-home';
 import { jsonFragment } from '../../core/host-config/json-fragment';
+import { CODEGRAPH_MCP_SELECTOR } from '../../core/host-config/claude-config';
 import { pathRecordHostRoot, pathRecordIsCurrent, pathRecordProof } from './path-records';
 import {
   discardStagedEntry,
@@ -385,6 +386,10 @@ function antigravityGlobalRulesPathAt(home: string): string {
   return join(home, '.gemini', 'config', 'AGENTS.md');
 }
 
+function antigravityMcpConfigPathAt(home: string): string {
+  return join(home, '.gemini', 'config', 'mcp_config.json');
+}
+
 export function antigravityHooksPath(env: NodeJS.ProcessEnv): string {
   return antigravityHooksPathAt(requireHome(env));
 }
@@ -393,17 +398,25 @@ export function antigravityGlobalRulesPath(env: NodeJS.ProcessEnv): string {
   return antigravityGlobalRulesPathAt(requireHome(env));
 }
 
+export function antigravityMcpConfigPath(env: NodeJS.ProcessEnv): string {
+  return antigravityMcpConfigPathAt(requireHome(env));
+}
+
 export function antigravitySkillsDirPath(env: NodeJS.ProcessEnv): string {
   return antigravitySkillRoot(requireHome(env));
 }
 
-/** Canonicalize HOME only. The three entries below it must never resolve through links. */
+/** Canonicalize HOME only. The configuration entries below it must never resolve through links. */
 export function antigravityHostPath(env: NodeJS.ProcessEnv, paths = hostConfigPaths(env)): HostPath {
   return antigravityHooksPathAt(resolveHostPath(paths, requireHome(env))) as HostPath;
 }
 
 export function antigravityGlobalRulesHostPath(env: NodeJS.ProcessEnv, paths = hostConfigPaths(env)): HostPath {
   return antigravityGlobalRulesPathAt(resolveHostPath(paths, requireHome(env))) as HostPath;
+}
+
+export function antigravityMcpConfigHostPath(env: NodeJS.ProcessEnv, paths = hostConfigPaths(env)): HostPath {
+  return antigravityMcpConfigPathAt(resolveHostPath(paths, requireHome(env))) as HostPath;
 }
 
 export function antigravitySkillsDirHostPath(env: NodeJS.ProcessEnv, paths = hostConfigPaths(env)): HostPath {
@@ -434,6 +447,8 @@ interface AntigravityGuardedPaths {
   readonly hooksRequested: string;
   readonly rules: HostPath;
   readonly rulesRequested: string;
+  readonly mcp: HostPath;
+  readonly mcpRequested: string;
   readonly skillsDir: HostPath;
 }
 
@@ -443,6 +458,8 @@ function antigravityGuardedPaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths)
     hooksRequested: antigravityHooksPath(env),
     rules: antigravityGlobalRulesHostPath(env, paths),
     rulesRequested: antigravityGlobalRulesPath(env),
+    mcp: antigravityMcpConfigHostPath(env, paths),
+    mcpRequested: antigravityMcpConfigPath(env),
     skillsDir: antigravitySkillsDirHostPath(env, paths),
   };
 }
@@ -455,7 +472,9 @@ function isAntigravityContainerDir(directory: string, antigravity: AntigravityGu
 
 function resolveUserFile(paths: HostConfigPaths, target: string, antigravity: AntigravityGuardedPaths): HostPath {
   const absolute = isAbsolute(target) ? resolve(target) : null;
-  for (const [host, requested] of [[antigravity.hooks, antigravity.hooksRequested], [antigravity.rules, antigravity.rulesRequested]] as const) {
+  const guarded = [[antigravity.hooks, antigravity.hooksRequested],
+    [antigravity.rules, antigravity.rulesRequested], [antigravity.mcp, antigravity.mcpRequested]] as const;
+  for (const [host, requested] of guarded) {
     if (absolute === requested || absolute === host) {
       if (isPathInside(paths.harness, host)) throw new HostConfigError('host_config_invalid_path', `Antigravity configuration is inside the repo-harness state directory: ${host}`);
       checkAntigravityPath(host);
@@ -463,7 +482,7 @@ function resolveUserFile(paths: HostConfigPaths, target: string, antigravity: An
     }
   }
   const resolved = resolveHostPath(paths, target);
-  if (resolved === antigravity.hooks || resolved === antigravity.rules) checkAntigravityPath(resolved);
+  if (guarded.some(([host]) => resolved === host)) checkAntigravityPath(resolved);
   return resolved;
 }
 
@@ -474,6 +493,10 @@ export function resolveUserConfigFile(env: NodeJS.ProcessEnv, target: string, pa
 
 function isAntigravityFragment(fragment: { readonly owner: string; readonly selector: string }): boolean {
   return fragment.owner === 'core' && fragment.selector === ANTIGRAVITY_HOOK_SELECTOR;
+}
+
+function isAntigravityCodegraphFragment(fragment: { readonly owner: string; readonly selector: string }): boolean {
+  return fragment.owner === 'architecture' && fragment.selector === CODEGRAPH_MCP_SELECTOR;
 }
 
 /** Two aliases of one file are one path. */
@@ -600,16 +623,18 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
   for (const [index, change] of changes.entries()) {
     const path = targets[index]!;
     const isHooks = path === antigravity?.hooks;
-    const isRules = path === antigravity?.rules;
-    const guarded = isHooks || isRules;
+    const isMcp = path === antigravity?.mcp;
+    const guarded = isHooks || isMcp || path === antigravity?.rules;
     if (guarded) checkAntigravityPath(path);
     const { observation, bytes } = observeFile(path);
     const preimage = expectedOf(observation, path);
     const content = decode(bytes, path);
     const recorded = fragments.filter((entry) => entry.file === path);
-    const requests = isHooks ? change.fragments.map((request): FragmentRequest => {
-      if (!isAntigravityFragment(request) || request.strategy !== jsonFragment || request.kind === 'override' || request.selected) {
-        throw new HostConfigError('host_config_invalid_state', `${path}: only the repo-harness hook member can be installed`);
+    const requests = isHooks || isMcp ? change.fragments.map((request): FragmentRequest => {
+      const allowed = isHooks ? isAntigravityFragment(request) : isAntigravityCodegraphFragment(request);
+      if (!allowed || request.strategy !== jsonFragment || request.kind === 'override' || request.selected) {
+        const member = isHooks ? 'repo-harness hook' : 'CodeGraph MCP';
+        throw new HostConfigError('host_config_invalid_state', `${path}: only the ${member} member can be installed`);
       }
       return { ...request, kind: jsonFragment.locate(content, request.selector) ? 'refresh' : 'add' };
     }) : change.fragments;
@@ -627,7 +652,7 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
     const createdDirs = unchanged ? [] : missingDirectories(path);
     if (guarded) checkAntigravityPath(path);
     const removesUserBytes = !plan.fragments.every(keepsUserBytes);
-    const backup = change.backup === 'overrides-only' && !removesUserBytes ? null : backupUserBytes(paths, previous, preimage, bytes, removesUserBytes);
+    const backup = isMcp || (change.backup === 'overrides-only' && !removesUserBytes) ? null : backupUserBytes(paths, previous, preimage, bytes, removesUserBytes);
     fragments = [...fragments.filter((entry) => entry.file !== path), ...fileFragments(plan, recorded)];
     if (!guarded) directories = [...directories, ...createdDirs];
     files[path] = nextFileRecord(previous, { kind: preimage.existed ? 'text_block' : 'created', backup, baselineUnknown: change.baselineUnknown === true, format: fileFormatOf(change.path) },
@@ -1768,18 +1793,20 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
     if (!record || seen.has(path)) continue;
     seen.add(path);
     const isHooks = path === user?.antigravity.hooks;
-    const isRules = path === user?.antigravity.rules;
-    const guarded = isHooks || isRules;
+    const isMcp = path === user?.antigravity.mcp;
+    const fragmentOnly = isHooks || isMcp;
+    const guarded = fragmentOnly || path === user?.antigravity.rules;
     if (guarded) checkAntigravityPath(path);
     const { observation, bytes } = observeFile(path);
     const current = expectedOf(observation, path);
     const all = ledger.fragments.filter((entry) => entry.file === path);
-    const own = all.filter((entry) => matchesFilter(entry, filter) && (!isHooks || (isAntigravityFragment(entry) && entry.kind === 'add')));
-    if ((filtered || isHooks) && !own.length) continue;
+    const own = all.filter((entry) => matchesFilter(entry, filter) && (!fragmentOnly || (entry.kind === 'add'
+      && (isHooks ? isAntigravityFragment(entry) : isAntigravityCodegraphFragment(entry)))));
+    if ((filtered || fragmentOnly) && !own.length) continue;
     const plan = planFileRevert({
-      path, format: record.format, kind: record.kind, hasBackup: !isHooks && record.backup !== null, externalChange: record.external_change, committed: isCommitted(record, current),
+      path, format: record.format, kind: record.kind, hasBackup: !fragmentOnly && record.backup !== null, externalChange: record.external_change, committed: isCommitted(record, current),
       existed: current.existed, requestedPresent: only !== undefined && requestedPresent(only[index]!), bytes, backup: () => readVault(paths, record.backup!), own, all,
-      filtered: filtered || isHooks, preserveContainer: isHooks, baseline: record.baseline, backupReference: record.backup,
+      filtered: filtered || fragmentOnly, preserveContainer: fragmentOnly, baseline: record.baseline, backupReference: record.backup,
     });
     report.push(plan.entry);
     const removed = new Set(plan.removed);
