@@ -1480,15 +1480,18 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
 
   test("registered Pi argv gives a direct pane launch bun, rh and hc on PATH", () => {
     withHome(undefined, home => withRepository(home, "rh", repo => {
-      const launchBin = join(home, "launch-bin"), paneBin = join(home, "pane-bin");
+      const launchBin = join(home, "launch-bin"), bunBin = join(home, "bun-bin"), paneBin = join(home, "pane-bin");
       mkdirSync(launchBin);
+      mkdirSync(bunBin);
       mkdirSync(paneBin);
       for (const profile of [".profile", ".zshrc"]) writeFileSync(join(home, profile), 'export PATH="$HOME/pane-bin:/bin:/usr/bin"\n');
       writeFileSync(join(launchBin, "hc"), `#!/bin/sh\ncase "$1" in\n  --version) echo hc-probe;;\n  label) echo '{"address":"t5","state":"live","labels":{"repo-harness.seat":"worker-light"},"turn":0}';;\nesac\n`, { mode: 0o755 });
       writeFileSync(join(launchBin, "rh"), "#!/bin/sh\necho rh-probe\n", { mode: 0o755 });
+      writeFileSync(join(bunBin, "bun"), `#!/bin/sh\nexec ${JSON.stringify(Bun.which("bun") ?? process.execPath)} "$@"\n`, { mode: 0o755 });
+      writeFileSync(join(bunBin, "rh"), "#!/bin/sh\necho shadowed-rh\n", { mode: 0o755 });
       writeFileSync(join(paneBin, "pi"), "#!/bin/sh\nset -e\nbun --version\nrh --version\nhc --version\n", { mode: 0o755 });
       const env = registryEnv(home);
-      const launch = run({ ...env, PATH: `${launchBin}:${dirname(Bun.which("bun") ?? process.execPath)}:/bin:/usr/bin` }, ["worker-light", "--repository-id", "1186405141", "--issue", "3300"], repo);
+      const launch = run({ ...env, PATH: `${launchBin}:${bunBin}:/bin:/usr/bin` }, ["worker-light", "--repository-id", "1186405141", "--issue", "3300"], repo);
       expect(launch.status, launch.stderr).toBe(0);
       const [command, ...args] = JSON.parse(launch.stdout);
       const result = spawnSync(command, args, { cwd: repo, encoding: "utf8",

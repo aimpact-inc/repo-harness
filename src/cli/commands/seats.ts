@@ -158,19 +158,26 @@ function seatId(seat: string): LaunchSeatId {
 }
 
 /**
- * Label the terminal before starting the agent. Keep the login shell's PATH order and add the launcher's Bun
- * directory and the caller's rh and hc directories for panes that start with a smaller PATH.
+ * Label the terminal before starting the agent. Keep the login shell's PATH order and append caller bun, rh,
+ * and hc directories in caller PATH order before the launcher's Bun directory fallback for smaller-PATH panes.
  */
 function selfLabelingArgv(seat: LaunchSeatId, input: SeatLabelInput, agent: readonly string[], env: NodeJS.ProcessEnv): string[] {
   const flags = ([['--repository-id', input.repositoryId], ['--issue', input.issue], ['--pr', input.pr], ['--parent', input.parent]] as const)
     .flatMap(([flag, value]) => value === undefined ? [] : [flag, value]);
-  const toolDirs = ['bun', 'rh', 'hc'].flatMap(tool => {
+  const pathOrder = new Map<string, number>();
+  for (const [index, entry] of (env.PATH ?? '').split(delimiter).entries()) {
+    const normalized = resolve(entry);
+    if (!pathOrder.has(normalized)) pathOrder.set(normalized, index);
+  }
+  const toolDirs = [...new Set(['bun', 'rh', 'hc'].flatMap(tool => {
     const path = Bun.which(tool, { PATH: env.PATH ?? '' });
     return path === null ? [] : [dirname(path)];
-  });
+  }))].sort((left, right) =>
+    (pathOrder.get(resolve(left)) ?? Number.MAX_SAFE_INTEGER) - (pathOrder.get(resolve(right)) ?? Number.MAX_SAFE_INTEGER),
+  );
   const pathSetup = 'export PATH="${PATH:+$PATH:}${2:+$2:}${0%/*}"';
   const label = `"$0" "$1" seats label ${[seat, ...flags].join(' ')}`;
-  const args = [process.execPath, CLI_ENTRY, [...new Set(toolDirs)].join(delimiter)];
+  const args = [process.execPath, CLI_ENTRY, toolDirs.join(delimiter)];
   // The owner exception URL is positional, so only checked seat and dispatch values enter the script.
   return input.ownerException === undefined
     ? ['/bin/sh', '-c', `${pathSetup}; ${label} && shift 2 && exec "$@"`, ...args, ...agent]
