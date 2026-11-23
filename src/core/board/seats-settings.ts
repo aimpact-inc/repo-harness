@@ -27,7 +27,7 @@ export const isWorkerSeat = (seat: SeatId): seat is WorkerSeatId => WORKER_SEAT_
 export const SEAT_RUNTIMES = ['claude', 'codex', 'pi', 'agy'] as const;
 export type SeatRuntime = typeof SEAT_RUNTIMES[number];
 
-export const ALLOWED_AGY_SEAT_IDS = ['advisor', 'council', ...WORKER_SEAT_IDS, 'gatekeeper-fallback'] as const satisfies readonly SeatId[];
+export const ALLOWED_AGY_SEAT_IDS = ['orchestrator', 'advisor', 'council', ...WORKER_SEAT_IDS, 'gatekeeper-fallback'] as const satisfies readonly SeatId[];
 export const isAgyAllowedSeat = (id: SeatId): boolean => (ALLOWED_AGY_SEAT_IDS as readonly SeatId[]).includes(id);
 
 export const seatHostId = (runtime: SeatRuntime): string => runtime === 'agy' ? 'antigravity' : runtime;
@@ -47,13 +47,18 @@ export const AGY_READONLY_SEAT_TOOLS = ['net', 'read', 'shell'] as const satisfi
 export const AGY_ADVISOR_SEAT_TOOLS = ['edit', 'mcp', 'net', 'read', 'schedule', 'shell'] as const satisfies readonly SeatTool[];
 export const AGY_WORKER_SEAT_TOOLS = ['edit', 'gh', 'net', 'read', 'shell'] as const satisfies readonly SeatTool[];
 const AGY_WORKER_REQUIRED_TOOLS = ['edit', 'net', 'read', 'shell'] as const satisfies readonly SeatTool[];
+const ORCHESTRATOR_TOOLS = Object.freeze(['gh', 'mcp', 'net', 'read', 'shell', 'tasks'] as const satisfies readonly SeatTool[]);
 
 export function agySeatTools(id: SeatId): readonly SeatTool[] {
+  if (id === 'orchestrator') return ORCHESTRATOR_TOOLS;
   if (id === 'advisor') return AGY_ADVISOR_SEAT_TOOLS;
   return isWorkerSeat(id) ? AGY_WORKER_SEAT_TOOLS : AGY_READONLY_SEAT_TOOLS;
 }
 
 export function isAgyToolsValid(id: SeatId, tools: readonly SeatTool[]): boolean {
+  if (id === 'orchestrator') {
+    return tools.length === ORCHESTRATOR_TOOLS.length && ORCHESTRATOR_TOOLS.every(tool => tools.includes(tool));
+  }
   const isReadonly = tools.length === AGY_READONLY_SEAT_TOOLS.length
     && AGY_READONLY_SEAT_TOOLS.every(tool => tools.includes(tool));
   if (isWorkerSeat(id)) {
@@ -248,7 +253,7 @@ export function neonDeepSeatStarter(enabledHosts: readonly string[], preferredRu
 export function defaultSeatsConfig(preset: 'magpie' | 'native' = 'magpie'): SeatsConfigV1 {
   if (preset === 'native') {
     return Object.freeze({
-      orchestrator: Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: Object.freeze(['gh', 'mcp', 'net', 'read', 'shell', 'tasks'] as const), fleet: EXPLORER_ONLY_FLEET }),
+      orchestrator: Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: ORCHESTRATOR_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
       advisor: Object.freeze({ runtime: 'agy', model: 'gemini-4-neon-high', advisor_model: null, effort: null, tools: AGY_ADVISOR_SEAT_TOOLS, fleet: EMPTY_FLEET }),
       council: null,
       worker: Object.freeze({ runtime: 'codex', model: 'gpt-6.1-terra', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
@@ -264,7 +269,7 @@ export function defaultSeatsConfig(preset: 'magpie' | 'native' = 'magpie'): Seat
     });
   }
   return Object.freeze({
-    orchestrator: Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: Object.freeze(['gh', 'mcp', 'net', 'read', 'shell', 'tasks'] as const), fleet: EXPLORER_ONLY_FLEET }),
+    orchestrator: Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: ORCHESTRATOR_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
     advisor: Object.freeze({ runtime: 'pi', model: PI_NEON_MODEL, advisor_model: null, effort: 'xhigh', tools: Object.freeze(['mcp', 'net', 'read', 'shell'] as const), fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
     council: null,
     worker: Object.freeze({ runtime: 'pi', model: `${PI_CODEX_MODEL_PREFIX}gpt-6.1-terra`, advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),

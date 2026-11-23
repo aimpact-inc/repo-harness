@@ -931,7 +931,7 @@ describe('seat settings contract without transport', () => {
 });
 
 describe('seat settings routes', () => {
-  test('saves agy on advisor, council, all workers (with gh on/off), and gatekeeper-fallback, and refuses to disable its host while in use', async () => {
+  test('saves agy on orchestrator, advisor, council, all workers (with gh on/off), and gatekeeper-fallback, and refuses to disable its host while in use', async () => {
     const harness = await startHarness({ agents: { ...PANE_AGENTS, enabled: ['antigravity', ...PANE_AGENTS.enabled] } });
     const advisor = { runtime: 'agy', model: 'gemini-4-neon-high', effort: 'high', advisor_model: null, fleet: [], tools: ['edit', 'mcp', 'net', 'read', 'schedule', 'shell'] } as const;
     expect((await seats(harness)).ranges.runtimes.find(range => range.id === 'agy')).toMatchObject({ enabled: true, effort: true, fleet: false });
@@ -942,6 +942,7 @@ describe('seat settings routes', () => {
       expect(response.status).toBe(200);
       expect((await seats(harness)).config.advisor).toEqual(next);
     }
+    const orchestrator = { runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['gh', 'mcp', 'net', 'read', 'shell', 'tasks'] } as const;
     const council = { runtime: 'agy', model: 'gemini-4-carbon-high', effort: null, advisor_model: null, fleet: [], tools: ['net', 'read', 'shell'] } as const;
     const workerGhOn = { runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['edit', 'gh', 'net', 'read', 'shell'] } as const;
     const workerGhOff = { runtime: 'agy', model: 'gemini-4-hydrogen-high', effort: 'high', advisor_model: null, fleet: [], tools: ['edit', 'net', 'read', 'shell'] } as const;
@@ -950,6 +951,7 @@ describe('seat settings routes', () => {
       const { revision, ...section } = (await seats(harness)).config;
       const response = await post(harness, { expected_revision: revision, seats: {
         ...section,
+        orchestrator,
         council,
         worker: workerGhOn,
         'worker-deep': workerGhOn,
@@ -960,6 +962,7 @@ describe('seat settings routes', () => {
       } }, 'seats');
       expect(response.status).toBe(200);
       const updated = (await seats(harness)).config;
+      expect(updated.orchestrator).toEqual(orchestrator);
       expect(updated.council).toEqual(council);
       expect(updated.worker).toEqual(workerGhOn);
       expect(updated['worker-light']).toEqual(workerGhOff);
@@ -972,7 +975,7 @@ describe('seat settings routes', () => {
   });
 
   test.each([
-    ['orchestrator', {}, 'seat_runtime_not_allowed'],
+    ['orchestrator', { tools: ['edit', 'gh', 'mcp', 'net', 'read', 'shell', 'tasks'] }, 'seat_tool_not_allowed'],
     ['gatekeeper', {}, 'seat_runtime_not_allowed'],
     ['reviewer', {}, 'seat_runtime_not_allowed'],
     ['advisor', { model: null }, 'seat_model_invalid'],
@@ -998,7 +1001,7 @@ describe('seat settings routes', () => {
     const body = await response.json();
     expect(body.error.code).toBe(code);
     if (code === 'seat_runtime_not_allowed') {
-      expect(body.error.next_action).toBe('Use agy only on advisor, council, worker seats, or gatekeeper-fallback.');
+      expect(body.error.next_action).toBe('Use agy only on orchestrator, advisor, council, worker seats, or gatekeeper-fallback.');
     }
     expect(sha256(harness.configPath)).toBe(revision);
   });
@@ -1065,7 +1068,7 @@ describe('seat settings routes', () => {
       expect((await seats(harness)).config[id]).toEqual(entry);
     }
     const { revision, ...section } = (await seats(harness)).config;
-    for (const id of ['orchestrator', 'gatekeeper', 'reviewer'] as const) {
+    for (const id of ['gatekeeper', 'reviewer'] as const) {
       const response = await post(harness, { expected_revision: revision, seats: { ...section, [id]: fallbackHydrogen } }, 'seats');
       expect([id, response.status, (await response.json()).error.code]).toEqual([id, 422, 'seat_runtime_not_allowed']);
     }

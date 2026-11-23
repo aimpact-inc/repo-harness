@@ -139,6 +139,7 @@ function bare(args: string[]): unknown[] {
 }
 
 const AGY_ADVISOR = { runtime: "agy", model: "gemini-4-neon-high", advisor_model: null, effort: null, tools: AGY_ADVISOR_SEAT_TOOLS, fleet: [] } as const;
+const AGY_ORCHESTRATOR = { ...AGY_ADVISOR, tools: ["gh", "mcp", "net", "read", "shell", "tasks"] } as const;
 const AGY_WORKER = { runtime: "agy", model: "gemini-4-neon-high", advisor_model: null, effort: null, tools: ["edit", "gh", "net", "read", "shell"], fleet: [] } as const;
 const AGY_WORKER_NO_GH = { ...NATIVE_SEATS_PRESET["worker-light"]!, effort: "high", tools: ["edit", "net", "read", "shell"] } as const;
 const AGY_FALLBACK = { runtime: "agy", model: "gemini-4-hydrogen-high", advisor_model: null, effort: null, tools: ["net", "read", "shell"], fleet: [] } as const;
@@ -321,7 +322,33 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     expect(JSON.parse(opened.stdout).placement).toEqual({ tab: "tb1", terminal: "t9" });
   }));
 
-  test.each(["missing", "unsupported", "signed out", "unknown", "model absent", "effort mismatch", "outside opt-in", "guard absent", "host disabled", "orchestrator", "gatekeeper", "reviewer"])("agy refuses %s before any agent projection or tab", (branch) => withAgySeat(f => {
+  test("renders the native orchestrator argv, command rules and read-only agent profile", withAgySeat(f => {
+    f.configure(AGY_ADVISOR, true, { orchestrator: AGY_ORCHESTRATOR });
+    const raw = f.run(["argv", "orchestrator", "--repository-id", "1186405141", "--json"]);
+    expect(raw.status, raw.stderr).toBe(0);
+    const launch = JSON.parse(raw.stdout);
+    expect(launch).toMatchObject({ seat: "orchestrator", runtime: "agy" });
+    const argv = agent(launch);
+    expect(argv).toContain("REPO_HARNESS_SEAT=orchestrator");
+    expect(argv[argv.indexOf("--agent") + 1]).toBe("rh-orchestrator");
+    const directory = argv[argv.indexOf("--add-dir") + 1];
+    const profile = readFileSync(join(directory, ".agents", "agents", "rh-orchestrator", "agent.md"), "utf8");
+    expect(profile).toContain("tools: [view_file, run_command, search_web]\ninheritMcp: true");
+    expect(profile).toContain("Never edit repository files.");
+    expect(profile).toContain("triage queue in your own scratch files under /tmp");
+    const { permissions } = JSON.parse(argv[argv.indexOf("--settings") + 1]);
+    expect(permissions.allow).toEqual(expect.arrayContaining([
+      "command(rh board attention)", "command(rh board dispatch)", "command(rh board review)",
+      "command(rh seats launch)", "command(rh publication merge)", "command(rh review collect)",
+      "command(rh worktrees clean)", "command(git worktree list)", "command(gh issue edit)", "command(gh run rerun)",
+    ]));
+    expect(permissions.deny).toEqual([
+      "command(git reset --hard)", "command(git clean)", "command(gh release create)",
+      "command(npm publish)", "command(bun publish)",
+    ]);
+  }));
+
+  test.each(["missing", "unsupported", "signed out", "unknown", "model absent", "effort mismatch", "outside opt-in", "guard absent", "host disabled", "gatekeeper", "reviewer"])("agy refuses %s before any agent projection or tab", (branch) => withAgySeat(f => {
     let cwd = f.cwd;
     let seat = "advisor";
     let error: string;
@@ -340,7 +367,6 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
       case "outside opt-in": cwd = f.home; error = "seat_checkout_not_opted_in"; break;
       case "guard absent": rmSync(f.hooks); error = "antigravity_guard_unready"; break;
       case "host disabled": f.configure(AGY_ADVISOR, false); error = "seat_runtime_not_enabled"; break;
-      case "orchestrator": seat = "orchestrator"; f.configure(AGY_ADVISOR, true, { orchestrator: AGY_ADVISOR }); error = "seat_runtime_not_allowed"; break;
       case "gatekeeper": seat = "gatekeeper"; extraArgs.push("--pr", "3377"); f.configure(AGY_ADVISOR, true, { gatekeeper: AGY_ADVISOR }); error = "seat_runtime_not_allowed"; break;
       default: seat = "reviewer"; extraArgs.push("--pr", "3377"); f.configure(AGY_ADVISOR, true, { reviewer: AGY_ADVISOR }); error = "seat_runtime_not_allowed"; break;
     }
@@ -624,6 +650,18 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     const { allow } = agySeatCommandRules("worker", AGY_WORKER);
     for (const command of ["git rm -- ./submodule", "git worktree add -B existing ../checkout", "git worktree prune"]) {
       expect(allow.find(prefix => command.startsWith(prefix))).toBeUndefined();
+    }
+  });
+
+  test("an agy orchestrator needs approval for commands outside the coordinator grants", () => {
+    const { allow } = agySeatCommandRules("orchestrator", AGY_ORCHESTRATOR);
+    for (const command of [
+      "git worktree add -B existing ../checkout", "git worktree prune", "rh worktrees prune",
+      "git push origin topic --force-with-lease", "git push origin --delete topic", "git push origin topic",
+      "gh api repos/org/repo", "gh issue delete 42", "gh run delete 42", "gh pr merge 42 --admin",
+      "rh board --parent 42 merge", "hc keys t1", "hc run --help",
+    ]) {
+      expect(allow.find(prefix => command.startsWith(prefix)), command).toBeUndefined();
     }
   });
 
