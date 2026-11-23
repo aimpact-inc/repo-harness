@@ -11,6 +11,7 @@ import { emptySeatPoolProbe, seatModelBlock, type SeatPoolProbe } from '../src/c
 import { DEFAULT_SEATS_CONFIG, NATIVE_SEATS_PRESET } from '../src/core/board/seats-settings';
 import type { BoardCommentV1, BoardParentReadV1, BoardSubIssueReadV1 } from '../src/core/board/source';
 import { agyCatalogScript } from './helpers/agy-cli-fixture';
+import { run, withTempRepo } from './helpers/repo-fixture';
 
 const NORMAL: SeatAccountQuotas = {
   claude: { state: 'normal', remaining: 80, mode: 'normal' },
@@ -63,6 +64,28 @@ test('a ready issue dispatches to its route seat; every other state is skipped w
   });
   expect(reasons(plan)).toEqual(['1:dispatch', '2:held', '3:blocked', '4:claimed', '5:kind_label_invalid', '6:closed', '7:dispatch', '8:not_sub_issue']);
   expect(plan.decisions[0]).toMatchObject({ seat: 'worker-opus', route_class: 'important_deep' });
+});
+
+test('early start dispatches an explicitly selected blocked bundle and records the override on each claim', async () => {
+  const labels = ['route:important_deep', 'tier:medium'];
+  const parent = read([issue(1, { labels }), issue(3, { labels, blocked_by: [{ number: 9, state: 'open' }] })], 4, [[3, 1]]);
+  const input = { seats: DEFAULT_SEATS_CONFIG, quota: NORMAL, terminals: [], parent };
+  expect(reasons(planDispatch({ ...input, bundle: [1, 3] }))).toEqual(['3:blocked', '1:blocked']);
+  expect(reasons(planDispatch({ ...input, earlyStart: true }))).toEqual(['3:blocked', '1:blocked']);
+  const plan = planDispatch({ ...input, bundle: [1, 3], earlyStart: true });
+  const claims: string[] = [];
+  const dispatch = ports({ comment: (number, body) => { claims.push(body); return `claim-${number}`; } });
+  expect((await executeDispatch(plan, context, dispatch.base)).map(entry => entry.issue)).toEqual([3, 1]);
+  for (const claim of claims) expect(claim).toMatch(/^Dispatch reading: .+\(early start\)$/m);
+});
+
+test('the CLI refuses early start without --issues', () => {
+  withTempRepo('dispatch-early-start-', cwd => {
+    const cli = join(import.meta.dir, '../src/cli/index.ts');
+    const result = run(process.execPath, [cli, 'board', 'dispatch', '--parent', '100', '--space', 's1', '--early-start'], cwd);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('--early-start requires --issues');
+  });
 });
 
 test('dispatch skips a signed-out worker and uses the next available seat in that route', () => {

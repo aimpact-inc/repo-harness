@@ -122,6 +122,12 @@ remove. Default to a clean refactor: change every caller, delete the old
 path and update the tests in the same change. Keep compatibility only
 where the issue names a concrete reason.
 
+Add a blocked-by link only when writing or testing the issue requires the
+merged code of the blocker. Name the required symbol or file in the plan
+note. Use `merge_order` to sequence PRs that share files. After the earlier
+merge, the later writer rebases unpublished work once. For a pushed branch
+that conflicts with main, follow `worker.md` §7.
+
 ### 3.1 Planning tiers and `council`
 
 Follow the three planning tiers (`ADR-0006` §4):
@@ -337,9 +343,10 @@ module is in the title so that a list view shows the write scopes.
   plan again with rh board post plan`. The claim is the worker's identity
   on the board, and the worker never posts one. Dispatch only after the
   claim is on each issue of the bundle.
-- Dispatch in parallel only when the write scopes are disjoint and each
-  dependency is merged, or its contract is stable and the issue allows
-  early start.
+- When a worker seat is free and a bundle skips only as `blocked`, use
+  `rh board dispatch --issues <unit> --early-start` if the bundle can be
+  written and tested before the blocker merges. Log the decision in one
+  line on the parent issue. Use the dependency rule in §3.
 - Each parallel worker gets its own worktree from a clean base.
 - Run `git fetch` in the main checkout before `rh worktrees start`. The
   helper bases the worktree on the upstream of the base branch and does not

@@ -43,6 +43,8 @@ export interface DispatchInputV1 {
   readonly modelBlock?: SeatModelCheck;
   /** `--issues`: the member set of one plan unit; absent dispatches every unit of the plan. */
   readonly bundle?: readonly number[];
+  /** Allow the selected bundle to start before its blockers close. */
+  readonly earlyStart?: boolean;
 }
 
 export interface DispatchPlanV1 {
@@ -137,6 +139,7 @@ function unitTierFailure(members: readonly { readonly issue: BoardSubIssueReadV1
 export function planDispatch(input: DispatchInputV1): DispatchPlanV1 {
   const { parent, seats, quota } = input;
   const bundle = input.bundle ?? null;
+  const earlyStart = input.earlyStart === true && bundle !== null;
   const plan = planOf(parent);
   const comments = parent.parent.comments;
   const closed = closedClaimUrls(comments);
@@ -173,7 +176,8 @@ export function planDispatch(input: DispatchInputV1): DispatchPlanV1 {
       const hold = held.get(number);
       if (hold !== undefined) return { number, failure: { reason: 'held', detail: hold } };
       // A blocker inside the unit lands in the same pull request, so it does not block.
-      const open = issue.blocked_by.filter(blocker => blocker.state === 'open' && !members.has(blocker.number)).map(blocker => `#${blocker.number}`);
+      const open = earlyStart ? [] : issue.blocked_by
+        .filter(blocker => blocker.state === 'open' && !members.has(blocker.number)).map(blocker => `#${blocker.number}`);
       if (open.length > 0) return { number, failure: { reason: 'blocked', detail: `blocked by ${open.join(', ')}` } };
       const claim = claimHolder(issueClaim(issue.comments, number)) ?? (liveIssues.has(String(number)) ? 'a live worker seat carries the issue label' : null);
       if (claim !== null) return { number, failure: { reason: 'claimed', detail: claim } };
@@ -220,9 +224,10 @@ export function planDispatch(input: DispatchInputV1): DispatchPlanV1 {
       continue;
     }
     running += 1;
+    const route_line = earlyStart ? `${route.line} (early start)` : route.line;
     for (const entry of checked) {
       decisions.push('issue' in entry
-        ? { issue: entry.number, action: 'dispatch', title: entry.issue.title, route_class: kind, credentials, seat: route.id, route_line: route.line }
+        ? { issue: entry.number, action: 'dispatch', title: entry.issue.title, route_class: kind, credentials, seat: route.id, route_line }
         : { issue: entry.number, action: 'skip', ...CLOSED });
     }
     ready.push(Object.freeze(open.map(entry => entry.number)));
