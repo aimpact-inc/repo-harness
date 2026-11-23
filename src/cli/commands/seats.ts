@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { delimiter, dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { CLAUDE_BUILTIN_AGENT_TYPES, SeatPaneNameError, buildSeatLaunch, seatPaneName, seatTabName, type SeatLaunchV1 } from '../../core/board/seat-launch';
@@ -30,6 +30,7 @@ import { resolveCatalogRoute } from '../../core/board/model-catalog';
 import { agyReserved, claudeReserved, effectiveGatekeeper, effectiveSeatConfig, seatAccount, seatAccountQuotas, seatState, shownModel, type SeatRouteV1 } from '../../core/board/seat-routing';
 import { AGY_QUOTA_ACCOUNTS, classifyQuotaReading, type QuotaAccount, type QuotaReading } from '../../core/board/quota';
 import { readAgyQuota, readClaudeQuota, readCodexQuota } from '../../effects/board/quota';
+import { readAntigravityTranscript } from '../../effects/board/antigravity-transcript';
 import { version as PACKAGE_VERSION } from '../../../package.json';
 import { readGlobalConfiguration } from '../../effects/configuration/global-configuration';
 import { resolveGitCommonDirectory } from '../../effects/git/common-directory';
@@ -43,7 +44,7 @@ import { bunGlobalPackageRoot } from '../installer/skill-projection';
 import { PiFleetRolesError, writePiFleetRoles } from '../../effects/board/pi-fleet-roles';
 import { PiShellError, assertPiShell } from '../../effects/board/pi-shell';
 import { MANAGED_AGENTS } from '../../effects/terminal/task-role-profiles';
-import { SeatResetError, readSeatSession, readTranscriptUsage, runSeatReset, writeSeatResetRequest, type SeatRelaunch, type SeatResetNotify, type TranscriptUsage } from '../../effects/board/seat-reset';
+import { SeatResetError, readSeatSession, readTranscriptUsage, runSeatReset, seatResetRequestState, writeSeatHandoff, writeSeatResetRequest, type SeatRelaunch, type SeatResetNotify, type SeatResetTarget, type TranscriptUsage } from '../../effects/board/seat-reset';
 import { handoffIdentity, seatResetAction, seatResetIdentity, seatResetSteps, type SeatResetIdentity } from '../../core/board/seat-reset';
 import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
 import { COUNCIL_MEMBERS, CouncilConsultError, parseCouncilMembers, type CouncilMember } from '../../core/board/planner-consult';
@@ -57,9 +58,9 @@ import { resolveAntigravityRepository } from '../hook/host-adapter';
 const CLI_ENTRY = fileURLToPath(new URL('../index.ts', import.meta.url));
 
 class SeatsCommandError extends Error {
-  constructor(readonly code: 'seat_unknown' | 'seat_not_configured' | 'seat_quota_exhausted' | 'seat_quota_reserved' | 'seat_provider_unavailable' | 'owner_exception_invalid' | 'config_invalid' | 'label_value_invalid' | 'repository_id_required' | 'terminal_unknown' | 'seat_identity_missing' | 'seat_session_unknown' | 'seat_context_unknown' | 'pi_extension_missing' | 'seat_space_missing' | 'seat_tab_failed' | 'seat_tab_unknown' | 'seat_reset_runtime_unsupported'
+  constructor(readonly code: 'seat_unknown' | 'seat_not_configured' | 'seat_quota_exhausted' | 'seat_quota_reserved' | 'seat_provider_unavailable' | 'owner_exception_invalid' | 'config_invalid' | 'label_value_invalid' | 'repository_id_required' | 'terminal_unknown' | 'seat_identity_missing' | 'seat_session_unknown' | 'seat_context_unknown' | 'pi_extension_missing' | 'seat_space_missing' | 'seat_tab_failed' | 'seat_tab_unknown'
     | 'seat_runtime_missing' | 'seat_runtime_unsupported' | 'seat_runtime_signed_out' | 'seat_runtime_unknown' | 'seat_model_unavailable'
-    | 'seat_checkout_not_opted_in' | 'antigravity_guard_unready', message: string) {
+    | 'seat_checkout_not_opted_in' | 'antigravity_guard_unready' | 'seat_handoff_request_unavailable' | 'seat_handoff_write_failed', message: string) {
     super(message);
   }
 }
@@ -303,14 +304,24 @@ export async function seatLaunch(seat: string, labels: SeatLabelInput = {}, env:
   return (await effectiveSeatLaunch(seat, labels, env, cwd, { planned, checkAvailability: true })).launch;
 }
 
-/**
- * The launch of a reset seat for `seats reset` (#2633): its argv, its effective model and effort, and whether the quota
- * mode that chose them is known. The checkout comes from the requester selected by the seat identity.
- */
+export function seatResetTarget(identity: SeatResetIdentity, env: NodeJS.ProcessEnv): SeatResetTarget {
+  const { seats } = configuredSeats(env);
+  const configured = seats[identity.seat];
+  return {
+    runtime: configured.runtime,
+    model: async () => {
+      const { seat, modeKnown } = await quotaCheckedSeat(identity.seat, seats, configured, env, undefined, () => readAgyQuota(env));
+      return { model: seat.model, effort: seat.effort, modeKnown };
+    },
+  };
+}
+
+/** Prepare the relaunch only when reset will start a new process. */
 export async function seatResetLaunch(identity: SeatResetIdentity, env: NodeJS.ProcessEnv, checkout: string): Promise<SeatRelaunch> {
   // The terminal already has a waiting shell. Run only the agent command to keep one shell across resets.
-  const { launch, effective, modeKnown } = await effectiveSeatLaunch(identity.seat, { repositoryId: identity.repository }, env, checkout, { terminal: 'existing' });
-  return { argv: launch.argv, model: effective.model, effort: effective.effort, modeKnown };
+  const { launch, effective, modeKnown } = await effectiveSeatLaunch(identity.seat, { repositoryId: identity.repository }, env, checkout,
+    { terminal: 'existing', checkAvailability: true });
+  return { argv: launch.argv, runtime: launch.runtime, model: effective.model, effort: effective.effort, modeKnown };
 }
 
 /** The rh Pi extension of the installed package. A Pi review seat without it would run with no hook, so a missing file stops the launch. */
@@ -342,7 +353,16 @@ function resolveCouncilMemberSeat(member: CouncilMember, seats: SeatsConfigV1, e
   };
 }
 
-/** The launch and the effective seat config that it starts; the seat reset compares the config with the session record (#2633). */
+function configuredSeats(env: NodeJS.ProcessEnv): { config: Record<string, unknown>; seats: SeatsConfigV1 } {
+  let config: Record<string, unknown>;
+  try { config = readGlobalConfiguration(env).config; } catch (error) { throw new SeatsCommandError('config_invalid', (error as Error).message); }
+  try { return { config, seats: decodeSeatsConfig(config.seats) }; } catch (error) {
+    if (error instanceof SeatsConfigMigrationRequiredError || error instanceof AgySeatSettingsError) throw error;
+    throw new SeatsCommandError('config_invalid', seatsConfigInvalidMessage(error));
+  }
+}
+
+/** The launch and the effective seat config that it starts. */
 async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: NodeJS.ProcessEnv, cwd: string,
   { planned, terminal = 'new', prepareFleet = true, checkAvailability = false, configuredOverride }: {
     readonly planned?: SeatRouteV1; readonly terminal?: 'new' | 'existing'; readonly prepareFleet?: boolean; readonly checkAvailability?: boolean;
@@ -351,13 +371,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   readonly launch: SeatLaunchResult; readonly effective: SeatConfigV1; readonly effectiveId: LaunchSeatId | 'gatekeeper-fallback'; readonly modeKnown: boolean;
 }> {
   const id = seatId(seat);
-  let config: Record<string, unknown>;
-  try { config = readGlobalConfiguration(env).config; } catch (error) { throw new SeatsCommandError('config_invalid', (error as Error).message); }
-  let seats;
-  try { seats = decodeSeatsConfig(config.seats); } catch (error) {
-    if (error instanceof SeatsConfigMigrationRequiredError || error instanceof AgySeatSettingsError) throw error;
-    throw new SeatsCommandError('config_invalid', seatsConfigInvalidMessage(error));
-  }
+  const { config, seats } = configuredSeats(env);
   const configured = configuredOverride ?? seats[id];
   if (configured === null) throw new SeatsCommandError('seat_not_configured', `The ${id} seat is not configured. Configure it in the seats section before launch.`);
   // The board review passes the gatekeeper route that its plan checked: the launched seat is the planned one, with no second quota read.
@@ -371,7 +385,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   const runtimeSeat: SeatId = plannedSeat?.id === 'gatekeeper-fallback' ? plannedSeat.id : id;
   const initialCandidate = plannedSeat?.seat ?? configured;
   let agyProbe = prepareFleet && initialCandidate.runtime === 'agy'
-    ? checkedAgyRuntime(runtimeSeat, config, initialCandidate, env, terminal)
+    ? checkedAgyRuntime(runtimeSeat, config, initialCandidate, env)
     : undefined;
   const checkPool = checkAvailability && agyProbe === undefined;
   const probes = checkPool ? collectSeatPoolProbes(env, SEAT_IDS.some(seatId => seats[seatId]?.runtime === 'agy')) : [];
@@ -396,7 +410,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
       const installation = await agyInstallation?.catch(() => undefined);
       const probeEnv = installation?.kind === 'available' && installation.via === 'executable'
         ? { ...env, OAR_ANTIGRAVITY_BIN: installation.command } : env;
-      agyProbe = checkedAgyRuntime(effectiveId, config, effective, probeEnv, terminal);
+      agyProbe = checkedAgyRuntime(effectiveId, config, effective, probeEnv);
     }
     checkAgyLaunchTarget(effectiveId, effective, agyProbe.models, env, cwd);
   }
@@ -427,14 +441,21 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   const launch = buildSeatLaunch(id, effective, config.seats === undefined ? 'defaults' : 'seats', agentTypes, {
     paneName: name ?? undefined, repositoryId: labels.repositoryId, piRoleDirectory, piHookExtension, claudeSaving, agy,
   });
+  const argv = [...launch.argv];
+  if (terminal === 'existing' && effective.runtime !== 'agy' && effective.runtime !== 'codex') {
+    const executable = Bun.which(effective.runtime, { PATH: env.PATH ?? '' });
+    if (executable === null) throw new SeatsCommandError('seat_runtime_missing', `${effective.runtime} is missing from the launch PATH.`);
+    // Run the checked executable even when the requester's parent shell has a different PATH.
+    argv[argv.indexOf(effective.runtime)] = executable;
+  }
   return { effective, effectiveId, modeKnown, launch: {
     ...launch,
-    argv: labelSet === undefined ? launch.argv : labeledSeatArgv(id, labels, launch.argv, env, terminal),
+    argv: labelSet === undefined ? argv : labeledSeatArgv(id, labels, argv, env, terminal),
     labels: labelSet === undefined ? [] : hcLabelPairs(labelSet), name, tab, ownerException: labels.ownerException ?? null,
   } };
 }
 
-function checkedAgyRuntime(id: SeatId, config: Record<string, unknown>, seat: SeatConfigV1, env: NodeJS.ProcessEnv, terminal: 'new' | 'existing') {
+function checkedAgyRuntime(id: SeatId, config: Record<string, unknown>, seat: SeatConfigV1, env: NodeJS.ProcessEnv) {
   if (!isAgyAllowedSeat(id)) {
     throw new SeatsCommandError('seat_runtime_unsupported', `Direct agy launch is not supported on the ${id} seat.`);
   }
@@ -444,7 +465,6 @@ function checkedAgyRuntime(id: SeatId, config: Record<string, unknown>, seat: Se
       `The ${id} agy worker seat is configured read-only (missing edit). Enable edit for seats.${id}.tools in Settings before launching it.`,
     );
   }
-  if (terminal === 'existing') throw new SeatsCommandError('seat_reset_runtime_unsupported', `Start a new agy ${id} pane with rh seats launch ${id}.`);
   if (!enabledRuntimesOf(config).includes(seatHostId('agy'))) {
     throw new SeatsConfigurationError('seat_runtime_not_enabled', `Enable Antigravity in Hosts before launching the ${id}.`);
   }
@@ -564,24 +584,34 @@ const labelInput = (options: SeatLabelInput): SeatLabelInput => ({
  * `seats handoff`: an on-demand reset. It records a reset request for the current session, as the Stop hook does at
  * the threshold, so the peer's `seats reset` accepts the handoff, and returns the steps that the hook prints.
  */
-export function seatHandoff(env: NodeJS.ProcessEnv = process.env, now = new Date()): string {
+export function seatHandoff(env: NodeJS.ProcessEnv = process.env, now = new Date(), markdown?: Buffer): string {
   const identity = seatResetIdentity(env);
   if (identity === null) {
     throw new SeatsCommandError('seat_identity_missing', 'REPO_HARNESS_SEAT and REPO_HARNESS_SEAT_REPOSITORY name no orchestrator or advisor seat: start the seat with rh seats argv <seat> --repository-id <id>.');
   }
   const session = readSeatSession(identity);
   if (session === null) throw new SeatsCommandError('seat_session_unknown', `The SessionStart record of the ${identity.seat} seat is missing or not valid, so the session transcript is unknown.`);
-  if (session.host === 'antigravity') throw new SeatsCommandError('seat_reset_runtime_unsupported', 'Send the agy handoff to the orchestrator for a manual relaunch.');
-  const transcript = session.transcriptPath;
-  let usage: TranscriptUsage;
-  try { usage = readTranscriptUsage(transcript); } catch (error) {
+  const { host, sessionId, transcriptPath: transcript } = session;
+  if (markdown !== undefined) {
+    if (seatResetRequestState(identity, transcript, session).state !== 'open') {
+      throw new SeatsCommandError('seat_handoff_request_unavailable', 'This session has no open reset request. Run rh seats handoff to record a request.');
+    }
+    try { return writeSeatHandoff(identity, markdown); } catch (error) {
+      throw new SeatsCommandError('seat_handoff_write_failed', (error as Error).message);
+    }
+  }
+  let usage: TranscriptUsage | null = null;
+  try {
+    if (host !== 'antigravity') usage = readTranscriptUsage(transcript);
+    else if (sessionId !== null) usage = readAntigravityTranscript(sessionId, transcript, env);
+  } catch (error) {
     throw new SeatsCommandError('seat_context_unknown', `The transcript ${transcript} cannot be read: ${(error as Error).message}`);
   }
+  if (usage === null || usage.contextTokens === null) throw new SeatsCommandError('seat_context_unknown', `The transcript ${transcript} has no assistant entry with a context size.`);
   const { contextTokens, bytes } = usage;
-  if (contextTokens === null) throw new SeatsCommandError('seat_context_unknown', `The transcript ${transcript} has no assistant entry with a context size.`);
-  const action = seatResetAction(bytes);
-  writeSeatResetRequest(identity, now, { contextTokens, transcriptPath: transcript, transcriptBytes: bytes, action, host: session.host });
-  return seatResetSteps(identity, action, session.host === 'pi' ? 'pi' : 'claude');
+  const action = seatResetAction(bytes, host);
+  writeSeatResetRequest(identity, now, { contextTokens, transcriptPath: transcript, transcriptBytes: bytes, action, host });
+  return seatResetSteps(identity, action, host);
 }
 
 /** `loadNotify` comes from the composition root, only when peer-runtime is selected. */
@@ -754,10 +784,12 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
     });
   seats
     .command('handoff')
-    .description('In the orchestrator or advisor seat: record a reset request now and print the handoff steps of the Stop hook')
-    .action(() => {
+    .description('Record a reset request and print its steps, or write the handoff for an open request')
+    .option('--write', 'Read Markdown from stdin, write this seat’s handoff and print its RESET-REQUEST line')
+    .action((options: { write?: boolean }) => {
       try {
-        process.stdout.write(`${seatHandoff()}\n`);
+        const markdown = options.write ? readFileSync(0) : undefined;
+        process.stdout.write(`${seatHandoff(process.env, new Date(), markdown)}\n`);
       } catch (error) {
         if (!(error instanceof SeatsCommandError)) throw error;
         process.stderr.write(`${JSON.stringify({ ok: false, error: error.code, message: error.message })}\n`);
@@ -766,7 +798,7 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
     });
   seats
     .command('reset')
-    .description('On a RESET-REQUEST from the orchestrator or advisor seat: check its handoff, ask for a rewrite or send /clear, then resume it; run it in the background')
+    .description('Check and carry out a RESET-REQUEST from the peer seat, then send the resume prompt. Run in the background.')
     .argument('<handoff>', 'The handoff path of the RESET-REQUEST')
     .argument('<sha256>', 'The handoff sha256 of the RESET-REQUEST')
     .action(async (handoff: string, sha256: string) => {
@@ -776,6 +808,7 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
         const ending = identity === null ? null : readSeatSession(identity);
         const result = await runSeatReset(handoff, sha256, {
           ...(loadNotify === undefined ? {} : { notify: await loadNotify() }),
+          resolveLaunch: identity => seatResetTarget(identity, process.env),
           relaunch: (identity, checkout) => seatResetLaunch(identity, process.env, checkout),
         });
         process.stdout.write(`${JSON.stringify({ ok: true, ...result })}\n`);

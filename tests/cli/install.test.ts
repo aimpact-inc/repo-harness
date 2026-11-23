@@ -148,7 +148,7 @@ test.skipIf(process.platform === 'win32')('Antigravity install --report-language
     expect(fs.lstatSync(path.join(skillsDir, 'repo-harness-issue-flow')).isSymbolicLink()).toBe(true);
     expect(fs.existsSync(path.join(skillsDir, 'repo-harness-setup'))).toBe(false);
     expect(fs.existsSync(path.join(skillsDir, 'repo-harness-herdr-portal'))).toBe(false);
-    expect(fs.existsSync(path.join(skillsDir, 'repo-harness-seat-handoff'))).toBe(false);
+    expect(fs.lstatSync(path.join(skillsDir, 'repo-harness-seat-handoff')).isSymbolicLink()).toBe(true);
     expect(fs.readFileSync(path.join(skillsDir, 'herdr', 'SKILL.md'), 'utf8')).toContain('hc manual (herdr-core)');
     for (const skill of ['think', 'hunt', 'check', 'health']) {
       expect(fs.readlinkSync(path.join(skillsDir, skill))).toBe(path.join(home, '.agents', 'skills', skill));

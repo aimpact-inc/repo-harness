@@ -38,15 +38,16 @@ export function isSeatResetAction(value: unknown): value is SeatResetAction {
   return value === 'compact' || value === 'reset';
 }
 
-export const seatResetAction = (transcriptBytes: number): SeatResetAction => (transcriptBytes < SEAT_RESET_TRANSCRIPT_BYTES ? 'compact' : 'reset');
-
 /** The interactive hosts that support automated peer-typed reset commands. */
-export type InteractiveResetHost = 'claude' | 'pi';
+export type InteractiveResetHost = 'claude' | 'pi' | 'antigravity';
 
-/** The slash command that the peer types for each action. */
+export const seatResetAction = (transcriptBytes: number, host: InteractiveResetHost = 'claude'): SeatResetAction =>
+  host === 'antigravity' || transcriptBytes >= SEAT_RESET_TRANSCRIPT_BYTES ? 'reset' : 'compact';
+
+/** The slash command that the peer types for a reset that keeps the same process. */
 export const SEAT_RESET_COMMAND: Readonly<Record<SeatResetAction, '/compact' | '/clear'>> = { compact: '/compact', reset: '/clear' };
 
-export function seatResetCommand(action: SeatResetAction, host: InteractiveResetHost = 'claude'): '/compact' | '/clear' | '/new' {
+export function seatResetCommand(action: SeatResetAction, host: Exclude<InteractiveResetHost, 'antigravity'> = 'claude'): '/compact' | '/clear' | '/new' {
   if (action === 'compact') return '/compact';
   return host === 'pi' ? '/new' : '/clear';
 }
@@ -92,8 +93,13 @@ export function isSeatSessionSource(value: unknown): value is SeatSessionSource 
 export const seatSessionPath = (identity: SeatResetIdentity): string => `${seatResetDirectory(identity)}/session.json`;
 /** One JSON line per reset failure. It is the only record of the rewrite and resend counts. */
 export const seatResetLogPath = (identity: SeatResetIdentity): string => `${seatResetDirectory(identity)}/reset-log.jsonl`;
-/** Created once with an exclusive create before `/compact` or `/clear`: no second run acts on the same request. */
-export const seatResetClaimPath = (identity: SeatResetIdentity, requestedAt: string): string => `${seatResetDirectory(identity)}/claim-${requestedAt.replace(/\D/gu, '')}`;
+const requestTimestamp = (requestedAt: string): string => requestedAt.replace(/\D/gu, '');
+
+/** Created once with an exclusive create before processing the handoff. */
+export const seatResetClaimPath = (identity: SeatResetIdentity, requestedAt: string): string => `${seatResetDirectory(identity)}/claim-${requestTimestamp(requestedAt)}`;
+export const seatResetRelaunchPath = (identity: SeatResetIdentity, requestedAt: string): string => `${seatResetDirectory(identity)}/relaunch-${requestTimestamp(requestedAt)}.sh`;
+
+export const SEAT_HANDOFF_WRITE_COMMAND = 'rh seats handoff --write';
 
 /** At most this many handoff rewrites and resume prompt resends per request. */
 export const SEAT_RESET_RETRIES = 3;
@@ -131,7 +137,7 @@ export function missingHandoffSections(text: string): string[] {
 
 const PEER: Readonly<Record<ResetSeat, ResetSeat>> = { orchestrator: 'advisor', advisor: 'orchestrator' };
 
-const autoCompactionNotice = (host: InteractiveResetHost): string =>
+const autoCompactionNotice = (host: Exclude<InteractiveResetHost, 'antigravity'>): string =>
   host === 'pi' ? 'Pi auto-compaction handles the context.' : 'Claude Code auto-compaction handles the context.';
 
 /**
@@ -141,23 +147,41 @@ const autoCompactionNotice = (host: InteractiveResetHost): string =>
  */
 export function seatResetSteps(identity: SeatResetIdentity, action: SeatResetAction, host: InteractiveResetHost = 'claude'): string {
   const path = seatHandoffPath(identity);
+  const peer = PEER[identity.seat];
+  const reset = host === 'antigravity'
+    ? `types ${seatExitCommand(host)} and relaunches this seat in the same pane.`
+    : `types ${seatResetCommand(action, host)} in this session.`;
+  const noPeer = host === 'antigravity' ? '.' : `: ${autoCompactionNotice(host)}`;
+  const write = host === 'antigravity'
+    ? [
+      `1. Fill in the sections below. Pass the completed Markdown to \`${SEAT_HANDOFF_WRITE_COMMAND}\` using a quoted heredoc.`,
+      '',
+      `\`\`\`sh\n${SEAT_HANDOFF_WRITE_COMMAND} <<'RH_HANDOFF'\n${seatHandoffTemplate()}RH_HANDOFF\n\`\`\``,
+      '2. Copy the RESET-REQUEST line printed by the command. It contains the handoff path and SHA-256.',
+    ]
+    : [
+      `1. Write the handoff to ${path} with exactly these sections:`,
+      '',
+      seatHandoffTemplate(),
+      `2. Take its sha256 with \`shasum -a 256 ${path}\`.`,
+    ];
   return [
     '0. Finish the planning and the dispatch that you have in hand. Start nothing new. Then write the handoff.',
-    `1. Write the handoff to ${path} with exactly these sections:`,
-    '',
-    seatHandoffTemplate(),
-    `2. Take its sha256 with \`shasum -a 256 ${path}\`.`,
-    `3. Send \`RESET-REQUEST ${path} <sha256>\` to the ${PEER[identity.seat]} seat (repo-harness.seat=${PEER[identity.seat]}) with hc send, then end your turn. The ${PEER[identity.seat]} seat types ${seatResetCommand(action, host)} in this session.`,
+    ...write,
+    `3. Send \`RESET-REQUEST ${path} <sha256>\` to the ${peer} seat (repo-harness.seat=${peer}) with hc send, then end your turn. The ${peer} seat ${reset}`,
     `On REWRITE, write the handoff again and send RESET-REQUEST again. On NO-RESET, continue.`,
-    `When the ${PEER[identity.seat]} seat is missing or does not answer, continue without a reset: ${autoCompactionNotice(host)}`,
+    `When the ${peer} seat is missing or does not answer, continue without a reset${noPeer}`,
   ].join('\n');
 }
 
 /** The block reason of the Stop hook: the token reason and the action, then the handoff steps. */
 export function seatResetReason(identity: SeatResetIdentity, contextTokens: number, transcriptBytes: number, action: SeatResetAction, host: InteractiveResetHost = 'claude'): string {
-  const side = action === 'compact' ? 'below' : 'at or above';
-  return `repo-harness: the ${identity.seat} seat context is ${contextTokens} tokens, at or above ${SEAT_RESET_CONTEXT_TOKENS}. Reset before auto-compaction. `
-    + `The transcript is ${transcriptBytes} bytes, ${side} ${SEAT_RESET_TRANSCRIPT_BYTES}, so the reset types ${seatResetCommand(action, host)}.\n${seatResetSteps(identity, action, host)}`;
+  const threshold = `repo-harness: the ${identity.seat} seat context is ${contextTokens} tokens, at or above ${SEAT_RESET_CONTEXT_TOKENS}.`;
+  const size = `The transcript is ${transcriptBytes} bytes`;
+  const reset = host === 'antigravity'
+    ? `${size}. Antigravity resets by relaunching in the same pane.`
+    : `Reset before auto-compaction. ${size}, ${action === 'compact' ? 'below' : 'at or above'} ${SEAT_RESET_TRANSCRIPT_BYTES}, so the reset types ${seatResetCommand(action, host)}.`;
+  return `${threshold} ${reset}\n${seatResetSteps(identity, action, host)}`;
 }
 
 /**
@@ -170,11 +194,13 @@ export function seatResumePrompt(identity: SeatResetIdentity, peerAddress: strin
 }
 
 /** The message to the requester when its handoff fails a check. */
-export function seatRewriteMessage(identity: SeatResetIdentity, problem: string, attempt: number): string {
-  return `REWRITE ${attempt}/${SEAT_RESET_RETRIES}: ${problem} Write ${seatHandoffPath(identity)} again and send RESET-REQUEST again.`;
+export function seatRewriteMessage(identity: SeatResetIdentity, problem: string, attempt: number, host: InteractiveResetHost): string {
+  const write = host === 'antigravity' ? `Run \`${SEAT_HANDOFF_WRITE_COMMAND}\` with the corrected Markdown on stdin.` : `Write ${seatHandoffPath(identity)} again.`;
+  return `REWRITE ${attempt}/${SEAT_RESET_RETRIES}: ${problem} ${write} Send RESET-REQUEST again.`;
 }
 
 /** The message that releases the requester with no reset: it continues, and auto-compaction handles the context. */
 export function seatNoResetMessage(reason: string, host: InteractiveResetHost = 'claude'): string {
-  return `NO-RESET: ${reason}. Continue your work; ${autoCompactionNotice(host)}`;
+  const next = host === 'antigravity' ? '.' : `; ${autoCompactionNotice(host)}`;
+  return `NO-RESET: ${reason}. Continue your work${next}`;
 }

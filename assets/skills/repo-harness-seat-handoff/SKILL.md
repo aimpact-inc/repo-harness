@@ -20,7 +20,6 @@ skill copies neither.
      `repo-harness-orchestrator` or `repo-harness-advisor`.
    - `seat_session_unknown` or `seat_context_unknown`: the SessionStart record or the
      transcript is not readable.
-3. Follow the printed steps exactly, in order, then end your turn. The peer seat checks
-   the handoff with `rh seats reset`, types the action that the steps name
-   (`/compact` below a 32 MiB transcript, `/clear` at or above it) and sends the
-   resume prompt.
+3. Follow the printed steps in order, then end your turn. The peer seat runs
+   `rh seats reset` to check the handoff, carry out the action in the printed steps,
+   and send the resume prompt.

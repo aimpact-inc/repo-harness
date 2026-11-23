@@ -1,5 +1,5 @@
 /** Stop publishes the evidence checkpoint and reports notices; it never grants publication permission. */
-import { ANTIGRAVITY_HANDOFF, HOST_ADAPTERS } from './host-adapter';
+import { HOST_ADAPTERS } from './host-adapter';
 import { readAntigravityTranscript } from '../../effects/board/antigravity-transcript';
 import { collectArchitectureNotice } from './hook-protocol';
 import { collectProtectedPathNotice } from './protected-path-notice';
@@ -8,7 +8,7 @@ import type { StateInputCollector } from '../../effects/loop/state-input-collect
 import { resolveCapabilityOwnership } from '../../effects/state/resolve-effective-state';
 import { payloadString, payloadValue, type HookIdentity, type HookPayload } from './hook-input';
 import { SEAT_RESET_CONTEXT_TOKENS, seatResetAction, seatResetIdentity, seatResetReason } from '../../core/board/seat-reset';
-import { readTranscriptUsage, seatResetRequested, writeSeatResetRequest } from '../../effects/board/seat-reset';
+import { readTranscriptUsage, seatResetRequestState, writeSeatResetRequest } from '../../effects/board/seat-reset';
 
 export type StopCollector = Pick<StateInputCollector, 'getRepoRoot'>;
 
@@ -64,26 +64,26 @@ interface StopNotice {
 /**
  * A reset seat at the threshold records a request and asks for a handoff. Claude
  * asks once per session segment. Antigravity repeats an open request once per
- * user turn until the seat relaunches.
+ * user turn until the peer releases it or the seat starts a new segment.
  */
 function seatReset(payload: HookPayload, env: NodeJS.ProcessEnv, now: Date, handoff: 'compact-or-clear' | 'relaunch', host: HookIdentity['host']): { readonly block: StopHandlerResult } | { readonly notices: readonly StopNotice[] } {
   const relaunch = handoff === 'relaunch';
-  const resetHost = host === 'antigravity' ? 'antigravity' : host === 'pi' ? 'pi' : 'claude';
+  const resetHost = host === 'codex' ? 'claude' : host;
   try {
     const identity = seatResetIdentity(env);
     const transcript = payloadString(payload, 'transcript_path');
     if (identity === null || transcript === '') return { notices: [] };
-    const open = seatResetRequested(identity, transcript);
-    if (open && !relaunch) return { notices: [] };
+    const { state } = seatResetRequestState(identity, transcript);
+    if (state === 'released' || (state === 'open' && !relaunch)) return { notices: [] };
     const usage = relaunch
       ? readAntigravityTranscript(payloadString(payload, 'session_id'), transcript, env)
       : readTranscriptUsage(transcript);
     if (!usage || usage.contextTokens === null || usage.contextTokens < SEAT_RESET_CONTEXT_TOKENS) return { notices: [] };
     const { contextTokens, bytes } = usage;
-    const action = relaunch ? 'reset' : seatResetAction(bytes);
-    if (!open) writeSeatResetRequest(identity, now, { contextTokens, transcriptPath: transcript, transcriptBytes: bytes, action,
+    const action = seatResetAction(bytes, resetHost);
+    if (state === 'closed') writeSeatResetRequest(identity, now, { contextTokens, transcriptPath: transcript, transcriptBytes: bytes, action,
       host: resetHost });
-    const message = relaunch ? ANTIGRAVITY_HANDOFF : seatResetReason(identity, contextTokens, bytes, action, resetHost === 'pi' ? 'pi' : 'claude');
+    const message = seatResetReason(identity, contextTokens, bytes, action, resetHost);
     return { block: { exitCode: 2, stdout: '', stderr: `${message}\n` } };
   } catch (error) {
     return { notices: relaunch ? [] : [{ systemMessage: `repo-harness: seat reset skipped: ${(error as Error).message}` }] };

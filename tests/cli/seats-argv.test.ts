@@ -5,9 +5,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "os";
 import { basename, delimiter, dirname, join } from "path";
 import { AGY_READONLY_COMMAND_PREFIXES, AGY_WORKER_COMMAND_PREFIXES, agySeatCommandRules, agySeatLimits, buildSeatLaunch, seatPaneName } from "../../src/core/board/seat-launch";
-import { HANDOFF_SECTIONS, seatResetReason, seatResetSteps, type SeatResetIdentity } from "../../src/core/board/seat-reset";
+import { HANDOFF_SECTIONS, seatHandoffPath, seatResetReason, seatResetRelaunchPath, seatResetRequestPath, seatResetSteps } from "../../src/core/board/seat-reset";
 import { SeatResetError, readSeatSession, recordSeatSession, runSeatReset, type SeatRelaunch, type SeatResetNotify, type SeatResetOptions } from "../../src/effects/board/seat-reset";
-import { seatHandoff, seatResetLaunch } from "../../src/cli/commands/seats";
+import { seatHandoff, seatResetLaunch, seatResetTarget } from "../../src/cli/commands/seats";
 import { AGY_ADVISOR_SEAT_TOOLS, DEFAULT_SEATS_CONFIG, LAUNCH_SEAT_IDS, NATIVE_SEATS_PRESET, WORKER_SEAT_IDS, isCouncilSeat, isReviewSeat, isWorkerSeat } from "../../src/core/board/seats-settings";
 import { repoHarnessRepoIdFor } from "../../src/effects/repo-registry";
 import { classifyQuotaReading, decodeCodexRateLimitsResult } from "../../src/core/board/quota";
@@ -145,7 +145,7 @@ const AGY_WORKER_NO_GH = { ...NATIVE_SEATS_PRESET["worker-light"]!, effort: "hig
 const AGY_FALLBACK = { runtime: "agy", model: "gemini-4-hydrogen-high", advisor_model: null, effort: null, tools: ["net", "read", "shell"], fleet: [] } as const;
 
 type AgyFixture = {
-  home: string; cwd: string; agy: string; hooks: string; tab: string;
+  home: string; cwd: string; agy: string; hooks: string; tab: string; env: NodeJS.ProcessEnv;
   run: (args: string[], extra?: Record<string, string>) => ReturnType<typeof run>;
   configure: (advisor?: unknown, enabled?: boolean, overrides?: Record<string, unknown>) => void;
   catalog: (models: AgyCatalogFixture, version?: string, quota?: { gemini: number; other: number }) => void;
@@ -202,7 +202,7 @@ console.log(JSON.stringify({ tab: 'tb1', terminal: 't9', args }));
       const result = spawnSync(process.execPath, [CLI, "seats", ...args], { cwd, env: { ...setup, ...extra }, encoding: "utf8", timeout: 40_000 });
       return { status: result.status, stdout: result.stdout, stderr: result.stderr };
     };
-    callback({ home, cwd, agy, hooks, tab, run, configure, catalog });
+    callback({ home, cwd, agy, hooks, tab, env: setup, run, configure, catalog });
   }));
 }
 
@@ -262,6 +262,8 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
         "command(ls)",
         "command(cat)",
         "command(rh seats council)",
+        "command(rh seats reset)",
+        "command(rh seats handoff)",
         "command(rh arch refactor decide)"
       ],
       "deny": [
@@ -286,7 +288,6 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
         "command(rh board closeout)",
         "command(rh board migrate-dependencies)",
         "command(rh seats launch)",
-        "command(rh seats reset)",
         "command(rh publication merge)",
         "command(rh review collect)",
         "command(rh review publish)",
@@ -311,6 +312,7 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     expect(profile).toContain("Edit only your own files under /tmp/rh-triage/");
     expect(profile).toContain("Never edit repository source.");
     expect(profile).toContain("Never read auth or credential files.");
+    expect(profile).toContain("Follow the handoff steps printed by the Stop hook or rh seats handoff");
     const unlabeled = f.run(["argv", "advisor", "--json"]);
     expect(unlabeled.status, unlabeled.stderr).toBe(0);
     expect(JSON.parse(unlabeled.stdout).argv).toEqual([...UNSET_SEAT, ...executable]);
@@ -347,6 +349,47 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
       "command(npm publish)", "command(bun publish)",
     ]);
   }));
+
+  test.each(["advisor", "orchestrator"] as const)("the generated agy %s profile can write and hash a handoff through its CLI", seat => withAgySeat(f => {
+    const advisor = { ...AGY_ADVISOR, tools: AGY_ADVISOR.tools.filter(tool => tool !== "edit") };
+    f.configure(advisor, true, { orchestrator: AGY_ORCHESTRATOR });
+    const repository = String(9_400_000_000 + process.pid * 10 + Number(seat === "advisor"));
+    const identity = { seat, repository };
+    const handoff = seatHandoffPath(identity);
+    const request = seatResetRequestPath(identity);
+    try {
+      const launch = f.run(["argv", seat, "--repository-id", repository, "--json"]);
+      expect(launch.status, launch.stderr).toBe(0);
+      const argv = agent(JSON.parse(launch.stdout));
+      const { permissions } = JSON.parse(argv[argv.indexOf("--settings") + 1]);
+      expect(permissions.allow).toContain("command(rh seats handoff)");
+      expect(permissions.deny).not.toContain("command(rh seats handoff)");
+      const profile = readFileSync(join(argv[argv.indexOf("--add-dir") + 1], ".agents", "agents", `rh-${seat}`, "agent.md"), "utf8");
+      expect(profile).not.toMatch(/^tools:.*\b(?:write_file|edit_file)\b/mu);
+      const env = { ...f.env, ...Object.fromEntries(argv.filter(value => /^REPO_HARNESS_SEAT(?:_REPOSITORY)?=/u.test(value)).map(value => value.split("="))) };
+      const transcript = join(f.home, ".gemini", "antigravity-cli", "brain", "handoff-fixture", ".system_generated", "logs", "transcript.jsonl");
+      mkdirSync(dirname(transcript), { recursive: true });
+      writeFileSync(transcript, '{"type":"PLANNER_RESPONSE","input_tokens":100}\n');
+      recordSeatSession(identity, { host: "antigravity", sessionId: "handoff-fixture", transcriptPath: transcript,
+        source: "startup", model: null, effort: null }, new Date(0));
+      writeFileSync(join(f.home, "bin", "rh"), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(CLI)} "$@"\n`, { mode: 0o755 });
+      const runHandoff = (command: string) => spawnSync("/bin/sh", ["-c", command], { env, cwd: f.cwd, encoding: "utf8" });
+      const steps = runHandoff("rh seats handoff");
+      expect(steps.status, steps.stderr).toBe(0);
+      const heredoc = steps.stdout.match(/rh seats handoff --write <<'RH_HANDOFF'\n[\s\S]*?\nRH_HANDOFF/u)?.[0];
+      expect(heredoc).toBeDefined();
+      const recorded = readFileSync(request, "utf8");
+      const command = heredoc!.replaceAll("<fill in>", "Current state includes a literal $(exit 9).");
+      const body = command.split("\n").slice(1, -1).join("\n") + "\n";
+      const write = runHandoff(command);
+      expect(write.status, write.stderr).toBe(0);
+      expect(readFileSync(handoff, "utf8")).toBe(body);
+      expect(write.stdout).toBe(`RESET-REQUEST ${handoff} ${createHash("sha256").update(body).digest("hex")}\n`);
+      expect(readFileSync(request, "utf8")).toBe(recorded);
+    } finally {
+      rmSync(dirname(dirname(handoff)), { recursive: true, force: true });
+    }
+  })());
 
   test.each(["missing", "unsupported", "signed out", "unknown", "model absent", "effort mismatch", "outside opt-in", "guard absent", "host disabled", "gatekeeper", "reviewer"])("agy refuses %s before any agent projection or tab", (branch) => withAgySeat(f => {
     let cwd = f.cwd;
@@ -399,6 +442,21 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     expect(readFileSync(join(directory, ".agents", "agents", "rh-advisor", "agent.md"), "utf8"))
       .toContain("tools: [view_file, run_command, search_web]\ninheritMcp: false");
     expect(readFileSync(cache, "utf8")).toBe(stale);
+  }));
+
+  test("builds an agy advisor relaunch in the existing shell", withAgySeat(f => {
+    const repository = "1186405141";
+    const source = join(import.meta.dir, "../../src/cli/commands/seats.ts");
+    const program = `import { seatResetLaunch } from ${JSON.stringify(source)};
+console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: "${repository}" }, process.env, process.cwd())));`;
+    const result = spawnSync(process.execPath, ["--eval", program], { cwd: f.cwd, env: f.env, encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    const { argv, model, runtime } = JSON.parse(result.stdout);
+    expect(runtime).toBe("agy");
+    expect(model).toBe("gemini-4-neon-high");
+    expect(argv.slice(0, 2)).toEqual(["/bin/sh", "-c"]);
+    expect(argv).toEqual(expect.arrayContaining([f.agy, "rh-advisor", `REPO_HARNESS_SEAT_REPOSITORY=${repository}`]));
+    expect(existsSync(f.tab)).toBe(false);
   }));
 
   test("agy advisor checks the quota-selected model in its native catalog", withAgySeat(f => {
@@ -672,6 +730,12 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
       const output = `${prefix} --output=/tmp/existing-user-file`;
       expect(allow.some(rule => prefix.startsWith(rule) || output.startsWith(rule)), output).toBe(false);
     }
+  });
+
+  test("a native agy council cannot invoke the advisor's reset commands", () => {
+    const { allow, deny } = agySeatCommandRules("council", AGY_FALLBACK);
+    expect(deny).toContain("rh seats reset");
+    expect(["rh seats reset", "rh seats handoff"].some(command => allow.some(prefix => command.startsWith(prefix)))).toBe(false);
   });
 
   test("agySeatCommandRules refuses bare command names and mutation-capable prefixes across all allowed seats", () => {
@@ -1868,6 +1932,9 @@ describe("rh seats reset (#1972)", () => {
   let runs = 0;
   const ended = { ended: true, reason: "status", turn: 3, status: "idle" };
   const timeouts = { signalMs: 300, compactSignalMs: 300, evidenceMs: 300, exitMs: 300, pollMs: 20 };
+  type ResetInput = { path?: string; text?: string; sha256?: string; caller?: string; request?: boolean; fresh?: boolean; stale?: boolean; handoff?: boolean;
+    resolveLaunch?: SeatResetOptions["resolveLaunch"]; relaunch?: SeatResetOptions["relaunch"]; before?: () => void;
+    notify?: SeatResetNotify; action?: "compact" | "reset" | null; host?: "claude" | "pi" | "antigravity" };
   /**
    * A fake hc at the hc boundary: no real terminal is read or written. `/clear` writes the new-session signal of a new
    * transcript and `/compact` a compact record of the request transcript when `signal` is on, a relaunch line always writes it, `/exit` ends claude when `exit` is on, and every resume prompt
@@ -1877,8 +1944,8 @@ describe("rh seats reset (#1972)", () => {
    * `sendFail` refuses a send.
    */
   function withReset(fn: (f: { handoff: string; body: string; sha: (text: string) => string; state: (patch: Record<string, unknown>) => void;
-    reset: (input?: { path?: string; text?: string; sha256?: string; caller?: string; request?: boolean; stale?: boolean; handoff?: boolean; relaunch?: SeatResetOptions["relaunch"]; before?: () => void; notify?: SeatResetNotify; action?: "compact" | "reset" | null }) => Promise<unknown>;
-    home: string; sends: () => string[]; calls: () => string[]; log: () => { kind: string; detail: string; notice: string; requested_at: string }[] }) => Promise<void>, seat: "advisor" | "orchestrator" = "advisor") {
+    reset: (input?: ResetInput) => Promise<unknown>;
+    home: string; relaunchPath: () => string; sends: () => string[]; calls: () => string[]; log: () => { kind: string; detail: string; notice: string; requested_at: string }[] }) => Promise<void>, seat: "advisor" | "orchestrator" = "advisor") {
     return async () => {
       const home = mkdtempSync(join(tmpdir(), "seats-reset-"));
       // The handoff path is fixed under /tmp; a repository id per run keeps the runs apart.
@@ -1896,7 +1963,14 @@ fs.appendFileSync("${home}/calls.log", [cmd, ...rest].join(" ") + "\\n");
 const out = value => process.stdout.write(JSON.stringify(value));
 const session = (transcript, source = "clear") => fs.writeFileSync("${dir}/session.json", JSON.stringify({ session_id: "s", transcript_path: transcript, source, started_at: new Date().toISOString(), ...(st.host ? { host: st.host } : {}) }));
 if (cmd === "ls") out({ terminals: st.terminals });
-if (cmd === "get") out({ address: rest.at(-1), state: "live", labels: rest.at(-1) === "t2" ? st.callerLabels : { "repo-harness.seat": "${seat}", "repo-harness.repository": "${repository}" }, turn: 3, cwd: st.cwd, pid: st.pid ?? 1, status: st.status, foreground: { pid: 2, name: st.foreground, argv: [], cwd: "/" } });
+if (cmd === "get") {
+  const peer = rest.at(-1) === "t2";
+  const state = peer ? "live" : st.requesterState ?? "live";
+  out({ address: rest.at(-1), state, labels: peer ? st.callerLabels : { "repo-harness.seat": "${seat}", "repo-harness.repository": "${repository}" },
+    turn: st.turn ?? 3, cwd: st.cwd, pid: st.pid ?? 1, status: st.status, foreground: state === "finished" ? null : {
+      pid: st.foreground === "zsh" ? st.pid ?? 1 : 2, name: st.foreground, argv: [st.foreground === "node" ? "pi" : st.foreground], cwd: "/",
+    } });
+}
 // wait is one result, or a sequence: the last result answers every later call.
 // Wait number waitDelayAt (from 1) answers after waitDelayMs, as a message that arrives late does.
 if (cmd === "wait") {
@@ -1910,10 +1984,17 @@ if (cmd === "keys") {
   if ((line === "/clear" || line === "/new") && st.signal) session("${home}/cleared.jsonl");
   if ((line === "/clear" || line === "/new") && st.untrackOnClear) st.status = null;
   if (line === "/compact" && st.signal) session("${home}/old.jsonl", "compact");
-  if ((line === "/exit" || line === "/quit") && st.exit) st.foreground = "zsh";
+  if (line === "/exit" || line === "/quit") {
+    if (!fs.readdirSync("${dir}").some(name => name.startsWith("claim-"))) process.exit(1);
+    if (st.exit) st.foreground = st.exitForeground ?? "zsh";
+  }
   if (line.startsWith("sh ")) {
-    st.foreground = st.host === "pi" ? "pi" : "claude";
-    session("${home}/relaunched.jsonl");
+    st.foreground = st.host === "antigravity" ? "agy" : st.host === "pi" ? "pi" : "claude";
+    if (st.host === "antigravity") {
+      const logs = "${home}/.gemini/antigravity-cli/brain/s/.system_generated/logs";
+      fs.mkdirSync(logs, { recursive: true });
+      session(logs + "/transcript.jsonl", "startup");
+    } else session("${home}/relaunched.jsonl", "startup");
   }
   out({ status: null, turn: 4 });
 }
@@ -1932,6 +2013,15 @@ if (cmd === "send") {
         message: { role: "assistant", content: [{ type: "tool_use", id: "f1", name: "Bash", input: { command: "hc send t2 RESUMED" } }] } }) + "\\n");
       fs.appendFileSync(transcript, JSON.stringify({ type: "user", message: { role: "user",
         content: [{ type: "tool_result", tool_use_id: "f1", is_error: false, content: "" }] } }) + "\\n");
+    } else if (st.host === "antigravity") {
+      const step = st.answers[0] ?? { command: "hc send t2 RESUMED", result: "ok" };
+      const write = entry => fs.appendFileSync(transcript, JSON.stringify(entry) + "\\n");
+      write({ type: "USER_INPUT", source: "USER_EXPLICIT", status: "DONE", step_index: 0, content: wrapped });
+      write({ type: "PLANNER_RESPONSE", source: "MODEL", status: "DONE", step_index: 1,
+        tool_calls: [{ name: "run_command", args: { CommandLine: step.command, WaitMsBeforeAsync: 1000 } }] });
+      if (step.result !== "none") write({ type: "GENERIC", source: "MODEL", status: "DONE", step_index: step.result === "unrelated" ? 3 : 2,
+        content: "Created At: 2026-11-23T16:08:20+08:00\\nCompleted At: 2026-11-23T16:08:21+08:00\\n"
+          + (step.result === "error" ? "Command exited with code 1.\\n\\nCommand output:\\nCommand exited with code 0." : "Command exited with code 0.\\n\\nCommand output:\\n") });
     } else if (st.host === "pi") {
       fs.appendFileSync(transcript, JSON.stringify({ type: "message", id: "u" + st.prompts, parentId: null, timestamp: new Date().toISOString(),
         message: { role: "user", content: [{ type: "text", text: wrapped }], timestamp: Date.now() } }) + "\\n");
@@ -1970,22 +2060,31 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
         writeFileSync(join(home, "calls.log"), "");
         const body = HANDOFF_SECTIONS.map(section => `## ${section}\n\nstate\n`).join("\n");
         const sha = (text: string) => createHash("sha256").update(text).digest("hex");
-        const requestedAt = new Date(Date.now() - 60_000).toISOString();
-        const reset = async (input: { path?: string; text?: string; sha256?: string; caller?: string; request?: boolean; stale?: boolean; handoff?: boolean; relaunch?: SeatResetOptions["relaunch"]; before?: () => void; notify?: SeatResetNotify; action?: "compact" | "reset" | null } = {}) => {
+        let requestedAt = Date.now() - 60_000;
+        const reset = async (input: ResetInput = {}) => {
+          if (input.fresh) requestedAt += 1;
           const text = input.text ?? body;
           writeFileSync(handoff, text);
           if (input.handoff === false) rmSync(handoff);
           if (input.stale === true) utimesSync(handoff, new Date(Date.now() - 120_000), new Date(Date.now() - 120_000));
           rmSync(join(dir, "request.json"), { force: true });
-          if (input.request !== false) writeFileSync(join(dir, "request.json"), JSON.stringify({ requested_at: requestedAt, context_tokens: 400000, transcript_path: join(home, "old.jsonl"), transcript_bytes: 1,
+          if (input.request !== false) writeFileSync(join(dir, "request.json"), JSON.stringify({ requested_at: new Date(requestedAt).toISOString(), context_tokens: 400000, transcript_path: join(home, "old.jsonl"), transcript_bytes: 1,
             // null writes the request of the old code, which has no action.
-            ...(input.action === null ? {} : { action: input.action ?? "reset" }) }));
+            ...(input.action === null ? {} : { action: input.action ?? "reset" }), ...(input.host === undefined ? {} : { host: input.host }) }));
+          const host = input.host ?? (current.host === "pi" ? "pi" : "claude");
+          if (!existsSync(join(dir, "session.json"))) {
+            recordSeatSession({ seat, repository }, { host, sessionId: "old", transcriptPath: join(home, "old.jsonl"),
+              source: "startup", model: null, effort: null }, new Date(0));
+          }
           const { HERDR_ENV: _nested, ...base } = process.env;
           input.before?.();
+          const runtime = host === "antigravity" ? "agy" : host;
           try {
             return await runSeatReset(input.path ?? handoff, input.sha256 ?? sha(text), {
               env: { ...base, HOME: home, REPO_HARNESS_HOME: join(home, ".repo-harness"), HC_TERMINAL_ID: input.caller ?? "t2", PATH: `${join(home, "bin")}:/bin:/usr/bin` },
-              timeouts, notify: input.notify, relaunch: input.relaunch ?? (async () => ({ argv: ["/bin/sh", "-c", "exec claude", "x y"], model: "fable", effort: "high", modeKnown: true })),
+              timeouts, notify: input.notify,
+              resolveLaunch: input.resolveLaunch ?? (() => ({ runtime, model: async () => ({ model: "fable", effort: "high", modeKnown: true }) })),
+              relaunch: input.relaunch ?? (async () => ({ argv: ["/bin/sh", "-c", `exec ${runtime}`, "x y"], runtime, model: "fable", effort: "high", modeKnown: true })),
             });
           } catch (error) {
             return { error: (error as SeatResetError).code, outcome: (error as SeatResetError).outcome };
@@ -1997,7 +2096,8 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
           : line.slice("keys -- t5 ".length).split(" ").filter(key => key !== "enter").map(key => (key === "space" ? " " : key)).join("")));
         const log = () => existsSync(join(dir, "reset-log.jsonl"))
           ? readFileSync(join(dir, "reset-log.jsonl"), "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line)) : [];
-        await fn({ home, handoff, body, sha, state, reset, sends, calls, log });
+        const relaunchPath = () => seatResetRelaunchPath({ seat, repository }, new Date(requestedAt).toISOString());
+        await fn({ home, handoff, body, sha, state, reset, sends, calls, log, relaunchPath });
       } finally {
         chmodSync(dir, 0o700);
         rmSync(join("/tmp/repo-harness-seats", repository), { recursive: true, force: true });
@@ -2005,33 +2105,235 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
       }
     };
   }
-  const prompt = (handoff: string) => `You are advisor. Read ${handoff}, then run the Bash command \`hc send t2 RESUMED\` alone, then check the current state with git/gh and continue.`;
+  const prompt = (handoff: string, seat = "advisor") => `You are ${seat}. Read ${handoff}, then run the Bash command \`hc send t2 RESUMED\` alone, then check the current state with git/gh and continue.`;
+  const agyStatus = { state: "done", app: "antigravity" };
 
-  test.each(['request', 'agy foreground', 'unknown foreground'])("an agy or untracked advisor reset refuses before keys or claims (%s)", branch => withReset(async ({ reset, state, handoff, sends }) => {
-    if (branch === 'agy foreground') state({ foreground: 'agy', status: { state: 'done', app: 'antigravity' } });
-    if (branch === 'unknown foreground') state({ foreground: 'unknown', status: null });
-    const directory = dirname(handoff);
-    const before = () => {
-      if (branch !== 'request') return;
-      const request = join(directory, 'request.json');
-      writeFileSync(request, JSON.stringify({ ...JSON.parse(readFileSync(request, 'utf8')), host: 'antigravity' }));
-    };
-    expect(await reset({ before })).toEqual({ error: 'seat_reset_runtime_unsupported', outcome: 'nothing_sent' });
+  test.each([
+    ["antigravity", "agy", "reset"], ["claude", "claude", "reset"], ["pi", "pi", "compact"],
+  ] as const)("a %s %s foreground refuses a configured runtime change on %s", (host, foreground, action) => withReset(async ({ handoff, reset, state, sends, log, relaunchPath }) => {
+    state({ foreground, host });
+    const runtime = host === "antigravity" ? "claude" : "agy";
+    const model = () => { throw new Error("Unexpected model probe"); };
+    const relaunch = () => { throw new Error("Unexpected destination probe"); };
+    expect(await reset({ host, action, resolveLaunch: () => ({ runtime, model }), relaunch })).toEqual({
+      error: "seat_reset_runtime_changed", outcome: "nothing_sent",
+    });
+    expect(log().at(-1)).toMatchObject({ kind: "seat_reset_runtime_changed", detail: expect.stringContaining("rh seats launch advisor") });
     expect(sends()).toEqual([]);
-    expect(readdirSync(directory).some(name => name.startsWith('claim-'))).toBe(false);
+    expect(existsSync(relaunchPath())).toBe(false);
+    expect(readdirSync(dirname(handoff)).some(name => name.startsWith("claim-"))).toBe(false);
   })());
 
-  test("an agy handoff refuses before reading the transcript as Claude", withReset(async ({ handoff }) => {
-    const directory = dirname(handoff);
-    writeFileSync(join(directory, 'session.json'), JSON.stringify({ host: 'antigravity', session_id: 'test',
-      transcript_path: join(directory, 'missing.jsonl'), source: 'startup', started_at: new Date().toISOString() }));
-    expect(() => seatHandoff({ REPO_HARNESS_SEAT: 'advisor', REPO_HARNESS_SEAT_REPOSITORY: basename(dirname(directory)) }))
-      .toThrow(expect.objectContaining({ code: 'seat_reset_runtime_unsupported' }));
+  test.each([false, true])("an agy relaunch refuses a runtime change during preparation (launch failed: %s)", launchFailed => withReset(async ({ reset, state, sends }) => {
+    state({ foreground: "agy", host: "antigravity", status: agyStatus });
+    let runtime: "agy" | "pi" = "agy";
+    const resolveLaunch = () => ({ runtime, model: async () => ({ model: null, effort: null, modeKnown: true }) });
+    const relaunch = async (): Promise<SeatRelaunch> => {
+      runtime = "pi";
+      if (launchFailed) throw new Error("The launch executable is unavailable.");
+      return { argv: ["agy"], runtime: "agy", model: null, effort: null, modeKnown: true };
+    };
+    expect(await reset({ host: "antigravity", resolveLaunch, relaunch })).toEqual({ error: "seat_reset_runtime_changed", outcome: "nothing_sent" });
+    expect(sends()).toEqual([]);
+  })());
+
+  test("a Pi runtime change during a failed quota check refuses /new", withReset(async ({ home, handoff, reset, state, sends, log }) => {
+    const identity = { seat: "advisor", repository: basename(dirname(dirname(handoff))) } as const;
+    recordSeatSession(identity, { host: "pi", sessionId: "old", transcriptPath: join(home, "old.jsonl"), source: "startup",
+      model: "old", effort: null }, new Date(0));
+    state({ foreground: "pi", host: "pi" });
+    let runtime: "pi" | "agy" = "pi";
+    const resolveLaunch = () => ({ runtime, model: async () => {
+      runtime = "agy";
+      throw new Error("The seat account is exhausted.");
+    } });
+    expect(await reset({ host: "pi", resolveLaunch })).toEqual({ error: "seat_reset_runtime_changed", outcome: "nothing_sent" });
+    expect(log().map(({ kind }) => kind)).toEqual(["model_check_failed", "seat_reset_runtime_changed"]);
+    expect(sends()).toEqual([]);
+    expect(readdirSync(dirname(handoff)).some(name => name.startsWith("claim-"))).toBe(false);
   }));
 
-  test("a pi advisor with foreground 'pi' and host 'pi' resets with /new and relaunches with /quit on Pi JSONL transcripts", withReset(async ({ home, handoff, reset, state, calls, sends, log }) => {
+  test("a Claude reset checks the configured runtime when hc reports no checkout", withReset(async ({ reset, state, sends }) => {
+    state({ cwd: null });
+    const resolveLaunch = () => ({ runtime: "pi" as const, model: async () => { throw new Error("Unexpected model probe"); } });
+    expect(await reset({ resolveLaunch })).toEqual({ error: "seat_reset_runtime_changed", outcome: "nothing_sent" });
+    expect(sends()).toEqual([]);
+  }));
+
+  test("overlapping agy preparations keep each claimed request's relaunch script separate", withReset(async ({ handoff, reset, state, sends, relaunchPath }) => {
+    state({ foreground: "agy", host: "antigravity", status: agyStatus });
+    const olderEntered = Promise.withResolvers<void>();
+    const newerEntered = Promise.withResolvers<void>();
+    const older = Promise.withResolvers<SeatRelaunch>();
+    const newer = Promise.withResolvers<SeatRelaunch>();
+    const oldScript = relaunchPath();
+    const first = reset({ host: "antigravity", relaunch: () => {
+      olderEntered.resolve();
+      return older.promise;
+    } });
+    await Promise.race([olderEntered.promise, first.then(result => { throw new Error(`Older run stopped before preparation: ${JSON.stringify(result)}`); })]);
+    const second = reset({ host: "antigravity", fresh: true, relaunch: () => {
+      newerEntered.resolve();
+      return newer.promise;
+    } });
+    await Promise.race([newerEntered.promise, second.then(result => { throw new Error(`Newer run stopped before preparation: ${JSON.stringify(result)}`); })]);
+    const newScript = relaunchPath();
+    const plan = { runtime: "agy", model: null, effort: null, modeKnown: true } as const;
+    newer.resolve({ ...plan, argv: ["agy", "--model", "new"] });
+    expect(await second).toMatchObject({ relaunched: true });
+    older.resolve({ ...plan, argv: ["agy", "--model", "old"] });
+    expect(await first).toEqual({ error: "request_closed", outcome: "nothing_sent" });
+    expect(sends()).toEqual(["/exit", `sh ${newScript}`, prompt(handoff)]);
+    expect(readFileSync(newScript, "utf8")).toBe("exec agy --model new\n");
+    expect(readFileSync(oldScript, "utf8")).toBe("exec agy --model old\n");
+  }));
+
+  test("an agy requester stays running when agy is unavailable on the launch PATH", withReset(async ({ home, reset, state, sends, log }) => {
+    mkdirSync(join(home, ".repo-harness"));
+    writeFileSync(join(home, ".repo-harness", "config.json"), JSON.stringify({
+      agents: { enabled: ["antigravity"], uses: { docs: [], review: [] }, default_docs: null },
+      seats: { ...DEFAULT_SEATS_CONFIG, advisor: AGY_ADVISOR },
+    }));
+    state({ foreground: "agy", host: "antigravity", status: agyStatus });
+    const env = { ...registryEnv(home), PATH: join(home, "bin") };
+    const relaunch: SeatResetOptions["relaunch"] = (identity, cwd) => seatResetLaunch(identity, env, cwd);
+    expect(await reset({ host: "antigravity", resolveLaunch: identity => seatResetTarget(identity, env), relaunch })).toEqual({
+      error: "seat_reset_destination_unavailable", outcome: "nothing_sent",
+    });
+    expect(sends()).toEqual([]);
+    expect(log().at(-1)).toMatchObject({ kind: "relaunch_failed", detail: expect.stringContaining("Install agy before launching") });
+  }));
+
+  test("an agy relaunch refuses when its SessionStart record is missing", withReset(async ({ handoff, reset, state, sends }) => {
+    state({ foreground: "agy", host: "antigravity", status: agyStatus });
+    const before = () => rmSync(join(dirname(handoff), "session.json"));
+    expect(await reset({ host: "antigravity", before })).toEqual({ error: "seat_reset_session_unconfirmed", outcome: "nothing_sent" });
+    expect(sends()).toEqual([]);
+  }));
+
+  test.each([["antigravity", "agy"], ["claude", "claude"], ["pi", "pi"]] as const)(
+    "a new session during %s launch preparation prevents direct relaunch keys", (host, runtime) => withReset(async ({ home, handoff, reset, state, sends }) => {
+      const identity = { seat: "advisor", repository: basename(dirname(dirname(handoff))) } as const;
+      const session = { sessionId: "s", host, transcriptPath: join(home, "old.jsonl"), source: "startup", model: "old", effort: null } as const;
+      recordSeatSession(identity, session, new Date(0));
+      state({ foreground: runtime, host });
+      const relaunch = async () => {
+        recordSeatSession(identity, { ...session, sessionId: "new", transcriptPath: join(home, "new.jsonl") }, new Date());
+        return { argv: [runtime], runtime, model: "new", effort: null, modeKnown: true };
+      };
+      expect(await reset({ host, relaunch })).toEqual({ error: "request_closed", outcome: "no_reset" });
+      expect(sends()).toEqual([expect.stringMatching(/^NO-RESET: a session segment started/u)]);
+    })());
+
+  test("an agy relaunch refuses a handoff rewritten during destination preparation", withReset(async ({ handoff, reset, state, sends }) => {
+    state({ foreground: "agy", host: "antigravity", status: agyStatus });
+    const relaunch = async (): Promise<SeatRelaunch> => {
+      expect(readdirSync(dirname(handoff)).some(name => name.startsWith("claim-"))).toBe(true);
+      writeFileSync(handoff, "## Changed after validation\n");
+      return { argv: ["agy"], runtime: "agy", model: null, effort: null, modeKnown: true };
+    };
+    expect(await reset({ host: "antigravity", relaunch })).toEqual({ error: "handoff_sha256_mismatch", outcome: "nothing_sent" });
+    expect(sends()).toEqual([]);
+    expect(readdirSync(dirname(handoff)).some(name => name.startsWith("claim-"))).toBe(false);
+  }));
+
+  test("a requester that exits during launch preparation is reported as exited", withReset(async ({ reset, state, sends }) => {
+    state({ foreground: "agy", host: "antigravity", status: agyStatus });
+    const relaunch = async (): Promise<SeatRelaunch> => {
+      state({ requesterState: "finished", status: null });
+      return { argv: ["agy"], runtime: "agy", model: null, effort: null, modeKnown: true };
+    };
+    expect(await reset({ host: "antigravity", relaunch })).toEqual({ error: "requester_exited", outcome: "nothing_sent" });
+    expect(sends()).toEqual([]);
+  }));
+
+  test("an agy request can retry after a blocked turn refuses the exit command", withReset(async ({ handoff, reset, state, sends, relaunchPath }) => {
+    state({ foreground: "agy", host: "antigravity", status: agyStatus, wait: { ...ended, status: "blocked" } });
+    expect(await reset({ host: "antigravity" })).toEqual({ error: "requester_busy", outcome: "nothing_sent" });
+    expect(sends()).toEqual([]);
+    expect(readdirSync(dirname(handoff)).some(name => name.startsWith("claim-"))).toBe(false);
+    state({ wait: ended });
+    expect(await reset({ host: "antigravity" })).toEqual({ requester: "t5", seat: "advisor", relaunched: true, logErrors: [] });
+    expect(sends()).toEqual(["/exit", `sh ${relaunchPath()}`, prompt(handoff)]);
+    expect(await reset({ host: "antigravity" })).toEqual({ error: "already_claimed", outcome: "nothing_sent" });
+  }));
+
+  test.each([
+    ["claude", { turn: ended.turn + 1 }],
+    ["pi", { status: { state: "blocked", app: "pi" } }],
+  ] as const)("an in-process %s reset rechecks the requester after model resolution", (host, change) => withReset(async ({ home, handoff, reset, state, calls, sends }) => {
+    const identity = { seat: "advisor", repository: basename(dirname(dirname(handoff))) } as const;
+    recordSeatSession(identity, { sessionId: "s", host, transcriptPath: join(home, "old.jsonl"), source: "startup", model: "same", effort: null }, new Date(0));
+    state({ foreground: host, host });
+    const resolveLaunch = () => ({ runtime: host, model: async () => {
+      state(change);
+      return { model: "same", effort: null, modeKnown: true };
+    } });
+    expect(await reset({ host, resolveLaunch })).toEqual({ error: "requester_busy", outcome: "nothing_sent" });
+    expect(calls()).toHaveLength(1);
+    expect(sends()).toEqual([]);
+  })());
+
+  test("an agy orchestrator relaunches in the same pane and verifies RESUMED", withReset(async ({ handoff, reset, state, sends, log, relaunchPath }) => {
+    state({ foreground: "agy", host: "antigravity", status: agyStatus });
+    expect(await reset({ host: "antigravity" })).toEqual({ requester: "t5", seat: "orchestrator", relaunched: true, logErrors: [] });
+    expect(sends()).toEqual(["/exit", `sh ${relaunchPath()}`, prompt(handoff, "orchestrator")]);
+    expect(log()[0]).toMatchObject({ kind: "reset", detail: "relaunched" });
+  }, "orchestrator"));
+
+  test("an agy reset refuses an untracked requester and missing or stale handoffs without typing or retaining a claim", withReset(async ({ reset, state, handoff, calls }) => {
+    state({ foreground: "agy", status: null });
+    expect(await reset({ host: "antigravity" })).toEqual({ error: "requester_status_untracked", outcome: "nothing_sent" });
+    expect(calls()).toEqual([]);
+    state({ status: agyStatus });
+    expect(await reset({ host: "antigravity", handoff: false })).toEqual({ error: "handoff_missing", outcome: "rewrite_requested" });
+    expect(await reset({ host: "antigravity", stale: true })).toEqual({ error: "handoff_stale", outcome: "rewrite_requested" });
+    expect(calls().every(line => line.startsWith("send "))).toBe(true);
+    expect(readdirSync(dirname(handoff)).some(name => name.startsWith("claim-"))).toBe(false);
+  }));
+
+  test("an agy reset does not type a command into a different foreground process", withReset(async ({ reset, state, sends }) => {
+    state({ foreground: "agy", host: "antigravity", status: agyStatus });
+    const relaunch = async (): Promise<SeatRelaunch> => {
+      state({ foreground: "claude" });
+      return { argv: ["agy"], runtime: "agy", model: null, effort: null, modeKnown: true };
+    };
+    expect(await reset({ host: "antigravity", relaunch })).toEqual({ error: "seat_reset_runtime_unsupported", outcome: "nothing_sent" });
+    expect(sends()).toEqual([]);
+    state({ foreground: "agy", exitForeground: "helper" });
+    expect(await reset({ host: "antigravity" })).toEqual({ error: "resume_not_sent", outcome: "uncertain" });
+    expect(sends()).toEqual(["/exit"]);
+  }));
+
+  test.each([["hc send t2 RESUMED", "error"], ["hc send t2 RESUMED", "unrelated"], ["hc send t9 RESUMED", "ok"]])(
+    "an agy reset rejects unverified RESUMED evidence (%s, %s)", (command, result) => withReset(async ({ reset, state, log }) => {
+      state({ foreground: "agy", host: "antigravity", status: agyStatus, answers: [{ command, result }] });
+      expect(await reset({ host: "antigravity" })).toEqual({ error: "resume_not_sent", outcome: "uncertain" });
+      expect(log().at(-1)).toMatchObject({ kind: "relaunch_failed", detail: "no_evidence" });
+    })());
+
+  test.each([["advisor", "antigravity-cli"], ["orchestrator", "antigravity"], ["orchestrator", "antigravity-ide"]] as const)(
+    "a %s handoff reads the %s transcript and records a relaunch", (seat, surface) => withReset(async ({ home, handoff }) => {
+      const directory = dirname(handoff);
+      const repository = basename(dirname(directory));
+      const identity = { seat, repository };
+      const env = { HOME: home, REPO_HARNESS_SEAT: seat, REPO_HARNESS_SEAT_REPOSITORY: repository };
+      const transcript = join(home, ".gemini", surface, "brain/test/.system_generated/logs/transcript.jsonl");
+      mkdirSync(dirname(transcript), { recursive: true });
+      writeFileSync(transcript, `${JSON.stringify({ type: "PLANNER_RESPONSE", input_tokens: 100, cache_read_tokens: 20 })}\n`);
+      const session = { host: "antigravity", transcriptPath: transcript, source: "startup", model: null, effort: null } as const;
+      recordSeatSession(identity, { ...session, sessionId: null }, new Date(0));
+      expect(() => seatHandoff(env)).toThrow(expect.objectContaining({ code: "seat_context_unknown" }));
+      const request = join(directory, "request.json");
+      expect(existsSync(request)).toBe(false);
+      recordSeatSession(identity, { ...session, sessionId: "test" }, new Date(0));
+      expect(seatHandoff(env)).toBe(seatResetSteps(identity, "reset", "antigravity"));
+      expect(JSON.parse(readFileSync(request, "utf8"))).toMatchObject({ host: "antigravity", action: "reset", context_tokens: 120, transcript_path: transcript });
+    }, seat)());
+
+  test("a Pi advisor with foreground name node and argv[0] pi resets with /new and relaunches with /quit", withReset(async ({ home, handoff, reset, state, calls, sends, log, relaunchPath }) => {
     const directory = dirname(handoff);
-    state({ foreground: 'pi', host: 'pi', status: { state: 'done', app: 'pi' } });
+    state({ foreground: 'node', host: 'pi', status: { state: 'done', app: 'pi' } });
     const before = () => {
       const request = join(directory, 'request.json');
       writeFileSync(request, JSON.stringify({ ...JSON.parse(readFileSync(request, 'utf8')), host: 'pi' }));
@@ -2043,12 +2345,8 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     expect(log().map(({ kind, detail }) => [kind, detail])).toEqual([['reset', 'cleared']]);
 
     state({ signal: false });
-    const beforeRelaunch = () => {
-      for (const name of readdirSync(directory).filter(entry => entry.startsWith('claim-'))) rmSync(join(directory, name));
-      before();
-    };
-    expect(await reset({ before: beforeRelaunch })).toEqual({ requester: 't5', seat: 'advisor', relaunched: true, logErrors: [] });
-    const script = join(directory, 'relaunch.sh');
+    expect(await reset({ before, fresh: true })).toEqual({ requester: 't5', seat: 'advisor', relaunched: true, logErrors: [] });
+    const script = relaunchPath();
     expect(sends().slice(-7)).toEqual([...Array(4).fill('/new'), '/quit', `sh ${script}`, prompt(handoff)]);
     expect(log().at(-1)).toMatchObject({ kind: 'reset', detail: 'relaunched' });
   }));
@@ -2094,14 +2392,14 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     expect(calls()).toEqual(["wait --timeout 600 -- t5", "wait --timeout 600 -- t5", "keys -- t5 / c l e a r enter", `send -- t5 ${prompt(handoff)}`]);
   }));
 
-  test("a message to the caller during the relaunch wait gets the rest of the budget and the relaunch goes on (#2326)", withReset(async ({ handoff, reset, state, calls, sends }) => {
+  test("a message to the caller during the relaunch wait gets the rest of the budget and the relaunch goes on (#2326)", withReset(async ({ handoff, reset, state, calls, sends, relaunchPath }) => {
     state({ signal: false, waitDelayAt: 2, waitDelayMs: 1200, wait: [ended, { ...ended, ended: false, reason: "message" }, ended] });
     expect(await reset()).toEqual({ requester: "t5", seat: "advisor", relaunched: true, logErrors: [] });
     const waits = calls().filter(line => line.startsWith("wait "));
     // The first wait of the relaunch ends on a message to the caller; the second gets the rest of the 600 s budget.
     const rest = Number(waits[2]?.split(" ")[2]);
     expect([waits.length, waits[1], rest !== undefined && rest > 590 && rest < 600]).toEqual([3, "wait --timeout 600 -- t5", true]);
-    const script = join(dirname(handoff), "relaunch.sh");
+    const script = relaunchPath();
     expect(sends()).toEqual([...Array(4).fill("/clear"), "/exit", `sh ${script}`, prompt(handoff)]);
   }));
 
@@ -2127,7 +2425,7 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     expect(sends()).toEqual(["/clear", expect.stringContaining("You are orchestrator.")]);
   }, "orchestrator"));
 
-  test("a failed handoff check asks for 3 rewrites of one request, then tells the requester to continue", withReset(async ({ reset, sha, body, state, sends, log }) => {
+  test("after three rewrites and NO-RESET, a delayed corrected handoff sends no keys or messages", withReset(async ({ handoff, reset, sha, body, state, sends, log }) => {
     state({ sendFail: true });
     expect(await reset({ handoff: false })).toEqual({ error: "message_not_sent", outcome: "uncertain" });
     state({ sendFail: false });
@@ -2145,6 +2443,25 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
       ["message_not_sent", expect.stringContaining("The rewrite message to t5 failed"), "not_configured"], ["rewrite", "handoff_missing", "not_configured"], ["rewrite", "handoff_stale", "not_configured"],
       ["rewrite", "handoff_sha256_mismatch", "not_configured"], ["no_reset", "handoff_sections_missing", "not_configured"],
     ]);
+    const released = log().at(-1)!;
+    const beforeRetry = sends();
+    state({ turn: ended.turn + 1, wait: { ...ended, turn: ended.turn + 1 } });
+    expect(await reset({ sha256: sha(body) })).toEqual({ error: "request_released", outcome: "nothing_sent" });
+    expect(log().at(-1)?.requested_at).toBe(released.requested_at);
+    expect(sends()).toEqual(beforeRetry);
+    expect(readdirSync(dirname(handoff)).some(name => name.startsWith("claim-"))).toBe(false);
+  }));
+
+  test("a release recorded during agy launch preparation stops the first key", withReset(async ({ handoff, reset, state, sends }) => {
+    state({ foreground: "agy", host: "antigravity", status: agyStatus });
+    const relaunch = async (): Promise<SeatRelaunch> => {
+      const directory = dirname(handoff);
+      const { requested_at } = JSON.parse(readFileSync(join(directory, "request.json"), "utf8"));
+      writeFileSync(join(directory, "reset-log.jsonl"), `${JSON.stringify({ requested_at, kind: "no_reset", detail: "handoff_sections_missing" })}\n`);
+      return { argv: ["agy"], runtime: "agy", model: null, effort: null, modeKnown: true };
+    };
+    expect(await reset({ host: "antigravity", relaunch })).toEqual({ error: "request_released", outcome: "nothing_sent" });
+    expect(sends()).toEqual([]);
   }));
 
   test("with a notify config, the plugin notice port gets one call per failure", withReset(async ({ home, reset, log }) => {
@@ -2183,10 +2500,10 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     expect([sends(), log().map(({ kind, detail }) => [kind, detail])]).toEqual([["/compact"], [["resume", "no_signal"]]]);
   }));
 
-  test("a session segment newer than the request types no command and releases the requester with NO-RESET (#2625)", withReset(async ({ home, handoff, reset, calls, log }) => {
+  test("a session segment newer than the request sends NO-RESET before any key", withReset(async ({ home, handoff, reset, calls, log }) => {
     const segment = () => writeFileSync(join(dirname(handoff), "session.json"), JSON.stringify({ session_id: "s", transcript_path: join(home, "old.jsonl"), source: "compact", started_at: new Date().toISOString() }));
     expect(await reset({ action: "compact", before: segment })).toEqual({ error: "request_closed", outcome: "no_reset" });
-    expect(calls()).toEqual(["wait --timeout 600 -- t5", expect.stringMatching(/^send -- t5 NO-RESET: a session segment started after the reset request/u)]);
+    expect(calls()).toEqual([expect.stringMatching(/^send -- t5 NO-RESET: a session segment started/u)]);
     expect(log().map(({ kind, detail }) => [kind, detail])).toEqual([["no_reset", "request_closed"]]);
   }));
 
@@ -2200,16 +2517,16 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     expect(log().at(-1)).toMatchObject({ kind: "no_reset", detail: "request_invalid" });
   }));
 
-  test("an unanswered compact prompt is sent 3 more times, then the relaunch sends the prompt with the state check (#2625)", withReset(async ({ handoff, reset, state, sends, log }) => {
+  test("an unanswered compact prompt is sent 3 more times, then the relaunch sends the prompt with the state check (#2625)", withReset(async ({ handoff, reset, state, sends, log, relaunchPath }) => {
     state({ evidenceFrom: 5 });
     expect(await reset({ action: "compact" })).toEqual({ requester: "t5", seat: "advisor", relaunched: true, logErrors: [] });
-    expect(sends()).toEqual(["/compact", ...Array(4).fill(compactPrompt(handoff)), "/exit", `sh ${join(dirname(handoff), "relaunch.sh")}`, prompt(handoff)]);
+    expect(sends()).toEqual(["/compact", ...Array(4).fill(compactPrompt(handoff)), "/exit", `sh ${relaunchPath()}`, prompt(handoff)]);
     expect(log().map(({ kind, detail }) => [kind, detail])).toEqual([...Array(4).fill(["resume", "no_evidence"]), ["reset", "relaunched"]]);
   }));
 
   test("a claim that cannot be created types nothing", withReset(async ({ handoff, reset, calls }) => {
     expect(await reset({ before: () => chmodSync(dirname(handoff), 0o500) })).toEqual({ error: "claim_failed", outcome: "nothing_sent" });
-    expect(calls()).toEqual(["wait --timeout 600 -- t5"]);
+    expect(calls()).toEqual([]);
   }));
 
   test("a reset log that cannot be written still ends the retries after 3 in the run and is reported", withReset(async ({ handoff, reset, state, sends }) => {
@@ -2226,10 +2543,10 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     expect([sends(), log().map(({ kind, detail }) => [kind, detail])]).toEqual([["/clear", prompt(handoff), prompt(handoff)], [["resume", "no_evidence"], ["reset", "cleared"]]]);
   }));
 
-  test("a prompt that is never answered with RESUMED is sent 3 more times, then the requester is relaunched", withReset(async ({ handoff, reset, state, sends, log }) => {
+  test("a prompt that is never answered with RESUMED is sent 3 more times, then the requester is relaunched", withReset(async ({ handoff, reset, state, sends, log, relaunchPath }) => {
     state({ evidenceFrom: 5 });
     expect(await reset()).toEqual({ requester: "t5", seat: "advisor", relaunched: true, logErrors: [] });
-    expect(sends()).toEqual(["/clear", ...Array(4).fill(prompt(handoff)), "/exit", `sh ${join(dirname(handoff), "relaunch.sh")}`, prompt(handoff)]);
+    expect(sends()).toEqual(["/clear", ...Array(4).fill(prompt(handoff)), "/exit", `sh ${relaunchPath()}`, prompt(handoff)]);
     expect(log().map(({ kind, detail }) => [kind, detail])).toEqual([...Array(4).fill(["resume", "no_evidence"]), ["reset", "relaunched"]]);
   }));
 
@@ -2268,10 +2585,14 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     expect([sends(), log().map(({ kind, detail }) => [kind, detail])]).toEqual([["/clear", prompt(handoff), prompt(handoff)], [["resume", "no_evidence"], ["reset", "cleared"]]]);
   }));
 
-  test("no new-session signal types /clear again 3 times, then relaunches the requester from its seat argv in the same terminal", withReset(async ({ handoff, reset, state, sends, log }) => {
+  test("the relaunch after /clear retries uses the claimed handoff without repeating its digest check", withReset(async ({ handoff, reset, state, sends, log, relaunchPath }) => {
     state({ signal: false });
-    expect(await reset()).toEqual({ requester: "t5", seat: "advisor", relaunched: true, logErrors: [] });
-    const script = join(dirname(handoff), "relaunch.sh");
+    const relaunch = async () => {
+      writeFileSync(handoff, "## Updated during recovery\n");
+      return { argv: ["/bin/sh", "-c", "exec claude", "x y"], runtime: "claude" as const, model: "fable", effort: "high", modeKnown: true };
+    };
+    expect(await reset({ relaunch })).toEqual({ requester: "t5", seat: "advisor", relaunched: true, logErrors: [] });
+    const script = relaunchPath();
     expect(sends()).toEqual([...Array(4).fill("/clear"), "/exit", `sh ${script}`, prompt(handoff)]);
     expect(readFileSync(script, "utf8")).toBe("exec /bin/sh -c 'exec claude' 'x y'\n");
     expect(log().map(({ kind, detail }) => [kind, detail])).toEqual([...Array(4).fill(["resume", "no_signal"]), ["reset", "relaunched"]]);
@@ -2285,46 +2606,61 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
       "relaunch_argv_failed: The stored seats section needs a one-shot migration. Run rh update"]);
   }));
 
-  test("a reset from /tmp uses the requesting seat checkout to compare the effective model (#2633, #3279)", withReset(async ({ home, handoff, reset, state, sends, log }) => {
+  function resetLaunchFixture(home: string) {
+    const repo = realpathSync(home);
+    git(repo, "init", "-q");
+    const { CLAUDE_CONFIG_DIR: _claude, PI_CODING_AGENT_DIR: _pi, ...base } = process.env;
+    const bin = join(home, "bin");
+    const env = { ...base, ...registryEnv(home), PATH: `${bin}:/bin:/usr/bin` };
+    const advisor = { ...DEFAULT_SEATS_CONFIG.orchestrator, model: "fable", fleet: [] };
+    mkdirSync(join(home, ".repo-harness"), { recursive: true });
+    writeFileSync(join(home, ".repo-harness", "config.json"), JSON.stringify({ seats: { ...DEFAULT_SEATS_CONFIG, advisor } }));
+    const at = "2026-11-03T00:00:00.000Z";
+    writeFileSync(join(home, ".repo-harness", "registered-repos.json"), JSON.stringify({ version: 1, authorizationRevision: 0,
+      repos: [{ id: repoHarnessRepoIdFor(repo), path: repo, accessMode: "read_only", source: "manual", registeredAt: at, lastSeenAt: at, panePrefix: "rh" }] }));
+    const executable = join(bin, "claude");
+    writeFileSync(executable, `#!${process.execPath}
+if (process.argv[2] === "--version") console.log("2.1.319 (Claude Code)");
+else if (process.argv[2] === "auth") console.log(JSON.stringify({ loggedIn: true }));
+else require("node:readline").createInterface({ input: process.stdin }).on("line", line => {
+  const { request_id } = JSON.parse(line);
+  console.log(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id,
+    response: { models: [{ value: "opus" }, { value: "fable" }] } } }));
+});
+`, { mode: 0o755 });
+    return { env, repo, executable };
+  }
+
+  test("a reset from /tmp uses the requesting seat checkout to compare the effective model (#2633, #3279)", withReset(async ({ home, handoff, reset, state, sends, log, relaunchPath }) => {
     const dir = dirname(handoff);
-    // A session record of the launch model, older than the request; the claim of the earlier run is removed so the request runs again.
+    // Each fixture run records a distinct request and a session older than that request.
     const recorded = (model: string) => () => {
-      for (const name of readdirSync(dir).filter(entry => entry.startsWith("claim-"))) rmSync(join(dir, name));
       writeFileSync(join(dir, "session.json"), JSON.stringify({ session_id: "s", transcript_path: join(home, "old.jsonl"), source: "startup",
         started_at: new Date(Date.now() - 120_000).toISOString(), model, effort: "high" }));
     };
-    const failed = async (): Promise<SeatRelaunch> => { throw new Error("The seats section of the repo-harness configuration is not valid."); };
-    // The real launch of the default advisor: a registered checkout and a Claude capture older than 30 min (10% used,
-    // hyper if it were fresh). The stale reading gives the unknown mode, whose launch is opus high; it must not move a fable seat.
-    const repo = join(home, "repo");
-    mkdirSync(repo);
-    git(repo, "init", "-q");
-    git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init");
-    const at = "2026-11-03T00:00:00.000Z";
-    mkdirSync(join(home, ".repo-harness", "quota"), { recursive: true });
-    writeFileSync(join(home, ".repo-harness", "config.json"), JSON.stringify({
-      seats: { ...DEFAULT_SEATS_CONFIG, advisor: { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "claude", model: "fable", effort: "high", tools: ["mcp", "net", "read", "shell"] } },
-    }));
-    writeFileSync(join(home, ".repo-harness", "registered-repos.json"), JSON.stringify({ version: 1, authorizationRevision: 0,
-      repos: [{ id: repoHarnessRepoIdFor(realpathSync(repo)), path: realpathSync(repo), accessMode: "read_only", source: "manual", registeredAt: at, lastSeenAt: at, panePrefix: "rh" }] }));
+    const failed: SeatResetOptions["resolveLaunch"] = () => ({ runtime: "claude", model: async () => { throw new Error("The seat account is exhausted."); } });
+    const { env, repo, executable } = resetLaunchFixture(home);
     const quota = join(home, ".repo-harness", "quota", "claude.json");
+    mkdirSync(dirname(quota), { recursive: true });
     const capture = (minutesAgo: number) => writeFileSync(quota, JSON.stringify({ observed_at: new Date(Date.now() - minutesAgo * 60_000).toISOString(), rate_limits: {
       seven_day: { used_percentage: 10, resets_at: Math.floor(Date.now() / 1000) + 3600 } } }));
-    const { CLAUDE_CONFIG_DIR: _claude, PI_CODING_AGENT_DIR: _pi, ...base } = process.env;
-    const relaunch = (identity: SeatResetIdentity, cwd = "/tmp") => seatResetLaunch(identity, { ...base, ...registryEnv(home), PATH: "/bin:/usr/bin" }, cwd);
+    const resolveLaunch: SeatResetOptions["resolveLaunch"] = identity => seatResetTarget(identity, env);
+    const relaunch: SeatResetOptions["relaunch"] = (identity, cwd) => seatResetLaunch(identity, env, cwd);
     state({ cwd: repo });
     capture(0);
     const cleared = { requester: "t5", seat: "advisor", relaunched: false, logErrors: [] };
-    expect(await reset({ before: recorded("fable"), relaunch })).toEqual(cleared);
-    expect(await reset({ before: recorded("opus"), relaunch })).toEqual({ ...cleared, relaunched: true });
-    expect(await reset({ before: recorded("opus"), relaunch: failed })).toEqual(cleared);
+    expect(await reset({ before: recorded("fable"), resolveLaunch, relaunch })).toEqual(cleared);
+    expect(await reset({ before: recorded("opus"), fresh: true, resolveLaunch, relaunch })).toEqual({ ...cleared, relaunched: true });
+    const script = relaunchPath();
+    expect(readFileSync(script, "utf8")).toContain(executable);
+    expect(await reset({ before: recorded("opus"), fresh: true, resolveLaunch: failed, relaunch })).toEqual(cleared);
     capture(31);
-    expect(await reset({ before: recorded("fable"), relaunch })).toEqual(cleared);
-    expect(await reset({ before: recorded("opus"), action: "compact" })).toEqual(cleared);
-    expect(sends()).toEqual(["/clear", prompt(handoff), "/exit", `sh ${join(dir, "relaunch.sh")}`, prompt(handoff), "/clear", prompt(handoff),
+    expect(await reset({ before: recorded("fable"), fresh: true, resolveLaunch, relaunch })).toEqual(cleared);
+    expect(await reset({ before: recorded("opus"), fresh: true, action: "compact" })).toEqual(cleared);
+    expect(sends()).toEqual(["/clear", prompt(handoff), "/exit", `sh ${script}`, prompt(handoff), "/clear", prompt(handoff),
       "/clear", prompt(handoff), "/compact", compactPrompt(handoff)]);
     expect(log().map(({ kind, detail }) => [kind, detail])).toEqual([["reset", "cleared"], ["reset", "restarted"],
-      ["model_check_failed", "relaunch_argv_failed: The seats section of the repo-harness configuration is not valid"], ["reset", "cleared"],
+      ["model_check_failed", "relaunch_argv_failed: The seat account is exhausted"], ["reset", "cleared"],
       ["model_check_failed", "quota_unknown: the seat account has no fresh weekly quota reading, so the seat keeps its model"], ["reset", "cleared"],
       ["reset", "compacted"]]);
   }));
