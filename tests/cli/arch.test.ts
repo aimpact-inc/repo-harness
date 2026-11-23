@@ -452,7 +452,7 @@ describe('rh arch', () => {
       expect(existsSync(join(spacedSibling, '.codegraph'))).toBe(false);
     }
 
-    // 8e. Real pinned archctx@0.18.2 read-only commands leave zero SQLite sidecars so subsequent public seed succeeds.
+    // 8e. Real pinned archctx@0.18.3 read-only commands leave zero SQLite sidecars so subsequent public seed succeeds.
     const readChecks: Array<{ args: readonly string[]; allowedStatuses: readonly number[] }> = [
       { args: ['doctor', '--json'], allowedStatuses: [0] },
       { args: ['prepare', '--task', 'verify-zero-sidecars', '--json'], allowedStatuses: [0] },
@@ -497,7 +497,7 @@ describe('rh arch', () => {
       expect(existsSync(join(crSibling, '.codegraph'))).toBe(false);
     }
 
-    // 8g. Real lockfile-installed archctx@0.18.2 fails closed on an unrelated SQLite DB with overlapping table names
+    // 8g. Real lockfile-installed archctx@0.18.3 fails closed on an unrelated SQLite DB with overlapping table names
     // (preserving exact DB, -wal, and -shm bytes when ARCHCONTEXT_LOCAL_STORE_PATH is passed via rh arch).
     const foreignStoreDir = mkdtempSync(join(tmpdir(), 'repo-harness-foreign-store-'));
     roots.push(foreignStoreDir);
@@ -549,6 +549,76 @@ describe('rh arch', () => {
       ]);
     } finally {
       overlappingDb.close();
+    }
+
+    // 8h. Real lockfile-installed archctx@0.18.3 fails closed when a WAL DB has all 6 exact
+    // LEGACY_V1_CORE_TABLE_COLUMNS tables + 0001_runtime_state alongside custom/spoofed objects
+    // (custom waivers table, spoofed legacy view SQL, custom trigger, or all combined).
+    const legacyCoreSql = `
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+      CREATE TABLE repository_sessions (repository_id TEXT PRIMARY KEY, root TEXT NOT NULL, head_sha TEXT NOT NULL, worktree_digest TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE snapshots (id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, head_sha TEXT NOT NULL, worktree_digest TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, committed_at TEXT);
+      CREATE TABLE task_states (task_session_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE observed_evidence (id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, head_sha TEXT NOT NULL, selector_json TEXT NOT NULL, summary TEXT NOT NULL, confidence TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE review_results (review_id TEXT PRIMARY KEY, task_session_id TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
+      INSERT INTO schema_migrations (id, applied_at) VALUES ('0001_runtime_state', '2026-11-20T00:00:00.000Z');
+    `;
+    const waiversSql = `CREATE TABLE waivers (id TEXT PRIMARY KEY, owner TEXT NOT NULL); INSERT INTO waivers VALUES ('w1', 'keep-me');`;
+    const spoofedViewSql = `CREATE VIEW recent_architecture_changes_view AS SELECT 1 AS user_value;`;
+    const customTriggerSql = `CREATE TRIGGER user_audit_trigger AFTER INSERT ON snapshots BEGIN SELECT 1; END;`;
+    for (const variant of [
+      { fileName: 'spoofed-legacy-table.sqlite', extraSql: waiversSql, checkWaiverRow: true },
+      { fileName: 'spoofed-legacy-view.sqlite', extraSql: spoofedViewSql, checkWaiverRow: false },
+      { fileName: 'spoofed-legacy-trigger.sqlite', extraSql: customTriggerSql, checkWaiverRow: false },
+      { fileName: 'spoofed-legacy.sqlite', extraSql: `${waiversSql}\n${spoofedViewSql}\n${customTriggerSql}`, checkWaiverRow: true },
+    ]) {
+      const spoofedStoreDir = mkdtempSync(join(tmpdir(), 'repo-harness-spoofed-legacy-'));
+      roots.push(spoofedStoreDir);
+      const spoofedPath = join(spoofedStoreDir, variant.fileName);
+      const spoofedWalPath = `${spoofedPath}-wal`;
+      const spoofedShmPath = `${spoofedPath}-shm`;
+      const spoofedDb = new Database(spoofedPath);
+      try {
+        spoofedDb.exec(`${legacyCoreSql}\n${variant.extraSql}`);
+        const dbBytesBefore = readFileSync(spoofedPath);
+        const walBytesBefore = readFileSync(spoofedWalPath);
+        const shmBytesBefore = readFileSync(spoofedShmPath);
+        expect(walBytesBefore.length).toBeGreaterThan(0);
+        expect(shmBytesBefore.length).toBeGreaterThan(0);
+
+        const spoofedRes = spawnSync(
+          process.execPath,
+          [CLI, 'arch', 'prepare', '--task', 'verify-spoofed-legacy', '--json'],
+          {
+            cwd: cleanCase.repo,
+            env: { ...cleanCase.env, ARCHCONTEXT_LOCAL_STORE_PATH: spoofedPath },
+            encoding: 'utf8',
+            timeout: 60_000,
+          },
+        );
+        expect(spoofedRes.status).not.toBe(0);
+        const spoofedEnvelope = JSON.parse(spoofedRes.stdout) as {
+          ok: boolean;
+          error?: { code?: string; reasonCode?: string };
+        };
+        expect(spoofedEnvelope.ok).toBe(false);
+        expect(spoofedEnvelope.error?.code).toBe('AC_PRECONDITION_FAILED');
+        expect(spoofedEnvelope.error?.reasonCode).toBe('local-store-unproven-file');
+        expect(readFileSync(spoofedPath).equals(dbBytesBefore)).toBe(true);
+        expect(readFileSync(spoofedWalPath).equals(walBytesBefore)).toBe(true);
+        expect(readFileSync(spoofedShmPath).equals(shmBytesBefore)).toBe(true);
+        expect(readdirSync(spoofedStoreDir).sort()).toEqual([
+          variant.fileName,
+          `${variant.fileName}-shm`,
+          `${variant.fileName}-wal`,
+        ]);
+        if (variant.checkWaiverRow) {
+          expect(spoofedDb.prepare("SELECT owner FROM waivers WHERE id = 'w1'").get()).toEqual({ owner: 'keep-me' });
+        }
+      } finally {
+        spoofedDb.close();
+      }
     }
 
     // 9. Non-PID / empty user files at codegraph.lock and codegraph.lock.break refused on real primary index without unlinking.
