@@ -1314,7 +1314,7 @@ function checkpoint(step: string) {
     const bun = join(bin, 'bun');
     const bunLog = join(root, 'bun.log');
     const providerLog = join(root, 'provider.log');
-    const env = { HOME: home, BUN_INSTALL: bunInstall, PATH: `${bin}:${fakeHcBin}:${pathBeforeFakeHc ?? ''}`,
+    const env = { HOME: home, BUN_INSTALL: bunInstall, PATH: `${bin}:${fakeHcBin}:/usr/bin:/bin`,
       REPO_HARNESS_BUN_EXECUTABLE: bun, TMPDIR: root };
     const cli = join(parent, 'src', 'cli', 'index.ts');
     const run = (...args: string[]) => spawnSync(process.execPath, ['--no-env-file', cli, ...args], {
@@ -1326,6 +1326,10 @@ function checkpoint(step: string) {
       copyRuntimeFixture(parent, '0.36.0', 30);
       copyRuntimeFixture(candidate, '0.36.1', 30);
       symlinkSync(parent, globalPackage, 'dir');
+      const binRoot = join(bunInstall, 'bin');
+      mkdirSync(binRoot);
+      // Bun's launcher points through the global package path before and after the switch.
+      symlinkSync(join(globalPackage, 'src', 'cli', 'index.ts'), join(binRoot, 'rh'));
       writeCoreOnlyInstallState(home);
       writeCandidateSwitchingBun(root, bun, bunLog, globalPackage, candidate, undefined, true);
       const wrapper = readFileSync(`${bun}.fixture-body`, 'utf8');
