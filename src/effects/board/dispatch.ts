@@ -30,6 +30,7 @@ export interface DispatchInput {
   readonly dry_run: boolean;
   /** `--issues`: the issues that one seat and one pull request take; null dispatches the plan. */
   readonly bundle: readonly number[] | null;
+  readonly earlyStart?: boolean;
   readonly gh_runner?: BoardCollectInput['gh_runner'];
   readonly env?: NodeJS.ProcessEnv;
 }
@@ -175,7 +176,7 @@ export async function runDispatch(input: DispatchInput): Promise<DispatchResultV
   const { seats } = readSeatsConfiguration(env);
   const probes = collectSeatPoolProbes(env, SEAT_IDS.some(id => seats[id]?.runtime === 'agy'));
   const quota = seatAccountQuotas((await readQuotaReport(env, seats.routing.exhausted_at_or_above_used)).accounts, seats.routing);
-  const plan = planDispatch({ parent, terminals: terminals.terminals, seats, quota,
+  const plan = planDispatch({ parent, terminals: terminals.terminals, seats, quota, earlyStart: input.earlyStart,
     modelBlock: (id, seat) => (isWorkerSeat(id) && seat.runtime === 'agy' && !seat.tools.includes('edit')
       ? `agy: ${id} is configured read-only (missing edit). Enable edit for seats.${id}.tools in Settings.`
       : seatModelBlock(id, seat, seats, probes, () => magpieExtensionInstalled(env))),

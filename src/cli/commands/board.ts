@@ -417,11 +417,14 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
     .requiredOption('--space <id>', 'Herdr space that receives the worker tabs')
     .option('--dry-run', 'Print the decision for each plan issue and start nothing')
     .option('--issues <a,b,c>', 'Start only the plan unit with exactly these issues; each claim names the bundle, and nothing starts unless every open issue of the unit is ready')
-    .action(async (options: { space: string; dryRun?: boolean; issues?: string }, command: Command) => {
+    .option('--early-start', 'Allow the plan unit selected by --issues to start before its blockers close')
+    .action(async (options: { space: string; dryRun?: boolean; issues?: string; earlyStart?: boolean }, command: Command) => {
+      if (options.earlyStart && options.issues === undefined) command.error('--early-start requires --issues');
       try {
         const parent = parentNumber(command.optsWithGlobals<BoardOptions>());
         const result = await runDispatch({
-          repo_root: process.cwd(), parent, space: options.space, host, dry_run: options.dryRun === true, bundle: options.issues === undefined ? null : bundleIssues(options.issues),
+          repo_root: process.cwd(), parent, space: options.space, host, dry_run: options.dryRun === true,
+          bundle: options.issues === undefined ? null : bundleIssues(options.issues), earlyStart: options.earlyStart,
           launch: (seat, labels, cwd) => seatLaunch(seat, labels, process.env, cwd),
         });
         process.stdout.write(dispatchText(result.plan, result.started.map(entry => entry.issue)));
