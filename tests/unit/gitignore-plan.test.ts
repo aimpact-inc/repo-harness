@@ -145,12 +145,22 @@ describe("gitignore managed block .repo-harness rule", () => {
         writeFileSync(join(cwd, ".gitignore"), ignoreContent);
         const result = spawnSync("git", ["check-ignore", "--no-index", "--stdin"], { cwd, encoding: "utf8", input: `${runtimePaths.join("\n")}\n` });
         expect(result.stdout.trimEnd().split("\n")).toEqual(runtimePaths);
-        const canonicalDir = spawnSync("git", ["check-ignore", "-q", "--no-index", ".archcontext/refactor-decisions/recommendation.0123456789abcdef.json/"], { cwd });
-        expect(canonicalDir.status).toBe(0);
-        const caseSensitiveUpper = spawnSync("git", ["-c", "core.ignorecase=false", "check-ignore", "-q", "--no-index", ".archcontext/refactor-decisions/recommendation.0123456789ABCDEF.json"], { cwd });
-        expect(caseSensitiveUpper.status).toBe(0);
-        const trackedDecision = spawnSync("git", ["check-ignore", "-q", "--no-index", ".archcontext/refactor-decisions/recommendation.0123456789abcdef.json"], { cwd });
-        expect(trackedDecision.status).toBe(1);
+        for (const ignoreCase of ["false", "true"]) {
+          const canonicalDir = spawnSync("git", ["-c", `core.ignorecase=${ignoreCase}`, "check-ignore", "-q", "--no-index", ".archcontext/refactor-decisions/recommendation.0123456789abcdef.json/"], { cwd });
+          expect(canonicalDir.status).toBe(0);
+          const trackedDecision = spawnSync("git", ["-c", `core.ignorecase=${ignoreCase}`, "check-ignore", "-q", "--no-index", ".archcontext/refactor-decisions/recommendation.0123456789abcdef.json"], { cwd });
+          expect(trackedDecision.status).toBe(1);
+          const expectedVariantIgnore = ignoreCase === "true" ? 1 : 0;
+          for (const variant of [
+            ".archcontext/refactor-decisions/recommendation.0123456789ABCDEF.json",
+            ".archcontext/refactor-decisions/recommendation.0123456789abcdef.JSON",
+          ]) {
+            const variantStatus = spawnSync("git", ["-c", `core.ignorecase=${ignoreCase}`, "check-ignore", "-q", "--no-index", variant], { cwd });
+            expect(variantStatus.status).toBe(expectedVariantIgnore);
+            const nestedSecretStatus = spawnSync("git", ["-c", `core.ignorecase=${ignoreCase}`, "check-ignore", "-q", "--no-index", `${variant}/private.env`], { cwd });
+            expect(nestedSecretStatus.status).toBe(0);
+          }
+        }
       }
       // Also confirm `git status --porcelain` and `git add -A --dry-run` expose only canonical decision files and hide directory-bypass secrets.
       mkdirSync(join(cwd, ".archcontext", "refactor-decisions", "recommendation.fedcba9876543210.json"), { recursive: true });

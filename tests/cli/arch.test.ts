@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ARCHCTX_COMMAND_DISPOSITIONS, ARCHCTX_REQUIRED_VERSION, archctxRefusal } from '../../src/core/architecture/projection';
@@ -520,6 +520,11 @@ describe('rh arch', () => {
       const shmBytesBefore = readFileSync(overlappingShmPath);
       expect(walBytesBefore.length).toBeGreaterThan(0);
       expect(shmBytesBefore.length).toBeGreaterThan(0);
+      const agedLockPath = `${overlappingPath}.cache.lock`;
+      const agedLockContent = 'user plain-text lock — must never be unlinked\n';
+      writeFileSync(agedLockPath, agedLockContent);
+      const agedTime = new Date(Date.now() - 60_000);
+      utimesSync(agedLockPath, agedTime, agedTime);
 
       const foreignStoreRes = spawnSync(
         process.execPath,
@@ -542,13 +547,62 @@ describe('rh arch', () => {
       expect(readFileSync(overlappingPath).equals(dbBytesBefore)).toBe(true);
       expect(readFileSync(overlappingWalPath).equals(walBytesBefore)).toBe(true);
       expect(readFileSync(overlappingShmPath).equals(shmBytesBefore)).toBe(true);
+      expect(readFileSync(agedLockPath, 'utf8')).toBe(agedLockContent);
       expect(readdirSync(foreignStoreDir).sort()).toEqual([
         'overlapping.sqlite',
         'overlapping.sqlite-shm',
         'overlapping.sqlite-wal',
+        'overlapping.sqlite.cache.lock',
       ]);
+      if (process.platform !== 'win32') {
+        expect(statSync(foreignStoreDir).mode & 0o7777).toBe(0o700);
+      }
     } finally {
       overlappingDb.close();
+    }
+
+    if (process.platform !== 'win32') {
+      const publicModeParent = mkdtempSync(join(tmpdir(), 'repo-harness-store-0755-'));
+      roots.push(publicModeParent);
+      chmodSync(publicModeParent, 0o755);
+      const absentStoreIn0755 = join(publicModeParent, 'local-cache-v2.sqlite');
+      const absent0755Res = spawnSync(
+        process.execPath,
+        [CLI, 'arch', 'prepare', '--task', 'verify-0755-absent', '--json'],
+        {
+          cwd: cleanCase.repo,
+          env: { ...cleanCase.env, ARCHCONTEXT_LOCAL_STORE_PATH: absentStoreIn0755 },
+          encoding: 'utf8',
+          timeout: 60_000,
+        },
+      );
+      expect(absent0755Res.status).toBe(1);
+      const absent0755Envelope = JSON.parse(absent0755Res.stdout) as { ok: boolean; error?: { code?: string; reasonCode?: string } };
+      expect(absent0755Envelope.ok).toBe(false);
+      expect(absent0755Envelope.error?.code).toBe('AC_PRECONDITION_FAILED');
+      expect(absent0755Envelope.error?.reasonCode).toBe('local-store-unproven-file');
+      expect(statSync(publicModeParent).mode & 0o7777).toBe(0o755);
+      expect(readdirSync(publicModeParent)).toEqual([]);
+
+      const dbIn0755Path = join(publicModeParent, 'foreign.sqlite');
+      const dbIn0755 = new Database(dbIn0755Path);
+      dbIn0755.exec('CREATE TABLE user_data (id INTEGER PRIMARY KEY);');
+      dbIn0755.close();
+      const dbIn0755Res = spawnSync(
+        process.execPath,
+        [CLI, 'arch', 'prepare', '--task', 'verify-0755-db', '--json'],
+        {
+          cwd: cleanCase.repo,
+          env: { ...cleanCase.env, ARCHCONTEXT_LOCAL_STORE_PATH: dbIn0755Path },
+          encoding: 'utf8',
+          timeout: 60_000,
+        },
+      );
+      expect(dbIn0755Res.status).toBe(1);
+      const dbIn0755Envelope = JSON.parse(dbIn0755Res.stdout) as { ok: boolean; error?: { code?: string; reasonCode?: string } };
+      expect(dbIn0755Envelope.ok).toBe(false);
+      expect(dbIn0755Envelope.error?.reasonCode).toBe('local-store-unproven-file');
+      expect(statSync(publicModeParent).mode & 0o7777).toBe(0o755);
     }
 
     // 8h. Real lockfile-installed archctx@0.18.4 fails closed when a WAL DB holds legacy v1 core tables +
@@ -682,6 +736,71 @@ describe('rh arch', () => {
       } finally {
         spoofedDb.close();
       }
+    }
+
+    // 8i. Foreign dead-PID JSON cache locks (`{"pid":999999}`) are preserved beside both absent and unproven stores.
+    const deadLockDir = mkdtempSync(join(tmpdir(), 'repo-harness-dead-lock-'));
+    roots.push(deadLockDir);
+    const deadPidPayload = '{"pid":999999}\n';
+    const absentLockedStore = join(deadLockDir, 'absent.sqlite');
+    writeFileSync(`${absentLockedStore}.cache.lock`, deadPidPayload);
+    const absentLockRes = spawnSync(
+      process.execPath,
+      [CLI, 'arch', 'prepare', '--task', 'verify-dead-lock-absent', '--json'],
+      {
+        cwd: cleanCase.repo,
+        env: { ...cleanCase.env, ARCHCONTEXT_LOCAL_STORE_PATH: absentLockedStore },
+        encoding: 'utf8',
+        timeout: 60_000,
+      },
+    );
+    expect(absentLockRes.status).toBe(1);
+    const absentLockEnvelope = JSON.parse(absentLockRes.stdout) as { ok: boolean; error?: { code?: string; reasonCode?: string } };
+    expect(absentLockEnvelope.ok).toBe(false);
+    expect(absentLockEnvelope.error?.code).toBe('AC_PRECONDITION_FAILED');
+    expect(absentLockEnvelope.error?.reasonCode).toBe('local-store-unproven-file');
+    expect(readFileSync(`${absentLockedStore}.cache.lock`, 'utf8')).toBe(deadPidPayload);
+    expect(existsSync(absentLockedStore)).toBe(false);
+
+    const unprovenLockedStore = join(deadLockDir, 'unproven.sqlite');
+    const unprovenLockedDb = new Database(unprovenLockedStore);
+    unprovenLockedDb.exec('CREATE TABLE user_notes (note TEXT);');
+    unprovenLockedDb.close();
+    writeFileSync(`${unprovenLockedStore}.cache.lock`, deadPidPayload);
+    const unprovenBytes = readFileSync(unprovenLockedStore);
+    const unprovenLockRes = spawnSync(
+      process.execPath,
+      [CLI, 'arch', 'prepare', '--task', 'verify-dead-lock-unproven', '--json'],
+      {
+        cwd: cleanCase.repo,
+        env: { ...cleanCase.env, ARCHCONTEXT_LOCAL_STORE_PATH: unprovenLockedStore },
+        encoding: 'utf8',
+        timeout: 60_000,
+      },
+    );
+    expect(unprovenLockRes.status).toBe(1);
+    expect(readFileSync(`${unprovenLockedStore}.cache.lock`, 'utf8')).toBe(deadPidPayload);
+    expect(readFileSync(unprovenLockedStore).equals(unprovenBytes)).toBe(true);
+
+    // 8j. Positive control: valid 0o700 dir with absent store creates proven v2 store and succeeds on repeat calls.
+    const validOverrideDir = mkdtempSync(join(tmpdir(), 'repo-harness-valid-override-'));
+    roots.push(validOverrideDir);
+    if (process.platform !== 'win32') chmodSync(validOverrideDir, 0o700);
+    const validOverridePath = join(validOverrideDir, 'local-cache-v2.sqlite');
+    for (const pass of [1, 2]) {
+      const okOverrideRes = spawnSync(
+        process.execPath,
+        [CLI, 'arch', 'prepare', '--task', `verify-clean-override-${pass}`, '--json'],
+        {
+          cwd: cleanCase.repo,
+          env: { ...cleanCase.env, ARCHCONTEXT_LOCAL_STORE_PATH: validOverridePath },
+          encoding: 'utf8',
+          timeout: 60_000,
+        },
+      );
+      expect(okOverrideRes.status, `${okOverrideRes.stderr}\n${okOverrideRes.stdout}`).toBe(0);
+      expect((JSON.parse(okOverrideRes.stdout) as { ok: boolean }).ok).toBe(true);
+      expect(existsSync(validOverridePath)).toBe(true);
     }
 
     // 9. Non-PID / empty user files at codegraph.lock and codegraph.lock.break refused on real primary index without unlinking.

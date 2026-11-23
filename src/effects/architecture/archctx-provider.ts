@@ -7,7 +7,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { ARCHCONTEXT_NODE_RANGE, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_SCHEMA_VERSION, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_UPGRADE_COMMAND, ERROR_CATALOG, PROJECTION_MANIFEST_UPGRADE_REQUIRED, failureIssues, architectureDocsProjectionCompatibilityIssues, PROJECTION_REQUEST_SCHEMA_VERSION, digestJson, type ArchContextError, type ArchctxCapabilitiesV1, type ArchitectureDebtDeltaReportV1, type ArchitectureDebtReportV1, type DocsAnchorsReportV1, type IndexSeedResultV1, type Json, type ProjectionExpectedSnapshotV1, type ProjectionMode, type ProjectionRequestV1, type ProjectionResultV3 } from 'archctx-contracts';
+import { ARCHCONTEXT_NODE_RANGE, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_SCHEMA_VERSION, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_UPGRADE_COMMAND, ERROR_CATALOG, PROJECTION_MANIFEST_UPGRADE_REQUIRED, errorEnvelope, failureIssues, architectureDocsProjectionCompatibilityIssues, PROJECTION_REQUEST_SCHEMA_VERSION, digestJson, type ArchContextError, type ArchctxCapabilitiesV1, type ArchitectureDebtDeltaReportV1, type ArchitectureDebtReportV1, type DocsAnchorsReportV1, type IndexSeedResultV1, type Json, type ProjectionExpectedSnapshotV1, type ProjectionMode, type ProjectionRequestV1, type ProjectionResultV3 } from 'archctx-contracts';
 import { isRecord } from '../../core/evidence/is-record';
 import { readWorkflowPolicyDocument } from '../state/resolve-effective-state';
 import { POLICY_ABSENT, isPolicyObject, policyValue } from '../../core/workflow/policy-schema';
@@ -177,6 +177,9 @@ function runArchctxProcess(
 ): ArchctxProcessResult {
   const env = options.env ?? process.env;
   if (options.run) return options.run(resolved.binaryPath, args, { cwd, timeoutMs, env });
+  if (args[0] !== 'capabilities') {
+    assertSafeArchctxLocalStoreOverride(cwd, env);
+  }
   // Subprocess supervision uses epoch wall time. Translate an injected clock's
   // remaining budget once, then preserve that wall deadline through Node selection.
   const deadlineMs = options.nowMs === undefined
@@ -297,6 +300,11 @@ export function archctxCapabilities(repoRoot: string, options: ArchctxProviderOp
   return { resolved, capabilities: value as ArchctxCapabilitiesV1 };
 }
 
+function passThroughRequestId(args: readonly string[]): string {
+  const subcommand = args[1] && !args[1].startsWith('-') ? `.${args[1]}` : '';
+  return args[0] && !args[0].startsWith('-') ? `${args[0]}${subcommand}` : 'arch';
+}
+
 /**
  * `rh arch`: the version handshake, then the package-local archctx with the caller's
  * arguments, inherited stdio and no output cap. Returns the archctx exit code; a signal exit is 1.
@@ -304,6 +312,12 @@ export function archctxCapabilities(repoRoot: string, options: ArchctxProviderOp
 export function runArchctxPassThrough(cwd: string, args: readonly string[], options: ArchctxProviderOptions = {}): number {
   let spawnCwd = cwd;
   let env: NodeJS.ProcessEnv = { ...(options.env ?? process.env) };
+  const isMetadataOnly = args.length === 0
+    || args.includes('--help')
+    || args.includes('-h')
+    || args[0] === '--version'
+    || args[0] === '-v'
+    || args[0] === 'capabilities';
   const isIndexSeed = args[0] === 'index' && args[1] === 'seed' && !args.includes('--help') && !args.includes('-h');
   if (isIndexSeed) {
     const seedRoot = resolveCodeGraphSeedRoot(cwd, env);
@@ -314,6 +328,17 @@ export function runArchctxPassThrough(cwd: string, args: readonly string[], opti
       CODEGRAPH_FORCE_WATCH: '1',
     };
     assertSafeCodeGraphDestination(seedRoot, { env });
+  }
+  if (!isMetadataOnly) {
+    try {
+      assertSafeArchctxLocalStoreOverride(spawnCwd, env);
+    } catch (error) {
+      if (error instanceof ArchctxClientError && error.reasonCode === LOCAL_STORE_UNPROVEN_REASON_CODE && args.includes('--json')) {
+        process.stdout.write(`${JSON.stringify(errorEnvelope(passThroughRequestId(args), 'AC_PRECONDITION_FAILED', error.providerMessage, error.reasonCode))}\n`);
+        return 1;
+      }
+      throw error;
+    }
   }
   const { resolved } = archctxCapabilities(spawnCwd, { ...options, env });
   const nodeExecutable = resolveCompatibleNodeRuntime(env, options.trustedNodeCandidateSource);
@@ -669,16 +694,59 @@ function unsafeCodeGraphDestination(message: string): ArchctxClientError {
   });
 }
 
+const LOCAL_STORE_PATH_ENV = 'ARCHCONTEXT_LOCAL_STORE_PATH';
+const LOCAL_STORE_UNPROVEN_REASON_CODE = 'local-store-unproven-file';
+const LOCAL_CACHE_SCHEMA_VERSION = 200;
+const ARCHCONTEXT_SQLITE_APPLICATION_ID = 1094931544;
+const LOCAL_STORE_LOCK_MAX_BYTES = 4096;
+const LOCAL_STORE_LOCK_KEYS = ['acquiredAt', 'databasePath', 'pid', 'token'] as const;
+const LOCAL_STORE_LOCK_ISO_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+const LOCAL_STORE_LOCK_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SQLITE_VIRTUAL_TABLE_PATTERN = /^\s*CREATE\s+VIRTUAL\s+TABLE\b/i;
+const V2_CACHE_TABLE_COLUMNS: Record<string, readonly string[]> = {
+  architecture_debt_base_cache: ['cache_key|TEXT|0|1|0', 'report_json|TEXT|1|0|0', 'updated_at|TEXT|1|0|0'],
+  external_docs_cache: [
+    'provider|TEXT|1|1|0',
+    'library_id|TEXT|1|2|0',
+    'version|TEXT|1|3|0',
+    'query_digest|TEXT|1|4|0',
+    'content_digest|TEXT|1|0|0',
+    'resource_json|TEXT|1|0|0',
+    'retrieved_at|TEXT|1|0|0',
+    'expires_at|TEXT|1|0|0',
+  ],
+  kv_cache: ['namespace|TEXT|1|1|0', 'cache_key|TEXT|1|2|0', 'value_json|TEXT|1|0|0', 'updated_at|TEXT|1|0|0'],
+};
+const V2_CACHE_TABLE_SQL: Record<string, string> = {
+  architecture_debt_base_cache: 'CREATE TABLE architecture_debt_base_cache(cache_key TEXT PRIMARY KEY,report_json TEXT NOT NULL,updated_at TEXT NOT NULL)',
+  external_docs_cache: 'CREATE TABLE external_docs_cache(provider TEXT NOT NULL,library_id TEXT NOT NULL,version TEXT NOT NULL,query_digest TEXT NOT NULL,content_digest TEXT NOT NULL,resource_json TEXT NOT NULL,retrieved_at TEXT NOT NULL,expires_at TEXT NOT NULL,PRIMARY KEY(provider,library_id,version,query_digest))',
+  kv_cache: 'CREATE TABLE kv_cache(namespace TEXT NOT NULL,cache_key TEXT NOT NULL,value_json TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(namespace,cache_key))',
+};
+
+function readEnvKey(
+  env: NodeJS.ProcessEnv,
+  key: string,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (platform === 'win32') {
+    const upperKey = key.toUpperCase();
+    let matched: string | undefined;
+    for (const candidate of Object.keys(env)) {
+      if (candidate.toUpperCase() === upperKey && env[candidate] !== undefined) {
+        matched = env[candidate];
+      }
+    }
+    return matched;
+  }
+  return env[key];
+}
+
 function hasAnyEnvKey(
   env: NodeJS.ProcessEnv,
   keys: readonly string[],
   platform: NodeJS.Platform = process.platform,
 ): boolean {
-  if (platform === 'win32') {
-    const upperKeys = new Set(keys.map((key) => key.toUpperCase()));
-    return Object.keys(env).some((key) => upperKeys.has(key.toUpperCase()) && env[key] !== undefined);
-  }
-  return keys.some((key) => env[key] !== undefined);
+  return keys.some((key) => readEnvKey(env, key, platform) !== undefined);
 }
 
 function withoutEnvKeys(
@@ -697,6 +765,229 @@ function withoutEnvKeys(
   }
   for (const key of keys) delete clean[key];
   return clean;
+}
+
+function unprovenLocalStore(message: string): ArchctxClientError {
+  return new ArchctxClientError({
+    code: 'AC_PRECONDITION_FAILED',
+    action: 'inspect-diagnostics',
+    reasonCode: LOCAL_STORE_UNPROVEN_REASON_CODE,
+    message,
+  });
+}
+
+function isProvenLocalStoreLock(value: unknown, rawStorePath: string, storePath: string, cwd: string): boolean {
+  if (!isRecord(value)) return false;
+  const keys = Object.keys(value).sort();
+  if (keys.length !== LOCAL_STORE_LOCK_KEYS.length || !LOCAL_STORE_LOCK_KEYS.every((key, i) => keys[i] === key)) {
+    return false;
+  }
+  if (typeof value.pid !== 'number' || !Number.isInteger(value.pid) || value.pid <= 0) return false;
+  if (typeof value.databasePath !== 'string' || (value.databasePath !== rawStorePath && resolve(cwd, value.databasePath) !== storePath)) {
+    return false;
+  }
+  if (typeof value.acquiredAt !== 'string' || !LOCAL_STORE_LOCK_ISO_PATTERN.test(value.acquiredAt)) return false;
+  if (typeof value.token !== 'string' || !LOCAL_STORE_LOCK_UUID_PATTERN.test(value.token)) return false;
+  return true;
+}
+
+function normalizeSqliteDdl(sql: unknown): string {
+  return String(sql ?? '').replace(/\s+/g, ' ').replace(/\s*([(),])\s*/g, '$1').trim();
+}
+
+function assertProvenLocalStoreDatabase(storePath: string, hasWal: boolean): void {
+  let probeDir: string | undefined;
+  let db: Database | undefined;
+  try {
+    probeDir = mkdtempSync(join(realpathSync(tmpdir()), 'rh-local-store-probe-'));
+    const stagedDb = join(probeDir, 'store.sqlite');
+    copyFileSync(storePath, stagedDb, fsConstants.COPYFILE_FICLONE);
+    chmodSync(stagedDb, 0o600);
+    if (hasWal) {
+      const stagedWal = `${stagedDb}-wal`;
+      copyFileSync(`${storePath}-wal`, stagedWal, fsConstants.COPYFILE_FICLONE);
+      chmodSync(stagedWal, 0o600);
+    }
+    db = new Database(stagedDb, { create: false });
+    db.exec('PRAGMA query_only = ON;');
+    const appRow = db.query('PRAGMA application_id').get() as { application_id?: unknown } | null;
+    const applicationId = Number(appRow?.application_id ?? 0);
+    const versionRow = db.query('PRAGMA user_version').get() as { user_version?: unknown } | null;
+    const userVersion = Number(versionRow?.user_version ?? 0);
+    const masterRows = db.query(
+      "SELECT type, name, sql FROM sqlite_master WHERE type IN ('table', 'view', 'trigger', 'index') AND name NOT LIKE 'sqlite_%' AND (type != 'index' OR sql IS NOT NULL)",
+    ).all() as Array<{ type?: unknown; name?: unknown; sql?: unknown }>;
+
+    const expectedTableNames = Object.keys(V2_CACHE_TABLE_SQL);
+    if (
+      userVersion !== LOCAL_CACHE_SCHEMA_VERSION
+      || (applicationId !== 0 && applicationId !== ARCHCONTEXT_SQLITE_APPLICATION_ID)
+      || masterRows.length !== expectedTableNames.length
+    ) {
+      throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${storePath} is not a proven ArchContext v2 cache database.`);
+    }
+
+    const seenTables = new Set<string>();
+    for (const row of masterRows) {
+      const name = String(row.name ?? '');
+      const expectedSql = Object.hasOwn(V2_CACHE_TABLE_SQL, name) ? V2_CACHE_TABLE_SQL[name] : undefined;
+      const expectedCols = Object.hasOwn(V2_CACHE_TABLE_COLUMNS, name) ? V2_CACHE_TABLE_COLUMNS[name] : undefined;
+      if (
+        String(row.type) !== 'table'
+        || (typeof row.sql === 'string' && SQLITE_VIRTUAL_TABLE_PATTERN.test(row.sql))
+        || !expectedSql
+        || !expectedCols
+        || seenTables.has(name)
+        || normalizeSqliteDdl(row.sql) !== expectedSql
+      ) {
+        throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${storePath} contains unproven SQLite objects.`);
+      }
+      seenTables.add(name);
+      const quotedName = `"${name.replaceAll('"', '""')}"`;
+      const columns = db.query(`PRAGMA table_xinfo(${quotedName})`).all() as Array<{
+        name?: unknown; type?: unknown; notnull?: unknown; pk?: unknown; hidden?: unknown;
+      }>;
+      if (
+        columns.length !== expectedCols.length
+        || !columns.every((col, index) => `${String(col.name)}|${String(col.type)}|${Number(col.notnull)}|${Number(col.pk)}|${Number(col.hidden)}` === expectedCols[index])
+      ) {
+        throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${storePath} table ${name} does not match the pinned ArchContext v2 schema.`);
+      }
+    }
+  } catch (error) {
+    if (error instanceof ArchctxClientError) throw error;
+    throw unprovenLocalStore(
+      `Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${storePath} failed read-only ownership proof (${error instanceof Error ? error.message : String(error)}).`,
+    );
+  } finally {
+    try {
+      db?.close();
+    } finally {
+      if (probeDir !== undefined) rmSync(probeDir, { recursive: true, force: true, maxRetries: 3 });
+    }
+  }
+}
+
+/**
+ * Preflights explicit `ARCHCONTEXT_LOCAL_STORE_PATH` overrides before spawning `archctx@0.18.4`.
+ * `archctx` runtime startup calls `ensurePrivateDir` (`chmod 0o700`) and acquires/unlinks
+ * `<database>.cache.lock` before proving SQLite ownership, so an unproven parent mode, foreign
+ * lock file, or foreign/spoofed SQLite store must fail closed here before launch (I2).
+ */
+export function assertSafeArchctxLocalStoreOverride(
+  cwd: string,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  const rawStorePath = readEnvKey(env, LOCAL_STORE_PATH_ENV, platform);
+  if (rawStorePath === undefined || rawStorePath === ':memory:') return;
+  if (rawStorePath.trim() === '') {
+    throw unprovenLocalStore('Refusing empty ARCHCONTEXT_LOCAL_STORE_PATH override.');
+  }
+  const storePath = resolve(cwd, rawStorePath);
+  const parentDir = dirname(storePath);
+  let parentStat: ReturnType<typeof lstatSync> | undefined;
+  try {
+    parentStat = lstatSync(parentDir, { throwIfNoEntry: false });
+  } catch (error) {
+    throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: parent directory ${parentDir} is unreadable (${error instanceof Error ? error.message : String(error)}).`);
+  }
+  if (parentStat) {
+    if (!parentStat.isDirectory()) {
+      throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: parent ${parentDir} must be a directory, not a symlink or file.`);
+    }
+    if (platform !== 'win32' && (parentStat.mode & 0o7777) !== 0o700) {
+      throw unprovenLocalStore(
+        `Refusing ARCHCONTEXT_LOCAL_STORE_PATH: existing parent directory ${parentDir} has mode 0o${(parentStat.mode & 0o7777).toString(8)}, not 0o700, and would be chmodded.`,
+      );
+    }
+  }
+
+  const lockPath = `${storePath}.cache.lock`;
+  let lockStat: ReturnType<typeof lstatSync> | undefined;
+  try {
+    lockStat = lstatSync(lockPath, { throwIfNoEntry: false });
+  } catch (error) {
+    throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: lock path ${lockPath} is unreadable (${error instanceof Error ? error.message : String(error)}).`);
+  }
+  if (lockStat) {
+    if (!lockStat.isFile()) {
+      throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${lockPath} must be a regular file, not a symlink or directory.`);
+    }
+    if (lockStat.size === 0 || lockStat.size > LOCAL_STORE_LOCK_MAX_BYTES) {
+      throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${lockPath} does not match the ArchContext cache lock format and would be unlinked.`);
+    }
+    let parsedLock: unknown;
+    try {
+      parsedLock = JSON.parse(readFileSync(lockPath, 'utf8'));
+    } catch {
+      throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${lockPath} is not valid JSON and would be unlinked.`);
+    }
+    if (!isProvenLocalStoreLock(parsedLock, rawStorePath, storePath, cwd)) {
+      throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${lockPath} does not match an ArchContext writer lock and would be unlinked.`);
+    }
+  }
+
+  let dbStat: ReturnType<typeof lstatSync> | undefined;
+  try {
+    dbStat = lstatSync(storePath, { throwIfNoEntry: false });
+  } catch (error) {
+    throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: store path ${storePath} is unreadable (${error instanceof Error ? error.message : String(error)}).`);
+  }
+  if (!dbStat) {
+    for (const suffix of ['-wal', '-shm', '-journal']) {
+      let sidecarStat: ReturnType<typeof lstatSync> | undefined;
+      try {
+        sidecarStat = lstatSync(`${storePath}${suffix}`, { throwIfNoEntry: false });
+      } catch (error) {
+        throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: sidecar ${storePath}${suffix} check failed (${error instanceof Error ? error.message : String(error)}).`);
+      }
+      if (sidecarStat) {
+        throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${storePath}${suffix} exists without a proven store database.`);
+      }
+    }
+    return;
+  }
+
+  if (!dbStat.isFile() || dbStat.size < SQLITE_HEADER_MAGIC.length) {
+    throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${storePath} is not a valid SQLite 3 database.`);
+  }
+  let header: Buffer;
+  try {
+    header = readPrefixBytes(storePath, SQLITE_HEADER_MAGIC.length);
+  } catch (error) {
+    throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${storePath} is unreadable (${error instanceof Error ? error.message : String(error)}).`);
+  }
+  if (!header.equals(SQLITE_HEADER_MAGIC)) {
+    throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${storePath} is not a valid SQLite 3 database.`);
+  }
+
+  let journalStat: ReturnType<typeof lstatSync> | undefined;
+  try {
+    journalStat = lstatSync(`${storePath}-journal`, { throwIfNoEntry: false });
+  } catch (error) {
+    throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: sidecar ${storePath}-journal check failed (${error instanceof Error ? error.message : String(error)}).`);
+  }
+  if (journalStat) {
+    throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${storePath}-journal is present.`);
+  }
+
+  let hasWal = false;
+  for (const [suffix, isWal] of [['-wal', true], ['-shm', false]] as const) {
+    let sidecarStat: ReturnType<typeof lstatSync> | undefined;
+    try {
+      sidecarStat = lstatSync(`${storePath}${suffix}`, { throwIfNoEntry: false });
+    } catch (error) {
+      throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: sidecar ${storePath}${suffix} check failed (${error instanceof Error ? error.message : String(error)}).`);
+    }
+    if (sidecarStat) {
+      if (!sidecarStat.isFile()) {
+        throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${storePath}${suffix} must be a regular file.`);
+      }
+      if (isWal) hasWal = true;
+    }
+  }
+  assertProvenLocalStoreDatabase(storePath, hasWal);
 }
 
 export function sanitizeGitDiscoveryEnv(

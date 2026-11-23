@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ARCHCTX_REQUIRED_VERSION } from "../src/core/architecture/projection";
 import { RefactorProviderError } from "../src/core/refactor/provider-contract";
@@ -12,6 +12,7 @@ import { formatRefactorDecide, formatRefactorVerify, resolveDecisionCommitRoot }
 import { resolveCompatibleNodeRuntime } from "../src/effects/architecture/archctx-provider";
 import { recordPluginSelection } from "./helpers/install-ownership";
 import {
+  assertNoCaseAliasedKillListTargets,
   decideRecommendation,
   listRefactorRecommendations,
   resolveRecommendation,
@@ -640,6 +641,34 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
     expect((JSON.parse(readFileSync(join(repoRoot, legacyRetire.relPath), "utf8")) as RefactorDecisionV1).status).toBe("rejected");
     expect(readFileSync(join(secondCheckout, legacyRetire.relPath), "utf8")).toBe(secondBodyBefore);
 
+    // Omitted `--repo` (cwd=repoRoot) and relative `--repo` (cwd=secondCheckout) also bind emitted `decide reject` hints to absolute `repoRoot`.
+    const relRepoArg = relative(secondCheckout, repoRoot);
+    for (const verifyCall of [
+      { cwd: repoRoot, args: [cliEntry, "arch", "refactor", "verify", legacyRetire.recId] },
+      { cwd: secondCheckout, args: [cliEntry, "arch", "refactor", "verify", legacyRetire.recId, "--repo", relRepoArg] },
+    ]) {
+      runGit(repoRoot, ["checkout", "HEAD", "--", legacyRetire.relPath], env);
+      const hintVerify = spawnSync(process.execPath, verifyCall.args, {
+        cwd: verifyCall.cwd,
+        env,
+        encoding: "utf8",
+        timeout: 60_000,
+      });
+      expect(hintVerify.status).toBe(1);
+      const boundRejectCmd = /`((?:rh arch refactor decide [^`]+ reject [^`]+))`/.exec(hintVerify.stdout)?.[1];
+      expect(boundRejectCmd).toBeDefined();
+      expect(boundRejectCmd).toContain(`--repo ${repoRoot}`);
+      const thirdExec = spawnSync("sh", ["-c", boundRejectCmd!.replace('"<reason>"', '"Retire legacy proposal from other checkout"')], {
+        cwd: secondCheckout,
+        env: execEnv,
+        encoding: "utf8",
+        timeout: 60_000,
+      });
+      expect(thirdExec.status, thirdExec.stderr + thirdExec.stdout).toBe(0);
+      expect((JSON.parse(readFileSync(join(repoRoot, legacyRetire.relPath), "utf8")) as RefactorDecisionV1).status).toBe("rejected");
+      expect(readFileSync(join(secondCheckout, legacyRetire.relPath), "utf8")).toBe(secondBodyBefore);
+    }
+
     // Restore clean committed state before exercising the alternative `git -C ... rm` branch from secondCheckout,
     // even when conflicting GIT_DIR/GIT_WORK_TREE point to secondCheckout.
     runGit(repoRoot, ["checkout", "HEAD", "--", legacyRetire.relPath], env);
@@ -769,6 +798,41 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
       resolutionDigest: `sha256:${"b".repeat(64)}`,
       reason: "Must fail closed before archctx resolve",
     }, { consumerRoot: REPO_ROOT, env })).toThrow("differs only in case");
+
+    // 13b. Case-alias probe fails closed (never coalescing ENOBUFS to `[]`) and still protects unborn-HEAD repos.
+    expect(() => assertNoCaseAliasedKillListTargets(
+      caseRepo,
+      [{ kind: "path", target: "does-not-exist.ts", required: true }],
+      "refactor verify",
+      env,
+      undefined,
+      { maxBuffer: 16 },
+    )).toThrow(RefactorProviderError);
+    try {
+      assertNoCaseAliasedKillListTargets(
+        caseRepo,
+        [{ kind: "path", target: "does-not-exist.ts", required: true }],
+        "refactor verify",
+        env,
+        undefined,
+        { maxBuffer: 16 },
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(RefactorProviderError);
+      expect((error as RefactorProviderError).code).toBe("refactor_provider_unavailable");
+    }
+
+    const unbornRepo = scratchDir("refactor-unborn-head-");
+    runGit(unbornRepo, ["init", "-q"], env);
+    runGit(unbornRepo, ["config", "core.ignorecase", "true"], env);
+    writeRepoFile(unbornRepo, "AGENTS.md", "# Unborn\n");
+    runGit(unbornRepo, ["add", "AGENTS.md"], env);
+    expect(() => assertNoCaseAliasedKillListTargets(
+      unbornRepo,
+      [{ kind: "path", target: "agents.md", required: true }],
+      "refactor decide",
+      env,
+    )).toThrow("differs only in case");
 
     // 14. Two real checkouts + non-Git directory with inherited GIT_DIR/GIT_WORK_TREE fail closed across decide, verify, resolve, and commit hint;
     // matching discovery env is stripped before spawning archctx.

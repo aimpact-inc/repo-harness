@@ -33,11 +33,67 @@ import { assertSafeArchctxRepoRoot, commandLabel, runPackageLocalArchctxJson, sa
 import { gitSpawnSync } from "../git/runner";
 
 const MUTATING_DECIDE_ACTIONS = new Set<string>(["accept", "defer", "reject", "acknowledge", "waive", "resolve"]);
+const GIT_PATH_LIST_MAX_BUFFER = 64 * 1024 * 1024;
 
-function readNullDelimitedGitPaths(verifiedRoot: string, args: readonly string[], env: NodeJS.ProcessEnv): string[] | null {
-  const result = gitSpawnSync(["-C", verifiedRoot, ...args], { encoding: "utf8", env });
-  if (result.status !== 0 || typeof result.stdout !== "string") return null;
-  return result.stdout.split("\0").filter(Boolean);
+interface ReadGitPathsOptions {
+  readonly allowUnbornHead?: boolean;
+  readonly allowMissingCommit?: string;
+  readonly maxBuffer?: number;
+}
+
+function readNullDelimitedGitPaths(
+  verifiedRoot: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  options: ReadGitPathsOptions & { readonly allowMissingCommit: string },
+): string[] | null;
+function readNullDelimitedGitPaths(
+  verifiedRoot: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  options?: ReadGitPathsOptions,
+): string[];
+function readNullDelimitedGitPaths(
+  verifiedRoot: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  options: ReadGitPathsOptions = {},
+): string[] | null {
+  const result = gitSpawnSync(["-C", verifiedRoot, ...args], {
+    encoding: "utf8",
+    env,
+    maxBuffer: options.maxBuffer ?? GIT_PATH_LIST_MAX_BUFFER,
+  });
+  if (!result.error && result.status === 0 && typeof result.stdout === "string") {
+    return result.stdout.split("\0").filter(Boolean);
+  }
+  if (options.allowUnbornHead && result.error === undefined && result.status !== null) {
+    const headProbe = gitSpawnSync(["-C", verifiedRoot, "rev-parse", "--verify", "--quiet", "HEAD"], {
+      encoding: "utf8",
+      env,
+    });
+    if (headProbe.error === undefined && headProbe.status !== null && headProbe.status !== 0) {
+      return [];
+    }
+  }
+  if (options.allowMissingCommit && result.error === undefined && result.status !== null) {
+    const commitProbe = gitSpawnSync(
+      ["-C", verifiedRoot, "cat-file", "-e", `${options.allowMissingCommit}^{commit}`],
+      { encoding: "utf8", env },
+    );
+    if (commitProbe.error === undefined && commitProbe.status !== null && commitProbe.status !== 0) {
+      return null;
+    }
+  }
+  const detail = result.error
+    ? result.error.message
+    : typeof result.stderr === "string" && result.stderr.trim() !== ""
+      ? result.stderr.trim()
+      : `exit ${result.status ?? result.signal ?? "unknown"}`;
+  throw new RefactorProviderError(
+    "refactor_provider_unavailable",
+    `Git path inspection (${args[0] ?? "git"}) failed for refactor case-alias verification: ${detail}`,
+  );
 }
 
 function requiredKillTargetPaths(
@@ -61,20 +117,37 @@ function requiredKillTargetPaths(
  * tracked, HEAD, or untracked path in `verifiedRoot` so a case-insensitive checkout cannot treat
  * an alias (such as `agents.md` beside tracked `AGENTS.md`) as removed on verify/resolve.
  */
-function assertNoCaseAliasedKillListTargets(
+export function assertNoCaseAliasedKillListTargets(
   verifiedRoot: string,
   entries: readonly { readonly kind: string; readonly target: string; readonly required?: boolean }[],
   label: string,
   env: NodeJS.ProcessEnv = process.env,
   baselineHeadSha?: string,
+  options: { readonly maxBuffer?: number } = {},
 ): void {
   const targets = requiredKillTargetPaths(entries);
   if (targets.length === 0) return;
 
   const cleanEnv = sanitizeGitDiscoveryEnv(env);
-  const indexPaths = readNullDelimitedGitPaths(verifiedRoot, ["ls-files", "-z"], cleanEnv) ?? [];
-  const headPaths = readNullDelimitedGitPaths(verifiedRoot, ["ls-tree", "-r", "-z", "--name-only", "HEAD"], cleanEnv) ?? [];
-  const untrackedPaths = readNullDelimitedGitPaths(verifiedRoot, ["ls-files", "--others", "--exclude-standard", "-z"], cleanEnv) ?? [];
+  const worktreeProbe = gitSpawnSync(["-C", verifiedRoot, "rev-parse", "--is-inside-work-tree"], {
+    encoding: "utf8",
+    env: cleanEnv,
+  });
+  if (worktreeProbe.error !== undefined || worktreeProbe.status === null) {
+    throw new RefactorProviderError(
+      "refactor_provider_unavailable",
+      `Git worktree check failed for refactor case-alias verification: ${worktreeProbe.error?.message ?? worktreeProbe.signal ?? "unknown"}`,
+    );
+  }
+  if (worktreeProbe.status !== 0 || worktreeProbe.stdout.trim() !== "true") {
+    return;
+  }
+  const indexPaths = readNullDelimitedGitPaths(verifiedRoot, ["ls-files", "-z"], cleanEnv, options);
+  const headPaths = readNullDelimitedGitPaths(verifiedRoot, ["ls-tree", "-r", "-z", "--name-only", "HEAD"], cleanEnv, {
+    allowUnbornHead: true,
+    ...options,
+  });
+  const untrackedPaths = readNullDelimitedGitPaths(verifiedRoot, ["ls-files", "--others", "--exclude-standard", "-z"], cleanEnv, options);
   const exactPaths = new Set<string>([...indexPaths, ...headPaths, ...untrackedPaths]);
   const lowerToExact = new Map<string, string>();
   for (const path of exactPaths) {
@@ -95,7 +168,10 @@ function assertNoCaseAliasedKillListTargets(
       baselineExact = null;
       return baselineExact;
     }
-    const entriesAtBase = readNullDelimitedGitPaths(verifiedRoot, ["ls-tree", "-r", "-z", "--name-only", baselineHeadSha], cleanEnv);
+    const entriesAtBase = readNullDelimitedGitPaths(verifiedRoot, ["ls-tree", "-r", "-z", "--name-only", baselineHeadSha], cleanEnv, {
+      allowMissingCommit: baselineHeadSha,
+      ...options,
+    });
     baselineExact = entriesAtBase ? new Set(entriesAtBase) : null;
     return baselineExact;
   };

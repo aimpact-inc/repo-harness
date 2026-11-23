@@ -294,6 +294,43 @@ test('exposes only repository-scoped v2 CLI subcommands and options, and formats
   expect(formatRefactorVerify(verifyResult, { repo: '/tmp/target-repo', importNodeLimit: 5_000, platform: 'linux' })).toContain(
     `next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>" --repo /tmp/target-repo --import-node-limit 5000\n`,
   );
+  // Verified absolute repoRoot overrides omitted and relative --repo across resolve, legacy decide, and rm hints.
+  const absPosix = '/one/project';
+  const absWin = "C:\\Users\\O'Connor\\one\\project";
+  for (const repo of [undefined, '../project']) {
+    const resolvedPosix = formatRefactorVerify(verifyResult, { repo, repoRoot: absPosix, platform: 'darwin' });
+    expect(resolvedPosix).toContain(
+      `next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>" --repo ${absPosix}\n`,
+    );
+    const legacyPosix = formatRefactorVerify({
+      ...verifyResult,
+      disposition: 'stale',
+      blockingReasons: ['baseline-metadata-missing'],
+      killListChecks: [],
+      metricChecks: [],
+    }, { repo, repoRoot: absPosix, platform: 'darwin' });
+    expect(legacyPosix).toContain(`decide ${REC_ID} accept --reason "<reason>" --kill-path <path> --repo ${absPosix}\``);
+    expect(legacyPosix).toContain(`decide ${REC_ID} reject --reason "<reason>" --repo ${absPosix}\``);
+    expect(legacyPosix).toContain(`${posixEnvReset} git -C ${absPosix} rm -- .archcontext/refactor-decisions/${REC_ID}.json`);
+  }
+  for (const repo of [undefined, '..\\project']) {
+    const resolvedWin = formatRefactorVerify(verifyResult, { repo, repoRoot: absWin, platform: 'win32' });
+    expect(resolvedWin).toContain(
+      `next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>" --repo 'C:\\Users\\O''Connor\\one\\project'\n`,
+    );
+    const legacyWin = formatRefactorVerify({
+      ...verifyResult,
+      disposition: 'stale',
+      blockingReasons: ['baseline-metadata-missing'],
+      killListChecks: [],
+      metricChecks: [],
+    }, { repo, repoRoot: absWin, platform: 'win32' });
+    expect(legacyWin).toContain(`decide ${REC_ID} accept --reason "<reason>" --kill-path <path> --repo 'C:\\Users\\O''Connor\\one\\project'\``);
+    expect(legacyWin).toContain(`decide ${REC_ID} reject --reason "<reason>" --repo 'C:\\Users\\O''Connor\\one\\project'\``);
+    expect(legacyWin).toContain(
+      wrapExpectedWinEnvScope(`git -C 'C:\\Users\\O''Connor\\one\\project' rm '--' .archcontext/refactor-decisions/${REC_ID}.json`),
+    );
+  }
 
   const listText = formatRefactorList({
     schemaVersion: 'archcontext.refactor-decide-list/v1',

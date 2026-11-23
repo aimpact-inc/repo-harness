@@ -190,8 +190,10 @@ export interface RefactorVerifyFormatOptions {
 
 export function formatRefactorVerify(result: RefactorVerifyV2, invocation: RefactorVerifyFormatOptions = {}): string {
   const platform = invocation.platform ?? process.platform;
-  const repoFlag = invocation.repo !== undefined && invocation.repo !== ''
-    ? [`--repo ${formatShellArg(invocation.repo, platform)}`]
+  const effectiveRepoRoot = invocation.repoRoot
+    ?? (invocation.repo !== undefined && invocation.repo !== '' ? invocation.repo : undefined);
+  const repoFlag = effectiveRepoRoot !== undefined
+    ? [`--repo ${formatShellArg(effectiveRepoRoot, platform)}`]
     : [];
   const nextParts = [
     `rh arch refactor resolve ${result.recommendationId}`,
@@ -202,9 +204,7 @@ export function formatRefactorVerify(result: RefactorVerifyV2, invocation: Refac
     ...(invocation.timeoutMs !== undefined ? [`--timeout-ms ${invocation.timeoutMs}`] : []),
   ];
   const decisionRelPath = `.archcontext/refactor-decisions/${result.recommendationId}.json`;
-  const effectiveRemoveRoot = invocation.repoRoot
-    ?? (invocation.repo !== undefined && invocation.repo !== '' ? invocation.repo : undefined);
-  const removeHint = formatDecisionRemoveHint(effectiveRemoveRoot, decisionRelPath, platform);
+  const removeHint = formatDecisionRemoveHint(effectiveRepoRoot, decisionRelPath, platform);
   const repoSuffix = repoFlag.length > 0 ? ` ${repoFlag[0]}` : '';
   const missingBaseline = result.disposition === 'stale' && result.blockingReasons.includes('baseline-metadata-missing');
   const legacyNext = missingBaseline
