@@ -65,7 +65,7 @@ export function readTranscriptUsage(path: string): TranscriptUsage {
 }
 
 const RESET_HOSTS: ReadonlySet<unknown> = new Set<InteractiveResetHost>(['claude', 'pi', 'antigravity']);
-export const isResetHost = (host: unknown): host is InteractiveResetHost => RESET_HOSTS.has(host);
+const isResetHost = (host: unknown): host is InteractiveResetHost => RESET_HOSTS.has(host);
 
 export interface SeatResetRequestRecord {
   readonly host?: InteractiveResetHost;
@@ -99,8 +99,7 @@ export function seatResetRequested(identity: SeatResetIdentity, transcriptPath: 
 }
 
 /** A request is open while no SessionStart record is newer than it: a newer record means a new session segment. */
-export function requestOpen(identity: SeatResetIdentity, request: SeatRequest): boolean {
-  const session = readSeatSession(identity);
+export function requestOpen(identity: SeatResetIdentity, request: SeatRequest, session = readSeatSession(identity)): boolean {
   return session === null || Date.parse(session.startedAt) <= Date.parse(request.requestedAt);
 }
 

@@ -52,11 +52,7 @@ import { runCouncilConsult } from '../../effects/board/planner-consult';
 import { formatSeatPool, seatModelBlock, seatPoolHint, seatRuntimeBlock } from '../../core/board/seat-pool';
 import { collectSeatPoolProbes, enabledRuntimesOf, magpieExtensionInstalled, probeAgySeat, refreshSeatPool, resolveAgyInstallation, SeatsConfigurationError, writeAgySeatAgent } from '../../effects/board/seats-configuration';
 
-import { buildManagedHooks, compareManagedHooks } from '../installer/managed-entries';
-import { piPackagePresent } from '../installer/pi-package';
-import { readJsonOrEmpty } from '../installer/shared';
 import { checkAntigravityHooks } from '../installer/targets/antigravity';
-import { requireHome } from '../../effects/repo-harness-home';
 import { resolveAntigravityRepository } from '../hook/host-adapter';
 
 const CLI_ENTRY = fileURLToPath(new URL('../index.ts', import.meta.url));
@@ -325,29 +321,7 @@ export async function seatResetLaunch(identity: SeatResetIdentity, env: NodeJS.P
   // The terminal already has a waiting shell. Run only the agent command to keep one shell across resets.
   const { launch, effective, modeKnown } = await effectiveSeatLaunch(identity.seat, { repositoryId: identity.repository }, env, checkout,
     { terminal: 'existing', checkAvailability: true });
-  checkResetStartup(launch.runtime, env, checkout);
   return { argv: launch.argv, runtime: launch.runtime, model: effective.model, effort: effective.effort, modeKnown };
-}
-
-function checkResetStartup(runtime: SeatLaunchV1['runtime'], env: NodeJS.ProcessEnv, cwd: string): void {
-  if (runtime !== 'claude' && runtime !== 'pi') return;
-  const checkout = resolveAntigravityRepository({ cwd });
-  if (checkout.status !== 'opted-in') throw new Error('SessionStart needs a repo-harness opt-in checkout.');
-  if (runtime === 'pi') {
-    const source = bunGlobalPackageRoot(env);
-    if (source === null || !piPackagePresent(source, env)) throw new Error('Pi has no repo-harness user package registration. Run rh install.');
-    installedPiExtension(env);
-    return;
-  }
-  const home = env.CLAUDE_CONFIG_DIR ?? join(requireHome(env), '.claude');
-  const user = readJsonOrEmpty(join(home, 'settings.json'));
-  const project = readJsonOrEmpty(join(checkout.repoRoot, '.claude', 'settings.json'));
-  const local = readJsonOrEmpty(join(checkout.repoRoot, '.claude', 'settings.local.json'));
-  if ((local.disableAllHooks ?? project.disableAllHooks ?? user.disableAllHooks) === true) throw new Error('Claude hooks are disabled. Enable SessionStart before relaunch.');
-  const { SessionStart } = buildManagedHooks('claude', env);
-  if (compareManagedHooks(user.hooks, { SessionStart: SessionStart! }).mismatches.some(row => row.event === 'SessionStart')) {
-    throw new Error('Claude has no ready repo-harness SessionStart hook. Run rh install.');
-  }
 }
 
 /** The rh Pi extension of the installed package. A Pi review seat without it would run with no hook, so a missing file stops the launch. */
