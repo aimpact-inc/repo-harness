@@ -7,7 +7,7 @@ import {
 import { HerdrCoreError, RH_LABEL, hcGet, hcKeys, hcList, hcSend, hcWait, type HcLabels, type HcTerminal, type HcWaitResult, type HerdrCoreOptions } from '../terminal/herdr-core';
 import { readNotifyConfig } from '../terminal/notify-read';
 import {
-  fileSize, handoffProblem, newSession, readAppended, readRequest, readSeatSession, requestOpen, sentResumed,
+  handoffProblem, newSession, readRequest, readResumeTranscript, readSeatSession, requestOpen, sentResumed,
   type NewSession, type SeatRequest,
 } from './seat-reset-store';
 
@@ -23,7 +23,7 @@ export type SeatResetCode = 'handoff_path_invalid' | 'handoff_missing' | 'reques
   | 'handoff_sections_missing' | 'already_claimed' | 'claim_failed' | 'caller_unknown' | 'requester_not_found' | 'requester_busy' | 'message_not_sent'
   | 'hc_failed' | 'requester_status_untracked' | 'resume_not_sent' | 'request_invalid' | 'request_closed' | 'seat_reset_runtime_unsupported';
 
-const RESET_FOREGROUNDS: ReadonlySet<string> = new Set(['claude', 'pi']);
+const RESET_FOREGROUNDS: Readonly<Record<InteractiveResetHost, string>> = { claude: 'claude', pi: 'pi', antigravity: 'agy' };
 
 export class SeatResetError extends Error {
   constructor(readonly code: SeatResetCode, readonly outcome: SeatResetOutcome, message: string, readonly logErrors: readonly string[] = []) {
@@ -188,9 +188,6 @@ class SeatResetRun {
     try {
       const requestPath = seatResetRequestPath(this.identity);
       this.request = readRequest(this.identity);
-      if (this.request?.host === 'antigravity' || readSeatSession(this.identity)?.host === 'antigravity') {
-        throw this.unsupportedRuntime();
-      }
       if (this.request === null && !existsSync(requestPath)) {
         throw this.refuse('request_missing', 'nothing_sent', `${requestPath} is missing: the Stop hook did not ask for this reset.`);
       }
@@ -204,10 +201,10 @@ class SeatResetRun {
       const claim = seatResetClaimPath(this.identity, this.request.requestedAt);
       if (existsSync(claim)) throw this.alreadyClaimed();
       this.findRequester();
+      this.requireResettableRequester('nothing_sent', this.trackedRequester('nothing_sent'));
       this.prompt = seatResumePrompt(this.identity, this.caller, this.request.action);
       this.checkHandoff(sha256);
       this.wait();
-      this.requireResettableAdvisor('nothing_sent');
       this.claim(claim);
       // An auto-compaction or another reset after the request started a new segment: a second action would compact
       // or clear the new summary.
@@ -222,8 +219,9 @@ class SeatResetRun {
     try {
       return await this.resetAndResume();
     } catch (error) {
-      if (error instanceof SeatResetError && (error.outcome === 'uncertain' || error.code === 'requester_status_untracked' || error.code === 'seat_reset_runtime_unsupported')) throw error;
-      const command = seatResetCommand(this.request!.action, this.interactiveHost());
+      if (error instanceof SeatResetError && (error.outcome !== 'nothing_sent' || error.code === 'requester_status_untracked' || error.code === 'seat_reset_runtime_unsupported')) throw error;
+      const host = this.interactiveHost();
+      const command = host === 'antigravity' ? seatExitCommand(host) : seatResetCommand(this.request!.action, host);
       throw this.refuse('resume_not_sent', 'uncertain', `${this.requester} may have got ${command}, but not the resume prompt: ${sentence(error)}. Send it by hand: ${this.prompt}`);
     }
   }
@@ -265,19 +263,13 @@ class SeatResetRun {
       }
     }
     this.caller = caller;
-    this.requireResettableAdvisor('nothing_sent');
   }
 
-  private unsupportedRuntime(outcome: SeatResetOutcome = 'nothing_sent'): SeatResetError {
-    return new SeatResetError('seat_reset_runtime_unsupported', outcome,
-      'Automated advisor reset requires a Claude or Pi foreground. Relaunch an agy advisor through rh seats launch advisor.');
-  }
-
-  private requireResettableAdvisor(outcome: SeatResetOutcome): void {
-    if (this.identity.seat !== 'advisor') return;
-    const terminal = hcGet(this.requester, this.options);
-    if (terminal.state !== 'live' || !terminal.foreground || !RESET_FOREGROUNDS.has(terminal.foreground.name) || terminal.status?.app === 'antigravity') {
-      throw this.unsupportedRuntime(outcome);
+  private requireResettableRequester(outcome: 'nothing_sent' | 'uncertain', terminal = hcGet(this.requester, this.options)): void {
+    const expected = RESET_FOREGROUNDS[this.interactiveHost()];
+    if (terminal.state !== 'live' || terminal.foreground?.name !== expected) {
+      throw this.refuse('seat_reset_runtime_unsupported', outcome,
+        `The ${this.identity.seat} reset requires a live ${expected} foreground in ${this.requester}.`);
     }
   }
 
@@ -292,7 +284,7 @@ class SeatResetRun {
   }
 
   private interactiveHost(): InteractiveResetHost {
-    return this.request?.host === 'pi' ? 'pi' : 'claude';
+    return this.request?.host ?? 'claude';
   }
 
   /** Releases the requester with NO-RESET: it continues, and no slash command is typed. */
@@ -361,9 +353,9 @@ class SeatResetRun {
 
   /** Sends the prompt; true when the model sends RESUMED in the new transcript within the evidence window. */
   private async promptAnswered(session: NewSession): Promise<boolean> {
-    const offset = fileSize(session.transcript);
+    const read = readResumeTranscript(session, this.env);
     hcSend(this.requester, this.prompt, this.options);
-    return await this.poll(() => (sentResumed(readAppended(session.transcript, offset), this.prompt, this.caller) ? true : null), this.timeouts.evidenceMs) !== null;
+    return await this.poll(() => (sentResumed(read(), this.prompt, this.caller, session.host) ? true : null), this.timeouts.evidenceMs) !== null;
   }
 
   private done(session: NewSession, detail: 'compacted' | 'cleared' | 'relaunched' | 'restarted'): Omit<SeatResetResult, 'logErrors'> {
@@ -402,10 +394,11 @@ class SeatResetRun {
   private async resetAndResume(): Promise<Omit<SeatResetResult, 'logErrors'>> {
     const { action } = this.request!;
     const host = this.interactiveHost();
+    if (host === 'antigravity') return this.relaunch();
     const changed = action === 'reset' ? await this.modelChange() : null;
     if (changed !== null) return this.relaunch(changed);
     let since = Date.now();
-    this.requireResettableAdvisor('nothing_sent');
+    this.requireResettableRequester('nothing_sent');
     typeLine(this.requester, seatResetCommand(action, host), this.options);
     let session: NewSession | null = null;
     // The log counts across runs; the run counts too, so an unwritable log still ends the retries.
@@ -421,13 +414,13 @@ class SeatResetRun {
       if (failures > SEAT_RESET_RETRIES || this.count('resume') > SEAT_RESET_RETRIES) return this.relaunch();
       if (failure === 'no_signal') {
         since = Date.now();
-        this.requireResettableAdvisor('uncertain');
+        this.requireResettableRequester('uncertain');
         typeLine(this.requester, seatResetCommand('reset', host), this.options);
       }
     }
   }
 
-  /** `launch` is the launch of a model change; without it the relaunch builds the launch after the retries. */
+  /** `launch` is the launch of a model change. Otherwise build the launch for a direct or retried relaunch. */
   private async relaunch(launch?: SeatRelaunch): Promise<Omit<SeatResetResult, 'logErrors'>> {
     const host = this.interactiveHost();
     // A relaunched process has no compaction summary, so it gets the prompt with the git and gh check.
@@ -447,21 +440,24 @@ class SeatResetRun {
     } catch (error) {
       throw stop(`relaunch_argv_failed: ${sentence(error)}`, true);
     }
-    const outcome = launch === undefined ? 'uncertain' : 'nothing_sent';
+    const outcome = launch === undefined && host !== 'antigravity' ? 'uncertain' : 'nothing_sent';
     const turn = this.waitForTurn(outcome);
     if (!turn.ended) throw stop('requester_busy', true);
     const terminal = this.trackedRequester(outcome);
     if (terminal.state === 'finished') throw stop('requester_exited');
     if (terminal.foreground === null) throw stop('requester_foreground_unavailable', true);
-    if (terminal.foreground.pid === terminal.pid) throw stop('requester_has_no_parent_shell', true);
-    this.requireResettableAdvisor(outcome);
+    if (terminal.pid === null || terminal.foreground.pid === terminal.pid) throw stop('requester_has_no_parent_shell', true);
+    this.requireResettableRequester(outcome, terminal);
+    if (host === 'antigravity' && !requestOpen(this.identity, this.request!)) {
+      throw this.release('request_closed', `a session started after the reset request of ${this.request!.requestedAt}, so nothing was typed`);
+    }
     typeLine(this.requester, seatExitCommand(host), this.options);
     const shellReady = await this.poll(() => {
       const current = hcGet(this.requester, this.options);
       if (current.state === 'finished') throw stop('requester_exited');
-      return current.foreground !== null && !RESET_FOREGROUNDS.has(current.foreground.name) ? true : null;
+      return current.foreground?.pid === terminal.pid ? true : null;
     }, this.timeouts.exitMs);
-    if (shellReady === null) throw stop(host === 'pi' ? 'pi_did_not_exit' : 'claude_did_not_exit');
+    if (shellReady === null) throw stop(`${RESET_FOREGROUNDS[host]}_did_not_exit`);
     const startedAt = Date.now();
     typeLine(this.requester, `sh ${script}`, this.options);
     const session = await this.waitForSession(startedAt, 'reset');

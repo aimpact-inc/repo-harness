@@ -402,8 +402,8 @@ export function agySeatCommandRules(seat: LaunchSeatId, config: SeatConfigV1): {
     };
   }
   if (seat === 'advisor') return {
-    allow: [...AGY_READONLY_COMMAND_PREFIXES, 'rh seats council', 'rh arch refactor decide'],
-    deny: AGY_READONLY_DENIED_COMMANDS,
+    allow: [...AGY_READONLY_COMMAND_PREFIXES, 'rh seats council', 'rh seats reset', 'rh seats handoff', 'rh arch refactor decide'],
+    deny: AGY_READONLY_DENIED_COMMANDS.filter(command => command !== 'rh seats reset'),
   };
   if (seat === 'council' || seat === 'gatekeeper') {
     return { allow: AGY_READONLY_COMMAND_PREFIXES, deny: [...AGY_READONLY_DENIED_COMMANDS, 'rh arch refactor decide'] };

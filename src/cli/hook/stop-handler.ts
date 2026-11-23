@@ -1,5 +1,5 @@
 /** Stop publishes the evidence checkpoint and reports notices; it never grants publication permission. */
-import { ANTIGRAVITY_HANDOFF, HOST_ADAPTERS } from './host-adapter';
+import { HOST_ADAPTERS } from './host-adapter';
 import { readAntigravityTranscript } from '../../effects/board/antigravity-transcript';
 import { collectArchitectureNotice } from './hook-protocol';
 import { collectProtectedPathNotice } from './protected-path-notice';
@@ -68,7 +68,7 @@ interface StopNotice {
  */
 function seatReset(payload: HookPayload, env: NodeJS.ProcessEnv, now: Date, handoff: 'compact-or-clear' | 'relaunch', host: HookIdentity['host']): { readonly block: StopHandlerResult } | { readonly notices: readonly StopNotice[] } {
   const relaunch = handoff === 'relaunch';
-  const resetHost = host === 'antigravity' ? 'antigravity' : host === 'pi' ? 'pi' : 'claude';
+  const resetHost = host === 'codex' ? 'claude' : host;
   try {
     const identity = seatResetIdentity(env);
     const transcript = payloadString(payload, 'transcript_path');
@@ -80,10 +80,10 @@ function seatReset(payload: HookPayload, env: NodeJS.ProcessEnv, now: Date, hand
       : readTranscriptUsage(transcript);
     if (!usage || usage.contextTokens === null || usage.contextTokens < SEAT_RESET_CONTEXT_TOKENS) return { notices: [] };
     const { contextTokens, bytes } = usage;
-    const action = relaunch ? 'reset' : seatResetAction(bytes);
+    const action = seatResetAction(bytes, resetHost);
     if (!open) writeSeatResetRequest(identity, now, { contextTokens, transcriptPath: transcript, transcriptBytes: bytes, action,
       host: resetHost });
-    const message = relaunch ? ANTIGRAVITY_HANDOFF : seatResetReason(identity, contextTokens, bytes, action, resetHost === 'pi' ? 'pi' : 'claude');
+    const message = seatResetReason(identity, contextTokens, bytes, action, resetHost);
     return { block: { exitCode: 2, stdout: '', stderr: `${message}\n` } };
   } catch (error) {
     return { notices: relaunch ? [] : [{ systemMessage: `repo-harness: seat reset skipped: ${(error as Error).message}` }] };
