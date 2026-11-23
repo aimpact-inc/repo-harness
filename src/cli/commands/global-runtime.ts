@@ -14,7 +14,8 @@ import { pathRecordIsCurrent, pathRecordKey, readPathRecords } from '../../effec
 import { architecturePort, isArchitectureUnavailable } from '../../core/architecture/contracts';
 import { globalConfigurationWriter, mutateGlobalConfiguration } from '../../effects/configuration/global-configuration';
 import { DEFAULT_SEATS_CONFIG, INTRODUCED_ROUTING_DEFAULTS, ROUTING_CLASSES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, migrateLegacySeatsRecord, seatModelShapeValid, stripRetiredSeatFleetRoles } from '../../core/board/seats-settings';
-import { checkSeatRoutingModels, seatsRanges } from '../../effects/board/seats-configuration';
+import { checkSeatRoutingModels } from '../../effects/board/seats-configuration';
+import { EFFORT_LEVELS } from '../../effects/terminal/task-role-profiles';
 import { chmodSync, closeSync, constants, cpSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync } from "fs";
 import { syncDirectoryDurably, writeAllSync } from '../../effects/atomic-append';
 import { renderJsonObjectUpdate } from "../../effects/adoption/standard-plan";
@@ -1749,13 +1750,12 @@ export function migrateSeatsConfiguration(env: NodeJS.ProcessEnv, runtimeLock?: 
       const targets = ['claude', 'advisor', 'codex'];
       if (typeof hyper !== 'object' || hyper === null || Array.isArray(hyper)
         || Object.keys(hyper).length !== targets.length || targets.some(key => !Object.hasOwn(hyper, key))) invalid();
-      const ranges = seatsRanges([]);
       for (const target of targets) {
         const value = hyper![target] as Record<string, unknown> | null;
         if (typeof value !== 'object' || value === null || Array.isArray(value) || Object.keys(value).length !== 2
           || !Object.hasOwn(value, 'model') || !Object.hasOwn(value, 'effort')
           || value.model !== null && !seatModelShapeValid(target === 'codex' ? 'codex' : 'claude', value.model)
-          || value.effort !== null && !ranges.efforts.includes(value.effort as string)) invalid();
+          || value.effort !== null && !EFFORT_LEVELS.includes(value.effort as string)) invalid();
       }
       const { mode: _mode, hyper: _hyper, ...kept } = row;
       routing = { ...kept, claude_saving_below_remaining: DEFAULT_SEATS_CONFIG.routing.claude_saving_below_remaining };

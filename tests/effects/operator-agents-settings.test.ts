@@ -27,6 +27,7 @@ import { renderGlobalRulesBlock, setReportingLanguage } from '../../src/cli/inst
 import { createOperatorLanguageSettings } from '../../src/cli/commands/operator-actions';
 import { reportingLanguageWriteRoute } from '../../src/effects/operator/language-settings-route';
 import { acquireRuntimeTransactionLock, globalRuntimeScope } from '../../src/effects/locking/runtime-transaction-lock';
+import { agyCatalogScript, type AgyCatalogFixture } from '../helpers/agy-cli-fixture';
 import { operatorAuditPath } from '../../src/effects/operator/write-audit';
 
 const PROBE: AgentRuntimeProbeV1 = {
@@ -580,6 +581,13 @@ describe('agent settings routes', () => {
 
 const PANE_AGENTS = { enabled: ['claude', 'codex', 'pi'], uses: { docs: [], review: [] }, default_docs: null };
 
+/** The official agy install path under the harness HOME, so the catalog probe finds it without PATH. */
+function installAgy(home: string, catalog: AgyCatalogFixture): void {
+  const bin = join(home, '.local', 'bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'agy'), `#!${process.execPath}\n${agyCatalogScript(catalog)}`, { mode: 0o755 });
+}
+
 async function seats(harness: Harness): Promise<ReturnType<typeof decodeSeatsSettings>> {
   const response = await fetch(`${harness.server.url}/api/v1/settings/seats`);
   expect(response.status).toBe(200);
@@ -933,9 +941,10 @@ describe('seat settings contract without transport', () => {
 describe('seat settings routes', () => {
   test('saves agy on orchestrator, advisor, council, all workers (with gh on/off), and gatekeeper-fallback, and refuses to disable its host while in use', async () => {
     const harness = await startHarness({ agents: { ...PANE_AGENTS, enabled: ['antigravity', ...PANE_AGENTS.enabled] } });
+    installAgy(harness.home, [{ id: 'gemini-4-neon', efforts: ['high'] }, { id: 'gemini-4-hydrogen', efforts: ['high'] }]);
     const advisor = { runtime: 'agy', model: 'gemini-4-neon-high', effort: 'high', advisor_model: null, fleet: [], tools: ['edit', 'mcp', 'net', 'read', 'schedule', 'shell'] } as const;
     expect((await seats(harness)).ranges.runtimes.find(range => range.id === 'agy')).toMatchObject({ enabled: true, effort: true, fleet: false });
-    for (const [model, effort] of [['gemini-4-neon-high', 'high'], ['well-shaped-free-model', 'max']] as const) {
+    for (const [model, effort] of [['gemini-4-neon-high', 'high'], ['well-shaped-free-model', null]] as const) {
       const { revision, ...section } = (await seats(harness)).config;
       const next = { ...advisor, model, effort };
       const response = await post(harness, { expected_revision: revision, seats: { ...section, advisor: next } }, 'seats');
@@ -1046,6 +1055,37 @@ describe('seat settings routes', () => {
     }, 'seats');
     expect(enableEdit.status).toBe(200);
     expect((await seats(harness)).config['worker-neon'].tools).toEqual(['edit', 'net', 'read', 'shell']);
+  });
+
+  test('an agy seat effort must be on the catalog menu of its model, and the ranges carry that menu', async () => {
+    const harness = await startHarness({ agents: { ...PANE_AGENTS, enabled: ['antigravity', ...PANE_AGENTS.enabled] } });
+    installAgy(harness.home, [{ id: 'gemini-4-hydrogen', efforts: ['low', 'medium', 'high', 'xhigh'] }]);
+    const read = await seats(harness);
+    expect(read.ranges.agy_models).toContainEqual({ id: 'gemini-4-hydrogen', efforts: ['low', 'medium', 'high', 'xhigh'] });
+    const { revision, ...section } = read.config;
+    const advisor = { runtime: 'agy', model: 'gemini-4-hydrogen', effort: 'max', advisor_model: null, fleet: [], tools: ['net', 'read', 'shell'] } as const;
+    const refused = await post(harness, { expected_revision: revision, seats: { ...section, advisor } }, 'seats');
+    expect([refused.status, (await refused.json()).error.code]).toEqual([422, 'seat_effort_invalid']);
+    expect(sha256(harness.configPath)).toBe(revision);
+    const saved = await post(harness, { expected_revision: revision, seats: { ...section, advisor: { ...advisor, effort: 'high' } } }, 'seats');
+    expect(saved.status).toBe(200);
+  });
+
+  test('an unreadable agy catalog keeps a stored agy effort, refuses a changed one and accepts the Default', async () => {
+    const advisor = { runtime: 'agy', model: 'gemini-4-hydrogen', effort: 'high', advisor_model: null, fleet: [], tools: ['net', 'read', 'shell'] } as const;
+    const harness = await startHarness({ agents: { ...PANE_AGENTS, enabled: ['antigravity', ...PANE_AGENTS.enabled] }, seats: { ...DEFAULT_SEATS_CONFIG, advisor } });
+    installAgy(harness.home, 'signed_out');
+    const read = await seats(harness);
+    expect(read.ranges.agy_models).toBeNull();
+    const { revision, ...section } = read.config;
+    const unrelated = await post(harness, { expected_revision: revision, seats: { ...section, orchestrator: { ...section.orchestrator, effort: 'xhigh' } } }, 'seats');
+    expect(unrelated.status).toBe(200);
+    const { revision: next, ...stored } = (await seats(harness)).config;
+    expect(stored.advisor).toEqual(advisor);
+    const changed = await post(harness, { expected_revision: next, seats: { ...stored, advisor: { ...advisor, effort: 'medium' } } }, 'seats');
+    expect([changed.status, (await changed.json()).error.code]).toEqual([503, 'seat_effort_unverified']);
+    const defaulted = await post(harness, { expected_revision: next, seats: { ...stored, advisor: { ...advisor, effort: null } } }, 'seats');
+    expect(defaulted.status).toBe(200);
   });
 
   test('an agy advisor refuses before save when Antigravity is disabled', async () => {

@@ -43,6 +43,14 @@ export function agentsSettingsFixture(now: number, fixture: 'busy' | 'degraded')
   });
 }
 
+/** The native agy catalog: base models with their effort menus, and the suffixed ids that each take one effort. */
+const AGY_BASE_MODELS = [
+  { id: 'gemini-4-neon', efforts: ['high', 'xhigh'] },
+  { id: 'gemini-4-carbon', efforts: ['high'] },
+  { id: 'gemini-4-hydrogen', efforts: ['low', 'medium', 'high', 'xhigh'] },
+];
+const AGY_CATALOG = [...AGY_BASE_MODELS, ...AGY_BASE_MODELS.flatMap(({ id, efforts }) => efforts.map(effort => ({ id: `${id}-${effort}`, efforts: [effort] })))];
+
 /** The Settings ranges for the in-page store. */
 function seatsRanges(enabled: readonly string[]) {
   const all = ['read', 'edit', 'shell', 'net', 'tasks', 'schedule', 'mcp', 'gh'];
@@ -54,6 +62,7 @@ function seatsRanges(enabled: readonly string[]) {
       { id: 'agy', enabled: enabled.includes(seatHostId('agy')), effort: true, fleet: false },
     ],
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    agy_models: enabled.includes(seatHostId('agy')) ? AGY_CATALOG : null,
     roles: SEAT_SCAFFOLD_SUB_AGENTS.map(name => ({ name, writable: false })),
     seats: {
       orchestrator: { models: SEAT_RECOMMENDED_MODELS.orchestrator, fleet: ALLOWED_SEAT_FLEET_ROLES.orchestrator, tools: all.filter(tool => tool !== 'edit') },

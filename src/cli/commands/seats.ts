@@ -20,6 +20,7 @@ import {
   seatHostId,
   seatsConfigInvalidMessage,
   unavailablePiSeat,
+  type AgyCatalogModel,
   type LaunchSeatId,
   type SeatConfigV1,
   type SeatId,
@@ -47,7 +48,7 @@ import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
 import { COUNCIL_MEMBERS, CouncilConsultError, parseCouncilMembers, type CouncilMember } from '../../core/board/planner-consult';
 import { runCouncilConsult } from '../../effects/board/planner-consult';
 import { formatSeatPool, seatModelBlock, seatPoolHint, seatRuntimeBlock } from '../../core/board/seat-pool';
-import { collectSeatPoolProbes, enabledRuntimesOf, magpieExtensionInstalled, probeAgySeat, refreshSeatPool, resolveAgyInstallation, SeatsConfigurationError, writeAgySeatAgent, type AgyCatalogModel } from '../../effects/board/seats-configuration';
+import { collectSeatPoolProbes, enabledRuntimesOf, magpieExtensionInstalled, probeAgySeat, refreshSeatPool, resolveAgyInstallation, SeatsConfigurationError, writeAgySeatAgent } from '../../effects/board/seats-configuration';
 
 import { checkAntigravityHooks } from '../installer/targets/antigravity';
 import { resolveAntigravityRepository } from '../hook/host-adapter';

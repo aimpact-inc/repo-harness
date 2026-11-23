@@ -270,6 +270,40 @@ describe('agents page seats section', () => {
     expect(posts[0]?.seats['worker-neon']).toEqual({ runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['edit', 'net', 'read', 'shell'] });
   });
 
+  test('an agy seat offers its model catalog effort menu and keeps an effort across a model change only when the new menu has it', async () => {
+    const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
+    const read = await settingsStores(NOW, 'busy').seats.read();
+    if (read.state !== 'ok') throw new Error('fixture read failed');
+    const settings = {
+      ...read.settings,
+      config: { ...read.settings.config, 'worker-deep': { runtime: 'agy' as const, model: 'gemini-4-hydrogen', effort: 'xhigh', advisor_model: null, fleet: [], tools: ['edit', 'net', 'read', 'shell'] as const } },
+      ranges: {
+        ...read.settings.ranges,
+        runtimes: read.settings.ranges.runtimes.map(entry => (entry.id === 'agy' ? { ...entry, enabled: true } : entry)),
+        agy_models: [
+          { id: 'gemini-4-hydrogen', efforts: ['low', 'medium', 'high', 'xhigh'] },
+          { id: 'gemini-4-neon', efforts: ['high', 'xhigh'] },
+          { id: 'gemini-4-carbon', efforts: ['high'] },
+        ],
+      },
+    };
+    await mount({ ...seatsProps(posts), readSeatsSettings: async () => ({ state: 'ok', settings }) });
+    await click(buttonWithText('Deep worker'));
+    const effort = '[data-seat-card="worker-deep"] [aria-label="Effort"]';
+    const choices = () => [...document.querySelectorAll(`${effort} button`)].map(button => button.textContent);
+    const pressed = () => document.querySelector(`${effort} [aria-pressed="true"]`)?.textContent;
+    expect([choices(), pressed()]).toEqual([['Default', 'low', 'medium', 'high', 'xhigh'], 'xhigh']);
+    const input = '[data-seat-card="worker-deep"] [data-model-input]';
+    await typeText(input, 'gemini-4-neon');
+    await leaveField(input);
+    expect([choices(), pressed()]).toEqual([['Default', 'high', 'xhigh'], 'xhigh']);
+    await typeText(input, 'gemini-4-carbon');
+    await leaveField(input);
+    expect([choices(), pressed()]).toEqual([['Default', 'high'], 'Default']);
+    await click(seatsSave());
+    expect(posts[0]?.seats['worker-deep']).toMatchObject({ model: 'gemini-4-carbon', effort: null });
+  });
+
   test('the advisor offers only scaffold roles, allows edits and blocks GitHub writes; save sends the whole section', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     await mount(seatsProps(posts));

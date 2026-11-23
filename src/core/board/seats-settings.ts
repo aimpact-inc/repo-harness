@@ -339,9 +339,17 @@ export interface SeatRangeV1 {
   readonly tools: readonly SeatTool[];
 }
 
+/** One model of the native agy catalog and its effort menu: the catalog that launch checks. */
+export interface AgyCatalogModel {
+  readonly id: string;
+  readonly efforts: readonly string[];
+}
+
 export interface SeatsRangesV1 {
   readonly runtimes: readonly SeatRuntimeRangeV1[];
   readonly efforts: readonly string[];
+  /** The agy catalog with each model's effort menu, or null when Antigravity is off or its catalog cannot be read. */
+  readonly agy_models: readonly AgyCatalogModel[] | null;
   readonly roles: readonly SeatRoleV1[];
   readonly seats: { readonly [seat in SeatId]: SeatRangeV1 };
   readonly routing: {
@@ -674,8 +682,17 @@ function decodeRoutingRanges(value: unknown, code: string): SeatsRangesV1['routi
   return ranges;
 }
 
+function decodeAgyModels(value: unknown, code: string): readonly AgyCatalogModel[] {
+  if (!Array.isArray(value)) invalid(code);
+  return value.map((item) => {
+    const entry = object(item, ['id', 'efforts'], code);
+    if (!seatModelShapeValid('agy', entry.id) || !Array.isArray(entry.efforts)) invalid(code);
+    return { id: entry.id, efforts: entry.efforts.map(effort => (seatModelShapeValid('agy', effort) ? effort : invalid(code))) };
+  });
+}
+
 function decodeRanges(value: unknown, code: string): SeatsRangesV1 {
-  const record = object(value, ['runtimes', 'efforts', 'roles', 'seats', 'routing'], code);
+  const record = object(value, ['runtimes', 'efforts', 'agy_models', 'roles', 'seats', 'routing'], code);
   if (!Array.isArray(record.runtimes) || !Array.isArray(record.efforts) || !Array.isArray(record.roles)) invalid(code);
   const runtimes = record.runtimes.map((entry) => {
     const runtime = object(entry, ['id', 'enabled', 'effort', 'fleet'], code);
@@ -702,6 +719,7 @@ function decodeRanges(value: unknown, code: string): SeatsRangesV1 {
   return {
     runtimes,
     efforts: record.efforts.map(effort => text(effort, code)),
+    agy_models: record.agy_models === null ? null : decodeAgyModels(record.agy_models, code),
     roles,
     seats: Object.fromEntries(SEAT_IDS.map(id => [id, seat(id)])) as SeatsRangesV1['seats'],
     routing: decodeRoutingRanges(record.routing, code),

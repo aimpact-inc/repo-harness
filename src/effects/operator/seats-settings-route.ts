@@ -10,6 +10,7 @@ import {
 } from '../../core/board/seats-settings';
 import {
   SeatsConfigurationError,
+  agyCatalogModels,
   applySeatsSettings,
   readSeatPoolCache,
   readSeatsConfiguration,
@@ -34,6 +35,7 @@ export const SEATS_CONFIGURATION_FAILURES: Readonly<Record<SeatsConfigurationErr
   seat_runtime_not_allowed: { status: 422, next_action: 'Use agy only on orchestrator, advisor, council, worker seats, or gatekeeper-fallback.' },
   seat_model_invalid: { status: 422, next_action: 'Choose or type a model for the named field, then save again.' },
   seat_effort_invalid: { status: 422, next_action: CHOOSE_FROM_RANGES },
+  seat_effort_unverified: { status: 503, next_action: 'Sign in to agy so that it lists its models, or set the agy seat effort to Default, then save again.' },
   seat_tool_not_allowed: { status: 422, next_action: CHOOSE_FROM_RANGES },
   seat_fleet_not_allowed: { status: 422, next_action: CHOOSE_FROM_RANGES },
 });
@@ -42,7 +44,7 @@ export const SEATS_CONFIGURATION_FAILURES: Readonly<Record<SeatsConfigurationErr
 export function readSeatsSettings(env?: NodeJS.ProcessEnv): SeatsSettingsV1 {
   const { revision, seats, enabled_runtimes } = readSeatsConfiguration(env);
   const settings = decodeSeatsSettings({ protocol: 1, kind: 'operator_seats_settings', config: { revision, ...seats },
-    defaults: DEFAULT_SEATS_CONFIG, ranges: seatsRanges(enabled_runtimes) });
+    defaults: DEFAULT_SEATS_CONFIG, ranges: seatsRanges(enabled_runtimes, agyCatalogModels(enabled_runtimes, env)) });
   const pool = readSeatPoolCache(env);
   return pool === null ? settings : { ...settings, model_pool: pool };
 }
