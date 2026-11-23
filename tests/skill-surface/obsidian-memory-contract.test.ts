@@ -58,7 +58,7 @@ describe("obsidian-memory: manifest registration", () => {
     expect(entry?.kind).toBe("facade");
     expect(entry?.provider).toBeNull();
     expect(entry?.source).toBe(`assets/skills/${PACKAGE_DIR}`);
-    expect([...(entry?.hosts ?? [])].sort()).toEqual(["claude", "codex", "pi"]);
+    expect([...(entry?.hosts ?? [])].sort()).toEqual(["antigravity", "claude", "codex", "pi"]);
     expect(entry?.retirementCandidate).toBeNull();
     expect(entry?.requires).toEqual(["obsidian-markdown", "obsidian-cli"]);
   });
@@ -71,7 +71,7 @@ describe("obsidian-memory: manifest registration", () => {
       expect(entry?.provider).toBe("kepano/obsidian-skills#a1dc48e68138490d522c04cbf5822214c6eb1202");
       expect(entry?.owner).toBe("strategy-memory");
       expect(entry?.explicitOnly).toBe(true);
-      expect(entry?.hosts).toEqual(["claude", "codex", "pi"]);
+      expect(entry?.hosts).toEqual(["claude", "codex", "pi", "antigravity"]);
       expect(entry?.integrity).toMatch(/^sha256:[0-9a-f]{64}$/);
     }
   });

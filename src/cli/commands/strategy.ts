@@ -19,7 +19,7 @@ export function buildStrategyCommand(): Command {
   contextOptions(strategy.command('validate').argument('<proposal>', 'Repository-relative proposal JSON').option('--document <path>', 'Explicit project-local context document'))
     .action(async (path: string, o: StrategyCommandOptions) => (await actions()).validate(path, o));
   for (const action of ['install', 'uninstall'] as const) {
-    strategy.command(`${action}-skill`).option('--target <host>', 'codex|claude|both', 'both')
+    strategy.command(`${action}-skill`).option('--target <host>', 'codex|claude|antigravity|both', 'both')
       .option('--dry-run', 'Preview owned host projection changes')
       .action(async (o: StrategyCommandOptions) => (await actions()).projectSkill(action, o));
   }

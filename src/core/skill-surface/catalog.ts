@@ -11,7 +11,7 @@ import { SHA256_PREFIXED_PATTERN } from "../evidence/sha256-pattern";
 
 export const SKILL_SURFACE_CATALOG_VERSION = 4 as const;
 
-export const SKILL_SURFACE_HOSTS = ["claude", "codex", "pi"] as const;
+export const SKILL_SURFACE_HOSTS = ["claude", "codex", "pi", "antigravity"] as const;
 export type SkillSurfaceHost = (typeof SKILL_SURFACE_HOSTS)[number];
 
 export const SKILL_SURFACE_KINDS = ["router", "facade", "provider-skill", "integration", "external", "judge"] as const;
@@ -80,6 +80,7 @@ export interface SkillSurfaceHostPlacements {
   readonly pi: readonly string[];
   readonly claude: readonly string[];
   readonly codex: readonly string[];
+  readonly antigravity: readonly string[];
 }
 
 export interface SkillSurfaceCatalog {
@@ -657,7 +658,7 @@ export function hostSkillPlacements(
   catalog: SkillSurfaceCatalog,
   plugins?: readonly PluginId[],
 ): SkillSurfaceHostPlacements {
-  const placements: Record<SkillSurfaceHost, string[]> = { claude: [], codex: [], pi: [] };
+  const placements: Record<SkillSurfaceHost, string[]> = { claude: [], codex: [], pi: [], antigravity: [] };
   for (const pkg of catalog.packages) {
     if (pkg.kind !== "provider-skill") continue;
     if (plugins !== undefined && !selected(pkg, plugins)) continue;

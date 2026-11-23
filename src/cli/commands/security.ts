@@ -11,12 +11,14 @@ import * as path from 'path';
 import { isRecord } from '../../core/evidence/is-record';
 import { POLICY_ABSENT, isPolicyObject, policyValue } from '../../core/workflow/policy-schema';
 import { readWorkflowPolicyFile } from '../../effects/state/policy-file';
-import { buildManagedHooks, type HookEntry, type HookHost } from '../installer/managed-entries';
+import { buildAntigravityHooks, buildManagedHooks, type HookEntry, type HookHost } from '../installer/managed-entries';
+import { antigravityHookCommands } from '../installer/targets/antigravity';
+import { ANTIGRAVITY_HOOK_SELECTOR, checkAntigravityPath } from '../../effects/host-config/gate';
 import { gitToplevel } from '../../effects/git/runner';
 
 export type SecurityStatus = 'ok' | 'warn' | 'fail';
 export type SecuritySeverity = 'warn' | 'high' | 'fail';
-export type ScannedFileKind = 'claude-hooks' | 'codex-hooks' | 'vscode-tasks';
+export type ScannedFileKind = 'claude-hooks' | 'codex-hooks' | 'antigravity-hooks' | 'vscode-tasks';
 
 export interface SecurityFinding {
   filePath: string;
@@ -244,9 +246,12 @@ function hookBlocks(config: HookConfig): Array<{ event: string; hook: HookComman
  * Exact commands the installer writes for a host. The managed marker inside a
  * command only names its owner; any text can repeat it, so it never exempts.
  */
-function generatedHookCommands(host: HookHost): ReadonlySet<string> | Error {
+function generatedHookCommands(host: HookHost | 'antigravity'): ReadonlySet<string> | Error {
   try {
-    return new Set(Object.values(buildManagedHooks(host)).flat().flatMap((entry) => entry.hooks.map((hook) => hook.command)));
+    const commands = host === 'antigravity'
+      ? antigravityHookCommands(buildAntigravityHooks(process.env)).map(({ command }) => command)
+      : Object.values(buildManagedHooks(host)).flat().flatMap((entry) => entry.hooks.map((hook) => hook.command));
+    return new Set(commands);
   } catch (error) {
     return error instanceof Error ? error : new Error(String(error));
   }
@@ -255,22 +260,29 @@ function generatedHookCommands(host: HookHost): ReadonlySet<string> | Error {
 function scanHookConfig(
   findings: SecurityFinding[],
   filePath: string,
-  host: HookHost,
+  host: HookHost | 'antigravity',
   hostLabel: string,
-  legacyProjectAdapter: boolean,
+  project: boolean,
 ): void {
   if (!fs.existsSync(filePath)) return;
 
+  const antigravity = host === 'antigravity';
   let parsed: unknown;
   try {
+    if (antigravity) checkAntigravityPath(filePath);
     parsed = readJson(filePath);
   } catch (err) {
-    pushJsonFailure(findings, filePath, err);
+    if (antigravity) {
+      findings.push({ filePath, ruleId: 'invalid-json', severity: 'fail',
+        summary: 'Could not read the Antigravity hook configuration as JSON', recommendation: 'Inspect the hook file.' });
+    } else pushJsonFailure(findings, filePath, err);
     return;
   }
 
-  const config = parsed as HookConfig;
-  const commands = hookBlocks(config);
+  const commands = antigravity
+    ? Object.entries(isRecord(parsed) ? parsed : {}).flatMap(([name, group]) =>
+      antigravityHookCommands(group).map(({ event, command }) => ({ event, command, managedGroup: !project && name === ANTIGRAVITY_HOOK_SELECTOR })))
+    : hookBlocks(parsed as HookConfig).map(({ event, hook }) => ({ event, command: hook?.command, managedGroup: true }));
   const generated = generatedHookCommands(host);
   if (generated instanceof Error) {
     findings.push({
@@ -279,7 +291,7 @@ function scanHookConfig(
       recommendation: generated.message,
     });
   }
-  if (legacyProjectAdapter && commands.length > 0) {
+  if (project && !antigravity && commands.length > 0) {
     findings.push({
       filePath,
       ruleId: 'legacy-project-hook-adapter',
@@ -289,9 +301,8 @@ function scanHookConfig(
     });
   }
 
-  for (const { event, hook } of commands) {
-    const command = typeof hook.command === 'string' ? hook.command : '';
-    if (!command || (!(generated instanceof Error) && generated.has(command))) continue;
+  for (const { event, command, managedGroup } of commands) {
+    if (typeof command !== 'string' || !command || (managedGroup && !(generated instanceof Error) && generated.has(command))) continue;
     const suspicious = suspiciousMatch(command);
     findings.push({
       filePath,
@@ -300,7 +311,7 @@ function scanHookConfig(
       summary: suspicious
         ? `${hostLabel} ${event} hook looks risky: ${suspicious.summary}`
         : `${hostLabel} ${event} hook is not managed by repo-harness`,
-      recommendation: `Review this command before trusting it: ${commandSnippet(command)}`,
+      recommendation: antigravity ? 'Review the command in the hook file.' : `Review this command before trusting it: ${commandSnippet(command)}`,
       command,
     });
   }
@@ -413,6 +424,8 @@ export function runSecurityScan(opts: SecurityScanOptions = {}): SecurityScanRep
     { filePath: path.join(repoRoot, '.vscode', 'tasks.json'), kind: 'vscode-tasks' as ScannedFileKind, exists: false },
     { filePath: path.join(repoRoot, '.claude', 'settings.json'), kind: 'claude-hooks' as ScannedFileKind, exists: false },
     { filePath: path.join(repoRoot, '.codex', 'hooks.json'), kind: 'codex-hooks' as ScannedFileKind, exists: false },
+    { filePath: path.join(home, '.gemini', 'config', 'hooks.json'), kind: 'antigravity-hooks' as ScannedFileKind, exists: false },
+    { filePath: path.join(repoRoot, '.agents', 'hooks.json'), kind: 'antigravity-hooks' as ScannedFileKind, exists: false },
   ].map((entry) => ({ ...entry, exists: fs.existsSync(entry.filePath) }));
 
   const findings: SecurityFinding[] = [];
@@ -421,13 +434,23 @@ export function runSecurityScan(opts: SecurityScanOptions = {}): SecurityScanRep
   scanVscodeTasks(findings, scannedFiles[2].filePath);
   scanHookConfig(findings, scannedFiles[3].filePath, 'claude', 'Claude', true);
   scanHookConfig(findings, scannedFiles[4].filePath, 'codex', 'Codex', true);
+  scanHookConfig(findings, scannedFiles[5].filePath, 'antigravity', 'Antigravity user-level', false);
+  scanHookConfig(findings, scannedFiles[6].filePath, 'antigravity', 'Antigravity workspace', true);
 
   const reviewedExceptions = loadReviewedExceptions(repoRoot, home);
   const applied = applyReviewedExceptions(findings, reviewedExceptions);
+  // Exception matching uses the exact command. Reports for Antigravity keep command text in its source file.
+  const antigravityFiles = new Set([scannedFiles[5].filePath, scannedFiles[6].filePath]);
+  const omitAntigravityCommand = <T extends SecurityFinding>(finding: T): T => {
+    if (!antigravityFiles.has(finding.filePath)) return finding;
+    const report = { ...finding };
+    delete report.command;
+    return report;
+  };
   return {
     status: reportStatus(applied.findings),
-    findings: applied.findings,
-    reviewedFindings: applied.reviewedFindings,
+    findings: applied.findings.map(omitAntigravityCommand),
+    reviewedFindings: applied.reviewedFindings.map(omitAntigravityCommand),
     scannedFiles,
   };
 }

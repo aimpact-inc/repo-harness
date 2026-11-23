@@ -12,7 +12,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "core",
       "explicitOnly": false,
@@ -33,7 +34,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "core",
       "explicitOnly": true,
@@ -52,7 +54,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "core",
       "explicitOnly": false,
@@ -71,7 +74,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "core",
       "explicitOnly": false,
@@ -90,7 +94,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "product",
       "explicitOnly": false,
@@ -109,7 +114,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "core",
       "explicitOnly": false,
@@ -128,7 +134,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "core",
       "explicitOnly": false,
@@ -147,7 +154,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "architecture",
       "explicitOnly": false,
@@ -166,7 +174,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "architecture",
       "explicitOnly": false,
@@ -185,7 +194,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "strategy-memory",
       "explicitOnly": false,
@@ -207,7 +217,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "platform",
       "explicitOnly": false,
@@ -226,7 +237,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "cross-review",
       "explicitOnly": false,
@@ -260,7 +272,8 @@
       "source": "assets/skills/repo-harness-orchestrator",
       "provider": null,
       "hosts": [
-        "claude"
+        "claude",
+        "antigravity"
       ],
       "owner": "peer-runtime",
       "explicitOnly": false,
@@ -279,7 +292,8 @@
       "source": "assets/skills/repo-harness-advisor",
       "provider": null,
       "hosts": [
-        "claude"
+        "claude",
+        "antigravity"
       ],
       "owner": "peer-runtime",
       "explicitOnly": false,
@@ -334,7 +348,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "core",
       "explicitOnly": true,
@@ -353,7 +368,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "core",
       "explicitOnly": false,
@@ -372,7 +388,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "core",
       "explicitOnly": false,
@@ -391,7 +408,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "core",
       "explicitOnly": false,
@@ -410,7 +428,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "core",
       "explicitOnly": false,
@@ -429,7 +448,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "core",
       "explicitOnly": false,
@@ -449,7 +469,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "strategy-memory",
       "explicitOnly": true,
@@ -469,7 +490,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "strategy-memory",
       "explicitOnly": true,
@@ -488,7 +510,8 @@
       "hosts": [
         "claude",
         "codex",
-        "pi"
+        "pi",
+        "antigravity"
       ],
       "owner": "strategy-memory",
       "explicitOnly": true,

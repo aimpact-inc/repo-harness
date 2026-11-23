@@ -58,6 +58,9 @@ export interface InstallOptions {
   readonly updateMode?: boolean;
   /** False when `--no-hooks` is passed on update. */
   readonly hooks?: boolean;
+  /** The enclosing runtime transaction keeps whole-path preimages here. */
+  readonly transaction?: string;
+  readonly syncSkill?: boolean;
 }
 
 export interface TargetPathPreview {

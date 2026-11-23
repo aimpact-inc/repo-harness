@@ -48,7 +48,10 @@ describe('status command (Phase 1C)', () => {
       process.env.BUN_INSTALL = path.join(home, 'missing-bun');
       const r = runStatus();
       expect(r.targets.length).toBeGreaterThan(0);
-      for (const t of r.targets) {
+      const antigravity = r.targets.find(t => t.id === 'antigravity')!;
+      expect(antigravity).toMatchObject({ installed: false, alreadyConfigured: false, managedEntryCount: 0 });
+      expect(antigravity.projection).toBeUndefined();
+      for (const t of r.targets.filter(target => target.id !== 'antigravity')) {
         expect(t.alreadyConfigured).toBe(false);
         expect(t.managedEntryCount).toBe(0);
         expect(t.expectedEntryCount).toBe(t.id === 'codex' ? 5 : 6);
@@ -68,6 +71,27 @@ describe('status command (Phase 1C)', () => {
       const claude = r.targets.find((t) => t.id === 'claude')!;
       expect(claude.managedEntryCount).toBe(claude.expectedEntryCount);
       expect(claude.managedEntryCount).toBe(6);
+    });
+  });
+
+  test.skipIf(process.platform === 'win32')('reports current Antigravity hooks and drift in JSON status', () => {
+    withTempHome('repo-harness-status-antigravity', (home) => {
+      expect(runInstall({ target: 'antigravity', location: 'global' }).exitCode).toBe(0);
+      const target = () => (JSON.parse(formatStatus(runStatus(), true)) as ReturnType<typeof runStatus>)
+        .targets.find(t => t.id === 'antigravity')!;
+      const configPath = path.join(home, '.gemini', 'config', 'hooks.json');
+      const installed = target();
+      expect(installed).toMatchObject({ installed: true, alreadyConfigured: true, configPath,
+        projection: { status: 'consistent' }, skillProjection: { status: 'ok' } });
+      expect(installed.managedEntryCount).toBe(installed.expectedEntryCount);
+
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      config['repo-harness'].Stop[0].timeout = 90;
+      fs.writeFileSync(configPath, JSON.stringify(config));
+      fs.unlinkSync(path.join(home, '.gemini', 'config', 'skills', 'repo-harness'));
+      expect(target()).toMatchObject({ managedEntryCount: installed.managedEntryCount,
+        projection: { status: 'drift', mismatches: [{ event: 'Stop' }] }, skillProjection: { status: 'fail' } });
+      expect(formatStatus(runStatus())).toContain('projection drift: Stop');
     });
   });
 

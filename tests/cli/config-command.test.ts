@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { writeFakeHc } from '../helpers/fake-hc';
 import { seedGlobalPackageFixture } from '../helpers/install-ownership';
 import { afterEach, expect, test } from 'bun:test';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -35,6 +36,12 @@ test.skipIf(process.platform === 'win32')('Antigravity keeps a user hook member 
   env.PATH = join(home, 'bin');
   env.TMPDIR = home;
   mkdirSync(env.PATH);
+  writeFakeHc(env.PATH);
+  for (const name of ['think', 'hunt', 'check', 'health']) {
+    const staged = join(home, '.agents', 'skills', name);
+    mkdirSync(staged, { recursive: true });
+    writeFileSync(join(staged, 'SKILL.md'), `# ${name} fixture\n`);
+  }
   seedGlobalPackageFixture(env);
   const cli = join(import.meta.dir, '../../src/cli/index.ts');
   const run = (...args: string[]) => {

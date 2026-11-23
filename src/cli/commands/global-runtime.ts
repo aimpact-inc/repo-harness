@@ -1,7 +1,7 @@
 import { requireHome } from "../../effects/repo-harness-home";
 import { parseJsonText } from "../../core/evidence/file-syntax";
 import { syncInstalledSkillCopies } from "../installer/skill-sync";
-import { openHostConfigGate } from "../../effects/host-config/gate";
+import { antigravitySkillsDirHostPath, checkAntigravityPath, openHostConfigGate } from "../../effects/host-config/gate";
 import { importBunBootstrapRecord, recordedToolIsCurrent, windowsPowershellPath, windowsUserPathPort } from "../../effects/host-config/tools";
 import { hostConfigPaths, readLedger } from "../../effects/host-config/store";
 import { configureRequiredHerdrSkill } from "./herdr-skill";
@@ -10,7 +10,6 @@ import { bunGlobalPackageRoot, isBunGlobalPackageSource } from "../installer/ski
 import { installPiPackage } from '../installer/pi-package';
 import { revertItem } from '../installer/uninstall';
 import { realPathOrResolved } from '../../effects/path-identity';
-import type { SkillHost } from '../../effects/host-skill-roots';
 import { pathRecordIsCurrent, pathRecordKey, readPathRecords } from '../../effects/host-config/path-records';
 import { architecturePort, isArchitectureUnavailable } from '../../core/architecture/contracts';
 import { globalConfigurationWriter, mutateGlobalConfiguration } from '../../effects/configuration/global-configuration';
@@ -29,7 +28,8 @@ import { applyGlobalContextRefresh, GLOBAL_RULES_BEGIN, GLOBAL_RULES_END, global
 import { CLI_NAME, namesRetiredCli, RETIRED_CLI_NAME } from "../../core/skill-surface/cli-name";
 import { shellQuote } from "../../core/shell-quote";
 import { syncCrossReviewSkills } from "./init";
-import { runInstall, type InstallTargetSpec } from "./install";
+import { antigravitySourceRoot, hasRecordedAntigravityState } from "../installer/targets/antigravity";
+import { runInstall, type InstallCommandOptions, type InstallCommandResult, type InstallTargetSpec } from "./install";
 import type { OverrideSelection } from "../../core/host-config/override";
 import { jsonFragment } from "../../core/host-config/json-fragment";
 import { compareVersions, readLatestPackageVersion } from "./doctor";
@@ -54,8 +54,9 @@ import {
   parseSkillSurfaceCatalog,
   requiredExplicitExternalDependencyInstallGroups,
   type SkillSurfaceCatalog,
+  type SkillSurfaceHost,
 } from "../../core/skill-surface/catalog";
-import { hostSkillRoot, providerSkillLock, stagedSkillRoot } from "../../effects/host-skill-roots";
+import { antigravitySkillRoot, hostSkillRoot, providerSkillLock, stagedSkillRoot } from "../../effects/host-skill-roots";
 import { MEASURED_INSTALLERS } from "../../effects/host-config/delegated";
 import {
   discoverWindowsProtectedHelperContract,
@@ -359,7 +360,7 @@ function hostIds(target: InstallTargetSpec): Array<"codex" | "claude"> {
   return ["claude", "codex"];
 }
 
-function targetFromHostIds(hosts: readonly SkillHost[]): InstallTargetSpec {
+function targetFromHostIds(hosts: readonly SkillSurfaceHost[]): InstallTargetSpec {
   const first = hosts[0];
   if (first !== 'codex' && first !== 'claude') throw new Error('No install host selected');
   return hosts.includes('codex') && hosts.includes('claude') ? "both" : first;
@@ -1293,7 +1294,9 @@ function installExternalSkillGroup(
   return withNotes(projectStagedSkills(skills, target, piSelected, env, stepName, transaction), notes);
 }
 
-function installWazaSkills(sourceRoot: string, target: InstallTargetSpec, piSelected: boolean, env?: NodeJS.ProcessEnv, refresh = false, transaction?: string): GlobalRuntimeStep {
+type StagedSkillTarget = InstallTargetSpec | 'antigravity';
+
+function installWazaSkills(sourceRoot: string, target: StagedSkillTarget, piSelected: boolean, env?: NodeJS.ProcessEnv, refresh = false, transaction?: string): GlobalRuntimeStep {
   const wazaSkills = externalSkillGroupsFromCatalog(loadSkillSurfaceCatalog(sourceRoot)).get("tw93/Waza") ?? [];
   const skillsRoot = stagedSkillRoot(homeDir(env));
   const selected = refresh ? wazaSkills : wazaSkills.filter((skill) => !existsSync(join(skillsRoot, skill, 'SKILL.md')));
@@ -1310,56 +1313,58 @@ function installWazaSkills(sourceRoot: string, target: InstallTargetSpec, piSele
   return withNotes(projectStagedSkills(wazaSkills, target, piSelected, env, 'configure Waza skills', transaction), notes);
 }
 
-/**
- * Each selected host skill root, with the canonical path it must resolve to.
- * The ledger owns every Pi-root path under the `pi` plugin, so the Pi root is
- * a projection root only when `pi` runs.
- */
-function stagedProjectionRoots(home: string, target: InstallTargetSpec, piSelected: boolean, env: NodeJS.ProcessEnv | undefined): Array<{ path: string; expected: string }> {
-  const canonicalHome = realpathSync(home);
-  const hosts = target === 'both' && piSelected ? [...hostIds(target), 'pi' as const] : hostIds(target);
-  return hosts.map((host) => ({ path: hostSkillRoot(home, host, env), expected: hostSkillRoot(canonicalHome, host, env) }));
+/** Pi follows the plugin selection. Antigravity follows explicit installation or its ledger. */
+function stagedProjectionRoots(home: string, target: StagedSkillTarget, piSelected: boolean, env: NodeJS.ProcessEnv): string[] {
+  const hosts = target === 'antigravity' ? [] : hostIds(target);
+  const roots = hosts.map((host) => hostSkillRoot(home, host, env));
+  if (target === 'both' && piSelected) roots.push(hostSkillRoot(home, 'pi', env));
+  if (target === 'antigravity' || hasRecordedAntigravityState(env, false)) {
+    checkAntigravityPath(antigravitySkillsDirHostPath(env), 'directory');
+    roots.push(antigravitySkillRoot(home));
+  }
+  return roots;
 }
 
 function preflightStagedSkillProjection(
   skills: readonly string[],
-  target: InstallTargetSpec,
+  target: StagedSkillTarget,
   piSelected: boolean,
   env: NodeJS.ProcessEnv | undefined,
   step: string,
 ): GlobalRuntimeStep | null {
-  const home = homeDir(env);
-  const roots = stagedProjectionRoots(home, target, piSelected, env);
-  const records = readPathRecords(env ?? process.env);
+  const environment = env ?? process.env;
+  const roots = stagedProjectionRoots(homeDir(environment), target, piSelected, environment);
+  const records = readPathRecords(environment);
   for (const skill of skills) for (const root of roots) {
-    const destination = join(root.path, skill);
+    const destination = join(root, skill);
     if (!pathEntryExists(destination)) continue;
-    const key = pathRecordKey(env ?? process.env, destination);
+    const key = pathRecordKey(environment, destination);
     const record = records[key];
-    if (!record || record.kind === 'user_managed' || record.owner !== ownerForInstallPath(destination, env)
+    if (!record || record.kind === 'user_managed' || record.owner !== ownerForInstallPath(destination, environment)
       || !pathRecordIsCurrent(key, record)) return { step, status: 'failed', detail: 'refusing to refresh unowned host skill ' + destination + '; preserve or move this path, then run: rh install --target ' + target };
   }
   return null;
 }
 
 function projectStagedSkills(
-  skills: readonly string[], target: InstallTargetSpec, piSelected: boolean,
+  skills: readonly string[], target: StagedSkillTarget, piSelected: boolean,
   env: NodeJS.ProcessEnv | undefined, step: string, transaction?: string,
 ): GlobalRuntimeStep {
-  const home = homeDir(env);
-  const roots = stagedProjectionRoots(home, target, piSelected, env);
+  const environment = env ?? process.env;
+  const home = homeDir(environment);
   try {
+    const roots = stagedProjectionRoots(home, target, piSelected, environment);
     const writes = skills.flatMap(skill => {
       const source = join(stagedSkillRoot(home), skill);
       if (!existsSync(join(source, 'SKILL.md'))) throw new Error('staging skill missing after install: ' + source);
       return roots.map(root => {
-        const path = join(root.path, skill);
-        const owner = ownerForInstallPath(path, env);
+        const path = join(root, skill);
+        const owner = ownerForInstallPath(path, environment);
         if (owner === null) throw new Error('no skill owner: ' + path);
         return { path, owner, entry: { type: 'symlink' as const, target: source } };
       });
     });
-    withHostConfigTransaction(env ?? process.env, transaction, root => openHostConfigGate({ env }).writePaths(writes, { transaction: root }));
+    withHostConfigTransaction(environment, transaction, root => openHostConfigGate({ env: environment }).writePaths(writes, { transaction: root }));
     return { step, status: 'ok', detail: 'projected ' + writes.length + ' host skills' };
   } catch (error) { return { step, status: 'failed', detail: (error as Error).message }; }
 }
@@ -1777,6 +1782,44 @@ export function removeBrainRootConfiguration(env: NodeJS.ProcessEnv, runtimeLock
     : { value: false }), { runtimeLock, beforeWrite, render: renderJsonObjectUpdate }).value;
 }
 
+class AntigravityRuntimeInstallFailure extends Error {
+  constructor(readonly result: InstallCommandResult) { super('Antigravity install failed'); }
+}
+
+export function installAntigravityRuntime(
+  env: NodeJS.ProcessEnv,
+  runtimeLock: RuntimeTransactionContext,
+  options: Pick<InstallCommandOptions, 'reportLanguage' | 'syncSkill' | 'hooks' | 'updateMode'> & { externalSkills?: boolean },
+): InstallCommandResult {
+  try {
+    return withHostConfigTransaction(env, undefined, (transaction) => {
+      const target = 'antigravity';
+      const { externalSkills, ...adapterOptions } = options;
+      const result = runInstall({ target, location: 'global', transaction, ...adapterOptions });
+      if (result.exitCode !== 0) throw new AntigravityRuntimeInstallFailure(result);
+      const herdr = configureRequiredHerdrSkill(target, env, transaction);
+      const steps = herdr.status === 'ok' && externalSkills !== false
+        ? [herdr, installWazaSkills(antigravitySourceRoot(env), target, false, env, false, transaction)]
+        : [herdr];
+      for (const step of steps) result.lines.push(`[${target}] ${step.status}: ${step.step}${step.detail ? ` (${step.detail})` : ''}`);
+      if (steps.some(step => step.status === 'failed')) throw new AntigravityRuntimeInstallFailure({ exitCode: 1, lines: result.lines });
+      return result;
+    }, undefined, { runtimeLock, snapshotPaths: [hostConfigPaths(env).ledger] });
+  } catch (error) {
+    if (error instanceof AntigravityRuntimeInstallFailure) return error.result;
+    throw error;
+  }
+}
+
+function refreshAntigravityRuntime(env: NodeJS.ProcessEnv, opts: GlobalRuntimeOptions): GlobalRuntimeStep {
+  const step = 'refresh Antigravity runtime';
+  const result = withProcessEnv(env, () => runInstall({
+    target: 'antigravity', location: 'global', updateMode: true, hooks: opts.hostAdapters,
+    syncSkill: opts.syncSkill, reportLanguage: opts.reportLanguage, transaction: opts.transaction,
+  }));
+  return { step, status: result.exitCode === 0 ? 'ok' : 'failed', detail: result.lines.join('; ') };
+}
+
 class RuntimeSetupFailure extends Error {
   constructor(readonly result: GlobalRuntimeResult) { super('runtime setup failed'); }
 }
@@ -1943,6 +1986,13 @@ function runGlobalRuntimeSetupInTransaction(opts: GlobalRuntimeOptions): GlobalR
 
   if (opts.hostAdapters !== false) steps.push(installHostAdapters(target, env, opts.overrides));
   else steps.push({ step: "install host adapters", status: "skipped", detail: "disabled" });
+
+  const refreshAntigravity = updateMode && target === 'both' && hasRecordedAntigravityState(env, false);
+  if (refreshAntigravity) {
+    const antigravity = refreshAntigravityRuntime(env, opts);
+    steps.push(antigravity);
+    if (antigravity.status === 'failed') return finalizeRuntimeResult(steps);
+  }
 
   steps.push(installAgentFleet(sourceRoot, bunExecutable, env, opts.transaction));
 

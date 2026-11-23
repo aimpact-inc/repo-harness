@@ -12,7 +12,7 @@ import { migrateJsonConfigRecords } from './json-config-migration';
 import { pathRecordIsCurrent, pathRecordKey, pathRecordsDigest, readPathRecords, readPathRecordSet, registerSupportedPathRecords, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
 import { HostConfigError, type HostPath, type PathCommitted, type PathRecord, type PathRecordHost, type PathRecordKind } from '../../core/host-config/types';
 import { globalContextBackupEligible, globalContextPath } from './global-context';
-import { acquireRuntimeTransactionLock, assertRuntimeTransactionContext, globalRuntimeScope, runtimeTransactionLockRelativePath, runtimeTransactionRoot, withRuntimeTransactionLock, type RuntimeTransactionContext, type RuntimeTransactionLock, type RuntimeTransactionScope } from '../../effects/locking/runtime-transaction-lock';
+import { acquireRuntimeTransactionLock, assertRuntimeTransactionContext, globalRuntimeScope, runtimeTransactionLockRelativePath, runtimeTransactionRoot, withRuntimeTransactionContext, type RuntimeTransactionContext, type RuntimeTransactionLock, type RuntimeTransactionScope } from '../../effects/locking/runtime-transaction-lock';
 import { exclusiveDirectoryLockOwnerLiveness, readExclusiveDirectoryLockOwner } from '../../effects/locking/exclusive-directory-lock';
 import { currentProcessStartTime } from '../../effects/locking/process-start-time';
 import { randomUUID } from 'crypto';
@@ -62,7 +62,7 @@ import {
   type PluginSelection,
   type SurfaceOwner,
 } from '../../core/skill-surface/plugin-manifest';
-import { hostSkillRoot, providerSkillLock, stagedSkillRoot, syncSkillRoots, type SkillHost } from '../../effects/host-skill-roots';
+import { antigravitySkillRoot, hostSkillRoot, providerSkillLock, stagedSkillRoot, syncSkillRoots, type SkillHost } from '../../effects/host-skill-roots';
 import { MANAGED_AGENTS } from '../../effects/terminal/task-role-profiles';
 import { hashManagedTree } from '../../effects/managed-tree';
 import { readWorkflowPolicyDocument } from '../../effects/state/resolve-effective-state';
@@ -253,12 +253,14 @@ export function ownerForInstallPath(path: string, env: NodeJS.ProcessEnv = proce
   const normalized = path.replaceAll('\\', '/');
   const name = normalized.split('/').at(-1) ?? '';
   const home = requireHome(env);
-  const inSkills = [...hostSkillRoots(home, env), stagedSkillRoot(home)].includes(dirname(path));
+  const inAntigravity = dirname(path) === antigravitySkillRoot(home);
+  const inSkills = inAntigravity || [...hostSkillRoots(home, env), stagedSkillRoot(home)].includes(dirname(path));
   if (inSkills && normalized.startsWith(`${hostSkillRoot(home, 'pi', env).replaceAll('\\', '/')}/`)) return 'pi';
   if (name === 'repo-harness' && inSkills) return 'core';
   if (inSkills) {
     const catalog = suppliedCatalog ?? loadSkillSurfaceCatalog();
     const pkg = catalog.packages.find(entry => entry.name === name);
+    if (inAntigravity) return pkg?.hosts.includes('antigravity') ? pkg.owner : null;
     if (pkg?.kind === 'facade' || pkg?.kind === 'provider-skill') return pkg.owner;
     // The installer writes the Herdr skill itself (configureRequiredHerdrSkill), outside the selection projection.
     if (pkg?.name === 'herdr') return pkg.owner;
@@ -444,7 +446,8 @@ export function supportedPathRecord(env: NodeJS.ProcessEnv): (key: string, recor
   const { repoHarnessSkills } = catalogMutationPathSkillNames(catalog);
   const antigravitySkillNames = new Set(
     catalog.packages
-      .filter((pkg) => pkg.source !== null && !pkg.explicitOnly && (pkg.kind === 'router' || pkg.kind === 'facade' || pkg.kind === 'provider-skill'))
+      .filter((pkg) => (pkg.source !== null && !pkg.explicitOnly && (pkg.kind === 'router' || pkg.kind === 'facade' || pkg.kind === 'provider-skill'))
+      || (pkg.kind === 'external' && pkg.hosts.includes('antigravity')))
       .map((pkg) => pkg.name),
   );
   const antigravitySkillsRoot = antigravitySkillsDirHostPath(env);
@@ -566,12 +569,14 @@ export function hostPathReplacementRefused(error: unknown): error is HostConfigE
 
 /** Standalone writers use the same runtime lock and transaction as install. */
 export function withHostConfigTransaction<T>(env: NodeJS.ProcessEnv, transaction: string | undefined,
-  run: (root: string, runtimeLock?: RuntimeTransactionContext) => T, beforeSnapshot?: () => void): T {
+  run: (root: string, runtimeLock?: RuntimeTransactionContext) => T, beforeSnapshot?: () => void,
+  held?: { readonly runtimeLock: RuntimeTransactionContext; readonly snapshotPaths: readonly string[] }): T {
   requireHome(env);
   if (transaction !== undefined) return run(transaction);
-  return withRuntimeTransactionLock(globalRuntimeScope(env), runtimeLock => {
+  return withRuntimeTransactionContext(globalRuntimeScope(env), held?.runtimeLock, runtimeLock => {
     beforeSnapshot?.();
-    const current = beginInstallHostTransaction(installProfileTransactionPaths(env), env, { runtimeLock });
+    const paths = held?.snapshotPaths ?? installProfileTransactionPaths(env);
+    const current = beginInstallHostTransaction(paths, env, { runtimeLock });
     try {
       const result = run(current.backup_root, runtimeLock);
       commitInstallHostTransaction(current);
