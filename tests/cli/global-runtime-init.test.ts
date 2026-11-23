@@ -2791,7 +2791,8 @@ exit 0
     { name: 'default update restores the staged Waza link', restores: true },
     { name: 'mismatched transaction ID skips staged Waza links', mismatch: true },
     { name: 'explicit opt-out skips staged Waza links', optOut: true },
-  ])('$name', ({ releasedParent, releasedCandidate, restores, mismatch, optOut }) => {
+    { name: 'no skill sync skips staged Waza links', noSyncSkill: true },
+  ])('$name', ({ releasedParent, releasedCandidate, restores, mismatch, optOut, noSyncSkill }) => {
     const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'repo-harness-staged-waza-update-')));
     try {
       const home = join(tmp, 'home');
@@ -2851,10 +2852,16 @@ exit 0
       rmSync(link);
 
       const parent = releasedParent ? join(released, 'src', 'cli', 'index.ts') : CLI;
-      const update = run(parent, ['update', '--json', ...(releasedCandidate ? ['--version', version] : []), ...(optOut ? ['--no-external-skills'] : [])]);
+      const update = run(parent, [
+        'update', '--json',
+        ...(releasedCandidate ? ['--version', version] : []),
+        ...(optOut ? ['--no-external-skills'] : []),
+        ...(noSyncSkill ? ['--no-sync-skill'] : []),
+      ]);
       expect(update.status, update.stdout + update.stderr).toBe(0);
+      const scope = noSyncSkill ? 'partial' : 'complete';
       expect(JSON.parse(update.stdout).steps).toContainEqual(expect.objectContaining({
-        step: 'reconcile installed candidate runtime', status: 'ok', detail: expect.stringContaining(`candidate=${version}; scope=complete`),
+        step: 'reconcile installed candidate runtime', status: 'ok', detail: expect.stringContaining(`candidate=${version}; scope=${scope}`),
       }));
       if (restores) expect(readlinkSync(link)).toBe(staged);
       else expect(lstatSync(link, { throwIfNoEntry: false })).toBeUndefined();

@@ -2036,7 +2036,7 @@ function runGlobalRuntimeSetupInTransaction(opts: GlobalRuntimeOptions): GlobalR
   } else {
     steps.push({ step: "configure Waza skills", status: "skipped", detail: "disabled" });
     steps.push({ step: "configure Mermaid skill", status: "skipped", detail: "disabled" });
-    if (refreshAntigravity && opts.externalSkills === undefined) {
+    if (refreshAntigravity && opts.syncSkill !== false && opts.externalSkills === undefined) {
       const projection = projectAvailableAntigravitySkills(sourceRoot, env, opts.transaction);
       steps.push(projection);
       if (projection.status === 'failed') return finalizeRuntimeResult(steps);
