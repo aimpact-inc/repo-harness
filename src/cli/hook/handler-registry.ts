@@ -13,6 +13,7 @@ import { resolveCapabilityOwnership } from '../../effects/state/resolve-effectiv
 import { payloadString } from './hook-input';
 import { isSeatSessionSource, seatLaunchModel, seatResetIdentity } from '../../core/board/seat-reset';
 import { recordSeatSession } from '../../effects/board/seat-reset';
+import { AGY_REVIEW_LAUNCH_ENV, recordAgyReviewSession } from '../../effects/board/agy-review-session';
 
 /**
  * A text handler's result. Successful stdout is the model-facing advisory, so
@@ -39,9 +40,18 @@ function textResult(value: { readonly exitCode: number; readonly stdout: string;
  */
 function seatSessionDiagnostic(context: HookHandlerContext): string {
   if (!HOST_ADAPTERS[context.identity.host].capabilities.sessionRecord) return '';
+  const transcriptPath = payloadString(context.payload, 'transcript_path');
+  const reviewLaunch = context.env[AGY_REVIEW_LAUNCH_ENV];
+  if (context.identity.host === 'antigravity' && reviewLaunch !== undefined) {
+    try {
+      recordAgyReviewSession(reviewLaunch, { sessionId: context.identity.sessionId ?? '', transcriptPath }, context.env);
+      return '';
+    } catch {
+      return 'repo-harness: agy review session not recorded\n';
+    }
+  }
   const identity = seatResetIdentity(context.env);
   const source = payloadString(context.payload, 'source');
-  const transcriptPath = payloadString(context.payload, 'transcript_path');
   if (identity === null || !isSeatSessionSource(source) || transcriptPath === '') return '';
   try {
     recordSeatSession(identity, { sessionId: context.identity.sessionId, transcriptPath, source,

@@ -1,10 +1,13 @@
 import { expect, test } from 'bun:test';
-import { mkdtempSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseReviewPacket, planReview, reviewPacket, type ReviewDecisionV1, type ReviewSeat } from '../src/core/board/review';
 import { executeReview, withReviewLock, type ReviewPorts } from '../src/effects/board/review';
-import { HerdrCoreError } from '../src/effects/terminal/herdr-core';
+import { AGY_REVIEW_LAUNCH_ENV, AGY_REVIEW_LAUNCH_LINE, AGY_REVIEW_PROMPT_OPTION } from '../src/effects/board/agy-review-session';
+import { effectiveGatekeeper, seatAccountQuotas } from '../src/core/board/seat-routing';
+import { HerdrCoreError, RH_LABEL } from '../src/effects/terminal/herdr-core';
 import type { BoardPullRequestV1, BoardV1 } from '../src/core/board/board';
 import type { BoardCommentPageV1, BoardCommentV1, BoardPullRequestReadV1 } from '../src/core/board/source';
 import { renderAcceptanceDispositionComment } from '../src/core/board/protocol-comments';
@@ -175,25 +178,78 @@ test('a signed-out reviewer leaves the whole High start decision without markers
   expect([p.comments, p.tabs]).toEqual([[], []]);
 });
 
-test('an agy review launch refuses gatekeeper-fallback, primary gatekeeper, and reviewer before any marker or tab', async () => {
-  const expectedMessage = 'agy review seats cannot collect or publish acceptance receipts yet; configure gatekeeper-fallback on claude, codex, or pi.';
-  const reviewerAgy = ports({ launch: async seat => ({ argv: [seat], tab: seat, runtime: seat === 'reviewer' ? 'agy' : 'codex' }) });
+// Native gatekeeper-fallback launch (#3448).
+test('agy still refuses a primary gatekeeper or reviewer before the marker or tab', async () => {
+  const expectedMessage = 'agy review launches require the effective gatekeeper-fallback seat.';
   const decisions = plan([pr(1, { second_review: 'pending' })]);
-  await expect(executeReview(decisions, context, reviewerAgy)).rejects.toThrow(expectedMessage);
-  expect([reviewerAgy.comments, reviewerAgy.tabs]).toEqual([[], []]);
+  for (const agySeat of ['gatekeeper', 'reviewer']) {
+    const p = ports({ launch: async seat => ({ argv: [seat], tab: seat, runtime: seat === agySeat ? 'agy' : 'codex' }) });
+    await expect(executeReview(decisions, context, p)).rejects.toThrow(expectedMessage);
+    expect([p.comments, p.tabs]).toEqual([[], []]);
+  }
+});
 
-  const primaryGatekeeperAgy = ports({ launch: async seat => ({ argv: [seat], tab: seat, runtime: seat === 'gatekeeper' ? 'agy' : 'claude' }) });
-  await expect(executeReview(decisions, context, primaryGatekeeperAgy)).rejects.toThrow(expectedMessage);
-  expect([primaryGatekeeperAgy.comments, primaryGatekeeperAgy.tabs]).toEqual([[], []]);
+function nativeGatekeeperRoute() {
+  const seats = { ...DEFAULT_SEATS_CONFIG, 'gatekeeper-fallback': {
+    ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'agy', model: 'gemini-4-hydrogen-high', effort: null,
+  } } as const;
+  const quotas = seatAccountQuotas([], seats.routing);
+  return effectiveGatekeeper(seats, { ...quotas,
+    chatgpt: { ...quotas.chatgpt, state: 'exhausted', remaining: 0 },
+    agy_gemini: { state: 'normal', remaining: 90, mode: 'normal' },
+  });
+}
 
-  const fallbackRoute: SeatRouteV1 = {
-    id: 'gatekeeper-fallback',
-    seat: { runtime: 'agy', model: 'gemini-4-hydrogen', advisor_model: null, effort: null, tools: ['net', 'read', 'shell'], fleet: [] },
-    line: 'gatekeeper: gatekeeper-fallback (agy gemini-4-hydrogen)',
-  };
-  const fallbackPorts = ports({ launch: async seat => ({ argv: [seat, '--model', 'gemini-4-hydrogen'], tab: 'review', runtime: 'agy' }) });
-  await expect(executeReview(high, { ...context, gatekeeper: fallbackRoute }, fallbackPorts)).rejects.toThrow(expectedMessage);
-  expect([fallbackPorts.comments, fallbackPorts.tabs]).toEqual([[], []]);
+test.skipIf(process.platform === 'win32').each([0, 1])('an agy launch reports the terminal binding result (hc exit %i)', async (bindExit) => {
+  const gatekeeper = nativeGatekeeperRoute();
+  expect(gatekeeper.id).toBe('gatekeeper-fallback');
+  const root = mkdtempSync(join(tmpdir(), 'rh-agy-review-'));
+  const hc = join(root, 'hc');
+  const agy = join(root, 'agy');
+  writeFileSync(hc, `#!/bin/sh\nexit ${bindExit}\n`, { mode: 0o700 });
+  writeFileSync(agy, `#!/bin/sh\nprintf '%s\\n' "$${AGY_REVIEW_LAUNCH_ENV}"\n`, { mode: 0o700 });
+  const tab = Promise.withResolvers<Readonly<Record<string, unknown>>>();
+  const events: string[] = [];
+  const p = ports({ agy: { hc, env: { HOME: root } }, openTab: tab.resolve, launch: async (seat, _labels, _cwd, route) => {
+    expect(seat).toBe('gatekeeper');
+    expect(route).toBe(gatekeeper);
+    return { argv: [agy, '--agent', 'rh-gatekeeper-fallback'], tab: 'review', runtime: 'agy' };
+  } });
+  const decisions = plan([pr(1)], page(), [], gatekeeper);
+  const run = executeReview(decisions, { ...context, gatekeeper, observe: ({ kind }) => events.push(kind) }, p);
+  try {
+    const placement = await Promise.race([tab.promise, run.then(() => { throw new Error('the review finished without placing a tab'); })]);
+    expect(placement).toMatchObject({ folder: '/tmp/w', name: 'review', space: 's' });
+    expect(placement).not.toHaveProperty('task');
+    expect(placement).not.toHaveProperty('labels');
+    expect(events).toEqual([]);
+    const [shell, ...args] = placement.argv as [string, ...string[]];
+    const packet = args.at(-1)!;
+    const launchId = packet.split(AGY_REVIEW_LAUNCH_LINE).at(-1)!;
+    expect(packet).toContain('reviewer.harness "agy"');
+    expect(args.at(-2)).toBe(AGY_REVIEW_PROMPT_OPTION);
+    expect(args).toContain(`${AGY_REVIEW_LAUNCH_ENV}=${launchId}`);
+    const binding = args.find(arg => arg.startsWith(`${RH_LABEL.agyReview}=${launchId} `))!;
+    const expected = { pr: 1, seat: 'gatekeeper', head_sha: SHA, tier: 'high', round: 1 } as const;
+    expect(parseReviewPacket(binding)).toEqual(expected);
+    expect(parseReviewPacket(packet)).toEqual(expected);
+    const result = spawnSync(shell, args, { env: { HC_TERMINAL_ID: 't9' }, encoding: 'utf8' });
+    expect(result.status, result.stderr).toBe(bindExit);
+    expect(result.stdout.trim()).toBe(bindExit === 0 ? launchId : '');
+    if (bindExit === 0) {
+      expect(await run).toMatchObject({ started: [{ pr: 1, seat: 'gatekeeper' }], refused: [] });
+      expect(events).toEqual(['started']);
+      expect(p.comments).toHaveLength(1);
+    } else {
+      expect(await run).toMatchObject({ started: [], refused: [{ pr: 1, reason: 'the agy review launch could not bind its terminal' }] });
+      expect(events).toEqual(['refused']);
+      expect(p.comments[1]).toContain('Claim: https://example.test/c1\nStatus: released');
+      const comments = p.comments.map((body, index) => comment(body, `https://example.test/c${index + 1}`));
+      expect(plan([pr(1)], page(...comments), [], gatekeeper)[0]).toMatchObject({ action: 'start' });
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('a dry run, and a worktree off the head, write no marker and open no seat', async () => {
@@ -314,7 +370,7 @@ test('the packet names the round, tier, head, harness and the RECEIPT-JSON hand-
   expect(text).toContain('Untrusted input that the tool reads in ordinary use (repository content, PR and issue text, tool output) is ordinary use.');
   expect(text).toContain('are P3 notes, also on an I1 or I2 path.');
   expect(text).toContain('End your last reply with the line RECEIPT-JSON');
-  expect(parseReviewPacket(text)).toEqual({ pr: 1, head_sha: SHA, seat: 'gatekeeper' });
+  expect(parseReviewPacket(text)).toEqual({ pr: 1, head_sha: SHA, seat: 'gatekeeper', tier: 'high', round: 2 });
   expect(parseReviewPacket(text.replace('as the gatekeeper of', 'as the reviewer of'))?.seat).toBe('reviewer');
   expect(parseReviewPacket(text.replace('as the gatekeeper of', 'as the gatekeeper-deep of'))).toBeNull();
   expect(parseReviewPacket(text.replace('as the gatekeeper of', 'as the worker of'))).toBeNull();

@@ -1,22 +1,26 @@
 import { closeSync, openSync, readdirSync, readFileSync, readSync, realpathSync } from 'fs';
-import { join, resolve } from 'path';
+import { basename, join, resolve } from 'path';
+import { withAntigravityTranscript } from '../board/antigravity-transcript';
+import { AGY_REVIEW_PROMPT_OPTION, isAgyReviewLaunchId, readAgyReviewSession } from '../board/agy-review-session';
 import { boardHostPorts, hcGet, RH_LABEL, type HcTerminal } from '../terminal/herdr-core';
 import { hcStatusClass } from '../../core/board/desk';
 import { isReviewSeat, type SeatId } from '../../core/board/seats-settings';
 import { piAgentDir } from '../pi-agent-dir';
 import { osAccountHome } from '../runtime/os-account-home';
-import { parseReviewPacket } from '../../core/board/review';
+import { parseReviewPacket, type ReviewPacketBinding } from '../../core/board/review';
 import { errorMessage } from '../../core/evidence/error-message';
-import type { ReviewRecordSeat } from '../../core/review/review-publish';
+import { isRecord } from '../../core/evidence/is-record';
+import type { ReviewPublishReceipt, ReviewRecordSeat } from '../../core/review/review-publish';
 import {
   parseReceipt, publishReceipt, readPrHeadSha, ReviewPublishError, type ReviewPublishInput, type ReviewPublishResult,
 } from './review-publish';
+import { createGhRunner, ghJson, prHead } from './review-publish-gh';
 
 const MARKER = 'RECEIPT-JSON';
 const RECEIPT_KIND = 'repo-harness-review-publish-receipt';
 
 export interface ReviewCollectInput extends Omit<ReviewPublishInput, 'seat'> {
-  /** The review seat's `hc` terminal address (Pi, Claude or Codex). */
+  /** The review seat's `hc` terminal address. */
   readonly seat: string;
 }
 
@@ -163,21 +167,95 @@ function lastReceiptValue(texts: readonly string[]): unknown {
   return found;
 }
 
+/** A user turn, model error or planner tool call supersedes visible planner text. */
+function agyReply(transcript: string): string {
+  let reply = '';
+  for (const line of transcript.split('\n')) {
+    if (line.trim() === '') continue;
+    let entry: unknown;
+    try { entry = JSON.parse(line); } catch { reply = ''; continue; }
+    if (!isRecord(entry)) continue;
+    if (entry.type === 'USER_INPUT' || entry.type === 'ERROR_MESSAGE') reply = '';
+    if (entry.type === 'PLANNER_RESPONSE') {
+      const callsTools = Array.isArray(entry.tool_calls) && entry.tool_calls.length > 0;
+      reply = typeof entry.content === 'string' && !callsTools ? entry.content : '';
+    }
+  }
+  return reply;
+}
+
+/** The native reply ends with one explicit receipt block. A later block supersedes any earlier one. */
+function parseAgyReceipt(reply: string): ReviewPublishReceipt {
+  const blocks = reply.split(/^[ \t]*RECEIPT-JSON[ \t]*:?[ \t]*\r?$/mu);
+  if (blocks.length === 1) throw invalid('the agy session has no RECEIPT-JSON block');
+  const final = blocks.at(-1)!.trim();
+  const fenced = /^```(?:json)?[ \t]*\r?\n([\s\S]*)\r?\n```$/iu.exec(final);
+  let value: unknown;
+  try {
+    value = JSON.parse(fenced?.[1] ?? final);
+  } catch {
+    throw invalid('the final RECEIPT-JSON block does not decode as JSON');
+  }
+  return parseReceipt(value);
+}
+
+function agyLaunchBinding(terminal: HcTerminal, pr: number): ReviewPacketBinding & { launchId: string } {
+  const binding = terminal.labels[RH_LABEL.agyReview] ?? '';
+  const separator = binding.indexOf(' ');
+  const launchId = binding.slice(0, separator);
+  const packet = parseReviewPacket(binding.slice(separator + 1));
+  if (separator < 0 || !isAgyReviewLaunchId(launchId) || terminal.labels[RH_LABEL.seat] !== 'gatekeeper'
+    || terminal.labels[RH_LABEL.pr] !== String(pr) || packet?.seat !== 'gatekeeper' || packet.pr !== pr) {
+    throw invalid('the terminal has no complete agy gatekeeper-fallback launch packet for this PR');
+  }
+  return { ...packet, launchId };
+}
+
+function agyPrHead(input: Omit<ReviewPublishInput, 'seat'>, repository: string | undefined): string {
+  const run = input.ghRunner ?? createGhRunner(input.repoRoot, input.ghBin);
+  let target;
+  let repositoryId: unknown;
+  try {
+    target = prHead(run, input.prNumber);
+    repositoryId = ghJson(run, ['api', `repos/${target.slug}`]).id;
+  } catch (error) {
+    throw new ReviewPublishError('review_publish_provider_unavailable', errorMessage(error), 1);
+  }
+  if (!Number.isSafeInteger(repositoryId) || String(repositoryId) !== repository) throw invalid('the agy launch belongs to a different repository');
+  return target.headSha.toLowerCase();
+}
+
+function agyReceipt(input: Omit<ReviewPublishInput, 'seat'>, terminal: HcTerminal, home: string): ReviewPublishReceipt {
+  const launch = agyLaunchBinding(terminal, input.prNumber);
+  const head = agyPrHead(input, terminal.labels[RH_LABEL.repository]);
+  if (launch.head_sha !== head) {
+    throw new ReviewPublishError('review_subject_stale', `the agy launch packet is for ${launch.head_sha}, but the PR head is ${head}; nothing was posted`, 2);
+  }
+  const env = { HOME: home };
+  let session: ReturnType<typeof readAgyReviewSession>;
+  try { session = readAgyReviewSession(launch.launchId, env); } catch (error) { throw invalid(errorMessage(error)); }
+  const { sessionId, transcriptPath } = session;
+  const name = basename(transcriptPath);
+  if (name !== 'transcript.jsonl' && name !== 'transcript_full.jsonl') throw invalid('the recorded agy path must name a native transcript');
+  let reply: string | null;
+  try {
+    reply = withAntigravityTranscript(sessionId, transcriptPath, env, fd => agyReply(readFileSync(fd, 'utf8')));
+  } catch { throw invalid('the recorded agy transcript is unreadable'); }
+  if (reply === null) throw invalid('the recorded agy transcript is outside the conversation logs or is not a regular transcript');
+  const receipt = parseAgyReceipt(reply);
+  if (receipt.reviewer.harness !== 'agy') throw invalid('the agy review receipt must name reviewer.harness agy');
+  if (receipt.subject_sha !== head) throw invalid(`the receipt names ${receipt.subject_sha}, not the packet head ${head}`);
+  if (receipt.round !== launch.round) throw invalid(`receipt round ${receipt.round} differs from packet round ${launch.round}`);
+  if (receipt.risk_tier !== launch.tier) throw invalid(`receipt tier ${receipt.risk_tier} differs from packet tier ${launch.tier}`);
+  return receipt;
+}
+
 /**
  * The session of the seat is the one whose packet names this seat, this PR and the PR head now. Review seats of one PR share a
  * worktree, so one directory holds every seat and every round, and file age says nothing about either. Sessions of an earlier head
  * are not candidates; two sessions for the head, or a receipt for another head than its packet's, fail closed.
  */
-export function collectReview(input: ReviewCollectInput): ReviewCollectResult {
-  const terminal = hcGet(input.seat);
-  const cwd = terminal.cwd;
-  if (cwd == null) throw invalid('terminal ' + input.seat + ' reports no working directory');
-  const seat = terminal.labels[RH_LABEL.seat];
-  if (seat === undefined) throw invalid('terminal ' + input.seat + ' carries no ' + RH_LABEL.seat + ' label; launch the seat with `rh seats argv <seat> --repository-id <id> --pr <n>`');
-  if (!isReviewSeat(seat as SeatId)) throw invalid('terminal ' + input.seat + ' carries non-review seat ' + seat);
-  let realCwd: string;
-  try { realCwd = realpathSync(cwd); } catch (error) { throw invalid('the seat working directory is unreadable: ' + errorMessage(error)); }
-  const home = osAccountHome();
+function jsonlReceipt(input: Omit<ReviewPublishInput, 'seat'>, seat: string, realCwd: string, home: string): ReviewPublishReceipt {
   const piDirectory = piSessionDirectory(piAgentDir(home), realCwd);
   const claudeDirectory = claudeSessionDirectory(envDirectory('CLAUDE_CONFIG_DIR', join(home, '.claude')), realCwd);
   const files = [...jsonlIn(piDirectory), ...jsonlIn(claudeDirectory), ...codexSessionFiles(envDirectory('CODEX_HOME', join(home, '.codex')), realCwd)];
@@ -188,20 +266,41 @@ export function collectReview(input: ReviewCollectInput): ReviewCollectResult {
   if (bound.length === 0) {
     throw invalid('the seat session record is missing: no session in ' + piDirectory + ', in ' + claudeDirectory + ' or in a Codex rollout of ' + realCwd + ' holds the review packet of the ' + seat + ' for PR #' + input.prNumber);
   }
-  const { seat: _terminalAddress, ...publishBase } = input;
-  const head = readPrHeadSha(publishBase);
+  const head = readPrHeadSha(input);
   const atHead = bound.filter((session) => parseReviewPacket(session.packet)!.head_sha === head);
   if (atHead.length === 0) {
     throw new ReviewPublishError('review_subject_stale', 'no session of the ' + seat + ' for PR #' + input.prNumber + ' holds a packet for the PR head ' + head + '; nothing was posted', 2);
   }
   // A session that ends with no receipt (an aborted attempt) is no candidate and makes nothing ambiguous.
   const finished = atHead.flatMap((session) => {
-    try { return [{ session, receipt: parseReceipt(lastReceiptValue(session.assistant)) }]; } catch { return []; }
+    try {
+      const receipt = parseReceipt(lastReceiptValue(session.assistant));
+      return receipt.reviewer.harness === 'agy' ? [] : [{ session, receipt }];
+    } catch { return []; }
   });
   if (finished.length > 1) throw invalid(finished.length + ' sessions of the ' + seat + ' for PR #' + input.prNumber + ' end with a receipt for the PR head ' + head + ': ' + finished.map(({ session }) => session.path).join(', '));
   // The one session at the head reports its own error when it holds no valid receipt.
   const receipt = finished.length === 1 ? finished[0]!.receipt : parseReceipt(lastReceiptValue(atHead[0]!.assistant));
+  if (receipt.reviewer.harness === 'agy') throw invalid('an agy review receipt requires an agy gatekeeper-fallback launch');
   if (receipt.subject_sha !== head) throw invalid('the receipt names ' + receipt.subject_sha + ', not the packet head ' + head);
+  return receipt;
+}
+
+export function collectReview(input: ReviewCollectInput): ReviewCollectResult {
+  const terminal = hcGet(input.seat);
+  const cwd = terminal.cwd;
+  if (cwd == null) throw invalid('terminal ' + input.seat + ' reports no working directory');
+  const seat = terminal.labels[RH_LABEL.seat];
+  if (seat === undefined) throw invalid('terminal ' + input.seat + ' carries no ' + RH_LABEL.seat + ' label; launch the seat with `rh seats argv <seat> --repository-id <id> --pr <n>`');
+  if (!isReviewSeat(seat as SeatId)) throw invalid('terminal ' + input.seat + ' carries non-review seat ' + seat);
+  let realCwd: string;
+  try { realCwd = realpathSync(cwd); } catch (error) { throw invalid('the seat working directory is unreadable: ' + errorMessage(error)); }
+  const home = osAccountHome();
+  const { seat: _terminalAddress, ...publishBase } = input;
+  const foreground = terminal.foreground;
+  const nativeAgy = terminal.labels[RH_LABEL.agyReview] !== undefined
+    || foreground?.name === 'agy' || foreground?.argv.includes(AGY_REVIEW_PROMPT_OPTION);
+  const receipt = nativeAgy ? agyReceipt(publishBase, terminal, home) : jsonlReceipt(publishBase, seat, realCwd, home);
   const reviewSeat: ReviewRecordSeat = seat === 'reviewer' ? 'reviewer' : 'gatekeeper';
   const published = publishReceipt({ ...publishBase, seat: reviewSeat }, receipt);
   return { ...published, seat_close: closeReviewSeat(terminal, seat, input.prNumber, receipt.subject_sha) };

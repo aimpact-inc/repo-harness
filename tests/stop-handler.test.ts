@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { chmodSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync, mkdirSync } from 'fs';
 import { spawnSync } from 'child_process';
+import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'path';
 import { tmpdir } from 'os';
 import { runStopHandler as runStopHandlerRuntime } from '../src/cli/hook/stop-handler';
@@ -8,6 +9,7 @@ import { runMutationGuard } from '../src/cli/hook/mutation-guard';
 import { seatHandoffPath, seatResetDirectory, seatResetRequestPath } from '../src/core/board/seat-reset';
 import { renderAntigravityHookCommand } from '../src/cli/hook/host-adapter';
 import { readSeatSession } from '../src/effects/board/seat-reset';
+import { AGY_REVIEW_LAUNCH_ENV, readAgyReviewSession } from '../src/effects/board/agy-review-session';
 import { tmpWorkspace } from './helpers/repo-fixture';
 import { agentNoticeFixture, noticeEnv, NOTICE_CAPABILITY, repeatUndeliveredNotice, streamNoticeAttempt } from './helpers/agent-notice';
 import { fixtureWrite, fixtureCommit } from './helpers/module-repository';
@@ -214,10 +216,8 @@ describe.skipIf(process.platform === 'win32')('Antigravity Stop', () => {
     expect(existsSync(dirname(seatDir))).toBe(false);
     fixtures.push(dirname(seatDir));
     const request = seatResetRequestPath(identity);
-    const env = [
-      `HOME=${home}`, `PATH=${bin}`, `BUN_INSTALL=${bunInstall}`, `TMPDIR=${root}`,
-      `REPO_HARNESS_SEAT=${identity.seat}`, `REPO_HARNESS_SEAT_REPOSITORY=${identity.repository}`,
-    ];
+    const baseEnv = [`HOME=${home}`, `PATH=${bin}`, `BUN_INSTALL=${bunInstall}`, `TMPDIR=${root}`];
+    const env = [...baseEnv, `REPO_HARNESS_SEAT=${identity.seat}`, `REPO_HARNESS_SEAT_REPOSITORY=${identity.repository}`];
     const git = Bun.which('git');
     if (!git) throw new Error('git is required for the Antigravity fixture');
     const init = spawnSync('/usr/bin/env', ['-i', ...env, git, 'init', '-q', cwd], { cwd: root, env: {}, encoding: 'utf8' });
@@ -236,9 +236,9 @@ describe.skipIf(process.platform === 'win32')('Antigravity Stop', () => {
     symlinkSync(transcriptPath, leafLink);
     symlinkSync(root, parentLink);
     const entry = join(import.meta.dir, '../src/cli/hook-entry.ts');
-    function invoke(event: 'SessionStart' | 'Stop', options: { executionNum?: number; transcriptPath?: string; conversationId?: string } = {}) {
+    function invoke(event: 'SessionStart' | 'Stop', options: { executionNum?: number; transcriptPath?: string; conversationId?: string } = {}, hookEnv = env) {
       const command = renderAntigravityHookCommand(process.execPath, entry, event, 'default');
-      const result = spawnSync('/usr/bin/env', ['-i', ...env, '/bin/sh', '-c', command], {
+      const result = spawnSync('/usr/bin/env', ['-i', ...hookEnv, '/bin/sh', '-c', command], {
         cwd: root, env: {}, encoding: 'utf8',
         input: JSON.stringify({ cwd, transcriptPath, conversationId, continuationActive: false, ...options }),
       });
@@ -248,7 +248,13 @@ describe.skipIf(process.platform === 'win32')('Antigravity Stop', () => {
       return result.stdout;
     }
     invoke('SessionStart');
-    expect(readSeatSession(identity)).toMatchObject({ host: 'antigravity', source: 'startup', sessionId: conversationId, transcriptPath });
+    const resetSession = readSeatSession(identity);
+    expect(resetSession).toMatchObject({ host: 'antigravity', source: 'startup', sessionId: conversationId, transcriptPath });
+    const reviewLaunch = randomUUID();
+    expect(() => readAgyReviewSession(reviewLaunch, { HOME: home })).toThrow('session record is missing');
+    invoke('SessionStart', {}, [...baseEnv, `${AGY_REVIEW_LAUNCH_ENV}=${reviewLaunch}`]);
+    expect(readAgyReviewSession(reviewLaunch, { HOME: home })).toEqual({ sessionId: conversationId, transcriptPath });
+    expect(readSeatSession(identity)).toEqual(resetSession);
     for (const path of [outside, leafLink, join(parentLink, 'outside.jsonl')]) {
       expect(invoke('Stop', { executionNum: 0, transcriptPath: path })).toBe('');
     }
