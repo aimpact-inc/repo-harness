@@ -173,7 +173,7 @@ describe("repo-harness-cross-review package: activation proof -- live in manifes
     expect(entry?.kind).toBe("provider-skill");
     expect(entry?.source).toBe(`assets/skills/${PACKAGE_DIR}`);
     expect(entry?.owner).toBe("cross-review");
-    expect([...(entry?.hosts ?? [])].sort()).toEqual(["claude", "codex", "pi"]);
+    expect([...(entry?.hosts ?? [])].sort()).toEqual(["antigravity", "claude", "codex", "pi"]);
     expect(entry?.explicitOnly).toBe(false);
   });
 

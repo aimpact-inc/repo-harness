@@ -238,7 +238,13 @@ setInterval(() => {}, 1000);
       routes: ROUTES, fleet_roles: roles, fleet_hosts: null, hook_usage: null,
     }));
     expect(packages.length).toBeGreaterThan(0);
-    expect(projected.skills.map(skill => [skill.name, skill.summary, skill.catalog_hosts])).toEqual(packages.map(pkg => [pkg.name, pkg.summary, [...pkg.hosts]]));
+    const claudeOnly = new Set(["repo-harness-herdr-portal", "repo-harness-orchestrator", "repo-harness-advisor", "repo-harness-seat-handoff"]);
+    const expectedSkills = packages.map(pkg => {
+      const hosts = pkg.name === "merge-gate" ? [] : ["claude"] as Array<"claude" | "codex" | "pi">;
+      if (hosts.length && !claudeOnly.has(pkg.name)) hosts.push("codex", "pi");
+      return [pkg.name, pkg.summary, hosts];
+    });
+    expect(projected.skills.map(skill => [skill.name, skill.summary, skill.catalog_hosts])).toEqual(expectedSkills);
     const expectedRoles: (string | null)[][] = roles.map(role => [role.name ?? null, role.description ?? null, role.model ?? null, role.effort ?? null]);
     expect(projected.fleet.map(role => [role.name, role.description, role.model, role.effort])).toEqual(expectedRoles);
     expect(JSON.stringify(projected)).not.toContain('[configured]');

@@ -55,7 +55,7 @@ import { buildRetentionCommand, type RetentionPorts } from './commands/retention
 import { MCP_AUDIT_LOG_RELATIVE_PATH } from '../core/public-projections/mcp-audit-log';
 import { TASK_INBOX_V2_RELATIVE_PATH } from '../core/fleet/task-inbox-layout';
 import { formatSecurityScan, runSecurityScan } from './commands/security';
-import { MIN_BUN_VERSION, bunVersionIsSupported, updateLeftoverSummary, updateRegisteredUpgradeSummary } from './commands/global-runtime';
+import { MIN_BUN_VERSION, bunVersionIsSupported, installAntigravityRuntime, updateLeftoverSummary, updateRegisteredUpgradeSummary } from './commands/global-runtime';
 import { parseReportLanguageFlag, REPORT_LANGUAGE_FLAG_VALUES, type ReportLanguageFlag } from './installer/global-context';
 import { installStateStatus, readInstallState, rollbackInstallSelection } from './installer/install-profile';
 import { enabledPlugins } from './installer/install-state';
@@ -140,10 +140,13 @@ export function buildProgram(): Command {
       const target = assertAdapterTarget(rawOpts.target, 'install');
       const location = rawOpts.location === undefined ? undefined : assertLocation(rawOpts.location, 'install');
       // Adapter-only installs validate the install-state protocol under the runtime lock.
-      const installAdapters = (reportLanguage?: ReportLanguageFlag) => withRuntimeTransactionLock(globalRuntimeScope(process.env), () => {
+      const installAdapters = (reportLanguage?: ReportLanguageFlag) => withRuntimeTransactionLock(globalRuntimeScope(process.env), (runtimeLock) => {
         migrateInstallState(process.env);
         readInstallState();
-        return runInstall({ target, location: location ?? 'global', ...(reportLanguage !== undefined ? { reportLanguage } : {}) });
+        if (target === 'antigravity') {
+          return installAntigravityRuntime(process.env, runtimeLock, { reportLanguage, externalSkills: rawOpts.externalSkills, syncSkill: rawOpts.syncSkill });
+        }
+        return runInstall({ target, location: location ?? 'global', reportLanguage });
       });
       if (target === 'antigravity') {
         if (rawOpts.state || rawOpts.rollback || rawOpts.plugins !== undefined || rawOpts.override?.length || rawOpts.withObsidianSkills) {

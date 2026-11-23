@@ -534,6 +534,62 @@ function setupFakeSource(root: string): void {
   );
 }
 
+function seedAntigravityStagedWaza(home: string): void {
+  for (const name of ['think', 'hunt', 'check', 'health']) {
+    const skill = join(home, '.agents', 'skills', name);
+    mkdirSync(skill, { recursive: true });
+    writeFileSync(join(skill, 'SKILL.md'), `# ${name}\n`);
+  }
+}
+
+test.skipIf(process.platform === 'win32')('default runtime update refreshes the recorded Antigravity adapter and staged skills only after opt-in', () => {
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'repo-harness-antigravity-update-')));
+  try {
+    const home = join(tmp, 'home');
+    const bin = join(tmp, 'bin');
+    const source = join(tmp, 'source');
+    const env = { ...sanitizedChildEnv(home), PATH: `${bin}:${process.env.PATH ?? ''}`, REPO_HARNESS_BUN_EXECUTABLE: process.execPath };
+    mkdirSync(home);
+    mkdirSync(bin);
+    writeFakeHc(bin);
+    setupFakeSource(source);
+    seedGlobalPackageFixture(env);
+    recordPluginSelection(env, [], []);
+    seedAntigravityStagedWaza(home);
+
+    const options = { sourceRoot: source, cwd: tmp, target: 'both' as const, plugins: [], installCli: false, codegraph: false, env };
+    const gemini = join(home, '.gemini');
+    const linked = join(tmp, 'user-gemini');
+    mkdirSync(linked);
+    symlinkSync(linked, gemini);
+    for (const updateMode of [false, true]) {
+      const result = runGlobalRuntimeSetup({ ...options, updateMode });
+      expect(result.exitCode, result.stdout + result.stderr).toBe(0);
+      expect(result.steps.find(step => step.step === 'refresh Antigravity runtime')).toBeUndefined();
+      expect(readlinkSync(gemini)).toBe(linked);
+      expect(readdirSync(linked)).toEqual([]);
+    }
+    rmSync(gemini);
+
+    const installed = spawnSync(process.execPath, ['--no-env-file', join(ROOT, 'src/cli/index.ts'), 'install', '--target', 'antigravity'], {
+      cwd: tmp, env, encoding: 'utf8',
+    });
+    expect(installed.status, installed.stdout + installed.stderr).toBe(0);
+    const hooks = join(gemini, 'config', 'hooks.json');
+    const skill = join(gemini, 'config', 'skills', 'think');
+    rmSync(skill);
+    const movedEnv = { ...env, BUN_INSTALL: join(home, 'moved-bun') };
+    const packageRoot = seedGlobalPackageFixture(movedEnv, { mutable: true });
+    const updated = runGlobalRuntimeSetup({ ...options, updateMode: true, env: movedEnv });
+    expect(updated.exitCode, updated.stdout + updated.stderr).toBe(0);
+    expect(updated.steps.find(step => step.step === 'refresh Antigravity runtime')).toMatchObject({ status: 'ok' });
+    expect(readFileSync(hooks, 'utf8')).toContain(join(packageRoot, 'dist/hook-entry.js'));
+    expect(readlinkSync(skill)).toBe(join(home, '.agents', 'skills', 'think'));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 function setObsidianSkillIntegrity(root: string, name: string, integrity: string | null): void {
   const manifestPath = join(root, 'assets', 'skill-commands', 'manifest.json');
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));

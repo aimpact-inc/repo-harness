@@ -23,6 +23,7 @@ import {
   type CheckStatus,
 } from '../../src/cli/commands/doctor';
 import { writeShellExecutableFixture } from '../helpers/repo-fixture';
+import { writeFakeHc } from '../helpers/fake-hc';
 import { installStateFixturePath, recordPluginSelection, seedGlobalPackageFixture, seedPathRecords, withTempHome } from '../helpers/install-ownership';
 import type { PathCommitted } from '../../src/core/host-config/types';
 import { pathRecordHost, pathRecordKey } from '../../src/effects/host-config/path-records';
@@ -99,9 +100,19 @@ function setupFakeEnvironment(prefix: string) {
   return { root, home, fakeBin };
 }
 
+function seedAntigravitySkillInputs(home: string, bin: string): void {
+  writeFakeHc(bin);
+  for (const skill of ['think', 'hunt', 'check', 'health']) {
+    const staged = path.join(home, '.agents', 'skills', skill);
+    fs.mkdirSync(staged, { recursive: true });
+    fs.writeFileSync(path.join(staged, 'SKILL.md'), `# ${skill} fixture\n`);
+  }
+}
+
 test.skipIf(process.platform === 'win32')('doctor measures the installed Antigravity Bash command separately from native activation', () => {
   const { root, home, fakeBin } = setupFakeEnvironment('rh-antigravity-doctor');
   try {
+    seedAntigravitySkillInputs(home, fakeBin);
     const bunInstall = path.join(root, 'bun');
     const env = { HOME: home, PATH: fakeBin, BUN_INSTALL: bunInstall, TMPDIR: root };
     seedGlobalPackageFixture(env, { mutable: true });
@@ -156,6 +167,7 @@ test.skipIf(process.platform === 'win32')('doctor measures the installed Antigra
 test.skipIf(process.platform === 'win32')('doctor checks Antigravity global rules and projected skills across absent, ok, stale, unbalanced, and linked states', () => {
   const { root, home, fakeBin } = setupFakeEnvironment('rh-antigravity-doctor-rules-skills');
   try {
+    seedAntigravitySkillInputs(home, fakeBin);
     const bunInstall = path.join(root, 'bun');
     const env = { HOME: home, PATH: fakeBin, BUN_INSTALL: bunInstall, TMPDIR: root };
     seedGlobalPackageFixture(env);
@@ -233,6 +245,7 @@ test.skipIf(process.platform === 'win32')('doctor checks Antigravity global rule
 test.skipIf(process.platform === 'win32')('doctor reports matching-but-unmanaged for an Antigravity skill symlink without a ledger record', () => {
   const { root, home, fakeBin } = setupFakeEnvironment('rh-antigravity-doctor-unmanaged');
   try {
+    seedAntigravitySkillInputs(home, fakeBin);
     const bunInstall = path.join(root, 'bun');
     const env = { HOME: home, PATH: fakeBin, BUN_INSTALL: bunInstall, TMPDIR: root };
     seedGlobalPackageFixture(env);

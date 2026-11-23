@@ -81,31 +81,32 @@ export interface AntigravitySkillProjection {
   readonly destination: string;
 }
 
-/**
- * Expected Antigravity skill symlinks under ~/.gemini/config/skills/<name>,
- * derived from assets/skill-commands/manifest.json via the shared catalog selectors.
- */
-export function expectedAntigravitySkillProjections(
-  sourceRoot: string,
-  home: string,
-  plugins: readonly PluginId[],
-): readonly AntigravitySkillProjection[] {
+function readAntigravityCatalog(sourceRoot: string) {
   const manifestPath = join(sourceRoot, 'assets', 'skill-commands', 'manifest.json');
   const parsed = parseSkillSurfaceCatalog(readFileSync(manifestPath, 'utf8'), { declared: true });
   if (parsed.status !== 'valid') {
     const detail = parsed.diagnostics.map((d) => `${d.code} ${d.path}: ${d.message}`).join('; ');
     throw new Error(`invalid skill-surface catalog ${manifestPath}: ${detail}`);
   }
-  const catalog = parsed.catalog;
+  return parsed.catalog;
+}
+
+/** Expected symlinks under ~/.gemini/config/skills, from the skill catalog. */
+export function expectedAntigravitySkillProjections(
+  sourceRoot: string,
+  home: string,
+  plugins: readonly PluginId[],
+  catalog = readAntigravityCatalog(sourceRoot),
+): readonly AntigravitySkillProjection[] {
   const facades = new Set(facadesForSelection(catalog, plugins));
   const placements = hostSkillPlacements(catalog, plugins);
-  const selected = new Set([...facades, ...placements.claude, ...placements.codex, ...placements.pi]);
+  const selected = new Set([...facades, ...placements.antigravity]);
   const root = antigravitySkillRoot(home);
   const projections: AntigravitySkillProjection[] = [
     { host: 'antigravity', name: catalog.router, owner: 'core', source: sourceRoot, destination: join(root, catalog.router) },
   ];
   for (const pkg of catalog.packages) {
-    if (pkg.source === null || !selected.has(pkg.name)) continue;
+    if (pkg.source === null || !pkg.hosts.includes('antigravity') || !selected.has(pkg.name)) continue;
     projections.push({
       host: 'antigravity',
       name: pkg.name,
@@ -117,25 +118,30 @@ export function expectedAntigravitySkillProjections(
   return projections;
 }
 
+function antigravityRecords(env: NodeJS.ProcessEnv, preview: boolean) {
+  const paths = hostConfigPaths(env);
+  const ledger = (preview ? readProjectedLedger : readLedger)(paths);
+  const hooksPath = antigravityHostPath(env, paths);
+  const rulesPath = antigravityGlobalRulesHostPath(env, paths);
+  return {
+    hooks: ledger.fragments.some((record) => record.file === hooksPath && record.owner === 'core'
+      && record.selector === ANTIGRAVITY_HOOK_SELECTOR && record.kind === 'add'),
+    rules: ledger.fragments.some((record) => record.file === rulesPath && record.selector === GLOBAL_RULES_SELECTOR),
+    skills: Object.values(ledger.paths).some((record) => record.host === 'antigravity'),
+  };
+}
+
 export function recordedAntigravityHooks(env: NodeJS.ProcessEnv, preview: boolean): boolean {
-  return openHostConfigGate({ env, preview }).recorded(antigravityHooksPath(env)).some((record) =>
-    record.owner === 'core' && record.selector === ANTIGRAVITY_HOOK_SELECTOR && record.kind === 'add');
+  return antigravityRecords(env, preview).hooks;
 }
 
 export function recordedAntigravityRules(env: NodeJS.ProcessEnv, preview: boolean): boolean {
-  return openHostConfigGate({ env, preview }).recorded(antigravityGlobalRulesPath(env)).some((record) =>
-    record.selector === GLOBAL_RULES_SELECTOR);
-}
-
-export function recordedAntigravitySkills(env: NodeJS.ProcessEnv, preview: boolean): boolean {
-  const paths = hostConfigPaths(env);
-  const ledger = (preview ? readProjectedLedger : readLedger)(paths);
-  return Object.values(ledger.paths).some((record) => record.host === 'antigravity');
+  return antigravityRecords(env, preview).rules;
 }
 
 export function hasRecordedAntigravityState(env: NodeJS.ProcessEnv, preview: boolean): boolean {
-  checkAntigravityAllPaths(env);
-  return recordedAntigravityHooks(env, preview) || recordedAntigravityRules(env, preview) || recordedAntigravitySkills(env, preview);
+  const { hooks, rules, skills } = antigravityRecords(env, preview);
+  return hooks || rules || skills;
 }
 
 function readHooks(env: NodeJS.ProcessEnv) {
@@ -144,9 +150,29 @@ function readHooks(env: NodeJS.ProcessEnv) {
   return { path, exists: observation.existed, content: decode(bytes, path) };
 }
 
-export function readAntigravityHooks(env: NodeJS.ProcessEnv): { path: string; value: unknown } {
-  const { path, content } = readHooks(env);
-  return { path, value: jsonFragmentValue(content, ANTIGRAVITY_HOOK_SELECTOR) };
+export function readAntigravityHooks(env: NodeJS.ProcessEnv): { path: string; exists: boolean; value: unknown } {
+  const { path, exists, content } = readHooks(env);
+  return { path, exists, value: jsonFragmentValue(content, ANTIGRAVITY_HOOK_SELECTOR) };
+}
+
+/** Antigravity uses flat lifecycle handlers and matcher groups for tool events. */
+export function antigravityHookCommands(group: unknown): Array<{ event: string; command: string }> {
+  const commands: Array<{ event: string; command: string }> = [];
+  if (!isRecord(group)) return commands;
+  for (const event of ['SessionStart', 'PreToolUse', 'PostToolUse', 'PreInvocation', 'PostInvocation', 'Stop']) {
+    const entries = group[event];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (!isRecord(entry)) continue;
+      const handlers = Array.isArray(entry.hooks) ? entry.hooks : [entry];
+      for (const handler of handlers) {
+        if (isRecord(handler) && typeof handler.command === 'string' && handler.command.trim()) {
+          commands.push({ event, command: handler.command });
+        }
+      }
+    }
+  }
+  return commands;
 }
 
 interface AntigravityCheck {
@@ -405,11 +431,7 @@ export function planAntigravitySkills(
   opts: InstallOptions,
   preview: boolean,
 ): AntigravitySkillsPlan {
-  const updateMode = opts.updateMode === true;
-  const hasSkills = updateMode
-    ? (recordedAntigravitySkills(env, preview) || recordedAntigravityHooks(env, preview))
-    : true;
-  if (!hasSkills) {
+  if (opts.syncSkill === false || (opts.updateMode && !hasRecordedAntigravityState(env, preview))) {
     return { projections: [], writes: [], retiredKeys: [], actions: [], refusals: [] };
   }
   const paths = hostConfigPaths(env);
@@ -426,7 +448,8 @@ export function planAntigravitySkills(
   }
   const home = requireHome(env);
   const sourceRoot = antigravitySourceRoot(env);
-  const projections = expectedAntigravitySkillProjections(sourceRoot, home, antigravityPlugins(env));
+  const catalog = readAntigravityCatalog(sourceRoot);
+  const projections = expectedAntigravitySkillProjections(sourceRoot, home, antigravityPlugins(env), catalog);
   const writes: HostConfigPathWrite[] = projections.map((projection) => ({
     path: projection.destination,
     owner: projection.owner,
@@ -450,8 +473,11 @@ export function planAntigravitySkills(
   const ledger = (preview ? readProjectedLedger : readLedger)(paths);
   const recorded = partitionPathRecords(env, ledger.paths).records;
   const expectedKeys = new Set(projections.map((projection) => pathRecordKey(env, projection.destination)));
+  const independentSkills = new Set(catalog.packages
+    .filter((pkg) => pkg.kind === 'external' || pkg.kind === 'integration')
+    .map((pkg) => pkg.name));
   const retiredEntries = Object.entries(recorded)
-    .filter(([key, record]) => record.host === 'antigravity' && !expectedKeys.has(key));
+    .filter(([key, record]) => record.host === 'antigravity' && !expectedKeys.has(key) && !independentSkills.has(basename(key)));
   const retiredKeys = retiredEntries.map(([key]) => key);
   for (const [key, record] of retiredEntries) {
     const revertPlan = planPathRevertEntry(paths, key, record);
@@ -528,7 +554,10 @@ export const antigravityTarget: AgentTarget<'antigravity'> = {
       const hookResult = gate.apply([builtHookChange]);
       const skipped = hookResult.skipped[0];
       if (skipped) files.push({ path: hooksInfo.path, action: 'kept', detail: `${skipped.code}: ${hooksInfo.path}#${skipped.selector}` });
-      else files.push({ path: hooksInfo.path, action: hookResult.written.length ? (hooksInfo.exists ? 'updated' : 'created') : 'unchanged' });
+      else {
+        const writtenAction = hooksInfo.exists ? 'updated' : 'created';
+        files.push({ path: hooksInfo.path, action: hookResult.written.length ? writtenAction : 'unchanged' });
+      }
     }
 
     if (rulesPlan) {
@@ -545,15 +574,16 @@ export const antigravityTarget: AgentTarget<'antigravity'> = {
     }
 
     if (skillPlan.writes.length > 0) {
-      const writtenKeys = new Set(gate.writePaths(skillPlan.writes));
+      const writtenKeys = new Set(gate.writePaths(skillPlan.writes, { transaction: opts.transaction }));
       for (const item of skillPlan.actions) {
         if (item.action === 'remove') continue;
-        const action = writtenKeys.has(item.key) ? (item.action === 'update' ? 'updated' : 'created') : 'unchanged';
+        const writtenAction = item.action === 'update' ? 'updated' : 'created';
+        const action = writtenKeys.has(item.key) ? writtenAction : 'unchanged';
         files.push({ path: item.path, action });
       }
     }
     if (skillPlan.retiredKeys.length > 0) {
-      const retired = gate.revertPaths(skillPlan.retiredKeys);
+      const retired = gate.revertPaths(skillPlan.retiredKeys, { transaction: opts.transaction });
       for (const entry of retired) {
         if (entry.action === 'removed') files.push({ path: entry.path, action: 'removed' });
       }

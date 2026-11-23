@@ -37,6 +37,8 @@ export interface InstallCommandOptions {
   reportLanguage?: ReportLanguageFlag;
   updateMode?: boolean;
   hooks?: boolean;
+  transaction?: string;
+  syncSkill?: boolean;
 }
 
 export interface UninstallCommandOptions {
@@ -75,9 +77,11 @@ export function runInstall(opts: InstallCommandOptions): InstallCommandResult {
     try {
       const result = target.install(opts.location, {
         overrides: opts.overrides ?? NO_OVERRIDES,
-        ...(opts.reportLanguage !== undefined ? { reportLanguage: opts.reportLanguage } : {}),
-        ...(opts.updateMode !== undefined ? { updateMode: opts.updateMode } : {}),
-        ...(opts.hooks !== undefined ? { hooks: opts.hooks } : {}),
+        reportLanguage: opts.reportLanguage,
+        updateMode: opts.updateMode,
+        hooks: opts.hooks,
+        transaction: opts.transaction,
+        syncSkill: opts.syncSkill,
       });
       for (const file of result.files) {
         lines.push(`[${target.id}] ${file.action}: ${file.detail ?? file.path}`);

@@ -7,10 +7,15 @@
  */
 
 import * as fs from 'fs';
+import { isDeepStrictEqual } from 'node:util';
+import { isRecord } from '../../core/evidence/is-record';
+import { antigravityHooksPath } from '../../effects/host-config/gate';
+import { antigravityHookCommands, antigravityTarget, checkAntigravitySkills, hasRecordedAntigravityState, readAntigravityHooks } from '../installer/targets/antigravity';
 import { version as PACKAGE_VERSION } from '../../../package.json';
 import { ALL_TARGETS } from '../installer/targets/registry';
 import { ROUTES, routesForHost } from '../hook/route-registry';
 import {
+  buildAntigravityHooks,
   compareManagedHookProjection,
   isManagedEntry,
   type HookHost,
@@ -51,6 +56,7 @@ export interface StatusReport {
     expectedEntryCount: number;
     /** Exact comparison of the repo-harness-owned projection, when inspected. */
     projection?: ManagedHookProjectionReport;
+    skillProjection?: ReturnType<typeof checkAntigravitySkills>;
   }>;
   repo: {
     inGitRepo: boolean;
@@ -167,6 +173,52 @@ export function readInstallStateForStatus(): StatusReport['installState'] {
   }
 }
 
+function antigravityHookProjection(member: unknown, expectedEntryCount: number): ManagedHookProjectionReport {
+  const managedEntryCount = antigravityHookCommands(member).length;
+  try {
+    const expected = buildAntigravityHooks(process.env);
+    const actual = isRecord(member) ? member : {};
+    const mismatches: ManagedHookProjectionMismatch[] = [];
+    for (const [event, commands] of Object.entries(expected)) {
+      if (actual[event] === undefined) mismatches.push({ kind: 'missing', event });
+      else if (!isDeepStrictEqual(actual[event], commands)) mismatches.push({ kind: 'field-mismatch', event, field: 'event', expected: 'current hook configuration', actual: 'changed hook configuration' });
+    }
+    for (const { event } of antigravityHookCommands(actual)) {
+      if (!Object.hasOwn(expected, event) && !mismatches.some(item => item.event === event)) mismatches.push({ kind: 'unexpected', event });
+    }
+    if (actual.enabled === false) mismatches.push({ kind: 'field-mismatch', event: 'repo-harness', field: 'event', expected: 'enabled', actual: 'disabled' });
+    return { status: mismatches.length ? 'drift' : 'consistent', managedEntryCount, expectedEntryCount, mismatches };
+  } catch (error) {
+    return { status: 'drift', managedEntryCount, expectedEntryCount, mismatches: [], error: (error as Error).message };
+  }
+}
+
+function antigravityStatus(): StatusReport['targets'][number] {
+  const id = antigravityTarget.id;
+  const expectedEntryCount = routesForHost(id).length;
+  const target = { id, displayName: antigravityTarget.displayName, location: 'global' as const,
+    installed: false, alreadyConfigured: false, managedEntryCount: 0, expectedEntryCount };
+  if (process.platform === 'win32') return target;
+  const env = process.env;
+  try {
+    const recorded = hasRecordedAntigravityState(env, true);
+    const { path, exists, value } = readAntigravityHooks(env);
+    const installed = exists || recorded;
+    if (!recorded && value === undefined) return { ...target, installed, configPath: path };
+    const projection = antigravityHookProjection(value, expectedEntryCount);
+    return {
+      ...target, installed, configPath: path, alreadyConfigured: isRecord(value) && value.enabled !== false,
+      managedEntryCount: projection.managedEntryCount, projection,
+      skillProjection: checkAntigravitySkills(env),
+    };
+  } catch {
+    return { ...target, configPath: antigravityHooksPath(env), projection: {
+      status: 'drift', expectedEntryCount, managedEntryCount: 0, mismatches: [],
+      error: 'Cannot inspect Antigravity hooks or their ownership record. Run rh doctor for details.',
+    } };
+  }
+}
+
 export function runStatus(cwd: string = process.cwd()): StatusReport {
   const byEvent: Record<string, number> = {};
   for (const r of ROUTES) {
@@ -193,6 +245,8 @@ export function runStatus(cwd: string = process.cwd()): StatusReport {
       projection,
     });
   }
+
+  targets.push(antigravityStatus());
 
   const repoRoot = resolveRepoRoot(cwd);
   const repo: StatusReport['repo'] = {
@@ -237,11 +291,12 @@ export function formatStatus(report: StatusReport, asJson = false): string {
     else status = `${t.managedEntryCount}/${t.expectedEntryCount} managed entries`;
     if (t.projection?.error) {
       status += `; projection check failed: ${t.projection.error}`;
-    } else if (t.alreadyConfigured && t.projection?.status === 'drift' && t.projection.mismatches.length > 0) {
+    } else if ((t.alreadyConfigured || t.id === 'antigravity') && t.projection?.status === 'drift' && t.projection.mismatches.length > 0) {
       status += `; projection drift: ${t.projection.mismatches.map(formatManagedHookProjectionMismatch).join('; ')}`;
     }
     lines.push(`  ${t.id} (${t.location}): ${status}`);
     if (t.configPath) lines.push(`    ${t.configPath}`);
+    if (t.skillProjection && t.skillProjection.status !== 'ok' && t.skillProjection.status !== 'na') lines.push(`    ${t.skillProjection.detail}`);
   }
   lines.push('');
   lines.push('Routes:');

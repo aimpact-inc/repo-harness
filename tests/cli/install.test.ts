@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { installStateFixturePath, recordLegacyInstallOwnership, seedGlobalPackageFixture, withTempHome } from '../helpers/install-ownership';
+import { writeFakeHc } from '../helpers/fake-hc';
+import { installStateFixturePath, recordLegacyInstallOwnership, recordPluginSelection, seedGlobalPackageFixture, withTempHome } from '../helpers/install-ownership';
 import * as fs from 'fs';
 import * as path from 'path';
 import { spawnSync } from 'child_process';
@@ -20,6 +21,13 @@ const CLI = path.join(ROOT, 'src/cli/index.ts');
 function antigravityCli(home: string, args: readonly string[], bunInstall = path.join(home, '.bun')) {
   const bin = path.join(home, 'probe-bin');
   fs.mkdirSync(bin, { recursive: true });
+  if (!fs.existsSync(path.join(bin, 'hc'))) writeFakeHc(bin);
+  for (const skill of ['think', 'hunt', 'check', 'health']) {
+    const staged = path.join(home, '.agents', 'skills', skill);
+    if (fs.existsSync(staged)) continue;
+    fs.mkdirSync(staged, { recursive: true });
+    fs.writeFileSync(path.join(staged, 'SKILL.md'), `# ${skill} fixture\n`);
+  }
   return spawnSync(process.execPath, ['--no-env-file', '--config=/dev/null', CLI, ...args], {
     cwd: home, env: { HOME: home, PATH: bin, BUN_INSTALL: bunInstall, TMPDIR: home }, encoding: 'utf8',
   });
@@ -66,7 +74,7 @@ test.skipIf(process.platform === 'win32')('Antigravity refuses a link or wrong e
   });
 }, 30_000);
 
-test.skipIf(process.platform === 'win32')('default install and update exclude Antigravity, and explicit update refreshes only a recorded member', () => {
+test.skipIf(process.platform === 'win32')('adapter-only default install and local previews exclude Antigravity, and explicit update refreshes a recorded member', () => {
   withTempHome('rh-antigravity-opt-in', (home) => {
     const hooks = path.join(home, '.gemini/config/hooks.json');
     const target = ['--target', 'antigravity'];
@@ -138,6 +146,12 @@ test.skipIf(process.platform === 'win32')('Antigravity install --report-language
     expect(fs.lstatSync(path.join(skillsDir, 'repo-harness-check')).isSymbolicLink()).toBe(true);
     expect(fs.lstatSync(path.join(skillsDir, 'repo-harness-issue-flow')).isSymbolicLink()).toBe(true);
     expect(fs.existsSync(path.join(skillsDir, 'repo-harness-setup'))).toBe(false);
+    expect(fs.existsSync(path.join(skillsDir, 'repo-harness-herdr-portal'))).toBe(false);
+    expect(fs.existsSync(path.join(skillsDir, 'repo-harness-seat-handoff'))).toBe(false);
+    expect(fs.readFileSync(path.join(skillsDir, 'herdr', 'SKILL.md'), 'utf8')).toContain('hc manual (herdr-core)');
+    for (const skill of ['think', 'hunt', 'check', 'health']) {
+      expect(fs.readlinkSync(path.join(skillsDir, skill))).toBe(path.join(home, '.agents', 'skills', skill));
+    }
 
     // Unrelated flags and invalid --report-language are rejected.
     expect(antigravityCli(home, ['install', ...target, '--plugins', 'core']).status).not.toBe(0);
@@ -162,6 +176,61 @@ test.skipIf(process.platform === 'win32')('Antigravity install --report-language
     expect(fs.readFileSync(rules, 'utf8')).toBe(edited);
   });
 }, 30_000);
+
+test.skipIf(process.platform === 'win32')('Antigravity rolls back a new install when a Waza destination belongs to the user', () => {
+  withTempHome('rh-antigravity-waza-collision', (home) => {
+    const config = path.join(home, '.gemini', 'config');
+    const skills = path.join(config, 'skills');
+    const think = path.join(skills, 'think');
+    fs.mkdirSync(think, { recursive: true });
+    fs.writeFileSync(path.join(think, 'SKILL.md'), '# User skill\n');
+
+    const install = antigravityCli(home, ['install', '--target', 'antigravity']);
+    expect(install.status, install.stdout + install.stderr).toBe(1);
+    expect(install.stdout + install.stderr).toContain(think);
+    expect(fs.readFileSync(path.join(think, 'SKILL.md'), 'utf8')).toBe('# User skill\n');
+    expect(fs.readdirSync(skills)).toEqual(['think']);
+    expect(fs.existsSync(path.join(config, 'hooks.json'))).toBe(false);
+    expect(fs.existsSync(path.join(config, 'AGENTS.md'))).toBe(false);
+  });
+});
+
+test.skipIf(process.platform === 'win32')('Antigravity retires the old owned portal link and uninstalls new skill projections', () => {
+  withTempHome('rh-antigravity-retire-skill', (home) => {
+    const target = ['--target', 'antigravity'];
+    const skills = path.join(home, '.gemini', 'config', 'skills');
+    const portal = path.join(skills, 'repo-harness-herdr-portal');
+    const portalSource = path.join(ROOT, 'assets', 'skills', 'repo-harness-herdr-portal');
+    recordPluginSelection(process.env, ['peer-runtime', 'strategy-memory']);
+    expect(antigravityCli(home, ['install', ...target]).status).toBe(0);
+    openHostConfigGate().writePaths([{ path: portal, owner: 'peer-runtime', entry: { type: 'symlink', target: portalSource } }]);
+    const strategy = path.join(skills, 'repo-harness-strategy');
+    expect(antigravityCli(home, ['strategy', 'install-skill']).status).toBe(0);
+    expect(fs.readlinkSync(strategy)).toBe(path.join(ROOT, 'assets', 'skills', 'repo-harness-strategy'));
+
+    const update = antigravityCli(home, ['update', ...target]);
+    expect(update.status, update.stdout + update.stderr).toBe(0);
+    expect(fs.existsSync(portal)).toBe(false);
+    expect(fs.existsSync(strategy)).toBe(true);
+    expect(fs.existsSync(path.join(skills, 'think'))).toBe(true);
+    expect(fs.existsSync(path.join(portalSource, 'SKILL.md'))).toBe(true);
+
+    // The user recreated the link with the same target. Its identity is new.
+    openHostConfigGate().writePaths([{ path: portal, owner: 'peer-runtime', entry: { type: 'symlink', target: portalSource } }]);
+    fs.renameSync(portal, path.join(home, 'previous-portal'));
+    fs.symlinkSync(portalSource, portal, 'dir');
+    expect(antigravityCli(home, ['update', ...target]).status).toBe(0);
+    expect(fs.readlinkSync(portal)).toBe(portalSource);
+
+    const uninstall = antigravityCli(home, ['uninstall', ...target]);
+    expect(uninstall.status, uninstall.stdout + uninstall.stderr).toBe(0);
+    for (const name of ['herdr', 'think', 'hunt', 'check', 'health', 'repo-harness-strategy']) {
+      expect(fs.lstatSync(path.join(skills, name), { throwIfNoEntry: false })).toBeUndefined();
+    }
+    expect(fs.existsSync(path.join(home, '.agents', 'skills', 'think', 'SKILL.md'))).toBe(true);
+    expect(fs.readlinkSync(portal)).toBe(portalSource);
+  });
+});
 
 test.skipIf(process.platform === 'win32')('Antigravity --dry-run reports unowned skill collisions and exits non-zero, matching apply', () => {
   withTempHome('rh-antigravity-dry-run-collision', (home) => {

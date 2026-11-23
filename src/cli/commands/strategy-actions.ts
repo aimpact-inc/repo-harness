@@ -1,6 +1,7 @@
 import { collectStrategyContext, validateStrategyRequest, strategyStatus, StrategySourceDriftError, REPOSITORY_PILOT_DOCUMENT, REPOSITORY_PILOT_READ_LIMITS } from '../../effects/strategy/context';
 import { projectStrategySkill } from '../../effects/strategy/skill';
 import type { StrategyCommandOptions } from './strategy';
+import { hasRecordedAntigravityState } from '../installer/targets/antigravity';
 
 function run(action: () => unknown): void {
   try { process.stdout.write(`${JSON.stringify(action())}\n`); }
@@ -38,5 +39,5 @@ export function validate(path: string, o: StrategyCommandOptions): void {
 }
 
 export function projectSkill(action: 'install' | 'uninstall', o: StrategyCommandOptions): void {
-  run(() => projectStrategySkill({ action, target: o.target, dryRun: o.dryRun }));
+  run(() => projectStrategySkill({ action, target: o.target, dryRun: o.dryRun }, hasRecordedAntigravityState));
 }
