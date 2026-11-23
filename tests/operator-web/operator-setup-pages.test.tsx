@@ -310,6 +310,8 @@ describe('Agents page', () => {
     expect(all('[data-host-row]').map(row => row.getAttribute('data-host-row'))).toEqual(['claude', 'codex', 'pi', 'antigravity']);
     expect(text('[data-host-row="claude"] [data-host-sentence]')).toBe('Connected · 5/5 managed hooks');
     expect(text('[data-host-row="codex"]')).toContain('v0.162.0');
+    expect(text('[data-host-row="antigravity"]')).toContain('Antigravityv1.5.15');
+    expect(text('[data-host-row="antigravity"] [data-host-sentence]')).toBe('Connected · 4/4 managed hooks');
     expect(all('[data-fleet-role]').map(row => row.getAttribute('data-fleet-role'))).toEqual(['deep-reasoner', 'explorer', 'harness-evaluator']);
   });
 
@@ -476,8 +478,10 @@ describe('Skills page', () => {
     const skills = snapshot.skills.map(skill => skill.name === 'think' ? { ...skill, catalog_hosts: ['claude' as const, 'codex' as const] }
       : skill.name === 'hunt' ? { ...skill, catalog_hosts: null } : skill);
     await mount('#skills', props({ ...snapshot, skills, install_selection: null }));
-    const state = (skill: string) => document.querySelector(`[data-skill="${skill}"] [data-host-cell="pi"] [data-skill-state]`)!.getAttribute('data-skill-state');
+    const state = (skill: string, host = 'pi') => document.querySelector(`[data-skill="${skill}"] [data-host-cell="${host}"] [data-skill-state]`)!.getAttribute('data-skill-state');
     expect([state('repo-harness'), state('think'), state('hunt')]).toEqual(['not_installed', 'not_supported', 'not_judged']);
+    // Setup check measures no Antigravity skill root, so a catalog host there is not judged.
+    expect([state('repo-harness', 'antigravity'), state('think', 'antigravity')]).toEqual(['not_judged', 'not_supported']);
     expect(document.querySelector('[data-skill-repair="update"]')).toBeNull();
     expect(text('[data-skill-repair="no-ledger"]')).toContain('rh update cannot run');
   });

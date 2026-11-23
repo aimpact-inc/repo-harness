@@ -43,7 +43,7 @@ const SUMMARY: Readonly<Record<string, string>> = {
 };
 
 function skill(name: string, claude: SetupSkillHostRow | null, codex: SetupSkillHostRow | null): SetupSkill {
-  return { name, summary: SUMMARY[name] ?? null, catalog_hosts: ['claude', 'codex', 'pi'], hosts: { claude, codex, pi: null, antigravity: null } };
+  return { name, summary: SUMMARY[name] ?? null, catalog_hosts: ['claude', 'codex', 'pi', 'antigravity'], hosts: { claude, codex, pi: null, antigravity: null } };
 }
 
 /** Pi is not installed, so its root does not exist. */
@@ -100,7 +100,8 @@ export function readySetup(now: number): SetupSnapshotV2 {
       { host: 'codex', reported: true, adapter_check: 'ok', detected: true, cli_version: '0.162.0',
         adapter: { configured: true, managed_entries: 5, expected_entries: 5, projection: 'consistent', projection_error: null, mismatches: [] } },
       { host: 'pi', reported: true, adapter_check: null, detected: false, cli_version: null, adapter: null, package_check: 'na' },
-      { host: 'antigravity', reported: true, adapter_check: 'na', detected: false, cli_version: null, adapter: null },
+      { host: 'antigravity', reported: true, adapter_check: 'ok', detected: true, cli_version: '1.5.15',
+        adapter: { configured: true, managed_entries: 4, expected_entries: 4, projection: 'consistent', projection_error: null, mismatches: [] } },
     ],
     skills: readySkills(),
     skill_roots: SKILL_ROOTS,

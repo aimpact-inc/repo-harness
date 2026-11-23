@@ -74,11 +74,15 @@ export function orderSkills(skills: readonly SetupSkill[]): readonly SetupSkill[
  */
 export type SkillCell = 'not_supported' | 'not_installed' | 'not_judged' | 'drift' | SetupSkillHostRow['state'];
 
+/** The hosts that the doctor skill projection judges. It reads no Antigravity skill root, so no row there is a judgment. */
+const SKILL_JUDGED_HOSTS: readonly SetupHost[] = ['claude', 'codex', 'pi'];
+
 export function skillCell(skill: SetupSkill, host: SetupHost): SkillCell {
   const row = skill.hosts[host];
   if (row === null) {
     if (skill.catalog_hosts === null) return 'not_judged';
-    return skill.catalog_hosts.includes(host) ? 'not_installed' : 'not_supported';
+    if (!skill.catalog_hosts.includes(host)) return 'not_supported';
+    return SKILL_JUDGED_HOSTS.includes(host) ? 'not_installed' : 'not_judged';
   }
   if (!row.ok && row.state.startsWith('ok ')) return 'drift';
   return row.state;
