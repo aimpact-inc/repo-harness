@@ -13,10 +13,10 @@ import {
   type QuotaReport,
 } from '../../src/core/board/quota';
 import { effectiveSeatConfig, formatSeatModes, formatSeatRoutes, seatAccount, seatAccountQuotas, selectSeatRoute } from '../../src/core/board/seat-routing';
-import { LOGICAL_MODEL_IDS, MODEL_CATALOG, catalogEntry, isCatalogModelPermittedOnSeat, resolveCatalogRoute } from '../../src/core/board/model-catalog';
+import { AGY_HYDROGEN_VARIANTS, LOGICAL_MODEL_IDS, MODEL_CATALOG, catalogEntry, isCatalogModelPermittedOnSeat, resolveCatalogRoute } from '../../src/core/board/model-catalog';
 import { SHIPPED_MODEL_IDS } from '../../src/core/board/recommended-models';
 import { decodeSeatPool, seatRuntimeBlock } from '../../src/core/board/seat-pool';
-import { DEFAULT_SEATS_CONFIG, type CodexCreditMode, type SeatConfigV1 } from '../../src/core/board/seats-settings';
+import { DEFAULT_SEATS_CONFIG, NATIVE_SEATS_PRESET, type CodexCreditMode, type SeatConfigV1 } from '../../src/core/board/seats-settings';
 
 const ROOT = join(import.meta.dir, '../..');
 const CLI = join(ROOT, 'src/cli/index.ts');
@@ -199,18 +199,26 @@ describe('seat quota routing', () => {
     expect(effectiveSeatConfig('advisor', seats, quota)).toEqual({ ...advisor, model: `magpie/agy-cli/gemini-4-${model}` });
     const other = { ...advisor, model: 'magpie/codex/gpt-6-astra' };
     expect(effectiveSeatConfig('advisor', { ...seats, advisor: other }, quota)).toEqual(other);
-    const nativeCarbon = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: 'agy' as const, model: 'gemini-4-carbon-high', effort: null, fleet: [] };
-    expect(effectiveSeatConfig('advisor', { ...seats, advisor: nativeCarbon }, quota)).toEqual(nativeCarbon);
+    const nativeCarbon = { ...NATIVE_SEATS_PRESET.advisor, model: 'gemini-4-carbon-high', effort: 'high' };
+    expect(effectiveSeatConfig('advisor', { ...seats, advisor: nativeCarbon }, quota)).toEqual(model === 'carbon'
+      ? nativeCarbon : { ...nativeCarbon, model: 'gemini-4-neon-high', effort: null });
+    const nativeOther = { ...nativeCarbon, model: 'claude-opus-5-5-high' };
+    expect(effectiveSeatConfig('advisor', { ...seats, advisor: nativeOther }, quota)).toEqual(nativeOther);
   });
 
   test('model-catalog maps logical lines to Magpie/Native routes, quota accounts, and permitted planes', () => {
     expect(LOGICAL_MODEL_IDS).toContain('hydrogen');
-    expect(resolveCatalogRoute('hydrogen', 'native')).toEqual({ runtime: 'agy', model: 'gemini-4-hydrogen', effort: null });
+    expect(resolveCatalogRoute('hydrogen', 'native')).toEqual({ runtime: 'agy', model: 'gemini-4-hydrogen-high', effort: null });
+    expect(NATIVE_SEATS_PRESET['worker-light']?.model).toBe('gemini-4-hydrogen-high');
+    expect(AGY_HYDROGEN_VARIANTS.map(entry => entry.model)).toEqual(['low', 'medium', 'high', 'xhigh'].map(effort => `gemini-4-hydrogen-${effort}`));
     expect(resolveCatalogRoute('hydrogen', 'magpie')).toEqual({ runtime: 'pi', model: 'magpie/agy-cli/gemini-4-hydrogen', effort: 'high' });
     expect(catalogEntry('sol', 'magpie')).toEqual({ runtime: 'pi', model: 'magpie/codex/gpt-6.2-sol' });
-    expect(seatAccount({ runtime: 'agy', model: 'gemini-4-hydrogen' })).toBe('agy_gemini');
+    expect(seatAccount({ runtime: 'agy', model: 'gemini-4-hydrogen-high' })).toBe('agy_gemini');
+    expect(seatAccount({ runtime: 'agy', model: 'claude-opus-5-5-high' })).toBe('agy_other');
+    expect(seatAccount({ runtime: 'agy', model: 'gpt-oss-120b-medium' })).toBe('agy_other');
+    expect(seatAccount({ runtime: 'agy', model: null })).toBeNull();
     expect(seatAccount({ runtime: 'pi', model: 'magpie/agy-cli/gemini-4-hydrogen' })).toBe('agy_gemini');
-    expect(SHIPPED_MODEL_IDS.has('gemini-4-hydrogen')).toBe(true);
+    expect(SHIPPED_MODEL_IDS.has('gemini-4-hydrogen-high')).toBe(true);
     expect(SHIPPED_MODEL_IDS.has('magpie/agy-cli/gemini-4-hydrogen')).toBe(true);
     expect(isCatalogModelPermittedOnSeat('worker', catalogEntry('astra', 'native'))).toBe(false);
     expect(isCatalogModelPermittedOnSeat('council', catalogEntry('astra', 'native'))).toBe(true);
@@ -706,7 +714,8 @@ ${branch === 'timeout' ? 'setInterval(() => {}, 1000);' : branch === 'signed out
       ['magpie/codex/gpt-6.2-sol', 'not_installed'],
       ['magpie/codex/gpt-6.1-terra', 'not_installed'], ['gpt-6.1-terra', 'not_listed'],
       ['zai/glm-5.3-flash', 'not_installed'], ['magpie/group/deepseek-v4.1-flash', 'not_installed'],
-      ['magpie/agy-cli/gemini-4-hydrogen', 'not_installed'], ['gemini-4-hydrogen', 'not_installed'],
+      ['magpie/agy-cli/gemini-4-hydrogen', 'not_installed'],
+      ...['low', 'medium', 'high', 'xhigh'].map(effort => [`gemini-4-hydrogen-${effort}`, 'not_installed']),
     ]);
     expect(row.configured).toEqual({ field: 'seats.worker.model', table_entry: false, in_pool: false, reason: 'outside_recommendations' });
     const calls = readFileSync(f.env.SEAT_POOL_LOG, 'utf8').trim().split('\n').map(line => JSON.parse(line));

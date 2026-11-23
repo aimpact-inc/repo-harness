@@ -44,10 +44,12 @@ export const MODEL_FAMILY_LABELS: Readonly<Record<string, string>> = Object.free
 export const SEAT_TOOLS = ['read', 'edit', 'shell', 'net', 'tasks', 'schedule', 'mcp', 'gh'] as const;
 export type SeatTool = typeof SEAT_TOOLS[number];
 export const AGY_READONLY_SEAT_TOOLS = ['net', 'read', 'shell'] as const satisfies readonly SeatTool[];
+export const AGY_ADVISOR_SEAT_TOOLS = ['edit', 'mcp', 'net', 'read', 'schedule', 'shell'] as const satisfies readonly SeatTool[];
 export const AGY_WORKER_SEAT_TOOLS = ['edit', 'gh', 'net', 'read', 'shell'] as const satisfies readonly SeatTool[];
 const AGY_WORKER_REQUIRED_TOOLS = ['edit', 'net', 'read', 'shell'] as const satisfies readonly SeatTool[];
 
 export function agySeatTools(id: SeatId): readonly SeatTool[] {
+  if (id === 'advisor') return AGY_ADVISOR_SEAT_TOOLS;
   return isWorkerSeat(id) ? AGY_WORKER_SEAT_TOOLS : AGY_READONLY_SEAT_TOOLS;
 }
 
@@ -58,7 +60,20 @@ export function isAgyToolsValid(id: SeatId, tools: readonly SeatTool[]): boolean
     return isReadonly || (AGY_WORKER_REQUIRED_TOOLS.every(tool => tools.includes(tool))
       && tools.every(tool => (AGY_WORKER_SEAT_TOOLS as readonly SeatTool[]).includes(tool)));
   }
+  if (id === 'advisor') {
+    return AGY_READONLY_SEAT_TOOLS.every(tool => tools.includes(tool))
+      && tools.every(tool => (AGY_ADVISOR_SEAT_TOOLS as readonly SeatTool[]).includes(tool));
+  }
   return isReadonly;
+}
+
+const AGY_EFFORT_LEVELS: readonly string[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+export function agyEffortValid(model: string, effort: string | null): boolean {
+  if (effort === null) return true;
+  const embedded = model.slice(model.lastIndexOf('-') + 1);
+  return AGY_EFFORT_LEVELS.includes(effort)
+    && (!model.includes('-') || !AGY_EFFORT_LEVELS.includes(embedded) || effort === embedded);
 }
 
 const TOKEN = /^[a-z0-9][a-z0-9.-]{0,63}$/u;
@@ -83,6 +98,7 @@ export const isPiCodexSeat = (seat: { readonly runtime: SeatRuntime; readonly mo
 
 export const PI_AGY_MODEL_PREFIX = 'magpie/agy-cli/';
 const AGY_NEON_MODEL = 'gemini-4-neon';
+export const AGY_HYDROGEN_HIGH_MODEL = 'gemini-4-hydrogen-high';
 export const PI_NEON_MODEL = `${PI_AGY_MODEL_PREFIX}${AGY_NEON_MODEL}`;
 
 export const isNeonSeat = (seat: Pick<SeatConfigV1, 'runtime' | 'model'>): boolean =>
@@ -219,13 +235,13 @@ export function defaultSeatsConfig(preset: 'magpie' | 'native' = 'magpie'): Seat
   if (preset === 'native') {
     return Object.freeze({
       orchestrator: Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: Object.freeze(['gh', 'mcp', 'net', 'read', 'shell', 'tasks'] as const), fleet: EXPLORER_ONLY_FLEET }),
-      advisor: Object.freeze({ runtime: 'agy', model: 'gemini-4-neon-high', advisor_model: null, effort: null, tools: AGY_READONLY_SEAT_TOOLS, fleet: EMPTY_FLEET }),
+      advisor: Object.freeze({ runtime: 'agy', model: 'gemini-4-neon-high', advisor_model: null, effort: null, tools: AGY_ADVISOR_SEAT_TOOLS, fleet: EMPTY_FLEET }),
       council: null,
       worker: Object.freeze({ runtime: 'codex', model: 'gpt-6.1-terra', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
       'worker-deep': Object.freeze({ runtime: 'codex', model: 'gpt-6.2-sol', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
       'worker-opus': Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
       'worker-neon': Object.freeze({ runtime: 'agy', model: 'gemini-4-neon-high', advisor_model: null, effort: null, tools: AGY_WORKER_SEAT_TOOLS, fleet: EMPTY_FLEET }),
-      'worker-light': Object.freeze({ runtime: 'agy', model: 'gemini-4-hydrogen', advisor_model: null, effort: null, tools: AGY_WORKER_SEAT_TOOLS, fleet: EMPTY_FLEET }),
+      'worker-light': Object.freeze({ runtime: 'agy', model: AGY_HYDROGEN_HIGH_MODEL, advisor_model: null, effort: null, tools: AGY_WORKER_SEAT_TOOLS, fleet: EMPTY_FLEET }),
       gatekeeper: Object.freeze({ runtime: 'codex', model: 'gpt-6.2-sol', advisor_model: null, effort: 'high', tools: REVIEW_TOOLS, fleet: EMPTY_FLEET }),
       'gatekeeper-fallback': null,
       reviewer: Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: REVIEW_TOOLS, fleet: EMPTY_FLEET }),
@@ -356,7 +372,7 @@ function checkAgySeat(id: SeatId, seat: SeatConfigV1): void {
   if (!isAgyAllowedSeat(id)) throw new AgySeatSettingsError('seat_runtime_not_allowed', id, 'runtime');
   if (!seatModelShapeValid('agy', seat.model)) throw new AgySeatSettingsError('seat_model_invalid', id, 'model');
   if (isCouncilSeat(id) && !isCouncilModelEntry('agy', seat.model)) throw new AgySeatSettingsError('seat_model_invalid', id, 'model');
-  if (seat.effort !== null) throw new AgySeatSettingsError('seat_effort_invalid', id, 'effort');
+  if (!agyEffortValid(seat.model, seat.effort)) throw new AgySeatSettingsError('seat_effort_invalid', id, 'effort');
   if (seat.advisor_model !== null) throw new AgySeatSettingsError('seat_model_invalid', id, 'advisor_model');
   if (seat.fleet.length !== 0) throw new AgySeatSettingsError('seat_fleet_not_allowed', id, 'fleet');
   if (!isAgyToolsValid(id, seat.tools)) {

@@ -91,7 +91,7 @@ const RUNTIME_RANGES: Readonly<Record<SeatRuntime, Omit<SeatRuntimeRangeV1, 'id'
   claude: { effort: true, fleet: true },
   codex: { effort: true, fleet: true },
   pi: { effort: true, fleet: true },
-  agy: { effort: false, fleet: false },
+  agy: { effort: true, fleet: false },
 };
 
 export function seatsRanges(enabledRuntimes: readonly string[]): SeatsRangesV1 {
@@ -371,11 +371,11 @@ const AGY_AGENT_DESCRIPTIONS: Readonly<Record<string, string>> = {
 /** Publish the generated agy seat agent by digest. An existing path can only be reused if it holds these bytes. */
 export function writeAgySeatAgent(seat: LaunchSeatId, config: SeatConfigV1, env: NodeJS.ProcessEnv): string {
   const agentName = agySeatAgentName(seat);
-  const tools = agySeatAgentTools(seat);
+  const tools = agySeatAgentTools(seat, config);
   const description = AGY_AGENT_DESCRIPTIONS[agentName] ?? `Repo-harness ${seat}`;
   const content = Buffer.from([
     '---', `name: ${agentName}`, `description: ${description}`, 'mainAgent: true',
-    `tools: [${tools.join(', ')}]`, 'inheritMcp: false', '---', '', '# System', '', agySeatBrief(seat, config), '',
+    `tools: [${tools.join(', ')}]`, `inheritMcp: ${config.tools.includes('mcp')}`, '---', '', '# System', '', agySeatBrief(seat, config), '',
   ].join('\n'));
   const digest = sha256Hex(content);
   let directory = realpathSync(dirname(dirname(globalConfigurationPath(env))));

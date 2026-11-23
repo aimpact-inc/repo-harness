@@ -1,5 +1,5 @@
 import { AGY_QUOTA_ACCOUNTS, weeklyRemainingPercent, type QuotaAccount, type QuotaAccountReport, type QuotaState } from './quota';
-import { catalogSeatAccount } from './model-catalog';
+import { catalogEntry, catalogSeatAccount } from './model-catalog';
 import { SHIPPED_MODEL_IDS } from './recommended-models';
 import { PI_NEON_MODEL, ROUTING_CLASSES, SEAT_IDS, isCouncilSeat, isNeonSeat, isReviewSeat, unavailablePiSeat, type CodexCreditMode, type RoutingClass, type SeatConfigV1, type SeatId, type SeatRoutingV1, type SeatsConfigV1 } from './seats-settings';
 
@@ -54,7 +54,8 @@ export const agyReserved = (quota: SeatAccountQuotas): boolean => quota.agy_gemi
 const AGY_ADVISOR_HYPER_MIN_REMAINING = 50;
 const CONTROL_MODELS = {
   claude: { model: 'opus', effort: 'high' },
-  agy: { model: PI_NEON_MODEL },
+  piAgy: { model: PI_NEON_MODEL },
+  nativeAgy: { ...catalogEntry('neon', 'native'), effort: null },
 } as const;
 
 export function seatAccount(seat: Pick<SeatConfigV1, 'runtime' | 'model'>): QuotaAccount | null {
@@ -94,9 +95,12 @@ export function effectiveSeatConfig(id: SeatId, seats: SeatsConfigV1, quota: Sea
     if (id === 'orchestrator' ? reserved : id === 'advisor' && (reserved || quota.claude.mode !== 'hyper')) {
       return { ...seat, ...CONTROL_MODELS.claude };
     }
-  } else if (id === 'advisor' && seat.runtime === 'pi' && isAgyAccount(seatAccount(seat))) {
+  } else if (id === 'advisor') {
     const remaining = quota.agy_gemini.remaining;
-    if (remaining === null || remaining < AGY_ADVISOR_HYPER_MIN_REMAINING) return { ...seat, ...CONTROL_MODELS.agy };
+    if (remaining === null || remaining < AGY_ADVISOR_HYPER_MIN_REMAINING) {
+      if (seat.runtime === 'pi' && isAgyAccount(seatAccount(seat))) return { ...seat, ...CONTROL_MODELS.piAgy };
+      if (seat.runtime === 'agy' && seat.model?.startsWith('gemini-4-carbon')) return { ...seat, ...CONTROL_MODELS.nativeAgy };
+    }
   }
   return seat;
 }

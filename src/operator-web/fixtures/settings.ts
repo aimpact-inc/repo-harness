@@ -51,7 +51,7 @@ function seatsRanges(enabled: readonly string[]) {
       { id: 'claude', enabled: enabled.includes('claude'), effort: true, fleet: true },
       { id: 'codex', enabled: enabled.includes('codex'), effort: true, fleet: true },
       { id: 'pi', enabled: enabled.includes('pi'), effort: true, fleet: true },
-      { id: 'agy', enabled: enabled.includes(seatHostId('agy')), effort: false, fleet: false },
+      { id: 'agy', enabled: enabled.includes(seatHostId('agy')), effort: true, fleet: false },
     ],
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     roles: SEAT_SCAFFOLD_SUB_AGENTS.map(name => ({ name, writable: false })),

@@ -1,4 +1,4 @@
-import { MODEL_FAMILY_LABELS, PI_AGY_MODEL_PREFIX, PI_CODEX_MODEL_PREFIX, type SeatId, type SeatModelEntryV1, type SeatRuntime } from './seats-settings';
+import { AGY_HYDROGEN_HIGH_MODEL, MODEL_FAMILY_LABELS, PI_AGY_MODEL_PREFIX, PI_CODEX_MODEL_PREFIX, type SeatId, type SeatModelEntryV1, type SeatRuntime } from './seats-settings';
 import type { QuotaAccount } from './quota';
 
 export const LOGICAL_MODEL_IDS = [
@@ -105,7 +105,7 @@ export const MODEL_CATALOG: Readonly<Record<LogicalModelId, LogicalModelEntry>> 
     family: 'google',
     account: 'agy_gemini',
     magpie: route('pi', `${PI_AGY_MODEL_PREFIX}gemini-4-hydrogen`, 'high'),
-    native: route('agy', 'gemini-4-hydrogen', null),
+    native: route('agy', AGY_HYDROGEN_HIGH_MODEL, null),
     planes: ['worker-light', 'gatekeeper-fallback', 'explorer'],
   }),
   astra: defineModel({
@@ -178,6 +178,12 @@ export const AGY_NEON_VARIANTS: readonly SeatModelEntryV1[] = Object.freeze([
 ]);
 
 export const AGY_HYDROGEN_ENTRY: SeatModelEntryV1 = catalogEntry('hydrogen', 'native');
+export const AGY_HYDROGEN_VARIANTS: readonly SeatModelEntryV1[] = Object.freeze([
+  Object.freeze({ runtime: 'agy', model: 'gemini-4-hydrogen-low' }),
+  Object.freeze({ runtime: 'agy', model: 'gemini-4-hydrogen-medium' }),
+  AGY_HYDROGEN_ENTRY,
+  Object.freeze({ runtime: 'agy', model: 'gemini-4-hydrogen-xhigh' }),
+]);
 
 const OPENAI_CODEX_TARGET_LABELS: Readonly<Record<'sol' | 'terra' | 'luna' | 'astra', string>> = Object.freeze({
   sol: 'GPT-6.2 Sol',
@@ -218,7 +224,7 @@ export function catalogModelIds(): ReadonlySet<string> {
     if (entry.magpie !== null) ids.add(entry.magpie.model);
     if (entry.native !== null) ids.add(entry.native.model);
   }
-  for (const entry of AGY_NEON_VARIANTS) ids.add(entry.model);
+  for (const entry of [...AGY_NEON_VARIANTS, ...AGY_HYDROGEN_VARIANTS]) ids.add(entry.model);
   return ids;
 }
 
@@ -231,7 +237,9 @@ export function catalogSeatAccount(seat: { readonly runtime: SeatRuntime; readon
   if (seat.runtime === 'codex' || (seat.runtime === 'pi' && seat.model?.startsWith(PI_CODEX_MODEL_PREFIX) === true)) {
     return 'chatgpt';
   }
-  if (seat.runtime === 'agy' && seat.model?.startsWith('gemini-')) return 'agy_gemini';
+  if (seat.runtime === 'agy' && seat.model !== null) {
+    return seat.model.startsWith('gemini-') ? 'agy_gemini' : 'agy_other';
+  }
   if (seat.runtime === 'pi' && seat.model?.startsWith(PI_AGY_MODEL_PREFIX)) {
     return seat.model.startsWith(`${PI_AGY_MODEL_PREFIX}gemini-`) ? 'agy_gemini' : 'agy_other';
   }

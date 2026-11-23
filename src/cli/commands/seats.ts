@@ -345,10 +345,10 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   const plannedSeat = id === 'gatekeeper' && planned !== undefined ? plannedGatekeeper(planned) : null;
   const runtimeSeat: SeatId = plannedSeat?.id === 'gatekeeper-fallback' ? plannedSeat.id : id;
   const initialCandidate = plannedSeat?.seat ?? configured;
-  let agyExecutable = prepareFleet && initialCandidate.runtime === 'agy'
-    ? await checkedAgyExecutable(runtimeSeat, config, initialCandidate, env, cwd, terminal)
+  let agyProbe = prepareFleet && initialCandidate.runtime === 'agy'
+    ? await checkedAgyRuntime(runtimeSeat, config, initialCandidate, env, terminal)
     : undefined;
-  const checkPool = checkAvailability && agyExecutable === undefined;
+  const checkPool = checkAvailability && agyProbe === undefined;
   const probes = checkPool ? collectSeatPoolProbes(env, SEAT_IDS.some(seatId => seats[seatId]?.runtime === 'agy')) : [];
   const unavailable = (modelSeat: SeatId, reason: string) => {
     throw new SeatProviderUnavailableError(`The ${id} seat cannot launch. ${reason} ${seatPoolHint(modelSeat, seats, probes)}`);
@@ -361,8 +361,9 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   const { id: effectiveId, seat: effective, modeKnown, claudeSaving } = plannedSeat !== null
     ? { id: runtimeSeat, seat: plannedSeat.seat, modeKnown: true, claudeSaving: false }
     : await quotaCheckedSeat(id, seats, configured, env, labels.ownerException);
-  if (prepareFleet && effective.runtime === 'agy' && agyExecutable === undefined) {
-    agyExecutable = await checkedAgyExecutable(effectiveId, config, effective, env, cwd, terminal);
+  if (prepareFleet && effective.runtime === 'agy') {
+    agyProbe ??= await checkedAgyRuntime(effectiveId, config, effective, env, terminal);
+    checkAgyLaunchTarget(effectiveId, effective, agyProbe.models, env, cwd);
   }
   if (checkPool && effective.runtime !== 'agy') {
     const reason = seatModelBlock(effectiveId, effective, seats, probes, () => magpieExtensionInstalled(env));
@@ -386,7 +387,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   const agy = effective.runtime !== 'agy'
     ? undefined
     : prepareFleet
-      ? { executable: agyExecutable!, directory: writeAgySeatAgent(id, effective, env), cwd }
+      ? { executable: agyProbe!.executable, directory: writeAgySeatAgent(id, effective, env), cwd }
       : { executable: 'agy', directory: '<dry-run>', cwd };
   const launch = buildSeatLaunch(id, effective, config.seats === undefined ? 'defaults' : 'seats', agentTypes, {
     paneName: name ?? undefined, repositoryId: labels.repositoryId, piRoleDirectory, piHookExtension, claudeSaving, agy,
@@ -399,7 +400,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   } };
 }
 
-async function checkedAgyExecutable(id: SeatId, config: Record<string, unknown>, seat: SeatConfigV1, env: NodeJS.ProcessEnv, cwd: string, terminal: 'new' | 'existing'): Promise<string> {
+async function checkedAgyRuntime(id: SeatId, config: Record<string, unknown>, seat: SeatConfigV1, env: NodeJS.ProcessEnv, terminal: 'new' | 'existing') {
   if (!isAgyAllowedSeat(id)) {
     throw new SeatsCommandError('seat_runtime_unsupported', `Direct agy launch is not supported on the ${id} seat.`);
   }
@@ -420,11 +421,13 @@ async function checkedAgyExecutable(id: SeatId, config: Record<string, unknown>,
     case 'signed_out': throw new SeatsCommandError('seat_runtime_signed_out', `Sign in through agy before launching the ${id}. See seats.${id}.model.`);
     case 'unknown':
     case 'catalog_unknown': throw new SeatsCommandError('seat_runtime_unknown', `The agy installation or model catalog could not be checked. Retry the launch. See seats.${id}.model.`);
-    case 'available':
-      if (seat.model === null || !probe.models.has(seat.model)) {
-        throw new SeatsCommandError('seat_model_unavailable', `agy does not list the selected ${id} model. See seats.${id}.model.`);
-      }
-      break;
+    case 'available': return probe;
+  }
+}
+
+function checkAgyLaunchTarget(id: SeatId, seat: SeatConfigV1, models: ReadonlySet<string>, env: NodeJS.ProcessEnv, cwd: string): void {
+  if (seat.model === null || !models.has(seat.model)) {
+    throw new SeatsCommandError('seat_model_unavailable', `agy does not list the selected ${id} model. See seats.${id}.model.`);
   }
   let optedIn = false;
   try { optedIn = resolveAntigravityRepository({ cwd }).status === 'opted-in'; } catch { /* refuse unresolved checkouts */ }
@@ -433,7 +436,6 @@ async function checkedAgyExecutable(id: SeatId, config: Record<string, unknown>,
   if (activation.status !== 'ok' || direct.status !== 'ok') {
     throw new SeatsCommandError('antigravity_guard_unready', `On-disk activation: ${activation.status}. Direct guard: ${direct.status}. Run rh doctor for details.`);
   }
-  return probe.executable;
 }
 
 /** The space of the calling terminal: Herdr.app writes it as a label on each terminal that a pane shows. */
