@@ -117,9 +117,19 @@ export function buildProgram(): Command {
     .addHelpText('after', '\nGlobal shortcuts:\n  -V, --version  output the version number')
     .exitOverride();
 
+  const configureAntigravityCodegraph = (explicitTarget: boolean) => {
+    const { configureAntigravityCodegraphStep } = require('./tools/codegraph') as typeof import('./tools/codegraph');
+    return configureAntigravityCodegraphStep(process.cwd(), process.env, explicitTarget);
+  };
+  const withAntigravityCodegraph = (result: ReturnType<typeof runInstall>): ReturnType<typeof runInstall> => {
+    if (result.exitCode !== 0) return result;
+    const step = configureAntigravityCodegraph(true)!;
+    return { exitCode: step.status === 'failed' ? 1 : 0, lines: [...result.lines, `[antigravity] ${step.status}: ${step.step} - ${step.detail}`] };
+  };
+
   program
     .command('install')
-    .description('Install the global runtime or, for --location global or --target antigravity, only hook adapters')
+    .description('Install the global runtime or, for --location global or --target antigravity, install host adapters')
     .option('--target <target>', `Target host: ${ADAPTER_TARGET_HELP}`, 'both')
     .option('--plugins <ids>', `Enable exactly these comma-separated plugins (${PLUGIN_IDS.join('|')}); omitted, every plugin that this host can run`)
     .option('--no-plugins', 'Enable core only')
@@ -132,11 +142,12 @@ export function buildProgram(): Command {
     .option('--no-hooks', 'Skip global hook adapter installation during full runtime install')
     .option('--no-external-skills', 'Skip mutable third-party Waza and Mermaid skill bootstrap')
     .option('--with-obsidian-skills', 'Explicitly install the pinned obsidian-markdown and obsidian-cli companion Skills')
+    .option('--configure-codegraph', 'Configure Antigravity CodeGraph MCP with --target antigravity')
     .option('--no-codegraph', 'Skip CodeGraph CLI/MCP configuration')
     .option('--report-language <language>', `Reporting language for Global Working Rules that record none: ${REPORT_LANGUAGE_FLAG_VALUES.join('|')}`)
     .option('--override <path#selector>', OVERRIDE_HELP, collectOption, [])
     .option('--json', 'Output JSON instead of human-readable text')
-    .action(async (rawOpts: GlobalRuntimeCommandOptions & { location?: string; state?: boolean; rollback?: boolean }, cmd: Command) => {
+    .action(async (rawOpts: GlobalRuntimeCommandOptions & { location?: string; state?: boolean; rollback?: boolean; configureCodegraph?: boolean }, cmd: Command) => {
       const target = assertAdapterTarget(rawOpts.target, 'install');
       const location = rawOpts.location === undefined ? undefined : assertLocation(rawOpts.location, 'install');
       // Adapter-only installs validate the install-state protocol under the runtime lock.
@@ -145,7 +156,8 @@ export function buildProgram(): Command {
           migrateInstallState(process.env);
           readInstallState();
           if (target === 'antigravity') {
-            return installAntigravityRuntime(process.env, runtimeLock, { ...adapterOptions, externalSkills: rawOpts.externalSkills });
+            const result = installAntigravityRuntime(process.env, runtimeLock, { ...adapterOptions, externalSkills: rawOpts.externalSkills });
+            return rawOpts.configureCodegraph === true && rawOpts.codegraph !== false ? withAntigravityCodegraph(result) : result;
           }
           return runInstall({ target, location: location ?? 'global' });
         });
@@ -308,9 +320,10 @@ export function buildProgram(): Command {
       json?: boolean;
     }) => {
       const target = assertAdapterTarget(rawOpts.target, 'update');
+      const configureCodegraph = rawOpts.configureCodegraph === true && rawOpts.codegraph !== false;
       if (target === 'antigravity') {
-        if (rawOpts.version || rawOpts.channel || rawOpts.override.length || rawOpts.withObsidianSkills || rawOpts.withExternalSkills || rawOpts.configureCodegraph) {
-          throw new Error('rh update --target antigravity only refreshes recorded Antigravity hooks, global rules, and skills; it does not install packages');
+        if (rawOpts.version || rawOpts.channel || rawOpts.override.length || rawOpts.withObsidianSkills || rawOpts.withExternalSkills) {
+          throw new Error('rh update --target antigravity refreshes Antigravity hooks, global rules, skills, and CodeGraph MCP. It does not install packages');
         }
         const reportLanguage = rawOpts.reportLanguage === undefined ? undefined : parseReportLanguageFlag(rawOpts.reportLanguage);
         const env = process.env;
@@ -324,10 +337,10 @@ export function buildProgram(): Command {
         }
         const result = withRuntimeTransactionLock(globalRuntimeScope(env), () => {
           migrateInstallState(env);
-          if (!hasRecordedAntigravityState(env, false)) {
-            return { exitCode: 0, lines: ['[antigravity] no recorded hook member; run rh install --target antigravity to install it'] };
-          }
-          return runInstall({ target, location: 'global', ...adapterOptions });
+          const adapters = hasRecordedAntigravityState(env, false)
+            ? runInstall({ target, location: 'global', ...adapterOptions })
+            : { exitCode: 0, lines: ['[antigravity] no recorded hook member; run rh install --target antigravity to install it'] };
+          return configureCodegraph ? withAntigravityCodegraph(adapters) : adapters;
         });
         if (rawOpts.json) console.log(JSON.stringify(result, null, 2));
         else for (const line of result.lines) console.log(line);
@@ -367,13 +380,25 @@ export function buildProgram(): Command {
         hostAdapters: rawOpts.hooks !== false,
         externalSkills: rawOpts.externalSkills === false ? false : rawOpts.withExternalSkills === true ? true : undefined,
         obsidianSkills: rawOpts.withObsidianSkills === true,
-        codegraph: rawOpts.codegraph === false ? false : rawOpts.configureCodegraph === true ? true : undefined,
+        codegraph: rawOpts.codegraph === false ? false : configureCodegraph ? true : undefined,
         reportLanguage: rawOpts.reportLanguage as ReportLanguageFlag | undefined,
         overrides,
       });
       if (result.exitCode === 0) {
         result.lines.push(updateLeftoverSummary(process.cwd(), rawOpts.cli !== false));
         result.lines.push(updateRegisteredUpgradeSummary(process.cwd(), rawOpts.cli !== false));
+        // The runtime refresh can hand off to an older package. Configure the opted-in host after that transaction commits.
+        if (target === 'both' && configureCodegraph) {
+          const step = withRuntimeTransactionLock(globalRuntimeScope(process.env), () =>
+            pluginSelected(readRecordedSelection(), 'architecture') ? configureAntigravityCodegraph(false) : undefined);
+          if (step) {
+            result.steps.push(step);
+            const line = `[runtime] ${step.status}: ${step.step} - ${step.detail}`;
+            result.lines.push(line);
+            result.stdout = [result.stdout, line].filter(Boolean).join('\n');
+            if (step.status === 'failed') result.exitCode = 1;
+          }
+        }
       }
       if (rawOpts.json === true) {
         console.log(JSON.stringify(result, null, 2));

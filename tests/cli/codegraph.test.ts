@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
@@ -8,6 +8,7 @@ import { writeShellExecutableFixture } from "../helpers/repo-fixture";
 import { requestUserInputFragment } from "../../src/cli/installer/targets/codex";
 import { openHostConfigGate } from "../../src/effects/host-config/gate";
 import { acquireRuntimeTransactionLock, globalRuntimeScope } from "../../src/effects/locking/runtime-transaction-lock";
+import { configureAntigravityCodegraphStep } from "../../src/cli/tools/codegraph";
 import { buildManagedHooks } from "../../src/cli/installer/managed-entries";
 import { jsonFragment } from "../../src/core/host-config/json-fragment";
 
@@ -222,6 +223,82 @@ test('standalone CodeGraph configure for Claude writes its server and tool rule 
     expect(readFileSync(settings, 'utf8')).toBe(settingsAfter);
   } finally { rmSync(fixture.root, { recursive: true, force: true }); }
 }, 15000);
+
+test.skipIf(process.platform === 'win32')('Antigravity CodeGraph configure checks opt-in, scopes the server, and refuses a linked config', () => {
+  const { root, home, fakeBin } = setupFakeEnvironment('antigravity-codegraph');
+  try {
+    const codegraph = join(fakeBin, 'codegraph');
+    const config = join(home, '.gemini', 'config', 'mcp_config.json');
+    const log = join(root, 'print-config.log');
+    const env = { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun'), PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+      REPO_HARNESS_CODEGRAPH_ALLOW_REPO_LOCAL: '0', REPO_HARNESS_CODEGRAPH_GLOBAL_BIN: codegraph, BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0' };
+    seedGlobalPackageFixture(env);
+    writeFakeSkillsCli(fakeBin);
+    const printServer = (command: string) => writeExecutable(fakeBin, codegraph, [
+      '#!/bin/bash',
+      'set -euo pipefail',
+      'case "$*" in',
+      '  --version) echo "1.6.4" ;;',
+      '  "status .") echo "Index is up to date" ;;',
+      `  "install --print-config antigravity") echo "$*" >> "${log}"; printf '%s\\n' "# Add to $HOME/.gemini/config/mcp_config.json" "" '${JSON.stringify({ mcpServers: { codegraph: { command, args: ['serve', '--mcp'] } } })}' ;;`,
+      '  *) exit 2 ;;',
+      'esac',
+    ].join('\n'));
+    printServer('/opt/codegraph-first');
+    const cli = (...args: string[]) => spawnSync(process.execPath, [CLI, ...args, '--json'], { cwd: root, env, encoding: 'utf8' });
+    const doctor = (status: 'ok' | 'warn' | 'fail' | 'na') => {
+      const result = cli('doctor');
+      expect(JSON.parse(result.stdout).checks).toContainEqual(expect.objectContaining({ id: 'antigravity-codegraph-mcp', status }));
+    };
+    const target = ['--target', 'antigravity'];
+    const user = { personal: { command: 'my-tool' } };
+    mkdirSync(join(home, '.gemini', 'config'), { recursive: true });
+    const outside = join(root, 'standalone.json');
+    const original = JSON.stringify({ mcpServers: user });
+    writeFileSync(outside, original);
+    symlinkSync(outside, config);
+    expect(configureAntigravityCodegraphStep(root, env, false)).toBeUndefined();
+    expect(existsSync(log)).toBe(false);
+    doctor('na');
+    expect(readFileSync(outside, 'utf8')).toBe(original);
+
+    rmSync(config);
+    writeFileSync(config, original);
+    const adapters = cli('install', ...target);
+    expect(adapters.status, adapters.stdout + adapters.stderr).toBe(0);
+    doctor('warn');
+    const customCodegraph = JSON.stringify({ mcpServers: { ...user, codegraph: { command: 'my-codegraph', args: ['serve', '--mcp'] } } });
+    writeFileSync(config, customCodegraph);
+    const preserved = cli('update', ...target, '--configure-codegraph');
+    expect(preserved.status, preserved.stdout + preserved.stderr).toBe(0);
+    expect(JSON.parse(preserved.stdout).lines.join('\n')).toContain('mcpServers.codegraph');
+    expect(readFileSync(config, 'utf8')).toBe(customCodegraph);
+    expect(openHostConfigGate({ env }).recorded(config)).toEqual([]);
+    writeFileSync(config, original);
+
+    const install = cli('install', ...target, '--configure-codegraph');
+    expect(install.status, install.stdout + install.stderr).toBe(0);
+    const args = ['serve', '--mcp', '--path', '.'];
+    expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ mcpServers: { ...user, codegraph: { command: '/opt/codegraph-first', args } } });
+
+    printServer('/opt/codegraph-update');
+    const update = cli('update', ...target, '--configure-codegraph');
+    expect(update.status, update.stdout + update.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ mcpServers: { ...user, codegraph: { command: '/opt/codegraph-update', args } } });
+    doctor('ok');
+    printServer('/opt/codegraph-opted-in');
+    expect(configureAntigravityCodegraphStep(root, env, false)).toMatchObject({ status: 'ok', detail: 'changed' });
+    expect(JSON.parse(readFileSync(config, 'utf8')).mcpServers.codegraph).toEqual({ command: '/opt/codegraph-opted-in', args });
+
+    rmSync(config);
+    symlinkSync(outside, config);
+    const refused = cli('update', ...target, '--configure-codegraph');
+    expect(refused.status).toBe(1);
+    expect(refused.stdout).toContain('antigravity_hooks_path_linked');
+    expect(readFileSync(outside, 'utf8')).toBe(original);
+    doctor('fail');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}, 30000);
 
 test('a concurrent rh install and CodeGraph configure for Claude serialize on the global lock, and the ledger keeps the records of both', async () => {
   const fixture = setupFakeEnvironment('concurrent-claude-writers');

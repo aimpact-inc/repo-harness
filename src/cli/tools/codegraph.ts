@@ -3,8 +3,10 @@ import { migrateInstallState } from '../installer/install-state-migration';
 import { migrateJsonConfigRecords } from '../installer/json-config-migration';
 import { CODEX_CONFIG_FRAGMENTS, codexConfigFragment, codexConfigValue, namingTomlFile, tomlFragment } from '../../core/host-config/toml-fragment';
 import { CLAUDE_ROOT_CONFIG_BACKUP, CODEGRAPH_MCP_SELECTOR, CODEGRAPH_PERMISSION_RULE, CODEGRAPH_PERMISSION_SELECTOR, LEGACY_CODEGRAPH_ALLOWED_TOOLS_SELECTOR } from '../../core/host-config/claude-config';
-import { jsonFragment } from '../../core/host-config/json-fragment';
-import { openHostConfigGate } from '../../effects/host-config/gate';
+import { jsonFragment, jsonFragmentValue } from '../../core/host-config/json-fragment';
+import { isRecord } from '../../core/evidence/is-record';
+import { antigravityGlobalRulesHostPath, antigravityHostPath, antigravityMcpConfigHostPath, antigravityMcpConfigPath, decode, openHostConfigGate, resolveUserConfigFile } from '../../effects/host-config/gate';
+import { hostConfigPaths, observeFile, readProjectedLedger } from '../../effects/host-config/store';
 import { resolveRepoRoot } from '../hook/runtime';
 import { existsSync, mkdirSync, readFileSync } from "fs";
 import { dirname, join } from "path";
@@ -34,8 +36,10 @@ export interface CodegraphEnsureOptions extends CodegraphResolveOptions {
   installDeps?: boolean;
 }
 
+type CodegraphConfigureTarget = CodegraphHostTarget | "antigravity";
+
 export interface CodegraphConfigureOptions extends CodegraphResolveOptions {
-  target: CodegraphHostTarget;
+  target: CodegraphConfigureTarget;
   location: CodegraphConfigureLocation;
 }
 
@@ -70,7 +74,7 @@ export interface CodegraphEnsureResult extends CodegraphCheckResult {
 }
 
 export interface CodegraphConfigureResult extends CodegraphCheckResult {
-  target: CodegraphHostTarget;
+  target: CodegraphConfigureTarget;
   location: CodegraphConfigureLocation;
   changed: boolean;
   readOnly: false;
@@ -243,7 +247,7 @@ export function ensureCodegraph(opts: CodegraphEnsureOptions): CodegraphEnsureRe
   };
 }
 
-function configureTargets(target: CodegraphHostTarget): Array<"codex" | "claude"> {
+function configureTargets(target: CodegraphConfigureTarget): Array<Exclude<CodegraphConfigureTarget, "both">> {
   return target === "both" ? ["codex", "claude"] : [target];
 }
 
@@ -337,52 +341,51 @@ function configureCodexMcp(actions: CodegraphAction[], binPath: string, repoRoot
   }
 }
 
-/** CodeGraph's own Claude MCP server object, with its args scoped to the working directory and loaded eagerly. */
-function scopedClaudeServer(printed: string): Record<string, unknown> {
-  const start = printed.indexOf("{");
+function scopedJsonCodegraphServer(printed: string, host: "claude" | "antigravity"): Record<string, unknown> {
+  const start = printed.search(/^[ \t]*\{/m);
   let server: unknown;
-  try { server = (JSON.parse(start === -1 ? "" : printed.slice(start)) as { mcpServers?: Record<string, unknown> }).mcpServers?.codegraph; }
+  try { server = jsonFragmentValue(start === -1 ? "" : printed.slice(start), CODEGRAPH_MCP_SELECTOR); }
   catch { server = undefined; }
-  if (!server || typeof server !== "object" || Array.isArray(server) || typeof (server as { command?: unknown }).command !== "string") {
-    throw new Error("codegraph install --print-config claude printed no mcpServers.codegraph object with a command");
+  if (!isRecord(server) || typeof server.command !== "string" || !server.command.trim()) {
+    throw new Error(`codegraph install --print-config ${host} printed no mcpServers.codegraph object with a command`);
   }
-  return { ...(server as Record<string, unknown>), args: [...CODEGRAPH_SCOPED_MCP_ARGS], alwaysLoad: true };
+  const args = [...CODEGRAPH_SCOPED_MCP_ARGS];
+  return host === "claude" ? { ...server, args, alwaysLoad: true } : { command: server.command, args };
 }
 
-/**
- * rh writes the Claude CodeGraph server into `~/.claude.json` itself, through
- * the host-config gate, from the object that `codegraph install --print-config
- * claude` prints without writing. A server entry that rh did not record is the
- * user's: it is kept.
- */
-function configureClaudeMcp(actions: CodegraphAction[], binPath: string, repoRoot: string, env?: NodeJS.ProcessEnv): void {
-  const command = [binPath, "install", "--print-config", "claude"];
-  const path = claudeRootConfigPath(env);
+/** Apply the printed server through the gate. An unrecorded server entry stays the user's. */
+function configureJsonMcp(actions: CodegraphAction[], host: "claude" | "antigravity", binPath: string, repoRoot: string, env?: NodeJS.ProcessEnv): void {
+  const action = `configure-${host}`;
+  const command = [binPath, "install", "--print-config", host];
+  const effectiveEnv = { ...process.env, ...env };
+  const path = host === "antigravity" ? antigravityMcpConfigPath(effectiveEnv) : claudeRootConfigPath(env);
   if (!path) {
-    actions.push({ action: "configure-claude", status: "skipped", command, stderr: "HOME environment variable not set; cannot locate ~/.claude.json." });
+    appendSkippedAction(actions, action, command, "HOME environment variable not set; cannot locate ~/.claude.json.");
     return;
   }
   const printed = run(binPath, command.slice(1), repoRoot, env);
   if (!printed.ok) {
-    actions.push({ action: "configure-claude", status: "failed", command, stderr: trimOutput(printed.stderr || printed.error) });
+    actions.push({ action, status: "failed", command, stderr: trimOutput(printed.stderr || printed.error) });
     return;
   }
   try {
-    const server = scopedClaudeServer(printed.stdout);
-    const content = existsSync(path) ? readFileSync(path, "utf8") : "";
+    const value = scopedJsonCodegraphServer(printed.stdout, host);
+    // The gate chooses add or refresh from the guarded Antigravity file.
+    const claude = host === "claude";
+    const content = claude && existsSync(path) ? readFileSync(path, "utf8") : "";
     const kind = jsonFragment.locate(content, CODEGRAPH_MCP_SELECTOR) ? "refresh" : "add";
-    const result = openHostConfigGate({ env: { ...process.env, ...env } }).apply([{
+    const result = openHostConfigGate({ env: effectiveEnv }).apply([{
       path,
-      backup: CLAUDE_ROOT_CONFIG_BACKUP,
-      fragments: [{ owner: "architecture", selector: CODEGRAPH_MCP_SELECTOR, kind, strategy: jsonFragment, value: server }],
+      backup: claude ? CLAUDE_ROOT_CONFIG_BACKUP : undefined,
+      fragments: [{ owner: "architecture", selector: CODEGRAPH_MCP_SELECTOR, kind, strategy: jsonFragment, value }],
     }]);
     if (result.skipped.length) {
-      actions.push({ action: "configure-claude", status: "skipped", command, stderr: `kept: ${CODEGRAPH_MCP_SELECTOR} in ${path} is your configuration; rh did not change it.` });
+      appendSkippedAction(actions, action, command, `kept: ${CODEGRAPH_MCP_SELECTOR} in ${path} is your configuration; rh did not change it.`);
     } else {
-      actions.push({ action: "configure-claude", status: result.written.length ? "changed" : "unchanged", command });
+      actions.push({ action, status: result.written.length ? "changed" : "unchanged", command });
     }
   } catch (error) {
-    actions.push({ action: "configure-claude", status: "failed", command, stderr: String((error as Error).message ?? error) });
+    actions.push({ action, status: "failed", command, stderr: String((error as Error).message ?? error) });
   }
 }
 
@@ -417,24 +420,32 @@ function configureClaudeToolPermission(actions: CodegraphAction[], env?: NodeJS.
   }
 }
 
+/** The ledger alone selects Antigravity before any path under .gemini is checked. */
+function optedIntoAntigravity(env: NodeJS.ProcessEnv): boolean {
+  const paths = hostConfigPaths(env);
+  const ledger = readProjectedLedger(paths);
+  return Boolean(ledger.files[antigravityHostPath(env, paths)]
+    || ledger.files[antigravityGlobalRulesHostPath(env, paths)]
+    || ledger.files[antigravityMcpConfigHostPath(env, paths)]
+    || Object.values(ledger.paths).some((record) => record.host === "antigravity"));
+}
+
 function configureCodegraphRuntime(opts: CodegraphConfigureOptions): CodegraphConfigureResult {
   const actions: CodegraphAction[] = [];
-  const initial = checkCodegraph({ repoRoot: opts.repoRoot, env: opts.env, host: opts.target });
+  // The tooling report supplies binary resolution for Codex and Claude. The Antigravity config is checked through the gate.
+  const probe = { repoRoot: opts.repoRoot, env: opts.env, host: opts.target === "antigravity" ? "codex" : opts.target } as const;
+  const initial = checkCodegraph(probe);
   const binPath = initial.resolution.binPath;
 
   for (const target of configureTargets(opts.target)) {
     const command = [binPath ?? "codegraph", "install", "--target", target, "--location", opts.location, "--yes"];
     const actionName = `configure-${target}`;
 
-    if (target === "codex" && opts.location === "local") {
-      const reason = "Codex has no project-local MCP configuration; use --location global.";
-      if (opts.target === "codex") {
-        actions.push({
-          action: actionName,
-          status: "failed",
-          command,
-          stderr: reason,
-        });
+    if (target !== "claude" && opts.location === "local") {
+      const reason = target === "codex" ? "Codex has no project-local MCP configuration; use --location global."
+        : "Antigravity CodeGraph configuration requires --location global.";
+      if (opts.target === target) {
+        actions.push({ action: actionName, status: "failed", command, stderr: reason });
       } else {
         appendSkippedAction(actions, actionName, command, reason);
       }
@@ -458,18 +469,17 @@ function configureCodegraphRuntime(opts: CodegraphConfigureOptions): CodegraphCo
       configureCodexMcp(actions, binPath, opts.repoRoot, opts.env);
       continue;
     }
-
     // A local configure writes only repository files, which stay outside the host-config ledger.
     if (opts.location === "local") appendAction(actions, actionName, command, run(binPath, command.slice(1), opts.repoRoot, opts.env));
-    else configureClaudeMcp(actions, binPath, opts.repoRoot, opts.env);
-    configureClaudeToolPermission(actions, opts.env);
+    else configureJsonMcp(actions, target, binPath, opts.repoRoot, opts.env);
+    if (target === "claude") configureClaudeToolPermission(actions, opts.env);
   }
 
   let refreshed = initial;
-  if (actions.some((entry) => entry.status === "changed")) {
+  if (opts.target !== "antigravity" && actions.some((entry) => entry.status === "changed")) {
     try {
-      refreshed = checkCodegraph({ repoRoot: opts.repoRoot, env: opts.env, host: opts.target });
-    } catch (_error) {
+      refreshed = checkCodegraph(probe);
+    } catch {
       refreshed = initial;
     }
   }
@@ -487,6 +497,7 @@ function configureCodegraphRuntime(opts: CodegraphConfigureOptions): CodegraphCo
 /** The old records of the host files move into the host-config ledger before the first gate write. */
 export function configureCodegraph(opts: CodegraphConfigureOptions): CodegraphConfigureResult {
   const env = { ...process.env, ...opts.env };
+  if (opts.target === "antigravity") return configureCodegraphRuntime({ ...opts, env });
   // A global configure holds the runtime lock, so it is a mutating entry of the one-shot state migration.
   if (opts.location === 'global') migrateInstallState(env);
   migrateCodexConfigRecords(env);
@@ -575,9 +586,26 @@ function checkCodegraphReadiness(probe: CodegraphProbe): ArchitectureDoctorCheck
   };
 }
 
-function checkCodegraphMcpHost(probe: CodegraphProbe, host: 'codex' | 'claude'): ArchitectureDoctorCheck {
+function checkAntigravityCodegraphMcp(id: string, describe: string, env: NodeJS.ProcessEnv): ArchitectureDoctorCheck {
+  try {
+    if (!optedIntoAntigravity(env)) return { id, describe, status: 'na', detail: 'Antigravity is not opted in' };
+    const path = resolveUserConfigFile(env, antigravityMcpConfigPath(env));
+    const server = jsonFragmentValue(decode(observeFile(path).bytes, path), CODEGRAPH_MCP_SELECTOR);
+    if (isRecord(server) && typeof server.command === 'string' && server.command.trim() && codegraphArgsAreScoped(server.args)) {
+      return { id, describe, status: 'ok', detail: 'CodeGraph MCP args are scoped to the working directory' };
+    }
+    const reason = server === undefined ? 'CodeGraph MCP entry is missing' : 'CodeGraph MCP entry needs a command and args scoped to the working directory';
+    return { id, describe, status: 'warn', detail: `${reason}. Run rh update --target antigravity --configure-codegraph` };
+  } catch (error) {
+    return { id, describe, status: 'fail', detail: String((error as Error).message ?? error) };
+  }
+}
+
+function checkCodegraphMcpHost(probe: CodegraphProbe, host: 'codex' | 'claude' | 'antigravity'): ArchitectureDoctorCheck {
   const id = `${host}-codegraph-mcp`;
-  const describe = `${host === 'codex' ? 'Codex' : 'Claude Code'} CodeGraph MCP config`;
+  const label = { codex: 'Codex', claude: 'Claude Code', antigravity: 'Antigravity' }[host];
+  const describe = `${label} CodeGraph MCP config`;
+  if (host === 'antigravity') return checkAntigravityCodegraphMcp(id, describe, process.env);
   if (!probe.result) {
     return {
       id,
@@ -640,6 +668,7 @@ function codegraphChecksFor(probe: CodegraphProbe, cwd: string): ArchitectureDoc
     checkCodegraphReadiness(probe),
     checkCodegraphMcpHost(probe, 'codex'),
     checkCodegraphMcpHost(probe, 'claude'),
+    checkCodegraphMcpHost(probe, 'antigravity'),
     checkCodegraphIndex(probe, cwd),
   ];
 }
@@ -714,6 +743,22 @@ function configureCodegraphMcpStep(cwd: string, target: CodegraphHostTarget, env
       status: "failed",
       stderr: String((error as Error).message ?? error),
     };
+  }
+}
+
+export function configureAntigravityCodegraphStep(cwd: string, env: NodeJS.ProcessEnv, explicitTarget: boolean): CodegraphSetupStep | undefined {
+  const step = 'configure Antigravity CodeGraph MCP';
+  try {
+    if (!explicitTarget && !optedIntoAntigravity(env)) return undefined;
+    const result = configureCodegraph({ repoRoot: cwd, target: 'antigravity', location: 'global', env });
+    const action = result.actions[0]!;
+    return {
+      step,
+      status: action.status === 'failed' || action.status === 'skipped' ? action.status : 'ok',
+      detail: action.stderr ?? action.status,
+    };
+  } catch (error) {
+    return { step, status: 'failed', detail: String((error as Error).message ?? error) };
   }
 }
 

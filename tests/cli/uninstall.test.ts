@@ -20,7 +20,7 @@ import { configurationReceiptPath } from '../../src/cli/installer/configuration-
 import { migrateCodexConfigRecords, planCodexConfigMigration } from '../../src/cli/installer/codex-config-migration';
 import { requestUserInputFragment } from '../../src/cli/installer/targets/codex';
 import { tomlFragment } from '../../src/core/host-config/toml-fragment';
-import { openHostConfigGate, rollbackHostConfigTransaction } from '../../src/effects/host-config/gate';
+import { antigravityMcpConfigHostPath, antigravityMcpConfigPath, openHostConfigGate, rollbackHostConfigTransaction } from '../../src/effects/host-config/gate';
 import { hostConfigPathsAt } from '../../src/effects/host-config/store';
 import { openRepositoryGate, repositoryConfigPaths } from '../../src/effects/host-config/repository';
 import { buildManagedHooks } from '../../src/cli/installer/managed-entries';
@@ -754,6 +754,48 @@ test.each([
   expect([again.exitCode,toolItems(again),hostTree(home),existsSync(registry)?readFileSync(registry,'utf8'):null]).toEqual([0,[],before,registryBefore]);
  }finally{rmSync(root,{recursive:true,force:true});}
 },30_000);
+
+test.each(['antigravity', 'both'] as const)('uninstall --target %s reverts the recorded Antigravity MCP server', (target) => fixture((home, env) => {
+ const user = { custom: { command: 'custom-server' } };
+ const path = antigravityMcpConfigPath(env);
+ put(home, '.gemini/config/mcp_config.json', JSON.stringify({ mcpServers: user }));
+ openHostConfigGate({ env }).apply([{ path, fragments: [{ owner: 'architecture', selector: CODEGRAPH_MCP_SELECTOR,
+  kind: 'add', strategy: jsonFragment, value: { command: 'codegraph', args: ['serve', '--mcp', '--path', '.'] } }] }]);
+ const installed = readFileSync(path, 'utf8');
+ expect(ledger(home).files[antigravityMcpConfigHostPath(env)].backup).toBeNull();
+ const preview = runUserUninstall({ target, dryRun: true, env });
+ expect(preview.items).toContainEqual(expect.objectContaining({ path: antigravityMcpConfigHostPath(env), action: 'reverted' }));
+ expect(readFileSync(path, 'utf8')).toBe(installed);
+ expect(runUserUninstall({ target, env }).status).toBe('complete');
+ expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ mcpServers: user });
+ expect(ledger(home).files[antigravityMcpConfigHostPath(env)]).toBeUndefined();
+}));
+
+test.each(['absent', 'edited', 'recreated', 'restored', 'linked'] as const)('Antigravity MCP uninstall preserves the file boundary when %s', (state) => fixture((home, env) => {
+ if (state === 'linked' && process.platform === 'win32') return;
+ const path = antigravityMcpConfigPath(env);
+ const user = '{"mcpServers":{"personal":{"command":"my-tool"}}}';
+ put(home, '.gemini/config/mcp_config.json', user);
+ openHostConfigGate({ env }).apply([{ path, fragments: [{ owner: 'architecture', selector: CODEGRAPH_MCP_SELECTOR,
+  kind: 'add', strategy: jsonFragment, value: { command: 'codegraph-bin' } }] }]);
+ const installed = readFileSync(path, 'utf8');
+ const edited = installed.replace('codegraph-bin', 'user-managed-bin');
+ if (state === 'absent') rmSync(path);
+ if (state === 'edited') writeFileSync(path, edited);
+ if (state === 'recreated') { rmSync(path); writeFileSync(path, installed); }
+ if (state === 'restored') writeFileSync(path, user);
+ if (state === 'linked') { rmSync(path); put(home, 'linked.json', installed); symlinkSync(join(home, 'linked.json'), path); }
+ const result = runUserUninstall({ target: 'antigravity', env });
+ const kept = state === 'edited' || state === 'linked';
+ expect(result.status).toBe(kept ? 'partial' : 'complete');
+ expect(Boolean(ledger(home).files[antigravityMcpConfigHostPath(env)])).toBe(kept);
+ if (state === 'absent') expect(existsSync(path)).toBe(false);
+ else if (state === 'linked') {
+  expect(lstatSync(path).isSymbolicLink()).toBe(true);
+  expect(readFileSync(join(home, 'linked.json'), 'utf8')).toBe(installed);
+ } else if (state === 'edited') expect(readFileSync(path, 'utf8')).toBe(edited);
+ else expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(JSON.parse(user));
+}));
 
 test.skipIf(process.platform === 'win32')('Antigravity uninstall removes hooks, rules block, and skills while preserving user text, user skills, and ~/.gemini/config', () => {
  withTempHome('user-uninstall-antigravity', (home) => {

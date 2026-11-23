@@ -6,8 +6,10 @@ import type { FragmentEdit, HostConfigStrategy, HostPath } from '../../src/core/
 import {
   AntigravityHooksPathError,
   antigravityGlobalRulesPath,
+  antigravityMcpConfigPath,
   antigravitySkillsDirPath,
   openHostConfigGate,
+  resolveUserConfigFile,
   openRepositoryFileGate,
   rollbackHostConfigTransaction,
   type HostConfigFileChange,
@@ -1281,6 +1283,33 @@ test.each(['git-managed HOME', 'bare repository with --work-tree=HOME', 'linked 
   const staged = new TextDecoder().decode(git('ls-files', '--cached').stdout).split('\n').filter(Boolean);
   expect(staged.filter((path) => path.startsWith('.repo-harness/config/vault/') || path.startsWith('.repo-harness/transactions/'))).toEqual([]);
   expect(staged).toContain('.claude/agents/rh.md');
+});
+
+test.each(['.gemini', 'config', 'mcp_config.json'] as const)('Antigravity MCP refuses a symlink at %s', (linked) => {
+  if (process.platform === 'win32') return;
+  const f = fixture();
+  const env = { HOME: f.home };
+  const path = antigravityMcpConfigPath(env);
+  const change: HostConfigFileChange = { path, fragments: [{
+    owner: 'architecture', selector: 'mcpServers.codegraph', kind: 'add', strategy: jsonFragment,
+    value: { command: 'codegraph', args: ['serve', '--mcp', '--path', '.'] },
+  }] };
+  const gate = f.gate();
+  gate.apply([change]);
+  const before = readFileSync(path);
+  const gemini = join(f.home, '.gemini');
+  const entries = { '.gemini': gemini, config: join(gemini, 'config'), 'mcp_config.json': path };
+  const entry = entries[linked];
+  const parked = join(f.home, 'parked');
+  renameSync(entry, parked);
+  symlinkSync(parked, entry, entry === path ? 'file' : 'dir');
+
+  expect(() => resolveUserConfigFile(env, path)).toThrow(AntigravityHooksPathError);
+  expect(() => gate.apply([change])).toThrow(AntigravityHooksPathError);
+  expect(() => gate.revert([path])).toThrow(AntigravityHooksPathError);
+  expect(() => gate.revert()).toThrow(AntigravityHooksPathError);
+  expect(readFileSync(path)).toEqual(before);
+  expect(f.ledger().fragments).toContainEqual(expect.objectContaining({ file: path, selector: 'mcpServers.codegraph' }));
 });
 
 test.skipIf(process.platform === 'win32')('Antigravity AGENTS.md and narrow skills root enforce no-symlink guards and preserve ~/.gemini/config', () => {
