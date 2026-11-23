@@ -4,7 +4,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { initGitRepo, run, tmpWorkspace } from './helpers/repo-fixture';
 import { A12_NO_PR_MS, A13_IDLE_MS, A14_RED_MS, A15_FAIL_MS, A16_QUESTION_MS, A17_BLOCKED_MS, A20_STUCK_MS, STALLED_WORKING_MS, BOARD_PRIORITY_ORDER, BOARD_RULE_PRIORITY, evaluateBoardAttention, renderAttentionText, type BoardPriority, type BoardRuleId } from '../src/core/board/attention';
-import { WINDOW_WITH_WORKERS_MS, WINDOW_WITHOUT_WORKERS_MS, attentionFindingKey, planAttentionDeliveries, type AttentionSentV1 } from '../src/core/board/attention-delivery';
+import { ADVISOR_WAKES_PER_DAY, MAX_SENDS_PER_FINDING, RENUDGE_INTERVAL_MS, WINDOW_WITH_WORKERS_MS, WINDOW_WITHOUT_WORKERS_MS, attentionFindingKey, planAttentionDeliveries, type AttentionSentV1 } from '../src/core/board/attention-delivery';
 import { attentionLogPath, attentionWatchDoctorCheck, runAttentionWindow, serviceTerminalRepository, startAttentionWatch } from '../src/effects/board/attention-watch';
 import { decodeBoard, type BoardHostPortsV1, type BoardItemV1, type BoardPullRequestV1, type BoardTerminalV1, type BoardV1 } from '../src/core/board/board';
 import { decodePlanBlock, PlanBlockError, planOrderIssues, planOrderUnits } from '../src/core/board/plan-block';
@@ -1977,10 +1977,195 @@ test('watch window sends a finding once to each seat terminal until its subject 
   expect(await window({ ...watched, daily_run: { ...watched.daily_run, conclusion: 'success' } } as BoardV1)).toEqual([]);
   expect(await window(watched)).toEqual([['t3', 'sent', ['A7']], ['t4', 'sent', ['A7']]]);
   // A slot that keeps no open key leaves the map: t1 holds one key of an earlier window, and no finding is open for it now.
-  sent = new Map([...sent, ['orchestrator t1', new Set([JSON.stringify(['A99', [], [], []])])]]);
+  sent = new Map([...sent, ['orchestrator t1', new Map([[JSON.stringify(['A99', [], [], []]), { count: 1, last_sent_ms: REPLAY_NOW.getTime() }]])]]);
   expect(await window(watched)).toEqual([]);
   expect(sent.has('orchestrator t1')).toBe(false);
   expect([...sent.values()].every(keys => keys.size > 0)).toBe(true);
+});
+
+test('watch window: persistent P0/P1 findings re-remind on same route up to MAX_SENDS_PER_FINDING, P2/P3 send once, and orchestrator findings never escalate to advisor', async () => {
+  const base = replay({ hcVersion: '0.1.15' });
+  const start = REPLAY_NOW.getTime();
+  const seat = (address: string, seatName: string, status: string | null, extra: Partial<BoardTerminalV1> = {}): BoardTerminalV1 =>
+    ({ address, name: null, agent: null, state: 'live', status, status_kind: null, status_msg: null, status_ms: null, turn: 1, where: 'repo-harness / #1474', branch: null, seat_status: 'observed', seat: seatName, issue: null, pr: null, ...extra }) as BoardTerminalV1;
+  const workerBlocked = seat('t1', 'worker', 'blocked', { agent: 'codex', status_ms: start - 11 * 60_000, issue: 1476 });
+  const orch = seat('t3', 'orchestrator', 'idle');
+  const advisor = seat('t9', 'advisor', 'idle');
+  const watched: BoardV1 = { ...base, execution: { status: 'observed', terminals: [workerBlocked, orch, advisor] } };
+  const hc = watchHc({ FAKE_TERMINALS: { t3: {}, t9: {} } });
+  const logPath = attentionLogPath(1186405141, 1474, { REPO_HARNESS_HOME: hc.root });
+  let clock = start;
+  let sent: AttentionSentV1 = new Map();
+  let logCursor = 0;
+  const step = async () => {
+    sent = await runAttentionWindow({
+      parent: 1474, deliver: true, log_path: logPath, sent, collect: () => watched, host: hc.host,
+      now: () => new Date(clock), sleep: async (ms) => { clock += ms; },
+    });
+    const all = readFileSync(logPath, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
+    const added = all.slice(logCursor);
+    logCursor = all.length;
+    return {
+      sends: added.filter(record => record.kind === 'send').map(record => [record.route, record.terminal, record.outcome, record.rules]),
+      skips: added.filter(record => record.kind === 'skip').map(record => ({ route: record.route, reason: record.reason })),
+    };
+  };
+
+  // t = 0: initial send includes P0 (A3), P1 (A16), P2 (A7, A10), P3 (A8) on orchestrator, and P2 (R2) on advisor.
+  const first = await step();
+  expect(first.sends).toEqual([
+    ['orchestrator', 't3', 'sent', ['A3', 'A7', 'A8', 'A10', 'A16', 'A16', 'A16']],
+    ['advisor', 't9', 'sent', ['R2']],
+  ]);
+  expect(first.skips).toEqual([]);
+  expect(clock).toBe(start + WINDOW_WITH_WORKERS_MS);
+
+  // t = 15m: inside RENUDGE_INTERVAL_MS, nothing sends and no renudge_cap skip emits.
+  expect(await step()).toEqual({ sends: [], skips: [] });
+
+  // t = 30m: 2nd send carries only P0 (A3) and P1 (A16) on orchestrator; P2 (A7, A10, R2) and P3 (A8) never re-remind.
+  const second = await step();
+  expect(second.sends).toEqual([['orchestrator', 't3', 'sent', ['A3', 'A16', 'A16', 'A16']]]);
+  expect(second.skips).toEqual([]);
+
+  // t = 45m: inside cooldown.
+  expect(await step()).toEqual({ sends: [], skips: [] });
+
+  // t = 60m: 3rd send (MAX_SENDS_PER_FINDING).
+  const third = await step();
+  expect(third.sends).toEqual([['orchestrator', 't3', 'sent', ['A3', 'A16', 'A16', 'A16']]]);
+  expect(third.skips).toEqual([]);
+
+  // t = 75m: capped at count 3, but cooldown has not elapsed -> no renudge_cap yet.
+  expect(await step()).toEqual({ sends: [], skips: [] });
+
+  // t = 90m: 4th due window sends nothing, never escalates to advisor, and logs renudge_cap once for orchestrator.
+  const fourth = await step();
+  expect(fourth.sends).toEqual([]);
+  expect(fourth.skips).toEqual([{ route: 'orchestrator', reason: 'renudge_cap' }]);
+  expect(hc.calls().filter(args => args[0] === 'send' && args.at(-2) === 't9')).toHaveLength(1);
+
+  // Advisor P1 (R3) re-reminds on advisor up to MAX_SENDS_PER_FINDING and still honors ADVISOR_WAKES_PER_DAY.
+  const advisorP1Board = replay({ parent: data => { issueNode(data, 1479).labels.nodes.push({ name: 'tier:medium' }); } });
+  const advisorOnly: BoardV1 = { ...advisorP1Board, execution: { status: 'observed', terminals: [advisor] } };
+  const fullAdvisorAtt = evaluateBoardAttention(advisorOnly);
+  const advisorAtt = { ...fullAdvisorAtt, findings: fullAdvisorAtt.findings.filter(finding => finding.route === 'advisor') };
+  const r3 = advisorAtt.findings.find(finding => finding.rule === 'R3')!;
+  const r2 = advisorAtt.findings.find(finding => finding.rule === 'R2')!;
+  let advSent: AttentionSentV1 = new Map([['advisor t9', new Map([
+    [attentionFindingKey(r3), { count: 1, last_sent_ms: start }],
+    [attentionFindingKey(r2), { count: 1, last_sent_ms: start }],
+  ])]]);
+  // Before cooldown: no R3 delivery, no skip.
+  expect(planAttentionDeliveries(advisorOnly, advisorAtt, 0, advSent, start + RENUDGE_INTERVAL_MS - 1)).toMatchObject({ deliveries: [], skipped: [] });
+  // After cooldown with daily wakes < 8: R3 re-reminds on advisor (R2 does not).
+  const advDue = planAttentionDeliveries(advisorOnly, advisorAtt, ADVISOR_WAKES_PER_DAY - 1, advSent, start + RENUDGE_INTERVAL_MS);
+  expect(advDue.deliveries.map(delivery => [delivery.route, delivery.terminal, delivery.rules])).toEqual([['advisor', 't9', ['R3']]]);
+  expect(advDue.skipped).toEqual([]);
+  // At advisor daily cap (8) when R5 is eligible: advisor_daily_cap fires and renudge_cap does NOT fire (even when R3 is capped).
+  const r3Capped = new Map([['advisor t9', new Map([
+    [attentionFindingKey(r3), { count: MAX_SENDS_PER_FINDING, last_sent_ms: start }],
+    [attentionFindingKey(r2), { count: 1, last_sent_ms: start }],
+  ])]]);
+  const withAlsoFresh = { ...advisorAtt, findings: [...advisorAtt.findings, { ...r3, rule: 'R5' as const }] };
+  expect(planAttentionDeliveries(advisorOnly, withAlsoFresh, ADVISOR_WAKES_PER_DAY, r3Capped, start + RENUDGE_INTERVAL_MS))
+    .toMatchObject({ deliveries: [], skipped: [{ route: 'advisor', reason: 'advisor_daily_cap' }] });
+  // At renudge cap when no advisor delivery is eligible: renudge_cap fires on advisor.
+  expect(planAttentionDeliveries(advisorOnly, advisorAtt, 0, r3Capped, start + RENUDGE_INTERVAL_MS))
+    .toMatchObject({ deliveries: [], skipped: [{ route: 'advisor', reason: 'renudge_cap' }] });
+
+  // No live terminal on orchestrator preserves no_seat_terminal when fresh or due for P0/P1 re-reminder, not when capped or inside cooldown.
+  const noOrch: BoardV1 = { ...watched, execution: { status: 'observed', terminals: [workerBlocked, advisor] } };
+  const a3Only = { ...evaluateBoardAttention(watched), findings: evaluateBoardAttention(watched).findings.filter(finding => finding.rule === 'A3') };
+  const a3Key = attentionFindingKey(a3Only.findings[0]!);
+  const a3Count1 = new Map([['orchestrator t3', new Map([[a3Key, { count: 1, last_sent_ms: start }]])]]);
+  const a3Count3 = new Map([['orchestrator t3', new Map([[a3Key, { count: MAX_SENDS_PER_FINDING, last_sent_ms: start }]])]]);
+  expect(planAttentionDeliveries(noOrch, a3Only, 0, a3Count1, start + RENUDGE_INTERVAL_MS - 1).skipped).toEqual([]);
+  expect(planAttentionDeliveries(noOrch, a3Only, 0, a3Count1, start + RENUDGE_INTERVAL_MS).skipped).toEqual([{ route: 'orchestrator', reason: 'no_seat_terminal' }]);
+  expect(planAttentionDeliveries(noOrch, a3Only, 0, a3Count3, start + RENUDGE_INTERVAL_MS).skipped).toEqual([]);
+  // Unavailable execution never emits renudge_cap.
+  const unavail: BoardV1 = { ...watched, execution: { status: 'unavailable', reason: 'no_seat_terminals' } };
+  expect(planAttentionDeliveries(unavail, a3Only, 0, a3Count3, start + RENUDGE_INTERVAL_MS).skipped).toEqual([]);
+});
+
+test('watch window: failed/blocked/ended re-reminders and collect failures keep counts intact, and disappearing findings reset to count 1', async () => {
+  const base = replay();
+  const start = REPLAY_NOW.getTime();
+  const seat = (address: string, seatName: string, status: string | null, extra: Partial<BoardTerminalV1> = {}): BoardTerminalV1 =>
+    ({ address, name: null, agent: null, state: 'live', status, status_kind: null, status_msg: null, status_ms: null, turn: 1, where: 'repo-harness / #1474', branch: null, seat_status: 'observed', seat: seatName, issue: null, pr: null, ...extra }) as BoardTerminalV1;
+  const blockedWorker = seat('t1', 'worker', 'blocked', { agent: 'codex', status_ms: start - 11 * 60_000, issue: 1476 });
+  const idleWorker = seat('t1', 'worker', 'idle', { agent: 'codex', status_ms: start, issue: 1476 });
+  const makeBoard = (worker: BoardTerminalV1, orchStatus: string | null = 'idle'): BoardV1 =>
+    ({ ...base, execution: { status: 'observed', terminals: [worker, seat('t3', 'orchestrator', orchStatus), seat('t9', 'advisor', 'idle')] } });
+
+  const hc = watchHc({
+    FAKE_TERMINALS: { t3: { status: { state: 'blocked' } }, t9: {} },
+    FAKE_WAITS: { t3: { ended: true, reason: 'status', status: 'blocked', exit_code: null, signal: null, children: [] } },
+  });
+  const logPath = attentionLogPath(1186405141, 1474, { REPO_HARNESS_HOME: hc.root });
+  let failSend = false;
+  const host = {
+    ...hc.host,
+    send: (terminal: string, text: string) =>
+      failSend && terminal === 't3' ? { status: 'failed' as const, reason: 'send_failed', detail: 'transient error' } : hc.host.send(terminal, text),
+  };
+
+  let clock = start;
+  let sent: AttentionSentV1 = new Map();
+  const runWin = (collect: () => BoardV1, winHost = host) =>
+    runAttentionWindow({ parent: 1474, deliver: true, log_path: logPath, sent, collect, host: winHost, now: () => new Date(clock), sleep: async (ms) => { clock += ms; } });
+
+  const a3Key = attentionFindingKey(evaluateBoardAttention(makeBoard(blockedWorker)).findings.find(finding => finding.rule === 'A3')!);
+  const a7Key = attentionFindingKey(evaluateBoardAttention(makeBoard(blockedWorker)).findings.find(finding => finding.rule === 'A7')!);
+  const logRecords = () => readFileSync(logPath, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
+
+  // 1. Initial send at t = 0 succeeds -> count 1.
+  sent = await runWin(() => makeBoard(blockedWorker));
+  expect(sent.get('orchestrator t3')?.get(a3Key)).toEqual({ count: 1, last_sent_ms: start });
+
+  // 2. At t = 30m, host.send fails during re-reminder -> count stays 1 and retries in the very next window (t = 45m).
+  clock = start + RENUDGE_INTERVAL_MS;
+  failSend = true;
+  sent = await runWin(() => makeBoard(blockedWorker));
+  expect(sent.get('orchestrator t3')?.get(a3Key)).toEqual({ count: 1, last_sent_ms: start });
+  expect(logRecords().filter(record => record.kind === 'send' && record.terminal === 't3').at(-1)?.outcome).toBe('send_failed');
+
+  // 3. At t = 45m, blocked terminal skips with skipped_blocked -> count still stays 1.
+  sent = await runWin(() => makeBoard(blockedWorker, 'blocked'));
+  expect(sent.get('orchestrator t3')?.get(a3Key)).toEqual({ count: 1, last_sent_ms: start });
+  expect(logRecords().filter(record => record.kind === 'send' && record.terminal === 't3').at(-1)?.outcome).toBe('skipped_blocked');
+
+  // 4. At t = 60m, terminal_ended during wait -> count still stays 1.
+  const endedHc = watchHc({
+    FAKE_TERMINALS: { t3: { state: 'finished', status: { state: 'blocked' } }, t9: {} },
+    FAKE_WAITS: { t3: { ended: true, reason: 'exit', status: null, exit_code: 0, signal: null, children: [] } },
+  });
+  sent = await runWin(() => makeBoard(blockedWorker, 'blocked'), endedHc.host);
+  expect(sent.get('orchestrator t3')?.get(a3Key)).toEqual({ count: 1, last_sent_ms: start });
+  expect(logRecords().filter(record => record.kind === 'send' && record.terminal === 't3').at(-1)?.outcome).toBe('terminal_ended');
+
+  // 5. Collect failure (HTTP 503) returns prior unchanged -> counts frozen at 1.
+  const stderr = spyOn(process.stderr, 'write').mockImplementation(() => true);
+  try {
+    sent = await runWin(() => readGhJson({ repo_root: hc.root, gh_runner: () => ({ status: 1, stdout: '', stderr: 'gh: HTTP 503' }) }, ['api', 'graphql']) as BoardV1);
+  } finally { stderr.mockRestore(); }
+  expect(sent.get('orchestrator t3')?.get(a3Key)).toEqual({ count: 1, last_sent_ms: start });
+  expect(logRecords().at(-1)?.kind).toBe('error');
+
+  // 6. Retry succeeds -> count advances to 2 with updated last_sent_ms.
+  failSend = false;
+  const retryAt = clock;
+  sent = await runWin(() => makeBoard(blockedWorker));
+  expect(sent.get('orchestrator t3')?.get(a3Key)).toEqual({ count: 2, last_sent_ms: retryAt });
+
+  // 7. Disappearing finding (A3 gone while A7 stays) clears A3 key while keeping A7; reappearing A3 sends immediately and restarts at count 1.
+  sent = await runWin(() => makeBoard(idleWorker));
+  expect(sent.get('orchestrator t3')?.has(a3Key)).toBe(false);
+  expect(sent.get('orchestrator t3')?.get(a7Key)).toEqual({ count: 1, last_sent_ms: start });
+
+  const reappearAt = clock;
+  sent = await runWin(() => makeBoard(blockedWorker));
+  expect(sent.get('orchestrator t3')?.get(a3Key)).toEqual({ count: 1, last_sent_ms: reappearAt });
 });
 
 test('watch window skips a provider 5xx and resumes at the next window', async () => {
