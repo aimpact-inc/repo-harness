@@ -2,7 +2,7 @@
 // the seat brief. Each limit names what the host does with it, so the output
 // never claims a limit that the host cannot apply.
 import { PANE_PREFIX } from '../terminal/pane-prefix';
-import { isCouncilSeat, isReviewSeat, isWorkerSeat, seatTakesFleet, type LaunchSeatId, type SeatConfigV1, type SeatTool } from './seats-settings';
+import { AgySeatSettingsError, agyEffortValid, isCouncilSeat, isReviewSeat, isWorkerSeat, seatTakesFleet, type LaunchSeatId, type SeatConfigV1, type SeatTool } from './seats-settings';
 import { SEAT_EFFORT_ENV, SEAT_ENV, SEAT_MODEL_ENV, SEAT_REPOSITORY_ENV, isResetSeat } from './seat-reset';
 
 /** `seats`: the stored section. `defaults`: no section, so `DEFAULT_SEATS_CONFIG`. */
@@ -304,38 +304,48 @@ const AGY_DENIED_RH_COMMANDS: readonly string[] = [
 ];
 
 export const AGY_READONLY_COMMAND_PREFIXES: readonly string[] = [
-  'hc ls', 'hc get', 'hc read', 'hc wait', 'hc send',
+  'hc ls', 'hc get', 'hc read', 'hc file read', 'hc wait', 'hc send',
   'git log', 'git show', 'git diff', 'git status', 'git grep', 'git rev-parse', 'git ls-remote', 'git fetch',
   'gh pr view', 'gh pr list', 'gh pr checks', 'gh pr diff',
   'gh issue view', 'gh issue list', 'gh run view', 'gh run list',
   'rh board attention --parent', 'rh board parents', 'rh board cluster', 'rh board seats', 'rh board retro',
-  'rh quota', 'rh seats pool',
+  'rh doctor', 'rh quota', 'rh seats pool',
+  'rh arch projection status', 'rh arch debt',
+  'rh arch refactor recommendations', 'rh arch refactor list', 'rh arch refactor show',
+  'rh arch module list', 'rh arch module review-prompt',
   'rg', 'ls', 'cat',
 ];
 
 export const AGY_READONLY_DENIED_COMMANDS: readonly string[] = [
   ...GITHUB_WRITE_COMMANDS,
   ...AGY_DENIED_RH_COMMANDS,
-  'git reset --hard', 'git clean',
+  'gh run rerun', 'git reset --hard', 'git clean',
 ];
 
 export const AGY_WORKER_COMMAND_PREFIXES: readonly string[] = [
   'hc ls', 'hc get', 'hc read', 'hc wait', 'hc send',
   'git log', 'git show', 'git diff', 'git status', 'git grep', 'git rev-parse', 'git ls-remote', 'git fetch',
-  'git add', 'git commit', 'git checkout', 'git switch', 'git branch',
+  'git add', 'git commit', 'git branch',
+  'git worktree list',
+  // Include the first path's ./ so even a string prefix cannot match an option after the `--`.
+  'git merge-tree', 'git restore --staged -- ./', 'git mv -- ./',
+  'git stash push', 'git stash list', 'git stash show',
   'gh pr view', 'gh pr list', 'gh pr checks', 'gh pr diff',
   'gh issue view', 'gh issue list', 'gh run view', 'gh run list',
-  'bun', 'node', 'npm',
+  'rh arch projection status', 'rh arch projection slice', 'rh arch prepare', 'rh arch checkpoint',
+  'rh arch complete', 'rh arch verify', 'rh arch debt', 'rh arch refactor verify', 'rh arch refactor resolve',
+  'rh capability resolve', 'rh state', 'rh doctor', 'rh quota', 'rh seats pool', 'rh run',
+  'bash scripts/check-ci.sh', 'bun', 'node', 'npm',
   'rg', 'ls', 'cat',
 ];
 
 const AGY_WORKER_GH_COMMAND_PREFIXES: readonly string[] = [
-  'git push', 'gh pr create', 'gh pr edit', 'gh pr comment', 'gh issue comment',
+  'git push', 'gh pr create', 'gh pr edit', 'gh pr comment', 'gh issue comment', 'gh run rerun',
 ];
 
 export const AGY_WORKER_DENIED_COMMANDS: readonly string[] = [
   ...AGY_DENIED_RH_COMMANDS,
-  'gh pr merge', 'gh release create', 'gh issue close',
+  'rh board', 'gh pr merge', 'gh release create', 'gh issue close',
   'git reset --hard', 'git clean',
 ];
 
@@ -350,9 +360,13 @@ export function agySeatAgentName(seat: LaunchSeatId): string {
   throw new Error(`agy is not supported on seat ${seat}.`);
 }
 
-export function agySeatAgentTools(seat: LaunchSeatId): readonly string[] {
+export function agySeatAgentTools(seat: LaunchSeatId, config: SeatConfigV1): readonly string[] {
   if (isWorkerSeat(seat)) return AGY_WORKER_AGENT_TOOLS;
-  if (seat === 'advisor' || seat === 'council' || seat === 'gatekeeper') return AGY_READONLY_AGENT_TOOLS;
+  if (seat === 'advisor') return [
+    ...(config.tools.includes('edit') ? AGY_WORKER_AGENT_TOOLS : AGY_READONLY_AGENT_TOOLS),
+    ...(config.tools.includes('schedule') ? ['schedule'] : []),
+  ];
+  if (seat === 'council' || seat === 'gatekeeper') return AGY_READONLY_AGENT_TOOLS;
   throw new Error(`agy is not supported on seat ${seat}.`);
 }
 
@@ -361,15 +375,15 @@ export function agySeatCommandRules(seat: LaunchSeatId, config: SeatConfigV1): {
     const hasGh = config.tools.includes('gh');
     return {
       allow: hasGh ? [...AGY_WORKER_COMMAND_PREFIXES, ...AGY_WORKER_GH_COMMAND_PREFIXES] : AGY_WORKER_COMMAND_PREFIXES,
-      deny: hasGh ? AGY_WORKER_DENIED_COMMANDS : [...new Set([...AGY_WORKER_DENIED_COMMANDS, ...GITHUB_WRITE_COMMANDS])],
+      deny: hasGh ? AGY_WORKER_DENIED_COMMANDS : [...new Set([...AGY_WORKER_DENIED_COMMANDS, ...GITHUB_WRITE_COMMANDS, 'gh run rerun'])],
     };
   }
-  if (seat === 'advisor' || seat === 'council' || seat === 'gatekeeper') {
-    const poolIndex = AGY_READONLY_COMMAND_PREFIXES.indexOf('rh seats pool') + 1;
-    const allow = seat === 'advisor'
-      ? [...AGY_READONLY_COMMAND_PREFIXES.slice(0, poolIndex), 'rh seats council', ...AGY_READONLY_COMMAND_PREFIXES.slice(poolIndex)]
-      : AGY_READONLY_COMMAND_PREFIXES;
-    return { allow, deny: AGY_READONLY_DENIED_COMMANDS };
+  if (seat === 'advisor') return {
+    allow: [...AGY_READONLY_COMMAND_PREFIXES, 'rh seats council', 'rh arch refactor decide'],
+    deny: AGY_READONLY_DENIED_COMMANDS,
+  };
+  if (seat === 'council' || seat === 'gatekeeper') {
+    return { allow: AGY_READONLY_COMMAND_PREFIXES, deny: [...AGY_READONLY_DENIED_COMMANDS, 'rh arch refactor decide'] };
   }
   throw new Error(`agy is not supported on seat ${seat}.`);
 }
@@ -395,6 +409,8 @@ export function agySeatBrief(seat: LaunchSeatId, config: SeatConfigV1): string {
     brief(seat, config, [], limits),
     'Never read auth or credential files.',
     ...(seat === 'advisor' ? [
+      'Edit only your own files under /tmp/rh-triage/ and your scratch proposal or retro files outside every repository. Never edit repository source.',
+      'Record a refactor decision only after the owner gives it.',
       'When Stop requests a handoff, send it to the orchestrator. After this pane ends, the orchestrator starts a new advisor pane with rh seats launch advisor and gives it the handoff.',
     ] : []),
   ].join('\n\n');
@@ -409,11 +425,13 @@ interface AgyLaunchInputs {
 function agyLaunch(seat: LaunchSeatId, config: SeatConfigV1, repositoryId: string | undefined, input: AgyLaunchInputs): RuntimeLaunch {
   const model = config.model;
   if (model === null) throw new Error('agy requires an explicit model.');
+  if (!agyEffortValid(model, config.effort)) throw new AgySeatSettingsError('seat_effort_invalid', seat, 'effort');
   if (isWorkerSeat(seat) && !config.tools.includes('edit')) {
     throw new Error(`The ${seat} agy worker seat is configured read-only (missing edit). Enable edit for seats.${seat}.tools in Settings before launching it.`);
   }
   const env = isResetSeat(seat) && repositoryId !== undefined
-    ? [`${SEAT_ENV}=${seat}`, `${SEAT_REPOSITORY_ENV}=${repositoryId}`, `${SEAT_MODEL_ENV}=${model}`]
+    ? [`${SEAT_ENV}=${seat}`, `${SEAT_REPOSITORY_ENV}=${repositoryId}`, `${SEAT_MODEL_ENV}=${model}`,
+      ...(config.effort === null ? [] : [`${SEAT_EFFORT_ENV}=${config.effort}`])]
     : [];
   const rules = agySeatCommandRules(seat, config);
   const settings = JSON.stringify({
@@ -427,6 +445,7 @@ function agyLaunch(seat: LaunchSeatId, config: SeatConfigV1, repositoryId: strin
   return {
     argv: [
       ...seatEnv(env), input.executable, '--mode', 'accept-edits', '--model', model,
+      ...(config.effort === null ? [] : ['--effort', config.effort]),
       '--add-dir', input.directory, '--agent', agySeatAgentName(seat), '--settings', settings,
     ],
     brief: agySeatBrief(seat, config),

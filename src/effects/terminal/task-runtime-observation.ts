@@ -8,7 +8,7 @@ export const OAR_OBSERVATION_MAX_BYTES = 16 * 1024;
 export const OAR_OBSERVATION_REFRESH_MS = 1000;
 const failureClasses: Record<FailureClass, true> = {
   auth: true, quota: true, rate_limited: true, billing: true, model_unavailable: true,
-  input_too_large: true, invalid_request: true, overloaded: true, provider: true,
+  input_too_large: true, model_refused: true, invalid_request: true, overloaded: true, provider: true,
   runtime_exited: true, limit_reached: true, output_schema: true, unknown: true,
 };
 const rejectionCodes: Record<RejectionCode, true> = {

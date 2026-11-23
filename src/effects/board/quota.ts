@@ -1,3 +1,4 @@
+import type { AccountUsageSnapshot, InstallationSnapshot } from '@botiverse/oar/browser';
 import { spawn } from 'node:child_process';
 import { retryWindowsSharingRace } from '../atomic-append';
 import { randomUUID } from 'node:crypto';
@@ -19,7 +20,7 @@ import {
   type QuotaReport,
 } from '../../core/board/quota';
 import { hasAgySeat } from '../../core/board/seat-routing';
-import { readSeatsConfiguration } from './seats-configuration';
+import { readSeatsConfiguration, resolveAgyInstallation } from './seats-configuration';
 
 const CODEX_READ_TIMEOUT_MS = 20_000;
 const AGY_READ_TIMEOUT_MS = 20_000;
@@ -37,17 +38,23 @@ export async function readQuotaReport(env: NodeJS.ProcessEnv, exhaustedAtOrAbove
   return buildQuotaReport([claude, codex, ...agy], Date.now(), exhaustedAtOrAboveUsed);
 }
 
-/** Read both model groups through agy's own sign-in. Only quota windows cross this boundary. */
-export async function readAgyQuota(env: NodeJS.ProcessEnv): Promise<QuotaReading[]> {
-  const command = Bun.which('agy', { PATH: env.PATH ?? process.env.PATH });
-  if (command === null) return unknownAgyQuota('agy not on PATH');
+/** Discard OAR account identity at the boundary. Only model-group quota windows leave it. */
+export function decodeAgyQuota(snapshot: AccountUsageSnapshot, observedAt: string): QuotaReading[] {
+  if (snapshot.kind === 'reauth_required') return unknownAgyQuota('agy is signed out');
+  if (snapshot.kind !== 'available') return unknownAgyQuota('agy account quota is unavailable');
+  return projectAgyQuota(snapshot.windows, observedAt);
+}
+
+/** Read both model groups through agy's own sign-in. */
+export async function readAgyQuota(env: NodeJS.ProcessEnv, verified?: Promise<InstallationSnapshot>): Promise<QuotaReading[]> {
   try {
+    const installation = await (verified ?? resolveAgyInstallation(env));
+    if (installation.kind === 'not_found') return unknownAgyQuota('agy not installed');
+    if (installation.kind !== 'available' || installation.via !== 'executable') return unknownAgyQuota('agy installation is unsupported');
     const { antigravityRuntime } = await import('@botiverse/oar/runtimes/antigravity');
     const environment = Object.fromEntries(Object.entries(env).map(([key, value]) => [key, value ?? null] as const));
-    const snapshot = await antigravityRuntime.accountUsage({ kind: 'available', via: 'executable', command }, { env: environment, timeoutMs: AGY_READ_TIMEOUT_MS });
-    if (snapshot.kind === 'reauth_required') return unknownAgyQuota('agy is signed out');
-    if (snapshot.kind === 'unsupported') return unknownAgyQuota('agy account quota is unavailable');
-    return projectAgyQuota(snapshot.windows, new Date().toISOString());
+    const options = { env: environment, timeoutMs: AGY_READ_TIMEOUT_MS };
+    return decodeAgyQuota(await antigravityRuntime.accountUsage(installation, options), new Date().toISOString());
   } catch (error) {
     // Use fixed reasons. An executable or library error can include private text.
     const message = error instanceof Error ? error.message : '';

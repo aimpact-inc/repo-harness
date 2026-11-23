@@ -178,7 +178,7 @@ describe('agents page seats section', () => {
     expect(allow('Shell').disabled).toBe(true);
     expect(allow('Edit files').disabled).toBe(true);
     await click(seatsSave());
-    expect(posts[0]?.seats.advisor).toEqual({ runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['net', 'read', 'shell'] });
+    expect(posts[0]?.seats.advisor).toEqual({ runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['edit', 'mcp', 'net', 'read', 'schedule', 'shell'] });
 
     // Worker seat gets Neon High + writable agy worker tools, unlocked gh toggle, and dynamic limits (no edit limit).
     await click(pane('worker'));
@@ -208,14 +208,14 @@ describe('agents page seats section', () => {
     await click(buttonWithText('Light worker'));
     await click(document.querySelector<HTMLButtonElement>('[data-seat-card="worker-light"] [aria-label="Configured"]')!);
     await click(buttonWithText('Antigravity (agy)'));
-    expect(buttonWithText('gemini-4-hydrogen').getAttribute('aria-pressed')).toBe('true');
+    expect(buttonWithText('gemini-4-hydrogen-high').getAttribute('aria-pressed')).toBe('true');
     expect(allow('Edit files').getAttribute('aria-checked')).toBe('true');
     expect(allow('GitHub writes').disabled).toBe(false);
 
     await click(buttonWithText('Gatekeeper fallback'));
     await click(document.querySelector<HTMLButtonElement>('[data-seat-card="gatekeeper-fallback"] [aria-label="Configured"]')!);
     await click(buttonWithText('Antigravity (agy)'));
-    expect(buttonWithText('gemini-4-hydrogen').getAttribute('aria-pressed')).toBe('true');
+    expect(buttonWithText('gemini-4-hydrogen-high').getAttribute('aria-pressed')).toBe('true');
     expect(allow('Shell').disabled).toBe(true);
 
     // Disallowed seats hide agy.

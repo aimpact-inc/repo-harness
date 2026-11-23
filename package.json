@@ -102,7 +102,7 @@
     "vite": "^8.3.8"
   },
   "dependencies": {
-    "@botiverse/oar": "0.104.0",
+    "@botiverse/oar": "0.129.1",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "archctx": "0.17.1",
     "archctx-contracts": "0.17.1",

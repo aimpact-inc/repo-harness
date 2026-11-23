@@ -13,7 +13,9 @@ import { claudeRuntime } from '@botiverse/oar/runtimes/claude';
 import { codebuddyRuntime } from '@botiverse/oar/runtimes/codebuddy';
 import { codexRuntime } from '@botiverse/oar/runtimes/codex';
 import { createCursorRuntime } from '@botiverse/oar/runtimes/cursor';
+import { devinRuntime } from '@botiverse/oar/runtimes/devin';
 import { dshRuntime } from '@botiverse/oar/runtimes/dsh';
+import { factoryRuntime } from '@botiverse/oar/runtimes/factory';
 import { grokRuntime } from '@botiverse/oar/runtimes/grok';
 import { kimiRuntime } from '@botiverse/oar/runtimes/kimi';
 import { opencodeRuntime } from '@botiverse/oar/runtimes/opencode';
@@ -48,7 +50,8 @@ export const HOST_DEPENDENCY_RUNTIMES: readonly HostDependencyRuntime[] = Object
 
 export function registryRuntimes(): readonly ProbedRuntime[] {
   return [
-    ...[antigravityRuntime, claudeRuntime, codexRuntime, codebuddyRuntime, dshRuntime, grokRuntime, kimiRuntime, opencodeRuntime, piRuntime, qwenRuntime, qoderRuntime]
+    ...[antigravityRuntime, claudeRuntime, codexRuntime, codebuddyRuntime, devinRuntime, dshRuntime, factoryRuntime,
+      grokRuntime, kimiRuntime, opencodeRuntime, piRuntime, qwenRuntime, qoderRuntime]
       .map(runtime => ({ id: runtime.id, group: 'default' as const, installation: runtime.installation })),
     ...[createMorphRuntime()].map(runtime => ({ id: runtime.id, group: 'community' as const, installation: runtime.installation })),
   ];

@@ -47,7 +47,7 @@ import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
 import { COUNCIL_MEMBERS, CouncilConsultError, parseCouncilMembers, type CouncilMember } from '../../core/board/planner-consult';
 import { runCouncilConsult } from '../../effects/board/planner-consult';
 import { formatSeatPool, seatModelBlock, seatPoolHint, seatRuntimeBlock } from '../../core/board/seat-pool';
-import { collectSeatPoolProbes, enabledRuntimesOf, magpieExtensionInstalled, probeAgySeat, refreshSeatPool, SeatsConfigurationError, writeAgySeatAgent } from '../../effects/board/seats-configuration';
+import { collectSeatPoolProbes, enabledRuntimesOf, magpieExtensionInstalled, probeAgySeat, refreshSeatPool, resolveAgyInstallation, SeatsConfigurationError, writeAgySeatAgent, type AgyCatalogModel } from '../../effects/board/seats-configuration';
 
 import { checkAntigravityHooks } from '../installer/targets/antigravity';
 import { resolveAntigravityRepository } from '../hook/host-adapter';
@@ -215,7 +215,8 @@ function plannedGatekeeper(route: SeatRouteV1): Exclude<SeatRouteV1, { id: null 
  * The seat config that launches for `id` under the current quota, or the quota refusal. `modeKnown` is false when the
  * account of the launched seat has no fresh weekly reading (missing, unreadable or stale capture), so its mode is unknown.
  */
-async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, configured: SeatConfigV1, env: NodeJS.ProcessEnv, ownerException: string | undefined): Promise<{
+async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, configured: SeatConfigV1, env: NodeJS.ProcessEnv,
+  ownerException: string | undefined, readAgy: () => Promise<QuotaReading[]>): Promise<{
   readonly id: LaunchSeatId | 'gatekeeper-fallback'; readonly seat: SeatConfigV1; readonly modeKnown: boolean;
   /** The Claude mode that `effectiveSeatConfig` read for this launch (#3091). */
   readonly claudeSaving: boolean;
@@ -229,7 +230,7 @@ async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, configur
       else if (account === 'chatgpt') readings.push(await readCodexQuota(env, PACKAGE_VERSION));
       else {
         for (const agyAccount of AGY_QUOTA_ACCOUNTS) done.add(agyAccount);
-        readings.push(...await readAgyQuota(env));
+        readings.push(...await readAgy());
       }
     }
     return seatAccountQuotas(readings.map(reading => classifyQuotaReading(reading, Date.now(), seats.routing.exhausted_at_or_above_used)), seats.routing);
@@ -345,10 +346,10 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   const plannedSeat = id === 'gatekeeper' && planned !== undefined ? plannedGatekeeper(planned) : null;
   const runtimeSeat: SeatId = plannedSeat?.id === 'gatekeeper-fallback' ? plannedSeat.id : id;
   const initialCandidate = plannedSeat?.seat ?? configured;
-  let agyExecutable = prepareFleet && initialCandidate.runtime === 'agy'
-    ? await checkedAgyExecutable(runtimeSeat, config, initialCandidate, env, cwd, terminal)
+  let agyProbe = prepareFleet && initialCandidate.runtime === 'agy'
+    ? checkedAgyRuntime(runtimeSeat, config, initialCandidate, env, terminal)
     : undefined;
-  const checkPool = checkAvailability && agyExecutable === undefined;
+  const checkPool = checkAvailability && agyProbe === undefined;
   const probes = checkPool ? collectSeatPoolProbes(env, SEAT_IDS.some(seatId => seats[seatId]?.runtime === 'agy')) : [];
   const unavailable = (modelSeat: SeatId, reason: string) => {
     throw new SeatProviderUnavailableError(`The ${id} seat cannot launch. ${reason} ${seatPoolHint(modelSeat, seats, probes)}`);
@@ -357,12 +358,23 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
     const reason = seatRuntimeBlock(runtimeSeat, initialCandidate.runtime, probes);
     if (reason !== null) unavailable(runtimeSeat, reason);
   }
+  let agyInstallation: ReturnType<typeof resolveAgyInstallation> | undefined;
+  const readAgy = () => {
+    agyInstallation ??= agyProbe === undefined ? resolveAgyInstallation(env) : Promise.resolve(agyProbe.installation);
+    return readAgyQuota(env, agyInstallation);
+  };
   // A planned gatekeeper route reserves no Claude seat while Claude is saving or exhausted.
   const { id: effectiveId, seat: effective, modeKnown, claudeSaving } = plannedSeat !== null
     ? { id: runtimeSeat, seat: plannedSeat.seat, modeKnown: true, claudeSaving: false }
-    : await quotaCheckedSeat(id, seats, configured, env, labels.ownerException);
-  if (prepareFleet && effective.runtime === 'agy' && agyExecutable === undefined) {
-    agyExecutable = await checkedAgyExecutable(effectiveId, config, effective, env, cwd, terminal);
+    : await quotaCheckedSeat(id, seats, configured, env, labels.ownerException, readAgy);
+  if (prepareFleet && effective.runtime === 'agy') {
+    if (agyProbe === undefined) {
+      const installation = await agyInstallation?.catch(() => undefined);
+      const probeEnv = installation?.kind === 'available' && installation.via === 'executable'
+        ? { ...env, OAR_ANTIGRAVITY_BIN: installation.command } : env;
+      agyProbe = checkedAgyRuntime(effectiveId, config, effective, probeEnv, terminal);
+    }
+    checkAgyLaunchTarget(effectiveId, effective, agyProbe.models, env, cwd);
   }
   if (checkPool && effective.runtime !== 'agy') {
     const reason = seatModelBlock(effectiveId, effective, seats, probes, () => magpieExtensionInstalled(env));
@@ -386,7 +398,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   const agy = effective.runtime !== 'agy'
     ? undefined
     : prepareFleet
-      ? { executable: agyExecutable!, directory: writeAgySeatAgent(id, effective, env), cwd }
+      ? { executable: agyProbe!.installation.command, directory: writeAgySeatAgent(id, effective, env), cwd }
       : { executable: 'agy', directory: '<dry-run>', cwd };
   const launch = buildSeatLaunch(id, effective, config.seats === undefined ? 'defaults' : 'seats', agentTypes, {
     paneName: name ?? undefined, repositoryId: labels.repositoryId, piRoleDirectory, piHookExtension, claudeSaving, agy,
@@ -399,7 +411,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   } };
 }
 
-async function checkedAgyExecutable(id: SeatId, config: Record<string, unknown>, seat: SeatConfigV1, env: NodeJS.ProcessEnv, cwd: string, terminal: 'new' | 'existing'): Promise<string> {
+function checkedAgyRuntime(id: SeatId, config: Record<string, unknown>, seat: SeatConfigV1, env: NodeJS.ProcessEnv, terminal: 'new' | 'existing') {
   if (!isAgyAllowedSeat(id)) {
     throw new SeatsCommandError('seat_runtime_unsupported', `Direct agy launch is not supported on the ${id} seat.`);
   }
@@ -413,18 +425,24 @@ async function checkedAgyExecutable(id: SeatId, config: Record<string, unknown>,
   if (!enabledRuntimesOf(config).includes(seatHostId('agy'))) {
     throw new SeatsConfigurationError('seat_runtime_not_enabled', `Enable Antigravity in Hosts before launching the ${id}.`);
   }
-  const probe = await probeAgySeat(env);
+  const probe = probeAgySeat(env);
   switch (probe.kind) {
     case 'not_installed': throw new SeatsCommandError('seat_runtime_missing', `Install agy before launching the ${id}. See seats.${id}.model.`);
     case 'unsupported': throw new SeatsCommandError('seat_runtime_unsupported', `The ${id} requires stable agy 1.5.0 or later. See seats.${id}.model.`);
     case 'signed_out': throw new SeatsCommandError('seat_runtime_signed_out', `Sign in through agy before launching the ${id}. See seats.${id}.model.`);
     case 'unknown':
     case 'catalog_unknown': throw new SeatsCommandError('seat_runtime_unknown', `The agy installation or model catalog could not be checked. Retry the launch. See seats.${id}.model.`);
-    case 'available':
-      if (seat.model === null || !probe.models.has(seat.model)) {
-        throw new SeatsCommandError('seat_model_unavailable', `agy does not list the selected ${id} model. See seats.${id}.model.`);
-      }
-      break;
+    case 'available': return probe;
+  }
+}
+
+function checkAgyLaunchTarget(id: SeatId, seat: SeatConfigV1, models: readonly AgyCatalogModel[], env: NodeJS.ProcessEnv, cwd: string): void {
+  const model = models.find(item => item.id === seat.model);
+  if (model === undefined) {
+    throw new SeatsCommandError('seat_model_unavailable', `agy does not list the selected ${id} model. See seats.${id}.model.`);
+  }
+  if (seat.effort !== null && !model.efforts.includes(seat.effort)) {
+    throw new AgySeatSettingsError('seat_effort_invalid', id, 'effort');
   }
   let optedIn = false;
   try { optedIn = resolveAntigravityRepository({ cwd }).status === 'opted-in'; } catch { /* refuse unresolved checkouts */ }
@@ -433,7 +451,6 @@ async function checkedAgyExecutable(id: SeatId, config: Record<string, unknown>,
   if (activation.status !== 'ok' || direct.status !== 'ok') {
     throw new SeatsCommandError('antigravity_guard_unready', `On-disk activation: ${activation.status}. Direct guard: ${direct.status}. Run rh doctor for details.`);
   }
-  return probe.executable;
 }
 
 /** The space of the calling terminal: Herdr.app writes it as a label on each terminal that a pane shows. */

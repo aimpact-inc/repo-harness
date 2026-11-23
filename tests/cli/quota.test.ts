@@ -13,10 +13,12 @@ import {
   type QuotaReport,
 } from '../../src/core/board/quota';
 import { effectiveSeatConfig, formatSeatModes, formatSeatRoutes, seatAccount, seatAccountQuotas, selectSeatRoute } from '../../src/core/board/seat-routing';
-import { LOGICAL_MODEL_IDS, MODEL_CATALOG, catalogEntry, isCatalogModelPermittedOnSeat, resolveCatalogRoute } from '../../src/core/board/model-catalog';
+import { AGY_HYDROGEN_VARIANTS, LOGICAL_MODEL_IDS, MODEL_CATALOG, catalogEntry, isCatalogModelPermittedOnSeat, resolveCatalogRoute } from '../../src/core/board/model-catalog';
 import { SHIPPED_MODEL_IDS } from '../../src/core/board/recommended-models';
 import { decodeSeatPool, seatRuntimeBlock } from '../../src/core/board/seat-pool';
-import { DEFAULT_SEATS_CONFIG, type CodexCreditMode, type SeatConfigV1 } from '../../src/core/board/seats-settings';
+import { DEFAULT_SEATS_CONFIG, NATIVE_SEATS_PRESET, type CodexCreditMode, type SeatConfigV1 } from '../../src/core/board/seats-settings';
+import { decodeAgyQuota } from '../../src/effects/board/quota';
+import { agyCatalogScript, type AgyCatalogFixture } from '../helpers/agy-cli-fixture';
 
 const ROOT = join(import.meta.dir, '../..');
 const CLI = join(ROOT, 'src/cli/index.ts');
@@ -199,18 +201,26 @@ describe('seat quota routing', () => {
     expect(effectiveSeatConfig('advisor', seats, quota)).toEqual({ ...advisor, model: `magpie/agy-cli/gemini-4-${model}` });
     const other = { ...advisor, model: 'magpie/codex/gpt-6-astra' };
     expect(effectiveSeatConfig('advisor', { ...seats, advisor: other }, quota)).toEqual(other);
-    const nativeCarbon = { ...DEFAULT_SEATS_CONFIG.advisor, runtime: 'agy' as const, model: 'gemini-4-carbon-high', effort: null, fleet: [] };
-    expect(effectiveSeatConfig('advisor', { ...seats, advisor: nativeCarbon }, quota)).toEqual(nativeCarbon);
+    const nativeCarbon = { ...NATIVE_SEATS_PRESET.advisor, model: 'gemini-4-carbon-high', effort: 'high' };
+    expect(effectiveSeatConfig('advisor', { ...seats, advisor: nativeCarbon }, quota)).toEqual(model === 'carbon'
+      ? nativeCarbon : { ...nativeCarbon, model: 'gemini-4-neon-high', effort: null });
+    const nativeOther = { ...nativeCarbon, model: 'claude-opus-5-5-high' };
+    expect(effectiveSeatConfig('advisor', { ...seats, advisor: nativeOther }, quota)).toEqual(nativeOther);
   });
 
   test('model-catalog maps logical lines to Magpie/Native routes, quota accounts, and permitted planes', () => {
     expect(LOGICAL_MODEL_IDS).toContain('hydrogen');
-    expect(resolveCatalogRoute('hydrogen', 'native')).toEqual({ runtime: 'agy', model: 'gemini-4-hydrogen', effort: null });
+    expect(resolveCatalogRoute('hydrogen', 'native')).toEqual({ runtime: 'agy', model: 'gemini-4-hydrogen-high', effort: null });
+    expect(NATIVE_SEATS_PRESET['worker-light']?.model).toBe('gemini-4-hydrogen-high');
+    expect(AGY_HYDROGEN_VARIANTS.map(entry => entry.model)).toEqual(['low', 'medium', 'high', 'xhigh'].map(effort => `gemini-4-hydrogen-${effort}`));
     expect(resolveCatalogRoute('hydrogen', 'magpie')).toEqual({ runtime: 'pi', model: 'magpie/agy-cli/gemini-4-hydrogen', effort: 'high' });
     expect(catalogEntry('sol', 'magpie')).toEqual({ runtime: 'pi', model: 'magpie/codex/gpt-6.2-sol' });
-    expect(seatAccount({ runtime: 'agy', model: 'gemini-4-hydrogen' })).toBe('agy_gemini');
+    expect(seatAccount({ runtime: 'agy', model: 'gemini-4-hydrogen-high' })).toBe('agy_gemini');
+    expect(seatAccount({ runtime: 'agy', model: 'claude-opus-5-5-high' })).toBe('agy_other');
+    expect(seatAccount({ runtime: 'agy', model: 'gpt-oss-120b-medium' })).toBe('agy_other');
+    expect(seatAccount({ runtime: 'agy', model: null })).toBeNull();
     expect(seatAccount({ runtime: 'pi', model: 'magpie/agy-cli/gemini-4-hydrogen' })).toBe('agy_gemini');
-    expect(SHIPPED_MODEL_IDS.has('gemini-4-hydrogen')).toBe(true);
+    expect(SHIPPED_MODEL_IDS.has('gemini-4-hydrogen-high')).toBe(true);
     expect(SHIPPED_MODEL_IDS.has('magpie/agy-cli/gemini-4-hydrogen')).toBe(true);
     expect(isCatalogModelPermittedOnSeat('worker', catalogEntry('astra', 'native'))).toBe(false);
     expect(isCatalogModelPermittedOnSeat('council', catalogEntry('astra', 'native'))).toBe(true);
@@ -503,11 +513,13 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
 });
 `;
 
-const FAKE_AGY = `#!${process.execPath}
+const fakeAgy = (log: string, mode: string) => `#!${process.execPath}
 const args = process.argv.slice(2).join(' ');
-require('node:fs').appendFileSync(process.env.FAKE_AGY_LOG, args + '\\n');
-const mode = process.env.FAKE_AGY_MODE;
+require('node:fs').appendFileSync(${JSON.stringify(log)}, args + '\\n');
+const mode = ${JSON.stringify(mode)};
 const email = ['agy-private-fixture', 'example.invalid'].join('@');
+if (args === '--help') { console.log('Usage of agy: --conversation'); process.exit(0); }
+if (args === '--version') { console.log('1.5.12'); process.exit(0); }
 if (args === 'models') {
   if (mode === 'signed-out') {
     process.stderr.write('Please sign in ' + email);
@@ -552,11 +564,11 @@ function fixture(codexMode: string | null, agyMode: string | null = null) {
   }
   const agyLog = join(root, 'agy.jsonl');
   if (agyMode !== null) {
-    writeFileSync(join(bin, 'agy'), FAKE_AGY);
+    writeFileSync(join(bin, 'agy'), fakeAgy(agyLog, agyMode));
     chmodSync(join(bin, 'agy'), 0o755);
   }
   const env = { HOME: home, PATH: bin, TMPDIR: tmpdir(), BUN_INSTALL: join(home, '.bun'),
-    FAKE_CODEX_LOG: log, FAKE_CODEX_MODE: codexMode ?? '', FAKE_AGY_LOG: agyLog, FAKE_AGY_MODE: agyMode ?? '' };
+    FAKE_CODEX_LOG: log, FAKE_CODEX_MODE: codexMode ?? '' };
   return { home, env, log, agyLog };
 }
 
@@ -585,8 +597,8 @@ const record = (call) => appendFileSync(process.env.SEAT_POOL_LOG, JSON.stringif
 const args = process.argv.slice(2).join(' ');
 record(args);
 const mode = id === 'claude' ? process.env.SEAT_POOL_CLAUDE : process.env.SEAT_POOL_CODEX;
-if (args === '--version') { console.log('99.0.0'); process.exit(0); }
-if (args === 'app-server --help') process.exit(0);
+if (args === '--version') { console.log(id === 'claude' ? '99.0.0 (Claude Code)' : 'codex-cli 99.0.0'); process.exit(0); }
+if (args === 'app-server --help') { console.log('Usage: codex app-server'); process.exit(0); }
 if (args === 'auth status --json') {
   console.log(JSON.stringify({ loggedIn: mode !== 'signed_out', email: 'private-catalog-fixture@example.invalid' }));
   process.exit(mode === 'signed_out' ? 1 : 0);
@@ -651,27 +663,28 @@ describe('rh seats pool', () => {
     expect(JSON.parse(readFileSync(f.cache, 'utf8'))).toEqual(JSON.parse(result.stdout));
   });
 
-  test.each(['present', 'missing', 'signed out', 'unsupported', 'timeout', 'malformed', 'empty'])(
-    'agy projects one native catalog observation into the advisor pool (%s)', branch => {
+  test.each([
+    ['present', 'available'], ['missing', 'not_installed'], ['signed_out', 'signed_out'], ['unsupported', 'unknown'],
+    ['timeout', 'unknown'], ['malformed', 'unknown'], ['empty', 'unknown'],
+  ] as const)('agy projects one native catalog observation into the advisor pool (%s)', (branch, expected) => {
       const f = poolFixture();
       const free = 'private-free-id';
       const model = 'gemini-4-neon-high';
       const advisor = { runtime: 'agy', model: free, effort: null, advisor_model: null, fleet: [], tools: ['net', 'read', 'shell'] } as const;
       writeFileSync(join(f.home, '.repo-harness', 'config.json'), JSON.stringify({ seats: { ...DEFAULT_SEATS_CONFIG, advisor } }));
-      const catalog = branch === 'present' ? model + '\tNeon high\n' + free + '\tCustom name\n' : free + '\tCustom name\n';
+      const catalogs: Record<typeof branch, AgyCatalogFixture> = {
+        present: [{ id: 'gemini-4-neon', efforts: ['high'] }, free], missing: [], signed_out: 'signed_out',
+        unsupported: [], timeout: 'timeout', malformed: 'malformed', empty: [],
+      };
       if (branch !== 'missing') writeFileSync(join(f.env.PATH, 'agy'), `#!${process.execPath}
-const arg = process.argv[2];
-if (arg === '--version') { console.log(${branch === 'unsupported' ? '"1.4.9"' : '"1.5.12"'}); process.exit(0); }
-if (arg !== 'models') process.exit(9);
-${branch === 'timeout' ? 'setInterval(() => {}, 1000);' : branch === 'signed out' ? 'console.error("Please sign in"); process.exit(1);'
-  : 'process.stdout.write(' + JSON.stringify(branch === 'malformed' ? 'private-catalog-text\n' : branch === 'empty' ? '' : catalog) + ');'}
+${agyCatalogScript(catalogs[branch], branch === 'unsupported' ? '1.4.9' : undefined)}
 `, { mode: 0o755 });
       const fresh = f.run();
       expect(fresh.status, fresh.stderr).toBe(0);
       const report = decodeSeatPool(JSON.parse(fresh.stdout));
       const row = report.seats.find(item => item.seat === 'advisor')!;
       const high = [...row.pool, ...row.excluded].find(entry => entry.model === model)!;
-      expect(high.status).toBe(branch === 'present' ? 'available' : branch === 'signed out' ? 'signed_out' : branch === 'missing' ? 'not_installed' : 'unknown');
+      expect(high.status).toBe(expected);
       if (branch === 'present') {
         expect(high.account).toBe('agy_gemini');
         expect(effectiveSeatConfig('advisor', { ...DEFAULT_SEATS_CONFIG, advisor }, seatAccountQuotas([], DEFAULT_SEATS_CONFIG.routing))).toEqual(advisor);
@@ -706,7 +719,8 @@ ${branch === 'timeout' ? 'setInterval(() => {}, 1000);' : branch === 'signed out
       ['magpie/codex/gpt-6.2-sol', 'not_installed'],
       ['magpie/codex/gpt-6.1-terra', 'not_installed'], ['gpt-6.1-terra', 'not_listed'],
       ['zai/glm-5.3-flash', 'not_installed'], ['magpie/group/deepseek-v4.1-flash', 'not_installed'],
-      ['magpie/agy-cli/gemini-4-hydrogen', 'not_installed'], ['gemini-4-hydrogen', 'not_installed'],
+      ['magpie/agy-cli/gemini-4-hydrogen', 'not_installed'],
+      ...['low', 'medium', 'high', 'xhigh'].map(effort => [`gemini-4-hydrogen-${effort}`, 'not_installed']),
     ]);
     expect(row.configured).toEqual({ field: 'seats.worker.model', table_entry: false, in_pool: false, reason: 'outside_recommendations' });
     const calls = readFileSync(f.env.SEAT_POOL_LOG, 'utf8').trim().split('\n').map(line => JSON.parse(line));
@@ -872,6 +886,22 @@ describe('rh seats launch availability', () => {
 });
 
 describe('rh quota', () => {
+  test('the OAR quota boundary discards current and last account identity', () => {
+    const observedAt = new Date(NOW).toISOString();
+    const windows = ['Gemini Models', 'Claude and GPT models'].flatMap(name => [5, 168].map(hours => ({
+      label: 'quota', scope: { kind: 'models' as const, name }, durationMs: hours * HOUR, usedRatio: 0.25,
+    })));
+    const available = { kind: 'available', rateLimited: false, windows } as const;
+    const account = { email: 'account-identity@example.invalid', plan: 'private-plan' };
+    const withIdentity = { ...available, ...account, account };
+    const readings = decodeAgyQuota(withIdentity, observedAt);
+    expect(readings).toEqual(decodeAgyQuota(available, observedAt));
+    expect(readings.map(reading => reading.windows.map(window => window.used_percent))).toEqual([[25, 25], [25, 25]]);
+    const signedOut = decodeAgyQuota({ kind: 'reauth_required', lastAccount: account }, observedAt);
+    expect(signedOut.map(reading => reading.reason)).toEqual(['agy is signed out', 'agy is signed out']);
+    expect(JSON.stringify([readings, signedOut])).not.toMatch(/account-identity|private-plan|lastAccount/);
+  });
+
   test('reads both agy groups once through OAR and publishes only the fixed accounts and windows', () => {
     const f = fixture(null, 'two');
     configureAgySeats(f.home);
@@ -886,7 +916,7 @@ describe('rh quota', () => {
         { window: '5h', window_minutes: 300, used_percent: 10 }, { window: 'weekly', window_minutes: 10080, used_percent: 95 },
       ] },
     ]);
-    expect(readFileSync(f.agyLog, 'utf8').trim().split('\n')).toEqual(['models', '-p /usage --output-format json']);
+    expect(readFileSync(f.agyLog, 'utf8').trim().split('\n')).toEqual(['--help', '--version', 'models', '-p /usage --output-format json']);
     const text = quota([], f.env);
     expect(text.status, text.stderr).toBe(0);
     expect(text.stdout).toContain('agy_gemini weekly: 62% left\nagy_other weekly: 5% left');
@@ -897,7 +927,7 @@ describe('rh quota', () => {
   });
 
   test.each([
-    [null, 'agy not on PATH'],
+    [null, 'agy not installed'],
     ['signed-out', 'agy is signed out'],
     ['api-key', 'agy /usage exited 2 without account quota'],
     ['error', 'agy quota reader failed'],
@@ -915,7 +945,7 @@ describe('rh quota', () => {
     ]);
     expect(result.stdout).toContain('advisor: advisor (pi magpie/agy-cli/gemini-4-neon xhigh; agy_gemini unknown)');
     expect(result.stdout + result.stderr).not.toContain('agy-private-fixture');
-    if (mode === 'signed-out') expect(readFileSync(f.agyLog, 'utf8').trim()).toBe('models');
+    if (mode === 'signed-out') expect(readFileSync(f.agyLog, 'utf8').trim().split('\n')).toEqual(['--help', '--version', 'models']);
   });
 
   test('routes past exhausted Gemini for workers and stops the advisor projected onto Gemini', () => {
@@ -1022,7 +1052,7 @@ describe('rh quota', () => {
     const report = JSON.parse(result.stdout) as QuotaReport;
     expect(report.accounts.map(account => [account.account, account.state, account.reason])).toEqual([
       ['claude', 'unknown', 'no capture'], ['chatgpt', 'unknown', reason],
-      ['agy_gemini', 'unknown', 'agy not on PATH'], ['agy_other', 'unknown', 'agy not on PATH'],
+      ['agy_gemini', 'unknown', 'agy not installed'], ['agy_other', 'unknown', 'agy not installed'],
     ]);
   });
 });

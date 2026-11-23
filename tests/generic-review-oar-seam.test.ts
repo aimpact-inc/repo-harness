@@ -588,7 +588,7 @@ darwinTest('OAR installation is probed by the fixed Node host, never the Bun con
   const probeReviewInstallation = (await import('../src/effects/review-runner/task-review-runner')).taskReviewRunner.installation;
   const root = tmpWorkspace('oar-node-installation'); roots.push(root);
   const trace = join(root, 'parent.txt'), executable = join(root, 'fake-codex');
-  writeFileSync(executable, `#!/bin/sh\n/bin/ps -p "$PPID" -o command= >> '${trace}'\nprintf '0.0.0\\n'\n`); chmodSync(executable, 0o700);
+  writeFileSync(executable, `#!/bin/sh\n/bin/ps -p "$PPID" -o command= >> '${trace}'\nif [ "$1" = app-server ]; then printf 'Usage: codex app-server\\n'; else printf 'codex-cli 0.0.0\\n'; fi\n`); chmodSync(executable, 0o700);
   const priorNode = process.env.REPO_HARNESS_NODE_BIN, priorBin = process.env.OAR_CODEX_BIN;
   try {
     process.env.REPO_HARNESS_NODE_BIN = resolveNode24();
@@ -622,8 +622,8 @@ darwinTest('OAR native child cannot forge owner control evidence or signal/conne
   const fixture = join(root, 'fixture-codex.cjs');
   writeFileSync(fixture, `#!${node}\n` + String.raw`
 const fs=require('node:fs'),path=require('node:path'),net=require('node:net'),readline=require('node:readline');
-if(process.argv.includes('--help'))process.exit(0);
-if(process.argv.includes('--version')){console.log('fixture-codex 0.0.0');process.exit(0)}
+if(process.argv.includes('--help')){console.log('Usage: codex app-server');process.exit(0)}
+if(process.argv.includes('--version')){console.log('codex-cli 0.0.0');process.exit(0)}
 const reply=(id,result)=>process.stdout.write(JSON.stringify({id,result})+'\n');
 const notify=(method,params)=>process.stdout.write(JSON.stringify({method,params})+'\n');
 readline.createInterface({input:process.stdin}).on('line',async line=>{

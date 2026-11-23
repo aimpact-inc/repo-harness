@@ -10,6 +10,7 @@ import type { SeatAccountQuotas } from '../src/core/board/seat-routing';
 import { emptySeatPoolProbe, seatModelBlock, type SeatPoolProbe } from '../src/core/board/seat-pool';
 import { DEFAULT_SEATS_CONFIG, NATIVE_SEATS_PRESET } from '../src/core/board/seats-settings';
 import type { BoardCommentV1, BoardParentReadV1, BoardSubIssueReadV1 } from '../src/core/board/source';
+import { agyCatalogScript } from './helpers/agy-cli-fixture';
 
 const NORMAL: SeatAccountQuotas = {
   claude: { state: 'normal', remaining: 80, mode: 'normal' },
@@ -350,10 +351,8 @@ test.skipIf(process.platform === 'win32')('runDispatch includes agy probes and d
     mkdirSync(join(home, '.repo-harness'), { recursive: true });
     const agy = join(bin, 'agy');
     writeFileSync(agy, `#!${process.execPath}
-const arg = process.argv[2];
-if (arg === '--version') { console.log('1.5.12'); process.exit(0); }
-if (arg === 'models') { process.stdout.write('gemini-4-neon-high\\tGemini 4 Neon (High)\\ngemini-4-hydrogen\\tGemini 4 Hydrogen\\n'); process.exit(0); }
-process.exit(93);
+${agyCatalogScript([{ id: 'gemini-4-neon', efforts: ['high'] }, { id: 'gemini-4-hydrogen', efforts: ['high'] }],
+  undefined, "process.exit(command === 'models' ? 0 : 93);")}
 `, { mode: 0o755 });
     const env: NodeJS.ProcessEnv = {
       HOME: home,

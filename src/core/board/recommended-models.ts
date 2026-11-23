@@ -1,5 +1,6 @@
 import {
   AGY_HYDROGEN_ENTRY,
+  AGY_HYDROGEN_VARIANTS,
   AGY_NEON_VARIANTS,
   CATALOG_AGENT_TARGET_OVERRIDES,
   catalogEntry,
@@ -46,7 +47,7 @@ const WORKER = Object.freeze([
   GLM_FLASH,
   DEEPSEEK_FLASH,
   PI_HYDROGEN,
-  AGY_HYDROGEN_ENTRY,
+  ...AGY_HYDROGEN_VARIANTS,
 ]);
 const REVIEW = Object.freeze([
   PI_SOL,
@@ -55,7 +56,7 @@ const REVIEW = Object.freeze([
   GLM_FLASH,
   DEEPSEEK_FLASH,
   PI_HYDROGEN,
-  AGY_HYDROGEN_ENTRY,
+  ...AGY_HYDROGEN_VARIANTS,
 ]);
 
 /**
