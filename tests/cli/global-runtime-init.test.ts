@@ -23,7 +23,7 @@ import wazaRules from '../../src/core/skill-surface/waza-shared-rules.json';
 import { syncWazaSharedRules } from "../../src/cli/installer/waza-rules";
 import { beginInstallHostTransaction, installProfileHostMutationPaths, installProfileTransactionPaths, installStateStatus, readInstallState, rollbackInstallHostTransaction, versions } from '../../src/cli/installer/install-profile';
 import { applyGlobalContextRefresh, GLOBAL_RULES_EDITED, GLOBAL_RULES_END, inspectGlobalContext, preflightGlobalContextRefresh, renderGlobalRulesBlock, setReportingLanguage } from '../../src/cli/installer/global-context';
-import { CandidateRequestProtocolRetiredError, assertReceiptSelection, encodeCandidateRequest, parseCandidateReceipt, parseCandidateRequest, type CandidateReconciliationRequest } from '../../src/cli/commands/candidate-reconciliation';
+import { CandidateRequestProtocolRetiredError, STAGED_SKILLS_HANDOFF_ENV, assertReceiptSelection, encodeCandidateRequest, parseCandidateReceipt, parseCandidateRequest, type CandidateReconciliationRequest } from '../../src/cli/commands/candidate-reconciliation';
 import type { PluginId } from '../../src/core/skill-surface/plugin-manifest';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
 import { hostConfigPaths } from '../../src/effects/host-config/store';
@@ -577,7 +577,7 @@ function seedAntigravityStagedWaza(home: string): void {
   }
 }
 
-test.skipIf(process.platform === 'win32')('default runtime update refreshes the recorded Antigravity adapter after opt-in and skips staged Waza links', () => {
+test.skipIf(process.platform === 'win32')('opted-out runtime update refreshes the recorded Antigravity adapter and skips staged Waza links', () => {
   const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'repo-harness-antigravity-update-')));
   try {
     const home = join(tmp, 'home');
@@ -616,7 +616,7 @@ test.skipIf(process.platform === 'win32')('default runtime update refreshes the 
     rmSync(skill);
     const movedEnv = { ...env, BUN_INSTALL: join(home, 'moved-bun') };
     const packageRoot = seedGlobalPackageFixture(movedEnv, { mutable: true });
-    const updated = runGlobalRuntimeSetup({ ...options, updateMode: true, env: movedEnv });
+    const updated = runGlobalRuntimeSetup({ ...options, updateMode: true, env: movedEnv, externalSkills: false });
     expect(updated.exitCode, updated.stdout + updated.stderr).toBe(0);
     expect(updated.steps.find(step => step.step === 'refresh Antigravity runtime')).toMatchObject({ status: 'ok' });
     expect(readFileSync(hooks, 'utf8')).toContain(join(packageRoot, 'dist/hook-entry.js'));
@@ -718,10 +718,10 @@ function setupManagedRuntimeReadback(temporaryRoot: string, home: string, fakeBi
   ].join('\n'));
 }
 
-function installCandidateRuntimeFixture(home: string, version: string): string {
+function installCandidateRuntimeFixture(home: string, version: string, sourceRoot = ROOT): string {
   const candidate = join(home, '.bun', 'install', 'global', 'node_modules', 'repo-harness');
   rmSync(candidate, { recursive: true, force: true });
-  copyPackageRuntimeFixture(ROOT, candidate);
+  copyPackageRuntimeFixture(sourceRoot, candidate);
   const manifestPath = join(candidate, 'package.json');
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as { version?: string };
   manifest.version = version;
@@ -2784,6 +2784,92 @@ exit 0
       expect(existsSync(join(source, '.ai/harness/runs/local.json'))).toBe(true);
     } finally { rmSync(tmp, { recursive: true, force: true }); }
   });
+
+  test.skipIf(process.platform === 'win32').each([
+    { name: 'released parent to current candidate', releasedParent: true },
+    { name: 'current parent to released candidate', releasedCandidate: true },
+    { name: 'default update restores the staged Waza link', restores: true },
+    { name: 'mismatched transaction ID skips staged Waza links', mismatch: true },
+    { name: 'explicit opt-out skips staged Waza links', optOut: true },
+    { name: 'no skill sync skips staged Waza links', noSyncSkill: true },
+  ])('$name', ({ releasedParent, releasedCandidate, restores, mismatch, optOut, noSyncSkill }) => {
+    const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'repo-harness-staged-waza-update-')));
+    try {
+      const home = join(tmp, 'home');
+      const bin = join(tmp, 'bin');
+      const bun = join(bin, 'bun');
+      const env = { ...sanitizedChildEnv(home), PATH: `${bin}:${process.env.PATH ?? ''}`, REPO_HARNESS_BUN_EXECUTABLE: bun };
+      mkdirSync(home);
+      mkdirSync(bin);
+      writeFakeHc(bin);
+      setupManagedRuntimeReadback(tmp, home, bin);
+      const version = releasedCandidate ? '0.36.1' : '9.9.9';
+      const released = join(tmp, 'released');
+      if (releasedParent || releasedCandidate) {
+        const archive = join(tmp, 'released.tar');
+        const archived = spawnSync('git', ['archive', `--output=${archive}`, 'v0.36.1'], { cwd: ROOT, encoding: 'utf8' });
+        expect(archived.status, archived.stderr).toBe(0);
+        mkdirSync(released);
+        const extracted = spawnSync('tar', ['-xf', archive, '-C', released], { encoding: 'utf8' });
+        expect(extracted.status, extracted.stderr).toBe(0);
+        symlinkSync(join(ROOT, 'node_modules'), join(released, 'node_modules'), 'dir');
+        if (releasedCandidate) {
+          const build = spawnSync(process.execPath, ['run', 'build:hook-bundle'], { cwd: released, env, encoding: 'utf8' });
+          expect(build.status, build.stdout + build.stderr).toBe(0);
+        }
+      }
+      installCandidateRuntimeFixture(home, version, releasedCandidate ? released : ROOT);
+      recordPluginSelection(env, [], []);
+      seedAntigravityStagedWaza(home);
+      mkdirSync(join(home, '.bun', 'bin'), { recursive: true });
+      writeExecutable(tmp, join(home, '.bun', 'bin', 'rh'), '#!/bin/sh\n');
+      const providerLog = join(tmp, 'provider.log');
+      writeExecutable(tmp, join(bin, 'bunx'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${providerLog}"\nexit 1\n`);
+      const marker = STAGED_SKILLS_HANDOFF_ENV;
+      const expectMarker = !releasedParent && !optOut;
+      const markerPresent = `[[ -n "\${${marker}+set}" ]]`;
+      writeExecutable(tmp, bun, [
+        '#!/bin/bash',
+        'if [[ "${2:-}" == "__reconcile-installed-runtime" ]]; then',
+        `  ${expectMarker ? '' : '! '}${markerPresent} || exit 89`,
+        ...(mismatch ? [`  export ${marker}=wrong-transaction`] : []),
+        `  exec "${process.execPath}" --no-env-file "$@"`,
+        'fi',
+        // The new candidate clears the marker before calling Bun for runtime setup.
+        ...(releasedCandidate ? [] : [`if ${markerPresent}; then exit 90; fi`]),
+        'if [[ "${1:-}" == "--version" ]]; then echo 1.4.4; exit 0; fi',
+        `if [[ "\${1:-} \${2:-}" == 'pm view' ]]; then echo '"${version}"'; exit 0; fi`,
+        `if [[ "\${1:-}" == *.ts || "\${1:-}" == '-' ]]; then exec "${process.execPath}" --no-env-file "$@"; fi`,
+        'exit 0',
+      ].join('\n') + '\n');
+
+      const run = (cli: string, args: string[]) => spawnSync(process.execPath, ['--no-env-file', cli, ...args], { cwd: tmp, env, encoding: 'utf8' });
+      const install = run(CLI, ['install', '--target', 'antigravity']);
+      expect(install.status, install.stdout + install.stderr).toBe(0);
+      const link = join(home, '.gemini', 'config', 'skills', 'think');
+      const staged = join(home, '.agents', 'skills', 'think');
+      expect(readlinkSync(link)).toBe(staged);
+      rmSync(link);
+
+      const parent = releasedParent ? join(released, 'src', 'cli', 'index.ts') : CLI;
+      const update = run(parent, [
+        'update', '--json',
+        ...(releasedCandidate ? ['--version', version] : []),
+        ...(optOut ? ['--no-external-skills'] : []),
+        ...(noSyncSkill ? ['--no-sync-skill'] : []),
+      ]);
+      expect(update.status, update.stdout + update.stderr).toBe(0);
+      const scope = noSyncSkill ? 'partial' : 'complete';
+      expect(JSON.parse(update.stdout).steps).toContainEqual(expect.objectContaining({
+        step: 'reconcile installed candidate runtime', status: 'ok', detail: expect.stringContaining(`candidate=${version}; scope=${scope}`),
+      }));
+      if (restores) expect(readlinkSync(link)).toBe(staged);
+      else expect(lstatSync(link, { throwIfNoEntry: false })).toBeUndefined();
+      expect(existsSync(providerLog)).toBe(false);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   test('CLI update --version installs the requested package version', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'repo-harness-cli-update-version-'));
