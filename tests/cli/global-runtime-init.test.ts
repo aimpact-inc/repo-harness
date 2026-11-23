@@ -2,13 +2,13 @@ import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, lstatSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { legacySections } from '../../scripts/check-released-managed-values';
 import { tmpdir } from 'os';
-import { dirname, join } from 'path';
+import { delimiter, dirname, join } from 'path';
 import { spawnSync } from 'child_process';
 import { PassThrough, Writable } from 'stream';
 import { createHash } from 'crypto';
 import { checkMcpLocalConfigFile } from '../../src/cli/mcp/local-config-check';
 import { migrateSeatsConfiguration, runGlobalRuntimeSetup, verifyInstalledManagedRuntime } from '../../src/cli/commands/global-runtime';
-import { DEFAULT_SEATS_CONFIG, SeatsConfigMigrationRequiredError, decodeSeatsConfig } from '../../src/core/board/seats-settings';
+import { DEFAULT_SEATS_CONFIG, NATIVE_SEATS_PRESET, SeatsConfigMigrationRequiredError, decodeSeatsConfig, type SeatsConfigV1 } from '../../src/core/board/seats-settings';
 import { buildSeatLaunch } from '../../src/core/board/seat-launch';
 import { writePiFleetRoles } from '../../src/effects/board/pi-fleet-roles';
 import { applySeatsSettings, readSeatsConfiguration } from '../../src/effects/board/seats-configuration';
@@ -156,14 +156,14 @@ test('update removes stored routing mode and hyper values once, keeps a null wor
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
-test('update migrates 12-seat configs to 11 seats, remaps routing, strips disallowed fleet roles, and preserves stored runtimes', () => {
+test('update renames retired seats, remaps routing, strips disallowed fleet roles, and preserves stored runtimes', () => {
   const home = mkdtempSync(join(tmpdir(), 'council-migration-'));
   try {
     const directory = join(home, '.repo-harness');
     mkdirSync(directory);
     const path = join(directory, 'config.json');
     const env = { HOME: home };
-    const { council: _council, 'worker-opus': workerOpus, 'worker-neon': workerNeon, routing, ...rest } = DEFAULT_SEATS_CONFIG;
+    const { council: _council, 'worker-opus': workerOpus, 'worker-neon': workerNeon, 'worker-neon-deep': _deep, routing, ...rest } = DEFAULT_SEATS_CONFIG;
     const { agy_saving_below_remaining: _agy, ...legacyRouting } = routing;
     const legacySeats = {
       ...rest,
@@ -199,7 +199,9 @@ test('update migrates 12-seat configs to 11 seats, remaps routing, strips disall
     expect(parsed.seats['worker-neon'].fleet).toEqual(['explorer']);
     expect(parsed.seats['worker-light'].fleet).toEqual([]);
     expect(parsed.seats.advisor).toEqual({ ...rest.advisor, runtime: 'claude', model: 'sonnet', fleet: ['deep-reasoner', 'explorer'] });
-    expect(parsed.seats.routing).toEqual({ ...DEFAULT_SEATS_CONFIG.routing });
+    expect(parsed.seats['worker-neon-deep']).toBeNull();
+    expect(parsed.seats.routing).toEqual({ ...DEFAULT_SEATS_CONFIG.routing,
+      important_deep: ['worker-opus', 'worker-neon', 'worker-deep'], simple_deep: ['worker-neon', 'worker-deep'] });
     expect(parsed.seats.pi_sub_agent_models).toEqual({ explorer: 'custom/model' });
     expect(migrateSeatsConfiguration(env)).toBe(false);
     expect(readFileSync(path, 'utf8')).toBe(migrated);
@@ -298,6 +300,39 @@ test('update strips retired fleet roles once and leaves the saved seats ready fo
     writeFileSync(path, malformed);
     expect(() => migrateSeatsConfiguration(env)).toThrow('seats_config_invalid: seats.worker.fleet');
     expect(readFileSync(path, 'utf8')).toBe(malformed);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('update adds a null Neon deep seat and preserves saved routes with a Neon host enabled', () => {
+  const home = mkdtempSync(join(tmpdir(), 'neon-deep-migration-'));
+  try {
+    const directory = join(home, '.repo-harness');
+    mkdirSync(directory);
+    const path = join(directory, 'config.json');
+    const bun = join(home, 'bun');
+    writeExecutable(home, bun, '#!/bin/bash\nif [[ "$1" == "--version" ]]; then echo 1.4.0; fi\nexit 0\n');
+    writeFakeHc(home);
+    const env = { ...sanitizedChildEnv(home), PATH: [home, process.env.PATH].filter(Boolean).join(delimiter),
+      REPO_HARNESS_HOME: directory, REPO_HARNESS_BUN_EXECUTABLE: bun };
+    const { 'worker-neon-deep': _deep, ...native } = NATIVE_SEATS_PRESET;
+    const seats = { ...native,
+      'worker-light': { ...DEFAULT_SEATS_CONFIG['worker-light']!, model: 'magpie/group/deepseek-v4.1-flash' },
+      routing: { ...native.routing, important_deep: ['worker-deep', 'worker-neon', 'worker-opus'],
+        simple_deep: ['worker-deep'], important_fast: ['worker-neon'], simple_fast: ['worker'] },
+    } satisfies Omit<SeatsConfigV1, 'worker-neon-deep'>;
+    const enabled = ['antigravity', 'claude', 'pi'];
+    const agents = { enabled, uses: { docs: [], review: [] }, default_docs: null };
+    const original = JSON.stringify({ agents, seats }, null, 4);
+    writeFileSync(path, original);
+    const update = runGlobalRuntimeSetup({
+      sourceRoot: ROOT, cwd: home, plugins: [], updateMode: true, installCli: false,
+      syncSkill: false, hostAdapters: false, externalSkills: false, codegraph: false, env,
+    });
+    expect(update.exitCode, update.stdout).toBe(0);
+    const backup = readdirSync(directory).find(name => name.startsWith('config.json.bak-'))!;
+    expect(readFileSync(join(directory, backup), 'utf8')).toBe(original);
+    expect(readSeatsConfiguration(env).seats).toEqual({ ...seats, 'worker-neon-deep': null });
+    expect(migrateSeatsConfiguration(env)).toBe(false);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 

@@ -1761,14 +1761,20 @@ export function migrateSeatsConfiguration(env: NodeJS.ProcessEnv, runtimeLock?: 
       const { codex_hyper_at_or_above_remaining: _codexHyper, ...kept } = routing as Record<string, unknown>;
       routing = { ...INTRODUCED_ROUTING_DEFAULTS, ...kept };
     }
-    const base = { ...introduced, 'worker-light': null, ...stored };
+    const base = { ...introduced, 'worker-neon-deep': null, 'worker-light': null, ...stored };
+    // Sections without routing predate the Neon deep defaults.
+    const legacyRoutingDefaults = {
+      ...introduced.routing,
+      important_deep: ['worker-opus', 'worker-neon', 'worker-deep'],
+      simple_deep: ['worker-neon', 'worker-deep'],
+    };
     const effectiveRouting = routing ?? (base['worker-light'] === null
       ? {
-          ...introduced.routing,
-          important_fast: introduced.routing.important_fast.filter(id => id !== 'worker-light'),
-          simple_fast: introduced.routing.simple_fast.filter(id => id !== 'worker-light'),
+          ...legacyRoutingDefaults,
+          important_fast: legacyRoutingDefaults.important_fast.filter(id => id !== 'worker-light'),
+          simple_fast: legacyRoutingDefaults.simple_fast.filter(id => id !== 'worker-light'),
         }
-      : introduced.routing);
+      : legacyRoutingDefaults);
     const seats = decodeSeatsConfig({ ...base, routing: effectiveRouting });
     checkSeatRoutingModels(seats.routing);
     return { config: { ...config, seats }, value: true };

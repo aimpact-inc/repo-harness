@@ -2,6 +2,7 @@ import {
   AGY_HYDROGEN_ENTRY,
   AGY_HYDROGEN_VARIANTS,
   AGY_NEON_VARIANTS,
+  AGY_NEON_XHIGH_ENTRY,
   CATALOG_AGENT_TARGET_OVERRIDES,
   catalogEntry,
   catalogModelIds,
@@ -28,10 +29,12 @@ const PI_ASTRA = catalogEntry('astra', 'magpie');
 export const AGY_ADVISOR_STARTER = catalogEntry('neon', 'native');
 export const AGY_COUNCIL_STARTER = catalogEntry('carbon', 'native');
 const GLM_FLASH = catalogEntry('glm-5.3-flash', 'magpie');
+const GLM_5_4 = catalogEntry('glm-5.4', 'magpie');
 const DEEPSEEK_FLASH = catalogEntry('deepseek-v4.1-flash', 'magpie');
 
 export function agySeatStarter(seat: SeatId): SeatModelEntryV1 {
   if (seat === 'council') return AGY_COUNCIL_STARTER;
+  if (seat === 'worker-neon-deep') return AGY_NEON_XHIGH_ENTRY;
   if (seat === 'worker-light' || seat === 'gatekeeper-fallback') return AGY_HYDROGEN_ENTRY;
   return AGY_ADVISOR_STARTER;
 }
@@ -72,10 +75,11 @@ export const SEAT_RECOMMENDED_MODELS: Readonly<Record<SeatId, readonly SeatModel
   'worker-deep': WORKER,
   'worker-opus': WORKER,
   'worker-neon': WORKER,
-  'worker-light': WORKER,
+  'worker-neon-deep': WORKER,
+  'worker-light': Object.freeze([...WORKER, GLM_5_4]),
   gatekeeper: REVIEW,
   'gatekeeper-fallback': REVIEW,
-  reviewer: REVIEW,
+  reviewer: Object.freeze([...REVIEW, GLM_5_4]),
 });
 
 const recommended = Object.values(SEAT_RECOMMENDED_MODELS).flat();

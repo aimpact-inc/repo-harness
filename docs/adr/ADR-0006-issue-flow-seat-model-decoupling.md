@@ -39,7 +39,7 @@ State at `main@8d7017ea6682ca840a84163f1d96c75675c80b54` exhibits seven structur
 | `fable` | `anthropic` | `claude` | `claude` / `fable` | `claude` / `fable` | `council` only |
 | `haiku` | `anthropic` | `claude` | `claude` / `haiku` | `claude` / `haiku` | Claude `explorer` sub-agent |
 | `carbon` | `google` | `agy_gemini` | `pi` / `magpie/agy-cli/gemini-4-carbon` | `agy` / `gemini-4-carbon-high` | `council` (and hyper `advisor`) |
-| `neon` | `google` | `agy_gemini` | `pi` / `magpie/agy-cli/gemini-4-neon` | `agy` / `gemini-4-neon-high` | `advisor`, `worker-neon` |
+| `neon` | `google` | `agy_gemini` | `pi` / `magpie/agy-cli/gemini-4-neon` | `agy` / `gemini-4-neon-high` | `advisor`, `worker-neon` (high), `worker-neon-deep` (xhigh) |
 | `hydrogen` | `google` | `agy_gemini` | `pi` / `magpie/agy-cli/gemini-4-hydrogen` | `agy` / `gemini-4-hydrogen` | Pre-paved `agy` light worker & explorer |
 | `astra` | `openai` | `chatgpt` | `pi` / `magpie/codex/gpt-6.2-astra` | `codex` / `gpt-6.2-astra` (via host `-o` write) | **`council` only** (banned from coding, review, sub-agents) |
 | `sol` | `openai` | `chatgpt` | `pi` / `magpie/codex/gpt-6.2-sol` | `codex` / `gpt-6.2-sol` | `worker-deep`, `gatekeeper`, `deep-reasoner`, `harness-evaluator` |
@@ -47,14 +47,15 @@ State at `main@8d7017ea6682ca840a84163f1d96c75675c80b54` exhibits seven structur
 | `luna` | `openai` | `chatgpt` | `pi` / `magpie/codex/gpt-6-luna` | `codex` / `gpt-6-luna` | Codex `explorer` sub-agent |
 | `glm-flash` | `zhipu` | Flash API | `pi` / `zai/glm-5.3-flash` | — (uses `terra` / `hydrogen` natively) | `worker-light`, `gatekeeper-fallback`, Pi `rh-explorer` |
 | `deepseek-flash` | `deepseek` | Flash API | `pi` / `magpie/group/deepseek-v4.1-flash` | — (uses `terra` / `hydrogen` natively) | `worker-light` alt, `gatekeeper-fallback` alt |
+| `glm-5.4` | `zhipu` | Flash API | `pi` / `magpie/zcode/GLM-5.4` | — | `worker-light`, `reviewer`, `gatekeeper-fallback` |
 
 - **Why Codex also prefers `pi` `magpie/codex/*` when Magpie is present**: `pi` workers on `magpie/codex/gpt-6.2-sol` and `magpie/codex/gpt-6.1-terra` commit, push, and run fix rounds directly in linked worktrees (eliminating `orchestrator` commit/push proxy turns), share `src/pi/extension.ts` hooks, and still meter against `chatgpt` (`isPiCodexSeat`). Only `touches:credentials` tasks exclude `pi` (`src/core/board/dispatch.ts:213`).
 - **Pre-paving native `agy`**: `seatAccount` maps native `agy` `gemini-*` (`carbon`, `neon`, `hydrogen`) to `agy_gemini`; `effectiveSeatConfig` preserves native `agy` model IDs instead of substituting `magpie/agy-cli/...`; `AGY_COMMAND_PREFIXES` adds read-only `rh board`, `rh quota`, `rh seats pool`, and `rh seats council` commands. Native `agy` stays off by default in the Magpie preset until upstream prompt-cache behavior matures.
-- **Quota rules**: `sonnet` is retired so `2 × Claude Max` (optionally split by seat profile between Control/Review Max #1 and Execution Max #2) serves `opus` and `fable` only. `SeatRoutingV1` adds `agy_saving_below_remaining` (default `25`, range `0..100`) to stop `worker-neon` dispatches below 25% weekly `agy_gemini` remaining and protect `advisor`.
+- **Quota rules**: `sonnet` is retired so `2 × Claude Max` (optionally split by seat profile between Control/Review Max #1 and Execution Max #2) serves `opus` and `fable` only. `SeatRoutingV1` adds `agy_saving_below_remaining` (default `25`, range `0..100`) to stop Neon worker dispatches below 25% weekly `agy_gemini` remaining and protect `advisor`.
 
-### 2. Eleven-seat topology and routing chains
+### 2. Twelve-seat topology and routing chains
 
-`SEAT_IDS` holds 11 seats (`planner` → `council`, `worker-important` → `worker-opus`, `worker-important-fast` → `worker-neon`, `gatekeeper-deep` retired; one-shot migration in `rh update`):
+`SEAT_IDS` holds 12 seats. `rh update` adds `worker-neon-deep` to saved configurations.
 
 | Plane | Seat ID | Magpie-First preset | Native-First preset | Role boundary |
 |---|---|---|---|---|
@@ -62,10 +63,11 @@ State at `main@8d7017ea6682ca840a84163f1d96c75675c80b54` exhibits seven structur
 | Control | `advisor` | `pi` / `magpie/agy-cli/gemini-4-neon` (`xhigh`) | `agy` / `gemini-4-neon-high` (or `claude/opus`) | Owner interface, pre-dispatch triage and bundling, L2 plans, `council` (`N=0..3`), 2 h audit |
 | Council | `council` | `{claude:fable, pi:magpie/agy-cli/gemini-4-carbon, pi:magpie/codex/gpt-6.2-astra}` | `{claude:fable, agy:gemini-4-carbon-high, codex:gpt-6.2-astra}` | Read-only L3 competing proposals under `/tmp/rh-council/<repo>/issue-<n>-<member>.md` |
 | Execution (Tier S) | `worker-opus` | `claude` / `opus` (`high`) | `claude` / `opus` (`high`) | UI/UX #1 (`frontend`), cross-module contracts #1 (`important_deep`), `touches:credentials` #1 |
-| Execution (Tier S) | `worker-neon` | `pi` / `magpie/agy-cli/gemini-4-neon` (`high`) | `agy` / `gemini-4-neon-high` (when enabled) | UI/UX #2 (`frontend`), `important_deep` #2, `simple_deep` #1 (`agy_gemini >= 25%`) |
+| Execution (Tier S) | `worker-neon` | `pi` / `magpie/agy-cli/gemini-4-neon` (`high`) | `agy` / `gemini-4-neon-high` (when enabled) | `frontend` and `important_fast` |
+| Execution (Tier S) | `worker-neon-deep` | `pi` / `magpie/agy-cli/gemini-4-neon` (`xhigh`) | `agy` / `gemini-4-neon-xhigh` (when enabled) | `important_deep` and `simple_deep` |
 | Execution (Tier A) | `worker-deep` | `pi` / `magpie/codex/gpt-6.2-sol` (`high`) | `codex` / `gpt-6.2-sol` (`high`) | GPT workhorse for boundary-locked backend, CLI, and state-machine work |
 | Execution (Tier B) | `worker` | `pi` / `magpie/codex/gpt-6.1-terra` (`high`) | `codex` / `gpt-6.1-terra` (`high`) | Fast GPT execution (`important_fast` #3, `simple_fast` fallback) |
-| Execution (Tier B) | `worker-light` | `pi` / `zai/glm-5.3-flash` (alt `deepseek-v4.1-flash`) | `agy` / `gemini-4-hydrogen` (or `null`) | Fast bounded execution (`simple_fast` #1, <=10 files, non-credential) |
+| Execution (Tier B) | `worker-light` | `pi` / `zai/glm-5.3-flash` (also `deepseek-v4.1-flash` and `glm-5.4`) | `agy` / `gemini-4-hydrogen` (or `null`) | Fast bounded execution (`simple_fast` #1, <=10 files, non-credential) |
 | Acceptance | `gatekeeper` | `pi` / `magpie/codex/gpt-6.2-sol` (`high`) | `codex` / `gpt-6.2-sol` (`high`) | Default Medium acceptor for non-OpenAI writers; High parallel acceptor #1 |
 | Acceptance | `gatekeeper-fallback` | `pi` / `zai/glm-5.3-flash` | `null` (or `agy` / `gemini-4-hydrogen`) | Replaces `gatekeeper` only while `chatgpt` is exhausted |
 | Acceptance | `reviewer` | `claude` / `opus` (`high`) | `claude` / `opus` (`high`) | Medium acceptor for OpenAI writers; High parallel acceptor #2 (0% Google Ultra review spend) |
@@ -73,10 +75,12 @@ State at `main@8d7017ea6682ca840a84163f1d96c75675c80b54` exhibits seven structur
 Default `seats.routing` order (evaluated strictly left-to-right after filtering reserved or exhausted accounts, with `savingRoute` removed and `FRONTEND_SEAT_IDS = ['worker-opus', 'worker-neon']`):
 
 - `frontend`: `['worker-opus', 'worker-neon']`
-- `important_deep`: `['worker-opus', 'worker-neon', 'worker-deep']`
+- `important_deep`: `['worker-opus', 'worker-neon-deep', 'worker-deep']`
 - `important_fast`: `['worker-opus', 'worker-neon', 'worker', 'worker-light']`
-- `simple_deep`: `['worker-neon', 'worker-deep']`
+- `simple_deep`: `['worker-neon-deep', 'worker-deep']`
 - `simple_fast`: `['worker-light', 'worker']`
+
+For a manual dispatch with eligible Opus and Neon candidates, the orchestrator normally picks the account with more weekly quota left.
 
 `piLaunch` sets `REPO_HARNESS_SEAT*` on reset seats, and `ResetHost` includes `'pi'` for bidirectional automated handoff reset between `orchestrator` (`Opus`) and `advisor` (`Pi-Neon`).
 
@@ -96,7 +100,7 @@ Per-seat `fleet` grants (`SEAT_ACCESS` and `DEFAULT_SEATS_CONFIG`):
 |---|---|---|
 | `advisor` | `['explorer', 'deep-reasoner']` | Uses parallel Flash `rh-explorer` for repo-wide triage/bundling and `rh-deep-reasoner` (`Sol`) for fast boundary checks before `council` escalation |
 | `orchestrator`, `council` | `['explorer']` | Offloads file/symbol discovery to `haiku`/Flash while keeping architectural judgment in the primary model |
-| `worker-opus`, `worker-neon`, `worker-deep`, `worker` | `['explorer']` | Locates code and runs pre-round-2 sibling checks; revoking `deep-reasoner` forces open boundary questions back to `orchestrator` |
+| `worker-opus`, `worker-neon`, `worker-neon-deep`, `worker-deep`, `worker` | `['explorer']` | Locates code and runs pre-round-2 sibling checks; revoking `deep-reasoner` forces open boundary questions back to `orchestrator` |
 | `worker-light`, `gatekeeper`, `gatekeeper-fallback`, `reviewer` | `[]` | Bounded <=10-file tasks and diff-scoped reviews run without sub-agent fan-out; Pi review seats enforce `--no-extensions -e src/pi/extension.ts` |
 
 ### 4. Planning tiers and `advisor`-controlled `council` (`N = 0..3`)
@@ -129,5 +133,5 @@ Per-seat `fleet` grants (`SEAT_ACCESS` and `DEFAULT_SEATS_CONFIG`):
 - Claude Max quota is preserved for `orchestrator` (`Opus`), `worker-opus` (UI/UX #1 and core contracts), `reviewer` (`Opus`), and `council` (`Fable`); routine non-OpenAI Medium reviews spend zero Claude tokens.
 - Google Ultra quota spends 0% on PR review and reserves its bottom 25% for `advisor` (`Neon`).
 - `gpt-6.2-astra` spend drops to zero outside explicit `advisor`-triggered L3 `council` runs.
-- Stored `~/.repo-harness/config.json#seats` sections require a one-shot `rh update` migration (`SeatsConfigMigrationRequiredError`) to rename `planner` → `council`, `worker-important` → `worker-opus`, `worker-important-fast` → `worker-neon`, retire `gatekeeper-deep`, and add `agy_saving_below_remaining`.
+- Stored `~/.repo-harness/config.json#seats` sections require a one-shot `rh update` migration (`SeatsConfigMigrationRequiredError`) to rename `planner` → `council`, `worker-important` → `worker-opus`, `worker-important-fast` → `worker-neon`, retire `gatekeeper-deep`, and add `agy_saving_below_remaining`. The migration adds a missing `worker-neon-deep` key with a null value and preserves the saved routes. Use Settings > Seats to enable the seat and add it to a saved route.
 - Rollback before code slices land: `git revert` of the ADR commit. Each implementation slice (#3343 children) carries its own `git revert <squash-commit>` rollback.

@@ -377,10 +377,13 @@ describe('magpie readiness', () => {
           worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex' as const, model: 'gpt-6.1-terra' },
           'worker-deep': { ...DEFAULT_SEATS_CONFIG['worker-deep'], runtime: 'codex' as const, model: 'gpt-6.2-sol' },
           'worker-neon': { ...DEFAULT_SEATS_CONFIG['worker-neon'], runtime: 'claude' as const, model: 'opus' },
+          'worker-neon-deep': null,
           'worker-light': null,
           gatekeeper: nonMagpie,
           routing: {
             ...DEFAULT_SEATS_CONFIG.routing,
+            important_deep: ['worker-opus', 'worker-neon', 'worker-deep'],
+            simple_deep: ['worker-neon', 'worker-deep'],
             important_fast: ['worker-opus', 'worker-neon', 'worker'],
             simple_fast: ['worker'],
           },
