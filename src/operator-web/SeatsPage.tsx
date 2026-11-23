@@ -3,7 +3,7 @@ import { Banner, Button, Empty, Loader, Switch, cn } from '@cloudflare/kumo';
 import { effectiveSeatConfig, seatAccountQuotas, seatOnCredits } from '../core/board/seat-routing';
 import { EXHAUSTED_AT_OR_ABOVE_USED_RANGE } from '../core/board/quota';
 import { agySeatLimits, buildSeatLaunch, type SeatLimitLevel } from '../core/board/seat-launch';
-import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, agyEffortValid, decodeSeatsSettingsRequest, isAgyAllowedSeat, isClaudeOrNeonSeat, isCouncilSeat, isOptionalSeat, isReviewSeat, isSeatScaffoldSubAgent, neonDeepSeatStarter, piSubAgentModel, seatHostId, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
+import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, decodeSeatsSettingsRequest, isAgyAllowedSeat, isClaudeOrNeonSeat, isCouncilSeat, isOptionalSeat, isReviewSeat, isSeatScaffoldSubAgent, neonDeepSeatStarter, piSubAgentModel, seatHostId, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
 import type { SetupSnapshotV2 } from '../core/setup/types';
 import type { OperatorTranslate } from './i18n';
 import type { QuotaSection } from './quota';
@@ -224,9 +224,7 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
     // A typed or stored model outside the seat's recommended list stays visible as a choice.
     ...(draft.model !== null && !suggested.includes(draft.model) ? [{ value: draft.model as string | null, label: draft.model }] : []),
   ];
-  // An agy model with an effort suffix takes only that effort; the launch checks the catalog menu of the model.
-  const effortOff = (effort: string) => !runtime.effort || (agy && draft.model !== null && !agyEffortValid(draft.model, effort));
-  const efforts = [{ value: null, label: t('seats.effort.default') }, ...ranges.efforts.map(effort => ({ value: effort as string | null, label: effort, off: effortOff(effort) }))];
+  const efforts = [{ value: null, label: t('seats.effort.default') }, ...ranges.efforts.map(effort => ({ value: effort as string | null, label: effort, off: !runtime.effort }))];
   // The host agent types change only the argv; the limit levels do not depend on them, so the page passes none.
   const launchSeat = seat === 'gatekeeper-fallback' ? 'gatekeeper' : seat;
   const limits = agy ? agySeatLimits(launchSeat, draft) : buildSeatLaunch(launchSeat, draft, 'seats', []).limits;

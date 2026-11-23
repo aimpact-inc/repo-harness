@@ -178,21 +178,9 @@ describe('agents page seats section', () => {
     expect(allow('Shell').disabled).toBe(true);
     // The agy advisor rule makes edit, MCP and schedule optional; the task list stays out.
     expect(['Edit files', 'MCP · repo-harness', 'Scheduled jobs', 'Task list'].map(tool => allow(tool).disabled)).toEqual([false, false, false, true]);
-    // The suffixed model takes only its own effort.
-    const effortChoices = () => [...document.querySelectorAll<HTMLButtonElement>('[data-seat-card="advisor"] [aria-label="Effort"] button')].filter(button => !button.disabled).map(button => button.textContent);
-    expect(effortChoices()).toEqual(['Default', 'high']);
     await click(allow('MCP · repo-harness'));
-    await click(buttonWithText('high'));
-    // A model with another effort suffix drops the refused effort.
-    const advisorModel = '[data-seat-card="advisor"] [data-model-input]';
-    await typeText(advisorModel, 'gemini-4-neon-low');
-    await leaveField(advisorModel);
-    expect(document.querySelector('[data-seat-card="advisor"] [aria-label="Effort"] [aria-pressed="true"]')?.textContent).toBe('Default');
-    expect(effortChoices()).toEqual(['Default', 'low']);
-    await click(buttonWithText('gemini-4-neon-high'));
-    await click(buttonWithText('high'));
     await click(seatsSave());
-    expect(posts[0]?.seats.advisor).toEqual({ runtime: 'agy', model: 'gemini-4-neon-high', effort: 'high', advisor_model: null, fleet: [], tools: ['edit', 'net', 'read', 'schedule', 'shell'] });
+    expect(posts[0]?.seats.advisor).toEqual({ runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['edit', 'net', 'read', 'schedule', 'shell'] });
 
     // Worker seat gets Neon High + writable agy worker tools, unlocked gh toggle, and dynamic limits (no edit limit).
     await click(pane('worker'));
@@ -205,6 +193,8 @@ describe('agents page seats section', () => {
     expect(levels()).toEqual(['instructions_only', 'instructions_only', 'instructions_only', 'instructions_only']);
     await click(allow('GitHub writes'));
     expect(allow('GitHub writes').getAttribute('aria-checked')).toBe('false');
+    // A writable worker keeps edit on without GitHub writes too: the launch refuses a read-only agy worker.
+    expect(allow('Edit files').disabled).toBe(true);
     expect(levels()).toEqual(['instructions_only', 'instructions_only', 'instructions_only', 'common_commands', 'instructions_only']);
     await click(seatsSave());
     expect(posts[1]?.seats.worker).toEqual({ runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['edit', 'net', 'read', 'shell'] });
@@ -263,8 +253,7 @@ describe('agents page seats section', () => {
     expect(allow('GitHub writes').disabled).toBe(true);
     await click(allow('Edit files'));
     expect(allow('Edit files').getAttribute('aria-checked')).toBe('true');
-    // Without GitHub writes, edit can go off again: the section decoder accepts a read-only agy worker.
-    expect(allow('Edit files').disabled).toBe(false);
+    expect(allow('Edit files').disabled).toBe(true);
     expect(allow('GitHub writes').disabled).toBe(false);
     await click(seatsSave());
     expect(posts[0]?.seats['worker-neon']).toEqual({ runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['edit', 'net', 'read', 'shell'] });
