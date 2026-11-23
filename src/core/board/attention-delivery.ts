@@ -13,6 +13,10 @@ const MINUTE = 60_000;
 export const WINDOW_WITH_WORKERS_MS = 15 * MINUTE;
 /** The window while no worker seat terminal is live. */
 export const WINDOW_WITHOUT_WORKERS_MS = 60 * MINUTE;
+/** Minimum cooldown before a persistent P0/P1 finding re-reminds on the same route. */
+export const RENUDGE_INTERVAL_MS = 30 * MINUTE;
+/** Maximum total sends (initial send plus re-reminders) per persistent P0/P1 finding per terminal slot. */
+export const MAX_SENDS_PER_FINDING = 3;
 /** The advisor seat wakes at most once per window, and at most this many times in a rolling 24 hours. */
 export const ADVISOR_WAKES_PER_DAY = 8;
 export const ADVISOR_CAP_SPAN_MS = 24 * 60 * MINUTE;
@@ -43,16 +47,20 @@ export function attentionFindingKey(finding: BoardFinding): string {
   return JSON.stringify(finding.comments.length === 0 ? subjects : [...subjects, finding.comments]);
 }
 
+export type AttentionSentEntryV1 = { readonly count: number; readonly last_sent_ms: number };
+
 /**
- * The finding keys that each seat terminal of a route got in a `sent` delivery,
- * by `attentionSentSlot`. The watcher keeps it in its process between windows:
- * a new watcher sends each open finding once.
+ * The finding send counts and last send timestamps that each seat terminal of
+ * a route got in `sent` deliveries, by `attentionSentSlot`. The watcher keeps
+ * it in its process between windows: a new watcher sends each open finding
+ * once, and persistent P0/P1 findings re-remind up to `MAX_SENDS_PER_FINDING`
+ * times after `RENUDGE_INTERVAL_MS`.
  */
-export type AttentionSentV1 = ReadonlyMap<string, ReadonlySet<string>>;
+export type AttentionSentV1 = ReadonlyMap<string, ReadonlyMap<string, AttentionSentEntryV1>>;
 
 export const attentionSentSlot = (route: BoardAttentionRoute, terminal: string): string => `${route} ${terminal}`;
 
-/** A route with findings that gets no send in this window, and why: the cap, no live seat terminal, or the board's execution reason. */
+/** A route with findings that gets no send in this window, and why: the advisor daily cap, the renudge cap, no live seat terminal, or the board's execution reason. */
 export interface AttentionSkipV1 {
   readonly route: BoardAttentionRoute;
   readonly reason: string;
@@ -91,27 +99,66 @@ function deliveryText(parent: number, findings: readonly BoardFinding[]): string
   return `[rh-attention] #${parent} ${ordered.map(finding => `${finding.priority} ${finding.rule}: ${finding.message}`).join('; ')}`;
 }
 
+const isRenudgePriority = (finding: BoardFinding): boolean => finding.priority === 'P0' || finding.priority === 'P1';
+
+function isDeliveryEligible(finding: BoardFinding, entry: AttentionSentEntryV1 | undefined, nowMs: number): boolean {
+  if (entry === undefined) return true;
+  return isRenudgePriority(finding) && entry.count < MAX_SENDS_PER_FINDING && nowMs - entry.last_sent_ms >= RENUDGE_INTERVAL_MS;
+}
+
+function isFindingCappedAndDue(finding: BoardFinding, entry: AttentionSentEntryV1 | undefined, nowMs: number): boolean {
+  return isRenudgePriority(finding) && entry !== undefined && entry.count >= MAX_SENDS_PER_FINDING && nowMs - entry.last_sent_ms >= RENUDGE_INTERVAL_MS;
+}
+
 /**
- * One message per live seat terminal of each route that has findings. A route
- * names its seat: A findings go to the orchestrator seat, R findings to the
- * advisor seat. A terminal gets only the findings that are not in its `sent`
- * slot. A route with no such finding gets no delivery and no skip; with no
- * live seat terminal, a finding is new when no terminal of the route got it.
+ * One message per live seat terminal of each route that has eligible findings.
+ * A route names its seat: A findings stay on orchestrator, R findings stay on
+ * advisor (no cross-route escalation). P2 and P3 findings send once per
+ * terminal slot; persistent P0/P1 findings re-remind up to
+ * `MAX_SENDS_PER_FINDING` after `RENUDGE_INTERVAL_MS`. With no live seat
+ * terminal, `no_seat_terminal` is emitted while any finding on the route is
+ * fresh or due for a P0/P1 re-reminder. When live terminals exist and no
+ * delivery is queued, `renudge_cap` is emitted once per route if any P0/P1
+ * finding on a live terminal reached `MAX_SENDS_PER_FINDING` with cooldown elapsed.
  */
-export function planAttentionDeliveries(board: BoardV1, attention: BoardAttentionV1, advisorWakesLastDay: number, sent: AttentionSentV1 = new Map()): AttentionDeliveryPlanV1 {
+export function planAttentionDeliveries(
+  board: BoardV1,
+  attention: BoardAttentionV1,
+  advisorWakesLastDay: number,
+  sent: AttentionSentV1 = new Map(),
+  nowMs: number = Date.parse(board.observed_at),
+): AttentionDeliveryPlanV1 {
   const deliveries: AttentionDeliveryV1[] = [];
   const skipped: AttentionSkipV1[] = [];
   for (const route of ['orchestrator', 'advisor'] as const) {
     const findings = attention.findings.filter(finding => finding.route === route);
-    const got = (terminal: string, finding: BoardFinding) => sent.get(attentionSentSlot(route, terminal))?.has(attentionFindingKey(finding)) ?? false;
+    if (findings.length === 0) continue;
     const terminals = liveSeatTerminals(board, route);
-    const pending = terminals.map(terminal => ({ terminal, findings: findings.filter(finding => !got(terminal.address, finding)) }))
-      .filter(entry => entry.findings.length > 0);
-    const slots = [...sent.keys()].filter(slot => slot.startsWith(attentionSentSlot(route, '')));
+    const pending = terminals.map((terminal) => {
+      const slotSent = sent.get(attentionSentSlot(route, terminal.address));
+      return {
+        terminal,
+        findings: findings.filter(finding => isDeliveryEligible(finding, slotSent?.get(attentionFindingKey(finding)), nowMs)),
+      };
+    }).filter(entry => entry.findings.length > 0);
+    const routePrefix = attentionSentSlot(route, '');
+    const slots = [...sent.keys()].filter(slot => slot.startsWith(routePrefix));
     const fresh = terminals.length === 0
-      ? findings.some(finding => !slots.some(slot => sent.get(slot)!.has(attentionFindingKey(finding))))
+      ? findings.some((finding) => {
+        const key = attentionFindingKey(finding);
+        const entries = slots.map(slot => sent.get(slot)?.get(key)).filter((entry): entry is AttentionSentEntryV1 => entry !== undefined);
+        return entries.length === 0 || entries.some(entry => isDeliveryEligible(finding, entry, nowMs));
+      })
       : pending.length > 0;
-    if (!fresh) continue;
+    if (!fresh) {
+      if (terminals.length > 0 && terminals.some((terminal) => {
+        const slotSent = sent.get(attentionSentSlot(route, terminal.address));
+        return findings.some(finding => isFindingCappedAndDue(finding, slotSent?.get(attentionFindingKey(finding)), nowMs));
+      })) {
+        skipped.push({ route, reason: 'renudge_cap' });
+      }
+      continue;
+    }
     if (route === 'advisor' && advisorWakesLastDay >= ADVISOR_WAKES_PER_DAY) {
       skipped.push({ route, reason: 'advisor_daily_cap' });
       continue;

@@ -3,7 +3,7 @@ import { basename, dirname, join } from 'node:path';
 import { evaluateBoardAttention } from '../../core/board/attention';
 import {
   ADVISOR_CAP_SPAN_MS, WINDOW_WITH_WORKERS_MS, attentionFindingKey, attentionSentSlot, deliveryTiming, liveSeatTerminals, planAttentionDeliveries,
-  type AttentionDeliveryV1, type AttentionHostPortsV1, type AttentionSentV1,
+  type AttentionDeliveryV1, type AttentionHostPortsV1, type AttentionSentEntryV1, type AttentionSentV1,
 } from '../../core/board/attention-delivery';
 import type { BoardV1 } from '../../core/board/board';
 import { repoHarnessHome } from '../repo-harness-home';
@@ -119,17 +119,18 @@ async function reviewWindow(review: (observe: ReviewObserver) => Promise<unknown
  * send to it), any other status gets the send then. So the skip never comes
  * before the window end, whatever `hc wait` returns for a blocked terminal.
  *
- * Returns the `sent` slots for the next window: of each slot, the keys of this
- * window's findings that it held before or that a `sent` delivery carried. A
- * failed, skipped or ended send adds no key, so the next window sends that
- * finding again; a finding that is gone leaves every slot, and a slot that
- * keeps no key leaves the map. A window that could not read the board returns
- * the slots it got.
+ * Returns the `sent` slots for the next window: of each slot, the
+ * `{ count, last_sent_ms }` entries of this window's open findings that it
+ * held before, incremented and stamped when a `sent` delivery carried them. A
+ * failed, skipped or ended send does not update `next`, so the next window
+ * retries that finding; a finding that is gone leaves every slot, and a slot
+ * that keeps no key leaves the map. A window that could not read the board
+ * returns the slots it got.
  */
 export async function runAttentionWindow(input: AttentionWindowInput): Promise<AttentionSentV1> {
   const now = input.now ?? (() => new Date());
   const sleep = input.sleep ?? sleepFor;
-  const prior = input.sent ?? new Map<string, ReadonlySet<string>>();
+  const prior = input.sent ?? new Map<string, ReadonlyMap<string, AttentionSentEntryV1>>();
   const started = now();
   const window = started.toISOString();
   const log = (record: Record<string, unknown>) => append(input.log_path, { at: now().toISOString(), window, parent: input.parent, ...record } as AttentionLogRecordV1);
@@ -145,14 +146,14 @@ export async function runAttentionWindow(input: AttentionWindowInput): Promise<A
   const attention = evaluateBoardAttention(board, input.previous ?? null);
   const open = new Set(attention.findings.map(attentionFindingKey));
   // A slot that keeps no open key leaves the map: a watcher that runs for days keeps no empty slot for each terminal.
-  const next = new Map<string, Set<string>>();
-  for (const [slot, keys] of prior) {
-    const held = [...keys].filter(key => open.has(key));
-    if (held.length > 0) next.set(slot, new Set(held));
+  const next = new Map<string, Map<string, AttentionSentEntryV1>>();
+  for (const [slot, entries] of prior) {
+    const held = [...entries].filter(([key]) => open.has(key));
+    if (held.length > 0) next.set(slot, new Map(held));
   }
   for (const finding of attention.findings) log({ kind: 'finding', rule: finding.rule, route: finding.route, message: finding.message });
   const reviewLines = input.review === undefined ? [] : await reviewWindow(input.review, log);
-  const plan = planAttentionDeliveries(board, attention, advisorWakes(input.log_path, started), prior);
+  const plan = planAttentionDeliveries(board, attention, advisorWakes(input.log_path, started), prior, started.getTime());
   const end = started.getTime() + plan.window_ms;
   if (!input.deliver) {
     await sleep(end - now().getTime());
@@ -167,8 +168,16 @@ export async function runAttentionWindow(input: AttentionWindowInput): Promise<A
     if (sent.status === 'sent') {
       record(delivery, 'sent');
       // The review delivery carries no key: it holds no finding, so it sets no slot.
-      const slot = attentionSentSlot(delivery.route, delivery.terminal);
-      if (delivery.keys.length > 0) next.set(slot, new Set([...next.get(slot) ?? [], ...delivery.keys]));
+      if (delivery.keys.length > 0) {
+        const slot = attentionSentSlot(delivery.route, delivery.terminal);
+        const updated = new Map(next.get(slot));
+        const sentAt = now().getTime();
+        for (const key of delivery.keys) {
+          const prev = updated.get(key);
+          updated.set(key, { count: (prev?.count ?? 0) + 1, last_sent_ms: sentAt });
+        }
+        next.set(slot, updated);
+      }
     } else record(delivery, 'send_failed', sent.detail);
   };
   // The review message takes the delivery path of a finding: a blocked orchestrator gets `hc wait`, a working one the window end.
