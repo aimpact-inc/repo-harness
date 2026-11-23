@@ -6,7 +6,7 @@
 import { DEFAULT_EXHAUSTED_AT_OR_ABOVE_USED, EXHAUSTED_AT_OR_ABOVE_USED_RANGE } from './quota';
 import type { SeatPoolCacheV1 } from './seat-pool';
 
-export const WORKER_SEAT_IDS = ['worker', 'worker-deep', 'worker-opus', 'worker-neon', 'worker-light'] as const;
+export const WORKER_SEAT_IDS = ['worker', 'worker-deep', 'worker-opus', 'worker-neon', 'worker-neon-deep', 'worker-light'] as const;
 export type WorkerSeatId = typeof WORKER_SEAT_IDS[number];
 export const FRONTEND_SEAT_IDS = ['worker-opus', 'worker-neon'] as const;
 export const ROUTING_CLASSES = ['important_deep', 'important_fast', 'simple_deep', 'simple_fast', 'frontend'] as const;
@@ -17,9 +17,9 @@ export type SeatId = typeof SEAT_IDS[number];
 export type LaunchSeatId = Exclude<SeatId, 'gatekeeper-fallback'>;
 export const LAUNCH_SEAT_IDS = SEAT_IDS.filter((id): id is LaunchSeatId => id !== 'gatekeeper-fallback');
 /** The seats that may be null in the section. */
-export type OptionalSeatId = 'worker-light' | 'gatekeeper-fallback' | 'council';
+export type OptionalSeatId = 'worker-neon-deep' | 'worker-light' | 'gatekeeper-fallback' | 'council';
 export const isCouncilSeat = (id: SeatId): boolean => id === 'council';
-export const isOptionalSeat = (id: SeatId): id is OptionalSeatId => id === 'worker-light' || id === 'gatekeeper-fallback' || isCouncilSeat(id);
+export const isOptionalSeat = (id: SeatId): id is OptionalSeatId => id === 'worker-neon-deep' || id === 'worker-light' || id === 'gatekeeper-fallback' || isCouncilSeat(id);
 export const isReviewSeat = (id: SeatId): boolean => id === 'gatekeeper' || id === 'gatekeeper-fallback' || id === 'reviewer';
 export const isWorkerSeat = (seat: SeatId): seat is WorkerSeatId => WORKER_SEAT_IDS.includes(seat as WorkerSeatId);
 
@@ -98,6 +98,7 @@ export const isPiCodexSeat = (seat: { readonly runtime: SeatRuntime; readonly mo
 
 export const PI_AGY_MODEL_PREFIX = 'magpie/agy-cli/';
 const AGY_NEON_MODEL = 'gemini-4-neon';
+export const AGY_NEON_XHIGH_MODEL = `${AGY_NEON_MODEL}-xhigh`;
 export const AGY_HYDROGEN_HIGH_MODEL = 'gemini-4-hydrogen-high';
 export const PI_NEON_MODEL = `${PI_AGY_MODEL_PREFIX}${AGY_NEON_MODEL}`;
 
@@ -181,6 +182,7 @@ export const ALLOWED_SEAT_FLEET_ROLES: Readonly<Record<SeatId, readonly SeatScaf
   'worker-deep': EXPLORER_ONLY_FLEET,
   'worker-opus': EXPLORER_ONLY_FLEET,
   'worker-neon': EXPLORER_ONLY_FLEET,
+  'worker-neon-deep': EXPLORER_ONLY_FLEET,
   'worker-light': EMPTY_FLEET,
   gatekeeper: EMPTY_FLEET,
   'gatekeeper-fallback': EMPTY_FLEET,
@@ -222,14 +224,26 @@ const DEFAULT_ROUTING: SeatRoutingV1 = Object.freeze({
   exhausted_at_or_above_used: DEFAULT_EXHAUSTED_AT_OR_ABOVE_USED,
   codex_credit_mode: 'off',
   codex_credit_floor: 0,
-  important_deep: Object.freeze(['worker-opus', 'worker-neon', 'worker-deep'] as const),
+  important_deep: Object.freeze(['worker-opus', 'worker-neon-deep', 'worker-deep'] as const),
   important_fast: Object.freeze(['worker-opus', 'worker-neon', 'worker', 'worker-light'] as const),
-  simple_deep: Object.freeze(['worker-neon', 'worker-deep'] as const),
+  simple_deep: Object.freeze(['worker-neon-deep', 'worker-deep'] as const),
   simple_fast: Object.freeze(['worker-light', 'worker'] as const),
   frontend: Object.freeze(['worker-opus', 'worker-neon'] as const),
   low_quota_explorer: Object.freeze({ model: 'haiku', effort: 'high' }),
   unavailable_pi_providers: Object.freeze([]),
 });
+
+const NEON_DEEP_STARTERS = Object.freeze({
+  pi: Object.freeze({ runtime: 'pi', model: PI_NEON_MODEL, advisor_model: null, effort: 'xhigh', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
+  agy: Object.freeze({ runtime: 'agy', model: AGY_NEON_XHIGH_MODEL, advisor_model: null, effort: null, tools: AGY_WORKER_SEAT_TOOLS, fleet: EMPTY_FLEET }),
+} as const satisfies Record<'pi' | 'agy', SeatConfigV1>);
+
+/** Prefer the existing Neon worker's host when both hosts are enabled. */
+export function neonDeepSeatStarter(enabledHosts: readonly string[], preferredRuntime: unknown): SeatConfigV1 | null {
+  const runtimes = preferredRuntime === 'agy' ? ['agy', 'pi'] as const : ['pi', 'agy'] as const;
+  const runtime = runtimes.find(id => enabledHosts.includes(seatHostId(id)));
+  return runtime === undefined ? null : NEON_DEEP_STARTERS[runtime];
+}
 
 export function defaultSeatsConfig(preset: 'magpie' | 'native' = 'magpie'): SeatsConfigV1 {
   if (preset === 'native') {
@@ -241,6 +255,7 @@ export function defaultSeatsConfig(preset: 'magpie' | 'native' = 'magpie'): Seat
       'worker-deep': Object.freeze({ runtime: 'codex', model: 'gpt-6.2-sol', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
       'worker-opus': Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
       'worker-neon': Object.freeze({ runtime: 'agy', model: 'gemini-4-neon-high', advisor_model: null, effort: null, tools: AGY_WORKER_SEAT_TOOLS, fleet: EMPTY_FLEET }),
+      'worker-neon-deep': NEON_DEEP_STARTERS.agy,
       'worker-light': Object.freeze({ runtime: 'agy', model: AGY_HYDROGEN_HIGH_MODEL, advisor_model: null, effort: null, tools: AGY_WORKER_SEAT_TOOLS, fleet: EMPTY_FLEET }),
       gatekeeper: Object.freeze({ runtime: 'codex', model: 'gpt-6.2-sol', advisor_model: null, effort: 'high', tools: REVIEW_TOOLS, fleet: EMPTY_FLEET }),
       'gatekeeper-fallback': null,
@@ -256,6 +271,7 @@ export function defaultSeatsConfig(preset: 'magpie' | 'native' = 'magpie'): Seat
     'worker-deep': Object.freeze({ runtime: 'pi', model: `${PI_CODEX_MODEL_PREFIX}gpt-6.2-sol`, advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
     'worker-opus': Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
     'worker-neon': Object.freeze({ runtime: 'pi', model: PI_NEON_MODEL, advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
+    'worker-neon-deep': NEON_DEEP_STARTERS.pi,
     'worker-light': Object.freeze({ runtime: 'pi', model: WORKER_LIGHT_MODEL, advisor_model: null, effort: null, tools: WORKER_TOOLS, fleet: EMPTY_FLEET }),
     gatekeeper: Object.freeze({ runtime: 'pi', model: `${PI_CODEX_MODEL_PREFIX}gpt-6.2-sol`, advisor_model: null, effort: 'high', tools: REVIEW_TOOLS, fleet: EMPTY_FLEET }),
     'gatekeeper-fallback': null,

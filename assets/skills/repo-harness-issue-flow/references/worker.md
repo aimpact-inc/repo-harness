@@ -253,7 +253,7 @@ You are the head owner. Only you push to this branch.
 - **Pre-check before review.** Before asking for round 2, check the
   fix delta against the open findings for sibling cases, missing test
   branches and changelog fragment text against behavior. Claude and
-  non-light Pi workers (`worker-opus`, `worker-neon`, `worker-deep`,
+  non-light Pi workers (`worker-opus`, `worker-neon`, `worker-neon-deep`, `worker-deep`,
   `worker`) may call `explorer` for discovery; `worker-light` has no
   sub-agents and does a self-check. The pre-check writes no record and
   does not replace the review.

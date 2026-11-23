@@ -218,6 +218,10 @@ describe('agents page seats section', () => {
     expect(buttonWithText('gemini-4-hydrogen-high').getAttribute('aria-pressed')).toBe('true');
     expect(allow('Shell').disabled).toBe(true);
 
+    await click(buttonWithText('Neon deep worker'));
+    await click(document.querySelector<HTMLButtonElement>('[data-seat-card="worker-neon-deep"] [aria-label="Configured"]')!);
+    expect(buttonWithText('gemini-4-neon-xhigh').getAttribute('aria-pressed')).toBe('true');
+
     // Disallowed seats hide agy.
     for (const disallowed of ['Orchestrator', 'Gatekeeper', 'Reviewer']) {
       await click(buttonWithText(disallowed));
@@ -270,7 +274,7 @@ describe('agents page seats section', () => {
     expect(request_id).toMatch(UUID);
     expect(expected_revision).toMatch(/^sha256:/u);
     expect(seats.advisor.fleet).toEqual(['explorer']);
-    expect(Object.keys(seats)).toEqual(['orchestrator', 'advisor', 'council', 'worker', 'worker-deep', 'worker-opus', 'worker-neon', 'worker-light', 'gatekeeper', 'gatekeeper-fallback', 'reviewer', 'routing']);
+    expect(Object.keys(seats)).toEqual(['orchestrator', 'advisor', 'council', 'worker', 'worker-deep', 'worker-opus', 'worker-neon', 'worker-neon-deep', 'worker-light', 'gatekeeper', 'gatekeeper-fallback', 'reviewer', 'routing']);
     expect(document.querySelector('[data-seats-saved]')?.textContent).toContain('Running panes do not change');
 
     await click(pane('orchestrator'));
@@ -504,7 +508,7 @@ describe('agents page seats section', () => {
 
   test('every seat has a card; a review seat shows only its read, shell and network groups and no fleet; Claude mode stays unknown while quota is not read', async () => {
     await mount(seatsProps([]));
-    expect(all('[role="group"][aria-label="Seat"] button')).toHaveLength(11);
+    expect(all('[role="group"][aria-label="Seat"] button')).toHaveLength(12);
     await click(pick('gatekeeper'));
     expect(document.querySelector('[data-seat-card]')?.getAttribute('data-seat-card')).toBe('gatekeeper');
     expect(all('[data-seat-tools] [role="switch"]').map(node => node.getAttribute('aria-label'))).toEqual(['Allow Read code', 'Allow Shell', 'Allow Network']);

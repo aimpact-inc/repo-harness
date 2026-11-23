@@ -613,6 +613,7 @@ describe('seat settings contract without transport', () => {
       { runtime: 'pi', model: 'zai/glm-5.3-flash' }, { runtime: 'pi', model: 'magpie/group/deepseek-v4.1-flash' },
       { runtime: 'pi', model: 'magpie/agy-cli/gemini-4-hydrogen' },
       ...['low', 'medium', 'high', 'xhigh'].map(effort => ({ runtime: 'agy' as const, model: `gemini-4-hydrogen-${effort}` })),
+      ...(id === 'worker-light' ? [{ runtime: 'pi' as const, model: 'magpie/zcode/GLM-5.4' }] : []),
     ]);
     const { revision, ...section } = before.config;
     const saved = await route.decode({ expected_revision: revision, seats: { ...section, advisor: { ...section.advisor, effort: 'medium' } } }, []).execute();
@@ -736,7 +737,7 @@ describe('seat settings contract without transport', () => {
     cleanups.push(() => rmSync(home, { recursive: true, force: true }));
     const settings = readSeatsSettings({ HOME: home });
     expect(Object.keys(settings.defaults)).toEqual([...SEAT_IDS, 'routing']);
-    expect(settings.ranges.routing).toEqual({ classes: ROUTING_CLASSES, worker_seats: ['worker', 'worker-deep', 'worker-opus', 'worker-neon', 'worker-light'],
+    expect(settings.ranges.routing).toEqual({ classes: ROUTING_CLASSES, worker_seats: ['worker', 'worker-deep', 'worker-opus', 'worker-neon', 'worker-neon-deep', 'worker-light'],
       frontend_seats: ['worker-opus', 'worker-neon'] });
     for (const id of ['gatekeeper', 'gatekeeper-fallback', 'reviewer'] as const) expect(settings.ranges.seats[id]).toEqual({ tools: ['net', 'read', 'shell'], fleet: [],
       models: [
@@ -744,6 +745,7 @@ describe('seat settings contract without transport', () => {
         { runtime: 'claude', model: 'opus' }, { runtime: 'pi', model: 'zai/glm-5.3-flash' },
         { runtime: 'pi', model: 'magpie/group/deepseek-v4.1-flash' }, { runtime: 'pi', model: 'magpie/agy-cli/gemini-4-hydrogen' },
         ...['low', 'medium', 'high', 'xhigh'].map(effort => ({ runtime: 'agy' as const, model: `gemini-4-hydrogen-${effort}` })),
+        ...(id === 'reviewer' ? [{ runtime: 'pi' as const, model: 'magpie/zcode/GLM-5.4' }] : []),
       ] });
     expect(settings.defaults['gatekeeper-fallback']).toBeNull();
     expect(settings.defaults.council).toBeNull();
@@ -778,7 +780,8 @@ describe('seat settings contract without transport', () => {
     for (const id of ['orchestrator', 'advisor', 'worker', 'worker-light'] as const) expect(decoded[id]).toEqual(originalSeats[id]);
     expect(decoded.worker.model).toBe('gpt-6.1-sol');
     expect(decoded['worker-deep']).toEqual(DEFAULT_SEATS_CONFIG['worker-deep']);
-    expect(decoded.routing).toEqual(DEFAULT_SEATS_CONFIG.routing);
+    expect(decoded.routing).toEqual({ ...DEFAULT_SEATS_CONFIG.routing,
+      important_deep: ['worker-opus', 'worker-neon', 'worker-deep'], simple_deep: ['worker-neon', 'worker-deep'] });
     const routing: SeatRoutingV1 = { ...before.config.routing, claude_saving_below_remaining: 30, claude_hyper_at_or_above_remaining: 60, codex_credit_mode: 'review', codex_credit_floor: 2000,
       important_fast: ['worker-opus', 'worker-neon', 'worker'], simple_fast: ['worker-deep', 'worker'], frontend: ['worker-neon'] };
     const { revision: _revision, ...storedSection } = before.config;
@@ -974,7 +977,7 @@ describe('seat settings routes', () => {
     expect(sha256(harness.configPath)).toBe(revision);
   });
 
-  test('stored main@76675c2 11-seat Native preset with read-only agy workers decodes, survives rh update without silent edits, and allows unrelated saves and explicit edit opt-in', async () => {
+  test('the Native preset with read-only agy workers survives update without silent edits and allows unrelated saves and explicit edit opt-in', async () => {
     const legacyNativeSeats = {
       ...NATIVE_SEATS_PRESET,
       'worker-neon': { ...NATIVE_SEATS_PRESET['worker-neon'], tools: ['net', 'read', 'shell'] as const },
@@ -1097,14 +1100,18 @@ describe('seat settings routes', () => {
     expect(stored.routing.frontend).toEqual(['worker-opus', 'worker-neon']);
   });
 
-  test('a configured Pi worker-light in a non-frontend class saves and reads back', async () => {
+  test('GLM 5.4 can be saved on worker-light and the default stays on GLM 5.3 Flash', async () => {
     const harness = await startHarness({ agents: PANE_AGENTS });
-    const { revision, ...section } = (await seats(harness)).config;
+    const { config: { revision, ...section }, defaults, ranges } = await seats(harness);
+    expect(defaults['worker-light']?.model).toBe('zai/glm-5.3-flash');
+    const glm = { runtime: 'pi', model: 'magpie/zcode/GLM-5.4' } as const;
+    expect(ranges.seats['worker-light'].models).toContainEqual(glm);
+    const workerLight = { ...section['worker-light']!, ...glm };
     const routing = { ...section.routing, simple_fast: ['worker-light'] };
-    const response = await post(harness, { expected_revision: revision, seats: { ...section, routing } }, 'seats');
+    const response = await post(harness, { expected_revision: revision, seats: { ...section, 'worker-light': workerLight, routing } }, 'seats');
     expect(response.status).toBe(200);
     const stored = (await seats(harness)).config;
-    expect(stored['worker-light']).toEqual(DEFAULT_SEATS_CONFIG['worker-light']);
+    expect(stored['worker-light']).toEqual(workerLight);
     expect(stored.routing.simple_fast).toEqual(['worker-light']);
   });
 
@@ -1116,7 +1123,7 @@ describe('seat settings routes', () => {
     expect(value.config.advisor.fleet).toEqual(fleet);
     expect(value.ranges.roles).toEqual(fleet.map(name => ({ name, writable: false })));
     expect(value.ranges.seats.advisor.fleet).toEqual(fleet);
-    for (const id of ['orchestrator', 'council', 'worker', 'worker-deep', 'worker-opus', 'worker-neon'] as const) {
+    for (const id of ['orchestrator', 'council', 'worker', 'worker-deep', 'worker-opus', 'worker-neon', 'worker-neon-deep'] as const) {
       expect(value.ranges.seats[id].fleet).toEqual(['explorer']);
     }
     for (const id of WORKER_SEAT_IDS) {

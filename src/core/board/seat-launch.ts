@@ -479,7 +479,7 @@ export function buildSeatLaunch(seat: LaunchSeatId, config: SeatConfigV1, source
   return { protocol: 1, kind: 'seat_launch', seat, runtime: config.runtime, source, ...runtimeLaunch(config.runtime, seat, config, claudeAgentTypes, options) };
 }
 
-const PANE_ROLE = { orchestrator: 'orch', advisor: 'adv', council: 'cn', worker: 'w', 'worker-deep': 'w', 'worker-opus': 'w', 'worker-neon': 'w', 'worker-light': 'w', gatekeeper: 'gk', reviewer: 'rv' } as const;
+const PANE_ROLE = { orchestrator: 'orch', advisor: 'adv', council: 'cn', worker: 'w', 'worker-deep': 'w', 'worker-opus': 'w', 'worker-neon': 'w', 'worker-neon-deep': 'w', 'worker-light': 'w', gatekeeper: 'gk', reviewer: 'rv' } as const;
 const PANE_NAME_MAX = 32;
 const POSITIVE = /^[1-9][0-9]*$/u;
 const WORD = /^[a-z][a-z0-9]*$/u;

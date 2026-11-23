@@ -677,7 +677,7 @@ test('attention rules and delivery windows recognize all worker seat kinds', () 
   const board = replay();
   if (board.execution.status !== 'observed') throw new Error('the replay observes the seats');
   const [blocked, done] = board.execution.terminals;
-  for (const seat of ['worker', 'worker-deep', 'worker-opus', 'worker-neon', 'worker-light', 'orchestrator', 'council', 'worker-custom']) {
+  for (const seat of ['worker', 'worker-deep', 'worker-opus', 'worker-neon', 'worker-neon-deep', 'worker-light', 'orchestrator', 'council', 'worker-custom']) {
     const terminals = [{ ...blocked!, seat }, { ...done!, seat }] as BoardTerminalV1[];
     const candidate: BoardV1 = { ...board, items: board.items.map(item => item.number === 1475 ? { ...item, claim_status: { status_kind: 'none' } } : item), execution: { status: 'observed', terminals } };
     const attention = evaluateBoardAttention(candidate);

@@ -366,7 +366,7 @@ module is in the title so that a list view shows the write scopes.
   Include this rule in the worker brief: before asking for round 2,
   check the fix delta against the open findings for sibling cases, missing
   test branches and changelog fragment text against behavior. Claude and
-  non-light Pi workers (`worker-opus`, `worker-neon`, `worker-deep`,
+  non-light Pi workers (`worker-opus`, `worker-neon`, `worker-neon-deep`, `worker-deep`,
   `worker`) may call `explorer` for discovery; `worker-light` has no
   sub-agents and does a self-check. The pre-check writes no record and
   does not replace the review.
@@ -411,11 +411,12 @@ module is in the title so that a list view shows the write scopes.
 
 Before each dispatch wave, run `rh quota`. It prints the account
 states, one mode line per account and one route line per task class. For
-example: `claude mode: saving (5% left < 20%)` and
-`codex mode: normal (68% left)`. Launch each task on the seat its
-route line names with `rh seats launch <seat> --repository-id <id>
---issue <n> --cwd <worktree> --task <packet>` (it opens the argv of
-`rh seats argv` in a Herdr.app tab); state the boundary in the task. A `none` route waits, or it changes through the seats
+example `claude mode: saving (5% left < 20%)` and
+`codex mode: normal (68% left)`. For a manual dispatch, check the configured
+candidates and their quota. When Opus and Neon are both eligible, normally
+choose the seat whose account has more weekly quota left. Launch with
+`rh seats launch <seat> --repository-id <id> --issue <n> --cwd <worktree> --task <packet>`.
+State the boundary in the task. A `none` route waits, or it changes through the seats
 configuration: the owner sets the seat order and each fallback there, and
 the route line then names the first eligible seat. When the gatekeeper
 account is exhausted and a `gatekeeper-fallback` seat is configured, the
@@ -435,7 +436,7 @@ own threshold. Only in Claude hyper does a Claude `advisor` take its config
 entry; in every other Claude mode it uses `opus` high. Claude hyper changes no
 worker route and not the `orchestrator` entry. `routing.agy_saving_below_remaining`
 (default 25) reserves `agy_gemini` for `advisor` (`Neon`) by blocking
-`worker-neon` dispatches below 25% remaining. A Pi `advisor` on `magpie/agy-cli/`
+`worker-neon` and `worker-neon-deep` dispatches below 25% remaining. A Pi `advisor` on `magpie/agy-cli/`
 uses its config entry at 50% or more `agy_gemini` weekly quota remaining and
 uses `magpie/agy-cli/gemini-4-neon` when lower or unknown. A seat takes a new
 model only at a tier-2 reset (`/clear` on Claude, `/new` on Pi), where
@@ -445,13 +446,12 @@ and effort at every quota level. Quota modes are derived, never stored.
 
 Routes evaluate strictly left-to-right across configured seats after excluding
 reserved or exhausted accounts (for example `important_deep`:
-`['worker-opus', 'worker-neon', 'worker-deep']`; `important_fast`:
+`['worker-opus', 'worker-neon-deep', 'worker-deep']`; `important_fast`:
 `['worker-opus', 'worker-neon', 'worker', 'worker-light']`; `simple_deep`:
-`['worker-neon', 'worker-deep']`; `simple_fast`: `['worker-light', 'worker']`;
+`['worker-neon-deep', 'worker-deep']`; `simple_fast`: `['worker-light', 'worker']`;
 `frontend`: `['worker-opus', 'worker-neon']`). Claude in saving mode or
 exhausted is reserved for `advisor` and `orchestrator`; routing skips
-`worker-opus` and selects the next eligible non-Claude seat (`worker-neon`,
-`worker-deep`, `worker`, `worker-light`). `frontend` waits for an eligible
+`worker-opus` and selects the next eligible non-Claude seat. `frontend` waits for an eligible
 Claude or Neon seat.
 `rh seats launch <seat> --repository-id <id> --owner-exception <url> --cwd <worktree> --task <packet>` lifts the
 reservation refusal (`seat_quota_reserved`) for one launch. The URL must be an

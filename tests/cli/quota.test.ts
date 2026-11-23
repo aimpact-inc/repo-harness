@@ -53,7 +53,8 @@ describe('seat quota routing', () => {
     // All three readings are pace-based tight or exhausted. Only the remaining threshold reserves Claude.
     expect(quota.claude.mode).toBe(mode);
     const lines = formatSeatRoutes(seats, quota).split('\n');
-    for (const task of ['important_deep', 'important_fast', 'frontend']) {
+    expect(lines.find(line => line.startsWith('route important_deep:'))).toContain(`${reserved ? 'worker-neon-deep' : selected} (`);
+    for (const task of ['important_fast', 'frontend']) {
       expect(lines.find(line => line.startsWith(`route ${task}:`))).toContain(`${selected} (`);
     }
     expect(lines).toContain(reserved ? `explorer: haiku high (claude ${account.state === 'exhausted' ? 'exhausted' : mode}; pass model haiku when you call the explorer)` : 'explorer: default');
@@ -67,6 +68,7 @@ describe('seat quota routing', () => {
   test.each([81, 95])('Neon keeps important and frontend routes active with Claude %s%% used; agy_saving_below_remaining reserves agy workers for advisor', used => {
     const seats = DEFAULT_SEATS_CONFIG;
     const neon = seats['worker-neon'];
+    const neonDeep = seats['worker-neon-deep'];
     const agyReading = (remaining: number) => classifyQuotaReading({
       account: 'agy_gemini', source: 'agy_account_usage', observed_at: new Date(NOW).toISOString(), reason: null,
       windows: [{ window: 'weekly', window_minutes: 10080, used_percent: 100 - remaining, resets_at: (NOW + 84 * HOUR) / 1000, absent: false, reason: null }],
@@ -75,7 +77,10 @@ describe('seat quota routing', () => {
       rateLimits: { primary: { usedPercent: 20, windowDurationMins: 10080, resetsAt: (NOW + 84 * HOUR) / 1000 } },
     }, new Date(NOW).toISOString()), NOW);
     const quota = seatAccountQuotas([claude({ seven_day: week(used, 84) }), agyReading(60), codexNormal], seats.routing);
-    for (const task of ['important_deep', 'important_fast', 'frontend'] as const) {
+    for (const task of ['important_deep', 'simple_deep'] as const) {
+      expect(selectSeatRoute(task, seats, quota)).toMatchObject({ id: 'worker-neon-deep', seat: neonDeep });
+    }
+    for (const task of ['important_fast', 'frontend'] as const) {
       expect(selectSeatRoute(task, seats, quota)).toMatchObject({ id: 'worker-neon', seat: neon });
     }
     const agySaving = seatAccountQuotas([claude({ seven_day: week(used, 84) }), agyReading(24), codexNormal], seats.routing);
@@ -97,8 +102,8 @@ describe('seat quota routing', () => {
     expect(selectSeatRoute('important_deep', seats, exhausted).id).toBe('worker-deep');
     expect(selectSeatRoute('important_fast', seats, exhausted).id).toBe('worker');
     expect(selectSeatRoute('important_deep', unavailable, quota).id).toBe('worker-deep');
-    expect(selectSeatRoute('important_deep', seats, quota, seat => seat !== neon).id).toBe('worker-deep');
-    expect(selectSeatRoute('important_deep', seats, quota, undefined, id => id === 'worker-neon' ? 'model unavailable' : null).id).toBe('worker-deep');
+    expect(selectSeatRoute('important_deep', seats, quota, seat => seat !== neonDeep).id).toBe('worker-deep');
+    expect(selectSeatRoute('important_deep', seats, quota, undefined, id => id === 'worker-neon-deep' ? 'model unavailable' : null).id).toBe('worker-deep');
     expect(selectSeatRoute('frontend', seats, exhausted).line).toEndWith('agy_gemini exhausted, reserved for advisor; frontend waits for claude or neon)');
     const neonOnly = { ...seats, routing: { ...seats.routing, frontend: ['worker-neon'] as const } };
     expect(selectSeatRoute('frontend', neonOnly, exhausted).line).toBe('route frontend: none (agy_gemini exhausted, reserved for advisor; frontend waits for neon)');
@@ -109,7 +114,7 @@ describe('seat quota routing', () => {
       routing: { ...DEFAULT_SEATS_CONFIG.routing, important_fast: ['worker-opus', 'worker-neon', 'worker'] as const, simple_fast: ['worker'] as const } };
     const quota = seatAccountQuotas([claude({ seven_day: week(81, 84) })], seats.routing);
     const lines = formatSeatRoutes(seats, quota).split('\n');
-    expect(lines).toContain('route important_deep: worker-neon (pi magpie/agy-cli/gemini-4-neon high; agy_gemini unknown); skipped worker-opus: claude tight, reserved for advisor and orchestrator');
+    expect(lines).toContain('route important_deep: worker-neon-deep (pi magpie/agy-cli/gemini-4-neon xhigh; agy_gemini unknown); skipped worker-opus: claude tight, reserved for advisor and orchestrator');
     expect(lines).toContain('route important_fast: worker-neon (pi magpie/agy-cli/gemini-4-neon high; agy_gemini unknown); skipped worker-opus: claude tight, reserved for advisor and orchestrator');
     const claudeOnly = { ...seats, routing: { ...seats.routing, frontend: ['worker-opus'] as const } };
     expect(selectSeatRoute('frontend', claudeOnly, quota).line)
@@ -140,13 +145,13 @@ describe('seat quota routing', () => {
   test('a listed provider matches only at a / boundary, and a Pi seat without a model is unavailable while the list is set (#2769)', () => {
     const pi = (model: string | null): SeatConfigV1 => ({ ...DEFAULT_SEATS_CONFIG['worker-light']!, model });
     const review = { ...pi(null), tools: DEFAULT_SEATS_CONFIG.reviewer.tools };
-    const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-deep': pi('magpie/cursorx/m'), 'worker-neon': pi('magpie/cursorx/m'), worker: pi(null), 'worker-light': pi(null),
+    const seats = { ...DEFAULT_SEATS_CONFIG, 'worker-deep': pi('magpie/cursorx/m'), 'worker-neon-deep': pi('magpie/cursorx/m'), worker: pi(null), 'worker-light': pi(null),
       gatekeeper: review, reviewer: review, advisor: { ...pi(null), tools: DEFAULT_SEATS_CONFIG.advisor.tools, fleet: DEFAULT_SEATS_CONFIG.advisor.fleet },
       routing: { ...DEFAULT_SEATS_CONFIG.routing, unavailable_pi_providers: ['magpie/cursor'] } };
     const unknown = 'pi default provider unknown: give the seat an explicit model or empty seats.routing.unavailable_pi_providers';
     const lines = formatSeatRoutes(seats, seatAccountQuotas([claude({ seven_day: week(10, 84) })], seats.routing)).split('\n');
     expect(lines.filter(line => /^(route simple_|gatekeeper:|reviewer:|advisor:)/u.test(line))).toEqual([
-      'route simple_deep: worker-neon (pi seats.worker-neon.model)',
+      'route simple_deep: worker-neon-deep (pi seats.worker-neon-deep.model)',
       `route simple_fast: none (${unknown})`,
       `gatekeeper: none (${unknown})`, `reviewer: none (${unknown})`, `advisor: none (${unknown})`,
     ]);
@@ -229,6 +234,8 @@ describe('seat quota routing', () => {
     expect(isCatalogModelPermittedOnSeat('council', catalogEntry('neon', 'magpie'))).toBe(false);
     expect(isCatalogModelPermittedOnSeat('council', catalogEntry('opus', 'native'))).toBe(false);
     expect(isCatalogModelPermittedOnSeat('worker-light', catalogEntry('hydrogen', 'native'))).toBe(true);
+    expect(isCatalogModelPermittedOnSeat('worker-neon-deep', catalogEntry('neon', 'magpie'))).toBe(true);
+    expect(isCatalogModelPermittedOnSeat('reviewer', catalogEntry('glm-5.4', 'magpie'))).toBe(true);
     expect(MODEL_CATALOG.astra.planes).toEqual(['council']);
   });
 
@@ -658,6 +665,8 @@ describe('rh seats pool', () => {
     expect(pool.seats.find(row => row.seat === 'advisor')?.pool.map(entry => [entry.model, entry.account])).toEqual([
       ['magpie/agy-cli/gemini-4-neon', 'agy_gemini'], ['magpie/agy-cli/gemini-4-carbon', 'agy_gemini'],
     ]);
+    expect(pool.seats.find(row => row.seat === 'worker-neon-deep')?.configured).toMatchObject({ in_pool: true });
+    expect(pool.seats.find(row => row.seat === 'worker-light')?.pool).toContainEqual(expect.objectContaining({ model: 'magpie/zcode/GLM-5.4' }));
     expect(result.stdout).not.toContain('signed in');
     expect(existsSync(f.env.SEAT_POOL_LOG)).toBe(false);
     expect(JSON.parse(readFileSync(f.cache, 'utf8'))).toEqual(JSON.parse(result.stdout));
@@ -921,7 +930,7 @@ describe('rh quota', () => {
     expect(text.status, text.stderr).toBe(0);
     expect(text.stdout).toContain('agy_gemini weekly: 62% left\nagy_other weekly: 5% left');
     expect(text.stdout).toContain('route simple_fast: worker (pi magpie/agy-cli/gemini-4-neon high; agy_gemini normal)');
-    expect(text.stdout).toContain('route simple_deep: worker-neon (pi magpie/agy-cli/gemini-4-neon high; agy_gemini normal)');
+    expect(text.stdout).toContain('route simple_deep: worker-neon-deep (pi magpie/agy-cli/gemini-4-neon xhigh; agy_gemini normal)');
     expect(text.stdout).toContain('advisor: advisor (pi magpie/agy-cli/gemini-4-carbon xhigh; agy_gemini normal)');
     expect(result.stdout + result.stderr + text.stdout + text.stderr).not.toMatch(/agy-private-fixture|private-bucket|Gemini Models|Claude and GPT models/);
   });
@@ -964,7 +973,11 @@ describe('rh quota', () => {
     const f = fixture(null, 'two');
     const seats = { ...DEFAULT_SEATS_CONFIG,
       advisor: { ...DEFAULT_SEATS_CONFIG.advisor, runtime: 'claude' as const, model: 'fable', effort: 'high' },
-      'worker-neon': { ...DEFAULT_SEATS_CONFIG['worker-neon'], runtime: 'claude' as const, model: 'opus', effort: 'high' } };
+      'worker-neon': { ...DEFAULT_SEATS_CONFIG['worker-neon'], runtime: 'claude' as const, model: 'opus', effort: 'high' },
+      'worker-neon-deep': null,
+      routing: { ...DEFAULT_SEATS_CONFIG.routing,
+        important_deep: ['worker-opus', 'worker-neon', 'worker-deep'], simple_deep: ['worker-neon', 'worker-deep'] },
+    };
     writeFileSync(join(f.home, '.repo-harness', 'config.json'), JSON.stringify({ seats }));
     const result = quota(['--json'], f.env);
     expect(result.status, result.stderr).toBe(0);
@@ -994,8 +1007,9 @@ describe('rh quota', () => {
     writeFileSync(join(f.home, '.repo-harness', 'config.json'), JSON.stringify({ seats: { ...DEFAULT_SEATS_CONFIG,
       'worker-deep': { ...DEFAULT_SEATS_CONFIG['worker-deep'], runtime: 'pi', model: 'magpie/codex/gpt-6.2-sol', effort: 'medium' },
       'worker-neon': { ...DEFAULT_SEATS_CONFIG['worker-neon'], runtime: 'claude', model: 'opus', effort: 'high' },
+      'worker-neon-deep': null,
       advisor: { ...DEFAULT_SEATS_CONFIG.advisor, runtime: 'pi', model: 'magpie/codex/gpt-6.2-sol', effort: null },
-      routing: { ...DEFAULT_SEATS_CONFIG.routing, simple_deep: ['worker-deep'] as const, simple_fast: ['worker'] as const },
+      routing: { ...DEFAULT_SEATS_CONFIG.routing, important_deep: ['worker-opus', 'worker-neon', 'worker-deep'], simple_deep: ['worker-deep'], simple_fast: ['worker'] },
     } }));
     const resetsAt = Math.floor(Date.now() / 1000) + 2 * 3600;
     writeFileSync(join(f.home, '.repo-harness', 'quota', 'claude.json'), JSON.stringify({ observed_at: new Date().toISOString(), rate_limits: {

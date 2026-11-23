@@ -1,4 +1,4 @@
-import { AGY_HYDROGEN_HIGH_MODEL, MODEL_FAMILY_LABELS, PI_AGY_MODEL_PREFIX, PI_CODEX_MODEL_PREFIX, type SeatId, type SeatModelEntryV1, type SeatRuntime } from './seats-settings';
+import { AGY_HYDROGEN_HIGH_MODEL, AGY_NEON_XHIGH_MODEL, MODEL_FAMILY_LABELS, PI_AGY_MODEL_PREFIX, PI_CODEX_MODEL_PREFIX, type SeatId, type SeatModelEntryV1, type SeatRuntime } from './seats-settings';
 import type { QuotaAccount } from './quota';
 
 export const LOGICAL_MODEL_IDS = [
@@ -13,6 +13,7 @@ export const LOGICAL_MODEL_IDS = [
   'terra',
   'luna',
   'glm-5.3-flash',
+  'glm-5.4',
   'deepseek-v4.1-flash',
 ] as const;
 
@@ -28,6 +29,7 @@ export type LogicalModelPlane =
   | 'council'
   | 'worker-opus'
   | 'worker-neon'
+  | 'worker-neon-deep'
   | 'worker-deep'
   | 'worker'
   | 'worker-light'
@@ -98,7 +100,7 @@ export const MODEL_CATALOG: Readonly<Record<LogicalModelId, LogicalModelEntry>> 
     account: 'agy_gemini',
     magpie: route('pi', `${PI_AGY_MODEL_PREFIX}gemini-4-neon`, 'xhigh'),
     native: route('agy', 'gemini-4-neon-high', null),
-    planes: ['advisor', 'worker-neon'],
+    planes: ['advisor', 'worker-neon', 'worker-neon-deep'],
   }),
   hydrogen: defineModel({
     id: 'hydrogen',
@@ -148,6 +150,14 @@ export const MODEL_CATALOG: Readonly<Record<LogicalModelId, LogicalModelEntry>> 
     native: null,
     planes: ['worker-light', 'gatekeeper-fallback', 'explorer'],
   }),
+  'glm-5.4': defineModel({
+    id: 'glm-5.4',
+    family: 'zhipu',
+    account: 'flash_api',
+    magpie: route('pi', 'magpie/zcode/GLM-5.4', null),
+    native: null,
+    planes: ['worker-light', 'reviewer', 'gatekeeper-fallback'],
+  }),
   'deepseek-v4.1-flash': defineModel({
     id: 'deepseek-v4.1-flash',
     family: 'deepseek',
@@ -170,11 +180,13 @@ export function catalogEntry(id: LogicalModelId, routeKind: TransportPreset): Se
   return Object.freeze({ runtime: resolved.runtime, model: resolved.model });
 }
 
+export const AGY_NEON_XHIGH_ENTRY: SeatModelEntryV1 = Object.freeze({ runtime: 'agy', model: AGY_NEON_XHIGH_MODEL });
+
 export const AGY_NEON_VARIANTS: readonly SeatModelEntryV1[] = Object.freeze([
   Object.freeze({ runtime: 'agy', model: 'gemini-4-neon-low' }),
   Object.freeze({ runtime: 'agy', model: 'gemini-4-neon-medium' }),
   catalogEntry('neon', 'native'),
-  Object.freeze({ runtime: 'agy', model: 'gemini-4-neon-xhigh' }),
+  AGY_NEON_XHIGH_ENTRY,
 ]);
 
 export const AGY_HYDROGEN_ENTRY: SeatModelEntryV1 = catalogEntry('hydrogen', 'native');

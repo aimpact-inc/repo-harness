@@ -81,6 +81,7 @@ const SEAT_ACCESS: { readonly [seat in SeatId]: Omit<SeatRangeV1, 'models'> } = 
   'worker-deep': { fleet: ALLOWED_SEAT_FLEET_ROLES['worker-deep'], tools: SEAT_TOOLS },
   'worker-opus': { fleet: ALLOWED_SEAT_FLEET_ROLES['worker-opus'], tools: SEAT_TOOLS },
   'worker-neon': { fleet: ALLOWED_SEAT_FLEET_ROLES['worker-neon'], tools: SEAT_TOOLS },
+  'worker-neon-deep': { fleet: ALLOWED_SEAT_FLEET_ROLES['worker-neon-deep'], tools: SEAT_TOOLS },
   'worker-light': { fleet: ALLOWED_SEAT_FLEET_ROLES['worker-light'], tools: SEAT_TOOLS },
   gatekeeper: { fleet: ALLOWED_SEAT_FLEET_ROLES.gatekeeper, tools: ['net', 'read', 'shell'] },
   'gatekeeper-fallback': { fleet: ALLOWED_SEAT_FLEET_ROLES['gatekeeper-fallback'], tools: ['net', 'read', 'shell'] },
@@ -163,6 +164,14 @@ function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly str
   if (tool !== undefined) throw new SeatsConfigurationError('seat_tool_not_allowed', `The ${id} seat cannot have the ${tool} tool group.`);
   const role = seat.fleet.find(name => !runtime.fleet || !seatTakesFleet(seat) || !range.fleet.includes(name));
   if (role !== undefined) throw new SeatsConfigurationError('seat_fleet_not_allowed', `The ${id} seat on ${seat.runtime} cannot call the ${role} sub-agent.`);
+}
+
+export function checkSeatSettingsRanges(seats: SeatsConfigV1, enabledRuntimes: readonly string[], ids: readonly SeatId[] = SEAT_IDS): void {
+  for (const id of ids) {
+    const seat = seats[id];
+    if (seat !== null) checkSeat(id, seat, enabledRuntimes);
+  }
+  checkSeatRoutingModels(seats.routing);
 }
 
 const SEAT_POOL_MEMBER_MS = 15_000;
@@ -487,12 +496,7 @@ export function applySeatsSettings(
 ): SeatsSettingsResultV1 {
   try {
     const result = mutateGlobalConfiguration(env, (config) => {
-      const enabled = enabledRuntimesOf(config);
-      for (const id of SEAT_IDS) {
-        const seat = request.seats[id];
-        if (seat !== null) checkSeat(id, seat, enabled);
-      }
-      checkSeatRoutingModels(request.seats.routing);
+      checkSeatSettingsRanges(request.seats, enabledRuntimesOf(config));
       // One decoder for the read path and the save (#2917): a candidate that `rh quota` or `rh seats argv` would refuse is never written.
       const next = decodeSeatsSection(request.seats);
       const changed = changedKeys(decodeSeatsSection(config.seats), next);

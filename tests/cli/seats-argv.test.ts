@@ -396,6 +396,16 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     expect(configured[configured.indexOf("--effort") + 1]).toBe("xhigh");
   }));
 
+  test('worker-neon-deep launches the native Neon xhigh preset', withAgySeat(f => {
+    f.configure(AGY_ADVISOR, true, { 'worker-neon-deep': NATIVE_SEATS_PRESET['worker-neon-deep'] });
+    f.catalog([{ id: 'gemini-4-neon', efforts: ['high', 'xhigh'] }]);
+    const result = f.run(['argv', 'worker-neon-deep', '--json']);
+    expect(result.status, result.stderr).toBe(0);
+    const { runtime, argv } = JSON.parse(result.stdout);
+    expect(runtime).toBe('agy');
+    expect(argv[argv.indexOf('--model') + 1]).toBe('gemini-4-neon-xhigh');
+  }));
+
   test("native agy worker without Gemini uses the agy_other account before launch", withAgySeat(f => {
     const model = "claude-opus-5-5-high";
     f.configure(AGY_ADVISOR, true, { worker: { ...AGY_WORKER, model } });
@@ -748,7 +758,11 @@ describe("rh seats argv", () => {
         const result = run(registryEnv(home), [seat, "--repository-id", "1", "--issue", "1925", "--parent", "1924", "--json"], repo);
         expect(result.status, result.stderr).toBe(0);
         const value = JSON.parse(result.stdout);
-        expect(value.runtime).toBe(seats[seat].runtime);
+        expect(value.runtime).toBe(seats[seat]?.runtime);
+        if (seat === 'worker-neon-deep') {
+          const modelArgs = value.argv.indexOf('--provider');
+          expect(value.argv.slice(modelArgs, modelArgs + 6)).toEqual(['--provider', 'magpie', '--model', 'agy-cli/gemini-4-neon', '--thinking', 'xhigh']);
+        }
         expect(value.brief).toContain("You are a worker seat.");
         expect(value.labels).toContain(`repo-harness.seat=${seat}`);
         expect([value.name, value.tab]).toEqual(["rh-w-1925", "#1924"]);
@@ -779,7 +793,7 @@ describe("rh seats argv", () => {
       }
       const retired = argv(home, "gatekeeper-deep", "--pr", "1925", "--json");
       expect([retired.status, JSON.parse(retired.stderr).error]).toEqual([1, "seat_unknown"]);
-      expect(LAUNCH_SEAT_IDS).toEqual(["orchestrator", "advisor", "council", "worker", "worker-deep", "worker-opus", "worker-neon", "worker-light", "gatekeeper", "reviewer"]);
+      expect(LAUNCH_SEAT_IDS).toEqual(["orchestrator", "advisor", "council", "worker", "worker-deep", "worker-opus", "worker-neon", "worker-neon-deep", "worker-light", "gatekeeper", "reviewer"]);
     }));
   });
 
