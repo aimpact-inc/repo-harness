@@ -767,7 +767,7 @@ describe('seat settings contract without transport', () => {
     const agents = { ...PANE_AGENTS, enabled: ['claude', 'codex'] };
     const originalSeats = { orchestrator: DEFAULT_SEATS_CONFIG.orchestrator, advisor: { ...DEFAULT_SEATS_CONFIG.advisor, runtime: 'claude' as const, model: 'opus' },
       worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex' as const, model: 'gpt-6.1-sol' },
-      'worker-light': DEFAULT_SEATS_CONFIG['worker-light'] };
+      'worker-neon-deep': null, 'worker-light': DEFAULT_SEATS_CONFIG['worker-light'] };
     writeFileSync(path, JSON.stringify({ agents, security: { mode: 'strict' }, seats: originalSeats }));
     const env = { HOME: home };
     expect(() => readSeatsSettings(env)).toThrow(expect.objectContaining({ code: 'seats_config_migration_required' }));

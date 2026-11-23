@@ -16,7 +16,7 @@ import { architecturePort, isArchitectureUnavailable } from '../../core/architec
 import { globalConfigurationWriter, mutateGlobalConfiguration } from '../../effects/configuration/global-configuration';
 import { DEFAULT_SEATS_CONFIG, INTRODUCED_ROUTING_DEFAULTS, ROUTING_CLASSES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, migrateLegacySeatsRecord, neonDeepSeatStarter, seatModelShapeValid, stripRetiredSeatFleetRoles } from '../../core/board/seats-settings';
 import { isRecord } from '../../core/evidence/is-record';
-import { checkSeatSettingsRanges, enabledRuntimesOf, seatsRanges } from '../../effects/board/seats-configuration';
+import { checkSeatRoutingModels, checkSeatSettingsRanges, enabledRuntimesOf, seatsRanges } from '../../effects/board/seats-configuration';
 import { chmodSync, closeSync, constants, cpSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync } from "fs";
 import { syncDirectoryDurably, writeAllSync } from '../../effects/atomic-append';
 import { renderJsonObjectUpdate } from "../../effects/adoption/standard-plan";
@@ -1795,8 +1795,8 @@ export function migrateSeatsConfiguration(env: NodeJS.ProcessEnv, runtimeLock?: 
     const base = { ...introduced, 'worker-neon-deep': neonDeep, 'worker-light': null, ...stored };
     const effectiveRouting = routing ?? seatMigrationRoutingDefaults(base['worker-neon-deep'] !== null, base['worker-light'] !== null);
     const seats = decodeSeatsConfig({ ...base, routing: effectiveRouting });
-    // Validate the new seat with the same ranges as the Settings save. Keep legacy seat migrations independent of current host enablement.
-    checkSeatSettingsRanges(seats, enabled, addsNeonDeep ? ['worker-neon-deep'] : []);
+    if (addsNeonDeep) checkSeatSettingsRanges(seats, enabled);
+    else checkSeatRoutingModels(seats.routing);
     return { config: { ...config, seats }, value: true };
   }, { runtimeLock, beforeWrite }).value;
 }

@@ -166,8 +166,8 @@ function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly str
   if (role !== undefined) throw new SeatsConfigurationError('seat_fleet_not_allowed', `The ${id} seat on ${seat.runtime} cannot call the ${role} sub-agent.`);
 }
 
-export function checkSeatSettingsRanges(seats: SeatsConfigV1, enabledRuntimes: readonly string[], ids: readonly SeatId[] = SEAT_IDS): void {
-  for (const id of ids) {
+export function checkSeatSettingsRanges(seats: SeatsConfigV1, enabledRuntimes: readonly string[]): void {
+  for (const id of SEAT_IDS) {
     const seat = seats[id];
     if (seat !== null) checkSeat(id, seat, enabledRuntimes);
   }
