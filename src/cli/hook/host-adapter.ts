@@ -3,6 +3,7 @@ import { devNull } from 'os';
 import { dirname, isAbsolute, join } from 'path';
 import { WORKFLOW_CONTRACT_MARKER_PATH } from '../../core/adoption/minimum-harness-version';
 import { shellQuote } from '../../core/shell-quote';
+import { ANTIGRAVITY_BRAIN_ROOTS } from '../../effects/board/antigravity-transcript';
 import { HookPayloadError, parseHookPayload, payloadString, payloadValue, type HookPayload } from './hook-input';
 import { HOST_RENDERERS, type HookOutcome, type HostOutput } from './hook-protocol';
 import type { HookEvent, Route, RouteHost, RouteId } from './route-registry';
@@ -32,11 +33,7 @@ function legacyAdapter(host: keyof typeof HOST_RENDERERS, capabilities: Partial<
 
 export const ANTIGRAVITY_GUARD_DENIAL = 'rh hook: the tool call is refused';
 export const ANTIGRAVITY_HANDOFF = 'Write your handoff now. The orchestrator relaunches this seat with rh seats launch.';
-export const ANTIGRAVITY_BRAIN_ROOTS = [
-  '.gemini/antigravity/brain',
-  '.gemini/antigravity-cli/brain',
-  '.gemini/antigravity-ide/brain',
-] as const;
+export { ANTIGRAVITY_BRAIN_ROOTS };
 
 const ANTIGRAVITY_TOOLS = {
   bash: { run_command: 'Bash' },
