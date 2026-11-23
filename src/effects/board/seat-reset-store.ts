@@ -1,8 +1,8 @@
 import { sha256Hex } from '../../core/evidence/sha256';
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'fs';
-import { dirname } from 'path';
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'fs';
+import { dirname, join, relative } from 'path';
 import {
-  isSeatResetAction, missingHandoffSections, seatResetLogPath, seatResetRequestPath, isSeatSessionSource, seatSessionPath,
+  isSeatResetAction, missingHandoffSections, seatHandoffPath, seatResetLogPath, seatResetRequestPath, isSeatSessionSource, seatSessionPath,
   type InteractiveResetHost, type SeatLaunchModel, type SeatResetAction, type SeatResetIdentity, type SeatSessionSource,
 } from '../../core/board/seat-reset';
 import { withAntigravityTranscript } from './antigravity-transcript';
@@ -86,6 +86,27 @@ export function writeSeatResetRequest(identity: SeatResetIdentity, now: Date, re
     requested_at: now.toISOString(), context_tokens: request.contextTokens, transcript_path: request.transcriptPath,
     action: request.action, transcript_bytes: request.transcriptBytes, host: request.host ?? 'claude',
   })}\n`);
+}
+
+/** Replace only the current seat's handoff and return the digest of the bytes written. */
+export function writeSeatHandoff(identity: SeatResetIdentity, markdown: Buffer): string {
+  const missing = missingHandoffSections(markdown.toString('utf8'));
+  if (missing.length > 0) throw new Error(`Missing handoff sections: ${missing.join(', ')}.`);
+  const path = seatHandoffPath(identity);
+  const directory = dirname(path);
+  if (realpathSync(directory) !== join(realpathSync('/tmp'), relative('/tmp', directory))) {
+    throw new Error('The seat handoff directory has a symbolic link.');
+  }
+  if (lstatSync(path, { throwIfNoEntry: false })?.isFile() === false) throw new Error('The seat handoff path is not a regular file.');
+  const temporaryDirectory = mkdtempSync(join(directory, '.handoff-'));
+  const temporary = join(temporaryDirectory, 'handoff.md');
+  try {
+    writeFileSync(temporary, markdown, { mode: 0o600, flag: 'wx' });
+    renameSync(temporary, path);
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+  return `RESET-REQUEST ${path} ${sha256Hex(markdown)}`;
 }
 
 function seatResetEvents(identity: SeatResetIdentity, requestedAt: string): Record<string, unknown>[] {

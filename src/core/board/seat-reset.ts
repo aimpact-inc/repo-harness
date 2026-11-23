@@ -93,8 +93,13 @@ export function isSeatSessionSource(value: unknown): value is SeatSessionSource 
 export const seatSessionPath = (identity: SeatResetIdentity): string => `${seatResetDirectory(identity)}/session.json`;
 /** One JSON line per reset failure. It is the only record of the rewrite and resend counts. */
 export const seatResetLogPath = (identity: SeatResetIdentity): string => `${seatResetDirectory(identity)}/reset-log.jsonl`;
-/** Created once with an exclusive create before `/compact` or `/clear`: no second run acts on the same request. */
-export const seatResetClaimPath = (identity: SeatResetIdentity, requestedAt: string): string => `${seatResetDirectory(identity)}/claim-${requestedAt.replace(/\D/gu, '')}`;
+const requestTimestamp = (requestedAt: string): string => requestedAt.replace(/\D/gu, '');
+
+/** Created once with an exclusive create before processing the handoff. */
+export const seatResetClaimPath = (identity: SeatResetIdentity, requestedAt: string): string => `${seatResetDirectory(identity)}/claim-${requestTimestamp(requestedAt)}`;
+export const seatResetRelaunchPath = (identity: SeatResetIdentity, requestedAt: string): string => `${seatResetDirectory(identity)}/relaunch-${requestTimestamp(requestedAt)}.sh`;
+
+export const SEAT_HANDOFF_WRITE_COMMAND = 'rh seats handoff --write';
 
 /** At most this many handoff rewrites and resume prompt resends per request. */
 export const SEAT_RESET_RETRIES = 3;
@@ -147,12 +152,22 @@ export function seatResetSteps(identity: SeatResetIdentity, action: SeatResetAct
     ? `types ${seatExitCommand(host)} and relaunches this seat in the same pane.`
     : `types ${seatResetCommand(action, host)} in this session.`;
   const noPeer = host === 'antigravity' ? '.' : `: ${autoCompactionNotice(host)}`;
+  const write = host === 'antigravity'
+    ? [
+      `1. Fill in the sections below. Pass the completed Markdown to \`${SEAT_HANDOFF_WRITE_COMMAND}\` using a quoted heredoc.`,
+      '',
+      `\`\`\`sh\n${SEAT_HANDOFF_WRITE_COMMAND} <<'RH_HANDOFF'\n${seatHandoffTemplate()}RH_HANDOFF\n\`\`\``,
+      '2. Copy the RESET-REQUEST line printed by the command. It contains the handoff path and SHA-256.',
+    ]
+    : [
+      `1. Write the handoff to ${path} with exactly these sections:`,
+      '',
+      seatHandoffTemplate(),
+      `2. Take its sha256 with \`shasum -a 256 ${path}\`.`,
+    ];
   return [
     '0. Finish the planning and the dispatch that you have in hand. Start nothing new. Then write the handoff.',
-    `1. Write the handoff to ${path} with exactly these sections:`,
-    '',
-    seatHandoffTemplate(),
-    `2. Take its sha256 with \`shasum -a 256 ${path}\`.`,
+    ...write,
     `3. Send \`RESET-REQUEST ${path} <sha256>\` to the ${peer} seat (repo-harness.seat=${peer}) with hc send, then end your turn. The ${peer} seat ${reset}`,
     `On REWRITE, write the handoff again and send RESET-REQUEST again. On NO-RESET, continue.`,
     `When the ${peer} seat is missing or does not answer, continue without a reset${noPeer}`,
@@ -179,8 +194,9 @@ export function seatResumePrompt(identity: SeatResetIdentity, peerAddress: strin
 }
 
 /** The message to the requester when its handoff fails a check. */
-export function seatRewriteMessage(identity: SeatResetIdentity, problem: string, attempt: number): string {
-  return `REWRITE ${attempt}/${SEAT_RESET_RETRIES}: ${problem} Write ${seatHandoffPath(identity)} again and send RESET-REQUEST again.`;
+export function seatRewriteMessage(identity: SeatResetIdentity, problem: string, attempt: number, host: InteractiveResetHost): string {
+  const write = host === 'antigravity' ? `Run \`${SEAT_HANDOFF_WRITE_COMMAND}\` with the corrected Markdown on stdin.` : `Write ${seatHandoffPath(identity)} again.`;
+  return `REWRITE ${attempt}/${SEAT_RESET_RETRIES}: ${problem} ${write} Send RESET-REQUEST again.`;
 }
 
 /** The message that releases the requester with no reset: it continues, and auto-compaction handles the context. */

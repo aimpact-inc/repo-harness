@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "os";
 import { basename, delimiter, dirname, join } from "path";
 import { AGY_READONLY_COMMAND_PREFIXES, AGY_WORKER_COMMAND_PREFIXES, agySeatCommandRules, agySeatLimits, buildSeatLaunch, seatPaneName } from "../../src/core/board/seat-launch";
-import { HANDOFF_SECTIONS, seatResetReason, seatResetSteps } from "../../src/core/board/seat-reset";
+import { HANDOFF_SECTIONS, seatHandoffPath, seatResetReason, seatResetRelaunchPath, seatResetRequestPath, seatResetSteps } from "../../src/core/board/seat-reset";
 import { SeatResetError, readSeatSession, recordSeatSession, runSeatReset, type SeatRelaunch, type SeatResetNotify, type SeatResetOptions } from "../../src/effects/board/seat-reset";
 import { seatHandoff, seatResetLaunch, seatResetTarget } from "../../src/cli/commands/seats";
 import { AGY_ADVISOR_SEAT_TOOLS, DEFAULT_SEATS_CONFIG, LAUNCH_SEAT_IDS, NATIVE_SEATS_PRESET, WORKER_SEAT_IDS, isCouncilSeat, isReviewSeat, isWorkerSeat } from "../../src/core/board/seats-settings";
@@ -349,6 +349,47 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
       "command(npm publish)", "command(bun publish)",
     ]);
   }));
+
+  test.each(["advisor", "orchestrator"] as const)("the generated agy %s profile can write and hash a handoff through its CLI", seat => withAgySeat(f => {
+    const advisor = { ...AGY_ADVISOR, tools: AGY_ADVISOR.tools.filter(tool => tool !== "edit") };
+    f.configure(advisor, true, { orchestrator: AGY_ORCHESTRATOR });
+    const repository = String(9_400_000_000 + process.pid * 10 + Number(seat === "advisor"));
+    const identity = { seat, repository };
+    const handoff = seatHandoffPath(identity);
+    const request = seatResetRequestPath(identity);
+    try {
+      const launch = f.run(["argv", seat, "--repository-id", repository, "--json"]);
+      expect(launch.status, launch.stderr).toBe(0);
+      const argv = agent(JSON.parse(launch.stdout));
+      const { permissions } = JSON.parse(argv[argv.indexOf("--settings") + 1]);
+      expect(permissions.allow).toContain("command(rh seats handoff)");
+      expect(permissions.deny).not.toContain("command(rh seats handoff)");
+      const profile = readFileSync(join(argv[argv.indexOf("--add-dir") + 1], ".agents", "agents", `rh-${seat}`, "agent.md"), "utf8");
+      expect(profile).not.toMatch(/^tools:.*\b(?:write_file|edit_file)\b/mu);
+      const env = { ...f.env, ...Object.fromEntries(argv.filter(value => /^REPO_HARNESS_SEAT(?:_REPOSITORY)?=/u.test(value)).map(value => value.split("="))) };
+      const transcript = join(f.home, ".gemini", "antigravity-cli", "brain", "handoff-fixture", ".system_generated", "logs", "transcript.jsonl");
+      mkdirSync(dirname(transcript), { recursive: true });
+      writeFileSync(transcript, '{"type":"PLANNER_RESPONSE","input_tokens":100}\n');
+      recordSeatSession(identity, { host: "antigravity", sessionId: "handoff-fixture", transcriptPath: transcript,
+        source: "startup", model: null, effort: null }, new Date(0));
+      writeFileSync(join(f.home, "bin", "rh"), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(CLI)} "$@"\n`, { mode: 0o755 });
+      const runHandoff = (command: string) => spawnSync("/bin/sh", ["-c", command], { env, cwd: f.cwd, encoding: "utf8" });
+      const steps = runHandoff("rh seats handoff");
+      expect(steps.status, steps.stderr).toBe(0);
+      const heredoc = steps.stdout.match(/rh seats handoff --write <<'RH_HANDOFF'\n[\s\S]*?\nRH_HANDOFF/u)?.[0];
+      expect(heredoc).toBeDefined();
+      const recorded = readFileSync(request, "utf8");
+      const command = heredoc!.replaceAll("<fill in>", "Current state includes a literal $(exit 9).");
+      const body = command.split("\n").slice(1, -1).join("\n") + "\n";
+      const write = runHandoff(command);
+      expect(write.status, write.stderr).toBe(0);
+      expect(readFileSync(handoff, "utf8")).toBe(body);
+      expect(write.stdout).toBe(`RESET-REQUEST ${handoff} ${createHash("sha256").update(body).digest("hex")}\n`);
+      expect(readFileSync(request, "utf8")).toBe(recorded);
+    } finally {
+      rmSync(dirname(dirname(handoff)), { recursive: true, force: true });
+    }
+  })());
 
   test.each(["missing", "unsupported", "signed out", "unknown", "model absent", "effort mismatch", "outside opt-in", "guard absent", "host disabled", "gatekeeper", "reviewer"])("agy refuses %s before any agent projection or tab", (branch) => withAgySeat(f => {
     let cwd = f.cwd;
@@ -1904,7 +1945,7 @@ describe("rh seats reset (#1972)", () => {
    */
   function withReset(fn: (f: { handoff: string; body: string; sha: (text: string) => string; state: (patch: Record<string, unknown>) => void;
     reset: (input?: ResetInput) => Promise<unknown>;
-    home: string; sends: () => string[]; calls: () => string[]; log: () => { kind: string; detail: string; notice: string; requested_at: string }[] }) => Promise<void>, seat: "advisor" | "orchestrator" = "advisor") {
+    home: string; relaunchPath: () => string; sends: () => string[]; calls: () => string[]; log: () => { kind: string; detail: string; notice: string; requested_at: string }[] }) => Promise<void>, seat: "advisor" | "orchestrator" = "advisor") {
     return async () => {
       const home = mkdtempSync(join(tmpdir(), "seats-reset-"));
       // The handoff path is fixed under /tmp; a repository id per run keeps the runs apart.
@@ -2055,7 +2096,8 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
           : line.slice("keys -- t5 ".length).split(" ").filter(key => key !== "enter").map(key => (key === "space" ? " " : key)).join("")));
         const log = () => existsSync(join(dir, "reset-log.jsonl"))
           ? readFileSync(join(dir, "reset-log.jsonl"), "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line)) : [];
-        await fn({ home, handoff, body, sha, state, reset, sends, calls, log });
+        const relaunchPath = () => seatResetRelaunchPath({ seat, repository }, new Date(requestedAt).toISOString());
+        await fn({ home, handoff, body, sha, state, reset, sends, calls, log, relaunchPath });
       } finally {
         chmodSync(dir, 0o700);
         rmSync(join("/tmp/repo-harness-seats", repository), { recursive: true, force: true });
@@ -2068,7 +2110,7 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
 
   test.each([
     ["antigravity", "agy", "reset"], ["claude", "claude", "reset"], ["pi", "pi", "compact"],
-  ] as const)("a %s %s foreground refuses a configured runtime change on %s", (host, foreground, action) => withReset(async ({ handoff, reset, state, sends, log }) => {
+  ] as const)("a %s %s foreground refuses a configured runtime change on %s", (host, foreground, action) => withReset(async ({ handoff, reset, state, sends, log, relaunchPath }) => {
     state({ foreground, host });
     const runtime = host === "antigravity" ? "claude" : "agy";
     const model = () => { throw new Error("Unexpected model probe"); };
@@ -2078,7 +2120,7 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     });
     expect(log().at(-1)).toMatchObject({ kind: "seat_reset_runtime_changed", detail: expect.stringContaining("rh seats launch advisor") });
     expect(sends()).toEqual([]);
-    expect(existsSync(join(dirname(handoff), "relaunch.sh"))).toBe(false);
+    expect(existsSync(relaunchPath())).toBe(false);
     expect(readdirSync(dirname(handoff)).some(name => name.startsWith("claim-"))).toBe(false);
   })());
 
@@ -2116,6 +2158,34 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     const resolveLaunch = () => ({ runtime: "pi" as const, model: async () => { throw new Error("Unexpected model probe"); } });
     expect(await reset({ resolveLaunch })).toEqual({ error: "seat_reset_runtime_changed", outcome: "nothing_sent" });
     expect(sends()).toEqual([]);
+  }));
+
+  test("overlapping agy preparations keep each claimed request's relaunch script separate", withReset(async ({ handoff, reset, state, sends, relaunchPath }) => {
+    state({ foreground: "agy", host: "antigravity", status: agyStatus });
+    const olderEntered = Promise.withResolvers<void>();
+    const newerEntered = Promise.withResolvers<void>();
+    const older = Promise.withResolvers<SeatRelaunch>();
+    const newer = Promise.withResolvers<SeatRelaunch>();
+    const oldScript = relaunchPath();
+    const first = reset({ host: "antigravity", relaunch: () => {
+      olderEntered.resolve();
+      return older.promise;
+    } });
+    await Promise.race([olderEntered.promise, first.then(result => { throw new Error(`Older run stopped before preparation: ${JSON.stringify(result)}`); })]);
+    const second = reset({ host: "antigravity", fresh: true, relaunch: () => {
+      newerEntered.resolve();
+      return newer.promise;
+    } });
+    await Promise.race([newerEntered.promise, second.then(result => { throw new Error(`Newer run stopped before preparation: ${JSON.stringify(result)}`); })]);
+    const newScript = relaunchPath();
+    const plan = { runtime: "agy", model: null, effort: null, modeKnown: true } as const;
+    newer.resolve({ ...plan, argv: ["agy", "--model", "new"] });
+    expect(await second).toMatchObject({ relaunched: true });
+    older.resolve({ ...plan, argv: ["agy", "--model", "old"] });
+    expect(await first).toEqual({ error: "request_closed", outcome: "nothing_sent" });
+    expect(sends()).toEqual(["/exit", `sh ${newScript}`, prompt(handoff)]);
+    expect(readFileSync(newScript, "utf8")).toBe("exec agy --model new\n");
+    expect(readFileSync(oldScript, "utf8")).toBe("exec agy --model old\n");
   }));
 
   test("an agy requester stays running when agy is unavailable on the launch PATH", withReset(async ({ home, reset, state, sends, log }) => {
@@ -2177,14 +2247,14 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     expect(sends()).toEqual([]);
   }));
 
-  test("an agy request can retry after a blocked turn refuses the exit command", withReset(async ({ handoff, reset, state, sends }) => {
+  test("an agy request can retry after a blocked turn refuses the exit command", withReset(async ({ handoff, reset, state, sends, relaunchPath }) => {
     state({ foreground: "agy", host: "antigravity", status: agyStatus, wait: { ...ended, status: "blocked" } });
     expect(await reset({ host: "antigravity" })).toEqual({ error: "requester_busy", outcome: "nothing_sent" });
     expect(sends()).toEqual([]);
     expect(readdirSync(dirname(handoff)).some(name => name.startsWith("claim-"))).toBe(false);
     state({ wait: ended });
     expect(await reset({ host: "antigravity" })).toEqual({ requester: "t5", seat: "advisor", relaunched: true, logErrors: [] });
-    expect(sends()).toEqual(["/exit", `sh ${join(dirname(handoff), "relaunch.sh")}`, prompt(handoff)]);
+    expect(sends()).toEqual(["/exit", `sh ${relaunchPath()}`, prompt(handoff)]);
     expect(await reset({ host: "antigravity" })).toEqual({ error: "already_claimed", outcome: "nothing_sent" });
   }));
 
@@ -2204,10 +2274,10 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     expect(sends()).toEqual([]);
   })());
 
-  test("an agy orchestrator relaunches in the same pane and verifies RESUMED", withReset(async ({ handoff, reset, state, sends, log }) => {
+  test("an agy orchestrator relaunches in the same pane and verifies RESUMED", withReset(async ({ handoff, reset, state, sends, log, relaunchPath }) => {
     state({ foreground: "agy", host: "antigravity", status: agyStatus });
     expect(await reset({ host: "antigravity" })).toEqual({ requester: "t5", seat: "orchestrator", relaunched: true, logErrors: [] });
-    expect(sends()).toEqual(["/exit", `sh ${join(dirname(handoff), "relaunch.sh")}`, prompt(handoff, "orchestrator")]);
+    expect(sends()).toEqual(["/exit", `sh ${relaunchPath()}`, prompt(handoff, "orchestrator")]);
     expect(log()[0]).toMatchObject({ kind: "reset", detail: "relaunched" });
   }, "orchestrator"));
 
@@ -2261,7 +2331,7 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
       expect(JSON.parse(readFileSync(request, "utf8"))).toMatchObject({ host: "antigravity", action: "reset", context_tokens: 120, transcript_path: transcript });
     }, seat)());
 
-  test("a Pi advisor with foreground name node and argv[0] pi resets with /new and relaunches with /quit", withReset(async ({ home, handoff, reset, state, calls, sends, log }) => {
+  test("a Pi advisor with foreground name node and argv[0] pi resets with /new and relaunches with /quit", withReset(async ({ home, handoff, reset, state, calls, sends, log, relaunchPath }) => {
     const directory = dirname(handoff);
     state({ foreground: 'node', host: 'pi', status: { state: 'done', app: 'pi' } });
     const before = () => {
@@ -2276,7 +2346,7 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
 
     state({ signal: false });
     expect(await reset({ before, fresh: true })).toEqual({ requester: 't5', seat: 'advisor', relaunched: true, logErrors: [] });
-    const script = join(directory, 'relaunch.sh');
+    const script = relaunchPath();
     expect(sends().slice(-7)).toEqual([...Array(4).fill('/new'), '/quit', `sh ${script}`, prompt(handoff)]);
     expect(log().at(-1)).toMatchObject({ kind: 'reset', detail: 'relaunched' });
   }));
@@ -2322,14 +2392,14 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     expect(calls()).toEqual(["wait --timeout 600 -- t5", "wait --timeout 600 -- t5", "keys -- t5 / c l e a r enter", `send -- t5 ${prompt(handoff)}`]);
   }));
 
-  test("a message to the caller during the relaunch wait gets the rest of the budget and the relaunch goes on (#2326)", withReset(async ({ handoff, reset, state, calls, sends }) => {
+  test("a message to the caller during the relaunch wait gets the rest of the budget and the relaunch goes on (#2326)", withReset(async ({ handoff, reset, state, calls, sends, relaunchPath }) => {
     state({ signal: false, waitDelayAt: 2, waitDelayMs: 1200, wait: [ended, { ...ended, ended: false, reason: "message" }, ended] });
     expect(await reset()).toEqual({ requester: "t5", seat: "advisor", relaunched: true, logErrors: [] });
     const waits = calls().filter(line => line.startsWith("wait "));
     // The first wait of the relaunch ends on a message to the caller; the second gets the rest of the 600 s budget.
     const rest = Number(waits[2]?.split(" ")[2]);
     expect([waits.length, waits[1], rest !== undefined && rest > 590 && rest < 600]).toEqual([3, "wait --timeout 600 -- t5", true]);
-    const script = join(dirname(handoff), "relaunch.sh");
+    const script = relaunchPath();
     expect(sends()).toEqual([...Array(4).fill("/clear"), "/exit", `sh ${script}`, prompt(handoff)]);
   }));
 
@@ -2447,10 +2517,10 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     expect(log().at(-1)).toMatchObject({ kind: "no_reset", detail: "request_invalid" });
   }));
 
-  test("an unanswered compact prompt is sent 3 more times, then the relaunch sends the prompt with the state check (#2625)", withReset(async ({ handoff, reset, state, sends, log }) => {
+  test("an unanswered compact prompt is sent 3 more times, then the relaunch sends the prompt with the state check (#2625)", withReset(async ({ handoff, reset, state, sends, log, relaunchPath }) => {
     state({ evidenceFrom: 5 });
     expect(await reset({ action: "compact" })).toEqual({ requester: "t5", seat: "advisor", relaunched: true, logErrors: [] });
-    expect(sends()).toEqual(["/compact", ...Array(4).fill(compactPrompt(handoff)), "/exit", `sh ${join(dirname(handoff), "relaunch.sh")}`, prompt(handoff)]);
+    expect(sends()).toEqual(["/compact", ...Array(4).fill(compactPrompt(handoff)), "/exit", `sh ${relaunchPath()}`, prompt(handoff)]);
     expect(log().map(({ kind, detail }) => [kind, detail])).toEqual([...Array(4).fill(["resume", "no_evidence"]), ["reset", "relaunched"]]);
   }));
 
@@ -2473,10 +2543,10 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     expect([sends(), log().map(({ kind, detail }) => [kind, detail])]).toEqual([["/clear", prompt(handoff), prompt(handoff)], [["resume", "no_evidence"], ["reset", "cleared"]]]);
   }));
 
-  test("a prompt that is never answered with RESUMED is sent 3 more times, then the requester is relaunched", withReset(async ({ handoff, reset, state, sends, log }) => {
+  test("a prompt that is never answered with RESUMED is sent 3 more times, then the requester is relaunched", withReset(async ({ handoff, reset, state, sends, log, relaunchPath }) => {
     state({ evidenceFrom: 5 });
     expect(await reset()).toEqual({ requester: "t5", seat: "advisor", relaunched: true, logErrors: [] });
-    expect(sends()).toEqual(["/clear", ...Array(4).fill(prompt(handoff)), "/exit", `sh ${join(dirname(handoff), "relaunch.sh")}`, prompt(handoff)]);
+    expect(sends()).toEqual(["/clear", ...Array(4).fill(prompt(handoff)), "/exit", `sh ${relaunchPath()}`, prompt(handoff)]);
     expect(log().map(({ kind, detail }) => [kind, detail])).toEqual([...Array(4).fill(["resume", "no_evidence"]), ["reset", "relaunched"]]);
   }));
 
@@ -2515,14 +2585,14 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     expect([sends(), log().map(({ kind, detail }) => [kind, detail])]).toEqual([["/clear", prompt(handoff), prompt(handoff)], [["resume", "no_evidence"], ["reset", "cleared"]]]);
   }));
 
-  test("the relaunch after /clear retries uses the claimed handoff without repeating its digest check", withReset(async ({ handoff, reset, state, sends, log }) => {
+  test("the relaunch after /clear retries uses the claimed handoff without repeating its digest check", withReset(async ({ handoff, reset, state, sends, log, relaunchPath }) => {
     state({ signal: false });
     const relaunch = async () => {
       writeFileSync(handoff, "## Updated during recovery\n");
       return { argv: ["/bin/sh", "-c", "exec claude", "x y"], runtime: "claude" as const, model: "fable", effort: "high", modeKnown: true };
     };
     expect(await reset({ relaunch })).toEqual({ requester: "t5", seat: "advisor", relaunched: true, logErrors: [] });
-    const script = join(dirname(handoff), "relaunch.sh");
+    const script = relaunchPath();
     expect(sends()).toEqual([...Array(4).fill("/clear"), "/exit", `sh ${script}`, prompt(handoff)]);
     expect(readFileSync(script, "utf8")).toBe("exec /bin/sh -c 'exec claude' 'x y'\n");
     expect(log().map(({ kind, detail }) => [kind, detail])).toEqual([...Array(4).fill(["resume", "no_signal"]), ["reset", "relaunched"]]);
@@ -2561,7 +2631,7 @@ else require("node:readline").createInterface({ input: process.stdin }).on("line
     return { env, repo, executable };
   }
 
-  test("a reset from /tmp uses the requesting seat checkout to compare the effective model (#2633, #3279)", withReset(async ({ home, handoff, reset, state, sends, log }) => {
+  test("a reset from /tmp uses the requesting seat checkout to compare the effective model (#2633, #3279)", withReset(async ({ home, handoff, reset, state, sends, log, relaunchPath }) => {
     const dir = dirname(handoff);
     // Each fixture run records a distinct request and a session older than that request.
     const recorded = (model: string) => () => {
@@ -2581,12 +2651,13 @@ else require("node:readline").createInterface({ input: process.stdin }).on("line
     const cleared = { requester: "t5", seat: "advisor", relaunched: false, logErrors: [] };
     expect(await reset({ before: recorded("fable"), resolveLaunch, relaunch })).toEqual(cleared);
     expect(await reset({ before: recorded("opus"), fresh: true, resolveLaunch, relaunch })).toEqual({ ...cleared, relaunched: true });
-    expect(readFileSync(join(dir, "relaunch.sh"), "utf8")).toContain(executable);
+    const script = relaunchPath();
+    expect(readFileSync(script, "utf8")).toContain(executable);
     expect(await reset({ before: recorded("opus"), fresh: true, resolveLaunch: failed, relaunch })).toEqual(cleared);
     capture(31);
     expect(await reset({ before: recorded("fable"), fresh: true, resolveLaunch, relaunch })).toEqual(cleared);
     expect(await reset({ before: recorded("opus"), fresh: true, action: "compact" })).toEqual(cleared);
-    expect(sends()).toEqual(["/clear", prompt(handoff), "/exit", `sh ${join(dir, "relaunch.sh")}`, prompt(handoff), "/clear", prompt(handoff),
+    expect(sends()).toEqual(["/clear", prompt(handoff), "/exit", `sh ${script}`, prompt(handoff), "/clear", prompt(handoff),
       "/clear", prompt(handoff), "/compact", compactPrompt(handoff)]);
     expect(log().map(({ kind, detail }) => [kind, detail])).toEqual([["reset", "cleared"], ["reset", "restarted"],
       ["model_check_failed", "relaunch_argv_failed: The seat account is exhausted"], ["reset", "cleared"],

@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { delimiter, dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { CLAUDE_BUILTIN_AGENT_TYPES, SeatPaneNameError, buildSeatLaunch, seatPaneName, seatTabName, type SeatLaunchV1 } from '../../core/board/seat-launch';
@@ -44,7 +44,7 @@ import { bunGlobalPackageRoot } from '../installer/skill-projection';
 import { PiFleetRolesError, writePiFleetRoles } from '../../effects/board/pi-fleet-roles';
 import { PiShellError, assertPiShell } from '../../effects/board/pi-shell';
 import { MANAGED_AGENTS } from '../../effects/terminal/task-role-profiles';
-import { SeatResetError, readSeatSession, readTranscriptUsage, runSeatReset, writeSeatResetRequest, type SeatRelaunch, type SeatResetNotify, type SeatResetTarget, type TranscriptUsage } from '../../effects/board/seat-reset';
+import { SeatResetError, readSeatSession, readTranscriptUsage, runSeatReset, seatResetRequestState, writeSeatHandoff, writeSeatResetRequest, type SeatRelaunch, type SeatResetNotify, type SeatResetTarget, type TranscriptUsage } from '../../effects/board/seat-reset';
 import { handoffIdentity, seatResetAction, seatResetIdentity, seatResetSteps, type SeatResetIdentity } from '../../core/board/seat-reset';
 import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
 import { COUNCIL_MEMBERS, CouncilConsultError, parseCouncilMembers, type CouncilMember } from '../../core/board/planner-consult';
@@ -60,7 +60,7 @@ const CLI_ENTRY = fileURLToPath(new URL('../index.ts', import.meta.url));
 class SeatsCommandError extends Error {
   constructor(readonly code: 'seat_unknown' | 'seat_not_configured' | 'seat_quota_exhausted' | 'seat_quota_reserved' | 'seat_provider_unavailable' | 'owner_exception_invalid' | 'config_invalid' | 'label_value_invalid' | 'repository_id_required' | 'terminal_unknown' | 'seat_identity_missing' | 'seat_session_unknown' | 'seat_context_unknown' | 'pi_extension_missing' | 'seat_space_missing' | 'seat_tab_failed' | 'seat_tab_unknown'
     | 'seat_runtime_missing' | 'seat_runtime_unsupported' | 'seat_runtime_signed_out' | 'seat_runtime_unknown' | 'seat_model_unavailable'
-    | 'seat_checkout_not_opted_in' | 'antigravity_guard_unready', message: string) {
+    | 'seat_checkout_not_opted_in' | 'antigravity_guard_unready' | 'seat_handoff_request_unavailable' | 'seat_handoff_write_failed', message: string) {
     super(message);
   }
 }
@@ -584,7 +584,7 @@ const labelInput = (options: SeatLabelInput): SeatLabelInput => ({
  * `seats handoff`: an on-demand reset. It records a reset request for the current session, as the Stop hook does at
  * the threshold, so the peer's `seats reset` accepts the handoff, and returns the steps that the hook prints.
  */
-export function seatHandoff(env: NodeJS.ProcessEnv = process.env, now = new Date()): string {
+export function seatHandoff(env: NodeJS.ProcessEnv = process.env, now = new Date(), markdown?: Buffer): string {
   const identity = seatResetIdentity(env);
   if (identity === null) {
     throw new SeatsCommandError('seat_identity_missing', 'REPO_HARNESS_SEAT and REPO_HARNESS_SEAT_REPOSITORY name no orchestrator or advisor seat: start the seat with rh seats argv <seat> --repository-id <id>.');
@@ -592,6 +592,14 @@ export function seatHandoff(env: NodeJS.ProcessEnv = process.env, now = new Date
   const session = readSeatSession(identity);
   if (session === null) throw new SeatsCommandError('seat_session_unknown', `The SessionStart record of the ${identity.seat} seat is missing or not valid, so the session transcript is unknown.`);
   const { host, sessionId, transcriptPath: transcript } = session;
+  if (markdown !== undefined) {
+    if (seatResetRequestState(identity, transcript, session).state !== 'open') {
+      throw new SeatsCommandError('seat_handoff_request_unavailable', 'This session has no open reset request. Run rh seats handoff to record a request.');
+    }
+    try { return writeSeatHandoff(identity, markdown); } catch (error) {
+      throw new SeatsCommandError('seat_handoff_write_failed', (error as Error).message);
+    }
+  }
   let usage: TranscriptUsage | null = null;
   try {
     if (host !== 'antigravity') usage = readTranscriptUsage(transcript);
@@ -776,10 +784,12 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
     });
   seats
     .command('handoff')
-    .description('In the orchestrator or advisor seat: record a reset request now and print the handoff steps of the Stop hook')
-    .action(() => {
+    .description('Record a reset request and print its steps, or write the handoff for an open request')
+    .option('--write', 'Read Markdown from stdin, write this seat’s handoff and print its RESET-REQUEST line')
+    .action((options: { write?: boolean }) => {
       try {
-        process.stdout.write(`${seatHandoff()}\n`);
+        const markdown = options.write ? readFileSync(0) : undefined;
+        process.stdout.write(`${seatHandoff(process.env, new Date(), markdown)}\n`);
       } catch (error) {
         if (!(error instanceof SeatsCommandError)) throw error;
         process.stderr.write(`${JSON.stringify({ ok: false, error: error.code, message: error.message })}\n`);

@@ -2,7 +2,7 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, unlinkSync,
 import { basename } from 'path';
 import {
   RESET_SEATS, seatExitCommand, seatNoResetMessage, seatResetCommand, SEAT_RESET_RETRIES, handoffIdentity, seatResetClaimPath,
-  seatResetLogPath, seatResetRequestPath, seatResetDirectory, seatResumePrompt, seatRewriteMessage,
+  seatResetLogPath, seatResetRequestPath, seatResetDirectory, seatResetRelaunchPath, seatResumePrompt, seatRewriteMessage,
   type InteractiveResetHost, type SeatLaunchModel, type SeatResetAction, type SeatResetIdentity,
 } from '../../core/board/seat-reset';
 import { seatHostId, type SeatRuntime } from '../../core/board/seats-settings';
@@ -14,7 +14,7 @@ import {
 } from './seat-reset-store';
 
 export {
-  readTranscriptUsage, writeSeatResetRequest, seatResetRequestState, recordSeatSession, readSeatSession,
+  readTranscriptUsage, writeSeatHandoff, writeSeatResetRequest, seatResetRequestState, recordSeatSession, readSeatSession,
   type TranscriptUsage, type SeatResetRequestRecord, type SeatSessionRecord,
 } from './seat-reset-store';
 
@@ -323,7 +323,7 @@ class SeatResetRun {
     if (problem === null) return;
     const rewrites = this.count('rewrite');
     const [kind, message, outcome, result] = rewrites < SEAT_RESET_RETRIES
-      ? ['rewrite', seatRewriteMessage(this.identity, problem.message, rewrites + 1), 'rewrite_requested' as const, `Rewrite ${rewrites + 1}/${SEAT_RESET_RETRIES} asked.`]
+      ? ['rewrite', seatRewriteMessage(this.identity, problem.message, rewrites + 1, this.interactiveHost()), 'rewrite_requested' as const, `Rewrite ${rewrites + 1}/${SEAT_RESET_RETRIES} asked.`]
       : ['no_reset', seatNoResetMessage('the handoff failed every rewrite', this.interactiveHost()), 'no_reset' as const, 'The rewrites are used up: no reset; the requester continues.'];
     this.tell(kind, message, problem.code, problem.message);
     throw new SeatResetError(problem.code, outcome, `${problem.message} ${result}`);
@@ -512,7 +512,7 @@ class SeatResetRun {
     }
     this.requireSameRuntime(plan.runtime);
     // The shell reads the argv from a script because hc keys can only type a subset of its characters.
-    const script = `${seatResetDirectory(this.identity)}/relaunch.sh`;
+    const script = seatResetRelaunchPath(this.identity, this.request!.requestedAt);
     if (!TYPABLE.test(script) || script.includes(' ')) throw this.relaunchFailed('relaunch_path_untypable');
     try {
       writeFileSync(script, `exec ${plan.argv.map(shellQuote).join(' ')}\n`, { mode: 0o700 });
