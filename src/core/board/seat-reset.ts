@@ -11,6 +11,8 @@ export const SEAT_REPOSITORY_ENV = 'REPO_HARNESS_SEAT_REPOSITORY';
 /** The effective model and effort of the reset seat launch (#2633); the SessionStart hook records them in `session.json`. */
 export const SEAT_MODEL_ENV = 'REPO_HARNESS_SEAT_MODEL';
 export const SEAT_EFFORT_ENV = 'REPO_HARNESS_SEAT_EFFORT';
+/** Pi lists this flag after its loader enables the repo-harness startup extension. */
+export const PI_SEAT_STARTUP_DIAGNOSTIC = 'rh-seat-startup-ready';
 
 export interface SeatLaunchModel {
   readonly model: string | null;

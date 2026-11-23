@@ -3,7 +3,8 @@ import { existsSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { VERSION, getPackageDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { probePiCapability, type PiCapability } from './compat';
-import { PiHookBridge, type PiHookRequest } from './hook-bridge';
+import { PI_SEAT_STARTUP_DIAGNOSTIC } from '../core/board/seat-reset';
+import { PiHookBridge, piHookStartupAvailable, type PiHookRequest } from './hook-bridge';
 import type { BridgeHookOutput } from '../cli/hook/hook-protocol';
 import { gitExecFileSync, withoutRepositorySelectingGitEnv } from '../effects/git/runner';
 
@@ -190,4 +191,14 @@ export function registerPiHooks(pi: ExtensionAPI, options: {
   });
 }
 
-export default function repoHarnessPi(pi: ExtensionAPI): void { registerPiHooks(pi); }
+export default async function repoHarnessPi(pi: ExtensionAPI): Promise<void> {
+  registerPiHooks(pi);
+  // Pi renders flags from enabled extensions in --help. Check only when the flag can be used or displayed.
+  if (!process.argv.some(arg => arg === '--help' || arg === '-h' || arg === `--${PI_SEAT_STARTUP_DIAGNOSTIC}`)) return;
+  const cwd = process.cwd();
+  if (probeRepoOptIn(cwd) !== 'opted-in') return;
+  const capability = await probePiCapability(VERSION, getPackageDir());
+  if (capability.state === 'ready' && await piHookStartupAvailable(cwd)) {
+    pi.registerFlag(PI_SEAT_STARTUP_DIAGNOSTIC, { type: 'boolean', description: 'Report repo-harness SessionStart readiness in --help' });
+  }
+}

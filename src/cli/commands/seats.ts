@@ -1,5 +1,7 @@
 import { Command } from 'commander';
+import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { promisify } from 'node:util';
 import { delimiter, dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { CLAUDE_BUILTIN_AGENT_TYPES, SeatPaneNameError, buildSeatLaunch, seatPaneName, seatTabName, type SeatLaunchV1 } from '../../core/board/seat-launch';
@@ -45,7 +47,8 @@ import { PiFleetRolesError, writePiFleetRoles } from '../../effects/board/pi-fle
 import { PiShellError, assertPiShell } from '../../effects/board/pi-shell';
 import { MANAGED_AGENTS } from '../../effects/terminal/task-role-profiles';
 import { SeatResetError, readSeatSession, readTranscriptUsage, runSeatReset, seatResetRequestState, writeSeatHandoff, writeSeatResetRequest, type SeatRelaunch, type SeatResetNotify, type SeatResetTarget, type TranscriptUsage } from '../../effects/board/seat-reset';
-import { handoffIdentity, seatResetAction, seatResetIdentity, seatResetSteps, type SeatResetIdentity } from '../../core/board/seat-reset';
+import { handoffIdentity, PI_SEAT_STARTUP_DIAGNOSTIC, SEAT_ENV, SEAT_REPOSITORY_ENV, seatResetAction, seatResetIdentity, seatResetSteps, type SeatResetIdentity } from '../../core/board/seat-reset';
+import { isRecord } from '../../core/evidence/is-record';
 import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
 import { COUNCIL_MEMBERS, CouncilConsultError, parseCouncilMembers, type CouncilMember } from '../../core/board/planner-consult';
 import { runCouncilConsult } from '../../effects/board/planner-consult';
@@ -54,6 +57,7 @@ import { collectSeatPoolProbes, enabledRuntimesOf, magpieExtensionInstalled, pro
 
 import { checkAntigravityHooks } from '../installer/targets/antigravity';
 import { resolveAntigravityRepository } from '../hook/host-adapter';
+import { EDIT_GUARD_SCOPE_SECTION } from '../hook/session-context';
 
 const CLI_ENTRY = fileURLToPath(new URL('../index.ts', import.meta.url));
 
@@ -317,11 +321,65 @@ export function seatResetTarget(identity: SeatResetIdentity, env: NodeJS.Process
 }
 
 /** Prepare the relaunch only when reset will start a new process. */
-export async function seatResetLaunch(identity: SeatResetIdentity, env: NodeJS.ProcessEnv, checkout: string): Promise<SeatRelaunch> {
+export async function seatResetLaunch(identity: SeatResetIdentity, env: NodeJS.ProcessEnv, checkout: string, crossRuntime: boolean): Promise<SeatRelaunch> {
   // The terminal already has a waiting shell. Run only the agent command to keep one shell across resets.
-  const { launch, effective, modeKnown } = await effectiveSeatLaunch(identity.seat, { repositoryId: identity.repository }, env, checkout,
+  const labels = { repositoryId: identity.repository };
+  const { launch, agentArgv, effective, modeKnown } = await effectiveSeatLaunch(identity.seat, labels, env, checkout,
     { terminal: 'existing', checkAvailability: true });
-  return { argv: launch.argv, runtime: launch.runtime, model: effective.model, effort: effective.effort, modeKnown };
+  let argv = launch.argv;
+  if (crossRuntime) {
+    if (launch.runtime !== 'claude' && launch.runtime !== 'pi') throw new Error('The prepared runtime provides no pre-exit SessionStart readiness evidence');
+    const bound = await probeSeatResetStartup(launch.runtime, agentArgv, env, checkout);
+    argv = labeledSeatArgv(identity.seat, labels, bound, env, 'existing');
+  }
+  return { argv, runtime: launch.runtime, model: effective.model, effort: effective.effort, modeKnown };
+}
+
+const runStartupProbe = promisify(execFile);
+// Claude gives each startup hook up to 30 seconds, then still has to close the stream.
+const STARTUP_PROBE_TIMEOUT_MS = { claude: 45_000, pi: 15_000 };
+
+function claudeStartupHookConfirmed(stdout: string): boolean {
+  return stdout.split('\n').some(line => {
+    try {
+      const event: unknown = JSON.parse(line);
+      if (!isRecord(event) || event.type !== 'system' || event.subtype !== 'hook_response' || event.hook_event !== 'SessionStart'
+        || event.hook_name !== 'SessionStart:startup' || event.outcome !== 'success' || event.exit_code !== 0 || typeof event.stdout !== 'string') return false;
+      const response: unknown = JSON.parse(event.stdout);
+      if (!isRecord(response) || !isRecord(response.hookSpecificOutput)) return false;
+      const { hookEventName, additionalContext } = response.hookSpecificOutput;
+      return hookEventName === 'SessionStart' && typeof additionalContext === 'string'
+        && additionalContext.split('\n').includes(EDIT_GUARD_SCOPE_SECTION.content);
+    } catch { return false; }
+  });
+}
+
+async function probeSeatResetStartup(runtime: 'claude' | 'pi', argv: readonly string[], env: NodeJS.ProcessEnv, cwd: string): Promise<string[]> {
+  // Use the same executable, CLI flags, settings roots, and tool PATH in the probe and replacement.
+  const names = ['HOME', 'PATH', ...(runtime === 'pi' ? ['PI_CODING_AGENT_DIR', 'PI_PACKAGE_DIR'] : [
+    'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_SAFE_MODE', 'CLAUDE_CODE_SIMPLE', 'CLAUDE_CODE_PERSONAL_HOOKS_OFF',
+    'CLAUDE_CODE_MANAGED_SETTINGS_PATH', 'CLAUDE_CODE_REMOTE_SETTINGS_PATH',
+  ])];
+  const binding = [
+    ...names.flatMap(name => ['-u', name]),
+    ...(runtime === 'claude' ? ['-u', 'CLAUDECODE'] : []),
+    ...names.flatMap(name => env[name] === undefined ? [] : [`${name}=${env[name]}`]),
+  ];
+  const probe = runtime === 'pi'
+    ? ['PI_OFFLINE=1', ...argv, '--help']
+    : [...argv.filter(arg => !arg.startsWith(`${SEAT_ENV}=`) && !arg.startsWith(`${SEAT_REPOSITORY_ENV}=`)),
+      '--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-hook-events', '--no-session-persistence'];
+  const unavailable = new Error(`${runtime} did not confirm the repo-harness SessionStart integration`);
+  const execution = runStartupProbe('/usr/bin/env', [...binding, ...probe], {
+    cwd, env, timeout: STARTUP_PROBE_TIMEOUT_MS[runtime], maxBuffer: 1024 * 1024, killSignal: 'SIGKILL',
+  });
+  execution.child.stdin?.end();
+  const { stdout } = await execution.catch(() => { throw unavailable; });
+  const ready = runtime === 'pi'
+    ? stdout.split('\n').some(line => line.trimStart().startsWith(`--${PI_SEAT_STARTUP_DIAGNOSTIC} `))
+    : claudeStartupHookConfirmed(stdout);
+  if (!ready) throw unavailable;
+  return ['/usr/bin/env', ...binding, ...argv];
 }
 
 /** The rh Pi extension of the installed package. A Pi review seat without it would run with no hook, so a missing file stops the launch. */
@@ -368,7 +426,8 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
     readonly planned?: SeatRouteV1; readonly terminal?: 'new' | 'existing'; readonly prepareFleet?: boolean; readonly checkAvailability?: boolean;
     readonly configuredOverride?: SeatConfigV1;
   } = {}): Promise<{
-  readonly launch: SeatLaunchResult; readonly effective: SeatConfigV1; readonly effectiveId: LaunchSeatId | 'gatekeeper-fallback'; readonly modeKnown: boolean;
+  readonly launch: SeatLaunchResult; readonly agentArgv: readonly string[];
+  readonly effective: SeatConfigV1; readonly effectiveId: LaunchSeatId | 'gatekeeper-fallback'; readonly modeKnown: boolean;
 }> {
   const id = seatId(seat);
   const { config, seats } = configuredSeats(env);
@@ -448,7 +507,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
     // Run the checked executable even when the requester's parent shell has a different PATH.
     argv[argv.indexOf(effective.runtime)] = executable;
   }
-  return { effective, effectiveId, modeKnown, launch: {
+  return { effective, effectiveId, modeKnown, agentArgv: argv, launch: {
     ...launch,
     argv: labelSet === undefined ? argv : labeledSeatArgv(id, labels, argv, env, terminal),
     labels: labelSet === undefined ? [] : hcLabelPairs(labelSet), name, tab, ownerException: labels.ownerException ?? null,
@@ -809,7 +868,7 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
         const result = await runSeatReset(handoff, sha256, {
           ...(loadNotify === undefined ? {} : { notify: await loadNotify() }),
           resolveLaunch: identity => seatResetTarget(identity, process.env),
-          relaunch: (identity, checkout) => seatResetLaunch(identity, process.env, checkout),
+          relaunch: (identity, checkout, crossRuntime) => seatResetLaunch(identity, process.env, checkout, crossRuntime),
         });
         process.stdout.write(`${JSON.stringify({ ok: true, ...result })}\n`);
         if (identity !== null) {
