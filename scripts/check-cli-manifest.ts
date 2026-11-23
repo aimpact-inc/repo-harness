@@ -120,7 +120,7 @@ export function checkSpan(root: Command, span: string): string[] {
     }
     // `rh arch` and `rh arch projection` start archctx for an unregistered token; the disposition table decides whether it starts.
     if (pathTokens[0] === "arch" && current.commands.length > 0) {
-      const refusal = archctxRefusal([...pathTokens.slice(1), token]);
+      const refusal = archctxRefusal([...pathTokens.slice(1), ...tokens.slice(index)]);
       if (refusal !== null) return [`${refusal} in "rh ${[...pathTokens, token].join(" ")}"`];
     }
     pathOpen = false;

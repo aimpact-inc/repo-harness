@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 export function cleanRoomEnvironment(workspace: string, inherited: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -13,58 +13,28 @@ export function cleanRoomEnvironment(workspace: string, inherited: NodeJS.Proces
   };
 }
 
-type Result = { status: number | null; stdout: string | Buffer | null; error?: Error };
-export type DaemonCommand = (binary: string, args: string[], options: {
-  cwd: string; env: NodeJS.ProcessEnv; encoding: 'utf8'; timeout: number; maxBuffer: number;
-}) => Result;
+const DAEMON_ARTIFACT = /^(?:archctxd(?:\.json|\.pid|\.sock)|daemon\.(?:pid|sock)|.*\.sock)$/u;
 
-/** Arm before any operation that may start a daemon, including snapshot. */
-export class CleanRoomDaemon {
-  private target?: { binary: string; root: string; env: NodeJS.ProcessEnv };
-  constructor(private readonly command: DaemonCommand = spawnSync,
-    private readonly pause: () => void = () => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25); }) {}
-
-  arm(binary: string, root: string, env: NodeJS.ProcessEnv): void {
-    if (this.target) throw new Error('clean-room daemon is already armed');
-    this.target = { binary, root, env: { ...env } };
-  }
-
-  stop(): void {
-    if (!this.target) return;
-    const { binary, root, env } = this.target;
-    const invoke = (operation: string): Record<string, unknown> => {
-      const result = this.command(binary, ['daemon', operation], {
-        cwd: root, env, encoding: 'utf8', timeout: 5_000, maxBuffer: 1024 * 1024,
-      });
-      // Do not print control-file tokens or arbitrary subprocess output.
-      if (result.error || result.status !== 0) throw new Error(`clean-room daemon ${operation} failed; preserve workspace`);
-      let envelope: any;
-      try { envelope = JSON.parse(String(result.stdout)); } catch { throw new Error(`clean-room daemon ${operation} returned invalid JSON; preserve workspace`); }
-      if (envelope?.schemaVersion !== 'archcontext.envelope/v1' || envelope.ok !== true || !envelope.data || typeof envelope.data !== 'object') {
-        throw new Error(`clean-room daemon ${operation} did not confirm success; preserve workspace`);
+/** Fails closed if an in-process archctx run leaves any daemon control, PID or socket file behind. */
+export function assertNoDaemonArtifacts(stateDir: string): void {
+  if (!existsSync(stateDir)) return;
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const fullPath = join(dir, entry.name);
+      if (DAEMON_ARTIFACT.test(entry.name)) {
+        throw new Error(`unexpected daemon artifact in clean-room state dir: ${fullPath}`);
       }
-      return envelope.data;
-    };
-    invoke('stop');
-    for (let attempt = 0; attempt < 10; attempt++) {
-      const status = invoke('status');
-      if (status.running === false && status.staleConnection !== true && status.lockOwnerPid === undefined && status.versionUnsupported === undefined) {
-        this.target = undefined;
-        return;
-      }
-      if (attempt < 9) this.pause();
+      if (entry.isDirectory()) walk(fullPath);
     }
-    throw new Error('clean-room daemon stop was not confirmed; preserve workspace');
-  }
+  };
+  walk(stateDir);
 }
 
 export function finishCleanRoom(input: {
-  daemon: Pick<CleanRoomDaemon, 'stop'>;
   cleanup: () => void;
   failure?: { error: unknown };
 }): void {
   try {
-    input.daemon.stop();
     input.cleanup();
   } catch (error) {
     if (input.failure) throw new AggregateError([input.failure.error, error], 'clean-room operation and cleanup failed; inspect retained workspace');

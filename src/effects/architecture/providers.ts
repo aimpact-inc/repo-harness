@@ -10,7 +10,7 @@ import {
   resolveArchcontextCapabilityPaths,
 } from './archcontext-owners';
 import { archcontextResolveFileCache } from './archcontext-resolve-cache';
-import { resolvePackageLocalArchctx, stopWorkspaceArchitectureDaemons } from './archctx-provider';
+import { resolvePackageLocalArchctx } from './archctx-provider';
 
 /**
  * The archctx providers that every process entry registers. The two
@@ -35,6 +35,5 @@ export const ARCHITECTURE_PROVIDERS: Pick<ArchitecturePorts, 'ownership' | 'disp
     contractVersion: ARCHITECTURE_CONTRACT_VERSION,
     requiredArchctxVersion: ARCHCTX_REQUIRED_VERSION,
     resolvePackageLocalArchctx: (consumerRoot) => resolvePackageLocalArchctx(consumerRoot),
-    stopWorkspaceDaemons: (repoRoot, canonicalWorktree) => stopWorkspaceArchitectureDaemons(repoRoot, canonicalWorktree),
   },
 };

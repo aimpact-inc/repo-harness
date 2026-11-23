@@ -19,6 +19,7 @@ const ARCHIMAP_MARKER = `${STATE_DIR}agent-notice-archimap`;
 const ARCHIMAP_FILE = 'docs/architecture/archimap.html';
 const STATUS_COMMAND = 'rh arch projection status --json';
 const NOTICE_TIMEOUT_LINE = 'repo-harness: architecture notice: not finished in its time budget; the next hook measures again';
+const NOTICE_WRITER_BUSY_LINE = 'repo-harness: architecture notice: local store writer busy; the next hook measures again';
 const MAX_BYTES = 800;
 const MAX_MESSAGE_BYTES = 200;
 // The codes that archctx 0.9.1 checkpoint and package resolution throw for a setup step
@@ -218,8 +219,14 @@ function transientOwnershipFailure(error: unknown): error is CapabilityOwnership
     && error.blocker.fix !== 'rh update';
 }
 
+function transientRuntimeWriterLock(error: unknown): error is ArchctxClientError {
+  return error instanceof ArchctxClientError
+    && error.code === 'AC_PRECONDITION_FAILED'
+    && error.reasonCode === 'runtime-writer-owned';
+}
+
 function statusOf(error: unknown): Status {
-  if (noticeTimeout(error) || transientOwnershipFailure(error)) return { kind: 'quiet', error };
+  if (noticeTimeout(error) || transientOwnershipFailure(error) || transientRuntimeWriterLock(error)) return { kind: 'quiet', error };
   if (!(error instanceof ArchctxClientError) || !INACTIVE_CODES.has(error.code)) return { kind: 'failure', error };
   return { kind: 'inactive', cause: singleLine(error.action ? `${error.code}, action ${error.action}` : error.code) };
 }
@@ -394,15 +401,18 @@ function archimapNotice(repoRoot: string, options: ArchctxProviderOptions, obser
 function noticeProblems() {
   const texts: string[] = [];
   let timedOut = false;
+  let writerBusy = false;
   return {
     add(error: unknown): void {
       if (noticeTimeout(error)) { timedOut = true; return; }
+      if (transientRuntimeWriterLock(error)) { writerBusy = true; return; }
       texts.push(errorText(error));
     },
     lines(): string {
       return [
         ...(texts.length > 0 ? [boundedHookDiagnostic(`repo-harness: architecture notice unavailable: ${texts.join('; ')}`)] : []),
         ...(timedOut ? [boundedHookDiagnostic(NOTICE_TIMEOUT_LINE)] : []),
+        ...(writerBusy ? [boundedHookDiagnostic(NOTICE_WRITER_BUSY_LINE)] : []),
       ].map(line => `${line}\n`).join('');
     },
   };
@@ -461,6 +471,7 @@ export function collectAgentNotice(repoRoot: string, ownership: (options: Archct
   if (archimapError !== undefined && (reported === undefined || errorText(archimapError) !== errorText(reported))) problems.add(archimapError);
   try { blocks.push(...archimapNotice(repoRoot, options, observation)); }
   catch (error) { problems.add(error); }
+  let prepareWriterBusy = false;
   if (point === 'session-start') {
     try { if (![STATUS_MARKER, MARKER, ARCHIMAP_MARKER].every(path => ignored(repoRoot, path, options))) blocks.push(unignoredBlock()); }
     catch (error) { problems.add(error); }
@@ -469,8 +480,13 @@ export function collectAgentNotice(repoRoot: string, ownership: (options: Archct
         const block = taskNotice(repoRoot, options);
         if (block) blocks.push(block);
       } catch (error) {
-        // The subprocess can echo task text or stderr. Report only its code.
-        problems.add(noticeTimeout(error) ? error : new Error(`architecture prepare unavailable (${failureCode(error)})`));
+        if (transientRuntimeWriterLock(error)) {
+          prepareWriterBusy = true;
+          problems.add(error);
+        } else {
+          // The subprocess can echo task text or stderr. Report only its code.
+          problems.add(noticeTimeout(error) ? error : new Error(`architecture prepare unavailable (${failureCode(error)})`));
+        }
       }
     }
   }
@@ -479,12 +495,16 @@ export function collectAgentNotice(repoRoot: string, ownership: (options: Archct
     catch (error) { problems.add(error); return false; }
   });
   const diagnostics = problems.lines();
+  const logReason = status.kind === 'quiet' && transientOwnershipFailure(status.error) && !noticeTimeout(status.error)
+    ? `architecture-notice-quiet:${singleLine(status.error.blocker.code)}`
+    : (status.kind === 'quiet' && transientRuntimeWriterLock(status.error)) || prepareWriterBusy
+      ? 'architecture-notice-quiet:runtime-writer-owned'
+      : undefined;
   return {
     ...(chosen.length > 0 ? { content: chosen.map(block => block.content).join('\n'), systemMessage: chosen.map(block => block.systemMessage).join('\n') } : {}),
     ...(diagnostics === '' ? {} : { diagnostics }),
     // A timeout is load and keeps its fixed line only. The log gets the code, never the text: archctx output can carry private paths.
-    ...(status.kind === 'quiet' && transientOwnershipFailure(status.error) && !noticeTimeout(status.error)
-      ? { logReason: `architecture-notice-quiet:${singleLine(status.error.blocker.code)}` } : {}),
+    ...(logReason === undefined ? {} : { logReason }),
   };
 }
 

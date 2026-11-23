@@ -3,20 +3,20 @@
   "status": "verified",
   "source": {
     "repository": "Ancienttwo/arch-context",
-    "revision": "b4244ac5e1755ad84194d25a6fae4036e91da1c7",
+    "revision": "5946ad3755ad4da87fffbad231a4b01ef39b989d",
     "archiveMode": "git-archive",
     "dirtySourceUsed": false
   },
   "packages": {
     "contracts": {
       "name": "archctx-contracts",
-      "version": "0.17.1",
-      "file": "archctx-contracts-0.17.1.tgz"
+      "version": "0.18.1",
+      "file": "archctx-contracts-0.18.1.tgz"
     },
     "archctx": {
       "name": "archctx",
-      "version": "0.17.1",
-      "file": "archctx-0.17.1.tgz"
+      "version": "0.18.1",
+      "file": "archctx-0.18.1.tgz"
     }
   },
   "consumer": {
@@ -25,13 +25,17 @@
     "committedFileDependency": false,
     "packageLocalBinary": true,
     "conflictingPathIgnored": true,
+    "inProcessNoDaemon": {
+      "daemonCommandAbsent": true,
+      "noDaemonArtifacts": true
+    },
     "authoritativeNodeSchema": "archcontext.node/v2",
     "authoritativeNodeSchemaDigest": "sha256:38f56056476a82a2d9a543382c5e46e6e46bebf5a1c1b57db4078f38cd421131",
     "capabilities": {
       "schemaVersion": "archcontext.capabilities/v1",
       "package": {
         "name": "archctx",
-        "version": "0.17.1"
+        "version": "0.18.1"
       },
       "protocols": {
         "projectionRequest": "archcontext.projection-request/v1",
@@ -51,14 +55,16 @@
         "capability-dependencies-v1",
         "changeset-entity-operations-v1",
         "changeset-ownership-delta-v1",
+        "cli-check-v1",
         "code-facts-unavailable-error-v1",
+        "deps-calls-matrix-v1",
         "docs-anchors-v1",
         "flow-selector-check-v1",
+        "host-ownership-isolation-v1",
+        "index-seed-v1",
         "module-statistics-v1",
         "native-context-export-v1",
-        "projection-apply-readback-v1",
         "projection-apply-receipt-v1",
-        "projection-apply-recovery-v1",
         "projection-apply-replay-restore-v1",
         "projection-apply-replay-v1",
         "projection-architecture-debt-v1",
@@ -80,14 +86,17 @@
         "recommendation-v3",
         "refactor-assessment-v1",
         "refactor-observation-evidence-v1",
+        "refactor-radar-v2",
         "refactor-resolution-v1",
         "refactor-scan-limits-v1",
-        "refactor-scan-untracked-count-v1"
+        "refactor-scan-untracked-count-v1",
+        "refactor-simulate-v1",
+        "refactor-symbol-kill-list-v1"
       ]
     },
     "projection": {
       "requestId": "repo-harness.axr5-clean-room",
-      "status": "human-action-required",
+      "status": "planned",
       "worktreeDigestMatched": true,
       "rendererVersion": "archcontext.docs-renderer/v6",
       "layoutVersion": "archcontext.docs-layout/v1",
@@ -96,6 +105,14 @@
         "codeGraphVersion": "1.6.4",
         "codeGraphStatus": "ready"
       }
+    },
+    "fixedPoint": {
+      "applyStatus": "applied",
+      "applyFiles": 3,
+      "checkStatus": "noop",
+      "checkRenderEquivalent": true,
+      "secondApplyStatus": "noop",
+      "secondApplyFiles": 0
     }
   }
 }

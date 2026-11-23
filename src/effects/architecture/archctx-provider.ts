@@ -1,12 +1,13 @@
 import { FileSyntaxError, parseJsonText } from '../../core/evidence/file-syntax';
 import { DEFAULT_GLOBAL_ARCHITECTURE, loadArchitectureProjectionPolicy, readGlobalArchitectureConfiguration } from './projection-config';
-import { accessSync, constants as fsConstants, existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { Database } from 'bun:sqlite';
+import { accessSync, chmodSync, closeSync, constants as fsConstants, copyFileSync, existsSync, lstatSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { userInfo } from 'node:os';
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { tmpdir, userInfo } from 'node:os';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { ARCHCONTEXT_NODE_RANGE, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_SCHEMA_VERSION, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_UPGRADE_COMMAND, ERROR_CATALOG, PROJECTION_MANIFEST_UPGRADE_REQUIRED, failureIssues, architectureDocsProjectionCompatibilityIssues, PROJECTION_REQUEST_SCHEMA_VERSION, digestJson, type ArchContextError, type ArchctxCapabilitiesV1, type ArchitectureDebtDeltaReportV1, type ArchitectureDebtReportV1, type DocsAnchorsReportV1, type Json, type ProjectionApplyReadbackResultV2, type ProjectionExpectedSnapshotV1, type ProjectionMode, type ProjectionRequestV1, type ProjectionResultV3 } from 'archctx-contracts';
+import { ARCHCONTEXT_NODE_RANGE, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_SCHEMA_VERSION, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_UPGRADE_COMMAND, ERROR_CATALOG, PROJECTION_MANIFEST_UPGRADE_REQUIRED, failureIssues, architectureDocsProjectionCompatibilityIssues, PROJECTION_REQUEST_SCHEMA_VERSION, digestJson, type ArchContextError, type ArchctxCapabilitiesV1, type ArchitectureDebtDeltaReportV1, type ArchitectureDebtReportV1, type DocsAnchorsReportV1, type IndexSeedResultV1, type Json, type ProjectionExpectedSnapshotV1, type ProjectionMode, type ProjectionRequestV1, type ProjectionResultV3 } from 'archctx-contracts';
 import { isRecord } from '../../core/evidence/is-record';
 import { readWorkflowPolicyDocument } from '../state/resolve-effective-state';
 import { POLICY_ABSENT, isPolicyObject, policyValue } from '../../core/workflow/policy-schema';
@@ -14,9 +15,9 @@ import { trustedNodeCandidates } from '../runtime/node-candidates';
 import { selectCompatibleNode } from '../runtime/node-runtime';
 import { runProcess } from '../process-runner';
 import type { CapabilityOwnership } from '../../core/capabilities/registry';
-import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError, assertArchctxVersion, assertProjectionApplyReadbackResult, assertProjectionResult, decodeArchitectureDebtDelta, decodeArchitectureDebtReport, decodeDocsAnchorsReport, readArchitectureProjectionPolicy } from '../../core/architecture/projection';
-import type { ArchctxProcessResult, ArchctxProviderOptions, ArchitectureDaemonStopFailure, ArchitectureDaemonStopReportV1, ResolvedArchctxPackage, ArchitectureProjectionReadinessV1 } from '../../core/architecture/contracts';
-import { gitExecFileSync } from '../git/runner';
+import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError, assertArchctxVersion, assertProjectionResult, decodeArchitectureDebtDelta, decodeArchitectureDebtReport, decodeDocsAnchorsReport, decodeIndexSeedResult, readArchitectureProjectionPolicy } from '../../core/architecture/projection';
+import type { ArchctxProcessResult, ArchctxProviderOptions, ResolvedArchctxPackage, ArchitectureProjectionReadinessV1 } from '../../core/architecture/contracts';
+import { gitExecFileSync, gitSpawnSync } from '../git/runner';
 
 const ARCHCTX_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const DEFAULT_RUNNER = (binary: string, args: readonly string[], options: { cwd: string; timeoutMs?: number; deadlineMs?: number; env: NodeJS.ProcessEnv }): ArchctxProcessResult => {
@@ -31,11 +32,20 @@ const DEFAULT_RUNNER = (binary: string, args: readonly string[], options: { cwd:
     processGroup: true,
   });
   const overflow = Buffer.byteLength(result.stdout, 'utf8') > ARCHCTX_MAX_OUTPUT_BYTES || Buffer.byteLength(result.stderr, 'utf8') > ARCHCTX_MAX_OUTPUT_BYTES;
-  return { status: overflow ? 1 : result.status, signal: result.signal, timedOut: result.timedOut, stdout: result.stdout, stderr: result.stderr, ...((overflow ? 'archctx output exceeded maxBuffer' : result.error) ? { error: overflow ? 'archctx output exceeded maxBuffer' : result.error } : {}) };
+  return {
+    status: overflow ? 1 : result.status,
+    signal: result.signal,
+    timedOut: result.timedOut,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    ...((overflow ? 'archctx output exceeded maxBuffer' : result.error) ? { error: overflow ? 'archctx output exceeded maxBuffer' : result.error } : {}),
+    ...(result.launchFailed ? { launchFailed: true } : {}),
+  };
 };
 
 const CODEGRAPH_INIT_ARGS = ['init', '-y', '.'] as const;
-const CODEGRAPH_SEED_RETRY_DELAYS_MS = [250, 750] as const;
+/** Bound for linked worktree `archctx index seed` waiting on an active base refresh or staged sync. */
+const CODEGRAPH_INDEX_SEED_LINKED_TIMEOUT_MS = 5_000;
 
 function capabilityAuthorityReady(repoRoot: string): boolean {
   return existsSync(join(repoRoot, '.archcontext', 'model', 'nodes'));
@@ -192,17 +202,18 @@ export class ArchctxClient {
       if (args[0] === 'checkpoint') {
         throw new ArchctxClientError({ code: 'RH_ARCHCTX_TIMEOUT', action: 'inspect-diagnostics', message: 'architecture checkpoint did not finish in the notice time budget' });
       }
-      throw new ArchctxClientError({ code: 'RH_ARCHCTX_TIMEOUT', action: 'check-and-retry-same-request', message: `${label} timed out; outcome unknown. Run rh arch projection check --json, then retry with the same request id.` });
+      throw new ArchctxClientError({ code: 'RH_ARCHCTX_TIMEOUT', action: 'retry', message: `${label} timed out` });
     }
     if (Buffer.byteLength(result.stdout, 'utf8') > ARCHCTX_MAX_OUTPUT_BYTES || Buffer.byteLength(result.stderr, 'utf8') > ARCHCTX_MAX_OUTPUT_BYTES) throw new Error(`${label} output exceeded maxBuffer`);
+    // Distinguish proven pre-launch spawn failures (no target started) from post-launch failures; never print argv/request-json.
+    if (result.launchFailed === true) {
+      throw new ArchctxClientError({ code: 'RH_ARCHCTX_LAUNCH_FAILED', action: 'inspect-diagnostics', message: `${label} failed to launch` });
+    }
     // Process errors can contain argv, including request-json. Do not print them.
     if (result.signal || result.error) throw new Error(`${label} process failed${result.signal ? `: signal ${result.signal}` : ''}`);
     if (result.stdout.trim() === '') throw new Error(`${label} failed: exit ${result.status}: ${result.stderr.trim()}`);
     const value = parseJson(result, label);
     if (args[0] === 'capabilities' && result.status === 0) return value;
-    // Daemon lifecycle readback is not a request-scoped command and carries no
-    // requestId; its caller validates the lifecycle envelope itself.
-    if (args[0] === 'daemon' && result.status === 0) return value;
     if (!isRecord(value) || value.schemaVersion !== 'archcontext.envelope/v1' || typeof value.ok !== 'boolean' || typeof value.requestId !== 'string') throw new Error(`${label} returned an invalid envelope`);
     if (value.ok === false) {
       const error = decodeArchctxError(value.error);
@@ -291,94 +302,27 @@ export function archctxCapabilities(repoRoot: string, options: ArchctxProviderOp
  * arguments, inherited stdio and no output cap. Returns the archctx exit code; a signal exit is 1.
  */
 export function runArchctxPassThrough(cwd: string, args: readonly string[], options: ArchctxProviderOptions = {}): number {
-  const { resolved } = archctxCapabilities(cwd, options);
-  const env = options.env ?? process.env;
-  const result = spawnSync(resolveCompatibleNodeRuntime(env, options.trustedNodeCandidateSource), [resolved.binaryPath, ...args], { cwd, env, stdio: 'inherit' });
+  let spawnCwd = cwd;
+  let env: NodeJS.ProcessEnv = { ...(options.env ?? process.env) };
+  const isIndexSeed = args[0] === 'index' && !args.includes('--help') && !args.includes('-h');
+  if (isIndexSeed) {
+    const seedRoot = resolveCodeGraphSeedRoot(cwd, env);
+    spawnCwd = seedRoot;
+    env = sanitizeGitDiscoveryEnv(env);
+    // `archctx index seed` disables shared-base seeding if CODEGRAPH_DIR is set (`index-base.ts:189`).
+    delete env.CODEGRAPH_DIR;
+    env.CODEGRAPH_FORCE_WATCH = '1';
+    delete env.CODEGRAPH_NO_WATCH;
+    assertSafeCodeGraphDestination(seedRoot, { env });
+  }
+  const { resolved } = archctxCapabilities(spawnCwd, { ...options, env });
+  const nodeExecutable = resolveCompatibleNodeRuntime(env, options.trustedNodeCandidateSource);
+  const result = spawnSync(nodeExecutable, [resolved.binaryPath, ...args], { cwd: spawnCwd, env, stdio: 'inherit' });
   if (result.error) throw result.error;
+  if (isIndexSeed && result.status === 0) {
+    quiesceSeededCodeGraphSidecars(spawnCwd, nodeExecutable, env);
+  }
   return result.status ?? 1;
-}
-
-/** Lifecycle readback is separate from the CLI-only capabilities handshake. */
-export function verifyArchctxDaemonRuntime(repoRoot: string, options: ArchctxProviderOptions = {}, packageRoot?: string): void {
-  hasUsableArchctxDaemon(repoRoot, options, packageRoot);
-}
-
-/** Validate status without starting a daemon. True means a usable daemon answered. */
-function hasUsableArchctxDaemon(repoRoot: string, options: ArchctxProviderOptions = {}, packageRoot?: string): boolean {
-  const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
-  const client = new ArchctxClient(repoRoot, policy.requiredVersion, options, packageRoot);
-  const resolved = client.resolved;
-  const value = client.json(['daemon', 'status', '--json'], Math.min(policy.timeoutMs, 10_000));
-  if (!isRecord(value) || value.schemaVersion !== 'archcontext.envelope/v1' || value.ok !== true || !isRecord(value.data) || typeof value.data.running !== 'boolean') {
-    throw new Error('archctx daemon status returned an invalid envelope');
-  }
-  const data = value.data;
-  if (data.staleConnection === true) {
-    throw new Error('archctx daemon status reports an unhealthy connection; runtime compatibility is unverified. Ask the user before daemon repair; do not automatically restart or clear shared state.');
-  }
-  if (data.versionUnsupported !== undefined) {
-    const issue = data.versionUnsupported;
-    if (!isRecord(issue) || typeof issue.reason !== 'string' || typeof issue.expected !== 'string' || typeof issue.received !== 'string' || issue.action !== 'upgrade-archctx-runtime' || issue.command !== 'archctx daemon upgrade') {
-      throw new Error('archctx daemon status returned an invalid versionUnsupported diagnostic');
-    }
-    throw new ArchctxClientError({ code: 'AC_RUNTIME_VERSION_UNSUPPORTED', action: 'upgrade-archctx-runtime', reasonCode: issue.reason, message: `managed archctx@${resolved.version}; daemon ${issue.reason}: expected ${issue.expected}, received ${issue.received}.` });
-  }
-  if (data.running && (data.rpcVersionCompatible !== true || data.productVersionCompatible !== true)) {
-    throw new Error('archctx daemon status did not prove runtime compatibility');
-  }
-  return data.running === true && data.responding !== false && data.usable !== false;
-}
-
-function daemonStopFailure(stateDir: string | null, error: ArchctxClientError): ArchitectureDaemonStopFailure {
-  return {
-    stateDir, code: error.code, action: error.action, message: error.providerMessage,
-    ...(error.reasonCode === undefined ? {} : { reasonCode: error.reasonCode }),
-    ...(error.retryable === undefined ? {} : { retryable: error.retryable }),
-  };
-}
-
-/** Closeout calls archctx outside the topology lock; each call still stays short. */
-const ARCHCTX_DAEMON_STOP_BUDGET_MS = 3_000;
-
-/**
- * Closeout stops the daemons that archctx lists for a checkout it is about to
- * remove. The listed connection root is archctx's own canonical workspace
- * root, so a daemon is selected only by exact root equality and stopped by its
- * state directory. Typed archctx failures are reported; contract violations throw.
- */
-export function stopWorkspaceArchitectureDaemons(repoRoot: string, canonicalWorktree: string, options: ArchctxProviderOptions = {}): ArchitectureDaemonStopReportV1 {
-  if (!isAbsolute(canonicalWorktree)) throw new Error('architecture daemon stop requires an absolute canonical worktree path');
-  const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
-  const report: ArchitectureDaemonStopReportV1 = { schemaVersion: 'repo-harness.architecture-daemon-stop/v1', worktree: canonicalWorktree, provider: policy.provider, stopped: [], failures: [] };
-  if (policy.provider === 'disabled') return report;
-  const client = new ArchctxClient(repoRoot, policy.requiredVersion, options);
-  const maximumMs = Math.min(policy.timeoutMs, ARCHCTX_DAEMON_STOP_BUDGET_MS);
-  let listed: unknown;
-  try { listed = client.json(['daemon', 'list', '--json'], maximumMs); }
-  catch (error) {
-    if (!(error instanceof ArchctxClientError)) throw error;
-    report.failures.push(daemonStopFailure(null, error));
-    return report;
-  }
-  if (!isRecord(listed) || listed.schemaVersion !== 'archcontext.envelope/v1' || listed.ok !== true || !isRecord(listed.data) || !Array.isArray(listed.data.daemons)) {
-    throw new Error('archctx daemon list returned an invalid envelope');
-  }
-  for (const entry of listed.data.daemons) {
-    if (!isRecord(entry) || typeof entry.stateDir !== 'string' || typeof entry.connection !== 'string') throw new Error('archctx daemon list returned an invalid daemon entry');
-    if (entry.connection !== 'valid' || entry.root !== canonicalWorktree) continue;
-    let stopped: unknown;
-    try { stopped = client.json(['daemon', 'stop', '--state-dir', entry.stateDir, '--json'], maximumMs); }
-    catch (error) {
-      if (!(error instanceof ArchctxClientError)) throw error;
-      report.failures.push(daemonStopFailure(entry.stateDir, error));
-      continue;
-    }
-    if (!isRecord(stopped) || stopped.schemaVersion !== 'archcontext.envelope/v1' || stopped.ok !== true || !isRecord(stopped.data) || stopped.data.stopping !== true) {
-      throw new Error('archctx daemon stop returned an invalid envelope');
-    }
-    report.stopped.push(entry.stateDir);
-  }
-  return report;
 }
 
 const PROJECTION_MANIFEST_INCOMPATIBLE = 'projection-manifest-incompatible';
@@ -422,13 +366,11 @@ export function inspectArchitectureProjectionReadiness(
 ): ArchitectureProjectionReadinessV1 {
   const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
   let source: ArchitectureProjectionReadinessV1['modelAuthority']['source'] = 'unadopted';
-  let daemonState: ArchitectureProjectionReadinessV1['daemonRuntime']['state'] = 'not-evaluated';
   let codeFacts: ArchitectureProjectionReadinessV1['codeFacts'] = { requirement: 'required', state: 'not-evaluated' };
   const base = () => ({
     schemaVersion: 'repo-harness.architecture-projection-readiness/v1' as const,
     modelAuthority: { source, ready: source !== 'unadopted' && capabilityAuthorityReady(repoRoot) },
     codeFacts,
-    daemonRuntime: { state: daemonState },
     apply: { mode: policy.applyMode, enabled: false },
   });
   try {
@@ -442,14 +384,12 @@ export function inspectArchitectureProjectionReadiness(
     const nodePath = resolveCompatibleNodeRuntime(options.env ?? process.env, options.trustedNodeCandidateSource);
     const handshake = archctxCapabilities(repoRoot, options);
     assertCommittedProjectionManifestCompatible(repoRoot, handshake.capabilities);
-    try { verifyArchctxDaemonRuntime(repoRoot, options); daemonState = 'compatible'; }
-    catch (error) { daemonState = error instanceof ArchctxClientError && error.code === 'AC_RUNTIME_VERSION_UNSUPPORTED' ? 'mismatch' : 'error'; throw error; }
     const facts = readArchitectureCodeFacts(new ArchctxClient(repoRoot, policy.requiredVersion, options), policy.timeoutMs);
     codeFacts = { requirement: 'required', ...facts };
     const modelReady = readModelReady(repoRoot, options);
     return {
       ...base(),
-      projectionProvider: { provider: 'archctx', state: 'ready', binaryPath: handshake.resolved.binaryPath, nodePath, command: [nodePath, handshake.resolved.binaryPath], version: handshake.resolved.version, reason: 'exact package-local handshake and daemon runtime check passed; code facts are reported separately' },
+      projectionProvider: { provider: 'archctx', state: 'ready', binaryPath: handshake.resolved.binaryPath, nodePath, command: [nodePath, handshake.resolved.binaryPath], version: handshake.resolved.version, reason: 'exact package-local handshake passed; code facts are reported separately' },
       apply: { mode: policy.applyMode, enabled: policy.applyMode !== 'disabled' && modelReady && codeFacts.state === 'ready' },
       next: facts.state !== 'ready' ? codeFactsFixCommand(facts.state) : source !== 'archcontext' || !modelReady ? architectureAdoptionStep() : null,
     };
@@ -538,12 +478,7 @@ function architectureAdoptionStep(): string {
 }
 
 export function runArchitectureProjection(request: ProjectionRequestV1, repoRoot: string, options: ArchctxProviderOptions = {}): ProjectionResultV3 {
-  return assertProjectionResult(runProjectionCommand('run', request, repoRoot, options), request.requestId);
-}
-
-/** Read an existing committed apply; this operation never invokes projection run/apply. */
-export function readArchitectureProjectionApply(request: ProjectionRequestV1, repoRoot: string, options: ArchctxProviderOptions = {}): ProjectionApplyReadbackResultV2 {
-  return assertProjectionApplyReadbackResult(runProjectionCommand('readback', request, repoRoot, options), request);
+  return runProjectionCommand(request, repoRoot, options);
 }
 
 /**
@@ -613,6 +548,23 @@ export function changedSinceReviewBase(repoRoot: string, reviewBase: string, opt
   ]);
 }
 
+/**
+ * Strips caller diagnostic store/state overrides before automatic hook invocations (`prepare`,
+ * `checkpoint`). `archctx@0.18.1` runs fail-closed checks on unrelated DB files, and automatic
+ * hooks still isolate `ARCHCONTEXT_LOCAL_STORE_PATH` and `ARCHCONTEXT_STATE_DIR` so user
+ * diagnostic paths are never touched implicitly (I2).
+ */
+function sanitizeAutomaticHookArchctxOptions(options: ArchctxProviderOptions): ArchctxProviderOptions {
+  const source = options.env ?? process.env;
+  if (source.ARCHCONTEXT_LOCAL_STORE_PATH === undefined && source.ARCHCONTEXT_STATE_DIR === undefined) {
+    return options;
+  }
+  const env: NodeJS.ProcessEnv = { ...source };
+  delete env.ARCHCONTEXT_LOCAL_STORE_PATH;
+  delete env.ARCHCONTEXT_STATE_DIR;
+  return { ...options, env };
+}
+
 /** Changed owned paths only. */
 export function checkpointArchitectureDebt(repoRoot: string, ownership: CapabilityOwnership | null, options: ArchctxProviderOptions = {}): {
   readonly branch: string;
@@ -620,7 +572,8 @@ export function checkpointArchitectureDebt(repoRoot: string, ownership: Capabili
 } | null {
   if (!ownership?.review_base || !ownership.capabilities.some(capability => capability.paths.length > 0)) return null;
   const now = options.nowMs ?? Date.now;
-  const bounded = { ...options, deadlineMs: Math.min(options.deadlineMs ?? Infinity, now() + 3_000) };
+  const sanitized = sanitizeAutomaticHookArchctxOptions(options);
+  const bounded = { ...sanitized, deadlineMs: Math.min(options.deadlineMs ?? Infinity, now() + 3_000) };
   const changed = changedSinceReviewBase(repoRoot, ownership.review_base, bounded);
   const paths = [...new Set(ownership.capabilities.flatMap(capability => capability.paths).filter(path => changed.has(path)))].sort();
   if (paths.length === 0) return null;
@@ -641,19 +594,12 @@ export function prepareArchitectureTask(repoRoot: string, task: string, options:
   if (capabilitySource(repoRoot) !== 'archcontext' || !capabilityAuthorityReady(repoRoot)) return null;
   const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
   if (policy.provider === 'disabled') return null;
-  // Warm reads measured 1326–1395 ms. Reserve that time after the status probe too.
-  const requirePrepareTime = () => {
-    if (remainingTimeout(options, 3_000, 'notice prepare') < 1_500) {
-      throw new ArchctxClientError({ code: 'RH_ARCHCTX_TIMEOUT', action: 'retry', message: 'architecture prepare skipped: less than 1500 ms remains' });
-    }
-  };
-  requirePrepareTime();
-  // Status never starts a daemon. Prepare can start one if none answers.
-  if (!hasUsableArchctxDaemon(repoRoot, { ...options, policy })) {
-    throw new ArchctxClientError({ code: 'AC_RUNTIME_UNAVAILABLE', action: 'start-or-reconnect-runtime', message: 'architecture prepare skipped: no usable daemon answered' });
+  // In-process prepare measured ~2415 ms cold (~1910 ms warm). Skip when too little hook budget remains.
+  if (remainingTimeout(options, 3_000, 'notice prepare') < 1_500) {
+    throw new ArchctxClientError({ code: 'RH_ARCHCTX_TIMEOUT', action: 'retry', message: 'architecture prepare skipped: less than 1500 ms remains' });
   }
-  requirePrepareTime();
-  const data = new ArchctxClient(repoRoot, policy.requiredVersion, options).data(['prepare', '--task', task, '--json'], 3_000);
+  const sanitized = sanitizeAutomaticHookArchctxOptions(options);
+  const data = new ArchctxClient(repoRoot, policy.requiredVersion, sanitized).data(['prepare', '--task', task, '--json'], 3_000);
   remainingTimeout(options, 3_000, 'notice prepare decode');
   const context = isRecord(data) && isRecord(data.context) ? data.context : null;
   if (!context || context.schemaVersion !== 'archcontext.task-context/v1' || context.task !== task
@@ -685,73 +631,573 @@ function decodeCompleteArchitectureDebt(data: unknown, headSha: string): Archite
   }
 }
 
+const CODEGRAPH_GITIGNORE_MARKER = '# CodeGraph data files';
+const SQLITE_HEADER_MAGIC = Buffer.from('SQLite format 3\0', 'ascii');
+const SQLITE_HEADER_MIN_BYTES = 100;
+const CODEGRAPH_LOCK_MAX_BYTES = 32;
+const CODEGRAPH_PID_LOCK_PATTERN = /^[1-9]\d*$/;
+const CODEGRAPH_SQLITE_SIDECARS = ['codegraph.db-wal', 'codegraph.db-shm', 'codegraph.db-journal'] as const;
+const CODEGRAPH_LOCK_FILES = [
+  'codegraph.lock',
+  'codegraph.lock.break',
+  'codegraph.lock.break.break',
+  'codegraph.lock.break.break.break',
+] as const;
+const CODEGRAPH_LOCK_TEMP_PATTERN = /^codegraph\.lock(?:\.break){0,3}\.\d+\.\d+\.tmp$/;
+const CODEGRAPH_ERROR_LOG_MARKER = 'CodeGraph Error Log - ';
+const GIT_DISCOVERY_ENV_KEYS = [
+  'GIT_CEILING_DIRECTORIES',
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_COMMON_DIR',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+] as const;
+
+/** Matches pinned CodeGraph 1.6.4 `isStaleDefaultGitignore` (`directory.js:491-495`). */
+function codeGraphRewritesGitignore(content: string): boolean {
+  if (!content.trimStart().startsWith(CODEGRAPH_GITIGNORE_MARKER)) return false;
+  return !content.split('\n').some((line) => line.trim() === '*');
+}
+
+function unsafeCodeGraphDestination(message: string): ArchctxClientError {
+  return new ArchctxClientError({
+    code: 'RH_CODEGRAPH_DESTINATION_UNSAFE',
+    action: 'inspect-codegraph-index',
+    reasonCode: 'codegraph-destination-unsafe',
+    message,
+  });
+}
+
+export function sanitizeGitDiscoveryEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const clean: NodeJS.ProcessEnv = { ...env };
+  for (const key of GIT_DISCOVERY_ENV_KEYS) delete clean[key];
+  return clean;
+}
+
+/**
+ * Removes only Git's single trailing line terminator (`\r\n` or `\n` on win32; single `\n` on POSIX)
+ * so directory names ending in a literal `\r` or whitespace are never collapsed onto a sibling checkout.
+ */
+export function stripGitLineTerminator(value: string, platform: NodeJS.Platform = process.platform): string {
+  if (!value.endsWith('\n')) return value;
+  if (platform === 'win32' && value.endsWith('\r\n')) return value.slice(0, -2);
+  return value.slice(0, -1);
+}
+
+function unsafeArchctxRepoRoot(message: string): ArchctxClientError {
+  return new ArchctxClientError({
+    code: 'RH_ARCHCTX_UNSAFE_REPO_ROOT',
+    action: 'inspect-repository-root',
+    reasonCode: 'archctx-unsafe-repo-root',
+    message,
+  });
+}
+
+function assertSafeCheckoutPath(path: string, contextLabel: string, fail: (message: string) => Error): void {
+  if (path !== path.trim() || /[\u0000-\u001f\u007f]/.test(path)) {
+    throw fail(
+      `${contextLabel} refused checkout path with boundary whitespace or control characters (${JSON.stringify(path)}); checkout paths could target an adjacent checkout.`,
+    );
+  }
+}
+
+function readGitTopLevel(
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  contextLabel: string,
+  fail: (message: string) => Error,
+): string | null {
+  const probe = gitSpawnSync(['-C', cwd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', env });
+  if (probe.status !== 0) return null;
+  if (!probe.stdout.endsWith('\n')) {
+    throw fail(`${contextLabel} received malformed git rev-parse --show-toplevel output for ${JSON.stringify(cwd)}.`);
+  }
+  const stripped = stripGitLineTerminator(probe.stdout);
+  if (!stripped) {
+    throw fail(`${contextLabel} received empty git rev-parse --show-toplevel output for ${JSON.stringify(cwd)}.`);
+  }
+  return stripped;
+}
+
+function resolveVerifiedGitRoot(
+  inputPath: string,
+  callerEnv: NodeJS.ProcessEnv,
+  contextLabel: string,
+  fail: (message: string) => Error,
+  allowMissingOrNonGit: boolean,
+): string {
+  assertSafeCheckoutPath(inputPath, contextLabel, fail);
+  let fallbackRoot = inputPath;
+  if (allowMissingOrNonGit) {
+    if (!existsSync(inputPath)) return inputPath;
+    fallbackRoot = realpathSync(inputPath);
+    assertSafeCheckoutPath(fallbackRoot, contextLabel, fail);
+  }
+  const callerRoot = readGitTopLevel(inputPath, callerEnv, contextLabel, fail);
+  if (!callerRoot) {
+    if (allowMissingOrNonGit) return fallbackRoot;
+    throw fail(
+      `${contextLabel} requires a Git repository worktree; git rev-parse --show-toplevel failed in ${inputPath}.`,
+    );
+  }
+  assertSafeCheckoutPath(callerRoot, contextLabel, fail);
+  const canonicalRoot = realpathSync(callerRoot);
+  assertSafeCheckoutPath(canonicalRoot, contextLabel, fail);
+  const cleanRoot = readGitTopLevel(canonicalRoot, sanitizeGitDiscoveryEnv(callerEnv), contextLabel, fail);
+  if (!cleanRoot) {
+    throw fail(
+      `${contextLabel} refused ambiguous Git repository root (${JSON.stringify(callerRoot)}); unset GIT_DIR/GIT_WORK_TREE or run inside the target checkout.`,
+    );
+  }
+  assertSafeCheckoutPath(cleanRoot, contextLabel, fail);
+  if (realpathSync(cleanRoot) !== canonicalRoot) {
+    throw fail(
+      `${contextLabel} refused ambiguous Git repository root (${JSON.stringify(callerRoot)}); unset GIT_DIR/GIT_WORK_TREE or run inside the target checkout.`,
+    );
+  }
+  return canonicalRoot;
+}
+
+/**
+ * Verifies a repository path before invoking pinned `archctx@0.18.1`.
+ * Rejects leading/trailing whitespace, control characters (including literal `\r`),
+ * and ambiguous Git discovery roots before canonicalizing or mutating state (I2).
+ */
+export function assertSafeArchctxRepoRoot(
+  repoRoot: string,
+  callerEnv: NodeJS.ProcessEnv = process.env,
+  contextLabel = 'ArchContext operation',
+): string {
+  return resolveVerifiedGitRoot(repoRoot, callerEnv, contextLabel, unsafeArchctxRepoRoot, true);
+}
+
+/**
+ * Resolves and proves the exact Git worktree root that `archctx index seed` will mutate.
+ * Fails closed when Git discovery fails (never falling back to `cwd`), when the root has
+ * boundary whitespace or control characters, or when caller Git environment overrides
+ * disagree with the repository root at that directory (I2).
+ */
+function resolveCodeGraphSeedRoot(cwd: string, callerEnv: NodeJS.ProcessEnv): string {
+  return resolveVerifiedGitRoot(cwd, callerEnv, 'CodeGraph index seed', unsafeCodeGraphDestination, false);
+}
+
+function readPrefixBytes(path: string, maxBytes: number): Buffer {
+  const fd = openSync(path, 'r');
+  try {
+    const buffer = Buffer.alloc(maxBytes);
+    const bytesRead = readSync(fd, buffer, 0, maxBytes, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function assertProvenCodeGraphLockFile(indexDirectory: string, name: string): void {
+  const lockPath = join(indexDirectory, name);
+  const stat = lstatSync(lockPath, { throwIfNoEntry: false });
+  if (!stat) return;
+  if (!stat.isFile()) {
+    throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/${name} must be a regular file, not a symlink or directory. Inspect .codegraph before seeding or running codegraph init.`);
+  }
+  if (stat.size === 0 || stat.size > CODEGRAPH_LOCK_MAX_BYTES) {
+    throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/${name} does not match the PID lock format and could be unlinked as stale. Inspect .codegraph/${name} before seeding.`);
+  }
+  let content: string;
+  try {
+    content = readPrefixBytes(lockPath, CODEGRAPH_LOCK_MAX_BYTES).toString('utf8').trim();
+  } catch (error) {
+    throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/${name} is unreadable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!CODEGRAPH_PID_LOCK_PATTERN.test(content)) {
+    throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/${name} does not match the PID lock format and could be unlinked as stale. Inspect .codegraph/${name} before seeding.`);
+  }
+}
+
+const CODEGRAPH_DEFAULT_DIR = '.codegraph';
+const CODEGRAPH_WSL_DIR = '.codegraph-wsl';
+const WSL_WINDOWS_DRIVE_PATTERN = /^\/mnt\/[a-z](\/|$)/i;
+const CODEGRAPH_REQUIRED_TABLES = [
+  'schema_versions',
+  'nodes',
+  'edges',
+  'files',
+  'unresolved_refs',
+  'name_segment_vocab',
+  'synthesis_inputs',
+  'project_metadata',
+] as const;
+const CODEGRAPH_REQUIRED_NODE_COLUMNS = [
+  'id',
+  'kind',
+  'name',
+  'qualified_name',
+  'file_path',
+  'language',
+  'start_line',
+  'end_line',
+  'start_column',
+  'end_column',
+  'updated_at',
+] as const;
+
+export interface CodeGraphDestinationProbe {
+  readonly env?: NodeJS.ProcessEnv;
+  readonly platform?: NodeJS.Platform;
+  readonly procVersion?: string;
+  /** Optional logical path used only for WSL drive-mount classification in tests (never for filesystem I/O). */
+  readonly pathForWslCheck?: string;
+  /** True when the caller pins `CODEGRAPH_DIR=.codegraph` (e.g. direct `codegraph init`), false when `CODEGRAPH_DIR` stays unset for `archctx index seed`. */
+  readonly pinDefaultDir?: boolean;
+}
+
+export type BootstrapWorktreeCodeGraphOptions = ArchctxProviderOptions & {
+  readonly destinationProbe?: Omit<CodeGraphDestinationProbe, 'env' | 'pinDefaultDir'>;
+};
+
+function isWslRuntime(probe: CodeGraphDestinationProbe): boolean {
+  const platform = probe.platform ?? process.platform;
+  if (platform !== 'linux') return false;
+  const env = probe.env ?? process.env;
+  if (env.WSL_DISTRO_NAME || env.WSL_INTEROP) return true;
+  if (probe.procVersion !== undefined) {
+    const lower = probe.procVersion.toLowerCase();
+    return lower.includes('microsoft') || lower.includes('wsl');
+  }
+  try {
+    const version = readFileSync('/proc/version', 'utf8').toLowerCase();
+    return version.includes('microsoft') || version.includes('wsl');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Computes the effective CodeGraph data directory name that pinned CodeGraph 1.6.4
+ * (`directory.js:102-117`, `watch-policy.js:47-76`) resolves when `CODEGRAPH_DIR` is unset.
+ */
+export function effectiveCodeGraphDirName(repoRoot: string, probe: CodeGraphDestinationProbe = {}): string {
+  if (probe.pinDefaultDir) return CODEGRAPH_DEFAULT_DIR;
+  const wslPath = probe.pathForWslCheck ?? resolve(repoRoot);
+  if (!isWslRuntime(probe) || !WSL_WINDOWS_DRIVE_PATTERN.test(wslPath)) return CODEGRAPH_DEFAULT_DIR;
+  try {
+    if (statSync(join(repoRoot, CODEGRAPH_WSL_DIR)).isDirectory()) return CODEGRAPH_WSL_DIR;
+  } catch { /* absent or unreadable */ }
+  if (existsSync(join(repoRoot, CODEGRAPH_DEFAULT_DIR, 'codegraph.db'))) return CODEGRAPH_DEFAULT_DIR;
+  return CODEGRAPH_WSL_DIR;
+}
+
+/**
+ * Refuses any existing SQLite sidecar (`-wal`, `-shm`, `-journal`) beside `.codegraph/codegraph.db`.
+ * SQLite WAL/SHM salts are not stored in `codegraph.db`, so sidecar ownership cannot be cryptographically
+ * bound to the destination database; opening writable WAL mode beside a foreign sidecar could replay
+ * foreign frames or overwrite/unlink the user's file (I2).
+ */
+function assertNoCodeGraphSidecars(indexDirectory: string): void {
+  for (const sidecar of CODEGRAPH_SQLITE_SIDECARS) {
+    const stat = lstatSync(join(indexDirectory, sidecar), { throwIfNoEntry: false });
+    if (stat) {
+      throw unsafeCodeGraphDestination(
+        `CodeGraph destination .codegraph/${sidecar} is present. Stop active CodeGraph processes or inspect .codegraph/${sidecar} before seeding or running codegraph init.`,
+      );
+    }
+  }
+}
+
+/**
+ * After our own `index seed` succeeds (preflight already proved no sidecars existed beforehand),
+ * quiesce any empty writable-WAL sidecars left behind in `.codegraph/` while `archctx@0.18.1`
+ * keeps all read-only CodeGraph opens isolated inside private scratch copies (leaving sidecars
+ * intact if another process holds `codegraph.db` open).
+ */
+function quiesceSeededCodeGraphSidecars(repoRoot: string, nodeExecutable: string, env: NodeJS.ProcessEnv): void {
+  const dbPath = join(repoRoot, CODEGRAPH_DEFAULT_DIR, 'codegraph.db');
+  const dbStat = lstatSync(dbPath, { throwIfNoEntry: false });
+  if (!dbStat?.isFile()) return;
+  const walStat = lstatSync(`${dbPath}-wal`, { throwIfNoEntry: false });
+  const shmStat = lstatSync(`${dbPath}-shm`, { throwIfNoEntry: false });
+  if (!walStat && !shmStat) return;
+  if (walStat && (!walStat.isFile() || walStat.size > 0)) return;
+  if (shmStat && !shmStat.isFile()) return;
+  spawnSync(
+    nodeExecutable,
+    [
+      '--no-warnings',
+      '-e',
+      'const { DatabaseSync } = require("node:sqlite"); const db = new DatabaseSync(process.argv[1]); try { db.prepare("SELECT 1 FROM sqlite_master LIMIT 1").get(); } finally { db.close(); }',
+      dbPath,
+    ],
+    { cwd: repoRoot, env, stdio: 'ignore', timeout: 10_000 },
+  );
+}
+
+/**
+ * Proves on a disposable private temp copy (zero workspace writes, zero `-wal`/`-shm` creation
+ * inside `.codegraph/`, plain file path so Linux Bun SQLite without URI support works cleanly)
+ * that an existing `codegraph.db` carries pinned CodeGraph 1.6.4's full schema signature. This
+ * guarantees both `isInitialized(repoRoot) === true` (blocking parent-directory walk in
+ * `codegraph sync`) and CodeGraph ownership (refusing foreign SQLite databases, even ones with
+ * a `nodes` table).
+ */
+function assertProvenCodeGraphDatabase(dbPath: string): void {
+  let probeDir: string | undefined;
+  let db: Database | undefined;
+  try {
+    probeDir = mkdtempSync(join(tmpdir(), 'rh-codegraph-probe-'));
+    const tempDb = join(probeDir, 'codegraph.db');
+    copyFileSync(dbPath, tempDb, fsConstants.COPYFILE_FICLONE);
+    chmodSync(tempDb, 0o600);
+    db = new Database(tempDb, { create: false });
+    db.exec('PRAGMA query_only = ON;');
+    const tables = new Set(
+      (db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name),
+    );
+    const missingTables = CODEGRAPH_REQUIRED_TABLES.filter((table) => !tables.has(table));
+    if (missingTables.length > 0) {
+      throw unsafeCodeGraphDestination(
+        `CodeGraph destination .codegraph/codegraph.db does not match the pinned CodeGraph 1.6.4 schema (missing tables: ${missingTables.join(', ')}). Inspect .codegraph/codegraph.db before seeding.`,
+      );
+    }
+    const nodeColumns = new Set(
+      (db.query('PRAGMA table_info(nodes)').all() as Array<{ name: string }>).map((row) => row.name),
+    );
+    const missingColumns = CODEGRAPH_REQUIRED_NODE_COLUMNS.filter((column) => !nodeColumns.has(column));
+    if (missingColumns.length > 0) {
+      throw unsafeCodeGraphDestination(
+        `CodeGraph destination .codegraph/codegraph.db nodes table does not match the pinned CodeGraph 1.6.4 schema (missing columns: ${missingColumns.join(', ')}). Inspect .codegraph/codegraph.db before seeding.`,
+      );
+    }
+    const versionRow = db.query("SELECT 1 AS ok FROM schema_versions WHERE typeof(version) = 'integer' AND version >= 1 LIMIT 1").get();
+    if (!versionRow) {
+      throw unsafeCodeGraphDestination(
+        'CodeGraph destination .codegraph/codegraph.db has no schema_versions entry matching pinned CodeGraph 1.6.4. Inspect .codegraph/codegraph.db before seeding.',
+      );
+    }
+  } catch (error) {
+    if (error instanceof ArchctxClientError) throw error;
+    throw unsafeCodeGraphDestination(
+      `CodeGraph destination .codegraph/codegraph.db failed read-only schema verification: ${error instanceof Error ? error.message : String(error)}. Inspect .codegraph/codegraph.db before seeding.`,
+    );
+  } finally {
+    try {
+      db?.close();
+    } finally {
+      if (probeDir !== undefined) rmSync(probeDir, { recursive: true, force: true });
+    }
+  }
+}
+
+/**
+ * Verifies `<repoRoot>/.codegraph` before `archctx index seed` or worktree `codegraph init`.
+ * Fails closed when pinned CodeGraph would select another directory (such as `.codegraph-wsl` on
+ * WSL Windows drives), or on symlinks, non-directories, occupied directories without `codegraph.db`,
+ * non-CodeGraph or schemaless `codegraph.db`, unproven SQLite sidecars, unproven lock or error-log
+ * files that pinned CodeGraph could unlink/overwrite, or a `.gitignore` that pinned CodeGraph would rewrite.
+ */
+export function assertSafeCodeGraphDestination(repoRoot: string, probe: CodeGraphDestinationProbe = {}): void {
+  const effectiveDir = effectiveCodeGraphDirName(repoRoot, probe);
+  if (effectiveDir !== CODEGRAPH_DEFAULT_DIR) {
+    throw unsafeCodeGraphDestination(
+      `CodeGraph resolves ${effectiveDir} instead of ${CODEGRAPH_DEFAULT_DIR} for ${repoRoot}; refusing to seed an unchecked destination. Inspect ${CODEGRAPH_DEFAULT_DIR} and ${effectiveDir} (remove ${effectiveDir} if unused), or initialize linked worktrees via guarded rh worktrees start.`,
+    );
+  }
+  const indexDirectory = join(repoRoot, CODEGRAPH_DEFAULT_DIR);
+  let dirStat: ReturnType<typeof lstatSync> | undefined;
+  try {
+    dirStat = lstatSync(indexDirectory, { throwIfNoEntry: false });
+  } catch (error) {
+    throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph is unreadable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!dirStat) return;
+  if (!dirStat.isDirectory()) {
+    throw unsafeCodeGraphDestination('CodeGraph destination .codegraph must be a regular directory, not a symlink or file. Inspect .codegraph before seeding or running codegraph init.');
+  }
+
+  let entries: string[];
+  try {
+    entries = readdirSync(indexDirectory);
+  } catch (error) {
+    throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph cannot be listed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const gitignorePath = join(indexDirectory, '.gitignore');
+  const gitignoreStat = lstatSync(gitignorePath, { throwIfNoEntry: false });
+  if (gitignoreStat) {
+    if (!gitignoreStat.isFile()) {
+      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/.gitignore must be a regular file, not a symlink or directory. Inspect .codegraph before seeding or running codegraph init.');
+    }
+    let content: string;
+    try {
+      content = readFileSync(gitignorePath, 'utf8');
+    } catch (error) {
+      throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/.gitignore is unreadable and would be overwritten: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (codeGraphRewritesGitignore(content)) {
+      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/.gitignore matches the stale-default pattern and would be overwritten. Inspect .codegraph/.gitignore before seeding or running codegraph init.');
+    }
+  }
+
+  const dbPath = join(indexDirectory, 'codegraph.db');
+  const dbStat = lstatSync(dbPath, { throwIfNoEntry: false });
+  if (!dbStat) {
+    if (entries.length > 0) {
+      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph is occupied without codegraph.db. Inspect .codegraph before seeding or running codegraph init.');
+    }
+    return;
+  }
+  if (!dbStat.isFile()) {
+    throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db must be a regular file, not a symlink or directory. Inspect .codegraph before seeding or running codegraph init.');
+  }
+  let header: Buffer;
+  try {
+    header = readPrefixBytes(dbPath, SQLITE_HEADER_MAGIC.length);
+  } catch (error) {
+    throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/codegraph.db is unreadable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (dbStat.size < SQLITE_HEADER_MIN_BYTES || !header.equals(SQLITE_HEADER_MAGIC)) {
+    throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db is not a valid SQLite 3 database. Inspect .codegraph/codegraph.db before seeding.');
+  }
+  assertNoCodeGraphSidecars(indexDirectory);
+  assertProvenCodeGraphDatabase(dbPath);
+  for (const lockName of CODEGRAPH_LOCK_FILES) {
+    assertProvenCodeGraphLockFile(indexDirectory, lockName);
+  }
+  for (const entry of entries) {
+    if (CODEGRAPH_LOCK_TEMP_PATTERN.test(entry)) {
+      assertProvenCodeGraphLockFile(indexDirectory, entry);
+    }
+  }
+
+  const errorLogPath = join(indexDirectory, 'errors.log');
+  const errorLogStat = lstatSync(errorLogPath, { throwIfNoEntry: false });
+  if (errorLogStat) {
+    if (!errorLogStat.isFile()) {
+      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/errors.log must be a regular file, not a symlink or directory. Inspect .codegraph before seeding.');
+    }
+    let prefix: string;
+    try {
+      prefix = readPrefixBytes(errorLogPath, Buffer.byteLength(CODEGRAPH_ERROR_LOG_MARKER, 'utf8')).toString('utf8');
+    } catch (error) {
+      throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/errors.log is unreadable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (prefix !== CODEGRAPH_ERROR_LOG_MARKER) {
+      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/errors.log is not a CodeGraph error log and could be overwritten or unlinked. Inspect .codegraph/errors.log before seeding.');
+    }
+  }
+}
+
 function hasPrivateCodeGraphIndex(directory: string): boolean {
   return lstatSync(directory, { throwIfNoEntry: false })?.isDirectory() === true
     && lstatSync(join(directory, 'codegraph.db'), { throwIfNoEntry: false })?.isFile() === true;
 }
 
-function seedRetryLoop(
-  worktreeRoot: string,
+function runArchctxIndexSeed(
+  repoRoot: string,
   requiredVersion: string,
   timeoutMs: number,
   options: ArchctxProviderOptions,
-  onFailure: (error: unknown) => void,
-): boolean {
-  const indexDirectory = join(worktreeRoot, '.codegraph');
-  // All seed attempts share the original command deadline. Only an active
-  // first publisher can turn a missing base into an available one shortly.
-  const seedDeadline = Date.now() + timeoutMs;
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      new ArchctxClient(worktreeRoot, requiredVersion, { ...options, deadlineMs: seedDeadline }).data(['sync', '--json'], timeoutMs);
-      return hasPrivateCodeGraphIndex(indexDirectory);
-    } catch (error) {
-      const delay = CODEGRAPH_SEED_RETRY_DELAYS_MS[attempt];
-      if (!(error instanceof ArchctxClientError && error.code === 'AC_CODE_FACTS_UNAVAILABLE'
-        && error.reasonCode === 'index-base-building' && error.retryable === true)
-        || delay === undefined || Date.now() + delay >= seedDeadline) {
-        onFailure(error);
-        return false;
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
-    }
+  processTimeoutMs = timeoutMs,
+): IndexSeedResultV1 {
+  const env: NodeJS.ProcessEnv = {
+    ...sanitizeGitDiscoveryEnv(options.env ?? process.env),
+    CODEGRAPH_FORCE_WATCH: '1',
+  };
+  // `archctx index seed` disables shared-base seeding when CODEGRAPH_DIR is set (`index-base.ts:189`).
+  delete env.CODEGRAPH_DIR;
+  delete env.CODEGRAPH_NO_WATCH;
+  assertSafeArchctxRepoRoot(repoRoot, env, 'CodeGraph index seed');
+  assertSafeCodeGraphDestination(repoRoot, { env });
+  const envelope = new ArchctxClient(repoRoot, requiredVersion, { ...options, env }).json(
+    ['index', 'seed', '--timeout-ms', String(timeoutMs), '--json'],
+    processTimeoutMs,
+  );
+  if (!isRecord(envelope) || envelope.requestId !== 'index.seed') {
+    throw new ArchctxClientError({
+      code: 'RH_ARCHCTX_INDEX_SEED_INVALID',
+      action: 'update-repo-harness',
+      reasonCode: 'index-seed-invalid',
+      message: 'archctx index seed returned an unexpected requestId',
+    });
   }
+  const decoded = decodeIndexSeedResult(envelope.data);
+  if (!options.run) {
+    quiesceSeededCodeGraphSidecars(repoRoot, resolveCompatibleNodeRuntime(env, options.trustedNodeCandidateSource), env);
+  }
+  return decoded;
 }
 
 /** Called after the primary checkout and plugin have opted into CodeGraph. */
-export function bootstrapWorktreeCodeGraph(primaryRoot: string, worktreeRoot: string): void {
-  const env: NodeJS.ProcessEnv = { ...process.env, CODEGRAPH_NO_DOWNLOAD: '1', DO_NOT_TRACK: '1' };
+export function bootstrapWorktreeCodeGraph(primaryRoot: string, worktreeRoot: string, options: BootstrapWorktreeCodeGraphOptions = {}): void {
+  const env: NodeJS.ProcessEnv = {
+    ...sanitizeGitDiscoveryEnv(options.env ?? process.env),
+    CODEGRAPH_NO_DOWNLOAD: '1',
+    CODEGRAPH_FORCE_WATCH: '1',
+    DO_NOT_TRACK: '1',
+  };
   delete env.CODEGRAPH_DIR;
-  const policy = readArchitectureProjectionPolicy({ architecture: DEFAULT_GLOBAL_ARCHITECTURE });
+  delete env.CODEGRAPH_NO_WATCH;
+  // Refuse leading/trailing-whitespace checkout roots before upstream archctx trims Git output onto a sibling checkout (I2).
+  assertSafeArchctxRepoRoot(primaryRoot, env, 'CodeGraph primary checkout');
+  assertSafeArchctxRepoRoot(worktreeRoot, env, 'CodeGraph worktree');
+  const policy = options.policy ?? readArchitectureProjectionPolicy({ architecture: DEFAULT_GLOBAL_ARCHITECTURE });
   const indexDirectory = join(worktreeRoot, '.codegraph');
+  const destinationProbe: CodeGraphDestinationProbe = { ...options.destinationProbe, env };
+  const runtimePlatform = options.destinationProbe?.platform ?? process.platform;
+  const wslPath = destinationProbe.pathForWslCheck ?? resolve(worktreeRoot);
 
-  if (process.platform !== 'win32') {
-    // Start uses the upstream tip for the new branch. Publish the actual primary
-    // HEAD and let archctx sync the private copy against the worktree sources.
+  // On WSL /mnt/<drive>, ordinary CodeGraph readers prefer `.codegraph-wsl` whenever it exists; refuse that layout instead of writing an unconsulted `.codegraph`.
+  if (isWslRuntime(destinationProbe) && WSL_WINDOWS_DRIVE_PATTERN.test(wslPath)) {
+    if (lstatSync(join(worktreeRoot, CODEGRAPH_WSL_DIR), { throwIfNoEntry: false })) {
+      throw unsafeCodeGraphDestination(
+        `CodeGraph destination ${CODEGRAPH_WSL_DIR} already exists on this WSL drive mount; ordinary CodeGraph readers prefer ${CODEGRAPH_WSL_DIR} over ${CODEGRAPH_DEFAULT_DIR}. Inspect or remove ${CODEGRAPH_WSL_DIR} before bootstrapping the worktree.`,
+      );
+    }
+  }
+
+  // Validate `.codegraph` up front with pinDefaultDir: true so WSL /mnt/<drive> worktrees without `.codegraph-wsl` fall through cleanly to pinned `codegraph init`.
+  assertSafeCodeGraphDestination(worktreeRoot, { ...destinationProbe, pinDefaultDir: true });
+
+  if (runtimePlatform !== 'win32' && effectiveCodeGraphDirName(worktreeRoot, destinationProbe) === CODEGRAPH_DEFAULT_DIR) {
+    // Only refresh primary when it already has a private CodeGraph index; never init primary.
     if (hasPrivateCodeGraphIndex(join(primaryRoot, '.codegraph'))) {
       try {
-        const data = new ArchctxClient(primaryRoot, policy.requiredVersion, { env }).data(['sync', '--json'], policy.timeoutMs);
-        if (isRecord(data) && (data.codeGraphBase === 'failed' || data.codeGraphBase === 'skipped-unproven')) {
-          console.error(`[ContractWorktree] CodeGraph base refresh: ${data.codeGraphBase}`);
-        }
+        runArchctxIndexSeed(primaryRoot, policy.requiredVersion, policy.timeoutMs, { ...options, env, policy });
       } catch (error) {
         reportBootstrapSyncFailure('CodeGraph base refresh', error);
       }
     }
-    if (seedRetryLoop(worktreeRoot, policy.requiredVersion, policy.timeoutMs, { env, policy }, (error) => reportBootstrapSyncFailure('CodeGraph shared-base seed', error))) {
+    const linkedTimeoutMs = Math.min(policy.timeoutMs, CODEGRAPH_INDEX_SEED_LINKED_TIMEOUT_MS);
+    const linkedProcessTimeoutMs = Math.max(policy.timeoutMs, linkedTimeoutMs + 15_000);
+    try {
+      runArchctxIndexSeed(worktreeRoot, policy.requiredVersion, linkedTimeoutMs, { ...options, env, policy }, linkedProcessTimeoutMs);
+      if (!hasPrivateCodeGraphIndex(indexDirectory)) {
+        throw new Error('archctx index seed did not create a worktree index');
+      }
       return;
+    } catch (error) {
+      const fallbackEligible = error instanceof ArchctxClientError
+        && error.code === 'AC_CODE_FACTS_UNAVAILABLE'
+        && (error.reasonCode === 'index-missing' || error.reasonCode === 'index-base-building');
+      if (!fallbackEligible) throw error;
+      reportBootstrapSyncFailure('CodeGraph shared-base seed', error);
     }
   }
 
-  // Init can write the ignore file and SQLite sidecars. Preserve an occupied
-  // directory, including an index that appeared during an unsuccessful sync.
-  const index = lstatSync(indexDirectory, { throwIfNoEntry: false });
-  if (index && (!index.isDirectory() || readdirSync(indexDirectory).length > 0)) {
-    throw new Error('CodeGraph bootstrap could not verify the worktree index. Inspect .codegraph before running codegraph init.');
+  // Init writes the ignore file and SQLite sidecars. Re-check safety and refuse an existing database.
+  assertSafeCodeGraphDestination(worktreeRoot, { ...destinationProbe, pinDefaultDir: true });
+  if (lstatSync(join(indexDirectory, 'codegraph.db'), { throwIfNoEntry: false })) {
+    throw unsafeCodeGraphDestination('CodeGraph destination .codegraph already contains codegraph.db. Inspect .codegraph before running codegraph init.');
   }
   console.error('[ContractWorktree] Running CodeGraph init in the worktree');
-  indexPackageLocalCodeGraph(worktreeRoot, { env: { ...env, CODEGRAPH_DIR: '.codegraph' }, policy });
+  indexPackageLocalCodeGraph(worktreeRoot, { ...options, env: { ...env, CODEGRAPH_DIR: '.codegraph' }, policy });
   if (!hasPrivateCodeGraphIndex(indexDirectory)) throw new Error('codegraph init did not create a worktree index');
+  const resolvedAfterInit = effectiveCodeGraphDirName(worktreeRoot, destinationProbe);
+  if (resolvedAfterInit !== CODEGRAPH_DEFAULT_DIR) {
+    throw unsafeCodeGraphDestination(
+      `CodeGraph resolves ${resolvedAfterInit} instead of ${CODEGRAPH_DEFAULT_DIR} after worktree init; ordinary CodeGraph readers would bypass the new worktree index.`,
+    );
+  }
 }
 
 function reportBootstrapSyncFailure(step: string, error: unknown): void {
@@ -767,7 +1213,15 @@ export function indexPackageLocalCodeGraph(checkoutRoot: string, options: Archct
   const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
   if (policy.provider === 'disabled') throw new Error('architecture projection provider is disabled');
   const binaryPath = resolvePackageLocalCodeGraph(resolvePackageLocalArchctx(options.consumerRoot, policy.requiredVersion));
-  const env = { ...(options.env ?? process.env), CODEGRAPH_NO_DOWNLOAD: '1', CODEGRAPH_TELEMETRY: '0' };
+  const env: NodeJS.ProcessEnv = {
+    ...(options.env ?? process.env),
+    CODEGRAPH_DIR: '.codegraph',
+    CODEGRAPH_NO_DOWNLOAD: '1',
+    CODEGRAPH_FORCE_WATCH: '1',
+    CODEGRAPH_TELEMETRY: '0',
+    DO_NOT_TRACK: '1',
+  };
+  delete env.CODEGRAPH_NO_WATCH;
   const args = CODEGRAPH_INIT_ARGS;
   const result = options.run
     ? options.run(binaryPath, args, { cwd: checkoutRoot, timeoutMs: policy.timeoutMs, env })
@@ -795,15 +1249,117 @@ function resolvePackageLocalCodeGraph(archctx: ResolvedArchctxPackage): string {
   return realBinary;
 }
 
-function runProjectionCommand(command: 'run' | 'readback', request: ProjectionRequestV1, repoRoot: string, options: ArchctxProviderOptions): unknown {
+const PROJECTION_WRITE_RECONCILE_GUIDANCE =
+  'outcome unknown. Run rh arch projection check --json and git diff to reconcile before authorizing a fresh apply.';
+
+/**
+ * Structured `archctx@0.18.1` error codes emitted exclusively before `changeSetEngine.apply`
+ * writes files. Never include `AC_UNCLASSIFIED_FAILURE`, `AC_RUNTIME_UNAVAILABLE`,
+ * or unvetted codes that can surface after partial or committed writes.
+ */
+const PRE_WRITE_PROJECTION_ERROR_CODES = new Set<string>([
+  'AC_REPO_NOT_FOUND',
+  'AC_RUNTIME_VERSION_UNSUPPORTED',
+  'AC_NODE_VERSION_UNSUPPORTED',
+  'AC_CODEGRAPH_UNAVAILABLE',
+  'AC_CODE_FACTS_UNAVAILABLE',
+  'AC_CODE_FACTS_NOT_READY',
+  'AC_MODEL_ADOPTION_REQUIRED',
+  'AC_POLICY_VIOLATION',
+  'AC_PATH_DENIED',
+  'AC_USER_CONFIRMATION_REQUIRED',
+  'AC_CAPABILITY_UNSUPPORTED',
+]);
+
+/** `AC_SCHEMA_INVALID` reasons proven pre-write (explicitly excludes post-write `projection-result-invalid`). */
+const PRE_WRITE_PROJECTION_SCHEMA_REASONS = new Set<string>([
+  'projection-input-invalid',
+  'projection-adoption-profile-invalid',
+  'projection-adoption-approval-input-invalid',
+  'plan-input-invalid',
+  'apply-input-invalid',
+  'constraint-model-invalid',
+  'state-machine-model-invalid',
+  'cli-input-invalid',
+  'product-id-invalid',
+  'workspace-exports-unsupported',
+]);
+
+/** `AC_PRECONDITION_FAILED` reasons proven pre-write (explicitly excludes post-write `changeset-rollback-conflict`). */
+const PRE_WRITE_PROJECTION_PRECONDITION_REASONS = new Set<string>([
+  'projection-snapshot-mismatch',
+  'projection-inputs-changed-during-run',
+  'projection-manifest-upgrade-required',
+  'projection-manifest-invalid',
+  'projection-manifest-incompatible',
+  'architecture-model-ignored',
+  'projection-footprint-uncovered',
+  'projection-ownership-repair-required',
+  'projection-orphan-review-required',
+  'projection-adoption-refused',
+  'projection-adoption-preimage-missing',
+  'projection-adoption-preview-mismatch',
+  'projection-adoption-fixed-point-unproven',
+  'projection-accepted-fixed-point-unproven',
+  'projection-ambiguous-ownership',
+  'plan-worktree-changed',
+  'plan-model-invalid',
+  'apply-repository-mismatch',
+  'apply-draft-missing',
+  'apply-profile-missing',
+  'apply-profile-changed',
+  'apply-worktree-changed',
+  'apply-head-changed',
+  'apply-model-invalid',
+  'apply-model-changed',
+  'apply-preimage-changed',
+  'runtime-writer-locked',
+  'runtime-writer-owned',
+]);
+
+function isProvenPreWriteProjectionRefusal(error: ArchctxClientError): boolean {
+  if (PRE_WRITE_PROJECTION_ERROR_CODES.has(error.code)) return true;
+  if (error.code === 'AC_SCHEMA_INVALID') {
+    return error.reasonCode !== undefined && PRE_WRITE_PROJECTION_SCHEMA_REASONS.has(error.reasonCode);
+  }
+  if (error.code === 'AC_PRECONDITION_FAILED') {
+    return error.reasonCode !== undefined && PRE_WRITE_PROJECTION_PRECONDITION_REASONS.has(error.reasonCode);
+  }
+  return false;
+}
+
+function runProjectionCommand(request: ProjectionRequestV1, repoRoot: string, options: ArchctxProviderOptions): ProjectionResultV3 {
   const policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
-  if ((request.mode === 'apply' || request.mode === 'adopt') && policy.applyMode === 'disabled') throw new Error('architecture projection apply is disabled');
+  const writeMode = request.mode === 'apply' || request.mode === 'adopt';
+  if (writeMode && policy.applyMode === 'disabled') throw new Error('architecture projection apply is disabled');
   archctxCapabilities(repoRoot, { ...options, policy });
   const client = new ArchctxClient(repoRoot, policy.requiredVersion, options);
-  try { return client.data(['projection', command, '--request-json', JSON.stringify(request)], policy.timeoutMs); }
-  catch (error) {
-    if (error instanceof ArchctxClientError && error.code === 'RH_ARCHCTX_TIMEOUT') throw new ArchctxClientError({ code: error.code, action: error.action, message: `${error.message} Retry with --request-id ${request.requestId}.` });
-    throw error;
+  // Pre-launch deadline and runtime checks stay distinct from started write mutations.
+  remainingTimeout(options, policy.timeoutMs, 'archctx projection run');
+  if (!options.run) {
+    resolveCompatibleNodeRuntime(options.env ?? process.env, options.trustedNodeCandidateSource);
+  }
+  try {
+    const data = client.data(['projection', 'run', '--request-json', JSON.stringify(request)], policy.timeoutMs);
+    return assertProjectionResult(data, request.requestId);
+  } catch (error) {
+    if (!writeMode) throw error;
+    if (error instanceof ArchctxClientError && (
+      error.code === 'RH_ARCHCTX_LAUNCH_FAILED'
+      || isProvenPreWriteProjectionRefusal(error)
+      || (error.code === 'RH_ARCHCTX_TIMEOUT' && error.providerMessage.startsWith('architecture projection timeout before '))
+    )) {
+      throw error;
+    }
+    const code = error instanceof ArchctxClientError ? error.code : 'RH_ARCHCTX_WRITE_OUTCOME_UNKNOWN';
+    const detail = error instanceof ArchctxClientError
+      ? error.providerMessage
+      : error instanceof Error ? error.message : String(error);
+    throw new ArchctxClientError({
+      code,
+      action: 'reconcile-projection-state',
+      message: `${detail}; ${PROJECTION_WRITE_RECONCILE_GUIDANCE}`,
+    });
   }
 }
 

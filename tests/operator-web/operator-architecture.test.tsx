@@ -22,7 +22,7 @@ import { defaultTopologyBase, layoutTopology, type TopologyBase } from '../../sr
 import { repairRoute, routePath, sceneBounds, sceneFindings, sceneSvg, textWidth, type PlacedScene, type SceneBox } from '../../src/operator-web/architecture-scene';
 import { contentBox, firstViewport } from '../../src/operator-web/architecture-map-parts';
 import recordedMap from '../../src/operator-web/fixtures/architecture-map.json';
-import type { ArchitectureHistory as HistoryPage } from 'archctx-contracts';
+import { REF_IMPACT_BATCH_UNAVAILABLE_REASONS, type ArchitectureHistory as HistoryPage } from 'archctx-contracts';
 import { historyLayoutInput, historyShape, skippedMilestones, type ValidMilestone } from '../../src/operator-web/ArchitectureHistory';
 // Three real `archctx history --ref dd9ccef3 --offset N --limit M --json` pages of this repository.
 import historyPages from '../fixtures/architecture-history/repo-harness-pages.json';
@@ -774,6 +774,26 @@ describe('architecture map', () => {
       expect([prSlot(CENTER), document.querySelector('[data-module-impact="21"]')?.textContent])
         .toEqual(['1', `Changes ${files} here.`]);
     }
+
+    // Expanded ref-impact-batch unavailable reasons decode, translate in both locales, and render on the PR layer.
+    for (const reason of REF_IMPACT_BATCH_UNAVAILABLE_REASONS) {
+      expect(translate('en', `architecture.layer.pull_requests.pr.${reason}`).length).toBeGreaterThan(0);
+      expect(translate('zh', `architecture.layer.pull_requests.pr.${reason}`).length).toBeGreaterThan(0);
+    }
+    const batchGapMap = mapFor(true, { ...mapLayers, pull_requests: { state: 'ok', observed_at: '2026-10-27T08:59:00.000Z', pull_requests: [
+      { number: 24, title: 'Large diff', url: 'https://github.com/acme/widgets/pull/24', head_sha: head, impact: { state: 'unavailable', reason: 'diff-limit-exceeded' } },
+    ] } });
+    await act(async () => root?.render(workspace({ repositoryId: 'repo-batch-gap', readMap: reader({ state: 'ok', map: batchGapMap }) })));
+    await settle();
+    await act(async () => document.querySelector<HTMLButtonElement>('.architecture-layers [data-layer="pull_requests"]')!.click());
+    await settle();
+    await act(async () => {
+      select().value = '24';
+      select().dispatchEvent(new window.Event('change', { bubbles: true }) as unknown as Event);
+    });
+    await settle();
+    expect(document.querySelector('.architecture-map__gap[data-gap="pull_request"]')?.textContent)
+      .toBe('No impact for this pull request: the diff exceeds the archctx impact limit.');
   });
 
   test('a layer with data that marks no node dims no node', async () => {

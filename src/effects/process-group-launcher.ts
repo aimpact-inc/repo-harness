@@ -18,6 +18,7 @@ interface LauncherResult {
   readonly code: number | null;
   readonly signal: NodeJS.Signals | null;
   readonly spawnError: string;
+  readonly launchFailed: boolean;
 }
 
 export const PROCESS_GROUP_LAUNCHER_FLAG = '--process-group-launcher';
@@ -44,45 +45,54 @@ async function waitForSupervisorRelease(): Promise<void> {
 }
 
 async function launch(options: LauncherOptions): Promise<number> {
-  await waitForSupervisorRelease();
-  const child = spawn(options.command, [...options.args], { stdio: 'inherit' });
-  const completion = await new Promise<Completion>((resolve) => {
-    let settled = false;
-    child.once('error', (error) => {
-      if (settled) return;
-      settled = true;
-      resolve({ code: 1, signal: null, error });
-    });
-    child.once('exit', (code, signal) => {
-      if (settled) return;
-      settled = true;
-      resolve({ code, signal, error: null });
-    });
-  });
-  publishResult(options.resultPath, {
-    code: completion.code,
-    signal: completion.signal,
-    spawnError: completion.error?.message ?? '',
-  });
-  if (completion.error) return 1;
-  if (completion.signal) process.kill(process.pid, completion.signal);
-  return completion.code ?? 1;
-}
-
-export async function runProcessGroupLauncherCli(argv: readonly string[]): Promise<number> {
-  const options = parseArgs(argv);
+  let targetSpawnStarted = false;
   try {
-    return await launch(options);
+    await waitForSupervisorRelease();
+    targetSpawnStarted = true;
+    const child = spawn(options.command, [...options.args], { stdio: 'inherit' });
+    const completion = await new Promise<Completion>((resolve) => {
+      let settled = false;
+      child.once('error', (error) => {
+        if (settled) return;
+        settled = true;
+        resolve({ code: 1, signal: null, error });
+      });
+      child.once('exit', (code, signal) => {
+        if (settled) return;
+        settled = true;
+        resolve({ code, signal, error: null });
+      });
+    });
+    const launchFailed = completion.error !== null && !(typeof child.pid === 'number' && child.pid > 0);
+    publishResult(options.resultPath, {
+      code: completion.code,
+      signal: completion.signal,
+      spawnError: completion.error?.message ?? '',
+      launchFailed,
+    });
+    if (completion.error) return 1;
+    if (completion.signal) process.kill(process.pid, completion.signal);
+    return completion.code ?? 1;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     try {
-      publishResult(options.resultPath, { code: 1, signal: null, spawnError: message });
+      publishResult(options.resultPath, {
+        code: 1,
+        signal: null,
+        spawnError: message,
+        launchFailed: !targetSpawnStarted,
+      });
     } catch {
       // The supervisor reports a missing launcher result if this also fails.
     }
     process.stderr.write(`${message}\n`);
     return 1;
   }
+}
+
+export async function runProcessGroupLauncherCli(argv: readonly string[]): Promise<number> {
+  const options = parseArgs(argv);
+  return await launch(options);
 }
 
 // Keep imported module initialization synchronous. Bun must not create an async

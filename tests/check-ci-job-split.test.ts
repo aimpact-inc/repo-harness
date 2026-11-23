@@ -1226,7 +1226,6 @@ describe('architecture lanes', () => {
       ['src/effects/architecture/new-internal.ts', '../architecture/new-internal'],
     ] as const;
     const importFrom = (path: string) => `import { value } from "${path}";\nexport const answer = value;\n`;
-    let client: ArchctxClient | undefined;
     try {
       mkdirSync(temporary);
       mkdirSync(home);
@@ -1250,9 +1249,9 @@ describe('architecture lanes', () => {
       const base = fixtureCommit(root);
       const checkout = layout === 'primary' ? root : join(scratch, 'linked');
       if (layout === 'linked') fixtureGit(root, ['worktree', 'add', '--detach', checkout, base]);
-      client = new ArchctxClient(checkout, ARCHCTX_REQUIRED_VERSION, { env });
+      const client = new ArchctxClient(checkout, ARCHCTX_REQUIRED_VERSION, { env });
       indexPackageLocalCodeGraph(checkout, { env, policy });
-      const constraintReport = () => JSON.stringify(client!.json(['constraints', 'check', '--json'], policy.timeoutMs));
+      const constraintReport = () => JSON.stringify(client.json(['constraints', 'check', '--json'], policy.timeoutMs));
       const pass = runLane(['architecture-advisory', '--base', base], { constraints: constraintReport(), debt: debt([]), check: noop, checkExit: 0 });
       expect(pass.status, pass.stdout + pass.stderr).toBe(0);
       expect(pass.stdout).toContain(`[ci] ${PLUGIN_INTERNALS}: 0 violations, coverage complete.`);
@@ -1301,11 +1300,8 @@ describe('architecture lanes', () => {
       }
       expect(readFileSync(join(checkout, constraintPath), 'utf8')).toBe(constraintBody);
     } finally {
-      try { client?.json(['daemon', 'stop', '--json'], policy.timeoutMs, true); }
-      finally {
-        rmSync(scratch, { recursive: true, force: true });
-        rmSync(root, { recursive: true, force: true });
-      }
+      rmSync(scratch, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
     }
   }, 60_000);
 

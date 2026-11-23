@@ -258,9 +258,17 @@ describe("canonical adoption plan", () => {
         mkdirSync(join(repo, dirname(path)), { recursive: true });
         writeFileSync(join(repo, path), "old runtime state\n");
       }
-      // The block as a release rendered it: the base block and a retired-rule section.
+      // The block as v0.32.0 rendered it: the released base block and a retired-rule section.
+      const refactorDecisionsAllowlist = [
+        "!.archcontext/refactor-decisions/",
+        ".archcontext/refactor-decisions/*",
+        "!.archcontext/refactor-decisions/recommendation.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json",
+        ".archcontext/refactor-decisions/*/",
+        "",
+      ].join("\n");
+      const releasedV032Base = GITIGNORE_MANAGED_BLOCK_CONTENT.replace(refactorDecisionsAllowlist, "");
       const releasedRetired = ["", "# Retired runtime state that still exists; repo-harness upgrade lists these files", ...RETIRED_RUNTIME_IGNORE_RULES.slice(0, -1)];
-      writeFileSync(join(repo, ".gitignore"), ["# BEGIN: repo-harness generated-runtime", GITIGNORE_MANAGED_BLOCK_CONTENT, ...releasedRetired, "# END: repo-harness generated-runtime", ""].join("\n"));
+      writeFileSync(join(repo, ".gitignore"), ["# BEGIN: repo-harness generated-runtime", releasedV032Base, ...releasedRetired, "# END: repo-harness generated-runtime", ""].join("\n"));
       const untracked = () => spawnSync("git", ["status", "--porcelain", "--untracked-files=all", "--", codegraph, ...retired], { cwd: repo, encoding: "utf8" }).stdout;
       const refresh = () => expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }), LEDGER).ok).toBe(true);
 

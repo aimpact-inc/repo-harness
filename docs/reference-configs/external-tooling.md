@@ -1074,7 +1074,7 @@ never call the export. They take capability identity from the node id:
 `capability.<domain>.<name>` gives `<domain>-<name>` and its module document.
 Path ownership under `archcontext` comes only from the
 package-local archctx `resolve --paths-from` command. One process resolves one batch of
-paths. It reads no daemon state and no CodeGraph index. The pre-edit hook,
+paths. It runs in-process and reads no CodeGraph index. The pre-edit hook,
 Effective State, `rh capability resolve match` and `rh capability context` all use
 this route. If archctx cannot run, Effective State reports the
 `capability_ownership:unavailable` blocker. A model fault or an ownership fault
@@ -1224,7 +1224,7 @@ root. Inspect
 another state dir reports an empty state. For initial setup, run `once`. If
 the archctx result reports missing code facts, read `data.worktreePath` from
 `status`, run `codegraph init -y <worktreePath>`, then run `once` again. Initialize only that
-writer-owned worktree. Do not replace a shared daemon or index other workspaces.
+writer-owned worktree. Do not index other workspaces.
 Inspect facts again if archctx reports a stale index after the base moves; the
 command does not invent a repair.
 
@@ -1320,33 +1320,26 @@ All delivery points share the id marker. Claude also gets a one-sentence
 `systemMessage` from the same notice. Codex gets no human line.
 
 Manual projection apply remains available for explicitly authorized adoption
-and repair. It is not a feature-PR freshness step. archctx owns observed-change
-acceptance and committed-result readback; repo-harness keeps no second
-candidate, receipt or approval store.
+and repair. It is not a feature-PR freshness step. `archctx@0.18.1` runs every
+command in-process with no background service and no projection replay.
+`rh arch projection apply --json` returns its result directly; verify zero drift
+with `rh arch projection check --json` (or `rh arch sync --check --json`).
+repo-harness keeps no second candidate, receipt or approval store.
 
-Managed install/update also verifies `daemon status --json` through the same
-exact package-local CLI and compatible Node runtime after static capabilities.
-A running daemon must prove RPC and product-version compatibility; upstream
-`versionUnsupported` diagnostics (including a replaced entrypoint) fail the
-strict installed-runtime verifier with an explicit user-authorization reminder.
-Install/update reports daemon readiness as pending (`skipped`) separately from
-verified package installation, retaining the candidate so a daemon mismatch
-cannot trigger package rollback and strand newer hoisted dependencies.
-An upstream `staleConnection:true` response is unhealthy, not cleanly stopped. A stopped daemon needs no
-replacement and this check never starts it. Upstream status may recover stale
-control files; the check never upgrades the daemon or creates/clears indexes.
+Managed install and update verify the exact pinned `archctx` and
+`archctx-contracts` package versions, package-local CodeGraph, compatible Node
+runtime and `capabilities --json` handshake. ArchContext runs in-process, so
+install, update and worktree cleanup manage no background service.
 
-Runtime failures with the typed `AC_RUNTIME_VERSION_UNSUPPORTED` code and
-`upgrade-archctx-runtime` action preserve the reminder beyond the ordinary
-300-character process-error preview, including projection/refactor callers.
-The Agent presents the reported discrepancy and asks for user authorization
-before running `daemon upgrade` through the same managed CLI and Node runtime.
-Explain that replacing a shared daemon interrupts other clients. After authorized
-replacement, verify daemon compatibility and inspect this repository's configured
-CodeGraph index. Request authorization to rebuild only when its authoritative
-status reports it missing or stale; verify readiness before retrying the blocked
-operation. CLI upgrade alone does not prove that an index needs rebuilding.
-Never delete the shared database or all repository indexes as recovery.
+Worktree CodeGraph bootstrap runs `rh arch index seed --timeout-ms <ms> --json`.
+In a primary checkout with an existing `.codegraph/codegraph.db`, it refreshes
+the shared base index without initializing a missing primary index. In a linked
+worktree, it seeds from that shared base and falls back to package-local
+CodeGraph init only when `index seed` returns `AC_CODE_FACTS_UNAVAILABLE`
+(`index-missing` or `index-base-building`) on an absent or empty `.codegraph`
+directory. An occupied, symlinked or `AC_CODE_FACTS_NOT_READY` `.codegraph`
+directory fails closed without overwriting files.
+
 The runtime snapshot excludes `.ai/harness/**`, so concurrent harness receipts
 and traces cannot invalidate a provider snapshot.
 
@@ -1442,33 +1435,49 @@ semantics. The retired `archcontext-boundaries-v1` format is rejected.
 
 ## Refactor recommendations
 
-repo-harness supplies refactor evidence on demand. No hook scans for it and no
+repo-harness supplies pure-Git refactor evidence on demand through `archctx@0.18.1`
+in-process commands (`scan`, `decide`, `verify`). No hook scans for it and no
 setting enables it. The Bot reads the evidence and decides whether to schedule
-work or ask the user. Incomplete code facts return `proof_required` with a
-`codegraph init` hint. An import limit gets a `--import-node-limit` hint
-instead. The command never creates an index, a model, a plan or a code edit.
+work or ask the user. Incomplete import coverage returns `proof_required` with a
+`codegraph init` hint (or a `--import-node-limit` hint on
+`code-facts-import-limit`). The read commands never create an index, model, plan
+or code edit.
 
-Read evidence and record a decision with:
+Read evidence, record decisions and verify resolutions with:
 
 ```bash
-rh arch refactor recommendations [--json] [--import-node-limit <n>] [--timeout-ms <ms>]
-rh arch refactor decide <recommendation-id> accept|defer|reject --reason "<text>" --snapshot-digest <digest> [--import-node-limit <n>] [--timeout-ms <ms>]
+rh arch refactor recommendations [--import-node-limit <n>] [--timeout-ms <ms>] [--json]
+rh arch refactor list [--status <status>] [--import-node-limit <n>] [--timeout-ms <ms>] [--json]
+rh arch refactor show <recommendation-id> [--import-node-limit <n>] [--timeout-ms <ms>] [--json]
+rh arch refactor decide <recommendation-id> accept|defer|reject|acknowledge|waive --reason "<text>" [--kill-symbol <path#sym>...] [--kill-path <path>...] [--kill-relation <id>...] [--import-node-limit <n>] [--timeout-ms <ms>] [--json]
+rh arch refactor verify <recommendation-id> [--import-node-limit <n>] [--timeout-ms <ms>] [--json]
+rh arch refactor resolve <recommendation-id> --resolution-digest <sha256:...> --reason "<text>" [--import-node-limit <n>] [--timeout-ms <ms>] [--json]
 ```
 
-`recommendations` shows each open suggestion with its explanation, the metrics
-and bounded `evidence` of its observation (`kind`, `totalCount`, `truncated`
-and the first items) and the statistics of every affected module (files, lines,
-fan-in, fan-out, cycles, direction violations, unresolved imports). Direction
-violations are filled only when the model declares constraints. repo-harness
-does not show instability or test file counts in module statistics. A suggestion
-recorded by an earlier scan has `snapshot: "earlier"`, keeps its recorded
-metrics and evidence, and shows no module statistics.
+`recommendations` returns `repo-harness.refactor-recommendations/v3` with
+`status` (`recommended`, `no_action`, `proof_required`, `unavailable`),
+`headSha`, `snapshotDigest`, `scope`, `coverage` (`imports`, `gitHistory`,
+`reasonCodes`), `findings` (each with `recommendationId`, `detector`, `severity`,
+`blocking`, `capabilityId`, `affectedNodeIds`, `affectedPaths`, `killList`,
+`metrics` and bounded `evidence` scalars) and `suppressed`.
 
-Open suggestions are the ArchContext `open` records plus scan candidates not yet
-recorded. `decide` stores the decision in one ArchContext call, for a recorded
-id or a scan candidate. A suggestion with a recorded decision is not shown again
-in the same worktree path and branch (Ancienttwo/arch-context#321). Pass the
-same `--import-node-limit` to `decide` that the scan used. repo-harness keeps no
-local delivery state; ArchContext owns the recommendation lifecycle. Execution
-of an accepted suggestion uses the normal
-plan and pull request workflow.
+`decide` writes one Git-tracked decision file at
+`.archcontext/refactor-decisions/<recommendation-id>.json` in one step
+(`--kill-symbol`, `--kill-path` and `--kill-relation` apply to `accept`). Keep
+`.archcontext/refactor-decisions/` unignored in `.gitignore` so every clone
+reads the same decisions. `list` and `show` inspect recorded decision files
+(`list`'s `openFindings` is best-effort; `recommendations` is the authoritative
+scan with coverage). Pass the same `--import-node-limit` to `decide`, `verify`
+and `resolve` when the scan used one.
+
+`verify` is read-only: it checks `killListChecks` and `metricChecks`, prints
+`disposition`, `headSha`, `resolutionDigest`, `blockingReasons` and
+`historicalReceipt`, and exits 0 only when `disposition === "resolved"`.
+`resolve` requires `--resolution-digest <sha256:...>` from `verify` and updates
+`.archcontext/refactor-decisions/<recommendation-id>.json` to `resolved`.
+Because `verify` hashes live `headSha` into live `resolutionDigest`, committing
+the resolved decision file shifts subsequent live `resolutionDigest` while
+preserving the committed digest in `historicalReceipt.resolutionDigest`.
+repo-harness keeps no local delivery state; Git-tracked decision
+files and ArchContext own the recommendation lifecycle. Execution of an accepted
+finding uses the normal plan and pull request workflow.

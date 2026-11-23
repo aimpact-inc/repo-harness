@@ -133,10 +133,13 @@ Otherwise skip it.
    or fix it. On a `stale-context` finding, run step 1 again.
 4. **When the issue binds `Refactor IDs:` (`recommendation.<hex>`):** commit your
    code fix first, run `rh arch refactor verify <id> --json` to confirm
-   `disposition === "resolved"`, then run
-   `rh arch refactor resolve <id> --evidence-digest <resolutionDigest> --reason "Resolved in #<issue>"`
+   `disposition === "resolved"` and read `resolutionDigest`, then run
+   `rh arch refactor resolve <id> --resolution-digest <resolutionDigest> --reason "Resolved in #<issue>"`,
+   record that pre-commit `verify`/`resolve` `resolutionDigest` in the PR body,
    and commit the updated `.archcontext/refactor-decisions/<id>.json` file on
-   the PR branch.
+   the PR branch. Committing the decision file advances `HEAD` and shifts
+   subsequent live `resolutionDigest`, while `verify` preserves the committed
+   digest in `historicalReceipt.resolutionDigest`.
 
 This section names commands only. Practice text, matching rules and
 checker logic stay in ArchContext. A model change follows the

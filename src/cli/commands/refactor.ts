@@ -1,83 +1,277 @@
-import { Command, InvalidArgumentError, Option } from 'commander';
-import type { RecommendationStatus } from 'archctx-contracts';
+import { Command, InvalidArgumentError } from 'commander';
+import { ArchctxClientError } from '../../core/architecture/projection';
 import {
-  normalizeRefactorScope,
   REFACTOR_DECISIONS,
   REFACTOR_DEFAULT_TIMEOUT_MS,
+  REFACTOR_LIST_STATUSES,
   REFACTOR_MAX_TIMEOUT_MS,
   REFACTOR_MIN_TIMEOUT_MS,
   RefactorProviderError,
+  type RecommendationStatus,
+  type RefactorDecideListResultV1,
+  type RefactorDecideResultV1,
+  type RefactorDecideShowResultV1,
   type RefactorDecision,
+  type RefactorResolveResultV1,
+  type RefactorScanFindingV2,
+  type RefactorVerifyV2,
 } from '../../core/refactor/provider-contract';
+import { shellQuote } from '../../core/shell-quote';
+import { assertSafeArchctxRepoRoot } from '../../effects/architecture/archctx-provider';
 import { canonicalRepoPath } from '../../effects/repo-registry';
-import type { RefactorRecommendation, RefactorRecommendationResult } from '../../effects/refactor/recommendations';
+import type { RefactorRecommendationResult, RefactorScanCoverage } from '../../effects/refactor/recommendations';
 
 const EVIDENCE_ITEMS_SHOWN = 5;
-const LIST_STATUSES: readonly RecommendationStatus[] = [
-  'open',
-  'acknowledged',
-  'accepted',
-  'rejected',
-  'deferred',
-  'waived',
-  'resolved',
-  'superseded',
-  'expired',
-];
+
+function formatCoverageLine(coverage: RefactorScanCoverage): string {
+  const reasons = coverage.reasonCodes.length > 0 ? ` (reasons: ${coverage.reasonCodes.join(', ')})` : '';
+  return `coverage: imports=${coverage.imports}, gitHistory=${coverage.gitHistory}${reasons}`;
+}
+
+function formatEvidenceScalars(evidence: RefactorScanFindingV2['evidence']): string[] {
+  const scalars: string[] = [];
+  if (evidence.thinDirectionEdgeCount !== undefined) scalars.push(`thinDirectionEdgeCount=${evidence.thinDirectionEdgeCount}`);
+  if (evidence.sccSize !== undefined) scalars.push(`sccSize=${evidence.sccSize}`);
+  if (evidence.splitClusterCount !== undefined) scalars.push(`splitClusterCount=${evidence.splitClusterCount}`);
+  if (evidence.lcomScore !== undefined) scalars.push(`lcomScore=${evidence.lcomScore}`);
+  if (evidence.instabilitySource !== undefined) scalars.push(`instabilitySource=${evidence.instabilitySource}`);
+  if (evidence.instabilityTarget !== undefined) scalars.push(`instabilityTarget=${evidence.instabilityTarget}`);
+  if (evidence.coChangeSupport !== undefined) scalars.push(`coChangeSupport=${evidence.coChangeSupport}`);
+  if (evidence.coChangeCoverageOk !== undefined) scalars.push(`coChangeCoverageOk=${evidence.coChangeCoverageOk}`);
+  if (evidence.testCallerCoverage !== undefined) scalars.push(`testCallerCoverage=${evidence.testCallerCoverage ?? 'n/a'}`);
+  return scalars;
+}
+
+function formatFinding(finding: RefactorScanFindingV2, index: number): string {
+  const scalars = formatEvidenceScalars(finding.evidence);
+  const metrics = Object.entries(finding.metrics).map(([key, value]) => `${key}=${value ?? 'n/a'}`).join(', ');
+  const pathsShown = finding.affectedPaths.slice(0, EVIDENCE_ITEMS_SHOWN);
+  const hiddenPaths = finding.affectedPaths.length - pathsShown.length;
+  const capability = finding.capabilityId ? ` (capability: ${finding.capabilityId})` : '';
+  return [
+    `${index + 1}. ${finding.detector} [${finding.severity}, ${finding.blocking ? 'blocking' : 'non-blocking'}]${capability}`,
+    `  id: ${finding.recommendationId}`,
+    ...(finding.affectedNodeIds.length > 0 ? [`  nodes: ${finding.affectedNodeIds.join(', ')}`] : []),
+    `  summary: ${finding.evidence.summary}`,
+    ...(scalars.length > 0 ? [`  evidence: ${scalars.join(', ')}`] : []),
+    ...(metrics ? [`  metrics: ${metrics}`] : []),
+    ...(finding.affectedPaths.length > 0 ? [
+      `  affectedPaths (${finding.affectedPaths.length}):`,
+      ...pathsShown.map((path) => `    - ${path}`),
+      ...(hiddenPaths > 0 ? [`    ... (+${hiddenPaths} more)`] : []),
+    ] : []),
+    ...(finding.killList.length > 0 ? [
+      `  killList (${finding.killList.length}):`,
+      ...finding.killList.map((entry) => `    - ${entry.kind}: ${entry.target}${entry.required ? '' : ' (optional)'}`),
+    ] : []),
+    '',
+  ].join('\n');
+}
+
+function formatSuppressedLines(suppressed: RefactorRecommendationResult['suppressed']): string[] {
+  if (suppressed.length === 0) return [];
+  return [
+    `suppressed (${suppressed.length}):`,
+    ...suppressed.map((entry) => `  - ${entry.recommendationId} (${entry.detector}, ${entry.decisionStatus}): ${entry.reason}`),
+  ];
+}
 
 export function formatRefactorRecommendations(value: RefactorRecommendationResult): string {
   if (value.status !== 'recommended') {
     const detail = [value.code, value.message].filter(Boolean).join(': ');
     const reason = value.reasonCode ? ` (reasonCode: ${value.reasonCode})` : '';
-    return `[RefactorRecommendations] ${value.status}${detail ? `: ${detail}` : ''}${reason}${value.action ? ` (action: ${value.action})` : ''}\n`;
+    const action = value.action ? ` (action: ${value.action})` : '';
+    const lines = [
+      `[RefactorRecommendations] ${value.status}${detail ? `: ${detail}` : ''}${reason}${action}`,
+      ...(value.coverage ? [`  ${formatCoverageLine(value.coverage)}`] : []),
+      ...formatSuppressedLines(value.suppressed),
+      '',
+    ];
+    return lines.join('\n');
   }
   const header = [
-    `snapshot digest: ${value.snapshotDigest}`,
-    ...(value.message ? [`note: ${value.message}`] : []),
+    ...(value.headSha ? [`head: ${value.headSha}`] : []),
+    ...(value.snapshotDigest ? [`snapshot digest: ${value.snapshotDigest}`] : []),
+    ...(value.coverage ? [formatCoverageLine(value.coverage)] : []),
     '',
   ].join('\n');
-  return [header, ...value.candidates.map(formatCandidate)].join('\n');
+  const suppressed = formatSuppressedLines(value.suppressed);
+  return [
+    header,
+    ...value.findings.map(formatFinding),
+    ...(suppressed.length > 0 ? [...suppressed, ''] : []),
+  ].join('\n');
 }
 
-/** First lines of the bounded evidence sample; `--json` carries all of it. */
-function evidenceLines(evidence: RefactorRecommendation['evidence'], proposal: RefactorRecommendation['proposal']): string[] {
-  if (proposal) {
-    return [
-      `  proposal: scale=${proposal.scale} (${proposal.targetOutcomes.length} target outcome(s), ${proposal.killList.length} kill entry/entries)`,
-      ...proposal.killList.slice(0, EVIDENCE_ITEMS_SHOWN).map((entry) => `    - kill ${entry.kind}: ${entry.selectorId}`),
-    ];
-  }
-  if (!evidence) return [];
-  const items = (() => {
-    switch (evidence.kind) {
-      case 'cycle':
-      case 'residual-cycle': return evidence.edges.map((edge) => `${edge.fromPath}:${edge.fromLine ?? '?'} -> ${edge.toPath}`);
-      case 'direction-violation': return evidence.violations.map((entry) => `${entry.constraintId}: ${entry.fromPath}:${entry.fromLine ?? '?'} -> ${entry.toPath}`);
-      case 'evidence-gap': return evidence.unresolvedImports.map((entry) => `${entry.fromPath}:${entry.fromLine ?? '?'} imports ${entry.specifier}`);
-      case 'ownership-ambiguous':
-      case 'undeclared-footprint':
-      case 'unowned-paths': return evidence.paths.map((entry) => entry.path);
+export function resolveDecisionCommitRoot(targetPath: string): string {
+  try {
+    return canonicalRepoPath(assertSafeArchctxRepoRoot(targetPath, process.env, 'refactor decision commit hint'));
+  } catch (error) {
+    if (error instanceof ArchctxClientError) {
+      throw new RefactorProviderError('refactor_unsafe_repo_root', error.providerMessage, error.action, error.reasonCode);
     }
-  })();
-  return [
-    `  evidence: ${evidence.kind}, ${evidence.totalCount} total${evidence.truncated ? ' (sample is truncated)' : ''}`,
-    ...items.slice(0, EVIDENCE_ITEMS_SHOWN).map((line) => `    - ${line}`),
-  ];
+    throw error;
+  }
 }
 
-function formatCandidate(entry: RefactorRecommendation, index: number): string {
-  const metrics = Object.entries(entry.metrics).map(([key, metric]) => `${key}=${metric ?? 'n/a'}`).join(', ');
-  const modules = entry.modules.map((module) => `  - ${module.nodeId}: ${module.files ?? '?'} files / ${module.lines ?? '?'} lines, fan-in ${module.fanIn ?? '?'}, fan-out ${module.fanOut ?? '?'}, cycles ${module.cycles ?? '?'}, direction violations ${module.directionViolations ?? '?'}, unresolved imports ${module.unresolvedImports}${module.ambiguousOwnership ? ' (ambiguous ownership)' : ''}`);
+function quoteCommandArg(value: string, platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' ? `'${value.replaceAll("'", "''")}'` : shellQuote(value);
+}
+
+function formatShellArg(value: string, platform: NodeJS.Platform = process.platform): string {
+  const safePattern = platform === 'win32' ? /^[A-Za-z0-9_./:@%+=-]+$/ : /^[A-Za-z0-9_./:@%+=,-]+$/;
+  return safePattern.test(value) ? value : quoteCommandArg(value, platform);
+}
+
+function formatDecisionCommitHint(
+  repoRoot: string | undefined,
+  filePath: string,
+  message: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const gitPrefix = repoRoot ? `git -C ${formatShellArg(repoRoot, platform)}` : 'git';
+  const quotedPath = formatShellArg(filePath, platform);
+  const quotedMessage = quoteCommandArg(message, platform);
+  if (platform === 'win32') {
+    return `${gitPrefix} add '--' ${quotedPath}; if ($LASTEXITCODE -eq 0) { ${gitPrefix} commit --only -m ${quotedMessage} '--' ${quotedPath} }`;
+  }
+  return `${gitPrefix} add -- ${quotedPath} && ${gitPrefix} commit --only -m ${quotedMessage} -- ${quotedPath}`;
+}
+
+function formatDecisionRemoveHint(
+  repoRoot: string | undefined,
+  filePath: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const gitPrefix = repoRoot ? `git -C ${formatShellArg(repoRoot, platform)}` : 'git';
+  const quotedPath = formatShellArg(filePath, platform);
+  return platform === 'win32'
+    ? `${gitPrefix} rm '--' ${quotedPath}`
+    : `${gitPrefix} rm -- ${quotedPath}`;
+}
+
+export function formatRefactorDecide(
+  result: RefactorDecideResultV1,
+  repoRoot?: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const killCount = result.decision.killList?.length ?? 0;
+  const commitMessage = `chore(architecture): record refactor decision ${result.recommendationId} (${result.status})`;
   return [
-    `${index + 1}. ${entry.kind} on ${entry.subject} (risk ${entry.risk}, confidence ${entry.confidence}, uncertainty ${entry.uncertainty}${entry.ambiguousOwnership ? ', ambiguous ownership' : ''})`,
-    `  id: ${entry.recommendationId}`,
-    ...entry.explanation.map((line) => `  ${line}`),
-    ...(metrics ? [`  metrics: ${metrics}`] : []),
-    ...evidenceLines(entry.evidence, entry.proposal),
-    ...(entry.snapshot === 'earlier' ? [`  recorded on an earlier snapshot (${entry.baselineSnapshotDigest}); current module statistics are not shown`] : []),
-    ...(modules.length ? ['  modules:', ...modules.map((line) => `  ${line}`)] : []),
+    `[RefactorDecide] ${result.recommendationId}: status=${result.status}`,
+    `  file: ${result.filePath}`,
+    ...(killCount > 0 ? [`  killList: ${killCount} target(s)`] : []),
+    `  next: ${formatDecisionCommitHint(repoRoot, result.filePath, commitMessage, platform)}`,
     '',
   ].join('\n');
+}
+
+export interface RefactorVerifyFormatOptions {
+  readonly repo?: string;
+  readonly repoRoot?: string;
+  readonly importNodeLimit?: number;
+  readonly timeoutMs?: number;
+  readonly platform?: NodeJS.Platform;
+}
+
+export function formatRefactorVerify(result: RefactorVerifyV2, invocation: RefactorVerifyFormatOptions = {}): string {
+  const platform = invocation.platform ?? process.platform;
+  const repoFlag = invocation.repo !== undefined && invocation.repo !== ''
+    ? [`--repo ${formatShellArg(invocation.repo, platform)}`]
+    : [];
+  const nextParts = [
+    `rh arch refactor resolve ${result.recommendationId}`,
+    `--resolution-digest ${result.resolutionDigest}`,
+    '--reason "<reason>"',
+    ...repoFlag,
+    ...(invocation.importNodeLimit !== undefined ? [`--import-node-limit ${invocation.importNodeLimit}`] : []),
+    ...(invocation.timeoutMs !== undefined ? [`--timeout-ms ${invocation.timeoutMs}`] : []),
+  ];
+  const decisionRelPath = `.archcontext/refactor-decisions/${result.recommendationId}.json`;
+  const effectiveRemoveRoot = invocation.repoRoot
+    ?? (invocation.repo !== undefined && invocation.repo !== '' ? invocation.repo : undefined);
+  const removeHint = formatDecisionRemoveHint(effectiveRemoveRoot, decisionRelPath, platform);
+  const repoSuffix = repoFlag.length > 0 ? ` ${repoFlag[0]}` : '';
+  const missingBaseline = result.disposition === 'stale' && result.blockingReasons.includes('baseline-metadata-missing');
+  const legacyNext = missingBaseline
+    ? [
+      `  next: legacy decision lacks baseline proof metadata; attach a verifiable kill-list via \`rh arch refactor decide ${result.recommendationId} accept --reason "<reason>" --kill-path <path>${repoSuffix}\` or retire it via \`rh arch refactor decide ${result.recommendationId} reject --reason "<reason>"${repoSuffix}\` (or \`${removeHint}\`).`,
+    ]
+    : [];
+  return [
+    `[RefactorVerify] ${result.recommendationId}: disposition=${result.disposition}`,
+    `  headSha: ${result.headSha}`,
+    `  resolutionDigest: ${result.resolutionDigest}`,
+    ...(result.historicalReceipt ? [
+      `  historicalReceipt: status=${result.historicalReceipt.status}, headSha=${result.historicalReceipt.headSha}, resolutionDigest=${result.historicalReceipt.resolutionDigest ?? 'none'}`,
+    ] : []),
+    ...(result.metricChecks.length > 0 ? [
+      '  metricChecks:',
+      ...result.metricChecks.map((check) => `    - ${check.metric}: before=${check.before ?? 'n/a'}, after=${check.after ?? 'n/a'} [${check.satisfied ? 'ok' : 'unsatisfied'}]`),
+    ] : []),
+    ...(result.killListChecks.length > 0 ? [
+      '  killListChecks:',
+      ...result.killListChecks.map((check) => `    - ${check.kind} ${check.target}: ${check.status}${check.required ? '' : ' (optional)'}`),
+    ] : []),
+    ...(result.blockingReasons.length > 0 ? [`  blockingReasons: ${result.blockingReasons.join(', ')}`] : []),
+    ...(result.disposition === 'resolved' ? [
+      `  next: ${nextParts.join(' ')}`,
+    ] : legacyNext),
+    '',
+  ].join('\n');
+}
+
+export function formatRefactorResolve(
+  result: RefactorResolveResultV1,
+  repoRoot?: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const commitMessage = `chore(architecture): mark refactor decision ${result.recommendationId} resolved`;
+  return [
+    `[RefactorResolve] ${result.recommendationId}: status=${result.status}`,
+    `  file: ${result.filePath}`,
+    `  resolutionDigest: ${result.verification.resolutionDigest}`,
+    `  next: ${formatDecisionCommitHint(repoRoot, result.filePath, commitMessage, platform)}`,
+    '',
+  ].join('\n');
+}
+
+export function formatRefactorList(result: RefactorDecideListResultV1): string {
+  const showOpenNote = result.status === 'all' || result.status === 'open';
+  return [
+    `[RefactorList] status=${result.status} count=${result.count} (decisions=${result.decisions.length}, openFindings=${result.openFindings.length})`,
+    ...result.decisions.map((decision) => `  - ${decision.recommendationId} (${decision.status}, git-decision) ${decision.subject.stableKey}`),
+    ...result.openFindings.map((finding) => `  - ${finding.recommendationId} (open, ${finding.detector}, ${finding.severity}) ${finding.evidence.summary}`),
+    ...(showOpenNote ? ['  note: openFindings is best-effort (scan errors are omitted by archctx decide list); run `rh arch refactor recommendations` for authoritative scan coverage.'] : []),
+    '',
+  ].join('\n');
+}
+
+export function formatRefactorShow(result: RefactorDecideShowResultV1): string {
+  const lines = [`[RefactorShow] ${result.recommendationId}`];
+  if (result.decision) {
+    lines.push(`  decision: status=${result.decision.status}, kind=${result.decision.kind ?? 'n/a'}, decidedAt=${result.decision.decidedAt}, headSha=${result.decision.provenance.headSha}`);
+    lines.push(`  reason: ${result.decision.reason}`);
+    if (result.decision.resolutionDigest) lines.push(`  resolutionDigest: ${result.decision.resolutionDigest}`);
+    if (result.decision.killList && result.decision.killList.length > 0) {
+      lines.push(`  killList (${result.decision.killList.length}):`);
+      for (const entry of result.decision.killList) {
+        lines.push(`    - ${entry.kind}: ${entry.target}${entry.required ? '' : ' (optional)'}`);
+      }
+    }
+  } else {
+    lines.push('  decision: none');
+  }
+  if (result.finding) {
+    lines.push(`  finding: ${result.finding.detector} [${result.finding.severity}, ${result.finding.blocking ? 'blocking' : 'non-blocking'}] — ${result.finding.evidence.summary}`);
+    if (result.finding.affectedPaths.length > 0) {
+      lines.push(`  affectedPaths: ${result.finding.affectedPaths.slice(0, EVIDENCE_ITEMS_SHOWN).join(', ')}`);
+    }
+  } else {
+    lines.push('  finding: none (live scan findings are best-effort in archctx decide show; run `rh arch refactor recommendations` for authoritative scan coverage)');
+  }
+  lines.push('');
+  return lines.join('\n');
 }
 
 function parseImportNodeLimit(value: string): number {
@@ -86,11 +280,13 @@ function parseImportNodeLimit(value: string): number {
 }
 
 function parseTimeoutMs(value: string): number {
-  if (!/^[0-9]+$/.test(value) || Number(value) < REFACTOR_MIN_TIMEOUT_MS || Number(value) > REFACTOR_MAX_TIMEOUT_MS) throw new InvalidArgumentError(`must be an integer from ${REFACTOR_MIN_TIMEOUT_MS} to ${REFACTOR_MAX_TIMEOUT_MS}`);
+  if (!/^[0-9]+$/.test(value) || Number(value) < REFACTOR_MIN_TIMEOUT_MS || Number(value) > REFACTOR_MAX_TIMEOUT_MS) {
+    throw new InvalidArgumentError(`must be an integer from ${REFACTOR_MIN_TIMEOUT_MS} to ${REFACTOR_MAX_TIMEOUT_MS}`);
+  }
   return Number(value);
 }
 
-function collectScopePath(value: string, previous: string[] = []): string[] {
+function collectValues(value: string, previous: string[] = []): string[] {
   return [...previous, value];
 }
 
@@ -104,133 +300,144 @@ function fail(error: unknown): void {
 export function buildRefactorCommand(): Command {
   const command = new Command('refactor').description('Show measured refactor suggestions, verify outcomes, and record user decisions');
   command.command('recommendations')
-    .description('Show measured suggestions with evidence; never executes a refactor')
+    .description('Show measured v2 refactor findings with coverage; never executes a refactor')
     .option('--repo <path>', 'Repository root', '.')
-    .addOption(new Option('--node <nodeId>', 'Limit scan observations to one declared architecture node').conflicts('path'))
-    .addOption(new Option('--path <repo-relative-path>', 'Limit scan observations to the owners of these repository-relative POSIX paths (repeatable)').argParser(collectScopePath).conflicts('node'))
-    .option('--import-node-limit <n>', 'Raise the CodeGraph import read cap; use the same value for decide', parseImportNodeLimit)
+    .option('--import-node-limit <n>', 'Raise the CodeGraph import read cap; use the same value for decide and verify', parseImportNodeLimit)
     .option('--timeout-ms <ms>', `Per archctx call timeout in ms (default ${REFACTOR_DEFAULT_TIMEOUT_MS}, max ${REFACTOR_MAX_TIMEOUT_MS})`, parseTimeoutMs)
     .option('--json', 'Output machine-readable JSON')
-    .action(async (options: { repo: string; node?: string; path?: string[]; importNodeLimit?: number; timeoutMs?: number; json?: boolean }) => {
+    .action(async (options: { repo: string; importNodeLimit?: number; timeoutMs?: number; json?: boolean }) => {
       try {
-        const scope = normalizeRefactorScope({ node: options.node, paths: options.path });
         const { observeRefactorRecommendations } = await import('../../effects/refactor/recommendations');
         const value = observeRefactorRecommendations(canonicalRepoPath(options.repo), {
           importNodeLimit: options.importNodeLimit,
           timeoutMs: options.timeoutMs,
-          ...(scope.kind === 'repository' ? {} : { scope }),
         });
         process.stdout.write(options.json ? `${JSON.stringify(value, null, 2)}\n` : formatRefactorRecommendations(value));
         if (value.status === 'unavailable' || value.status === 'proof_required') process.exitCode = 1;
       } catch (error) { fail(error); }
     });
   command.command('decide')
-    .description('Record the user decision on one suggestion in ArchContext')
+    .description('Record a Git-tracked user decision on one recommendation in .archcontext/refactor-decisions/')
     .argument('<recommendation-id>')
     .argument('<decision>', REFACTOR_DECISIONS.join('|'))
     .requiredOption('--reason <text>', 'Why the user decided this way')
-    .requiredOption('--snapshot-digest <digest>', 'Snapshot digest from rh arch refactor recommendations')
-    .option('--repo <path>', 'Repository root', '.')
+    .option('--kill-symbol <path#symbol>', 'Require a symbol to be absent on verify (repeatable; accept only)', collectValues)
+    .option('--kill-path <repo-relative-path>', 'Require a tracked file path to be absent on verify (repeatable; accept only)', collectValues)
+    .option('--kill-relation <relation-id>', 'Require a model relation id to be absent on verify (repeatable; accept only)', collectValues)
     .option('--import-node-limit <n>', 'Same limit the suggestion was scanned with', parseImportNodeLimit)
+    .option('--repo <path>', 'Repository root', '.')
     .option('--timeout-ms <ms>', `Per archctx call timeout in ms (default ${REFACTOR_DEFAULT_TIMEOUT_MS}, max ${REFACTOR_MAX_TIMEOUT_MS})`, parseTimeoutMs)
-    .action(async (recommendationId: string, decision: string, options: { reason: string; snapshotDigest: string; repo: string; importNodeLimit?: number; timeoutMs?: number }) => {
+    .option('--json', 'Output machine-readable JSON')
+    .action(async (
+      recommendationId: string,
+      decision: string,
+      options: {
+        reason: string;
+        killSymbol?: string[];
+        killPath?: string[];
+        killRelation?: string[];
+        importNodeLimit?: number;
+        repo: string;
+        timeoutMs?: number;
+        json?: boolean;
+      },
+    ) => {
       try {
-        if (!REFACTOR_DECISIONS.includes(decision as RefactorDecision)) throw new Error(`decision must be one of ${REFACTOR_DECISIONS.join('|')}`);
+        if (!REFACTOR_DECISIONS.includes(decision as RefactorDecision)) {
+          throw new RefactorProviderError('refactor_invalid_input', `decision must be one of ${REFACTOR_DECISIONS.join('|')}`);
+        }
         const { decideRefactorRecommendation } = await import('./refactor-actions');
-        const status = decideRefactorRecommendation(canonicalRepoPath(options.repo), recommendationId, decision as RefactorDecision, options.reason, options.snapshotDigest, options.importNodeLimit, options.timeoutMs);
-        process.stdout.write(`${JSON.stringify({ recommendationId, status }, null, 2)}\n`);
+        const targetRepo = canonicalRepoPath(options.repo);
+        const result = decideRefactorRecommendation(
+          targetRepo,
+          recommendationId,
+          decision as RefactorDecision,
+          options.reason,
+          {
+            killSymbols: options.killSymbol,
+            killPaths: options.killPath,
+            killRelations: options.killRelation,
+            importNodeLimit: options.importNodeLimit,
+            timeoutMs: options.timeoutMs,
+          },
+        );
+        process.stdout.write(options.json ? `${JSON.stringify(result, null, 2)}\n` : formatRefactorDecide(result, resolveDecisionCommitRoot(targetRepo)));
       } catch (error) { fail(error); }
     });
   command.command('verify')
-    .description('Re-measure HEAD against one recorded recommendation and verify resolution outcomes')
+    .description('Re-measure HEAD live against one recorded recommendation decision (read-only)')
     .argument('<recommendation-id>')
-    .option('--expected-head-sha <sha>', '40-hex Git SHA expected at HEAD')
-    .option('--expected-worktree-digest <digest>', 'Expected sha256:<64-hex> worktree digest')
     .option('--import-node-limit <n>', 'Override the CodeGraph import read cap', parseImportNodeLimit)
     .option('--repo <path>', 'Repository root', '.')
     .option('--timeout-ms <ms>', `Per archctx call timeout in ms (default ${REFACTOR_DEFAULT_TIMEOUT_MS}, max ${REFACTOR_MAX_TIMEOUT_MS})`, parseTimeoutMs)
     .option('--json', 'Output machine-readable JSON')
-    .action(async (recommendationId: string, options: { expectedHeadSha?: string; expectedWorktreeDigest?: string; importNodeLimit?: number; repo: string; timeoutMs?: number; json?: boolean }) => {
+    .action(async (recommendationId: string, options: { importNodeLimit?: number; repo: string; timeoutMs?: number; json?: boolean }, cmd: Command) => {
       try {
         const { verifyRefactorRecommendation } = await import('./refactor-actions');
-        const result = verifyRefactorRecommendation(canonicalRepoPath(options.repo), recommendationId, {
-          expectedHeadSha: options.expectedHeadSha,
-          expectedWorktreeDigest: options.expectedWorktreeDigest,
+        const targetRepo = canonicalRepoPath(options.repo);
+        const result = verifyRefactorRecommendation(targetRepo, recommendationId, {
           importNodeLimit: options.importNodeLimit,
           timeoutMs: options.timeoutMs,
         });
-        if (options.json) {
-          process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-        } else {
-          process.stdout.write([
-            `[RefactorVerify] ${result.recommendationId}: disposition=${result.disposition ?? 'none'} (status ${result.recommendationStatus})`,
-            ...(result.resolutionDigest ? [`  resolutionDigest: ${result.resolutionDigest}`] : []),
-            ...(result.resolveCommand ? [`  next: ${result.resolveCommand}`] : []),
-            '',
-          ].join('\n'));
-        }
+        const formatOptions: RefactorVerifyFormatOptions = {
+          ...(cmd.getOptionValueSource('repo') === 'cli' ? { repo: options.repo } : {}),
+          ...(options.json ? {} : { repoRoot: resolveDecisionCommitRoot(targetRepo) }),
+          ...(options.importNodeLimit !== undefined ? { importNodeLimit: options.importNodeLimit } : {}),
+          ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+        };
+        process.stdout.write(options.json ? `${JSON.stringify(result, null, 2)}\n` : formatRefactorVerify(result, formatOptions));
         if (result.disposition !== 'resolved') process.exitCode = 1;
       } catch (error) { fail(error); }
     });
   command.command('resolve')
     .description('Mark a verified recommendation resolved in .archcontext/refactor-decisions/')
     .argument('<recommendation-id>')
-    .requiredOption('--evidence-digest <digest>', 'Resolution evidence digest from rh arch refactor verify')
+    .requiredOption('--resolution-digest <digest>', 'Attested resolution digest from rh arch refactor verify')
     .requiredOption('--reason <text>', 'Why this recommendation is resolved')
-    .option('--snapshot-digest <digest>', 'Optional scan snapshot digest')
     .option('--import-node-limit <n>', 'Same limit the suggestion was scanned with', parseImportNodeLimit)
     .option('--repo <path>', 'Repository root', '.')
     .option('--timeout-ms <ms>', `Per archctx call timeout in ms (default ${REFACTOR_DEFAULT_TIMEOUT_MS}, max ${REFACTOR_MAX_TIMEOUT_MS})`, parseTimeoutMs)
     .option('--json', 'Output machine-readable JSON')
-    .action(async (recommendationId: string, options: { evidenceDigest: string; reason: string; snapshotDigest?: string; importNodeLimit?: number; repo: string; timeoutMs?: number; json?: boolean }) => {
+    .action(async (
+      recommendationId: string,
+      options: { resolutionDigest: string; reason: string; importNodeLimit?: number; repo: string; timeoutMs?: number; json?: boolean },
+    ) => {
       try {
         const { resolveRefactorRecommendation } = await import('./refactor-actions');
-        const result = resolveRefactorRecommendation(canonicalRepoPath(options.repo), recommendationId, options.evidenceDigest, options.reason, options.snapshotDigest, options.importNodeLimit, options.timeoutMs);
-        process.stdout.write(`${JSON.stringify(options.json ? result : { recommendationId: result.recommendationId, status: result.nextStatus, decisionFile: result.decisionFile }, null, 2)}\n`);
-      } catch (error) { fail(error); }
-    });
-  command.command('record')
-    .description('Persist a scanned refactor assessment into the local ArchContext ledger')
-    .requiredOption('--assessment-digest <digest>', 'Assessment digest from rh arch refactor recommendations --json')
-    .requiredOption('--expected-worktree-digest <digest>', 'Worktree digest from rh arch refactor recommendations --json')
-    .option('--repo <path>', 'Repository root', '.')
-    .option('--timeout-ms <ms>', `Per archctx call timeout in ms (default ${REFACTOR_DEFAULT_TIMEOUT_MS}, max ${REFACTOR_MAX_TIMEOUT_MS})`, parseTimeoutMs)
-    .option('--json', 'Output machine-readable JSON')
-    .action(async (options: { assessmentDigest: string; expectedWorktreeDigest: string; repo: string; timeoutMs?: number; json?: boolean }) => {
-      try {
-        const { recordRefactorAssessment } = await import('./refactor-actions');
-        const result = recordRefactorAssessment(canonicalRepoPath(options.repo), options.assessmentDigest, options.expectedWorktreeDigest, options.timeoutMs);
-        process.stdout.write(`${JSON.stringify(options.json ? result : { runId: result.runId, recommendationIds: result.recommendationIds }, null, 2)}\n`);
+        const targetRepo = canonicalRepoPath(options.repo);
+        const result = resolveRefactorRecommendation(
+          targetRepo,
+          recommendationId,
+          options.resolutionDigest,
+          options.reason,
+          { importNodeLimit: options.importNodeLimit, timeoutMs: options.timeoutMs },
+        );
+        process.stdout.write(options.json ? `${JSON.stringify(result, null, 2)}\n` : formatRefactorResolve(result, resolveDecisionCommitRoot(targetRepo)));
       } catch (error) { fail(error); }
     });
   command.command('list')
-    .description('List recorded refactor recommendations and Git decisions')
-    .option('--status <status>', `Filter by status (${LIST_STATUSES.join('|')})`)
+    .description('List Git-tracked refactor decisions and best-effort open findings')
+    .option('--status <status>', `Filter by status (${REFACTOR_LIST_STATUSES.join('|')})`)
+    .option('--import-node-limit <n>', 'Same limit the suggestion was scanned with', parseImportNodeLimit)
     .option('--repo <path>', 'Repository root', '.')
     .option('--timeout-ms <ms>', `Per archctx call timeout in ms (default ${REFACTOR_DEFAULT_TIMEOUT_MS}, max ${REFACTOR_MAX_TIMEOUT_MS})`, parseTimeoutMs)
     .option('--json', 'Output machine-readable JSON')
-    .action(async (options: { status?: string; repo: string; timeoutMs?: number; json?: boolean }) => {
+    .action(async (options: { status?: string; importNodeLimit?: number; repo: string; timeoutMs?: number; json?: boolean }) => {
       try {
-        if (options.status !== undefined && !LIST_STATUSES.includes(options.status as RecommendationStatus)) {
-          throw new Error(`--status must be one of ${LIST_STATUSES.join('|')}`);
+        if (options.status !== undefined && !REFACTOR_LIST_STATUSES.includes(options.status as RecommendationStatus)) {
+          throw new RefactorProviderError('refactor_invalid_input', `--status must be one of ${REFACTOR_LIST_STATUSES.join('|')}`);
         }
         const { listRecordedRefactorRecommendations } = await import('./refactor-actions');
-        const result = listRecordedRefactorRecommendations(canonicalRepoPath(options.repo), options.status as RecommendationStatus | undefined, options.timeoutMs);
-        if (options.json) {
-          process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-        } else {
-          const lines = [
-            `[RefactorList] status=${result.status} count=${result.count}`,
-            ...result.recommendations.map((r) => `  - ${r.recommendationId} (${r.status}) ${r.subject}`),
-            ...result.decisions.map((d) => `  - ${d.recommendationId} (${d.status}, git-only) ${d.subject.stableKey}`),
-            '',
-          ];
-          process.stdout.write(lines.join('\n'));
-        }
+        const result = listRecordedRefactorRecommendations(canonicalRepoPath(options.repo), {
+          status: options.status as RecommendationStatus | undefined,
+          importNodeLimit: options.importNodeLimit,
+          timeoutMs: options.timeoutMs,
+        });
+        process.stdout.write(options.json ? `${JSON.stringify(result, null, 2)}\n` : formatRefactorList(result));
       } catch (error) { fail(error); }
     });
   command.command('show')
-    .description('Show one recorded refactor recommendation or Git decision')
+    .description('Show one Git-tracked refactor decision and best-effort live finding')
     .argument('<recommendation-id>')
     .option('--import-node-limit <n>', 'Same limit the suggestion was scanned with', parseImportNodeLimit)
     .option('--repo <path>', 'Repository root', '.')
@@ -239,8 +446,11 @@ export function buildRefactorCommand(): Command {
     .action(async (recommendationId: string, options: { importNodeLimit?: number; repo: string; timeoutMs?: number; json?: boolean }) => {
       try {
         const { showRecordedRefactorRecommendation } = await import('./refactor-actions');
-        const result = showRecordedRefactorRecommendation(canonicalRepoPath(options.repo), recommendationId, options.importNodeLimit, options.timeoutMs);
-        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        const result = showRecordedRefactorRecommendation(canonicalRepoPath(options.repo), recommendationId, {
+          importNodeLimit: options.importNodeLimit,
+          timeoutMs: options.timeoutMs,
+        });
+        process.stdout.write(options.json ? `${JSON.stringify(result, null, 2)}\n` : formatRefactorShow(result));
       } catch (error) { fail(error); }
     });
   return command;

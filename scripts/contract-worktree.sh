@@ -260,8 +260,9 @@ bootstrap_worktree_runtime() {
     fi
   fi
 
-  # Mirror only an adoption the primary worktree already made.
-  if [[ -d "$REPO_ROOT/.codegraph" && ! -f "$worktree_path/.codegraph/codegraph.db" ]]; then
+  # Mirror only an adoption the primary worktree already made (including WSL .codegraph-wsl primaries).
+  # Also enter bootstrap on reused WSL drive-mount worktrees holding .codegraph-wsl so conflict detection runs.
+  if { [[ -d "$REPO_ROOT/.codegraph" ]] || [[ -d "$REPO_ROOT/.codegraph-wsl" ]]; } && { [[ ! -f "$worktree_path/.codegraph/codegraph.db" ]] || [[ -e "$worktree_path/.codegraph-wsl" ]] || [[ -L "$worktree_path/.codegraph-wsl" ]]; }; then
     local package_root
     package_root="$(cd "$helper_dir/.." && pwd)"
     repo_harness_architecture_start "$package_root" "$BUN_BIN" "CodeGraph index of the worktree" \
@@ -633,17 +634,6 @@ cleanup_worktree() {
   fi
 
   # Bind the observations before runtime shutdown to the existing exact authority.
-  local daemon_stop_failed=0
-  if [[ -n "$worktree_path" ]]; then
-    # Stop this checkout's architecture daemons while it still exists and
-    # stays registered: start cannot put another checkout at this path, and
-    # the helpers that finish runs from this checkout are still present.
-    # archctx runs outside the topology lock. A failure is reported and
-    # never blocks or reorders the removal.
-    if ! run_contract_runtime stop-architecture-daemons --repo "$current_root" --worktree "$worktree_path"; then
-      daemon_stop_failed=1
-    fi
-  fi
   run_contract_runtime remove-exact --repo "$current_root" \
     --worktree "${worktree_path:-(absent)}" \
     --branch "$branch_name" --head "$cleanup_head" --target "$target_branch" \
@@ -656,11 +646,6 @@ cleanup_worktree() {
     echo "[ContractWorktree] Removed metadata: $metadata_file"
   else
     echo "[ContractWorktree] Metadata already absent, skipping: $metadata_file"
-  fi
-
-  if [[ "$daemon_stop_failed" -eq 1 ]]; then
-    echo "contract-worktree: worktree removed, but its architecture daemon stop failed; the report above names each state directory" >&2
-    return 1
   fi
 }
 
