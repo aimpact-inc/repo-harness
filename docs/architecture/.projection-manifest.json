@@ -784,7 +784,7 @@
     "projection_target.entity.capability-runtime-harness-mcp-sidecar":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.mcp-sidecar","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/mcp-sidecar.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:632a8c4632aacc085a23cf9ff38c30e5bb1b35313691d69bd9aded9b17ef8bd7"},
     "projection_target.entity.capability-runtime-harness-operator":
-      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.operator","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/operator.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:d70b7fb7bfa9740d4510efcdae08bed9fdb4b230c875c54c5b22475219ab7afd"},
+      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.operator","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/operator.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:06eb36956f5a5bd47f1620e542d21bbf0d280f23c84f1144a867b7b748873da0"},
     "projection_target.entity.capability-runtime-harness-refactor-program":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.refactor-program","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/refactor-program.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:bb5a26ccd248f7b0eb642c06e4acb59ab1f47aeb8d1070dbf046c9b0884d4b83"},
     "projection_target.entity.capability-runtime-harness-task-agent-host":

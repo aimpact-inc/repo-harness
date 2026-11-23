@@ -1,6 +1,6 @@
 # runtime-harness/operator 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-operator" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:d70b7fb7bfa9740d4510efcdae08bed9fdb4b230c875c54c5b22475219ab7afd" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-operator" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:06eb36956f5a5bd47f1620e542d21bbf0d280f23c84f1144a867b7b748873da0" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.operator`(kind `capability`)
 > **Matched Prefixes**:`docs/kanban-runtime-status.md`、`src/effects/operator/**`、`src/operator-web/**`、`packages/operator-web/**`、`src/effects/setup/**`、`src/effects/dev-activity/**`、`vite.operator.config.ts`
@@ -177,7 +177,7 @@ flowchart LR
 | `component.operator.primary` | Operator HTTP Reader | `20–50` 個文件 / `5000–10000` 行 | `entrypoint.operator.http-server` |
 | `component.operator.primary-cli` | Operator HTTP Reader (cli) | `2–5` 個文件 / `200–500` 行 | 未宣告 |
 | `component.operator.view-projections` | Operator View Projections | `20–50` 個文件 / `2000–5000` 行 | 未宣告 |
-| `component.operator.web-console` | Operator Web Console | `100–200` 個文件 / `20k–50k` 行 | `entrypoint.operator.web-dev-activity` |
+| `component.operator.web-console` | Operator Web Console | `100–200` 個文件 / `50k–100k` 行 | `entrypoint.operator.web-dev-activity` |
 
 ## 2. P2:端到端數據流
 
