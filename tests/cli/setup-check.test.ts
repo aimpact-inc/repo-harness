@@ -141,6 +141,30 @@ function baseToolingReport(tools: ToolingReport['tools'] = {}): ToolingReport {
 }
 
 describe('setup check command', () => {
+  test('reports Antigravity CLI and adapter readiness only for an opted-in setup', () => {
+    withTempHome((home, repo) => {
+      const statusReport = baseStatusReport();
+      const antigravity = { id: 'antigravity', displayName: 'Antigravity', location: 'global' as const,
+        installed: true, alreadyConfigured: false, managedEntryCount: 0, expectedEntryCount: 5 };
+      const doctorReport = baseDoctorReport([
+        { id: 'agy-path', describe: 'Antigravity CLI on PATH', status: 'ok', detail: 'found' },
+        { id: 'agy-cli-version', describe: 'Antigravity CLI version', status: 'ok', detail: '1.5.15', version: '1.5.15' },
+      ]);
+      const adapterId = 'status.adapter.antigravity';
+      const ids = [adapterId, 'doctor.agy-path', 'doctor.agy-cli-version'];
+      const check = (entry: StatusReport['targets'][number]) => runInitHook(CLI_PORTS.doctor, {
+        cwd: repo, env: { HOME: home }, doctorReport, toolingReport: baseToolingReport(),
+        statusReport: { ...statusReport, targets: [...statusReport.targets, entry] },
+      });
+      const unconfigured = check(antigravity);
+      expect(ids.map(id => unconfigured.checks.find(row => row.id === id)?.status)).toEqual(['na', 'na', 'na']);
+      expect(unconfigured.agent_actions.some(action => action.command?.includes('--target antigravity'))).toBe(false);
+      const ready = check({ ...antigravity, alreadyConfigured: true, managedEntryCount: 5,
+        projection: { status: 'consistent', managedEntryCount: 5, expectedEntryCount: 5, mismatches: [] } });
+      expect(ids.map(id => ready.checks.find(row => row.id === id)?.status)).toEqual(['ok', 'ok', 'ok']);
+    });
+  });
+
   test('prints one leftover summary without listing or changing retired bytes', () => {
     withTempHome((home, repo) => {
       const target = join(home, '.repo-harness/hook-shim.sh');

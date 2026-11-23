@@ -23,7 +23,7 @@ import { buildQuotaReport, OPERATOR_QUOTA_PATH, unknownQuotaReading } from '../.
 import { probeAgentRuntimes, registryRuntimes } from '../../src/effects/setup/agent-runtime-probe';
 import { startOperatorServer, type OperatorServerHandle } from '../../src/effects/operator/server';
 import { repoHarnessRepoIdFor, canonicalRepoPath } from '../../src/effects/repo-registry';
-import { renderGlobalRulesBlock } from '../../src/cli/installer/global-context';
+import { renderGlobalRulesBlock, setReportingLanguage } from '../../src/cli/installer/global-context';
 import { createOperatorLanguageSettings } from '../../src/cli/commands/operator-actions';
 import { reportingLanguageWriteRoute } from '../../src/effects/operator/language-settings-route';
 import { acquireRuntimeTransactionLock, globalRuntimeScope } from '../../src/effects/locking/runtime-transaction-lock';
@@ -138,6 +138,32 @@ describe('language settings routes', () => {
     writeFileSync(join(h.home, '.codex', 'AGENTS.md'), '<!-- BEGIN: repo-harness global-working-rules -->');
     const refused = await send(h, reportPath, { preset: 'zh-CN' });
     expect([refused.status, (await refused.json()).error.code]).toEqual([409, 'report_language_refused']);
+  });
+
+  test.skipIf(process.platform === 'win32')('POST syncs recorded Antigravity rules and preserves missing or unrecorded files', async () => {
+    const h = await startHarness();
+    const sourceRoot = resolve(import.meta.dir, '../..');
+    const config = join(h.home, '.gemini', 'config');
+    const file = join(config, 'AGENTS.md');
+    const save = async (preset: 'en' | 'zh-CN') => {
+      const response = await send(h, reportPath, { preset });
+      expect(response.status).toBe(200);
+      return (await response.json()).changed_hosts;
+    };
+    expect(await save('en')).not.toContain('antigravity');
+    expect(existsSync(config)).toBe(false);
+    mkdirSync(config, { recursive: true });
+    writeFileSync(file, 'Personal rules.\n');
+    expect(await save('zh-CN')).not.toContain('antigravity');
+    expect(readFileSync(file, 'utf8')).toBe('Personal rules.\n');
+
+    expect(setReportingLanguage(h.home, sourceRoot, ['antigravity'], 'en').changed_hosts).toEqual(['antigravity']);
+    expect(await save('zh-CN')).toContain('antigravity');
+    expect(readFileSync(file, 'utf8')).toStartWith('Personal rules.\n');
+    expect((await (await fetch(`${h.server.url}${reportPath}`)).json()).hosts).toContainEqual({ host: 'antigravity', state: 'managed-current', preset: 'zh-CN' });
+    rmSync(file);
+    expect(await save('en')).not.toContain('antigravity');
+    expect(existsSync(file)).toBe(false);
   });
 
   test('POST refuses an unrecorded block that no release rendered, and saves after the block is deleted', async () => {

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { ROUTES } from '../../src/cli/hook/route-registry';
 import { projectSetupSnapshot } from '../../src/core/setup/projection';
 import { decodeSetupSnapshot } from '../../src/core/setup/decode';
-import type { SetupSnapshotV2 } from '../../src/core/setup/types';
+import type { SetupHost, SetupSnapshotV2 } from '../../src/core/setup/types';
 import type { AgentRuntimeProbeV1 } from '../../src/core/board/agents-settings';
 import {
   AGENT_RUNTIME_PROBE_ARGV,
@@ -240,8 +240,9 @@ setInterval(() => {}, 1000);
     expect(packages.length).toBeGreaterThan(0);
     const claudeOnly = new Set(["repo-harness-herdr-portal", "repo-harness-orchestrator", "repo-harness-advisor", "repo-harness-seat-handoff"]);
     const expectedSkills = packages.map(pkg => {
-      const hosts = pkg.name === "merge-gate" ? [] : ["claude"] as Array<"claude" | "codex" | "pi">;
+      const hosts: SetupHost[] = pkg.name === "merge-gate" ? [] : ["claude"];
       if (hosts.length && !claudeOnly.has(pkg.name)) hosts.push("codex", "pi");
+      if (pkg.hosts.includes('antigravity')) hosts.push('antigravity');
       return [pkg.name, pkg.summary, hosts];
     });
     expect(projected.skills.map(skill => [skill.name, skill.summary, skill.catalog_hosts])).toEqual(expectedSkills);
@@ -268,7 +269,8 @@ setInterval(() => {}, 1000);
       if (!outcome.ok) throw new Error(`setup child failed: ${outcome.reason}`);
       const text = JSON.stringify(outcome.snapshot);
       expect(outcome.snapshot.status).toBe('ready');
-      expect(outcome.snapshot.hosts.map(host => [host.host, host.reported])).toEqual([['claude', true], ['codex', true], ['pi', true]]);
+      expect(outcome.snapshot.hosts.map(host => [host.host, host.reported])).toEqual([['claude', true], ['codex', true], ['pi', true], ['antigravity', true]]);
+      expect(outcome.snapshot.hosts.find(host => host.host === 'antigravity')).toMatchObject({ adapter_check: 'na', detected: false, cli_version: null });
       expect(outcome.snapshot.fleet.map(role => role.name)).toEqual(['deep-reasoner', 'explorer', 'harness-evaluator']);
       expect(outcome.snapshot.hooks.flatMap(event => event.routes)).toHaveLength(ROUTES.length);
       expect(outcome.snapshot.skills.length).toBeGreaterThan(0);
@@ -276,6 +278,7 @@ setInterval(() => {}, 1000);
         { host: 'claude', root: '~/.claude/skills', other_skills: ['my-skill'] },
         { host: 'codex', root: '~/.codex/skills', other_skills: null },
         { host: 'pi', root: '~/.pi/agent/skills', other_skills: null },
+        { host: 'antigravity', root: '~/.gemini/config/skills', other_skills: null },
       ]);
       expect(outcome.snapshot.install_selection).toBeNull();
       for (const forbidden of [root, home, '/Users/', '/private/', ...secrets]) expect(text).not.toContain(forbidden);

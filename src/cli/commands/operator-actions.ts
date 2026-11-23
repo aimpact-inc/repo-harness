@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import type { RenderPassOptions, RenderPassResult } from '../../effects/operator/diagram-render';
 import { readbackDiagram, readbackExitCode } from '../../effects/operator/diagram-readback';
@@ -7,7 +7,9 @@ import { version as PACKAGE_VERSION } from '../../../package.json';
 import { OPERATOR_WEB_PACKAGE_NAME } from '../../core/skill-surface/plugin-manifest';
 import { findInstalledPackageRoot, readPackageManifest } from './global-runtime';
 import { hostConfigurationRoot, assertConfigurationPath } from '../installer/configuration-ownership';
-import { inspectGlobalContext, parseReportLanguageFlag, preflightGlobalContextRefresh, setReportingLanguage } from '../installer/global-context';
+import { inspectGlobalContext, parseReportLanguageFlag, preflightGlobalContextRefresh, setReportingLanguage, type GlobalContextHost } from '../installer/global-context';
+import { recordedAntigravityRules } from '../installer/targets/antigravity';
+import { antigravityGlobalRulesPath, resolveUserConfigFile } from '../../effects/host-config/gate';
 import type { OperatorLanguageSettingsAdapter } from '../../effects/operator/language-settings-route';
 import { OperatorWriteRefusal } from '../../effects/operator/write-run';
 import { acquireRuntimeTransactionLock, globalRuntimeScope } from '../../effects/locking/runtime-transaction-lock';
@@ -129,9 +131,16 @@ export function createOperatorLanguageSettings(
   sourceRoot = fileURLToPath(new URL('../../../', import.meta.url)),
 ): OperatorLanguageSettingsAdapter {
   const home = hostConfigurationRoot(env);
-  const hosts = ['claude', 'codex'] as const;
+  const reportingHosts = (): GlobalContextHost[] => {
+    const hosts: GlobalContextHost[] = ['claude', 'codex'];
+    if (recordedAntigravityRules(env, true) && existsSync(resolveUserConfigFile(env, antigravityGlobalRulesPath(env)))) {
+      hosts.push('antigravity');
+    }
+    return hosts;
+  };
   return {
     readReportingLanguage() {
+      const hosts = reportingHosts();
       const plan = preflightGlobalContextRefresh(sourceRoot, home, hosts, undefined);
       return { hosts: plan.files.map((file, index) => ({
         host: hosts[index]!, state: file.state,
@@ -148,7 +157,7 @@ export function createOperatorLanguageSettings(
         throw new OperatorWriteRefusal(409, 'runtime_busy', 'An install or update holds the runtime transaction lock.',
           'Wait for rh update or install to finish, then save again.');
       }
-      try { return setReportingLanguage(home, sourceRoot, hosts, preset); }
+      try { return setReportingLanguage(home, sourceRoot, reportingHosts(), preset); }
       finally { lock.release(); }
     },
     assertPolicyPath: assertConfigurationPath,

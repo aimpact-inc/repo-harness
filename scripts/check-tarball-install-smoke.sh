@@ -808,4 +808,93 @@ writeFileSync(statePath, JSON.stringify(state));
 console.log(`[tarball-smoke] OK: peer-runtime loads ${selected.loaded} modules when selected; refusals, core commands, hook routes and hook bundle load 0.`);
 JS_EOF
 
+if [[ "$(bun -p 'process.platform')" != win32 ]]; then
+  (
+    export HOME="$SMOKE_HOME/antigravity" BUN_INSTALL="$TMP_DIR/antigravity-bun" TMPDIR="$TMP_DIR/antigravity-tmp"
+    export PATH="$APP_DIR/node_modules/.bin:$PATH"
+    mkdir -p "$HOME" "$TMPDIR" "$BUN_INSTALL/install/global/node_modules"
+    # The global hook command must resolve the bundle from the same installed tarball.
+    ln -s "$INSTALLED_ROOT" "$BUN_INSTALL/install/global/node_modules/$PACKAGE_NAME"
+    cd "$TARGET_REPO"
+    printf 'FAKE=antigravity-smoke\n' >.env
+    "$CLI" install --target antigravity --report-language en --no-external-skills
+    bun - "$INSTALLED_ROOT" "$HOME" "$TARGET_REPO" <<'JS_EOF'
+import { join } from 'node:path';
+
+const [, , installedRoot, home, repo] = process.argv;
+const { HOOK_EVENT_TELEMETRY_PATH } = await import(`${installedRoot}/src/cli/hook/event-telemetry.ts`);
+const { readSegmentedLog } = await import(`${installedRoot}/src/effects/segmented-log.ts`);
+const config = join(home, '.gemini', 'config');
+const hooks = (await Bun.file(join(config, 'hooks.json')).json())['repo-harness'];
+const conversationId = 'tarball-smoke-antigravity';
+function invoke(event, handler, extra = {}) {
+  const result = Bun.spawnSync(['/bin/sh', '-c', handler.command], {
+    cwd: config,
+    stdin: Buffer.from(JSON.stringify({ hookEventName: event, cwd: repo, conversationId, ...extra })),
+  });
+  if (result.exitCode !== 0 || result.stderr.length) {
+    throw new Error(`Antigravity ${event} failed (${result.exitCode}): ${result.stderr.toString()}`);
+  }
+  return result.stdout.length ? JSON.parse(result.stdout.toString()) : null;
+}
+
+const bash = hooks.PreToolUse.find(group => group.matcher === 'run_command').hooks[0];
+const edit = hooks.PreToolUse.find(group => group.matcher.split('|').includes('write_file')).hooks[0];
+invoke('SessionStart', hooks.SessionStart[0]);
+for (const [handler, toolCall, decision] of [
+  [bash, { name: 'run_command', args: { CommandLine: 'cat .env' } }, 'deny'],
+  // The hook only judges the target path. It never opens or edits this file.
+  [edit, { name: 'write_file', args: { Path: '/etc/hosts' } }, 'force_ask'],
+]) {
+  if (invoke('PreToolUse', handler, { toolCall })?.decision !== decision) {
+    throw new Error(`Expected Antigravity ${toolCall.name} to return ${decision}`);
+  }
+}
+invoke('PreInvocation', hooks.PreInvocation[0], { invocationNum: 0 });
+const events = [...readSegmentedLog(join(repo, HOOK_EVENT_TELEMETRY_PATH), repo) ?? []].map(line => JSON.parse(line));
+for (const [event, route] of [['SessionStart', 'default'], ['UserPromptSubmit', 'inbox']]) {
+  if (!events.some(row => row.host === 'antigravity' && row.session_id === conversationId && row.event === event && row.route_id === route && row.exit_code === 0)) {
+    throw new Error(`Missing successful Antigravity hook event ${event}.${route}`);
+  }
+}
+JS_EOF
+    # Other installed hosts and repo checks can set doctor's exit status to 1.
+    doctor_status=0
+    "$CLI" doctor --json >"$TMP_DIR/antigravity-doctor.json" || doctor_status=$?
+    if [[ "$doctor_status" -gt 1 ]]; then exit "$doctor_status"; fi
+    setup_status=0
+    "$CLI" setup check --json >"$TMP_DIR/antigravity-setup.json" || setup_status=$?
+    if [[ "$setup_status" -gt 1 ]]; then exit "$setup_status"; fi
+    bun - "$TMP_DIR/antigravity-doctor.json" "$TMP_DIR/antigravity-setup.json" <<'JS_EOF'
+const { checks } = await Bun.file(process.argv[2]).json();
+const { checks: setup } = await Bun.file(process.argv[3]).json();
+for (const id of ['antigravity-native-activation', 'antigravity-direct-command', 'antigravity-global-rules', 'antigravity-skills']) {
+  const check = checks.find(row => row.id === id);
+  if (check?.status !== 'ok') throw new Error(`Antigravity doctor ${id}: ${check?.detail ?? 'missing check'}`);
+  if (setup.find(row => row.id === `doctor.${id}`)?.status !== 'ok') throw new Error(`Antigravity setup check did not report ${id} as ready`);
+}
+for (const id of ['agy-path', 'agy-cli-version']) {
+  const check = checks.find(row => row.id === id);
+  if (!check || !setup.some(row => row.id === `doctor.${id}` && row.status === check.status)) {
+    throw new Error(`Antigravity doctor and setup check did not report the same ${id} status`);
+  }
+}
+if (setup.find(row => row.id === 'status.adapter.antigravity')?.status !== 'ok') {
+  throw new Error('Antigravity setup check did not report a configured adapter');
+}
+JS_EOF
+    "$CLI" uninstall --target antigravity
+    bun - "$HOME/.gemini/config" <<'JS_EOF'
+const config = process.argv[2];
+const hooks = Bun.file(`${config}/hooks.json`);
+if ((await hooks.exists() && 'repo-harness' in await hooks.json())
+  || await Bun.file(`${config}/AGENTS.md`).exists()
+  || await Bun.file(`${config}/skills/repo-harness/SKILL.md`).exists()) {
+  throw new Error('Antigravity uninstall kept a managed hook, rules file, or router skill');
+}
+JS_EOF
+    echo '[tarball-smoke] OK: Antigravity install, hooks, doctor, and uninstall.'
+  )
+fi
+
 echo "[tarball-smoke] OK: ${PACKAGE_NAME}-${PACKAGE_VERSION}.tgz installs, serves the packaged Operator, and packaged CLI bins start."

@@ -311,6 +311,17 @@ function statusChecks(
   return checks;
 }
 
+function antigravityAdapterCheck(report: StatusReport): InitHookCheck {
+  const check = { id: 'status.adapter.antigravity', title: 'Antigravity global hook adapter', source: 'status' as const };
+  const entry = report.targets.find(candidate => candidate.id === 'antigravity');
+  if (entry?.projection === undefined) return { ...check, status: 'na', detail: 'Antigravity is not opted in.' };
+  const { projection, alreadyConfigured, managedEntryCount, expectedEntryCount } = entry;
+  if (projection.error !== undefined) return { ...check, status: 'fail', detail: projection.error };
+  const status = alreadyConfigured && projection.status === 'consistent' ? 'ok' : 'warn';
+  const count = `${managedEntryCount}/${expectedEntryCount} managed entries at ${entry.configPath}`;
+  return { ...check, status, detail: status === 'ok' ? count : `${count}; inspect with rh doctor.` };
+}
+
 function adoptionRefreshCheck(
   report: StatusReport,
   target: InitHookTarget,
@@ -419,10 +430,18 @@ function doctorChecks(
   target: InitHookTarget,
   checkUpdates: boolean,
   actions: ActionLedger,
+  antigravityOptedIn: boolean,
 ): InitHookCheck[] {
   const checks: InitHookCheck[] = [];
   for (const entry of report.checks) {
     if (target === 'claude' && entry.id === 'codex-cli-version') continue;
+    if (entry.id === 'agy-path' || entry.id === 'agy-cli-version') {
+      if (target !== 'both') continue;
+      if (!antigravityOptedIn) {
+        checks.push({ id: `doctor.${entry.id}`, title: entry.describe, status: 'na', source: 'doctor', detail: 'Antigravity is not opted in.' });
+        continue;
+      }
+    }
     if (entry.id === 'pi-package' && entry.status === 'warn') {
       addAction(actions, {
         id: 'pi.package.install', status: 'needs_agent', reason: entry.detail,
@@ -891,10 +910,13 @@ export function buildSetupCheck(ports: DoctorPorts, opts: InitHookOptions = {}):
     ? { report: opts.toolingReport, error: undefined }
     : collectToolingReport(sourceRoot, cwd, target, checkUpdates, opts.env);
 
+  const antigravityAdapter = target === 'both' ? antigravityAdapterCheck(statusReport) : null;
+  const antigravityOptedIn = antigravityAdapter !== null && antigravityAdapter.status !== 'na';
   const checks: InitHookCheck[] = [
     ...statusChecks(statusReport, target, checkUpdates, actions),
+    ...(antigravityAdapter === null ? [] : [antigravityAdapter]),
     adoptionRefreshCheck(statusReport, target, checkUpdates, actions),
-    ...doctorChecks(doctorReport, target, checkUpdates, actions),
+    ...doctorChecks(doctorReport, target, checkUpdates, actions, antigravityOptedIn),
     ...globalRulesChecks(target, opts.env, sourceRoot, checkUpdates, actions),
     ...runtimeCapabilityChecks(toolingProbe.report, target, checkUpdates, actions),
     ...toolingChecks(toolingProbe.report, target, checkUpdates, actions, toolingProbe.error),

@@ -130,12 +130,14 @@ function hostFacts(host: SetupHost, input: SetupProjectionInput, checks: Readonl
   if (check === undefined || entry === undefined) {
     return { host, reported: false, adapter_check: null, detected: null, adapter: null, cli_version: null };
   }
+  const optedOut = host === 'antigravity' && check.status === 'na';
+  const detected = entry.installed && !optedOut;
   return {
     host,
     reported: true,
     adapter_check: check.status,
-    detected: entry.installed,
-    adapter: entry.installed
+    detected,
+    adapter: detected
       ? {
         configured: entry.alreadyConfigured && entry.projection?.error === undefined,
         managed_entries: entry.managedEntryCount,
@@ -150,14 +152,14 @@ function hostFacts(host: SetupHost, input: SetupProjectionInput, checks: Readonl
         })),
       }
       : null,
-    cli_version: input.cli_versions[host] ?? null,
+    cli_version: optedOut ? null : input.cli_versions[host] ?? null,
   };
 }
 
 function skills(input: SetupProjectionInput): SetupSkill[] {
   const byName = new Map<string, { -readonly [H in SetupHost]: SetupSkill['hosts'][H] }>();
   for (const row of input.skill_rows ?? []) {
-    const hosts = byName.get(row.name) ?? { claude: null, codex: null, pi: null };
+    const hosts = byName.get(row.name) ?? { claude: null, codex: null, pi: null, antigravity: null };
     hosts[row.host] = { state: row.state, ok: row.ok };
     byName.set(row.name, hosts);
   }
@@ -234,7 +236,7 @@ function fleet(input: SetupProjectionInput): SetupFleetRole[] {
       description: packageText(role.description),
       model: packageText(role.model),
       effort: packageText(role.effort),
-      hosts: { claude: state('claude'), codex: state('codex'), pi: null },
+      hosts: { claude: state('claude'), codex: state('codex'), pi: null, antigravity: null },
     });
   }
   return roles;

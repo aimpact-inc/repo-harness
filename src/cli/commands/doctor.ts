@@ -218,6 +218,26 @@ export function checkRetiredPiExtension(env: NodeJS.ProcessEnv = process.env, no
     `Retired extension: ${file}. It calls repo-harness-hook with the old --route argv protocol; each call waits for its timeout and fails open. The repo-harness pi package replaces it. Run: mv -n ${quote(file)} ${quote(path.join(agentDir, `${path.basename(file)}.legacy-${stamp}`))}`).join('\n') };
 }
 
+export function checkAgyHost(): DoctorCheckResult[] {
+  const executable = findCommandOnPath('agy');
+  const pathCheck = { id: 'agy-path', describe: 'Antigravity CLI on PATH' };
+  const versionCheck = { id: 'agy-cli-version', describe: 'Antigravity CLI version' };
+  if (!executable) {
+    return [pathCheck, versionCheck].map(check => ({ ...check, status: 'na', detail: 'agy not found on PATH' }));
+  }
+
+  const found: DoctorCheckResult = { ...pathCheck, status: 'ok', detail: executable };
+  const result = spawnSync(executable, ['--version'], { encoding: 'utf8', timeout: 5000 });
+  if (result.status !== 0 || result.error) {
+    return [found, { ...versionCheck, status: 'warn', detail: 'agy --version failed.' }];
+  }
+  const version = /^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/u.exec(result.stdout.trim())?.[1];
+  if (version === undefined) {
+    return [found, { ...versionCheck, status: 'warn', detail: 'agy --version did not return a release version.' }];
+  }
+  return [found, { ...versionCheck, status: 'ok', version, detail: version }];
+}
+
 function checkVersion(): DoctorCheckResult {
   return { id: 'cli-version', describe: 'repo-harness CLI version', status: 'ok', detail: CLI_VERSION };
 }
@@ -695,7 +715,7 @@ export function runDoctor(ports: DoctorPorts, cwd: string = process.cwd(), targe
   checks.push(checkVersion());
   checks.push(checkSkillProjection(target));
   checks.push(checkCodexCliVersion());
-  if (target === 'both') checks.push(...checkPiHost(), checkRetiredPiExtension());
+  if (target === 'both') checks.push(...checkPiHost(), checkRetiredPiExtension(), ...checkAgyHost());
   checks.push(checkMagpie());
   checks.push(checkCliUpdate(target));
   for (const target of ALL_TARGETS) {
