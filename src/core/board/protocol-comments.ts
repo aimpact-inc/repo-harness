@@ -28,8 +28,10 @@ export function protocolComments(page: BoardCommentPageV1, header: string): Boar
 }
 
 /** The newest comment of one protocol kind from an account with write access. */
-export function newestProtocolComment(page: BoardCommentPageV1, header: string): BoardCommentV1 | null {
-  return protocolComments(page, header).reduce<BoardCommentV1 | null>((newest, comment) => (newest === null || comment.created_at >= newest.created_at ? comment : newest), null);
+export function newestProtocolComment(page: BoardCommentPageV1, header: string, matches: (comment: BoardCommentV1) => boolean = () => true): BoardCommentV1 | null {
+  return protocolComments(page, header).reduce<BoardCommentV1 | null>((newest, comment) => (
+    matches(comment) && (newest === null || comment.created_at >= newest.created_at) ? comment : newest
+  ), null);
 }
 
 export function field(body: string, name: string): string | null {
@@ -165,6 +167,29 @@ export function parseClaimStatus(comment: BoardCommentV1): ClaimStatusV1 | null 
     pr: pr === null ? null : Number(pr[1]),
     head_sha: pr?.[2] ?? null,
   });
+}
+
+export interface WriterCompletionV1 {
+  readonly pr: number;
+  readonly head_sha: string;
+  readonly branch: string | null;
+}
+
+/** Completion from the newest status of the issue's latest writer claim, including a `done` that closes that claim. */
+export function writerCompletion(page: BoardCommentPageV1, issue: number): WriterCompletionV1 | null {
+  const claim = newestProtocolComment(page, CLAIM_HEADER);
+  if (claim === null || field(claim.body, 'Role') !== 'writer' || bundleOf(claim.body, issue) === 'invalid') return null;
+  const id = commentId(claim.url);
+  if (id === null) return null;
+  const claimedAt = Date.parse(claim.created_at);
+  const comment = newestProtocolComment(page, CLAIM_STATUS_HEADER, (entry) => {
+    const target = claimStatusTarget(entry);
+    return target !== null && commentId(target) === id && Date.parse(entry.created_at) >= claimedAt;
+  });
+  const status = comment === null ? null : parseClaimStatus(comment);
+  if (status === null || status.pr === null || !Number.isSafeInteger(status.pr) || status.head_sha === null) return null;
+  if (!/^(?:ready for review|done)(?:;|$)/u.test(status.status)) return null;
+  return Object.freeze({ pr: status.pr, head_sha: status.head_sha, branch: field(claim.body, 'Branch') });
 }
 
 export interface AcceptanceRowV1 {

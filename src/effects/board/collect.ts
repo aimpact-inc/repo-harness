@@ -6,7 +6,7 @@ import {
 } from '../../core/board/board';
 import { ADVISOR_SEAT } from '../../core/board/advisor-seat';
 import { sha256Hex } from '../../core/evidence/sha256';
-import { STALLED_WORKING_MS } from '../../core/board/attention';
+import { isA22TaskSeat, STALLED_WORKING_MS } from '../../core/board/attention';
 import { isAllowedEditPath, readReviewI3Paths, workflowEditAllowed } from '../../core/board/hazards';
 import type { BoardPullRequestTierEvidenceV1 } from '../../core/board/review-rules';
 import {
@@ -402,13 +402,13 @@ export function seatScreenHash(text: string): string {
   return sha256Hex(text.replace(SPINNER_FRAMES, '').replace(ELAPSED_COUNTERS, ''));
 }
 
-/**
- * The liveness probes of the live seats that report `working` for longer than `STALLED_WORKING_MS` (#3182): one process table read
- * for all of them, and one screen read each. A seat under the bound costs no read.
- */
+/** Probe working seats past the bound and task seats with no reported status. Read the process table once. */
 function seatLiveness(host: BoardCollectInput['host'], terminals: readonly BoardSeatTerminalReadV1[], now: number): BoardSeatLivenessV1 {
-  const candidates = terminals.filter(terminal => terminal.state === 'live' && terminal.status === 'working' && terminal.labels.seat !== undefined
-    && terminal.status_ms !== null && now - terminal.status_ms > STALLED_WORKING_MS);
+  const candidates = terminals.filter(({ state, status, status_ms, labels }) => {
+    if (state !== 'live' || labels.seat === undefined) return false;
+    if (status === null) return isA22TaskSeat(labels.seat);
+    return status === 'working' && status_ms !== null && now - status_ms > STALLED_WORKING_MS;
+  });
   if (candidates.length === 0) return { status: 'observed', probes: [] };
   const table = host.childProcessCounts();
   if (table.status === 'unavailable') return table;
@@ -418,8 +418,8 @@ function seatLiveness(host: BoardCollectInput['host'], terminals: readonly Board
       if (terminal.agent_pid === null) return [];
       const screen = host.seatRead(terminal.address, SEAT_SCREEN_LINES);
       const usable = screen.status === 'observed' && screen.text.trim() !== '';
-      return [Object.freeze({ address: terminal.address, status_ms: terminal.status_ms!, turn: terminal.turn, children: table.counts.get(terminal.agent_pid) ?? 0,
-        screen_hash: usable ? seatScreenHash(screen.text) : null })];
+      return [Object.freeze({ address: terminal.address, status_ms: terminal.status === null ? null : terminal.status_ms, turn: terminal.turn,
+        children: table.counts.get(terminal.agent_pid) ?? 0, screen_hash: usable ? seatScreenHash(screen.text) : null })];
     })),
   };
 }

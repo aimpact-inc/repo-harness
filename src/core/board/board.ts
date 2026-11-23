@@ -11,6 +11,8 @@ import {
   parseClaimStatus,
   parseRefs,
   protocolComments,
+  writerCompletion,
+  type WriterCompletionV1,
   type BoardCommentPageV1,
   type BoardParentReadV1,
   type BoardPullRequestReadV1,
@@ -62,7 +64,7 @@ export type {
  * It is a read model. GitHub and hc stay the authorities; the board keeps
  * their observation time and never writes back.
  */
-export const BOARD_PROTOCOL = 14 as const;
+export const BOARD_PROTOCOL = 15 as const;
 export const BOARD_KIND = 'repo-harness.board' as const;
 
 const PLAN_HEADER = PLAN_COMMENT_HEADER;
@@ -91,6 +93,8 @@ export interface BoardItemV1 {
   readonly blocked_by: readonly { readonly number: number; readonly state: 'open' | 'closed' }[];
   readonly claim: IssueClaimV1;
   readonly claim_status: BoardClaimStatusV1;
+  /** A ready or done status bound to the issue's latest writer claim and the PR and head it reports. */
+  readonly writer_completion: WriterCompletionV1 | null;
   readonly open_questions: OpenQuestionsV1;
   /** Pull requests whose body closes or refs this issue. */
   readonly pull_requests: readonly number[];
@@ -188,14 +192,14 @@ export interface BoardSeatTerminalReadV1 {
 export type BoardSeatTerminalInputV1 = Omit<BoardSeatTerminalReadV1, 'cwd' | 'agent_pid'> & { readonly branch: string | null };
 
 /**
- * One liveness probe of a seat that reports `working` for longer than the stalled bound: the number of child processes of its program
- * and the hash of its screen (`seatScreenHash`); `screen_hash` is null when the screen read failed or came back empty. hc marks the
- * read of a working terminal incomplete, so the probe does not require a complete read: both reads hash the same screen tail.
- * `status_ms` and `turn` bind the probe to one working status, so A22 compares two probes of the same turn only.
+ * One liveness probe of a seat that has worked past the stalled bound or a task seat that reports no status.
+ * `status_ms` is the start of the working status or null for an unreported seat. A22 compares probes of the same status and turn.
+ * `screen_hash` is the digest of the screen tail and is null when that tail is empty or unavailable. A working seat can report
+ * the tail as incomplete.
  */
 export interface BoardSeatProbeV1 {
   readonly address: string;
-  readonly status_ms: number;
+  readonly status_ms: number | null;
   readonly turn: number;
   readonly children: number;
   readonly screen_hash: string | null;
@@ -300,7 +304,7 @@ export interface BoardV1 {
   readonly pull_requests: readonly BoardPullRequestV1[];
   readonly path_owners: BoardPathOwnersV1;
   readonly execution: BoardExecutionV1;
-  /** Probes of the seats that work past the stalled bound; A22 compares them with the probes of the board read before. */
+  /** A22 compares probes of working and unreported task seats with the board read before. */
   readonly seat_liveness: BoardSeatLivenessV1;
   readonly daily_run: BoardDailyRunV1;
   readonly tooling: BoardToolingV1;
@@ -360,10 +364,17 @@ function isIssueClaim(value: unknown): boolean {
     && (value.bundle === null || (Array.isArray(value.bundle) && value.bundle.length > 1 && value.bundle.every(number => Number.isSafeInteger(number) && number > 0)));
 }
 
+function isWriterCompletion(value: unknown): boolean {
+  return value === null || (isRecord(value) && Number.isSafeInteger(value.pr) && (value.pr as number) > 0
+    && typeof value.head_sha === 'string' && /^[0-9a-f]{7,40}$/u.test(value.head_sha)
+    && (value.branch === null || typeof value.branch === 'string'));
+}
+
 function isReviewRecords(value: unknown): boolean {
   if (!isRecord(value)) return false;
   if (value.status === 'unknown') return value.reason === 'comments_truncated' || value.reason === 'acceptance_record_unparsed';
-  return value.status === 'observed' && [value.gatekeeper, value.reviewer].every(time => time === null || isTime(time));
+  return value.status === 'observed' && [value.gatekeeper, value.reviewer].every(time => time === null || isTime(time))
+    && isRecord(value.head) && typeof value.head.gatekeeper === 'boolean' && typeof value.head.reviewer === 'boolean';
 }
 
 function isOpenQuestions(value: unknown): boolean {
@@ -377,7 +388,7 @@ function isSeatLiveness(value: unknown): boolean {
   if (!isRecord(value)) return false;
   if (value.status === 'unavailable') return typeof value.reason === 'string';
   return value.status === 'observed' && Array.isArray(value.probes) && value.probes.every((probe: unknown) => isRecord(probe) && typeof probe.address === 'string'
-    && Number.isSafeInteger(probe.status_ms) && Number.isSafeInteger(probe.turn) && Number.isSafeInteger(probe.children) && (probe.children as number) >= 0
+    && (probe.status_ms === null || Number.isSafeInteger(probe.status_ms)) && Number.isSafeInteger(probe.turn) && Number.isSafeInteger(probe.children) && (probe.children as number) >= 0
     && (probe.screen_hash === null || (typeof probe.screen_hash === 'string' && /^[0-9a-f]{64}$/u.test(probe.screen_hash))));
 }
 
@@ -395,6 +406,7 @@ export function decodeBoard(value: unknown): BoardV1 {
   if (!isSeatLiveness(board.seat_liveness)) throw new Error('invalid board seat_liveness');
   for (const item of board.items ?? []) {
     if (!isIssueClaim(item.claim)) throw new Error(`invalid board claim on #${item.number}`);
+    if (!isWriterCompletion(item.writer_completion)) throw new Error(`invalid board writer_completion on #${item.number}`);
     if (!isOpenQuestions(item.open_questions)) throw new Error(`invalid board open_questions on #${item.number}`);
   }
   for (const pr of board.pull_requests ?? []) {
@@ -512,6 +524,7 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
     blocked_by: issue.blocked_by,
     claim: issueClaim(issue.comments, issue.number),
     claim_status: claimStatus(issue),
+    writer_completion: writerCompletion(issue.comments, issue.number),
     open_questions: openQuestions(issue.comments),
     pull_requests: Object.freeze(pullRequests.filter(pr => pr.closes.includes(issue.number) || pr.refs.includes(issue.number)).map(pr => pr.number)),
     merge_hold: readMergeHold(issue.comments, false),

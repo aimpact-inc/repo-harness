@@ -35,7 +35,7 @@ export const A15_FAIL_MS = 60 * MINUTE;
 export const A16_QUESTION_MS = 15 * MINUTE;
 /** A17: a blocked claim status is this old. */
 export const A17_BLOCKED_MS = 15 * MINUTE;
-/** A22: a seat reports `working` this long; the board collector probes only such seats. */
+/** A22 uses this window for working status and for two matching probes of an unreported task seat. */
 export const STALLED_WORKING_MS = 5 * MINUTE;
 /** R1: this many open items are not in the latest plan. */
 export const R1_UNPLANNED_ITEMS = 3;
@@ -44,6 +44,7 @@ export const R4_STALLED_MS = 4 * 60 * MINUTE;
 const WORKER_SEATS = new Set<string>(WORKER_SEAT_IDS);
 /** The review seat ids of the seats config; the gatekeeper-fallback seat launches under the gatekeeper label (#2253). */
 const REVIEW_SEATS = new Set<string>(SEAT_IDS.filter(isReviewSeat));
+export const isA22TaskSeat = (seat: string): boolean => WORKER_SEATS.has(seat) || REVIEW_SEATS.has(seat);
 const RED_CONCLUSIONS = new Set(['failure', 'timed_out', 'startup_failure']);
 
 export type BoardRuleId = 'A1' | 'A3' | 'A4' | 'A5' | 'A6' | 'A7' | 'A8' | 'A9' | 'A10' | 'A11' | 'A12' | 'A13' | 'A14' | 'A15' | 'A16' | 'A17' | 'A18' | 'A19' | 'A20' | 'A21' | 'A22' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R7' | 'R8';
@@ -328,32 +329,76 @@ function a21(context: Context): void {
   }
 }
 
-/**
- * A22: a seat is stalled (#3182). It reports `working` for longer than `STALLED_WORKING_MS`, its program has no child process, and its
- * screen hash without spinner frames and elapsed-time counters is the same as in the read before, in the same turn and status. The
- * finding asks the orchestrator to look; nothing kills the seat.
- */
+function workerA22PullRequest(board: BoardV1, seat: SeatTerminal, item: BoardItemV1 | undefined): BoardPullRequestV1 | undefined {
+  if (seat.pr !== null) return board.pull_requests.find(pr => pr.number === seat.pr);
+  if (seat.branch === null) return undefined;
+  const matches = board.pull_requests.filter(pr => pr.head_ref === seat.branch);
+  const items = item === undefined ? null : bundleItems(board, item);
+  const linked = (pr: BoardPullRequestV1): boolean => items === null || items.some(entry => entry.pull_requests.includes(pr.number));
+  const open = matches.filter(pr => pr.state === 'open' && linked(pr));
+  if (open.length === 1) return open[0];
+
+  // A branch name survives reuse. A merge can identify this assignment only if it follows the writer claim and the branch is unique.
+  const [pr] = matches;
+  const claim = item?.claim;
+  return matches.length === 1 && pr?.state === 'merged' && linked(pr) && claim?.status === 'active' && claim.role === 'writer'
+    && claim.branch === seat.branch && pr.merged_at !== null && Date.parse(pr.merged_at) > Date.parse(claim.created_at) ? pr : undefined;
+}
+
+function workerA22Completed(board: BoardV1, seat: SeatTerminal, pr: BoardPullRequestV1, item: BoardItemV1 | undefined): boolean {
+  if (pr.state === 'merged') return true;
+  if (pr.state !== 'open') return false;
+  // A labeled issue owns its own status. Without that label, require one unambiguous issue for the pull request.
+  const issues = seat.issue === null ? board.items.filter(entry => entry.pull_requests.includes(pr.number)) : [];
+  const completion = (item ?? (issues.length === 1 ? issues[0] : undefined))?.writer_completion;
+  return completion?.pr === pr.number && pr.head_sha.startsWith(completion.head_sha)
+    && (completion.branch === pr.head_ref || (seat.pr !== null && completion.branch === null));
+}
+
+function unreportedA22(context: Context, seat: SeatTerminal, elapsed: number): void {
+  const { board } = context;
+  const item = board.items.find(entry => entry.number === seat.issue);
+  const review = REVIEW_SEATS.has(seat.seat);
+  const pr = review ? board.pull_requests.find(entry => entry.number === seat.pr) : workerA22PullRequest(board, seat, item);
+  if (pr !== undefined) {
+    if (review) {
+      const records = pr.review_records;
+      const role = seat.seat === 'reviewer' ? 'reviewer' : 'gatekeeper';
+      if (records.status === 'observed' && records.head[role]) return;
+    } else if (workerA22Completed(board, seat, pr, item)) return;
+  }
+  find(context, 'A22', { issues: seat.issue === null ? [] : [seat.issue], pull_requests: pr === undefined ? [] : [pr.number], terminals: [seat.address] },
+    `${seat.seat} ${seat.address} has no reported status, no child process, and the same screen as ${minutes(elapsed)} min ago; read the pane, it may be stalled`);
+}
+
+/** A22 compares the screen and child count of two probes in the same turn after the stalled window. */
 function a22(context: Context): void {
   const liveness = context.board.seat_liveness;
   if (liveness.status === 'unavailable') return skip(context, 'A22', liveness.reason);
   const execution = context.board.execution;
   const before = context.previous?.seat_liveness;
   for (const probe of liveness.probes) {
-    if (context.now - probe.status_ms <= STALLED_WORKING_MS || probe.children > 0) continue;
+    const workingSince = probe.status_ms;
+    if (probe.children > 0 || (workingSince !== null && context.now - workingSince <= STALLED_WORKING_MS)) continue;
     if (probe.screen_hash === null) {
       skip(context, 'A22', 'screen_unavailable', probe.address);
       continue;
     }
-    if (before?.status !== 'observed') {
+    if (context.previous === null || before?.status !== 'observed') {
       skip(context, 'A22', 'previous_read_missing', probe.address);
       continue;
     }
-    const prior = before.probes.find(entry => entry.address === probe.address && entry.status_ms === probe.status_ms && entry.turn === probe.turn);
+    const prior = before.probes.find(entry => entry.address === probe.address && entry.status_ms === workingSince && entry.turn === probe.turn);
     if (prior === undefined || prior.children > 0 || prior.screen_hash !== probe.screen_hash) continue;
     const terminal = execution.status === 'observed' ? execution.terminals.find(entry => entry.address === probe.address) : undefined;
     const seat = terminal?.seat_status === 'observed' ? terminal : null;
+    if (workingSince === null) {
+      const elapsed = context.now - Date.parse(context.previous.observed_at);
+      if (seat !== null && isA22TaskSeat(seat.seat) && elapsed > STALLED_WORKING_MS) unreportedA22(context, seat, elapsed);
+      continue;
+    }
     find(context, 'A22', { issues: seat?.issue == null ? [] : [seat.issue], pull_requests: seat?.pr == null ? [] : [seat.pr], terminals: [probe.address] },
-      `${seat?.seat ?? 'seat'} ${probe.address} is working for ${minutes(context.now - probe.status_ms)} min with no child process and an unchanged screen since the read before; read the pane, it may be a stalled stream`);
+      `${seat?.seat ?? 'seat'} ${probe.address} is working for ${minutes(context.now - workingSince)} min with no child process and an unchanged screen since the read before; read the pane, it may be a stalled stream`);
   }
 }
 
