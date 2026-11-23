@@ -132,6 +132,50 @@ export function assertResolutionDigest(value: string): string {
   return value;
 }
 
+/**
+ * Canonical Git-style repo-relative POSIX path. Rejects leading/trailing whitespace, control chars,
+ * backslashes, leading/trailing `/`, Windows drive prefixes (`C:/...`), empty segments (`//`),
+ * and `.` or `..` segments so pinned `archctx@0.18.0`'s literal `trackedSet.has(...)` check
+ * cannot treat a noncanonical spelling of an existing file as removed.
+ */
+export function isCanonicalRepoRelativePosixPath(path: string): boolean {
+  if (!isRepoRelativePosixPath(path) || path !== path.trim()) return false;
+  if (/[\u0000-\u001f\u007f]/.test(path)) return false;
+  if (path.endsWith("/") || /^[A-Za-z]:/.test(path)) return false;
+  for (const segment of path.split("/")) {
+    if (segment === "" || segment === "." || segment === "..") return false;
+  }
+  return true;
+}
+
+export function isCanonicalKillListSymbolTarget(target: string): boolean {
+  if (!isValidRefactorKillListSymbolTarget(target)) return false;
+  const hashIndex = target.indexOf("#");
+  if (hashIndex <= 0) return false;
+  return isCanonicalRepoRelativePosixPath(target.slice(0, hashIndex));
+}
+
+export function assertCanonicalKillListTargets(
+  entries: readonly { readonly kind: string; readonly target: string; readonly required?: boolean }[],
+  label: string,
+): void {
+  for (const entry of entries) {
+    if (entry.required === false) continue;
+    if (entry.kind === "path" && !isCanonicalRepoRelativePosixPath(entry.target)) {
+      throw new RefactorProviderError(
+        "refactor_invalid_kill_list",
+        `${label} contains a noncanonical required path target: ${entry.target}. Update or retire the decision so required path targets use canonical repo-relative POSIX paths (no ./, //, .., backslashes, or drive prefixes).`,
+      );
+    }
+    if (entry.kind === "symbol" && !isCanonicalKillListSymbolTarget(entry.target)) {
+      throw new RefactorProviderError(
+        "refactor_invalid_kill_list",
+        `${label} contains a noncanonical required symbol target: ${entry.target}. Update or retire the decision so required symbol targets use canonical <repo-relative-path>#<symbol> paths.`,
+      );
+    }
+  }
+}
+
 export function validateRefactorKillListFlags(input: RefactorKillListFlags): {
   killSymbols: string[];
   killPaths: string[];
@@ -141,13 +185,13 @@ export function validateRefactorKillListFlags(input: RefactorKillListFlags): {
   const killPaths = [...(input.killPaths ?? [])];
   const killRelations = [...(input.killRelations ?? [])];
   for (const symbol of killSymbols) {
-    if (!isValidRefactorKillListSymbolTarget(symbol)) {
-      throw new RefactorProviderError("refactor_invalid_input", `--kill-symbol must be <repo-relative-path>#<symbol>: ${symbol}`);
+    if (!isCanonicalKillListSymbolTarget(symbol)) {
+      throw new RefactorProviderError("refactor_invalid_input", `--kill-symbol must be a canonical <repo-relative-path>#<symbol>: ${symbol}`);
     }
   }
   for (const path of killPaths) {
-    if (!isRepoRelativePosixPath(path)) {
-      throw new RefactorProviderError("refactor_invalid_input", `--kill-path must be a repo-relative POSIX path: ${path}`);
+    if (!isCanonicalRepoRelativePosixPath(path)) {
+      throw new RefactorProviderError("refactor_invalid_input", `--kill-path must be a canonical repo-relative POSIX path: ${path}`);
     }
   }
   for (const relation of killRelations) {
@@ -202,6 +246,7 @@ function assertVerifyData(value: unknown, expectedRecommendationId: string, labe
   if (verified.recommendationId !== expectedRecommendationId) {
     throw new RefactorProviderError("refactor_provider_result_invalid", `${label} returned recommendationId ${verified.recommendationId}, expected ${expectedRecommendationId}`);
   }
+  assertCanonicalKillListTargets(verified.killListChecks, `${label}.killListChecks`);
   return verified;
 }
 
@@ -258,6 +303,9 @@ export function decodeRefactorResolveResult(
   const data = refactorEnvelopeData(value, requestId, REFACTOR_DECIDE_WRITE_SCHEMA_VERSION);
   const filePath = assertDecisionFilePath(data.filePath, expectedRecommendationId, requestId);
   const decision = assertDecision(data.decision, `${requestId}.decision`, expectedRecommendationId);
+  if (decision.killList) {
+    assertCanonicalKillListTargets(decision.killList, `${requestId}.decision.killList`);
+  }
   if (decision.status !== "resolved") {
     throw new RefactorProviderError("refactor_provider_result_invalid", `${requestId} returned status ${decision.status}, expected resolved`);
   }

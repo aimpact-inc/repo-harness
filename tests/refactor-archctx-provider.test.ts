@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { errorEnvelope, type RefactorDecisionV1, type RefactorScanFindingV2, type RefactorScanV2, type RefactorVerifyV2 } from "archctx-contracts";
+import { digestJson, errorEnvelope, serializeRefactorDecision, type RefactorDecisionV1, type RefactorScanFindingV2, type RefactorScanV2, type RefactorVerifyV2 } from "archctx-contracts";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -8,6 +8,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ARCHCTX_REQUIRED_VERSION } from "../src/core/architecture/projection";
 import { RefactorProviderError } from "../src/core/refactor/provider-contract";
+import { formatRefactorVerify, resolveDecisionCommitRoot } from "../src/cli/commands/refactor";
 import { resolveCompatibleNodeRuntime } from "../src/effects/architecture/archctx-provider";
 import {
   decideRecommendation,
@@ -432,6 +433,22 @@ describe("real archctx 0.18.0 pure-Git refactor lifecycle (end-to-end)", () => {
     expect(shownBefore.decision).toBeNull();
     expect(shownBefore.finding?.recommendationId).toBe(recId);
 
+    // 3b. Noncanonical kill-path and kill-symbol spellings against an existing tracked file are refused before invoking archctx.
+    for (const badPath of ["./src/beta/legacy.ts", "src/./beta/legacy.ts", "src//beta/legacy.ts", "C:/src/beta/legacy.ts"]) {
+      expect(() => decideRecommendation(repoRoot, {
+        recommendationId: recId,
+        decision: "accept",
+        reason: "Noncanonical kill-path must be rejected",
+        killPaths: [badPath],
+      }, { consumerRoot: REPO_ROOT, env })).toThrow("canonical repo-relative POSIX path");
+      expect(() => decideRecommendation(repoRoot, {
+        recommendationId: recId,
+        decision: "accept",
+        reason: "Noncanonical kill-symbol must be rejected",
+        killSymbols: [`${badPath}#legacyCycleBridge`],
+      }, { consumerRoot: REPO_ROOT, env })).toThrow("canonical <repo-relative-path>#<symbol>");
+    }
+
     // 4. Decide accept with explicit kill-symbol and kill-path targets.
     const decided = decideRecommendation(repoRoot, {
       recommendationId: recId,
@@ -468,6 +485,32 @@ describe("real archctx 0.18.0 pure-Git refactor lifecycle (end-to-end)", () => {
     expect(unresolved.disposition).toBe("unresolved");
     expect(unresolved.killListChecks.every((check) => check.status === "still-present")).toBe(true);
     expect(unresolved.metricChecks.some((check) => !check.satisfied)).toBe(true);
+
+    // 6b. Stored decision with a noncanonical required kill-path target (`./src/beta/legacy.ts`) cannot be verified as removed or resolved.
+    const noncanonicalFp = digestJson({ kind: "stored-noncanonical-kill-target" });
+    const noncanonicalRecId = `recommendation.${digestJson({ fingerprint: noncanonicalFp, regressesFrom: null }).slice("sha256:".length, "sha256:".length + 16)}`;
+    const noncanonicalDecision: RefactorDecisionV1 = {
+      ...decided.decision,
+      recommendationId: noncanonicalRecId,
+      fingerprint: noncanonicalFp,
+      category: "refactor_proposal",
+      kind: null,
+      observationMetrics: null,
+      targetOutcomes: undefined,
+      killList: [{ kind: "path", target: "./src/beta/legacy.ts", required: true }],
+    };
+    const noncanonicalRelPath = `.archcontext/refactor-decisions/${noncanonicalRecId}.json`;
+    const noncanonicalBody = serializeRefactorDecision(noncanonicalDecision);
+    writeRepoFile(repoRoot, noncanonicalRelPath, noncanonicalBody);
+    expect(() => runRefactorVerify(repoRoot, { recommendationId: noncanonicalRecId }, { consumerRoot: REPO_ROOT, env }))
+      .toThrow("noncanonical required path target: ./src/beta/legacy.ts");
+    expect(() => resolveRecommendation(repoRoot, {
+      recommendationId: noncanonicalRecId,
+      resolutionDigest: `sha256:${"a".repeat(64)}`,
+      reason: "Must fail closed before archctx resolve",
+    }, { consumerRoot: REPO_ROOT, env })).toThrow("noncanonical required path target: ./src/beta/legacy.ts");
+    expect(readFileSync(join(repoRoot, noncanonicalRelPath), "utf8")).toBe(noncanonicalBody);
+    unlinkSync(join(repoRoot, noncanonicalRelPath));
 
     // 7. Apply fix and commit WITHOUT syncing CodeGraph -> verify reports stale index.
     unlinkSync(join(repoRoot, "src/beta/legacy.ts"));
@@ -512,5 +555,101 @@ describe("real archctx 0.18.0 pure-Git refactor lifecycle (end-to-end)", () => {
       status: "resolved",
       resolutionDigest: verified.resolutionDigest,
     });
+
+    // 11. Real 0.17.1-shape `refactor_proposal` decisions (null observationMetrics, no targetOutcomes/killList):
+    // verify reports stale + baseline-metadata-missing with explicit retire/replace next-step;
+    // operators can either attach a verifiable kill-list via `decide accept --kill-path` and resolve, or retire via `decide reject`.
+    writeRepoFile(repoRoot, "src/beta/legacy-retire.ts", "export const legacyRetire = 1;\n");
+    const makeLegacyProposal = (seed: string): { recId: string; relPath: string } => {
+      const fp = digestJson({ legacy0171Proposal: seed });
+      const id = `recommendation.${digestJson({ fingerprint: fp, regressesFrom: null }).slice("sha256:".length, "sha256:".length + 16)}`;
+      const decision: RefactorDecisionV1 = {
+        ...decided.decision,
+        recommendationId: id,
+        fingerprint: fp,
+        category: "refactor_proposal",
+        kind: null,
+        status: "accepted",
+        observationMetrics: null,
+        targetOutcomes: undefined,
+        killList: undefined,
+        resolutionDigest: undefined,
+      };
+      const relPath = `.archcontext/refactor-decisions/${id}.json`;
+      writeRepoFile(repoRoot, relPath, serializeRefactorDecision(decision));
+      return { recId: id, relPath };
+    };
+    const legacyUpgrade = makeLegacyProposal("upgrade-via-kill-list");
+    const legacyRetire = makeLegacyProposal("retire-via-reject");
+    runGit(repoRoot, ["add", "src/beta/legacy-retire.ts", legacyUpgrade.relPath, legacyRetire.relPath], env);
+    runGit(repoRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Add 0.17.1 legacy proposals"], env);
+    runCodeGraph(repoRoot, ["sync", "."], env);
+
+    const legacyStale = runRefactorVerify(repoRoot, { recommendationId: legacyUpgrade.recId }, { consumerRoot: REPO_ROOT, env });
+    expect(legacyStale.disposition).toBe("stale");
+    expect(legacyStale.blockingReasons).toEqual(["baseline-metadata-missing"]);
+    const legacyHint = formatRefactorVerify(legacyStale, { repo: repoRoot });
+    expect(legacyHint).toContain("legacy decision lacks baseline proof metadata");
+    expect(legacyHint).toContain(`rh arch refactor decide accept ${legacyUpgrade.recId}`);
+    expect(legacyHint).toContain(`rh arch refactor decide reject ${legacyUpgrade.recId}`);
+
+    // Upgrade legacy proposal A with canonical kill-path, remove target, sync, verify -> resolved -> resolve!
+    const upgraded = decideRecommendation(repoRoot, {
+      recommendationId: legacyUpgrade.recId,
+      decision: "accept",
+      reason: "Attach verifiable kill-path to 0.17.1 legacy proposal",
+      killPaths: ["src/beta/legacy-retire.ts"],
+    }, { consumerRoot: REPO_ROOT, env });
+    expect(upgraded.decision.killList).toEqual([{ kind: "path", target: "src/beta/legacy-retire.ts", required: true }]);
+    unlinkSync(join(repoRoot, "src/beta/legacy-retire.ts"));
+    runGit(repoRoot, ["add", "-A"], env);
+    runGit(repoRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Remove legacy-retire file and commit upgraded decision"], env);
+    runCodeGraph(repoRoot, ["sync", "."], env);
+    const upgradedVerified = runRefactorVerify(repoRoot, { recommendationId: legacyUpgrade.recId }, { consumerRoot: REPO_ROOT, env });
+    expect(upgradedVerified.disposition).toBe("resolved");
+    const upgradedResolved = resolveRecommendation(repoRoot, {
+      recommendationId: legacyUpgrade.recId,
+      resolutionDigest: upgradedVerified.resolutionDigest,
+      reason: "Legacy proposal upgraded with kill-path and verified resolved",
+    }, { consumerRoot: REPO_ROOT, env });
+    expect(upgradedResolved.status).toBe("resolved");
+
+    // Retire legacy proposal B directly via `decide reject`.
+    const retired = decideRecommendation(repoRoot, {
+      recommendationId: legacyRetire.recId,
+      decision: "reject",
+      reason: "Retire obsolete 0.17.1 proposal lacking baseline metadata",
+    }, { consumerRoot: REPO_ROOT, env });
+    expect(retired.status).toBe("rejected");
+
+    // 12. Sibling checkouts `project` and `project ` (trailing space): refactor writes & commit root fail closed without touching `project`.
+    const wsParent = scratchDir("refactor-ws-sibling-");
+    const cleanSibling = join(wsParent, "project");
+    const spacedSibling = join(wsParent, "project ");
+    for (const sibling of [cleanSibling, spacedSibling]) {
+      mkdirSync(join(sibling, "src"), { recursive: true });
+      runGit(sibling, ["init", "-q"], env);
+      writeRepoFile(sibling, "src/index.ts", "export const v = 1;\n");
+      runGit(sibling, ["add", "-A"], env);
+      runGit(sibling, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "init"], env);
+    }
+    const siblingHeadBefore = runGit(cleanSibling, ["rev-parse", "HEAD"], env);
+    for (const target of [spacedSibling, join(spacedSibling, "src")]) {
+      expect(() => decideRecommendation(target, {
+        recommendationId: recId,
+        decision: "reject",
+        reason: "Must fail closed on whitespace checkout root",
+      }, { consumerRoot: REPO_ROOT, env })).toThrow("whitespace");
+      expect(() => runRefactorVerify(target, { recommendationId: recId }, { consumerRoot: REPO_ROOT, env })).toThrow("whitespace");
+      expect(() => resolveRecommendation(target, {
+        recommendationId: recId,
+        resolutionDigest: verified.resolutionDigest,
+        reason: "Must fail closed",
+      }, { consumerRoot: REPO_ROOT, env })).toThrow("whitespace");
+      expect(() => resolveDecisionCommitRoot(target)).toThrow("whitespace");
+    }
+    expect(runGit(cleanSibling, ["rev-parse", "HEAD"], env)).toBe(siblingHeadBefore);
+    expect(existsSync(join(cleanSibling, ".archcontext"))).toBe(false);
+    expect(existsSync(join(spacedSibling, ".archcontext"))).toBe(false);
   }, 60_000);
 });

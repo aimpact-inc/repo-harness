@@ -1,6 +1,9 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError } from "../../core/architecture/projection";
 import type { ArchctxProviderOptions } from "../../core/architecture/contracts";
 import {
+  assertCanonicalKillListTargets,
   assertRefactorReason,
   assertRefactorRecommendationId,
   assertResolutionDigest,
@@ -26,14 +29,47 @@ import {
   type RefactorScanV2,
   type RefactorVerifyV2,
 } from "../../core/refactor/provider-contract";
-import { commandLabel, runPackageLocalArchctxJson } from "../architecture/archctx-provider";
+import { assertSafeArchctxRepoRoot, commandLabel, runPackageLocalArchctxJson } from "../architecture/archctx-provider";
 
 const MUTATING_DECIDE_ACTIONS = new Set<string>(["accept", "defer", "reject", "acknowledge", "waive", "resolve"]);
+
+function assertStoredDecisionCanonicalKillList(verifiedRoot: string, recommendationId: string): void {
+  const decisionPath = join(verifiedRoot, ".archcontext", "refactor-decisions", `${recommendationId}.json`);
+  if (!existsSync(decisionPath)) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(decisionPath, "utf8"));
+  } catch {
+    return;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+  const killList = (parsed as { killList?: unknown }).killList;
+  if (!Array.isArray(killList)) return;
+  const entries = killList.filter(
+    (entry): entry is { kind: string; target: string; required?: boolean } =>
+      Boolean(entry) && typeof entry === "object" && !Array.isArray(entry)
+      && typeof (entry as { kind?: unknown }).kind === "string"
+      && typeof (entry as { target?: unknown }).target === "string",
+  );
+  assertCanonicalKillListTargets(entries, `.archcontext/refactor-decisions/${recommendationId}.json killList`);
+}
+
+function verifyRefactorRoot(repoRoot: string, options: ArchctxProviderOptions, label: string): string {
+  try {
+    return assertSafeArchctxRepoRoot(repoRoot, options.env ?? process.env, label);
+  } catch (error) {
+    if (error instanceof ArchctxClientError) {
+      throw new RefactorProviderError(error.code, error.providerMessage, error.action, error.reasonCode);
+    }
+    throw new RefactorProviderError("refactor_provider_unavailable", error instanceof Error ? error.message : String(error));
+  }
+}
 
 /** Package resolution refuses an installed archctx whose manifest is not the pinned version. */
 function invoke(repoRoot: string, args: readonly string[], options: ArchctxProviderOptions, timeoutMs: number): unknown {
   try {
-    return runPackageLocalArchctxJson(repoRoot, ARCHCTX_REQUIRED_VERSION, args, options, timeoutMs).value;
+    const verifiedRoot = verifyRefactorRoot(repoRoot, options, `refactor ${commandLabel(args)}`);
+    return runPackageLocalArchctxJson(verifiedRoot, ARCHCTX_REQUIRED_VERSION, args, options, timeoutMs).value;
   } catch (error) {
     if (error instanceof RefactorProviderError) throw error;
     if (error instanceof ArchctxClientError) {
@@ -123,8 +159,10 @@ export function runRefactorVerify(
   timeoutMs = REFACTOR_DEFAULT_TIMEOUT_MS,
 ): RefactorVerifyV2 {
   const recommendationId = assertRefactorRecommendationId(input.recommendationId);
+  const verifiedRoot = verifyRefactorRoot(repoRoot, options, "refactor verify");
+  assertStoredDecisionCanonicalKillList(verifiedRoot, recommendationId);
   const args = ["verify", recommendationId, ...importNodeLimitArgs(input.importNodeLimit), "--json"];
-  return decodeRefactorVerifyV2(invoke(repoRoot, args, options, timeoutMs), recommendationId);
+  return decodeRefactorVerifyV2(invoke(verifiedRoot, args, options, timeoutMs), recommendationId);
 }
 
 export interface ResolveRecommendationInput {
@@ -144,6 +182,8 @@ export function resolveRecommendation(
   const recommendationId = assertRefactorRecommendationId(input.recommendationId);
   const resolutionDigest = assertResolutionDigest(input.resolutionDigest);
   const reason = assertRefactorReason(input.reason);
+  const verifiedRoot = verifyRefactorRoot(repoRoot, options, "refactor decide resolve");
+  assertStoredDecisionCanonicalKillList(verifiedRoot, recommendationId);
   const args = [
     "decide",
     "resolve",
@@ -155,7 +195,7 @@ export function resolveRecommendation(
     ...importNodeLimitArgs(input.importNodeLimit),
     "--json",
   ];
-  return decodeRefactorResolveResult(invoke(repoRoot, args, options, timeoutMs), recommendationId, resolutionDigest);
+  return decodeRefactorResolveResult(invoke(verifiedRoot, args, options, timeoutMs), recommendationId, resolutionDigest);
 }
 
 export interface ListRefactorInput {

@@ -383,29 +383,68 @@ describe('rh arch', () => {
     writeFileSync(parentIgnorePath, originalParentIgnore);
     rmSync(nestedChild, { recursive: true, force: true });
 
-    // 8c. Real pinned-provider test: foreign regular SQLite sidecars (-shm, -wal, -journal) beside a valid CodeGraph DB
-    // are refused before CodeGraph opens WAL mode, preserving exact sidecar bytes and directory entries.
+    // 8c. Real pinned-provider test: valid SQLite sidecars copied from ANOTHER database (-wal alone, -shm alone,
+    // -wal + -shm pair, and -journal) beside a valid CodeGraph DB are refused unconditionally, preserving exact bytes.
     const cleanCgDir = join(cleanCase.repo, '.codegraph');
     const cleanDbPath = join(cleanCgDir, 'codegraph.db');
-    for (const sidecar of ['codegraph.db-shm', 'codegraph.db-wal', 'codegraph.db-journal'] as const) {
-      rmSync(join(cleanCgDir, sidecar), { force: true });
+    // Confirm clean seeded repo already has zero lingering sidecars after rh arch index seed.
+    expect(readdirSync(cleanCgDir).sort()).toEqual(['.gitignore', 'codegraph.db']);
+
+    const foreignWalSource = mkdtempSync(join(tmpdir(), 'repo-harness-foreign-wal-'));
+    roots.push(foreignWalSource);
+    const foreignSourceDb = new Database(join(foreignWalSource, 'other.db'));
+    let foreignWalBytes: Buffer;
+    let foreignShmBytes: Buffer;
+    try {
+      foreignSourceDb.exec('PRAGMA journal_mode=WAL; CREATE TABLE foreign_tbl (id TEXT); INSERT INTO foreign_tbl VALUES ("foreign");');
+      foreignWalBytes = readFileSync(join(foreignWalSource, 'other.db-wal'));
+      foreignShmBytes = readFileSync(join(foreignWalSource, 'other.db-shm'));
+      expect(foreignWalBytes.length).toBeGreaterThan(32);
+      expect(foreignShmBytes.length).toBeGreaterThanOrEqual(32_768);
+    } finally {
+      foreignSourceDb.close();
     }
-    for (const [sidecar, payload, expectedErr] of [
-      ['codegraph.db-shm', 'foreign-shm-user-data\n', 'codegraph.db-shm is not a valid SQLite WAL-index'],
-      ['codegraph.db-wal', 'foreign-wal-user-data\n', 'codegraph.db-wal is not a valid SQLite WAL'],
-      ['codegraph.db-journal', 'foreign-journal-user-data\n', 'codegraph.db-journal is present'],
-    ] as const) {
-      const sidecarPath = join(cleanCgDir, sidecar);
-      writeFileSync(sidecarPath, payload);
+
+    const sidecarCases: Array<{ files: Array<[string, Buffer]>; expected: string }> = [
+      { files: [['codegraph.db-wal', foreignWalBytes]], expected: '.codegraph/codegraph.db-wal is present' },
+      { files: [['codegraph.db-shm', foreignShmBytes]], expected: '.codegraph/codegraph.db-shm is present' },
+      { files: [['codegraph.db-wal', foreignWalBytes], ['codegraph.db-shm', foreignShmBytes]], expected: '.codegraph/codegraph.db-wal is present' },
+      { files: [['codegraph.db-journal', Buffer.from('foreign-journal-user-data\n')]], expected: '.codegraph/codegraph.db-journal is present' },
+    ];
+    for (const sc of sidecarCases) {
+      for (const [name, payload] of sc.files) writeFileSync(join(cleanCgDir, name), payload);
       const dbBefore = readFileSync(cleanDbPath);
       const entriesBefore = readdirSync(cleanCgDir).sort();
       const sidecarRes = runSeed(cleanCase.repo, cleanCase.env);
       expect(sidecarRes.status).toBe(1);
-      expect(sidecarRes.stderr).toContain(expectedErr);
-      expect(readFileSync(sidecarPath, 'utf8')).toBe(payload);
+      expect(sidecarRes.stderr).toContain(sc.expected);
+      for (const [name, payload] of sc.files) expect(readFileSync(join(cleanCgDir, name)).equals(payload)).toBe(true);
       expect(readFileSync(cleanDbPath)).toEqual(dbBefore);
       expect(readdirSync(cleanCgDir).sort()).toEqual(entriesBefore);
-      rmSync(sidecarPath, { force: true });
+      for (const [name] of sc.files) rmSync(join(cleanCgDir, name), { force: true });
+    }
+
+    // 8d. Real pinned-provider test: sibling checkouts `project` and `project ` (trailing space) —
+    // invoking public `rh arch index seed` in `project ` (or a subdir of it) fails closed without touching `project`.
+    const wsParent = mkdtempSync(join(tmpdir(), 'repo-harness-ws-sibling-'));
+    roots.push(wsParent);
+    const cleanSibling = join(wsParent, 'project');
+    const spacedSibling = join(wsParent, 'project ');
+    for (const dir of [cleanSibling, spacedSibling]) {
+      mkdirSync(join(dir, 'src'), { recursive: true });
+      fixtureGit(dir, ['init', '-q']);
+      fixtureWrite(dir, 'src/index.ts', 'export const ok = 1;\n');
+      fixtureCommit(dir);
+    }
+    const cleanSiblingSeed = runSeed(cleanSibling, cleanCase.env);
+    expect(cleanSiblingSeed.status, `${cleanSiblingSeed.stderr}\n${cleanSiblingSeed.stdout}`).toBe(0);
+    const siblingDbBefore = readFileSync(join(cleanSibling, '.codegraph/codegraph.db'));
+    for (const cwdTarget of [spacedSibling, join(spacedSibling, 'src')]) {
+      const spacedRes = runSeed(cwdTarget, cleanCase.env);
+      expect(spacedRes.status).toBe(1);
+      expect(spacedRes.stderr).toContain('whitespace');
+      expect(readFileSync(join(cleanSibling, '.codegraph/codegraph.db'))).toEqual(siblingDbBefore);
+      expect(existsSync(join(spacedSibling, '.codegraph'))).toBe(false);
     }
 
     // 9. Non-PID / empty user files at codegraph.lock and codegraph.lock.break refused on real primary index without unlinking.

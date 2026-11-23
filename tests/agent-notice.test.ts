@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { Database } from 'bun:sqlite';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { ARCHCONTEXT_NODE_RANGE, ERROR_CATALOG, digestJson, type Json } from 'archctx-contracts';
 import { collectAgentNotice, renderAgentNotice } from '../src/cli/hook/agent-notice';
@@ -818,5 +820,72 @@ describe('AgentNotice', () => {
     // Without the map the unowned filter reads the same diff, so the shared failure is not repeated.
     rmSync(join(root, ARCHIMAP));
     expect(collectAgentNotice(root, broken, { env: noticeEnv(root), run: noCheckpoint }).diagnostics).toBe(failed.diagnostics);
+  });
+
+  test('SessionStart prepare strips inherited ARCHCONTEXT_LOCAL_STORE_PATH and ARCHCONTEXT_STATE_DIR so unrelated SQLite and user files stay untouched', () => {
+    const root = fixture();
+    const scratch = mkdtempSync(join(tmpdir(), 'agent-notice-store-guard-'));
+    roots.push(scratch);
+    const packageRoot = resolve(import.meta.dir, '..');
+    const stateOverrideDir = join(scratch, 'forbidden-state-dir');
+    mkdirSync(stateOverrideDir, { recursive: true });
+
+    // (a) Unrelated SQLite database with user_version !== 200 (archctx SqliteLocalStore would drop all tables if inherited).
+    const sqliteTargetDir = join(scratch, 'sqlite-target');
+    mkdirSync(sqliteTargetDir, { recursive: true });
+    const unrelatedSqlitePath = join(sqliteTargetDir, 'user-app.sqlite');
+    const userDb = new Database(unrelatedSqlitePath);
+    userDb.exec('PRAGMA user_version = 7; CREATE TABLE secrets (k TEXT PRIMARY KEY, v TEXT); INSERT INTO secrets VALUES ("a", "preserve");');
+    userDb.close();
+    const sqliteBytesBefore = readFileSync(unrelatedSqlitePath);
+    const sqliteEntriesBefore = readdirSync(sqliteTargetDir).sort();
+
+    // (b) Non-SQLite user file (archctx SqliteLocalStore would rmSync it on initialization failure if inherited).
+    const plainTargetDir = join(scratch, 'plain-target');
+    mkdirSync(plainTargetDir, { recursive: true });
+    const plainUserFile = join(plainTargetDir, 'important.txt');
+    writeFileSync(plainUserFile, 'important user notes — never unlink\n');
+    const plainBytesBefore = readFileSync(plainUserFile);
+    const plainEntriesBefore = readdirSync(plainTargetDir).sort();
+
+    // Put repo on an issue branch so SessionStart triggers prepareArchitectureTask against real pinned archctx@0.18.0.
+    fixtureGit(root, ['checkout', '-q', '-b', 'feat/3388-store-guard']);
+    fixtureWrite(root, '.archcontext/product.yaml', 'schemaVersion: archcontext.product/v1\nid: prod.notice\nname: Notice\n');
+    const ownership = () => noticeOwnership(root);
+    const baseEnv = noticeEnv(root);
+
+    // Run real pinned archctx@0.18.0 prepare via SessionStart with both inherited overrides.
+    collectAgentNotice(root, ownership, {
+      consumerRoot: packageRoot,
+      env: { ...baseEnv, ARCHCONTEXT_LOCAL_STORE_PATH: unrelatedSqlitePath, ARCHCONTEXT_STATE_DIR: stateOverrideDir },
+    }, 'session-start');
+    expect(readFileSync(unrelatedSqlitePath).equals(sqliteBytesBefore)).toBe(true);
+    expect(readdirSync(sqliteTargetDir).sort()).toEqual(sqliteEntriesBefore);
+    expect(readdirSync(stateOverrideDir)).toEqual([]);
+
+    collectAgentNotice(root, ownership, {
+      consumerRoot: packageRoot,
+      env: { ...baseEnv, ARCHCONTEXT_LOCAL_STORE_PATH: plainUserFile, ARCHCONTEXT_STATE_DIR: stateOverrideDir },
+    }, 'session-start');
+    expect(readFileSync(plainUserFile).equals(plainBytesBefore)).toBe(true);
+    expect(readdirSync(plainTargetDir).sort()).toEqual(plainEntriesBefore);
+    expect(readdirSync(stateOverrideDir)).toEqual([]);
+
+    // Also verify checkpointArchitectureDebt strips both env vars before invoking archctx.
+    const seenEnvs: NodeJS.ProcessEnv[] = [];
+    fixtureWrite(root, 'src/module/read.ts', 'export const touched = 1;\n');
+    try {
+      checkpointArchitectureDebt(root, noticeOwnership(root), {
+        consumerRoot: packageRoot,
+        env: { ...baseEnv, ARCHCONTEXT_LOCAL_STORE_PATH: unrelatedSqlitePath, ARCHCONTEXT_STATE_DIR: stateOverrideDir },
+        run: (_bin, _args, opts) => {
+          seenEnvs.push({ ...opts.env });
+          return { status: 1, signal: null, stdout: '', stderr: 'stop' };
+        },
+      });
+    } catch { /* mocked non-zero stop */ }
+    expect(seenEnvs).toHaveLength(1);
+    expect(seenEnvs[0]!.ARCHCONTEXT_LOCAL_STORE_PATH).toBeUndefined();
+    expect(seenEnvs[0]!.ARCHCONTEXT_STATE_DIR).toBeUndefined();
   });
 });

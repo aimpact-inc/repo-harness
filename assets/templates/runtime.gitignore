@@ -19,7 +19,8 @@ _ref/
 !.archcontext/model/flows/
 !.archcontext/decisions/
 !.archcontext/refactor-decisions/
-.archcontext/refactor-decisions/*.tmp-*
+.archcontext/refactor-decisions/*
+!.archcontext/refactor-decisions/recommendation.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
 !.archcontext/policies/
 !.archcontext/practices/
 !.archcontext/projections/

@@ -3,7 +3,7 @@ import { DEFAULT_GLOBAL_ARCHITECTURE, loadArchitectureProjectionPolicy, readGlob
 import { Database } from 'bun:sqlite';
 import { accessSync, chmodSync, closeSync, constants as fsConstants, copyFileSync, existsSync, lstatSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { endianness, tmpdir, userInfo } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -304,7 +304,8 @@ export function archctxCapabilities(repoRoot: string, options: ArchctxProviderOp
 export function runArchctxPassThrough(cwd: string, args: readonly string[], options: ArchctxProviderOptions = {}): number {
   let spawnCwd = cwd;
   let env: NodeJS.ProcessEnv = { ...(options.env ?? process.env) };
-  if (args[0] === 'index' && !args.includes('--help') && !args.includes('-h')) {
+  const isIndexSeed = args[0] === 'index' && !args.includes('--help') && !args.includes('-h');
+  if (isIndexSeed) {
     const seedRoot = resolveCodeGraphSeedRoot(cwd, env);
     spawnCwd = seedRoot;
     env = sanitizeGitDiscoveryEnv(env);
@@ -315,8 +316,12 @@ export function runArchctxPassThrough(cwd: string, args: readonly string[], opti
     assertSafeCodeGraphDestination(seedRoot, { env });
   }
   const { resolved } = archctxCapabilities(spawnCwd, { ...options, env });
-  const result = spawnSync(resolveCompatibleNodeRuntime(env, options.trustedNodeCandidateSource), [resolved.binaryPath, ...args], { cwd: spawnCwd, env, stdio: 'inherit' });
+  const nodeExecutable = resolveCompatibleNodeRuntime(env, options.trustedNodeCandidateSource);
+  const result = spawnSync(nodeExecutable, [resolved.binaryPath, ...args], { cwd: spawnCwd, env, stdio: 'inherit' });
   if (result.error) throw result.error;
+  if (isIndexSeed && result.status === 0) {
+    quiesceSeededCodeGraphSidecars(spawnCwd, nodeExecutable, env);
+  }
   return result.status ?? 1;
 }
 
@@ -543,6 +548,23 @@ export function changedSinceReviewBase(repoRoot: string, reviewBase: string, opt
   ]);
 }
 
+/**
+ * Strips caller diagnostic store/state overrides before automatic hook invocations (`prepare`,
+ * `checkpoint`). `archctx@0.18.0`'s `SqliteLocalStore` drops tables on schema mismatch and unlinks
+ * target DB + sidecars on initialization errors, so automatic hooks must never inherit
+ * `ARCHCONTEXT_LOCAL_STORE_PATH` or `ARCHCONTEXT_STATE_DIR` (I2).
+ */
+function sanitizeAutomaticHookArchctxOptions(options: ArchctxProviderOptions): ArchctxProviderOptions {
+  const source = options.env ?? process.env;
+  if (source.ARCHCONTEXT_LOCAL_STORE_PATH === undefined && source.ARCHCONTEXT_STATE_DIR === undefined) {
+    return options;
+  }
+  const env: NodeJS.ProcessEnv = { ...source };
+  delete env.ARCHCONTEXT_LOCAL_STORE_PATH;
+  delete env.ARCHCONTEXT_STATE_DIR;
+  return { ...options, env };
+}
+
 /** Changed owned paths only. */
 export function checkpointArchitectureDebt(repoRoot: string, ownership: CapabilityOwnership | null, options: ArchctxProviderOptions = {}): {
   readonly branch: string;
@@ -550,7 +572,8 @@ export function checkpointArchitectureDebt(repoRoot: string, ownership: Capabili
 } | null {
   if (!ownership?.review_base || !ownership.capabilities.some(capability => capability.paths.length > 0)) return null;
   const now = options.nowMs ?? Date.now;
-  const bounded = { ...options, deadlineMs: Math.min(options.deadlineMs ?? Infinity, now() + 3_000) };
+  const sanitized = sanitizeAutomaticHookArchctxOptions(options);
+  const bounded = { ...sanitized, deadlineMs: Math.min(options.deadlineMs ?? Infinity, now() + 3_000) };
   const changed = changedSinceReviewBase(repoRoot, ownership.review_base, bounded);
   const paths = [...new Set(ownership.capabilities.flatMap(capability => capability.paths).filter(path => changed.has(path)))].sort();
   if (paths.length === 0) return null;
@@ -575,7 +598,8 @@ export function prepareArchitectureTask(repoRoot: string, task: string, options:
   if (remainingTimeout(options, 3_000, 'notice prepare') < 1_500) {
     throw new ArchctxClientError({ code: 'RH_ARCHCTX_TIMEOUT', action: 'retry', message: 'architecture prepare skipped: less than 1500 ms remains' });
   }
-  const data = new ArchctxClient(repoRoot, policy.requiredVersion, options).data(['prepare', '--task', task, '--json'], 3_000);
+  const sanitized = sanitizeAutomaticHookArchctxOptions(options);
+  const data = new ArchctxClient(repoRoot, policy.requiredVersion, sanitized).data(['prepare', '--task', task, '--json'], 3_000);
   remainingTimeout(options, 3_000, 'notice prepare decode');
   const context = isRecord(data) && isRecord(data.context) ? data.context : null;
   if (!context || context.schemaVersion !== 'archcontext.task-context/v1' || context.task !== task
@@ -612,13 +636,7 @@ const SQLITE_HEADER_MAGIC = Buffer.from('SQLite format 3\0', 'ascii');
 const SQLITE_HEADER_MIN_BYTES = 100;
 const CODEGRAPH_LOCK_MAX_BYTES = 32;
 const CODEGRAPH_PID_LOCK_PATTERN = /^[1-9]\d*$/;
-const SQLITE_WAL_MAGIC_LE = 0x377f0682;
-const SQLITE_WAL_MAGIC_BE = 0x377f0683;
-const SQLITE_WAL_HEADER_BYTES = 32;
-const SQLITE_SHM_CHUNK_BYTES = 32_768;
-const SQLITE_SHM_HEADER_PAIR_BYTES = 96;
-const SQLITE_SHM_HEADER_HALF_BYTES = 48;
-const SQLITE_SHM_VERSION = 3_007_000;
+const CODEGRAPH_SQLITE_SIDECARS = ['codegraph.db-wal', 'codegraph.db-shm', 'codegraph.db-journal'] as const;
 const CODEGRAPH_LOCK_FILES = [
   'codegraph.lock',
   'codegraph.lock.break',
@@ -658,28 +676,88 @@ function sanitizeGitDiscoveryEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return clean;
 }
 
+function stripTrailingLineEnding(value: string): string {
+  return value.replace(/\r?\n$/, '');
+}
+
+function unsafeArchctxRepoRoot(message: string): ArchctxClientError {
+  return new ArchctxClientError({
+    code: 'RH_ARCHCTX_UNSAFE_REPO_ROOT',
+    action: 'inspect-repository-root',
+    reasonCode: 'archctx-unsafe-repo-root',
+    message,
+  });
+}
+
+function assertNoBoundaryWhitespacePath(path: string, contextLabel: string, fail: (message: string) => Error): void {
+  if (path !== path.trim()) {
+    throw fail(
+      `${contextLabel} refused checkout path with leading or trailing whitespace (${JSON.stringify(path)}); pinned archctx trims Git roots and could target an adjacent checkout.`,
+    );
+  }
+}
+
+/**
+ * Verifies a repository path that will be passed to pinned `archctx@0.18.0`.
+ * Pinned `archctx` trims `git rev-parse --show-toplevel` output, so any checkout root with
+ * leading or trailing whitespace (e.g. `project ` beside `project`) would redirect writes onto
+ * an adjacent checkout. Fails closed on boundary whitespace or Git discovery root mismatches.
+ */
+export function assertSafeArchctxRepoRoot(
+  repoRoot: string,
+  callerEnv: NodeJS.ProcessEnv = process.env,
+  contextLabel = 'ArchContext operation',
+): string {
+  assertNoBoundaryWhitespacePath(repoRoot, contextLabel, unsafeArchctxRepoRoot);
+  if (!existsSync(repoRoot)) return repoRoot;
+  const realInput = realpathSync(repoRoot);
+  assertNoBoundaryWhitespacePath(realInput, contextLabel, unsafeArchctxRepoRoot);
+  const callerProbe = gitSpawnSync(['-C', repoRoot, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', env: callerEnv });
+  if (callerProbe.status !== 0) return realInput;
+  const callerRoot = stripTrailingLineEnding(callerProbe.stdout);
+  if (!callerRoot) return realInput;
+  assertNoBoundaryWhitespacePath(callerRoot, contextLabel, unsafeArchctxRepoRoot);
+  const canonicalRoot = realpathSync(callerRoot);
+  assertNoBoundaryWhitespacePath(canonicalRoot, contextLabel, unsafeArchctxRepoRoot);
+  const cleanProbe = gitSpawnSync(['-C', canonicalRoot, 'rev-parse', '--show-toplevel'], {
+    encoding: 'utf8',
+    env: sanitizeGitDiscoveryEnv(callerEnv),
+  });
+  const cleanRoot = cleanProbe.status === 0 ? stripTrailingLineEnding(cleanProbe.stdout) : '';
+  if (!cleanRoot || cleanRoot !== cleanRoot.trim() || realpathSync(cleanRoot) !== canonicalRoot) {
+    throw unsafeArchctxRepoRoot(
+      `${contextLabel} refused ambiguous Git repository root (${JSON.stringify(callerRoot)}); unset GIT_DIR/GIT_WORK_TREE or run inside the target checkout.`,
+    );
+  }
+  return canonicalRoot;
+}
+
 /**
  * Resolves and proves the exact Git worktree root that `archctx index seed` will mutate.
- * Fails closed when Git discovery fails (never falling back to `cwd`) or when caller Git
- * environment overrides disagree with the repository root at that directory.
+ * Fails closed when Git discovery fails (never falling back to `cwd`), when the root has
+ * leading or trailing whitespace that pinned `archctx` would trim onto a sibling checkout,
+ * or when caller Git environment overrides disagree with the repository root at that directory.
  */
 function resolveCodeGraphSeedRoot(cwd: string, callerEnv: NodeJS.ProcessEnv): string {
+  assertNoBoundaryWhitespacePath(cwd, 'CodeGraph index seed', unsafeCodeGraphDestination);
   const callerProbe = gitSpawnSync(['-C', cwd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', env: callerEnv });
-  const callerRoot = callerProbe.status === 0 ? callerProbe.stdout.trim() : '';
+  const callerRoot = callerProbe.status === 0 ? stripTrailingLineEnding(callerProbe.stdout) : '';
   if (!callerRoot) {
     throw unsafeCodeGraphDestination(
       `CodeGraph index seed requires a Git repository worktree; git rev-parse --show-toplevel failed in ${cwd}.`,
     );
   }
+  assertNoBoundaryWhitespacePath(callerRoot, 'CodeGraph index seed', unsafeCodeGraphDestination);
   const canonicalRoot = realpathSync(callerRoot);
+  assertNoBoundaryWhitespacePath(canonicalRoot, 'CodeGraph index seed', unsafeCodeGraphDestination);
   const cleanProbe = gitSpawnSync(['-C', canonicalRoot, 'rev-parse', '--show-toplevel'], {
     encoding: 'utf8',
     env: sanitizeGitDiscoveryEnv(callerEnv),
   });
-  const cleanRoot = cleanProbe.status === 0 ? cleanProbe.stdout.trim() : '';
-  if (!cleanRoot || realpathSync(cleanRoot) !== canonicalRoot) {
+  const cleanRoot = cleanProbe.status === 0 ? stripTrailingLineEnding(cleanProbe.stdout) : '';
+  if (!cleanRoot || cleanRoot !== cleanRoot.trim() || realpathSync(cleanRoot) !== canonicalRoot) {
     throw unsafeCodeGraphDestination(
-      `CodeGraph index seed refused ambiguous Git repository root (${callerRoot}); unset GIT_DIR/GIT_WORK_TREE or run inside the target checkout.`,
+      `CodeGraph index seed refused ambiguous Git repository root (${JSON.stringify(callerRoot)}); unset GIT_DIR/GIT_WORK_TREE or run inside the target checkout.`,
     );
   }
   return canonicalRoot;
@@ -790,81 +868,50 @@ export function effectiveCodeGraphDirName(repoRoot: string, probe: CodeGraphDest
   return CODEGRAPH_WSL_DIR;
 }
 
-function readNativeUInt32(buffer: Buffer, offset: number): number {
-  return endianness() === 'BE' ? buffer.readUInt32BE(offset) : buffer.readUInt32LE(offset);
+/**
+ * Refuses any existing SQLite sidecar (`-wal`, `-shm`, `-journal`) beside `.codegraph/codegraph.db`.
+ * SQLite WAL/SHM salts are not stored in `codegraph.db`, so sidecar ownership cannot be cryptographically
+ * bound to the destination database; opening writable WAL mode beside a foreign sidecar could replay
+ * foreign frames or overwrite/unlink the user's file (I2).
+ */
+function assertNoCodeGraphSidecars(indexDirectory: string): void {
+  for (const sidecar of CODEGRAPH_SQLITE_SIDECARS) {
+    const stat = lstatSync(join(indexDirectory, sidecar), { throwIfNoEntry: false });
+    if (stat) {
+      throw unsafeCodeGraphDestination(
+        `CodeGraph destination .codegraph/${sidecar} is present. Stop active CodeGraph processes or inspect .codegraph/${sidecar} before seeding or running codegraph init.`,
+      );
+    }
+  }
 }
 
 /**
- * Validates any existing SQLite sidecars beside `.codegraph/codegraph.db` before opening
- * or invoking CodeGraph/SQLite in WAL mode. Refuses `codegraph.db-journal` unconditionally,
- * proves SQLite WAL-index headers on `codegraph.db-shm`, and proves SQLite WAL headers on
- * `codegraph.db-wal` (allowing a 0-byte `-wal` only alongside a validated `-shm`).
+ * `archctx@0.18.0`'s `snapshotCodeGraphIndex` opens `codegraph.db` read-only for `VACUUM INTO`,
+ * leaving behind a 0-byte `-wal` and empty 32 KiB `-shm` because read-only handles cannot unlink
+ * WAL sidecars on close. After our own `index seed` succeeds (preflight already proved no sidecars
+ * existed beforehand), open and close cleanly via `node:sqlite` so SQLite atomically unlinks its
+ * own empty sidecars while leaving `codegraph.db` byte-identical (and leaving sidecars intact if
+ * another process holds `codegraph.db` open).
  */
-function assertProvenCodeGraphSidecars(indexDirectory: string): { readonly hasNonEmptyWal: boolean } {
-  const journalPath = join(indexDirectory, 'codegraph.db-journal');
-  const journalStat = lstatSync(journalPath, { throwIfNoEntry: false });
-  if (journalStat) {
-    throw unsafeCodeGraphDestination(
-      'CodeGraph destination .codegraph/codegraph.db-journal is present and could be overwritten or unlinked by SQLite. Inspect .codegraph before seeding or running codegraph init.',
-    );
-  }
-
-  let hasValidatedShm = false;
-  const shmPath = join(indexDirectory, 'codegraph.db-shm');
-  const shmStat = lstatSync(shmPath, { throwIfNoEntry: false });
-  if (shmStat) {
-    if (!shmStat.isFile()) {
-      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db-shm must be a regular file, not a symlink or directory. Inspect .codegraph before seeding or running codegraph init.');
-    }
-    if (shmStat.size < SQLITE_SHM_CHUNK_BYTES || shmStat.size % SQLITE_SHM_CHUNK_BYTES !== 0) {
-      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db-shm is not a valid SQLite WAL-index file and could be overwritten or unlinked. Inspect .codegraph/codegraph.db-shm before seeding.');
-    }
-    let shmHeader: Buffer;
-    try {
-      shmHeader = readPrefixBytes(shmPath, SQLITE_SHM_HEADER_PAIR_BYTES);
-    } catch (error) {
-      throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/codegraph.db-shm is unreadable: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    const headersMatch = shmHeader.length === SQLITE_SHM_HEADER_PAIR_BYTES
-      && shmHeader.subarray(0, SQLITE_SHM_HEADER_HALF_BYTES).equals(shmHeader.subarray(SQLITE_SHM_HEADER_HALF_BYTES, SQLITE_SHM_HEADER_PAIR_BYTES));
-    const versionMatches = headersMatch
-      && readNativeUInt32(shmHeader, 0) === SQLITE_SHM_VERSION
-      && readNativeUInt32(shmHeader, SQLITE_SHM_HEADER_HALF_BYTES) === SQLITE_SHM_VERSION;
-    if (!versionMatches) {
-      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db-shm does not carry a valid SQLite WAL-index header and could be overwritten or unlinked. Inspect .codegraph/codegraph.db-shm before seeding.');
-    }
-    hasValidatedShm = true;
-  }
-
-  let hasNonEmptyWal = false;
-  const walPath = join(indexDirectory, 'codegraph.db-wal');
-  const walStat = lstatSync(walPath, { throwIfNoEntry: false });
-  if (walStat) {
-    if (!walStat.isFile()) {
-      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db-wal must be a regular file, not a symlink or directory. Inspect .codegraph before seeding or running codegraph init.');
-    }
-    if (walStat.size === 0) {
-      if (!hasValidatedShm) {
-        throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db-wal is empty without a valid SQLite WAL-index (.codegraph/codegraph.db-shm) and could be overwritten or unlinked. Inspect .codegraph/codegraph.db-wal before seeding.');
-      }
-    } else if (walStat.size < SQLITE_WAL_HEADER_BYTES) {
-      throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db-wal is not a valid SQLite WAL file and could be overwritten or unlinked. Inspect .codegraph/codegraph.db-wal before seeding.');
-    } else {
-      let walHeader: Buffer;
-      try {
-        walHeader = readPrefixBytes(walPath, 4);
-      } catch (error) {
-        throw unsafeCodeGraphDestination(`CodeGraph destination .codegraph/codegraph.db-wal is unreadable: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      const magic = walHeader.length === 4 ? walHeader.readUInt32BE(0) : 0;
-      if (magic !== SQLITE_WAL_MAGIC_LE && magic !== SQLITE_WAL_MAGIC_BE) {
-        throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db-wal does not carry a valid SQLite WAL header and could be overwritten or unlinked. Inspect .codegraph/codegraph.db-wal before seeding.');
-      }
-      hasNonEmptyWal = true;
-    }
-  }
-
-  return { hasNonEmptyWal };
+function quiesceSeededCodeGraphSidecars(repoRoot: string, nodeExecutable: string, env: NodeJS.ProcessEnv): void {
+  const dbPath = join(repoRoot, CODEGRAPH_DEFAULT_DIR, 'codegraph.db');
+  const dbStat = lstatSync(dbPath, { throwIfNoEntry: false });
+  if (!dbStat?.isFile()) return;
+  const walStat = lstatSync(`${dbPath}-wal`, { throwIfNoEntry: false });
+  const shmStat = lstatSync(`${dbPath}-shm`, { throwIfNoEntry: false });
+  if (!walStat && !shmStat) return;
+  if (walStat && (!walStat.isFile() || walStat.size > 0)) return;
+  if (shmStat && !shmStat.isFile()) return;
+  spawnSync(
+    nodeExecutable,
+    [
+      '--no-warnings',
+      '-e',
+      'const { DatabaseSync } = require("node:sqlite"); const db = new DatabaseSync(process.argv[1]); try { db.prepare("SELECT 1 FROM sqlite_master LIMIT 1").get(); } finally { db.close(); }',
+      dbPath,
+    ],
+    { cwd: repoRoot, env, stdio: 'ignore', timeout: 10_000 },
+  );
 }
 
 /**
@@ -875,7 +922,7 @@ function assertProvenCodeGraphSidecars(indexDirectory: string): { readonly hasNo
  * `codegraph sync`) and CodeGraph ownership (refusing foreign SQLite databases, even ones with
  * a `nodes` table).
  */
-function assertProvenCodeGraphDatabase(dbPath: string, copyWal: boolean): void {
+function assertProvenCodeGraphDatabase(dbPath: string): void {
   let probeDir: string | undefined;
   let db: Database | undefined;
   try {
@@ -883,11 +930,6 @@ function assertProvenCodeGraphDatabase(dbPath: string, copyWal: boolean): void {
     const tempDb = join(probeDir, 'codegraph.db');
     copyFileSync(dbPath, tempDb, fsConstants.COPYFILE_FICLONE);
     chmodSync(tempDb, 0o600);
-    if (copyWal) {
-      const tempWal = `${tempDb}-wal`;
-      copyFileSync(`${dbPath}-wal`, tempWal, fsConstants.COPYFILE_FICLONE);
-      chmodSync(tempWal, 0o600);
-    }
     db = new Database(tempDb, { create: false });
     db.exec('PRAGMA query_only = ON;');
     const tables = new Set(
@@ -998,8 +1040,8 @@ export function assertSafeCodeGraphDestination(repoRoot: string, probe: CodeGrap
   if (dbStat.size < SQLITE_HEADER_MIN_BYTES || !header.equals(SQLITE_HEADER_MAGIC)) {
     throw unsafeCodeGraphDestination('CodeGraph destination .codegraph/codegraph.db is not a valid SQLite 3 database. Inspect .codegraph/codegraph.db before seeding.');
   }
-  const { hasNonEmptyWal } = assertProvenCodeGraphSidecars(indexDirectory);
-  assertProvenCodeGraphDatabase(dbPath, hasNonEmptyWal);
+  assertNoCodeGraphSidecars(indexDirectory);
+  assertProvenCodeGraphDatabase(dbPath);
   for (const lockName of CODEGRAPH_LOCK_FILES) {
     assertProvenCodeGraphLockFile(indexDirectory, lockName);
   }
@@ -1046,6 +1088,7 @@ function runArchctxIndexSeed(
   // `archctx index seed` disables shared-base seeding when CODEGRAPH_DIR is set (`index-base.ts:189`).
   delete env.CODEGRAPH_DIR;
   delete env.CODEGRAPH_NO_WATCH;
+  assertSafeArchctxRepoRoot(repoRoot, env, 'CodeGraph index seed');
   assertSafeCodeGraphDestination(repoRoot, { env });
   const envelope = new ArchctxClient(repoRoot, requiredVersion, { ...options, env }).json(
     ['index', 'seed', '--timeout-ms', String(timeoutMs), '--json'],
@@ -1059,7 +1102,11 @@ function runArchctxIndexSeed(
       message: 'archctx index seed returned an unexpected requestId',
     });
   }
-  return decodeIndexSeedResult(envelope.data);
+  const decoded = decodeIndexSeedResult(envelope.data);
+  if (!options.run) {
+    quiesceSeededCodeGraphSidecars(repoRoot, resolveCompatibleNodeRuntime(env, options.trustedNodeCandidateSource), env);
+  }
+  return decoded;
 }
 
 /** Called after the primary checkout and plugin have opted into CodeGraph. */
@@ -1072,12 +1119,25 @@ export function bootstrapWorktreeCodeGraph(primaryRoot: string, worktreeRoot: st
   };
   delete env.CODEGRAPH_DIR;
   delete env.CODEGRAPH_NO_WATCH;
+  // Refuse leading/trailing-whitespace checkout roots before upstream archctx trims Git output onto a sibling checkout (I2).
+  assertSafeArchctxRepoRoot(primaryRoot, env, 'CodeGraph primary checkout');
+  assertSafeArchctxRepoRoot(worktreeRoot, env, 'CodeGraph worktree');
   const policy = options.policy ?? readArchitectureProjectionPolicy({ architecture: DEFAULT_GLOBAL_ARCHITECTURE });
   const indexDirectory = join(worktreeRoot, '.codegraph');
   const destinationProbe: CodeGraphDestinationProbe = { ...options.destinationProbe, env };
   const runtimePlatform = options.destinationProbe?.platform ?? process.platform;
+  const wslPath = destinationProbe.pathForWslCheck ?? resolve(worktreeRoot);
 
-  // Validate `.codegraph` up front with pinDefaultDir: true so WSL /mnt/<drive> worktrees fall through cleanly to pinned `codegraph init`.
+  // On WSL /mnt/<drive>, ordinary CodeGraph readers prefer `.codegraph-wsl` whenever it exists; refuse that layout instead of writing an unconsulted `.codegraph`.
+  if (isWslRuntime(destinationProbe) && WSL_WINDOWS_DRIVE_PATTERN.test(wslPath)) {
+    if (lstatSync(join(worktreeRoot, CODEGRAPH_WSL_DIR), { throwIfNoEntry: false })) {
+      throw unsafeCodeGraphDestination(
+        `CodeGraph destination ${CODEGRAPH_WSL_DIR} already exists on this WSL drive mount; ordinary CodeGraph readers prefer ${CODEGRAPH_WSL_DIR} over ${CODEGRAPH_DEFAULT_DIR}. Inspect or remove ${CODEGRAPH_WSL_DIR} before bootstrapping the worktree.`,
+      );
+    }
+  }
+
+  // Validate `.codegraph` up front with pinDefaultDir: true so WSL /mnt/<drive> worktrees without `.codegraph-wsl` fall through cleanly to pinned `codegraph init`.
   assertSafeCodeGraphDestination(worktreeRoot, { ...destinationProbe, pinDefaultDir: true });
 
   if (runtimePlatform !== 'win32' && effectiveCodeGraphDirName(worktreeRoot, destinationProbe) === CODEGRAPH_DEFAULT_DIR) {
@@ -1114,6 +1174,12 @@ export function bootstrapWorktreeCodeGraph(primaryRoot: string, worktreeRoot: st
   console.error('[ContractWorktree] Running CodeGraph init in the worktree');
   indexPackageLocalCodeGraph(worktreeRoot, { ...options, env: { ...env, CODEGRAPH_DIR: '.codegraph' }, policy });
   if (!hasPrivateCodeGraphIndex(indexDirectory)) throw new Error('codegraph init did not create a worktree index');
+  const resolvedAfterInit = effectiveCodeGraphDirName(worktreeRoot, destinationProbe);
+  if (resolvedAfterInit !== CODEGRAPH_DEFAULT_DIR) {
+    throw unsafeCodeGraphDestination(
+      `CodeGraph resolves ${resolvedAfterInit} instead of ${CODEGRAPH_DEFAULT_DIR} after worktree init; ordinary CodeGraph readers would bypass the new worktree index.`,
+    );
+  }
 }
 
 function reportBootstrapSyncFailure(step: string, error: unknown): void {
@@ -1171,7 +1237,7 @@ const PROJECTION_WRITE_RECONCILE_GUIDANCE =
 /**
  * Structured `archctx@0.18.0` error codes emitted exclusively before `changeSetEngine.apply`
  * writes files. Never include `AC_UNCLASSIFIED_FAILURE`, `AC_RUNTIME_UNAVAILABLE`,
- * `AC_PROJECTION_APPLY_COMMITTED`, or unvetted codes that can surface after partial or committed writes.
+ * or unvetted codes that can surface after partial or committed writes.
  */
 const PRE_WRITE_PROJECTION_ERROR_CODES = new Set<string>([
   'AC_REPO_NOT_FOUND',

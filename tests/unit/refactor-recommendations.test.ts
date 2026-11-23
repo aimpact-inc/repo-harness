@@ -252,13 +252,27 @@ test('exposes only repository-scoped v2 CLI subcommands and options, and formats
     `next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>" --repo '/tmp/target repo/work'\\''s' --import-node-limit 20000 --timeout-ms 300000\n`,
   );
   const verifyWinFlags = formatRefactorVerify(verifyResult, {
-    repo: "C:\\Users\\O'Connor\\target repo's",
+    repo: "C:\\Users\\O'Connor,Team\\target repo's",
     importNodeLimit: 20_000,
     platform: 'win32',
   });
   expect(verifyWinFlags).toContain(
-    `next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>" --repo 'C:\\Users\\O''Connor\\target repo''s' --import-node-limit 20000\n`,
+    `next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>" --repo 'C:\\Users\\O''Connor,Team\\target repo''s' --import-node-limit 20000\n`,
   );
+  // Comma alone in a win32 path must also be quoted (PowerShell treats unquoted commas as arrays).
+  expect(formatRefactorVerify(verifyResult, { repo: 'repo,a', platform: 'win32' })).toContain("--repo 'repo,a'");
+  // Legacy 0.17.1 proposal lacking baseline metadata surfaces explicit repo-bound retire/replace workflow.
+  const staleLegacyText = formatRefactorVerify({
+    ...verifyResult,
+    disposition: 'stale',
+    blockingReasons: ['baseline-metadata-missing'],
+    killListChecks: [],
+    metricChecks: [],
+  }, { repo: '/tmp/target-repo', platform: 'linux' });
+  expect(staleLegacyText).toContain('legacy decision lacks baseline proof metadata');
+  expect(staleLegacyText).toContain(`rh arch refactor decide accept ${REC_ID} --reason "<reason>" --kill-path <path> --repo /tmp/target-repo`);
+  expect(staleLegacyText).toContain(`rh arch refactor decide reject ${REC_ID} --reason "<reason>" --repo /tmp/target-repo`);
+  expect(staleLegacyText).toContain(`git rm .archcontext/refactor-decisions/${REC_ID}.json`);
   expect(formatRefactorVerify(verifyResult, { repo: '/tmp/target-repo', importNodeLimit: 5_000, platform: 'linux' })).toContain(
     `next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>" --repo /tmp/target-repo --import-node-limit 5000\n`,
   );

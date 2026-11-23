@@ -104,8 +104,22 @@ export function formatRefactorRecommendations(value: RefactorRecommendationResul
 
 export function resolveDecisionCommitRoot(targetPath: string): string {
   const probe = gitSpawnSync(['-C', targetPath, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' });
-  const topLevel = probe.status === 0 ? probe.stdout.trim() : '';
-  return topLevel ? canonicalRepoPath(topLevel) : targetPath;
+  const topLevel = probe.status === 0 ? probe.stdout.replace(/\r?\n$/, '') : '';
+  const candidate = topLevel || targetPath;
+  if (candidate !== candidate.trim()) {
+    throw new RefactorProviderError(
+      'refactor_unsafe_repo_root',
+      `Refused Git checkout root with leading or trailing whitespace (${JSON.stringify(candidate)}); pinned archctx trims Git roots and could target an adjacent checkout.`,
+    );
+  }
+  const canonical = canonicalRepoPath(candidate);
+  if (canonical !== canonical.trim()) {
+    throw new RefactorProviderError(
+      'refactor_unsafe_repo_root',
+      `Refused canonical Git checkout root with leading or trailing whitespace (${JSON.stringify(canonical)}); pinned archctx trims Git roots and could target an adjacent checkout.`,
+    );
+  }
+  return canonical;
 }
 
 function quoteCommandArg(value: string, platform: NodeJS.Platform = process.platform): string {
@@ -113,7 +127,8 @@ function quoteCommandArg(value: string, platform: NodeJS.Platform = process.plat
 }
 
 function formatShellArg(value: string, platform: NodeJS.Platform = process.platform): string {
-  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : quoteCommandArg(value, platform);
+  const safePattern = platform === 'win32' ? /^[A-Za-z0-9_./:@%+=-]+$/ : /^[A-Za-z0-9_./:@%+=,-]+$/;
+  return safePattern.test(value) ? value : quoteCommandArg(value, platform);
 }
 
 function formatDecisionCommitHint(
@@ -156,14 +171,23 @@ export interface RefactorVerifyFormatOptions {
 
 export function formatRefactorVerify(result: RefactorVerifyV2, invocation: RefactorVerifyFormatOptions = {}): string {
   const platform = invocation.platform ?? process.platform;
+  const repoFlag = invocation.repo !== undefined && invocation.repo !== ''
+    ? [`--repo ${formatShellArg(invocation.repo, platform)}`]
+    : [];
   const nextParts = [
     `rh arch refactor resolve ${result.recommendationId}`,
     `--resolution-digest ${result.resolutionDigest}`,
     '--reason "<reason>"',
-    ...(invocation.repo !== undefined && invocation.repo !== '' ? [`--repo ${formatShellArg(invocation.repo, platform)}`] : []),
+    ...repoFlag,
     ...(invocation.importNodeLimit !== undefined ? [`--import-node-limit ${invocation.importNodeLimit}`] : []),
     ...(invocation.timeoutMs !== undefined ? [`--timeout-ms ${invocation.timeoutMs}`] : []),
   ];
+  const missingBaseline = result.disposition === 'stale' && result.blockingReasons.includes('baseline-metadata-missing');
+  const legacyNext = missingBaseline
+    ? [
+      `  next: legacy decision lacks baseline proof metadata; attach a verifiable kill-list via \`rh arch refactor decide accept ${result.recommendationId} --reason "<reason>" --kill-path <path>${repoFlag.length > 0 ? ` ${repoFlag[0]}` : ''}\` or retire it via \`rh arch refactor decide reject ${result.recommendationId} --reason "<reason>"${repoFlag.length > 0 ? ` ${repoFlag[0]}` : ''}\` (or \`git rm .archcontext/refactor-decisions/${result.recommendationId}.json\`).`,
+    ]
+    : [];
   return [
     `[RefactorVerify] ${result.recommendationId}: disposition=${result.disposition}`,
     `  headSha: ${result.headSha}`,
@@ -182,7 +206,7 @@ export function formatRefactorVerify(result: RefactorVerifyV2, invocation: Refac
     ...(result.blockingReasons.length > 0 ? [`  blockingReasons: ${result.blockingReasons.join(', ')}`] : []),
     ...(result.disposition === 'resolved' ? [
       `  next: ${nextParts.join(' ')}`,
-    ] : []),
+    ] : legacyNext),
     '',
   ].join('\n');
 }

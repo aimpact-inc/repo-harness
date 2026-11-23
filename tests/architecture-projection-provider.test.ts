@@ -2130,37 +2130,58 @@ describe('bootstrapWorktreeCodeGraph index seed cutover', () => {
       expect(() => assertSafeCodeGraphDestination(absentDir)).toThrow('stale-default pattern');
       rmSync(join(absentDir, '.codegraph', '.gitignore'));
 
-      // Live WAL-mode CodeGraph DB probe (active -wal + -shm, and 0-byte -wal after TRUNCATE checkpoint) succeeds without modifying workspace files.
-      const walRepo = join(f.root, 'wal-live-dest');
+      // Any existing SQLite sidecars (-wal, -shm, pair, -journal — including valid sidecars from another WAL DB)
+      // fail closed unconditionally beside a proven CodeGraph DB while preserving exact bytes.
+      const walRepo = join(f.root, 'wal-sidecars-dest');
       mkdirSync(join(walRepo, '.codegraph'), { recursive: true });
       const walDbPath = join(walRepo, '.codegraph', 'codegraph.db');
-      writeCodeGraphSchemaDb(walDbPath, 'wal-live');
-      const liveWal = new Database(walDbPath);
+      writeCodeGraphSchemaDb(walDbPath, 'wal-dest');
+      const otherDir = join(f.root, 'other-wal-source');
+      mkdirSync(otherDir, { recursive: true });
+      const otherDb = new Database(join(otherDir, 'other.db'));
+      let otherWal: Buffer;
+      let otherShm: Buffer;
       try {
-        liveWal.exec("PRAGMA journal_mode=WAL; INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, start_line, end_line, start_column, end_column, updated_at) VALUES ('n2', 'function', 'g', 'g', 'a.ts', 'typescript', 1, 1, 0, 1, 0);");
-        expect(() => assertSafeCodeGraphDestination(walRepo)).not.toThrow();
-        liveWal.exec('PRAGMA wal_checkpoint(TRUNCATE);');
-        expect(() => assertSafeCodeGraphDestination(walRepo)).not.toThrow();
+        otherDb.exec('PRAGMA journal_mode=WAL; CREATE TABLE other_tbl (id TEXT); INSERT INTO other_tbl VALUES ("o1");');
+        otherWal = readFileSync(join(otherDir, 'other.db-wal'));
+        otherShm = readFileSync(join(otherDir, 'other.db-shm'));
       } finally {
-        liveWal.close();
+        otherDb.close();
       }
-      // After closing, foreign sidecars beside a proven CodeGraph DB fail closed and keep their exact bytes.
-      for (const s of ['codegraph.db-shm', 'codegraph.db-wal', 'codegraph.db-journal'] as const) {
-        rmSync(join(walRepo, '.codegraph', s), { force: true });
-      }
-      for (const [sidecar, content, pattern] of [
-        ['codegraph.db-shm', Buffer.alloc(32_768, 0), 'SQLite WAL-index header'],
-        ['codegraph.db-shm', Buffer.from('not-shm'), 'not a valid SQLite WAL-index'],
-        ['codegraph.db-wal', Buffer.alloc(0), 'empty without a valid SQLite WAL-index'],
-        ['codegraph.db-wal', Buffer.from('x'.repeat(64)), 'SQLite WAL header'],
-        ['codegraph.db-journal', Buffer.from('rollback-data'), 'codegraph.db-journal is present'],
+      for (const [sidecar, content] of [
+        ['codegraph.db-wal', otherWal],
+        ['codegraph.db-shm', otherShm],
+        ['codegraph.db-journal', Buffer.from('rollback-data')],
       ] as const) {
         const sidecarPath = join(walRepo, '.codegraph', sidecar);
         writeFileSync(sidecarPath, content);
-        expect(() => assertSafeCodeGraphDestination(walRepo)).toThrow(pattern);
-        expect(readFileSync(sidecarPath)).toEqual(content);
+        expect(() => assertSafeCodeGraphDestination(walRepo)).toThrow(`.codegraph/${sidecar} is present`);
+        expect(readFileSync(sidecarPath).equals(content)).toBe(true);
         rmSync(sidecarPath, { force: true });
       }
+      // Valid mismatched WAL + SHM pair together is also refused with exact bytes preserved.
+      writeFileSync(join(walRepo, '.codegraph', 'codegraph.db-wal'), otherWal);
+      writeFileSync(join(walRepo, '.codegraph', 'codegraph.db-shm'), otherShm);
+      expect(() => assertSafeCodeGraphDestination(walRepo)).toThrow('.codegraph/codegraph.db-wal is present');
+      expect(readFileSync(join(walRepo, '.codegraph', 'codegraph.db-wal')).equals(otherWal)).toBe(true);
+      expect(readFileSync(join(walRepo, '.codegraph', 'codegraph.db-shm')).equals(otherShm)).toBe(true);
+      rmSync(join(walRepo, '.codegraph', 'codegraph.db-wal'), { force: true });
+      rmSync(join(walRepo, '.codegraph', 'codegraph.db-shm'), { force: true });
+      expect(() => assertSafeCodeGraphDestination(walRepo)).not.toThrow();
+
+      // Sibling checkouts `project` and `project ` (trailing space): bootstrapWorktreeCodeGraph refuses both primary and worktree roots.
+      const cleanSibling = join(f.root, 'project');
+      const spacedSibling = join(f.root, 'project ');
+      mkdirSync(join(cleanSibling, '.codegraph'), { recursive: true });
+      writeCodeGraphSchemaDb(join(cleanSibling, '.codegraph', 'codegraph.db'), 'clean-sibling');
+      mkdirSync(spacedSibling, { recursive: true });
+      const siblingBytes = readFileSync(join(cleanSibling, '.codegraph', 'codegraph.db'));
+      expect(() => bootstrapWorktreeCodeGraph(spacedSibling, linked, { consumerRoot: f.consumerRoot, policy, run: mustNotRun }))
+        .toThrow('whitespace');
+      expect(() => bootstrapWorktreeCodeGraph(cleanSibling, spacedSibling, { consumerRoot: f.consumerRoot, policy, run: mustNotRun }))
+        .toThrow('whitespace');
+      expect(readFileSync(join(cleanSibling, '.codegraph', 'codegraph.db'))).toEqual(siblingBytes);
+      expect(existsSync(join(spacedSibling, '.codegraph'))).toBe(false);
 
       // An unexpected requestId from index seed fails closed instead of falling back to init.
       const linkedBad = join(f.root, 'linked-bad');
@@ -2204,6 +2225,23 @@ describe('bootstrapWorktreeCodeGraph index seed cutover', () => {
       });
       expect(seen).toEqual([{ args: ['init', '-y', '.'], codegraphDir: '.codegraph', forceWatch: '1' }]);
       expect(lstatSync(join(linked, '.codegraph', 'codegraph.db')).isFile()).toBe(true);
+      // Ordinary CodeGraph directory resolution (without CODEGRAPH_DIR override) now resolves `.codegraph`.
+      expect(effectiveCodeGraphDirName(linked, { platform: 'linux', env: { WSL_DISTRO_NAME: 'Ubuntu' }, pathForWslCheck: '/mnt/c/work/linked' })).toBe('.codegraph');
+
+      // Existing empty or stale `.codegraph-wsl` on a WSL /mnt/<drive> mount fails closed before fallback init
+      // because ordinary CodeGraph readers would prefer `.codegraph-wsl` over `.codegraph`.
+      const conflictingWsl = join(f.root, 'wsl-conflicting');
+      mkdirSync(join(conflictingWsl, '.codegraph-wsl'), { recursive: true });
+      writeFileSync(join(conflictingWsl, '.codegraph-wsl', 'stale.txt'), 'keep-stale-wsl\n');
+      expect(() => bootstrapWorktreeCodeGraph(primary, conflictingWsl, {
+        consumerRoot: PACKAGE_ROOT,
+        policy,
+        env: { ...process.env, WSL_DISTRO_NAME: 'Ubuntu' },
+        destinationProbe: { platform: 'linux', pathForWslCheck: '/mnt/c/work/conflicting' },
+        run: () => { throw new Error('must not run init when .codegraph-wsl already exists'); },
+      })).toThrow('.codegraph-wsl already exists');
+      expect(readFileSync(join(conflictingWsl, '.codegraph-wsl', 'stale.txt'), 'utf8')).toBe('keep-stale-wsl\n');
+      expect(existsSync(join(conflictingWsl, '.codegraph'))).toBe(false);
 
       // Unsafe symlink .codegraph still fails closed before codegraph init on WSL /mnt/<drive>.
       const unsafeWsl = join(f.root, 'wsl-symlink');

@@ -260,8 +260,8 @@ bootstrap_worktree_runtime() {
     fi
   fi
 
-  # Mirror only an adoption the primary worktree already made.
-  if [[ -d "$REPO_ROOT/.codegraph" && ! -f "$worktree_path/.codegraph/codegraph.db" ]]; then
+  # Mirror only an adoption the primary worktree already made (including WSL .codegraph-wsl primaries).
+  if { [[ -d "$REPO_ROOT/.codegraph" ]] || [[ -d "$REPO_ROOT/.codegraph-wsl" ]]; } && [[ ! -f "$worktree_path/.codegraph/codegraph.db" ]]; then
     local package_root
     package_root="$(cd "$helper_dir/.." && pwd)"
     repo_harness_architecture_start "$package_root" "$BUN_BIN" "CodeGraph index of the worktree" \

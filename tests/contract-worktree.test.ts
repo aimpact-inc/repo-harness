@@ -547,7 +547,7 @@ exec ${shellQuote(realGit)} "$@"
     }
   }, 60000);
 
-  const codeGraphCases = ['seeded', 'retry-ready', 'retry-exhausted', 'no-base', 'not-opted-in', 'not-selected', 'unreadable', 'init-failed', 'occupied'] as const;
+  const codeGraphCases = ['seeded', 'retry-ready', 'retry-exhausted', 'no-base', 'wsl-primary', 'not-opted-in', 'not-selected', 'unreadable', 'init-failed', 'occupied'] as const;
   for (const scenario of codeGraphCases) {
     test.skipIf(process.platform === 'win32')(`rh worktrees start CodeGraph bootstrap: ${scenario}`, () => {
       const workspace = tmpWorkspace('shared-codegraph-start');
@@ -568,18 +568,30 @@ exec ${shellQuote(realGit)} "$@"
       mkdirSync(home);
       try {
         const indexDir = join(primary, '.codegraph');
+        const wslPrimaryDir = join(primary, '.codegraph-wsl');
         initGitRepo(primary);
-        if (scenario !== 'not-opted-in') mkdirSync(indexDir);
-        if (scenario === 'occupied') writeFileSync(join(indexDir, 'user.txt'), 'keep this file');
-        else writeFileSync(join(primary, '.gitignore'), '.codegraph/\n');
+        if (scenario === 'wsl-primary') {
+          mkdirSync(wslPrimaryDir);
+          writeFileSync(join(wslPrimaryDir, 'marker.txt'), 'wsl-primary-untouched\n');
+          writeFileSync(join(primary, '.gitignore'), '.codegraph/\n.codegraph-wsl/\n');
+        } else {
+          if (scenario !== 'not-opted-in') mkdirSync(indexDir);
+          if (scenario === 'occupied') writeFileSync(join(indexDir, 'user.txt'), 'keep this file');
+          else writeFileSync(join(primary, '.gitignore'), '.codegraph/\n');
+        }
         writeFileSync(join(primary, 'index.ts'), 'export const baseSymbol = true;\n');
         commitAll(primary, 'seed CodeGraph fixture');
+        if (scenario === 'unreadable') {
+          mkdirSync(join(home, '.repo-harness'));
+          writeFileSync(installStateFixturePath(env), '{');
+        } else if (scenario !== 'not-selected') recordPluginSelection(env);
         if (needsBase) {
+          writeFileSync(join(home, '.repo-harness/config.json'), JSON.stringify({ architecture: { projection_provider: 'archctx', projection_apply: 'manual' } }));
           indexPackageLocalCodeGraph(primary, {
             env: { ...process.env, ...env },
             policy: { provider: 'archctx', requiredVersion: ARCHCTX_REQUIRED_VERSION, applyMode: 'disabled', timeoutMs: 120_000 },
           });
-          const published = arch(primary, ['index', 'seed']);
+          const published = run(process.execPath, [join(ROOT, 'src/cli/index.ts'), 'arch', 'index', 'seed', '--json'], primary, env);
           expect(published.status, published.stderr || published.stdout).toBe(0);
           expect(JSON.parse(published.stdout).data).toMatchObject({
             schemaVersion: 'archcontext.index-seed/v1',
@@ -598,10 +610,6 @@ exec ${shellQuote(realGit)} "$@"
         }
         const primaryHead = run('git', ['rev-parse', 'HEAD'], primary).stdout.trim();
         addSelfOrigin(primary);
-        if (scenario === 'unreadable') {
-          mkdirSync(join(home, '.repo-harness'));
-          writeFileSync(installStateFixturePath(env), '{');
-        } else if (scenario !== 'not-selected') recordPluginSelection(env);
 
         const gh = join(workspace, 'gh');
         writeFileSync(gh, `#!/bin/sh\nprintf '%s\\n' ${shellQuote(JSON.stringify(ISSUE))}\n`, { mode: 0o755 });
@@ -649,10 +657,14 @@ exec ${shellQuote(realGit)} "$@"
             expect(lstatSync(join(linked, db)).isFile()).toBe(true);
             break;
           case 'no-base':
+          case 'wsl-primary':
           case 'init-failed':
             expect(calls).toEqual([`index seed ${linked}`, `init ${linked}`]);
-            expect(existsSync(join(linked, db))).toBe(scenario === 'no-base');
+            expect(existsSync(join(linked, db))).toBe(scenario !== 'init-failed');
             expect(existsSync(join(primary, db))).toBe(false);
+            if (scenario === 'wsl-primary') {
+              expect(readFileSync(join(wslPrimaryDir, 'marker.txt'), 'utf8')).toBe('wsl-primary-untouched\n');
+            }
             if (scenario === 'init-failed') {
               expect(started.stderr).toContain('codegraph init in');
               expect(started.stderr).not.toContain('x'.repeat(2001));
