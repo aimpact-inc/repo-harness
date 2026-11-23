@@ -1,5 +1,5 @@
 # verification/codegraph-readiness 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-verification-codegraph-readiness" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:7c3d62aec0462d5c5009f01711a7d00facf5a7332c989f00c4ec6bf4bfba58bd" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-verification-codegraph-readiness" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:1771c29d17ddd9d9e043ece58f041065d4109763ead590b45d5b126d958ba1db" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.verification.codegraph-readiness`(kind `capability`)
 > **Matched Prefixes**:`src/cli/tools/codegraph.ts`、`src/cli/tools/codegraph-reader.ts`、`src/cli/commands/tools.ts`
@@ -81,7 +81,7 @@ flowchart LR
 | 組件 | 名稱 | 規模量級 | 宣告入口 |
 | --- | --- | --- | --- |
 | `component.codegraph-readiness.mcp-adapter` | CodeGraph MCP Adapter | `1–2` 個文件 / `200–500` 行 | 未宣告 |
-| `component.codegraph-readiness.primary` | CodeGraph Readiness Check | `2–5` 個文件 / `500–1000` 行 | 未宣告 |
+| `component.codegraph-readiness.primary` | CodeGraph Readiness Check | `2–5` 個文件 / `1000–2000` 行 | 未宣告 |
 | `component.codegraph-readiness.scripts-layer` | CodeGraph Readiness (scripts) | `1–2` 個文件 / `10–20` 行 | 未宣告 |
 | `component.codegraph-readiness.tests-layer` | CodeGraph Readiness (tests) | `1–2` 個文件 / `100–200` 行 | 未宣告 |
 
