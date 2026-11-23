@@ -123,7 +123,8 @@ function renderAntigravity(outcome: HookOutcome): ReturnType<HostAdapter['render
       return emit({ decision: 'deny', reason: ANTIGRAVITY_GUARD_DENIAL });
     }
     if (outcome.exitCode !== 0) return emit({ decision: 'deny', reason: `rh hook failed: ${outcome.routeId}; the call is refused` });
-    if (outcome.permission?.decision === 'ask') return emit({ decision: 'ask', reason: outcome.permission.reason });
+    // force_ask prompts even when Antigravity has a cached approval for this tool.
+    if (outcome.permission?.decision === 'ask') return emit({ decision: 'force_ask', reason: outcome.permission.reason });
   }
   if (outcome.event === 'Stop' && outcome.reason === 'blocked') {
     return emit({ decision: 'continue', reason: ANTIGRAVITY_HANDOFF });
