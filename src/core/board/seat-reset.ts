@@ -38,15 +38,16 @@ export function isSeatResetAction(value: unknown): value is SeatResetAction {
   return value === 'compact' || value === 'reset';
 }
 
-export const seatResetAction = (transcriptBytes: number): SeatResetAction => (transcriptBytes < SEAT_RESET_TRANSCRIPT_BYTES ? 'compact' : 'reset');
-
 /** The interactive hosts that support automated peer-typed reset commands. */
-export type InteractiveResetHost = 'claude' | 'pi';
+export type InteractiveResetHost = 'claude' | 'pi' | 'antigravity';
 
-/** The slash command that the peer types for each action. */
+export const seatResetAction = (transcriptBytes: number, host: InteractiveResetHost = 'claude'): SeatResetAction =>
+  host === 'antigravity' || transcriptBytes >= SEAT_RESET_TRANSCRIPT_BYTES ? 'reset' : 'compact';
+
+/** The slash command that the peer types for a reset that keeps the same process. */
 export const SEAT_RESET_COMMAND: Readonly<Record<SeatResetAction, '/compact' | '/clear'>> = { compact: '/compact', reset: '/clear' };
 
-export function seatResetCommand(action: SeatResetAction, host: InteractiveResetHost = 'claude'): '/compact' | '/clear' | '/new' {
+export function seatResetCommand(action: SeatResetAction, host: Exclude<InteractiveResetHost, 'antigravity'> = 'claude'): '/compact' | '/clear' | '/new' {
   if (action === 'compact') return '/compact';
   return host === 'pi' ? '/new' : '/clear';
 }
@@ -131,7 +132,7 @@ export function missingHandoffSections(text: string): string[] {
 
 const PEER: Readonly<Record<ResetSeat, ResetSeat>> = { orchestrator: 'advisor', advisor: 'orchestrator' };
 
-const autoCompactionNotice = (host: InteractiveResetHost): string =>
+const autoCompactionNotice = (host: Exclude<InteractiveResetHost, 'antigravity'>): string =>
   host === 'pi' ? 'Pi auto-compaction handles the context.' : 'Claude Code auto-compaction handles the context.';
 
 /**
@@ -141,23 +142,31 @@ const autoCompactionNotice = (host: InteractiveResetHost): string =>
  */
 export function seatResetSteps(identity: SeatResetIdentity, action: SeatResetAction, host: InteractiveResetHost = 'claude'): string {
   const path = seatHandoffPath(identity);
+  const peer = PEER[identity.seat];
+  const reset = host === 'antigravity'
+    ? `types ${seatExitCommand(host)} and relaunches this seat in the same pane.`
+    : `types ${seatResetCommand(action, host)} in this session.`;
+  const noPeer = host === 'antigravity' ? '.' : `: ${autoCompactionNotice(host)}`;
   return [
     '0. Finish the planning and the dispatch that you have in hand. Start nothing new. Then write the handoff.',
     `1. Write the handoff to ${path} with exactly these sections:`,
     '',
     seatHandoffTemplate(),
     `2. Take its sha256 with \`shasum -a 256 ${path}\`.`,
-    `3. Send \`RESET-REQUEST ${path} <sha256>\` to the ${PEER[identity.seat]} seat (repo-harness.seat=${PEER[identity.seat]}) with hc send, then end your turn. The ${PEER[identity.seat]} seat types ${seatResetCommand(action, host)} in this session.`,
+    `3. Send \`RESET-REQUEST ${path} <sha256>\` to the ${peer} seat (repo-harness.seat=${peer}) with hc send, then end your turn. The ${peer} seat ${reset}`,
     `On REWRITE, write the handoff again and send RESET-REQUEST again. On NO-RESET, continue.`,
-    `When the ${PEER[identity.seat]} seat is missing or does not answer, continue without a reset: ${autoCompactionNotice(host)}`,
+    `When the ${peer} seat is missing or does not answer, continue without a reset${noPeer}`,
   ].join('\n');
 }
 
 /** The block reason of the Stop hook: the token reason and the action, then the handoff steps. */
 export function seatResetReason(identity: SeatResetIdentity, contextTokens: number, transcriptBytes: number, action: SeatResetAction, host: InteractiveResetHost = 'claude'): string {
-  const side = action === 'compact' ? 'below' : 'at or above';
-  return `repo-harness: the ${identity.seat} seat context is ${contextTokens} tokens, at or above ${SEAT_RESET_CONTEXT_TOKENS}. Reset before auto-compaction. `
-    + `The transcript is ${transcriptBytes} bytes, ${side} ${SEAT_RESET_TRANSCRIPT_BYTES}, so the reset types ${seatResetCommand(action, host)}.\n${seatResetSteps(identity, action, host)}`;
+  const threshold = `repo-harness: the ${identity.seat} seat context is ${contextTokens} tokens, at or above ${SEAT_RESET_CONTEXT_TOKENS}.`;
+  const size = `The transcript is ${transcriptBytes} bytes`;
+  const reset = host === 'antigravity'
+    ? `${size}. Antigravity resets by relaunching in the same pane.`
+    : `Reset before auto-compaction. ${size}, ${action === 'compact' ? 'below' : 'at or above'} ${SEAT_RESET_TRANSCRIPT_BYTES}, so the reset types ${seatResetCommand(action, host)}.`;
+  return `${threshold} ${reset}\n${seatResetSteps(identity, action, host)}`;
 }
 
 /**
@@ -176,5 +185,6 @@ export function seatRewriteMessage(identity: SeatResetIdentity, problem: string,
 
 /** The message that releases the requester with no reset: it continues, and auto-compaction handles the context. */
 export function seatNoResetMessage(reason: string, host: InteractiveResetHost = 'claude'): string {
-  return `NO-RESET: ${reason}. Continue your work; ${autoCompactionNotice(host)}`;
+  const next = host === 'antigravity' ? '.' : `; ${autoCompactionNotice(host)}`;
+  return `NO-RESET: ${reason}. Continue your work${next}`;
 }

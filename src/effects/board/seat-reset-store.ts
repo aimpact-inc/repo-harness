@@ -3,8 +3,9 @@ import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, re
 import { dirname } from 'path';
 import {
   isSeatResetAction, missingHandoffSections, seatResetRequestPath, isSeatSessionSource, seatSessionPath,
-  type SeatLaunchModel, type SeatResetAction, type SeatResetIdentity, type SeatSessionSource,
+  type InteractiveResetHost, type SeatLaunchModel, type SeatResetAction, type SeatResetIdentity, type SeatSessionSource,
 } from '../../core/board/seat-reset';
+import { withAntigravityTranscript } from './antigravity-transcript';
 
 const TAIL_BYTES = 1024 * 1024;
 
@@ -63,12 +64,11 @@ export function readTranscriptUsage(path: string): TranscriptUsage {
   }
 }
 
-export type ResetHost = 'claude' | 'pi' | 'antigravity';
-const RESET_HOSTS: ReadonlySet<unknown> = new Set<ResetHost>(['claude', 'pi', 'antigravity']);
-const isResetHost = (host: unknown): host is ResetHost => RESET_HOSTS.has(host);
+const RESET_HOSTS: ReadonlySet<unknown> = new Set<InteractiveResetHost>(['claude', 'pi', 'antigravity']);
+export const isResetHost = (host: unknown): host is InteractiveResetHost => RESET_HOSTS.has(host);
 
 export interface SeatResetRequestRecord {
-  readonly host?: ResetHost;
+  readonly host?: InteractiveResetHost;
   readonly contextTokens: number;
   readonly transcriptPath: string;
   readonly transcriptBytes: number;
@@ -109,7 +109,7 @@ export function requestOpen(identity: SeatResetIdentity, request: SeatRequest): 
  * reset command sends the resume prompt only after this signal. The launch model of the session lets a tier-2 reset
  * see a mode change (#2633).
  */
-export function recordSeatSession(identity: SeatResetIdentity, session: SeatLaunchModel & { readonly sessionId: string | null; readonly transcriptPath: string; readonly source: SeatSessionSource; readonly host?: ResetHost }, now: Date): void {
+export function recordSeatSession(identity: SeatResetIdentity, session: SeatLaunchModel & { readonly sessionId: string | null; readonly transcriptPath: string; readonly source: SeatSessionSource; readonly host?: InteractiveResetHost }, now: Date): void {
   const path = seatSessionPath(identity);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(path, `${JSON.stringify({ session_id: session.sessionId, transcript_path: session.transcriptPath, source: session.source, started_at: now.toISOString(),
@@ -117,7 +117,7 @@ export function recordSeatSession(identity: SeatResetIdentity, session: SeatLaun
 }
 
 export interface SeatSessionRecord extends SeatLaunchModel {
-  readonly host: ResetHost;
+  readonly host: InteractiveResetHost;
   readonly sessionId: string | null;
   readonly transcriptPath: string;
   readonly source: SeatSessionSource;
@@ -148,7 +148,7 @@ function isoInstant(text: string): boolean {
 type HandoffCode = 'handoff_missing' | 'handoff_stale' | 'handoff_sha256_mismatch' | 'handoff_sections_missing';
 
 export interface SeatRequest {
-  readonly host: ResetHost;
+  readonly host: InteractiveResetHost;
   readonly requestedAt: string;
   readonly transcriptPath: string | null;
   readonly action: SeatResetAction;
@@ -166,6 +166,7 @@ export function readRequest(identity: SeatResetIdentity): SeatRequest | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   const { requested_at: requestedAt, transcript_path: transcriptPath, action, host = 'claude' } = value as Record<string, unknown>;
   if (!isResetHost(host) || typeof requestedAt !== 'string' || !Number.isFinite(Date.parse(requestedAt)) || !isSeatResetAction(action)) return null;
+  if (host === 'antigravity' && action !== 'reset') return null;
   return { requestedAt, transcriptPath: typeof transcriptPath === 'string' ? transcriptPath : null, action, host };
 }
 
@@ -180,39 +181,57 @@ export function handoffProblem(path: string, sha256: string, request: SeatReques
   return missing.length === 0 ? null : { code: 'handoff_sections_missing', message: `${path} has no section ${missing.map(section => `"## ${section}"`).join(', ')}.` };
 }
 
-export interface NewSession {
-  readonly transcript: string;
-  readonly sessionId: string | null;
-}
+export type NewSession = { readonly transcript: string } & (
+  | { readonly host: 'antigravity'; readonly sessionId: string }
+  | { readonly host: Exclude<InteractiveResetHost, 'antigravity'>; readonly sessionId: string | null }
+);
 
 /**
- * The session segment that started at or after `since`: for `/compact` a `compact` record of the transcript of the
- * request, for `/clear` and a relaunch a record of another transcript.
+ * The segment must match the expected host. Compaction keeps the transcript. A reset needs a different transcript,
+ * and a process relaunch also needs a startup record.
  */
-export function newSession(identity: SeatResetIdentity, since: number, request: SeatRequest, action: SeatResetAction): NewSession | null {
+export function newSession(identity: SeatResetIdentity, since: number, previousTranscript: string | null, expectedHost: InteractiveResetHost, action: SeatResetAction | 'startup'): NewSession | null {
   const session = readSeatSession(identity);
-  if (session === null || session.host !== request.host || Date.parse(session.startedAt) < since) return null;
+  if (session === null || session.host !== expectedHost || Date.parse(session.startedAt) < since) return null;
+  if (action === 'startup' && session.source !== 'startup') return null;
   const segment = action === 'compact'
-    ? session.source === 'compact' && session.transcriptPath === request.transcriptPath
-    : session.transcriptPath !== request.transcriptPath;
-  return segment ? { transcript: session.transcriptPath, sessionId: session.sessionId } : null;
+    ? session.source === 'compact' && session.transcriptPath === previousTranscript
+    : session.transcriptPath !== previousTranscript;
+  if (!segment) return null;
+  const { host, sessionId, transcriptPath: transcript } = session;
+  if (host !== 'antigravity') return { host, sessionId, transcript };
+  return session.source === 'startup' && sessionId ? { host, sessionId, transcript } : null;
 }
 
-/** The bytes of a file after `offset`, or '' when it is missing; the evidence poll reads only what was appended. */
-export function readAppended(path: string, offset: number): string {
-  let fd: number;
-  try { fd = openSync(path, 'r'); } catch { return ''; }
-  try {
-    const length = Math.max(0, fstatSync(fd).size - offset);
-    const buffer = Buffer.alloc(length);
-    readSync(fd, buffer, 0, length, offset);
-    return buffer.toString('utf8');
-  } finally {
-    closeSync(fd);
+function readAppended(fd: number, size: number, offset: number): string {
+  const length = Math.max(0, size - offset);
+  const buffer = Buffer.alloc(length);
+  const bytes = readSync(fd, buffer, 0, length, offset);
+  return buffer.toString('utf8', 0, bytes);
+}
+
+/** Capture the transcript offset before the prompt. Each poll reads only bytes appended after that offset. */
+export function readResumeTranscript(session: NewSession, env: NodeJS.ProcessEnv): () => string {
+  const { host, sessionId, transcript } = session;
+  if (host === 'antigravity') {
+    const read = <T>(reader: (fd: number, size: number) => T): T | null => {
+      try { return withAntigravityTranscript(sessionId, transcript, env, reader); } catch (error) {
+        // SessionStart can arrive before Antigravity creates the transcript.
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw error;
+      }
+    };
+    const offset = read((_fd, size) => size) ?? 0;
+    return () => read((fd, size) => readAppended(fd, size, offset)) ?? '';
   }
+  let offset = 0;
+  try { offset = statSync(transcript).size; } catch { /* transcript not yet present */ }
+  return () => {
+    let fd: number;
+    try { fd = openSync(transcript, 'r'); } catch { return ''; }
+    try { return readAppended(fd, fstatSync(fd).size, offset); } finally { closeSync(fd); }
+  };
 }
-
-export const fileSize = (path: string): number => { try { return statSync(path).size; } catch { return 0; } };
 
 const RESUMED_WORDS: readonly string[] = ['RESUMED', "'RESUMED'", '"RESUMED"'];
 
@@ -253,10 +272,18 @@ interface TranscriptLine {
  * The evidence fields of one transcript line, or null for a line that is not a JSON object: a JSON null, an array, a
  * scalar and a cut line are skipped, never a throw.
  */
+function parseTranscriptLine(line: string): Record<string, unknown> | null {
+  try {
+    const entry: unknown = JSON.parse(line);
+    return typeof entry === 'object' && entry !== null && !Array.isArray(entry) ? entry as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
 function transcriptLine(line: string): TranscriptLine | null {
-  let entry: unknown;
-  try { entry = JSON.parse(line); } catch { return null; }
-  if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return null;
+  const entry = parseTranscriptLine(line);
+  if (entry === null) return null;
   const { type, message, attachment } = entry as {
     type?: unknown;
     message?: { role?: unknown; content?: unknown; toolCallId?: unknown; isError?: unknown } | null;
@@ -286,12 +313,43 @@ function holdsPrompt(entry: TranscriptLine, parts: readonly Part[], prompt: stri
   return queued || ((entry.type === 'user' || (entry.type === 'message' && entry.role === 'user')) && userText);
 }
 
+function antigravityResumedCall(entry: Record<string, unknown>, peer: string): number | null {
+  const { type, step_index: index, tool_calls: calls } = entry;
+  if (type !== 'PLANNER_RESPONSE' || typeof index !== 'number' || !Number.isSafeInteger(index) || !Array.isArray(calls) || calls.length !== 1) return null;
+  const [call] = calls as readonly ({ name?: unknown; args?: { CommandLine?: unknown } } | null)[];
+  const command = call?.args?.CommandLine;
+  return call?.name === 'run_command' && typeof command === 'string' && isResumedSend(command, peer) ? index + 1 : null;
+}
+
+function antigravityCommandSucceeded(entry: Record<string, unknown>): boolean {
+  if (entry.type !== 'GENERIC' || entry.error !== undefined || typeof entry.content !== 'string') return false;
+  const summary = entry.content.split(/\r?\n\r?\n/u, 1)[0];
+  return summary?.split(/\r?\n/u).at(-1) === 'Command exited with code 0.';
+}
+
+/** agy 1.5.14 writes the result of a single tool call at the next step index. */
+function sentAntigravityResumed(appended: string, prompt: string, peer: string): boolean {
+  let asked = false;
+  let resultStep: number | null = null;
+  for (const line of appended.split('\n')) {
+    const entry = parseTranscriptLine(line);
+    if (entry === null) continue;
+    const { type, source, status, content, step_index: index } = entry;
+    if (type === 'USER_INPUT' && source === 'USER_EXPLICIT' && status === 'DONE' && typeof content === 'string' && content.includes(prompt)) asked = true;
+    const modelStep = source === 'MODEL' && status === 'DONE';
+    if (modelStep && resultStep !== null && index === resultStep && antigravityCommandSucceeded(entry)) return true;
+    resultStep = asked && modelStep ? antigravityResumedCall(entry, peer) : null;
+  }
+  return false;
+}
+
 /**
  * Mechanical resume evidence in the text appended after the prompt send: the entry that holds the resume prompt, then
  * an assistant Bash tool call whose command sends RESUMED to the peer with hc send, then its tool result without an
  * error. A refused, failed or missing result is no evidence.
  */
-export function sentResumed(appended: string, prompt: string, peer: string): boolean {
+export function sentResumed(appended: string, prompt: string, peer: string, host: InteractiveResetHost): boolean {
+  if (host === 'antigravity') return sentAntigravityResumed(appended, prompt, peer);
   let asked = false;
   const sends = new Set<unknown>();
   for (const line of appended.split('\n')) {

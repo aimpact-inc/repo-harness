@@ -1,13 +1,15 @@
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
+import { basename } from 'path';
 import {
   RESET_SEATS, seatExitCommand, seatNoResetMessage, seatResetCommand, SEAT_RESET_RETRIES, handoffIdentity, seatResetClaimPath,
   seatResetLogPath, seatResetRequestPath, seatResetDirectory, seatResumePrompt, seatRewriteMessage,
   type InteractiveResetHost, type SeatLaunchModel, type SeatResetAction, type SeatResetIdentity,
 } from '../../core/board/seat-reset';
+import { seatHostId, type SeatRuntime } from '../../core/board/seats-settings';
 import { HerdrCoreError, RH_LABEL, hcGet, hcKeys, hcList, hcSend, hcWait, type HcLabels, type HcTerminal, type HcWaitResult, type HerdrCoreOptions } from '../terminal/herdr-core';
 import { readNotifyConfig } from '../terminal/notify-read';
 import {
-  fileSize, handoffProblem, newSession, readAppended, readRequest, readSeatSession, requestOpen, sentResumed,
+  handoffProblem, isResetHost, newSession, readRequest, readResumeTranscript, readSeatSession, requestOpen, sentResumed,
   type NewSession, type SeatRequest,
 } from './seat-reset-store';
 
@@ -21,9 +23,10 @@ export type SeatResetOutcome = 'nothing_sent' | 'rewrite_requested' | 'no_reset'
 
 export type SeatResetCode = 'handoff_path_invalid' | 'handoff_missing' | 'request_missing' | 'handoff_stale' | 'handoff_sha256_mismatch'
   | 'handoff_sections_missing' | 'already_claimed' | 'claim_failed' | 'caller_unknown' | 'requester_not_found' | 'requester_busy' | 'message_not_sent'
-  | 'hc_failed' | 'requester_status_untracked' | 'resume_not_sent' | 'request_invalid' | 'request_closed' | 'seat_reset_runtime_unsupported';
+  | 'hc_failed' | 'requester_status_untracked' | 'requester_exited' | 'resume_not_sent' | 'request_invalid' | 'request_closed'
+  | 'seat_reset_runtime_unsupported' | 'seat_reset_destination_unavailable';
 
-const RESET_FOREGROUNDS: ReadonlySet<string> = new Set(['claude', 'pi']);
+const RESET_FOREGROUNDS: Readonly<Record<InteractiveResetHost, string>> = { claude: 'claude', pi: 'pi', antigravity: 'agy' };
 
 export class SeatResetError extends Error {
   constructor(readonly code: SeatResetCode, readonly outcome: SeatResetOutcome, message: string, readonly logErrors: readonly string[] = []) {
@@ -73,6 +76,7 @@ export type SeatResetNotify = (env: NodeJS.ProcessEnv, event: {
  */
 export interface SeatRelaunch extends SeatLaunchModel {
   readonly argv: readonly string[];
+  readonly runtime: SeatRuntime;
   readonly modeKnown: boolean;
 }
 
@@ -102,10 +106,8 @@ const NOTICE_SETTLE_MS = 5_000;
  * valid handoff gets the recorded action, `/compact` or `/clear`; the resume prompt goes out only after the
  * new-session signal. A missing signal after `/clear` types `/clear` again; a missing signal after `/compact` ends
  * the run, and auto-compaction stays as the net. A missing answer to the prompt sends it again. After 3 retries in
- * total the requester starts again from its seat argv in the same terminal. A `reset` request whose effective launch
- * model or effort differs from the session record starts the requester again from its seat argv instead of `/clear`
- * (#2633); `compact` never restarts. Each failure appends one entry to the
- * reset log, then posts one notice that nothing waits for. A completed request is never reset again.
+ * total the requester starts again from its seat argv in the same terminal. Antigravity and a `reset` that changes
+ * runtime, model or effort relaunch directly. Each failure appends a log entry and triggers a notice.
  */
 export async function runSeatReset(path: string, sha256: string, options: SeatResetOptions): Promise<SeatResetResult> {
   const identity = handoffIdentity(path);
@@ -133,6 +135,7 @@ class SeatResetRun {
   private requesterCheckout: string | null = null;
   private caller = '';
   private prompt = '';
+  private attemptedKeys = false;
 
   constructor(private readonly identity: SeatResetIdentity, private readonly path: string, private readonly options: SeatResetOptions) {
     this.env = options.env ?? process.env;
@@ -185,12 +188,10 @@ class SeatResetRun {
 
   async reset(sha256: string): Promise<Omit<SeatResetResult, 'logErrors'>> {
     mkdirSync(seatResetDirectory(this.identity), { recursive: true, mode: 0o700 });
+    let claimed: string | null = null;
     try {
       const requestPath = seatResetRequestPath(this.identity);
       this.request = readRequest(this.identity);
-      if (this.request?.host === 'antigravity' || readSeatSession(this.identity)?.host === 'antigravity') {
-        throw this.unsupportedRuntime();
-      }
       if (this.request === null && !existsSync(requestPath)) {
         throw this.refuse('request_missing', 'nothing_sent', `${requestPath} is missing: the Stop hook did not ask for this reset.`);
       }
@@ -204,27 +205,45 @@ class SeatResetRun {
       const claim = seatResetClaimPath(this.identity, this.request.requestedAt);
       if (existsSync(claim)) throw this.alreadyClaimed();
       this.findRequester();
+      this.requireResettableRequester(this.trackedRequester());
       this.prompt = seatResumePrompt(this.identity, this.caller, this.request.action);
       this.checkHandoff(sha256);
       this.wait();
-      this.requireResettableAdvisor('nothing_sent');
       this.claim(claim);
-      // An auto-compaction or another reset after the request started a new segment: a second action would compact
-      // or clear the new summary.
+      claimed = claim;
       if (!requestOpen(this.identity, this.request)) {
         throw this.release('request_closed', `a session segment started after the reset request of ${this.request.requestedAt}, so nothing was typed`);
       }
-    } catch (error) {
-      if (error instanceof SeatResetError) throw error;
-      throw this.refuse('hc_failed', 'nothing_sent', `hc failed before the first typed command: ${sentence(error)}.`);
-    }
-    // From the first typed command on, the requester may already be reset, so a failure gives the prompt to send by hand.
-    try {
       return await this.resetAndResume();
     } catch (error) {
-      if (error instanceof SeatResetError && (error.outcome === 'uncertain' || error.code === 'requester_status_untracked' || error.code === 'seat_reset_runtime_unsupported')) throw error;
-      const command = seatResetCommand(this.request!.action, this.interactiveHost());
-      throw this.refuse('resume_not_sent', 'uncertain', `${this.requester} may have got ${command}, but not the resume prompt: ${sentence(error)}. Send it by hand: ${this.prompt}`);
+      if (error instanceof SeatResetError) throw error;
+      if (!this.attemptedKeys) throw this.refuse('hc_failed', 'nothing_sent', `Reset failed before the first typed command: ${sentence(error)}.`);
+      throw this.refuse('resume_not_sent', 'uncertain', `${this.requester} may have been reset: ${sentence(error)}. Send the resume prompt by hand: ${this.prompt}`);
+    } finally {
+      if (claimed !== null && !this.attemptedKeys) {
+        try { unlinkSync(claimed); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') this.logErrors.push(`Remove the unused claim ${claimed} before retrying: ${sentence(error)}`);
+        }
+      }
+    }
+  }
+
+  private get keyOutcome(): 'nothing_sent' | 'uncertain' {
+    return this.attemptedKeys ? 'uncertain' : 'nothing_sent';
+  }
+
+  private type(line: string): void {
+    // hc may fail after delivering part of the line. Keep the claim once a key command has been attempted.
+    this.attemptedKeys = true;
+    typeLine(this.requester, line, this.options);
+  }
+
+  private requireFreshRequest(): void {
+    const request = this.request!;
+    const current = readRequest(this.identity);
+    if (current?.requestedAt !== request.requestedAt || current.host !== request.host || current.action !== request.action
+      || current.transcriptPath !== request.transcriptPath || !requestOpen(this.identity, request)) {
+      throw this.refuse('request_closed', 'nothing_sent', `The reset request of ${request.requestedAt} is no longer current.`);
     }
   }
 
@@ -265,19 +284,14 @@ class SeatResetRun {
       }
     }
     this.caller = caller;
-    this.requireResettableAdvisor('nothing_sent');
   }
 
-  private unsupportedRuntime(outcome: SeatResetOutcome = 'nothing_sent'): SeatResetError {
-    return new SeatResetError('seat_reset_runtime_unsupported', outcome,
-      'Automated advisor reset requires a Claude or Pi foreground. Relaunch an agy advisor through rh seats launch advisor.');
-  }
-
-  private requireResettableAdvisor(outcome: SeatResetOutcome): void {
-    if (this.identity.seat !== 'advisor') return;
-    const terminal = hcGet(this.requester, this.options);
-    if (terminal.state !== 'live' || !terminal.foreground || !RESET_FOREGROUNDS.has(terminal.foreground.name) || terminal.status?.app === 'antigravity') {
-      throw this.unsupportedRuntime(outcome);
+  private requireResettableRequester(terminal: HcTerminal): void {
+    const expected = RESET_FOREGROUNDS[this.request!.host];
+    const foreground = terminal.foreground?.argv[0];
+    if (foreground === undefined || basename(foreground) !== expected) {
+      throw this.refuse('seat_reset_runtime_unsupported', this.keyOutcome,
+        `The ${this.identity.seat} reset requires a live ${expected} foreground in ${this.requester}.`);
     }
   }
 
@@ -292,7 +306,7 @@ class SeatResetRun {
   }
 
   private interactiveHost(): InteractiveResetHost {
-    return this.request?.host === 'pi' ? 'pi' : 'claude';
+    return this.request?.host ?? 'claude';
   }
 
   /** Releases the requester with NO-RESET: it continues, and no slash command is typed. */
@@ -313,18 +327,26 @@ class SeatResetRun {
     throw new SeatResetError(problem.code, outcome, `${problem.message} ${result}`);
   }
 
-  private trackedRequester(outcome: 'nothing_sent' | 'uncertain'): HcTerminal {
+  private requireLiveRequester(terminal: HcTerminal): void {
+    if (terminal.state === 'finished') {
+      const recovery = this.attemptedKeys ? ` Start the seat and send: ${this.prompt}` : '';
+      throw this.refuse('requester_exited', this.keyOutcome, `${this.requester} exited.${recovery}`);
+    }
+  }
+
+  private trackedRequester(): HcTerminal {
     const terminal = hcGet(this.requester, this.options);
-    if (terminal.state === 'live' && terminal.status === null) {
-      throw this.refuse('requester_status_untracked', outcome,
+    this.requireLiveRequester(terminal);
+    if (terminal.status === null) {
+      throw this.refuse('requester_status_untracked', this.keyOutcome,
         `${this.requester} has untracked hc status (status: null, foreground: ${terminal.foreground?.name ?? 'unknown'}). Check the seat, then use hc keys ${this.requester} by hand or restart it with \`rh seats argv ${this.identity.seat} --repository-id ${this.identity.repository}\`.`);
     }
     return terminal;
   }
 
   /** A message to the waiting seat ends its wait (#2305). Continue for the rest of the same budget. */
-  private waitForTurn(outcome: 'nothing_sent' | 'uncertain'): HcWaitResult {
-    const terminal = this.trackedRequester(outcome);
+  private waitForTurn(): HcWaitResult {
+    const terminal = this.trackedRequester();
     this.requesterCheckout ??= terminal.cwd ?? null;
     const deadline = Date.now() + WAIT_SECONDS * 1000;
     let result = hcWait(this.requester, WAIT_SECONDS, this.options);
@@ -338,13 +360,19 @@ class SeatResetRun {
 
   /** Only a requester that still works after the whole budget is busy. */
   private wait(): void {
-    const result = this.waitForTurn('nothing_sent');
-    if (!result.ended) throw this.refuse('requester_busy', 'nothing_sent', `${this.requester} did not end its turn in ${WAIT_SECONDS} s (${result.reason}).`);
+    const result = this.waitForTurn();
+    if (result.ended) return;
+    this.requireLiveRequester(hcGet(this.requester, this.options));
+    throw this.refuse('requester_busy', 'nothing_sent', `${this.requester} did not end its turn in ${WAIT_SECONDS} s (${result.reason}).`);
   }
 
-  private launchRequester(): Promise<SeatRelaunch> {
-    if (!this.requesterCheckout) throw new Error(`hc did not report the launch directory of ${this.requester}.`);
-    return this.options.relaunch(this.identity, this.requesterCheckout);
+  private async launchRequester(): Promise<SeatRelaunch> {
+    try {
+      if (!this.requesterCheckout) throw new Error(`hc did not report the launch directory of ${this.requester}.`);
+      return await this.options.relaunch(this.identity, this.requesterCheckout);
+    } catch (error) {
+      throw this.relaunchFailed(`relaunch_argv_failed: ${sentence(error)}`);
+    }
   }
 
   private async poll<T>(read: () => T | null, ms: number): Promise<T | null> {
@@ -354,16 +382,16 @@ class SeatResetRun {
     }
   }
 
-  private waitForSession(since: number, action: SeatResetAction): Promise<NewSession | null> {
+  private waitForSession(since: number, action: SeatResetAction | 'startup', host: InteractiveResetHost): Promise<NewSession | null> {
     const ms = action === 'compact' ? this.timeouts.compactSignalMs : this.timeouts.signalMs;
-    return this.poll(() => newSession(this.identity, since, this.request!, action), ms);
+    return this.poll(() => newSession(this.identity, since, this.request!.transcriptPath, host, action), ms);
   }
 
   /** Sends the prompt; true when the model sends RESUMED in the new transcript within the evidence window. */
   private async promptAnswered(session: NewSession): Promise<boolean> {
-    const offset = fileSize(session.transcript);
+    const read = readResumeTranscript(session, this.env);
     hcSend(this.requester, this.prompt, this.options);
-    return await this.poll(() => (sentResumed(readAppended(session.transcript, offset), this.prompt, this.caller) ? true : null), this.timeouts.evidenceMs) !== null;
+    return await this.poll(() => (sentResumed(read(), this.prompt, this.caller, session.host) ? true : null), this.timeouts.evidenceMs) !== null;
   }
 
   private done(session: NewSession, detail: 'compacted' | 'cleared' | 'relaunched' | 'restarted'): Omit<SeatResetResult, 'logErrors'> {
@@ -371,22 +399,13 @@ class SeatResetRun {
     return { requester: this.requester, seat: this.identity.seat, relaunched: detail === 'relaunched' || detail === 'restarted' };
   }
 
-  /**
-   * The launch of the requester when its effective model or effort differs from the session record, else null. A record
-   * without a model gives null. A launch that cannot be built, or a launch under an unknown quota mode (no fresh weekly
-   * reading: a missing reading is no authority to move a running seat), is logged and gives null: the reset types
-   * `/clear` as before #2633, and the seat keeps its model. A fresh `seats argv` launch still uses the unknown mode.
-   */
-  private async modelChange(): Promise<SeatRelaunch | null> {
+  /** Restart for a runtime change, or for a model or effort change with known quota (#2633). */
+  private async launchChange(): Promise<SeatRelaunch | null> {
     const session = readSeatSession(this.identity);
-    if (session === null || session.model === null) return null;
-    let launch: SeatRelaunch;
-    try {
-      launch = await this.launchRequester();
-    } catch (error) {
-      this.record('model_check_failed', `relaunch_argv_failed: ${sentence(error)}`);
-      return null;
-    }
+    if (session === null) return null;
+    const launch = await this.launchRequester();
+    if (seatHostId(launch.runtime) !== this.request!.host) return launch;
+    if (session.model === null) return null;
     if (!launch.modeKnown) {
       this.record('model_check_failed', 'quota_unknown: the seat account has no fresh weekly quota reading, so the seat keeps its model');
       return null;
@@ -400,17 +419,18 @@ class SeatResetRun {
    * relaunched.
    */
   private async resetAndResume(): Promise<Omit<SeatResetResult, 'logErrors'>> {
-    const { action } = this.request!;
-    const host = this.interactiveHost();
-    const changed = action === 'reset' ? await this.modelChange() : null;
-    if (changed !== null) return this.relaunch(changed);
+    const { action, host } = this.request!;
+    if (host === 'antigravity') return this.relaunch(await this.launchRequester(), 'relaunched');
+    const changed = action === 'reset' ? await this.launchChange() : null;
+    if (changed !== null) return this.relaunch(changed, 'restarted');
+    this.requireResettableRequester(this.trackedRequester());
     let since = Date.now();
-    this.requireResettableAdvisor('nothing_sent');
-    typeLine(this.requester, seatResetCommand(action, host), this.options);
+    this.requireFreshRequest();
+    this.type(seatResetCommand(action, host));
     let session: NewSession | null = null;
     // The log counts across runs; the run counts too, so an unwritable log still ends the retries.
     for (let failures = 1; ; failures += 1) {
-      session ??= await this.waitForSession(since, action);
+      session ??= await this.waitForSession(since, action, host);
       const failure = session === null ? 'no_signal' : await this.promptAnswered(session) ? null : 'no_evidence';
       if (failure === null) return this.done(session!, action === 'compact' ? 'compacted' : 'cleared');
       this.record('resume', failure);
@@ -418,55 +438,68 @@ class SeatResetRun {
         const autoHost = host === 'pi' ? 'Pi' : 'Claude Code';
         throw new SeatResetError('resume_not_sent', 'uncertain', `${this.requester} got /compact, but no compact session record came in ${this.timeouts.compactSignalMs / 1000} s. No second /compact: the seat continues and ${autoHost} auto-compaction stays as the net. If it compacts later, send: ${this.prompt}`);
       }
-      if (failures > SEAT_RESET_RETRIES || this.count('resume') > SEAT_RESET_RETRIES) return this.relaunch();
+      if (failures > SEAT_RESET_RETRIES || this.count('resume') > SEAT_RESET_RETRIES) return this.relaunch(await this.launchRequester(), 'relaunched');
       if (failure === 'no_signal') {
         since = Date.now();
-        this.requireResettableAdvisor('uncertain');
-        typeLine(this.requester, seatResetCommand('reset', host), this.options);
+        const terminal = hcGet(this.requester, this.options);
+        this.requireLiveRequester(terminal);
+        this.requireResettableRequester(terminal);
+        this.type(seatResetCommand('reset', host));
       }
     }
   }
 
-  /** `launch` is the launch of a model change; without it the relaunch builds the launch after the retries. */
-  private async relaunch(launch?: SeatRelaunch): Promise<Omit<SeatResetResult, 'logErrors'>> {
-    const host = this.interactiveHost();
-    // A relaunched process has no compaction summary, so it gets the prompt with the git and gh check.
-    this.prompt = seatResumePrompt(this.identity, this.caller, 'reset');
-    const stop = (detail: string, running = false): SeatResetError => {
-      const next = running ? `No relaunch key was typed. Its session still runs. Send it: ${this.prompt}`
-        : `Start it from \`rh seats argv ${this.identity.seat} --repository-id ${this.identity.repository}\` and send: ${this.prompt}`;
-      this.record('relaunch_failed', detail);
-      return new SeatResetError('resume_not_sent', 'uncertain', `The relaunch of ${this.requester} failed (${detail}). ${next}`);
-    };
-    // The argv needs characters that hc keys cannot type, so the login shell runs it from a script. The script is
-    // ready before /exit or /quit, so a failed build leaves the running session in place.
-    const script = `${seatResetDirectory(this.identity)}/relaunch.sh`;
-    if (!TYPABLE.test(script) || script.includes(' ')) throw stop('relaunch_path_untypable', true);
-    try {
-      writeFileSync(script, `exec ${(launch ?? await this.launchRequester()).argv.map(shellQuote).join(' ')}\n`, { mode: 0o700 });
-    } catch (error) {
-      throw stop(`relaunch_argv_failed: ${sentence(error)}`, true);
+  /** A wait can end at a blocked prompt, or a new turn can start before the terminal is checked. */
+  private settledRequester(): HcTerminal {
+    const turn = this.waitForTurn();
+    const terminal = this.trackedRequester();
+    const settled = (state: string | undefined) => state === 'idle' || state === 'done';
+    if (!turn.ended || !settled(turn.status?.state) || !settled(terminal.status?.state) || terminal.turn !== turn.turn) {
+      throw this.refuse('requester_busy', this.keyOutcome, `${this.requester} did not stay on the settled turn after hc wait.`);
     }
-    const outcome = launch === undefined ? 'uncertain' : 'nothing_sent';
-    const turn = this.waitForTurn(outcome);
-    if (!turn.ended) throw stop('requester_busy', true);
-    const terminal = this.trackedRequester(outcome);
-    if (terminal.state === 'finished') throw stop('requester_exited');
-    if (terminal.foreground === null) throw stop('requester_foreground_unavailable', true);
-    if (terminal.foreground.pid === terminal.pid) throw stop('requester_has_no_parent_shell', true);
-    this.requireResettableAdvisor(outcome);
-    typeLine(this.requester, seatExitCommand(host), this.options);
+    return terminal;
+  }
+
+  private relaunchFailed(detail: string, beforeExit = true): SeatResetError {
+    let next = '';
+    if (!beforeExit) next = ` Start it from \`rh seats argv ${this.identity.seat} --repository-id ${this.identity.repository}\` and send: ${this.prompt}`;
+    else if (this.attemptedKeys) next = ` Send the resume prompt by hand: ${this.prompt}`;
+    this.record('relaunch_failed', detail);
+    return new SeatResetError(this.attemptedKeys ? 'resume_not_sent' : 'seat_reset_destination_unavailable', this.keyOutcome,
+      `The relaunch of ${this.requester} failed (${detail}).${next}`);
+  }
+
+  private async relaunch(plan: SeatRelaunch, detail: 'relaunched' | 'restarted'): Promise<Omit<SeatResetResult, 'logErrors'>> {
+    const host = this.request!.host;
+    const launchHost = seatHostId(plan.runtime);
+    if (!isResetHost(launchHost)) {
+      throw this.refuse('seat_reset_runtime_unsupported', this.keyOutcome, `The ${this.identity.seat} runtime ${plan.runtime} does not record SessionStart.`);
+    }
+    // The shell reads the argv from a script because hc keys can only type a subset of its characters.
+    this.prompt = seatResumePrompt(this.identity, this.caller, 'reset');
+    const script = `${seatResetDirectory(this.identity)}/relaunch.sh`;
+    if (!TYPABLE.test(script) || script.includes(' ')) throw this.relaunchFailed('relaunch_path_untypable');
+    try {
+      writeFileSync(script, `exec ${plan.argv.map(shellQuote).join(' ')}\n`, { mode: 0o700 });
+    } catch (error) {
+      throw this.relaunchFailed(`relaunch_argv_failed: ${sentence(error)}`);
+    }
+    const terminal = this.settledRequester();
+    this.requireResettableRequester(terminal);
+    if (terminal.pid === null || terminal.foreground?.pid === terminal.pid) throw this.relaunchFailed('requester_has_no_parent_shell');
+    if (!this.attemptedKeys) this.requireFreshRequest();
+    this.type(seatExitCommand(host));
     const shellReady = await this.poll(() => {
       const current = hcGet(this.requester, this.options);
-      if (current.state === 'finished') throw stop('requester_exited');
-      return current.foreground !== null && !RESET_FOREGROUNDS.has(current.foreground.name) ? true : null;
+      this.requireLiveRequester(current);
+      return current.foreground?.pid === terminal.pid ? true : null;
     }, this.timeouts.exitMs);
-    if (shellReady === null) throw stop(host === 'pi' ? 'pi_did_not_exit' : 'claude_did_not_exit');
+    if (shellReady === null) throw this.relaunchFailed(`${RESET_FOREGROUNDS[host]}_did_not_exit`, false);
     const startedAt = Date.now();
-    typeLine(this.requester, `sh ${script}`, this.options);
-    const session = await this.waitForSession(startedAt, 'reset');
-    if (session === null) throw stop('no_signal');
-    if (!await this.promptAnswered(session)) throw stop('no_evidence');
-    return this.done(session, launch === undefined ? 'relaunched' : 'restarted');
+    this.type(`sh ${script}`);
+    const session = await this.waitForSession(startedAt, 'startup', launchHost);
+    if (session === null) throw this.relaunchFailed('no_signal', false);
+    if (!await this.promptAnswered(session)) throw this.relaunchFailed('no_evidence', false);
+    return this.done(session, detail);
   }
 }

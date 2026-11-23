@@ -402,8 +402,8 @@ export function agySeatCommandRules(seat: LaunchSeatId, config: SeatConfigV1): {
     };
   }
   if (seat === 'advisor') return {
-    allow: [...AGY_READONLY_COMMAND_PREFIXES, 'rh seats council', 'rh arch refactor decide'],
-    deny: AGY_READONLY_DENIED_COMMANDS,
+    allow: [...AGY_READONLY_COMMAND_PREFIXES, 'rh seats council', 'rh seats reset', 'rh seats handoff', 'rh arch refactor decide'],
+    deny: AGY_READONLY_DENIED_COMMANDS.filter(command => command !== 'rh seats reset'),
   };
   if (seat === 'council' || seat === 'gatekeeper') {
     return { allow: AGY_READONLY_COMMAND_PREFIXES, deny: [...AGY_READONLY_DENIED_COMMANDS, 'rh arch refactor decide'] };
@@ -437,7 +437,7 @@ export function agySeatBrief(seat: LaunchSeatId, config: SeatConfigV1): string {
     ...(seat === 'advisor' ? [
       'Edit only your own files under /tmp/rh-triage/ and your scratch proposal or retro files outside every repository. Never edit repository source.',
       'Record a refactor decision only after the owner gives it.',
-      'When Stop requests a handoff, send it to the orchestrator. After this pane ends, the orchestrator starts a new advisor pane with rh seats launch advisor and gives it the handoff.',
+      'Follow the handoff steps printed by the Stop hook or rh seats handoff to request an in-pane relaunch from the orchestrator.',
     ] : []),
   ].join('\n\n');
 }

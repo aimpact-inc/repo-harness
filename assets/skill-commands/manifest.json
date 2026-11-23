@@ -312,7 +312,8 @@
       "source": "assets/skills/repo-harness-seat-handoff",
       "provider": null,
       "hosts": [
-        "claude"
+        "claude",
+        "antigravity"
       ],
       "owner": "peer-runtime",
       "explicitOnly": false,

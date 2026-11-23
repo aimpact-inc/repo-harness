@@ -32,7 +32,6 @@ function legacyAdapter(host: keyof typeof HOST_RENDERERS, capabilities: Partial<
 }
 
 export const ANTIGRAVITY_GUARD_DENIAL = 'rh hook: the tool call is refused';
-export const ANTIGRAVITY_HANDOFF = 'Write your handoff now. The orchestrator relaunches this seat with rh seats launch.';
 export { ANTIGRAVITY_BRAIN_ROOTS };
 
 const ANTIGRAVITY_TOOLS = {
@@ -124,7 +123,7 @@ function renderAntigravity(outcome: HookOutcome): ReturnType<HostAdapter['render
     if (outcome.permission?.decision === 'ask') return emit({ decision: 'force_ask', reason: outcome.permission.reason });
   }
   if (outcome.event === 'Stop' && outcome.reason === 'blocked') {
-    return emit({ decision: 'continue', reason: ANTIGRAVITY_HANDOFF });
+    return emit({ decision: 'continue', reason: outcome.diagnostics.trimEnd() });
   }
   if ((outcome.event === 'SessionStart' || outcome.event === 'UserPromptSubmit') && outcome.exitCode === 0) {
     const context = [outcome.additionalContext, outcome.systemMessage].filter(Boolean).join('\n');
