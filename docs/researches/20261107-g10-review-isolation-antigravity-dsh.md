@@ -5,6 +5,10 @@ OAR: `@botiverse/oar` 0.91.0 (`bun.lock`, `node_modules/@botiverse/oar/package.j
 Runtimes: `agy` from `/Users/chris/.local/bin/agy`, `dsh` 0.2.2-rc.1 from `/opt/homebrew/bin/dsh`.
 Host: macOS 26.5 (build 25F71), arm64, Node 24.22.1, Bun 1.4.3.
 
+Re-probed on 2026-11-23 with `agy` 1.5.15 and OAR 0.129.1 (#3418). The verdict below describes the
+0.91.0 and 1.5.2 state; the [re-probe section](#2026-11-23-re-probe-agy-1515-and-oar-01291-issue-3418)
+at the end holds the current verdict.
+
 The `agy` binary reported 1.5.1 at the first probe and 1.5.2 from 03:28 onward; its file mtime moved
 from Nov 6 10:16 to Nov 7 03:28 during the session, so it self-updated mid-run. Every agy result
 labelled 1.5.2 was produced by the updated binary. Both versions are at or above the 1.5.0 floor
@@ -308,3 +312,74 @@ the three ids, and `dist/` was removed.
 - Items 5 and 8 could not use the runner credential path. Item 8 is BLOCKED for both runtimes and
   item 5 is decided on the code evidence (no antigravity or dsh branch exists), not on a live
   credential test.
+
+## 2026-11-23 re-probe: agy 1.5.15 and OAR 0.129.1 (issue #3418)
+
+Date: 2026-11-23. Base: main `43be22221`. Issue: #3418, which follows #1857.
+OAR: `@botiverse/oar` 0.129.1 (`package.json:105`). Runtime: `agy` 1.5.15 from
+`/Users/chris/.local/bin/agy`; it auto-updated from 1.5.14 before the probe, and both versions meet
+the OAR 1.5.0 floor.
+Host: macOS arm64, production Seatbelt policy from `reviewIsolationPolicy`
+(`src/effects/review/review-isolation.ts`).
+Isolation: `GEMINI_HOME=<outbox>/.gemini`, which OAR 0.129.1 emits as
+`--gemini-dir <outbox>/.gemini` (`dist/runtimes/antigravity/state-directory.js:4-6`); `HOME` and
+`BUN_INSTALL` in a `mkdtemp` directory for each probe that calls a product writer.
+Evidence: the probe record is
+https://github.com/aimpact-inc/repo-harness/issues/3418#issuecomment-7096275477. The probe made no
+repository change. It did not read, list or write the caller's `~/.gemini`, did not read a keychain
+item or a token file, and exported no provider key. No credential value appears in this section.
+
+### Verdict
+
+`REVIEW_RUNTIME_IDS` stays `['claude', 'codex', 'pi']` (`src/core/review/review-runtimes.ts:6`).
+Three items FAIL and five are BLOCKED, so `antigravity` does not join the review admission list.
+
+### The eight items
+
+| # | Item | Result | Evidence |
+|---|---|---|---|
+| 1 | Permission mode | **BLOCKED**: the policy and ACP `initialize` pass, the live tool turn does not | OAR 0.129.1 emits `agy acp --dangerously-skip-permissions --process-per-session --gemini-dir <outbox>/.gemini`. The sandboxed `agy acp` completes `initialize` with `appDataDir=<outbox>/.gemini/antigravity-cli`, and `<outbox>/.gemini/antigravity-cli/bin/agentapi` is writable under the production policy. `session/new` then stops with `RuntimeFailureError: Authentication required`. |
+| 2 | Writes | **BLOCKED**: the file-write confinement passes, the live tool write does not | Node probe under the production policy: allowed for `<outbox>/probe-write.txt`, `<outbox>/.gemini/antigravity-cli/bin/agentapi`, `<outbox>/.gemini/config/hooks.json` and `/dev/null`; `EPERM` for the candidate repo, the isolated HOME, the account HOME and `<outbox>/.gemini/antigravity-cli/{settings.json,builtin/skills/*,builtin/agents/*}`. The live write attempt stops at `session/new` with `Authentication required`. |
+| 3 | Network | **FAIL** | The #1807 baseline holds: loopback IPv4, all IPv6 TCP and the remote IPv6 test address return `EPERM`, and DNS resolves through `mDNSResponder`. Remote IPv4 `1.1.1.1:443` connects, so provider-only egress is not enforced by `reviewIsolationPolicy`. |
+| 4 | Project trust and tool restrictions | **FAIL** | OAR 0.129.1 throws `UnsupportedOptionError` for `userConfiguration` ("no verified separation of user configuration from its native login"), for `disallowedTools` ("no verified tool-denial channel"), for `systemPrompt` and for `mcpServers` with `env`. `agy 1.5.15 acp --help` lists no `--no-context-files` and no `--disallowed-tools`, and `--include-default-customizations` defaults to true. |
+| 5 | Credentials: isolation and cleanup | **FAIL** | `generic-review.ts:238-239` prepares an isolated home for `pi` and `codex` only, and `review-isolation.ts` has no `antigravity` projection or cleanup branch. The confined child therefore has no controlled credential and no cleanup target; under the isolated state directory `agy` logged a failed silent sign-in and wrote no token file. |
+| 6 | Model identity | **BLOCKED** | Every session attempt, including `model: 'opus'` with `effort: 'xhigh'`, stopped at `Authentication required` before the model was configured. Unchanged in code: `reviewSessionOptions` (`task-review-runner.ts:127-135`) passes the fleet `model: 'opus'` to a runtime that is not `pi` or `codex`, and `validateReviewOutput` (`src/core/review/generic-review.ts:42-43`) accepts `actual_model: null`. |
+| 7 | Session id and resume | **BLOCKED** | ACP `initialize` advertises `loadSession: true` and `sessionCapabilities.resume: {}`, and OAR 0.129.1 enforces `resumeKeepsSessionCwd`. The resume of a new session and the resume of an unknown id both stopped at `Authentication required` before `session/list` or `session/new` returned. |
+| 8 | One real review round | **BLOCKED** | `antigravity` is absent from `REVIEW_RUNTIME_IDS`, from the OAR runtime registry in `task-oar-host.ts`, from `EXECUTABLE_VARIABLES` (`task-review-runner.ts:115-117`, no `OAR_ANTIGRAVITY_BIN`), from `REVIEWER_LABELS` (`generic-review.ts:29`) and from the receipt labels. No Result and no Receipt exist. |
+
+### Deltas against the 2026-11-07 probe
+
+1. `--gemini-dir` removes the `$HOME/.gemini/antigravity-cli/bin/agentapi` barrier at the policy
+   level. `agy 1.5.15` creates `antigravity-cli/bin/` inside `<outbox>`, and the production policy
+   allows that write. The 2026-11-07 finding 1 (no shell tool under the profile) no longer holds on
+   this path.
+2. A new collision exists inside `<outbox>`. The deny regexes at `review-isolation.ts:169-170` match
+   `settings*.json` and the `hooks|agents|skills|rules|plugins` directory names at any depth, so
+   `agy` startup cannot create `<outbox>/.gemini/antigravity-cli/builtin/plugins` and logs
+   `failed to populate builtins: ... operation not permitted`. Writes to
+   `<outbox>/.gemini/antigravity-cli/{settings.json,builtin/skills/*,builtin/agents/*}` return
+   `EPERM`. `<outbox>/.gemini/config/hooks.json` and the `antigravity-oauth-token` file inside
+   `antigravity-cli/` match no regex and stay writable inside `<outbox>`.
+3. ACP `initialize` works under Seatbelt and offers a verified append channel:
+   `_meta.antigravity.systemPrompt.append: true`. The generated launcher also passes the OAR
+   installation check (`version: 1.5.15`), so the launcher, policy and output paths are correct.
+4. Authentication isolation stops without a caller leak, and it blocks every live turn. Under the
+   isolated state directory `boot.go:103` logs `Silent sign-in failed; session requests fail with
+   auth_required`, `session/new` answers `RuntimeFailureError: Authentication required`, and
+   `antigravityRuntime.authStatus` returns `{ kind: "unknown" }`. Items 1, 2, 6, 7 and 8 stay
+   BLOCKED on that error, because a real login and a keychain read were out of bounds for this probe.
+
+### Consequences for a later PR
+
+- Admission needs more than a runtime id: an entry in the OAR registry at `task-oar-host.ts`, the
+  `OAR_ANTIGRAVITY_BIN` mapping in `EXECUTABLE_VARIABLES`, a label in `REVIEWER_LABELS` and in the
+  receipt validator. Item 8 fails on all four today.
+- `reviewIsolationPolicy` needs an output-scoped exception for the `agy` state tree. Without it, a
+  `--gemini-dir` session starts but cannot populate `builtin/` (delta 2).
+- Model identity needs a per-runtime id, because `reviewSessionOptions` passes the fleet model to
+  every runtime that is not `pi` or `codex` (item 6).
+- Item 4 and item 5 fail on adapter and product code alone. A live authenticated turn would add no
+  admission evidence, so the next probe needs a product change first, not another login experiment.
+- Native `agy` review seats in the issue-flow run through Herdr panes (#3415, #3424). They do not
+  need `REVIEW_RUNTIME_IDS` admission, so the seat path stays open while review admission stays
+  closed.
