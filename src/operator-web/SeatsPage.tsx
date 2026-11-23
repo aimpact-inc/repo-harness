@@ -8,7 +8,7 @@ import type { SetupSnapshotV2 } from '../core/setup/types';
 import type { OperatorTranslate } from './i18n';
 import type { QuotaSection } from './quota';
 import {
-  GATEKEEPER_FALLBACK_STARTER, agyToolLocked, councilStarter, seatChanges, setExplorer, setOptionalSeat, setPiSubAgentModel, setRoute, setSeatAdvisorModel, setSeatEffort, setSeatModel, setSeatRole, setSeatRuntime, setRoutingValue, setSeatTool, type SeatsSettingsForm,
+  GATEKEEPER_FALLBACK_STARTER, agyEffortMenu, agyToolLocked, councilStarter, seatChanges, setExplorer, setOptionalSeat, setPiSubAgentModel, setRoute, setSeatAdvisorModel, setSeatEffort, setSeatModel, setSeatRole, setSeatRuntime, setRoutingValue, setSeatTool, type SeatsSettingsForm,
 } from './seats';
 import { EnableSwitch, formLocked, runtimeRowOf, SaveResult } from './SettingsPage';
 import type { AgentsSettingsForm } from './settings';
@@ -224,13 +224,13 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
     // A typed or stored model outside the seat's recommended list stays visible as a choice.
     ...(draft.model !== null && !suggested.includes(draft.model) ? [{ value: draft.model as string | null, label: draft.model }] : []),
   ];
-  // An agy seat offers the catalog menu of its model. A stored effort outside it stays visible; it is struck out when the catalog lacks it.
-  const agyMenu = agy ? ranges.agy_models?.find(entry => entry.id === draft.model)?.efforts ?? [] : null;
+  // An agy seat offers the menu of its model. A stored effort outside it stays visible; it is struck out when the menu is known.
+  const agyMenu = agy ? agyEffortMenu(draft.model, ranges.agy_models) : null;
   const efforts = [
     { value: null, label: t('seats.effort.default') },
-    ...(agyMenu ?? ranges.efforts).map(effort => ({ value: effort as string | null, label: effort, off: !runtime.effort })),
-    ...(agyMenu !== null && draft.effort !== null && !agyMenu.includes(draft.effort)
-      ? [{ value: draft.effort as string | null, label: draft.effort, off: ranges.agy_models !== null }] : []),
+    ...(agy ? agyMenu ?? [] : ranges.efforts).map(effort => ({ value: effort as string | null, label: effort, off: !runtime.effort })),
+    ...(agy && draft.effort !== null && !agyMenu?.includes(draft.effort)
+      ? [{ value: draft.effort as string | null, label: draft.effort, off: agyMenu !== null }] : []),
   ];
   // The host agent types change only the argv; the limit levels do not depend on them, so the page passes none.
   const launchSeat = seat === 'gatekeeper-fallback' ? 'gatekeeper' : seat;

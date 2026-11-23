@@ -339,10 +339,10 @@ export interface SeatRangeV1 {
   readonly tools: readonly SeatTool[];
 }
 
-/** One model of the native agy catalog and its effort menu: the catalog that launch checks. */
+/** One model of the native agy catalog and its effort menu: the catalog that launch checks. A null menu: agy could not report it. */
 export interface AgyCatalogModel {
   readonly id: string;
-  readonly efforts: readonly string[];
+  readonly efforts: readonly string[] | null;
 }
 
 export interface SeatsRangesV1 {
@@ -686,8 +686,8 @@ function decodeAgyModels(value: unknown, code: string): readonly AgyCatalogModel
   if (!Array.isArray(value)) invalid(code);
   return value.map((item) => {
     const entry = object(item, ['id', 'efforts'], code);
-    if (!seatModelShapeValid('agy', entry.id) || !Array.isArray(entry.efforts)) invalid(code);
-    return { id: entry.id, efforts: entry.efforts.map(effort => (seatModelShapeValid('agy', effort) ? effort : invalid(code))) };
+    if (!seatModelShapeValid('agy', entry.id) || (entry.efforts !== null && !Array.isArray(entry.efforts))) invalid(code);
+    return { id: entry.id, efforts: entry.efforts === null ? null : entry.efforts.map(effort => (seatModelShapeValid('agy', effort) ? effort : invalid(code))) };
   });
 }
 

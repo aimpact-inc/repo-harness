@@ -6,6 +6,7 @@ import {
   ROUTING_KEYS,
   SEAT_IDS,
   SEAT_SCAFFOLD_SUB_AGENTS,
+  agyEffortValid,
   agySeatTools,
   decodeSeatsSettings,
   decodeSeatsSettingsResult,
@@ -126,12 +127,19 @@ export function setSeatRuntime(draft: SeatsConfigV1, seat: SeatId, runtime: Seat
   });
 }
 
-/** An agy seat keeps its explicit effort across a model change only when the new model's catalog menu offers it. */
+/** The efforts that an agy seat on this model may select: its catalog menu through the seat effort rule, or null while agy does not report that menu. */
+export function agyEffortMenu(model: string | null, agyModels: SeatsSettingsV1['ranges']['agy_models']): readonly string[] | null {
+  if (agyModels === null || model === null) return null;
+  const listed = agyModels.find(entry => entry.id === model);
+  if (listed === undefined) return [];
+  return listed.efforts === null ? null : listed.efforts.filter(effort => agyEffortValid(model, effort));
+}
+
+/** An agy seat keeps its explicit effort across a model change only when the new model's menu offers it. */
 export function setSeatModel(draft: SeatsConfigV1, seat: SeatId, model: string | null, agyModels: SeatsSettingsV1['ranges']['agy_models']): SeatsConfigV1 {
   const current = draft[seat]!;
   if (current.runtime !== 'agy' || current.effort === null || current.model === model) return patch(draft, seat, { model });
-  const effort = current.effort;
-  return patch(draft, seat, { model, effort: agyModels?.find(entry => entry.id === model)?.efforts.includes(effort) ? effort : null });
+  return patch(draft, seat, { model, effort: agyEffortMenu(model, agyModels)?.includes(current.effort) ? current.effort : null });
 }
 
 export const setSeatAdvisorModel = (draft: SeatsConfigV1, seat: SeatId, advisor_model: string | null): SeatsConfigV1 => patch(draft, seat, { advisor_model });

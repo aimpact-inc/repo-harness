@@ -4,6 +4,7 @@ import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, mkdtem
 import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Worker } from 'node:worker_threads';
 import { decodeAgentsConfig } from '../../core/board/agents-settings';
 import { isRecord } from '../../core/evidence/is-record';
 import { sha256Hex } from '../../core/evidence/sha256';
@@ -198,8 +199,8 @@ export async function resolveAgyInstallation(env: NodeJS.ProcessEnv) {
 }
 
 function isAgyCatalogModel(row: unknown): row is AgyCatalogModel {
-  return isRecord(row) && seatModelShapeValid('agy', row.id) && Array.isArray(row.efforts)
-    && row.efforts.every(effort => seatModelShapeValid('agy', effort));
+  return isRecord(row) && seatModelShapeValid('agy', row.id)
+    && (row.efforts === null || (Array.isArray(row.efforts) && row.efforts.every(effort => seatModelShapeValid('agy', effort))));
 }
 
 /** Read the native catalog in a child with a scratch cwd. Only its typed projection returns. */
@@ -228,10 +229,20 @@ export function probeAgySeat(env: NodeJS.ProcessEnv = process.env): AgyProbe {
   }
 }
 
+/** The launch probe in a worker thread, so a slow catalog does not stop the operator's other routes. */
+function readAgyCatalogOffThread(env: NodeJS.ProcessEnv): Promise<AgyProbe> {
+  return new Promise((resolve) => {
+    const worker = new Worker(new URL('./agy-catalog-thread.ts', import.meta.url), { workerData: { env: { ...env } } });
+    worker.once('message', resolve);
+    worker.once('error', () => resolve({ kind: 'unknown' }));
+    worker.once('exit', () => resolve({ kind: 'unknown' }));
+  });
+}
+
 /** The effort menus that the settings page offers: the launch catalog, read only while Antigravity is on in Hosts. */
-export function agyCatalogModels(enabledRuntimes: readonly string[], env: NodeJS.ProcessEnv = process.env): readonly AgyCatalogModel[] | null {
+export async function agyCatalogModels(enabledRuntimes: readonly string[], env: NodeJS.ProcessEnv = process.env): Promise<readonly AgyCatalogModel[] | null> {
   if (!enabledRuntimes.includes(seatHostId('agy'))) return null;
-  const probe = probeAgySeat(env);
+  const probe = await readAgyCatalogOffThread(env);
   return probe.kind === 'available' ? probe.models : null;
 }
 
@@ -244,12 +255,14 @@ function agyEffortChanged(stored: SeatConfigV1 | null, next: SeatConfigV1 | null
     && !(stored?.runtime === 'agy' && stored.model === next.model && stored.effort === next.effort);
 }
 
+/** The messages name the seat field only: a model id is user text and a refusal body goes into the operator audit. */
 function checkAgyEffort(id: SeatId, seat: SeatConfigV1 & { readonly effort: string }, catalog: AgyProbe): void {
-  if (catalog.kind !== 'available') {
-    throw new SeatsConfigurationError('seat_effort_unverified', `The agy model catalog could not be read, so the ${id} seat effort ${seat.effort} cannot be checked.`);
+  const listed = catalog.kind === 'available' ? catalog.models.find(model => model.id === seat.model) : undefined;
+  if (catalog.kind !== 'available' || listed?.efforts === null) {
+    throw new SeatsConfigurationError('seat_effort_unverified', `agy did not report the effort menu of the seats.${id}.model, so seats.${id}.effort cannot be checked.`);
   }
-  if (!catalog.models.find(model => model.id === seat.model)?.efforts.includes(seat.effort)) {
-    throw new SeatsConfigurationError('seat_effort_invalid', `The agy catalog does not offer effort ${seat.effort} for the ${id} seat model ${seat.model}.`);
+  if (!listed?.efforts.includes(seat.effort)) {
+    throw new SeatsConfigurationError('seat_effort_invalid', `The agy catalog does not offer seats.${id}.effort for seats.${id}.model.`);
   }
 }
 
@@ -268,15 +281,16 @@ async function readAgyCatalog(): Promise<AgyProbe> {
     if (catalog.kind === 'unauthenticated') return { kind: 'signed_out' };
     if (catalog.kind !== 'ok') return { kind: 'catalog_unknown' };
     const models = new Map<string, AgyCatalogModel>();
-    for (const { id, disabled, effortLevels = [] } of catalog.models) {
+    for (const { id, disabled, effortLevels = [], effortUnavailableReason } of catalog.models) {
       if (disabled === undefined && seatModelShapeValid('agy', id)) {
-        models.set(id, { id, efforts: effortLevels.filter(effort => seatModelShapeValid('agy', effort)) });
+        // A null menu: agy lists the model but could not report its efforts.
+        models.set(id, { id, efforts: effortUnavailableReason === undefined ? effortLevels.filter(effort => seatModelShapeValid('agy', effort)) : null });
       }
     }
     // OAR's ACP catalog exposes base IDs plus effort menus. The interactive CLI also takes suffixed IDs.
     const nativeIds = new Set(catalog.models.map(model => model.id));
     for (const { id, efforts } of [...models.values()]) {
-      for (const effort of efforts) {
+      for (const effort of efforts ?? []) {
         const variant = `${id}-${effort}`;
         if (!nativeIds.has(variant) && seatModelShapeValid('agy', variant)) models.set(variant, { id: variant, efforts: [effort] });
       }
@@ -506,10 +520,10 @@ function changedKeys(current: SeatsConfigV1, next: SeatsConfigV1): string[] {
 }
 
 /** Replaces the `seats` section. It writes only the configuration file; panes that run keep their launch arguments. */
-export function applySeatsSettings(
+export async function applySeatsSettings(
   request: { readonly expected_revision: string; readonly seats: SeatsConfigV1 },
   env: NodeJS.ProcessEnv = process.env,
-): SeatsSettingsResultV1 {
+): Promise<SeatsSettingsResultV1> {
   try {
     // The catalog read can take a minute, so it runs before the configuration lock. The expected revision refuses a
     // section that changed after this read.
@@ -518,7 +532,7 @@ export function applySeatsSettings(
       const seat = request.seats[id];
       return agyEffortChanged(stored[id], seat) ? [{ id, seat }] : [];
     });
-    const catalog = agyChecks.length === 0 ? null : probeAgySeat(env);
+    const catalog = agyChecks.length === 0 ? null : await readAgyCatalogOffThread(env);
     const result = mutateGlobalConfiguration(env, (config) => {
       const enabled = enabledRuntimesOf(config);
       for (const id of SEAT_IDS) {

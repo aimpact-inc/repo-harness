@@ -449,7 +449,7 @@ function checkAgyLaunchTarget(id: SeatId, seat: SeatConfigV1, models: readonly A
   if (model === undefined) {
     throw new SeatsCommandError('seat_model_unavailable', `agy does not list the selected ${id} model. See seats.${id}.model.`);
   }
-  if (seat.effort !== null && !model.efforts.includes(seat.effort)) {
+  if (seat.effort !== null && !(model.efforts ?? []).includes(seat.effort)) {
     throw new AgySeatSettingsError('seat_effort_invalid', id, 'effort');
   }
   let optedIn = false;

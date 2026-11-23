@@ -41,10 +41,11 @@ export const SEATS_CONFIGURATION_FAILURES: Readonly<Record<SeatsConfigurationErr
 });
 
 /** GET: the stored section, or the defaults, with its revision, the defaults and the ranges the form may offer. */
-export function readSeatsSettings(env?: NodeJS.ProcessEnv): SeatsSettingsV1 {
+export async function readSeatsSettings(env?: NodeJS.ProcessEnv): Promise<SeatsSettingsV1> {
   const { revision, seats, enabled_runtimes } = readSeatsConfiguration(env);
+  const agyModels = await agyCatalogModels(enabled_runtimes, env);
   const settings = decodeSeatsSettings({ protocol: 1, kind: 'operator_seats_settings', config: { revision, ...seats },
-    defaults: DEFAULT_SEATS_CONFIG, ranges: seatsRanges(enabled_runtimes, agyCatalogModels(enabled_runtimes, env)) });
+    defaults: DEFAULT_SEATS_CONFIG, ranges: seatsRanges(enabled_runtimes, agyModels) });
   const pool = readSeatPoolCache(env);
   return pool === null ? settings : { ...settings, model_pool: pool };
 }
@@ -70,7 +71,7 @@ export function seatsSettingsWriteRoute(env?: NodeJS.ProcessEnv): OperatorWriteR
         input: request as unknown as JsonValue,
         execute: async () => {
           try {
-            return { status: 200, body: decodeSeatsSettingsResult(applySeatsSettings(request, env)) as unknown as JsonValue };
+            return { status: 200, body: decodeSeatsSettingsResult(await applySeatsSettings(request, env)) as unknown as JsonValue };
           } catch (error) {
             if (!(error instanceof SeatsConfigurationError)) throw error;
             const failure = SEATS_CONFIGURATION_FAILURES[error.code];

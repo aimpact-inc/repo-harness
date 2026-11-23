@@ -284,6 +284,8 @@ describe('agents page seats section', () => {
           { id: 'gemini-4-hydrogen', efforts: ['low', 'medium', 'high', 'xhigh'] },
           { id: 'gemini-4-neon', efforts: ['high', 'xhigh'] },
           { id: 'gemini-4-carbon', efforts: ['high'] },
+          // The seat effort rule refuses an effort other than the one that a suffixed id names.
+          { id: 'gemini-4-hydrogen-high', efforts: ['high', 'low'] },
         ],
       },
     };
@@ -300,6 +302,11 @@ describe('agents page seats section', () => {
     await typeText(input, 'gemini-4-carbon');
     await leaveField(input);
     expect([choices(), pressed()]).toEqual([['Default', 'high'], 'Default']);
+    await typeText(input, 'gemini-4-hydrogen-high');
+    await leaveField(input);
+    expect(choices()).toEqual(['Default', 'high']);
+    await typeText(input, 'gemini-4-carbon');
+    await leaveField(input);
     await click(seatsSave());
     expect(posts[0]?.seats['worker-deep']).toMatchObject({ model: 'gemini-4-carbon', effort: null });
   });
