@@ -228,6 +228,7 @@ function candidateHandoffContext(
 export function runTransactionalRuntimeRefresh(
   options: GlobalRuntimeOptions,
   setup: (options: GlobalRuntimeOptions) => GlobalRuntimeResult = (setupOptions) => runGlobalRuntimeSetup(setupOptions),
+  preflight?: (env: NodeJS.ProcessEnv, plugins: readonly PluginId[]) => void,
 ): GlobalRuntimeResult {
   const transactionEnv = runtimeHostTransactionEnv(options.env);
   // An invalid XDG_STATE_HOME must fail before the lock creates transaction state.
@@ -235,28 +236,23 @@ export function runTransactionalRuntimeRefresh(
   return withRuntimeTransactionLock(globalRuntimeScope(transactionEnv), (lock) => {
     // The one-shot state migration commits on its own before the snapshot, so a rollback keeps it.
     migrateInstallState(transactionEnv);
-    if (options.hostAdapters !== false) migrateRuntimeHostConfig(transactionEnv);
-    const transaction = beginInstallHostTransaction(runtimeHostMutationPaths(transactionEnv), transactionEnv, { runtimeLock: lock });
     let plugins: readonly PluginId[];
     // Null when the caller passes its own plugin set; then the recorded state does not change.
     let recordedSelection: { readonly state: InstallState; readonly resolved: SelectionResolution } | null = null;
-    try {
-      if (options.plugins !== undefined) plugins = options.plugins;
-      else {
-        const state = requireInstallState(transactionEnv);
-        const resolved = resolveRecordedSelection(state, options.target ?? 'both', transactionEnv, {
-          partial: options.syncSkill === false || options.hostAdapters === false,
-        });
-        recordedSelection = { state, resolved };
-        plugins = resolved.run;
-      }
-      assertArchitecturePolicySelection(options.cwd ?? process.cwd(), plugins, transactionEnv);
-      if (plugins.includes('architecture')) registerArchitecturePlugin();
-    } catch (error) {
-      // Nothing outside the snapshot ran yet, so a restore is enough.
-      restoreTransactionBytes(transaction, error);
-      throw error;
+    if (options.plugins !== undefined) plugins = options.plugins;
+    else {
+      const state = requireInstallState(transactionEnv);
+      const resolved = resolveRecordedSelection(state, options.target ?? 'both', transactionEnv, {
+        partial: options.syncSkill === false || options.hostAdapters === false,
+      });
+      recordedSelection = { state, resolved };
+      plugins = resolved.run;
     }
+    assertArchitecturePolicySelection(options.cwd ?? process.cwd(), plugins, transactionEnv);
+    preflight?.(transactionEnv, plugins);
+    if (options.hostAdapters !== false) migrateRuntimeHostConfig(transactionEnv);
+    if (plugins.includes('architecture')) registerArchitecturePlugin();
+    const transaction = beginInstallHostTransaction(runtimeHostMutationPaths(transactionEnv), transactionEnv, { runtimeLock: lock });
     let result: GlobalRuntimeResult;
     try {
       result = setup({ ...options, plugins, runtimeLock: lock, transaction: transaction.backup_root, candidateHandoff: candidateHandoffContext(transaction, lock), mcpLocalConfigCheck });

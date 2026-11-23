@@ -4,6 +4,7 @@ import { migrateJsonConfigRecords } from '../installer/json-config-migration';
 import { CODEX_CONFIG_FRAGMENTS, codexConfigFragment, codexConfigValue, namingTomlFile, tomlFragment } from '../../core/host-config/toml-fragment';
 import { CLAUDE_ROOT_CONFIG_BACKUP, CODEGRAPH_MCP_SELECTOR, CODEGRAPH_PERMISSION_RULE, CODEGRAPH_PERMISSION_SELECTOR, LEGACY_CODEGRAPH_ALLOWED_TOOLS_SELECTOR } from '../../core/host-config/claude-config';
 import { jsonFragment, jsonFragmentValue } from '../../core/host-config/json-fragment';
+import { HostConfigError } from '../../core/host-config/types';
 import { isRecord } from '../../core/evidence/is-record';
 import { antigravityGlobalRulesHostPath, antigravityHostPath, antigravityMcpConfigHostPath, antigravityMcpConfigPath, decode, openHostConfigGate, resolveUserConfigFile } from '../../effects/host-config/gate';
 import { hostConfigPaths, observeFile, readProjectedLedger } from '../../effects/host-config/store';
@@ -122,7 +123,7 @@ function trimOutput(value: string) {
 function readJson(path: string) {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
-  } catch (_error) {
+  } catch {
     return null;
   }
 }
@@ -586,16 +587,39 @@ function checkCodegraphReadiness(probe: CodegraphProbe): ArchitectureDoctorCheck
   };
 }
 
+function readAntigravityMcpConfig(env: NodeJS.ProcessEnv) {
+  const path = resolveUserConfigFile(env, antigravityMcpConfigPath(env));
+  return { path, content: decode(observeFile(path).bytes, path) };
+}
+
+/** Validate the config with the same JSON edit strategy the gate will apply. */
+export function preflightAntigravityCodegraph(env: NodeJS.ProcessEnv, explicitTarget: boolean): void {
+  if (!explicitTarget && !optedIntoAntigravity(env)) return;
+  const { path, content } = readAntigravityMcpConfig(env);
+  try {
+    jsonFragment.apply(content, CODEGRAPH_MCP_SELECTOR, null);
+  } catch (error) {
+    if (!(error instanceof HostConfigError)) throw error;
+    throw new HostConfigError(error.code, `${path}: ${error.message}`, { cause: error });
+  }
+}
+
 function checkAntigravityCodegraphMcp(id: string, describe: string, env: NodeJS.ProcessEnv): ArchitectureDoctorCheck {
   try {
     if (!optedIntoAntigravity(env)) return { id, describe, status: 'na', detail: 'Antigravity is not opted in' };
-    const path = resolveUserConfigFile(env, antigravityMcpConfigPath(env));
-    const server = jsonFragmentValue(decode(observeFile(path).bytes, path), CODEGRAPH_MCP_SELECTOR);
+    const { path, content } = readAntigravityMcpConfig(env);
+    const server = jsonFragmentValue(content, CODEGRAPH_MCP_SELECTOR);
     if (isRecord(server) && typeof server.command === 'string' && server.command.trim() && codegraphArgsAreScoped(server.args)) {
       return { id, describe, status: 'ok', detail: 'CodeGraph MCP args are scoped to the working directory' };
     }
-    const reason = server === undefined ? 'CodeGraph MCP entry is missing' : 'CodeGraph MCP entry needs a command and args scoped to the working directory';
-    return { id, describe, status: 'warn', detail: `${reason}. Run rh update --target antigravity --configure-codegraph` };
+    const configure = 'Run rh update --target antigravity --configure-codegraph';
+    if (server === undefined) return { id, describe, status: 'warn', detail: `CodeGraph MCP entry is missing. ${configure}` };
+    const range = jsonFragment.locate(content, CODEGRAPH_MCP_SELECTOR)!;
+    const text = content.slice(range.start, range.end);
+    const current = openHostConfigGate({ env, preview: true }).recorded(path).some((record) =>
+      record.owner === 'architecture' && record.selector === CODEGRAPH_MCP_SELECTOR && record.inserted === text);
+    const remedy = current ? configure : `Edit ${CODEGRAPH_MCP_SELECTOR} in ${path} to set the CodeGraph command and args ${JSON.stringify(CODEGRAPH_SCOPED_MCP_ARGS)}`;
+    return { id, describe, status: 'warn', detail: `CodeGraph MCP entry needs a command and args scoped to the working directory. ${remedy}` };
   } catch (error) {
     return { id, describe, status: 'fail', detail: String((error as Error).message ?? error) };
   }
@@ -746,6 +770,8 @@ function configureCodegraphMcpStep(cwd: string, target: CodegraphHostTarget, env
   }
 }
 
+export function configureAntigravityCodegraphStep(cwd: string, env: NodeJS.ProcessEnv, explicitTarget: true): CodegraphSetupStep;
+export function configureAntigravityCodegraphStep(cwd: string, env: NodeJS.ProcessEnv, explicitTarget: boolean): CodegraphSetupStep | undefined;
 export function configureAntigravityCodegraphStep(cwd: string, env: NodeJS.ProcessEnv, explicitTarget: boolean): CodegraphSetupStep | undefined {
   const step = 'configure Antigravity CodeGraph MCP';
   try {

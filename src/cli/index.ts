@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 import { buildStrategyCommand } from './commands/strategy';
 import { CLI_NAME } from '../core/skill-surface/cli-name';
-import { globalRuntimeScope, withRuntimeTransactionLock } from '../effects/locking/runtime-transaction-lock';
+import { globalRuntimeScope, withRuntimeTransactionLock, type RuntimeTransactionContext } from '../effects/locking/runtime-transaction-lock';
+import { hostConfigPaths } from '../effects/host-config/store';
 /**
  * repo-harness CLI entry.
  *
@@ -55,9 +56,9 @@ import { buildRetentionCommand, type RetentionPorts } from './commands/retention
 import { MCP_AUDIT_LOG_RELATIVE_PATH } from '../core/public-projections/mcp-audit-log';
 import { TASK_INBOX_V2_RELATIVE_PATH } from '../core/fleet/task-inbox-layout';
 import { formatSecurityScan, runSecurityScan } from './commands/security';
-import { MIN_BUN_VERSION, bunVersionIsSupported, installAntigravityRuntime, updateLeftoverSummary, updateRegisteredUpgradeSummary } from './commands/global-runtime';
+import { MIN_BUN_VERSION, bunVersionIsSupported, installAntigravityRuntime, runGlobalRuntimeSetup, updateLeftoverSummary, updateRegisteredUpgradeSummary, type GlobalRuntimeOptions, type GlobalRuntimeResult } from './commands/global-runtime';
 import { parseReportLanguageFlag, REPORT_LANGUAGE_FLAG_VALUES, type ReportLanguageFlag } from './installer/global-context';
-import { installStateStatus, readInstallState, rollbackInstallSelection } from './installer/install-profile';
+import { installStateStatus, readInstallState, rollbackInstallSelection, withHostConfigTransaction } from './installer/install-profile';
 import { enabledPlugins } from './installer/install-state';
 import { runAdoptionPlan } from './commands/adoption-plan';
 import { buildCommandsCommand, recordCommandPlugin } from './commands/commands';
@@ -109,6 +110,66 @@ function collectOption(value: string, previous: string[]): string[] {
   return [...previous, value];
 }
 
+function loadAntigravityCodegraph() {
+  return require('./tools/codegraph') as typeof import('./tools/codegraph');
+}
+
+type AdapterResult = ReturnType<typeof runInstall>;
+
+class AntigravityAdapterFailure extends Error {
+  constructor(readonly result: AdapterResult) {
+    super(result.lines.join('\n'));
+  }
+}
+
+function runAntigravityAdaptersWithCodegraph(
+  command: 'install' | 'update',
+  runtimeLock: RuntimeTransactionContext,
+  runAdapters: (transaction: string) => AdapterResult,
+): AdapterResult {
+  const env = process.env;
+  const codegraph = loadAntigravityCodegraph();
+  const configure = (lines: readonly string[]): string => {
+    const step = codegraph.configureAntigravityCodegraphStep(process.cwd(), env, true);
+    const line = `[antigravity] ${step.status}: ${step.step} - ${step.detail}`;
+    if (step.status === 'failed') throw new AntigravityAdapterFailure({ exitCode: 1, lines: [...lines, line] });
+    return line;
+  };
+  try {
+    return withHostConfigTransaction(env, undefined, transaction => {
+      // Install owns its own adapter transaction under this lock. Finish MCP before it starts.
+      const configured = command === 'install' ? configure([]) : undefined;
+      const adapters = runAdapters(transaction);
+      if (adapters.exitCode !== 0) throw new AntigravityAdapterFailure(adapters);
+      return { exitCode: 0, lines: [...adapters.lines, configured ?? configure(adapters.lines)] };
+    }, () => {
+      assertPluginCommandSelected(readRecordedSelection(env), 'architecture', `${command} --target antigravity --configure-codegraph`, env);
+      codegraph.preflightAntigravityCodegraph(env, true);
+    }, { runtimeLock, snapshotPaths: [hostConfigPaths(env).ledger] });
+  } catch (error) {
+    if (error instanceof AntigravityAdapterFailure) return error.result;
+    throw error;
+  }
+}
+
+/** The runtime transaction invokes this while it still holds its lock and rollback snapshot. */
+function refreshRuntimeWithAntigravityCodegraph(options: GlobalRuntimeOptions): GlobalRuntimeResult {
+  const result = runGlobalRuntimeSetup(options);
+  if (result.exitCode !== 0 || !options.plugins?.includes('architecture')) return result;
+  const env = options.env ?? process.env;
+  const step = loadAntigravityCodegraph().configureAntigravityCodegraphStep(options.cwd ?? process.cwd(), env, false);
+  if (!step) return result;
+  const line = `[runtime] ${step.status}: ${step.step} - ${step.detail}`;
+  return {
+    ...result,
+    exitCode: step.status === 'failed' ? 1 : 0,
+    steps: [...result.steps, step],
+    lines: [...result.lines, line],
+    stdout: [result.stdout, line].filter(Boolean).join('\n'),
+    stderr: step.status === 'failed' ? step.detail ?? '' : result.stderr,
+  };
+}
+
 export function buildProgram(): Command {
   const program = new Command();
   program
@@ -116,16 +177,6 @@ export function buildProgram(): Command {
     .description('Make Claude/Codex work resumable, reviewable, and repo-local')
     .addHelpText('after', '\nGlobal shortcuts:\n  -V, --version  output the version number')
     .exitOverride();
-
-  const configureAntigravityCodegraph = (explicitTarget: boolean) => {
-    const { configureAntigravityCodegraphStep } = require('./tools/codegraph') as typeof import('./tools/codegraph');
-    return configureAntigravityCodegraphStep(process.cwd(), process.env, explicitTarget);
-  };
-  const withAntigravityCodegraph = (result: ReturnType<typeof runInstall>): ReturnType<typeof runInstall> => {
-    if (result.exitCode !== 0) return result;
-    const step = configureAntigravityCodegraph(true)!;
-    return { exitCode: step.status === 'failed' ? 1 : 0, lines: [...result.lines, `[antigravity] ${step.status}: ${step.step} - ${step.detail}`] };
-  };
 
   program
     .command('install')
@@ -152,14 +203,18 @@ export function buildProgram(): Command {
       const location = rawOpts.location === undefined ? undefined : assertLocation(rawOpts.location, 'install');
       // Adapter-only installs validate the install-state protocol under the runtime lock.
       const installAdapters = (adapterOptions: Pick<InstallCommandOptions, 'reportLanguage' | 'syncSkill' | 'hooks' | 'updateMode'> = {}) =>
-        withRuntimeTransactionLock(globalRuntimeScope(process.env), (runtimeLock) => {
-          migrateInstallState(process.env);
-          readInstallState();
-          if (target === 'antigravity') {
-            const result = installAntigravityRuntime(process.env, runtimeLock, { ...adapterOptions, externalSkills: rawOpts.externalSkills });
-            return rawOpts.configureCodegraph === true && rawOpts.codegraph !== false ? withAntigravityCodegraph(result) : result;
-          }
-          return runInstall({ target, location: location ?? 'global' });
+        withRuntimeTransactionLock(globalRuntimeScope(process.env), runtimeLock => {
+          const runAdapters = () => {
+            migrateInstallState(process.env);
+            readInstallState();
+            if (target === 'antigravity') {
+              return installAntigravityRuntime(process.env, runtimeLock, { ...adapterOptions, externalSkills: rawOpts.externalSkills });
+            }
+            return runInstall({ target, location: location ?? 'global' });
+          };
+          return target === 'antigravity' && rawOpts.configureCodegraph === true && rawOpts.codegraph !== false
+            ? runAntigravityAdaptersWithCodegraph('install', runtimeLock, runAdapters)
+            : runAdapters();
         });
       if (target === 'antigravity') {
         if (rawOpts.state || rawOpts.rollback || rawOpts.plugins !== undefined || rawOpts.override?.length || rawOpts.withObsidianSkills) {
@@ -335,13 +390,15 @@ export function buildProgram(): Command {
           else for (const line of formatHostConfigPreview(hostConfig)) console.log(line);
           process.exit(hostConfig.unplanned.length ? 1 : 0);
         }
-        const result = withRuntimeTransactionLock(globalRuntimeScope(env), () => {
+        const refreshAdapters = (transaction?: string) => {
           migrateInstallState(env);
-          const adapters = hasRecordedAntigravityState(env, false)
-            ? runInstall({ target, location: 'global', ...adapterOptions })
+          return hasRecordedAntigravityState(env, false)
+            ? runInstall({ target, location: 'global', ...adapterOptions, transaction })
             : { exitCode: 0, lines: ['[antigravity] no recorded hook member; run rh install --target antigravity to install it'] };
-          return configureCodegraph ? withAntigravityCodegraph(adapters) : adapters;
-        });
+        };
+        const result = withRuntimeTransactionLock(globalRuntimeScope(env), runtimeLock => configureCodegraph
+          ? runAntigravityAdaptersWithCodegraph('update', runtimeLock, refreshAdapters)
+          : refreshAdapters());
         if (rawOpts.json) console.log(JSON.stringify(result, null, 2));
         else for (const line of result.lines) console.log(line);
         process.exit(result.exitCode);
@@ -371,6 +428,7 @@ export function buildProgram(): Command {
         : rawOpts.channel
           ? `repo-harness@${rawOpts.channel}`
           : 'repo-harness@latest';
+      const refreshAntigravity = target === 'both' && configureCodegraph;
       const result = runTransactionalRuntimeRefresh({
         target,
         installCli: rawOpts.cli !== false,
@@ -383,22 +441,12 @@ export function buildProgram(): Command {
         codegraph: rawOpts.codegraph === false ? false : configureCodegraph ? true : undefined,
         reportLanguage: rawOpts.reportLanguage as ReportLanguageFlag | undefined,
         overrides,
-      });
+      }, refreshAntigravity ? refreshRuntimeWithAntigravityCodegraph : undefined, refreshAntigravity ? (env, plugins) => {
+        if (plugins.includes('architecture')) loadAntigravityCodegraph().preflightAntigravityCodegraph(env, false);
+      } : undefined);
       if (result.exitCode === 0) {
         result.lines.push(updateLeftoverSummary(process.cwd(), rawOpts.cli !== false));
         result.lines.push(updateRegisteredUpgradeSummary(process.cwd(), rawOpts.cli !== false));
-        // The runtime refresh can hand off to an older package. Configure the opted-in host after that transaction commits.
-        if (target === 'both' && configureCodegraph) {
-          const step = withRuntimeTransactionLock(globalRuntimeScope(process.env), () =>
-            pluginSelected(readRecordedSelection(), 'architecture') ? configureAntigravityCodegraph(false) : undefined);
-          if (step) {
-            result.steps.push(step);
-            const line = `[runtime] ${step.status}: ${step.step} - ${step.detail}`;
-            result.lines.push(line);
-            result.stdout = [result.stdout, line].filter(Boolean).join('\n');
-            if (step.status === 'failed') result.exitCode = 1;
-          }
-        }
       }
       if (rawOpts.json === true) {
         console.log(JSON.stringify(result, null, 2));
