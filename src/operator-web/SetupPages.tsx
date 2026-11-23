@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { Banner, Button, Empty, Loader, cn } from '@cloudflare/kumo';
-import { ArrowClockwiseIcon, CaretDownIcon, CaretRightIcon, ChatCircleDotsIcon, CheckIcon, MinusIcon, TerminalWindowIcon, WarningCircleIcon, WarningIcon } from '@phosphor-icons/react';
+import { ArrowClockwiseIcon, CaretDownIcon, CaretRightIcon, ChatCircleDotsIcon, CheckIcon, MinusIcon, PlanetIcon, TerminalWindowIcon, WarningCircleIcon, WarningIcon } from '@phosphor-icons/react';
 import {
   SETUP_HOSTS,
   type SetupCheck,
@@ -50,7 +50,7 @@ const HOST_ICON: Readonly<Record<SetupHost, ReactNode>> = {
   claude: <ChatCircleDotsIcon size={16} aria-hidden="true" />,
   codex: <TerminalWindowIcon size={16} aria-hidden="true" />,
   pi: <TerminalWindowIcon size={16} aria-hidden="true" />,
-  antigravity: <TerminalWindowIcon size={16} aria-hidden="true" />,
+  antigravity: <PlanetIcon size={16} aria-hidden="true" />,
 };
 
 const CHECK_TONE: Readonly<Record<SetupCheckStatus, DotTone>> = { ok: 'ok', warn: 'warn', fail: 'danger', needs_agent: 'warn', na: 'neutral' };

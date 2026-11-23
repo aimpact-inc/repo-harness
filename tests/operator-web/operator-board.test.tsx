@@ -1039,8 +1039,8 @@ describe('board office (#1755)', () => {
   };
 
   test('the avatar follows the hc agent word, and the scene keeps a desk for every seat: free to the limit, roped to 8, a new row past 8', () => {
-    expect(['claude-code', 'codex', 'pi', 'grok', null].map(agent => sceneAgent(agent))).toEqual([
-      { kind: 'claude', badge: 'CC' }, { kind: 'codex', badge: 'CX' }, { kind: 'other', badge: 'PI' }, { kind: 'other', badge: 'GR' }, { kind: 'unknown', badge: '?' },
+    expect(['claude-code', 'codex', 'antigravity', 'pi', 'grok', null].map(agent => sceneAgent(agent))).toEqual([
+      { kind: 'claude', badge: 'CC' }, { kind: 'codex', badge: 'CX' }, { kind: 'antigravity', badge: 'AG' }, { kind: 'other', badge: 'PI' }, { kind: 'other', badge: 'GR' }, { kind: 'unknown', badge: '?' },
     ]);
     const scene = (desks: number, limit: number) => {
       const input: SceneRoom = {
@@ -1677,7 +1677,7 @@ describe('board office (#1755)', () => {
     const seated: BoardSeatsV1 = {
       ...SEATS, seats: [
         { ...seat('t1', 'orchestrator', null, null, 'working'), agent: 'claude-code', parent: null },
-        { ...seat('t2', 'advisor', null, null, 'idle'), agent: 'codex', parent: null },
+        { ...seat('t2', 'advisor', null, null, 'idle'), agent: 'antigravity', parent: null },
         { ...seat('t3', 'worker', 9001, null, 'working'), agent: 'codex', parent: null },
         { ...seat('t4', 'worker', 1476, 1499, 'idle'), agent: 'pi', parent: '1474' },
         { address: 't5', name: null, agent: null, state: 'live', status: null, status_kind: null, status_msg: null, status_ms:null, turn: 0, where: 'repo-harness / #1474', branch: null, seat_status: 'unavailable', reason: 'seat_label_invalid', seat: '', parent: null },
@@ -1693,6 +1693,7 @@ describe('board office (#1755)', () => {
     expect(boards).toEqual([joinBoardParents(PARENTS, SEATS).active_parent!]);
     expect(document.querySelector('[data-board-office="room"]')?.getAttribute('data-board-parent')).toBe('1474');
     expect(rows('[data-desk]').map(desk => desk.getAttribute('aria-label'))).toEqual(['#9001 · Codex: Coding', '#1476 · pi: Idle']);
+    expect(rows('[data-office-hit="advisor"]')[0]?.getAttribute('aria-label')).toBe('Advisor · Antigravity');
     expect(rows('[data-boss]').map(button => button.getAttribute('data-boss'))).toEqual(['rage', 'carrot', 'mine', 'valve']);
     // The drawer resolves only items of the loaded board; a seat of another parent keeps its detail and command.
     for (const [address, issue, command] of [['t3', null, 'gh issue view 9001 --comments'], ['t4', '1476', 'gh pr checks 1499']] as const) {
