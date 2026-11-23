@@ -345,7 +345,7 @@ function configureCodexMcp(actions: CodegraphAction[], binPath: string, repoRoot
   }
 }
 
-function scopedJsonCodegraphServer(printed: string, host: "claude" | "antigravity"): Record<string, unknown> {
+function scopedJsonCodegraphServer(printed: string, host: "claude" | "antigravity"): Record<string, unknown> & { args: string[] } {
   const start = printed.search(/^[ \t]*\{/m);
   let server: unknown;
   try { server = jsonFragmentValue(start === -1 ? "" : printed.slice(start), CODEGRAPH_MCP_SELECTOR); }
@@ -357,8 +357,7 @@ function scopedJsonCodegraphServer(printed: string, host: "claude" | "antigravit
   return host === "claude" ? { ...server, args, alwaysLoad: true } : { command: server.command, args };
 }
 
-function jsonMcpChange(host: 'claude' | 'antigravity', path: string, printed: string): HostConfigFileChange {
-  const value = scopedJsonCodegraphServer(printed, host);
+function jsonMcpChange(host: 'claude' | 'antigravity', path: string, value: Record<string, unknown>): HostConfigFileChange {
   const claude = host === 'claude';
   // The gate chooses add or refresh from the guarded Antigravity file.
   const content = claude && existsSync(path) ? readFileSync(path, 'utf8') : '';
@@ -386,7 +385,8 @@ function configureJsonMcp(actions: CodegraphAction[], host: "claude" | "antigrav
     return;
   }
   try {
-    const result = openHostConfigGate({ env: effectiveEnv }).apply([jsonMcpChange(host, path, printed.stdout)]);
+    const value = scopedJsonCodegraphServer(printed.stdout, host);
+    const result = openHostConfigGate({ env: effectiveEnv }).apply([jsonMcpChange(host, path, value)]);
     if (result.skipped.length) {
       appendSkippedAction(actions, action, command, `kept: ${CODEGRAPH_MCP_SELECTOR} in ${path} is your configuration; rh did not change it.`);
     } else {
@@ -654,8 +654,7 @@ function installedCodegraphRenderer(cwd: string, env: NodeJS.ProcessEnv) {
       return redirectsToCheckout ? [] : [real];
     } catch { return []; }
   });
-  const override = env.REPO_HARNESS_CODEGRAPH_GLOBAL_BIN;
-  const candidates = override ? [override] : installedPath.map(directory => join(directory, 'codegraph'));
+  const candidates = installedPath.map(directory => join(directory, 'codegraph'));
   for (const candidate of env.REPO_HARNESS_CODEGRAPH_ALLOW_GLOBAL === '0' ? [] : candidates) {
     try {
       const command = hostPath(candidate);
@@ -677,7 +676,8 @@ export function prepareAntigravityCodegraph(cwd: string, env: NodeJS.ProcessEnv)
       cwd: scratch, env: { HOME: scratch, PATH: path, DO_NOT_TRACK: '1' }, inheritEnv: false,
     });
     if (!printed.ok) throw new Error('codegraph install --print-config antigravity failed');
-    return jsonMcpChange('antigravity', antigravityMcpConfigPath(env), printed.stdout);
+    const { args } = scopedJsonCodegraphServer(printed.stdout, 'antigravity');
+    return jsonMcpChange('antigravity', antigravityMcpConfigPath(env), { command, args });
   } finally { rmSync(scratch, { recursive: true, force: true }); }
 }
 

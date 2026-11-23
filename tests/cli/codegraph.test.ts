@@ -331,7 +331,7 @@ test.skipIf(process.platform === 'win32')('global update refuses malformed Antig
 
 describe.skipIf(process.platform === 'win32')('targeted Antigravity CodeGraph', () => {
   function withTargetedFixture(command: 'install' | 'update', run: (fixture: {
-    env: NodeJS.ProcessEnv; root: string; repo: string; fakeBin: string; config: string; statePath: string; cliPath: string;
+    env: NodeJS.ProcessEnv; root: string; repo: string; fakeBin: string; codegraph: string; config: string; statePath: string; cliPath: string;
     cli: (...args: string[]) => SpawnSyncReturns<string>;
     launch: (bunArgs: readonly string[], args: readonly string[]) => SpawnSyncReturns<string>;
   }) => void) {
@@ -339,7 +339,7 @@ describe.skipIf(process.platform === 'win32')('targeted Antigravity CodeGraph', 
     try {
       const codegraph = join(fakeBin, 'codegraph');
       const env = { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun'), PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
-        REPO_HARNESS_CODEGRAPH_ALLOW_REPO_LOCAL: '0', REPO_HARNESS_CODEGRAPH_GLOBAL_BIN: codegraph, BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0' };
+        BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0' };
       seedGlobalPackageFixture(env);
       writeFakeHc(fakeBin);
       writeFakeSkillsCli(fakeBin);
@@ -368,14 +368,14 @@ esac
         const installed = cli('install', '--no-external-skills');
         expect(installed.status, installed.stdout + installed.stderr).toBe(0);
       }
-      run({ env, root, repo, fakeBin, config, statePath: installStateFixturePath(env), cliPath, cli, launch });
+      run({ env, root, repo, fakeBin, codegraph: realpathSync(codegraph), config, statePath: installStateFixturePath(env), cliPath, cli, launch });
     } finally { rmSync(root, { recursive: true, force: true }); }
   }
 
   for (const command of ['install', 'update'] as const) {
     const options = command === 'install' ? ['--no-external-skills'] : [];
 
-    test(`${command} previews and applies a scoped MCP change after protocol 4 migration`, () => withTargetedFixture(command, ({ env, root, config, statePath, cli }) => {
+    test(`${command} previews and applies a scoped MCP change after protocol 4 migration`, () => withTargetedFixture(command, ({ env, root, codegraph, config, statePath, cli }) => {
       const state = JSON.parse(readFileSync(statePath, 'utf8'));
       writeFileSync(statePath, JSON.stringify({ ...state, protocol: 4, pi_packages: [] }));
       const before = hashManagedTree(root);
@@ -392,12 +392,12 @@ esac
       expect(result.status, result.stdout + result.stderr).toBe(0);
       expect(JSON.parse(readFileSync(statePath, 'utf8')).protocol).toBe(5);
       expect(JSON.parse(readFileSync(config, 'utf8')).mcpServers).toEqual({
-        personal: { command: 'my-tool' }, codegraph: { command: 'codegraph', args: ['serve', '--mcp', '--path', '.'] },
+        personal: { command: 'my-tool' }, codegraph: { command: codegraph, args: ['serve', '--mcp', '--path', '.'] },
       });
       expect(openHostConfigGate({ env }).recorded(config)).toMatchObject([{ owner: 'architecture', selector: 'mcpServers.codegraph' }]);
     }), 30000);
 
-    test(`${command} uses the installed renderer over checkout candidates in preview and apply`, () => withTargetedFixture(command, ({ env, root, repo, fakeBin, config, cli }) => {
+    test(`${command} binds MCP to the trusted PATH launcher in preview and apply`, () => withTargetedFixture(command, ({ env, root, repo, fakeBin, codegraph, config, cli }) => {
       const checkoutBin = join(repo, 'bin');
       const pathAlias = join(root, 'path-alias');
       const refused = join(root, 'checkout-renderer-ran');
@@ -410,27 +410,21 @@ esac
       const installedPath = env.PATH;
       env.REPO_HARNESS_CODEGRAPH_LOCAL_BIN = local;
       env.REPO_HARNESS_CODEGRAPH_ALLOW_REPO_LOCAL = '1';
-      const assertRefused = () => {
-        for (const mode of [['--dry-run'], []]) {
-          const rejected = cli(...args, ...mode);
-          expect(rejected.status).toBe(1);
-          expect(rejected.stderr).toContain('CodeGraph CLI is missing');
-          expect(existsSync(refused)).toBe(false);
-        }
-      };
-      env.REPO_HARNESS_CODEGRAPH_GLOBAL_BIN = join(pathAlias, 'codegraph');
-      assertRefused();
-      delete env.REPO_HARNESS_CODEGRAPH_GLOBAL_BIN;
       const checkoutPath = `../bin:${checkoutBin}:${pathAlias}`;
       env.PATH = checkoutPath;
-      assertRefused();
+      for (const mode of [['--dry-run'], []]) {
+        const rejected = cli(...args, ...mode);
+        expect(rejected.status).toBe(1);
+        expect(rejected.stderr).toContain('CodeGraph CLI is missing');
+        expect(existsSync(refused)).toBe(false);
+      }
 
-      env.PATH = `${checkoutPath}:${fakeBin}:${installedPath}`;
-      const installed = join(fakeBin, 'codegraph');
-      writeExecutable(fakeBin, installed, `#!/bin/sh
+      env.PATH = `${checkoutPath}:${installedPath}`;
+      writeExecutable(fakeBin, join(fakeBin, 'codegraph'), `#!/bin/sh
 [ "$*" = 'install --print-config antigravity' ] || exit 2
+[ "$(command -v codegraph)" = '${codegraph}' ] || exit 3
 printf 'cache' > "$HOME/renderer-cache"
-printf '{"mcpServers":{"codegraph":{"command":"%s"}}}\\n' "$(command -v codegraph)"
+printf '%s\\n' '{"mcpServers":{"codegraph":{"command":"codegraph-from-renderer","args":["serve","--mcp"]}}}'
 `);
       const before = hashManagedTree(root);
       const dryRun = cli(...args, '--dry-run');
@@ -439,12 +433,12 @@ printf '{"mcpServers":{"codegraph":{"command":"%s"}}}\\n' "$(command -v codegrap
       expect(hashManagedTree(root)).toBe(before);
       const applied = cli(...args);
       expect(applied.status, applied.stdout + applied.stderr).toBe(0);
-      expect(JSON.parse(readFileSync(config, 'utf8')).mcpServers.codegraph.command).toBe(realpathSync(installed));
+      expect(JSON.parse(readFileSync(config, 'utf8')).mcpServers.codegraph).toEqual({ command: codegraph, args: ['serve', '--mcp', '--path', '.'] });
       expect(existsSync(join(env.HOME!, 'renderer-cache'))).toBe(false);
       expect(existsSync(refused)).toBe(false);
     }), 30000);
 
-    test.each(['formatted', 'absent', 'replaced'] as const)(`${command} handles adapter failure with %s MCP preimage`, (input) => withTargetedFixture(command, ({ env, root, config, launch }) => {
+    test.each(['formatted', 'absent', 'replaced'] as const)(`${command} handles adapter failure with %s MCP preimage`, (input) => withTargetedFixture(command, ({ env, root, codegraph, config, launch }) => {
       const original = '{\r\n\t"mcpServers" : {  \r\n  }\r\n}\r\n';
       if (input === 'formatted') writeFileSync(config, original);
       else rmSync(config);
@@ -458,7 +452,7 @@ import { copyFileSync, readFileSync, renameSync } from 'node:fs';
 import { antigravityTarget } from ${JSON.stringify(join(ROOT, 'src/cli/installer/targets/antigravity.ts'))};
 antigravityTarget.install = () => {
   const config = ${JSON.stringify(config)};
-  if (JSON.parse(readFileSync(config, 'utf8')).mcpServers.codegraph.command !== 'codegraph') throw new Error('MCP write missing');
+  if (JSON.parse(readFileSync(config, 'utf8')).mcpServers.codegraph.command !== ${JSON.stringify(codegraph)}) throw new Error('MCP write missing');
   ${input === 'replaced' ? `const copy = ${JSON.stringify(replacement)}; copyFileSync(config, copy); renameSync(copy, config);` : ''}
   throw new Error('injected adapter failure after MCP write');
 };
@@ -467,7 +461,7 @@ antigravityTarget.install = () => {
       expect(result.status).toBe(1);
       if (input === 'replaced') {
         expect(result.stderr).toContain('rollback failed');
-        expect(JSON.parse(readFileSync(config, 'utf8')).mcpServers.codegraph.command).toBe('codegraph');
+        expect(JSON.parse(readFileSync(config, 'utf8')).mcpServers.codegraph.command).toBe(codegraph);
       } else {
         expect(result.stdout).toContain('injected adapter failure after MCP write');
         expect(existsSync(config) ? readFileSync(config, 'utf8') : null).toBe(input === 'formatted' ? original : null);
