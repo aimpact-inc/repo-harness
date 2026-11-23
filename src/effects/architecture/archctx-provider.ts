@@ -304,7 +304,7 @@ export function archctxCapabilities(repoRoot: string, options: ArchctxProviderOp
 export function runArchctxPassThrough(cwd: string, args: readonly string[], options: ArchctxProviderOptions = {}): number {
   let spawnCwd = cwd;
   let env: NodeJS.ProcessEnv = { ...(options.env ?? process.env) };
-  const isIndexSeed = args[0] === 'index' && !args.includes('--help') && !args.includes('-h');
+  const isIndexSeed = args[0] === 'index' && args[1] === 'seed' && !args.includes('--help') && !args.includes('-h');
   if (isIndexSeed) {
     const seedRoot = resolveCodeGraphSeedRoot(cwd, env);
     spawnCwd = seedRoot;
@@ -645,7 +645,7 @@ const CODEGRAPH_LOCK_FILES = [
 ] as const;
 const CODEGRAPH_LOCK_TEMP_PATTERN = /^codegraph\.lock(?:\.break){0,3}\.\d+\.\d+\.tmp$/;
 const CODEGRAPH_ERROR_LOG_MARKER = 'CodeGraph Error Log - ';
-const GIT_DISCOVERY_ENV_KEYS = [
+export const GIT_DISCOVERY_ENV_KEYS = [
   'GIT_CEILING_DIRECTORIES',
   'GIT_DIR',
   'GIT_WORK_TREE',
@@ -735,29 +735,36 @@ function resolveVerifiedGitRoot(
     fallbackRoot = realpathSync(inputPath);
     assertSafeCheckoutPath(fallbackRoot, contextLabel, fail);
   }
+  const cleanRoot = readGitTopLevel(inputPath, sanitizeGitDiscoveryEnv(callerEnv), contextLabel, fail);
   const callerRoot = readGitTopLevel(inputPath, callerEnv, contextLabel, fail);
-  if (!callerRoot) {
+  if (!cleanRoot) {
+    if (callerRoot !== null) {
+      throw fail(
+        `${contextLabel} refused ambiguous Git repository root (${JSON.stringify(callerRoot)}); unset GIT_DIR/GIT_WORK_TREE or run inside the target checkout.`,
+      );
+    }
     if (allowMissingOrNonGit) return fallbackRoot;
     throw fail(
       `${contextLabel} requires a Git repository worktree; git rev-parse --show-toplevel failed in ${inputPath}.`,
     );
   }
-  assertSafeCheckoutPath(callerRoot, contextLabel, fail);
-  const canonicalRoot = realpathSync(callerRoot);
-  assertSafeCheckoutPath(canonicalRoot, contextLabel, fail);
-  const cleanRoot = readGitTopLevel(canonicalRoot, sanitizeGitDiscoveryEnv(callerEnv), contextLabel, fail);
-  if (!cleanRoot) {
-    throw fail(
-      `${contextLabel} refused ambiguous Git repository root (${JSON.stringify(callerRoot)}); unset GIT_DIR/GIT_WORK_TREE or run inside the target checkout.`,
-    );
-  }
   assertSafeCheckoutPath(cleanRoot, contextLabel, fail);
-  if (realpathSync(cleanRoot) !== canonicalRoot) {
+  const canonicalCleanRoot = realpathSync(cleanRoot);
+  assertSafeCheckoutPath(canonicalCleanRoot, contextLabel, fail);
+  if (!callerRoot) {
     throw fail(
-      `${contextLabel} refused ambiguous Git repository root (${JSON.stringify(callerRoot)}); unset GIT_DIR/GIT_WORK_TREE or run inside the target checkout.`,
+      `${contextLabel} refused ambiguous Git repository root (git rev-parse --show-toplevel failed under caller Git environment for ${JSON.stringify(cleanRoot)}); unset GIT_DIR/GIT_WORK_TREE/GIT_CEILING_DIRECTORIES or run inside the target checkout.`,
     );
   }
-  return canonicalRoot;
+  assertSafeCheckoutPath(callerRoot, contextLabel, fail);
+  const canonicalCallerRoot = realpathSync(callerRoot);
+  assertSafeCheckoutPath(canonicalCallerRoot, contextLabel, fail);
+  if (canonicalCallerRoot !== canonicalCleanRoot) {
+    throw fail(
+      `${contextLabel} refused ambiguous Git repository root (${JSON.stringify(callerRoot)} != ${JSON.stringify(cleanRoot)}); unset GIT_DIR/GIT_WORK_TREE or run inside the target checkout.`,
+    );
+  }
+  return canonicalCleanRoot;
 }
 
 /**

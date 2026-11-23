@@ -163,7 +163,11 @@ function verifyRefactorRoot(repoRoot: string, options: ArchctxProviderOptions, l
 function invoke(repoRoot: string, args: readonly string[], options: ArchctxProviderOptions, timeoutMs: number): unknown {
   try {
     const verifiedRoot = verifyRefactorRoot(repoRoot, options, `refactor ${commandLabel(args)}`);
-    return runPackageLocalArchctxJson(verifiedRoot, ARCHCTX_REQUIRED_VERSION, args, options, timeoutMs).value;
+    const cleanOptions: ArchctxProviderOptions = {
+      ...options,
+      env: sanitizeGitDiscoveryEnv(options.env ?? process.env),
+    };
+    return runPackageLocalArchctxJson(verifiedRoot, ARCHCTX_REQUIRED_VERSION, args, cleanOptions, timeoutMs).value;
   } catch (error) {
     if (error instanceof RefactorProviderError) throw error;
     if (error instanceof ArchctxClientError) {

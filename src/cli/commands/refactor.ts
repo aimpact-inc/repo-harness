@@ -17,7 +17,7 @@ import {
   type RefactorVerifyV2,
 } from '../../core/refactor/provider-contract';
 import { shellQuote } from '../../core/shell-quote';
-import { assertSafeArchctxRepoRoot } from '../../effects/architecture/archctx-provider';
+import { assertSafeArchctxRepoRoot, GIT_DISCOVERY_ENV_KEYS } from '../../effects/architecture/archctx-provider';
 import { canonicalRepoPath } from '../../effects/repo-registry';
 import type { RefactorRecommendationResult, RefactorScanCoverage } from '../../effects/refactor/recommendations';
 
@@ -123,18 +123,27 @@ function formatShellArg(value: string, platform: NodeJS.Platform = process.platf
   return safePattern.test(value) ? value : quoteCommandArg(value, platform);
 }
 
+function formatGitEnvResetPrefix(platform: NodeJS.Platform = process.platform): string {
+  if (platform === 'win32') {
+    return `Remove-Item ${GIT_DISCOVERY_ENV_KEYS.map((key) => `Env:${key}`).join(',')} -ErrorAction SilentlyContinue; `;
+  }
+  return `env ${GIT_DISCOVERY_ENV_KEYS.map((key) => `-u ${key}`).join(' ')} `;
+}
+
 function formatDecisionCommitHint(
   repoRoot: string | undefined,
   filePath: string,
   message: string,
   platform: NodeJS.Platform = process.platform,
 ): string {
-  const gitPrefix = repoRoot ? `git -C ${formatShellArg(repoRoot, platform)}` : 'git';
   const quotedPath = formatShellArg(filePath, platform);
   const quotedMessage = quoteCommandArg(message, platform);
   if (platform === 'win32') {
-    return `${gitPrefix} add '--' ${quotedPath}; if ($LASTEXITCODE -eq 0) { ${gitPrefix} commit --only -m ${quotedMessage} '--' ${quotedPath} }`;
+    const envPrefix = repoRoot ? formatGitEnvResetPrefix(platform) : '';
+    const gitBase = repoRoot ? `git -C ${formatShellArg(repoRoot, platform)}` : 'git';
+    return `${envPrefix}${gitBase} add '--' ${quotedPath}; if ($LASTEXITCODE -eq 0) { ${gitBase} commit --only -m ${quotedMessage} '--' ${quotedPath} }`;
   }
+  const gitPrefix = repoRoot ? `${formatGitEnvResetPrefix(platform)}git -C ${formatShellArg(repoRoot, platform)}` : 'git';
   return `${gitPrefix} add -- ${quotedPath} && ${gitPrefix} commit --only -m ${quotedMessage} -- ${quotedPath}`;
 }
 
@@ -143,11 +152,14 @@ function formatDecisionRemoveHint(
   filePath: string,
   platform: NodeJS.Platform = process.platform,
 ): string {
-  const gitPrefix = repoRoot ? `git -C ${formatShellArg(repoRoot, platform)}` : 'git';
   const quotedPath = formatShellArg(filePath, platform);
-  return platform === 'win32'
-    ? `${gitPrefix} rm '--' ${quotedPath}`
-    : `${gitPrefix} rm -- ${quotedPath}`;
+  if (platform === 'win32') {
+    const envPrefix = repoRoot ? formatGitEnvResetPrefix(platform) : '';
+    const gitBase = repoRoot ? `git -C ${formatShellArg(repoRoot, platform)}` : 'git';
+    return `${envPrefix}${gitBase} rm '--' ${quotedPath}`;
+  }
+  const gitPrefix = repoRoot ? `${formatGitEnvResetPrefix(platform)}git -C ${formatShellArg(repoRoot, platform)}` : 'git';
+  return `${gitPrefix} rm -- ${quotedPath}`;
 }
 
 export function formatRefactorDecide(

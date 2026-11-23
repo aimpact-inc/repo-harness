@@ -16,6 +16,7 @@ import {
   resolveDecisionCommitRoot,
 } from '../../src/cli/commands/refactor';
 import { RefactorProviderError } from '../../src/core/refactor/provider-contract';
+import { GIT_DISCOVERY_ENV_KEYS } from '../../src/effects/architecture/archctx-provider';
 import { observeRefactorRecommendations } from '../../src/effects/refactor/recommendations';
 
 const roots: string[] = [];
@@ -262,6 +263,8 @@ test('exposes only repository-scoped v2 CLI subcommands and options, and formats
   // Comma alone in a win32 path must also be quoted (PowerShell treats unquoted commas as arrays).
   expect(formatRefactorVerify(verifyResult, { repo: 'repo,a', platform: 'win32' })).toContain("--repo 'repo,a'");
   // Legacy 0.17.1 proposal lacking baseline metadata surfaces explicit repo-bound retire/replace workflow.
+  const posixEnvReset = `env ${GIT_DISCOVERY_ENV_KEYS.map((key) => `-u ${key}`).join(' ')}`;
+  const winEnvReset = `Remove-Item ${GIT_DISCOVERY_ENV_KEYS.map((key) => `Env:${key}`).join(',')} -ErrorAction SilentlyContinue; `;
   const staleLegacyText = formatRefactorVerify({
     ...verifyResult,
     disposition: 'stale',
@@ -272,7 +275,7 @@ test('exposes only repository-scoped v2 CLI subcommands and options, and formats
   expect(staleLegacyText).toContain('legacy decision lacks baseline proof metadata');
   expect(staleLegacyText).toContain(`rh arch refactor decide ${REC_ID} accept --reason "<reason>" --kill-path <path> --repo /tmp/target-repo`);
   expect(staleLegacyText).toContain(`rh arch refactor decide ${REC_ID} reject --reason "<reason>" --repo /tmp/target-repo`);
-  expect(staleLegacyText).toContain(`git -C /tmp/target-repo rm -- .archcontext/refactor-decisions/${REC_ID}.json`);
+  expect(staleLegacyText).toContain(`${posixEnvReset} git -C /tmp/target-repo rm -- .archcontext/refactor-decisions/${REC_ID}.json`);
   const staleLegacyWinText = formatRefactorVerify({
     ...verifyResult,
     disposition: 'stale',
@@ -284,7 +287,7 @@ test('exposes only repository-scoped v2 CLI subcommands and options, and formats
     `rh arch refactor decide ${REC_ID} reject --reason "<reason>" --repo 'C:\\Users\\O''Connor,Team\\target repo''s'`,
   );
   expect(staleLegacyWinText).toContain(
-    `git -C 'C:\\Users\\O''Connor,Team\\target repo''s' rm '--' .archcontext/refactor-decisions/${REC_ID}.json`,
+    `${winEnvReset}git -C 'C:\\Users\\O''Connor,Team\\target repo''s' rm '--' .archcontext/refactor-decisions/${REC_ID}.json`,
   );
   expect(formatRefactorVerify(verifyResult, { repo: '/tmp/target-repo', importNodeLimit: 5_000, platform: 'linux' })).toContain(
     `next: rh arch refactor resolve ${REC_ID} --resolution-digest ${RESOLUTION_DIGEST} --reason "<reason>" --repo /tmp/target-repo --import-node-limit 5000\n`,
@@ -350,6 +353,7 @@ test('decide and resolve commit hints bind to the target Git root and commit onl
   git(targetRepo, 'add', 'unrelated.txt');
 
   // Verify PowerShell apostrophe escaping and path restriction deterministically on every host OS.
+  const winEnvReset = `Remove-Item ${GIT_DISCOVERY_ENV_KEYS.map((key) => `Env:${key}`).join(',')} -ErrorAction SilentlyContinue; `;
   const winDecideHint = formatRefactorDecide({
     recommendationId: REC_ID,
     status: 'accepted',
@@ -357,7 +361,7 @@ test('decide and resolve commit hints bind to the target Git root and commit onl
     decision: shippedDecision(),
   }, "C:\\Users\\O'Connor\\target repo's", 'win32');
   expect(winDecideHint).toContain(
-    `next: git -C 'C:\\Users\\O''Connor\\target repo''s' add '--' ${decisionPath}; if ($LASTEXITCODE -eq 0) { git -C 'C:\\Users\\O''Connor\\target repo''s' commit --only -m 'chore(architecture): record refactor decision ${REC_ID} (accepted)' '--' ${decisionPath} }\n`,
+    `next: ${winEnvReset}git -C 'C:\\Users\\O''Connor\\target repo''s' add '--' ${decisionPath}; if ($LASTEXITCODE -eq 0) { git -C 'C:\\Users\\O''Connor\\target repo''s' commit --only -m 'chore(architecture): record refactor decision ${REC_ID} (accepted)' '--' ${decisionPath} }\n`,
   );
 
   const decideHint = formatRefactorDecide({
@@ -372,8 +376,13 @@ test('decide and resolve commit hints bind to the target Git root and commit onl
   expect(decideCmd).toContain(`commit --only -m `);
   expect(decideCmd).toContain(decisionPath);
 
-  // Run emitted decide command from a DIFFERENT checkout (`otherCheckout`).
-  runHint(otherCheckout, decideCmd!);
+  // Run emitted decide command from a DIFFERENT checkout (`otherCheckout`) even with inherited GIT_DIR/GIT_WORK_TREE pointing to otherCheckout.
+  const crossGitEnv = { ...gitEnv, GIT_DIR: join(otherCheckout, '.git'), GIT_WORK_TREE: otherCheckout };
+  if (process.platform === 'win32') {
+    execFileSync('powershell.exe', ['-NoProfile', '-Command', decideCmd!], { cwd: otherCheckout, env: crossGitEnv });
+  } else {
+    execFileSync('sh', ['-c', decideCmd!], { cwd: otherCheckout, env: crossGitEnv });
+  }
   expect(git(targetRepo, 'show', '--name-only', '--pretty=format:', 'HEAD')).toBe(decisionPath);
   expect(git(targetRepo, 'status', '--porcelain')).toBe('A  unrelated.txt');
   expect(git(otherCheckout, 'status', '--porcelain')).toBe(`?? .archcontext/`);
@@ -399,7 +408,7 @@ test('decide and resolve commit hints bind to the target Git root and commit onl
     },
   };
   expect(formatRefactorResolve(resolvePayload, "C:\\Users\\O'Connor\\target repo's", 'win32')).toContain(
-    `next: git -C 'C:\\Users\\O''Connor\\target repo''s' add '--' ${decisionPath}; if ($LASTEXITCODE -eq 0) { git -C 'C:\\Users\\O''Connor\\target repo''s' commit --only -m 'chore(architecture): mark refactor decision ${REC_ID} resolved' '--' ${decisionPath} }\n`,
+    `next: ${winEnvReset}git -C 'C:\\Users\\O''Connor\\target repo''s' add '--' ${decisionPath}; if ($LASTEXITCODE -eq 0) { git -C 'C:\\Users\\O''Connor\\target repo''s' commit --only -m 'chore(architecture): mark refactor decision ${REC_ID} resolved' '--' ${decisionPath} }\n`,
   );
   const resolveHint = formatRefactorResolve(resolvePayload, resolveDecisionCommitRoot(nestedDir));
   const resolveCmd = resolveHint.split('\n').find((line) => line.startsWith('  next: '))?.slice('  next: '.length);

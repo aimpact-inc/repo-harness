@@ -8,7 +8,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ARCHCTX_REQUIRED_VERSION } from "../src/core/architecture/projection";
 import { RefactorProviderError } from "../src/core/refactor/provider-contract";
-import { formatRefactorVerify, resolveDecisionCommitRoot } from "../src/cli/commands/refactor";
+import { formatRefactorDecide, formatRefactorVerify, resolveDecisionCommitRoot } from "../src/cli/commands/refactor";
 import { resolveCompatibleNodeRuntime } from "../src/effects/architecture/archctx-provider";
 import { recordPluginSelection } from "./helpers/install-ownership";
 import {
@@ -617,9 +617,9 @@ describe("real archctx 0.18.2 pure-Git refactor lifecycle (end-to-end)", () => {
     });
     expect(verifyCliRes.status).toBe(1);
     const rejectCmdMatch = /`((?:rh arch refactor decide [^`]+ reject [^`]+))`/.exec(verifyCliRes.stdout);
-    const removeCmdMatch = /`(git -C [^`]+ rm [^`]+)`/.exec(verifyCliRes.stdout);
+    const removeCmdMatch = /`((?:env [^`]+ )?git -C [^`]+ rm [^`]+)`/.exec(verifyCliRes.stdout);
     expect(rejectCmdMatch?.[1]).toBeDefined();
-    expect(removeCmdMatch?.[1]).toBeDefined();
+    expect(removeCmdMatch?.[1]).toContain(`git -C ${repoRoot} rm -- ${legacyRetire.relPath}`);
 
     const shimDir = join(base, "bin");
     mkdirSync(shimDir, { recursive: true });
@@ -638,11 +638,17 @@ describe("real archctx 0.18.2 pure-Git refactor lifecycle (end-to-end)", () => {
     expect((JSON.parse(readFileSync(join(repoRoot, legacyRetire.relPath), "utf8")) as RefactorDecisionV1).status).toBe("rejected");
     expect(readFileSync(join(secondCheckout, legacyRetire.relPath), "utf8")).toBe(secondBodyBefore);
 
-    // Restore clean committed state before exercising the alternative `git -C ... rm` branch from secondCheckout.
+    // Restore clean committed state before exercising the alternative `git -C ... rm` branch from secondCheckout,
+    // even when conflicting GIT_DIR/GIT_WORK_TREE point to secondCheckout.
     runGit(repoRoot, ["checkout", "HEAD", "--", legacyRetire.relPath], env);
+    const crossCheckoutExecEnv = {
+      ...execEnv,
+      GIT_DIR: join(secondCheckout, ".git"),
+      GIT_WORK_TREE: secondCheckout,
+    };
     const removeExec = spawnSync("sh", ["-c", removeCmdMatch![1]!], {
       cwd: secondCheckout,
-      env: execEnv,
+      env: crossCheckoutExecEnv,
       encoding: "utf8",
       timeout: 60_000,
     });
@@ -653,7 +659,8 @@ describe("real archctx 0.18.2 pure-Git refactor lifecycle (end-to-end)", () => {
     runGit(repoRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Retire legacy proposal via rm"], env);
     runCodeGraph(repoRoot, ["sync", "."], env);
 
-    // Upgrade legacy proposal A with canonical kill-path, remove target, sync, verify -> resolved -> resolve!
+    // Upgrade legacy proposal A with canonical kill-path, execute emitted decide commit hint under conflicting GIT_DIR/GIT_WORK_TREE,
+    // then remove target, sync, verify -> resolved -> resolve!
     const upgraded = decideRecommendation(repoRoot, {
       recommendationId: legacyUpgrade.recId,
       decision: "accept",
@@ -661,6 +668,20 @@ describe("real archctx 0.18.2 pure-Git refactor lifecycle (end-to-end)", () => {
       killPaths: ["src/beta/legacy-retire.ts"],
     }, { consumerRoot: REPO_ROOT, env });
     expect(upgraded.decision.killList).toEqual([{ kind: "path", target: "src/beta/legacy-retire.ts", required: true }]);
+    const decideCommitCmd = formatRefactorDecide(upgraded, resolveDecisionCommitRoot(repoRoot))
+      .split("\n")
+      .find((line) => line.startsWith("  next: "))
+      ?.slice("  next: ".length);
+    expect(decideCommitCmd).toBeDefined();
+    const decideCommitExec = spawnSync("sh", ["-c", decideCommitCmd!], {
+      cwd: secondCheckout,
+      env: crossCheckoutExecEnv,
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+    expect(decideCommitExec.status, decideCommitExec.stderr + decideCommitExec.stdout).toBe(0);
+    expect(runGit(repoRoot, ["show", "--name-only", "--pretty=format:", "HEAD"], env)).toBe(legacyUpgrade.relPath);
+    expect(readFileSync(join(secondCheckout, legacyRetire.relPath), "utf8")).toBe(secondBodyBefore);
     unlinkSync(join(repoRoot, "src/beta/legacy-retire.ts"));
     runGit(repoRoot, ["add", "-A"], env);
     runGit(repoRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Remove legacy-retire file and commit upgraded decision"], env);
@@ -746,5 +767,69 @@ describe("real archctx 0.18.2 pure-Git refactor lifecycle (end-to-end)", () => {
       resolutionDigest: `sha256:${"b".repeat(64)}`,
       reason: "Must fail closed before archctx resolve",
     }, { consumerRoot: REPO_ROOT, env })).toThrow("differs only in case");
+
+    // 14. Two real checkouts + non-Git directory with inherited GIT_DIR/GIT_WORK_TREE fail closed across decide, verify, resolve, and commit hint;
+    // matching discovery env is stripped before spawning archctx.
+    const crossBase = scratchDir("refactor-cross-git-env-");
+    const checkoutA = join(crossBase, "checkout-a");
+    const checkoutB = join(crossBase, "checkout-b");
+    const nonGitTarget = join(crossBase, "non-git-target");
+    for (const checkout of [checkoutA, checkoutB]) {
+      mkdirSync(checkout, { recursive: true });
+      runGit(checkout, ["init", "-q"], env);
+      writeRepoFile(checkout, "README.md", "ok\n");
+      runGit(checkout, ["add", "README.md"], env);
+      runGit(checkout, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "init"], env);
+    }
+    mkdirSync(nonGitTarget, { recursive: true });
+
+    const crossEnv = {
+      ...env,
+      GIT_DIR: join(checkoutB, ".git"),
+      GIT_WORK_TREE: checkoutB,
+    };
+    const mustNotInvokeProvider = () => {
+      throw new Error("provider must not run when inherited GIT_DIR/GIT_WORK_TREE points to another checkout");
+    };
+    for (const target of [checkoutA, nonGitTarget]) {
+      expect(() => decideRecommendation(target, {
+        recommendationId: recId,
+        decision: "reject",
+        reason: "Refuse cross-checkout decide",
+      }, { consumerRoot: REPO_ROOT, env: crossEnv, run: mustNotInvokeProvider })).toThrow("ambiguous Git repository root");
+      expect(() => runRefactorVerify(target, { recommendationId: recId }, {
+        consumerRoot: REPO_ROOT,
+        env: crossEnv,
+        run: mustNotInvokeProvider,
+      })).toThrow("ambiguous Git repository root");
+      expect(() => resolveRecommendation(target, {
+        recommendationId: recId,
+        resolutionDigest: verified.resolutionDigest,
+        reason: "Refuse cross-checkout resolve",
+      }, { consumerRoot: REPO_ROOT, env: crossEnv, run: mustNotInvokeProvider })).toThrow("ambiguous Git repository root");
+      const prevGitDir = process.env.GIT_DIR;
+      const prevGitWorkTree = process.env.GIT_WORK_TREE;
+      process.env.GIT_DIR = crossEnv.GIT_DIR;
+      process.env.GIT_WORK_TREE = crossEnv.GIT_WORK_TREE;
+      try {
+        expect(() => resolveDecisionCommitRoot(target)).toThrow("ambiguous Git repository root");
+      } finally {
+        if (prevGitDir === undefined) delete process.env.GIT_DIR;
+        else process.env.GIT_DIR = prevGitDir;
+        if (prevGitWorkTree === undefined) delete process.env.GIT_WORK_TREE;
+        else process.env.GIT_WORK_TREE = prevGitWorkTree;
+      }
+    }
+
+    const observedProviderEnvs: Array<{ cwd: string; gitDir: string | undefined; gitWorkTree: string | undefined }> = [];
+    expect(() => runRefactorVerify(checkoutA, { recommendationId: recId }, {
+      consumerRoot: REPO_ROOT,
+      env: { ...env, GIT_DIR: join(checkoutA, ".git"), GIT_WORK_TREE: checkoutA },
+      run: (_bin, _args, opts) => {
+        observedProviderEnvs.push({ cwd: opts.cwd, gitDir: opts.env.GIT_DIR, gitWorkTree: opts.env.GIT_WORK_TREE });
+        throw new Error("stop-after-env-capture");
+      },
+    })).toThrow("stop-after-env-capture");
+    expect(observedProviderEnvs).toEqual([{ cwd: checkoutA, gitDir: undefined, gitWorkTree: undefined }]);
   }, 60_000);
 });

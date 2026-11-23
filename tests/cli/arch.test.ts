@@ -588,5 +588,28 @@ describe('rh arch', () => {
     const nonGitRes = runSeed(nonGitDir, cleanCase.env);
     expect(nonGitRes.status).toBe(1);
     expect(nonGitRes.stderr).toContain('git rev-parse --show-toplevel failed');
+
+    // 12. Two real checkouts: inherited GIT_DIR + GIT_WORK_TREE pointing to another valid repo fails closed
+    // before index seed touches either checkout's .codegraph/codegraph.db.
+    const cleanCaseDbBefore = readFileSync(join(cleanCase.repo, '.codegraph/codegraph.db'));
+    const crossCheckoutEnvRes = runSeed(cleanSibling, {
+      ...cleanCase.env,
+      GIT_DIR: join(cleanCase.repo, '.git'),
+      GIT_WORK_TREE: cleanCase.repo,
+    });
+    expect(crossCheckoutEnvRes.status).toBe(1);
+    expect(crossCheckoutEnvRes.stderr).toContain('ambiguous Git repository root');
+    expect(readFileSync(join(cleanSibling, '.codegraph/codegraph.db'))).toEqual(siblingDbBefore);
+    expect(readFileSync(join(cleanCase.repo, '.codegraph/codegraph.db'))).toEqual(cleanCaseDbBefore);
+
+    // 13. Non-Git directory with inherited GIT_DIR + GIT_WORK_TREE pointing to another valid repo also fails closed.
+    const nonGitCrossEnvRes = runSeed(nonGitDir, {
+      ...cleanCase.env,
+      GIT_DIR: join(cleanCase.repo, '.git'),
+      GIT_WORK_TREE: cleanCase.repo,
+    });
+    expect(nonGitCrossEnvRes.status).toBe(1);
+    expect(nonGitCrossEnvRes.stderr).toContain('ambiguous Git repository root');
+    expect(readFileSync(join(cleanCase.repo, '.codegraph/codegraph.db'))).toEqual(cleanCaseDbBefore);
   }, 120_000);
 });

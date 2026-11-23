@@ -28,6 +28,7 @@ import {
   ArchctxClient,
   archctxCapabilities,
   architectureProjectionRequest,
+  assertSafeArchctxRepoRoot,
   assertSafeCodeGraphDestination,
   bootstrapWorktreeCodeGraph,
   effectiveCodeGraphDirName,
@@ -2274,5 +2275,32 @@ describe('bootstrapWorktreeCodeGraph index seed cutover', () => {
     } finally {
       console.error = origError;
     }
+  });
+
+  test('assertSafeArchctxRepoRoot refuses conflicting inherited GIT_DIR/GIT_WORK_TREE across real checkouts and non-Git dirs', () => {
+    const f = fixture({ git: false });
+    const repoA = join(f.root, 'repo-a');
+    const repoB = join(f.root, 'repo-b');
+    const nonGit = join(f.root, 'non-git');
+    for (const repo of [repoA, repoB]) {
+      mkdirSync(join(repo, 'src'), { recursive: true });
+      execFileSync('git', ['-C', repo, 'init', '-q']);
+      writeFileSync(join(repo, 'README.md'), 'ok\n');
+      execFileSync('git', ['-C', repo, 'add', 'README.md']);
+      execFileSync('git', ['-C', repo, '-c', 'user.name=Test', '-c', 'user.email=t@t', 'commit', '-qm', 'init']);
+    }
+    mkdirSync(nonGit, { recursive: true });
+
+    const crossEnv = {
+      ...process.env,
+      GIT_DIR: join(repoB, '.git'),
+      GIT_WORK_TREE: repoB,
+    };
+    expect(() => assertSafeArchctxRepoRoot(repoA, crossEnv, 'refactor decide')).toThrow('ambiguous Git repository root');
+    expect(() => assertSafeArchctxRepoRoot(nonGit, crossEnv, 'refactor decide')).toThrow('ambiguous Git repository root');
+    expect(() => assertSafeArchctxRepoRoot(join(repoA, 'src'), { ...process.env, GIT_CEILING_DIRECTORIES: repoA }, 'refactor decide'))
+      .toThrow('git rev-parse --show-toplevel failed');
+    expect(assertSafeArchctxRepoRoot(repoA, { ...process.env, GIT_DIR: join(repoA, '.git'), GIT_WORK_TREE: repoA }, 'refactor decide'))
+      .toBe(realpathSync(repoA));
   });
 });
