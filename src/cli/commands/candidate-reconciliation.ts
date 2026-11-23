@@ -42,6 +42,7 @@ import {
 
 /** Protocol 2 drops the request profile: the candidate reads the recorded plugin selection from the install state. */
 export const CANDIDATE_RECONCILIATION_PROTOCOL = 3;
+export const STAGED_SKILLS_HANDOFF_ENV = 'REPO_HARNESS_RUNTIME_RECONCILIATION_STAGED_SKILLS';
 export const CANDIDATE_RECONCILIATION_CAPABILITY_PROTOCOL = 1;
 const CANDIDATE_CAPABILITY_NAME = '.candidate-runtime-reconciliation-capability.v1.json';
 

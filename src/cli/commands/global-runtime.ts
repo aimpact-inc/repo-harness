@@ -65,6 +65,7 @@ import {
 } from "../../effects/runtime/protected-helper-platform";
 import {
   CANDIDATE_RECONCILIATION_PROTOCOL,
+  STAGED_SKILLS_HANDOFF_ENV,
   assertReceiptSelection,
   candidatePackageIdentity,
   encodeCandidateRequest,
@@ -852,6 +853,8 @@ function reconcileWithInstalledCandidate(
       ...env,
       REPO_HARNESS_RUNTIME_RECONCILIATION_PARENT: '1',
       REPO_HARNESS_RUNTIME_RECONCILIATION_TOKEN: handoff.parentToken,
+      // Protocol 3 candidates can ignore the optional default-update intent.
+      [STAGED_SKILLS_HANDOFF_ENV]: opts.externalSkills === undefined ? handoff.transactionId : undefined,
     },
   );
   if (child.status === 'failed') return withStepName(child, CANDIDATE_RECONCILE_STEP, `candidate=${candidate.version}`);
@@ -1826,6 +1829,17 @@ function refreshAntigravityRuntime(env: NodeJS.ProcessEnv, opts: GlobalRuntimeOp
   return { step, status: result.exitCode === 0 ? 'ok' : 'failed', detail: result.lines.join('; ') };
 }
 
+function projectAvailableAntigravitySkills(sourceRoot: string, env: NodeJS.ProcessEnv, transaction?: string): GlobalRuntimeStep {
+  const step = 'project staged Antigravity skills';
+  const staged = stagedSkillRoot(homeDir(env));
+  const skills = loadSkillSurfaceCatalog(sourceRoot).packages
+    .filter(pkg => pkg.kind === 'external' && !pkg.explicitOnly && pkg.hosts.includes('antigravity'))
+    .map(pkg => pkg.name)
+    .filter(name => existsSync(join(staged, name, 'SKILL.md')));
+  if (skills.length === 0) return { step, status: 'skipped', detail: 'no staged external skills' };
+  return projectStagedSkills(skills, 'antigravity', false, env, step, transaction);
+}
+
 class RuntimeSetupFailure extends Error {
   constructor(readonly result: GlobalRuntimeResult) { super('runtime setup failed'); }
 }
@@ -2022,6 +2036,11 @@ function runGlobalRuntimeSetupInTransaction(opts: GlobalRuntimeOptions): GlobalR
   } else {
     steps.push({ step: "configure Waza skills", status: "skipped", detail: "disabled" });
     steps.push({ step: "configure Mermaid skill", status: "skipped", detail: "disabled" });
+    if (refreshAntigravity && opts.externalSkills === undefined) {
+      const projection = projectAvailableAntigravitySkills(sourceRoot, env, opts.transaction);
+      steps.push(projection);
+      if (projection.status === 'failed') return finalizeRuntimeResult(steps);
+    }
   }
 
   if (opts.obsidianSkills === true && !plugins.includes('strategy-memory')) {

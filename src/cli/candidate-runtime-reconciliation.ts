@@ -11,7 +11,7 @@ import { migrateRuntimeHostConfig } from './installer/install-profile';
 import { migrateInstallState } from './installer/install-state-migration';
 import { pathRecordsDigest, readPathRecords } from '../effects/host-config/path-records';
 import { GLOBAL_RULES_REFRESH_STEP, RETIRED_AGENT_FLEET_STEP, RETIRED_CLI_LINK_STEP, RETIRED_CLI_REFERENCES_STEP, HERDR_CORE_STEP, runGlobalRuntimeSetup, type GlobalRuntimeResult } from './commands/global-runtime';
-import { assertCandidateReconciliationReceipt, assertInstalledAdapterProjection, CANDIDATE_RECONCILIATION_PROTOCOL, candidatePackageIdentity, consumeCandidateReconciliationCapability, parseCandidateRequest, routeRegistryDigest, type CandidateReconciliationReceipt } from './commands/candidate-reconciliation';
+import { assertCandidateReconciliationReceipt, assertInstalledAdapterProjection, CANDIDATE_RECONCILIATION_PROTOCOL, STAGED_SKILLS_HANDOFF_ENV, candidatePackageIdentity, consumeCandidateReconciliationCapability, parseCandidateRequest, routeRegistryDigest, type CandidateReconciliationReceipt } from './commands/candidate-reconciliation';
 import { applyInstallSelection, commandPluginRepairLines, rollbackRuntimeHostConfig, migrateInParentTransaction, requireInstallState, resolveRecordedSelection } from './installer/install-profile';
 import { mcpLocalConfigCheck, refusedPaths, registerArchitecturePlugin, selectionLines } from './runtime-transaction';
 
@@ -25,19 +25,20 @@ function candidateSourceRoot(): string {
  */
 export function runCandidateRuntimeReconciliation(
   encodedRequest: string,
-  env: NodeJS.ProcessEnv = process.env,
+  handoffEnv: NodeJS.ProcessEnv = process.env,
 ): CandidateReconciliationReceipt {
   const sourceRoot = candidateSourceRoot();
   const candidate = candidatePackageIdentity(sourceRoot);
   const request = parseCandidateRequest(encodedRequest, candidate.version);
   if (
-    env.REPO_HARNESS_RUNTIME_RECONCILIATION_PARENT !== '1'
-    || env.REPO_HARNESS_RUNTIME_RECONCILIATION_TOKEN !== request.parent_token
+    handoffEnv.REPO_HARNESS_RUNTIME_RECONCILIATION_PARENT !== '1'
+    || handoffEnv.REPO_HARNESS_RUNTIME_RECONCILIATION_TOKEN !== request.parent_token
   ) {
     throw new Error('candidate reconciliation requires an explicit parent transaction capability');
   }
-  const capability = consumeCandidateReconciliationCapability(request, globalRuntimeScope(env));
-  const runtimeLock = parentRuntimeTransactionContext(globalRuntimeScope(env), { pid: capability.parent_pid, lockPath: capability.lock_path, ownerToken: capability.lock_owner_token });
+  const scope = globalRuntimeScope(handoffEnv);
+  const capability = consumeCandidateReconciliationCapability(request, scope);
+  const runtimeLock = parentRuntimeTransactionContext(scope, { pid: capability.parent_pid, lockPath: capability.lock_path, ownerToken: capability.lock_owner_token });
   if (
     candidate.root !== request.candidate.root
     || candidate.version !== request.candidate.version
@@ -45,6 +46,12 @@ export function runCandidateRuntimeReconciliation(
   ) {
     throw new Error('candidate reconciliation package authority mismatch');
   }
+  const { [STAGED_SKILLS_HANDOFF_ENV]: stagedSkillsTransaction, ...env } = handoffEnv;
+  // Subprocesses can inherit process.env in addition to the supplied environment.
+  delete process.env[STAGED_SKILLS_HANDOFF_ENV];
+  const externalSkills = request.external_skills === false && stagedSkillsTransaction === request.transaction_id
+    ? undefined
+    : request.external_skills;
   // This package version owns the resolution: it knows the plugins that it ships.
   // The parent reads and writes no install state after this handoff: this commit owns
   // the whole state, including the Pi package and Pi skill-root receipts.
@@ -76,7 +83,7 @@ export function runCandidateRuntimeReconciliation(
       installSpec: `repo-harness@${candidate.version}`,
       syncSkill: request.sync_skill,
       hostAdapters: request.host_adapters,
-      externalSkills: request.external_skills,
+      externalSkills,
       obsidianSkills: request.obsidian_skills,
       codegraph: request.codegraph,
       reportLanguage: request.report_language,
