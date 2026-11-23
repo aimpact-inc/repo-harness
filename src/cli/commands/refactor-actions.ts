@@ -1,47 +1,58 @@
-import type { RecommendationStatus } from 'archctx-contracts';
 import type {
+  RecommendationStatus,
+  RefactorDecideListResultV1,
+  RefactorDecideResultV1,
+  RefactorDecideShowResultV1,
   RefactorDecision,
-  RefactorLifecycleResultV1,
-  RefactorRecommendationListResultV1,
-  RefactorRecommendationShowResultV1,
-  RefactorRecordResultV1,
-  RefactorVerifyResultV1,
+  RefactorKillListFlags,
+  RefactorResolveResultV1,
+  RefactorVerifyV2,
 } from '../../core/refactor/provider-contract';
 import {
   decideRecommendation,
   listRefactorRecommendations,
   resolveRecommendation,
-  runRefactorRecord,
   runRefactorVerify,
   showRefactorRecommendation,
 } from '../../effects/refactor/archctx-provider';
 
-/** `refactor decide` loads this module only after the architecture selection check. One archctx call decides a recorded suggestion or a fresh scan candidate. */
+export interface DecideRefactorOptions extends RefactorKillListFlags {
+  readonly importNodeLimit?: number;
+  readonly timeoutMs?: number;
+}
+
+/** `refactor decide` loads this module only after the architecture selection check. */
 export function decideRefactorRecommendation(
   root: string,
   recommendationId: string,
   decision: RefactorDecision,
   reason: string,
-  snapshotDigest: string,
-  importNodeLimit?: number,
-  timeoutMs?: number,
-): string {
-  return decideRecommendation(recommendationId, decision, reason, snapshotDigest, root, {}, importNodeLimit, timeoutMs).status;
+  options: DecideRefactorOptions = {},
+): RefactorDecideResultV1 {
+  return decideRecommendation(
+    root,
+    {
+      recommendationId,
+      decision,
+      reason,
+      killSymbols: options.killSymbols,
+      killPaths: options.killPaths,
+      killRelations: options.killRelations,
+      importNodeLimit: options.importNodeLimit,
+    },
+    {},
+    options.timeoutMs,
+  );
 }
 
 export function verifyRefactorRecommendation(
   root: string,
   recommendationId: string,
-  options: { expectedHeadSha?: string; expectedWorktreeDigest?: string; importNodeLimit?: number; timeoutMs?: number } = {},
-): RefactorVerifyResultV1 {
+  options: { importNodeLimit?: number; timeoutMs?: number } = {},
+): RefactorVerifyV2 {
   return runRefactorVerify(
     root,
-    {
-      recommendationId,
-      expectedHeadSha: options.expectedHeadSha,
-      expectedWorktreeDigest: options.expectedWorktreeDigest,
-      importNodeLimit: options.importNodeLimit,
-    },
+    { recommendationId, importNodeLimit: options.importNodeLimit },
     {},
     options.timeoutMs,
   );
@@ -50,42 +61,44 @@ export function verifyRefactorRecommendation(
 export function resolveRefactorRecommendation(
   root: string,
   recommendationId: string,
-  evidenceDigest: string,
+  resolutionDigest: string,
   reason: string,
-  snapshotDigest?: string,
-  importNodeLimit?: number,
-  timeoutMs?: number,
-): RefactorLifecycleResultV1 {
+  options: { importNodeLimit?: number; timeoutMs?: number } = {},
+): RefactorResolveResultV1 {
   return resolveRecommendation(
     root,
-    { recommendationId, evidenceDigest, reason, snapshotDigest, importNodeLimit },
+    {
+      recommendationId,
+      resolutionDigest,
+      reason,
+      importNodeLimit: options.importNodeLimit,
+    },
     {},
-    timeoutMs,
+    options.timeoutMs,
   );
-}
-
-export function recordRefactorAssessment(
-  root: string,
-  assessmentDigest: string,
-  expectedWorktreeDigest: string,
-  timeoutMs?: number,
-): RefactorRecordResultV1 {
-  return runRefactorRecord(root, assessmentDigest, expectedWorktreeDigest, {}, timeoutMs);
 }
 
 export function listRecordedRefactorRecommendations(
   root: string,
-  status?: RecommendationStatus,
-  timeoutMs?: number,
-): RefactorRecommendationListResultV1 {
-  return listRefactorRecommendations(root, status, {}, timeoutMs);
+  options: { status?: RecommendationStatus; importNodeLimit?: number; timeoutMs?: number } = {},
+): RefactorDecideListResultV1 {
+  return listRefactorRecommendations(
+    root,
+    { status: options.status, importNodeLimit: options.importNodeLimit },
+    {},
+    options.timeoutMs,
+  );
 }
 
 export function showRecordedRefactorRecommendation(
   root: string,
   recommendationId: string,
-  importNodeLimit?: number,
-  timeoutMs?: number,
-): RefactorRecommendationShowResultV1 {
-  return showRefactorRecommendation(root, recommendationId, {}, importNodeLimit, timeoutMs);
+  options: { importNodeLimit?: number; timeoutMs?: number } = {},
+): RefactorDecideShowResultV1 {
+  return showRefactorRecommendation(
+    root,
+    { recommendationId, importNodeLimit: options.importNodeLimit },
+    {},
+    options.timeoutMs,
+  );
 }

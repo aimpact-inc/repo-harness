@@ -48,6 +48,7 @@ interface SupervisorResult {
   readonly spawnError: string;
   readonly completed: boolean;
   readonly processGroupPid: number | null;
+  readonly launchFailed: boolean;
 }
 
 interface Completion {
@@ -60,6 +61,7 @@ interface LauncherResult {
   readonly code: number | null;
   readonly signal: NodeJS.Signals | null;
   readonly spawnError: string;
+  readonly launchFailed?: boolean;
 }
 
 function usage(): never {
@@ -92,10 +94,12 @@ function readLauncherResult(path: string): LauncherResult | null {
       code?: unknown;
       signal?: unknown;
       spawnError?: unknown;
+      launchFailed?: unknown;
     };
     if ((parsed.code !== null && !Number.isInteger(parsed.code))
       || (parsed.signal !== null && typeof parsed.signal !== 'string')
-      || typeof parsed.spawnError !== 'string') return null;
+      || typeof parsed.spawnError !== 'string'
+      || (parsed.launchFailed !== undefined && typeof parsed.launchFailed !== 'boolean')) return null;
     return parsed as LauncherResult;
   } catch {
     return null;
@@ -259,6 +263,7 @@ async function superviseTarget(options: SupervisorOptions, expensiveLock: Expens
       spawnError: 'process supervisor did not publish a completion receipt',
       completed: false,
       processGroupPid: child.pid,
+      launchFailed: false,
     });
     startBarrier.end('start\n');
   } catch (error) {
@@ -397,6 +402,13 @@ async function superviseTarget(options: SupervisorOptions, expensiveLock: Expens
       ?? (outcome === 'completed' ? 'process group launcher did not publish a result' : ''),
     completed: true,
     processGroupPid: child.pid ?? null,
+    launchFailed: !didTimeOut
+      && !didLoseParent
+      && interruptedBy === null
+      && completed.signal === null
+      && (launcherResult?.signal ?? null) === null
+      && ((completed.error !== null && !(typeof child.pid === 'number' && child.pid > 0))
+        || launcherResult?.launchFailed === true),
   };
   publishResult(options.metadataPath, result);
   return status;
@@ -420,6 +432,7 @@ async function supervise(options: SupervisorOptions): Promise<number> {
         spawnError: 'helper timeout elapsed before supervised process start',
         completed: true,
         processGroupPid: null,
+        launchFailed: false,
       });
       return 1;
     }
@@ -448,6 +461,7 @@ export async function runProcessSupervisorCli(argv: readonly string[]): Promise<
       spawnError: error instanceof Error ? error.message : String(error),
       completed: processGroupPid === null,
       processGroupPid,
+      launchFailed: processGroupPid === null,
     };
     try {
       publishResult(options.metadataPath, result);

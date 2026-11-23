@@ -36,6 +36,7 @@ export interface ProcessRunResult {
   readonly status: number;
   readonly signal: NodeJS.Signals | null;
   readonly timedOut: boolean;
+  readonly launchFailed?: boolean;
   readonly command: readonly string[];
   readonly stdout: string;
   readonly stderr: string;
@@ -70,6 +71,7 @@ interface SupervisedProcessReceipt {
   readonly spawnError: string;
   readonly completed: boolean;
   readonly processGroupPid: number | null;
+  readonly launchFailed?: boolean;
 }
 
 const DEFAULT_REDACTIONS: readonly ProcessOutputRedaction[] = [
@@ -173,10 +175,15 @@ function runSupervisedProcess(
         spawnError: ["process supervisor did not publish a receipt", supervisorError, detail].filter(Boolean).join(": "),
         completed: false,
         processGroupPid: null,
+        launchFailed: false,
       };
     }
     const supervisorError = result.error as NodeJS.ErrnoException | undefined;
     const supervisorTimedOut = supervisorError?.code === "ETIMEDOUT";
+    const supervisorNeverLaunched = supervisorError !== undefined
+      && supervisorError.code !== "ETIMEDOUT"
+      && supervisorError.code !== "ENOBUFS"
+      && !(typeof result.pid === "number" && result.pid > 0);
     const processGroupPid = Number.isSafeInteger(receipt.processGroupPid) && receipt.processGroupPid! > 0
       ? receipt.processGroupPid
       : null;
@@ -201,6 +208,7 @@ function runSupervisedProcess(
         signal: result.signal ?? receipt.signal,
         timedOut: receipt.timedOut || supervisorTimedOut,
         spawnError: [receipt.spawnError, envelopeError, cleanupError].filter(Boolean).join(": "),
+        launchFailed: supervisorNeverLaunched && processGroupPid === null,
       };
     }
     return {
@@ -232,7 +240,7 @@ export function runProcess(command: string, args: readonly string[], opts: RunPr
   if (remainingMs !== undefined && remainingMs <= (opts.processGroup ? 2 * PROCESS_SUPERVISOR_TERMINATION_GRACE_MS : 0)) {
     const message = `process deadline has no execution budget before cleanup: ${redactedCommand.join(" ")}`;
     return {
-      ok: false, status: 1, signal: null, timedOut: true,
+      ok: false, status: 1, signal: null, timedOut: true, launchFailed: false,
       command: redactedCommand, stdout: "",
       stderr: capProcessOutput(message, maxOutputBytes), error: message,
     };
@@ -257,6 +265,14 @@ export function runProcess(command: string, args: readonly string[], opts: RunPr
   const stdout = supervised?.stdout ?? (typeof result?.stdout === "string" ? result.stdout : "");
   const stderr = supervised?.stderr ?? (typeof result?.stderr === "string" ? result.stderr : "");
   const rawError = supervised?.receipt.spawnError ?? (error ? errorMessage(error) : "");
+  const launchFailed = supervised !== null
+    ? supervised.receipt.launchFailed === true && supervised.receipt.spawnError !== "" && !timedOut && signal === null
+    : error !== undefined
+      && error.code !== "ETIMEDOUT"
+      && error.code !== "ENOBUFS"
+      && !(typeof result?.pid === "number" && result.pid > 0)
+      && !timedOut
+      && signal === null;
   const timeoutMessage = timedOut ? `process timed out after ${timeoutMs}ms: ${redactedCommand.join(" ")}` : "";
   const failureMessage = [timeoutMessage, rawError].filter(Boolean).join("\n");
   const stderrDetails = [timeoutMessage, rawError]
@@ -269,6 +285,7 @@ export function runProcess(command: string, args: readonly string[], opts: RunPr
     status,
     signal,
     timedOut,
+    launchFailed,
     command: redactedCommand,
     stdout: capProcessOutput(redactProcessOutput(stdout, redactions), maxOutputBytes),
     stderr: capProcessOutput(redactProcessOutput(stderrOrError, redactions), maxOutputBytes),

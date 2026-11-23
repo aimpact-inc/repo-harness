@@ -85,6 +85,8 @@ describe("rh commands", () => {
     expect(checkSpan(root, "rh arch nosuch")).toEqual(['arch_command_unknown: nosuch in "rh arch nosuch"']);
     expect(checkSpan(root, "rh arch projection run --request-json x")).toEqual(['arch_command_owned: projection run. Use: rh arch projection check|plan|apply in "rh arch projection run"']);
     expect(checkSpan(root, "rh arch validate --format json")).toEqual([]);
+    expect(checkSpan(root, "rh arch sync --check --json")).toEqual([]);
+    expect(checkSpan(root, "rh arch sync")).toEqual(['arch_command_owned: sync. Use: rh arch projection apply (or rh arch sync --check) in "rh arch sync"']);
     expect(checkSpan(root, "rh arch projection verify-pr --base origin/main --json")).toEqual([]);
     // A registered subcommand under the pass-through keeps its option check.
     expect(checkSpan(root, "rh arch projection status --bogus")).toEqual(['unknown option "--bogus" for "rh arch projection status"']);

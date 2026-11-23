@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawn } from "child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "fs";
+import { existsSync, chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { capProcessOutput, runProcess } from "../src/effects/process-runner";
@@ -56,8 +56,40 @@ describe("process runner", () => {
 
     expect(result.ok).toBe(false);
     expect(result.timedOut).toBe(true);
+    expect(result.launchFailed).toBe(false);
     expect(result.error).toContain("process timed out after 20ms");
     expect(result.stderr).toContain("process timed out after 20ms");
+  });
+
+  test("distinguishes confirmed pre-launch spawn failures from started exits in direct and supervised modes", () => {
+    const root = mkdtempSync(join(tmpdir(), "process-runner-launch-failed-"));
+    try {
+      const missing = join(root, "does-not-exist");
+      const nonExec = join(root, "not-executable");
+      writeFileSync(nonExec, "#!/bin/sh\necho nope\n");
+      chmodSync(nonExec, 0o644);
+      for (const processGroup of [false, true]) {
+        const missingResult = runProcess(missing, ["--version"], { processGroup });
+        expect(missingResult.ok).toBe(false);
+        expect(missingResult.timedOut).toBe(false);
+        expect(missingResult.launchFailed).toBe(true);
+        expect(missingResult.error).not.toBe("");
+
+        if (process.platform !== "win32") {
+          const noExecResult = runProcess(nonExec, [], { processGroup });
+          expect(noExecResult.ok).toBe(false);
+          expect(noExecResult.timedOut).toBe(false);
+          expect(noExecResult.launchFailed).toBe(true);
+        }
+
+        const exitResult = runProcess(process.execPath, ["-e", "process.exit(1)"], { processGroup });
+        expect(exitResult.ok).toBe(false);
+        expect(exitResult.timedOut).toBe(false);
+        expect(exitResult.launchFailed).toBe(false);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("supervised runs include TERM-resistant process cleanup inside an absolute deadline", () => {

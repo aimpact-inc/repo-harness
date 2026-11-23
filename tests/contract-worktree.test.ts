@@ -29,8 +29,6 @@ import { indexPackageLocalCodeGraph, resolveCompatibleNodeRuntime, resolvePackag
 import { ARCHCTX_REQUIRED_VERSION } from '../src/core/architecture/projection';
 import { shellQuote } from '../src/core/shell-quote';
 import { productVersionManifest } from 'archctx-contracts';
-import { spawnSync } from 'node:child_process';
-import { CleanRoomDaemon } from '../scripts/lib/axr5-clean-room-runtime';
 
 setDefaultTimeout(30000);
 
@@ -549,7 +547,7 @@ exec ${shellQuote(realGit)} "$@"
     }
   }, 60000);
 
-  const codeGraphCases = ['seeded', 'retry-ready', 'retry-exhausted', 'no-base', 'not-opted-in', 'not-selected', 'unreadable', 'init-failed', 'occupied'] as const;
+  const codeGraphCases = ['seeded', 'retry-ready', 'retry-exhausted', 'no-base', 'wsl-primary', 'not-opted-in', 'not-selected', 'unreadable', 'init-failed', 'occupied'] as const;
   for (const scenario of codeGraphCases) {
     test.skipIf(process.platform === 'win32')(`rh worktrees start CodeGraph bootstrap: ${scenario}`, () => {
       const workspace = tmpWorkspace('shared-codegraph-start');
@@ -564,27 +562,43 @@ exec ${shellQuote(realGit)} "$@"
       const baseDir = join(primary, '.git', 'archcontext', 'codegraph', productVersionManifest().runtime.codeGraph.requiredVersion);
       const pointer = join(baseDir, 'current.json');
       const hiddenPointer = join(workspace, 'published-pointer.json');
-      const firstSeed = join(workspace, 'first-seed.json');
       const needsBase = scenario === 'seeded' || scenario === 'retry-ready';
       const busy = scenario === 'retry-ready' || scenario === 'retry-exhausted';
       mkdirSync(primary);
       mkdirSync(home);
       try {
         const indexDir = join(primary, '.codegraph');
+        const wslPrimaryDir = join(primary, '.codegraph-wsl');
         initGitRepo(primary);
-        if (scenario !== 'not-opted-in') mkdirSync(indexDir);
-        if (scenario === 'occupied') writeFileSync(join(indexDir, 'user.txt'), 'keep this file');
-        else writeFileSync(join(primary, '.gitignore'), '.codegraph/\n');
+        if (scenario === 'wsl-primary') {
+          mkdirSync(wslPrimaryDir);
+          writeFileSync(join(wslPrimaryDir, 'marker.txt'), 'wsl-primary-untouched\n');
+          writeFileSync(join(primary, '.gitignore'), '.codegraph/\n.codegraph-wsl/\n');
+        } else {
+          if (scenario !== 'not-opted-in') mkdirSync(indexDir);
+          if (scenario === 'occupied') writeFileSync(join(indexDir, 'user.txt'), 'keep this file');
+          else writeFileSync(join(primary, '.gitignore'), '.codegraph/\n');
+        }
         writeFileSync(join(primary, 'index.ts'), 'export const baseSymbol = true;\n');
         commitAll(primary, 'seed CodeGraph fixture');
+        if (scenario === 'unreadable') {
+          mkdirSync(join(home, '.repo-harness'));
+          writeFileSync(installStateFixturePath(env), '{');
+        } else if (scenario !== 'not-selected') recordPluginSelection(env);
         if (needsBase) {
+          writeFileSync(join(home, '.repo-harness/config.json'), JSON.stringify({ architecture: { projection_provider: 'archctx', projection_apply: 'manual' } }));
           indexPackageLocalCodeGraph(primary, {
             env: { ...process.env, ...env },
             policy: { provider: 'archctx', requiredVersion: ARCHCTX_REQUIRED_VERSION, applyMode: 'disabled', timeoutMs: 120_000 },
           });
-          const published = arch(primary, ['sync']);
+          const published = run(process.execPath, [join(ROOT, 'src/cli/index.ts'), 'arch', 'index', 'seed', '--json'], primary, env);
           expect(published.status, published.stderr || published.stdout).toBe(0);
-          expect(JSON.parse(published.stdout).data.codeGraphBase).toBe('published');
+          expect(JSON.parse(published.stdout).data).toMatchObject({
+            schemaVersion: 'archcontext.index-seed/v1',
+            mode: 'primary-refresh',
+            worktreeRole: 'primary',
+            copiedFiles: 1,
+          });
           if (scenario === 'seeded') {
             writeFileSync(join(primary, 'index.ts'), 'export const refreshedSymbol = true;\n');
             commitAll(primary, 'advance the primary checkout');
@@ -596,26 +610,19 @@ exec ${shellQuote(realGit)} "$@"
         }
         const primaryHead = run('git', ['rev-parse', 'HEAD'], primary).stdout.trim();
         addSelfOrigin(primary);
-        if (scenario === 'unreadable') {
-          mkdirSync(join(home, '.repo-harness'));
-          writeFileSync(installStateFixturePath(env), '{');
-        } else if (scenario !== 'not-selected') recordPluginSelection(env);
 
         const gh = join(workspace, 'gh');
         writeFileSync(gh, `#!/bin/sh\nprintf '%s\\n' ${shellQuote(JSON.stringify(ISSUE))}\n`, { mode: 0o755 });
         const observedNode = join(workspace, 'node');
         writeFileSync(observedNode, [
           '#!/bin/sh',
-          'case "${1##*/}:${2:-}" in',
-          `  archctx.mjs:sync|npm-shim.js:init) printf '%s %s\\n' "$2" "$(pwd -P)" >> ${shellQuote(log)} ;;`,
+          'case "${1##*/}:${2:-}:${3:-}" in',
+          `  archctx.mjs:index:seed) printf 'index seed %s\\n' "$(pwd -P)" >> ${shellQuote(log)} ;;`,
+          `  npm-shim.js:init:*) printf 'init %s\\n' "$(pwd -P)" >> ${shellQuote(log)} ;;`,
           'esac',
           ...(scenario === 'retry-ready' ? [
-            `if [ "$2" = sync ] && [ "$(pwd -P)" = ${shellQuote(linked)} ] && [ -f ${shellQuote(hiddenPointer)} ]; then`,
-            `  ${shellQuote(node)} "$@" > ${shellQuote(firstSeed)}`,
-            '  result=$?',
-            `  mv ${shellQuote(hiddenPointer)} ${shellQuote(pointer)}`,
-            `  cat ${shellQuote(firstSeed)}`,
-            '  exit "$result"',
+            `if [ "$2" = index ] && [ "$3" = seed ] && [ "$(pwd -P)" = ${shellQuote(linked)} ] && [ -f ${shellQuote(hiddenPointer)} ]; then`,
+            `  (sleep 0.3 && mv ${shellQuote(hiddenPointer)} ${shellQuote(pointer)}) >/dev/null 2>&1 &`,
             'fi',
           ] : []),
           ...(scenario === 'init-failed' ? ['if [ "$2" = init ]; then head -c 5000 /dev/zero | tr "\\000" x >&2; exit 1; fi'] : []),
@@ -633,10 +640,7 @@ exec ${shellQuote(realGit)} "$@"
         switch (scenario) {
           case 'seeded':
           case 'retry-ready': {
-            expect(calls).toEqual([`sync ${primary}`, `sync ${linked}`, ...(scenario === 'retry-ready' ? [`sync ${linked}`] : [])]);
-            if (scenario === 'retry-ready') {
-              expect(JSON.parse(readFileSync(firstSeed, 'utf8')).error).toMatchObject({ reasonCode: 'index-base-building', retryable: true });
-            }
+            expect(calls).toEqual([`index seed ${primary}`, `index seed ${linked}`]);
             const seeded = lstatSync(join(linked, db));
             expect(seeded.isFile()).toBe(true);
             expect(seeded.ino).not.toBe(lstatSync(join(primary, db)).ino);
@@ -644,26 +648,51 @@ exec ${shellQuote(realGit)} "$@"
             expect(doctor.status, doctor.stderr || doctor.stdout).toBe(0);
             expect(JSON.parse(doctor.stdout).data.codeFacts).toMatchObject({ state: 'ready', indexPresent: true });
             expect(JSON.parse(readFileSync(pointer, 'utf8')).headSha).toBe(primaryHead);
+            if (scenario === 'seeded') {
+              // Reusing linked worktree with clean `.codegraph/codegraph.db` and no `.codegraph-wsl` skips bootstrap.
+              writeFileSync(log, '');
+              const cleanReuse = run(process.execPath, [
+                '--preload', join(ROOT, 'tests/helpers/protected-helper-host.ts'),
+                join(ROOT, 'src/cli/index.ts'), 'worktrees', 'start', '--issue', '123', '--path', linked, '--json',
+              ], primary, { ...env, PROTECTED_HELPER_TEST_GH: gh, PROTECTED_HELPER_TEST_HOME: home, PROTECTED_HELPER_TEST_NODE: observedNode });
+              expect(cleanReuse.status, `${cleanReuse.stderr}\n${cleanReuse.stdout}`).toBe(0);
+              expect(readFileSync(log, 'utf8').trim()).toBe('');
+
+              // Reusing linked worktree holding both `.codegraph/codegraph.db` and `.codegraph-wsl` does NOT skip CodeGraph checks.
+              mkdirSync(join(linked, '.codegraph-wsl'));
+              writeFileSync(join(linked, '.codegraph-wsl', 'stale.txt'), 'wsl-present\n');
+              const wslCoexistReuse = run(process.execPath, [
+                '--preload', join(ROOT, 'tests/helpers/protected-helper-host.ts'),
+                join(ROOT, 'src/cli/index.ts'), 'worktrees', 'start', '--issue', '123', '--path', linked, '--json',
+              ], primary, { ...env, PROTECTED_HELPER_TEST_GH: gh, PROTECTED_HELPER_TEST_HOME: home, PROTECTED_HELPER_TEST_NODE: observedNode });
+              expect(wslCoexistReuse.status, `${wslCoexistReuse.stderr}\n${wslCoexistReuse.stdout}`).toBe(0);
+              expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual([`index seed ${primary}`, `index seed ${linked}`]);
+              expect(readFileSync(join(linked, '.codegraph-wsl', 'stale.txt'), 'utf8')).toBe('wsl-present\n');
+            }
             break;
           }
           case 'retry-exhausted':
-            expect(calls).toEqual([`sync ${linked}`, `sync ${linked}`, `sync ${linked}`, `init ${linked}`]);
+            expect(calls).toEqual([`index seed ${linked}`, `init ${linked}`]);
             expect(started.stderr).toContain('(index-base-building)');
             expect(existsSync(pointer)).toBe(false);
             expect(lstatSync(join(linked, db)).isFile()).toBe(true);
             break;
           case 'no-base':
+          case 'wsl-primary':
           case 'init-failed':
-            expect(calls).toEqual([`sync ${linked}`, `init ${linked}`]);
-            expect(existsSync(join(linked, db))).toBe(scenario === 'no-base');
+            expect(calls).toEqual([`index seed ${linked}`, `init ${linked}`]);
+            expect(existsSync(join(linked, db))).toBe(scenario !== 'init-failed');
             expect(existsSync(join(primary, db))).toBe(false);
+            if (scenario === 'wsl-primary') {
+              expect(readFileSync(join(wslPrimaryDir, 'marker.txt'), 'utf8')).toBe('wsl-primary-untouched\n');
+            }
             if (scenario === 'init-failed') {
               expect(started.stderr).toContain('codegraph init in');
               expect(started.stderr).not.toContain('x'.repeat(2001));
             }
             break;
           case 'occupied':
-            expect(calls).toEqual([`sync ${linked}`]);
+            expect(calls).toEqual([]);
             expect(readFileSync(join(linked, '.codegraph/user.txt'), 'utf8')).toBe('keep this file');
             break;
           default:
@@ -674,17 +703,6 @@ exec ${shellQuote(realGit)} "$@"
             if (scenario === 'unreadable') expect(started.stderr).toContain('the install selection cannot be read');
         }
       } finally {
-        for (const cwd of [linked, primary]) {
-          if (!existsSync(cwd) || (cwd === primary && !needsBase) || ['not-opted-in', 'not-selected', 'unreadable'].includes(scenario)) continue;
-          const status = arch(cwd, ['daemon', 'status']);
-          expect(status.status, status.stderr).toBe(0);
-          const state = JSON.parse(status.stdout).data;
-          expect(state.lockOwnerPid).toBeUndefined();
-          if (!state.running) continue;
-          const daemon = new CleanRoomDaemon((binary, args, options) => spawnSync(node, [binary, ...args], options));
-          daemon.arm(archctx, cwd, { ...process.env, ...env });
-          daemon.stop();
-        }
         rmSync(workspace, { recursive: true, force: true });
       }
     }, 60_000);
@@ -1058,8 +1076,6 @@ describe('W2/W3/W4 start and closeout ownership', () => {
       const result = run('bash', ['scripts/contract-worktree.sh', 'cleanup', '--slug', '123-owned', '--target', 'main'], f.cwd);
       expect(result.status, result.stderr).toBe(0); expect(existsSync(f.target)).toBe(false);
       expect(run('git', ['branch', '--list', 'codex/owned'], f.cwd).stdout.trim()).toBe('');
-      // The fixture HOME has no global architecture configuration, so the provider is disabled.
-      expect(result.stdout).toContain(JSON.stringify({ schemaVersion: 'repo-harness.architecture-daemon-stop/v1', worktree: f.target, provider: 'disabled', stopped: [], failures: [] }));
     } finally { f.cleanup(); }
   }, 15000);
   test('retry recovers the same registered branch and marker', () => {

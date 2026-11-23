@@ -2542,8 +2542,8 @@ test('board closeout: proofs come first; a bound, clean, pushed seat closes and 
   const holders = [child, sigfail], stops: Record<string, { stopped: number[]; failures: string[] }> = {
     [child]: { stopped: [4241], failures: [] }, [sigfail]: { stopped: [], failures: ['codegraph server 4240: EPERM'] } };
   const closeout = (pr: number) => runBoardCloseout({
-    repo_root: main, pr, caller_terminal: 't3', processes: () => holders.map(cwd => ({ pid: 4242, cwd })), stopCodegraphServers: (path) => stops[path] ?? { stopped: [], failures: [] },
-    stopDaemons: (path) => { if (path === partial) throw new Error('daemon stop failed'); return []; },
+    repo_root: main, pr, caller_terminal: 't3', processes: () => holders.map(cwd => ({ pid: 4242, cwd })),
+    stopCodegraphServers: (path) => { if (path === partial) throw new Error('codegraph stop failed'); return stops[path] ?? { stopped: [], failures: [] }; },
     summarizeHooks: () => null,
     host: { closeoutTerminals: () => ({ status: 'observed', terminals: terminals.filter(row => !closed.includes(row.address)) }), closeTerminal: (address) => {
       if (rmFails.has(address)) return { status: 'unavailable', reason: 'hc_failed' };
@@ -2579,7 +2579,7 @@ test('board closeout: proofs come first; a bound, clean, pushed seat closes and 
 
   // A step that fails after the panes closed returns those outcomes and the observed worktree state.
   const failed = await closeout(24);
-  expect([failed.panes, failed.worktree]).toEqual([[pane('t9', 'reviewer', null)], state(partial, 'kept', 'daemon stop failed')]);
+  expect([failed.panes, failed.worktree]).toEqual([[pane('t9', 'reviewer', null)], state(partial, 'kept', 'codegraph stop failed')]);
   // A branch deletion that fails after the checkout removal is a partial outcome with the observed state.
   const half = await closeout(25);
   expect([half.panes, half.worktree]).toEqual([[pane('t11', 'reviewer', null)],
@@ -2592,10 +2592,10 @@ test('board closeout: proofs come first; a bound, clean, pushed seat closes and 
   expect([retried.panes, retried.worktree]).toEqual([[pane('t17', 'reviewer', null)], state(rmfail, 'removed', null)]);
   // A server that stops while its child keeps the checkout: closeout re-reads the inventory and keeps the worktree.
   const surviving = await closeout(27);
-  expect([surviving.worktree.outcome, surviving.worktree.reason, surviving.stopped_codegraph_servers, surviving.daemon_stop_failures]).toEqual(['kept', 'process_in_use', [4241], []]);
+  expect([surviving.worktree.outcome, surviving.worktree.reason, surviving.stopped_codegraph_servers, surviving.codegraph_stop_failures]).toEqual(['kept', 'process_in_use', [4241], []]);
   // A failed signal is reported, lists no stopped PID, and the holder keeps the worktree.
   const unsignalled = await closeout(28);
-  expect([unsignalled.worktree.outcome, unsignalled.worktree.reason, unsignalled.stopped_codegraph_servers, unsignalled.daemon_stop_failures])
+  expect([unsignalled.worktree.outcome, unsignalled.worktree.reason, unsignalled.stopped_codegraph_servers, unsignalled.codegraph_stop_failures])
     .toEqual(['kept', 'process_in_use', [], ['codegraph server 4240: EPERM']]);
   // The seat of the Refs-only PR closes by its branch and the worktree goes with it.
   const refs = await closeout(29);

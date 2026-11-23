@@ -25,7 +25,7 @@ import { runDispatch } from '../../effects/board/dispatch';
 import { runReview, type ReviewObserver, type ReviewResultV1 } from '../../effects/board/review';
 import { runBoardMerge, type BoardMergeResultV1 } from '../../effects/board/merge';
 import { seatLaunch, SeatProviderUnavailableError } from './seats';
-import { runBoardCloseout, stopArchitectureDaemons, stopCodegraphServers } from '../../effects/board/closeout';
+import { runBoardCloseout, stopCodegraphServers } from '../../effects/board/closeout';
 import { worktreeProcesses } from '../../effects/git/worktree-processes';
 import { LIFECYCLE_EVENT_PROTOCOL, lifecycleIndexPath, recordLifecycleEvents, sanitized, summarizeWorktreeHooks, type CliFrictionEvent, type LifecycleEvent } from '../../effects/board/lifecycle-index';
 import { bodyLinks, linkedPullRequests } from '../../core/board/board';
@@ -500,11 +500,11 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
         if (!/^[1-9][0-9]*$/u.test(options.pr)) throw new BoardCollectError('--pr must be a pull request number');
         const repo_root = process.cwd();
         const result = await runBoardCloseout({ repo_root, pr: Number(options.pr), host, caller_terminal: process.env.HC_TERMINAL_ID ?? null,
-          stopDaemons: worktree => stopArchitectureDaemons(repo_root, worktree), processes: worktreeProcesses, stopCodegraphServers,
+          processes: worktreeProcesses, stopCodegraphServers,
           summarizeHooks: worktree => summarizeWorktreeHooks(worktree, { path: HOOK_EVENT_TELEMETRY_PATH, protocol: HOOK_EVENT_TELEMETRY_PROTOCOL, routes: ROUTES }) });
         process.stdout.write(`${JSON.stringify(result)}\n`);
         recordLifecycleEvents(() => readRepositoryId({ repo_root }), closeoutEvents(result), process.env);
-        if (result.panes.some(pane => pane.outcome === 'kept') || result.worktree.outcome !== 'removed' || result.daemon_stop_failures.length > 0) process.exitCode = 1;
+        if (result.panes.some(pane => pane.outcome === 'kept') || result.worktree.outcome !== 'removed' || result.codegraph_stop_failures.length > 0) process.exitCode = 1;
       } catch (error) {
         if (!(error instanceof BoardCollectError)) throw error;
         process.stderr.write(`${JSON.stringify({ ok: false, error: error.name, message: error.message })}\n`);

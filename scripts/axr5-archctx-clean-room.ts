@@ -5,9 +5,10 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { PROJECTION_REQUEST_SCHEMA_VERSION, type ProjectionRequestV1 } from 'archctx-contracts';
-import { cleanRoomEnvironment, CleanRoomDaemon, finishCleanRoom } from './lib/axr5-clean-room-runtime';
-import { ARCHCTX_REQUIRED_VERSION } from '../src/core/architecture/projection';
-import { archctxCapabilities, indexPackageLocalCodeGraph, readArchitectureProjectionSnapshot, runArchitectureProjection } from '../src/effects/architecture/archctx-provider';
+import { assertNoDaemonArtifacts, cleanRoomEnvironment, finishCleanRoom } from './lib/axr5-clean-room-runtime';
+import { ARCHCTX_REQUIRED_VERSION, summarizeArchitectureRender } from '../src/core/architecture/projection';
+import { archctxCapabilities, architectureProjectionRequest, indexPackageLocalCodeGraph, readArchitectureProjectionSnapshot, resolveCompatibleNodeRuntime, runArchitectureProjection } from '../src/effects/architecture/archctx-provider';
+import { applyArchitectureProjection } from '../src/effects/architecture/projection-apply';
 
 const VERSION = ARCHCTX_REQUIRED_VERSION;
 const repoRoot = resolve(import.meta.dir, '..');
@@ -19,12 +20,11 @@ const keep = process.argv.includes('--keep-temp');
 mkdirSync(dirname(outputPath), { recursive: true });
 const workspace = mkdtempSync(join(tmpdir(), 'repo-harness-axr5-clean-room-'));
 const offlineEnv = cleanRoomEnvironment(workspace, process.env);
-const daemon = new CleanRoomDaemon();
 let failure: { error: unknown } | undefined;
 let readbackBody: string | undefined;
 
 try {
-  const revision = requestedRevision ?? git(archContextRoot, ['rev-parse', 'HEAD']);
+  const revision = git(archContextRoot, ['rev-parse', '--verify', `${requestedRevision ?? 'HEAD'}^{commit}`]);
   const checkout = join(workspace, 'arch-context');
   const artifacts = join(workspace, 'artifacts');
   const consumer = join(workspace, 'consumer');
@@ -54,11 +54,12 @@ try {
     dependencies: {
       archctx: `file:${archctxTarball}`,
       'archctx-contracts': `file:${contracts.tarball}`,
+      '@sinclair/typebox': `file:${installedPackagePath('@sinclair', 'typebox')}`,
       '@colbymchenry/codegraph': `file:${installedPackagePath('@colbymchenry', 'codegraph')}`,
       [codeGraphPlatform.name]: `file:${codeGraphPlatform.path}`,
       '@node-rs/jieba': `file:${installedPackagePath('@node-rs', 'jieba')}`,
       [jiebaPlatform.name]: `file:${jiebaPlatform.path}`,
-      koffi: `file:${join(repoRoot, 'node_modules', 'koffi')}`,
+      koffi: `file:${realpathSync(join(repoRoot, 'node_modules', 'koffi'))}`,
       [koffiPlatform.name]: `file:${koffiPlatform.path}`,
     },
   }, null, 2)}\n`);
@@ -73,6 +74,8 @@ try {
 
   mkdirSync(join(fixtureRepo, '.ai', 'harness'), { recursive: true });
   mkdirSync(join(fixtureRepo, '.archcontext', 'model', 'nodes'), { recursive: true });
+  mkdirSync(join(fixtureRepo, '.archcontext', 'model', 'relations'), { recursive: true });
+  mkdirSync(join(fixtureRepo, '.archcontext', 'model', 'flows'), { recursive: true });
   run('git', ['init'], fixtureRepo);
   writeFileSync(join(fixtureRepo, '.ai', 'harness', 'policy.json'), `${JSON.stringify({
     context: { capability_source: 'archcontext' },
@@ -80,7 +83,8 @@ try {
   mkdirSync(join(fixtureRepo, 'src', 'projection-fixture'), { recursive: true });
   // An import of a workspace package with condition-object `exports` crashed the debt read of an
   // indexed projection before archctx 0.11.1 (Ancienttwo/arch-context#445).
-  writeFileSync(join(fixtureRepo, 'src', 'projection-fixture', 'index.ts'), "import { conditionExports } from '@fixture/condition-exports';\nexport const projectionFixture = conditionExports;\n");
+  writeFileSync(join(fixtureRepo, 'src', 'projection-fixture', 'index.ts'), "import { conditionExports } from '@fixture/condition-exports';\nimport { projectFixture } from './core';\nexport function runProjectionFixture() { return conditionExports && projectFixture(); }\n");
+  writeFileSync(join(fixtureRepo, 'src', 'projection-fixture', 'core.ts'), 'export function projectFixture() { return true; }\n');
   mkdirSync(join(fixtureRepo, 'packages', 'condition-exports', 'src'), { recursive: true });
   writeFileSync(join(fixtureRepo, 'package.json'), `${JSON.stringify({ private: true, workspaces: ['packages/*'] }, null, 2)}\n`);
   writeFileSync(join(fixtureRepo, 'packages', 'condition-exports', 'package.json'), `${JSON.stringify({
@@ -88,26 +92,91 @@ try {
     exports: { '.': { types: './src/index.ts', default: './src/index.ts' } },
   }, null, 2)}\n`);
   writeFileSync(join(fixtureRepo, 'packages', 'condition-exports', 'src', 'index.ts'), 'export const conditionExports = true;\n');
-  writeFileSync(join(fixtureRepo, 'AGENTS.md'), '# Fixture agent context\n');
-  writeFileSync(join(fixtureRepo, 'CLAUDE.md'), '# Fixture agent context\n');
-  writeFileSync(join(fixtureRepo, '.archcontext', 'model', 'nodes', 'capability.fixture.projection.yaml'), `schemaVersion: archcontext.node/v2
-id: capability.fixture.projection
-kind: capability
-name: Projection Fixture
-status: active
-summary: Proves the packed provider projection contract.
-responsibilities:
-  - Provide one deterministic clean-room projection scope.
-source:
-  include:
-    - src/projection-fixture/**
-extensions:
-  contractFiles:
-    agents: AGENTS.md
-    claude: CLAUDE.md
-  lspProfile: typescript-lsp
-  verification: []
-`);
+  const yaml = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
+  writeFileSync(join(fixtureRepo, '.archcontext', 'manifest.yaml'), yaml({
+    schemaVersion: 'archcontext.manifest/v1',
+    model: { layout: 'split', root: '.archcontext/model' },
+    runtime: { contextBudgetBytes: 12288 },
+  }));
+  writeFileSync(join(fixtureRepo, '.archcontext', 'product.yaml'), yaml({
+    schemaVersion: 'archcontext.product/v1',
+    id: 'product.fixture',
+    name: 'Projection Fixture',
+    purpose: 'Prove the packed archctx clean-room projection contract.',
+    capabilities: ['capability.fixture.projection'],
+    users: [{ id: 'developer', description: 'Maintainer verifying clean-room projection.' }],
+    successCriteria: ['Clean-room apply reaches a fixed point with zero drift.'],
+    nonGoals: [],
+    riskDomains: [],
+  }));
+  writeFileSync(join(fixtureRepo, '.archcontext', 'model', 'nodes', 'capability.fixture.projection.yaml'), yaml({
+    schemaVersion: 'archcontext.node/v2',
+    id: 'capability.fixture.projection',
+    kind: 'capability',
+    name: 'Projection Fixture',
+    status: 'active',
+    summary: 'Proves the packed provider projection contract.',
+    responsibilities: ['Provide one deterministic clean-room projection scope.'],
+    source: {
+      include: ['src/projection-fixture/**'],
+      entrypoints: [{
+        id: 'entrypoint.fixture.run',
+        path: 'src/projection-fixture/index.ts',
+        symbols: [{
+          name: 'runProjectionFixture',
+          sinks: [{ id: 'sink.fixture.core', path: 'src/projection-fixture/core.ts', symbol: 'projectFixture' }],
+        }],
+      }],
+    },
+    extensions: {
+      contractFiles: { agents: 'AGENTS.md', claude: 'CLAUDE.md' },
+      lspProfile: 'typescript-lsp',
+      verification: [],
+    },
+  }));
+  writeFileSync(join(fixtureRepo, '.archcontext', 'model', 'nodes', 'component.fixture.core.yaml'), yaml({
+    schemaVersion: 'archcontext.node/v2',
+    id: 'component.fixture.core',
+    kind: 'component',
+    name: 'Fixture Core',
+    status: 'active',
+    summary: 'Executes the fixture projection sink.',
+    parent: 'capability.fixture.projection',
+  }));
+  writeFileSync(join(fixtureRepo, '.archcontext', 'model', 'relations', 'relation.fixture.core.yaml'), yaml({
+    schemaVersion: 'archcontext.relation/v1',
+    id: 'relation.fixture.core',
+    kind: 'calls',
+    source: 'capability.fixture.projection',
+    target: 'component.fixture.core',
+    intent: 'Run the fixture sink.',
+  }));
+  const flowStep = {
+    id: 'run',
+    from: 'fixture',
+    to: 'core',
+    label: 'Run projection fixture',
+    evidence: { entrypointId: 'entrypoint.fixture.run', sourceSymbol: 'runProjectionFixture', sinkId: 'sink.fixture.core' },
+  };
+  writeFileSync(join(fixtureRepo, '.archcontext', 'model', 'flows', 'flow.fixture.primary.yaml'), yaml({
+    schemaVersion: 'archcontext.flow/v1',
+    id: 'flow.fixture.primary',
+    capabilityId: 'capability.fixture.projection',
+    name: 'Run fixture projection',
+    applicability: 'required',
+    participants: [
+      { id: 'fixture', nodeId: 'capability.fixture.projection' },
+      { id: 'core', nodeId: 'component.fixture.core' },
+    ],
+    steps: [flowStep],
+    outcomes: (['success', 'error'] as const).map((kind) => ({
+      id: kind,
+      kind,
+      label: kind,
+      steps: [flowStep],
+      terminal: { participant: 'fixture', label: kind },
+    })),
+  }));
   run('git', ['config', 'user.email', 'axr5@example.invalid'], fixtureRepo);
   run('git', ['config', 'user.name', 'AXR5 Clean Room'], fixtureRepo);
   run('git', ['add', '.'], fixtureRepo);
@@ -127,13 +196,20 @@ extensions:
   const conflictingPathIgnored = packageLocalBinary && handshake.capabilities.package.version === VERSION && !realpathSync(handshake.resolved.binaryPath).startsWith(`${conflictDir}/`);
   if (!packageLocalBinary || !conflictingPathIgnored) throw new Error('package-local provider authority was not proven');
   const runtimeEnv = { ...offlineEnv, PATH: `${conflictDir}:${process.env.PATH ?? ''}` };
+  const nodeBin = resolveCompatibleNodeRuntime(runtimeEnv);
+  const helpProbe = JSON.parse(run(nodeBin, [installedBinary, 'help', '--json'], fixtureRepo, runtimeEnv).stdout) as { requestId?: unknown; data?: { commands?: unknown } };
+  const daemonCommandAbsent = helpProbe.requestId === 'help'
+    && Array.isArray(helpProbe.data?.commands)
+    && !helpProbe.data.commands.includes('daemon');
+  if (!daemonCommandAbsent) throw new Error('clean-room archctx still advertises retired daemon command');
+
   indexPackageLocalCodeGraph(fixtureRepo, { consumerRoot: consumer, env: runtimeEnv });
-  daemon.arm(installedBinary, fixtureRepo, runtimeEnv);
-  const expected = readArchitectureProjectionSnapshot(fixtureRepo, {
-    consumerRoot: consumer,
-    env: runtimeEnv,
-  });
-  run(installedBinary, ['daemon', 'upgrade'], fixtureRepo, runtimeEnv);
+  const validateProbe = JSON.parse(run(nodeBin, [installedBinary, 'validate', '--json'], fixtureRepo, runtimeEnv).stdout) as { ok?: boolean; data?: { valid?: boolean; diagnostics?: unknown[] } };
+  if (validateProbe.ok !== true || validateProbe.data?.valid !== true) {
+    throw new Error(`clean-room fixture model invalid: ${JSON.stringify(validateProbe.data?.diagnostics ?? validateProbe)}`);
+  }
+  const providerOpts = { consumerRoot: consumer, env: runtimeEnv };
+  const expected = readArchitectureProjectionSnapshot(fixtureRepo, providerOpts);
   const request: ProjectionRequestV1 = {
     schemaVersion: PROJECTION_REQUEST_SCHEMA_VERSION,
     requestId: 'repo-harness.axr5-clean-room',
@@ -143,12 +219,22 @@ extensions:
     changedPaths: ['src/projection-fixture/index.ts'],
     expected,
   };
-  const projection = runArchitectureProjection(request, fixtureRepo, {
-    consumerRoot: consumer,
-    env: runtimeEnv,
-  });
+  const projection = runArchitectureProjection(request, fixtureRepo, providerOpts);
   // Without a ready index archctx reads no import edge, and the condition-object exports case does not run.
   if (projection.outputSnapshot.generatedFrom.codeGraphStatus !== 'ready') throw new Error('clean-room projection did not read a ready CodeGraph index');
+
+  const firstApply = applyArchitectureProjection(fixtureRepo, { ...providerOpts, changedPaths: ['src/projection-fixture/index.ts'] });
+  if (firstApply.status !== 'applied') throw new Error(`clean-room projection apply returned unexpected status: ${firstApply.status} (${JSON.stringify(firstApply.humanActions)})`);
+  const checkAfterApply = runArchitectureProjection(architectureProjectionRequest('check', fixtureRepo, providerOpts), fixtureRepo, providerOpts);
+  const checkRender = summarizeArchitectureRender(checkAfterApply);
+  if (checkAfterApply.status !== 'noop' || checkRender.renderEquivalent !== true) {
+    throw new Error(`clean-room projection check after apply did not prove fixed point: status=${checkAfterApply.status}, renderEquivalent=${String(checkRender.renderEquivalent)}`);
+  }
+  const secondApply = applyArchitectureProjection(fixtureRepo, providerOpts);
+  if (secondApply.status !== 'noop' || secondApply.files.length !== 0) {
+    throw new Error(`clean-room second projection apply was not a noop: status=${secondApply.status}, files=${secondApply.files.length}`);
+  }
+  assertNoDaemonArtifacts(runtimeEnv.ARCHCONTEXT_STATE_DIR!);
 
   const readback = {
     schemaVersion: 'repo-harness.axr5-clean-room/v1',
@@ -164,6 +250,10 @@ extensions:
       committedFileDependency: false,
       packageLocalBinary,
       conflictingPathIgnored,
+      inProcessNoDaemon: {
+        daemonCommandAbsent,
+        noDaemonArtifacts: true,
+      },
       authoritativeNodeSchema: installedNodeSchema.properties.schemaVersion.const,
       authoritativeNodeSchemaDigest: `sha256:${createHash('sha256').update(installedNodeSchemaBody).digest('hex')}`,
       capabilities: handshake.capabilities,
@@ -175,6 +265,14 @@ extensions:
         layoutVersion: projection.outputSnapshot.layoutVersion,
         codeGraph: projection.outputSnapshot.generatedFrom,
       },
+      fixedPoint: {
+        applyStatus: firstApply.status,
+        applyFiles: firstApply.files.length,
+        checkStatus: checkAfterApply.status,
+        checkRenderEquivalent: checkRender.renderEquivalent,
+        secondApplyStatus: secondApply.status,
+        secondApplyFiles: secondApply.files.length,
+      },
     },
   };
   readbackBody = `${JSON.stringify(readback, null, 2)}\n`;
@@ -182,12 +280,11 @@ extensions:
   failure = { error };
   throw error;
 } finally {
-  finishCleanRoom({ daemon, failure, cleanup: () => {
+  finishCleanRoom({ failure, cleanup: () => {
     rmSync(stagedOutputPath, { force: true });
     if (!keep) rmSync(workspace, { recursive: true, force: true });
   } });
 }
-// A receipt is published only after daemon shutdown is confirmed.
 if (readbackBody !== undefined) {
   writeFileSync(stagedOutputPath, readbackBody);
   renameSync(stagedOutputPath, outputPath);
@@ -217,6 +314,11 @@ function linkBuildDependencies(checkout: string): void {
   if (!existsSync(koffiTarget)) symlinkSync(join(repoRoot, 'node_modules', 'koffi'), koffiTarget, 'dir');
   const yamlTarget = join(targetModules, 'yaml');
   if (!existsSync(yamlTarget)) symlinkSync(realpathSync(join(archContextRoot, 'packages', 'core', 'node_modules', 'yaml')), yamlTarget, 'dir');
+  const sinclairScope = join(targetModules, '@sinclair');
+  if (!existsSync(join(sinclairScope, 'typebox'))) {
+    mkdirSync(sinclairScope, { recursive: true });
+    symlinkSync(installedPackagePath('@sinclair', 'typebox'), join(sinclairScope, 'typebox'), 'dir');
+  }
   const targetScope = join(targetModules, '@archcontext');
   mkdirSync(targetScope, { recursive: true });
   const workspaces = (JSON.parse(readFileSync(join(checkout, 'package.json'), 'utf8')) as { workspaces?: unknown }).workspaces;
@@ -238,10 +340,12 @@ function packContracts(checkout: string, artifacts: string): { tarball: string; 
   cpSync(join(checkout, 'packages', 'contracts', 'src'), join(stage, 'src'), { recursive: true });
   cpSync(join(checkout, 'packages', 'contracts', 'fixtures'), join(stage, 'fixtures'), { recursive: true });
   cpSync(join(checkout, 'schemas'), join(stage, 'schemas'), { recursive: true });
+  const sourceManifest = JSON.parse(readFileSync(join(checkout, 'packages', 'contracts', 'package.json'), 'utf8')) as { dependencies?: Record<string, string> };
   writeFileSync(join(stage, 'package.json'), `${JSON.stringify({
     name: 'archctx-contracts', version: VERSION, private: false, type: 'module', license: 'Apache-2.0',
     files: ['src', 'fixtures', 'schemas'],
     exports: { '.': './src/index.ts', './schemas/*': './schemas/*' },
+    ...(sourceManifest.dependencies ? { dependencies: sourceManifest.dependencies } : {}),
   }, null, 2)}\n`);
   const [packed] = JSON.parse(run('npm', ['pack', '--json', '--pack-destination', artifacts], stage).stdout) as Array<{ filename: string; integrity: string }>;
   if (!packed?.filename || !packed.integrity) throw new Error('contracts npm pack did not return integrity');
@@ -261,10 +365,11 @@ function prepareReleaseVersion(checkout: string): void {
   }
   const productVersionPath = join(checkout, 'packages', 'contracts', 'src', 'product-version.ts');
   const source = readFileSync(productVersionPath, 'utf8');
-  if (!/export const ARCHCONTEXT_PRODUCT_VERSION = "[^"]+";/.test(source)) {
+  const pattern = /(export const ARCHCONTEXT_PRODUCT_VERSION = )"[^"]+"( as const)?;/;
+  if (!pattern.test(source)) {
     throw new Error('product version declaration is missing');
   }
-  const updated = source.replace(/export const ARCHCONTEXT_PRODUCT_VERSION = "[^"]+";/, `export const ARCHCONTEXT_PRODUCT_VERSION = "${VERSION}";`);
+  const updated = source.replace(pattern, (_match, prefix: string, suffix?: string) => `${prefix}"${VERSION}"${suffix ?? ''};`);
   writeFileSync(productVersionPath, updated);
 }
 
@@ -277,7 +382,7 @@ function installedPackagePath(scope: string, name: string): string {
   ];
   for (const root of roots) {
     const candidate = join(root, name);
-    if (existsSync(candidate)) return candidate;
+    if (existsSync(candidate)) return realpathSync(candidate);
   }
   throw new Error(`installed package is missing: ${scope}/${name}`);
 }
@@ -293,7 +398,7 @@ function installedPlatformPackage(scope: string, baseName: string): { name: stri
   for (const root of roots) {
     if (!existsSync(root)) continue;
     const name = readdirSync(root).find((entry) => entry === expectedPrefix || entry.startsWith(`${expectedPrefix}-`));
-    if (name) return { name: `${scope}/${name}`, path: join(root, name) };
+    if (name) return { name: `${scope}/${name}`, path: realpathSync(join(root, name)) };
   }
   throw new Error(`installed platform package is missing: ${scope}/${expectedPrefix}*`);
 }
