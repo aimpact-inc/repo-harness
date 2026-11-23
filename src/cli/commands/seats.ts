@@ -20,6 +20,7 @@ import {
   seatHostId,
   seatsConfigInvalidMessage,
   unavailablePiSeat,
+  type AgyCatalogModel,
   type LaunchSeatId,
   type SeatConfigV1,
   type SeatId,
@@ -47,7 +48,7 @@ import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
 import { COUNCIL_MEMBERS, CouncilConsultError, parseCouncilMembers, type CouncilMember } from '../../core/board/planner-consult';
 import { runCouncilConsult } from '../../effects/board/planner-consult';
 import { formatSeatPool, seatModelBlock, seatPoolHint, seatRuntimeBlock } from '../../core/board/seat-pool';
-import { collectSeatPoolProbes, enabledRuntimesOf, magpieExtensionInstalled, probeAgySeat, refreshSeatPool, resolveAgyInstallation, SeatsConfigurationError, writeAgySeatAgent, type AgyCatalogModel } from '../../effects/board/seats-configuration';
+import { collectSeatPoolProbes, enabledRuntimesOf, magpieExtensionInstalled, probeAgySeat, refreshSeatPool, resolveAgyInstallation, SeatsConfigurationError, writeAgySeatAgent } from '../../effects/board/seats-configuration';
 
 import { checkAntigravityHooks } from '../installer/targets/antigravity';
 import { resolveAntigravityRepository } from '../hook/host-adapter';
@@ -448,7 +449,7 @@ function checkAgyLaunchTarget(id: SeatId, seat: SeatConfigV1, models: readonly A
   if (model === undefined) {
     throw new SeatsCommandError('seat_model_unavailable', `agy does not list the selected ${id} model. See seats.${id}.model.`);
   }
-  if (seat.effort !== null && !model.efforts.includes(seat.effort)) {
+  if (seat.effort !== null && !(model.efforts ?? []).includes(seat.effort)) {
     throw new AgySeatSettingsError('seat_effort_invalid', id, 'effort');
   }
   let optedIn = false;

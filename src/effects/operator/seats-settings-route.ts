@@ -10,6 +10,7 @@ import {
 } from '../../core/board/seats-settings';
 import {
   SeatsConfigurationError,
+  agyCatalogModels,
   applySeatsSettings,
   readSeatPoolCache,
   readSeatsConfiguration,
@@ -34,15 +35,17 @@ export const SEATS_CONFIGURATION_FAILURES: Readonly<Record<SeatsConfigurationErr
   seat_runtime_not_allowed: { status: 422, next_action: 'Use agy only on orchestrator, advisor, council, worker seats, or gatekeeper-fallback.' },
   seat_model_invalid: { status: 422, next_action: 'Choose or type a model for the named field, then save again.' },
   seat_effort_invalid: { status: 422, next_action: CHOOSE_FROM_RANGES },
+  seat_effort_unverified: { status: 503, next_action: 'Sign in to agy so that it lists its models, or set the agy seat effort to Default, then save again.' },
   seat_tool_not_allowed: { status: 422, next_action: CHOOSE_FROM_RANGES },
   seat_fleet_not_allowed: { status: 422, next_action: CHOOSE_FROM_RANGES },
 });
 
 /** GET: the stored section, or the defaults, with its revision, the defaults and the ranges the form may offer. */
-export function readSeatsSettings(env?: NodeJS.ProcessEnv): SeatsSettingsV1 {
+export async function readSeatsSettings(env?: NodeJS.ProcessEnv): Promise<SeatsSettingsV1> {
   const { revision, seats, enabled_runtimes } = readSeatsConfiguration(env);
+  const agyModels = await agyCatalogModels(enabled_runtimes, env);
   const settings = decodeSeatsSettings({ protocol: 1, kind: 'operator_seats_settings', config: { revision, ...seats },
-    defaults: DEFAULT_SEATS_CONFIG, ranges: seatsRanges(enabled_runtimes) });
+    defaults: DEFAULT_SEATS_CONFIG, ranges: seatsRanges(enabled_runtimes, agyModels) });
   const pool = readSeatPoolCache(env);
   return pool === null ? settings : { ...settings, model_pool: pool };
 }
@@ -68,7 +71,7 @@ export function seatsSettingsWriteRoute(env?: NodeJS.ProcessEnv): OperatorWriteR
         input: request as unknown as JsonValue,
         execute: async () => {
           try {
-            return { status: 200, body: decodeSeatsSettingsResult(applySeatsSettings(request, env)) as unknown as JsonValue };
+            return { status: 200, body: decodeSeatsSettingsResult(await applySeatsSettings(request, env)) as unknown as JsonValue };
           } catch (error) {
             if (!(error instanceof SeatsConfigurationError)) throw error;
             const failure = SEATS_CONFIGURATION_FAILURES[error.code];

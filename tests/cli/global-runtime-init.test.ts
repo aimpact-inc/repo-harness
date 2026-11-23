@@ -239,7 +239,7 @@ test('update removes the Codex hyper threshold once, preserves other settings, a
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
-test('update strips retired fleet roles once and leaves the saved seats ready for all three launchers', () => {
+test('update strips retired fleet roles once and leaves the saved seats ready for all three launchers', async () => {
   const home = mkdtempSync(join(tmpdir(), 'seat-fleet-migration-'));
   try {
     const directory = join(home, '.repo-harness');
@@ -281,7 +281,7 @@ test('update strips retired fleet roles once and leaves the saved seats ready fo
     expect(migrateSeatsConfiguration(env)).toBe(false);
 
     const saved = { ...migrated.seats, worker: { ...migrated.seats.worker, effort: 'medium' } };
-    expect(applySeatsSettings({ expected_revision: migrated.revision, seats: saved }, env).changed_keys).toEqual(['seats.worker.effort']);
+    expect((await applySeatsSettings({ expected_revision: migrated.revision, seats: saved }, env)).changed_keys).toEqual(['seats.worker.effort']);
     const current = readSeatsConfiguration(env).seats;
     expect(current).toEqual(saved);
     const codex = buildSeatLaunch('worker', current.worker, 'seats', []);

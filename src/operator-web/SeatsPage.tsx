@@ -8,7 +8,7 @@ import type { SetupSnapshotV2 } from '../core/setup/types';
 import type { OperatorTranslate } from './i18n';
 import type { QuotaSection } from './quota';
 import {
-  GATEKEEPER_FALLBACK_STARTER, agyToolLocked, councilStarter, seatChanges, setExplorer, setOptionalSeat, setPiSubAgentModel, setRoute, setSeatAdvisorModel, setSeatEffort, setSeatModel, setSeatRole, setSeatRuntime, setRoutingValue, setSeatTool, type SeatsSettingsForm,
+  GATEKEEPER_FALLBACK_STARTER, agyEffortMenu, agyToolLocked, councilStarter, seatChanges, setExplorer, setOptionalSeat, setPiSubAgentModel, setRoute, setSeatAdvisorModel, setSeatEffort, setSeatModel, setSeatRole, setSeatRuntime, setRoutingValue, setSeatTool, type SeatsSettingsForm,
 } from './seats';
 import { EnableSwitch, formLocked, runtimeRowOf, SaveResult } from './SettingsPage';
 import type { AgentsSettingsForm } from './settings';
@@ -224,7 +224,14 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
     // A typed or stored model outside the seat's recommended list stays visible as a choice.
     ...(draft.model !== null && !suggested.includes(draft.model) ? [{ value: draft.model as string | null, label: draft.model }] : []),
   ];
-  const efforts = [{ value: null, label: t('seats.effort.default') }, ...ranges.efforts.map(effort => ({ value: effort as string | null, label: effort, off: !runtime.effort }))];
+  // An agy seat offers the menu of its model. A stored effort outside it stays visible; it is struck out when the menu is known.
+  const agyMenu = agy ? agyEffortMenu(draft.model, ranges.agy_models) : null;
+  const efforts = [
+    { value: null, label: t('seats.effort.default') },
+    ...(agy ? agyMenu ?? [] : ranges.efforts).map(effort => ({ value: effort as string | null, label: effort, off: !runtime.effort })),
+    ...(agy && draft.effort !== null && !agyMenu?.includes(draft.effort)
+      ? [{ value: draft.effort as string | null, label: draft.effort, off: agyMenu !== null }] : []),
+  ];
   // The host agent types change only the argv; the limit levels do not depend on them, so the page passes none.
   const launchSeat = seat === 'gatekeeper-fallback' ? 'gatekeeper' : seat;
   const limits = agy ? agySeatLimits(launchSeat, draft) : buildSeatLaunch(launchSeat, draft, 'seats', []).limits;
@@ -255,8 +262,8 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
 
       <Field label={t('seats.field.model')}>
         <Segmented label={t('seats.field.model')} disabled={locked} value={draft.model} options={models}
-          onPick={value => form.edit(current => setSeatModel(current, seat, value))} />
-        {!council && <ModelInput label={t('seats.model.custom')} disabled={locked} commit={value => form.edit(current => setSeatModel(current, seat, value))} />}
+          onPick={value => form.edit(current => setSeatModel(current, seat, value, ranges.agy_models))} />
+        {!council && <ModelInput label={t('seats.model.custom')} disabled={locked} commit={value => form.edit(current => setSeatModel(current, seat, value, ranges.agy_models))} />}
         <span className="text-xs text-kumo-brand">
           {council ? t('seats.rec.council') : seat === 'worker' ? t('seats.rec.worker')
             : recommended?.model ? t('seats.rec.model', { model: recommended.model }) + check(draft.model === recommended.model) : ''}

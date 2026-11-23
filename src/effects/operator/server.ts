@@ -748,7 +748,7 @@ export async function startOperatorServer(
         return;
       }
       try {
-        sendJson(response, 200, readSeatsSettings(options.env), headOnly);
+        sendJson(response, 200, await readSeatsSettings(options.env), headOnly);
       } catch (error) {
         if (!(error instanceof SeatsConfigurationError)) throw error;
         sendRefusal(request, response, SEATS_CONFIGURATION_FAILURES[error.code].status,

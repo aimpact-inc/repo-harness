@@ -27,6 +27,7 @@ import { renderGlobalRulesBlock, setReportingLanguage } from '../../src/cli/inst
 import { createOperatorLanguageSettings } from '../../src/cli/commands/operator-actions';
 import { reportingLanguageWriteRoute } from '../../src/effects/operator/language-settings-route';
 import { acquireRuntimeTransactionLock, globalRuntimeScope } from '../../src/effects/locking/runtime-transaction-lock';
+import { agyCatalogScript, type AgyCatalogFixture } from '../helpers/agy-cli-fixture';
 import { operatorAuditPath } from '../../src/effects/operator/write-audit';
 
 const PROBE: AgentRuntimeProbeV1 = {
@@ -580,6 +581,13 @@ describe('agent settings routes', () => {
 
 const PANE_AGENTS = { enabled: ['claude', 'codex', 'pi'], uses: { docs: [], review: [] }, default_docs: null };
 
+/** The official agy install path under the harness HOME, so the catalog probe finds it without PATH. */
+function installAgy(home: string, catalog: AgyCatalogFixture, release?: string): void {
+  const bin = join(home, '.local', 'bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'agy'), `#!${process.execPath}\n${agyCatalogScript(catalog, undefined, undefined, release)}`, { mode: 0o755 });
+}
+
 async function seats(harness: Harness): Promise<ReturnType<typeof decodeSeatsSettings>> {
   const response = await fetch(`${harness.server.url}/api/v1/settings/seats`);
   expect(response.status).toBe(200);
@@ -594,17 +602,17 @@ describe('seat settings contract without transport', () => {
     cleanups.push(() => rmSync(home, { recursive: true, force: true }));
     mkdirSync(join(home, '.repo-harness'));
     writeFileSync(join(home, '.repo-harness', 'config.json'), JSON.stringify({ agents: PANE_AGENTS }));
-    const env = { HOME: home }, initial = readSeatsSettings(env), route = seatsSettingsWriteRoute(env);
+    const env = { HOME: home }, initial = (await readSeatsSettings(env)), route = seatsSettingsWriteRoute(env);
     for (const id of SEAT_IDS) if (initial.defaults[id] !== null) expect(initial.defaults[id]!.advisor_model).toBeNull();
     const { advisor_model: _omitted, ...withoutAdvisor } = initial.config['worker-opus'];
     const section = { ...DEFAULT_SEATS_CONFIG, 'worker-opus': withoutAdvisor };
     expect(decodeSeatsConfig(section)['worker-opus'].advisor_model).toBeNull();
     for (const advisor_model of [...Object.keys(MODEL_FAMILY_LABELS), null]) {
-      const { revision, ...seats } = readSeatsSettings(env).config;
+      const { revision, ...seats } = (await readSeatsSettings(env)).config;
       const saved = await route.decode({ expected_revision: revision, seats: { ...seats,
         'worker-opus': { ...seats['worker-opus'], advisor_model } } }, []).execute();
       expect(saved).toMatchObject({ status: 200, body: { changed_keys: ['seats.worker-opus.advisor_model'] } });
-      expect(readSeatsSettings(env).config['worker-opus'].advisor_model).toBe(advisor_model);
+      expect((await readSeatsSettings(env)).config['worker-opus'].advisor_model).toBe(advisor_model);
     }
     for (const patch of [{ runtime: 'codex', advisor_model: 'fable' }, { runtime: 'pi', model: 'zai/glm-5.3', fleet: [], advisor_model: 'fable' },
       ...['unknown', 'toString', '', 42].map(advisor_model => ({ advisor_model }))]) {
@@ -621,7 +629,7 @@ describe('seat settings contract without transport', () => {
     cleanups.push(() => rmSync(home, { recursive: true, force: true }));
     mkdirSync(join(home, '.repo-harness'));
     writeFileSync(join(home, '.repo-harness', 'config.json'), JSON.stringify({ agents: PANE_AGENTS, seats: { ...DEFAULT_SEATS_CONFIG, worker } }));
-    const env = { HOME: home }, before = readSeatsSettings(env), route = seatsSettingsWriteRoute(env);
+    const env = { HOME: home }, before = (await readSeatsSettings(env)), route = seatsSettingsWriteRoute(env);
     const addedModels = ['magpie/opencode-go/deepseek-v4.1-flash', 'magpie/group/deepseek-v4.1-flash', 'magpie/zcode/GLM-5.3', 'magpie/zcode/GLM-5.3-Flash'];
     // The seat ranges recommend models in the owner's order. Other valid Pi ids still save.
     const opus = { runtime: 'claude', model: 'opus' } as const;
@@ -645,19 +653,20 @@ describe('seat settings contract without transport', () => {
     const saved = await route.decode({ expected_revision: revision, seats: { ...section, advisor: { ...section.advisor, effort: 'medium' } } }, []).execute();
     expect(saved.status).toBe(200);
     for (const addedModel of addedModels) {
-      const result = await route.decode({ expected_revision: readSeatsSettings(env).config.revision, seats: { ...section, worker: { ...worker, model: addedModel } } }, []).execute();
+      const result = await route.decode({ expected_revision: (await readSeatsSettings(env)).config.revision, seats: { ...section, worker: { ...worker, model: addedModel } } }, []).execute();
       expect(result.status).toBe(200);
-      expect(readSeatsSettings(env).config.worker.model).toBe(addedModel);
+      expect((await readSeatsSettings(env)).config.worker.model).toBe(addedModel);
     }
     const gpt = { ...worker, model: 'magpie/codex/gpt-6.1-terra', effort: 'high' };
-    expect((await route.decode({ expected_revision: readSeatsSettings(env).config.revision, seats: { ...section, worker: { ...gpt, fleet: ['explorer'] } } }, []).execute()).status).toBe(200);
-    expect(readSeatsSettings(env).config.worker).toMatchObject({ runtime: 'pi', model: gpt.model, effort: 'high', fleet: ['explorer'] });
-    expect((await route.decode({ expected_revision: readSeatsSettings(env).config.revision, seats: { ...section, reviewer: { ...section.reviewer!, runtime: 'pi', model: 'zai/glm-5.3' } } }, []).execute()).status).toBe(200);
-    expect(readSeatsSettings(env).config.reviewer).toMatchObject({ runtime: 'pi', model: 'zai/glm-5.3' });
+    expect((await route.decode({ expected_revision: (await readSeatsSettings(env)).config.revision, seats: { ...section, worker: { ...gpt, fleet: ['explorer'] } } }, []).execute()).status).toBe(200);
+    expect((await readSeatsSettings(env)).config.worker).toMatchObject({ runtime: 'pi', model: gpt.model, effort: 'high', fleet: ['explorer'] });
+    expect((await route.decode({ expected_revision: (await readSeatsSettings(env)).config.revision, seats: { ...section, reviewer: { ...section.reviewer!, runtime: 'pi', model: 'zai/glm-5.3' } } }, []).execute()).status).toBe(200);
+    expect((await readSeatsSettings(env)).config.reviewer).toMatchObject({ runtime: 'pi', model: 'zai/glm-5.3' });
     // The recommended list does not limit the id (#3250); the decoder refuses only a shape that the Pi launcher cannot split.
-    expect((await route.decode({ expected_revision: readSeatsSettings(env).config.revision, seats: { ...section, worker: { ...worker, model: 'magpie/other' } } }, []).execute()).status).toBe(200);
-    expect(readSeatsSettings(env).config.worker.model).toBe('magpie/other');
-    expect(() => route.decode({ expected_revision: readSeatsSettings(env).config.revision, seats: { ...section, worker: { ...worker, model: 'magpie' } } }, []))
+    expect((await route.decode({ expected_revision: (await readSeatsSettings(env)).config.revision, seats: { ...section, worker: { ...worker, model: 'magpie/other' } } }, []).execute()).status).toBe(200);
+    expect((await readSeatsSettings(env)).config.worker.model).toBe('magpie/other');
+    const current = (await readSeatsSettings(env)).config.revision;
+    expect(() => route.decode({ expected_revision: current, seats: { ...section, worker: { ...worker, model: 'magpie' } } }, []))
       .toThrow('seats_settings_request_invalid');
   });
 
@@ -682,11 +691,11 @@ describe('seat settings contract without transport', () => {
     const gatekeeperFallback = { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'codex' as const, model: 'gpt-6-astra' };
     writeFileSync(join(home, '.repo-harness', 'config.json'), JSON.stringify({ agents: PANE_AGENTS,
       seats: { ...DEFAULT_SEATS_CONFIG, 'gatekeeper-fallback': gatekeeperFallback } }));
-    const env = { HOME: home }, before = readSeatsSettings(env), route = seatsSettingsWriteRoute(env);
+    const env = { HOME: home }, before = (await readSeatsSettings(env)), route = seatsSettingsWriteRoute(env);
     const { revision, ...section } = before.config;
     const saved = await route.decode({ expected_revision: revision, seats: { ...section, [seatId]: seatConfig } }, []).execute();
     expect(saved.status).toBe(200);
-    const storedConfig = readSeatsSettings(env).config;
+    const storedConfig = (await readSeatsSettings(env)).config;
     const stored = storedConfig[seatId]!;
     expect(storedConfig['gatekeeper-fallback']?.model).toBe('gpt-6-astra');
     expect(stored).toMatchObject({ runtime, model, effort: 'high', fleet: [] });
@@ -706,18 +715,18 @@ describe('seat settings contract without transport', () => {
     mkdirSync(join(home, '.repo-harness'));
     writeFileSync(join(home, '.repo-harness', 'config.json'), JSON.stringify({ agents: PANE_AGENTS, seats: DEFAULT_SEATS_CONFIG }));
     const env = { HOME: home }, route = seatsSettingsWriteRoute(env);
-    const { revision, ...section } = readSeatsSettings(env).config;
+    const { revision, ...section } = (await readSeatsSettings(env)).config;
     const advisor = { ...section.advisor, runtime: 'pi' as const, model: 'magpie/agy-cli/gemini-4-neon', fleet: ['deep-reasoner', 'explorer'] };
     const models = { explorer: 'magpie/group/deepseek-v4.1-flash', 'deep-reasoner': 'zai/GLM-5.3' };
     const saved = await route.decode({ expected_revision: revision, seats: { ...section, advisor, pi_sub_agent_models: models } }, []).execute();
     expect(saved.status).toBe(200);
     expect(saved.body).toMatchObject({ changed_keys: ['seats.pi_sub_agent_models.deep-reasoner', 'seats.pi_sub_agent_models.explorer'] });
-    const stored = readSeatsSettings(env).config;
+    const stored = (await readSeatsSettings(env)).config;
     expect(stored.advisor).toEqual(advisor);
     expect(stored.pi_sub_agent_models).toEqual(models);
     const cleared = await route.decode({ expected_revision: stored.revision, seats: { ...section, advisor, pi_sub_agent_models: { 'deep-reasoner': models['deep-reasoner'] } } }, []).execute();
     expect(cleared.body).toMatchObject({ changed_keys: ['seats.pi_sub_agent_models.explorer'] });
-    expect(readSeatsSettings(env).config.pi_sub_agent_models).toEqual({ 'deep-reasoner': models['deep-reasoner'] });
+    expect((await readSeatsSettings(env)).config.pi_sub_agent_models).toEqual({ 'deep-reasoner': models['deep-reasoner'] });
   });
 
   test('Pi models require a provider and model id', () => {
@@ -752,7 +761,7 @@ describe('seat settings contract without transport', () => {
     }
   });
 
-  test('old stored sections require update and GET exposes all seats and routing ranges', () => {
+  test('old stored sections require update and GET exposes all seats and routing ranges', async () => {
     const original = { orchestrator: DEFAULT_SEATS_CONFIG.orchestrator, advisor: DEFAULT_SEATS_CONFIG.advisor,
       worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex' as const, model: 'gpt-6.1-sol' } };
     expect(() => decodeSeatsConfig(original)).toThrow(expect.objectContaining({ code: 'seats_config_migration_required', next_action: 'rh update' }));
@@ -761,7 +770,7 @@ describe('seat settings contract without transport', () => {
     expect(() => decodeSeatsConfig({ advisor: original.advisor, worker: original.worker })).toThrow('seats_config_invalid');
     const home = mkdtempSync(join(tmpdir(), 'seats-contract-'));
     cleanups.push(() => rmSync(home, { recursive: true, force: true }));
-    const settings = readSeatsSettings({ HOME: home });
+    const settings = (await readSeatsSettings({ HOME: home }));
     expect(Object.keys(settings.defaults)).toEqual([...SEAT_IDS, 'routing']);
     expect(settings.ranges.routing).toEqual({ classes: ROUTING_CLASSES, worker_seats: ['worker', 'worker-deep', 'worker-opus', 'worker-neon', 'worker-neon-deep', 'worker-light'],
       frontend_seats: ['worker-opus', 'worker-neon'] });
@@ -796,12 +805,12 @@ describe('seat settings contract without transport', () => {
       'worker-light': DEFAULT_SEATS_CONFIG['worker-light'] };
     writeFileSync(path, JSON.stringify({ agents, security: { mode: 'strict' }, seats: originalSeats }));
     const env = { HOME: home };
-    expect(() => readSeatsSettings(env)).toThrow(expect.objectContaining({ code: 'seats_config_migration_required' }));
+    await expect(readSeatsSettings(env)).rejects.toMatchObject({ code: 'seats_config_migration_required' });
     expect(migrateSeatsConfiguration(env)).toBe(true);
     const migratedBytes = readFileSync(path, 'utf8');
     expect(migrateSeatsConfiguration(env)).toBe(false);
     expect(readFileSync(path, 'utf8')).toBe(migratedBytes);
-    const before = readSeatsSettings(env);
+    const before = (await readSeatsSettings(env));
     const decoded = decodeSeatsConfig(JSON.parse(migratedBytes).seats);
     for (const id of ['orchestrator', 'advisor', 'worker', 'worker-light'] as const) expect(decoded[id]).toEqual(originalSeats[id]);
     expect(decoded.worker.model).toBe('gpt-6.1-sol');
@@ -825,7 +834,7 @@ describe('seat settings contract without transport', () => {
       'seats.gatekeeper.runtime', 'seats.gatekeeper.model',
       'seats.routing.important_fast', 'seats.routing.simple_fast', 'seats.routing.frontend', 'seats.routing.claude_saving_below_remaining', 'seats.routing.claude_hyper_at_or_above_remaining',
       'seats.routing.codex_credit_mode', 'seats.routing.codex_credit_floor'] });
-    const after = readSeatsSettings(env);
+    const after = (await readSeatsSettings(env));
     expect(after.config).toEqual({ revision: sha256(path), ...section });
     expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ agents, security: { mode: 'strict' }, seats: section });
   });
@@ -853,7 +862,7 @@ describe('seat settings contract without transport', () => {
     const path = join(home, '.repo-harness', 'config.json');
     const original = JSON.stringify({ agents: PANE_AGENTS });
     writeFileSync(path, original);
-    const env = { HOME: home }, { revision, ...seats } = readSeatsSettings(env).config;
+    const env = { HOME: home }, { revision, ...seats } = (await readSeatsSettings(env)).config;
     for (const [field, value, code] of [['model', null, 'seat_model_invalid'], ['effort', 'extreme', 'seat_effort_invalid']] as const) {
       const routing = { ...seats.routing, low_quota_explorer: { ...seats.routing.low_quota_explorer, [field]: value } };
       if (value === null) expect(() => decodeSeatsConfig({ ...seats, routing })).toThrow('seats_config_invalid');
@@ -864,7 +873,7 @@ describe('seat settings contract without transport', () => {
     const explorer = (model: string) => ({ ...seats, routing: { ...seats.routing, low_quota_explorer: { ...seats.routing.low_quota_explorer, model } } });
     expect(() => seatsSettingsWriteRoute(env).decode({ expected_revision: revision, seats: explorer('Claude Opus') }, [])).toThrow('seats_settings_request_invalid');
     expect((await seatsSettingsWriteRoute(env).decode({ expected_revision: revision, seats: explorer('claude-opus-5-5') }, []).execute()).status).toBe(200);
-    expect(readSeatsSettings(env).config.routing.low_quota_explorer.model).toBe('claude-opus-5-5');
+    expect((await readSeatsSettings(env)).config.routing.low_quota_explorer.model).toBe('claude-opus-5-5');
   });
 
   test('routing accepts percent thresholds and the credit mode range and rejects old stored fields on save', () => {
@@ -889,14 +898,14 @@ describe('seat settings contract without transport', () => {
     } }, [])).toThrow('seats_settings_request_invalid');
   });
 
-  test('routing refuses unknown, duplicate, empty and non-worker routes and Codex frontend seats', () => {
+  test('routing refuses unknown, duplicate, empty and non-worker routes and Codex frontend seats', async () => {
     const home = mkdtempSync(join(tmpdir(), 'seats-contract-'));
     cleanups.push(() => rmSync(home, { recursive: true, force: true }));
     mkdirSync(join(home, '.repo-harness'));
     const path = join(home, '.repo-harness', 'config.json');
     const original = JSON.stringify({ agents: PANE_AGENTS });
     writeFileSync(path, original);
-    const env = { HOME: home }, settings = readSeatsSettings(env), route = seatsSettingsWriteRoute(env);
+    const env = { HOME: home }, settings = (await readSeatsSettings(env)), route = seatsSettingsWriteRoute(env);
     for (const [task, candidates] of [
       ['simple_fast', ['unknown']], ['simple_fast', ['worker', 'worker']], ['simple_fast', []], ['simple_fast', ['advisor']],
       ['frontend', ['worker']], ['frontend', ['worker-light']],
@@ -914,7 +923,7 @@ describe('seat settings contract without transport', () => {
     expect(readFileSync(path, 'utf8')).toBe(original);
   });
 
-  test('a save refuses a frontend route to a Pi DeepSeek seat as the read path does and writes nothing', () => {
+  test('a save refuses a frontend route to a Pi DeepSeek seat as the read path does and writes nothing', async () => {
     const home = mkdtempSync(join(tmpdir(), 'seats-save-decoder-')), dir = join(home, '.repo-harness'), path = join(dir, 'config.json'), env = { HOME: home };
     cleanups.push(() => rmSync(home, { recursive: true, force: true }));
     const written = JSON.stringify({ agents: PANE_AGENTS, seats: { ...DEFAULT_SEATS_CONFIG, routing: { ...DEFAULT_SEATS_CONFIG.routing, frontend: ['worker-opus'] },
@@ -922,10 +931,10 @@ describe('seat settings contract without transport', () => {
     mkdirSync(dir); writeFileSync(path, written);
     const { revision, seats } = readSeatsConfiguration(env);
     // The request decoder takes this section; the read decoder refuses it, so the save refuses it with the read path's code.
-    expect(() => applySeatsSettings({ expected_revision: revision, seats: { ...seats, routing: { ...seats.routing, frontend: ['worker-neon'] } } }, env))
-      .toThrow(expect.objectContaining({ code: 'config_invalid' }));
+    await expect(applySeatsSettings({ expected_revision: revision, seats: { ...seats, routing: { ...seats.routing, frontend: ['worker-neon'] } } }, env))
+      .rejects.toMatchObject({ code: 'config_invalid' });
     expect(readFileSync(path, 'utf8')).toBe(written);
-    expect([applySeatsSettings({ expected_revision: revision, seats: { ...seats, advisor: { ...seats.advisor, effort: 'medium' } } }, env).changed_keys,
+    expect([(await applySeatsSettings({ expected_revision: revision, seats: { ...seats, advisor: { ...seats.advisor, effort: 'medium' } } }, env)).changed_keys,
       JSON.parse(readFileSync(path, 'utf8')).seats.advisor.effort]).toEqual([['seats.advisor.effort'], 'medium']);
   });
 });
@@ -933,9 +942,10 @@ describe('seat settings contract without transport', () => {
 describe('seat settings routes', () => {
   test('saves agy on orchestrator, advisor, council, all workers (with gh on/off), and gatekeeper-fallback, and refuses to disable its host while in use', async () => {
     const harness = await startHarness({ agents: { ...PANE_AGENTS, enabled: ['antigravity', ...PANE_AGENTS.enabled] } });
+    installAgy(harness.home, [{ id: 'gemini-4-neon', efforts: ['high'] }, { id: 'gemini-4-hydrogen', efforts: ['high'] }]);
     const advisor = { runtime: 'agy', model: 'gemini-4-neon-high', effort: 'high', advisor_model: null, fleet: [], tools: ['edit', 'mcp', 'net', 'read', 'schedule', 'shell'] } as const;
     expect((await seats(harness)).ranges.runtimes.find(range => range.id === 'agy')).toMatchObject({ enabled: true, effort: true, fleet: false });
-    for (const [model, effort] of [['gemini-4-neon-high', 'high'], ['well-shaped-free-model', 'max']] as const) {
+    for (const [model, effort] of [['gemini-4-neon-high', 'high'], ['well-shaped-free-model', null]] as const) {
       const { revision, ...section } = (await seats(harness)).config;
       const next = { ...advisor, model, effort };
       const response = await post(harness, { expected_revision: revision, seats: { ...section, advisor: next } }, 'seats');
@@ -1046,6 +1056,71 @@ describe('seat settings routes', () => {
     }, 'seats');
     expect(enableEdit.status).toBe(200);
     expect((await seats(harness)).config['worker-neon'].tools).toEqual(['edit', 'net', 'read', 'shell']);
+  });
+
+  test('an agy seat effort must be on the catalog menu of its model, and the ranges carry that menu', async () => {
+    const harness = await startHarness({ agents: { ...PANE_AGENTS, enabled: ['antigravity', ...PANE_AGENTS.enabled] } });
+    installAgy(harness.home, [{ id: 'gemini-4-hydrogen', efforts: ['low', 'medium', 'high', 'xhigh'] }, { id: 'gemini-4-carbon', efforts: 'unavailable' }]);
+    const read = await seats(harness);
+    expect(read.ranges.agy_models).toContainEqual({ id: 'gemini-4-hydrogen', efforts: ['low', 'medium', 'high', 'xhigh'] });
+    expect(read.ranges.agy_models).toContainEqual({ id: 'gemini-4-carbon', efforts: null });
+    const { revision, ...section } = read.config;
+    const advisor = { runtime: 'agy', model: 'gemini-4-hydrogen', effort: 'max', advisor_model: null, fleet: [], tools: ['net', 'read', 'shell'] } as const;
+    const refused = await post(harness, { expected_revision: revision, seats: { ...section, advisor } }, 'seats');
+    expect([refused.status, (await refused.json()).error.code]).toEqual([422, 'seat_effort_invalid']);
+    expect(sha256(harness.configPath)).toBe(revision);
+    // agy lists carbon without its menu: the effort cannot be checked, which is not an invalid effort.
+    const unverified = await post(harness, { expected_revision: revision, seats: { ...section, advisor: { ...advisor, model: 'gemini-4-carbon', effort: 'high' } } }, 'seats');
+    expect([unverified.status, (await unverified.json()).error.code]).toEqual([503, 'seat_effort_unverified']);
+    const saved = await post(harness, { expected_revision: revision, seats: { ...section, advisor: { ...advisor, effort: 'high' } } }, 'seats');
+    expect(saved.status).toBe(200);
+  });
+
+  test('an agy catalog refusal names the seat field and keeps the submitted model out of the body and the audit', async () => {
+    const harness = await startHarness({ agents: { ...PANE_AGENTS, enabled: ['antigravity', ...PANE_AGENTS.enabled] } });
+    installAgy(harness.home, [{ id: 'gemini-4-hydrogen', efforts: ['high'] }]);
+    const token = '0123456789abcdef0123456789abcdef01234567';
+    const { revision, ...section } = (await seats(harness)).config;
+    const advisor = { runtime: 'agy', model: token, effort: 'high', advisor_model: null, fleet: [], tools: ['net', 'read', 'shell'] } as const;
+    const refused = await post(harness, { expected_revision: revision, seats: { ...section, advisor } }, 'seats');
+    const body = await refused.text();
+    expect([refused.status, JSON.parse(body).error.code]).toEqual([422, 'seat_effort_invalid']);
+    expect(JSON.parse(body).error.message).toContain('seats.advisor.model');
+    expect(body).not.toContain(token);
+    expect(readFileSync(operatorAuditPath({ REPO_HARNESS_HOME: harness.harnessHome }), 'utf8')).not.toContain(token);
+  });
+
+  test('a held agy catalog read leaves the other operator routes answering', async () => {
+    const harness = await startHarness({ agents: { ...PANE_AGENTS, enabled: ['antigravity', ...PANE_AGENTS.enabled] } });
+    const release = join(harness.home, 'release-catalog');
+    installAgy(harness.home, [{ id: 'gemini-4-hydrogen', efforts: ['high'] }], release);
+    const pending = fetch(`${harness.server.url}/api/v1/settings/seats`);
+    for (const deadline = Date.now() + 30_000; !existsSync(`${release}.held`);) {
+      if (Date.now() > deadline) throw new Error('the catalog read did not start');
+      await Bun.sleep(20);
+    }
+    expect((await fetch(`${harness.server.url}/healthz`)).status).toBe(200);
+    writeFileSync(release, '');
+    const read = await pending;
+    expect(read.status).toBe(200);
+    expect(decodeSeatsSettings(await read.json()).ranges.agy_models).toContainEqual({ id: 'gemini-4-hydrogen', efforts: ['high'] });
+  });
+
+  test('an unreadable agy catalog keeps a stored agy effort, refuses a changed one and accepts the Default', async () => {
+    const advisor = { runtime: 'agy', model: 'gemini-4-hydrogen', effort: 'high', advisor_model: null, fleet: [], tools: ['net', 'read', 'shell'] } as const;
+    const harness = await startHarness({ agents: { ...PANE_AGENTS, enabled: ['antigravity', ...PANE_AGENTS.enabled] }, seats: { ...DEFAULT_SEATS_CONFIG, advisor } });
+    installAgy(harness.home, 'signed_out');
+    const read = await seats(harness);
+    expect(read.ranges.agy_models).toBeNull();
+    const { revision, ...section } = read.config;
+    const unrelated = await post(harness, { expected_revision: revision, seats: { ...section, orchestrator: { ...section.orchestrator, effort: 'xhigh' } } }, 'seats');
+    expect(unrelated.status).toBe(200);
+    const { revision: next, ...stored } = (await seats(harness)).config;
+    expect(stored.advisor).toEqual(advisor);
+    const changed = await post(harness, { expected_revision: next, seats: { ...stored, advisor: { ...advisor, effort: 'medium' } } }, 'seats');
+    expect([changed.status, (await changed.json()).error.code]).toEqual([503, 'seat_effort_unverified']);
+    const defaulted = await post(harness, { expected_revision: next, seats: { ...stored, advisor: { ...advisor, effort: null } } }, 'seats');
+    expect(defaulted.status).toBe(200);
   });
 
   test('an agy advisor refuses before save when Antigravity is disabled', async () => {
