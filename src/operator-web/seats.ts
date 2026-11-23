@@ -6,8 +6,10 @@ import {
   ROUTING_KEYS,
   SEAT_IDS,
   SEAT_SCAFFOLD_SUB_AGENTS,
+  agyEffortValid,
   agySeatTools,
   decodeSeatsSettings,
+  isAgyToolsValid,
   decodeSeatsSettingsResult,
   seatTakesFleet,
   type SeatConfigV1,
@@ -124,12 +126,21 @@ export function setSeatRuntime(draft: SeatsConfigV1, seat: SeatId, runtime: Seat
   });
 }
 
-export const setSeatModel = (draft: SeatsConfigV1, seat: SeatId, model: string | null): SeatsConfigV1 => patch(draft, seat, { model });
+/** An agy model with an effort suffix takes only that effort, so a new model drops an effort that it refuses. */
+export function setSeatModel(draft: SeatsConfigV1, seat: SeatId, model: string | null): SeatsConfigV1 {
+  const current = draft[seat]!;
+  const refused = current.runtime === 'agy' && model !== null && !agyEffortValid(model, current.effort);
+  return patch(draft, seat, refused ? { model, effort: null } : { model });
+}
 
 export const setSeatAdvisorModel = (draft: SeatsConfigV1, seat: SeatId, advisor_model: string | null): SeatsConfigV1 => patch(draft, seat, { advisor_model });
 export const setSeatEffort = (draft: SeatsConfigV1, seat: SeatId, effort: string | null): SeatsConfigV1 => patch(draft, seat, { effort });
 export const setSeatTool = (draft: SeatsConfigV1, seat: SeatId, tool: SeatTool, on: boolean): SeatsConfigV1 =>
   patch(draft, seat, { tools: toggled(draft[seat]!.tools, tool, on) });
+
+/** An agy seat switches a tool group only when the result passes the tool rule that the section decoder enforces. */
+export const agyToolLocked = (seat: SeatId, tools: readonly SeatTool[], tool: SeatTool): boolean =>
+  !isAgyToolsValid(seat, toggled(tools, tool, !tools.includes(tool)));
 export const setSeatRole = (draft: SeatsConfigV1, seat: SeatId, role: string, on: boolean): SeatsConfigV1 =>
   patch(draft, seat, { fleet: toggled(draft[seat]!.fleet, role, on) });
 

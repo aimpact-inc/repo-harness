@@ -3,12 +3,12 @@ import { Banner, Button, Empty, Loader, Switch, cn } from '@cloudflare/kumo';
 import { effectiveSeatConfig, seatAccountQuotas, seatOnCredits } from '../core/board/seat-routing';
 import { EXHAUSTED_AT_OR_ABOVE_USED_RANGE } from '../core/board/quota';
 import { agySeatLimits, buildSeatLaunch, type SeatLimitLevel } from '../core/board/seat-launch';
-import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, decodeSeatsSettingsRequest, isAgyAllowedSeat, isClaudeOrNeonSeat, isCouncilSeat, isOptionalSeat, isReviewSeat, isSeatScaffoldSubAgent, isWorkerSeat, neonDeepSeatStarter, piSubAgentModel, seatHostId, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
+import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, agyEffortValid, decodeSeatsSettingsRequest, isAgyAllowedSeat, isClaudeOrNeonSeat, isCouncilSeat, isOptionalSeat, isReviewSeat, isSeatScaffoldSubAgent, neonDeepSeatStarter, piSubAgentModel, seatHostId, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
 import type { SetupSnapshotV2 } from '../core/setup/types';
 import type { OperatorTranslate } from './i18n';
 import type { QuotaSection } from './quota';
 import {
-  GATEKEEPER_FALLBACK_STARTER, councilStarter, seatChanges, setExplorer, setOptionalSeat, setPiSubAgentModel, setRoute, setSeatAdvisorModel, setSeatEffort, setSeatModel, setSeatRole, setSeatRuntime, setRoutingValue, setSeatTool, type SeatsSettingsForm,
+  GATEKEEPER_FALLBACK_STARTER, agyToolLocked, councilStarter, seatChanges, setExplorer, setOptionalSeat, setPiSubAgentModel, setRoute, setSeatAdvisorModel, setSeatEffort, setSeatModel, setSeatRole, setSeatRuntime, setRoutingValue, setSeatTool, type SeatsSettingsForm,
 } from './seats';
 import { EnableSwitch, formLocked, runtimeRowOf, SaveResult } from './SettingsPage';
 import type { AgentsSettingsForm } from './settings';
@@ -224,7 +224,9 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
     // A typed or stored model outside the seat's recommended list stays visible as a choice.
     ...(draft.model !== null && !suggested.includes(draft.model) ? [{ value: draft.model as string | null, label: draft.model }] : []),
   ];
-  const efforts = [{ value: null, label: t('seats.effort.default') }, ...ranges.efforts.map(effort => ({ value: effort as string | null, label: effort, off: !runtime.effort }))];
+  // An agy model with an effort suffix takes only that effort; the launch checks the catalog menu of the model.
+  const effortOff = (effort: string) => !runtime.effort || (agy && draft.model !== null && !agyEffortValid(draft.model, effort));
+  const efforts = [{ value: null, label: t('seats.effort.default') }, ...ranges.efforts.map(effort => ({ value: effort as string | null, label: effort, off: effortOff(effort) }))];
   // The host agent types change only the argv; the limit levels do not depend on them, so the page passes none.
   const launchSeat = seat === 'gatekeeper-fallback' ? 'gatekeeper' : seat;
   const limits = agy ? agySeatLimits(launchSeat, draft) : buildSeatLaunch(launchSeat, draft, 'seats', []).limits;
@@ -293,7 +295,7 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
         {SEAT_TOOLS.filter(tool => !(review || council) || range.tools.includes(tool)).map((tool) => {
           const on = draft.tools.includes(tool);
           const ruled = !range.tools.includes(tool);
-          const agyLockedTool = agy && !(isWorkerSeat(seat) && ((tool === 'gh' && (draft.tools.includes('edit') || on)) || (tool === 'edit' && !on)));
+          const agyLockedTool = agy && agyToolLocked(seat, draft.tools, tool);
           // Codex always runs commands, so its Shell can be turned on but not off.
           const hostWhy = agyLockedTool ? t('seats.tools.why.agy') : draft.runtime === 'pi' ? t('seats.tools.why.pi')
             : tool === 'read' ? t('seats.tools.why.read')
