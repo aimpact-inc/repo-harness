@@ -665,6 +665,15 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     }
   });
 
+  test("an agy orchestrator needs approval for Git commands that can write output files", () => {
+    const { allow } = agySeatCommandRules("orchestrator", AGY_ORCHESTRATOR);
+    for (const subcommand of ["diff", "log", "show"]) {
+      const prefix = `git ${subcommand}`;
+      const output = `${prefix} --output=/tmp/existing-user-file`;
+      expect(allow.some(rule => prefix.startsWith(rule) || output.startsWith(rule)), output).toBe(false);
+    }
+  });
+
   test("agySeatCommandRules refuses bare command names and mutation-capable prefixes across all allowed seats", () => {
     for (const [seat, config] of [
       ["advisor", AGY_ADVISOR],

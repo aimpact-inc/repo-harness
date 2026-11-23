@@ -309,7 +309,7 @@ const AGY_ORCHESTRATOR_COMMAND_PREFIXES: readonly string[] = [
   'gh issue view', 'gh issue list', 'gh issue create', 'gh issue comment', 'gh issue edit', 'gh issue close', 'gh issue reopen',
   'gh pr view', 'gh pr list', 'gh pr checks', 'gh pr diff', 'gh pr create', 'gh pr comment', 'gh pr edit', 'gh pr ready',
   'gh run view', 'gh run list', 'gh run watch', 'gh run rerun',
-  'git fetch', 'git status', 'git log', 'git show', 'git diff', 'git worktree list',
+  'git fetch', 'git status', 'git worktree list',
 ];
 
 const AGY_ORCHESTRATOR_DENIED_COMMANDS: readonly string[] = [
