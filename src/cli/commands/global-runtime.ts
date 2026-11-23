@@ -14,9 +14,8 @@ import type { SkillHost } from '../../effects/host-skill-roots';
 import { pathRecordIsCurrent, pathRecordKey, readPathRecords } from '../../effects/host-config/path-records';
 import { architecturePort, isArchitectureUnavailable } from '../../core/architecture/contracts';
 import { globalConfigurationWriter, mutateGlobalConfiguration } from '../../effects/configuration/global-configuration';
-import { DEFAULT_SEATS_CONFIG, INTRODUCED_ROUTING_DEFAULTS, ROUTING_CLASSES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, migrateLegacySeatsRecord, neonDeepSeatStarter, seatModelShapeValid, stripRetiredSeatFleetRoles } from '../../core/board/seats-settings';
-import { isRecord } from '../../core/evidence/is-record';
-import { checkSeatRoutingModels, checkSeatSettingsRanges, enabledRuntimesOf, seatsRanges } from '../../effects/board/seats-configuration';
+import { DEFAULT_SEATS_CONFIG, INTRODUCED_ROUTING_DEFAULTS, ROUTING_CLASSES, SeatsConfigMigrationRequiredError, decodeSeatsConfig, migrateLegacySeatsRecord, seatModelShapeValid, stripRetiredSeatFleetRoles } from '../../core/board/seats-settings';
+import { checkSeatRoutingModels, seatsRanges } from '../../effects/board/seats-configuration';
 import { chmodSync, closeSync, constants, cpSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync } from "fs";
 import { syncDirectoryDurably, writeAllSync } from '../../effects/atomic-append';
 import { renderJsonObjectUpdate } from "../../effects/adoption/standard-plan";
@@ -1719,33 +1718,6 @@ function withPlugin(plugins: readonly PluginId[], id: PluginId): readonly Plugin
   return [...new Set([...plugins, id])].sort() as PluginId[];
 }
 
-const DEEP_ROUTING_CLASSES = ['important_deep', 'simple_deep'] as const;
-
-function addNeonDeepToSavedRoutes(routing: Record<string, unknown>): Record<string, unknown> {
-  const next = { ...routing };
-  for (const task of DEEP_ROUTING_CLASSES) {
-    const list = routing[task];
-    if (Array.isArray(list) && list.includes('worker-neon') && !list.includes('worker-neon-deep')) {
-      next[task] = list.flatMap(id => id === 'worker-neon' ? ['worker-neon-deep', id] : [id]);
-    }
-  }
-  return next;
-}
-
-function seatMigrationRoutingDefaults(neonDeepConfigured: boolean, lightConfigured: boolean) {
-  const routing = { ...DEFAULT_SEATS_CONFIG.routing };
-  if (!neonDeepConfigured) {
-    for (const task of DEEP_ROUTING_CLASSES) {
-      routing[task] = routing[task].map(id => id === 'worker-neon-deep' ? 'worker-neon' : id);
-    }
-  }
-  if (!lightConfigured) {
-    routing.important_fast = routing.important_fast.filter(id => id !== 'worker-light');
-    routing.simple_fast = routing.simple_fast.filter(id => id !== 'worker-light');
-  }
-  return routing;
-}
-
 /** Update fills introduced keys and removes retired routing keys and fleet roles. */
 export function migrateSeatsConfiguration(env: NodeJS.ProcessEnv, runtimeLock?: RuntimeTransactionContext, beforeWrite?: (path: string, text: string) => void): boolean {
   return mutateGlobalConfiguration(env, config => {
@@ -1758,13 +1730,6 @@ export function migrateSeatsConfiguration(env: NodeJS.ProcessEnv, runtimeLock?: 
     const { orchestrator: _orchestrator, advisor: _advisor, worker: _worker, ...introduced } = DEFAULT_SEATS_CONFIG;
     const { record: legacyMigrated } = migrateLegacySeatsRecord(config.seats as Record<string, unknown>);
     const stored = stripRetiredSeatFleetRoles(legacyMigrated);
-    const addsNeonDeep = !Object.hasOwn(stored, 'worker-neon-deep');
-    const enabled = addsNeonDeep ? enabledRuntimesOf(config) : [];
-    const neon = isRecord(stored['worker-neon']) ? stored['worker-neon'] : null;
-    const starter = addsNeonDeep ? neonDeepSeatStarter(enabled, neon?.runtime) : null;
-    const neonDeep = starter !== null && neon?.runtime === starter.runtime
-      ? { ...starter, tools: neon.tools, fleet: neon.fleet }
-      : starter;
     let routing = stored.routing;
     if (typeof routing === 'object' && routing !== null && ('mode' in routing || 'hyper' in routing)) {
       const row = routing as Record<string, unknown>;
@@ -1791,12 +1756,22 @@ export function migrateSeatsConfiguration(env: NodeJS.ProcessEnv, runtimeLock?: 
       const { codex_hyper_at_or_above_remaining: _codexHyper, ...kept } = routing as Record<string, unknown>;
       routing = { ...INTRODUCED_ROUTING_DEFAULTS, ...kept };
     }
-    if (neonDeep !== null && isRecord(routing)) routing = addNeonDeepToSavedRoutes(routing);
-    const base = { ...introduced, 'worker-neon-deep': neonDeep, 'worker-light': null, ...stored };
-    const effectiveRouting = routing ?? seatMigrationRoutingDefaults(base['worker-neon-deep'] !== null, base['worker-light'] !== null);
+    const base = { ...introduced, 'worker-neon-deep': null, 'worker-light': null, ...stored };
+    // Sections without routing predate the Neon deep defaults.
+    const legacyRoutingDefaults = {
+      ...introduced.routing,
+      important_deep: ['worker-opus', 'worker-neon', 'worker-deep'],
+      simple_deep: ['worker-neon', 'worker-deep'],
+    };
+    const effectiveRouting = routing ?? (base['worker-light'] === null
+      ? {
+          ...legacyRoutingDefaults,
+          important_fast: legacyRoutingDefaults.important_fast.filter(id => id !== 'worker-light'),
+          simple_fast: legacyRoutingDefaults.simple_fast.filter(id => id !== 'worker-light'),
+        }
+      : legacyRoutingDefaults);
     const seats = decodeSeatsConfig({ ...base, routing: effectiveRouting });
-    if (addsNeonDeep) checkSeatSettingsRanges(seats, enabled);
-    else checkSeatRoutingModels(seats.routing);
+    checkSeatRoutingModels(seats.routing);
     return { config: { ...config, seats }, value: true };
   }, { runtimeLock, beforeWrite }).value;
 }

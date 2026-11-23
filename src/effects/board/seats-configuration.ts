@@ -166,14 +166,6 @@ function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly str
   if (role !== undefined) throw new SeatsConfigurationError('seat_fleet_not_allowed', `The ${id} seat on ${seat.runtime} cannot call the ${role} sub-agent.`);
 }
 
-export function checkSeatSettingsRanges(seats: SeatsConfigV1, enabledRuntimes: readonly string[]): void {
-  for (const id of SEAT_IDS) {
-    const seat = seats[id];
-    if (seat !== null) checkSeat(id, seat, enabledRuntimes);
-  }
-  checkSeatRoutingModels(seats.routing);
-}
-
 const SEAT_POOL_MEMBER_MS = 15_000;
 // Codex installation can run both a readiness and a version check. Leave time for OAR to close its processes.
 const SEAT_POOL_CHILD_MS = 120_000;
@@ -496,7 +488,12 @@ export function applySeatsSettings(
 ): SeatsSettingsResultV1 {
   try {
     const result = mutateGlobalConfiguration(env, (config) => {
-      checkSeatSettingsRanges(request.seats, enabledRuntimesOf(config));
+      const enabled = enabledRuntimesOf(config);
+      for (const id of SEAT_IDS) {
+        const seat = request.seats[id];
+        if (seat !== null) checkSeat(id, seat, enabled);
+      }
+      checkSeatRoutingModels(request.seats.routing);
       // One decoder for the read path and the save (#2917): a candidate that `rh quota` or `rh seats argv` would refuse is never written.
       const next = decodeSeatsSection(request.seats);
       const changed = changedKeys(decodeSeatsSection(config.seats), next);

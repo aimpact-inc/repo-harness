@@ -182,7 +182,7 @@ test('update renames retired seats, remaps routing, strips disallowed fleet role
       },
       pi_sub_agent_models: { explorer: 'custom/model' },
     };
-    const agents = { enabled: ['claude', 'pi'], uses: { docs: [], review: [] }, default_docs: null };
+    const agents = { enabled: ['claude'], uses: { docs: [], review: [] }, default_docs: null };
     expect(decodeSeatsConfig(undefined).council).toBeNull();
     expect(() => decodeSeatsConfig(legacySeats)).toThrow(SeatsConfigMigrationRequiredError);
     writeFileSync(path, JSON.stringify({ seats: legacySeats, agents }));
@@ -199,10 +199,9 @@ test('update renames retired seats, remaps routing, strips disallowed fleet role
     expect(parsed.seats['worker-neon'].fleet).toEqual(['explorer']);
     expect(parsed.seats['worker-light'].fleet).toEqual([]);
     expect(parsed.seats.advisor).toEqual({ ...rest.advisor, runtime: 'claude', model: 'sonnet', fleet: ['deep-reasoner', 'explorer'] });
-    expect(parsed.seats['worker-neon-deep']).toEqual(DEFAULT_SEATS_CONFIG['worker-neon-deep']);
+    expect(parsed.seats['worker-neon-deep']).toBeNull();
     expect(parsed.seats.routing).toEqual({ ...DEFAULT_SEATS_CONFIG.routing,
-      important_deep: ['worker-opus', 'worker-neon-deep', 'worker-neon', 'worker-deep'],
-      simple_deep: ['worker-neon-deep', 'worker-neon', 'worker-deep'] });
+      important_deep: ['worker-opus', 'worker-neon', 'worker-deep'], simple_deep: ['worker-neon', 'worker-deep'] });
     expect(parsed.seats.pi_sub_agent_models).toEqual({ explorer: 'custom/model' });
     expect(migrateSeatsConfiguration(env)).toBe(false);
     expect(readFileSync(path, 'utf8')).toBe(migrated);
@@ -304,7 +303,7 @@ test('update strips retired fleet roles once and leaves the saved seats ready fo
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
-test.each([false, true])('update adds the deep Neon seat to old configs when Neon hosts are enabled (%s)', neonEnabled => {
+test('update adds a null Neon deep seat and preserves saved routes with a Neon host enabled', () => {
   const home = mkdtempSync(join(tmpdir(), 'neon-deep-migration-'));
   try {
     const directory = join(home, '.repo-harness');
@@ -316,16 +315,12 @@ test.each([false, true])('update adds the deep Neon seat to old configs when Neo
     const env = { ...sanitizedChildEnv(home), PATH: [home, process.env.PATH].filter(Boolean).join(delimiter),
       REPO_HARNESS_HOME: directory, REPO_HARNESS_BUN_EXECUTABLE: bun };
     const { 'worker-neon-deep': _deep, ...native } = NATIVE_SEATS_PRESET;
-    const neonTools = ['net', 'read', 'shell'] as const;
     const seats = { ...native,
-      advisor: neonEnabled ? native.advisor : { ...native.advisor, runtime: 'claude', model: 'opus' },
-      'worker-neon': neonEnabled ? { ...native['worker-neon'], tools: neonTools }
-        : { ...DEFAULT_SEATS_CONFIG['worker-neon'], runtime: 'claude', model: 'opus' },
-      'worker-light': neonEnabled ? { ...DEFAULT_SEATS_CONFIG['worker-light']!, model: 'magpie/group/deepseek-v4.1-flash' } : null,
+      'worker-light': { ...DEFAULT_SEATS_CONFIG['worker-light']!, model: 'magpie/group/deepseek-v4.1-flash' },
       routing: { ...native.routing, important_deep: ['worker-deep', 'worker-neon', 'worker-opus'],
         simple_deep: ['worker-deep'], important_fast: ['worker-neon'], simple_fast: ['worker'] },
     } satisfies Omit<SeatsConfigV1, 'worker-neon-deep'>;
-    const enabled = neonEnabled ? ['antigravity', 'claude', 'codex', 'pi'] : ['claude', 'codex'];
+    const enabled = ['antigravity', 'claude', 'pi'];
     const agents = { enabled, uses: { docs: [], review: [] }, default_docs: null };
     const original = JSON.stringify({ agents, seats }, null, 4);
     writeFileSync(path, original);
@@ -336,43 +331,8 @@ test.each([false, true])('update adds the deep Neon seat to old configs when Neo
     expect(update.exitCode, update.stdout).toBe(0);
     const backup = readdirSync(directory).find(name => name.startsWith('config.json.bak-'))!;
     expect(readFileSync(join(directory, backup), 'utf8')).toBe(original);
-    const migrated = readSeatsConfiguration(env).seats;
-    expect(migrated).toEqual({ ...seats,
-      'worker-neon-deep': neonEnabled ? { ...NATIVE_SEATS_PRESET['worker-neon-deep']!, tools: neonTools } : null,
-      routing: { ...seats.routing, important_deep: neonEnabled
-        ? ['worker-deep', 'worker-neon-deep', 'worker-neon', 'worker-opus'] : seats.routing.important_deep },
-    });
+    expect(readSeatsConfiguration(env).seats).toEqual({ ...seats, 'worker-neon-deep': null });
     expect(migrateSeatsConfiguration(env)).toBe(false);
-  } finally { rmSync(home, { recursive: true, force: true }); }
-});
-
-test('update leaves the config bytes intact when the Neon deep migration finds a seat on a disabled host', () => {
-  const home = mkdtempSync(join(tmpdir(), 'neon-deep-refusal-'));
-  try {
-    const directory = join(home, '.repo-harness');
-    mkdirSync(directory);
-    const path = join(directory, 'config.json');
-    const bun = join(home, 'bun');
-    writeExecutable(home, bun, '#!/bin/bash\nif [[ "$1" == "--version" ]]; then echo 1.4.0; fi\nexit 0\n');
-    writeFakeHc(home);
-    const env = { ...sanitizedChildEnv(home), PATH: [home, process.env.PATH].filter(Boolean).join(delimiter),
-      REPO_HARNESS_HOME: directory, REPO_HARNESS_BUN_EXECUTABLE: bun };
-    const { 'worker-neon-deep': _deep, ...defaults } = DEFAULT_SEATS_CONFIG;
-    const seats = { ...defaults, worker: NATIVE_SEATS_PRESET.worker,
-      routing: { ...defaults.routing, important_deep: ['worker-opus', 'worker-neon', 'worker-deep'], simple_deep: ['worker-neon', 'worker-deep'] },
-    };
-    const agents = { enabled: ['claude', 'pi'], uses: { docs: [], review: [] }, default_docs: null };
-    const original = Buffer.from(`${JSON.stringify({ agents, seats }, null, 4)}\r\n`);
-    writeFileSync(path, original);
-    const update = runGlobalRuntimeSetup({
-      sourceRoot: ROOT, cwd: home, plugins: [], updateMode: true, installCli: false,
-      syncSkill: false, hostAdapters: false, externalSkills: false, codegraph: false, env,
-    });
-    expect(readFileSync(path)).toEqual(original);
-    expect(update.exitCode).toBe(1);
-    expect(update.steps.at(-1)).toEqual({ step: 'migrate seats configuration', status: 'failed',
-      detail: 'Fix the worker seat before saving. Its runtime codex is disabled under Hosts.' });
-    expect(readdirSync(directory).filter(name => name.startsWith('config.json.bak-'))).toEqual([]);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
