@@ -2,7 +2,7 @@ import { sha256Hex } from '../../core/evidence/sha256';
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
 import {
-  isSeatResetAction, missingHandoffSections, seatResetRequestPath, isSeatSessionSource, seatSessionPath,
+  isSeatResetAction, missingHandoffSections, seatResetLogPath, seatResetRequestPath, isSeatSessionSource, seatSessionPath,
   type InteractiveResetHost, type SeatLaunchModel, type SeatResetAction, type SeatResetIdentity, type SeatSessionSource,
 } from '../../core/board/seat-reset';
 import { withAntigravityTranscript } from './antigravity-transcript';
@@ -88,14 +88,21 @@ export function writeSeatResetRequest(identity: SeatResetIdentity, now: Date, re
   })}\n`);
 }
 
-/**
- * True while a valid request for this transcript is open. The block is once per session segment; `/compact` keeps
- * the transcript path, so its SessionStart record ends the segment. An absent request, or one that `readRequest`
- * refuses (an old request without an action), is not open, so the next crossing writes a fresh request.
- */
-export function seatResetRequested(identity: SeatResetIdentity, transcriptPath: string): boolean {
+/** An outcome belongs to the request whose timestamp was recorded with it. */
+export function seatResetEventCount(identity: SeatResetIdentity, requestedAt: string, kind: string): number {
+  let lines: string[];
+  try { lines = readFileSync(seatResetLogPath(identity), 'utf8').split('\n'); } catch { return 0; }
+  return lines.filter((line) => {
+    const entry = parseJsonObject(line);
+    return entry?.requested_at === requestedAt && entry.kind === kind;
+  }).length;
+}
+
+/** A release suppresses reminders for this request until the seat starts a new session segment. */
+export function seatResetRequestState(identity: SeatResetIdentity, transcriptPath: string): 'absent' | 'open' | 'released' {
   const request = readRequest(identity);
-  return request !== null && request.transcriptPath === transcriptPath && requestOpen(identity, request);
+  if (request === null || request.transcriptPath !== transcriptPath || !requestOpen(identity, request)) return 'absent';
+  return seatResetEventCount(identity, request.requestedAt, 'no_reset') > 0 ? 'released' : 'open';
 }
 
 /** A request is open while no SessionStart record is newer than it: a newer record means a new session segment. */
@@ -271,7 +278,7 @@ interface TranscriptLine {
  * The evidence fields of one transcript line, or null for a line that is not a JSON object: a JSON null, an array, a
  * scalar and a cut line are skipped, never a throw.
  */
-function parseTranscriptLine(line: string): Record<string, unknown> | null {
+function parseJsonObject(line: string): Record<string, unknown> | null {
   try {
     const entry: unknown = JSON.parse(line);
     return typeof entry === 'object' && entry !== null && !Array.isArray(entry) ? entry as Record<string, unknown> : null;
@@ -281,7 +288,7 @@ function parseTranscriptLine(line: string): Record<string, unknown> | null {
 }
 
 function transcriptLine(line: string): TranscriptLine | null {
-  const entry = parseTranscriptLine(line);
+  const entry = parseJsonObject(line);
   if (entry === null) return null;
   const { type, message, attachment } = entry as {
     type?: unknown;
@@ -331,7 +338,7 @@ function sentAntigravityResumed(appended: string, prompt: string, peer: string):
   let asked = false;
   let resultStep: number | null = null;
   for (const line of appended.split('\n')) {
-    const entry = parseTranscriptLine(line);
+    const entry = parseJsonObject(line);
     if (entry === null) continue;
     const { type, source, status, content, step_index: index } = entry;
     if (type === 'USER_INPUT' && source === 'USER_EXPLICIT' && status === 'DONE' && typeof content === 'string' && content.includes(prompt)) asked = true;

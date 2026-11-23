@@ -1,4 +1,4 @@
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, unlinkSync, writeFileSync } from 'fs';
 import { basename } from 'path';
 import {
   RESET_SEATS, seatExitCommand, seatNoResetMessage, seatResetCommand, SEAT_RESET_RETRIES, handoffIdentity, seatResetClaimPath,
@@ -9,12 +9,12 @@ import { seatHostId, type SeatRuntime } from '../../core/board/seats-settings';
 import { HerdrCoreError, RH_LABEL, hcGet, hcKeys, hcList, hcSend, hcWait, type HcLabels, type HcTerminal, type HcWaitResult, type HerdrCoreOptions } from '../terminal/herdr-core';
 import { readNotifyConfig } from '../terminal/notify-read';
 import {
-  handoffProblem, newSession, readRequest, readResumeTranscript, readSeatSession, requestOpen, sentResumed,
+  handoffProblem, newSession, readRequest, readResumeTranscript, readSeatSession, requestOpen, seatResetEventCount, sentResumed,
   type NewSession, type SeatRequest, type SeatSessionRecord,
 } from './seat-reset-store';
 
 export {
-  readTranscriptUsage, writeSeatResetRequest, seatResetRequested, recordSeatSession, readSeatSession,
+  readTranscriptUsage, writeSeatResetRequest, seatResetRequestState, recordSeatSession, readSeatSession,
   type TranscriptUsage, type SeatResetRequestRecord, type SeatSessionRecord,
 } from './seat-reset-store';
 
@@ -87,7 +87,7 @@ export interface SeatResetTarget {
 
 export interface SeatResetOptions extends HerdrCoreOptions {
   /** Resolve the configured runtime and, only when requested, the quota-selected model. */
-  readonly resolveLaunch: (identity: SeatResetIdentity, checkout: string) => SeatResetTarget;
+  readonly resolveLaunch: (identity: SeatResetIdentity) => SeatResetTarget;
   /** Prepare the same-runtime destination using the normal launch checks. */
   readonly relaunch: (identity: SeatResetIdentity, checkout: string) => Promise<SeatRelaunch>;
   /** Tests only: shorter waits. */
@@ -177,16 +177,7 @@ class SeatResetRun {
   }
 
   private count(kind: string): number {
-    let lines: string[] = [];
-    try { lines = readFileSync(this.logPath, 'utf8').split('\n'); } catch { /* no log yet */ }
-    return lines.filter((line) => {
-      try {
-        const entry = JSON.parse(line) as { requested_at?: unknown; kind?: unknown };
-        return entry.requested_at === this.request?.requestedAt && entry.kind === kind;
-      } catch {
-        return false;
-      }
-    }).length;
+    return seatResetEventCount(this.identity, this.request!.requestedAt, kind);
   }
 
   async settleNotices(): Promise<void> {
@@ -317,9 +308,9 @@ class SeatResetRun {
   }
 
   /** Releases the requester with NO-RESET: it continues, and no slash command is typed. */
-  private release(code: 'request_invalid' | 'request_closed', reason: string): SeatResetError {
+  private release(code: 'request_invalid' | 'request_closed' | 'seat_reset_runtime_changed', reason: string, next = ''): SeatResetError {
     this.tell('no_reset', seatNoResetMessage(reason, this.interactiveHost()), code, `${reason}.`);
-    return new SeatResetError(code, 'no_reset', `${reason}. No reset: the requester continues.`);
+    return new SeatResetError(code, 'no_reset', `${reason}. No reset: the requester continues.${next}`);
   }
 
   /** A failed check asks for a rewrite, at most 3 times per request; then the requester continues without a reset. */
@@ -403,30 +394,28 @@ class SeatResetRun {
   }
 
   private requireSameRuntime(runtime: SeatRuntime): void {
+    if (seatHostId(runtime) === this.request!.host) return;
     const current = RESET_FOREGROUNDS[this.request!.host];
-    if (seatHostId(runtime) !== this.request!.host) {
-      throw this.refuse('seat_reset_runtime_changed', this.keyOutcome,
-        `The requester runs ${current}, but ${this.identity.seat} is configured for ${runtime}. Finish the handoff, then run \`rh seats launch ${this.identity.seat} --repository-id ${this.identity.repository}\` to start the configured runtime.`);
-    }
+    const reason = `The requester runs ${current}, but ${this.identity.seat} is configured for ${runtime}`;
+    const next = ` Run \`rh seats launch ${this.identity.seat} --repository-id ${this.identity.repository}\` to start the configured runtime.`;
+    if (!this.attemptedKeys) throw this.release('seat_reset_runtime_changed', reason, next);
+    throw this.refuse('seat_reset_runtime_changed', this.keyOutcome, `${reason}.${next}`);
   }
 
-  /** Resolve the configured runtime before probing quota for a same-runtime model change. */
+  /** A model check can fail and still leave the current runtime available for an in-process reset. */
   private async modelChanged(action: SeatResetAction): Promise<boolean> {
+    const session = readSeatSession(this.identity);
+    if (action !== 'reset' || session?.model == null) return false;
     try {
-      const checkout = this.launchDirectory();
-      const target = this.options.resolveLaunch(this.identity, checkout);
-      this.requireSameRuntime(target.runtime);
-      const session = readSeatSession(this.identity);
-      if (action !== 'reset' || session?.model == null) return false;
+      const target = this.options.resolveLaunch(this.identity);
+      if (seatHostId(target.runtime) !== this.request!.host) return false;
       const model = await target.model();
-      this.requireSameRuntime(this.options.resolveLaunch(this.identity, checkout).runtime);
       if (!model.modeKnown) {
         this.record('model_check_failed', 'quota_unknown: the seat account has no fresh weekly quota reading, so the seat keeps its model');
         return false;
       }
       return model.model !== session.model || model.effort !== session.effort;
     } catch (error) {
-      if (error instanceof SeatResetError) throw error;
       this.record('model_check_failed', `relaunch_argv_failed: ${sentence(error)}`);
       return false;
     }
@@ -481,6 +470,7 @@ class SeatResetRun {
     const session = readSeatSession(this.identity);
     this.requireFreshRequest(session);
     if (relaunch !== undefined) this.requireRelaunchReady(terminal, session, relaunch.transcriptPath);
+    this.requireSameRuntime(this.options.resolveLaunch(this.identity).runtime);
     const since = Date.now();
     this.type(command);
     return { since, parentPid: terminal.pid };
@@ -506,17 +496,14 @@ class SeatResetRun {
   }
 
   private async prepareRelaunch(): Promise<string> {
+    this.requireSameRuntime(this.options.resolveLaunch(this.identity).runtime);
     let plan: SeatRelaunch;
     try {
-      const checkout = this.launchDirectory();
-      this.requireSameRuntime(this.options.resolveLaunch(this.identity, checkout).runtime);
-      plan = await this.options.relaunch(this.identity, checkout);
-      this.requireSameRuntime(plan.runtime);
-      this.requireSameRuntime(this.options.resolveLaunch(this.identity, checkout).runtime);
+      plan = await this.options.relaunch(this.identity, this.launchDirectory());
     } catch (error) {
-      if (error instanceof SeatResetError) throw error;
       throw this.relaunchFailed(`relaunch_argv_failed: ${sentence(error)}`);
     }
+    this.requireSameRuntime(plan.runtime);
     // The shell reads the argv from a script because hc keys can only type a subset of its characters.
     const script = `${seatResetDirectory(this.identity)}/relaunch.sh`;
     if (!TYPABLE.test(script) || script.includes(' ')) throw this.relaunchFailed('relaunch_path_untypable');

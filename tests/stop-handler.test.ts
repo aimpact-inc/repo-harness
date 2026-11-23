@@ -6,7 +6,7 @@ import { dirname, join } from 'path';
 import { tmpdir } from 'os';
 import { runStopHandler as runStopHandlerRuntime } from '../src/cli/hook/stop-handler';
 import { runMutationGuard } from '../src/cli/hook/mutation-guard';
-import { seatHandoffPath, seatResetDirectory, seatResetReason, seatResetRequestPath } from '../src/core/board/seat-reset';
+import { seatHandoffPath, seatResetDirectory, seatResetLogPath, seatResetReason, seatResetRequestPath } from '../src/core/board/seat-reset';
 import { renderAntigravityHookCommand } from '../src/cli/hook/host-adapter';
 import { readSeatSession } from '../src/effects/board/seat-reset';
 import { AGY_REVIEW_LAUNCH_ENV, readAgyReviewSession } from '../src/effects/board/agy-review-session';
@@ -275,6 +275,10 @@ describe.skipIf(process.platform === 'win32')('Antigravity Stop', () => {
     const record = readFileSync(request, 'utf8');
     expect(JSON.parse(record)).toMatchObject({ context_tokens: 380_000, action: 'reset', transcript_path: transcriptPath, host: 'antigravity' });
     expect(record).not.toContain(marker);
+    const { requested_at } = JSON.parse(record);
+    writeFileSync(seatResetLogPath(identity), `${JSON.stringify({ requested_at, kind: 'no_reset', detail: 'handoff_sections_missing' })}\n`);
+    expect(invoke('Stop', { executionNum: 0 })).toBe('');
+    expect(readFileSync(request, 'utf8')).toBe(record);
     for (const surface of ['antigravity', 'antigravity-ide']) {
       const dir = join(home, '.gemini', surface, 'brain', conversationId, '.system_generated/logs');
       mkdirSync(dir, { recursive: true });

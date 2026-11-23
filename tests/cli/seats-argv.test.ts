@@ -2073,10 +2073,10 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     const model = () => { throw new Error("Unexpected model probe"); };
     const relaunch = () => { throw new Error("Unexpected destination probe"); };
     expect(await reset({ host, action, resolveLaunch: () => ({ runtime, model }), relaunch })).toEqual({
-      error: "seat_reset_runtime_changed", outcome: "nothing_sent",
+      error: "seat_reset_runtime_changed", outcome: "no_reset",
     });
-    expect(log().at(-1)?.detail).toContain("rh seats launch advisor");
-    expect(sends()).toEqual([]);
+    expect(log().at(-1)).toMatchObject({ kind: "no_reset", detail: "seat_reset_runtime_changed" });
+    expect(sends()).toEqual([expect.stringMatching(/^NO-RESET: The requester runs/u)]);
     expect(existsSync(join(dirname(handoff), "relaunch.sh"))).toBe(false);
     expect(readdirSync(dirname(handoff)).some(name => name.startsWith("claim-"))).toBe(false);
   })());
@@ -2089,8 +2089,31 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
       runtime = "pi";
       return { argv: ["agy"], runtime: "agy", model: null, effort: null, modeKnown: true };
     };
-    expect(await reset({ host: "antigravity", resolveLaunch, relaunch })).toEqual({ error: "seat_reset_runtime_changed", outcome: "nothing_sent" });
-    expect(sends()).toEqual([]);
+    expect(await reset({ host: "antigravity", resolveLaunch, relaunch })).toEqual({ error: "seat_reset_runtime_changed", outcome: "no_reset" });
+    expect(sends()).toEqual([expect.stringMatching(/^NO-RESET:/u)]);
+  }));
+
+  test("a Pi runtime change during a failed quota check refuses /new", withReset(async ({ home, handoff, reset, state, sends, log }) => {
+    const identity = { seat: "advisor", repository: basename(dirname(dirname(handoff))) } as const;
+    recordSeatSession(identity, { host: "pi", sessionId: "old", transcriptPath: join(home, "old.jsonl"), source: "startup",
+      model: "old", effort: null }, new Date(0));
+    state({ foreground: "pi", host: "pi" });
+    let runtime: "pi" | "agy" = "pi";
+    const resolveLaunch = () => ({ runtime, model: async () => {
+      runtime = "agy";
+      throw new Error("The seat account is exhausted.");
+    } });
+    expect(await reset({ host: "pi", resolveLaunch })).toEqual({ error: "seat_reset_runtime_changed", outcome: "no_reset" });
+    expect(log().map(({ kind }) => kind)).toEqual(["model_check_failed", "no_reset"]);
+    expect(sends()).toEqual([expect.stringMatching(/^NO-RESET:/u)]);
+    expect(readdirSync(dirname(handoff)).some(name => name.startsWith("claim-"))).toBe(false);
+  }));
+
+  test("a Claude reset checks the configured runtime when hc reports no checkout", withReset(async ({ reset, state, sends }) => {
+    state({ cwd: null });
+    const resolveLaunch = () => ({ runtime: "pi" as const, model: async () => { throw new Error("Unexpected model probe"); } });
+    expect(await reset({ resolveLaunch })).toEqual({ error: "seat_reset_runtime_changed", outcome: "no_reset" });
+    expect(sends()).toEqual([expect.stringMatching(/^NO-RESET:/u)]);
   }));
 
   test("an agy requester stays running when agy is unavailable on the launch PATH", withReset(async ({ home, reset, state, sends, log }) => {
@@ -2529,7 +2552,7 @@ else require("node:readline").createInterface({ input: process.stdin }).on("line
       writeFileSync(join(dir, "session.json"), JSON.stringify({ session_id: "s", transcript_path: join(home, "old.jsonl"), source: "startup",
         started_at: new Date(Date.now() - 120_000).toISOString(), model, effort: "high" }));
     };
-    const failed = () => { throw new Error("The seats section of the repo-harness configuration is not valid."); };
+    const failed: SeatResetOptions["resolveLaunch"] = () => ({ runtime: "claude", model: async () => { throw new Error("The seat account is exhausted."); } });
     const { env, repo, executable } = resetLaunchFixture(home);
     const quota = join(home, ".repo-harness", "quota", "claude.json");
     mkdirSync(dirname(quota), { recursive: true });
@@ -2550,7 +2573,7 @@ else require("node:readline").createInterface({ input: process.stdin }).on("line
     expect(sends()).toEqual(["/clear", prompt(handoff), "/exit", `sh ${join(dir, "relaunch.sh")}`, prompt(handoff), "/clear", prompt(handoff),
       "/clear", prompt(handoff), "/compact", compactPrompt(handoff)]);
     expect(log().map(({ kind, detail }) => [kind, detail])).toEqual([["reset", "cleared"], ["reset", "restarted"],
-      ["model_check_failed", "relaunch_argv_failed: The seats section of the repo-harness configuration is not valid"], ["reset", "cleared"],
+      ["model_check_failed", "relaunch_argv_failed: The seat account is exhausted"], ["reset", "cleared"],
       ["model_check_failed", "quota_unknown: the seat account has no fresh weekly quota reading, so the seat keeps its model"], ["reset", "cleared"],
       ["reset", "compacted"]]);
   }));

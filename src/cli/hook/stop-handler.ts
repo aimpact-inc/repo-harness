@@ -8,7 +8,7 @@ import type { StateInputCollector } from '../../effects/loop/state-input-collect
 import { resolveCapabilityOwnership } from '../../effects/state/resolve-effective-state';
 import { payloadString, payloadValue, type HookIdentity, type HookPayload } from './hook-input';
 import { SEAT_RESET_CONTEXT_TOKENS, seatResetAction, seatResetIdentity, seatResetReason } from '../../core/board/seat-reset';
-import { readTranscriptUsage, seatResetRequested, writeSeatResetRequest } from '../../effects/board/seat-reset';
+import { readTranscriptUsage, seatResetRequestState, writeSeatResetRequest } from '../../effects/board/seat-reset';
 
 export type StopCollector = Pick<StateInputCollector, 'getRepoRoot'>;
 
@@ -64,7 +64,7 @@ interface StopNotice {
 /**
  * A reset seat at the threshold records a request and asks for a handoff. Claude
  * asks once per session segment. Antigravity repeats an open request once per
- * user turn until the seat relaunches.
+ * user turn until the peer releases it or the seat starts a new segment.
  */
 function seatReset(payload: HookPayload, env: NodeJS.ProcessEnv, now: Date, handoff: 'compact-or-clear' | 'relaunch', host: HookIdentity['host']): { readonly block: StopHandlerResult } | { readonly notices: readonly StopNotice[] } {
   const relaunch = handoff === 'relaunch';
@@ -73,15 +73,15 @@ function seatReset(payload: HookPayload, env: NodeJS.ProcessEnv, now: Date, hand
     const identity = seatResetIdentity(env);
     const transcript = payloadString(payload, 'transcript_path');
     if (identity === null || transcript === '') return { notices: [] };
-    const open = seatResetRequested(identity, transcript);
-    if (open && !relaunch) return { notices: [] };
+    const request = seatResetRequestState(identity, transcript);
+    if (request === 'released' || (request === 'open' && !relaunch)) return { notices: [] };
     const usage = relaunch
       ? readAntigravityTranscript(payloadString(payload, 'session_id'), transcript, env)
       : readTranscriptUsage(transcript);
     if (!usage || usage.contextTokens === null || usage.contextTokens < SEAT_RESET_CONTEXT_TOKENS) return { notices: [] };
     const { contextTokens, bytes } = usage;
     const action = seatResetAction(bytes, resetHost);
-    if (!open) writeSeatResetRequest(identity, now, { contextTokens, transcriptPath: transcript, transcriptBytes: bytes, action,
+    if (request === 'absent') writeSeatResetRequest(identity, now, { contextTokens, transcriptPath: transcript, transcriptBytes: bytes, action,
       host: resetHost });
     const message = seatResetReason(identity, contextTokens, bytes, action, resetHost);
     return { block: { exitCode: 2, stdout: '', stderr: `${message}\n` } };
