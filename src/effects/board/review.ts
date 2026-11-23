@@ -1,12 +1,14 @@
+import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { collectBoard, type BoardCollectInput, BoardCollectError, readRepositoryId, runGhText } from './collect';
-import { planReview, reviewPacket, REVIEW_START_HEADER, REVIEW_START_STATUS_HEADER, type ReviewDecisionV1, type ReviewSeatStartV1 } from '../../core/board/review';
+import { planReview, reviewPacket, reviewPacketHeader, REVIEW_START_HEADER, REVIEW_START_STATUS_HEADER, type ReviewDecisionV1, type ReviewSeatStartV1 } from '../../core/board/review';
 import type { BoardCommentPageV1 } from '../../core/board/source';
-import type { SeatConfigV1, SeatId } from '../../core/board/seats-settings';
+import type { SeatConfigV1 } from '../../core/board/seats-settings';
 import type { SeatRouteV1 } from '../../core/board/seat-routing';
 import { gitSpawnSync, withoutRepositorySelectingGitEnv } from '../git/runner';
 import { HERDR_APP_NOT_SENT, HerdrCoreError, herdrAppDo } from '../terminal/herdr-core';
+import { AGY_REVIEW_LAUNCH_ENV, AGY_REVIEW_LAUNCH_LINE, AGY_REVIEW_PROMPT_OPTION, prepareAgyReviewStartup, waitForAgyReviewBinding, type AgyReviewBinding } from './agy-review-session';
 import { acquireExclusiveDirectoryLock, ExclusiveLockContentionError } from '../locking/exclusive-directory-lock';
 import { repoHarnessHome } from '../repo-harness-home';
 import { effectiveGatekeeper, seatAccountQuotas } from '../../core/board/seat-routing';
@@ -19,7 +21,7 @@ type StartDecision = Extract<ReviewDecisionV1, { action: 'start' }>;
  * What `seatLaunch` (the `seats argv` command) answers for one review seat; the command layer owns it, so the caller passes it in.
  * `gatekeeper` is the effective gatekeeper that the plan checked: the launch starts that seat and reads quota no second time.
  */
-export type ReviewLaunch = (seat: SeatId, labels: { readonly repositoryId: string; readonly pr: string; readonly parent: string }, cwd: string, gatekeeper: SeatRouteV1) =>
+export type ReviewLaunch = (seat: ReviewSeatStartV1['seat'], labels: { readonly repositoryId: string; readonly pr: string; readonly parent: string; readonly agyReview?: AgyReviewBinding }, cwd: string, gatekeeper: SeatRouteV1) =>
   Promise<{ readonly argv: readonly string[]; readonly tab: string | null; readonly runtime: SeatConfigV1['runtime'] }>;
 
 export interface ReviewInput extends Pick<BoardCollectInput, 'repo_root' | 'parent' | 'host'> {
@@ -44,6 +46,7 @@ export interface ReviewPorts {
   readonly comment: (pr: number, body: string) => string;
   readonly openTab: (args: Readonly<Record<string, unknown>>) => void;
   readonly launch: ReviewLaunch;
+  readonly agy?: { readonly hc: string | null; readonly env: NodeJS.ProcessEnv };
 }
 
 export interface ReviewResultV1 {
@@ -75,6 +78,13 @@ function markerBody(decision: StartDecision, start: ReviewSeatStartV1): string {
   return [REVIEW_START_HEADER, `Subject: ${decision.head_sha}`, `Seat: ${start.seat}`, `PR: #${decision.pr}`, `Reading: ${reading}`].join('\n');
 }
 
+function agyBinding(header: string, ports: ReviewPorts): AgyReviewBinding & { readonly launchId: string } {
+  const agy = ports.agy;
+  if (agy?.hc == null) throw new BoardCollectError('hc is required to bind the agy review launch to its terminal.');
+  const launchId = randomUUID();
+  return { launchId, startup: prepareAgyReviewStartup(launchId, agy.env), label: `${launchId} ${header}` };
+}
+
 /**
  * Resolve every launch for a `start` decision in the writer's worktree before posting a marker or opening a tab.
  * A tab request that failed before sending releases that seat's marker only, so a retry starts that seat
@@ -96,22 +106,45 @@ export async function executeReview(decisions: readonly ReviewDecisionV1[], cont
     const launches = [];
     const labels = { repositoryId: context.repositoryId, pr: String(decision.pr), parent: String(context.parent) };
     for (const start of decision.seats) {
-      const { runtime, ...launch } = await ports.launch(start.seat, labels, worktree.path, context.gatekeeper);
+      const gatekeeper = context.gatekeeper;
+      const native = start.seat === 'gatekeeper' && gatekeeper.id === 'gatekeeper-fallback' && gatekeeper.seat.runtime === 'agy'
+        ? agyBinding(reviewPacketHeader(decision, start), ports)
+        : undefined;
+      const launchLabels = native === undefined ? labels : { ...labels, agyReview: native };
+      const { runtime, argv, tab } = await ports.launch(start.seat, launchLabels, worktree.path, gatekeeper);
+      const packet = reviewPacket(decision, start, runtime);
+      const tabArgs = { ...(tab === null ? {} : { name: tab }), space: context.space, folder: worktree.path };
       if (runtime === 'agy') {
-        throw new BoardCollectError('agy review seats cannot collect or publish acceptance receipts yet; configure gatekeeper-fallback on claude, codex, or pi.');
+        if (native === undefined) throw new BoardCollectError('agy review launches require the effective gatekeeper-fallback seat.');
+        const { launchId, startup } = native;
+        const nativeArgv = ['/usr/bin/env', `${AGY_REVIEW_LAUNCH_ENV}=${launchId}`, ...argv, AGY_REVIEW_PROMPT_OPTION, packet + AGY_REVIEW_LAUNCH_LINE + launchId];
+        launches.push({ start, placement: { ...tabArgs, argv: nativeArgv }, startup });
+      } else {
+        launches.push({ start, placement: { ...tabArgs, argv, task: packet } });
       }
-      launches.push({ start, launch, runtime });
     }
-    for (const { start, launch, runtime } of launches) {
+    for (const { start, placement, startup } of launches) {
       const markerUrl = ports.comment(decision.pr, markerBody(decision, start));
+      const release = () => ports.comment(decision.pr, `${REVIEW_START_STATUS_HEADER}\nClaim: ${markerUrl}\nStatus: released`);
       try {
-        ports.openTab({ ...(launch.tab === null ? {} : { name: launch.tab }), space: context.space, folder: worktree.path, argv: launch.argv, task: reviewPacket(decision, start, runtime) });
+        ports.openTab(placement);
       } catch (error) {
         if (!(error instanceof HerdrCoreError) || HERDR_APP_NOT_SENT.has(error.reason)) {
-          ports.comment(decision.pr, `${REVIEW_START_STATUS_HEADER}\nClaim: ${markerUrl}\nStatus: released`);
+          release();
           throw error;
         }
         throw new BoardCollectError(`launch_unknown for the ${start.seat} of PR #${decision.pr}: ${error.message}. The marker ${markerUrl} stays; check hc ls for the tab before a retry`);
+      }
+      if (startup !== undefined) {
+        const binding = await waitForAgyReviewBinding(startup);
+        if (binding === 'failed') {
+          release();
+          refuse(decision.pr, 'the agy review launch could not bind its terminal');
+          continue;
+        }
+        if (binding === 'unknown') {
+          throw new BoardCollectError(`launch_unknown for the ${start.seat} of PR #${decision.pr}: no agy terminal binding result. The marker ${markerUrl} stays; check hc ls for the tab before a retry`);
+        }
       }
       started.push({ pr: decision.pr, seat: start.seat, marker_url: markerUrl });
       context.observe?.({ kind: 'started', pr: decision.pr, seat: start.seat, marker_url: markerUrl });
@@ -155,6 +188,7 @@ export async function runReview(input: ReviewInput): Promise<ReviewResultV1> {
       worktree: (ref, sha) => worktreeAt(input, ref, sha),
       comment: (pr, body) => runGhText(input, ['pr', 'comment', String(pr), '--body-file', '-'], body),
       openTab: args => { herdrAppDo('tab.new', args); },
+      agy: { hc: Bun.which('hc'), env: process.env },
       launch: input.launch,
     }) };
   });

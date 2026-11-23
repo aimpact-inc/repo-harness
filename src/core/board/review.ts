@@ -4,7 +4,7 @@ import type { SeatRouteV1 } from './seat-routing';
 import { DEFAULT_SEATS_CONFIG, isReviewSeat, SEAT_IDS, type SeatConfigV1, type SeatId } from './seats-settings';
 import { REVIEW_SEVERITY_BAR } from '../review/finding-severity';
 import { modelFamily } from '../review/model-family';
-import type { ReviewRuntimeId } from '../review/review-runtimes';
+import type { SeatReviewHarness } from '../review/review-publish';
 import {
   acceptanceRowSeat,
   carriedPasses,
@@ -131,26 +131,39 @@ function roundOf(page: BoardCommentPageV1, head: string): number {
   return rows.find(row => row.subject === head)?.round ?? Math.max(0, ...rows.map(row => row.round)) + 1;
 }
 
-export interface ReviewPacketBinding { readonly pr: number; readonly head_sha: string; readonly seat: SeatId }
+export interface ReviewPacketBinding {
+  readonly pr: number;
+  readonly head_sha: string;
+  readonly seat: SeatId;
+  readonly tier: 'medium' | 'high';
+  readonly round: number;
+}
 
-/** The packet's first sentence: the one text that binds a seat session to its PR, head and seat. `parseReviewPacket` reads it back. */
-const PACKET_HEAD = /Task: review PR #([1-9][0-9]*) at head ([0-9a-f]{40}|[0-9a-f]{64}) \(tier (?:medium|high), round [1-9][0-9]*\), as the ([a-z]+(?:-[a-z]+)*) of repo-harness-issue-flow\./u;
+/** The first sentence binds the session to the review subject and round. */
+const PACKET_HEAD = /Task: review PR #(?<pr>[1-9][0-9]*) at head (?<head>[0-9a-f]{40}|[0-9a-f]{64}) \(tier (?<tier>medium|high), round (?<round>[1-9][0-9]*)\), as the (?<seat>[a-z]+(?:-[a-z]+)*) of repo-harness-issue-flow\./u;
 
 export function parseReviewPacket(text: string): ReviewPacketBinding | null {
-  const match = PACKET_HEAD.exec(text);
-  const seat = SEAT_IDS.find(id => id === match?.[3]);
-  return match === null || seat === undefined || !isReviewSeat(seat) ? null : { pr: Number(match[1]), head_sha: match[2]!, seat };
+  const fields = PACKET_HEAD.exec(text)?.groups;
+  if (fields === undefined) return null;
+  const { pr, head, tier, round } = fields;
+  const seat = SEAT_IDS.find(id => id === fields.seat);
+  if (seat === undefined || !isReviewSeat(seat) || (tier !== 'medium' && tier !== 'high') || !Number.isSafeInteger(Number(round))) return null;
+  return { pr: Number(pr), head_sha: head!, seat, tier, round: Number(round) };
+}
+
+export function reviewPacketHeader(decision: Extract<ReviewDecisionV1, { action: 'start' }>, start: ReviewSeatStartV1): string {
+  return `Task: review PR #${decision.pr} at head ${decision.head_sha} (tier ${decision.tier}, round ${decision.round}), as the ${start.seat} of repo-harness-issue-flow.`;
 }
 
 /**
  * The task text of a review seat. It states each value of the receipt that the seat cannot know, and the hand-off: a read-only seat
  * cannot write a file or publish, so it ends its reply with the receipt and the orchestrator publishes it with `rh review collect`.
  */
-export function reviewPacket(decision: Extract<ReviewDecisionV1, { action: 'start' }>, start: ReviewSeatStartV1, harness: ReviewRuntimeId): string {
+export function reviewPacket(decision: Extract<ReviewDecisionV1, { action: 'start' }>, start: ReviewSeatStartV1, harness: SeatReviewHarness): string {
   const scope = start.delta_from === null
     ? 'Review the whole diff.'
     : `This is a delta review. Review the hunks that changed since ${start.delta_from} and the sibling cases of each earlier finding.`;
-  return `Task: review PR #${decision.pr} at head ${decision.head_sha} (tier ${decision.tier}, round ${decision.round}), as the ${start.seat} of repo-harness-issue-flow. The worktree is at that head. ${scope} Read the PR body, the issue and the recorded evidence first: gh pr view ${decision.pr} --comments. You are read-only. ${REVIEW_SEVERITY_BAR} Receipt values (repo-harness-review-publish-receipt protocol 2): round ${decision.round}, risk_tier "${decision.tier}", subject_sha ${decision.head_sha}, reviewer.harness "${harness}" (exactly this value); confirmed_fixed lists the node ids of the earlier-round review publish threads whose fix you confirmed at this head, or []. Do not publish. End your last reply with the line RECEIPT-JSON and then the receipt as one JSON object; the orchestrator publishes it with rh review collect.`;
+  return `${reviewPacketHeader(decision, start)} The worktree is at that head. ${scope} Read the PR body, the issue and the recorded evidence first: gh pr view ${decision.pr} --comments. You are read-only. ${REVIEW_SEVERITY_BAR} Receipt values (repo-harness-review-publish-receipt protocol 2): round ${decision.round}, risk_tier "${decision.tier}", subject_sha ${decision.head_sha}, reviewer.harness "${harness}" (exactly this value); confirmed_fixed lists the node ids of the earlier-round review publish threads whose fix you confirmed at this head, or []. Do not publish. End your last reply with the line RECEIPT-JSON and then the receipt as one JSON object; the orchestrator publishes it with rh review collect.`;
 }
 
 export function planReview(input: ReviewInputV1): readonly ReviewDecisionV1[] {

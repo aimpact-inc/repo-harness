@@ -1,12 +1,15 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import * as fs from 'node:fs';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { taskReviewRunner } from '../../src/effects/review-runner/task-review-runner';
 import { buildReviewCommand, pullRequestSelectionFromOptions } from '../../src/cli/commands/review';
 import { renderAcceptanceClaim, validateReviewPublishReceipt } from '../../src/core/review/review-publish';
+import { parseReceipt } from '../../src/effects/review/review-publish';
+import { AGY_REVIEW_LAUNCH_LINE, AGY_REVIEW_PROMPT_OPTION, recordAgyReviewSession } from '../../src/effects/board/agy-review-session';
 import { createReviewAdmission, reviewCampaignKey, type ReviewAdmissionInput } from '../../src/core/review/authority-context';
 import { readReviewAdmission } from '../../src/effects/admission/admission-store';
 import { gatesDirectoryName } from '../../src/effects/git/repository-identity';
@@ -17,7 +20,7 @@ import { controlApprovalFixture } from '../helpers/control-approval-fixture';
 import { initGitRepo, tmpWorkspace } from '../helpers/repo-fixture';
 import { recordPluginSelection } from '../helpers/install-ownership';
 import { PLUGIN_IDS, type PluginId, type PluginSelection } from '../../src/core/skill-surface/plugin-manifest';
-import { HEAD as PUBLISH_HEAD, PR as PUBLISH_PR, installFakeGh, passingScenario } from '../helpers/publication-merge-fake-gh';
+import { HEAD as PUBLISH_HEAD, PR as PUBLISH_PR, REPOSITORY_ID as PUBLISH_REPOSITORY, installFakeGh, passingScenario } from '../helpers/publication-merge-fake-gh';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -171,6 +174,12 @@ function publishReceipt(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+test('parseReceipt accepts the native agy seat harness and refuses an unknown harness', () => {
+  const reviewer = { harness: 'agy', actual_model: 'gemini-4-hydrogen-thinking' };
+  expect(parseReceipt(publishReceipt({ reviewer }))).toMatchObject({ reviewer });
+  expect(() => parseReceipt(publishReceipt({ reviewer: { ...reviewer, harness: 'other' } }))).toThrow('reviewer.harness is invalid');
+});
 
 // Lines 10-14 of src/example.ts are in the PR diff; the default F1 finding sits on line 12.
 const DIFF_PATCH = '@@ -10,3 +10,5 @@\n context\n-old\n+new\n+added\n context\n context\n';
@@ -635,7 +644,7 @@ test('the optional PR selection is all-or-none and admission identity alone is n
     .toEqual({ repository: 'example/repo-harness', provider_repository_id: '1001', pr_number: 42, expected_base_sha: 'b'.repeat(40) });
 });
 
-const seatPacket = (seat = 'gatekeeper', head = PUBLISH_HEAD) => `Task: review PR #${PUBLISH_PR} at head ${head} (tier high, round 1), as the ${seat} of repo-harness-issue-flow. Review.`;
+const seatPacket = (seat = 'gatekeeper', head = PUBLISH_HEAD, round = 1) => `Task: review PR #${PUBLISH_PR} at head ${head} (tier high, round ${round}), as the ${seat} of repo-harness-issue-flow. Review.`;
 
 function seatFixture(texts: readonly string[] | null, options: { agentDir?: string; symlinkCwd?: boolean; seat?: string; head?: string } = {}) {
   const fixture = publishFixture();
@@ -656,10 +665,11 @@ function seatFixture(texts: readonly string[] | null, options: { agentDir?: stri
   return { ...fixture, home, cwd, directory };
 }
 
-async function runCollect(fixture: ReturnType<typeof seatFixture>, agentDir?: string, seat = 'gatekeeper', terminal: { pr?: string; status?: string; argv?: string[]; closed?: string[] } = {}) {
+async function runCollect(fixture: ReturnType<typeof seatFixture>, agentDir?: string, seat = 'gatekeeper', terminal: { repository?: string; pr?: string; status?: string; name?: string; argv?: string[]; agyBinding?: string; closed?: string[] } = {}) {
   const hc = spyOn(herdrCore, 'hcGet').mockReturnValue({ address: 't9', cwd: fixture.cwd, status: terminal.status === undefined ? null : { state: terminal.status },
-    foreground: terminal.argv === undefined ? null : { pid: 1, name: 'pi', argv: terminal.argv, cwd: fixture.cwd },
-    labels: { 'repo-harness.seat': seat, ...(terminal.pr === undefined ? {} : { 'repo-harness.pr': terminal.pr }) } } as never);
+    foreground: terminal.argv === undefined ? null : { pid: 1, name: terminal.name ?? 'pi', argv: terminal.argv, cwd: fixture.cwd },
+    labels: { 'repo-harness.seat': seat, 'repo-harness.repository': terminal.repository, 'repo-harness.pr': terminal.pr,
+      [herdrCore.RH_LABEL.agyReview]: terminal.agyBinding } } as never);
   const ports = spyOn(herdrCore, 'boardHostPorts').mockReturnValue({ closeTerminal: (address: string) => { terminal.closed?.push(address); return { status: 'closed' }; } } as never);
   const previous = process.env.REPO_HARNESS_GH_BIN;
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -676,6 +686,157 @@ async function runCollect(fixture: ReturnType<typeof seatFixture>, agentDir?: st
 }
 
 const receiptBlock = (receipt: unknown) => 'Done.\nRECEIPT-JSON\n```json\n' + JSON.stringify(receipt, null, 2) + '\n```\n';
+const AGY_REVIEWER = { harness: 'agy', actual_model: 'gemini-4-hydrogen-high' };
+const agyLine = (type: string, content: string) => JSON.stringify({ type, content }) + '\n';
+
+function agySeatFixture(decoyPi: string | null = null) {
+  const fixture = seatFixture(decoyPi === null ? null : [decoyPi]);
+  const launch = randomUUID();
+  const sessionId = 'review-conversation';
+  const transcript = (session: string) => join(fixture.home, '.gemini', 'antigravity-cli', 'brain', session, '.system_generated', 'logs', 'transcript_full.jsonl');
+  const ownTranscript = transcript(sessionId);
+  mkdirSync(dirname(ownTranscript), { recursive: true });
+  const packet = (head = PUBLISH_HEAD, round = 1) => seatPacket('gatekeeper', head, round) + AGY_REVIEW_LAUNCH_LINE + launch;
+  const record = (path = ownTranscript) => recordAgyReviewSession(launch, { sessionId, transcriptPath: path }, { HOME: fixture.home });
+  const collect = (head = PUBLISH_HEAD, seat = 'gatekeeper', repository = PUBLISH_REPOSITORY, round = 1) => runCollect(fixture, undefined, seat, {
+    repository, pr: String(PUBLISH_PR), name: 'agy', argv: ['agy', AGY_REVIEW_PROMPT_OPTION, packet(head, round)],
+    agyBinding: `${launch} ${seatPacket('gatekeeper', head, round)}`,
+  });
+  return { ...fixture, launch, transcript, ownTranscript, packet, record, collect };
+}
+
+async function observeFileOpens<T>(run: () => Promise<T>) {
+  const opened: string[] = [];
+  const open = fs.openSync;
+  const read = fs.readFileSync;
+  const opening = spyOn(fs, 'openSync').mockImplementation((...args: Parameters<typeof fs.openSync>) => {
+    opened.push(String(args[0]));
+    return open(...args);
+  });
+  const reading = spyOn(fs, 'readFileSync').mockImplementation(((...args: Parameters<typeof fs.readFileSync>) => {
+    opened.push(String(args[0]));
+    return read(...args);
+  }) as typeof fs.readFileSync);
+  try {
+    return { result: await run(), opened };
+  } finally {
+    opening.mockRestore();
+    reading.mockRestore();
+  }
+}
+
+test('collect publishes only the native agy fallback receipt from its recorded conversation', async () => {
+  const f = agySeatFixture();
+  const decoy = join(f.home, '.gemini', 'antigravity-cli', 'antigravity-oauth-token');
+  const other = f.transcript('parallel-conversation');
+  mkdirSync(dirname(other), { recursive: true });
+  const own = receiptBlock(publishReceipt({ reviewer: AGY_REVIEWER, summary: 'Receipt of the selected launch.' }));
+  const competing = receiptBlock(publishReceipt({ reviewer: AGY_REVIEWER, summary: 'Receipt of a different launch.' }));
+  writeFileSync(decoy, 'decoy token');
+  writeFileSync(other, agyLine('PLANNER_RESPONSE', competing));
+  recordAgyReviewSession(randomUUID(), { sessionId: 'parallel-conversation', transcriptPath: other }, { HOME: f.home });
+  writeFileSync(f.ownTranscript, agyLine('USER_INPUT', f.packet()) + agyLine('PLANNER_RESPONSE', own) + agyLine('SYSTEM_MESSAGE', competing));
+  f.record();
+
+  const { result, opened } = await observeFileOpens(f.collect);
+  expect(result.status, result.stdout + result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, pr: PUBLISH_PR, head_sha: PUBLISH_HEAD, round: 1 });
+  expect(opened).toContain(f.ownTranscript);
+  expect(opened).not.toContain(other);
+  expect(opened).not.toContain(decoy);
+  const posted = f.gh.inputs().map(({ input }) => input).join('\n');
+  expect(posted).toContain('Seat: gatekeeper');
+  expect(posted).toContain('agy (gemini-4-hydrogen-high)');
+  expect(posted).toContain('Receipt of the selected launch.');
+  expect(posted).not.toContain('Receipt of a different launch.');
+});
+
+test.each([
+  { field: 'round', receipt: { round: 1 } },
+  { field: 'tier', receipt: { round: 2, risk_tier: 'medium' } },
+])('collect refuses an agy receipt with a different $field from the launch packet', async ({ field, receipt }) => {
+  const f = agySeatFixture();
+  writeFileSync(f.ownTranscript, agyLine('PLANNER_RESPONSE', receiptBlock(publishReceipt({ reviewer: AGY_REVIEWER, ...receipt }))));
+  f.record();
+  const result = await f.collect(PUBLISH_HEAD, 'gatekeeper', PUBLISH_REPOSITORY, 2);
+  expect(result.status, result.stdout).toBe(2);
+  expect(JSON.parse(result.stdout)).toMatchObject({ error: 'review_receipt_invalid', message: expect.stringContaining(`packet ${field}`), posted: [] });
+  expect(f.gh.calls().some(args => args.includes('POST'))).toBe(false);
+});
+
+test('collect routes a shell foreground by its agy review binding before any Pi read', async () => {
+  const f = agySeatFixture(receiptBlock(publishReceipt()));
+  writeFileSync(f.ownTranscript, agyLine('PLANNER_RESPONSE', receiptBlock(publishReceipt({ reviewer: AGY_REVIEWER }))));
+  f.record();
+  const collectFromShell = (agyBinding: string) => observeFileOpens(() => runCollect(f, undefined, 'gatekeeper', {
+    repository: PUBLISH_REPOSITORY, pr: String(PUBLISH_PR), name: 'zsh', argv: ['zsh', '-li'], agyBinding,
+  }));
+  const incomplete = await collectFromShell(f.launch);
+  expect(incomplete.result.status, incomplete.result.stdout).toBe(2);
+  expect(JSON.parse(incomplete.result.stdout)).toMatchObject({ error: 'review_receipt_invalid', posted: [] });
+  expect(incomplete.opened).not.toContain(join(f.directory, 'a.jsonl'));
+  expect(f.gh.calls().some(args => args.includes('POST'))).toBe(false);
+
+  const bound = await collectFromShell(`${f.launch} ${seatPacket()}`);
+  expect(bound.result.status, bound.result.stdout + bound.result.stderr).toBe(0);
+  expect(bound.opened).toContain(f.ownTranscript);
+  expect(bound.opened).not.toContain(join(f.directory, 'a.jsonl'));
+  expect(f.gh.inputs().map(({ input }) => input).join('\n')).toContain('agy (gemini-4-hydrogen-high)');
+});
+
+test('collect refuses an agy receipt superseded by a model error', async () => {
+  const f = agySeatFixture();
+  const receipt = receiptBlock(publishReceipt({ reviewer: AGY_REVIEWER, verdict: 'PASS', findings: [] }));
+  writeFileSync(f.ownTranscript, agyLine('PLANNER_RESPONSE', receipt) + agyLine('ERROR_MESSAGE', 'Model failed'));
+  f.record();
+  const result = await f.collect();
+  expect(result.status, result.stdout).toBe(2);
+  expect(JSON.parse(result.stdout)).toMatchObject({ error: 'review_receipt_invalid', message: expect.stringContaining('no RECEIPT-JSON block'), posted: [] });
+  expect(f.gh.calls().some(args => args.includes('POST'))).toBe(false);
+});
+
+test('collect refuses malformed, unbound and unsafe agy transcripts before publication', async () => {
+  const good = receiptBlock(publishReceipt({ reviewer: AGY_REVIEWER }));
+  const cases = [
+    { label: 'missing native record', record: false, message: 'session record is missing' },
+    { label: 'user text', contents: agyLine('USER_INPUT', good), message: 'no RECEIPT-JSON block' },
+    { label: 'bad JSON', contents: agyLine('PLANNER_RESPONSE', 'RECEIPT-JSON\n{'), message: 'final RECEIPT-JSON block does not decode' },
+    { label: 'later malformed reply', contents: agyLine('PLANNER_RESPONSE', good) + agyLine('PLANNER_RESPONSE', 'RECEIPT-JSON\n{'), message: 'final RECEIPT-JSON block does not decode' },
+    { label: 'malformed final block in the same reply', contents: agyLine('PLANNER_RESPONSE', `${good}RECEIPT-JSON:\n{"round": `), message: 'final RECEIPT-JSON block does not decode' },
+    { label: 'bad receipt', contents: agyLine('PLANNER_RESPONSE', receiptBlock(publishReceipt({ reviewer: AGY_REVIEWER, protocol: 1 }))), message: 'protocol 1 is retired' },
+    { label: 'other harness', contents: agyLine('PLANNER_RESPONSE', receiptBlock(publishReceipt())), message: 'must name reviewer.harness agy' },
+    { label: 'other subject', contents: agyLine('PLANNER_RESPONSE', receiptBlock(publishReceipt({ reviewer: AGY_REVIEWER, subject_sha: 'b'.repeat(40) }))), message: 'not the packet head' },
+    { label: 'other seat', seat: 'reviewer', message: 'no complete agy gatekeeper-fallback launch packet' },
+    { label: 'other repository', repository: '987', message: 'belongs to a different repository' },
+    { label: 'earlier head', head: 'b'.repeat(40), code: 'review_subject_stale', message: 'the agy launch packet is for' },
+    { label: 'credential path', path: 'token', message: 'must name a native transcript' },
+    { label: 'credential symlink', path: 'link', message: 'is not a regular transcript' },
+    { label: 'other conversation path', path: 'other', message: 'outside the conversation logs' },
+    { label: 'two conversations', path: 'ambiguous', message: 'expected one agy review session record, found 2' },
+  ];
+  for (const row of cases) {
+    const f = agySeatFixture();
+    const decoy = join(f.home, '.gemini', 'antigravity-cli', 'antigravity-oauth-token');
+    writeFileSync(decoy, agyLine('PLANNER_RESPONSE', good));
+    const other = f.transcript('another-session');
+    mkdirSync(dirname(other), { recursive: true });
+    writeFileSync(other, agyLine('PLANNER_RESPONSE', good));
+    if (row.path === 'link') symlinkSync(decoy, f.ownTranscript);
+    else writeFileSync(f.ownTranscript, row.contents ?? agyLine('PLANNER_RESPONSE', good));
+    const recordedPath = row.path === 'token' ? decoy : f.ownTranscript;
+    if (row.record !== false) f.record(row.path === 'other' ? other : recordedPath);
+    if (row.path === 'ambiguous') recordAgyReviewSession(f.launch, { sessionId: 'another-session', transcriptPath: other }, { HOME: f.home });
+    const { result, opened } = await observeFileOpens(() => f.collect(row.head, row.seat, row.repository));
+    expect(opened, row.label).not.toContain(decoy);
+    expect(opened, row.label).not.toContain(other);
+    if (row.contents === undefined) expect(opened, row.label).not.toContain(f.ownTranscript);
+    expect(result.status, row.label).toBe(2);
+    const reply = JSON.parse(result.stdout);
+    expect(reply, row.label).toMatchObject({ ok: false, error: row.code ?? 'review_receipt_invalid', posted: [] });
+    expect(reply.message, row.label).toContain(row.message);
+    expect(f.gh.calls().some(args => args.includes('POST')), row.label).toBe(false);
+  }
+});
 
 test('collect publishes the last RECEIPT-JSON block of the seat session', async () => {
   const fixture = seatFixture([receiptBlock(publishReceipt({ subject_sha: 'b'.repeat(40) })), receiptBlock(publishReceipt())]);

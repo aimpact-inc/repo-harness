@@ -96,6 +96,7 @@ export const RH_LABEL = {
   seat: 'repo-harness.seat',
   issue: 'repo-harness.issue',
   pr: 'repo-harness.pr',
+  agyReview: 'repo-harness.agy-review',
   parent: 'repo-harness.parent',
   /** The owner decision URL that lifted the Claude quota reservation for one seat launch (#2769). */
   ownerException: 'repo-harness.owner-exception',

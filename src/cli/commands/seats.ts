@@ -35,6 +35,7 @@ import { readGlobalConfiguration } from '../../effects/configuration/global-conf
 import { resolveGitCommonDirectory } from '../../effects/git/common-directory';
 import { gitExecFileSync } from '../../effects/git/runner';
 import { githubRemoteRepository } from '../../core/board/source';
+import { AGY_REVIEW_BINDING_ENV, AGY_REVIEW_LAUNCH_ENV, type AgyReviewBinding } from '../../effects/board/agy-review-session';
 import { ClaudeAgentTypesError, claudeHostAgentTypes } from '../../effects/board/claude-agent-types';
 import { RepoHarnessRegistryStrictError, canonicalRepoPath, readRepoHarnessRegistryStrictSnapshot, repoCheckoutProbeEnv, setRepoHarnessPanePrefix } from '../../effects/repo-registry';
 import { HERDR_APP_NOT_SENT, HerdrCoreError, RH_LABEL, hcCallerSpace, hcLabel, hcLabelPairs, herdrAppDo, type HcLabels } from '../../effects/terminal/herdr-core';
@@ -82,6 +83,8 @@ export interface SeatLabelInput {
   readonly qualifier?: string;
   /** An owner decision URL on this repository (#2769): it lifts the quota reservation for this one launch. */
   readonly ownerException?: string;
+  /** Internal input from the native board review launch. */
+  readonly agyReview?: AgyReviewBinding;
 }
 
 const POSITIVE = /^[1-9][0-9]*$/u;
@@ -121,7 +124,7 @@ function checkOwnerException(url: string, cwd: string, env: NodeJS.ProcessEnv): 
 }
 
 function seatLabels(seat: LaunchSeatId, input: SeatLabelInput): HcLabels | undefined {
-  const { repositoryId, release, qualifier, ownerException, ...dispatch } = input;
+  const { repositoryId, release, qualifier, ownerException, agyReview: _agyReview, ...dispatch } = input;
   if (ownerException !== undefined) {
     ownerDecisionRepository(ownerException);
     if (repositoryId === undefined) throw new SeatsCommandError('repository_id_required', '--owner-exception needs --repository-id, so the seat label records it.');
@@ -179,6 +182,11 @@ function selfLabelingArgv(seat: LaunchSeatId, input: SeatLabelInput, agent: read
   const pathSetup = 'export PATH="${PATH:+$PATH:}${2:+$2:}${0%/*}"';
   const label = `"$0" "$1" seats label ${[seat, ...flags].join(' ')}`;
   const args = [process.execPath, CLI_ENTRY, toolDirs.join(delimiter)];
+  if (input.agyReview !== undefined) {
+    const { label: binding, startup } = input.agyReview;
+    const bind = `if ! ${AGY_REVIEW_BINDING_ENV}="$3" ${label}; then /bin/mkdir "$4/failed"; exit 1; fi`;
+    return ['/bin/sh', '-c', `${pathSetup}; ${bind}; /bin/mkdir "$4/bound" && shift 4 && exec "$@"`, ...args, binding, startup, ...agent];
+  }
   // The owner exception URL is positional, so only checked seat and dispatch values enter the script.
   return input.ownerException === undefined
     ? ['/bin/sh', '-c', `${pathSetup}; ${label} && shift 2 && exec "$@"`, ...args, ...agent]
@@ -191,13 +199,21 @@ function seatLoginShell(argv: readonly string[]): string[] {
   return [shell, '-lic', '"$@"; result=$?; [ ! -t 0 ] || exec "$0" -li; exit "$result"', shell, ...argv];
 }
 
+/** Wrap the agent with the production seat label command and, for a new pane, the login shell. */
+export function labeledSeatArgv(seat: LaunchSeatId, input: SeatLabelInput, agent: readonly string[], env: NodeJS.ProcessEnv, terminal: 'new' | 'existing'): string[] {
+  const argv = selfLabelingArgv(seat, input, agent, env);
+  return terminal === 'new' ? seatLoginShell(argv) : argv;
+}
+
 /** `seats label`: set the seat labels on the calling hc terminal. The seat argv runs it before the agent starts. */
 function labelOwnTerminal(seat: string, input: SeatLabelInput, env: NodeJS.ProcessEnv = process.env): void {
   const labels = seatLabels(seatId(seat), input);
   if (labels === undefined) throw new SeatsCommandError('repository_id_required', 'seats label needs --repository-id.');
   const terminal = env.HC_TERMINAL_ID;
   if (!terminal) throw new SeatsCommandError('terminal_unknown', 'HC_TERMINAL_ID is not set: start the seat argv with herdr-app do tab.new or pane.split.');
-  hcLabel(terminal, labels, { env });
+  const { [AGY_REVIEW_BINDING_ENV]: binding, [AGY_REVIEW_LAUNCH_ENV]: _launchId, ...hcEnv } = env;
+  const boundLabels = seat === 'gatekeeper' && binding !== undefined ? { ...labels, [RH_LABEL.agyReview]: binding } : labels;
+  hcLabel(terminal, boundLabels, { env: hcEnv });
 }
 
 /** The registry entry of the primary checkout of `cwd` holds the pane prefix; a linked worktree resolves to its primary root. */
@@ -411,10 +427,9 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   const launch = buildSeatLaunch(id, effective, config.seats === undefined ? 'defaults' : 'seats', agentTypes, {
     paneName: name ?? undefined, repositoryId: labels.repositoryId, piRoleDirectory, piHookExtension, claudeSaving, agy,
   });
-  const argv = labelSet === undefined ? launch.argv : selfLabelingArgv(id, labels, launch.argv, env);
   return { effective, effectiveId, modeKnown, launch: {
     ...launch,
-    argv: labelSet !== undefined && terminal === 'new' ? seatLoginShell(argv) : argv,
+    argv: labelSet === undefined ? launch.argv : labeledSeatArgv(id, labels, launch.argv, env, terminal),
     labels: labelSet === undefined ? [] : hcLabelPairs(labelSet), name, tab, ownerException: labels.ownerException ?? null,
   } };
 }

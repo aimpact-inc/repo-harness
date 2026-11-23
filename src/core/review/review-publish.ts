@@ -26,6 +26,7 @@ import type { ModelRelation } from './acceptance-receipt';
 export type ReviewRiskTier = 'low' | 'medium' | 'high';
 export type ReviewPublishSeverity = ReviewSeverity;
 export type ReviewRecordSeat = 'gatekeeper' | 'reviewer';
+export type SeatReviewHarness = ReviewRuntimeId | 'agy';
 
 export interface ReviewPublishBlockingFinding {
   readonly id: string;
@@ -51,7 +52,7 @@ export interface ReviewPublishReceipt {
   readonly subject_sha: string;
   readonly risk_tier: ReviewRiskTier;
   readonly reviewer: {
-    readonly harness: ReviewRuntimeId;
+    readonly harness: SeatReviewHarness;
     /** Null when the host did not observe the reviewer model. */
     readonly actual_model: string | null;
   };
@@ -149,7 +150,8 @@ export function validateReviewPublishReceipt(value: unknown): ReviewPublishRecei
   if (!['different-family', 'same-family', 'unknown'].includes(String(value.model_relation))) invalid('model_relation is invalid');
   if (!isRecord(value.reviewer)) invalid('reviewer must be an object');
   exactFields(value.reviewer, ['harness', 'actual_model'], 'reviewer');
-  if (typeof value.reviewer.harness !== 'string' || !isReviewRuntimeId(value.reviewer.harness)) invalid('reviewer.harness is invalid');
+  const harness = value.reviewer.harness;
+  if (harness !== 'agy' && (typeof harness !== 'string' || !isReviewRuntimeId(harness))) invalid('reviewer.harness is invalid');
   if (!Array.isArray(value.findings)) invalid('findings must be an array');
   const findings = value.findings.map((entry, index) => finding(entry, index));
   const ids = new Set<string>();
@@ -172,7 +174,7 @@ export function validateReviewPublishReceipt(value: unknown): ReviewPublishRecei
     round: value.round,
     subject_sha: gitSha(value.subject_sha),
     risk_tier: value.risk_tier as ReviewRiskTier,
-    reviewer: Object.freeze({ harness: value.reviewer.harness as ReviewRuntimeId, actual_model: optionalModel(value.reviewer.actual_model) }),
+    reviewer: Object.freeze({ harness, actual_model: optionalModel(value.reviewer.actual_model) }),
     verdict: value.verdict as 'PASS' | 'FAIL',
     model_relation: value.model_relation as ModelRelation,
     summary: text(value.summary, 'summary'),
