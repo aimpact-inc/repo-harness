@@ -2073,10 +2073,10 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     const model = () => { throw new Error("Unexpected model probe"); };
     const relaunch = () => { throw new Error("Unexpected destination probe"); };
     expect(await reset({ host, action, resolveLaunch: () => ({ runtime, model }), relaunch })).toEqual({
-      error: "seat_reset_runtime_changed", outcome: "no_reset",
+      error: "seat_reset_runtime_changed", outcome: "nothing_sent",
     });
-    expect(log().at(-1)).toMatchObject({ kind: "no_reset", detail: "seat_reset_runtime_changed" });
-    expect(sends()).toEqual([expect.stringMatching(/^NO-RESET: The requester runs/u)]);
+    expect(log().at(-1)).toMatchObject({ kind: "seat_reset_runtime_changed", detail: expect.stringContaining("rh seats launch advisor") });
+    expect(sends()).toEqual([]);
     expect(existsSync(join(dirname(handoff), "relaunch.sh"))).toBe(false);
     expect(readdirSync(dirname(handoff)).some(name => name.startsWith("claim-"))).toBe(false);
   })());
@@ -2089,8 +2089,8 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
       runtime = "pi";
       return { argv: ["agy"], runtime: "agy", model: null, effort: null, modeKnown: true };
     };
-    expect(await reset({ host: "antigravity", resolveLaunch, relaunch })).toEqual({ error: "seat_reset_runtime_changed", outcome: "no_reset" });
-    expect(sends()).toEqual([expect.stringMatching(/^NO-RESET:/u)]);
+    expect(await reset({ host: "antigravity", resolveLaunch, relaunch })).toEqual({ error: "seat_reset_runtime_changed", outcome: "nothing_sent" });
+    expect(sends()).toEqual([]);
   }));
 
   test("a Pi runtime change during a failed quota check refuses /new", withReset(async ({ home, handoff, reset, state, sends, log }) => {
@@ -2103,17 +2103,17 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
       runtime = "agy";
       throw new Error("The seat account is exhausted.");
     } });
-    expect(await reset({ host: "pi", resolveLaunch })).toEqual({ error: "seat_reset_runtime_changed", outcome: "no_reset" });
-    expect(log().map(({ kind }) => kind)).toEqual(["model_check_failed", "no_reset"]);
-    expect(sends()).toEqual([expect.stringMatching(/^NO-RESET:/u)]);
+    expect(await reset({ host: "pi", resolveLaunch })).toEqual({ error: "seat_reset_runtime_changed", outcome: "nothing_sent" });
+    expect(log().map(({ kind }) => kind)).toEqual(["model_check_failed", "seat_reset_runtime_changed"]);
+    expect(sends()).toEqual([]);
     expect(readdirSync(dirname(handoff)).some(name => name.startsWith("claim-"))).toBe(false);
   }));
 
   test("a Claude reset checks the configured runtime when hc reports no checkout", withReset(async ({ reset, state, sends }) => {
     state({ cwd: null });
     const resolveLaunch = () => ({ runtime: "pi" as const, model: async () => { throw new Error("Unexpected model probe"); } });
-    expect(await reset({ resolveLaunch })).toEqual({ error: "seat_reset_runtime_changed", outcome: "no_reset" });
-    expect(sends()).toEqual([expect.stringMatching(/^NO-RESET:/u)]);
+    expect(await reset({ resolveLaunch })).toEqual({ error: "seat_reset_runtime_changed", outcome: "nothing_sent" });
+    expect(sends()).toEqual([]);
   }));
 
   test("an agy requester stays running when agy is unavailable on the launch PATH", withReset(async ({ home, reset, state, sends, log }) => {

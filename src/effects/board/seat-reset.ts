@@ -308,9 +308,9 @@ class SeatResetRun {
   }
 
   /** Releases the requester with NO-RESET: it continues, and no slash command is typed. */
-  private release(code: 'request_invalid' | 'request_closed' | 'seat_reset_runtime_changed', reason: string, next = ''): SeatResetError {
+  private release(code: 'request_invalid' | 'request_closed', reason: string): SeatResetError {
     this.tell('no_reset', seatNoResetMessage(reason, this.interactiveHost()), code, `${reason}.`);
-    return new SeatResetError(code, 'no_reset', `${reason}. No reset: the requester continues.${next}`);
+    return new SeatResetError(code, 'no_reset', `${reason}. No reset: the requester continues.`);
   }
 
   /** A failed check asks for a rewrite, at most 3 times per request; then the requester continues without a reset. */
@@ -398,7 +398,6 @@ class SeatResetRun {
     const current = RESET_FOREGROUNDS[this.request!.host];
     const reason = `The requester runs ${current}, but ${this.identity.seat} is configured for ${runtime}`;
     const next = ` Run \`rh seats launch ${this.identity.seat} --repository-id ${this.identity.repository}\` to start the configured runtime.`;
-    if (!this.attemptedKeys) throw this.release('seat_reset_runtime_changed', reason, next);
     throw this.refuse('seat_reset_runtime_changed', this.keyOutcome, `${reason}.${next}`);
   }
 
