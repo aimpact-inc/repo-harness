@@ -5,7 +5,9 @@ import {
   ADVISOR_CAP_SPAN_MS, WINDOW_WITH_WORKERS_MS, attentionFindingKey, attentionSentSlot, deliveryTiming, liveSeatTerminals, planAttentionDeliveries,
   type AttentionDeliveryV1, type AttentionHostPortsV1, type AttentionSentEntryV1, type AttentionSentV1,
 } from '../../core/board/attention-delivery';
-import type { BoardV1 } from '../../core/board/board';
+import type { BoardHostPortsV1, BoardV1 } from '../../core/board/board';
+import { isReviewSeat, type SeatId } from '../../core/board/seats-settings';
+import { isBlockingSeverity, type ReviewSeverity } from '../../core/review/finding-severity';
 import { repoHarnessHome } from '../repo-harness-home';
 import { BoardCollectError, boardAvailabilityFailure } from './collect';
 import type { ReviewObserver } from './review';
@@ -39,6 +41,7 @@ export type AttentionLogRecordV1 = { readonly at: string; readonly window: strin
   | { readonly kind: 'error'; readonly message: string }
   | { readonly kind: 'finding'; readonly rule: string; readonly route: string; readonly message: string }
   | { readonly kind: 'review'; readonly pr: number | null; readonly seat: string | null; readonly outcome: 'started' | 'refused'; readonly detail: string | null }
+  | { readonly kind: 'review_collect'; readonly line: ReviewCollectLine }
   | { readonly kind: 'skip'; readonly route: string; readonly reason: string }
   | { readonly kind: 'send'; readonly route: string; readonly terminal: string; readonly rules: readonly string[]; readonly outcome: AttentionSendOutcome; readonly detail: string | null }
 );
@@ -73,11 +76,87 @@ export function advisorWakes(path: string, now: Date): number {
   return wakes;
 }
 
+export const REVIEW_COLLECT_TICK_MS = 30_000;
+
+export type ReviewCollectLine =
+  | { readonly kind: 'published'; readonly pr: number; readonly seat: string; readonly record_url: string }
+  | { readonly kind: 'fail_held'; readonly pr: number; readonly seat: string; readonly terminal: string; readonly blocking: number }
+  | { readonly kind: 'refused'; readonly pr: number; readonly seat: string; readonly terminal: string; readonly error: string };
+
+type ReadReceipt = {
+  readonly receipt: { readonly verdict: 'PASS' | 'FAIL'; readonly findings: readonly { readonly severity: ReviewSeverity }[] };
+};
+
+export interface ReviewCollectPorts<T extends ReadReceipt = ReadReceipt> {
+  readonly terminals: () => readonly { readonly address: string; readonly seat: string; readonly pr: number | null; readonly status: string | null; readonly status_ms: number | null }[];
+  readonly read: (terminal: string, pr: number) => T;
+  readonly publish: (terminal: string, pr: number, read: T) => { readonly record_url: string };
+  readonly errorCode: (error: unknown) => string | null;
+}
+
+/** Handle each completion once. A new status timestamp can carry a new receipt after a challenge. */
+export function* collectFinishedReviews<T extends ReadReceipt>(ports: ReviewCollectPorts<T>, handled: Set<string>): IterableIterator<ReviewCollectLine> {
+  for (const { address, seat, pr, status, status_ms } of ports.terminals()) {
+    if (pr === null || (status !== 'done' && status !== 'idle')) continue;
+    const key = `${address}:${status_ms}`;
+    if (handled.has(key) || handled.has(address)) continue;
+    handled.add(key);
+    try {
+      const read = ports.read(address, pr);
+      if (read.receipt.verdict === 'FAIL') {
+        const blocking = read.receipt.findings.filter(finding => isBlockingSeverity(finding.severity)).length;
+        yield { kind: 'fail_held', pr, seat, terminal: address, blocking };
+      } else {
+        const published = ports.publish(address, pr, read);
+        yield { kind: 'published', pr, seat, record_url: published.record_url };
+      }
+    } catch (error) {
+      const code = ports.errorCode(error);
+      if (code === null) throw error;
+      // An incomplete or unknown GitHub write needs manual inspection, even if the seat status changes.
+      if (code === 'review_publish_partial' || code === 'review_publish_unknown') handled.add(address);
+      yield { kind: 'refused', pr, seat, terminal: address, error: code };
+    }
+  }
+}
+
+interface AttentionReviewTick {
+  readonly lines: Iterable<ReviewCollectLine>;
+  readonly orchestrators: readonly string[];
+}
+
+/** Discover seats from hc on every tick. The publisher makes its own live GitHub checks for PASS. */
+export function attentionReviewCollector<T extends ReadReceipt>(repositoryId: number, host: BoardHostPortsV1, receipt: Omit<ReviewCollectPorts<T>, 'terminals'>): () => AttentionReviewTick {
+  const handled = new Set<string>();
+  return () => {
+    const observed = host.seatTerminals(String(repositoryId));
+    const live = observed.status === 'observed' ? observed.terminals.filter(terminal => terminal.state === 'live') : [];
+    const orchestrators = live.filter(terminal => terminal.labels.seat === 'orchestrator').map(terminal => terminal.address);
+    const lines = collectFinishedReviews({
+      ...receipt,
+      terminals: () => live.flatMap(({ address, labels: { seat, pr }, status, status_ms }) =>
+        seat !== undefined && isReviewSeat(seat as SeatId) && pr !== undefined && /^[1-9][0-9]*$/u.test(pr)
+          ? [{ address, seat, pr: Number(pr), status, status_ms }] : []),
+    }, handled);
+    return { lines, orchestrators };
+  };
+}
+
+function reviewCollectMessage(line: ReviewCollectLine): string {
+  switch (line.kind) {
+    case 'published': return 'PASS published; run rh board merge';
+    case 'fail_held': return `FAIL held on ${line.terminal}: ${line.blocking} blocking; challenge once or run rh review collect`;
+    case 'refused': return `refused: ${line.error}`;
+  }
+}
+
 export interface AttentionWindowInput {
   readonly parent: number;
   readonly deliver: boolean;
   /** The same code path as `board review --parent <n>`; set only when the watcher starts with `--review`, which needs `deliver`. */
   readonly review?: (observe: ReviewObserver) => Promise<unknown>;
+  /** The local receipt collector, retained across windows when --review is on. */
+  readonly review_collect?: () => AttentionReviewTick;
   readonly log_path: string;
   /** The `sent` slots that the window before returned; empty for the first window. */
   readonly sent?: AttentionSentV1;
@@ -90,6 +169,29 @@ export interface AttentionWindowInput {
 }
 
 const sleepFor = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
+
+async function sleepThroughWindow(end: number, now: () => Date, sleep: (ms: number) => Promise<void>, tick?: () => void): Promise<void> {
+  if (tick === undefined) {
+    await sleep(end - now().getTime());
+    return;
+  }
+  for (let remaining = end - now().getTime(); remaining > 0; remaining = end - now().getTime()) {
+    await sleep(Math.min(remaining, REVIEW_COLLECT_TICK_MS));
+    if (now().getTime() < end) tick();
+  }
+}
+
+function notifyReviewReceipts(input: AttentionWindowInput, tick: AttentionReviewTick, log: (record: Record<string, unknown>) => void): void {
+  for (const line of tick.lines) {
+    log({ kind: 'review_collect', line });
+    const text = `[rh-attention] #${input.parent} P1 review: PR #${line.pr} ${line.seat} ${reviewCollectMessage(line)}`;
+    for (const terminal of tick.orchestrators) {
+      const result = input.host.send(terminal, text);
+      log({ kind: 'send', route: 'orchestrator', terminal, rules: ['review'],
+        outcome: result.status === 'sent' ? 'sent' : 'send_failed', detail: result.status === 'sent' ? null : result.detail });
+    }
+  }
+}
 
 /**
  * One review pass: one log line and one message line per start or refusal. A
@@ -134,13 +236,16 @@ export async function runAttentionWindow(input: AttentionWindowInput): Promise<A
   const started = now();
   const window = started.toISOString();
   const log = (record: Record<string, unknown>) => append(input.log_path, { at: now().toISOString(), window, parent: input.parent, ...record } as AttentionLogRecordV1);
+  const readReviews = input.review_collect;
+  const reviewTick = readReviews === undefined ? undefined : () => notifyReviewReceipts(input, readReviews(), log);
+  reviewTick?.();
   let board: BoardV1;
   try { board = input.collect(); } catch (error) {
     if (!boardAvailabilityFailure(error)) throw error;
     const message = error.message.slice(0, 300);
     process.stderr.write(`${JSON.stringify({ ok: false, error: error.name, message })}\n`);
     log({ kind: 'error', message });
-    await sleep(started.getTime() + WINDOW_WITH_WORKERS_MS - now().getTime());
+    await sleepThroughWindow(started.getTime() + WINDOW_WITH_WORKERS_MS, now, sleep, reviewTick);
     return prior;
   }
   const attention = evaluateBoardAttention(board, input.previous ?? null);
@@ -196,7 +301,7 @@ export async function runAttentionWindow(input: AttentionWindowInput): Promise<A
     else if (waited.state === 'blocked') stillBlocked.push(delivery);
     else send(delivery);
   }
-  await sleep(end - now().getTime());
+  await sleepThroughWindow(end, now, sleep, reviewTick);
   for (const delivery of stillBlocked) {
     const current = input.host.state(delivery.terminal);
     if (current.status === 'failed') record(delivery, 'send_failed', current.detail);

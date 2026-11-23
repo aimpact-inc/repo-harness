@@ -1,6 +1,6 @@
 import { BOARD_PRIORITY_ORDER, type BoardAttentionRoute, type BoardAttentionV1 } from './attention';
 import type { BoardV1 } from './board';
-import { WORKER_SEAT_IDS } from './seats-settings';
+import { SEAT_IDS, isReviewSeat, isWorkerSeat } from './seats-settings';
 
 /**
  * The delivery plan of the resident attention watcher (#1509). It is a pure
@@ -9,9 +9,9 @@ import { WORKER_SEAT_IDS } from './seats-settings';
  * the seat terminals and never decides for them.
  */
 const MINUTE = 60_000;
-/** The window while a worker seat terminal is live. */
+/** The window while a worker or review seat terminal is live. */
 export const WINDOW_WITH_WORKERS_MS = 15 * MINUTE;
-/** The window while no worker seat terminal is live. */
+/** The window while no worker or review seat terminal is live. */
 export const WINDOW_WITHOUT_WORKERS_MS = 60 * MINUTE;
 /** Minimum cooldown before a persistent P0/P1 finding re-reminds on the same route. */
 export const RENUDGE_INTERVAL_MS = 30 * MINUTE;
@@ -78,7 +78,8 @@ export function liveSeatTerminals(board: BoardV1, seat: string) {
 }
 
 export function attentionWindowMs(board: BoardV1): number {
-  return WORKER_SEAT_IDS.some(seat => liveSeatTerminals(board, seat).length > 0) ? WINDOW_WITH_WORKERS_MS : WINDOW_WITHOUT_WORKERS_MS;
+  const live = SEAT_IDS.some(seat => (isWorkerSeat(seat) || isReviewSeat(seat)) && liveSeatTerminals(board, seat).length > 0);
+  return live ? WINDOW_WITH_WORKERS_MS : WINDOW_WITHOUT_WORKERS_MS;
 }
 
 export function deliveryTiming(status: string | null): AttentionDeliveryTiming {

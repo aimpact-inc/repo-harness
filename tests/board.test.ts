@@ -5,7 +5,7 @@ import { join } from 'path';
 import { initGitRepo, run, tmpWorkspace } from './helpers/repo-fixture';
 import { A12_NO_PR_MS, A13_IDLE_MS, A14_RED_MS, A15_FAIL_MS, A16_QUESTION_MS, A17_BLOCKED_MS, A20_STUCK_MS, STALLED_WORKING_MS, BOARD_PRIORITY_ORDER, BOARD_RULE_PRIORITY, evaluateBoardAttention, renderAttentionText, type BoardPriority, type BoardRuleId } from '../src/core/board/attention';
 import { ADVISOR_WAKES_PER_DAY, MAX_SENDS_PER_FINDING, RENUDGE_INTERVAL_MS, WINDOW_WITH_WORKERS_MS, WINDOW_WITHOUT_WORKERS_MS, attentionFindingKey, planAttentionDeliveries, type AttentionSentV1 } from '../src/core/board/attention-delivery';
-import { attentionLogPath, attentionWatchDoctorCheck, runAttentionWindow, serviceTerminalRepository, startAttentionWatch } from '../src/effects/board/attention-watch';
+import { REVIEW_COLLECT_TICK_MS, attentionLogPath, attentionWatchDoctorCheck, collectFinishedReviews, runAttentionWindow, serviceTerminalRepository, startAttentionWatch, type ReviewCollectPorts } from '../src/effects/board/attention-watch';
 import { BOARD_PROTOCOL, decodeBoard, type BoardHostPortsV1, type BoardItemV1, type BoardPullRequestV1, type BoardTerminalV1, type BoardV1 } from '../src/core/board/board';
 import { decodePlanBlock, PlanBlockError, planOrderIssues, planOrderUnits } from '../src/core/board/plan-block';
 import { decodeReviewHazards, pathHazardHits, workflowEditAllowed } from '../src/core/board/hazards';
@@ -30,6 +30,7 @@ import { HC_MIN_VERSION } from '../src/core/terminal/herdr-pin';
 import { BoardParentsError, collectBoardParents } from '../src/effects/board/parents';
 import { deskState, hasDesk, hcStatusClass, isQueued, ISSUE_FLOW_WORKER_LIMIT, liveSeats, seatItem, seatPullRequest, workerLimit } from '../src/core/board/desk';
 import { renderAcceptanceClaim, renderAcceptanceRecord, reviewPayloadFromReceipt, type ReviewPublishReceipt } from '../src/core/review/review-publish';
+import { ReviewPublishError } from '../src/effects/review/review-publish';
 import type { ReviewObserver } from '../src/effects/board/review';
 import { BoardCollectError } from '../src/effects/board/collect';
 import type { ModelRelation } from '../src/core/review/acceptance-receipt';
@@ -673,17 +674,18 @@ test('the board decoder refuses protocol 4 and a readiness read time that does n
   for (const invalid of [withTime(null), withTime('not a time'), withTime(REPLAY_NOW.toISOString(), false)]) expect(() => decodeBoard(invalid)).toThrow('invalid board merge_readiness_observed_at on PR #1491');
 });
 
-test('attention rules and delivery windows recognize all worker seat kinds', () => {
+test('attention rules use worker seats and delivery windows also count review seats', () => {
   const board = replay();
   if (board.execution.status !== 'observed') throw new Error('the replay observes the seats');
   const [blocked, done] = board.execution.terminals;
-  for (const seat of ['worker', 'worker-deep', 'worker-opus', 'worker-neon', 'worker-neon-deep', 'worker-light', 'orchestrator', 'council', 'worker-custom']) {
+  for (const seat of ['worker', 'worker-deep', 'worker-opus', 'worker-neon', 'worker-neon-deep', 'worker-light', 'gatekeeper', 'gatekeeper-fallback', 'reviewer', 'orchestrator', 'council', 'worker-custom']) {
     const terminals = [{ ...blocked!, seat }, { ...done!, seat }] as BoardTerminalV1[];
     const candidate: BoardV1 = { ...board, items: board.items.map(item => item.number === 1475 ? { ...item, claim_status: { status_kind: 'none' } } : item), execution: { status: 'observed', terminals } };
     const attention = evaluateBoardAttention(candidate);
-    const worker = seat !== 'orchestrator' && seat !== 'council' && seat !== 'worker-custom';
+    const worker = seat.startsWith('worker') && seat !== 'worker-custom';
+    const review = ['gatekeeper', 'gatekeeper-fallback', 'reviewer'].includes(seat);
     expect(attention.findings.filter(finding => finding.rule === 'A3' || finding.rule === 'A4').map(finding => finding.rule)).toEqual(worker ? ['A3', 'A4'] : []);
-    expect(planAttentionDeliveries(candidate, attention, 0).window_ms).toBe(worker ? WINDOW_WITH_WORKERS_MS : WINDOW_WITHOUT_WORKERS_MS);
+    expect(planAttentionDeliveries(candidate, attention, 0).window_ms).toBe(worker || review ? WINDOW_WITH_WORKERS_MS : WINDOW_WITHOUT_WORKERS_MS);
   }
 });
 
@@ -2934,6 +2936,62 @@ test('watch window --review: each start or refusal is a log line and an orchestr
   const twoLines = hc.calls().find(args => args[0] === 'send' && args.at(-1)?.includes('P3 review: PR #7'))!.at(-1)!;
   expect(twoLines.slice('[rh-attention] #1474 P3 review: '.length).split(' · ')).toHaveLength(2);
   expect(twoLines).not.toContain('; ');
+});
+
+test('watch window --review publishes PASS and sends each result on its completion tick', async () => {
+  const board = replay();
+  const hc = watchHc({ FAKE_TERMINALS: { t3: { status: { state: 'working' } } } });
+  const start = REPLAY_NOW.getTime();
+  let clock = start;
+  const reads: string[] = [];
+  const published: string[] = [];
+  const sent: Array<[number, string]> = [];
+  const handled = new Set<string>();
+  const ports: ReviewCollectPorts = {
+    errorCode: error => error instanceof ReviewPublishError ? error.code : null,
+    terminals: () => [
+      { address: 't7', pr: 7, seat: 'reviewer', status: 'done', status_ms: start },
+      { address: 't8', pr: 8, seat: 'gatekeeper', status: clock === start ? 'working' : 'idle', status_ms: start + REVIEW_COLLECT_TICK_MS },
+      { address: 't9', pr: 9, seat: 'gatekeeper', status: 'done', status_ms: clock },
+      { address: 't10', pr: 10, seat: 'gatekeeper', status: 'done', status_ms: clock },
+      { address: 't11', pr: 11, seat: 'gatekeeper', status: 'done', status_ms: start },
+    ],
+    read: (address, pr) => {
+      reads.push(address);
+      if (pr === 11) throw new ReviewPublishError('review_receipt_invalid', 'no receipt', 2);
+      return { receipt: pr === 8
+        ? { verdict: 'FAIL', findings: [{ severity: 'P1' }, { severity: 'P2' }] }
+        : { verdict: 'PASS', findings: [] } };
+    },
+    publish: (address, pr) => {
+      published.push(address);
+      if (pr === 9) {
+        expect(sent[0]?.[1]).toContain('PR #7 reviewer PASS published');
+        throw new ReviewPublishError('review_publish_partial', 'partial publication', 5);
+      }
+      if (pr === 10) throw new ReviewPublishError('review_publish_unknown', 'unknown publication', 5);
+      return { record_url: 'https://example.test/record' };
+    },
+  };
+  const input = {
+    parent: 1474, deliver: true, log_path: attentionLogPath(1186405141, 1474, { REPO_HARNESS_HOME: hc.root }), collect: () => board,
+    review_collect: () => ({ orchestrators: ['t3'], lines: collectFinishedReviews(ports, handled) }),
+    host: { ...hc.host, send: (address: string, text: string) => {
+      if (text.startsWith('[rh-attention] #1474 P1 review:')) sent.push([clock - start, text]);
+      return hc.host.send(address, text);
+    } }, now: () => new Date(clock), sleep: async (ms: number) => { clock += ms; },
+  };
+  await runAttentionWindow(input);
+  await runAttentionWindow(input);
+  expect(reads).toEqual(['t7', 't9', 't10', 't11', 't8']);
+  expect(published).toEqual(['t7', 't9', 't10']);
+  expect(sent).toEqual([
+    [0, '[rh-attention] #1474 P1 review: PR #7 reviewer PASS published; run rh board merge'],
+    [0, '[rh-attention] #1474 P1 review: PR #9 gatekeeper refused: review_publish_partial'],
+    [0, '[rh-attention] #1474 P1 review: PR #10 gatekeeper refused: review_publish_unknown'],
+    [0, '[rh-attention] #1474 P1 review: PR #11 gatekeeper refused: review_receipt_invalid'],
+    [REVIEW_COLLECT_TICK_MS, '[rh-attention] #1474 P1 review: PR #8 gatekeeper FAIL held on t8: 1 blocking; challenge once or run rh review collect'],
+  ]);
 });
 
 test('watch window --review: the message to a blocked orchestrator waits for it and is sent once after it stops being blocked', async () => {

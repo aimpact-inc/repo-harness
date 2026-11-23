@@ -582,12 +582,12 @@ host's PR events or check when the worker reports.
   Record the result in one acceptance record comment on
   the PR, in the row shape of `templates.md`: `Seat`, round, role, subject,
   verdict and model relation.
-  The review brief forbids every GitHub write: the coordinator publishes
-  a review row with `rh review collect` (which sets `Seat: gatekeeper` for
-  `gatekeeper` and `gatekeeper-fallback`, and `Seat: reviewer` for
-  `reviewer`). Attention rule A19 names a review seat that is done or idle
-  for more than 10 min while its PR has no record of its seat after that
-  time: read its pane and publish its row.
+  Start the attention watcher with `rh board attention start --parent <n> --review --space <id>`.
+  It publishes PASS receipts and reports held FAIL receipts and collection
+  errors. Attention rule A19 is the fallback. It names a seat that is done
+  or idle for more than 10 min without a later record for that seat.
+  Inspect the receipt and use `rh review collect` when it is ready to
+  publish.
 - **Defensive code.** Reject compatibility branches, fallbacks and
   speculative guards that the issue did not ask for, even when the tests
   pass. Quote the boundary line. This is the most common reason to send a

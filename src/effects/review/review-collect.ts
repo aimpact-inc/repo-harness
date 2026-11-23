@@ -2,7 +2,7 @@ import { closeSync, openSync, readdirSync, readFileSync, readSync, realpathSync 
 import { basename, join, resolve } from 'path';
 import { withAntigravityTranscript } from '../board/antigravity-transcript';
 import { AGY_REVIEW_PROMPT_OPTION, isAgyReviewLaunchId, readAgyReviewSession } from '../board/agy-review-session';
-import { boardHostPorts, hcGet, RH_LABEL, type HcTerminal } from '../terminal/herdr-core';
+import { boardHostPorts, hcGet, HerdrCoreError, RH_LABEL, type HcTerminal } from '../terminal/herdr-core';
 import { hcStatusClass } from '../../core/board/desk';
 import { isReviewSeat, type SeatId } from '../../core/board/seats-settings';
 import { piAgentDir } from '../pi-agent-dir';
@@ -31,6 +31,13 @@ export type ReviewSeatCloseV1 =
   | { readonly outcome: 'kept'; readonly reason: string };
 
 export type ReviewCollectResult = ReviewPublishResult & { readonly seat_close: ReviewSeatCloseV1 };
+
+export interface SeatReceipt {
+  readonly terminal: HcTerminal;
+  readonly seat: string;
+  readonly reviewSeat: ReviewRecordSeat;
+  readonly receipt: ReviewPublishReceipt;
+}
 
 /**
  * Close a done review seat of this pull request once its record is out (#3190), with the kill and remove of the board closeout.
@@ -225,9 +232,9 @@ function agyPrHead(input: Omit<ReviewPublishInput, 'seat'>, repository: string |
   return target.headSha.toLowerCase();
 }
 
-function agyReceipt(input: Omit<ReviewPublishInput, 'seat'>, terminal: HcTerminal, home: string): ReviewPublishReceipt {
+function agyReceipt(input: ReviewCollectInput, terminal: HcTerminal, home: string, watcher: boolean): ReviewPublishReceipt {
   const launch = agyLaunchBinding(terminal, input.prNumber);
-  const head = agyPrHead(input, terminal.labels[RH_LABEL.repository]);
+  const head = watcher ? launch.head_sha : agyPrHead(input, terminal.labels[RH_LABEL.repository]);
   if (launch.head_sha !== head) {
     throw new ReviewPublishError('review_subject_stale', `the agy launch packet is for ${launch.head_sha}, but the PR head is ${head}; nothing was posted`, 2);
   }
@@ -250,44 +257,34 @@ function agyReceipt(input: Omit<ReviewPublishInput, 'seat'>, terminal: HcTermina
   return receipt;
 }
 
-/**
- * The session of the seat is the one whose packet names this seat, this PR and the PR head now. Review seats of one PR share a
- * worktree, so one directory holds every seat and every round, and file age says nothing about either. Sessions of an earlier head
- * are not candidates; two sessions for the head, or a receipt for another head than its packet's, fail closed.
- */
-function jsonlReceipt(input: Omit<ReviewPublishInput, 'seat'>, seat: string, realCwd: string, home: string): ReviewPublishReceipt {
-  const piDirectory = piSessionDirectory(piAgentDir(home), realCwd);
-  const claudeDirectory = claudeSessionDirectory(envDirectory('CLAUDE_CONFIG_DIR', join(home, '.claude')), realCwd);
-  const files = [...jsonlIn(piDirectory), ...jsonlIn(claudeDirectory), ...codexSessionFiles(envDirectory('CODEX_HOME', join(home, '.codex')), realCwd)];
-  const bound = files.map(readSession).filter((session) => {
-    const packet = parseReviewPacket(session.packet);
-    return packet !== null && packet.pr === input.prNumber && packet.seat === seat;
-  });
-  if (bound.length === 0) {
-    throw invalid('the seat session record is missing: no session in ' + piDirectory + ', in ' + claudeDirectory + ' or in a Codex rollout of ' + realCwd + ' holds the review packet of the ' + seat + ' for PR #' + input.prNumber);
+function watcherSeatTerminal(address: string, pr: number, repositoryId: number): HcTerminal {
+  let terminal: HcTerminal;
+  try { terminal = hcGet(address); } catch (error) {
+    if (!(error instanceof HerdrCoreError)) throw error;
+    throw invalid(error.message);
   }
-  const head = readPrHeadSha(input);
-  const atHead = bound.filter((session) => parseReviewPacket(session.packet)!.head_sha === head);
-  if (atHead.length === 0) {
-    throw new ReviewPublishError('review_subject_stale', 'no session of the ' + seat + ' for PR #' + input.prNumber + ' holds a packet for the PR head ' + head + '; nothing was posted', 2);
+  const status = hcStatusClass(terminal.status?.state ?? null);
+  if (terminal.labels[RH_LABEL.repository] !== String(repositoryId) || terminal.labels[RH_LABEL.pr] !== String(pr)
+    || terminal.state !== 'live' || (status !== 'done' && status !== 'idle')) {
+    throw invalid('the terminal is not a finished review seat of this repository and PR');
   }
-  // A session that ends with no receipt (an aborted attempt) is no candidate and makes nothing ambiguous.
-  const finished = atHead.flatMap((session) => {
-    try {
-      const receipt = parseReceipt(lastReceiptValue(session.assistant));
-      return receipt.reviewer.harness === 'agy' ? [] : [{ session, receipt }];
-    } catch { return []; }
-  });
-  if (finished.length > 1) throw invalid(finished.length + ' sessions of the ' + seat + ' for PR #' + input.prNumber + ' end with a receipt for the PR head ' + head + ': ' + finished.map(({ session }) => session.path).join(', '));
-  // The one session at the head reports its own error when it holds no valid receipt.
-  const receipt = finished.length === 1 ? finished[0]!.receipt : parseReceipt(lastReceiptValue(atHead[0]!.assistant));
-  if (receipt.reviewer.harness === 'agy') throw invalid('an agy review receipt requires an agy gatekeeper-fallback launch');
-  if (receipt.subject_sha !== head) throw invalid('the receipt names ' + receipt.subject_sha + ', not the packet head ' + head);
-  return receipt;
+  return terminal;
 }
 
-export function collectReview(input: ReviewCollectInput): ReviewCollectResult {
-  const terminal = hcGet(input.seat);
+function launchHead(terminal: HcTerminal, pr: number, seat: string): string {
+  for (const arg of terminal.foreground?.argv ?? []) {
+    const packet = parseReviewPacket(arg);
+    if (packet !== null && packet.pr === pr && packet.seat === seat) return packet.head_sha;
+  }
+  throw invalid('the terminal has no launch packet for this review seat and PR');
+}
+
+/**
+ * Bind the session to its seat, PR and head and parse its receipt without posting.
+ * The watcher uses the local launch head. Publication still checks the live PR head.
+ */
+export function readSeatReceipt(input: ReviewCollectInput, watcherRepositoryId?: number): SeatReceipt {
+  const terminal = watcherRepositoryId === undefined ? hcGet(input.seat) : watcherSeatTerminal(input.seat, input.prNumber, watcherRepositoryId);
   const cwd = terminal.cwd;
   if (cwd == null) throw invalid('terminal ' + input.seat + ' reports no working directory');
   const seat = terminal.labels[RH_LABEL.seat];
@@ -296,12 +293,55 @@ export function collectReview(input: ReviewCollectInput): ReviewCollectResult {
   let realCwd: string;
   try { realCwd = realpathSync(cwd); } catch (error) { throw invalid('the seat working directory is unreadable: ' + errorMessage(error)); }
   const home = osAccountHome();
-  const { seat: _terminalAddress, ...publishBase } = input;
   const foreground = terminal.foreground;
   const nativeAgy = terminal.labels[RH_LABEL.agyReview] !== undefined
     || foreground?.name === 'agy' || foreground?.argv.includes(AGY_REVIEW_PROMPT_OPTION);
-  const receipt = nativeAgy ? agyReceipt(publishBase, terminal, home) : jsonlReceipt(publishBase, seat, realCwd, home);
+  const receipt = nativeAgy
+    ? agyReceipt(input, terminal, home, watcherRepositoryId !== undefined)
+    : jsonlReceipt(input.prNumber, seat, realCwd, home,
+      () => watcherRepositoryId === undefined ? readPrHeadSha(input) : launchHead(terminal, input.prNumber, seat));
   const reviewSeat: ReviewRecordSeat = seat === 'reviewer' ? 'reviewer' : 'gatekeeper';
-  const published = publishReceipt({ ...publishBase, seat: reviewSeat }, receipt);
+  return { terminal, seat, reviewSeat, receipt };
+}
+
+function jsonlReceipt(pr: number, seat: string, realCwd: string, home: string, readHead: () => string): ReviewPublishReceipt {
+  const piDirectory = piSessionDirectory(piAgentDir(home), realCwd);
+  const claudeDirectory = claudeSessionDirectory(envDirectory('CLAUDE_CONFIG_DIR', join(home, '.claude')), realCwd);
+  const files = [...jsonlIn(piDirectory), ...jsonlIn(claudeDirectory), ...codexSessionFiles(envDirectory('CODEX_HOME', join(home, '.codex')), realCwd)];
+  const bound = files.map(readSession).filter((session) => {
+    const packet = parseReviewPacket(session.packet);
+    return packet !== null && packet.pr === pr && packet.seat === seat;
+  });
+  if (bound.length === 0) {
+    throw invalid('the seat session record is missing: no session in ' + piDirectory + ', in ' + claudeDirectory + ' or in a Codex rollout of ' + realCwd + ' holds the review packet of the ' + seat + ' for PR #' + pr);
+  }
+  const head = readHead();
+  const atHead = bound.filter((session) => parseReviewPacket(session.packet)!.head_sha === head);
+  if (atHead.length === 0) {
+    throw new ReviewPublishError('review_subject_stale', 'no session of the ' + seat + ' for PR #' + pr + ' holds a packet for the PR head ' + head + '; nothing was posted', 2);
+  }
+  // A session that ends with no receipt (an aborted attempt) is no candidate and makes nothing ambiguous.
+  const finished = atHead.flatMap((session) => {
+    try {
+      const receipt = parseReceipt(lastReceiptValue(session.assistant));
+      return receipt.reviewer.harness === 'agy' ? [] : [{ session, receipt }];
+    } catch { return []; }
+  });
+  if (finished.length > 1) throw invalid(finished.length + ' sessions of the ' + seat + ' for PR #' + pr + ' end with a receipt for the PR head ' + head + ': ' + finished.map(({ session }) => session.path).join(', '));
+  // The one session at the head reports its own error when it holds no valid receipt.
+  const receipt = finished.length === 1 ? finished[0]!.receipt : parseReceipt(lastReceiptValue(atHead[0]!.assistant));
+  if (receipt.reviewer.harness === 'agy') throw invalid('an agy review receipt requires an agy gatekeeper-fallback launch');
+  if (receipt.subject_sha !== head) throw invalid('the receipt names ' + receipt.subject_sha + ', not the packet head ' + head);
+  return receipt;
+}
+
+/** Publish a bound receipt and close its seat after publication succeeds. */
+export function publishSeatReceipt(input: ReviewCollectInput, read: SeatReceipt): ReviewCollectResult {
+  const { terminal, seat, reviewSeat, receipt } = read;
+  const published = publishReceipt({ ...input, seat: reviewSeat }, receipt);
   return { ...published, seat_close: closeReviewSeat(terminal, seat, input.prNumber, receipt.subject_sha) };
+}
+
+export function collectReview(input: ReviewCollectInput): ReviewCollectResult {
+  return publishSeatReceipt(input, readSeatReceipt(input));
 }

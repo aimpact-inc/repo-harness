@@ -15,6 +15,7 @@ import { readReviewAdmission } from '../../src/effects/admission/admission-store
 import { gatesDirectoryName } from '../../src/effects/git/repository-identity';
 import * as accountHome from '../../src/effects/runtime/os-account-home';
 import * as herdrCore from '../../src/effects/terminal/herdr-core';
+import { publishSeatReceipt, readSeatReceipt } from '../../src/effects/review/review-collect';
 import { hashVerificationPlan } from '../../src/core/evidence/verification-plan';
 import { controlApprovalFixture } from '../helpers/control-approval-fixture';
 import { initGitRepo, tmpWorkspace } from '../helpers/repo-fixture';
@@ -835,6 +836,50 @@ test('collect refuses malformed, unbound and unsafe agy transcripts before publi
     expect(reply, row.label).toMatchObject({ ok: false, error: row.code ?? 'review_receipt_invalid', posted: [] });
     expect(reply.message, row.label).toContain(row.message);
     expect(f.gh.calls().some(args => args.includes('POST')), row.label).toBe(false);
+  }
+});
+
+test('watcher reads a bound Antigravity receipt without GitHub', () => {
+  const fixture = agySeatFixture();
+  writeFileSync(fixture.ownTranscript, agyLine('PLANNER_RESPONSE', receiptBlock(publishReceipt({ reviewer: AGY_REVIEWER }))));
+  fixture.record();
+  const home = spyOn(accountHome, 'osAccountHome').mockReturnValue(fixture.home);
+  const hc = spyOn(herdrCore, 'hcGet').mockReturnValue({
+    address: 't9', name: null, state: 'live', turn: 1, pid: 1, cwd: fixture.cwd, status: { state: 'done' }, reason: null,
+    foreground: null,
+    labels: { [herdrCore.RH_LABEL.seat]: 'gatekeeper', [herdrCore.RH_LABEL.pr]: String(PUBLISH_PR),
+      [herdrCore.RH_LABEL.repository]: PUBLISH_REPOSITORY, [herdrCore.RH_LABEL.agyReview]: `${fixture.launch} ${seatPacket()}` },
+  });
+  try {
+    const read = readSeatReceipt({ seat: 't9', prNumber: PUBLISH_PR, repoRoot: fixture.root, ghBin: fixture.gh.bin }, Number(PUBLISH_REPOSITORY));
+    expect(read.receipt).toMatchObject({ subject_sha: PUBLISH_HEAD, reviewer: AGY_REVIEWER });
+    expect(fixture.gh.calls()).toEqual([]);
+  } finally {
+    hc.mockRestore();
+    home.mockRestore();
+  }
+});
+
+test('watcher receipt reading uses the local launch head and publication still refuses a stale head', () => {
+  const launchHead = 'b'.repeat(40);
+  const fixture = seatFixture([receiptBlock(publishReceipt({ subject_sha: launchHead }))], { head: launchHead });
+  const repositoryId = 1001;
+  const home = spyOn(accountHome, 'osAccountHome').mockReturnValue(fixture.home);
+  const hc = spyOn(herdrCore, 'hcGet').mockReturnValue({
+    address: 't9', name: null, state: 'live', turn: 1, pid: 1, cwd: fixture.cwd, status: { state: 'done' }, reason: null,
+    foreground: { pid: 1, name: 'pi', argv: ['pi', seatPacket('gatekeeper', launchHead)], cwd: fixture.cwd },
+    labels: { 'repo-harness.seat': 'gatekeeper', 'repo-harness.pr': String(PUBLISH_PR), 'repo-harness.repository': String(repositoryId) },
+  });
+  try {
+    const input = { seat: 't9', prNumber: PUBLISH_PR, repoRoot: fixture.root, ghBin: fixture.gh.bin };
+    const read = readSeatReceipt(input, repositoryId);
+    expect(read.receipt.subject_sha).toBe(launchHead);
+    expect(fixture.gh.calls()).toEqual([]);
+    expect(() => publishSeatReceipt(input, read)).toThrow(/is not the PR head/);
+    expect(fixture.gh.calls().some(args => args.includes('POST'))).toBe(false);
+  } finally {
+    hc.mockRestore();
+    home.mockRestore();
   }
 });
 

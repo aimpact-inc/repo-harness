@@ -3,7 +3,7 @@ import { readFileSync } from 'fs';
 import { basename } from 'path';
 import { fileURLToPath } from 'url';
 import { AdvisorSeatError, advisorSeatSendFailure, readAdvisorSeat, sendToAdvisorSeat } from '../../core/board/advisor-seat';
-import { AttentionWatchError, attentionLogPath, runAttentionWindow, serviceTerminalRepository, startAttentionWatch } from '../../effects/board/attention-watch';
+import { AttentionWatchError, attentionLogPath, attentionReviewCollector, runAttentionWindow, serviceTerminalRepository, startAttentionWatch } from '../../effects/board/attention-watch';
 import { evaluateBoardAttention, renderAttentionText } from '../../core/board/attention';
 import type { AttentionHostPortsV1, AttentionSentV1 } from '../../core/board/attention-delivery';
 import type { BoardHostPortsV1, BoardV1 } from '../../core/board/board';
@@ -23,6 +23,8 @@ import { gitHubTriageApplyPorts, readTriageManifestFile, runTriageApply, type Tr
 import { DispatchError, type DispatchPlanV1 } from '../../core/board/dispatch';
 import { runDispatch } from '../../effects/board/dispatch';
 import { runReview, type ReviewObserver, type ReviewResultV1 } from '../../effects/board/review';
+import { publishSeatReceipt, readSeatReceipt } from '../../effects/review/review-collect';
+import { ReviewPublishError } from '../../effects/review/review-publish';
 import { runBoardMerge, type BoardMergeResultV1 } from '../../effects/board/merge';
 import { seatLaunch, SeatProviderUnavailableError } from './seats';
 import { runBoardCloseout, stopArchitectureDaemons, stopCodegraphServers } from '../../effects/board/closeout';
@@ -338,7 +340,7 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
     .description('Run the attention rules on the board of one parent issue (takes the board options --parent and --json)')
     .option('--watch', 'Stay resident: one board read per window (15 min while a worker seat runs, else 60 min); runs only in the terminal that `attention start` opens')
     .option('--deliver', 'With --watch: send the findings to the seat terminals with hc send')
-    .option('--review', 'With --watch --deliver: run `board review` once per window and report each start or refusal (needs --space)')
+    .option('--review', 'With --watch --deliver: start review seats each window and collect finished receipts every 30 seconds (needs --space)')
     .option('--space <id>', 'With --review: the Herdr space that receives the review tabs')
     .action(async (_options: AttentionOptions, command: Command) => {
       const options = command.optsWithGlobals<AttentionOptions>();
@@ -595,11 +597,18 @@ async function watchAttention(options: AttentionOptions, host: BoardHostPortsV1,
     const parent = parentNumber(options);
     const repositoryId = serviceTerminalRepository(parent, attentionHost);
     const review = options.review === true ? reviewRunner(options, parent, host) : undefined;
+    const repoRoot = process.cwd();
+    const reviewCollect = review === undefined ? undefined : attentionReviewCollector(repositoryId, host, {
+      read: (seat, prNumber) => readSeatReceipt({ repoRoot, seat, prNumber }, repositoryId),
+      publish: (seat, prNumber, read) => publishSeatReceipt({ repoRoot, seat, prNumber }, read),
+      errorCode: error => error instanceof ReviewPublishError ? error.code : null,
+    });
     // The watcher keeps one keyed source store for its process lifetime; its review run reads its own board through a fresh one.
     const sources = createKeyedSources();
     const input = {
       parent, deliver: options.deliver === true, review, log_path: attentionLogPath(repositoryId, parent),
-      collect: () => collectBoardThrough({ repo_root: process.cwd(), parent, host }, sources), host: attentionHost,
+      review_collect: reviewCollect,
+      collect: () => collectBoardThrough({ repo_root: repoRoot, parent, host }, sources), host: attentionHost,
     };
     // The sent slots live in this process only: a new watcher sends each open finding once.
     let sent: AttentionSentV1 = new Map();
