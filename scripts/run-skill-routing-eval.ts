@@ -238,6 +238,7 @@ import {
 } from "./run-skill-evals";
 
 export const MANIFEST_PATH = join(REPO_ROOT, "assets", "skill-commands", "manifest.json");
+const ROUTING_EVAL_HOSTS = SKILL_SURFACE_HOSTS.filter(host => host !== "antigravity");
 
 export function loadLiveCatalog(manifestPath: string = MANIFEST_PATH): SkillSurfaceCatalog {
   const raw = readFileSync(manifestPath, "utf-8");
@@ -1167,8 +1168,8 @@ function parseRunArgs(argv: string[]): RunOptions {
       plugins = [];
     } else if (arg === "--host") {
       const value = argv[++i];
-      if (!(SKILL_SURFACE_HOSTS as readonly string[]).includes(value)) {
-        throw new CliError(`run: --host must be one of ${SKILL_SURFACE_HOSTS.join(", ")}`, 2);
+      if (!(ROUTING_EVAL_HOSTS as readonly string[]).includes(value)) {
+        throw new CliError(`run: --host must be one of ${ROUTING_EVAL_HOSTS.join(", ")}`, 2);
       }
       host = value as SkillSurfaceHost;
     } else if (arg === "--provider") {
@@ -1398,7 +1399,7 @@ export function buildSubjectFreeze(): SubjectFreeze {
 
   const discoveredSetProjections: SubjectFreeze["discovered_set_projections"] = {};
   for (const [label, plugins] of [["core", []], ["all", PLUGIN_IDS]] as const) {
-    for (const host of SKILL_SURFACE_HOSTS) {
+    for (const host of ROUTING_EVAL_HOSTS) {
       const key = `${label}/${host}`;
       discoveredSetProjections[key] = buildDiscoveredSkillSurface(catalog, plugins, host).map((e) => ({ name: e.name, reason: e.reason }));
     }

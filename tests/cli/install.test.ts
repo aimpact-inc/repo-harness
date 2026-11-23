@@ -223,7 +223,8 @@ test.skipIf(process.platform === 'win32')('Antigravity retires the old owned por
     expect(fs.readlinkSync(portal)).toBe(portalSource);
 
     const uninstall = antigravityCli(home, ['uninstall', ...target]);
-    expect(uninstall.status, uninstall.stdout + uninstall.stderr).toBe(0);
+    expect(uninstall.status, uninstall.stdout + uninstall.stderr).toBe(1);
+    expect(uninstall.stdout).toContain(`[unresolved] ${portal}`);
     for (const name of ['herdr', 'think', 'hunt', 'check', 'health', 'repo-harness-strategy']) {
       expect(fs.lstatSync(path.join(skills, name), { throwIfNoEntry: false })).toBeUndefined();
     }
