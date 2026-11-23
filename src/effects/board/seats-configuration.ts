@@ -43,7 +43,7 @@ import {
 } from '../../core/board/seats-settings';
 import { SEAT_RECOMMENDED_MODELS } from '../../core/board/recommended-models';
 import { MAGPIE_EXTENSION_PATH, SEAT_POOL_KIND, SEAT_POOL_STALE_MS, buildSeatPool, decodeSeatPool, decodeSeatPoolProbe, emptySeatPoolProbe, recommendedModelIds, type SeatPoolCacheV1, type SeatPoolProbe, type SeatPoolV1 } from '../../core/board/seat-pool';
-import { EFFORT_LEVELS } from '../terminal/task-role-profiles';
+import { EFFORT_LEVELS, parseFrontmatter, validateFrontmatter } from '../terminal/task-role-profiles';
 import { GlobalConfigurationError, globalConfigurationPath, mutateGlobalConfiguration, readGlobalConfiguration } from '../configuration/global-configuration';
 import { withExclusiveDirectoryLock } from '../locking/exclusive-directory-lock';
 import { publishFileByRename } from '../atomic-append';
@@ -92,16 +92,16 @@ const SEAT_ACCESS: { readonly [seat in SeatId]: Omit<SeatRangeV1, 'models'> } = 
 };
 const SEAT_RANGES = Object.fromEntries(SEAT_IDS.map(id => [id, { models: SEAT_RECOMMENDED_MODELS[id], ...SEAT_ACCESS[id] }])) as SeatsRangesV1['seats'];
 
-const RUNTIME_RANGES: Readonly<Record<SeatRuntime, Omit<SeatRuntimeRangeV1, 'id' | 'enabled'>>> = {
-  claude: { effort: true, fleet: true },
-  codex: { effort: true, fleet: true },
-  pi: { effort: true, fleet: true },
-  agy: { effort: true, fleet: false },
+const RUNTIME_RANGES: Readonly<Record<SeatRuntime, Pick<SeatRuntimeRangeV1, 'effort'>>> = {
+  claude: { effort: true },
+  codex: { effort: true },
+  pi: { effort: true },
+  agy: { effort: true },
 };
 
 export function seatsRanges(enabledRuntimes: readonly string[], agyModels: readonly AgyCatalogModel[] | null): SeatsRangesV1 {
   return {
-    runtimes: SEAT_RUNTIMES.map(id => ({ id, enabled: enabledRuntimes.includes(seatHostId(id)), ...RUNTIME_RANGES[id] })),
+    runtimes: SEAT_RUNTIMES.map(id => ({ id, enabled: enabledRuntimes.includes(seatHostId(id)), fleet: seatTakesFleet({ runtime: id }), ...RUNTIME_RANGES[id] })),
     efforts: EFFORT_LEVELS,
     agy_models: agyModels,
     roles: SEAT_SCAFFOLD_SUB_AGENTS.map(name => ({ name, writable: false })),
@@ -158,7 +158,6 @@ export function checkSeatRoutingModels(routing: SeatRoutingV1): void {
 }
 
 function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly string[]): void {
-  const runtime = RUNTIME_RANGES[seat.runtime];
   const range = SEAT_RANGES[id];
   if (!enabledRuntimes.includes(seatHostId(seat.runtime))) {
     throw new SeatsConfigurationError('seat_runtime_not_enabled', `Fix the ${id} seat before saving. Its runtime ${seat.runtime} is disabled under Hosts.`);
@@ -166,7 +165,7 @@ function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly str
   checkEffort(`${id} seat`, seat, seat.runtime);
   const tool = seat.tools.find(item => !range.tools.includes(item));
   if (tool !== undefined) throw new SeatsConfigurationError('seat_tool_not_allowed', `The ${id} seat cannot have the ${tool} tool group.`);
-  const role = seat.fleet.find(name => !runtime.fleet || !seatTakesFleet(seat) || !range.fleet.includes(name));
+  const role = seat.fleet.find(name => !seatTakesFleet(seat) || !range.fleet.includes(name));
   if (role !== undefined) throw new SeatsConfigurationError('seat_fleet_not_allowed', `The ${id} seat on ${seat.runtime} cannot call the ${role} sub-agent.`);
 }
 
@@ -465,26 +464,53 @@ const AGY_AGENT_DESCRIPTIONS: Readonly<Record<string, string>> = {
   'rh-worker': 'Repo-harness worker',
 };
 
-/** Publish the generated agy seat agent by digest. An existing path can only be reused if it holds these bytes. */
+const FLEET_SOURCE_DIR = fileURLToPath(new URL('../../../agents/fleet/', import.meta.url));
+
+function agyFleetProfile(role: typeof SEAT_SCAFFOLD_SUB_AGENTS[number]): string {
+  const parsed = parseFrontmatter(readFileSync(join(FLEET_SOURCE_DIR, `${role}.md`), 'utf8'));
+  const valid = validateFrontmatter(parsed, role);
+  if (!valid.ok) throw new Error(`The ${role} fleet source is invalid: ${valid.reason}.`);
+  const description = parsed!.description!.replace(` on ${valid.sourceDescription}`, '');
+  return [
+    '---', `name: ${role}`, `description: ${JSON.stringify(description)}`, 'subagent: true', 'mainAgent: false',
+    'tools: [read_file, search_web]', 'inheritMcp: false', '---', '', '# System', '',
+    'Never read auth or credential files.', '', parsed!.body, '',
+  ].join('\n');
+}
+
+function ensureAgyAgentDirectory(parent: string, part: string): string {
+  const directory = join(parent, part);
+  try { mkdirSync(directory, { mode: 0o700 }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+  const stat = lstatSync(directory);
+  if (!stat.isDirectory() || (process.getuid !== undefined && stat.uid !== process.getuid())) throw new Error('agy agent directory must be owned and contain no links.');
+  return directory;
+}
+
+/** Publish the main profile and its fleet in the same agy discovery directory. */
 export function writeAgySeatAgent(seat: LaunchSeatId, config: SeatConfigV1, env: NodeJS.ProcessEnv): string {
   const agentName = agySeatAgentName(seat);
   const tools = agySeatAgentTools(seat, config);
   const description = AGY_AGENT_DESCRIPTIONS[agentName] ?? `Repo-harness ${seat}`;
-  const content = Buffer.from([
+  const mainProfile = [
     '---', `name: ${agentName}`, `description: ${description}`, 'mainAgent: true',
     `tools: [${tools.join(', ')}]`, `inheritMcp: ${config.tools.includes('mcp')}`, '---', '', '# System', '', agySeatBrief(seat, config), '',
-  ].join('\n'));
-  const digest = sha256Hex(content);
-  let directory = realpathSync(dirname(dirname(globalConfigurationPath(env))));
-  for (const part of ['.repo-harness', 'seats', 'agy', digest, '.agents', 'agents', agentName]) {
-    directory = join(directory, part);
-    try { mkdirSync(directory, { mode: 0o700 }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-    const stat = lstatSync(directory);
-    if (!stat.isDirectory() || (process.getuid !== undefined && stat.uid !== process.getuid())) throw new Error('agy agent directory must be owned and contain no links.');
-  }
-  const path = join(directory, 'agent.md');
-  const temporary = join(directory, `.agent-${randomUUID()}.tmp`);
+  ].join('\n');
+  const fleet = ALLOWED_SEAT_FLEET_ROLES[seat].filter(role => config.fleet.includes(role))
+    .map(role => [`${role}.md`, agyFleetProfile(role)] as const);
+  const digest = sha256Hex(mainProfile + fleet.map(([, profile]) => profile).join(''));
+  const home = realpathSync(dirname(dirname(globalConfigurationPath(env))));
+  const root = ['.repo-harness', 'seats', 'agy', digest].reduce(ensureAgyAgentDirectory, home);
+  const agents = ['.agents', 'agents'].reduce(ensureAgyAgentDirectory, root);
+  for (const [file, profile] of fleet) writeAgyAgentProfile(join(agents, file), Buffer.from(profile));
+  const mainDirectory = ensureAgyAgentDirectory(agents, agentName);
+  writeAgyAgentProfile(join(mainDirectory, 'agent.md'), Buffer.from(mainProfile));
+  return root;
+}
+
+/** An existing path can only be reused if it holds these bytes. */
+function writeAgyAgentProfile(path: string, content: Buffer): void {
+  const temporary = join(dirname(path), `.agent-${randomUUID()}.tmp`);
   writeFileSync(temporary, content, { flag: 'wx', mode: 0o600 });
   try {
     try { linkSync(temporary, path); }
@@ -499,7 +525,6 @@ export function writeAgySeatAgent(seat: LaunchSeatId, config: SeatConfigV1, env:
   } finally {
     unlinkSync(temporary);
   }
-  return dirname(dirname(dirname(directory)));
 }
 
 const FIELDS = ['runtime', 'model', 'advisor_model', 'effort', 'tools', 'fleet'] as const;

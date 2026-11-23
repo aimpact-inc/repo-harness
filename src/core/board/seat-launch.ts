@@ -382,7 +382,7 @@ export function agySeatAgentName(seat: LaunchSeatId): string {
   throw new Error(`agy is not supported on seat ${seat}.`);
 }
 
-export function agySeatAgentTools(seat: LaunchSeatId, config: SeatConfigV1): readonly string[] {
+function agyMainAgentTools(seat: LaunchSeatId, config: SeatConfigV1): readonly string[] {
   if (isWorkerSeat(seat)) return AGY_WORKER_AGENT_TOOLS;
   if (seat === 'advisor') return [
     ...(config.tools.includes('edit') ? AGY_WORKER_AGENT_TOOLS : AGY_READONLY_AGENT_TOOLS),
@@ -390,6 +390,11 @@ export function agySeatAgentTools(seat: LaunchSeatId, config: SeatConfigV1): rea
   ];
   if (seat === 'orchestrator' || seat === 'council' || seat === 'gatekeeper') return AGY_READONLY_AGENT_TOOLS;
   throw new Error(`agy is not supported on seat ${seat}.`);
+}
+
+export function agySeatAgentTools(seat: LaunchSeatId, config: SeatConfigV1): readonly string[] {
+  const tools = agyMainAgentTools(seat, config);
+  return config.fleet.length === 0 ? tools : [...tools, 'invoke_subagent'];
 }
 
 export function agySeatCommandRules(seat: LaunchSeatId, config: SeatConfigV1): { readonly allow: readonly string[]; readonly deny: readonly string[] } {
@@ -429,7 +434,7 @@ export function agySeatLimits(_seat: LaunchSeatId, config: SeatConfigV1): readon
 export function agySeatBrief(seat: LaunchSeatId, config: SeatConfigV1): string {
   const limits = agySeatLimits(seat, config);
   return [
-    brief(seat, config, [], limits),
+    brief(seat, config, config.fleet, limits),
     'Never read auth or credential files.',
     ...(seat === 'orchestrator' ? [
       'Write only your own scratch files under /tmp and outside every repository and worktree. Never edit repository files.',

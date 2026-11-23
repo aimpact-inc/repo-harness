@@ -214,6 +214,10 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
   test("renders the exact labeled and unlabeled advisor argv and sends the first task once through Herdr", withAgySeat(f => {
     const task = "Private first turn";
     const labels = ["--repository-id", "1186405141"];
+    const fleet = ["deep-reasoner", "explorer"];
+    f.configure({ ...AGY_ADVISOR, fleet });
+    const gemini = join(f.home, ".gemini");
+    const geminiFiles = readdirSync(gemini, { recursive: true }).sort();
     const raw = f.run(["argv", "advisor", ...labels, "--json"]);
     expect(raw.status, raw.stderr).toBe(0);
     const labeled = JSON.parse(raw.stdout);
@@ -306,8 +310,18 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
       "--agent", "rh-advisor", "--settings", JSON.stringify(settings)];
     expect(agent(labeled)).toEqual([...UNSET_SEAT, "REPO_HARNESS_SEAT=advisor", "REPO_HARNESS_SEAT_REPOSITORY=1186405141",
       "REPO_HARNESS_SEAT_MODEL=gemini-4-neon-high", ...executable]);
-    const profile = readFileSync(join(directory, ".agents", "agents", "rh-advisor", "agent.md"), "utf8");
-    expect(profile).toContain("tools: [view_file, write_file, edit_file, run_command, search_web, schedule]\ninheritMcp: true");
+    const agents = join(directory, ".agents", "agents");
+    const profile = readFileSync(join(agents, "rh-advisor", "agent.md"), "utf8");
+    expect(profile).toContain("tools: [view_file, write_file, edit_file, run_command, search_web, schedule, invoke_subagent]\ninheritMcp: true");
+    expect(profile).toContain("`deep-reasoner`, `explorer`");
+    expect(labeled.brief).toContain("`deep-reasoner`, `explorer`");
+    expect(readdirSync(agents).sort()).toEqual(["deep-reasoner.md", "explorer.md", "rh-advisor"]);
+    for (const role of fleet) {
+      const subagent = readFileSync(join(agents, `${role}.md`), "utf8");
+      expect(subagent).toContain(`\nname: ${role}\n`);
+      expect(subagent).toContain("subagent: true\nmainAgent: false\ntools: [read_file, search_web]\ninheritMcp: false\n---");
+    }
+    expect(readdirSync(gemini, { recursive: true }).sort()).toEqual(geminiFiles);
     expect(profile).toContain("Edit only your own files under /tmp/rh-triage/");
     expect(profile).toContain("Never edit repository source.");
     expect(profile).toContain("Never read auth or credential files.");
@@ -323,7 +337,7 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
   }));
 
   test("renders the native orchestrator argv, command rules and read-only agent profile", withAgySeat(f => {
-    f.configure(AGY_ADVISOR, true, { orchestrator: AGY_ORCHESTRATOR });
+    f.configure(AGY_ADVISOR, true, { orchestrator: { ...AGY_ORCHESTRATOR, fleet: ["explorer"] } });
     const raw = f.run(["argv", "orchestrator", "--repository-id", "1186405141", "--json"]);
     expect(raw.status, raw.stderr).toBe(0);
     const launch = JSON.parse(raw.stdout);
@@ -333,7 +347,9 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     expect(argv[argv.indexOf("--agent") + 1]).toBe("rh-orchestrator");
     const directory = argv[argv.indexOf("--add-dir") + 1];
     const profile = readFileSync(join(directory, ".agents", "agents", "rh-orchestrator", "agent.md"), "utf8");
-    expect(profile).toContain("tools: [view_file, run_command, search_web]\ninheritMcp: true");
+    expect(profile).toContain("tools: [view_file, run_command, search_web, invoke_subagent]\ninheritMcp: true");
+    expect(profile).toContain("read-only sub-agents: `explorer`");
+    expect(readdirSync(join(directory, ".agents", "agents")).sort()).toEqual(["explorer.md", "rh-orchestrator"]);
     expect(profile).toContain("Never edit repository files.");
     expect(profile).toContain("triage queue in your own scratch files under /tmp");
     const { permissions } = JSON.parse(argv[argv.indexOf("--settings") + 1]);
@@ -470,7 +486,8 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
   );
 
   test("worker agy launches generate rh-worker with writable tools, zero REPO_HARNESS_SEAT* env vars, and gh-aware command rules", withAgySeat(f => {
-    f.configure(AGY_ADVISOR, true, { "worker-neon": AGY_WORKER, "worker-light": AGY_WORKER_NO_GH });
+    const workerConfig = { ...AGY_WORKER, fleet: ["explorer"] };
+    f.configure(AGY_ADVISOR, true, { "worker-neon": workerConfig, "worker-light": AGY_WORKER_NO_GH });
     const raw = f.run(["argv", "worker-neon", "--repository-id", "1186405141", "--issue", "3377", "--parent", "3375", "--json"]);
     expect(raw.status, raw.stderr).toBe(0);
     const worker = JSON.parse(raw.stdout);
@@ -484,7 +501,8 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     expect(worker.brief).not.toContain("Do not write to GitHub.");
     const directory = worker.argv[worker.argv.indexOf("--add-dir") + 1];
     const profile = readFileSync(join(directory, ".agents", "agents", "rh-worker", "agent.md"), "utf8");
-    expect(profile).toContain("name: rh-worker\ndescription: Repo-harness worker\nmainAgent: true\ntools: [view_file, write_file, edit_file, run_command, search_web]\ninheritMcp: false");
+    expect(profile).toContain("name: rh-worker\ndescription: Repo-harness worker\nmainAgent: true\ntools: [view_file, write_file, edit_file, run_command, search_web, invoke_subagent]\ninheritMcp: false");
+    expect(readdirSync(join(directory, ".agents", "agents")).sort()).toEqual(["explorer.md", "rh-worker"]);
     expect(profile).toContain("Never read auth or credential files.");
     expect(profile).not.toContain("When Stop requests a handoff");
     const parsedSettings = JSON.parse(worker.argv[worker.argv.indexOf("--settings") + 1]);
@@ -503,13 +521,16 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
       "command(rh publication merge)", "command(rh board merge)", "command(gh pr merge)", "command(gh release create)",
       "command(gh issue close)", "command(git reset --hard)", "command(git clean)",
     ]));
-    expect(worker.limits).toEqual(agySeatLimits("worker-neon", AGY_WORKER));
+    expect(worker.limits).toEqual(agySeatLimits("worker-neon", workerConfig));
     expect(worker.limits.some((limit: { subject: string }) => limit.subject === "edit" || limit.subject === "gh")).toBe(false);
 
     // Worker with gh disabled denies git push and gh pr create and reports gh: common_commands.
     const noGhRaw = f.run(["argv", "worker-light", "--repository-id", "1186405141", "--issue", "3377", "--json"]);
     expect(noGhRaw.status, noGhRaw.stderr).toBe(0);
     const noGh = JSON.parse(noGhRaw.stdout);
+    const lightAgents = join(noGh.argv[noGh.argv.indexOf("--add-dir") + 1], ".agents", "agents");
+    expect(readdirSync(lightAgents)).toEqual(["rh-worker"]);
+    expect(readFileSync(join(lightAgents, "rh-worker", "agent.md"), "utf8")).not.toContain("invoke_subagent");
     expect(noGh.argv[noGh.argv.indexOf("--model") + 1]).toBe("gemini-4-hydrogen-high");
     expect(noGh.argv[noGh.argv.indexOf("--effort") + 1]).toBe("high");
     const noGhSettings = JSON.parse(noGh.argv[noGh.argv.indexOf("--settings") + 1]);
@@ -569,7 +590,9 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     expect(tabArg.argv[tabArg.argv.indexOf("--agent") + 1]).toBe("rh-council");
     const directory = tabArg.argv[tabArg.argv.indexOf("--add-dir") + 1];
     const profile = readFileSync(join(directory, ".agents", "agents", "rh-council", "agent.md"), "utf8");
-    expect(profile).toContain("name: rh-council\ndescription: Repo-harness council\nmainAgent: true\ntools: [view_file, run_command, search_web]\ninheritMcp: false");
+    expect(profile).toContain("name: rh-council\ndescription: Repo-harness council\nmainAgent: true\ntools: [view_file, run_command, search_web, invoke_subagent]\ninheritMcp: false");
+    expect(profile).toContain("read-only sub-agents `explorer`");
+    expect(readdirSync(join(directory, ".agents", "agents")).sort()).toEqual(["explorer.md", "rh-council"]);
     const parsedSettings = JSON.parse(tabArg.argv[tabArg.argv.indexOf("--settings") + 1]);
     expect(parsedSettings.permissions.allow).not.toContain("command(rh seats council)");
     expect(parsedSettings.permissions.deny).toEqual(expect.arrayContaining(["command(rh publication merge)", "command(rh board merge)", "command(gh pr merge)", "command(git reset --hard)"]));

@@ -338,7 +338,7 @@ function resolveCouncilMemberSeat(member: CouncilMember, seats: SeatsConfigV1, e
     advisor_model: null,
     effort: matchesStored ? stored.effort : (selected.effort ?? null),
     tools: selected.runtime === 'agy' ? AGY_READONLY_SEAT_TOOLS : (stored?.tools ?? COUNCIL_TOOLS),
-    fleet: selected.runtime === 'agy' ? [] : (stored?.fleet ?? ALLOWED_SEAT_FLEET_ROLES.council),
+    fleet: stored?.fleet ?? ALLOWED_SEAT_FLEET_ROLES.council,
   };
 }
 
