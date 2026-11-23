@@ -422,7 +422,10 @@ test.skipIf(process.platform === 'win32')('architecture switch removes only a re
     const bunBin = join(fakeBin, 'bun');
     const env = { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun'), REPO_HARNESS_BUN_EXECUTABLE: bunBin,
       PATH: `${fakeBin}:${process.env.PATH ?? ''}` };
-    seedGlobalPackageFixture(env);
+    const installedPackage = seedGlobalPackageFixture(env);
+    const bin = join(env.BUN_INSTALL, 'bin');
+    mkdirSync(bin, { recursive: true });
+    symlinkSync(join(installedPackage, 'src/cli/index.ts'), join(bin, 'rh'));
     writeFakeHc(fakeBin);
     const config = join(home, '.gemini/config/mcp_config.json');
     const paths = hostConfigPaths(env);
