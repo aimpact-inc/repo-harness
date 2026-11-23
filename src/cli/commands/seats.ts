@@ -346,7 +346,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   const runtimeSeat: SeatId = plannedSeat?.id === 'gatekeeper-fallback' ? plannedSeat.id : id;
   const initialCandidate = plannedSeat?.seat ?? configured;
   let agyProbe = prepareFleet && initialCandidate.runtime === 'agy'
-    ? await checkedAgyRuntime(runtimeSeat, config, initialCandidate, env, terminal)
+    ? checkedAgyRuntime(runtimeSeat, config, initialCandidate, env, terminal)
     : undefined;
   const checkPool = checkAvailability && agyProbe === undefined;
   const probes = checkPool ? collectSeatPoolProbes(env, SEAT_IDS.some(seatId => seats[seatId]?.runtime === 'agy')) : [];
@@ -362,7 +362,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
     ? { id: runtimeSeat, seat: plannedSeat.seat, modeKnown: true, claudeSaving: false }
     : await quotaCheckedSeat(id, seats, configured, env, labels.ownerException);
   if (prepareFleet && effective.runtime === 'agy') {
-    agyProbe ??= await checkedAgyRuntime(effectiveId, config, effective, env, terminal);
+    agyProbe ??= checkedAgyRuntime(effectiveId, config, effective, env, terminal);
     checkAgyLaunchTarget(effectiveId, effective, agyProbe.models, env, cwd);
   }
   if (checkPool && effective.runtime !== 'agy') {
@@ -400,7 +400,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   } };
 }
 
-async function checkedAgyRuntime(id: SeatId, config: Record<string, unknown>, seat: SeatConfigV1, env: NodeJS.ProcessEnv, terminal: 'new' | 'existing') {
+function checkedAgyRuntime(id: SeatId, config: Record<string, unknown>, seat: SeatConfigV1, env: NodeJS.ProcessEnv, terminal: 'new' | 'existing') {
   if (!isAgyAllowedSeat(id)) {
     throw new SeatsCommandError('seat_runtime_unsupported', `Direct agy launch is not supported on the ${id} seat.`);
   }
@@ -414,7 +414,7 @@ async function checkedAgyRuntime(id: SeatId, config: Record<string, unknown>, se
   if (!enabledRuntimesOf(config).includes(seatHostId('agy'))) {
     throw new SeatsConfigurationError('seat_runtime_not_enabled', `Enable Antigravity in Hosts before launching the ${id}.`);
   }
-  const probe = await probeAgySeat(env);
+  const probe = probeAgySeat(env);
   switch (probe.kind) {
     case 'not_installed': throw new SeatsCommandError('seat_runtime_missing', `Install agy before launching the ${id}. See seats.${id}.model.`);
     case 'unsupported': throw new SeatsCommandError('seat_runtime_unsupported', `The ${id} requires stable agy 1.5.0 or later. See seats.${id}.model.`);
@@ -425,8 +425,8 @@ async function checkedAgyRuntime(id: SeatId, config: Record<string, unknown>, se
   }
 }
 
-function checkAgyLaunchTarget(id: SeatId, seat: SeatConfigV1, models: ReadonlySet<string>, env: NodeJS.ProcessEnv, cwd: string): void {
-  if (seat.model === null || !models.has(seat.model)) {
+function checkAgyLaunchTarget(id: SeatId, seat: SeatConfigV1, models: readonly string[], env: NodeJS.ProcessEnv, cwd: string): void {
+  if (seat.model === null || !models.includes(seat.model)) {
     throw new SeatsCommandError('seat_model_unavailable', `agy does not list the selected ${id} model. See seats.${id}.model.`);
   }
   let optedIn = false;

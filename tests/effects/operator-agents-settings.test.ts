@@ -1298,7 +1298,7 @@ describe('agent runtime probe', () => {
     const probe = await probeAgentRuntimes({
       runtimes: [
         { id: 'claude', group: 'default', installation: async () => ({ kind: 'available', via: 'executable', command: '/Users/someone/.local/bin/claude', version: '2.1.0', shadowed: ['/usr/local/bin/claude'] }) },
-        { id: 'kimi', group: 'default', installation: async () => ({ kind: 'unsupported', reason: 'needs /Users/someone/.kimi/config' }) },
+        { id: 'kimi', group: 'default', installation: async () => ({ kind: 'unsupported', code: 'unsupported_host', reason: 'needs /Users/someone/.kimi/config' }) },
         { id: 'grok', group: 'default', installation: async () => { throw new Error('/Users/someone/secret'); } },
         { id: 'opencode', group: 'default', installation: () => new Promise(() => {}) },
         { id: 'morph', group: 'community' },

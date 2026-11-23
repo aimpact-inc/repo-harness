@@ -16,6 +16,7 @@ import { assertPiShell } from "../../src/effects/board/pi-shell";
 import { readClaudeQuota } from "../../src/effects/board/quota";
 import { buildAntigravityHooks } from "../../src/cli/installer/managed-entries";
 import { seedGlobalPackageFixture } from "../helpers/install-ownership";
+import { agyCatalogScript, type AgyCatalogFixture } from "../helpers/agy-cli-fixture";
 
 const CLI = join(import.meta.dir, "..", "..", "src/cli/index.ts");
 
@@ -146,7 +147,7 @@ type AgyFixture = {
   home: string; cwd: string; agy: string; hooks: string; tab: string;
   run: (args: string[], extra?: Record<string, string>) => ReturnType<typeof run>;
   configure: (advisor?: unknown, enabled?: boolean, overrides?: Record<string, unknown>) => void;
-  catalog: (lines: string, version?: string, exit?: number, quota?: { gemini: number; other: number }) => void;
+  catalog: (models: AgyCatalogFixture, version?: string, quota?: { gemini: number; other: number }) => void;
 };
 
 function withAgySeat(callback: (fixture: AgyFixture) => void) {
@@ -168,12 +169,11 @@ function withAgySeat(callback: (fixture: AgyFixture) => void) {
     };
     configure();
     const agy = join(bin, "agy");
-    const catalog = (lines: string, version = "1.5.12", exit = 0, quota?: { gemini: number; other: number }) => writeFileSync(agy, `#!${process.execPath}
-const arg = process.argv[2];
-if (arg === '--version') { console.log(${JSON.stringify(version)}); process.exit(0); }
-if (arg === 'models') { process.stdout.write(${JSON.stringify(lines)}); process.exit(${exit}); }
+    const catalog = (models: AgyCatalogFixture, version?: string, quota?: { gemini: number; other: number }) => {
+      const quotaScript = `
+if (command === 'models') process.exit(0);
 const quota = ${JSON.stringify(quota)};
-if (arg === '-p' && process.argv[3] === '/usage' && quota) {
+if (command === '-p' && process.argv[3] === '/usage' && quota) {
   const bucket = (window, remaining_fraction, hours) => ({ window, remaining_fraction,
     reset_time: new Date(Date.now() + hours * 3600000).toISOString() });
   const group = (name, remaining) => ({ name, buckets: [bucket('weekly', remaining, 84), bucket('5h', 0.90, 2)] });
@@ -182,8 +182,14 @@ if (arg === '-p' && process.argv[3] === '/usage' && quota) {
   process.exit(0);
 }
 process.exit(93);
-`, { mode: 0o755 });
-    catalog("gemini-4-neon-high\tGemini 4 Neon (High)\ngemini-4-carbon-high\tGemini 4 Carbon (High)\ngemini-4-hydrogen-high\tGemini 4 Hydrogen (High)\n");
+`;
+      writeFileSync(agy, `#!${process.execPath}\n${agyCatalogScript(models, version, quotaScript)}`, { mode: 0o755 });
+    };
+    catalog([
+      { id: "gemini-4-neon", efforts: ["high"] },
+      { id: "gemini-4-carbon", efforts: ["high"] },
+      { id: "gemini-4-hydrogen", efforts: ["low", "medium", "high", "xhigh"] },
+    ]);
     const tab = join(home, "tab.json");
     writeFileSync(join(bin, "herdr-app"), `#!${process.execPath}
 const args = JSON.parse(process.argv[4]);
@@ -322,9 +328,13 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     const extraArgs: string[] = [];
     switch (branch) {
       case "missing": rmSync(f.agy); error = "seat_runtime_missing"; break;
-      case "unsupported": f.catalog("", "1.4.9"); error = "seat_runtime_unsupported"; break;
-      case "signed out": f.catalog("Please sign in\n", "1.5.12", 1); error = "seat_runtime_signed_out"; break;
-      case "unknown": f.catalog("private unexpected output\n"); error = "seat_runtime_unknown"; break;
+      case "unsupported": f.catalog([], "1.4.9"); error = "seat_runtime_unsupported"; break;
+      case "signed out":
+        f.configure({ ...AGY_ADVISOR, model: "private-free-id" });
+        f.catalog("signed_out", undefined, { gemini: 0.01, other: 0.60 });
+        error = "seat_runtime_signed_out";
+        break;
+      case "unknown": f.catalog("malformed"); error = "seat_runtime_unknown"; break;
       case "model absent": f.configure({ ...AGY_ADVISOR, model: "private-free-id" }); error = "seat_model_unavailable"; break;
       case "effort mismatch": f.configure({ ...AGY_ADVISOR, effort: "medium" }); error = "seat_effort_invalid"; break;
       case "outside opt-in": cwd = f.home; error = "seat_checkout_not_opted_in"; break;
@@ -346,13 +356,13 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
   test("a listed free model launches despite a stale cache, and only the local argv carries it", withAgySeat(f => {
     const model = "private-free-id";
     f.configure({ ...AGY_ADVISOR, model, tools: ["net", "read", "shell"] });
-    f.catalog("Please sign in\n", "1.5.12", 1);
+    f.catalog("signed_out");
     const negative = f.run(["pool", "--json"]);
     expect(negative.status, negative.stderr).toBe(0);
     const cache = join(f.home, ".repo-harness", "seats", "pool.json");
     const stale = JSON.stringify({ ...JSON.parse(negative.stdout), collected_at: "2026-01-01T00:00:00.000Z" });
     writeFileSync(cache, stale);
-    f.catalog(model + "\tA custom model\n");
+    f.catalog([model]);
     const result = f.run(agyTabArgs(f.cwd));
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).not.toContain(model);
@@ -367,18 +377,18 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
 
   test("agy advisor checks the quota-selected model in its native catalog", withAgySeat(f => {
     f.configure({ ...AGY_ADVISOR, model: "gemini-4-carbon-xhigh", effort: "xhigh" });
-    const carbon = "gemini-4-carbon-xhigh\tGemini 4 Carbon (XHigh)\n";
-    const neon = "gemini-4-neon-high\tGemini 4 Neon (High)\n";
-    f.catalog(carbon, undefined, 0, { gemini: 0.49, other: 0.60 });
+    const carbon = [{ id: "gemini-4-carbon", efforts: ["xhigh"] }];
+    const neon = [{ id: "gemini-4-neon", efforts: ["high"] }];
+    f.catalog(carbon, undefined, { gemini: 0.49, other: 0.60 });
     const missing = f.run(["argv", "advisor", "--json"]);
     expect([missing.status, JSON.parse(missing.stderr).error]).toEqual([1, "seat_model_unavailable"]);
-    f.catalog(neon, undefined, 0, { gemini: 0.49, other: 0.60 });
+    f.catalog(neon, undefined, { gemini: 0.49, other: 0.60 });
     const downgraded = f.run(["argv", "advisor", "--json"]);
     expect(downgraded.status, downgraded.stderr).toBe(0);
     const args = JSON.parse(downgraded.stdout).argv;
     expect(args[args.indexOf("--model") + 1]).toBe("gemini-4-neon-high");
     expect(args).not.toContain("--effort");
-    f.catalog(carbon, undefined, 0, { gemini: 0.50, other: 0.60 });
+    f.catalog(carbon, undefined, { gemini: 0.50, other: 0.60 });
     const unchanged = f.run(["argv", "advisor", "--json"]);
     expect(unchanged.status, unchanged.stderr).toBe(0);
     const configured = JSON.parse(unchanged.stdout).argv;
@@ -389,7 +399,7 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
   test("native agy worker without Gemini uses the agy_other account before launch", withAgySeat(f => {
     const model = "claude-opus-5-5-high";
     f.configure(AGY_ADVISOR, true, { worker: { ...AGY_WORKER, model } });
-    f.catalog(model + "\tClaude Opus 5.5 (High)\n", undefined, 0, { gemini: 0.60, other: 0.01 });
+    f.catalog([model], undefined, { gemini: 0.60, other: 0.01 });
     const refused = f.run(["argv", "worker", "--json"]);
     expect([refused.status, JSON.parse(refused.stderr).error]).toEqual([1, "seat_quota_exhausted"]);
     expect(JSON.parse(refused.stderr).message).toContain("agy_other");
@@ -822,6 +832,7 @@ describe("rh seats argv", () => {
       const writeAgy = (weekly: number) => writeFileSync(agy, `#!${process.execPath}
 const args = process.argv.slice(2).join(' ');
 require('node:fs').appendFileSync(${JSON.stringify(log)}, args + '\\n');
+if (args === '--version') { console.log('1.5.12'); process.exit(0); }
 if (args === 'models') process.exit(0);
 if (args !== '-p /usage --output-format json') process.exit(9);
 const hour = 3_600_000;
@@ -839,7 +850,7 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
       const fallback = argv(home, "gatekeeper", "--pr", "3288", "--json");
       expect(fallback.status, fallback.stderr).toBe(0);
       expect(bare(JSON.parse(fallback.stdout).argv)).toContain('agy-cli/claude-opus-5-5');
-      expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual(Array.from({ length: 3 }, () => ['models', '-p /usage --output-format json']).flat());
+      expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual(Array.from({ length: 3 }, () => ['--version', 'models', '-p /usage --output-format json']).flat());
       writeAgy(0.24);
       const reserved = argv(home, "worker-neon", "--json");
       expect([reserved.status, JSON.parse(reserved.stderr).error]).toEqual([1, "seat_quota_reserved"]);

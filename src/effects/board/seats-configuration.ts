@@ -167,56 +167,74 @@ function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly str
 const SEAT_POOL_MEMBER_MS = 15_000;
 // Codex installation can run both a readiness and a version check. Leave time for OAR to close its processes.
 const SEAT_POOL_CHILD_MS = 120_000;
+const AGY_CATALOG_CHILD_MS = 60_000;
+const AGY_CATALOG_CHILD_ARG = '--agy-catalog';
 const SEAT_POOL_FILE_LIMIT = 64 * 1024;
 const CATALOG_RUNTIMES = ['claude', 'codex'] as const;
 
 type AgyProbe =
-  | { readonly kind: 'available'; readonly executable: string; readonly models: ReadonlySet<string> }
+  | { readonly kind: 'available'; readonly executable: string; readonly models: readonly string[] }
   | { readonly kind: 'not_installed' | 'unsupported' | 'signed_out' | 'catalog_unknown' | 'unknown' };
 
-/** Observe the native CLI once. Its login state and raw output stay with the probe. */
-export async function probeAgySeat(env: NodeJS.ProcessEnv = process.env): Promise<AgyProbe> {
-  const probeEnv: NodeJS.ProcessEnv = { HOME: env.HOME ?? homedir(), PATH: env.PATH ?? '', TMPDIR: env.TMPDIR,
-    BUN_INSTALL: env.BUN_INSTALL, OAR_ANTIGRAVITY_BIN: env.OAR_ANTIGRAVITY_BIN, OAR_CHILD_STDERR: 'ignore', NO_COLOR: '1', TERM: 'dumb' };
-  let executable: string;
+function agyProbeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return { HOME: env.HOME ?? homedir(), USERPROFILE: env.USERPROFILE, LOCALAPPDATA: env.LOCALAPPDATA, PATH: env.PATH ?? '',
+    TMPDIR: env.TMPDIR, OAR_ANTIGRAVITY_BIN: env.OAR_ANTIGRAVITY_BIN, OAR_CHILD_STDERR: 'ignore', NO_COLOR: '1', TERM: 'dumb' };
+}
+
+/** Read the native catalog in a child with a scratch cwd. Only its typed projection returns. */
+export function probeAgySeat(env: NodeJS.ProcessEnv = process.env): AgyProbe {
+  const cwd = mkdtempSync(join(tmpdir(), 'rh-agy-catalog-'));
   try {
-    const { antigravityRuntime } = await import('@botiverse/oar/runtimes/antigravity');
-    const overlay = Object.fromEntries(Object.keys(process.env).map(key => [key, null]));
-    const installed = await antigravityRuntime.installation?.({ env: { ...overlay, ...Object.fromEntries(Object.entries(probeEnv).map(([key, value]) => [key, value ?? null])) } });
-    if (installed?.kind === 'not_found') return { kind: 'not_installed' };
-    if (installed?.kind === 'unsupported') return { kind: 'unsupported' };
-    if (installed?.kind !== 'available' || installed.via !== 'executable' || !isAbsolute(installed.command)) return { kind: 'unknown' };
-    executable = installed.command;
+    const result = runProcess(process.execPath, [fileURLToPath(import.meta.url), AGY_CATALOG_CHILD_ARG], {
+      cwd, env: agyProbeEnv(env), inheritEnv: false, timeoutMs: AGY_CATALOG_CHILD_MS, processGroup: true,
+    });
+    if (!result.ok) return { kind: 'unknown' };
+    const row: unknown = JSON.parse(result.stdout);
+    if (!isRecord(row)) return { kind: 'unknown' };
+    switch (row.kind) {
+      case 'not_installed': case 'unsupported': case 'signed_out': case 'catalog_unknown': return { kind: row.kind };
+      case 'available':
+        if (typeof row.executable === 'string' && isAbsolute(row.executable) && Array.isArray(row.models)
+          && row.models.every(id => seatModelShapeValid('agy', id))) {
+          return { kind: row.kind, executable: row.executable, models: row.models };
+        }
+    }
+    return { kind: 'unknown' };
   } catch {
     return { kind: 'unknown' };
-  }
-
-  let cwd: string | undefined;
-  try {
-    cwd = mkdtempSync(join(tmpdir(), 'rh-agy-catalog-'));
-    const result = runProcess(executable, ['models'], { cwd, env: probeEnv, inheritEnv: false, timeoutMs: SEAT_POOL_MEMBER_MS, processGroup: true });
-    if (!result.timedOut && result.status === 1 && /Please sign in\b/iu.test(`${result.stdout}\n${result.stderr}`)) return { kind: 'signed_out' };
-    if (!result.ok) return { kind: 'catalog_unknown' };
-    const models = new Set<string>();
-    for (const line of result.stdout.split(/\r?\n/u)) {
-      if (line.trim() === '') continue;
-      const [id, name, ...rest] = line.split('\t');
-      if (!seatModelShapeValid('agy', id) || !name?.trim() || rest.length !== 0) return { kind: 'catalog_unknown' };
-      models.add(id);
-    }
-    return models.size === 0 ? { kind: 'catalog_unknown' } : { kind: 'available', executable, models };
-  } catch {
-    return { kind: 'catalog_unknown' };
   } finally {
-    if (cwd !== undefined) rmSync(cwd, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+}
+
+async function readAgyCatalog(): Promise<AgyProbe> {
+  const env = { ...Object.fromEntries(Object.keys(process.env).map(key => [key, null])),
+    ...Object.fromEntries(Object.entries(agyProbeEnv(process.env)).map(([key, value]) => [key, value ?? null])) };
+  let stage: 'unknown' | 'catalog_unknown' = 'unknown';
+  try {
+    const { antigravityRuntime } = await import('@botiverse/oar/runtimes/antigravity');
+    const installed = await antigravityRuntime.installation({ env });
+    if (installed.kind === 'not_found') return { kind: 'not_installed' };
+    if (installed.kind === 'unsupported') return { kind: 'unsupported' };
+    if (installed.via !== 'executable' || !isAbsolute(installed.command)) return { kind: 'unknown' };
+    stage = 'catalog_unknown';
+    // The catalog reports sign-in directly. The auth endpoint also reads account identity.
+    const catalog = await antigravityRuntime.listModels(installed, { env, timeoutMs: SEAT_POOL_MEMBER_MS });
+    if (catalog.kind === 'unauthenticated') return { kind: 'signed_out' };
+    if (catalog.kind !== 'ok') return { kind: 'catalog_unknown' };
+    const models = new Set(catalog.models.flatMap(({ id, disabled, effortLevels = [] }) => disabled === undefined
+      ? [id, ...effortLevels.map(effort => `${id}-${effort}`)] : []).filter(id => seatModelShapeValid('agy', id)));
+    return models.size === 0 ? { kind: 'catalog_unknown' } : { kind: 'available', executable: installed.command, models: [...models] };
+  } catch {
+    return { kind: stage };
   }
 }
 
 async function probeAgyPool(): Promise<SeatPoolProbe> {
-  const probe = await probeAgySeat();
+  const probe = await readAgyCatalog();
   switch (probe.kind) {
     case 'available': return { id: 'agy', installation: 'available', sign_in: 'logged_in', models: 'ok',
-      listed: [...recommendedModelIds('agy')].filter(id => probe.models.has(id)).map(id => ({ id, disabled: false })) };
+      listed: [...recommendedModelIds('agy')].filter(id => probe.models.includes(id)).map(id => ({ id, disabled: false })) };
     case 'signed_out': return { ...emptySeatPoolProbe('agy', 'available'), sign_in: 'logged_out', models: 'unauthenticated' };
     case 'catalog_unknown': return { ...emptySeatPoolProbe('agy', 'available'), sign_in: 'unknown', models: 'unknown' };
     case 'not_installed': return emptySeatPoolProbe('agy', 'not_installed');
@@ -237,8 +255,8 @@ async function probeSeatCatalog(id: typeof CATALOG_RUNTIMES[number], command: st
     if (installed.kind === 'not_found') return emptySeatPoolProbe(id, 'not_installed');
     if (installed.kind !== 'available') return probe;
     probe = { ...probe, installation: 'available', sign_in: 'unknown' };
-    const auth = await authStatus(installed, { timeoutMs: SEAT_POOL_MEMBER_MS });
-    if (auth.kind !== 'logged_in') return { ...probe, sign_in: auth.kind };
+    const { kind: signIn } = await authStatus(installed, { timeoutMs: SEAT_POOL_MEMBER_MS });
+    if (signIn !== 'logged_in') return { ...probe, sign_in: signIn };
     probe = { ...probe, sign_in: 'logged_in', models: 'unknown' };
     const catalog = await listModels(installed, { cwd: process.cwd(), timeoutMs: SEAT_POOL_MEMBER_MS });
     if (catalog.kind === 'unauthenticated') return { ...probe, models: 'unauthenticated' };
@@ -354,11 +372,14 @@ export function refreshSeatPool(): { readonly report: SeatPoolV1; readonly store
 }
 
 if (import.meta.main) {
-  // Only the pool probe child runs the OAR catalog members, one runtime at a time.
-  const probes: SeatPoolProbe[] = [];
-  for (const [index, id] of CATALOG_RUNTIMES.entries()) probes.push(await probeSeatCatalog(id, process.argv[index + 2] ?? ''));
-  if (process.argv[2 + CATALOG_RUNTIMES.length] === 'agy') probes.push(await probeAgyPool());
-  process.stdout.write(`${JSON.stringify(probes)}\n`, () => process.exit(0));
+  if (process.argv[2] === AGY_CATALOG_CHILD_ARG) {
+    process.stdout.write(`${JSON.stringify(await readAgyCatalog())}\n`, () => process.exit(0));
+  } else {
+    const probes: SeatPoolProbe[] = [];
+    for (const [index, id] of CATALOG_RUNTIMES.entries()) probes.push(await probeSeatCatalog(id, process.argv[index + 2] ?? ''));
+    if (process.argv[2 + CATALOG_RUNTIMES.length] === 'agy') probes.push(await probeAgyPool());
+    process.stdout.write(`${JSON.stringify(probes)}\n`, () => process.exit(0));
+  }
 }
 
 const AGY_AGENT_DESCRIPTIONS: Readonly<Record<string, string>> = {
