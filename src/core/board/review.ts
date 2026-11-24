@@ -157,7 +157,7 @@ export function reviewPacketHeader(decision: Extract<ReviewDecisionV1, { action:
 
 function reviewScope(tier: 'medium' | 'high', seat: ReviewSeat, deltaFrom: string | null): string {
   if (deltaFrom !== null) {
-    return `This is a fix check. Confirm the fix of each earlier blocking finding at this head, and review the hunks that changed since ${deltaFrom}. A new finding outside those hunks blocks only as a P0, or as an I1 or I2 finding with a trigger.`;
+    return `This is a fix check. Confirm the fix of each earlier blocking finding at this head. An earlier finding stays open only when its own case still fails. Review the hunks that changed since ${deltaFrom}. A new finding blocks only when it is in those hunks and the fix introduced the defect: the trigger reaches the defect at this head and does not reach it at ${deltaFrom}. Every other new finding is at most a P2, also when the fix moved or rewrote the lines of a defect that ${deltaFrom} already had. The exceptions are a P0, and an I1 or I2 finding with a trigger.`;
   }
   if (tier === 'high' && seat === 'reviewer') {
     return 'You are the second review of a High head. Report only I1 and I2 defects, and defects on a configured I3 path. The gatekeeper reviews the rest.';
@@ -174,7 +174,7 @@ export function reviewPacket(decision: Extract<ReviewDecisionV1, { action: 'star
     `Read the PR body, the issue and the recorded evidence first: gh pr view ${decision.pr} --comments. You are read-only.`,
     'Grade only the lines that the PR changes; a defect that main already has is a P3.',
     REVIEW_SEVERITY_BAR,
-    'In each P0 or P1 finding, "trigger" holds that command or input, and "fix" names the smallest change that removes it. Do not ask for a wider guard.',
+    'In each P0 or P1 finding, "trigger" holds that command or input, or those steps in order, and "fix" names the smallest change that removes the trigger. Do not ask for a guard that the trigger does not need.',
     'Write at most five P3 notes, one line each.',
     'Do not publish. End your last reply with the line RECEIPT-JSON and then this receipt as one JSON object, with your values in place of each <...>. Include only your findings and write each line number as an integer.',
     receipt,

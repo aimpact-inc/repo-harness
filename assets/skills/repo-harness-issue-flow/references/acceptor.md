@@ -121,10 +121,14 @@ PR changes.
    check rows from distinct claims, at least one different-family, started
    in parallel.
 2. **Round 2 is a fix check.** The reviewer that raised a blocking finding
-   confirms each fix and reviews the hunks that changed after round 1. A
-   new finding outside those hunks blocks only as a P0, or as an I1 or I2
-   finding with a trigger. Every other new finding outside those hunks is
-   a P2 or a P3. A round-1 `PASS` row counts for the fix head when the fix
+   confirms each fix. An earlier finding stays open only when its own case
+   still fails. The reviewer then reviews the hunks that changed after
+   round 1. A new finding blocks only when it is in those hunks and the fix
+   introduced the defect: the trigger reaches the defect at the fix head
+   and does not reach it at the round-1 head. Every other new finding is at
+   most a P2, also when the fix moved or rewrote the lines of a defect that
+   the round-1 head already had. The exceptions are a P0, and an I1 or I2
+   finding with a trigger. A round-1 `PASS` row counts for the fix head when the fix
    stays inside the files of the failing reviewer's findings. A fix outside
    those files takes a delta check from the passing reviewer.
 3. **Merge or stop.** The orchestrator merges on round 2 when only P2 or
@@ -213,8 +217,10 @@ configured I3 paths.
 
 Fail the PR only for a defect that ordinary use or one accident reaches at
 this head. A P0 or a P1 needs a trigger: the command or input, in a default
-environment, that reaches the defect. Documented commands, options and
-settings are ordinary use. Untrusted input that the tool reads in ordinary
+environment, that reaches the defect. A trigger can be several steps in
+order. Documented commands, options and settings are ordinary use. A process
+that ends normally and the state that earlier ordinary use left are also
+ordinary use. Untrusted input that the tool reads in ordinary
 use (repository content, PR and issue text, tool output) is ordinary use. A
 trigger that needs an undocumented override, hand-edited tool state, a second
 independent fault, or an adversary who already runs as the user (race, alias,

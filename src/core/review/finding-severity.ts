@@ -17,7 +17,9 @@ export type ReviewSeverity = 'P0' | 'P1' | 'P2' | 'P3';
 export const REVIEW_SEVERITY_BAR =
   'Fail the PR only for a defect that ordinary use or one accident reaches at this head. ' +
   'A P0 or a P1 needs a trigger: the command or input, in a default environment, that reaches the defect. ' +
+  'A trigger can be several steps in order. ' +
   'Documented commands, options and settings are ordinary use. ' +
+  'A process that ends normally and the state that earlier ordinary use left are also ordinary use. ' +
   'Untrusted input that the tool reads in ordinary use (repository content, PR and issue text, tool output) is ordinary use. ' +
   'A trigger that needs an undocumented override, hand-edited tool state, a second independent fault, or an adversary who already runs as the user (race, alias, shell trick) is not ordinary use, also on an I1 or I2 path. ' +
   'A client-side cache timing window, an unrequested defensive fallback and a duplicate JSON key are P3 notes. ' +

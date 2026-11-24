@@ -399,7 +399,7 @@ test('the packet names the round, tier, head, harness and the RECEIPT-JSON hand-
 test.each([
   ['full review', 'medium', 'reviewer', null, 1, 'Review the whole diff. Group findings by bug family: one finding lists every sibling case.'],
   ['High second review', 'high', 'reviewer', null, 1, 'You are the second review of a High head. Report only I1 and I2 defects, and defects on a configured I3 path. The gatekeeper reviews the rest.'],
-  ['fix check', 'high', 'reviewer', OLD, 2, `This is a fix check. Confirm the fix of each earlier blocking finding at this head, and review the hunks that changed since ${OLD}. A new finding outside those hunks blocks only as a P0, or as an I1 or I2 finding with a trigger.`],
+  ['fix check', 'high', 'reviewer', OLD, 2, `This is a fix check. Confirm the fix of each earlier blocking finding at this head. An earlier finding stays open only when its own case still fails. Review the hunks that changed since ${OLD}. A new finding blocks only when it is in those hunks and the fix introduced the defect: the trigger reaches the defect at this head and does not reach it at ${OLD}. Every other new finding is at most a P2, also when the fix moved or rewrote the lines of a defect that ${OLD} already had. The exceptions are a P0, and an I1 or I2 finding with a trigger.`],
 ] as const)('packet scope for %s', (_label, tier, seat, delta_from, round, scope) => {
   const start = { seat, delta_from };
   const decision = { pr: 1, action: 'start', head_ref: 'feat/1', head_sha: SHA, tier, round, seats: [start] } as const;
