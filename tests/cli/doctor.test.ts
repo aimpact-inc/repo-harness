@@ -165,6 +165,19 @@ test.skipIf(process.platform === 'win32')('doctor measures the installed Antigra
     const entry = fs.readFileSync(bundle);
     fs.writeFileSync(bundle, 'console.log(JSON.stringify({ decision: "allow" }));');
     doctor('ok', 'fail');
+    // A cwd-only hook that ignores workspacePaths reproduces #3473 and must fail the multi-workspace probe.
+    fs.writeFileSync(bundle, [
+      "const fs = require('node:fs');",
+      "const path = require('node:path');",
+      "const input = JSON.parse(fs.readFileSync(0, 'utf8'));",
+      "let dir = input.cwd;",
+      "while (typeof dir === 'string') {",
+      "  if (fs.existsSync(path.join(dir, '.git'))) { console.log(JSON.stringify({ decision: 'deny', reason: 'rh hook: the tool call is refused' })); break; }",
+      "  if (path.dirname(dir) === dir) break;",
+      "  dir = path.dirname(dir);",
+      "}",
+    ].join('\n'));
+    doctor('ok', 'fail');
     fs.writeFileSync(bundle, entry);
     installed['repo-harness'].enabled = false;
     const ran = path.join(root, 'ran');

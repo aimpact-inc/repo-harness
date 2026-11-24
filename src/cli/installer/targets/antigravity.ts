@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -185,19 +185,24 @@ interface AntigravityCheck {
 }
 
 function probeAntigravityGuard(command: string): boolean {
-  const root = mkdtempSync(join(tmpdir(), 'rh-antigravity-doctor-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'rh-antigravity-doctor-')));
   try {
     const home = join(root, 'home');
+    const agentDir = join(home, '.repo-harness', 'seats', 'agy', 'probe');
     const bun = join(root, 'bun');
     const bin = join(root, 'bin');
-    const repo = join(root, 'fake');
-    for (const dir of [home, bun, bin, join(repo, '.git'), join(repo, '.ai', 'harness')]) mkdirSync(dir, { recursive: true });
+    const repo = join(root, 'repo');
+    for (const dir of [home, agentDir, bun, bin, join(repo, '.git'), join(repo, '.ai', 'harness')]) mkdirSync(dir, { recursive: true });
     writeFileSync(join(repo, '.ai', 'harness', 'workflow-contract.json'), '{}\n');
     const fakeEnv = join(repo, '.env');
     writeFileSync(fakeEnv, 'FAKE=antigravity-doctor\n');
-    const input = JSON.stringify({ cwd: repo, toolCall: { name: 'run_command', args: { CommandLine: `cat ${shellQuote(fakeEnv)}` } } });
+    const input = JSON.stringify({
+      cwd: agentDir,
+      workspacePaths: [agentDir, repo],
+      toolCall: { name: 'run_command', args: { CommandLine: `cat ${shellQuote(fakeEnv)}` } },
+    });
     const probe = spawnSync('/bin/sh', ['-c', command], {
-      cwd: repo, env: { HOME: home, PATH: bin, BUN_INSTALL: bun, TMPDIR: root }, input, encoding: 'utf8', timeout: 5000, maxBuffer: 64 * 1024,
+      cwd: home, env: { HOME: home, PATH: bin, BUN_INSTALL: bun, TMPDIR: root }, input, encoding: 'utf8', timeout: 5000, maxBuffer: 64 * 1024,
     });
     if (probe.status !== 0 || probe.stderr !== '') return false;
     const output = parseJsonText(probe.stdout, null);

@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join } from 'path';
 import { WORKFLOW_CONTRACT_MARKER_PATH } from '../../core/adoption/minimum-harness-version';
 import { shellQuote } from '../../core/shell-quote';
 import { ANTIGRAVITY_BRAIN_ROOTS } from '../../effects/board/antigravity-transcript';
-import { HookPayloadError, parseHookPayload, payloadString, payloadValue, type HookPayload } from './hook-input';
+import { HookPayloadError, parseHookPayload, payloadValue, type HookPayload } from './hook-input';
 import { HOST_RENDERERS, type HookOutcome, type HostOutput } from './hook-protocol';
 import type { HookEvent, Route, RouteHost, RouteId } from './route-registry';
 
@@ -57,7 +57,12 @@ export class AntigravityToolInputError extends HookPayloadError {
 
 function decodeAntigravity(input: string | Buffer | undefined, tuple: Pick<Route, 'event' | 'routeId'>): HookPayload {
   const wire = parseHookPayload(input);
-  const payload = { cwd: wire.cwd, session_id: wire.conversationId, transcript_path: wire.transcriptPath };
+  const payload = {
+    cwd: wire.cwd,
+    ...(Object.hasOwn(wire, 'workspacePaths') ? { workspace_paths: wire.workspacePaths } : {}),
+    session_id: wire.conversationId,
+    transcript_path: wire.transcriptPath,
+  };
   if (isAntigravityGuard(tuple)) {
     const tool = payloadValue(wire, 'toolCall.name');
     if (tuple.routeId === 'bash' && tool === 'run_command') {
@@ -88,22 +93,56 @@ type AntigravityRepository =
   | { readonly status: 'opted-in'; readonly cwd: string; readonly repoRoot: string }
   | { readonly status: 'not-in-git-repo' | 'non-opt-in'; readonly repoRoot: string | null };
 
-/** Resolve the tool's working directory. The hook process runs in the config directory. */
-export function resolveAntigravityRepository(payload: HookPayload): AntigravityRepository {
-  const supplied = payloadString(payload, 'cwd');
-  if (!isAbsolute(supplied)) throw new HookPayloadError('cwd must be absolute');
-  const cwd = realpathSync(supplied);
-  if (!statSync(cwd).isDirectory()) throw new HookPayloadError('cwd must be a directory');
-  for (let dir = cwd; ; dir = dirname(dir)) {
-    const git = lstatSync(join(dir, '.git'), { throwIfNoEntry: false });
+function canonicalDirectory(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !isAbsolute(value) || value.includes('\0')) {
+    throw new HookPayloadError(`${label} must be absolute`);
+  }
+  const dir = realpathSync(value);
+  if (!statSync(dir).isDirectory()) throw new HookPayloadError(`${label} must be a directory`);
+  return dir;
+}
+
+function findAntigravityRepository(dir: string): { readonly status: 'opted-in' | 'non-opt-in'; readonly repoRoot: string } | { readonly status: 'not-in-git-repo'; readonly repoRoot: null } {
+  for (let current = dir; ; current = dirname(current)) {
+    const git = lstatSync(join(current, '.git'), { throwIfNoEntry: false });
     if (git) {
       if (!git.isDirectory() && !git.isFile()) throw new HookPayloadError('invalid .git entry');
-      return lstatSync(join(dir, WORKFLOW_CONTRACT_MARKER_PATH), { throwIfNoEntry: false })
-        ? { status: 'opted-in', cwd, repoRoot: dir }
-        : { status: 'non-opt-in', repoRoot: dir };
+      return lstatSync(join(current, WORKFLOW_CONTRACT_MARKER_PATH), { throwIfNoEntry: false })
+        ? { status: 'opted-in', repoRoot: current }
+        : { status: 'non-opt-in', repoRoot: current };
     }
-    if (dirname(dir) === dir) return { status: 'not-in-git-repo', repoRoot: null };
+    if (dirname(current) === current) return { status: 'not-in-git-repo', repoRoot: null };
   }
+}
+
+/** Resolve the opted-in repository across `cwd` and `workspacePaths`, keeping the canonical command `cwd`. */
+export function resolveAntigravityRepository(payload: HookPayload): AntigravityRepository {
+  const cwd = canonicalDirectory(payloadValue(payload, 'cwd'), 'cwd');
+  const candidates = [cwd];
+  const seen = new Set<string>(candidates);
+  const rawWorkspaces = payloadValue(payload, 'workspace_paths');
+  if (rawWorkspaces !== undefined) {
+    if (!Array.isArray(rawWorkspaces)) throw new HookPayloadError('workspacePaths must be an array');
+    for (const entry of rawWorkspaces) {
+      const dir = canonicalDirectory(entry, 'workspacePaths entry');
+      if (!seen.has(dir)) {
+        seen.add(dir);
+        candidates.push(dir);
+      }
+    }
+  }
+  const optedIn = new Set<string>();
+  let nonOptInRoot: string | null = null;
+  for (const dir of candidates) {
+    const found = findAntigravityRepository(dir);
+    if (found.status === 'opted-in') optedIn.add(found.repoRoot);
+    else if (found.status === 'non-opt-in' && nonOptInRoot === null) nonOptInRoot = found.repoRoot;
+  }
+  if (optedIn.size > 1) throw new HookPayloadError('multiple opted-in repositories in workspacePaths');
+  const [repoRoot] = optedIn;
+  if (repoRoot !== undefined) return { status: 'opted-in', cwd, repoRoot };
+  if (nonOptInRoot !== null) return { status: 'non-opt-in', repoRoot: nonOptInRoot };
+  return { status: 'not-in-git-repo', repoRoot: null };
 }
 
 function renderAntigravity(outcome: HookOutcome): ReturnType<HostAdapter['render']> {
