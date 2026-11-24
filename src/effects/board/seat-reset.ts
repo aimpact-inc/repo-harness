@@ -403,11 +403,11 @@ class SeatResetRun {
     const configured = this.options.resolveLaunch(this.identity).runtime;
     if (configured === runtime) return;
     const reason = `The reset selected ${runtime}, but ${this.identity.seat} is now configured for ${configured}`;
-    throw this.refuse('seat_reset_runtime_changed', this.keyOutcome, `${reason}. Run ${this.launchCommand()} to start the configured runtime.`);
+    throw this.refuse('seat_reset_runtime_changed', this.keyOutcome, `${reason}. Run ${this.launchCommand()} to get the configured runtime's launch command.`);
   }
 
   private launchCommand(): string {
-    return `\`rh seats launch ${this.identity.seat} --repository-id ${this.identity.repository}\``;
+    return `\`rh seats argv ${this.identity.seat} --repository-id ${this.identity.repository}\``;
   }
 
   /** A model check can fail and still leave the current runtime available for an in-process reset. */
@@ -505,9 +505,9 @@ class SeatResetRun {
 
   private relaunchFailed(detail: string, beforeExit = true, crossRuntime = false): SeatResetError {
     let next = '';
-    if (!beforeExit) next = ` Start it from \`rh seats argv ${this.identity.seat} --repository-id ${this.identity.repository}\` and send: ${this.prompt}`;
+    if (!beforeExit) next = ` Start it from ${this.launchCommand()} and send: ${this.prompt}`;
     else if (this.attemptedKeys) next = ` Send the resume prompt by hand: ${this.prompt}`;
-    else if (crossRuntime) next = ` Run ${this.launchCommand()} to start the configured runtime.`;
+    else if (crossRuntime) next = ` Run ${this.launchCommand()} to get the configured runtime's launch command.`;
     this.record('relaunch_failed', detail);
     return new SeatResetError(this.attemptedKeys ? 'resume_not_sent' : 'seat_reset_destination_unavailable', this.keyOutcome,
       `The relaunch of ${this.requester} failed (${detail}).${next}`);
@@ -515,7 +515,7 @@ class SeatResetRun {
 
   private async prepareRelaunch(runtime: SeatRuntime): Promise<PreparedRelaunch> {
     const crossRuntime = seatHostId(runtime) !== this.request!.host;
-    if (crossRuntime && (runtime === 'agy' || runtime === 'codex')) {
+    if (crossRuntime && runtime !== 'claude') {
       return { problem: `${runtime} provides no pre-exit SessionStart readiness evidence` };
     }
     const script = seatResetRelaunchPath(this.identity, this.request!.requestedAt);

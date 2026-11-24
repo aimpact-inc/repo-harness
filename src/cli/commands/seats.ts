@@ -47,7 +47,7 @@ import { PiFleetRolesError, writePiFleetRoles } from '../../effects/board/pi-fle
 import { PiShellError, assertPiShell } from '../../effects/board/pi-shell';
 import { MANAGED_AGENTS } from '../../effects/terminal/task-role-profiles';
 import { SeatResetError, readSeatSession, readTranscriptUsage, runSeatReset, seatResetRequestState, writeSeatHandoff, writeSeatResetRequest, type SeatRelaunch, type SeatResetNotify, type SeatResetTarget, type TranscriptUsage } from '../../effects/board/seat-reset';
-import { handoffIdentity, PI_SEAT_STARTUP_DIAGNOSTIC, SEAT_ENV, SEAT_REPOSITORY_ENV, seatResetAction, seatResetIdentity, seatResetSteps, type SeatResetIdentity } from '../../core/board/seat-reset';
+import { handoffIdentity, SEAT_ENV, SEAT_REPOSITORY_ENV, seatResetAction, seatResetIdentity, seatResetSteps, type SeatResetIdentity } from '../../core/board/seat-reset';
 import { isRecord } from '../../core/evidence/is-record';
 import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
 import { COUNCIL_MEMBERS, CouncilConsultError, parseCouncilMembers, type CouncilMember } from '../../core/board/planner-consult';
@@ -328,8 +328,8 @@ export async function seatResetLaunch(identity: SeatResetIdentity, env: NodeJS.P
     { terminal: 'existing', checkAvailability: true });
   let argv = launch.argv;
   if (crossRuntime) {
-    if (launch.runtime !== 'claude' && launch.runtime !== 'pi') throw new Error('The prepared runtime provides no pre-exit SessionStart readiness evidence');
-    const bound = await probeSeatResetStartup(launch.runtime, agentArgv, env, checkout);
+    if (launch.runtime !== 'claude') throw new Error('The prepared runtime provides no pre-exit SessionStart readiness evidence');
+    const bound = await probeClaudeResetStartup(agentArgv, env, checkout);
     argv = labeledSeatArgv(identity.seat, labels, bound, env, 'existing');
   }
   return { argv, runtime: launch.runtime, model: effective.model, effort: effective.effort, modeKnown };
@@ -337,7 +337,7 @@ export async function seatResetLaunch(identity: SeatResetIdentity, env: NodeJS.P
 
 const runStartupProbe = promisify(execFile);
 // Claude gives each startup hook up to 30 seconds, then still has to close the stream.
-const STARTUP_PROBE_TIMEOUT_MS = { claude: 45_000, pi: 15_000 };
+const STARTUP_PROBE_TIMEOUT_MS = 45_000;
 
 function claudeStartupHookConfirmed(stdout: string): boolean {
   return stdout.split('\n').some(line => {
@@ -354,31 +354,25 @@ function claudeStartupHookConfirmed(stdout: string): boolean {
   });
 }
 
-async function probeSeatResetStartup(runtime: 'claude' | 'pi', argv: readonly string[], env: NodeJS.ProcessEnv, cwd: string): Promise<string[]> {
+async function probeClaudeResetStartup(argv: readonly string[], env: NodeJS.ProcessEnv, cwd: string): Promise<string[]> {
   // Use the same executable, CLI flags, settings roots, and tool PATH in the probe and replacement.
-  const names = ['HOME', 'PATH', ...(runtime === 'pi' ? ['PI_CODING_AGENT_DIR', 'PI_PACKAGE_DIR'] : [
+  const names = ['HOME', 'PATH',
     'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_SAFE_MODE', 'CLAUDE_CODE_SIMPLE', 'CLAUDE_CODE_PERSONAL_HOOKS_OFF',
     'CLAUDE_CODE_MANAGED_SETTINGS_PATH', 'CLAUDE_CODE_REMOTE_SETTINGS_PATH',
-  ])];
+  ];
   const binding = [
-    ...names.flatMap(name => ['-u', name]),
-    ...(runtime === 'claude' ? ['-u', 'CLAUDECODE'] : []),
+    ...names.flatMap(name => ['-u', name]), '-u', 'CLAUDECODE',
     ...names.flatMap(name => env[name] === undefined ? [] : [`${name}=${env[name]}`]),
   ];
-  const probe = runtime === 'pi'
-    ? ['PI_OFFLINE=1', ...argv, '--help']
-    : [...argv.filter(arg => !arg.startsWith(`${SEAT_ENV}=`) && !arg.startsWith(`${SEAT_REPOSITORY_ENV}=`)),
-      '--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-hook-events', '--no-session-persistence'];
-  const unavailable = new Error(`${runtime} did not confirm the repo-harness SessionStart integration`);
+  const probe = [...argv.filter(arg => !arg.startsWith(`${SEAT_ENV}=`) && !arg.startsWith(`${SEAT_REPOSITORY_ENV}=`)),
+    '--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-hook-events', '--no-session-persistence'];
+  const unavailable = new Error('claude did not confirm the repo-harness SessionStart integration');
   const execution = runStartupProbe('/usr/bin/env', [...binding, ...probe], {
-    cwd, env, timeout: STARTUP_PROBE_TIMEOUT_MS[runtime], maxBuffer: 1024 * 1024, killSignal: 'SIGKILL',
+    cwd, env, timeout: STARTUP_PROBE_TIMEOUT_MS, maxBuffer: 1024 * 1024, killSignal: 'SIGKILL',
   });
   execution.child.stdin?.end();
   const { stdout } = await execution.catch(() => { throw unavailable; });
-  const ready = runtime === 'pi'
-    ? stdout.split('\n').some(line => line.trimStart().startsWith(`--${PI_SEAT_STARTUP_DIAGNOSTIC} `))
-    : claudeStartupHookConfirmed(stdout);
-  if (!ready) throw unavailable;
+  if (!claudeStartupHookConfirmed(stdout)) throw unavailable;
   return ['/usr/bin/env', ...binding, ...argv];
 }
 
