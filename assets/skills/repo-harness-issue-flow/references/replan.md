@@ -8,8 +8,12 @@ files link it and do not restate it.
 
 The advisor is the long-lived hc terminal in the pane beside the orchestrator
 ([Issue-flow topology](https://github.com/aimpact-inc/repo-harness/blob/main/docs/reference-configs/herdr-notify.md#issue-flow-topology)).
-It holds no claim role. It does not commit, write to GitHub or
-decide. Its other duties are in `advisor.md`.
+It holds no claim role. With `gh` granted, it may write to GitHub only with
+`gh issue comment`, `gh pr comment` (ending each comment with `Seat: advisor
+<hc address>`), and `gh issue create`; an owner decision it logs still reaches
+the orchestrator locally (a comment never starts an action). It does not
+commit, push, merge, close or reopen, label, edit issue or PR bodies, review,
+release, decide, or message a worker. Its other duties are in `advisor.md`.
 
 ## 1. Triggers
 

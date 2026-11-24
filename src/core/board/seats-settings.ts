@@ -44,14 +44,17 @@ export const MODEL_FAMILY_LABELS: Readonly<Record<string, string>> = Object.free
 export const SEAT_TOOLS = ['read', 'edit', 'shell', 'net', 'tasks', 'schedule', 'mcp', 'gh'] as const;
 export type SeatTool = typeof SEAT_TOOLS[number];
 export const AGY_READONLY_SEAT_TOOLS = ['net', 'read', 'shell'] as const satisfies readonly SeatTool[];
+/** Starter and preset tools for an Antigravity advisor; `gh` stays off until granted (#3468). */
 export const AGY_ADVISOR_SEAT_TOOLS = ['edit', 'mcp', 'net', 'read', 'schedule', 'shell'] as const satisfies readonly SeatTool[];
+/** Allowed tools for an Antigravity advisor; `gh` is an explicit opt-in and `tasks` stays out (no agy task-list tool). */
+export const AGY_ADVISOR_ALLOWED_SEAT_TOOLS = ['edit', 'gh', 'mcp', 'net', 'read', 'schedule', 'shell'] as const satisfies readonly SeatTool[];
 export const AGY_WORKER_SEAT_TOOLS = ['edit', 'gh', 'net', 'read', 'shell'] as const satisfies readonly SeatTool[];
 const AGY_WORKER_REQUIRED_TOOLS = ['edit', 'net', 'read', 'shell'] as const satisfies readonly SeatTool[];
 const ORCHESTRATOR_TOOLS = Object.freeze(['gh', 'mcp', 'net', 'read', 'shell', 'tasks'] as const satisfies readonly SeatTool[]);
 
-export function agySeatTools(id: SeatId): readonly SeatTool[] {
+export function agySeatTools(id: SeatId, currentTools: readonly SeatTool[] = []): readonly SeatTool[] {
   if (id === 'orchestrator') return ORCHESTRATOR_TOOLS;
-  if (id === 'advisor') return AGY_ADVISOR_SEAT_TOOLS;
+  if (id === 'advisor') return currentTools.includes('gh') ? AGY_ADVISOR_ALLOWED_SEAT_TOOLS : AGY_ADVISOR_SEAT_TOOLS;
   return isWorkerSeat(id) ? AGY_WORKER_SEAT_TOOLS : AGY_READONLY_SEAT_TOOLS;
 }
 
@@ -67,7 +70,7 @@ export function isAgyToolsValid(id: SeatId, tools: readonly SeatTool[]): boolean
   }
   if (id === 'advisor') {
     return AGY_READONLY_SEAT_TOOLS.every(tool => tools.includes(tool))
-      && tools.every(tool => (AGY_ADVISOR_SEAT_TOOLS as readonly SeatTool[]).includes(tool));
+      && tools.every(tool => (AGY_ADVISOR_ALLOWED_SEAT_TOOLS as readonly SeatTool[]).includes(tool));
   }
   return isReadonly;
 }

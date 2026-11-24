@@ -9,7 +9,7 @@ import { HANDOFF_SECTIONS, seatHandoffPath, seatResetReason, seatResetRelaunchPa
 import { EDIT_GUARD_SCOPE_SECTION } from "../../src/cli/hook/session-context";
 import { SeatResetError, readSeatSession, recordSeatSession, runSeatReset, type SeatRelaunch, type SeatResetNotify, type SeatResetOptions } from "../../src/effects/board/seat-reset";
 import { seatHandoff, seatResetLaunch, seatResetTarget } from "../../src/cli/commands/seats";
-import { AGY_ADVISOR_SEAT_TOOLS, DEFAULT_SEATS_CONFIG, LAUNCH_SEAT_IDS, NATIVE_SEATS_PRESET, WORKER_SEAT_IDS, isCouncilSeat, isReviewSeat, isWorkerSeat } from "../../src/core/board/seats-settings";
+import { AGY_ADVISOR_ALLOWED_SEAT_TOOLS, AGY_ADVISOR_SEAT_TOOLS, DEFAULT_SEATS_CONFIG, LAUNCH_SEAT_IDS, NATIVE_SEATS_PRESET, WORKER_SEAT_IDS, isCouncilSeat, isReviewSeat, isWorkerSeat } from "../../src/core/board/seats-settings";
 import { repoHarnessRepoIdFor } from "../../src/effects/repo-registry";
 import { classifyQuotaReading, decodeCodexRateLimitsResult } from "../../src/core/board/quota";
 import { effectiveSeatConfig, formatSeatRoutes, seatAccountQuotas } from "../../src/core/board/seat-routing";
@@ -756,6 +756,103 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
         expect(rules.allow).not.toContain("rh arch refactor decide");
         expect(rules.deny).toContain("rh arch refactor decide");
       }
+    }
+  });
+
+  test("advisor brief without gh keeps the no-GitHub-write text across Pi, Claude, Codex, and agy", () => {
+    const agyInput = { executable: "/usr/local/bin/agy", directory: "/tmp/agy", cwd: "/tmp/repo" };
+    for (const config of [
+      { runtime: "pi", model: "magpie/agy-cli/gemini-4-neon", advisor_model: null, effort: "xhigh", tools: ["mcp", "net", "read", "shell"], fleet: [] },
+      { runtime: "claude", model: "opus", advisor_model: null, effort: "high", tools: ["mcp", "net", "read", "shell"], fleet: [] },
+      { runtime: "codex", model: "gpt-6.2-sol", advisor_model: null, effort: "high", tools: ["mcp", "net", "read", "shell"], fleet: [] },
+      { runtime: "agy", model: "gemini-4-neon-high", advisor_model: null, effort: null, tools: AGY_ADVISOR_SEAT_TOOLS, fleet: [] },
+    ] as const) {
+      const result = buildSeatLaunch("advisor", config, "seats", [], config.runtime === "agy" ? { agy: agyInput } : {});
+      expect(result.brief).toContain("You do not commit or write to GitHub.");
+      expect(result.brief).toContain("Do not write to GitHub.");
+      expect(result.brief).not.toContain("gh issue comment");
+      expect(result.brief).not.toContain("gh pr comment");
+      expect(result.brief).not.toContain("gh issue create");
+    }
+  });
+
+  test("advisor brief with gh allows only gh issue comment, gh pr comment, and gh issue create across Pi, Claude, Codex, and agy", () => {
+    const agyInput = { executable: "/usr/local/bin/agy", directory: "/tmp/agy", cwd: "/tmp/repo" };
+    for (const config of [
+      { runtime: "pi", model: "magpie/agy-cli/gemini-4-neon", advisor_model: null, effort: "xhigh", tools: ["gh", "mcp", "net", "read", "shell", "tasks"], fleet: [] },
+      { runtime: "claude", model: "opus", advisor_model: null, effort: "high", tools: ["gh", "mcp", "net", "read", "shell", "tasks"], fleet: [] },
+      { runtime: "codex", model: "gpt-6.2-sol", advisor_model: null, effort: "high", tools: ["gh", "mcp", "net", "read", "shell"], fleet: [] },
+      { runtime: "agy", model: "gemini-4-neon-high", advisor_model: null, effort: null, tools: AGY_ADVISOR_ALLOWED_SEAT_TOOLS, fleet: [] },
+    ] as const) {
+      const result = buildSeatLaunch("advisor", config, "seats", [], config.runtime === "agy" ? { agy: agyInput } : {});
+      expect(result.brief).toContain("You may write to GitHub only with `gh issue comment`, `gh pr comment`, and `gh issue create` (end each comment with `Seat: advisor <hc address>`).");
+      expect(result.brief).toContain("Do not commit, push, merge, close or reopen, label, edit issue or PR bodies, review, or release.");
+      expect(result.brief).not.toContain("You do not commit or write to GitHub.");
+      expect(result.brief).not.toContain("Do not write to GitHub.");
+    }
+  });
+
+  test("Claude advisor with gh keeps all non-allowed GitHub and git push denials while other Claude seats with gh drop them", () => {
+    const disallowed = (argv: readonly string[]): readonly string[] => {
+      const start = argv.indexOf("--disallowedTools");
+      if (start === -1) return [];
+      const end = argv.indexOf("--append-system-prompt", start);
+      return argv.slice(start + 1, end === -1 ? argv.length : end);
+    };
+    const nonAllowed = [
+      "Bash(gh issue close *)", "Bash(gh issue edit *)", "Bash(gh pr close *)", "Bash(gh pr create *)",
+      "Bash(gh pr edit *)", "Bash(gh pr merge *)", "Bash(gh pr review *)", "Bash(gh release create *)", "Bash(git push *)",
+    ];
+    const allowed = ["Bash(gh issue comment *)", "Bash(gh pr comment *)", "Bash(gh issue create *)"];
+
+    const withoutGh = buildSeatLaunch("advisor", { runtime: "claude", model: "opus", advisor_model: null, effort: "high", tools: ["mcp", "net", "read", "shell"], fleet: [] }, "seats", []);
+    expect(disallowed(withoutGh.argv)).toEqual(expect.arrayContaining([...nonAllowed, ...allowed]));
+
+    const withGh = buildSeatLaunch("advisor", { runtime: "claude", model: "opus", advisor_model: null, effort: "high", tools: ["gh", "mcp", "net", "read", "shell"], fleet: ["explorer"] }, "seats", ["explorer", "Plan"]);
+    expect(disallowed(withGh.argv)).toEqual([...nonAllowed, "Agent(Plan)"]);
+    for (const item of allowed) expect(disallowed(withGh.argv)).not.toContain(item);
+
+    const withGhNoFleet = buildSeatLaunch("advisor", { runtime: "claude", model: "opus", advisor_model: null, effort: "high", tools: ["gh", "mcp", "net", "read", "shell"], fleet: [] }, "seats", []);
+    expect(disallowed(withGhNoFleet.argv)).toEqual(nonAllowed);
+
+    const withGhNoShell = buildSeatLaunch("advisor", { runtime: "claude", model: "opus", advisor_model: null, effort: "high", tools: ["gh", "mcp", "net", "read"], fleet: [] }, "seats", []);
+    expect(disallowed(withGhNoShell.argv)).toEqual([]);
+
+    for (const [seat, tools] of [
+      ["orchestrator", DEFAULT_SEATS_CONFIG.orchestrator.tools],
+      ["worker-opus", DEFAULT_SEATS_CONFIG["worker-opus"].tools],
+    ] as const) {
+      const sibling = buildSeatLaunch(seat, { runtime: "claude", model: "opus", advisor_model: null, effort: "high", tools, fleet: [] }, "seats", []);
+      expect(disallowed(sibling.argv)).toEqual([]);
+    }
+  });
+
+  test("agy advisor keeps gh and tasks off in the Native preset and grants only comment and intake issue writes when gh is enabled", () => {
+    expect(NATIVE_SEATS_PRESET.advisor.tools).not.toContain("gh");
+    expect(NATIVE_SEATS_PRESET.advisor.tools).not.toContain("tasks");
+    const withoutGh = agySeatCommandRules("advisor", NATIVE_SEATS_PRESET.advisor);
+    for (const allowed of ["gh issue comment", "gh pr comment", "gh issue create"]) {
+      expect(withoutGh.allow).not.toContain(allowed);
+      expect(withoutGh.deny).toContain(allowed);
+    }
+
+    const withGh = agySeatCommandRules("advisor", { ...AGY_ADVISOR, tools: AGY_ADVISOR_ALLOWED_SEAT_TOOLS });
+    expect(withGh.allow).toEqual(expect.arrayContaining(["gh issue comment", "gh pr comment", "gh issue create"]));
+    for (const allowed of ["gh issue comment", "gh pr comment", "gh issue create"]) {
+      expect(withGh.deny).not.toContain(allowed);
+    }
+    expect(withGh.deny).toEqual(expect.arrayContaining([
+      "gh issue close", "gh issue edit", "gh pr close", "gh pr create",
+      "gh pr edit", "gh pr merge", "gh pr review", "gh release create", "git push", "gh run rerun",
+    ]));
+    for (const forbidden of [
+      "gh issue close 3468", "gh issue reopen 3468", "gh issue edit 3468 --add-label tier:medium",
+      "gh issue delete 3468 --yes", "gh pr close 3467", "gh pr reopen 3467", "gh pr create --title x",
+      "gh pr edit 3467 --body x", "gh pr merge 3467 --squash", "gh pr review 3467 --approve",
+      "gh release create v0.37.0", "gh label create foo", "gh api repos/org/repo/issues/1/comments",
+      "gh run rerun 123", "git commit -m test", "git push origin main",
+    ]) {
+      expect(withGh.allow.find(prefix => forbidden.startsWith(prefix)), forbidden).toBeUndefined();
     }
   });
 });

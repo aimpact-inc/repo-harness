@@ -54,6 +54,18 @@ const GITHUB_WRITE_COMMANDS = [
   'gh release create', 'git push',
 ];
 
+/** The only GitHub write commands that an advisor with `gh` granted may run (#3468). */
+const ADVISOR_GH_WRITE_COMMANDS: readonly string[] = [
+  'gh issue comment', 'gh pr comment', 'gh issue create',
+];
+
+function claudeDeniedGithubCommands(seat: LaunchSeatId, hasGh: boolean): readonly string[] {
+  if (!hasGh) return GITHUB_WRITE_COMMANDS;
+  return seat === 'advisor'
+    ? GITHUB_WRITE_COMMANDS.filter(command => !ADVISOR_GH_WRITE_COMMANDS.includes(command))
+    : [];
+}
+
 /**
  * The built-in Claude tools of each group, for the `--tools` allow list (owner decision M22). Every built-in tool
  * that no enabled group names is off, also a tool that a later host version adds. `gh` names no tool: it needs the
@@ -105,6 +117,24 @@ export const piRoleName = (role: string): string => `rh-${role}`;
 type RoleName = (role: string) => string;
 const roleList = (fleet: readonly string[], name: RoleName) => fleet.map(role => `\`${name(role)}\``).join(', ');
 
+function advisorParagraphs(config: SeatConfigV1, fleet: readonly string[], name: RoleName): string[] {
+  const evidence = fleet.length === 0
+    ? 'You have no sub-agents. Collect evidence yourself.'
+    : [
+      `Collect evidence through your sub-agents: ${roleList(fleet, name)}. Split one research request into 2 to 4 read-only briefs with scopes that do not overlap, and send them in parallel.`,
+      ...(fleet.includes('deep-reasoner') ? [`Use ${name('deep-reasoner')} only for an independent second judgment.`] : []),
+      'Keep judgment, synthesis and the proposal for yourself. Run a check of one or two commands yourself.',
+    ].join(' ');
+  const ghRule = config.tools.includes('gh')
+    ? 'You may write to GitHub only with `gh issue comment`, `gh pr comment`, and `gh issue create` (end each comment with `Seat: advisor <hc address>`). Do not commit, push, merge, close or reopen, label, edit issue or PR bodies, review, or release.'
+    : 'You do not commit or write to GitHub.';
+  return [
+    `You are the advisor seat. You serve only the orchestrator. You do research and write proposals. ${ghRule} Edit files only for your proposals.`,
+    'You may read the processes of worker seats (hc ls, hc get and hc read on seat-labeled terminals) for evidence. You do not send messages or keys to a worker. You report only to the orchestrator.',
+    evidence,
+  ];
+}
+
 function roleParagraphs(seat: LaunchSeatId, config: SeatConfigV1, fleet: readonly string[], name: RoleName): string[] {
   if (seat === 'orchestrator') {
     const queue = config.tools.includes('tasks')
@@ -123,20 +153,7 @@ function roleParagraphs(seat: LaunchSeatId, config: SeatConfigV1, fleet: readonl
       ...queue,
     ];
   }
-  if (seat === 'advisor') {
-    const evidence = fleet.length === 0
-      ? 'You have no sub-agents. Collect evidence yourself.'
-      : [
-        `Collect evidence through your sub-agents: ${roleList(fleet, name)}. Split one research request into 2 to 4 read-only briefs with scopes that do not overlap, and send them in parallel.`,
-        ...(fleet.includes('deep-reasoner') ? [`Use ${name('deep-reasoner')} only for an independent second judgment.`] : []),
-        'Keep judgment, synthesis and the proposal for yourself. Run a check of one or two commands yourself.',
-      ].join(' ');
-    return [
-      'You are the advisor seat. You serve only the orchestrator. You do research and write proposals. You do not commit or write to GitHub. Edit files only for your proposals.',
-      'You may read the processes of worker seats (hc ls, hc get and hc read on seat-labeled terminals) for evidence. You do not send messages or keys to a worker. You report only to the orchestrator.',
-      evidence,
-    ];
-  }
+  if (seat === 'advisor') return advisorParagraphs(config, fleet, name);
   if (isCouncilSeat(seat)) {
     return [
       'You are a council seat. Read the issue and the relevant code. Research the architecture, weigh trade-offs, and give your independent judgment. Produce an implementation skeleton with the affected files and interfaces, a delete list, a forbidden-additions list, and checks that prove the result.',
@@ -191,7 +208,7 @@ function claudeLaunch(seat: LaunchSeatId, config: SeatConfigV1, agentTypes: read
   // tool and denies every other known type by name.
   const tools = [...config.tools.flatMap(group => CLAUDE_GROUP_TOOLS[group]), ...(config.fleet.length > 0 ? ['Agent'] : [])];
   const denied = [
-    ...(on('shell') && !on('gh') ? GITHUB_WRITE_COMMANDS.map(command => `Bash(${command} *)`) : []),
+    ...(on('shell') ? claudeDeniedGithubCommands(seat, on('gh')).map(command => `Bash(${command} *)`) : []),
     ...(config.fleet.length > 0 ? [...new Set(agentTypes)].filter(type => !config.fleet.includes(type)).sort().map(type => `Agent(${type})`) : []),
   ];
   const limits: SeatLimitV1[] = [
@@ -406,10 +423,18 @@ export function agySeatCommandRules(seat: LaunchSeatId, config: SeatConfigV1): {
       deny: hasGh ? AGY_WORKER_DENIED_COMMANDS : [...new Set([...AGY_WORKER_DENIED_COMMANDS, ...GITHUB_WRITE_COMMANDS, 'gh run rerun'])],
     };
   }
-  if (seat === 'advisor') return {
-    allow: [...AGY_READONLY_COMMAND_PREFIXES, 'rh seats council', 'rh seats reset', 'rh seats handoff', 'rh arch refactor decide'],
-    deny: AGY_READONLY_DENIED_COMMANDS.filter(command => command !== 'rh seats reset'),
-  };
+  if (seat === 'advisor') {
+    const hasGh = config.tools.includes('gh');
+    return {
+      allow: [
+        ...AGY_READONLY_COMMAND_PREFIXES,
+        'rh seats council', 'rh seats reset', 'rh seats handoff', 'rh arch refactor decide',
+        ...(hasGh ? ADVISOR_GH_WRITE_COMMANDS : []),
+      ],
+      deny: AGY_READONLY_DENIED_COMMANDS.filter(command =>
+        command !== 'rh seats reset' && (!hasGh || !ADVISOR_GH_WRITE_COMMANDS.includes(command))),
+    };
+  }
   if (seat === 'council' || seat === 'gatekeeper') {
     return { allow: AGY_READONLY_COMMAND_PREFIXES, deny: [...AGY_READONLY_DENIED_COMMANDS, 'rh arch refactor decide'] };
   }

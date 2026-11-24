@@ -943,7 +943,7 @@ describe('seat settings routes', () => {
   test('saves agy on orchestrator, advisor, council, all workers (with gh on/off), and gatekeeper-fallback, and refuses to disable its host while in use', async () => {
     const harness = await startHarness({ agents: { ...PANE_AGENTS, enabled: ['antigravity', ...PANE_AGENTS.enabled] } });
     installAgy(harness.home, [{ id: 'gemini-4-neon', efforts: ['high'] }, { id: 'gemini-4-hydrogen', efforts: ['high'] }]);
-    const advisor = { runtime: 'agy', model: 'gemini-4-neon-high', effort: 'high', advisor_model: null, fleet: [], tools: ['edit', 'mcp', 'net', 'read', 'schedule', 'shell'] } as const;
+    const advisor = { runtime: 'agy', model: 'gemini-4-neon-high', effort: 'high', advisor_model: null, fleet: [], tools: ['edit', 'gh', 'mcp', 'net', 'read', 'schedule', 'shell'] } as const;
     expect((await seats(harness)).ranges.runtimes.find(range => range.id === 'agy')).toMatchObject({ enabled: true, effort: true, fleet: false });
     for (const [model, effort] of [['gemini-4-neon-high', 'high'], ['well-shaped-free-model', null]] as const) {
       const { revision, ...section } = (await seats(harness)).config;
@@ -993,7 +993,8 @@ describe('seat settings routes', () => {
     ['advisor', { effort: 'medium' }, 'seat_effort_invalid'],
     ['advisor', { advisor_model: 'opus' }, 'seat_model_invalid'],
     ['advisor', { fleet: ['explorer'] }, 'seat_fleet_not_allowed'],
-    ['advisor', { tools: ['gh', 'net', 'read', 'shell'] }, 'seat_tool_not_allowed'],
+    ['advisor', { tools: ['gh', 'read'] }, 'seat_tool_not_allowed'],
+    ['advisor', { tools: ['edit', 'mcp', 'net', 'read', 'schedule', 'shell', 'tasks'] }, 'seat_tool_not_allowed'],
     ['council', { model: 'gemini-4-carbon-high', tools: ['net', 'read', 'schedule', 'shell'] }, 'seat_tool_not_allowed'],
     ['gatekeeper-fallback', { tools: ['edit', 'net', 'read', 'shell'] }, 'seat_tool_not_allowed'],
     ['worker', { tools: ['gh', 'net', 'read', 'shell'] }, 'seat_tool_not_allowed'],
@@ -1261,7 +1262,6 @@ describe('seat settings routes', () => {
     const original = readFileSync(harness.configPath, 'utf8');
     for (const [seat, patch, code] of [
       ['advisor', { fleet: ['explorer', 'fast-worker'] }, 'seat_fleet_not_allowed'],
-      ['advisor', { tools: ['gh', 'read'] }, 'seat_tool_not_allowed'],
       ['orchestrator', { tools: ['edit', 'read'] }, 'seat_tool_not_allowed'],
       ['worker', { runtime: 'codex' }, 'seat_runtime_not_enabled'],
       ['advisor', { effort: 'extreme' }, 'seat_effort_invalid'],
@@ -1295,13 +1295,13 @@ describe('seat settings routes', () => {
     expect((await seats(harness)).config.routing.codex_credit_mode).toBe('review');
   });
 
-  test('an advisor config with edit saves; an orchestrator config with edit stays refused', async () => {
+  test('an advisor config with edit and gh saves; an orchestrator config with edit stays refused', async () => {
     const harness = await startHarness({ agents: PANE_AGENTS });
     const { revision, ...section } = (await seats(harness)).config;
-    const advisor = { ...section.advisor, tools: ['edit', 'read'] as typeof section.advisor.tools };
+    const advisor = { ...section.advisor, tools: ['edit', 'gh', 'read'] as typeof section.advisor.tools };
     const saved = await post(harness, { expected_revision: revision, seats: { ...section, advisor } }, 'seats');
     expect(saved.status).toBe(200);
-    expect((await seats(harness)).config.advisor.tools).toEqual(['edit', 'read']);
+    expect((await seats(harness)).config.advisor.tools).toEqual(['edit', 'gh', 'read']);
   });
 
   test('a Codex seat with edit and net saves and reads back', async () => {
