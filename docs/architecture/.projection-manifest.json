@@ -774,7 +774,7 @@
     "projection_target.entity.capability-public-surface-strategy-reflection":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.public-surface.strategy-reflection","entityKind":"capability"},"path":"docs/architecture/modules/public-surface/strategy-reflection.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:2dfb67ea7a6b58a840d0f6a49756864317c9219324d301317036e104b1e4f33e"},
     "projection_target.entity.capability-runtime-harness-architecture":
-      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.architecture","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/architecture.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:449be3cf295894eabb30c68ca526aa80e59522cfabcb6d58b74243b1c016d5d6"},
+      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.architecture","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/architecture.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:d9a3aa8a574712b05397e78030eeb641f8f206a6ccbe8f7b9345a74fd18ed235"},
     "projection_target.entity.capability-runtime-harness-evidence-ledger":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.evidence-ledger","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/evidence-ledger.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:20e50b16a1f22219776a205b2b84b91be71dc82a056966596d6241b708427b74"},
     "projection_target.entity.capability-runtime-harness-global-runtime-reconciliation":
@@ -786,7 +786,7 @@
     "projection_target.entity.capability-runtime-harness-operator":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.operator","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/operator.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:06eb36956f5a5bd47f1620e542d21bbf0d280f23c84f1144a867b7b748873da0"},
     "projection_target.entity.capability-runtime-harness-refactor-program":
-      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.refactor-program","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/refactor-program.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:bb5a26ccd248f7b0eb642c06e4acb59ab1f47aeb8d1070dbf046c9b0884d4b83"},
+      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.refactor-program","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/refactor-program.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:454b194fc61d3cf23d3ced2019d308d7f3785597811365cf62e1f504670f88d6"},
     "projection_target.entity.capability-runtime-harness-task-agent-host":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.task-agent-host","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/task-agent-host.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:871ee534669af15e452902062b3df449651b9412a53041b1a1a383808c2f590c"},
     "projection_target.entity.capability-runtime-mcp-general-repo-access":
