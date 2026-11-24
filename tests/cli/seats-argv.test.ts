@@ -2072,19 +2072,34 @@ describe("rh seats reset (#1972)", () => {
         mkdirSync(dir, { recursive: true });
         writeFileSync(join(home, "bin", "hc"), `#!${process.execPath}
 const fs = require("fs");
+const { spawnSync } = require("child_process");
 const [cmd, , ...rest] = process.argv.slice(2);
 const st = JSON.parse(fs.readFileSync("${home}/state.json", "utf8"));
 fs.appendFileSync("${home}/calls.log", [cmd, ...rest].join(" ") + "\\n");
 const out = value => process.stdout.write(JSON.stringify(value));
 const session = (transcript, source = "clear") => fs.writeFileSync("${dir}/session.json", JSON.stringify({ session_id: "s", transcript_path: transcript, source, started_at: new Date().toISOString(), ...(st.host ? { host: st.host } : {}) }));
+const writeAgyTurn = (transcript, content) => {
+  const step = st.answers[0] ?? { command: "hc send t2 RESUMED", result: "ok" };
+  const write = entry => fs.appendFileSync(transcript, JSON.stringify(entry) + "\\n");
+  write({ type: "USER_INPUT", source: "USER_EXPLICIT", status: "DONE", step_index: 0, content });
+  write({ type: "PLANNER_RESPONSE", source: "MODEL", status: "DONE", step_index: 1,
+    tool_calls: [{ name: "run_command", args: { CommandLine: step.command, WaitMsBeforeAsync: 1000 } }] });
+  if (step.result !== "none") write({ type: "GENERIC", source: "MODEL", status: "DONE", step_index: step.result === "unrelated" ? 3 : 2,
+    content: "Created At: 2026-11-23T16:08:20+08:00\\nCompleted At: 2026-11-23T16:08:21+08:00\\n"
+      + (step.result === "error" ? "Command exited with code 1.\\n\\nCommand output:\\nCommand exited with code 0." : "Command exited with code 0.\\n\\nCommand output:\\n") });
+};
 if (cmd === "ls") out({ terminals: st.terminals });
 if (cmd === "get") {
   const peer = rest.at(-1) === "t2";
   const state = peer ? "live" : st.requesterState ?? "live";
+  if (!peer && st.exited && Array.isArray(st.exitSequence) && st.exitSequence.length > 0) {
+    st.foreground = st.exitSequence.length > 1 ? st.exitSequence.shift() : st.exitSequence[0];
+  }
+  const fg = state === "finished" ? null : typeof st.foreground === "object" && st.foreground !== null
+    ? { cwd: "/", ...st.foreground }
+    : { pid: st.foreground === "zsh" ? st.pid ?? 1 : 2, name: st.foreground, argv: [st.foreground === "node" ? "pi" : st.foreground], cwd: "/" };
   out({ address: rest.at(-1), state, labels: peer ? st.callerLabels : { "repo-harness.seat": "${seat}", "repo-harness.repository": "${repository}" },
-    turn: st.turn ?? 3, cwd: st.cwd, pid: st.pid ?? 1, status: st.status, foreground: state === "finished" ? null : {
-      pid: st.foreground === "zsh" ? st.pid ?? 1 : 2, name: st.foreground, argv: [st.foreground === "node" ? "pi" : st.foreground], cwd: "/",
-    } });
+    turn: st.turn ?? 3, cwd: st.cwd, pid: st.pid ?? 1, status: st.status, foreground: fg });
 }
 // wait is one result, or a sequence: the last result answers every later call.
 // Wait number waitDelayAt (from 1) answers after waitDelayMs, as a message that arrives late does.
@@ -2101,15 +2116,38 @@ if (cmd === "keys") {
   if (line === "/compact" && st.signal) session("${home}/old.jsonl", "compact");
   if (line === "/exit" || line === "/quit") {
     if (!fs.readdirSync("${dir}").some(name => name.startsWith("claim-"))) process.exit(1);
-    if (st.exit) st.foreground = st.exitForeground ?? "zsh";
+    if (st.exit) {
+      st.exited = true;
+      if (!Array.isArray(st.exitSequence) || st.exitSequence.length === 0) st.foreground = st.exitForeground ?? "zsh";
+    }
   }
   if (line.startsWith("sh ")) {
+    if (typeof st.foreground === "object" && st.foreground !== null && Array.isArray(st.foreground.argv) && st.foreground.argv.includes("-lic")) process.exit(1);
     if (st.destinationHost) st.host = st.destinationHost;
+    st.exited = false;
     st.foreground = st.host === "antigravity" ? "agy" : st.host === "pi" ? "pi" : "claude";
     if (st.host === "antigravity") {
-      const logs = "${home}/.gemini/antigravity-cli/brain/s/.system_generated/logs";
-      fs.mkdirSync(logs, { recursive: true });
-      session(logs + "/transcript.jsonl", "startup");
+      st.status = { state: "idle", app: "antigravity" };
+      const scriptPath = line.slice("sh ".length);
+      if (st.runRelaunchScript) {
+        const run = spawnSync("/bin/sh", [scriptPath], { env: process.env });
+        if (run.status !== 0) process.exit(run.status ?? 1);
+      } else {
+        const text = fs.readFileSync(scriptPath, "utf8");
+        const marker = " -i '";
+        const start = text.indexOf(marker);
+        const end = text.lastIndexOf("'");
+        const initialPrompt = start !== -1 && end > start
+          ? text.slice(start + marker.length, end).split("'" + String.fromCharCode(92) + "''").join("'")
+          : null;
+        if (initialPrompt !== null && st.agyNoSignal !== true) {
+          const logs = "${home}/.gemini/antigravity-cli/brain/s/.system_generated/logs";
+          fs.mkdirSync(logs, { recursive: true });
+          const transcript = logs + "/transcript_full.jsonl";
+          session(transcript, "startup");
+          writeAgyTurn(transcript, initialPrompt);
+        }
+      }
     } else session("${home}/relaunched.jsonl", "startup");
   }
   out({ status: null, turn: 4 });
@@ -2130,14 +2168,7 @@ if (cmd === "send") {
       fs.appendFileSync(transcript, JSON.stringify({ type: "user", message: { role: "user",
         content: [{ type: "tool_result", tool_use_id: "f1", is_error: false, content: "" }] } }) + "\\n");
     } else if (st.host === "antigravity") {
-      const step = st.answers[0] ?? { command: "hc send t2 RESUMED", result: "ok" };
-      const write = entry => fs.appendFileSync(transcript, JSON.stringify(entry) + "\\n");
-      write({ type: "USER_INPUT", source: "USER_EXPLICIT", status: "DONE", step_index: 0, content: wrapped });
-      write({ type: "PLANNER_RESPONSE", source: "MODEL", status: "DONE", step_index: 1,
-        tool_calls: [{ name: "run_command", args: { CommandLine: step.command, WaitMsBeforeAsync: 1000 } }] });
-      if (step.result !== "none") write({ type: "GENERIC", source: "MODEL", status: "DONE", step_index: step.result === "unrelated" ? 3 : 2,
-        content: "Created At: 2026-11-23T16:08:20+08:00\\nCompleted At: 2026-11-23T16:08:21+08:00\\n"
-          + (step.result === "error" ? "Command exited with code 1.\\n\\nCommand output:\\nCommand exited with code 0." : "Command exited with code 0.\\n\\nCommand output:\\n") });
+      process.exit(1);
     } else if (st.host === "pi") {
       fs.appendFileSync(transcript, JSON.stringify({ type: "message", id: "u" + st.prompts, parentId: null, timestamp: new Date().toISOString(),
         message: { role: "user", content: [{ type: "text", text: wrapped }], timestamp: Date.now() } }) + "\\n");
@@ -2298,9 +2329,9 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     expect(await second).toMatchObject({ relaunched: true });
     older.resolve({ ...plan, argv: ["agy", "--model", "old"] });
     expect(await first).toEqual({ error: "request_closed", outcome: "nothing_sent" });
-    expect(sends()).toEqual(["/exit", `sh ${newScript}`, prompt(handoff)]);
-    expect(readFileSync(newScript, "utf8")).toBe("exec agy --model new\n");
-    expect(readFileSync(oldScript, "utf8")).toBe("exec agy --model old\n");
+    expect(sends()).toEqual(["/exit", `sh ${newScript}`]);
+    expect(readFileSync(newScript, "utf8")).toBe(`exec agy --model new -i '${prompt(handoff)}'\n`);
+    expect(readFileSync(oldScript, "utf8")).toBe(`exec agy --model old -i '${prompt(handoff)}'\n`);
   }));
 
   test("an agy requester stays running when agy is unavailable on the launch PATH", withReset(async ({ home, reset, state, sends, log }) => {
@@ -2369,7 +2400,8 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     expect(readdirSync(dirname(handoff)).some(name => name.startsWith("claim-"))).toBe(false);
     state({ wait: ended });
     expect(await reset({ host: "antigravity" })).toEqual({ requester: "t5", seat: "advisor", relaunched: true, logErrors: [] });
-    expect(sends()).toEqual(["/exit", `sh ${relaunchPath()}`, prompt(handoff)]);
+    expect(sends()).toEqual(["/exit", `sh ${relaunchPath()}`]);
+    expect(readFileSync(relaunchPath(), "utf8")).toContain(`-i '${prompt(handoff)}'`);
     expect(await reset({ host: "antigravity" })).toEqual({ error: "already_claimed", outcome: "nothing_sent" });
   }));
 
@@ -2392,7 +2424,8 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
   test("an agy orchestrator relaunches in the same pane and verifies RESUMED", withReset(async ({ handoff, reset, state, sends, log, relaunchPath }) => {
     state({ foreground: "agy", host: "antigravity", status: agyStatus });
     expect(await reset({ host: "antigravity" })).toEqual({ requester: "t5", seat: "orchestrator", relaunched: true, logErrors: [] });
-    expect(sends()).toEqual(["/exit", `sh ${relaunchPath()}`, prompt(handoff, "orchestrator")]);
+    expect(sends()).toEqual(["/exit", `sh ${relaunchPath()}`]);
+    expect(readFileSync(relaunchPath(), "utf8")).toContain(`-i '${prompt(handoff, "orchestrator")}'`);
     expect(log()[0]).toMatchObject({ kind: "reset", detail: "relaunched" });
   }, "orchestrator"));
 
@@ -2418,6 +2451,81 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     state({ foreground: "agy", exitForeground: "helper" });
     expect(await reset({ host: "antigravity" })).toEqual({ error: "resume_not_sent", outcome: "uncertain" });
     expect(sends()).toEqual(["/exit"]);
+  }));
+
+  test("a nested login shell from rh seats launch is treated as shell-ready after exit (#3480)", withReset(async ({ home, handoff, reset, state, sends, log, relaunchPath }) => {
+    const identity = { seat: "advisor", repository: basename(dirname(dirname(handoff))) } as const;
+    // Observed #3416 shape: outer tab.new shell PID 32782 -> inner seatLoginShell PID 32865 -> agy PID 32927.
+    state({
+      pid: 32782,
+      foreground: { pid: 32927, name: "agy", argv: ["/Users/chris/.local/bin/agy", "--mode", "accept-edits"] },
+      host: "antigravity",
+      status: agyStatus,
+      exitSequence: [
+        { pid: 32865, name: "zsh", argv: ["/bin/zsh", "-lic", '"$@"; result=$?; [ ! -t 0 ] || exec "$0" -li; exit "$result"', "/bin/zsh"] },
+        { pid: 32865, name: "zsh", argv: ["/bin/zsh", "-li"] },
+      ],
+    });
+    expect(await reset({ host: "antigravity" })).toEqual({ requester: "t5", seat: "advisor", relaunched: true, logErrors: [] });
+    expect(sends()).toEqual(["/exit", `sh ${relaunchPath()}`]);
+    expect(log().at(-1)).toMatchObject({ kind: "reset", detail: "relaunched" });
+
+    // A non-interactive child shell running a command is not a waiting shell.
+    state({
+      pid: 32782,
+      foreground: { pid: 32927, name: "agy", argv: ["/Users/chris/.local/bin/agy", "--mode", "accept-edits"] },
+      host: "antigravity",
+      status: agyStatus,
+      exitSequence: [],
+      exitForeground: { pid: 32865, name: "zsh", argv: ["/bin/zsh", "-c", "sleep 10"] },
+    });
+    const before = () => recordSeatSession(identity, { host: "antigravity", sessionId: "old", transcriptPath: join(home, "old.jsonl"), source: "startup", model: null, effort: null }, new Date(0));
+    expect(await reset({ host: "antigravity", fresh: true, before })).toEqual({ error: "resume_not_sent", outcome: "uncertain" });
+    expect(sends().slice(-1)).toEqual(["/exit"]);
+    expect(log().at(-1)).toMatchObject({ kind: "relaunch_failed", detail: "agy_did_not_exit" });
+  }));
+
+  test("an agy 1.5.16 relaunch passes -i <prompt> to trigger lazy SessionStart and reads RESUMED from offset 0 (#3480)", withReset(async ({ home, handoff, reset, state, sends, log, relaunchPath }) => {
+    const dir = dirname(handoff);
+    const identity = { seat: "advisor", repository: basename(dirname(dir)) } as const;
+    const fakeAgy = join(home, "bin", "agy-fake");
+    const observedArgvPath = join(home, "observed-agy-argv.json");
+    writeFileSync(fakeAgy, `#!${process.execPath}
+const fs = require("fs");
+const path = require("path");
+const argv = process.argv.slice(2);
+fs.writeFileSync(${JSON.stringify(observedArgvPath)}, JSON.stringify(argv));
+const flag = argv.indexOf("-i");
+if (flag === -1 || argv[flag + 1] === undefined) process.exit(0);
+const promptText = argv[flag + 1];
+const logs = path.join(${JSON.stringify(home)}, ".gemini", "antigravity-cli", "brain", "new-session", ".system_generated", "logs");
+fs.mkdirSync(logs, { recursive: true });
+const transcript = path.join(logs, "transcript_full.jsonl");
+fs.writeFileSync(${JSON.stringify(join(dir, "session.json"))}, JSON.stringify({
+  session_id: "new-session", transcript_path: transcript, source: "startup", started_at: new Date().toISOString(), host: "antigravity",
+}));
+const write = entry => fs.appendFileSync(transcript, JSON.stringify(entry) + "\\n");
+write({ type: "USER_INPUT", source: "USER_EXPLICIT", status: "DONE", step_index: 0, content: promptText });
+write({ type: "PLANNER_RESPONSE", source: "MODEL", status: "DONE", step_index: 1,
+  tool_calls: [{ name: "run_command", args: { CommandLine: "hc send t2 RESUMED", WaitMsBeforeAsync: 1000 } }] });
+write({ type: "GENERIC", source: "MODEL", status: "DONE", step_index: 2,
+  content: "Created At: 2026-11-24T14:25:57+08:00\\nCompleted At: 2026-11-24T14:25:58+08:00\\nCommand exited with code 0.\\n\\nCommand output:\\n" });
+`, { mode: 0o755 });
+    state({ foreground: "agy", host: "antigravity", status: agyStatus, runRelaunchScript: true });
+    const relaunch: SeatResetOptions["relaunch"] = async () => ({
+      argv: [fakeAgy, "--mode", "accept-edits"], runtime: "agy", model: "gemini-4-neon-high", effort: null, modeKnown: true,
+    });
+    expect(await reset({ host: "antigravity", relaunch })).toEqual({ requester: "t5", seat: "advisor", relaunched: true, logErrors: [] });
+    const expectedPrompt = prompt(handoff);
+    expect(JSON.parse(readFileSync(observedArgvPath, "utf8"))).toEqual(["--mode", "accept-edits", "-i", expectedPrompt]);
+    expect(sends()).toEqual(["/exit", `sh ${relaunchPath()}`]);
+    expect(log().at(-1)).toMatchObject({ kind: "reset", detail: "relaunched", session_id: "new-session" });
+
+    // If agy still fails to emit SessionStart, relaunch reports no_signal.
+    state({ foreground: "agy", host: "antigravity", status: agyStatus, runRelaunchScript: false, agyNoSignal: true });
+    const before = () => recordSeatSession(identity, { host: "antigravity", sessionId: "old", transcriptPath: join(home, "old.jsonl"), source: "startup", model: null, effort: null }, new Date(0));
+    expect(await reset({ host: "antigravity", fresh: true, before })).toEqual({ error: "resume_not_sent", outcome: "uncertain" });
+    expect(log().at(-1)).toMatchObject({ kind: "relaunch_failed", detail: "no_signal" });
   }));
 
   test.each([["hc send t2 RESUMED", "error"], ["hc send t2 RESUMED", "unrelated"], ["hc send t9 RESUMED", "ok"]])(

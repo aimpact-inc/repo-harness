@@ -27,6 +27,24 @@ export type SeatResetCode = 'handoff_path_invalid' | 'handoff_missing' | 'reques
   | 'seat_reset_runtime_unsupported' | 'seat_reset_destination_unavailable' | 'seat_reset_runtime_changed' | 'seat_reset_session_unconfirmed';
 
 const RESET_FOREGROUNDS: Readonly<Record<InteractiveResetHost, string>> = { claude: 'claude', pi: 'pi', antigravity: 'agy' };
+const WAITING_SHELLS: ReadonlySet<string> = new Set(['sh', 'zsh', 'bash', 'dash', 'ksh', 'ash']);
+const INTERACTIVE_SHELL_ARG = /^(?:-[il]+|--login|--interactive)$/u;
+
+function shellBasename(value: string): string {
+  return basename(value).replace(/^-/u, '');
+}
+
+/** True when the terminal returned to its root shell or a waiting interactive shell after the seat exited. */
+function isShellReady(terminal: HcTerminal, parentPid: number, agentPid: number): boolean {
+  const { foreground } = terminal;
+  if (foreground === null) return false;
+  if (foreground.pid === parentPid) return true;
+  if (foreground.pid === agentPid) return false;
+  const command = foreground.argv[0];
+  if (command === undefined) return false;
+  if (!WAITING_SHELLS.has(shellBasename(command)) || !WAITING_SHELLS.has(shellBasename(foreground.name))) return false;
+  return foreground.argv.slice(1).every(arg => INTERACTIVE_SHELL_ARG.test(arg));
+}
 
 export class SeatResetError extends Error {
   constructor(readonly code: SeatResetCode, readonly outcome: SeatResetOutcome, message: string, readonly logErrors: readonly string[] = []) {
@@ -387,10 +405,10 @@ class SeatResetRun {
     return this.poll(() => newSession(this.identity, since, this.request!.transcriptPath, host, action), ms);
   }
 
-  /** Sends the prompt; true when the model sends RESUMED in the new transcript within the evidence window. */
-  private async promptAnswered(session: NewSession): Promise<boolean> {
+  /** Sends the prompt unless launch already passed it; true when RESUMED succeeds in the new transcript. */
+  private async promptAnswered(session: NewSession, sendPrompt = true): Promise<boolean> {
     const read = readResumeTranscript(session, this.env);
-    hcSend(this.requester, this.prompt, this.options);
+    if (sendPrompt) hcSend(this.requester, this.prompt, this.options);
     return await this.poll(() => (sentResumed(read(), this.prompt, this.caller, session.host) ? true : null), this.timeouts.evidenceMs) !== null;
   }
 
@@ -480,27 +498,28 @@ class SeatResetRun {
     const session = readSeatSession(this.identity);
     this.requireOpenRequest(session);
     this.requirePlannedRuntime(runtime);
-    let launch: Exclude<PreparedRelaunch, { problem: string }> | undefined;
+    let launch: (Exclude<PreparedRelaunch, { problem: string }> & { readonly parentPid: number; readonly agentPid: number }) | undefined;
     if (relaunch !== undefined) {
       const prepared = relaunch.launch;
       if ('problem' in prepared) throw this.relaunchFailed(prepared.problem, true, seatHostId(runtime) !== this.request!.host);
       if (prepared.runtime !== runtime) throw this.relaunchFailed('the prepared runtime differs from the selected runtime');
-      this.requireRelaunchReady(terminal, session, relaunch.transcriptPath);
-      launch = prepared;
+      const pids = this.requireRelaunchReady(terminal, session, relaunch.transcriptPath);
+      launch = { ...prepared, ...pids };
     }
     const since = Date.now();
     this.type(command);
-    return { since, parentPid: terminal.pid, launch };
+    return { since, launch };
   }
 
-  private requireRelaunchReady(terminal: HcTerminal, session: SeatSessionRecord | null, transcriptPath: string | null): void {
-    if (terminal.pid === null || terminal.foreground?.pid === terminal.pid) {
+  private requireRelaunchReady(terminal: HcTerminal, session: SeatSessionRecord | null, transcriptPath: string | null): { readonly parentPid: number; readonly agentPid: number } {
+    if (terminal.pid === null || terminal.foreground === null || terminal.foreground.pid === terminal.pid) {
       throw this.relaunchFailed('requester_has_no_parent_shell');
     }
     if (session?.host !== this.request!.host || session.transcriptPath !== transcriptPath || terminal.cwd !== this.requesterCheckout) {
       throw this.refuse('seat_reset_session_unconfirmed', this.keyOutcome,
         `The running ${this.identity.seat} in ${this.requester} has no matching SessionStart record for this relaunch. Check the seat and run rh seats handoff again.`);
     }
+    return { parentPid: terminal.pid, agentPid: terminal.foreground.pid };
   }
 
   private relaunchFailed(detail: string, beforeExit = true, crossRuntime = false): SeatResetError {
@@ -525,7 +544,9 @@ class SeatResetRun {
       const plan = await this.options.relaunch(this.identity, checkout, crossRuntime);
       if (plan.runtime === 'codex') return { problem: 'the prepared runtime has no SessionStart record' };
       const host = plan.runtime === 'agy' ? 'antigravity' : plan.runtime;
-      const command = `exec ${plan.argv.map(shellQuote).join(' ')}\n`;
+      // agy 1.5.16 fires SessionStart only on the first prompt, so pass the resume prompt via -i at launch.
+      const argv = plan.runtime === 'agy' ? [...plan.argv, '-i', this.prompt] : plan.argv;
+      const command = `exec ${argv.map(shellQuote).join(' ')}\n`;
       // The script runs the probed launch in the same checkout even if the parent shell has a different cwd.
       writeFileSync(script, crossRuntime ? `cd ${shellQuote(checkout)} && ${command}` : command, { mode: 0o700 });
       return { runtime: plan.runtime, host, script };
@@ -539,19 +560,19 @@ class SeatResetRun {
     const host = this.request!.host;
     this.prompt = seatResumePrompt(this.identity, this.caller, 'reset');
     const prepared = await this.prepareRelaunch(runtime);
-    const { parentPid, launch } = this.typeResetCommand(seatExitCommand(host), turn, sha256, runtime, { transcriptPath, launch: prepared });
-    const { script, host: destination } = launch!;
+    const { launch } = this.typeResetCommand(seatExitCommand(host), turn, sha256, runtime, { transcriptPath, launch: prepared });
+    const { script, host: destination, parentPid, agentPid } = launch!;
     const shellReady = await this.poll(() => {
       const current = hcGet(this.requester, this.options);
       this.requireLiveRequester(current);
-      return current.foreground?.pid === parentPid ? true : null;
+      return isShellReady(current, parentPid, agentPid) ? true : null;
     }, this.timeouts.exitMs);
     if (shellReady === null) throw this.relaunchFailed(`${RESET_FOREGROUNDS[host]}_did_not_exit`, false);
     const startedAt = Date.now();
     this.type(`sh ${script}`);
     const session = await this.waitForSession(startedAt, 'startup', destination);
     if (session === null) throw this.relaunchFailed('no_signal', false);
-    if (!await this.promptAnswered(session)) throw this.relaunchFailed('no_evidence', false);
+    if (!await this.promptAnswered(session, destination !== 'antigravity')) throw this.relaunchFailed('no_evidence', false);
     return this.done(session, detail);
   }
 }
