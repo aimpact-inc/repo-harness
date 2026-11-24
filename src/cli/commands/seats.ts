@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { delimiter, dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import { CLAUDE_BUILTIN_AGENT_TYPES, SeatPaneNameError, agySeatAgentSpec, buildSeatLaunch, seatPaneName, seatTabName, type SeatLaunchV1 } from '../../core/board/seat-launch';
+import { CLAUDE_BUILTIN_AGENT_TYPES, SeatPaneNameError, buildSeatLaunch, seatPaneName, seatTabName, type SeatLaunchV1 } from '../../core/board/seat-launch';
 import {
   AGY_READONLY_SEAT_TOOLS,
   ALLOWED_SEAT_FLEET_ROLES,
@@ -53,7 +53,7 @@ import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
 import { COUNCIL_MEMBERS, CouncilConsultError, parseCouncilMembers, type CouncilMember } from '../../core/board/planner-consult';
 import { runCouncilConsult } from '../../effects/board/planner-consult';
 import { formatSeatPool, seatModelBlock, seatPoolHint, seatRuntimeBlock } from '../../core/board/seat-pool';
-import { collectSeatPoolProbes, enabledRuntimesOf, magpieExtensionInstalled, probeAgySeat, refreshSeatPool, resolveAgyInstallation, SeatsConfigurationError, writeAgySeatAgent } from '../../effects/board/seats-configuration';
+import { agySeatAgentSpec, collectSeatPoolProbes, enabledRuntimesOf, magpieExtensionInstalled, probeAgySeat, refreshSeatPool, resolveAgyInstallation, SeatsConfigurationError, writeAgySeatAgent } from '../../effects/board/seats-configuration';
 
 import { HostConfigError } from '../../core/host-config/types';
 import { AntigravityHooksPathError } from '../../effects/host-config/gate';

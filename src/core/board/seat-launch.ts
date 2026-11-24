@@ -1,7 +1,6 @@
 // The launch of one seat in a Herdr pane (#1473): the argv for its runtime and
 // the seat brief. Each limit names what the host does with it, so the output
 // never claims a limit that the host cannot apply.
-import { sha256Hex, sha256Prefixed } from '../evidence/sha256';
 import { PANE_PREFIX } from '../terminal/pane-prefix';
 import { AgySeatSettingsError, agyEffortValid, isCouncilSeat, isReviewSeat, isWorkerSeat, seatTakesFleet, type LaunchSeatId, type SeatConfigV1, type SeatTool } from './seats-settings';
 import { SEAT_EFFORT_ENV, SEAT_ENV, SEAT_MODEL_ENV, SEAT_REPOSITORY_ENV, isResetSeat } from './seat-reset';
@@ -473,59 +472,8 @@ export function agySeatBrief(seat: LaunchSeatId, config: SeatConfigV1): string {
   ].join('\n\n');
 }
 
-const AGY_AGENT_DESCRIPTIONS: Readonly<Record<string, string>> = {
-  'rh-orchestrator': 'Repo-harness orchestrator',
-  'rh-advisor': 'Repo-harness advisor',
-  'rh-council': 'Repo-harness council',
-  'rh-gatekeeper-fallback': 'Repo-harness gatekeeper fallback',
-  'rh-worker': 'Repo-harness worker',
-};
-
 /** Allowed directory names under `~/.gemini/config/agents` for repo-harness seat definitions. */
 export const AGY_SEAT_AGENT_DIR_PATTERN = /^rh-(?:orchestrator|advisor|council|gatekeeper-fallback|worker)-[0-9a-f]{12}$/u;
-
-export interface AgySeatAgentSpec {
-  readonly baseName: string;
-  /** Content-addressed agent directory and frontmatter name (`rh-<role>-<digest12>`). */
-  readonly name: string;
-  /** Full `agent.md` UTF-8 content with frontmatter `name: <name>`. */
-  readonly content: string;
-  /** Expected `hashManagedTree` digest of the directory holding only `agent.md`. */
-  readonly treeDigest: string;
-}
-
-function renderAgySeatAgentMarkdown(name: string, description: string, tools: readonly string[], inheritMcp: boolean, body: string): string {
-  return [
-    '---',
-    `name: ${name}`,
-    `description: ${description}`,
-    'mainAgent: true',
-    `tools: [${tools.join(', ')}]`,
-    `inheritMcp: ${inheritMcp}`,
-    '---',
-    '',
-    '# System',
-    '',
-    body,
-    '',
-  ].join('\n');
-}
-
-/** Pure deterministic content-addressed agy agent spec (`rh-<role>-<digest12>`). */
-export function agySeatAgentSpec(seat: LaunchSeatId, config: SeatConfigV1): AgySeatAgentSpec {
-  const baseName = agySeatAgentName(seat);
-  const tools = agySeatAgentTools(seat, config);
-  const description = AGY_AGENT_DESCRIPTIONS[baseName] ?? `Repo-harness ${seat}`;
-  const inheritMcp = config.tools.includes('mcp');
-  const body = agySeatBrief(seat, config);
-  const canonical = renderAgySeatAgentMarkdown(baseName, description, tools, inheritMcp, body);
-  const digest12 = sha256Hex(Buffer.from(canonical, 'utf8')).slice(0, 12);
-  const name = `${baseName}-${digest12}`;
-  const content = renderAgySeatAgentMarkdown(name, description, tools, inheritMcp, body);
-  const contentBytes = Buffer.from(content, 'utf8');
-  const treeDigest = sha256Prefixed(Buffer.concat([Buffer.from('F\0agent.md\0', 'utf8'), contentBytes, Buffer.from('\0', 'utf8')]));
-  return { baseName, name, content, treeDigest };
-}
 
 interface AgyLaunchInputs {
   readonly executable: string;

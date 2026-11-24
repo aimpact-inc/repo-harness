@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { decodeAgentsConfig } from '../../core/board/agents-settings';
 import { isRecord } from '../../core/evidence/is-record';
-import { agySeatAgentSpec } from '../../core/board/seat-launch';
+import { sha256Hex, sha256Prefixed } from '../../core/evidence/sha256';
+import { agySeatAgentName, agySeatAgentTools, agySeatBrief } from '../../core/board/seat-launch';
 import { HostConfigError, type PathRecord } from '../../core/host-config/types';
 import {
   AgySeatSettingsError,
@@ -459,6 +460,57 @@ if (import.meta.main) {
     if (process.argv[2 + CATALOG_RUNTIMES.length] === 'agy') probes.push(await probeAgyPool());
     process.stdout.write(`${JSON.stringify(probes)}\n`, () => process.exit(0));
   }
+}
+
+const AGY_AGENT_DESCRIPTIONS: Readonly<Record<string, string>> = {
+  'rh-orchestrator': 'Repo-harness orchestrator',
+  'rh-advisor': 'Repo-harness advisor',
+  'rh-council': 'Repo-harness council',
+  'rh-gatekeeper-fallback': 'Repo-harness gatekeeper fallback',
+  'rh-worker': 'Repo-harness worker',
+};
+
+export interface AgySeatAgentSpec {
+  readonly baseName: string;
+  /** Content-addressed agent directory and frontmatter name (`rh-<role>-<digest12>`). */
+  readonly name: string;
+  /** Full `agent.md` UTF-8 content with frontmatter `name: <name>`. */
+  readonly content: string;
+  /** Expected `hashManagedTree` digest of the directory holding only `agent.md`. */
+  readonly treeDigest: string;
+}
+
+function renderAgySeatAgentMarkdown(name: string, description: string, tools: readonly string[], inheritMcp: boolean, body: string): string {
+  return [
+    '---',
+    `name: ${name}`,
+    `description: ${description}`,
+    'mainAgent: true',
+    `tools: [${tools.join(', ')}]`,
+    `inheritMcp: ${inheritMcp}`,
+    '---',
+    '',
+    '# System',
+    '',
+    body,
+    '',
+  ].join('\n');
+}
+
+/** Deterministic content-addressed agy agent spec (`rh-<role>-<digest12>`). */
+export function agySeatAgentSpec(seat: LaunchSeatId, config: SeatConfigV1): AgySeatAgentSpec {
+  const baseName = agySeatAgentName(seat);
+  const tools = agySeatAgentTools(seat, config);
+  const description = AGY_AGENT_DESCRIPTIONS[baseName] ?? `Repo-harness ${seat}`;
+  const inheritMcp = config.tools.includes('mcp');
+  const body = agySeatBrief(seat, config);
+  const canonical = renderAgySeatAgentMarkdown(baseName, description, tools, inheritMcp, body);
+  const digest12 = sha256Hex(Buffer.from(canonical, 'utf8')).slice(0, 12);
+  const name = `${baseName}-${digest12}`;
+  const content = renderAgySeatAgentMarkdown(name, description, tools, inheritMcp, body);
+  const contentBytes = Buffer.from(content, 'utf8');
+  const treeDigest = sha256Prefixed(Buffer.concat([Buffer.from('F\0agent.md\0', 'utf8'), contentBytes, Buffer.from('\0', 'utf8')]));
+  return { baseName, name, content, treeDigest };
 }
 
 function agySeatAgentRecordIsCurrent(
