@@ -29,20 +29,21 @@ Measure `Stop.default` using
 `.ai/harness/runs/hook-events.jsonl` `elapsed_ms`. The terminal's Working
 time is the whole turn, not the duration of its currently displayed hook.
 
-This table is the one route inventory. It lists the 7 entries of `ROUTES` in
+This table is the one route inventory. It lists the 8 entries of `ROUTES` in
 `src/cli/hook/route-registry.ts`, in registry order. The Host column follows the
-`hosts` field of each route: Claude installs 6 routes and Codex installs 5.
+`hosts` field of each route: Claude installs 7 routes, Pi uses 6, Codex installs 5 and Antigravity installs 5.
 Other documents link here. They do not copy this table.
 
 | Route | Matcher | Host | Typed handler | Responsibility |
 | --- | --- | --- | --- | --- |
-| `SessionStart.default` | all sessions | Claude, Codex | `session-context` | Emit the Effective State section first, then the edit-guard-scope, architecture-debt and pending-plan sections under one budget. |
-| `PreToolUse.edit` | `Edit\|Write` | Claude, Codex | `mutation-guard` | Safety hook: block an `Edit`, `Write` or Codex `apply_patch` removal or overwrite of an existing user file outside the worktree and temp roots (I2), or input without a parseable target path. See [Safety hook coverage](#safety-hook-coverage). |
+| `SessionStart.default` | all sessions | Claude, Codex, Pi, Antigravity | `session-context` | Emit the Effective State section first, then the edit-guard-scope, architecture-debt and pending-plan sections under one budget. |
+| `PreToolUse.edit` | `Edit\|Write` | Claude, Codex, Pi, Antigravity | `mutation-guard` | Safety hook: block an `Edit`, `Write` or Codex `apply_patch` removal or overwrite of an existing user file outside the worktree and temp roots (I2), or input without a parseable target path. See [Safety hook coverage](#safety-hook-coverage). |
 | `PreToolUse.subagent` | `Agent` | Claude | `return-channel` | Append the return-channel contract and standing orders to a Claude `Agent` prompt. |
-| `PreToolUse.bash` | `Bash` | Claude | `bash-mutation-guard` | Safety hook: deny a credential read (I1), a removal or overwrite of an existing user file outside the worktree and temp roots (I2), and whole-repository recursion (`git clean -x`, `find -delete`, `rm -r` of the root). |
-| `UserPromptSubmit.inbox` | all prompts | Claude, Codex | `agent-notice` | Deliver architecture debt on Codex; Claude emits nothing. |
+| `PreToolUse.bash` | `Bash` | Claude, Pi, Antigravity | `bash-mutation-guard` | Safety hook: deny a credential read (I1), a removal or overwrite of an existing user file outside the worktree and temp roots (I2), and whole-repository recursion (`git clean -x`, `find -delete`, `rm -r` of the root). |
+| `PreToolUse.question` | `AskUserQuestion` (Pi: `ask_user_question`) | Claude, Pi | `question-guard` | Deny blocking question modals (`AskUserQuestion` / `ask_user_question`) only when `REPO_HARNESS_SEAT=orchestrator`, so the orchestrator asks the owner in plain text instead of blocking asynchronous notices. |
+| `UserPromptSubmit.inbox` | all prompts | Claude, Codex, Pi, Antigravity | `agent-notice` | Deliver architecture debt on Codex; Claude emits nothing. |
 | `SubagentStart.context` | subagent start | Codex | `subagent-context` | Record the native role and model observation. Add the bounded child context and standing orders. |
-| `Stop.default` | session stop | Claude, Codex | `stop` | Publish the evidence checkpoint and render handoff and resume. Report protected path changes. Claude can get architecture debt. |
+| `Stop.default` | session stop | Claude, Codex, Pi, Antigravity | `stop` | Publish the evidence checkpoint and render handoff and resume. Report protected path changes. Claude can get architecture debt. |
 
 After upgrading the package, reinstall the host adapters. Codex must trust the
 new command tuples once. Old adapters invoke removed routes and get exit 2.
@@ -122,8 +123,11 @@ The hook identity is the payload `session_id`, `run_id` and `turn_id`. A missing
 value stays null. No hook mints or stores an id.
 
 `UserPromptSubmit` output is advisory. `PreToolUse.edit` blocks invalid edit
-targets. `PreToolUse.bash` blocks known protected write targets. No policy mode changes them. Stop and observer handlers never
-spawn an LLM or a long-running worker.
+targets. `PreToolUse.bash` blocks known protected write targets.
+`PreToolUse.question` denies blocking question modals (`AskUserQuestion` /
+`ask_user_question`) only when `REPO_HARNESS_SEAT=orchestrator`. No policy mode
+changes them. Stop and observer handlers never spawn an LLM or a long-running
+worker.
 
 ## Host and Adoption Operations
 

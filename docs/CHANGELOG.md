@@ -2,6 +2,47 @@
 
 All notable changes to this skill are documented here.
 
+## [0.37.0] - 2026-11-24
+
+### Added
+
+- Antigravity (`agy`) integration completes batch #3419: native `agy` orchestrator seat, native `agy` seat routing, Antigravity hook parity (inbox, approval, shared transcript reader), opted-in runtime reconciliation, runtime readiness checks, managed and targeted Antigravity CodeGraph MCP configuration, per-model Antigravity effort menus, bound Antigravity fallback review receipt collection, and Operator Web support in Setup, Seats Settings and Board Office. (#3409, #3410, #3411, #3412, #3413, #3414, #3415, #3435, #3440, #3445, #3448)
+- Automated in-pane seat reset and cross-runtime control-seat relaunch: one request-state authority for seat reset and Stop (including Pi foreground check via `argv[0]`) and cross-runtime in-pane relaunch for control seats. (#3416, #3462, #3464, #3465)
+- `PreToolUse.question` hook route (`question-guard`) on Claude and Pi, `--exclude-tools ask_user_question` on Pi orchestrator seats, and plain-text prompt guidance in orchestrator briefs and `orchestrator.md`, blocking orchestrator question modals when `REPO_HARNESS_SEAT=orchestrator`. (#3466, #3467)
+- Opt-in `gh` tool support for `seats.advisor` (`SEAT_ACCESS.advisor.tools` and `AGY_ADVISOR_ALLOWED_SEAT_TOOLS`, off by default on `agy`), permitting only `gh issue comment`, `gh pr comment` and `gh issue create`, with aligned advisor briefs, Operator Web settings and issue-flow docs. (#3468, #3469)
+- `worker-neon-deep` seat (12-seat schema) and GLM 5.4 worker options. (#3425, #3431)
+- Board workflow additions: automatic publishing of finished PASS review receipts by the board watcher, early start for explicit dispatch bundles, stalled task-seat detection with unreported status, bounded P0/P1 renudge with ADR-0007, and a `Cheapest alternative` section in council consultation tasks. (#3393, #3423, #3446, #3454, #3455)
+
+### Changed
+
+- Review receipts move to protocol 3: every `P0` and `P1` finding requires a non-empty typed `trigger`, review prompts include the owner-confirmed `#2742` severity bar, round-2 fix checks enforce the regression gate, and High second-row reviews scope to I1/I2/I3. (#3394, #3453, #3457)
+- `@botiverse/oar` updates from `0.104.0` to `0.129.1`, and `herdr-core` pins `0.1.22`. (#3407, #3410, #3420)
+
+### Fixed
+
+- `rh board retro` counts Actions runs within each merged pull request’s lifetime, so earlier runs on reused branches do not inflate the count or trigger the 100-run limit. (#3399, #3400)
+- `rh update` refreshes staged Antigravity skills on update. (#3429, #3436)
+- `selfLabelingArgv` preserves caller `PATH` order. (#3426)
+
+### Documentation
+
+- Updated `assets/reference-configs/hook-operations.md` and `docs/reference-configs/hook-operations.md` to match the 8-entry `ROUTES` registry (Claude 7, Pi 6, Codex 5, Antigravity 5), add `PreToolUse.question` (`question-guard`), and list it among denying routes. (#3470)
+- Tightened Progressive Due Diligence P1/P2/P3 rules, added issue-flow L1/cheapest-path/retro notes, recorded the G10 Antigravity isolation re-probe on `agy 1.5.15` and OAR `0.129.1`, and completed the post-0.36.1 lessons retro. (#3395, #3396, #3403, #3418)
+
+### Upgrade
+
+- Run `rh update` once on each host after installing 0.37.0. Keep a pre-upgrade copy of saved seat settings and host configuration ledgers if you need a downgrade path.
+- One-shot `seats` config migration: 0.37.0 requires `worker-neon-deep` under `seats`. Existing 0.36.1 configurations fail closed with `seats_config_migration_required` until `rh update` runs (it applies the one-shot migration and refreshes staged Antigravity skills and hooks). (#3425, #3431, #3429)
+- `rh update` installs `PreToolUse.question` (`question-guard`) on Claude (6 -> 7 routes) and Pi (5 -> 6 routes). Hand-started orchestrator sessions without `REPO_HARNESS_SEAT=orchestrator` are not covered; relaunch them with `rh seats launch orchestrator --repository-id <id> --cwd <repo> --task <prompt>`. (#3466, #3467)
+- `seats.advisor` accepts `gh` as an explicit opt-in (off by default on `agy`). When granted, it allows only `gh issue comment`, `gh pr comment` and `gh issue create`; other GitHub write commands stay denied. (#3468, #3469)
+- Review receipts use protocol 3 (every `P0` or `P1` finding requires a non-empty `trigger`; protocol 2 receipts are rejected). Finish or rerun in-flight 0.36.1 review seats before collecting under 0.37.0, and upgrade the CLI before collecting 0.37.0 packets. (#3453, #3457)
+- Runtime dependencies update to `@botiverse/oar` `0.129.1` and `herdr-core` `0.1.22`. (#3407, #3420)
+
+### Rollback
+
+- Before publication, close the prep PR or run `git revert <squash-commit>` after merge. After publication, keep the tag and release a corrective patch.
+- Version 0.36.1 rejects the 12-seat configuration that includes `worker-neon-deep` and expects protocol 2 review receipts. Keep 0.37.0 on migrated hosts, or restore the pre-upgrade seat settings and host configuration ledgers before returning to 0.36.1.
+
 ## [0.36.1] - 2026-11-21
 
 Version 0.36.1 is the first published 0.36.x release. Version 0.36.0 was not published to npm or tagged. This release includes all changes from 0.36.0 and the changes in [#3390](https://github.com/aimpact-inc/repo-harness/pull/3390), [#3392](https://github.com/aimpact-inc/repo-harness/pull/3392) and [#3391](https://github.com/aimpact-inc/repo-harness/pull/3391).
