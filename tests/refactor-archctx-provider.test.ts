@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { digestJson, errorEnvelope, serializeRefactorDecision, type RefactorDecisionV1, type RefactorScanFindingV2, type RefactorScanV2, type RefactorVerifyV2 } from "archctx-contracts";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -897,5 +897,26 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
       },
     })).toThrow("stop-after-env-capture");
     expect(observedProviderEnvs).toEqual([{ cwd: checkoutA, gitDir: undefined, gitWorkTree: undefined }]);
+
+    // 15. Stored decision preflight uses lstat and never follows a decision symlink to a FIFO before invoking archctx.
+    if (process.platform !== "win32") {
+      const fifoPath = join(crossBase, "decision.fifo");
+      const mkfifoRes = spawnSync("mkfifo", [fifoPath], { encoding: "utf8" });
+      expect(mkfifoRes.status).toBe(0);
+      const decisionDir = join(checkoutA, ".archcontext", "refactor-decisions");
+      mkdirSync(decisionDir, { recursive: true });
+      const symlinkedDecision = join(decisionDir, `${recId}.json`);
+      symlinkSync(fifoPath, symlinkedDecision);
+      let providerInvoked = false;
+      expect(() => runRefactorVerify(checkoutA, { recommendationId: recId }, {
+        consumerRoot: REPO_ROOT,
+        env,
+        run: () => {
+          providerInvoked = true;
+          throw new Error("reached-provider-without-blocking-on-fifo");
+        },
+      })).toThrow("reached-provider-without-blocking-on-fifo");
+      expect(providerInvoked).toBe(true);
+    }
   }, 60_000);
 });

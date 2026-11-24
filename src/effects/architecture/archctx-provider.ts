@@ -310,15 +310,37 @@ const ARCHCTX_LOCAL_STORE_COMMANDS = new Set<string>([
   'repo', 'landscape', 'recommendations', 'refactor', 'explore', 'prepare',
   'docs', 'agent-context', 'practices', 'review', 'complete', 'plan', 'apply', 'manifest',
 ]);
+const READONLY_PROJECTION_SUBCOMMANDS = new Set<string>([
+  'snapshot', 'freshness', 'slice', 'publish-status', 'verify-pr',
+]);
+const SYNC_VALUE_FLAGS = new Set<string>(['--changed', '--format']);
+
+function hasStandaloneSyncCheckFlag(rest: readonly string[]): boolean {
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index]!;
+    if (token === '--') return false;
+    if (SYNC_VALUE_FLAGS.has(token)) {
+      index += 1;
+      continue;
+    }
+    if (token === '--check') return true;
+  }
+  return false;
+}
+
+function isLocalStoreExemptSubcommand(command: string, args: readonly string[]): boolean {
+  if (command === 'sync') return hasStandaloneSyncCheckFlag(args.slice(1));
+  if (command === 'projection') return args[1] !== undefined && READONLY_PROJECTION_SUBCOMMANDS.has(args[1]);
+  if (command === 'docs') return args[1] === 'anchors';
+  if (command === 'model') return args[1] === 'export' && args[2] === 'native';
+  return false;
+}
 
 /** Returns true when pinned `archctx@0.18.4` opens `ARCHCONTEXT_LOCAL_STORE_PATH` for this command. */
 export function usesArchctxLocalStore(args: readonly string[]): boolean {
   if (args.length === 0 || args.includes('--help') || args.includes('-h')) return false;
   const command = args[0]!;
-  if (!ARCHCTX_LOCAL_STORE_COMMANDS.has(command)) return false;
-  if (command === 'docs' && args[1] === 'anchors') return false;
-  if (command === 'model' && args[1] === 'export' && args[2] === 'native') return false;
-  return true;
+  return ARCHCTX_LOCAL_STORE_COMMANDS.has(command) && !isLocalStoreExemptSubcommand(command, args);
 }
 
 /**
@@ -929,7 +951,35 @@ function normalizeSqliteDdl(sql: unknown): string {
   return String(sql ?? '').replace(/\s+/g, ' ').replace(/\s*([(),])\s*/g, '$1').trim();
 }
 
-function assertProvenLocalStoreDatabase(storePath: string, hasWal: boolean): void {
+const LOCAL_STORE_SQLITE_SIDECARS = ['-wal', '-shm', '-journal'] as const;
+
+/**
+ * Refuses any existing SQLite sidecar (`-wal`, `-shm`, `-journal`) beside `ARCHCONTEXT_LOCAL_STORE_PATH`.
+ * SQLite WAL/SHM salts are not stored in the main cache database, so sidecar ownership cannot be
+ * proven from the database file; opening writable WAL mode beside an unproven sidecar could replay
+ * foreign frames or overwrite/unlink the user's file (I2).
+ */
+function assertNoLocalStoreSidecars(storePath: string, hasDatabase: boolean): void {
+  for (const suffix of LOCAL_STORE_SQLITE_SIDECARS) {
+    let sidecarStat: ReturnType<typeof lstatSync> | undefined;
+    try {
+      sidecarStat = lstatSync(`${storePath}${suffix}`, { throwIfNoEntry: false });
+    } catch (error) {
+      throw unprovenLocalStore(
+        `Refusing ARCHCONTEXT_LOCAL_STORE_PATH: sidecar ${storePath}${suffix} check failed (${error instanceof Error ? error.message : String(error)}).`,
+      );
+    }
+    if (sidecarStat) {
+      throw unprovenLocalStore(
+        hasDatabase
+          ? `Refusing ARCHCONTEXT_LOCAL_STORE_PATH: sidecar ${storePath}${suffix} is present and its ownership cannot be proven. Stop active archctx processes or inspect ${storePath}${suffix} before retrying.`
+          : `Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${storePath}${suffix} exists without a proven store database.`,
+      );
+    }
+  }
+}
+
+function assertProvenLocalStoreDatabase(storePath: string): void {
   let probeDir: string | undefined;
   let db: Database | undefined;
   try {
@@ -937,11 +987,6 @@ function assertProvenLocalStoreDatabase(storePath: string, hasWal: boolean): voi
     const stagedDb = join(probeDir, 'store.sqlite');
     copyFileSync(storePath, stagedDb, fsConstants.COPYFILE_FICLONE);
     chmodSync(stagedDb, 0o600);
-    if (hasWal) {
-      const stagedWal = `${stagedDb}-wal`;
-      copyFileSync(`${storePath}-wal`, stagedWal, fsConstants.COPYFILE_FICLONE);
-      chmodSync(stagedWal, 0o600);
-    }
     db = new Database(stagedDb, { create: false });
     db.exec('PRAGMA query_only = ON;');
     const appRow = db.query('PRAGMA application_id').get() as { application_id?: unknown } | null;
@@ -1007,7 +1052,8 @@ function assertProvenLocalStoreDatabase(storePath: string, hasWal: boolean): voi
  * returning the filesystem-canonical path so the child cannot open a different target than preflight.
  * `archctx` runtime startup calls `ensurePrivateDir` (`chmod 0o700`) and acquires/unlinks
  * `<database>.cache.lock` before proving SQLite ownership, so an unproven path, parent mode, foreign
- * lock file, or foreign/spoofed SQLite store must fail closed here before launch (I2).
+ * lock file, unproven SQLite sidecars (`-wal`, `-shm`, `-journal`), or foreign/spoofed SQLite store
+ * must fail closed here before launch (I2).
  */
 export function resolveSafeArchctxLocalStoreOverride(
   cwd: string,
@@ -1050,17 +1096,7 @@ export function resolveSafeArchctxLocalStoreOverride(
     throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: store path ${storePath} is unreadable (${error instanceof Error ? error.message : String(error)}).`);
   }
   if (!dbStat) {
-    for (const suffix of ['-wal', '-shm', '-journal']) {
-      let sidecarStat: ReturnType<typeof lstatSync> | undefined;
-      try {
-        sidecarStat = lstatSync(`${storePath}${suffix}`, { throwIfNoEntry: false });
-      } catch (error) {
-        throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: sidecar ${storePath}${suffix} check failed (${error instanceof Error ? error.message : String(error)}).`);
-      }
-      if (sidecarStat) {
-        throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${storePath}${suffix} exists without a proven store database.`);
-      }
-    }
+    assertNoLocalStoreSidecars(storePath, false);
     return storePath;
   }
 
@@ -1077,32 +1113,8 @@ export function resolveSafeArchctxLocalStoreOverride(
     throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${storePath} is not a valid SQLite 3 database.`);
   }
 
-  let journalStat: ReturnType<typeof lstatSync> | undefined;
-  try {
-    journalStat = lstatSync(`${storePath}-journal`, { throwIfNoEntry: false });
-  } catch (error) {
-    throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: sidecar ${storePath}-journal check failed (${error instanceof Error ? error.message : String(error)}).`);
-  }
-  if (journalStat) {
-    throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${storePath}-journal is present.`);
-  }
-
-  let hasWal = false;
-  for (const [suffix, isWal] of [['-wal', true], ['-shm', false]] as const) {
-    let sidecarStat: ReturnType<typeof lstatSync> | undefined;
-    try {
-      sidecarStat = lstatSync(`${storePath}${suffix}`, { throwIfNoEntry: false });
-    } catch (error) {
-      throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: sidecar ${storePath}${suffix} check failed (${error instanceof Error ? error.message : String(error)}).`);
-    }
-    if (sidecarStat) {
-      if (!sidecarStat.isFile()) {
-        throw unprovenLocalStore(`Refusing ARCHCONTEXT_LOCAL_STORE_PATH: ${storePath}${suffix} must be a regular file.`);
-      }
-      if (isWal) hasWal = true;
-    }
-  }
-  assertProvenLocalStoreDatabase(storePath, hasWal);
+  assertNoLocalStoreSidecars(storePath, true);
+  assertProvenLocalStoreDatabase(storePath);
   return storePath;
 }
 

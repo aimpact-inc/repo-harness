@@ -852,6 +852,98 @@ describe('rh arch', () => {
       expect((JSON.parse(okOverrideRes.stdout) as { ok: boolean }).ok).toBe(true);
       expect(existsSync(validOverridePath)).toBe(true);
     }
+    expect(readdirSync(validOverrideDir)).toEqual(['local-cache-v2.sqlite']);
+
+    // 8k. Foreign sidecars (-shm, -wal, -wal+-shm pair, -journal) beside a genuine v2 cache fail closed
+    // before launch and keep both the genuine v2 cache and foreign sidecars byte-identical (I2).
+    const genuineV2BytesBefore = readFileSync(validOverridePath);
+    const foreignLocalSidecarCases: Array<{ files: Array<[string, Buffer]>; expectedSuffix: string }> = [
+      { files: [['-shm', Buffer.from('foreign user shm data — must not be overwritten\n')]], expectedSuffix: '-shm' },
+      { files: [['-shm', foreignShmBytes]], expectedSuffix: '-shm' },
+      { files: [['-wal', Buffer.from('foreign user wal data — must not be overwritten\n')]], expectedSuffix: '-wal' },
+      { files: [['-wal', foreignWalBytes]], expectedSuffix: '-wal' },
+      { files: [['-wal', foreignWalBytes], ['-shm', foreignShmBytes]], expectedSuffix: '-wal' },
+      { files: [['-journal', Buffer.from('foreign user journal data\n')]], expectedSuffix: '-journal' },
+    ];
+    for (const sidecarCase of foreignLocalSidecarCases) {
+      for (const [suffix, payload] of sidecarCase.files) {
+        writeFileSync(`${validOverridePath}${suffix}`, payload);
+      }
+      try {
+        const res = spawnSync(
+          process.execPath,
+          [CLI, 'arch', 'prepare', '--task', 'verify-foreign-sidecar-on-v2', '--json'],
+          {
+            cwd: cleanCase.repo,
+            env: { ...cleanCase.env, ARCHCONTEXT_LOCAL_STORE_PATH: validOverridePath },
+            encoding: 'utf8',
+            timeout: 60_000,
+          },
+        );
+        expect(res.status).toBe(1);
+        const envOut = JSON.parse(res.stdout) as { ok: boolean; error?: { code?: string; reasonCode?: string; message?: string } };
+        expect(envOut.ok).toBe(false);
+        expect(envOut.error?.code).toBe('AC_PRECONDITION_FAILED');
+        expect(envOut.error?.reasonCode).toBe('local-store-unproven-file');
+        expect(envOut.error?.message).toContain(`${validOverridePath}${sidecarCase.expectedSuffix}`);
+        expect(envOut.error?.message).toContain('ownership cannot be proven');
+        expect(readFileSync(validOverridePath).equals(genuineV2BytesBefore)).toBe(true);
+        for (const [suffix, payload] of sidecarCase.files) {
+          expect(readFileSync(`${validOverridePath}${suffix}`).equals(payload)).toBe(true);
+        }
+        expect(readdirSync(validOverrideDir).sort()).toEqual([
+          'local-cache-v2.sqlite',
+          ...sidecarCase.files.map(([suffix]) => `local-cache-v2.sqlite${suffix}`),
+        ].sort());
+      } finally {
+        for (const [suffix] of sidecarCase.files) {
+          rmSync(`${validOverridePath}${suffix}`, { force: true });
+        }
+      }
+    }
+    const cleanAfterSidecarRes = spawnSync(
+      process.execPath,
+      [CLI, 'arch', 'prepare', '--task', 'verify-v2-clean-after-sidecar-removal', '--json'],
+      {
+        cwd: cleanCase.repo,
+        env: { ...cleanCase.env, ARCHCONTEXT_LOCAL_STORE_PATH: validOverridePath },
+        encoding: 'utf8',
+        timeout: 60_000,
+      },
+    );
+    expect(cleanAfterSidecarRes.status, `${cleanAfterSidecarRes.stderr}\n${cleanAfterSidecarRes.stdout}`).toBe(0);
+    expect((JSON.parse(cleanAfterSidecarRes.stdout) as { ok: boolean }).ok).toBe(true);
+
+    // 8l. Non-store commands (`projection snapshot`, `sync --check`) do not fail with local-store-unproven-file
+    // when ARCHCONTEXT_LOCAL_STORE_PATH points to an unrelated user file, and leave that file untouched.
+    const unrelatedFile = join(validOverrideDir, 'not-a-store.txt');
+    const unrelatedPayload = Buffer.from('plain user file beside non-store command\n');
+    writeFileSync(unrelatedFile, unrelatedPayload);
+    const snapshotWithUnrelatedRes = spawnSync(
+      process.execPath,
+      [CLI, 'arch', 'projection', 'snapshot', '--json'],
+      {
+        cwd: cleanCase.repo,
+        env: { ...cleanCase.env, ARCHCONTEXT_LOCAL_STORE_PATH: unrelatedFile },
+        encoding: 'utf8',
+        timeout: 60_000,
+      },
+    );
+    expect(snapshotWithUnrelatedRes.status, `${snapshotWithUnrelatedRes.stderr}\n${snapshotWithUnrelatedRes.stdout}`).toBe(0);
+    expect((JSON.parse(snapshotWithUnrelatedRes.stdout) as { ok: boolean }).ok).toBe(true);
+    const syncCheckWithUnrelatedRes = spawnSync(
+      process.execPath,
+      [CLI, 'arch', 'sync', '--check', '--json'],
+      {
+        cwd: cleanCase.repo,
+        env: { ...cleanCase.env, ARCHCONTEXT_LOCAL_STORE_PATH: unrelatedFile },
+        encoding: 'utf8',
+        timeout: 60_000,
+      },
+    );
+    expect([0, 2]).toContain(syncCheckWithUnrelatedRes.status ?? -1);
+    expect(readFileSync(unrelatedFile).equals(unrelatedPayload)).toBe(true);
+    rmSync(unrelatedFile, { force: true });
 
     // 9. Non-PID / empty user files at codegraph.lock and codegraph.lock.break refused on real primary index without unlinking.
     const lockPath = join(cleanCase.repo, '.codegraph/codegraph.lock');

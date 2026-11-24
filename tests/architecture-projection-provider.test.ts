@@ -2337,6 +2337,13 @@ describe('bootstrapWorktreeCodeGraph index seed cutover', () => {
       ['capabilities', '--json'],
       ['prepare', '--help'],
       ['docs', 'anchors', '--json'],
+      ['sync', '--check', '--json'],
+      ['sync', '--check', '--no-instructions'],
+      ['projection', 'snapshot', '--json'],
+      ['projection', 'freshness', '--json'],
+      ['projection', 'slice', '--base', 'main', '--json'],
+      ['projection', 'publish-status', '--json'],
+      ['projection', 'verify-pr', '--base', 'main', '--json'],
       ['resolve', '--path', 'src/a.ts'],
       ['verify', '--base', 'HEAD', '--json'],
       ['export', 'native', '--worktree', '--json'],
@@ -2351,6 +2358,10 @@ describe('bootstrapWorktreeCodeGraph index seed cutover', () => {
     for (const storeBacked of [
       ['prepare', '--task', 'x', '--json'],
       ['projection', 'run', '--request-json', '{}'],
+      ['projection', 'publish'],
+      ['sync', '--json'],
+      ['sync', '--changed', '--check'],
+      ['sync', '--', '--check'],
       ['docs', 'drift', '--json'],
       ['docs', 'sync'],
       ['validate', '--json'],
@@ -2397,6 +2408,42 @@ describe('bootstrapWorktreeCodeGraph index seed cutover', () => {
       symlinkSync(privateDir, symParent);
       expect(() => resolveSafeArchctxLocalStoreOverride(f.root, { ARCHCONTEXT_LOCAL_STORE_PATH: join(symParent, 'cache.sqlite') }))
         .toThrow('not a symlink or file');
+    }
+
+    // Genuine v2 cache accepts clean state and refuses any existing -wal, -shm, or -journal sidecar without mutating bytes.
+    const genuineV2Path = join(privateDir, 'local-cache-v2.sqlite');
+    const genuineDb = new Database(genuineV2Path);
+    try {
+      genuineDb.exec(`
+        PRAGMA journal_mode = WAL;
+        CREATE TABLE architecture_debt_base_cache(cache_key TEXT PRIMARY KEY,report_json TEXT NOT NULL,updated_at TEXT NOT NULL);
+        CREATE TABLE external_docs_cache(provider TEXT NOT NULL,library_id TEXT NOT NULL,version TEXT NOT NULL,query_digest TEXT NOT NULL,content_digest TEXT NOT NULL,resource_json TEXT NOT NULL,retrieved_at TEXT NOT NULL,expires_at TEXT NOT NULL,PRIMARY KEY(provider,library_id,version,query_digest));
+        CREATE TABLE kv_cache(namespace TEXT NOT NULL,cache_key TEXT NOT NULL,value_json TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(namespace,cache_key));
+        PRAGMA application_id = 1094931544;
+        PRAGMA user_version = 200;
+        PRAGMA wal_checkpoint(TRUNCATE);
+      `);
+    } finally {
+      genuineDb.close();
+    }
+    // bun:sqlite sets SQLITE_FCNTL_PERSIST_WAL, leaving 0-byte -wal and -shm on close unlike node:sqlite.
+    rmSync(`${genuineV2Path}-wal`, { force: true });
+    rmSync(`${genuineV2Path}-shm`, { force: true });
+    expect(resolveSafeArchctxLocalStoreOverride(f.root, { ARCHCONTEXT_LOCAL_STORE_PATH: genuineV2Path }))
+      .toBe(join(canonicalPriv, 'local-cache-v2.sqlite'));
+    const genuineBytes = readFileSync(genuineV2Path);
+    for (const suffix of ['-wal', '-shm', '-journal'] as const) {
+      const sidecarPath = `${genuineV2Path}${suffix}`;
+      const foreignBytes = Buffer.from(`foreign ${suffix} bytes\n`);
+      writeFileSync(sidecarPath, foreignBytes);
+      try {
+        expect(() => resolveSafeArchctxLocalStoreOverride(f.root, { ARCHCONTEXT_LOCAL_STORE_PATH: genuineV2Path }))
+          .toThrow('ownership cannot be proven');
+        expect(readFileSync(genuineV2Path).equals(genuineBytes)).toBe(true);
+        expect(readFileSync(sidecarPath).equals(foreignBytes)).toBe(true);
+      } finally {
+        rmSync(sidecarPath, { force: true });
+      }
     }
   });
 });

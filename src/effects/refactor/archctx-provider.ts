@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError } from "../../core/architecture/projection";
 import type { ArchctxProviderOptions } from "../../core/architecture/contracts";
@@ -192,36 +192,61 @@ export function assertNoCaseAliasedKillListTargets(
   }
 }
 
-function assertStoredDecisionCanonicalKillList(
-  verifiedRoot: string,
-  recommendationId: string,
-  env: NodeJS.ProcessEnv = process.env,
-): void {
-  const decisionPath = join(verifiedRoot, ".archcontext", "refactor-decisions", `${recommendationId}.json`);
-  if (!existsSync(decisionPath)) return;
+interface StoredDecisionKillList {
+  readonly entries: Array<{ kind: string; target: string; required?: boolean }>;
+  readonly baselineHeadSha?: string;
+}
+
+function isRegularDecisionFile(verifiedRoot: string, recommendationId: string): string | undefined {
+  const archcontextDir = join(verifiedRoot, ".archcontext");
+  const decisionsDir = join(archcontextDir, "refactor-decisions");
+  const decisionPath = join(decisionsDir, `${recommendationId}.json`);
+  try {
+    if (!lstatSync(archcontextDir, { throwIfNoEntry: false })?.isDirectory()) return undefined;
+    if (!lstatSync(decisionsDir, { throwIfNoEntry: false })?.isDirectory()) return undefined;
+    if (!lstatSync(decisionPath, { throwIfNoEntry: false })?.isFile()) return undefined;
+    return decisionPath;
+  } catch {
+    return undefined;
+  }
+}
+
+function readStoredDecisionKillList(verifiedRoot: string, recommendationId: string): StoredDecisionKillList | undefined {
+  const decisionPath = isRegularDecisionFile(verifiedRoot, recommendationId);
+  if (!decisionPath) return undefined;
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(decisionPath, "utf8"));
   } catch {
-    return;
+    return undefined;
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
   const killList = (parsed as { killList?: unknown }).killList;
-  if (!Array.isArray(killList)) return;
+  if (!Array.isArray(killList)) return undefined;
   const entries = killList.filter(
     (entry): entry is { kind: string; target: string; required?: boolean } =>
       Boolean(entry) && typeof entry === "object" && !Array.isArray(entry)
       && typeof (entry as { kind?: unknown }).kind === "string"
       && typeof (entry as { target?: unknown }).target === "string",
   );
-  const label = `.archcontext/refactor-decisions/${recommendationId}.json killList`;
-  assertCanonicalKillListTargets(entries, label);
   const provenance = (parsed as { provenance?: unknown }).provenance;
   const baselineHeadSha = provenance && typeof provenance === "object" && !Array.isArray(provenance)
     && typeof (provenance as { headSha?: unknown }).headSha === "string"
     ? (provenance as { headSha: string }).headSha
     : undefined;
-  assertNoCaseAliasedKillListTargets(verifiedRoot, entries, label, env, baselineHeadSha);
+  return { entries, baselineHeadSha };
+}
+
+function assertStoredDecisionCanonicalKillList(
+  verifiedRoot: string,
+  recommendationId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  const stored = readStoredDecisionKillList(verifiedRoot, recommendationId);
+  if (!stored) return;
+  const label = `.archcontext/refactor-decisions/${recommendationId}.json killList`;
+  assertCanonicalKillListTargets(stored.entries, label);
+  assertNoCaseAliasedKillListTargets(verifiedRoot, stored.entries, label, env, stored.baselineHeadSha);
 }
 
 function verifyRefactorRoot(repoRoot: string, options: ArchctxProviderOptions, label: string): string {
