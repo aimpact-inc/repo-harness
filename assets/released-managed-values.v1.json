@@ -104,7 +104,8 @@
     "v0.35.1",
     "v0.35.2",
     "v0.36.1",
-    "v0.37.0"
+    "v0.37.0",
+    "v0.37.1"
   ],
   "packageScripts": {
     "check:architecture-sync": [
@@ -2136,6 +2137,7 @@
       "sha256:e89fb6de41408366c1b0c1692220770c1abcca7f41fffcf0b650e45e05b6fc66",
       "sha256:ea5fbaf3b84fd08d90e3c30c76b64e63f19c8cfebfb285a87a94707427204bde",
       "sha256:efe608ccea435a07a4b50d9ce75993c5bbde6d27823f869bdd141db46dda7e6c",
+      "sha256:f1fbbf62006d47eb428644c943c518324a3b774b68589182fb69c2cc35ff69e0",
       "sha256:f56955bed47f457fe1021db0aa9692f3ed891f1d4db92df090d2579da705bdb2",
       "sha256:f717abd40c17bf746cfd3fc56bff414abbc6ca943259ca74b59dcbaf421b5536",
       "sha256:f968f85c1ee78c2764288770974c109886f3ecc5276786cadb98a286b211acff",
@@ -2178,7 +2180,8 @@
           "tasks/.current.md.tmp.*"
         ],
         "bases": [
-          "sha256:ea5fbaf3b84fd08d90e3c30c76b64e63f19c8cfebfb285a87a94707427204bde"
+          "sha256:ea5fbaf3b84fd08d90e3c30c76b64e63f19c8cfebfb285a87a94707427204bde",
+          "sha256:f1fbbf62006d47eb428644c943c518324a3b774b68589182fb69c2cc35ff69e0"
         ]
       }
     ]
