@@ -66,7 +66,7 @@ function seatsRanges(enabled: readonly string[]) {
     roles: SEAT_SCAFFOLD_SUB_AGENTS.map(name => ({ name, writable: false })),
     seats: {
       orchestrator: { models: SEAT_RECOMMENDED_MODELS.orchestrator, fleet: ALLOWED_SEAT_FLEET_ROLES.orchestrator, tools: all.filter(tool => tool !== 'edit') },
-      advisor: { models: SEAT_RECOMMENDED_MODELS.advisor, fleet: ALLOWED_SEAT_FLEET_ROLES.advisor, tools: all.filter(tool => tool !== 'gh') },
+      advisor: { models: SEAT_RECOMMENDED_MODELS.advisor, fleet: ALLOWED_SEAT_FLEET_ROLES.advisor, tools: all },
       council: { models: SEAT_RECOMMENDED_MODELS.council, fleet: ALLOWED_SEAT_FLEET_ROLES.council, tools: COUNCIL_TOOLS },
       worker: { models: SEAT_RECOMMENDED_MODELS.worker, fleet: ALLOWED_SEAT_FLEET_ROLES.worker, tools: all },
       'worker-deep': { models: SEAT_RECOMMENDED_MODELS['worker-deep'], fleet: ALLOWED_SEAT_FLEET_ROLES['worker-deep'], tools: all },

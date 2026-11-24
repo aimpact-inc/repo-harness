@@ -74,11 +74,11 @@ const without = (...excluded: SeatTool[]): readonly SeatTool[] => SEAT_TOOLS.fil
 
 /**
  * Per-seat scaffold sub-agent and tool grants (ADR-0006 §3).
- * The orchestrator does not edit (#1472). The advisor may edit proposals (#2032) and does not write GitHub (#1472).
+ * The orchestrator does not edit (#1472). The advisor may edit proposals (#2032) and post GitHub comments and intake issues when `gh` is granted (#3468).
  */
 const SEAT_ACCESS: { readonly [seat in SeatId]: Omit<SeatRangeV1, 'models'> } = {
   orchestrator: { fleet: ALLOWED_SEAT_FLEET_ROLES.orchestrator, tools: without('edit') },
-  advisor: { fleet: ALLOWED_SEAT_FLEET_ROLES.advisor, tools: without('gh') },
+  advisor: { fleet: ALLOWED_SEAT_FLEET_ROLES.advisor, tools: SEAT_TOOLS },
   council: { fleet: ALLOWED_SEAT_FLEET_ROLES.council, tools: COUNCIL_TOOLS },
   worker: { fleet: ALLOWED_SEAT_FLEET_ROLES.worker, tools: SEAT_TOOLS },
   'worker-deep': { fleet: ALLOWED_SEAT_FLEET_ROLES['worker-deep'], tools: SEAT_TOOLS },

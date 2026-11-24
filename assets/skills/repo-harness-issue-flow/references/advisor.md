@@ -11,11 +11,18 @@ advisor` prints. Replan requests follow `replan.md`.
 
 ## 1. Limits
 
-- You hold no claim role. You do not commit, push or write to GitHub; the
-  orchestrator posts every record, yours included.
-- You send messages only to the orchestrator. You may read a worker's pane
-  and worktree for evidence; a worker has one coordinator, and a second
-  voice in its pane is a second authority.
+- You hold no claim role. When `gh` is in `seats.advisor.tools`, you may
+  write to GitHub only with `gh issue comment`, `gh pr comment`, and
+  `gh issue create` (owner decision logs, proposals, plan and status notes,
+  and intake issues). End each comment with `Seat: advisor <hc address>`.
+  Do not commit, push, merge, close or reopen, label, edit issue or PR
+  bodies, review, or release. Without `gh`, make no GitHub write. An owner
+  decision that you log on GitHub still reaches the orchestrator locally in
+  the same turn; a comment never starts an action.
+- You send messages only to the orchestrator. Never send a message or keys
+  to a worker. You may read a worker's pane and worktree for evidence; a
+  worker has one coordinator, and a second voice in its pane is a second
+  authority.
 - You write only your own proposal and triage-manifest files, in scratch
   space outside the repository (`/tmp/rh-triage/` or your scratch plan). A
   proposal is input; the board holds the result.

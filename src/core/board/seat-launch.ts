@@ -105,6 +105,24 @@ export const piRoleName = (role: string): string => `rh-${role}`;
 type RoleName = (role: string) => string;
 const roleList = (fleet: readonly string[], name: RoleName) => fleet.map(role => `\`${name(role)}\``).join(', ');
 
+function advisorParagraphs(config: SeatConfigV1, fleet: readonly string[], name: RoleName): string[] {
+  const evidence = fleet.length === 0
+    ? 'You have no sub-agents. Collect evidence yourself.'
+    : [
+      `Collect evidence through your sub-agents: ${roleList(fleet, name)}. Split one research request into 2 to 4 read-only briefs with scopes that do not overlap, and send them in parallel.`,
+      ...(fleet.includes('deep-reasoner') ? [`Use ${name('deep-reasoner')} only for an independent second judgment.`] : []),
+      'Keep judgment, synthesis and the proposal for yourself. Run a check of one or two commands yourself.',
+    ].join(' ');
+  const ghRule = config.tools.includes('gh')
+    ? 'You may write to GitHub only with `gh issue comment`, `gh pr comment`, and `gh issue create` (end each comment with `Seat: advisor <hc address>`). Do not commit, push, merge, close or reopen, label, edit issue or PR bodies, review, or release.'
+    : 'You do not commit or write to GitHub.';
+  return [
+    `You are the advisor seat. You serve only the orchestrator. You do research and write proposals. ${ghRule} Edit files only for your proposals.`,
+    'You may read the processes of worker seats (hc ls, hc get and hc read on seat-labeled terminals) for evidence. You do not send messages or keys to a worker. You report only to the orchestrator.',
+    evidence,
+  ];
+}
+
 function roleParagraphs(seat: LaunchSeatId, config: SeatConfigV1, fleet: readonly string[], name: RoleName): string[] {
   if (seat === 'orchestrator') {
     const queue = config.tools.includes('tasks')
@@ -122,20 +140,7 @@ function roleParagraphs(seat: LaunchSeatId, config: SeatConfigV1, fleet: readonl
       ...queue,
     ];
   }
-  if (seat === 'advisor') {
-    const evidence = fleet.length === 0
-      ? 'You have no sub-agents. Collect evidence yourself.'
-      : [
-        `Collect evidence through your sub-agents: ${roleList(fleet, name)}. Split one research request into 2 to 4 read-only briefs with scopes that do not overlap, and send them in parallel.`,
-        ...(fleet.includes('deep-reasoner') ? [`Use ${name('deep-reasoner')} only for an independent second judgment.`] : []),
-        'Keep judgment, synthesis and the proposal for yourself. Run a check of one or two commands yourself.',
-      ].join(' ');
-    return [
-      'You are the advisor seat. You serve only the orchestrator. You do research and write proposals. You do not commit or write to GitHub. Edit files only for your proposals.',
-      'You may read the processes of worker seats (hc ls, hc get and hc read on seat-labeled terminals) for evidence. You do not send messages or keys to a worker. You report only to the orchestrator.',
-      evidence,
-    ];
-  }
+  if (seat === 'advisor') return advisorParagraphs(config, fleet, name);
   if (isCouncilSeat(seat)) {
     return [
       'You are a council seat. Read the issue and the relevant code. Research the architecture, weigh trade-offs, and give your independent judgment. Produce an implementation skeleton with the affected files and interfaces, a delete list, a forbidden-additions list, and checks that prove the result.',
@@ -360,6 +365,10 @@ export const AGY_WORKER_COMMAND_PREFIXES: readonly string[] = [
   'rg', 'ls', 'cat',
 ];
 
+const AGY_ADVISOR_GH_COMMAND_PREFIXES: readonly string[] = [
+  'gh issue comment', 'gh pr comment', 'gh issue create',
+];
+
 const AGY_WORKER_GH_COMMAND_PREFIXES: readonly string[] = [
   'git push', 'gh pr create', 'gh pr edit', 'gh pr comment', 'gh issue comment', 'gh run rerun',
 ];
@@ -401,10 +410,18 @@ export function agySeatCommandRules(seat: LaunchSeatId, config: SeatConfigV1): {
       deny: hasGh ? AGY_WORKER_DENIED_COMMANDS : [...new Set([...AGY_WORKER_DENIED_COMMANDS, ...GITHUB_WRITE_COMMANDS, 'gh run rerun'])],
     };
   }
-  if (seat === 'advisor') return {
-    allow: [...AGY_READONLY_COMMAND_PREFIXES, 'rh seats council', 'rh seats reset', 'rh seats handoff', 'rh arch refactor decide'],
-    deny: AGY_READONLY_DENIED_COMMANDS.filter(command => command !== 'rh seats reset'),
-  };
+  if (seat === 'advisor') {
+    const hasGh = config.tools.includes('gh');
+    return {
+      allow: [
+        ...AGY_READONLY_COMMAND_PREFIXES,
+        'rh seats council', 'rh seats reset', 'rh seats handoff', 'rh arch refactor decide',
+        ...(hasGh ? AGY_ADVISOR_GH_COMMAND_PREFIXES : []),
+      ],
+      deny: AGY_READONLY_DENIED_COMMANDS.filter(command =>
+        command !== 'rh seats reset' && (!hasGh || !AGY_ADVISOR_GH_COMMAND_PREFIXES.includes(command))),
+    };
+  }
   if (seat === 'council' || seat === 'gatekeeper') {
     return { allow: AGY_READONLY_COMMAND_PREFIXES, deny: [...AGY_READONLY_DENIED_COMMANDS, 'rh arch refactor decide'] };
   }

@@ -176,11 +176,11 @@ describe('agents page seats section', () => {
     expect(buttonWithText('gemini-4-neon-high').getAttribute('aria-pressed')).toBe('true');
     expect(allow('Shell').getAttribute('aria-checked')).toBe('true');
     expect(allow('Shell').disabled).toBe(true);
-    // The agy advisor rule makes edit, MCP and schedule optional; the task list stays out.
-    expect(['Edit files', 'MCP · repo-harness', 'Scheduled jobs', 'Task list'].map(tool => allow(tool).disabled)).toEqual([false, false, false, true]);
+    // The agy advisor rule makes edit, gh, MCP, schedule, and tasks optional while net, read, and shell stay required.
+    expect(['Edit files', 'GitHub writes', 'MCP · repo-harness', 'Scheduled jobs', 'Task list'].map(tool => allow(tool).disabled)).toEqual([false, false, false, false, false]);
     await click(allow('MCP · repo-harness'));
     await click(seatsSave());
-    expect(posts[0]?.seats.advisor).toEqual({ runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['edit', 'net', 'read', 'schedule', 'shell'] });
+    expect(posts[0]?.seats.advisor).toEqual({ runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['edit', 'gh', 'net', 'read', 'schedule', 'shell', 'tasks'] });
 
     // Worker seat gets Neon High + writable agy worker tools, unlocked gh toggle, and dynamic limits (no edit limit).
     await click(pane('worker'));
@@ -311,12 +311,12 @@ describe('agents page seats section', () => {
     expect(posts[0]?.seats['worker-deep']).toMatchObject({ model: 'gemini-4-carbon', effort: null });
   });
 
-  test('the advisor offers only scaffold roles, allows edits and blocks GitHub writes; save sends the whole section', async () => {
+  test('the advisor offers only scaffold roles, allows edits and GitHub writes; save sends the whole section', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     await mount(seatsProps(posts));
     expect(document.querySelector('[data-seat-card]')?.getAttribute('data-seat-card')).toBe('advisor');
     expect(all('[data-seat-fleet] button[role="switch"]').map(button => button.getAttribute('aria-label'))).toEqual(['Allow deep-reasoner', 'Allow explorer']);
-    expect(allow('GitHub writes').disabled).toBe(true);
+    expect(allow('GitHub writes').disabled).toBe(false);
     expect(allow('Edit files').disabled).toBe(false);
     // The levels are those of buildSeatLaunch (#1531): Claude advisor with shell on, tasks, schedule, edit and gh off.
     expect(levels()).toEqual(['common_commands', 'enforced', 'instructions_only', 'common_commands', 'named_types_only']);

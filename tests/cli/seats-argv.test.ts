@@ -265,15 +265,15 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
         "command(rh seats council)",
         "command(rh seats reset)",
         "command(rh seats handoff)",
-        "command(rh arch refactor decide)"
+        "command(rh arch refactor decide)",
+        "command(gh issue comment)",
+        "command(gh pr comment)",
+        "command(gh issue create)"
       ],
       "deny": [
         "command(gh issue close)",
-        "command(gh issue comment)",
-        "command(gh issue create)",
         "command(gh issue edit)",
         "command(gh pr close)",
-        "command(gh pr comment)",
         "command(gh pr create)",
         "command(gh pr edit)",
         "command(gh pr merge)",
@@ -756,6 +756,64 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
         expect(rules.allow).not.toContain("rh arch refactor decide");
         expect(rules.deny).toContain("rh arch refactor decide");
       }
+    }
+  });
+
+  test("advisor brief without gh keeps the no-GitHub-write text across Pi, Claude, and agy", () => {
+    const agyInput = { executable: "/usr/local/bin/agy", directory: "/tmp/agy", cwd: "/tmp/repo" };
+    for (const config of [
+      { runtime: "pi", model: "magpie/agy-cli/gemini-4-neon", advisor_model: null, effort: "xhigh", tools: ["mcp", "net", "read", "shell"], fleet: [] },
+      { runtime: "claude", model: "opus", advisor_model: null, effort: "high", tools: ["mcp", "net", "read", "shell"], fleet: [] },
+      { runtime: "agy", model: "gemini-4-neon-high", advisor_model: null, effort: null, tools: ["edit", "mcp", "net", "read", "schedule", "shell"], fleet: [] },
+    ] as const) {
+      const result = buildSeatLaunch("advisor", config, "seats", [], config.runtime === "agy" ? { agy: agyInput } : {});
+      expect(result.brief).toContain("You do not commit or write to GitHub.");
+      expect(result.brief).toContain("Do not write to GitHub.");
+      expect(result.brief).not.toContain("gh issue comment");
+      expect(result.brief).not.toContain("gh pr comment");
+      expect(result.brief).not.toContain("gh issue create");
+    }
+  });
+
+  test("advisor brief with gh allows only gh issue comment, gh pr comment, and gh issue create across Pi, Claude, and agy", () => {
+    const agyInput = { executable: "/usr/local/bin/agy", directory: "/tmp/agy", cwd: "/tmp/repo" };
+    for (const config of [
+      { runtime: "pi", model: "magpie/agy-cli/gemini-4-neon", advisor_model: null, effort: "xhigh", tools: ["gh", "mcp", "net", "read", "shell", "tasks"], fleet: [] },
+      { runtime: "claude", model: "opus", advisor_model: null, effort: "high", tools: ["gh", "mcp", "net", "read", "shell", "tasks"], fleet: [] },
+      { runtime: "agy", model: "gemini-4-neon-high", advisor_model: null, effort: null, tools: AGY_ADVISOR_SEAT_TOOLS, fleet: [] },
+    ] as const) {
+      const result = buildSeatLaunch("advisor", config, "seats", [], config.runtime === "agy" ? { agy: agyInput } : {});
+      expect(result.brief).toContain("You may write to GitHub only with `gh issue comment`, `gh pr comment`, and `gh issue create` (end each comment with `Seat: advisor <hc address>`).");
+      expect(result.brief).toContain("Do not commit, push, merge, close or reopen, label, edit issue or PR bodies, review, or release.");
+      expect(result.brief).not.toContain("You do not commit or write to GitHub.");
+      expect(result.brief).not.toContain("Do not write to GitHub.");
+    }
+  });
+
+  test("agy advisor command rules grant only comment and intake issue writes when gh is enabled and keep every other write denied", () => {
+    const withoutGh = agySeatCommandRules("advisor", { ...AGY_ADVISOR, tools: ["edit", "mcp", "net", "read", "schedule", "shell"] });
+    for (const allowed of ["gh issue comment", "gh pr comment", "gh issue create"]) {
+      expect(withoutGh.allow).not.toContain(allowed);
+      expect(withoutGh.deny).toContain(allowed);
+    }
+
+    const withGh = agySeatCommandRules("advisor", AGY_ADVISOR);
+    expect(withGh.allow).toEqual(expect.arrayContaining(["gh issue comment", "gh pr comment", "gh issue create"]));
+    for (const allowed of ["gh issue comment", "gh pr comment", "gh issue create"]) {
+      expect(withGh.deny).not.toContain(allowed);
+    }
+    expect(withGh.deny).toEqual(expect.arrayContaining([
+      "gh issue close", "gh issue edit", "gh pr close", "gh pr create",
+      "gh pr edit", "gh pr merge", "gh pr review", "gh release create", "git push", "gh run rerun",
+    ]));
+    for (const forbidden of [
+      "gh issue close 3468", "gh issue reopen 3468", "gh issue edit 3468 --add-label tier:medium",
+      "gh issue delete 3468 --yes", "gh pr close 3467", "gh pr reopen 3467", "gh pr create --title x",
+      "gh pr edit 3467 --body x", "gh pr merge 3467 --squash", "gh pr review 3467 --approve",
+      "gh release create v0.37.0", "gh label create foo", "gh api repos/org/repo/issues/1/comments",
+      "gh run rerun 123", "git commit -m test", "git push origin main",
+    ]) {
+      expect(withGh.allow.find(prefix => forbidden.startsWith(prefix)), forbidden).toBeUndefined();
     }
   });
 });
