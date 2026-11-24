@@ -609,6 +609,19 @@ host's PR events or check when the worker reports.
   (a growing file list, the same compile error, no commit), re-route the
   issue to a deeper seat. A handoff needs a claim comment that cites the
   prior claim; the new seat starts from the pushed branch.
+- **Owner wait.** Do not open a blocking question modal
+  (`AskUserQuestion`, `ask_user_question`, or `request_user_input`). A
+  modal holds the pane in `blocked` and stops incoming `hc` notices from
+  workers and the advisor. When one task waits on the owner, park only
+  that task, ask the owner in plain text (or through the advisor), and
+  end the turn so `hc` messages from other seats keep arriving. A seat
+  started by hand without seat identity (`REPO_HARNESS_SEAT=orchestrator`)
+  is not covered by the launcher or hook guard; migrate it by relaunching
+  with:
+
+  ```bash
+  rh seats launch orchestrator --repository-id <id> --cwd <repo> --task <prompt>
+  ```
 
 ### 8.1 Triage queue
 

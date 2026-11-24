@@ -4,6 +4,7 @@ import { runBashMutationGuard } from './mutation-bash';
 import { runStopHandler } from './stop-handler';
 import { HOST_ADAPTERS } from './host-adapter';
 import { runReturnChannel } from './return-channel';
+import { runQuestionGuard } from './question-guard';
 import { runSubagentContext } from './subagent-context';
 import type { HookHandlerId, Route } from './route-registry';
 import type { HookHandlerContext, HookHandlerResult, HookPermission, TypedHookHandler } from './handler-contract';
@@ -98,6 +99,13 @@ const handlers: Readonly<Record<HookHandlerId, TypedHookHandler>> = Object.freez
     run: (context: HookHandlerContext) => runReturnChannel({
       collector: context.collector,
       payload: context.payload,
+    }),
+  },
+  'question-guard': {
+    id: 'question-guard',
+    run: (context: HookHandlerContext) => runQuestionGuard({
+      payload: context.payload,
+      env: context.env,
     }),
   },
   'subagent-context': {

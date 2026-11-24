@@ -98,7 +98,7 @@ function repo(optIn = true): string {
   return root;
 }
 
-function env(root: string, host: 'claude' | 'codex' = 'claude'): NodeJS.ProcessEnv {
+function env(root: string, host: 'claude' | 'codex' | 'pi' = 'claude'): NodeJS.ProcessEnv {
   return {
     ...process.env,
     HOOK_REPO_ROOT: root,
@@ -413,6 +413,7 @@ describe('typed hook runtime', () => {
         ['SessionStart', 'default', undefined, 'session-context'],
         ['PreToolUse', 'edit', JSON.stringify({ tool_input: { file_path: 'README.md' } }), 'mutation-guard'],
         ['PreToolUse', 'subagent', JSON.stringify({ tool_name: 'Agent', tool_input: { prompt: 'inspect' } }), 'return-channel'],
+        ['PreToolUse', 'question', JSON.stringify({ tool_name: 'AskUserQuestion', tool_input: {} }), 'question-guard'],
         ['UserPromptSubmit', 'inbox', JSON.stringify({ prompt: 'continue' }), 'agent-notice'],
         ['SubagentStart', 'context', JSON.stringify({ hook_event_name: 'SubagentStart' }), 'subagent-context'],
         ['Stop', 'default', JSON.stringify({ stop_hook_active: false }), 'stop'],
@@ -447,6 +448,34 @@ describe('typed hook runtime', () => {
       const lines = readFileSync(join(root, '.ai/harness/runs/hook-events.jsonl'), 'utf8').trim().split('\n');
       expect(lines).toHaveLength(1);
       expect(JSON.parse(lines[0])).toMatchObject({ event: 'PreToolUse', route_id: 'edit', reason: 'ok' });
+    } finally { clean(root); }
+  }, 30_000);
+
+  test('PreToolUse.question denies blocking question tools only in the orchestrator seat', () => {
+    const root = repo();
+    const seatEnv = (host: 'claude' | 'pi', seat?: string): NodeJS.ProcessEnv => {
+      const next = { ...env(root, host) };
+      if (seat === undefined) delete next.REPO_HARNESS_SEAT;
+      else next.REPO_HARNESS_SEAT = seat;
+      return next;
+    };
+    try {
+      for (const [host, toolName] of [['claude', 'AskUserQuestion'], ['pi', 'ask_user_question']] as const) {
+        const input = JSON.stringify({ tool_name: toolName, tool_input: {} });
+        expect(runHook({ event: 'PreToolUse', routeId: 'question', cwd: root, input, env: seatEnv(host, 'orchestrator') }))
+          .toMatchObject({ exitCode: 2, reason: 'blocked', handler: 'question-guard' });
+        expect(runHook({ event: 'PreToolUse', routeId: 'question', cwd: root, input, env: seatEnv(host, 'advisor') }))
+          .toMatchObject({ exitCode: 0, reason: 'ok', handler: 'question-guard' });
+        expect(runHook({ event: 'PreToolUse', routeId: 'question', cwd: root, input, env: seatEnv(host) }))
+          .toMatchObject({ exitCode: 0, reason: 'ok', handler: 'question-guard' });
+      }
+      expect(runHook({
+        event: 'PreToolUse',
+        routeId: 'question',
+        cwd: root,
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'true' } }),
+        env: seatEnv('claude', 'orchestrator'),
+      })).toMatchObject({ exitCode: 0, reason: 'ok', handler: 'question-guard' });
     } finally { clean(root); }
   }, 30_000);
 });

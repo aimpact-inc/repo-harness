@@ -119,6 +119,7 @@ function roleParagraphs(seat: LaunchSeatId, config: SeatConfigV1, fleet: readonl
       `You are the orchestrator seat. You hold the coordinator and integrator seats of repo-harness-issue-flow. You dispatch, accept and merge. You do not edit product code, tests or configuration. You do not review a PR that you dispatched; route that review to another seat. You push only the branch of a Codex worker seat handoff: commit its worktree diff with its message and explicit paths only, push the branch, open the PR, and push each fix round. On the owner's explicit word for one release you run the command list of \`bash scripts/release-owner-steps.sh plan <version>\` from the release worktree; the owner confirms the npm login. Without that word you do not tag or publish. You do not delete, or change credentials or permissions yourself.`,
       `${dispatch} When \`publication.acceptance_merge\` is \`on\`, merge only with \`rh publication merge\`. When it is \`off\`, hand each ready PR to the owner.`,
       'Before each dispatch wave, run `rh quota`. Launch each task on the seat its route line names with `rh seats argv <seat>`; state the boundary in the task.',
+      'Do not call a blocking question tool (`AskUserQuestion`, `ask_user_question`, or `request_user_input`). When one task waits on the owner, park only that task, ask the owner in plain text (or through the advisor), and end the turn so `hc` messages from other seats keep arriving.',
       ...queue,
     ];
   }
@@ -263,6 +264,10 @@ function codexLaunch(seat: LaunchSeatId, config: SeatConfigV1): Omit<SeatLaunchV
 function piLaunch(seat: LaunchSeatId, config: SeatConfigV1, roleDirectory: string | undefined, hookExtension: string | undefined, repositoryId: string | undefined): Omit<SeatLaunchV1, 'protocol' | 'kind' | 'seat' | 'runtime' | 'source'> {
   const review = isReviewSeat(seat);
   const excludeEdits = review || isCouncilSeat(seat);
+  const excludedTools = [
+    ...(excludeEdits ? ['edit', 'write'] : []),
+    ...(seat === 'orchestrator' ? ['ask_user_question'] : []),
+  ];
   // Pi's denylist blocks the edit/write tools; shell paths stay open. pi-subagents does not refuse a role outside the fleet.
   const limits: SeatLimitV1[] = [
     ...OFF_GROUPS(config).map(group => ({
@@ -287,7 +292,7 @@ function piLaunch(seat: LaunchSeatId, config: SeatConfigV1, roleDirectory: strin
   return {
     argv: [...seatEnv(env), 'pi', ...(config.model === null ? [] : ['--provider', config.model.slice(0, slash), '--model', config.model.slice(slash + 1)]),
       ...(config.effort === null ? [] : ['--thinking', config.effort]),
-      ...(excludeEdits ? ['--exclude-tools', 'edit,write'] : []),
+      ...(excludedTools.length > 0 ? ['--exclude-tools', excludedTools.join(',')] : []),
       ...(review ? ['--no-extensions',
       ...(hookExtension === undefined ? [] : ['-e', hookExtension]), '--no-skills',
       '--no-prompt-templates', '--no-context-files', '--no-mcp'] : []), '--append-system-prompt', text],

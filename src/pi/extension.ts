@@ -39,6 +39,33 @@ function probeRepoOptIn(cwd: string): 'opted-in' | 'inactive' | 'unknown' {
   }
 }
 
+type HookCaller = (state: Session, ctx: ExtensionContext, event: PiHookRequest['event'], routeId: PiHookRequest['routeId'], payload?: Record<string, unknown>) => Promise<BridgeHookOutput>;
+
+async function guardQuestionCall(
+  state: Session | undefined,
+  ctx: ExtensionContext,
+  toolCallId: string,
+  parentToolCallId: string | undefined,
+  active: (state: Session, ctx: ExtensionContext) => boolean,
+  call: HookCaller,
+): Promise<{ block: true; reason: string } | undefined> {
+  if (!state || !active(state, ctx) || state.capability.state !== 'ready' || !state.runId) return;
+  const runId = state.runId;
+  state.calls.set(toolCallId, runId);
+  try {
+    const output = await call(state, ctx, 'PreToolUse', 'question', {
+      tool_name: 'ask_user_question',
+      tool_call_id: toolCallId,
+      parent_tool_call_id: parentToolCallId ?? null,
+      tool_input: {},
+    });
+    if (active(state, ctx) && state.runId === runId && state.calls.get(toolCallId) === runId && output.decision === 'block') {
+      return { block: true, reason: output.diagnostics || output.reason };
+    }
+  } catch { /* Question guard is non-I1/I2 and fails open on bridge errors. */ }
+  finally { state.calls.delete(toolCallId); }
+}
+
 /** Options supply deterministic capability and transport seams for SDK fixtures. */
 export function registerPiHooks(pi: ExtensionAPI, options: {
   readonly probe?: () => Promise<PiCapability>;
@@ -119,6 +146,9 @@ export function registerPiHooks(pi: ExtensionAPI, options: {
   });
 
   pi.on('tool_call', async (event, ctx) => {
+    if (event.toolName === 'ask_user_question') {
+      return guardQuestionCall(current, ctx, event.toolCallId, event.parentToolCallId, active, call);
+    }
     if (!['edit', 'write', 'bash'].includes(event.toolName)) return;
     const state = current;
     if (!state || !active(state, ctx)) return { block: true, reason: 'PI_HOOK_STALE_SESSION' };

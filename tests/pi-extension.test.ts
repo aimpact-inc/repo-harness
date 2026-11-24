@@ -66,6 +66,8 @@ async function fixture(options: {
   gitProbe?: 'missing' | keyof typeof GIT_PROBE_SCRIPTS;
   sessionFile?: boolean;
   extraEnv?: NodeJS.ProcessEnv;
+  extraExtensions?: readonly ((pi: ExtensionAPI) => void)[];
+  extraTools?: readonly string[];
 } = {}) {
   const workspace = tmpWorkspace('pi-sdk-fixture');
   const root = join(workspace, 'repo');
@@ -135,6 +137,7 @@ async function fixture(options: {
         },
       })]),
       createCodemodeExtension({ models: false }),
+      ...(options.extraExtensions ?? []),
     ],
   });
   await loader.reload();
@@ -145,7 +148,7 @@ async function fixture(options: {
   const { session } = await createAgentSession({
     cwd: root, agentDir, modelRuntime, model: modelRuntime.getModel('scripted-fixture', 'fixture'),
     sessionManager, settingsManager, resourceLoader: loader,
-    tools: ['edit', 'write', 'bash', 'codemode'], thinkingLevel: 'off',
+    tools: ['edit', 'write', 'bash', 'codemode', ...(options.extraTools ?? [])], thinkingLevel: 'off',
   });
   const previousGit = process.env.REPO_HARNESS_GIT_BIN;
   if (options.gitProbe) {
@@ -265,6 +268,36 @@ describe('Pi real SDK with scripted provider fixture', () => {
       expect(existsSync(join(f.root, '.ai/harness/handoff/current.md'))).toBe(false);
       expect(existsSync(join(f.root, '.ai/harness/handoff/resume.md'))).toBe(false);
     } finally { await f.close(); }
+  });
+
+  test('PreToolUse.question blocks ask_user_question in orchestrator and allows it in advisor', async () => {
+    for (const [seat, blocked] of [['orchestrator', true], ['advisor', false]] as const) {
+      let executed = 0;
+      const f = await fixture({
+        extraEnv: { REPO_HARNESS_SEAT: seat },
+        extraTools: ['ask_user_question'],
+        extraExtensions: [(pi) => {
+          pi.registerTool({
+            name: 'ask_user_question',
+            label: 'Ask user question',
+            description: 'Fixture blocking question tool',
+            parameters: { type: 'object', properties: {} } as never,
+            async execute() {
+              executed += 1;
+              return { content: [{ type: 'text', text: 'asked' }], details: {} };
+            },
+          });
+        }],
+      });
+      try {
+        const result = await f.tool('ask_user_question', {});
+        expect(result.isError, seat).toBe(blocked);
+        expect(executed, seat).toBe(blocked ? 0 : 1);
+        const questionRequests = f.bridges.flatMap(bridge => bridge.requests).filter(request => request.event === 'PreToolUse' && request.routeId === 'question');
+        expect(questionRequests).toHaveLength(1);
+        expect(questionRequests[0]?.payload.tool_name).toBe('ask_user_question');
+      } finally { await f.close(); }
+    }
   });
 
   test('reset seat records Pi SessionStart and Stop blocks once at threshold without looping', async () => {
