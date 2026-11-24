@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "child_process";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -92,9 +92,17 @@ describe("gitignore managed block .repo-harness rule", () => {
     const edited = "before/\n# BEGIN: claude-runtime-temp (managed by repo-harness)\nstale-entry/\n# END: claude-runtime-temp\nafter/\n";
     expect(ensure(edited)).toMatchObject({ ok: true, changed: false, kept: "# BEGIN: claude-runtime-temp (managed by repo-harness)", content: edited });
 
-    // A released block with a retired-rule section, in a CRLF file, is replaced and keeps CRLF.
+    // A released v0.32.0 block with a retired-rule section, in a CRLF file, is replaced and keeps CRLF.
+    const refactorDecisionsAllowlist = [
+      "!.archcontext/refactor-decisions/",
+      ".archcontext/refactor-decisions/*",
+      "!.archcontext/refactor-decisions/recommendation.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json",
+      ".archcontext/refactor-decisions/*/",
+      "",
+    ].join("\n");
+    const releasedV032Base = GITIGNORE_MANAGED_BLOCK_CONTENT.replace(refactorDecisionsAllowlist, "");
     const retiredSection = ["", "# Retired runtime state that still exists; repo-harness upgrade lists these files", ".claude/.session-id", "tasks/current.md"];
-    const releasedRetired = ["# BEGIN: repo-harness generated-runtime", GITIGNORE_MANAGED_BLOCK_CONTENT, ...retiredSection, "# END: repo-harness generated-runtime"].join("\n");
+    const releasedRetired = ["# BEGIN: repo-harness generated-runtime", releasedV032Base, ...retiredSection, "# END: repo-harness generated-runtime"].join("\n");
     expect(ensure(`before/\n${releasedRetired}\nafter/\n`.replaceAll("\n", "\r\n")))
       .toMatchObject({ ok: true, changed: true, content: `before/\n${current}\nafter/\n`.replaceAll("\n", "\r\n") });
   });
@@ -118,10 +126,53 @@ describe("gitignore managed block .repo-harness rule", () => {
         ".ai/harness/handoff/gptpro/gptpro-stamp-slug.md", // repo-harness-chatgpt delegate skill
         ".ai/harness/mcp/index-events.jsonl", // mcp general-repo-access.ts
         ".ai/harness/backups/fs-transaction/entry", // fs-transaction.ts BACKUP_ROOT
+        ".archcontext/refactor-decisions/recommendation.0123456789abcdef.json.tmp-123-456", // archctx atomic decision write temp
+        ".archcontext/refactor-decisions/private.env", // unrelated local secret must stay ignored (I1)
+        ".archcontext/refactor-decisions/local-plan.md", // unrelated local note must stay ignored
+        ".archcontext/refactor-decisions/notes.json", // non-canonical JSON must stay ignored
+        ".archcontext/refactor-decisions/recommendation.0123456789abcdef.json~", // editor backup must stay ignored
+        ".archcontext/refactor-decisions/recommendation.0123456789abcdef.json.bak", // backup must stay ignored
+        ".archcontext/refactor-decisions/recommendation.0123456789abcdeg.json", // non-hex is non-canonical
+        ".archcontext/refactor-decisions/recommendation.0123456789abcde.json", // wrong length is non-canonical
+        ".archcontext/refactor-decisions/recommendation.0123456789abcdef.json/private.env", // canonical-named dir cannot expose children (I1)
         ".claude/worktrees/task/README.md", // Claude Code task worktrees
       ];
-      const result = spawnSync("git", ["check-ignore", "--no-index", "--stdin"], { cwd, encoding: "utf8", input: `${runtimePaths.join("\n")}\n` });
-      expect(result.stdout.trimEnd().split("\n")).toEqual(runtimePaths);
+      // Verify BOTH distributed runtime.gitignore and root .gitignore enforce the same canonical allowlist.
+      for (const ignoreContent of [
+        `${GITIGNORE_MANAGED_BLOCK_CONTENT}\n${RUNTIME_STATE_IGNORE_CONTENT}\n`,
+        readFileSync(join(import.meta.dir, "../../.gitignore"), "utf8"),
+      ]) {
+        writeFileSync(join(cwd, ".gitignore"), ignoreContent);
+        const result = spawnSync("git", ["check-ignore", "--no-index", "--stdin"], { cwd, encoding: "utf8", input: `${runtimePaths.join("\n")}\n` });
+        expect(result.stdout.trimEnd().split("\n")).toEqual(runtimePaths);
+        for (const ignoreCase of ["false", "true"]) {
+          const canonicalDir = spawnSync("git", ["-c", `core.ignorecase=${ignoreCase}`, "check-ignore", "-q", "--no-index", ".archcontext/refactor-decisions/recommendation.0123456789abcdef.json/"], { cwd });
+          expect(canonicalDir.status).toBe(0);
+          const trackedDecision = spawnSync("git", ["-c", `core.ignorecase=${ignoreCase}`, "check-ignore", "-q", "--no-index", ".archcontext/refactor-decisions/recommendation.0123456789abcdef.json"], { cwd });
+          expect(trackedDecision.status).toBe(1);
+          const expectedVariantIgnore = ignoreCase === "true" ? 1 : 0;
+          for (const variant of [
+            ".archcontext/refactor-decisions/recommendation.0123456789ABCDEF.json",
+            ".archcontext/refactor-decisions/recommendation.0123456789abcdef.JSON",
+          ]) {
+            const variantStatus = spawnSync("git", ["-c", `core.ignorecase=${ignoreCase}`, "check-ignore", "-q", "--no-index", variant], { cwd });
+            expect(variantStatus.status).toBe(expectedVariantIgnore);
+            const nestedSecretStatus = spawnSync("git", ["-c", `core.ignorecase=${ignoreCase}`, "check-ignore", "-q", "--no-index", `${variant}/private.env`], { cwd });
+            expect(nestedSecretStatus.status).toBe(0);
+          }
+        }
+      }
+      // Also confirm `git status --porcelain` and `git add -A --dry-run` expose only canonical decision files and hide directory-bypass secrets.
+      mkdirSync(join(cwd, ".archcontext", "refactor-decisions", "recommendation.fedcba9876543210.json"), { recursive: true });
+      writeFileSync(join(cwd, ".archcontext", "refactor-decisions", "recommendation.fedcba9876543210.json", "private.env"), "SECRET=1\n");
+      for (const name of ["private.env", "local-plan.md", "notes.json", "recommendation.0123456789abcdef.json~", "recommendation.0123456789abcdef.json.bak", "recommendation.0123456789abcdef.json.tmp-1-2", "recommendation.0123456789abcdef.json"]) {
+        writeFileSync(join(cwd, ".archcontext", "refactor-decisions", name), "x\n");
+      }
+      const status = spawnSync("git", ["status", "--porcelain", "--untracked-files=all", "--", ".archcontext/refactor-decisions"], { cwd, encoding: "utf8" });
+      expect(status.stdout.trim()).toBe("?? .archcontext/refactor-decisions/recommendation.0123456789abcdef.json");
+      const addDryRun = spawnSync("git", ["add", "-A", "--dry-run"], { cwd, encoding: "utf8" });
+      expect(addDryRun.status).toBe(0);
+      expect(addDryRun.stdout).not.toContain("private.env");
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

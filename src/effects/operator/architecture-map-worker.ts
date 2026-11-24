@@ -7,7 +7,7 @@
 
 import { readFileSync, realpathSync } from 'node:fs';
 
-import { isRepoRelativePosixPath, type ArchitectureDebtReportV1, type ArchitectureFlowSelectorCheckV1, type DependencyConstraintEvaluationV1, type DocsAnchorsReportV1, type NativeContextExportV1, type RefImpactV1 } from 'archctx-contracts';
+import { isRepoRelativePosixPath, type ArchitectureDebtReportV1, type ArchitectureFlowSelectorCheckV1, type DependencyConstraintEvaluationV1, type DocsAnchorsReportV1, type NativeContextExportV1, type RefImpactBatchItemV1, type RefImpactV1 } from 'archctx-contracts';
 import {
   ARCHCTX_REQUIRED_VERSION,
   ArchctxClientError,
@@ -325,6 +325,15 @@ function pullRequestImpactInput(pr: ArchitecturePullRequestSourceV1):
   return { state: 'ok', item: { id: String(pr.number), paths: [...pr.changed_files.paths] } };
 }
 
+/** Maps one `archctx impact --batch-file` item to the map's PR impact arm. */
+export function pullRequestBatchImpact(result: RefImpactBatchItemV1): ArchitecturePullRequestImpactV1['impact'] {
+  if ('impact' in result) return { state: 'ok', ...architectureImpact(result.impact) };
+  if (result.error !== undefined) {
+    return archctxRefusal(result.error.code, result.error.reasonCode ?? result.reasonCode) ?? ARCHCTX_FAILED;
+  }
+  return { state: 'unavailable', reason: result.reasonCode };
+}
+
 /** PR paths come from GitHub. Impact comes from the worktree model at the map commit. */
 function readPullRequests(root: string, commit: string, checkout: CheckoutState, source: ArchitecturePullRequestsSource, budgetMs: number): ArchitecturePullRequestsLayerV1 {
   if (source.state === 'unavailable') return source;
@@ -350,8 +359,7 @@ function readPullRequests(root: string, commit: string, checkout: CheckoutState,
       if (input.state === 'unavailable') return { ...entry, impact: input };
       const result = batch?.get(input.item.id);
       if (result === undefined) return { ...entry, impact: gap };
-      if ('impact' in result) return { ...entry, impact: { state: 'ok', ...architectureImpact(result.impact) } };
-      return { ...entry, impact: { state: 'unavailable', reason: result.reasonCode } };
+      return { ...entry, impact: pullRequestBatchImpact(result) };
     }),
   };
 }

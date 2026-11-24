@@ -114,7 +114,7 @@ function clean(root: string): void {
 describe('typed hook runtime', () => {
   for (const [mode, behavior] of [
     ['delivered', 'delivers task posture from a local prepare process'],
-    ['skipped', 'skips prepare when the daemon probe leaves less than 1500 ms'],
+    ['skipped', 'skips prepare when checkpoint leaves less than 1500 ms'],
     ['timeout', 'preserves debt and exits zero when prepare finishes after the deadline'],
   ] as const) {
     test(`SessionStart ${behavior}`, () => {
@@ -153,8 +153,7 @@ describe('typed hook runtime', () => {
                 });
                 if (error) throw error;
                 // Advance the product clock on child completion, independent of runner speed.
-                if (args[0] === 'checkpoint') now = 1100;
-                if (args[0] === 'daemon') now = ${mode === 'skipped' ? 1501 : 1500};
+                if (args[0] === 'checkpoint') now = ${mode === 'skipped' ? 1501 : 1100};
                 if (args[0] === 'prepare' && ${mode === 'timeout'}) now = 3001;
                 return { status, signal, stdout, stderr };
               },
@@ -166,7 +165,7 @@ describe('typed hook runtime', () => {
           const args = process.argv.slice(2);
           appendFileSync(${JSON.stringify(join(root, 'home/archctx-calls'))}, args[0] + '\\n');
           console.log(JSON.stringify({ schemaVersion: 'archcontext.envelope/v1', requestId: args[0], ok: true,
-            data: args[0] === 'daemon' ? { running: true, rpcVersionCompatible: true, productVersionCompatible: true } : args[0] === 'checkpoint' ? ${JSON.stringify(report)} : { posture: 'structural', context: {
+            data: args[0] === 'checkpoint' ? ${JSON.stringify(report)} : { posture: 'structural', context: {
               schemaVersion: 'archcontext.task-context/v1', task: args[2], posture: 'structural', constraints: ['constraint'] } } }));
         `);
         const result = spawnSync(process.execPath, [launcher], { cwd: root, env: { ...noticeEnv(root), ...env(root), HOME: join(root, 'home') },
@@ -185,7 +184,7 @@ describe('typed hook runtime', () => {
           expect(result.stderr).toContain('not finished in its time budget');
         }
         expect(readFileSync(join(root, 'home/archctx-calls'), 'utf8').trim().split('\n')).toEqual(
-          mode === 'skipped' ? ['checkpoint', 'daemon'] : ['checkpoint', 'daemon', 'prepare']);
+          mode === 'skipped' ? ['checkpoint'] : ['checkpoint', 'prepare']);
       } finally { clean(root); }
     }, 30_000);
   }

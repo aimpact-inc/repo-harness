@@ -3,7 +3,7 @@
 // answer to that wire form. The strict decoder and the map projection stay in
 // `architecture-map.ts`; this leaf never imports it.
 
-import type { RefImpactV1 } from 'archctx-contracts';
+import { REF_IMPACT_BATCH_UNAVAILABLE_REASONS, type RefImpactV1 } from 'archctx-contracts';
 import { PULL_REQUEST_FILES_REASONS } from './pull-request-files';
 import { TESTS_UNAVAILABLE_REASONS } from './tests';
 
@@ -72,8 +72,8 @@ export type ArchitectureTestReason = typeof ARCHITECTURE_TEST_REASONS[number];
  */
 export const ARCHITECTURE_PR_LAYER_REASONS = ['model_worktree_dirty', 'checkout_changed', 'git_read_failed', 'dev_activity_pending', 'dev_activity_unavailable'] as const;
 export type ArchitecturePullRequestsReason = typeof ARCHITECTURE_PR_LAYER_REASONS[number];
-/** One open PR without impact: gh gave no head commit or no complete file list, archctx failed, or a path in its valid answer fails the public-path guard. */
-export const ARCHITECTURE_PR_REASONS = ['head_missing', ...PULL_REQUEST_FILES_REASONS, 'archctx_failed', 'batch-response-bytes', 'path_not_public'] as const;
+/** One open PR without impact: gh gave no head commit or no complete file list, archctx returned a batch unavailable reason or failed, or a path in its valid answer fails the public-path guard. */
+export const ARCHITECTURE_PR_REASONS = ['head_missing', ...PULL_REQUEST_FILES_REASONS, 'archctx_failed', ...REF_IMPACT_BATCH_UNAVAILABLE_REASONS, 'path_not_public'] as const;
 export type ArchitecturePullRequestReason = typeof ARCHITECTURE_PR_REASONS[number];
 /** Why the map has no layer order: the model declares no ordered `model.layers`. */
 export const ARCHITECTURE_LAYER_ORDER_REASONS = ['model_layers_undeclared'] as const;

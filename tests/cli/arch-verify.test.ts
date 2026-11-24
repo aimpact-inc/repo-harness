@@ -19,7 +19,7 @@ import {
   type ArchVerifyCheckV1,
 } from '../../src/core/architecture/arch-verify';
 import { ARCH_VERIFY_BASE_INVALID, archVerify, runArchVerifyCommand } from '../../src/cli/commands/arch-verify';
-import { ArchctxClient, indexPackageLocalCodeGraph, resolveCompatibleNodeRuntime } from '../../src/effects/architecture/archctx-provider';
+import { indexPackageLocalCodeGraph, resolveCompatibleNodeRuntime } from '../../src/effects/architecture/archctx-provider';
 import { ARCHCTX_REQUIRED_VERSION } from '../../src/core/architecture/projection';
 import type { ArchitectureProjectionPolicy, RunArchctxProcess } from '../../src/core/architecture/contracts';
 import { fixtureCommit, fixtureGit, fixtureWrite, fixtureYaml, moduleRepository } from '../helpers/module-repository';
@@ -367,34 +367,22 @@ describe('rh arch verify in a repository', () => {
     expect(report.checks).toEqual(ARCH_VERIFY_CHECK_IDS.map(id => check(id, 'pass')));
   });
 
-  test('composite verify validates checkout YAML with the ledger in authoritative mode', () => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'rh-verify-ledger-')));
-    roots.push(root);
-    fixtureGit(root, ['init', '-q']);
-    fixtureWrite(root, '.gitignore', 'state/\n.codegraph/\n');
-    const env = { ...process.env, ARCHCONTEXT_STATE_DIR: join(root, 'state'), ARCHCONTEXT_LEDGER_MODE: 'ledger-authoritative' };
-    const client = new ArchctxClient(root, ARCHCTX_REQUIRED_VERSION, { env });
-    const invoke = (...args: string[]) => client.data([...args, '--json'], 30_000);
-    invoke('init', '--name', 'Verify ledger authority');
-    fixtureCommit(root);
-    const path = '.archcontext/model/nodes/module.verify.ledger.yaml';
-    const id = 'changeset.verify-ledger-node';
-    try {
-      const plan = invoke('plan', '--id', id, '--op', 'create_entity', '--path', path, '--expected-hash', 'missing', '--body', fixtureYaml({
-        schemaVersion: 'archcontext.node/v2', id: 'module.verify.ledger', kind: 'module', name: 'Ledger node', status: 'active', summary: 'Retained in the ledger.',
-      })) as { draft: { base: { worktreeDigest: string } } };
-      expect(invoke('apply', '--id', id, '--approved', '--expected-worktree-digest', plan.draft.base.worktreeDigest)).toMatchObject({ status: 'applied' });
-      fixtureCommit(root);
-      // The ledger still holds the valid entity. The checkout contains a bad node with the same ID.
-      fixtureWrite(root, path, fixtureYaml({ schemaVersion: 'archcontext.node/v2', id: 'module.verify.ledger' }));
-      expect(invoke('validate')).toMatchObject({ valid: true, architectureLedger: { readAuthority: 'ledger' } });
-      const result = runArchVerifyCommand(root, { base: 'HEAD', json: true }, { policy, env });
-      if (!result.ok) throw new Error(result.error);
-      expect(JSON.parse(result.document).checks.find((entry: ArchVerifyCheckV1) => entry.id === 'validate'))
-        .toMatchObject({ status: 'findings', count: expect.any(Number) });
-    } finally {
-      invoke('daemon', 'stop');
-    }
+  test('composite verify validates checkout YAML directly and reports invalid node findings', () => {
+    const root = validRepository();
+    const stateDir = mkdtempSync(join(tmpdir(), 'rh-verify-state-'));
+    roots.push(stateDir);
+    const env = { ...process.env, ARCHCONTEXT_STATE_DIR: stateDir };
+    fixtureWrite(root, '.archcontext/model/nodes/module.verify.invalid.yaml', fixtureYaml({
+      schemaVersion: 'archcontext.node/v2', id: 'module.verify.invalid',
+    }));
+    const result = runArchVerifyCommand(root, { base: 'HEAD', json: true }, { policy, env });
+    if (!result.ok) throw new Error(result.error);
+    const report = JSON.parse(result.document) as { verdict: string; checks: ArchVerifyCheckV1[] };
+    const validate = report.checks.find((entry) => entry.id === 'validate');
+    expect(validate?.status).toBe('findings');
+    expect(validate?.count).toBeGreaterThan(0);
+    expect(report.verdict).toBe('findings');
+    expect(result.exitCode).toBe(1);
   }, 60_000);
 
   test('a base ref that resolves to no commit exits 2 with arch_verify_base_invalid', () => {

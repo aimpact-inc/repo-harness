@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { knownFailure, REFACTOR_DECISION_DIRECTORY, REFACTOR_DECISION_SCHEMA_VERSION, REFACTOR_RECOMMENDATION_FINGERPRINT_SCHEMA_VERSION, serializeRefactorDecision, type RefactorDecisionV1 } from 'archctx-contracts';
+import { ALL_REFACTOR_DECISION_KINDS, knownFailure, REF_IMPACT_BATCH_UNAVAILABLE_REASONS, REFACTOR_DECISION_DIRECTORY, REFACTOR_DECISION_SCHEMA_VERSION, REFACTOR_RECOMMENDATION_FINGERPRINT_SCHEMA_VERSION, serializeRefactorDecision, type RefactorDecisionV1 } from 'archctx-contracts';
 import { ArchitectureModelReader } from '../../src/effects/architecture/model-reader';
 import {
   architectureRefactorVerifyCommand,
@@ -39,7 +39,7 @@ import {
 import type { DevActivitySnapshotV2 } from '../../src/core/dev-activity/types';
 import { architecturePullRequestsSource } from '../../src/core/dev-activity/architecture';
 import type { TestsSnapshotV1 } from '../../src/core/operator/tests';
-import { anchorsSection, collectArchitectureMap, debtSection, flowProofSection, layerDirectionSection, localMidnight, readCommitLineCounts, recheckCheckout, recheckLayers } from '../../src/effects/operator/architecture-map-worker';
+import { anchorsSection, collectArchitectureMap, debtSection, flowProofSection, layerDirectionSection, localMidnight, pullRequestBatchImpact, readCommitLineCounts, recheckCheckout, recheckLayers } from '../../src/effects/operator/architecture-map-worker';
 import { ARCHCTX_REQUIRED_VERSION, decodeArchitectureDebtReport, decodeConstraintEvaluation, decodeDocsAnchorsReport, decodeFlowSelectorCheck } from '../../src/core/architecture/projection';
 import { join } from 'node:path';
 import { resolveCompatibleNodeRuntime } from '../../src/effects/architecture/archctx-provider';
@@ -1173,6 +1173,51 @@ describe('architecture map', () => {
       expect(pulls.state === 'ok' && pulls.pull_requests.map(pr => pr.impact)).toEqual([{ state: 'unavailable', reason: 'path_not_public' }]);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
+
+  test('ref-impact-batch unavailable items map error refusals and expanded batch reasons and decode cleanly', () => {
+    const baseMap = JSON.parse(JSON.stringify(projected()));
+    const impacts = [
+      ...REF_IMPACT_BATCH_UNAVAILABLE_REASONS.map(reasonCode => pullRequestBatchImpact({ id: reasonCode, status: 'unavailable', reasonCode })),
+      pullRequestBatchImpact({
+        id: 'err-with-reason',
+        status: 'unavailable',
+        reasonCode: 'model-invalid',
+        error: { code: 'AC_SCHEMA_INVALID', message: 'bad model', severity: 'error', retryable: false, action: 'fix-model', reasonCode: 'native-context-model-invalid' },
+      }),
+      pullRequestBatchImpact({
+        id: 'err-without-reason',
+        status: 'unavailable',
+        reasonCode: 'worktree-error',
+        error: { code: 'AC_GIT_ERROR', message: 'git failed', severity: 'error', retryable: true, action: 'retry' },
+      }),
+      pullRequestBatchImpact({
+        id: 'err-bad-code',
+        status: 'unavailable',
+        reasonCode: 'path-invalid',
+        error: { code: 'not-a-code', message: 'bad', severity: 'error', retryable: false, action: 'fix' },
+      }),
+    ];
+    expect(impacts.slice(0, REF_IMPACT_BATCH_UNAVAILABLE_REASONS.length)).toEqual(
+      REF_IMPACT_BATCH_UNAVAILABLE_REASONS.map(reason => ({ state: 'unavailable', reason })),
+    );
+    expect(impacts.slice(REF_IMPACT_BATCH_UNAVAILABLE_REASONS.length)).toEqual([
+      { state: 'unavailable', reason: 'archctx_error', code: 'AC_SCHEMA_INVALID', reason_code: 'native-context-model-invalid' },
+      { state: 'unavailable', reason: 'archctx_error', code: 'AC_GIT_ERROR', reason_code: 'worktree-error' },
+      { state: 'unavailable', reason: 'archctx_failed' },
+    ]);
+    baseMap.layers.pull_requests = {
+      state: 'ok',
+      observed_at: '2026-10-27T12:59:00.000Z',
+      pull_requests: impacts.map((impact, index) => ({
+        number: index + 1,
+        title: `PR ${index + 1}`,
+        url: `https://github.com/acme/module/pull/${index + 1}`,
+        head_sha: 'a'.repeat(40),
+        impact,
+      })),
+    };
+    expect(decodeArchitectureMap(baseMap)).toEqual(baseMap);
+  });
 });
 
 describe('operator architecture refactor decisions', () => {
@@ -1216,24 +1261,31 @@ describe('operator architecture refactor decisions', () => {
       const dir = join(repo, REFACTOR_DECISION_DIRECTORY);
       mkdirSync(dir, { recursive: true });
       const resolved = makeDecision('1', 'resolved');
-      const deferred = makeDecision('3', 'deferred');
+      const deferred = makeDecision('3', 'deferred', 'Defer component cycle split', { kind: 'component-cycle' });
       const acceptedB = makeDecision('4', 'accepted', `Fix ${repo}/src/secret.ts and /Users/alice/key`);
       const acceptedA = makeDecision('2', 'accepted', 'Split cycle', { category: 'refactor_proposal', kind: null, observationMetrics: null });
       for (const item of [resolved, deferred, acceptedB, acceptedA]) {
         writeFileSync(join(dir, `${item.recommendationId}.json`), serializeRefactorDecision(item));
       }
-      // Transient ChangeSet backup and temp files are skipped cleanly.
+      // Transient ChangeSet and atomic-decide temp files are skipped cleanly.
       writeFileSync(join(dir, `${resolved.recommendationId}.json.archctx-backup`), 'transient');
       writeFileSync(join(dir, `${resolved.recommendationId}.json.archctx-tmp-123-1`), 'transient');
+      writeFileSync(join(dir, `${resolved.recommendationId}.json.tmp-4242-1732300000000`), 'transient');
 
       const snapshot = readRefactorDecisions(repo);
       expect(snapshot.counts).toEqual({ accepted: 2, acknowledged: 0, deferred: 1, resolved: 1, rejected: 0, waived: 0 });
-      expect(snapshot.decisions.map(item => [item.recommendation_id, item.status, item.cli_verify_command])).toEqual([
-        [acceptedA.recommendationId, 'accepted', architectureRefactorVerifyCommand(acceptedA.recommendationId)],
-        [acceptedB.recommendationId, 'accepted', architectureRefactorVerifyCommand(acceptedB.recommendationId)],
-        [deferred.recommendationId, 'deferred', architectureRefactorVerifyCommand(deferred.recommendationId)],
-        [resolved.recommendationId, 'resolved', architectureRefactorVerifyCommand(resolved.recommendationId)],
+      expect(snapshot.decisions.map(item => [item.recommendation_id, item.status, item.kind, item.cli_verify_command])).toEqual([
+        [acceptedA.recommendationId, 'accepted', null, architectureRefactorVerifyCommand(acceptedA.recommendationId)],
+        [acceptedB.recommendationId, 'accepted', 'cycle', architectureRefactorVerifyCommand(acceptedB.recommendationId)],
+        [deferred.recommendationId, 'deferred', 'component-cycle', architectureRefactorVerifyCommand(deferred.recommendationId)],
+        [resolved.recommendationId, 'resolved', 'cycle', architectureRefactorVerifyCommand(resolved.recommendationId)],
       ]);
+      for (const kind of ALL_REFACTOR_DECISION_KINDS) {
+        expect(decodeArchitectureRefactorDecisions({
+          ...snapshot,
+          decisions: snapshot.decisions.map(item => (item.recommendation_id === deferred.recommendationId ? { ...item, kind } : item)),
+        }).decisions.find(item => item.recommendation_id === deferred.recommendationId)?.kind).toBe(kind);
+      }
       expect(snapshot.decisions[1]!.reason).toBe('Fix [redacted]/src/secret.ts and [redacted]');
       expect(JSON.stringify(snapshot)).not.toContain(repo);
       expect(() => decodeArchitectureRefactorDecisions({ ...snapshot, counts: { ...snapshot.counts, accepted: 0 } })).toThrow('architecture_refactor_decisions_invalid');
@@ -1252,11 +1304,13 @@ describe('operator architecture refactor decisions', () => {
         const cached = await fetch(`${server.url}/api/v1/repositories/${repoId}/architecture/refactor`, { headers: { 'If-None-Match': res.headers.get('ETag')! } });
         expect(cached.status).toBe(304);
 
-        // Malformed decision file fails closed with 422 model_invalid.
-        writeFileSync(join(dir, 'recommendation.ffffffffffffffff.json'), '{"broken":true}\n');
-        const bad = await fetch(`${server.url}/api/v1/repositories/${repoId}/architecture/refactor`);
-        expect([bad.status, await bad.json()]).toEqual([422, { code: 'model_invalid' }]);
-        rmSync(join(dir, 'recommendation.ffffffffffffffff.json'));
+        // Malformed decision file and non-matching temp suffix both fail closed with 422 model_invalid.
+        for (const badName of ['recommendation.ffffffffffffffff.json', `${resolved.recommendationId}.json.tmp-bad`]) {
+          writeFileSync(join(dir, badName), '{"broken":true}\n');
+          const bad = await fetch(`${server.url}/api/v1/repositories/${repoId}/architecture/refactor`);
+          expect([bad.status, await bad.json()]).toEqual([422, { code: 'model_invalid' }]);
+          rmSync(join(dir, badName));
+        }
 
         // Symlinked decision file fails closed with 422 path_escape.
         const outside = join(base, 'outside.json');

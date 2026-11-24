@@ -24,7 +24,7 @@ import {
 } from '../../core/operator/architecture';
 
 const PRIVATE_PATH = /(?<![A-Za-z0-9])(?:\/(?:Users|home|private|tmp|Volumes|var)\/|[A-Za-z]:[\\/])[^\s"'<>]+/g;
-const TRANSIENT_DECISION_FILE = /\.(?:archctx-backup|archctx-tmp-[^/]+)$/u;
+const TRANSIENT_DECISION_FILE = /\.(?:archctx-backup|archctx-tmp-[^/]+|tmp-\d+-\d+)$/u;
 
 // Redact public text before the whitelist decoder. Never change a prompt digest.
 export function publicValue(value: unknown, root: string): unknown {

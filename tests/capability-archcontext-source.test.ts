@@ -13,6 +13,7 @@ import {
 import { archcontextResolveFailure, formatArchcontextCapabilityError, readArchcontextCapabilityAuthority, resolveArchcontextCapabilityPaths } from "../src/effects/architecture/archcontext-owners";
 import { capabilityOwnershipBlocker, capabilityOwnershipNextAction } from "../src/core/capabilities/ownership-blocker";
 import { readArchitectureNativeContext } from "../src/effects/architecture/architecture-read";
+import { ARCHITECTURE_CONTRACT_VERSION } from "../src/core/architecture/contracts";
 import { ArchctxClientError } from "../src/core/architecture/projection";
 import { withReadonlyObservation } from "../src/effects/readonly-observation";
 import { pluginSelectionEnv } from "./helpers/install-ownership";
@@ -507,7 +508,9 @@ describe("capability source: no fallback in either direction", () => {
       const res = spawnSync("bun", ["-e", script], { cwd, encoding: "utf-8" });
       expect(res.status, res.stderr).toBe(0);
       const { otherVersion, missing, notSelected } = JSON.parse(res.stdout);
-      expect(otherVersion).toBe("architecture ownership provider has contract version 3; core requires 2");
+      expect(otherVersion).toBe(
+        `architecture ownership provider has contract version ${ARCHITECTURE_CONTRACT_VERSION + 1}; core requires ${ARCHITECTURE_CONTRACT_VERSION}`,
+      );
       // A missing provider fails each consumer; an unselected plugin is inert in the hook and doctor rows.
       for (const [rows, code, message] of [
         [missing, "ARCHITECTURE_PROVIDER_UNAVAILABLE", "no architecture ownership provider is registered in this process"],

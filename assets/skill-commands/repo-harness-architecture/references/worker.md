@@ -5,7 +5,7 @@ Worker reference. Use only within the assigned architecture scope.
 ## Protocol
 
 1. Confirm the target repo path and architecture scope. Run every archctx command as `rh arch <command>` in the target repo. Do not run a bare archctx from PATH: a PATH copy can have another version and can print a help envelope with `"ok": true`.
-   Projection diagnostics need CodeGraph code facts. In a new worktree run `codegraph init -y .`; when `.codegraph/` exists, run `codegraph sync .`.
+   Projection diagnostics need CodeGraph code facts. In a linked worktree when the primary checkout has a CodeGraph index, run `rh arch index seed --json` (or `codegraph init -y .` for a new standalone index); when `.codegraph/` exists, run `codegraph sync .`.
 2. Inspect the committed architecture entry for the projection profile (`docs/architecture/index.md`, or the capability pages under `docs/architecture/modules/` for `repo-harness/v1`) and `.archcontext/model/nodes/`. For a coverage or registration scope, follow the coverage procedure below.
 3. When the scope maps to repo code or config, resolve the capability with:
    - `rh capability resolve match --repo <repo> --path <path> --format json`
@@ -38,7 +38,7 @@ of the rolling PR accepts the proven major changes in it.
 
 ## Drift signals
 
-- Generated sections: `rh arch projection check --json`.
+- Generated sections: `rh arch projection check --json`, or `rh arch sync --check --json` for an in-process exit-code check (0 fresh, 2 drifted or pending).
   `changes[].outputChanged` reports render changes. When generated output differs, inspect `rh arch projection publish status` and the open rolling PR.
 - Human-written sections: `rh arch projection anchors --json`.
   It runs `docs anchors` and writes no file. It lists cited paths that are
@@ -98,14 +98,14 @@ write nodes.
   `.archcontext/tmp/` and delete it before commit.
 - Inspect the draft and preview, then run
   `rh arch apply --id <same-id> --approved --expected-worktree-digest <draft.base.worktreeDigest>`.
-  A draft lives in daemon memory. Plan again after a daemon restart or any worktree
-  change. `--approved` records the authorized Agent decision; it does not grant extra scope.
-- After `apply` returns a `journalId`, run
-  `rh arch ledger receipt --journal-id <id> --json` and record the
-  receipt in the PR body. The receipt lists the base and result model digests and
-  each file path, operation and `bodyHash`. It is unsigned: its
-  `approvalAuthenticity` is `unverified`. It exists only on the machine that
-  applied the ChangeSet. Export one receipt for each apply.
+  `plan` caches the draft in the local SQLite store; plan again after any HEAD,
+  worktree or model change. `--approved` records the authorized Agent decision;
+  it does not grant extra scope.
+- `apply` returns the applied ChangeSet inline (`status: "applied"`, base digests
+  and operations). Verify the result with `git diff -- .archcontext/model/`,
+  `rh arch validate --format json` and `rh arch projection check --json`
+  (or `rh arch sync --check --json`), and summarize the changed model paths in
+  the PR body.
 - A component footprint is `source.include` on the `component.*` node, with an
   optional `source.exclude`. ArchContext validation owns the include and exclude
   shapes. repo-harness resolves path ownership only through
@@ -151,10 +151,12 @@ Then the repository has no complete ArchContext model, and `apply.enabled` is
    The output is a JSON array of complete `archcontext.node/v2` capability nodes.
    An empty registry gives an empty array. Then author the first nodes as
    "Coverage and Agent-owned registration" describes.
-3. Run `rh arch init --name <product name>`. It writes
-   `.archcontext/manifest.yaml`, `.archcontext/product.yaml` and one sample node
-   `capability.architecture.context`. The sample node has no `responsibilities`
-   or `extensions`, so repo-harness cannot read it.
+3. Run `rh arch init --model-only --name <product name>`. `--model-only`
+   disables ArchContext hook, skill and instruction-block projection
+   (`projection.instructions: false`) because repo-harness owns those surfaces.
+   It writes `.archcontext/manifest.yaml`, `.archcontext/product.yaml` and one
+   sample node `capability.architecture.context`. The sample node has no
+   `responsibilities` or `extensions`, so repo-harness cannot read it.
 4. Write one ChangeSet. Create one node file per exported node at
    `.archcontext/model/nodes/<id>.yaml`. JSON text is valid YAML, so the body can
    be the exported node. Delete the sample node with the hash from

@@ -1,19 +1,18 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { copyFileSync, cpSync, chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import { basename, join, sep } from 'node:path';
 import {
   PROJECTION_HUMAN_ACTION_REASON_CODES,
   PROJECTION_REQUEST_SCHEMA_VERSION,
   errorEnvelope,
   failureEnvelope,
   knownFailure,
-  projectionApplyReadbackRequestFromReceipt,
   createProjectionApplyIdentity,
   digestJson,
-  projectionApplyLookupKey,
   projectionResultInvariantIssues,
   projectionResultReceiptDigest,
   type ArchitectureRefreshSignalV2,
@@ -29,20 +28,25 @@ import {
   ArchctxClient,
   archctxCapabilities,
   architectureProjectionRequest,
-  verifyArchctxDaemonRuntime,
+  assertSafeArchctxRepoRoot,
+  assertSafeCodeGraphDestination,
+  bootstrapWorktreeCodeGraph,
+  effectiveCodeGraphDirName,
   inspectArchitectureProjectionReadiness,
   readArchitectureProjectionSnapshot,
   resolveCompatibleNodeRuntime,
   resolvePackageLocalArchctx,
+  resolveSafeArchctxLocalStoreOverride,
   readArchitectureDocsAnchors,
-  readArchitectureProjectionApply,
   runArchitectureProjection,
-  stopWorkspaceArchitectureDaemons,
+  sanitizeGitDiscoveryEnv,
+  usesArchctxLocalStore,
 } from '../src/effects/architecture/archctx-provider';
 import { architectureModelReady, readArchitectureNativeContext, readArchitectureHandEdits } from '../src/effects/architecture/architecture-read';
 import { trustedNodeCandidates } from '../src/effects/runtime/node-candidates';
 import { selectCompatibleNode } from '../src/effects/runtime/node-runtime';
 import { PROCESS_SUPERVISOR_TERMINATION_GRACE_MS } from '../src/effects/process-supervisor';
+import { runProcess } from '../src/effects/process-runner';
 import { buildArchitectureProjectionCommand } from '../src/cli/commands/architecture-projection';
 import { ARCHITECTURE_SETUP_PROVIDER } from '../src/cli/commands/architecture-setup';
 import { architectureProjectionExitCode, humanActionLine } from '../src/cli/commands/architecture-projection-actions';
@@ -230,7 +234,7 @@ function capabilities(version = ARCHCTX_REQUIRED_VERSION) {
       architectureRefreshSignal: 'archcontext.architecture-refresh-signal/v2',
     },
     renderers: { architectureDocs: 'archcontext.docs-renderer/v6', agentContext: 'archcontext.agent-context-renderer/v2' },
-    features: ['architecture-docs-renderer-v2', 'architecture-refresh-signal-v1', 'projection-apply-receipt-v1', 'projection-prior-committed-applies-v1', 'projection-protocol-v2', 'projection-apply-readback-v1', 'projection-snapshot-v1'],
+    features: ['architecture-docs-renderer-v2', 'architecture-refresh-signal-v1', 'index-seed-v1', 'projection-apply-receipt-v1', 'projection-prior-committed-applies-v1', 'projection-protocol-v2', 'projection-snapshot-v1'],
   };
 }
 
@@ -364,53 +368,6 @@ function committedApplyEnvelope(request: ProjectionRequestV1) {
   return { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'projection.run', data };
 }
 
-function committedApplyReadback(request: ProjectionRequestV1, result: ReturnType<typeof committedApplyEnvelope>['data']) {
-  const signal = result.refreshSignals[0]!;
-  const resultingDigests = {
-    modelDigest: signal.resultingDigests.modelDigest!,
-    flowProofDigest: signal.resultingDigests.flowProofDigest!,
-    projectionDigest: signal.resultingDigests.projectionDigest!,
-  };
-  const ownedOutputDigest = digest('c');
-  const recovery = {
-    schemaVersion: 'archcontext.projection-apply-recovery-binding/v2' as const,
-    targets: request.targets,
-    changedPaths: request.changedPaths,
-    originalExpectedSnapshot: request.expected,
-    expectedResultingDigests: resultingDigests,
-    rendererVersion: result.outputSnapshot.rendererVersion,
-    layoutVersion: result.outputSnapshot.layoutVersion,
-    generatedFrom: result.outputSnapshot.generatedFrom,
-    ownedOutputDigest,
-    receiptDigest: result.receiptDigest,
-  };
-  const body = {
-    schemaVersion: 'archcontext.projection-apply-readback-result/v2' as const,
-    requestId: request.requestId,
-    requestDigest: digestProjectionJson(request),
-    receipt: { schemaVersion: 'archcontext.projection-apply-receipt/v1' as const, identity: result.applyReceipt, result, recovery },
-    current: { snapshot: result.outputSnapshot, resultingDigests, ownedOutputDigest, fixedPointDigest: digest('d') },
-  };
-  return { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'projection.readback', data: { ...body, readbackDigest: digestProjectionJson(body) } };
-}
-
-function absentApplyReadback(request: ProjectionRequestV1) {
-  if (!request.acceptedChange) throw new Error('fixture requires acceptedChange');
-  const body = {
-    schemaVersion: 'archcontext.projection-apply-absence/v1' as const,
-    requestId: request.requestId,
-    requestDigest: digestProjectionJson(request),
-    lookupKey: projectionApplyLookupKey({
-      repositoryId: request.expected.repositoryId,
-      workspaceId: request.expected.workspaceId,
-      acceptedChange: request.acceptedChange,
-    }),
-    current: request.expected,
-  };
-  return { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'projection.readback',
-    data: { ...body, absenceDigest: digestProjectionJson(body) } };
-}
-
 // Acceptance is producer data. The consumer sends only acceptObservedMajorChange.
 function producerAcceptedRequest(request: ProjectionRequestV1): ProjectionRequestV1 {
   const { acceptObservedMajorChange: _flag, ...body } = request;
@@ -425,7 +382,7 @@ function writeAppliedOutputs(repoRoot: string): void {
 function runner(calls: Array<{ binary: string; args: readonly string[] }>, docs: ReturnType<typeof projectionEnvelope>): RunArchctxProcess {
   return (binary, args): ArchctxProcessResult => {
     calls.push({ binary, args });
-    return { status: 0, signal: null, stdout: JSON.stringify(args[0] === 'capabilities' ? capabilities() : args[0] === 'doctor' ? doctorEnvelope() : args[0] === 'daemon' ? { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'daemon.status', data: { running: false } } : args[1] === 'snapshot' ? snapshotEnvelope() : docs), stderr: '' };
+    return { status: 0, signal: null, stdout: JSON.stringify(args[0] === 'capabilities' ? capabilities() : args[0] === 'doctor' ? doctorEnvelope() : args[1] === 'snapshot' ? snapshotEnvelope() : docs), stderr: '' };
   };
 }
 
@@ -680,41 +637,16 @@ describe('package-local ArchContext projection provider', () => {
     expect(calls.filter((call) => call.args[0] === 'projection')).toHaveLength(1);
   });
 
-  test.each(['projection-accepted-change-committed', 'projection-apply-request-differs'])('typed committed error %s reads back unchanged but succeeds only for the accepted change', (reasonCode) => {
+  test('apply propagates provider errors directly without invoking any retired replay or readback', () => {
     const f = fixture();
-    let applies = 0;
-    let readbacks = 0;
-    let committed: ReturnType<typeof committedApplyEnvelope>;
-    let readbackRequest: ProjectionRequestV1;
+    const calls: readonly string[][] = [];
     const run: RunArchctxProcess = withSnapshot((_binary, args) => {
+      (calls as string[][]).push([...args]);
       if (args[0] === 'capabilities') return { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' };
-      const wireRequest = JSON.parse(args[3]!) as ProjectionRequestV1;
-      if (args[1] === 'readback') {
-        readbacks += 1;
-        expect(args[3]).toBe(JSON.stringify(readbackRequest));
-        return { status: 0, signal: null, stdout: JSON.stringify(committedApplyReadback(wireRequest, committed.data)), stderr: '' };
-      }
-      applies += 1;
-      const accepted = producerAcceptedRequest(wireRequest);
-      committed = committedApplyEnvelope(accepted);
-      const receipt = committedApplyReadback(accepted, committed.data).data.receipt;
-      readbackRequest = projectionApplyReadbackRequestFromReceipt(receipt)!;
-      writeAppliedOutputs(f.repoRoot);
-      return { status: 1, signal: null, stdout: JSON.stringify(errorEnvelope('projection.run', 'AC_PROJECTION_APPLY_COMMITTED',
-        'this accepted change was already applied; send error.details.readbackRequest unchanged as the projection readback request', reasonCode,
-        { requestId: accepted.requestId, lookupKey: committed.data.applyReceipt.lookupKey, applyId: committed.data.applyReceipt.applyId, readbackRequest: readbackRequest as unknown as Json })), stderr: '' };
+      return { status: 1, signal: null, stdout: JSON.stringify(errorEnvelope('projection.run', 'AC_PRECONDITION_FAILED', 'worktree changed during apply', 'expected-snapshot-mismatch')), stderr: '' };
     });
-    if (reasonCode === 'projection-accepted-change-committed') {
-      const result = applyArchitectureProjection(f.repoRoot, { consumerRoot: f.consumerRoot, policy, run });
-      expect(result).toEqual(committed!.data);
-    } else {
-      let error: unknown;
-      try { applyArchitectureProjection(f.repoRoot, { consumerRoot: f.consumerRoot, policy, run }); } catch (caught) { error = caught; }
-      expect(error).toBeInstanceOf(ArchctxClientError);
-      expect(error).toMatchObject({ code: 'AC_PROJECTION_APPLY_COMMITTED', reasonCode: 'projection-apply-request-differs' });
-    }
-    expect(applies).toBe(1);
-    expect(readbacks).toBe(1);
+    expect(() => applyArchitectureProjection(f.repoRoot, { consumerRoot: f.consumerRoot, policy, run })).toThrow('AC_PRECONDITION_FAILED');
+    expect(calls.filter((args) => args[0] === 'projection').map((args) => args[1])).toEqual(['run']);
   });
 
   test('the complete recorded code-facts envelope preserves the remedy and typed reason', () => {
@@ -726,21 +658,6 @@ describe('package-local ArchContext projection provider', () => {
     expect(error).toBeInstanceOf(ArchctxClientError);
     expect(error).toMatchObject({ code: 'AC_CODE_FACTS_UNAVAILABLE', action: 'codegraph-init', reasonCode: 'index-missing', retryable: true });
     expect((error as Error).message).toContain('run `codegraph init` and retry');
-  });
-
-  test('prose cannot authorize readback and oversized typed details fail closed', () => {
-    const f = fixture();
-    let readbacks = 0;
-    for (const response of [
-      { stdout: '', stderr: 'AC_PRECONDITION_FAILED: committed projection receipt requires recovery' },
-      { stdout: JSON.stringify(errorEnvelope('projection.run', 'AC_PROJECTION_APPLY_COMMITTED', 'committed', 'projection-accepted-change-committed', { readbackRequest: { oversized: 'x'.repeat(256 * 1024) } })), stderr: '' },
-    ]) {
-      const run: RunArchctxProcess = withSnapshot((_binary, args) => args[0] === 'capabilities'
-        ? { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' }
-        : { status: 1, signal: null, ...response });
-      expect(() => applyArchitectureProjection(f.repoRoot, { consumerRoot: f.consumerRoot, policy, run, runReadback: () => { readbacks++; throw new Error('must not read back'); } })).toThrow();
-    }
-    expect(readbacks).toBe(0);
   });
 
   test('a second capability edit cannot be rebound by a second apply request', () => {
@@ -802,19 +719,123 @@ describe('package-local ArchContext projection provider', () => {
     }
   });
 
-  test('a timeout reports outcome unknown and the same id without the request JSON', () => {
+  test('started apply/adopt failures without a validated result report outcome unknown while keeping pre-launch failures and AC_* refusals distinct', () => {
     const f = fixture();
-    const run: RunArchctxProcess = withSnapshot((_binary, args) => args[0] === 'capabilities'
-      ? { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' }
-      : { status: 1, signal: 'SIGTERM', stdout: '', stderr: '', timedOut: true, error: 'process timed out: --request-json secret-payload' });
-    let message = '';
-    try { applyArchitectureProjection(f.repoRoot, { consumerRoot: f.consumerRoot, policy, requestId: 'same.retry.id', run }); }
-    catch (error) { message = (error as Error).message; }
-    expect(message).toContain('outcome unknown');
-    expect(message).toContain('check --json');
-    expect(message).toContain('--request-id same.retry.id');
-    expect(message).not.toContain('--request-json');
-    expect(message).not.toContain('secret-payload');
+    const withCapabilities = (handler: RunArchctxProcess): RunArchctxProcess =>
+      withSnapshot((binary, args, opts) => args[0] === 'capabilities'
+        ? { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' }
+        : handler(binary, args, opts));
+
+    const captureApply = (run: RunArchctxProcess, mode: 'apply' | 'adopt' = 'apply') => {
+      try {
+        if (mode === 'apply') applyArchitectureProjection(f.repoRoot, { consumerRoot: f.consumerRoot, policy, requestId: 'same.retry.id', run });
+        else runArchitectureProjection({ ...request(), mode: 'adopt' }, f.repoRoot, { consumerRoot: f.consumerRoot, policy, run });
+      } catch (error) { return error; }
+      throw new Error('expected projection write failure');
+    };
+
+    // 1. Timeout on apply -> RH_ARCHCTX_TIMEOUT + reconcile-projection-state, never leaking --request-json or retired --request-id replay.
+    const timeoutErr = captureApply(withCapabilities(() => ({
+      status: 1, signal: 'SIGTERM', stdout: '', stderr: '', timedOut: true, error: 'process timed out: --request-json secret-payload',
+    })));
+    expect(timeoutErr).toBeInstanceOf(ArchctxClientError);
+    expect(timeoutErr).toMatchObject({ code: 'RH_ARCHCTX_TIMEOUT', action: 'reconcile-projection-state' });
+    const timeoutMsg = (timeoutErr as Error).message;
+    expect(timeoutMsg).toContain('outcome unknown');
+    expect(timeoutMsg).toContain('rh arch projection check --json');
+    expect(timeoutMsg).toContain('git diff');
+    expect(timeoutMsg).not.toContain('--request-id');
+    expect(timeoutMsg).not.toContain('same request id');
+    expect(timeoutMsg).not.toContain('--request-json');
+    expect(timeoutMsg).not.toContain('secret-payload');
+
+    // 2. Signal termination -> RH_ARCHCTX_WRITE_OUTCOME_UNKNOWN + reconcile-projection-state.
+    const signalErr = captureApply(withCapabilities(() => ({
+      status: null, signal: 'SIGKILL', stdout: '', stderr: '',
+    })));
+    expect(signalErr).toMatchObject({ code: 'RH_ARCHCTX_WRITE_OUTCOME_UNKNOWN', action: 'reconcile-projection-state' });
+    expect((signalErr as Error).message).toContain('signal SIGKILL');
+    expect((signalErr as Error).message).toContain('outcome unknown');
+
+    // 3. Empty/corrupt response -> RH_ARCHCTX_WRITE_OUTCOME_UNKNOWN + reconcile-projection-state.
+    for (const badResult of [
+      { status: 1, signal: null, stdout: '', stderr: 'terminated mid-write' },
+      { status: 0, signal: null, stdout: '{corrupt', stderr: '' },
+    ]) {
+      const err = captureApply(withCapabilities(() => badResult));
+      expect(err).toMatchObject({ code: 'RH_ARCHCTX_WRITE_OUTCOME_UNKNOWN', action: 'reconcile-projection-state' });
+      expect((err as Error).message).toContain('outcome unknown');
+    }
+
+    // 4. Result validation failure (`assertProjectionResult`) on adopt -> RH_ARCHCTX_WRITE_OUTCOME_UNKNOWN + reconcile-projection-state.
+    const forgedEnvelope = structuredClone(projectionEnvelope(expectedSnapshot)) as any;
+    forgedEnvelope.data.receiptDigest = digest('f');
+    const validationErr = captureApply(withCapabilities(() => ({
+      status: 0, signal: null, stdout: JSON.stringify(forgedEnvelope), stderr: '',
+    })), 'adopt');
+    expect(validationErr).toMatchObject({ code: 'RH_ARCHCTX_WRITE_OUTCOME_UNKNOWN', action: 'reconcile-projection-state' });
+    expect((validationErr as Error).message).toContain('receiptDigest');
+    expect((validationErr as Error).message).toContain('outcome unknown');
+
+    // 5. Real supervised pre-launch spawn ENOENT (`runProcess` sets stderr and status=1, plus typed `launchFailed: true`)
+    // stays distinct (`RH_ARCHCTX_LAUNCH_FAILED`, NOT reconcile-projection-state).
+    const launchErr = captureApply(withCapabilities((_binary, args, opts) => {
+      const r = runProcess(join(f.root, 'missing-node-executable'), args, {
+        cwd: opts.cwd,
+        env: opts.env,
+        inheritEnv: false,
+        timeoutMs: opts.timeoutMs,
+        processGroup: true,
+      });
+      expect(r.launchFailed).toBe(true);
+      expect(r.stderr).not.toBe('');
+      expect(r.status).toBe(1);
+      return { status: r.status, signal: r.signal, timedOut: r.timedOut, stdout: r.stdout, stderr: r.stderr, ...(r.error ? { error: r.error } : {}), ...(r.launchFailed ? { launchFailed: true } : {}) };
+    }));
+    expect(launchErr).toMatchObject({ code: 'RH_ARCHCTX_LAUNCH_FAILED', action: 'inspect-diagnostics' });
+    expect((launchErr as Error).message).not.toContain('outcome unknown');
+
+    // 6. Post-write or generic catalog errors (`AC_UNCLASSIFIED_FAILURE`, `projection-result-invalid`, `changeset-rollback-conflict`,
+    // unknown precondition reason) reconcile instead of being treated as no-write refusals.
+    for (const postWriteEnvelope of [
+      errorEnvelope('projection.run', 'AC_UNCLASSIFIED_FAILURE', 'cache delete failed after apply', 'failure-unclassified'),
+      errorEnvelope('projection.run', 'AC_SCHEMA_INVALID', 'Projection result invalid.', 'projection-result-invalid'),
+      errorEnvelope('projection.run', 'AC_PRECONDITION_FAILED', 'ChangeSet rollback is incomplete', 'changeset-rollback-conflict'),
+      errorEnvelope('projection.run', 'AC_PRECONDITION_FAILED', 'unclassified precondition'),
+    ]) {
+      const err = captureApply(withCapabilities(() => ({
+        status: 1, signal: null, stdout: JSON.stringify(postWriteEnvelope), stderr: '',
+      })));
+      expect(err).toMatchObject({ code: postWriteEnvelope.error!.code, action: 'reconcile-projection-state' });
+      expect((err as Error).message).toContain('outcome unknown');
+    }
+
+    // 7. Proven pre-write structured refusals stay distinct (not wrapped into reconcile-projection-state).
+    for (const preWriteEnvelope of [
+      errorEnvelope('projection.run', 'AC_PRECONDITION_FAILED', 'Worktree digest changed before apply.', 'apply-worktree-changed'),
+      errorEnvelope('projection.run', 'AC_PRECONDITION_FAILED', 'architecture-docs-projection-inputs-changed-during-run', 'projection-inputs-changed-during-run'),
+      errorEnvelope('projection.run', 'AC_SCHEMA_INVALID', 'Projection input invalid.', 'projection-input-invalid'),
+      errorEnvelope('projection.run', 'AC_CODE_FACTS_NOT_READY', 'Repository code facts are not ready.', 'code-facts-not-ready'),
+    ]) {
+      const refusalErr = captureApply(withCapabilities(() => ({
+        status: 1, signal: null, stdout: JSON.stringify(preWriteEnvelope), stderr: '',
+      })));
+      expect(refusalErr).toMatchObject({ code: preWriteEnvelope.error!.code, reasonCode: preWriteEnvelope.error!.reasonCode });
+      expect((refusalErr as ArchctxClientError).action).not.toBe('reconcile-projection-state');
+    }
+
+    // 8. Read-only `check` timeout stays `action: 'retry'`.
+    let checkErr: unknown;
+    try {
+      runArchitectureProjection({ ...request(), mode: 'check' }, f.repoRoot, {
+        consumerRoot: f.consumerRoot, policy,
+        run: withCapabilities(() => ({ status: 1, signal: 'SIGTERM', stdout: '', stderr: '', timedOut: true })),
+      });
+    } catch (error) { checkErr = error; }
+    expect(checkErr).toBeInstanceOf(ArchctxClientError);
+    expect(checkErr).toMatchObject({ code: 'RH_ARCHCTX_TIMEOUT', action: 'retry' });
+    expect((checkErr as Error).message).not.toContain('--request-id');
+    expect((checkErr as Error).message).not.toContain('same request id');
   });
 
   test('reviewed worktree digest binds apply before any projection run', () => {
@@ -848,7 +869,7 @@ describe('package-local ArchContext projection provider', () => {
     expect(calls.some((call) => call.args[0] === 'projection' && call.args[1] === 'run')).toBe(true);
   });
 
-  test('readiness reports missing policy and incompatible daemon as typed states', () => {
+  test('readiness reports missing policy and package mismatch as typed states', () => {
     const f = fixture();
     const options = { consumerRoot: f.consumerRoot, policy, run: runner([], projectionEnvelope(expectedSnapshot)) };
     rmSync(join(f.repoRoot, '.ai/harness/policy.json'));
@@ -857,12 +878,9 @@ describe('package-local ArchContext projection provider', () => {
     expect(missing.projectionProvider.state).toBe('missing');
     expect(missing.projectionProvider.reason).toContain('run rh init');
     writeFileSync(join(f.repoRoot, '.ai/harness/policy.json'), JSON.stringify({ context: { capability_source: 'archcontext' } }));
-    const run: RunArchctxProcess = (_bin, args) => ({ status: 0, signal: null, stderr: '', stdout: JSON.stringify(args[0] === 'capabilities' ? capabilities() : {
-      schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'daemon.status', data: { running: true, versionUnsupported: { reason: 'product-version-mismatch', expected: ARCHCTX_REQUIRED_VERSION, received: '0.6.3', action: 'upgrade-archctx-runtime', command: 'archctx daemon upgrade' } },
-    }) });
+    const run: RunArchctxProcess = () => ({ status: 0, signal: null, stderr: '', stdout: JSON.stringify({ ...capabilities(), package: { name: 'archctx', version: '0.6.3' } }) });
     const mismatch = inspectArchitectureProjectionReadiness(f.repoRoot, architectureModelReady, { ...options, run });
     expect(mismatch.projectionProvider.state).toBe('mismatch');
-    expect(mismatch.daemonRuntime.state).toBe('mismatch');
     expect(mismatch.apply.enabled).toBe(false);
   });
 
@@ -882,7 +900,7 @@ describe('package-local ArchContext projection provider', () => {
     expect(readiness.codeFacts).toEqual({ requirement: 'required', state: 'not-ready', issues });
     expect(readiness.apply.enabled).toBe(false);
     expect(readiness.next).toBe('codegraph index .');
-    expect(calls.map(({ args }) => args[0])).toEqual(['capabilities', 'daemon', 'doctor']);
+    expect(calls.map(({ args }) => args[0])).toEqual(['capabilities', 'doctor']);
   });
 
   test('readiness keeps doctor failures closed and preserves unavailable diagnostics', () => {
@@ -983,84 +1001,6 @@ describe('package-local ArchContext projection provider', () => {
       expect(result.projectionProvider.reason).toContain('is not valid JSON');
       expect(result.apply.enabled).toBe(false);
     });
-  });
-
-  describe('closeout architecture daemon stop', () => {
-    const worktree = '/private/tmp/repo-harness-wt-closed';
-    const listing = (daemons: unknown[]) => ({ schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'daemon.list', data: { stateRoot: '/state', daemons } });
-    const entry = (stateDir: string, root: string | undefined, connection = 'valid') => ({ storageRepositoryId: 'repo.0000000000000001', storageWorkspaceId: 'ws.0000000000000001', stateDir, connectionPath: `${stateDir}/archctxd.json`, connection, ...(root === undefined ? {} : { root, rootExists: false, pid: 1, pidAlive: true }) });
-    const daemons = [entry('/state/closed', worktree), entry('/state/other', '/private/tmp/repo-harness-wt-other'), entry('/state/orphan', undefined, 'invalid')];
-
-    test('stops only the daemon whose listed root is the removed checkout, by state directory', () => {
-      const f = fixture();
-      const calls: Array<{ args: readonly string[]; cwd: string }> = [];
-      const run: RunArchctxProcess = (_binary, args, options) => {
-        calls.push({ args, cwd: options.cwd });
-        return { status: 0, signal: null, stderr: '', stdout: JSON.stringify(args[1] === 'list' ? listing(daemons) : { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'daemon.stop', data: { stopping: true } }) };
-      };
-      expect(stopWorkspaceArchitectureDaemons(f.repoRoot, worktree, { consumerRoot: f.consumerRoot, policy, run })).toEqual({
-        schemaVersion: 'repo-harness.architecture-daemon-stop/v1', worktree, provider: 'archctx', stopped: ['/state/closed'], failures: [],
-      });
-      expect(calls).toEqual([
-        { args: ['daemon', 'list', '--json'], cwd: f.repoRoot },
-        { args: ['daemon', 'stop', '--state-dir', '/state/closed', '--json'], cwd: f.repoRoot },
-      ]);
-    });
-
-    test('a disabled provider reports disabled and never resolves or runs archctx', () => {
-      const run: RunArchctxProcess = () => { throw new Error('must not run'); };
-      expect(stopWorkspaceArchitectureDaemons('/missing-repo', worktree, { consumerRoot: '/missing-consumer', policy: { ...policy, provider: 'disabled', applyMode: 'disabled' }, run })).toEqual({
-        schemaVersion: 'repo-harness.architecture-daemon-stop/v1', worktree, provider: 'disabled', stopped: [], failures: [],
-      });
-    });
-
-    test('typed stop and listing failures are reported with their archctx fields', () => {
-      const f = fixture();
-      const unavailable = errorEnvelope('daemon.stop', 'AC_RUNTIME_UNAVAILABLE', 'No archctxd connection file found in /state/closed');
-      const stopFailed: RunArchctxProcess = (_binary, args) => args[1] === 'list'
-        ? { status: 0, signal: null, stderr: '', stdout: JSON.stringify(listing(daemons)) }
-        : { status: 1, signal: null, stderr: '', stdout: JSON.stringify(unavailable) };
-      expect(stopWorkspaceArchitectureDaemons(f.repoRoot, worktree, { consumerRoot: f.consumerRoot, policy, run: stopFailed }).failures).toEqual([
-        { stateDir: '/state/closed', code: 'AC_RUNTIME_UNAVAILABLE', action: 'start-or-reconnect-runtime', retryable: true, message: 'No archctxd connection file found in /state/closed' },
-      ]);
-      const listFailed: RunArchctxProcess = () => ({ status: 1, signal: null, stderr: '', stdout: JSON.stringify(errorEnvelope('daemon.list', 'AC_RUNTIME_UNAVAILABLE', 'state root unreadable')) });
-      const report = stopWorkspaceArchitectureDaemons(f.repoRoot, worktree, { consumerRoot: f.consumerRoot, policy, run: listFailed });
-      expect(report.stopped).toEqual([]);
-      expect(report.failures).toEqual([{ stateDir: null, code: 'AC_RUNTIME_UNAVAILABLE', action: 'start-or-reconnect-runtime', retryable: true, message: 'state root unreadable' }]);
-    });
-
-    test('an invalid stop envelope fails closed instead of counting as stopped', () => {
-      const f = fixture();
-      const run: RunArchctxProcess = (_binary, args) => ({ status: 0, signal: null, stderr: '', stdout: JSON.stringify(args[1] === 'list' ? listing(daemons) : { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'daemon.stop', data: {} }) });
-      expect(() => stopWorkspaceArchitectureDaemons(f.repoRoot, worktree, { consumerRoot: f.consumerRoot, policy, run })).toThrow('archctx daemon stop returned an invalid envelope');
-    });
-  });
-
-  test('rejects a re-digested readback whose current output proof differs from the committed receipt', () => {
-    const f = fixture();
-    const accepted = request();
-    accepted.mode = 'apply';
-    accepted.acceptedChange = {
-      changeSetId: 'changeset.docs-projection-readback-proof', eventId: 'event.readback-proof',
-      reasonCodes: ['responsibility-changed'], affectedNodeIds: ['capability.test.core'],
-    };
-    const committed = committedApplyEnvelope(accepted);
-    const forged = committedApplyReadback(accepted, committed.data);
-    forged.data.current.ownedOutputDigest = digest('e');
-    const { readbackDigest: _old, ...body } = forged.data;
-    forged.data.readbackDigest = digestProjectionJson(body);
-    const run: RunArchctxProcess = (_binary, args) => ({
-      status: 0, signal: null,
-      stdout: JSON.stringify(args[0] === 'capabilities' ? capabilities() : forged), stderr: '',
-    });
-    expect(() => readArchitectureProjectionApply(accepted, f.repoRoot, { consumerRoot: f.consumerRoot, policy, run }))
-      .toThrow('readback current state differs from committed recovery binding');
-    const absent: RunArchctxProcess = (_binary, args) => ({
-      status: 0, signal: null,
-      stdout: JSON.stringify(args[0] === 'capabilities' ? capabilities() : absentApplyReadback(accepted)), stderr: '',
-    });
-    expect(() => readArchitectureProjectionApply(accepted, f.repoRoot, { consumerRoot: f.consumerRoot, policy, run: absent }))
-      .toThrow('no committed projection apply exists for request.axr5');
   });
 
   test('bounds a real provider process tree whose descendant keeps captured pipes open', async () => {
@@ -1771,6 +1711,14 @@ describe('package-local ArchContext projection provider', () => {
     expect(readback.consumer.authoritativeNodeSchema).toBe('archcontext.node/v2');
     expect(readback.consumer.authoritativeNodeSchemaDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(readback.consumer.projection.codeGraph.codeGraphStatus).toBe('ready');
+    expect(readback.consumer.inProcessNoDaemon).toEqual({ daemonCommandAbsent: true, noDaemonArtifacts: true });
+    expect(readback.consumer.fixedPoint).toMatchObject({
+      applyStatus: 'applied',
+      checkStatus: 'noop',
+      checkRenderEquivalent: true,
+      secondApplyStatus: 'noop',
+      secondApplyFiles: 0,
+    });
     expect(readback.source.dirtySourceUsed).toBe(false);
   });
 
@@ -1863,8 +1811,8 @@ describe('package-local ArchContext projection provider', () => {
 });
 
 
-describe('ArchContext maintenance reminders', () => {
-  test('managed daemon check finds a hoisted Bun global install and fails when missing', () => {
+describe('ArchContext managed package checks and typed error envelopes', () => {
+  test('managed package check finds a hoisted Bun global install and reports missing when removed', () => {
     const f = fixture();
     const bunRoot = join(f.root, '.bun');
     const globalRoot = join(bunRoot, 'install', 'global');
@@ -1877,7 +1825,7 @@ describe('ArchContext maintenance reminders', () => {
     const manifest = JSON.parse(readFileSync(join(sourceRoot, 'package.json'), 'utf8'));
     manifest.dependencies = { '@colbymchenry/codegraph': '1.0.0' };
     writeFileSync(join(sourceRoot, 'package.json'), JSON.stringify(manifest));
-    writeFileSync(f.binary, `console.log(JSON.stringify(process.argv[2] === 'capabilities' ? ${JSON.stringify(capabilities())} : {schemaVersion:'archcontext.envelope/v1',ok:true,data:{running:false}}));`);
+    writeFileSync(f.binary, `console.log(JSON.stringify(${JSON.stringify(capabilities())}));`);
     for (const name of ['archctx-contracts', '@colbymchenry/codegraph']) {
       const root = join(globalRoot, 'node_modules', name);
       mkdirSync(root, { recursive: true });
@@ -1888,63 +1836,26 @@ describe('ArchContext maintenance reminders', () => {
     expect(createRequire(join(harnessRoot, 'package.json')).resolve('archctx/package.json')).toBe(join(nestedRoot, 'package.json'));
     rmSync(nestedRoot, { recursive: true });
     const env = { ...process.env, BUN_INSTALL: bunRoot };
-    expect(() => ARCHITECTURE_SETUP_PROVIDER.verifyDaemon(f.repoRoot, env)).not.toThrow();
     expect(ARCHITECTURE_SETUP_PROVIDER.readManagedPackages(harnessRoot, f.repoRoot, env).status).toBe('ready');
     rmSync(selectedRoot, { recursive: true });
-    expect(() => ARCHITECTURE_SETUP_PROVIDER.verifyDaemon(f.repoRoot, env)).toThrow();
+    expect(ARCHITECTURE_SETUP_PROVIDER.readManagedPackages(harnessRoot, f.repoRoot, env).status).toBe('package-mismatch');
   });
 
-  const incompatible = {
-    schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'daemon.status',
-    data: { running: true, versionUnsupported: {
-      reason: 'product-version-mismatch', expected: ARCHCTX_REQUIRED_VERSION, received: '0.2.3',
-      action: 'upgrade-archctx-runtime', command: 'archctx daemon upgrade',
-    } },
-  };
-
-  test('daemon lifecycle mismatch requests authorization without running recovery', () => {
-    const f = fixture();
-    const calls: string[][] = [];
-    const run: RunArchctxProcess = (_binary, args) => {
-      calls.push([...args]);
-      return { status: 0, signal: null, stdout: JSON.stringify(incompatible), stderr: '' };
-    };
-    expect(() => verifyArchctxDaemonRuntime(f.repoRoot, { consumerRoot: f.consumerRoot, policy, run }))
-      .toThrow('received 0.2.3. User authorization required');
-    expect(calls).toEqual([['daemon', 'status', '--json']]);
-  });
-
-  test('healthy and stopped daemons need no maintenance; malformed status fails closed', () => {
-    const f = fixture();
-    const check = (data: unknown) => verifyArchctxDaemonRuntime(f.repoRoot, {
-      consumerRoot: f.consumerRoot, policy,
-      run: () => ({ status: 0, signal: null, stdout: JSON.stringify({ schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'daemon.status', data }), stderr: '' }),
-    });
-    expect(() => check({ running: false })).not.toThrow();
-    expect(() => check({ running: true, rpcVersionCompatible: true, productVersionCompatible: true })).not.toThrow();
-    expect(() => check({ running: true })).toThrow('did not prove runtime compatibility');
-    expect(() => check({ running: 'true' })).toThrow('invalid envelope');
-    expect(() => check({ running: false, staleConnection: true })).toThrow('unhealthy connection');
-    expect(() => check({ ...incompatible.data, versionUnsupported: { ...incompatible.data.versionUnsupported, action: 'unknown' } }))
-      .toThrow('invalid versionUnsupported diagnostic');
-  });
-
-  test('projection failure preserves typed maintenance guidance beyond diagnostic truncation', () => {
+  test('projection failure preserves typed provider message beyond diagnostic truncation', () => {
     const f = fixture();
     const calls: string[][] = [];
     const run: RunArchctxProcess = (_binary, args) => {
       calls.push([...args]);
       return { status: args[0] === 'capabilities' ? 0 : 1, signal: null, stderr: 'short stderr', stdout: JSON.stringify(args[0] === 'capabilities' ? capabilities() : {
         schemaVersion: 'archcontext.envelope/v1', ok: false, requestId: 'projection',
-        error: { ...errorEnvelope('projection', 'AC_RUNTIME_VERSION_UNSUPPORTED', 'x'.repeat(400) + ' daemon 0.2.3 requires replacement').error },
+        error: { ...errorEnvelope('projection', 'AC_RUNTIME_VERSION_UNSUPPORTED', 'x'.repeat(400) + ' runtime 0.2.3 requires replacement').error },
       }) };
     };
     let message = '';
     try { runArchitectureProjection(request(), f.repoRoot, { consumerRoot: f.consumerRoot, policy, run }); }
     catch (error) { message = (error as Error).message; }
-    expect(message).toContain('daemon 0.2.3 requires replacement');
-    expect(message).toContain('User authorization required');
-    expect(message).toContain('only if it is missing or stale');
+    expect(message).toContain('runtime 0.2.3 requires replacement');
+    expect(message).not.toContain('daemon upgrade');
     expect(calls.map((args) => args[0])).toEqual(['capabilities', 'projection']);
   });
 
@@ -2108,4 +2019,431 @@ test('memoizes node --version probes across repeated ArchctxClient calls with ma
   rmSync(countingNode);
   expect(resolveCompatibleNodeRuntime(combinedEnv)).toBe(realpathSync(join(otherBin, 'node')));
   expect(readFileSync(countFile, 'utf8').trim().split('\n')).toHaveLength(beforeEvict + 1);
+});
+
+describe('bootstrapWorktreeCodeGraph index seed cutover', () => {
+  const writeCodeGraphSchemaDb = (dbPath: string, tag = 'valid') => {
+    const db = new Database(dbPath);
+    try {
+      db.exec(`
+        CREATE TABLE schema_versions (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL, description TEXT);
+        INSERT INTO schema_versions (version, applied_at, description) VALUES (1, 1, '${tag}');
+        CREATE TABLE nodes (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, qualified_name TEXT NOT NULL, file_path TEXT NOT NULL, language TEXT NOT NULL, start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, start_column INTEGER NOT NULL, end_column INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE TABLE edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, target TEXT NOT NULL, kind TEXT NOT NULL);
+        CREATE TABLE files (path TEXT PRIMARY KEY, content_hash TEXT NOT NULL);
+        CREATE TABLE unresolved_refs (id INTEGER PRIMARY KEY AUTOINCREMENT, from_node_id TEXT NOT NULL);
+        CREATE TABLE name_segment_vocab (segment TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY (segment, name)) WITHOUT ROWID;
+        CREATE TABLE synthesis_inputs (file_path TEXT PRIMARY KEY);
+        CREATE TABLE project_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);
+      `);
+    } finally {
+      db.close();
+    }
+  };
+
+  test.skipIf(process.platform === 'win32')('enforces safe destination preflight, schema proof, WSL fallback, and avoids copiedFiles=0 false alarm', () => {
+    const f = fixture({ git: false });
+    const primary = join(f.root, 'primary');
+    const linked = join(f.root, 'linked');
+    mkdirSync(join(primary, '.codegraph'), { recursive: true });
+    writeCodeGraphSchemaDb(join(primary, '.codegraph', 'codegraph.db'), 'primary-db');
+    writeFileSync(join(primary, '.codegraph', '.gitignore'), '*\n');
+    mkdirSync(join(linked, '.codegraph'), { recursive: true });
+    writeCodeGraphSchemaDb(join(linked, '.codegraph', 'codegraph.db'), 'preserve-unready');
+    const linkedBytes = readFileSync(join(linked, '.codegraph', 'codegraph.db'));
+    const calls: Array<{ cwd: string; args: readonly string[]; codegraphDir: string | undefined }> = [];
+    const logged: string[] = [];
+    const origError = console.error;
+    console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
+    try {
+      const runNotReady: RunArchctxProcess = (_binary, args, opts) => {
+        calls.push({ cwd: opts.cwd, args, codegraphDir: opts.env.CODEGRAPH_DIR });
+        if (opts.cwd === primary) {
+          return { status: 0, signal: null, stderr: '', stdout: JSON.stringify({
+            schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'index.seed',
+            data: { schemaVersion: 'archcontext.index-seed/v1', mode: 'primary-refresh', worktreeRole: 'primary', seededFromBase: false, hardlinkedFiles: 0, copiedFiles: 0, elapsedMs: 5 },
+          }) };
+        }
+        return { status: 1, signal: null, stderr: '', stdout: JSON.stringify(errorEnvelope('index.seed', 'AC_CODE_FACTS_NOT_READY', 'index is not ready', 'code-facts-not-ready')) };
+      };
+      expect(() => bootstrapWorktreeCodeGraph(primary, linked, {
+        consumerRoot: f.consumerRoot,
+        policy,
+        env: { ...process.env, CODEGRAPH_DIR: '.codegraph-wsl' },
+        run: runNotReady,
+      })).toThrow('AC_CODE_FACTS_NOT_READY');
+      expect(readFileSync(join(linked, '.codegraph', 'codegraph.db'))).toEqual(linkedBytes);
+      // Primary refresh copiedFiles=0 is normal when the shared base is already current.
+      expect(logged).toEqual([]);
+      expect(calls.map(c => `${c.args[0]} ${c.args[1]}`)).toEqual(['index seed', 'index seed']);
+      // CODEGRAPH_DIR must stay unset for `archctx index seed` (setting it disables shared-base seeding in archctx).
+      expect(calls.every(c => c.codegraphDir === undefined)).toBe(true);
+      // WSL /mnt/<drive> paths without a checked .codegraph-only resolution fail closed on direct index seed with non-destructive inspection guidance.
+      expect(effectiveCodeGraphDirName('/mnt/c/work/repo', { platform: 'linux', env: { WSL_DISTRO_NAME: 'Ubuntu' } })).toBe('.codegraph-wsl');
+      let wslErr = '';
+      try { assertSafeCodeGraphDestination('/mnt/c/work/repo', { platform: 'linux', env: { WSL_DISTRO_NAME: 'Ubuntu' } }); }
+      catch (error) { wslErr = (error as Error).message; }
+      expect(wslErr).toContain('CodeGraph resolves .codegraph-wsl instead of .codegraph');
+      expect(wslErr).toContain('Inspect .codegraph and .codegraph-wsl');
+      expect(wslErr).toContain('rh worktrees start');
+      expect(wslErr).not.toContain('codegraph init');
+      expect(effectiveCodeGraphDirName('/mnt/c/work/repo', { platform: 'linux', env: { WSL_DISTRO_NAME: 'Ubuntu' }, pinDefaultDir: true })).toBe('.codegraph');
+
+      // A symlink .codegraph fails closed BEFORE invoking archctx index seed or codegraph init.
+      const linkedSymlink = join(f.root, 'linked-symlink');
+      const targetDir = join(f.root, 'external-dir');
+      mkdirSync(linkedSymlink, { recursive: true });
+      mkdirSync(targetDir, { recursive: true });
+      symlinkSync(targetDir, join(linkedSymlink, '.codegraph'));
+      const mustNotRun: RunArchctxProcess = () => { throw new Error('provider must not run on unsafe .codegraph'); };
+      expect(() => bootstrapWorktreeCodeGraph(primary, linkedSymlink, { consumerRoot: f.consumerRoot, policy, run: mustNotRun }))
+        .toThrow('.codegraph must be a regular directory');
+      expect(lstatSync(join(linkedSymlink, '.codegraph')).isSymbolicLink()).toBe(true);
+
+      // Shared destination preflight checks absent, empty, foreign SQLite (zero sidecars), schema proof, lock/log ownership, and unsafe shapes.
+      const absentDir = join(f.root, 'absent-dest');
+      mkdirSync(absentDir, { recursive: true });
+      expect(() => assertSafeCodeGraphDestination(absentDir)).not.toThrow();
+      mkdirSync(join(absentDir, '.codegraph'));
+      expect(() => assertSafeCodeGraphDestination(absentDir)).not.toThrow();
+      writeFileSync(join(absentDir, '.codegraph', 'codegraph.db'), 'not-sqlite');
+      expect(() => assertSafeCodeGraphDestination(absentDir)).toThrow('not a valid SQLite 3 database');
+      // Foreign SQLite DB with a `nodes` table is refused without creating -wal/-shm sidecars.
+      rmSync(join(absentDir, '.codegraph', 'codegraph.db'));
+      const foreignDb = new Database(join(absentDir, '.codegraph', 'codegraph.db'));
+      foreignDb.exec('CREATE TABLE nodes (id TEXT PRIMARY KEY);');
+      foreignDb.close();
+      const foreignBytes = readFileSync(join(absentDir, '.codegraph', 'codegraph.db'));
+      const foreignEntries = readdirSync(join(absentDir, '.codegraph')).sort();
+      expect(() => assertSafeCodeGraphDestination(absentDir)).toThrow('CodeGraph 1.6.4 schema');
+      expect(readFileSync(join(absentDir, '.codegraph', 'codegraph.db'))).toEqual(foreignBytes);
+      expect(readdirSync(join(absentDir, '.codegraph')).sort()).toEqual(foreignEntries);
+      rmSync(join(absentDir, '.codegraph', 'codegraph.db'));
+      writeCodeGraphSchemaDb(join(absentDir, '.codegraph', 'codegraph.db'));
+      writeFileSync(join(absentDir, '.codegraph', '.gitignore'), '# CodeGraph data files\n*\n!.gitignore\n');
+      writeFileSync(join(absentDir, '.codegraph', 'codegraph.lock'), '12345\n');
+      writeFileSync(join(absentDir, '.codegraph', 'errors.log'), 'CodeGraph Error Log - 2026-11-23T00:00:00.000Z\n');
+      expect(() => assertSafeCodeGraphDestination(absentDir)).not.toThrow();
+      writeFileSync(join(absentDir, '.codegraph', 'codegraph.lock'), 'user notes\n');
+      expect(() => assertSafeCodeGraphDestination(absentDir)).toThrow('PID lock format');
+      writeFileSync(join(absentDir, '.codegraph', 'codegraph.lock'), '12345');
+      writeFileSync(join(absentDir, '.codegraph', 'errors.log'), 'custom user log\n');
+      expect(() => assertSafeCodeGraphDestination(absentDir)).toThrow('not a CodeGraph error log');
+      rmSync(join(absentDir, '.codegraph', 'errors.log'));
+      writeFileSync(join(absentDir, '.codegraph', '.gitignore'), '# CodeGraph data files\n*.db\n');
+      expect(() => assertSafeCodeGraphDestination(absentDir)).toThrow('stale-default pattern');
+      rmSync(join(absentDir, '.codegraph', '.gitignore'));
+
+      // Any existing SQLite sidecars (-wal, -shm, pair, -journal — including valid sidecars from another WAL DB)
+      // fail closed unconditionally beside a proven CodeGraph DB while preserving exact bytes.
+      const walRepo = join(f.root, 'wal-sidecars-dest');
+      mkdirSync(join(walRepo, '.codegraph'), { recursive: true });
+      const walDbPath = join(walRepo, '.codegraph', 'codegraph.db');
+      writeCodeGraphSchemaDb(walDbPath, 'wal-dest');
+      const otherDir = join(f.root, 'other-wal-source');
+      mkdirSync(otherDir, { recursive: true });
+      const otherDb = new Database(join(otherDir, 'other.db'));
+      let otherWal: Buffer;
+      let otherShm: Buffer;
+      try {
+        otherDb.exec('PRAGMA journal_mode=WAL; CREATE TABLE other_tbl (id TEXT); INSERT INTO other_tbl VALUES ("o1");');
+        otherWal = readFileSync(join(otherDir, 'other.db-wal'));
+        otherShm = readFileSync(join(otherDir, 'other.db-shm'));
+      } finally {
+        otherDb.close();
+      }
+      for (const [sidecar, content] of [
+        ['codegraph.db-wal', otherWal],
+        ['codegraph.db-shm', otherShm],
+        ['codegraph.db-journal', Buffer.from('rollback-data')],
+      ] as const) {
+        const sidecarPath = join(walRepo, '.codegraph', sidecar);
+        writeFileSync(sidecarPath, content);
+        expect(() => assertSafeCodeGraphDestination(walRepo)).toThrow(`.codegraph/${sidecar} is present`);
+        expect(readFileSync(sidecarPath).equals(content)).toBe(true);
+        rmSync(sidecarPath, { force: true });
+      }
+      // Valid mismatched WAL + SHM pair together is also refused with exact bytes preserved.
+      writeFileSync(join(walRepo, '.codegraph', 'codegraph.db-wal'), otherWal);
+      writeFileSync(join(walRepo, '.codegraph', 'codegraph.db-shm'), otherShm);
+      expect(() => assertSafeCodeGraphDestination(walRepo)).toThrow('.codegraph/codegraph.db-wal is present');
+      expect(readFileSync(join(walRepo, '.codegraph', 'codegraph.db-wal')).equals(otherWal)).toBe(true);
+      expect(readFileSync(join(walRepo, '.codegraph', 'codegraph.db-shm')).equals(otherShm)).toBe(true);
+      rmSync(join(walRepo, '.codegraph', 'codegraph.db-wal'), { force: true });
+      rmSync(join(walRepo, '.codegraph', 'codegraph.db-shm'), { force: true });
+      expect(() => assertSafeCodeGraphDestination(walRepo)).not.toThrow();
+
+      // Sibling checkouts `project` and `project ` (trailing space): bootstrapWorktreeCodeGraph refuses both primary and worktree roots.
+      const cleanSibling = join(f.root, 'project');
+      const spacedSibling = join(f.root, 'project ');
+      mkdirSync(join(cleanSibling, '.codegraph'), { recursive: true });
+      writeCodeGraphSchemaDb(join(cleanSibling, '.codegraph', 'codegraph.db'), 'clean-sibling');
+      mkdirSync(spacedSibling, { recursive: true });
+      const siblingBytes = readFileSync(join(cleanSibling, '.codegraph', 'codegraph.db'));
+      expect(() => bootstrapWorktreeCodeGraph(spacedSibling, linked, { consumerRoot: f.consumerRoot, policy, run: mustNotRun }))
+        .toThrow('whitespace');
+      expect(() => bootstrapWorktreeCodeGraph(cleanSibling, spacedSibling, { consumerRoot: f.consumerRoot, policy, run: mustNotRun }))
+        .toThrow('whitespace');
+      expect(readFileSync(join(cleanSibling, '.codegraph', 'codegraph.db'))).toEqual(siblingBytes);
+      expect(existsSync(join(spacedSibling, '.codegraph'))).toBe(false);
+
+      // An unexpected requestId from index seed fails closed instead of falling back to init.
+      const linkedBad = join(f.root, 'linked-bad');
+      mkdirSync(linkedBad, { recursive: true });
+      const runWrongId: RunArchctxProcess = () => ({ status: 0, signal: null, stderr: '', stdout: JSON.stringify({
+        schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'sync',
+        data: { schemaVersion: 'archcontext.index-seed/v1', mode: 'worktree-seed', worktreeRole: 'linked', seededFromBase: true, hardlinkedFiles: 1, copiedFiles: 0, elapsedMs: 5 },
+      }) });
+      expect(() => bootstrapWorktreeCodeGraph(join(f.root, 'absent-primary'), linkedBad, { consumerRoot: f.consumerRoot, policy, run: runWrongId }))
+        .toThrow('unexpected requestId');
+    } finally {
+      console.error = origError;
+    }
+  });
+
+  test('WSL /mnt/<drive> worktree bootstrap bypasses index seed and reaches pinned codegraph init fallback while keeping .codegraph safety checks', () => {
+    const f = fixture({ git: false });
+    const primary = join(f.root, 'wsl-primary');
+    const linked = join(f.root, 'wsl-linked');
+    mkdirSync(join(primary, '.codegraph'), { recursive: true });
+    writeCodeGraphSchemaDb(join(primary, '.codegraph', 'codegraph.db'));
+    mkdirSync(linked, { recursive: true });
+
+    const seen: Array<{ args: readonly string[]; codegraphDir: string | undefined; forceWatch: string | undefined }> = [];
+    const runInitFallback: RunArchctxProcess = (_binary, args, opts) => {
+      if (args[0] === 'index') throw new Error('archctx index seed must be skipped on WSL /mnt/<drive> worktrees');
+      seen.push({ args, codegraphDir: opts.env.CODEGRAPH_DIR, forceWatch: opts.env.CODEGRAPH_FORCE_WATCH });
+      mkdirSync(join(opts.cwd, '.codegraph'), { recursive: true });
+      writeCodeGraphSchemaDb(join(opts.cwd, '.codegraph', 'codegraph.db'));
+      return { status: 0, signal: null, stdout: '', stderr: '' };
+    };
+    const origError = console.error;
+    console.error = () => {};
+    try {
+      bootstrapWorktreeCodeGraph(primary, linked, {
+        consumerRoot: PACKAGE_ROOT,
+        policy,
+        env: { ...process.env, WSL_DISTRO_NAME: 'Ubuntu' },
+        destinationProbe: { platform: 'linux', pathForWslCheck: '/mnt/c/work/linked' },
+        run: runInitFallback,
+      });
+      expect(seen).toEqual([{ args: ['init', '-y', '.'], codegraphDir: '.codegraph', forceWatch: '1' }]);
+      expect(lstatSync(join(linked, '.codegraph', 'codegraph.db')).isFile()).toBe(true);
+      // Ordinary CodeGraph directory resolution (without CODEGRAPH_DIR override) now resolves `.codegraph`.
+      expect(effectiveCodeGraphDirName(linked, { platform: 'linux', env: { WSL_DISTRO_NAME: 'Ubuntu' }, pathForWslCheck: '/mnt/c/work/linked' })).toBe('.codegraph');
+
+      // Existing empty or stale `.codegraph-wsl` on a WSL /mnt/<drive> mount fails closed before fallback init
+      // because ordinary CodeGraph readers would prefer `.codegraph-wsl` over `.codegraph`.
+      const conflictingWsl = join(f.root, 'wsl-conflicting');
+      mkdirSync(join(conflictingWsl, '.codegraph-wsl'), { recursive: true });
+      writeFileSync(join(conflictingWsl, '.codegraph-wsl', 'stale.txt'), 'keep-stale-wsl\n');
+      expect(() => bootstrapWorktreeCodeGraph(primary, conflictingWsl, {
+        consumerRoot: PACKAGE_ROOT,
+        policy,
+        env: { ...process.env, WSL_DISTRO_NAME: 'Ubuntu' },
+        destinationProbe: { platform: 'linux', pathForWslCheck: '/mnt/c/work/conflicting' },
+        run: () => { throw new Error('must not run init when .codegraph-wsl already exists'); },
+      })).toThrow('.codegraph-wsl already exists');
+      expect(readFileSync(join(conflictingWsl, '.codegraph-wsl', 'stale.txt'), 'utf8')).toBe('keep-stale-wsl\n');
+      expect(existsSync(join(conflictingWsl, '.codegraph'))).toBe(false);
+
+      // Same conflict check applies even when a reused WSL worktree already holds `.codegraph/codegraph.db`.
+      const reusedWsl = join(f.root, 'wsl-reused-conflicting');
+      mkdirSync(join(reusedWsl, '.codegraph'), { recursive: true });
+      writeCodeGraphSchemaDb(join(reusedWsl, '.codegraph', 'codegraph.db'));
+      mkdirSync(join(reusedWsl, '.codegraph-wsl'), { recursive: true });
+      writeFileSync(join(reusedWsl, '.codegraph-wsl', 'stale.txt'), 'keep-reused-wsl\n');
+      expect(() => bootstrapWorktreeCodeGraph(primary, reusedWsl, {
+        consumerRoot: PACKAGE_ROOT,
+        policy,
+        env: { ...process.env, WSL_DISTRO_NAME: 'Ubuntu' },
+        destinationProbe: { platform: 'linux', pathForWslCheck: '/mnt/c/work/reused-conflicting' },
+        run: () => { throw new Error('must not run init when .codegraph-wsl coexists with .codegraph/codegraph.db'); },
+      })).toThrow('.codegraph-wsl already exists');
+      expect(readFileSync(join(reusedWsl, '.codegraph-wsl', 'stale.txt'), 'utf8')).toBe('keep-reused-wsl\n');
+
+      // Unsafe symlink .codegraph still fails closed before codegraph init on WSL /mnt/<drive>.
+      const unsafeWsl = join(f.root, 'wsl-symlink');
+      const target = join(f.root, 'wsl-target');
+      mkdirSync(unsafeWsl, { recursive: true });
+      mkdirSync(target, { recursive: true });
+      symlinkSync(target, join(unsafeWsl, '.codegraph'));
+      expect(() => bootstrapWorktreeCodeGraph(primary, unsafeWsl, {
+        consumerRoot: PACKAGE_ROOT,
+        policy,
+        env: { ...process.env, WSL_DISTRO_NAME: 'Ubuntu' },
+        destinationProbe: { platform: 'linux', pathForWslCheck: '/mnt/c/work/symlink' },
+        run: () => { throw new Error('must not run init on symlink .codegraph'); },
+      })).toThrow('.codegraph must be a regular directory');
+    } finally {
+      console.error = origError;
+    }
+  });
+
+  test('assertSafeArchctxRepoRoot refuses conflicting inherited GIT_DIR/GIT_WORK_TREE across real checkouts and non-Git dirs', () => {
+    const f = fixture({ git: false });
+    const repoA = join(f.root, 'repo-a');
+    const repoB = join(f.root, 'repo-b');
+    const nonGit = join(f.root, 'non-git');
+    for (const repo of [repoA, repoB]) {
+      mkdirSync(join(repo, 'src'), { recursive: true });
+      execFileSync('git', ['-C', repo, 'init', '-q']);
+      writeFileSync(join(repo, 'README.md'), 'ok\n');
+      execFileSync('git', ['-C', repo, 'add', 'README.md']);
+      execFileSync('git', ['-C', repo, '-c', 'user.name=Test', '-c', 'user.email=t@t', 'commit', '-qm', 'init']);
+    }
+    mkdirSync(nonGit, { recursive: true });
+
+    const crossEnv = {
+      ...process.env,
+      GIT_DIR: join(repoB, '.git'),
+      GIT_WORK_TREE: repoB,
+    };
+    expect(() => assertSafeArchctxRepoRoot(repoA, crossEnv, 'refactor decide')).toThrow('ambiguous Git repository root');
+    expect(() => assertSafeArchctxRepoRoot(nonGit, crossEnv, 'refactor decide')).toThrow('ambiguous Git repository root');
+    expect(() => assertSafeArchctxRepoRoot(join(repoA, 'src'), { ...process.env, GIT_CEILING_DIRECTORIES: repoA }, 'refactor decide'))
+      .toThrow('git rev-parse --show-toplevel failed');
+    expect(assertSafeArchctxRepoRoot(repoA, { ...process.env, GIT_DIR: join(repoA, '.git'), GIT_WORK_TREE: repoA }, 'refactor decide'))
+      .toBe(realpathSync(repoA));
+    expect(sanitizeGitDiscoveryEnv({
+      git_dir: '/other/.git',
+      Git_Work_Tree: '/other',
+      git_common_dir: '/other/.git',
+      gIt_InDeX_fIlE: '/other/.git/index',
+      git_object_directory: '/other/.git/objects',
+      git_alternate_object_directories: '/other/obj',
+      git_ceiling_directories: '/other',
+      KEEP: '1',
+    }, 'win32')).toEqual({ KEEP: '1' });
+    expect(sanitizeGitDiscoveryEnv({ GIT_DIR: '/other/.git', git_dir: '/keep', KEEP: '1' }, 'linux')).toEqual({
+      git_dir: '/keep',
+      KEEP: '1',
+    });
+    if (process.platform === 'win32') {
+      const mixedCaseCrossEnv = {
+        ...process.env,
+        git_dir: join(repoB, '.git'),
+        Git_Work_Tree: repoB,
+      };
+      expect(() => assertSafeArchctxRepoRoot(repoA, mixedCaseCrossEnv, 'refactor decide')).toThrow('ambiguous Git repository root');
+      expect(() => assertSafeArchctxRepoRoot(nonGit, mixedCaseCrossEnv, 'refactor decide')).toThrow('ambiguous Git repository root');
+    }
+  });
+
+  test('usesArchctxLocalStore and resolveSafeArchctxLocalStoreOverride separate store-backed commands and canonicalize paths', () => {
+    for (const independent of [
+      [],
+      ['--version'],
+      ['capabilities', '--json'],
+      ['prepare', '--help'],
+      ['docs', 'anchors', '--json'],
+      ['sync', '--check', '--json'],
+      ['sync', '--check', '--no-instructions'],
+      ['projection', 'snapshot', '--json'],
+      ['projection', 'freshness', '--json'],
+      ['projection', 'slice', '--base', 'main', '--json'],
+      ['projection', 'publish-status', '--json'],
+      ['projection', 'verify-pr', '--base', 'main', '--json'],
+      ['resolve', '--path', 'src/a.ts'],
+      ['verify', '--base', 'HEAD', '--json'],
+      ['export', 'native', '--worktree', '--json'],
+      ['model', 'export', 'native', '--worktree', '--json'],
+      ['scan', '--json'],
+      ['decide', 'list', '--json'],
+      ['index', 'seed', '--json'],
+      ['doctor', '--json'],
+    ]) {
+      expect(usesArchctxLocalStore(independent), independent.join(' ')).toBe(false);
+    }
+    for (const storeBacked of [
+      ['prepare', '--task', 'x', '--json'],
+      ['projection', 'run', '--request-json', '{}'],
+      ['projection', 'publish'],
+      ['sync', '--json'],
+      ['sync', '--changed', '--check'],
+      ['sync', '--', '--check'],
+      ['docs', 'drift', '--json'],
+      ['docs', 'sync'],
+      ['validate', '--json'],
+      ['status', '--json'],
+      ['complete', '--json'],
+      ['model', 'check'],
+    ]) {
+      expect(usesArchctxLocalStore(storeBacked), storeBacked.join(' ')).toBe(true);
+    }
+
+    const f = fixture({ git: false });
+    const privateDir = join(f.root, 'priv');
+    mkdirSync(privateDir, { recursive: true });
+    if (process.platform !== 'win32') chmodSync(privateDir, 0o700);
+    const canonicalPriv = realpathSync(privateDir);
+
+    expect(resolveSafeArchctxLocalStoreOverride(f.root, {})).toBeUndefined();
+    expect(resolveSafeArchctxLocalStoreOverride(f.root, { ARCHCONTEXT_LOCAL_STORE_PATH: ':memory:' })).toBeUndefined();
+    expect(resolveSafeArchctxLocalStoreOverride(f.root, { ARCHCONTEXT_LOCAL_STORE_PATH: join(privateDir, 'cache.sqlite') }))
+      .toBe(join(canonicalPriv, 'cache.sqlite'));
+    expect(resolveSafeArchctxLocalStoreOverride(f.root, { ARCHCONTEXT_LOCAL_STORE_PATH: 'priv/cache.sqlite' }))
+      .toBe(join(canonicalPriv, 'cache.sqlite'));
+    if (process.platform === 'darwin' && lstatSync('/tmp').isSymbolicLink()) {
+      const macTmpDir = mkdtempSync('/tmp/rh-canon-prefix-');
+      try {
+        chmodSync(macTmpDir, 0o700);
+        expect(resolveSafeArchctxLocalStoreOverride(f.root, { ARCHCONTEXT_LOCAL_STORE_PATH: join(macTmpDir, 'cache.sqlite') }))
+          .toBe(join(realpathSync(macTmpDir), 'cache.sqlite'));
+        expect(resolveSafeArchctxLocalStoreOverride(f.root, { ARCHCONTEXT_LOCAL_STORE_PATH: join(macTmpDir, 'absent-sub', 'cache.sqlite') }))
+          .toBe(join(realpathSync(macTmpDir), 'absent-sub', 'cache.sqlite'));
+      } finally {
+        rmSync(macTmpDir, { recursive: true, force: true });
+      }
+    }
+    expect(() => resolveSafeArchctxLocalStoreOverride(f.root, { ARCHCONTEXT_LOCAL_STORE_PATH: '' }))
+      .toThrow('Refusing unsafe ARCHCONTEXT_LOCAL_STORE_PATH');
+    expect(() => resolveSafeArchctxLocalStoreOverride(f.root, { ARCHCONTEXT_LOCAL_STORE_PATH: './cache.sqlite' }))
+      .toThrow("'.' or '..'");
+    expect(() => resolveSafeArchctxLocalStoreOverride(f.root, { ARCHCONTEXT_LOCAL_STORE_PATH: `${privateDir}/../priv/cache.sqlite` }))
+      .toThrow("'.' or '..'");
+
+    if (process.platform !== 'win32') {
+      const symParent = join(f.root, 'sym-parent');
+      symlinkSync(privateDir, symParent);
+      expect(() => resolveSafeArchctxLocalStoreOverride(f.root, { ARCHCONTEXT_LOCAL_STORE_PATH: join(symParent, 'cache.sqlite') }))
+        .toThrow('not a symlink or file');
+    }
+
+    // Genuine v2 cache accepts clean state and refuses any existing -wal, -shm, or -journal sidecar without mutating bytes.
+    const genuineV2Path = join(privateDir, 'local-cache-v2.sqlite');
+    const genuineDb = new Database(genuineV2Path);
+    try {
+      genuineDb.exec(`
+        PRAGMA journal_mode = WAL;
+        CREATE TABLE architecture_debt_base_cache(cache_key TEXT PRIMARY KEY,report_json TEXT NOT NULL,updated_at TEXT NOT NULL);
+        CREATE TABLE external_docs_cache(provider TEXT NOT NULL,library_id TEXT NOT NULL,version TEXT NOT NULL,query_digest TEXT NOT NULL,content_digest TEXT NOT NULL,resource_json TEXT NOT NULL,retrieved_at TEXT NOT NULL,expires_at TEXT NOT NULL,PRIMARY KEY(provider,library_id,version,query_digest));
+        CREATE TABLE kv_cache(namespace TEXT NOT NULL,cache_key TEXT NOT NULL,value_json TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(namespace,cache_key));
+        PRAGMA application_id = 1094931544;
+        PRAGMA user_version = 200;
+        PRAGMA wal_checkpoint(TRUNCATE);
+      `);
+    } finally {
+      genuineDb.close();
+    }
+    // bun:sqlite sets SQLITE_FCNTL_PERSIST_WAL, leaving 0-byte -wal and -shm on close unlike node:sqlite.
+    rmSync(`${genuineV2Path}-wal`, { force: true });
+    rmSync(`${genuineV2Path}-shm`, { force: true });
+    expect(resolveSafeArchctxLocalStoreOverride(f.root, { ARCHCONTEXT_LOCAL_STORE_PATH: genuineV2Path }))
+      .toBe(join(canonicalPriv, 'local-cache-v2.sqlite'));
+    const genuineBytes = readFileSync(genuineV2Path);
+    for (const suffix of ['-wal', '-shm', '-journal'] as const) {
+      const sidecarPath = `${genuineV2Path}${suffix}`;
+      const foreignBytes = Buffer.from(`foreign ${suffix} bytes\n`);
+      writeFileSync(sidecarPath, foreignBytes);
+      try {
+        expect(() => resolveSafeArchctxLocalStoreOverride(f.root, { ARCHCONTEXT_LOCAL_STORE_PATH: genuineV2Path }))
+          .toThrow('ownership cannot be proven');
+        expect(readFileSync(genuineV2Path).equals(genuineBytes)).toBe(true);
+        expect(readFileSync(sidecarPath).equals(foreignBytes)).toBe(true);
+      } finally {
+        rmSync(sidecarPath, { force: true });
+      }
+    }
+  });
 });

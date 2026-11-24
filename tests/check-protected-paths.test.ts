@@ -87,4 +87,42 @@ describe('Git protected path boundary', () => {
       expect(check(root, ['--unknown']).status).not.toBe(0);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
+
+  test('non-canonical refactor decision filenames are refused on staged and tracked checks even with core.ignorecase=true', () => {
+    fixture((root, git) => {
+      git('config', 'core.ignorecase', 'true');
+      writeFileSync(
+        join(root, '.gitignore'),
+        `_ops/\n_ref/\n!.archcontext/refactor-decisions/\n.archcontext/refactor-decisions/*\n!.archcontext/refactor-decisions/recommendation.${'[0-9a-f]'.repeat(16)}.json\n.archcontext/refactor-decisions/*/\n`,
+      );
+      git('add', '.gitignore');
+      git('commit', '-qm', 'add refactor-decisions ignore rule');
+      mkdirSync(join(root, '.archcontext/refactor-decisions'), { recursive: true });
+      const canonical = '.archcontext/refactor-decisions/recommendation.0123456789abcdef.json';
+      writeFileSync(join(root, canonical), '{}\n');
+      git('add', '.');
+      expect(check(root).status).toBe(0);
+      git('commit', '-qm', 'commit canonical decision');
+      expect(check(root, ['--tracked']).status).toBe(0);
+
+      for (const nonCanonical of [
+        '.archcontext/refactor-decisions/recommendation.ABCDEF0123456789.json',
+        '.archcontext/refactor-decisions/recommendation.fedcba9876543210.JSON',
+      ]) {
+        writeFileSync(join(root, nonCanonical), '{}\n');
+        git('add', '.');
+        const blocked = check(root);
+        expect(blocked.status).toBe(1);
+        expect(blocked.stderr).toContain(nonCanonical);
+        expect(blocked.stderr).toContain('recommendation.<16-lowercase-hex>.json');
+        expect(check(root, [], '1').status).toBe(1);
+
+        git('commit', '-qm', 'bypassed non-canonical decision');
+        expect(check(root, ['--tracked']).status).toBe(1);
+        git('rm', '-q', '--', nonCanonical);
+        expect(check(root).status).toBe(0);
+        git('commit', '-qm', 'remove non-canonical decision');
+      }
+    });
+  });
 });
