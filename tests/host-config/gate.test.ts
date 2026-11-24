@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { FragmentEdit, HostConfigStrategy, HostPath } from '../../src/core/host-config/types';
 import {
   AntigravityHooksPathError,
+  antigravityAgentsDirPath,
   antigravityGlobalRulesPath,
   antigravityMcpConfigPath,
   antigravitySkillsDirPath,
@@ -1371,4 +1372,105 @@ test.skipIf(process.platform === 'win32')('Antigravity AGENTS.md and narrow skil
   expect(f.gate().revert([rulesPath]).map((entry) => entry.action)).toEqual(['removed']);
   expect(lstatSync(configDir).isDirectory()).toBe(true);
   expect(readFileSync(join(userSkill, 'SKILL.md'), 'utf8')).toBe('# user skill\n');
+});
+
+test.skipIf(process.platform === 'win32')('Antigravity agentsDir enforces root-specific no-symlink guards independently of skillsDir and tracks file + container identities', () => {
+  const f = fixture();
+  const env = { HOME: f.home };
+  const skillsDir = antigravitySkillsDirPath(env);
+  const agentsDir = antigravityAgentsDirPath(env);
+  const configDir = join(f.home, '.gemini', 'config');
+  const agentDir = join(agentsDir, 'rh-advisor-0123456789ab');
+  const agentFile = join(agentDir, 'agent.md');
+  const agentBytes = Buffer.from('---\nname: rh-advisor-0123456789ab\n---\n', 'utf8');
+  mkdirSync(skillsDir, { recursive: true });
+
+  expect(pathRecordHost(env, agentFile)).toBe('antigravity');
+  expect(pathRecordHost(env, agentsDir)).toBeNull();
+  expect(pathRecordHost(env, join(configDir, 'other', 'x'))).toBeNull();
+
+  // Write agent.md as a file PathRecord: records both agentsDir and agentDir in ledger.directories + directory_identities, never ~/.gemini or ~/.gemini/config.
+  expect(f.gate().writePaths([{ path: agentFile, owner: 'core', entry: { type: 'file', bytes: agentBytes, mode: 0o600 } }])).toEqual([agentFile]);
+  const createdAgentsIdentity = observeEntryIdentity(agentsDir);
+  const createdAgentDirIdentity = observeEntryIdentity(agentDir);
+  const createdAgentFileIdentity = observeEntryIdentity(agentFile);
+  expect(f.ledger().paths[agentFile]).toMatchObject({ host: 'antigravity', owner: 'core', kind: 'created', committed: { type: 'file' }, identity: createdAgentFileIdentity });
+  expect(f.ledger().directories).toContain(agentsDir);
+  expect(f.ledger().directories).toContain(agentDir);
+  expect(f.ledger().directory_identities?.[agentsDir]).toBe(createdAgentsIdentity);
+  expect(f.ledger().directory_identities?.[agentDir]).toBe(createdAgentDirIdentity);
+  expect(f.ledger().directories).not.toContain(configDir);
+  expect(f.ledger().directories).not.toContain(join(f.home, '.gemini'));
+
+  // Symlinked agentsDir while skillsDir is a clean real directory fails closed across planPaths, writePaths, revertPaths, and configStatus.
+  const parkedAgents = join(f.home, 'parked-agents');
+  renameSync(agentsDir, parkedAgents);
+  symlinkSync(parkedAgents, agentsDir, 'dir');
+  expect(f.gate().planPaths([{ path: agentFile, owner: 'core', entry: { type: 'file', bytes: agentBytes, mode: 0o600 } }]).refusals[0]).toBeInstanceOf(AntigravityHooksPathError);
+  expect(() => f.gate().writePaths([{ path: agentFile, owner: 'core', entry: { type: 'file', bytes: agentBytes, mode: 0o600 } }])).toThrow(AntigravityHooksPathError);
+  expect(() => f.gate().revertPaths([agentFile])).toThrow(AntigravityHooksPathError);
+  expect(() => configStatus(env)).toThrow(AntigravityHooksPathError);
+  rmSync(agentsDir);
+  renameSync(parkedAgents, agentsDir);
+
+  // Same-bytes inode replacement of agent.md is rejected by revert (kept_edited, host_config_entry_replaced) and keeps agent.md and both directories.
+  const copyFile = join(f.home, 'agent-copy.md');
+  writeFileSync(copyFile, agentBytes);
+  renameSync(copyFile, agentFile);
+  const replacedFileId = observeEntryIdentity(agentFile);
+  expect(replacedFileId).not.toBe(createdAgentFileIdentity);
+  expect(f.gate().revertPaths([agentFile])).toEqual([{ path: agentFile, action: 'kept_edited', code: 'host_config_entry_replaced' }]);
+  expect(observeEntryIdentity(agentFile)).toBe(replacedFileId);
+  expect(lstatSync(agentDir).isDirectory()).toBe(true);
+  expect(lstatSync(agentsDir).isDirectory()).toBe(true);
+
+  // Clean revert of an untouched file removes agent.md, agentDir, and rh-created empty agentsDir when identities match, preserving ~/.gemini/config.
+  rmSync(agentsDir, { recursive: true, force: true });
+  writeFileSync(join(f.root, 'ledger.json'), JSON.stringify({ ...f.ledger(), paths: {}, directories: [], directory_identities: undefined }));
+  expect(f.gate().writePaths([{ path: agentFile, owner: 'core', entry: { type: 'file', bytes: agentBytes, mode: 0o600 } }])).toEqual([agentFile]);
+  expect(f.gate().revertPaths([agentFile]).map((entry) => entry.action)).toEqual(['removed']);
+  expect(existsSync(agentFile)).toBe(false);
+  expect(existsSync(agentDir)).toBe(false);
+  expect(existsSync(agentsDir)).toBe(false);
+  expect(f.ledger().directory_identities).toBeUndefined();
+  expect(lstatSync(configDir).isDirectory()).toBe(true);
+
+  // Replacing an rh-created agentsDir with a new empty directory (different identity) keeps the replacement on revert.
+  expect(f.gate().writePaths([{ path: agentFile, owner: 'core', entry: { type: 'file', bytes: agentBytes, mode: 0o600 } }])).toEqual([agentFile]);
+  const origAgentsId = observeEntryIdentity(agentsDir);
+  expect(f.ledger().directory_identities?.[agentsDir]).toBe(origAgentsId);
+  const movedAgents = join(f.home, 'moved-agents');
+  renameSync(agentsDir, movedAgents);
+  mkdirSync(agentsDir);
+  const replacementAgentsId = observeEntryIdentity(agentsDir);
+  expect(replacementAgentsId).not.toBe(origAgentsId);
+  expect(f.gate().revertPaths([agentFile]).map((entry) => entry.action)).toEqual(['released']);
+  expect(lstatSync(agentsDir).isDirectory()).toBe(true);
+  expect(observeEntryIdentity(agentsDir)).toBe(replacementAgentsId);
+  expect(f.ledger().directories).not.toContain(agentsDir);
+  expect(f.ledger().directory_identities).toBeUndefined();
+  rmSync(movedAgents, { recursive: true, force: true });
+
+  // An unproved agentDir/agentsDir entry in ledger.directories without directory_identities fails safe and is not removed.
+  rmSync(agentsDir, { recursive: true, force: true });
+  expect(f.gate().writePaths([{ path: agentFile, owner: 'core', entry: { type: 'file', bytes: agentBytes, mode: 0o600 } }])).toEqual([agentFile]);
+  const unprovedLedger = f.ledger();
+  delete unprovedLedger.directory_identities;
+  writeFileSync(join(f.root, 'ledger.json'), JSON.stringify(unprovedLedger, null, 2));
+  expect(f.gate().revertPaths([agentFile]).map((entry) => entry.action)).toEqual(['removed']);
+  expect(existsSync(agentFile)).toBe(false);
+  expect(lstatSync(agentDir).isDirectory()).toBe(true);
+  expect(lstatSync(agentsDir).isDirectory()).toBe(true);
+  expect(f.ledger().directories).not.toContain(agentDir);
+  expect(f.ledger().directories).not.toContain(agentsDir);
+
+  // Pre-existing user agentsDir is not recorded in ledger.directories and stays even when empty after revert.
+  rmSync(agentDir, { recursive: true, force: true });
+  expect(f.gate().writePaths([{ path: agentFile, owner: 'core', entry: { type: 'file', bytes: agentBytes, mode: 0o600 } }])).toEqual([agentFile]);
+  expect(f.ledger().directories).not.toContain(agentsDir);
+  expect(f.ledger().directories).toContain(agentDir);
+  expect(f.gate().revertPaths([agentFile]).map((entry) => entry.action)).toEqual(['removed']);
+  expect(existsSync(agentFile)).toBe(false);
+  expect(existsSync(agentDir)).toBe(false);
+  expect(lstatSync(agentsDir).isDirectory()).toBe(true);
 });

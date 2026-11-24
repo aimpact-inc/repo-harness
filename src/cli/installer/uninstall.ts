@@ -1,23 +1,25 @@
 import { globalConfigurationPath, mutateGlobalConfiguration } from '../../effects/configuration/global-configuration';
 import { globalRuntimeScope, withRuntimeTransactionContext, type RuntimeTransactionContext } from '../../effects/locking/runtime-transaction-lock';
 import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, rmdirSync, unlinkSync } from 'fs';
-import { dirname, join } from 'path';
+import { basename, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { createHash } from 'crypto';
 import { hostSkillRoot, providerSkillLock, type ProviderSkillLock } from '../../effects/host-skill-roots';
+import { isPathInside } from '../../effects/path-containment';
 import { piPackageEntry, piPackageRemoval, recordedPiPackages, removePiPackage } from './pi-package';
 import { globalContextPath, inspectUnrecordedGlobalRules, previewGlobalRulesAdoptedRevert, type GlobalContextHost } from './global-context';
 import { legacyRepositoryExcludesPath } from './repository-excludes';
 import { isHistoricalRetiredAgentRecord, readInstallState, retiredAgentRecordCheck } from './install-profile';
 import { installStatePendingMigration, migrateInstallState, planInstallStateMigration } from './install-state-migration';
 import type { PathRecord } from '../../core/host-config/types';
-import { partitionPathRecords, pathRecordRoot, pathRecordsDigest, readPathRecords, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
+import { antigravityDirMatches, partitionPathRecords, pathRecordRoot, pathRecordsDigest, readPathRecords, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
 import { InstallStateError, installProfileStatePath } from './install-state';
 import { assertConfigurationPath, configurationReceiptPath, hostConfigurationRoot, writePrivateConfiguration } from './configuration-ownership';
 import { migrateCodexConfigRecords, planCodexConfigMigration, previewAdoptedRevert } from './codex-config-migration';
 import { migrateJsonConfigRecords, planJsonConfigMigration, previewJsonAdoptedRevert } from './json-config-migration';
 import { UNVERIFIED_INSTALLER_RANGES } from '../../effects/host-config/delegated';
 import {
+  antigravityAgentsDirHostPath,
   antigravityGlobalRulesHostPath,
   antigravityHooksPath,
   antigravityHostPath,
@@ -25,6 +27,7 @@ import {
   antigravityMcpConfigPath,
   antigravitySkillsDirHostPath,
   checkAntigravityPath,
+  checkAntigravityRecordPath,
   openHostConfigGate,
   openRepositoryFileGate,
   planPathRevertEntry,
@@ -37,8 +40,9 @@ import {
   type HostConfigToolRevertEntry,
 } from '../../effects/host-config/gate';
 import { hostConfigPaths, projectedLedgerPaths, readLedger, readProjectedLedger, repositoryLedgers } from '../../effects/host-config/store';
+import { observeEntryIdentity } from '../../effects/host-config/whole-path';
 import { planToolRemoval, removeTools, windowsPowershellPath, windowsUserPathPort, type ToolRemovalEntry } from '../../effects/host-config/tools';
-import { HostConfigError, type ToolId, type ToolRecord } from '../../core/host-config/types';
+import { HostConfigError, type HostConfigLedger, type ToolId, type ToolRecord } from '../../core/host-config/types';
 import { FileSyntaxError, parseJsonText, parseTomlText } from '../../core/evidence/file-syntax';
 import type { TargetId } from './types';
 
@@ -260,6 +264,45 @@ function uninstallResult(items: UninstallItem[], dryRun: boolean): UninstallResu
     lines: [...items.map((item) => `[${item.action}] ${item.path}: ${item.reason}`), `[uninstall] ${status}${dryRun ? ' (dry-run)' : ''}`] };
 }
 
+function findRecordedDirectory(directories: readonly string[], dir: string): string | undefined {
+  return directories.find((candidate) => candidate === dir || antigravityDirMatches(dir, candidate));
+}
+
+function collectKeptAntigravityAgentDirs(
+  ledger: HostConfigLedger,
+  removedSurfaces: ReadonlySet<string>,
+  records: PathRecords,
+  reported: Set<string>,
+): UninstallItem[] {
+  const kept: UninstallItem[] = [];
+  for (const key of removedSurfaces) {
+    const record = records[key];
+    if (!record || record.host !== 'antigravity' || record.committed.type !== 'file' || basename(key) !== 'agent.md') continue;
+    const agentDir = dirname(key);
+    const recordedAgentDir = findRecordedDirectory(ledger.directories, agentDir);
+    if (recordedAgentDir !== undefined && !reported.has(agentDir) && lstatSync(agentDir, { throwIfNoEntry: false })?.isDirectory()) {
+      const expectedId = ledger.directory_identities?.[recordedAgentDir];
+      if (expectedId === undefined || observeEntryIdentity(agentDir) !== expectedId) {
+        reported.add(agentDir);
+        kept.push({ path: agentDir, action: 'kept', reason: 'agent directory identity changed or unproved since rh created it; kept' });
+      } else if (readdirSync(agentDir).some((entry) => entry !== 'agent.md')) {
+        reported.add(agentDir);
+        kept.push({ path: agentDir, action: 'kept', reason: 'agent directory holds extra entries besides agent.md; kept' });
+      }
+    }
+    const agentsDir = dirname(agentDir);
+    const recordedAgentsDir = findRecordedDirectory(ledger.directories, agentsDir);
+    if (recordedAgentsDir !== undefined && !reported.has(agentsDir) && lstatSync(agentsDir, { throwIfNoEntry: false })?.isDirectory()) {
+      const expectedAgentsId = ledger.directory_identities?.[recordedAgentsDir];
+      if (expectedAgentsId === undefined || observeEntryIdentity(agentsDir) !== expectedAgentsId) {
+        reported.add(agentsDir);
+        kept.push({ path: agentsDir, action: 'kept', reason: 'agents directory identity changed or unproved since rh created it; kept' });
+      }
+    }
+  }
+  return kept;
+}
+
 function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   const env = opts.env ?? process.env;
   const home = hostConfigurationRoot(env);
@@ -308,15 +351,24 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   const includeAntigravityMcp = opts.target === 'antigravity' || (opts.target === 'both' && Boolean(currentLedger.files[antigravityMcp]));
   const antigravityChecks: [string, 'regular file' | 'directory'][] = [];
   if (includeAntigravityMcp) antigravityChecks.push([antigravityMcp, 'regular file']);
-  if (opts.target === 'antigravity') {
-    antigravityChecks.push(
-      [antigravityHostPath(env), 'regular file'],
-      [antigravityGlobalRulesHostPath(env), 'regular file'],
-      [antigravitySkillsDirHostPath(env), 'directory'],
-    );
-    hostPaths.push(antigravityHooksPath(env));
-  } else if (opts.target === 'both' && currentLedger.files[antigravityHostPath(env)]) {
-    hostPaths.push(antigravityHooksPath(env));
+  if (opts.target === 'antigravity' || opts.target === 'both') {
+    const antigravityPathEntries = Object.entries(currentLedger.paths).filter(([, record]) => record.host === 'antigravity');
+    const antigravitySkills = opts.target === 'antigravity' || antigravityPathEntries.length > 0
+      ? antigravitySkillsDirHostPath(env, paths)
+      : null;
+    const hasAntigravityAgentRecord = antigravitySkills !== null && antigravityPathEntries.some(([key]) =>
+      !isPathInside(antigravitySkills, key) && !antigravityDirMatches(antigravitySkills, dirname(key)));
+    if (hasAntigravityAgentRecord) antigravityChecks.push([antigravityAgentsDirHostPath(env, paths), 'directory']);
+    if (opts.target === 'antigravity') {
+      antigravityChecks.push(
+        [antigravityHostPath(env), 'regular file'],
+        [antigravityGlobalRulesHostPath(env), 'regular file'],
+        [antigravitySkills!, 'directory'],
+      );
+      hostPaths.push(antigravityHooksPath(env));
+    } else if (currentLedger.files[antigravityHostPath(env)]) {
+      hostPaths.push(antigravityHooksPath(env));
+    }
   }
   for (const [entry, kind] of antigravityChecks) {
     try { checkAntigravityPath(entry, kind); }
@@ -417,7 +469,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       continue;
     }
     try {
-      if (record.host === 'antigravity') checkAntigravityPath(antigravitySkillsDirHostPath(env), 'directory');
+      if (record.host === 'antigravity') checkAntigravityRecordPath(key, env, paths);
       // The record is checked beneath its own host root, which a link can put outside HOME.
       const root = pathRecordRoot(env, key, record);
       if (root === null) throw new Error(`the record is outside the root of its host: ${key}`);
@@ -437,6 +489,9 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
         : { path: key, action: record.baseline.state === 'known' && !record.baseline.existed ? 'restored' : 'reverted', reason: 'unchanged transaction-owned surface' });
     } catch (error) { unresolved(key, String((error as Error).message)); }
   }
+
+  const reportedKeptAgentDirs = new Set<string>();
+  items.push(...collectKeptAntigravityAgentDirs(currentLedger, removedSurfaces, records, reportedKeptAgentDirs));
 
   if (opts.target === 'both') {
     const path = join(home, '.repo-harness/config.json');
@@ -504,6 +559,16 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
         || (retired.length && !sameRevert(gate.revertPaths(retired, { retire: true }), retired.map(key => pathReverts.get(key)!)))) {
         throw new Error(`configuration changed after preview: ${surfaces.join(', ')}`);
       }
+      for (const key of active) {
+        const record = records[key];
+        if (!record || record.host !== 'antigravity' || record.committed.type !== 'file' || basename(key) !== 'agent.md') continue;
+        const agentDir = dirname(key);
+        if (!reportedKeptAgentDirs.has(agentDir) && findRecordedDirectory(currentLedger.directories, agentDir) !== undefined
+          && lstatSync(agentDir, { throwIfNoEntry: false })?.isDirectory()) {
+          reportedKeptAgentDirs.add(agentDir);
+          items.push({ path: agentDir, action: 'kept', reason: 'agent directory was not removed (extra entries or changed identity); kept' });
+        }
+      }
       if (retireRecords) writePathRecords(env, {});
       for (const [path, content] of writes) {
         assertConfigurationPath(path, surfaceRoot(path));
@@ -525,10 +590,24 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
           if (index === -1) items.push(item); else items[index] = item;
         }
       }
+      let antigravityRoots: { readonly skills: string; readonly agents: string } | null = null;
+      const isAntigravityManagedParent = (parent: string): boolean => {
+        if (opts.target !== 'antigravity' && opts.target !== 'both') return false;
+        const leaf = basename(parent).toLowerCase();
+        if (leaf !== 'skills' && leaf !== 'agents') return false;
+        antigravityRoots ??= {
+          skills: antigravitySkillsDirHostPath(env, paths),
+          agents: antigravityAgentsDirHostPath(env, paths),
+        };
+        return antigravityDirMatches(antigravityRoots.skills, parent) || antigravityDirMatches(antigravityRoots.agents, parent);
+      };
       for (const path of [...originals.keys()]) {
         const parent = dirname(path);
+        // Antigravity skills and agents directories are managed only through gate.revertPaths + ledger.directories,
+        // so pre-existing user ~/.gemini/config/{skills,agents} directories stay even when empty.
+        if (isAntigravityManagedParent(parent)) continue;
         // Never remove a host root or history tree; only now-empty managed leaf containers.
-        if (['skills', 'rules', 'agents'].includes(parent.split('/').at(-1) ?? '') && existsSync(parent) && readdirSync(parent).length === 0) rmdirSync(parent);
+        if (['skills', 'rules', 'agents'].includes(parent.split('/').at(-1) ?? '') && lstatSync(parent, { throwIfNoEntry: false })?.isDirectory() && readdirSync(parent).length === 0) rmdirSync(parent);
       }
     } catch (error) { unresolved(home, `uninstall incomplete: ${String((error as Error).message)}`); }
   }

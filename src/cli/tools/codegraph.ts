@@ -6,7 +6,8 @@ import { CLAUDE_ROOT_CONFIG_BACKUP, CODEGRAPH_MCP_SELECTOR, CODEGRAPH_PERMISSION
 import { jsonFragment, jsonFragmentValue } from '../../core/host-config/json-fragment';
 import { HostConfigError } from '../../core/host-config/types';
 import { isRecord } from '../../core/evidence/is-record';
-import { antigravityGlobalRulesHostPath, antigravityHostPath, antigravityMcpConfigHostPath, antigravityMcpConfigPath, decode, openHostConfigGate, resolveUserConfigFile, type HostConfigFileChange } from '../../effects/host-config/gate';
+import { antigravityGlobalRulesHostPath, antigravityHostPath, antigravityMcpConfigHostPath, antigravityMcpConfigPath, antigravitySkillsDirHostPath, decode, openHostConfigGate, resolveUserConfigFile, type HostConfigFileChange } from '../../effects/host-config/gate';
+import { antigravityDirMatches } from '../../effects/host-config/path-records';
 import { hostConfigPaths, observeFile, readProjectedLedger } from '../../effects/host-config/store';
 import { resolveRepoRoot } from '../hook/runtime';
 import { isPathInside } from '../../effects/path-containment';
@@ -432,10 +433,15 @@ function configureClaudeToolPermission(actions: CodegraphAction[], env?: NodeJS.
 function optedIntoAntigravity(env: NodeJS.ProcessEnv): boolean {
   const paths = hostConfigPaths(env);
   const ledger = readProjectedLedger(paths);
-  return Boolean(ledger.files[antigravityHostPath(env, paths)]
+  if (ledger.files[antigravityHostPath(env, paths)]
     || ledger.files[antigravityGlobalRulesHostPath(env, paths)]
-    || ledger.files[antigravityMcpConfigHostPath(env, paths)]
-    || Object.values(ledger.paths).some((record) => record.host === "antigravity"));
+    || ledger.files[antigravityMcpConfigHostPath(env, paths)]) {
+    return true;
+  }
+  const antigravityPaths = Object.entries(ledger.paths).filter(([, record]) => record.host === "antigravity");
+  if (antigravityPaths.length === 0) return false;
+  const skillsRoot = antigravitySkillsDirHostPath(env, paths);
+  return antigravityPaths.some(([key]) => antigravityDirMatches(skillsRoot, dirname(key)));
 }
 
 function configureCodegraphRuntime(opts: CodegraphConfigureOptions): CodegraphConfigureResult {

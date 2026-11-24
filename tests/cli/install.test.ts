@@ -11,7 +11,10 @@ import { CLAUDE_STATUS_LINE_PIPE, claudeTarget } from '../../src/cli/installer/t
 import type { Location } from '../../src/cli/installer/types';
 import { requestUserInputFragment } from '../../src/cli/installer/targets/codex';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
-import { hostConfigPaths } from '../../src/effects/host-config/store';
+import { hostConfigPaths, readLedger } from '../../src/effects/host-config/store';
+import { supportedPathRecord } from '../../src/cli/installer/install-profile';
+import { checkAntigravitySkills, hasRecordedAntigravityState } from '../../src/cli/installer/targets/antigravity';
+import { configureAntigravityCodegraphStep } from '../../src/cli/tools/codegraph';
 import { isRepoHarnessManagedHookCommand } from '../../src/core/adoption/managed-hook-config';
 import { buildManagedHooks, compareManagedHookProjection, hookSelector, managedStatusLine } from '../../src/cli/installer/managed-entries';
 
@@ -233,6 +236,52 @@ test.skipIf(process.platform === 'win32')('Antigravity retires the old owned por
     expect(fs.readlinkSync(portal)).toBe(portalSource);
   });
 });
+
+test.skipIf(process.platform === 'win32')('Antigravity skills planner, doctor, CodeGraph opt-in, and install-profile preserve core-owned seat agent files without false opt-in', () => {
+  withTempHome('rh-antigravity-seat-agents', (home) => {
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, BUN_INSTALL: path.join(home, '.bun') };
+    const agentsDir = path.join(home, '.gemini', 'config', 'agents');
+    const agentName = 'rh-advisor-0123456789ab';
+    const agentDir = path.join(agentsDir, agentName);
+    const agentFile = path.join(agentDir, 'agent.md');
+    const agentContent = `---\nname: ${agentName}\n---\n`;
+
+    // Record a core-owned agy seat agent file before any Antigravity skills/hooks install.
+    openHostConfigGate({ env }).writePaths([{ path: agentFile, owner: 'core', entry: { type: 'file', bytes: Buffer.from(agentContent, 'utf8'), mode: 0o600 } }]);
+    const recordedAgent = readLedger(hostConfigPaths(env)).paths[agentFile]!;
+    expect(recordedAgent).toMatchObject({ host: 'antigravity', owner: 'core', kind: 'created', committed: { type: 'file' } });
+
+    // supportedPathRecord accepts only core-owned file records at agents/<rh-<role>-<digest12>>/agent.md.
+    const isSupported = supportedPathRecord(env);
+    expect(isSupported(agentFile, recordedAgent)).toBe(true);
+    expect(isSupported(path.join(agentsDir, 'my-user-agent', 'agent.md'), recordedAgent)).toBe(false);
+    expect(isSupported(path.join(agentDir, 'notes.md'), recordedAgent)).toBe(false);
+    expect(isSupported(agentDir, { ...recordedAgent, committed: { type: 'directory', sha256: `sha256:${'0'.repeat(64)}` } })).toBe(false);
+    expect(isSupported(agentFile, { ...recordedAgent, owner: 'peer-runtime' })).toBe(false);
+    expect(isSupported(agentFile, { ...recordedAgent, committed: { type: 'symlink', target: agentDir } })).toBe(false);
+
+    // Agent records alone must not trigger Antigravity opt-in, CodeGraph MCP setup, or false antigravity-skills doctor failures.
+    expect(hasRecordedAntigravityState(env, false)).toBe(false);
+    expect(hasRecordedAntigravityState(env, true)).toBe(false);
+    expect(configureAntigravityCodegraphStep(home, env)).toBeUndefined();
+    expect(checkAntigravitySkills(env)).toMatchObject({ id: 'antigravity-skills', status: 'na' });
+    const noopUpdate = antigravityCli(home, ['update', '--target', 'antigravity', '--no-cli']);
+    expect(noopUpdate.status, noopUpdate.stdout + noopUpdate.stderr).toBe(0);
+    expect(fs.existsSync(path.join(home, '.gemini', 'config', 'hooks.json'))).toBe(false);
+    expect(fs.existsSync(agentFile)).toBe(true);
+
+    // Installing and updating Antigravity skills must never plan or delete live agent files.
+    const install = antigravityCli(home, ['install', '--target', 'antigravity']);
+    expect(install.status, install.stdout + install.stderr).toBe(0);
+    const updateDry = antigravityCli(home, ['update', '--target', 'antigravity', '--no-cli', '--dry-run', '--json']);
+    expect(updateDry.status, updateDry.stderr).toBe(0);
+    expect(JSON.parse(updateDry.stdout).host_config.items.some((item: { path: string }) => item.path === agentFile || item.path === agentDir)).toBe(false);
+    const update = antigravityCli(home, ['update', '--target', 'antigravity', '--no-cli']);
+    expect(update.status, update.stdout + update.stderr).toBe(0);
+    expect(fs.readFileSync(agentFile, 'utf8')).toBe(agentContent);
+    expect(readLedger(hostConfigPaths(env)).paths[agentFile]).toBeDefined();
+  });
+}, 30_000);
 
 test.skipIf(process.platform === 'win32')('Antigravity --dry-run reports unowned skill collisions and exits non-zero, matching apply', () => {
   withTempHome('rh-antigravity-dry-run-collision', (home) => {

@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "child_process";
 import { createHash } from "crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { basename, delimiter, dirname, join } from "path";
-import { AGY_READONLY_COMMAND_PREFIXES, AGY_WORKER_COMMAND_PREFIXES, agySeatCommandRules, agySeatLimits, buildSeatLaunch, seatPaneName } from "../../src/core/board/seat-launch";
+import { AGY_READONLY_COMMAND_PREFIXES, AGY_SEAT_AGENT_DIR_PATTERN, AGY_WORKER_COMMAND_PREFIXES, agySeatCommandRules, agySeatLimits, buildSeatLaunch, seatPaneName } from "../../src/core/board/seat-launch";
+import { agySeatAgentSpec } from "../../src/effects/board/seats-configuration";
 import { HANDOFF_SECTIONS, seatHandoffPath, seatResetReason, seatResetRelaunchPath, seatResetRequestPath, seatResetSteps } from "../../src/core/board/seat-reset";
 import { EDIT_GUARD_SCOPE_SECTION } from "../../src/cli/hook/session-context";
 import { SeatResetError, readSeatSession, recordSeatSession, runSeatReset, type SeatRelaunch, type SeatResetNotify, type SeatResetOptions } from "../../src/effects/board/seat-reset";
@@ -16,6 +17,8 @@ import { effectiveSeatConfig, formatSeatRoutes, seatAccountQuotas } from "../../
 import { assertPiShell } from "../../src/effects/board/pi-shell";
 import { readClaudeQuota } from "../../src/effects/board/quota";
 import { buildAntigravityHooks } from "../../src/cli/installer/managed-entries";
+import { runUserUninstall } from "../../src/cli/installer/uninstall";
+import { observeEntryIdentity } from "../../src/effects/host-config/whole-path";
 import { seedGlobalPackageFixture } from "../helpers/install-ownership";
 import { agyCatalogScript, type AgyCatalogFixture } from "../helpers/agy-cli-fixture";
 
@@ -218,8 +221,13 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     const raw = f.run(["argv", "advisor", ...labels, "--json"]);
     expect(raw.status, raw.stderr).toBe(0);
     const labeled = JSON.parse(raw.stdout);
-    const directory = labeled.argv[labeled.argv.indexOf("--add-dir") + 1];
-    expect(directory).toStartWith(join(realpathSync(f.home), ".repo-harness", "seats", "agy"));
+    const expectedSpec = agySeatAgentSpec("advisor", AGY_ADVISOR);
+    const agentName = labeled.argv[labeled.argv.indexOf("--agent") + 1];
+    expect(labeled.argv).not.toContain("--add-dir");
+    expect(agentName).toBe(expectedSpec.name);
+    expect(agentName).toMatch(AGY_SEAT_AGENT_DIR_PATTERN);
+    const agentDir = join(realpathSync(f.home), ".gemini", "config", "agents", agentName);
+    expect(existsSync(join(f.home, ".repo-harness", "seats", "agy"))).toBe(false);
     const settings = { trustedWorkspaces: [f.cwd], permissions: {
       "allow": [
         "command(hc ls)",
@@ -304,12 +312,22 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     expect(AGY_WORKER_COMMAND_PREFIXES.some(prefix => ["git", "gh", "hc", "rh"].includes(prefix))).toBe(false);
     expect(AGY_READONLY_COMMAND_PREFIXES.some(prefix => ["git", "gh", "hc", "rh"].includes(prefix))).toBe(false);
     expect(settings.permissions.deny).toContain("command(rh board attention start)");
-    const executable = [f.agy, "--mode", "accept-edits", "--model", "gemini-4-neon-high", "--add-dir", directory,
-      "--agent", "rh-advisor", "--settings", JSON.stringify(settings)];
+    const executable = [f.agy, "--mode", "accept-edits", "--model", "gemini-4-neon-high",
+      "--agent", agentName, "--settings", JSON.stringify(settings)];
     expect(agent(labeled)).toEqual([...UNSET_SEAT, "REPO_HARNESS_SEAT=advisor", "REPO_HARNESS_SEAT_REPOSITORY=1186405141",
       "REPO_HARNESS_SEAT_MODEL=gemini-4-neon-high", ...executable]);
-    const profile = readFileSync(join(directory, ".agents", "agents", "rh-advisor", "agent.md"), "utf8");
-    expect(profile).toContain("tools: [view_file, write_file, edit_file, run_command, search_web, schedule]\ninheritMcp: true");
+    const profile = readFileSync(join(agentDir, "agent.md"), "utf8");
+    expect(profile).toContain(`name: ${agentName}\ndescription: Repo-harness advisor\nmainAgent: true\ntools: [view_file, write_file, edit_file, run_command, search_web, schedule]\ninheritMcp: true`);
+    const ledger = JSON.parse(readFileSync(join(f.home, ".repo-harness", "config", "ledger.json"), "utf8"));
+    const agentFile = join(agentDir, "agent.md");
+    expect(ledger.paths[agentFile]).toMatchObject({
+      host: "antigravity",
+      owner: "core",
+      kind: "created",
+      committed: { type: "file", sha256: expectedSpec.fileDigest },
+      identity: observeEntryIdentity(agentFile),
+    });
+    expect(ledger.directory_identities?.[agentDir]).toBe(observeEntryIdentity(agentDir));
     expect(profile).toContain("Edit only your own files under /tmp/rh-triage/");
     expect(profile).toContain("Never edit repository source.");
     expect(profile).toContain("Never read auth or credential files.");
@@ -333,9 +351,10 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     expect(launch).toMatchObject({ seat: "orchestrator", runtime: "agy" });
     const argv = agent(launch);
     expect(argv).toContain("REPO_HARNESS_SEAT=orchestrator");
-    expect(argv[argv.indexOf("--agent") + 1]).toBe("rh-orchestrator");
-    const directory = argv[argv.indexOf("--add-dir") + 1];
-    const profile = readFileSync(join(directory, ".agents", "agents", "rh-orchestrator", "agent.md"), "utf8");
+    const expectedAgent = agySeatAgentSpec("orchestrator", AGY_ORCHESTRATOR).name;
+    expect(argv).not.toContain("--add-dir");
+    expect(argv[argv.indexOf("--agent") + 1]).toBe(expectedAgent);
+    const profile = readFileSync(join(f.home, ".gemini", "config", "agents", expectedAgent, "agent.md"), "utf8");
     expect(profile).toContain("tools: [view_file, run_command, search_web]\ninheritMcp: true");
     expect(profile).toContain("Never edit repository files.");
     expect(profile).toContain("triage queue in your own scratch files under /tmp");
@@ -365,7 +384,10 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
       const { permissions } = JSON.parse(argv[argv.indexOf("--settings") + 1]);
       expect(permissions.allow).toContain("command(rh seats handoff)");
       expect(permissions.deny).not.toContain("command(rh seats handoff)");
-      const profile = readFileSync(join(argv[argv.indexOf("--add-dir") + 1], ".agents", "agents", `rh-${seat}`, "agent.md"), "utf8");
+      expect(argv).not.toContain("--add-dir");
+      const agentName = argv[argv.indexOf("--agent") + 1];
+      expect(agentName).toMatch(new RegExp(`^rh-${seat}-[0-9a-f]{12}$`, "u"));
+      const profile = readFileSync(join(f.home, ".gemini", "config", "agents", agentName, "agent.md"), "utf8");
       expect(profile).not.toMatch(/^tools:.*\b(?:write_file|edit_file)\b/mu);
       const env = { ...f.env, ...Object.fromEntries(argv.filter(value => /^REPO_HARNESS_SEAT(?:_REPOSITORY)?=/u.test(value)).map(value => value.split("="))) };
       const transcript = join(f.home, ".gemini", "antigravity-cli", "brain", "handoff-fixture", ".system_generated", "logs", "transcript.jsonl");
@@ -419,6 +441,7 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     const result = f.run(args);
     expect([result.status, result.stdout, JSON.parse(result.stderr).error]).toEqual([1, "", error]);
     expect(result.stderr).not.toContain("private");
+    expect(existsSync(join(f.home, ".gemini", "config", "agents"))).toBe(false);
     expect(existsSync(join(f.home, ".repo-harness", "seats", "agy"))).toBe(false);
     expect(existsSync(f.tab)).toBe(false);
   })());
@@ -439,8 +462,9 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     expect(JSON.parse(result.stdout).model).toBe("seats.advisor.model");
     const args = JSON.parse(readFileSync(f.tab, "utf8")).argv;
     expect(args[args.indexOf("--model") + 1]).toBe(model);
-    const directory = args[args.indexOf("--add-dir") + 1];
-    expect(readFileSync(join(directory, ".agents", "agents", "rh-advisor", "agent.md"), "utf8"))
+    expect(args).not.toContain("--add-dir");
+    const agentName = args[args.indexOf("--agent") + 1];
+    expect(readFileSync(join(f.home, ".gemini", "config", "agents", agentName, "agent.md"), "utf8"))
       .toContain("tools: [view_file, run_command, search_web]\ninheritMcp: false");
     expect(readFileSync(cache, "utf8")).toBe(stale);
   }));
@@ -456,7 +480,8 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
     expect(runtime).toBe("agy");
     expect(model).toBe("gemini-4-neon-high");
     expect(argv.slice(0, 2)).toEqual(["/bin/sh", "-c"]);
-    expect(argv).toEqual(expect.arrayContaining([f.agy, "rh-advisor", `REPO_HARNESS_SEAT_REPOSITORY=${repository}`]));
+    expect(argv).not.toContain("--add-dir");
+    expect(argv).toEqual(expect.arrayContaining([f.agy, agySeatAgentSpec("advisor", AGY_ADVISOR).name, `REPO_HARNESS_SEAT_REPOSITORY=${repository}`]));
     expect(existsSync(f.tab)).toBe(false);
   }));
 
@@ -506,6 +531,7 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
     f.catalog([{ id: model, efforts: ["low", "medium", "high", "xhigh"] }]);
     const refused = f.run(agyTabArgs(f.cwd));
     expect([refused.status, JSON.parse(refused.stderr).error]).toEqual([1, "seat_effort_invalid"]);
+    expect(existsSync(join(f.home, ".gemini", "config", "agents"))).toBe(false);
     expect(existsSync(join(f.home, ".repo-harness", "seats", "agy"))).toBe(false);
     expect(existsSync(f.tab)).toBe(false);
   }));
@@ -538,12 +564,13 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
     expect(workerAgentArgs[UNSET_SEAT.length]).toBe(f.agy);
     expect(worker.argv.some((arg: string) => arg.startsWith("REPO_HARNESS_SEAT") && arg.includes("="))).toBe(false);
     expect(worker.argv).not.toContain("--dangerously-skip-permissions");
-    expect(worker.argv[worker.argv.indexOf("--agent") + 1]).toBe("rh-worker");
+    expect(worker.argv).not.toContain("--add-dir");
+    const expectedWorkerAgent = agySeatAgentSpec("worker-neon", AGY_WORKER).name;
+    expect(worker.argv[worker.argv.indexOf("--agent") + 1]).toBe(expectedWorkerAgent);
     expect(worker.brief).not.toContain("Do not edit files.");
     expect(worker.brief).not.toContain("Do not write to GitHub.");
-    const directory = worker.argv[worker.argv.indexOf("--add-dir") + 1];
-    const profile = readFileSync(join(directory, ".agents", "agents", "rh-worker", "agent.md"), "utf8");
-    expect(profile).toContain("name: rh-worker\ndescription: Repo-harness worker\nmainAgent: true\ntools: [view_file, write_file, edit_file, run_command, search_web]\ninheritMcp: false");
+    const profile = readFileSync(join(f.home, ".gemini", "config", "agents", expectedWorkerAgent, "agent.md"), "utf8");
+    expect(profile).toContain(`name: ${expectedWorkerAgent}\ndescription: Repo-harness worker\nmainAgent: true\ntools: [view_file, write_file, edit_file, run_command, search_web]\ninheritMcp: false`);
     expect(profile).toContain("Never read auth or credential files.");
     expect(profile).not.toContain("When Stop requests a handoff");
     const parsedSettings = JSON.parse(worker.argv[worker.argv.indexOf("--settings") + 1]);
@@ -592,21 +619,23 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
     const gk = JSON.parse(raw.stdout);
     expect(gk.runtime).toBe("agy");
     expect(gk.argv[gk.argv.indexOf("--model") + 1]).toBe("gemini-4-hydrogen-high");
-    expect(gk.argv[gk.argv.indexOf("--agent") + 1]).toBe("rh-gatekeeper-fallback");
+    expect(gk.argv).not.toContain("--add-dir");
+    const expectedGkAgent = agySeatAgentSpec("gatekeeper", AGY_FALLBACK).name;
+    expect(gk.argv[gk.argv.indexOf("--agent") + 1]).toBe(expectedGkAgent);
     expect(gk.argv.some((arg: string) => arg.startsWith("REPO_HARNESS_SEAT") && arg.includes("="))).toBe(false);
     expect(gk.brief).toContain("Do not edit files.");
-    const directory = gk.argv[gk.argv.indexOf("--add-dir") + 1];
-    const profile = readFileSync(join(directory, ".agents", "agents", "rh-gatekeeper-fallback", "agent.md"), "utf8");
-    expect(profile).toContain("name: rh-gatekeeper-fallback\ndescription: Repo-harness gatekeeper fallback\nmainAgent: true\ntools: [view_file, run_command, search_web]\ninheritMcp: false");
+    const profile = readFileSync(join(f.home, ".gemini", "config", "agents", expectedGkAgent, "agent.md"), "utf8");
+    expect(profile).toContain(`name: ${expectedGkAgent}\ndescription: Repo-harness gatekeeper fallback\nmainAgent: true\ntools: [view_file, run_command, search_web]\ninheritMcp: false`);
     const parsedSettings = JSON.parse(gk.argv[gk.argv.indexOf("--settings") + 1]);
     expect(parsedSettings.permissions.allow).not.toContain("command(rh seats council)");
     expect(parsedSettings.permissions.deny).toEqual(expect.arrayContaining(["command(rh publication merge)", "command(rh board merge)", "command(gh pr merge)", "command(git reset --hard)"]));
 
     // Removing hooks fails closed before creating any agent dir or tab.
-    rmSync(join(f.home, ".repo-harness", "seats", "agy"), { recursive: true, force: true });
+    rmSync(join(f.home, ".gemini", "config", "agents"), { recursive: true, force: true });
     rmSync(f.hooks);
     const refused = f.run(["argv", "gatekeeper", "--pr", "42", "--json"], extraPath);
     expect([refused.status, JSON.parse(refused.stderr).error]).toEqual([1, "antigravity_guard_unready"]);
+    expect(existsSync(join(f.home, ".gemini", "config", "agents"))).toBe(false);
     expect(existsSync(join(f.home, ".repo-harness", "seats", "agy"))).toBe(false);
   }));
 
@@ -614,6 +643,7 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
     const dry = f.run(["council", "--issue", "3377", "--members", "carbon", "--repository-id", "1186405141", "--dry-run", "--json"]);
     expect(dry.status, dry.stderr).toBe(0);
     expect(JSON.parse(dry.stdout).members[0]).toMatchObject({ member: "carbon", runtime: "agy", model: "gemini-4-carbon-high" });
+    expect(existsSync(join(f.home, ".gemini", "config", "agents"))).toBe(false);
     expect(existsSync(join(f.home, ".repo-harness", "seats", "agy"))).toBe(false);
 
     const res = f.run(["council", "--issue", "3377", "--members", "carbon", "--repository-id", "1186405141", "--space", "sp1", "--question", "Secret focus?", "--json"]);
@@ -625,10 +655,11 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
     expect(tabArg.argv.at(-2)).toBe("-i");
     expect(tabArg.argv.at(-1)).toContain("Secret focus?");
     expect(tabArg.argv.some((arg: string) => arg.startsWith("REPO_HARNESS_SEAT") && arg.includes("="))).toBe(false);
-    expect(tabArg.argv[tabArg.argv.indexOf("--agent") + 1]).toBe("rh-council");
-    const directory = tabArg.argv[tabArg.argv.indexOf("--add-dir") + 1];
-    const profile = readFileSync(join(directory, ".agents", "agents", "rh-council", "agent.md"), "utf8");
-    expect(profile).toContain("name: rh-council\ndescription: Repo-harness council\nmainAgent: true\ntools: [view_file, run_command, search_web]\ninheritMcp: false");
+    expect(tabArg.argv).not.toContain("--add-dir");
+    const councilAgent = tabArg.argv[tabArg.argv.indexOf("--agent") + 1];
+    expect(councilAgent).toMatch(/^rh-council-[0-9a-f]{12}$/u);
+    const profile = readFileSync(join(f.home, ".gemini", "config", "agents", councilAgent, "agent.md"), "utf8");
+    expect(profile).toContain(`name: ${councilAgent}\ndescription: Repo-harness council\nmainAgent: true\ntools: [view_file, run_command, search_web]\ninheritMcp: false`);
     const parsedSettings = JSON.parse(tabArg.argv[tabArg.argv.indexOf("--settings") + 1]);
     expect(parsedSettings.permissions.allow).not.toContain("command(rh seats council)");
     expect(parsedSettings.permissions.deny).toEqual(expect.arrayContaining(["command(rh publication merge)", "command(rh board merge)", "command(gh pr merge)", "command(git reset --hard)"]));
@@ -648,16 +679,205 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
     expect(readFileSync(f.tab, "utf8").trimEnd().split("\n")).toHaveLength(1);
   }));
 
-  test("the generated agent cannot replace an existing different file", withAgySeat(f => {
+  test("disk-verified cache hit reuses untouched agent file without rewriting, fails closed on edit/file-replacement/dir-replacement/digest-mismatch/unrecorded/symlink, and recreates after clean absence", withAgySeat(f => {
     const argv = ["argv", "advisor", "--json"];
     const first = f.run(argv);
     expect(first.status, first.stderr).toBe(0);
     const args = JSON.parse(first.stdout).argv;
-    const file = join(args[args.indexOf("--add-dir") + 1], ".agents", "agents", "rh-advisor", "agent.md");
+    const agentName = args[args.indexOf("--agent") + 1];
+    const agentsDir = join(realpathSync(f.home), ".gemini", "config", "agents");
+    const agentDir = join(agentsDir, agentName);
+    const file = join(agentDir, "agent.md");
+    const ledgerPath = join(f.home, ".repo-harness", "config", "ledger.json");
+    const originalContent = readFileSync(file, "utf8");
+    const fileIdentityBefore = observeEntryIdentity(file);
+    const dirIdentityBefore = observeEntryIdentity(agentDir);
+    const ledgerBefore = readFileSync(ledgerPath, "utf8");
+
+    // Cache hit: untouched disk file and dir are verified and reused without rewriting.
+    const second = f.run(argv);
+    expect(second.status, second.stderr).toBe(0);
+    expect(observeEntryIdentity(file)).toBe(fileIdentityBefore);
+    expect(observeEntryIdentity(agentDir)).toBe(dirIdentityBefore);
+    expect(readFileSync(ledgerPath, "utf8")).toBe(ledgerBefore);
+
+    // Edit between launches: fails closed and preserves user bytes.
     writeFileSync(file, "user content");
-    const refused = f.run(argv);
-    expect(refused.status).toBe(1);
+    const edited = f.run(argv);
+    expect([edited.status, JSON.parse(edited.stderr).error]).toEqual([1, "host_config_replacement_refused"]);
     expect(readFileSync(file, "utf8")).toBe("user content");
+
+    // Same-bytes inode replacement of agent.md alone: fails closed and preserves the replacement inode.
+    const siblingCopy = join(f.home, "agent-sibling-copy.md");
+    writeFileSync(siblingCopy, originalContent);
+    renameSync(siblingCopy, file);
+    const replacedFileIdentity = observeEntryIdentity(file);
+    expect(replacedFileIdentity).not.toBe(fileIdentityBefore);
+    const replacedFile = f.run(argv);
+    expect([replacedFile.status, JSON.parse(replacedFile.stderr).error]).toEqual([1, "host_config_replacement_refused"]);
+    expect(observeEntryIdentity(file)).toBe(replacedFileIdentity);
+
+    // Replacement of agentDir with identical bytes (new dir + file identity): fails closed and preserves the replacement copy.
+    const replacedCopy = join(f.home, "replaced-agent");
+    mkdirSync(replacedCopy, { recursive: true });
+    writeFileSync(join(replacedCopy, "agent.md"), originalContent);
+    rmSync(agentDir, { recursive: true, force: true });
+    cpSync(replacedCopy, agentDir, { recursive: true });
+    const replacementDirIdentity = observeEntryIdentity(agentDir);
+    expect(replacementDirIdentity).not.toBe(dirIdentityBefore);
+    const replaced = f.run(argv);
+    expect([replaced.status, JSON.parse(replaced.stderr).error]).toEqual([1, "host_config_replacement_refused"]);
+    expect(observeEntryIdentity(agentDir)).toBe(replacementDirIdentity);
+
+    // Clean absence: recreates through host-config gate and updates ledger identities.
+    rmSync(agentDir, { recursive: true, force: true });
+    const recreated = f.run(argv);
+    expect(recreated.status, recreated.stderr).toBe(0);
+    expect(readFileSync(file, "utf8")).toBe(originalContent);
+    expect(observeEntryIdentity(agentDir)).not.toBe(replacementDirIdentity);
+
+    // Ledger committed digest mismatch while matching disk: fails closed.
+    const tamperedContent = `${originalContent}\n# different digest\n`;
+    writeFileSync(file, tamperedContent);
+    const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
+    const mismatchHash = `sha256:${createHash("sha256").update(tamperedContent).digest("hex")}`;
+    ledger.paths[file].committed.sha256 = mismatchHash;
+    ledger.paths[file].identity = observeEntryIdentity(file);
+    writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2));
+    const mismatch = f.run(argv);
+    expect([mismatch.status, JSON.parse(mismatch.stderr).error]).toEqual([1, "host_config_replacement_refused"]);
+    expect(readFileSync(file, "utf8")).toBe(tamperedContent);
+
+    // Pre-existing unrecorded file/directory at target key: fails closed without overwriting.
+    delete ledger.paths[file];
+    writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2));
+    const unrecorded = f.run(argv);
+    expect([unrecorded.status, JSON.parse(unrecorded.stderr).error]).toEqual([1, "host_config_replacement_refused"]);
+    expect(readFileSync(file, "utf8")).toBe(tamperedContent);
+
+    // Symlinked ~/.gemini/config/agents fails closed with antigravity_hooks_path_linked.
+    const parkedAgents = join(f.home, "parked-agents");
+    renameSync(agentsDir, parkedAgents);
+    symlinkSync(parkedAgents, agentsDir, "dir");
+    const linked = f.run(argv);
+    expect([linked.status, JSON.parse(linked.stderr).error]).toEqual([1, "antigravity_hooks_path_linked"]);
+    expect(lstatSync(agentsDir).isSymbolicLink()).toBe(true);
+  }));
+
+  test("agy seat directory containing an extra regular .repo-harness-owner.json fails cache hit, and uninstall removes only agent.md while keeping and reporting the directory", () => {
+    for (const target of ["antigravity", "both"] as const) {
+      withAgySeat(f => {
+        const argv = ["argv", "advisor", "--json"];
+        const first = f.run(argv);
+        expect(first.status, first.stderr).toBe(0);
+        const args = JSON.parse(first.stdout).argv;
+        const agentName = args[args.indexOf("--agent") + 1];
+        const agentDir = join(realpathSync(f.home), ".gemini", "config", "agents", agentName);
+        const agentFile = join(agentDir, "agent.md");
+        const userMarker = join(agentDir, ".repo-harness-owner.json");
+        const userBytes = "{\"user\":\"keep\"}\n";
+        writeFileSync(userMarker, userBytes);
+
+        // Cache hit must reject the modified directory rather than ignoring .repo-harness-owner.json.
+        const second = f.run(argv);
+        expect([second.status, JSON.parse(second.stderr).error]).toEqual([1, "host_config_replacement_refused"]);
+        expect(readFileSync(userMarker, "utf8")).toBe(userBytes);
+
+        // Dry-run and apply remove only untouched agent.md, never recursively delete agentDir, keep .repo-harness-owner.json, and report agentDir as kept.
+        const dry = runUserUninstall({ target, dryRun: true, env: f.env });
+        expect(dry.items).toContainEqual(expect.objectContaining({ path: agentDir, action: "kept" }));
+
+        const result = runUserUninstall({ target, env: f.env });
+        expect(result.exitCode, result.lines.join("\n")).toBe(0);
+        expect(existsSync(agentFile)).toBe(false);
+        expect(readFileSync(userMarker, "utf8")).toBe(userBytes);
+        expect(lstatSync(agentDir).isDirectory()).toBe(true);
+        expect(result.items).toContainEqual(expect.objectContaining({ path: agentDir, action: "kept" }));
+      })();
+    }
+  });
+
+  test("pre-existing capitalized Agents directory and post-publish case-only rename use guarded canonical aliases across publish, cache hit, and uninstall", withAgySeat(f => {
+    const configDir = join(realpathSync(f.home), ".gemini", "config");
+    const capitalizedAgents = join(configDir, "Agents");
+    mkdirSync(capitalizedAgents, { recursive: true });
+
+    const argv = ["argv", "advisor", "--json"];
+    const first = f.run(argv);
+    expect(first.status, first.stderr).toBe(0);
+    const args = JSON.parse(first.stdout).argv;
+    const agentName = args[args.indexOf("--agent") + 1];
+    const ledgerPath = join(f.home, ".repo-harness", "config", "ledger.json");
+    const recordedKey = Object.keys(JSON.parse(readFileSync(ledgerPath, "utf8")).paths)
+      .find(key => basename(dirname(key)) === agentName && basename(key) === "agent.md")!;
+    expect(recordedKey).toBeDefined();
+    const identityBefore = observeEntryIdentity(recordedKey);
+    const ledgerBefore = readFileSync(ledgerPath, "utf8");
+
+    // Second launch must hit the cache using the same canonical key (including on case-insensitive macOS APFS).
+    const second = f.run(argv);
+    expect(second.status, second.stderr).toBe(0);
+    expect(observeEntryIdentity(recordedKey)).toBe(identityBefore);
+    expect(readFileSync(ledgerPath, "utf8")).toBe(ledgerBefore);
+
+    // Targeted Antigravity uninstall must recognize and remove the recorded agent file + dir while keeping the pre-existing Agents dir.
+    const removed = runUserUninstall({ target: "antigravity", env: f.env });
+    expect(removed.exitCode, removed.lines.join("\n")).toBe(0);
+    expect(existsSync(recordedKey)).toBe(false);
+    expect(existsSync(dirname(recordedKey))).toBe(false);
+    expect(lstatSync(capitalizedAgents).isDirectory()).toBe(true);
+
+    // Case-only rename after publication on case-insensitive volumes (agents -> Agents) still hits cache and uninstalls cleanly.
+    rmSync(capitalizedAgents, { recursive: true, force: true });
+    const republished = f.run(argv);
+    expect(republished.status, republished.stderr).toBe(0);
+    const lowercaseAgents = join(configDir, "agents");
+    const lowercaseFile = join(lowercaseAgents, agentName, "agent.md");
+    const sameVolumeCaseInsensitive = lstatSync(capitalizedAgents, { throwIfNoEntry: false }) !== undefined;
+    if (sameVolumeCaseInsensitive) {
+      renameSync(lowercaseAgents, capitalizedAgents);
+      expect(f.run(argv).status).toBe(0);
+      const preview = runUserUninstall({ target: "antigravity", dryRun: true, env: f.env });
+      expect(preview.items).toContainEqual(expect.objectContaining({ path: lowercaseFile, action: "restored" }));
+      const cleaned = runUserUninstall({ target: "antigravity", env: f.env });
+      expect(cleaned.exitCode, cleaned.lines.join("\n")).toBe(0);
+      expect(existsSync(join(capitalizedAgents, agentName))).toBe(false);
+      expect(existsSync(capitalizedAgents)).toBe(false);
+    }
+  }));
+
+  test("same-role agy candidates disambiguate by content-addressed name without colliding with each other or user rh-worker", withAgySeat(f => {
+    f.configure(AGY_ADVISOR, true, { "worker-neon": AGY_WORKER, "worker-light": AGY_WORKER_NO_GH });
+    const agentsDir = join(f.home, ".gemini", "config", "agents");
+    const userWorkerDir = join(agentsDir, "rh-worker");
+    mkdirSync(userWorkerDir, { recursive: true });
+    writeFileSync(join(userWorkerDir, "agent.md"), "---\nname: rh-worker\ndescription: User worker\nmainAgent: true\ntools: [view_file]\n---\n\n# User\n");
+
+    const withGh = JSON.parse(f.run(["argv", "worker-neon", "--json"]).stdout);
+    const withoutGh = JSON.parse(f.run(["argv", "worker-light", "--json"]).stdout);
+    const withGhName = withGh.argv[withGh.argv.indexOf("--agent") + 1];
+    const withoutGhName = withoutGh.argv[withoutGh.argv.indexOf("--agent") + 1];
+    expect(withGhName).not.toBe(withoutGhName);
+
+    // Simulate agy fs.ConfigDir agent discovery across ~/.gemini/config/agents/*/agent.md by directory + frontmatter name.
+    const discovered = new Map<string, string>();
+    for (const entry of readdirSync(agentsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const body = readFileSync(join(agentsDir, entry.name, "agent.md"), "utf8");
+      const frontmatterName = body.match(/^name:\s*(.+)$/mu)?.[1]?.trim();
+      expect(frontmatterName).toBe(entry.name);
+      discovered.set(frontmatterName!, body);
+    }
+    expect(discovered.get(withGhName)).not.toContain("Do not write to GitHub.");
+    expect(discovered.get(withoutGhName)).toContain("Do not write to GitHub.");
+    expect(discovered.get("rh-worker")).toContain("# User");
+  }));
+
+  test("rh seats argv --help states that it materializes Pi fleet roles and agy seat agent directories", withAgySeat(f => {
+    const help = f.run(["argv", "--help"]);
+    expect(help.status, help.stderr).toBe(0);
+    expect(help.stdout).toContain("~/.gemini/config/agents");
+    expect(help.stdout).toContain("Pi fleet");
   }));
 
   test("stored main@76675c2 Native preset with read-only agy workers lets unrelated seats render argv while failing closed on read-only agy worker launch", withAgySeat(f => {
@@ -679,7 +899,7 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
     expect(adv.status, adv.stderr).toBe(0);
     expect(JSON.parse(adv.stdout).runtime).toBe("agy");
 
-    rmSync(join(f.home, ".repo-harness", "seats", "agy"), { recursive: true, force: true });
+    rmSync(join(f.home, ".gemini", "config", "agents"), { recursive: true, force: true });
     for (const workerSeat of ["worker-neon", "worker-light"] as const) {
       const refused = f.run(["argv", workerSeat, "--json"]);
       expect(refused.status).toBe(1);
@@ -689,6 +909,7 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
       expect(body.message).toContain(`The ${workerSeat} agy worker seat is configured read-only (missing edit).`);
       expect(body.message).toContain(`Enable edit for seats.${workerSeat}.tools in Settings`);
     }
+    expect(existsSync(join(f.home, ".gemini", "config", "agents"))).toBe(false);
     expect(existsSync(join(f.home, ".repo-harness", "seats", "agy"))).toBe(false);
   }));
 
@@ -760,7 +981,7 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
   });
 
   test("advisor brief without gh keeps the no-GitHub-write text across Pi, Claude, Codex, and agy", () => {
-    const agyInput = { executable: "/usr/local/bin/agy", directory: "/tmp/agy", cwd: "/tmp/repo" };
+    const agyInput = { executable: "/usr/local/bin/agy", agentName: "rh-advisor-0123456789ab", cwd: "/tmp/repo" };
     for (const config of [
       { runtime: "pi", model: "magpie/agy-cli/gemini-4-neon", advisor_model: null, effort: "xhigh", tools: ["mcp", "net", "read", "shell"], fleet: [] },
       { runtime: "claude", model: "opus", advisor_model: null, effort: "high", tools: ["mcp", "net", "read", "shell"], fleet: [] },
@@ -777,7 +998,7 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
   });
 
   test("advisor brief with gh allows only gh issue comment, gh pr comment, and gh issue create across Pi, Claude, Codex, and agy", () => {
-    const agyInput = { executable: "/usr/local/bin/agy", directory: "/tmp/agy", cwd: "/tmp/repo" };
+    const agyInput = { executable: "/usr/local/bin/agy", agentName: "rh-advisor-0123456789ab", cwd: "/tmp/repo" };
     for (const config of [
       { runtime: "pi", model: "magpie/agy-cli/gemini-4-neon", advisor_model: null, effort: "xhigh", tools: ["gh", "mcp", "net", "read", "shell", "tasks"], fleet: [] },
       { runtime: "claude", model: "opus", advisor_model: null, effort: "high", tools: ["gh", "mcp", "net", "read", "shell", "tasks"], fleet: [] },

@@ -61,11 +61,11 @@ import {
   type HostConfigPaths,
 } from './store';
 import { isPathInside } from '../path-containment';
-import { antigravitySkillRoot } from '../host-skill-roots';
+import { antigravityAgentRoot, antigravitySkillRoot } from '../host-skill-roots';
 import { requireHome } from '../repo-harness-home';
 import { jsonFragment } from '../../core/host-config/json-fragment';
 import { CODEGRAPH_MCP_SELECTOR } from '../../core/host-config/claude-config';
-import { pathRecordHostRoot, pathRecordIsCurrent, pathRecordProof } from './path-records';
+import { antigravityDirMatches, canonicalAntigravityDir, pathRecordHostRoot, pathRecordIsCurrent, pathRecordProof } from './path-records';
 import {
   discardStagedEntry,
   hasPreimage,
@@ -426,6 +426,10 @@ export function antigravitySkillsDirPath(env: NodeJS.ProcessEnv): string {
   return antigravitySkillRoot(requireHome(env));
 }
 
+export function antigravityAgentsDirPath(env: NodeJS.ProcessEnv): string {
+  return antigravityAgentRoot(requireHome(env));
+}
+
 /** Canonicalize HOME only. The configuration entries below it must never resolve through links. */
 export function antigravityHostPath(env: NodeJS.ProcessEnv, paths = hostConfigPaths(env)): HostPath {
   return antigravityHooksPathAt(resolveHostPath(paths, requireHome(env))) as HostPath;
@@ -440,7 +444,11 @@ export function antigravityMcpConfigHostPath(env: NodeJS.ProcessEnv, paths = hos
 }
 
 export function antigravitySkillsDirHostPath(env: NodeJS.ProcessEnv, paths = hostConfigPaths(env)): HostPath {
-  return antigravitySkillRoot(resolveHostPath(paths, requireHome(env))) as HostPath;
+  return canonicalAntigravityDir(resolveHostPath(paths, requireHome(env)), 'skills') as HostPath;
+}
+
+export function antigravityAgentsDirHostPath(env: NodeJS.ProcessEnv, paths = hostConfigPaths(env)): HostPath {
+  return canonicalAntigravityDir(resolveHostPath(paths, requireHome(env)), 'agents') as HostPath;
 }
 
 export class AntigravityHooksPathError extends Error {
@@ -470,24 +478,148 @@ interface AntigravityGuardedPaths {
   readonly mcp: HostPath;
   readonly mcpRequested: string;
   readonly skillsDir: HostPath;
+  readonly skillsDirRequested: string;
+  readonly agentsDir: HostPath;
+  readonly agentsDirRequested: string;
 }
 
 function antigravityGuardedPaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths): AntigravityGuardedPaths {
+  const home = requireHome(env);
+  const resolvedHome = resolveHostPath(paths, home);
+  let cachedSkillsDir: HostPath | null = null;
+  let cachedAgentsDir: HostPath | null = null;
   return {
-    hooks: antigravityHostPath(env, paths),
-    hooksRequested: antigravityHooksPath(env),
-    rules: antigravityGlobalRulesHostPath(env, paths),
-    rulesRequested: antigravityGlobalRulesPath(env),
-    mcp: antigravityMcpConfigHostPath(env, paths),
-    mcpRequested: antigravityMcpConfigPath(env),
-    skillsDir: antigravitySkillsDirHostPath(env, paths),
+    hooks: antigravityHooksPathAt(resolvedHome) as HostPath,
+    hooksRequested: antigravityHooksPathAt(home),
+    rules: antigravityGlobalRulesPathAt(resolvedHome) as HostPath,
+    rulesRequested: antigravityGlobalRulesPathAt(home),
+    mcp: antigravityMcpConfigPathAt(resolvedHome) as HostPath,
+    mcpRequested: antigravityMcpConfigPathAt(home),
+    skillsDirRequested: antigravitySkillRoot(home),
+    agentsDirRequested: antigravityAgentRoot(home),
+    get skillsDir(): HostPath {
+      return (cachedSkillsDir ??= canonicalAntigravityDir(resolvedHome, 'skills') as HostPath);
+    },
+    get agentsDir(): HostPath {
+      return (cachedAgentsDir ??= canonicalAntigravityDir(resolvedHome, 'agents') as HostPath);
+    },
   };
+}
+
+function checkAntigravityParentDir(entry: string): void {
+  const stat = lstatSync(entry, { throwIfNoEntry: false });
+  if (stat && !stat.isDirectory()) throw new AntigravityHooksPathError(entry, 'directory');
+}
+
+function checkAntigravityGuardedRecord(key: string, antigravity: Pick<AntigravityGuardedPaths, 'skillsDir' | 'agentsDir'>): void {
+  const skillsDir = antigravity.skillsDir;
+  if (key !== skillsDir && (isPathInside(skillsDir, key) || antigravityDirMatches(skillsDir, dirname(key)))) {
+    checkAntigravityPath(skillsDir, 'directory');
+    return;
+  }
+  const agentsDir = antigravity.agentsDir;
+  if (key !== agentsDir && (isPathInside(agentsDir, key)
+    || antigravityDirMatches(agentsDir, dirname(key))
+    || antigravityDirMatches(agentsDir, dirname(dirname(key))))) {
+    checkAntigravityPath(agentsDir, 'directory');
+    if (dirname(key) !== agentsDir && !antigravityDirMatches(agentsDir, dirname(key))) {
+      checkAntigravityParentDir(dirname(key));
+    }
+    return;
+  }
+  // An unexpected out-of-root Antigravity key fails closed against both guarded roots.
+  checkAntigravityPath(skillsDir, 'directory');
+  checkAntigravityPath(agentsDir, 'directory');
+}
+
+/** Guard an Antigravity path record against its own root (`skillsDir` vs `agentsDir`). */
+export function checkAntigravityRecordPath(key: string, env: NodeJS.ProcessEnv, paths = hostConfigPaths(env)): void {
+  checkAntigravityGuardedRecord(key, {
+    skillsDir: antigravitySkillsDirHostPath(env, paths),
+    agentsDir: antigravityAgentsDirHostPath(env, paths),
+  });
 }
 
 function isAntigravityContainerDir(directory: string, antigravity: AntigravityGuardedPaths): boolean {
   const configDir = dirname(antigravity.hooks);
   const geminiDir = dirname(configDir);
-  return directory === configDir || directory === geminiDir;
+  return directory === configDir
+    || directory === geminiDir
+    || directory.toLowerCase() === configDir.toLowerCase()
+    || directory.toLowerCase() === geminiDir.toLowerCase();
+}
+
+function isAntigravitySkillsDirectoryPath(directory: string): boolean {
+  const configDir = dirname(directory);
+  const geminiDir = dirname(configDir);
+  return basename(directory).toLowerCase() === 'skills'
+    && basename(configDir).toLowerCase() === 'config'
+    && basename(geminiDir).toLowerCase() === '.gemini';
+}
+
+function isAntigravityAgentsDirectoryPath(directory: string): boolean {
+  const configDir = dirname(directory);
+  const geminiDir = dirname(configDir);
+  return basename(directory).toLowerCase() === 'agents'
+    && basename(configDir).toLowerCase() === 'config'
+    && basename(geminiDir).toLowerCase() === '.gemini';
+}
+
+/** True for `~/.gemini/config/agents` or a direct seat-agent child directory beneath it (pure lexical check). */
+function isAntigravityAgentContainerDir(directory: string): boolean {
+  return isAntigravityAgentsDirectoryPath(directory) || isAntigravityAgentsDirectoryPath(dirname(directory));
+}
+
+function antigravityAgentDirIdentities(
+  recordedDirs: readonly string[],
+  createdIdentities: Readonly<Record<string, string>>,
+  antigravity?: AntigravityGuardedPaths,
+): Record<string, string> {
+  if (!antigravity) return {};
+  const identities: Record<string, string> = {};
+  for (const directory of recordedDirs) {
+    if (isAntigravityAgentContainerDir(directory) && createdIdentities[directory] !== undefined) {
+      identities[directory] = createdIdentities[directory]!;
+    }
+  }
+  return identities;
+}
+
+function observeDirectoryIdentities(directories: readonly string[]): Record<string, string> {
+  const identities: Record<string, string> = {};
+  for (const directory of directories) {
+    const identity = observeEntryIdentity(directory);
+    if (identity !== null) identities[directory] = identity;
+  }
+  return identities;
+}
+
+function cleanupCreatedDirectories(
+  paths: HostConfigPaths,
+  state: HostConfigLedger,
+  attempted: readonly string[],
+  antigravity?: AntigravityGuardedPaths,
+): void {
+  const requireIdentity = antigravity ? isAntigravityAgentContainerDir : undefined;
+  const kept = removeCreatedDirectories(attempted, { identities: state.directory_identities, requireIdentity });
+  const nextDirectories = state.directories.filter((directory) => !attempted.includes(directory) || kept.includes(directory));
+  writeLedger(paths, withDirectoryIdentities(state, nextDirectories, state.directory_identities ?? {}));
+}
+
+function withDirectoryIdentities(
+  ledger: HostConfigLedger,
+  directories: readonly string[],
+  identities: Readonly<Record<string, string>>,
+): HostConfigLedger {
+  const remaining = new Set(directories);
+  const filtered = Object.fromEntries(
+    Object.entries(identities).filter(([directory]) => remaining.has(directory)),
+  );
+  if (Object.keys(filtered).length === 0) {
+    const { directory_identities: _omitted, ...rest } = ledger;
+    return { ...rest, directories };
+  }
+  return { ...ledger, directories, directory_identities: filtered };
 }
 
 function resolveUserFile(paths: HostConfigPaths, target: string, antigravity: AntigravityGuardedPaths): HostPath {
@@ -724,7 +856,16 @@ function admitWholePath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, ledger: 
   const held = pathRecordHostRoot(env, path);
   if (held === null) throw new HostConfigError('host_config_invalid_path', `not inside an install root, so rh records no whole path there: ${path}`);
   const { host, root } = held;
-  if (host === 'antigravity') checkAntigravityPath(antigravitySkillsDirHostPath(env, paths), 'directory');
+  if (host === 'antigravity') {
+    const agentsDir = antigravityAgentsDirHostPath(env, paths);
+    const resolvedHome = resolveHostPath(paths, requireHome(env));
+    const guardDir = root === antigravityAgentsDirPath(env)
+      || root === antigravityAgentRoot(resolvedHome)
+      || root === agentsDir
+      ? agentsDir
+      : antigravitySkillsDirHostPath(env, paths);
+    checkAntigravityPath(guardDir, 'directory');
+  }
   const key = hostPathKey(paths, path);
   const holder = pathRecordOf(ledger, key as HostPath);
   if (holder !== null && toolOf(ledger, holder) !== null) throw new HostConfigError('host_config_invalid_state', `rh records this path for the tool ${toolOf(ledger, holder)}, so it does not write it as an install path: ${path}`);
@@ -924,7 +1065,7 @@ function planWholePaths(
   const entries: HostConfigPlannedPath[] = [];
   for (const { write, key, host } of admitted) {
     try {
-      if (host === 'antigravity' && antigravity) checkAntigravityPath(antigravity.skillsDir, 'directory');
+      if (host === 'antigravity' && antigravity) checkAntigravityGuardedRecord(key, antigravity);
       const plan = planWholePath(paths, write, key, host, ledger.paths[key]);
       let action: HostConfigPlannedPath['action'];
       if (plan.observed === null) {
@@ -957,19 +1098,22 @@ function writeWholePaths(admit: WholePathAdmit, paths: HostConfigPaths, writes: 
   const ledger = readLedger(paths);
   const records = { ...ledger.paths };
   let directories = ledger.directories;
-  const persist = () => writeLedger(paths, { ...ledger, paths: records, directories });
+  let directoryIdentities: Record<string, string> = { ...(ledger.directory_identities ?? {}) };
+  const persist = () => writeLedger(paths, withDirectoryIdentities({ ...ledger, paths: records }, directories, directoryIdentities));
   const admitted = writes.map((write) => ({ write, ...admit(ledger, write.path) }));
   refuseOverlappingPaths(admitted.map(({ write, key }) => ({ path: write.path, key })));
   const plans = admitted.map(({ write, key, host }) => planWholePath(paths, write, key, host, records[key]));
   const written: string[] = [];
   for (const { write, key, host, previous, prior, entry, linkTarget, observed, replaces } of plans) {
-    if (host === 'antigravity' && antigravity) checkAntigravityPath(antigravity.skillsDir, 'directory');
+    if (host === 'antigravity' && antigravity) checkAntigravityGuardedRecord(key, antigravity);
     const backup = replaces ? vaultUserFile(paths, entry, replaces, write.path) : undefined;
     const createdDirs = missingDirectories(entry as HostPath);
     const recordedDirs = host === 'antigravity' && antigravity
       ? createdDirs.filter((directory) => !isAntigravityContainerDir(directory, antigravity))
       : createdDirs;
     createDirectories(createdDirs);
+    const createdIdentities = observeDirectoryIdentities(createdDirs);
+    const recordedIdentities = antigravityAgentDirIdentities(recordedDirs, createdIdentities, antigravity);
     let staged: string | null = null;
     try {
       const stage = stagePathEntry(entry, write.entry, options.stage?.(entry));
@@ -982,7 +1126,8 @@ function writeWholePaths(admit: WholePathAdmit, paths: HostConfigPaths, writes: 
       }
       if (backup === undefined && options.transaction) keepPreimage(options.transaction, entry);
       records[key] = next;
-      directories = [...directories, ...recordedDirs];
+      directories = [...new Set([...directories, ...recordedDirs])];
+      directoryIdentities = { ...directoryIdentities, ...recordedIdentities };
       persist();
       publishPathEntry(staged, entry);
       staged = null;
@@ -997,7 +1142,8 @@ function writeWholePaths(admit: WholePathAdmit, paths: HostConfigPaths, writes: 
       if (staged) discardStagedEntry(staged);
       if (previous) records[key] = previous; else delete records[key];
       directories = directories.filter((directory) => !recordedDirs.includes(directory));
-      removeCreatedDirectories(createdDirs);
+      for (const directory of recordedDirs) delete directoryIdentities[directory];
+      removeCreatedDirectories(createdDirs, { identities: createdIdentities });
       persist();
       throw error;
     }
@@ -1550,6 +1696,20 @@ function rollbackRetiredPath(paths: HostConfigPaths, key: string, write: Retired
   return rollbackLanded(key, pending);
 }
 
+function resolveRevertLedgerKey(paths: HostConfigPaths, ledger: HostConfigLedger, rawPath: string): string {
+  const canonical = hostPathKey(paths, rawPath);
+  if (ledger.paths[canonical]) return canonical;
+  const resolvedRaw = resolve(rawPath);
+  const matchesAlias = (candidate: string): boolean => {
+    const rec = ledger.paths[candidate];
+    if (rec?.host !== 'antigravity' || candidate.toLowerCase() !== canonical.toLowerCase()) return false;
+    return antigravityDirMatches(dirname(canonical), dirname(candidate))
+      || (basename(canonical) === basename(candidate) && antigravityDirMatches(dirname(dirname(canonical)), dirname(dirname(candidate))));
+  };
+  if (matchesAlias(resolvedRaw)) return resolvedRaw;
+  return Object.keys(ledger.paths).find(matchesAlias) ?? canonical;
+}
+
 function revertWholePaths(paths: HostConfigPaths, only: readonly string[], options: HostConfigPathOptions & { readonly retire?: boolean }, antigravity?: AntigravityGuardedPaths): HostConfigRevertEntry[] {
   let ledger = readLedger(paths);
   const report: HostConfigRevertEntry[] = [];
@@ -1557,14 +1717,24 @@ function revertWholePaths(paths: HostConfigPaths, only: readonly string[], optio
   const dropped: string[] = [];
   const steps: RevertStep[] = [];
   for (const rawPath of only) {
-    if (antigravity && isPathInside(antigravity.skillsDir, resolve(rawPath))) {
+    if (!antigravity) continue;
+    const resolvedRaw = resolve(rawPath);
+    if (isPathInside(antigravity.skillsDirRequested, resolvedRaw) || isAntigravitySkillsDirectoryPath(dirname(resolvedRaw))) {
       checkAntigravityPath(antigravity.skillsDir, 'directory');
     }
+    if (isPathInside(antigravity.agentsDirRequested, resolvedRaw)
+      || isAntigravityAgentsDirectoryPath(dirname(resolvedRaw))
+      || isAntigravityAgentsDirectoryPath(dirname(dirname(resolvedRaw)))) {
+      checkAntigravityPath(antigravity.agentsDir, 'directory');
+      if (isAntigravityAgentsDirectoryPath(dirname(dirname(resolvedRaw)))) {
+        checkAntigravityParentDir(dirname(resolvedRaw));
+      }
+    }
   }
-  for (const key of new Set(only.map((path) => hostPathKey(paths, path)))) {
+  for (const key of new Set(only.map((path) => resolveRevertLedgerKey(paths, ledger, path)))) {
     const record = ledger.paths[key];
     if (!record) continue;
-    if (record.host === 'antigravity' && antigravity) checkAntigravityPath(antigravity.skillsDir, 'directory');
+    if (record.host === 'antigravity' && antigravity) checkAntigravityGuardedRecord(key, antigravity);
     const planned = planPathRevertEntry(paths, key, record, options.retire);
     report.push(planned);
     const { action } = planned;
@@ -1591,7 +1761,7 @@ function revertWholePaths(paths: HostConfigPaths, only: readonly string[], optio
     }
     if (action === 'released') { steps.push({ kind: 'release', commit }); continue; }
     steps.push({ kind: action === 'removed' ? 'delete' : 'restore', commit, write: () => {
-      if (record.host === 'antigravity' && antigravity) checkAntigravityPath(antigravity.skillsDir, 'directory');
+      if (record.host === 'antigravity' && antigravity) checkAntigravityGuardedRecord(key, antigravity);
       if (options.transaction) keepPreimage(options.transaction, entry);
       if (record.kind === 'replaced') {
         const committed = record.committed as Extract<PathCommitted, { type: 'file' }>;
@@ -1602,8 +1772,7 @@ function revertWholePaths(paths: HostConfigPaths, only: readonly string[], optio
   const state = retireThenDestroy(paths, ledger, steps);
   const attempted = ledger.directories.filter((directory) =>
     (!antigravity || !isAntigravityContainerDir(directory, antigravity)) && dropped.some((key) => isPathInside(directory, key)));
-  const kept = removeCreatedDirectories(attempted);
-  writeLedger(paths, { ...state, directories: state.directories.filter((directory) => !attempted.includes(directory) || kept.includes(directory)) });
+  cleanupCreatedDirectories(paths, state, attempted, antigravity);
   return report;
 }
 
@@ -1908,8 +2077,7 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
   const state = retireThenDestroy(paths, ledger, steps);
   const attempted = filtered ? [] : ledger.directories.filter((directory) =>
     (!user || !isAntigravityContainerDir(directory, user.antigravity)) && (!only || targets.some((path) => isPathInside(directory, path))));
-  const kept = removeCreatedDirectories(attempted);
-  writeLedger(paths, { ...state, directories: state.directories.filter((directory) => !attempted.includes(directory) || kept.includes(directory)) });
+  cleanupCreatedDirectories(paths, state, attempted, user?.antigravity);
   return report;
 }
 
@@ -2094,9 +2262,24 @@ export function rollbackHostConfigTransaction(paths: HostConfigPaths, snapshot: 
     else if (content !== decode(bytes, path)) replaceTarget(path, Buffer.from(content, 'utf8'), current);
   }
   const pathRecords = rollbackWholePaths(paths, before, now, transaction, unresolved, releasedMaterial, options.stage);
-  const kept = removeCreatedDirectories(now.directories.filter((directory) => !before.directories.includes(directory)));
-  const restored: HostConfigLedger = { ...before, files, fragments: before.fragments.filter((entry) => !releasedFiles.has(entry.file)),
-    retired: [...before.retired.filter((entry) => !releasedMaterial.has(entry.sha256)), ...now.retired.filter((entry) => releasedMaterial.has(entry.sha256))], paths: pathRecords, directories: [...before.directories, ...kept], tools: rollbackTools(before.tools, now.tools) };
+  const addedDirs = now.directories.filter((directory) => !before.directories.includes(directory));
+  const kept = removeCreatedDirectories(addedDirs, {
+    identities: now.directory_identities,
+    requireIdentity: isAntigravityAgentContainerDir,
+  });
+  const nextIdentities: Record<string, string> = { ...(before.directory_identities ?? {}) };
+  for (const directory of kept) {
+    const identity = now.directory_identities?.[directory];
+    if (identity !== undefined) nextIdentities[directory] = identity;
+  }
+  const restored: HostConfigLedger = withDirectoryIdentities({
+    ...before,
+    files,
+    fragments: before.fragments.filter((entry) => !releasedFiles.has(entry.file)),
+    retired: [...before.retired.filter((entry) => !releasedMaterial.has(entry.sha256)), ...now.retired.filter((entry) => releasedMaterial.has(entry.sha256))],
+    paths: pathRecords,
+    tools: rollbackTools(before.tools, now.tools),
+  }, [...before.directories, ...kept], nextIdentities);
   // No ledger before the transaction and no record left: the ledger file goes, as it was.
   if (snapshot === null && JSON.stringify(restored) === JSON.stringify(EMPTY_LEDGER)) rmSync(paths.ledger, { force: true });
   // A clean rollback puts the snapshot back as it was: a parent of an older protocol reads its ledger again. A protocol 4
@@ -2113,7 +2296,8 @@ function snapshotProtocol(snapshot: Buffer): unknown {
 }
 
 function withoutIdentities(ledger: HostConfigLedger): HostConfigLedger {
-  return { ...ledger, paths: Object.fromEntries(Object.entries(ledger.paths).map(([key, { identity: _identity, ...record }]) => [key, record])) };
+  const { directory_identities: _directoryIdentities, ...rest } = ledger;
+  return { ...rest, paths: Object.fromEntries(Object.entries(ledger.paths).map(([key, { identity: _identity, ...record }]) => [key, record])) };
 }
 
 /**

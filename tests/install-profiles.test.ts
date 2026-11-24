@@ -478,6 +478,20 @@ describe('install selection', () => {
     });
   });
 
+  test.skipIf(process.platform === 'win32')('applyInstallSelection keeps core-owned Antigravity seat agent records across empty and full selections', () => withHome((env) => {
+    writeManagedHostSurfaces(env, ALL_PLUGINS);
+    const agentFile = join(env.HOME!, '.gemini', 'config', 'agents', 'rh-advisor-0123456789ab', 'agent.md');
+    const agentBytes = Buffer.from('---\nname: rh-advisor-0123456789ab\n---\n', 'utf8');
+    openHostConfigGate({ env }).writePaths([{ path: agentFile, owner: 'core', entry: { type: 'file', bytes: agentBytes, mode: 0o600 } }]);
+
+    applyInstallSelection('all', ALL_PLUGINS, env, new Date('2026-01-01T00:00:00Z'));
+    expect(records(env)).toContainEqual(expect.objectContaining({ path: pathRecordKey(env, agentFile), host: 'antigravity', owner: 'core' }));
+
+    applyInstallSelection([], [], env, new Date('2026-01-02T00:00:00Z'));
+    expect(records(env)).toContainEqual(expect.objectContaining({ path: pathRecordKey(env, agentFile), host: 'antigravity', owner: 'core' }));
+    expect(readFileSync(agentFile, 'utf8')).toBe('---\nname: rh-advisor-0123456789ab\n---\n');
+  }));
+
   test('a rollback that cannot complete its projection names the missing owner', () => withHome((env) => {
     writeManagedHostSurfaces(env, ALL_PLUGINS);
     applyInstallSelection('all', ALL_PLUGINS, env, new Date('2026-01-01T00:00:00Z'));

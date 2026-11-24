@@ -53,8 +53,10 @@ import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
 import { COUNCIL_MEMBERS, CouncilConsultError, parseCouncilMembers, type CouncilMember } from '../../core/board/planner-consult';
 import { runCouncilConsult } from '../../effects/board/planner-consult';
 import { formatSeatPool, seatModelBlock, seatPoolHint, seatRuntimeBlock } from '../../core/board/seat-pool';
-import { collectSeatPoolProbes, enabledRuntimesOf, magpieExtensionInstalled, probeAgySeat, refreshSeatPool, resolveAgyInstallation, SeatsConfigurationError, writeAgySeatAgent } from '../../effects/board/seats-configuration';
+import { agySeatAgentSpec, collectSeatPoolProbes, enabledRuntimesOf, magpieExtensionInstalled, probeAgySeat, refreshSeatPool, resolveAgyInstallation, SeatsConfigurationError, writeAgySeatAgent } from '../../effects/board/seats-configuration';
 
+import { HostConfigError } from '../../core/host-config/types';
+import { AntigravityHooksPathError } from '../../effects/host-config/gate';
 import { checkAntigravityHooks } from '../installer/targets/antigravity';
 import { resolveAntigravityRepository } from '../hook/host-adapter';
 import { EDIT_GUARD_SCOPE_SECTION } from '../hook/session-context';
@@ -489,8 +491,8 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
   const agy = effective.runtime !== 'agy'
     ? undefined
     : prepareFleet
-      ? { executable: agyProbe!.installation.command, directory: writeAgySeatAgent(id, effective, env), cwd }
-      : { executable: 'agy', directory: '<dry-run>', cwd };
+      ? { executable: agyProbe!.installation.command, agentName: writeAgySeatAgent(id, effective, env), cwd }
+      : { executable: 'agy', agentName: agySeatAgentSpec(id, effective).name, cwd };
   const launch = buildSeatLaunch(id, effective, config.seats === undefined ? 'defaults' : 'seats', agentTypes, {
     paneName: name ?? undefined, repositoryId: labels.repositoryId, piRoleDirectory, piHookExtension, claudeSaving, agy,
   });
@@ -609,7 +611,8 @@ function openSeatTab(args: Readonly<Record<string, unknown>> & { readonly space:
 function writeLaunchError(error: unknown): void {
   const code = error instanceof SeatsCommandError || error instanceof ClaudeAgentTypesError || error instanceof PiFleetRolesError || error instanceof PiShellError || error instanceof SeatPaneNameError
     || error instanceof RepoHarnessRegistryStrictError || error instanceof SeatsConfigMigrationRequiredError || error instanceof CouncilConsultError
-    || error instanceof SeatsConfigurationError || error instanceof AgySeatSettingsError ? error.code : 'seat_launch_failed';
+    || error instanceof SeatsConfigurationError || error instanceof AgySeatSettingsError
+    || error instanceof AntigravityHooksPathError || error instanceof HostConfigError ? error.code : 'seat_launch_failed';
   process.stderr.write(`${JSON.stringify({ ok: false, error: code, message: (error as Error).message,
     ...(error instanceof SeatsConfigMigrationRequiredError ? { next_action: error.next_action } : {}) })}\n`);
   process.exitCode = 1;
@@ -688,7 +691,7 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
     });
   withSeatLabelOptions(seats
     .command('argv')
-    .description('Print the argv that starts a seat, from the seats section of ~/.repo-harness/config.json'))
+    .description('Print the argv that starts a seat from ~/.repo-harness/config.json; materializes Pi fleet role files and agy seat agent directories under ~/.gemini/config/agents when needed'))
     .option('--json', 'Print the argv, the seat brief, the source, the limits, the labels, the pane name and the tab name as JSON')
     .action(async (seat: string, options: SeatLabelInput & { json?: boolean }) => {
       let launch: Awaited<ReturnType<typeof seatLaunch>>;

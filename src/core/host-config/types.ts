@@ -239,6 +239,12 @@ export interface HostConfigLedger {
   readonly fragments: readonly FragmentRecord[];
   /** Directories that rh created and did not remove yet; a revert drops one only when it removes it. */
   readonly directories: readonly string[];
+  /**
+   * `observeEntryIdentity` of a created directory when rh created it (omitted when empty).
+   * Checked before removing a recorded directory, and required before removing `~/.gemini/config/agents`,
+   * so a user-created replacement directory at the same path is never removed by `rmdir`.
+   */
+  readonly directory_identities?: Readonly<Record<string, string>>;
   /** Keyed by the path with its parent links followed and the leaf kept (`hostPathKey`). The gate refuses a path that has one. */
   readonly paths: Readonly<Record<string, PathRecord>>;
   readonly retired: readonly RetiredMaterial[];
