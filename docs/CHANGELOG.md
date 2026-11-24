@@ -2,6 +2,27 @@
 
 All notable changes to this skill are documented here.
 
+## [0.37.2] - 2026-11-25
+
+### Changed
+
+- Antigravity (`agy`) seat launches materialize content-addressed agent definitions at `~/.gemini/config/agents/rh-<role>-<digest12>/agent.md` as host-config file records (`owner: 'core'`, sha256 and entry identity) and drop `--add-dir` so the target checkout is workspace 0. `rh uninstall --target antigravity` unlinks `agent.md` only when its identity and sha256 match, removes the agent directory and rh-created `agents` container only when empty with verified identity, and preserves and reports any directory with extra entries or changed identity; non-Antigravity uninstalls do not touch `~/.gemini`, and `rh seats argv --help` documents agent materialization. (#3474, #3483)
+
+### Fixed
+
+- `rh seats reset` detects a waiting nested interactive login shell (`sh`, `zsh`, `bash`, `dash`, `ksh`, `ash` with login/interactive flags only) after the seat process exits without accepting non-interactive child commands, removing `agy_did_not_exit`. Antigravity relaunch passes the resume prompt via `agy -i <prompt>` in `relaunch.sh`, skips the duplicate `hc send`, and reads the new startup transcript from offset 0 so `agy` fires `SessionStart` and confirms `RESUMED`, removing `no_signal`. (#3480, #3481)
+
+### Upgrade
+
+- Run `rh update` once on each host after installing 0.37.2. Antigravity (`agy`) seats launched after the update materialize content-addressed agent definitions at `~/.gemini/config/agents/rh-<role>-<digest12>/agent.md` without `--add-dir` (making the target checkout workspace 0) and use `-i <prompt>` with nested-shell detection during `rh seats reset`. (#3474, #3480, #3481, #3483)
+- `rh uninstall --target antigravity` reverts unchanged recorded seat agent files under `~/.gemini/config/agents/` and removes rh-created directories only when empty with verified identity. (#3474, #3483)
+- Earlier `agy` seat agent trees under `~/.repo-harness/seats/agy/` are no longer used and are not removed automatically. (#3474, #3483)
+
+### Rollback
+
+- Before publication, close the prep PR or run `git revert <squash-commit>` after merge. After publication, keep the tag and release a corrective patch.
+- Version 0.37.1 launches `agy` seats with `--add-dir` from `~/.repo-harness/seats/agy/` and uses the pre-`#3481` `rh seats reset` relaunch handshake. Keep 0.37.2 on upgraded hosts; if you must return to 0.37.1, run `rh uninstall --target antigravity` first if you want unchanged `~/.gemini/config/agents/rh-<role>-<digest12>/agent.md` records reverted, then reinstall 0.37.1 and run `rh update`. Note that `agy` seats on 0.37.1 lose nested-shell reset detection, `-i` relaunch, and workspace-0 checkout placement.
+
 ## [0.37.1] - 2026-11-24
 
 ### Breaking
