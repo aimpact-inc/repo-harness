@@ -244,19 +244,20 @@ function readAppended(fd: number, size: number, offset: number): string {
   return buffer.toString('utf8', 0, bytes);
 }
 
-/** Capture the transcript offset before the prompt. Each poll reads only bytes appended after that offset. */
+/**
+ * Capture the transcript offset before the prompt so each poll reads only appended bytes.
+ * Antigravity relaunches pass the prompt at startup, so the new session transcript is read from offset 0.
+ */
 export function readResumeTranscript(session: NewSession, env: NodeJS.ProcessEnv): () => string {
   const { host, sessionId, transcript } = session;
   if (host === 'antigravity') {
-    const read = <T>(reader: (fd: number, size: number) => T): T | null => {
-      try { return withAntigravityTranscript(sessionId, transcript, env, reader); } catch (error) {
+    return () => {
+      try { return withAntigravityTranscript(sessionId, transcript, env, (fd, size) => readAppended(fd, size, 0)) ?? ''; } catch (error) {
         // SessionStart can arrive before Antigravity creates the transcript.
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
         throw error;
       }
     };
-    const offset = read((_fd, size) => size) ?? 0;
-    return () => read((fd, size) => readAppended(fd, size, offset)) ?? '';
   }
   let offset = 0;
   try { offset = statSync(transcript).size; } catch { /* transcript not yet present */ }
