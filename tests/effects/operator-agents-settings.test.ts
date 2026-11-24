@@ -943,7 +943,7 @@ describe('seat settings routes', () => {
   test('saves agy on orchestrator, advisor, council, all workers (with gh on/off), and gatekeeper-fallback, and refuses to disable its host while in use', async () => {
     const harness = await startHarness({ agents: { ...PANE_AGENTS, enabled: ['antigravity', ...PANE_AGENTS.enabled] } });
     installAgy(harness.home, [{ id: 'gemini-4-neon', efforts: ['high'] }, { id: 'gemini-4-hydrogen', efforts: ['high'] }]);
-    const advisor = { runtime: 'agy', model: 'gemini-4-neon-high', effort: 'high', advisor_model: null, fleet: [], tools: ['edit', 'gh', 'mcp', 'net', 'read', 'schedule', 'shell', 'tasks'] } as const;
+    const advisor = { runtime: 'agy', model: 'gemini-4-neon-high', effort: 'high', advisor_model: null, fleet: [], tools: ['edit', 'gh', 'mcp', 'net', 'read', 'schedule', 'shell'] } as const;
     expect((await seats(harness)).ranges.runtimes.find(range => range.id === 'agy')).toMatchObject({ enabled: true, effort: true, fleet: false });
     for (const [model, effort] of [['gemini-4-neon-high', 'high'], ['well-shaped-free-model', null]] as const) {
       const { revision, ...section } = (await seats(harness)).config;
@@ -994,6 +994,7 @@ describe('seat settings routes', () => {
     ['advisor', { advisor_model: 'opus' }, 'seat_model_invalid'],
     ['advisor', { fleet: ['explorer'] }, 'seat_fleet_not_allowed'],
     ['advisor', { tools: ['gh', 'read'] }, 'seat_tool_not_allowed'],
+    ['advisor', { tools: ['edit', 'mcp', 'net', 'read', 'schedule', 'shell', 'tasks'] }, 'seat_tool_not_allowed'],
     ['council', { model: 'gemini-4-carbon-high', tools: ['net', 'read', 'schedule', 'shell'] }, 'seat_tool_not_allowed'],
     ['gatekeeper-fallback', { tools: ['edit', 'net', 'read', 'shell'] }, 'seat_tool_not_allowed'],
     ['worker', { tools: ['gh', 'net', 'read', 'shell'] }, 'seat_tool_not_allowed'],

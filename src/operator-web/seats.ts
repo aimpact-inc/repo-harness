@@ -112,7 +112,7 @@ export function setSeatRuntime(draft: SeatsConfigV1, seat: SeatId, runtime: Seat
   const current = draft[seat]!;
   if (current.runtime === runtime) return draft;
   if (runtime === 'agy') {
-    return patch(draft, seat, { ...agySeatStarter(seat), advisor_model: null, effort: null, fleet: [], tools: agySeatTools(seat) });
+    return patch(draft, seat, { ...agySeatStarter(seat), advisor_model: null, effort: null, fleet: [], tools: agySeatTools(seat, current.tools) });
   }
   const model = ranges.seats[seat].models.some(entry => entry.runtime === runtime && entry.model === current.model)
     ? current.model

@@ -54,6 +54,18 @@ const GITHUB_WRITE_COMMANDS = [
   'gh release create', 'git push',
 ];
 
+/** The only GitHub write commands that an advisor with `gh` granted may run (#3468). */
+const ADVISOR_GH_WRITE_COMMANDS: readonly string[] = [
+  'gh issue comment', 'gh pr comment', 'gh issue create',
+];
+
+function claudeDeniedGithubCommands(seat: LaunchSeatId, hasGh: boolean): readonly string[] {
+  if (!hasGh) return GITHUB_WRITE_COMMANDS;
+  return seat === 'advisor'
+    ? GITHUB_WRITE_COMMANDS.filter(command => !ADVISOR_GH_WRITE_COMMANDS.includes(command))
+    : [];
+}
+
 /**
  * The built-in Claude tools of each group, for the `--tools` allow list (owner decision M22). Every built-in tool
  * that no enabled group names is off, also a tool that a later host version adds. `gh` names no tool: it needs the
@@ -195,7 +207,7 @@ function claudeLaunch(seat: LaunchSeatId, config: SeatConfigV1, agentTypes: read
   // tool and denies every other known type by name.
   const tools = [...config.tools.flatMap(group => CLAUDE_GROUP_TOOLS[group]), ...(config.fleet.length > 0 ? ['Agent'] : [])];
   const denied = [
-    ...(on('shell') && !on('gh') ? GITHUB_WRITE_COMMANDS.map(command => `Bash(${command} *)`) : []),
+    ...(on('shell') ? claudeDeniedGithubCommands(seat, on('gh')).map(command => `Bash(${command} *)`) : []),
     ...(config.fleet.length > 0 ? [...new Set(agentTypes)].filter(type => !config.fleet.includes(type)).sort().map(type => `Agent(${type})`) : []),
   ];
   const limits: SeatLimitV1[] = [
@@ -365,10 +377,6 @@ export const AGY_WORKER_COMMAND_PREFIXES: readonly string[] = [
   'rg', 'ls', 'cat',
 ];
 
-const AGY_ADVISOR_GH_COMMAND_PREFIXES: readonly string[] = [
-  'gh issue comment', 'gh pr comment', 'gh issue create',
-];
-
 const AGY_WORKER_GH_COMMAND_PREFIXES: readonly string[] = [
   'git push', 'gh pr create', 'gh pr edit', 'gh pr comment', 'gh issue comment', 'gh run rerun',
 ];
@@ -416,10 +424,10 @@ export function agySeatCommandRules(seat: LaunchSeatId, config: SeatConfigV1): {
       allow: [
         ...AGY_READONLY_COMMAND_PREFIXES,
         'rh seats council', 'rh seats reset', 'rh seats handoff', 'rh arch refactor decide',
-        ...(hasGh ? AGY_ADVISOR_GH_COMMAND_PREFIXES : []),
+        ...(hasGh ? ADVISOR_GH_WRITE_COMMANDS : []),
       ],
       deny: AGY_READONLY_DENIED_COMMANDS.filter(command =>
-        command !== 'rh seats reset' && (!hasGh || !AGY_ADVISOR_GH_COMMAND_PREFIXES.includes(command))),
+        command !== 'rh seats reset' && (!hasGh || !ADVISOR_GH_WRITE_COMMANDS.includes(command))),
     };
   }
   if (seat === 'council' || seat === 'gatekeeper') {

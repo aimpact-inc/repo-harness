@@ -176,11 +176,12 @@ describe('agents page seats section', () => {
     expect(buttonWithText('gemini-4-neon-high').getAttribute('aria-pressed')).toBe('true');
     expect(allow('Shell').getAttribute('aria-checked')).toBe('true');
     expect(allow('Shell').disabled).toBe(true);
-    // The agy advisor rule makes edit, gh, MCP, schedule, and tasks optional while net, read, and shell stay required.
-    expect(['Edit files', 'GitHub writes', 'MCP · repo-harness', 'Scheduled jobs', 'Task list'].map(tool => allow(tool).disabled)).toEqual([false, false, false, false, false]);
+    // The agy advisor rule keeps gh off on runtime switch unless already granted, makes edit/gh/MCP/schedule optional, and keeps Task list out.
+    expect(allow('GitHub writes').getAttribute('aria-checked')).toBe('false');
+    expect(['Edit files', 'GitHub writes', 'MCP · repo-harness', 'Scheduled jobs', 'Task list'].map(tool => allow(tool).disabled)).toEqual([false, false, false, false, true]);
     await click(allow('MCP · repo-harness'));
     await click(seatsSave());
-    expect(posts[0]?.seats.advisor).toEqual({ runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['edit', 'gh', 'net', 'read', 'schedule', 'shell', 'tasks'] });
+    expect(posts[0]?.seats.advisor).toEqual({ runtime: 'agy', model: 'gemini-4-neon-high', effort: null, advisor_model: null, fleet: [], tools: ['edit', 'net', 'read', 'schedule', 'shell'] });
 
     // Worker seat gets Neon High + writable agy worker tools, unlocked gh toggle, and dynamic limits (no edit limit).
     await click(pane('worker'));
@@ -242,6 +243,35 @@ describe('agents page seats section', () => {
       expect(document.querySelector('[data-seat-card]')?.getAttribute('data-seat-card')).toBe(id);
       expect(Boolean(buttonWithText('Antigravity (agy)')), label).toBe(false);
     }
+  });
+
+  test('switching the advisor to agy preserves an existing gh grant and allows toggling gh separately', async () => {
+    const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
+    const read = await settingsStores(NOW, 'busy').seats.read();
+    if (read.state !== 'ok') throw new Error('fixture read failed');
+    const { settings: initial } = read;
+    const ranges = { ...initial.ranges, runtimes: initial.ranges.runtimes.map(runtime => runtime.id === 'agy' ? { ...runtime, enabled: true } : runtime) };
+    let stored = { ...initial.config, advisor: { ...initial.config.advisor, tools: [...initial.config.advisor.tools, 'gh'].sort() as typeof initial.config.advisor.tools } };
+    await mount({
+      ...seatsProps(posts),
+      readSeatsSettings: async () => ({ state: 'ok', settings: { ...initial, config: stored, ranges } }),
+      writeSeatsSettings: async (body) => {
+        posts.push(body);
+        stored = { revision: REVISION_B, ...body.seats };
+        return { state: 'saved', result: { config_revision: stored.revision, changed_keys: ['seats.advisor'] } };
+      },
+    });
+    await click(buttonWithText('Antigravity (agy)'));
+    expect(allow('GitHub writes').getAttribute('aria-checked')).toBe('true');
+    expect(allow('GitHub writes').disabled).toBe(false);
+    expect(allow('Task list').disabled).toBe(true);
+    await click(seatsSave());
+    expect(posts[0]?.seats.advisor.tools).toEqual(['edit', 'gh', 'mcp', 'net', 'read', 'schedule', 'shell']);
+
+    await click(allow('GitHub writes'));
+    expect(allow('GitHub writes').getAttribute('aria-checked')).toBe('false');
+    await click(seatsSave());
+    expect(posts[1]?.seats.advisor.tools).toEqual(['edit', 'mcp', 'net', 'read', 'schedule', 'shell']);
   });
 
   test('a stored read-only agy worker allows explicitly enabling edit in Settings UI and unlocks gh afterwards', async () => {
