@@ -1,6 +1,6 @@
 import { chmodSync, cpSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { sha256Hex, sha256Prefixed } from '../../core/evidence/sha256';
 import { HostConfigError, type PathCommitted, type PathRecord } from '../../core/host-config/types';
 import { retryWindowsSharingRace } from '../atomic-append';
@@ -57,6 +57,27 @@ function treeEntriesAreCovered(path: string): boolean {
   return covered;
 }
 
+/** Antigravity seat agent directories live directly under `.gemini/config/agents` and hold only a regular `agent.md`. */
+function isAntigravityAgentRecordPath(key: string): boolean {
+  const parent = dirname(key);
+  const configDir = dirname(parent);
+  const geminiDir = dirname(configDir);
+  return basename(parent).toLowerCase() === 'agents'
+    && basename(configDir).toLowerCase() === 'config'
+    && basename(geminiDir).toLowerCase() === '.gemini';
+}
+
+function agySeatAgentTreeHolds(key: string, expectedSha256: string): boolean {
+  const entries = readdirSync(key, { withFileTypes: true });
+  if (entries.length !== 1) return false;
+  const entry = entries[0]!;
+  if (entry.name !== 'agent.md' || !entry.isFile()) return false;
+  const agentPath = join(key, 'agent.md');
+  if (!lstatSync(agentPath).isFile()) return false;
+  const digest = sha256Prefixed(Buffer.concat([Buffer.from('F\0agent.md\0', 'utf8'), readFileSync(agentPath), Buffer.from('\0', 'utf8')]));
+  return digest === expectedSha256;
+}
+
 /**
  * The entry at the key holds what rh recorded, by content only. For a linked
  * record the key must still be a link that names `link_target`, and that file
@@ -75,6 +96,9 @@ export function pathRecordContentHolds(key: string, record: PathRecord): boolean
     if (committed.type === 'symlink') return stat.isSymbolicLink() && readlinkSync(key) === committed.target;
     if (committed.type === 'file') return stat.isFile() && sha256Prefixed(readFileSync(key)) === committed.sha256;
     if (!stat.isDirectory()) return false;
+    if (record.host === 'antigravity' && 'sha256' in committed && isAntigravityAgentRecordPath(key)) {
+      return agySeatAgentTreeHolds(key, committed.sha256);
+    }
     if (!treeEntriesAreCovered(key)) return false;
     return 'proof' in committed ? ownedSkillIsIntact(key) : hashManagedTree(key) === committed.sha256;
   } catch {

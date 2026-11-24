@@ -1390,10 +1390,12 @@ test.skipIf(process.platform === 'win32')('Antigravity agentsDir enforces root-s
   expect(pathRecordHost(env, agentsDir)).toBeNull();
   expect(pathRecordHost(env, join(configDir, 'other', 'x'))).toBeNull();
 
-  // Write under rh-created agentsDir: records agentsDir in ledger.directories, never ~/.gemini or ~/.gemini/config.
+  // Write under rh-created agentsDir: records agentsDir in ledger.directories with its identity, never ~/.gemini or ~/.gemini/config.
   expect(f.gate().writePaths([{ path: agentDest, owner: 'core', entry: { type: 'directory', source: agentSrc } }])).toEqual([agentDest]);
+  const createdAgentsIdentity = observeEntryIdentity(agentsDir);
   expect(f.ledger().paths[agentDest]).toMatchObject({ host: 'antigravity', owner: 'core', kind: 'created' });
   expect(f.ledger().directories).toContain(agentsDir);
+  expect(f.ledger().directory_identities?.[agentsDir]).toBe(createdAgentsIdentity);
   expect(f.ledger().directories).not.toContain(configDir);
   expect(f.ledger().directories).not.toContain(join(f.home, '.gemini'));
 
@@ -1408,14 +1410,41 @@ test.skipIf(process.platform === 'win32')('Antigravity agentsDir enforces root-s
   rmSync(agentsDir);
   renameSync(parkedAgents, agentsDir);
 
-  // Reverting removes the agent dir and the rh-created empty agentsDir, while preserving ~/.gemini/config.
+  // Reverting removes the agent dir and the rh-created empty agentsDir when its identity matches, while preserving ~/.gemini/config.
   expect(f.gate().revertPaths([agentDest]).map((entry) => entry.action)).toEqual(['removed']);
   expect(existsSync(agentDest)).toBe(false);
   expect(existsSync(agentsDir)).toBe(false);
+  expect(f.ledger().directory_identities).toBeUndefined();
   expect(lstatSync(configDir).isDirectory()).toBe(true);
 
+  // Replacing an rh-created agentsDir with a new empty directory (different identity) keeps the replacement on revert.
+  expect(f.gate().writePaths([{ path: agentDest, owner: 'core', entry: { type: 'directory', source: agentSrc } }])).toEqual([agentDest]);
+  const origAgentsId = observeEntryIdentity(agentsDir);
+  expect(f.ledger().directory_identities?.[agentsDir]).toBe(origAgentsId);
+  const movedAgents = join(f.home, 'moved-agents');
+  renameSync(agentsDir, movedAgents);
+  mkdirSync(agentsDir);
+  const replacementAgentsId = observeEntryIdentity(agentsDir);
+  expect(replacementAgentsId).not.toBe(origAgentsId);
+  expect(f.gate().revertPaths([agentDest]).map((entry) => entry.action)).toEqual(['released']);
+  expect(lstatSync(agentsDir).isDirectory()).toBe(true);
+  expect(observeEntryIdentity(agentsDir)).toBe(replacementAgentsId);
+  expect(f.ledger().directories).not.toContain(agentsDir);
+  expect(f.ledger().directory_identities).toBeUndefined();
+  rmSync(movedAgents, { recursive: true, force: true });
+
+  // An unproved agentsDir entry in ledger.directories without directory_identities fails safe and is not removed.
+  rmSync(agentsDir, { recursive: true, force: true });
+  expect(f.gate().writePaths([{ path: agentDest, owner: 'core', entry: { type: 'directory', source: agentSrc } }])).toEqual([agentDest]);
+  const unprovedLedger = f.ledger();
+  delete unprovedLedger.directory_identities;
+  writeFileSync(join(f.root, 'ledger.json'), JSON.stringify(unprovedLedger, null, 2));
+  expect(f.gate().revertPaths([agentDest]).map((entry) => entry.action)).toEqual(['removed']);
+  expect(existsSync(agentDest)).toBe(false);
+  expect(lstatSync(agentsDir).isDirectory()).toBe(true);
+  expect(f.ledger().directories).not.toContain(agentsDir);
+
   // Pre-existing user agentsDir is not recorded in ledger.directories and stays even when empty after revert.
-  mkdirSync(agentsDir, { recursive: true });
   expect(f.gate().writePaths([{ path: agentDest, owner: 'core', entry: { type: 'directory', source: agentSrc } }])).toEqual([agentDest]);
   expect(f.ledger().directories).not.toContain(agentsDir);
   expect(f.gate().revertPaths([agentDest]).map((entry) => entry.action)).toEqual(['removed']);

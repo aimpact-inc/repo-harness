@@ -5,6 +5,7 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { createHash } from 'crypto';
 import { hostSkillRoot, providerSkillLock, type ProviderSkillLock } from '../../effects/host-skill-roots';
+import { isPathInside } from '../../effects/path-containment';
 import { piPackageEntry, piPackageRemoval, recordedPiPackages, removePiPackage } from './pi-package';
 import { globalContextPath, inspectUnrecordedGlobalRules, previewGlobalRulesAdoptedRevert, type GlobalContextHost } from './global-context';
 import { legacyRepositoryExcludesPath } from './repository-excludes';
@@ -310,12 +311,16 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   const includeAntigravityMcp = opts.target === 'antigravity' || (opts.target === 'both' && Boolean(currentLedger.files[antigravityMcp]));
   const antigravityChecks: [string, 'regular file' | 'directory'][] = [];
   if (includeAntigravityMcp) antigravityChecks.push([antigravityMcp, 'regular file']);
+  const antigravitySkills = antigravitySkillsDirHostPath(env, paths);
+  const hasAntigravityAgentRecord = (opts.target === 'antigravity' || opts.target === 'both')
+    && Object.entries(currentLedger.paths).some(([key, record]) =>
+      record.host === 'antigravity' && !isPathInside(antigravitySkills, key));
+  if (hasAntigravityAgentRecord) antigravityChecks.push([antigravityAgentsDirHostPath(env, paths), 'directory']);
   if (opts.target === 'antigravity') {
     antigravityChecks.push(
       [antigravityHostPath(env), 'regular file'],
       [antigravityGlobalRulesHostPath(env), 'regular file'],
-      [antigravitySkillsDirHostPath(env), 'directory'],
-      [antigravityAgentsDirHostPath(env, paths), 'directory'],
+      [antigravitySkills, 'directory'],
     );
     hostPaths.push(antigravityHooksPath(env));
   } else if (opts.target === 'both' && currentLedger.files[antigravityHostPath(env)]) {

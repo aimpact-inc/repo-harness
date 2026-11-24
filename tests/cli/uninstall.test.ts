@@ -11,7 +11,7 @@ import { CLAUDE_ROOT_CONFIG_BACKUP, CODEGRAPH_MCP_SELECTOR } from '../../src/cor
 import type { PathCommitted } from '../../src/core/host-config/types';
 import { pathRecordHost, pathRecordKey } from '../../src/effects/host-config/path-records';
 import { hashManagedTree } from '../../src/effects/managed-tree';
-import { appendFileSync, chmodSync, copyFileSync, cpSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync, statSync } from 'fs';
+import { appendFileSync, chmodSync, copyFileSync, cpSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, relative } from 'path';
 import { spawnSync } from 'child_process';
@@ -22,6 +22,7 @@ import { requestUserInputFragment } from '../../src/cli/installer/targets/codex'
 import { tomlFragment } from '../../src/core/host-config/toml-fragment';
 import { antigravityMcpConfigHostPath, antigravityMcpConfigPath, openHostConfigGate, rollbackHostConfigTransaction } from '../../src/effects/host-config/gate';
 import { hostConfigPathsAt } from '../../src/effects/host-config/store';
+import { observeEntryIdentity } from '../../src/effects/host-config/whole-path';
 import { openRepositoryGate, repositoryConfigPaths } from '../../src/effects/host-config/repository';
 import { buildManagedHooks } from '../../src/cli/installer/managed-entries';
 import { applyGlobalContextRefresh, preflightGlobalContextRefresh, renderGlobalRulesBlock } from '../../src/cli/installer/global-context';
@@ -934,5 +935,47 @@ test.skipIf(process.platform === 'win32')('Antigravity uninstall reverts recorde
   expect(existsSync(agentA)).toBe(false);
   expect(existsSync(agentsDir)).toBe(false);
   expect(lstatSync(configDir).isDirectory()).toBe(true);
+
+  // Unmanaged agents symlink without any recorded seat-agent path does not block targeted Antigravity uninstall.
+  const externalAgents = join(home, 'external-user-agents');
+  mkdirSync(externalAgents, { recursive: true });
+  symlinkSync(externalAgents, agentsDir, 'dir');
+  expect(runInstall({ target: 'antigravity', location: 'global' }).exitCode).toBe(0);
+  const withoutAgents = runUserUninstall({ target: 'antigravity', env });
+  expect(withoutAgents.exitCode, withoutAgents.lines.join('\n')).toBe(0);
+  expect(lstatSync(agentsDir).isSymbolicLink()).toBe(true);
  });
+});
+
+test.skipIf(process.platform === 'win32')('replacing an rh-created ~/.gemini/config/agents directory with a new empty directory is preserved by Antigravity and full uninstall', () => {
+  for (const target of ['antigravity', 'both'] as const) {
+    fixture((home, env) => {
+      const agentsDir = join(home, '.gemini', 'config', 'agents');
+      const agentA = join(agentsDir, 'rh-advisor-0123456789ab');
+      const agentSrc = join(home, 'agent-src');
+      mkdirSync(agentSrc, { recursive: true });
+      writeFileSync(join(agentSrc, 'agent.md'), '---\nname: rh-advisor-0123456789ab\n---\n');
+
+      expect(runInstall({ target: 'antigravity', location: 'global' }).exitCode).toBe(0);
+      expect(existsSync(agentsDir)).toBe(false);
+      openHostConfigGate({ env }).writePaths([{ path: agentA, owner: 'core', entry: { type: 'directory', source: agentSrc } }]);
+      const createdId = observeEntryIdentity(agentsDir);
+      expect(ledger(home).directories).toContain(agentsDir);
+      expect(ledger(home).directory_identities?.[agentsDir]).toBe(createdId);
+
+      // Move the rh-created agents dir aside and create a fresh empty user directory at the original path.
+      const movedAside = join(home, 'agents-moved-aside');
+      renameSync(agentsDir, movedAside);
+      mkdirSync(agentsDir);
+      const replacementId = observeEntryIdentity(agentsDir);
+      expect(replacementId).not.toBe(createdId);
+
+      const result = runUserUninstall({ target, env });
+      expect(result.exitCode, result.lines.join('\n')).toBe(0);
+      expect(lstatSync(agentsDir).isDirectory()).toBe(true);
+      expect(observeEntryIdentity(agentsDir)).toBe(replacementId);
+      expect(ledger(home).directories).not.toContain(agentsDir);
+      expect(ledger(home).directory_identities).toBeUndefined();
+    });
+  }
 });

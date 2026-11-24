@@ -1,5 +1,6 @@
 import { requireHome } from '../repo-harness-home';
 import { sha256Prefixed } from '../../core/evidence/sha256';
+import { lstatSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { PathRecord, PathRecordHost } from '../../core/host-config/types';
 import { antigravityAgentRoot, antigravitySkillRoot, hostSkillRoot, stagedSkillRoot, syncSkillRoots } from '../host-skill-roots';
@@ -84,6 +85,22 @@ export function partitionPathRecords(env: NodeJS.ProcessEnv, all: PathRecords,
 }
 
 /**
+ * Canonicalize the real on-disk spelling of existing non-symlink components under `~/.gemini/config/<leaf>`.
+ * Never follows a symlink below HOME: stops at the first missing or non-directory component so link guards reject it.
+ */
+export function canonicalAntigravityDir(resolvedHome: string, leaf: 'skills' | 'agents'): string {
+  const parts = ['.gemini', 'config', leaf] as const;
+  let current = resolvedHome;
+  for (let index = 0; index < parts.length; index += 1) {
+    const next = join(current, parts[index]!);
+    const stat = lstatSync(next, { throwIfNoEntry: false });
+    if (!stat || !stat.isDirectory()) return join(current, ...parts.slice(index));
+    current = realpathSync.native(next);
+  }
+  return current;
+}
+
+/**
  * The root of the record's host that holds the key, with its links followed: a
  * removal is checked beneath it. `~/.claude.json` has HOME as its root. Null
  * for a key outside every root of its host.
@@ -92,9 +109,9 @@ export function pathRecordRoot(env: NodeJS.ProcessEnv, key: string, record: Path
   const paths = hostConfigPaths(env);
   if (record.host === 'claude' && key === hostPathKey(paths, join(requireHome(env), '.claude.json'))) return dirname(key);
   if (record.host === 'antigravity') {
-    // Canonicalize HOME only: ~/.gemini, config, skills, and agents must never resolve through links.
+    // Canonicalize HOME and verified non-symlink directory components only: never resolve through links below HOME.
     const home = resolveHostPath(paths, requireHome(env));
-    return [antigravitySkillRoot(home), antigravityAgentRoot(home)]
+    return [canonicalAntigravityDir(home, 'skills'), canonicalAntigravityDir(home, 'agents')]
       .find(root => key !== root && isPathInside(root, key)) ?? null;
   }
   return hostRoots(env, record.host).map(root => resolveHostPath(paths, root)).find(root => key !== root && isPathInside(root, key)) ?? null;
@@ -145,6 +162,7 @@ function hostRoots(env: NodeJS.ProcessEnv, host: PathRecordHost): readonly strin
     return [...new Set([
       antigravitySkillRoot(home), antigravityAgentRoot(home),
       antigravitySkillRoot(resolved), antigravityAgentRoot(resolved),
+      canonicalAntigravityDir(resolved, 'skills'), canonicalAntigravityDir(resolved, 'agents'),
     ])];
   }
   if (host === 'staged') return [join(stagedSkillRoot(home), '..')];

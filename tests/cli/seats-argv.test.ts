@@ -17,6 +17,7 @@ import { effectiveSeatConfig, formatSeatRoutes, seatAccountQuotas } from "../../
 import { assertPiShell } from "../../src/effects/board/pi-shell";
 import { readClaudeQuota } from "../../src/effects/board/quota";
 import { buildAntigravityHooks } from "../../src/cli/installer/managed-entries";
+import { runUserUninstall } from "../../src/cli/installer/uninstall";
 import { observeEntryIdentity } from "../../src/effects/host-config/whole-path";
 import { seedGlobalPackageFixture } from "../helpers/install-ownership";
 import { agyCatalogScript, type AgyCatalogFixture } from "../helpers/agy-cli-fixture";
@@ -746,6 +747,60 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
     const linked = f.run(argv);
     expect([linked.status, JSON.parse(linked.stderr).error]).toEqual([1, "antigravity_hooks_path_linked"]);
     expect(lstatSync(agentsDir).isSymbolicLink()).toBe(true);
+  }));
+
+  test("agy seat directory containing an extra regular .repo-harness-owner.json fails cache hit and is preserved by Antigravity and full uninstall", withAgySeat(f => {
+    const argv = ["argv", "advisor", "--json"];
+    const first = f.run(argv);
+    expect(first.status, first.stderr).toBe(0);
+    const args = JSON.parse(first.stdout).argv;
+    const agentName = args[args.indexOf("--agent") + 1];
+    const agentDir = join(realpathSync(f.home), ".gemini", "config", "agents", agentName);
+    const userMarker = join(agentDir, ".repo-harness-owner.json");
+    const userBytes = "{\"user\":\"keep\"}\n";
+    writeFileSync(userMarker, userBytes);
+
+    // Cache hit must reject the modified tree rather than ignoring .repo-harness-owner.json.
+    const second = f.run(argv);
+    expect([second.status, JSON.parse(second.stderr).error]).toEqual([1, "host_config_replacement_refused"]);
+    expect(readFileSync(userMarker, "utf8")).toBe(userBytes);
+
+    // Both targeted Antigravity uninstall and full uninstall must keep the directory and user file intact.
+    for (const target of ["antigravity", "both"] as const) {
+      const result = runUserUninstall({ target, env: f.env });
+      expect(result.status, result.lines.join("\n")).toBe("partial");
+      expect(readFileSync(userMarker, "utf8")).toBe(userBytes);
+      expect(existsSync(join(agentDir, "agent.md"))).toBe(true);
+    }
+  }));
+
+  test("pre-existing capitalized Agents directory uses one canonical key across publish, cache hit, and uninstall", withAgySeat(f => {
+    const capitalizedAgents = join(realpathSync(f.home), ".gemini", "config", "Agents");
+    mkdirSync(capitalizedAgents, { recursive: true });
+
+    const argv = ["argv", "advisor", "--json"];
+    const first = f.run(argv);
+    expect(first.status, first.stderr).toBe(0);
+    const args = JSON.parse(first.stdout).argv;
+    const agentName = args[args.indexOf("--agent") + 1];
+    const ledgerPath = join(f.home, ".repo-harness", "config", "ledger.json");
+    const recordedKey = Object.keys(JSON.parse(readFileSync(ledgerPath, "utf8")).paths)
+      .find(key => basename(key) === agentName)!;
+    expect(recordedKey).toBeDefined();
+    const identityBefore = observeEntryIdentity(recordedKey);
+    const ledgerBefore = readFileSync(ledgerPath, "utf8");
+
+    // Second launch must hit the cache using the same canonical key (including on case-insensitive macOS APFS).
+    const second = f.run(argv);
+    expect(second.status, second.stderr).toBe(0);
+    expect(observeEntryIdentity(recordedKey)).toBe(identityBefore);
+    expect(readFileSync(ledgerPath, "utf8")).toBe(ledgerBefore);
+
+    // Targeted Antigravity uninstall must recognize and remove the recorded agent while keeping the pre-existing Agents dir.
+    const removed = runUserUninstall({ target: "antigravity", env: f.env });
+    expect(removed.exitCode, removed.lines.join("\n")).toBe(0);
+    expect(existsSync(recordedKey)).toBe(false);
+    expect(lstatSync(capitalizedAgents).isDirectory()).toBe(true);
   }));
 
   test("same-role agy candidates disambiguate by content-addressed name without colliding with each other or user rh-worker", withAgySeat(f => {

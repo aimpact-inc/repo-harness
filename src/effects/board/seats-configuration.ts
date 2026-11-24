@@ -48,9 +48,9 @@ import { EFFORT_LEVELS } from '../terminal/task-role-profiles';
 import { GlobalConfigurationError, globalConfigurationPath, mutateGlobalConfiguration, readGlobalConfiguration } from '../configuration/global-configuration';
 import { withExclusiveDirectoryLock } from '../locking/exclusive-directory-lock';
 import { globalRuntimeScope, withRuntimeTransactionLock } from '../locking/runtime-transaction-lock';
-import { antigravityAgentsDirHostPath, antigravityAgentsDirPath, checkAntigravityPath, openHostConfigGate, ownsPathEntry } from '../host-config/gate';
+import { antigravityAgentsDirHostPath, checkAntigravityPath, openHostConfigGate, ownsPathEntry } from '../host-config/gate';
 import { pathRecordProof } from '../host-config/path-records';
-import { hostConfigPaths, readLedger } from '../host-config/store';
+import { hostConfigPaths, hostPathKey, readLedger } from '../host-config/store';
 import { publishFileByRename } from '../atomic-append';
 import { runProcess } from '../process-runner';
 
@@ -561,32 +561,33 @@ function refuseExistingAgySeatAgent(
 export function writeAgySeatAgent(seat: LaunchSeatId, config: SeatConfigV1, env: NodeJS.ProcessEnv): string {
   const spec = agySeatAgentSpec(seat, config);
   const paths = hostConfigPaths(env);
-  const agentsDir = antigravityAgentsDirHostPath(env, paths);
-  const targetPath = join(antigravityAgentsDirPath(env), spec.name);
-  const key = join(agentsDir, spec.name);
 
-  const checkHitOrRefusePresent = (): boolean => {
+  const checkHitOrRefusePresent = (): { readonly hit: boolean; readonly key: string } => {
+    const agentsDir = antigravityAgentsDirHostPath(env, paths);
     checkAntigravityPath(agentsDir, 'directory');
+    // One canonical path key (after the link guard passes) for cache lookup, refusal, and gate publication.
+    const key = hostPathKey(paths, join(agentsDir, spec.name));
     const record = readLedger(paths).paths[key];
-    if (agySeatAgentRecordIsCurrent(record, key, spec.treeDigest)) return true;
+    if (agySeatAgentRecordIsCurrent(record, key, spec.treeDigest)) return { hit: true, key };
     // Fail closed on any existing entry (edited, replaced, symlinked, or unrecorded) without taking the lock or writing.
     if (lstatSync(key, { throwIfNoEntry: false }) !== undefined) {
       refuseExistingAgySeatAgent(record, key, spec.treeDigest);
     }
-    return false;
+    return { hit: false, key };
   };
 
-  if (checkHitOrRefusePresent()) return spec.name;
+  if (checkHitOrRefusePresent().hit) return spec.name;
 
   return withRuntimeTransactionLock(globalRuntimeScope(env), () => {
-    if (checkHitOrRefusePresent()) return spec.name;
+    const checked = checkHitOrRefusePresent();
+    if (checked.hit) return spec.name;
     const stagingParent = mkdtempSync(join(tmpdir(), 'rh-agy-agent-'));
     try {
       const sourceDir = join(stagingParent, spec.name);
       mkdirSync(sourceDir, { mode: 0o700 });
       writeFileSync(join(sourceDir, 'agent.md'), spec.content, { mode: 0o600 });
       openHostConfigGate({ env }).writePaths([{
-        path: targetPath,
+        path: checked.key,
         owner: 'core',
         entry: { type: 'directory', source: sourceDir },
       }]);
