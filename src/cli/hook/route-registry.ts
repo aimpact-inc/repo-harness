@@ -38,6 +38,7 @@ export type RouteId =
   | 'edit'
   | 'bash'
   | 'subagent'
+  | 'question'
   | 'inbox'
   | 'context';
 
@@ -47,6 +48,7 @@ export type HookHandlerId =
   | 'mutation-guard'
   | 'bash-mutation-guard'
   | 'return-channel'
+  | 'question-guard'
   | 'subagent-context'
   | 'agent-notice'
   | 'stop';
@@ -103,6 +105,13 @@ export const ROUTES: readonly Route[] = Object.freeze([
     // Exit 2 denies a credential read (I1), a removal or overwrite of an existing user file (I2) and a whole-repository recursive delete.
     // A crash must deny too: on exit 1 Claude runs the command with neither guard (#3267).
     failClosed: true as const,
+  }),
+  Object.freeze({
+    event: 'PreToolUse' as const,
+    routeId: 'question' as const,
+    matcher: 'AskUserQuestion',
+    hosts: Object.freeze(['claude', 'pi'] as const),
+    handler: 'question-guard',
   }),
   Object.freeze({
     event: 'UserPromptSubmit' as const,

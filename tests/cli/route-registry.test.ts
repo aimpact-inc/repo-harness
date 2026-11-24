@@ -15,7 +15,7 @@ function matchers(event: HookEvent): (string | undefined)[] {
 describe('typed hook route registry', () => {
   test('routes are frozen, ordered, and carry no legacy script field', () => {
     expect(Object.isFrozen(ROUTES)).toBe(true);
-    expect(ROUTES).toHaveLength(7);
+    expect(ROUTES).toHaveLength(8);
     for (const route of ROUTES) {
       expect(Object.isFrozen(route)).toBe(true);
       expect('scripts' in route).toBe(false);
@@ -36,6 +36,7 @@ describe('typed hook route registry', () => {
       'PreToolUse.edit',
       'PreToolUse.subagent',
       'PreToolUse.bash',
+      'PreToolUse.question',
       'UserPromptSubmit.inbox',
       'Stop.default',
     ]);
@@ -43,19 +44,24 @@ describe('typed hook route registry', () => {
       'SessionStart.default',
       'PreToolUse.edit',
       'PreToolUse.bash',
+      'PreToolUse.question',
       'UserPromptSubmit.inbox',
       'Stop.default',
     ]);
     expect(routeSupportsHost(getRoute('SubagentStart', 'context')!, 'codex')).toBe(true);
     expect(routeSupportsHost(getRoute('SubagentStart', 'context')!, 'claude')).toBe(false);
+    expect(routeSupportsHost(getRoute('PreToolUse', 'question')!, 'claude')).toBe(true);
+    expect(routeSupportsHost(getRoute('PreToolUse', 'question')!, 'pi')).toBe(true);
+    expect(routeSupportsHost(getRoute('PreToolUse', 'question')!, 'codex')).toBe(false);
+    expect(routeSupportsHost(getRoute('PreToolUse', 'question')!, 'antigravity')).toBe(false);
   });
 
   test('matcher partitions remain disjoint', () => {
-    expect(matchers('PreToolUse')).toEqual(['Edit|Write', 'Agent', 'Bash']);
+    expect(matchers('PreToolUse')).toEqual(['Edit|Write', 'Agent', 'Bash', 'AskUserQuestion']);
   });
 
   test('every route has exactly one exhaustive typed handler binding', () => {
-    expect(new Set(ROUTES.map((route) => `${route.event}.${route.routeId}`)).size).toBe(7);
+    expect(new Set(ROUTES.map((route) => `${route.event}.${route.routeId}`)).size).toBe(8);
     for (const route of ROUTES) expect(getHandlerForRoute(route).id).toBe(route.handler);
   });
 

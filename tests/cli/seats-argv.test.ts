@@ -1064,6 +1064,18 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   });
 
   test("Pi reset seats inject REPO_HARNESS_SEAT* only with repositoryId while Pi workers never inject them", () => {
+    const piOrchestrator = buildSeatLaunch("orchestrator", { runtime: "pi", model: "magpie/agy-cli/gemini-4-neon", advisor_model: null, effort: "xhigh", tools: ["read", "shell", "net", "tasks", "gh"], fleet: [] }, "seats", [], { repositoryId: "12345" });
+    expect(bare([...piOrchestrator.argv]).slice(0, 5)).toEqual([
+      "REPO_HARNESS_SEAT=orchestrator",
+      "REPO_HARNESS_SEAT_REPOSITORY=12345",
+      "REPO_HARNESS_SEAT_MODEL=magpie/agy-cli/gemini-4-neon",
+      "REPO_HARNESS_SEAT_EFFORT=xhigh",
+      "pi",
+    ]);
+    expect(values([...piOrchestrator.argv], "--exclude-tools")).toEqual(["ask_user_question"]);
+    expect(piOrchestrator.argv).not.toContain("--no-extensions");
+    expect(piOrchestrator.brief).toContain("Do not call a blocking question tool");
+
     const piAdvisor = buildSeatLaunch("advisor", { runtime: "pi", model: "magpie/agy-cli/gemini-4-neon", advisor_model: null, effort: "xhigh", tools: ["read", "shell", "net"], fleet: [] }, "seats", [], { repositoryId: "12345" });
     expect(bare([...piAdvisor.argv]).slice(0, 5)).toEqual([
       "REPO_HARNESS_SEAT=advisor",
@@ -1072,13 +1084,18 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
       "REPO_HARNESS_SEAT_EFFORT=xhigh",
       "pi",
     ]);
+    expect(values([...piAdvisor.argv], "--exclude-tools")).toEqual([]);
     const piAdvisorUnlabeled = buildSeatLaunch("advisor", { runtime: "pi", model: "magpie/agy-cli/gemini-4-neon", advisor_model: null, effort: "xhigh", tools: ["read", "shell", "net"], fleet: [] }, "seats", []);
     expect(bare([...piAdvisorUnlabeled.argv])[0]).toBe("pi");
     const piWorker = buildSeatLaunch("worker", { runtime: "pi", model: "magpie/agy-cli/gemini-4-neon", advisor_model: null, effort: "xhigh", tools: ["edit", "read", "shell"], fleet: [] }, "seats", [], { repositoryId: "12345" });
     const workerBare = bare([...piWorker.argv]);
     expect(workerBare[0]).toBe("pi");
+    expect(values([...piWorker.argv], "--exclude-tools")).toEqual([]);
     expect(workerBare.some(arg => typeof arg === "string" && arg.startsWith("REPO_HARNESS_SEAT"))).toBe(false);
     expect(piWorker.argv.some(arg => arg.startsWith("REPO_HARNESS_SEAT") && arg.includes("="))).toBe(false);
+
+    const codexOrchestrator = buildSeatLaunch("orchestrator", { runtime: "codex", model: "gpt-6.2-sol", advisor_model: null, effort: "high", tools: ["read", "shell", "net", "gh"], fleet: [] }, "seats", [], { repositoryId: "12345" });
+    expect(codexOrchestrator.brief).toContain("Do not call a blocking question tool");
   });
 
   test.skipIf(process.platform === "win32")("Pi role overrides stay private under umask 022", () => {

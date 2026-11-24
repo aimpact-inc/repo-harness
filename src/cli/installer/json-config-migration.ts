@@ -157,7 +157,7 @@ function isReleasedExec(command: string, head: string, tail: string): boolean {
  * prove nothing until they are one of these.
  */
 const RELEASED_ROUTES: ReadonlySet<string> = new Set([
-  'PostToolUse always', 'PostToolUse bash', 'PostToolUse edit', 'PreToolUse bash', 'PreToolUse edit', 'PreToolUse subagent', 'SessionStart default',
+  'PostToolUse always', 'PostToolUse bash', 'PostToolUse edit', 'PreToolUse bash', 'PreToolUse edit', 'PreToolUse question', 'PreToolUse subagent', 'SessionStart default',
   'Stop default', 'SubagentStart context', 'SubagentStop quality', 'UserPromptSubmit default', 'UserPromptSubmit delegation', 'UserPromptSubmit inbox',
 ]);
 

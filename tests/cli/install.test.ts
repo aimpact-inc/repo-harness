@@ -882,7 +882,7 @@ describe('install command (Phase 1B)', () => {
     });
   });
 
-  test('claude --location global creates ~/.claude/settings.json with 6 hooks including the Bash tripwire', () => {
+  test('claude --location global creates ~/.claude/settings.json with 7 hooks including the Bash tripwire and orchestrator question guard', () => {
     withTempHome('repo-harness-install', (home) => {
       const result = runInstall({ target: 'claude', location: 'global' });
       expect(result.exitCode).toBe(0);
@@ -890,8 +890,8 @@ describe('install command (Phase 1B)', () => {
         fs.readFileSync(path.join(home, '.claude/settings.json'), 'utf-8'),
       );
       const total = Object.values(data.hooks as Record<string, unknown[]>).flat().length;
-      expect(total).toBe(6);
-      expect(data.hooks.PreToolUse.map((entry: { matcher: string }) => entry.matcher)).toEqual(['Edit|Write', 'Agent', 'Bash']);
+      expect(total).toBe(7);
+      expect(data.hooks.PreToolUse.map((entry: { matcher: string }) => entry.matcher)).toEqual(['Edit|Write', 'Agent', 'Bash', 'AskUserQuestion']);
       expect(data.hooks.UserPromptSubmit.length).toBe(1);
       expect(data.hooks.SubagentStart).toBeUndefined();
       expect(data.hooks.SubagentStop).toBeUndefined();
@@ -949,7 +949,7 @@ describe('install command (Phase 1B)', () => {
     });
   });
 
-  test('claude install self-heals legacy Codex-only managed entries back to 6 hooks', () => {
+  test('claude install self-heals legacy Codex-only managed entries back to 7 hooks', () => {
     withTempHome('repo-harness-install', (home) => {
       const filePath = path.join(home, '.claude/settings.json');
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -974,7 +974,7 @@ describe('install command (Phase 1B)', () => {
       expect(result.exitCode).toBe(0);
       const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       const total = Object.values(data.hooks as Record<string, unknown[]>).flat().length;
-      expect(total).toBe(6);
+      expect(total).toBe(7);
       expect(data.hooks.UserPromptSubmit.length).toBe(1);
       // The migration does not prove that rh created the retired event arrays, so they stay, empty.
       expect([data.hooks.SubagentStart, data.hooks.SubagentStop]).toEqual([[], []]);
@@ -999,11 +999,11 @@ describe('install command (Phase 1B)', () => {
       runInstall({ target: 'claude', location: 'global' });
       const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       const pre = data.hooks.PreToolUse as { hooks: { command: string }[] }[];
-      // 2 siblings + 3 managed, including the Bash tripwire.
-      expect(pre.length).toBe(5);
-      expect(pre.slice(0, 3)).toEqual(buildManagedHooks('claude').PreToolUse);
-      expect(pre[3].hooks[0].command).toBe('rtk hook claude');
-      expect(pre[4].hooks[0].command).toBe('echo repo-harness hook is documented');
+      // 2 siblings + 4 managed, including the Bash tripwire and orchestrator question guard.
+      expect(pre.length).toBe(6);
+      expect(pre.slice(0, 4)).toEqual(buildManagedHooks('claude').PreToolUse);
+      expect(pre[4].hooks[0].command).toBe('rtk hook claude');
+      expect(pre[5].hooks[0].command).toBe('echo repo-harness hook is documented');
     });
   });
 

@@ -118,7 +118,7 @@ test('the JSON migration adopts a tagged entry with the old writer shape, keeps 
     'a status line bundle path segment': ['statusLine', (data) => { data.statusLine.command = data.statusLine.command.replace("/dist/hook-entry.js'", `/${INLINE_TOKEN}/dist/hook-entry.js'`); }],
     // A path segment longer than a file name can be: its lookup fails, and the error would name the path.
     'an overlong Bun path segment': ['hooks.PreToolUse[edit]', (data) => { data.hooks.PreToolUse[0].hooks[0].command = data.hooks.PreToolUse[0].hooks[0].command.replace(/ exec '[^']*'/, ` exec '/opt/${INLINE_TOKEN.repeat(10)}/bun'`); }],
-    'a manifest hash mismatch': ['hooks.SessionStart[default], hooks.PreToolUse[edit], hooks.PreToolUse[subagent], hooks.PreToolUse[bash], hooks.UserPromptSubmit[inbox], hooks.Stop[default]', (data) => { data.hooks.PreToolUse[0].hooks[0].timeout = 99; }, true],
+    'a manifest hash mismatch': ['hooks.SessionStart[default], hooks.PreToolUse[edit], hooks.PreToolUse[subagent], hooks.PreToolUse[bash], hooks.PreToolUse[question], hooks.UserPromptSubmit[inbox], hooks.Stop[default]', (data) => { data.hooks.PreToolUse[0].hooks[0].timeout = 99; }, true],
   };
   for (const [name, [kept, edit, hashed]] of Object.entries(rows)) withClaudeHome((home, settings) => {
     const env = process.env;
