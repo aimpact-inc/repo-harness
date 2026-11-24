@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { parseJsonText } from '../../../core/evidence/file-syntax';
@@ -125,11 +125,12 @@ function antigravityRecords(env: NodeJS.ProcessEnv, preview: boolean) {
   const ledger = (preview ? readProjectedLedger : readLedger)(paths);
   const hooksPath = antigravityHostPath(env, paths);
   const rulesPath = antigravityGlobalRulesHostPath(env, paths);
+  const skillsRoot = antigravitySkillsDirHostPath(env, paths);
   return {
     hooks: ledger.fragments.some((record) => record.file === hooksPath && record.owner === 'core'
       && record.selector === ANTIGRAVITY_HOOK_SELECTOR && record.kind === 'add'),
     rules: ledger.fragments.some((record) => record.file === rulesPath && record.selector === GLOBAL_RULES_SELECTOR),
-    skills: Object.values(ledger.paths).some((record) => record.host === 'antigravity'),
+    skills: Object.entries(ledger.paths).some(([key, record]) => record.host === 'antigravity' && dirname(key) === skillsRoot),
   };
 }
 
@@ -336,7 +337,7 @@ export function checkAntigravitySkills(env: NodeJS.ProcessEnv = process.env): An
   catch (error) {
     ledgerError = error instanceof Error ? error.message : String(error);
   }
-  const hasRecordedSkills = Object.values(ledgerPaths).some((record) => record.host === 'antigravity');
+  const hasRecordedSkills = Object.entries(ledgerPaths).some(([key, record]) => record.host === 'antigravity' && dirname(key) === skillsDir);
   if (!hooksPresent && !hasRecordedSkills && ledgerError === null) {
     return { id, describe, status: 'na', detail: 'Antigravity hooks and skill projections are absent.' };
   }
@@ -442,8 +443,9 @@ export function planAntigravitySkills(
     return { projections: [], writes: [], retiredKeys: [], actions: [], refusals: [] };
   }
   const paths = hostConfigPaths(env);
+  const skillsRoot = antigravitySkillsDirHostPath(env, paths);
   try {
-    checkAntigravityPath(antigravitySkillsDirHostPath(env, paths), 'directory');
+    checkAntigravityPath(skillsRoot, 'directory');
   } catch (error) {
     return {
       projections: [],
@@ -484,7 +486,7 @@ export function planAntigravitySkills(
     .filter((pkg) => pkg.kind === 'external' || pkg.kind === 'integration')
     .map((pkg) => pkg.name));
   const retiredEntries = Object.entries(recorded)
-    .filter(([key, record]) => record.host === 'antigravity' && !expectedKeys.has(key) && !independentSkills.has(basename(key)));
+    .filter(([key, record]) => record.host === 'antigravity' && dirname(key) === skillsRoot && !expectedKeys.has(key) && !independentSkills.has(basename(key)));
   const retiredKeys = retiredEntries.map(([key]) => key);
   for (const [key, record] of retiredEntries) {
     const revertPlan = planPathRevertEntry(paths, key, record);

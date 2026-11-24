@@ -61,7 +61,7 @@ import {
   type HostConfigPaths,
 } from './store';
 import { isPathInside } from '../path-containment';
-import { antigravitySkillRoot } from '../host-skill-roots';
+import { antigravityAgentRoot, antigravitySkillRoot } from '../host-skill-roots';
 import { requireHome } from '../repo-harness-home';
 import { jsonFragment } from '../../core/host-config/json-fragment';
 import { CODEGRAPH_MCP_SELECTOR } from '../../core/host-config/claude-config';
@@ -426,6 +426,10 @@ export function antigravitySkillsDirPath(env: NodeJS.ProcessEnv): string {
   return antigravitySkillRoot(requireHome(env));
 }
 
+export function antigravityAgentsDirPath(env: NodeJS.ProcessEnv): string {
+  return antigravityAgentRoot(requireHome(env));
+}
+
 /** Canonicalize HOME only. The configuration entries below it must never resolve through links. */
 export function antigravityHostPath(env: NodeJS.ProcessEnv, paths = hostConfigPaths(env)): HostPath {
   return antigravityHooksPathAt(resolveHostPath(paths, requireHome(env))) as HostPath;
@@ -441,6 +445,10 @@ export function antigravityMcpConfigHostPath(env: NodeJS.ProcessEnv, paths = hos
 
 export function antigravitySkillsDirHostPath(env: NodeJS.ProcessEnv, paths = hostConfigPaths(env)): HostPath {
   return antigravitySkillRoot(resolveHostPath(paths, requireHome(env))) as HostPath;
+}
+
+export function antigravityAgentsDirHostPath(env: NodeJS.ProcessEnv, paths = hostConfigPaths(env)): HostPath {
+  return antigravityAgentRoot(resolveHostPath(paths, requireHome(env))) as HostPath;
 }
 
 export class AntigravityHooksPathError extends Error {
@@ -470,6 +478,9 @@ interface AntigravityGuardedPaths {
   readonly mcp: HostPath;
   readonly mcpRequested: string;
   readonly skillsDir: HostPath;
+  readonly skillsDirRequested: string;
+  readonly agentsDir: HostPath;
+  readonly agentsDirRequested: string;
 }
 
 function antigravityGuardedPaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths): AntigravityGuardedPaths {
@@ -481,7 +492,32 @@ function antigravityGuardedPaths(env: NodeJS.ProcessEnv, paths: HostConfigPaths)
     mcp: antigravityMcpConfigHostPath(env, paths),
     mcpRequested: antigravityMcpConfigPath(env),
     skillsDir: antigravitySkillsDirHostPath(env, paths),
+    skillsDirRequested: antigravitySkillsDirPath(env),
+    agentsDir: antigravityAgentsDirHostPath(env, paths),
+    agentsDirRequested: antigravityAgentsDirPath(env),
   };
+}
+
+function checkAntigravityGuardedRecord(key: string, antigravity: Pick<AntigravityGuardedPaths, 'skillsDir' | 'agentsDir'>): void {
+  if (key !== antigravity.skillsDir && isPathInside(antigravity.skillsDir, key)) {
+    checkAntigravityPath(antigravity.skillsDir, 'directory');
+    return;
+  }
+  if (key !== antigravity.agentsDir && isPathInside(antigravity.agentsDir, key)) {
+    checkAntigravityPath(antigravity.agentsDir, 'directory');
+    return;
+  }
+  // An unexpected out-of-root Antigravity key fails closed against both guarded roots.
+  checkAntigravityPath(antigravity.skillsDir, 'directory');
+  checkAntigravityPath(antigravity.agentsDir, 'directory');
+}
+
+/** Guard an Antigravity path record against its own root (`skillsDir` vs `agentsDir`). */
+export function checkAntigravityRecordPath(key: string, env: NodeJS.ProcessEnv, paths = hostConfigPaths(env)): void {
+  checkAntigravityGuardedRecord(key, {
+    skillsDir: antigravitySkillsDirHostPath(env, paths),
+    agentsDir: antigravityAgentsDirHostPath(env, paths),
+  });
 }
 
 function isAntigravityContainerDir(directory: string, antigravity: AntigravityGuardedPaths): boolean {
@@ -724,7 +760,13 @@ function admitWholePath(env: NodeJS.ProcessEnv, paths: HostConfigPaths, ledger: 
   const held = pathRecordHostRoot(env, path);
   if (held === null) throw new HostConfigError('host_config_invalid_path', `not inside an install root, so rh records no whole path there: ${path}`);
   const { host, root } = held;
-  if (host === 'antigravity') checkAntigravityPath(antigravitySkillsDirHostPath(env, paths), 'directory');
+  if (host === 'antigravity') {
+    const agentsDir = antigravityAgentsDirHostPath(env, paths);
+    const guardDir = root === antigravityAgentsDirPath(env) || root === agentsDir
+      ? agentsDir
+      : antigravitySkillsDirHostPath(env, paths);
+    checkAntigravityPath(guardDir, 'directory');
+  }
   const key = hostPathKey(paths, path);
   const holder = pathRecordOf(ledger, key as HostPath);
   if (holder !== null && toolOf(ledger, holder) !== null) throw new HostConfigError('host_config_invalid_state', `rh records this path for the tool ${toolOf(ledger, holder)}, so it does not write it as an install path: ${path}`);
@@ -924,7 +966,7 @@ function planWholePaths(
   const entries: HostConfigPlannedPath[] = [];
   for (const { write, key, host } of admitted) {
     try {
-      if (host === 'antigravity' && antigravity) checkAntigravityPath(antigravity.skillsDir, 'directory');
+      if (host === 'antigravity' && antigravity) checkAntigravityGuardedRecord(key, antigravity);
       const plan = planWholePath(paths, write, key, host, ledger.paths[key]);
       let action: HostConfigPlannedPath['action'];
       if (plan.observed === null) {
@@ -963,7 +1005,7 @@ function writeWholePaths(admit: WholePathAdmit, paths: HostConfigPaths, writes: 
   const plans = admitted.map(({ write, key, host }) => planWholePath(paths, write, key, host, records[key]));
   const written: string[] = [];
   for (const { write, key, host, previous, prior, entry, linkTarget, observed, replaces } of plans) {
-    if (host === 'antigravity' && antigravity) checkAntigravityPath(antigravity.skillsDir, 'directory');
+    if (host === 'antigravity' && antigravity) checkAntigravityGuardedRecord(key, antigravity);
     const backup = replaces ? vaultUserFile(paths, entry, replaces, write.path) : undefined;
     const createdDirs = missingDirectories(entry as HostPath);
     const recordedDirs = host === 'antigravity' && antigravity
@@ -1557,14 +1599,19 @@ function revertWholePaths(paths: HostConfigPaths, only: readonly string[], optio
   const dropped: string[] = [];
   const steps: RevertStep[] = [];
   for (const rawPath of only) {
-    if (antigravity && isPathInside(antigravity.skillsDir, resolve(rawPath))) {
+    if (!antigravity) continue;
+    const resolvedRaw = resolve(rawPath);
+    if (isPathInside(antigravity.skillsDir, resolvedRaw) || isPathInside(antigravity.skillsDirRequested, resolvedRaw)) {
       checkAntigravityPath(antigravity.skillsDir, 'directory');
+    }
+    if (isPathInside(antigravity.agentsDir, resolvedRaw) || isPathInside(antigravity.agentsDirRequested, resolvedRaw)) {
+      checkAntigravityPath(antigravity.agentsDir, 'directory');
     }
   }
   for (const key of new Set(only.map((path) => hostPathKey(paths, path)))) {
     const record = ledger.paths[key];
     if (!record) continue;
-    if (record.host === 'antigravity' && antigravity) checkAntigravityPath(antigravity.skillsDir, 'directory');
+    if (record.host === 'antigravity' && antigravity) checkAntigravityGuardedRecord(key, antigravity);
     const planned = planPathRevertEntry(paths, key, record, options.retire);
     report.push(planned);
     const { action } = planned;
@@ -1591,7 +1638,7 @@ function revertWholePaths(paths: HostConfigPaths, only: readonly string[], optio
     }
     if (action === 'released') { steps.push({ kind: 'release', commit }); continue; }
     steps.push({ kind: action === 'removed' ? 'delete' : 'restore', commit, write: () => {
-      if (record.host === 'antigravity' && antigravity) checkAntigravityPath(antigravity.skillsDir, 'directory');
+      if (record.host === 'antigravity' && antigravity) checkAntigravityGuardedRecord(key, antigravity);
       if (options.transaction) keepPreimage(options.transaction, entry);
       if (record.kind === 'replaced') {
         const committed = record.committed as Extract<PathCommitted, { type: 'file' }>;

@@ -18,6 +18,7 @@ import { migrateCodexConfigRecords, planCodexConfigMigration, previewAdoptedReve
 import { migrateJsonConfigRecords, planJsonConfigMigration, previewJsonAdoptedRevert } from './json-config-migration';
 import { UNVERIFIED_INSTALLER_RANGES } from '../../effects/host-config/delegated';
 import {
+  antigravityAgentsDirHostPath,
   antigravityGlobalRulesHostPath,
   antigravityHooksPath,
   antigravityHostPath,
@@ -25,6 +26,7 @@ import {
   antigravityMcpConfigPath,
   antigravitySkillsDirHostPath,
   checkAntigravityPath,
+  checkAntigravityRecordPath,
   openHostConfigGate,
   openRepositoryFileGate,
   planPathRevertEntry,
@@ -313,6 +315,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       [antigravityHostPath(env), 'regular file'],
       [antigravityGlobalRulesHostPath(env), 'regular file'],
       [antigravitySkillsDirHostPath(env), 'directory'],
+      [antigravityAgentsDirHostPath(env, paths), 'directory'],
     );
     hostPaths.push(antigravityHooksPath(env));
   } else if (opts.target === 'both' && currentLedger.files[antigravityHostPath(env)]) {
@@ -417,7 +420,7 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
       continue;
     }
     try {
-      if (record.host === 'antigravity') checkAntigravityPath(antigravitySkillsDirHostPath(env), 'directory');
+      if (record.host === 'antigravity') checkAntigravityRecordPath(key, env, paths);
       // The record is checked beneath its own host root, which a link can put outside HOME.
       const root = pathRecordRoot(env, key, record);
       if (root === null) throw new Error(`the record is outside the root of its host: ${key}`);
@@ -525,10 +528,15 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
           if (index === -1) items.push(item); else items[index] = item;
         }
       }
+      const antigravitySkills = antigravitySkillsDirHostPath(env, paths);
+      const antigravityAgents = antigravityAgentsDirHostPath(env, paths);
       for (const path of [...originals.keys()]) {
         const parent = dirname(path);
+        // Antigravity skills and agents directories are managed only through gate.revertPaths + ledger.directories,
+        // so pre-existing user ~/.gemini/config/{skills,agents} directories stay even when empty.
+        if (parent === antigravitySkills || parent === antigravityAgents) continue;
         // Never remove a host root or history tree; only now-empty managed leaf containers.
-        if (['skills', 'rules', 'agents'].includes(parent.split('/').at(-1) ?? '') && existsSync(parent) && readdirSync(parent).length === 0) rmdirSync(parent);
+        if (['skills', 'rules', 'agents'].includes(parent.split('/').at(-1) ?? '') && lstatSync(parent, { throwIfNoEntry: false })?.isDirectory() && readdirSync(parent).length === 0) rmdirSync(parent);
       }
     } catch (error) { unresolved(home, `uninstall incomplete: ${String((error as Error).message)}`); }
   }

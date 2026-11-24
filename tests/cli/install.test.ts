@@ -11,7 +11,9 @@ import { CLAUDE_STATUS_LINE_PIPE, claudeTarget } from '../../src/cli/installer/t
 import type { Location } from '../../src/cli/installer/types';
 import { requestUserInputFragment } from '../../src/cli/installer/targets/codex';
 import { openHostConfigGate } from '../../src/effects/host-config/gate';
-import { hostConfigPaths } from '../../src/effects/host-config/store';
+import { hostConfigPaths, readLedger } from '../../src/effects/host-config/store';
+import { supportedPathRecord } from '../../src/cli/installer/install-profile';
+import { checkAntigravitySkills, hasRecordedAntigravityState } from '../../src/cli/installer/targets/antigravity';
 import { isRepoHarnessManagedHookCommand } from '../../src/core/adoption/managed-hook-config';
 import { buildManagedHooks, compareManagedHookProjection, hookSelector, managedStatusLine } from '../../src/cli/installer/managed-entries';
 
@@ -233,6 +235,50 @@ test.skipIf(process.platform === 'win32')('Antigravity retires the old owned por
     expect(fs.readlinkSync(portal)).toBe(portalSource);
   });
 });
+
+test.skipIf(process.platform === 'win32')('Antigravity skills planner, doctor, and install-profile preserve core-owned seat agent dirs without false opt-in', () => {
+  withTempHome('rh-antigravity-seat-agents', (home) => {
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, BUN_INSTALL: path.join(home, '.bun') };
+    const agentsDir = path.join(home, '.gemini', 'config', 'agents');
+    const agentName = 'rh-advisor-0123456789ab';
+    const agentDest = path.join(agentsDir, agentName);
+    const agentSrc = path.join(home, 'agent-src');
+    fs.mkdirSync(agentSrc, { recursive: true });
+    fs.writeFileSync(path.join(agentSrc, 'agent.md'), `---\nname: ${agentName}\n---\n`);
+
+    // Record a core-owned agy seat agent directory before any Antigravity skills/hooks install.
+    openHostConfigGate({ env }).writePaths([{ path: agentDest, owner: 'core', entry: { type: 'directory', source: agentSrc } }]);
+    const recordedAgent = readLedger(hostConfigPaths(env)).paths[agentDest]!;
+    expect(recordedAgent).toMatchObject({ host: 'antigravity', owner: 'core', kind: 'created' });
+
+    // supportedPathRecord accepts only core-owned directory records matching the rh-<role>-<digest12> pattern under agentsDir.
+    const isSupported = supportedPathRecord(env);
+    expect(isSupported(agentDest, recordedAgent)).toBe(true);
+    expect(isSupported(path.join(agentsDir, 'my-user-agent'), recordedAgent)).toBe(false);
+    expect(isSupported(agentDest, { ...recordedAgent, owner: 'peer-runtime' })).toBe(false);
+    expect(isSupported(agentDest, { ...recordedAgent, committed: { type: 'symlink', target: agentSrc } })).toBe(false);
+
+    // Agent records alone must not trigger Antigravity opt-in or false antigravity-skills doctor failures.
+    expect(hasRecordedAntigravityState(env, false)).toBe(false);
+    expect(hasRecordedAntigravityState(env, true)).toBe(false);
+    expect(checkAntigravitySkills(env)).toMatchObject({ id: 'antigravity-skills', status: 'na' });
+    const noopUpdate = antigravityCli(home, ['update', '--target', 'antigravity', '--no-cli']);
+    expect(noopUpdate.status, noopUpdate.stdout + noopUpdate.stderr).toBe(0);
+    expect(fs.existsSync(path.join(home, '.gemini', 'config', 'hooks.json'))).toBe(false);
+    expect(fs.existsSync(path.join(agentDest, 'agent.md'))).toBe(true);
+
+    // Installing and updating Antigravity skills must never plan or delete live agent directories.
+    const install = antigravityCli(home, ['install', '--target', 'antigravity']);
+    expect(install.status, install.stdout + install.stderr).toBe(0);
+    const updateDry = antigravityCli(home, ['update', '--target', 'antigravity', '--no-cli', '--dry-run', '--json']);
+    expect(updateDry.status, updateDry.stderr).toBe(0);
+    expect(JSON.parse(updateDry.stdout).host_config.items.some((item: { path: string }) => item.path === agentDest)).toBe(false);
+    const update = antigravityCli(home, ['update', '--target', 'antigravity', '--no-cli']);
+    expect(update.status, update.stdout + update.stderr).toBe(0);
+    expect(fs.readFileSync(path.join(agentDest, 'agent.md'), 'utf8')).toBe(`---\nname: ${agentName}\n---\n`);
+    expect(readLedger(hostConfigPaths(env)).paths[agentDest]).toBeDefined();
+  });
+}, 30_000);
 
 test.skipIf(process.platform === 'win32')('Antigravity --dry-run reports unowned skill collisions and exits non-zero, matching apply', () => {
   withTempHome('rh-antigravity-dry-run-collision', (home) => {

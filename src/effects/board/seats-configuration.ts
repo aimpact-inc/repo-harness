@@ -1,14 +1,14 @@
 import type { ExecutableInstallation } from '@botiverse/oar/browser';
 import { randomUUID } from 'node:crypto';
-import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { decodeAgentsConfig } from '../../core/board/agents-settings';
 import { isRecord } from '../../core/evidence/is-record';
-import { sha256Hex } from '../../core/evidence/sha256';
-import { agySeatAgentName, agySeatAgentTools, agySeatBrief } from '../../core/board/seat-launch';
+import { agySeatAgentSpec } from '../../core/board/seat-launch';
+import { HostConfigError, type PathRecord } from '../../core/host-config/types';
 import {
   AgySeatSettingsError,
   ALLOWED_SEAT_FLEET_ROLES,
@@ -46,6 +46,10 @@ import { MAGPIE_EXTENSION_PATH, SEAT_POOL_KIND, SEAT_POOL_STALE_MS, buildSeatPoo
 import { EFFORT_LEVELS } from '../terminal/task-role-profiles';
 import { GlobalConfigurationError, globalConfigurationPath, mutateGlobalConfiguration, readGlobalConfiguration } from '../configuration/global-configuration';
 import { withExclusiveDirectoryLock } from '../locking/exclusive-directory-lock';
+import { globalRuntimeScope, withRuntimeTransactionLock } from '../locking/runtime-transaction-lock';
+import { antigravityAgentsDirHostPath, antigravityAgentsDirPath, checkAntigravityPath, openHostConfigGate, ownsPathEntry } from '../host-config/gate';
+import { pathRecordProof } from '../host-config/path-records';
+import { hostConfigPaths, readLedger } from '../host-config/store';
 import { publishFileByRename } from '../atomic-append';
 import { runProcess } from '../process-runner';
 
@@ -457,49 +461,88 @@ if (import.meta.main) {
   }
 }
 
-const AGY_AGENT_DESCRIPTIONS: Readonly<Record<string, string>> = {
-  'rh-orchestrator': 'Repo-harness orchestrator',
-  'rh-advisor': 'Repo-harness advisor',
-  'rh-council': 'Repo-harness council',
-  'rh-gatekeeper-fallback': 'Repo-harness gatekeeper fallback',
-  'rh-worker': 'Repo-harness worker',
-};
+function agySeatAgentRecordIsCurrent(
+  record: PathRecord | undefined,
+  key: string,
+  expectedTreeDigest: string,
+): boolean {
+  return record !== undefined
+    && record.host === 'antigravity'
+    && record.kind === 'created'
+    && record.committed.type === 'directory'
+    && 'sha256' in record.committed
+    && record.committed.sha256 === expectedTreeDigest
+    && ownsPathEntry(record, 'core', key);
+}
 
-/** Publish the generated agy seat agent by digest. An existing path can only be reused if it holds these bytes. */
+function refuseExistingAgySeatAgent(
+  record: PathRecord | undefined,
+  key: string,
+  expectedTreeDigest: string,
+): never {
+  if (!record) {
+    throw new HostConfigError('host_config_replacement_refused', `rh has no record of it, so rh does not replace it: ${key}`);
+  }
+  if (record.owner !== 'core') {
+    throw new HostConfigError('host_config_replacement_refused', `rh records it for ${record.owner}, so rh does not replace it: ${key}`);
+  }
+  if (record.kind === 'user_managed') {
+    throw new HostConfigError('host_config_replacement_refused', `the user keeps it, so rh does not replace it: ${key}`);
+  }
+  if (record.committed.type !== 'directory' || !('sha256' in record.committed) || record.committed.sha256 !== expectedTreeDigest) {
+    throw new HostConfigError('host_config_replacement_refused', `the recorded agy agent directory differs from its expected digest, so rh does not replace it: ${key}`);
+  }
+  const proof = pathRecordProof(key, record);
+  const reason = proof === 'replaced'
+    ? 'it holds the bytes that rh wrote, but it is another file-system entry (a copy or a restore)'
+    : proof === 'unproved'
+      ? 'rh recorded no identity for it, so nothing proves that rh wrote it'
+      : 'it changed since rh wrote it';
+  throw new HostConfigError('host_config_replacement_refused', `${reason}, so rh does not replace it: ${key}`);
+}
+
+/**
+ * Materialize the content-addressed agy seat agent under `~/.gemini/config/agents/rh-<role>-<digest12>/agent.md`
+ * through `openHostConfigGate` (`owner: 'core'`). Cache hits verify both the root guard and on-disk tree
+ * identity/digest; edits or replacements fail closed without touching the existing path.
+ */
 export function writeAgySeatAgent(seat: LaunchSeatId, config: SeatConfigV1, env: NodeJS.ProcessEnv): string {
-  const agentName = agySeatAgentName(seat);
-  const tools = agySeatAgentTools(seat, config);
-  const description = AGY_AGENT_DESCRIPTIONS[agentName] ?? `Repo-harness ${seat}`;
-  const content = Buffer.from([
-    '---', `name: ${agentName}`, `description: ${description}`, 'mainAgent: true',
-    `tools: [${tools.join(', ')}]`, `inheritMcp: ${config.tools.includes('mcp')}`, '---', '', '# System', '', agySeatBrief(seat, config), '',
-  ].join('\n'));
-  const digest = sha256Hex(content);
-  let directory = realpathSync(dirname(dirname(globalConfigurationPath(env))));
-  for (const part of ['.repo-harness', 'seats', 'agy', digest, '.agents', 'agents', agentName]) {
-    directory = join(directory, part);
-    try { mkdirSync(directory, { mode: 0o700 }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-    const stat = lstatSync(directory);
-    if (!stat.isDirectory() || (process.getuid !== undefined && stat.uid !== process.getuid())) throw new Error('agy agent directory must be owned and contain no links.');
-  }
-  const path = join(directory, 'agent.md');
-  const temporary = join(directory, `.agent-${randomUUID()}.tmp`);
-  writeFileSync(temporary, content, { flag: 'wx', mode: 0o600 });
-  try {
-    try { linkSync(temporary, path); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-      try {
-        const stat = fstatSync(fd);
-        if (!stat.isFile() || stat.size !== content.length || !readFileSync(fd).equals(content)) throw new Error('agy agent file differs from its expected content.');
-      } finally { closeSync(fd); }
+  const spec = agySeatAgentSpec(seat, config);
+  const paths = hostConfigPaths(env);
+  const agentsDir = antigravityAgentsDirHostPath(env, paths);
+  const targetPath = join(antigravityAgentsDirPath(env), spec.name);
+  const key = join(agentsDir, spec.name);
+
+  const checkHitOrRefusePresent = (): boolean => {
+    checkAntigravityPath(agentsDir, 'directory');
+    const record = readLedger(paths).paths[key];
+    if (agySeatAgentRecordIsCurrent(record, key, spec.treeDigest)) return true;
+    // Fail closed on any existing entry (edited, replaced, symlinked, or unrecorded) without taking the lock or writing.
+    if (lstatSync(key, { throwIfNoEntry: false }) !== undefined) {
+      refuseExistingAgySeatAgent(record, key, spec.treeDigest);
     }
-  } finally {
-    unlinkSync(temporary);
-  }
-  return dirname(dirname(dirname(directory)));
+    return false;
+  };
+
+  if (checkHitOrRefusePresent()) return spec.name;
+
+  return withRuntimeTransactionLock(globalRuntimeScope(env), () => {
+    if (checkHitOrRefusePresent()) return spec.name;
+    const stagingParent = mkdtempSync(join(tmpdir(), 'rh-agy-agent-'));
+    try {
+      const sourceDir = join(stagingParent, spec.name);
+      mkdirSync(sourceDir, { mode: 0o700 });
+      writeFileSync(join(sourceDir, 'agent.md'), spec.content, { mode: 0o600 });
+      openHostConfigGate({ env }).writePaths([{
+        path: targetPath,
+        owner: 'core',
+        entry: { type: 'directory', source: sourceDir },
+      }]);
+    } finally {
+      rmSync(stagingParent, { recursive: true, force: true });
+    }
+    return spec.name;
+  });
 }
 
 const FIELDS = ['runtime', 'model', 'advisor_model', 'effort', 'tools', 'fleet'] as const;

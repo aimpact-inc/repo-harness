@@ -5,7 +5,8 @@ import { bunGlobalPackageRoot, expectedSkillProjections } from './skill-projecti
 import { configurationReceiptPath } from './configuration-ownership';
 import { expectedOf, hostConfigPaths, hostConfigPathsAt, observeFile, putVault, readLedger, removeTarget, replaceTarget, repositoryLedgers, resolveHostPath } from '../../effects/host-config/store';
 import { ensureSelfIgnoringDirectory, isSelfIgnoreGuard, SELF_IGNORE_NAME } from '../../effects/self-ignoring-directory';
-import { antigravityMcpConfigHostPath, AntigravityHooksPathError, antigravitySkillsDirHostPath, openHostConfigGate, planPathRevert, recoverRetiredPathWrites, rollbackHostConfigTransaction, type AntigravityMcpUndo } from '../../effects/host-config/gate';
+import { antigravityAgentsDirHostPath, antigravityMcpConfigHostPath, AntigravityHooksPathError, antigravitySkillsDirHostPath, openHostConfigGate, planPathRevert, recoverRetiredPathWrites, rollbackHostConfigTransaction, type AntigravityMcpUndo } from '../../effects/host-config/gate';
+import { AGY_SEAT_AGENT_DIR_PATTERN } from '../../core/board/seat-launch';
 import { namingTomlFile } from '../../core/host-config/toml-fragment';
 import { migrateCodexConfigRecords } from './codex-config-migration';
 import { migrateJsonConfigRecords } from './json-config-migration';
@@ -451,6 +452,7 @@ export function supportedPathRecord(env: NodeJS.ProcessEnv): (key: string, recor
       .map((pkg) => pkg.name),
   );
   const antigravitySkillsRoot = antigravitySkillsDirHostPath(env);
+  const antigravityAgentsRoot = antigravityAgentsDirHostPath(env);
   const allowed = keys([...installProfileHostMutationPaths(env), ...effectiveSkillRoots(PLUGIN_IDS, env).flatMap(root => repoHarnessSkills.map(name => join(root, name)))]);
   const fleet = keys(agentFleetTargetPaths(env));
   const facadeRoots = new Set([...keys(hostSkillRoots(requireHome(env), env).map((root) => join(root, FACADE_NAME_PREFIX)))].map((key) => dirname(key)));
@@ -459,9 +461,14 @@ export function supportedPathRecord(env: NodeJS.ProcessEnv): (key: string, recor
     if (!isSurfaceOwner(record.owner)) return false;
     if (record.host === 'antigravity') {
       const name = basename(key);
-      return record.kind === 'created'
-        && dirname(key) === antigravitySkillsRoot
-        && (antigravitySkillNames.has(name) || name.startsWith(FACADE_NAME_PREFIX));
+      if (record.kind !== 'created') return false;
+      if (dirname(key) === antigravitySkillsRoot) {
+        return antigravitySkillNames.has(name) || name.startsWith(FACADE_NAME_PREFIX);
+      }
+      return dirname(key) === antigravityAgentsRoot
+        && record.owner === 'core'
+        && record.committed.type === 'directory'
+        && AGY_SEAT_AGENT_DIR_PATTERN.test(name);
     }
     return record.kind === 'user_managed'
       ? fleet.has(key)

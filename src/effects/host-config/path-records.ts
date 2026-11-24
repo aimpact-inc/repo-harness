@@ -2,7 +2,7 @@ import { requireHome } from '../repo-harness-home';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import { dirname, join } from 'node:path';
 import type { PathRecord, PathRecordHost } from '../../core/host-config/types';
-import { antigravitySkillRoot, hostSkillRoot, stagedSkillRoot, syncSkillRoots } from '../host-skill-roots';
+import { antigravityAgentRoot, antigravitySkillRoot, hostSkillRoot, stagedSkillRoot, syncSkillRoots } from '../host-skill-roots';
 import { isPathInside } from '../path-containment';
 import { hostConfigPaths, hostPathKey, readLedger, resolveHostPath, writeLedger } from './store';
 import { observeEntryIdentity, pathRecordContentHolds, pathRecordEntry } from './whole-path';
@@ -92,9 +92,10 @@ export function pathRecordRoot(env: NodeJS.ProcessEnv, key: string, record: Path
   const paths = hostConfigPaths(env);
   if (record.host === 'claude' && key === hostPathKey(paths, join(requireHome(env), '.claude.json'))) return dirname(key);
   if (record.host === 'antigravity') {
-    // Canonicalize HOME only: ~/.gemini, config, and skills must never resolve through links.
-    const root = antigravitySkillRoot(resolveHostPath(paths, requireHome(env)));
-    return key !== root && isPathInside(root, key) ? root : null;
+    // Canonicalize HOME only: ~/.gemini, config, skills, and agents must never resolve through links.
+    const home = resolveHostPath(paths, requireHome(env));
+    return [antigravitySkillRoot(home), antigravityAgentRoot(home)]
+      .find(root => key !== root && isPathInside(root, key)) ?? null;
   }
   return hostRoots(env, record.host).map(root => resolveHostPath(paths, root)).find(root => key !== root && isPathInside(root, key)) ?? null;
 }
@@ -139,7 +140,13 @@ const HOST_ORDER: readonly PathRecordHost[] = ['pi', 'claude', 'codex', 'antigra
 function hostRoots(env: NodeJS.ProcessEnv, host: PathRecordHost): readonly string[] {
   const home = requireHome(env);
   if (host === 'pi') return [hostSkillRoot(home, 'pi', env)];
-  if (host === 'antigravity') return [antigravitySkillRoot(home)];
+  if (host === 'antigravity') {
+    const resolved = resolveHostPath(hostConfigPaths(env), home);
+    return [...new Set([
+      antigravitySkillRoot(home), antigravityAgentRoot(home),
+      antigravitySkillRoot(resolved), antigravityAgentRoot(resolved),
+    ])];
+  }
   if (host === 'staged') return [join(stagedSkillRoot(home), '..')];
   if (host === 'bin') return [env.BUN_INSTALL ?? join(home, '.bun')];
   // A repository record lives in a worktree, never under a host root of the user.
