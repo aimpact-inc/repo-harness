@@ -354,7 +354,7 @@ describe('install selection', () => {
   test('install state protocol 5 names the plugins, and every hook route is core', () => withHome((env) => {
     expect(PLUGIN_IDS).toEqual(['architecture', 'cross-review', 'mcp', 'operator', 'peer-runtime', 'pi', 'platform', 'product', 'strategy-memory']);
     expect(Object.values(buildManagedHooks('codex', env)).flat()).toHaveLength(5);
-    expect(Object.values(buildManagedHooks('claude', env)).flat()).toHaveLength(6);
+    expect(Object.values(buildManagedHooks('claude', env)).flat()).toHaveLength(7);
     expect(planInstallSelection('all', { run: ALL_PLUGINS, record: ALL_PLUGINS }, null, env).protocol).toBe(5);
   }));
 

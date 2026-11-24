@@ -168,7 +168,7 @@ test('the JSON migration adopts a tagged entry with the old writer shape, keeps 
     const deletion = removeJsonFragment(content, 'hooks.PreToolUse[edit]');
     writeFileSync(settings, content.slice(0, deletion.at) + content.slice(deletion.at + deletion.removed.length));
     claudeTarget.install('global', {});
-    expect(JSON.parse(readFileSync(settings, 'utf8')).hooks.PreToolUse.map((entry: any) => entry.hooks[0].async), name).toEqual([undefined, undefined, undefined]);
+    expect(JSON.parse(readFileSync(settings, 'utf8')).hooks.PreToolUse.map((entry: any) => entry.hooks[0].async), name).toStrictEqual([undefined, undefined, undefined, undefined]);
   });
 });
 
