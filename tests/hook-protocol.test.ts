@@ -399,4 +399,98 @@ process.exit(runHookCli(process.argv.slice(2)));
     expect(JSON.parse(log)).toMatchObject({ guard: 'CredentialGuard', action: 'block', reason: GUARD_DENIAL });
     expect(asked.stdout + denied.stdout + log).not.toContain(marker);
   }));
+
+  test('resolves an opted-in checkout from workspacePaths when cwd is an agent dir, refuses .env reads, and fails closed on ambiguity or invalid entries', () => withAntigravityFixture(f => {
+    const agentDir = join(f.root, '.repo-harness', 'seats', 'agy', 'fa283333');
+    const otherRepo = join(f.root, 'other-repo');
+    const repoLink = join(f.root, 'repo-link');
+    mkdirSync(agentDir, { recursive: true });
+    mkdirSync(otherRepo, { recursive: true });
+    symlinkSync(f.repo, repoLink);
+    const git = Bun.which('git')!;
+    const init = spawnSync(git, ['init', '-q', otherRepo], { encoding: 'utf8' });
+    expect(init.status, init.stderr).toBe(0);
+
+    // Captured agy 1.5.16 multi-workspace shape: cwd is the non-git agent dir, workspacePaths includes the opted-in checkout.
+    const multi = { cwd: agentDir, workspacePaths: [agentDir, f.repo], conversationId: 'conv-3473', transcriptPath: '' };
+    const start = f.run('SessionStart', 'default', { ...multi, hookEventName: 'SessionStart' });
+    expect([start.status, start.stderr]).toEqual([0, '']);
+    expect(JSON.parse(start.stdout)).toEqual({
+      injectSteps: [{ systemMessage: { systemMessage: expect.stringContaining('[EditGuardScope]') } }],
+    });
+
+    // I1 CredentialGuard refuses .env reads in the multi-workspace shape.
+    for (const CommandLine of ['cat /tmp/rh-probe-3473-nonexistent/.env', 'cat .env']) {
+      expectAntigravityDeny(
+        f.run('PreToolUse', 'bash', { ...multi, hookEventName: 'PreToolUse', toolCall: { name: 'run_command', args: { CommandLine } } }),
+        GUARD_DENIAL,
+      );
+    }
+
+    // I2 UserFileGuard still resolves relative Bash targets against wire.cwd (outside repoRoot and tmp), not repoRoot.
+    expectAntigravityForceAsk(
+      f.run('PreToolUse', 'bash', { cwd: '/etc', workspacePaths: ['/etc', f.repo], toolCall: { name: 'run_command', args: { CommandLine: 'rm hosts' } } }),
+    );
+    expectAntigravityForceAsk(
+      f.run('PreToolUse', 'edit', { ...multi, toolCall: { name: 'write_file', args: { Path: '/etc/hosts' } } }),
+    );
+
+    // PreInvocation and Stop resolve the opted-in checkout too instead of skipping as not-in-git-repo.
+    const inbox = f.run('UserPromptSubmit', 'inbox', { ...multi, hookEventName: 'PreInvocation', invocationNum: 0 });
+    expect([inbox.status, inbox.stderr]).toEqual([0, '']);
+    const stop = f.run('Stop', 'default', { ...multi, hookEventName: 'Stop', executionNum: 0 });
+    expect([stop.status, stop.stderr]).toEqual([0, '']);
+    const events = readFileSync(join(f.repo, '.ai/harness/runs/hook-events.jsonl'), 'utf8')
+      .trim().split('\n').map(line => JSON.parse(line) as { host: string; event: string; session_id: string });
+    expect(events.map(entry => entry.event)).toEqual(expect.arrayContaining(['SessionStart', 'PreToolUse', 'UserPromptSubmit', 'Stop']));
+    expect(events.every(entry => entry.host === 'antigravity')).toBe(true);
+
+    // Same opted-in repository repeated via subdir/root/symlink is unambiguous.
+    const okTool = { name: 'run_command', args: { CommandLine: 'echo okay' } };
+    const dedup = f.run('PreToolUse', 'bash', { cwd: f.cwd, workspacePaths: [f.cwd, f.repo, repoLink], toolCall: okTool });
+    expect([dedup.status, dedup.stdout, dedup.stderr]).toEqual([0, '', '']);
+
+    // One opted-in repo alongside a non-opt-in git repo runs guards for the opted-in repo.
+    const mixed = f.run('PreToolUse', 'bash', {
+      cwd: otherRepo, workspacePaths: [otherRepo, f.repo], toolCall: { name: 'run_command', args: { CommandLine: 'cat .env' } },
+    });
+    expectAntigravityDeny(mixed, GUARD_DENIAL);
+
+    // Two distinct opted-in repos are ambiguous and must fail closed on both guard routes.
+    mkdirSync(join(otherRepo, '.ai/harness'), { recursive: true });
+    writeFileSync(join(otherRepo, '.ai/harness/workflow-contract.json'), '{}\n');
+    for (const cwd of [agentDir, f.repo]) {
+      expectAntigravityDeny(
+        f.run('PreToolUse', 'bash', { cwd, workspacePaths: [agentDir, f.repo, otherRepo], toolCall: okTool }),
+        'rh hook failed: bash; the call is refused',
+      );
+    }
+    expectAntigravityDeny(
+      f.run('PreToolUse', 'edit', { cwd: f.repo, workspacePaths: [f.repo, otherRepo], toolCall: { name: 'write_file', args: { Path: join(f.repo, 'ok.txt') } } }),
+      'rh hook failed: edit; the call is refused',
+    );
+
+    // Corrupted marker in a sibling workspace fails closed rather than silently skipping.
+    rmSync(join(otherRepo, '.ai/harness'), { recursive: true });
+    writeFileSync(join(otherRepo, '.ai/harness'), 'not a directory');
+    expectAntigravityDeny(
+      f.run('PreToolUse', 'bash', { cwd: agentDir, workspacePaths: [agentDir, f.repo, otherRepo], toolCall: okTool }),
+      'rh hook failed: bash; the call is refused',
+    );
+    rmSync(join(otherRepo, '.ai/harness'));
+
+    // Malformed or unresolvable workspacePaths entries fail closed.
+    for (const workspacePaths of ['not-an-array', null, ['relative/path'], [f.repo, join(f.root, 'missing-workspace')], [f.repo, join(f.repo, '.git/HEAD')]]) {
+      expectAntigravityDeny(
+        f.run('PreToolUse', 'bash', { cwd: f.repo, workspacePaths, toolCall: okTool }),
+        'rh hook failed: bash; the call is refused',
+      );
+    }
+
+    // Confirmed absence of any opted-in repo across cwd and workspacePaths passes silently.
+    const noOptIn = f.run('PreToolUse', 'bash', {
+      cwd: agentDir, workspacePaths: [agentDir, otherRepo], toolCall: { name: 'run_command', args: { CommandLine: 'cat .env' } },
+    });
+    expect([noOptIn.status, noOptIn.stdout, noOptIn.stderr]).toEqual([0, '', '']);
+  }));
 });
