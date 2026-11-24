@@ -329,6 +329,14 @@ are seat-only. Only the active coordinator holder posts them. Another
 agent's comment of one of these kinds takes effect only when the
 coordinator confirms it.
 
+For a trigger challenge, post the decision on the PR first. In `Decision`,
+name the review seat, subject SHA and finding IDs. In `Why`, quote the bar
+sentence that the trigger does not meet. Then send this text to the seat:
+
+```text
+Challenge for <ids>: <sentence>. Write the trigger again for a default environment, or rate the finding by the bar. Reply with the full receipt after RECEIPT-JSON.
+```
+
 ### plan
 
 Post it with `rh board post plan`. The fields are `coordinator`, `baseline`,
@@ -404,8 +412,10 @@ Model relation: <different-family | same-family | unknown>
 
 Findings:
 
-- <severity> <id> at <path>:<line>: <evidence> -> <fix>
-- <none when the round has no finding>
+- <P0 or P1> <id> at <path>:<line>: trigger: <trigger>; <evidence> -> <fix>
+- P2 <id> at <path>:<line>: <evidence> -> <fix>
+- P3 <id>: <message>
+- none
 ```
 
 Every review writes this record, one row per review. The fields are `Seat`
@@ -414,7 +424,32 @@ Every review writes this record, one row per review. The fields are `Seat`
 in backticks), `Verdict` (`PASS` or `FAIL`, a colon, then the finding
 counts) and the `Model relation` line. `rh review publish` writes it for
 rounds 1 to 5 (`acceptor.md` §4). The board reads only this shape. A record
-that it cannot read makes the PR state unknown, not accepted.
+that it cannot read makes the PR state unknown, not accepted. The findings
+section uses one line per finding or `- none` when the review has no findings.
+
+### Review publish receipt
+
+The seat writes one JSON object after `RECEIPT-JSON`. The protocol 3 fields
+are listed below. The packet fills the round, head, tier and runtime.
+
+```text
+protocol: 3
+kind: repo-harness-review-publish-receipt
+round: <round>
+subject_sha: <head sha>
+risk_tier: low | medium | high
+reviewer: { harness: <review runtime id>, actual_model: <model> | null }
+verdict: PASS | FAIL
+model_relation: different-family | same-family | unknown
+summary: <one paragraph>
+findings: [{ id, severity: P0 | P1, path, line, trigger, evidence, fix }
+         | { id, severity: P2, path, line, evidence, fix }
+         | { id, severity: P3, message }]
+confirmed_fixed: [<review thread node id>]
+```
+
+Each P0 or P1 requires a non-empty `trigger`. Use `[]` for
+`confirmed_fixed` when the review confirms no earlier fix.
 
 ### acceptance disposition (on the PR, coordinator only)
 

@@ -13,6 +13,8 @@ import { redactMcpText } from '../../src/cli/mcp/redaction';
 import { containsSecret, replaceSecrets } from '../../src/core/security/secret-patterns';
 import { MODULE_DOC, MODULE_FLOW, MODULE_ID, MODULE_NODE, fixtureCommit, fixtureGit, fixtureWrite, fixtureYaml, moduleRepository, projectionCheckResult } from '../helpers/module-repository';
 
+// Fits the instructions and shard header while the fixtures still need several shards.
+const SHARD_BUDGET_BYTES = 2_560;
 const roots: string[] = [];
 function repo(options: Parameters<typeof moduleRepository>[0] = {}): string { const root = moduleRepository(options); roots.push(root); return root; }
 afterEach(() => { roots.splice(0).forEach(root => rmSync(root, { recursive: true, force: true })); });
@@ -147,14 +149,14 @@ describe('committed module review prompt', () => {
     }
   });
   test('oversize UTF-8 content is complete across bounded shards with one digest and instructions only at the end', () => {
-    const root = repo({ section3: '决策🙂'.repeat(5000), budget: 2000 }), reader = new ArchitectureModelReader(root);
+    const root = repo({ section3: '决策🙂'.repeat(5000), budget: SHARD_BUDGET_BYTES }), reader = new ArchitectureModelReader(root);
     const first = reader.reviewPrompt(MODULE_ID), packets = Array.from({ length: first.shard.count }, (_, index) => reader.reviewPrompt(MODULE_ID, { shard: index + 1 }));
     expect(first.budget.incomplete).toBe(true); expect(first.budget.omitted_sections).toContain('section3');
     expect(packets.length).toBeGreaterThan(1);
     let full = '';
     for (const packet of packets) {
       expect(packet.digest).toBe(first.digest); expect(packet.budget).toEqual(first.budget);
-      expect(packet.shard.bytes).toBeLessThanOrEqual(2000);
+      expect(packet.shard.bytes).toBeLessThanOrEqual(SHARD_BUDGET_BYTES);
       expect(packet.prompt).toContain(`shard ${packet.shard.index}/${packets.length}`);
       const body = packet.prompt.slice(packet.prompt.indexOf('\n\n') + 2); full += body;
       if (packet.shard.index !== packets.length) expect(body).not.toContain('REVIEW INSTRUCTIONS');
@@ -164,13 +166,13 @@ describe('committed module review prompt', () => {
     expect(() => reader.reviewPrompt(MODULE_ID, { shard: packets.length + 1 })).toThrow('shard_out_of_range');
   });
   test('every multi-shard boundary lists deferred sections, including instructions', () => {
-    const root = repo({ section3: 'x'.repeat(560), budget: 2000 });
+    const root = repo({ section3: 'x'.repeat(560), budget: SHARD_BUDGET_BYTES });
     const reader = new ArchitectureModelReader(root), first = reader.reviewPrompt(MODULE_ID);
     expect(first.shard.count).toBeGreaterThan(1);
     expect(first.budget.omitted_sections.length).toBeGreaterThan(0);
     expect(first.budget.omitted_sections).toContain('review_instructions');
     const last = reader.reviewPrompt(MODULE_ID, { shard: first.shard.count });
-    expect(last.prompt).toContain('REVIEW INSTRUCTIONS'); expect(last.shard.bytes).toBeLessThanOrEqual(2000);
+    expect(last.prompt).toContain('REVIEW INSTRUCTIONS'); expect(last.shard.bytes).toBeLessThanOrEqual(SHARD_BUDGET_BYTES);
   });
   test('handles quoted UTF-8 dirty paths as content observations', () => {
     const root = repo(); fixtureWrite(root, 'src/module/新 文件.ts', 'new source');

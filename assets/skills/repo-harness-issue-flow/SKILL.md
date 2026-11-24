@@ -159,13 +159,11 @@ map ─▶ split ─▶ gap review ─▶ publish ─▶ dispatch ─▶ worker 
   provisional; confirm the evidence before the merge (`references/acceptor.md` §1). The rolling projection PR
   (`archctx/projection`) merges on green CI; its merge is its acceptance.
 - Review rounds. A review grades only the lines that the PR changes and
-  has at most two rounds. Round 2 checks only the round-1 fix delta. A
-  round-1 `PASS` row carries forward while the fix stays inside the
-  failing reviewer's files; otherwise its reviewer checks only that
-  delta. Only a failure reachable in ordinary use or an I1/I2/I3 defect is
-  P0 or P1; adversarial-only assumptions and unrequested fallbacks are P3
-  notes. The orchestrator merges on round
-  2 when only P2 or P3 findings remain. A blocking finding after round 2
+  has at most two rounds. Round 2 is a fix check under `references/acceptor.md` §2.2.
+  A round-1 `PASS` row carries forward while the fix stays inside the
+  failing reviewer's files. A fix outside those files takes a delta check.
+  Apply the finding bar in `references/acceptor.md` §3.
+  The orchestrator merges on round 2 when only P2 or P3 findings remain. A blocking finding after round 2
   ends the loop: the orchestrator narrows the PR, or closes it and
   dispatches the bundle again. P2 and P3 findings stay in the review
   record; only a P0 or P1 defect or an owner-named item opens an issue. A

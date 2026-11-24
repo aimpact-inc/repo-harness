@@ -13,8 +13,9 @@ import type { ModelRelation } from './acceptance-receipt';
  * fields that one review round needs to become a GitHub review:
  *
  * - P0/P1/P2 findings carry a path, a line, evidence and a bounded fix, so
- *   each one becomes exactly one inline review thread. Only P0 and P1 block
- *   the merge; a P2 stays in the review record and opens no issue (`finding-severity.ts`).
+ *   each one becomes exactly one inline review thread. P0 and P1 also carry
+ *   the trigger and block the merge. A P2 stays in the review record and
+ *   opens no issue (`finding-severity.ts`).
  * - P3 findings are NITs. They carry no location, so they can appear only in
  *   the review body.
  * - `confirmed_fixed` names, by GitHub node id, the earlier-round review
@@ -28,13 +29,21 @@ export type ReviewPublishSeverity = ReviewSeverity;
 export type ReviewRecordSeat = 'gatekeeper' | 'reviewer';
 export type SeatReviewHarness = ReviewRuntimeId | 'agy';
 
-export interface ReviewPublishBlockingFinding {
+interface ReviewPublishLocation {
   readonly id: string;
-  readonly severity: 'P0' | 'P1' | 'P2';
   readonly path: string;
   readonly line: number;
   readonly evidence: string;
   readonly fix: string;
+}
+
+export interface ReviewPublishBlockingFinding extends ReviewPublishLocation {
+  readonly severity: 'P0' | 'P1';
+  readonly trigger: string;
+}
+
+interface ReviewPublishP2Finding extends ReviewPublishLocation {
+  readonly severity: 'P2';
 }
 
 export interface ReviewPublishNit {
@@ -43,11 +52,15 @@ export interface ReviewPublishNit {
   readonly message: string;
 }
 
-export type ReviewPublishFinding = ReviewPublishBlockingFinding | ReviewPublishNit;
+type ReviewPublishLocatedFinding = ReviewPublishBlockingFinding | ReviewPublishP2Finding;
+export type ReviewPublishFinding = ReviewPublishLocatedFinding | ReviewPublishNit;
+
+const PROTOCOL = 3;
+const RECEIPT_KIND = 'repo-harness-review-publish-receipt';
 
 export interface ReviewPublishReceipt {
-  readonly protocol: 2;
-  readonly kind: 'repo-harness-review-publish-receipt';
+  readonly protocol: typeof PROTOCOL;
+  readonly kind: typeof RECEIPT_KIND;
   readonly round: number;
   readonly subject_sha: string;
   readonly risk_tier: ReviewRiskTier;
@@ -70,7 +83,40 @@ export interface ReviewInlineComment {
   readonly body: string;
 }
 
-const TOP_FIELDS = ['protocol', 'kind', 'round', 'subject_sha', 'risk_tier', 'reviewer', 'verdict', 'model_relation', 'summary', 'findings', 'confirmed_fixed'] as const;
+const P2_EXAMPLE = {
+  id: '<P2 finding id>', severity: 'P2', path: '<path>', line: '<integer line number>', evidence: '<evidence>', fix: '<smallest fix>',
+} satisfies Record<keyof ReviewPublishP2Finding, string>;
+const BLOCKING_EXAMPLE = {
+  ...P2_EXAMPLE, id: '<P1 finding id>', severity: 'P1', trigger: '<command or input in a default environment>',
+} satisfies Record<keyof ReviewPublishBlockingFinding, string>;
+const NIT_EXAMPLE = {
+  id: '<P3 finding id>', severity: 'P3', message: '<one-line note>',
+} satisfies Record<keyof ReviewPublishNit, string>;
+const RECEIPT_EXAMPLE = {
+  protocol: PROTOCOL,
+  kind: RECEIPT_KIND,
+  round: '<round>',
+  subject_sha: '<head SHA>',
+  risk_tier: '<tier>',
+  reviewer: { harness: '<harness>', actual_model: '<observed model or null>' },
+  verdict: '<PASS or FAIL>',
+  model_relation: '<different-family, same-family or unknown>',
+  summary: '<one paragraph>',
+  findings: [BLOCKING_EXAMPLE, P2_EXAMPLE, NIT_EXAMPLE],
+  confirmed_fixed: ['<node IDs of earlier-round threads whose fixes you confirmed at this head, or use []>'],
+} satisfies Record<keyof ReviewPublishReceipt, unknown>;
+
+/** The one-line receipt example in the review packet. Its keys define the validator's closed shape. */
+export function receiptSkeleton(values: {
+  readonly round: number;
+  readonly subject_sha: string;
+  readonly risk_tier: 'medium' | 'high';
+  readonly harness: SeatReviewHarness;
+}): string {
+  const { round, subject_sha, risk_tier, harness } = values;
+  return JSON.stringify({ ...RECEIPT_EXAMPLE, round, subject_sha, risk_tier, reviewer: { ...RECEIPT_EXAMPLE.reviewer, harness } });
+}
+
 const MAX_TEXT = 20_000;
 const MAX_PATH = 1_024;
 const THREAD_ID = /^[A-Za-z0-9_=-]{1,256}$/;
@@ -119,37 +165,38 @@ function lineNumber(value: unknown): number {
 }
 
 function finding(value: unknown, index: number): ReviewPublishFinding {
-  if (!isRecord(value)) invalid('finding ' + index + ' must be an object');
-  if (!['P0', 'P1', 'P2', 'P3'].includes(String(value.severity))) invalid('finding ' + index + ' severity is invalid');
-  const severity = value.severity as ReviewPublishSeverity;
+  if (!isRecord(value)) invalid(`finding ${index} must be an object`);
+  const { severity } = value;
+  if (severity !== 'P0' && severity !== 'P1' && severity !== 'P2' && severity !== 'P3') invalid(`finding ${index} severity is invalid`);
   const id = text(value.id, 'finding.id', 256);
   if (severity === 'P3') {
-    exactFields(value, ['id', 'severity', 'message'], 'NIT finding');
+    exactFields(value, Object.keys(NIT_EXAMPLE), 'NIT finding');
     return Object.freeze({ id, severity: 'P3', message: text(value.message, 'finding.message') });
   }
-  exactFields(value, ['id', 'severity', 'path', 'line', 'evidence', 'fix'], 'blocking finding');
-  return Object.freeze({
+  exactFields(value, Object.keys(severity === 'P2' ? P2_EXAMPLE : BLOCKING_EXAMPLE), severity === 'P2' ? 'P2 finding' : 'blocking finding');
+  const location = {
     id,
-    severity,
     path: reviewPath(value.path),
     line: lineNumber(value.line),
     evidence: text(value.evidence, 'finding.evidence'),
     fix: text(value.fix, 'finding.fix'),
-  });
+  };
+  return severity === 'P2'
+    ? Object.freeze({ ...location, severity })
+    : Object.freeze({ ...location, severity, trigger: text(value.trigger, 'finding.trigger') });
 }
 
 export function validateReviewPublishReceipt(value: unknown): ReviewPublishReceipt {
   if (!isRecord(value)) invalid('document must be an object');
-  if (value.protocol === 1) invalid('protocol 1 is retired; protocol 2 requires confirmed_fixed (an array of earlier-round thread ids)');
-  if (value.protocol !== 2) invalid('protocol must be 2');
-  exactFields(value, TOP_FIELDS, 'receipt');
-  if (value.kind !== 'repo-harness-review-publish-receipt') invalid('kind is invalid');
+  if (value.protocol !== PROTOCOL) invalid(`protocol must be ${PROTOCOL}; a P0 or P1 finding requires trigger`);
+  exactFields(value, Object.keys(RECEIPT_EXAMPLE), 'receipt');
+  if (value.kind !== RECEIPT_KIND) invalid('kind is invalid');
   if (typeof value.round !== 'number' || !Number.isSafeInteger(value.round) || value.round < 1) invalid('round must be a positive integer');
   if (!['low', 'medium', 'high'].includes(String(value.risk_tier))) invalid('risk_tier is invalid');
   if (!['PASS', 'FAIL'].includes(String(value.verdict))) invalid('verdict is invalid');
   if (!['different-family', 'same-family', 'unknown'].includes(String(value.model_relation))) invalid('model_relation is invalid');
   if (!isRecord(value.reviewer)) invalid('reviewer must be an object');
-  exactFields(value.reviewer, ['harness', 'actual_model'], 'reviewer');
+  exactFields(value.reviewer, Object.keys(RECEIPT_EXAMPLE.reviewer), 'reviewer');
   const harness = value.reviewer.harness;
   if (harness !== 'agy' && (typeof harness !== 'string' || !isReviewRuntimeId(harness))) invalid('reviewer.harness is invalid');
   if (!Array.isArray(value.findings)) invalid('findings must be an array');
@@ -169,8 +216,8 @@ export function validateReviewPublishReceipt(value: unknown): ReviewPublishRecei
   });
   if (new Set(confirmed).size !== confirmed.length) invalid('confirmed_fixed ids must be unique');
   return Object.freeze({
-    protocol: 2,
-    kind: 'repo-harness-review-publish-receipt',
+    protocol: PROTOCOL,
+    kind: RECEIPT_KIND,
     round: value.round,
     subject_sha: gitSha(value.subject_sha),
     risk_tier: value.risk_tier as ReviewRiskTier,
@@ -192,8 +239,8 @@ export function reviewerIdentity(receipt: ReviewPublishReceipt): string {
  * review thread: P0, P1 and P2. The thread is not a merge block; only a P0 or
  * a P1 needs a fix before the merge (`finding-severity.ts`).
  */
-export function locatedFindings(receipt: ReviewPublishReceipt): readonly ReviewPublishBlockingFinding[] {
-  return receipt.findings.filter((entry): entry is ReviewPublishBlockingFinding => entry.severity !== 'P3');
+export function locatedFindings(receipt: ReviewPublishReceipt): readonly ReviewPublishLocatedFinding[] {
+  return receipt.findings.filter((entry): entry is ReviewPublishLocatedFinding => entry.severity !== 'P3');
 }
 
 export function nitFindings(receipt: ReviewPublishReceipt): readonly ReviewPublishNit[] {
@@ -209,7 +256,8 @@ function severityCounts(receipt: ReviewPublishReceipt): string {
 
 function findingSummary(finding: ReviewPublishFinding): string {
   if (finding.severity === 'P3') return 'P3 ' + finding.id + ': ' + finding.message;
-  return finding.severity + ' ' + finding.id + ' at ' + finding.path + ':' + finding.line + ': ' + finding.evidence + ' -> ' + finding.fix;
+  const trigger = finding.severity === 'P2' ? '' : `trigger: ${finding.trigger}; `;
+  return `${finding.severity} ${finding.id} at ${finding.path}:${finding.line}: ${trigger}${finding.evidence} -> ${finding.fix}`;
 }
 
 export function renderAcceptanceClaim(receipt: ReviewPublishReceipt, ownerRecord?: string, seat: ReviewRecordSeat = 'gatekeeper'): string {
@@ -285,12 +333,13 @@ export function renderAcceptanceRecord(receipt: ReviewPublishReceipt, claimUrl: 
   ].join('\n');
 }
 
-export function renderInlineComment(finding: ReviewPublishBlockingFinding): ReviewInlineComment {
+export function renderInlineComment(finding: ReviewPublishLocatedFinding): ReviewInlineComment {
+  const trigger = finding.severity === 'P2' ? '' : `**Trigger**: ${finding.trigger}\n\n`;
   return Object.freeze({
     path: finding.path,
     line: finding.line,
     side: 'RIGHT' as const,
-    body: '**' + finding.severity + ' ' + finding.id + '**\n\n' + finding.evidence + '\n\n**Fix**: ' + finding.fix,
+    body: `**${finding.severity} ${finding.id}**\n\n${trigger}${finding.evidence}\n\n**Fix**: ${finding.fix}`,
   });
 }
 
@@ -324,7 +373,7 @@ export function reviewPayloadFromReceipt(receipt: ReviewPublishReceipt, diffLine
   readonly body: string;
   readonly comments: readonly ReviewInlineComment[];
 } {
-  const inDiff = (entry: ReviewPublishBlockingFinding) => diffLines.get(entry.path)?.has(entry.line) === true;
+  const inDiff = (entry: ReviewPublishLocatedFinding) => diffLines.get(entry.path)?.has(entry.line) === true;
   const located = locatedFindings(receipt);
   const outside = located.filter((entry) => !inDiff(entry));
   const body = renderAcceptanceReview(receipt) + (outside.length

@@ -37,6 +37,7 @@ const REPO = 'repo-fixture';
 const CENTER = 'capability.workflow-engine.pipeline';
 const CALLER = 'capability.public-surface.root-router';
 const COMMIT = 'c'.repeat(40);
+const SHARD_BUDGET_BYTES = 2_560;
 
 const node = (id: string, kind: 'capability' | 'component', parent?: string): ModelNode =>
   ({ id, kind, name: id.split('.').slice(-2).join(' '), status: 'active', summary: `${id} summary`, ...(parent ? { parent } : {}) });
@@ -66,7 +67,7 @@ function detailFor(id = CENTER, section3: string | null = 'Decision text.\n**not
 
 function promptFor(detail: ModuleDetailV1, shard: number): ModuleReviewPromptV1 {
   return buildModuleReviewPrompt({
-    detail, package_version: '0.21.0', repository_id: 'repo_0123456789abcdef', input_cap_bytes: 2048, worktree_dirty_paths: [], dirty_content_sha256: null,
+    detail, package_version: '0.21.0', repository_id: 'repo_0123456789abcdef', input_cap_bytes: SHARD_BUDGET_BYTES, worktree_dirty_paths: [], dirty_content_sha256: null,
     model_sha256: 'a'.repeat(64), doc_sha256: null, sources: [], source_sections: {}, module_doc_path: 'docs/architecture/modules/pipeline.md',
     base: null, head: null, diff: null, backlog: null, stale_citations: null,
   }, shard);
@@ -274,7 +275,7 @@ describe('architecture module page', () => {
     const prompt = promptFor(detailFor(), 1);
     expect(prompt.shard.count).toBeGreaterThan(1);
     expect(document.querySelector('.review-prompt__digest')?.textContent).toBe(prompt.digest);
-    expect(document.querySelector('.review-prompt')?.textContent).toContain(`Total ${prompt.budget.used_bytes} bytes · 2048 bytes per shard`);
+    expect(document.querySelector('.review-prompt')?.textContent).toContain(`Total ${prompt.budget.used_bytes} bytes · ${SHARD_BUDGET_BYTES} bytes per shard`);
     const command = document.querySelector('[data-bot-command]')?.textContent;
     expect(command).toBe(`rh arch module review-prompt ${CENTER} --shard 1`);
     const copy = document.querySelector<HTMLButtonElement>('.review-prompt__command button')!;

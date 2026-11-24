@@ -235,7 +235,7 @@ console.log(JSON.stringify({ address, state: 'live', turn: 0, labels }));
     const [shell, ...args] = placement.argv as [string, ...string[]];
     const packet = args.at(-1)!;
     const launchId = packet.split(AGY_REVIEW_LAUNCH_LINE).at(-1)!;
-    expect(packet).toContain('reviewer.harness "agy"');
+    expect(packet).toContain('"reviewer":{"harness":"agy"');
     expect(args.at(-2)).toBe(AGY_REVIEW_PROMPT_OPTION);
     expect(args).toContain(`${AGY_REVIEW_LAUNCH_ENV}=${launchId}`);
     const expected = { pr: 1, seat: 'gatekeeper', head_sha: SHA, tier: 'high', round: 1 } as const;
@@ -290,7 +290,7 @@ test('a reviewer seat on Pi starts after its marker and gets a packet for its ow
   const deepseekReviewer: SeatConfigV1 = { ...DEFAULT_SEATS_CONFIG.reviewer, runtime: 'pi', model: 'magpie/cursor/deepseek-v41-flash-1017', effort: null };
   const result = await executeReview(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], page(marker(SHA), record(SHA, 'pi (gpt-6.1-sol)', 'PASS', 'gatekeeper')), [], GATEKEEPER, deepseekReviewer), context, p);
   expect(result.started).toMatchObject([{ seat: 'reviewer' }]);
-  expect(p.tabs[0]!.task).toContain('reviewer.harness "pi"');
+  expect(p.tabs[0]!.task).toContain('"reviewer":{"harness":"pi"');
 });
 
 test('the gatekeeper starts only when the effective gatekeeper is of another known family than the writer, and not Claude where the head needs that', () => {
@@ -381,9 +381,12 @@ test('the packet names the round, tier, head, harness and the RECEIPT-JSON hand-
   const second = start(page(record(OLD)));
   expect(second.round).toBe(2);
   const text = reviewPacket(second, second.seats[0]!, 'pi');
-  expect(text).toContain(`round 2, risk_tier "high", subject_sha ${SHA}, reviewer.harness "pi"`);
+  const receipt = JSON.parse(text.split('\n').at(-1)!);
+  expect(receipt).toMatchObject({ protocol: 3, round: 2, risk_tier: 'high', subject_sha: SHA, reviewer: { harness: 'pi' } });
   expect(text).toContain('Untrusted input that the tool reads in ordinary use (repository content, PR and issue text, tool output) is ordinary use.');
-  expect(text).toContain('are P3 notes, also on an I1 or I2 path.');
+  expect(text).toContain('are P3 notes.');
+  expect(text).toContain('Grade only the lines that the PR changes');
+  expect(text).toContain('Write at most five P3 notes, one line each.');
   expect(text).toContain('End your last reply with the line RECEIPT-JSON');
   expect(parseReviewPacket(text)).toEqual({ pr: 1, head_sha: SHA, seat: 'gatekeeper', tier: 'high', round: 2 });
   expect(parseReviewPacket(text.replace('as the gatekeeper of', 'as the reviewer of'))?.seat).toBe('reviewer');
@@ -391,6 +394,21 @@ test('the packet names the round, tier, head, harness and the RECEIPT-JSON hand-
   expect(parseReviewPacket(text.replace('as the gatekeeper of', 'as the worker of'))).toBeNull();
   // A claim that a publish left without its record still counts for the round.
   expect(start(page(comment(`repo-harness acceptance claim\nRound: 2\nSubject: ${OLD}`))).round).toBe(3);
+});
+
+test.each([
+  ['full review', 'medium', 'reviewer', null, 1, 'Review the whole diff. Group findings by bug family: one finding lists every sibling case.'],
+  ['High second review', 'high', 'reviewer', null, 1, 'You are the second review of a High head. Report only I1 and I2 defects, and defects on a configured I3 path. The gatekeeper reviews the rest.'],
+  ['fix check', 'high', 'reviewer', OLD, 2, `This is a fix check. Confirm the fix of each earlier blocking finding at this head. An earlier finding stays open only when its own case still fails. Review the hunks that changed since ${OLD}. A new finding blocks only when it is in those hunks and the fix introduced the defect: the trigger reaches the defect at this head and does not reach it at ${OLD}. Every other new finding is at most a P2, also when the fix moved or rewrote the lines of a defect that ${OLD} already had. The exceptions are a P0, and an I1 or I2 finding with a trigger.`],
+] as const)('packet scope for %s', (_label, tier, seat, delta_from, round, scope) => {
+  const start = { seat, delta_from };
+  const decision = { pr: 1, action: 'start', head_ref: 'feat/1', head_sha: SHA, tier, round, seats: [start] } as const;
+  const packet = reviewPacket(decision, start, 'pi');
+  expect(packet.split('\n').slice(0, 2)).toEqual([
+    `Task: review PR #1 at head ${SHA} (tier ${tier}, round ${round}), as the ${seat} of repo-harness-issue-flow.`,
+    `The worktree is at that head. ${scope}`,
+  ]);
+  expect(parseReviewPacket(packet)).toEqual({ pr: 1, head_sha: SHA, seat, tier, round });
 });
 
 test('a round-1 PASS carries only to the fix head of the claimed FAIL, in either publication order; never to a later head or from an unclaimed row (#3187)', () => {
@@ -402,7 +420,7 @@ test('a round-1 PASS carries only to the fix head of the claimed FAIL, in either
   const read = (head: string, rows: readonly Row[]) => {
     const comments = rows.flatMap(([harness, subject, round, verdict, claimed = true], at) => {
       const seat = harness === 'claude' ? 'reviewer' : 'gatekeeper';
-      const receipt: ReviewPublishReceipt = { protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round, subject_sha: subject, risk_tier: 'high',
+      const receipt: ReviewPublishReceipt = { protocol: 3, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round, subject_sha: subject, risk_tier: 'high',
         reviewer: { harness: harness === 'custom' ? 'pi' : harness, actual_model: models[harness] }, verdict, model_relation: 'different-family', summary: 'Reviewed.', findings: [] };
       const claimUrl = `https://github.com/example/repo/pull/1#issuecomment-${100 + at}`;
       const made = (body: string, url: string, minute: number): BoardCommentV1 => ({ url, created_at: `2026-11-18T10:${String(minute).padStart(2, '0')}:00Z`, author_association: 'OWNER', body });
@@ -445,7 +463,7 @@ test('a round-1 PASS carries only to the fix head of the claimed FAIL, in either
 
 test('Seat: attributes records across mixed Seat: and legacy rows on one head and fails closed on invalid or conflicting Seat:', () => {
   const mkRecord = (head: string, role: string, verdict: 'PASS' | 'FAIL', seat?: 'gatekeeper' | 'reviewer') => {
-    const receipt: ReviewPublishReceipt = { protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 1, subject_sha: head, risk_tier: 'high',
+    const receipt: ReviewPublishReceipt = { protocol: 3, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 1, subject_sha: head, risk_tier: 'high',
       reviewer: { harness: 'pi', actual_model: role }, verdict, model_relation: 'different-family', summary: 'Reviewed.', findings: [] };
     return { receipt, seat };
   };
@@ -471,7 +489,7 @@ test('Seat: attributes records across mixed Seat: and legacy rows on one head an
   expect(gatekeeperReview(prWith([unattributedClaim, unattributedPass]))).toBe('none');
   // Explicit Seat: reviewer on a DeepSeek PASS satisfies secondReview without reading config, while Model relation stays checked by acceptance.
   const seatReviewerPass = comment(renderAcceptanceRecord({
-    protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 1, subject_sha: SHA, risk_tier: 'high',
+    protocol: 3, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 1, subject_sha: SHA, risk_tier: 'high',
     reviewer: { harness: 'pi', actual_model: 'magpie/group/deepseek-v4.1-flash' }, verdict: 'PASS', model_relation: 'different-family', summary: 'Ok.', findings: [],
   }, c1.url, undefined, 'reviewer'), '2026-11-09T10:03:00Z');
   const onlyReviewer = prWith([c1, seatReviewerPass]);
@@ -496,13 +514,13 @@ test.each([
   };
   const deepseekReviewer: SeatConfigV1 = { ...DEFAULT_SEATS_CONFIG.reviewer, runtime: 'pi', model: 'magpie/group/deepseek-v4.1-flash', effort: null };
   const deepseekPass: ReviewPublishReceipt = {
-    protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 1, subject_sha: OLD, risk_tier: 'high',
+    protocol: 3, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 1, subject_sha: OLD, risk_tier: 'high',
     reviewer: { harness: 'pi', actual_model: 'magpie/group/deepseek-v4.1-flash' }, verdict: 'PASS', model_relation: 'different-family', summary: 'Reviewer passed.', findings: [],
   };
   const solFail: ReviewPublishReceipt = {
-    protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 1, subject_sha: OLD, risk_tier: 'high',
+    protocol: 3, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 1, subject_sha: OLD, risk_tier: 'high',
     reviewer: { harness: 'codex', actual_model: 'gpt-6.2-sol' }, verdict: 'FAIL', model_relation: 'different-family', summary: 'Gatekeeper failed.',
-    findings: [{ id: 'F1', severity: 'P1', path: 'src/a.ts', line: 1, evidence: 'Broken.', fix: 'Fix it.' }],
+    findings: [{ id: 'F1', severity: 'P1', path: 'src/a.ts', line: 1, trigger: 'Run the default command.', evidence: 'Broken.', fix: 'Fix it.' }],
   };
   const r1Comments: BoardCommentV1[] = [
     marker(OLD, 'https://example.test/m-gk', 'gatekeeper'),
@@ -522,7 +540,7 @@ test.each([
   ]);
   // The Round-2 gatekeeper PASS completes acceptance with the carried reviewer PASS.
   const solPass: ReviewPublishReceipt = {
-    protocol: 2, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 2, subject_sha: SHA, risk_tier: 'high',
+    protocol: 3, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 2, subject_sha: SHA, risk_tier: 'high',
     reviewer: { harness: 'codex', actual_model: 'gpt-6.2-sol' }, verdict: 'PASS', model_relation: 'different-family', summary: 'Gatekeeper passed.', findings: [],
   };
   const r2Comments = [
