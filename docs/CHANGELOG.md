@@ -2,6 +2,32 @@
 
 All notable changes to this skill are documented here.
 
+## [0.37.1] - 2026-11-24
+
+### Breaking
+
+- ArchContext updates from `0.17.1` to `0.18.4` (`archctx` and `archctx-contracts`, `ARCHITECTURE_CONTRACT_VERSION` 3). The cutover retires the archctx daemon and projection replay/readback, moves worktree CodeGraph seeding to `archctx index seed`, enforces fail-closed `ARCHCONTEXT_LOCAL_STORE_PATH` preflight on `local-cache-v2.sqlite`, and moves `rh arch refactor` to repository-scoped pure-Git `recommendations`, `decide`, `verify` and `resolve`. Run `rh update` once after upgrading. (#3388, #3443)
+- Migration: `rh arch refactor recommendations --node <id>` and `--path <path>` → removed with no alias; `rh arch refactor recommendations` now runs a repository-scoped pure-Git scan. (#3388, #3443)
+- Migration: `rh arch refactor recommendations --json` schema `repo-harness.refactor-recommendations/v2` → `repo-harness.refactor-recommendations/v3`; update JSON consumers to read the v3 schema. (#3388, #3443)
+- Migration: `rh arch refactor record` (including `--assessment-digest` and `--expected-worktree-digest`) and the `--snapshot-digest`, `--expected-head-sha` and `--expected-worktree-digest` flags on `rh arch refactor decide|verify|resolve` → removed with no alias; record decisions directly with `rh arch refactor decide` and commit `.archcontext/refactor-decisions/<id>.json`. (#3388, #3443)
+- Migration: `rh arch refactor resolve --evidence-digest <digest>` → renamed to `--resolution-digest <digest>` with no alias; pass the attested resolution digest from `rh arch refactor verify`. (#3388, #3443)
+- Migration: `daemon_stop_failures` in `rh board closeout --json` → renamed to `codegraph_stop_failures`; update closeout JSON consumers to read `codegraph_stop_failures`. (#3388, #3443)
+
+### Fixed
+
+- Antigravity hooks resolve opted-in repositories across `cwd` and `workspacePaths` while keeping `cwd` for relative Bash target checks, restoring `SessionStart`, `PreToolUse` (I1/I2 guards), `PreInvocation` and `Stop` for `agy` seats launched by `rh seats launch` and failing closed on multi-repo ambiguity or malformed workspace entries. `rh doctor` (`antigravity-direct-command`) now probes the installed Antigravity hook bundle with a multi-workspace payload (`cwd` set to a non-git agent directory and `workspacePaths` containing `[agentDir, repo]`). (#3473, #3475)
+
+### Upgrade
+
+- Run `rh update` once on each host after installing 0.37.1 to reconcile the `archctx@0.18.4` / `archctx-contracts@0.18.4` (`ARCHITECTURE_CONTRACT_VERSION` 3) cutover and refresh the installed Antigravity hook bundle. (#3388, #3443, #3473, #3475)
+- After `rh update`, Antigravity (`agy`) seats launched by `rh seats launch` enforce `SessionStart`, `PreToolUse` (I1/I2 guards), `PreInvocation` and `Stop` across `workspacePaths`, and fail closed on `PreToolUse` when a session spans more than one distinct opted-in repository, has malformed or unresolvable `workspacePaths`, or contains a corrupted sibling workspace marker. Run `rh doctor` to verify the updated `antigravity-direct-command` multi-workspace guard probe. (#3473, #3475)
+- Update callers of `rh arch refactor` and `rh board closeout --json` for the breaking CLI and schema changes above: remove `--node`/`--path` on `recommendations` (v3 JSON schema), remove `record` and the removed digest flags on `decide|verify|resolve`, switch `resolve` from `--evidence-digest` to `--resolution-digest`, and read `codegraph_stop_failures` instead of `daemon_stop_failures`. (#3388, #3443)
+
+### Rollback
+
+- Before publication, close the prep PR or run `git revert <squash-commit>` after merge. After publication, keep the tag and release a corrective patch.
+- Version 0.37.0 uses `archctx@0.17.1` (`ARCHITECTURE_CONTRACT_VERSION` 2), the retired archctx daemon, v2 refactor recommendation schemas and `cwd`-only Antigravity hook resolution. Keep 0.37.1 on upgraded hosts; if you must return to 0.37.0, reinstall 0.37.0 and run `rh update` to reconcile the `archctx@0.17.1` runtime and host hooks, noting that `agy` seats launched with a non-git agent directory as `cwd` lose hook enforcement on 0.37.0.
+
 ## [0.37.0] - 2026-11-24
 
 ### Added
