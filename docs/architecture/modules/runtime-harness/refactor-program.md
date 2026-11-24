@@ -1,5 +1,5 @@
 # Refactor Program
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-refactor-program" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:bb5a26ccd248f7b0eb642c06e4acb59ab1f47aeb8d1070dbf046c9b0884d4b83" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-refactor-program" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:454b194fc61d3cf23d3ced2019d308d7f3785597811365cf62e1f504670f88d6" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.refactor-program`(kind `capability`)
 > **Matched Prefixes**:`src/effects/refactor/**`
@@ -41,7 +41,7 @@ flowchart LR
 
 ### 1.3 規模信號
 
-- 規模量級:`2–5` 個文件 / `200–500` 行
+- 規模量級:`2–5` 個文件 / `500–1000` 行
 - 匹配前綴:`src/effects/refactor/**`
 - 推導:掃描 `source.include` 減 `source.exclude`,跳過 `.git/` 與 `node_modules/`,再按 1–2–5 階梯分桶。精確計數不入本文檔:量級足以回答「這個能力有多大」,而逐行計數會讓覆蓋範圍內任何一次源碼改動都改寫本文檔。
 
@@ -74,8 +74,8 @@ flowchart LR
 | 組件 | 名稱 | 規模量級 | 宣告入口 |
 | --- | --- | --- | --- |
 | `component.refactor-program.archctx-provider` | Refactor ArchContext Provider Boundary | `1–2` 個文件 / `200–500` 行 | 未宣告 |
-| `component.refactor-program.cli-layer` | Refactor Recommendations (cli) | `2–5` 個文件 / `200–500` 行 | 未宣告 |
-| `component.refactor-program.core-layer` | Refactor Recommendations (core) | `1–2` 個文件 / `100–200` 行 | 未宣告 |
+| `component.refactor-program.cli-layer` | Refactor Recommendations (cli) | `2–5` 個文件 / `500–1000` 行 | 未宣告 |
+| `component.refactor-program.core-layer` | Refactor Recommendations (core) | `1–2` 個文件 / `200–500` 行 | 未宣告 |
 
 ## 2. P2:端到端數據流
 
