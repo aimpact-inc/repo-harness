@@ -20,6 +20,11 @@ export function antigravitySkillRoot(home: string): string {
   return join(home, '.gemini', 'config', 'skills');
 }
 
+/** Antigravity seat agents are opt-in; materialized on agy seat launch under ~/.gemini/config/agents. */
+export function antigravityAgentRoot(home: string): string {
+  return join(home, '.gemini', 'config', 'agents');
+}
+
 /** The Skills CLI staging root. Host roots link staged skills from here. */
 export function stagedSkillRoot(home: string): string {
   return join(home, '.agents', 'skills');

@@ -15,7 +15,7 @@ import {
   type Sha256,
 } from '../../core/host-config/types';
 import { publishFileByRename, retryWindowsSharingRace } from '../atomic-append';
-import { adoptedIdentity } from './whole-path';
+import { adoptedIdentity, observeEntryIdentity } from './whole-path';
 import { ensureSelfIgnoringDirectory } from '../self-ignoring-directory';
 import { globalConfigurationPath } from '../configuration/global-configuration';
 import { isPathInside } from '../path-containment';
@@ -157,10 +157,30 @@ export function createDirectories(directories: readonly string[]): void {
   for (const directory of directories) mkdirSync(directory, { mode: 0o700 });
 }
 
+export interface RemoveCreatedDirectoriesOptions {
+  /** Recorded `observeEntryIdentity` for created directories; when present for a directory, it must match before `rmdir`. */
+  readonly identities?: Readonly<Record<string, string>>;
+  /** Directories for which a matching recorded identity is required before `rmdir` (an absent identity preserves the directory). */
+  readonly requireIdentity?: (directory: string) => boolean;
+}
+
 /** Remove the directories rh created, innermost first, and return those that still hold other content. */
-export function removeCreatedDirectories(directories: readonly string[]): string[] {
+export function removeCreatedDirectories(
+  directories: readonly string[],
+  options: RemoveCreatedDirectoriesOptions = {},
+): string[] {
   const kept: string[] = [];
   for (const directory of [...new Set(directories)].sort((a, b) => b.length - a.length)) {
+    const expected = options.identities?.[directory];
+    const required = options.requireIdentity?.(directory) === true;
+    if (expected !== undefined || required) {
+      const stat = lstatSync(directory, { throwIfNoEntry: false });
+      if (!stat) continue;
+      if (!stat.isDirectory() || expected === undefined || observeEntryIdentity(directory) !== expected) {
+        // Different file-system object (or unproved when identity is required): preserve it and release the dead claim.
+        continue;
+      }
+    }
     try { rmdirSync(directory); }
     catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
@@ -331,13 +351,19 @@ const RETIRED_PROTOCOLS: Readonly<Record<number, string>> = {
   1: 'which has no path records', 2: 'which has no retirement records', 3: 'which has no tool records', 4: 'which has no entry identity',
 };
 
+function validDirectoryIdentities(value: Record<string, unknown>): boolean {
+  if (value.directory_identities === undefined) return true;
+  return isObject(value.directory_identities)
+    && Object.entries(value.directory_identities).every(([directory, identity]) => isAbsolute(directory) && isIdentity(identity));
+}
+
 /** The ledger in `bytes`, also a copy of it; `label` names the file in an error. An older protocol names the update step. */
 export function parseLedger(bytes: Buffer, label: string): HostConfigLedger {
   const value = parseJson(bytes, label);
   const retired = isObject(value) && typeof value.protocol === 'number' ? RETIRED_PROTOCOLS[value.protocol] : undefined;
   if (retired) throw invalidState(`the ledger is protocol ${String((value as Record<string, unknown>).protocol)}, ${retired}; run: rh update (${label})`);
-  const valid = isObject(value) && value.protocol === HOST_CONFIG_LEDGER_PROTOCOL && validTextRecords(value) && validPathRecords(value)
-    && validRetirement(value) && validTools(value);
+  const valid = isObject(value) && value.protocol === HOST_CONFIG_LEDGER_PROTOCOL && validTextRecords(value) && validDirectoryIdentities(value)
+    && validPathRecords(value) && validRetirement(value) && validTools(value);
   if (!valid) throw invalidState(`the ledger has an invalid shape: ${label}`);
   return value as unknown as HostConfigLedger;
 }

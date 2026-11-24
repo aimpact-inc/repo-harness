@@ -1,8 +1,9 @@
 import { requireHome } from '../repo-harness-home';
 import { sha256Prefixed } from '../../core/evidence/sha256';
+import { lstatSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { PathRecord, PathRecordHost } from '../../core/host-config/types';
-import { antigravitySkillRoot, hostSkillRoot, stagedSkillRoot, syncSkillRoots } from '../host-skill-roots';
+import { antigravityAgentRoot, antigravitySkillRoot, hostSkillRoot, stagedSkillRoot, syncSkillRoots } from '../host-skill-roots';
 import { isPathInside } from '../path-containment';
 import { hostConfigPaths, hostPathKey, readLedger, resolveHostPath, writeLedger } from './store';
 import { observeEntryIdentity, pathRecordContentHolds, pathRecordEntry } from './whole-path';
@@ -84,6 +85,52 @@ export function partitionPathRecords(env: NodeJS.ProcessEnv, all: PathRecords,
 }
 
 /**
+ * Canonicalize the real on-disk spelling of existing non-symlink components under `~/.gemini/config/<leaf>`.
+ * Never follows a symlink below HOME and stops on access errors (EACCES/EPERM), keeping the remaining literal
+ * segments so non-Antigravity callers are never blocked while Antigravity guards still fail closed.
+ */
+export function canonicalAntigravityDir(resolvedHome: string, leaf: 'skills' | 'agents'): string {
+  const parts = ['.gemini', 'config', leaf] as const;
+  let current = resolvedHome;
+  for (let index = 0; index < parts.length; index += 1) {
+    const next = join(current, parts[index]!);
+    let stat: ReturnType<typeof lstatSync>;
+    try { stat = lstatSync(next, { throwIfNoEntry: false }); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EACCES' || code === 'EPERM') return join(current, ...parts.slice(index));
+      throw error;
+    }
+    if (!stat || !stat.isDirectory()) return join(current, ...parts.slice(index));
+    try { current = realpathSync.native(next); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EACCES' || code === 'EPERM' || code === 'ENOENT') return join(current, ...parts.slice(index));
+      throw error;
+    }
+  }
+  return current;
+}
+
+/**
+ * True when `candidate` equals `root` or is a verified case-only alias of `root` on disk
+ * (both real non-symlink directories with the exact same `observeEntryIdentity`).
+ */
+export function antigravityDirMatches(root: string, candidate: string): boolean {
+  if (candidate === root) return true;
+  if (candidate.toLowerCase() !== root.toLowerCase()) return false;
+  try {
+    const rootStat = lstatSync(root, { throwIfNoEntry: false });
+    const candidateStat = lstatSync(candidate, { throwIfNoEntry: false });
+    if (!rootStat?.isDirectory() || !candidateStat?.isDirectory()) return false;
+    const rootId = observeEntryIdentity(root);
+    return rootId !== null && rootId === observeEntryIdentity(candidate);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The root of the record's host that holds the key, with its links followed: a
  * removal is checked beneath it. `~/.claude.json` has HOME as its root. Null
  * for a key outside every root of its host.
@@ -92,9 +139,17 @@ export function pathRecordRoot(env: NodeJS.ProcessEnv, key: string, record: Path
   const paths = hostConfigPaths(env);
   if (record.host === 'claude' && key === hostPathKey(paths, join(requireHome(env), '.claude.json'))) return dirname(key);
   if (record.host === 'antigravity') {
-    // Canonicalize HOME only: ~/.gemini, config, and skills must never resolve through links.
-    const root = antigravitySkillRoot(resolveHostPath(paths, requireHome(env)));
-    return key !== root && isPathInside(root, key) ? root : null;
+    // Canonicalize HOME and verified non-symlink directory components only: never resolve through links below HOME.
+    const home = resolveHostPath(paths, requireHome(env));
+    const skills = canonicalAntigravityDir(home, 'skills');
+    const agents = canonicalAntigravityDir(home, 'agents');
+    const exact = [skills, agents].find(root => key !== root && isPathInside(root, key));
+    if (exact !== undefined) return exact;
+    const parent = dirname(key);
+    if (antigravityDirMatches(skills, parent) || antigravityDirMatches(agents, parent)) return parent;
+    const grandParent = dirname(parent);
+    if (grandParent !== parent && antigravityDirMatches(agents, grandParent)) return grandParent;
+    return null;
   }
   return hostRoots(env, record.host).map(root => resolveHostPath(paths, root)).find(root => key !== root && isPathInside(root, key)) ?? null;
 }
@@ -126,7 +181,13 @@ export function pathRecordHostRoot(env: NodeJS.ProcessEnv, path: string): { read
   const home = requireHome(env);
   if (path === join(home, '.claude.json')) return { host: 'claude', root: home };
   for (const host of HOST_ORDER) {
-    const root = hostRoots(env, host).filter(candidate => path !== candidate && isPathInside(candidate, path)).sort((a, b) => b.length - a.length)[0];
+    const candidates = host === 'antigravity' && path.toLowerCase().includes('.gemini')
+      ? (() => {
+        const resolved = resolveHostPath(hostConfigPaths(env), home);
+        return [...new Set([...hostRoots(env, host), canonicalAntigravityDir(resolved, 'skills'), canonicalAntigravityDir(resolved, 'agents')])];
+      })()
+      : hostRoots(env, host);
+    const root = candidates.filter(candidate => path !== candidate && isPathInside(candidate, path)).sort((a, b) => b.length - a.length)[0];
     if (root !== undefined) return { host, root };
   }
   return null;
@@ -139,7 +200,13 @@ const HOST_ORDER: readonly PathRecordHost[] = ['pi', 'claude', 'codex', 'antigra
 function hostRoots(env: NodeJS.ProcessEnv, host: PathRecordHost): readonly string[] {
   const home = requireHome(env);
   if (host === 'pi') return [hostSkillRoot(home, 'pi', env)];
-  if (host === 'antigravity') return [antigravitySkillRoot(home)];
+  if (host === 'antigravity') {
+    const resolved = resolveHostPath(hostConfigPaths(env), home);
+    return [...new Set([
+      antigravitySkillRoot(home), antigravityAgentRoot(home),
+      antigravitySkillRoot(resolved), antigravityAgentRoot(resolved),
+    ])];
+  }
   if (host === 'staged') return [join(stagedSkillRoot(home), '..')];
   if (host === 'bin') return [env.BUN_INSTALL ?? join(home, '.bun')];
   // A repository record lives in a worktree, never under a host root of the user.

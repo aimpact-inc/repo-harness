@@ -5,11 +5,12 @@ import { bunGlobalPackageRoot, expectedSkillProjections } from './skill-projecti
 import { configurationReceiptPath } from './configuration-ownership';
 import { expectedOf, hostConfigPaths, hostConfigPathsAt, observeFile, putVault, readLedger, removeTarget, replaceTarget, repositoryLedgers, resolveHostPath } from '../../effects/host-config/store';
 import { ensureSelfIgnoringDirectory, isSelfIgnoreGuard, SELF_IGNORE_NAME } from '../../effects/self-ignoring-directory';
-import { antigravityMcpConfigHostPath, AntigravityHooksPathError, antigravitySkillsDirHostPath, openHostConfigGate, planPathRevert, recoverRetiredPathWrites, rollbackHostConfigTransaction, type AntigravityMcpUndo } from '../../effects/host-config/gate';
+import { antigravityAgentsDirHostPath, antigravityMcpConfigHostPath, AntigravityHooksPathError, antigravitySkillsDirHostPath, openHostConfigGate, planPathRevert, recoverRetiredPathWrites, rollbackHostConfigTransaction, type AntigravityMcpUndo } from '../../effects/host-config/gate';
+import { AGY_SEAT_AGENT_DIR_PATTERN } from '../../core/board/seat-launch';
 import { namingTomlFile } from '../../core/host-config/toml-fragment';
 import { migrateCodexConfigRecords } from './codex-config-migration';
 import { migrateJsonConfigRecords } from './json-config-migration';
-import { pathRecordIsCurrent, pathRecordKey, pathRecordsDigest, readPathRecords, readPathRecordSet, registerSupportedPathRecords, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
+import { antigravityDirMatches, pathRecordIsCurrent, pathRecordKey, pathRecordsDigest, readPathRecords, readPathRecordSet, registerSupportedPathRecords, writePathRecords, type PathRecords } from '../../effects/host-config/path-records';
 import { HostConfigError, type HostPath, type PathCommitted, type PathRecord, type PathRecordHost, type PathRecordKind } from '../../core/host-config/types';
 import { globalContextBackupEligible, globalContextPath } from './global-context';
 import { acquireRuntimeTransactionLock, assertRuntimeTransactionContext, globalRuntimeScope, runtimeTransactionLockRelativePath, runtimeTransactionRoot, withRuntimeTransactionContext, type RuntimeTransactionContext, type RuntimeTransactionLock, type RuntimeTransactionScope } from '../../effects/locking/runtime-transaction-lock';
@@ -450,7 +451,11 @@ export function supportedPathRecord(env: NodeJS.ProcessEnv): (key: string, recor
       || (pkg.kind === 'external' && pkg.hosts.includes('antigravity')))
       .map((pkg) => pkg.name),
   );
-  const antigravitySkillsRoot = antigravitySkillsDirHostPath(env);
+  let antigravityRoots: { readonly skills: string; readonly agents: string } | null = null;
+  const getAntigravityRoots = () => (antigravityRoots ??= {
+    skills: antigravitySkillsDirHostPath(env),
+    agents: antigravityAgentsDirHostPath(env),
+  });
   const allowed = keys([...installProfileHostMutationPaths(env), ...effectiveSkillRoots(PLUGIN_IDS, env).flatMap(root => repoHarnessSkills.map(name => join(root, name)))]);
   const fleet = keys(agentFleetTargetPaths(env));
   const facadeRoots = new Set([...keys(hostSkillRoots(requireHome(env), env).map((root) => join(root, FACADE_NAME_PREFIX)))].map((key) => dirname(key)));
@@ -458,10 +463,18 @@ export function supportedPathRecord(env: NodeJS.ProcessEnv): (key: string, recor
     if (isRetired(key, record)) return true;
     if (!isSurfaceOwner(record.owner)) return false;
     if (record.host === 'antigravity') {
+      const { skills, agents } = getAntigravityRoots();
       const name = basename(key);
-      return record.kind === 'created'
-        && dirname(key) === antigravitySkillsRoot
-        && (antigravitySkillNames.has(name) || name.startsWith(FACADE_NAME_PREFIX));
+      if (record.kind !== 'created') return false;
+      if (antigravityDirMatches(skills, dirname(key))) {
+        return antigravitySkillNames.has(name) || name.startsWith(FACADE_NAME_PREFIX);
+      }
+      const agentDir = dirname(key);
+      return name === 'agent.md'
+        && AGY_SEAT_AGENT_DIR_PATTERN.test(basename(agentDir))
+        && antigravityDirMatches(agents, dirname(agentDir))
+        && record.owner === 'core'
+        && record.committed.type === 'file';
     }
     return record.kind === 'user_managed'
       ? fleet.has(key)

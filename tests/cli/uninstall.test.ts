@@ -11,7 +11,7 @@ import { CLAUDE_ROOT_CONFIG_BACKUP, CODEGRAPH_MCP_SELECTOR } from '../../src/cor
 import type { PathCommitted } from '../../src/core/host-config/types';
 import { pathRecordHost, pathRecordKey } from '../../src/effects/host-config/path-records';
 import { hashManagedTree } from '../../src/effects/managed-tree';
-import { appendFileSync, chmodSync, copyFileSync, cpSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync, statSync } from 'fs';
+import { appendFileSync, chmodSync, copyFileSync, cpSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, relative } from 'path';
 import { spawnSync } from 'child_process';
@@ -22,6 +22,7 @@ import { requestUserInputFragment } from '../../src/cli/installer/targets/codex'
 import { tomlFragment } from '../../src/core/host-config/toml-fragment';
 import { antigravityMcpConfigHostPath, antigravityMcpConfigPath, openHostConfigGate, rollbackHostConfigTransaction } from '../../src/effects/host-config/gate';
 import { hostConfigPathsAt } from '../../src/effects/host-config/store';
+import { observeEntryIdentity } from '../../src/effects/host-config/whole-path';
 import { openRepositoryGate, repositoryConfigPaths } from '../../src/effects/host-config/repository';
 import { buildManagedHooks } from '../../src/cli/installer/managed-entries';
 import { applyGlobalContextRefresh, preflightGlobalContextRefresh, renderGlobalRulesBlock } from '../../src/cli/installer/global-context';
@@ -853,4 +854,210 @@ test.skipIf(process.platform === 'win32')('Antigravity uninstall removes hooks, 
   expect(JSON.parse(readFileSync(hooks, 'utf8'))).toEqual({ custom: { enabled: true } });
   expect(lstatSync(configDir).isDirectory()).toBe(true);
  });
+});
+
+test.skipIf(process.platform === 'win32')('Antigravity uninstall reverts recorded seat agent files, preserves pre-existing agents dir and user agents, and fails closed on symlinked agents dir', () => {
+ withTempHome('user-uninstall-antigravity-agents', (home) => {
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun') };
+  const configDir = join(home, '.gemini', 'config');
+  const agentsDir = join(configDir, 'agents');
+  const agentADir = join(agentsDir, 'rh-advisor-0123456789ab');
+  const agentAFile = join(agentADir, 'agent.md');
+  const agentBDir = join(agentsDir, 'rh-worker-abcdef012345');
+  const agentBFile = join(agentBDir, 'agent.md');
+  const agentBytes = Buffer.from('---\nname: rh-advisor-0123456789ab\n---\n', 'utf8');
+
+  // Case 1: pre-existing user agentsDir stays even when empty after uninstalling the only rh agent file + dir.
+  mkdirSync(agentsDir, { recursive: true });
+  expect(runInstall({ target: 'antigravity', location: 'global' }).exitCode).toBe(0);
+  openHostConfigGate({ env }).writePaths([{ path: agentAFile, owner: 'core', entry: { type: 'file', bytes: agentBytes, mode: 0o600 } }]);
+  expect(ledger(home).directories).not.toContain(agentsDir);
+  expect(ledger(home).directories).toContain(agentADir);
+
+  // Uninstalling --target codex leaves Antigravity agent files untouched.
+  expect(runUserUninstall({ target: 'codex', env }).exitCode).toBe(0);
+  expect(existsSync(agentAFile)).toBe(true);
+
+  const removedPreExisting = runUserUninstall({ target: 'antigravity', env });
+  expect(removedPreExisting.exitCode, removedPreExisting.lines.join('\n')).toBe(0);
+  expect(existsSync(agentAFile)).toBe(false);
+  expect(existsSync(agentADir)).toBe(false);
+  expect(lstatSync(agentsDir).isDirectory()).toBe(true);
+  expect(readdirSync(agentsDir)).toEqual([]);
+  expect(ledger(home).paths[agentAFile]).toBeUndefined();
+
+  // Case 2: rh-created agentsDir is removed when empty, while user agents and edited rh agents are preserved.
+  rmSync(agentsDir, { recursive: true, force: true });
+  expect(runInstall({ target: 'antigravity', location: 'global' }).exitCode).toBe(0);
+  openHostConfigGate({ env }).writePaths([
+    { path: agentAFile, owner: 'core', entry: { type: 'file', bytes: agentBytes, mode: 0o600 } },
+    { path: agentBFile, owner: 'core', entry: { type: 'file', bytes: agentBytes, mode: 0o600 } },
+  ]);
+  expect(ledger(home).directories).toContain(agentsDir);
+  expect(ledger(home).directories).toContain(agentADir);
+
+  // Symlinked agentsDir fails closed on both --target antigravity and --target both while skillsDir is clean.
+  const parked = join(home, 'parked-agents');
+  cpSync(agentsDir, parked, { recursive: true });
+  rmSync(agentsDir, { recursive: true, force: true });
+  symlinkSync(parked, agentsDir, 'dir');
+  for (const target of ['antigravity', 'both'] as const) {
+    const refused = runUserUninstall({ target, env });
+    expect(refused.exitCode).not.toBe(0);
+    expect(refused.lines.join('\n')).toContain('antigravity_hooks_path_linked');
+    expect(existsSync(join(parked, 'rh-advisor-0123456789ab', 'agent.md'))).toBe(true);
+  }
+  rmSync(agentsDir);
+  rmSync(parked, { recursive: true, force: true });
+  // Re-establish clean rh-created agentsDir + edited agentB + unrecorded user agent.
+  expect(runInstall({ target: 'antigravity', location: 'global' }).exitCode).toBe(0);
+  openHostConfigGate({ env }).writePaths([
+    { path: agentAFile, owner: 'core', entry: { type: 'file', bytes: agentBytes, mode: 0o600 } },
+    { path: agentBFile, owner: 'core', entry: { type: 'file', bytes: agentBytes, mode: 0o600 } },
+  ]);
+  const userAgent = join(agentsDir, 'my-custom-agent');
+  mkdirSync(userAgent, { recursive: true });
+  writeFileSync(join(userAgent, 'agent.md'), '# user agent\n');
+  writeFileSync(agentBFile, '# user edited rh agent\n');
+
+  const partial = runUserUninstall({ target: 'both', env });
+  expect(partial.status).toBe('partial');
+  expect(existsSync(agentADir)).toBe(false);
+  expect(readFileSync(agentBFile, 'utf8')).toBe('# user edited rh agent\n');
+  expect(readFileSync(join(userAgent, 'agent.md'), 'utf8')).toBe('# user agent\n');
+  expect(lstatSync(agentsDir).isDirectory()).toBe(true);
+  expect(lstatSync(configDir).isDirectory()).toBe(true);
+
+  // Clean rh-created agentsDir with only an untouched rh agent removes agent.md, agentDir, and agentsDir when empty and preserves ~/.gemini/config.
+  rmSync(agentsDir, { recursive: true, force: true });
+  rmSync(join(home, '.repo-harness', 'config', 'ledger.json'), { force: true });
+  expect(runInstall({ target: 'antigravity', location: 'global' }).exitCode).toBe(0);
+  openHostConfigGate({ env }).writePaths([{ path: agentAFile, owner: 'core', entry: { type: 'file', bytes: agentBytes, mode: 0o600 } }]);
+  const cleaned = runUserUninstall({ target: 'antigravity', env });
+  expect(cleaned.exitCode, cleaned.lines.join('\n')).toBe(0);
+  expect(existsSync(agentAFile)).toBe(false);
+  expect(existsSync(agentADir)).toBe(false);
+  expect(existsSync(agentsDir)).toBe(false);
+  expect(lstatSync(configDir).isDirectory()).toBe(true);
+
+  // Unmanaged agents symlink without any recorded seat-agent path does not block targeted Antigravity uninstall.
+  const externalAgents = join(home, 'external-user-agents');
+  mkdirSync(externalAgents, { recursive: true });
+  symlinkSync(externalAgents, agentsDir, 'dir');
+  expect(runInstall({ target: 'antigravity', location: 'global' }).exitCode).toBe(0);
+  const withoutAgents = runUserUninstall({ target: 'antigravity', env });
+  expect(withoutAgents.exitCode, withoutAgents.lines.join('\n')).toBe(0);
+  expect(lstatSync(agentsDir).isSymbolicLink()).toBe(true);
+ });
+});
+
+test.skipIf(process.platform === 'win32')('replacing an rh-created ~/.gemini/config/agents directory with a new empty directory is preserved and reported by Antigravity and full uninstall', () => {
+  for (const target of ['antigravity', 'both'] as const) {
+    fixture((home, env) => {
+      const agentsDir = join(home, '.gemini', 'config', 'agents');
+      const agentADir = join(agentsDir, 'rh-advisor-0123456789ab');
+      const agentAFile = join(agentADir, 'agent.md');
+      const agentBytes = Buffer.from('---\nname: rh-advisor-0123456789ab\n---\n', 'utf8');
+
+      expect(runInstall({ target: 'antigravity', location: 'global' }).exitCode).toBe(0);
+      expect(existsSync(agentsDir)).toBe(false);
+      openHostConfigGate({ env }).writePaths([{ path: agentAFile, owner: 'core', entry: { type: 'file', bytes: agentBytes, mode: 0o600 } }]);
+      const createdId = observeEntryIdentity(agentsDir);
+      expect(ledger(home).directories).toContain(agentsDir);
+      expect(ledger(home).directory_identities?.[agentsDir]).toBe(createdId);
+
+      // Move the rh-created agents dir aside and create a fresh empty user directory at the original path.
+      const movedAside = join(home, 'agents-moved-aside');
+      renameSync(agentsDir, movedAside);
+      mkdirSync(agentsDir);
+      const replacementId = observeEntryIdentity(agentsDir);
+      expect(replacementId).not.toBe(createdId);
+
+      const result = runUserUninstall({ target, env });
+      expect(result.exitCode, result.lines.join('\n')).toBe(0);
+      expect(lstatSync(agentsDir).isDirectory()).toBe(true);
+      expect(observeEntryIdentity(agentsDir)).toBe(replacementId);
+      expect(result.items).toContainEqual(expect.objectContaining({ path: agentsDir, action: 'kept' }));
+      expect(ledger(home).directories).not.toContain(agentsDir);
+      expect(ledger(home).directory_identities).toBeUndefined();
+    });
+  }
+});
+
+test.skipIf(process.platform === 'win32')('replacing agent.md inode or agentDir identity keeps the user entry and reports it without recursive deletion', () => {
+  // Case A (R2 P1-agent-file-replacement-identity): same-bytes inode replacement of agent.md keeps agent.md and its directories.
+  fixture((home, env) => {
+    const agentsDir = join(home, '.gemini', 'config', 'agents');
+    const agentDir = join(agentsDir, 'rh-advisor-0123456789ab');
+    const agentFile = join(agentDir, 'agent.md');
+    const agentBytes = Buffer.from('---\nname: rh-advisor-0123456789ab\n---\n', 'utf8');
+
+    expect(runInstall({ target: 'antigravity', location: 'global' }).exitCode).toBe(0);
+    openHostConfigGate({ env }).writePaths([{ path: agentFile, owner: 'core', entry: { type: 'file', bytes: agentBytes, mode: 0o600 } }]);
+    const origFileId = observeEntryIdentity(agentFile);
+
+    const siblingCopy = join(home, 'agent-sibling.md');
+    writeFileSync(siblingCopy, agentBytes);
+    renameSync(siblingCopy, agentFile);
+    const replacedFileId = observeEntryIdentity(agentFile);
+    expect(replacedFileId).not.toBe(origFileId);
+
+    const dry = runUserUninstall({ target: 'antigravity', dryRun: true, env });
+    expect(dry.status).toBe('partial');
+    expect(dry.items).toContainEqual(expect.objectContaining({ path: agentFile, action: 'unresolved' }));
+
+    const applied = runUserUninstall({ target: 'antigravity', env });
+    expect(applied.status).toBe('partial');
+    expect(applied.exitCode).toBe(1);
+    expect(observeEntryIdentity(agentFile)).toBe(replacedFileId);
+    expect(lstatSync(agentDir).isDirectory()).toBe(true);
+    expect(lstatSync(agentsDir).isDirectory()).toBe(true);
+    expect(ledger(home).paths[agentFile]).toBeDefined();
+  });
+
+  // Case B: replacing agentDir itself while moving untouched agent.md inside removes only agent.md, keeps the replacement agentDir, and reports it.
+  fixture((home, env) => {
+    const agentsDir = join(home, '.gemini', 'config', 'agents');
+    const agentDir = join(agentsDir, 'rh-advisor-0123456789ab');
+    const agentFile = join(agentDir, 'agent.md');
+    const agentBytes = Buffer.from('---\nname: rh-advisor-0123456789ab\n---\n', 'utf8');
+
+    expect(runInstall({ target: 'antigravity', location: 'global' }).exitCode).toBe(0);
+    openHostConfigGate({ env }).writePaths([{ path: agentFile, owner: 'core', entry: { type: 'file', bytes: agentBytes, mode: 0o600 } }]);
+    const origDirId = observeEntryIdentity(agentDir);
+
+    const replacementDir = join(home, 'replacement-agent-dir');
+    mkdirSync(replacementDir);
+    renameSync(agentFile, join(replacementDir, 'agent.md'));
+    rmSync(agentDir, { recursive: true });
+    renameSync(replacementDir, agentDir);
+    const newDirId = observeEntryIdentity(agentDir);
+    expect(newDirId).not.toBe(origDirId);
+
+    const applied = runUserUninstall({ target: 'antigravity', env });
+    expect(applied.exitCode, applied.lines.join('\n')).toBe(0);
+    expect(existsSync(agentFile)).toBe(false);
+    expect(lstatSync(agentDir).isDirectory()).toBe(true);
+    expect(observeEntryIdentity(agentDir)).toBe(newDirId);
+    expect(applied.items).toContainEqual(expect.objectContaining({ path: agentDir, action: 'kept' }));
+  });
+});
+
+test.skipIf(process.platform === 'win32')('unreadable ~/.gemini (chmod u-x) does not block Codex-only uninstall preview or apply', () => {
+  fixture((home, env) => {
+    const geminiDir = join(home, '.gemini');
+    mkdirSync(join(geminiDir, 'config'), { recursive: true });
+    expect(runInstall({ target: 'codex', location: 'global' }).exitCode).toBe(0);
+
+    chmodSync(geminiDir, 0o600);
+    try {
+      const cliDry = spawnSync(process.execPath, [CLI, 'uninstall', '--target', 'codex', '--dry-run'], { env, encoding: 'utf8' });
+      expect(cliDry.status, cliDry.stdout + cliDry.stderr).toBe(0);
+
+      const applied = runUserUninstall({ target: 'codex', env });
+      expect(applied.exitCode, applied.lines.join('\n')).toBe(0);
+    } finally {
+      chmodSync(geminiDir, 0o700);
+    }
+  });
 });

@@ -8,11 +8,11 @@ import { pathRecordIsCurrent } from './path-records';
 import {
   antigravityGlobalRulesHostPath,
   antigravityHostPath,
-  antigravitySkillsDirHostPath,
   checkAntigravityPath,
+  checkAntigravityRecordPath,
   resolveUserConfigFile,
 } from './gate';
-import { hostConfigPaths, observeFile, readLedger, vaultPath, writeLedger, type HostConfigPaths } from './store';
+import { hostConfigPaths, observeFile, readLedger, vaultPath, writeLedger } from './store';
 
 /**
  * Read-only views of the host-config ledger for `rh config`, and the GC of
@@ -105,7 +105,6 @@ export function configStatus(env: NodeJS.ProcessEnv): ConfigStatus {
   const ledger = readLedger(paths);
   const antigravityHooks = antigravityHostPath(env, paths);
   const antigravityRules = antigravityGlobalRulesHostPath(env, paths);
-  const antigravitySkills = antigravitySkillsDirHostPath(env, paths);
   const files = Object.entries(ledger.files).map(([path, record]): FileStatus => {
     if (path === antigravityHooks || path === antigravityRules) checkAntigravityPath(path);
     const { current, bytes } = currentOf(path);
@@ -121,7 +120,7 @@ export function configStatus(env: NodeJS.ProcessEnv): ConfigStatus {
     ledger: paths.ledger,
     files,
     paths: Object.entries(ledger.paths).map(([path, record]) => {
-      if (record.host === 'antigravity') checkAntigravityPath(antigravitySkills, 'directory');
+      if (record.host === 'antigravity') checkAntigravityRecordPath(path, env, paths);
       return { path, owner: record.owner, kind: record.kind, current: pathRecordIsCurrent(path, record) };
     }),
     recovery: ledger.recovery.map((entry) => ({ file: entry.file, copy: vaultPath(paths, entry.sha256), at: entry.at })),

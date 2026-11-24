@@ -472,9 +472,12 @@ export function agySeatBrief(seat: LaunchSeatId, config: SeatConfigV1): string {
   ].join('\n\n');
 }
 
+/** Allowed directory names under `~/.gemini/config/agents` for repo-harness seat definitions. */
+export const AGY_SEAT_AGENT_DIR_PATTERN = /^rh-(?:orchestrator|advisor|council|gatekeeper-fallback|worker)-[0-9a-f]{12}$/u;
+
 interface AgyLaunchInputs {
   readonly executable: string;
-  readonly directory: string;
+  readonly agentName: string;
   readonly cwd: string;
 }
 
@@ -502,7 +505,7 @@ function agyLaunch(seat: LaunchSeatId, config: SeatConfigV1, repositoryId: strin
     argv: [
       ...seatEnv(env), input.executable, '--mode', 'accept-edits', '--model', model,
       ...(config.effort === null ? [] : ['--effort', config.effort]),
-      '--add-dir', input.directory, '--agent', agySeatAgentName(seat), '--settings', settings,
+      '--agent', input.agentName, '--settings', settings,
     ],
     brief: agySeatBrief(seat, config),
     limits,
