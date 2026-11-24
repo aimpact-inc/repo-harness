@@ -58,9 +58,12 @@
 
 The prep PR records the local commands, results and tested commit. `Required / CI` runs on the prep PR.
 
-## Acceptance environment (release rehearsal)
+## Acceptance environment
 
-Pending. The orchestrator runs the release rehearsal workflow after a joint decision and fills this section.
+- Run URL: https://github.com/aimpact-inc/repo-harness/actions/runs/45357561544 (`probe.yml`, lane `release-rehearsal`, runner `ubuntu-latest`, ref `release/0.37.0` at `55f5c175b`)
+- `[rehearsal] OK: 0.36.1 -> 0.37.0`
+- `TARBALL SERVED repo-harness 0.37.0`
+- `TARBALL SERVED repo-harness-operator-web 0.37.0`
 
 ## Order of the owner steps
 
