@@ -6,6 +6,7 @@ import { tmpdir } from "os";
 import { basename, delimiter, dirname, join } from "path";
 import { AGY_READONLY_COMMAND_PREFIXES, AGY_WORKER_COMMAND_PREFIXES, agySeatCommandRules, agySeatLimits, buildSeatLaunch, seatPaneName } from "../../src/core/board/seat-launch";
 import { HANDOFF_SECTIONS, seatHandoffPath, seatResetReason, seatResetRelaunchPath, seatResetRequestPath, seatResetSteps } from "../../src/core/board/seat-reset";
+import { EDIT_GUARD_SCOPE_SECTION } from "../../src/cli/hook/session-context";
 import { SeatResetError, readSeatSession, recordSeatSession, runSeatReset, type SeatRelaunch, type SeatResetNotify, type SeatResetOptions } from "../../src/effects/board/seat-reset";
 import { seatHandoff, seatResetLaunch, seatResetTarget } from "../../src/cli/commands/seats";
 import { AGY_ADVISOR_SEAT_TOOLS, DEFAULT_SEATS_CONFIG, LAUNCH_SEAT_IDS, NATIVE_SEATS_PRESET, WORKER_SEAT_IDS, isCouncilSeat, isReviewSeat, isWorkerSeat } from "../../src/core/board/seats-settings";
@@ -448,7 +449,7 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     const repository = "1186405141";
     const source = join(import.meta.dir, "../../src/cli/commands/seats.ts");
     const program = `import { seatResetLaunch } from ${JSON.stringify(source)};
-console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: "${repository}" }, process.env, process.cwd())));`;
+console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: "${repository}" }, process.env, process.cwd(), false)));`;
     const result = spawnSync(process.execPath, ["--eval", program], { cwd: f.cwd, env: f.env, encoding: "utf8" });
     expect(result.status, result.stderr).toBe(0);
     const { argv, model, runtime } = JSON.parse(result.stdout);
@@ -1989,6 +1990,7 @@ if (cmd === "keys") {
     if (st.exit) st.foreground = st.exitForeground ?? "zsh";
   }
   if (line.startsWith("sh ")) {
+    if (st.destinationHost) st.host = st.destinationHost;
     st.foreground = st.host === "antigravity" ? "agy" : st.host === "pi" ? "pi" : "claude";
     if (st.host === "antigravity") {
       const logs = "${home}/.gemini/antigravity-cli/brain/s/.system_generated/logs";
@@ -2108,17 +2110,15 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
   const prompt = (handoff: string, seat = "advisor") => `You are ${seat}. Read ${handoff}, then run the Bash command \`hc send t2 RESUMED\` alone, then check the current state with git/gh and continue.`;
   const agyStatus = { state: "done", app: "antigravity" };
 
-  test.each([
-    ["antigravity", "agy", "reset"], ["claude", "claude", "reset"], ["pi", "pi", "compact"],
-  ] as const)("a %s %s foreground refuses a configured runtime change on %s", (host, foreground, action) => withReset(async ({ handoff, reset, state, sends, log, relaunchPath }) => {
-    state({ foreground, host });
-    const runtime = host === "antigravity" ? "claude" : "agy";
+  test.each(["agy", "pi", "codex"] as const)("a cross-runtime destination of %s has no pre-exit startup authority", runtime => withReset(async ({ handoff, reset, sends, log, relaunchPath }) => {
     const model = () => { throw new Error("Unexpected model probe"); };
-    const relaunch = () => { throw new Error("Unexpected destination probe"); };
-    expect(await reset({ host, action, resolveLaunch: () => ({ runtime, model }), relaunch })).toEqual({
-      error: "seat_reset_runtime_changed", outcome: "nothing_sent",
+    let preparations = 0;
+    const relaunch = () => { preparations++; throw new Error("Unexpected destination probe"); };
+    expect(await reset({ action: "compact", resolveLaunch: () => ({ runtime, model }), relaunch })).toEqual({
+      error: "seat_reset_destination_unavailable", outcome: "nothing_sent",
     });
-    expect(log().at(-1)).toMatchObject({ kind: "seat_reset_runtime_changed", detail: expect.stringContaining("rh seats launch advisor") });
+    expect(preparations).toBe(0);
+    expect(log().at(-1)).toMatchObject({ kind: "relaunch_failed", detail: `${runtime} provides no pre-exit SessionStart readiness evidence` });
     expect(sends()).toEqual([]);
     expect(existsSync(relaunchPath())).toBe(false);
     expect(readdirSync(dirname(handoff)).some(name => name.startsWith("claim-"))).toBe(false);
@@ -2153,10 +2153,11 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     expect(readdirSync(dirname(handoff)).some(name => name.startsWith("claim-"))).toBe(false);
   }));
 
-  test("a Claude reset checks the configured runtime when hc reports no checkout", withReset(async ({ reset, state, sends }) => {
-    state({ cwd: null });
-    const resolveLaunch = () => ({ runtime: "pi" as const, model: async () => { throw new Error("Unexpected model probe"); } });
-    expect(await reset({ resolveLaunch })).toEqual({ error: "seat_reset_runtime_changed", outcome: "nothing_sent" });
+  test("a cross-runtime reset without an hc checkout cannot prepare a destination", withReset(async ({ reset, state, sends, log }) => {
+    state({ cwd: null, foreground: "pi", host: "pi" });
+    const resolveLaunch = () => ({ runtime: "claude" as const, model: async () => { throw new Error("Unexpected model probe"); } });
+    expect(await reset({ host: "pi", resolveLaunch })).toEqual({ error: "seat_reset_destination_unavailable", outcome: "nothing_sent" });
+    expect(log().at(-1)?.detail).toContain("hc did not report the launch directory");
     expect(sends()).toEqual([]);
   }));
 
@@ -2196,7 +2197,7 @@ fs.writeFileSync("${home}/state.json", JSON.stringify(st));
     }));
     state({ foreground: "agy", host: "antigravity", status: agyStatus });
     const env = { ...registryEnv(home), PATH: join(home, "bin") };
-    const relaunch: SeatResetOptions["relaunch"] = (identity, cwd) => seatResetLaunch(identity, env, cwd);
+    const relaunch: SeatResetOptions["relaunch"] = (identity, cwd, crossRuntime) => seatResetLaunch(identity, env, cwd, crossRuntime);
     expect(await reset({ host: "antigravity", resolveLaunch: identity => seatResetTarget(identity, env), relaunch })).toEqual({
       error: "seat_reset_destination_unavailable", outcome: "nothing_sent",
     });
@@ -2631,6 +2632,69 @@ else require("node:readline").createInterface({ input: process.stdin }).on("line
     return { env, repo, executable };
   }
 
+  test.each([
+    ["antigravity", "ready"], ["pi", "ready"], ["antigravity", "missing hook"],
+    ["antigravity", "checkout changed"], ["antigravity", "executable missing"],
+  ] as const)("a %s requester switches to Claude only when the destination is %s", (host, outcome) => withReset(async ({ home, handoff, reset, state, sends, log, relaunchPath }) => {
+    const { repo, executable, env: baseEnv } = resetLaunchFixture(home);
+    const env = { ...baseEnv, REPO_HARNESS_SEAT: "orchestrator", REPO_HARNESS_SEAT_REPOSITORY: "134201" };
+    const seatDirectory = dirname(handoff);
+    const probePath = join(home, "startup-probe.json");
+    const response = { type: "system", subtype: "hook_response", hook_event: "SessionStart", hook_name: "SessionStart:startup",
+      outcome: "success", exit_code: 0, stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart",
+        additionalContext: outcome === "missing hook" ? "Unrelated hook" : EDIT_GUARD_SCOPE_SECTION.content } }) };
+    if (outcome === "executable missing") rmSync(executable);
+    else {
+      const prelude = readFileSync(executable, "utf8").split("\n").slice(1).join("\n");
+      writeFileSync(executable, `#!${process.execPath}
+const args = process.argv.slice(2);
+if (args.includes("--include-hook-events")) {
+  const fs = require("node:fs");
+  const identity = [process.env.REPO_HARNESS_SEAT, process.env.REPO_HARNESS_SEAT_REPOSITORY];
+  fs.writeFileSync(${JSON.stringify(probePath)}, JSON.stringify({ args, identity, cwd: process.cwd() }));
+  if (identity.some(Boolean)) fs.writeFileSync(${JSON.stringify(join(seatDirectory, "session.json"))}, "unexpected probe write");
+  process.stdout.write(${JSON.stringify(`${JSON.stringify(response)}\n`)});
+} else {
+${prelude}
+}
+`, { mode: 0o755 });
+    }
+    const foreground = host === "pi" ? "node" : "agy";
+    const status = host === "pi" ? { state: "done", app: "pi" } : agyStatus;
+    state({ cwd: repo, foreground, host, status, destinationHost: "claude" });
+    const result = await reset({ host, resolveLaunch: identity => seatResetTarget(identity, env),
+      relaunch: async (identity, cwd, crossRuntime) => {
+        const before = readdirSync(seatDirectory).map(name => [name, readFileSync(join(seatDirectory, name), "utf8")]);
+        const launch = await seatResetLaunch(identity, env, cwd, crossRuntime);
+        expect(readdirSync(seatDirectory).map(name => [name, readFileSync(join(seatDirectory, name), "utf8")])).toEqual(before);
+        if (outcome === "checkout changed") state({ cwd: join(repo, "other") });
+        return launch;
+      },
+    });
+    if (outcome !== "executable missing") {
+      const probe = JSON.parse(readFileSync(probePath, "utf8"));
+      expect(probe.cwd).toBe(repo);
+      expect(probe.identity).toEqual([null, null]);
+      expect(probe.args.slice(-8)).toEqual(["--print", "--input-format", "stream-json", "--output-format", "stream-json",
+        "--verbose", "--include-hook-events", "--no-session-persistence"]);
+    }
+    if (outcome === "ready") {
+      expect(result).toMatchObject({ relaunched: true });
+      expect(sends()).toEqual([host === "pi" ? "/quit" : "/exit", `sh ${relaunchPath()}`, prompt(handoff)]);
+      expect(readSeatSession({ seat: "advisor", repository: basename(dirname(seatDirectory)) })).toMatchObject({
+        host: "claude", transcriptPath: join(home, "relaunched.jsonl"),
+      });
+      expect(readFileSync(relaunchPath(), "utf8")).toContain(`cd ${repo} && exec `);
+    } else {
+      expect(result).toEqual({ error: outcome === "checkout changed" ? "seat_reset_session_unconfirmed" : "seat_reset_destination_unavailable",
+        outcome: "nothing_sent" });
+      expect(sends()).toEqual([]);
+      expect(readdirSync(seatDirectory).some(name => name.startsWith("claim-"))).toBe(false);
+      expect(log().at(-1)?.detail).toContain(outcome === "executable missing" ? "Claude Code" : outcome === "checkout changed"
+        ? "no matching SessionStart" : "did not confirm the repo-harness SessionStart integration");
+    }
+  })());
+
   test("a reset from /tmp uses the requesting seat checkout to compare the effective model (#2633, #3279)", withReset(async ({ home, handoff, reset, state, sends, log, relaunchPath }) => {
     const dir = dirname(handoff);
     // Each fixture run records a distinct request and a session older than that request.
@@ -2645,7 +2709,7 @@ else require("node:readline").createInterface({ input: process.stdin }).on("line
     const capture = (minutesAgo: number) => writeFileSync(quota, JSON.stringify({ observed_at: new Date(Date.now() - minutesAgo * 60_000).toISOString(), rate_limits: {
       seven_day: { used_percentage: 10, resets_at: Math.floor(Date.now() / 1000) + 3600 } } }));
     const resolveLaunch: SeatResetOptions["resolveLaunch"] = identity => seatResetTarget(identity, env);
-    const relaunch: SeatResetOptions["relaunch"] = (identity, cwd) => seatResetLaunch(identity, env, cwd);
+    const relaunch: SeatResetOptions["relaunch"] = (identity, cwd, crossRuntime) => seatResetLaunch(identity, env, cwd, crossRuntime);
     state({ cwd: repo });
     capture(0);
     const cleared = { requester: "t5", seat: "advisor", relaunched: false, logErrors: [] };
