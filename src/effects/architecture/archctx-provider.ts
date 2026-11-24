@@ -6,7 +6,8 @@ import { userInfo } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { ARCHCONTEXT_NODE_RANGE, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_SCHEMA_VERSION, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_UPGRADE_COMMAND, ERROR_CATALOG, PROJECTION_MANIFEST_UPGRADE_REQUIRED, failureIssues, architectureDocsProjectionCompatibilityIssues, PROJECTION_REQUEST_SCHEMA_VERSION, digestJson, type ArchContextError, type ArchctxCapabilitiesV1, type ArchitectureDebtDeltaReportV1, type ArchitectureDebtReportV1, type DocsAnchorsReportV1, type Json, type ProjectionApplyReadbackResultV2, type ProjectionExpectedSnapshotV1, type ProjectionMode, type ProjectionRequestV1, type ProjectionResultV3 } from 'archctx-contracts';
+import { ARCHCONTEXT_NODE_RANGE, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_SCHEMA_VERSION, ARCHITECTURE_DOCS_PROJECTION_MANIFEST_UPGRADE_COMMAND, ERROR_CATALOG, PROJECTION_MANIFEST_UPGRADE_REQUIRED, failureIssues, architectureDocsProjectionCompatibilityIssues, PROJECTION_REQUEST_SCHEMA_VERSION, digestJson, validateJsonSchema, type ArchContextError, type ArchctxCapabilitiesV1, type ArchitectureDebtDeltaReportV1, type ArchitectureDebtReportV1, type DocsAnchorsReportV1, type Json, type ProjectionApplyReadbackResultV2, type ProjectionExpectedSnapshotV1, type ProjectionMode, type ProjectionRequestV1, type ProjectionResultV3 } from 'archctx-contracts';
+import indexSeedSchema from 'archctx-contracts/schemas/runtime/index-seed.schema.json';
 import { isRecord } from '../../core/evidence/is-record';
 import { readWorkflowPolicyDocument } from '../state/resolve-effective-state';
 import { POLICY_ABSENT, isPolicyObject, policyValue } from '../../core/workflow/policy-schema';
@@ -15,7 +16,7 @@ import { selectCompatibleNode } from '../runtime/node-runtime';
 import { runProcess } from '../process-runner';
 import type { CapabilityOwnership } from '../../core/capabilities/registry';
 import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError, assertArchctxVersion, assertProjectionApplyReadbackResult, assertProjectionResult, decodeArchitectureDebtDelta, decodeArchitectureDebtReport, decodeDocsAnchorsReport, readArchitectureProjectionPolicy } from '../../core/architecture/projection';
-import type { ArchctxProcessResult, ArchctxProviderOptions, ResolvedArchctxPackage, ArchitectureProjectionReadinessV1 } from '../../core/architecture/contracts';
+import type { ArchctxProcessResult, ArchctxProviderOptions, ResolvedArchctxPackage, ArchitectureProjectionPolicy, ArchitectureProjectionReadinessV1 } from '../../core/architecture/contracts';
 import { gitExecFileSync } from '../git/runner';
 
 const ARCHCTX_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -35,7 +36,6 @@ const DEFAULT_RUNNER = (binary: string, args: readonly string[], options: { cwd:
 };
 
 const CODEGRAPH_INIT_ARGS = ['init', '-y', '.'] as const;
-const CODEGRAPH_SEED_RETRY_DELAYS_MS = [250, 750] as const;
 
 function capabilityAuthorityReady(repoRoot: string): boolean {
   return existsSync(join(repoRoot, '.archcontext', 'model', 'nodes'));
@@ -254,7 +254,7 @@ function codeFactsFixCommand(state: DoctorCodeFacts['state']): string {
   return state === 'index-missing' ? `codegraph ${CODEGRAPH_INIT_ARGS.join(' ')}` : 'codegraph index .';
 }
 
-/** Decode the code facts contract from archctx@0.9.1 doctor for both CLI callers. */
+/** Decode the repository code-facts union emitted by doctor. */
 function readArchitectureCodeFacts(client: ArchctxClient, maximumMs: number): DoctorCodeFacts {
   const value = client.json(['doctor', '--json'], maximumMs);
   const facts = isRecord(value) && isRecord(value.data) ? value.data.codeFacts : null;
@@ -595,31 +595,15 @@ function hasPrivateCodeGraphIndex(directory: string): boolean {
     && lstatSync(join(directory, 'codegraph.db'), { throwIfNoEntry: false })?.isFile() === true;
 }
 
-function seedRetryLoop(
-  worktreeRoot: string,
-  requiredVersion: string,
-  timeoutMs: number,
-  options: ArchctxProviderOptions,
-  onFailure: (error: unknown) => void,
-): boolean {
-  const indexDirectory = join(worktreeRoot, '.codegraph');
-  // All seed attempts share the original command deadline. Only an active
-  // first publisher can turn a missing base into an available one shortly.
-  const seedDeadline = Date.now() + timeoutMs;
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      new ArchctxClient(worktreeRoot, requiredVersion, { ...options, deadlineMs: seedDeadline }).data(['sync', '--json'], timeoutMs);
-      return hasPrivateCodeGraphIndex(indexDirectory);
-    } catch (error) {
-      const delay = CODEGRAPH_SEED_RETRY_DELAYS_MS[attempt];
-      if (!(error instanceof ArchctxClientError && error.code === 'AC_CODE_FACTS_UNAVAILABLE'
-        && error.reasonCode === 'index-base-building' && error.retryable === true)
-        || delay === undefined || Date.now() + delay >= seedDeadline) {
-        onFailure(error);
-        return false;
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
-    }
+function seedCodeGraphIndex(root: string, role: 'primary' | 'linked', options: ArchctxProviderOptions, policy: ArchitectureProjectionPolicy): void {
+  const client = new ArchctxClient(root, policy.requiredVersion, options);
+  const envelope = client.json(['index', 'seed', '--timeout-ms', String(policy.timeoutMs), '--json'], policy.timeoutMs);
+  const data = isRecord(envelope) ? envelope.data : undefined;
+  if (!isRecord(envelope) || envelope.requestId !== 'index.seed' || !isRecord(data)
+    || !validateJsonSchema(indexSeedSchema as Parameters<typeof validateJsonSchema>[0], data as Json).valid
+    || data.worktreeRole !== role || (data.mode === 'primary-refresh') !== (role === 'primary')
+    || !hasPrivateCodeGraphIndex(join(root, '.codegraph'))) {
+    throw new Error('archctx index seed did not prove a private CodeGraph index for this checkout');
   }
 }
 
@@ -629,27 +613,20 @@ export function bootstrapWorktreeCodeGraph(primaryRoot: string, worktreeRoot: st
   delete env.CODEGRAPH_DIR;
   const policy = readArchitectureProjectionPolicy({ architecture: DEFAULT_GLOBAL_ARCHITECTURE });
   const indexDirectory = join(worktreeRoot, '.codegraph');
-
-  if (process.platform !== 'win32') {
-    // Start uses the upstream tip for the new branch. Publish the actual primary
-    // HEAD and let archctx sync the private copy against the worktree sources.
-    if (hasPrivateCodeGraphIndex(join(primaryRoot, '.codegraph'))) {
-      try {
-        const data = new ArchctxClient(primaryRoot, policy.requiredVersion, { env }).data(['sync', '--json'], policy.timeoutMs);
-        if (isRecord(data) && (data.codeGraphBase === 'failed' || data.codeGraphBase === 'skipped-unproven')) {
-          console.error(`[ContractWorktree] CodeGraph base refresh: ${data.codeGraphBase}`);
-        }
-      } catch (error) {
-        reportBootstrapSyncFailure('CodeGraph base refresh', error);
-      }
-    }
-    if (seedRetryLoop(worktreeRoot, policy.requiredVersion, policy.timeoutMs, { env, policy }, (error) => reportBootstrapSyncFailure('CodeGraph shared-base seed', error))) {
-      return;
+  if (hasPrivateCodeGraphIndex(join(primaryRoot, '.codegraph'))) {
+    try { seedCodeGraphIndex(primaryRoot, 'primary', { env }, policy); }
+    catch (error) {
+      const reason = error instanceof ArchctxClientError ? error.reasonCode ?? error.code : '';
+      console.error(`[ContractWorktree] CodeGraph base refresh did not complete${/^[a-zA-Z0-9_-]+$/.test(reason) ? ` (${reason})` : ''}`);
     }
   }
+  try {
+    seedCodeGraphIndex(worktreeRoot, 'linked', { env }, policy);
+    return;
+  } catch (error) {
+    if (!(error instanceof ArchctxClientError && error.code === 'AC_CODE_FACTS_UNAVAILABLE' && error.reasonCode === 'index-missing')) throw error;
+  }
 
-  // Init can write the ignore file and SQLite sidecars. Preserve an occupied
-  // directory, including an index that appeared during an unsuccessful sync.
   const index = lstatSync(indexDirectory, { throwIfNoEntry: false });
   if (index && (!index.isDirectory() || readdirSync(indexDirectory).length > 0)) {
     throw new Error('CodeGraph bootstrap could not verify the worktree index. Inspect .codegraph before running codegraph init.');
@@ -657,11 +634,6 @@ export function bootstrapWorktreeCodeGraph(primaryRoot: string, worktreeRoot: st
   console.error('[ContractWorktree] Running CodeGraph init in the worktree');
   indexPackageLocalCodeGraph(worktreeRoot, { env: { ...env, CODEGRAPH_DIR: '.codegraph' }, policy });
   if (!hasPrivateCodeGraphIndex(indexDirectory)) throw new Error('codegraph init did not create a worktree index');
-}
-
-function reportBootstrapSyncFailure(step: string, error: unknown): void {
-  const reason = error instanceof ArchctxClientError ? error.reasonCode ?? error.code : '';
-  console.error(`[ContractWorktree] ${step} did not complete${/^[a-zA-Z0-9_-]+$/.test(reason) ? ` (${reason})` : ''}`);
 }
 
 /**

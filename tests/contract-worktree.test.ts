@@ -9,7 +9,6 @@ import {
   utimesSync,
   readFileSync,
   realpathSync,
-  renameSync,
   rmSync,
   writeFileSync
 } from "fs";
@@ -29,8 +28,6 @@ import { indexPackageLocalCodeGraph, resolveCompatibleNodeRuntime, resolvePackag
 import { ARCHCTX_REQUIRED_VERSION } from '../src/core/architecture/projection';
 import { shellQuote } from '../src/core/shell-quote';
 import { productVersionManifest } from 'archctx-contracts';
-import { spawnSync } from 'node:child_process';
-import { CleanRoomDaemon } from '../scripts/lib/axr5-clean-room-runtime';
 
 setDefaultTimeout(30000);
 
@@ -549,7 +546,7 @@ exec ${shellQuote(realGit)} "$@"
     }
   }, 60000);
 
-  const codeGraphCases = ['seeded', 'retry-ready', 'retry-exhausted', 'no-base', 'not-opted-in', 'not-selected', 'unreadable', 'init-failed', 'occupied'] as const;
+  const codeGraphCases = ['seeded', 'no-base', 'not-opted-in', 'not-selected', 'unreadable', 'init-failed', 'occupied'] as const;
   for (const scenario of codeGraphCases) {
     test.skipIf(process.platform === 'win32')(`rh worktrees start CodeGraph bootstrap: ${scenario}`, () => {
       const workspace = tmpWorkspace('shared-codegraph-start');
@@ -559,14 +556,11 @@ exec ${shellQuote(realGit)} "$@"
       const log = join(workspace, 'calls.log');
       const node = resolveCompatibleNodeRuntime(process.env);
       const archctx = resolvePackageLocalArchctx().binaryPath;
-      const env = { HOME: home, DO_NOT_TRACK: '1', CODEGRAPH_NO_DOWNLOAD: '1' };
+      const env = { HOME: home, BUN_INSTALL: join(workspace, 'bun'), ARCHCONTEXT_STATE_DIR: join(workspace, 'state'), DO_NOT_TRACK: '1', CODEGRAPH_NO_DOWNLOAD: '1' };
       const arch = (cwd: string, args: string[]) => run(node, [archctx, ...args, '--json'], cwd, env);
       const baseDir = join(primary, '.git', 'archcontext', 'codegraph', productVersionManifest().runtime.codeGraph.requiredVersion);
       const pointer = join(baseDir, 'current.json');
-      const hiddenPointer = join(workspace, 'published-pointer.json');
-      const firstSeed = join(workspace, 'first-seed.json');
-      const needsBase = scenario === 'seeded' || scenario === 'retry-ready';
-      const busy = scenario === 'retry-ready' || scenario === 'retry-exhausted';
+      const needsBase = scenario === 'seeded';
       mkdirSync(primary);
       mkdirSync(home);
       try {
@@ -582,17 +576,11 @@ exec ${shellQuote(realGit)} "$@"
             env: { ...process.env, ...env },
             policy: { provider: 'archctx', requiredVersion: ARCHCTX_REQUIRED_VERSION, applyMode: 'disabled', timeoutMs: 120_000 },
           });
-          const published = arch(primary, ['sync']);
+          const published = arch(primary, ['index', 'seed']);
           expect(published.status, published.stderr || published.stdout).toBe(0);
-          expect(JSON.parse(published.stdout).data.codeGraphBase).toBe('published');
-          if (scenario === 'seeded') {
-            writeFileSync(join(primary, 'index.ts'), 'export const refreshedSymbol = true;\n');
-            commitAll(primary, 'advance the primary checkout');
-          } else renameSync(pointer, hiddenPointer);
-        }
-        if (busy) {
-          mkdirSync(baseDir, { recursive: true });
-          writeFileSync(join(baseDir, 'refresh.lock'), `${process.pid}\n`, { flag: 'wx' });
+          expect(JSON.parse(published.stdout).data).toMatchObject({ mode: 'primary-refresh', copiedFiles: 1 });
+          writeFileSync(join(primary, 'index.ts'), 'export const refreshedSymbol = true;\n');
+          commitAll(primary, 'advance the primary checkout');
         }
         const primaryHead = run('git', ['rev-parse', 'HEAD'], primary).stdout.trim();
         addSelfOrigin(primary);
@@ -607,17 +595,8 @@ exec ${shellQuote(realGit)} "$@"
         writeFileSync(observedNode, [
           '#!/bin/sh',
           'case "${1##*/}:${2:-}" in',
-          `  archctx.mjs:sync|npm-shim.js:init) printf '%s %s\\n' "$2" "$(pwd -P)" >> ${shellQuote(log)} ;;`,
+          `  archctx.mjs:index|npm-shim.js:init) printf '%s %s\\n' "$2" "$(pwd -P)" >> ${shellQuote(log)} ;;`,
           'esac',
-          ...(scenario === 'retry-ready' ? [
-            `if [ "$2" = sync ] && [ "$(pwd -P)" = ${shellQuote(linked)} ] && [ -f ${shellQuote(hiddenPointer)} ]; then`,
-            `  ${shellQuote(node)} "$@" > ${shellQuote(firstSeed)}`,
-            '  result=$?',
-            `  mv ${shellQuote(hiddenPointer)} ${shellQuote(pointer)}`,
-            `  cat ${shellQuote(firstSeed)}`,
-            '  exit "$result"',
-            'fi',
-          ] : []),
           ...(scenario === 'init-failed' ? ['if [ "$2" = init ]; then head -c 5000 /dev/zero | tr "\\000" x >&2; exit 1; fi'] : []),
           `exec ${shellQuote(node)} "$@"`,
           '',
@@ -631,12 +610,8 @@ exec ${shellQuote(realGit)} "$@"
         const calls = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : [];
         const db = '.codegraph/codegraph.db';
         switch (scenario) {
-          case 'seeded':
-          case 'retry-ready': {
-            expect(calls).toEqual([`sync ${primary}`, `sync ${linked}`, ...(scenario === 'retry-ready' ? [`sync ${linked}`] : [])]);
-            if (scenario === 'retry-ready') {
-              expect(JSON.parse(readFileSync(firstSeed, 'utf8')).error).toMatchObject({ reasonCode: 'index-base-building', retryable: true });
-            }
+          case 'seeded': {
+            expect(calls).toEqual([`index ${primary}`, `index ${linked}`]);
             const seeded = lstatSync(join(linked, db));
             expect(seeded.isFile()).toBe(true);
             expect(seeded.ino).not.toBe(lstatSync(join(primary, db)).ino);
@@ -646,15 +621,9 @@ exec ${shellQuote(realGit)} "$@"
             expect(JSON.parse(readFileSync(pointer, 'utf8')).headSha).toBe(primaryHead);
             break;
           }
-          case 'retry-exhausted':
-            expect(calls).toEqual([`sync ${linked}`, `sync ${linked}`, `sync ${linked}`, `init ${linked}`]);
-            expect(started.stderr).toContain('(index-base-building)');
-            expect(existsSync(pointer)).toBe(false);
-            expect(lstatSync(join(linked, db)).isFile()).toBe(true);
-            break;
           case 'no-base':
           case 'init-failed':
-            expect(calls).toEqual([`sync ${linked}`, `init ${linked}`]);
+            expect(calls).toEqual([`index ${linked}`, `init ${linked}`]);
             expect(existsSync(join(linked, db))).toBe(scenario === 'no-base');
             expect(existsSync(join(primary, db))).toBe(false);
             if (scenario === 'init-failed') {
@@ -663,7 +632,7 @@ exec ${shellQuote(realGit)} "$@"
             }
             break;
           case 'occupied':
-            expect(calls).toEqual([`sync ${linked}`]);
+            expect(calls).toEqual([`index ${linked}`]);
             expect(readFileSync(join(linked, '.codegraph/user.txt'), 'utf8')).toBe('keep this file');
             break;
           default:
@@ -674,17 +643,6 @@ exec ${shellQuote(realGit)} "$@"
             if (scenario === 'unreadable') expect(started.stderr).toContain('the install selection cannot be read');
         }
       } finally {
-        for (const cwd of [linked, primary]) {
-          if (!existsSync(cwd) || (cwd === primary && !needsBase) || ['not-opted-in', 'not-selected', 'unreadable'].includes(scenario)) continue;
-          const status = arch(cwd, ['daemon', 'status']);
-          expect(status.status, status.stderr).toBe(0);
-          const state = JSON.parse(status.stdout).data;
-          expect(state.lockOwnerPid).toBeUndefined();
-          if (!state.running) continue;
-          const daemon = new CleanRoomDaemon((binary, args, options) => spawnSync(node, [binary, ...args], options));
-          daemon.arm(archctx, cwd, { ...process.env, ...env });
-          daemon.stop();
-        }
         rmSync(workspace, { recursive: true, force: true });
       }
     }, 60_000);
