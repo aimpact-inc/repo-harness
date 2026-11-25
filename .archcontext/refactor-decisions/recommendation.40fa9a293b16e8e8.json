@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.40fa9a293b16e8e8",
+  "fingerprint": "sha256:6a12e86be66321c66ee8f796e38a5c1a900b4723fdba238b5c2b160860a0a17c",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "pair:component.acceptance-review.primary|component.publication.primary-effects",
+    "subjectSelectorId": "subject.repository.33cc3f16e03c2d61"
+  },
+  "affectedNodeIds": [
+    "component.acceptance-review.primary",
+    "component.publication.primary-effects"
+  ],
+  "affectedNodeCount": 2,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "backwardEdgeCount": 1,
+    "forwardEdgeCount": 1,
+    "thinDirectionEdgeCount": 1,
+    "totalEdgeCount": 2
+  },
+  "reason": "Resolved in #3507",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T09:14:09.000Z",
+  "provenance": {
+    "headSha": "7daa50ae5d3dc9bd922f12efcc2f81a33063c313",
+    "assessmentDigest": "sha256:817c4f6abe8c8fcccddece870076dc84cff7da87d8d55c24c4d48ecca27156e1",
+    "baselineSnapshotDigest": "sha256:718cf88335ccc76691fdb27347c858087366fa02ca6dbc1a18fbb1b33ed15510"
+  },
+  "snapshotDigest": "sha256:718cf88335ccc76691fdb27347c858087366fa02ca6dbc1a18fbb1b33ed15510",
+  "evidenceDigest": "sha256:817c4f6abe8c8fcccddece870076dc84cff7da87d8d55c24c4d48ecca27156e1",
+  "resolutionDigest": "sha256:ce5555846d65a90c35ab1c2533508a064cc0d3bbd0728d0e45e45cb4b48cee3b",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.pairThinDirectionEdgeCount",
+      "subjectSelectorId": "subject.repository.33cc3f16e03c2d61",
+      "nodeId": null,
+      "memberNodeIds": [
+        "component.acceptance-review.primary",
+        "component.publication.primary-effects"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.ad78b6b7847def76"
+    }
+  ]
+}
