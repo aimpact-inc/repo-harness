@@ -5,7 +5,7 @@ import { delimiter, join } from 'node:path';
 import { DispatchError, bundleRouteClass, planDispatch, type DispatchPlanV1 } from '../src/core/board/dispatch';
 import { WORKER_AUTHORITY, executeDispatch, runDispatch, type DispatchPorts } from '../src/effects/board/dispatch';
 import { withSeatLine } from '../src/core/board/seat-line';
-import { HerdrCoreError, type HerdrAppTab, type HerdrSeatPlacementCommand } from '../src/effects/terminal/herdr-core';
+import { HerdrCoreError, seatLoginShell, type HerdrAppTab, type HerdrSeatPlacement } from '../src/effects/terminal/herdr-core';
 import type { SeatAccountQuotas } from '../src/core/board/seat-routing';
 import { emptySeatPoolProbe, seatModelBlock, type SeatPoolProbe } from '../src/core/board/seat-pool';
 import { DEFAULT_SEATS_CONFIG, NATIVE_SEATS_PRESET } from '../src/core/board/seats-settings';
@@ -211,7 +211,7 @@ test('a unit is its open members: a closed member does not stop it and gets no c
     expect([reasons(plan), plan.units]).toEqual([['101:dispatch', '102:closed'], [[101]]]);
     const bodies: string[] = [];
     const tasks: string[] = [];
-    const run = ports({ comment: (_issue, body) => { bodies.push(body); return 'claim'; }, placePane: (_cmd, args) => { tasks.push(String(args.task)); } });
+    const run = ports({ comment: (_issue, body) => { bodies.push(body); return 'claim'; }, placePane: placement => { if (placement.command === 'tab.new') tasks.push(String(placement.args.task)); } });
     expect((await executeDispatch(plan, context, run.base)).map(entry => entry.issue)).toEqual([101]);
     expect(bodies).toHaveLength(1);
     expect(bodies[0]).not.toContain('Issues:');
@@ -225,7 +225,7 @@ function ports(overrides: Partial<DispatchPorts> = {}) {
     startWorktree: issueNumber => { calls.push(`worktree ${issueNumber}`); return { path: `/tmp/wt-${issueNumber}`, branch: `feat/${issueNumber}` }; },
     comment: (issueNumber, body) => { calls.push(`comment ${issueNumber}: ${body.split('\n')[0]} ${body.split('\n').find(line => line.startsWith('Status:'))}`); return `https://example.test/claim-${issueNumber}`; },
     listSpaceTabs: () => [],
-    placePane: (_command, args) => { calls.push(`tab ${String(args.folder)}`); },
+    placePane: placement => { calls.push(`tab ${placement.command === 'tab.new' ? String(placement.args.folder) : placement.folder}`); },
     launch: async () => ({ argv: ['agent'], tab: 'tab-name', runtime: 'claude' }),
     ...overrides,
   };
@@ -303,7 +303,7 @@ test('coordinator ties use comment IDs and a handoff selects the successor', () 
 
 test('the packet carries the worker Authority line, and templates.md quotes the same text', async () => {
   const tasks: string[] = [];
-  const run = ports({ placePane: (_cmd, args) => { tasks.push(String(args.task)); } });
+  const run = ports({ placePane: placement => { if (placement.command === 'tab.new') tasks.push(String(placement.args.task)); } });
   await executeDispatch(planOf(['route:important_deep']), context, run.base);
   expect(tasks).toHaveLength(1);
   expect(tasks[0]).toContain(`Authority: ${WORKER_AUTHORITY}`);
@@ -339,7 +339,7 @@ test('the plan starts one worktree and one tab with a bundle claim on each issue
   const bodies: string[] = [];
   const tasks: string[] = [];
   const run = ports({ comment: (issueNumber, body) => { bodies.push(body); run.calls.push(`comment ${issueNumber}`); return `https://example.test/claim-${issueNumber}`; },
-    placePane: (_cmd, args) => { tasks.push(String(args.task)); run.calls.push(`tab ${String(args.folder)}`); } });
+    placePane: placement => { if (placement.command === 'tab.new') { tasks.push(String(placement.args.task)); run.calls.push(`tab ${String(placement.args.folder)}`); } } });
   // Default dispatch: the unit [1, 3] and the unit [5] take the two seats; the held unit [2, 4] starts nothing and throws nothing.
   const started = await executeDispatch(bundlePlan(), context, run.base);
   expect(run.calls).toEqual(['worktree 1', 'comment 1', 'comment 3', 'tab /tmp/wt-1', 'worktree 5', 'comment 5', 'tab /tmp/wt-5']);
@@ -358,7 +358,7 @@ test('executeDispatch passes -i <task> in argv and omits task when launching an 
   const tabs: Record<string, unknown>[] = [];
   const run = ports({
     launch: async () => ({ argv: ['agy', '--model', 'gemini-4-neon-high'], tab: '#1', runtime: 'agy' }),
-    placePane: (_cmd, args) => { tabs.push({ ...args }); },
+    placePane: placement => { if (placement.command === 'tab.new') tabs.push({ ...placement.args }); },
   });
   await executeDispatch(planOf(['route:important_deep']), context, run.base);
   expect(tabs).toHaveLength(1);
@@ -367,49 +367,45 @@ test('executeDispatch passes -i <task> in argv and omits task when launching an 
   expect((tabs[0]!.argv as string[])[4]).toContain('Task: issue #1 ');
 });
 
-test('executeDispatch splits right into an existing <3-pane issue tab, overflows to <base> 2 at 3 panes, and preserves fail-closed pane.split semantics', async () => {
+test('executeDispatch joins an existing <3-pane issue tab via hc.run with worktree cwd, overflows to <base> 2 at 3 panes, and preserves fail-closed semantics', async () => {
   const tab = (id: string, name: string, panes: readonly [string, string][]): HerdrAppTab => ({
     id, name, active: false, paneCount: panes.length,
     terminals: panes.map(([terminal, pane]) => ({ terminal, pane, name: null, status: null, app: null })),
   });
-  // Existing 2-pane #1 tab -> pane.split right of rightmost pane p2 with cd injection and -- <task>.
-  const splitPlaced: { command: HerdrSeatPlacementCommand; args: Readonly<Record<string, unknown>> }[] = [];
-  const labeledArgv = ['/bin/sh', '-c', 'export PATH="${PATH:+$PATH:}${2:+$2:}${0%/*}"; "$0" "$1" seats label worker-opus --repository-id 9 --issue 1 --parent 100 && shift 2 && exec "$@"', 'bun', 'cli.ts', '', 'claude'];
+  // Existing 2-pane #1 tab -> hc.run targeting tab tb1 in /tmp/wt-1 with -- <task> and no wrapper cd injection.
+  const splitPlaced: HerdrSeatPlacement[] = [];
+  const labeledArgv = seatLoginShell(['/bin/sh', '-c', 'export PATH="${PATH:+$PATH:}${2:+$2:}${0%/*}"; "$0" "$1" seats label worker-opus --repository-id 9 --issue 1 --parent 100 && shift 2 && exec "$@"', 'bun', 'cli.ts', '', 'claude']);
   const splitRun = ports({
     listSpaceTabs: () => [tab('tb1', '#1', [['t1', 'p1'], ['t2', 'p2']])],
     launch: async () => ({ argv: labeledArgv, tab: '#1', runtime: 'claude' }),
-    placePane: (command, args) => { splitPlaced.push({ command, args }); },
+    placePane: placement => { splitPlaced.push(placement); },
   });
   await executeDispatch(planOf(['route:important_deep']), context, splitRun.base);
   expect(splitPlaced).toHaveLength(1);
-  expect(splitPlaced[0]!.command).toBe('pane.split');
-  expect(splitPlaced[0]!.args).toMatchObject({ direction: 'right', pane: 'p2' });
-  expect(splitPlaced[0]!.args).not.toHaveProperty('folder');
-  expect(splitPlaced[0]!.args).not.toHaveProperty('task');
-  const splitArgv = splitPlaced[0]!.args.argv as string[];
-  expect(splitArgv[2]).toContain("&& shift 2 && cd -- '/tmp/wt-1' && exec \"$@\"");
+  expect(splitPlaced[0]).toMatchObject({ command: 'hc.run', space: 's1', tabId: 'tb1', pane: 'p2', folder: '/tmp/wt-1', tabName: '#1' });
+  const splitArgv = (splitPlaced[0] as Extract<HerdrSeatPlacement, { command: 'hc.run' }>).argv;
+  expect(splitArgv.join(' ')).not.toContain('cd --');
   expect(splitArgv.at(-2)).toBe('--');
   expect(splitArgv.at(-1)).toContain('Task: issue #1 ');
 
   // Full 3-pane #1 tab -> tab.new named '#1 2' and claim records '#1 2'.
-  const overflowPlaced: { command: HerdrSeatPlacementCommand; args: Readonly<Record<string, unknown>> }[] = [];
+  const overflowPlaced: HerdrSeatPlacement[] = [];
   const claimBodies: string[] = [];
   const overflowRun = ports({
     listSpaceTabs: () => [tab('tb1', '#1', [['t1', 'p1'], ['t2', 'p2'], ['t3', 'p3']])],
     comment: (_issue, body) => { claimBodies.push(body); return 'https://example.test/claim-1'; },
     launch: async () => ({ argv: ['agent'], tab: '#1', runtime: 'claude' }),
-    placePane: (command, args) => { overflowPlaced.push({ command, args }); },
+    placePane: placement => { overflowPlaced.push(placement); },
   });
   await executeDispatch(planOf(['route:important_deep']), context, overflowRun.base);
-  expect(overflowPlaced[0]!.command).toBe('tab.new');
-  expect(overflowPlaced[0]!.args).toMatchObject({ name: '#1 2', space: 's1', folder: '/tmp/wt-1' });
+  expect(overflowPlaced[0]).toMatchObject({ command: 'tab.new', args: { name: '#1 2', space: 's1', folder: '/tmp/wt-1' } });
   expect(claimBodies[0]).toContain('Agent: worker-opus, session #1 2');
 
-  // Fail-closed pane.split: HERDR_APP_NOT_SENT releases claim; timeout keeps claim as launch_unknown; listSpaceTabs failure posts no claim.
+  // Fail-closed split: HERDR_APP_NOT_SENT releases claim; timeout keeps claim as launch_unknown; listSpaceTabs failure posts no claim.
   const splitNotSent = ports({
     listSpaceTabs: () => [tab('tb1', '#1', [['t1', 'p1']])],
     launch: async () => ({ argv: ['agent'], tab: '#1', runtime: 'claude' }),
-    placePane: () => { throw new HerdrCoreError('herdr-app', 'invalid_address'); },
+    placePane: () => { throw new HerdrCoreError('hc', 'invalid_address'); },
   });
   await expect(executeDispatch(planOf(['route:important_deep']), context, splitNotSent.base)).rejects.toBeInstanceOf(HerdrCoreError);
   expect(splitNotSent.calls.at(-1)).toBe('comment 1: repo-harness issue claim status Status: released');
@@ -417,7 +413,7 @@ test('executeDispatch splits right into an existing <3-pane issue tab, overflows
   const splitUnknown = ports({
     listSpaceTabs: () => [tab('tb1', '#1', [['t1', 'p1']])],
     launch: async () => ({ argv: ['agent'], tab: '#1', runtime: 'claude' }),
-    placePane: () => { throw new HerdrCoreError('herdr-app', 'timeout'); },
+    placePane: () => { throw new HerdrCoreError('hc', 'timeout'); },
   });
   await expect(executeDispatch(planOf(['route:important_deep']), context, splitUnknown.base)).rejects.toThrow(/launch_unknown for #1/);
   expect(splitUnknown.calls.some(call => call.includes('released'))).toBe(false);

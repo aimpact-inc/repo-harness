@@ -9,8 +9,9 @@ import { isWorkerSeat, type SeatConfigV1, type SeatId } from '../../core/board/s
 import type { SeatRouteV1 } from '../../core/board/seat-routing';
 import { gitSpawnSync, withoutRepositorySelectingGitEnv } from '../git/runner';
 import {
-  HERDR_APP_NOT_SENT, HerdrCoreError, buildHerdrSeatPlacement, herdrAppDo, herdrAppSpaceTabs,
-  type HerdrAppTab, type HerdrSeatPlacementCommand,
+  HERDR_APP_NOT_SENT, HerdrCoreError, buildHerdrSeatPlacement, executeHerdrSeatPlacement, herdrAppSpaceTabs,
+  recordPendingTabPlacement, withPendingTabPlacements,
+  type HerdrAppTab, type HerdrSeatPlacement,
 } from '../terminal/herdr-core';
 import { AGY_REVIEW_LAUNCH_ENV, AGY_REVIEW_LAUNCH_LINE, AGY_REVIEW_PROMPT_OPTION, prepareAgyReviewStartup, waitForAgyReviewBinding, type AgyReviewBinding } from './agy-review-session';
 import { acquireExclusiveDirectoryLock, ExclusiveLockContentionError } from '../locking/exclusive-directory-lock';
@@ -54,8 +55,8 @@ export interface ReviewPorts {
   readonly seatTerminals: () => readonly BoardSeatTerminalReadV1[];
   /** Closing issue numbers per PR (from the board read), used to match the worker's `repo-harness.issue` label. */
   readonly closingIssues?: ReadonlyMap<number, readonly number[]>;
-  /** `herdr-app do tab.new` or explicit-ID `herdr-app do pane.split` with these arguments. */
-  readonly placePane: (command: HerdrSeatPlacementCommand, args: Readonly<Record<string, unknown>>) => Record<string, unknown> | void;
+  /** Place one seat via `herdr-app do tab.new` or `hc run --keep --no-parent --cwd` tab adoption. */
+  readonly placePane: (placement: HerdrSeatPlacement) => Record<string, unknown> | void;
   readonly launch: ReviewLaunch;
   readonly agy?: { readonly hc: string | null; readonly env: NodeJS.ProcessEnv };
 }
@@ -147,6 +148,7 @@ export async function executeReview(decisions: readonly ReviewDecisionV1[], cont
   const started: Array<ReviewResultV1['started'][number]> = [];
   const refused: Array<ReviewResultV1['refused'][number]> = [];
   if (context.dry_run) return { started, refused };
+  const pendingByTab = new Map<string, Set<string>>();
   const refuse = (pr: number, reason: string) => { refused.push({ pr, reason }); context.observe?.({ kind: 'refused', pr, reason }); };
   for (const decision of decisions) {
     if (decision.action !== 'start') continue;
@@ -188,8 +190,8 @@ export async function executeReview(decisions: readonly ReviewDecisionV1[], cont
     });
     for (const { start, argv, task, baseTabName, startup } of launches) {
       // Read the current space layout before posting the marker so a failing `herdr-app ls` posts no orphaned marker,
-      // and so a second seat in the same run sees the pane the first seat just created.
-      const tabs = ports.listSpaceTabs(context.space);
+      // and merge pending `hc.run` placements so a second seat in the same run counts the first before async adoption.
+      const tabs = withPendingTabPlacements(ports.listSpaceTabs(context.space), pendingByTab);
       const markerUrl = ports.comment(decision.pr, markerBody(decision, start));
       const release = () => ports.comment(decision.pr, `${REVIEW_START_STATUS_HEADER}\nClaim: ${markerUrl}\nStatus: released`);
       try {
@@ -202,7 +204,7 @@ export async function executeReview(decisions: readonly ReviewDecisionV1[], cont
           tabs,
           preferredTerminals,
         });
-        ports.placePane(placement.command, placement.args);
+        recordPendingTabPlacement(pendingByTab, placement, ports.placePane(placement));
       } catch (error) {
         if (!(error instanceof HerdrCoreError) || HERDR_APP_NOT_SENT.has(error.reason)) {
           release();
@@ -268,7 +270,7 @@ export async function runReview(input: ReviewInput): Promise<ReviewResultV1> {
       listSpaceTabs: space => herdrAppSpaceTabs(space),
       seatTerminals: () => seatTerminals,
       closingIssues,
-      placePane: (command, args) => herdrAppDo(command, args),
+      placePane: placement => executeHerdrSeatPlacement(placement),
       agy: { hc: Bun.which('hc'), env: process.env },
       launch: input.launch,
     }) };

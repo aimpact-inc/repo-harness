@@ -7,7 +7,7 @@ import { parseReviewPacket, planReview, reviewPacket, type ReviewDecisionV1, typ
 import { executeReview, matchingWorkerTerminals, withReviewLock, type ReviewPorts } from '../src/effects/board/review';
 import { AGY_REVIEW_LAUNCH_ENV, AGY_REVIEW_LAUNCH_LINE, AGY_REVIEW_PROMPT_OPTION } from '../src/effects/board/agy-review-session';
 import { effectiveGatekeeper, seatAccountQuotas } from '../src/core/board/seat-routing';
-import { HerdrCoreError, RH_LABEL, type HerdrAppTab, type HerdrSeatPlacementCommand } from '../src/effects/terminal/herdr-core';
+import { HerdrCoreError, RH_LABEL, seatLoginShell, type HerdrAppTab, type HerdrSeatPlacement } from '../src/effects/terminal/herdr-core';
 import type { BoardPullRequestV1, BoardSeatTerminalReadV1, BoardV1 } from '../src/core/board/board';
 import type { BoardCommentPageV1, BoardCommentV1, BoardPullRequestReadV1 } from '../src/core/board/source';
 import { parseAcceptanceRecord, renderAcceptanceDispositionComment } from '../src/core/board/protocol-comments';
@@ -144,7 +144,7 @@ function ports(overrides: Partial<ReviewPorts> = {}): ReviewPorts & { comments: 
     comment: (_pr, body) => { comments.push(body); return `https://example.test/c${comments.length}`; },
     listSpaceTabs: () => [],
     seatTerminals: () => [],
-    placePane: (_command, args) => { tabs.push(args); },
+    placePane: placement => { if (placement.command === 'tab.new') tabs.push(placement.args); },
     launch: async seat => ({ argv: ['agent'], tab: 'review', runtime: seat === 'reviewer' ? 'claude' : 'codex' }),
     ...overrides,
   };
@@ -221,7 +221,7 @@ console.log(JSON.stringify({ address, state: 'live', turn: 0, labels }));
   writeFileSync(agy, `#!/bin/sh\nprintf '%s\\n' "$${AGY_REVIEW_LAUNCH_ENV}"\n`, { mode: 0o700 });
   const tab = Promise.withResolvers<Readonly<Record<string, unknown>>>();
   const events: string[] = [];
-  const p = ports({ agy: { hc, env }, placePane: (_cmd, args) => { tab.resolve(args); }, launch: async (seat, labels, _cwd, route) => {
+  const p = ports({ agy: { hc, env }, placePane: placement => { if (placement.command === 'tab.new') tab.resolve(placement.args); }, launch: async (seat, labels, _cwd, route) => {
     expect(seat).toBe('gatekeeper');
     expect(route).toBe(gatekeeper);
     return { argv: labeledSeatArgv(seat, labels, [agy, '--agent', 'rh-gatekeeper-fallback'], env, 'new'), tab: 'review', runtime: 'agy' };
@@ -572,18 +572,18 @@ test('matchingWorkerTerminals orders live worker matches by closing issue, PR la
   expect(matchingWorkerTerminals({ terminals, issues: [], pr: '9999', cwd: '/tmp/wt-2479' })).toEqual(['t3']);
 });
 
-test('executeReview splits gatekeeper and reviewer right into the worker tab up to 3 panes, and falls back to PR#<pr> / PR#<pr> 2 when absent or full', async () => {
+test('executeReview joins the worker tab via hc.run in the PR worktree (even when the worker ran in the primary checkout), respects the 3-pane cap across pending adoptions, and falls back to PR#<pr> / PR#<pr> 2', async () => {
   const mkTab = (id: string, name: string, panes: readonly [string, string][]): HerdrAppTab => ({
     id, name, active: false, paneCount: panes.length,
     terminals: panes.map(([terminal, pane]) => ({ terminal, pane, name: null, status: null, app: null })),
   });
+  // Worker t10 was started in the primary checkout while the PR head lives in /tmp/wt-2479 (P1 trigger).
   const worker: BoardSeatTerminalReadV1 = {
     address: 't10', name: null, agent: 'pi', state: 'live', status: 'idle', status_kind: null, status_msg: null, status_ms: null,
-    turn: 0, cwd: '/tmp/wt-2479', where: 'repo / #2479', agent_pid: null, labels: { seat: 'worker-deep', issue: '2479', parent: '2457' },
+    turn: 0, cwd: '/repo/primary', where: 'repo / #2479', agent_pid: null, labels: { seat: 'worker-deep', issue: '2479', parent: '2457' },
   };
-  // High PR #2485 closing #2479: worker t10 is in #2479 [p1] -> gatekeeper splits right of p1 (p2), then reviewer splits right of p2 (p3).
   let tabsState: HerdrAppTab[] = [mkTab('tb1', '#2479', [['t10', 'p1']])];
-  const calls: { command: HerdrSeatPlacementCommand; args: Readonly<Record<string, unknown>> }[] = [];
+  const calls: HerdrSeatPlacement[] = [];
   let nextPane = 2;
   const p = ports({
     worktree: () => ({ path: '/tmp/wt-2479' }),
@@ -591,66 +591,85 @@ test('executeReview splits gatekeeper and reviewer right into the worker tab up 
     seatTerminals: () => [worker],
     closingIssues: new Map([[2485, [2479]]]),
     launch: async seat => ({
-      argv: ['/bin/sh', '-c', `export PATH="\${PATH:+$PATH:}"; "$0" "$1" seats label ${seat} --repository-id 1 --pr 2485 && shift 2 && exec "$@"`, 'bun', 'cli.ts', '', seat],
+      argv: seatLoginShell(['/bin/sh', '-c', `export PATH="\${PATH:+$PATH:}"; "$0" "$1" seats label ${seat} --repository-id 1 --pr 2485 && shift 2 && exec "$@"`, 'bun', 'cli.ts', '', seat]),
       tab: 'PR#2485', runtime: seat === 'reviewer' ? 'claude' : 'codex',
     }),
-    placePane: (command, args) => {
-      calls.push({ command, args });
-      if (command === 'pane.split') {
+    placePane: placement => {
+      calls.push(placement);
+      if (placement.command === 'hc.run') {
         const paneId = `p${nextPane++}`;
         const termId = `t${10 + nextPane}`;
-        tabsState = tabsState.map(t => t.terminals.some(term => term.pane === args.pane)
+        tabsState = tabsState.map(t => t.id === placement.tabId
           ? { ...t, paneCount: t.paneCount + 1, terminals: [...t.terminals, { terminal: termId, pane: paneId, name: null, status: null, app: null }] }
           : t);
+        return { space: placement.space, tab: placement.tabId, terminal: termId };
       }
+      return { tab: 'tb-new', terminal: 't99' };
     },
   });
   const pending = pr(2485, { closes: [2479], second_review: 'pending' });
   expect(await executeReview(plan([pending]), context, p)).toMatchObject({ started: [{ pr: 2485, seat: 'gatekeeper' }, { pr: 2485, seat: 'reviewer' }] });
-  expect(calls.map(c => [c.command, c.args.direction, c.args.pane])).toEqual([
-    ['pane.split', 'right', 'p1'],
-    ['pane.split', 'right', 'p2'],
+  expect(calls.map(c => c.command === 'hc.run' ? [c.command, c.space, c.tabId, c.folder] : [c.command])).toEqual([
+    ['hc.run', 's', 'tb1', '/tmp/wt-2479'],
+    ['hc.run', 's', 'tb1', '/tmp/wt-2479'],
   ]);
   for (const call of calls) {
-    expect(call.args).not.toHaveProperty('folder');
-    expect(call.args).not.toHaveProperty('task');
-    const argv = call.args.argv as string[];
-    expect(argv[2]).toContain("&& shift 2 && cd -- '/tmp/wt-2479' && exec \"$@\"");
+    expect(call.command).toBe('hc.run');
+    const argv = (call as Extract<HerdrSeatPlacement, { command: 'hc.run' }>).argv;
+    expect(argv.join(' ')).not.toContain('cd --');
     expect(argv.at(-2)).toBe('--');
     expect(parseReviewPacket(argv.at(-1)!)).toMatchObject({ pr: 2485 });
   }
 
-  // Worker tab full (3 panes) and existing PR#2485 also full (3 panes) -> opens tab.new named 'PR#2485 2', then second seat splits right into 'PR#2485 2'.
+  // Async adoption race: worker tab has 2 panes and herdr-app ls does not reflect the 3rd pane yet -> gatekeeper joins tb1 via hc.run, reviewer opens tab.new PR#2485 instead of overflowing to 4 panes.
+  const staleTwoPanes: HerdrAppTab[] = [mkTab('tb1', '#2479', [['t10', 'p1'], ['t11', 'p2']])];
+  const pendingCalls: HerdrSeatPlacement[] = [];
+  const pPending = ports({
+    worktree: () => ({ path: '/tmp/wt-2479' }),
+    listSpaceTabs: () => staleTwoPanes,
+    seatTerminals: () => [worker],
+    closingIssues: new Map([[2485, [2479]]]),
+    launch: async seat => ({ argv: [seat], tab: 'PR#2485', runtime: seat === 'reviewer' ? 'claude' : 'codex' }),
+    placePane: placement => {
+      pendingCalls.push(placement);
+      return placement.command === 'hc.run' ? { space: placement.space, tab: placement.tabId, terminal: 't20' } : { tab: 'tb-new', terminal: 't21' };
+    },
+  });
+  await executeReview(plan([pending]), context, pPending);
+  expect(pendingCalls[0]).toMatchObject({ command: 'hc.run', tabId: 'tb1', folder: '/tmp/wt-2479' });
+  expect(pendingCalls[1]).toMatchObject({ command: 'tab.new', args: { name: 'PR#2485', space: 's', folder: '/tmp/wt-2479' } });
+
+  // Worker tab full (3 panes) and existing PR#2485 also full (3 panes) -> opens tab.new named 'PR#2485 2', then second seat joins 'PR#2485 2' via hc.run.
   let overflowState: HerdrAppTab[] = [
     mkTab('tb1', '#2479', [['t10', 'p1'], ['t11', 'p2'], ['t12', 'p3']]),
     mkTab('tb2', 'PR#2485', [['t13', 'p4'], ['t14', 'p5'], ['t15', 'p6']]),
   ];
-  const overflowCalls: { command: HerdrSeatPlacementCommand; args: Readonly<Record<string, unknown>> }[] = [];
+  const overflowCalls: HerdrSeatPlacement[] = [];
   const pOverflow = ports({
     worktree: () => ({ path: '/tmp/wt-2479' }),
     listSpaceTabs: () => overflowState,
     seatTerminals: () => [worker],
     closingIssues: new Map([[2485, [2479]]]),
     launch: async seat => ({ argv: [seat], tab: 'PR#2485', runtime: seat === 'reviewer' ? 'claude' : 'codex' }),
-    placePane: (command, args) => {
-      overflowCalls.push({ command, args });
-      if (command === 'tab.new') {
-        overflowState = [...overflowState, mkTab('tb3', String(args.name), [['t16', 'p7']])];
+    placePane: placement => {
+      overflowCalls.push(placement);
+      if (placement.command === 'tab.new') {
+        overflowState = [...overflowState, mkTab('tb3', String(placement.args.name), [['t16', 'p7']])];
+        return { tab: 'tb3', terminal: 't16' };
       }
+      return { space: placement.space, tab: placement.tabId, terminal: 't17' };
     },
   });
   await executeReview(plan([pending]), context, pOverflow);
-  expect(overflowCalls[0]!.command).toBe('tab.new');
-  expect(overflowCalls[0]!.args).toMatchObject({ name: 'PR#2485 2', space: 's', folder: '/tmp/wt-2479' });
-  expect(overflowCalls[1]!.command).toBe('pane.split');
-  expect(overflowCalls[1]!.args).toMatchObject({ direction: 'right', pane: 'p7' });
+  expect(overflowCalls[0]).toMatchObject({ command: 'tab.new', args: { name: 'PR#2485 2', space: 's', folder: '/tmp/wt-2479' } });
+  expect(overflowCalls[1]).toMatchObject({ command: 'hc.run', space: 's', tabId: 'tb3', folder: '/tmp/wt-2479' });
 
-  // Fail-closed pane.split: HERDR_APP_NOT_SENT releases marker; timeout keeps marker as launch_unknown; listSpaceTabs failure writes no marker.
+  // Fail-closed split: HERDR_APP_NOT_SENT releases marker; timeout keeps marker as launch_unknown; listSpaceTabs failure writes no marker.
   const splitNotSent = ports({
     listSpaceTabs: () => [mkTab('tb1', '#2479', [['t10', 'p1']])],
     seatTerminals: () => [worker],
     closingIssues: new Map([[1, [2479]]]),
-    placePane: () => { throw new HerdrCoreError('herdr-app', 'invalid_address'); },
+    placePane: () => { throw new HerdrCoreError('hc', 'invalid_address'); },
   });
   await expect(executeReview(high, context, splitNotSent)).rejects.toBeInstanceOf(HerdrCoreError);
   expect(splitNotSent.comments).toHaveLength(2);
@@ -660,7 +679,7 @@ test('executeReview splits gatekeeper and reviewer right into the worker tab up 
     listSpaceTabs: () => [mkTab('tb1', '#2479', [['t10', 'p1']])],
     seatTerminals: () => [worker],
     closingIssues: new Map([[1, [2479]]]),
-    placePane: () => { throw new HerdrCoreError('herdr-app', 'timeout'); },
+    placePane: () => { throw new HerdrCoreError('hc', 'timeout'); },
   });
   await expect(executeReview(high, context, splitUnknown)).rejects.toThrow('launch_unknown');
   expect(splitUnknown.comments).toHaveLength(1);
@@ -670,7 +689,7 @@ test('executeReview splits gatekeeper and reviewer right into the worker tab up 
   expect(listFailed.comments).toEqual([]);
 });
 
-test.skipIf(process.platform === 'win32')('agy gatekeeper-fallback pane.split injects cd inside selfLabelingArgv and runs in the worktree directory', async () => {
+test.skipIf(process.platform === 'win32')('agy gatekeeper-fallback tab split targets the worktree cwd via hc.run and binds in the worktree directory', async () => {
   const gatekeeper = nativeGatekeeperRoute();
   const root = mkdtempSync(join(tmpdir(), 'rh-agy-split-'));
   const worktree = join(root, 'wt-2479');
@@ -684,10 +703,10 @@ const labels = Object.fromEntries(pairs.map(pair => [pair.slice(0, pair.indexOf(
 console.log(JSON.stringify({ address, state: 'live', turn: 0, labels }));
 `, { mode: 0o700 });
   writeFileSync(agy, '#!/bin/sh\npwd\n', { mode: 0o700 });
-  const split = Promise.withResolvers<{ command: HerdrSeatPlacementCommand; args: Readonly<Record<string, unknown>> }>();
+  const split = Promise.withResolvers<HerdrSeatPlacement>();
   const worker: BoardSeatTerminalReadV1 = {
     address: 't10', name: null, agent: 'pi', state: 'live', status: 'idle', status_kind: null, status_msg: null, status_ms: null,
-    turn: 0, cwd: worktree, where: null, agent_pid: null, labels: { seat: 'worker-deep', issue: '10' },
+    turn: 0, cwd: root, where: null, agent_pid: null, labels: { seat: 'worker-deep', issue: '10' },
   };
   const workerTab: HerdrAppTab = { id: 'tb1', name: '#10', active: true, paneCount: 1, terminals: [{ terminal: 't10', pane: 'p1', name: null, status: null, app: null }] };
   const p = ports({
@@ -696,7 +715,7 @@ console.log(JSON.stringify({ address, state: 'live', turn: 0, labels }));
     listSpaceTabs: () => [workerTab],
     seatTerminals: () => [worker],
     closingIssues: new Map([[1, [10]]]),
-    placePane: (command, args) => { split.resolve({ command, args }); },
+    placePane: placement => { split.resolve(placement); return { space: 's', tab: 'tb1', terminal: 't9' }; },
     launch: async (seat, labels) => ({
       argv: labeledSeatArgv(seat, labels, [agy, '--agent', 'rh-gatekeeper-fallback'], env, 'new'),
       tab: 'PR#1', runtime: 'agy',
@@ -705,10 +724,10 @@ console.log(JSON.stringify({ address, state: 'live', turn: 0, labels }));
   const run = executeReview(plan([pr(1)], page(), [], gatekeeper), { ...context, gatekeeper }, p);
   try {
     const placed = await Promise.race([split.promise, run.then(() => { throw new Error('finished without placing'); })]);
-    expect(placed.command).toBe('pane.split');
-    expect(placed.args).toMatchObject({ direction: 'right', pane: 'p1' });
-    const [shell, ...args] = placed.args.argv as [string, ...string[]];
-    const result = spawnSync(shell, args, { env, cwd: root, encoding: 'utf8' });
+    expect(placed).toMatchObject({ command: 'hc.run', space: 's', tabId: 'tb1', folder: worktree });
+    const [shell, ...args] = (placed as Extract<HerdrSeatPlacement, { command: 'hc.run' }>).argv;
+    expect(args.join(' ')).not.toContain('cd --');
+    const result = spawnSync(shell, args, { env, cwd: (placed as Extract<HerdrSeatPlacement, { command: 'hc.run' }>).folder, encoding: 'utf8' });
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout.trim()).toBe(realpathSync(worktree));
     expect(await run).toMatchObject({ started: [{ pr: 1, seat: 'gatekeeper' }], refused: [] });

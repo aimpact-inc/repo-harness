@@ -5,9 +5,10 @@ import { join } from 'path';
 import { tmpWorkspace } from '../helpers/repo-fixture';
 import {
   HERDR_APP_NOT_SENT, HerdrCoreError, MAX_PANES_PER_TAB, RH_LABEL, RH_NOTIFY_LABELS, RH_NOTIFY_RELAY,
-  buildHerdrSeatPlacement, hcEvents, hcGet, hcKill, hcLabel, hcList, hcListAsync, hcRead, hcRm, hcRun,
-  hcKeys, hcSend, hcServerStatusAsync, hcWait, herdrAppCommand, herdrAppDo, herdrAppList, herdrAppSpaceTabs,
-  injectSplitCwd, planHerdrPlacement, prepareSplitArgv, type HcLabels, type HcStreamItem, type HerdrAppTab,
+  buildHerdrSeatPlacement, executeHerdrSeatPlacement, hcEvents, hcGet, hcKill, hcLabel, hcList, hcListAsync,
+  hcRead, hcRm, hcRun, hcKeys, hcSend, hcServerStatusAsync, hcWait, herdrAppCommand, herdrAppDo,
+  herdrAppList, herdrAppSpaceTabs, planHerdrPlacement, prepareSplitArgv, recordPendingTabPlacement,
+  seatLoginShell, withPendingTabPlacements, type HcLabels, type HcStreamItem, type HerdrAppTab,
 } from '../../src/effects/terminal/herdr-core';
 import { NOTIFY_SECRET_KEYS } from '../../src/core/decision/notify-secret-keys';
 
@@ -321,36 +322,156 @@ test('planHerdrPlacement packs up to 3 panes via rightmost pane.split and suffix
     .toEqual({ action: 'tab.new', name: 'council 2' });
 });
 
-test.skipIf(process.platform === 'win32')('injectSplitCwd and prepareSplitArgv inject cd inside selfLabelingArgv and execute in the target directory with task', () => {
+test.skipIf(process.platform === 'win32')('prepareSplitArgv, buildHerdrSeatPlacement, executeHerdrSeatPlacement, and withPendingTabPlacements start existing-tab splits via hc run in the target cwd', () => {
   const root = tmpWorkspace('split-cwd'); roots.push(root);
   const worktree = join(root, "wt 'quoted' $HOME");
   mkdirSync(worktree, { recursive: true });
   const canonicalWorktree = realpathSync(worktree);
-  // Unwrapped argv wraps in /bin/sh -c with cd -- <quoted> && exec "$@" and passes -- <task> cleanly (even leading '-').
+  const shellEnv = { HOME: root, ZDOTDIR: root, PATH: '/usr/bin:/bin' };
+
+  // Unwrapped argv wraps in seatLoginShell with -- <task> (even leading '-') and runs in the process cwd without injecting cd.
   const probe = ['/bin/sh', '-c', 'printf "%s|%s|%s" "$(pwd)" "$1" "$2"', 'probe'];
-  const splitUnwrapped = prepareSplitArgv(probe, worktree, '-lead-dash prompt');
-  const runUnwrapped = spawnSync(splitUnwrapped[0]!, splitUnwrapped.slice(1), { cwd: root, encoding: 'utf8' });
+  const splitUnwrapped = prepareSplitArgv(probe, '-lead-dash prompt');
+  expect(splitUnwrapped[1]).toBe('-lic');
+  const runUnwrapped = spawnSync(splitUnwrapped[0], splitUnwrapped.slice(1), { cwd: worktree, env: shellEnv, encoding: 'utf8' });
   expect([runUnwrapped.status, runUnwrapped.stdout]).toEqual([0, `${canonicalWorktree}|--|-lead-dash prompt`]);
-  // Labeled argv injects cd inside the existing selfLabelingArgv /bin/sh -c script right before exec "$@".
+
+  // Already-wrapped seatLoginShell argv is not double-wrapped and forwards -- <task> cleanly.
   const fakeBun = join(root, 'fake-bun');
   writeFileSync(fakeBun, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-  const labeled = [
+  const labeled = seatLoginShell([
     '/bin/sh', '-c', 'export PATH="${PATH:+$PATH:}${2:+$2:}${0%/*}"; "$0" "$1" seats label worker --repository-id 1 --issue 42 && shift 2 && exec "$@"',
-    fakeBun, 'cli.ts', '', ...probe,
-  ];
-  const splitLabeled = prepareSplitArgv(labeled, worktree, 'Task: issue #42');
-  expect(splitLabeled[2]).toContain(`&& shift 2 && cd -- '${worktree.replaceAll("'", "'\\''")}' && exec "$@"`);
-  // Idempotent when called twice.
-  expect(injectSplitCwd(splitLabeled, worktree)).toEqual(splitLabeled);
-  const runLabeled = spawnSync(splitLabeled[0]!, splitLabeled.slice(1), { cwd: root, encoding: 'utf8' });
+    fakeBun, 'cli.ts', '/usr/bin', ...probe,
+  ]);
+  const splitLabeled = prepareSplitArgv(labeled, 'Task: issue #42');
+  expect(splitLabeled).toEqual([...labeled, '--', 'Task: issue #42']);
+  const runLabeled = spawnSync(splitLabeled[0], splitLabeled.slice(1), { cwd: worktree, env: shellEnv, encoding: 'utf8' });
   expect([runLabeled.status, runLabeled.stdout]).toEqual([0, `${canonicalWorktree}|--|Task: issue #42`]);
-  // buildHerdrSeatPlacement emits pane.split without folder/task fields when splitting, and tab.new with folder/task when creating a tab.
+
+  // buildHerdrSeatPlacement emits hc.run (with explicit folder, space, tabId) when joining a <3-pane tab, and tab.new for a new tab.
   const tabWithPane: HerdrAppTab = { id: 'tb1', name: '#42', active: true, paneCount: 1, terminals: [{ terminal: 't1', pane: 'p1', name: null, status: null, app: null }] };
   const splitPlacement = buildHerdrSeatPlacement({ space: 'sp1', folder: worktree, argv: labeled, task: 'Task: issue #42', baseTabName: '#42', tabs: [tabWithPane] });
-  expect(splitPlacement.command).toBe('pane.split');
-  expect(splitPlacement.args).toEqual({ direction: 'right', pane: 'p1', argv: splitLabeled });
+  expect(splitPlacement).toEqual({ command: 'hc.run', space: 'sp1', tabId: 'tb1', pane: 'p1', folder: worktree, machine: null, argv: splitLabeled, tabName: '#42' });
   const tabPlacement = buildHerdrSeatPlacement({ space: 'sp1', folder: worktree, argv: labeled, task: 'Task: issue #42', focus: false, baseTabName: '#42', tabs: [] });
   expect(tabPlacement).toEqual({ command: 'tab.new', tabName: '#42', args: { name: '#42', space: 'sp1', folder: worktree, argv: labeled, task: 'Task: issue #42', focus: false } });
+
+  // executeHerdrSeatPlacement runs hc run --bg --keep --no-parent --cwd <worktree> --label herdr.space=... --label herdr.tab=... for local splits.
+  const ok = fake('ok', { address: 't21', state: 'live', cwd: worktree });
+  expect(executeHerdrSeatPlacement(splitPlacement, { env: ok.env })).toEqual({ space: 'sp1', tab: 'tb1', terminal: 't21' });
+  expect(ok.argv()).toEqual([
+    'run', '--json', '--bg', '--keep', '--no-parent',
+    '--cwd', worktree, '--label', 'herdr.space=sp1', '--label', 'herdr.tab=tb1',
+    '--', ...splitLabeled,
+  ]);
+
+  // Remote tabs strip the <machine>/ prefix from herdr.space / herdr.tab labels and pass --on <machine>.
+  const remoteTab: HerdrAppTab = { id: 'mini-cf/tb9', name: 'council', active: true, paneCount: 1, machine: 'mini-cf', terminals: [{ terminal: 'mini-cf/t6j7', pane: 'mini-cf/p9', name: null, status: null, app: null }] };
+  const remotePlacement = buildHerdrSeatPlacement({ space: 'mini-cf/sp2', folder: '/srv/wt', argv: labeled, baseTabName: 'council', tabs: [remoteTab] });
+  expect(remotePlacement).toMatchObject({ command: 'hc.run', space: 'mini-cf/sp2', tabId: 'mini-cf/tb9', machine: 'mini-cf', folder: '/srv/wt' });
+  const remoteOk = fake('ok', { address: 'mini-cf/t7', state: 'live', cwd: '/srv/wt' });
+  expect(executeHerdrSeatPlacement(remotePlacement, { env: remoteOk.env })).toEqual({ space: 'mini-cf/sp2', tab: 'mini-cf/tb9', terminal: 'mini-cf/t7' });
+  expect(remoteOk.argv().slice(0, 13)).toEqual([
+    'run', '--json', '--bg', '--keep', '--no-parent', '--on', 'mini-cf',
+    '--cwd', '/srv/wt', '--label', 'herdr.space=sp2', '--label', 'herdr.tab=tb9',
+  ]);
+
+  // Validation and missing hc fail closed as HERDR_APP_NOT_SENT before spawning hc.
+  const notSentChecks = [
+    () => buildHerdrSeatPlacement({ space: 'sp1', folder: '', argv: labeled, baseTabName: '#42', tabs: [tabWithPane] }),
+    () => buildHerdrSeatPlacement({ space: 'sp1', folder: '/tmp/bad\0dir', argv: labeled, baseTabName: '#42', tabs: [tabWithPane] }),
+    () => executeHerdrSeatPlacement({ ...splitPlacement, space: 'bad space' } as typeof splitPlacement, { env: ok.env }),
+    () => executeHerdrSeatPlacement({ ...splitPlacement, machine: '--bad' } as typeof splitPlacement, { env: ok.env }),
+    () => executeHerdrSeatPlacement(splitPlacement, { env: { PATH: root } }),
+  ];
+  for (const call of notSentChecks) {
+    const err = failure(call);
+    expect([err.program, HERDR_APP_NOT_SENT.has(err.reason)]).toEqual(['hc', true]);
+  }
+
+  // withPendingTabPlacements increments paneCount until herdr-app ls reflects the adopted terminal, then stops double-counting.
+  const pending = new Map<string, Set<string>>();
+  recordPendingTabPlacement(pending, splitPlacement, { space: 'sp1', tab: 'tb1', terminal: 't21' });
+  const twoPaneTab: HerdrAppTab = { id: 'tb1', name: '#42', active: true, paneCount: 2, terminals: [
+    { terminal: 't1', pane: 'p1', name: null, status: null, app: null },
+    { terminal: 't2', pane: 'p2', name: null, status: null, app: null },
+  ] };
+  const mergedPending = withPendingTabPlacements([twoPaneTab], pending);
+  expect(mergedPending[0]!.paneCount).toBe(3);
+  expect(planHerdrPlacement({ tabs: mergedPending, baseTabName: '#42' })).toEqual({ action: 'tab.new', name: '#42 2' });
+  const adoptedTab: HerdrAppTab = { ...twoPaneTab, paneCount: 3, terminals: [...twoPaneTab.terminals, { terminal: 't21', pane: 'p3', name: null, status: null, app: null }] };
+  expect(withPendingTabPlacements([adoptedTab], pending)[0]!.paneCount).toBe(3);
+});
+
+test.skipIf(process.platform === 'win32' || Bun.which('hc') === null)('real hc: executeHerdrSeatPlacement starts an existing-tab split with hc get cwd equal to the requested worktree', () => {
+  const root = tmpWorkspace('hc-real-split'); roots.push(root);
+  const primary = join(root, 'primary');
+  const worktree = join(root, 'worktree');
+  const cfg = join(root, 'cfg');
+  const data = join(root, 'data');
+  const state = join(root, 'state');
+  const runtime = join(root, 'run');
+  for (const dir of [primary, worktree, cfg, data, state, runtime]) mkdirSync(dir, { recursive: true });
+  const env: NodeJS.ProcessEnv = {
+    HOME: root,
+    ZDOTDIR: root,
+    PATH: process.env.PATH ?? '/usr/bin:/bin',
+    HC_SOCKET: join(root, 'core.sock'),
+    HC_SESSION: `rh-split-test-${process.pid}-${Date.now()}`,
+    XDG_CONFIG_HOME: cfg,
+    XDG_DATA_HOME: data,
+    XDG_STATE_HOME: state,
+    XDG_RUNTIME_DIR: runtime,
+  };
+  try {
+    // Start a worker terminal in the primary checkout (the P1 trigger setup).
+    const parentRun = spawnSync('hc', [
+      'run', '--json', '--bg', '--keep', '--no-parent', '--cwd', primary,
+      '--label', 'herdr.space=sp1', '--label', 'herdr.tab=tb1',
+      '--', '/bin/sh', '-c', 'sleep 30',
+    ], { env, encoding: 'utf8' });
+    expect(parentRun.status, parentRun.stderr).toBe(0);
+    const parentAddr = (JSON.parse(parentRun.stdout) as { address: string }).address;
+
+    const pwdOut = join(root, 'pwd.txt');
+    const tidOut = join(root, 'tid.txt');
+    const workerTab: HerdrAppTab = {
+      id: 'tb1', name: '#3494', active: true, paneCount: 1,
+      terminals: [{ terminal: parentAddr, pane: 'p1', name: null, status: null, app: null }],
+    };
+    const placement = buildHerdrSeatPlacement({
+      space: 'sp1',
+      folder: worktree,
+      baseTabName: 'PR#3497',
+      tabs: [workerTab],
+      preferredTerminals: [parentAddr],
+      argv: ['/bin/sh', '-c', 'hc label --json -- "$HC_TERMINAL_ID" repo-harness.seat=gatekeeper repo-harness.repository=1 >/dev/null && pwd > "$1" && printf "%s" "$HC_TERMINAL_ID" > "$2"', 'sh', pwdOut, tidOut],
+    });
+    expect(placement.command).toBe('hc.run');
+
+    // Run from inside the primary-checkout parent terminal (HC_TERMINAL_ID set) to verify --no-parent + worktree cwd.
+    const placed = executeHerdrSeatPlacement(placement, { env: { ...env, HC_TERMINAL_ID: parentAddr, HC_TERMINAL_SOCKET: env.HC_SOCKET } });
+    expect(placed).toMatchObject({ space: 'sp1', tab: 'tb1' });
+    const createdAddr = String(placed.terminal);
+    // Synchronize on the real hc process finishing instead of sleeping.
+    const waited = spawnSync('hc', ['wait', '--json', '--timeout', '10', '--', createdAddr], { env, encoding: 'utf8' });
+    expect(waited.status, waited.stderr).toBe(0);
+
+    // hc get --json reports cwd === worktree (NOT primary!), keep === true, parent === null, and both herdr + self-labeled repo-harness labels.
+    const inspected = hcGet(createdAddr, { env });
+    expect(realpathSync(inspected.cwd!)).toBe(realpathSync(worktree));
+    expect(inspected.labels).toMatchObject({
+      'herdr.space': 'sp1',
+      'herdr.tab': 'tb1',
+      'repo-harness.seat': 'gatekeeper',
+      'repo-harness.repository': '1',
+    });
+    const rawGet = JSON.parse(spawnSync('hc', ['get', '--json', '--', createdAddr], { env, encoding: 'utf8' }).stdout) as { keep: boolean; parent: string | null; die_with_parent: boolean };
+    expect(rawGet).toMatchObject({ keep: true, parent: null, die_with_parent: false });
+    expect(realpathSync(readFileSync(pwdOut, 'utf8').trim())).toBe(realpathSync(worktree));
+    expect(readFileSync(tidOut, 'utf8')).toBe(createdAddr);
+  } finally {
+    spawnSync('hc', ['server', 'stop'], { env, encoding: 'utf8' });
+  }
 });
 
 test('server status: the core id and version are read; a bad version, a missing core id or an hc error fail', async () => {

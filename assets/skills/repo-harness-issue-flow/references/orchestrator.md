@@ -398,21 +398,23 @@ module is in the title so that a list view shows the write scopes.
   with the label flags of `rh seats argv` for a standalone issue, a fix
   round or a stacked writer. `rh seats launch` takes the space from
   `--space` or from the `herdr.space` label of your own terminal, reads the
-  space layout with `herdr-app ls`, and places panes with explicit-ID
-  `pane.split --direction right` up to 3 panes per tab before opening
-  `<base> 2`, `<base> 3`, failing closed when Herdr.app opens no tab or
-  pane. Worker tabs are named `#<issue>` (`other` without `--issue`); review
-  seats split right into the PR's live worker tab (`worker + gatekeeper + reviewer`
-  in one tab, max 3 panes) and fall back to `PR#<pr>` (or `review` without
-  `--pr`) when that tab is absent or full; `council` packs up to 3 panes in
-  `council` before opening `council 2`. Close each PASS review pane
-  immediately after its receipt publishes; keep only a FAIL `gatekeeper`
-  pane when needed for a round-2 fix check. When calling
+  space layout with `herdr-app ls`, and joins a matching `< 3` pane tab via
+  `hc run --bg --keep --no-parent --cwd <worktree> --label herdr.space=<id> --label herdr.tab=<tab>`
+  (so `terminal.cwd` equals the worktree) or opens `<base>`, `<base> 2`,
+  `<base> 3` via `tab.new`, failing closed when Herdr.app is unavailable or
+  placement fails. Worker tabs are named `#<issue>` (`other` without
+  `--issue`); review seats join the PR's live worker tab (`worker +
+  gatekeeper + reviewer` in one tab, max 3 panes) and fall back to `PR#<pr>`
+  (or `review` without `--pr`) when that tab is absent or full; `council`
+  packs up to 3 panes in `council` before opening `council 2`. Close each
+  PASS review pane immediately after its receipt publishes; keep only a FAIL
+  `gatekeeper` pane when needed for a round-2 fix check. When calling
   `herdr-app do pane.split` directly, resolve an explicit `--pane <id>` with
   `herdr-app ls` first; never combine `pane.focus` with an untargeted
   `pane.split` (an untargeted split can land in another Herdr space). Never
-  start a seat with `hc run --bg`: that terminal has no pane. Attention rule
-  A21 names each live seat that no pane shows; give it a pane with
+  start a seat with bare `hc run --bg` (without `herdr.space` and
+  `herdr.tab` from an open window): that terminal has no pane. Attention
+  rule A21 names each live seat that no pane shows; give it a pane with
   `herdr-app do terminal.keep`, or close and relaunch it.
 - Attention rule A22 names a stalled seat: it reports `working` for more
   than 300 s, its agent has no child process, and its screen without

@@ -41,8 +41,7 @@ import { githubRemoteRepository } from '../../core/board/source';
 import { AGY_REVIEW_BINDING_ENV, AGY_REVIEW_LAUNCH_ENV, type AgyReviewBinding } from '../../effects/board/agy-review-session';
 import { ClaudeAgentTypesError, claudeHostAgentTypes } from '../../effects/board/claude-agent-types';
 import { RepoHarnessRegistryStrictError, canonicalRepoPath, readRepoHarnessRegistryStrictSnapshot, repoCheckoutProbeEnv, setRepoHarnessPanePrefix } from '../../effects/repo-registry';
-import { HERDR_APP_NOT_SENT, HerdrCoreError, RH_LABEL, boardHostPorts, buildHerdrSeatPlacement, hcCallerSpace, hcLabel, hcLabelPairs, herdrAppDo, herdrAppSpaceTabs, type HcLabels, type HerdrAppTab } from '../../effects/terminal/herdr-core';
-import { shellQuote } from '../../core/shell-quote';
+import { HERDR_APP_NOT_SENT, HerdrCoreError, RH_LABEL, boardHostPorts, buildHerdrSeatPlacement, executeHerdrSeatPlacement, hcCallerSpace, hcLabel, hcLabelPairs, herdrAppSpaceTabs, recordPendingTabPlacement, seatLoginShell, withPendingTabPlacements, type HcLabels, type HerdrAppTab } from '../../effects/terminal/herdr-core';
 import { matchingWorkerTerminals } from '../../effects/board/review';
 import { bunGlobalPackageRoot } from '../installer/skill-projection';
 import { PiFleetRolesError, writePiFleetRoles } from '../../effects/board/pi-fleet-roles';
@@ -174,8 +173,7 @@ function seatId(seat: string): LaunchSeatId {
  * Label the terminal before starting the agent. Keep the login shell's PATH order and append caller bun, rh,
  * and hc directories in caller PATH order before the launcher's Bun directory fallback for smaller-PATH panes.
  */
-function selfLabelingArgv(seat: LaunchSeatId, input: SeatLabelInput, agent: readonly string[], env: NodeJS.ProcessEnv, cwd?: string): string[] {
-  if (cwd !== undefined && cwd.includes('\0')) throw new SeatsCommandError('label_value_invalid', 'Split working directory cannot contain a NUL byte.');
+function selfLabelingArgv(seat: LaunchSeatId, input: SeatLabelInput, agent: readonly string[], env: NodeJS.ProcessEnv): string[] {
   const flags = ([['--repository-id', input.repositoryId], ['--issue', input.issue], ['--pr', input.pr], ['--parent', input.parent]] as const)
     .flatMap(([flag, value]) => value === undefined ? [] : [flag, value]);
   const pathOrder = new Map<string, number>();
@@ -192,28 +190,20 @@ function selfLabelingArgv(seat: LaunchSeatId, input: SeatLabelInput, agent: read
   const pathSetup = 'export PATH="${PATH:+$PATH:}${2:+$2:}${0%/*}"';
   const label = `"$0" "$1" seats label ${[seat, ...flags].join(' ')}`;
   const args = [process.execPath, CLI_ENTRY, toolDirs.join(delimiter)];
-  const cd = cwd === undefined ? '' : ` && cd -- ${shellQuote(cwd)}`;
   if (input.agyReview !== undefined) {
     const { label: binding, startup } = input.agyReview;
     const bind = `if ! ${AGY_REVIEW_BINDING_ENV}="$3" ${label}; then /bin/mkdir "$4/failed"; exit 1; fi`;
-    const agyCd = cwd === undefined ? '' : `; if ! cd -- ${shellQuote(cwd)}; then /bin/mkdir "$4/failed"; exit 1; fi`;
-    return ['/bin/sh', '-c', `${pathSetup}; ${bind}${agyCd}; /bin/mkdir "$4/bound" && shift 4 && exec "$@"`, ...args, binding, startup, ...agent];
+    return ['/bin/sh', '-c', `${pathSetup}; ${bind}; /bin/mkdir "$4/bound" && shift 4 && exec "$@"`, ...args, binding, startup, ...agent];
   }
   // The owner exception URL is positional, so only checked seat and dispatch values enter the script.
   return input.ownerException === undefined
-    ? ['/bin/sh', '-c', `${pathSetup}; ${label} && shift 2${cd} && exec "$@"`, ...args, ...agent]
-    : ['/bin/sh', '-c', `${pathSetup}; ${label} --owner-exception "$3" && shift 3${cd} && exec "$@"`, ...args, input.ownerException, ...agent];
-}
-
-/** Keep a foreground shell available after the agent exits, including in a direct Herdr pane split. */
-function seatLoginShell(argv: readonly string[]): string[] {
-  const shell = process.platform === 'darwin' ? '/bin/zsh' : '/bin/sh';
-  return [shell, '-lic', '"$@"; result=$?; [ ! -t 0 ] || exec "$0" -li; exit "$result"', shell, ...argv];
+    ? ['/bin/sh', '-c', `${pathSetup}; ${label} && shift 2 && exec "$@"`, ...args, ...agent]
+    : ['/bin/sh', '-c', `${pathSetup}; ${label} --owner-exception "$3" && shift 3 && exec "$@"`, ...args, input.ownerException, ...agent];
 }
 
 /** Wrap the agent with the production seat label command and, for a new pane, the login shell. */
-export function labeledSeatArgv(seat: LaunchSeatId, input: SeatLabelInput, agent: readonly string[], env: NodeJS.ProcessEnv, terminal: 'new' | 'existing', cwd?: string): string[] {
-  const argv = selfLabelingArgv(seat, input, agent, env, cwd);
+export function labeledSeatArgv(seat: LaunchSeatId, input: SeatLabelInput, agent: readonly string[], env: NodeJS.ProcessEnv, terminal: 'new' | 'existing'): string[] {
+  const argv = selfLabelingArgv(seat, input, agent, env);
   return terminal === 'new' ? seatLoginShell(argv) : argv;
 }
 
@@ -482,12 +472,12 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
     if (reason !== null) throw new SeatsCommandError('seat_provider_unavailable', `The ${id} seat cannot launch: ${reason}. See the quota routes.`);
   }
   if (effective.runtime === 'pi') await assertPiShell(env, cwd);
-  // The pane name needs the registry prefix, so it comes only with the seat labels.
+  // The pane name needs the registry prefix, so it comes only with the seat labels; the base tab name does not.
   const name = labels.repositoryId === undefined ? null : seatPaneName({
     prefix: panePrefix(cwd, env), seat: id, issue: isWorkerSeat(id) || isCouncilSeat(id) ? labels.issue : undefined,
     pr: isReviewSeat(id) ? labels.pr : undefined, release: labels.release, qualifier: labels.qualifier,
   });
-  const tab = labels.repositoryId === undefined ? null : seatTabName(id, { issue: labels.issue, pr: labels.pr });
+  const tab = seatTabName(id, { issue: labels.issue, pr: labels.pr });
   const agentTypes = effective.runtime === 'claude' && effective.fleet.length > 0
     ? [...MANAGED_AGENTS, ...RETIRED_SEAT_FLEET_ROLES, ...CLAUDE_BUILTIN_AGENT_TYPES, ...claudeHostAgentTypes(env)]
     : [];
@@ -626,11 +616,19 @@ interface SeatPlacementRequest {
   readonly preferredTerminals?: readonly string[];
 }
 
+const sanitizePlacement = (raw: Record<string, unknown>, privateTask: boolean): Record<string, unknown> => (
+  !privateTask
+    ? raw
+    : Object.fromEntries(Object.entries(raw).filter(([key, value]) =>
+      ['tab', 'pane', 'terminal', 'space'].includes(key) && typeof value === 'string' && /^[a-z0-9/_-]+$/iu.test(value)))
+);
+
 function openSeatTab(
   request: SeatPlacementRequest,
   env: NodeJS.ProcessEnv,
   modelField: string | null = null,
   privateTask = false,
+  pendingByTab?: Map<string, Set<string>>,
 ): { readonly placement: Record<string, unknown>; readonly tabName: string | null } {
   const { space } = request;
   const formatDetail = (error: HerdrCoreError) =>
@@ -643,6 +641,7 @@ function openSeatTab(
     // `herdr-app ls` is read-only: no tab or split request was sent yet.
     throw new SeatsCommandError('seat_tab_failed', `Herdr.app opened no tab in space ${space}: ${formatDetail(error)}. No seat started. Run the launch on the machine that shows the Herdr.app window.`);
   }
+  const effectiveTabs = pendingByTab === undefined ? tabs : withPendingTabPlacements(tabs, pendingByTab);
   try {
     const planned = buildHerdrSeatPlacement({
       space,
@@ -651,15 +650,12 @@ function openSeatTab(
       ...(request.task === undefined ? {} : { task: request.task }),
       ...(request.focus === undefined ? {} : { focus: request.focus }),
       baseTabName: request.name ?? null,
-      tabs,
+      tabs: effectiveTabs,
       preferredTerminals: request.preferredTerminals,
     });
-    const raw = herdrAppDo(planned.command, planned.args, { env });
-    const placement = !privateTask
-      ? raw
-      : Object.fromEntries(Object.entries(raw).filter(([key, value]) =>
-        ['tab', 'pane', 'terminal', 'space'].includes(key) && typeof value === 'string' && /^[a-z0-9/_-]+$/iu.test(value)));
-    return { placement, tabName: planned.tabName };
+    const raw = executeHerdrSeatPlacement(planned, { env });
+    if (pendingByTab !== undefined) recordPendingTabPlacement(pendingByTab, planned, raw);
+    return { placement: sanitizePlacement(raw, privateTask), tabName: planned.tabName };
   } catch (error) {
     if (!(error instanceof HerdrCoreError)) throw error;
     const detail = formatDetail(error);
@@ -835,6 +831,7 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
           if (error instanceof SeatsConfigMigrationRequiredError || error instanceof AgySeatSettingsError) throw error;
           throw new SeatsCommandError('config_invalid', seatsConfigInvalidMessage(error));
         }
+        const pendingCouncilByTab = new Map<string, Set<string>>();
         const result = await runCouncilConsult({
           cwd: process.cwd(),
           issue: consultIssueNumber(options.issue, '--issue'),
@@ -857,7 +854,7 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
             return { launch, model: effective.model, shell: effective.tools.includes('shell') };
           },
           openTab: ({ task, ...rest }, opts) => {
-            openSeatTab(task === undefined ? rest : { ...rest, task }, env, null, opts?.privateTask === true);
+            openSeatTab(task === undefined ? rest : { ...rest, task }, env, null, opts?.privateTask === true, pendingCouncilByTab);
           },
         });
         process.stdout.write(options.json === true || result.dry_run

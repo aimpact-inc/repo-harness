@@ -9,7 +9,7 @@ import { agySeatAgentSpec } from "../../src/effects/board/seats-configuration";
 import { HANDOFF_SECTIONS, seatHandoffPath, seatResetReason, seatResetRelaunchPath, seatResetRequestPath, seatResetSteps } from "../../src/core/board/seat-reset";
 import { EDIT_GUARD_SCOPE_SECTION } from "../../src/cli/hook/session-context";
 import { SeatResetError, readSeatSession, recordSeatSession, runSeatReset, type SeatRelaunch, type SeatResetNotify, type SeatResetOptions } from "../../src/effects/board/seat-reset";
-import { labeledSeatArgv, seatHandoff, seatResetLaunch, seatResetTarget } from "../../src/cli/commands/seats";
+import { seatHandoff, seatResetLaunch, seatResetTarget } from "../../src/cli/commands/seats";
 import { AGY_ADVISOR_ALLOWED_SEAT_TOOLS, AGY_ADVISOR_SEAT_TOOLS, DEFAULT_SEATS_CONFIG, LAUNCH_SEAT_IDS, NATIVE_SEATS_PRESET, WORKER_SEAT_IDS, isCouncilSeat, isReviewSeat, isWorkerSeat } from "../../src/core/board/seats-settings";
 import { repoHarnessRepoIdFor } from "../../src/effects/repo-registry";
 import { classifyQuotaReading, decodeCodexRateLimitsResult } from "../../src/core/board/quota";
@@ -2113,12 +2113,21 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
         ]).toEqual(["#2479", "other", "PR#2478", "review", "council", "orch", "orch"]);
         expect(() => seatTabName("worker", { issue: "0" })).toThrow(expect.objectContaining({ code: "pane_name_invalid" }));
         expect(() => seatTabName("gatekeeper", { pr: "abc" })).toThrow(expect.objectContaining({ code: "pane_name_invalid" }));
-        const splitLabeled = labeledSeatArgv("worker", { repositoryId: "1", issue: "1508" }, ["claude"], process.env, "new", worktree);
-        expect(splitLabeled.some(arg => arg.includes(`&& shift 2 && cd -- '${worktree.replaceAll("'", "'\\''")}' && exec "$@"`))).toBe(true);
         expect(seatPaneName({ prefix: "rh", seat: "reviewer", pr: "1536", qualifier: "codex" })).toBe("rh-rv-1536-codex");
         expect(() => seatPaneName({ prefix: "a", seat: "reviewer", pr: "1536" })).toThrow(expect.objectContaining({ code: "pane_name_invalid" }));
-        // Without --repository-id the argv has no name, as before.
+        // Without --repository-id the argv has no pane name, while the base tab name still resolves (P2-unlabeled-tab-names).
         expect(launch(home, "orchestrator").argv).not.toContain("-n");
+        expect([
+          JSON.parse(run(registryEnv(home), ["orchestrator", "--json"], repo).stdout),
+          JSON.parse(run(registryEnv(home), ["advisor", "--json"], repo).stdout),
+          JSON.parse(run(registryEnv(home), ["worker", "--json"], repo).stdout),
+          JSON.parse(run(registryEnv(home), ["gatekeeper", "--pr", "2478", "--json"], repo).stdout),
+        ].map(entry => [entry.name, entry.tab])).toEqual([
+          [null, "orch"],
+          [null, "orch"],
+          [null, "other"],
+          [null, "PR#2478"],
+        ]);
       });
     });
   });
@@ -2183,11 +2192,42 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
       writeFileSync(join(home, ".pi", "agent", "extensions", "magpie.ts"), "");
       writeFileSync(join(bin, "pi"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
       writeFileSync(join(bin, "agy"), "#!/bin/sh\nexit 2\n", { mode: 0o755 });
-      writeFileSync(join(bin, "hc"), `#!/bin/sh\nprintf '{"address":"t5","state":"live","turn":0,"labels":{"herdr.space":"sp-auto"}}'\n`, { mode: 0o755 });
-      writeFileSync(gh, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${ghLog}"\n`
-        + `test "$*" = 'api --hostname github.com repos/{owner}/{repo}' && test -z "$GH_REPO" && printf '{"id":19}'\n`, { mode: 0o755 });
       const stateFile = join(home, "herdr-state.json");
       writeFileSync(stateFile, JSON.stringify({ spaces: [{ id: "sp-auto", name: "council-test", folder: worktree, machine: null, active: true, tabs: [] }], seq: 1 }));
+      writeFileSync(join(bin, "hc"), `#!${process.execPath}
+const fs = require('node:fs');
+const sub = process.argv[2];
+if (sub === 'run') {
+  const state = JSON.parse(fs.readFileSync(${JSON.stringify(stateFile)}, 'utf8'));
+  const args = process.argv.slice(3);
+  const sep = args.indexOf('--');
+  const flags = sep === -1 ? args : args.slice(0, sep);
+  const argv = sep === -1 ? [] : args.slice(sep + 1);
+  const labels = {};
+  let cwd = null;
+  for (let i = 0; i < flags.length; i += 1) {
+    if (flags[i] === '--cwd') cwd = flags[++i];
+    else if (flags[i] === '--label') {
+      const pair = flags[++i];
+      const eq = pair.indexOf('=');
+      labels[pair.slice(0, eq)] = pair.slice(eq + 1);
+    }
+  }
+  const id = state.seq++;
+  const pane = 'p' + id;
+  const terminal = 't' + (10 + id);
+  fs.appendFileSync(${JSON.stringify(tabLog)}, JSON.stringify(['hc.run', { cwd, space: labels['herdr.space'], tab: labels['herdr.tab'], keep: flags.includes('--keep'), noParent: flags.includes('--no-parent'), argv }]) + '\\n');
+  const space = state.spaces.find(s => s.id === labels['herdr.space']);
+  const tab = space?.tabs.find(t => t.id === labels['herdr.tab']);
+  if (tab) tab.terminals.push({ terminal, pane, status: null, app: null, name: null });
+  fs.writeFileSync(${JSON.stringify(stateFile)}, JSON.stringify(state));
+  console.log(JSON.stringify({ address: terminal, state: 'live', cwd }));
+  process.exit(0);
+}
+console.log(JSON.stringify({ address: 't5', state: 'live', turn: 0, labels: { 'herdr.space': 'sp-auto' } }));
+`, { mode: 0o755 });
+      writeFileSync(gh, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${ghLog}"\n`
+        + `test "$*" = 'api --hostname github.com repos/{owner}/{repo}' && test -z "$GH_REPO" && printf '{"id":19}'\n`, { mode: 0o755 });
       writeFileSync(join(bin, "herdr-app"), `#!${process.execPath}
 const fs = require('node:fs');
 const state = JSON.parse(fs.readFileSync(${JSON.stringify(stateFile)}, 'utf8'));
@@ -2207,16 +2247,6 @@ if (cmd === 'tab.new') {
   if (space) space.tabs.push({ id: tabId, name: args.name ?? null, active: true, terminals: [{ terminal, pane, status: null, app: null, name: null }] });
   fs.writeFileSync(${JSON.stringify(stateFile)}, JSON.stringify(state));
   console.log(JSON.stringify({ tab: tabId, pane, terminal }));
-} else if (cmd === 'pane.split') {
-  for (const space of state.spaces) {
-    for (const tab of space.tabs) {
-      if (tab.terminals.some(t => t.pane === args.pane)) {
-        tab.terminals.push({ terminal, pane, status: null, app: null, name: null });
-      }
-    }
-  }
-  fs.writeFileSync(${JSON.stringify(stateFile)}, JSON.stringify(state));
-  console.log(JSON.stringify({ pane, terminal }));
 }
 `, { mode: 0o755 });
       const { CLAUDE_CONFIG_DIR: _claude, PI_CODING_AGENT_DIR: _pi, HC_TERMINAL_ID: _terminal, HERDR_ENV: _herdr, ...base } = process.env;
@@ -2249,12 +2279,10 @@ if (cmd === 'tab.new') {
       const [cmd0, tab0] = ops[0]!;
       const [cmd1, split1] = ops[1]!;
       expect([cmd0, tab0]).toEqual(["tab.new", expect.objectContaining({ name: "council", space: "sp-auto", folder: worktree })]);
-      expect([cmd1, split1]).toEqual(["pane.split", expect.objectContaining({ direction: "right", pane: "p1" })]);
-      expect(split1).not.toHaveProperty("folder");
-      expect(split1).not.toHaveProperty("task");
+      expect([cmd1, split1]).toEqual(["hc.run", expect.objectContaining({ cwd: worktree, space: "sp-auto", tab: "tb1", keep: true, noParent: true })]);
       expect((tab0.argv as string[]).some((arg: string) => arg.includes("seats label council --repository-id 20 --issue 42 --parent 7"))).toBe(true);
       expect(values(split1.argv as string[], "--exclude-tools")).toEqual(["edit,write"]);
-      expect((split1.argv as string[]).some((arg: string) => arg.includes(`&& cd -- '${worktree.replaceAll("'", "'\\''")}' && exec "$@"`))).toBe(true);
+      expect((split1.argv as string[]).join(" ")).not.toContain("cd --");
       expect(tab0.task).toContain(join(outDir, "issue-42-fable-api.md"));
       expect((split1.argv as string[]).at(-2)).toBe("--");
       expect((split1.argv as string[]).at(-1)).toContain(join(outDir, "issue-42-carbon-api.md"));
@@ -2351,7 +2379,7 @@ if (cmd === 'tab.new') {
     });
   });
 
-  test("seats launch and council enforce Option A tab naming (#<issue>, PR#<pr>, council) and 3-pane explicit pane.split packing (#3494)", () => {
+  test("seats launch and council enforce Option A tab naming (#<issue>, PR#<pr>, council) and 3-pane hc.run tab packing with worktree cwd (#3494)", () => {
     const seatsConfig = {
       ...DEFAULT_SEATS_CONFIG,
       reviewer: { ...DEFAULT_SEATS_CONFIG.reviewer, runtime: "pi" as const, model: "magpie/group/deepseek-v4.1-flash", effort: null },
@@ -2384,6 +2412,37 @@ if (sub === 'ls') {
   const addr = process.argv[process.argv.length - 1];
   const found = state.terminals[addr] ?? { address: addr, name: null, state: 'live', turn: 0, labels: { 'herdr.space': 'sp1' }, status: null, pid: null, foreground: null, reason: null, cwd: null };
   console.log(JSON.stringify(found));
+} else if (sub === 'run') {
+  const args = process.argv.slice(3);
+  const sep = args.indexOf('--');
+  const flags = sep === -1 ? args : args.slice(0, sep);
+  const labels = {};
+  let cwd = null;
+  for (let i = 0; i < flags.length; i += 1) {
+    if (flags[i] === '--cwd') cwd = flags[++i];
+    else if (flags[i] === '--label') {
+      const pair = flags[++i];
+      const eq = pair.indexOf('=');
+      labels[pair.slice(0, eq)] = pair.slice(eq + 1);
+    }
+  }
+  const id = state.seq++;
+  const pane = 'p' + id;
+  const terminal = 't' + (10 + id);
+  fs.appendFileSync(${JSON.stringify(opsLog)}, JSON.stringify(['hc.run', {
+    cwd,
+    keep: flags.includes('--keep'),
+    noParent: flags.includes('--no-parent'),
+    space: labels['herdr.space'] ?? null,
+    tab: labels['herdr.tab'] ?? null,
+  }]) + '\\n');
+  if (process.env.DELAY_ADOPTION !== '1') {
+    const space = state.spaces.find(s => s.id === labels['herdr.space']);
+    const tab = space?.tabs.find(t => t.id === labels['herdr.tab']);
+    if (tab) tab.terminals.push({ terminal, pane, status: null, app: null, name: null });
+  }
+  fs.writeFileSync(${JSON.stringify(stateFile)}, JSON.stringify(state));
+  console.log(JSON.stringify({ address: terminal, state: 'live', cwd }));
 }
 `, { mode: 0o755 });
         writeFileSync(join(bin, "herdr-app"), `#!${process.execPath}
@@ -2405,14 +2464,6 @@ if (cmd === 'tab.new') {
   space.tabs.push({ id: tabId, name: args.name ?? null, active: true, terminals: [{ terminal, pane, status: null, app: null, name: null }] });
   fs.writeFileSync(${JSON.stringify(stateFile)}, JSON.stringify(state));
   console.log(JSON.stringify({ tab: tabId, pane, terminal }));
-} else if (cmd === 'pane.split') {
-  for (const tab of space.tabs) {
-    if (tab.terminals.some(t => t.pane === args.pane)) {
-      tab.terminals.push({ terminal, pane, status: null, app: null, name: null });
-    }
-  }
-  fs.writeFileSync(${JSON.stringify(stateFile)}, JSON.stringify(state));
-  console.log(JSON.stringify({ pane, terminal }));
 }
 `, { mode: 0o755 });
         const { CLAUDE_CONFIG_DIR: _c, PI_CODING_AGENT_DIR: _p, HC_TERMINAL_ID: _t, HERDR_ENV: _h, ...base } = process.env;
@@ -2420,18 +2471,19 @@ if (cmd === 'tab.new') {
           ...base, ...registryEnv(home), BUN_INSTALL: join(home, ".bun"), TMPDIR: scratch,
           PATH: [bin, join(home, ".quota-bin"), dirname(process.execPath), "/bin", "/usr/bin"].join(delimiter),
         };
-        const runSeats = (args: string[]) => {
-          const result = spawnSync(process.execPath, [CLI, "seats", ...args], { cwd: repo, env, encoding: "utf8" });
+        const runSeats = (args: string[], extraEnv: Record<string, string> = {}) => {
+          const result = spawnSync(process.execPath, [CLI, "seats", ...args], { cwd: repo, env: { ...env, ...extraEnv }, encoding: "utf8" });
           expect(result.status, result.stderr).toBe(0);
           return result;
         };
         const readOps = () => readFileSync(opsLog, "utf8").trimEnd().split("\n").map(line => JSON.parse(line) as [string, Record<string, unknown>]);
 
         // 1. Two workers for #2479 and #2461 under --parent 2457 open distinct tabs #2479 and #2461 (no duplicate #2457).
-        const w1 = JSON.parse(runSeats(["launch", "worker", "--repository-id", "1", "--parent", "2457", "--issue", "2479", "--space", "sp1", "--cwd", worktree, "--task", "Task #2479"]).stdout);
+        // Start w1 in the primary checkout (repo) while its PR lives in worktree (P1 trigger setup).
+        const w1 = JSON.parse(runSeats(["launch", "worker", "--repository-id", "1", "--parent", "2457", "--issue", "2479", "--space", "sp1", "--cwd", repo, "--task", "Task #2479"]).stdout);
         const w2 = JSON.parse(runSeats(["launch", "worker", "--repository-id", "1", "--parent", "2457", "--issue", "2461", "--space", "sp1", "--cwd", repo, "--task", "Task #2461"]).stdout);
         expect([w1.tab, w2.tab]).toEqual(["#2479", "#2461"]);
-        // Record w1 as a live hc worker terminal in worktree so review seats discover it via hc + herdr-app ls.
+        // Record w1 as a live hc worker terminal with cwd = worktree so standalone seats launch discovers it by cwd/pr.
         const stateAfterWorkers = JSON.parse(readFileSync(stateFile, "utf8"));
         stateAfterWorkers.terminals[w1.placement.terminal] = {
           address: w1.placement.terminal, name: null, state: "live", agent: "pi", turn: 0, status: null, pid: null, foreground: null, reason: null,
@@ -2439,7 +2491,7 @@ if (cmd === 'tab.new') {
         };
         writeFileSync(stateFile, JSON.stringify(stateAfterWorkers));
 
-        // 2. Launching gatekeeper and reviewer for PR #2485 splits right into #2479 (worker + gatekeeper + reviewer = 3 panes).
+        // 2. Launching gatekeeper and reviewer for PR #2485 joins #2479 (tb1) via hc.run with --cwd worktree (--keep --no-parent).
         const gk = JSON.parse(runSeats(["launch", "gatekeeper", "--repository-id", "1", "--pr", "2485", "--space", "sp1", "--cwd", worktree, "--task", "Review PR#2485 gk"]).stdout);
         const rv = JSON.parse(runSeats(["launch", "reviewer", "--repository-id", "1", "--pr", "2485", "--space", "sp1", "--cwd", worktree, "--task", "Review PR#2485 rv"]).stdout);
         expect([gk.tab, rv.tab]).toEqual(["#2479", "#2479"]);
@@ -2452,23 +2504,31 @@ if (cmd === 'tab.new') {
         expect([fb1.tab, fb2.tab, fb3.tab, fb4.tab]).toEqual(["PR#2485", "PR#2485", "PR#2485", "PR#2485 2"]);
 
         // 4. Council packs 3 panes into 'council', then a subsequent council launch opens 'council 2'.
+        // Even with DELAY_ADOPTION=1 (simulating async Herdr.app adoption during a single council run), a 2-pane council tab only admits 1 more pane before overflowing to 'council 2'.
         runSeats(["council", "--issue", "42", "--members", "fable,carbon,astra", "--repository-id", "1", "--space", "sp1", "--out-dir", join(scratch, "c1")]);
         runSeats(["council", "--issue", "43", "--members", "fable", "--repository-id", "1", "--space", "sp1", "--out-dir", join(scratch, "c2")]);
+        runSeats(["council", "--issue", "44", "--members", "fable,carbon,astra", "--repository-id", "1", "--space", "sp1", "--out-dir", join(scratch, "c3")], { DELAY_ADOPTION: "1" });
 
         const ops = readOps();
-        expect(ops.map(([cmd, args]) => cmd === "tab.new" ? [cmd, args.name] : [cmd, args.direction, args.pane])).toEqual([
+        expect(ops.map(([cmd, args]) => cmd === "tab.new"
+          ? [cmd, args.name]
+          : [cmd, args.space, args.tab, args.cwd, args.keep, args.noParent])).toEqual([
           ["tab.new", "#2479"],
           ["tab.new", "#2461"],
-          ["pane.split", "right", "p1"],
-          ["pane.split", "right", "p3"],
+          ["hc.run", "sp1", "tb1", worktree, true, true],
+          ["hc.run", "sp1", "tb1", worktree, true, true],
           ["tab.new", "PR#2485"],
-          ["pane.split", "right", "p5"],
-          ["pane.split", "right", "p6"],
+          ["hc.run", "sp1", "tb5", worktree, true, true],
+          ["hc.run", "sp1", "tb5", worktree, true, true],
           ["tab.new", "PR#2485 2"],
           ["tab.new", "council"],
-          ["pane.split", "right", "p9"],
-          ["pane.split", "right", "p10"],
+          ["hc.run", "sp1", "tb9", repo, true, true],
+          ["hc.run", "sp1", "tb9", repo, true, true],
           ["tab.new", "council 2"],
+          // Under DELAY_ADOPTION=1, 'council 2' (tb12) starts with 1 pane -> fable & carbon join tb12 (2nd & 3rd panes), astra overflows to 'council 3'.
+          ["hc.run", "sp1", "tb12", repo, true, true],
+          ["hc.run", "sp1", "tb12", repo, true, true],
+          ["tab.new", "council 3"],
         ]);
       });
     });
