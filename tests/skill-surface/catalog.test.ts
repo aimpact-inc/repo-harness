@@ -315,11 +315,11 @@ describe("skill-surface catalog: the real manifest.json on disk", () => {
   });
 
   // Current closed catalog excludes the retired headless plan skill.
-  test("covers all 18 repo-owned entries plus the 8 external skills (26 packages)", () => {
+  test("covers all 20 repo-owned entries plus the 8 external skills (28 packages)", () => {
     if (resolution.status !== "valid") throw new Error("expected valid catalog");
-    expect(resolution.catalog.packages.length).toBe(26);
+    expect(resolution.catalog.packages.length).toBe(28);
     const repoOwned = resolution.catalog.packages.filter((p) => p.kind !== "external");
-    expect(repoOwned.length).toBe(18);
+    expect(repoOwned.length).toBe(20);
     expect(repoOwned.map(p => p.name)).not.toContain("claude-plan");
     const external = resolution.catalog.packages.filter((p) => p.kind === "external");
     expect(external.map((p) => p.name).sort()).toEqual([
@@ -384,9 +384,11 @@ describe("skill-surface catalog: target post-cutover discovery matrix", () => {
   test("facadesForSelection matches the target discovery matrix for core only and every plugin", () => {
     expect(facadesForSelection(catalog, [])).toEqual([
       "repo-harness-check", "repo-harness-test", "repo-harness-issue-flow", "repo-harness-ship",
+      "repo-harness-sharpen", "repo-harness-reframe",
     ]);
     expect(facadesForSelection(catalog, PLUGIN_IDS)).toEqual([
       "repo-harness-check", "repo-harness-test", "repo-harness-product", "repo-harness-issue-flow", "repo-harness-ship",
+      "repo-harness-sharpen", "repo-harness-reframe",
       "repo-harness-architecture", "repo-harness-archimap", "obsidian-memory", "windows-python-first",
       "repo-harness-orchestrator", "repo-harness-advisor", "repo-harness-seat-handoff",
     ]);
@@ -491,7 +493,8 @@ describe("skill-surface catalog: target post-cutover discovery matrix", () => {
     const { repoHarnessSkills, externalSkills } = mutationPathSkillNames(catalog);
     expect(repoHarnessSkills).toEqual([
       "repo-harness", "repo-harness-check", "repo-harness-test", "repo-harness-product",
-      "repo-harness-issue-flow", "repo-harness-ship", "repo-harness-architecture", "repo-harness-archimap",
+      "repo-harness-issue-flow", "repo-harness-ship", "repo-harness-sharpen", "repo-harness-reframe",
+      "repo-harness-architecture", "repo-harness-archimap",
       "obsidian-memory", "windows-python-first", "repo-harness-orchestrator", "repo-harness-advisor", "repo-harness-seat-handoff",
     ]);
     expect(externalSkills).toEqual([
@@ -527,9 +530,10 @@ describe("skill-surface catalog: explicit-only projection onto host-native switc
     return existsSync(path) && /^\s*allow_implicit_invocation:\s*false\s*$/m.test(readFileSync(path, "utf-8"));
   }
 
-  test("the explicit-only set is exactly repo-harness-architecture, repo-harness-ship, obsidian-memory and the three seat skills", () => {
+  test("the explicit-only set is exactly repo-harness-architecture, repo-harness-ship, repo-harness-sharpen, repo-harness-reframe, obsidian-memory and the three seat skills", () => {
     expect(facades.filter((pkg) => pkg.discoverability === "explicit-only").map((pkg) => pkg.name).sort()).toEqual([
-      "obsidian-memory", "repo-harness-advisor", "repo-harness-architecture", "repo-harness-orchestrator", "repo-harness-seat-handoff", "repo-harness-ship",
+      "obsidian-memory", "repo-harness-advisor", "repo-harness-architecture", "repo-harness-orchestrator",
+      "repo-harness-reframe", "repo-harness-seat-handoff", "repo-harness-sharpen", "repo-harness-ship",
     ]);
   });
 
@@ -543,9 +547,25 @@ describe("skill-surface catalog: explicit-only projection onto host-native switc
   });
 
   test("explicit-only facades stay installed: facade selection filters kind and owner, never discoverability", () => {
-    expect(facadesForSelection(catalog, [])).toContain("repo-harness-ship");
+    for (const name of ["repo-harness-ship", "repo-harness-sharpen", "repo-harness-reframe"]) {
+      expect(facadesForSelection(catalog, [])).toContain(name);
+    }
+    for (const name of ["repo-harness-sharpen", "repo-harness-reframe"]) {
+      const pkg = catalog.packages.find((entry) => entry.name === name);
+      expect(pkg).toMatchObject({
+        kind: "facade",
+        owner: "core",
+        explicitOnly: false,
+        discoverability: "explicit-only",
+        mutatesRepoByDefault: false,
+        audience: "bot",
+        hosts: ["claude", "codex", "pi", "antigravity"],
+      });
+    }
     expect(facadesForSelection(catalog, ["strategy-memory"])).toContain("obsidian-memory");
-    for (const name of ["repo-harness-ship", "repo-harness-architecture", "obsidian-memory"]) expect(facadesForSelection(catalog, PLUGIN_IDS)).toContain(name);
+    for (const name of ["repo-harness-ship", "repo-harness-sharpen", "repo-harness-reframe", "repo-harness-architecture", "obsidian-memory"]) {
+      expect(facadesForSelection(catalog, PLUGIN_IDS)).toContain(name);
+    }
   });
 });
 
@@ -582,6 +602,7 @@ test("audience source selection returns disjoint complete load groups and reject
   const lines = (body: string) => body.trim().split("\n");
   expect(lines(bot.stdout).map((line) => line.split("\t")[0])).toEqual([
     "repo-harness", "repo-harness-check", "repo-harness-product", "repo-harness-issue-flow", "repo-harness-ship",
+    "repo-harness-sharpen", "repo-harness-reframe",
     "obsidian-memory", "repo-harness-cross-review", "repo-harness-herdr-portal",
     "repo-harness-orchestrator", "repo-harness-advisor", "repo-harness-seat-handoff",
     "repo-harness-strategy",
