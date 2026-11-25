@@ -640,6 +640,95 @@ describe('safety hook: edit route', () => {
       }
     }
   }, 60_000);
+  posixOnly('denial refuses symlinked failure-log leaf and ancestor paths without touching outside files', () => {
+    const sentinel = '{"keep":true}\n';
+    const cases: ReadonlyArray<{
+      readonly label: string;
+      readonly setup: (cwd: string, outside: string) => { readonly sentinelPath?: string; readonly absentPath?: string };
+    }> = [
+      {
+        label: 'leaf symlink to outside file',
+        setup: (cwd, outside) => {
+          const sentinelPath = join(outside, 'settings.json');
+          writeFileSync(sentinelPath, sentinel);
+          mkdirSync(join(cwd, '.ai/harness/failures'), { recursive: true });
+          symlinkSync(sentinelPath, join(cwd, '.ai/harness/failures/latest.jsonl'));
+          return { sentinelPath };
+        },
+      },
+      {
+        label: 'dangling leaf symlink outside repository',
+        setup: (cwd, outside) => {
+          const absentPath = join(outside, 'created.jsonl');
+          mkdirSync(join(cwd, '.ai/harness/failures'), { recursive: true });
+          symlinkSync(absentPath, join(cwd, '.ai/harness/failures/latest.jsonl'));
+          return { absentPath };
+        },
+      },
+      {
+        label: 'leaf symlink to stdout',
+        setup: (cwd) => {
+          mkdirSync(join(cwd, '.ai/harness/failures'), { recursive: true });
+          symlinkSync('/dev/stdout', join(cwd, '.ai/harness/failures/latest.jsonl'));
+          return {};
+        },
+      },
+      {
+        label: 'ancestor symlink at .ai/harness/failures',
+        setup: (cwd, outside) => {
+          const dir = join(outside, 'failures-dir');
+          mkdirSync(dir, { recursive: true });
+          const sentinelPath = join(dir, 'latest.jsonl');
+          writeFileSync(sentinelPath, sentinel);
+          symlinkSync(dir, join(cwd, '.ai/harness/failures'));
+          return { sentinelPath };
+        },
+      },
+      {
+        label: 'ancestor symlink at .ai/harness',
+        setup: (cwd, outside) => {
+          const dir = join(outside, 'harness-dir');
+          mkdirSync(join(dir, 'failures'), { recursive: true });
+          writeFileSync(join(dir, 'workflow-contract.json'), '{}\n');
+          const sentinelPath = join(dir, 'failures/latest.jsonl');
+          writeFileSync(sentinelPath, sentinel);
+          rmSync(join(cwd, '.ai/harness'), { recursive: true, force: true });
+          symlinkSync(dir, join(cwd, '.ai/harness'));
+          return { sentinelPath };
+        },
+      },
+    ];
+    for (const { label, setup } of cases) {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-log-symlink-')));
+      const [cwd, home, outside] = ['repo', 'home', 'outside'].map(name => join(root, name));
+      try {
+        for (const dir of [cwd, home, outside]) mkdirSync(dir, { recursive: true });
+        initRepo(cwd);
+        const { sentinelPath, absentPath } = setup(cwd, outside);
+        const agyId = hookIdentity({ host: 'antigravity' });
+        const agyEnv = { HOME: home, REPO_HARNESS_WORKTREE_ROOT: join(root, 'wt') };
+        const expectedStderr = `[UserFileGuard] ${ANTIGRAVITY_GUARD_DENIAL}\n  Fix: Ask the user to review the operation and run it locally.\n[UserFileGuard] Failure log not written.\n`;
+        expect({ label, edit: runMutationGuard({ repoRoot: cwd, payload: { tool_input: { file_path: OUTSIDE } }, identity: agyId, env: agyEnv }) })
+          .toEqual({ label, edit: { exitCode: 2, stdout: '', stderr: expectedStderr } });
+        expect({ label, bash: runBashMutationGuard({ repoRoot: cwd, payload: { cwd, tool_input: { command: `rm ${OUTSIDE}` } }, identity: agyId, env: agyEnv }) })
+          .toEqual({ label, bash: { exitCode: 2, stdout: '', stderr: expectedStderr } });
+        const hook = spawnSync(process.execPath, [HOOK_ENTRY, 'PreToolUse', '--route', 'edit'], {
+          cwd,
+          encoding: 'utf-8',
+          input: JSON.stringify({ cwd, toolCall: { name: 'write_file', args: { Path: OUTSIDE } } }),
+          env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, HOME: home, HOOK_HOST: 'antigravity' },
+        });
+        expect({ label, status: hook.status, stdout: hook.stdout, stderr: hook.stderr }).toEqual({
+          label,
+          status: 0,
+          stdout: `${JSON.stringify({ decision: 'deny', reason: ANTIGRAVITY_GUARD_DENIAL })}\n`,
+          stderr: '',
+        });
+        if (sentinelPath) expect(readFileSync(sentinelPath, 'utf8')).toBe(sentinel);
+        if (absentPath) expect(existsSync(absentPath)).toBe(false);
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    }
+  }, 60_000);
   posixOnly('unparseable patch fails closed and an outside target stops the batch', () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-cutover-patch-')));
     try {

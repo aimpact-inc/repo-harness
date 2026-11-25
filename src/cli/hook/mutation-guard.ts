@@ -6,9 +6,10 @@
  * failure record. An allowed edit can carry the `[CapabilityOwner]` line.
  */
 
-import { appendFileSync, mkdirSync } from 'fs';
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, realpathSync, writeFileSync } from 'fs';
 import { dirname, isAbsolute, join, posix, sep, win32 } from 'path';
-import { canonicalRepoRelativePath } from '../../effects/state/collect-state-inputs';
+import { assertSafeRepoWritePath } from '../../effects/hook-state-file';
+import { canonicalRepoRelativePath, repoPath } from '../../effects/state/collect-state-inputs';
 import { parseStatusZ, splitNul } from '../../effects/review/diff-fingerprint';
 import {
   capabilityOwnersForPaths,
@@ -206,8 +207,15 @@ function extractApplyPatchTargets(command: string): readonly EditTarget[] {
 // ---------------------------------------------------------------------------
 
 function appendFailureRecord(repoRoot: string, denial: Denial, runId: string | null): void {
-  const target = join(repoRoot, FAILURE_LOG_FILE);
+  const root = realpathSync(repoRoot);
+  assertSafeRepoWritePath(root, join(root, FAILURE_LOG_FILE));
+  const target = repoPath(root, FAILURE_LOG_FILE);
+  const existing = lstatSync(target, { throwIfNoEntry: false });
+  if (existing && !existing.isFile()) {
+    throw new Error(`failure log requires a regular file: ${target}`);
+  }
   mkdirSync(dirname(target), { recursive: true });
+  assertSafeRepoWritePath(root, target);
   const record = {
     ts: formatIsoWithNumericOffset(new Date()),
     guard: denial.guard,
@@ -217,7 +225,16 @@ function appendFailureRecord(repoRoot: string, denial: Denial, runId: string | n
     failure_class: 'state_violation',
     run_id: runId,
   };
-  appendFileSync(target, `${JSON.stringify(record)}\n`);
+  const noFollow = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0;
+  const fd = openSync(target, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | noFollow, 0o600);
+  try {
+    if (!fstatSync(fd).isFile()) {
+      throw new Error(`failure log requires a regular file: ${target}`);
+    }
+    writeFileSync(fd, `${JSON.stringify(record)}\n`);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Local time with a numeric offset and no colon, e.g. `2026-10-13T09:00:00+0800`. */
