@@ -10,9 +10,13 @@ export const ALL_TARGETS: readonly AgentTarget[] = Object.freeze([
   claudeTarget,
 ]);
 
+function findDefaultTarget(id: string): AgentTarget | undefined {
+  return ALL_TARGETS.find((target) => target.id === id);
+}
+
 export function getTarget(id: string): AgentTarget<TargetId> | undefined {
   if (id === antigravityTarget.id) return antigravityTarget;
-  return ALL_TARGETS.find((target) => target.id === id);
+  return findDefaultTarget(id);
 }
 
 /** The targets selected together by default, in registry order. */
