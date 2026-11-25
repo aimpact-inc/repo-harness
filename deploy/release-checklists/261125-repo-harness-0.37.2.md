@@ -4,7 +4,7 @@
 
 - Release date is 2026-11-25. The release includes `repo-harness` and `repo-harness-operator-web`.
 - The base source is `6ef0627ca956ad057c140fac1a9accd9c8208395`. The range `v0.37.1..6ef0627ca` has 3 commits.
-- Owner release word for publishing both packages, creating `v0.37.2` and creating the GitHub Release is pending (after this prep PR merges; scope logged on `#3484` under batch parent `#3419`).
+- The owner gave the release word on 2026-11-25 ("批准收尾") for publishing both packages, creating `v0.37.2` and creating the GitHub Release (logged on `#3419` comment `7148839518`).
 
 | PR | Commit | Change |
 |---|---|---|
@@ -25,7 +25,10 @@ The prep PR records the local commands, results and tested commit. `Required / C
 
 ## Acceptance environment
 
-Pending: the orchestrator runs `gh workflow run probe.yml --ref release/0.37.2 -f lane=release-rehearsal -f runner=ubuntu-latest` after a joint decision and green `Required / CI`, and records the run URL, `[rehearsal] OK: 0.37.1 -> 0.37.2`, `TARBALL SERVED repo-harness 0.37.2`, and `TARBALL SERVED repo-harness-operator-web 0.37.2`.
+- Run URL: https://github.com/aimpact-inc/repo-harness/actions/runs/45479270085 (`probe.yml`, lane `release-rehearsal`, runner `ubuntu-latest`, ref `main` at `b5a735c55`)
+- `[rehearsal] OK: 0.37.1 -> 0.37.2`
+- `TARBALL SERVED repo-harness 0.37.2`
+- `TARBALL SERVED repo-harness-operator-web 0.37.2`
 
 ## Order of the owner steps
 
@@ -44,14 +47,16 @@ If a step stops, use the saved plan's resume checks to determine which steps alr
 
 ## Publication
 
-Release merge SHA is pending.
+Release merge SHA is `b5a735c55469e227b1ff7ca64e5d74f87b368836`, the `v0.37.2` tag commit.
 
 | Order | Name | Shasum | Integrity | File count |
 |---|---|---|---|---|
-| 1 | `repo-harness-operator-web@0.37.2` | pending | pending | pending |
-| 2 | `repo-harness@0.37.2` | pending | pending | pending |
+| 1 | `repo-harness-operator-web@0.37.2` | `7b4a604905b522d20835af30410163472bca8d33` | `sha512-wRLdCvpqGMjCc04Kr0Xn/bt4SDYupFRCmM0OYA9gJIes+AvNmEdKpOA1JPW0Xshbb8ZR6QqbiEMhf7GnzSlBLg==` | 129 |
+| 2 | `repo-harness@0.37.2` | `0da2b6fcc05fe63252a33227b34c20c2fe9c6fe8` | `sha512-7IqzA3pi6Aju4kFUJr7sFZW9SRMb9eqZ2uWwH4c75lMjr/OaCKt763h+hI1lf0U3TYNAfYn4HFrDNzwy/t8u6A==` | 819 |
 
-Tag `v0.37.2` and the GitHub Release are pending.
+Step 3 stopped on its first attempt: the registry readback showed only `repo-harness-operator-web@0.37.2`. The owner ran step 3 again and it completed. Both packages are on `latest`.
+
+Tag `v0.37.2` and the GitHub Release are published: https://github.com/aimpact-inc/repo-harness/releases/tag/v0.37.2 (2026-11-25T00:44:27Z). The release record is https://github.com/aimpact-inc/repo-harness/issues/3419#issuecomment-7148839518.
 
 ## Post-publish checks
 
