@@ -1,6 +1,6 @@
 ---
 name: herdr
-description: "Control herdr-core terminals and Herdr.app panes when the user explicitly requests Herdr. Find terminals by task path, then reuse a task reviewer or start a new one."
+description: "Control, read, message, open, split, or close herdr-core terminals and Herdr.app panes and tabs, including orchestrator and advisor seat workflows and restarts. Find terminals by task path, then reuse a task reviewer or start a new one."
 ---
 
 # Herdr

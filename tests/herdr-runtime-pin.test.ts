@@ -153,6 +153,8 @@ const HC_MANUAL = "# hc manual (herdr-core)\n\nThe current manual for herdr-core
 test("Herdr skill puts the hc manual verbatim under the caller-context policy", () => {
   const rendered = renderHerdrSkill(HC_MANUAL);
   expect(rendered.startsWith("---\nname: herdr\n")).toBe(true);
+  expect(rendered).toContain("Control, read, message, open, split, or close herdr-core terminals and Herdr.app panes and tabs, including orchestrator and advisor seat workflows and restarts.");
+  expect(rendered).not.toContain("when the user explicitly requests Herdr");
   expect(rendered).toContain("Missing variables do not prove");
   expect(rendered).toContain("hc ls --json");
   expect(rendered).toContain("Read-only discovery does not require");
