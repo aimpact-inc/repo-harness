@@ -6,6 +6,7 @@
  */
 import type { AccountUsageWindow } from '@botiverse/oar/browser';
 import { isRecord } from '../evidence/is-record';
+import type { SeatRoutingV1 } from './seats-settings';
 
 /**
  * The line at or above which a window is `exhausted` (#2909). The owner sets it as
@@ -35,6 +36,7 @@ const QUOTA_ACCOUNT_SOURCES = {
   agy_gemini: 'agy_account_usage',
   agy_other: 'agy_account_usage',
 } as const;
+const MAGPIE_QUOTA_SOURCE = 'magpie_quota' as const;
 
 export const AGY_QUOTA_ACCOUNTS = ['agy_gemini', 'agy_other'] as const;
 export type QuotaAccount = keyof typeof QUOTA_ACCOUNT_SOURCES;
@@ -62,6 +64,7 @@ export interface ClaudeQuotaCapture {
 }
 
 export interface CodexCredits { has_credits: boolean; unlimited: boolean; balance: string | null }
+export type CodexCreditRouting = Pick<SeatRoutingV1, 'codex_credit_mode' | 'codex_credit_floor'>;
 
 interface WindowSample {
   window: string;
@@ -77,10 +80,12 @@ interface WindowSample {
 /** A decoded source reading. `reason` set means the whole reading is unknown. */
 export interface QuotaReading {
   account: QuotaAccount;
-  source: typeof QUOTA_ACCOUNT_SOURCES[QuotaAccount];
+  source: typeof QUOTA_ACCOUNT_SOURCES[QuotaAccount] | typeof MAGPIE_QUOTA_SOURCE;
   observed_at: string | null;
   reason: string | null;
   windows: WindowSample[];
+  /** The host's existing credit policy, bound by the ChatGPT quota reader. */
+  credit_routing?: CodexCreditRouting;
   codex?: { plan_type: string | null; credits: CodexCredits | null; rate_limit_reached_type: string | null; field_errors: string[] };
 }
 
@@ -136,7 +141,8 @@ export function decodeQuotaReport(value: unknown): QuotaReport {
   for (const value of report.accounts as unknown[]) {
     const account = object(value, ['account', 'source', 'observed_at', 'state', 'reason', 'windows'], ['codex']);
     expectValid(typeof account.account === 'string' && Object.hasOwn(QUOTA_ACCOUNT_SOURCES, account.account)
-      && Object.values(QUOTA_ACCOUNT_SOURCES).includes(account.source as QuotaReading['source'])
+      && (account.source === MAGPIE_QUOTA_SOURCE ? account.account === 'chatgpt'
+        : Object.values(QUOTA_ACCOUNT_SOURCES).includes(account.source as typeof QUOTA_ACCOUNT_SOURCES[QuotaAccount]))
       && nullableString(account.observed_at) && state(account.state) && nullableString(account.reason) && Array.isArray(account.windows));
     for (const value of account.windows as unknown[]) {
       const window = object(value, ['window', 'window_minutes', 'used_percent', 'resets_at', 'elapsed_percent', 'pace', 'state', 'reason']);
@@ -275,6 +281,44 @@ export function decodeCodexRateLimitsResult(value: unknown, observedAt: string):
   };
 }
 
+const MAGPIE_CODEX_WINDOWS = [
+  { name: '5 hours', window: '5h', minutes: FIVE_HOUR_WINDOW_MINUTES },
+  { name: '7 days', window: 'weekly', minutes: WEEKLY_WINDOW_MINUTES },
+] as const;
+
+function decodeMagpieWindow(rows: readonly (Record<string, unknown> | null)[], { name, window, minutes }: typeof MAGPIE_CODEX_WINDOWS[number]): WindowSample | null {
+  const matches = rows.filter(row => row?.name === name);
+  const row = matches.length === 1 ? matches[0] : null;
+  if (!row) return null;
+  const used = row.used;
+  const resetsMs = typeof row.resetsAt === 'string' ? Date.parse(row.resetsAt) : NaN;
+  const usedPercent = typeof used === 'number' && Number.isFinite(used) && used >= 0 ? used : null;
+  const resetsAt = Number.isFinite(resetsMs) ? resetsMs / 1000 : null;
+  const reason = usedPercent === null || resetsAt === null ? `${name} usage or reset time unavailable` : null;
+  return { window, window_minutes: minutes, used_percent: usedPercent, resets_at: resetsAt, absent: false, reason };
+}
+
+/** Projects the subscription card from `magpie quota codex --json` without account identity. */
+export function decodeMagpieCodexQuota(value: unknown): QuotaReading | null {
+  if (!Array.isArray(value)) return null;
+  const cards = value.map(record).filter(card => card?.provider === 'codex' && card.kind === 'subscription');
+  const card = cards.length === 1 ? cards[0] : null;
+  if (!card || card.error || typeof card.readAt !== 'string') return null;
+  const observedMs = Date.parse(card.readAt);
+  if (!Number.isFinite(observedMs)) return null;
+
+  const balance = typeof card.balance === 'string' ? /^(\d+(?:\.\d+)?) credits$/.exec(card.balance)?.[1] : undefined;
+  const credits = balance !== undefined && Number.isFinite(Number(balance))
+    ? { has_credits: Number(balance) > 0, unlimited: false, balance } : null;
+  const rows = Array.isArray(card.windows) ? card.windows.map(record) : [];
+  const windows = MAGPIE_CODEX_WINDOWS.map(window => decodeMagpieWindow(rows, window)).filter(window => window !== null);
+  if (credits === null && !windows.some(window => window.reason === null)) return null;
+  return {
+    account: 'chatgpt', source: MAGPIE_QUOTA_SOURCE, observed_at: new Date(observedMs).toISOString(),
+    reason: null, windows, codex: { plan_type: null, credits, rate_limit_reached_type: null, field_errors: [] },
+  };
+}
+
 const round = (value: number) => Math.round(value * 10) / 10;
 
 function classifyWindow(sample: WindowSample, nowMs: number, readingReason: string | null, exhaustedAtOrAboveUsed: number): QuotaWindowReport {
@@ -298,10 +342,16 @@ function classifyWindow(sample: WindowSample, nowMs: number, readingReason: stri
   return { ...report, elapsed_percent: round(elapsed), pace: round(pace), state };
 }
 
-/**
- * Applies the #1716 decision table to each window. The worst window state wins; `rate_limit_reached_type` set means exhausted
- * at any exhaustion line. No window of 10080 min means no weekly reading; that counts as an unknown window in the order.
- */
+function codexCreditReason(reading: QuotaReading, reached: string | null): string | null {
+  const routing = reading.credit_routing, credits = reading.codex?.credits;
+  if (reading.account !== 'chatgpt' || routing?.codex_credit_mode !== 'all' || !credits) return null;
+  if (credits.unlimited) return 'unlimited credits cover usage';
+  const balance = Number(credits.balance);
+  return reached === null && Number.isFinite(balance) && balance > 0 && balance >= routing.codex_credit_floor
+    ? 'available credits cover usage' : null;
+}
+
+/** The worst window state wins unless all seats can use credits. A missing weekly window counts as unknown. */
 export function classifyQuotaReading(reading: QuotaReading, nowMs: number, exhaustedAtOrAboveUsed: number = DEFAULT_EXHAUSTED_AT_OR_ABOVE_USED): QuotaAccountReport {
   const stale = reading.reason === null && reading.observed_at !== null && nowMs - Date.parse(reading.observed_at) > QUOTA_STALE_MS;
   const reason = stale ? 'reading older than 30 min' : reading.reason;
@@ -312,9 +362,10 @@ export function classifyQuotaReading(reading: QuotaReading, nowMs: number, exhau
   const state: QuotaState = reason !== null ? 'unknown'
     : reached !== null ? 'exhausted'
       : QUOTA_STATE_ORDER.find(candidate => (candidate === 'unknown' && !weekly) || windows.some(window => window.state === candidate)) ?? 'unknown';
-  const accountReason = reason ?? (reached !== null ? `rate_limit_reached_type ${reached}` : !weekly ? `no window of ${WEEKLY_WINDOW_MINUTES} min` : null);
+  const creditReason = state === 'tight' || state === 'exhausted' ? codexCreditReason(reading, reached) : null;
+  const accountReason = reason ?? creditReason ?? (reached !== null ? `rate_limit_reached_type ${reached}` : !weekly ? `no window of ${WEEKLY_WINDOW_MINUTES} min` : null);
   return {
-    account: reading.account, source: reading.source, observed_at: reading.observed_at, state,
+    account: reading.account, source: reading.source, observed_at: reading.observed_at, state: creditReason === null ? state : 'normal',
     reason: accountReason, windows,
     ...(reading.codex ? { codex: reading.codex } : {}),
   };
