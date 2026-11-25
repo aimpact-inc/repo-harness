@@ -39,6 +39,8 @@ const TARGET_FACADE_KIND_PACKAGES = [
   "repo-harness-product",
   "repo-harness-issue-flow",
   "repo-harness-ship",
+  "repo-harness-sharpen",
+  "repo-harness-reframe",
   "repo-harness-architecture",
   "repo-harness-archimap",
   // Post-cutover addition: a repo-owned facade sourced from

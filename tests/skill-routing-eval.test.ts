@@ -282,7 +282,7 @@ describe("scripts/run-skill-routing-eval.ts provider mode (run subcommand, SSD-0
     test("core only discovers the router, the core facades, and explicit-setup packages", () => {
       const names = buildDiscoveredSkillSurface(catalog, [], "claude").map((e) => e.name).sort();
       expect(names).toEqual(
-        ["repo-harness", "repo-harness-check", "repo-harness-issue-flow", "repo-harness-ship", "repo-harness-strategy", "repo-harness-test"],
+        ["repo-harness", "repo-harness-check", "repo-harness-issue-flow", "repo-harness-reframe", "repo-harness-sharpen", "repo-harness-ship", "repo-harness-strategy", "repo-harness-test"],
       );
       expect(buildDiscoveredSkillSurface(catalog, [], "claude").find(e => e.name === "repo-harness-strategy")?.reason).toBe("explicit-setup");
     });
@@ -540,7 +540,7 @@ describe("scripts/run-skill-routing-eval.ts provider mode (run subcommand, SSD-0
       expect(report.metrics.double_trigger).toEqual({ count: 0, denominator: 64, rate: 0 });
       expect(report.metrics.provider_error_count).toBe(0);
       expect(report.discovered_surface.map((d) => d.name).sort()).toEqual(
-        ["obsidian-memory", "repo-harness", "repo-harness-advisor", "repo-harness-archimap", "repo-harness-architecture", "repo-harness-check", "repo-harness-cross-review", "repo-harness-herdr-portal", "repo-harness-issue-flow", "repo-harness-orchestrator", "repo-harness-product", "repo-harness-seat-handoff", "repo-harness-ship", "repo-harness-strategy", "repo-harness-test", "windows-python-first"].sort(),
+        ["obsidian-memory", "repo-harness", "repo-harness-advisor", "repo-harness-archimap", "repo-harness-architecture", "repo-harness-check", "repo-harness-cross-review", "repo-harness-herdr-portal", "repo-harness-issue-flow", "repo-harness-orchestrator", "repo-harness-product", "repo-harness-reframe", "repo-harness-seat-handoff", "repo-harness-sharpen", "repo-harness-ship", "repo-harness-strategy", "repo-harness-test", "windows-python-first"].sort(),
       );
     }, 30_000);
 

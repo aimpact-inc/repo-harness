@@ -147,6 +147,46 @@
       "audience": "bot"
     },
     {
+      "name": "repo-harness-sharpen",
+      "kind": "facade",
+      "source": "assets/skills/repo-harness-sharpen",
+      "provider": null,
+      "hosts": [
+        "claude",
+        "codex",
+        "pi",
+        "antigravity"
+      ],
+      "owner": "core",
+      "explicitOnly": false,
+      "discoverability": "explicit-only",
+      "requires": [],
+      "mutatesRepoByDefault": false,
+      "summary": "Read-only prompt-sharpening skill: identifies practitioner checks, raw primary inputs, concrete methods, and an external verification oracle, then rewrites the prompt deeper without expanding scope. Explicit invoke only.",
+      "retirementCandidate": null,
+      "audience": "bot"
+    },
+    {
+      "name": "repo-harness-reframe",
+      "kind": "facade",
+      "source": "assets/skills/repo-harness-reframe",
+      "provider": null,
+      "hosts": [
+        "claude",
+        "codex",
+        "pi",
+        "antigravity"
+      ],
+      "owner": "core",
+      "explicitOnly": false,
+      "discoverability": "explicit-only",
+      "requires": [],
+      "mutatesRepoByDefault": false,
+      "summary": "Read-only problem-reframing skill: disambiguates candidate problems, teaches ranked domain terms with verified citations and neighboring-field analogies, then rewrites the operator's description. Explicit invoke only.",
+      "retirementCandidate": null,
+      "audience": "bot"
+    },
+    {
       "name": "repo-harness-architecture",
       "kind": "facade",
       "source": "assets/skill-commands/repo-harness-architecture",

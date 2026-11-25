@@ -73,7 +73,7 @@ const ALL_WITH_PI = ['architecture', 'cross-review', 'mcp', 'operator', 'peer-ru
 const PROBE_PLUGINS = ALL_PLUGINS.filter(id => !isCommandPlugin(id));
 /** The plugins that own host files, including peer-runtime's Claude portal skill. */
 const HOST_FILE_PLUGINS = ALL_PLUGINS.filter(id => id !== 'mcp' && id !== 'operator');
-const CORE_FACADES = ['repo-harness-check', 'repo-harness-issue-flow', 'repo-harness-ship', 'repo-harness-test'];
+const CORE_FACADES = ['repo-harness-check', 'repo-harness-issue-flow', 'repo-harness-reframe', 'repo-harness-sharpen', 'repo-harness-ship', 'repo-harness-test'];
 const WAZA_SKILLS = ['think', 'hunt', 'check', 'health', 'mermaid'];
 /** The host roots and skills each plugin owns (the herdr portal ships for Claude only). */
 const PLUGIN_SKILLS: Readonly<Partial<Record<PluginId, readonly (readonly ['codex' | 'claude', string])[]>>> = {
