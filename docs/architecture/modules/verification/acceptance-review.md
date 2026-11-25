@@ -1,6 +1,6 @@
 # verification/acceptance-review 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-verification-acceptance-review" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:722326c5f46b1b7fe12e61aae8afe92e5ce5035adddad1846671029f8d57e716" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-verification-acceptance-review" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:24b95a314d0495dc276749501438cdcbf9c3814ea54f0bade9d58292fda0691c" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.verification.acceptance-review`(kind `capability`)
 > **Matched Prefixes**:`src/core/review/**`、`src/effects/review/**`、`src/cli/commands/review.ts`、`scripts/acceptance-receipt.ts`、`scripts/change-assessment.ts`、`src/effects/admission/admission-store.ts`、`src/effects/admission/admission-source.ts`、`src/effects/admission/issue-goal.ts`、`src/effects/admission/control-admission.ts`、`src/effects/github/issues.ts`、`src/effects/github/policy.ts`
@@ -28,6 +28,7 @@ flowchart LR
   p1_component_task_agent_host_review_runner_c2379e1e["Reviewer Runner"]:::component
   p1_capability_verification_acceptance_review_f80a24d6 -->|"Admit at most one persistent semantic review session per work package through the circuit breaker"| p1_capability_runtime_harness_hook_adapters_75a11743
   p1_capability_verification_acceptance_review_f80a24d6 -->|"Run one generic acceptance review round for an admitted review campaign"| p1_component_acceptance_review_primary_b86fb286
+  p1_component_acceptance_review_primary_cli_16f323d1 -->|"Supply native Antigravity session access to the review collector at the CLI boundary."| p1_capability_workflow_engine_execution_primitives_b3033934
   p1_component_acceptance_review_primary_b86fb286 -->|"Hold an exclusive directory lock around one generic review run#44; and read and write immutable session artifacts and the reviewer process identity"| p1_capability_workflow_engine_execution_primitives_b3033934
   p1_component_acceptance_review_primary_b86fb286 -->|"Drive the persistent reviewer session through the runner port that task-agent-host implements#59; the CLI root injects a loader and guards the four runtime operations with peer-runtime#44; so core review admission and publication load no task-agent-host module"| p1_capability_runtime_harness_task_agent_host_d81dadb6
   p1_capability_runtime_harness_hook_adapters_75a11743 -->|"Read the diff fingerprint for mutation guards."| p1_capability_verification_acceptance_review_f80a24d6
@@ -45,8 +46,8 @@ flowchart LR
   classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-- Proof: `proven` (`sha256:7a7ef7785c1d8ff2666761dd97ab9e7ea156aff387e42a55c50a15550369fa73`).
-- Semantic nodes: `11`; declared relations: `13`.
+- Proof: `proven` (`sha256:39521f0bef8a6b147b4e15820cef2f56815683d7cb5f1928fb8fd03661449db2`).
+- Semantic nodes: `11`; declared relations: `14`.
 
 ### 1.2 模組職責表
 
@@ -97,7 +98,6 @@ flowchart LR
 - `reads` ← `component.mcp-sidecar.primary` — Read the check records and the change assessment record
 - `depends-on` ← `capability.runtime-harness.operator` — Read and reobserve protected current review admission for exact session discovery and current goal context
 - `reads` ← `component.operator.agents-configuration` — Plugin → core: validate review runtime ids against the declared review runtimes
-- `depends-on` ← `capability.organization.publication` — Run the bounded gh command transport that the Draft PR operation uses.
 - `calls` ← `capability.runtime-harness.task-agent-host` — Plugin → core: bind task sessions to the active review admission and its source, resolve the policy review base of the diff fingerprint, implement the reviewer runner port, and apply the review isolation policy in the OAR review host
 - `calls` ← `component.task-fleet.provider-feedback` — Plugin → core: observe the active review admission before admitted feedback intake
 - `depends-on` ← `capability.workflow-engine.workflow-state` — Read the diff fingerprint for Effective State.
@@ -110,7 +110,7 @@ flowchart LR
   - `calls` → `capability.runtime-harness.task-agent-host` — Drive the persistent reviewer session through the runner port that task-agent-host implements; the CLI root injects a loader and guards the four runtime operations with peer-runtime, so core review admission and publication load no task-agent-host module
   - `reads` → `capability.workflow-engine.workflow-state` — Observe Git and files read-only and resolve the workflow profile for the review subject
 - `component.acceptance-review.primary-cli`:
-  - 無。
+  - `depends-on` → `capability.workflow-engine.execution-primitives` — Supply native Antigravity session access to the review collector at the CLI boundary.
 - `component.acceptance-review.primary-core`:
   - 無。
 - `component.acceptance-review.primary-scripts`:
@@ -127,7 +127,7 @@ flowchart LR
 
 ## 2. P2:端到端數據流
 
-> **Proof**: `proven` (`sha256:7a7ef7785c1d8ff2666761dd97ab9e7ea156aff387e42a55c50a15550369fa73`); selectors `16/16`.
+> **Proof**: `proven` (`sha256:39521f0bef8a6b147b4e15820cef2f56815683d7cb5f1928fb8fd03661449db2`); selectors `16/16`.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%
