@@ -13,3 +13,6 @@ source:
     - src/cli/commands/global-runtime.ts
     - src/cli/commands/candidate-reconciliation.ts
     - src/cli/commands/upgrade.ts
+    - src/cli/commands/upgrade-command.ts
+    - src/cli/commands/upgrade-registered.ts
+    - src/cli/commands/package-version.ts
