@@ -128,10 +128,17 @@ try {
       console.log(JSON.stringify(result));
       if (result.status === 'retained') process.exitCode = 1;
     } else if (action === 'cleanup') {
-      const result = await cleanupTaskWorktree(value('--repo'), value('--worktree'), args.includes('--dry-run'));
+      const { releaseClosedWorktreeMarker } = await import(pathToFileURL(join(packageRoot, 'src/effects/state/coordination-worktree-topology.ts')).href) as typeof import('../src/effects/state/coordination-worktree-topology');
+      const result = await cleanupTaskWorktree(value('--repo'), value('--worktree'), args.includes('--dry-run'), undefined, releaseClosedWorktreeMarker);
       console.log(JSON.stringify(result));
       if (result.status === 'cleanup_pending') process.exitCode = 1;
     }
+  } else if (action === 'prove-cleanup-branch') {
+    const { proveCloseoutBranch } = await import(pathToFileURL(join(packageRoot, 'src/effects/state/coordination-worktree-topology.ts')).href) as typeof import('../src/effects/state/coordination-worktree-topology');
+    const { mode, merge_commit_sha } = proveCloseoutBranch(value('--repo'), value('--branch'), value('--head'), {
+      targetRef: value('--target'), target: value('--target-oid'),
+    });
+    console.log(`${mode}\t${merge_commit_sha}`);
   } else if (action === 'assert-ignored-cleanup-safe') {
     const { assertNoIgnoredCloseoutData } = await import(pathToFileURL(join(packageRoot, 'src/effects/state/coordination-worktree-topology.ts')).href) as typeof import('../src/effects/state/coordination-worktree-topology');
     assertNoIgnoredCloseoutData(value('--worktree'));

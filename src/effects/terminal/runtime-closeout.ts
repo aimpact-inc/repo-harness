@@ -324,14 +324,27 @@ async function closeUnboundTaskStart(dir: string, task: string, role: string, mo
   if (group.length) return { status: 'cleanup_pending', pids: group, reason: 'provider_group_alive' };
   return finish();
 }
-async function cleanupTaskAgent(repoRoot: string, task: string, role: string, mode: 'close' | 'cancel'): Promise<TaskCleanupResult> {
+type OnWorktreeClosed = (root: string, checkout: string, gitBin?: string) => void;
+
+async function cleanupTaskAgent(repoRoot: string, task: string, role: string, mode: 'close' | 'cancel', onClosed?: OnWorktreeClosed): Promise<TaskCleanupResult> {
   const repository = taskRepository(repoRoot); const root = repository.primary_root; const dir = taskSessionDirectory(root, task, role);
   assertSessionDirectory(root, dir);
   return withCallerLock<TaskCleanupResult>(root, dir, async () => {
-    if (!existsSync(join(dir, 'binding.json'))) return closeUnboundTaskStart(dir, task, role, mode);
+    if (!existsSync(join(dir, 'binding.json'))) {
+      const result = await closeUnboundTaskStart(dir, task, role, mode);
+      if (result.status === 'closed' && onClosed) {
+        const intent = readStartIntent(join(dir, 'intent.json'));
+        onClosed(root, intent.repository.execution_root);
+      }
+      return result;
+    }
     const { binding } = readTaskAgent(root, task, role);
     assertCreated(binding.ownership); assertCreated(binding.provider.ownership);
-    if (existsSync(join(dir, 'closed.json'))) return { status: 'closed', pids: [] };
+    const releaseMarker = () => onClosed?.(root, binding.execution_root);
+    if (existsSync(join(dir, 'closed.json'))) {
+      releaseMarker();
+      return { status: 'closed', pids: [] };
+    }
     if (mode === 'close') {
       for (let round = 1; round <= binding.max_requests && existsSync(join(dir, `request-${round}.json`)); round++) {
         const request = readSessionArtifact<TaskRequest>(join(dir, `request-${round}.json`));
@@ -349,6 +362,7 @@ async function cleanupTaskAgent(repoRoot: string, task: string, role: string, mo
     }
     const closed = () => {
       writeSessionArtifact(join(dir, 'closed.json'), { task, role, provider: binding.provider, disposition: mode === 'cancel' ? 'cancelled' : 'completed' });
+      releaseMarker();
       return { status: 'closed' as const, pids: [] };
     };
     if (binding.runtime === 'terminal') {
@@ -366,21 +380,22 @@ async function cleanupTaskAgent(repoRoot: string, task: string, role: string, mo
   });
 }
 
-export function closeTaskAgent(repoRoot: string, task: string, role: string): Promise<TaskCleanupResult> {
-  return cleanupTaskAgent(repoRoot, task, role, 'close');
+export function closeTaskAgent(repoRoot: string, task: string, role: string, onClosed?: OnWorktreeClosed): Promise<TaskCleanupResult> {
+  return cleanupTaskAgent(repoRoot, task, role, 'close', onClosed);
 }
 export function cancelTaskAgent(repoRoot: string, task: string, role: string): Promise<TaskCleanupResult> {
   return cleanupTaskAgent(repoRoot, task, role, 'cancel');
 }
 
 /** Git publication/dirty/merge checks remain the caller's authority. */
-export async function cleanupTaskWorktree(repoRoot: string, checkoutPath: string, dryRun = false, gitBin = configuredGitBinary()): Promise<TaskCleanupResult | { status: 'not_registered'; pids: number[] }> {
+export async function cleanupTaskWorktree(repoRoot: string, checkoutPath: string, dryRun = false, gitBin = configuredGitBinary(),
+  onClosed?: OnWorktreeClosed): Promise<TaskCleanupResult | { status: 'not_registered'; pids: number[] }> {
   const repository = taskRepository(repoRoot, gitBin);
   const expected = { ...repository, execution_root: checkoutPath };
   const dir = workspaceDirectory(expected);
   if (!existsSync(dir)) return { status: 'not_registered', pids: [] };
   assertSessionDirectory(repository.primary_root, dir);
-  return withCallerLock(repository.primary_root, dir, async () => {
+  const result = await withCallerLock<TaskCleanupResult | { status: 'not_registered'; pids: number[] }>(repository.primary_root, dir, async () => {
     if (existsSync(join(dir, 'closed.json'))) return { status: 'closed', pids: [] };
     if (existsSync(join(dir, 'open-intent.json'))) classicRecordRetired(join(dir, 'open-intent.json'));
     if (!existsSync(join(dir, 'binding.json'))) return { status: 'not_registered', pids: [] };
@@ -409,4 +424,6 @@ export async function cleanupTaskWorktree(repoRoot: string, checkoutPath: string
     }
     return { status: 'closed', pids: [] };
   });
+  if (!dryRun && result.status === 'closed') onClosed?.(repository.primary_root, checkoutPath, gitBin);
+  return result;
 }

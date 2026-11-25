@@ -47,10 +47,6 @@ if [[ -n "${REPO_HARNESS_HELPER_SOURCE_PATH:-}" && -f "$REPO_HARNESS_HELPER_SOUR
 fi
 helper_dir="$(cd "$(dirname "$helper_source")" && pwd)"
 
-worktree_merge_lib="$helper_dir/worktree-merge-lib.sh"
-[[ -f "$worktree_merge_lib" ]] || { echo "contract-worktree: worktree merge library is unavailable: $worktree_merge_lib" >&2; exit 1; }
-# shellcheck source=worktree-merge-lib.sh
-. "$worktree_merge_lib"
 architecture_plugin_lib="$helper_dir/lib/architecture-plugin.sh"
 [[ -f "$architecture_plugin_lib" ]] || { echo "contract-worktree: architecture plugin library is unavailable: $architecture_plugin_lib" >&2; exit 1; }
 # shellcheck source=lib/architecture-plugin.sh
@@ -574,13 +570,12 @@ cleanup_worktree() {
     esac
   fi
 
-  local cleanup_head="" cleanup_target=""
+  local cleanup_head cleanup_target merge_proof merge_commit
   cleanup_target="$(git rev-parse "$target_branch^{commit}")"
   cleanup_head="$(git rev-parse "refs/heads/$branch_name")"
-  # Merge state comes from the shared authority in worktree-merge-lib.sh.
-  # The lib is fail-closed: anything it cannot prove merged comes back
-  # `unmerged`.
-  merge_mode="$(worktree_merge_mode "$branch_name" "$target_branch")"
+  merge_proof="$(run_contract_runtime prove-cleanup-branch --repo "$current_root" \
+    --branch "$branch_name" --head "$cleanup_head" --target "$target_branch" --target-oid "$cleanup_target")"
+  IFS=$'\t' read -r merge_mode merge_commit <<< "$merge_proof"
   case "$merge_mode" in
     ancestor)
       echo "[ContractWorktree] Merge check for $branch_name: ancestor of $target_branch"
@@ -588,9 +583,8 @@ cleanup_worktree() {
     absorbed)
       echo "[ContractWorktree] Merge check for $branch_name: absorbed into $target_branch (squash-equivalent tree)"
       ;;
-    *)
-      echo "contract-worktree: branch $branch_name is not fully merged into $target_branch; refusing cleanup" >&2
-      exit 1
+    provider)
+      echo "[ContractWorktree] Merge check for $branch_name: provider proved the exact head merged into $target_branch"
       ;;
   esac
 
@@ -637,7 +631,7 @@ cleanup_worktree() {
   run_contract_runtime remove-exact --repo "$current_root" \
     --worktree "${worktree_path:-(absent)}" \
     --branch "$branch_name" --head "$cleanup_head" --target "$target_branch" \
-    --target-oid "$cleanup_target" --merge "$cleanup_target"
+    --target-oid "$cleanup_target" --merge "$merge_commit"
   echo "[ContractWorktree] Removed worktree: ${worktree_path:-(absent)}"
   echo "[ContractWorktree] Deleted branch: $branch_name (update-ref, $merge_mode)"
 

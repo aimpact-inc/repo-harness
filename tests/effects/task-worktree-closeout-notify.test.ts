@@ -6,7 +6,8 @@ import { mockOfflineHerdr } from '../helpers/engineer-runtime-fixture';
 import { commitAll, initGitRepo, run, tmpWorkspaceIn } from '../helpers/repo-fixture';
 import { startTaskAgent } from '../../src/effects/terminal/task-session';
 import { cleanupTaskWorktree, notifyTaskWorktreeMerged } from '../../src/effects/terminal/runtime-closeout';
-import { removeExactWorktree } from '../../src/effects/state/coordination-worktree-topology';
+import { releaseClosedWorktreeMarker, removeExactWorktree } from '../../src/effects/state/coordination-worktree-topology';
+import { writeControlledWorktreeProcessesConfig } from '../helpers/controlled-worktree-processes';
 import { HerdrCoreError } from '../../src/effects/terminal/herdr-core';
 
 const roots: string[] = [];
@@ -27,12 +28,14 @@ async function fixture(branch = 'codex/owner') {
   const base = tmpWorkspaceIn('/tmp', 'mn'); roots.push(base);
   const root = join(base, 'repo'), home = join(base, 'home'), checkout = join(base, 'repo-wt-owner');
   mkdirSync(root); mkdirSync(home); initGitRepo(root);
+  writeControlledWorktreeProcessesConfig(root);
   writeFileSync(join(root, '.gitignore'), '.ai/\n.env\n');
   writeFileSync(join(root, 'file'), 'base'); commitAll(root, 'base');
   expect(run('git', ['worktree', 'add', '-b', branch, checkout], root).status).toBe(0);
   writeFileSync(join(checkout, 'file'), 'merged'); commitAll(checkout, 'owner change');
   expect(run('git', ['merge', '--ff-only', branch], root).status).toBe(0);
   const merge = run('git', ['rev-parse', 'HEAD'], root).stdout.trim();
+  expect(run('git', ['update-ref', 'refs/remotes/origin/main', merge], root).status).toBe(0);
   const spec = { task: 'owner-task', role: 'worker', harness_kind: 'codex',
     endpoint: { socket: join(base, 'hc.sock'), home }, args: [], max_requests: 1 };
   const provider = spawn(process.execPath, ['-e', 'process.stdout.write("ready"); setInterval(() => {}, 1000)'], {
@@ -78,8 +81,8 @@ async function fixture(branch = 'codex/owner') {
     notify: () => notifyTaskWorktreeMerged(root, binding.terminal_id, notice),
     /** The owner program exited and its terminal was removed. */
     async ownerGone() { await exit(); mode = 'gone'; },
-    remove: () => removeExactWorktree(root, { worktree: checkout, branch: notice.branch, head_sha: merge,
-      target_ref: 'main', target_oid: merge, merge_commit_sha: merge }, { closeout: true }),
+    remove: (closeoutProcesses?: () => null) => removeExactWorktree(root, { worktree: checkout, branch: notice.branch, head_sha: merge,
+      target_ref: 'main', target_oid: merge, merge_commit_sha: merge }, { closeout: true, closeoutProcesses }),
   };
 }
 
@@ -112,7 +115,11 @@ test('cleanup ends the live owner terminal before closeout and exact public remo
   const f = await fixture('feat/owner');
   expect(await f.notify()).toEqual({ status: 'notified' });
   expect(f.prompts).toHaveLength(1);
-  expect(await cleanupTaskWorktree(f.root, f.checkout)).toEqual({ status: 'closed', pids: [] });
+  expect(await cleanupTaskWorktree(f.root, f.checkout, false, undefined, releaseClosedWorktreeMarker)).toEqual({ status: 'closed', pids: [] });
+  expect(existsSync(join(f.checkout, '.ai/harness/active-worktree'))).toBe(false);
+  // Board-style closeout still requires a known inventory from its observer.
+  expect(() => f.remove(() => null)).toThrow('process_unknown');
+  expect(existsSync(f.checkout)).toBe(true);
   expect([f.spies.hcKill.mock.calls.map(call => call[0]), f.spies.hcRm.mock.calls.map(call => call[0])]).toEqual([[f.binding.terminal_id], [f.binding.terminal_id]]);
   const cli = join(import.meta.dir, '../../src/cli/index.ts');
   const removal = run(process.execPath, [cli, 'worktrees', 'runtime', 'remove-exact',
@@ -126,10 +133,10 @@ test('cleanup ends the live owner terminal before closeout and exact public remo
 test('owner closeout retains ignored local data and succeeds after the file is cleared', async () => {
   const f = await fixture(); await f.ownerGone();
   expect(await f.notify()).toEqual({ status: 'owner_gone', reason: 'agent_exited' });
-  expect(await cleanupTaskWorktree(f.root, f.checkout)).toEqual({ status: 'closed', pids: [] });
-  expect(await f.notify()).toEqual({ status: 'owner_gone', reason: 'workspace_closed' });
   const local = join(f.checkout, '.env');
   writeFileSync(local, 'ignored fixture data');
+  expect(await cleanupTaskWorktree(f.root, f.checkout, false, undefined, releaseClosedWorktreeMarker)).toEqual({ status: 'closed', pids: [] });
+  expect(await f.notify()).toEqual({ status: 'owner_gone', reason: 'workspace_closed' });
   expect(f.remove).toThrow('ignored worktree data: ".env"');
   expect(readFileSync(local, 'utf8')).toBe('ignored fixture data');
   expect(readFileSync(join(f.checkout, '.ai/harness/active-worktree'), 'utf8').trim()).toBe(f.checkout);
