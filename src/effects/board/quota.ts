@@ -1,5 +1,5 @@
 import type { AccountUsageSnapshot, InstallationSnapshot } from '@botiverse/oar/browser';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { retryWindowsSharingRace } from '../atomic-append';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -12,10 +12,12 @@ import {
   CLAUDE_QUOTA_CAPTURE_PATH,
   decodeClaudeQuotaCapture,
   decodeCodexRateLimitsResult,
+  decodeMagpieCodexQuota,
   projectAgyQuota,
   unknownAgyQuota,
   unknownQuotaReading,
   type ClaudeQuotaCapture,
+  type CodexCreditRouting,
   type QuotaReading,
   type QuotaReport,
 } from '../../core/board/quota';
@@ -23,6 +25,7 @@ import { hasAgySeat } from '../../core/board/seat-routing';
 import { readSeatsConfiguration, resolveAgyInstallation } from './seats-configuration';
 
 const CODEX_READ_TIMEOUT_MS = 20_000;
+const MAGPIE_READ_TIMEOUT_MS = 15_000;
 const AGY_READ_TIMEOUT_MS = 20_000;
 
 /**
@@ -32,7 +35,7 @@ export async function readQuotaReport(env: NodeJS.ProcessEnv, exhaustedAtOrAbove
   const { seats } = readSeatsConfiguration(env);
   const claude = readClaudeQuota(env);
   const [codex, agy] = await Promise.all([
-    readCodexQuota(env, PACKAGE_VERSION),
+    readCodexQuota(env, PACKAGE_VERSION, CODEX_READ_TIMEOUT_MS, seats.routing),
     hasAgySeat(seats) ? readAgyQuota(env) : [],
   ]);
   return buildQuotaReport([claude, codex, ...agy], Date.now(), exhaustedAtOrAboveUsed);
@@ -136,12 +139,35 @@ export function runClaudeStatusLine(rateLimits: unknown, env: NodeJS.ProcessEnv 
   return { exitCode: 0, stdout: `${line}\n`, stderr: '' };
 }
 
+/** Keep the native account authoritative when it returns a quota signal. */
+export async function readCodexQuota(env: NodeJS.ProcessEnv, clientVersion: string, timeoutMs = CODEX_READ_TIMEOUT_MS,
+  routing?: CodexCreditRouting): Promise<QuotaReading> {
+  const native = await readCodexAppServerQuota(env, clientVersion, timeoutMs);
+  const nativeAnswered = native.reason === null && (native.codex?.credits != null
+    || native.codex?.rate_limit_reached_type != null || native.windows.some(window => window.used_percent !== null && window.resets_at !== null));
+  const reading = nativeAnswered ? native : (await readMagpieCodexQuota(env)) ?? native;
+  if (!reading.codex?.credits) return reading;
+  const { codex_credit_mode, codex_credit_floor } = routing ?? readSeatsConfiguration(env).seats.routing;
+  return { ...reading, credit_routing: { codex_credit_mode, codex_credit_floor } };
+}
+
+function readMagpieCodexQuota(env: NodeJS.ProcessEnv): Promise<QuotaReading | null> {
+  return new Promise(resolve => {
+    execFile('magpie', ['quota', 'codex', '--json'], { env, timeout: MAGPIE_READ_TIMEOUT_MS, killSignal: 'SIGKILL' }, (error, stdout) => {
+      if (error) { resolve(null); return; }
+      let value: unknown;
+      try { value = JSON.parse(stdout); } catch { resolve(null); return; }
+      resolve(decodeMagpieCodexQuota(value));
+    });
+  });
+}
+
 /**
  * One active read through `codex app-server`: `initialize`, then
  * `account/rateLimits/read`. It starts no thread and no model turn, and reads
  * no Codex rollout log. Every failure is an `unknown` reading with its reason.
  */
-export function readCodexQuota(env: NodeJS.ProcessEnv, clientVersion: string, timeoutMs = CODEX_READ_TIMEOUT_MS): Promise<QuotaReading> {
+function readCodexAppServerQuota(env: NodeJS.ProcessEnv, clientVersion: string, timeoutMs: number): Promise<QuotaReading> {
   return new Promise(resolve => {
     const child = spawn('codex', ['app-server'], { env, stdio: ['pipe', 'pipe', 'ignore'] });
     let settled = false;

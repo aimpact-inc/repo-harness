@@ -399,6 +399,28 @@ describe('quota classification', () => {
     expect(account.state).toBe(accountState);
   });
 
+  test.each([
+    ['positive balance covers an exhausted window', 97, '12.50', false, null, 'all', 0, 'normal', 'available credits cover usage'],
+    ['positive balance covers a tight window at the floor', 90, '12.50', false, null, 'all', 12.5, 'normal', 'available credits cover usage'],
+    ['unlimited credits cover usage at any floor', 97, null, true, 'rate_limit_reached', 'all', 1000, 'normal', 'unlimited credits cover usage'],
+    ['a provider limit still stops finite credits', 97, '12.50', false, 'rate_limit_reached', 'all', 0, 'exhausted', 'rate_limit_reached_type rate_limit_reached'],
+    ['zero balance does not cover usage', 97, '0', false, null, 'all', 0, 'exhausted', null],
+    ['a balance below the floor does not cover usage', 97, '12.50', false, null, 'all', 13, 'exhausted', null],
+    ['review mode leaves the account classification intact', 97, '12.50', false, null, 'review', 0, 'exhausted', null],
+    ['off mode leaves the account classification intact', 97, '12.50', false, null, 'off', 0, 'exhausted', null],
+  ] as const)('ChatGPT credit classification: %s', (_name, usedPercent, balance, unlimited, reached, mode, floor, state, reason) => {
+    const reading = decodeCodexRateLimitsResult({ rateLimits: {
+      primary: { usedPercent, windowDurationMins: 300, resetsAt: (NOW + 2 * HOUR) / 1000 },
+      secondary: { usedPercent: 50, windowDurationMins: 10080, resetsAt: (NOW + 84 * HOUR) / 1000 },
+      credits: { hasCredits: balance !== null && Number(balance) > 0, unlimited, balance }, rateLimitReachedType: reached,
+    } }, new Date(NOW).toISOString());
+    reading.credit_routing = { codex_credit_mode: mode, codex_credit_floor: floor };
+    expect(classifyQuotaReading(reading, NOW)).toMatchObject({ state, reason, windows: [
+      { window: 'primary', state: usedPercent >= 95 ? 'exhausted' : 'tight', used_percent: usedPercent },
+      { window: 'secondary', state: 'normal' },
+    ] });
+  });
+
   test('a provider-reported limit is exhausted at any exhaustion line', () => {
     const reading = decodeCodexRateLimitsResult({ rateLimits: {
       primary: { usedPercent: 10, windowDurationMins: 10_080, resetsAt: (NOW + 84 * HOUR) / 1000 }, rateLimitReachedType: 'rate_limit_reached',
@@ -514,8 +536,9 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
     out({ id: message.id, result: { codexHome: '/fake', platformFamily: 'unix', platformOs: 'macos', userAgent: 'fake' } });
   } else if (message.method === 'account/rateLimits/read') {
     if (mode === 'error') return out({ id: message.id, error: { code: -32603, message: 'not logged in' } });
+    const primaryUsed = mode === 'primary-exhausted' ? 97 : 50;
     const resetsAt = Math.floor(Date.now() / 1000) + 167 * 3600;
-    out({ id: message.id, result: { rateLimits: { primary: { usedPercent: 50, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 2 * 3600 }, secondary: { usedPercent: mode === 'exhausted' ? 95 : mode === '90-left' ? 10 : 1, windowDurationMins: 10080, resetsAt }, credits: { hasCredits: true, unlimited: false, balance: '34410.83' }, planType: 'pro', rateLimitReachedType: null } } });
+    out({ id: message.id, result: { rateLimits: { primary: { usedPercent: primaryUsed, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 2 * 3600 }, secondary: { usedPercent: mode === 'exhausted' ? 95 : mode === '90-left' ? 10 : 1, windowDurationMins: 10080, resetsAt }, credits: { hasCredits: true, unlimited: false, balance: '34410.83' }, planType: 'pro', rateLimitReachedType: null } } });
   }
 });
 `;
@@ -577,6 +600,28 @@ function fixture(codexMode: string | null, agyMode: string | null = null) {
   const env = { HOME: home, PATH: bin, TMPDIR: tmpdir(), BUN_INSTALL: join(home, '.bun'),
     FAKE_CODEX_LOG: log, FAKE_CODEX_MODE: codexMode ?? '' };
   return { home, env, log, agyLog };
+}
+
+function fixtureMagpie(env: Record<string, string>, output: string, exitCode = 0): string {
+  const log = join(env.HOME, 'magpie.json');
+  writeFileSync(join(env.PATH, 'magpie'), `#!${process.execPath}
+require('node:fs').writeFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)));
+console.log(${JSON.stringify(output)});
+process.exit(${exitCode});
+`, { mode: 0o755 });
+  return log;
+}
+
+function magpieSubscription(nowMs: number) {
+  return {
+    provider: 'codex', kind: 'subscription', name: 'private-magpie-name', user: 'private-magpie-user@example.invalid',
+    readAt: new Date(nowMs).toISOString().replace('Z', '+00:00'),
+    balance: '12.50 credits',
+    windows: [
+      { name: '7 days', used: 97, remaining: 3, resetsAt: new Date(nowMs + 84 * HOUR).toISOString().replace('Z', '+00:00') },
+      { name: 'Image generation', used: 0, remaining: 100, text: true, display: 'Unknown', lane: 'images' },
+    ],
+  };
 }
 
 function quota(args: string[], env: Record<string, string>) {
@@ -1042,6 +1087,64 @@ describe('rh quota', () => {
       'gatekeeper: gatekeeper (pi magpie/codex/gpt-6.2-sol high',
       'advisor: advisor (pi magpie/codex/gpt-6.2-sol)']) expect(text.stdout).toContain(expected);
     expect(lines.slice(4).map(line => line.split(':')[0])).toEqual(['route important_deep', 'route important_fast', 'route simple_deep', 'route simple_fast', 'route frontend', 'explorer', 'gatekeeper', 'reviewer', 'advisor']);
+  });
+
+  test('the stored all credit mode reports ChatGPT normal above the primary window threshold', () => {
+    const f = fixture('primary-exhausted');
+    const magpieLog = fixtureMagpie(f.env, JSON.stringify([magpieSubscription(Date.now())]));
+    writeFileSync(join(f.home, '.repo-harness', 'config.json'), JSON.stringify({ seats: { ...DEFAULT_SEATS_CONFIG,
+      routing: { ...DEFAULT_SEATS_CONFIG.routing, codex_credit_mode: 'all', codex_credit_floor: 0 } } }));
+    const result = quota([], f.env);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('chatgpt: normal | available credits cover usage | primary exhausted 97% used');
+    expect(result.stdout).toContain('gatekeeper: gatekeeper (pi magpie/codex/gpt-6.2-sol high; chatgpt normal)');
+    expect(existsSync(magpieLog)).toBe(false);
+  });
+
+  test('Magpie supplies the credit balance and weekly reset when the native read fails', () => {
+    const f = fixture('error');
+    const card = magpieSubscription(Date.now());
+    const magpieLog = fixtureMagpie(f.env, JSON.stringify([card]));
+    writeFileSync(join(f.home, '.repo-harness', 'config.json'), JSON.stringify({ seats: { ...DEFAULT_SEATS_CONFIG,
+      routing: { ...DEFAULT_SEATS_CONFIG.routing, codex_credit_mode: 'all', codex_credit_floor: 0 } } }));
+    const result = quota(['--json'], f.env);
+    expect(result.status, result.stderr).toBe(0);
+    const report = decodeQuotaReport(JSON.parse(result.stdout));
+    expect(report.accounts[1]).toMatchObject({
+      account: 'chatgpt', source: 'magpie_quota', state: 'normal', reason: 'available credits cover usage',
+      observed_at: new Date(card.readAt).toISOString(),
+      windows: [{ window: 'weekly', used_percent: 97, resets_at: new Date(card.windows[0]!.resetsAt!).toISOString() }],
+      codex: { credits: { balance: '12.50', has_credits: true, unlimited: false } },
+    });
+    expect(JSON.parse(readFileSync(magpieLog, 'utf8'))).toEqual(['quota', 'codex', '--json']);
+    expect(result.stdout + result.stderr).not.toMatch(/private-magpie|Image generation/);
+  });
+
+  test('Magpie supplies a valid weekly reset when it omits the credit balance', () => {
+    const f = fixture(null);
+    const card = { ...magpieSubscription(Date.now()), balance: undefined };
+    fixtureMagpie(f.env, JSON.stringify([card]));
+    const result = quota(['--json'], f.env);
+    expect(result.status, result.stderr).toBe(0);
+    expect(decodeQuotaReport(JSON.parse(result.stdout)).accounts[1]).toMatchObject({
+      account: 'chatgpt', source: 'magpie_quota', state: 'exhausted',
+      windows: [{ window: 'weekly', resets_at: new Date(card.windows[0]!.resetsAt!).toISOString() }],
+      codex: { credits: null },
+    });
+  });
+
+  test.each(['empty', 'malformed', 'ambiguous', 'stale', 'failed'] as const)('Magpie %s leaves ChatGPT unknown when Codex is absent', mode => {
+    const f = fixture(null);
+    const card = magpieSubscription(Date.now() - (mode === 'stale' ? HOUR : 0));
+    const output = mode === 'malformed' ? 'private-magpie-error'
+      : JSON.stringify(mode === 'empty' ? [] : mode === 'ambiguous' ? [card, card] : [card]);
+    fixtureMagpie(f.env, output, mode === 'failed' ? 2 : 0);
+    const result = quota(['--json'], f.env);
+    expect(result.status, result.stderr).toBe(0);
+    expect(decodeQuotaReport(JSON.parse(result.stdout)).accounts[1]).toMatchObject({
+      account: 'chatgpt', state: 'unknown', reason: mode === 'stale' ? 'reading older than 30 min' : 'codex not on PATH',
+    });
+    expect(result.stdout + result.stderr).not.toContain('private-magpie');
   });
 
   test('the stored review credit mode routes the gatekeeper on credits and keeps the account line exhausted', () => {
