@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { digestJson, errorEnvelope, serializeRefactorDecision, type RefactorDecisionV1, type RefactorScanFindingV2, type RefactorScanV2, type RefactorVerifyV2 } from "archctx-contracts";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -24,11 +24,31 @@ import { observeRefactorRecommendations } from "../src/effects/refactor/recommen
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const RUNTIME_GITIGNORE = readFileSync(join(REPO_ROOT, "assets/templates/runtime.gitignore"), "utf8");
-const CODEGRAPH_BIN = (() => {
-  const pkgPath = createRequire(import.meta.url).resolve("@colbymchenry/codegraph/package.json");
-  const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { bin: { codegraph: string } };
-  return resolve(dirname(pkgPath), pkg.bin.codegraph);
+const CODEGRAPH_PACKAGE_PATH = createRequire(import.meta.url).resolve("@colbymchenry/codegraph/package.json");
+const CODEGRAPH_SHIM = (() => {
+  const pkg = JSON.parse(readFileSync(CODEGRAPH_PACKAGE_PATH, "utf8")) as { bin: { codegraph: string } };
+  return resolve(dirname(CODEGRAPH_PACKAGE_PATH), pkg.bin.codegraph);
 })();
+const CODEGRAPH_PLATFORM_BIN = (() => {
+  if (process.platform === "win32") return null;
+  try {
+    return createRequire(CODEGRAPH_PACKAGE_PATH).resolve(
+      `@colbymchenry/codegraph-${process.platform}-${process.arch}/bin/codegraph`,
+    );
+  } catch {
+    return null;
+  }
+})();
+
+function formatSubprocessFailure(label: string, result: SpawnSyncReturns<string>): string {
+  const reason = result.error
+    ? `failed to spawn (${result.error.message})`
+    : result.signal !== null || result.status === null
+      ? `was killed (signal ${result.signal ?? "unknown"}, exit ${result.status})`
+      : `failed (exit ${result.status})`;
+  const output = [result.stderr, result.stdout].map((part) => part?.trim()).filter(Boolean).join("\n");
+  return output ? `${label} ${reason}: ${output}` : `${label} ${reason}`;
+}
 
 const roots: string[] = [];
 afterEach(() => {
@@ -321,6 +341,30 @@ describe("refactor v2 archctx provider", () => {
       reason: "invalid",
     }, { consumerRoot: REPO_ROOT, run })).toThrow("--resolution-digest must be sha256:<64-hex>");
   });
+
+  test("reports killed subprocesses explicitly instead of a bare exit null", () => {
+    const killed: SpawnSyncReturns<string> = {
+      pid: 12345,
+      output: [null, "Syncing CodeGraph\n", ""],
+      stdout: "Syncing CodeGraph\n",
+      stderr: "",
+      status: null,
+      signal: "SIGKILL",
+    };
+    const msg = formatSubprocessFailure("codegraph sync .", killed);
+    expect(msg).toContain("codegraph sync . was killed (signal SIGKILL, exit null)");
+    expect(msg).toContain("Syncing CodeGraph");
+
+    const unknownSignal: SpawnSyncReturns<string> = { ...killed, signal: null };
+    expect(formatSubprocessFailure("codegraph sync .", unknownSignal)).toContain(
+      "codegraph sync . was killed (signal unknown, exit null)",
+    );
+
+    const spawnErr: SpawnSyncReturns<string> = { ...killed, signal: null, error: new Error("ENOENT") };
+    expect(formatSubprocessFailure("codegraph sync .", spawnErr)).toContain(
+      "codegraph sync . failed to spawn (ENOENT)",
+    );
+  });
 });
 
 describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
@@ -329,41 +373,36 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
   }
 
   function runCodeGraph(cwd: string, args: readonly string[], env: NodeJS.ProcessEnv): void {
-    const nodeBin = resolveCompatibleNodeRuntime(env);
-    const result = spawnSync(nodeBin, [CODEGRAPH_BIN, ...args], {
-      cwd,
-      env: { ...env, CODEGRAPH_NO_DOWNLOAD: "1", CODEGRAPH_TELEMETRY: "0" },
-      encoding: "utf8",
-    });
-    if (result.status !== 0) {
-      throw new Error(`codegraph ${args.join(" ")} failed (exit ${result.status}): ${result.stderr}\n${result.stdout}`);
+    const cgEnv = { ...env, CODEGRAPH_NO_DOWNLOAD: "1", CODEGRAPH_TELEMETRY: "0" };
+    const result = CODEGRAPH_PLATFORM_BIN
+      ? spawnSync(CODEGRAPH_PLATFORM_BIN, [...args], { cwd, env: cgEnv, encoding: "utf8" })
+      : spawnSync(resolveCompatibleNodeRuntime(env), [CODEGRAPH_SHIM, ...args], { cwd, env: cgEnv, encoding: "utf8" });
+    if (result.error || result.signal !== null || result.status !== 0) {
+      throw new Error(formatSubprocessFailure(`codegraph ${args.join(" ")}`, result));
     }
   }
 
-  function writeRepoFile(repoRoot: string, relPath: string, content: string): void {
-    const abs = join(repoRoot, relPath);
-    mkdirSync(dirname(abs), { recursive: true });
-    writeFileSync(abs, content);
-  }
-
-  test("executes scan -> decide accept -> git track -> verify (unresolved & stale) -> fix -> sync -> verify (resolved) -> resolve -> shallow clean-clone check", () => {
-    const base = scratchDir("refactor-v2-e2e-");
+  function createIsolatedEnv(base: string): { home: string; env: NodeJS.ProcessEnv } {
     const home = join(base, "home");
     const stateDir = join(base, "archctx-state");
-    const repoRoot = join(base, "repo");
-    const shallowClone = join(base, "shallow-clone");
     mkdirSync(home, { recursive: true });
     mkdirSync(stateDir, { recursive: true });
-    mkdirSync(repoRoot, { recursive: true });
-
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      HOME: home,
-      ARCHCONTEXT_STATE_DIR: stateDir,
-      GIT_CONFIG_GLOBAL: "/dev/null",
-      GIT_CONFIG_NOSYSTEM: "1",
+    const nodeBin = resolveCompatibleNodeRuntime(process.env);
+    return {
+      home,
+      env: {
+        ...process.env,
+        HOME: home,
+        ARCHCONTEXT_STATE_DIR: stateDir,
+        REPO_HARNESS_NODE_BIN: nodeBin,
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_NOSYSTEM: "1",
+      },
     };
+  }
 
+  function initArchctxFixtureRepo(repoRoot: string, env: NodeJS.ProcessEnv, productId = "product.test-refactor"): void {
+    mkdirSync(repoRoot, { recursive: true });
     runGit(repoRoot, ["init", "-q"], env);
     runGit(repoRoot, ["config", "user.name", "Test"], env);
     runGit(repoRoot, ["config", "user.email", "test@example.invalid"], env);
@@ -373,7 +412,7 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
     writeRepoFile(repoRoot, ".gitignore", RUNTIME_GITIGNORE);
     writeRepoFile(repoRoot, ".archcontext/manifest.yaml", JSON.stringify({
       schemaVersion: "archcontext.manifest/v1",
-      product: { id: "product.test-refactor", name: "Test Refactor" },
+      product: { id: productId, name: "Test Refactor" },
       model: { layout: "split", root: ".archcontext/model" },
       runtime: { contextBudgetBytes: 12288 },
     }, null, 2) + "\n");
@@ -399,6 +438,36 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
     }, null, 2) + "\n");
     mkdirSync(join(repoRoot, ".archcontext/model/relations"), { recursive: true });
     mkdirSync(join(repoRoot, ".archcontext/model/flows"), { recursive: true });
+  }
+
+  function writeRepoFile(repoRoot: string, relPath: string, content: string): void {
+    const abs = join(repoRoot, relPath);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, content);
+  }
+
+  test("reports proof_required before CodeGraph indexing", () => {
+    const base = scratchDir("refactor-v2-unindexed-");
+    const repoRoot = join(base, "repo");
+    const { env } = createIsolatedEnv(base);
+    initArchctxFixtureRepo(repoRoot, env);
+    writeRepoFile(repoRoot, "src/alpha/index.ts", "export const alphaBase = () => 1;\n");
+    runGit(repoRoot, ["add", "."], env);
+    runGit(repoRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Initial unindexed fixture"], env);
+
+    const unindexed = observeRefactorRecommendations(repoRoot, { env });
+    expect(unindexed.schemaVersion).toBe("repo-harness.refactor-recommendations/v3");
+    expect(unindexed.status).toBe("proof_required");
+    expect(unindexed.coverage?.imports).not.toBe("complete");
+    expect(unindexed.message).toContain("codegraph init");
+  });
+
+  test("executes scan -> decide accept -> git track -> verify (unresolved & stale) -> fix -> sync -> verify (resolved) -> resolve -> shallow clean-clone check", () => {
+    const base = scratchDir("refactor-v2-e2e-");
+    const repoRoot = join(base, "repo");
+    const shallowClone = join(base, "shallow-clone");
+    const { env } = createIsolatedEnv(base);
+    initArchctxFixtureRepo(repoRoot, env);
 
     // Create a real mutual import cycle between capability.test.alpha and capability.test.beta.
     writeRepoFile(repoRoot, "src/alpha/index.ts", 'import { betaValue } from "../beta/index";\nexport const alphaValue = () => betaValue() + 1;\nexport const alphaBase = () => 1;\n');
@@ -408,14 +477,7 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
     runGit(repoRoot, ["add", "."], env);
     runGit(repoRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Initial cycle fixture"], env);
 
-    // 1. Before indexing CodeGraph, scan reports proof_required with incomplete import coverage.
-    const unindexed = observeRefactorRecommendations(repoRoot, { env });
-    expect(unindexed.schemaVersion).toBe("repo-harness.refactor-recommendations/v3");
-    expect(unindexed.status).toBe("proof_required");
-    expect(unindexed.coverage?.imports).not.toBe("complete");
-    expect(unindexed.message).toContain("codegraph init");
-
-    // Index with real package-local CodeGraph.
+    // 1. Index with real package-local CodeGraph.
     runCodeGraph(repoRoot, ["init", "-y", "."], env);
 
     // 2. Low import-node-limit triggers code-facts-import-limit proof_required with actionable guidance.
@@ -468,12 +530,12 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
 
     // 5. Verify runtime.gitignore tracks `.archcontext/refactor-decisions/<id>.json` (exit 1) and ignores atomic temp files (exit 0),
     // and confirm the canonical archctx CLI still reads the valid decision when an orphan temp file exists.
-    const ignoreCheck = spawnSync("git", ["check-ignore", "-q", decided.filePath], { cwd: repoRoot, env });
-    expect(ignoreCheck.status).toBe(1);
+    const ignoreCheck = spawnSync("git", ["check-ignore", "-q", decided.filePath], { cwd: repoRoot, env, encoding: "utf8" });
+    expect(ignoreCheck.status, formatSubprocessFailure("git check-ignore (tracked decision)", ignoreCheck)).toBe(1);
     const orphanTmpPath = `${decided.filePath}.tmp-12345-1700000000000`;
     writeRepoFile(repoRoot, orphanTmpPath, "{interrupted write");
-    const tmpIgnoreCheck = spawnSync("git", ["check-ignore", "-q", orphanTmpPath], { cwd: repoRoot, env });
-    expect(tmpIgnoreCheck.status).toBe(0);
+    const tmpIgnoreCheck = spawnSync("git", ["check-ignore", "-q", orphanTmpPath], { cwd: repoRoot, env, encoding: "utf8" });
+    expect(tmpIgnoreCheck.status, formatSubprocessFailure("git check-ignore (orphan temp file)", tmpIgnoreCheck)).toBe(0);
 
     runGit(repoRoot, ["add", decided.filePath], env);
     runGit(repoRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Accept cycle refactor decision"], env);
@@ -560,25 +622,45 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
       status: "resolved",
       resolutionDigest: verified.resolutionDigest,
     });
+  }, 60_000);
 
-    // 11. Real 0.17.1-shape `refactor_proposal` decisions (null observationMetrics, no targetOutcomes/killList):
+  test("verifies, retires, and upgrades real 0.17.1-shape legacy refactor_proposal decisions across checkouts", () => {
+    const base = scratchDir("refactor-v2-legacy-");
+    const repoRoot = join(base, "repo");
+    const { home, env } = createIsolatedEnv(base);
+    const baseDecision = shippedDecision();
+    initArchctxFixtureRepo(repoRoot, env, baseDecision.namespace);
+
+    // Real 0.17.1-shape `refactor_proposal` decisions (null observationMetrics, no targetOutcomes/killList):
     // verify reports stale + baseline-metadata-missing with explicit retire/replace next-step;
     // operators can either attach a verifiable kill-list via `decide accept --kill-path` and resolve, or retire via `decide reject`.
+    writeRepoFile(repoRoot, "src/alpha/index.ts", "export const alphaValue = () => 1;\n");
+    writeRepoFile(repoRoot, "src/beta/index.ts", "export const betaValue = () => 2;\n");
     writeRepoFile(repoRoot, "src/beta/legacy-retire.ts", "export const legacyRetire = 1;\n");
+    runGit(repoRoot, ["add", "."], env);
+    runGit(repoRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Initial legacy proposal fixture"], env);
+    const baselineHeadSha = runGit(repoRoot, ["rev-parse", "HEAD"], env);
+
     const makeLegacyProposal = (seed: string): { recId: string; relPath: string } => {
       const fp = digestJson({ legacy0171Proposal: seed });
       const id = `recommendation.${digestJson({ fingerprint: fp, regressesFrom: null }).slice("sha256:".length, "sha256:".length + 16)}`;
       const decision: RefactorDecisionV1 = {
-        ...decided.decision,
+        ...baseDecision,
         recommendationId: id,
         fingerprint: fp,
         category: "refactor_proposal",
         kind: null,
+        affectedNodeIds: ["capability.test.beta"],
+        affectedNodeCount: 1,
         status: "accepted",
         observationMetrics: null,
         targetOutcomes: undefined,
         killList: undefined,
         resolutionDigest: undefined,
+        provenance: {
+          ...baseDecision.provenance,
+          headSha: baselineHeadSha,
+        },
       };
       const relPath = `.archcontext/refactor-decisions/${id}.json`;
       writeRepoFile(repoRoot, relPath, serializeRefactorDecision(decision));
@@ -586,9 +668,9 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
     };
     const legacyUpgrade = makeLegacyProposal("upgrade-via-kill-list");
     const legacyRetire = makeLegacyProposal("retire-via-reject");
-    runGit(repoRoot, ["add", "src/beta/legacy-retire.ts", legacyUpgrade.relPath, legacyRetire.relPath], env);
+    runGit(repoRoot, ["add", legacyUpgrade.relPath, legacyRetire.relPath], env);
     runGit(repoRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Add 0.17.1 legacy proposals"], env);
-    runCodeGraph(repoRoot, ["sync", "."], env);
+    runCodeGraph(repoRoot, ["init", "-y", "."], env);
 
     const legacyStale = runRefactorVerify(repoRoot, { recommendationId: legacyUpgrade.recId }, { consumerRoot: REPO_ROOT, env });
     expect(legacyStale.disposition).toBe("stale");
@@ -618,7 +700,7 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
       encoding: "utf8",
       timeout: 60_000,
     });
-    expect(verifyCliRes.status).toBe(1);
+    expect(verifyCliRes.status, formatSubprocessFailure("rh arch refactor verify", verifyCliRes)).toBe(1);
     const rejectCmdMatch = /`((?:rh arch refactor decide [^`]+ reject [^`]+))`/.exec(verifyCliRes.stdout);
     const removeCmdMatch = /`((?:env [^`]+ )?git -C [^`]+ rm [^`]+)`/.exec(verifyCliRes.stdout);
     expect(rejectCmdMatch?.[1]).toBeDefined();
@@ -637,7 +719,7 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
       encoding: "utf8",
       timeout: 60_000,
     });
-    expect(rejectExec.status, rejectExec.stderr + rejectExec.stdout).toBe(0);
+    expect(rejectExec.status, formatSubprocessFailure("emitted decide reject hint", rejectExec)).toBe(0);
     expect((JSON.parse(readFileSync(join(repoRoot, legacyRetire.relPath), "utf8")) as RefactorDecisionV1).status).toBe("rejected");
     expect(readFileSync(join(secondCheckout, legacyRetire.relPath), "utf8")).toBe(secondBodyBefore);
 
@@ -654,7 +736,7 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
         encoding: "utf8",
         timeout: 60_000,
       });
-      expect(hintVerify.status).toBe(1);
+      expect(hintVerify.status, formatSubprocessFailure("rh arch refactor verify (bound hint)", hintVerify)).toBe(1);
       const boundRejectCmd = /`((?:rh arch refactor decide [^`]+ reject [^`]+))`/.exec(hintVerify.stdout)?.[1];
       expect(boundRejectCmd).toBeDefined();
       expect(boundRejectCmd).toContain(`--repo ${repoRoot}`);
@@ -664,7 +746,7 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
         encoding: "utf8",
         timeout: 60_000,
       });
-      expect(thirdExec.status, thirdExec.stderr + thirdExec.stdout).toBe(0);
+      expect(thirdExec.status, formatSubprocessFailure("emitted bound decide reject hint", thirdExec)).toBe(0);
       expect((JSON.parse(readFileSync(join(repoRoot, legacyRetire.relPath), "utf8")) as RefactorDecisionV1).status).toBe("rejected");
       expect(readFileSync(join(secondCheckout, legacyRetire.relPath), "utf8")).toBe(secondBodyBefore);
     }
@@ -683,12 +765,11 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
       encoding: "utf8",
       timeout: 60_000,
     });
-    expect(removeExec.status, removeExec.stderr + removeExec.stdout).toBe(0);
+    expect(removeExec.status, formatSubprocessFailure("emitted git rm hint", removeExec)).toBe(0);
     expect(existsSync(join(repoRoot, legacyRetire.relPath))).toBe(false);
     expect(existsSync(join(secondCheckout, legacyRetire.relPath))).toBe(true);
     expect(readFileSync(join(secondCheckout, legacyRetire.relPath), "utf8")).toBe(secondBodyBefore);
     runGit(repoRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Retire legacy proposal via rm"], env);
-    runCodeGraph(repoRoot, ["sync", "."], env);
 
     // Upgrade legacy proposal A with canonical kill-path, execute emitted decide commit hint under conflicting GIT_DIR/GIT_WORK_TREE,
     // then remove target, sync, verify -> resolved -> resolve!
@@ -710,7 +791,7 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
       encoding: "utf8",
       timeout: 60_000,
     });
-    expect(decideCommitExec.status, decideCommitExec.stderr + decideCommitExec.stdout).toBe(0);
+    expect(decideCommitExec.status, formatSubprocessFailure("emitted decide commit hint", decideCommitExec)).toBe(0);
     expect(runGit(repoRoot, ["show", "--name-only", "--pretty=format:", "HEAD"], env)).toBe(legacyUpgrade.relPath);
     expect(readFileSync(join(secondCheckout, legacyRetire.relPath), "utf8")).toBe(secondBodyBefore);
     unlinkSync(join(repoRoot, "src/beta/legacy-retire.ts"));
@@ -725,8 +806,11 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
       reason: "Legacy proposal upgraded with kill-path and verified resolved",
     }, { consumerRoot: REPO_ROOT, env });
     expect(upgradedResolved.status).toBe("resolved");
+  }, 60_000);
 
-    // 12. Sibling checkouts `project`, `project `, and (POSIX) `project\r`: refactor writes & commit root fail closed without touching `project`.
+  test("fails closed on unsafe whitespace sibling checkouts without touching sibling repos", () => {
+    const base = scratchDir("refactor-ws-env-");
+    const { env } = createIsolatedEnv(base);
     const wsParent = scratchDir("refactor-ws-sibling-");
     const cleanSibling = join(wsParent, "project");
     const spacedSibling = join(wsParent, "project ");
@@ -742,14 +826,14 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
     for (const unsafeSibling of unsafeSiblings) {
       for (const target of [unsafeSibling, join(unsafeSibling, "src")]) {
         expect(() => decideRecommendation(target, {
-          recommendationId: recId,
+          recommendationId: REC_ID,
           decision: "reject",
           reason: "Must fail closed on unsafe checkout root",
         }, { consumerRoot: REPO_ROOT, env })).toThrow("whitespace");
-        expect(() => runRefactorVerify(target, { recommendationId: recId }, { consumerRoot: REPO_ROOT, env })).toThrow("whitespace");
+        expect(() => runRefactorVerify(target, { recommendationId: REC_ID }, { consumerRoot: REPO_ROOT, env })).toThrow("whitespace");
         expect(() => resolveRecommendation(target, {
-          recommendationId: recId,
-          resolutionDigest: verified.resolutionDigest,
+          recommendationId: REC_ID,
+          resolutionDigest: RESOLUTION_DIGEST,
           reason: "Must fail closed",
         }, { consumerRoot: REPO_ROOT, env })).toThrow("whitespace");
         expect(() => resolveDecisionCommitRoot(target)).toThrow("whitespace");
@@ -758,8 +842,11 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
     }
     expect(runGit(cleanSibling, ["rev-parse", "HEAD"], env)).toBe(siblingHeadBefore);
     expect(existsSync(join(cleanSibling, ".archcontext"))).toBe(false);
+  });
 
-    // 13. Case-aliased kill targets (`agents.md` beside tracked `AGENTS.md` on `core.ignorecase=true`) fail closed before decide, verify, and resolve.
+  test("fails closed on case-aliased kill targets, ENOBUFS path probes, and unborn-HEAD repos", () => {
+    const base = scratchDir("refactor-case-env-");
+    const { env } = createIsolatedEnv(base);
     const caseRepo = scratchDir("refactor-case-alias-");
     runGit(caseRepo, ["init", "-q"], env);
     runGit(caseRepo, ["config", "core.ignorecase", "true"], env);
@@ -785,9 +872,10 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
 
     const caseDecisionRel = `.archcontext/refactor-decisions/${caseRecId}.json`;
     const caseDecision: RefactorDecisionV1 = {
-      ...decided.decision,
+      ...shippedDecision(),
       recommendationId: caseRecId,
       fingerprint: caseFp,
+      status: "accepted",
       killList: [{ kind: "path", target: "agents.md", required: true }],
     };
     writeRepoFile(caseRepo, caseDecisionRel, serializeRefactorDecision(caseDecision));
@@ -799,7 +887,7 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
       reason: "Must fail closed before archctx resolve",
     }, { consumerRoot: REPO_ROOT, env })).toThrow("differs only in case");
 
-    // 13b. Case-alias probe fails closed (never coalescing ENOBUFS to `[]`) and still protects unborn-HEAD repos.
+    // Case-alias probe fails closed (never coalescing ENOBUFS to `[]`) and still protects unborn-HEAD repos.
     expect(() => assertNoCaseAliasedKillListTargets(
       caseRepo,
       [{ kind: "path", target: "does-not-exist.ts", required: true }],
@@ -833,9 +921,11 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
       "refactor decide",
       env,
     )).toThrow("differs only in case");
+  });
 
-    // 14. Two real checkouts + non-Git directory with inherited GIT_DIR/GIT_WORK_TREE fail closed across decide, verify, resolve, and commit hint;
-    // matching discovery env is stripped before spawning archctx.
+  test("fails closed on cross-checkout Git discovery env and symlinked FIFO decision files", () => {
+    const base = scratchDir("refactor-git-env-");
+    const { env } = createIsolatedEnv(base);
     const crossBase = scratchDir("refactor-cross-git-env-");
     const checkoutA = join(crossBase, "checkout-a");
     const checkoutB = join(crossBase, "checkout-b");
@@ -859,18 +949,18 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
     };
     for (const target of [checkoutA, nonGitTarget]) {
       expect(() => decideRecommendation(target, {
-        recommendationId: recId,
+        recommendationId: REC_ID,
         decision: "reject",
         reason: "Refuse cross-checkout decide",
       }, { consumerRoot: REPO_ROOT, env: crossEnv, run: mustNotInvokeProvider })).toThrow("ambiguous Git repository root");
-      expect(() => runRefactorVerify(target, { recommendationId: recId }, {
+      expect(() => runRefactorVerify(target, { recommendationId: REC_ID }, {
         consumerRoot: REPO_ROOT,
         env: crossEnv,
         run: mustNotInvokeProvider,
       })).toThrow("ambiguous Git repository root");
       expect(() => resolveRecommendation(target, {
-        recommendationId: recId,
-        resolutionDigest: verified.resolutionDigest,
+        recommendationId: REC_ID,
+        resolutionDigest: RESOLUTION_DIGEST,
         reason: "Refuse cross-checkout resolve",
       }, { consumerRoot: REPO_ROOT, env: crossEnv, run: mustNotInvokeProvider })).toThrow("ambiguous Git repository root");
       const prevGitDir = process.env.GIT_DIR;
@@ -888,7 +978,7 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
     }
 
     const observedProviderEnvs: Array<{ cwd: string; gitDir: string | undefined; gitWorkTree: string | undefined }> = [];
-    expect(() => runRefactorVerify(checkoutA, { recommendationId: recId }, {
+    expect(() => runRefactorVerify(checkoutA, { recommendationId: REC_ID }, {
       consumerRoot: REPO_ROOT,
       env: { ...env, GIT_DIR: join(checkoutA, ".git"), GIT_WORK_TREE: checkoutA },
       run: (_bin, _args, opts) => {
@@ -898,17 +988,17 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
     })).toThrow("stop-after-env-capture");
     expect(observedProviderEnvs).toEqual([{ cwd: checkoutA, gitDir: undefined, gitWorkTree: undefined }]);
 
-    // 15. Stored decision preflight uses lstat and never follows a decision symlink to a FIFO before invoking archctx.
+    // Stored decision preflight uses lstat and never follows a decision symlink to a FIFO before invoking archctx.
     if (process.platform !== "win32") {
       const fifoPath = join(crossBase, "decision.fifo");
       const mkfifoRes = spawnSync("mkfifo", [fifoPath], { encoding: "utf8" });
-      expect(mkfifoRes.status).toBe(0);
+      expect(mkfifoRes.status, formatSubprocessFailure("mkfifo", mkfifoRes)).toBe(0);
       const decisionDir = join(checkoutA, ".archcontext", "refactor-decisions");
       mkdirSync(decisionDir, { recursive: true });
-      const symlinkedDecision = join(decisionDir, `${recId}.json`);
+      const symlinkedDecision = join(decisionDir, `${REC_ID}.json`);
       symlinkSync(fifoPath, symlinkedDecision);
       let providerInvoked = false;
-      expect(() => runRefactorVerify(checkoutA, { recommendationId: recId }, {
+      expect(() => runRefactorVerify(checkoutA, { recommendationId: REC_ID }, {
         consumerRoot: REPO_ROOT,
         env,
         run: () => {
@@ -918,5 +1008,5 @@ describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
       })).toThrow("reached-provider-without-blocking-on-fifo");
       expect(providerInvoked).toBe(true);
     }
-  }, 60_000);
+  });
 });
