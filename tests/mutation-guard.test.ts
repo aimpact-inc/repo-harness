@@ -4,6 +4,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'os';
 import { dirname, isAbsolute, join } from 'path';
 import { execFileSync, spawnSync } from 'child_process';
+import { ANTIGRAVITY_GUARD_DENIAL } from '../src/cli/hook/host-adapter';
+import { runBashMutationGuard } from '../src/cli/hook/mutation-bash';
 import { runMutationGuard } from '../src/cli/hook/mutation-guard';
 import { bashSafetyDenial, ledgerCreated, registerInstallLedger } from '../src/cli/hook/safety-hook';
 import { createdPaths } from '../src/effects/host-config/path-records';
@@ -479,7 +481,7 @@ describe('safety hook: edit route', () => {
       expect(existsSync(join(cwd, '.ai/harness/state/circuit-breaker.json'))).toBe(false);
     } finally { rmSync(cwd, { recursive: true, force: true }); }
   });
-  posixOnly('Antigravity asks for protected HOME writes and leaves brain artifacts writable', () => {
+  posixOnly('Antigravity denies protected HOME writes with fixed text in every mode and leaves brain artifacts writable', () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'agy-guard-')));
     const [cwd, home, scratch] = ['repo', 'home', 'tmp'].map(name => join(root, name));
     const savedTmp = process.env.TMPDIR;
@@ -487,24 +489,48 @@ describe('safety hook: edit route', () => {
       for (const dir of [cwd, home, scratch]) mkdirSync(dir);
       initRepo(cwd);
       process.env.TMPDIR = scratch;
-      const edit = (file_path: string) => runMutationGuard({
-        repoRoot: cwd, payload: { tool_input: { file_path } }, identity: hookIdentity({ host: 'antigravity' }),
-        env: { HOME: home, REPO_HARNESS_WORKTREE_ROOT: scratch },
+      const agyEnv = { HOME: home, REPO_HARNESS_WORKTREE_ROOT: scratch };
+      const agyId = hookIdentity({ host: 'antigravity' });
+      const edit = (file_path: string, extra: Record<string, unknown> = {}) => runMutationGuard({
+        repoRoot: cwd, payload: { ...extra, tool_input: { file_path } }, identity: agyId, env: agyEnv,
       });
-      const ask = { decision: 'ask' as const, reason: expect.stringContaining('[UserFileGuard] I2:') };
+      const bash = (command: string, extra: Record<string, unknown> = {}) => runBashMutationGuard({
+        repoRoot: cwd, payload: { ...extra, cwd, tool_input: { command } }, identity: agyId, env: agyEnv,
+      });
+      const denied = (guard: 'UserFileGuard' | 'CredentialGuard') => ({
+        exitCode: 2,
+        stdout: '',
+        stderr: `[${guard}] ${ANTIGRAVITY_GUARD_DENIAL}\n  Fix: Ask the user to review the operation and run it locally.\n`,
+      });
       const gemini = join(home, '.gemini');
       for (const file of ['antigravity/brain/s/notes.md', 'antigravity-cli/brain/s/notes.md', 'antigravity-ide/brain/s/notes.md',
         'config/AGENTS.md', 'antigravity-cli/antigravity-oauth-token']) {
         const path = join(gemini, file);
         mkdirSync(dirname(path), { recursive: true });
         writeFileSync(path, 'synthetic fixture');
-        expect(edit(path)).toEqual({ exitCode: 0, stdout: '', stderr: '', ...(file.includes('/brain/') ? {} : { permission: ask }) });
+        expect(edit(path)).toEqual(file.includes('/brain/') ? { exitCode: 0, stdout: '', stderr: '' } : denied('UserFileGuard'));
       }
+      // Even a payload carrying a prompting Claude permission_mode must still fail closed on Antigravity.
+      expect(edit(join(gemini, 'config/AGENTS.md'), { permission_mode: 'default' })).toEqual(denied('UserFileGuard'));
       const brain = join(gemini, 'antigravity/brain');
       renameSync(brain, join(gemini, 'antigravity/parked'));
       symlinkSync(gemini, brain);
-      expect(edit(join(brain, 'config/AGENTS.md')).permission).toEqual(ask);
-      expect(failureRecords(cwd)).toEqual([]);
+      expect(edit(join(brain, 'config/AGENTS.md'))).toEqual(denied('UserFileGuard'));
+      // Bash I2 UserFileGuard denies with fixed text; I1 CredentialGuard remains unchanged.
+      const protectedFile = join(gemini, 'config/AGENTS.md');
+      expect(bash(`printf x > ${protectedFile}`, { permission_mode: 'default' })).toEqual(denied('UserFileGuard'));
+      expect(bash('cat .env')).toEqual(denied('CredentialGuard'));
+      const records = failureRecords(cwd);
+      expect(records.map(record => ({ guard: record.guard, action: record.action, reason: record.reason }))).toEqual([
+        { guard: 'UserFileGuard', action: 'block', reason: ANTIGRAVITY_GUARD_DENIAL },
+        { guard: 'UserFileGuard', action: 'block', reason: ANTIGRAVITY_GUARD_DENIAL },
+        { guard: 'UserFileGuard', action: 'block', reason: ANTIGRAVITY_GUARD_DENIAL },
+        { guard: 'UserFileGuard', action: 'block', reason: ANTIGRAVITY_GUARD_DENIAL },
+        { guard: 'UserFileGuard', action: 'block', reason: ANTIGRAVITY_GUARD_DENIAL },
+        { guard: 'CredentialGuard', action: 'block', reason: ANTIGRAVITY_GUARD_DENIAL },
+      ]);
+      expect(JSON.stringify(records)).not.toContain('AGENTS.md');
+      expect(JSON.stringify(records)).not.toContain('antigravity-oauth-token');
     } finally {
       if (savedTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = savedTmp;
       rmSync(root, { recursive: true, force: true });

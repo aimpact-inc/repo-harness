@@ -154,12 +154,11 @@ function renderAntigravity(outcome: HookOutcome): ReturnType<HostAdapter['render
     if (outcome.reason === 'invalid-payload' && outcome.permission?.decision === 'deny') {
       return emit({ decision: 'deny', reason: outcome.permission.reason });
     }
-    if (outcome.reason === 'blocked' || outcome.permission?.decision === 'deny') {
+    // agy 1.5.16 auto-approves force_ask without a prompt in always-proceed and auto file-write modes, so ask also denies.
+    if (outcome.reason === 'blocked' || outcome.permission?.decision === 'deny' || outcome.permission?.decision === 'ask') {
       return emit({ decision: 'deny', reason: ANTIGRAVITY_GUARD_DENIAL });
     }
     if (outcome.exitCode !== 0) return emit({ decision: 'deny', reason: `rh hook failed: ${outcome.routeId}; the call is refused` });
-    // force_ask prompts even when Antigravity has a cached approval for this tool.
-    if (outcome.permission?.decision === 'ask') return emit({ decision: 'force_ask', reason: outcome.permission.reason });
   }
   if (outcome.event === 'Stop' && outcome.reason === 'blocked') {
     return emit({ decision: 'continue', reason: outcome.diagnostics.trimEnd() });
@@ -179,7 +178,7 @@ export const HOST_ADAPTERS: Readonly<Record<RouteHost, HostAdapter>> = Object.fr
   antigravity: {
     decode: decodeAntigravity,
     render: renderAntigravity,
-    capabilities: { handoff: 'relaunch', sessionRecord: true, ask: true, inbox: true },
+    capabilities: { handoff: 'relaunch', sessionRecord: true, ask: false, inbox: true },
   },
 });
 

@@ -85,14 +85,11 @@ export function runMutationDenial(opts: MutationGuardInput, found: Denial): Muta
   const antigravity = host === 'antigravity';
   const mode = payloadString(opts.payload, 'permission_mode');
   const ask = found.askable && HOST_ADAPTERS[host].capabilities.ask
-    && (antigravity ? found.guard === 'UserFileGuard' : mode !== '' && !NO_PROMPT_MODES.has(mode));
-  // Antigravity responses and logs use fixed text because a target can contain an unrecognized secret from the command.
+    && mode !== '' && !NO_PROMPT_MODES.has(mode);
   if (ask) {
-    const reason = antigravity
-      ? 'I2: This tool call may overwrite or remove an existing file outside the allowed roots.'
-      : replaceSecrets(found.reason);
-    return { exitCode: 0, stdout: '', stderr: '', permission: { decision: 'ask', reason: `[${found.guard}] ${reason}` } };
+    return { exitCode: 0, stdout: '', stderr: '', permission: { decision: 'ask', reason: `[${found.guard}] ${replaceSecrets(found.reason)}` } };
   }
+  // Antigravity responses and logs use fixed text because a target can contain an unrecognized secret from the command.
   const denial: Denial = antigravity
     ? { guard: found.guard, reason: ANTIGRAVITY_GUARD_DENIAL, fix: 'Ask the user to review the operation and run it locally.' }
     : { ...found, reason: replaceSecrets(found.reason), fix: replaceSecrets(found.fix) };
