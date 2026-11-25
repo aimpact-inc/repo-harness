@@ -22,3 +22,5 @@ source:
     - src/effects/upgrade/**
     - install.sh
     - install.ps1
+  exclude:
+    - src/effects/upgrade/legacy-worktree-cleanup.ts

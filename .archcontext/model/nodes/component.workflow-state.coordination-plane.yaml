@@ -12,6 +12,7 @@ responsibilities:
 source:
   include:
     - src/effects/state/coordination-*.ts
+    - src/effects/upgrade/legacy-worktree-cleanup.ts
     - src/effects/state/pruned-worktree-intents.ts
     - src/effects/state/worktree-trash.ts
     - src/effects/state/canonical-target.ts
