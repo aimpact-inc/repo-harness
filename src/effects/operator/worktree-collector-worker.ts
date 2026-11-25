@@ -26,9 +26,11 @@ export function worktreeSize(path: string, previous: WorktreeSize | undefined, d
     if (previous && Date.now() - Date.parse(previous.observed_at) < SIZE_INTERVAL_MS) {
       return { cache: previous, bytes: previous.mtime === stat.mtimeMs ? previous.bytes : null };
     }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return { bytes: null };
     let bytes: number | null = null;
     try {
-      const output = execFileSync('du', ['-sk', path], { encoding: 'utf8', timeout: Math.max(1, Math.min(2_000, deadline - Date.now())), stdio: ['ignore', 'pipe', 'pipe'] });
+      const output = execFileSync('du', ['-sk', path], { encoding: 'utf8', timeout: Math.min(2_000, remaining), stdio: ['ignore', 'pipe', 'pipe'] });
       const count = Number(output.split(/\s/u)[0]) * 1024;
       if (Number.isSafeInteger(count) && count >= 0) bytes = count;
     } catch { /* Failed attempts also observe the low-frequency retry interval. */ }
@@ -76,13 +78,17 @@ export function collectRepositoryWorktrees(repo: RepoHarnessRegisteredRepo, prev
   const topology = entries(repo.path, { deadline });
   const root = managedWorktreeRoot(env);
   const processes = worktreeProcesses(Math.min(deadline, Date.now() + 5_000))?.filter(row => row.pid !== process.pid) ?? null;
+  // Finish the judgments before optional directory sizes can spend the deadline.
+  const inspected = registeredWorktreePaths(topology).map(({ path, entry }) => {
+    const row = repositoryWorktreeRow({ repo, common, managed_root: root, id: worktreeId(common, path), path, entry,
+      size_bytes: null, size_observed_at: null, caller_cwd: null, env, deadline, processes });
+    return { path, row };
+  });
   const sizes: WorktreeSizes = {};
-  const worktrees: WorktreeView[] = registeredWorktreePaths(topology).map(({ path, entry }) => {
-    const id = worktreeId(common, path);
-    const size = worktreeSize(path, previous[id], deadline);
-    if (size.cache) sizes[id] = size.cache;
-    return repositoryWorktreeRow({ repo, common, managed_root: root, id, path, entry, size_bytes: size.bytes, size_observed_at: size.cache?.observed_at ?? null,
-      caller_cwd: null, env, deadline, processes });
+  const worktrees = inspected.map(({ path, row }) => {
+    const size = worktreeSize(path, previous[row.id], deadline);
+    if (size.cache) sizes[row.id] = size.cache;
+    return { ...row, size_bytes: size.bytes, size_observed_at: size.cache?.observed_at ?? null };
   });
   const snapshot: WorktreesSnapshot = { version: 1, status: 'ready', collected_at: new Date().toISOString(), unassigned: [], repositories: [
     { repository_id: repo.id, display_name: safe(basename(repo.path)), status: 'ready', worktrees },

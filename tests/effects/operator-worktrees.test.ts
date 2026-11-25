@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import * as childProcess from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { tmpWorkspace, initGitRepo, commitAll, run } from '../helpers/repo-fixture';
 import { entries, inspectWorktree } from '../../src/effects/state/coordination-worktree-topology';
@@ -13,6 +13,7 @@ import { collectRepositoryWorktrees, registeredWorktreePaths, repositoryWorktree
 import { startWorktreeCollector } from '../../src/effects/operator/worktree-collector';
 import { collectOrphanWorktrees } from '../../src/effects/operator/worktree-orphans-worker';
 import { repoHarnessRepoIdFor, type RepoHarnessRegisteredRepo } from '../../src/effects/repo-registry';
+import * as processProbe from '../../src/effects/git/worktree-processes';
 import { worktreeProcesses, type LinuxWorktreeProcessProbe } from '../../src/effects/git/worktree-processes';
 import { decodeWorktreeCleanupRequest, decodeWorktreeCleanupResult, worktreeDigestRow } from '../../src/core/operator/worktree-cleanup';
 import { decodeWorktreeCleanupChildOutput, runWorktreeCleanup, selectionDigest, type WorktreeProcessProbe } from '../../src/effects/operator/worktree-cleanup';
@@ -171,6 +172,29 @@ describe('read-only worktree judgment and lifecycle', () => {
       expect(worktreeId(common, f.tree)).not.toBe(before);
       expect(readWorktreeRecord(common, f.tree)).toBeNull();
     } finally { f.cleanup(); }
+  });
+
+  test('judges a pushed squash merge before directory sizing spends the collection budget', () => {
+    const f = fixture();
+    const processes = spyOn(processProbe, 'worktreeProcesses').mockReturnValue([]);
+    const du = join(f.parent, 'du');
+    const path = process.env.PATH;
+    const now = Date.now;
+    const clock = spyOn(Date, 'now').mockImplementation(() => now() + (existsSync(`${du}.ran`) ? 20_000 : 0));
+    try {
+      writeFileSync(du, '#!/bin/sh\n: > "$0.ran"\nprintf "1\\t%s\\n" "$2"\n');
+      chmodSync(du, 0o755);
+      process.env.PATH = `${f.parent}:${path ?? ''}`;
+      f.git(f.main, 'update-ref', 'refs/remotes/origin/feature', 'feature');
+      f.git(f.main, 'merge', '--squash', 'feature'); commitAll(f.main, 'squash feature');
+      f.git(f.main, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+      const rows = collectRepositoryWorktrees(f.repo, {}, f.env).snapshot.repositories[0]!.worktrees;
+      expect(rows.find(row => row.directory === 'repo-wt-feature')).toMatchObject({ judgment: 'green', merge: 'absorbed', reasons: [], size_bytes: 1024 });
+      expect(rows.find(row => row.directory === 'repo')).toMatchObject({ size_bytes: null, size_observed_at: null });
+    } finally {
+      if (path === undefined) delete process.env.PATH; else process.env.PATH = path;
+      clock.mockRestore(); processes.mockRestore(); f.cleanup();
+    }
   });
 
   test('projects basenames, discovers orphan directories, caches du and rejects private egress', () => {
