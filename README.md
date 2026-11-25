@@ -258,12 +258,14 @@ acceptance; **Worker** skills carry out assigned steps.
 | `repo-harness-check` | Bot | Plan scoped work, review plans, assess recorded checks |
 | `repo-harness-product` | Bot | PRD drafting and Goal preparation |
 | `repo-harness-issue-flow` | Bot | Issue/PR-driven multi-agent development: split, dispatch, follow CI |
-| `repo-harness-ship` | Bot | Explicit publication and cleanup decisions |
+| `repo-harness-ship` | Bot | Explicit-only publication and cleanup decisions |
+| `repo-harness-sharpen` | Bot | Explicit-only prompt sharpening: deeper, not bigger |
+| `repo-harness-reframe` | Bot | Explicit-only problem reframing: domain terms and analogies |
 | `repo-harness-cross-review` | Bot | Generic review |
-| `obsidian-memory` | Bot | Explicit memory recall or persistence |
+| `obsidian-memory` | Bot | Explicit-only memory recall or persistence |
 | `repo-harness-setup` | Worker | Install, migration, repair or scaffold |
 | `repo-harness-test` | Worker | Source tests and real fixtures |
-| `repo-harness-architecture` | Worker | Model, projection or diagram work |
+| `repo-harness-architecture` | Worker | Explicit-only model, projection or diagram work |
 | `repo-harness-archimap` | Worker | Refresh the architecture map `docs/architecture/archimap.html` |
 | `windows-python-first` | Worker | Native Windows file and shell work through Python |
 
