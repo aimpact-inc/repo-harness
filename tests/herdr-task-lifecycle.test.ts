@@ -298,6 +298,8 @@ writeFileSync(spec.role+'-'+mode+'.binding',JSON.stringify(binding));
     await send(spec.task, linkedSpec.role, 'context.md');
     copyHelpers(fixture);
     const helper = join(fixture, 'scripts/contract-worktree.sh');
+    const { writeControlledWorktreeProcessesConfig } = await import('./helpers/controlled-worktree-processes');
+    writeControlledWorktreeProcessesConfig(fixture);
     const helperEnv = { ...env, REPO_HARNESS_TARGET_REPO_ROOT: fixture };
     const blocked = spawnSync('bash', [helper, 'cleanup', '--slug', 'linked-test'], { cwd: fixture, env: helperEnv, encoding: 'utf8', timeout: 15000 });
     expect(blocked.status).toBe(1);

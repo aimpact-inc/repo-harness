@@ -4,7 +4,7 @@ import { parseRefs } from '../../core/board/source';
 import type { BoardHostPortsV1, BoardSeatTerminalReadV1 } from '../../core/board/board';
 import { gitSpawnSync, withoutRepositorySelectingGitEnv } from '../git/runner';
 import type { WorktreeProcess } from '../git/worktree-processes';
-import { assertNoOwner, checkoutPath, entries, protectsCwd, removeExactWorktree } from '../state/coordination-worktree-topology';
+import { assertNoOwner, checkoutPath, entries, protectsCwd, releaseClosedWorktreeMarker, removeExactWorktree } from '../state/coordination-worktree-topology';
 import { cleanupTaskWorktree } from '../terminal/runtime-closeout';
 import { BoardCollectError, readGhJson, readRepositoryId, type GhInput } from './collect';
 import type { WorktreeHookCounts } from './lifecycle-index';
@@ -249,7 +249,8 @@ async function removeWorktree(input: BoardCloseoutInput, pr: MergedPullRequest, 
   let failures: readonly string[] = [];
   let stopped: readonly number[] = [];
   try {
-    const runtime = await cleanupTaskWorktree(proof.main, proof.path);
+    const runtime = await cleanupTaskWorktree(proof.main, proof.path, false, undefined,
+      (root, checkout, gitBin) => releaseClosedWorktreeMarker(root, checkout, gitBin, input.processes));
     if (runtime.status !== 'closed' && runtime.status !== 'not_registered') {
       return observed(proof, pr, `runtime ${runtime.status}${'reason' in runtime && runtime.reason ? ` (${runtime.reason})` : ''}`, failures);
     }
@@ -262,7 +263,7 @@ async function removeWorktree(input: BoardCloseoutInput, pr: MergedPullRequest, 
     const busy = await processesGone(input, proof.path);
     if (busy !== null) return observed(proof, pr, busy, failures, stopped);
     removeExactWorktree(proof.main, { worktree: proof.path, branch: pr.head_ref, head_sha: pr.head_oid, target_ref: TARGET_REF, target_oid: proof.target_oid,
-      merge_commit_sha: pr.merge_commit }, { closeout: true });
+      merge_commit_sha: pr.merge_commit }, { closeout: true, closeoutProcesses: input.processes });
     return observed(proof, pr, null, failures, stopped);
   } catch (error) {
     return observed(proof, pr, (error as Error).message.split('\n')[0]!, failures, stopped);

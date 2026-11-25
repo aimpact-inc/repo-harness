@@ -1,4 +1,4 @@
-import { controlledWorktreeProcessPreload, setControlledWorktreeProcesses } from './helpers/controlled-worktree-processes';
+import { controlledWorktreeProcessPreload, setControlledWorktreeProcesses, writeControlledWorktreeProcessesConfig } from './helpers/controlled-worktree-processes';
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "child_process";
 import {
@@ -15,7 +15,7 @@ import {
 } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
-import { commitAll, initGitRepo, run, tmpWorkspace } from "./helpers/repo-fixture";
+import { commitAll, initGitRepo as initFixtureGitRepo, run, tmpWorkspace } from "./helpers/repo-fixture";
 import { executeAdmittedVerification } from "../src/effects/evidence/verification-execution";
 import { seedReviewAdmissionFixture } from './helpers/review-admission-fixture';
 import { parseVerificationPlanFromContractText } from '../src/core/evidence/verification-plan';
@@ -38,6 +38,11 @@ const ROOT = join(import.meta.dir, "..");
 const HELPER_DIR = join(ROOT, "scripts");
 
 setDefaultTimeout(30000);
+
+function initGitRepo(cwd: string): void {
+  initFixtureGitRepo(cwd);
+  writeControlledWorktreeProcessesConfig(cwd);
+}
 
 
 
@@ -575,7 +580,9 @@ const actual = await import(${JSON.stringify(executableModule)});
 mock.module(${JSON.stringify(executableModule)}, () => ({ ...actual, resolveTrustedGhExecutable: () => ${JSON.stringify(f.gh)} }));\n`);
       const bun = join(dirname(f.gh), 'provider-bun');
       const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
-      writeFileSync(bun, `#!/bin/sh\nexec ${quote(process.execPath)} --preload ${quote(preload)} "$@"\n`, { mode: 0o700 });
+      writeFileSync(bun, `#!/bin/sh
+exec ${quote(process.execPath)} --preload ${quote(controlledWorktreeProcessPreload)} --preload ${quote(preload)} "$@"
+`, { mode: 0o700 });
       const result = run('bash', [join(HELPER_DIR, 'contract-worktree.sh'), 'cleanup', '--slug', 'squash'], f.root,
         { ...f.env, REPO_HARNESS_TARGET_REPO_ROOT: f.root, REPO_HARNESS_BUN_BIN: bun });
       expect(result.status, result.stdout + result.stderr).toBe(0);

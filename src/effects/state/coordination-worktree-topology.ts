@@ -46,6 +46,7 @@ function mergeLibraryPath(): string {
 }
 type Limits = { deadline?: number; gitBin?: string; closeout?: boolean; ghBin?: string;
   liveSweep?: Pick<SweepContext, 'cwd' | 'env' | 'processes'>;
+  closeoutProcesses?: (deadline: number) => WorktreeProcess[] | null;
   previewObjects?: { directory: string; alternates: string };
 };
 function gitBinary(limits: Limits): string { return limits.gitBin ?? configuredGitBinary(); }
@@ -226,9 +227,8 @@ export type LocalMergeMode = 'ancestor' | 'absorbed' | 'unmerged';
 
 /** The offline merge-library verdict for `head` against the target OID. Any other library output throws. */
 export function localMergeMode(root: string, head: string, target: string, limits: Limits): LocalMergeMode {
-  const inherited = withoutProviderTokens(withoutRepositorySelectingGitEnv());
   const objects = limits.previewObjects;
-  const env = { ...inherited, REPO_HARNESS_GIT_BIN: gitBinary(limits), ...objects && {
+  const env = { ...withoutProviderTokens(withoutRepositorySelectingGitEnv()), REPO_HARNESS_GIT_BIN: gitBinary(limits), ...objects && {
     GIT_OBJECT_DIRECTORY: objects.directory, GIT_ALTERNATE_OBJECT_DIRECTORIES: JSON.stringify(objects.alternates),
   } };
   const output = execFileSync('bash', [mergeLibraryPath(), '--target', target, head], {
@@ -287,7 +287,8 @@ export function proveCloseoutBranch(root: string, branch: string, head: string, 
   return { mode: result.merge, ...result.proof };
 }
 
-export function assertNoOwner(root: string, worktree: string, limits: Limits, allowSelfMarker = false): void {
+export function assertNoOwner(root: string, worktree: string, limits: Limits, allowSelfMarker = false): boolean {
+  let selfMarker = false;
   for (const entry of entries(root, limits)) {
     const marker = join(entry.path, ACTIVE_WORKTREE_MARKER);
     timeout(limits);
@@ -295,9 +296,10 @@ export function assertNoOwner(root: string, worktree: string, limits: Limits, al
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
     const owner = readFileSync(marker, 'utf8').trim();
     if (!owner) throw new Error('cleanup has unknown active-worktree marker');
-    if (allowSelfMarker && owner === worktree && checkoutPath(entry.path) === worktree) continue;
+    if (allowSelfMarker && owner === worktree && checkoutPath(entry.path) === worktree) { selfMarker = true; continue; }
     if (checkoutPath(resolve(entry.path, owner)) === worktree) throw new Error('cleanup has an active-worktree marker reference');
   }
+  return selfMarker;
 }
 
 function identityStore(common: string): string | null {
@@ -445,9 +447,10 @@ export function cleanupExactWorktree(root: string, expected: ExactWorktreeCleanu
       if (git(path, ['rev-parse', 'HEAD'], limits) !== expected.head_sha) throw new Error('cleanup execution head moved');
     }
     if (live && (sweep || limits.closeout)) {
+      const probe = sweep?.processes ?? limits.closeoutProcesses;
       const inspection = inspectRemoval(root, path, sweep?.cwd ?? realpathSync(process.cwd()), limits, {
         target, allowProvider: true, requireOwnCommits: !!sweep, env: sweep?.env,
-        processes: sweep ? sweep.processes(Math.min(limits.deadline!, Date.now() + 5_000)) : undefined,
+        processes: probe?.(Math.min(limits.deadline ?? Infinity, Date.now() + 5_000)),
       });
       if (limits.closeout) {
         if (inspection.probeError) throw inspection.probeError;
@@ -744,11 +747,13 @@ export function inspectWorktree(root: string, path: string, callerCwd: string | 
   env?: NodeJS.ProcessEnv; deadline?: number; processes?: WorktreeProcess[] | null; ghBin?: string;
 } = {}): WorktreeInspection {
   const limits: Limits = { deadline: options.deadline ?? Date.now() + 10_000, gitBin: configuredGitBinary(options.env), ghBin: options.ghBin };
-  return inspectRemoval(root, path, callerCwd, limits, { ...options, requireOwnCommits: true, allowProvider: options.ghBin !== undefined }).view;
+  const { view, selfMarker } = inspectRemoval(root, path, callerCwd, limits, { ...options, requireOwnCommits: true, allowProvider: options.ghBin !== undefined });
+  if (view.judgment !== 'green' && selfMarker) view.reasons.push('owner');
+  return view;
 }
 
 function inspectRemoval(root: string, path: string, callerCwd: string | null, limits: Limits, options: LiveRemovalOptions): {
-  view: WorktreeInspection; proof: MergeProof | null; blockedPaths: string[]; probeError?: Error; branchError?: Error;
+  view: WorktreeInspection; proof: MergeProof | null; blockedPaths: string[]; probeError?: Error; branchError?: Error; selfMarker: boolean;
 } {
   const reasons: WorktreeReason[] = [];
   const result: WorktreeInspection = { judgment: 'yellow', reasons, process_count: null, dirty_files: null, ignored_entries: null, unpushed_commits: null, merge: 'unknown' };
@@ -757,6 +762,7 @@ function inspectRemoval(root: string, path: string, callerCwd: string | null, li
   let probeError: Error | undefined;
   let branchError: Error | undefined;
   let inUse = false;
+  let selfMarker = false;
   const reject = (reason: WorktreeReason, action: () => void): Error | undefined => {
     try { action(); } catch (error) {
       reasons.push(reason);
@@ -782,7 +788,7 @@ function inspectRemoval(root: string, path: string, callerCwd: string | null, li
     if (!entry) reasons.push('unregistered');
     if (!existsSync(path)) reasons.push('missing');
     if (entry?.locked) reasons.push('locked');
-    reject('owner', () => assertNoOwner(main, path, limits, true));
+    reject('owner', () => { selfMarker = assertNoOwner(main, path, limits, true); });
     if (entry && existsSync(path)) {
       probeError = reject('probe_failed', () => {
         // A read-only judgment: no index refresh, so no index.lock in the inspected worktree.
@@ -822,16 +828,17 @@ function inspectRemoval(root: string, path: string, callerCwd: string | null, li
   } catch { reasons.push('probe_failed'); }
   if (inUse) result.judgment = 'red';
   else if (proof && reasons.length === 0) result.judgment = 'green';
-  return { view: result, proof, blockedPaths, probeError, branchError };
+  return { view: result, proof, blockedPaths, probeError, branchError, selfMarker };
 }
 
 /** Release a closed workspace's own ignored marker under the same removal proof. */
-export function releaseClosedWorktreeMarker(root: string, path: string, gitBin = configuredGitBinary()): void {
+export function releaseClosedWorktreeMarker(root: string, path: string, gitBin = configuredGitBinary(),
+  processes: (deadline: number) => WorktreeProcess[] | null = worktreeProcesses): void {
   const limits: Limits = { gitBin, deadline: Date.now() + 5_000 };
   try {
     if (checkoutPath(path) !== path || !isSelfMarker(path)) return;
     withWorktreeTopologyLock(root, () => {
-      const { view } = inspectRemoval(root, path, realpathSync(process.cwd()), limits, { allowProvider: true });
+      const { view } = inspectRemoval(root, path, realpathSync(process.cwd()), limits, { allowProvider: true, processes: processes(limits.deadline!) });
       if (view.judgment !== 'green') return;
       // A tracked marker is repository content, even when its bytes match the checkout path.
       git(path, ['check-ignore', '--quiet', '--', ACTIVE_WORKTREE_MARKER], limits);

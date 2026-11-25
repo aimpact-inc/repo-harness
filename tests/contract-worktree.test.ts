@@ -23,7 +23,8 @@ import { appendGenesisRecord } from "../src/effects/evidence/event-log";
 import { sweepManagedWorktrees } from '../src/effects/state/coordination-worktree-topology';
 import { defaultPolicy } from "../src/effects/adoption/standard-plan";
 import { copyHelpers, ROOT } from "./helpers/helper-script-fixture";
-import { addSelfOrigin, commitAll, initGitRepo, run, tmpWorkspace } from "./helpers/repo-fixture";
+import { addSelfOrigin, commitAll, initGitRepo as initFixtureGitRepo, run, tmpWorkspace } from "./helpers/repo-fixture";
+import { writeControlledWorktreeProcessesConfig } from "./helpers/controlled-worktree-processes";
 import { installStateFixturePath, recordPluginSelection } from "./helpers/install-ownership";
 import { indexPackageLocalCodeGraph, resolveCompatibleNodeRuntime, resolvePackageLocalArchctx } from '../src/effects/architecture/archctx-provider';
 import { ARCHCTX_REQUIRED_VERSION } from '../src/core/architecture/projection';
@@ -31,6 +32,11 @@ import { shellQuote } from '../src/core/shell-quote';
 import { productVersionManifest } from 'archctx-contracts';
 
 setDefaultTimeout(30000);
+
+function initGitRepo(cwd: string): void {
+  initFixtureGitRepo(cwd);
+  writeControlledWorktreeProcessesConfig(cwd);
+}
 
 interface IssueStub {
   number: number;

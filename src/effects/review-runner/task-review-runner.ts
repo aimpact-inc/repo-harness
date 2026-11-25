@@ -21,6 +21,7 @@ import { MAGPIE_REVIEW_EFFORT, MAGPIE_REVIEW_MODEL, MAGPIE_REVIEW_PI_MODEL } fro
 import { assertTerminalHostCommand, bindTerminalApplicationHost, collectTaskResult,
   sendTaskRequest, startTaskApplicationHost, taskAgentStatus } from '../terminal/task-session';
 import { assertTaskBinding, cancelTaskAgent, closeTaskAgent, validateHerdrCoreEndpoint } from '../terminal/runtime-closeout';
+import { releaseClosedWorktreeMarker } from '../state/coordination-worktree-topology';
 import { taskBindingSha256 } from '../terminal/task-session-admission';
 import { readSessionArtifact, writeSessionArtifact } from '../terminal/task-session-io';
 import { commitPrePromptInbox, preparePrePromptInbox } from './task-pre-prompt-inbox';
@@ -208,6 +209,6 @@ export const taskReviewRunner: ReviewerRunner<TaskPaneBinding, HerdrCoreEndpoint
       await Bun.sleep(25);
     }
   },
-  close: closeTaskAgent,
+  close: (root, task, role) => closeTaskAgent(root, task, role, releaseClosedWorktreeMarker),
   cancel: cancelTaskAgent,
 };

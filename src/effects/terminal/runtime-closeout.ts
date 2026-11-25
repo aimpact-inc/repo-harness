@@ -14,7 +14,6 @@ import { taskSessionKey } from '../git/repository-identity';
 import { readWorktreeRecord, endWorktreeRecord } from '../git/worktree-record';
 import { taskRepository, type TaskRepository } from '../git/task-repository';
 import { withCallerLock } from '../locking/exclusive-directory-lock';
-import { releaseClosedWorktreeMarker } from '../state/coordination-worktree-topology';
 import { HerdrCoreError, RH_LABEL, RH_NOTIFY_LABELS, RH_ROLE, hcGet, hcKill, hcList, hcRm, hcSend, isHcAddress,
   type HcLabels, type HcTerminal, type HerdrCoreOptions } from './herdr-core';
 
@@ -325,16 +324,23 @@ async function closeUnboundTaskStart(dir: string, task: string, role: string, mo
   if (group.length) return { status: 'cleanup_pending', pids: group, reason: 'provider_group_alive' };
   return finish();
 }
-async function cleanupTaskAgent(repoRoot: string, task: string, role: string, mode: 'close' | 'cancel'): Promise<TaskCleanupResult> {
+type OnWorktreeClosed = (root: string, checkout: string, gitBin?: string) => void;
+
+async function cleanupTaskAgent(repoRoot: string, task: string, role: string, mode: 'close' | 'cancel', onClosed?: OnWorktreeClosed): Promise<TaskCleanupResult> {
   const repository = taskRepository(repoRoot); const root = repository.primary_root; const dir = taskSessionDirectory(root, task, role);
   assertSessionDirectory(root, dir);
   return withCallerLock<TaskCleanupResult>(root, dir, async () => {
-    if (!existsSync(join(dir, 'binding.json'))) return closeUnboundTaskStart(dir, task, role, mode);
+    if (!existsSync(join(dir, 'binding.json'))) {
+      const result = await closeUnboundTaskStart(dir, task, role, mode);
+      if (result.status === 'closed' && onClosed) {
+        const intent = readStartIntent(join(dir, 'intent.json'));
+        onClosed(root, intent.repository.execution_root);
+      }
+      return result;
+    }
     const { binding } = readTaskAgent(root, task, role);
     assertCreated(binding.ownership); assertCreated(binding.provider.ownership);
-    const releaseMarker = () => {
-      if (mode === 'close') releaseClosedWorktreeMarker(root, binding.execution_root);
-    };
+    const releaseMarker = () => onClosed?.(root, binding.execution_root);
     if (existsSync(join(dir, 'closed.json'))) {
       releaseMarker();
       return { status: 'closed', pids: [] };
@@ -374,15 +380,16 @@ async function cleanupTaskAgent(repoRoot: string, task: string, role: string, mo
   });
 }
 
-export function closeTaskAgent(repoRoot: string, task: string, role: string): Promise<TaskCleanupResult> {
-  return cleanupTaskAgent(repoRoot, task, role, 'close');
+export function closeTaskAgent(repoRoot: string, task: string, role: string, onClosed?: OnWorktreeClosed): Promise<TaskCleanupResult> {
+  return cleanupTaskAgent(repoRoot, task, role, 'close', onClosed);
 }
 export function cancelTaskAgent(repoRoot: string, task: string, role: string): Promise<TaskCleanupResult> {
   return cleanupTaskAgent(repoRoot, task, role, 'cancel');
 }
 
 /** Git publication/dirty/merge checks remain the caller's authority. */
-export async function cleanupTaskWorktree(repoRoot: string, checkoutPath: string, dryRun = false, gitBin = configuredGitBinary()): Promise<TaskCleanupResult | { status: 'not_registered'; pids: number[] }> {
+export async function cleanupTaskWorktree(repoRoot: string, checkoutPath: string, dryRun = false, gitBin = configuredGitBinary(),
+  onClosed?: OnWorktreeClosed): Promise<TaskCleanupResult | { status: 'not_registered'; pids: number[] }> {
   const repository = taskRepository(repoRoot, gitBin);
   const expected = { ...repository, execution_root: checkoutPath };
   const dir = workspaceDirectory(expected);
@@ -417,6 +424,6 @@ export async function cleanupTaskWorktree(repoRoot: string, checkoutPath: string
     }
     return { status: 'closed', pids: [] };
   });
-  if (!dryRun && result.status === 'closed') releaseClosedWorktreeMarker(repository.primary_root, checkoutPath, gitBin);
+  if (!dryRun && result.status === 'closed') onClosed?.(repository.primary_root, checkoutPath, gitBin);
   return result;
 }
