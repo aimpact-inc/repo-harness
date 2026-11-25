@@ -28,15 +28,44 @@ function assertFile(path: string): void {
   const uid = worktreeUid();
   if (!stat.isFile() || stat.isSymbolicLink() || uid === undefined || stat.uid !== uid || (stat.mode & 0o002)) throw new Error('pruned worktree intent file is unsafe');
 }
-export function readPrunedWorktreeIntents(common: string): PrunedWorktreeIntent[] {
+export interface WorktreeSweepCursor {
+  readonly pending: string;
+  readonly live: string;
+  readonly first: 'pending' | 'live';
+}
+
+interface PrunedWorktreeState {
+  readonly entries: PrunedWorktreeIntent[];
+  readonly sweepCursor?: unknown;
+}
+
+function readState(common: string): PrunedWorktreeState {
   const path = file(common);
-  if (!existsSync(path)) { try { lstatSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; } }
+  if (!existsSync(path)) { try { lstatSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { entries: [] }; throw error; } }
   assertParent(common);
   assertFile(path);
   const saved = JSON.parse(readFileSync(path, 'utf8'));
   if (!saved || saved.protocol !== 1 || saved.common !== common || !Array.isArray(saved.entries)) throw new Error('pruned worktree intent file is invalid');
   assertEntries(common, saved.entries);
-  return saved.entries;
+  return { entries: saved.entries, sweepCursor: saved.sweepCursor };
+}
+
+export function readPrunedWorktreeIntents(common: string): PrunedWorktreeIntent[] {
+  return readState(common).entries;
+}
+
+export function readPrunedWorktreeSweepState(common: string): { intents: PrunedWorktreeIntent[]; cursor: WorktreeSweepCursor } {
+  const { entries: intents, sweepCursor } = readState(common);
+  if (sweepCursor === undefined) return { intents, cursor: { pending: '', live: '', first: 'pending' } };
+  if (!sweepCursor || typeof sweepCursor !== 'object' || !('pending' in sweepCursor) || typeof sweepCursor.pending !== 'string'
+    || !('live' in sweepCursor) || typeof sweepCursor.live !== 'string'
+    || !('first' in sweepCursor) || (sweepCursor.first !== 'pending' && sweepCursor.first !== 'live')) throw new Error('worktree sweep cursor is invalid');
+  return { intents, cursor: { pending: sweepCursor.pending, live: sweepCursor.live, first: sweepCursor.first } };
+}
+
+/** The caller holds the topology lock. The cursor is only a scheduling hint. */
+export function writeWorktreeSweepCursor(common: string, sweepCursor: WorktreeSweepCursor): void {
+  writeState(common, { entries: readState(common).entries, sweepCursor });
 }
 function assertEntries(common: string, entries: readonly PrunedWorktreeIntent[]): void {
   for (const entry of entries) {
@@ -59,8 +88,15 @@ export function writePrunedWorktreeIntents(common: string, entries: readonly Pru
     const orphan = join(dirname(path), name); const stat = lstatSync(orphan);
     if (stat.isFile() && !stat.isSymbolicLink() && stat.uid === worktreeUid() && (stat.mode & 0o777) === 0o600 && stat.mtimeMs < beforeWrite) unlinkSync(orphan);
   }
+  const { sweepCursor } = readState(common);
+  writeState(common, { entries, sweepCursor });
+}
+
+function writeState(common: string, { entries, sweepCursor }: { readonly entries: readonly PrunedWorktreeIntent[]; readonly sweepCursor?: unknown }): void {
+  const path = file(common);
+  assertParent(common);
   if (existsSync(path)) assertFile(path);
-  if (!entries.length) { if (existsSync(path)) unlinkSync(path); syncDirectoryDurably(dirname(path)); return; }
+  if (!entries.length && !sweepCursor) { if (existsSync(path)) unlinkSync(path); syncDirectoryDurably(dirname(path)); return; }
   const temporary = `${path}.${randomUUID()}.tmp`;
-  publishFileByRename(path, Buffer.from(JSON.stringify({ protocol: 1, common, entries })), temporary);
+  publishFileByRename(path, Buffer.from(JSON.stringify({ protocol: 1, common, entries, sweepCursor })), temporary);
 }
