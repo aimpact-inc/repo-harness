@@ -24,3 +24,4 @@ source:
     - src/effects/architecture/architecture-read.ts
     - src/effects/architecture/capability-resolver.ts
     - src/effects/architecture/model-reader.ts
+    - src/effects/architecture/providers.ts

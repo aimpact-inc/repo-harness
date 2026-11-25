@@ -1,6 +1,6 @@
 schemaVersion: archcontext.relation/v1
-id: relation.hook-adapters.hook-root.archctx-closure
+id: relation.hook-adapters.hook-root.providers
 kind: calls
 source: component.hook-adapters.hook-root
-target: component.architecture.archctx-closure
+target: component.architecture.providers
 intent: "Register the archctx ownership, display and runtime providers"

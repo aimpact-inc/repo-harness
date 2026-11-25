@@ -1,0 +1,6 @@
+schemaVersion: archcontext.relation/v1
+id: relation.architecture.providers.owners
+kind: calls
+source: component.architecture.providers
+target: component.architecture.owners
+intent: "Expose path ownership, path owners and the resolve answer cache as the ownership and display providers"

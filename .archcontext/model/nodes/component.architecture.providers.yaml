@@ -1,0 +1,14 @@
+schemaVersion: archcontext.node/v2
+id: component.architecture.providers
+kind: component
+name: Architecture Providers
+status: active
+parent: capability.runtime-harness.architecture
+layer: effects
+summary: "Assembles the archctx ownership, display and runtime providers that every process root registers."
+responsibilities:
+  - "Assemble the ownership and display providers from the path owners and the resolve answer cache."
+  - Assemble the runtime provider from the archctx version pin and the package-local archctx resolver.
+source:
+  include:
+    - src/effects/architecture/providers.ts

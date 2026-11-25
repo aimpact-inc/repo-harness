@@ -1,0 +1,6 @@
+schemaVersion: archcontext.relation/v1
+id: relation.architecture.providers.archctx-closure
+kind: calls
+source: component.architecture.providers
+target: component.architecture.archctx-closure
+intent: "Expose the package-local archctx resolver as the runtime provider"

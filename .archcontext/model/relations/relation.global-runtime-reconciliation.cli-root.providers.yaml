@@ -1,0 +1,6 @@
+schemaVersion: archcontext.relation/v1
+id: relation.global-runtime-reconciliation.cli-root.providers
+kind: calls
+source: component.global-runtime-reconciliation.cli-root
+target: component.architecture.providers
+intent: "Register the archctx ownership, display and runtime providers"
