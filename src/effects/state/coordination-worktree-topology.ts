@@ -541,8 +541,15 @@ export function protectsCwd(path: string, cwd: string, platform = process.platfo
   return current.startsWith(prefix);
 }
 
+function windowsTargetPath(path: string): string {
+  if (process.platform !== 'win32') return path;
+  try { return realpathSync.native(path); } catch { return path; }
+}
+
 function worktreeProcessCount(path: string, processes: WorktreeProcess[] | null): number | null {
-  return processes === null ? null : new Set(processes.filter(item => protectsCwd(path, item.cwd)).map(item => item.pid)).size;
+  if (processes === null) return null;
+  const target = windowsTargetPath(path);
+  return new Set(processes.filter(item => protectsCwd(target, item.cwd)).map(item => item.pid)).size;
 }
 
 /** A closeout preview must prove occupancy before it lists a planned removal. */
