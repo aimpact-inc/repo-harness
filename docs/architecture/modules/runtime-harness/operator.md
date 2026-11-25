@@ -1,6 +1,6 @@
 # runtime-harness/operator 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-operator" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:06eb36956f5a5bd47f1620e542d21bbf0d280f23c84f1144a867b7b748873da0" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-operator" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:b52809c5cac4910ea139b63009448310d64922960ba7f8ca9d379feb166d39b8" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.operator`(kind `capability`)
 > **Matched Prefixes**:`docs/kanban-runtime-status.md`、`src/effects/operator/**`、`src/operator-web/**`、`packages/operator-web/**`、`src/effects/setup/**`、`src/effects/dev-activity/**`、`vite.operator.config.ts`
@@ -27,20 +27,23 @@ flowchart LR
   p1_component_operator_cli_layer_6969b5f0["Operator Board (cli)"]:::component
   p1_component_operator_console_collectors_1f8d9a20["Console Collectors"]:::component
   p1_component_operator_core_layer_995d28e9["Operator Board (core)"]:::component
+  p1_component_operator_herdr_runtime_transport_98c44267["Herdr Runtime Transport"]:::component
   p1_component_operator_primary_d8da79ba["Operator HTTP Reader"]:::component
   p1_component_operator_primary_cli_7531f69e["Operator HTTP Reader (cli)"]:::component
   p1_component_operator_view_projections_ca31e3bc["Operator View Projections"]:::component
   p1_component_operator_web_console_452bb61f["Operator Web Console"]:::component
   p1_component_operator_activity_feeds_00325b96 -->|"Reuse public agent-config text filtering and runtime source freshness rules"| p1_component_operator_view_projections_ca31e3bc
+  p1_component_operator_board_observer_af875547 -->|"Take a terminal snapshot scoped to the repository to refresh the observed seats."| p1_component_operator_herdr_runtime_transport_98c44267
   p1_component_operator_console_collectors_1f8d9a20 -->|"Read the GitHub name and default branch of each repository from the Dev Activity cache for the docs ref and the daily CI run#44; read the open pull requests' heads and changed files for the architecture map's PR impact layer#44; and run the execution-state child through the setup collector's supervised process runner."| p1_component_operator_activity_feeds_00325b96
-  p1_component_operator_console_collectors_1f8d9a20 -->|"Check the hc core version against the pin with hc server status and read the task-session hc events snapshot through the hc runtime transport."| p1_component_operator_primary_d8da79ba
-  p1_component_operator_console_collectors_1f8d9a20 -->|"Build cache values with the strict Bot access#44; notify#44; docs and tests decoders and the JUnit and projection parsers."| p1_component_operator_view_projections_ca31e3bc
+  p1_component_operator_console_collectors_1f8d9a20 -->|"Check the core version against the pin and read the task-session terminal snapshot for Bot access."| p1_component_operator_herdr_runtime_transport_98c44267
+  p1_component_operator_console_collectors_1f8d9a20 -->|"Build cache values with the strict Bot access#44; notify#44; docs and tests decoders and the JUnit and projection parsers. Redact public architecture map values."| p1_component_operator_view_projections_ca31e3bc
   p1_component_operator_primary_d8da79ba -->|"Start the bounded background collectors once and serve only their cached#44; re-decoded snapshots"| p1_component_operator_activity_feeds_00325b96
   p1_component_operator_primary_d8da79ba -->|"Start the notify#44; Bot access#44; docs and tests collectors once#44; serve only their re-decoded caches#44; and send a docs file GET as one object request to the resident cat-file worker."| p1_component_operator_console_collectors_1f8d9a20
   p1_component_operator_primary_d8da79ba -->|"Read the committed architecture model through the shared ArchitectureModelReader"| p1_component_architecture_model_reader_a34f9503
-  p1_component_operator_primary_d8da79ba -->|"Parse closed route requests and project or re-decode each observation before it leaves the server"| p1_component_operator_view_projections_ca31e3bc
+  p1_component_operator_primary_d8da79ba -->|"Parse closed route requests#44; redact public architecture values and project or re-decode observations before they leave the server."| p1_component_operator_view_projections_ca31e3bc
   p1_capability_runtime_harness_operator_00133dd3 -->|"Return a read-only HTTP observation."| p1_component_operator_primary_d8da79ba
   p1_component_operator_primary_d8da79ba -->|"Start one board observer per server#44; serve its seats#44; parents and board documents from memory with an ETag for each document version and close its streams and worker with the server."| p1_component_operator_board_observer_af875547
+  p1_component_operator_primary_d8da79ba -->|"Read the Herdr core identity and terminal snapshot for the live runtime adapter."| p1_component_operator_herdr_runtime_transport_98c44267
   p1_component_operator_web_console_452bb61f -->|"Decode the development activity and setup snapshots with the decoders the server uses"| p1_component_operator_activity_feeds_00325b96
   p1_component_operator_web_console_452bb61f -->|"Fetch public JSON observations through GET and HEAD routes only"| p1_component_operator_primary_d8da79ba
   p1_component_operator_web_console_452bb61f -->|"Decode each observation body with the shared strict core decoder before render"| p1_component_operator_view_projections_ca31e3bc
@@ -50,8 +53,8 @@ flowchart LR
   classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-- Proof: `proven` (`sha256:46299c8cb07c606650bf00677a2e39134d2e46faba48e72d05b27a8752d95a0d`).
-- Semantic nodes: `16`; declared relations: `13`.
+- Proof: `proven` (`sha256:8a580ad52e5b096f8612021b7155afc2f4f58ac705e000f78e6e49cfae0cf3b1`).
+- Semantic nodes: `17`; declared relations: `15`.
 
 ### 1.2 模組職責表
 
@@ -116,6 +119,7 @@ flowchart LR
 - `component.operator.board-observer`:
   - `calls` → `component.board.effects` — In the resident worker, collect each observed board through one keyed source store per board and the parent list of each registered repository; acts keep their own fresh reads.
   - `calls` → `component.execution-primitives.hc-client` — Read repository hc streams and snapshots, read agent values from hc ls, and use the one seat-terminal mapping shared with closeout.
+  - `calls` → `component.operator.herdr-runtime-transport` — Take a terminal snapshot scoped to the repository to refresh the observed seats.
 - `component.operator.cli-layer`:
   - 無。
 - `component.operator.console-collectors`:
@@ -125,28 +129,31 @@ flowchart LR
   - `reads` → `external.git` — Read remote URLs from local config, docs blobs through a resident cat-file worker on local refs only, line counts of a commit for the architecture map, and worktree topology and status. Worktree merge proof uses the shared sweep authority.
   - `reads` → `external.github` — Read the newest daily CI run, download its JUnit and test projection artifacts, and list open CI repair issues with gh.
   - `reads` → `external.herdr-core` — Run hc ls for the notify relay terminal on each notify cycle, and hc server status for the core id of each execution cycle and terminal socket.
-  - `calls` → `component.operator.primary` — Check the hc core version against the pin with hc server status and read the task-session hc events snapshot through the hc runtime transport.
+  - `calls` → `component.operator.herdr-runtime-transport` — Check the core version against the pin and read the task-session terminal snapshot for Bot access.
   - `reads` → `capability.runtime-harness.mcp-sidecar` — Run mcp doctor and read the newest audit rows for Bot access.
   - `reads` → `component.execution-primitives.notify-read` — Read the notify install record, notify.env and the relay delivery record through the notify read contract on each notify cycle.
   - `reads` → `component.execution-primitives.public-projections` — Read the MCP audit log path for Bot access
   - `reads` → `component.execution-primitives.repository-registry` — Read the strict repository registry snapshot and the account home for Bot access, docs and tests.
   - `reads` → `external.slack` — Read the Dot review threads of #bot-worker with bots.info, conversations.history and conversations.replies; post nothing.
-  - `calls` → `component.operator.view-projections` — Build cache values with the strict Bot access, notify, docs and tests decoders and the JUnit and projection parsers.
+  - `calls` → `component.operator.view-projections` — Build cache values with the strict Bot access, notify, docs and tests decoders and the JUnit and projection parsers. Redact public architecture map values.
   - `depends-on` → `capability.workflow-engine.workflow-state` — Reuse inspectWorktree and the sweep merge predicates for the read-only worktree inventory.
 - `component.operator.core-layer`:
   - 無。
+- `component.operator.herdr-runtime-transport`:
+  - `calls` → `component.execution-primitives.hc-client` — Read core status and take the initial snapshot from a typed hc events stream.
 - `component.operator.primary`:
   - `calls` → `component.operator.activity-feeds` — Start the bounded background collectors once and serve only their cached, re-decoded snapshots
   - `calls` → `capability.runtime-harness.global-runtime-reconciliation` — Plugin → core: read the architecture history, the hand edits and the history timeout through the architecture read module
   - `calls` → `component.operator.console-collectors` — Start the notify, Bot access, docs and tests collectors once, serve only their re-decoded caches, and send a docs file GET as one object request to the resident cat-file worker.
   - `calls` → `component.architecture.model-reader` — Read the committed architecture model through the shared ArchitectureModelReader
   - `reads` → `component.execution-primitives.repository-registry` — Resolve a registered repository root from the strict repo-harness registry snapshot
-  - `calls` → `component.operator.view-projections` — Parse closed route requests and project or re-decode each observation before it leaves the server
+  - `calls` → `component.operator.view-projections` — Parse closed route requests, redact public architecture values and project or re-decode observations before they leave the server.
   - `reads` → `component.acceptance-review.primary` — Run the worktree cleanup investigation reviewer through the review isolation and runner port.
   - `calls` → `component.operator.board-observer` — Start one board observer per server, serve its seats, parents and board documents from memory with an ETag for each document version and close its streams and worker with the server.
   - `calls` → `component.workflow-state.coordination-plane` — Remove green worktrees under the worktree topology lock of their clone.
   - `reads` → `component.execution-primitives.primary` — Read the managed worktree root and its naming rule for the worktree cleanup.
-  - `reads` → `external.herdr-core` — Run hc server status and read the task-session hc events snapshot for the hc runtime transport, and follow the task-session hc events stream for runtime capture.
+  - `reads` → `external.herdr-core` — Follow the task-session hc events stream for runtime capture.
+  - `calls` → `component.operator.herdr-runtime-transport` — Read the Herdr core identity and terminal snapshot for the live runtime adapter.
   - `reads` → `component.task-fleet.task-inbox-effects` — Read the stored task inbox of one verified task for the Task drawer, read-only, in the supervised read process
 - `component.operator.primary-cli`:
   - 無。
@@ -174,6 +181,7 @@ flowchart LR
 | `component.operator.cli-layer` | Operator Board (cli) | `1–2` 個文件 / `20–50` 行 | 未宣告 |
 | `component.operator.console-collectors` | Console Collectors | `10–20` 個文件 / `2000–5000` 行 | 未宣告 |
 | `component.operator.core-layer` | Operator Board (core) | `1–2` 個文件 / `50–100` 行 | 未宣告 |
+| `component.operator.herdr-runtime-transport` | Herdr Runtime Transport | `1–2` 個文件 / `20–50` 行 | 未宣告 |
 | `component.operator.primary` | Operator HTTP Reader | `20–50` 個文件 / `5000–10000` 行 | `entrypoint.operator.http-server` |
 | `component.operator.primary-cli` | Operator HTTP Reader (cli) | `2–5` 個文件 / `200–500` 行 | 未宣告 |
 | `component.operator.view-projections` | Operator View Projections | `20–50` 個文件 / `2000–5000` 行 | 未宣告 |
@@ -181,7 +189,7 @@ flowchart LR
 
 ## 2. P2:端到端數據流
 
-> **Proof**: `proven` (`sha256:46299c8cb07c606650bf00677a2e39134d2e46faba48e72d05b27a8752d95a0d`); selectors `7/7`.
+> **Proof**: `proven` (`sha256:8a580ad52e5b096f8612021b7155afc2f4f58ac705e000f78e6e49cfae0cf3b1`); selectors `7/7`.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%

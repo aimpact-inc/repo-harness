@@ -1,5 +1,5 @@
 # runtime-harness/mcp-sidecar 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-mcp-sidecar" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:632a8c4632aacc085a23cf9ff38c30e5bb1b35313691d69bd9aded9b17ef8bd7" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-mcp-sidecar" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:bd10aea039dc205167d22ee374cf05512bcc75ebab28cdc33b64ae9ec153e382" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.mcp-sidecar`(kind `capability`)
 > **Matched Prefixes**:`src/cli/mcp/**`
@@ -18,9 +18,10 @@ flowchart LR
   p1_component_mcp_sidecar_host_setup_a05a1958["CLI Actions and Doctor"]:::component
   p1_component_mcp_sidecar_primary_8f9b418c["Server and Tool Dispatch"]:::component
   p1_component_mcp_sidecar_repo_policy_registry_40f1ea26["Config Policy and Repository Registry"]:::component
+  p1_component_mcp_sidecar_tool_result_7ae48439["Tool Result and Version"]:::component
   p1_component_mcp_sidecar_transport_auth_2511e63e["Stdio Transport"]:::component
-  p1_component_mcp_sidecar_host_setup_a05a1958 -->|"Read the package version for the mcp doctor report"| p1_component_mcp_sidecar_primary_8f9b418c
   p1_component_mcp_sidecar_host_setup_a05a1958 -->|"Read the user-level config#44; the allowed-root policy and the repository root for mcp doctor"| p1_component_mcp_sidecar_repo_policy_registry_40f1ea26
+  p1_component_mcp_sidecar_host_setup_a05a1958 -->|"Read the package version for the mcp doctor report"| p1_component_mcp_sidecar_tool_result_7ae48439
   p1_component_mcp_sidecar_host_setup_a05a1958 -->|"Start the stdio transport for mcp serve"| p1_component_mcp_sidecar_transport_auth_2511e63e
   p1_capability_runtime_harness_mcp_sidecar_4e12aaf3 -->|"Dispatch an MCP tool call"| p1_component_mcp_sidecar_primary_8f9b418c
   p1_component_mcp_sidecar_primary_8f9b418c -->|"Resolve repositories and paths under the profile policy then redact and audit each result"| p1_component_mcp_sidecar_repo_policy_registry_40f1ea26
@@ -31,8 +32,8 @@ flowchart LR
   classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-- Proof: `proven` (`sha256:3324010d17ad56bde062808a4160feed69dfbd9320da83d747d250d5aa9ab81a`).
-- Semantic nodes: `5`; declared relations: `6`.
+- Proof: `proven` (`sha256:850d29c0baa6cc49e257171eb7620cd1712715359235e6d9839888dd4ccb324e`).
+- Semantic nodes: `6`; declared relations: `6`.
 
 ### 1.2 模組職責表
 
@@ -76,8 +77,8 @@ flowchart LR
 - `component.mcp-sidecar.host-setup`:
   - `reads` → `component.contract-assets.architecture-contracts` — Read the CodeGraph port to build the reader of the served tools
   - `reads` → `capability.runtime-harness.global-runtime-reconciliation` — Resolve host skill roots to name leftover ChatGPT skill links for mcp doctor
-  - `reads` → `component.mcp-sidecar.primary` — Read the package version for the mcp doctor report
   - `reads` → `component.mcp-sidecar.repo-policy-registry` — Read the user-level config, the allowed-root policy and the repository root for mcp doctor
+  - `reads` → `component.mcp-sidecar.tool-result` — Read the package version for the mcp doctor report
   - `calls` → `component.mcp-sidecar.transport-auth` — Start the stdio transport for mcp serve
 - `component.mcp-sidecar.primary`:
   - `reads` → `capability.verification.acceptance-review` — Read the check records and the change assessment record
@@ -89,6 +90,8 @@ flowchart LR
 - `component.mcp-sidecar.repo-policy-registry`:
   - `calls` → `capability.workflow-engine.execution-primitives` — Run Git for repository roots, lock guarded writes and read the MCP audit log path
   - `calls` → `capability.runtime-harness.hook-adapters` — Append the MCP audit log through the shared segmented log writer
+- `component.mcp-sidecar.tool-result`:
+  - 無。
 - `component.mcp-sidecar.transport-auth`:
   - `calls` → `component.mcp-sidecar.primary` — Create the MCP server for the stdio session and dispatch its tool calls
 
@@ -99,11 +102,12 @@ flowchart LR
 | `component.mcp-sidecar.host-setup` | CLI Actions and Doctor | `2–5` 個文件 / `100–200` 行 | `entrypoint.mcp-sidecar.cli` |
 | `component.mcp-sidecar.primary` | Server and Tool Dispatch | `5–10` 個文件 / `1000–2000` 行 | `entrypoint.mcp-sidecar.tool-dispatch`、`entrypoint.mcp-sidecar.tool-context` |
 | `component.mcp-sidecar.repo-policy-registry` | Config Policy and Repository Registry | `10–20` 個文件 / `1000–2000` 行 | 未宣告 |
+| `component.mcp-sidecar.tool-result` | Tool Result and Version | `2–5` 個文件 / `20–50` 行 | 未宣告 |
 | `component.mcp-sidecar.transport-auth` | Stdio Transport | `1–2` 個文件 / `5–10` 行 | `entrypoint.mcp-sidecar.stdio-transport` |
 
 ## 2. P2:端到端數據流
 
-> **Proof**: `proven` (`sha256:3324010d17ad56bde062808a4160feed69dfbd9320da83d747d250d5aa9ab81a`); selectors `5/5`.
+> **Proof**: `proven` (`sha256:850d29c0baa6cc49e257171eb7620cd1712715359235e6d9839888dd4ccb324e`); selectors `5/5`.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%

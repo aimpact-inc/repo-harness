@@ -1,6 +1,6 @@
 # workflow-engine/execution-primitives 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-execution-primitives" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:9215d1d9a518004d3f4299f8913287de3a5c50cfb868d0c015d4f9ac318b513d" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-execution-primitives" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:ad2baff055778fd12f11186ccb68ac5a5d93a39b53554303285c23397245f322" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.workflow-engine.execution-primitives`(kind `capability`)
 > **Matched Prefixes**:`src/effects/process-runner.ts`、`src/effects/process-supervisor.ts`、`src/effects/process-group-launcher.ts`、`src/effects/process-group-termination.ts`、`src/effects/process-group-registry.ts`、`src/effects/expensive-run-lock.ts`、`src/effects/readonly-observation.ts`、`src/core/shell-quote.ts`、`src/effects/path-containment.ts`、`src/effects/atomic-append.ts`、`src/effects/locking/**`、`src/effects/git/**`
@@ -89,7 +89,7 @@ flowchart LR
 - `calls` ← `component.hook-adapters.edit-guards` — Lock the circuit breaker records
 - `calls` ← `component.hook-adapters.host-config-effects` — Take the runtime transaction lock before it applies a host file change
 - `calls` ← `component.hook-adapters.host-installer` — Hold the runtime host transaction lock and resolve the Pi opt-in repository through the bounded shared Git runner
-- `calls` ← `component.hook-adapters.primary` — Run the process supervisor and group launcher entries
+- `calls` ← `component.hook-adapters.primary` — Run the process supervisor and group launcher entries, and write host output through the shared blocking writer
 - `calls` ← `component.hook-adapters.session-lifecycle` — Hold the native role evidence lock
 - `calls` ← `component.mcp-sidecar.primary` — Read the registered repository roots for the server scope
 - `calls` ← `component.mcp-sidecar.repo-policy-registry` — Run Git for repository roots, lock guarded writes and read the MCP audit log path

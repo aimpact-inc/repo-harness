@@ -1,6 +1,6 @@
 # runtime-harness/architecture 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-architecture" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:d9a3aa8a574712b05397e78030eeb641f8f206a6ccbe8f7b9345a74fd18ed235" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-architecture" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:1d8ef70694a1280e5c54345d64502e3968398eef0d3a8b141e506680509c2f0c" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.architecture`(kind `capability`)
 > **Matched Prefixes**:`src/effects/architecture/**`、`src/core/architecture/projection.ts`、`src/core/architecture/module-view.ts`、`src/core/review/module-review-prompt.ts`、`src/cli/commands/module.ts`、`src/cli/hook/agent-notice.ts`、`scripts/axr5-archctx-clean-room.ts`、`scripts/check-state-boundaries.ts`、`scripts/project-test-capabilities.ts`、`scripts/sync-helper-sources.ts`、`assets/skills/repo-harness-archimap/**`、`assets/skill-commands/repo-harness-architecture/**`、`docs/verification/**`
@@ -27,11 +27,14 @@ flowchart LR
   p1_component_architecture_module_view_2b7004f1["Module View Contract"]:::component
   p1_component_architecture_notice_a8021c95["Architecture Notice"]:::component
   p1_component_architecture_owners_e27e764b["ArchContext Path Owners"]:::component
+  p1_component_architecture_providers_eeb6f018["Architecture Providers"]:::component
   p1_component_architecture_skills_17de03c8["Architecture Skills"]:::component
   p1_component_architecture_state_boundaries_check_139ea12c["State Boundaries Check"]:::component
   p1_component_architecture_test_projection_check_3217626c["Test Capability Projection Check"]:::component
   p1_capability_runtime_harness_architecture_b2e483c3 -->|"Project the standalone capability resolver helper"| p1_component_architecture_helper_projection_4f90d353
   p1_component_architecture_module_cli_9d2922f4 -->|"List modules and export review prompts through the shared ArchitectureModelReader"| p1_component_architecture_model_reader_a34f9503
+  p1_component_architecture_providers_eeb6f018 -->|"Expose the package-local archctx resolver as the runtime provider"| p1_component_architecture_archctx_closure_ab1057a2
+  p1_component_architecture_providers_eeb6f018 -->|"Expose path ownership#44; path owners and the resolve answer cache as the ownership and display providers"| p1_component_architecture_owners_e27e764b
   p1_component_architecture_archctx_closure_cli_e356d3af -->|"Read the hand edits and the model readiness for the rh arch projection command"| p1_component_architecture_architecture_read_367307ea
   p1_component_architecture_architecture_read_367307ea -->|"Run each read through the package-local archctx client and read the projection policy"| p1_component_architecture_archctx_closure_ab1057a2
   classDef actor fill:#111827,color:#ffffff,stroke:#f9fafb,stroke-width:2px
@@ -40,8 +43,8 @@ flowchart LR
   classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-- Proof: `proven` (`sha256:afde94c9f73fb6afd4557d78d1461268fbb8b6bfbf2be367d28608ff400a198c`).
-- Semantic nodes: `15`; declared relations: `4`.
+- Proof: `proven` (`sha256:b922e4207f06dffd372ba48ed09efbc9b7a09e07c2526fd4fbca6fcccecb1bd7`).
+- Semantic nodes: `16`; declared relations: `6`.
 
 ### 1.2 模組職責表
 
@@ -109,6 +112,9 @@ flowchart LR
   - 無。
 - `component.architecture.owners`:
   - 無。
+- `component.architecture.providers`:
+  - `calls` → `component.architecture.archctx-closure` — Expose the package-local archctx resolver as the runtime provider
+  - `calls` → `component.architecture.owners` — Expose path ownership, path owners and the resolve answer cache as the ownership and display providers
 - `component.architecture.skills`:
   - 無。
 - `component.architecture.state-boundaries-check`:
@@ -131,13 +137,14 @@ flowchart LR
 | `component.architecture.module-view` | Module View Contract | `2–5` 個文件 / `200–500` 行 | 未宣告 |
 | `component.architecture.notice` | Architecture Notice | `1–2` 個文件 / `500–1000` 行 | 未宣告 |
 | `component.architecture.owners` | ArchContext Path Owners | `2–5` 個文件 / `200–500` 行 | 未宣告 |
+| `component.architecture.providers` | Architecture Providers | `1–2` 個文件 / `20–50` 行 | 未宣告 |
 | `component.architecture.skills` | Architecture Skills | `5–10` 個文件 / `1000–2000` 行 | 未宣告 |
 | `component.architecture.state-boundaries-check` | State Boundaries Check | `1–2` 個文件 / `1000–2000` 行 | 未宣告 |
 | `component.architecture.test-projection-check` | Test Capability Projection Check | `1–2` 個文件 / `100–200` 行 | 未宣告 |
 
 ## 2. P2:端到端數據流
 
-> **Proof**: `proven` (`sha256:afde94c9f73fb6afd4557d78d1461268fbb8b6bfbf2be367d28608ff400a198c`); selectors `3/3`.
+> **Proof**: `proven` (`sha256:b922e4207f06dffd372ba48ed09efbc9b7a09e07c2526fd4fbca6fcccecb1bd7`); selectors `3/3`.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%

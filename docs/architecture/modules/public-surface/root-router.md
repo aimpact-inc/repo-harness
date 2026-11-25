@@ -1,5 +1,5 @@
 # public-surface/root-router 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-public-surface-root-router" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:ce84762173642c2d91334ed4487b65fd08718bd8540e9897d366a93ea504442b" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-public-surface-root-router" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:0f45690bb23c8a51d1e22c12b7d1dc53191c81d7c43430a683ea19971096454e" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.public-surface.root-router`(kind `capability`)
 > **Matched Prefixes**:`agents/openai.yaml`、`docs/CHANGELOG.md`、`docs/changelog.d/**`、`docs/images/**`、`references/bot-control.md`、`references/handoff.md`、`references/workflow-packaging-rubric.md`、`SKILL.md`、`references/pm-boundary.md`、`README.md`、`AGENTS.md`、`CLAUDE.md`、`docs/spec.md`、`docs/usage.md`、`docs/control-bot-boundary.md`、`docs/bot-onboarding.md`、`docs/prds/**`、`README.es.md`、`README.fr.md`、`README.ja.md`、`README.zh-CN.md`、`src/cli/commands/docs.ts`
@@ -31,6 +31,7 @@ flowchart LR
 | 宣告入口 | 錨點 | 職責 |
 | --- | --- | --- |
 | `entrypoint.root-router.primary` | `src/cli/commands/adoption-plan.ts#runAdoptionPlan` | `sink.root-router.primary` → `src/cli/commands/adoption-plan.ts#createPlan` |
+| `entrypoint.root-router.docs` | `src/cli/commands/docs.ts#buildDocsCommand` | `sink.root-router.docs` → `src/cli/commands/docs.ts#listRuntimeDocs` |
 
 組件入口:
 

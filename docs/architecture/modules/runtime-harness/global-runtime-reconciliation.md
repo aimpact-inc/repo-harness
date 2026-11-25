@@ -1,6 +1,6 @@
 # runtime-harness/global-runtime-reconciliation 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-global-runtime-reconciliation" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:0f2431acb8dc85f7575897740db4da17f76dbf21b9e6cc231824218762a7ad77" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-global-runtime-reconciliation" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:f5dfeb974a86dafcfdf4b46f87a17a47fe405719b711aa3cbf1cf57fce813887" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.global-runtime-reconciliation`(kind `capability`)
 > **Matched Prefixes**:`package.json`、`bun.lock`、`scripts/check-managed-runtime.ts`、`scripts/sync-codex-installed-copies.sh`、`assets/reference-configs/external-tooling.md`、`docs/reference-configs/external-tooling.md`、`docs/reference-configs/install-profiles.md`、`src/effects/upgrade/**`、`src/effects/runtime/node-candidates.ts`、`src/effects/runtime/protected-helper-platform.ts`、`src/effects/skill-tree-integrity.ts`、`src/effects/host-skill-roots.ts`、`src/effects/configuration/**`、`src/core/release/**`、`src/effects/release/**`、`scripts/check-npm-release.sh`、`scripts/check-release-published.sh`、`scripts/check-tarball-install-smoke.sh`、`scripts/check-release-upgrade-rehearsal.sh`、`scripts/check-pi-package-smoke.ts`、`scripts/runtime-evidence-receipt.ts`、`install.sh`、`install.ps1`、`tsconfig.json`、`src/effects/runtime/node-runtime.ts`
@@ -36,7 +36,7 @@ flowchart LR
   p1_component_global_runtime_reconciliation_cli_diagnostics_95dbb784 -->|"Read the install state#44; skill projections#44; host targets#44; the Pi host probe#44; hook routes and status for the doctor and setup check reports"| p1_capability_runtime_harness_hook_adapters_75a11743
   p1_component_global_runtime_reconciliation_cli_diagnostics_95dbb784 -->|"Read the staged host skill roots and the upgrade operator decisions"| p1_component_global_runtime_reconciliation_primary_d41cdd38
   p1_component_global_runtime_reconciliation_cli_diagnostics_95dbb784 -->|"Plan the upgrade for the setup check checklist"| p1_component_global_runtime_reconciliation_primary_cli_6acfbdac
-  p1_component_global_runtime_reconciliation_cli_root_389856ab -->|"Register the rh arch projection command and the archctx providers"| p1_component_architecture_archctx_closure_ab1057a2
+  p1_component_global_runtime_reconciliation_cli_root_389856ab -->|"Register the rh arch projection command"| p1_component_architecture_archctx_closure_ab1057a2
   p1_component_global_runtime_reconciliation_cli_root_389856ab -->|"Register the doctor and setup check commands and validate the shared CLI options"| p1_component_global_runtime_reconciliation_cli_diagnostics_95dbb784
   p1_component_global_runtime_reconciliation_cli_root_389856ab -->|"Register the install and status and security and hook commands and run host transactions for the plugin selection"| p1_capability_runtime_harness_hook_adapters_75a11743
   p1_component_global_runtime_reconciliation_cli_root_389856ab -->|"Register the update and upgrade commands and run the setup inside the candidate runtime"| p1_component_global_runtime_reconciliation_primary_d41cdd38
@@ -50,7 +50,7 @@ flowchart LR
   classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-- Proof: `proven` (`sha256:95fd5fe8dd6deab093c1c4efd3a5dc05bc44fd55afc9d6ab40c324399e391656`).
+- Proof: `proven` (`sha256:af36575274efb1d3a45a158f5e0c3849e935de451d303a8ed40332a4325e2efc`).
 - Semantic nodes: `16`; declared relations: `13`.
 
 ### 1.2 模組職責表
@@ -93,7 +93,6 @@ flowchart LR
 - `depends-on` ← `capability.workflow-engine.contract-assets` — Resolve protected helper runtimes and host skill roots for contract assets.
 - `depends-on` ← `capability.verification.evals-checks` — Test Global Runtime Reconciliation behavior through its source modules.
 - `calls` ← `component.hook-adapters.host-installer` — Read the shared host skill roots for install projections and report architecture projection readiness in status
-- `calls` ← `component.hook-adapters.primary` — Write host output through the shared blocking writer
 - `reads` ← `component.mcp-sidecar.host-setup` — Resolve host skill roots to name leftover ChatGPT skill links for mcp doctor
 - `calls` ← `component.operator.agents-configuration` — Plugin → core: change the agents section through the shared global configuration transaction
 - `calls` ← `component.operator.primary` — Plugin → core: read the architecture history, the hand edits and the history timeout through the architecture read module
@@ -119,7 +118,7 @@ flowchart LR
   - `deployed-on` → `process.cli` — The CLI root dispatches commands in the per-command process.
   - `calls` → `capability.verification.acceptance-review` — Register the review command
   - `calls` → `capability.public-surface.adoption` — Register the adoption-plan command and run the adoption plan for the setup check
-  - `calls` → `component.architecture.archctx-closure` — Register the rh arch projection command and the archctx providers
+  - `calls` → `component.architecture.archctx-closure` — Register the rh arch projection command
   - `calls` → `component.contract-assets.architecture-contracts` — Register the architecture providers after the contract version check
   - `calls` → `capability.organization.board` — Register the board, seats and quota commands
   - `calls` → `component.execution-primitives.cli-layer` — Register the bots command
@@ -131,6 +130,7 @@ flowchart LR
   - `calls` → `capability.runtime-harness.mcp-sidecar` — Guard mcp serve and doctor on the mcp selection, load their actions after the guard, and list the MCP log roots for retention only when the plugin is selected
   - `calls` → `capability.runtime-harness.operator` — Guard the operator, worktrees and catch-up commands on the operator selection and load their actions after the guard
   - `calls` → `component.global-runtime-reconciliation.primary` — Register the update and upgrade commands and run the setup inside the candidate runtime
+  - `calls` → `component.architecture.providers` — Register the archctx ownership, display and runtime providers
   - `reads` → `component.execution-primitives.public-projections` — Pass the MCP audit log path to retention
   - `calls` → `capability.organization.publication` — Register the publication command
   - `calls` → `capability.runtime-harness.refactor-program` — Register the rh arch refactor command
@@ -188,7 +188,7 @@ flowchart LR
 
 ## 2. P2:端到端數據流
 
-> **Proof**: `proven` (`sha256:95fd5fe8dd6deab093c1c4efd3a5dc05bc44fd55afc9d6ab40c324399e391656`); selectors `5/5`.
+> **Proof**: `proven` (`sha256:af36575274efb1d3a45a158f5e0c3849e935de451d303a8ed40332a4325e2efc`); selectors `5/5`.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%
