@@ -3,7 +3,7 @@
 ## Release scope
 
 - Release date is 2026-11-25. The release includes `repo-harness` and `repo-harness-operator-web`.
-- The base source is `068a42ab166d80d570bb3d7aed994dac37506ab1`. The range `v0.37.2..068a42ab1` has 22 commits.
+- The base source is `a2fbe47f63f2cb133794ddb333098438ff9eb482`. The range `v0.37.2..a2fbe47f6` has 26 commits.
 - Owner release word for publishing both packages, creating `v0.37.3` and creating the GitHub Release is pending (after this prep PR merges; scope logged on `#3536` under batch parent `#3491`).
 
 | PR | Commit | Change |
@@ -30,12 +30,17 @@
 | [#3525](https://github.com/aimpact-inc/repo-harness/pull/3525) | `15e7463fe` | Refactor: re-home `repo-harness-home` to `execution-primitives.primary` (`#3513`) |
 | [#3532](https://github.com/aimpact-inc/repo-harness/pull/3532) | `35c6ce720` | Refactor: declare the host-installer public surface as entrypoints (`#3527`) |
 | [#3534](https://github.com/aimpact-inc/repo-harness/pull/3534) | `068a42ab1` | Refactor: extract shared version and upgrade command helpers (`#3509`) |
+| [#3533](https://github.com/aimpact-inc/repo-harness/pull/3533) | `8337b899e` | Projection refresh of generated architecture outputs for main `068a42ab1` |
+| [#3535](https://github.com/aimpact-inc/repo-harness/pull/3535) | `be5e0462e` | Refactor: decouple review collection and publication layers (`#3507`) |
+| [#3538](https://github.com/aimpact-inc/repo-harness/pull/3538) | `7d6d50c5d` | Refactor: split shared hook contracts from dispatch and guards; guard behaviour unchanged (`#3505`) |
+| [#3537](https://github.com/aimpact-inc/repo-harness/pull/3537) | `a2fbe47f6` | Retire GPT-6.1 Terra from seat settings; default `worker` is GPT-6.2 Sol (`#3502`) |
 
 ## Upgrade
 
 - Run `rh update` once on each host after installing 0.37.3. It installs the fail-closed Antigravity hook and the `repo-harness-sharpen` and `repo-harness-reframe` skills.
 - Run `rh update` before you launch `agy` seats. A host that keeps the 0.37.2 hook returns `force_ask` on the readiness probe, and `rh seats launch` refuses the seat with `antigravity_guard_unready`.
 - Antigravity sessions no longer prompt for an overwrite of an existing user file outside the allowed roots; the hook denies it.
+- A seat configuration that saves `gpt-6.1-terra` or `magpie/codex/gpt-6.1-terra` keeps working after the update. Select a replacement model, for example GPT-6.2 Sol, in Settings before you save the seat configuration again.
 - See the full [0.37.3 upgrade instructions](../../docs/CHANGELOG.md#upgrade).
 
 ## Verification
