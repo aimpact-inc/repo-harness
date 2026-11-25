@@ -24,6 +24,7 @@ import { DispatchError, type DispatchPlanV1 } from '../../core/board/dispatch';
 import { runDispatch } from '../../effects/board/dispatch';
 import { runReview, type ReviewObserver, type ReviewResultV1 } from '../../effects/board/review';
 import { publishSeatReceipt, readSeatReceipt } from '../../effects/review/review-collect';
+import { agyReviewSource } from '../../effects/board/agy-review-session';
 import { ReviewPublishError } from '../../effects/review/review-publish';
 import { runBoardMerge, type BoardMergeResultV1 } from '../../effects/board/merge';
 import { seatLaunch, SeatProviderUnavailableError } from './seats';
@@ -599,7 +600,7 @@ async function watchAttention(options: AttentionOptions, host: BoardHostPortsV1,
     const review = options.review === true ? reviewRunner(options, parent, host) : undefined;
     const repoRoot = process.cwd();
     const reviewCollect = review === undefined ? undefined : attentionReviewCollector(repositoryId, host, {
-      read: (seat, prNumber) => readSeatReceipt({ repoRoot, seat, prNumber }, repositoryId),
+      read: (seat, prNumber) => readSeatReceipt({ repoRoot, seat, prNumber }, agyReviewSource, repositoryId),
       publish: (seat, prNumber, read) => publishSeatReceipt({ repoRoot, seat, prNumber }, read),
       errorCode: error => error instanceof ReviewPublishError ? error.code : null,
     });

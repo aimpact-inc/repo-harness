@@ -11,7 +11,7 @@ import type { TaskRequest } from '../../src/core/review/runner-port';
 import { resolveGitCommonDirectory } from '../../src/effects/git/common-directory';
 import { worktreeId } from '../../src/effects/git/worktree-record';
 import type { WorktreeProcess } from '../../src/effects/git/worktree-processes';
-import type { GithubCommandRunner } from '../../src/effects/github/issues';
+import type { GithubCommandRunner } from '../../src/effects/github/command';
 import { repoHarnessRepoIdFor } from '../../src/effects/repo-registry';
 import { runSetupProcess } from '../../src/effects/setup/collector';
 import { startOperatorServer } from '../../src/effects/operator/server';

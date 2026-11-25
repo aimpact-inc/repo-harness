@@ -9,7 +9,7 @@ import {
   type PublicationRepository,
 } from '../../core/publication/publication-writes';
 import { isRecord } from '../../core/evidence/is-record';
-import { runGithubCommand, type GithubCommandRunner } from '../github/issues';
+import { runGithubCommand, type GithubCommandRunner } from '../github/command';
 
 const DEADLINE_MS = 15_000;
 const MAX_BYTES = 2 * 1024 * 1024;

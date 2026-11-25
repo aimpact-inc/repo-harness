@@ -11,3 +11,6 @@ responsibilities:
 source:
   include:
     - "src/effects/board/**"
+  exclude:
+    - "src/effects/board/agy-review-session.ts"
+    - "src/effects/board/antigravity-transcript.ts"

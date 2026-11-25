@@ -7,7 +7,7 @@ import type { CleanupPlanItem } from '../../src/core/operator/worktree-cleanup-p
 import type { WorktreeView } from '../../src/core/public-projections/worktrees';
 import { resolveGitCommonDirectory } from '../../src/effects/git/common-directory';
 import { worktreeId } from '../../src/effects/git/worktree-record';
-import type { GithubCommandRunner } from '../../src/effects/github/issues';
+import type { GithubCommandRunner } from '../../src/effects/github/command';
 import { observeCleanupLoss } from '../../src/effects/operator/worktree-cleanup-observation';
 import { cleanupPlanSelectionDigest, createCleanupPlan, executeCleanupPlan, type CleanupExecutionPorts } from '../../src/effects/operator/worktree-cleanup-plan';
 import { CLEANUP_ARCHIVE_BRANCH, createCleanupArchivePorts, createGithubDraftPrPublisher } from '../../src/effects/operator/worktree-cleanup-publish';

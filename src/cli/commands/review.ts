@@ -10,6 +10,7 @@ import { recordCircuitAttempt } from '../hook/circuit-breaker';
 import { isReviewRuntimeId } from '../../core/review/review-runtimes';
 import { publishReview, ReviewPublishError } from '../../effects/review/review-publish';
 import { collectReview } from '../../effects/review/review-collect';
+import { agyReviewSource } from '../../effects/board/agy-review-session';
 
 /** Both control operations accept only a closed JSON object from the trusted Bot. */
 function readControlRequest(file: string, fields: readonly string[]): Record<string, any> {
@@ -98,7 +99,7 @@ export function buildReviewCommand<Session, Endpoint>(loadRunner: () => Promise<
     .requiredOption('--pr <number>', 'Pull request number')
     .option('--owner-record <url>', 'Owner decision comment URL on the PR or an issue it closes; required for a round above 5')
     .option('--repo <path>', 'Owner repository worktree', process.cwd()).option('--json', 'Print compact JSON')
-    .action(publishAction('collect', opts => collectReview({ repoRoot: opts.repo, prNumber: Number(opts.pr), seat: opts.seat, ownerRecord: opts.ownerRecord })));
+    .action(publishAction('collect', opts => collectReview({ repoRoot: opts.repo, prNumber: Number(opts.pr), seat: opts.seat, ownerRecord: opts.ownerRecord }, agyReviewSource)));
   for (const operation of ['round', 'status', 'close', 'cancel'] as const) {
     const child = command.command(operation).requiredOption('--repository-id <id>', 'Approved provider repository identity')
       .requiredOption('--issue-id <id>', 'Approved provider issue identity')

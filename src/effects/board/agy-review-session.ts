@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { isRecord } from '../../core/evidence/is-record';
 import { requireHome } from '../repo-harness-home';
 import { ensureSessionDirectory, readSessionArtifact, writeSessionArtifact } from '../terminal/task-session-io';
+import { withAntigravityTranscript } from './antigravity-transcript';
 
 export const AGY_REVIEW_LAUNCH_ENV = 'REPO_HARNESS_SEAT_AGY_REVIEW_LAUNCH';
 export const AGY_REVIEW_BINDING_ENV = 'REPO_HARNESS_AGY_REVIEW_BINDING';
@@ -65,6 +66,13 @@ export function readAgyReviewSession(launchId: string, env: NodeJS.ProcessEnv): 
   } catch { /* malformed or unreadable launch record */ }
   throw new Error('the agy review session record is invalid');
 }
+
+export const agyReviewSource = {
+  promptOption: AGY_REVIEW_PROMPT_OPTION,
+  isLaunchId: isAgyReviewLaunchId,
+  readSession: readAgyReviewSession,
+  withTranscript: withAntigravityTranscript,
+};
 
 /** The launcher and hook use the same private directory. Startup signals are atomic directory entries. */
 export function prepareAgyReviewStartup(launchId: string, env: NodeJS.ProcessEnv): string {

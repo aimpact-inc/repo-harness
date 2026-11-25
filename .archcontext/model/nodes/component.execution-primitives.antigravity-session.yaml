@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "archcontext.node/v2",
+  "kind": "component",
+  "status": "active",
+  "parent": "capability.workflow-engine.execution-primitives",
+  "layer": "effects",
+  "id": "component.execution-primitives.antigravity-session",
+  "name": "Antigravity Session Access",
+  "summary": "Binds native Antigravity launches to recorded sessions and provides safe transcript access for launchers, hooks, and review collection.",
+  "responsibilities": [
+    "Bind a launch ID to its startup and session records through the shared session artifact store.",
+    "Admit transcript reads through one regular-file and conversation-root check."
+  ],
+  "source": {
+    "include": [
+      "src/effects/board/agy-review-session.ts",
+      "src/effects/board/antigravity-transcript.ts"
+    ]
+  }
+}

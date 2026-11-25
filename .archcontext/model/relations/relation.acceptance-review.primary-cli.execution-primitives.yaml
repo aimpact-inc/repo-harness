@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "archcontext.relation/v1",
+  "id": "relation.acceptance-review.primary-cli.execution-primitives",
+  "kind": "depends-on",
+  "source": "component.acceptance-review.primary-cli",
+  "target": "capability.workflow-engine.execution-primitives",
+  "intent": "Supply native Antigravity session access to the review collector at the CLI boundary."
+}

@@ -6,7 +6,7 @@ import { githubRemoteRepository } from '../../core/board/source';
 import type { CleanupPlanItem } from '../../core/operator/worktree-cleanup-plan';
 import type { DraftPullRequest, DraftPullRequestHead, DraftPullRequestResult, PublicationRepository } from '../../core/publication/publication-writes';
 import { configuredGitBinary, gitExecFileSync, withoutRepositorySelectingGitEnv } from '../git/runner';
-import type { GithubCommandRunner } from '../github/issues';
+import type { GithubCommandRunner } from '../github/command';
 import { findDraftPullRequest, findOrCreateDraftPullRequest, readPublicationRepository } from '../publication/draft-pull-request';
 import { observeRemoteRef, pushCommitToNewRemoteRef } from '../publication/new-remote-ref-push';
 import { stageCleanupArchive, type StagedCleanupArchive } from './worktree-cleanup-archive';

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "archcontext.node/v2",
+  "kind": "component",
+  "status": "active",
+  "parent": "capability.workflow-engine.execution-primitives",
+  "layer": "effects",
+  "id": "component.execution-primitives.github-command",
+  "name": "GitHub CLI Transport",
+  "summary": "Runs bounded GitHub CLI commands and classifies transport errors for provider adapters.",
+  "responsibilities": [
+    "Run the GitHub CLI with the caller’s timeout and output limits and preserve the shared adapter error contract."
+  ],
+  "source": {
+    "include": [
+      "src/effects/github/command.ts"
+    ]
+  }
+}

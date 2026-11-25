@@ -9,7 +9,7 @@ import { taskReviewRunner } from '../../src/effects/review-runner/task-review-ru
 import { buildReviewCommand, pullRequestSelectionFromOptions } from '../../src/cli/commands/review';
 import { renderAcceptanceClaim, validateReviewPublishReceipt } from '../../src/core/review/review-publish';
 import { parseReceipt } from '../../src/effects/review/review-publish';
-import { AGY_REVIEW_LAUNCH_LINE, AGY_REVIEW_PROMPT_OPTION, recordAgyReviewSession } from '../../src/effects/board/agy-review-session';
+import { AGY_REVIEW_LAUNCH_LINE, AGY_REVIEW_PROMPT_OPTION, agyReviewSource, recordAgyReviewSession } from '../../src/effects/board/agy-review-session';
 import { createReviewAdmission, reviewCampaignKey, type ReviewAdmissionInput } from '../../src/core/review/authority-context';
 import { readReviewAdmission } from '../../src/effects/admission/admission-store';
 import { gatesDirectoryName } from '../../src/effects/git/repository-identity';
@@ -853,7 +853,7 @@ test('watcher reads a bound Antigravity receipt without GitHub', () => {
       [herdrCore.RH_LABEL.repository]: PUBLISH_REPOSITORY, [herdrCore.RH_LABEL.agyReview]: `${fixture.launch} ${seatPacket()}` },
   });
   try {
-    const read = readSeatReceipt({ seat: 't9', prNumber: PUBLISH_PR, repoRoot: fixture.root, ghBin: fixture.gh.bin }, Number(PUBLISH_REPOSITORY));
+    const read = readSeatReceipt({ seat: 't9', prNumber: PUBLISH_PR, repoRoot: fixture.root, ghBin: fixture.gh.bin }, agyReviewSource, Number(PUBLISH_REPOSITORY));
     expect(read.receipt).toMatchObject({ subject_sha: PUBLISH_HEAD, reviewer: AGY_REVIEWER });
     expect(fixture.gh.calls()).toEqual([]);
   } finally {
@@ -874,7 +874,7 @@ test('watcher receipt reading uses the local launch head and publication still r
   });
   try {
     const input = { seat: 't9', prNumber: PUBLISH_PR, repoRoot: fixture.root, ghBin: fixture.gh.bin };
-    const read = readSeatReceipt(input, repositoryId);
+    const read = readSeatReceipt(input, agyReviewSource, repositoryId);
     expect(read.receipt.subject_sha).toBe(launchHead);
     expect(fixture.gh.calls()).toEqual([]);
     expect(() => publishSeatReceipt(input, read)).toThrow(/is not the PR head/);
