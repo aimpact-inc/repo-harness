@@ -605,32 +605,14 @@ cleanup_worktree() {
       echo "contract-worktree: preserve the dirty worktree and ask the user before any deletion" >&2
       exit 1
     fi
-    local preview_occupancy=""
-    if [[ "$dry_run" -eq 1 ]]; then
-      preview_occupancy="$(run_contract_runtime assert-ignored-cleanup-safe --repo "$current_root" --worktree "$worktree_path" --check-occupancy)"
-      preview_occupancy="${preview_occupancy%$'\r'}"
-      case "$preview_occupancy" in
-        idle|managed_runtime_only) ;;
-        *)
-          echo "contract-worktree: unexpected preview occupancy state: $preview_occupancy" >&2
-          exit 1
-          ;;
-      esac
-    else
-      run_contract_runtime assert-ignored-cleanup-safe --worktree "$worktree_path"
-    fi
+    run_contract_runtime assert-ignored-cleanup-safe --worktree "$worktree_path"
   else
     echo "[ContractWorktree] Worktree already absent, skipping: $branch_name"
   fi
 
   if [[ "$dry_run" -eq 1 ]]; then
     echo "[ContractWorktree] dry-run cleanup slug=$slug target=$target_branch"
-    if [[ "${preview_occupancy:-}" == "managed_runtime_only" ]]; then
-      echo "[ContractWorktree] would close verified managed runtime and run a fresh occupancy check before removing worktree: ${worktree_path:-"(absent)"}"
-      echo "[ContractWorktree] would remove worktree (conditional on closing verified managed runtime and passing fresh occupancy check): ${worktree_path:-"(absent)"}"
-    else
-      echo "[ContractWorktree] would remove worktree: ${worktree_path:-"(absent)"}"
-    fi
+    echo "[ContractWorktree] would remove worktree: ${worktree_path:-"(absent)"}"
     echo "[ContractWorktree] would delete branch: $branch_name"
     echo "[ContractWorktree] would remove metadata: $metadata_file"
     return 0

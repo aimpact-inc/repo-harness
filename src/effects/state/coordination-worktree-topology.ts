@@ -16,11 +16,7 @@ import { readWorkflowPolicyDocument } from './resolve-effective-state';
 import { POLICY_ABSENT, isPolicyObject, policyValue } from '../../core/workflow/policy-schema';
 import { configuredGitBinary, resolveGitCommonDirectory, resolveGitCommonDirectoryAsync } from '../git/common-directory';
 import { acquireExclusiveDirectoryLock, ExclusiveLockContentionError, withExclusiveDirectoryLock } from '../locking/exclusive-directory-lock';
-import { TASK_SESSIONS_PATH, assertCreated, assertSessionDirectory, processProofAlive, readStartIntent, readTaskAgent, readWorkspaceBinding, taskWorktreeRuntimeClosed, workspaceDirectory } from '../terminal/task-session-record';
-import { assertTaskBinding, readTaskRequestResult } from '../terminal/runtime-closeout';
-import { readSessionArtifact } from '../terminal/task-session-io';
-import { taskRepository, type TaskRepository } from '../git/task-repository';
-import type { ProcessProof, TaskRequest } from '../../core/review/runner-port';
+import { taskWorktreeRuntimeClosed } from '../terminal/task-session-record';
 import { parseWorktreeTopology } from '../git/worktree-topology';
 import { observeProviderBranchMergeCommit } from './coordination-provider-merge';
 import { resolveTrustedGhExecutable } from '../runtime/trusted-executable';
@@ -147,7 +143,7 @@ function inspectIgnoredWorktreeEntries(worktree: string, limits: Limits = {}): {
 }
 
 export function assertNoIgnoredCloseoutData(worktree: string, limits: Limits = {}): void {
-  assertNoBlockedIgnoredEntries(inspectIgnoredWorktreeEntries(checkoutPath(worktree), limits).blockedPaths);
+  assertNoBlockedIgnoredEntries(inspectIgnoredWorktreeEntries(worktree, limits).blockedPaths);
 }
 
 function assertNoBlockedIgnoredEntries(blockedPaths: readonly string[]): void {
@@ -224,6 +220,7 @@ type LiveRemovalOptions = {
   readonly allowProvider?: boolean;
   readonly verifiedMerge?: MergeProof;
   readonly processes?: WorktreeProcess[] | null;
+  readonly explicitCloseout?: boolean;
   readonly requireOwnCommits?: boolean;
   readonly env?: NodeJS.ProcessEnv;
 };
@@ -458,6 +455,8 @@ export function cleanupExactWorktree(root: string, expected: ExactWorktreeCleanu
       const probe = sweep?.processes ?? limits.closeoutProcesses;
       const inspection = inspectRemoval(root, path, sweep?.cwd ?? realpathSync(process.cwd()), limits, {
         target, allowProvider: true, verifiedMerge, requireOwnCommits: !!sweep, env: sweep?.env,
+        // Explicit contract cleanup keeps its existing occupancy behavior. Board and sweep supply an observer.
+        explicitCloseout: limits.closeout === true && probe === undefined,
         processes: probe?.(Math.min(limits.deadline ?? Infinity, Date.now() + 5_000)),
       });
       if (limits.closeout) {
@@ -586,91 +585,6 @@ export function worktreeOccupyingPids(
 function worktreeProcessCount(path: string, processes: WorktreeProcess[] | null): number | null {
   const pids = worktreeOccupyingPids(path, processes);
   return pids === null ? null : pids.length;
-}
-
-function provenProviderGroupPids(provider: ProcessProof): number[] {
-  if (process.platform === 'win32' || !processProofAlive(provider)) return [];
-  const pgidText = execFileSync('ps', ['-o', 'pgid=', '-p', String(provider.pid)], {
-    encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-  }).trim();
-  if (Number(pgidText) !== provider.pid) return [];
-  const output = execFileSync('ps', ['-eo', 'pid=,pgid='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  const pids = output.split('\n').flatMap(line => {
-    const match = /^\s*(\d+)\s+(\d+)\s*$/u.exec(line);
-    return match && Number(match[2]) === provider.pid ? [Number(match[1])] : [];
-  });
-  return processProofAlive(provider) ? pids : [];
-}
-
-function closableHerdrRolePids(primaryRoot: string, roleDir: string, repositoryId: string, checkout: string): number[] | 'irrelevant' | null {
-  if (!existsSync(join(roleDir, 'intent.json'))) return 'irrelevant';
-  const owner = readSessionArtifact<{ repository?: Partial<TaskRepository> }>(join(roleDir, 'intent.json')).repository;
-  if (owner?.repository_id !== repositoryId || owner?.execution_root !== checkout) return 'irrelevant';
-  if (existsSync(join(roleDir, 'closed.json'))) return 'irrelevant';
-  if (!existsSync(join(roleDir, 'binding.json'))) return null;
-  const intent = readStartIntent(join(roleDir, 'intent.json'));
-  const { binding } = readTaskAgent(primaryRoot, intent.spec.task, intent.spec.role);
-  assertCreated(binding.ownership);
-  assertCreated(binding.provider.ownership);
-  if (binding.runtime !== 'herdr-core') return null;
-  for (let round = 1; round <= binding.max_requests && existsSync(join(roleDir, `request-${round}.json`)); round++) {
-    const request = readSessionArtifact<TaskRequest>(join(roleDir, `request-${round}.json`));
-    if (!readTaskRequestResult(primaryRoot, roleDir, request)) return null;
-  }
-  assertTaskBinding(binding, true);
-  if (!processProofAlive(binding.provider)) return [];
-  return [binding.provider.pid, ...provenProviderGroupPids(binding.provider)];
-}
-
-function verifiedClosableManagedRuntimePids(repoRoot: string, checkout: string): Set<number> | null {
-  try {
-    const repository = taskRepository(repoRoot);
-    const dir = workspaceDirectory({ ...repository, execution_root: checkout });
-    if (!existsSync(dir)) return null;
-    assertSessionDirectory(repository.primary_root, dir);
-    if (existsSync(join(dir, 'closed.json')) || existsSync(join(dir, 'open-intent.json')) || !existsSync(join(dir, 'binding.json'))) return null;
-    const workspace = readWorkspaceBinding(join(dir, 'binding.json'));
-    if (workspace.repository.repository_id !== repository.repository_id || workspace.repository.execution_root !== checkout) return null;
-    const rolesRoot = join(repository.primary_root, TASK_SESSIONS_PATH);
-    if (!existsSync(rolesRoot)) return null;
-    assertSessionDirectory(repository.primary_root, rolesRoot);
-    const closable = new Set<number>();
-    for (const entry of readdirSync(rolesRoot, { withFileTypes: true })) {
-      if (!entry.isDirectory() || entry.isSymbolicLink()) return null;
-      const rolePids = closableHerdrRolePids(repository.primary_root, join(rolesRoot, entry.name), repository.repository_id, checkout);
-      if (rolePids === 'irrelevant') continue;
-      if (rolePids === null) return null;
-      for (const pid of rolePids) closable.add(pid);
-    }
-    return closable.size > 0 ? closable : null;
-  } catch {
-    return null;
-  }
-}
-
-export type CloseoutOccupancyPreview = 'idle' | 'managed_runtime_only';
-
-/**
- * Preview occupancy proof for explicit cleanup. Refuses `process_unknown` and independently
- * occupied checkouts (`process_in_use`). When every occupant belongs to a verified closable
- * Herdr runtime, returns `managed_runtime_only` so preview reports conditional removal.
- */
-export function previewCloseoutOccupancy(worktree: string, repoRoot?: string, processes?: WorktreeProcess[] | null): CloseoutOccupancyPreview {
-  const canonical = checkoutPath(worktree);
-  const observed = processes === undefined ? worktreeProcesses(Date.now() + 5_000) : processes;
-  const occupying = worktreeOccupyingPids(canonical, observed);
-  if (occupying === null) throw new WorktreeNotGreenError(['process_unknown']);
-  if (occupying.length === 0) return 'idle';
-  if (repoRoot) {
-    const closable = verifiedClosableManagedRuntimePids(repoRoot, canonical);
-    if (closable && occupying.every(pid => closable.has(pid))) return 'managed_runtime_only';
-  }
-  throw new WorktreeNotGreenError(['process_in_use']);
-}
-
-/** A closeout preview must prove occupancy before it lists a planned removal. */
-export function assertCloseoutOccupancy(worktree: string): void {
-  previewCloseoutOccupancy(worktree);
 }
 
 /** Git documents these backpointers. They are read only to fence whole prune,
@@ -927,12 +841,14 @@ function inspectRemoval(root: string, path: string, callerCwd: string | null, li
     const entry = topology.find(item => checkoutPath(item.path) === path);
     if (path === main) reasons.push('primary');
     if (callerCwd !== null && protectsCwd(path, callerCwd)) { reasons.push('session_cwd'); inUse = true; }
-    const processes = options.processes === undefined
-      ? worktreeProcesses(Math.min(limits.deadline ?? Infinity, Date.now() + 5_000))
-      : options.processes;
-    result.process_count = worktreeProcessCount(path, processes);
-    if (result.process_count === null) reasons.push('process_unknown');
-    else if (result.process_count > 0) { reasons.push('process_in_use'); inUse = true; }
+    if (!options.explicitCloseout) {
+      const processes = options.processes === undefined
+        ? worktreeProcesses(Math.min(limits.deadline ?? Infinity, Date.now() + 5_000))
+        : options.processes;
+      result.process_count = worktreeProcessCount(path, processes);
+      if (result.process_count === null) reasons.push('process_unknown');
+      else if (result.process_count > 0) { reasons.push('process_in_use'); inUse = true; }
+    }
     try {
       if (!taskWorktreeRuntimeClosed({ repository_id: common, primary_root: main, execution_root: path })) { reasons.push('runtime_open'); inUse = true; }
     } catch { reasons.push('runtime_unknown'); }
