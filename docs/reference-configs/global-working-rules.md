@@ -1,6 +1,6 @@
 # Global Working Rules
 
-Source for the managed block in user-level `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`. Keep personal preferences outside the markers and repo-specific contracts in the repo. Use the host's available tools; do not install cross-host tool-compatibility maps here. Remove equivalent personal rules only with user authorization. Synchronization replaces the sections that repo-harness shipped, inside and outside the markers, and keeps user sections unchanged. The fenced text below is the managed template. Herdr is the required peer terminal runtime; missing Herdr does not select another transport.
+Source for the managed block in user-level `~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`, and `~/.pi/agent/AGENTS.md`. Keep personal preferences outside the markers and repo-specific contracts in the repo. Use the host's available tools; do not install cross-host tool-compatibility maps here. Remove equivalent personal rules only with user authorization. Synchronization replaces the sections that repo-harness shipped, inside and outside the markers, and keeps user sections unchanged. The fenced text below is the managed template. Herdr is the required peer terminal runtime; missing Herdr does not select another transport.
 
 ```md
 # Global Working Rules
@@ -27,13 +27,15 @@ Generality: These are general working rules. Do not tailor behavior to any speci
 
 Before non-trivial design or edits, complete P1/P2/P3:
 
-- **P1 — Map:** read the code that the task touches before you design or edit; rely on observed code, not on filenames or reports.
+- **P1 — Map:** read the affected code and map all entry points, sibling callers, and the authority that owns the rule.
 - **P2 — Trace:** follow one concrete input to its output and locate the pressure point. Mandatory before a bug fix.
-- **P3 — Decide:** choose the smallest coherent change that preserves the invariant; state what it gives up and what it does not handle.
+- **P3 — Decide:** choose the smallest change at the owning rule or primitive that preserves the invariant for every consumer. State the tradeoffs and limits.
 
 ## Code Optimization Principles
 
 - Keep one source of truth for each datum. Other representations must be deterministic projections with drift checks; an authority cutover removes the old authoring path in the same approved work-package.
+- Enforce each rule at its owning helper or boundary. Fix defects in the shared primitive so every caller inherits the fix.
+- Probes, admission, retries, recovery, and cleanup reuse the primary path's builders, validators, and isolation boundaries.
 - Add an abstraction only when it removes observed duplicate authority or complexity, serves at least two real consumers, or protects a cross-module invariant.
 - Create shared components only for observed reuse or invariants. When independently meaningful consumers need a shared package, prefer an existing monorepo workspace; do not convert a single-package repository into a monorepo without a second independently released or deployed consumer.
 - Validate an unknown value once, at the boundary that owns it, and pass the typed value inward. Do not check again a value that a schema, constructor or internal type already guarantees.
@@ -69,7 +71,7 @@ Keep P1/P2/P3 internal for small tasks; report them explicitly for architecture 
 
 ## Artifact Hygiene
 
-Write comments, commits, and PR text from the final diff. Comments explain non-obvious reasons at the owning boundary; omit operation restatements, discarded attempts, and speculative work. PRs describe final behavior and material rationale. Rejected additions leave no explanatory residue.
+Write comments, commits, and PR text from the final diff. Comments explain non-obvious reasons at the owning boundary; omit operation restatements, discarded attempts, and speculative work. Preserve invariant, race-window, and failure-mode comments while the conditions they describe still apply. PRs describe final behavior and material rationale. Rejected additions leave no explanatory residue.
 
 ## Completion Summary Rule
 

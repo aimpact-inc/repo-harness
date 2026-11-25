@@ -1,7 +1,7 @@
 import { requireHome } from "../../effects/repo-harness-home";
 import { parseJsonText } from "../../core/evidence/file-syntax";
 import { syncInstalledSkillCopies } from "../installer/skill-sync";
-import { antigravitySkillsDirHostPath, checkAntigravityPath, openHostConfigGate } from "../../effects/host-config/gate";
+import { antigravitySkillsDirHostPath, checkAntigravityPath, openHostConfigGate, resolveUserConfigFile } from "../../effects/host-config/gate";
 import { importBunBootstrapRecord, recordedToolIsCurrent, windowsPowershellPath, windowsUserPathPort } from "../../effects/host-config/tools";
 import { hostConfigPaths, readLedger } from "../../effects/host-config/store";
 import { configureRequiredHerdrSkill } from "./herdr-skill";
@@ -25,7 +25,7 @@ import { tmpdir, userInfo } from "os";
 import { basename, delimiter, dirname, join, relative, resolve, sep } from "path";
 import { fileURLToPath } from "url";
 import { syncWazaSharedRules } from "../installer/waza-rules";
-import { applyGlobalContextRefresh, GLOBAL_RULES_BEGIN, GLOBAL_RULES_END, globalContextPath, preflightGlobalContextRefresh, type GlobalContextRefreshPlan, type ReportLanguageFlag } from "../installer/global-context";
+import { applyGlobalContextRefresh, GLOBAL_RULES_BEGIN, GLOBAL_RULES_END, globalContextPath, globalRuntimeContextHosts, preflightGlobalContextRefresh, type GlobalContextRefreshPlan, type ReportLanguageFlag } from "../installer/global-context";
 import { CLI_NAME, namesRetiredCli, RETIRED_CLI_NAME } from "../../core/skill-surface/cli-name";
 import { shellQuote } from "../../core/shell-quote";
 import { syncCrossReviewSkills } from "./init";
@@ -998,16 +998,19 @@ function retireCliLink(env: NodeJS.ProcessEnv): GlobalRuntimeStep {
 function findRetiredCliCalls(env: NodeJS.ProcessEnv, target: InstallTargetSpec, globalRules: GlobalContextRefreshPlan): GlobalRuntimeStep {
   const step = RETIRED_CLI_REFERENCES_STEP;
   const home = homeDir(env);
-  const hosts = hostIds(target);
+  const piRules = globalContextPath(home, 'pi');
   const files = [
-    ...hosts.map(host => globalContextPath(home, host)),
-    ...(hosts.includes('claude') ? [join(home, '.claude', 'settings.json')] : []),
+    ...globalRules.files.map(file => file.path),
+    ...(hostIds(target).includes('claude') ? [join(home, '.claude', 'settings.json')] : []),
   ];
   const unread: string[] = [];
   const calls = files.flatMap((path) => {
-    if (!existsSync(path)) return [];
     let text: string;
-    try { text = readFileSync(path, 'utf8'); } catch (error) {
+    try {
+      if (path === piRules) resolveUserConfigFile(env, path);
+      if (!existsSync(path)) return [];
+      text = readFileSync(path, 'utf8');
+    } catch (error) {
       unread.push(`${path} (${(error as NodeJS.ErrnoException).code ?? 'unreadable'})`);
       return [];
     }
@@ -1889,7 +1892,7 @@ function runGlobalRuntimeSetupInTransaction(opts: GlobalRuntimeOptions): GlobalR
   // reported as skipped and never stops the run, because an older parent CLI
   // hands update to this candidate without --report-language. The process
   // that reaches the host-write section below applies this plan.
-  const globalRules = preflightGlobalContextRefresh(sourceRoot, homeDir(env), hostIds(target), opts.reportLanguage);
+  const globalRules = preflightGlobalContextRefresh(sourceRoot, homeDir(env), globalRuntimeContextHosts(target, piSelected), opts.reportLanguage);
 
   if (updateMode) {
     let backupPath: string | undefined;

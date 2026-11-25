@@ -422,6 +422,77 @@ test('rules blocks revert to the original bytes, keep a later user line and an e
  expect(runUserUninstall({target:'both',env}).status).toBe('complete');
  expect(readFileSync(codex,'utf8')).toBe('codex notes\nlater\n');expect(lstatSync(claude).isSymbolicLink()).toBe(true);
 }));
+test.each(['outside edit', 'edited block', 'absent', 'same bytes', 'restored'] as const)('Pi rules uninstall preserves user data after %s', (state) => fixture((home, env) => {
+  const root = join(import.meta.dir, '../..');
+  const path = join(home, '.pi', 'agent', 'AGENTS.md');
+  const original = 'Personal rules\n';
+  if (state !== 'same bytes') put(home, '.pi/agent/AGENTS.md', original);
+  expect(applyGlobalContextRefresh(preflightGlobalContextRefresh(root, home, ['pi'], 'en'), home).status).toBe('ok');
+  const installed = readFileSync(path, 'utf8');
+  let expected: string | null = original;
+  switch (state) {
+    case 'outside edit':
+      appendFileSync(path, 'Another personal rule\n');
+      expected += 'Another personal rule\n';
+      break;
+    case 'edited block':
+      expected = installed.replace('## Reporting', 'Personal edit\n\n## Reporting');
+      writeFileSync(path, expected);
+      break;
+    case 'absent':
+      rmSync(path);
+      expected = null;
+      break;
+    case 'same bytes':
+      renameSync(path, join(home, 'installed-copy.md'));
+      writeFileSync(path, installed);
+      expected = '';
+      break;
+    case 'restored':
+      writeFileSync(path, original);
+      break;
+  }
+  const inode = lstatSync(path, { throwIfNoEntry: false })?.ino;
+  const result = runUserUninstall({ target: 'both', env });
+  expect(result.status, result.lines.join('\n')).toBe(state === 'edited block' ? 'partial' : 'complete');
+  expect(existsSync(path) ? readFileSync(path, 'utf8') : null).toBe(expected);
+  if (state === 'restored' || state === 'edited block') expect(lstatSync(path).ino).toBe(inode!);
+}));
+
+test.each([true, false])('Pi rules uninstall removes only an empty created file that shadows a fallback (%s)', (withFallback) => fixture((home, env) => {
+  const root = join(import.meta.dir, '../..');
+  const path = join(home, '.pi', 'agent', 'AGENTS.md');
+  const fallback = join(home, '.pi', 'agent', 'CLAUDE.md');
+  expect(applyGlobalContextRefresh(preflightGlobalContextRefresh(root, home, ['pi'], 'en'), home).status).toBe('ok');
+  if (withFallback) writeFileSync(fallback, 'Personal Pi rules.\n');
+  const installed = readFileSync(path, 'utf8');
+  const preview = runUserUninstall({ target: 'both', env, dryRun: true });
+  expect(readFileSync(path, 'utf8')).toBe(installed);
+  const result = runUserUninstall({ target: 'both', env });
+  expect(result.status, result.lines.join('\n')).toBe('complete');
+  expect(result.items.find(item => item.path === path)).toEqual(preview.items.find(item => item.path === path));
+  if (withFallback) {
+    expect(existsSync(path)).toBe(false);
+    expect(readFileSync(fallback, 'utf8')).toBe('Personal Pi rules.\n');
+  } else expect(readFileSync(path, 'utf8')).toBe('');
+}));
+
+test.skipIf(process.platform === 'win32')('Pi rules uninstall refuses a replacement link to the installed bytes', () => fixture((home, env) => {
+  const root = join(import.meta.dir, '../..');
+  const path = join(home, '.pi', 'agent', 'AGENTS.md');
+  const outside = join(home, 'dotfiles');
+  expect(applyGlobalContextRefresh(preflightGlobalContextRefresh(root, home, ['pi'], 'en'), home).status).toBe('ok');
+  mkdirSync(outside);
+  const moved = join(outside, 'AGENTS.md');
+  const installed = readFileSync(path, 'utf8');
+  renameSync(path, moved);
+  symlinkSync(moved, path);
+  const result = runUserUninstall({ target: 'both', env });
+  expect(result.items).toContainEqual(expect.objectContaining({ path, action: 'unresolved' }));
+  expect(lstatSync(path).isSymbolicLink()).toBe(true);
+  expect(readFileSync(moved, 'utf8')).toBe(installed);
+}));
+
 /** Every entry outside ~/.repo-harness and ~/.bun, with the bytes and mode of each file. */
 function hostSnapshot(home: string) {
  return readdirSync(home,{recursive:true}).map(String).filter((p)=>!/^\.(repo-harness|bun)([\\/]|$)/.test(p)).sort().map((p)=>{

@@ -1,6 +1,6 @@
 /**
  * The repo-harness managed Global Working Rules block in the user-level host
- * instruction files (`~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`).
+ * instruction files. All hosts use the same marked-block renderer.
  *
  * Init writes the block, install and update refresh it, setup check compares
  * it, and uninstall removes it. All of them use the markers and the render
@@ -18,6 +18,8 @@ import {
   AntigravityHooksPathError,
   openHostConfigGate,
   planFileRevert,
+  piGlobalRulesPathAt,
+  piRulesPrecedenceConflict,
   resolveUserConfigFile,
   type HostConfigAdoption,
   type HostConfigFileChange,
@@ -54,7 +56,14 @@ export interface ReportingLanguage {
   readonly instruction: string;
 }
 
-export type GlobalContextHost = 'codex' | 'claude' | 'antigravity';
+const GLOBAL_RUNTIME_CONTEXT_HOSTS = ['claude', 'codex', 'pi'] as const;
+type RuntimeGlobalContextHost = typeof GLOBAL_RUNTIME_CONTEXT_HOSTS[number];
+export type GlobalContextHost = RuntimeGlobalContextHost | 'antigravity';
+
+export function globalRuntimeContextHosts(target: 'codex' | 'claude' | 'both', piSelected: boolean): readonly RuntimeGlobalContextHost[] {
+  if (target !== 'both') return [target];
+  return piSelected ? GLOBAL_RUNTIME_CONTEXT_HOSTS : GLOBAL_RUNTIME_CONTEXT_HOSTS.filter(host => host !== 'pi');
+}
 
 /** One state per file. Only the two managed states with recorded inputs sync without a flag. */
 export type GlobalContextState =
@@ -113,6 +122,7 @@ export function parseReportLanguageFlag(value: string): ReportLanguageFlag {
 export function globalContextPath(home: string, host: GlobalContextHost): string {
   if (host === 'codex') return join(home, '.codex', 'AGENTS.md');
   if (host === 'claude') return join(home, '.claude', 'CLAUDE.md');
+  if (host === 'pi') return piGlobalRulesPathAt(home);
   return join(home, '.gemini', 'config', 'AGENTS.md');
 }
 
@@ -405,7 +415,7 @@ export function inspectGlobalContext(content: string | null, sourceRoot: string,
 
 export interface GlobalContextFilePlan {
   readonly path: string;
-  readonly state: GlobalContextState | 'unreadable';
+  readonly state: GlobalContextState | 'unreadable' | 'conflict';
   readonly outcome: 'write' | 'unchanged' | 'skipped';
   /** The file content at preflight; null when the file did not exist. */
   readonly current: string | null;
@@ -496,25 +506,29 @@ export function planGlobalContextFile(
   sourceRoot: string,
   flag: ReportLanguageFlag | undefined,
 ): GlobalContextFilePlan {
-  const unreadable = (current: string | null, detail: string): GlobalContextFilePlan => (
-    { path, state: 'unreadable', outcome: 'skipped', current, recorded: null, block: null, legacy: false, detail }
+  const skipped = (state: 'unreadable' | 'conflict', current: string | null, detail: string): GlobalContextFilePlan => (
+    { path, state, outcome: 'skipped', current, recorded: null, block: null, legacy: false, detail }
   );
   const env = { ...process.env, HOME: home };
   let current: string | null;
   let recorded: GlobalRulesRecord;
   try {
-    resolveUserConfigFile(env, path);
+    const target = resolveUserConfigFile(env, path);
+    if (path === piGlobalRulesPathAt(home)) {
+      const conflict = piRulesPrecedenceConflict(target);
+      if (conflict !== null) return skipped('conflict', null, `skipped-pi-context:${conflict}`);
+    }
     current = readGlobalContextFile(path);
     recorded = recordedBlock(rulesGate(home), path);
   } catch (error) {
     if (error instanceof AntigravityHooksPathError) throw error;
-    return unreadable(null, `skipped-unreadable:${path} (${(error as Error).message}; make it a readable regular file to enable managed sync)`);
+    return skipped('unreadable', null, `skipped-unreadable:${path} (${(error as Error).message}; make it a readable regular file to enable managed sync)`);
   }
   let inspection: GlobalContextInspection;
   try {
     inspection = inspectGlobalContext(current, sourceRoot, recorded);
   } catch (error) {
-    return unreadable(current, `skipped-template:${path} (cannot render the Global Working Rules template: ${(error as Error).message}; reinstall repo-harness)`);
+    return skipped('unreadable', current, `skipped-template:${path} (cannot render the Global Working Rules template: ${(error as Error).message}; reinstall repo-harness)`);
   }
   const plan = (outcome: GlobalContextFilePlan['outcome'], detail: string): GlobalContextFilePlan => (
     { path, state: inspection.state, outcome, current, recorded, block: null, legacy: false, detail }

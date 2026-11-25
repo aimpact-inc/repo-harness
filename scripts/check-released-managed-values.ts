@@ -528,9 +528,26 @@ const GLOBAL_RULES_PINS = new Map<string, RulesRecipe>([
   ['cd25bf3ee55960081d0b0fee4f965831cf6f6aca2176fbed7f2908e77a5fd97b', 'plain'], // v0.2.0 to v0.8.4
   ['2e1909c2d21b7e27e71bfde5deb96938113851a99e7aa295690a8b6b1e2b2158', 'self-note'], // v0.8.5 to v0.18.0
   ['cad35faf2f0c0a6225751574c67f3e1bf47af82b1c9f50147851ef37ace0890c', 'self-note-label'], // v0.19.0 to v0.23.1
-  ['786ef373e9441dea24e8201e98fa5cc4b1bbc9eacdd743df07773fda1b2696d8', 'encoded'], // v0.24.0 to v0.32.0
+  ['786ef373e9441dea24e8201e98fa5cc4b1bbc9eacdd743df07773fda1b2696d8', 'encoded'], // v0.24.0 onward
 ]);
 const RULES_FUNCTIONS = ['languageInstruction', 'readGlobalRulesTemplate', 'renderCompletionSummaryLabel', 'encodeReportingLanguage', 'renderGlobalRules', 'renderGlobalRulesBlock'];
+const RULES_MARKER_SOURCE = 'src/core/host-config/marked-block.ts';
+const RULES_MARKER_PINS = new Set([
+  'bd099b302b6c605def77aee754fd0d6f25fdc35e6f1027588014225ae58e2adb', // v0.35.0 to v0.35.1
+  '018ca4fb8dc36e7b7cae74e848807fe2673ec2054f655ea784b36dea35bada07', // v0.35.2 onward
+]);
+
+function globalRulesMarkers(tree: TagTree, source: string): readonly [string, string] {
+  if (source.includes('export const { begin: GLOBAL_RULES_BEGIN, end: GLOBAL_RULES_END } = markedBlockMarkers(GLOBAL_RULES_SELECTOR);')) {
+    const selector = requireValue(stringConstant(source, 'GLOBAL_RULES_SELECTOR'), tree.tag, 'GLOBAL_RULES_SELECTOR');
+    if (selector !== 'global-working-rules') throw new Error(`${tree.tag}: unknown global rules selector ${selector}`);
+    const markers = requireValue(functionSource(tree.read(RULES_MARKER_SOURCE), 'markedBlockMarkers'), tree.tag, 'markedBlockMarkers');
+    requirePinned(tree.tag, 'markedBlockMarkers', markers, RULES_MARKER_PINS);
+    return [`<!-- BEGIN: repo-harness ${selector} -->`, `<!-- END: repo-harness ${selector} -->`];
+  }
+  return [requireValue(stringConstant(source, 'GLOBAL_RULES_BEGIN'), tree.tag, 'GLOBAL_RULES_BEGIN'),
+    requireValue(stringConstant(source, 'GLOBAL_RULES_END'), tree.tag, 'GLOBAL_RULES_END')];
+}
 
 function readTemplate(raw: string): string {
   return raw.match(/```md\n([\s\S]*?)\n```/)?.[1] ?? raw;
@@ -542,14 +559,13 @@ interface RulesRenders {
 }
 
 function globalRulesRenders(tree: TagTree): RulesRenders | null {
-  const path = GLOBAL_RULES_PATHS.find((candidate) => tree.has(candidate) && tree.read(candidate).includes('BEGIN: repo-harness global-working-rules'));
+  const path = GLOBAL_RULES_PATHS.find((candidate) => tree.has(candidate) && tree.read(candidate).includes('GLOBAL_RULES_BEGIN'));
   if (!path) return null;
   const source = tree.read(path);
   const joined = RULES_FUNCTIONS.map((name) => functionSource(source, name)).filter((text): text is string => text !== null).join('\n');
   const recipe = GLOBAL_RULES_PINS.get(sha(joined));
   if (!recipe) throw new Error(`${tree.tag}: unknown global rules renderer (sha256 ${sha(joined)}); teach scripts/check-released-managed-values.ts this renderer`);
-  const begin = requireValue(stringConstant(source, 'GLOBAL_RULES_BEGIN'), tree.tag, 'GLOBAL_RULES_BEGIN');
-  const end = requireValue(stringConstant(source, 'GLOBAL_RULES_END'), tree.tag, 'GLOBAL_RULES_END');
+  const [begin, end] = globalRulesMarkers(tree, source);
   const selfNote = recipe === 'plain' ? null
     : requireValue(source.match(/^const GLOBAL_RULES_SELF_NOTE =\s*(['"])(.*?)\1;$/m)?.[2], tree.tag, 'GLOBAL_RULES_SELF_NOTE');
   const labels = recipe === 'self-note-label' || recipe === 'encoded'
