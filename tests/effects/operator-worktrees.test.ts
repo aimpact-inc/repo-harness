@@ -4,7 +4,7 @@ import * as childProcess from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { tmpWorkspace, initGitRepo, commitAll, run } from '../helpers/repo-fixture';
-import { entries, inspectWorktree } from '../../src/effects/state/coordination-worktree-topology';
+import { entries, inspectWorktree, protectsCwd, worktreeOccupyingPids } from '../../src/effects/state/coordination-worktree-topology';
 import { prepareWorktreeTrash, renameWorktreeToTrash, worktreeTrashNames } from '../../src/effects/state/worktree-trash';
 import { worktreeId, recordWorktree, readWorktreeRecord, endWorktreeRecord } from '../../src/effects/git/worktree-record';
 import { resolveGitCommonDirectory } from '../../src/effects/git/common-directory';
@@ -14,7 +14,7 @@ import { startWorktreeCollector } from '../../src/effects/operator/worktree-coll
 import { collectOrphanWorktrees } from '../../src/effects/operator/worktree-orphans-worker';
 import { repoHarnessRepoIdFor, type RepoHarnessRegisteredRepo } from '../../src/effects/repo-registry';
 import * as processProbe from '../../src/effects/git/worktree-processes';
-import { worktreeProcesses, type LinuxWorktreeProcessProbe } from '../../src/effects/git/worktree-processes';
+import { classifyWindowsOpenFailure, worktreeProcesses, type LinuxWorktreeProcessProbe, type WindowsDirectoryAncestry, type WindowsProcessInspection, type WindowsWorktreeProcessProbe } from '../../src/effects/git/worktree-processes';
 import { decodeWorktreeCleanupRequest, decodeWorktreeCleanupResult, worktreeDigestRow } from '../../src/core/operator/worktree-cleanup';
 import { decodeWorktreeCleanupChildOutput, runWorktreeCleanup, selectionDigest, type WorktreeProcessProbe } from '../../src/effects/operator/worktree-cleanup';
 import { OperatorWriteRefusal } from '../../src/effects/operator/write-run';
@@ -122,6 +122,191 @@ describe('read-only worktree judgment and lifecycle', () => {
     ['a bare hidepid option', () => mountInfo('rw,hidepid')],
   ])('%s makes the inventory unknown', (_name, text) => {
     expect(worktreeProcesses(Date.now() + 5000, procMountProbe(text as () => string))).toBeNull();
+  });
+
+  const winProbe = (overrides: Partial<WindowsWorktreeProcessProbe> = {}): WindowsWorktreeProcessProbe => ({
+    ownPid: 100, ownCwd: 'C:\\Users\\win\\repo', pids: () => [100, 101],
+    inspect: pid => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : { status: 'ok', cwd: 'C:\\Users\\win\\repo-wt-1\\' },
+    isLocalDrive: drive => drive === 'C:\\',
+    realpath: path => path,
+    ...overrides,
+  });
+
+  test('windows process probe normalizes handle-canonicalized and local paths, skips denied/out-of-scope entries, and keeps volume GUID paths for target matching', () => {
+    const resolved: string[] = [];
+    const byPid: Record<number, WindowsProcessInspection> = {
+      100: { status: 'ok', cwd: 'c:\\users\\win\\repo\\' },
+      101: { status: 'ok', cwd: '\\\\?\\C:\\Users\\win\\junc-wt\\' },
+      102: { status: 'ok', cwd: 'C:\\' },
+      103: { status: 'ok', cwd: '\\\\?\\C:\\Users\\win\\repo-wt-subst\\', canonical: true },
+      104: { status: 'ok', cwd: '\\\\?\\UNC\\server\\share\\sub\\', canonical: true },
+      105: { status: 'ok', cwd: '\\\\?\\Volume{AAAA-1111}\\sub\\', canonical: true },
+      106: { status: 'exited' },
+      107: { status: 'other_user' },
+      108: { status: 'inaccessible' },
+      109: { status: 'protected' },
+      110: { status: 'ui_access' },
+    };
+    const rows = worktreeProcesses(Date.now() + 5000, undefined, winProbe({
+      pids: () => Object.keys(byPid).map(Number),
+      inspect: pid => byPid[pid]!,
+      realpath: path => {
+        resolved.push(path);
+        return path.toLowerCase().endsWith('junc-wt') ? 'C:\\Users\\win\\repo-wt-1' : path.replace(/^c:\\users\\win/i, 'C:\\Users\\win');
+      },
+    }));
+    expect(rows).toEqual([
+      { pid: 100, cwd: 'C:\\Users\\win\\repo' },
+      { pid: 101, cwd: 'C:\\Users\\win\\repo-wt-1' },
+      { pid: 102, cwd: 'C:\\' },
+      { pid: 103, cwd: 'C:\\Users\\win\\repo-wt-subst' },
+      { pid: 104, cwd: '\\\\server\\share\\sub' },
+      { pid: 105, cwd: '\\\\?\\volume{aaaa-1111}\\sub' },
+    ]);
+    expect(resolved.some(path => path.includes('repo-wt-subst') || path.startsWith('\\\\server') || path.includes('Volume'))).toBe(false);
+    expect(protectsCwd('C:\\Users\\win\\repo-wt-1', 'c:\\users\\win\\repo-wt-1\\sub\\', 'win32')).toBe(true);
+    expect(protectsCwd('C:\\Users\\win\\repo-wt-1', '\\\\?\\C:/Users/win/repo-wt-1', 'win32')).toBe(true);
+    expect(protectsCwd('C:\\Users\\win\\repo-wt-1', 'C:\\Users\\win\\repo-wt-10', 'win32')).toBe(false);
+  });
+
+  test('windows probe self-check accepts a valid mapped SMB drive and matches another process on it', () => {
+    const mapShare = (path: string) => path.replace(/^Z:\\/iu, '\\\\?\\UNC\\server\\share\\');
+    const resolver = { isLocalDrive: (drive: string) => drive === 'C:\\', realpath: mapShare };
+    const checkout: WindowsDirectoryAncestry = { ids: ['checkout', 'share'], volumeRoot: false };
+    const own: WindowsDirectoryAncestry = { ids: ['primary', 'share'], volumeRoot: false };
+    const sub: WindowsDirectoryAncestry = { ids: ['sub', ...checkout.ids], volumeRoot: false };
+    const rows = worktreeProcesses(Date.now() + 5000, undefined, winProbe({
+      ownPid: 100,
+      ownCwd: 'Z:\\repo',
+      pids: () => [100, 101, 102],
+      inspect: pid => pid === 100
+        ? { status: 'ok', cwd: '\\\\?\\UNC\\server\\share\\repo', canonical: true, windowsDirectory: own }
+        : pid === 101
+          ? { status: 'ok', cwd: '\\\\?\\UNC\\server\\share\\repo-wt-1\\sub', canonical: true, windowsDirectory: sub }
+          : { status: 'ok', cwd: 'Z:\\repo-wt-1\\', windowsDirectory: checkout },
+      ...resolver,
+    }));
+    expect(rows).toEqual([
+      { pid: 100, cwd: '\\\\server\\share\\repo', windowsDirectory: own },
+      { pid: 101, cwd: '\\\\server\\share\\repo-wt-1\\sub', windowsDirectory: sub },
+      { pid: 102, cwd: '\\\\server\\share\\repo-wt-1', windowsDirectory: checkout },
+    ]);
+    const options = { platform: 'win32' as const, readTargetAncestry: () => checkout };
+    expect(worktreeOccupyingPids('Z:\\repo-wt-1', rows, options)).toEqual([101, 102]);
+    expect(worktreeOccupyingPids('\\\\?\\UNC\\server\\share\\repo-wt-1', rows, options)).toEqual([101, 102]);
+  });
+
+  test('windows target matching uses complete local ancestry and fails closed on unreadable identities', () => {
+    const checkout: WindowsDirectoryAncestry = { ids: ['checkout', 'volume-root'], volumeRoot: true };
+    const options = { platform: 'win32' as const, readTargetAncestry: () => checkout };
+    const target = 'C:\\Users\\RUNNER~1\\repo-wt-1';
+    const own = { pid: 100, cwd: 'C:\\Users\\runneradmin\\repo',
+      windowsDirectory: { ids: ['primary', 'volume-root'] as const, volumeRoot: true } };
+    const volumeCwd = '\\\\?\\Volume{AAAA-1111}\\sub';
+    expect(worktreeOccupyingPids(target, [own, { pid: 105, cwd: volumeCwd,
+      windowsDirectory: { ids: ['sub', 'different-volume-root'], volumeRoot: true } }], options)).toEqual([]);
+    expect(worktreeOccupyingPids(target, [own, { pid: 105, cwd: volumeCwd,
+      windowsDirectory: { ids: ['sub', ...checkout.ids], volumeRoot: true } }], options)).toEqual([105]);
+    expect(worktreeOccupyingPids(target, [own, { pid: 105, cwd: volumeCwd }], options)).toBeNull();
+    expect(worktreeOccupyingPids('X:\\repo-wt-1', [own], { ...options, readTargetAncestry: () => null })).toBeNull();
+  });
+
+  test('windows occupancy counts a UNC loopback CWD under a local checkout', () => {
+    const observed = [{ pid: 101, cwd: '\\\\127.0.0.1\\C$\\repo-wt-1\\src',
+      windowsDirectory: { ids: ['src', 'checkout', 'volume-root'] as const, volumeRoot: false } }];
+    const options = {
+      platform: 'win32' as const,
+      readTargetAncestry: () => ({ ids: ['checkout', 'volume-root'] as const, volumeRoot: true }),
+    };
+    expect(worktreeOccupyingPids('C:\\repo-wt-1', observed, options)).toEqual([101]);
+  });
+
+  test('windows occupancy is unknown for a UNC target and a volume-GUID CWD with no common identity', () => {
+    const observed = [{ pid: 105, cwd: '\\\\?\\Volume{AAAA-1111}\\src',
+      windowsDirectory: { ids: ['src', 'volume-root'] as const, volumeRoot: true } }];
+    const options = {
+      platform: 'win32' as const,
+      readTargetAncestry: () => ({ ids: ['checkout', 'share-root'] as const, volumeRoot: false }),
+    };
+    expect(worktreeOccupyingPids('\\\\server\\share\\repo-wt-1', observed, options)).toBeNull();
+  });
+
+  test.each([
+    ['proven same-user SID followed by denied read', { inspect: (pid: number) => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : { status: 'denied' } } as Partial<WindowsWorktreeProcessProbe>],
+    ['non-access-denied or post-SID failed read', { inspect: (pid: number) => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : { status: 'failed' } } as Partial<WindowsWorktreeProcessProbe>],
+    ['truncated or failed PID enumeration', { pids: () => null }],
+    ['missing own process', { pids: () => [101] }],
+    ['mismatched own CWD', { inspect: () => ({ status: 'ok', cwd: 'C:\\elsewhere\\' }) } as Partial<WindowsWorktreeProcessProbe>],
+    ['relative CWD', { inspect: (pid: number) => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : { status: 'ok', cwd: 'relative\\path' } } as Partial<WindowsWorktreeProcessProbe>],
+    ['removed SUBST or unrecognized drive', { inspect: (pid: number) => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : { status: 'ok', cwd: 'X:\\repo-wt-alias\\' } } as Partial<WindowsWorktreeProcessProbe>],
+    ['unresolved mapped network drive', { inspect: (pid: number) => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : { status: 'ok', cwd: 'Z:\\mapped\\dir\\' } } as Partial<WindowsWorktreeProcessProbe>],
+    ['unresolvable mapped own CWD', { ownCwd: 'Z:\\repo', inspect: () => ({ status: 'ok', cwd: '\\\\?\\UNC\\server\\share\\repo', canonical: true }), realpath: () => { throw new Error('ENOENT'); } } as Partial<WindowsWorktreeProcessProbe>],
+    ['unresolvable local alias or junction', { realpath: (path: string) => { if (path.includes('repo-wt-1')) throw new Error('ENOENT'); return path; } }],
+    ['unresolvable non-canonical UNC path', { inspect: (pid: number) => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : { status: 'ok', cwd: '\\\\server\\share\\dir\\' }, realpath: (path: string) => { if (path.startsWith('\\\\')) throw new Error('ENOENT'); return path; } } as Partial<WindowsWorktreeProcessProbe>],
+    ['device namespace path without volume GUID', { inspect: (pid: number) => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : { status: 'ok', cwd: '\\\\.\\PhysicalDrive0', canonical: true } } as Partial<WindowsWorktreeProcessProbe>],
+  ])('windows probe fails closed on %s', (_name, overrides) => {
+    expect(worktreeProcesses(Date.now() + 5000, undefined, winProbe(overrides))).toBeNull();
+  });
+
+  test('windows open failure classification skips denied opens with no readable SID and fails closed on post-SID or non-access-denied errors', () => {
+    const ACCESS_DENIED = 0xc0000022, NON_ACCESS_ERROR = 0xc0000001, INVALID_CID = 0xc000000b;
+    // (2) Denied limited or token open with no readable SID is skipped (`inaccessible` / `protected`).
+    expect(classifyWindowsOpenFailure('limited', ACCESS_DENIED)).toEqual({ status: 'inaccessible' });
+    expect(classifyWindowsOpenFailure('token', ACCESS_DENIED, { stillActive: true, protectedProcess: false })).toEqual({ status: 'inaccessible' });
+    expect(classifyWindowsOpenFailure('token', ACCESS_DENIED, { stillActive: true, protectedProcess: true })).toEqual({ status: 'protected' });
+    expect(classifyWindowsOpenFailure('token', ACCESS_DENIED, { stillActive: false })).toEqual({ status: 'exited' });
+    expect(worktreeProcesses(Date.now() + 5000, undefined, winProbe({
+      inspect: pid => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : classifyWindowsOpenFailure('limited', ACCESS_DENIED),
+    }))).toEqual([{ pid: 100, cwd: 'C:\\Users\\win\\repo' }]);
+    // (3) Proven same-user SID followed by denied/failed read fails closed unless proven PPL or non-elevated UIAccess.
+    expect(classifyWindowsOpenFailure('same_user_vm', ACCESS_DENIED, { stillActive: true, protectedProcess: true })).toEqual({ status: 'protected' });
+    expect(classifyWindowsOpenFailure('same_user_vm', ACCESS_DENIED, { stillActive: true, nonElevatedUiAccess: true })).toEqual({ status: 'ui_access' });
+    expect(classifyWindowsOpenFailure('same_user_vm', ACCESS_DENIED, { stillActive: true })).toEqual({ status: 'denied' });
+    expect(worktreeProcesses(Date.now() + 5000, undefined, winProbe({
+      inspect: pid => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : classifyWindowsOpenFailure('same_user_vm', ACCESS_DENIED, { stillActive: true }),
+    }))).toBeNull();
+    // (4) Any failure that is not access denied (and not exited) gives unknown (`failed` -> `null`).
+    for (const stage of ['limited', 'token', 'same_user_vm'] as const) {
+      expect(classifyWindowsOpenFailure(stage, INVALID_CID)).toEqual({ status: 'exited' });
+      const nonAccess = classifyWindowsOpenFailure(stage, NON_ACCESS_ERROR);
+      expect(nonAccess).toEqual({ status: 'failed' });
+      expect(worktreeProcesses(Date.now() + 5000, undefined, winProbe({
+        inspect: pid => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : nonAccess,
+      }))).toBeNull();
+    }
+    expect(classifyWindowsOpenFailure('token', ACCESS_DENIED, { stillActive: null })).toEqual({ status: 'failed' });
+  });
+
+  test('windows probe fails closed when its deadline is already reached', () => {
+    expect(worktreeProcesses(Date.now() - 1, undefined, winProbe())).toBeNull();
+  });
+
+  test.if(process.platform === 'win32')('native Windows observer reports a live child in the worktree and clears once it exits', async () => {
+    const f = fixture();
+    const sub = join(f.tree, 'sub');
+    mkdirSync(sub);
+    const child = Bun.spawn([process.execPath, '-e', 'console.log("ready"); await Bun.sleep(30_000);'], {
+      cwd: sub, stdout: 'pipe', stderr: 'ignore',
+    });
+    try {
+      const reader = child.stdout.getReader();
+      await reader.read();
+      reader.releaseLock();
+      const occupied = worktreeProcesses(Date.now() + 5_000);
+      expect(occupied).not.toBeNull();
+      expect(occupied!.some(row => row.pid === child.pid && protectsCwd(f.tree, row.cwd))).toBe(true);
+      child.kill();
+      await child.exited;
+      const idle = worktreeProcesses(Date.now() + 5_000);
+      expect(idle).not.toBeNull();
+      expect(idle!.some(row => protectsCwd(f.tree, row.cwd))).toBe(false);
+    } finally {
+      if (child.exitCode === null) {
+        child.kill();
+        await child.exited;
+      }
+      f.cleanup();
+    }
   });
 
   test('uses merge, ownership, loss and occupancy predicates without removing anything', () => {

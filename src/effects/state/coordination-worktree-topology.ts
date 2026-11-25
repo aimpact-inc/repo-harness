@@ -1,6 +1,6 @@
 import { isManagedWorktreePath, managedWorktreeRoot } from '../git/managed-worktree';
 import type { WorktreeReason, WorktreeView } from '../../core/public-projections/worktrees';
-import { worktreeProcesses, type WorktreeProcess } from '../git/worktree-processes';
+import { readWindowsDirectoryAncestry, worktreeProcesses, type WindowsDirectoryAncestry, type WorktreeProcess } from '../git/worktree-processes';
 import { readWorktreeRecord, readWorktreeRecordById, endWorktreeRecord } from '../git/worktree-record';
 import { randomUUID } from 'crypto';
 import { sha256Hex } from '../../core/evidence/sha256';
@@ -526,12 +526,65 @@ interface SweepContext {
   /** A fresh process inventory; null means occupancy is unknown. */
   readonly processes: (deadline: number) => WorktreeProcess[] | null;
 }
-export function protectsCwd(path: string, cwd: string): boolean {
-  return cwd === path || cwd.startsWith(path + sep);
+function comparablePath(value: string, platform = process.platform): string {
+  if (platform !== 'win32') return value;
+  let normalized = value.replace(/\//gu, '\\');
+  if (/^\\\\\?\\[A-Za-z]:\\/u.test(normalized)) normalized = normalized.slice(4);
+  else if (/^\\\\\?\\UNC\\/iu.test(normalized)) normalized = `\\\\${normalized.slice(8)}`;
+  while (normalized.length > 3 && normalized.endsWith('\\')) normalized = normalized.slice(0, -1);
+  return normalized.toLowerCase();
+}
+
+export function protectsCwd(path: string, cwd: string, platform = process.platform): boolean {
+  const target = comparablePath(path, platform);
+  const current = comparablePath(cwd, platform);
+  if (current === target) return true;
+  const separator = platform === 'win32' ? '\\' : sep;
+  const prefix = target.endsWith(separator) ? target : target + separator;
+  return current.startsWith(prefix);
+}
+
+export interface WorktreeOccupancyMatchOptions {
+  readonly platform?: NodeJS.Platform;
+  readonly readTargetAncestry?: (path: string) => WindowsDirectoryAncestry | null;
+}
+
+/** Unique occupying PIDs, or null (process_unknown) when occupancy cannot be proved. */
+export function worktreeOccupyingPids(
+  path: string,
+  processes: WorktreeProcess[] | null,
+  options: WorktreeOccupancyMatchOptions = {},
+): number[] | null {
+  if (processes === null) return null;
+  const platform = options.platform ?? process.platform;
+  const occupying = new Set<number>();
+  if (platform !== 'win32') {
+    for (const { pid, cwd } of processes) if (protectsCwd(path, cwd, platform)) occupying.add(pid);
+    return [...occupying];
+  }
+
+  const target = (options.readTargetAncestry ?? readWindowsDirectoryAncestry)(path);
+  if (target === null) return null;
+  for (const { pid, windowsDirectory: cwd } of processes) {
+    if (cwd === undefined) return null;
+    if (cwd.ids.includes(target.ids[0])) {
+      occupying.add(pid);
+      continue;
+    }
+    // Local volume roots bound the whole ancestry. A redirector can hide parents
+    // or report different IDs. A shared identity is needed to compare namespaces,
+    // and a share-limited CWD must reach a directory on the target's ancestry.
+    if (cwd.volumeRoot && target.volumeRoot) continue;
+    if (target.ids.includes(cwd.ids.at(-1)!)) continue;
+    if (cwd.volumeRoot && cwd.ids.some(id => target.ids.includes(id))) continue;
+    return null;
+  }
+  return [...occupying];
 }
 
 function worktreeProcessCount(path: string, processes: WorktreeProcess[] | null): number | null {
-  return processes === null ? null : new Set(processes.filter(item => protectsCwd(path, item.cwd)).map(item => item.pid)).size;
+  const pids = worktreeOccupyingPids(path, processes);
+  return pids === null ? null : pids.length;
 }
 
 /** Git documents these backpointers. They are read only to fence whole prune,
@@ -789,7 +842,9 @@ function inspectRemoval(root: string, path: string, callerCwd: string | null, li
     if (path === main) reasons.push('primary');
     if (callerCwd !== null && protectsCwd(path, callerCwd)) { reasons.push('session_cwd'); inUse = true; }
     if (!options.explicitCloseout) {
-      const processes = options.processes === undefined ? worktreeProcesses(limits.deadline ?? Date.now() + 5_000) : options.processes;
+      const processes = options.processes === undefined
+        ? worktreeProcesses(Math.min(limits.deadline ?? Infinity, Date.now() + 5_000))
+        : options.processes;
       result.process_count = worktreeProcessCount(path, processes);
       if (result.process_count === null) reasons.push('process_unknown');
       else if (result.process_count > 0) { reasons.push('process_in_use'); inUse = true; }
