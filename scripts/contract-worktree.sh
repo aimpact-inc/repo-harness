@@ -625,7 +625,7 @@ cleanup_worktree() {
 
   if [[ "$dry_run" -eq 1 ]]; then
     echo "[ContractWorktree] dry-run cleanup slug=$slug target=$target_branch"
-    if [[ "$preview_occupancy" == "managed_runtime_only" ]]; then
+    if [[ "${preview_occupancy:-}" == "managed_runtime_only" ]]; then
       echo "[ContractWorktree] would close verified managed runtime and run a fresh occupancy check before removing worktree: ${worktree_path:-"(absent)"}"
       echo "[ContractWorktree] would remove worktree (conditional on closing verified managed runtime and passing fresh occupancy check): ${worktree_path:-"(absent)"}"
     else

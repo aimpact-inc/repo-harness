@@ -14,7 +14,7 @@ import { startWorktreeCollector } from '../../src/effects/operator/worktree-coll
 import { collectOrphanWorktrees } from '../../src/effects/operator/worktree-orphans-worker';
 import { repoHarnessRepoIdFor, type RepoHarnessRegisteredRepo } from '../../src/effects/repo-registry';
 import * as processProbe from '../../src/effects/git/worktree-processes';
-import { canonicalizeWindowsPath, classifyWindowsOpenFailure, worktreeProcesses, type LinuxWorktreeProcessProbe, type WindowsProcessInspection, type WindowsWorktreeProcessProbe } from '../../src/effects/git/worktree-processes';
+import { classifyWindowsOpenFailure, worktreeProcesses, type LinuxWorktreeProcessProbe, type WindowsDirectoryAncestry, type WindowsProcessInspection, type WindowsWorktreeProcessProbe } from '../../src/effects/git/worktree-processes';
 import { decodeWorktreeCleanupRequest, decodeWorktreeCleanupResult, worktreeDigestRow } from '../../src/core/operator/worktree-cleanup';
 import { decodeWorktreeCleanupChildOutput, runWorktreeCleanup, selectionDigest, type WorktreeProcessProbe } from '../../src/effects/operator/worktree-cleanup';
 import { OperatorWriteRefusal } from '../../src/effects/operator/write-run';
@@ -172,46 +172,63 @@ describe('read-only worktree judgment and lifecycle', () => {
   test('windows probe self-check accepts a valid mapped SMB drive and matches another process on it', () => {
     const mapShare = (path: string) => path.replace(/^Z:\\/iu, '\\\\?\\UNC\\server\\share\\');
     const resolver = { isLocalDrive: (drive: string) => drive === 'C:\\', realpath: mapShare };
+    const checkout: WindowsDirectoryAncestry = { ids: ['checkout', 'share'], volumeRoot: false };
+    const own: WindowsDirectoryAncestry = { ids: ['primary', 'share'], volumeRoot: false };
+    const sub: WindowsDirectoryAncestry = { ids: ['sub', ...checkout.ids], volumeRoot: false };
     const rows = worktreeProcesses(Date.now() + 5000, undefined, winProbe({
       ownPid: 100,
       ownCwd: 'Z:\\repo',
       pids: () => [100, 101, 102],
       inspect: pid => pid === 100
-        ? { status: 'ok', cwd: '\\\\?\\UNC\\server\\share\\repo', canonical: true }
+        ? { status: 'ok', cwd: '\\\\?\\UNC\\server\\share\\repo', canonical: true, windowsDirectory: own }
         : pid === 101
-          ? { status: 'ok', cwd: '\\\\?\\UNC\\server\\share\\repo-wt-1\\sub', canonical: true }
-          : { status: 'ok', cwd: 'Z:\\repo-wt-1\\' },
+          ? { status: 'ok', cwd: '\\\\?\\UNC\\server\\share\\repo-wt-1\\sub', canonical: true, windowsDirectory: sub }
+          : { status: 'ok', cwd: 'Z:\\repo-wt-1\\', windowsDirectory: checkout },
       ...resolver,
     }));
     expect(rows).toEqual([
-      { pid: 100, cwd: '\\\\server\\share\\repo' },
-      { pid: 101, cwd: '\\\\server\\share\\repo-wt-1\\sub' },
-      { pid: 102, cwd: '\\\\server\\share\\repo-wt-1' },
+      { pid: 100, cwd: '\\\\server\\share\\repo', windowsDirectory: own },
+      { pid: 101, cwd: '\\\\server\\share\\repo-wt-1\\sub', windowsDirectory: sub },
+      { pid: 102, cwd: '\\\\server\\share\\repo-wt-1', windowsDirectory: checkout },
     ]);
-    const resolveTarget = (target: string) => canonicalizeWindowsPath(target, resolver);
-    expect(worktreeOccupyingPids('Z:\\repo-wt-1', rows, { platform: 'win32', resolveTarget })).toEqual([101, 102]);
-    expect(worktreeOccupyingPids('\\\\?\\UNC\\server\\share\\repo-wt-1', rows, { platform: 'win32', resolveTarget })).toEqual([101, 102]);
+    const options = { platform: 'win32' as const, readTargetAncestry: () => checkout };
+    expect(worktreeOccupyingPids('Z:\\repo-wt-1', rows, options)).toEqual([101, 102]);
+    expect(worktreeOccupyingPids('\\\\?\\UNC\\server\\share\\repo-wt-1', rows, options)).toEqual([101, 102]);
   });
 
-  test('windows target matching skips different-volume GUID CWDs and fails closed on same-volume, unproven-volume, or unresolvable targets', () => {
-    const resolver = { isLocalDrive: (drive: string) => drive === 'C:\\', realpath: (p: string) => p.replace(/^C:\\Users\\RUNNER~1/iu, 'C:\\Users\\runneradmin') };
-    const resolveTarget = (target: string) => canonicalizeWindowsPath(target, resolver);
-    const withVolume = [{ pid: 100, cwd: 'C:\\Users\\runneradmin\\repo' }, { pid: 105, cwd: '\\\\?\\volume{aaaa-1111}\\sub' }];
-    expect(worktreeOccupyingPids('C:\\Users\\RUNNER~1\\repo-wt-1', withVolume, {
-      platform: 'win32', resolveTarget, targetVolumeGuid: () => 'volume{bbbb-2222}',
-    })).toEqual([]);
-    expect(worktreeOccupyingPids('C:\\Users\\RUNNER~1\\repo-wt-1', withVolume, {
-      platform: 'win32', resolveTarget, targetVolumeGuid: () => 'volume{aaaa-1111}',
-    })).toBeNull();
-    expect(worktreeOccupyingPids('C:\\Users\\RUNNER~1\\repo-wt-1', withVolume, {
-      platform: 'win32', resolveTarget, targetVolumeGuid: () => null,
-    })).toBeNull();
-    expect(worktreeOccupyingPids('\\\\server\\share\\repo-wt-1', withVolume, {
-      platform: 'win32', resolveTarget: p => canonicalizeWindowsPath(p, { isLocalDrive: () => false, realpath: x => x }),
-    })).toEqual([]);
-    expect(worktreeOccupyingPids('X:\\repo-wt-1', [{ pid: 100, cwd: 'C:\\Users\\runneradmin\\repo' }], {
-      platform: 'win32', resolveTarget: () => null,
-    })).toBeNull();
+  test('windows target matching uses complete local ancestry and fails closed on unreadable identities', () => {
+    const checkout: WindowsDirectoryAncestry = { ids: ['checkout', 'volume-root'], volumeRoot: true };
+    const options = { platform: 'win32' as const, readTargetAncestry: () => checkout };
+    const target = 'C:\\Users\\RUNNER~1\\repo-wt-1';
+    const own = { pid: 100, cwd: 'C:\\Users\\runneradmin\\repo',
+      windowsDirectory: { ids: ['primary', 'volume-root'] as const, volumeRoot: true } };
+    const volumeCwd = '\\\\?\\Volume{AAAA-1111}\\sub';
+    expect(worktreeOccupyingPids(target, [own, { pid: 105, cwd: volumeCwd,
+      windowsDirectory: { ids: ['sub', 'different-volume-root'], volumeRoot: true } }], options)).toEqual([]);
+    expect(worktreeOccupyingPids(target, [own, { pid: 105, cwd: volumeCwd,
+      windowsDirectory: { ids: ['sub', ...checkout.ids], volumeRoot: true } }], options)).toEqual([105]);
+    expect(worktreeOccupyingPids(target, [own, { pid: 105, cwd: volumeCwd }], options)).toBeNull();
+    expect(worktreeOccupyingPids('X:\\repo-wt-1', [own], { ...options, readTargetAncestry: () => null })).toBeNull();
+  });
+
+  test('windows occupancy counts a UNC loopback CWD under a local checkout', () => {
+    const observed = [{ pid: 101, cwd: '\\\\127.0.0.1\\C$\\repo-wt-1\\src',
+      windowsDirectory: { ids: ['src', 'checkout', 'volume-root'] as const, volumeRoot: false } }];
+    const options = {
+      platform: 'win32' as const,
+      readTargetAncestry: () => ({ ids: ['checkout', 'volume-root'] as const, volumeRoot: true }),
+    };
+    expect(worktreeOccupyingPids('C:\\repo-wt-1', observed, options)).toEqual([101]);
+  });
+
+  test('windows occupancy is unknown for a UNC target and a volume-GUID CWD with no common identity', () => {
+    const observed = [{ pid: 105, cwd: '\\\\?\\Volume{AAAA-1111}\\src',
+      windowsDirectory: { ids: ['src', 'volume-root'] as const, volumeRoot: true } }];
+    const options = {
+      platform: 'win32' as const,
+      readTargetAncestry: () => ({ ids: ['checkout', 'share-root'] as const, volumeRoot: false }),
+    };
+    expect(worktreeOccupyingPids('\\\\server\\share\\repo-wt-1', observed, options)).toBeNull();
   });
 
   test.each([

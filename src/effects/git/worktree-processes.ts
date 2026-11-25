@@ -1,8 +1,15 @@
 import { dlopen, FFIType, ptr, type Pointer } from 'bun:ffi';
 import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { win32 } from 'node:path';
 
-export interface WorktreeProcess { pid: number; cwd: string }
+export interface WindowsDirectoryAncestry {
+  /** Directory identity followed by its parents, up to the visible root. */
+  readonly ids: readonly [string, ...string[]];
+  readonly volumeRoot: boolean;
+}
+
+export interface WorktreeProcess { pid: number; cwd: string; windowsDirectory?: WindowsDirectoryAncestry }
 export interface LinuxWorktreeProcessProbe {
   readonly uid: number;
   entries(): readonly string[];
@@ -12,7 +19,7 @@ export interface LinuxWorktreeProcessProbe {
   mountInfo(): string;
 }
 export type WindowsProcessInspection =
-  | { readonly status: 'ok'; readonly cwd: string; readonly canonical?: boolean }
+  | { readonly status: 'ok'; readonly cwd: string; readonly canonical?: boolean; readonly windowsDirectory?: WindowsDirectoryAncestry }
   | { readonly status: 'exited' | 'other_user' | 'inaccessible' | 'protected' | 'ui_access' | 'denied' | 'failed' };
 export interface WindowsPathResolver {
   isLocalDrive(driveRoot: string): boolean;
@@ -59,6 +66,7 @@ const INVALID_HANDLE_VALUE = 0xffffffffffffffffn;
 const FILE_TYPE_DISK = 0x1;
 const FILE_NAME_NORMALIZED_VOLUME_DOS = 0x0;
 const FILE_NAME_NORMALIZED_VOLUME_GUID = 0x1;
+const FILE_ID_INFO_CLASS = 18;
 const STILL_ACTIVE = 259;
 const STATUS_SUCCESS = 0;
 const STATUS_INVALID_CID = 0xc000000b;
@@ -88,6 +96,7 @@ interface WindowsProcessApi {
     GetExitCodeProcess(handle: Pointer, exitCode: Pointer): number;
     GetDriveTypeW(rootPath: Pointer): number;
     GetFileType(handle: Pointer): number;
+    GetFileInformationByHandleEx(handle: Pointer, infoClass: number, buffer: Pointer, byteLength: number): number;
     GetFinalPathNameByHandleW(handle: Pointer, filePath: Pointer, charCapacity: number, flags: number): number;
     CreateFileW(
       fileName: Pointer,
@@ -128,6 +137,7 @@ function loadWindowsProcessApi(): WindowsProcessApi {
       GetExitCodeProcess: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
       GetDriveTypeW: { args: [FFIType.ptr], returns: FFIType.u32 },
       GetFileType: { args: [FFIType.ptr], returns: FFIType.u32 },
+      GetFileInformationByHandleEx: { args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
       GetFinalPathNameByHandleW: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32, FFIType.u32], returns: FFIType.u32 },
       CreateFileW: {
         args: [FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr],
@@ -300,7 +310,7 @@ function queryFinalPathName(api: WindowsProcessApi, dupHandle: Pointer): string 
 function readRemoteCwdOnce(
   api: WindowsProcessApi,
   handle: Pointer,
-): { status: 'ok'; cwd: string; canonical: true } | { status: 'exited' } | { status: 'retry' } {
+): { status: 'ok'; cwd: string; canonical: true; windowsDirectory: WindowsDirectoryAncestry } | { status: 'exited' } | { status: 'retry' } {
   const retLen = new Uint32Array(1);
   const wowPeb = new BigUint64Array(1);
   const wowStatus = api.ntdll.NtQueryInformationProcess(handle, PROCESS_WOW64_INFORMATION_CLASS, ptr(wowPeb), 8, ptr(retLen));
@@ -323,8 +333,10 @@ function readRemoteCwdOnce(
     const second = readHandle();
     if (second.status !== 'ok') return second;
     if (second.cwdHandle !== first.cwdHandle) return { status: 'retry' };
-    const finalPath = queryFinalPathName(api, dupHandle);
-    return finalPath ? { status: 'ok', cwd: finalPath, canonical: true } : { status: 'retry' };
+    const cwd = queryFinalPathName(api, dupHandle);
+    if (cwd === null) return { status: 'retry' };
+    const windowsDirectory = queryWindowsDirectoryAncestry(api, dupHandle, cwd);
+    return windowsDirectory ? { status: 'ok', cwd, canonical: true, windowsDirectory } : { status: 'retry' };
   } finally {
     api.ntdll.NtClose(dupHandle);
   }
@@ -507,7 +519,7 @@ function createNativeWindowsProbe(deadline: number): WindowsWorktreeProcessProbe
 const WINDOWS_VOLUME_GUID_RE = /^\\\\\?\\(Volume\{[0-9a-f-]+\})(?:\\|$)/iu;
 
 /** Lowercase `volume{...}` identifier when a Windows path addresses a volume GUID with no DOS letter. */
-export function windowsVolumeGuid(path: string): string | null {
+function windowsVolumeGuid(path: string): string | null {
   const match = WINDOWS_VOLUME_GUID_RE.exec(path.replace(/\//gu, '\\'));
   return match ? match[1]!.toLowerCase() : null;
 }
@@ -528,10 +540,9 @@ function cleanWindowsPath(raw: string): string | null {
 }
 
 /**
- * Single canonical resolver for every Windows path in occupancy comparisons: process CWDs,
- * the observer's own CWD, and checkout targets. Resolves non-canonical paths via `realpath`
- * before checking drive type so valid mapped SMB drives (`Z:\repo` -> `\\server\share\repo`),
- * SUBST drives, junctions, 8.3 names, and `\\?\UNC\...` produce the same canonical form.
+ * Canonical spelling for process CWD reporting and the observer's own CWD check.
+ * Resolve non-canonical paths before checking drive type so mapped drives,
+ * SUBST drives, junctions, and 8.3 names can use the handle's canonical spelling.
  */
 export function canonicalizeWindowsPath(raw: string, resolver: WindowsPathResolver, canonical = false): string | null {
   const cleaned = cleanWindowsPath(raw);
@@ -552,37 +563,52 @@ export function canonicalizeWindowsPath(raw: string, resolver: WindowsPathResolv
   return canonicalPath;
 }
 
-/** Resolve a Windows checkout target through the same canonical resolver as process CWDs. */
-export function resolveWindowsWorktreePath(path: string, resolver?: WindowsPathResolver): string | null {
-  const activeResolver = resolver ?? {
-    isLocalDrive: createWindowsDriveLookup(loadWindowsProcessApi()),
-    realpath: (target: string) => realpathSync.native(target),
-  };
-  return canonicalizeWindowsPath(path, activeResolver);
+function withWindowsDirectory<T>(api: WindowsProcessApi, path: string, read: (handle: Pointer) => T): T | null {
+  const wide = Buffer.from(`${win32.toNamespacedPath(path)}\0`, 'utf16le');
+  const handleRaw = api.kernel32.CreateFileW(
+    ptr(wide), FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, null, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, null,
+  );
+  if (handleRaw === 0n || handleRaw === INVALID_HANDLE_VALUE) return null;
+  const handle = Number(handleRaw) as Pointer;
+  try {
+    return read(handle);
+  } finally {
+    api.ntdll.NtClose(handle);
+  }
 }
 
-/** Resolve a Windows directory's lowercase `volume{...}` GUID from its open kernel handle. */
-export function queryWindowsPathVolumeGuid(path: string): string | null {
+function queryWindowsDirectoryId(api: WindowsProcessApi, handle: Pointer): string | null {
+  // FILE_ID_INFO is an 8-byte volume serial followed by the 16-byte file ID.
+  const info = Buffer.alloc(24);
+  return api.kernel32.GetFileInformationByHandleEx(handle, FILE_ID_INFO_CLASS, ptr(info), info.length) !== 0
+    ? info.toString('hex') : null;
+}
+
+function queryWindowsDirectoryAncestry(api: WindowsProcessApi, handle: Pointer, path: string): WindowsDirectoryAncestry | null {
+  const id = queryWindowsDirectoryId(api, handle);
+  if (id === null) return null;
+  const volumePath = windowsVolumeGuid(path) ? path : queryFinalPathNameByFlag(api, handle, FILE_NAME_NORMALIZED_VOLUME_GUID);
+  let current = cleanWindowsPath(volumePath ?? path);
+  if (current === null) return null;
+  const ids: [string, ...string[]] = [id];
+  for (let parent = win32.dirname(current); parent !== current; parent = win32.dirname(current)) {
+    const parentId = withWindowsDirectory(api, parent, dir => queryWindowsDirectoryId(api, dir));
+    if (parentId === null) return null;
+    ids.push(parentId);
+    current = parent;
+  }
+  return { ids, volumeRoot: windowsVolumeGuid(current) !== null };
+}
+
+/** Read a checkout directory and its ancestry through the same handle APIs as process CWDs. */
+export function readWindowsDirectoryAncestry(path: string): WindowsDirectoryAncestry | null {
   if (process.platform !== 'win32') return null;
   try {
     const api = loadWindowsProcessApi();
-    const cleaned = cleanWindowsPath(path);
-    if (!cleaned) return null;
-    const direct = windowsVolumeGuid(cleaned);
-    if (direct) return direct;
-    const target = /^[A-Za-z]:\\/u.test(cleaned) && cleaned.length >= 248 ? `\\\\?\\${cleaned}` : cleaned;
-    const wide = Buffer.from(`${target}\0`, 'utf16le');
-    const handleRaw = api.kernel32.CreateFileW(
-      ptr(wide), FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, null, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, null,
-    );
-    if (handleRaw === 0n || handleRaw === INVALID_HANDLE_VALUE) return null;
-    const handle = Number(handleRaw) as Pointer;
-    try {
-      const guidPath = queryFinalPathNameByFlag(api, handle, FILE_NAME_NORMALIZED_VOLUME_GUID);
-      return guidPath ? windowsVolumeGuid(guidPath) : null;
-    } finally {
-      api.ntdll.NtClose(handle);
-    }
+    return withWindowsDirectory(api, path, handle => {
+      const canonical = queryFinalPathName(api, handle);
+      return canonical === null ? null : queryWindowsDirectoryAncestry(api, handle, canonical);
+    });
   } catch {
     return null;
   }
@@ -601,7 +627,8 @@ function windowsWorktreeProcesses(deadline: number, probe: WindowsWorktreeProces
     if (outcome.status !== 'ok') return null;
     const cwd = canonicalizeWindowsPath(outcome.cwd, probe, outcome.canonical === true);
     if (cwd === null) return null;
-    result.push({ pid, cwd });
+    const { windowsDirectory } = outcome;
+    result.push(windowsDirectory ? { pid, cwd, windowsDirectory } : { pid, cwd });
     if (pid === probe.ownPid) sawOwnCwd = cwd;
   }
   const expectedOwn = sawOwnCwd ? canonicalizeWindowsPath(probe.ownCwd, probe) : null;

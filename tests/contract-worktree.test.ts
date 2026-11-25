@@ -188,6 +188,18 @@ describe("contract-worktree helper integration", () => {
     }, [], inventory);
   });
 
+  test('slug cleanup dry run succeeds when the worktree is already absent', () => {
+    withIgnoredCleanupFixture('.ai/', f => {
+      const remove = run('git', ['worktree', 'remove', f.worktree], join(f.parent, 'repo'));
+      expect(remove.status, remove.stderr).toBe(0);
+      const result = f.cli(...f.cleanup, '--dry-run');
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(result.stdout).toContain('would remove worktree: (absent)');
+      expect(f.branchStatus()).toBe(0);
+      expect(existsSync(f.metadata)).toBe(true);
+    });
+  });
+
   test("slug cleanup accepts populated dependency, build and harness runtime outputs", () => {
     withIgnoredCleanupFixture(".ai/harness/\nnode_modules/\ndist/\n.codegraph/\n.ci-affected-tests.json", f => {
       writeIgnoredFiles(f.worktree, [

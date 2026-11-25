@@ -1,6 +1,6 @@
 import { isManagedWorktreePath, managedWorktreeRoot } from '../git/managed-worktree';
 import type { WorktreeReason, WorktreeView } from '../../core/public-projections/worktrees';
-import { queryWindowsPathVolumeGuid, resolveWindowsWorktreePath, windowsVolumeGuid, worktreeProcesses, type WorktreeProcess } from '../git/worktree-processes';
+import { readWindowsDirectoryAncestry, worktreeProcesses, type WindowsDirectoryAncestry, type WorktreeProcess } from '../git/worktree-processes';
 import { readWorktreeRecord, readWorktreeRecordById, endWorktreeRecord } from '../git/worktree-record';
 import { randomUUID } from 'crypto';
 import { sha256Hex } from '../../core/evidence/sha256';
@@ -547,16 +547,10 @@ export function protectsCwd(path: string, cwd: string, platform = process.platfo
 
 export interface WorktreeOccupancyMatchOptions {
   readonly platform?: NodeJS.Platform;
-  readonly resolveTarget?: (path: string) => string | null;
-  readonly targetVolumeGuid?: (path: string) => string | null;
+  readonly readTargetAncestry?: (path: string) => WindowsDirectoryAncestry | null;
 }
 
-/**
- * Unique occupying PIDs for `path`, or `null` (`process_unknown`) when occupancy or target
- * identity cannot be proven. On Windows, resolves `path` through the same canonical resolver
- * used for process CWDs and skips `\\?\Volume{...}` CWDs only when proven to be on a different
- * volume from `path`.
- */
+/** Unique occupying PIDs, or null (process_unknown) when occupancy cannot be proved. */
 export function worktreeOccupyingPids(
   path: string,
   processes: WorktreeProcess[] | null,
@@ -564,32 +558,27 @@ export function worktreeOccupyingPids(
 ): number[] | null {
   if (processes === null) return null;
   const platform = options.platform ?? process.platform;
-  let target = path;
-  if (platform === 'win32') {
-    const resolved = (options.resolveTarget ?? resolveWindowsWorktreePath)(path);
-    if (resolved === null) return null;
-    target = resolved;
-  }
   const occupying = new Set<number>();
-  let targetVolume: string | null | undefined;
-  const checkoutVolume = (): string | null => {
-    if (targetVolume !== undefined) return targetVolume;
-    const direct = windowsVolumeGuid(target);
-    if (direct) { targetVolume = direct; return targetVolume; }
-    if (target.startsWith('\\\\')) { targetVolume = 'unc'; return targetVolume; }
-    targetVolume = (options.targetVolumeGuid ?? queryWindowsPathVolumeGuid)(target);
-    return targetVolume;
-  };
-  for (const item of processes) {
-    if (platform === 'win32') {
-      const procVol = windowsVolumeGuid(item.cwd);
-      if (procVol !== null) {
-        const volume = checkoutVolume();
-        if (volume === null || volume === procVol) return null;
-        continue;
-      }
+  if (platform !== 'win32') {
+    for (const { pid, cwd } of processes) if (protectsCwd(path, cwd, platform)) occupying.add(pid);
+    return [...occupying];
+  }
+
+  const target = (options.readTargetAncestry ?? readWindowsDirectoryAncestry)(path);
+  if (target === null) return null;
+  for (const { pid, windowsDirectory: cwd } of processes) {
+    if (cwd === undefined) return null;
+    if (cwd.ids.includes(target.ids[0])) {
+      occupying.add(pid);
+      continue;
     }
-    if (protectsCwd(target, item.cwd, platform)) occupying.add(item.pid);
+    // Local volume roots bound the whole ancestry. A redirector can hide parents
+    // or report different IDs. A shared identity is needed to compare namespaces,
+    // and a share-limited CWD must reach a directory on the target's ancestry.
+    if (cwd.volumeRoot && target.volumeRoot) continue;
+    if (target.ids.includes(cwd.ids.at(-1)!)) continue;
+    if (cwd.volumeRoot && cwd.ids.some(id => target.ids.includes(id))) continue;
+    return null;
   }
   return [...occupying];
 }
