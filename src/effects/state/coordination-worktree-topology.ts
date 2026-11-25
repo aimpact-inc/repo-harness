@@ -1,6 +1,6 @@
 import { isManagedWorktreePath, managedWorktreeRoot } from '../git/managed-worktree';
 import type { WorktreeReason, WorktreeView } from '../../core/public-projections/worktrees';
-import { worktreeProcesses, type WorktreeProcess } from '../git/worktree-processes';
+import { queryWindowsPathVolumeGuid, resolveWindowsWorktreePath, windowsVolumeGuid, worktreeProcesses, type WorktreeProcess } from '../git/worktree-processes';
 import { readWorktreeRecord, readWorktreeRecordById, endWorktreeRecord } from '../git/worktree-record';
 import { randomUUID } from 'crypto';
 import { sha256Hex } from '../../core/evidence/sha256';
@@ -16,7 +16,11 @@ import { readWorkflowPolicyDocument } from './resolve-effective-state';
 import { POLICY_ABSENT, isPolicyObject, policyValue } from '../../core/workflow/policy-schema';
 import { configuredGitBinary, resolveGitCommonDirectory, resolveGitCommonDirectoryAsync } from '../git/common-directory';
 import { acquireExclusiveDirectoryLock, ExclusiveLockContentionError, withExclusiveDirectoryLock } from '../locking/exclusive-directory-lock';
-import { taskWorktreeRuntimeClosed } from '../terminal/task-session-record';
+import { TASK_SESSIONS_PATH, assertCreated, assertSessionDirectory, processProofAlive, readStartIntent, readTaskAgent, readWorkspaceBinding, taskWorktreeRuntimeClosed, workspaceDirectory } from '../terminal/task-session-record';
+import { assertTaskBinding, readTaskRequestResult } from '../terminal/runtime-closeout';
+import { readSessionArtifact } from '../terminal/task-session-io';
+import { taskRepository, type TaskRepository } from '../git/task-repository';
+import type { ProcessProof, TaskRequest } from '../../core/review/runner-port';
 import { parseWorktreeTopology } from '../git/worktree-topology';
 import { observeProviderBranchMergeCommit } from './coordination-provider-merge';
 import { resolveTrustedGhExecutable } from '../runtime/trusted-executable';
@@ -541,22 +545,143 @@ export function protectsCwd(path: string, cwd: string, platform = process.platfo
   return current.startsWith(prefix);
 }
 
-function windowsTargetPath(path: string): string {
-  if (process.platform !== 'win32') return path;
-  try { return realpathSync.native(path); } catch { return path; }
+export interface WorktreeOccupancyMatchOptions {
+  readonly platform?: NodeJS.Platform;
+  readonly resolveTarget?: (path: string) => string | null;
+  readonly targetVolumeGuid?: (path: string) => string | null;
+}
+
+/**
+ * Unique occupying PIDs for `path`, or `null` (`process_unknown`) when occupancy or target
+ * identity cannot be proven. On Windows, resolves `path` through the same canonical resolver
+ * used for process CWDs and skips `\\?\Volume{...}` CWDs only when proven to be on a different
+ * volume from `path`.
+ */
+export function worktreeOccupyingPids(
+  path: string,
+  processes: WorktreeProcess[] | null,
+  options: WorktreeOccupancyMatchOptions = {},
+): number[] | null {
+  if (processes === null) return null;
+  const platform = options.platform ?? process.platform;
+  let target = path;
+  if (platform === 'win32') {
+    const resolved = (options.resolveTarget ?? resolveWindowsWorktreePath)(path);
+    if (resolved === null) return null;
+    target = resolved;
+  }
+  const occupying = new Set<number>();
+  let targetVolume: string | null | undefined;
+  const checkoutVolume = (): string | null => {
+    if (targetVolume !== undefined) return targetVolume;
+    const direct = windowsVolumeGuid(target);
+    if (direct) { targetVolume = direct; return targetVolume; }
+    if (target.startsWith('\\\\')) { targetVolume = 'unc'; return targetVolume; }
+    targetVolume = (options.targetVolumeGuid ?? queryWindowsPathVolumeGuid)(target);
+    return targetVolume;
+  };
+  for (const item of processes) {
+    if (platform === 'win32') {
+      const procVol = windowsVolumeGuid(item.cwd);
+      if (procVol !== null) {
+        const volume = checkoutVolume();
+        if (volume === null || volume === procVol) return null;
+        continue;
+      }
+    }
+    if (protectsCwd(target, item.cwd, platform)) occupying.add(item.pid);
+  }
+  return [...occupying];
 }
 
 function worktreeProcessCount(path: string, processes: WorktreeProcess[] | null): number | null {
-  if (processes === null) return null;
-  const target = windowsTargetPath(path);
-  return new Set(processes.filter(item => protectsCwd(target, item.cwd)).map(item => item.pid)).size;
+  const pids = worktreeOccupyingPids(path, processes);
+  return pids === null ? null : pids.length;
+}
+
+function provenProviderGroupPids(provider: ProcessProof): number[] {
+  if (process.platform === 'win32' || !processProofAlive(provider)) return [];
+  const pgidText = execFileSync('ps', ['-o', 'pgid=', '-p', String(provider.pid)], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+  }).trim();
+  if (Number(pgidText) !== provider.pid) return [];
+  const output = execFileSync('ps', ['-eo', 'pid=,pgid='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  const pids = output.split('\n').flatMap(line => {
+    const match = /^\s*(\d+)\s+(\d+)\s*$/u.exec(line);
+    return match && Number(match[2]) === provider.pid ? [Number(match[1])] : [];
+  });
+  return processProofAlive(provider) ? pids : [];
+}
+
+function closableHerdrRolePids(primaryRoot: string, roleDir: string, repositoryId: string, checkout: string): number[] | 'irrelevant' | null {
+  if (!existsSync(join(roleDir, 'intent.json'))) return 'irrelevant';
+  const owner = readSessionArtifact<{ repository?: Partial<TaskRepository> }>(join(roleDir, 'intent.json')).repository;
+  if (owner?.repository_id !== repositoryId || owner?.execution_root !== checkout) return 'irrelevant';
+  if (existsSync(join(roleDir, 'closed.json'))) return 'irrelevant';
+  if (!existsSync(join(roleDir, 'binding.json'))) return null;
+  const intent = readStartIntent(join(roleDir, 'intent.json'));
+  const { binding } = readTaskAgent(primaryRoot, intent.spec.task, intent.spec.role);
+  assertCreated(binding.ownership);
+  assertCreated(binding.provider.ownership);
+  if (binding.runtime !== 'herdr-core') return null;
+  for (let round = 1; round <= binding.max_requests && existsSync(join(roleDir, `request-${round}.json`)); round++) {
+    const request = readSessionArtifact<TaskRequest>(join(roleDir, `request-${round}.json`));
+    if (!readTaskRequestResult(primaryRoot, roleDir, request)) return null;
+  }
+  assertTaskBinding(binding, true);
+  if (!processProofAlive(binding.provider)) return [];
+  return [binding.provider.pid, ...provenProviderGroupPids(binding.provider)];
+}
+
+function verifiedClosableManagedRuntimePids(repoRoot: string, checkout: string): Set<number> | null {
+  try {
+    const repository = taskRepository(repoRoot);
+    const dir = workspaceDirectory({ ...repository, execution_root: checkout });
+    if (!existsSync(dir)) return null;
+    assertSessionDirectory(repository.primary_root, dir);
+    if (existsSync(join(dir, 'closed.json')) || existsSync(join(dir, 'open-intent.json')) || !existsSync(join(dir, 'binding.json'))) return null;
+    const workspace = readWorkspaceBinding(join(dir, 'binding.json'));
+    if (workspace.repository.repository_id !== repository.repository_id || workspace.repository.execution_root !== checkout) return null;
+    const rolesRoot = join(repository.primary_root, TASK_SESSIONS_PATH);
+    if (!existsSync(rolesRoot)) return null;
+    assertSessionDirectory(repository.primary_root, rolesRoot);
+    const closable = new Set<number>();
+    for (const entry of readdirSync(rolesRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) return null;
+      const rolePids = closableHerdrRolePids(repository.primary_root, join(rolesRoot, entry.name), repository.repository_id, checkout);
+      if (rolePids === 'irrelevant') continue;
+      if (rolePids === null) return null;
+      for (const pid of rolePids) closable.add(pid);
+    }
+    return closable.size > 0 ? closable : null;
+  } catch {
+    return null;
+  }
+}
+
+export type CloseoutOccupancyPreview = 'idle' | 'managed_runtime_only';
+
+/**
+ * Preview occupancy proof for explicit cleanup. Refuses `process_unknown` and independently
+ * occupied checkouts (`process_in_use`). When every occupant belongs to a verified closable
+ * Herdr runtime, returns `managed_runtime_only` so preview reports conditional removal.
+ */
+export function previewCloseoutOccupancy(worktree: string, repoRoot?: string, processes?: WorktreeProcess[] | null): CloseoutOccupancyPreview {
+  const canonical = checkoutPath(worktree);
+  const observed = processes === undefined ? worktreeProcesses(Date.now() + 5_000) : processes;
+  const occupying = worktreeOccupyingPids(canonical, observed);
+  if (occupying === null) throw new WorktreeNotGreenError(['process_unknown']);
+  if (occupying.length === 0) return 'idle';
+  if (repoRoot) {
+    const closable = verifiedClosableManagedRuntimePids(repoRoot, canonical);
+    if (closable && occupying.every(pid => closable.has(pid))) return 'managed_runtime_only';
+  }
+  throw new WorktreeNotGreenError(['process_in_use']);
 }
 
 /** A closeout preview must prove occupancy before it lists a planned removal. */
 export function assertCloseoutOccupancy(worktree: string): void {
-  const count = worktreeProcessCount(checkoutPath(worktree), worktreeProcesses(Date.now() + 5_000));
-  if (count === null) throw new WorktreeNotGreenError(['process_unknown']);
-  if (count > 0) throw new WorktreeNotGreenError(['process_in_use']);
+  previewCloseoutOccupancy(worktree);
 }
 
 /** Git documents these backpointers. They are read only to fence whole prune,

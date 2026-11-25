@@ -140,10 +140,12 @@ try {
     });
     console.log(`${mode}\t${merge_commit_sha}`);
   } else if (action === 'assert-ignored-cleanup-safe') {
-    const { assertCloseoutOccupancy, assertNoIgnoredCloseoutData } = await import(pathToFileURL(join(packageRoot, 'src/effects/state/coordination-worktree-topology.ts')).href) as typeof import('../src/effects/state/coordination-worktree-topology');
+    const { assertNoIgnoredCloseoutData, previewCloseoutOccupancy } = await import(pathToFileURL(join(packageRoot, 'src/effects/state/coordination-worktree-topology.ts')).href) as typeof import('../src/effects/state/coordination-worktree-topology');
     const worktree = value('--worktree');
     assertNoIgnoredCloseoutData(worktree);
-    if (args.includes('--check-occupancy')) assertCloseoutOccupancy(worktree);
+    if (args.includes('--check-occupancy')) {
+      console.log(previewCloseoutOccupancy(worktree, args.includes('--repo') ? value('--repo') : undefined));
+    }
   } else if (action === 'remove-exact') {
     const { removeExactWorktree } = await import(pathToFileURL(join(packageRoot, 'src/effects/state/coordination-worktree-topology.ts')).href) as typeof import('../src/effects/state/coordination-worktree-topology');
     removeExactWorktree(value('--repo'), {

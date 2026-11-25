@@ -14,13 +14,15 @@ export interface LinuxWorktreeProcessProbe {
 export type WindowsProcessInspection =
   | { readonly status: 'ok'; readonly cwd: string; readonly canonical?: boolean }
   | { readonly status: 'exited' | 'other_user' | 'inaccessible' | 'protected' | 'ui_access' | 'denied' | 'failed' };
-export interface WindowsWorktreeProcessProbe {
+export interface WindowsPathResolver {
+  isLocalDrive(driveRoot: string): boolean;
+  realpath(path: string): string;
+}
+export interface WindowsWorktreeProcessProbe extends WindowsPathResolver {
   readonly ownPid: number;
   readonly ownCwd: string;
   pids(): readonly number[] | null;
   inspect(pid: number): WindowsProcessInspection;
-  isLocalDrive(driveRoot: string): boolean;
-  realpath(path: string): string;
 }
 
 /**
@@ -49,8 +51,14 @@ const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
 const PROCESS_QUERY_INFORMATION_VM_READ_AND_DUP_HANDLE = 0x0450;
 const TOKEN_QUERY = 0x0008;
 const DUPLICATE_SAME_ACCESS = 0x2;
+const FILE_READ_ATTRIBUTES = 0x80;
+const FILE_SHARE_ALL = 0x7;
+const OPEN_EXISTING = 3;
+const FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+const INVALID_HANDLE_VALUE = 0xffffffffffffffffn;
 const FILE_TYPE_DISK = 0x1;
 const FILE_NAME_NORMALIZED_VOLUME_DOS = 0x0;
+const FILE_NAME_NORMALIZED_VOLUME_GUID = 0x1;
 const STILL_ACTIVE = 259;
 const STATUS_SUCCESS = 0;
 const STATUS_INVALID_CID = 0xc000000b;
@@ -63,22 +71,14 @@ const TOKEN_ELEVATION_CLASS = 20;
 const TOKEN_INTEGRITY_LEVEL_CLASS = 25;
 const TOKEN_UI_ACCESS_CLASS = 26;
 const PROCESS_BASIC_INFORMATION_CLASS = 0;
-const PROCESS_SESSION_INFORMATION_CLASS = 24;
 const PROCESS_WOW64_INFORMATION_CLASS = 26;
 const PROCESS_PROTECTION_INFORMATION_CLASS = 61;
-const SC_MANAGER_ENUMERATE_SERVICE = 0x0004;
-const SC_ENUM_PROCESS_INFO = 0;
-const SERVICE_WIN32 = 0x30;
-const SERVICE_ACTIVE = 0x1;
-const SERVICE_QUERY_CONFIG = 0x0001;
 const DRIVE_REMOVABLE = 2;
 const DRIVE_FIXED = 3;
 const DRIVE_RAMDISK = 6;
 const MAX_ENUM_PIDS = 1_048_576;
 const MAX_TOKEN_BUFFER_BYTES = 65_536;
 const MAX_CWD_CHARS = 32_768;
-const MAX_SCM_BUFFER_BYTES = 4 * 1024 * 1024;
-const MAX_SERVICE_CONFIG_BYTES = 65_536;
 const CWD_READ_ATTEMPTS = 3;
 
 interface WindowsProcessApi {
@@ -89,6 +89,15 @@ interface WindowsProcessApi {
     GetDriveTypeW(rootPath: Pointer): number;
     GetFileType(handle: Pointer): number;
     GetFinalPathNameByHandleW(handle: Pointer, filePath: Pointer, charCapacity: number, flags: number): number;
+    CreateFileW(
+      fileName: Pointer,
+      desiredAccess: number,
+      shareMode: number,
+      securityAttributes: Pointer | null,
+      creationDisposition: number,
+      flagsAndAttributes: number,
+      templateFile: Pointer | null,
+    ): bigint;
   };
   readonly ntdll: {
     NtOpenProcess(handleOut: Pointer, access: number, objectAttributes: Pointer, clientId: Pointer): number;
@@ -109,27 +118,7 @@ interface WindowsProcessApi {
   };
 }
 
-interface WindowsScmApi {
-  OpenSCManagerW(machineName: Pointer | null, databaseName: Pointer | null, desiredAccess: number): Pointer | null;
-  EnumServicesStatusExW(
-    scManager: Pointer,
-    infoLevel: number,
-    serviceType: number,
-    serviceState: number,
-    services: Pointer | null,
-    bufSize: number,
-    bytesNeeded: Pointer,
-    servicesReturned: Pointer,
-    resumeHandle: Pointer,
-    groupName: Pointer | null,
-  ): number;
-  OpenServiceW(scManager: Pointer, serviceName: Pointer, desiredAccess: number): Pointer | null;
-  QueryServiceConfigW(service: Pointer, serviceConfig: Pointer, bufSize: number, bytesNeeded: Pointer): number;
-  CloseServiceHandle(handle: Pointer): number;
-}
-
 let windowsProcessApi: WindowsProcessApi | undefined;
-let windowsScmApi: WindowsScmApi | undefined;
 
 function loadWindowsProcessApi(): WindowsProcessApi {
   if (windowsProcessApi === undefined) {
@@ -140,6 +129,10 @@ function loadWindowsProcessApi(): WindowsProcessApi {
       GetDriveTypeW: { args: [FFIType.ptr], returns: FFIType.u32 },
       GetFileType: { args: [FFIType.ptr], returns: FFIType.u32 },
       GetFinalPathNameByHandleW: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32, FFIType.u32], returns: FFIType.u32 },
+      CreateFileW: {
+        args: [FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr],
+        returns: FFIType.u64,
+      },
     });
     const ntdll = dlopen('ntdll.dll', {
       NtOpenProcess: { args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr], returns: FFIType.u32 },
@@ -160,24 +153,6 @@ function loadWindowsProcessApi(): WindowsProcessApi {
     };
   }
   return windowsProcessApi;
-}
-
-function loadWindowsScmApi(): WindowsScmApi {
-  if (windowsScmApi === undefined) {
-    const advapi32 = dlopen('advapi32.dll', {
-      OpenSCManagerW: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32], returns: FFIType.ptr },
-      EnumServicesStatusExW: {
-        args: [FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr],
-        returns: FFIType.i32,
-      },
-      OpenServiceW: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32], returns: FFIType.ptr },
-      QueryServiceConfigW: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
-      CloseServiceHandle: { args: [FFIType.ptr], returns: FFIType.i32 },
-    });
-    // SAFETY: bun:ffi dlopen returns loosely typed symbol wrappers; each entry above matches the 64-bit Windows advapi32 ABI.
-    windowsScmApi = advapi32.symbols as unknown as WindowsScmApi;
-  }
-  return windowsScmApi;
 }
 
 const isExitedStatus = (status: number): boolean =>
@@ -301,20 +276,25 @@ function readNative64CwdHandle(api: WindowsProcessApi, handle: Pointer): CwdHand
   return cwdHandle === 0n ? { status: 'retry' } : { status: 'ok', cwdHandle };
 }
 
-function queryFinalPathName(api: WindowsProcessApi, dupHandle: Pointer): string | null {
-  if (api.kernel32.GetFileType(dupHandle) !== FILE_TYPE_DISK) return null;
+function queryFinalPathNameByFlag(api: WindowsProcessApi, handle: Pointer, flags: number): string | null {
   let capacity = 1024;
   for (let attempt = 0; attempt < 2; attempt++) {
     const buffer = new Uint16Array(capacity);
-    const length = api.kernel32.GetFinalPathNameByHandleW(dupHandle, ptr(buffer), buffer.length, FILE_NAME_NORMALIZED_VOLUME_DOS);
-    if (length === 0 || length > MAX_CWD_CHARS) return null;
+    const length = api.kernel32.GetFinalPathNameByHandleW(handle, ptr(buffer), buffer.length, flags);
+    if (length === 0 || length >= MAX_CWD_CHARS) return null;
     if (length < buffer.length) {
       const text = Buffer.from(buffer.buffer, 0, length * 2).toString('utf16le');
       return text && !text.includes('\0') ? text : null;
     }
-    capacity = length;
+    capacity = length + 1;
   }
   return null;
+}
+
+function queryFinalPathName(api: WindowsProcessApi, dupHandle: Pointer): string | null {
+  if (api.kernel32.GetFileType(dupHandle) !== FILE_TYPE_DISK) return null;
+  return queryFinalPathNameByFlag(api, dupHandle, FILE_NAME_NORMALIZED_VOLUME_DOS)
+    ?? queryFinalPathNameByFlag(api, dupHandle, FILE_NAME_NORMALIZED_VOLUME_GUID);
 }
 
 function readRemoteCwdOnce(
@@ -389,147 +369,25 @@ function isProtectedWindowsProcess(api: WindowsProcessApi, limitedHandle: Pointe
     && (protection[0]! & 0x07) !== 0;
 }
 
-function processSessionId(api: WindowsProcessApi, limitedHandle: Pointer): number | null {
-  const session = new Uint32Array(1);
-  const retLen = new Uint32Array(1);
-  return api.ntdll.NtQueryInformationProcess(limitedHandle, PROCESS_SESSION_INFORMATION_CLASS, ptr(session), 4, ptr(retLen)) === STATUS_SUCCESS
-    ? session[0]! : null;
+export function classifyWindowsOpenFailure(
+  stage: 'limited' | 'token' | 'same_user_vm',
+  status: number,
+  options: { readonly stillActive?: boolean | null; readonly protectedProcess?: boolean; readonly nonElevatedUiAccess?: boolean } = {},
+): Exclude<WindowsProcessInspection, { readonly status: 'ok' }> {
+  if (isExitedStatus(status)) return { status: 'exited' };
+  if (status !== STATUS_ACCESS_DENIED) return { status: 'failed' };
+  if (stage === 'limited') return { status: 'inaccessible' };
+  if (options.stillActive === false) return { status: 'exited' };
+  if (options.stillActive === null) return { status: 'failed' };
+  if (options.protectedProcess) return { status: 'protected' };
+  if (stage === 'token') return { status: 'inaccessible' };
+  return options.nonElevatedUiAccess ? { status: 'ui_access' } : { status: 'denied' };
 }
 
-function isSystemServiceSid(sid: Uint8Array): boolean {
-  // SECURITY_NT_AUTHORITY (0,0,0,0,0,5): S-1-5-18 (LocalSystem), S-1-5-19 (LocalService),
-  // S-1-5-20 (NetworkService), and S-1-5-80-* (NT SERVICE).
-  if (sid.length < 12 || sid[0] !== 1 || sid[1]! < 1) return false;
-  if (sid[2] !== 0 || sid[3] !== 0 || sid[4] !== 0 || sid[5] !== 0 || sid[6] !== 0 || sid[7] !== 5) return false;
-  const sub0 = new DataView(sid.buffer, sid.byteOffset, sid.byteLength).getUint32(8, true);
-  return (sid[1] === 1 && (sub0 === 18 || sub0 === 19 || sub0 === 20)) || sub0 === 80;
-}
-
-function isSystemServiceAccountName(name: string): boolean {
-  const lower = name.trim().toLowerCase();
-  return lower === '' || lower === 'localsystem' || lower === '.\\localsystem'
-    || lower === 'nt authority\\system' || lower === 'nt authority\\localservice'
-    || lower === 'nt authority\\networkservice' || lower.startsWith('nt service\\');
-}
-
-function readWideStringInBuffer(buffer: Uint8Array, baseAddress: bigint, stringAddress: bigint): string | null {
-  if (stringAddress === 0n) return null;
-  const offset = Number(stringAddress - baseAddress);
-  if (!Number.isSafeInteger(offset) || offset < 0 || offset % 2 !== 0 || offset >= buffer.byteLength) return null;
-  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-  let end = offset;
-  while (end + 1 < buffer.byteLength && view.getUint16(end, true) !== 0) end += 2;
-  if (end + 1 >= buffer.byteLength || view.getUint16(end, true) !== 0) return null;
-  return Buffer.from(buffer.buffer, buffer.byteOffset + offset, end - offset).toString('utf16le');
-}
-
-function enumerateActiveServiceNamesByPid(scmApi: WindowsScmApi, scm: Pointer): Map<number, string[]> | null {
-  const needed = new Uint32Array(1);
-  const returned = new Uint32Array(1);
-  const resume = new Uint32Array(1);
-  scmApi.EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_WIN32, SERVICE_ACTIVE, null, 0, ptr(needed), ptr(returned), ptr(resume), null);
-  if (needed[0]! === 0 || needed[0]! + 4096 > MAX_SCM_BUFFER_BYTES) return null;
-  const buffer = new Uint8Array(new ArrayBuffer(needed[0]! + 4096));
-  const baseAddress = BigInt(ptr(buffer));
-  resume[0] = 0;
-  if (scmApi.EnumServicesStatusExW(
-    scm, SC_ENUM_PROCESS_INFO, SERVICE_WIN32, SERVICE_ACTIVE, ptr(buffer), buffer.byteLength, ptr(needed), ptr(returned), ptr(resume), null,
-  ) === 0 || resume[0]! !== 0) {
-    return null;
-  }
-  const view = new DataView(buffer.buffer);
-  const byPid = new Map<number, string[]>();
-  // 64-bit ENUM_SERVICE_STATUS_PROCESSW is 56 bytes: lpServiceName (+0), dwProcessId (+44).
-  for (let index = 0; index < returned[0]!; index++) {
-    const offset = index * 56;
-    if (offset + 56 > buffer.byteLength) return null;
-    const pid = view.getUint32(offset + 44, true);
-    if (pid === 0) continue;
-    const name = readWideStringInBuffer(buffer, baseAddress, view.getBigUint64(offset, true));
-    if (!name) return null;
-    const names = byPid.get(pid);
-    if (names) names.push(name); else byPid.set(pid, [name]);
-  }
-  return byPid;
-}
-
-function queryServiceStartName(scmApi: WindowsScmApi, scm: Pointer, serviceName: string): string | null {
-  const wideName = Buffer.from(`${serviceName}\0`, 'utf16le');
-  const service = scmApi.OpenServiceW(scm, ptr(wideName), SERVICE_QUERY_CONFIG);
-  if (!service) return null;
-  try {
-    let capacity = 8192;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const buffer = new Uint8Array(new ArrayBuffer(capacity));
-      const baseAddress = BigInt(ptr(buffer));
-      const needed = new Uint32Array(1);
-      if (scmApi.QueryServiceConfigW(service, ptr(buffer), buffer.byteLength, ptr(needed)) !== 0) {
-        // 64-bit QUERY_SERVICE_CONFIGW has lpServiceStartName at +48; NULL means LocalSystem.
-        const startNameAddr = new DataView(buffer.buffer).getBigUint64(48, true);
-        return startNameAddr === 0n ? '' : readWideStringInBuffer(buffer, baseAddress, startNameAddr);
-      }
-      if (needed[0]! <= capacity || needed[0]! > MAX_SERVICE_CONFIG_BYTES) return null;
-      capacity = needed[0]!;
-    }
-    return null;
-  } finally {
-    scmApi.CloseServiceHandle(service);
-  }
-}
-
-export function classifyWindowsDeniedToken(evidence: {
-  readonly stillActive: boolean | null;
-  readonly protectedProcess: boolean;
-  readonly ownIsSystemService: boolean;
-  readonly sessionId: number | null;
-  readonly systemServiceAccounts: readonly string[] | null;
-}): Exclude<WindowsProcessInspection, { readonly status: 'ok' }> {
-  if (evidence.stillActive === false) return { status: 'exited' };
-  if (evidence.stillActive === null) return { status: 'failed' };
-  if (evidence.protectedProcess) return { status: 'protected' };
-  if (!evidence.ownIsSystemService && evidence.sessionId === 0
-    && evidence.systemServiceAccounts && evidence.systemServiceAccounts.length > 0
-    && evidence.systemServiceAccounts.every(isSystemServiceAccountName)) {
-    return { status: 'other_user' };
-  }
-  return { status: 'denied' };
-}
-
-function classifyDeniedTokenProcess(
-  api: WindowsProcessApi,
-  pid: number,
-  limitedHandle: Pointer,
-  ownSid: Uint8Array,
-  serviceAccountsForPid: (pid: number) => readonly string[] | null,
-): WindowsProcessInspection {
-  const stillActive = processStillActive(api, limitedHandle);
-  if (stillActive !== true) return stillActive === false ? { status: 'exited' } : { status: 'failed' };
-  const protectedProcess = isProtectedWindowsProcess(api, limitedHandle);
-  if (protectedProcess) return { status: 'protected' };
-  const ownIsSystemService = isSystemServiceSid(ownSid);
-  const sessionId = ownIsSystemService ? null : processSessionId(api, limitedHandle);
-  const systemServiceAccounts = sessionId === 0 ? serviceAccountsForPid(pid) : null;
-  // Reconfirm the handle stayed alive after querying SCM so a recycled PID cannot match.
-  const stillActiveAfter = systemServiceAccounts ? processStillActive(api, limitedHandle) : true;
-  return classifyWindowsDeniedToken({ stillActive: stillActiveAfter, protectedProcess, ownIsSystemService, sessionId, systemServiceAccounts });
-}
-
-function classifyDeniedWindowsProcess(
-  api: WindowsProcessApi,
-  limitedHandle: Pointer,
-  token: Pointer,
-  ownFlags: TokenSecurityFlags,
-): WindowsProcessInspection {
-  const stillActive = processStillActive(api, limitedHandle);
-  if (stillActive === false) return { status: 'exited' };
-  if (stillActive === null) return { status: 'failed' };
-  if (isProtectedWindowsProcess(api, limitedHandle)) return { status: 'protected' };
+function isNonElevatedUiAccess(api: WindowsProcessApi, token: Pointer, ownFlags: TokenSecurityFlags): boolean {
   const targetFlags = queryTokenSecurityFlags(api, token);
-  if (targetFlags && targetFlags.uiAccess && !targetFlags.elevated
-    && (targetFlags.integrityRid > ownFlags.integrityRid || !ownFlags.uiAccess)) {
-    return { status: 'ui_access' };
-  }
-  return { status: 'denied' };
+  return Boolean(targetFlags && targetFlags.uiAccess && !targetFlags.elevated
+    && (targetFlags.integrityRid > ownFlags.integrityRid || !ownFlags.uiAccess));
 }
 
 function inspectWindowsProcessWithToken(
@@ -548,10 +406,11 @@ function inspectWindowsProcessWithToken(
 
   const vm = ntOpenProcess(api, pid, PROCESS_QUERY_INFORMATION_VM_READ_AND_DUP_HANDLE);
   if (vm.status !== STATUS_SUCCESS || !vm.handle) {
-    if (isExitedStatus(vm.status)) return { status: 'exited' };
-    return vm.status === STATUS_ACCESS_DENIED
-      ? classifyDeniedWindowsProcess(api, limitedHandle, token, ownFlags)
-      : { status: 'failed' };
+    if (vm.status !== STATUS_ACCESS_DENIED) return classifyWindowsOpenFailure('same_user_vm', vm.status);
+    const stillActive = processStillActive(api, limitedHandle);
+    const protectedProcess = stillActive === true && isProtectedWindowsProcess(api, limitedHandle);
+    const nonElevatedUiAccess = stillActive === true && !protectedProcess && isNonElevatedUiAccess(api, token, ownFlags);
+    return classifyWindowsOpenFailure('same_user_vm', vm.status, { stillActive, protectedProcess, nonElevatedUiAccess });
   }
   try {
     return readRemoteCwd(api, vm.handle, deadline);
@@ -565,18 +424,14 @@ function inspectWindowsProcess(
   pid: number,
   ownSid: Uint8Array,
   ownFlags: TokenSecurityFlags,
-  serviceAccountsForPid: (pid: number) => readonly string[] | null,
   deadline: number,
 ): WindowsProcessInspection {
   if (pid === 0) return { status: 'other_user' };
   const limited = ntOpenProcess(api, pid, PROCESS_QUERY_LIMITED_INFORMATION);
   if (limited.status !== STATUS_SUCCESS || !limited.handle) {
-    if (isExitedStatus(limited.status)) return { status: 'exited' };
-    // Unprivileged Windows callers receive STATUS_ACCESS_DENIED here for OS, service, and
-    // higher-privilege processes (System, csrss, winlogon, dwm, svchost, elevated/other-user
-    // shells) with no unprivileged API to read their SID — the same scope boundary as unprivileged
-    // macOS lsof omitting EPERM processes.
-    return limited.status === STATUS_ACCESS_DENIED ? { status: 'inaccessible' } : { status: 'failed' };
+    // Windows privilege boundary: unprivileged callers receive STATUS_ACCESS_DENIED with no
+    // readable SID for OS, service, and higher-privilege processes (matching macOS lsof EPERM).
+    return classifyWindowsOpenFailure('limited', limited.status);
   }
   try {
     const active = processStillActive(api, limited.handle);
@@ -585,11 +440,12 @@ function inspectWindowsProcess(
 
     const tokenOut = new BigUint64Array(1);
     const tokenStatus = api.ntdll.NtOpenProcessToken(limited.handle, TOKEN_QUERY, ptr(tokenOut));
-    if (isExitedStatus(tokenStatus)) return { status: 'exited' };
-    if (tokenStatus === STATUS_ACCESS_DENIED) {
-      return classifyDeniedTokenProcess(api, pid, limited.handle, ownSid, serviceAccountsForPid);
+    if (tokenStatus !== STATUS_SUCCESS || tokenOut[0]! === 0n) {
+      if (tokenStatus !== STATUS_ACCESS_DENIED) return classifyWindowsOpenFailure('token', tokenStatus);
+      const stillActive = processStillActive(api, limited.handle);
+      const protectedProcess = stillActive === true && isProtectedWindowsProcess(api, limited.handle);
+      return classifyWindowsOpenFailure('token', tokenStatus, { stillActive, protectedProcess });
     }
-    if (tokenStatus !== STATUS_SUCCESS || tokenOut[0]! === 0n) return { status: 'failed' };
     const token = Number(tokenOut[0]!) as Pointer;
     try {
       return inspectWindowsProcessWithToken(api, pid, limited.handle, token, ownSid, ownFlags, deadline);
@@ -619,41 +475,6 @@ function createWindowsDriveLookup(api: WindowsProcessApi): (driveRoot: string) =
   };
 }
 
-function createWindowsServiceAccountLookup(): (pid: number) => readonly string[] | null {
-  let serviceNamesByPid: Map<number, string[]> | null | undefined;
-  const serviceAccountsCache = new Map<number, readonly string[] | null>();
-  return (pid: number): readonly string[] | null => {
-    if (serviceAccountsCache.has(pid)) return serviceAccountsCache.get(pid) ?? null;
-    const scmApi = loadWindowsScmApi();
-    const scm = scmApi.OpenSCManagerW(null, null, SC_MANAGER_ENUMERATE_SERVICE);
-    if (!scm) {
-      serviceAccountsCache.set(pid, null);
-      return null;
-    }
-    try {
-      if (serviceNamesByPid === undefined) serviceNamesByPid = enumerateActiveServiceNamesByPid(scmApi, scm);
-      const names = serviceNamesByPid?.get(pid);
-      if (!names || names.length === 0) {
-        serviceAccountsCache.set(pid, null);
-        return null;
-      }
-      const accounts: string[] = [];
-      for (const name of names) {
-        const startName = queryServiceStartName(scmApi, scm, name);
-        if (startName === null) {
-          serviceAccountsCache.set(pid, null);
-          return null;
-        }
-        accounts.push(startName);
-      }
-      serviceAccountsCache.set(pid, accounts);
-      return accounts;
-    } finally {
-      scmApi.CloseServiceHandle(scm);
-    }
-  };
-}
-
 function createNativeWindowsProbe(deadline: number): WindowsWorktreeProcessProbe | null {
   if (process.arch !== 'x64' && process.arch !== 'arm64') return null;
   const api = loadWindowsProcessApi();
@@ -673,39 +494,95 @@ function createNativeWindowsProbe(deadline: number): WindowsWorktreeProcessProbe
   } finally {
     api.ntdll.NtClose(selfToken);
   }
-  const serviceAccountsForPid = createWindowsServiceAccountLookup();
   return {
     ownPid: process.pid,
     ownCwd: process.cwd(),
     pids: () => enumerateWindowsPids(api),
-    inspect: pid => inspectWindowsProcess(api, pid, ownSid, ownFlags, serviceAccountsForPid, deadline),
+    inspect: pid => inspectWindowsProcess(api, pid, ownSid, ownFlags, deadline),
     isLocalDrive: createWindowsDriveLookup(api),
     realpath: (path: string) => realpathSync.native(path),
   };
+}
+
+const WINDOWS_VOLUME_GUID_RE = /^\\\\\?\\(Volume\{[0-9a-f-]+\})(?:\\|$)/iu;
+
+/** Lowercase `volume{...}` identifier when a Windows path addresses a volume GUID with no DOS letter. */
+export function windowsVolumeGuid(path: string): string | null {
+  const match = WINDOWS_VOLUME_GUID_RE.exec(path.replace(/\//gu, '\\'));
+  return match ? match[1]!.toLowerCase() : null;
 }
 
 function cleanWindowsPath(raw: string): string | null {
   let cwd = raw.replace(/\//gu, '\\');
   if (/^\\\\\?\\[A-Za-z]:\\/u.test(cwd)) cwd = cwd.slice(4);
   else if (/^\\\\\?\\UNC\\/iu.test(cwd)) cwd = `\\\\${cwd.slice(8)}`;
+  const volumeGuid = windowsVolumeGuid(cwd);
+  if (volumeGuid) {
+    let rest = cwd.slice(`\\\\?\\${volumeGuid}`.length) || '\\';
+    while (rest.length > 1 && rest.endsWith('\\')) rest = rest.slice(0, -1);
+    return `\\\\?\\${volumeGuid}${rest}`;
+  }
   if (/^\\\\[?.]\\/u.test(cwd)) return null;
   while (cwd.length > 3 && cwd.endsWith('\\')) cwd = cwd.slice(0, -1);
   return /^([A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)/u.test(cwd) ? cwd : null;
 }
 
-function normalizeWindowsCwd(
-  raw: string,
-  resolveRealpath: (path: string) => string,
-  isLocalDrive: (driveRoot: string) => boolean,
-  canonical = false,
-): string | null {
-  const cwd = cleanWindowsPath(raw);
-  if (!cwd) return null;
-  if (canonical) return cwd;
-  if (/^[A-Za-z]:\\/u.test(cwd) && !isLocalDrive(`${cwd[0]!.toUpperCase()}:\\`)) return null;
+/**
+ * Single canonical resolver for every Windows path in occupancy comparisons: process CWDs,
+ * the observer's own CWD, and checkout targets. Resolves non-canonical paths via `realpath`
+ * before checking drive type so valid mapped SMB drives (`Z:\repo` -> `\\server\share\repo`),
+ * SUBST drives, junctions, 8.3 names, and `\\?\UNC\...` produce the same canonical form.
+ */
+export function canonicalizeWindowsPath(raw: string, resolver: WindowsPathResolver, canonical = false): string | null {
+  const cleaned = cleanWindowsPath(raw);
+  if (!cleaned) return null;
+  if (canonical) return cleaned;
+  let resolved: string;
   try {
-    const target = /^[A-Za-z]:\\/u.test(cwd) && cwd.length >= 248 ? `\\\\?\\${cwd}` : cwd;
-    return cleanWindowsPath(resolveRealpath(target));
+    const target = /^[A-Za-z]:\\/u.test(cleaned) && cleaned.length >= 248 ? `\\\\?\\${cleaned}` : cleaned;
+    resolved = resolver.realpath(target);
+  } catch {
+    return null;
+  }
+  const canonicalPath = cleanWindowsPath(resolved);
+  if (!canonicalPath) return null;
+  if (/^[A-Za-z]:\\/u.test(canonicalPath) && !resolver.isLocalDrive(`${canonicalPath[0]!.toUpperCase()}:\\`)) {
+    return null;
+  }
+  return canonicalPath;
+}
+
+/** Resolve a Windows checkout target through the same canonical resolver as process CWDs. */
+export function resolveWindowsWorktreePath(path: string, resolver?: WindowsPathResolver): string | null {
+  const activeResolver = resolver ?? {
+    isLocalDrive: createWindowsDriveLookup(loadWindowsProcessApi()),
+    realpath: (target: string) => realpathSync.native(target),
+  };
+  return canonicalizeWindowsPath(path, activeResolver);
+}
+
+/** Resolve a Windows directory's lowercase `volume{...}` GUID from its open kernel handle. */
+export function queryWindowsPathVolumeGuid(path: string): string | null {
+  if (process.platform !== 'win32') return null;
+  try {
+    const api = loadWindowsProcessApi();
+    const cleaned = cleanWindowsPath(path);
+    if (!cleaned) return null;
+    const direct = windowsVolumeGuid(cleaned);
+    if (direct) return direct;
+    const target = /^[A-Za-z]:\\/u.test(cleaned) && cleaned.length >= 248 ? `\\\\?\\${cleaned}` : cleaned;
+    const wide = Buffer.from(`${target}\0`, 'utf16le');
+    const handleRaw = api.kernel32.CreateFileW(
+      ptr(wide), FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, null, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, null,
+    );
+    if (handleRaw === 0n || handleRaw === INVALID_HANDLE_VALUE) return null;
+    const handle = Number(handleRaw) as Pointer;
+    try {
+      const guidPath = queryFinalPathNameByFlag(api, handle, FILE_NAME_NORMALIZED_VOLUME_GUID);
+      return guidPath ? windowsVolumeGuid(guidPath) : null;
+    } finally {
+      api.ntdll.NtClose(handle);
+    }
   } catch {
     return null;
   }
@@ -722,12 +599,12 @@ function windowsWorktreeProcesses(deadline: number, probe: WindowsWorktreeProces
     const outcome = probe.inspect(pid);
     if (SKIPPED_WINDOWS_PROCESS_STATUSES.has(outcome.status)) continue;
     if (outcome.status !== 'ok') return null;
-    const cwd = normalizeWindowsCwd(outcome.cwd, probe.realpath, probe.isLocalDrive, outcome.canonical === true);
+    const cwd = canonicalizeWindowsPath(outcome.cwd, probe, outcome.canonical === true);
     if (cwd === null) return null;
     result.push({ pid, cwd });
     if (pid === probe.ownPid) sawOwnCwd = cwd;
   }
-  const expectedOwn = sawOwnCwd ? normalizeWindowsCwd(probe.ownCwd, probe.realpath, probe.isLocalDrive) : null;
+  const expectedOwn = sawOwnCwd ? canonicalizeWindowsPath(probe.ownCwd, probe) : null;
   return expectedOwn && sawOwnCwd!.toLowerCase() === expectedOwn.toLowerCase() ? result : null;
 }
 

@@ -1,12 +1,12 @@
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { spawn, type ChildProcess } from 'child_process';
 import { mockOfflineHerdr } from '../helpers/engineer-runtime-fixture';
 import { commitAll, initGitRepo, run, tmpWorkspaceIn } from '../helpers/repo-fixture';
 import { startTaskAgent } from '../../src/effects/terminal/task-session';
 import { cleanupTaskWorktree, notifyTaskWorktreeMerged } from '../../src/effects/terminal/runtime-closeout';
-import { releaseClosedWorktreeMarker, removeExactWorktree } from '../../src/effects/state/coordination-worktree-topology';
+import { previewCloseoutOccupancy, releaseClosedWorktreeMarker, removeExactWorktree } from '../../src/effects/state/coordination-worktree-topology';
 import { setControlledWorktreeProcesses, writeControlledWorktreeProcessesConfig } from '../helpers/controlled-worktree-processes';
 import { HerdrCoreError } from '../../src/effects/terminal/herdr-core';
 
@@ -77,7 +77,7 @@ async function fixture(branch = 'codex/owner') {
   mkdirSync(join(checkout, '.ai/harness'), { recursive: true });
   writeFileSync(join(checkout, '.ai/harness/active-worktree'), checkout + '\n');
   const notice = { pr: 993, merge_sha: merge, worktree: checkout, branch };
-  return { root, checkout, spec, binding, prompts, notice, spies: offline.spies, setMode(value: string) { mode = value; },
+  return { root, checkout, spec, binding, prompts, notice, spies: offline.spies, terminal: offline.terminal, setMode(value: string) { mode = value; },
     notify: () => notifyTaskWorktreeMerged(root, binding.terminal_id, notice),
     /** The owner program exited and its terminal was removed. */
     async ownerGone() { await exit(); mode = 'gone'; },
@@ -115,6 +115,44 @@ test('cleanup ends the live owner terminal before closeout and exact public remo
   const f = await fixture('feat/owner');
   expect(await f.notify()).toEqual({ status: 'notified' });
   expect(f.prompts).toHaveLength(1);
+  // Preview reports conditional removal when only the verified managed Herdr runtime occupies the checkout,
+  // and still refuses an independently occupied checkout or unreachable runtime.
+  const providerRow = { pid: f.binding.provider.pid, cwd: f.checkout };
+  expect(previewCloseoutOccupancy(f.checkout, f.root, [providerRow])).toBe('managed_runtime_only');
+  expect(() => previewCloseoutOccupancy(f.checkout, f.root, [providerRow, { pid: 999_999, cwd: f.checkout }])).toThrow('process_in_use');
+  f.setMode('unreachable');
+  expect(() => previewCloseoutOccupancy(f.checkout, f.root, [providerRow])).toThrow('process_in_use');
+  f.setMode('live');
+  const stubBin = join(f.root, '.git/preview-stub-bin');
+  mkdirSync(stubBin, { recursive: true });
+  writeFileSync(join(stubBin, 'hc'), `#!/bin/sh\nprintf '%s\\n' ${JSON.stringify(JSON.stringify(f.terminal()))}\n`);
+  chmodSync(join(stubBin, 'hc'), 0o700);
+  mkdirSync(join(f.root, '.ai/harness/worktrees'), { recursive: true });
+  writeFileSync(join(f.root, '.ai/harness/worktrees/owner.json'), `${JSON.stringify({ slug: 'owner', branch: 'feat/owner' })}\n`);
+  const helper = join(import.meta.dir, '../../scripts/contract-worktree.sh');
+  const setSubprocessInventory = (rows: Array<{ pid: number; cwd: string }>) => {
+    rmSync(join(f.root, 'bunfig.toml'), { force: true });
+    rmSync(join(f.root, '.git/controlled-worktree-processes.ts'), { force: true });
+    writeControlledWorktreeProcessesConfig(f.root, rows);
+  };
+  setSubprocessInventory([providerRow]);
+  const previewConditional = run('bash', [helper, 'cleanup', '--slug', 'owner', '--target', 'main', '--dry-run'], f.root, {
+    PATH: `${stubBin}:${process.env.PATH ?? ''}`,
+    REPO_HARNESS_TARGET_REPO_ROOT: f.root,
+  });
+  expect(previewConditional.status, previewConditional.stdout + previewConditional.stderr).toBe(0);
+  expect(previewConditional.stdout).toContain('would close verified managed runtime and run a fresh occupancy check before removing worktree');
+  expect(previewConditional.stdout).toContain('conditional on closing verified managed runtime and passing fresh occupancy check');
+  expect(existsSync(f.checkout)).toBe(true);
+  setSubprocessInventory([providerRow, { pid: 999_999, cwd: f.checkout }]);
+  const previewIndependent = run('bash', [helper, 'cleanup', '--slug', 'owner', '--target', 'main', '--dry-run'], f.root, {
+    PATH: `${stubBin}:${process.env.PATH ?? ''}`,
+    REPO_HARNESS_TARGET_REPO_ROOT: f.root,
+  });
+  expect(previewIndependent.status, previewIndependent.stdout + previewIndependent.stderr).toBe(1);
+  expect(previewIndependent.stderr).toContain('process_in_use');
+  expect(previewIndependent.stdout).not.toContain('would remove worktree');
+  setSubprocessInventory([]);
   expect(await cleanupTaskWorktree(f.root, f.checkout, false, undefined, releaseClosedWorktreeMarker)).toEqual({ status: 'closed', pids: [] });
   expect(existsSync(join(f.checkout, '.ai/harness/active-worktree'))).toBe(false);
   setControlledWorktreeProcesses(null);

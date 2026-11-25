@@ -2,6 +2,7 @@ import { mock } from 'bun:test';
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import * as actualWorktreeProcesses from '../../src/effects/git/worktree-processes';
 import type { WorktreeProcess } from '../../src/effects/git/worktree-processes';
 
 type ControlledInventory = WorktreeProcess[] | null | (() => WorktreeProcess[] | null);
@@ -12,6 +13,7 @@ let processes: ControlledInventory = [];
 // A function value is read at each observation, so a test can change the
 // inventory between two observations without sleeping.
 mock.module(fileURLToPath(new URL('../../src/effects/git/worktree-processes.ts', import.meta.url)), () => ({
+  ...actualWorktreeProcesses,
   worktreeProcesses: () => typeof processes === 'function' ? processes() : processes,
 }));
 
