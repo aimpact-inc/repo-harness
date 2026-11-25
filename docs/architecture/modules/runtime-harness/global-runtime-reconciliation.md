@@ -355,10 +355,10 @@ the old Pi package sync script remain absent.
 
 ## Optimization Backlog
 
-- **CLI 根是单一 SCC 的原因之一。** `src/cli/index.ts` 引用约 26 个 capability 的命令模块，而多个 capability 又通过 `src/cli/runtime/write-all-sync.ts`、`src/core/architecture/projection.ts` 等文件回到本 capability。组合根本身合理。可以做的是让被别人依赖的叶子文件离开组合根所在的 capability：`write-all-sync.ts` 移到 `execution-primitives`，`core/architecture/projection.ts` 的策略类型与 archctx 版本 pin 移到被依赖方。
+- **CLI 根是单一 SCC 的原因之一。** `src/cli/index.ts` 引用约 26 个 capability 的命令模块，而多个 capability 又通过 `src/core/architecture/projection.ts` 等文件回到本 capability。组合根本身合理。可以做的是让被别人依赖的叶子文件离开组合根所在的 capability：`core/architecture/projection.ts` 的策略类型与 archctx 版本 pin 移到被依赖方。`write-all-sync.ts` 已在 #3504 移到 `execution-primitives`（`src/effects/write-all-sync.ts`）。
 - **`index.ts` 同时是路由和事务。** 1087 行里有命令注册和 `runTransactional*` 事务函数。把事务函数移到 primary 组件，可以让 cli-root 只剩注册。需要先确认事务函数没有依赖 commander 状态。
 - **`global-runtime.ts` 有 1,631 行。** setup 步骤、外部 skill 安装、Waza 规则同步、CodeGraph 配置都在一个文件里。按步骤族拆分前需要改动频率证据。
-- **反向边：** primary → cli-root（`doctor.ts` 的版本比较函数）。把 `compareVersions`、`readLatestPackageVersion` 移到 primary 或一个版本工具模块即可去掉。archctx-closure → primary 只有类型引用（`GlobalRuntimeStep`），可以把类型移到 `src/cli/runtime/`。
+- **反向边：** primary → cli-root（`doctor.ts` 的版本比较函数）。把 `compareVersions`、`readLatestPackageVersion` 移到 primary 或一个版本工具模块即可去掉。archctx-closure → primary 只有类型引用（`GlobalRuntimeStep`），可以把类型移到 primary-cli 组件。
 - **多归属文件。** 3 个测试文件和 3 个 reference config 仍在本 capability 的 include 里，与 evals-checks、contract-assets 重叠。按用户决定，等 arch-context#296 和 resolver 改动后再收窄。
 - **集成没有声明的方向。** #1365 把 `model-reader.ts` 与 `agents-configuration.ts` 移到 operator 以后，archctx-closure → operator 没有边。archctx-closure → contract-assets 还剩 1 条边（`src/effects/architecture/archctx-provider.ts:15` 读 capability registry），没有声明。contract-assets → 本 capability（25 条边）与 operator → 本 capability（12 条边）已经声明，且边更多。cli-root → execution-primitives 只有类型导入（`src/cli/index.ts:102-104`），没有声明。
 - **与 contract-assets 的已声明双向关系。** cli-root 与 primary → contract-assets（21 条边）和 contract-assets template-projection → 本 capability（25 条边）都已声明。按边数，本 capability 的方向是回边。集成不删除分组已声明的关系。是否删除是开放问题。

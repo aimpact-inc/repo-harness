@@ -13,7 +13,7 @@ import { antigravityEnvironment } from './hook/host-adapter';
 import { HOOK_COMMAND_NAME, runHook } from './hook/runtime';
 import type { HookEvent, RouteId } from './hook/route-registry';
 import { parseHookPayload } from './hook/hook-input';
-import { writeAllSync } from './runtime/write-all-sync';
+import { writeAllSync } from '../effects/write-all-sync';
 import { PROCESS_GROUP_LAUNCHER_FLAG, runProcessGroupLauncherCli } from '../effects/process-group-launcher';
 import { PROCESS_SUPERVISOR_FLAG, runProcessSupervisorCli } from '../effects/process-supervisor';
 import { readRecordedSelection, registerSelectedArchitecturePorts } from './installer/architecture-selection';

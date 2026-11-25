@@ -16,7 +16,7 @@ import { resolve } from 'path';
 import { assertOverridesCarried, formatHostConfigPreview, hasRecordedAntigravityState, previewHostConfig, resolveOverrides, runInstall, runUninstall, type HostConfigPreview, type HostConfigPreviewItem, type InstallCommandOptions, type InstallCommandResult } from './commands/install';
 import { installStatePendingMigration, migrateInstallState, planInstallStateMigration } from './installer/install-state-migration';
 import { PLUGIN_IDS, type PluginId } from '../core/skill-surface/plugin-manifest';
-import { writeAllSync } from './runtime/write-all-sync';
+import { writeAllSync } from '../effects/write-all-sync';
 import { runInit } from './commands/init';
 import { CLI_VERSION, formatStatus, runStatus } from './commands/status';
 import { formatDoctor, runDoctor, type DoctorPorts } from './commands/doctor';
