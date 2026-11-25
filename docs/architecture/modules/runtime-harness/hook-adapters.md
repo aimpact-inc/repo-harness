@@ -1,5 +1,5 @@
 # runtime-harness/hook-adapters 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-hook-adapters" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:75f48baccb34f6be50232adc5b10afcb67a49cb766bb68891dc811c9b4e58dbe" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-hook-adapters" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:60b753ff1b6566097961d2c98513d764794c65ef3d00583768367c526a507916" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.hook-adapters`(kind `capability`)
 > **Matched Prefixes**:`src/cli/hook/**`、`src/cli/installer/**`、`src/pi/**`、`src/effects/managed-tree.ts`、`src/cli/hook-entry.ts`、`src/effects/loop/**`、`src/effects/segmented-log.ts`、`src/effects/run-summary-retention.ts`、`src/cli/commands/install.ts`、`src/cli/commands/status.ts`、`src/cli/commands/security.ts`
@@ -18,6 +18,7 @@ flowchart LR
   p1_capability_runtime_harness_hook_adapters_75a11743["Hook Adapters"]:::component
   p1_component_action_commands_skill_surface_catalog_a72c29bc["Skill Surface Catalog"]:::component
   p1_component_execution_primitives_host_roots_5aec22e3["Host Root Resolution"]:::component
+  p1_component_hook_adapters_contracts_b709bf5d["Hook Contracts"]:::component
   p1_component_hook_adapters_edit_guards_019fd22c["Edit Guard Handlers"]:::component
   p1_component_hook_adapters_hook_root_4ed4a0fc["Hook Composition Root"]:::component
   p1_component_hook_adapters_host_config_adc84962["Host Config Write Gate"]:::component
@@ -30,25 +31,27 @@ flowchart LR
   p1_component_hook_adapters_session_lifecycle_effects_b7b67dd9["Session Lifecycle Handlers (effects)"]:::component
   p1_component_action_commands_skill_surface_catalog_a72c29bc -->|"Resolve the destination roots for the shell skill sync projection"| p1_component_execution_primitives_host_roots_5aec22e3
   p1_capability_runtime_harness_evidence_ledger_2fe63ef5 -->|"Collect loop state inputs for recovery evidence."| p1_capability_runtime_harness_hook_adapters_75a11743
-  p1_component_hook_adapters_edit_guards_019fd22c -->|"Implement the typed handler contract and read hook input through the shared parsers"| p1_component_hook_adapters_primary_1659ffb9
+  p1_component_hook_adapters_edit_guards_019fd22c -->|"Read hook input and use the typed permission and denial results"| p1_component_hook_adapters_contracts_b709bf5d
+  p1_component_hook_adapters_hook_root_4ed4a0fc -->|"Register the install ledger reader used by the edit and Bash guards"| p1_component_hook_adapters_edit_guards_019fd22c
   p1_component_hook_adapters_hook_root_4ed4a0fc -->|"Run the hook route runtime for one host event"| p1_component_hook_adapters_primary_1659ffb9
+  p1_component_hook_adapters_host_installer_cd378e80 -->|"Read the ordered hook routes to build managed host adapter entries"| p1_component_hook_adapters_contracts_b709bf5d
   p1_component_hook_adapters_host_installer_cd378e80 -->|"Request a host file change through the write gate"| p1_component_hook_adapters_host_config_adc84962
   p1_component_hook_adapters_host_installer_cd378e80 -->|"Resolve the destination root for each host skill projection"| p1_component_execution_primitives_host_roots_5aec22e3
-  p1_component_hook_adapters_host_installer_cd378e80 -->|"Project Claude and Codex adapter entries and map Pi events through the bounded Bun protocol to the shared route runtime"| p1_component_hook_adapters_primary_1659ffb9
   p1_component_hook_adapters_host_installer_cd378e80 -->|"Read skill names and plugin owners from the skill surface catalog"| p1_component_action_commands_skill_surface_catalog_a72c29bc
   p1_capability_runtime_harness_hook_adapters_75a11743 -->|"Dispatch a host hook route to its typed handler"| p1_component_hook_adapters_primary_1659ffb9
+  p1_component_hook_adapters_primary_1659ffb9 -->|"Select a route and use the shared input#44; result and context contracts"| p1_component_hook_adapters_contracts_b709bf5d
   p1_component_hook_adapters_primary_1659ffb9 -->|"Bind PreToolUse.edit and the Claude or Pi PreToolUse.bash route to the typed path guards"| p1_component_hook_adapters_edit_guards_019fd22c
   p1_component_hook_adapters_primary_1659ffb9 -->|"Bind SessionStart and Stop and subagent and inbox routes to their typed handlers"| p1_component_hook_adapters_session_lifecycle_e389d412
+  p1_component_hook_adapters_session_lifecycle_e389d412 -->|"Use shared hook input#44; context sections and result types"| p1_component_hook_adapters_contracts_b709bf5d
   p1_component_hook_adapters_session_lifecycle_e389d412 -->|"Publish the evidence checkpoint and render handoff and resume from it"| p1_capability_runtime_harness_evidence_ledger_2fe63ef5
-  p1_component_hook_adapters_session_lifecycle_e389d412 -->|"Implement the typed handler contract and read state through the event-scoped collector"| p1_component_hook_adapters_primary_1659ffb9
   classDef actor fill:#111827,color:#ffffff,stroke:#f9fafb,stroke-width:2px
   classDef component fill:#075985,color:#ffffff,stroke:#bae6fd,stroke-width:2px
   classDef datastore fill:#3f6212,color:#ffffff,stroke:#d9f99d,stroke-width:2px
   classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-- Proof: `proven` (`sha256:c015cc3901988fd2dc566d0cb798c8d0b29fdd88626fcd35e60631050fd686a7`).
-- Semantic nodes: `14`; declared relations: `13`.
+- Proof: `proven` (`sha256:6673f1e1e9d076d2618e5537b802ed9968ee3f104fadf93193e02138f9718801`).
+- Semantic nodes: `15`; declared relations: `15`.
 
 ### 1.2 模組職責表
 
@@ -125,12 +128,15 @@ flowchart LR
 
 組件出向關係:
 
+- `component.hook-adapters.contracts`:
+  - 無。
 - `component.hook-adapters.edit-guards`:
+  - `depends-on` → `component.hook-adapters.contracts` — Read hook input and use the typed permission and denial results
   - `calls` → `capability.workflow-engine.execution-primitives` — Lock the circuit breaker records
-  - `depends-on` → `component.hook-adapters.primary` — Implement the typed handler contract and read hook input through the shared parsers
   - `calls` → `capability.workflow-engine.workflow-state` — Canonicalize edit paths and resolve the owners of edited paths
 - `component.hook-adapters.hook-root`:
   - `calls` → `component.contract-assets.architecture-contracts` — Register the architecture providers after the contract version check
+  - `calls` → `component.hook-adapters.edit-guards` — Register the install ledger reader used by the edit and Bash guards
   - `calls` → `component.hook-adapters.primary` — Run the hook route runtime for one host event
   - `calls` → `component.architecture.providers` — Register the archctx ownership, display and runtime providers
 - `component.hook-adapters.host-config`:
@@ -141,27 +147,28 @@ flowchart LR
 - `component.hook-adapters.host-installer`:
   - `calls` → `capability.public-surface.adoption` — Share the managed hook command fingerprints with the adoption migration
   - `reads` → `capability.workflow-engine.contract-assets` — Resolve the managed fleet role list during host installation
+  - `calls` → `component.hook-adapters.contracts` — Read the ordered hook routes to build managed host adapter entries
   - `calls` → `capability.workflow-engine.execution-primitives` — Hold the runtime host transaction lock and resolve the Pi opt-in repository through the bounded shared Git runner
   - `calls` → `capability.runtime-harness.global-runtime-reconciliation` — Report architecture projection readiness in status
   - `calls` → `component.hook-adapters.host-config` — Request a host file change through the write gate
   - `calls` → `component.execution-primitives.host-roots` — Resolve the destination root for each host skill projection
   - `calls` → `external.pi` — Use Pi list, install and remove for the exact package source, without writing Pi settings or bypassing trust.
-  - `calls` → `component.hook-adapters.primary` — Project Claude and Codex adapter entries and map Pi events through the bounded Bun protocol to the shared route runtime
   - `calls` → `component.action-commands.skill-surface-catalog` — Read skill names and plugin owners from the skill surface catalog
 - `component.hook-adapters.host-installer-effects`:
   - 無。
 - `component.hook-adapters.primary`:
   - `calls` → `capability.workflow-engine.execution-primitives` — Run the process supervisor and group launcher entries, and write host output through the shared blocking writer
   - `calls` → `capability.workflow-engine.workflow-state` — Resolve effective state read-only at most once per hook event
+  - `depends-on` → `component.hook-adapters.contracts` — Select a route and use the shared input, result and context contracts
   - `calls` → `component.hook-adapters.edit-guards` — Bind PreToolUse.edit and the Claude or Pi PreToolUse.bash route to the typed path guards
   - `calls` → `component.hook-adapters.session-lifecycle` — Bind SessionStart and Stop and subagent and inbox routes to their typed handlers
 - `component.hook-adapters.primary-effects`:
   - 無。
 - `component.hook-adapters.session-lifecycle`:
   - `calls` → `capability.public-surface.adoption` — Check the one-release run summary cleanup paths with the shared path safety rules
+  - `depends-on` → `component.hook-adapters.contracts` — Use shared hook input, context sections and result types
   - `calls` → `capability.runtime-harness.evidence-ledger` — Publish the evidence checkpoint and render handoff and resume from it
   - `calls` → `capability.workflow-engine.execution-primitives` — Hold the native role evidence lock
-  - `depends-on` → `component.hook-adapters.primary` — Implement the typed handler contract and read state through the event-scoped collector
   - `calls` → `capability.organization.task-fleet` — Render task inbox messages as untrusted session context
   - `calls` → `capability.workflow-engine.workflow-state` — Read Effective State snapshots and capability ownership for session context
 - `component.hook-adapters.session-lifecycle-effects`:
@@ -171,33 +178,34 @@ flowchart LR
 
 | 組件 | 名稱 | 規模量級 | 宣告入口 |
 | --- | --- | --- | --- |
-| `component.hook-adapters.edit-guards` | Edit Guard Handlers | `2–5` 個文件 / `500–1000` 行 | 未宣告 |
+| `component.hook-adapters.contracts` | Hook Contracts | `5–10` 個文件 / `200–500` 行 | 未宣告 |
+| `component.hook-adapters.edit-guards` | Edit Guard Handlers | `5–10` 個文件 / `2000–5000` 行 | 未宣告 |
 | `component.hook-adapters.hook-root` | Hook Composition Root | `1–2` 個文件 / `100–200` 行 | 未宣告 |
 | `component.hook-adapters.host-config` | Host Config Write Gate | `5–10` 個文件 / `1000–2000` 行 | 未宣告 |
 | `component.hook-adapters.host-config-effects` | Host Config Write Gate (effects) | `5–10` 個文件 / `2000–5000` 行 | 未宣告 |
 | `component.hook-adapters.host-installer` | Host Adapter Installer | `20–50` 個文件 / `5000–10000` 行 | `entrypoint.hook-adapters.managed-entries`、`entrypoint.hook-adapters.pi-extension`、`entrypoint.hook-adapters.skill-projection`、`entrypoint.hook-adapters.install-command`、`entrypoint.hook-adapters.config-command`、`entrypoint.hook-adapters.status-command`、`entrypoint.hook-adapters.security-command`、`entrypoint.hook-adapters.architecture-selection`、`entrypoint.hook-adapters.codex-config-migration`、`entrypoint.hook-adapters.configuration-ownership`、`entrypoint.hook-adapters.global-context`、`entrypoint.hook-adapters.install-profile`、`entrypoint.hook-adapters.install-state-migration`、`entrypoint.hook-adapters.install-state`、`entrypoint.hook-adapters.json-config-migration`、`entrypoint.hook-adapters.pi-package`、`entrypoint.hook-adapters.repository-excludes`、`entrypoint.hook-adapters.installer-shared`、`entrypoint.hook-adapters.skill-sync`、`entrypoint.hook-adapters.antigravity-target`、`entrypoint.hook-adapters.target-registry`、`entrypoint.hook-adapters.uninstall`、`entrypoint.hook-adapters.waza-rules` |
 | `component.hook-adapters.host-installer-effects` | Host Adapter Installer (effects) | `5–10` 個文件 / `200–500` 行 | 未宣告 |
-| `component.hook-adapters.primary` | Hook Route Runtime | `5–10` 個文件 / `1000–2000` 行 | `entrypoint.hook-adapters.handler-bindings` |
+| `component.hook-adapters.primary` | Hook Route Runtime | `2–5` 個文件 / `500–1000` 行 | `entrypoint.hook-adapters.handler-bindings` |
 | `component.hook-adapters.primary-effects` | Hook Route Runtime (effects) | `2–5` 個文件 / `200–500` 行 | 未宣告 |
 | `component.hook-adapters.session-lifecycle` | Session Lifecycle Handlers | `5–10` 個文件 / `500–1000` 行 | `entrypoint.hook-adapters.stop` |
 | `component.hook-adapters.session-lifecycle-effects` | Session Lifecycle Handlers (effects) | `2–5` 個文件 / `200–500` 行 | 未宣告 |
 
 ## 2. P2:端到端數據流
 
-> **Proof**: `proven` (`sha256:c015cc3901988fd2dc566d0cb798c8d0b29fdd88626fcd35e60631050fd686a7`); selectors `7/7`.
+> **Proof**: `proven` (`sha256:6673f1e1e9d076d2618e5537b802ed9968ee3f104fadf93193e02138f9718801`); selectors `7/7`.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%
 sequenceDiagram
   autonumber
   participant p2_host_installer_e130a8f7 as Host Adapter Installer
-  participant p2_route_runtime_281dbb1e as Hook Route Runtime
-  p2_host_installer_e130a8f7->>p2_route_runtime_281dbb1e: Read the ordered routes for the selected Claude or Codex adapter
+  participant p2_contracts_9fc6c109 as Hook Contracts
+  p2_host_installer_e130a8f7->>p2_contracts_9fc6c109: Read the ordered routes for the selected Claude or Codex adapter
   alt One managed adapter entry exists per host route in registry order
-  p2_host_installer_e130a8f7->>p2_route_runtime_281dbb1e: Build one adapter entry per route that the host supports
+  p2_host_installer_e130a8f7->>p2_contracts_9fc6c109: Build one adapter entry per route that the host supports
     Note over p2_host_installer_e130a8f7: Write the user-level host configuration
   else An installed projection differs from the registry
-  p2_host_installer_e130a8f7->>p2_route_runtime_281dbb1e: Rebuild the expected entries for the comparison
+  p2_host_installer_e130a8f7->>p2_contracts_9fc6c109: Rebuild the expected entries for the comparison
     Note over p2_host_installer_e130a8f7: Report the drift in status without a rewrite
   end
 ```

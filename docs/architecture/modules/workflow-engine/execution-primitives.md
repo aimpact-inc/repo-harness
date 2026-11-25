@@ -1,6 +1,6 @@
 # workflow-engine/execution-primitives 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-execution-primitives" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:56041c49d246d026aac6bff1664392c97a82c887975237622b8fc157f6ee2e33" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-execution-primitives" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:e89817428f48ce04ca8c211c0db9e4b98dcada5d7c3a81c809114cf3a89081c2" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.workflow-engine.execution-primitives`(kind `capability`)
 > **Matched Prefixes**:`src/effects/process-runner.ts`、`src/effects/process-supervisor.ts`、`src/effects/process-group-launcher.ts`、`src/effects/process-group-termination.ts`、`src/effects/process-group-registry.ts`、`src/effects/expensive-run-lock.ts`、`src/effects/readonly-observation.ts`、`src/core/shell-quote.ts`、`src/effects/path-containment.ts`、`src/effects/atomic-append.ts`、`src/effects/locking/**`、`src/effects/git/**`
@@ -16,9 +16,11 @@ Runs bounded child processes and provides the canonical directory lock and Git c
 ```mermaid
 flowchart LR
   p1_capability_workflow_engine_execution_primitives_b3033934["Execution Primitives"]:::component
+  p1_component_execution_primitives_antigravity_session_449a2ee1["Antigravity Session Access"]:::component
   p1_component_execution_primitives_bot_registry_5584811f["Bot Registry"]:::component
   p1_component_execution_primitives_checkout_filesystem_8123fc5d["Checkout Filesystem Primitives"]:::component
   p1_component_execution_primitives_cli_layer_61a69b63["Execution Primitives (cli)"]:::component
+  p1_component_execution_primitives_github_command_13136dbc["GitHub CLI Transport"]:::component
   p1_component_execution_primitives_hc_client_0c8c8ef8["hc Client"]:::component
   p1_component_execution_primitives_host_roots_5aec22e3["Host Root Resolution"]:::component
   p1_component_execution_primitives_notify_read_829d6cce["Notify Read Contract"]:::component
@@ -43,8 +45,8 @@ flowchart LR
   classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-- Proof: `proven` (`sha256:e8ad6dfa719ee9e635a5bb78c68c1839c6c8228507d0cd2ea32185b0c41a21b5`).
-- Semantic nodes: `17`; declared relations: `5`.
+- Proof: `proven` (`sha256:260815cb62ec50472f19d89a8600a5fddf6e9d192ceee42905455411689ee100`).
+- Semantic nodes: `19`; declared relations: `5`.
 
 ### 1.2 模組職責表
 
@@ -75,6 +77,7 @@ flowchart LR
 
 入向關係:
 
+- `depends-on` ← `component.acceptance-review.primary-cli` — Supply native Antigravity session access to the review collector at the CLI boundary.
 - `calls` ← `component.acceptance-review.primary` — Hold an exclusive directory lock around one generic review run, and read and write immutable session artifacts and the reviewer process identity
 - `depends-on` ← `capability.public-surface.adoption` — Run bounded processes for adoption and file transactions.
 - `depends-on` ← `capability.organization.board` — Build the seat launch from the pane prefix, the hc terminal labels, the repository registry and the Git common directory. Read the Git runner, the hc pin, the repo-harness home and the secret token rules for the board.
@@ -96,7 +99,7 @@ flowchart LR
 - `calls` ← `component.mcp-sidecar.primary` — Read the registered repository roots for the server scope
 - `calls` ← `component.mcp-sidecar.repo-policy-registry` — Run Git for repository roots, lock guarded writes and read the MCP audit log path
 - `depends-on` ← `capability.runtime-harness.operator` — Read Git topology for task diffs and development activity. Read the task session records, the native session record and the process proof for task execution state. Use the hc client for hc server status, hc ls, hc events, the terminal labels, the herdr-app command and its error type. Read the notify install record, the notify config and the relay delivery record through the notify read contract, and use its relay channel names and record types in the notify status and the Bots page.
-- `depends-on` ← `capability.organization.publication` — Resolve the Git common directory for the feedback store, validate the shared task message claim in feedback records, and run Git through the shared runner in the new remote ref push operation
+- `depends-on` ← `capability.organization.publication` — Resolve the Git common directory for the feedback store, validate the shared task message claim in feedback records, run Git through the shared runner for new remote refs, and use the bounded GitHub CLI runner for draft pull requests
 - `calls` ← `component.publication.primary` — Read the worktree topology and the Git common directory
 - `depends-on` ← `capability.public-surface.strategy-reflection` — Read strategy context through shared Git and runtime observations.
 - `calls` ← `component.task-agent-host.primary` — Resolve the task repository and record task worktrees through the Git primitives. Hold task session locks, read and write immutable session artifacts, run hc through the hc client, read the notify secret key names, read the notify config, the delivery record and the notify file paths through the notify read contract, and build the next delivery record with its channel names, record types and empty record
@@ -109,12 +112,16 @@ flowchart LR
 
 組件出向關係:
 
+- `component.execution-primitives.antigravity-session`:
+  - 無。
 - `component.execution-primitives.bot-registry`:
   - `reads` → `component.execution-primitives.primary` — Resolve the account home of the Bot records
 - `component.execution-primitives.checkout-filesystem`:
   - 無。
 - `component.execution-primitives.cli-layer`:
   - `calls` → `component.execution-primitives.bot-registry` — Register a Bot record for bots register
+- `component.execution-primitives.github-command`:
+  - 無。
 - `component.execution-primitives.hc-client`:
   - `depends-on` → `capability.organization.board` — Implement the board host port (seat terminals by parent label and the hc version) and the attention host port (start watcher terminals with hc run, read watcher terminals, and send to and wait on seat terminals)
   - `calls` → `external.herdr-core` — Run the hc CLI for its callers and parse its JSON output. For the board and attention host ports, list seat and watcher terminals, read the hc version, start watcher terminals with hc run, and send to and wait on seat terminals.
@@ -149,9 +156,11 @@ flowchart LR
 
 | 組件 | 名稱 | 規模量級 | 宣告入口 |
 | --- | --- | --- | --- |
+| `component.execution-primitives.antigravity-session` | Antigravity Session Access | `2–5` 個文件 / `100–200` 行 | 未宣告 |
 | `component.execution-primitives.bot-registry` | Bot Registry | `1–2` 個文件 / `200–500` 行 | 未宣告 |
 | `component.execution-primitives.checkout-filesystem` | Checkout Filesystem Primitives | `2–5` 個文件 / `200–500` 行 | 未宣告 |
 | `component.execution-primitives.cli-layer` | Execution Primitives (cli) | `1–2` 個文件 / `50–100` 行 | 未宣告 |
+| `component.execution-primitives.github-command` | GitHub CLI Transport | `1–2` 個文件 / `50–100` 行 | 未宣告 |
 | `component.execution-primitives.hc-client` | hc Client | `1–2` 個文件 / `500–1000` 行 | 未宣告 |
 | `component.execution-primitives.host-roots` | Host Root Resolution | `2–5` 個文件 / `50–100` 行 | 未宣告 |
 | `component.execution-primitives.notify-read` | Notify Read Contract | `1–2` 個文件 / `100–200` 行 | 未宣告 |
@@ -168,7 +177,7 @@ flowchart LR
 
 ## 2. P2:端到端數據流
 
-> **Proof**: `proven` (`sha256:e8ad6dfa719ee9e635a5bb78c68c1839c6c8228507d0cd2ea32185b0c41a21b5`); selectors `5/5`.
+> **Proof**: `proven` (`sha256:260815cb62ec50472f19d89a8600a5fddf6e9d192ceee42905455411689ee100`); selectors `5/5`.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%
