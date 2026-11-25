@@ -1,0 +1,58 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.fcdb8cebeb7e52e5",
+  "fingerprint": "sha256:2f3937642310c6266666a651418c27176cb5dea50147bd722cd8d8f111485cb8",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "pair:capability.runtime-harness.mcp-sidecar|component.mcp-sidecar.primary",
+    "subjectSelectorId": "subject.repository.d0c5b5a56a28486c"
+  },
+  "affectedNodeIds": [
+    "capability.runtime-harness.mcp-sidecar",
+    "component.mcp-sidecar.primary"
+  ],
+  "affectedNodeCount": 2,
+  "regressesFrom": null,
+  "status": "accepted",
+  "observationMetrics": {
+    "backwardEdgeCount": 3,
+    "forwardEdgeCount": 1,
+    "thinDirectionEdgeCount": 1,
+    "totalEdgeCount": 4
+  },
+  "reason": "Issue #3512: re-home the leaf files src/cli/mcp/result.ts (imports only redaction) and src/cli/mcp/version.ts (imports only package.json) into a new component below capability.runtime-harness.mcp-sidecar, so mcp-sidecar, component.mcp-sidecar.primary and general-repo-access depend on it in one direction.",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T07:09:11.000Z",
+  "provenance": {
+    "headSha": "fbf9f278f7d2357030cf51824a82a216a9cabc7b",
+    "assessmentDigest": "sha256:fe7a5490092a55d90df0de0ff9e0c11629ab59c51985269bfa36347b1d351aac",
+    "baselineSnapshotDigest": "sha256:a7e1de4c892e94b18d59461881fc557b350b02a2004892dda2f95448c93d4e0c"
+  },
+  "snapshotDigest": "sha256:a7e1de4c892e94b18d59461881fc557b350b02a2004892dda2f95448c93d4e0c",
+  "evidenceDigest": "sha256:fe7a5490092a55d90df0de0ff9e0c11629ab59c51985269bfa36347b1d351aac",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.pairThinDirectionEdgeCount",
+      "subjectSelectorId": "subject.repository.d0c5b5a56a28486c",
+      "nodeId": null,
+      "memberNodeIds": [
+        "capability.runtime-harness.mcp-sidecar",
+        "component.mcp-sidecar.primary"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.f38b1be5d177e54c"
+    }
+  ]
+}

@@ -19,8 +19,7 @@
       "src/cli/mcp/repo-discovery.ts",
       "src/cli/mcp/state-tools.ts",
       "src/cli/mcp/fleet-tools.ts",
-      "src/cli/mcp/instructions.ts",
-      "src/cli/mcp/version.ts"
+      "src/cli/mcp/instructions.ts"
     ],
     "entrypoints": [
       {
