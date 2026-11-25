@@ -17,19 +17,19 @@
   ],
   "affectedNodeCount": 2,
   "regressesFrom": null,
-  "status": "accepted",
+  "status": "resolved",
   "observationMetrics": {
     "backwardEdgeCount": 1,
     "forwardEdgeCount": 1,
     "thinDirectionEdgeCount": 1,
     "totalEdgeCount": 2
   },
-  "reason": "Issue #3510 moves shared Herdr reads outside the HTTP reader so board observation has no return dependency.",
+  "reason": "Resolved in #3510. Board observer reads Herdr snapshots from the shared transport.",
   "actor": {
     "kind": "cli",
     "id": "cli-user"
   },
-  "decidedAt": "2026-11-25T07:09:11.000Z",
+  "decidedAt": "2026-11-25T07:25:44.000Z",
   "provenance": {
     "headSha": "fbf9f278f7d2357030cf51824a82a216a9cabc7b",
     "assessmentDigest": "sha256:a36dcf7dd0162bdad70d74e4ca72e0fe878058e100325827e214009ebef18c27",
@@ -37,6 +37,7 @@
   },
   "snapshotDigest": "sha256:5862a04c072466c57b400829c58fce6b1f19398aaddab66095351b509d90f28d",
   "evidenceDigest": "sha256:a36dcf7dd0162bdad70d74e4ca72e0fe878058e100325827e214009ebef18c27",
+  "resolutionDigest": "sha256:bb971562ee621bc18f90462f13ea50a7e79a6de2658c211edbb4cc80c318cc96",
   "scope": {
     "kind": "repository"
   },
