@@ -16,7 +16,7 @@
 | [#3517](https://github.com/aimpact-inc/repo-harness/pull/3517) | `fbf9f278f` | `rh worktrees list` judges checkouts before directory sizing (`#3500`) |
 | [#3519](https://github.com/aimpact-inc/repo-harness/pull/3519) | `c132cce48` | Split the refactor e2e suite and report killed subprocesses (`#3516`) |
 | [#3515](https://github.com/aimpact-inc/repo-harness/pull/3515) | `f80d5af85` | List the sharpen and reframe skills and refresh `tasks/lessons.md` for 0.37.x (`#3501`) |
-| [#3497](https://github.com/aimpact-inc/repo-harness/pull/3497) | `dc09e4c3c` | Name worker tabs by issue and put at most 3 panes in one tab (`#3494`) |
+| [#3497](https://github.com/aimpact-inc/repo-harness/pull/3497) | `dc09e4c3c` | Name worker tabs by issue and put at most 3 panes in one tab within a single launch or dispatch batch; concurrent commands do not share the pane quota (`#3494`) |
 | [#3520](https://github.com/aimpact-inc/repo-harness/pull/3520) | `d41829cec` | Refactor: move write-all-sync into execution-primitives (`#3504`) |
 | [#3521](https://github.com/aimpact-inc/repo-harness/pull/3521) | `7fff398a9` | Refactor: break shared operator read dependency cycles (`#3510`) |
 | [#3524](https://github.com/aimpact-inc/repo-harness/pull/3524) | `4600c7f0c` | Refactor: move `providers.ts` wiring into its own component (`#3511`) |
