@@ -11,6 +11,7 @@ export function observeProviderBranchMergeCommit(input: {
   readonly baseRef: string;
   readonly targetOid: string;
   readonly timeoutMs: number;
+  readonly requireExactHead?: boolean;
 }): string | null {
   if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(input.headSha)) return null;
   const deadline = Date.now() + input.timeoutMs;
@@ -27,7 +28,8 @@ export function observeProviderBranchMergeCommit(input: {
   if (!Array.isArray(pulls)) return null;
   for (const pull of pulls) {
     if (!pull || typeof pull !== 'object' || Array.isArray(pull)) continue;
-    const { merged_at: mergedAt, base, merge_commit_sha: merge } = pull as Record<string, unknown>;
+    const { merged_at: mergedAt, base, head, merge_commit_sha: merge } = pull as Record<string, unknown>;
+    if (input.requireExactHead && (!head || typeof head !== 'object' || (head as Record<string, unknown>).sha !== input.headSha)) continue;
     if (typeof mergedAt !== 'string' || !Number.isFinite(Date.parse(mergedAt))) continue;
     if (!base || typeof base !== 'object' || (base as Record<string, unknown>).ref !== input.baseRef) continue;
     if (typeof merge !== 'string' || !/^[a-f0-9]{40}$/u.test(merge)) continue;

@@ -1017,8 +1017,9 @@ describe('task worktree location', () => {
       const retry = start(['--issue', '123', '--json'], cwd, { REPO_HARNESS_WORKTREE_ROOT: managed });
       expect(retry.status, retry.stderr).toBe(0);
       expect(JSON.parse(retry.stdout)).toMatchObject({ disposition: 'reused_existing_worktree', worktree_path: path });
-      expect(sweepManagedWorktrees(cwd, cwd, { ...process.env, REPO_HARNESS_WORKTREE_ROOT: managed }, { deadlineMs: 60_000 })).toContain('marker reference');
-      expect(existsSync(path)).toBe(true);
+      const sweep = sweepManagedWorktrees(cwd, cwd, { ...process.env, REPO_HARNESS_WORKTREE_ROOT: managed }, { deadlineMs: 60_000 });
+      expect(sweep).toContain(`${path}: kept; cleanup_blocked_dirty_worktree, branch has no commits of its own`);
+      expect(readFileSync(join(path, '.ai/harness/active-worktree'), 'utf8').trim()).toBe(path);
     } finally { rmSync(parent, { recursive: true, force: true }); }
   }, 15000);
 

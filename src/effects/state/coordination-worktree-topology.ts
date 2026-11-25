@@ -7,7 +7,8 @@ import { sha256Hex } from '../../core/evidence/sha256';
 import { CHANGE_ASSESSMENT_EVIDENCE_PATH } from '../../core/review/check-records';
 import { execFileSync } from 'child_process';
 import { gitExecFileSync, gitSpawnSync, withoutProviderTokens, withoutRepositorySelectingGitEnv } from '../git/runner';
-import { existsSync, lstatSync, readFileSync, realpathSync, readdirSync, unlinkSync, mkdirSync } from 'fs';
+import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, unlinkSync, mkdirSync } from 'fs';
+import { tmpdir } from 'os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'path';
 import { publishFileByRename, syncDirectoryDurably } from '../atomic-append';
 import { readPrunedWorktreeIntents, writePrunedWorktreeIntents, prunedIntentKey, type PrunedWorktreeIntent } from './pruned-worktree-intents';
@@ -43,7 +44,10 @@ function mergeLibraryPath(): string {
     directory = parent;
   }
 }
-type Limits = { deadline?: number; gitBin?: string; closeout?: boolean; ghBin?: string };
+type Limits = { deadline?: number; gitBin?: string; closeout?: boolean; ghBin?: string;
+  liveSweep?: Pick<SweepContext, 'cwd' | 'env' | 'processes'>;
+  previewObjects?: { directory: string; alternates: string };
+};
 function gitBinary(limits: Limits): string { return limits.gitBin ?? configuredGitBinary(); }
 function timeout(limits: Limits): number | undefined {
   if (limits.deadline === undefined) return undefined;
@@ -55,8 +59,8 @@ function git(root: string, args: string[], limits: Limits = {}): string {
   return gitExecFileSync(args, { cwd: root, gitBin: gitBinary(limits), env: withoutRepositorySelectingGitEnv(), encoding: 'utf8', timeout: timeout(limits), stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
-const BUILD_OUTPUTS = new Set(['node_modules/', 'dist/', 'build/', 'coverage/', '.next/']);
-const CLOSEOUT_CONTAINERS = new Set(['.codegraph/', '.ai/', '.ai/harness/', '.ai/harness/evidence/',
+const REGENERABLE_TREES = new Set(['node_modules/', 'dist/', 'build/', 'coverage/', '.next/', '.archcontext/generated/', '.archcontext/tmp/']);
+const OUTPUT_CONTAINERS = new Set(['.archcontext/', '.codegraph/', '.ai/', '.ai/harness/', '.ai/harness/evidence/',
   '.ai/harness/evidence/events/', '.ai/harness/evidence/blobs/', '.ai/harness/evidence/runs/',
   '.ai/harness/evidence/checkpoints/',
   // Publication leaves an empty staging directory. Any child still blocks closeout.
@@ -94,10 +98,12 @@ function isRealPath(worktree: string, rel: string, kind: 'dir' | 'file'): boolea
   return stat.isFile() || (rel === CODEGRAPH_SOCKET && stat.isSocket());
 }
 
-function isCloseoutOutput(worktree: string, entry: string): boolean {
-  if (entry === ACTIVE_WORKTREE_MARKER) {
-    return isRealPath(worktree, entry, 'file') && readFileSync(join(worktree, entry), 'utf8').trim() === worktree;
-  }
+function isSelfMarker(worktree: string): boolean {
+  return isRealPath(worktree, ACTIVE_WORKTREE_MARKER, 'file') && readFileSync(join(worktree, ACTIVE_WORKTREE_MARKER), 'utf8').trim() === worktree;
+}
+
+function isRegenerableOutput(worktree: string, entry: string): boolean {
+  if (entry === ACTIVE_WORKTREE_MARKER) return isSelfMarker(worktree);
   const runtime = entry.startsWith('.ai/harness/') ? entry.slice('.ai/harness/'.length) : '';
   // Wildcard output names never authorize hidden local files.
   if (runtime.split('/').some(component => component.startsWith('.'))) return false;
@@ -106,7 +112,7 @@ function isCloseoutOutput(worktree: string, entry: string): boolean {
     && isRealPath(worktree, entry, 'file');
 }
 
-export function inspectIgnoredWorktreeEntries(worktree: string, mode: 'sweep' | 'closeout', limits: Limits = {}): { count: number; blockedPaths: string[] } {
+function inspectIgnoredWorktreeEntries(worktree: string, limits: Limits = {}): { count: number; blockedPaths: string[] } {
   const result = gitSpawnSync(['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'], {
     cwd: worktree, gitBin: gitBinary(limits), env: withoutRepositorySelectingGitEnv(),
     encoding: 'utf8', timeout: Math.min(timeout(limits) ?? Infinity, IGNORED_GIT_TIMEOUT_MS),
@@ -119,18 +125,16 @@ export function inspectIgnoredWorktreeEntries(worktree: string, mode: 'sweep' | 
   const blocked = new Set<string>();
   function inspect(entry: string): void {
     timeout(limits);
-    if (BUILD_OUTPUTS.has(entry) && isRealPath(worktree, entry.slice(0, -1), 'dir')) return;
-    if (mode === 'closeout') {
-      // Git can collapse these parents. Inspect their children against the same allowlist.
-      const container = CLOSEOUT_CONTAINERS.has(entry) || CLOSEOUT_RUN_CONTAINER.test(entry) || CLOSEOUT_CHECKPOINT_CONTAINER.test(entry);
-      if (container && isRealPath(worktree, entry.slice(0, -1), 'dir')) {
-        for (const child of readdirSync(join(worktree, entry), { withFileTypes: true })) {
-          inspect(entry + child.name + (child.isDirectory() ? '/' : ''));
-        }
-        return;
+    if (REGENERABLE_TREES.has(entry) && isRealPath(worktree, entry.slice(0, -1), 'dir')) return;
+    // Git can collapse these parents. Inspect their children against the same allowlist.
+    const container = OUTPUT_CONTAINERS.has(entry) || CLOSEOUT_RUN_CONTAINER.test(entry) || CLOSEOUT_CHECKPOINT_CONTAINER.test(entry);
+    if (container && isRealPath(worktree, entry.slice(0, -1), 'dir')) {
+      for (const child of readdirSync(join(worktree, entry), { withFileTypes: true })) {
+        inspect(entry + child.name + (child.isDirectory() ? '/' : ''));
       }
-      if (isCloseoutOutput(worktree, entry)) return;
+      return;
     }
+    if (isRegenerableOutput(worktree, entry)) return;
     blocked.add(entry);
   }
   for (const entry of entries) inspect(entry);
@@ -138,7 +142,10 @@ export function inspectIgnoredWorktreeEntries(worktree: string, mode: 'sweep' | 
 }
 
 export function assertNoIgnoredCloseoutData(worktree: string, limits: Limits = {}): void {
-  const { blockedPaths } = inspectIgnoredWorktreeEntries(worktree, 'closeout', limits);
+  assertNoBlockedIgnoredEntries(inspectIgnoredWorktreeEntries(worktree, limits).blockedPaths);
+}
+
+function assertNoBlockedIgnoredEntries(blockedPaths: readonly string[]): void {
   if (blockedPaths.length === 0) return;
   const names = blockedPaths.slice(0, 5).map(path => JSON.stringify(path)).join(', ');
   const overflow = blockedPaths.length > 5 ? ` (+${blockedPaths.length - 5} more)` : '';
@@ -205,15 +212,29 @@ export interface ExactWorktreeCleanup {
 }
 
 type MergeProof = { readonly provider: boolean; readonly merge_commit_sha: string };
+type MergeTarget = { readonly targetRef: string; readonly target: string };
+type WorktreeInspection = Pick<WorktreeView, 'judgment' | 'reasons' | 'process_count' | 'dirty_files' | 'ignored_entries' | 'unpushed_commits' | 'merge'>;
+type LiveRemovalOptions = {
+  readonly target?: MergeTarget;
+  readonly allowProvider?: boolean;
+  readonly processes?: WorktreeProcess[] | null;
+  readonly requireOwnCommits?: boolean;
+  readonly env?: NodeJS.ProcessEnv;
+};
 
 export type LocalMergeMode = 'ancestor' | 'absorbed' | 'unmerged';
 
 /** The offline merge-library verdict for `head` against the target OID. Any other library output throws. */
 export function localMergeMode(root: string, head: string, target: string, limits: Limits): LocalMergeMode {
+  const inherited = withoutProviderTokens(withoutRepositorySelectingGitEnv());
+  const objects = limits.previewObjects;
+  const env = { ...inherited, REPO_HARNESS_GIT_BIN: gitBinary(limits), ...objects && {
+    GIT_OBJECT_DIRECTORY: objects.directory, GIT_ALTERNATE_OBJECT_DIRECTORIES: JSON.stringify(objects.alternates),
+  } };
   const output = execFileSync('bash', [mergeLibraryPath(), '--target', target, head], {
     cwd: root, encoding: 'utf8', timeout: timeout(limits), stdio: ['ignore', 'pipe', 'pipe'],
-    // The library runs only local git (merge-base, rev-parse, merge-tree), so no provider token reaches it or a merge driver.
-    env: { ...withoutProviderTokens(withoutRepositorySelectingGitEnv()), REPO_HARNESS_GIT_BIN: gitBinary(limits) },
+    // The library runs only local git. A merge driver cannot inherit provider tokens.
+    env,
   }).trim();
   const mode = output.split('\t')[1];
   if (mode === 'ancestor' || mode === 'absorbed' || mode === 'unmerged') return mode;
@@ -225,24 +246,53 @@ export function mergeProof(root: string, branch: string, head: string, targetRef
   if (localMergeMode(root, head, target, limits) !== 'unmerged') return { provider: false, merge_commit_sha: target };
   // A fresh branch at the target head is also linked to the PR that made that head. It must never reach the provider.
   assertBranchHasCommits(root, branch, limits);
+  return providerMergeProof(root, head, { targetRef, target }, limits, providerCapMs, false);
+}
+
+function providerMergeProof(root: string, head: string, { targetRef, target }: MergeTarget, limits: Limits, providerCapMs: number, requireExactHead: boolean): MergeProof {
   const base = /^refs\/(?:heads\/|remotes\/[^/]+\/)(.+)$/.exec(git(root, ['rev-parse', '--symbolic-full-name', targetRef], limits))?.[1];
   const ghBin = limits.ghBin ?? resolveTrustedGhExecutable();
   const merge = base && ghBin ? observeProviderBranchMergeCommit({
     repoRoot: checkoutPath(entries(root, limits)[0]!.path), ghBin, gitBin: gitBinary(limits),
-    headSha: head, baseRef: base, targetOid: target, timeoutMs: Math.min(providerCapMs, timeout(limits) ?? providerCapMs),
+    headSha: head, baseRef: base, targetOid: target, timeoutMs: Math.min(providerCapMs, timeout(limits) ?? providerCapMs), requireExactHead,
   }) : null;
   if (!merge) throw new Error('cleanup merge is unproven');
   return { provider: true, merge_commit_sha: merge };
 }
 
+function branchRemovalProof(root: string, branch: string, head: string, target: MergeTarget, limits: Limits, allowProvider: boolean): {
+  merge: WorktreeInspection['merge']; unpushed: number; proof: MergeProof | null;
+} {
+  const local = localMergeMode(root, head, target.target, limits);
+  const unpushed = Number(git(root, ['rev-list', '--count', head, '--not', target.target, '--remotes'], limits));
+  if (!Number.isSafeInteger(unpushed) || unpushed < 0) throw new Error('invalid unpushed count');
+  if (local !== 'unmerged' && unpushed === 0) return { merge: local, unpushed, proof: { provider: false, merge_commit_sha: target.target } };
+  if (allowProvider) {
+    try {
+      // The PR that made a branch's starting commit does not authorize deleting the branch.
+      assertBranchHasCommits(root, branch, limits);
+      return { merge: 'provider', unpushed: 0, proof: providerMergeProof(root, head, target, limits, 3_000, true) };
+    } catch { /* only a positive exact-head observation establishes coverage */ }
+  }
+  return { merge: local, unpushed, proof: null };
+}
+
+/** The contract cleanup preview and the final barrier bind the same branch proof. */
+export function proveCloseoutBranch(root: string, branch: string, head: string, target: MergeTarget, limits: Limits = {}) {
+  const result = branchRemovalProof(root, branch, head, target, limits, true);
+  if (!result.proof) {
+    if (result.merge === 'unmerged') throw new Error(`branch ${branch} is not fully merged into ${target.targetRef}; refusing cleanup`);
+    throw new Error(`branch ${branch} has unpushed commits; refusing cleanup`);
+  }
+  return { mode: result.merge, ...result.proof };
+}
+
 export function assertNoOwner(root: string, worktree: string, limits: Limits, allowSelfMarker = false): void {
   for (const entry of entries(root, limits)) {
-    const marker = join(entry.path, '.ai/harness/active-worktree');
+    const marker = join(entry.path, ACTIVE_WORKTREE_MARKER);
     timeout(limits);
-    let stat;
-    try { stat = lstatSync(marker); }
+    try { if (!isRealPath(entry.path, ACTIVE_WORKTREE_MARKER, 'file')) throw new Error('cleanup has unknown active-worktree marker'); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
-    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('cleanup has unknown active-worktree marker');
     const owner = readFileSync(marker, 'utf8').trim();
     if (!owner) throw new Error('cleanup has unknown active-worktree marker');
     if (allowSelfMarker && owner === worktree && checkoutPath(entry.path) === worktree) continue;
@@ -376,33 +426,47 @@ export function cleanupExactWorktree(root: string, expected: ExactWorktreeCleanu
     // A renamed receipt binds the original inode. Its old name may now belong
     // to another user; registration cleanup must never traverse that new data.
     const path = expected.worktree ? (renamed ? expected.worktree : checkoutPath(expected.worktree)) : '';
-    assertNoOwner(root, path, limits, limits.closeout === true);
-    if (git(root, ['rev-parse', `${expected.target_ref}^{commit}`], limits) !== expected.target_oid) throw new Error('cleanup target moved');
+    assertCleanupTarget(root, { targetRef: expected.target_ref, target: expected.target_oid }, limits);
     git(root, ['merge-base', '--is-ancestor', expected.merge_commit_sha, expected.target_oid], limits);
     if (git(root, ['rev-parse', `refs/heads/${expected.branch}`], limits) !== expected.head_sha) throw new Error('cleanup execution head moved');
-    // The topology lock is held here, and other lock users wait at most 5 s.
-    const proof = mergeProof(root, expected.branch, expected.head_sha, expected.target_ref, expected.target_oid, limits, 3_000);
-    if (proof.provider && proof.merge_commit_sha !== expected.merge_commit_sha) throw new Error('cleanup merge commit changed');
     const topology = entries(root, limits);
     const binding = topology.find(entry => entry.branch === `refs/heads/${expected.branch}`);
     if (binding && checkoutPath(binding.path) !== path) throw new Error('cleanup worktree target moved');
     if (binding?.locked) throw new Error('cleanup worktree is locked');
     if (renamed && topology.some(entry => protectsCwd(renamed!.directory, checkoutPath(entry.path)))) throw new Error('cleanup trash is still registered');
-    if (!renamed && path && existsSync(path)) {
+    const live = !renamed && path && existsSync(path);
+    const target = { targetRef: expected.target_ref, target: expected.target_oid };
+    const sweep = limits.liveSweep;
+    let proof: MergeProof;
+    if (live) {
       if (!binding) throw new Error('cleanup worktree is not registered in this clone');
       if (checkoutPath(root) === path) throw new Error('cleanup cannot remove its current worktree');
       assertWorktreeBinding(root, path, expected.branch, limits);
       if (git(path, ['rev-parse', 'HEAD'], limits) !== expected.head_sha) throw new Error('cleanup execution head moved');
-      if (git(path, ['status', '--porcelain', '--untracked-files=all'], limits)) throw new Error('cleanup_blocked_dirty_worktree');
-      if (limits.closeout) assertNoIgnoredCloseoutData(path, limits);
     }
-    if (limits.closeout && path) {
-      const marker = join(path, ACTIVE_WORKTREE_MARKER);
-      try {
-        if (isRealPath(path, ACTIVE_WORKTREE_MARKER, 'file') && readFileSync(marker, 'utf8').trim() === path) unlinkSync(marker);
-      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    if (live && (sweep || limits.closeout)) {
+      const inspection = inspectRemoval(root, path, sweep?.cwd ?? realpathSync(process.cwd()), limits, {
+        target, allowProvider: true, requireOwnCommits: !!sweep, env: sweep?.env,
+        processes: sweep ? sweep.processes(Math.min(limits.deadline!, Date.now() + 5_000)) : undefined,
+      });
+      if (limits.closeout) {
+        if (inspection.probeError) throw inspection.probeError;
+        assertNoBlockedIgnoredEntries(inspection.blockedPaths);
+      }
+      proof = requireGreenRemoval(inspection);
+    } else {
       assertNoOwner(root, path, limits);
+      if (live && git(path, ['status', '--porcelain', '--untracked-files=all'], limits)) throw new Error('cleanup_blocked_dirty_worktree');
+      if (sweep || limits.closeout) {
+        const checked = branchRemovalProof(root, expected.branch, expected.head_sha, target, limits, true);
+        if (!checked.proof) throw new Error('cleanup merge is unproven');
+        proof = checked.proof;
+      } else {
+        proof = mergeProof(root, expected.branch, expected.head_sha, target.targetRef, target.target, limits, 3_000);
+      }
     }
+    if (proof.provider && proof.merge_commit_sha !== expected.merge_commit_sha) throw new Error('cleanup merge commit changed');
+    assertCleanupTarget(root, target, limits);
     const result = actuator();
     if (!renamed && path && existsSync(path)) throw new Error('cleanup worktree removal is unproven');
     if (entries(root, limits).some(entry => entry.branch === `refs/heads/${expected.branch}`)) throw new Error('cleanup registration removal is unproven');
@@ -411,6 +475,10 @@ export function cleanupExactWorktree(root: string, expected: ExactWorktreeCleanu
     endWorktreeRecord(common, lifecycle, 'removed');
     return result;
   }, limits);
+}
+
+function assertCleanupTarget(root: string, { targetRef, target }: MergeTarget, limits: Limits): void {
+  if (git(root, ['rev-parse', `${targetRef}^{commit}`], limits) !== target) throw new Error('cleanup target moved');
 }
 
 function deleteCheckedBranch(root: string, expected: ExactWorktreeCleanup, limits: Limits): void {
@@ -557,7 +625,8 @@ function pathExists(path: string): boolean {
 }
 export function assertNoSubmodules(context: { readonly main: string; readonly limits: Limits }, path: string): void {
   const directory = git(context.main, ['-C', path, 'rev-parse', '--absolute-git-dir'], context.limits);
-  if (pathExists(join(path, '.gitmodules')) || pathExists(join(directory, 'modules'))) throw new Error('submodules present');
+  if (pathExists(join(path, '.gitmodules')) || pathExists(join(directory, 'modules'))
+    || /^160000$/m.test(git(path, ['ls-files', '--format=%(objectmode)'], context.limits))) throw new Error('submodules present');
 }
 
 /**
@@ -573,16 +642,11 @@ function commitSweepRemoval(context: SweepContext, expected: ExactWorktreeCleanu
   const snapshot = pending ? { ...expected, target_oid: git(context.main, ['rev-parse', `${expected.target_ref}^{commit}`], context.limits) } : expected;
   const identity = payloadExists && !binding ? { ...snapshot, worktree: '' } : snapshot;
   cleanupExactWorktree(context.main, identity, () => {
-    if (!pending) {
-      const inspection = inspectWorktree(context.main, expected.worktree, context.cwd, { env: context.env, deadline: context.limits.deadline,
-        processes: context.processes(Math.min(context.limits.deadline, Date.now() + 5_000)), ghBin: context.limits.ghBin });
-      if (inspection.judgment !== 'green') throw new WorktreeNotGreenError(inspection.reasons);
-      verify?.();
-    }
+    if (!pending) verify?.();
     if (receipt) assertTrashIsUnregistered(context, receipt.directory);
     // Refuse a whole-prune conflict before renaming any visible checkout.
     assertPruneScope(context, receipt);
-    if (!receipt || !existsSync(trashPayload(receipt))) {
+    if (pending && !payloadExists) {
       assertBranchHasCommits(context.main, expected.branch, context.limits);
       assertNoSubmodules(context, expected.worktree);
     }
@@ -601,7 +665,7 @@ function commitSweepRemoval(context: SweepContext, expected: ExactWorktreeCleanu
     context.options.afterRemovalStep?.('unregistered', receipt.directory);
     deleteCheckedBranch(context.main, snapshot, context.limits);
     context.options.afterRemovalStep?.('branch-deleted', receipt.directory);
-  }, context.limits, payloadExists ? pending : undefined);
+  }, { ...context.limits, liveSweep: context }, payloadExists ? pending : undefined);
   return receipt!;
 }
 function trashLifecycle(common: string, receipt: WorktreeTrashReceipt) {
@@ -663,7 +727,7 @@ function resumeSweepTrash(context: SweepContext, directory: string): 'resumed' |
 }
 
 /** The policy merge-back target that every worktree merge proof binds. */
-export function mergeBackTarget(main: string, limits: Limits = {}): { readonly targetRef: string; readonly target: string } {
+export function mergeBackTarget(main: string, limits: Limits = {}): MergeTarget {
   const policy = readWorkflowPolicyDocument(main);
   const strategy = policy.rootIsObject ? policyValue(policy, 'worktree_strategy') : POLICY_ABSENT;
   const mergeBack = isPolicyObject(strategy) ? policyValue(policy, 'worktree_strategy.merge_back') : POLICY_ABSENT;
@@ -678,12 +742,27 @@ export function mergeBackTarget(main: string, limits: Limits = {}): { readonly t
 /** Shared, read-only selection predicate. The actuator still rechecks under the topology lock. */
 export function inspectWorktree(root: string, path: string, callerCwd: string | null, options: {
   env?: NodeJS.ProcessEnv; deadline?: number; processes?: WorktreeProcess[] | null; ghBin?: string;
-} = {}): Pick<WorktreeView, 'judgment' | 'reasons' | 'process_count' | 'dirty_files' | 'ignored_entries' | 'unpushed_commits' | 'merge'> {
+} = {}): WorktreeInspection {
   const limits: Limits = { deadline: options.deadline ?? Date.now() + 10_000, gitBin: configuredGitBinary(options.env), ghBin: options.ghBin };
+  return inspectRemoval(root, path, callerCwd, limits, { ...options, requireOwnCommits: true, allowProvider: options.ghBin !== undefined }).view;
+}
+
+function inspectRemoval(root: string, path: string, callerCwd: string | null, limits: Limits, options: LiveRemovalOptions): {
+  view: WorktreeInspection; proof: MergeProof | null; blockedPaths: string[]; probeError?: Error; branchError?: Error;
+} {
   const reasons: WorktreeReason[] = [];
-  const result: ReturnType<typeof inspectWorktree> = { judgment: 'yellow', reasons, process_count: null, dirty_files: null, ignored_entries: null, unpushed_commits: null, merge: 'unknown' };
+  const result: WorktreeInspection = { judgment: 'yellow', reasons, process_count: null, dirty_files: null, ignored_entries: null, unpushed_commits: null, merge: 'unknown' };
+  let proof: MergeProof | null = null;
+  let blockedPaths: string[] = [];
+  let probeError: Error | undefined;
+  let branchError: Error | undefined;
   let inUse = false;
-  const reject = (reason: WorktreeReason, action: () => void) => { try { action(); } catch { reasons.push(reason); } };
+  const reject = (reason: WorktreeReason, action: () => void): Error | undefined => {
+    try { action(); } catch (error) {
+      reasons.push(reason);
+      return error instanceof Error ? error : new Error(String(error));
+    }
+  };
   try {
     const topology = entries(root, limits);
     const main = checkoutPath(topology[0]!.path);
@@ -692,48 +771,73 @@ export function inspectWorktree(root: string, path: string, callerCwd: string | 
     const entry = topology.find(item => checkoutPath(item.path) === path);
     if (path === main) reasons.push('primary');
     if (callerCwd !== null && protectsCwd(path, callerCwd)) { reasons.push('session_cwd'); inUse = true; }
-    const processes = options.processes === undefined ? worktreeProcesses(limits.deadline!) : options.processes;
+    const processes = options.processes === undefined ? worktreeProcesses(limits.deadline ?? Date.now() + 5_000) : options.processes;
     result.process_count = processes === null ? null : new Set(processes.filter(item => protectsCwd(path, item.cwd)).map(item => item.pid)).size;
     if (result.process_count === null) reasons.push('process_unknown');
     else if (result.process_count > 0) { reasons.push('process_in_use'); inUse = true; }
     try {
       if (!taskWorktreeRuntimeClosed({ repository_id: common, primary_root: main, execution_root: path })) { reasons.push('runtime_open'); inUse = true; }
     } catch { reasons.push('runtime_unknown'); }
-    if (!isManagedWorktreePath(path, managedWorktreeRoot(options.env), basename(main))) reasons.push('outside_managed_root');
+    if (options.requireOwnCommits && !isManagedWorktreePath(path, managedWorktreeRoot(options.env), basename(main))) reasons.push('outside_managed_root');
     if (!entry) reasons.push('unregistered');
     if (!existsSync(path)) reasons.push('missing');
     if (entry?.locked) reasons.push('locked');
-    reject('owner', () => assertNoOwner(main, path, limits));
+    reject('owner', () => assertNoOwner(main, path, limits, true));
     if (entry && existsSync(path)) {
-      reject('probe_failed', () => {
+      probeError = reject('probe_failed', () => {
         // A read-only judgment: no index refresh, so no index.lock in the inspected worktree.
-        const status = git(path, ['--no-optional-locks', 'status', '--porcelain=v2', '-z', '--untracked-files=all'], limits);
+        const status = git(path, ['--no-optional-locks', 'status', '--porcelain=v2', '-z', '--untracked-files=all', '--ignore-submodules=none'], limits);
         // Rename records have a second NUL field containing the old name.
         result.dirty_files = status.split('\0').filter(line => /^[12u?] /u.test(line)).length;
         if (result.dirty_files > 0) reasons.push('dirty');
-        const ignored = inspectIgnoredWorktreeEntries(path, 'sweep', limits);
+        const ignored = inspectIgnoredWorktreeEntries(path, limits);
         result.ignored_entries = ignored.count;
-        if (ignored.blockedPaths.length > 0) reasons.push('ignored_data');
-        result.unpushed_commits = Number(git(path, ['rev-list', '--count', 'HEAD', '--not', '--remotes'], limits));
-        if (!Number.isSafeInteger(result.unpushed_commits)) throw new Error('invalid count');
-        if (result.unpushed_commits > 0) reasons.push('unpushed');
+        blockedPaths = ignored.blockedPaths;
+        if (blockedPaths.length > 0) reasons.push('ignored_data');
       });
       reject('submodules', () => assertNoSubmodules({ main, limits }, path));
     }
-    if (!entry?.branch?.startsWith('refs/heads/') || !entry.head) reasons.push('no_branch');
-    else {
+    if (entry?.head && entry.branch?.startsWith('refs/heads/')) {
       const branch = entry.branch.slice('refs/heads/'.length);
-      reject('no_own_commits', () => assertBranchHasCommits(main, branch, limits));
+      if (options.requireOwnCommits) branchError = reject('no_own_commits', () => assertBranchHasCommits(main, branch, limits));
       reject('merge_unproven', () => {
-        const { target } = mergeBackTarget(main, limits);
-        const local = localMergeMode(main, entry.head!, target, limits);
-        result.merge = local;
-        if (local === 'unmerged') throw new Error('local merge proof unavailable');
+        const target = options.target ?? mergeBackTarget(main, limits);
+        const checked = branchRemovalProof(main, branch, entry.head!, target, limits, options.allowProvider === true && reasons.length === 0);
+        result.merge = checked.merge;
+        result.unpushed_commits = checked.unpushed;
+        proof = checked.proof;
+        if (checked.unpushed > 0) reasons.push('unpushed');
+        if (checked.merge === 'unmerged') reasons.push('merge_unproven');
       });
-    }
+    } else if (entry?.head && entry.detached) {
+      result.merge = 'unmerged';
+      reject('merge_unproven', () => {
+        const { target } = options.target ?? mergeBackTarget(main, limits);
+        git(main, ['merge-base', '--is-ancestor', entry.head!, target], limits);
+        result.merge = 'ancestor';
+        result.unpushed_commits = 0;
+        proof = { provider: false, merge_commit_sha: target };
+      });
+    } else reasons.push('no_branch');
   } catch { reasons.push('probe_failed'); }
-  result.judgment = inUse ? 'red' : reasons.length ? 'yellow' : 'green';
-  return result;
+  if (inUse) result.judgment = 'red';
+  else if (proof && reasons.length === 0) result.judgment = 'green';
+  return { view: result, proof, blockedPaths, probeError, branchError };
+}
+
+/** Release a closed workspace's own ignored marker under the same removal proof. */
+export function releaseClosedWorktreeMarker(root: string, path: string, gitBin = configuredGitBinary()): void {
+  const limits: Limits = { gitBin, deadline: Date.now() + 5_000 };
+  try {
+    if (checkoutPath(path) !== path || !isSelfMarker(path)) return;
+    withWorktreeTopologyLock(root, () => {
+      const { view } = inspectRemoval(root, path, realpathSync(process.cwd()), limits, { allowProvider: true });
+      if (view.judgment !== 'green') return;
+      // A tracked marker is repository content, even when its bytes match the checkout path.
+      git(path, ['check-ignore', '--quiet', '--', ACTIVE_WORKTREE_MARKER], limits);
+      if (isSelfMarker(path)) unlinkSync(join(path, ACTIVE_WORKTREE_MARKER));
+    }, limits);
+  } catch { /* A marker with uncertain proof stays in place for a later cleanup. */ }
 }
 
 function createSweepContext(root: string, callerCwd: string, env: NodeJS.ProcessEnv, limits: SweepContext['limits'], trashDeadline: number, options: WorktreeRemovalOptions,
@@ -849,23 +953,32 @@ function recoverSweepTrash(context: SweepContext, notes: string[], approval?: Sw
 
 /** The shared green predicate refused a removal. The message keeps the sweep's report wording. */
 export class WorktreeNotGreenError extends Error {
-  constructor(readonly reasons: readonly WorktreeReason[]) {
-    const messages: Partial<Record<WorktreeReason, string>> = { dirty: 'cleanup_blocked_dirty_worktree', merge_unproven: 'cleanup merge is unproven', submodules: 'submodules present' };
+  constructor(readonly reasons: readonly WorktreeReason[], branchError?: Error) {
+    const messages: Partial<Record<WorktreeReason, string>> = { dirty: 'cleanup_blocked_dirty_worktree', merge_unproven: 'cleanup merge is unproven',
+      submodules: 'submodules present', owner: 'cleanup has an active-worktree marker reference', session_cwd: 'session cwd', runtime_open: 'runtime is open' };
+    if (branchError) messages.no_own_commits = branchError.message;
     super(reasons.map(reason => messages[reason] ?? reason).join(', '));
     this.name = 'WorktreeNotGreenError';
   }
 }
 
-/** The one green removal path: the shared predicate, the merge proof, then the exact barrier, which runs the predicate again. */
+function requireGreenRemoval(inspection: ReturnType<typeof inspectRemoval>): MergeProof {
+  if (inspection.view.judgment !== 'green' || !inspection.proof) throw new WorktreeNotGreenError(inspection.view.reasons, inspection.branchError);
+  return inspection.proof;
+}
+
+/** Recheck the bound branch and the fresh removal proof under the topology lock before creating a receipt. */
 function removeGreenWorktree(context: SweepContext, input: {
   readonly path: string; readonly branch: string; readonly head: string; readonly targetRef: string; readonly target: string;
   readonly processes: WorktreeProcess[] | null; readonly verify?: () => void;
 }): WorktreeTrashReceipt {
   const { main, limits } = context;
-  const inspection = inspectWorktree(main, input.path, context.cwd, { env: context.env, deadline: limits.deadline, processes: input.processes, ghBin: limits.ghBin });
-  if (inspection.judgment !== 'green') throw new WorktreeNotGreenError(inspection.reasons);
-  const merge = mergeProof(main, input.branch, input.head, input.targetRef, input.target, limits).merge_commit_sha;
-  return commitSweepRemoval(context, { worktree: input.path, branch: input.branch, head_sha: input.head, target_ref: input.targetRef, target_oid: input.target, merge_commit_sha: merge }, undefined, input.verify);
+  const target = { targetRef: input.targetRef, target: input.target };
+  const proof = requireGreenRemoval(inspectRemoval(main, input.path, context.cwd, limits, {
+    env: context.env, target, processes: input.processes, requireOwnCommits: true, allowProvider: true,
+  }));
+  return commitSweepRemoval(context, { worktree: input.path, branch: input.branch, head_sha: input.head, target_ref: input.targetRef, target_oid: input.target,
+    merge_commit_sha: proof.merge_commit_sha }, undefined, input.verify);
 }
 
 export interface GreenWorktreeRemoval {
@@ -876,7 +989,7 @@ export interface GreenWorktreeRemoval {
 }
 export type GreenWorktreeRemovalResult =
   | { readonly removed: true }
-  /** `started` is true when a removal step ran, so the trash receipt, not this call, finishes it. */
+  /** `started` is true once a removal step begins, including a Git checkout-only removal. */
   | { readonly removed: false; readonly started: boolean; readonly error: unknown };
 
 /**
@@ -899,7 +1012,13 @@ export function removeGreenWorktrees(root: string, callerCwd: string, env: NodeJ
     try {
       timeout(limits);
       const entry = entries(context.main, limits).find(row => checkoutPath(row.path) === item.path);
-      if (!entry?.branch?.startsWith('refs/heads/') || !entry.head) throw new Error('worktree registration changed');
+      if (!entry?.head) throw new Error('worktree registration changed');
+      if (entry.detached && !entry.branch) {
+        removeDetachedWorktree(context, item.path, entry.head, { targetRef, target }, item.verify, () => { started = true; });
+        results.push({ removed: true });
+        continue;
+      }
+      if (!entry.branch?.startsWith('refs/heads/')) throw new Error('worktree registration changed');
       const receipt = removeGreenWorktree(context, { path: item.path, branch: entry.branch.slice('refs/heads/'.length), head: entry.head, targetRef, target,
         processes: options.processes(Math.min(options.deadline, Date.now() + 5_000)), verify: item.verify });
       results.push({ removed: true });
@@ -910,11 +1029,9 @@ export function removeGreenWorktrees(root: string, callerCwd: string, env: NodeJ
   return { recovery_blocked: false, results };
 }
 
-/** The sweep's checks before the shared green predicate. Read-only; a throw is the reason to keep the entry. */
-function selectLiveWorktree(context: SweepContext, entry: ReturnType<typeof entries>[number], ignoredTrash: boolean) {
+function selectMissingWorktree(context: SweepContext, entry: ReturnType<typeof entries>[number], ignoredTrash: boolean): string {
   const { main, cwd, common, limits } = context;
   const path = checkoutPath(entry.path);
-  timeout(limits);
   if (path === main || protectsCwd(path, cwd)) throw new Error('session cwd');
   if (entry.locked) throw new Error('locked');
   if (!entry.branch?.startsWith('refs/heads/') || !entry.head) throw new Error('no local branch');
@@ -922,9 +1039,32 @@ function selectLiveWorktree(context: SweepContext, entry: ReturnType<typeof entr
   assertNoOwner(main, path, limits);
   assertBranchHasCommits(main, branch, limits);
   if (!taskWorktreeRuntimeClosed({ repository_id: common, primary_root: main, execution_root: path })) throw new Error('runtime is open');
-  const missing = !existsSync(path);
-  if (missing && ignoredTrash) throw new Error('missing entry retained while trash ownership is unknown');
-  return { path, branch, head: entry.head, missing };
+  if (ignoredTrash) throw new Error('missing entry retained while trash ownership is unknown');
+  return branch;
+}
+
+/** Detached removal has no ref transaction and Git removes only this registration. */
+function removeDetachedWorktree(context: SweepContext, path: string, head: string, target: MergeTarget, verify?: () => void, onRemoval?: () => void): void {
+  const { main, cwd, common, limits } = context;
+  withWorktreeTopologyLock(main, () => {
+    assertCleanupTarget(main, target, limits);
+    const entry = entries(main, limits).find(item => checkoutPath(item.path) === path);
+    if (!entry?.detached || entry.branch || entry.head !== head
+      || resolveGitCommonDirectory(path, gitBinary(limits), timeout(limits)) !== common
+      || git(path, ['rev-parse', 'HEAD'], limits) !== head) throw new Error('detached worktree binding changed');
+    requireGreenRemoval(inspectRemoval(main, path, cwd, limits, {
+      target, env: context.env, requireOwnCommits: true,
+      processes: context.processes(Math.min(limits.deadline, Date.now() + 5_000)),
+    }));
+    verify?.();
+    assertCleanupTarget(main, target, limits);
+    const lifecycle = readWorktreeRecord(common, path);
+    onRemoval?.();
+    git(main, ['worktree', 'remove', path], limits);
+    if (existsSync(path) || entries(main, limits).some(item => checkoutPath(item.path) === path)) throw new Error('cleanup worktree removal is unproven');
+    retireWorktreeIdentity(common, path, limits);
+    endWorktreeRecord(common, lifecycle, 'removed');
+  }, limits);
 }
 
 const reasonOf = (error: unknown) => error instanceof Error ? error.message.split('\n')[0]! : String(error);
@@ -932,9 +1072,9 @@ const reasonOf = (error: unknown) => error instanceof Error ? error.message.spli
 /**
  * The read-only form of `sweepManagedWorktrees`: the same inputs, checks and
  * green predicate, without the topology lock, the provider merge query or any
- * ref, index or worktree write; the local merge check's `git merge-tree` can add
- * unreferenced loose objects. Null means the sweep has nothing to inspect. The sweep's per-run budget
- * is not applied, so a run executes a subset of these steps.
+ * repository writes. Git puts temporary merge objects in a private directory.
+ * Provider-only live checkouts are kept and do not bind an approved apply.
+ * Null means there is nothing to inspect. Apply can take a subset of the steps.
  */
 export function planManagedWorktreeSweep(root: string, callerCwd: string, env: NodeJS.ProcessEnv = process.env, options: { readonly deadlineMs?: number } = {}): WorktreeSweepPlan | null {
   const limits = { deadline: Date.now() + (options.deadlineMs ?? 2_000), gitBin: configuredGitBinary(env) };
@@ -957,7 +1097,7 @@ export function planManagedWorktreeSweep(root: string, callerCwd: string, env: N
   const live = entries(main, limits).slice(1).filter(entry => managed(checkoutPath(entry.path)));
   const intents = readPrunedWorktreeIntents(common);
   if (!live.length && !intents.length) return items.length ? { target_oid: null, items } : null;
-  const { target } = mergeBackTarget(main, limits);
+  const target = mergeBackTarget(main, limits);
   for (const intent of intents) {
     const step = intentStep(intent);
     if (ignoredTrash) items.push({ ...step, action: 'keep', reason: 'missing entry retained while trash ownership is unknown' });
@@ -965,20 +1105,31 @@ export function planManagedWorktreeSweep(root: string, callerCwd: string, env: N
     else if (pathExists(intent.worktree)) items.push({ ...step, action: 'keep', reason: 'pruned worktree path or registration reappeared' });
     else items.push(step);
   }
-  const registered = registrations(common);
-  const processes = worktreeProcesses(limits.deadline);
-  for (const entry of live) {
+  if (live.length) {
+    const registered = registrations(common);
+    const processes = worktreeProcesses(limits.deadline);
+    const alternates = git(main, ['rev-parse', '--path-format=absolute', '--git-path', 'objects'], limits);
+    const directory = mkdtempSync(join(tmpdir(), 'rh-worktree-merge-'));
+    const previewLimits = { ...limits, previewObjects: { directory, alternates } };
     try {
-      const selected = selectLiveWorktree(context, entry, ignoredTrash);
-      if (selected.missing) { items.push(liveStep('prune', entry, registered)); continue; }
-      const inspection = inspectWorktree(main, selected.path, context.cwd, { env, deadline: limits.deadline, processes });
-      const step = liveStep('remove', entry, registered);
-      items.push(inspection.judgment === 'green' ? step : { ...step, action: 'keep', reason: new WorktreeNotGreenError(inspection.reasons).message });
-    } catch (error) {
-      items.push({ ...liveStep('remove', entry, registered), action: 'keep', reason: reasonOf(error) });
-    }
+      for (const entry of live) {
+        const path = checkoutPath(entry.path);
+        try {
+          if (!existsSync(path)) {
+            selectMissingWorktree(context, entry, ignoredTrash);
+            items.push(liveStep('prune', entry, registered));
+            continue;
+          }
+          const { view, branchError } = inspectRemoval(main, path, context.cwd, previewLimits, { env, target, processes, requireOwnCommits: true });
+          const step = liveStep('remove', entry, registered);
+          items.push(view.judgment === 'green' ? step : { ...step, action: 'keep', reason: new WorktreeNotGreenError(view.reasons, branchError).message });
+        } catch (error) {
+          items.push({ ...liveStep('remove', entry, registered), action: 'keep', reason: reasonOf(error) });
+        }
+      }
+    } finally { rmSync(directory, { recursive: true, force: true }); }
   }
-  return { target_oid: target, items };
+  return { target_oid: target.target, items };
 }
 
 /**
@@ -1033,20 +1184,20 @@ export function sweepManagedWorktrees(root: string, callerCwd: string, env: Node
           // Ownership precedes the merge proof, because that proof can query the provider.
           assertNoOwner(main, intent.worktree, limits);
           if (!taskWorktreeRuntimeClosed({ repository_id: common, primary_root: main, execution_root: intent.worktree })) throw new Error('runtime is open');
-          let merge: string;
-          try { merge = mergeProof(main, intent.branch, intent.head, targetRef, target, limits).merge_commit_sha; }
-          catch {
+          const { proof } = branchRemovalProof(main, intent.branch, intent.head, { targetRef, target }, limits, true);
+          if (!proof) {
             notes.push(`${intent.worktree}: pruned; unmerged branch kept (${intent.branch})`);
             continue;
           }
-          const expected = { worktree: '', branch: intent.branch, head_sha: intent.head, target_ref: targetRef, target_oid: target, merge_commit_sha: merge };
+          const expected = { worktree: '', branch: intent.branch, head_sha: intent.head, target_ref: targetRef, target_oid: target,
+            merge_commit_sha: proof.merge_commit_sha };
           cleanupExactWorktree(main, expected, () => {
             if (pathExists(intent.worktree) || pathExists(intent.git_directory)) throw new Error('pruned worktree path or registration reappeared');
             assertNoOwner(main, intent.worktree, limits);
             assertBranchHasCommits(main, intent.branch, limits);
             if (!taskWorktreeRuntimeClosed({ repository_id: common, primary_root: main, execution_root: intent.worktree })) throw new Error('runtime is open');
             deleteCheckedBranch(main, expected, limits);
-          }, limits);
+          }, { ...limits, liveSweep: context });
         }
         withWorktreeTopologyLock(main, () => {
           if (branchExists(context, intent.branch) || entries(main, limits).some(entry => checkoutPath(entry.path) === intent.worktree || entry.branch === `refs/heads/${intent.branch}`)) throw new Error('pruned removal readback failed');
@@ -1069,16 +1220,31 @@ export function sweepManagedWorktrees(root: string, callerCwd: string, env: Node
     for (const entry of liveCandidates.slice(0, liveBudget)) {
       const path = checkoutPath(entry.path);
       try {
-        const { branch, head, missing } = selectLiveWorktree(context, entry, ignoredTrash);
-        // A removal also runs Git's whole prune, so both steps need the prune scope approved.
+        if (approval && protectsCwd(path, cwd)) throw new WorktreeNotGreenError(['session_cwd']);
+        const missing = !existsSync(path);
+        const detached = entry.detached && !entry.branch;
+        // Linked branch removal also runs Git's whole prune. Detached removal is scoped to its registration.
         if (approval && (!approval.allows(liveStep(missing ? 'prune' : 'remove', entry, registered!)) || (!missing && !targetApproved)
-          || !pruneScopeApproved(context, approval))) throw new Error(NOT_IN_PREVIEW);
+          || ((missing || !detached) && !pruneScopeApproved(context, approval)))) throw new Error(NOT_IN_PREVIEW);
         if (missing) {
+          const branch = selectMissingWorktree(context, entry, ignoredTrash);
           withWorktreeTopologyLock(main, () => { pruned += pruneManagedWorktrees(context); }, limits);
           notes.push(`${path}: pruned; branch cleanup deferred (${branch})`);
           continue;
         }
-        const receipt = removeGreenWorktree(context, { path, branch, head, targetRef, target, processes });
+        if (!entry.head) throw new Error('cleanup head is unavailable');
+        const verify = approval && (() => {
+          const step = liveStep('remove', entry, registrations(common));
+          if (!approval.allows(step) || (!detached && !pruneScopeApproved(context, approval))) throw new Error(NOT_IN_PREVIEW);
+        });
+        if (detached) {
+          removeDetachedWorktree(context, path, entry.head, { targetRef, target }, verify);
+          removed++;
+          notes.push(`${path}: removed`);
+          continue;
+        }
+        if (!entry.branch?.startsWith('refs/heads/')) throw new Error('no local branch');
+        const receipt = removeGreenWorktree(context, { path, branch: entry.branch.slice('refs/heads/'.length), head: entry.head, targetRef, target, processes, verify });
         removed++;
         notes.push(`${path}: removed`);
         // No detached child: each unlink checks the shared trash deadline.

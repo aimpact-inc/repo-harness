@@ -1,4 +1,4 @@
-import { controlledWorktreeProcessPreload } from './helpers/controlled-worktree-processes';
+import { controlledWorktreeProcessPreload, setControlledWorktreeProcesses } from './helpers/controlled-worktree-processes';
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "child_process";
 import {
@@ -14,15 +14,17 @@ import {
   writeFileSync
 } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 import { commitAll, initGitRepo, run, tmpWorkspace } from "./helpers/repo-fixture";
 import { executeAdmittedVerification } from "../src/effects/evidence/verification-execution";
 import { seedReviewAdmissionFixture } from './helpers/review-admission-fixture';
 import { parseVerificationPlanFromContractText } from '../src/core/evidence/verification-plan';
 import { nativeVerificationPlan } from "./state/effective-state-fixture";
-import { sweepManagedWorktrees } from "../src/effects/state/coordination-worktree-topology";
+import { planManagedWorktreeSweep, removeGreenWorktrees, sweepManagedWorktrees } from "../src/effects/state/coordination-worktree-topology";
 import { readPrunedWorktreeIntents } from "../src/effects/state/pruned-worktree-intents";
 import { listHelperFiles } from "../src/effects/runtime/helper-runner";
+import { workspaceDirectory } from '../src/effects/terminal/task-session-record';
+import { ensureSessionDirectory } from '../src/effects/terminal/task-session-io';
 
 // Regression guard for the squash-merge absorption predicate in the cleanup
 // branch of `scripts/contract-worktree.sh`. See:
@@ -161,6 +163,10 @@ describe("contract-worktree cleanup squash-merge absorption", () => {
       mkdirSync(join(cwd, ".ai/harness/worktrees"), { recursive: true });
       writeFileSync(join(cwd, ".ai/harness/worktrees/squash-demo.json"), '{"slug":"squash-demo","branch":"codex/squash-demo"}\n');
 
+      const unpublished = run("bash", ["scripts/contract-worktree.sh", "cleanup", "--slug", "squash-demo", "--dry-run"], cwd);
+      expect(unpublished.status).toBe(1);
+      expect(unpublished.stderr).toContain('has unpushed commits');
+      expect(run("git", ["update-ref", "refs/remotes/origin/squash-demo", "codex/squash-demo"], cwd).status).toBe(0);
       const dryRun = run(
         "bash",
         ["scripts/contract-worktree.sh", "cleanup", "--slug", "squash-demo", "--dry-run"],
@@ -248,6 +254,7 @@ describe("contract-worktree cleanup squash-merge absorption", () => {
 
       expect(run("git", ["merge", "--squash", "codex/squash-real"], cwd).status).toBe(0);
       commitAll(cwd, "squash-merge codex/squash-real");
+      expect(run("git", ["update-ref", "refs/remotes/origin/squash-real", "codex/squash-real"], cwd).status).toBe(0);
       expect(
         run("git", ["merge-base", "--is-ancestor", "codex/squash-real", "main"], cwd).status,
       ).not.toBe(0);
@@ -337,19 +344,18 @@ describe("contract-worktree cleanup squash-merge absorption", () => {
   }, 15000);
 });
 
-// Live checkouts require local merge proof. Already missing checkouts retain
-// their provider proof and barrier checks while the sweep retires the branch.
-describe("pruned branch provider merge proof after a later conflicting target edit", () => {
+describe("provider merge proof after a later conflicting target edit", () => {
   /** A stub answer that is not a JSON value, or that exits non-zero. */
   class RawAnswer { constructor(readonly stdout: string, readonly exit = 0) {} }
   /** Answer N serves provider call N. Later calls reuse the last answer. */
-  function squashFixture(...answers: Array<(squash: string, target: string) => unknown>) {
+  function squashFixture(...answers: Array<(squash: string, target: string, head: string) => unknown>) {
     const parent = realpathSync(mkdtempSync(join(tmpdir(), "worktree-provider-proof-")));
     const root = join(parent, "repo");
     const managed = join(parent, "managed");
     const home = join(parent, "home");
     for (const directory of [root, managed, home]) mkdirSync(directory);
-    const env = { ...process.env, REPO_HARNESS_WORKTREE_ROOT: managed, HOME: home };
+    const env = { ...process.env, REPO_HARNESS_WORKTREE_ROOT: managed, HOME: home, BUN_INSTALL: join(parent, 'bun') };
+    mkdirSync(env.BUN_INSTALL);
     const git = (cwd: string, ...args: string[]) => {
       const result = spawnSync("git", args, { cwd, encoding: "utf8", env });
       if (result.status !== 0) throw new Error(result.stderr);
@@ -378,7 +384,7 @@ describe("pruned branch provider merge proof after a later conflicting target ed
     writeFileSync(join(path, ".ai/harness/evidence/events/log.jsonl"), "{}\n");
     const log = join(parent, "gh.log");
     answers.forEach((answer, index) => {
-      const value = answer(squash, target);
+      const value = answer(squash, target, head);
       const raw = value instanceof RawAnswer ? value : new RawAnswer(JSON.stringify(value));
       writeFileSync(join(parent, `gh.${index + 1}.out`), raw.stdout);
       writeFileSync(join(parent, `gh.${index + 1}.exit`), String(raw.exit));
@@ -396,24 +402,198 @@ describe("pruned branch provider merge proof after a later conflicting target ed
     ].join("\n"));
     chmodSync(gh, 0o755);
     const calls = () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : [];
-    const sweep = () => sweepManagedWorktrees(root, root, env, { deadlineMs: 30_000, ghBin: gh });
+    const sweep = (approved?: NonNullable<ReturnType<typeof planManagedWorktreeSweep>>) => sweepManagedWorktrees(root, root, env, { deadlineMs: 30_000, ghBin: gh, approved });
+    const plan = () => planManagedWorktreeSweep(root, root, env, { deadlineMs: 30_000 })!;
     const prune = () => rmSync(path, { recursive: true });
     const pending = () => readPrunedWorktreeIntents(join(root, '.git')).some(entry => entry.worktree === path);
-    return { root, managed, path, head, squash, git, calls, sweep, prune, pending, cleanup: () => rmSync(parent, { recursive: true, force: true }) };
+    return { root, managed, path, head, squash, gh, env, git, calls, sweep, plan, prune, pending, cleanup: () => rmSync(parent, { recursive: true, force: true }) };
   }
-  const mergedPr = (squash: string) => [{ number: 7, state: "closed", merged_at: "2026-10-01T00:00:00Z", base: { ref: "main" }, merge_commit_sha: squash }];
+  const mergedPr = (squash: string, _target: string, head: string) => [{ number: 7, state: "closed", merged_at: "2026-10-01T00:00:00Z",
+    base: { ref: "main" }, head: { sha: head }, merge_commit_sha: squash }];
 
-  test("a live checkout with only provider proof retains its branch and evidence", () => {
+  test("ordinary sweep proves an exact squash head after an offline preview keeps it", () => {
     const f = squashFixture(mergedPr);
     try {
-      const evidence = join(f.path, '.ai/harness/evidence/events/log.jsonl');
-      const result = f.sweep();
-      expect(result).toContain(`${f.path}: kept;`);
-      expect(result).toContain('cleanup merge is unproven');
-      expect(result).toContain('ignored_data');
-      expect(readFileSync(evidence, 'utf8')).toBe('{}\n');
-      expect(f.git(f.root, 'branch', '--list', 'fix/squash')).toContain('fix/squash');
+      const marker = join(f.path, '.ai/harness/active-worktree');
+      writeFileSync(marker, `${f.path}\n`);
+      const detached = join(f.managed, 'repo-wt-detached');
+      f.git(f.root, 'worktree', 'add', '-q', '--detach', detached, f.squash);
+      const plan = f.plan();
+      expect(plan.items).toEqual(expect.arrayContaining([
+        expect.objectContaining({ path: detached, action: 'remove', head: f.squash }),
+        expect.objectContaining({ path: f.path, action: 'keep', reason: expect.stringContaining('cleanup merge is unproven') }),
+      ]));
+      expect(f.sweep(plan)).toContain(`${f.path}: kept; not in the preview`);
+      expect(existsSync(detached)).toBe(false);
+      expect(readFileSync(marker, 'utf8')).toBe(`${f.path}\n`);
       expect(f.calls()).toEqual([]);
+      expect(f.sweep()).toContain(`${f.path}: removed`);
+      expect(existsSync(f.path)).toBe(false);
+      expect(f.git(f.root, 'branch', '--list', 'fix/squash')).toBe('');
+      expect(f.calls()).toHaveLength(2);
+    } finally { f.cleanup(); }
+  });
+
+  test('replays the 51 audit classifications and keeps the four additional owner and data cases', async () => {
+    const f = squashFixture(mergedPr);
+    let occupant: ReturnType<typeof Bun.spawn> | undefined;
+    try {
+      const git = (...args: string[]) => f.git(f.root, ...args);
+      const target = 'refs/remotes/origin/main';
+      const add = (slug: string, detached?: string) => {
+        const path = join(f.managed, `repo-wt-${slug}`);
+        if (detached) git('worktree', 'add', '-q', '--detach', path, detached);
+        else git('worktree', 'add', '-q', '-b', `fix/${slug}`, path);
+        return path;
+      };
+      const output = (path: string, file: string, contents = 'fixture\n') => {
+        const dest = join(path, file);
+        mkdirSync(dirname(dest), { recursive: true });
+        writeFileSync(dest, contents);
+      };
+      const mark = (path: string, owner = path) => output(path, '.ai/harness/active-worktree', `${owner}\n`);
+      const branch = (slug: string, merged = false) => {
+        const path = add(slug);
+        output(path, 'source', `${slug}\n`);
+        f.git(path, 'commit', '-qam', slug);
+        if (merged) git('merge', '--ff-only', `fix/${slug}`);
+        return path;
+      };
+      const providerCases = new Map([[f.path, 'cleanup merge is unproven']]);
+      const pulls = mergedPr(f.squash, '', f.head);
+      for (const slug of ['safe-squash-1', 'safe-squash-2']) {
+        const path = branch(slug);
+        providerCases.set(path, 'cleanup merge is unproven');
+        git('merge', '--squash', `fix/${slug}`);
+        git('commit', '-qm', `squash ${slug}`);
+        pulls.push(...mergedPr(git('rev-parse', 'HEAD'), '', f.git(path, 'rev-parse', 'HEAD')));
+        output(f.root, 'source', `edit after ${slug}\n`);
+        git('commit', '-qam', 'later edit');
+      }
+      output(f.root, '.git/info/exclude', '.codegraph/\n.archcontext/\n.env\n');
+      const offlineCases: string[] = [];
+      const kept = new Map<string, string>();
+      for (let i = 0; i < 16; i++) {
+        const slug = `safe-marked-${i}`;
+        const path = i === 15 ? add(slug) : branch(slug, true);
+        mark(path);
+        if (i === 15) {
+          output(path, 'marked-feature', 'merged feature\n');
+          f.git(path, 'add', 'marked-feature');
+          f.git(path, 'commit', '-qm', slug);
+          git('merge', '--squash', `fix/${slug}`);
+          git('commit', '-qm', `squash ${slug}`);
+          providerCases.set(path, 'unpushed');
+        } else offlineCases.push(path);
+        pulls.push(...mergedPr(git('rev-parse', 'HEAD'), '', f.git(path, 'rev-parse', 'HEAD')));
+        const repository = { primary_root: f.root, repository_id: join(f.root, '.git'), execution_root: path };
+        expect(existsSync(workspaceDirectory(repository))).toBe(false);
+      }
+      for (let i = 0; i < 11; i++) {
+        const path = branch(`safe-outputs-${i}`, true);
+        for (const file of ['.ai/harness/state/agent-notice', '.ai/harness/failures/latest.jsonl', '.codegraph/codegraph.db',
+          '.archcontext/generated/model.json', '.archcontext/tmp/cache.json']) output(path, file);
+        offlineCases.push(path);
+      }
+      for (let i = 0; i < 8; i++) offlineCases.push(add(`safe-detached-${i}`, f.squash));
+      for (let i = 0; i < 7; i++) {
+        const path = branch(`zz-closed-${i}`);
+        if (i < 5) mark(path);
+        const head = f.git(path, 'rev-parse', 'HEAD');
+        git('update-ref', `refs/remotes/origin/closed-${i}`, head);
+        // Closed PRs and a merged PR on a different tip are both insufficient.
+        pulls.push(i === 4 ? { ...pulls[0]! } : { ...pulls[0]!, merged_at: '', head: { sha: head } });
+        kept.set(path, 'cleanup merge is unproven');
+      }
+      output(dirname(f.gh), 'gh.1.out', JSON.stringify(pulls));
+      const closedHead = git('rev-parse', 'refs/heads/fix/zz-closed-0');
+      for (let i = 0; i < 4; i++) kept.set(add(`zz-detached-${i}`, closedHead), 'cleanup merge is unproven');
+      kept.set(branch('zz-unpushed'), 'unpushed');
+      const locked = branch('zz-locked', true);
+      git('worktree', 'lock', locked);
+      kept.set(locked, 'locked');
+      expect([offlineCases.length, providerCases.size, kept.size]).toEqual([34, 4, 13]);
+
+      const ignored = branch('zz-ignored', true);
+      output(ignored, '.env', 'keep these bytes\n');
+      const foreign = branch('zz-foreign', true);
+      mark(f.root, foreign);
+      const open = branch('zz-open', true);
+      const repository = { primary_root: f.root, repository_id: join(f.root, '.git'), execution_root: open };
+      ensureSessionDirectory(f.root, workspaceDirectory(repository));
+      const busy = branch('zz-busy', true);
+      occupant = Bun.spawn([process.execPath, '-e', 'console.log("ready"); setInterval(() => {}, 1000)'],
+        { cwd: busy, env: f.env, stdout: 'pipe' });
+      const ready = (occupant.stdout as ReadableStream<Uint8Array>).getReader();
+      try { expect(new TextDecoder().decode((await ready.read()).value)).toBe('ready\n'); }
+      finally { ready.releaseLock(); }
+      const inventory = [{ pid: occupant.pid, cwd: busy }];
+      setControlledWorktreeProcesses(inventory);
+      const protectedPaths: Array<[string, string]> = [[ignored, 'ignored_data'], [foreign, 'marker reference'], [open, 'runtime is open'], [busy, 'process_in_use']];
+      git('update-ref', target, 'HEAD');
+      const beforeObjects = git('count-objects', '-v');
+      const plan = new Map(f.plan().items.map(item => [item.path, item]));
+      expect(git('count-objects', '-v')).toBe(beforeObjects);
+      expect(plan.size).toBe(55);
+      for (const path of offlineCases) expect(plan.get(path)).toMatchObject({ action: 'remove' });
+      for (const [path, reason] of providerCases) expect(plan.get(path)).toMatchObject({ action: 'keep', reason: expect.stringContaining(reason) });
+      for (const [path, reason] of [...kept, ...protectedPaths]) {
+        expect(plan.get(path)).toMatchObject({ action: 'keep', reason: expect.stringContaining(reason) });
+      }
+      expect(f.calls()).toEqual([]);
+
+      const readbacks = Array.from({ length: 5 }, () => f.sweep()).join('\n');
+      for (const path of [...offlineCases, ...providerCases.keys()]) {
+        expect(readbacks).toContain(`${path}: removed`);
+        expect(existsSync(path)).toBe(false);
+      }
+      const protectedResult = removeGreenWorktrees(f.root, f.root, f.env, protectedPaths.map(([path]) => ({
+        path, verify: () => { throw new Error('a protected checkout reached the removal barrier'); },
+      })), { ghBin: f.gh, deadline: Date.now() + 30_000, processes: () => inventory });
+      expect(protectedResult.results.map(result => !result.removed && String(result.error))).toEqual(
+        protectedPaths.map(([, reason]) => expect.stringContaining(reason)));
+      for (const path of [...kept.keys(), ignored, foreign, open, busy]) expect(existsSync(path)).toBe(true);
+      expect(readFileSync(join(ignored, '.env'), 'utf8')).toBe('keep these bytes\n');
+    } finally {
+      setControlledWorktreeProcesses([]);
+      occupant?.kill();
+      await occupant?.exited;
+      f.cleanup();
+    }
+  }, 60_000);
+
+  test('explicit contract cleanup uses exact-head provider proof for a squash with no remote branch', () => {
+    const f = squashFixture(mergedPr);
+    try {
+      const metadata = join(f.root, '.ai/harness/worktrees/squash.json');
+      mkdirSync(join(f.root, '.ai/harness/worktrees'), { recursive: true });
+      writeFileSync(metadata, '{"slug":"squash","branch":"fix/squash"}\n');
+      const preload = join(dirname(f.gh), 'provider-preload.ts');
+      const executableModule = join(ROOT, 'src/effects/runtime/trusted-executable.ts');
+      writeFileSync(preload, `import { mock } from 'bun:test';
+const actual = await import(${JSON.stringify(executableModule)});
+mock.module(${JSON.stringify(executableModule)}, () => ({ ...actual, resolveTrustedGhExecutable: () => ${JSON.stringify(f.gh)} }));\n`);
+      const bun = join(dirname(f.gh), 'provider-bun');
+      const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+      writeFileSync(bun, `#!/bin/sh\nexec ${quote(process.execPath)} --preload ${quote(preload)} "$@"\n`, { mode: 0o700 });
+      const result = run('bash', [join(HELPER_DIR, 'contract-worktree.sh'), 'cleanup', '--slug', 'squash'], f.root,
+        { ...f.env, REPO_HARNESS_TARGET_REPO_ROOT: f.root, REPO_HARNESS_BUN_BIN: bun });
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(result.stdout).toContain('provider proved the exact head merged into main');
+      expect(existsSync(f.path)).toBe(false);
+      expect(existsSync(metadata)).toBe(false);
+      expect(f.calls()).toHaveLength(2);
+    } finally { f.cleanup(); }
+  });
+
+  test('a provider result for a different head keeps the live branch', () => {
+    const f = squashFixture((squash, target) => mergedPr(squash, target, target));
+    try {
+      const result = f.sweep();
+      expect(result).toContain(`${f.path}: kept; unpushed, cleanup merge is unproven`);
+      expect(f.calls()).toHaveLength(1);
+      expect(existsSync(f.path)).toBe(true);
+      expect(f.git(f.path, 'rev-parse', 'HEAD')).toBe(f.head);
     } finally { f.cleanup(); }
   });
 
@@ -456,7 +636,7 @@ describe("pruned branch provider merge proof after a later conflicting target ed
 
   for (const [label, second, reason] of [
     ["no PR", () => [], "cleanup merge is unproven"],
-    ["another merge commit", (_squash: string, target: string) => mergedPr(target), "cleanup merge commit changed"],
+    ["another merge commit", (_squash: string, target: string, head: string) => mergedPr(target, target, head), "cleanup merge commit changed"],
   ] as const) {
     test(`the barrier keeps the pruned branch when its second provider proof returns ${label}`, () => {
       const f = squashFixture(mergedPr, second);
@@ -471,7 +651,7 @@ describe("pruned branch provider merge proof after a later conflicting target ed
   }
 
   for (const [label, answer] of [
-    ["exits non-zero", (squash: string) => new RawAnswer(JSON.stringify(mergedPr(squash)), 1)],
+    ["exits non-zero", (squash: string, target: string, head: string) => new RawAnswer(JSON.stringify(mergedPr(squash, target, head)), 1)],
     ["returns malformed JSON", () => new RawAnswer('[{"merged_at":')],
   ] as const) {
     test(`a provider call that ${label} keeps the pruned branch`, () => {
@@ -506,7 +686,7 @@ describe("pruned branch provider merge proof after a later conflicting target ed
   ];
   for (const [label, edit] of edits) {
     test(`a merged provider PR with ${label} keeps the pruned branch`, () => {
-      const f = squashFixture(squash => mergedPr(squash).map(edit));
+      const f = squashFixture((squash, target, head) => mergedPr(squash, target, head).map(edit));
       try {
         f.prune();
         expect(f.sweep()).toContain(`${f.path}: pruned; unmerged branch kept (fix/squash)`);

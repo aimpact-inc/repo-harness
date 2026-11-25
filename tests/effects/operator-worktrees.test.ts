@@ -144,6 +144,18 @@ describe('read-only worktree judgment and lifecycle', () => {
     } finally { f.cleanup(); }
   });
 
+  test('a clean checkout with a gitlink is kept without .gitmodules or module metadata', () => {
+    const f = fixture();
+    try {
+      const head = f.git(f.tree, 'rev-parse', 'HEAD');
+      f.git(f.tree, 'update-index', '--add', '--cacheinfo', `160000,${head},submodule`);
+      f.git(f.tree, 'commit', '-m', 'add gitlink');
+      mkdirSync(join(f.tree, 'submodule'));
+      f.git(f.main, 'update-ref', 'refs/remotes/origin/main', f.git(f.tree, 'rev-parse', 'HEAD'));
+      expect(f.inspect()).toMatchObject({ judgment: 'yellow', reasons: ['submodules'], dirty_files: 0, merge: 'ancestor' });
+    } finally { f.cleanup(); }
+  });
+
   test('fresh branches and unpushed commits are not green', () => {
     const f = fixture();
     try {

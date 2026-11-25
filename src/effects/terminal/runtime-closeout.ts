@@ -14,6 +14,7 @@ import { taskSessionKey } from '../git/repository-identity';
 import { readWorktreeRecord, endWorktreeRecord } from '../git/worktree-record';
 import { taskRepository, type TaskRepository } from '../git/task-repository';
 import { withCallerLock } from '../locking/exclusive-directory-lock';
+import { releaseClosedWorktreeMarker } from '../state/coordination-worktree-topology';
 import { HerdrCoreError, RH_LABEL, RH_NOTIFY_LABELS, RH_ROLE, hcGet, hcKill, hcList, hcRm, hcSend, isHcAddress,
   type HcLabels, type HcTerminal, type HerdrCoreOptions } from './herdr-core';
 
@@ -331,7 +332,13 @@ async function cleanupTaskAgent(repoRoot: string, task: string, role: string, mo
     if (!existsSync(join(dir, 'binding.json'))) return closeUnboundTaskStart(dir, task, role, mode);
     const { binding } = readTaskAgent(root, task, role);
     assertCreated(binding.ownership); assertCreated(binding.provider.ownership);
-    if (existsSync(join(dir, 'closed.json'))) return { status: 'closed', pids: [] };
+    const releaseMarker = () => {
+      if (mode === 'close') releaseClosedWorktreeMarker(root, binding.execution_root);
+    };
+    if (existsSync(join(dir, 'closed.json'))) {
+      releaseMarker();
+      return { status: 'closed', pids: [] };
+    }
     if (mode === 'close') {
       for (let round = 1; round <= binding.max_requests && existsSync(join(dir, `request-${round}.json`)); round++) {
         const request = readSessionArtifact<TaskRequest>(join(dir, `request-${round}.json`));
@@ -349,6 +356,7 @@ async function cleanupTaskAgent(repoRoot: string, task: string, role: string, mo
     }
     const closed = () => {
       writeSessionArtifact(join(dir, 'closed.json'), { task, role, provider: binding.provider, disposition: mode === 'cancel' ? 'cancelled' : 'completed' });
+      releaseMarker();
       return { status: 'closed' as const, pids: [] };
     };
     if (binding.runtime === 'terminal') {
@@ -380,7 +388,7 @@ export async function cleanupTaskWorktree(repoRoot: string, checkoutPath: string
   const dir = workspaceDirectory(expected);
   if (!existsSync(dir)) return { status: 'not_registered', pids: [] };
   assertSessionDirectory(repository.primary_root, dir);
-  return withCallerLock(repository.primary_root, dir, async () => {
+  const result = await withCallerLock<TaskCleanupResult | { status: 'not_registered'; pids: number[] }>(repository.primary_root, dir, async () => {
     if (existsSync(join(dir, 'closed.json'))) return { status: 'closed', pids: [] };
     if (existsSync(join(dir, 'open-intent.json'))) classicRecordRetired(join(dir, 'open-intent.json'));
     if (!existsSync(join(dir, 'binding.json'))) return { status: 'not_registered', pids: [] };
@@ -409,4 +417,6 @@ export async function cleanupTaskWorktree(repoRoot: string, checkoutPath: string
     }
     return { status: 'closed', pids: [] };
   });
+  if (!dryRun && result.status === 'closed') releaseClosedWorktreeMarker(repository.primary_root, checkoutPath, gitBin);
+  return result;
 }
