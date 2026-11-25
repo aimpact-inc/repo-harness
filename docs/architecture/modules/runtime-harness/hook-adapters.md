@@ -282,29 +282,27 @@ sequenceDiagram
 | 删除 `workflow-state.sh`，helper 改调 TypeScript | 路径与 stem 只有一个 TypeScript 实现。代价：`prepare-handoff` 与 `summarize-failures` 现在需要 Bun，旧的 `hook-lib path` 下游调用方要改成 `rh run <helper>` |
 | 空 lifecycle hooks 已移除 | Scaffold 和 template assembly 直接执行各自任务。它们不再调用空 runner。 |
 
-### 3.3 组件拆分（2026-10-11）
+### 3.3 组件职责
 
-数据来源：`archctx refactor scan --json`（archctx 0.7.0）。footprint 写在各 component 节点的 `source.include` 里。archctx 校验 footprint。model reader 从 `archctx export native` 读模型，不再自己翻译 component 的 include（#739）。
+组件的源码归属以各节点的 `source.include` 为准。文件数量和行数见生成区。
 
-| 组件 | footprint 摘要 | 文件 / 行 | 职责 |
-| --- | --- | --- | --- |
-| `component.hook-adapters.primary`（Hook Route Runtime） | `hook-entry.ts`、`hook/{runtime,route-registry,handler-registry,handler-contract,hook-input,hook-protocol,event-telemetry,session-context-budget}.ts`、`src/effects/loop/**`、`hook-event-log.ts` | 11 / 1037（2026-10-16） | route 表、handler 绑定、opt-in 检查、payload 与 identity 解析、host 渲染表、遥测与日志轮转 |
-| `component.hook-adapters.edit-guards`（Edit Guard Handlers） | `hook/{mutation-guard,circuit-breaker}.ts` | 2 / 489（2026-10-16） | PreToolUse.edit 路径边界、semantic-review circuit breaker |
-| `component.hook-adapters.session-lifecycle`（Session Lifecycle Handlers） | `hook/{session-context,stop-handler,return-channel,subagent-context,task-inbox-handler,state-snapshot}.ts`、`run-summary-retention.ts` | 8 / 1373（2026-10-16） | SessionStart、Stop 恢复视图、subagent route、Task Inbox |
-| `component.hook-adapters.host-installer`（Host Adapter Installer） | `src/cli/installer/**`、`commands/{install,status,security}.ts` | 14 / 3670（2026-10-16） | managed entries、插件选择与 install state、status 与 security scan |
-
-与归属提议 §5 的一处偏差，有源码证据：
-
-- `session-context-budget.ts` 归 route-runtime。`runtime.ts` 的 `sessionOutput` 调用 `budgetSessionContext`（`runtime.ts:120`），`handler-contract.ts:3` 引用它的类型。SessionStart 预算是 host 输出整形的一部分（不变量 4）。按提议放进 session-lifecycle 会产生 runtime → handler 的反向边。
+| 组件 | 主要文件 | 职责 |
+| --- | --- | --- |
+| `component.hook-adapters.primary`（Hook Route Runtime） | `hook/{runtime,handler-registry,event-telemetry}.ts` | 选择 route、绑定 handler、检查 opt-in、编排 host 输出和遥测 |
+| `component.hook-adapters.contracts`（Hook Contracts） | `hook/{route-registry,handler-contract,hook-input,hook-protocol,session-context-budget,guard-denial,mutation-protected-dirs}.ts` | 定义 route、payload、identity、handler、host 输出、上下文预算、拒绝结构和受保护目录 |
+| `component.hook-adapters.edit-guards`（Edit Guard Handlers） | `hook/{mutation-guard,mutation-bash,safety-hook,shell-words,circuit-breaker}.ts` | 检查 edit 和 Bash 路径及凭据访问，维护 semantic-review circuit breaker |
+| `component.hook-adapters.session-lifecycle`（Session Lifecycle Handlers） | `hook/{session-context,stop-handler,return-channel,subagent-context,state-snapshot}.ts` | SessionStart、Stop 恢复视图、subagent route、Task Inbox |
+| `component.hook-adapters.host-installer`（Host Adapter Installer） | `src/cli/installer/**`、`src/pi/**`、`commands/{install,status,security}.ts` | 构建 managed entries，选择插件，注册 Pi，检查安装与安全状态 |
 
 组件之间的关系：
 
 | 关系 | 类型 | 证据 |
 | --- | --- | --- |
-| host-installer → route-runtime | calls | `buildManagedHooks` 调用 `routesForHost`（`managed-entries.ts:107`） |
-| route-runtime → edit-guards | calls | `handlers` 绑定 `runMutationGuard`（`handler-registry.ts`）。`hook-entry.ts` 只分派 hook route、`state-snapshot` 与进程 supervisor |
-| route-runtime → session-lifecycle | calls | `handlers` 绑定 `runStopHandler`、SessionStart、两个 subagent handler 与 inbox handler（`handler-registry.ts`） |
-| edit-guards → route-runtime、session-lifecycle → route-runtime | depends-on | handler 实现 typed `HookHandlerResult` 契约。handler 从 `HookHandlerContext` 读取 `payload` 与 `identity`，并读取 event 级 `StateInputCollector`。handler 不读取 session、run 或 turn 的环境变量 |
+| host-installer → contracts | calls | `buildManagedHooks` 调用 `routesForHost`（`managed-entries.ts`） |
+| route-runtime → edit-guards | calls | `handlers` 绑定 `runMutationGuard` 和 `runBashMutationGuard`（`handler-registry.ts`） |
+| route-runtime → session-lifecycle | calls | `handlers` 绑定 Stop、SessionStart、subagent 和 inbox handler（`handler-registry.ts`） |
+| route-runtime、edit-guards、session-lifecycle → contracts | depends-on | runtime 和 handler 共用 input、结果类型和上下文结构。Stop 的路径通知读取目录清单。两个 guard 模块共用拒绝契约 |
+| hook-root → edit-guards | calls | `hook-entry.ts` 为 safety guard 注册 install ledger reader |
 
 组件到其他 capability 的关系（生成区 §1.4 不显示组件级出向关系，所以列在这里）：
 
@@ -314,8 +312,6 @@ sequenceDiagram
 | host-installer → `global-runtime-reconciliation` | `status.ts:242` 调用 `inspectArchitectureProjectionReadiness` |
 | route-runtime → `execution-primitives` | `hook-entry.ts` 与 `runtime.ts` 用 `src/effects/write-all-sync.ts` 写 host 输出（#3504 从 global-runtime-reconciliation 移出，去掉 capability 级回边） |
 | session-lifecycle → `public-surface.adoption` | `run-summary-retention.ts` 引用 `src/effects/path-safety.ts`。只有 `scripts/evidence-gc.ts` 调用它，这是一个版本的一次性清理 |
-
-依赖方向说明：route-runtime 与两个 handler 组件之间有双向边。registry 组合 handler（calls），handler 实现 registry 的契约（depends-on）。这是插件式组合，不是层次倒置。如果以后要消除这个环，把 `handler-contract.ts` 与 `hook-input.ts` 移到一个叶子组件即可。目前没有证据说明这个环造成了问题。
 
 host-installer 有 14 个文件、3670 行（2026-10-16），标记为 expandable。可以拆成 installer 与 asset projection 两块。现在不拆。
 
@@ -652,7 +648,6 @@ The event route registry remains the host adapter authority. Ordinary edits and 
 ## Optimization Backlog
 
 - `install-profile.ts` 有 1,576 行，是本 capability 最大的文件。它同时承担插件选择计划、事务、ownership 记录和 install state 读写（`planInstallSelection`、`beginInstallHostTransaction`、`recordVerifiedAgentFleetOwnership`）。拆分顺序需要改动频率证据，目前没有。
-- route-runtime 与 handler 组件之间的环（§3.3）。如果 archctx 的环检测开始阻塞，把 handler 契约移到叶子组件。
 - host-installer 与 edit-guards → acceptance-review 没有声明。`relation.acceptance-review.hook-adapters` 已经声明反向（review 命令调用 circuit breaker）。本方向有 5 条边，反向有 2 条。集成不新增反向关系。是否翻转方向是开放问题。
 
 ### Controlled native-session inbox delivery

@@ -1,0 +1,6 @@
+schemaVersion: archcontext.relation/v1
+id: relation.hook-adapters.host-installer.contracts
+kind: calls
+source: component.hook-adapters.host-installer
+target: component.hook-adapters.contracts
+intent: "Read the ordered hook routes to build managed host adapter entries"

@@ -17,7 +17,7 @@ import { homedir, tmpdir } from 'os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { managedWorktreeRoot } from '../../effects/git/managed-worktree';
 import { ANTIGRAVITY_BRAIN_ROOTS } from './host-adapter';
-import type { Denial } from './mutation-guard';
+import type { Denial } from './guard-denial';
 import type { RouteHost } from './route-registry';
 import {
   escapePattern, expandBraces, globIndex, segmentMatches, simpleCommands, unescapePattern, writeThroughPath,

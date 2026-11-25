@@ -1,0 +1,67 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.7dc9eb779ce5d385",
+  "fingerprint": "sha256:c202f7719c1644e96bfe15b1af14dbd0c92c540722c4aa5186763de59e3dee8c",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "pair:capability.runtime-harness.hook-adapters|component.hook-adapters.edit-guards",
+    "subjectSelectorId": "subject.repository.c1444b541610c5b1"
+  },
+  "affectedNodeIds": [
+    "capability.runtime-harness.hook-adapters",
+    "component.hook-adapters.edit-guards"
+  ],
+  "affectedNodeCount": 2,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "backwardEdgeCount": 3,
+    "forwardEdgeCount": 2,
+    "thinDirectionEdgeCount": 2,
+    "totalEdgeCount": 5
+  },
+  "reason": "Resolved in #3505 by the shared Hook Contracts owner.",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T09:56:03.000Z",
+  "provenance": {
+    "headSha": "068a42ab166d80d570bb3d7aed994dac37506ab1",
+    "assessmentDigest": "sha256:59948e3da2f687f5129e525ef98a64665d42e49b3f9d795690cac095d3fa3007",
+    "baselineSnapshotDigest": "sha256:55bfb716e5091803e9bce7d0dac122061ccba8ef16feda8ff103e70f8929489a"
+  },
+  "snapshotDigest": "sha256:55bfb716e5091803e9bce7d0dac122061ccba8ef16feda8ff103e70f8929489a",
+  "evidenceDigest": "sha256:59948e3da2f687f5129e525ef98a64665d42e49b3f9d795690cac095d3fa3007",
+  "resolutionDigest": "sha256:7f829738e03557ad086635f0050c936da4e7f9156bb045b2da151aa297d14332",
+  "scope": {
+    "kind": "repository"
+  },
+  "importNodeLimit": 100000,
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.pairThinDirectionEdgeCount",
+      "subjectSelectorId": "subject.repository.c1444b541610c5b1",
+      "nodeId": null,
+      "memberNodeIds": [
+        "capability.runtime-harness.hook-adapters",
+        "component.hook-adapters.edit-guards"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.079aae678ae2aad0"
+    }
+  ],
+  "killList": [
+    {
+      "kind": "symbol",
+      "target": "src/cli/hook/mutation-guard.ts#Denial",
+      "required": true
+    }
+  ]
+}

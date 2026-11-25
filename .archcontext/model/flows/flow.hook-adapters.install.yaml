@@ -6,12 +6,12 @@ applicability: required
 participants:
   - id: host-installer
     nodeId: component.hook-adapters.host-installer
-  - id: route-runtime
-    nodeId: component.hook-adapters.primary
+  - id: contracts
+    nodeId: component.hook-adapters.contracts
 steps:
   - id: project-routes
     from: host-installer
-    to: route-runtime
+    to: contracts
     label: "Read the ordered routes for the selected Claude or Codex adapter"
     evidence:
       entrypointId: entrypoint.hook-adapters.managed-entries
@@ -24,7 +24,7 @@ outcomes:
     steps:
       - id: build-entries
         from: host-installer
-        to: route-runtime
+        to: contracts
         label: "Build one adapter entry per route that the host supports"
         evidence:
           entrypointId: entrypoint.hook-adapters.managed-entries
@@ -39,7 +39,7 @@ outcomes:
     steps:
       - id: compare-entries
         from: host-installer
-        to: route-runtime
+        to: contracts
         label: "Rebuild the expected entries for the comparison"
         evidence:
           entrypointId: entrypoint.hook-adapters.managed-entries

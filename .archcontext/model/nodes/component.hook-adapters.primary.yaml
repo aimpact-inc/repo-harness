@@ -7,19 +7,15 @@ parent: capability.runtime-harness.hook-adapters
 layer: "cli"
 summary: "Resolves a host hook route to its one typed handler, shapes the host output and writes one telemetry record."
 responsibilities:
-  - Keep the ordered ROUTES registry and the one typed handler binding per route.
+  - Bind each registered route to one typed handler.
   - Check the opt-in marker, parse the host payload and resolve the hook identity once, and resolve Effective State at most once per event.
   - Render typed handler results for Claude, Codex and Pi through one host table, including the SessionStart context budget.
   - Append one loop-engine-hook-event/v2 record per handled event and rotate the bounded log archive.
 source:
   include:
     - src/cli/hook/runtime.ts
-    - src/cli/hook/route-registry.ts
-    - src/cli/hook/handler-*.ts
-    - src/cli/hook/hook-input.ts
-    - src/cli/hook/hook-protocol.ts
+    - src/cli/hook/handler-registry.ts
     - src/cli/hook/event-telemetry.ts
-    - src/cli/hook/session-context-budget.ts
   entrypoints:
     - id: entrypoint.hook-adapters.handler-bindings
       path: "src/cli/hook/handler-registry.ts"

@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.13129fd52f6b42b8",
+  "fingerprint": "sha256:f2c6b75eb95168eb4f673ea93f7a31ee7f4138ee0c7807a48f0352caf35c0031",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "pair:capability.runtime-harness.hook-adapters|component.hook-adapters.primary",
+    "subjectSelectorId": "subject.repository.d7bfcb3c4815bf1f"
+  },
+  "affectedNodeIds": [
+    "capability.runtime-harness.hook-adapters",
+    "component.hook-adapters.primary"
+  ],
+  "affectedNodeCount": 2,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "backwardEdgeCount": 3,
+    "forwardEdgeCount": 9,
+    "thinDirectionEdgeCount": 3,
+    "totalEdgeCount": 12
+  },
+  "reason": "Resolved in #3505 by the shared Hook Contracts owner.",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T09:56:03.000Z",
+  "provenance": {
+    "headSha": "068a42ab166d80d570bb3d7aed994dac37506ab1",
+    "assessmentDigest": "sha256:73b8a263d50a3893fca81554712ad6d2c34e7e0d33c94859c89ef30ce0ef600f",
+    "baselineSnapshotDigest": "sha256:c20aac340c197be390f936f677fe36af5829759dbce5f8b0d8e7164037eaf730"
+  },
+  "snapshotDigest": "sha256:c20aac340c197be390f936f677fe36af5829759dbce5f8b0d8e7164037eaf730",
+  "evidenceDigest": "sha256:73b8a263d50a3893fca81554712ad6d2c34e7e0d33c94859c89ef30ce0ef600f",
+  "resolutionDigest": "sha256:14e36959c46425548b95d5662351bdd0b117630e481c39d798a65d5e63705c0e",
+  "scope": {
+    "kind": "repository"
+  },
+  "importNodeLimit": 100000,
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.pairThinDirectionEdgeCount",
+      "subjectSelectorId": "subject.repository.d7bfcb3c4815bf1f",
+      "nodeId": null,
+      "memberNodeIds": [
+        "capability.runtime-harness.hook-adapters",
+        "component.hook-adapters.primary"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.73d87bdb301f9903"
+    }
+  ]
+}

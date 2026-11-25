@@ -1,0 +1,6 @@
+schemaVersion: archcontext.relation/v1
+id: relation.hook-adapters.edit-guards.contracts
+kind: depends-on
+source: component.hook-adapters.edit-guards
+target: component.hook-adapters.contracts
+intent: "Read hook input and use the typed permission and denial results"
