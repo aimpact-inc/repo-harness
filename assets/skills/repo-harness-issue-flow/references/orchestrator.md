@@ -389,15 +389,22 @@ module is in the title so that a list view shows the write scopes.
   not grant publication, deletion or credential authority.
   For the Herdr pane topology, follow
   [Herdr Dispatch](https://github.com/aimpact-inc/repo-harness/blob/main/docs/reference-configs/herdr-notify.md#herdr-dispatch).
+- Both `orchestrator` and `advisor` seats load the `herdr` skill by default
+  at session start before any `hc` or `herdr-app` read, send, or pane
+  operation.
 - Open every worker and reviewer seat in a Herdr.app tab, so the owner
-  can see its progress: `rh board dispatch`, `rh board review`, or
+  can see its progress: prefer `rh board dispatch`, `rh board review`, or
   `rh seats launch <seat> --cwd <worktree> --task <packet>` with the label
   flags of `rh seats argv` for a standalone issue, a fix round or a stacked
   writer. `rh seats launch` takes the space from `--space` or from the
   `herdr.space` label of your own terminal, and fails closed when Herdr.app
-  opens no tab. Never start a seat with `hc run --bg`: that terminal has no
-  pane. Attention rule A21 names each live seat that no pane shows; give it
-  a pane with `herdr-app do terminal.keep`, or close and relaunch it.
+  opens no tab. When calling `herdr-app do pane.split` directly, resolve an
+  explicit `--pane <id>` with `herdr-app ls` first; never combine
+  `pane.focus` with an untargeted `pane.split` (an untargeted split can land
+  in another Herdr space). Never start a seat with `hc run --bg`: that
+  terminal has no pane. Attention rule A21 names each live seat that no pane
+  shows; give it a pane with `herdr-app do terminal.keep`, or close and
+  relaunch it.
 - Attention rule A22 names a stalled seat: it reports `working` for more
   than 300 s, its agent has no child process, and its screen without
   spinner frames and elapsed-time counters did not change between two

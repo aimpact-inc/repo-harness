@@ -35,9 +35,11 @@ This topology applies to issue-flow work (`repo-harness-issue-flow`) on herdr-co
 
 ### Runtime commands
 
-Start a worker or reviewer seat with `rh seats launch <seat> --cwd <path> --task <text>`, `rh board dispatch` or `rh board review`; each opens a Herdr.app tab. Use `hc` for terminals and `herdr-app do` for a further pane in an open tab. In an hc terminal, `HC_TERMINAL_ID` is your address. `hc --help`, `herdr-app commands` and `rh seats launch --help` are the syntax authority.
+Start a worker or reviewer seat with `rh seats launch <seat> --cwd <path> --task <text>`, `rh board dispatch` or `rh board review`; each opens a Herdr.app tab. Use `hc` for terminals and `herdr-app do` for a further pane in an open tab. Orchestrator and advisor seats load the `herdr` skill at session start before any `hc` or `herdr-app` read, send, or pane operation. In an hc terminal, `HC_TERMINAL_ID` is your address. `hc --help`, `herdr-app commands` and `rh seats launch --help` are the syntax authority.
 
 Find every live seat of the repository with `rh board seats --json`, including seats without a parent issue. Wait with `hc wait <t>` or follow `hc events`. Never use `sleep` loops to wait for seats.
+
+Before any `herdr-app do pane.split`, resolve the target `<pane>` ID with `herdr-app ls` and pass `--pane <id>` explicitly. Never combine `pane.focus` with an untargeted `pane.split`: an untargeted split can place the pane in another Herdr space.
 
 Commands for the topology steps:
 

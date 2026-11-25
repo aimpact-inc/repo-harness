@@ -130,7 +130,7 @@ function advisorParagraphs(config: SeatConfigV1, fleet: readonly string[], name:
     : 'You do not commit or write to GitHub.';
   return [
     `You are the advisor seat. You serve only the orchestrator. You do research and write proposals. ${ghRule} Edit files only for your proposals.`,
-    'You may read the processes of worker seats (hc ls, hc get and hc read on seat-labeled terminals) for evidence. You do not send messages or keys to a worker. You report only to the orchestrator.',
+    'Load the `herdr` skill at session start before any `hc` or `herdr-app` read, send, or pane operation. You may read the processes of worker seats (hc ls, hc get and hc read on seat-labeled terminals) for evidence. You do not send messages or keys to a worker. You report only to the orchestrator.',
     evidence,
   ];
 }
@@ -148,7 +148,8 @@ function roleParagraphs(seat: LaunchSeatId, config: SeatConfigV1, fleet: readonl
     return [
       `You are the orchestrator seat. You hold the coordinator and integrator seats of repo-harness-issue-flow. You dispatch, accept and merge. You do not edit product code, tests or configuration. You do not review a PR that you dispatched; route that review to another seat. You push only the branch of a Codex worker seat handoff: commit its worktree diff with its message and explicit paths only, push the branch, open the PR, and push each fix round. On the owner's explicit word for one release you run the command list of \`bash scripts/release-owner-steps.sh plan <version>\` from the release worktree; the owner confirms the npm login. Without that word you do not tag or publish. You do not delete, or change credentials or permissions yourself.`,
       `${dispatch} When \`publication.acceptance_merge\` is \`on\`, merge only with \`rh publication merge\`. When it is \`off\`, hand each ready PR to the owner.`,
-      'Before each dispatch wave, run `rh quota`. Launch each task on the seat its route line names with `rh seats argv <seat>`; state the boundary in the task.',
+      'Load the `herdr` skill at session start before any `hc` or `herdr-app` read, send, or pane operation.',
+      'Before each dispatch wave, run `rh quota`. Open each worker or reviewer tab on the seat its route line names with `rh seats launch <seat>` or `rh board dispatch`; state the boundary in the task. When calling `herdr-app do pane.split` directly, resolve an explicit `--pane <id>` with `herdr-app ls` and never rely on `pane.focus` with an untargeted `pane.split`.',
       'Do not call a blocking question tool (`AskUserQuestion`, `ask_user_question`, or `request_user_input`). When one task waits on the owner, park only that task, ask the owner in plain text (or through the advisor), and end the turn so `hc` messages from other seats keep arriving.',
       ...queue,
     ];
@@ -205,8 +206,13 @@ function seatEnv(assignments: readonly string[]): string[] {
 function claudeLaunch(seat: LaunchSeatId, config: SeatConfigV1, agentTypes: readonly string[], name: string | undefined, repositoryId: string | undefined, claudeSaving: boolean): Omit<SeatLaunchV1, 'protocol' | 'kind' | 'seat' | 'runtime' | 'source'> {
   const on = (group: SeatTool) => config.tools.includes(group);
   // `--tools` cannot name agent types (`Agent(<type>)` there removes the Agent tool), so a fleet keeps the Agent
-  // tool and denies every other known type by name.
-  const tools = [...config.tools.flatMap(group => CLAUDE_GROUP_TOOLS[group]), ...(config.fleet.length > 0 ? ['Agent'] : [])];
+  // tool and denies every other known type by name. Orchestrator and advisor seats keep `Skill` when `shell` is on so
+  // `Skill(herdr)` stays callable without opening a shell-preprocessing side path on read-only seats.
+  const tools = [
+    ...config.tools.flatMap(group => CLAUDE_GROUP_TOOLS[group]),
+    ...(config.fleet.length > 0 ? ['Agent'] : []),
+    ...((seat === 'orchestrator' || seat === 'advisor') && on('shell') ? ['Skill'] : []),
+  ];
   const denied = [
     ...(on('shell') ? claudeDeniedGithubCommands(seat, on('gh')).map(command => `Bash(${command} *)`) : []),
     ...(config.fleet.length > 0 ? [...new Set(agentTypes)].filter(type => !config.fleet.includes(type)).sort().map(type => `Agent(${type})`) : []),
@@ -327,7 +333,7 @@ const AGY_ORCHESTRATOR_COMMAND_PREFIXES: readonly string[] = [
   'rh publication readiness', 'rh publication merge', 'rh review collect', 'rh review publish',
   'rh worktrees start', 'rh worktrees list', 'rh worktrees clean',
   'rh arch projection status', 'rh arch projection slice', 'rh arch projection publish', 'rh quota', 'rh doctor',
-  'hc ls', 'hc get', 'hc read', 'hc wait', 'hc send', 'hc label', 'hc file read', 'herdr-app do',
+  'hc ls', 'hc get', 'hc read', 'hc wait', 'hc send', 'hc label', 'hc file read', 'herdr-app ls', 'herdr-app do',
   'gh issue view', 'gh issue list', 'gh issue create', 'gh issue comment', 'gh issue edit', 'gh issue close', 'gh issue reopen',
   'gh pr view', 'gh pr list', 'gh pr checks', 'gh pr diff', 'gh pr create', 'gh pr comment', 'gh pr edit', 'gh pr ready',
   'gh run view', 'gh run list', 'gh run watch', 'gh run rerun',

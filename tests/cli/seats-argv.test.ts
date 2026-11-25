@@ -1076,6 +1076,56 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
       expect(withGh.allow.find(prefix => forbidden.startsWith(prefix)), forbidden).toBeUndefined();
     }
   });
+
+  test("orchestrator and advisor require the herdr skill and explicit pane placement across Claude, Pi, and agy while review seats keep --no-skills", () => {
+    const agyInput = (seat: "orchestrator" | "advisor") => ({
+      executable: "/usr/local/bin/agy",
+      agentName: `rh-${seat}-0123456789ab`,
+      cwd: "/tmp/repo",
+    });
+    const herdrRequirement = "Load the `herdr` skill at session start before any `hc` or `herdr-app` read, send, or pane operation.";
+
+    for (const [seat, configs] of [
+      ["orchestrator", [
+        { runtime: "claude", model: "opus", advisor_model: null, effort: "high", tools: DEFAULT_SEATS_CONFIG.orchestrator.tools, fleet: ["explorer"] },
+        { runtime: "pi", model: "magpie/agy-cli/gemini-4-neon", advisor_model: null, effort: "high", tools: DEFAULT_SEATS_CONFIG.orchestrator.tools, fleet: ["explorer"] },
+        AGY_ORCHESTRATOR,
+      ]],
+      ["advisor", [
+        { runtime: "claude", model: "opus", advisor_model: null, effort: "high", tools: ["mcp", "net", "read", "shell"], fleet: ["explorer"] },
+        { runtime: "pi", model: "magpie/agy-cli/gemini-4-neon", advisor_model: null, effort: "xhigh", tools: ["mcp", "net", "read", "shell"], fleet: ["explorer"] },
+        AGY_ADVISOR,
+      ]],
+    ] as const) {
+      for (const config of configs) {
+        const result = buildSeatLaunch(seat, config, "seats", [], config.runtime === "agy" ? { agy: agyInput(seat) } : {});
+        expect(result.brief, `${seat}:${config.runtime}`).toContain(herdrRequirement);
+        if (seat === "orchestrator") {
+          expect(result.brief, `${seat}:${config.runtime}`).toContain("`rh seats launch <seat>` or `rh board dispatch`");
+          expect(result.brief, `${seat}:${config.runtime}`).toContain("resolve an explicit `--pane <id>` with `herdr-app ls` and never rely on `pane.focus` with an untargeted `pane.split`");
+          expect(result.brief, `${seat}:${config.runtime}`).not.toContain("with `rh seats argv <seat>`");
+        }
+        if (config.runtime === "claude") {
+          expect(tools([...result.argv]), `${seat}:claude`).toContain("Skill");
+        }
+        if (config.runtime === "pi") {
+          expect(result.argv, `${seat}:pi`).not.toContain("--no-skills");
+        }
+      }
+    }
+
+    expect(agySeatCommandRules("orchestrator", AGY_ORCHESTRATOR).allow).toContain("herdr-app ls");
+
+    const claudeReviewer = buildSeatLaunch("reviewer", { runtime: "claude", model: "opus", advisor_model: null, effort: "high", tools: ["net", "read", "shell"], fleet: [] }, "seats", []);
+    expect(tools([...claudeReviewer.argv])).not.toContain("Skill");
+    expect(claudeReviewer.brief).not.toContain(herdrRequirement);
+
+    for (const reviewSeat of ["gatekeeper", "reviewer"] as const) {
+      const piReview = buildSeatLaunch(reviewSeat, { runtime: "pi", model: "magpie/codex/gpt-6.2-sol", advisor_model: null, effort: "high", tools: ["net", "read", "shell"], fleet: [] }, "seats", [], { piHookExtension: "/tmp/ext.ts" });
+      expect(piReview.argv, reviewSeat).toContain("--no-skills");
+      expect(piReview.brief, reviewSeat).not.toContain(herdrRequirement);
+    }
+  });
 });
 
 describe("rh seats argv", () => {
@@ -1583,7 +1633,7 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
       withHome({ ...DEFAULT_SEATS_CONFIG, advisor: claudeAdvisor }, claudeHome => {
         const ca = launch(claudeHome, "advisor");
         expect(tools(ca.argv)).toEqual(["ToolSearch", "ListMcpResourcesTool", "ReadMcpResourceTool", "WebFetch", "WebSearch", "Read", "Glob", "Grep",
-          "Bash", "Monitor", "TaskStop", "Agent"]);
+          "Bash", "Monitor", "TaskStop", "Agent", "Skill"]);
         expect(ca.argv).not.toContain("--strict-mcp-config");
         expect(denied(ca.argv)).toEqual(expect.arrayContaining(["Agent(fast-worker)", "Agent(general-purpose)", "Agent(fork)",
           "Agent(nested-auditor)", "Agent(demo:helper)", "Agent(demo:review:security)", "Bash(gh pr create *)"]));
@@ -1628,7 +1678,7 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
       const orchestrator = launch(home, "orchestrator").argv;
       expect(bare(orchestrator).slice(0, 2)).toEqual(["CLAUDE_CODE_TASK_LIST_ID=repo-harness-orchestrator", "claude"]);
       expect(tools(orchestrator)).toEqual(["ToolSearch", "ListMcpResourcesTool", "ReadMcpResourceTool", "WebFetch", "WebSearch", "Read", "Glob", "Grep",
-        "Bash", "Monitor", "TaskStop", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "Agent"]);
+        "Bash", "Monitor", "TaskStop", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "Agent", "Skill"]);
       expect(denied(orchestrator)).not.toContain("Agent(explorer)");
       expect(denied(orchestrator)).toContain("Agent(deep-reasoner)");
       expect(orchestrator).not.toContain("--strict-mcp-config");
