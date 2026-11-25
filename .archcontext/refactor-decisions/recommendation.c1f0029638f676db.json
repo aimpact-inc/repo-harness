@@ -1,0 +1,66 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.c1f0029638f676db",
+  "fingerprint": "sha256:309374409c5e22d4e948f60f6c4747667b6c37647a923bb04b14b110dd5bb16e",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "pair:component.global-runtime-reconciliation.primary-cli|component.hook-adapters.primary",
+    "subjectSelectorId": "subject.repository.45b768da83281060"
+  },
+  "affectedNodeIds": [
+    "component.global-runtime-reconciliation.primary-cli",
+    "component.hook-adapters.primary"
+  ],
+  "affectedNodeCount": 2,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "backwardEdgeCount": 1,
+    "forwardEdgeCount": 1,
+    "thinDirectionEdgeCount": 1,
+    "totalEdgeCount": 2
+  },
+  "reason": "Resolved in #3504",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T07:15:40.000Z",
+  "provenance": {
+    "headSha": "fbf9f278f7d2357030cf51824a82a216a9cabc7b",
+    "assessmentDigest": "sha256:1d669fa1c2d5e067606e486328c7398748dcc07922b2e4bf67d1011f8845c900",
+    "baselineSnapshotDigest": "sha256:273ec57ffa6e6aedf7cc38b80d40f3aaf1f2d308e314ca404c9de68aae7a0a71"
+  },
+  "snapshotDigest": "sha256:273ec57ffa6e6aedf7cc38b80d40f3aaf1f2d308e314ca404c9de68aae7a0a71",
+  "evidenceDigest": "sha256:1d669fa1c2d5e067606e486328c7398748dcc07922b2e4bf67d1011f8845c900",
+  "resolutionDigest": "sha256:66a78a39ae9cea2113bf9163af6c0665d8bb45bed5bfb975b01f8b8dc959dbd9",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.pairThinDirectionEdgeCount",
+      "subjectSelectorId": "subject.repository.45b768da83281060",
+      "nodeId": null,
+      "memberNodeIds": [
+        "component.global-runtime-reconciliation.primary-cli",
+        "component.hook-adapters.primary"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.aeda526ca6c173a1"
+    }
+  ],
+  "killList": [
+    {
+      "kind": "path",
+      "target": "src/cli/runtime/write-all-sync.ts",
+      "required": true
+    }
+  ]
+}
