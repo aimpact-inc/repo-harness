@@ -1,6 +1,6 @@
 # Repo Agent Context
 
-This is the root routing contract for Claude Code and Codex. Load this before task-local artifacts.
+This is the root routing contract for Claude Code, Codex, and Pi. Load this before task-local artifacts.
 
 ## Workflow
 - Multi-agent work follows the `repo-harness-issue-flow` skill (`~/.claude/skills/repo-harness-issue-flow/` or `~/.codex/skills/repo-harness-issue-flow/`): roles, claims, handoff, dispatch, acceptance and merge.
@@ -16,11 +16,13 @@ This is the root routing contract for Claude Code and Codex. Load this before ta
 - GitHub operations (PRs, reviews, merges, labels, releases, comments) go only through the gh/git CLI or the GitHub API. Never use simulated browser clicks on github.com: the account can be banned.
 
 ## Code Optimization Principles
-- Identify observable conditions, controllable inputs, the invariant and the actual pressure point before changing structure.
+- Map entry points, sibling callers, and the authority that owns the invariant. Change the shared rule or primitive so every consumer inherits the fix.
+- Probes, admission, retries, recovery, and cleanup reuse the primary path's builders, validators, and isolation boundaries.
 - Keep one source of truth for each datum; other representations are deterministic projections with drift checks.
 - Do not add steady-state compatibility code, dual authority, semantic fallbacks, aliases or shadow parsers; one-shot migrations fail closed and remove the retired path.
 - Share components only for observed reuse or a cross-module invariant. Do not convert a single-package repository into a workspace without an independently meaningful consumer boundary.
 - Prefer platform/standard-library features, then installed dependencies, and the smallest direct implementation; shrink obsolete code before adding layers.
+- Preserve invariant, race-window, and failure-mode comments while the conditions they describe still apply.
 - Never satisfy a requirement with a substitute that only looks compliant; say what cannot be done and flag the deviation in the PR.
 
 ## Testing

@@ -7,7 +7,8 @@ import { version as PACKAGE_VERSION } from '../../../package.json';
 import { OPERATOR_WEB_PACKAGE_NAME } from '../../core/skill-surface/plugin-manifest';
 import { findInstalledPackageRoot, readPackageManifest } from './global-runtime';
 import { hostConfigurationRoot, assertConfigurationPath } from '../installer/configuration-ownership';
-import { inspectGlobalContext, parseReportLanguageFlag, preflightGlobalContextRefresh, setReportingLanguage, type GlobalContextHost } from '../installer/global-context';
+import { globalRuntimeContextHosts, inspectGlobalContext, parseReportLanguageFlag, preflightGlobalContextRefresh, setReportingLanguage, type GlobalContextHost } from '../installer/global-context';
+import { readRecordedInstallState } from '../installer/install-state';
 import { recordedAntigravityRules } from '../installer/targets/antigravity';
 import { antigravityGlobalRulesPath, resolveUserConfigFile } from '../../effects/host-config/gate';
 import type { OperatorLanguageSettingsAdapter } from '../../effects/operator/language-settings-route';
@@ -132,7 +133,8 @@ export function createOperatorLanguageSettings(
 ): OperatorLanguageSettingsAdapter {
   const home = hostConfigurationRoot(env);
   const reportingHosts = (): GlobalContextHost[] => {
-    const hosts: GlobalContextHost[] = ['claude', 'codex'];
+    const piSelected = readRecordedInstallState(env)?.plugins.some(({ id }) => id === 'pi') === true;
+    const hosts: GlobalContextHost[] = [...globalRuntimeContextHosts('both', piSelected)];
     if (recordedAntigravityRules(env, true) && existsSync(resolveUserConfigFile(env, antigravityGlobalRulesPath(env)))) {
       hosts.push('antigravity');
     }

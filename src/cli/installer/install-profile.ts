@@ -5,7 +5,7 @@ import { bunGlobalPackageRoot, expectedSkillProjections } from './skill-projecti
 import { configurationReceiptPath } from './configuration-ownership';
 import { expectedOf, hostConfigPaths, hostConfigPathsAt, observeFile, putVault, readLedger, removeTarget, replaceTarget, repositoryLedgers, resolveHostPath } from '../../effects/host-config/store';
 import { ensureSelfIgnoringDirectory, isSelfIgnoreGuard, SELF_IGNORE_NAME } from '../../effects/self-ignoring-directory';
-import { antigravityAgentsDirHostPath, antigravityMcpConfigHostPath, AntigravityHooksPathError, antigravitySkillsDirHostPath, openHostConfigGate, planPathRevert, recoverRetiredPathWrites, rollbackHostConfigTransaction, type AntigravityMcpUndo } from '../../effects/host-config/gate';
+import { antigravityAgentsDirHostPath, antigravityMcpConfigHostPath, AntigravityHooksPathError, antigravitySkillsDirHostPath, openHostConfigGate, piGlobalRulesHostPath, planPathRevert, recoverRetiredPathWrites, rollbackHostConfigTransaction, type AntigravityMcpUndo } from '../../effects/host-config/gate';
 import { AGY_SEAT_AGENT_DIR_PATTERN } from '../../core/board/seat-launch';
 import { namingTomlFile } from '../../core/host-config/toml-fragment';
 import { migrateCodexConfigRecords } from './codex-config-migration';
@@ -602,7 +602,7 @@ export function withHostConfigTransaction<T>(env: NodeJS.ProcessEnv, transaction
   });
 }
 
-const transactionLocks = new WeakMap<InstallHostTransaction, { context: RuntimeTransactionContext; owned: RuntimeTransactionLock | undefined }>();
+const transactionLocks = new WeakMap<InstallHostTransaction, { context: RuntimeTransactionContext; owned: RuntimeTransactionLock | undefined; piRules: HostPath }>();
 
 const TRANSACTION_PREFIX = 'install-';
 /** The process that runs a transaction, in the lock owner's shape (PID and start time), and the paths that it snapshots by index. */
@@ -743,7 +743,7 @@ function snapshotPaths(
         return { path, existed: true, backup_path: backupPath };
       });
       const transaction: InstallHostTransaction = { protocol: 1, backup_root: backupRoot, snapshots };
-      if (context) transactionLocks.set(transaction, { context, owned });
+      if (context) transactionLocks.set(transaction, { context, owned, piRules: piGlobalRulesHostPath(env) });
       if (options.retainBackup === true) {
         writeFileSync(join(backupRoot, 'manifest.json'), `${JSON.stringify(transaction, null, 2)}\n`, { mode: 0o600 });
       }
@@ -829,7 +829,7 @@ export function rollbackInstallHostTransaction(
       try {
         const result = rollbackHostConfigTransaction(hostConfigPathsAt(dirname(dirname(ledger.path))),
           ledger.existed && ledger.backup_path !== null ? readFileSync(ledger.backup_path) : null, transaction.backup_root,
-          { antigravityMcpUndo: options.antigravityMcpUndo });
+          { antigravityMcpUndo: options.antigravityMcpUndo, piRules: transactionLocks.get(transaction)?.piRules });
         failures.push(...result.unresolved.map(entry => entry + ': rh cannot prove this host configuration entry; run rh update'));
       } catch (error) { failures.push('host configuration rollback: ' + String((error as Error).message ?? error) + '; run rh update'); }
     }
@@ -990,7 +990,7 @@ export function rollbackRuntimeHostConfig(backupRoot: string, env: NodeJS.Proces
     snapshot = lstatExists(backup) ? readFileSync(backup) : null;
   }
   const kept = restoreMovedRepositoryLedgers(backupRoot, env);
-  const result = rollbackHostConfigTransaction(hostConfigPathsAt(dirname(dirname(ledger))), snapshot, backupRoot);
+  const result = rollbackHostConfigTransaction(hostConfigPathsAt(dirname(dirname(ledger))), snapshot, backupRoot, { piRules: piGlobalRulesHostPath(env) });
   if (result.unresolved.length) throw new Error(['host configuration rollback unresolved: ' + result.unresolved.join(', ') + '; run rh update', ...(kept.length ? [movedLedgersKept(kept)] : [])].join('; '));
   if (owner === 'none') restoreOlderParentFiles(backupRoot, env);
   if (kept.length) throw new Error(movedLedgersKept(kept));

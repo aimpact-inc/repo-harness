@@ -30,10 +30,12 @@ import { ReviewBaseUnresolvedError } from '../../effects/adoption/standard-plan'
 import type { AdoptionPlan } from '../../core/adoption/operations';
 import { isRepoHarnessSourceCheckout } from '../../effects/source-checkout';
 import { resolveRepoRoot } from '../hook/runtime';
+import { resolveUserConfigFile } from '../../effects/host-config/gate';
 import {
   GLOBAL_RULES_EDITED,
   GLOBAL_RULES_UNBALANCED,
   globalContextPath,
+  globalRuntimeContextHosts,
   inspectGlobalContext,
   type GlobalContextInspection,
 } from '../installer/global-context';
@@ -509,6 +511,7 @@ function doctorChecks(
 
 function globalRulesChecks(
   target: InitHookTarget,
+  piSelected: boolean,
   env: NodeJS.ProcessEnv | undefined,
   sourceRoot: string,
   checkUpdates: boolean,
@@ -518,19 +521,23 @@ function globalRulesChecks(
   const checks: InitHookCheck[] = [];
   const missing: string[] = [];
   const missingChecks: string[] = [];
-  for (const host of selectedTargets(target)) {
+  for (const host of globalRuntimeContextHosts(target, piSelected)) {
     const id = `global-rules.${host}`;
     const filePath = globalContextPath(home, host);
-    const exists = existsSync(filePath);
     const check = (status: InitHookCheckStatus, detail: string): void => {
       checks.push({
         id,
-        title: `${targetLabel(host)} user-level Global Working Rules`,
+        title: `${host === 'pi' ? 'Pi' : targetLabel(host)} user-level Global Working Rules`,
         status,
         source: 'global-rules',
         detail,
       });
     };
+    if (host === 'pi') {
+      try { resolveUserConfigFile({ ...env, HOME: home }, filePath); }
+      catch (error) { check('fail', (error as Error).message); continue; }
+    }
+    const exists = existsSync(filePath);
     let content: string | null = null;
     if (exists) {
       try {
@@ -912,12 +919,14 @@ export function buildSetupCheck(ports: DoctorPorts, opts: InitHookOptions = {}):
 
   const antigravityAdapter = target === 'both' ? antigravityAdapterCheck(statusReport) : null;
   const antigravityOptedIn = antigravityAdapter !== null && antigravityAdapter.status !== 'na';
+  const { installState } = statusReport;
+  const piSelected = installState.recorded === true && installState.plugins.includes('pi');
   const checks: InitHookCheck[] = [
     ...statusChecks(statusReport, target, checkUpdates, actions),
     ...(antigravityAdapter === null ? [] : [antigravityAdapter]),
     adoptionRefreshCheck(statusReport, target, checkUpdates, actions),
     ...doctorChecks(doctorReport, target, checkUpdates, actions, antigravityOptedIn),
-    ...globalRulesChecks(target, opts.env, sourceRoot, checkUpdates, actions),
+    ...globalRulesChecks(target, piSelected, opts.env, sourceRoot, checkUpdates, actions),
     ...runtimeCapabilityChecks(toolingProbe.report, target, checkUpdates, actions),
     ...toolingChecks(toolingProbe.report, target, checkUpdates, actions, toolingProbe.error),
     ...legacyChecks(cwd, homeDir(opts.env), target, checkUpdates, actions),

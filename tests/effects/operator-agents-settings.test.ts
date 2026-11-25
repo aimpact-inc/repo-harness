@@ -29,6 +29,7 @@ import { reportingLanguageWriteRoute } from '../../src/effects/operator/language
 import { acquireRuntimeTransactionLock, globalRuntimeScope } from '../../src/effects/locking/runtime-transaction-lock';
 import { agyCatalogScript, type AgyCatalogFixture } from '../helpers/agy-cli-fixture';
 import { operatorAuditPath } from '../../src/effects/operator/write-audit';
+import { recordPluginSelection } from '../helpers/install-ownership';
 
 const PROBE: AgentRuntimeProbeV1 = {
   protocol: 1,
@@ -165,6 +166,17 @@ describe('language settings routes', () => {
     rmSync(file);
     expect(await save('en')).not.toContain('antigravity');
     expect(existsSync(file)).toBe(false);
+  });
+
+  test('reporting language includes Pi when its plugin is selected', async () => {
+    const h = await startHarness();
+    const path = join(h.home, '.pi', 'agent', 'AGENTS.md');
+    expect((await send(h, reportPath, { preset: 'en' })).status).toBe(200);
+    expect(existsSync(path)).toBe(false);
+    recordPluginSelection({ HOME: h.home }, ['pi']);
+    const saved = await send(h, reportPath, { preset: 'en' });
+    expect([saved.status, await saved.json()]).toEqual([200, { changed_hosts: ['pi'] }]);
+    expect((await (await fetch(`${h.server.url}${reportPath}`)).json()).hosts).toContainEqual({ host: 'pi', state: 'managed-current', preset: 'en' });
   });
 
   test('POST refuses an unrecorded block that no release rendered, and saves after the block is deleted', async () => {

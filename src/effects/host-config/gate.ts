@@ -461,12 +461,15 @@ export class AntigravityHooksPathError extends Error {
 }
 
 export function checkAntigravityPath(path: string, leafKind: 'regular file' | 'directory' = 'regular file'): void {
+  checkUnlinkedHostPath(path, leafKind, (entry, kind) => new AntigravityHooksPathError(entry, kind));
+}
+
+function checkUnlinkedHostPath(path: string, leafKind: 'regular file' | 'directory',
+  error: (entry: string, kind: 'regular file' | 'directory') => Error): void {
   for (const entry of [dirname(dirname(path)), dirname(path), path]) {
     const stat = lstatSync(entry, { throwIfNoEntry: false });
-    const expected: 'regular file' | 'directory' = entry === path ? leafKind : 'directory';
-    if (stat && (expected === 'regular file' ? !stat.isFile() : !stat.isDirectory())) {
-      throw new AntigravityHooksPathError(entry, expected);
-    }
+    const expected = entry === path ? leafKind : 'directory';
+    if (stat && (expected === 'regular file' ? !stat.isFile() : !stat.isDirectory())) throw error(entry, expected);
   }
 }
 
@@ -622,25 +625,54 @@ function withDirectoryIdentities(
   return { ...ledger, directories, directory_identities: filtered };
 }
 
-function resolveUserFile(paths: HostConfigPaths, target: string, antigravity: AntigravityGuardedPaths): HostPath {
-  const absolute = isAbsolute(target) ? resolve(target) : null;
-  const guarded = [[antigravity.hooks, antigravity.hooksRequested],
-    [antigravity.rules, antigravity.rulesRequested], [antigravity.mcp, antigravity.mcpRequested]] as const;
-  for (const [host, requested] of guarded) {
-    if (absolute === requested || absolute === host) {
-      if (isPathInside(paths.harness, host)) throw new HostConfigError('host_config_invalid_path', `Antigravity configuration is inside the repo-harness state directory: ${host}`);
-      checkAntigravityPath(host);
-      return host;
-    }
-  }
-  const resolved = resolveHostPath(paths, target);
-  if (guarded.some(([host]) => resolved === host)) checkAntigravityPath(resolved);
-  return resolved;
+export function piGlobalRulesPathAt(home: string): string {
+  return join(home, '.pi', 'agent', 'AGENTS.md');
 }
 
-/** Host config operations follow legacy host links and keep the exact Antigravity entries. */
+export function piGlobalRulesHostPath(env: NodeJS.ProcessEnv, paths = hostConfigPaths(env)): HostPath {
+  return piGlobalRulesPathAt(resolveHostPath(paths, requireHome(env))) as HostPath;
+}
+
+function checkPiRulesPath(path: HostPath): void {
+  checkUnlinkedHostPath(path, 'regular file', (entry, kind) =>
+    new HostConfigError('host_config_invalid_path', `Pi Global Working Rules need a ${kind} at ${entry} without a symbolic link`));
+}
+
+function userConfigFiles(env: NodeJS.ProcessEnv, paths: HostConfigPaths, antigravity: AntigravityGuardedPaths) {
+  const piRules = piGlobalRulesHostPath(env, paths);
+  const guarded = [
+    [antigravity.hooks, antigravity.hooksRequested],
+    [antigravity.rules, antigravity.rulesRequested],
+    [antigravity.mcp, antigravity.mcpRequested],
+    [piRules, piGlobalRulesPathAt(requireHome(env))],
+  ] as const;
+  const checkFile = (path: HostPath): void => {
+    if (path === piRules) checkPiRulesPath(path);
+    else if (guarded.some(([host]) => path === host)) checkAntigravityPath(path);
+  };
+  const resolveFile = (target: string): HostPath => {
+    const absolute = isAbsolute(target) ? resolve(target) : null;
+    for (const [host, requested] of guarded) {
+      if (absolute !== requested && absolute !== host) continue;
+      if (isPathInside(paths.harness, host)) {
+        const label = host === piRules ? 'Pi Global Working Rules' : 'Antigravity configuration';
+        throw new HostConfigError('host_config_invalid_path', `${label} is inside the repo-harness state directory: ${host}`);
+      }
+      checkFile(host);
+      return host;
+    }
+    const resolved = resolveHostPath(paths, target);
+    checkFile(resolved);
+    return resolved;
+  };
+  return { antigravity, piRules, checkFile, resolveFile };
+}
+
+type UserConfigFiles = ReturnType<typeof userConfigFiles>;
+
+/** Host config operations follow legacy host links and guard the exact Antigravity and Pi entries. */
 export function resolveUserConfigFile(env: NodeJS.ProcessEnv, target: string, paths = hostConfigPaths(env)): HostPath {
-  return resolveUserFile(paths, target, antigravityGuardedPaths(env, paths));
+  return userConfigFiles(env, paths, antigravityGuardedPaths(env, paths)).resolveFile(target);
 }
 
 function isAntigravityFragment(fragment: { readonly owner: string; readonly selector: string }): boolean {
@@ -790,8 +822,9 @@ function previewAntigravityMcp(path: HostPath, change: HostConfigFileChange, led
 }
 
 /** Each record reaches the ledger before its write, so every write has its record. */
-function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileChange[], admit: FileAdmission = admitPaths, antigravity?: AntigravityGuardedPaths,
+function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileChange[], admit: FileAdmission = admitPaths, user?: UserConfigFiles,
   options?: HostConfigApplyOptions): HostConfigApplyResult {
+  const antigravity = user?.antigravity;
   const targets = admit(paths, changes.map((change) => change.path));
   const ledger = readLedger(paths);
   const files = { ...ledger.files };
@@ -804,8 +837,8 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
     const path = targets[index]!;
     const isHooks = path === antigravity?.hooks;
     const isMcp = path === antigravity?.mcp;
-    const guarded = isHooks || isMcp || path === antigravity?.rules;
-    if (guarded) checkAntigravityPath(path);
+    const guarded = isHooks || isMcp || path === antigravity?.rules || path === user?.piRules;
+    user?.checkFile(path);
     const { observation, bytes } = observeFile(path);
     const preimage = expectedOf(observation, path);
     const content = decode(bytes, path);
@@ -823,7 +856,7 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
     const before = { fragments, directories };
     const result = Buffer.from(plan.result, 'utf8');
     const createdDirs = unchanged ? [] : missingDirectories(path);
-    if (guarded) checkAntigravityPath(path);
+    user?.checkFile(path);
     const removesUserBytes = !plan.fragments.every(keepsUserBytes);
     const backup = isMcp || (change.backup === 'overrides-only' && !removesUserBytes) ? null : backupUserBytes(paths, previous, preimage, bytes, removesUserBytes);
     fragments = [...fragments.filter((entry) => entry.file !== path), ...fileFragments(plan, recorded)];
@@ -2019,7 +2052,7 @@ function replaceRevertedAntigravityMcp(path: HostPath, bytes: Buffer, current: E
  * content keeps its record for a later revert.
  */
 function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined, options: HostConfigRevertOptions, read: LedgerReader,
-  user?: { readonly resolveFile: (target: string) => HostPath; readonly antigravity: AntigravityGuardedPaths }): HostConfigRevertEntry[] {
+  user?: UserConfigFiles): HostConfigRevertEntry[] {
   const dryRun = options.dryRun === true;
   const filter: RevertFilter = { owner: options.owner, selectors: options.selectors };
   const filtered = filter.owner !== undefined || filter.selectors !== undefined;
@@ -2036,8 +2069,9 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
     const isHooks = path === user?.antigravity.hooks;
     const isMcp = path === user?.antigravity.mcp;
     const fragmentOnly = isHooks || isMcp;
-    const guarded = fragmentOnly || path === user?.antigravity.rules;
-    if (guarded) checkAntigravityPath(path);
+    // The fragment ledger does not prove ownership of a Pi file recreated with the same bytes.
+    const preserveContainer = fragmentOnly || (path === user?.piRules && record.kind === 'created');
+    user?.checkFile(path);
     const { observation, bytes } = observeFile(path);
     const current = expectedOf(observation, path);
     const all = ledger.fragments.filter((entry) => entry.file === path);
@@ -2047,7 +2081,7 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
     const plan = planFileRevert({
       path, format: record.format, kind: record.kind, hasBackup: !fragmentOnly && record.backup !== null, externalChange: record.external_change, committed: isCommitted(record, current),
       existed: current.existed, requestedPresent: only !== undefined && requestedPresent(only[index]!), bytes, backup: () => readVault(paths, record.backup!), own, all,
-      filtered: filtered || fragmentOnly, preserveContainer: fragmentOnly, baseline: record.baseline, backupReference: record.backup,
+      filtered: filtered || preserveContainer, preserveContainer, baseline: record.baseline, backupReference: record.backup,
     });
     report.push(plan.entry);
     const removed = new Set(plan.removed);
@@ -2063,11 +2097,11 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
     };
     steps.push(write === null ? { kind: 'release', commit }
       : write.kind === 'remove' ? { kind: 'delete', commit, write: () => {
-        if (guarded) checkAntigravityPath(path);
+        user?.checkFile(path);
         removeTarget(path, current);
       } }
         : { kind: write.restores ? 'restore' : 'delete', commit, write: () => {
-          if (guarded) checkAntigravityPath(path);
+          user?.checkFile(path);
           if (isMcp && bytes !== null && options.onAntigravityMcpRemoval) {
             replaceRevertedAntigravityMcp(path, bytes, current, write.content, options.onAntigravityMcpRemoval);
           } else replaceTarget(path, write.content, current);
@@ -2198,6 +2232,7 @@ const fragmentKey = (record: FragmentRecord): string => `${record.owner}\0${reco
  */
 export function rollbackHostConfigTransaction(paths: HostConfigPaths, snapshot: Buffer | null, transaction: string, options: Pick<HostConfigPathOptions, 'stage'> & {
   readonly antigravityMcpUndo?: AntigravityMcpUndo;
+  readonly piRules?: HostPath;
 } = {}): HostConfigRollbackResult {
   const before = snapshot === null ? EMPTY_LEDGER : parseSnapshotLedger(snapshot, `${paths.ledger} (transaction snapshot)`);
   const now = readLedger(paths);
@@ -2217,6 +2252,10 @@ export function rollbackHostConfigTransaction(paths: HostConfigPaths, snapshot: 
     const changed = all.filter((entry) => earlier.find((old) => fragmentKey(old) === fragmentKey(entry))?.inserted !== entry.inserted);
     const dropped = earlier.filter((old) => !all.some((entry) => fragmentKey(entry) === fragmentKey(old)));
     unresolved.push(...dropped.map((old) => `${path}: ${old.selector}`));
+    if (path === options.piRules) {
+      try { checkPiRulesPath(path); }
+      catch (error) { unresolved.push((error as Error).message); continue; }
+    }
     if (!changed.length && !dropped.length && record.external_backup && record.external_backup !== previous?.external_backup) {
       const current = expectedOf(observeFile(path).observation, path);
       if (!current.existed || current.sha256 !== record.external_backup) {
@@ -2443,9 +2482,9 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
   const preview = options.preview === true;
   const read: LedgerReader = preview ? readProjectedLedger : readLedger;
   const antigravity = antigravityGuardedPaths(env, paths);
-  const resolveFile = (target: string) => resolveUserFile(paths, target, antigravity);
+  const user = userConfigFiles(env, paths, antigravity);
+  const { resolveFile } = user;
   const admitUserFiles: FileAdmission = (layout, targets) => admitPaths(layout, targets, resolveFile);
-  const user = { antigravity, resolveFile };
   const previewMcp = (change: HostConfigFileChange) => {
     const path = resolveFile(change.path);
     if (path !== antigravity.mcp) throw new HostConfigError('host_config_invalid_path', `not the Antigravity MCP file: ${path}`);
@@ -2469,7 +2508,7 @@ export function openHostConfigGate(options: HostConfigGateOptions = {}): HostCon
     };
   }
   return {
-    apply: (changes, applyOptions) => applyChanges(paths, changes, admitUserFiles, antigravity, applyOptions),
+    apply: (changes, applyOptions) => applyChanges(paths, changes, admitUserFiles, user, applyOptions),
     planPaths,
     writePaths: (writes, pathOptions) => writeWholePaths((ledger, path) => admitUserWrite(env, paths, ledger, path), paths, writes, pathOptions ?? {}, antigravity),
     delegate: (declared, run, pathOptions) => delegateWrites(env, paths, declared, run, pathOptions ?? {}),

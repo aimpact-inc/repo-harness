@@ -1,6 +1,6 @@
 /**
  * The repo-harness managed Global Working Rules block in the user-level host
- * instruction files (`~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`).
+ * instruction files. All hosts use the same marked-block renderer.
  *
  * Init writes the block, install and update refresh it, setup check compares
  * it, and uninstall removes it. All of them use the markers and the render
@@ -18,6 +18,7 @@ import {
   AntigravityHooksPathError,
   openHostConfigGate,
   planFileRevert,
+  piGlobalRulesPathAt,
   resolveUserConfigFile,
   type HostConfigAdoption,
   type HostConfigFileChange,
@@ -54,7 +55,14 @@ export interface ReportingLanguage {
   readonly instruction: string;
 }
 
-export type GlobalContextHost = 'codex' | 'claude' | 'antigravity';
+const GLOBAL_RUNTIME_CONTEXT_HOSTS = ['claude', 'codex', 'pi'] as const;
+type RuntimeGlobalContextHost = typeof GLOBAL_RUNTIME_CONTEXT_HOSTS[number];
+export type GlobalContextHost = RuntimeGlobalContextHost | 'antigravity';
+
+export function globalRuntimeContextHosts(target: 'codex' | 'claude' | 'both', piSelected: boolean): readonly RuntimeGlobalContextHost[] {
+  if (target !== 'both') return [target];
+  return piSelected ? GLOBAL_RUNTIME_CONTEXT_HOSTS : GLOBAL_RUNTIME_CONTEXT_HOSTS.filter(host => host !== 'pi');
+}
 
 /** One state per file. Only the two managed states with recorded inputs sync without a flag. */
 export type GlobalContextState =
@@ -113,6 +121,7 @@ export function parseReportLanguageFlag(value: string): ReportLanguageFlag {
 export function globalContextPath(home: string, host: GlobalContextHost): string {
   if (host === 'codex') return join(home, '.codex', 'AGENTS.md');
   if (host === 'claude') return join(home, '.claude', 'CLAUDE.md');
+  if (host === 'pi') return piGlobalRulesPathAt(home);
   return join(home, '.gemini', 'config', 'AGENTS.md');
 }
 

@@ -7,7 +7,7 @@ import { createHash } from 'crypto';
 import { hostSkillRoot, providerSkillLock, type ProviderSkillLock } from '../../effects/host-skill-roots';
 import { isPathInside } from '../../effects/path-containment';
 import { piPackageEntry, piPackageRemoval, recordedPiPackages, removePiPackage } from './pi-package';
-import { globalContextPath, inspectUnrecordedGlobalRules, previewGlobalRulesAdoptedRevert, type GlobalContextHost } from './global-context';
+import { globalContextPath, globalRuntimeContextHosts, inspectUnrecordedGlobalRules, previewGlobalRulesAdoptedRevert, type GlobalContextHost } from './global-context';
 import { legacyRepositoryExcludesPath } from './repository-excludes';
 import { isHistoricalRetiredAgentRecord, readInstallState, retiredAgentRecordCheck } from './install-profile';
 import { installStatePendingMigration, migrateInstallState, planInstallStateMigration } from './install-state-migration';
@@ -31,6 +31,7 @@ import {
   openHostConfigGate,
   openRepositoryFileGate,
   planPathRevertEntry,
+  piGlobalRulesHostPath,
   resolveUserConfigFile,
   userPathLabel,
   type HostConfigAdoption,
@@ -384,9 +385,9 @@ function runUserUninstallLocked(opts: UninstallOptions): UninstallResult {
   const globalContextPaths = new Set<string>();
   const includeAntigravityRules = opts.target === 'antigravity'
     || (opts.target === 'both' && Boolean(currentLedger.files[antigravityGlobalRulesHostPath(env)]));
+  const includePiRules = opts.target === 'both' && Boolean(currentLedger.files[piGlobalRulesHostPath(env, paths)]);
   const rulesHosts: readonly GlobalContextHost[] = [
-    ...(opts.target === 'both' || opts.target === 'codex' ? ['codex' as const] : []),
-    ...(opts.target === 'both' || opts.target === 'claude' ? ['claude' as const] : []),
+    ...(opts.target === 'antigravity' ? [] : globalRuntimeContextHosts(opts.target, includePiRules)),
     ...(includeAntigravityRules ? ['antigravity' as const] : []),
   ];
   for (const host of rulesHosts) {

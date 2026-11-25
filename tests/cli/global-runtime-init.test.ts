@@ -3556,6 +3556,7 @@ describe('Global Working Rules refresh during install and update', () => {
       reportLanguage?: 'follow' | 'zh-CN' | 'en',
       updateMode?: boolean,
       target?: 'codex' | 'both',
+      plugins?: readonly PluginId[],
     ) => ReturnType<typeof runGlobalRuntimeSetup>;
   }) => void): void {
     const tmp = mkdtempSync(join(tmpdir(), 'repo-harness-global-rules-refresh-'));
@@ -3583,11 +3584,11 @@ describe('Global Working Rules refresh during install and update', () => {
       body({
         home,
         path: join(home, '.codex', 'AGENTS.md'),
-        run: (reportLanguage, updateMode = true, target = 'codex') => runGlobalRuntimeSetup({
+        run: (reportLanguage, updateMode = true, target = 'codex', plugins = []) => runGlobalRuntimeSetup({
           sourceRoot: source,
           cwd: repo,
           target,
-          plugins: [],
+          plugins,
           updateMode,
           installCli: false,
           syncSkill: false,
@@ -3607,6 +3608,80 @@ describe('Global Working Rules refresh during install and update', () => {
     result.steps.find((step) => step.step === 'refresh global working rules');
   const backupDir = (home: string) => join(home, '.repo-harness', 'global-context-backups');
   const vaultDir = (home: string) => join(home, '.repo-harness', 'config', 'vault');
+
+  test('install and update manage Pi rules only for an opted-in Pi selection', () => withRulesRuntime(({ home, run }) => {
+    const path = join(home, '.pi', 'agent', 'AGENTS.md');
+    expect(run('en', false, 'both').exitCode).toBe(0);
+    expect(existsSync(join(home, '.pi'))).toBe(false);
+    expect(run('en', false, 'codex', ['pi']).exitCode).toBe(0);
+    expect(existsSync(path)).toBe(false);
+    expect(run(undefined, true, 'both', ['pi']).exitCode).toBe(0);
+    expect(existsSync(path)).toBe(false);
+
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, userBefore);
+    expect(run('en', false, 'both', ['pi']).exitCode).toBe(0);
+    const installed = readFileSync(path, 'utf8');
+    expect(installed).toStartWith(userBefore);
+    expect(inspectGlobalContext(installed, ROOT).state).toBe('managed-current');
+    const inode = lstatSync(path).ino;
+    expect(run(undefined, true, 'both', ['pi']).exitCode).toBe(0);
+    expect(lstatSync(path).ino).toBe(inode);
+    expect(readFileSync(path, 'utf8')).toBe(installed);
+
+    const edited = installed.replace(GLOBAL_RULES_END, `Personal rule.\n${GLOBAL_RULES_END}`);
+    writeFileSync(path, edited);
+    expect(run('zh-CN', true, 'both', ['pi']).exitCode).toBe(0);
+    expect(readFileSync(path, 'utf8')).toBe(edited);
+  }), 60_000);
+
+  test.skipIf(process.platform === 'win32')('install refuses links at the Pi rules file and both path components', () => {
+    for (const components of [['.pi'], ['.pi', 'agent'], ['.pi', 'agent', 'AGENTS.md']]) {
+      withRulesRuntime(({ home, run }) => {
+        const link = join(home, ...components);
+        const outside = join(home, 'link-target');
+        const target = join(outside, ...['.pi', 'agent', 'AGENTS.md'].slice(components.length));
+        mkdirSync(dirname(target), { recursive: true });
+        mkdirSync(dirname(link), { recursive: true });
+        writeFileSync(target, userBefore);
+        symlinkSync(outside, link, components.length === 3 ? 'file' : 'dir');
+        expect(run('en', false, 'both', ['pi']).exitCode).toBe(0);
+        expect(readFileSync(target, 'utf8')).toBe(userBefore);
+        expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      });
+    }
+  }, 30_000);
+
+  test.skipIf(process.platform === 'win32')('Pi rules rollback refuses a linked parent with the installed bytes', () => withRulesRuntime(({ home }) => {
+    const env = { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun') };
+    const dir = join(home, '.pi', 'agent');
+    const outside = join(home, 'linked-agent');
+    const transaction = beginInstallHostTransaction(installProfileTransactionPaths(env), env);
+    expect(applyGlobalContextRefresh(preflightGlobalContextRefresh(ROOT, home, ['pi'], 'en'), home).status).toBe('ok');
+    const installed = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
+    renameSync(dir, outside);
+    symlinkSync(outside, dir, 'dir');
+    expect(() => rollbackInstallHostTransaction(transaction)).toThrow('without a symbolic link');
+    expect(lstatSync(dir).isSymbolicLink()).toBe(true);
+    expect(readFileSync(join(outside, 'AGENTS.md'), 'utf8')).toBe(installed);
+  }));
+
+  test('a restored v0.37.3 block without its ledger still syncs', () => withRulesRuntime(({ home, path, run }) => {
+    const relativeTemplate = 'assets/reference-configs/global-working-rules.md';
+    const release = spawnSync('git', ['show', `v0.37.3:${relativeTemplate}`], { cwd: ROOT });
+    expect(release.status, release.stderr.toString()).toBe(0);
+    const releaseRoot = join(home, 'released');
+    mkdirSync(dirname(join(releaseRoot, relativeTemplate)), { recursive: true });
+    writeFileSync(join(releaseRoot, relativeTemplate), release.stdout);
+    const language = { preset: 'custom', instruction: 'Report in French.' } as const;
+    const old = renderGlobalRulesBlock(releaseRoot, language);
+    const current = renderGlobalRulesBlock(ROOT, language);
+    expect(old).not.toBe(current);
+    writeFileSync(path, `${userBefore}${old}`);
+
+    expect(run().exitCode).toBe(0);
+    expect(readFileSync(path, 'utf8')).toBe(`${userBefore}${current}`);
+  }), 30_000);
 
   test('setting the language replaces both recorded presets, keeps user text and keeps no whole-file copy', () => withRulesRuntime(({ home, path }) => {
     const claudePath = join(home, '.claude', 'CLAUDE.md');
