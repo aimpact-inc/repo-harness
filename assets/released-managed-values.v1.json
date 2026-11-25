@@ -106,7 +106,8 @@
     "v0.36.1",
     "v0.37.0",
     "v0.37.1",
-    "v0.37.2"
+    "v0.37.2",
+    "v0.37.3"
   ],
   "packageScripts": {
     "check:architecture-sync": [
@@ -2330,6 +2331,7 @@
       ],
       "## Sub-agent Delegation": [
         "sha256:0867ebf51d139e026dc8c3ebff1e0aff7577ea408be5722974f10caae5afc842",
+        "sha256:4854194027d51b2dfd23355fd553eb62f487d92e3c6cd2b216404524637a0e77",
         "sha256:6038a74d11852a4bcc85e23eb34377456df21ebce358c6bb6ab2aa85f7f85a73",
         "sha256:731954322da34a273e628f5b8f839f0da2634f87d5c6e165d9321e6d7bdbcdba",
         "sha256:756d24d99f788fd9ce38095c979594d20b3c3cf66e89d2e2ebee6b9a0c601109",
