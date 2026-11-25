@@ -17,19 +17,19 @@
   ],
   "affectedNodeCount": 2,
   "regressesFrom": null,
-  "status": "accepted",
+  "status": "resolved",
   "observationMetrics": {
     "backwardEdgeCount": 1,
     "forwardEdgeCount": 1,
     "thinDirectionEdgeCount": 1,
     "totalEdgeCount": 2
   },
-  "reason": "Issue #3508 moves fixed host GitHub CLI resolution to an execution primitive and preserves the acceptance receipt runtime path and worktree cleanup refusals.",
+  "reason": "Resolved in #3508",
   "actor": {
     "kind": "cli",
     "id": "cli-user"
   },
-  "decidedAt": "2026-11-25T07:09:11.000Z",
+  "decidedAt": "2026-11-25T07:21:26.000Z",
   "provenance": {
     "headSha": "fbf9f278f7d2357030cf51824a82a216a9cabc7b",
     "assessmentDigest": "sha256:d94dacdb8df17501b7afea0a7079500b61894da2161ba74ae71b77bc9c191ecf",
@@ -37,6 +37,7 @@
   },
   "snapshotDigest": "sha256:3e77d3e289d93b54f4d6b291cd39427bc023aadd5fcddf94e874faa67755ca8e",
   "evidenceDigest": "sha256:d94dacdb8df17501b7afea0a7079500b61894da2161ba74ae71b77bc9c191ecf",
+  "resolutionDigest": "sha256:54044a25778414a95c9e6bd0c8f8c8c0c68e11bf03ee1f8c629d935187d74d34",
   "scope": {
     "kind": "repository"
   },
