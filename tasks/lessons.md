@@ -1,6 +1,6 @@
 # Lessons
 
-reviewed-through: 66c187281ead7631385d2347a257bd961ce8e9bf
+reviewed-through: 51519eaa0f7fb851d5305949b02d837b3ef9489b
 
 - Date: 2026-10-03
 - Name: Verify live state
@@ -421,3 +421,43 @@ reviewed-through: 66c187281ead7631385d2347a257bd961ce8e9bf
 - Why: The 0.36.0 release prep smoke hit macOS Bash 3.2. The recorded pass used a caller-supplied Pi config to select Bash 5.3. The packaged smoke needed a follow-up fix to pass with its own settings for 0.36.1.
 - Triggered by correction: dc5ae3646
 - Seen: 6×
+
+- Date: 2026-11-25
+- Name: Deny what the host auto-approves
+- Mistake pattern: never-ask-when-host-auto-approves
+- Prevention rule: Return `deny` from a guard when its question cannot reach the user. Set `capabilities.ask: false` for a host that approves a confirmation without a prompt, and test each prompt-skipping mode.
+- Enforced by: tests/mutation-guard.test.ts
+- Missed by: self-verify
+- Why: The Antigravity `UserFileGuard` returned `force_ask`, and the guard assumed that agy shows it. The #3487 probe record found that agy 1.5.16 approves the confirmation without a prompt under `--dangerously-skip-permissions`, `auto` and `always-proceed`. An ordinary `run_command` then overwrote a user file outside the allowed roots (I2). No test ran the real confirmation path.
+- Triggered by correction: a1a07470b, #3489
+- Seen: 1×
+
+- Date: 2026-11-25
+- Name: Probe outside every allowed root
+- Mistake pattern: probe-target-outside-allowed-roots
+- Prevention rule: Point a guard probe at a file outside the probe HOME, its TMPDIR and the worktree root that the probe runtime resolves. Prove the target through `realpath`, and run the probe with the CI TMPDIR.
+- Enforced by: tests/cli/doctor.test.ts
+- Missed by: self-verify
+- Why: The Antigravity guard probe put its HOME inside TMPDIR and its protected target next to the scratch root. A stale hook that allowed protected-file overwrites still reported the guard ready. On Linux the worktree root resolves `/tmp`, so a `/tmp` target proves nothing there. #3493 moved the probe TMPDIR beside the HOME and targeted `/etc/hosts`.
+- Triggered by correction: 3979a7b41, #3493
+- Seen: 1×
+
+- Date: 2026-11-25
+- Name: Read explicitOnly before discovery
+- Mistake pattern: read-explicit-only-before-discovery
+- Prevention rule: Set `explicitOnly: true` only to keep a skill out of every selection. To install a skill that a model must not invoke on its own, keep `explicitOnly: false`, set `discoverability: "explicit-only"` and add both host switches.
+- Enforced by: tests/skill-surface/catalog.test.ts
+- Missed by: unknown
+- Why: #3496 asked for `explicitOnly: true` so the two new skills would never auto-trigger. The same field also removes a skill from every selection, so `rh update` would install neither one. The orchestrator changed it to `explicitOnly: false` with `discoverability: "explicit-only"` before implementation. The record names no check of the requested field against the selector rule.
+- Triggered by correction: #3496, 51519eaa0
+- Seen: 1×
+
+- Date: 2026-11-25
+- Name: Split a known pane
+- Mistake pattern: split-an-explicit-pane-id
+- Prevention rule: Put a seat in an existing tab with `pane.split --direction right --pane <pane id>` from a placement lookup. Never rely on focus or an untargeted split.
+- Enforced by: judgment
+- Missed by: unknown
+- Why: `docs/reference-configs/herdr-notify.md` described up to three panes per tab, but no production code called `pane.split`, and both dispatch paths opened a new tab for every seat. A manual split without an explicit pane id landed in the focused space. Live multi-issue work produced duplicate `#<parent>` worker tabs and `review` tabs (#3494). No test ran a split.
+- Triggered by correction: #3494
+- Seen: 1×

@@ -14,7 +14,7 @@ plugin id. The installer maps the other surfaces through
 
 | Owner | Surfaces |
 |---|---|
-| `core` | The CLI, the Claude and Codex hook adapters with every hook route, the agent fleet files, the root router `repo-harness`, `repo-harness-check`, `repo-harness-test`, `repo-harness-issue-flow`, `repo-harness-ship`, the Herdr skill, Waza (`think`, `hunt`, `check`, `health` and the Waza rules files), and Mermaid. `repo-harness-setup`, `merge-gate` and `herdr` are explicit-only. |
+| `core` | The CLI, the Claude and Codex hook adapters with every hook route, the agent fleet files, the root router `repo-harness`, `repo-harness-check`, `repo-harness-test`, `repo-harness-issue-flow`, `repo-harness-ship`, `repo-harness-sharpen`, `repo-harness-reframe`, the Herdr skill, Waza (`think`, `hunt`, `check`, `health` and the Waza rules files), and Mermaid. `repo-harness-setup`, `merge-gate` and `herdr` are explicit-only. |
 | `architecture` | `repo-harness-architecture`, `repo-harness-archimap`, and the CodeGraph CLI and MCP projection. |
 | `cross-review` | `repo-harness-cross-review`. |
 | `mcp` | The guarded commands `mcp serve` and `mcp doctor`. No host file. |
@@ -179,6 +179,14 @@ rh update
 ```
 
 ## Explicit-Only Skills
+
+Two manifest fields control discovery and installation.
+`discoverability: "explicit-only"` keeps a skill installed and blocks implicit
+model invocation: `core` installs `repo-harness-ship`, `repo-harness-sharpen`
+and `repo-harness-reframe`, and a model runs one only when the operator names
+it. `explicitOnly: true` keeps a skill out of every selection:
+`repo-harness-setup`, `merge-gate`, `herdr`, `repo-harness-strategy` and both
+companion Skills below hold it.
 
 `obsidian-memory` declares `obsidian-markdown` and `obsidian-cli` as hard
 companion Skill dependencies. Both upstream Skills are explicit-only, and an

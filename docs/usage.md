@@ -444,18 +444,23 @@ control context loading. They do not add a host permission boundary.
 | `repo-harness-check` | Bot | Plan scoped work, review plans, assess recorded checks |
 | `repo-harness-product` | Bot | Requested PRD drafting or Goal preparation |
 | `repo-harness-issue-flow` | Bot | Issue and PR driven multi-agent development: split by module, dispatch workers, follow PRs and CI |
-| `repo-harness-ship` | Bot | Explicit publication and cleanup decisions |
-| `obsidian-memory` | Bot | Explicit memory recall or persistence |
+| `repo-harness-ship` | Bot | Explicit-only publication and cleanup decisions |
+| `repo-harness-sharpen` | Bot | Explicit-only prompt sharpening: deeper, not bigger |
+| `repo-harness-reframe` | Bot | Explicit-only problem reframing: domain terms and analogies |
+| `obsidian-memory` | Bot | Explicit-only memory recall or persistence |
 | `repo-harness-cross-review` | Bot | Generic review; direct advisory runtime retired |
 | `repo-harness-setup` | Worker | Assigned install, migration, repair or scaffold |
 | `repo-harness-test` | Worker | Source tests and real fixtures |
-| `repo-harness-architecture` | Worker | Assigned model, projection or diagram work |
+| `repo-harness-architecture` | Worker | Explicit-only model, projection or diagram work |
 | `repo-harness-archimap` | Worker | Draw or refresh the human-facing architecture map `docs/architecture/archimap.html` |
 | `windows-python-first` | Worker | Native Windows file, text and shell work through Python |
 
 Planning is merged into `repo-harness-check`. No separate planning alias remains.
-`obsidian-memory` and `repo-harness-ship` stay installed for their
-profiles. Both host switches prohibit implicit invocation.
+`repo-harness-ship`, `repo-harness-sharpen` and `repo-harness-reframe` install
+with `core`; `obsidian-memory` installs with `strategy-memory`, and
+`repo-harness-architecture` installs with `architecture`. Both host switches
+prohibit implicit invocation, so a model runs an explicit-only skill only when
+the operator names it.
 External runtime skills remain user-owned. `think`, `check` and `geju` guide Bot
 decisions. `hunt`, `health` and `mermaid` supply worker techniques. This change
 does not vendor or edit them. The seven fleet personas remain separate from skills.
