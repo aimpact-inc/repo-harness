@@ -2,6 +2,30 @@
 
 All notable changes to this skill are documented here.
 
+## [0.37.4] - 2026-11-26
+
+### Added
+
+- Pi receives the managed Global Working Rules block in `~/.pi/agent/AGENTS.md` on full-target install and update, only when the Pi plugin is selected. A new block needs a reporting language: `--report-language` or a language save in the operator console. Install, update, operator language settings and `rh setup-check` share one filename-precedence check against the Pi 1.6.0 loader order (`AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD`). A refused write names the file that would shadow the block or be shadowed by it. Uninstall and its preview apply the same strict unlinked-path check, and a full uninstall finds the Pi rules through the ledger after a selection change. (#3546, #3549)
+- The released managed-values extractor reads the tagged marker helper that `markedBlockMarkers` writes, so a release that lands after #2849 is no longer skipped, and the index also holds the rendered block fingerprints. (#3549)
+
+### Fixed
+
+- I2: sweep, board closeout and explicit `rh worktrees cleanup` check one removal proof under the topology lock: clean Git status, submodules, one ignored-file allowlist, merge coverage and runtime ownership. Sweep and board closeout also require fresh process occupancy proof, so an unknown or live occupancy keeps the checkout; explicit cleanup keeps main's occupancy behavior until the Windows observer lands (#3550). ArchContext output directories hold children the allowlist does not name, so `.archcontext` evidence logs, blobs, run records and checkpoints keep the checkout, as do non-rebuildable worktree evidence, foreign markers, open workspaces and live processes. A closed, unoccupied workspace releases only its reserved ignored self-marker. (#3542, #3545)
+- Sweep and explicit cleanup accept a squash-merged PR when its head SHA matches the local tip and its merge commit is an ancestor of the target, so removal no longer needs the remote head branch that GitHub deletes. Clean detached checkouts at target ancestors are removed without changing a branch. (#3542, #3545)
+- `rh upgrade --registered --apply --pr` creates its refresh commit with `git commit --no-verify`, so a registered repository that installs `pre-commit` or `commit-msg` hooks that need local packages no longer fails in the dependency-free temporary worktree. (#3543, #3544)
+- `rh init` and `rh upgrade --registered` stop seeding the placeholder `docs/architecture/index.md`. `docs/architecture/archimap.html` and `docs/architecture/modules/` stay the single architecture entry, and a copy that an adopted repository already holds keeps its bytes. (#3547, #3548)
+
+### Upgrade
+
+- Run `rh update` once on each host after installing 0.37.4.
+- A Pi host whose `~/.pi/agent` holds `AGENTS.override.md` gets a refusal that names that file, because the override would shadow the block. A Pi host that holds `CLAUDE.md` and no `AGENTS.md` gets a refusal that names it, because the new block would shadow the file. Remove or rename the named file, or move your text into it, before you select Pi again. (#3549)
+
+### Rollback
+
+- Before publication, close the prep PR or run `git revert <squash-commit>` after merge. After publication, keep the tag and release a corrective patch.
+- Version 0.37.3 seeds the placeholder `docs/architecture/index.md` on init, runs registered-repository Git hooks on refresh commits and delivers no Pi Global Working Rules. Keep 0.37.4 on upgraded hosts; if you must return to 0.37.3, reinstall 0.37.3 and run `rh update`.
+
 ## [0.37.3] - 2026-11-25
 
 ### Changed
