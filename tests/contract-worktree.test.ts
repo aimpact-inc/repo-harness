@@ -170,15 +170,17 @@ describe("contract-worktree helper integration", () => {
     });
   });
 
-  test('slug cleanup with unknown occupancy refuses in preview and apply', () => {
+  test('slug cleanup can preview and remove a clean merged checkout with unknown occupancy', () => {
     withIgnoredCleanupFixture('.ai/', f => {
-      for (const extra of [['--dry-run'], []]) {
-        const result = f.cli(...f.cleanup, ...extra);
-        expect(result.status, result.stdout + result.stderr).toBe(1);
-        expect(result.stderr).toContain('process_unknown');
-        expect(result.stdout).not.toContain('would remove worktree');
-        f.retained();
-      }
+      const preview = f.cli(...f.cleanup, '--dry-run');
+      expect(preview.status, preview.stdout + preview.stderr).toBe(0);
+      expect(preview.stdout).toContain('would remove worktree');
+      f.retained();
+      const result = f.cli(...f.cleanup);
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(existsSync(f.worktree)).toBe(false);
+      expect(existsSync(f.metadata)).toBe(false);
+      expect(f.branchStatus()).not.toBe(0);
     }, [], null);
   });
 

@@ -7,7 +7,7 @@ import { commitAll, initGitRepo, run, tmpWorkspaceIn } from '../helpers/repo-fix
 import { startTaskAgent } from '../../src/effects/terminal/task-session';
 import { cleanupTaskWorktree, notifyTaskWorktreeMerged } from '../../src/effects/terminal/runtime-closeout';
 import { releaseClosedWorktreeMarker, removeExactWorktree } from '../../src/effects/state/coordination-worktree-topology';
-import { setControlledWorktreeProcesses, writeControlledWorktreeProcessesConfig } from '../helpers/controlled-worktree-processes';
+import { writeControlledWorktreeProcessesConfig } from '../helpers/controlled-worktree-processes';
 import { HerdrCoreError } from '../../src/effects/terminal/herdr-core';
 
 const roots: string[] = [];
@@ -81,8 +81,8 @@ async function fixture(branch = 'codex/owner') {
     notify: () => notifyTaskWorktreeMerged(root, binding.terminal_id, notice),
     /** The owner program exited and its terminal was removed. */
     async ownerGone() { await exit(); mode = 'gone'; },
-    remove: () => removeExactWorktree(root, { worktree: checkout, branch: notice.branch, head_sha: merge,
-      target_ref: 'main', target_oid: merge, merge_commit_sha: merge }, { closeout: true }),
+    remove: (closeoutProcesses?: () => null) => removeExactWorktree(root, { worktree: checkout, branch: notice.branch, head_sha: merge,
+      target_ref: 'main', target_oid: merge, merge_commit_sha: merge }, { closeout: true, closeoutProcesses }),
   };
 }
 
@@ -117,11 +117,9 @@ test('cleanup ends the live owner terminal before closeout and exact public remo
   expect(f.prompts).toHaveLength(1);
   expect(await cleanupTaskWorktree(f.root, f.checkout, false, undefined, releaseClosedWorktreeMarker)).toEqual({ status: 'closed', pids: [] });
   expect(existsSync(join(f.checkout, '.ai/harness/active-worktree'))).toBe(false);
-  setControlledWorktreeProcesses(null);
-  try {
-    expect(f.remove).toThrow('process_unknown');
-    expect(existsSync(f.checkout)).toBe(true);
-  } finally { setControlledWorktreeProcesses([]); }
+  // Board-style closeout still requires a known inventory from its observer.
+  expect(() => f.remove(() => null)).toThrow('process_unknown');
+  expect(existsSync(f.checkout)).toBe(true);
   expect([f.spies.hcKill.mock.calls.map(call => call[0]), f.spies.hcRm.mock.calls.map(call => call[0])]).toEqual([[f.binding.terminal_id], [f.binding.terminal_id]]);
   const cli = join(import.meta.dir, '../../src/cli/index.ts');
   const removal = run(process.execPath, [cli, 'worktrees', 'runtime', 'remove-exact',
