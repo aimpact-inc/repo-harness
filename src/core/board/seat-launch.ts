@@ -450,7 +450,11 @@ export function agySeatCommandRules(seat: LaunchSeatId, config: SeatConfigV1): {
 const AGY_OFF_GROUPS = (config: SeatConfigV1): SeatGroup[] =>
   (['edit', 'shell', 'net', 'tasks', 'schedule', 'mcp', 'gh'] as const).filter(group => !config.tools.includes(group));
 
-// MCP and fleet omission must be confirmed in a native agy session before reporting enforcement.
+// Under --dangerously-skip-permissions (agy 1.5.16, #3487/#3489) there is no in-session approval prompt:
+// --settings.permissions.deny still enforces denied command prefixes (edit/gh remain common_commands because
+// shell and MCP paths stay open), and PreToolUse hooks enforce I1 deny and I2 deny on guarded tools
+// (hook stays common_commands while read_file, MCP tools, and live disable remain outside the matcher per #3251 R1-R3).
+// MCP and fleet omission must still be confirmed in a native agy session before reporting enforcement.
 export function agySeatLimits(_seat: LaunchSeatId, config: SeatConfigV1): readonly SeatLimitV1[] {
   return [
     ...AGY_OFF_GROUPS(config).map((group): SeatLimitV1 => ({
@@ -509,7 +513,7 @@ function agyLaunch(seat: LaunchSeatId, config: SeatConfigV1, repositoryId: strin
   const limits = agySeatLimits(seat, config);
   return {
     argv: [
-      ...seatEnv(env), input.executable, '--mode', 'accept-edits', '--model', model,
+      ...seatEnv(env), input.executable, '--dangerously-skip-permissions', '--model', model,
       ...(config.effort === null ? [] : ['--effort', config.effort]),
       '--agent', input.agentName, '--settings', settings,
     ],

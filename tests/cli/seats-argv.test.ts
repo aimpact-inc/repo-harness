@@ -312,7 +312,7 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     expect(AGY_WORKER_COMMAND_PREFIXES.some(prefix => ["git", "gh", "hc", "rh"].includes(prefix))).toBe(false);
     expect(AGY_READONLY_COMMAND_PREFIXES.some(prefix => ["git", "gh", "hc", "rh"].includes(prefix))).toBe(false);
     expect(settings.permissions.deny).toContain("command(rh board attention start)");
-    const executable = [f.agy, "--mode", "accept-edits", "--model", "gemini-4-neon-high",
+    const executable = [f.agy, "--dangerously-skip-permissions", "--model", "gemini-4-neon-high",
       "--agent", agentName, "--settings", JSON.stringify(settings)];
     expect(agent(labeled)).toEqual([...UNSET_SEAT, "REPO_HARNESS_SEAT=advisor", "REPO_HARNESS_SEAT_REPOSITORY=1186405141",
       "REPO_HARNESS_SEAT_MODEL=gemini-4-neon-high", ...executable]);
@@ -563,7 +563,9 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
     expect(workerAgentArgs.slice(0, UNSET_SEAT.length)).toEqual(UNSET_SEAT);
     expect(workerAgentArgs[UNSET_SEAT.length]).toBe(f.agy);
     expect(worker.argv.some((arg: string) => arg.startsWith("REPO_HARNESS_SEAT") && arg.includes("="))).toBe(false);
-    expect(worker.argv).not.toContain("--dangerously-skip-permissions");
+    expect(worker.argv).toContain("--dangerously-skip-permissions");
+    expect(worker.argv).not.toContain("--mode");
+    expect(worker.argv).not.toContain("accept-edits");
     expect(worker.argv).not.toContain("--add-dir");
     const expectedWorkerAgent = agySeatAgentSpec("worker-neon", AGY_WORKER).name;
     expect(worker.argv[worker.argv.indexOf("--agent") + 1]).toBe(expectedWorkerAgent);
@@ -1126,6 +1128,73 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
       expect(piReview.brief, reviewSeat).not.toContain(herdrRequirement);
     }
   });
+
+  test("every agy seat launches with --dangerously-skip-permissions and preserves --settings trustedWorkspaces and command rules", () => {
+    const cwd = "/tmp/repo";
+    for (const [seat, config, agentName] of [
+      ["orchestrator", AGY_ORCHESTRATOR, "rh-orchestrator-0123456789ab"],
+      ["advisor", AGY_ADVISOR, "rh-advisor-0123456789ab"],
+      ["worker-neon", AGY_WORKER, "rh-worker-0123456789ab"],
+      ["worker-light", AGY_WORKER_NO_GH, "rh-worker-0123456789ab"],
+      ["council", AGY_FALLBACK, "rh-council-0123456789ab"],
+      ["gatekeeper", AGY_FALLBACK, "rh-gatekeeper-fallback-0123456789ab"],
+    ] as const) {
+      const result = buildSeatLaunch(seat, config, "seats", [], { agy: { executable: "/usr/local/bin/agy", agentName, cwd } });
+      expect(result.argv, seat).toContain("--dangerously-skip-permissions");
+      expect(result.argv, seat).not.toContain("--mode");
+      expect(result.argv, seat).not.toContain("accept-edits");
+      const settings = JSON.parse(result.argv[result.argv.indexOf("--settings") + 1]!);
+      const rules = agySeatCommandRules(seat, config);
+      expect(settings, seat).toEqual({
+        trustedWorkspaces: [cwd],
+        permissions: {
+          allow: rules.allow.map(command => `command(${command})`),
+          deny: rules.deny.map(command => `command(${command})`),
+        },
+      });
+    }
+  });
+
+  test("rh seats argv emits honest agy limit lines under --dangerously-skip-permissions", withAgySeat(f => {
+    expect(agySeatLimits("advisor", AGY_ADVISOR)).toEqual([
+      { subject: "tasks", level: "instructions_only" },
+      { subject: "gh", level: "common_commands" },
+      { subject: "fleet", level: "instructions_only" },
+      { subject: "hook", level: "common_commands" },
+    ]);
+    expect(agySeatLimits("worker-neon", AGY_WORKER)).toEqual([
+      { subject: "tasks", level: "instructions_only" },
+      { subject: "schedule", level: "instructions_only" },
+      { subject: "mcp", level: "instructions_only" },
+      { subject: "fleet", level: "instructions_only" },
+      { subject: "hook", level: "common_commands" },
+    ]);
+    expect(agySeatLimits("council", AGY_FALLBACK)).toEqual([
+      { subject: "edit", level: "common_commands" },
+      { subject: "tasks", level: "instructions_only" },
+      { subject: "schedule", level: "instructions_only" },
+      { subject: "mcp", level: "instructions_only" },
+      { subject: "gh", level: "common_commands" },
+      { subject: "fleet", level: "instructions_only" },
+      { subject: "hook", level: "common_commands" },
+    ]);
+
+    f.configure(AGY_ADVISOR, true, { orchestrator: AGY_ORCHESTRATOR });
+    const plain = f.run(["argv", "orchestrator"]);
+    expect(plain.status, plain.stderr).toBe(0);
+    const parsedArgv = JSON.parse(plain.stdout) as string[];
+    expect(parsedArgv).toContain("--dangerously-skip-permissions");
+    expect(parsedArgv).not.toContain("--mode");
+    expect(parsedArgv).not.toContain("accept-edits");
+    expect(parsedArgv).toContain("--settings");
+    const limitLines = plain.stderr.trim().split("\n").filter(line => line.startsWith("limit "));
+    expect(limitLines).toEqual([
+      "limit edit: common_commands",
+      "limit schedule: instructions_only (written into the launch instructions only)",
+      "limit fleet: instructions_only (written into the launch instructions only)",
+      "limit hook: common_commands",
+    ]);
+  }));
 });
 
 describe("rh seats argv", () => {
