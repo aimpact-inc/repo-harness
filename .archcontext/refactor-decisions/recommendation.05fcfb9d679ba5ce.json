@@ -1,0 +1,74 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.05fcfb9d679ba5ce",
+  "fingerprint": "sha256:03451147ce5f710080cccb92d1a2305d60ba0210d39d84a0e79fa47aaf6bb17c",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "residual-cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "cycle:scc.0be4db846b288eac",
+    "subjectSelectorId": "subject.repository.c68c5f4a37454f17"
+  },
+  "affectedNodeIds": [
+    "capability.runtime-harness.hook-adapters",
+    "component.contract-assets.template-projection-cli",
+    "component.global-runtime-reconciliation.cli-diagnostics",
+    "component.global-runtime-reconciliation.cli-layer",
+    "component.global-runtime-reconciliation.primary-cli",
+    "component.hook-adapters.host-installer",
+    "component.hook-adapters.primary"
+  ],
+  "affectedNodeCount": 7,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "cycleEdgeCount": 12,
+    "memberCount": 7
+  },
+  "reason": "Resolved in #3504",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T07:15:40.000Z",
+  "provenance": {
+    "headSha": "fbf9f278f7d2357030cf51824a82a216a9cabc7b",
+    "assessmentDigest": "sha256:7b65addf425cf69712553efa1138a4fc0ef615ea767fa5ee173e1d044b49acaf",
+    "baselineSnapshotDigest": "sha256:fee6204fe47fb9d94d42f01b591d88239204079f10190526cfaabbbee3c15b7d"
+  },
+  "snapshotDigest": "sha256:fee6204fe47fb9d94d42f01b591d88239204079f10190526cfaabbbee3c15b7d",
+  "evidenceDigest": "sha256:7b65addf425cf69712553efa1138a4fc0ef615ea767fa5ee173e1d044b49acaf",
+  "resolutionDigest": "sha256:5df24ab330d3bfeaca929dbb629092904bb7e7a0184a1bc9f68a381f1b87cb4b",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.residualCycleMemberCount",
+      "subjectSelectorId": "subject.repository.c68c5f4a37454f17",
+      "nodeId": null,
+      "memberNodeIds": [
+        "capability.runtime-harness.hook-adapters",
+        "component.contract-assets.template-projection-cli",
+        "component.global-runtime-reconciliation.cli-diagnostics",
+        "component.global-runtime-reconciliation.cli-layer",
+        "component.global-runtime-reconciliation.primary-cli",
+        "component.hook-adapters.host-installer",
+        "component.hook-adapters.primary"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.d19daa0057a09411"
+    }
+  ],
+  "killList": [
+    {
+      "kind": "path",
+      "target": "src/cli/runtime/write-all-sync.ts",
+      "required": true
+    }
+  ]
+}

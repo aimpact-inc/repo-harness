@@ -4,7 +4,7 @@ import { getRoute, routeSupportsHost, type HookEvent, type HookHandlerId, type R
 import { AntigravityToolInputError, HOST_ADAPTERS, antigravityEnvironment, resolveAntigravityRepository } from './host-adapter';
 import { getHandlerForRoute } from './handler-registry';
 import { budgetSessionContext, errorHash } from './session-context-budget';
-import { writeAllSync } from '../runtime/write-all-sync';
+import { writeAllSync } from '../../effects/write-all-sync';
 import {
   createStateInputCollector,
   type EffectiveStateResolution,

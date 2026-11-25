@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { writeAllSync, type SyncWriter } from '../src/cli/runtime/write-all-sync';
+import { writeAllSync, type SyncWriter } from '../src/effects/write-all-sync';
 
 describe('writeAllSync', () => {
   test('continues until every byte is written', () => {

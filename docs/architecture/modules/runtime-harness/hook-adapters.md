@@ -293,7 +293,7 @@ sequenceDiagram
 | --- | --- |
 | host-installer → `public-surface.adoption` | `managed-entries.ts`、`uninstall.ts` 引用 `core/adoption/managed-hook-config.ts` |
 | host-installer → `global-runtime-reconciliation` | `status.ts:242` 调用 `inspectArchitectureProjectionReadiness` |
-| route-runtime → `global-runtime-reconciliation` | `hook-entry.ts` 与 `runtime.ts` 用 `src/cli/runtime/write-all-sync.ts` 写 host 输出 |
+| route-runtime → `execution-primitives` | `hook-entry.ts` 与 `runtime.ts` 用 `src/effects/write-all-sync.ts` 写 host 输出（#3504 从 global-runtime-reconciliation 移出，去掉 capability 级回边） |
 | session-lifecycle → `public-surface.adoption` | `run-summary-retention.ts` 引用 `src/effects/path-safety.ts`。只有 `scripts/evidence-gc.ts` 调用它，这是一个版本的一次性清理 |
 
 依赖方向说明：route-runtime 与两个 handler 组件之间有双向边。registry 组合 handler（calls），handler 实现 registry 的契约（depends-on）。这是插件式组合，不是层次倒置。如果以后要消除这个环，把 `handler-contract.ts` 与 `hook-input.ts` 移到一个叶子组件即可。目前没有证据说明这个环造成了问题。
@@ -634,7 +634,6 @@ The event route registry remains the host adapter authority. Ordinary edits and 
 
 - `install-profile.ts` 有 1,576 行，是本 capability 最大的文件。它同时承担插件选择计划、事务、ownership 记录和 install state 读写（`planInstallSelection`、`beginInstallHostTransaction`、`recordVerifiedAgentFleetOwnership`）。拆分顺序需要改动频率证据，目前没有。
 - route-runtime 与 handler 组件之间的环（§3.3）。如果 archctx 的环检测开始阻塞，把 handler 契约移到叶子组件。
-- `write-all-sync.ts` 归 global-runtime-reconciliation，但 hook 热路径也用它。它造成 hook-adapters → global-runtime-reconciliation 的一条边，而 global-runtime-reconciliation 也调用 hook-adapters。这个 26 行的工具可以移到 `execution-primitives`（G2 新建），以去掉这条 capability 级回边。
 - host-installer 与 edit-guards → acceptance-review 没有声明。`relation.acceptance-review.hook-adapters` 已经声明反向（review 命令调用 circuit breaker）。本方向有 5 条边，反向有 2 条。集成不新增反向关系。是否翻转方向是开放问题。
 
 ### Controlled native-session inbox delivery
