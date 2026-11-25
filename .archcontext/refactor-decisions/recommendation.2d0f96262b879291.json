@@ -1,0 +1,71 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.2d0f96262b879291",
+  "fingerprint": "sha256:ac472dd7a56258697da258eb223822f3f9731480b8f536accbdae7cb2d3a2bb1",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "pair:component.operator.console-collectors|component.operator.primary",
+    "subjectSelectorId": "subject.repository.7792865de78cff7e"
+  },
+  "affectedNodeIds": [
+    "component.operator.console-collectors",
+    "component.operator.primary"
+  ],
+  "affectedNodeCount": 2,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "backwardEdgeCount": 14,
+    "forwardEdgeCount": 2,
+    "thinDirectionEdgeCount": 2,
+    "totalEdgeCount": 16
+  },
+  "reason": "Resolved in #3510. Console collectors use shared Herdr reads and public architecture redaction.",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T07:25:44.000Z",
+  "provenance": {
+    "headSha": "fbf9f278f7d2357030cf51824a82a216a9cabc7b",
+    "assessmentDigest": "sha256:81affd612ab5c06c855263325d393170d456f0315a864f5dfb1abf5db506cbc9",
+    "baselineSnapshotDigest": "sha256:5c7ee42a60277716ac195cd0c171afb96ade6575653f20ff6abfbef44728a62e"
+  },
+  "snapshotDigest": "sha256:5c7ee42a60277716ac195cd0c171afb96ade6575653f20ff6abfbef44728a62e",
+  "evidenceDigest": "sha256:81affd612ab5c06c855263325d393170d456f0315a864f5dfb1abf5db506cbc9",
+  "resolutionDigest": "sha256:b7874f429b16379f8cc254875a3e46d49b395b76fe06318fa789f8e91a10c243",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.pairThinDirectionEdgeCount",
+      "subjectSelectorId": "subject.repository.7792865de78cff7e",
+      "nodeId": null,
+      "memberNodeIds": [
+        "component.operator.console-collectors",
+        "component.operator.primary"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.a05500b291b27a4f"
+    }
+  ],
+  "killList": [
+    {
+      "kind": "symbol",
+      "target": "src/effects/operator/architecture.ts#publicValue",
+      "required": true
+    },
+    {
+      "kind": "relation",
+      "target": "relation.operator.console-collectors.http-reader",
+      "required": true
+    }
+  ]
+}

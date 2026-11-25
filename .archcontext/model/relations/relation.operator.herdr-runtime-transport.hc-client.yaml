@@ -1,0 +1,6 @@
+schemaVersion: archcontext.relation/v1
+id: relation.operator.herdr-runtime-transport.hc-client
+kind: calls
+source: component.operator.herdr-runtime-transport
+target: component.execution-primitives.hc-client
+intent: Read core status and take the initial snapshot from a typed hc events stream.

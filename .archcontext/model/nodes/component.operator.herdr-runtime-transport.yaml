@@ -1,0 +1,15 @@
+schemaVersion: archcontext.node/v2
+id: component.operator.herdr-runtime-transport
+kind: component
+name: Herdr Runtime Transport
+status: active
+parent: capability.runtime-harness.operator
+layer: effects
+summary: Read the selected Herdr core and take terminal snapshots for operator consumers.
+responsibilities:
+  - Read the answering Herdr core identity and compare its version with the package pin.
+  - Read the first terminal snapshot from a scoped hc events stream and close the stream.
+  - Provide the shared task-session label filter.
+source:
+  include:
+    - src/effects/operator/herdr-runtime-transport.ts

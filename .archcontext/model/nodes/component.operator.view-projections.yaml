@@ -8,6 +8,7 @@ layer: "core"
 summary: "Pure projections, route parsers and strict decoders for every operator observation schema."
 responsibilities:
   - "Project the repository list, planning, organization, decision and task reads into public snapshot shapes."
+  - "Redact repository roots, private paths and secret values from public architecture payloads before decoding."
   - "Decode each public schema with exact field sets so the server and the web console share one contract."
   - "Parse closed request shapes for session and architecture routes before any process starts."
   - "Own the list of runtimes with verified docs isolation: the agent settings read only this list."

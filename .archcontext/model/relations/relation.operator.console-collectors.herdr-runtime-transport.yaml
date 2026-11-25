@@ -1,0 +1,6 @@
+schemaVersion: archcontext.relation/v1
+id: relation.operator.console-collectors.herdr-runtime-transport
+kind: calls
+source: component.operator.console-collectors
+target: component.operator.herdr-runtime-transport
+intent: Check the core version against the pin and read the task-session terminal snapshot for Bot access.

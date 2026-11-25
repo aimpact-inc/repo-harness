@@ -1,0 +1,6 @@
+schemaVersion: archcontext.relation/v1
+id: relation.operator.primary.herdr-runtime-transport
+kind: calls
+source: component.operator.primary
+target: component.operator.herdr-runtime-transport
+intent: Read the Herdr core identity and terminal snapshot for the live runtime adapter.

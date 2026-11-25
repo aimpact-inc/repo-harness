@@ -55,13 +55,13 @@ import {
   type ArchitectureViolationReason,
   type ArchitectureViolationsLayerV1,
 } from '../../core/operator/architecture-map';
+import { publicValue } from '../../core/operator/architecture-public-value';
 import { isRecord } from '../../core/evidence/is-record';
 import { isPublicDevActivityText, isPublicRepoPath, publicDevActivityText } from '../../core/public-projections/public-text';
 import { readCommittedNativeContext } from '../architecture/model-reader';
 import { ARCHITECTURE_VIEW_TIMEOUT_MS, readArchitectureImpactBatch, readArchitectureView, resolveArchitecturePaths, type ArchitectureViewArgs } from '../architecture/architecture-read';
 import { gitSpawnSync } from '../git/runner';
 import { readRepoHarnessRegistryStrictSnapshot } from '../repo-registry';
-import { publicValue } from './architecture';
 
 /** A failure carries one named reason, or archctx's codes when archctx refused the model read; never a path or a message. */
 export type ArchitectureMapWorkerResult =

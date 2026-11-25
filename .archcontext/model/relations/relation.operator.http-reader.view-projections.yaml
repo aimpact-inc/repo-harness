@@ -3,4 +3,4 @@ id: relation.operator.http-reader.view-projections
 kind: calls
 source: component.operator.primary
 target: component.operator.view-projections
-intent: "Parse closed route requests and project or re-decode each observation before it leaves the server"
+intent: "Parse closed route requests, redact public architecture values and project or re-decode observations before they leave the server."
