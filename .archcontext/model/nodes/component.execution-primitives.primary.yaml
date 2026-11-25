@@ -13,6 +13,7 @@ responsibilities:
   - Keep one worktree lifecycle record per directory incarnation in the common Git directory, and read process cwd for sweep and console occupancy checks.
   - Run the shared observation loop: one cycle in flight, the next cycle after the previous one settles, close that aborts the running read, and the published states pending, observed with its observation time, and unavailable with its reason. Each collector passes its own keep rule, so a failed cycle has one defined result per consumer (#2216).
   - Write a whole string or byte buffer to a file descriptor synchronously, and fail on zero, negative or overlong write progress.
+  - Resolve GitHub CLI from fixed host install paths and share the native Windows executable checks.
 source:
   include:
     - src/effects/process-*.ts
@@ -22,5 +23,6 @@ source:
     - src/effects/atomic-append.ts
     - src/effects/write-all-sync.ts
     - src/effects/runtime/os-account-home.ts
+    - src/effects/runtime/trusted-executable.ts
     - src/effects/locking/**
     - src/effects/git/**

@@ -14,9 +14,12 @@ const real = { ...(await import(platformPath)) };
 const resolvePlatform = real.resolveProtectedHelperPlatform;
 mock.module(platformPath, () => ({
   ...real,
-  resolveTrustedGhExecutable: () => gh,
   resolveProtectedHelperPlatform: (options: Record<string, unknown> = {}) => resolvePlatform({ ...options, accountHome: home }),
 }));
+
+const executablePath = fileURLToPath(new URL('../../src/effects/runtime/trusted-executable.ts', import.meta.url));
+const executables = { ...(await import(executablePath)) };
+mock.module(executablePath, () => ({ ...executables, resolveTrustedGhExecutable: () => gh }));
 
 const node = process.env.PROTECTED_HELPER_TEST_NODE;
 if (node) {

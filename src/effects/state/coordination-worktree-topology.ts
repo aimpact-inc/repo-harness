@@ -18,7 +18,7 @@ import { acquireExclusiveDirectoryLock, withExclusiveDirectoryLock } from '../lo
 import { taskWorktreeRuntimeClosed } from '../terminal/task-session-record';
 import { parseWorktreeTopology } from '../git/worktree-topology';
 import { observeProviderBranchMergeCommit } from './coordination-provider-merge';
-import { resolveTrustedGhExecutable } from '../runtime/protected-helper-platform';
+import { resolveTrustedGhExecutable } from '../runtime/trusted-executable';
 import { worktreeUid, assertOwnedTrashDirectory, discardWorktreeTrashApproval, deleteUnpublishedTrash, deleteWorktreeTrash, prepareWorktreeTrash, readWorktreeTrash, renameWorktreeToTrash, trashPayload, worktreeTrashNames, WorktreeTrashBudgetReached, type WorktreeRemovalOptions, type WorktreeTrashReceipt } from './worktree-trash';
 import { authorizedWorktreeTrashCompleted, completeAuthorizedWorktreeTrash, prepareAuthorizedWorktreeTrash, readAuthorizedWorktreeTrash, recordAuthorizedWorktreeTrashRename,
   type AuthorizedWorktreeCleanup, type AuthorizedWorktreeTrashReceipt } from './worktree-trash';

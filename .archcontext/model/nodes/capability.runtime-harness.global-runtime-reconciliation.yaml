@@ -42,6 +42,7 @@ source:
     - tsconfig.json
     - src/effects/runtime/node-runtime.ts
   exclude:
+    - src/effects/upgrade/legacy-worktree-cleanup.ts
     - src/effects/configuration/agents-configuration.ts
   entrypoints:
     - id: entrypoint.global-runtime-reconciliation.update

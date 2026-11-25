@@ -10,9 +10,9 @@ import { engines } from '../../../package.json';
 import {
   protectedHelperRuntimeEnv,
   resolveProtectedHelperPlatform,
-  resolveTrustedGhExecutable,
   type ProtectedHelperPlatform,
 } from './protected-helper-platform';
+import { resolveTrustedGhExecutable } from './trusted-executable';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(SCRIPT_DIR, '..', '..', '..');
