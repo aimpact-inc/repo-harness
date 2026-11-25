@@ -1,0 +1,6 @@
+schemaVersion: archcontext.relation/v1
+id: relation.operator.board-observer.herdr-runtime-transport
+kind: calls
+source: component.operator.board-observer
+target: component.operator.herdr-runtime-transport
+intent: Take a terminal snapshot scoped to the repository to refresh the observed seats.

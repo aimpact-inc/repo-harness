@@ -1,6 +1,0 @@
-schemaVersion: archcontext.relation/v1
-id: relation.operator.console-collectors.http-reader
-kind: calls
-source: component.operator.console-collectors
-target: component.operator.primary
-intent: "Check the hc core version against the pin with hc server status and read the task-session hc events snapshot through the hc runtime transport."

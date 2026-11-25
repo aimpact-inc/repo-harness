@@ -22,6 +22,7 @@ source:
     - src/core/operator/agent-config.ts
     - src/core/operator/architecture-map-model.ts
     - src/core/operator/architecture-map.ts
+    - src/core/operator/architecture-public-value.ts
     - src/core/operator/architecture.ts
     - src/core/operator/board-read.ts
     - src/core/operator/bot-access.ts
