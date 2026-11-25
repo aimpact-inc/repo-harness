@@ -4,7 +4,7 @@ import * as childProcess from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { tmpWorkspace, initGitRepo, commitAll, run } from '../helpers/repo-fixture';
-import { entries, inspectWorktree } from '../../src/effects/state/coordination-worktree-topology';
+import { entries, inspectWorktree, protectsCwd } from '../../src/effects/state/coordination-worktree-topology';
 import { prepareWorktreeTrash, renameWorktreeToTrash, worktreeTrashNames } from '../../src/effects/state/worktree-trash';
 import { worktreeId, recordWorktree, readWorktreeRecord, endWorktreeRecord } from '../../src/effects/git/worktree-record';
 import { resolveGitCommonDirectory } from '../../src/effects/git/common-directory';
@@ -14,7 +14,7 @@ import { startWorktreeCollector } from '../../src/effects/operator/worktree-coll
 import { collectOrphanWorktrees } from '../../src/effects/operator/worktree-orphans-worker';
 import { repoHarnessRepoIdFor, type RepoHarnessRegisteredRepo } from '../../src/effects/repo-registry';
 import * as processProbe from '../../src/effects/git/worktree-processes';
-import { worktreeProcesses, type LinuxWorktreeProcessProbe } from '../../src/effects/git/worktree-processes';
+import { worktreeProcesses, type LinuxWorktreeProcessProbe, type WindowsProcessInspection, type WindowsWorktreeProcessProbe } from '../../src/effects/git/worktree-processes';
 import { decodeWorktreeCleanupRequest, decodeWorktreeCleanupResult, worktreeDigestRow } from '../../src/core/operator/worktree-cleanup';
 import { decodeWorktreeCleanupChildOutput, runWorktreeCleanup, selectionDigest, type WorktreeProcessProbe } from '../../src/effects/operator/worktree-cleanup';
 import { OperatorWriteRefusal } from '../../src/effects/operator/write-run';
@@ -122,6 +122,93 @@ describe('read-only worktree judgment and lifecycle', () => {
     ['a bare hidepid option', () => mountInfo('rw,hidepid')],
   ])('%s makes the inventory unknown', (_name, text) => {
     expect(worktreeProcesses(Date.now() + 5000, procMountProbe(text as () => string))).toBeNull();
+  });
+
+  const winProbe = (overrides: Partial<WindowsWorktreeProcessProbe> = {}): WindowsWorktreeProcessProbe => ({
+    ownPid: 100, ownCwd: 'C:\\Users\\win\\repo', pids: () => [100, 101],
+    inspect: pid => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : { status: 'ok', cwd: 'C:\\Users\\win\\repo-wt-1\\' },
+    isLocalDrive: drive => drive === 'C:\\',
+    realpath: path => path,
+    ...overrides,
+  });
+
+  test('windows process probe normalizes local paths, skips system/protected/UIAccess/exited entries, and leaves remote paths untouched', () => {
+    const resolved: string[] = [];
+    const byPid: Record<number, WindowsProcessInspection> = {
+      100: { status: 'ok', cwd: 'c:\\users\\win\\repo\\' },
+      101: { status: 'ok', cwd: '\\\\?\\C:\\Users\\win\\junc-wt\\' },
+      102: { status: 'ok', cwd: 'C:\\' },
+      103: { status: 'ok', cwd: '\\\\server\\share\\dir\\' },
+      104: { status: 'ok', cwd: '\\\\?\\UNC\\server\\share\\sub\\' },
+      105: { status: 'ok', cwd: 'Z:\\mapped\\dir\\' },
+      106: { status: 'exited' },
+      107: { status: 'other_user' },
+      108: { status: 'protected' },
+      109: { status: 'ui_access' },
+    };
+    const rows = worktreeProcesses(Date.now() + 5000, undefined, winProbe({
+      pids: () => Object.keys(byPid).map(Number),
+      inspect: pid => byPid[pid]!,
+      realpath: path => {
+        resolved.push(path);
+        return path.toLowerCase().endsWith('junc-wt') ? 'C:\\Users\\win\\repo-wt-1' : path.replace(/^c:\\users\\win/i, 'C:\\Users\\win');
+      },
+    }));
+    expect(rows).toEqual([
+      { pid: 100, cwd: 'C:\\Users\\win\\repo' },
+      { pid: 101, cwd: 'C:\\Users\\win\\repo-wt-1' },
+      { pid: 102, cwd: 'C:\\' },
+      { pid: 103, cwd: '\\\\server\\share\\dir' },
+      { pid: 104, cwd: '\\\\server\\share\\sub' },
+      { pid: 105, cwd: 'Z:\\mapped\\dir' },
+    ]);
+    expect(resolved.some(path => path.startsWith('\\\\server') || path.startsWith('Z:'))).toBe(false);
+    expect(protectsCwd('C:\\Users\\win\\repo-wt-1', 'c:\\users\\win\\repo-wt-1\\sub\\', 'win32')).toBe(true);
+    expect(protectsCwd('C:\\Users\\win\\repo-wt-1', '\\\\?\\C:/Users/win/repo-wt-1', 'win32')).toBe(true);
+    expect(protectsCwd('C:\\Users\\win\\repo-wt-1', 'C:\\Users\\win\\repo-wt-10', 'win32')).toBe(false);
+  });
+
+  test.each([
+    ['denied same-user process', { inspect: (pid: number) => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : { status: 'denied' } } as Partial<WindowsWorktreeProcessProbe>],
+    ['failed process read', { inspect: (pid: number) => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : { status: 'failed' } } as Partial<WindowsWorktreeProcessProbe>],
+    ['truncated or failed PID enumeration', { pids: () => null }],
+    ['missing own process', { pids: () => [101] }],
+    ['mismatched own CWD', { inspect: () => ({ status: 'ok', cwd: 'C:\\elsewhere\\' }) } as Partial<WindowsWorktreeProcessProbe>],
+    ['relative CWD', { inspect: (pid: number) => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : { status: 'ok', cwd: 'relative\\path' } } as Partial<WindowsWorktreeProcessProbe>],
+  ])('windows probe fails closed on %s', (_name, overrides) => {
+    expect(worktreeProcesses(Date.now() + 5000, undefined, winProbe(overrides))).toBeNull();
+  });
+
+  test('windows probe fails closed when its deadline is already reached', () => {
+    expect(worktreeProcesses(Date.now() - 1, undefined, winProbe())).toBeNull();
+  });
+
+  test.if(process.platform === 'win32')('native Windows observer reports a live child in the worktree and clears once it exits', async () => {
+    const f = fixture();
+    const sub = join(f.tree, 'sub');
+    mkdirSync(sub);
+    const child = Bun.spawn([process.execPath, '-e', 'console.log("ready"); await Bun.sleep(30_000);'], {
+      cwd: sub, stdout: 'pipe', stderr: 'ignore',
+    });
+    try {
+      const reader = child.stdout.getReader();
+      await reader.read();
+      reader.releaseLock();
+      const occupied = worktreeProcesses(Date.now() + 5_000);
+      expect(occupied).not.toBeNull();
+      expect(occupied!.some(row => row.pid === child.pid && protectsCwd(f.tree, row.cwd))).toBe(true);
+      child.kill();
+      await child.exited;
+      const idle = worktreeProcesses(Date.now() + 5_000);
+      expect(idle).not.toBeNull();
+      expect(idle!.some(row => protectsCwd(f.tree, row.cwd))).toBe(false);
+    } finally {
+      if (child.exitCode === null) {
+        child.kill();
+        await child.exited;
+      }
+      f.cleanup();
+    }
   });
 
   test('uses merge, ownership, loss and occupancy predicates without removing anything', () => {

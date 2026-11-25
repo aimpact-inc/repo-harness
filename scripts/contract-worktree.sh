@@ -605,7 +605,9 @@ cleanup_worktree() {
       echo "contract-worktree: preserve the dirty worktree and ask the user before any deletion" >&2
       exit 1
     fi
-    run_contract_runtime assert-ignored-cleanup-safe --worktree "$worktree_path"
+    local occupancy_args=()
+    if [[ "$dry_run" -eq 1 ]]; then occupancy_args=(--check-occupancy); fi
+    run_contract_runtime assert-ignored-cleanup-safe --worktree "$worktree_path" ${occupancy_args[@]+"${occupancy_args[@]}"}
   else
     echo "[ContractWorktree] Worktree already absent, skipping: $branch_name"
   fi
