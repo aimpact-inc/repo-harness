@@ -143,7 +143,7 @@ function inspectIgnoredWorktreeEntries(worktree: string, limits: Limits = {}): {
 }
 
 export function assertNoIgnoredCloseoutData(worktree: string, limits: Limits = {}): void {
-  assertNoBlockedIgnoredEntries(inspectIgnoredWorktreeEntries(worktree, limits).blockedPaths);
+  assertNoBlockedIgnoredEntries(inspectIgnoredWorktreeEntries(checkoutPath(worktree), limits).blockedPaths);
 }
 
 function assertNoBlockedIgnoredEntries(blockedPaths: readonly string[]): void {
@@ -220,7 +220,6 @@ type LiveRemovalOptions = {
   readonly allowProvider?: boolean;
   readonly verifiedMerge?: MergeProof;
   readonly processes?: WorktreeProcess[] | null;
-  readonly explicitCloseout?: boolean;
   readonly requireOwnCommits?: boolean;
   readonly env?: NodeJS.ProcessEnv;
 };
@@ -455,8 +454,6 @@ export function cleanupExactWorktree(root: string, expected: ExactWorktreeCleanu
       const probe = sweep?.processes ?? limits.closeoutProcesses;
       const inspection = inspectRemoval(root, path, sweep?.cwd ?? realpathSync(process.cwd()), limits, {
         target, allowProvider: true, verifiedMerge, requireOwnCommits: !!sweep, env: sweep?.env,
-        // Explicit contract cleanup keeps its existing occupancy behavior. Board and sweep supply an observer.
-        explicitCloseout: limits.closeout === true && probe === undefined,
         processes: probe?.(Math.min(limits.deadline ?? Infinity, Date.now() + 5_000)),
       });
       if (limits.closeout) {
@@ -526,12 +523,33 @@ interface SweepContext {
   /** A fresh process inventory; null means occupancy is unknown. */
   readonly processes: (deadline: number) => WorktreeProcess[] | null;
 }
-export function protectsCwd(path: string, cwd: string): boolean {
-  return cwd === path || cwd.startsWith(path + sep);
+function comparablePath(value: string, platform = process.platform): string {
+  if (platform !== 'win32') return value;
+  let normalized = value.replace(/\//gu, '\\');
+  if (/^\\\\\?\\[A-Za-z]:\\/u.test(normalized)) normalized = normalized.slice(4);
+  else if (/^\\\\\?\\UNC\\/iu.test(normalized)) normalized = `\\\\${normalized.slice(8)}`;
+  while (normalized.length > 3 && normalized.endsWith('\\')) normalized = normalized.slice(0, -1);
+  return normalized.toLowerCase();
+}
+
+export function protectsCwd(path: string, cwd: string, platform = process.platform): boolean {
+  const target = comparablePath(path, platform);
+  const current = comparablePath(cwd, platform);
+  if (current === target) return true;
+  const separator = platform === 'win32' ? '\\' : sep;
+  const prefix = target.endsWith(separator) ? target : target + separator;
+  return current.startsWith(prefix);
 }
 
 function worktreeProcessCount(path: string, processes: WorktreeProcess[] | null): number | null {
   return processes === null ? null : new Set(processes.filter(item => protectsCwd(path, item.cwd)).map(item => item.pid)).size;
+}
+
+/** A closeout preview must prove occupancy before it lists a planned removal. */
+export function assertCloseoutOccupancy(worktree: string): void {
+  const count = worktreeProcessCount(checkoutPath(worktree), worktreeProcesses(Date.now() + 5_000));
+  if (count === null) throw new WorktreeNotGreenError(['process_unknown']);
+  if (count > 0) throw new WorktreeNotGreenError(['process_in_use']);
 }
 
 /** Git documents these backpointers. They are read only to fence whole prune,
@@ -788,12 +806,12 @@ function inspectRemoval(root: string, path: string, callerCwd: string | null, li
     const entry = topology.find(item => checkoutPath(item.path) === path);
     if (path === main) reasons.push('primary');
     if (callerCwd !== null && protectsCwd(path, callerCwd)) { reasons.push('session_cwd'); inUse = true; }
-    if (!options.explicitCloseout) {
-      const processes = options.processes === undefined ? worktreeProcesses(limits.deadline ?? Date.now() + 5_000) : options.processes;
-      result.process_count = worktreeProcessCount(path, processes);
-      if (result.process_count === null) reasons.push('process_unknown');
-      else if (result.process_count > 0) { reasons.push('process_in_use'); inUse = true; }
-    }
+    const processes = options.processes === undefined
+      ? worktreeProcesses(Math.min(limits.deadline ?? Infinity, Date.now() + 5_000))
+      : options.processes;
+    result.process_count = worktreeProcessCount(path, processes);
+    if (result.process_count === null) reasons.push('process_unknown');
+    else if (result.process_count > 0) { reasons.push('process_in_use'); inUse = true; }
     try {
       if (!taskWorktreeRuntimeClosed({ repository_id: common, primary_root: main, execution_root: path })) { reasons.push('runtime_open'); inUse = true; }
     } catch { reasons.push('runtime_unknown'); }
