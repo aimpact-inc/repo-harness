@@ -87,7 +87,7 @@ type SeatsWrite = SeatsSettingsRequestV1 & { readonly request_id: string };
 const CLAUDE_CODEX_SEATS_FIXTURE: SeatsConfigV1 = {
   ...DEFAULT_SEATS_CONFIG,
   advisor: { ...DEFAULT_SEATS_CONFIG.advisor, runtime: 'claude', model: 'opus', effort: 'high' },
-  worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex', model: 'gpt-6.1-terra' },
+  worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex', model: 'gpt-6.2-sol' },
   'worker-deep': { ...DEFAULT_SEATS_CONFIG['worker-deep'], runtime: 'codex', model: 'gpt-6.2-sol' },
   'worker-neon': { ...DEFAULT_SEATS_CONFIG['worker-neon'], runtime: 'claude', model: 'opus' },
   'worker-neon-deep': null,

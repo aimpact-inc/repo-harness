@@ -22,8 +22,6 @@ const CARBON = catalogEntry('carbon', 'magpie');
 const PI_HYDROGEN = catalogEntry('hydrogen', 'magpie');
 const PI_SOL = catalogEntry('sol', 'magpie');
 const SOL = catalogEntry('sol', 'native');
-const PI_TERRA = catalogEntry('terra', 'magpie');
-const TERRA = catalogEntry('terra', 'native');
 const ASTRA = catalogEntry('astra', 'native');
 const PI_ASTRA = catalogEntry('astra', 'magpie');
 export const AGY_ADVISOR_STARTER = catalogEntry('neon', 'native');
@@ -45,8 +43,6 @@ const WORKER = Object.freeze([
   ...AGY_NEON_VARIANTS,
   PI_SOL,
   SOL,
-  PI_TERRA,
-  TERRA,
   GLM_FLASH,
   DEEPSEEK_FLASH,
   PI_HYDROGEN,

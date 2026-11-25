@@ -761,10 +761,10 @@ network fetch. The managed list is `explorer`, `deep-reasoner` and
 
 In-process sub-agent work serves cost control and read-only concurrency only,
 such as an `explorer` fan-out. Each harness maps it to its own lightweight
-family model: `claude` uses `haiku`/`sonnet`, `codex` uses
-`gpt-6-luna`/`gpt-6.1-terra`, `agy`/Gemini uses
-`gemini-4-carbon`/`gemini-4-neon`, and `pi` uses its configured setting. Code
-writes, cross-family planning and formal acceptance reviews run in Herdr seats.
+family model: `claude` uses `haiku`/`sonnet`, `codex` uses `gpt-6-luna`,
+`agy`/Gemini uses `gemini-4-carbon`/`gemini-4-neon`, and `pi` uses its
+configured setting. Code writes, cross-family planning and formal acceptance
+reviews run in Herdr seats.
 
 ### Two targets, one source
 

@@ -75,7 +75,7 @@ Before each dispatch wave, run `rh quota`. For a manual dispatch, check the rout
 | `worker-neon` | Pi, `magpie/agy-cli/gemini-4-neon`, high; worker tools; `['explorer']` | `agy`, `gemini-4-neon-high` (when enabled) |
 | `worker-neon-deep` | Pi, `magpie/agy-cli/gemini-4-neon`, xhigh; worker tools; `['explorer']` | `agy`, `gemini-4-neon-xhigh` (when enabled) |
 | `worker-deep` | Pi, `magpie/codex/gpt-6.2-sol`, high; worker tools; `['explorer']` | Codex, `gpt-6.2-sol`, high |
-| `worker` | Pi, `magpie/codex/gpt-6.1-terra`, high; worker tools; `['explorer']` | Codex, `gpt-6.1-terra`, high |
+| `worker` | Pi, `magpie/codex/gpt-6.2-sol`, high; worker tools; `['explorer']` | Codex, `gpt-6.2-sol`, high |
 | `worker-light` | Pi, `zai/glm-5.3-flash` (also `magpie/group/deepseek-v4.1-flash` and `magpie/zcode/GLM-5.4`), no effort; worker tools; `[]` | `agy`, `gemini-4-hydrogen` (or `null`) |
 | `gatekeeper` | Pi, `magpie/codex/gpt-6.2-sol`, high; read, shell, network; `[]` | Codex, `gpt-6.2-sol`, high |
 | `gatekeeper-fallback` | Pi, `zai/glm-5.3-flash` (or `null`); read, shell, network; `[]` | `null` (or `agy`, `gemini-4-hydrogen`) |

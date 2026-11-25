@@ -10,7 +10,6 @@ export const LOGICAL_MODEL_IDS = [
   'hydrogen',
   'astra',
   'sol',
-  'terra',
   'luna',
   'glm-5.3-flash',
   'glm-5.4',
@@ -124,15 +123,7 @@ export const MODEL_CATALOG: Readonly<Record<LogicalModelId, LogicalModelEntry>> 
     account: 'chatgpt',
     magpie: route('pi', `${PI_CODEX_MODEL_PREFIX}gpt-6.2-sol`, 'high'),
     native: route('codex', 'gpt-6.2-sol', 'high'),
-    planes: ['worker-deep', 'gatekeeper', 'deep-reasoner', 'harness-evaluator'],
-  }),
-  terra: defineModel({
-    id: 'terra',
-    family: 'openai',
-    account: 'chatgpt',
-    magpie: route('pi', `${PI_CODEX_MODEL_PREFIX}gpt-6.1-terra`, 'high'),
-    native: route('codex', 'gpt-6.1-terra', 'high'),
-    planes: ['worker'],
+    planes: ['worker-deep', 'worker', 'gatekeeper', 'deep-reasoner', 'harness-evaluator'],
   }),
   luna: defineModel({
     id: 'luna',
@@ -197,9 +188,8 @@ export const AGY_HYDROGEN_VARIANTS: readonly SeatModelEntryV1[] = Object.freeze(
   Object.freeze({ runtime: 'agy', model: 'gemini-4-hydrogen-xhigh' }),
 ]);
 
-const OPENAI_CODEX_TARGET_LABELS: Readonly<Record<'sol' | 'terra' | 'luna' | 'astra', string>> = Object.freeze({
+const OPENAI_CODEX_TARGET_LABELS: Readonly<Record<'sol' | 'luna' | 'astra', string>> = Object.freeze({
   sol: 'GPT-6.2 Sol',
-  terra: 'GPT-6.1 Terra',
   luna: 'GPT-6 Luna',
   astra: 'GPT-6.2 Astra',
 });
